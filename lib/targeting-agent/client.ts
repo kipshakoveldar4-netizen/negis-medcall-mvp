@@ -38,6 +38,21 @@ export type LaunchCampaignPayload = {
   [key: string]: unknown;
 };
 
+type TargetingFetchOptions = {
+  method: string;
+  headers?: Record<string, string>;
+  body?: string;
+};
+
+type FetchLikeResponse = {
+  ok: boolean;
+  status: number;
+  headers: {
+    get(name: string): string | null;
+  };
+  text(): Promise<string>;
+};
+
 const unavailableBody: TargetingAgentErrorBody = {
   success: false,
   error: "Targeting Agent unavailable",
@@ -87,11 +102,21 @@ function normalizeBody<TData>(value: unknown): TargetingAgentBody<TData> {
   return unavailableBody;
 }
 
-async function readJson(response: Response): Promise<unknown> {
-  try {
-    return await response.json();
-  } catch {
+async function safeJsonResponse(response: FetchLikeResponse): Promise<unknown> {
+  const text = await response.text();
+
+  if (!text) {
     return null;
+  }
+
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return {
+      success: false,
+      error: "Invalid JSON response",
+      details: [text],
+    };
   }
 }
 
@@ -138,20 +163,29 @@ export class TargetingAgentClient {
     return this.request(`/reports/${encodeURIComponent(campaignId)}`, { method: "GET" });
   }
 
-  private async request(path: string, init: RequestInit): Promise<TargetingAgentResult> {
+  private async request(path: string, init: TargetingFetchOptions): Promise<TargetingAgentResult> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 10_000);
 
     try {
-      const response = await fetch(`${this.baseUrl}${path}`, {
-        ...init,
+      const requestOptions: TargetingFetchOptions & { signal?: unknown } = {
+        method: init.method,
         headers: {
           ...jsonHeaders(),
           ...(init.headers ?? {}),
         },
         signal: controller.signal,
-      });
-      const body = await readJson(response);
+      };
+
+      if (init.body) {
+        requestOptions.body = init.body;
+      }
+
+      const response = (await fetch(
+        `${this.baseUrl}${path}`,
+        requestOptions as any,
+      )) as FetchLikeResponse;
+      const body = await safeJsonResponse(response);
 
       return {
         status: response.status,
