@@ -92,20 +92,18 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.status(201).json(demoSuccess(input));
   }
 
-  let userId: string | null = null;
-  let workspaceId: string | null = null;
-
   try {
-    const supabaseAdmin = createClient(supabaseUrl, serviceRoleKey, {
+    const supabase = createClient(supabaseUrl, serviceRoleKey, {
       auth: { autoRefreshToken: false, persistSession: false },
     });
 
     const { data: authData, error: authError } =
-      await supabaseAdmin.auth.admin.createUser({
+      await supabase.auth.signUp({
         email: input.email,
         password: input.password,
-        email_confirm: true,
-        user_metadata: { full_name: input.ownerName },
+        options: {
+          data: { full_name: input.ownerName },
+        },
       });
 
     if (authError || !authData.user?.id) {
@@ -114,9 +112,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         .json(errorBody("Registration failed", [authError?.message ?? "Failed to create user"]));
     }
 
-    userId = authData.user.id;
+    const userId = authData.user.id;
 
-    const { data: clinic, error: clinicError } = await supabaseAdmin
+    const { data: clinic, error: clinicError } = await supabase
       .from("clinics")
       .insert({
         name: input.workspaceName,
@@ -130,9 +128,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       throw clinicError ?? new Error("Failed to create workspace");
     }
 
-    workspaceId = clinic.id as string;
+    const workspaceId = clinic.id as string;
 
-    const { error: roleError } = await supabaseAdmin
+    const { error: roleError } = await supabase
       .from("user_roles")
       .insert({ user_id: userId, clinic_id: workspaceId, role: "owner" });
 
