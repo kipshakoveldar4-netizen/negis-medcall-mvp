@@ -49,6 +49,7 @@ type RegisterSuccess = {
     workspaceId: string;
     workspaceName: string;
     user: {
+      id?: string;
       name: string;
       email: string;
     };
@@ -76,25 +77,27 @@ async function safeJson<T>(response: Response): Promise<T | null> {
 }
 
 function persistDemoWorkspace(data: RegisterSuccess['data']) {
+  const createdAt = new Date().toISOString();
+  const user = {
+    id: data.user.id || 'demo-user',
+    name: data.user.name,
+    email: data.user.email,
+  };
   const workspace = {
-    active: true,
-    workspaceId: data.workspaceId || 'demo-workspace',
-    workspaceName: data.workspaceName,
-    user: data.user,
-    role: 'owner',
-    created_at: new Date().toISOString(),
+    id: data.workspaceId || 'demo-workspace',
+    name: data.workspaceName,
+  };
+  const session = {
+    mode: 'demo',
+    authenticated: true,
+    createdAt,
   };
 
+  localStorage.setItem('negis_demo_user', JSON.stringify(user));
   localStorage.setItem('negis_demo_workspace', JSON.stringify(workspace));
-  localStorage.setItem('negis_clinic_id', workspace.workspaceId);
-  localStorage.setItem('negis_session', JSON.stringify({
-    mode: 'demo',
-    role: 'owner',
-    clinic_id: workspace.workspaceId,
-    clinic_name: workspace.workspaceName,
-    email: workspace.user.email,
-    started_at: workspace.created_at,
-  }));
+  localStorage.setItem('negis_demo_session', JSON.stringify(session));
+  localStorage.removeItem('negis_clinic_id');
+  localStorage.removeItem('negis_session');
 }
 
 const roleRoute = (role: string | null) => {
@@ -212,7 +215,7 @@ export default function Landing() {
       }
 
       closeModal();
-      setLocation(registerJson.data.redirectTo || '/dashboard');
+      window.location.href = registerJson.data.redirectTo || '/dashboard';
     } catch (e: any) {
       setError(e.message || 'Registration failed');
     } finally { setIsLoading(false); }
