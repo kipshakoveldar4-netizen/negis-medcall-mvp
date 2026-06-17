@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { PageLayout } from '@/components/layout/PageLayout';
-import { Calendar, TrendingUp, DollarSign, Users } from 'lucide-react';
+import { Link } from 'wouter';
+import { BarChart3, BrainCircuit, Calendar, CalendarCheck, DollarSign, PhoneCall, TrendingUp, Users } from 'lucide-react';
 import { useGetDashboardMetrics } from '@workspace/api-client-react';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/contexts/AuthContext';
@@ -24,6 +25,117 @@ interface SlotLoad {
 }
 
 export default function Dashboard() {
+  const { isDemoMode } = useAuth();
+
+  if (isDemoMode) {
+    return <DemoDashboard />;
+  }
+
+  return <LiveDashboard />;
+}
+
+function DemoDashboard() {
+  const { clinicId } = useAuth();
+  const metrics = [
+    { label: 'Leads today', value: '24', icon: Users, color: 'text-[#1A56DB]', bg: 'bg-blue-500/10' },
+    { label: 'Calls', value: '18', icon: PhoneCall, color: 'text-[#0F766E]', bg: 'bg-teal-500/10' },
+    { label: 'Appointments', value: '7', icon: CalendarCheck, color: 'text-[#16A34A]', bg: 'bg-green-500/10' },
+    { label: 'Ad spend', value: '300 USD', icon: DollarSign, color: 'text-[#F59E0B]', bg: 'bg-yellow-500/10' },
+  ];
+  const sections = [
+    { href: '/targeting-agent', label: 'Targeting Agent', value: 'Creative score 86', icon: BrainCircuit },
+    { href: '/sales', label: 'Leads', value: '24 active leads', icon: Users },
+    { href: '/reception', label: 'Calls', value: '18 calls queued', icon: PhoneCall },
+    { href: '/booking', label: 'Appointments', value: '7 visits planned', icon: CalendarCheck },
+    { href: '/ads', label: 'Reports', value: 'Demo campaign report', icon: BarChart3 },
+  ];
+
+  return (
+    <PageLayout>
+      <div className="space-y-7">
+        <div className="flex flex-col gap-2">
+          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-[#64748B]">Demo workspace</p>
+          <h1 className="text-3xl font-bold text-[#0F172A]">Negis CRM</h1>
+          <p className="text-sm text-[#64748B]">{clinicId || 'demo-workspace'}</p>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-5">
+          {metrics.map(({ label, value, icon: Icon, color, bg }) => (
+            <div key={label} className="neu-card relative overflow-hidden">
+              <div className="flex items-center gap-3 mb-3">
+                <div className={`p-2 rounded-xl ${bg} ${color}`}>
+                  <Icon size={20} />
+                </div>
+                <span className="text-sm font-semibold text-[#64748B]">{label}</span>
+              </div>
+              <p className="text-3xl font-bold text-[#1E293B]">{value}</p>
+            </div>
+          ))}
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-5 gap-5">
+          {sections.map(({ href, label, value, icon: Icon }) => (
+            <Link key={href} href={href}>
+              <div className="neu-card h-full cursor-pointer transition-transform duration-150 hover:-translate-y-0.5">
+                <div className="flex items-center justify-between gap-3 mb-5">
+                  <div className="p-2 rounded-xl bg-[#E0F2FE] text-[#0369A1]">
+                    <Icon size={20} />
+                  </div>
+                  <span className="text-xs font-semibold text-[#94A3B8]">Open</span>
+                </div>
+                <h2 className="text-base font-bold text-[#0F172A]">{label}</h2>
+                <p className="text-sm text-[#64748B] mt-2">{value}</p>
+              </div>
+            </Link>
+          ))}
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          <div className="neu-card lg:col-span-2">
+            <h2 className="text-lg font-bold text-[#0F172A] mb-5">Today pipeline</h2>
+            <div className="space-y-3">
+              {[
+                ['New leads', '24', 'bg-[#1A56DB]'],
+                ['Qualified calls', '14', 'bg-[#0F766E]'],
+                ['Booked visits', '7', 'bg-[#16A34A]'],
+              ].map(([label, value, color]) => (
+                <div key={label} className="flex items-center justify-between neu-sm p-3 px-4">
+                  <div className="flex items-center gap-3">
+                    <span className={`h-3 w-3 rounded-full ${color}`} />
+                    <span className="text-sm font-semibold text-[#334155]">{label}</span>
+                  </div>
+                  <span className="text-sm font-bold text-[#0F172A]">{value}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="neu-card">
+            <h2 className="text-lg font-bold text-[#0F172A] mb-5">Campaign snapshot</h2>
+            <div className="space-y-4">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#94A3B8]">Status</p>
+                <p className="text-sm font-bold text-[#0F172A] mt-1">Pending launch</p>
+              </div>
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#94A3B8]">Creative score</p>
+                <p className="text-3xl font-bold text-[#1A56DB] mt-1">86</p>
+              </div>
+              <Link href="/targeting-agent">
+                <div className="neu-btn-primary inline-flex items-center gap-2 cursor-pointer">
+                  <BrainCircuit size={16} />
+                  Targeting Agent
+                </div>
+              </Link>
+            </div>
+          </div>
+        </div>
+      </div>
+    </PageLayout>
+  );
+}
+
+function LiveDashboard() {
   const { clinicId } = useAuth();
   const { data: metrics, isLoading } = useGetDashboardMetrics();
   const [agents, setAgents] = useState<AgentRace[]>([]);

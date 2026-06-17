@@ -212,7 +212,7 @@ export default function Landing() {
       }
 
       closeModal();
-      setLocation(registerJson.data.redirectTo || '/targeting-agent');
+      setLocation(registerJson.data.redirectTo || '/dashboard');
     } catch (e: any) {
       setError(e.message || 'Registration failed');
     } finally { setIsLoading(false); }

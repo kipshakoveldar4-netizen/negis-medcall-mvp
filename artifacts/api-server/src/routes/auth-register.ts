@@ -65,7 +65,7 @@ function successBody(input: RegisterInput, workspaceId: string, mode: "demo" | "
         name: input.ownerName,
         email: input.email,
       },
-      redirectTo: "/targeting-agent",
+      redirectTo: "/dashboard",
     },
   };
 }
