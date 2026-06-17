@@ -104,6 +104,8 @@ function targetingApiDevMiddleware(): Plugin {
             modulePath = apiModule("api", "targeting", "analyze.ts");
           } else if (pathname === "/api/targeting/launch") {
             modulePath = apiModule("api", "targeting", "launch.ts");
+          } else if (pathname === "/api/targeting/report") {
+            modulePath = apiModule("api", "targeting", "report.ts");
           } else {
             const reportMatch = pathname.match(/^\/api\/targeting\/reports\/([^/]+)$/);
             if (reportMatch?.[1]) {

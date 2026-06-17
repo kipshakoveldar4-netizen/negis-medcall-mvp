@@ -267,7 +267,7 @@ export default function TargetingAgent() {
     setLoading("report");
     try {
       const response = await requestJson<ReportData>(
-        `/api/targeting/reports/${encodeURIComponent(campaignId)}`,
+        `/api/targeting/report?campaignId=${encodeURIComponent(campaignId)}`,
       );
       if (isApiError(response)) {
         handleApiError(response);
