@@ -1,0 +1,24 @@
+{
+  "name": "workspace",
+  "version": "0.0.0",
+  "packageManager": "pnpm@10.33.2",
+  "license": "MIT",
+  "scripts": {
+    "preinstall": "node scripts/preinstall.cjs",
+    "build": "node scripts/run-pnpm.cjs run typecheck && node scripts/run-pnpm.cjs --filter @workspace/negis run build",
+    "build:all": "node scripts/run-pnpm.cjs run typecheck && node scripts/run-pnpm.cjs -r --if-present run build",
+    "typecheck:libs": "tsc --build",
+    "typecheck": "node scripts/run-pnpm.cjs run typecheck:libs && node scripts/run-pnpm.cjs -r --filter \"./artifacts/**\" --filter \"./scripts\" --if-present run typecheck",
+    "test:targeting": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:targeting"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.105.4",
+    "@vercel/node": "^5.8.17"
+  },
+  "private": true,
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "prettier": "^3.8.3",
+    "typescript": "~5.9.3"
+  }
+}

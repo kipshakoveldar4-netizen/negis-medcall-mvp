@@ -1,0 +1,196 @@
+Переделай центральную кнопку / ядро системы NEGIS.
+
+ВАЖНО:
+Сейчас кнопка выглядит:
+
+* слишком мягкой
+* слишком flat
+* как обычный neumorphism UI
+* как Dribbble concept
+
+Нужно:
+сделать physical industrial system core.
+
+Кнопка должна ощущаться:
+
+* тяжелой
+* инженерной
+* плотной
+* тактильной
+* изготовленной из материала
+* как hardware object
+
+НЕ:
+
+* обычная UI кнопка
+* bubble neumorphism
+* soft marshmallow UI
+* sci-fi sphere
+* glowing circle
+
+ГЛАВНАЯ ИДЕЯ:
+
+Это не кнопка.
+Это activation core системы.
+
+Визуально:
+как physical operational artifact.
+
+ФОРМА:
+
+Оставить круглую форму.
+
+Но:
+
+* outer ring сделать более резким
+* меньше blur
+* более инженерные края
+* более точная геометрия
+
+НЕ делать острые края.
+Но:
+precision-machined edges.
+
+ВНЕШНЕЕ КОЛЬЦО:
+
+Outer ring должен:
+
+* слегка выступать
+* иметь более sharp edge
+* выглядеть как алюминиевая или керамическая рамка
+
+Использовать:
+
+* subtle bevel
+* subtle inset
+* industrial hardware feeling
+
+INNER CORE:
+
+Внутренняя поверхность:
+
+* слегка recessed
+* ощущение control surface
+* не flat
+* не полностью выпуклая
+
+Главная глубина:
+именно в outer ring.
+
+ЦВЕТА:
+
+Background:
+#F4F7FB
+
+Outer ring:
+#D8DEE6
+
+Inner surface:
+#EEF2F6
+
+Inner shadow:
+rgba(15,23,42,0.08)
+
+Text:
+#475569
+
+ТЕКСТУРА:
+
+Убрать:
+
+* шум
+* grain noise
+* fuzzy texture
+
+Вместо этого:
+очень subtle ceramic / granite material feel.
+
+Текстура должна быть:
+
+* почти незаметной
+* premium
+* engineered
+* matte
+
+НЕ делать “каменный шум”.
+
+СВЕТ:
+
+Добавить:
+
+* soft top highlight
+* subtle lower density shadow
+* realistic material lighting
+
+Кнопка должна ощущаться:
+
+* grounded
+* тяжелой
+* физической
+
+НЕ должна выглядеть:
+будто парит в воздухе.
+
+ТЕНЬ:
+
+Сейчас тень слишком мягкая.
+
+Сделать:
+
+* меньше blur
+* чуть плотнее
+* ближе к объекту
+
+Тень должна создавать:
+массу,
+а не floating effect.
+
+ЛОГОТИП:
+
+NEGIS
+
+Текст:
+
+* perfectly centered
+* uppercase
+* medium weight
+* readable
+* calm spacing
+* слегка engraved
+
+НЕ futuristic sci-fi font.
+
+Шрифт должен ощущаться:
+
+* infrastructural
+* enterprise
+* architectural
+
+АНИМАЦИЯ:
+
+При hover:
+
+* very subtle pressure response
+* tiny light shift
+* minimal shadow response
+
+При клике:
+
+* inner surface слегка уходит внутрь
+* как physical activation control
+
+НЕ делать:
+
+* scale animation
+* bounce
+* glow
+* neon effects
+
+ГЛАВНАЯ ЦЕЛЬ:
+
+Кнопка должна выглядеть:
+не как UI элемент.
+
+А как:
+physical operating core
+из премиальной enterprise системы.

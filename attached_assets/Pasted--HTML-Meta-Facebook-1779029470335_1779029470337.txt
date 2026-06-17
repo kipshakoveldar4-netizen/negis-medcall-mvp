@@ -1,0 +1,171 @@
+Переделай юридические страницы на английский и сделай их статическими HTML.
+
+Важно:
+Meta/Facebook должен видеть текст прямо в HTML через curl, без загрузки React.
+
+Нужно сделать 3 статические страницы:
+
+1. https://www.negis.online/privacy/
+2. https://www.negis.online/terms/
+3. https://www.negis.online/data-deletion/
+
+Они должны быть на английском языке.
+
+Страницы должны возвращать HTTP 200 и содержать текст прямо в HTML.
+
+Проверка:
+curl https://www.negis.online/privacy/
+curl https://www.negis.online/terms/
+curl https://www.negis.online/data-deletion/
+
+В ответе должны быть английские заголовки:
+Privacy Policy
+Terms of Service
+Data Deletion Instructions
+
+Если curl показывает только общий React index.html, значит задача не выполнена.
+
+Создай файлы:
+
+public/privacy/index.html
+public/terms/index.html
+public/data-deletion/index.html
+
+И настрой routing/server так, чтобы эти URL отдавали именно эти HTML-файлы, а не SPA index.html.
+
+Содержимое:
+
+privacy/index.html:
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Privacy Policy — Negis</title>
+  <meta name="description" content="Privacy Policy for Negis CRM and automation platform for clinics." />
+</head>
+<body>
+  <main>
+    <h1>Privacy Policy</h1>
+    <p>Last updated: May 17, 2026</p>
+
+    <p>Negis is a CRM and automation platform for clinics. This Privacy Policy explains how we collect, use, store, and protect information when clinics and users use our service.</p>
+
+    <h2>Information We Collect</h2>
+    <p>We may collect names, phone numbers, email addresses, clinic names, employee information, customer and lead information, appointment data, advertising source data, and technical data required to operate the service.</p>
+
+    <h2>How We Use Information</h2>
+    <p>We use information to operate the CRM, process leads, manage appointments, manage employees and branches, provide analytics, support users, improve the service, and enable integrations requested by the user.</p>
+
+    <h2>Meta and Advertising Integrations</h2>
+    <p>If a clinic connects Facebook, Instagram, or other advertising integrations, Negis may process advertising account data, campaign statistics, lead data, and related information. This data is used only to provide CRM and analytics functionality for the connected clinic account.</p>
+
+    <h2>Data Sharing</h2>
+    <p>We do not sell personal data. Data may be shared only with service providers required to operate Negis, such as hosting, database, notification, analytics, and integration providers.</p>
+
+    <h2>Data Security</h2>
+    <p>We use reasonable technical and organizational measures to protect data from unauthorized access, alteration, disclosure, or destruction.</p>
+
+    <h2>Data Deletion</h2>
+    <p>Users may request deletion of their data by following the instructions on our Data Deletion page: https://www.negis.online/data-deletion/</p>
+
+    <h2>Contact</h2>
+    <p>If you have questions about this Privacy Policy, contact us at: agentconcept01@gmail.com</p>
+  </main>
+</body>
+</html>
+
+terms/index.html:
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Terms of Service — Negis</title>
+  <meta name="description" content="Terms of Service for Negis CRM and automation platform for clinics." />
+</head>
+<body>
+  <main>
+    <h1>Terms of Service</h1>
+    <p>Last updated: May 17, 2026</p>
+
+    <p>These Terms of Service govern the use of Negis, a CRM and automation platform for clinics.</p>
+
+    <h2>Service Description</h2>
+    <p>Negis provides tools for lead management, appointment scheduling, reception workflows, employee roles, branches, analytics, and integrations.</p>
+
+    <h2>User Accounts</h2>
+    <p>Users are responsible for maintaining the confidentiality of their login credentials and for all activity performed under their accounts.</p>
+
+    <h2>Clinic and Customer Data</h2>
+    <p>Clinics are responsible for the legality and accuracy of the data they upload or process through Negis. Negis provides technical tools for storing and processing such data.</p>
+
+    <h2>Integrations</h2>
+    <p>When connecting Facebook, Instagram, TikTok, WhatsApp, Telegram, or other integrations, users confirm that they have the right to use the connected accounts and related data.</p>
+
+    <h2>Restrictions</h2>
+    <p>Users may not use Negis for illegal activity, spam, infringement of third-party rights, or unauthorized access attempts.</p>
+
+    <h2>Pricing and Trial</h2>
+    <p>Negis may provide free trial access and paid subscription plans. Pricing and plan limits may be updated and displayed on the website.</p>
+
+    <h2>Limitation of Liability</h2>
+    <p>Negis is not responsible for losses caused by incorrect user data, third-party service outages, or misuse of the platform.</p>
+
+    <h2>Changes to Terms</h2>
+    <p>We may update these Terms from time to time. The current version will be published on this page.</p>
+
+    <h2>Contact</h2>
+    <p>For questions about these Terms, contact us at: agentconcept01@gmail.com</p>
+  </main>
+</body>
+</html>
+
+data-deletion/index.html:
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Data Deletion Instructions — Negis</title>
+  <meta name="description" content="Instructions for requesting deletion of user data from Negis." />
+</head>
+<body>
+  <main>
+    <h1>Data Deletion Instructions</h1>
+    <p>Last updated: May 17, 2026</p>
+
+    <p>If you want to request deletion of your data from Negis, please email us at: agentconcept01@gmail.com</p>
+
+    <h2>What to Include in Your Request</h2>
+    <p>Please include the following information in your email:</p>
+    <ul>
+      <li>Your full name</li>
+      <li>Your email address or phone number</li>
+      <li>Your clinic name, if applicable</li>
+      <li>A clear statement that you want your data deleted from Negis</li>
+      <li>If your data came from Facebook or Instagram Lead Ads, please mention that in your request</li>
+    </ul>
+
+    <h2>Processing Time</h2>
+    <p>We will review and process deletion requests within 30 days, unless we are required to retain certain data by law or contractual obligations.</p>
+
+    <h2>Meta / Facebook Data</h2>
+    <p>If your data was received through Facebook or Instagram integrations, we will delete the related lead or advertising data stored in Negis for the connected clinic account.</p>
+
+    <h2>Contact</h2>
+    <p>Email: agentconcept01@gmail.com</p>
+  </main>
+</body>
+</html>
+
+После деплоя обязательно проверить:
+
+curl https://www.negis.online/privacy/
+curl https://www.negis.online/terms/
+curl https://www.negis.online/data-deletion/
+
+Если в curl нет английских заголовков, значит страницы всё ещё не статические и Meta их не примет.

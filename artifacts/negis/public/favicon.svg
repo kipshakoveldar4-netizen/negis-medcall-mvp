@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1E293B"/>
+      <stop offset="100%" stop-color="#0B1220"/>
+    </linearGradient>
+    <linearGradient id="letter" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FFFFFF"/>
+      <stop offset="100%" stop-color="#CBD5E1"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background rounded square -->
+  <rect width="64" height="64" rx="14" fill="url(#bg)"/>
+
+  <!-- Subtle inner highlight for depth -->
+  <rect x="1" y="1" width="62" height="30" rx="13" fill="white" fill-opacity="0.05"/>
+
+  <!-- Letter N — clean geometric -->
+  <path
+    d="M15 47 L15 17 L21 17 L38 40 L38 17 L44 17 L44 47 L38 47 L21 24 L21 47 Z"
+    fill="url(#letter)"
+  />
+</svg>

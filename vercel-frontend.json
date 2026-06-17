@@ -1,0 +1,14 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "installCommand": "pnpm install --frozen-lockfile",
+  "buildCommand": "pnpm --filter @workspace/negis run build",
+  "outputDirectory": "artifacts/negis/dist/public",
+  "routes": [
+    {
+      "src": "/api/leads/webhook/([^/]+)",
+      "dest": "/api/leads/webhook/[clinicId].ts"
+    },
+    { "handle": "filesystem" },
+    { "src": "/(.*)", "dest": "/index.html" }
+  ]
+}

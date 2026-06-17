@@ -1,0 +1,125 @@
+Нужно доработать основной Negis CRM, чтобы вход из отдельной супер-админки Negis Control работал без запроса логина и пароля.
+
+Когда Negis CRM открывается по ссылке:
+
+/?impersonate_token=JWT_TOKEN&clinic_id=CLINIC_ID
+
+приложение должно:
+
+1. На старте приложения, до обычной проверки авторизации, прочитать из URL параметры:
+   - impersonate_token
+   - clinic_id
+
+2. Если impersonate_token есть, отправить его на проверку в Negis Control API:
+
+POST {VITE_NEGIS_CONTROL_API_URL}/api/impersonation/verify
+Content-Type: application/json
+
+Body:
+{
+  "token": "JWT_TOKEN_FROM_URL"
+}
+
+3. Добавить в Replit Secrets основного Negis CRM:
+
+VITE_NEGIS_CONTROL_API_URL=https://домен-или-url-админки
+
+Для локального теста:
+VITE_NEGIS_CONTROL_API_URL=http://localhost:8787
+
+4. Успешный ответ от API будет таким:
+
+{
+  "clinicId": "uuid",
+  "clinicName": "Clinic name",
+  "ownerEmail": "owner@email.com",
+  "issuedBy": "superadmin@email.com"
+}
+
+5. Если ответ успешный, создать локальную сессию администратора клиники. Нужно изучить текущую auth/session логику Negis CRM и записать те localStorage/session keys, которые приложение уже использует для обычного входа администратора клиники.
+
+Минимально нужно записать:
+
+localStorage.setItem('negis_session', JSON.stringify({
+  mode: 'impersonation',
+  role: 'admin',
+  clinic_id: data.clinicId,
+  clinic_name: data.clinicName,
+  email: data.ownerEmail,
+  issued_by: data.issuedBy,
+  started_at: new Date().toISOString()
+}));
+
+localStorage.setItem('negis_impersonation', JSON.stringify({
+  active: true,
+  clinic_id: data.clinicId,
+  clinic_name: data.clinicName,
+  owner_email: data.ownerEmail,
+  issued_by: data.issuedBy
+}));
+
+localStorage.setItem('negis_clinic_id', data.clinicId);
+
+Если в проекте уже есть другие ключи вроде negis_user, negis_current_user, currentUser, auth_user, clinic_id, userRole и т.п., нужно заполнить их тоже так, чтобы CRM считала пользователя авторизованным администратором выбранной клиники.
+
+6. После успешной проверки удалить токен из адресной строки:
+
+const cleanUrl = window.location.origin + window.location.pathname;
+window.history.replaceState({}, document.title, cleanUrl);
+
+7. После этого открыть основной экран CRM/dashboard без логина и пароля.
+
+8. Все данные в CRM в режиме impersonation должны фильтроваться по clinic_id = data.clinicId. Пользователь должен видеть только выбранную клинику.
+
+9. В режиме impersonation сверху должен быть красный баннер:
+
+Режим просмотра: {clinicName} | Выйти
+
+10. При клике на “Выйти” нужно:
+- удалить negis_session;
+- удалить negis_impersonation;
+- удалить negis_clinic_id;
+- удалить все дополнительные auth/session keys, которые были созданы для impersonation;
+- вернуть пользователя на обычный экран логина.
+
+11. Если проверка токена не прошла:
+- удалить impersonate_token из URL;
+- очистить impersonation keys;
+- показать ошибку:
+  Доступ по ссылке истёк. Войдите снова из Negis Control.
+- отправить пользователя на login.
+
+12. Безопасность:
+- НЕ использовать VITE_SUPABASE_SERVICE_ROLE_KEY во frontend.
+- Удалить VITE_SUPABASE_SERVICE_ROLE_KEY из Replit Secrets, если он есть.
+- Service role key нельзя хранить в переменных с VITE_, потому что они попадают в браузер.
+- Во frontend можно использовать только:
+  VITE_SUPABASE_URL
+  VITE_SUPABASE_ANON_KEY
+  VITE_NEGIS_CONTROL_API_URL
+- VITE_TELEGRAM_BOT_TOKEN тоже нельзя держать во frontend. Если используется, перенести на server-side без VITE_.
+
+13. Где искать код:
+Проверить файлы:
+- src/App.tsx
+- src/main.tsx
+- src/hooks/useAuth.ts
+- src/context/AuthContext.tsx
+- src/lib/auth.ts
+- src/pages/Login.tsx
+- src/integrations/supabase/client.ts
+- или index.html, если проект single-file
+
+Добавить проверку impersonate_token именно до обычного redirect на login.
+
+Acceptance criteria:
+1. Из Negis Control нажимаю “Войти” у клиники.
+2. Открывается Negis CRM.
+3. CRM не спрашивает логин и пароль.
+4. CRM сразу открывает выбранную клинику как admin/owner.
+5. Все данные отфильтрованы по выбранному clinic_id.
+6. Сверху виден красный баннер “Режим просмотра: {clinicName} | Выйти”.
+7. После обновления страницы impersonation-сессия сохраняется.
+8. После нажатия “Выйти” пользователь возвращается на login.
+9. Невалидный или истёкший токен возвращает на login.
+10. Service role key не попадает во frontend bundle.

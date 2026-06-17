@@ -1,0 +1,349 @@
+Add the Advertising module to the existing Negis project.
+Do not change anything that already works.
+Only add new functionality.
+
+STEP 1 — Run this SQL in Supabase:
+
+ALTER TABLE clinics ADD COLUMN IF NOT EXISTS 
+webhook_secret text DEFAULT encode(gen_random_bytes(32), 'hex');
+
+ALTER TABLE clinics ADD COLUMN IF NOT EXISTS 
+usd_to_kzt numeric DEFAULT 450;
+
+CREATE TABLE IF NOT EXISTS ad_accounts (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  clinic_id uuid REFERENCES clinics(id) ON DELETE CASCADE,
+  platform text NOT NULL CHECK (platform IN ('facebook', 'tiktok')),
+  account_id text NOT NULL,
+  account_name text,
+  access_token text NOT NULL,
+  token_expires_at timestamptz,
+  is_active boolean DEFAULT true,
+  created_at timestamptz DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS ad_reports (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  clinic_id uuid REFERENCES clinics(id) ON DELETE CASCADE,
+  ad_account_id uuid REFERENCES ad_accounts(id) ON DELETE CASCADE,
+  platform text NOT NULL,
+  date_start date NOT NULL,
+  date_end date NOT NULL,
+  impressions bigint DEFAULT 0,
+  clicks bigint DEFAULT 0,
+  leads integer DEFAULT 0,
+  spend numeric DEFAULT 0,
+  cpl numeric DEFAULT 0,
+  ctr numeric DEFAULT 0,
+  raw_data jsonb,
+  fetched_at timestamptz DEFAULT now(),
+  created_at timestamptz DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS ad_campaigns (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  clinic_id uuid REFERENCES clinics(id) ON DELETE CASCADE,
+  ad_account_id uuid REFERENCES ad_accounts(id) ON DELETE CASCADE,
+  platform text NOT NULL,
+  campaign_id text NOT NULL,
+  campaign_name text,
+  status text,
+  impressions bigint DEFAULT 0,
+  clicks bigint DEFAULT 0,
+  leads integer DEFAULT 0,
+  spend numeric DEFAULT 0,
+  cpl numeric DEFAULT 0,
+  date_start date,
+  date_end date,
+  fetched_at timestamptz DEFAULT now(),
+  created_at timestamptz DEFAULT now()
+);
+
+ALTER TABLE ad_accounts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE ad_reports ENABLE ROW LEVEL SECURITY;
+ALTER TABLE ad_campaigns ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "clinic_ad_accounts" ON ad_accounts
+  FOR ALL USING (clinic_id = get_user_clinic_id());
+CREATE POLICY "clinic_ad_reports" ON ad_reports
+  FOR ALL USING (clinic_id = get_user_clinic_id());
+CREATE POLICY "clinic_ad_campaigns" ON ad_campaigns
+  FOR ALL USING (clinic_id = get_user_clinic_id());
+
+STEP 2 — Add new file src/lib/facebook-ads.ts:
+
+const FB_API_BASE = 'https://graph.facebook.com/v18.0';
+
+export async function fetchFacebookReport(
+  accountId: string,
+  accessToken: string,
+  dateStart: string,
+  dateEnd: string
+) {
+  const fields = ['impressions','clicks','actions','spend','ctr','cost_per_action_type'].join(',');
+  const url = `${FB_API_BASE}/${accountId}/insights?fields=${fields}&time_range={"since":"${dateStart}","until":"${dateEnd}"}&access_token=${accessToken}`;
+  const response = await fetch(url);
+  const data = await response.json();
+  if (data.error) throw new Error(data.error.message);
+  const leads = data.data[0]?.actions?.find((a: any) => a.action_type === 'lead')?.value || 0;
+  return {
+    impressions: parseInt(data.data[0]?.impressions || '0'),
+    clicks: parseInt(data.data[0]?.clicks || '0'),
+    leads: parseInt(leads),
+    spend: parseFloat(data.data[0]?.spend || '0'),
+    ctr: parseFloat(data.data[0]?.ctr || '0'),
+    cpl: parseInt(leads) > 0 ? parseFloat(data.data[0]?.spend || '0') / parseInt(leads) : 0
+  };
+}
+
+export async function fetchFacebookCampaigns(
+  accountId: string,
+  accessToken: string,
+  dateStart: string,
+  dateEnd: string
+) {
+  const fields = ['campaign_name','campaign_id','impressions','clicks','actions','spend','ctr'].join(',');
+  const url = `${FB_API_BASE}/${accountId}/insights?fields=${fields}&level=campaign&time_range={"since":"${dateStart}","until":"${dateEnd}"}&access_token=${accessToken}`;
+  const response = await fetch(url);
+  const data = await response.json();
+  if (data.error) throw new Error(data.error.message);
+  return data.data || [];
+}
+
+STEP 3 — Add new file src/lib/tiktok-ads.ts:
+
+const TIKTOK_API_BASE = 'https://business-api.tiktok.com/open_api/v1.3';
+
+export async function fetchTikTokReport(
+  advertiserId: string,
+  accessToken: string,
+  dateStart: string,
+  dateEnd: string
+) {
+  const body = {
+    advertiser_id: advertiserId,
+    report_type: 'BASIC',
+    dimensions: ['stat_time_day'],
+    metrics: ['impressions','clicks','conversion','spend','ctr','cost_per_conversion'],
+    data_level: 'AUCTION_ADVERTISER',
+    start_date: dateStart,
+    end_date: dateEnd,
+    page_size: 100
+  };
+  const response = await fetch(`${TIKTOK_API_BASE}/report/integrated/get/`, {
+    method: 'POST',
+    headers: { 'Access-Token': accessToken, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  const data = await response.json();
+  if (data.code !== 0) throw new Error(data.message);
+  const rows = data.data?.list || [];
+  return rows.reduce((acc: any, row: any) => ({
+    impressions: acc.impressions + parseInt(row.metrics.impressions || '0'),
+    clicks: acc.clicks + parseInt(row.metrics.clicks || '0'),
+    leads: acc.leads + parseInt(row.metrics.conversion || '0'),
+    spend: acc.spend + parseFloat(row.metrics.spend || '0'),
+    ctr: parseFloat(row.metrics.ctr || '0'),
+    cpl: parseFloat(row.metrics.cost_per_conversion || '0')
+  }), { impressions: 0, clicks: 0, leads: 0, spend: 0, ctr: 0, cpl: 0 });
+}
+
+export async function fetchTikTokCampaigns(
+  advertiserId: string,
+  accessToken: string,
+  dateStart: string,
+  dateEnd: string
+) {
+  const body = {
+    advertiser_id: advertiserId,
+    report_type: 'BASIC',
+    dimensions: ['campaign_id','campaign_name'],
+    metrics: ['impressions','clicks','conversion','spend','ctr','cost_per_conversion'],
+    data_level: 'AUCTION_CAMPAIGN',
+    start_date: dateStart,
+    end_date: dateEnd,
+    page_size: 100
+  };
+  const response = await fetch(`${TIKTOK_API_BASE}/report/integrated/get/`, {
+    method: 'POST',
+    headers: { 'Access-Token': accessToken, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  const data = await response.json();
+  if (data.code !== 0) throw new Error(data.message);
+  return data.data?.list || [];
+}
+
+STEP 4 — Add new file src/lib/conversion.ts:
+
+import { supabase } from '@/integrations/supabase/client';
+
+export async function getConversionBySource(
+  clinicId: string,
+  dateStart: string,
+  dateEnd: string
+) {
+  const { data: leads } = await supabase
+    .from('leads')
+    .select('id, source, status_id, created_at')
+    .eq('clinic_id', clinicId)
+    .gte('created_at', dateStart)
+    .lte('created_at', dateEnd);
+
+  const { data: bookings } = await supabase
+    .from('bookings')
+    .select('id, lead_id, visited')
+    .eq('clinic_id', clinicId)
+    .gte('created_at', dateStart)
+    .lte('created_at', dateEnd);
+
+  const bookedLeadIds = new Set(bookings?.map(b => b.lead_id));
+  const visitedLeadIds = new Set(
+    bookings?.filter(b => b.visited === true).map(b => b.lead_id)
+  );
+
+  const sources = ['Facebook', 'TikTok', 'Instagram', 'Google', 'WhatsApp', '2GIS', 'Вручную', 'Webhook'];
+
+  return sources.map(source => {
+    const sourceLeads = leads?.filter(l => l.source === source) || [];
+    const total = sourceLeads.length;
+    const booked = sourceLeads.filter(l => bookedLeadIds.has(l.id)).length;
+    const visited = sourceLeads.filter(l => visitedLeadIds.has(l.id)).length;
+    return {
+      source,
+      total,
+      booked,
+      visited,
+      lost: total - booked,
+      bookingRate: total > 0 ? (booked / total * 100).toFixed(1) : '0',
+      visitRate: total > 0 ? (visited / total * 100).toFixed(1) : '0'
+    };
+  }).filter(r => r.total > 0);
+}
+
+STEP 5 — Create new page src/pages/Ads.tsx:
+
+Full page with same sidebar layout as other pages.
+Add to sidebar navigation: "📣 Реклама" between CRM and Admin.
+Route: /ads
+
+Two tabs at top (neu-sm style): "📊 Отчёты" | "🔄 Конверсия"
+
+TAB 1 — ОТЧЁТЫ:
+
+If no ad_accounts connected — show two neu cards side by side:
+Left card: Facebook logo + "Подключить Facebook Ads" + neu-btn-primary "Подключить"
+Right card: TikTok logo + "Подключить TikTok Ads" + neu-btn-primary "Подключить"
+
+Facebook connect modal:
+- Instructions text about needing Ad Account ID and Access Token
+- Link to https://developers.facebook.com/tools/explorer/
+- Input: Ad Account ID (placeholder: act_XXXXXXXXXX)
+- Input: Access Token (type password)
+- Button "Проверить и подключить"
+- On submit: verify with FB API, save to ad_accounts table
+- Success: show account name, close modal
+
+TikTok connect modal:
+- Instructions about Advertiser ID and Access Token
+- Link to https://business-api.tiktok.com/portal/docs
+- Input: Advertiser ID
+- Input: Access Token (type password)
+- Button "Проверить и подключить"
+- On submit: verify with TikTok API, save to ad_accounts
+
+When accounts connected — show main dashboard:
+
+Top filters bar:
+- Platform tabs: Все | Facebook | TikTok (neu-sm)
+- Period selector: Сегодня | 7 дней | 30 дней | Свой период
+- "Обновить данные" button (neu-btn with refresh icon)
+
+6 metric cards (neu, 3 per row):
+Row 1: Показы | Клики | Лиды
+Row 2: Потрачено ₸ | Стоимость лида ₸ | CTR %
+Each card: metric name, value, arrow up/down vs previous period, % change
+
+Campaigns table:
+Columns: Кампания, Платформа (FB/TikTok icon), Статус badge, Показы, Клики, Лиды, Потрачено ₸, CPL ₸, CTR %
+Sortable columns.
+Empty state: "Нет данных за выбранный период"
+
+Line chart at bottom (recharts):
+X axis: dates, Y axis: leads count + spend
+Two lines: blue (лиды), orange (расход ₸)
+
+Data flow:
+- On load: check ad_reports table for cached data
+- If cache older than 1 hour: fetch from FB/TikTok APIs
+- Save to ad_reports table
+- Display from cache
+- "Обновить данные" button forces API refresh
+
+Currency: multiply USD spend by clinics.usd_to_kzt field
+
+TAB 2 — КОНВЕРСИЯ:
+
+Filters: period selector + source filter (Все / Facebook / TikTok / Instagram / Google / WhatsApp / 2GIS)
+
+Main funnel card (neu-lg):
+4 stages:
+1. 📥 Лидов пришло — total count — 100%
+2. 📅 Записалось — booked count — X%
+3. 🏥 Пришли на приём — visited count — X%
+4. ❌ Потери — lost count — X%
+
+Each stage: icon + label + number + percentage + colored progress bar
+Colors: blue=leads, green=booked/visited, red=lost
+
+Source breakdown table:
+Columns: Источник, Лидов, Записалось, % записи, Пришло, % прихода, Потери
+% записи color: green if >60%, yellow if 40-60%, red if <40%
+Row click → modal with list of leads from that source
+
+Period comparison card (neu):
+This period vs previous period:
+Лидов: X ↑ +Y% (vs Z)
+Записей: X ↑ +Y%
+Конверсия: X% ↑ +Y%
+Приходов: X ↑ +Y%
+
+STEP 6 — Add webhook endpoint:
+
+Create src/api/webhook.ts with function handleLeadWebhook.
+Add POST route /api/leads/webhook/:clinic_id to the server.
+Validate X-Webhook-Secret header against clinics.webhook_secret.
+On valid request: insert lead, send Telegram notification, return 200.
+
+STEP 7 — Update Admin panel Settings tab:
+
+Add new section "Реклама и интеграции":
+
+Webhook URL (read-only input with copy button):
+Value: https://{window.location.host}/api/leads/webhook/{clinic_id}
+
+Webhook Secret (hidden input with copy button + "Обновить" button):
+Button regenerates secret in database.
+
+Exchange rate field:
+Label: "Курс USD → ₸"
+Default: 450
+Saves to clinics.usd_to_kzt
+
+Connected ad accounts list:
+Show each connected account: platform icon + account name + "Отключить" button
+
+STEP 8 — Update App.tsx:
+
+Add route: <Route path="/ads" element={<Ads />} />
+Import Ads page.
+
+RULES:
+- Use existing neumorphic CSS classes
+- Use existing sidebar component
+- All text in Russian
+- Currency always ₸
+- Use React Query for all data fetching
+- Loading states on all async operations
+- Error states with helpful messages
+- Do not break any existing functionality
