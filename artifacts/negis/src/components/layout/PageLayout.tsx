@@ -9,7 +9,7 @@ interface PageLayoutProps {
 }
 
 export function PageLayout({ children, requireAuth = true }: PageLayoutProps) {
-  const { session, isLoading, isImpersonation } = useAuth();
+  const { session, isLoading, isImpersonation, isDemoMode } = useAuth();
 
   if (isLoading) {
     return (
@@ -24,7 +24,7 @@ export function PageLayout({ children, requireAuth = true }: PageLayoutProps) {
     );
   }
 
-  if (requireAuth && !session && !isImpersonation) {
+  if (requireAuth && !session && !isImpersonation && !isDemoMode) {
     return <Redirect to="/" />;
   }
 

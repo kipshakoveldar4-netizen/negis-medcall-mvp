@@ -9,6 +9,10 @@
       "dest": "/api/leads/webhook/[clinicId].ts"
     },
     {
+      "src": "/api/auth/register",
+      "dest": "/api/auth/register.ts"
+    },
+    {
       "src": "/api/targeting/reports/([^/]+)",
       "dest": "/api/targeting/reports/[campaignId].ts"
     },

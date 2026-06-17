@@ -14,6 +14,18 @@ interface ImpersonationData {
   issued_by: string;
 }
 
+interface DemoWorkspaceData {
+  active: boolean;
+  workspaceId: string;
+  workspaceName: string;
+  user: {
+    name: string;
+    email: string;
+  };
+  role: 'owner';
+  created_at: string;
+}
+
 export type UserRole = 'owner' | 'manager' | 'agent' | 'booking_agent' | 'receptionist';
 export type RolePermissions = Record<string, boolean>;
 
@@ -25,6 +37,7 @@ interface AuthContextType {
   rolePermissions: RolePermissions;
   isLoading: boolean;
   isImpersonation: boolean;
+  isDemoMode: boolean;
   impersonationClinicName: string | null;
   signOut: () => Promise<void>;
 }
@@ -33,6 +46,7 @@ interface AuthContextType {
 const IMP_KEY     = 'negis_impersonation';
 const CLINIC_KEY  = 'negis_clinic_id';
 const SESSION_KEY = 'negis_session';
+const DEMO_WORKSPACE_KEY = 'negis_demo_workspace';
 
 const ALL_PERMISSIONS: RolePermissions = {
   dashboard: true,
@@ -58,6 +72,7 @@ const SYSTEM_ROLE_PERMISSIONS: Record<UserRole, RolePermissions> = {
 
 function clearImpersonationStorage() {
   localStorage.removeItem(IMP_KEY);
+  localStorage.removeItem(DEMO_WORKSPACE_KEY);
   localStorage.removeItem(CLINIC_KEY);
   localStorage.removeItem(SESSION_KEY);
 }
@@ -80,6 +95,17 @@ function loadStoredImpersonation(): ImpersonationData | null {
   }
 }
 
+function loadStoredDemoWorkspace(): DemoWorkspaceData | null {
+  try {
+    const raw = localStorage.getItem(DEMO_WORKSPACE_KEY);
+    if (!raw) return null;
+    const d: DemoWorkspaceData = JSON.parse(raw);
+    return d.active && d.workspaceId ? d : null;
+  } catch {
+    return null;
+  }
+}
+
 /* ── Context ──────────────────────────────────────────────── */
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
@@ -91,6 +117,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [rolePermissions,         setRolePermissions]         = useState<RolePermissions>({});
   const [isLoading,               setIsLoading]               = useState(true);
   const [isImpersonation,         setIsImpersonation]         = useState(false);
+  const [isDemoMode,              setIsDemoMode]              = useState(false);
   const [impersonationClinicName, setImpersonationClinicName] = useState<string | null>(null);
   const [, setLocation] = useLocation();
 
@@ -106,10 +133,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   /** Apply stored impersonation state to React state (idempotent). */
   const applyImpersonationState = (d: ImpersonationData) => {
     setIsImpersonation(true);
+    setIsDemoMode(false);
     setClinicId(d.clinic_id);
     setImpersonationClinicName(d.clinic_name);
     setUserRole('owner');
     setRolePermissions(ALL_PERMISSIONS);
+  };
+
+  const applyDemoWorkspaceState = (d: DemoWorkspaceData) => {
+    setIsDemoMode(true);
+    setIsImpersonation(false);
+    setClinicId(d.workspaceId);
+    setImpersonationClinicName(null);
+    setUserRole('owner');
+    setRolePermissions(ALL_PERMISSIONS);
+    setSession(null);
+    setUser(null);
   };
 
   /* ── 1. Init ──────────────────────────────────────────── */
@@ -150,6 +189,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       return;
     }
 
+    const demoWorkspace = loadStoredDemoWorkspace();
+    if (demoWorkspace) {
+      applyDemoWorkspaceState(demoWorkspace);
+      setIsLoading(false);
+      return;
+    }
+
     /* D) Normal Supabase auth */
     await setupSupabaseAuth();
   };
@@ -165,6 +211,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const imp = loadStoredImpersonation();
       if (imp) {
         applyImpersonationState(imp);
+        setIsLoading(false);
+        return;
+      }
+
+      const demoWorkspace = loadStoredDemoWorkspace();
+      if (demoWorkspace) {
+        applyDemoWorkspaceState(demoWorkspace);
         setIsLoading(false);
         return;
       }
@@ -189,6 +242,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     if (imp) {
       /* Session may or may not be present — either way, use impersonation data */
       applyImpersonationState(imp);
+      setIsLoading(false);
+      return;
+    }
+
+    const demoWorkspace = loadStoredDemoWorkspace();
+    if (demoWorkspace) {
+      applyDemoWorkspaceState(demoWorkspace);
       setIsLoading(false);
       return;
     }
@@ -351,6 +411,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   /* ── 5. Sign out ──────────────────────────────────────── */
   const signOut = async () => {
+    if (isDemoMode) {
+      clearImpersonationStorage();
+      setIsDemoMode(false);
+      setClinicId(null);
+      setUserRole(null);
+      setRolePermissions({});
+      setLocation('/');
+      return;
+    }
+
     if (isImpersonation) {
       clearImpersonationStorage();
       setIsImpersonation(false);
@@ -372,7 +442,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     <AuthContext.Provider value={{
       session, user, clinicId, userRole, isLoading,
       rolePermissions,
-      isImpersonation, impersonationClinicName,
+      isImpersonation, isDemoMode, impersonationClinicName,
       signOut,
     }}>
       {children}

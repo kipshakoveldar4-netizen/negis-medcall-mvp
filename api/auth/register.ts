@@ -1,8 +1,5 @@
-import { Router } from "express";
-import { supabaseAdmin } from "../lib/supabase-admin.js";
-import { logger } from "../lib/logger.js";
-
-const router = Router();
+import type { VercelRequest, VercelResponse } from "@vercel/node";
+import { createClient } from "@supabase/supabase-js";
 
 type RegisterInput = {
   ownerName: string;
@@ -15,7 +12,7 @@ function readString(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
 }
 
-function slugifyClinicName(name: string): string {
+function slugifyWorkspaceName(name: string): string {
   const base = name
     .toLowerCase()
     .trim()
@@ -26,7 +23,7 @@ function slugifyClinicName(name: string): string {
     .slice(0, 40);
 
   const suffix = Math.random().toString(36).slice(2, 7);
-  return `${base || "clinic"}-${suffix}`;
+  return `${base || "workspace"}-${suffix}`;
 }
 
 function parseInput(body: unknown): { input?: RegisterInput; details: string[] } {
@@ -54,12 +51,12 @@ function parseInput(body: unknown): { input?: RegisterInput; details: string[] }
   return { input: { ownerName, workspaceName, email, password }, details };
 }
 
-function successBody(input: RegisterInput, workspaceId: string, mode: "demo" | "supabase") {
+function demoSuccess(input: RegisterInput) {
   return {
     success: true,
-    mode,
+    mode: "demo",
     data: {
-      workspaceId,
+      workspaceId: "demo-workspace",
       workspaceName: input.workspaceName,
       user: {
         name: input.ownerName,
@@ -78,22 +75,31 @@ function errorBody(error: string, details: string[] = []) {
   };
 }
 
-router.post("/auth/register", async (req, res) => {
-  const { input, details } = parseInput(req.body);
-  if (!input) {
-    res.status(400).json(errorBody("Validation error", details));
-    return;
+export default async function handler(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== "POST") {
+    return res.status(405).json(errorBody("Method not allowed"));
   }
 
-  if (!process.env.VITE_SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
-    res.status(201).json(successBody(input, "demo-workspace", "demo"));
-    return;
+  const { input, details } = parseInput(req.body);
+  if (!input) {
+    return res.status(400).json(errorBody("Validation error", details));
+  }
+
+  const supabaseUrl = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || "";
+  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
+
+  if (!supabaseUrl || !serviceRoleKey) {
+    return res.status(201).json(demoSuccess(input));
   }
 
   let userId: string | null = null;
-  let clinicId: string | null = null;
+  let workspaceId: string | null = null;
 
   try {
+    const supabaseAdmin = createClient(supabaseUrl, serviceRoleKey, {
+      auth: { autoRefreshToken: false, persistSession: false },
+    });
+
     const { data: authData, error: authError } =
       await supabaseAdmin.auth.admin.createUser({
         email: input.email,
@@ -103,10 +109,9 @@ router.post("/auth/register", async (req, res) => {
       });
 
     if (authError || !authData.user?.id) {
-      res
+      return res
         .status(400)
         .json(errorBody("Registration failed", [authError?.message ?? "Failed to create user"]));
-      return;
     }
 
     userId = authData.user.id;
@@ -116,42 +121,38 @@ router.post("/auth/register", async (req, res) => {
       .insert({
         name: input.workspaceName,
         owner_id: userId,
-        slug: slugifyClinicName(input.workspaceName),
+        slug: slugifyWorkspaceName(input.workspaceName),
       })
       .select("id")
       .single();
 
     if (clinicError || !clinic?.id) {
-      throw clinicError ?? new Error("Failed to create clinic");
+      throw clinicError ?? new Error("Failed to create workspace");
     }
 
-    clinicId = clinic.id as string;
+    workspaceId = clinic.id as string;
 
     const { error: roleError } = await supabaseAdmin
       .from("user_roles")
-      .insert({ user_id: userId, clinic_id: clinicId, role: "owner" });
+      .insert({ user_id: userId, clinic_id: workspaceId, role: "owner" });
 
-    if (roleError) {
-      throw roleError;
-    }
+    if (roleError) throw roleError;
 
-    res.status(201).json(successBody(input, clinicId, "supabase"));
+    return res.status(201).json({
+      success: true,
+      mode: "supabase",
+      data: {
+        workspaceId,
+        workspaceName: input.workspaceName,
+        user: {
+          name: input.ownerName,
+          email: input.email,
+        },
+        redirectTo: "/targeting-agent",
+      },
+    });
   } catch (err) {
-    logger.error({ err }, "register failed");
-
-    if (clinicId) {
-      await supabaseAdmin.from("user_roles").delete().eq("clinic_id", clinicId);
-      await supabaseAdmin.from("clinics").delete().eq("id", clinicId);
-    }
-
-    if (userId) {
-      await supabaseAdmin.auth.admin.deleteUser(userId);
-    }
-
-    res
-      .status(500)
-      .json(errorBody("Registration failed", [err instanceof Error ? err.message : "Registration failed"]));
+    const message = err instanceof Error ? err.message : "Registration failed";
+    return res.status(500).json(errorBody("Registration failed", [message]));
   }
-});
-
-export default router;
+}

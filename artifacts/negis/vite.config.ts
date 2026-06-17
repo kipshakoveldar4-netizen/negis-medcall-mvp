@@ -89,7 +89,7 @@ function targetingApiDevMiddleware(): Plugin {
         const requestUrl = new URL(req.url ?? "/", "http://localhost");
         const pathname = requestUrl.pathname;
 
-        if (!pathname.startsWith("/api/targeting")) {
+        if (!pathname.startsWith("/api/targeting") && pathname !== "/api/auth/register") {
           next();
           return;
         }
@@ -98,7 +98,9 @@ function targetingApiDevMiddleware(): Plugin {
           const query = buildQuery(requestUrl);
           let modulePath: string | null = null;
 
-          if (pathname === "/api/targeting/health") {
+          if (pathname === "/api/auth/register") {
+            modulePath = apiModule("api", "auth", "register.ts");
+          } else if (pathname === "/api/targeting/health") {
             modulePath = apiModule("api", "targeting", "health.ts");
           } else if (pathname === "/api/targeting/analyze") {
             modulePath = apiModule("api", "targeting", "analyze.ts");

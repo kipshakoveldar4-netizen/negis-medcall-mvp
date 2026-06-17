@@ -42,6 +42,61 @@ type ResetValues      = z.infer<typeof resetSchema>;
 type NewPasswordValues = z.infer<typeof newPasswordSchema>;
 type ModalState = 'idle' | 'choice' | 'login' | 'register' | 'reset' | 'newpassword';
 
+type RegisterSuccess = {
+  success: true;
+  mode?: string;
+  data: {
+    workspaceId: string;
+    workspaceName: string;
+    user: {
+      name: string;
+      email: string;
+    };
+    redirectTo?: string;
+  };
+};
+
+type RegisterError = {
+  success: false;
+  error: string;
+  details?: string[];
+};
+
+type RegisterResponse = RegisterSuccess | RegisterError;
+
+async function safeJson<T>(response: Response): Promise<T | null> {
+  const text = await response.text();
+  if (!text) return null;
+
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    return null;
+  }
+}
+
+function persistDemoWorkspace(data: RegisterSuccess['data']) {
+  const workspace = {
+    active: true,
+    workspaceId: data.workspaceId || 'demo-workspace',
+    workspaceName: data.workspaceName,
+    user: data.user,
+    role: 'owner',
+    created_at: new Date().toISOString(),
+  };
+
+  localStorage.setItem('negis_demo_workspace', JSON.stringify(workspace));
+  localStorage.setItem('negis_clinic_id', workspace.workspaceId);
+  localStorage.setItem('negis_session', JSON.stringify({
+    mode: 'demo',
+    role: 'owner',
+    clinic_id: workspace.workspaceId,
+    clinic_name: workspace.workspaceName,
+    email: workspace.user.email,
+    started_at: workspace.created_at,
+  }));
+}
+
 const roleRoute = (role: string | null) => {
   if (role === 'owner' || role === 'manager') return '/dashboard';
   if (role === 'receptionist') return '/reception';
@@ -56,15 +111,15 @@ export default function Landing() {
   const [error,      setError]      = useState('');
   const [successMsg, setSuccessMsg] = useState('');
   const [, setLocation] = useLocation();
-  const { session, userRole, isLoading: authLoading, clinicId } = useAuth();
+  const { session, userRole, isLoading: authLoading, clinicId, isDemoMode } = useAuth();
   const modalRef = useRef<HTMLDivElement>(null);
 
   /* Auto-redirect if already authenticated (e.g. after dev login or page refresh) */
   useEffect(() => {
-    if (!authLoading && session && clinicId) {
+    if (!authLoading && clinicId && (session || isDemoMode)) {
       setLocation(roleRoute(userRole));
     }
-  }, [authLoading, session, clinicId, userRole]);
+  }, [authLoading, session, clinicId, userRole, isDemoMode]);
 
   const loginForm       = useForm<LoginValues>      ({ resolver: zodResolver(loginSchema) });
   const registerForm    = useForm<RegisterValues>   ({ resolver: zodResolver(registerSchema) });
@@ -133,19 +188,31 @@ export default function Landing() {
         }),
       });
 
-      const registerJson = await registerRes.json();
-      if (!registerRes.ok) {
-        throw new Error(registerJson.error || 'Registration failed');
+      const registerJson = await safeJson<RegisterResponse>(registerRes);
+      if (!registerJson) {
+        throw new Error('Registration service returned an empty response');
       }
 
-      const { error: signInError } = await supabase.auth.signInWithPassword({
-        email: data.email,
-        password: data.password,
-      });
+      if (!registerRes.ok || registerJson.success === false) {
+        const details = registerJson.success === false ? registerJson.details?.join(', ') : '';
+        throw new Error(
+          registerJson.success === false
+            ? [registerJson.error, details].filter(Boolean).join(': ')
+            : 'Registration failed',
+        );
+      }
 
-      if (signInError) throw signInError;
+      persistDemoWorkspace(registerJson.data);
 
-      setLocation('/onboarding');
+      if (registerJson.mode === 'supabase') {
+        await supabase.auth.signInWithPassword({
+          email: data.email,
+          password: data.password,
+        }).catch(() => undefined);
+      }
+
+      closeModal();
+      setLocation(registerJson.data.redirectTo || '/targeting-agent');
     } catch (e: any) {
       setError(e.message || 'Registration failed');
     } finally { setIsLoading(false); }
@@ -160,8 +227,8 @@ export default function Landing() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: data.email }),
       });
-      const json = await res.json();
-      if (!res.ok) throw new Error(json.error || 'Ошибка сервера');
+      const json = await safeJson<{ error?: string }>(res);
+      if (!res.ok) throw new Error(json?.error || 'Ошибка сервера');
       setSuccessMsg('Письмо с паролем для входа отправлено. Проверьте почту.');
     } catch (e: any) {
       setError('Не удалось отправить письмо. Проверьте email и попробуйте снова.');
