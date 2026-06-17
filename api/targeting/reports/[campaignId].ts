@@ -10,9 +10,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     });
   }
 
-  const campaignId = Array.isArray(req.query.campaignId)
-    ? req.query.campaignId[0]
-    : req.query.campaignId;
+  const campaignIdParam = req.query.campaignId;
+  const campaignId = (
+    Array.isArray(campaignIdParam) ? campaignIdParam[0] : campaignIdParam
+  )?.trim();
 
   if (!campaignId) {
     return res.status(400).json({

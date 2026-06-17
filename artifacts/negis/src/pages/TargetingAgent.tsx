@@ -169,7 +169,7 @@ function JsonBlock({ title, value }: { title: string; value?: unknown }) {
 export default function TargetingAgent() {
   const [creative, setCreative] = useState(initialCreative);
   const [launch, setLaunch] = useState(initialLaunch);
-  const [campaignId, setCampaignId] = useState("");
+  const [reportCampaignId, setReportCampaignId] = useState("");
   const [analysis, setAnalysis] = useState<ApiSuccess<AnalyzeData> | null>(null);
   const [launchResult, setLaunchResult] = useState<ApiSuccess<LaunchData> | null>(null);
   const [report, setReport] = useState<ApiSuccess<ReportData> | null>(null);
@@ -244,7 +244,8 @@ export default function TargetingAgent() {
         return;
       }
       setLaunchResult(response);
-      if (response.data.campaignId) setCampaignId(response.data.campaignId);
+      const createdCampaignId = response.data.campaignId?.trim();
+      if (createdCampaignId) setReportCampaignId(createdCampaignId);
       toast.success("Pending campaign created");
     } catch {
       toast.error("Launch request failed");
@@ -254,15 +255,19 @@ export default function TargetingAgent() {
   };
 
   const getReport = async () => {
-    if (!campaignId.trim()) {
-      toast.error("campaignId is required");
+    const campaignId = reportCampaignId.trim();
+
+    if (!campaignId) {
+      toast.error("Validation error", {
+        description: "campaignId is required",
+      });
       return;
     }
 
     setLoading("report");
     try {
       const response = await requestJson<ReportData>(
-        `/api/targeting/reports/${encodeURIComponent(campaignId.trim())}`,
+        `/api/targeting/reports/${encodeURIComponent(campaignId)}`,
       );
       if (isApiError(response)) {
         handleApiError(response);
@@ -418,8 +423,8 @@ export default function TargetingAgent() {
           <div className="flex flex-col gap-3 md:flex-row">
             <input
               style={inputStyle}
-              value={campaignId}
-              onChange={(event) => setCampaignId(event.target.value)}
+              value={reportCampaignId}
+              onChange={(event) => setReportCampaignId(event.target.value)}
               placeholder="campaignId"
             />
             <button
