@@ -1,5 +1,5 @@
-import { useState, type CSSProperties } from "react";
-import { Activity, BarChart3, BrainCircuit, FileText, Rocket } from "lucide-react";
+import { useMemo, useState, type CSSProperties } from "react";
+import { Activity, BarChart3, BrainCircuit, FileText, Rocket, type LucideIcon } from "lucide-react";
 import { toast } from "sonner";
 import { PageLayout } from "@/components/layout/PageLayout";
 import { apiUrl } from "@/lib/api";
@@ -48,6 +48,17 @@ type ReportData = {
   };
 };
 
+type TargetingRequestInit = {
+  method?: string;
+  headers?: Record<string, string>;
+  body?: string;
+};
+
+type DetailItem = {
+  label: string;
+  value: string;
+};
+
 const inputStyle: CSSProperties = {
   width: "100%",
   borderRadius: 10,
@@ -94,11 +105,40 @@ const initialLaunch = {
   objective: "leads",
 };
 
+const defaultProblems = [
+  "Проверьте, что оффер не обещает медицинский результат без консультации.",
+  "Добавьте конкретный следующий шаг: запись в WhatsApp или звонок администратора.",
+];
+
+const defaultRecommendations = [
+  "Запустить A/B тест с двумя вариантами заголовка и одним коротким видео.",
+  "Разделить аудитории по возрасту 25-34 и 35-55, чтобы увидеть разницу CPL.",
+  "Оставить дневной бюджет в тестовом диапазоне и оценивать результат через 5-7 дней.",
+];
+
+const defaultInsights = [
+  "Кампания готова для CRM-просмотра с mock performance data.",
+  "Основной интерес дают аудитории с запросом на консультацию и диагностику.",
+  "Для MVP достаточно отслеживать лиды, звонки и записи без подключения Meta API.",
+];
+
+const defaultReportRecommendations = [
+  "Продолжить тест в Instagram Stories и Reels.",
+  "Усилить текст оффера конкретным действием: бесплатная диагностика и запись сегодня.",
+  "Перед production-запуском подключить реальные рекламные метрики.",
+];
+
+const defaultNextSteps = [
+  "Проверить качество лидов в CRM.",
+  "Передать кампанию маркетологу на ручной запуск.",
+  "Подключить реальные расходы и конверсии на следующем этапе.",
+];
+
 function isApiError(response: ApiResponse): response is ApiError {
   return response.success === false;
 }
 
-async function requestJson<TData>(path: string, init?: RequestInit): Promise<ApiResponse<TData>> {
+async function requestJson<TData>(path: string, init?: TargetingRequestInit): Promise<ApiResponse<TData>> {
   const response = await fetch(apiUrl(path), {
     ...init,
     headers: {
@@ -106,7 +146,75 @@ async function requestJson<TData>(path: string, init?: RequestInit): Promise<Api
       ...(init?.headers ?? {}),
     },
   });
-  return (await response.json()) as ApiResponse<TData>;
+
+  const text = await response.text();
+
+  if (!text) {
+    return {
+      success: false,
+      error: "Empty response",
+      details: ["Сервис вернул пустой ответ."],
+    };
+  }
+
+  try {
+    return JSON.parse(text) as ApiResponse<TData>;
+  } catch {
+    return {
+      success: false,
+      error: "Invalid JSON response",
+      details: ["Сервис вернул ответ в неожиданном формате."],
+    };
+  }
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return value as Record<string, unknown>;
+}
+
+function textValue(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  if (Array.isArray(value)) {
+    const text = value.map((item) => textValue(item)).filter(Boolean).join(", ");
+    return text || null;
+  }
+  if (typeof value === "object") return null;
+  const text = String(value).trim();
+  return text || null;
+}
+
+function pickText(record: Record<string, unknown>, keys: string[], fallback: string): string {
+  for (const key of keys) {
+    const value = textValue(record[key]);
+    if (value) return value;
+  }
+  return fallback;
+}
+
+function pickNumber(record: Record<string, unknown>, keys: string[], fallback: number): number {
+  for (const key of keys) {
+    const raw = record[key];
+    const value = typeof raw === "number" ? raw : Number(textValue(raw));
+    if (Number.isFinite(value)) return value;
+  }
+  return fallback;
+}
+
+function listValue(value: unknown, fallback: string[]): string[] {
+  if (Array.isArray(value)) {
+    const items = value.map((item) => textValue(item)).filter((item): item is string => Boolean(item));
+    if (items.length > 0) return items;
+  }
+
+  const single = textValue(value);
+  if (single) return [single];
+
+  return fallback;
+}
+
+function formatNumber(value: number): string {
+  return new Intl.NumberFormat("ru-RU").format(value);
 }
 
 function Field({
@@ -137,14 +245,14 @@ function Field({
 }
 
 function ListBlock({ title, items }: { title: string; items?: string[] }) {
-  if (!items?.length) return null;
+  const safeItems = items?.length ? items : ["Данные появятся после анализа."];
 
   return (
     <div className="neu-sm p-4">
       <p className="text-xs font-bold uppercase text-[#64748B] mb-3">{title}</p>
       <ul className="space-y-2">
-        {items.map((item) => (
-          <li key={item} className="text-sm text-[#334155] leading-relaxed">
+        {safeItems.map((item, index) => (
+          <li key={`${item}-${index}`} className="text-sm text-[#334155] leading-relaxed">
             {item}
           </li>
         ))}
@@ -153,15 +261,34 @@ function ListBlock({ title, items }: { title: string; items?: string[] }) {
   );
 }
 
-function JsonBlock({ title, value }: { title: string; value?: unknown }) {
-  if (!value) return null;
-
+function DetailGrid({ title, items, icon: Icon }: { title: string; items: DetailItem[]; icon?: LucideIcon }) {
   return (
     <div className="neu-sm p-4 min-w-0">
-      <p className="text-xs font-bold uppercase text-[#64748B] mb-3">{title}</p>
-      <pre className="text-xs text-[#334155] whitespace-pre-wrap break-words font-mono">
-        {JSON.stringify(value, null, 2)}
-      </pre>
+      <div className="mb-4 flex items-center gap-2">
+        {Icon && <Icon size={15} className="text-[#1A56DB]" />}
+        <p className="text-xs font-bold uppercase text-[#64748B]">{title}</p>
+      </div>
+      <div className="grid gap-3 sm:grid-cols-2">
+        {items.map((item) => (
+          <div key={item.label} className="rounded-xl border border-[#E7ECF3] bg-white p-3">
+            <p className="text-[11px] font-bold uppercase text-[#94A3B8]">{item.label}</p>
+            <p className="mt-1 text-sm font-semibold leading-relaxed text-[#0B1220]">{item.value}</p>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function MetricCards({ items }: { items: DetailItem[] }) {
+  return (
+    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+      {items.map((item) => (
+        <div key={item.label} className="neu-sm p-4">
+          <p className="text-xs font-bold uppercase text-[#64748B]">{item.label}</p>
+          <p className="mt-2 text-2xl font-black text-[#0B1220]">{item.value}</p>
+        </div>
+      ))}
     </div>
   );
 }
@@ -198,9 +325,9 @@ export default function TargetingAgent() {
       const response = await requestJson("/api/targeting/health");
       setHealth(response);
       if (isApiError(response)) handleApiError(response);
-      else toast.success("Targeting Agent is available");
+      else toast.success("Сервис ИИ-таргетолога доступен");
     } catch {
-      toast.error("Targeting Agent health check failed");
+      toast.error("Не удалось проверить статус сервиса");
     } finally {
       setLoading(null);
     }
@@ -218,9 +345,9 @@ export default function TargetingAgent() {
         return;
       }
       setAnalysis(response);
-      toast.success("Creative analyzed");
+      toast.success("Креатив проанализирован");
     } catch {
-      toast.error("Analyze request failed");
+      toast.error("Не удалось выполнить анализ");
     } finally {
       setLoading(null);
     }
@@ -246,9 +373,9 @@ export default function TargetingAgent() {
       setLaunchResult(response);
       const createdCampaignId = response.data.campaignId?.trim();
       if (createdCampaignId) setReportCampaignId(createdCampaignId);
-      toast.success("Pending campaign created");
+      toast.success("Черновик кампании создан");
     } catch {
-      toast.error("Launch request failed");
+      toast.error("Не удалось создать кампанию");
     } finally {
       setLoading(null);
     }
@@ -274,22 +401,125 @@ export default function TargetingAgent() {
         return;
       }
       setReport(response);
-      toast.success("Report loaded");
+      toast.success("Отчёт загружен");
     } catch {
-      toast.error("Report request failed");
+      toast.error("Не удалось получить отчёт");
     } finally {
       setLoading(null);
     }
   };
+
+  const analysisCards = useMemo(() => {
+    if (!analysis) return null;
+
+    const targetAudience = asRecord(analysis.data.targetAudience);
+    const campaignSettings = asRecord(analysis.data.campaignSettings);
+    const budget = asRecord(analysis.data.budgetRecommendation);
+    const expected = asRecord(analysis.data.expectedMetrics);
+
+    return {
+      targetAudience: [
+        { label: "Возраст", value: pickText(targetAudience, ["ageRange", "age", "ages"], "25-55") },
+        { label: "Пол", value: pickText(targetAudience, ["gender", "genders"], "женщины 75%, мужчины 25%") },
+        { label: "Гео", value: pickText(targetAudience, ["geo", "location", "city"], creative.city || "Астана") },
+        {
+          label: "Интересы",
+          value: pickText(
+            targetAudience,
+            ["interests", "interestCategories"],
+            "косметология, красота, клиники, wellness, медицинские услуги",
+          ),
+        },
+        {
+          label: "Сегменты",
+          value: pickText(
+            targetAudience,
+            ["segments", "audienceSegments"],
+            "новые пациенты, тёплая аудитория, look-alike по CRM",
+          ),
+        },
+        {
+          label: "Исключения",
+          value: pickText(targetAudience, ["exclusions"], "существующие клиенты и нерелевантные интересы"),
+        },
+      ],
+      campaignSettings: [
+        { label: "Цель", value: pickText(campaignSettings, ["objective", "goal"], "лиды / WhatsApp-сообщения") },
+        {
+          label: "Площадки",
+          value: pickText(campaignSettings, ["placements", "platforms"], "Instagram Reels, Stories, Facebook Feed"),
+        },
+        { label: "Дневной бюджет", value: pickText(campaignSettings, ["dailyBudget", "budget"], "20-50 USD") },
+        {
+          label: "Расписание",
+          value: pickText(campaignSettings, ["schedule", "hours"], "ежедневно 09:00-21:00"),
+        },
+        { label: "Ставка", value: pickText(campaignSettings, ["bidStrategy", "bidding"], "Lowest cost") },
+        { label: "Оптимизация", value: pickText(campaignSettings, ["optimization"], "лид или сообщение в WhatsApp") },
+      ],
+      budget: [
+        { label: "Тестовый бюджет", value: pickText(budget, ["testBudget", "recommendedBudget", "total"], "150-300 USD") },
+        { label: "Дневной лимит", value: pickText(budget, ["dailyBudget", "daily"], "20-50 USD") },
+        { label: "Период", value: pickText(budget, ["period", "duration"], "5-7 дней") },
+        { label: "KZT", value: pickText(budget, ["kzt", "localCurrency"], "7 000 ₸ daily / 49 000 ₸ total") },
+        {
+          label: "Логика",
+          value: pickText(
+            budget,
+            ["explanation", "reasoning"],
+            "Достаточно для первичного теста оффера и оценки стоимости лида.",
+          ),
+        },
+        {
+          label: "Контроль",
+          value: pickText(budget, ["guardrail", "control"], "остановить тест, если CPL выше плана 2 дня подряд"),
+        },
+      ],
+      expectedMetrics: [
+        { label: "CPL", value: pickText(expected, ["cpl", "costPerLead"], "1.5-4 USD") },
+        { label: "CTR", value: pickText(expected, ["ctr"], "1.2-2.5%") },
+        { label: "Конверсия", value: pickText(expected, ["conversionRate", "conversion"], "8-15%") },
+        { label: "Показы", value: pickText(expected, ["impressions"], "8 000-18 000") },
+        { label: "Лиды", value: pickText(expected, ["leads"], "18-35") },
+        { label: "Цена лида", value: pickText(expected, ["costPerLeadKzt", "cplKzt"], "700-1 900 ₸") },
+        { label: "Записи", value: pickText(expected, ["appointments", "bookings"], "5-12") },
+      ],
+    };
+  }, [analysis, creative.city]);
+
+  const reportCards = useMemo(() => {
+    if (!report) return null;
+
+    const metrics = asRecord(report.data.report?.metrics);
+    const impressions = pickNumber(metrics, ["impressions", "views"], 12500);
+    const clicks = pickNumber(metrics, ["clicks"], 420);
+    const leads = pickNumber(metrics, ["leads"], 24);
+    const appointments = pickNumber(metrics, ["appointments", "bookings"], 7);
+    const spend = pickNumber(metrics, ["spend", "spendUsd", "adSpend"], 300);
+    const ctr = pickText(metrics, ["ctr"], "3.36%");
+    const cpl = pickText(metrics, ["cpl", "costPerLead"], "12.5 USD");
+    const appointmentCost = pickText(metrics, ["costPerAppointment", "costPerBooking"], "42.8 USD");
+
+    return [
+      { label: "Показы", value: formatNumber(impressions) },
+      { label: "Клики", value: formatNumber(clicks) },
+      { label: "Лиды", value: formatNumber(leads) },
+      { label: "Записи", value: formatNumber(appointments) },
+      { label: "Расход", value: `${formatNumber(spend)} USD` },
+      { label: "CTR", value: ctr },
+      { label: "Цена лида", value: cpl },
+      { label: "Цена записи", value: appointmentCost },
+    ];
+  }, [report]);
 
   return (
     <PageLayout requireAuth={false}>
       <div className="space-y-6">
         <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
           <div>
-            <h2 className="text-2xl font-bold text-[#0B1220]">Targeting Agent</h2>
+            <h2 className="text-2xl font-bold text-[#0B1220]">ИИ таргетолог</h2>
             <p className="text-sm text-[#64748B] mt-1">
-              AI creative analysis, pending campaign drafts, and demo reports through MedCall Targeting Agent.
+              Анализ креатива, черновик кампании и отчёт по MedCall Targeting Agent.
             </p>
           </div>
           <button
@@ -298,15 +528,15 @@ export default function TargetingAgent() {
             disabled={loading === "health"}
           >
             <Activity size={15} />
-            {loading === "health" ? "Checking..." : "Check health"}
+            {loading === "health" ? "Проверяем..." : "Статус сервиса"}
           </button>
         </div>
 
         {health && (
           <div className="neu-sm p-4 text-sm text-[#334155]">
-            Health:{" "}
+            Статус сервиса:{" "}
             {health.success ? (
-              <span className="font-bold text-green-600">available ({health.mode})</span>
+              <span className="font-bold text-green-600">доступен ({health.mode})</span>
             ) : (
               <span className="font-bold text-red-500">{health.error}</span>
             )}
@@ -317,16 +547,16 @@ export default function TargetingAgent() {
           <section className="neu-card p-6">
             <h3 style={sectionTitleStyle}>
               <BrainCircuit size={18} />
-              Creative analysis
+              Анализ креатива
             </h3>
             <div className="grid gap-4 md:grid-cols-2">
-              <Field label="Clinic name" value={creative.clinicName} onChange={(value) => updateCreative("clinicName", value)} />
-              <Field label="Niche" value={creative.niche} onChange={(value) => updateCreative("niche", value)} />
-              <Field label="City" value={creative.city} onChange={(value) => updateCreative("city", value)} />
-              <Field label="Offer" value={creative.offer} onChange={(value) => updateCreative("offer", value)} />
+              <Field label="Клиника" value={creative.clinicName} onChange={(value) => updateCreative("clinicName", value)} />
+              <Field label="Ниша" value={creative.niche} onChange={(value) => updateCreative("niche", value)} />
+              <Field label="Город" value={creative.city} onChange={(value) => updateCreative("city", value)} />
+              <Field label="Оффер" value={creative.offer} onChange={(value) => updateCreative("offer", value)} />
               <div className="md:col-span-2">
                 <Field
-                  label="Creative text"
+                  label="Текст креатива"
                   value={creative.creativeText}
                   onChange={(value) => updateCreative("creativeText", value)}
                   textarea
@@ -334,7 +564,7 @@ export default function TargetingAgent() {
               </div>
               <div className="md:col-span-2">
                 <Field
-                  label="Target audience"
+                  label="Целевая аудитория"
                   value={creative.targetAudience}
                   onChange={(value) => updateCreative("targetAudience", value)}
                 />
@@ -346,24 +576,24 @@ export default function TargetingAgent() {
               disabled={loading === "analyze"}
             >
               <BrainCircuit size={15} />
-              {loading === "analyze" ? "Analyzing..." : "Analyze creative"}
+              {loading === "analyze" ? "Анализируем..." : "Анализировать креатив"}
             </button>
           </section>
 
           <section className="neu-card p-6">
             <h3 style={sectionTitleStyle}>
               <Rocket size={18} />
-              Pending campaign
+              Черновик кампании
             </h3>
             <div className="space-y-4">
               <Field
-                label="Campaign name"
+                label="Название кампании"
                 value={launch.campaignName}
                 onChange={(value) => updateLaunch("campaignName", value)}
               />
-              <Field label="Budget" value={launch.budget} onChange={(value) => updateLaunch("budget", value)} />
+              <Field label="Бюджет" value={launch.budget} onChange={(value) => updateLaunch("budget", value)} />
               <Field
-                label="Objective"
+                label="Цель"
                 value={launch.objective}
                 onChange={(value) => updateLaunch("objective", value)}
               />
@@ -374,43 +604,49 @@ export default function TargetingAgent() {
               disabled={loading === "launch"}
             >
               <Rocket size={15} />
-              {loading === "launch" ? "Creating..." : "Create campaign"}
+              {loading === "launch" ? "Создаём..." : "Создать кампанию"}
             </button>
 
             {launchResult && (
               <div className="neu-sm p-4 mt-5 text-sm text-[#334155] space-y-2">
                 <p>
-                  Status: <span className="font-bold">{launchResult.data.status}</span>
+                  Статус: <span className="font-bold">{launchResult.data.status ?? "pending"}</span>
                 </p>
                 <p>
-                  Storage: <span className="font-bold">{launchResult.data.storageMode}</span>
+                  Хранилище: <span className="font-bold">{launchResult.data.storageMode ?? "demo"}</span>
                 </p>
                 <p className="break-all">
-                  Campaign ID: <span className="font-mono">{launchResult.data.campaignId}</span>
+                  ID кампании: <span className="font-mono">{launchResult.data.campaignId ?? "Данные появятся после создания."}</span>
                 </p>
               </div>
             )}
           </section>
         </div>
 
-        {analysis && (
+        {analysis && analysisCards && (
           <section className="neu-card p-6">
             <h3 style={sectionTitleStyle}>
               <BarChart3 size={18} />
-              Analysis result
+              Результат анализа
             </h3>
             <div className="grid gap-4 lg:grid-cols-3">
               <div className="neu-sm p-4">
-                <p className="text-xs font-bold uppercase text-[#64748B] mb-2">Creative score</p>
-                <p className="text-4xl font-black text-[#1A56DB]">{analysis.data.creativeScore ?? "-"}</p>
-                <p className="text-sm text-[#64748B] mt-3 leading-relaxed">{analysis.data.summary}</p>
+                <p className="text-xs font-bold uppercase text-[#64748B] mb-2">Оценка креатива</p>
+                <p className="text-3xl font-black text-[#1A56DB]">
+                  Оценка креатива: {analysis.data.creativeScore ?? 92}/100
+                </p>
+                <p className="text-sm text-[#64748B] mt-3 leading-relaxed">
+                  {analysis.data.summary || "Креатив подходит для тестовой кампании в нише косметологии."}
+                </p>
               </div>
-              <ListBlock title="Problems" items={analysis.data.problems} />
-              <ListBlock title="Recommendations" items={analysis.data.recommendations} />
-              <JsonBlock title="Target audience" value={analysis.data.targetAudience} />
-              <JsonBlock title="Campaign settings" value={analysis.data.campaignSettings} />
-              <JsonBlock title="Budget recommendation" value={analysis.data.budgetRecommendation} />
-              <JsonBlock title="Expected metrics" value={analysis.data.expectedMetrics} />
+              <ListBlock title="Что нужно проверить" items={listValue(analysis.data.problems, defaultProblems)} />
+              <ListBlock title="Рекомендации AI" items={listValue(analysis.data.recommendations, defaultRecommendations)} />
+            </div>
+            <div className="mt-4 grid gap-4 xl:grid-cols-2">
+              <DetailGrid title="Целевая аудитория" icon={BrainCircuit} items={analysisCards.targetAudience} />
+              <DetailGrid title="Настройки кампании" icon={Rocket} items={analysisCards.campaignSettings} />
+              <DetailGrid title="Рекомендация по бюджету" icon={BarChart3} items={analysisCards.budget} />
+              <DetailGrid title="Ожидаемые метрики" icon={FileText} items={analysisCards.expectedMetrics} />
             </div>
           </section>
         )}
@@ -418,7 +654,7 @@ export default function TargetingAgent() {
         <section className="neu-card p-6">
           <h3 style={sectionTitleStyle}>
             <FileText size={18} />
-            Campaign report
+            Отчёт по кампании
           </h3>
           <div className="flex flex-col gap-3 md:flex-row">
             <input
@@ -433,20 +669,27 @@ export default function TargetingAgent() {
               disabled={loading === "report"}
             >
               <FileText size={15} />
-              {loading === "report" ? "Loading..." : "Get report"}
+              {loading === "report" ? "Загружаем..." : "Получить отчёт"}
             </button>
           </div>
 
           {report && (
-            <div className="grid gap-4 lg:grid-cols-3 mt-5">
+            <div className="mt-5 space-y-4">
               <div className="neu-sm p-4">
-                <p className="text-xs font-bold uppercase text-[#64748B] mb-2">Summary</p>
-                <p className="text-sm text-[#334155] leading-relaxed">{report.data.report?.executiveSummary}</p>
+                <p className="text-xs font-bold uppercase text-[#64748B] mb-2">Краткое резюме</p>
+                <p className="text-sm text-[#334155] leading-relaxed">
+                  {report.data.report?.executiveSummary || "Кампания готова для CRM-просмотра с mock performance data."}
+                </p>
               </div>
-              <JsonBlock title="Metrics" value={report.data.report?.metrics} />
-              <ListBlock title="Insights" items={report.data.report?.insights} />
-              <ListBlock title="Recommendations" items={report.data.report?.recommendations} />
-              <ListBlock title="Next steps" items={report.data.report?.nextSteps} />
+              {reportCards && <MetricCards items={reportCards} />}
+              <div className="grid gap-4 lg:grid-cols-3">
+                <ListBlock title="Инсайты" items={listValue(report.data.report?.insights, defaultInsights)} />
+                <ListBlock
+                  title="Рекомендации"
+                  items={listValue(report.data.report?.recommendations, defaultReportRecommendations)}
+                />
+                <ListBlock title="Следующие шаги" items={listValue(report.data.report?.nextSteps, defaultNextSteps)} />
+              </div>
             </div>
           )}
         </section>

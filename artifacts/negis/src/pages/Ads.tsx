@@ -1,6 +1,9 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { PageLayout } from '@/components/layout/PageLayout';
+import { Link } from 'wouter';
 import {
+  BarChart3,
+  BrainCircuit,
   RefreshCw, Copy, Check, X, ExternalLink, TrendingUp, TrendingDown,
   ArrowUpDown, Megaphone, ChevronDown, ChevronUp, Users, UserPlus, AlertCircle,
 } from 'lucide-react';
@@ -1816,17 +1819,165 @@ function LeadsImportTab({ clinicId }: { clinicId: string }) {
 /* ═══════════════════════════════════════════════════════════════
    MAIN ADS PAGE
 ═══════════════════════════════════════════════════════════════ */
+function DemoAdsPage() {
+  const [tab, setTab] = useState<'reports' | 'leads' | 'conversion' | 'settings'>('reports');
+  const metrics = [
+    { label: 'Расход', value: '300 USD', icon: Megaphone },
+    { label: 'Лиды', value: '24', icon: Users },
+    { label: 'Звонки', value: '18', icon: UserPlus },
+    { label: 'Записи', value: '7', icon: Check },
+    { label: 'CPL', value: '12.5 USD', icon: TrendingDown },
+    { label: 'Конверсия в запись', value: '29%', icon: TrendingUp },
+  ];
+  const tabs = [
+    { id: 'reports' as const, label: 'Отчёты' },
+    { id: 'leads' as const, label: 'Лиды из рекламы' },
+    { id: 'conversion' as const, label: 'Конверсия' },
+    { id: 'settings' as const, label: 'Настройки' },
+  ];
+
+  return (
+    <PageLayout>
+      <div className="space-y-6">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+          <div>
+            <h2 className="text-2xl font-bold text-[#0B1220]">Реклама</h2>
+            <p className="mt-1 text-sm text-[#64748B]">
+              Управление рекламой, лидами и AI-рекомендациями для клиники.
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {tabs.map(({ id, label }) => (
+              <button
+                key={id}
+                type="button"
+                onClick={() => setTab(id)}
+                className={`rounded-full px-4 py-2 text-sm font-bold transition-all ${
+                  tab === id ? 'neu-pressed-sm text-[#1A56DB]' : 'neu-sm text-[#64748B] hover:text-[#1E293B]'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <section className="neu-card p-6">
+          <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_280px]">
+            <div>
+              <div className="mb-4 flex items-center gap-3">
+                <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-[#E0F2FE] text-[#0369A1]">
+                  <BrainCircuit size={24} />
+                </div>
+                <div>
+                  <h3 className="text-xl font-bold text-[#0B1220]">ИИ таргетолог</h3>
+                  <p className="text-sm text-[#64748B]">Рекламный помощник для MVP-кампаний</p>
+                </div>
+              </div>
+              <p className="max-w-3xl text-sm leading-relaxed text-[#334155]">
+                AI анализирует креатив, подбирает аудиторию, рассчитывает бюджет и готовит отчёт по кампании.
+              </p>
+              <Link href="/targeting-agent">
+                <div className="neu-btn-primary mt-5 inline-flex cursor-pointer items-center gap-2 px-5 py-2.5 text-sm">
+                  <BrainCircuit size={16} />
+                  Открыть ИИ таргетолога
+                </div>
+              </Link>
+            </div>
+            <div className="neu-sm p-4">
+              <p className="text-xs font-bold uppercase tracking-[0.14em] text-[#64748B]">Демо-режим</p>
+              <p className="mt-2 text-sm leading-relaxed text-[#334155]">
+                Здесь показаны примерные рекламные показатели. Реальные Meta/TikTok данные будут подключены на следующем этапе.
+              </p>
+            </div>
+          </div>
+        </section>
+
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-6">
+          {metrics.map(({ label, value, icon: Icon }) => (
+            <div key={label} className="neu-card p-4">
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <span className="text-sm font-semibold text-[#64748B]">{label}</span>
+                <div className="rounded-xl bg-[#E0F2FE] p-2 text-[#0369A1]">
+                  <Icon size={18} />
+                </div>
+              </div>
+              <p className="text-2xl font-black text-[#0B1220]">{value}</p>
+            </div>
+          ))}
+        </div>
+
+        <section className="neu-card p-6">
+          {tab === 'reports' && (
+            <div className="grid gap-4 lg:grid-cols-3">
+              <div className="neu-sm p-4">
+                <p className="text-xs font-bold uppercase text-[#64748B]">Отчёт</p>
+                <p className="mt-2 text-sm text-[#334155]">Кампания готова к CRM-просмотру. Данные demo-периода показывают устойчивый поток лидов.</p>
+              </div>
+              <div className="neu-sm p-4">
+                <p className="text-xs font-bold uppercase text-[#64748B]">Лучший канал</p>
+                <p className="mt-2 text-sm text-[#334155]">Instagram Stories и Reels дают основной объём заявок.</p>
+              </div>
+              <div className="neu-sm p-4">
+                <p className="text-xs font-bold uppercase text-[#64748B]">Рекомендация</p>
+                <p className="mt-2 text-sm text-[#334155]">Запустить сплит-тест креатива и усилить быстрый обратный звонок.</p>
+              </div>
+            </div>
+          )}
+          {tab === 'leads' && (
+            <div className="space-y-3">
+              {['WhatsApp: бесплатная консультация', 'Instagram Lead Form: диагностика', 'Повторное касание: ретаргетинг'].map((lead, index) => (
+                <div key={lead} className="neu-sm flex items-center justify-between p-4">
+                  <div>
+                    <p className="font-bold text-[#0B1220]">{lead}</p>
+                    <p className="text-sm text-[#64748B]">Demo-лид #{index + 1}, статус: в обработке</p>
+                  </div>
+                  <span className="rounded-full bg-green-50 px-3 py-1 text-xs font-bold text-green-700">Новый</span>
+                </div>
+              ))}
+            </div>
+          )}
+          {tab === 'conversion' && (
+            <div className="grid gap-4 md:grid-cols-3">
+              {[
+                ['Лид → звонок', '75%'],
+                ['Звонок → запись', '39%'],
+                ['Лид → запись', '29%'],
+              ].map(([label, value]) => (
+                <div key={label} className="neu-sm p-4">
+                  <p className="text-sm font-semibold text-[#64748B]">{label}</p>
+                  <p className="mt-2 text-3xl font-black text-[#1A56DB]">{value}</p>
+                </div>
+              ))}
+            </div>
+          )}
+          {tab === 'settings' && (
+            <div className="neu-sm p-4">
+              <p className="font-bold text-[#0B1220]">Настройки будут подключены позже</p>
+              <p className="mt-2 text-sm leading-relaxed text-[#64748B]">
+                В MVP Meta Marketing API не подключается. Сейчас можно проверить сценарий анализа, черновика кампании и отчёта через ИИ таргетолога.
+              </p>
+            </div>
+          )}
+        </section>
+      </div>
+    </PageLayout>
+  );
+}
+
 export default function Ads() {
-  const { clinicId } = useAuth();
+  const { clinicId, isDemoMode } = useAuth();
   const [tab, setTab] = useState<'reports' | 'leads' | 'conversion' | 'settings'>('reports');
   const [usdToKzt, setUsdToKzt] = useState(450);
 
   useEffect(() => {
+    if (isDemoMode) return;
     if (!clinicId) return;
     supabase.from('clinics').select('usd_to_kzt').eq('id', clinicId).single()
       .then(({ data }) => { if (data?.usd_to_kzt) setUsdToKzt(data.usd_to_kzt); });
-  }, [clinicId]);
+  }, [clinicId, isDemoMode]);
 
+  if (isDemoMode) return <DemoAdsPage />;
   if (!clinicId) return null;
 
   return (

@@ -138,8 +138,8 @@ function Router() {
       <Route path="/market" component={() => <ProtectedPage component={Marketplace} permission="marketplace" demoFallbackTitle="Маркет" />} />
       <Route path="/agent" component={Agent} />
       <Route path="/admin" component={() => <ProtectedPage component={Admin} permission="admin" demoFallbackTitle="Админ" />} />
-      <Route path="/ads" component={() => <ProtectedPage component={Ads} permission="ads" demoFallbackTitle="Реклама" />} />
-      <Route path="/advertising" component={() => <ProtectedPage component={Ads} permission="ads" demoFallbackTitle="Реклама" />} />
+      <Route path="/ads" component={() => <ProtectedPage component={Ads} permission="ads" />} />
+      <Route path="/advertising" component={() => <ProtectedPage component={Ads} permission="ads" />} />
       <Route path="/ads/callback" component={AdsCallback} />
       <Route path="/reports" component={() => <ProtectedPage component={() => <DemoPlaceholder title="Отчёты" />} permission="ads" />} />
       <Route path="/profile" component={() => <ProtectedPage component={() => <DemoPlaceholder title="Профиль" />} permission="dashboard" />} />
