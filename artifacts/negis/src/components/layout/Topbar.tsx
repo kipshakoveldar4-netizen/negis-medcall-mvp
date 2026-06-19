@@ -8,6 +8,15 @@ import { agentDisplayName, loadAgentRoleMaps, type AgentDisplayInfo } from '@/li
 import { TopNav } from './TopNav';
 
 const PAGE_LABELS: Record<string, string> = {
+  '/targeting-agent': 'ИИ таргетолог',
+  '/appointments': 'Записи',
+  '/calls': 'Звонки',
+  '/leads': 'Лиды',
+  '/clients': 'Клиенты',
+  '/market': 'Маркет',
+  '/advertising': 'Реклама',
+  '/reports': 'Отчёты',
+  '/profile': 'Профиль',
   '/dashboard': 'Дашборд',
   '/booking': 'Запись',
   '/reception': 'Ресепшн',
@@ -65,7 +74,7 @@ function writeStoredIds(key: string, ids: Set<string>) {
 
 export function Topbar() {
   const [location, setLocation] = useLocation();
-  const { clinicId } = useAuth();
+  const { clinicId, isDemoMode } = useAuth();
   const [notifs, setNotifs] = useState<Notif[]>([]);
   const [open, setOpen] = useState(false);
   const agentsRef = useRef<Record<string, string>>({});
@@ -96,6 +105,10 @@ export function Topbar() {
   }), []);
 
   useEffect(() => {
+    if (isDemoMode) {
+      setNotifs([]);
+      return;
+    }
     if (!clinicId) return;
     readIdsRef.current = readStoredIds(readKey(clinicId));
     deletedIdsRef.current = readStoredIds(deletedKey(clinicId));
@@ -137,7 +150,7 @@ export function Topbar() {
       .subscribe();
 
     return () => { supabase.removeChannel(channel); };
-  }, [clinicId, buildNotif]);
+  }, [clinicId, isDemoMode, buildNotif]);
 
   const markRead = (id: string) => {
     readIdsRef.current.add(id);

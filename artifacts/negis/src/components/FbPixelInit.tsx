@@ -4,9 +4,10 @@ import { supabase } from '@/lib/supabase';
 import { initPixel } from '@/lib/fbpixel';
 
 export default function FbPixelInit() {
-  const { clinicId } = useAuth();
+  const { clinicId, isDemoMode } = useAuth();
 
   useEffect(() => {
+    if (isDemoMode) return;
     if (!clinicId) return;
     supabase
       .from('clinics')
@@ -16,7 +17,7 @@ export default function FbPixelInit() {
       .then(({ data }) => {
         if (data?.fb_pixel_id) initPixel(data.fb_pixel_id);
       });
-  }, [clinicId]);
+  }, [clinicId, isDemoMode]);
 
   return null;
 }

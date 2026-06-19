@@ -6,7 +6,7 @@ import { supabase } from '@/lib/supabase';
 import { toast } from 'sonner';
 
 const NAV = [
-  { href: '/targeting-agent', icon: BrainCircuit, label: 'Targeting Agent', roles: ['owner', 'manager'] },
+  { href: '/targeting-agent', icon: BrainCircuit, label: 'ИИ таргетолог', roles: ['owner', 'manager'] },
   { href: '/dashboard', icon: BarChart2,    label: 'Дашборд',  roles: ['owner', 'manager'] },
   { href: '/booking',   icon: CalendarDays, label: 'Запись',   roles: ['owner', 'manager', 'agent', 'booking_agent'] },
   { href: '/reception', icon: Building2,    label: 'Ресепшн',  roles: ['owner', 'manager', 'receptionist', 'booking_agent'] },

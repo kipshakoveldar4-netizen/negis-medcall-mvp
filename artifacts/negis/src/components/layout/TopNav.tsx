@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type CSSProperties } from 'react';
 import { Link, useLocation } from 'wouter';
 import {
   BarChart2,
+  BrainCircuit,
   CalendarDays,
   Building2,
   Briefcase,
@@ -24,6 +25,7 @@ import { toast } from 'sonner';
 import { agentInitials, type AgentDisplayInfo } from '@/lib/agentDisplay';
 
 const NAV = [
+  { href: '/targeting-agent', icon: BrainCircuit, label: 'ИИ таргетолог', permission: 'ads' },
   { href: '/dashboard', icon: BarChart2, label: 'Дашборд', permission: 'dashboard' },
   { href: '/booking', icon: CalendarDays, label: 'Запись', permission: 'booking' },
   { href: '/reception', icon: Building2, label: 'Ресепшн', permission: 'reception' },
@@ -86,7 +88,7 @@ async function compressAvatarFile(file: File) {
 
 export function TopNav() {
   const [location] = useLocation();
-  const { signOut, user, userRole, rolePermissions, clinicId } = useAuth();
+  const { signOut, user, userRole, rolePermissions, clinicId, isDemoMode } = useAuth();
   const profileButtonRef = useRef<HTMLButtonElement | null>(null);
   const [showProfile, setShowProfile] = useState(false);
   const [profilePanelPosition, setProfilePanelPosition] = useState({ left: 24, top: 128 });
@@ -105,7 +107,7 @@ export function TopNav() {
   const avatarBg = avatarColor || myAgent?.avatar_color || user?.user_metadata?.avatar_color || '#EFF6FF';
 
   useEffect(() => {
-    if (!clinicId || !user?.id) return;
+    if (isDemoMode || !clinicId || !user?.id) return;
     const loadProfile = async () => {
       const primary = await supabase
         .from('agents')
@@ -131,7 +133,7 @@ export function TopNav() {
       setAvatarColor(agent.avatar_color || user.user_metadata?.avatar_color || '#EFF6FF');
     };
     loadProfile();
-  }, [clinicId, user?.id]);
+  }, [clinicId, isDemoMode, user?.id]);
 
   const openProfile = () => {
     const rect = profileButtonRef.current?.getBoundingClientRect();

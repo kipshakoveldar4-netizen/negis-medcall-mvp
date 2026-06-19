@@ -37,26 +37,29 @@ export default function Dashboard() {
 function DemoDashboard() {
   const { clinicId } = useAuth();
   const metrics = [
-    { label: 'Leads today', value: '24', icon: Users, color: 'text-[#1A56DB]', bg: 'bg-blue-500/10' },
-    { label: 'Calls', value: '18', icon: PhoneCall, color: 'text-[#0F766E]', bg: 'bg-teal-500/10' },
-    { label: 'Appointments', value: '7', icon: CalendarCheck, color: 'text-[#16A34A]', bg: 'bg-green-500/10' },
-    { label: 'Ad spend', value: '300 USD', icon: DollarSign, color: 'text-[#F59E0B]', bg: 'bg-yellow-500/10' },
+    { label: 'Лиды сегодня', value: '24', icon: Users, color: 'text-[#1A56DB]', bg: 'bg-blue-500/10' },
+    { label: 'Звонки', value: '18', icon: PhoneCall, color: 'text-[#0F766E]', bg: 'bg-teal-500/10' },
+    { label: 'Записи', value: '7', icon: CalendarCheck, color: 'text-[#16A34A]', bg: 'bg-green-500/10' },
+    { label: 'Расход рекламы', value: '300 USD', icon: DollarSign, color: 'text-[#F59E0B]', bg: 'bg-yellow-500/10' },
   ];
   const sections = [
-    { href: '/targeting-agent', label: 'Targeting Agent', value: 'Creative score 86', icon: BrainCircuit },
-    { href: '/sales', label: 'Leads', value: '24 active leads', icon: Users },
-    { href: '/reception', label: 'Calls', value: '18 calls queued', icon: PhoneCall },
-    { href: '/booking', label: 'Appointments', value: '7 visits planned', icon: CalendarCheck },
-    { href: '/ads', label: 'Reports', value: 'Demo campaign report', icon: BarChart3 },
+    { href: '/targeting-agent', label: 'ИИ таргетолог', value: 'Оценка креатива 86', icon: BrainCircuit },
+    { href: '/leads', label: 'Лиды', value: '24 активных лида', icon: Users },
+    { href: '/calls', label: 'Звонки', value: '18 звонков в очереди', icon: PhoneCall },
+    { href: '/appointments', label: 'Записи', value: '7 запланированных визитов', icon: CalendarCheck },
+    { href: '/reports', label: 'Отчёты', value: 'Демо-отчёт кампании', icon: BarChart3 },
   ];
 
   return (
     <PageLayout>
       <div className="space-y-7">
         <div className="flex flex-col gap-2">
-          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-[#64748B]">Demo workspace</p>
+          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-[#64748B]">Демо-режим</p>
           <h1 className="text-3xl font-bold text-[#0F172A]">Negis CRM</h1>
           <p className="text-sm text-[#64748B]">{clinicId || 'demo-workspace'}</p>
+          <p className="text-sm text-[#64748B]">
+            Демо-режим: данные сохранены локально, подключение Supabase будет в production-версии.
+          </p>
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-5">
@@ -81,7 +84,7 @@ function DemoDashboard() {
                   <div className="p-2 rounded-xl bg-[#E0F2FE] text-[#0369A1]">
                     <Icon size={20} />
                   </div>
-                  <span className="text-xs font-semibold text-[#94A3B8]">Open</span>
+                  <span className="text-xs font-semibold text-[#94A3B8]">Открыть</span>
                 </div>
                 <h2 className="text-base font-bold text-[#0F172A]">{label}</h2>
                 <p className="text-sm text-[#64748B] mt-2">{value}</p>
@@ -92,12 +95,12 @@ function DemoDashboard() {
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           <div className="neu-card lg:col-span-2">
-            <h2 className="text-lg font-bold text-[#0F172A] mb-5">Today pipeline</h2>
+            <h2 className="text-lg font-bold text-[#0F172A] mb-5">Воронка на сегодня</h2>
             <div className="space-y-3">
               {[
-                ['New leads', '24', 'bg-[#1A56DB]'],
-                ['Qualified calls', '14', 'bg-[#0F766E]'],
-                ['Booked visits', '7', 'bg-[#16A34A]'],
+                ['Новые лиды', '24', 'bg-[#1A56DB]'],
+                ['Квалифицированные звонки', '14', 'bg-[#0F766E]'],
+                ['Записанные визиты', '7', 'bg-[#16A34A]'],
               ].map(([label, value, color]) => (
                 <div key={label} className="flex items-center justify-between neu-sm p-3 px-4">
                   <div className="flex items-center gap-3">
@@ -111,20 +114,20 @@ function DemoDashboard() {
           </div>
 
           <div className="neu-card">
-            <h2 className="text-lg font-bold text-[#0F172A] mb-5">Campaign snapshot</h2>
+            <h2 className="text-lg font-bold text-[#0F172A] mb-5">Срез кампании</h2>
             <div className="space-y-4">
               <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#94A3B8]">Status</p>
-                <p className="text-sm font-bold text-[#0F172A] mt-1">Pending launch</p>
+                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#94A3B8]">Статус</p>
+                <p className="text-sm font-bold text-[#0F172A] mt-1">Ожидает запуска</p>
               </div>
               <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#94A3B8]">Creative score</p>
+                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#94A3B8]">Оценка креатива</p>
                 <p className="text-3xl font-bold text-[#1A56DB] mt-1">86</p>
               </div>
               <Link href="/targeting-agent">
                 <div className="neu-btn-primary inline-flex items-center gap-2 cursor-pointer">
                   <BrainCircuit size={16} />
-                  Targeting Agent
+                  ИИ таргетолог
                 </div>
               </Link>
             </div>

@@ -4,6 +4,8 @@ type ApiSuccess<TData = unknown> = {
   data: TData;
 };
 
+export {};
+
 type ApiResponse<TData = unknown> =
   | ApiSuccess<TData>
   | {
@@ -68,7 +70,7 @@ async function main() {
   console.log(`launch: ${launch.data.status} ${launch.data.campaignId}`);
 
   const report = await request<{ campaignId: string }>(
-    `/api/targeting/reports/${encodeURIComponent(launch.data.campaignId)}`,
+    `/api/targeting/report?campaignId=${encodeURIComponent(launch.data.campaignId)}`,
   );
   console.log(`report: ${report.data.campaignId}`);
 }

@@ -21,6 +21,7 @@ import Admin from "@/pages/Admin";
 import Ads from "@/pages/Ads";
 import AdsCallback from "@/pages/AdsCallback";
 import TargetingAgent from "@/pages/TargetingAgent";
+import DemoPlaceholder from "@/pages/DemoPlaceholder";
 import Privacy from "@/pages/Privacy";
 import Terms from "@/pages/Terms";
 import DataDeletion from "@/pages/DataDeletion";
@@ -33,13 +34,21 @@ const queryClient = new QueryClient();
 const ROUTE_PERMISSIONS: Record<string, string> = {
   '/dashboard': 'dashboard',
   '/booking': 'booking',
+  '/appointments': 'booking',
   '/reception': 'reception',
+  '/calls': 'reception',
   '/sales': 'crm',
+  '/leads': 'crm',
+  '/clients': 'crm',
   '/tasks': 'tasks',
   '/chat': 'chat',
   '/marketplace': 'marketplace',
+  '/market': 'marketplace',
   '/admin': 'admin',
   '/ads': 'ads',
+  '/advertising': 'ads',
+  '/reports': 'ads',
+  '/profile': 'dashboard',
   '/targeting-agent': 'ads',
 };
 
@@ -86,8 +95,16 @@ function ImpersonationBanner() {
   );
 }
 
-function ProtectedPage({ component: Component, permission }: { component: ComponentType; permission: string }) {
-  const { isLoading, userRole, rolePermissions } = useAuth();
+function ProtectedPage({
+  component: Component,
+  permission,
+  demoFallbackTitle,
+}: {
+  component: ComponentType;
+  permission: string;
+  demoFallbackTitle?: string;
+}) {
+  const { isLoading, userRole, rolePermissions, isDemoMode } = useAuth();
   const [, setLocation] = useLocation();
   const allowed = userRole === 'owner' || userRole === 'manager' || !!rolePermissions[permission];
 
@@ -96,6 +113,7 @@ function ProtectedPage({ component: Component, permission }: { component: Compon
   }, [allowed, isLoading, rolePermissions, setLocation]);
 
   if (isLoading || !allowed) return null;
+  if (isDemoMode && demoFallbackTitle) return <DemoPlaceholder title={demoFallbackTitle} />;
   return <Component />;
 }
 
@@ -107,16 +125,24 @@ function Router() {
       <Route path="/register" component={Register} />
       <Route path="/onboarding" component={Onboarding} />
       <Route path="/dashboard" component={() => <ProtectedPage component={Dashboard} permission="dashboard" />} />
-      <Route path="/booking" component={() => <ProtectedPage component={Booking} permission="booking" />} />
-      <Route path="/reception" component={() => <ProtectedPage component={Reception} permission="reception" />} />
-      <Route path="/sales" component={() => <ProtectedPage component={Sales} permission="crm" />} />
-      <Route path="/tasks" component={() => <ProtectedPage component={Tasks} permission="tasks" />} />
-      <Route path="/chat" component={() => <ProtectedPage component={Chat} permission="chat" />} />
-      <Route path="/marketplace" component={() => <ProtectedPage component={Marketplace} permission="marketplace" />} />
+      <Route path="/booking" component={() => <ProtectedPage component={Booking} permission="booking" demoFallbackTitle="Записи" />} />
+      <Route path="/appointments" component={() => <ProtectedPage component={Booking} permission="booking" demoFallbackTitle="Записи" />} />
+      <Route path="/reception" component={() => <ProtectedPage component={Reception} permission="reception" demoFallbackTitle="Ресепшн" />} />
+      <Route path="/calls" component={() => <ProtectedPage component={Reception} permission="reception" demoFallbackTitle="Звонки" />} />
+      <Route path="/sales" component={() => <ProtectedPage component={Sales} permission="crm" demoFallbackTitle="Клиенты" />} />
+      <Route path="/leads" component={() => <ProtectedPage component={Sales} permission="crm" demoFallbackTitle="Лиды" />} />
+      <Route path="/clients" component={() => <ProtectedPage component={Sales} permission="crm" demoFallbackTitle="Клиенты" />} />
+      <Route path="/tasks" component={() => <ProtectedPage component={Tasks} permission="tasks" demoFallbackTitle="Задачи" />} />
+      <Route path="/chat" component={() => <ProtectedPage component={Chat} permission="chat" demoFallbackTitle="Чат" />} />
+      <Route path="/marketplace" component={() => <ProtectedPage component={Marketplace} permission="marketplace" demoFallbackTitle="Маркет" />} />
+      <Route path="/market" component={() => <ProtectedPage component={Marketplace} permission="marketplace" demoFallbackTitle="Маркет" />} />
       <Route path="/agent" component={Agent} />
-      <Route path="/admin" component={() => <ProtectedPage component={Admin} permission="admin" />} />
-      <Route path="/ads" component={() => <ProtectedPage component={Ads} permission="ads" />} />
+      <Route path="/admin" component={() => <ProtectedPage component={Admin} permission="admin" demoFallbackTitle="Админ" />} />
+      <Route path="/ads" component={() => <ProtectedPage component={Ads} permission="ads" demoFallbackTitle="Реклама" />} />
+      <Route path="/advertising" component={() => <ProtectedPage component={Ads} permission="ads" demoFallbackTitle="Реклама" />} />
       <Route path="/ads/callback" component={AdsCallback} />
+      <Route path="/reports" component={() => <ProtectedPage component={() => <DemoPlaceholder title="Отчёты" />} permission="ads" />} />
+      <Route path="/profile" component={() => <ProtectedPage component={() => <DemoPlaceholder title="Профиль" />} permission="dashboard" />} />
       <Route path="/targeting-agent" component={TargetingAgent} />
       <Route path="/privacy" component={Privacy} />
       <Route path="/terms" component={Terms} />

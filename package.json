@@ -9,6 +9,7 @@
     "build:all": "node scripts/run-pnpm.cjs run typecheck && node scripts/run-pnpm.cjs -r --if-present run build",
     "typecheck:libs": "tsc --build",
     "typecheck": "node scripts/run-pnpm.cjs run typecheck:libs && node scripts/run-pnpm.cjs -r --filter \"./artifacts/**\" --filter \"./scripts\" --if-present run typecheck",
+    "test:routes": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:routes",
     "test:targeting": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:targeting"
   },
   "dependencies": {
