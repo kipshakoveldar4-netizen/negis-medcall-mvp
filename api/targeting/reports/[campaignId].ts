@@ -1,5 +1,6 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { targetingAgentClient } from "../../../lib/targeting-agent/client";
+import { persistTargetingReportIfAvailable } from "../../../lib/targeting-agent/persistence";
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method !== "GET") {
@@ -24,5 +25,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   const result = await targetingAgentClient.getCampaignReport(campaignId);
+  await persistTargetingReportIfAvailable(campaignId, result.body);
+
   return res.status(result.status).json(result.body);
 }

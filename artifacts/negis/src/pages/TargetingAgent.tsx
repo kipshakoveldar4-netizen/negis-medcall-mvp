@@ -217,6 +217,20 @@ function formatNumber(value: number): string {
   return new Intl.NumberFormat("ru-RU").format(value);
 }
 
+function readDemoWorkspaceId(): string | undefined {
+  if (typeof window === "undefined") return undefined;
+
+  try {
+    const rawWorkspace = window.localStorage.getItem("negis_demo_workspace");
+    if (!rawWorkspace) return undefined;
+
+    const workspace = JSON.parse(rawWorkspace) as { id?: unknown };
+    return typeof workspace.id === "string" && workspace.id.trim() ? workspace.id.trim() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function Field({
   label,
   value,
@@ -363,6 +377,7 @@ export default function TargetingAgent() {
           campaignName: launch.campaignName,
           budget: Number(launch.budget),
           objective: launch.objective,
+          workspaceId: readDemoWorkspaceId(),
           analysis: analysis?.data,
         }),
       });

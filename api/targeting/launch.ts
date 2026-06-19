@@ -4,6 +4,7 @@ import {
   validateRequiredFields,
   type LaunchCampaignPayload,
 } from "../../lib/targeting-agent/client";
+import { persistTargetingCampaignIfAvailable } from "../../lib/targeting-agent/persistence";
 
 const requiredFields = ["clinicName", "campaignName", "city", "budget", "objective"];
 
@@ -25,6 +26,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     });
   }
 
-  const result = await targetingAgentClient.launchCampaign(req.body as LaunchCampaignPayload);
+  const payload = req.body as LaunchCampaignPayload;
+  const result = await targetingAgentClient.launchCampaign(payload);
+  await persistTargetingCampaignIfAvailable(payload, result.body);
+
   return res.status(result.status).json(result.body);
 }

@@ -1,4 +1,5 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
+import { persistWorkspaceIfAvailable } from "../../lib/targeting-agent/persistence";
 
 type RegisterBody = {
   name?: string;
@@ -63,12 +64,19 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return sendJson(res, 400, errorBody("Validation error", details));
   }
 
+  const persistence = await persistWorkspaceIfAvailable({
+    workspaceName,
+    ownerEmail: email,
+  });
+
   return sendJson(res, 200, {
     success: true,
     mode: "demo",
+    ...(persistence.warning ? { warning: persistence.warning } : {}),
     data: {
-      workspaceId: "demo-workspace",
+      workspaceId: persistence.workspaceId,
       workspaceName,
+      persistenceMode: persistence.persistenceMode,
       user: {
         id: "demo-user",
         name,
