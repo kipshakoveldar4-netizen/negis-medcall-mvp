@@ -58,7 +58,18 @@ type ApiResponse<TData> =
       success: false;
       error: string;
       details?: string[];
+      telegramDescription?: string;
+      telegramErrorCode?: number;
+      status?: number;
+      hint?: string;
     };
+
+type TelegramResponse = {
+  sent: boolean;
+  packageText: string;
+  test?: boolean;
+  parts?: number;
+};
 
 const STORAGE_KEY = "negis_content_studio_videos";
 
@@ -154,6 +165,15 @@ function combinePrompt(result: PromptPackage) {
     .join("\n\n");
 }
 
+function telegramErrorMessage<TData>(body: ApiResponse<TData> | null, fallback: string) {
+  if (body?.success === false) {
+    const description = body.details?.filter(Boolean).join(", ") || body.telegramDescription || body.error;
+    return `${fallback}: ${description}${body.hint ? `. ${body.hint}` : ""}`;
+  }
+
+  return fallback;
+}
+
 function buildTelegramPackage(video: ContentVideo) {
   return [
     `ИИ студия контента: ${video.title}`,
@@ -235,7 +255,7 @@ export default function ContentStudio() {
   const [form, setForm] = useState(initialVideo);
   const [videos, setVideos] = useState<ContentVideo[]>([]);
   const [activeId, setActiveId] = useState<string>("");
-  const [loading, setLoading] = useState<"video" | "script" | "avatar" | "tapnow" | "telegram" | null>(null);
+  const [loading, setLoading] = useState<"video" | "script" | "avatar" | "tapnow" | "telegram" | "telegram-test" | null>(null);
   const [notice, setNotice] = useState("");
 
   useEffect(() => {
@@ -388,6 +408,41 @@ export default function ContentStudio() {
     }
   };
 
+  const testTelegram = async () => {
+    setLoading("telegram-test");
+    setNotice("");
+
+    try {
+      const response = await fetch(apiUrl("/api/content-studio/send-telegram"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ test: true }),
+      });
+      const body = await safeJson<TelegramResponse>(response);
+      if (!response.ok || body?.success !== true) {
+        const message = telegramErrorMessage(body, "Не удалось проверить Telegram");
+        setNotice(message);
+        toast.error(message);
+        return;
+      }
+
+      if (body.data.sent && body.mode === "telegram") {
+        setNotice("Telegram подключён");
+        toast.success("Telegram подключён");
+      } else {
+        const message = body.warning || "Telegram не подключён, пакет готов для копирования.";
+        setNotice(message);
+        toast.warning(message);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Не удалось проверить Telegram";
+      setNotice(message);
+      toast.error(message);
+    } finally {
+      setLoading(null);
+    }
+  };
+
   const sendTelegram = async () => {
     if (!activeVideo) {
       toast.error("Сначала создайте идею ролика");
@@ -403,16 +458,26 @@ export default function ContentStudio() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(activeVideo),
       });
-      const body = await safeJson<{ sent: boolean; packageText: string }>(response);
+      const body = await safeJson<TelegramResponse>(response);
       if (!response.ok || body?.success !== true) {
-        throw new Error(body?.success === false ? body.error : "Не удалось отправить в Telegram");
+        const message = telegramErrorMessage(body, "Не удалось отправить в Telegram");
+        setNotice(message);
+        toast.error(message);
+        return;
       }
 
       updateCurrentVideo({ status: "telegram_ready" });
-      setNotice(body.warning || (body.data.sent ? "Пакет отправлен в Telegram." : "Telegram не подключён, но пакет готов для копирования."));
+      setNotice(
+        body.warning ||
+          (body.data.sent
+            ? `Пакет отправлен в Telegram${body.data.parts && body.data.parts > 1 ? ` частями: ${body.data.parts}` : ""}.`
+            : "Telegram не подключён, но пакет готов для копирования."),
+      );
       toast.success(body.data.sent ? "Отправлено в Telegram" : "Пакет готов для копирования");
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Ошибка Telegram");
+      const message = error instanceof Error ? error.message : "Ошибка Telegram";
+      setNotice(message);
+      toast.error(message);
     } finally {
       setLoading(null);
     }
@@ -583,6 +648,10 @@ export default function ContentStudio() {
               <button type="button" className="neu-btn-primary flex items-center justify-center gap-2 px-5 py-2.5 text-sm" onClick={sendTelegram} disabled={loading === "telegram"}>
                 <Send size={15} />
                 {loading === "telegram" ? "Отправляем..." : "Отправить в Telegram"}
+              </button>
+              <button type="button" className="neu-btn flex items-center justify-center gap-2 px-5 py-2.5 text-sm" onClick={testTelegram} disabled={loading === "telegram-test"}>
+                <Check size={15} />
+                {loading === "telegram-test" ? "Проверяем..." : "Проверить Telegram"}
               </button>
               <button type="button" className="neu-btn flex items-center justify-center gap-2 px-5 py-2.5 text-sm" onClick={() => copyText(packageText, "Content package")}>
                 <Copy size={15} />

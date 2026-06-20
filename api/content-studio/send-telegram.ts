@@ -18,6 +18,7 @@ type TelegramFetch = (
 
 type TelegramApiBody = {
   ok?: boolean;
+  error_code?: number;
   description?: string;
   raw?: string;
 };
@@ -25,6 +26,68 @@ type TelegramApiBody = {
 function sendJson(res: VercelResponse, status: number, payload: unknown) {
   res.status(status).setHeader("Content-Type", "application/json; charset=utf-8");
   return res.json(payload);
+}
+
+function splitLongText(text: string, maxLength: number): string[] {
+  const chunks: string[] = [];
+  for (let index = 0; index < text.length; index += maxLength) {
+    chunks.push(text.slice(index, index + maxLength));
+  }
+  return chunks;
+}
+
+function splitTelegramMessage(text: string, maxLength = 3500): string[] {
+  const source = text.trim() || "Пакет Content Studio пуст.";
+  const blocks = source.split(/\n{2,}/);
+  const chunks: string[] = [];
+  let current = "";
+
+  for (const block of blocks) {
+    const normalizedBlock = block.trim();
+    if (!normalizedBlock) continue;
+
+    if (normalizedBlock.length > maxLength) {
+      if (current) {
+        chunks.push(current);
+        current = "";
+      }
+      chunks.push(...splitLongText(normalizedBlock, maxLength));
+      continue;
+    }
+
+    const next = current ? `${current}\n\n${normalizedBlock}` : normalizedBlock;
+    if (next.length > maxLength) {
+      if (current) chunks.push(current);
+      current = normalizedBlock;
+    } else {
+      current = next;
+    }
+  }
+
+  if (current) chunks.push(current);
+  return chunks.length > 0 ? chunks : [source.slice(0, maxLength)];
+}
+
+function telegramHint(description: string, status: number): string {
+  const lower = description.toLowerCase();
+
+  if (status === 401 || lower.includes("unauthorized")) {
+    return "Проверьте TELEGRAM_BOT_TOKEN.";
+  }
+
+  if (lower.includes("chat not found")) {
+    return "Проверьте TELEGRAM_CHAT_ID и напишите /start боту.";
+  }
+
+  if (lower.includes("bot was blocked")) {
+    return "Разблокируйте бота и напишите /start.";
+  }
+
+  if (lower.includes("message is too long")) {
+    return "Сообщение слишком длинное. Система попробует отправить пакет частями.";
+  }
+
+  return "Проверьте TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID и что пользователь написал /start боту.";
 }
 
 async function readTelegramBody(response: TelegramFetchResponse): Promise<TelegramApiBody> {
@@ -41,6 +104,43 @@ async function readTelegramBody(response: TelegramFetchResponse): Promise<Telegr
   }
 }
 
+async function sendTelegramMessage(input: {
+  safeFetch: TelegramFetch;
+  token: string;
+  chatId: string;
+  text: string;
+}) {
+  const response = await input.safeFetch(`https://api.telegram.org/bot${input.token}/sendMessage`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      chat_id: input.chatId,
+      text: input.text,
+    }),
+  });
+
+  const body = await readTelegramBody(response);
+  const description =
+    body.description || (body.raw ? "Telegram returned a non-JSON response body." : `Telegram API error: HTTP ${response.status}`);
+
+  if (!response.ok || body.ok === false) {
+    return {
+      success: false as const,
+      status: response.status,
+      telegramDescription: description,
+      telegramErrorCode: body.error_code,
+      hint: telegramHint(description, response.status),
+    };
+  }
+
+  return {
+    success: true as const,
+    status: response.status,
+  };
+}
+
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method !== "POST") {
     return sendJson(res, 405, {
@@ -51,6 +151,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   const payload = (req.body || {}) as Record<string, unknown>;
+  const isTest = payload.test === true;
   const packageText = telegramPackageText({
     title: typeof payload.title === "string" ? payload.title : undefined,
     hook: typeof payload.hook === "string" ? payload.hook : undefined,
@@ -65,6 +166,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   const token = process.env.TELEGRAM_BOT_TOKEN?.trim();
   const chatId = (typeof payload.chatId === "string" ? payload.chatId : process.env.TELEGRAM_CHAT_ID)?.trim();
+  const messageText = isTest ? "✅ Telegram подключён к Negis Content Studio" : packageText;
 
   if (!token || !chatId) {
     if (typeof payload.videoId === "string") {
@@ -74,38 +176,50 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return sendJson(res, 200, {
       success: true,
       mode: "demo",
-      warning: "Telegram не подключён, но пакет готов для копирования.",
+      warning: "Telegram не подключён, пакет готов для копирования.",
       data: {
         sent: false,
-        packageText,
+        packageText: messageText,
+        test: isTest,
       },
     });
   }
 
   try {
     const safeFetch = fetch as unknown as TelegramFetch;
-    const response = await safeFetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text: packageText,
-      }),
-    });
+    const chunks = splitTelegramMessage(messageText);
 
-    const body = await readTelegramBody(response);
-    if (!response.ok || body.ok === false) {
-      const invalidJsonNote = body.raw ? " Telegram returned a non-JSON response body." : "";
-      return sendJson(res, 502, {
-        success: false,
-        error: "Telegram API request failed",
-        details: [body.description || `Telegram API error: HTTP ${response.status}.${invalidJsonNote}`],
+    for (let index = 0; index < chunks.length; index += 1) {
+      const chunk = chunks[index];
+      const text =
+        chunks.length > 1 ? `SAAF Content Studio — пакет ролика, часть ${index + 1}/${chunks.length}\n\n${chunk}` : chunk;
+      const result = await sendTelegramMessage({
+        safeFetch,
+        token,
+        chatId,
+        text,
       });
+
+      if (!result.success) {
+        return sendJson(res, 502, {
+          success: false,
+          error: "Telegram API request failed",
+          details: [
+            chunks.length > 1
+              ? `Part ${index + 1}/${chunks.length}: ${result.telegramDescription}`
+              : result.telegramDescription,
+          ],
+          telegramDescription: result.telegramDescription,
+          telegramErrorCode: result.telegramErrorCode,
+          status: result.status,
+          part: chunks.length > 1 ? index + 1 : undefined,
+          totalParts: chunks.length,
+          hint: result.hint,
+        });
+      }
     }
 
-    if (typeof payload.videoId === "string") {
+    if (!isTest && typeof payload.videoId === "string") {
       updateContentVideo(payload.videoId, { status: "telegram_ready" });
     }
 
@@ -114,14 +228,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       mode: "telegram",
       data: {
         sent: true,
-        packageText,
+        packageText: messageText,
+        test: isTest,
+        parts: chunks.length,
       },
     });
   } catch (error) {
-    return sendJson(res, 500, {
+    return sendJson(res, 502, {
       success: false,
-      error: "Telegram error",
+      error: "Telegram network error",
       details: [error instanceof Error ? error.message : "Failed to send Telegram message"],
+      hint: "Проверьте доступность Telegram API, TELEGRAM_BOT_TOKEN и TELEGRAM_CHAT_ID.",
     });
   }
 }
