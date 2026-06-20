@@ -1,9 +1,44 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { telegramPackageText, updateContentVideo } from "../../lib/content-studio/core";
 
+type TelegramFetchResponse = {
+  ok: boolean;
+  status: number;
+  text: () => Promise<string>;
+};
+
+type TelegramFetch = (
+  input: string | URL,
+  init?: {
+    method?: string;
+    headers?: Record<string, string>;
+    body?: string;
+  },
+) => Promise<TelegramFetchResponse>;
+
+type TelegramApiBody = {
+  ok?: boolean;
+  description?: string;
+  raw?: string;
+};
+
 function sendJson(res: VercelResponse, status: number, payload: unknown) {
   res.status(status).setHeader("Content-Type", "application/json; charset=utf-8");
   return res.json(payload);
+}
+
+async function readTelegramBody(response: TelegramFetchResponse): Promise<TelegramApiBody> {
+  const rawText = await response.text();
+  const trimmed = rawText.trim();
+
+  if (!trimmed) return {};
+
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    return parsed && typeof parsed === "object" ? (parsed as TelegramApiBody) : { raw: trimmed };
+  } catch {
+    return { raw: trimmed };
+  }
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
@@ -48,7 +83,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   try {
-    const response = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+    const safeFetch = fetch as unknown as TelegramFetch;
+    const response = await safeFetch(`https://api.telegram.org/bot${token}/sendMessage`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -59,9 +95,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       }),
     });
 
-    const body = (await response.json()) as { ok?: boolean; description?: string };
+    const body = await readTelegramBody(response);
     if (!response.ok || body.ok === false) {
-      throw new Error(body.description || `Telegram API error: HTTP ${response.status}`);
+      const invalidJsonNote = body.raw ? " Telegram returned a non-JSON response body." : "";
+      return sendJson(res, 502, {
+        success: false,
+        error: "Telegram API request failed",
+        details: [body.description || `Telegram API error: HTTP ${response.status}.${invalidJsonNote}`],
+      });
     }
 
     if (typeof payload.videoId === "string") {
