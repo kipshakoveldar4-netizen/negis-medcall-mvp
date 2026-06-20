@@ -55,6 +55,28 @@ type OpenAIResponsesBody = {
   }>;
 };
 
+type ContentStudioFetchResponse = {
+  ok: boolean;
+  status: number;
+  text: () => Promise<string>;
+};
+
+type ContentStudioFetch = (
+  input: string | URL,
+  init?: {
+    method?: string;
+    headers?: Record<string, string>;
+    body?: string;
+  },
+) => Promise<ContentStudioFetchResponse>;
+
+type OpenAIResponseBody = OpenAIResponsesBody & {
+  error?: {
+    message?: string;
+  };
+  raw?: string;
+};
+
 const demoVideos: ContentStudioVideo[] = [
   {
     id: "demo-content-video",
@@ -111,6 +133,20 @@ function extractOutputText(body: OpenAIResponsesBody): string {
     .join("\n");
 
   return text ?? "";
+}
+
+async function readJsonBody(response: ContentStudioFetchResponse): Promise<OpenAIResponseBody> {
+  const rawText = await response.text();
+  const trimmed = rawText.trim();
+
+  if (!trimmed) return {};
+
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    return parsed && typeof parsed === "object" ? (parsed as OpenAIResponseBody) : { raw: trimmed };
+  } catch {
+    return { raw: trimmed };
+  }
 }
 
 export function listContentVideos(): ContentStudioVideo[] {
@@ -223,7 +259,8 @@ export async function generateOpenAIJson<TData>(input: {
     return { mode: "demo", data: input.fallback };
   }
 
-  const response = await fetch("https://api.openai.com/v1/responses", {
+  const safeFetch = fetch as unknown as ContentStudioFetch;
+  const response = await safeFetch("https://api.openai.com/v1/responses", {
     method: "POST",
     headers: {
       Authorization: `Bearer ${apiKey}`,
@@ -249,10 +286,11 @@ export async function generateOpenAIJson<TData>(input: {
     }),
   });
 
-  const body = (await response.json()) as OpenAIResponsesBody & { error?: { message?: string } };
+  const body = await readJsonBody(response);
 
   if (!response.ok) {
-    throw new Error(body.error?.message || `OpenAI request failed: HTTP ${response.status}`);
+    const rawDetails = body.raw ? `: ${body.raw.slice(0, 240)}` : "";
+    throw new Error(body.error?.message || `OpenAI request failed: HTTP ${response.status}${rawDetails}`);
   }
 
   const outputText = extractOutputText(body);
