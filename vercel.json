@@ -13,6 +13,26 @@
       "dest": "/api/auth/register.ts"
     },
     {
+      "src": "/api/content-studio/videos",
+      "dest": "/api/content-studio/videos.ts"
+    },
+    {
+      "src": "/api/content-studio/generate-script",
+      "dest": "/api/content-studio/generate-script.ts"
+    },
+    {
+      "src": "/api/content-studio/generate-avatar-prompt",
+      "dest": "/api/content-studio/generate-avatar-prompt.ts"
+    },
+    {
+      "src": "/api/content-studio/generate-tapnow-prompt",
+      "dest": "/api/content-studio/generate-tapnow-prompt.ts"
+    },
+    {
+      "src": "/api/content-studio/send-telegram",
+      "dest": "/api/content-studio/send-telegram.ts"
+    },
+    {
       "src": "/api/targeting/reports/([^/]+)",
       "dest": "/api/targeting/reports/[campaignId].ts"
     },

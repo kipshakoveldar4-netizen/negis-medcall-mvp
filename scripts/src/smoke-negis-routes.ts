@@ -3,6 +3,7 @@ type ApiBody = {
   mode?: string;
   error?: string;
   details?: string[];
+  data?: unknown;
 };
 
 export {};
@@ -49,11 +50,72 @@ async function checkTargetingHealth() {
   console.log(`/api/targeting/health: ok (${body.mode || "unknown"})`);
 }
 
+async function checkJsonEndpoint(path: string, init?: RequestInit) {
+  const response = await fetch(`${baseUrl}${path}`, init);
+  const text = await response.text();
+  let body: ApiBody;
+
+  try {
+    body = JSON.parse(text) as ApiBody;
+  } catch {
+    throw new Error(`${path} returned invalid JSON: ${text.slice(0, 120)}`);
+  }
+
+  if (!response.ok || body.success !== true) {
+    const details = body.details?.join(", ");
+    throw new Error(`${path} failed: ${body.error || `HTTP ${response.status}`}${details ? ` (${details})` : ""}`);
+  }
+
+  console.log(`${path}: ok (${body.mode || "unknown"})`);
+  return body;
+}
+
 async function main() {
   console.log(`Smoke testing Negis routes at ${baseUrl}`);
   await checkHtmlRoute("/dashboard");
   await checkHtmlRoute("/targeting-agent");
+  await checkHtmlRoute("/content-studio");
   await checkTargetingHealth();
+  await checkJsonEndpoint("/api/content-studio/generate-script", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      title: "Demo clinic video",
+      niche: "medical marketing",
+      goal: "book more appointments",
+      audience: "clinic owners",
+      style: "expert",
+      duration: "30-45 seconds",
+    }),
+  });
+  await checkJsonEndpoint("/api/content-studio/generate-avatar-prompt", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      title: "Demo clinic video",
+      style: "expert",
+    }),
+  });
+  await checkJsonEndpoint("/api/content-studio/generate-tapnow-prompt", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      title: "Demo clinic video",
+      niche: "medical marketing",
+      goal: "book more appointments",
+    }),
+  });
+  await checkJsonEndpoint("/api/content-studio/send-telegram", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      title: "Demo clinic video",
+      hook: "Clinic leads need fast follow-up",
+      script: "Demo script",
+      caption: "Demo caption",
+      hashtags: ["#crm", "#ai"],
+    }),
+  });
 }
 
 main().catch((error) => {

@@ -89,7 +89,11 @@ function targetingApiDevMiddleware(): Plugin {
         const requestUrl = new URL(req.url ?? "/", "http://localhost");
         const pathname = requestUrl.pathname;
 
-        if (!pathname.startsWith("/api/targeting") && pathname !== "/api/auth/register") {
+        if (
+          !pathname.startsWith("/api/targeting") &&
+          !pathname.startsWith("/api/content-studio") &&
+          pathname !== "/api/auth/register"
+        ) {
           next();
           return;
         }
@@ -100,6 +104,16 @@ function targetingApiDevMiddleware(): Plugin {
 
           if (pathname === "/api/auth/register") {
             modulePath = apiModule("api", "auth", "register.ts");
+          } else if (pathname === "/api/content-studio/videos") {
+            modulePath = apiModule("api", "content-studio", "videos.ts");
+          } else if (pathname === "/api/content-studio/generate-script") {
+            modulePath = apiModule("api", "content-studio", "generate-script.ts");
+          } else if (pathname === "/api/content-studio/generate-avatar-prompt") {
+            modulePath = apiModule("api", "content-studio", "generate-avatar-prompt.ts");
+          } else if (pathname === "/api/content-studio/generate-tapnow-prompt") {
+            modulePath = apiModule("api", "content-studio", "generate-tapnow-prompt.ts");
+          } else if (pathname === "/api/content-studio/send-telegram") {
+            modulePath = apiModule("api", "content-studio", "send-telegram.ts");
           } else if (pathname === "/api/targeting/health") {
             modulePath = apiModule("api", "targeting", "health.ts");
           } else if (pathname === "/api/targeting/analyze") {

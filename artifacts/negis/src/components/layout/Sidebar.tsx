@@ -1,12 +1,13 @@
 import { useState } from 'react';
 import { Link, useLocation } from 'wouter';
-import { BarChart2, CalendarDays, Building2, Briefcase, Settings, LogOut, X, Check, KeyRound, User, Megaphone, ClipboardList, BrainCircuit } from 'lucide-react';
+import { BarChart2, CalendarDays, Building2, Briefcase, Settings, LogOut, X, Check, KeyRound, User, Megaphone, ClipboardList, BrainCircuit, Clapperboard } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
 import { supabase } from '@/lib/supabase';
 import { toast } from 'sonner';
 
 const NAV = [
   { href: '/targeting-agent', icon: BrainCircuit, label: 'ИИ таргетолог', roles: ['owner', 'manager'] },
+  { href: '/content-studio', icon: Clapperboard, label: 'ИИ студия контента', roles: ['owner', 'manager'] },
   { href: '/dashboard', icon: BarChart2,    label: 'Дашборд',  roles: ['owner', 'manager'] },
   { href: '/booking',   icon: CalendarDays, label: 'Запись',   roles: ['owner', 'manager', 'agent', 'booking_agent'] },
   { href: '/reception', icon: Building2,    label: 'Ресепшн',  roles: ['owner', 'manager', 'receptionist', 'booking_agent'] },

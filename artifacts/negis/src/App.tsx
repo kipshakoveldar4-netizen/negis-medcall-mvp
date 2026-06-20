@@ -21,6 +21,7 @@ import Admin from "@/pages/Admin";
 import Ads from "@/pages/Ads";
 import AdsCallback from "@/pages/AdsCallback";
 import TargetingAgent from "@/pages/TargetingAgent";
+import ContentStudio from "@/pages/ContentStudio";
 import DemoPlaceholder from "@/pages/DemoPlaceholder";
 import Privacy from "@/pages/Privacy";
 import Terms from "@/pages/Terms";
@@ -50,6 +51,10 @@ const ROUTE_PERMISSIONS: Record<string, string> = {
   '/reports': 'ads',
   '/profile': 'dashboard',
   '/targeting-agent': 'ads',
+  '/content-studio': 'ads',
+  '/ai-content-studio': 'ads',
+  '/content': 'ads',
+  '/studio': 'ads',
 };
 
 function firstAllowedRoute(rolePermissions: Record<string, boolean>) {
@@ -144,6 +149,10 @@ function Router() {
       <Route path="/reports" component={() => <ProtectedPage component={() => <DemoPlaceholder title="Отчёты" />} permission="ads" />} />
       <Route path="/profile" component={() => <ProtectedPage component={() => <DemoPlaceholder title="Профиль" />} permission="dashboard" />} />
       <Route path="/targeting-agent" component={TargetingAgent} />
+      <Route path="/content-studio" component={() => <ProtectedPage component={ContentStudio} permission="ads" />} />
+      <Route path="/ai-content-studio" component={() => <ProtectedPage component={ContentStudio} permission="ads" />} />
+      <Route path="/content" component={() => <ProtectedPage component={ContentStudio} permission="ads" />} />
+      <Route path="/studio" component={() => <ProtectedPage component={ContentStudio} permission="ads" />} />
       <Route path="/privacy" component={Privacy} />
       <Route path="/terms" component={Terms} />
       <Route path="/data-deletion" component={DataDeletion} />

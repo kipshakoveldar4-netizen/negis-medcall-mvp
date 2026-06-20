@@ -9,6 +9,10 @@ import { TopNav } from './TopNav';
 
 const PAGE_LABELS: Record<string, string> = {
   '/targeting-agent': 'ИИ таргетолог',
+  '/content-studio': 'ИИ студия контента',
+  '/ai-content-studio': 'ИИ студия контента',
+  '/content': 'ИИ студия контента',
+  '/studio': 'ИИ студия контента',
   '/appointments': 'Записи',
   '/calls': 'Звонки',
   '/leads': 'Лиды',

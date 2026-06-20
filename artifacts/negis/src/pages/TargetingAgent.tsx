@@ -1,4 +1,4 @@
-import { useMemo, useState, type CSSProperties } from "react";
+import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import { Activity, BarChart3, BrainCircuit, FileText, Rocket, type LucideIcon } from "lucide-react";
 import { toast } from "sonner";
 import { PageLayout } from "@/components/layout/PageLayout";
@@ -57,6 +57,14 @@ type TargetingRequestInit = {
 type DetailItem = {
   label: string;
   value: string;
+};
+
+type TargetingPrefill = {
+  creativeText?: string;
+  caption?: string;
+  niche?: string;
+  offer?: string;
+  targetAudience?: string;
 };
 
 const inputStyle: CSSProperties = {
@@ -324,6 +332,26 @@ export default function TargetingAgent() {
   const updateLaunch = (key: keyof typeof initialLaunch, value: string) => {
     setLaunch((current) => ({ ...current, [key]: value }));
   };
+
+  useEffect(() => {
+    try {
+      const rawPrefill = window.localStorage.getItem("negis_targeting_prefill");
+      if (!rawPrefill) return;
+
+      const prefill = JSON.parse(rawPrefill) as TargetingPrefill;
+      setCreative((current) => ({
+        ...current,
+        niche: prefill.niche || current.niche,
+        offer: prefill.offer || current.offer,
+        creativeText: prefill.creativeText || prefill.caption || current.creativeText,
+        targetAudience: prefill.targetAudience || current.targetAudience,
+      }));
+      window.localStorage.removeItem("negis_targeting_prefill");
+      toast.success("Данные из ИИ студии контента подставлены");
+    } catch {
+      window.localStorage.removeItem("negis_targeting_prefill");
+    }
+  }, []);
 
   const handleApiError = (response: ApiResponse) => {
     if (isApiError(response)) {

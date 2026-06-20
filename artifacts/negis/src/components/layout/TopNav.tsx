@@ -6,6 +6,7 @@ import {
   CalendarDays,
   Building2,
   Briefcase,
+  Clapperboard,
   Settings,
   LogOut,
   X,
@@ -26,6 +27,7 @@ import { agentInitials, type AgentDisplayInfo } from '@/lib/agentDisplay';
 
 const NAV = [
   { href: '/targeting-agent', icon: BrainCircuit, label: 'ИИ таргетолог', permission: 'ads' },
+  { href: '/content-studio', icon: Clapperboard, label: 'ИИ студия контента', permission: 'ads' },
   { href: '/dashboard', icon: BarChart2, label: 'Дашборд', permission: 'dashboard' },
   { href: '/booking', icon: CalendarDays, label: 'Запись', permission: 'booking' },
   { href: '/reception', icon: Building2, label: 'Ресепшн', permission: 'reception' },
