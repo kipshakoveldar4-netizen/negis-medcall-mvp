@@ -72,9 +72,24 @@ async function checkJsonEndpoint(path: string, init?: RequestInit) {
 
 async function main() {
   console.log(`Smoke testing Negis routes at ${baseUrl}`);
-  await checkHtmlRoute("/dashboard");
-  await checkHtmlRoute("/targeting-agent");
-  await checkHtmlRoute("/content-studio");
+  for (const route of [
+    "/dashboard",
+    "/clients",
+    "/appointments",
+    "/reception",
+    "/leads",
+    "/calls",
+    "/tasks",
+    "/chat",
+    "/market",
+    "/reports",
+    "/admin",
+    "/ads",
+    "/targeting-agent",
+    "/content-studio",
+  ]) {
+    await checkHtmlRoute(route);
+  }
   await checkTargetingHealth();
   await checkJsonEndpoint("/api/content-studio/generate-script", {
     method: "POST",

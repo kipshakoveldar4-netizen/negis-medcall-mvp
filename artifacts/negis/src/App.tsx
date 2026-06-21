@@ -11,17 +11,23 @@ import Register from "@/pages/Register";
 import Onboarding from "@/pages/Onboarding";
 import Dashboard from "@/pages/Dashboard";
 import Booking from "@/pages/Booking";
-import Reception from "@/pages/Reception";
-import Sales from "@/pages/Sales";
-import Tasks from "@/pages/Tasks";
-import Chat from "@/pages/Chat";
-import Marketplace from "@/pages/Marketplace";
 import Agent from "@/pages/Agent";
-import Admin from "@/pages/Admin";
 import Ads from "@/pages/Ads";
 import AdsCallback from "@/pages/AdsCallback";
 import TargetingAgent from "@/pages/TargetingAgent";
 import ContentStudio from "@/pages/ContentStudio";
+import {
+  DemoAdmin,
+  DemoAppointments,
+  DemoCalls,
+  DemoChat,
+  DemoClients,
+  DemoLeads,
+  DemoMarket,
+  DemoReception,
+  DemoReports,
+  DemoTasks,
+} from "@/pages/DemoCrmModules";
 import DemoPlaceholder from "@/pages/DemoPlaceholder";
 import Privacy from "@/pages/Privacy";
 import Terms from "@/pages/Terms";
@@ -131,22 +137,22 @@ function Router() {
       <Route path="/onboarding" component={Onboarding} />
       <Route path="/dashboard" component={() => <ProtectedPage component={Dashboard} permission="dashboard" />} />
       <Route path="/booking" component={() => <ProtectedPage component={Booking} permission="booking" demoFallbackTitle="Записи" />} />
-      <Route path="/appointments" component={() => <ProtectedPage component={Booking} permission="booking" demoFallbackTitle="Записи" />} />
-      <Route path="/reception" component={() => <ProtectedPage component={Reception} permission="reception" demoFallbackTitle="Ресепшн" />} />
-      <Route path="/calls" component={() => <ProtectedPage component={Reception} permission="reception" demoFallbackTitle="Звонки" />} />
-      <Route path="/sales" component={() => <ProtectedPage component={Sales} permission="crm" demoFallbackTitle="Клиенты" />} />
-      <Route path="/leads" component={() => <ProtectedPage component={Sales} permission="crm" demoFallbackTitle="Лиды" />} />
-      <Route path="/clients" component={() => <ProtectedPage component={Sales} permission="crm" demoFallbackTitle="Клиенты" />} />
-      <Route path="/tasks" component={() => <ProtectedPage component={Tasks} permission="tasks" demoFallbackTitle="Задачи" />} />
-      <Route path="/chat" component={() => <ProtectedPage component={Chat} permission="chat" demoFallbackTitle="Чат" />} />
-      <Route path="/marketplace" component={() => <ProtectedPage component={Marketplace} permission="marketplace" demoFallbackTitle="Маркет" />} />
-      <Route path="/market" component={() => <ProtectedPage component={Marketplace} permission="marketplace" demoFallbackTitle="Маркет" />} />
+      <Route path="/appointments" component={() => <ProtectedPage component={DemoAppointments} permission="booking" />} />
+      <Route path="/reception" component={() => <ProtectedPage component={DemoReception} permission="reception" />} />
+      <Route path="/calls" component={() => <ProtectedPage component={DemoCalls} permission="reception" />} />
+      <Route path="/sales" component={() => <ProtectedPage component={DemoClients} permission="crm" />} />
+      <Route path="/leads" component={() => <ProtectedPage component={DemoLeads} permission="crm" />} />
+      <Route path="/clients" component={() => <ProtectedPage component={DemoClients} permission="crm" />} />
+      <Route path="/tasks" component={() => <ProtectedPage component={DemoTasks} permission="tasks" />} />
+      <Route path="/chat" component={() => <ProtectedPage component={DemoChat} permission="chat" />} />
+      <Route path="/marketplace" component={() => <ProtectedPage component={DemoMarket} permission="marketplace" />} />
+      <Route path="/market" component={() => <ProtectedPage component={DemoMarket} permission="marketplace" />} />
       <Route path="/agent" component={Agent} />
-      <Route path="/admin" component={() => <ProtectedPage component={Admin} permission="admin" demoFallbackTitle="Админ" />} />
+      <Route path="/admin" component={() => <ProtectedPage component={DemoAdmin} permission="admin" />} />
       <Route path="/ads" component={() => <ProtectedPage component={Ads} permission="ads" />} />
       <Route path="/advertising" component={() => <ProtectedPage component={Ads} permission="ads" />} />
       <Route path="/ads/callback" component={AdsCallback} />
-      <Route path="/reports" component={() => <ProtectedPage component={() => <DemoPlaceholder title="Отчёты" />} permission="ads" />} />
+      <Route path="/reports" component={() => <ProtectedPage component={DemoReports} permission="ads" />} />
       <Route path="/profile" component={() => <ProtectedPage component={() => <DemoPlaceholder title="Профиль" />} permission="dashboard" />} />
       <Route path="/targeting-agent" component={TargetingAgent} />
       <Route path="/content-studio" component={() => <ProtectedPage component={ContentStudio} permission="ads" />} />
