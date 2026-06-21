@@ -144,6 +144,17 @@ async function safeJson<TData>(response: Response): Promise<ApiResponse<TData> |
   }
 }
 
+function readWorkspaceId(): string {
+  try {
+    const raw = localStorage.getItem("negis_demo_workspace");
+    if (!raw) return "demo-workspace";
+    const workspace = JSON.parse(raw) as { id?: unknown };
+    return typeof workspace.id === "string" && workspace.id.trim() ? workspace.id.trim() : "demo-workspace";
+  } catch {
+    return "demo-workspace";
+  }
+}
+
 function readVideos(): ContentVideo[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -264,6 +275,27 @@ export default function ContentStudio() {
       setVideos(saved);
       setActiveId(saved[0].id);
     }
+
+    const loadApiVideos = async () => {
+      try {
+        const workspaceId = readWorkspaceId();
+        const response = await fetch(apiUrl(`/api/crm/content-videos?workspaceId=${encodeURIComponent(workspaceId)}`));
+        const body = await safeJson<{ videos?: ContentVideo[]; items?: ContentVideo[] }>(response);
+        if (!response.ok || body?.success !== true || body.mode !== "supabase") return;
+
+        const apiVideos = body.data.videos ?? body.data.items ?? [];
+        if (apiVideos.length === 0) return;
+
+        const sorted = [...apiVideos].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+        setVideos(sorted);
+        writeVideos(sorted);
+        setActiveId(sorted[0].id);
+      } catch {
+        // Keep localStorage videos as the offline fallback.
+      }
+    };
+
+    void loadApiVideos();
   }, []);
 
   const activeVideo = useMemo(
@@ -291,6 +323,23 @@ export default function ContentStudio() {
     if (!activeVideo) return;
     const nextVideo = { ...activeVideo, ...patch };
     saveVideos(videos.map((video) => (video.id === nextVideo.id ? nextVideo : video)), nextVideo.id);
+    void persistCurrentVideoPatch(nextVideo.id, patch);
+  };
+
+  const persistCurrentVideoPatch = async (videoId: string, patch: Partial<ContentVideo>) => {
+    try {
+      await fetch(apiUrl("/api/crm/content-videos"), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: videoId,
+          workspaceId: readWorkspaceId(),
+          ...patch,
+        }),
+      });
+    } catch {
+      // LocalStorage remains the source of truth in demo/offline mode.
+    }
   };
 
   const copyText = async (text: string, label: string) => {
@@ -303,10 +352,13 @@ export default function ContentStudio() {
     setNotice("");
 
     try {
-      const response = await fetch(apiUrl("/api/content-studio/videos"), {
+      const response = await fetch(apiUrl("/api/crm/content-videos"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(form),
+        body: JSON.stringify({
+          ...form,
+          workspaceId: readWorkspaceId(),
+        }),
       });
       const body = await safeJson<{ video: ContentVideo }>(response);
       const apiVideo = body?.success === true ? body.data.video : null;
@@ -338,7 +390,7 @@ export default function ContentStudio() {
     setNotice("");
 
     try {
-      const payload = { ...form, ...activeVideo, videoId: activeVideo?.id };
+      const payload = { ...form, ...activeVideo, videoId: activeVideo?.id, workspaceId: readWorkspaceId() };
       const response = await fetch(apiUrl("/api/content-studio/generate-script"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -388,7 +440,7 @@ export default function ContentStudio() {
       const response = await fetch(apiUrl(path), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...form, ...activeVideo, videoId: activeVideo?.id }),
+        body: JSON.stringify({ ...form, ...activeVideo, videoId: activeVideo?.id, workspaceId: readWorkspaceId() }),
       });
       const body = await safeJson<PromptPackage>(response);
       if (!response.ok || body?.success !== true) {

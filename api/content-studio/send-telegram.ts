@@ -1,5 +1,6 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { telegramPackageText, updateContentVideo } from "../../lib/content-studio/core";
+import { persistContentVideoPatchIfAvailable } from "../../lib/crm/server";
 
 type TelegramFetchResponse = {
   ok: boolean;
@@ -170,7 +171,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   if (!token || !chatId) {
     if (typeof payload.videoId === "string") {
-      updateContentVideo(payload.videoId, { status: "telegram_ready" });
+      const patch = { status: "telegram_ready" as const };
+      updateContentVideo(payload.videoId, patch);
+      await persistContentVideoPatchIfAvailable({
+        videoId: payload.videoId,
+        workspaceId: payload.workspaceId,
+        patch,
+      });
     }
 
     return sendJson(res, 200, {
@@ -220,7 +227,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
 
     if (!isTest && typeof payload.videoId === "string") {
-      updateContentVideo(payload.videoId, { status: "telegram_ready" });
+      const patch = { status: "telegram_ready" as const };
+      updateContentVideo(payload.videoId, patch);
+      await persistContentVideoPatchIfAvailable({
+        videoId: payload.videoId,
+        workspaceId: payload.workspaceId,
+        patch,
+      });
     }
 
     return sendJson(res, 200, {

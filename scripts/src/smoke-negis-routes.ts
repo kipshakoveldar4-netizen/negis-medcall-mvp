@@ -70,6 +70,18 @@ async function checkJsonEndpoint(path: string, init?: RequestInit) {
   return body;
 }
 
+async function checkCrmEndpoint(path: string, payload: Record<string, unknown>) {
+  await checkJsonEndpoint(`${path}?workspaceId=demo-workspace`);
+  await checkJsonEndpoint(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      workspaceId: "demo-workspace",
+      ...payload,
+    }),
+  });
+}
+
 async function main() {
   console.log(`Smoke testing Negis routes at ${baseUrl}`);
   for (const route of [
@@ -91,6 +103,39 @@ async function main() {
     await checkHtmlRoute(route);
   }
   await checkTargetingHealth();
+  await checkCrmEndpoint("/api/crm/clients", {
+    name: "Smoke Client",
+    phone: "+7 700 000 00 00",
+    source: "smoke",
+  });
+  await checkCrmEndpoint("/api/crm/leads", {
+    name: "Smoke Lead",
+    phone: "+7 700 111 22 33",
+    source: "smoke",
+  });
+  await checkCrmEndpoint("/api/crm/appointments", {
+    client: "Smoke Client",
+    service: "Consultation",
+    status: "scheduled",
+  });
+  await checkCrmEndpoint("/api/crm/tasks", {
+    title: "Smoke task",
+    status: "new",
+  });
+  await checkCrmEndpoint("/api/crm/chat", {
+    dialog: "Smoke",
+    author: "Smoke",
+    text: "Smoke message",
+  });
+  await checkCrmEndpoint("/api/crm/staff", {
+    name: "Smoke Staff",
+    email: "smoke@example.com",
+    role: "receptionist",
+  });
+  await checkCrmEndpoint("/api/crm/content-videos", {
+    title: "Smoke content video",
+    niche: "medical marketing",
+  });
   await checkJsonEndpoint("/api/content-studio/generate-script", {
     method: "POST",
     headers: { "Content-Type": "application/json" },

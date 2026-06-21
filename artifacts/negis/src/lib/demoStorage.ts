@@ -1,4 +1,27 @@
 import { useEffect, useState } from "react";
+import { apiUrl } from "@/lib/api";
+
+type ApiCollectionOptions<TItem extends { id: string }> = {
+  endpoint?: string;
+  listKey?: string;
+  itemKey?: string;
+  toApi?: (item: TItem) => Record<string, unknown>;
+  patchToApi?: (patch: Partial<TItem>) => Record<string, unknown>;
+  fromApi?: (item: unknown) => TItem;
+};
+
+type ApiResponse<TData> =
+  | {
+      success: true;
+      mode?: string;
+      warning?: string;
+      data: TData;
+    }
+  | {
+      success: false;
+      error: string;
+      details?: string[];
+    };
 
 export function readDemoStorage<TValue>(key: string, fallback: TValue): TValue {
   if (typeof window === "undefined") return fallback;
@@ -17,8 +40,44 @@ export function writeDemoStorage<TValue>(key: string, value: TValue) {
   window.localStorage.setItem(key, JSON.stringify(value));
 }
 
-export function useDemoCollection<TItem extends { id: string }>(key: string, seed: TItem[]) {
+function readWorkspaceId(): string {
+  if (typeof window === "undefined") return "demo-workspace";
+
+  try {
+    const raw = window.localStorage.getItem("negis_demo_workspace");
+    if (!raw) return "demo-workspace";
+    const workspace = JSON.parse(raw) as { id?: unknown };
+    return typeof workspace.id === "string" && workspace.id.trim() ? workspace.id.trim() : "demo-workspace";
+  } catch {
+    return "demo-workspace";
+  }
+}
+
+async function safeJson<TData>(response: globalThis.Response): Promise<ApiResponse<TData> | null> {
+  const text = await response.text();
+  if (!text) return null;
+
+  try {
+    return JSON.parse(text) as ApiResponse<TData>;
+  } catch {
+    return null;
+  }
+}
+
+export function useDemoCollection<TItem extends { id: string }>(
+  key: string,
+  seed: TItem[],
+  options: ApiCollectionOptions<TItem> = {},
+) {
   const [items, setItems] = useState<TItem[]>(seed);
+  const {
+    endpoint,
+    listKey = "items",
+    itemKey = "item",
+    toApi,
+    patchToApi,
+    fromApi,
+  } = options;
 
   useEffect(() => {
     const raw = typeof window === "undefined" ? null : window.localStorage.getItem(key);
@@ -30,6 +89,44 @@ export function useDemoCollection<TItem extends { id: string }>(key: string, see
     }
   }, [key, seed]);
 
+  useEffect(() => {
+    if (!endpoint) return;
+
+    let cancelled = false;
+
+    const loadFromApi = async () => {
+      try {
+        const workspaceId = readWorkspaceId();
+        const response = await fetch(apiUrl(`${endpoint}?workspaceId=${encodeURIComponent(workspaceId)}`));
+        const body = await safeJson<Record<string, unknown>>(response);
+
+        if (
+          cancelled ||
+          !response.ok ||
+          body?.success !== true ||
+          body.mode !== "supabase"
+        ) {
+          return;
+        }
+
+        const rawItems = body.data[listKey];
+        if (!Array.isArray(rawItems)) return;
+
+        const mapped = rawItems.map((item) => (fromApi ? fromApi(item) : (item as TItem)));
+        setItems(mapped);
+        writeDemoStorage(key, mapped);
+      } catch {
+        // Keep localStorage seed/data as the offline fallback.
+      }
+    };
+
+    void loadFromApi();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [endpoint, fromApi, key, listKey, seed]);
+
   const setStoredItems = (next: TItem[] | ((current: TItem[]) => TItem[])) => {
     setItems((current) => {
       const value = typeof next === "function" ? next(current) : next;
@@ -38,10 +135,59 @@ export function useDemoCollection<TItem extends { id: string }>(key: string, see
     });
   };
 
-  const addItem = (item: TItem) => setStoredItems((current) => [item, ...current]);
+  const addItem = (item: TItem) => {
+    setStoredItems((current) => [item, ...current]);
 
-  const updateItem = (id: string, patch: Partial<TItem>) =>
+    if (!endpoint) return;
+
+    void (async () => {
+      try {
+        const workspaceId = readWorkspaceId();
+        const payload = {
+          ...(toApi ? toApi(item) : item),
+          workspaceId,
+        };
+        const response = await fetch(apiUrl(endpoint), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const body = await safeJson<Record<string, unknown>>(response);
+        if (!response.ok || body?.success !== true || body.mode !== "supabase") return;
+
+        const rawItem = body.data[itemKey];
+        if (!rawItem) return;
+
+        const savedItem = fromApi ? fromApi(rawItem) : (rawItem as TItem);
+        setStoredItems((current) => current.map((currentItem) => (currentItem.id === item.id ? savedItem : currentItem)));
+      } catch {
+        // Local optimistic item remains saved in localStorage.
+      }
+    })();
+  };
+
+  const updateItem = (id: string, patch: Partial<TItem>) => {
     setStoredItems((current) => current.map((item) => (item.id === id ? { ...item, ...patch } : item)));
+
+    if (!endpoint) return;
+
+    void (async () => {
+      try {
+        const workspaceId = readWorkspaceId();
+        await fetch(apiUrl(endpoint), {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            id,
+            ...(patchToApi ? patchToApi(patch) : patch),
+            workspaceId,
+          }),
+        });
+      } catch {
+        // Local optimistic patch remains saved in localStorage.
+      }
+    })();
+  };
 
   return { items, setItems: setStoredItems, addItem, updateItem };
 }

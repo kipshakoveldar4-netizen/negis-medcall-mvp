@@ -23,6 +23,13 @@ import {
 import { toast } from "sonner";
 import { PageLayout } from "@/components/layout/PageLayout";
 import { useDemoCollection } from "@/lib/demoStorage";
+import {
+  permissionLabels,
+  permissionsForRole,
+  roleLabels,
+  staffRoles,
+  type StaffRole,
+} from "@/lib/permissions";
 
 type Metric = {
   label: string;
@@ -94,6 +101,15 @@ type ChatMessage = {
   author: string;
   text: string;
   time: string;
+};
+
+type StaffMember = {
+  id: string;
+  name: string;
+  email: string;
+  phone: string;
+  role: StaffRole;
+  status: string;
 };
 
 const clientsSeed: Client[] = [
@@ -220,6 +236,12 @@ const chatSeed: ChatMessage[] = [
   { id: "msg-4", dialog: "Medina AI", author: "Medina AI", text: "3 пропущенных звонка требуют follow-up.", time: "11:20" },
 ];
 
+const staffSeed: StaffMember[] = [
+  { id: "staff-owner", name: "Эльдар Кипшаков", email: "owner@negis.local", phone: "+7 700 000 00 01", role: "owner", status: "active" },
+  { id: "staff-reception", name: "Айгерим Ресепшн", email: "reception@negis.local", phone: "+7 700 000 00 02", role: "receptionist", status: "active" },
+  { id: "staff-marketer", name: "Маркетолог Concept", email: "marketing@negis.local", phone: "+7 700 000 00 03", role: "marketer", status: "active" },
+];
+
 const toneClasses: Record<NonNullable<Metric["tone"]>, { bg: string; text: string }> = {
   blue: { bg: "bg-blue-500/10", text: "text-[#1A56DB]" },
   teal: { bg: "bg-teal-500/10", text: "text-[#0F766E]" },
@@ -303,7 +325,10 @@ function PrimaryButton({ children, onClick }: { children: ReactNode; onClick?: (
 }
 
 export function DemoClients() {
-  const { items, addItem } = useDemoCollection("negis_demo_clients", clientsSeed);
+  const { items, addItem } = useDemoCollection("negis_demo_clients", clientsSeed, {
+    endpoint: "/api/crm/clients",
+    listKey: "clients",
+  });
   const [search, setSearch] = useState("");
   const filtered = items.filter((client) => `${client.name} ${client.phone}`.toLowerCase().includes(search.toLowerCase()));
 
@@ -368,7 +393,10 @@ export function DemoClients() {
 }
 
 export function DemoAppointments() {
-  const { items, addItem, updateItem } = useDemoCollection("negis_demo_appointments", appointmentsSeed);
+  const { items, addItem, updateItem } = useDemoCollection("negis_demo_appointments", appointmentsSeed, {
+    endpoint: "/api/crm/appointments",
+    listKey: "appointments",
+  });
   const statuses = ["Подтвердить", "Пришёл", "Не пришёл", "Отменить"];
 
   const createAppointment = () => {
@@ -495,7 +523,10 @@ export function DemoReception() {
 }
 
 export function DemoLeads() {
-  const { items, addItem } = useDemoCollection("negis_demo_leads", leadsSeed);
+  const { items, addItem } = useDemoCollection("negis_demo_leads", leadsSeed, {
+    endpoint: "/api/crm/leads",
+    listKey: "leads",
+  });
   const stages = ["Новый", "В работе", "Записан", "Пришёл", "Потерян"];
 
   const addLead = () => {
@@ -552,7 +583,10 @@ export function DemoLeads() {
 }
 
 export function DemoCalls() {
-  const { items } = useDemoCollection("negis_demo_calls", callsSeed);
+  const { items } = useDemoCollection("negis_demo_calls", callsSeed, {
+    endpoint: "/api/crm/calls",
+    listKey: "calls",
+  });
 
   return (
     <PageLayout>
@@ -610,7 +644,10 @@ export function DemoCalls() {
 }
 
 export function DemoTasks() {
-  const { items, addItem, updateItem } = useDemoCollection("negis_demo_tasks", tasksSeed);
+  const { items, addItem, updateItem } = useDemoCollection("negis_demo_tasks", tasksSeed, {
+    endpoint: "/api/crm/tasks",
+    listKey: "tasks",
+  });
   const columns: TaskItem["status"][] = ["Новые", "В работе", "Готово"];
 
   const addTask = () => {
@@ -664,7 +701,10 @@ export function DemoTasks() {
 }
 
 export function DemoChat() {
-  const { items, addItem } = useDemoCollection("negis_demo_chat", chatSeed);
+  const { items, addItem } = useDemoCollection("negis_demo_chat", chatSeed, {
+    endpoint: "/api/crm/chat",
+    listKey: "messages",
+  });
   const dialogs = ["Ресепшн", "Маркетолог", "Врач косметолог", "Medina AI"];
   const [active, setActive] = useState(dialogs[0]);
   const [message, setMessage] = useState("");
@@ -830,7 +870,18 @@ export function DemoReports() {
 }
 
 export function DemoAdmin() {
+  const { items: staff, addItem, updateItem } = useDemoCollection("negis_demo_staff", staffSeed, {
+    endpoint: "/api/crm/staff",
+    listKey: "staff",
+  });
   const [targetingStatus, setTargetingStatus] = useState("не проверен");
+  const [staffForm, setStaffForm] = useState<Omit<StaffMember, "id">>({
+    name: "",
+    email: "",
+    phone: "",
+    role: "receptionist",
+    status: "active",
+  });
 
   const checkTargeting = async () => {
     setTargetingStatus("проверяем...");
@@ -842,6 +893,37 @@ export function DemoAdmin() {
     } catch {
       setTargetingStatus("недоступен");
     }
+  };
+
+  const updateStaffForm = (field: keyof Omit<StaffMember, "id">, value: string) => {
+    setStaffForm((current) => ({
+      ...current,
+      [field]: field === "role" ? (value as StaffRole) : value,
+    }));
+  };
+
+  const addStaffMember = () => {
+    if (!staffForm.name.trim() || !staffForm.email.trim()) {
+      toast.error("Укажите имя и email сотрудника");
+      return;
+    }
+
+    addItem({
+      id: newId("staff"),
+      name: staffForm.name.trim(),
+      email: staffForm.email.trim(),
+      phone: staffForm.phone.trim(),
+      role: staffForm.role,
+      status: staffForm.status,
+    });
+    setStaffForm({
+      name: "",
+      email: "",
+      phone: "",
+      role: "receptionist",
+      status: "active",
+    });
+    toast.success("Сотрудник сохранён");
   };
 
   const integrations = useMemo(
@@ -859,19 +941,92 @@ export function DemoAdmin() {
       <div className="space-y-7">
         <PageHeader title="Админ" subtitle="Demo-safe панель настроек: пользователи, роли и статусы интеграций без показа секретов." action={<PrimaryButton onClick={checkTargeting}><Target size={16} />Проверить health</PrimaryButton>} />
         <div className="grid gap-5 lg:grid-cols-3">
-          {["Пользователи", "Роли", "Интеграции"].map((section) => (
-            <section key={section} className="neu-card">
-              <h2 className="text-lg font-bold text-[#0F172A]">{section}</h2>
-              <p className="mt-3 text-sm leading-relaxed text-[#64748B]">
-                {section === "Пользователи"
-                  ? "Owner, manager, ресепшн и маркетолог доступны в demo-режиме."
-                  : section === "Роли"
-                    ? "Права маршрутов сохраняются в текущем AuthContext."
-                    : "Проверка подключений без раскрытия токенов и service role keys."}
-              </p>
-            </section>
-          ))}
+          <section className="neu-card">
+            <h2 className="text-lg font-bold text-[#0F172A]">Сотрудники</h2>
+            <p className="mt-3 text-sm leading-relaxed text-[#64748B]">
+              Таблица сохраняется через Supabase при наличии env, иначе работает localStorage fallback.
+            </p>
+          </section>
+          <section className="neu-card">
+            <h2 className="text-lg font-bold text-[#0F172A]">Роли</h2>
+            <p className="mt-3 text-sm leading-relaxed text-[#64748B]">
+              Owner, admin, receptionist, marketer, doctor и manager уже описаны в permissions foundation.
+            </p>
+          </section>
+          <section className="neu-card">
+            <h2 className="text-lg font-bold text-[#0F172A]">Интеграции</h2>
+            <p className="mt-3 text-sm leading-relaxed text-[#64748B]">
+              Проверка подключений без раскрытия токенов, service role keys и Telegram секретов.
+            </p>
+          </section>
         </div>
+
+        <section className="neu-card">
+          <div className="mb-5 flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+            <div>
+              <h2 className="text-lg font-bold text-[#0F172A]">Сотрудники</h2>
+              <p className="mt-1 text-sm text-[#64748B]">Добавление сотрудника пока не отправляет invite email, но сохраняет запись для операционной работы.</p>
+            </div>
+            <PrimaryButton onClick={addStaffMember}><UserPlus size={16} />Добавить сотрудника</PrimaryButton>
+          </div>
+          <div className="mb-5 grid gap-3 md:grid-cols-5">
+            <input className="neu-input" value={staffForm.name} onChange={(event) => updateStaffForm("name", event.target.value)} placeholder="Имя" />
+            <input className="neu-input" value={staffForm.email} onChange={(event) => updateStaffForm("email", event.target.value)} placeholder="Email" />
+            <input className="neu-input" value={staffForm.phone} onChange={(event) => updateStaffForm("phone", event.target.value)} placeholder="Телефон" />
+            <select className="neu-input" value={staffForm.role} onChange={(event) => updateStaffForm("role", event.target.value)}>
+              {staffRoles.map((role) => (
+                <option key={role} value={role}>{roleLabels[role]}</option>
+              ))}
+            </select>
+            <select className="neu-input" value={staffForm.status} onChange={(event) => updateStaffForm("status", event.target.value)}>
+              <option value="active">Активен</option>
+              <option value="paused">Пауза</option>
+              <option value="disabled">Отключён</option>
+            </select>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[860px] text-left text-sm">
+              <thead className="text-xs uppercase text-[#94A3B8]">
+                <tr>
+                  {["Имя", "Email", "Телефон", "Роль", "Статус", "Действие"].map((header) => (
+                    <th key={header} className="border-b border-[#E7ECF3] px-3 py-3 font-bold">{header}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {staff.map((member) => (
+                  <tr key={member.id} className="border-b border-[#EEF2F7] last:border-0">
+                    <td className="px-3 py-4 font-bold text-[#0F172A]">{member.name}</td>
+                    <td className="px-3 py-4 text-[#334155]">{member.email}</td>
+                    <td className="px-3 py-4 text-[#334155]">{member.phone}</td>
+                    <td className="px-3 py-4 text-[#334155]">{roleLabels[member.role] ?? member.role}</td>
+                    <td className="px-3 py-4"><StatusPill value={member.status} /></td>
+                    <td className="px-3 py-4">
+                      <button
+                        type="button"
+                        className="neu-btn px-3 py-1.5 text-xs"
+                        onClick={() => updateItem(member.id, { status: member.status === "active" ? "paused" : "active" })}
+                      >
+                        {member.status === "active" ? "Поставить на паузу" : "Активировать"}
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section className="neu-card">
+          <h2 className="mb-4 text-lg font-bold text-[#0F172A]">Права роли: {roleLabels[staffForm.role]}</h2>
+          <div className="flex flex-wrap gap-2">
+            {permissionsForRole(staffForm.role).map((permission) => (
+              <span key={permission} className="rounded-full bg-[#F8FAFC] px-3 py-1 text-xs font-bold text-[#334155]">
+                {permissionLabels[permission]}
+              </span>
+            ))}
+          </div>
+        </section>
         <section className="neu-card">
           <h2 className="mb-4 text-lg font-bold text-[#0F172A]">Статус интеграций</h2>
           <div className="grid gap-4 md:grid-cols-2">

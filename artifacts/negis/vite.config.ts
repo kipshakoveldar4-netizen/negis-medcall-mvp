@@ -92,6 +92,7 @@ function targetingApiDevMiddleware(): Plugin {
         if (
           !pathname.startsWith("/api/targeting") &&
           !pathname.startsWith("/api/content-studio") &&
+          !pathname.startsWith("/api/crm") &&
           pathname !== "/api/auth/register"
         ) {
           next();
@@ -114,6 +115,22 @@ function targetingApiDevMiddleware(): Plugin {
             modulePath = apiModule("api", "content-studio", "generate-tapnow-prompt.ts");
           } else if (pathname === "/api/content-studio/send-telegram") {
             modulePath = apiModule("api", "content-studio", "send-telegram.ts");
+          } else if (pathname === "/api/crm/clients") {
+            modulePath = apiModule("api", "crm", "clients.ts");
+          } else if (pathname === "/api/crm/leads") {
+            modulePath = apiModule("api", "crm", "leads.ts");
+          } else if (pathname === "/api/crm/appointments") {
+            modulePath = apiModule("api", "crm", "appointments.ts");
+          } else if (pathname === "/api/crm/calls") {
+            modulePath = apiModule("api", "crm", "calls.ts");
+          } else if (pathname === "/api/crm/tasks") {
+            modulePath = apiModule("api", "crm", "tasks.ts");
+          } else if (pathname === "/api/crm/chat") {
+            modulePath = apiModule("api", "crm", "chat.ts");
+          } else if (pathname === "/api/crm/staff") {
+            modulePath = apiModule("api", "crm", "staff.ts");
+          } else if (pathname === "/api/crm/content-videos") {
+            modulePath = apiModule("api", "crm", "content-videos.ts");
           } else if (pathname === "/api/targeting/health") {
             modulePath = apiModule("api", "targeting", "health.ts");
           } else if (pathname === "/api/targeting/analyze") {

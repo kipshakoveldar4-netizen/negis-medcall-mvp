@@ -5,6 +5,7 @@ import {
   normalizePromptPackage,
   updateContentVideo,
 } from "../../lib/content-studio/core";
+import { persistContentVideoPatchIfAvailable } from "../../lib/crm/server";
 
 function sendJson(res: VercelResponse, status: number, payload: unknown) {
   res.status(status).setHeader("Content-Type", "application/json; charset=utf-8");
@@ -36,11 +37,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     });
 
     if (typeof payload.videoId === "string") {
-      updateContentVideo(payload.videoId, {
+      const patch = {
         avatarPrompt: [result.data.prompt, result.data.negativePrompt ? `Negative prompt: ${result.data.negativePrompt}` : null]
           .filter(Boolean)
           .join("\n\n"),
-        status: "avatar_ready",
+        status: "avatar_ready" as const,
+      };
+      updateContentVideo(payload.videoId, patch);
+      await persistContentVideoPatchIfAvailable({
+        videoId: payload.videoId,
+        workspaceId: payload.workspaceId,
+        patch,
       });
     }
 
