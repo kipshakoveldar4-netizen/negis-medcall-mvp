@@ -136,6 +136,16 @@ async function main() {
     title: "Smoke content video",
     niche: "medical marketing",
   });
+  await checkJsonEndpoint("/api/content-studio/videos");
+  await checkJsonEndpoint("/api/content-studio/videos", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      title: "Smoke content studio video",
+      niche: "medical marketing",
+      goal: "book more appointments",
+    }),
+  });
   await checkJsonEndpoint("/api/content-studio/generate-script", {
     method: "POST",
     headers: { "Content-Type": "application/json" },

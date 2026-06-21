@@ -105,32 +105,14 @@ function targetingApiDevMiddleware(): Plugin {
 
           if (pathname === "/api/auth/register") {
             modulePath = apiModule("api", "auth", "register.ts");
-          } else if (pathname === "/api/content-studio/videos") {
-            modulePath = apiModule("api", "content-studio", "videos.ts");
-          } else if (pathname === "/api/content-studio/generate-script") {
-            modulePath = apiModule("api", "content-studio", "generate-script.ts");
-          } else if (pathname === "/api/content-studio/generate-avatar-prompt") {
-            modulePath = apiModule("api", "content-studio", "generate-avatar-prompt.ts");
-          } else if (pathname === "/api/content-studio/generate-tapnow-prompt") {
-            modulePath = apiModule("api", "content-studio", "generate-tapnow-prompt.ts");
-          } else if (pathname === "/api/content-studio/send-telegram") {
-            modulePath = apiModule("api", "content-studio", "send-telegram.ts");
-          } else if (pathname === "/api/crm/clients") {
-            modulePath = apiModule("api", "crm", "clients.ts");
-          } else if (pathname === "/api/crm/leads") {
-            modulePath = apiModule("api", "crm", "leads.ts");
-          } else if (pathname === "/api/crm/appointments") {
-            modulePath = apiModule("api", "crm", "appointments.ts");
-          } else if (pathname === "/api/crm/calls") {
-            modulePath = apiModule("api", "crm", "calls.ts");
-          } else if (pathname === "/api/crm/tasks") {
-            modulePath = apiModule("api", "crm", "tasks.ts");
-          } else if (pathname === "/api/crm/chat") {
-            modulePath = apiModule("api", "crm", "chat.ts");
-          } else if (pathname === "/api/crm/staff") {
-            modulePath = apiModule("api", "crm", "staff.ts");
-          } else if (pathname === "/api/crm/content-videos") {
-            modulePath = apiModule("api", "crm", "content-videos.ts");
+          } else if (pathname.startsWith("/api/content-studio/")) {
+            const contentPath = pathname.replace(/^\/api\/content-studio\//, "").split("/").filter(Boolean);
+            modulePath = apiModule("api", "content-studio", "[...path].ts");
+            query.path = contentPath;
+          } else if (pathname.startsWith("/api/crm/")) {
+            const crmPath = pathname.replace(/^\/api\/crm\//, "").split("/").filter(Boolean);
+            modulePath = apiModule("api", "crm", "[...path].ts");
+            query.path = crmPath;
           } else if (pathname === "/api/targeting/health") {
             modulePath = apiModule("api", "targeting", "health.ts");
           } else if (pathname === "/api/targeting/analyze") {

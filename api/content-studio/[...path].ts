@@ -1,5 +1,16 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import { telegramPackageText, updateContentVideo } from "../../lib/content-studio/core";
+import {
+  createContentVideo,
+  demoAvatarPrompt,
+  demoScriptPackage,
+  demoTapNowPrompt,
+  generateOpenAIJson,
+  listContentVideos,
+  normalizePromptPackage,
+  normalizeScriptPackage,
+  telegramPackageText,
+  updateContentVideo,
+} from "../../lib/content-studio/core";
 import { persistContentVideoPatchIfAvailable } from "../../lib/crm/server";
 
 type TelegramFetchResponse = {
@@ -27,6 +38,31 @@ type TelegramApiBody = {
 function sendJson(res: VercelResponse, status: number, payload: unknown) {
   res.status(status).setHeader("Content-Type", "application/json; charset=utf-8");
   return res.json(payload);
+}
+
+function methodNotAllowed(res: VercelResponse, details: string[]) {
+  return sendJson(res, 405, {
+    success: false,
+    error: "Method not allowed",
+    details,
+  });
+}
+
+function readBody(req: VercelRequest): Record<string, unknown> {
+  return req.body && typeof req.body === "object" && !Array.isArray(req.body) ? (req.body as Record<string, unknown>) : {};
+}
+
+function readPathSegment(req: VercelRequest): string {
+  const pathParam = req.query.path;
+  const querySegment = Array.isArray(pathParam) ? pathParam[0] : pathParam;
+
+  if (typeof querySegment === "string" && querySegment.trim()) {
+    return querySegment.trim();
+  }
+
+  const pathname = new URL(req.url || "/", "http://localhost").pathname;
+  const [, segment] = pathname.split("/api/content-studio/");
+  return (segment || "").split("/").filter(Boolean)[0] || "";
 }
 
 function splitLongText(text: string, maxLength: number): string[] {
@@ -142,16 +178,191 @@ async function sendTelegramMessage(input: {
   };
 }
 
-export default async function handler(req: VercelRequest, res: VercelResponse) {
-  if (req.method !== "POST") {
-    return sendJson(res, 405, {
-      success: false,
-      error: "Method not allowed",
-      details: ["Use POST"],
+async function handleVideos(req: VercelRequest, res: VercelResponse) {
+  if (req.method === "GET") {
+    return sendJson(res, 200, {
+      success: true,
+      mode: "mock",
+      data: {
+        videos: listContentVideos(),
+      },
     });
   }
 
-  const payload = (req.body || {}) as Record<string, unknown>;
+  if (req.method === "POST") {
+    const video = createContentVideo(readBody(req));
+    return sendJson(res, 201, {
+      success: true,
+      mode: "mock",
+      data: {
+        video,
+      },
+    });
+  }
+
+  return methodNotAllowed(res, ["Use GET or POST"]);
+}
+
+async function handleGenerateScript(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== "POST") {
+    return methodNotAllowed(res, ["Use POST"]);
+  }
+
+  try {
+    const payload = readBody(req);
+    const result = await generateOpenAIJson({
+      system: "You are a Russian AI video script strategist. Return valid JSON only. No markdown.",
+      user: {
+        task: "Generate a short-form AI video package for 30-45 seconds.",
+        requiredJsonFields: ["hook", "script", "voiceover", "cta", "caption", "hashtags"],
+        requirements: {
+          language: "Russian",
+          outputStyle: "ready for avatar video production",
+          hashtags: "5-8 hashtags as array",
+        },
+        input: payload,
+      },
+      fallback: demoScriptPackage(),
+      normalize: normalizeScriptPackage,
+    });
+
+    if (typeof payload.videoId === "string") {
+      const patch = {
+        ...result.data,
+        status: "script_ready" as const,
+      };
+      updateContentVideo(payload.videoId, patch);
+      await persistContentVideoPatchIfAvailable({
+        videoId: payload.videoId,
+        workspaceId: payload.workspaceId,
+        patch,
+      });
+    }
+
+    return sendJson(res, 200, {
+      success: true,
+      mode: result.mode,
+      data: result.data,
+    });
+  } catch (error) {
+    return sendJson(res, 500, {
+      success: false,
+      error: "Generation error",
+      details: [error instanceof Error ? error.message : "Failed to generate script package"],
+    });
+  }
+}
+
+async function handleGenerateAvatarPrompt(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== "POST") {
+    return methodNotAllowed(res, ["Use POST"]);
+  }
+
+  try {
+    const payload = readBody(req);
+    const fallback = demoAvatarPrompt(payload);
+    const result = await generateOpenAIJson({
+      system:
+        "Generate production-ready prompts for realistic AI avatar photo/video tools. Return valid JSON only.",
+      user: {
+        task: "Generate avatar prompt for healthcare and marketing short-form video.",
+        requiredJsonFields: ["prompt", "negativePrompt", "format"],
+        input: payload,
+      },
+      fallback,
+      normalize: (value) => normalizePromptPackage(value, fallback),
+    });
+
+    if (typeof payload.videoId === "string") {
+      const patch = {
+        avatarPrompt: [result.data.prompt, result.data.negativePrompt ? `Negative prompt: ${result.data.negativePrompt}` : null]
+          .filter(Boolean)
+          .join("\n\n"),
+        status: "avatar_ready" as const,
+      };
+      updateContentVideo(payload.videoId, patch);
+      await persistContentVideoPatchIfAvailable({
+        videoId: payload.videoId,
+        workspaceId: payload.workspaceId,
+        patch,
+      });
+    }
+
+    return sendJson(res, 200, {
+      success: true,
+      mode: result.mode,
+      data: result.data,
+    });
+  } catch (error) {
+    return sendJson(res, 500, {
+      success: false,
+      error: "Generation error",
+      details: [error instanceof Error ? error.message : "Failed to generate avatar prompt"],
+    });
+  }
+}
+
+async function handleGenerateTapNowPrompt(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== "POST") {
+    return methodNotAllowed(res, ["Use POST"]);
+  }
+
+  try {
+    const payload = readBody(req);
+    const fallback = demoTapNowPrompt(payload);
+    const result = await generateOpenAIJson({
+      system: "Generate production-ready visual scene prompts for TapNow. Return valid JSON only.",
+      user: {
+        task: "Generate a TapNow visual video prompt.",
+        requiredJsonFields: ["prompt", "negativePrompt"],
+        mandatoryVisualDetails: [
+          "vertical 9:16",
+          "clinic CRM",
+          "WhatsApp leads",
+          "appointment pipeline",
+          "premium realistic style",
+        ],
+        input: payload,
+      },
+      fallback,
+      normalize: (value) => normalizePromptPackage(value, fallback),
+    });
+
+    if (typeof payload.videoId === "string") {
+      const patch = {
+        tapnowPrompt: [result.data.prompt, result.data.negativePrompt ? `Negative prompt: ${result.data.negativePrompt}` : null]
+          .filter(Boolean)
+          .join("\n\n"),
+        status: "avatar_ready" as const,
+      };
+      updateContentVideo(payload.videoId, patch);
+      await persistContentVideoPatchIfAvailable({
+        videoId: payload.videoId,
+        workspaceId: payload.workspaceId,
+        patch,
+      });
+    }
+
+    return sendJson(res, 200, {
+      success: true,
+      mode: result.mode,
+      data: result.data,
+    });
+  } catch (error) {
+    return sendJson(res, 500, {
+      success: false,
+      error: "Generation error",
+      details: [error instanceof Error ? error.message : "Failed to generate TapNow prompt"],
+    });
+  }
+}
+
+async function handleSendTelegram(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== "POST") {
+    return methodNotAllowed(res, ["Use POST"]);
+  }
+
+  const payload = readBody(req);
   const isTest = payload.test === true;
   const packageText = telegramPackageText({
     title: typeof payload.title === "string" ? payload.title : undefined,
@@ -254,4 +465,20 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       hint: "Проверьте доступность Telegram API, TELEGRAM_BOT_TOKEN и TELEGRAM_CHAT_ID.",
     });
   }
+}
+
+export default async function handler(req: VercelRequest, res: VercelResponse) {
+  const resource = readPathSegment(req);
+
+  if (resource === "videos") return handleVideos(req, res);
+  if (resource === "generate-script") return handleGenerateScript(req, res);
+  if (resource === "generate-avatar-prompt") return handleGenerateAvatarPrompt(req, res);
+  if (resource === "generate-tapnow-prompt") return handleGenerateTapNowPrompt(req, res);
+  if (resource === "send-telegram") return handleSendTelegram(req, res);
+
+  return sendJson(res, 404, {
+    success: false,
+    error: "Not found",
+    details: ["Unknown Content Studio route"],
+  });
 }
