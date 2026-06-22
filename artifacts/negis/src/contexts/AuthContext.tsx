@@ -4,6 +4,7 @@ import { supabase } from '@/lib/supabase';
 import { useLocation } from 'wouter';
 import { toast } from 'sonner';
 import { apiUrl } from '@/lib/api';
+import { isStaffRole, permissionsForRole, type StaffRole } from '@/lib/permissions';
 
 /* ── Types ────────────────────────────────────────────────── */
 interface ImpersonationData {
@@ -37,7 +38,33 @@ interface DemoAuthData {
   session: DemoSessionData;
 }
 
-export type UserRole = 'owner' | 'manager' | 'agent' | 'booking_agent' | 'receptionist';
+interface StaffUserData {
+  id?: string;
+  name?: string;
+  email?: string;
+  role?: string;
+  status?: string;
+  workspaceId?: string;
+  workspace_id?: string;
+  authUserId?: string;
+  auth_user_id?: string;
+}
+
+interface StaffSessionData {
+  mode: 'staff';
+  authenticated: boolean;
+  createdAt: string;
+  email: string;
+  workspaceId?: string;
+  supabaseUserId?: string;
+}
+
+interface StaffAuthData {
+  user: StaffUserData;
+  session: StaffSessionData;
+}
+
+export type UserRole = StaffRole | 'agent' | 'booking_agent';
 export type RolePermissions = Record<string, boolean>;
 
 interface AuthContextType {
@@ -49,6 +76,7 @@ interface AuthContextType {
   isLoading: boolean;
   isImpersonation: boolean;
   isDemoMode: boolean;
+  isStaffMode: boolean;
   impersonationClinicName: string | null;
   signOut: () => Promise<void>;
 }
@@ -58,6 +86,8 @@ const IMP_KEY     = 'negis_impersonation';
 const DEMO_USER_KEY = 'negis_demo_user';
 const DEMO_WORKSPACE_KEY = 'negis_demo_workspace';
 const DEMO_SESSION_KEY = 'negis_demo_session';
+const STAFF_USER_KEY = 'negis_staff_user';
+const STAFF_SESSION_KEY = 'negis_staff_session';
 
 const ALL_PERMISSIONS: RolePermissions = {
   dashboard: true,
@@ -73,12 +103,15 @@ const ALL_PERMISSIONS: RolePermissions = {
   settings: true,
 };
 
-const SYSTEM_ROLE_PERMISSIONS: Record<UserRole, RolePermissions> = {
+const SYSTEM_ROLE_PERMISSIONS: Partial<Record<UserRole, RolePermissions>> = {
   owner: ALL_PERMISSIONS,
   manager: ALL_PERMISSIONS,
+  admin: ALL_PERMISSIONS,
+  marketer: { dashboard: true, marketplace: true, ads: true, reports: true, tasks: true, chat: true },
+  doctor: { dashboard: true, booking: true, crm: true, chat: true, tasks: true },
   agent: { dashboard: true, booking: true, crm: true, tasks: true, chat: true },
   booking_agent: { dashboard: true, booking: true, chat: true },
-  receptionist: { reception: true, chat: true },
+  receptionist: { dashboard: true, booking: true, reception: true, crm: true, chat: true },
 };
 
 function clearDemoStorage() {
@@ -89,6 +122,11 @@ function clearDemoStorage() {
   localStorage.removeItem('negis_session');
 }
 
+function clearStaffStorage() {
+  localStorage.removeItem(STAFF_USER_KEY);
+  localStorage.removeItem(STAFF_SESSION_KEY);
+}
+
 function clearImpersonationStorage() {
   localStorage.removeItem(IMP_KEY);
 }
@@ -96,6 +134,7 @@ function clearImpersonationStorage() {
 function clearAuthStorage() {
   clearImpersonationStorage();
   clearDemoStorage();
+  clearStaffStorage();
 }
 
 function cleanUrl() {
@@ -138,6 +177,63 @@ function loadStoredDemoAuth(): DemoAuthData | null {
   return { session, workspace, user };
 }
 
+function loadStoredStaffAuth(): StaffAuthData | null {
+  const session = readJson<StaffSessionData>(STAFF_SESSION_KEY);
+  const user = readJson<StaffUserData>(STAFF_USER_KEY);
+
+  if (session?.mode !== 'staff' || session.authenticated !== true || !user?.email) {
+    return null;
+  }
+
+  return { session, user };
+}
+
+function routePermissionsForStaffRole(role: StaffRole): RolePermissions {
+  if (role === 'owner' || role === 'admin') return ALL_PERMISSIONS;
+
+  const crmPermissions = new Set(permissionsForRole(role));
+
+  return {
+    dashboard: true,
+    booking: crmPermissions.has('view_appointments') || crmPermissions.has('manage_appointments'),
+    reception: role === 'receptionist' || crmPermissions.has('view_calls') || crmPermissions.has('manage_calls'),
+    crm: crmPermissions.has('view_clients') || crmPermissions.has('manage_clients') || crmPermissions.has('view_leads') || crmPermissions.has('manage_leads'),
+    tasks: crmPermissions.has('view_tasks') || crmPermissions.has('manage_tasks'),
+    chat: crmPermissions.has('view_chat') || crmPermissions.has('send_chat'),
+    marketplace: crmPermissions.has('view_marketing') || crmPermissions.has('manage_marketing'),
+    admin: crmPermissions.has('view_admin') || crmPermissions.has('manage_staff'),
+    reports: crmPermissions.has('view_reports'),
+    ads:
+      crmPermissions.has('view_marketing') ||
+      crmPermissions.has('manage_marketing') ||
+      crmPermissions.has('view_ai_content') ||
+      crmPermissions.has('manage_ai_content') ||
+      crmPermissions.has('view_targeting') ||
+      crmPermissions.has('manage_targeting') ||
+      crmPermissions.has('view_reports'),
+    settings: role === 'manager',
+  };
+}
+
+function normalizeStaffUser(value: unknown): StaffUserData | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const email = typeof record.email === 'string' ? record.email.trim() : '';
+  if (!email) return null;
+
+  return {
+    id: typeof record.id === 'string' ? record.id : undefined,
+    name: typeof record.name === 'string' ? record.name : undefined,
+    email,
+    role: typeof record.role === 'string' ? record.role : undefined,
+    status: typeof record.status === 'string' ? record.status : undefined,
+    workspaceId: typeof record.workspaceId === 'string' ? record.workspaceId : undefined,
+    workspace_id: typeof record.workspace_id === 'string' ? record.workspace_id : undefined,
+    authUserId: typeof record.authUserId === 'string' ? record.authUserId : undefined,
+    auth_user_id: typeof record.auth_user_id === 'string' ? record.auth_user_id : undefined,
+  };
+}
+
 /* ── Context ──────────────────────────────────────────────── */
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
@@ -150,6 +246,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [isLoading,               setIsLoading]               = useState(true);
   const [isImpersonation,         setIsImpersonation]         = useState(false);
   const [isDemoMode,              setIsDemoMode]              = useState(false);
+  const [isStaffMode,             setIsStaffMode]             = useState(false);
   const [impersonationClinicName, setImpersonationClinicName] = useState<string | null>(null);
   const [, setLocation] = useLocation();
 
@@ -166,6 +263,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const applyImpersonationState = (d: ImpersonationData) => {
     setIsImpersonation(true);
     setIsDemoMode(false);
+    setIsStaffMode(false);
     setClinicId(d.clinic_id);
     setImpersonationClinicName(d.clinic_name);
     setUserRole('owner');
@@ -184,12 +282,75 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     setIsDemoMode(true);
     setIsImpersonation(false);
+    setIsStaffMode(false);
     setClinicId(d.workspace.id);
     setImpersonationClinicName(null);
     setUserRole('owner');
     setRolePermissions(ALL_PERMISSIONS);
     setSession(null);
     setUser(demoUser);
+  };
+
+  const applyStaffWorkspaceState = (d: StaffAuthData, supabaseUser?: User | null) => {
+    const role = isStaffRole(d.user.role) ? d.user.role : 'receptionist';
+    const workspaceId = d.user.workspaceId || d.user.workspace_id || d.session.workspaceId || 'demo-workspace';
+    const staffUser = supabaseUser ?? ({
+      id: d.user.authUserId || d.user.auth_user_id || d.user.id || 'staff-user',
+      email: d.user.email || d.session.email,
+      user_metadata: { full_name: d.user.name || d.user.email || 'Staff user', role },
+      app_metadata: {},
+      aud: 'authenticated',
+      created_at: d.session.createdAt,
+    } as User);
+
+    setIsDemoMode(false);
+    setIsImpersonation(false);
+    setIsStaffMode(true);
+    setClinicId(workspaceId);
+    setImpersonationClinicName(null);
+    setUserRole(role);
+    setRolePermissions(routePermissionsForStaffRole(role));
+    setUser(staffUser);
+  };
+
+  const fetchStaffByEmail = async (email: string): Promise<StaffUserData | null> => {
+    if (!email.trim()) return null;
+
+    try {
+      const response = await fetch(apiUrl(`/api/crm/staff?email=${encodeURIComponent(email.trim().toLowerCase())}`));
+      const text = await response.text();
+      const body = text ? JSON.parse(text) as { success?: boolean; data?: Record<string, unknown> } : null;
+      if (!response.ok || body?.success !== true || !body.data) return null;
+
+      const staffList = Array.isArray(body.data.staff)
+        ? body.data.staff
+        : Array.isArray(body.data.items)
+          ? body.data.items
+          : [];
+      return normalizeStaffUser(staffList[0]);
+    } catch {
+      return null;
+    }
+  };
+
+  const tryApplySupabaseStaffUser = async (supabaseUser: User): Promise<boolean> => {
+    const email = supabaseUser.email || '';
+    const staffUser = await fetchStaffByEmail(email);
+    if (!staffUser) return false;
+
+    const sessionData: StaffSessionData = {
+      mode: 'staff',
+      authenticated: true,
+      createdAt: new Date().toISOString(),
+      email,
+      workspaceId: staffUser.workspaceId || staffUser.workspace_id,
+      supabaseUserId: supabaseUser.id,
+    };
+
+    localStorage.setItem(STAFF_USER_KEY, JSON.stringify(staffUser));
+    localStorage.setItem(STAFF_SESSION_KEY, JSON.stringify(sessionData));
+    applyStaffWorkspaceState({ user: staffUser, session: sessionData }, supabaseUser);
+    return true;
   };
 
   /* ── 1. Init ──────────────────────────────────────────── */
@@ -230,6 +391,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       return;
     }
 
+    const staffAuth = loadStoredStaffAuth();
+    if (staffAuth) {
+      applyStaffWorkspaceState(staffAuth);
+      setIsLoading(false);
+      return;
+    }
+
     const demoAuth = loadStoredDemoAuth();
     if (demoAuth) {
       applyDemoWorkspaceState(demoAuth);
@@ -256,6 +424,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         return;
       }
 
+      const staffAuth = loadStoredStaffAuth();
+      if (staffAuth) {
+        applyStaffWorkspaceState(staffAuth, sess?.user ?? null);
+        setIsLoading(false);
+        return;
+      }
+
       const demoAuth = loadStoredDemoAuth();
       if (demoAuth) {
         applyDemoWorkspaceState(demoAuth);
@@ -264,7 +439,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
 
       if (sess?.user) {
-        fetchUserRole(sess.user.id);
+        void (async () => {
+          const handledAsStaff = await tryApplySupabaseStaffUser(sess.user);
+          if (handledAsStaff) {
+            setIsLoading(false);
+            return;
+          }
+          await fetchUserRole(sess.user.id);
+        })();
       } else {
         setClinicId(null);
         setUserRole(null);
@@ -287,6 +469,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       return;
     }
 
+    const staffAuth = loadStoredStaffAuth();
+    if (staffAuth) {
+      applyStaffWorkspaceState(staffAuth, sess?.user ?? null);
+      setIsLoading(false);
+      return;
+    }
+
     const demoAuth = loadStoredDemoAuth();
     if (demoAuth) {
       applyDemoWorkspaceState(demoAuth);
@@ -295,6 +484,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
 
     if (sess?.user) {
+      const handledAsStaff = await tryApplySupabaseStaffUser(sess.user);
+      if (handledAsStaff) {
+        setIsLoading(false);
+        return;
+      }
       await fetchUserRole(sess.user.id);
     } else {
       setIsLoading(false);
@@ -447,7 +641,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const signOut = async () => {
     if (isDemoMode) {
       clearDemoStorage();
+      clearStaffStorage();
       setIsDemoMode(false);
+      setIsStaffMode(false);
       setSession(null);
       setUser(null);
       setClinicId(null);
@@ -457,8 +653,23 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       return;
     }
 
+    if (isStaffMode) {
+      clearStaffStorage();
+      clearDemoStorage();
+      setIsStaffMode(false);
+      setSession(null);
+      setUser(null);
+      setClinicId(null);
+      setUserRole(null);
+      setRolePermissions({});
+      await supabase.auth.signOut();
+      setLocation('/');
+      return;
+    }
+
     if (isImpersonation) {
       clearImpersonationStorage();
+      clearStaffStorage();
       setIsImpersonation(false);
       setSession(null);
       setUser(null);
@@ -471,6 +682,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setLocation('/');
       return;
     }
+    clearStaffStorage();
+    clearDemoStorage();
     await supabase.auth.signOut();
     setLocation('/');
     toast.success('Вы успешно вышли из системы');
@@ -480,7 +693,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     <AuthContext.Provider value={{
       session, user, clinicId, userRole, isLoading,
       rolePermissions,
-      isImpersonation, isDemoMode, impersonationClinicName,
+      isImpersonation, isDemoMode, isStaffMode, impersonationClinicName,
       signOut,
     }}>
       {children}

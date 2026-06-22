@@ -13,6 +13,31 @@ export type CrmResource =
 
 type CrmMode = "supabase" | "demo";
 type JsonRecord = Record<string, unknown>;
+type QueryValue = string | string[] | undefined;
+
+type SupabaseAdminCreateUserResult = {
+  data?: {
+    user?: {
+      id?: string | null;
+    } | null;
+  } | null;
+  error?: {
+    message?: string;
+  } | null;
+};
+
+type SupabaseAdminCapableClient = {
+  auth?: {
+    admin?: {
+      createUser(input: {
+        email: string;
+        password: string;
+        email_confirm: boolean;
+        user_metadata: Record<string, unknown>;
+      }): Promise<SupabaseAdminCreateUserResult>;
+    };
+  };
+};
 
 type ResourceConfig = {
   table: string;
@@ -38,6 +63,10 @@ function asRecord(value: unknown): JsonRecord {
 
 function readString(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
+}
+
+function readQueryString(value: QueryValue): string {
+  return readString(Array.isArray(value) ? value[0] : value);
 }
 
 function readNumber(value: unknown): number | null {
@@ -162,6 +191,11 @@ function buildPatchRow(resource: CrmResource, body: JsonRecord): JsonRecord {
     setText("phone", ["phone"]);
     setText("role", ["role"]);
     setText("status", ["status"]);
+    setText("auth_user_id", ["authUserId", "auth_user_id"]);
+    setRaw("temporary_password_set", ["temporaryPasswordSet", "temporary_password_set"]);
+    setDate("invited_at", ["invitedAt", "invited_at"]);
+    setDate("last_login_at", ["lastLoginAt", "last_login_at"]);
+    setRaw("password_reset_required", ["passwordResetRequired", "password_reset_required"]);
     row.updated_at = new Date().toISOString();
   }
 
@@ -352,10 +386,16 @@ function makeStaffUser(body: JsonRecord): JsonRecord {
   return {
     id: readString(body.id) || nextDemoId("staff"),
     name: firstString(body.name, body.full_name, body.fullName),
-    email: readString(body.email),
+    email: readString(body.email).toLowerCase(),
     phone: readString(body.phone),
     role: readString(body.role) || "receptionist",
     status: readString(body.status) || "active",
+    workspaceId: firstString(body.workspaceId, body.workspace_id),
+    authUserId: firstString(body.authUserId, body.auth_user_id),
+    temporaryPasswordSet: Boolean(body.temporaryPasswordSet ?? body.temporary_password_set ?? false),
+    invitedAt: firstString(body.invitedAt, body.invited_at),
+    lastLoginAt: firstString(body.lastLoginAt, body.last_login_at),
+    passwordResetRequired: Boolean(body.passwordResetRequired ?? body.password_reset_required ?? false),
   };
 }
 
@@ -553,20 +593,31 @@ const configs: Record<CrmResource, ResourceConfig> = {
     toRow: (body, workspaceId) => ({
       workspace_id: workspaceId,
       full_name: firstString(body.name, body.full_name, body.fullName),
-      email: readString(body.email),
+      email: readString(body.email).toLowerCase(),
       phone: readString(body.phone) || null,
       role: readString(body.role) || "receptionist",
       status: readString(body.status) || "active",
+      auth_user_id: firstString(body.authUserId, body.auth_user_id) || null,
+      temporary_password_set: Boolean(body.temporaryPasswordSet ?? body.temporary_password_set ?? false),
+      invited_at: maybeDate(body.invitedAt ?? body.invited_at),
+      last_login_at: maybeDate(body.lastLoginAt ?? body.last_login_at),
+      password_reset_required: Boolean(body.passwordResetRequired ?? body.password_reset_required ?? false),
       updated_at: new Date().toISOString(),
     }),
     fromRow: (row) =>
       makeStaffUser({
         id: row.id,
+        workspaceId: row.workspace_id,
         name: row.full_name,
         email: row.email,
         phone: row.phone,
         role: row.role,
         status: row.status,
+        authUserId: row.auth_user_id,
+        temporaryPasswordSet: row.temporary_password_set,
+        invitedAt: row.invited_at,
+        lastLoginAt: row.last_login_at,
+        passwordResetRequired: row.password_reset_required,
       }),
   },
   "content-videos": {
@@ -618,12 +669,58 @@ const configs: Record<CrmResource, ResourceConfig> = {
   },
 };
 
+function generateTemporaryPassword(): string {
+  const suffix = Math.random().toString(36).slice(2, 8);
+  return `Negis2026!${suffix}`;
+}
+
+async function createSupabaseAuthUser(input: {
+  supabase: unknown;
+  email: string;
+  password: string;
+  name: string;
+  role: string;
+  workspaceId: string;
+}): Promise<{ authUserId: string; warning?: string }> {
+  const admin = (input.supabase as SupabaseAdminCapableClient).auth?.admin;
+
+  if (!admin?.createUser) {
+    return {
+      authUserId: "",
+      warning: "Supabase Auth admin API is not available in this runtime",
+    };
+  }
+
+  const result = await admin.createUser({
+    email: input.email,
+    password: input.password,
+    email_confirm: true,
+    user_metadata: {
+      full_name: input.name,
+      role: input.role,
+      workspace_id: input.workspaceId,
+    },
+  });
+
+  if (result.error) {
+    return {
+      authUserId: "",
+      warning: result.error.message || "Supabase Auth user was not created",
+    };
+  }
+
+  return {
+    authUserId: readString(result.data?.user?.id),
+  };
+}
+
 async function listItems(resource: CrmResource, req: VercelRequest, res: VercelResponse) {
   const config = configs[resource];
   const workspaceId = readWorkspaceId(req, {});
+  const emailFilter = resource === "staff" ? readQueryString(req.query.email).toLowerCase() : "";
   const supabase = getSupabaseServerClient();
 
-  if (!supabase || !isUuid(workspaceId)) {
+  if (!supabase || (!emailFilter && !isUuid(workspaceId))) {
     return sendJson(
       res,
       200,
@@ -632,11 +729,18 @@ async function listItems(resource: CrmResource, req: VercelRequest, res: VercelR
   }
 
   try {
-    const { data, error } = await supabase
+    let query = supabase
       .from(config.table)
       .select("*")
-      .eq("workspace_id", workspaceId)
       .order(config.sortableColumn, { ascending: false });
+
+    if (emailFilter) {
+      query = query.eq("email", emailFilter).limit(1);
+    } else {
+      query = query.eq("workspace_id", workspaceId);
+    }
+
+    const { data, error } = await query;
 
     if (error) {
       throw new Error(error.message);
@@ -651,7 +755,136 @@ async function listItems(resource: CrmResource, req: VercelRequest, res: VercelR
   }
 }
 
+async function createStaffItem(req: VercelRequest, res: VercelResponse) {
+  const config = configs.staff;
+  const rawBody = asRecord(req.body);
+  const name = firstString(rawBody.name, rawBody.full_name, rawBody.fullName);
+  const email = readString(rawBody.email).toLowerCase();
+  const role = readString(rawBody.role) || "receptionist";
+  const temporaryPassword = readString(rawBody.temporaryPassword) || generateTemporaryPassword();
+  const body = {
+    ...rawBody,
+    name,
+    email,
+    role,
+    temporaryPasswordSet: false,
+    passwordResetRequired: false,
+  };
+  const details = [...validationDetails(body, config.requiredPost), ...resourceValidationDetails("staff", body)];
+
+  if (details.length > 0) {
+    return sendJson(res, 400, errorBody("Validation error", details));
+  }
+
+  const workspaceId = readWorkspaceId(req, body);
+  const supabase = getSupabaseServerClient();
+  const demoItem = config.demoItem({
+    ...body,
+    workspaceId,
+    temporaryPasswordSet: true,
+    passwordResetRequired: true,
+    invitedAt: new Date().toISOString(),
+  });
+
+  if (!supabase || !isUuid(workspaceId)) {
+    return sendJson(
+      res,
+      200,
+      success(
+        "demo",
+        {
+          item: demoItem,
+          staff: demoItem,
+          temporaryPassword,
+          loginUrl: "/login",
+          authUserCreated: false,
+        },
+        !supabase ? "Supabase env is not configured" : "Demo workspace uses localStorage",
+      ),
+    );
+  }
+
+  let authUserId = "";
+  let authWarning = "";
+
+  try {
+    const authResult = await createSupabaseAuthUser({
+      supabase,
+      email,
+      password: temporaryPassword,
+      name,
+      role,
+      workspaceId,
+    });
+    authUserId = authResult.authUserId;
+    authWarning = authResult.warning || "";
+  } catch (error) {
+    authWarning = error instanceof Error ? error.message : "Supabase Auth user was not created";
+  }
+
+  try {
+    const row = config.toRow(
+      {
+        ...body,
+        authUserId,
+        temporaryPasswordSet: Boolean(authUserId),
+        invitedAt: new Date().toISOString(),
+        passwordResetRequired: Boolean(authUserId),
+      },
+      workspaceId,
+    );
+    const { data, error } = await supabase.from(config.table).insert(row).select("*").single();
+
+    if (error) {
+      throw new Error(error.message);
+    }
+
+    const item = config.fromRow(asRecord(data));
+    const warning = authWarning
+      ? `Сотрудник создан как профиль, но auth user не создан: ${authWarning}`
+      : undefined;
+
+    return sendJson(
+      res,
+      201,
+      success(
+        "supabase",
+        {
+          item,
+          staff: item,
+          ...(authUserId ? { temporaryPassword } : {}),
+          loginUrl: "/login",
+          authUserCreated: Boolean(authUserId),
+        },
+        warning,
+      ),
+    );
+  } catch (error) {
+    const warning = supabaseWarning(config.table, error);
+    console.warn(warning);
+    return sendJson(
+      res,
+      200,
+      success(
+        "demo",
+        {
+          item: demoItem,
+          staff: demoItem,
+          temporaryPassword,
+          loginUrl: "/login",
+          authUserCreated: false,
+        },
+        warning,
+      ),
+    );
+  }
+}
+
 async function createItem(resource: CrmResource, req: VercelRequest, res: VercelResponse) {
+  if (resource === "staff") {
+    return createStaffItem(req, res);
+  }
+
   const config = configs[resource];
   const body = asRecord(req.body);
   const details = [...validationDetails(body, config.requiredPost), ...resourceValidationDetails(resource, body)];
@@ -692,19 +925,27 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
 async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelResponse) {
   const config = configs[resource];
   const body = asRecord(req.body);
-  const id = readString(body.id);
+  const updates = asRecord(body.updates);
+  const patchBody = Object.keys(updates).length > 0 ? updates : body;
+  const id = firstString(body.id, patchBody.id, readQueryString(req.query.id));
 
   if (!id) {
-    return sendJson(res, 400, errorBody("Validation error", ["id is required"]));
+    return sendJson(res, 400, {
+      ...errorBody("PATCH failed", ["id is required"]),
+      resource,
+    });
   }
 
-  const details = validationDetails(body, config.requiredPatch ?? []);
+  const details = validationDetails(patchBody, config.requiredPatch ?? []);
   if (details.length > 0) {
-    return sendJson(res, 400, errorBody("Validation error", details));
+    return sendJson(res, 400, {
+      ...errorBody("PATCH failed", details),
+      resource,
+    });
   }
 
   const workspaceId = readWorkspaceId(req, body);
-  const demoItem = config.demoItem(body);
+  const demoItem = config.demoItem({ ...patchBody, id, workspaceId });
   const supabase = getSupabaseServerClient();
 
   if (!supabase || !isUuid(workspaceId) || !isUuid(id)) {
@@ -716,7 +957,11 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
   }
 
   try {
-    const row = buildPatchRow(resource, body);
+    const row = buildPatchRow(resource, patchBody);
+
+    if (Object.keys(row).length === 0) {
+      return sendJson(res, 200, success("supabase", { [resource === "content-videos" ? "video" : "item"]: demoItem, item: demoItem }));
+    }
 
     const { data, error } = await supabase
       .from(config.table)

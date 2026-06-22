@@ -44,6 +44,25 @@ function readWorkspaceId(): string {
   if (typeof window === "undefined") return "demo-workspace";
 
   try {
+    const staffUserRaw = window.localStorage.getItem("negis_staff_user");
+    if (staffUserRaw) {
+      const staffUser = JSON.parse(staffUserRaw) as { workspaceId?: unknown; workspace_id?: unknown };
+      const staffWorkspaceId = typeof staffUser.workspaceId === "string" && staffUser.workspaceId.trim()
+        ? staffUser.workspaceId.trim()
+        : typeof staffUser.workspace_id === "string" && staffUser.workspace_id.trim()
+          ? staffUser.workspace_id.trim()
+          : "";
+      if (staffWorkspaceId) return staffWorkspaceId;
+    }
+
+    const staffSessionRaw = window.localStorage.getItem("negis_staff_session");
+    if (staffSessionRaw) {
+      const staffSession = JSON.parse(staffSessionRaw) as { workspaceId?: unknown };
+      if (typeof staffSession.workspaceId === "string" && staffSession.workspaceId.trim()) {
+        return staffSession.workspaceId.trim();
+      }
+    }
+
     const raw = window.localStorage.getItem("negis_demo_workspace");
     if (!raw) return "demo-workspace";
     const workspace = JSON.parse(raw) as { id?: unknown };
@@ -179,8 +198,8 @@ export function useDemoCollection<TItem extends { id: string }>(
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             id,
-            ...(patchToApi ? patchToApi(patch) : patch),
             workspaceId,
+            updates: patchToApi ? patchToApi(patch) : patch,
           }),
         });
       } catch {

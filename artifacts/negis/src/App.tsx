@@ -8,9 +8,9 @@ import { useAuth } from "@/contexts/AuthContext";
 
 import Landing from "@/pages/Landing";
 import Register from "@/pages/Register";
+import Login from "@/pages/Login";
 import Onboarding from "@/pages/Onboarding";
 import Dashboard from "@/pages/Dashboard";
-import Booking from "@/pages/Booking";
 import Agent from "@/pages/Agent";
 import Ads from "@/pages/Ads";
 import AdsCallback from "@/pages/AdsCallback";
@@ -133,10 +133,11 @@ function Router() {
   return (
     <Switch>
       <Route path="/" component={Landing} />
+      <Route path="/login" component={Login} />
       <Route path="/register" component={Register} />
       <Route path="/onboarding" component={Onboarding} />
       <Route path="/dashboard" component={() => <ProtectedPage component={Dashboard} permission="dashboard" />} />
-      <Route path="/booking" component={() => <ProtectedPage component={Booking} permission="booking" demoFallbackTitle="Записи" />} />
+      <Route path="/booking" component={() => <ProtectedPage component={DemoAppointments} permission="booking" />} />
       <Route path="/appointments" component={() => <ProtectedPage component={DemoAppointments} permission="booking" />} />
       <Route path="/reception" component={() => <ProtectedPage component={DemoReception} permission="reception" />} />
       <Route path="/calls" component={() => <ProtectedPage component={DemoCalls} permission="reception" />} />

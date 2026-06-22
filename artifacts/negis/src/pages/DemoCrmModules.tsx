@@ -6,7 +6,9 @@ import {
   CalendarCheck,
   CheckCircle2,
   ClipboardList,
+  Copy,
   Crown,
+  KeyRound,
   MessageCircle,
   Megaphone,
   PhoneCall,
@@ -23,6 +25,7 @@ import {
 import { toast } from "sonner";
 import { PageLayout } from "@/components/layout/PageLayout";
 import { useDemoCollection } from "@/lib/demoStorage";
+import { apiUrl } from "@/lib/api";
 import {
   permissionLabels,
   permissionsForRole,
@@ -110,6 +113,12 @@ type StaffMember = {
   phone: string;
   role: StaffRole;
   status: string;
+  workspaceId?: string;
+  authUserId?: string;
+  temporaryPasswordSet?: boolean;
+  invitedAt?: string;
+  lastLoginAt?: string;
+  passwordResetRequired?: boolean;
 };
 
 const clientsSeed: Client[] = [
@@ -253,6 +262,75 @@ const toneClasses: Record<NonNullable<Metric["tone"]>, { bg: string; text: strin
 
 function newId(prefix: string) {
   return `${prefix}-${Date.now()}`;
+}
+
+function generateTemporaryPassword() {
+  return `Negis2026!${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function readCurrentWorkspaceId() {
+  if (typeof window === "undefined") return "demo-workspace";
+
+  for (const key of ["negis_staff_user", "negis_staff_session", "negis_demo_workspace"]) {
+    try {
+      const raw = window.localStorage.getItem(key);
+      if (!raw) continue;
+      const value = JSON.parse(raw) as { id?: unknown; workspaceId?: unknown; workspace_id?: unknown };
+      const workspaceId = typeof value.workspaceId === "string" && value.workspaceId.trim()
+        ? value.workspaceId.trim()
+        : typeof value.workspace_id === "string" && value.workspace_id.trim()
+          ? value.workspace_id.trim()
+          : key === "negis_demo_workspace" && typeof value.id === "string" && value.id.trim()
+            ? value.id.trim()
+            : "";
+      if (workspaceId) return workspaceId;
+    } catch {
+      // Ignore malformed localStorage and keep fallback mode.
+    }
+  }
+
+  return "demo-workspace";
+}
+
+async function readApiJson(response: globalThis.Response) {
+  const text = await response.text();
+  if (!text) return null;
+
+  try {
+    return JSON.parse(text) as {
+      success?: boolean;
+      mode?: string;
+      warning?: string;
+      data?: Record<string, unknown>;
+      error?: string;
+      details?: string[];
+    };
+  } catch {
+    return null;
+  }
+}
+
+function staffFromApi(value: unknown, fallback: StaffMember): StaffMember {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return fallback;
+  const record = value as Record<string, unknown>;
+  const role = typeof record.role === "string" && staffRoles.includes(record.role as StaffRole)
+    ? record.role as StaffRole
+    : fallback.role;
+
+  return {
+    id: typeof record.id === "string" ? record.id : fallback.id,
+    name: typeof record.name === "string" ? record.name : fallback.name,
+    email: typeof record.email === "string" ? record.email : fallback.email,
+    phone: typeof record.phone === "string" ? record.phone : fallback.phone,
+    role,
+    status: typeof record.status === "string" ? record.status : fallback.status,
+    workspaceId: typeof record.workspaceId === "string" ? record.workspaceId : fallback.workspaceId,
+    authUserId: typeof record.authUserId === "string" ? record.authUserId : fallback.authUserId,
+    temporaryPasswordSet: typeof record.temporaryPasswordSet === "boolean" ? record.temporaryPasswordSet : fallback.temporaryPasswordSet,
+    invitedAt: typeof record.invitedAt === "string" ? record.invitedAt : fallback.invitedAt,
+    lastLoginAt: typeof record.lastLoginAt === "string" ? record.lastLoginAt : fallback.lastLoginAt,
+    passwordResetRequired: typeof record.passwordResetRequired === "boolean" ? record.passwordResetRequired : fallback.passwordResetRequired,
+  };
 }
 
 function PageHeader({ title, subtitle, action }: { title: string; subtitle: string; action?: ReactNode }) {
@@ -870,11 +948,20 @@ export function DemoReports() {
 }
 
 export function DemoAdmin() {
-  const { items: staff, addItem, updateItem } = useDemoCollection("negis_demo_staff", staffSeed, {
+  const { items: staff, setItems: setStaff, updateItem } = useDemoCollection("negis_demo_staff", staffSeed, {
     endpoint: "/api/crm/staff",
     listKey: "staff",
   });
   const [targetingStatus, setTargetingStatus] = useState("не проверен");
+  const [temporaryPassword, setTemporaryPassword] = useState(generateTemporaryPassword);
+  const [createdCredentials, setCreatedCredentials] = useState<{
+    email: string;
+    role: StaffRole;
+    temporaryPassword: string;
+    loginUrl: string;
+    warning?: string;
+    authUserCreated?: boolean;
+  } | null>(null);
   const [staffForm, setStaffForm] = useState<Omit<StaffMember, "id">>({
     name: "",
     email: "",
@@ -902,20 +989,80 @@ export function DemoAdmin() {
     }));
   };
 
-  const addStaffMember = () => {
+  const addStaffMember = async () => {
     if (!staffForm.name.trim() || !staffForm.email.trim()) {
       toast.error("Укажите имя и email сотрудника");
       return;
     }
 
-    addItem({
+    const password = temporaryPassword.trim() || generateTemporaryPassword();
+    const workspaceId = readCurrentWorkspaceId();
+    const localStaff: StaffMember = {
       id: newId("staff"),
       name: staffForm.name.trim(),
-      email: staffForm.email.trim(),
+      email: staffForm.email.trim().toLowerCase(),
       phone: staffForm.phone.trim(),
       role: staffForm.role,
       status: staffForm.status,
-    });
+      workspaceId,
+      temporaryPasswordSet: true,
+      passwordResetRequired: true,
+      invitedAt: new Date().toISOString(),
+    };
+
+    setStaff((current) => [localStaff, ...current]);
+
+    try {
+      const response = await fetch(apiUrl("/api/crm/staff"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: localStaff.name,
+          email: localStaff.email,
+          phone: localStaff.phone,
+          role: localStaff.role,
+          status: localStaff.status,
+          workspaceId,
+          temporaryPassword: password,
+        }),
+      });
+      const body = await readApiJson(response);
+
+      if (!response.ok || body?.success !== true) {
+        throw new Error(body?.details?.join(", ") || body?.error || "Не удалось создать сотрудника");
+      }
+
+      const savedStaff = staffFromApi(body.data?.staff ?? body.data?.item, localStaff);
+      setStaff((current) => current.map((member) => (member.id === localStaff.id ? savedStaff : member)));
+      const returnedPassword = typeof body.data?.temporaryPassword === "string" ? body.data.temporaryPassword : password;
+
+      setCreatedCredentials({
+        email: savedStaff.email,
+        role: savedStaff.role,
+        temporaryPassword: returnedPassword,
+        loginUrl: typeof body.data?.loginUrl === "string" ? body.data.loginUrl : "/login",
+        warning: body.warning,
+        authUserCreated: Boolean(body.data?.authUserCreated),
+      });
+
+      if (body.warning) {
+        toast.warning(body.warning);
+      } else {
+        toast.success("Сотрудник создан");
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Сотрудник сохранён локально";
+      setCreatedCredentials({
+        email: localStaff.email,
+        role: localStaff.role,
+        temporaryPassword: password,
+        loginUrl: "/login",
+        warning: message,
+        authUserCreated: false,
+      });
+      toast.warning(message);
+    }
+
     setStaffForm({
       name: "",
       email: "",
@@ -923,7 +1070,26 @@ export function DemoAdmin() {
       role: "receptionist",
       status: "active",
     });
-    toast.success("Сотрудник сохранён");
+    setTemporaryPassword(generateTemporaryPassword());
+  };
+
+  const copyCreatedCredentials = async () => {
+    if (!createdCredentials) return;
+
+    const text = [
+      "Negis CRM",
+      `Login: ${createdCredentials.loginUrl}`,
+      `Email: ${createdCredentials.email}`,
+      `Role: ${roleLabels[createdCredentials.role]}`,
+      `Temporary password: ${createdCredentials.temporaryPassword}`,
+    ].join("\n");
+
+    try {
+      await navigator.clipboard.writeText(text);
+      toast.success("Данные для входа скопированы");
+    } catch {
+      toast.error("Не удалось скопировать автоматически");
+    }
   };
 
   const integrations = useMemo(
@@ -965,11 +1131,11 @@ export function DemoAdmin() {
           <div className="mb-5 flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
             <div>
               <h2 className="text-lg font-bold text-[#0F172A]">Сотрудники</h2>
-              <p className="mt-1 text-sm text-[#64748B]">Добавление сотрудника пока не отправляет invite email, но сохраняет запись для операционной работы.</p>
+              <p className="mt-1 text-sm text-[#64748B]">Создайте профиль сотрудника, роль и временный пароль. Пароль показывается только один раз после создания.</p>
             </div>
             <PrimaryButton onClick={addStaffMember}><UserPlus size={16} />Добавить сотрудника</PrimaryButton>
           </div>
-          <div className="mb-5 grid gap-3 md:grid-cols-5">
+          <div className="mb-5 grid gap-3 md:grid-cols-2 xl:grid-cols-6">
             <input className="neu-input" value={staffForm.name} onChange={(event) => updateStaffForm("name", event.target.value)} placeholder="Имя" />
             <input className="neu-input" value={staffForm.email} onChange={(event) => updateStaffForm("email", event.target.value)} placeholder="Email" />
             <input className="neu-input" value={staffForm.phone} onChange={(event) => updateStaffForm("phone", event.target.value)} placeholder="Телефон" />
@@ -983,7 +1149,50 @@ export function DemoAdmin() {
               <option value="paused">Пауза</option>
               <option value="disabled">Отключён</option>
             </select>
+            <div className="flex min-w-0 gap-2">
+              <input
+                className="neu-input min-w-0 flex-1"
+                value={temporaryPassword}
+                onChange={(event) => setTemporaryPassword(event.target.value)}
+                placeholder="Временный пароль"
+              />
+              <button
+                type="button"
+                className="neu-btn shrink-0 px-3"
+                onClick={() => setTemporaryPassword(generateTemporaryPassword())}
+                title="Сгенерировать временный пароль"
+              >
+                <KeyRound size={15} />
+              </button>
+            </div>
           </div>
+          {createdCredentials && (
+            <div className="mb-5 rounded-2xl border border-[#BBF7D0] bg-[#F0FDF4] p-4 text-sm text-[#166534]">
+              <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                <div>
+                  <h3 className="font-black text-[#14532D]">Сотрудник создан</h3>
+                  <p className="mt-1">
+                    Email: <b>{createdCredentials.email}</b> · Роль: <b>{roleLabels[createdCredentials.role]}</b> · Вход: <b>{createdCredentials.loginUrl}</b>
+                  </p>
+                  <p className="mt-1">
+                    Временный пароль: <b>{createdCredentials.temporaryPassword}</b>
+                  </p>
+                  <p className="mt-2 text-[#15803D]">
+                    Скопируйте пароль сейчас. После закрытия карточки он не будет показан снова. Сотрудник входит через `/login`.
+                  </p>
+                  {createdCredentials.warning && (
+                    <p className="mt-2 rounded-xl bg-white/70 px-3 py-2 text-[#92400E]">
+                      {createdCredentials.warning}
+                    </p>
+                  )}
+                </div>
+                <button type="button" className="neu-btn shrink-0" onClick={copyCreatedCredentials}>
+                  <Copy size={15} />
+                  Copy credentials
+                </button>
+              </div>
+            </div>
+          )}
           <div className="overflow-x-auto">
             <table className="w-full min-w-[860px] text-left text-sm">
               <thead className="text-xs uppercase text-[#94A3B8]">

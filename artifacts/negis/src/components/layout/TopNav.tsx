@@ -29,7 +29,7 @@ const NAV = [
   { href: '/targeting-agent', icon: BrainCircuit, label: 'ИИ таргетолог', permission: 'ads' },
   { href: '/content-studio', icon: Clapperboard, label: 'ИИ студия контента', permission: 'ads' },
   { href: '/dashboard', icon: BarChart2, label: 'Дашборд', permission: 'dashboard' },
-  { href: '/booking', icon: CalendarDays, label: 'Запись', permission: 'booking' },
+  { href: '/appointments', icon: CalendarDays, label: 'Запись', permission: 'booking' },
   { href: '/reception', icon: Building2, label: 'Ресепшн', permission: 'reception' },
   { href: '/sales', icon: Briefcase, label: 'Клиенты', permission: 'crm' },
   { href: '/tasks', icon: ClipboardList, label: 'Задачи', permission: 'tasks' },
@@ -90,7 +90,7 @@ async function compressAvatarFile(file: File) {
 
 export function TopNav() {
   const [location] = useLocation();
-  const { signOut, user, userRole, rolePermissions, clinicId, isDemoMode } = useAuth();
+  const { signOut, user, userRole, rolePermissions, clinicId, isDemoMode, isStaffMode } = useAuth();
   const profileButtonRef = useRef<HTMLButtonElement | null>(null);
   const [showProfile, setShowProfile] = useState(false);
   const [profilePanelPosition, setProfilePanelPosition] = useState({ left: 24, top: 128 });
@@ -109,7 +109,7 @@ export function TopNav() {
   const avatarBg = avatarColor || myAgent?.avatar_color || user?.user_metadata?.avatar_color || '#EFF6FF';
 
   useEffect(() => {
-    if (isDemoMode || !clinicId || !user?.id) return;
+    if (isDemoMode || isStaffMode || !clinicId || !user?.id) return;
     const loadProfile = async () => {
       const primary = await supabase
         .from('agents')
@@ -135,7 +135,7 @@ export function TopNav() {
       setAvatarColor(agent.avatar_color || user.user_metadata?.avatar_color || '#EFF6FF');
     };
     loadProfile();
-  }, [clinicId, isDemoMode, user?.id]);
+  }, [clinicId, isDemoMode, isStaffMode, user?.id]);
 
   const openProfile = () => {
     const rect = profileButtonRef.current?.getBoundingClientRect();
@@ -279,7 +279,7 @@ export function TopNav() {
                 <span>Профиль</span>
               </button>
               {filtered.map(({ href, icon: Icon, label }) => {
-                const active = location === href || location.startsWith(href + '/');
+                const active = location === href || location.startsWith(href + '/') || (href === '/appointments' && location === '/booking');
                 return (
                   <Link key={href} href={href}>
                     <div className={`topnav-item ${active ? 'is-active' : ''}`} title={label}>

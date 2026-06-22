@@ -9,7 +9,7 @@ const NAV = [
   { href: '/targeting-agent', icon: BrainCircuit, label: 'ИИ таргетолог', roles: ['owner', 'manager'] },
   { href: '/content-studio', icon: Clapperboard, label: 'ИИ студия контента', roles: ['owner', 'manager'] },
   { href: '/dashboard', icon: BarChart2,    label: 'Дашборд',  roles: ['owner', 'manager'] },
-  { href: '/booking',   icon: CalendarDays, label: 'Запись',   roles: ['owner', 'manager', 'agent', 'booking_agent'] },
+  { href: '/appointments', icon: CalendarDays, label: 'Запись', roles: ['owner', 'manager', 'agent', 'booking_agent'] },
   { href: '/reception', icon: Building2,    label: 'Ресепшн',  roles: ['owner', 'manager', 'receptionist', 'booking_agent'] },
   { href: '/sales',     icon: Briefcase,    label: 'Клиенты',  roles: ['owner', 'manager', 'agent'] },
   { href: '/tasks',     icon: ClipboardList, label: 'Задачи',   roles: ['owner', 'manager', 'agent'] },
@@ -25,7 +25,7 @@ export function Sidebar() {
   const [newPassword, setNewPassword] = useState('');
   const [saving, setSaving] = useState(false);
 
-  const filtered = NAV.filter(item => !userRole || item.roles.includes(userRole));
+  const filtered = NAV.filter(item => !userRole || userRole === 'owner' || userRole === 'manager' || userRole === 'admin' || item.roles.includes(userRole));
   const initials = (user?.user_metadata?.full_name ?? user?.email ?? 'U')
     .split(' ').map((w: string) => w[0]).join('').slice(0, 2).toUpperCase();
 

@@ -103,7 +103,7 @@ function persistDemoWorkspace(data: RegisterSuccess['data']) {
 const roleRoute = (role: string | null) => {
   if (role === 'owner' || role === 'manager') return '/dashboard';
   if (role === 'receptionist') return '/reception';
-  return '/booking';
+  return '/appointments';
 };
 
 export default function Landing() {
