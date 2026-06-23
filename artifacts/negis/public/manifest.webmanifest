@@ -1,0 +1,17 @@
+{
+  "name": "Negis MedCall CRM",
+  "short_name": "Negis CRM",
+  "description": "Mobile-ready CRM workspace for MedCall clinic operations.",
+  "start_url": "/dashboard",
+  "display": "standalone",
+  "background_color": "#EEF4F8",
+  "theme_color": "#0D9488",
+  "icons": [
+    {
+      "src": "/favicon.svg?v=3",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

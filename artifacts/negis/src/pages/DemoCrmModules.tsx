@@ -26,6 +26,7 @@ import { toast } from "sonner";
 import { PageLayout } from "@/components/layout/PageLayout";
 import { useDemoCollection } from "@/lib/demoStorage";
 import { apiUrl } from "@/lib/api";
+import { formatPhone, toTelHref, toWhatsappHref } from "@/lib/phone";
 import {
   permissionLabels,
   permissionsForRole,
@@ -336,12 +337,12 @@ function staffFromApi(value: unknown, fallback: StaffMember): StaffMember {
 function PageHeader({ title, subtitle, action }: { title: string; subtitle: string; action?: ReactNode }) {
   return (
     <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
-      <div>
+      <div className="min-w-0">
         <p className="text-xs font-semibold uppercase tracking-[0.18em] text-[#64748B]">Demo CRM</p>
-        <h1 className="mt-2 text-3xl font-black text-[#0F172A]">{title}</h1>
+        <h1 className="mt-2 break-words text-2xl font-black text-[#0F172A] sm:text-3xl">{title}</h1>
         <p className="mt-2 max-w-3xl text-sm leading-relaxed text-[#64748B]">{subtitle}</p>
       </div>
-      {action}
+      {action ? <div className="w-full sm:w-auto">{action}</div> : null}
     </div>
   );
 }
@@ -396,9 +397,32 @@ function SearchBox({ value, onChange, placeholder }: { value: string; onChange: 
 
 function PrimaryButton({ children, onClick }: { children: ReactNode; onClick?: () => void }) {
   return (
-    <button className="neu-btn-primary inline-flex items-center justify-center gap-2 px-5 py-2.5 text-sm" type="button" onClick={onClick}>
+    <button className="neu-btn-primary inline-flex w-full items-center justify-center gap-2 px-5 py-2.5 text-sm sm:w-auto" type="button" onClick={onClick}>
       {children}
     </button>
+  );
+}
+
+function MobileDetail({ label, value }: { label: string; value: ReactNode }) {
+  return (
+    <div className="min-w-0">
+      <p className="text-[11px] font-bold uppercase tracking-[0.10em] text-[#94A3B8]">{label}</p>
+      <div className="mt-1 break-words text-sm font-semibold text-[#334155]">{value}</div>
+    </div>
+  );
+}
+
+function QuickActionLink({
+  href,
+  children,
+}: {
+  href: string;
+  children: ReactNode;
+}) {
+  return (
+    <a className="neu-btn min-h-11 flex-1 px-3 py-2 text-xs" href={href} target={href.startsWith("http") ? "_blank" : undefined} rel="noreferrer">
+      {children}
+    </a>
   );
 }
 
@@ -440,7 +464,39 @@ export function DemoClients() {
             <h2 className="text-lg font-bold text-[#0F172A]">Таблица клиентов</h2>
             <SearchBox value={search} onChange={setSearch} placeholder="Поиск по имени или телефону" />
           </div>
-          <div className="overflow-x-auto">
+          <div className="space-y-3 md:hidden">
+            {filtered.map((client) => (
+              <article key={client.id} className="neu-sm p-4">
+                <div className="flex min-w-0 items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <h3 className="break-words text-base font-black text-[#0F172A]">{client.name}</h3>
+                    <p className="mt-1 text-sm text-[#64748B]">{formatPhone(client.phone)}</p>
+                  </div>
+                  <StatusPill value={client.status} />
+                </div>
+                <div className="mt-4 grid grid-cols-2 gap-3">
+                  <MobileDetail label="Источник" value={client.source} />
+                  <MobileDetail label="Последняя запись" value={client.lastVisit} />
+                </div>
+                <p className="mt-3 break-words rounded-xl bg-[#F8FAFC] px-3 py-2 text-sm text-[#64748B]">{client.comment}</p>
+                <div className="mt-4 grid grid-cols-3 gap-2">
+                  <QuickActionLink href={toWhatsappHref(client.phone, `Здравствуйте, ${client.name}! Пишем из Concept Clinic.`)}>
+                    <MessageCircle size={14} />
+                    WhatsApp
+                  </QuickActionLink>
+                  <QuickActionLink href={toTelHref(client.phone)}>
+                    <PhoneCall size={14} />
+                    Позвонить
+                  </QuickActionLink>
+                  <Link href="/appointments" className="neu-btn min-h-11 flex-1 px-3 py-2 text-xs">
+                    <CalendarCheck size={14} />
+                    Записать
+                  </Link>
+                </div>
+              </article>
+            ))}
+          </div>
+          <div className="hidden overflow-x-auto md:block">
             <table className="w-full min-w-[820px] text-left text-sm">
               <thead className="text-xs uppercase text-[#94A3B8]">
                 <tr>
@@ -632,7 +688,40 @@ export function DemoLeads() {
             </div>
           ))}
         </div>
-        <section className="neu-card overflow-x-auto">
+        <section className="neu-card">
+          <div className="space-y-3 md:hidden">
+            {items.map((lead) => (
+              <article key={lead.id} className="neu-sm p-4">
+                <div className="flex min-w-0 items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <h3 className="break-words text-base font-black text-[#0F172A]">{lead.name}</h3>
+                    <p className="mt-1 text-sm text-[#64748B]">{formatPhone(lead.phone)}</p>
+                  </div>
+                  <StatusPill value={lead.status} />
+                </div>
+                <div className="mt-4 grid grid-cols-2 gap-3">
+                  <MobileDetail label="Источник" value={lead.source} />
+                  <MobileDetail label="Кампания" value={lead.campaign} />
+                  <MobileDetail label="Ответственный" value={lead.owner} />
+                </div>
+                <div className="mt-4 grid grid-cols-3 gap-2">
+                  <QuickActionLink href={toTelHref(lead.phone)}>
+                    <PhoneCall size={14} />
+                    Позвонить
+                  </QuickActionLink>
+                  <QuickActionLink href={toWhatsappHref(lead.phone, `Здравствуйте, ${lead.name}! Это Concept Clinic.`)}>
+                    <MessageCircle size={14} />
+                    WhatsApp
+                  </QuickActionLink>
+                  <Link href="/appointments" className="neu-btn min-h-11 flex-1 px-3 py-2 text-xs">
+                    <CalendarCheck size={14} />
+                    Записать
+                  </Link>
+                </div>
+              </article>
+            ))}
+          </div>
+          <div className="hidden overflow-x-auto md:block">
           <table className="w-full min-w-[860px] text-left text-sm">
             <thead className="text-xs uppercase text-[#94A3B8]">
               <tr>
@@ -654,6 +743,7 @@ export function DemoLeads() {
               ))}
             </tbody>
           </table>
+          </div>
         </section>
       </div>
     </PageLayout>
@@ -679,8 +769,37 @@ export function DemoCalls() {
           ]}
         />
         <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">
-          <section className="neu-card overflow-x-auto">
+          <section className="neu-card">
             <h2 className="mb-4 text-lg font-bold text-[#0F172A]">Журнал звонков</h2>
+            <div className="space-y-3 md:hidden">
+              {items.map((call) => (
+                <article key={call.id} className="neu-sm p-4">
+                  <div className="flex min-w-0 items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="text-lg font-black text-[#1A56DB]">{call.time}</p>
+                      <h3 className="mt-1 break-words text-base font-black text-[#0F172A]">{call.client}</h3>
+                      <p className="mt-1 text-sm text-[#64748B]">{formatPhone(call.phone)}</p>
+                    </div>
+                    <StatusPill value={call.result} />
+                  </div>
+                  <div className="mt-4 grid grid-cols-2 gap-3">
+                    <MobileDetail label="Тип" value={call.type} />
+                    <MobileDetail label="Резюме" value={call.summary} />
+                  </div>
+                  <div className="mt-4 grid grid-cols-2 gap-2">
+                    <QuickActionLink href={toTelHref(call.phone)}>
+                      <PhoneCall size={14} />
+                      Позвонить
+                    </QuickActionLink>
+                    <QuickActionLink href={toWhatsappHref(call.phone, "Здравствуйте! Это Concept Clinic по вашему обращению.")}>
+                      <MessageCircle size={14} />
+                      WhatsApp
+                    </QuickActionLink>
+                  </div>
+                </article>
+              ))}
+            </div>
+            <div className="hidden overflow-x-auto md:block">
             <table className="w-full min-w-[820px] text-left text-sm">
               <thead className="text-xs uppercase text-[#94A3B8]">
                 <tr>
@@ -702,6 +821,7 @@ export function DemoCalls() {
                 ))}
               </tbody>
             </table>
+            </div>
           </section>
           <aside className="neu-card">
             <div className="mb-4 flex items-center gap-3">
@@ -756,11 +876,11 @@ export function DemoTasks() {
                   <article key={task.id} className="neu-sm p-4">
                     <h3 className="font-bold text-[#0F172A]">{task.title}</h3>
                     <p className="mt-2 text-sm text-[#64748B]">{task.owner} · {task.deadline}</p>
-                    <div className="mt-3 flex items-center justify-between gap-3">
+                    <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                       <StatusPill value={task.priority} />
-                      <div className="flex gap-2">
+                      <div className="grid grid-cols-2 gap-2 sm:flex">
                         {columns.filter((next) => next !== task.status).map((next) => (
-                          <button key={`${task.id}-${next}`} type="button" className="neu-btn px-3 py-1.5 text-xs" onClick={() => updateItem(task.id, { status: next })}>
+                          <button key={`${task.id}-${next}`} type="button" className="neu-btn min-h-11 px-3 py-2 text-xs" onClick={() => updateItem(task.id, { status: next })}>
                             {next}
                           </button>
                         ))}
@@ -827,7 +947,7 @@ export function DemoChat() {
               ))}
               {activeMessages.length === 0 ? <EmptyHint>Сообщений пока нет.</EmptyHint> : null}
             </div>
-            <div className="mt-4 flex gap-3">
+            <div className="mt-4 flex flex-col gap-3 sm:flex-row">
               <input className="neu-input flex-1" value={message} onChange={(event) => setMessage(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") send(); }} placeholder="Сообщение..." />
               <PrimaryButton onClick={send}><MessageCircle size={16} />Отправить</PrimaryButton>
             </div>
@@ -906,8 +1026,24 @@ export function DemoReports() {
           ]}
         />
         <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">
-          <section className="neu-card overflow-x-auto">
+          <section className="neu-card">
             <h2 className="mb-4 text-lg font-bold text-[#0F172A]">Недельный отчёт</h2>
+            <div className="space-y-3 md:hidden">
+              {weekly.map(([day, leads, appointments, conversion, revenue]) => (
+                <article key={day} className="neu-sm p-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <h3 className="font-black text-[#0F172A]">{day}</h3>
+                    <span className="rounded-full bg-green-50 px-3 py-1 text-xs font-bold text-green-700">{conversion}</span>
+                  </div>
+                  <div className="mt-4 grid grid-cols-2 gap-3">
+                    <MobileDetail label="Лиды" value={leads} />
+                    <MobileDetail label="Записи" value={appointments} />
+                    <MobileDetail label="Доход" value={revenue} />
+                  </div>
+                </article>
+              ))}
+            </div>
+            <div className="hidden overflow-x-auto md:block">
             <table className="w-full min-w-[680px] text-left text-sm">
               <thead className="text-xs uppercase text-[#94A3B8]">
                 <tr>
@@ -928,6 +1064,7 @@ export function DemoReports() {
                 ))}
               </tbody>
             </table>
+            </div>
           </section>
           <aside className="neu-card">
             <h2 className="mb-4 text-lg font-bold text-[#0F172A]">Рекомендации AI</h2>
@@ -1193,7 +1330,32 @@ export function DemoAdmin() {
               </div>
             </div>
           )}
-          <div className="overflow-x-auto">
+          <div className="space-y-3 md:hidden">
+            {staff.map((member) => (
+              <article key={member.id} className="neu-sm p-4">
+                <div className="flex min-w-0 items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <h3 className="break-words text-base font-black text-[#0F172A]">{member.name}</h3>
+                    <p className="mt-1 break-words text-sm text-[#64748B]">{member.email}</p>
+                  </div>
+                  <StatusPill value={member.status} />
+                </div>
+                <div className="mt-4 grid grid-cols-2 gap-3">
+                  <MobileDetail label="Телефон" value={formatPhone(member.phone) || "—"} />
+                  <MobileDetail label="Роль" value={roleLabels[member.role] ?? member.role} />
+                  <MobileDetail label="Пароль" value={member.temporaryPasswordSet ? "выдан" : "не выдан"} />
+                </div>
+                <button
+                  type="button"
+                  className="neu-btn mt-4 min-h-11 w-full px-3 py-2 text-xs"
+                  onClick={() => updateItem(member.id, { status: member.status === "active" ? "paused" : "active" })}
+                >
+                  {member.status === "active" ? "Поставить на паузу" : "Активировать"}
+                </button>
+              </article>
+            ))}
+          </div>
+          <div className="hidden overflow-x-auto md:block">
             <table className="w-full min-w-[860px] text-left text-sm">
               <thead className="text-xs uppercase text-[#94A3B8]">
                 <tr>

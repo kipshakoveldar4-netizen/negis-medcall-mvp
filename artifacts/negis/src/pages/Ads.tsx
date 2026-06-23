@@ -847,7 +847,47 @@ function ReportsTab({ clinicId, usdToKzt, onGoToSettings }: { clinicId: string; 
           <h3 className="font-bold text-[#0B1220]">Кампании {sortedCampaigns.length > 0 && <span className="text-[#94A3B8] font-normal text-sm ml-1">({sortedCampaigns.length})</span>}</h3>
           {sortedCampaigns.length > 0 && <span className="text-xs text-[#94A3B8]">Нажмите на строку для деталей</span>}
         </div>
-        <div className="overflow-x-auto">
+        <div className="space-y-3 p-4 md:hidden">
+          {sortedCampaigns.length === 0 ? (
+            <p className="rounded-2xl bg-[#F8FAFC] p-4 text-center text-sm text-[#94A3B8]">
+              Нет данных. Нажмите "Обновить данные", чтобы загрузить кампании.
+            </p>
+          ) : sortedCampaigns.map((c, i) => (
+            <button
+              key={`${c.platform}-${c.campaign_name}-${i}`}
+              type="button"
+              className="neu-sm w-full p-4 text-left"
+              onClick={() => setSelectedCampaign(c)}
+            >
+              <div className="flex min-w-0 items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="text-xs font-bold text-[#64748B]">{c.platform === 'facebook' ? 'Facebook' : 'TikTok'} · {c.account_name}</p>
+                  <h4 className="mt-1 break-words text-base font-black text-[#0B1220]">{c.campaign_name}</h4>
+                </div>
+                <StatusBadge status={c.status} />
+              </div>
+              <div className="mt-4 grid grid-cols-2 gap-3">
+                <div>
+                  <p className="text-[11px] font-bold uppercase tracking-[0.10em] text-[#94A3B8]">Лиды</p>
+                  <p className="mt-1 font-black text-[#0B1220]">{fmtNum(c.leads)}</p>
+                </div>
+                <div>
+                  <p className="text-[11px] font-bold uppercase tracking-[0.10em] text-[#94A3B8]">Расход</p>
+                  <p className="mt-1 font-black text-[#0B1220]">{fmtMoney(c.spend)}</p>
+                </div>
+                <div>
+                  <p className="text-[11px] font-bold uppercase tracking-[0.10em] text-[#94A3B8]">CPL</p>
+                  <p className="mt-1 font-black text-[#0B1220]">{c.leads > 0 ? fmtMoney(c.cpl) : '—'}</p>
+                </div>
+                <div>
+                  <p className="text-[11px] font-bold uppercase tracking-[0.10em] text-[#94A3B8]">Конверсия</p>
+                  <p className="mt-1 font-black text-[#0B1220]">{c.convRate.toFixed(1)}%</p>
+                </div>
+              </div>
+            </button>
+          ))}
+        </div>
+        <div className="hidden overflow-x-auto md:block">
           <table className="w-full text-left border-collapse text-sm" style={{ minWidth: 1100 }}>
             <thead>
               <tr className="border-b border-[#E7ECF3] bg-[#F8FAFC]">
@@ -1078,7 +1118,25 @@ function ConversionTab({ clinicId }: { clinicId: string }) {
         <div className="px-5 py-4 border-b border-[#E7ECF3]">
           <h3 className="font-bold text-[#0B1220]">По источникам</h3>
         </div>
-        <div className="overflow-x-auto">
+        <div className="space-y-3 p-4 md:hidden">
+          {displayed.length === 0 ? (
+            <p className="rounded-2xl bg-[#F8FAFC] p-4 text-center text-sm text-[#94A3B8]">Нет данных за выбранный период</p>
+          ) : displayed.map(r => (
+            <article key={r.source} className="neu-sm p-4">
+              <div className="flex items-center justify-between gap-3">
+                <h4 className="break-words font-black text-[#0B1220]">{r.source}</h4>
+                <span className="rounded-full bg-blue-50 px-3 py-1 text-xs font-bold text-blue-700">{r.bookingRate}%</span>
+              </div>
+              <div className="mt-4 grid grid-cols-2 gap-3 text-sm">
+                <div><p className="text-xs font-bold uppercase text-[#94A3B8]">Лидов</p><p className="font-black text-[#0B1220]">{r.total}</p></div>
+                <div><p className="text-xs font-bold uppercase text-[#94A3B8]">Записалось</p><p className="font-black text-[#0B1220]">{r.booked}</p></div>
+                <div><p className="text-xs font-bold uppercase text-[#94A3B8]">Пришло</p><p className="font-black text-[#0B1220]">{r.visited} · {r.visitRate}%</p></div>
+                <div><p className="text-xs font-bold uppercase text-[#94A3B8]">Потери</p><p className="font-black text-red-500">{r.lost}</p></div>
+              </div>
+            </article>
+          ))}
+        </div>
+        <div className="hidden overflow-x-auto md:block">
           <table className="w-full text-left border-collapse text-sm">
             <thead>
               <tr className="border-b border-[#E7ECF3] text-[#64748B]">

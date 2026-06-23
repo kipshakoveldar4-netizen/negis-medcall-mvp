@@ -536,4 +536,244 @@
                 inset 1px 1px 0 rgba(255, 255, 255, 0.9);
     backdrop-filter: blur(22px);
   }
+
+  html,
+  body,
+  #root {
+    min-width: 0;
+    max-width: 100%;
+    overflow-x: hidden;
+  }
+
+  body {
+    touch-action: manipulation;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  .negis-app-shell,
+  .negis-main,
+  .neu,
+  .neu-sm,
+  .neu-lg,
+  .neu-card,
+  table,
+  section,
+  article,
+  aside,
+  div {
+    min-width: 0;
+  }
+
+  .negis-main {
+    padding: 24px clamp(18px, 3vw, 40px) 40px;
+  }
+
+  .negis-topbar {
+    grid-template-columns: minmax(150px, 1fr) minmax(0, auto) minmax(190px, 1fr);
+    min-height: 98px;
+  }
+
+  .neu-card,
+  .neu-sm,
+  .neu,
+  .soft-modal {
+    overflow-wrap: anywhere;
+  }
+
+  .neu-btn,
+  .neu-btn-primary,
+  .neu-btn-success,
+  .neu-btn-danger,
+  .neu-icon-btn,
+  .soft-icon-btn,
+  button {
+    min-height: 44px;
+  }
+
+  .neu-btn,
+  .neu-btn-primary,
+  .neu-btn-success,
+  .neu-btn-danger {
+    white-space: normal;
+    text-align: center;
+  }
+
+  .mobile-bottom-nav {
+    position: fixed;
+    left: max(12px, env(safe-area-inset-left));
+    right: max(12px, env(safe-area-inset-right));
+    bottom: max(10px, env(safe-area-inset-bottom));
+    z-index: 70;
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 4px;
+    padding: 8px;
+    border: 1px solid rgba(219, 232, 224, 0.92);
+    border-radius: 24px;
+    background: rgba(255, 255, 255, 0.88);
+    box-shadow: 0 16px 46px rgba(15, 23, 42, 0.16);
+    backdrop-filter: blur(22px);
+  }
+
+  .mobile-bottom-nav-item {
+    min-width: 0;
+    min-height: 54px;
+    border: 0;
+    border-radius: 18px;
+    background: transparent;
+    color: var(--ng-muted);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
+    font-size: 10px;
+    font-weight: 800;
+    line-height: 1.1;
+    cursor: pointer;
+  }
+
+  .mobile-bottom-nav-item.is-active {
+    background: linear-gradient(145deg, #12B8AA, #0D9488);
+    color: #fff;
+    box-shadow: 0 8px 18px rgba(13, 148, 136, 0.22);
+  }
+
+  .mobile-nav-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 69;
+    background: rgba(15, 23, 42, 0.24);
+    display: flex;
+    align-items: flex-end;
+    padding: 16px 12px calc(92px + env(safe-area-inset-bottom));
+  }
+
+  .mobile-nav-sheet {
+    width: 100%;
+    max-height: min(72dvh, 620px);
+    overflow-y: auto;
+    border: 1px solid rgba(219, 232, 224, 0.92);
+    border-radius: 26px;
+    background: rgba(255, 255, 255, 0.94);
+    box-shadow: 0 22px 70px rgba(15, 23, 42, 0.20);
+    padding: 18px;
+    backdrop-filter: blur(22px);
+  }
+
+  .mobile-nav-drawer-item,
+  .mobile-nav-logout {
+    min-width: 0;
+    min-height: 52px;
+    border: 1px solid rgba(226, 232, 240, 0.95);
+    border-radius: 18px;
+    background: rgba(248, 250, 252, 0.88);
+    color: #0F172A;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px;
+    font-size: 13px;
+    font-weight: 800;
+    text-align: left;
+    width: 100%;
+  }
+
+  .mobile-nav-drawer-item span,
+  .mobile-nav-logout span {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .mobile-nav-logout {
+    margin-top: 12px;
+    justify-content: center;
+    color: #DC2626;
+    background: rgba(254, 242, 242, 0.92);
+    border-color: rgba(254, 202, 202, 0.95);
+  }
+
+  @media (max-width: 767px) {
+    body {
+      font-size: 14px;
+    }
+
+    .negis-main {
+      padding: 16px 14px calc(112px + env(safe-area-inset-bottom));
+    }
+
+    .negis-topbar {
+      grid-template-columns: minmax(0, 1fr) auto;
+      min-height: 66px;
+      padding-left: 16px;
+      padding-right: 16px;
+      gap: 10px;
+    }
+
+    .negis-topbar-nav {
+      display: none;
+    }
+
+    .negis-topbar-date {
+      display: none !important;
+    }
+
+    .negis-topbar-actions {
+      gap: 8px;
+    }
+
+    .neu-card {
+      padding: 18px;
+      border-radius: 20px;
+    }
+
+    .neu-card.p-6,
+    .neu-card.p-5,
+    .neu-card.p-4 {
+      padding: 18px !important;
+    }
+
+    .grid.grid-cols-2,
+    .grid.grid-cols-3,
+    .grid.grid-cols-4 {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .mobile-nav-sheet .grid.grid-cols-2 {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .neu,
+    .neu-sm {
+      border-radius: 18px;
+    }
+
+    .neu-input {
+      min-height: 46px;
+      font-size: 16px;
+    }
+
+    .topnav-shell {
+      display: none;
+    }
+
+    .soft-modal {
+      left: 12px !important;
+      right: 12px !important;
+      top: 72px !important;
+      width: auto !important;
+      max-height: calc(100dvh - 94px - env(safe-area-inset-bottom)) !important;
+    }
+
+    textarea {
+      max-width: 100%;
+    }
+  }
+
+  @media (min-width: 768px) {
+    .mobile-bottom-nav,
+    .mobile-nav-backdrop {
+      display: none;
+    }
+  }
 }

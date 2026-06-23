@@ -177,10 +177,8 @@ export function Topbar() {
 
   return (
     <header
-      className="grid shrink-0 sticky top-0 z-30 items-center gap-4 px-8"
+      className="negis-topbar grid shrink-0 sticky top-0 z-30 items-center gap-4 px-8"
       style={{
-        gridTemplateColumns: 'minmax(150px, 1fr) minmax(0, auto) minmax(190px, 1fr)',
-        height: 98,
         background: 'rgba(238, 244, 248, 0.86)',
         backdropFilter: 'blur(18px)',
         borderBottom: '1px solid rgba(224, 231, 239, 0.9)',
@@ -201,6 +199,7 @@ export function Topbar() {
         </span>
         <span style={{ color: '#CAD8E5', fontSize: 14 }}>/</span>
         <span
+          className="truncate"
           style={{
             fontSize: 12,
             fontWeight: 600,
@@ -214,12 +213,13 @@ export function Topbar() {
         </span>
       </div>
 
-      <div className="min-w-0 justify-self-center">
+      <div className="negis-topbar-nav min-w-0 justify-self-center">
         <TopNav />
       </div>
 
-      <div className="flex items-center justify-end gap-4">
+      <div className="negis-topbar-actions flex min-w-0 items-center justify-end gap-4">
         <span
+          className="negis-topbar-date"
           style={{
             fontSize: 12,
             color: '#94A3B8',
@@ -262,7 +262,7 @@ export function Topbar() {
             </button>
           </PopoverTrigger>
           <PopoverContent
-            className="w-96 p-0"
+            className="w-[min(24rem,calc(100vw-24px))] p-0"
             align="end"
             style={{
               background: 'rgba(255,255,255,0.94)',

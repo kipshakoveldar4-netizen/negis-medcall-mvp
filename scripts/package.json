@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "hello": "tsx ./src/hello.ts",
+    "test:mobile": "tsx ./src/mobile-layout-check.ts",
     "test:routes": "tsx ./src/smoke-negis-routes.ts",
     "test:targeting": "tsx ./src/test-targeting-agent.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
