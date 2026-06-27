@@ -426,6 +426,11 @@ function QuickActionLink({
   );
 }
 
+function saveAppointmentPrefill(prefill: { clientName: string; phone: string; source?: string; service?: string }) {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem("negis_appointment_prefill", JSON.stringify(prefill));
+}
+
 export function DemoClients() {
   const { items, addItem } = useDemoCollection("negis_demo_clients", clientsSeed, {
     endpoint: "/api/crm/clients",
@@ -488,7 +493,11 @@ export function DemoClients() {
                     <PhoneCall size={14} />
                     Позвонить
                   </QuickActionLink>
-                  <Link href="/appointments" className="neu-btn min-h-11 flex-1 px-3 py-2 text-xs">
+                  <Link
+                    href="/appointments"
+                    className="neu-btn min-h-11 flex-1 px-3 py-2 text-xs"
+                    onClick={() => saveAppointmentPrefill({ clientName: client.name, phone: client.phone, source: client.source })}
+                  >
                     <CalendarCheck size={14} />
                     Записать
                   </Link>
@@ -713,7 +722,11 @@ export function DemoLeads() {
                     <MessageCircle size={14} />
                     WhatsApp
                   </QuickActionLink>
-                  <Link href="/appointments" className="neu-btn min-h-11 flex-1 px-3 py-2 text-xs">
+                  <Link
+                    href="/appointments"
+                    className="neu-btn min-h-11 flex-1 px-3 py-2 text-xs"
+                    onClick={() => saveAppointmentPrefill({ clientName: lead.name, phone: lead.phone, source: lead.source, service: lead.campaign })}
+                  >
                     <CalendarCheck size={14} />
                     Записать
                   </Link>

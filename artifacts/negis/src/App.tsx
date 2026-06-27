@@ -14,11 +14,11 @@ import Dashboard from "@/pages/Dashboard";
 import Agent from "@/pages/Agent";
 import Ads from "@/pages/Ads";
 import AdsCallback from "@/pages/AdsCallback";
+import { AppointmentsPage } from "@/pages/AppointmentsPage";
 import TargetingAgent from "@/pages/TargetingAgent";
 import ContentStudio from "@/pages/ContentStudio";
 import {
   DemoAdmin,
-  DemoAppointments,
   DemoCalls,
   DemoChat,
   DemoClients,
@@ -137,8 +137,8 @@ function Router() {
       <Route path="/register" component={Register} />
       <Route path="/onboarding" component={Onboarding} />
       <Route path="/dashboard" component={() => <ProtectedPage component={Dashboard} permission="dashboard" />} />
-      <Route path="/booking" component={() => <ProtectedPage component={DemoAppointments} permission="booking" />} />
-      <Route path="/appointments" component={() => <ProtectedPage component={DemoAppointments} permission="booking" />} />
+      <Route path="/booking" component={() => <ProtectedPage component={AppointmentsPage} permission="booking" />} />
+      <Route path="/appointments" component={() => <ProtectedPage component={AppointmentsPage} permission="booking" />} />
       <Route path="/reception" component={() => <ProtectedPage component={DemoReception} permission="reception" />} />
       <Route path="/calls" component={() => <ProtectedPage component={DemoCalls} permission="reception" />} />
       <Route path="/sales" component={() => <ProtectedPage component={DemoClients} permission="crm" />} />

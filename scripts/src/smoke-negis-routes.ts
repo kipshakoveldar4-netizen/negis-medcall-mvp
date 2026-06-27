@@ -88,6 +88,7 @@ async function main() {
     "/dashboard",
     "/clients",
     "/appointments",
+    "/booking",
     "/reception",
     "/leads",
     "/calls",
@@ -115,8 +116,14 @@ async function main() {
   });
   await checkCrmEndpoint("/api/crm/appointments", {
     client: "Smoke Client",
+    phone: "+7 700 222 33 44",
+    whatsapp: "+7 700 222 33 44",
     service: "Consultation",
+    doctor: "Smoke Doctor",
+    starts_at: new Date().toISOString(),
+    durationMinutes: 60,
     status: "scheduled",
+    source: "smoke",
   });
   await checkCrmEndpoint("/api/crm/tasks", {
     title: "Smoke task",

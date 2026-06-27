@@ -151,11 +151,14 @@ function buildPatchRow(resource: CrmResource, body: JsonRecord): JsonRecord {
   if (resource === "appointments") {
     setText("client_name", ["client", "client_name", "clientName"]);
     setText("client_phone", ["phone", "client_phone", "clientPhone"]);
+    setText("whatsapp", ["whatsapp"]);
     setText("service", ["service"]);
     setText("doctor_name", ["doctor", "doctor_name", "doctorName"]);
     setDate("starts_at", ["starts_at", "startsAt"]);
+    setRaw("duration_minutes", ["duration_minutes", "durationMinutes"]);
     setText("status", ["status"]);
     setText("notes", ["notes", "time"]);
+    setText("source", ["source"]);
     row.updated_at = new Date().toISOString();
   }
 
@@ -334,15 +337,23 @@ function makeLead(body: JsonRecord): JsonRecord {
 }
 
 function makeAppointment(body: JsonRecord): JsonRecord {
+  const startsAt = firstString(body.startsAt, body.starts_at, body.time);
+  const phone = firstString(body.phone, body.client_phone, body.clientPhone);
+
   return {
     id: readString(body.id) || nextDemoId("appointment"),
-    time: firstString(body.time, body.starts_at),
+    time: startsAt,
+    startsAt,
     client: firstString(body.client, body.client_name, body.clientName),
-    phone: firstString(body.phone, body.client_phone, body.clientPhone),
+    phone,
+    whatsapp: firstString(body.whatsapp, phone),
     service: readString(body.service),
     doctor: firstString(body.doctor, body.doctor_name, body.doctorName),
     status: readString(body.status) || "scheduled",
     notes: readString(body.notes),
+    durationMinutes: readNumber(body.durationMinutes ?? body.duration_minutes) ?? 60,
+    duration_minutes: readNumber(body.durationMinutes ?? body.duration_minutes) ?? 60,
+    source: readString(body.source),
   };
 }
 
@@ -489,11 +500,14 @@ const configs: Record<CrmResource, ResourceConfig> = {
       workspace_id: workspaceId,
       client_name: firstString(body.client, body.client_name, body.clientName) || null,
       client_phone: firstString(body.phone, body.client_phone, body.clientPhone) || null,
+      whatsapp: readString(body.whatsapp) || null,
       service: readString(body.service) || null,
       doctor_name: firstString(body.doctor, body.doctor_name, body.doctorName) || null,
       starts_at: maybeDate(body.starts_at ?? body.startsAt),
+      duration_minutes: readNumber(body.durationMinutes ?? body.duration_minutes) ?? 60,
       status: readString(body.status) || "scheduled",
       notes: firstString(body.notes, body.time) || null,
+      source: readString(body.source) || null,
       updated_at: new Date().toISOString(),
     }),
     fromRow: (row) =>
@@ -501,11 +515,15 @@ const configs: Record<CrmResource, ResourceConfig> = {
         id: row.id,
         client: row.client_name,
         phone: row.client_phone,
+        whatsapp: row.whatsapp,
         service: row.service,
         doctor: row.doctor_name,
+        startsAt: row.starts_at,
         time: row.starts_at || row.notes,
         status: row.status,
         notes: row.notes,
+        durationMinutes: row.duration_minutes,
+        source: row.source,
       }),
   },
   calls: {
