@@ -100,10 +100,12 @@ async function main() {
     "/ads",
     "/targeting-agent",
     "/content-studio",
+    "/login",
   ]) {
     await checkHtmlRoute(route);
   }
   await checkTargetingHealth();
+  await checkJsonEndpoint("/api/crm/health");
   await checkCrmEndpoint("/api/crm/clients", {
     name: "Smoke Client",
     phone: "+7 700 000 00 00",
@@ -142,6 +144,32 @@ async function main() {
   await checkCrmEndpoint("/api/crm/content-videos", {
     title: "Smoke content video",
     niche: "medical marketing",
+  });
+  await checkCrmEndpoint("/api/crm/admin-settings", {
+    key: "clinic",
+    value: {
+      clinicName: "Smoke Clinic",
+      city: "Astana",
+    },
+  });
+  await checkCrmEndpoint("/api/crm/integration-statuses", {
+    provider: "smoke",
+    status: "configured",
+  });
+  await checkCrmEndpoint("/api/crm/ai-providers", {
+    provider: "openai",
+    purpose: "smoke",
+    enabled: false,
+    modelName: "smoke-model",
+  });
+  await checkCrmEndpoint("/api/crm/meta-accounts", {
+    accountName: "Smoke Meta Account",
+    status: "draft",
+  });
+  await checkCrmEndpoint("/api/crm/release-checks", {
+    checkKey: "smoke-release",
+    status: "passed",
+    notes: "Smoke test",
   });
   await checkJsonEndpoint("/api/content-studio/videos");
   await checkJsonEndpoint("/api/content-studio/videos", {

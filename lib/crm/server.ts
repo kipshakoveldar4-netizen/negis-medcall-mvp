@@ -9,7 +9,12 @@ export type CrmResource =
   | "tasks"
   | "chat"
   | "staff"
-  | "content-videos";
+  | "content-videos"
+  | "admin-settings"
+  | "integration-statuses"
+  | "ai-providers"
+  | "meta-accounts"
+  | "release-checks";
 
 type CrmMode = "supabase" | "demo";
 type JsonRecord = Record<string, unknown>;
@@ -45,6 +50,7 @@ type ResourceConfig = {
   requiredPost: string[];
   requiredPatch?: string[];
   sortableColumn: string;
+  upsertConflict?: string;
   toRow: (body: JsonRecord, workspaceId: string) => JsonRecord;
   fromRow: (row: JsonRecord) => JsonRecord;
   demoItem: (body: JsonRecord) => JsonRecord;
@@ -72,6 +78,12 @@ function readQueryString(value: QueryValue): string {
 function readNumber(value: unknown): number | null {
   const numeric = typeof value === "number" ? value : Number(value);
   return Number.isFinite(numeric) ? numeric : null;
+}
+
+function readBoolean(value: unknown): boolean {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") return ["true", "1", "yes", "on"].includes(value.trim().toLowerCase());
+  return Boolean(value);
 }
 
 function readJsonArray(value: unknown): unknown[] {
@@ -225,6 +237,52 @@ function buildPatchRow(resource: CrmResource, body: JsonRecord): JsonRecord {
     row.updated_at = new Date().toISOString();
   }
 
+  if (resource === "admin-settings") {
+    setText("key", ["key"]);
+    setRaw("value", ["value", "config", "settings"]);
+    row.updated_at = new Date().toISOString();
+  }
+
+  if (resource === "integration-statuses") {
+    setText("provider", ["provider"]);
+    setText("status", ["status"]);
+    setText("masked_identifier", ["maskedIdentifier", "masked_identifier"]);
+    setDate("last_checked_at", ["lastCheckedAt", "last_checked_at"]);
+    setText("last_error", ["lastError", "last_error"]);
+    setRaw("metadata", ["metadata"]);
+    row.updated_at = new Date().toISOString();
+  }
+
+  if (resource === "ai-providers") {
+    setText("provider", ["provider"]);
+    setText("purpose", ["purpose"]);
+    setRaw("enabled", ["enabled"]);
+    setText("model_name", ["modelName", "model_name"]);
+    setRaw("config", ["config"]);
+    row.updated_at = new Date().toISOString();
+  }
+
+  if (resource === "meta-accounts") {
+    setText("meta_business_id", ["metaBusinessId", "meta_business_id"]);
+    setText("ad_account_id", ["adAccountId", "ad_account_id"]);
+    setText("page_id", ["pageId", "page_id"]);
+    setText("instagram_actor_id", ["instagramActorId", "instagram_actor_id"]);
+    setText("account_name", ["accountName", "account_name"]);
+    setText("currency", ["currency"]);
+    setText("timezone_name", ["timezoneName", "timezone_name"]);
+    setText("status", ["status"]);
+    setRaw("metadata", ["metadata"]);
+    row.updated_at = new Date().toISOString();
+  }
+
+  if (resource === "release-checks") {
+    setText("check_key", ["checkKey", "check_key"]);
+    setText("status", ["status"]);
+    setText("notes", ["notes"]);
+    setDate("checked_at", ["checkedAt", "checked_at"]);
+    row.updated_at = new Date().toISOString();
+  }
+
   return Object.fromEntries(Object.entries(row).filter(([, value]) => value !== undefined));
 }
 
@@ -302,7 +360,48 @@ function resourceValidationDetails(resource: CrmResource, body: JsonRecord): str
     details.push("title is required");
   }
 
+  if (resource === "admin-settings" && !readString(body.key)) {
+    details.push("key is required");
+  }
+
+  if (resource === "integration-statuses" && !readString(body.provider)) {
+    details.push("provider is required");
+  }
+
+  if (resource === "ai-providers") {
+    if (!readString(body.provider)) details.push("provider is required");
+    if (!readString(body.purpose)) details.push("purpose is required");
+  }
+
+  if (resource === "release-checks" && !firstString(body.checkKey, body.check_key)) {
+    details.push("checkKey is required");
+  }
+
   return details;
+}
+
+function envStatus(keys: string[]) {
+  const configured = keys.filter((key) => Boolean(process.env[key]?.trim()));
+  const status =
+    configured.length === keys.length
+      ? "configured"
+      : configured.length > 0
+        ? "partial"
+        : "not_configured";
+
+  return {
+    status,
+    configured: configured.length,
+    total: keys.length,
+    keys: keys.map((key) => ({
+      key,
+      configured: Boolean(process.env[key]?.trim()),
+    })),
+  };
+}
+
+function singleEnvStatus(key: string) {
+  return envStatus([key]);
 }
 
 function supabaseWarning(scope: string, error: unknown): string {
@@ -429,6 +528,65 @@ function makeContentVideo(body: JsonRecord): JsonRecord {
     tapnowPrompt: firstString(body.tapnowPrompt, body.tapnow_prompt),
     status: readString(body.status) || "idea",
     createdAt: firstString(body.createdAt, body.created_at, new Date().toISOString()),
+  };
+}
+
+function makeAdminSetting(body: JsonRecord): JsonRecord {
+  const value = asRecord(body.value ?? body.config ?? body.settings);
+  return {
+    id: readString(body.id) || nextDemoId("setting"),
+    key: readString(body.key) || "clinic",
+    value,
+    config: value,
+    updatedAt: firstString(body.updatedAt, body.updated_at, new Date().toISOString()),
+  };
+}
+
+function makeIntegrationStatus(body: JsonRecord): JsonRecord {
+  return {
+    id: readString(body.id) || nextDemoId("integration"),
+    provider: readString(body.provider) || "unknown",
+    status: readString(body.status) || "not_configured",
+    maskedIdentifier: firstString(body.maskedIdentifier, body.masked_identifier),
+    lastCheckedAt: firstString(body.lastCheckedAt, body.last_checked_at),
+    lastError: firstString(body.lastError, body.last_error),
+    metadata: asRecord(body.metadata),
+  };
+}
+
+function makeAiProvider(body: JsonRecord): JsonRecord {
+  return {
+    id: readString(body.id) || nextDemoId("ai-provider"),
+    provider: readString(body.provider) || "demo",
+    purpose: readString(body.purpose) || "content_text",
+    enabled: readBoolean(body.enabled),
+    modelName: firstString(body.modelName, body.model_name),
+    config: asRecord(body.config),
+  };
+}
+
+function makeMetaAccount(body: JsonRecord): JsonRecord {
+  return {
+    id: readString(body.id) || nextDemoId("meta-account"),
+    metaBusinessId: firstString(body.metaBusinessId, body.meta_business_id),
+    adAccountId: firstString(body.adAccountId, body.ad_account_id),
+    pageId: firstString(body.pageId, body.page_id),
+    instagramActorId: firstString(body.instagramActorId, body.instagram_actor_id),
+    accountName: firstString(body.accountName, body.account_name),
+    currency: readString(body.currency) || "USD",
+    timezoneName: firstString(body.timezoneName, body.timezone_name),
+    status: readString(body.status) || "draft",
+    metadata: asRecord(body.metadata),
+  };
+}
+
+function makeReleaseCheck(body: JsonRecord): JsonRecord {
+  return {
+    id: readString(body.id) || nextDemoId("release-check"),
+    checkKey: firstString(body.checkKey, body.check_key),
+    status: readString(body.status) || "pending",
+    notes: readString(body.notes),
+    checkedAt: firstString(body.checkedAt, body.checked_at),
   };
 }
 
@@ -685,6 +843,138 @@ const configs: Record<CrmResource, ResourceConfig> = {
         createdAt: row.created_at,
       }),
   },
+  "admin-settings": {
+    table: "workspace_settings",
+    listKey: "settings",
+    requiredPost: [],
+    sortableColumn: "updated_at",
+    upsertConflict: "workspace_id,key",
+    demoItem: makeAdminSetting,
+    toRow: (body, workspaceId) => ({
+      workspace_id: workspaceId,
+      key: readString(body.key) || "clinic",
+      value: asRecord(body.value ?? body.config ?? body.settings),
+      updated_at: new Date().toISOString(),
+    }),
+    fromRow: (row) =>
+      makeAdminSetting({
+        id: row.id,
+        key: row.key,
+        value: row.value,
+        updatedAt: row.updated_at,
+      }),
+  },
+  "integration-statuses": {
+    table: "integration_statuses",
+    listKey: "integrations",
+    requiredPost: [],
+    sortableColumn: "updated_at",
+    upsertConflict: "workspace_id,provider",
+    demoItem: makeIntegrationStatus,
+    toRow: (body, workspaceId) => ({
+      workspace_id: workspaceId,
+      provider: readString(body.provider),
+      status: readString(body.status) || "not_configured",
+      masked_identifier: firstString(body.maskedIdentifier, body.masked_identifier) || null,
+      last_checked_at: maybeDate(body.lastCheckedAt ?? body.last_checked_at) || new Date().toISOString(),
+      last_error: firstString(body.lastError, body.last_error) || null,
+      metadata: asRecord(body.metadata),
+      updated_at: new Date().toISOString(),
+    }),
+    fromRow: (row) =>
+      makeIntegrationStatus({
+        id: row.id,
+        provider: row.provider,
+        status: row.status,
+        maskedIdentifier: row.masked_identifier,
+        lastCheckedAt: row.last_checked_at,
+        lastError: row.last_error,
+        metadata: row.metadata,
+      }),
+  },
+  "ai-providers": {
+    table: "ai_provider_settings",
+    listKey: "providers",
+    requiredPost: [],
+    sortableColumn: "updated_at",
+    upsertConflict: "workspace_id,provider,purpose",
+    demoItem: makeAiProvider,
+    toRow: (body, workspaceId) => ({
+      workspace_id: workspaceId,
+      provider: readString(body.provider),
+      purpose: readString(body.purpose),
+      enabled: readBoolean(body.enabled),
+      model_name: firstString(body.modelName, body.model_name) || null,
+      config: asRecord(body.config),
+      updated_at: new Date().toISOString(),
+    }),
+    fromRow: (row) =>
+      makeAiProvider({
+        id: row.id,
+        provider: row.provider,
+        purpose: row.purpose,
+        enabled: row.enabled,
+        modelName: row.model_name,
+        config: row.config,
+      }),
+  },
+  "meta-accounts": {
+    table: "meta_ad_accounts",
+    listKey: "accounts",
+    requiredPost: [],
+    sortableColumn: "updated_at",
+    demoItem: makeMetaAccount,
+    toRow: (body, workspaceId) => ({
+      workspace_id: workspaceId,
+      meta_business_id: firstString(body.metaBusinessId, body.meta_business_id) || null,
+      ad_account_id: firstString(body.adAccountId, body.ad_account_id) || null,
+      page_id: firstString(body.pageId, body.page_id) || null,
+      instagram_actor_id: firstString(body.instagramActorId, body.instagram_actor_id) || null,
+      account_name: firstString(body.accountName, body.account_name) || null,
+      currency: readString(body.currency) || "USD",
+      timezone_name: firstString(body.timezoneName, body.timezone_name) || null,
+      status: readString(body.status) || "draft",
+      metadata: asRecord(body.metadata),
+      updated_at: new Date().toISOString(),
+    }),
+    fromRow: (row) =>
+      makeMetaAccount({
+        id: row.id,
+        metaBusinessId: row.meta_business_id,
+        adAccountId: row.ad_account_id,
+        pageId: row.page_id,
+        instagramActorId: row.instagram_actor_id,
+        accountName: row.account_name,
+        currency: row.currency,
+        timezoneName: row.timezone_name,
+        status: row.status,
+        metadata: row.metadata,
+      }),
+  },
+  "release-checks": {
+    table: "release_checks",
+    listKey: "checks",
+    requiredPost: [],
+    sortableColumn: "created_at",
+    upsertConflict: "workspace_id,check_key",
+    demoItem: makeReleaseCheck,
+    toRow: (body, workspaceId) => ({
+      workspace_id: workspaceId,
+      check_key: firstString(body.checkKey, body.check_key),
+      status: readString(body.status) || "pending",
+      notes: readString(body.notes) || null,
+      checked_at: maybeDate(body.checkedAt ?? body.checked_at),
+      updated_at: new Date().toISOString(),
+    }),
+    fromRow: (row) =>
+      makeReleaseCheck({
+        id: row.id,
+        checkKey: row.check_key,
+        status: row.status,
+        notes: row.notes,
+        checkedAt: row.checked_at,
+      }),
+  },
 };
 
 function generateTemporaryPassword(): string {
@@ -925,7 +1215,10 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
 
   try {
     const row = config.toRow(body, workspaceId);
-    const { data, error } = await supabase.from(config.table).insert(row).select("*").single();
+    const query = config.upsertConflict
+      ? supabase.from(config.table).upsert(row, { onConflict: config.upsertConflict }).select("*").single()
+      : supabase.from(config.table).insert(row).select("*").single();
+    const { data, error } = await query;
 
     if (error) {
       throw new Error(error.message);
@@ -1000,6 +1293,48 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
     console.warn(warning);
     return sendJson(res, 200, success("demo", { [resource === "content-videos" ? "video" : "item"]: demoItem, item: demoItem }, warning));
   }
+}
+
+export async function handleCrmHealth(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== "GET") {
+    return sendJson(res, 405, errorBody("Method not allowed", ["Use GET"]));
+  }
+
+  const supabase = getSupabaseServerClient();
+  const providers = {
+    supabase: {
+      status: supabase ? "configured" : "not_configured",
+      env: envStatus(["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"]),
+    },
+    telegram: envStatus(["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"]),
+    targetingAgent: envStatus(["TARGETING_AGENT_URL"]),
+    openai: singleEnvStatus("OPENAI_API_KEY"),
+    anthropic: singleEnvStatus("ANTHROPIC_API_KEY"),
+    gemini: singleEnvStatus("GEMINI_API_KEY"),
+    elevenlabs: envStatus(["ELEVENLABS_API_KEY", "ELEVENLABS_VOICE_ID"]),
+    heygen: singleEnvStatus("HEYGEN_API_KEY"),
+    tapnow: singleEnvStatus("TAPNOW_API_KEY"),
+    meta: envStatus([
+      "META_APP_ID",
+      "META_APP_SECRET",
+      "META_ACCESS_TOKEN",
+      "META_AD_ACCOUNT_ID",
+      "META_PAGE_ID",
+      "META_INSTAGRAM_ACTOR_ID",
+    ]),
+  };
+
+  return sendJson(
+    res,
+    200,
+    success(supabase ? "supabase" : "demo", {
+      status: "ok",
+      service: "negis-crm",
+      generatedAt: new Date().toISOString(),
+      providers,
+      secrets: "masked",
+    }),
+  );
 }
 
 export async function handleCrmResource(resource: CrmResource, req: VercelRequest, res: VercelResponse) {

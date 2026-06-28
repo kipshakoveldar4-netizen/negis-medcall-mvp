@@ -1,5 +1,5 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import { handleCrmResource, type CrmResource } from "../../lib/crm/server";
+import { handleCrmHealth, handleCrmResource, type CrmResource } from "../../lib/crm/server";
 
 const resources: CrmResource[] = [
   "clients",
@@ -10,6 +10,11 @@ const resources: CrmResource[] = [
   "chat",
   "staff",
   "content-videos",
+  "admin-settings",
+  "integration-statuses",
+  "ai-providers",
+  "meta-accounts",
+  "release-checks",
 ];
 
 function sendJson(res: VercelResponse, status: number, payload: unknown) {
@@ -36,6 +41,10 @@ function isCrmResource(value: string): value is CrmResource {
 
 export default function handler(req: VercelRequest, res: VercelResponse) {
   const resource = readPathSegment(req);
+
+  if (resource === "health") {
+    return handleCrmHealth(req, res);
+  }
 
   if (!isCrmResource(resource)) {
     return sendJson(res, 404, {

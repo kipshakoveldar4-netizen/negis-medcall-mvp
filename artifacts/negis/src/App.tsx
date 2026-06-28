@@ -17,8 +17,8 @@ import AdsCallback from "@/pages/AdsCallback";
 import { AppointmentsPage } from "@/pages/AppointmentsPage";
 import TargetingAgent from "@/pages/TargetingAgent";
 import ContentStudio from "@/pages/ContentStudio";
+import AdminCenter from "@/pages/AdminCenter";
 import {
-  DemoAdmin,
   DemoCalls,
   DemoChat,
   DemoClients,
@@ -149,7 +149,7 @@ function Router() {
       <Route path="/marketplace" component={() => <ProtectedPage component={DemoMarket} permission="marketplace" />} />
       <Route path="/market" component={() => <ProtectedPage component={DemoMarket} permission="marketplace" />} />
       <Route path="/agent" component={Agent} />
-      <Route path="/admin" component={() => <ProtectedPage component={DemoAdmin} permission="admin" />} />
+      <Route path="/admin" component={() => <ProtectedPage component={AdminCenter} permission="admin" />} />
       <Route path="/ads" component={() => <ProtectedPage component={Ads} permission="ads" />} />
       <Route path="/advertising" component={() => <ProtectedPage component={Ads} permission="ads" />} />
       <Route path="/ads/callback" component={AdsCallback} />

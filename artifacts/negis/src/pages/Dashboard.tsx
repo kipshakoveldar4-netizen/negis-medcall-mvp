@@ -36,6 +36,15 @@ export default function Dashboard() {
 
 function DemoDashboard() {
   const { clinicId } = useAuth();
+  const releaseChecks = (() => {
+    try {
+      return JSON.parse(localStorage.getItem('negis_release_checks') || '[]') as Array<{ status?: string; critical?: boolean }>;
+    } catch {
+      return [];
+    }
+  })();
+  const releaseBlockers = releaseChecks.filter((check) => check.critical !== false && check.status !== 'passed' && check.status !== 'skipped').length;
+  const releaseComplete = releaseChecks.length > 0 && releaseBlockers === 0;
   const metrics = [
     { label: 'Лиды сегодня', value: '24', icon: Users, color: 'text-[#1A56DB]', bg: 'bg-blue-500/10' },
     { label: 'Звонки', value: '18', icon: PhoneCall, color: 'text-[#0F766E]', bg: 'bg-teal-500/10' },
@@ -59,6 +68,15 @@ function DemoDashboard() {
           <p className="text-sm text-[#64748B]">{clinicId || 'demo-workspace'}</p>
           <p className="text-sm text-[#64748B]">
             Демо-режим: данные сохранены локально, подключение Supabase будет в production-версии.
+          </p>
+        </div>
+
+        <div className={`rounded-[22px] border p-4 ${releaseComplete ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-amber-200 bg-amber-50 text-amber-800'}`}>
+          <p className="font-bold">
+            {releaseComplete ? 'Платформа готова к тестовой работе сотрудников' : 'Платформа в режиме подготовки к релизу'}
+          </p>
+          <p className="mt-1 text-sm">
+            {releaseComplete ? 'Release checklist закрыт.' : `Осталось закрыть блокеры: ${releaseChecks.length ? releaseBlockers : 'откройте /admin'}.`}
           </p>
         </div>
 
