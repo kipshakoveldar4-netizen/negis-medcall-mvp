@@ -404,6 +404,10 @@ function singleEnvStatus(key: string) {
   return envStatus([key]);
 }
 
+function readEnvValue(key: string): string {
+  return process.env[key]?.trim() || "";
+}
+
 function supabaseWarning(scope: string, error: unknown): string {
   const detail = error instanceof Error ? error.message : String(error);
   return `${scope} Supabase persistence skipped: ${detail}`;
@@ -1306,6 +1310,8 @@ export async function handleCrmHealth(req: VercelRequest, res: VercelResponse) {
       status: supabase ? "configured" : "not_configured",
       env: envStatus(["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"]),
     },
+    staffAuth: envStatus(["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"]),
+    vercelBasic: envStatus(["TARGETING_AGENT_URL"]),
     telegram: envStatus(["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"]),
     targetingAgent: envStatus(["TARGETING_AGENT_URL"]),
     openai: singleEnvStatus("OPENAI_API_KEY"),
@@ -1315,6 +1321,7 @@ export async function handleCrmHealth(req: VercelRequest, res: VercelResponse) {
     heygen: singleEnvStatus("HEYGEN_API_KEY"),
     tapnow: singleEnvStatus("TAPNOW_API_KEY"),
     meta: envStatus([
+      "META_BUSINESS_ID",
       "META_APP_ID",
       "META_APP_SECRET",
       "META_ACCESS_TOKEN",
@@ -1322,6 +1329,21 @@ export async function handleCrmHealth(req: VercelRequest, res: VercelResponse) {
       "META_PAGE_ID",
       "META_INSTAGRAM_ACTOR_ID",
     ]),
+  };
+  const safeMeta = {
+    configured:
+      Boolean(readEnvValue("META_BUSINESS_ID")) &&
+      Boolean(readEnvValue("META_AD_ACCOUNT_ID")) &&
+      Boolean(readEnvValue("META_PAGE_ID")) &&
+      Boolean(readEnvValue("META_INSTAGRAM_ACTOR_ID")) &&
+      Boolean(readEnvValue("META_ACCESS_TOKEN")) &&
+      Boolean(readEnvValue("META_APP_SECRET")),
+    businessId: readEnvValue("META_BUSINESS_ID"),
+    adAccountId: readEnvValue("META_AD_ACCOUNT_ID"),
+    pageId: readEnvValue("META_PAGE_ID"),
+    instagramActorId: readEnvValue("META_INSTAGRAM_ACTOR_ID"),
+    hasAccessToken: Boolean(readEnvValue("META_ACCESS_TOKEN")),
+    hasAppSecret: Boolean(readEnvValue("META_APP_SECRET")),
   };
 
   return sendJson(
@@ -1332,6 +1354,7 @@ export async function handleCrmHealth(req: VercelRequest, res: VercelResponse) {
       service: "negis-crm",
       generatedAt: new Date().toISOString(),
       providers,
+      meta: safeMeta,
       secrets: "masked",
     }),
   );

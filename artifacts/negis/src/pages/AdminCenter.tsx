@@ -74,6 +74,17 @@ type CrmHealthData = {
   service: string;
   generatedAt: string;
   providers: Record<string, ProviderPresence | { status: Status; env: ProviderPresence }>;
+  meta?: SafeMetaSummary;
+};
+
+type SafeMetaSummary = {
+  configured: boolean;
+  businessId: string;
+  adAccountId: string;
+  pageId: string;
+  instagramActorId: string;
+  hasAccessToken: boolean;
+  hasAppSecret: boolean;
 };
 
 type StaffMember = {
@@ -285,20 +296,34 @@ const permissionChecklist: Array<{ key: keyof MetaAccount["permissions"]; label:
 ];
 
 const releaseDefaults: ReleaseCheck[] = [
-  { checkKey: "migrations_009_013", title: "Supabase migrations 009/010/011/012/013 applied", critical: true, status: "pending", notes: "" },
-  { checkKey: "vercel_env", title: "Vercel env configured", critical: true, status: "pending", notes: "" },
+  { checkKey: "supabase_configured", title: "Supabase configured", critical: true, status: "pending", notes: "", automated: true },
+  { checkKey: "migrations_009_013", title: "Supabase migrations 009/010/011/012/013 applied", critical: false, status: "pending", notes: "" },
+  { checkKey: "vercel_env", title: "Vercel env basic configured", critical: true, status: "pending", notes: "", automated: true },
+  { checkKey: "staff_auth_env", title: "Staff auth env configured", critical: true, status: "pending", notes: "", automated: true },
   { checkKey: "staff_login", title: "Supabase Auth staff login tested", critical: true, status: "pending", notes: "" },
-  { checkKey: "staff_users", title: "Staff users created", critical: true, status: "pending", notes: "" },
-  { checkKey: "roles_checked", title: "Roles checked", critical: true, status: "pending", notes: "" },
+  { checkKey: "staff_users", title: "Staff users created", critical: false, status: "pending", notes: "" },
+  { checkKey: "roles_checked", title: "Roles checked", critical: false, status: "pending", notes: "" },
   { checkKey: "telegram_test", title: "Telegram test passed", critical: true, status: "pending", notes: "", automated: true },
   { checkKey: "targeting_health", title: "Targeting Agent health passed", critical: true, status: "pending", notes: "", automated: true },
-  { checkKey: "content_script", title: "Content Studio generate script passed", critical: true, status: "pending", notes: "" },
+  { checkKey: "openai_env", title: "OpenAI configured", critical: false, status: "pending", notes: "", automated: true },
+  { checkKey: "meta_env", title: "Meta env configured", critical: false, status: "pending", notes: "", automated: true },
+  { checkKey: "content_script", title: "Content Studio generate script passed", critical: false, status: "pending", notes: "" },
   { checkKey: "appointments_tested", title: "Appointments create/edit tested", critical: true, status: "pending", notes: "" },
-  { checkKey: "mobile_test", title: "Mobile test passed", critical: true, status: "pending", notes: "" },
-  { checkKey: "backup_export", title: "Backup/export strategy ready", critical: true, status: "pending", notes: "" },
-  { checkKey: "owner_account", title: "Admin owner account ready", critical: true, status: "pending", notes: "" },
-  { checkKey: "employee_day", title: "Test employee day completed", critical: true, status: "pending", notes: "" },
+  { checkKey: "mobile_test", title: "Mobile test passed", critical: false, status: "pending", notes: "" },
+  { checkKey: "backup_export", title: "Backup/export strategy ready", critical: false, status: "pending", notes: "" },
+  { checkKey: "owner_account", title: "Admin owner account ready", critical: false, status: "pending", notes: "" },
+  { checkKey: "employee_day", title: "Test employee day completed", critical: false, status: "pending", notes: "" },
 ];
+
+const criticalBlockerKeys = new Set([
+  "supabase_configured",
+  "vercel_env",
+  "staff_auth_env",
+  "staff_login",
+  "telegram_test",
+  "targeting_health",
+  "appointments_tested",
+]);
 
 const envList = [
   "OPENAI_API_KEY",
@@ -322,6 +347,28 @@ function readStored<T>(key: string, fallback: T): T {
 
 function writeStored<T>(key: string, value: T) {
   window.localStorage.setItem(key, JSON.stringify(value));
+}
+
+function mergeReleaseChecks(stored: ReleaseCheck[]): ReleaseCheck[] {
+  const storedByKey = new Map(stored.map((check) => [check.checkKey, check]));
+  const defaults = releaseDefaults.map((defaultCheck) => ({
+    ...defaultCheck,
+    ...storedByKey.get(defaultCheck.checkKey),
+    title: defaultCheck.title,
+    critical: criticalBlockerKeys.has(defaultCheck.checkKey),
+    automated: defaultCheck.automated,
+  }));
+  const custom = stored.filter((check) => !releaseDefaults.some((defaultCheck) => defaultCheck.checkKey === check.checkKey));
+  return [...defaults, ...custom.map((check) => ({ ...check, critical: criticalBlockerKeys.has(check.checkKey) }))];
+}
+
+function hasMetaFormValues(account: MetaAccount): boolean {
+  return Boolean(
+    account.metaBusinessId.trim() ||
+      account.adAccountId.trim() ||
+      account.pageId.trim() ||
+      account.instagramActorId.trim(),
+  );
 }
 
 async function safeJson<T>(response: globalThis.Response): Promise<ApiResponse<T>> {
@@ -395,6 +442,10 @@ function providerDetails(health: CrmHealthData | null, key: string): string {
   return `${presence.configured}/${presence.total} env configured`;
 }
 
+function isProviderConfigured(health: CrmHealthData | null, key: string): boolean {
+  return providerStatus(health, key) === "configured";
+}
+
 function permissionSummary(permissions: CrmPermission[]) {
   return permissions.map((permission) => permissionLabels[permission]).join(", ");
 }
@@ -406,9 +457,14 @@ export default function AdminCenter() {
   const [activeTab, setActiveTab] = useState<AdminTab>("overview");
   const [clinic, setClinic] = useState<ClinicSettings>(() => readStored("negis_clinic_settings", clinicDefaults));
   const [staff, setStaff] = useState<StaffMember[]>(() => readStored("negis_demo_staff", staffDefaults));
-  const [releaseChecks, setReleaseChecks] = useState<ReleaseCheck[]>(() => readStored("negis_release_checks", releaseDefaults));
+  const [releaseChecks, setReleaseChecks] = useState<ReleaseCheck[]>(() => mergeReleaseChecks(readStored("negis_release_checks", releaseDefaults)));
   const [aiProviders, setAiProviders] = useState<AiProviderSetting[]>(() => readStored("negis_ai_provider_settings", aiDefaults));
   const [metaAccount, setMetaAccount] = useState<MetaAccount>(() => readStored("negis_meta_account", metaDefaults));
+  const [metaConfigMode, setMetaConfigMode] = useState<"none" | "local" | "supabase">(() => {
+    const storedMode = readStored<"none" | "local" | "supabase">("negis_meta_config_save_mode", "none");
+    if (storedMode !== "none") return storedMode;
+    return hasMetaFormValues(readStored("negis_meta_account", metaDefaults)) ? "local" : "none";
+  });
   const [health, setHealth] = useState<CrmHealthData | null>(null);
   const [integrationCards, setIntegrationCards] = useState<IntegrationCard[]>(() => buildIntegrationCards(null));
   const [loading, setLoading] = useState<Record<string, boolean>>({});
@@ -425,7 +481,7 @@ export default function AdminCenter() {
   const readiness = useMemo(() => {
     const total = releaseChecks.length || 1;
     const passed = releaseChecks.filter((check) => check.status === "passed" || check.status === "skipped").length;
-    const blockers = releaseChecks.filter((check) => check.critical && check.status !== "passed" && check.status !== "skipped").length;
+    const blockers = releaseChecks.filter((check) => criticalBlockerKeys.has(check.checkKey) && check.status !== "passed" && check.status !== "skipped").length;
     return {
       score: Math.round((passed / total) * 100),
       blockers,
@@ -515,6 +571,142 @@ export default function AdminCenter() {
     const data = await checkCrmHealth();
     if (data) setIntegrationCards(buildIntegrationCards(data));
     await Promise.allSettled([checkTelegram(), checkTargetingAgent()]);
+  }
+
+  async function runReleaseAutocheck() {
+    setBusy("release-autocheck", true);
+    try {
+      const data = await checkCrmHealth();
+      const targetingOk = await (async () => {
+        try {
+          const body = await crmRequest<Record<string, unknown>>("/api/targeting/health");
+          return body.success !== false;
+        } catch {
+          return false;
+        }
+      })();
+      const telegramEnvConfigured = isProviderConfigured(data, "telegram");
+      const telegramOk = telegramEnvConfigured
+        ? await (async () => {
+            try {
+              const response = await fetch(apiUrl("/api/content-studio/send-telegram"), {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ test: true }),
+              });
+              const body = await safeJson<Record<string, unknown>>(response);
+              return response.ok && body.success !== false;
+            } catch {
+              return false;
+            }
+          })()
+        : false;
+
+      const autoResults: Record<string, { status: ReleaseStatus; notes: string }> = {
+        supabase_configured: {
+          status: isProviderConfigured(data, "supabase") ? "passed" : "failed",
+          notes: isProviderConfigured(data, "supabase") ? "Supabase env configured." : "SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY missing.",
+        },
+        vercel_env: {
+          status: isProviderConfigured(data, "vercelBasic") ? "passed" : "failed",
+          notes: isProviderConfigured(data, "vercelBasic") ? "Basic Vercel env detected." : "TARGETING_AGENT_URL missing.",
+        },
+        staff_auth_env: {
+          status: isProviderConfigured(data, "staffAuth") ? "passed" : "failed",
+          notes: isProviderConfigured(data, "staffAuth") ? "Staff auth server env configured." : "Staff auth needs Supabase service env.",
+        },
+        telegram_test: {
+          status: telegramOk ? "passed" : "failed",
+          notes: telegramEnvConfigured ? (telegramOk ? "Telegram test passed." : "Telegram env configured, but test failed.") : "Telegram env missing.",
+        },
+        targeting_health: {
+          status: targetingOk ? "passed" : "failed",
+          notes: targetingOk ? "Targeting Agent health passed." : "Targeting Agent health failed.",
+        },
+        openai_env: {
+          status: isProviderConfigured(data, "openai") ? "passed" : "pending",
+          notes: isProviderConfigured(data, "openai") ? "OpenAI env configured." : "Optional: OPENAI_API_KEY is not configured.",
+        },
+        meta_env: {
+          status: data?.meta?.configured ? "passed" : "pending",
+          notes: data?.meta?.configured ? "Meta env configured. Save non-secret config in Meta tab." : "Optional before real ads launch: Meta env incomplete.",
+        },
+        migrations_009_013: {
+          status: "pending",
+          notes: isProviderConfigured(data, "supabase") ? "Env configured. Apply SQL migrations manually in Supabase SQL editor." : "Configure Supabase before applying migrations.",
+        },
+        staff_login: {
+          status: "pending",
+          notes: "Manual check: sign in as a staff user through /login.",
+        },
+        appointments_tested: {
+          status: "pending",
+          notes: "Manual check: create and edit an appointment in /appointments.",
+        },
+      };
+
+      const next = releaseChecks.map((check) => {
+        const result = autoResults[check.checkKey];
+        return result ? { ...check, ...result } : check;
+      });
+      setReleaseChecks(next);
+      writeStored("negis_release_checks", next);
+      await Promise.allSettled(
+        next
+          .filter((check) => Boolean(autoResults[check.checkKey]))
+          .map((check) =>
+            crmRequest("/api/crm/release-checks", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                workspaceId,
+                checkKey: check.checkKey,
+                status: check.status,
+                notes: check.notes,
+                checkedAt: check.status === "passed" || check.status === "failed" ? new Date().toISOString() : null,
+              }),
+            }),
+          ),
+      );
+      toast.success("Автопроверка релиза завершена");
+    } finally {
+      setBusy("release-autocheck", false);
+    }
+  }
+
+  async function prefillMetaFromEnv() {
+    setBusy("meta-prefill", true);
+    try {
+      const data = health || (await checkCrmHealth());
+      const meta = data?.meta;
+      if (!meta) {
+        toast.error("Meta env summary недоступен");
+        return;
+      }
+      const next: MetaAccount = {
+        ...metaAccount,
+        metaBusinessId: meta.businessId || metaAccount.metaBusinessId,
+        adAccountId: meta.adAccountId || metaAccount.adAccountId,
+        pageId: meta.pageId || metaAccount.pageId,
+        instagramActorId: meta.instagramActorId || metaAccount.instagramActorId,
+        accountName: "Negis Meta Ads",
+        currency: "USD",
+        timezoneName: "Asia/Almaty",
+        status: "draft",
+        permissions: {
+          ...metaAccount.permissions,
+          appCreated: meta.hasAppSecret || metaAccount.permissions.appCreated,
+          adAccountConnected: Boolean(meta.adAccountId) || metaAccount.permissions.adAccountConnected,
+          pageConnected: Boolean(meta.pageId) || metaAccount.permissions.pageConnected,
+          instagramConnected: Boolean(meta.instagramActorId) || metaAccount.permissions.instagramConnected,
+          manualApproval: true,
+        },
+      };
+      setMetaAccount(next);
+      toast.success("Meta поля заполнены из безопасных env");
+    } finally {
+      setBusy("meta-prefill", false);
+    }
   }
 
   async function saveClinicSettings() {
@@ -628,7 +820,7 @@ export default function AdminCenter() {
     writeStored("negis_meta_account", next);
     setBusy("meta", true);
     try {
-      await crmRequest("/api/crm/meta-accounts", {
+      const body = await crmRequest("/api/crm/meta-accounts", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -637,8 +829,13 @@ export default function AdminCenter() {
           metadata: { permissions: next.permissions, manualApprovalOnly: true },
         }),
       });
+      const mode = body.mode === "supabase" ? "supabase" : "local";
+      setMetaConfigMode(mode);
+      writeStored("negis_meta_config_save_mode", mode);
       toast.success("Meta config сохранен без secret token");
     } catch (error) {
+      setMetaConfigMode("local");
+      writeStored("negis_meta_config_save_mode", "local");
       toast.warning(error instanceof Error ? error.message : "Meta config сохранен локально");
     } finally {
       setBusy("meta", false);
@@ -1035,6 +1232,27 @@ export default function AdminCenter() {
   function renderMeta() {
     const update = (key: keyof Omit<MetaAccount, "permissions">, value: string) => setMetaAccount((current) => ({ ...current, [key]: value }));
     const metaStatus = providerStatus(health, "meta");
+    const metaSummary = health?.meta;
+    const metaEnvFound = Boolean(
+      metaSummary?.configured ||
+        metaSummary?.businessId ||
+        metaSummary?.adAccountId ||
+        metaSummary?.pageId ||
+        metaSummary?.instagramActorId ||
+        metaSummary?.hasAccessToken ||
+        metaSummary?.hasAppSecret,
+    );
+    const metaFormEmpty = !hasMetaFormValues(metaAccount);
+    const metaNotice =
+      metaConfigMode === "supabase"
+        ? "Сохранено в Supabase"
+        : metaConfigMode === "local"
+          ? "Сохранено локально, Supabase недоступен"
+          : metaEnvFound && metaFormEmpty
+            ? "Meta env найдены. Нажмите 'Заполнить из env' и сохраните конфиг."
+            : metaEnvFound
+              ? "Env настроены, config не сохранён"
+              : "Meta env пока не найдены. Добавьте переменные в Vercel перед реальным запуском рекламы.";
     return (
       <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_380px]">
         <section className="neu-card">
@@ -1044,6 +1262,15 @@ export default function AdminCenter() {
               <p className="text-sm text-[#64748B]">MVP готовит config и draft preview. Реальный launch рекламы вручную подтверждается позже.</p>
             </div>
             <StatusPill status={metaStatus} />
+          </div>
+          <div className={`mb-5 rounded-2xl border px-4 py-3 text-sm font-semibold ${
+            metaConfigMode === "supabase"
+              ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+              : metaEnvFound
+                ? "border-amber-200 bg-amber-50 text-amber-800"
+                : "border-slate-200 bg-slate-50 text-slate-700"
+          }`}>
+            {metaNotice}
           </div>
           <div className="grid gap-4 md:grid-cols-2">
             <Field label="Meta Business ID" value={metaAccount.metaBusinessId} onChange={(value) => update("metaBusinessId", value)} />
@@ -1063,6 +1290,10 @@ export default function AdminCenter() {
             <button type="button" className="neu-btn w-full justify-center" onClick={checkCrmHealth}>
               <RefreshCw size={16} />
               Проверить настройки
+            </button>
+            <button type="button" className="neu-btn w-full justify-center" disabled={loading["meta-prefill"]} onClick={prefillMetaFromEnv}>
+              {loading["meta-prefill"] ? <Loader2 className="animate-spin" size={16} /> : <Copy size={16} />}
+              Заполнить из env
             </button>
             <button type="button" className="neu-btn-primary w-full justify-center" disabled={loading.meta} onClick={() => saveMetaConfig()}>
               {loading.meta ? <Loader2 className="animate-spin" size={16} /> : <Save size={16} />}
@@ -1118,7 +1349,13 @@ export default function AdminCenter() {
             <h2 className="text-lg font-black text-[#0F172A]">Release checklist</h2>
             <p className="text-sm text-[#64748B]">Хранится в release_checks, fallback: negis_release_checks.</p>
           </div>
-          <StatusPill status={readiness.complete ? "passed" : "pending"} label={readiness.complete ? "Готово" : `${readiness.blockers} blockers`} />
+          <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center">
+            <StatusPill status={readiness.complete ? "passed" : "pending"} label={readiness.complete ? "Готово" : `${readiness.blockers} blockers`} />
+            <button type="button" className="neu-btn-primary w-full justify-center sm:w-auto" disabled={loading["release-autocheck"]} onClick={runReleaseAutocheck}>
+              {loading["release-autocheck"] ? <Loader2 className="animate-spin" size={16} /> : <RefreshCw size={16} />}
+              Автопроверка релиза
+            </button>
+          </div>
         </div>
         <div className="grid gap-3">
           {releaseChecks.map((check) => (
@@ -1347,6 +1584,9 @@ function ReleaseBanner({ readiness }: { readiness: { complete: boolean; blockers
             </p>
             <p className={`mt-1 text-sm ${readiness.complete ? "text-emerald-700" : "text-amber-700"}`}>
               Readiness {readiness.score}% · blockers {readiness.blockers}
+            </p>
+            <p className={`mt-1 text-xs ${readiness.complete ? "text-emerald-700" : "text-amber-700"}`}>
+              Optional AI providers вроде ElevenLabs, HeyGen, Gemini, Anthropic и TapNow не считаются blocker.
             </p>
           </div>
         </div>
