@@ -1,7 +1,7 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { getSupabaseServerClient } from "../supabase/server";
 import { checkMetaCompliance } from "../meta/compliance";
-import { checkMetaAdAccount, getMetaCampaignStatus, getMetaConfig, launchMetaCampaign } from "../meta/marketing";
+import { checkMetaAdAccount, getMetaCampaignStatus, getMetaConfig, launchMetaCampaign, uploadMetaVideo } from "../meta/marketing";
 
 export type CrmResource =
   | "clients"
@@ -17,11 +17,27 @@ export type CrmResource =
   | "ai-providers"
   | "meta-accounts"
   | "meta-launches"
+  | "ad-creatives"
   | "release-checks";
 
 type CrmMode = "supabase" | "demo";
 type JsonRecord = Record<string, unknown>;
 type QueryValue = string | string[] | undefined;
+
+type CrmFetchResponse = {
+  ok: boolean;
+  status: number;
+  text: () => Promise<string>;
+};
+
+type CrmFetch = (
+  input: string,
+  init?: {
+    method?: string;
+    headers?: Record<string, string>;
+    body?: string;
+  },
+) => Promise<CrmFetchResponse>;
 
 type SupabaseAdminCreateUserResult = {
   data?: {
@@ -303,6 +319,23 @@ function buildPatchRow(resource: CrmResource, body: JsonRecord): JsonRecord {
     setRaw("compliance", ["compliance"]);
     setRaw("meta_response", ["metaResponse", "meta_response"]);
     setText("last_error", ["lastError", "last_error"]);
+    row.updated_at = new Date().toISOString();
+  }
+
+  if (resource === "ad-creatives") {
+    setText("launch_id", ["launchId", "launch_id"]);
+    setText("uploaded_by", ["uploadedBy", "uploaded_by"]);
+    setText("file_name", ["fileName", "file_name"]);
+    setText("file_type", ["fileType", "file_type"]);
+    setText("mime_type", ["mimeType", "mime_type"]);
+    setRaw("file_size", ["fileSize", "file_size"]);
+    setText("storage_bucket", ["storageBucket", "storage_bucket"]);
+    setText("storage_path", ["storagePath", "storage_path"]);
+    setText("public_url", ["publicUrl", "public_url", "creativeUrl", "creative_url"]);
+    setText("meta_asset_id", ["metaAssetId", "meta_asset_id"]);
+    setText("meta_video_id", ["metaVideoId", "meta_video_id", "videoId", "video_id"]);
+    setText("status", ["status"]);
+    setRaw("metadata", ["metadata"]);
     row.updated_at = new Date().toISOString();
   }
 
@@ -647,6 +680,35 @@ function makeMetaLaunch(body: JsonRecord): JsonRecord {
     compliance: asRecord(body.compliance),
     metaResponse: asRecord(body.metaResponse ?? body.meta_response),
     lastError: firstString(body.lastError, body.last_error),
+    createdAt: firstString(body.createdAt, body.created_at, new Date().toISOString()),
+    updatedAt: firstString(body.updatedAt, body.updated_at, new Date().toISOString()),
+  };
+}
+
+function normalizeCreativeFileType(body: JsonRecord): "image" | "video" {
+  const explicit = firstString(body.fileType, body.file_type, body.creativeType, body.creative_type).toLowerCase();
+  const mimeType = firstString(body.mimeType, body.mime_type).toLowerCase();
+  if (explicit === "video" || mimeType.startsWith("video/")) return "video";
+  return "image";
+}
+
+function makeAdCreativeAsset(body: JsonRecord): JsonRecord {
+  return {
+    id: readString(body.id) || nextDemoId("ad-creative"),
+    workspaceId: firstString(body.workspaceId, body.workspace_id),
+    launchId: firstString(body.launchId, body.launch_id),
+    uploadedBy: firstString(body.uploadedBy, body.uploaded_by),
+    fileName: firstString(body.fileName, body.file_name),
+    fileType: normalizeCreativeFileType(body),
+    mimeType: firstString(body.mimeType, body.mime_type),
+    fileSize: readNumber(body.fileSize ?? body.file_size) ?? null,
+    storageBucket: firstString(body.storageBucket, body.storage_bucket, "ad-creatives"),
+    storagePath: firstString(body.storagePath, body.storage_path),
+    publicUrl: firstString(body.publicUrl, body.public_url, body.creativeUrl, body.creative_url),
+    metaAssetId: firstString(body.metaAssetId, body.meta_asset_id),
+    metaVideoId: firstString(body.metaVideoId, body.meta_video_id, body.videoId, body.video_id),
+    status: readString(body.status) || "uploaded",
+    metadata: asRecord(body.metadata),
     createdAt: firstString(body.createdAt, body.created_at, new Date().toISOString()),
     updatedAt: firstString(body.updatedAt, body.updated_at, new Date().toISOString()),
   };
@@ -1089,6 +1151,53 @@ const configs: Record<CrmResource, ResourceConfig> = {
         updatedAt: row.updated_at,
       }),
   },
+  "ad-creatives": {
+    table: "ad_creative_assets",
+    listKey: "assets",
+    requiredPost: [],
+    sortableColumn: "created_at",
+    demoItem: makeAdCreativeAsset,
+    toRow: (body, workspaceId) => {
+      const launchId = firstString(body.launchId, body.launch_id);
+      return {
+        workspace_id: workspaceId,
+        launch_id: isUuid(launchId) ? launchId : null,
+        uploaded_by: firstString(body.uploadedBy, body.uploaded_by) || null,
+        file_name: firstString(body.fileName, body.file_name),
+        file_type: normalizeCreativeFileType(body),
+        mime_type: firstString(body.mimeType, body.mime_type) || null,
+        file_size: readNumber(body.fileSize ?? body.file_size),
+        storage_bucket: firstString(body.storageBucket, body.storage_bucket, "ad-creatives"),
+        storage_path: firstString(body.storagePath, body.storage_path) || null,
+        public_url: firstString(body.publicUrl, body.public_url, body.creativeUrl, body.creative_url) || null,
+        meta_asset_id: firstString(body.metaAssetId, body.meta_asset_id) || null,
+        meta_video_id: firstString(body.metaVideoId, body.meta_video_id, body.videoId, body.video_id) || null,
+        status: readString(body.status) || "uploaded",
+        metadata: asRecord(body.metadata),
+        updated_at: new Date().toISOString(),
+      };
+    },
+    fromRow: (row) =>
+      makeAdCreativeAsset({
+        id: row.id,
+        workspaceId: row.workspace_id,
+        launchId: row.launch_id,
+        uploadedBy: row.uploaded_by,
+        fileName: row.file_name,
+        fileType: row.file_type,
+        mimeType: row.mime_type,
+        fileSize: row.file_size,
+        storageBucket: row.storage_bucket,
+        storagePath: row.storage_path,
+        publicUrl: row.public_url,
+        metaAssetId: row.meta_asset_id,
+        metaVideoId: row.meta_video_id,
+        status: row.status,
+        metadata: row.metadata,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+      }),
+  },
   "release-checks": {
     table: "release_checks",
     listKey: "checks",
@@ -1433,6 +1542,477 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
   }
 }
 
+const IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
+const VIDEO_MIME_TYPES = new Set(["video/mp4", "video/quicktime", "video/webm"]);
+const IMAGE_EXTENSIONS = new Set(["jpg", "jpeg", "png", "webp"]);
+const VIDEO_EXTENSIONS = new Set(["mp4", "mov", "webm"]);
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+const MAX_VIDEO_BYTES = 100 * 1024 * 1024;
+
+function fileExtension(fileName: string): string {
+  const parts = fileName.toLowerCase().split(".");
+  return parts.length > 1 ? parts[parts.length - 1] : "";
+}
+
+function validateCreativeAssetBody(body: JsonRecord): string[] {
+  const details: string[] = [];
+  const fileName = firstString(body.fileName, body.file_name);
+  const mimeType = firstString(body.mimeType, body.mime_type).toLowerCase();
+  const fileSize = readNumber(body.fileSize ?? body.file_size) ?? 0;
+  const fileType = normalizeCreativeFileType(body);
+  const extension = fileExtension(fileName);
+
+  if (!fileName) details.push("fileName is required");
+  if (fileType === "image") {
+    if (mimeType && !IMAGE_MIME_TYPES.has(mimeType)) details.push("Поддерживаются только изображения JPG, PNG или WEBP");
+    if (!mimeType && extension && !IMAGE_EXTENSIONS.has(extension)) details.push("Поддерживаются только изображения JPG, PNG или WEBP");
+    if (fileSize > MAX_IMAGE_BYTES) details.push("Фото должно быть не больше 10 МБ");
+  }
+
+  if (fileType === "video") {
+    if (mimeType && !VIDEO_MIME_TYPES.has(mimeType)) details.push("Поддерживаются только видео MP4, MOV или WEBM");
+    if (!mimeType && extension && !VIDEO_EXTENSIONS.has(extension)) details.push("Поддерживаются только видео MP4, MOV или WEBM");
+    if (fileSize > MAX_VIDEO_BYTES) details.push("Видео должно быть не больше 100 МБ");
+  }
+
+  return details;
+}
+
+async function persistAdCreativeAsset(input: { workspaceId: string; body: JsonRecord }) {
+  const config = configs["ad-creatives"];
+  const supabase = getSupabaseServerClient();
+  const demoItem = config.demoItem({ ...input.body, workspaceId: input.workspaceId });
+
+  if (!supabase || !isUuid(input.workspaceId)) {
+    return {
+      mode: "demo" as CrmMode,
+      asset: demoItem,
+      warning: !supabase ? "Supabase env is not configured" : "Demo workspace uses localStorage",
+    };
+  }
+
+  try {
+    const row = config.toRow(input.body, input.workspaceId);
+    const { data, error } = await supabase.from(config.table).insert(row).select("*").single();
+    if (error) throw new Error(error.message);
+    return { mode: "supabase" as CrmMode, asset: config.fromRow(asRecord(data)), warning: "" };
+  } catch (error) {
+    const warning = supabaseWarning(config.table, error);
+    console.warn(warning);
+    return { mode: "demo" as CrmMode, asset: demoItem, warning };
+  }
+}
+
+async function updateAdCreativeMeta(input: {
+  workspaceId: string;
+  assetId: string;
+  metaVideoId?: string;
+  metaAssetId?: string;
+  status: string;
+  metadata?: JsonRecord;
+}) {
+  const supabase = getSupabaseServerClient();
+  if (!supabase || !isUuid(input.workspaceId) || !isUuid(input.assetId)) return;
+
+  try {
+    const { error } = await supabase
+      .from("ad_creative_assets")
+      .update({
+        meta_video_id: input.metaVideoId || null,
+        meta_asset_id: input.metaAssetId || null,
+        status: input.status,
+        metadata: input.metadata || {},
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", input.assetId)
+      .eq("workspace_id", input.workspaceId);
+    if (error) throw new Error(error.message);
+  } catch (error) {
+    console.warn(supabaseWarning("ad_creative_assets meta update", error));
+  }
+}
+
+export async function handleAdCreativeUpload(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== "POST") {
+    return sendJson(res, 405, errorBody("Method not allowed", ["Use POST"]));
+  }
+
+  const body = asRecord(req.body);
+  const details = validateCreativeAssetBody(body);
+  if (details.length > 0) {
+    return sendJson(res, 400, errorBody("Validation error", details));
+  }
+
+  const workspaceId = readWorkspaceId(req, body);
+  const saved = await persistAdCreativeAsset({
+    workspaceId,
+    body: {
+      ...body,
+      workspaceId,
+      status: readString(body.status) || "uploaded",
+      storageBucket: firstString(body.storageBucket, body.storage_bucket, "ad-creatives"),
+    },
+  });
+
+  return sendJson(
+    res,
+    saved.mode === "supabase" ? 201 : 200,
+    success(saved.mode, { asset: saved.asset, item: saved.asset }, saved.warning || undefined),
+  );
+}
+
+export async function handleAdCreativeMetaUpload(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== "POST") {
+    return sendJson(res, 405, errorBody("Method not allowed", ["Use POST"]));
+  }
+
+  const body = asRecord(req.body);
+  const workspaceId = readWorkspaceId(req, body);
+  const assetId = firstString(body.assetId, body.id);
+  const creativeType = normalizeCreativeFileType(body);
+  const publicUrl = firstString(body.publicUrl, body.public_url, body.videoUrl, body.video_url, body.creativeUrl, body.creative_url);
+  const title = firstString(body.title, body.fileName, body.file_name, "Negis video creative");
+
+  if (creativeType === "image") {
+    return sendJson(
+      res,
+      200,
+      success("demo", {
+        assetId,
+        publicUrl,
+        status: publicUrl ? "ready" : "missing_url",
+        message: "Для фото отдельная загрузка в Meta не требуется. URL будет использован в креативе.",
+      }),
+    );
+  }
+
+  if (!publicUrl) {
+    return sendJson(res, 400, errorBody("Validation error", ["Для видео нужен публичный URL из Supabase Storage"]));
+  }
+
+  if (readBoolean(body.dryRun)) {
+    const metaVideoId = demoMetaId("video");
+    return sendJson(
+      res,
+      200,
+      success("demo", {
+        assetId,
+        metaVideoId,
+        status: "dry_run",
+        message: "Dry-run: видео не отправлялось в Meta.",
+      }),
+    );
+  }
+
+  if (!getMetaConfig().configured) {
+    return sendJson(
+      res,
+      400,
+      errorBody("Meta video upload unavailable", [
+        "Meta env не настроены. Проверьте META_ACCESS_TOKEN, META_AD_ACCOUNT_ID и META_PAGE_ID в Vercel.",
+      ]),
+    );
+  }
+
+  try {
+    const metaResponse = await uploadMetaVideo({ videoUrl: publicUrl, title });
+    const metaVideoId = firstString(metaResponse.id, metaResponse.video_id);
+    if (!metaVideoId) {
+      throw new Error("Meta вернула ответ без video_id");
+    }
+
+    await updateAdCreativeMeta({
+      workspaceId,
+      assetId,
+      metaVideoId,
+      status: "meta_uploaded",
+      metadata: { metaResponse },
+    });
+
+    return sendJson(
+      res,
+      200,
+      success("supabase", {
+        assetId,
+        metaVideoId,
+        status: "meta_uploaded",
+        metaResponse,
+      }),
+    );
+  } catch (error) {
+    return sendJson(
+      res,
+      502,
+      errorBody("Meta video upload failed", [
+        error instanceof Error ? error.message : "Не удалось загрузить видео в Meta. Кампания не создана.",
+      ]),
+    );
+  }
+}
+
+function normalizeLeadDestination(value: unknown): "whatsapp" | "instagram_profile" | "website" | "lead_form" | "call" {
+  const text = readString(value).toLowerCase();
+  if (text.includes("instagram")) return "instagram_profile";
+  if (text.includes("website") || text.includes("site") || text.includes("landing")) return "website";
+  if (text.includes("form")) return "lead_form";
+  if (text.includes("call") || text.includes("phone")) return "call";
+  return "whatsapp";
+}
+
+function leadDestinationLabel(value: unknown): string {
+  const destination = normalizeLeadDestination(value);
+  const labels = {
+    whatsapp: "WhatsApp",
+    instagram_profile: "Instagram профиль",
+    website: "Сайт/лендинг",
+    lead_form: "Meta Lead Form",
+    call: "Звонок",
+  };
+  return labels[destination];
+}
+
+function buildDestinationUrl(destination: string, value: string): string {
+  const normalized = normalizeLeadDestination(destination);
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+
+  if (normalized === "whatsapp") {
+    const digits = trimmed.replace(/\D/g, "");
+    return digits ? `https://wa.me/${digits}` : trimmed;
+  }
+
+  if (normalized === "instagram_profile") {
+    if (trimmed.startsWith("http")) return trimmed;
+    return `https://instagram.com/${trimmed.replace(/^@/, "")}`;
+  }
+
+  if (normalized === "call") {
+    return `tel:${trimmed.replace(/[^\d+]/g, "")}`;
+  }
+
+  return trimmed;
+}
+
+function ctaForDestination(destination: string): string {
+  const normalized = normalizeLeadDestination(destination);
+  if (normalized === "whatsapp") return "CONTACT_US";
+  if (normalized === "call") return "CALL_NOW";
+  return "LEARN_MORE";
+}
+
+function safeMedicalAdText(input: { service: string; city: string; offer: string }): string {
+  const service = input.service || "консультация специалиста";
+  const city = input.city || "вашем городе";
+  const offer = input.offer || "подбор подходящего решения";
+  return `${service} в ${city}. ${offer}. Запишитесь на консультацию: специалист объяснит варианты и поможет выбрать следующий шаг.`;
+}
+
+function buildAdsAiFallback(body: JsonRecord): JsonRecord {
+  const service = firstString(body.service, body.niche, "Консультация специалиста");
+  const city = firstString(body.city, "Астана");
+  const offer = firstString(body.offer, "консультация и диагностика");
+  const leadDestination = firstString(body.leadDestination, body.lead_destination, "whatsapp");
+  const destinationValue = firstString(body.destinationValue, body.destination_value, body.landingUrl, body.phone);
+  const destinationUrl = buildDestinationUrl(leadDestination, destinationValue);
+  const dailyBudget = readNumber(body.dailyBudget ?? body.daily_budget ?? body.budget) ?? 20;
+  const startDate = firstString(body.startDate, body.start_date, new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString().slice(0, 10));
+  const endDate = firstString(body.endDate, body.end_date);
+  const creativeType = normalizeCreativeFileType(body);
+  const primaryText = safeMedicalAdText({ service, city, offer });
+  const objective =
+    normalizeLeadDestination(leadDestination) === "instagram_profile"
+      ? "OUTCOME_TRAFFIC"
+      : normalizeLeadDestination(leadDestination) === "lead_form"
+        ? "OUTCOME_LEADS"
+        : "OUTCOME_LEADS";
+  const cta = ctaForDestination(leadDestination);
+  const audience = firstString(body.knownAudience, body.known_audience, body.targetAudience, "Жители города 25-55, интересующиеся услугами клиники");
+
+  return {
+    campaignName: `${service} - ${city} - заявки`,
+    objective,
+    objectiveLabel: objective === "OUTCOME_TRAFFIC" ? "Цель: переходы" : "Цель: заявки",
+    primaryText,
+    headline: `${service} в ${city}`,
+    description: "Консультация без обещаний результата. Решение принимает специалист после осмотра.",
+    cta,
+    ctaLabel: cta === "CONTACT_US" ? "Кнопка: Написать" : cta === "CALL_NOW" ? "Кнопка: Позвонить" : "Кнопка: Подробнее",
+    destinationLabel: leadDestinationLabel(leadDestination),
+    destinationUrl,
+    audience,
+    targeting: {
+      geo_locations: { countries: ["KZ"] },
+      age_min: 25,
+      age_max: 55,
+      note: `Город: ${city}. Уточнение интересов вручную в Ads Manager при необходимости.`,
+    },
+    placements: ["Facebook Feed", "Instagram Feed", "Stories/Reels"],
+    budgetPlan: {
+      dailyBudget,
+      currency: "USD",
+      startDate,
+      endDate,
+      recommendation: "Начать с небольшого дневного бюджета и оценить заявки через 48-72 часа.",
+    },
+    metaPayloadPreview: {
+      campaign: "Кампания",
+      adSet: "Группа объявлений",
+      creative: creativeType === "video" ? "Видео-креатив" : "Фото-креатив",
+      ad: "Объявление",
+      statusMode: "PAUSED",
+    },
+    humanReport: {
+      summary: `ИИ подготовил рекламу услуги "${service}" для города ${city}.`,
+      whatWillRun: `${creativeType === "video" ? "Видео" : "Фото"} + безопасный текст объявления + кнопка ${cta === "CONTACT_US" ? "Написать" : "Подробнее"}.`,
+      whereLeadsGo: destinationUrl || "Адрес для заявок нужно указать перед запуском.",
+      risks: [
+        "Не использовать обещания результата.",
+        "Не обращаться к человеку через диагноз или внешность.",
+        "Перед ACTIVE запуском проверить бюджет и ссылку для заявок.",
+      ],
+      recommendations: [
+        "Сначала создать кампанию выключенной.",
+        "Проверить предпросмотр в Ads Manager.",
+        "Запустить ACTIVE только после ручного подтверждения.",
+      ],
+    },
+    safeWording: {
+      blockedPhrases: ["гарантируем", "у вас проблема", "до/после гарантировано"],
+      fixedText: primaryText,
+    },
+  };
+}
+
+async function parseCrmFetchJson(response: CrmFetchResponse): Promise<JsonRecord> {
+  const raw = await response.text();
+  if (!raw.trim()) return {};
+
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return asRecord(parsed);
+  } catch {
+    return { raw: raw.slice(0, 500) };
+  }
+}
+
+function extractOpenAiText(data: JsonRecord): string {
+  const choices = Array.isArray(data.choices) ? data.choices : [];
+  const firstChoice = asRecord(choices[0]);
+  const message = asRecord(firstChoice.message);
+  const content = message.content;
+  if (typeof content === "string") return content;
+
+  const output = Array.isArray(data.output) ? data.output : [];
+  for (const item of output) {
+    const contentItems = Array.isArray(asRecord(item).content) ? asRecord(item).content : [];
+    for (const contentItem of contentItems) {
+      const text = firstString(asRecord(contentItem).text, asRecord(contentItem).value);
+      if (text) return text;
+    }
+  }
+
+  return "";
+}
+
+async function tryOpenAiAdsFill(body: JsonRecord, fallback: JsonRecord): Promise<{ data: JsonRecord | null; warning?: string }> {
+  const apiKey = process.env.OPENAI_API_KEY?.trim();
+  if (!apiKey) return { data: null };
+
+  try {
+    const safeFetch = fetch as unknown as CrmFetch;
+    const response = await safeFetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: process.env.OPENAI_ADS_MODEL?.trim() || process.env.OPENAI_MODEL?.trim() || "gpt-4o-mini",
+        temperature: 0.35,
+        messages: [
+          {
+            role: "system",
+            content:
+              "Ты senior performance marketer для медицинской CRM. Верни только JSON без markdown. Пиши по-русски. Не используй обещания результата, диагнозы, давление на внешность, до/после гарантировано.",
+          },
+          {
+            role: "user",
+            content: JSON.stringify({
+              task: "Заполни безопасный пакет Meta Ads для сотрудника клиники.",
+              expectedKeys: Object.keys(fallback),
+              input: sanitizeLaunchPayload(body),
+              fallback,
+            }),
+          },
+        ],
+      }),
+    });
+
+    const responseBody = await parseCrmFetchJson(response);
+    if (!response.ok) {
+      return {
+        data: null,
+        warning: `OpenAI не ответил успешно: ${firstString(asRecord(responseBody.error).message, responseBody.raw, `HTTP ${response.status}`)}`,
+      };
+    }
+
+    const text = extractOpenAiText(responseBody);
+    if (!text) return { data: null, warning: "OpenAI вернул пустой ответ, использован demo fallback" };
+
+    const parsed = JSON.parse(text) as unknown;
+    const aiData = asRecord(parsed);
+    return {
+      data: {
+        ...fallback,
+        ...aiData,
+        humanReport: {
+          ...asRecord(fallback.humanReport),
+          ...asRecord(aiData.humanReport),
+        },
+      },
+    };
+  } catch (error) {
+    return {
+      data: null,
+      warning: error instanceof Error ? `OpenAI fallback: ${error.message}` : "OpenAI fallback: неизвестная ошибка",
+    };
+  }
+}
+
+export async function handleAdsAiFill(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== "POST") {
+    return sendJson(res, 405, errorBody("Method not allowed", ["Use POST"]));
+  }
+
+  const body = asRecord(req.body);
+  const details: string[] = [];
+  if (!firstString(body.service, body.niche)) details.push("service is required");
+  if (!firstString(body.city)) details.push("city is required");
+  if (!firstString(body.leadDestination, body.lead_destination)) details.push("leadDestination is required");
+  if ((readNumber(body.dailyBudget ?? body.daily_budget ?? body.budget) ?? 0) <= 0) details.push("dailyBudget is required");
+
+  if (details.length > 0) {
+    return sendJson(res, 400, errorBody("Validation error", details));
+  }
+
+  const fallback = buildAdsAiFallback(body);
+  const openAi = await tryOpenAiAdsFill(body, fallback);
+  const aiPackage = openAi.data || fallback;
+
+  return sendJson(
+    res,
+    200,
+    success(
+      "demo",
+      {
+        ...aiPackage,
+        generatedBy: openAi.data ? "openai" : "demo",
+      },
+      openAi.warning || (!openAi.data && process.env.OPENAI_API_KEY ? "OpenAI недоступен, использован demo fallback" : undefined),
+    ),
+  );
+}
+
 const META_MAX_DAILY_BUDGET = 50;
 const META_MAX_TOTAL_BUDGET = 300;
 
@@ -1516,6 +2096,11 @@ function buildMetaLaunchBody(body: JsonRecord) {
     cta: firstString(body.cta, "LEARN_MORE").toUpperCase().replace(/\s+/g, "_"),
     landingUrl: firstString(body.landingUrl, body.landing_url, body.websiteUrl, body.website_url),
     imageUrl: firstString(body.imageUrl, body.image_url),
+    creativeUrl: firstString(body.creativeUrl, body.creative_url),
+    creativeType: normalizeCreativeFileType(body),
+    videoUrl: firstString(body.videoUrl, body.video_url, body.creativeUrl, body.creative_url),
+    videoId: firstString(body.videoId, body.video_id, body.metaVideoId, body.meta_video_id),
+    thumbnailUrl: firstString(body.thumbnailUrl, body.thumbnail_url),
     startDate: firstString(body.startDate, body.start_time, new Date(Date.now() + 3600000).toISOString()),
     endDate: firstString(body.endDate, body.end_time),
     pageId: config.pageId,
@@ -1746,7 +2331,11 @@ export async function handleMetaLaunch(req: VercelRequest, res: VercelResponse) 
   if (!launch.primaryText) details.push("primaryText is required");
   if (!launch.headline) details.push("headline is required");
   if (!launch.dailyBudget || launch.dailyBudgetMinor <= 0) details.push("dailyBudget is required");
-  if (!launch.landingUrl && !launch.imageUrl) details.push("landingUrl or imageUrl is required");
+  if (!launch.landingUrl) details.push("landingUrl is required");
+  if (!launch.imageUrl && !launch.creativeUrl && !launch.videoUrl) details.push("creative image/video URL is required");
+  if (launch.creativeType === "video" && !launch.videoId && !launch.videoUrl) {
+    details.push("videoId or videoUrl is required for video ads");
+  }
   if (!readBoolean(body.complianceConfirmed)) details.push("complianceConfirmed is required");
   if (!readBoolean(body.manualApprovalConfirmed)) details.push("manualApprovalConfirmed is required");
 
@@ -1762,7 +2351,7 @@ export async function handleMetaLaunch(req: VercelRequest, res: VercelResponse) 
   if (launch.statusMode === "ACTIVE") {
     if (!liveLaunchEnabled) details.push("Live launch is disabled in Admin Center");
     if (!roleCanLaunchActive(actorRole)) details.push("Only owner/admin can launch ACTIVE campaigns");
-    if (readString(body.activeConfirmation) !== "ЗАПУСТИТЬ") details.push("activeConfirmation must be ЗАПУСТИТЬ");
+    if (readString(body.activeConfirmation).toUpperCase() !== "ЗАПУСТИТЬ") details.push("Для ACTIVE введите ЗАПУСТИТЬ");
   }
 
   const compliance = checkMetaCompliance({
@@ -1842,7 +2431,11 @@ export async function handleMetaLaunch(req: VercelRequest, res: VercelResponse) 
         description: launch.description,
         cta: launch.cta,
         landingUrl: launch.landingUrl,
-        imageUrl: launch.imageUrl,
+        imageUrl: launch.imageUrl || launch.creativeUrl,
+        creativeType: launch.creativeType,
+        videoUrl: launch.videoUrl || launch.creativeUrl,
+        videoId: launch.videoId,
+        thumbnailUrl: launch.thumbnailUrl,
         startTime: launch.startDate,
         endTime: launch.endDate || undefined,
       });

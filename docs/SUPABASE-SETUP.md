@@ -123,3 +123,22 @@ Then check production:
 - Analyze / Launch / Report
 
 The app should keep working even if Supabase variables are removed.
+## Ads creative storage
+
+Для `/ads-automation` примените:
+
+```sql
+-- migrations/015_ad_creative_assets.sql
+```
+
+Migration создаёт таблицу `ad_creative_assets` и публичный bucket `ad-creatives`.
+
+Frontend upload использует `VITE_SUPABASE_URL` и `VITE_SUPABASE_ANON_KEY`.
+Backend metadata persistence использует `SUPABASE_URL` и `SUPABASE_SERVICE_ROLE_KEY`.
+
+Если bucket нельзя создать через SQL в вашем Supabase проекте, создайте его вручную:
+
+- name: `ad-creatives`
+- public: enabled
+- max file size: 100 MB
+- MIME: JPG, PNG, WEBP, MP4, MOV, WEBM

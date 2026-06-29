@@ -1,5 +1,8 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import {
+  handleAdCreativeMetaUpload,
+  handleAdCreativeUpload,
+  handleAdsAiFill,
   handleCrmHealth,
   handleCrmResource,
   handleMetaLaunch,
@@ -22,6 +25,7 @@ const resources: CrmResource[] = [
   "ai-providers",
   "meta-accounts",
   "meta-launches",
+  "ad-creatives",
   "release-checks",
 ];
 
@@ -64,6 +68,18 @@ export default function handler(req: VercelRequest, res: VercelResponse) {
 
   if (resource === "meta-validate") {
     return handleMetaValidate(req, res);
+  }
+
+  if (resource === "ad-creative-upload") {
+    return handleAdCreativeUpload(req, res);
+  }
+
+  if (resource === "ad-creative-meta-upload") {
+    return handleAdCreativeMetaUpload(req, res);
+  }
+
+  if (resource === "ads-ai-fill") {
+    return handleAdsAiFill(req, res);
   }
 
   if (!isCrmResource(resource)) {

@@ -1,5 +1,13 @@
 # Meta Live Ads Launch
 
+## Ads Automation wizard update
+
+`/ads-automation` is now a Russian employee wizard. The user uploads a photo/video, fills only the key brief fields, lets AI prepare the ad package, runs a safety check, reads the final report, then confirms the Meta launch.
+
+Video creatives require a public Supabase Storage URL and a Meta `video_id` before real launch. If Meta video upload fails, Negis returns a clear error and does not create an incomplete campaign.
+
+ACTIVE launch still requires Admin Center live launch enabled and the typed confirmation `ЗАПУСТИТЬ`.
+
 Negis MedCall MVP can create Meta/Facebook/Instagram Ads from CRM through a server-side Marketing API flow.
 
 ## What Is Created

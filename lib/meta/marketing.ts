@@ -39,6 +39,10 @@ export type MetaLaunchInput = {
   cta: string;
   landingUrl: string;
   imageUrl?: string;
+  creativeType?: "image" | "video";
+  videoUrl?: string;
+  videoId?: string;
+  thumbnailUrl?: string;
   startTime?: string;
   endTime?: string;
   targeting?: MetaJson;
@@ -197,7 +201,21 @@ export async function createMetaAdSet(input: MetaLaunchInput & { campaignId: str
   });
 }
 
-export async function createMetaCreative(input: MetaLaunchInput): Promise<MetaJson> {
+export async function uploadMetaVideo(input: { videoUrl: string; title?: string }): Promise<MetaJson> {
+  const { adAccountId } = assertMetaConfigured();
+  const videoUrl = input.videoUrl.trim();
+
+  if (!videoUrl) {
+    throw new Error("Video URL is required for Meta video upload");
+  }
+
+  return metaRequest(`/${adAccountId}/advideos`, "POST", {
+    file_url: videoUrl,
+    title: input.title || "Negis video creative",
+  });
+}
+
+export async function createImageCreative(input: MetaLaunchInput): Promise<MetaJson> {
   const { adAccountId, pageId, instagramActorId } = assertMetaConfigured();
   const objectStorySpec: MetaJson = {
     page_id: pageId,
@@ -223,6 +241,43 @@ export async function createMetaCreative(input: MetaLaunchInput): Promise<MetaJs
   });
 }
 
+export async function createVideoCreative(input: MetaLaunchInput & { videoId: string }): Promise<MetaJson> {
+  const { adAccountId, pageId, instagramActorId } = assertMetaConfigured();
+  const objectStorySpec: MetaJson = {
+    page_id: pageId,
+    ...(instagramActorId ? { instagram_actor_id: instagramActorId } : {}),
+    video_data: {
+      video_id: input.videoId,
+      title: input.headline,
+      message: input.primaryText,
+      link_description: input.description,
+      ...(input.thumbnailUrl ? { image_url: input.thumbnailUrl } : {}),
+      call_to_action: {
+        type: input.cta || "LEARN_MORE",
+        value: {
+          link: input.landingUrl,
+        },
+      },
+    },
+  };
+
+  return metaRequest(`/${adAccountId}/adcreatives`, "POST", {
+    name: `${input.campaignName} - Video Creative`,
+    object_story_spec: objectStorySpec,
+  });
+}
+
+export async function createMetaCreative(input: MetaLaunchInput): Promise<MetaJson> {
+  if (input.creativeType === "video" || input.videoId) {
+    if (!input.videoId) {
+      throw new Error("Meta video_id is required before creating a video creative");
+    }
+    return createVideoCreative({ ...input, videoId: input.videoId });
+  }
+
+  return createImageCreative(input);
+}
+
 export async function createMetaAd(input: MetaLaunchInput & { adSetId: string; creativeId: string }): Promise<MetaJson> {
   const { adAccountId } = assertMetaConfigured();
   return metaRequest(`/${adAccountId}/ads`, "POST", {
@@ -234,19 +289,33 @@ export async function createMetaAd(input: MetaLaunchInput & { adSetId: string; c
 }
 
 export async function launchMetaCampaign(input: MetaLaunchInput): Promise<MetaLaunchResult> {
-  const campaign = await createMetaCampaign(input);
+  let preparedInput = input;
+
+  if ((input.creativeType === "video" || input.videoUrl) && !input.videoId) {
+    const video = await uploadMetaVideo({
+      videoUrl: input.videoUrl || input.imageUrl || "",
+      title: input.campaignName,
+    });
+    const metaVideoId = parseMetaId(video);
+    if (!metaVideoId) {
+      throw new Error("Meta video upload completed without video_id");
+    }
+    preparedInput = { ...input, creativeType: "video", videoId: metaVideoId };
+  }
+
+  const campaign = await createMetaCampaign(preparedInput);
   const metaCampaignId = parseMetaId(campaign);
   if (!metaCampaignId) throw new Error("Meta campaign was created without id");
 
-  const adSet = await createMetaAdSet({ ...input, campaignId: metaCampaignId });
+  const adSet = await createMetaAdSet({ ...preparedInput, campaignId: metaCampaignId });
   const metaAdSetId = parseMetaId(adSet);
   if (!metaAdSetId) throw new Error("Meta ad set was created without id");
 
-  const creative = await createMetaCreative(input);
+  const creative = await createMetaCreative(preparedInput);
   const metaCreativeId = parseMetaId(creative);
   if (!metaCreativeId) throw new Error("Meta creative was created without id");
 
-  const ad = await createMetaAd({ ...input, adSetId: metaAdSetId, creativeId: metaCreativeId });
+  const ad = await createMetaAd({ ...preparedInput, adSetId: metaAdSetId, creativeId: metaCreativeId });
   const metaAdId = parseMetaId(ad);
   if (!metaAdId) throw new Error("Meta ad was created without id");
 

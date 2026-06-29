@@ -99,6 +99,7 @@ async function main() {
     "/admin",
     "/ads",
     "/ads-automation",
+    "/ads-automation/history",
     "/targeting-agent",
     "/content-studio",
     "/login",
@@ -171,6 +172,56 @@ async function main() {
     campaignName: "Smoke Meta Launch",
     status: "draft",
   });
+  await checkCrmEndpoint("/api/crm/ad-creatives", {
+    fileName: "smoke-creative.jpg",
+    fileType: "image",
+    mimeType: "image/jpeg",
+    fileSize: 2048,
+    publicUrl: "https://example.com/smoke-creative.jpg",
+    status: "uploaded",
+  });
+  await checkJsonEndpoint("/api/crm/ad-creative-upload", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      workspaceId: "demo-workspace",
+      fileName: "smoke-upload.jpg",
+      fileType: "image",
+      mimeType: "image/jpeg",
+      fileSize: 2048,
+      publicUrl: "https://example.com/smoke-upload.jpg",
+      status: "uploaded",
+    }),
+  });
+  await checkJsonEndpoint("/api/crm/ad-creative-meta-upload", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      workspaceId: "demo-workspace",
+      fileName: "smoke-video.mp4",
+      fileType: "video",
+      mimeType: "video/mp4",
+      publicUrl: "https://example.com/smoke-video.mp4",
+      dryRun: true,
+    }),
+  });
+  await checkJsonEndpoint("/api/crm/ads-ai-fill", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      workspaceId: "demo-workspace",
+      creativeType: "image",
+      creativeUrl: "https://example.com/smoke-creative.jpg",
+      service: "Consultation",
+      city: "Astana",
+      leadDestination: "whatsapp",
+      destinationValue: "+77000000000",
+      dailyBudget: 20,
+      offer: "Consultation",
+      knownAudience: "Women 25-55",
+      restrictions: "Safe medical wording",
+    }),
+  });
   await checkJsonEndpoint("/api/crm/meta-validate", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -197,6 +248,9 @@ async function main() {
       description: "Book a consultation with a specialist.",
       cta: "LEARN_MORE",
       landingUrl: "https://example.com",
+      imageUrl: "https://example.com/smoke-creative.jpg",
+      creativeType: "image",
+      creativeUrl: "https://example.com/smoke-creative.jpg",
       complianceConfirmed: true,
       manualApprovalConfirmed: true,
       dryRun: true,

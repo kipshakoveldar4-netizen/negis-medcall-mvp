@@ -153,6 +153,7 @@ function Router() {
       <Route path="/agent" component={Agent} />
       <Route path="/admin" component={() => <ProtectedPage component={AdminCenter} permission="admin" />} />
       <Route path="/ads" component={() => <ProtectedPage component={Ads} permission="ads" />} />
+      <Route path="/ads-automation/history" component={() => <ProtectedPage component={AdsAutomation} permission="ads" />} />
       <Route path="/ads-automation" component={() => <ProtectedPage component={AdsAutomation} permission="ads" />} />
       <Route path="/advertising" component={() => <ProtectedPage component={Ads} permission="ads" />} />
       <Route path="/ads/callback" component={AdsCallback} />

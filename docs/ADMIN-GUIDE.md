@@ -43,3 +43,15 @@ Admin Center доступен по `/admin`.
 - The toggle is saved to `/api/crm/admin-settings` with key `meta_live_launch_enabled`.
 - Demo fallback key: `negis_meta_live_launch_enabled`.
 - Launch audit is stored in `meta_campaign_launches` and `meta_launch_audit_logs` when Supabase is configured.
+## Admin setup for Ads Automation
+
+Для production-запуска `/ads-automation` проверьте:
+
+- Meta env: `META_ACCESS_TOKEN`, `META_AD_ACCOUNT_ID`, `META_PAGE_ID`, `META_BUSINESS_ID`.
+- Supabase env: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`.
+- Frontend Supabase Storage env: `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`.
+- Migration `migrations/015_ad_creative_assets.sql` применена.
+- Bucket `ad-creatives` существует и допускает JPG/PNG/WEBP/MP4/MOV/WEBM.
+- В Admin Center включайте live launch только после теста `Создать в Meta выключенным`.
+
+Secrets Meta/OpenAI не отображаются на frontend. Frontend получает только безопасный summary.
