@@ -14,6 +14,7 @@ import {
   KeyRound,
   User,
   Megaphone,
+  Rocket,
   ClipboardList,
   MessageCircle,
   Store,
@@ -26,6 +27,7 @@ import { toast } from 'sonner';
 import { agentInitials, type AgentDisplayInfo } from '@/lib/agentDisplay';
 
 const NAV = [
+  { href: '/ads-automation', icon: Rocket, label: 'AI запуск рекламы', permission: 'ads' },
   { href: '/targeting-agent', icon: BrainCircuit, label: 'ИИ таргетолог', permission: 'ads' },
   { href: '/content-studio', icon: Clapperboard, label: 'ИИ студия контента', permission: 'ads' },
   { href: '/dashboard', icon: BarChart2, label: 'Дашборд', permission: 'dashboard' },

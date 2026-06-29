@@ -98,6 +98,7 @@ async function main() {
     "/reports",
     "/admin",
     "/ads",
+    "/ads-automation",
     "/targeting-agent",
     "/content-studio",
     "/login",
@@ -166,6 +167,43 @@ async function main() {
     accountName: "Smoke Meta Account",
     status: "draft",
   });
+  await checkCrmEndpoint("/api/crm/meta-launches", {
+    campaignName: "Smoke Meta Launch",
+    status: "draft",
+  });
+  await checkJsonEndpoint("/api/crm/meta-validate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      workspaceId: "demo-workspace",
+      dryRun: true,
+    }),
+  });
+  const launch = await checkJsonEndpoint("/api/crm/meta-launch", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      workspaceId: "demo-workspace",
+      campaignName: "Smoke Meta Campaign",
+      objective: "OUTCOME_LEADS",
+      statusMode: "PAUSED",
+      dailyBudget: 20,
+      totalBudget: 140,
+      currency: "USD",
+      city: "Astana",
+      targetAudience: "Women 25-55",
+      primaryText: "Professional consultation in Astana. Book a specialist consultation.",
+      headline: "Consultation in Astana",
+      description: "Book a consultation with a specialist.",
+      cta: "LEARN_MORE",
+      landingUrl: "https://example.com",
+      complianceConfirmed: true,
+      manualApprovalConfirmed: true,
+      dryRun: true,
+    }),
+  });
+  const launchData = (launch.data || {}) as { metaCampaignId?: string };
+  await checkJsonEndpoint(`/api/crm/meta-status?campaignId=${encodeURIComponent(launchData.metaCampaignId || "dryrun_campaign_smoke")}`);
   await checkCrmEndpoint("/api/crm/release-checks", {
     checkKey: "smoke-release",
     status: "passed",

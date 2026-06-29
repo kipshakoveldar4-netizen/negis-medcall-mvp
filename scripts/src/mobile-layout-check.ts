@@ -23,6 +23,7 @@ const routes = [
   "/reports",
   "/admin",
   "/ads",
+  "/ads-automation",
   "/targeting-agent",
   "/content-studio",
   "/login",

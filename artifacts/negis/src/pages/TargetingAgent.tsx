@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState, type CSSProperties } from "react";
+import { useLocation } from "wouter";
 import { Activity, BarChart3, BrainCircuit, FileText, Rocket, type LucideIcon } from "lucide-react";
 import { toast } from "sonner";
 import { PageLayout } from "@/components/layout/PageLayout";
@@ -316,6 +317,7 @@ function MetricCards({ items }: { items: DetailItem[] }) {
 }
 
 export default function TargetingAgent() {
+  const [, setLocation] = useLocation();
   const [creative, setCreative] = useState(initialCreative);
   const [launch, setLaunch] = useState(initialLaunch);
   const [reportCampaignId, setReportCampaignId] = useState("");
@@ -450,6 +452,33 @@ export default function TargetingAgent() {
     } finally {
       setLoading(null);
     }
+  };
+
+  const launchThroughMeta = () => {
+    const settings = asRecord(analysis?.data.campaignSettings);
+    const budget = asRecord(analysis?.data.budgetRecommendation);
+    localStorage.setItem(
+      "negis_ads_automation_prefill",
+      JSON.stringify({
+        sourceModule: "targeting-agent",
+        clinicName: creative.clinicName,
+        niche: creative.niche,
+        service: creative.niche,
+        city: creative.city,
+        offer: creative.offer,
+        campaignName: launch.campaignName,
+        objective: pickText(settings, ["objective"], "OUTCOME_LEADS"),
+        budget: launch.budget || pickText(budget, ["dailyBudget", "budget"], "20"),
+        targetAudience: creative.targetAudience,
+        primaryText: creative.creativeText,
+        creativeText: creative.creativeText,
+        headline: creative.offer,
+        description: analysis?.data.summary || creative.offer,
+        cta: "LEARN_MORE",
+      }),
+    );
+    toast.success("Данные переданы в AI запуск рекламы");
+    setLocation("/ads-automation");
   };
 
   const analysisCards = useMemo(() => {
@@ -691,6 +720,14 @@ export default function TargetingAgent() {
               <DetailGrid title="Рекомендация по бюджету" icon={BarChart3} items={analysisCards.budget} />
               <DetailGrid title="Ожидаемые метрики" icon={FileText} items={analysisCards.expectedMetrics} />
             </div>
+            <button
+              type="button"
+              className="neu-btn-primary mt-5 inline-flex items-center gap-2 px-5 py-2.5 text-sm"
+              onClick={launchThroughMeta}
+            >
+              <Rocket size={15} />
+              Запустить через Meta
+            </button>
           </section>
         )}
 

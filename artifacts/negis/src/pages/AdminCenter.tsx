@@ -460,6 +460,7 @@ export default function AdminCenter() {
   const [releaseChecks, setReleaseChecks] = useState<ReleaseCheck[]>(() => mergeReleaseChecks(readStored("negis_release_checks", releaseDefaults)));
   const [aiProviders, setAiProviders] = useState<AiProviderSetting[]>(() => readStored("negis_ai_provider_settings", aiDefaults));
   const [metaAccount, setMetaAccount] = useState<MetaAccount>(() => readStored("negis_meta_account", metaDefaults));
+  const [metaLiveLaunchEnabled, setMetaLiveLaunchEnabled] = useState(() => readStored("negis_meta_live_launch_enabled", false));
   const [metaConfigMode, setMetaConfigMode] = useState<"none" | "local" | "supabase">(() => {
     const storedMode = readStored<"none" | "local" | "supabase">("negis_meta_config_save_mode", "none");
     if (storedMode !== "none") return storedMode;
@@ -826,7 +827,7 @@ export default function AdminCenter() {
         body: JSON.stringify({
           workspaceId,
           ...next,
-          metadata: { permissions: next.permissions, manualApprovalOnly: true },
+          metadata: { permissions: next.permissions, manualApprovalOnly: true, liveLaunchEnabled: metaLiveLaunchEnabled },
         }),
       });
       const mode = body.mode === "supabase" ? "supabase" : "local";
@@ -839,6 +840,32 @@ export default function AdminCenter() {
       toast.warning(error instanceof Error ? error.message : "Meta config сохранен локально");
     } finally {
       setBusy("meta", false);
+    }
+  }
+
+  async function saveMetaLiveLaunchEnabled(enabled: boolean) {
+    setMetaLiveLaunchEnabled(enabled);
+    writeStored("negis_meta_live_launch_enabled", enabled);
+    setBusy("meta-live-launch", true);
+    try {
+      await crmRequest("/api/crm/admin-settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          workspaceId,
+          key: "meta_live_launch_enabled",
+          value: {
+            enabled,
+            updatedAt: new Date().toISOString(),
+            note: "Controls ACTIVE Meta launch from /ads-automation",
+          },
+        }),
+      });
+      toast.success(enabled ? "Live launch разрешен" : "Live launch выключен");
+    } catch (error) {
+      toast.warning(error instanceof Error ? error.message : "Live launch сохранен локально");
+    } finally {
+      setBusy("meta-live-launch", false);
     }
   }
 
@@ -1286,6 +1313,25 @@ export default function AdminCenter() {
               <option value="error">error</option>
             </select>
           </div>
+          <div className="mt-5 rounded-2xl border border-[#E2E8F0] bg-white/70 p-4">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <h3 className="font-black text-[#0F172A]">Разрешить live launch</h3>
+                <p className="mt-1 text-sm text-[#64748B]">
+                  Если выключено, /ads-automation создает только PAUSED campaigns. ACTIVE доступен owner/admin после ручного подтверждения.
+                </p>
+              </div>
+              <label className="flex items-center gap-3 rounded-2xl bg-[#F8FAFC] px-4 py-3 text-sm font-bold text-[#334155]">
+                <input
+                  type="checkbox"
+                  checked={metaLiveLaunchEnabled}
+                  disabled={loading["meta-live-launch"]}
+                  onChange={(event) => void saveMetaLiveLaunchEnabled(event.target.checked)}
+                />
+                <span>{metaLiveLaunchEnabled ? "ACTIVE разрешен" : "Только PAUSED"}</span>
+              </label>
+            </div>
+          </div>
           <div className="mt-5 flex flex-col gap-2 sm:flex-row">
             <button type="button" className="neu-btn w-full justify-center" onClick={checkCrmHealth}>
               <RefreshCw size={16} />
@@ -1299,7 +1345,7 @@ export default function AdminCenter() {
               {loading.meta ? <Loader2 className="animate-spin" size={16} /> : <Save size={16} />}
               Сохранить Meta config
             </button>
-            <button type="button" className="neu-btn w-full justify-center" onClick={() => setLocation("/ads")}>
+            <button type="button" className="neu-btn w-full justify-center" onClick={() => setLocation("/ads-automation")}>
               <Megaphone size={16} />
               Открыть Ads Automation
             </button>

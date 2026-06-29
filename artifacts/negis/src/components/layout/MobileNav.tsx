@@ -10,6 +10,7 @@ import {
   Megaphone,
   Menu,
   PhoneCall,
+  Rocket,
   Settings,
   Store,
   User,
@@ -35,6 +36,7 @@ const primaryItems: MobileNavItem[] = [
 ];
 
 const drawerItems: MobileNavItem[] = [
+  { href: "/ads-automation", label: "AI запуск рекламы", icon: Rocket, permission: "ads" },
   { href: "/targeting-agent", label: "ИИ таргетолог", icon: BrainCircuit, permission: "ads" },
   { href: "/content-studio", label: "ИИ студия контента", icon: Clapperboard, permission: "ads" },
   { href: "/ads", label: "Реклама", icon: Megaphone, permission: "ads" },

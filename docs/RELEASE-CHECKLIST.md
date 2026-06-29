@@ -30,3 +30,15 @@
 
 Release checklist сохраняется в Supabase table `release_checks`.
 Если Supabase недоступен, UI использует localStorage fallback `negis_release_checks`.
+
+## Meta Live Launch Release Checks
+
+Before real Meta launch:
+
+- Apply `migrations/014_meta_ad_launches.sql`.
+- Open `/admin -> Meta/Facebook Ads`.
+- Click `Заполнить из env` and save the config.
+- Keep `Разрешить live launch` off for the first production test.
+- Open `/ads-automation` and run dry-run/compliance check.
+- Create the first real campaign as `PAUSED`.
+- Review the campaign in Ads Manager before switching it to ACTIVE.

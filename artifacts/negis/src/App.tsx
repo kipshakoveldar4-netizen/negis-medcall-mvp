@@ -13,6 +13,7 @@ import Onboarding from "@/pages/Onboarding";
 import Dashboard from "@/pages/Dashboard";
 import Agent from "@/pages/Agent";
 import Ads from "@/pages/Ads";
+import AdsAutomation from "@/pages/AdsAutomation";
 import AdsCallback from "@/pages/AdsCallback";
 import { AppointmentsPage } from "@/pages/AppointmentsPage";
 import TargetingAgent from "@/pages/TargetingAgent";
@@ -53,6 +54,7 @@ const ROUTE_PERMISSIONS: Record<string, string> = {
   '/market': 'marketplace',
   '/admin': 'admin',
   '/ads': 'ads',
+  '/ads-automation': 'ads',
   '/advertising': 'ads',
   '/reports': 'ads',
   '/profile': 'dashboard',
@@ -151,6 +153,7 @@ function Router() {
       <Route path="/agent" component={Agent} />
       <Route path="/admin" component={() => <ProtectedPage component={AdminCenter} permission="admin" />} />
       <Route path="/ads" component={() => <ProtectedPage component={Ads} permission="ads" />} />
+      <Route path="/ads-automation" component={() => <ProtectedPage component={AdsAutomation} permission="ads" />} />
       <Route path="/advertising" component={() => <ProtectedPage component={Ads} permission="ads" />} />
       <Route path="/ads/callback" component={AdsCallback} />
       <Route path="/reports" component={() => <ProtectedPage component={DemoReports} permission="ads" />} />

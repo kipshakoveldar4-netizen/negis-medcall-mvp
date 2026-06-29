@@ -549,6 +549,32 @@ export default function ContentStudio() {
     setLocation("/targeting-agent");
   };
 
+  const transferToAdsAutomation = () => {
+    localStorage.setItem(
+      "negis_ads_automation_prefill",
+      JSON.stringify({
+        sourceModule: "content-studio",
+        sourceId: current.id,
+        title: current.title || form.title,
+        campaignName: current.title || form.title,
+        service: current.niche || form.niche,
+        niche: current.niche || form.niche,
+        offer: current.cta || current.goal || form.goal,
+        targetAudience: current.audience || form.audience,
+        audience: current.audience || form.audience,
+        primaryText: current.caption || current.script || current.hook || form.title,
+        caption: current.caption,
+        script: current.script,
+        hook: current.hook,
+        headline: current.hook || current.title || form.title,
+        description: current.cta || current.goal || form.goal,
+        cta: "LEARN_MORE",
+      }),
+    );
+    toast.success("Контент передан в AI запуск рекламы");
+    setLocation("/ads-automation");
+  };
+
   return (
     <PageLayout>
       <div className="space-y-6">
@@ -566,6 +592,15 @@ export default function ContentStudio() {
           >
             <Megaphone size={16} />
             Передать в ИИ таргетолог
+            <ArrowRight size={15} />
+          </button>
+          <button
+            type="button"
+            className="neu-btn inline-flex items-center gap-2 px-5 py-2.5 text-sm"
+            onClick={transferToAdsAutomation}
+          >
+            <Rocket size={16} />
+            Создать рекламу из этого контента
             <ArrowRight size={15} />
           </button>
         </div>

@@ -32,3 +32,14 @@ Admin Center доступен по `/admin`.
 - Staff: `/api/crm/staff`, fallback `negis_demo_staff`.
 - Clinic settings: `/api/crm/admin-settings`, fallback `negis_clinic_settings`.
 - Release checklist: `/api/crm/release-checks`, fallback `negis_release_checks`.
+
+## Meta Live Launch Controls
+
+`/admin -> Meta/Facebook Ads` now controls real Meta launch safety.
+
+- `Заполнить из env` fills only non-secret IDs.
+- `Разрешить live launch` enables ACTIVE campaigns for owner/admin/manager.
+- If the toggle is off, `/ads-automation` creates only `PAUSED` campaigns.
+- The toggle is saved to `/api/crm/admin-settings` with key `meta_live_launch_enabled`.
+- Demo fallback key: `negis_meta_live_launch_enabled`.
+- Launch audit is stored in `meta_campaign_launches` and `meta_launch_audit_logs` when Supabase is configured.

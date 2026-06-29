@@ -1,5 +1,7 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { getSupabaseServerClient } from "../supabase/server";
+import { checkMetaCompliance } from "../meta/compliance";
+import { checkMetaAdAccount, getMetaCampaignStatus, getMetaConfig, launchMetaCampaign } from "../meta/marketing";
 
 export type CrmResource =
   | "clients"
@@ -14,6 +16,7 @@ export type CrmResource =
   | "integration-statuses"
   | "ai-providers"
   | "meta-accounts"
+  | "meta-launches"
   | "release-checks";
 
 type CrmMode = "supabase" | "demo";
@@ -275,6 +278,34 @@ function buildPatchRow(resource: CrmResource, body: JsonRecord): JsonRecord {
     row.updated_at = new Date().toISOString();
   }
 
+  if (resource === "meta-launches") {
+    setText("launched_by", ["launchedBy", "launched_by"]);
+    setText("launched_by_role", ["launchedByRole", "launched_by_role"]);
+    setText("source_module", ["sourceModule", "source_module"]);
+    setText("source_id", ["sourceId", "source_id"]);
+    setText("campaign_name", ["campaignName", "campaign_name"]);
+    setText("objective", ["objective"]);
+    setText("status", ["status"]);
+    setText("meta_campaign_id", ["metaCampaignId", "meta_campaign_id"]);
+    setText("meta_adset_id", ["metaAdSetId", "meta_adset_id"]);
+    setText("meta_creative_id", ["metaCreativeId", "meta_creative_id"]);
+    setText("meta_ad_id", ["metaAdId", "meta_ad_id"]);
+    setText("meta_status", ["metaStatus", "meta_status"]);
+    setRaw("budget_daily_minor", ["budgetDailyMinor", "budget_daily_minor"]);
+    setRaw("budget_total_minor", ["budgetTotalMinor", "budget_total_minor"]);
+    setText("currency", ["currency"]);
+    setDate("start_time", ["startTime", "start_time"]);
+    setDate("end_time", ["endTime", "end_time"]);
+    setText("page_id", ["pageId", "page_id"]);
+    setText("instagram_actor_id", ["instagramActorId", "instagram_actor_id"]);
+    setText("ad_account_id", ["adAccountId", "ad_account_id"]);
+    setRaw("payload", ["payload"]);
+    setRaw("compliance", ["compliance"]);
+    setRaw("meta_response", ["metaResponse", "meta_response"]);
+    setText("last_error", ["lastError", "last_error"]);
+    row.updated_at = new Date().toISOString();
+  }
+
   if (resource === "release-checks") {
     setText("check_key", ["checkKey", "check_key"]);
     setText("status", ["status"]);
@@ -375,6 +406,10 @@ function resourceValidationDetails(resource: CrmResource, body: JsonRecord): str
 
   if (resource === "release-checks" && !firstString(body.checkKey, body.check_key)) {
     details.push("checkKey is required");
+  }
+
+  if (resource === "meta-launches" && !firstString(body.campaignName, body.campaign_name)) {
+    details.push("campaignName is required");
   }
 
   return details;
@@ -581,6 +616,39 @@ function makeMetaAccount(body: JsonRecord): JsonRecord {
     timezoneName: firstString(body.timezoneName, body.timezone_name),
     status: readString(body.status) || "draft",
     metadata: asRecord(body.metadata),
+  };
+}
+
+function makeMetaLaunch(body: JsonRecord): JsonRecord {
+  return {
+    id: readString(body.id) || nextDemoId("meta-launch"),
+    workspaceId: firstString(body.workspaceId, body.workspace_id),
+    launchedBy: firstString(body.launchedBy, body.launched_by),
+    launchedByRole: firstString(body.launchedByRole, body.launched_by_role),
+    sourceModule: firstString(body.sourceModule, body.source_module),
+    sourceId: firstString(body.sourceId, body.source_id),
+    campaignName: firstString(body.campaignName, body.campaign_name),
+    objective: readString(body.objective) || "OUTCOME_LEADS",
+    status: readString(body.status) || "draft",
+    metaCampaignId: firstString(body.metaCampaignId, body.meta_campaign_id),
+    metaAdSetId: firstString(body.metaAdSetId, body.meta_adset_id),
+    metaCreativeId: firstString(body.metaCreativeId, body.meta_creative_id),
+    metaAdId: firstString(body.metaAdId, body.meta_ad_id),
+    metaStatus: firstString(body.metaStatus, body.meta_status),
+    budgetDailyMinor: readNumber(body.budgetDailyMinor ?? body.budget_daily_minor) ?? null,
+    budgetTotalMinor: readNumber(body.budgetTotalMinor ?? body.budget_total_minor) ?? null,
+    currency: readString(body.currency) || "USD",
+    startTime: firstString(body.startTime, body.start_time),
+    endTime: firstString(body.endTime, body.end_time),
+    pageId: firstString(body.pageId, body.page_id),
+    instagramActorId: firstString(body.instagramActorId, body.instagram_actor_id),
+    adAccountId: firstString(body.adAccountId, body.ad_account_id),
+    payload: asRecord(body.payload),
+    compliance: asRecord(body.compliance),
+    metaResponse: asRecord(body.metaResponse ?? body.meta_response),
+    lastError: firstString(body.lastError, body.last_error),
+    createdAt: firstString(body.createdAt, body.created_at, new Date().toISOString()),
+    updatedAt: firstString(body.updatedAt, body.updated_at, new Date().toISOString()),
   };
 }
 
@@ -955,6 +1023,72 @@ const configs: Record<CrmResource, ResourceConfig> = {
         metadata: row.metadata,
       }),
   },
+  "meta-launches": {
+    table: "meta_campaign_launches",
+    listKey: "launches",
+    requiredPost: [],
+    sortableColumn: "created_at",
+    demoItem: makeMetaLaunch,
+    toRow: (body, workspaceId) => ({
+      workspace_id: workspaceId,
+      launched_by: firstString(body.launchedBy, body.launched_by) || null,
+      launched_by_role: firstString(body.launchedByRole, body.launched_by_role) || null,
+      source_module: firstString(body.sourceModule, body.source_module) || null,
+      source_id: firstString(body.sourceId, body.source_id) || null,
+      campaign_name: firstString(body.campaignName, body.campaign_name),
+      objective: readString(body.objective) || "OUTCOME_LEADS",
+      status: readString(body.status) || "draft",
+      meta_campaign_id: firstString(body.metaCampaignId, body.meta_campaign_id) || null,
+      meta_adset_id: firstString(body.metaAdSetId, body.meta_adset_id) || null,
+      meta_creative_id: firstString(body.metaCreativeId, body.meta_creative_id) || null,
+      meta_ad_id: firstString(body.metaAdId, body.meta_ad_id) || null,
+      meta_status: firstString(body.metaStatus, body.meta_status) || null,
+      budget_daily_minor: readNumber(body.budgetDailyMinor ?? body.budget_daily_minor),
+      budget_total_minor: readNumber(body.budgetTotalMinor ?? body.budget_total_minor),
+      currency: readString(body.currency) || "USD",
+      start_time: maybeDate(body.startTime ?? body.start_time),
+      end_time: maybeDate(body.endTime ?? body.end_time),
+      page_id: firstString(body.pageId, body.page_id) || null,
+      instagram_actor_id: firstString(body.instagramActorId, body.instagram_actor_id) || null,
+      ad_account_id: firstString(body.adAccountId, body.ad_account_id) || null,
+      payload: asRecord(body.payload),
+      compliance: asRecord(body.compliance),
+      meta_response: asRecord(body.metaResponse ?? body.meta_response),
+      last_error: firstString(body.lastError, body.last_error) || null,
+      updated_at: new Date().toISOString(),
+    }),
+    fromRow: (row) =>
+      makeMetaLaunch({
+        id: row.id,
+        workspaceId: row.workspace_id,
+        launchedBy: row.launched_by,
+        launchedByRole: row.launched_by_role,
+        sourceModule: row.source_module,
+        sourceId: row.source_id,
+        campaignName: row.campaign_name,
+        objective: row.objective,
+        status: row.status,
+        metaCampaignId: row.meta_campaign_id,
+        metaAdSetId: row.meta_adset_id,
+        metaCreativeId: row.meta_creative_id,
+        metaAdId: row.meta_ad_id,
+        metaStatus: row.meta_status,
+        budgetDailyMinor: row.budget_daily_minor,
+        budgetTotalMinor: row.budget_total_minor,
+        currency: row.currency,
+        startTime: row.start_time,
+        endTime: row.end_time,
+        pageId: row.page_id,
+        instagramActorId: row.instagram_actor_id,
+        adAccountId: row.ad_account_id,
+        payload: row.payload,
+        compliance: row.compliance,
+        metaResponse: row.meta_response,
+        lastError: row.last_error,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+      }),
+  },
   "release-checks": {
     table: "release_checks",
     listKey: "checks",
@@ -1297,6 +1431,484 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
     console.warn(warning);
     return sendJson(res, 200, success("demo", { [resource === "content-videos" ? "video" : "item"]: demoItem, item: demoItem }, warning));
   }
+}
+
+const META_MAX_DAILY_BUDGET = 50;
+const META_MAX_TOTAL_BUDGET = 300;
+
+function normalizeMetaStatus(value: unknown): "PAUSED" | "ACTIVE" {
+  return readString(value).toUpperCase() === "ACTIVE" ? "ACTIVE" : "PAUSED";
+}
+
+function budgetToMinor(value: unknown): number {
+  const amount = readNumber(value);
+  if (!amount || amount <= 0) return 0;
+  return Math.round(amount * 100);
+}
+
+function dateDays(startDate: string, endDate: string): number {
+  const start = new Date(startDate);
+  const end = new Date(endDate);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end <= start) return 1;
+  return Math.max(1, Math.ceil((end.getTime() - start.getTime()) / 86400000));
+}
+
+function roleCanLaunchActive(role: string): boolean {
+  return ["owner", "admin"].includes(role.trim().toLowerCase());
+}
+
+function demoMetaId(prefix: string) {
+  return `dryrun_${prefix}_${Date.now()}`;
+}
+
+async function readMetaLiveLaunchEnabled(workspaceId: string, body: JsonRecord): Promise<boolean> {
+  const requested = readBoolean(body.liveLaunchEnabled);
+  const supabase = getSupabaseServerClient();
+
+  if (!supabase || !isUuid(workspaceId)) {
+    return requested;
+  }
+
+  try {
+    const { data, error } = await supabase
+      .from("workspace_settings")
+      .select("value")
+      .eq("workspace_id", workspaceId)
+      .eq("key", "meta_live_launch_enabled")
+      .maybeSingle();
+
+    if (error) throw new Error(error.message);
+    const value = asRecord(asRecord(data).value);
+    if (Object.prototype.hasOwnProperty.call(value, "enabled")) {
+      return readBoolean(value.enabled);
+    }
+  } catch (error) {
+    console.warn(supabaseWarning("workspace_settings meta_live_launch_enabled", error));
+  }
+
+  return requested;
+}
+
+function buildMetaLaunchBody(body: JsonRecord) {
+  const campaignName = firstString(body.campaignName, body.campaign_name);
+  const primaryText = firstString(body.primaryText, body.primary_text, body.creativeText, body.caption);
+  const headline = firstString(body.headline, campaignName);
+  const description = firstString(body.description, body.offer, body.service, body.niche);
+  const dailyBudget = readNumber(body.dailyBudget ?? body.daily_budget ?? body.budget) ?? 0;
+  const days = dateDays(firstString(body.startDate, body.start_time), firstString(body.endDate, body.end_time));
+  const totalBudget = readNumber(body.totalBudget ?? body.total_budget) ?? dailyBudget * days;
+  const config = getMetaConfig();
+
+  return {
+    campaignName,
+    objective: firstString(body.objective, "OUTCOME_LEADS"),
+    statusMode: normalizeMetaStatus(body.statusMode ?? body.status),
+    dailyBudget,
+    totalBudget,
+    dailyBudgetMinor: budgetToMinor(dailyBudget),
+    totalBudgetMinor: budgetToMinor(totalBudget),
+    currency: readString(body.currency) || "USD",
+    city: firstString(body.city, "Astana"),
+    targetAudience: firstString(body.targetAudience, body.target_audience, "Women 25-55"),
+    primaryText,
+    headline,
+    description,
+    cta: firstString(body.cta, "LEARN_MORE").toUpperCase().replace(/\s+/g, "_"),
+    landingUrl: firstString(body.landingUrl, body.landing_url, body.websiteUrl, body.website_url),
+    imageUrl: firstString(body.imageUrl, body.image_url),
+    startDate: firstString(body.startDate, body.start_time, new Date(Date.now() + 3600000).toISOString()),
+    endDate: firstString(body.endDate, body.end_time),
+    pageId: config.pageId,
+    instagramActorId: config.instagramActorId,
+    adAccountId: config.adAccountId,
+  };
+}
+
+async function persistMetaLaunch(input: {
+  workspaceId: string;
+  payload: JsonRecord;
+  compliance: JsonRecord;
+  metaResponse: JsonRecord;
+  status: string;
+  metaStatus: string;
+  lastError?: string;
+}) {
+  const config = configs["meta-launches"];
+  const supabase = getSupabaseServerClient();
+  const demoItem = config.demoItem({
+    ...input.payload,
+    workspaceId: input.workspaceId,
+    status: input.status,
+    metaStatus: input.metaStatus,
+    compliance: input.compliance,
+    metaResponse: input.metaResponse,
+    lastError: input.lastError,
+  });
+
+  if (!supabase || !isUuid(input.workspaceId)) {
+    return { mode: "demo" as CrmMode, item: demoItem };
+  }
+
+  const row = config.toRow(
+    {
+      ...input.payload,
+      status: input.status,
+      metaStatus: input.metaStatus,
+      compliance: input.compliance,
+      metaResponse: input.metaResponse,
+      lastError: input.lastError,
+    },
+    input.workspaceId,
+  );
+
+  try {
+    const { data, error } = await supabase.from(config.table).insert(row).select("*").single();
+    if (error) throw new Error(error.message);
+    return { mode: "supabase" as CrmMode, item: config.fromRow(asRecord(data)) };
+  } catch (error) {
+    const warning = supabaseWarning(config.table, error);
+    console.warn(warning);
+    return { mode: "demo" as CrmMode, item: demoItem, warning };
+  }
+}
+
+async function insertMetaAuditLog(input: {
+  workspaceId: string;
+  launchId: string;
+  actorName: string;
+  actorRole: string;
+  action: string;
+  details: JsonRecord;
+}) {
+  const supabase = getSupabaseServerClient();
+  if (!supabase || !isUuid(input.workspaceId) || !isUuid(input.launchId)) return;
+
+  try {
+    const { error } = await supabase.from("meta_launch_audit_logs").insert({
+      workspace_id: input.workspaceId,
+      launch_id: input.launchId,
+      actor_name: input.actorName || null,
+      actor_role: input.actorRole || null,
+      action: input.action,
+      details: input.details,
+    });
+    if (error) throw new Error(error.message);
+  } catch (error) {
+    console.warn(supabaseWarning("meta_launch_audit_logs", error));
+  }
+}
+
+function extractMetaIds(metaResponse: JsonRecord) {
+  return {
+    metaCampaignId: firstString(metaResponse.metaCampaignId, asRecord(metaResponse.campaign).id),
+    metaAdSetId: firstString(metaResponse.metaAdSetId, asRecord(metaResponse.adSet).id),
+    metaCreativeId: firstString(metaResponse.metaCreativeId, asRecord(metaResponse.creative).id),
+    metaAdId: firstString(metaResponse.metaAdId, asRecord(metaResponse.ad).id),
+  };
+}
+
+function sanitizeLaunchPayload(body: JsonRecord): JsonRecord {
+  const sensitive = new Set([
+    "token",
+    "accesstoken",
+    "access_token",
+    "metaaccesstoken",
+    "meta_access_token",
+    "metaappsecret",
+    "meta_app_secret",
+    "appsecret",
+    "app_secret",
+  ]);
+
+  return Object.fromEntries(
+    Object.entries(body).filter(([key, value]) => value !== undefined && !sensitive.has(key.toLowerCase().replace(/[^a-z_]/g, ""))),
+  );
+}
+
+export async function handleMetaValidate(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== "POST") {
+    return sendJson(res, 405, errorBody("Method not allowed", ["Use POST"]));
+  }
+
+  const body = asRecord(req.body);
+  const config = getMetaConfig();
+  if (readBoolean(body.dryRun)) {
+    return sendJson(
+      res,
+      200,
+      success("demo", {
+        configured: config.configured,
+        dryRun: true,
+        adAccountId: config.adAccountId,
+        pageId: config.pageId,
+        instagramActorId: config.instagramActorId,
+        hasAccessToken: Boolean(config.accessToken),
+      }),
+    );
+  }
+
+  if (!config.configured) {
+    return sendJson(
+      res,
+      200,
+      success("demo", {
+        configured: false,
+        adAccountId: config.adAccountId,
+        pageId: config.pageId,
+        instagramActorId: config.instagramActorId,
+        hasAccessToken: Boolean(config.accessToken),
+      }, "Meta env is not configured"),
+    );
+  }
+
+  try {
+    const account = await checkMetaAdAccount();
+    return sendJson(
+      res,
+      200,
+      success("supabase", {
+        configured: true,
+        account,
+        adAccountId: config.adAccountId,
+        pageId: config.pageId,
+        instagramActorId: config.instagramActorId,
+        hasAccessToken: true,
+      }),
+    );
+  } catch (error) {
+    return sendJson(res, 502, {
+      ...errorBody("Meta validation failed", [error instanceof Error ? error.message : "Meta API validation failed"]),
+      status: 502,
+    });
+  }
+}
+
+export async function handleMetaStatus(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== "GET") {
+    return sendJson(res, 405, errorBody("Method not allowed", ["Use GET"]));
+  }
+
+  const campaignId = readQueryString(req.query.campaignId ?? req.query.campaign_id);
+  if (!campaignId) {
+    return sendJson(res, 400, errorBody("Validation error", ["campaignId is required"]));
+  }
+
+  if (campaignId.startsWith("dryrun_") || campaignId.startsWith("demo")) {
+    return sendJson(
+      res,
+      200,
+      success("demo", {
+        campaignId,
+        status: "PAUSED",
+        effectiveStatus: "PAUSED",
+        checkedAt: new Date().toISOString(),
+      }),
+    );
+  }
+
+  if (!getMetaConfig().configured) {
+    return sendJson(
+      res,
+      200,
+      success("demo", {
+        campaignId,
+        status: "unknown",
+        effectiveStatus: "unknown",
+        checkedAt: new Date().toISOString(),
+      }, "Meta env is not configured"),
+    );
+  }
+
+  try {
+    const status = await getMetaCampaignStatus(campaignId);
+    return sendJson(res, 200, success("supabase", { campaignId, status, checkedAt: new Date().toISOString() }));
+  } catch (error) {
+    return sendJson(res, 502, {
+      ...errorBody("Meta status failed", [error instanceof Error ? error.message : "Meta API status failed"]),
+      status: 502,
+    });
+  }
+}
+
+export async function handleMetaLaunch(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== "POST") {
+    return sendJson(res, 405, errorBody("Method not allowed", ["Use POST"]));
+  }
+
+  const body = asRecord(req.body);
+  const workspaceId = readWorkspaceId(req, body);
+  const launch = buildMetaLaunchBody(body);
+  const actorName = firstString(body.launchedBy, body.actorName, body.userName);
+  const actorRole = firstString(body.launchedByRole, body.actorRole, "owner");
+  const details: string[] = [];
+
+  if (!launch.campaignName) details.push("campaignName is required");
+  if (!launch.primaryText) details.push("primaryText is required");
+  if (!launch.headline) details.push("headline is required");
+  if (!launch.dailyBudget || launch.dailyBudgetMinor <= 0) details.push("dailyBudget is required");
+  if (!launch.landingUrl && !launch.imageUrl) details.push("landingUrl or imageUrl is required");
+  if (!readBoolean(body.complianceConfirmed)) details.push("complianceConfirmed is required");
+  if (!readBoolean(body.manualApprovalConfirmed)) details.push("manualApprovalConfirmed is required");
+
+  const budgetOverrideConfirmed = readBoolean(body.budgetOverrideConfirmed);
+  if (launch.dailyBudget > META_MAX_DAILY_BUDGET && (!budgetOverrideConfirmed || !roleCanLaunchActive(actorRole))) {
+    details.push(`dailyBudget exceeds ${META_MAX_DAILY_BUDGET} ${launch.currency}; admin override is required`);
+  }
+  if (launch.totalBudget > META_MAX_TOTAL_BUDGET && (!budgetOverrideConfirmed || !roleCanLaunchActive(actorRole))) {
+    details.push(`totalBudget exceeds ${META_MAX_TOTAL_BUDGET} ${launch.currency}; admin override is required`);
+  }
+
+  const liveLaunchEnabled = await readMetaLiveLaunchEnabled(workspaceId, body);
+  if (launch.statusMode === "ACTIVE") {
+    if (!liveLaunchEnabled) details.push("Live launch is disabled in Admin Center");
+    if (!roleCanLaunchActive(actorRole)) details.push("Only owner/admin can launch ACTIVE campaigns");
+    if (readString(body.activeConfirmation) !== "ЗАПУСТИТЬ") details.push("activeConfirmation must be ЗАПУСТИТЬ");
+  }
+
+  const compliance = checkMetaCompliance({
+    headline: launch.headline,
+    text: launch.primaryText,
+    description: launch.description,
+  });
+  if (compliance.status === "blocked") {
+    return sendJson(res, 400, {
+      ...errorBody("Compliance blocked", ["Ad text must be rewritten before launch"]),
+      data: { compliance, safeText: compliance.safeText },
+    });
+  }
+  if (compliance.status === "needs_review" && !readBoolean(body.manualApprovalConfirmed)) {
+    details.push("manualApprovalConfirmed is required for needs_review compliance status");
+  }
+
+  if (details.length > 0) {
+    return sendJson(res, 400, {
+      ...errorBody("Validation error", details),
+      data: { compliance, safeText: compliance.safeText },
+    });
+  }
+
+  const payload: JsonRecord = {
+    workspaceId,
+    launchedBy: actorName,
+    launchedByRole: actorRole,
+    sourceModule: firstString(body.sourceModule, body.source_module, "ads-automation"),
+    sourceId: firstString(body.sourceId, body.source_id),
+    campaignName: launch.campaignName,
+    objective: launch.objective,
+    status: launch.statusMode === "ACTIVE" ? "active" : "paused",
+    budgetDailyMinor: launch.dailyBudgetMinor,
+    budgetTotalMinor: launch.totalBudgetMinor,
+    currency: launch.currency,
+    startTime: launch.startDate,
+    endTime: launch.endDate,
+    pageId: launch.pageId,
+    instagramActorId: launch.instagramActorId,
+    adAccountId: launch.adAccountId,
+    payload: {
+      ...sanitizeLaunchPayload(body),
+    },
+    compliance,
+  };
+
+  const dryRun = readBoolean(body.dryRun);
+  const config = getMetaConfig();
+  let metaResponse: JsonRecord;
+  let launchStatus = launch.statusMode === "ACTIVE" ? "active" : "paused";
+  let warning = "";
+
+  try {
+    if (dryRun) {
+      metaResponse = {
+        dryRun: true,
+        metaCampaignId: demoMetaId("campaign"),
+        metaAdSetId: demoMetaId("adset"),
+        metaCreativeId: demoMetaId("creative"),
+        metaAdId: demoMetaId("ad"),
+      };
+      warning = "Dry run: Meta API was not called";
+    } else {
+      if (!config.configured) {
+        throw new Error("Meta env is not configured");
+      }
+      const result = await launchMetaCampaign({
+        campaignName: launch.campaignName,
+        objective: launch.objective,
+        status: launch.statusMode,
+        dailyBudgetMinor: launch.dailyBudgetMinor,
+        lifetimeBudgetMinor: launch.totalBudgetMinor,
+        currency: launch.currency,
+        primaryText: launch.primaryText,
+        headline: launch.headline,
+        description: launch.description,
+        cta: launch.cta,
+        landingUrl: launch.landingUrl,
+        imageUrl: launch.imageUrl,
+        startTime: launch.startDate,
+        endTime: launch.endDate || undefined,
+      });
+      metaResponse = result;
+    }
+  } catch (error) {
+    const lastError = error instanceof Error ? error.message : "Meta launch failed";
+    const saved = await persistMetaLaunch({
+      workspaceId,
+      payload,
+      compliance: compliance as unknown as JsonRecord,
+      metaResponse: {},
+      status: "failed",
+      metaStatus: "failed",
+      lastError,
+    });
+    return sendJson(res, 502, {
+      ...errorBody("Meta launch failed", [lastError]),
+      mode: saved.mode,
+      data: { launch: saved.item, compliance, safeText: compliance.safeText },
+    });
+  }
+
+  const ids = extractMetaIds(metaResponse);
+  const saved = await persistMetaLaunch({
+    workspaceId,
+    payload: {
+      ...payload,
+      ...ids,
+      metaStatus: launch.statusMode,
+    },
+    compliance: compliance as unknown as JsonRecord,
+    metaResponse,
+    status: launchStatus,
+    metaStatus: launch.statusMode,
+  });
+
+  const launchId = firstString(asRecord(saved.item).id);
+  await insertMetaAuditLog({
+    workspaceId,
+    launchId,
+    actorName,
+    actorRole,
+    action: dryRun ? "dry_run" : launch.statusMode === "ACTIVE" ? "launch_active" : "create_paused",
+    details: {
+      campaignName: launch.campaignName,
+      statusMode: launch.statusMode,
+      dryRun,
+      complianceStatus: compliance.status,
+    },
+  });
+
+  return sendJson(
+    res,
+    dryRun ? 200 : 201,
+    success(saved.mode, {
+      launchId,
+      launch: saved.item,
+      compliance,
+      safeText: compliance.safeText,
+      dryRun,
+      ...ids,
+      status: launchStatus,
+      metaStatus: launch.statusMode,
+    }, saved.warning || warning || undefined),
+  );
 }
 
 export async function handleCrmHealth(req: VercelRequest, res: VercelResponse) {

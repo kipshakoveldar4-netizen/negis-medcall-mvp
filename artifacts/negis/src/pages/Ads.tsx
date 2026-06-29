@@ -4,6 +4,7 @@ import { Link } from 'wouter';
 import {
   BarChart3,
   BrainCircuit,
+  Rocket,
   RefreshCw, Copy, Check, X, ExternalLink, TrendingUp, TrendingDown,
   ArrowUpDown, Megaphone, ChevronDown, ChevronUp, Users, UserPlus, AlertCircle,
 } from 'lucide-react';
@@ -1935,6 +1936,12 @@ function DemoAdsPage() {
               <p className="max-w-3xl text-sm leading-relaxed text-[#334155]">
                 AI анализирует креатив, подбирает аудиторию, рассчитывает бюджет и готовит отчёт по кампании.
               </p>
+              <Link href="/ads-automation">
+                <div className="neu-btn-primary mt-5 inline-flex cursor-pointer items-center gap-2 px-5 py-2.5 text-sm">
+                  <Rocket size={16} />
+                  AI запуск рекламы
+                </div>
+              </Link>
               <Link href="/targeting-agent">
                 <div className="neu-btn-primary mt-5 inline-flex cursor-pointer items-center gap-2 px-5 py-2.5 text-sm">
                   <BrainCircuit size={16} />
@@ -2044,6 +2051,12 @@ export default function Ads() {
         <div className="flex items-center justify-between">
           <h2 className="text-2xl font-bold">Реклама</h2>
           <div className="flex gap-2">
+            <Link href="/ads-automation">
+              <div className="neu-btn-primary flex cursor-pointer items-center gap-2 px-4 py-2.5 text-sm">
+                <Rocket size={16} />
+                AI запуск рекламы
+              </div>
+            </Link>
             {[
               { id: 'reports' as const, label: 'Отчёты' },
               { id: 'leads' as const, label: 'Лиды из рекламы' },

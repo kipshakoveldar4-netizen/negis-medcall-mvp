@@ -1,5 +1,12 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import { handleCrmHealth, handleCrmResource, type CrmResource } from "../../lib/crm/server";
+import {
+  handleCrmHealth,
+  handleCrmResource,
+  handleMetaLaunch,
+  handleMetaStatus,
+  handleMetaValidate,
+  type CrmResource,
+} from "../../lib/crm/server";
 
 const resources: CrmResource[] = [
   "clients",
@@ -14,6 +21,7 @@ const resources: CrmResource[] = [
   "integration-statuses",
   "ai-providers",
   "meta-accounts",
+  "meta-launches",
   "release-checks",
 ];
 
@@ -44,6 +52,18 @@ export default function handler(req: VercelRequest, res: VercelResponse) {
 
   if (resource === "health") {
     return handleCrmHealth(req, res);
+  }
+
+  if (resource === "meta-launch") {
+    return handleMetaLaunch(req, res);
+  }
+
+  if (resource === "meta-status") {
+    return handleMetaStatus(req, res);
+  }
+
+  if (resource === "meta-validate") {
+    return handleMetaValidate(req, res);
   }
 
   if (!isCrmResource(resource)) {
