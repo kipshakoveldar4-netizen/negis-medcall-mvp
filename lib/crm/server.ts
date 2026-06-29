@@ -1895,6 +1895,23 @@ async function parseCrmFetchJson(response: CrmFetchResponse): Promise<JsonRecord
   }
 }
 
+type OpenAiContentItem = {
+  text: string;
+  value: string;
+};
+
+function normalizeOpenAiContentItems(value: unknown): OpenAiContentItem[] {
+  if (!Array.isArray(value)) return [];
+
+  return value.map((item) => {
+    const record = asRecord(item);
+    return {
+      text: firstString(record.text),
+      value: firstString(record.value),
+    };
+  });
+}
+
 function extractOpenAiText(data: JsonRecord): string {
   const choices = Array.isArray(data.choices) ? data.choices : [];
   const firstChoice = asRecord(choices[0]);
@@ -1904,9 +1921,9 @@ function extractOpenAiText(data: JsonRecord): string {
 
   const output = Array.isArray(data.output) ? data.output : [];
   for (const item of output) {
-    const contentItems = Array.isArray(asRecord(item).content) ? asRecord(item).content : [];
+    const contentItems = normalizeOpenAiContentItems(asRecord(item).content);
     for (const contentItem of contentItems) {
-      const text = firstString(asRecord(contentItem).text, asRecord(contentItem).value);
+      const text = firstString(contentItem.text, contentItem.value);
       if (text) return text;
     }
   }
