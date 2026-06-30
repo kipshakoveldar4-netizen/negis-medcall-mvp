@@ -87,6 +87,15 @@ type SafeMetaSummary = {
   hasAppSecret: boolean;
 };
 
+type StorageHealth = {
+  bucket?: string;
+  exists?: boolean;
+  publicAccess?: boolean;
+  canUpload?: boolean;
+  publicUrlWorks?: boolean;
+  hint?: string;
+};
+
 type StaffMember = {
   id: string;
   name: string;
@@ -568,10 +577,58 @@ export default function AdminCenter() {
     }
   }
 
+  async function checkAdCreativesStorage() {
+    setBusy("adCreativesStorage", true);
+    try {
+      const body = await crmRequest<StorageHealth>("/api/crm/storage-health");
+      const storage = body.data || {};
+      const ready = Boolean(storage.exists && storage.publicAccess && storage.publicUrlWorks);
+      const details = [
+        `bucket ${storage.bucket || "ad-creatives"}`,
+        storage.exists ? "создан" : "не найден",
+        storage.publicAccess ? "public access включён" : "public access не подтверждён",
+        storage.canUpload ? "upload доступен" : "upload не подтверждён",
+      ].join(" · ");
+
+      setIntegrationCards((cards) =>
+        cards.map((card) =>
+          card.key === "adCreativesStorage"
+            ? {
+                ...card,
+                status: ready ? "connected" : "error",
+                details,
+                hint: storage.hint,
+              }
+            : card,
+        ),
+      );
+      if (ready) {
+        toast.success("Storage ad-creatives готов");
+      } else {
+        toast.warning(storage.hint || "Проверьте bucket ad-creatives и public access.");
+      }
+    } catch (error) {
+      setIntegrationCards((cards) =>
+        cards.map((card) =>
+          card.key === "adCreativesStorage"
+            ? {
+                ...card,
+                status: "error",
+                details: error instanceof Error ? error.message : "Не удалось проверить Storage.",
+              }
+            : card,
+        ),
+      );
+      toast.error(error instanceof Error ? error.message : "Не удалось проверить Storage.");
+    } finally {
+      setBusy("adCreativesStorage", false);
+    }
+  }
+
   async function checkAllIntegrations() {
     const data = await checkCrmHealth();
     if (data) setIntegrationCards(buildIntegrationCards(data));
-    await Promise.allSettled([checkTelegram(), checkTargetingAgent()]);
+    await Promise.allSettled([checkTelegram(), checkTargetingAgent(), checkAdCreativesStorage()]);
   }
 
   async function runReleaseAutocheck() {
@@ -1173,6 +1230,8 @@ export default function AdminCenter() {
                   ? checkTelegram
                   : card.key === "targetingAgent"
                     ? checkTargetingAgent
+                    : card.key === "adCreativesStorage"
+                      ? checkAdCreativesStorage
                     : card.key === "supabase"
                       ? () => { void checkCrmHealth(); }
                       : undefined
@@ -1548,6 +1607,14 @@ function buildIntegrationCards(health: CrmHealthData | null): IntegrationCard[] 
       status: providerStatus(health, "supabase"),
       icon: Database,
       details: providerDetails(health, "supabase"),
+    },
+    {
+      key: "adCreativesStorage",
+      title: "Ad creatives storage",
+      description: "Bucket ad-creatives для фото и видео рекламы",
+      status: providerStatus(health, "adCreativesStorage"),
+      icon: FileCheck2,
+      details: `${providerDetails(health, "adCreativesStorage")}. Дополнительно проверьте /api/crm/storage-health.`,
     },
     {
       key: "telegram",

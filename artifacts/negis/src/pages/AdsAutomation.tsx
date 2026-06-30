@@ -36,6 +36,7 @@ type ApiResponse<TData = Record<string, unknown>> =
       success: false;
       error: string;
       details?: string[];
+      hint?: string;
       data?: TData;
     };
 
@@ -122,6 +123,15 @@ type MetaSummary = {
   pageId?: string;
   instagramActorId?: string;
   hasAccessToken?: boolean;
+};
+
+type StorageHealth = {
+  bucket?: string;
+  exists?: boolean;
+  publicAccess?: boolean;
+  canUpload?: boolean;
+  publicUrlWorks?: boolean;
+  hint?: string;
 };
 
 type ConfirmationState = {
@@ -281,6 +291,27 @@ function statusModeLabel(value: "PAUSED" | "ACTIVE") {
   return value === "ACTIVE" ? "Реклама сразу активна" : "Создать выключенной";
 }
 
+function creativeReadyLabel(creative: CreativeAsset | null) {
+  if (!creative) return "Сначала загрузите креатив";
+  if (creative.publicUrl) return "Файл готов для Meta";
+  return "Креатив загружен, публичная ссылка не получена";
+}
+
+function creativeReadyTone(creative: CreativeAsset | null): "green" | "amber" | "slate" {
+  if (!creative) return "slate";
+  return creative.publicUrl ? "green" : "amber";
+}
+
+function missingPublicUrlMessage() {
+  return "Файл загружен, но публичная ссылка не получена. Проверьте Supabase Storage bucket ad-creatives.";
+}
+
+function realLaunchNeedsCreativeLink(creative: CreativeAsset | null) {
+  if (!creative) return "Сначала загрузите креатив. Система сама подготовит ссылку для Meta.";
+  if (!creative.publicUrl) return missingPublicUrlMessage();
+  return "";
+}
+
 function formatBytes(value: number) {
   if (value > 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)} МБ`;
   return `${Math.max(1, Math.round(value / 1024))} КБ`;
@@ -313,7 +344,8 @@ async function crmRequest<T>(path: string, init?: RequestInit): Promise<Extract<
 
   if (!response.ok || body.success === false) {
     const details = body.success === false ? body.details?.join(". ") : "";
-    throw new Error(details || (body.success === false ? body.error : `HTTP ${response.status}`));
+    const hint = body.success === false ? body.hint || "" : "";
+    throw new Error([details || (body.success === false ? body.error : `HTTP ${response.status}`), hint].filter(Boolean).join(" "));
   }
 
   return body as Extract<ApiResponse<T>, { success: true }>;
@@ -383,8 +415,9 @@ export default function AdsAutomation() {
   const [activeConfirmation, setActiveConfirmation] = useState("");
   const [statusMode, setStatusMode] = useState<"PAUSED" | "ACTIVE">("PAUSED");
   const [metaSummary, setMetaSummary] = useState<MetaSummary | null>(null);
+  const [storageHealth, setStorageHealth] = useState<StorageHealth | null>(null);
   const [liveLaunchEnabled, setLiveLaunchEnabled] = useState(() => readStored("negis_meta_live_launch_enabled", false));
-  const [loading, setLoading] = useState<"health" | "upload" | "ai" | "check" | "video" | "launch" | "history" | null>(null);
+  const [loading, setLoading] = useState<"health" | "storage" | "upload" | "ai" | "check" | "video" | "launch" | "history" | null>(null);
   const [notice, setNotice] = useState("");
   const [launchResult, setLaunchResult] = useState<LaunchResult | null>(null);
   const [historyItems, setHistoryItems] = useState<LaunchHistoryItem[]>([]);
@@ -428,6 +461,29 @@ export default function AdsAutomation() {
       setLiveLaunchEnabled(Boolean(readStored("negis_meta_live_launch_enabled", false)));
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Не удалось проверить Meta env.");
+    } finally {
+      setLoading(null);
+    }
+  }
+
+  async function checkStorage() {
+    setLoading("storage");
+    setNotice("");
+    try {
+      const body = await crmRequest<StorageHealth>("/api/crm/storage-health");
+      setStorageHealth(body.data);
+      if (body.data.exists && body.data.publicAccess) {
+        setNotice("Storage проверен: bucket ad-creatives найден, public access включён.");
+        toast.success("Storage готов");
+      } else {
+        const message = body.data.hint || "Bucket ad-creatives требует проверки администратора.";
+        setNotice(message);
+        toast.warning(message);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Не удалось проверить Supabase Storage.";
+      setNotice(message);
+      toast.error(message);
     } finally {
       setLoading(null);
     }
@@ -479,8 +535,11 @@ export default function AdsAutomation() {
         if (error) throw error;
         const { data } = supabase.storage.from("ad-creatives").getPublicUrl(storagePath);
         publicUrl = data.publicUrl || "";
+        if (!publicUrl) {
+          uploadWarning = missingPublicUrlMessage();
+        }
       } else {
-        uploadWarning = "Supabase Storage не подключён локально: используется demo preview.";
+        uploadWarning = "Креатив загружен в мастер, но Supabase Storage не подключён. Администратор должен настроить bucket ad-creatives.";
       }
     } catch (error) {
       uploadWarning = error instanceof Error ? `Supabase Storage: ${error.message}` : "Не удалось загрузить файл в Supabase Storage.";
@@ -499,7 +558,7 @@ export default function AdsAutomation() {
     };
 
     try {
-      const body = await crmRequest<{ asset?: unknown }>("/api/crm/ad-creative-upload", {
+      const body = await crmRequest<Partial<CreativeAsset> & { asset?: unknown; item?: unknown }>("/api/crm/ad-creative-upload", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -519,13 +578,14 @@ export default function AdsAutomation() {
           },
         }),
       });
-      setCreative(normalizeAsset(body.data.asset, fallback));
+      const uploadedAsset = normalizeAsset(body.data.asset || body.data, fallback);
+      setCreative(uploadedAsset);
       setCurrentStep(2);
-      toast.success(fileType === "video" ? "Видео добавлено" : "Фото добавлено");
-      if (uploadWarning) setNotice(uploadWarning);
+      toast.success(fileType === "video" ? "Видео загружено" : "Креатив загружен");
+      setNotice(uploadedAsset.publicUrl ? "Креатив загружен. Файл готов для Meta." : uploadWarning || missingPublicUrlMessage());
     } catch (error) {
       setCreative(fallback);
-      setNotice(error instanceof Error ? error.message : "Файл добавлен в demo preview, но metadata не сохранены.");
+      setNotice(error instanceof Error ? error.message : missingPublicUrlMessage());
     } finally {
       setLoading(null);
     }
@@ -578,6 +638,9 @@ export default function AdsAutomation() {
 
   function buildLaunchPayload(dryRun: boolean, forcedStatusMode = statusMode) {
     const text = compliance?.safeText && compliance.status !== "safe" ? compliance.safeText : aiPackage?.primaryText;
+    const publicCreativeUrl = creative?.publicUrl || "";
+    const dryRunPreviewUrl = dryRun ? creative?.previewUrl || "" : "";
+    const creativeUrl = publicCreativeUrl || dryRunPreviewUrl;
     return {
       workspaceId,
       launchedBy: user?.user_metadata?.full_name || user?.email || "Negis user",
@@ -599,9 +662,9 @@ export default function AdsAutomation() {
       description: aiPackage?.description || brief.offer,
       cta: aiPackage?.cta || "LEARN_MORE",
       landingUrl: destinationUrl,
-      imageUrl: creative?.fileType === "image" ? creative.publicUrl || creative.previewUrl : "",
+      imageUrl: creative?.fileType === "image" ? creativeUrl : "",
       creativeType: creative?.fileType || "image",
-      creativeUrl: creative?.publicUrl || creative?.previewUrl || "",
+      creativeUrl,
       videoUrl: creative?.fileType === "video" ? creative.publicUrl || "" : "",
       videoId: creative?.metaVideoId || "",
       startDate: brief.startDate,
@@ -615,7 +678,7 @@ export default function AdsAutomation() {
     };
   }
 
-  async function runComplianceCheck() {
+  async function runComplianceCheck(stayOnLaunchStep = false) {
     if (!aiPackage) {
       toast.error("Сначала нажмите «ИИ заполнить рекламу»");
       return;
@@ -634,9 +697,9 @@ export default function AdsAutomation() {
       });
       setCompliance(body.data.compliance || null);
       setLaunchResult(body.data);
-      setCurrentStep(5);
-      toast.success("Проверка безопасности готова");
-      if (body.warning) setNotice(body.warning);
+      setCurrentStep(stayOnLaunchStep ? 6 : 5);
+      toast.success(stayOnLaunchStep ? "Проверка прошла без запуска" : "Проверка безопасности готова");
+      setNotice(body.warning || (stayOnLaunchStep ? "Проверка прошла без запуска. Кампания в Meta не создавалась." : ""));
     } catch (error) {
       const message = error instanceof Error ? error.message : "Проверка не прошла.";
       setNotice(message);
@@ -667,8 +730,10 @@ export default function AdsAutomation() {
     if (!confirmations.manualApproval) errors.push("Подтвердите ручное согласование.");
     if (!confirmations.spendUnderstood) errors.push("Подтвердите понимание расходов.");
     if (!metaSummary?.configured) errors.push("Meta env не настроены или не подтверждены.");
-    if (creative && !creative.publicUrl) errors.push("Для реального запуска нужен публичный URL из Supabase Storage.");
-    if (creative?.fileType === "video" && !creative.metaVideoId && !creative.publicUrl) errors.push("Для видео нужен Meta video_id или публичный URL для загрузки.");
+    if (creative && !creative.publicUrl) errors.push(missingPublicUrlMessage());
+    if (creative?.fileType === "video" && !creative.metaVideoId && !creative.publicUrl) {
+      errors.push("Видео загружено в Negis, но ссылка для Meta ещё не готова. Проверьте Storage или повторите загрузку.");
+    }
     if (nextStatusMode === "ACTIVE") {
       if (!liveLaunchEnabled) errors.push("ACTIVE запуск выключен в Admin Center.");
       if (!["owner", "admin", "manager"].includes(userRole || "")) errors.push("ACTIVE запуск доступен только owner/admin/manager.");
@@ -680,7 +745,7 @@ export default function AdsAutomation() {
   async function ensureVideoReady(): Promise<string> {
     if (!creative || creative.fileType !== "video") return "";
     if (creative.metaVideoId) return creative.metaVideoId;
-    if (!creative.publicUrl) throw new Error("Видео должно быть загружено в Supabase Storage перед Meta upload.");
+    if (!creative.publicUrl) throw new Error("Видео загружено в Negis, но публичная ссылка не получена. Проверьте Supabase Storage bucket ad-creatives.");
 
     setLoading("video");
     try {
@@ -752,6 +817,9 @@ export default function AdsAutomation() {
           videoId: metaVideoId,
         }),
       });
+      if (body.data.dryRun) {
+        throw new Error("Meta вернула режим проверки для реального запуска. Кампания не создана.");
+      }
       setLaunchResult(body.data);
       setCompliance(body.data.compliance || compliance);
       saveLocalLaunch(body.data, nextStatusMode);
@@ -790,7 +858,7 @@ export default function AdsAutomation() {
             <p className="text-xs font-black uppercase tracking-[0.16em] text-[#0D9488]">Шаг 1</p>
             <h2 className="mt-1 text-2xl font-black text-[#0F172A]">Креатив</h2>
             <p className="mt-2 max-w-2xl text-sm leading-relaxed text-[#64748B]">
-              Добавьте фото или видео. Для реального запуска файл должен получить публичный URL в Supabase Storage.
+              Загрузите фото или видео. Система сама подготовит ссылку для Meta, без ручного ввода URL.
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -840,12 +908,22 @@ export default function AdsAutomation() {
                   <p className="min-w-0 truncate text-sm font-black text-[#0F172A]">{creative.fileName}</p>
                 </div>
                 <div className="mt-3 flex flex-wrap gap-2">
-                  <StatusPill tone={creative.publicUrl ? "green" : "amber"}>{creative.publicUrl ? "Supabase URL готов" : "Demo preview"}</StatusPill>
+                  <StatusPill tone={creativeReadyTone(creative)}>{creativeReadyLabel(creative)}</StatusPill>
                   <StatusPill tone={creative.fileType === "video" && creative.metaVideoId ? "green" : "slate"}>
                     {creative.fileType === "video" ? creative.metaVideoId ? "Meta video_id готов" : "Meta video_id нужен перед запуском" : "Фото"}
                   </StatusPill>
                 </div>
                 <p className="mt-3 text-sm text-[#64748B]">{formatBytes(creative.fileSize)} · {creative.mimeType || "тип не определён"}</p>
+                {!creative.publicUrl ? (
+                  <div className="mt-3 rounded-2xl border border-amber-200 bg-amber-50 p-3">
+                    <p className="text-sm font-semibold text-amber-900">{missingPublicUrlMessage()}</p>
+                    {storageHealth?.hint ? <p className="mt-1 text-xs font-bold text-amber-800">{storageHealth.hint}</p> : null}
+                    <button type="button" className="neu-btn mt-3 justify-center" disabled={loading === "storage"} onClick={checkStorage}>
+                      {loading === "storage" ? <Loader2 className="animate-spin" size={16} /> : <ShieldCheck size={16} />}
+                      Проверить Storage
+                    </button>
+                  </div>
+                ) : null}
               </div>
               <div className="grid grid-cols-2 gap-2">
                 <button type="button" className="neu-btn justify-center" onClick={() => fileInputRef.current?.click()}>
@@ -974,7 +1052,7 @@ export default function AdsAutomation() {
           Проверяем медицинские формулировки и готовим безопасную версию перед запуском.
         </p>
 
-        <button type="button" className="neu-btn-primary mt-6 justify-center" disabled={loading === "check"} onClick={runComplianceCheck}>
+        <button type="button" className="neu-btn-primary mt-6 justify-center" disabled={loading === "check"} onClick={() => void runComplianceCheck()}>
           {loading === "check" ? <Loader2 className="animate-spin" size={16} /> : <ShieldCheck size={16} />}
           Проверить безопасность
         </button>
@@ -1071,6 +1149,14 @@ export default function AdsAutomation() {
 
   function renderLaunchStep() {
     const errors = prelaunchErrors(statusMode);
+    const realLaunchBlockedByCreative = realLaunchNeedsCreativeLink(creative);
+    const realLaunchBusy = loading === "launch" || loading === "video";
+    const realLaunchDisabled = realLaunchBusy || Boolean(realLaunchBlockedByCreative);
+    const launchResultTitle = launchResult?.dryRun
+      ? "Проверка прошла без запуска"
+      : launchResult?.metaStatus === "ACTIVE" || launchResult?.status === "active"
+        ? "Реклама создана и запущена в Meta"
+        : "Реклама создана в Meta выключенной";
     return (
       <section className="neu-card p-5 sm:p-6">
         <p className="text-xs font-black uppercase tracking-[0.16em] text-[#0D9488]">Шаг 6</p>
@@ -1119,12 +1205,26 @@ export default function AdsAutomation() {
           </div>
         ) : null}
 
+        {realLaunchBlockedByCreative ? (
+          <div className="mt-5 rounded-2xl border border-amber-200 bg-amber-50 p-4">
+            <p className="text-sm font-semibold text-amber-900">{realLaunchBlockedByCreative}</p>
+            <button type="button" className="neu-btn mt-3 justify-center" disabled={loading === "storage"} onClick={checkStorage}>
+              {loading === "storage" ? <Loader2 className="animate-spin" size={16} /> : <ShieldCheck size={16} />}
+              Проверить Storage
+            </button>
+          </div>
+        ) : null}
+
         <div className="mt-6 flex flex-col gap-3 sm:flex-row">
-          <button type="button" className="neu-btn-primary justify-center" disabled={loading === "launch" || loading === "video"} onClick={() => void launch("PAUSED")}>
-            {loading === "launch" || loading === "video" ? <Loader2 className="animate-spin" size={16} /> : <Rocket size={16} />}
+          <button type="button" className="neu-btn justify-center" disabled={loading === "check"} onClick={() => void runComplianceCheck(true)}>
+            {loading === "check" ? <Loader2 className="animate-spin" size={16} /> : <ShieldCheck size={16} />}
+            Проверить без запуска
+          </button>
+          <button type="button" className="neu-btn-primary justify-center" disabled={realLaunchDisabled} onClick={() => void launch("PAUSED")}>
+            {realLaunchBusy ? <Loader2 className="animate-spin" size={16} /> : <Rocket size={16} />}
             Создать в Meta выключенным
           </button>
-          <button type="button" className="neu-btn justify-center border-red-200 text-red-700" disabled={loading === "launch" || loading === "video"} onClick={() => void launch("ACTIVE")}>
+          <button type="button" className="neu-btn justify-center border-red-200 text-red-700" disabled={realLaunchDisabled} onClick={() => void launch("ACTIVE")}>
             <AlertTriangle size={16} />
             Запустить рекламу
           </button>
@@ -1135,9 +1235,9 @@ export default function AdsAutomation() {
             <div className="flex items-start gap-3">
               <CheckCircle2 className="mt-0.5 text-emerald-700" size={20} />
               <div>
-                <p className="font-black text-emerald-900">Meta ответ сохранён</p>
+                <p className="font-black text-emerald-900">{launchResultTitle}</p>
                 <p className="mt-1 text-sm font-semibold text-emerald-800">
-                  Campaign ID: {launchResult.metaCampaignId || "ожидается"}
+                  {launchResult.dryRun ? "Кампания в Meta не создавалась." : `Meta Campaign ID: ${launchResult.metaCampaignId || "ожидается"}`}
                 </p>
               </div>
             </div>
@@ -1179,7 +1279,7 @@ export default function AdsAutomation() {
         <div className="mt-6 grid gap-3">
           {historyItems.length === 0 ? (
             <div className="rounded-2xl border border-[#D8E4EC] bg-white/65 p-5 text-sm font-semibold text-[#64748B]">
-              История пока пустая. Первый запуск появится здесь после dry-run или создания кампании.
+              История пока пустая. Первый запуск появится здесь после проверки без запуска или создания кампании.
             </div>
           ) : (
             historyItems.map((item, index) => {

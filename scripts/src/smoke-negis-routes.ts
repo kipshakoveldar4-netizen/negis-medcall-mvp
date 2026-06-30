@@ -70,6 +70,30 @@ async function checkJsonEndpoint(path: string, init?: RequestInit) {
   return body;
 }
 
+async function checkJsonFailure(path: string, init: RequestInit, expectedText?: string) {
+  const response = await fetch(`${baseUrl}${path}`, init);
+  const text = await response.text();
+  let body: ApiBody;
+
+  try {
+    body = JSON.parse(text) as ApiBody;
+  } catch {
+    throw new Error(`${path} returned invalid JSON for failure check: ${text.slice(0, 120)}`);
+  }
+
+  if (response.ok && body.success !== false) {
+    throw new Error(`${path} unexpectedly succeeded`);
+  }
+
+  const combined = [body.error, ...(body.details || [])].filter(Boolean).join(" ");
+  if (expectedText && !combined.includes(expectedText)) {
+    throw new Error(`${path} failed with unexpected message: ${combined}`);
+  }
+
+  console.log(`${path}: expected failure ok`);
+  return body;
+}
+
 async function checkCrmEndpoint(path: string, payload: Record<string, unknown>) {
   await checkJsonEndpoint(`${path}?workspaceId=demo-workspace`);
   await checkJsonEndpoint(path, {
@@ -108,6 +132,7 @@ async function main() {
   }
   await checkTargetingHealth();
   await checkJsonEndpoint("/api/crm/health");
+  await checkJsonEndpoint("/api/crm/storage-health");
   await checkCrmEndpoint("/api/crm/clients", {
     name: "Smoke Client",
     phone: "+7 700 000 00 00",
@@ -180,7 +205,7 @@ async function main() {
     publicUrl: "https://example.com/smoke-creative.jpg",
     status: "uploaded",
   });
-  await checkJsonEndpoint("/api/crm/ad-creative-upload", {
+  const upload = await checkJsonEndpoint("/api/crm/ad-creative-upload", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -193,6 +218,26 @@ async function main() {
       status: "uploaded",
     }),
   });
+  const uploadedAsset = (upload.data || {}) as { publicUrl?: string; asset?: { publicUrl?: string } };
+  if (!uploadedAsset.publicUrl && !uploadedAsset.asset?.publicUrl) {
+    throw new Error("/api/crm/ad-creative-upload did not return publicUrl");
+  }
+  await checkJsonFailure(
+    "/api/crm/ad-creative-upload",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        workspaceId: "demo-workspace",
+        fileName: "smoke-upload-missing-url.jpg",
+        fileType: "image",
+        mimeType: "image/jpeg",
+        fileSize: 2048,
+        status: "demo",
+      }),
+    },
+    "публичную ссылку",
+  );
   await checkJsonEndpoint("/api/crm/ad-creative-meta-upload", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -230,6 +275,34 @@ async function main() {
       dryRun: true,
     }),
   });
+  await checkJsonFailure(
+    "/api/crm/meta-launch",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        workspaceId: "demo-workspace",
+        campaignName: "Smoke Meta Campaign missing creative URL",
+        objective: "OUTCOME_LEADS",
+        statusMode: "PAUSED",
+        dailyBudget: 20,
+        totalBudget: 140,
+        currency: "USD",
+        city: "Astana",
+        targetAudience: "Women 25-55",
+        primaryText: "Professional consultation in Astana. Book a specialist consultation.",
+        headline: "Consultation in Astana",
+        description: "Book a consultation with a specialist.",
+        cta: "LEARN_MORE",
+        landingUrl: "https://example.com",
+        creativeType: "image",
+        complianceConfirmed: true,
+        manualApprovalConfirmed: true,
+        dryRun: false,
+      }),
+    },
+    "Креатив",
+  );
   const launch = await checkJsonEndpoint("/api/crm/meta-launch", {
     method: "POST",
     headers: { "Content-Type": "application/json" },

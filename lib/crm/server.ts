@@ -1643,6 +1643,16 @@ export async function handleAdCreativeUpload(req: VercelRequest, res: VercelResp
     return sendJson(res, 400, errorBody("Validation error", details));
   }
 
+  const publicUrl = firstString(body.publicUrl, body.public_url, body.creativeUrl, body.creative_url);
+  if (!publicUrl) {
+    return sendJson(res, 400, {
+      success: false,
+      error: "Не удалось получить публичную ссылку креатива",
+      details: ["Файл загружен, но публичная ссылка не получена."],
+      hint: "Проверьте, что Supabase Storage bucket ad-creatives создан и public access включён.",
+    });
+  }
+
   const workspaceId = readWorkspaceId(req, body);
   const saved = await persistAdCreativeAsset({
     workspaceId,
@@ -1657,8 +1667,68 @@ export async function handleAdCreativeUpload(req: VercelRequest, res: VercelResp
   return sendJson(
     res,
     saved.mode === "supabase" ? 201 : 200,
-    success(saved.mode, { asset: saved.asset, item: saved.asset }, saved.warning || undefined),
+    success(saved.mode, { ...saved.asset, asset: saved.asset, item: saved.asset }, saved.warning || undefined),
   );
+}
+
+export async function handleStorageHealth(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== "GET") {
+    return sendJson(res, 405, errorBody("Method not allowed", ["Use GET"]));
+  }
+
+  const bucket = "ad-creatives";
+  const supabase = getSupabaseServerClient();
+
+  if (!supabase) {
+    return sendJson(
+      res,
+      200,
+      success("demo", {
+        bucket,
+        exists: false,
+        publicAccess: false,
+        canUpload: false,
+        configured: false,
+        hint: "SUPABASE_URL и SUPABASE_SERVICE_ROLE_KEY не настроены.",
+      }),
+    );
+  }
+
+  try {
+    const { data, error } = await supabase.storage.getBucket(bucket);
+    const bucketData = asRecord(data);
+    const exists = !error && Boolean(data);
+    const publicUrl = supabase.storage.from(bucket).getPublicUrl("_negis-storage-health.txt").data.publicUrl || "";
+
+    return sendJson(
+      res,
+      200,
+      success("supabase", {
+        bucket,
+        exists,
+        publicAccess: Boolean(bucketData.public),
+        canUpload: exists,
+        publicUrlWorks: Boolean(publicUrl),
+        samplePublicUrl: publicUrl,
+        hint: exists
+          ? "Bucket найден. Проверьте public access, если реальные креативы не открываются по ссылке."
+          : "Bucket ad-creatives не найден. Примените migration 015 или создайте bucket вручную.",
+      }),
+    );
+  } catch (error) {
+    return sendJson(
+      res,
+      200,
+      success("demo", {
+        bucket,
+        exists: false,
+        publicAccess: false,
+        canUpload: false,
+        configured: true,
+        hint: error instanceof Error ? error.message : "Не удалось проверить Supabase Storage.",
+      }),
+    );
+  }
 }
 
 export async function handleAdCreativeMetaUpload(req: VercelRequest, res: VercelResponse) {
@@ -1681,13 +1751,19 @@ export async function handleAdCreativeMetaUpload(req: VercelRequest, res: Vercel
         assetId,
         publicUrl,
         status: publicUrl ? "ready" : "missing_url",
-        message: "Для фото отдельная загрузка в Meta не требуется. URL будет использован в креативе.",
+        message: "Для фото отдельная загрузка в Meta не требуется. Ссылка будет использована в креативе автоматически.",
       }),
     );
   }
 
   if (!publicUrl) {
-    return sendJson(res, 400, errorBody("Validation error", ["Для видео нужен публичный URL из Supabase Storage"]));
+    return sendJson(
+      res,
+      400,
+      errorBody("Не удалось получить публичную ссылку креатива", [
+        "Видео загружено в Negis, но публичная ссылка не получена. Проверьте Supabase Storage bucket ad-creatives.",
+      ]),
+    );
   }
 
   if (readBoolean(body.dryRun)) {
@@ -1699,7 +1775,7 @@ export async function handleAdCreativeMetaUpload(req: VercelRequest, res: Vercel
         assetId,
         metaVideoId,
         status: "dry_run",
-        message: "Dry-run: видео не отправлялось в Meta.",
+        message: "Проверка прошла без запуска: видео не отправлялось в Meta.",
       }),
     );
   }
@@ -1708,7 +1784,7 @@ export async function handleAdCreativeMetaUpload(req: VercelRequest, res: Vercel
     return sendJson(
       res,
       400,
-      errorBody("Meta video upload unavailable", [
+      errorBody("Не удалось загрузить видео в Meta", [
         "Meta env не настроены. Проверьте META_ACCESS_TOKEN, META_AD_ACCOUNT_ID и META_PAGE_ID в Vercel.",
       ]),
     );
@@ -1743,8 +1819,10 @@ export async function handleAdCreativeMetaUpload(req: VercelRequest, res: Vercel
     return sendJson(
       res,
       502,
-      errorBody("Meta video upload failed", [
-        error instanceof Error ? error.message : "Не удалось загрузить видео в Meta. Кампания не создана.",
+      errorBody("Видео загружено в Negis, но Meta не приняла видео", [
+        error instanceof Error
+          ? `${error.message}. Проверьте формат MP4, размер и права токена.`
+          : "Проверьте формат MP4, размер и права токена.",
       ]),
     );
   }
@@ -2058,6 +2136,29 @@ function demoMetaId(prefix: string) {
   return `dryrun_${prefix}_${Date.now()}`;
 }
 
+function localizeMetaLaunchError(message: string) {
+  const text = message || "Meta API вернул ошибку. Кампания не создана.";
+  const normalized = text.toLowerCase();
+
+  if (normalized.includes("meta env is not configured") || normalized.includes("meta env")) {
+    return "Meta env не настроены. Проверьте META_ACCESS_TOKEN, META_AD_ACCOUNT_ID и META_PAGE_ID в Vercel.";
+  }
+
+  if (normalized.includes("video") && (normalized.includes("url") || normalized.includes("public"))) {
+    return "Видео загружено в Negis, но публичная ссылка не получена. Проверьте Supabase Storage bucket ad-creatives.";
+  }
+
+  if (normalized.includes("permission") || normalized.includes("permissions") || normalized.includes("unsupported post request")) {
+    return "Meta отклонила запрос. Проверьте права access token, ad account, page и instagram actor.";
+  }
+
+  if (normalized.includes("invalid parameter") || normalized.includes("param")) {
+    return `Meta отклонила параметры кампании: ${text}`;
+  }
+
+  return text;
+}
+
 async function readMetaLiveLaunchEnabled(workspaceId: string, body: JsonRecord): Promise<boolean> {
   const requested = readBoolean(body.liveLaunchEnabled);
   const supabase = getSupabaseServerClient();
@@ -2259,7 +2360,7 @@ export async function handleMetaValidate(req: VercelRequest, res: VercelResponse
         pageId: config.pageId,
         instagramActorId: config.instagramActorId,
         hasAccessToken: Boolean(config.accessToken),
-      }, "Meta env is not configured"),
+      }, "Meta env не настроены."),
     );
   }
 
@@ -2279,7 +2380,7 @@ export async function handleMetaValidate(req: VercelRequest, res: VercelResponse
     );
   } catch (error) {
     return sendJson(res, 502, {
-      ...errorBody("Meta validation failed", [error instanceof Error ? error.message : "Meta API validation failed"]),
+      ...errorBody("Не удалось проверить Meta", [error instanceof Error ? error.message : "Meta API не ответил на проверку."]),
       status: 502,
     });
   }
@@ -2317,7 +2418,7 @@ export async function handleMetaStatus(req: VercelRequest, res: VercelResponse) 
         status: "unknown",
         effectiveStatus: "unknown",
         checkedAt: new Date().toISOString(),
-      }, "Meta env is not configured"),
+      }, "Meta env не настроены."),
     );
   }
 
@@ -2326,7 +2427,7 @@ export async function handleMetaStatus(req: VercelRequest, res: VercelResponse) 
     return sendJson(res, 200, success("supabase", { campaignId, status, checkedAt: new Date().toISOString() }));
   } catch (error) {
     return sendJson(res, 502, {
-      ...errorBody("Meta status failed", [error instanceof Error ? error.message : "Meta API status failed"]),
+      ...errorBody("Не удалось проверить статус Meta", [error instanceof Error ? error.message : "Meta API не вернул статус."]),
       status: 502,
     });
   }
@@ -2344,30 +2445,30 @@ export async function handleMetaLaunch(req: VercelRequest, res: VercelResponse) 
   const actorRole = firstString(body.launchedByRole, body.actorRole, "owner");
   const details: string[] = [];
 
-  if (!launch.campaignName) details.push("campaignName is required");
-  if (!launch.primaryText) details.push("primaryText is required");
-  if (!launch.headline) details.push("headline is required");
-  if (!launch.dailyBudget || launch.dailyBudgetMinor <= 0) details.push("dailyBudget is required");
-  if (!launch.landingUrl) details.push("landingUrl is required");
-  if (!launch.imageUrl && !launch.creativeUrl && !launch.videoUrl) details.push("creative image/video URL is required");
+  if (!launch.campaignName) details.push("Название кампании обязательно.");
+  if (!launch.primaryText) details.push("Текст объявления обязателен.");
+  if (!launch.headline) details.push("Заголовок обязателен.");
+  if (!launch.dailyBudget || launch.dailyBudgetMinor <= 0) details.push("Укажите дневной бюджет больше 0.");
+  if (!launch.landingUrl) details.push("Укажите, куда должны приходить заявки.");
+  if (!launch.imageUrl && !launch.creativeUrl && !launch.videoUrl) details.push("Креатив загружен, но публичная ссылка не получена.");
   if (launch.creativeType === "video" && !launch.videoId && !launch.videoUrl) {
-    details.push("videoId or videoUrl is required for video ads");
+    details.push("Для видео нужен Meta video_id или публичная ссылка для загрузки в Meta.");
   }
-  if (!readBoolean(body.complianceConfirmed)) details.push("complianceConfirmed is required");
-  if (!readBoolean(body.manualApprovalConfirmed)) details.push("manualApprovalConfirmed is required");
+  if (!readBoolean(body.complianceConfirmed)) details.push("Подтвердите проверку безопасности текста.");
+  if (!readBoolean(body.manualApprovalConfirmed)) details.push("Подтвердите ручное согласование запуска.");
 
   const budgetOverrideConfirmed = readBoolean(body.budgetOverrideConfirmed);
   if (launch.dailyBudget > META_MAX_DAILY_BUDGET && (!budgetOverrideConfirmed || !roleCanLaunchActive(actorRole))) {
-    details.push(`dailyBudget exceeds ${META_MAX_DAILY_BUDGET} ${launch.currency}; admin override is required`);
+    details.push(`Дневной бюджет больше ${META_MAX_DAILY_BUDGET} ${launch.currency}; нужен owner/admin override.`);
   }
   if (launch.totalBudget > META_MAX_TOTAL_BUDGET && (!budgetOverrideConfirmed || !roleCanLaunchActive(actorRole))) {
-    details.push(`totalBudget exceeds ${META_MAX_TOTAL_BUDGET} ${launch.currency}; admin override is required`);
+    details.push(`Общий бюджет больше ${META_MAX_TOTAL_BUDGET} ${launch.currency}; нужен owner/admin override.`);
   }
 
   const liveLaunchEnabled = await readMetaLiveLaunchEnabled(workspaceId, body);
   if (launch.statusMode === "ACTIVE") {
-    if (!liveLaunchEnabled) details.push("Live launch is disabled in Admin Center");
-    if (!roleCanLaunchActive(actorRole)) details.push("Only owner/admin can launch ACTIVE campaigns");
+    if (!liveLaunchEnabled) details.push("ACTIVE запуск выключен в Admin Center.");
+    if (!roleCanLaunchActive(actorRole)) details.push("ACTIVE запуск доступен только owner/admin.");
     if (readString(body.activeConfirmation).toUpperCase() !== "ЗАПУСТИТЬ") details.push("Для ACTIVE введите ЗАПУСТИТЬ");
   }
 
@@ -2378,12 +2479,12 @@ export async function handleMetaLaunch(req: VercelRequest, res: VercelResponse) 
   });
   if (compliance.status === "blocked") {
     return sendJson(res, 400, {
-      ...errorBody("Compliance blocked", ["Ad text must be rewritten before launch"]),
+      ...errorBody("Проверка безопасности заблокировала текст", ["Перепишите текст перед запуском."]),
       data: { compliance, safeText: compliance.safeText },
     });
   }
   if (compliance.status === "needs_review" && !readBoolean(body.manualApprovalConfirmed)) {
-    details.push("manualApprovalConfirmed is required for needs_review compliance status");
+    details.push("Нужно ручное согласование текста со статусом needs_review.");
   }
 
   if (details.length > 0) {
@@ -2431,7 +2532,7 @@ export async function handleMetaLaunch(req: VercelRequest, res: VercelResponse) 
         metaCreativeId: demoMetaId("creative"),
         metaAdId: demoMetaId("ad"),
       };
-      warning = "Dry run: Meta API was not called";
+      warning = "Проверка прошла без запуска: Meta API не вызывался.";
     } else {
       if (!config.configured) {
         throw new Error("Meta env is not configured");
@@ -2459,7 +2560,8 @@ export async function handleMetaLaunch(req: VercelRequest, res: VercelResponse) 
       metaResponse = result;
     }
   } catch (error) {
-    const lastError = error instanceof Error ? error.message : "Meta launch failed";
+    const rawError = error instanceof Error ? error.message : "Не удалось создать рекламу в Meta";
+    const lastError = localizeMetaLaunchError(rawError);
     const saved = await persistMetaLaunch({
       workspaceId,
       payload,
@@ -2470,7 +2572,7 @@ export async function handleMetaLaunch(req: VercelRequest, res: VercelResponse) 
       lastError,
     });
     return sendJson(res, 502, {
-      ...errorBody("Meta launch failed", [lastError]),
+      ...errorBody("Не удалось создать рекламу в Meta", [lastError]),
       mode: saved.mode,
       data: { launch: saved.item, compliance, safeText: compliance.safeText },
     });
@@ -2530,6 +2632,10 @@ export async function handleCrmHealth(req: VercelRequest, res: VercelResponse) {
   const providers = {
     supabase: {
       status: supabase ? "configured" : "not_configured",
+      env: envStatus(["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"]),
+    },
+    adCreativesStorage: {
+      status: supabase ? "checking" : "not_configured",
       env: envStatus(["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"]),
     },
     staffAuth: envStatus(["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"]),

@@ -8,6 +8,7 @@ import {
   handleMetaLaunch,
   handleMetaStatus,
   handleMetaValidate,
+  handleStorageHealth,
   type CrmResource,
 } from "../../lib/crm/server";
 
@@ -68,6 +69,10 @@ export default function handler(req: VercelRequest, res: VercelResponse) {
 
   if (resource === "meta-validate") {
     return handleMetaValidate(req, res);
+  }
+
+  if (resource === "storage-health") {
+    return handleStorageHealth(req, res);
   }
 
   if (resource === "ad-creative-upload") {
