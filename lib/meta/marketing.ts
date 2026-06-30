@@ -15,6 +15,27 @@ type MetaFetch = (
 
 type MetaJson = Record<string, unknown>;
 
+export type MetaApiErrorDetails = {
+  step?: string;
+  status?: number;
+  message: string;
+  code?: string;
+  errorSubcode?: string;
+  errorUserMsg?: string;
+  blameFieldSpecs?: unknown;
+  fbtraceId?: string;
+};
+
+export class MetaApiError extends Error {
+  details: MetaApiErrorDetails;
+
+  constructor(details: MetaApiErrorDetails) {
+    super(details.message);
+    this.name = "MetaApiError";
+    this.details = details;
+  }
+}
+
 export type MetaConfig = {
   graphVersion: string;
   baseUrl: string;
@@ -92,6 +113,23 @@ function sanitizeMetaError(data: unknown): string {
   return "Meta API request failed";
 }
 
+function readMetaErrorDetails(data: unknown, status: number, step?: string): MetaApiErrorDetails {
+  const error = data && typeof data === "object" && "error" in data ? (data as { error?: unknown }).error : data;
+  const record = error && typeof error === "object" && !Array.isArray(error) ? (error as MetaJson) : {};
+  const message = String(record.message || sanitizeMetaError(data) || "Meta API request failed").replace(/access_token=[^&\s]+/gi, "access_token=***");
+
+  return {
+    step,
+    status,
+    message,
+    code: record.code === undefined ? undefined : String(record.code),
+    errorSubcode: record.error_subcode === undefined ? undefined : String(record.error_subcode),
+    errorUserMsg: record.error_user_msg === undefined ? undefined : String(record.error_user_msg),
+    blameFieldSpecs: record.blame_field_specs,
+    fbtraceId: record.fbtrace_id === undefined ? undefined : String(record.fbtrace_id),
+  };
+}
+
 async function parseMetaResponse(response: MetaFetchResponse): Promise<MetaJson> {
   const rawText = await response.text();
   if (!rawText.trim()) return {};
@@ -141,7 +179,7 @@ export function assertMetaConfigured(): MetaConfig {
   return config;
 }
 
-export async function metaRequest(path: string, method: "GET" | "POST", body: MetaJson = {}): Promise<MetaJson> {
+export async function metaRequest(path: string, method: "GET" | "POST", body: MetaJson = {}, step?: string): Promise<MetaJson> {
   const config = assertMetaConfigured();
   const url = `${config.baseUrl}/${path.replace(/^\//, "")}`;
   const safeFetch = fetch as unknown as MetaFetch;
@@ -163,7 +201,7 @@ export async function metaRequest(path: string, method: "GET" | "POST", body: Me
 
   const data = await parseMetaResponse(response);
   if (!response.ok) {
-    throw new Error(`${sanitizeMetaError(data)} (HTTP ${response.status})`);
+    throw new MetaApiError(readMetaErrorDetails(data, response.status, step));
   }
 
   return data;
@@ -177,7 +215,7 @@ export async function createMetaCampaign(input: MetaLaunchInput): Promise<MetaJs
     buying_type: "AUCTION",
     special_ad_categories: [],
     status: input.status,
-  });
+  }, "campaign");
 }
 
 export async function createMetaAdSet(input: MetaLaunchInput & { campaignId: string }): Promise<MetaJson> {
@@ -198,7 +236,7 @@ export async function createMetaAdSet(input: MetaLaunchInput & { campaignId: str
     start_time: input.startTime,
     end_time: input.endTime,
     status: input.status,
-  });
+  }, "adset");
 }
 
 export async function uploadMetaVideo(input: { videoUrl: string; title?: string }): Promise<MetaJson> {
@@ -212,11 +250,58 @@ export async function uploadMetaVideo(input: { videoUrl: string; title?: string 
   return metaRequest(`/${adAccountId}/advideos`, "POST", {
     file_url: videoUrl,
     title: input.title || "Negis video creative",
-  });
+  }, "video_upload");
+}
+
+function parseMetaImageHash(data: MetaJson): string {
+  const directHash = data.hash;
+  if (typeof directHash === "string") return directHash;
+
+  const images = data.images;
+  if (images && typeof images === "object" && !Array.isArray(images)) {
+    for (const value of Object.values(images as Record<string, unknown>)) {
+      if (value && typeof value === "object" && !Array.isArray(value)) {
+        const hash = (value as MetaJson).hash;
+        if (typeof hash === "string" && hash) return hash;
+      }
+    }
+  }
+
+  return "";
+}
+
+export async function uploadMetaImageFromUrl(input: { imageUrl: string; name?: string }): Promise<MetaJson> {
+  const { adAccountId } = assertMetaConfigured();
+  const imageUrl = input.imageUrl.trim();
+
+  if (!imageUrl) {
+    throw new Error("Image URL is required for Meta image upload");
+  }
+
+  return metaRequest(`/${adAccountId}/adimages`, "POST", {
+    url: imageUrl,
+    name: input.name || "Negis image creative",
+  }, "image_upload");
 }
 
 export async function createImageCreative(input: MetaLaunchInput): Promise<MetaJson> {
   const { adAccountId, pageId, instagramActorId } = assertMetaConfigured();
+  let imageHash = "";
+
+  if (input.imageUrl) {
+    const image = await uploadMetaImageFromUrl({
+      imageUrl: input.imageUrl,
+      name: `${input.campaignName} - Image`,
+    });
+    imageHash = parseMetaImageHash(image);
+    if (!imageHash) {
+      throw new MetaApiError({
+        step: "image_upload",
+        message: "Meta image upload completed without image_hash",
+      });
+    }
+  }
+
   const objectStorySpec: MetaJson = {
     page_id: pageId,
     ...(instagramActorId ? { instagram_actor_id: instagramActorId } : {}),
@@ -225,7 +310,7 @@ export async function createImageCreative(input: MetaLaunchInput): Promise<MetaJ
       link: input.landingUrl,
       name: input.headline,
       description: input.description,
-      ...(input.imageUrl ? { picture: input.imageUrl } : {}),
+      ...(imageHash ? { image_hash: imageHash } : {}),
       call_to_action: {
         type: input.cta || "LEARN_MORE",
         value: {
@@ -238,7 +323,7 @@ export async function createImageCreative(input: MetaLaunchInput): Promise<MetaJ
   return metaRequest(`/${adAccountId}/adcreatives`, "POST", {
     name: `${input.campaignName} - Creative`,
     object_story_spec: objectStorySpec,
-  });
+  }, "creative");
 }
 
 export async function createVideoCreative(input: MetaLaunchInput & { videoId: string }): Promise<MetaJson> {
@@ -264,7 +349,7 @@ export async function createVideoCreative(input: MetaLaunchInput & { videoId: st
   return metaRequest(`/${adAccountId}/adcreatives`, "POST", {
     name: `${input.campaignName} - Video Creative`,
     object_story_spec: objectStorySpec,
-  });
+  }, "creative");
 }
 
 export async function createMetaCreative(input: MetaLaunchInput): Promise<MetaJson> {
@@ -285,7 +370,7 @@ export async function createMetaAd(input: MetaLaunchInput & { adSetId: string; c
     adset_id: input.adSetId,
     creative: { creative_id: input.creativeId },
     status: input.status,
-  });
+  }, "ad");
 }
 
 export async function launchMetaCampaign(input: MetaLaunchInput): Promise<MetaLaunchResult> {

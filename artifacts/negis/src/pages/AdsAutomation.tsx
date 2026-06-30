@@ -214,6 +214,8 @@ const confirmationDefaults: ConfirmationState = {
   spendUnderstood: false,
 };
 
+const VERCEL_FUNCTION_FILE_LIMIT_BYTES = 4 * 1024 * 1024;
+
 const destinationOptions: Array<{ value: LeadDestination; label: string; placeholder: string }> = [
   { value: "whatsapp", label: "WhatsApp", placeholder: "+7 700 000 00 00" },
   { value: "instagram_profile", label: "Instagram профиль", placeholder: "@clinic или https://instagram.com/clinic" },
@@ -401,6 +403,22 @@ function safeFileName(name: string) {
   return `${base}.${extension}`;
 }
 
+function safePathSegment(value: string, fallback: string) {
+  return value.replace(/[^a-z0-9-_]+/gi, "-").replace(/^-+|-+$/g, "").slice(0, 80) || fallback;
+}
+
+function randomUploadId() {
+  const cryptoApi = globalThis.crypto as Crypto | undefined;
+  if (cryptoApi?.randomUUID) return cryptoApi.randomUUID();
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function inferCreativeFileType(file: File): CreativeAsset["fileType"] {
+  const extension = file.name.split(".").pop()?.toLowerCase() || "";
+  if (file.type.startsWith("video/") || ["mp4", "mov", "webm"].includes(extension)) return "video";
+  return "image";
+}
+
 function localHistoryKey(workspaceId: string) {
   return `negis_ads_launch_history_${workspaceId}`;
 }
@@ -423,7 +441,17 @@ async function crmRequest<T>(path: string, init?: RequestInit): Promise<Extract<
   if (!response.ok || body.success === false) {
     const details = body.success === false ? body.details?.join(". ") : "";
     const hint = body.success === false ? body.hint || "" : "";
-    throw new Error([details || (body.success === false ? body.error : `HTTP ${response.status}`), hint].filter(Boolean).join(" "));
+    const metaError = body.success === false ? asRecord(asRecord(body.data).metaError) : {};
+    const metaDetails = [
+      firstString(metaError.step) ? `Шаг Meta: ${firstString(metaError.step)}` : "",
+      firstString(metaError.message),
+      firstString(metaError.code) ? `code: ${firstString(metaError.code)}` : "",
+      firstString(metaError.error_subcode) ? `subcode: ${firstString(metaError.error_subcode)}` : "",
+      firstString(metaError.error_user_msg),
+      metaError.blame_field_specs ? `blame_field_specs: ${JSON.stringify(metaError.blame_field_specs).slice(0, 180)}` : "",
+      firstString(metaError.fbtrace_id) ? `fbtrace_id: ${firstString(metaError.fbtrace_id)}` : "",
+    ].filter(Boolean);
+    throw new Error([details || (body.success === false ? body.error : `HTTP ${response.status}`), ...metaDetails, hint].filter(Boolean).join(" "));
   }
 
   return body as Extract<ApiResponse<T>, { success: true }>;
@@ -495,6 +523,7 @@ export default function AdsAutomation() {
   const [metaSummary, setMetaSummary] = useState<MetaSummary | null>(null);
   const [storageHealth, setStorageHealth] = useState<StorageHealth | null>(null);
   const [uploadDebug, setUploadDebug] = useState<UploadDebug | null>(null);
+  const [uploadStage, setUploadStage] = useState("");
   const [liveLaunchEnabled, setLiveLaunchEnabled] = useState(() => readStored("negis_meta_live_launch_enabled", false));
   const [loading, setLoading] = useState<"health" | "storage" | "upload" | "ai" | "check" | "video" | "launch" | "history" | null>(null);
   const [notice, setNotice] = useState("");
@@ -582,55 +611,63 @@ export default function AdsAutomation() {
     const details: string[] = [];
 
     if (!isImage && !isVideo && !allowedImage && !allowedVideo) {
-      details.push("Загрузите фото JPG/PNG/WEBP или видео MP4/MOV/WEBM.");
+      details.push("Формат не поддерживается. Используйте JPG, PNG, WEBP, MP4, MOV или WEBM.");
     }
     if ((isImage || allowedImage) && file.size > 10 * 1024 * 1024) {
-      details.push("Фото должно быть не больше 10 МБ.");
+      details.push("Фото больше 10 MB. Сожмите изображение.");
     }
     if ((isVideo || allowedVideo) && file.size > 100 * 1024 * 1024) {
-      details.push("Видео должно быть не больше 100 МБ.");
+      details.push("Видео больше 100 MB. Загрузите файл меньшего размера.");
     }
 
     return details;
   }
 
   async function uploadCreative(file: File) {
+    setUploadStage("Проверяем файл");
     const details = validateFile(file);
     if (details.length > 0) {
+      setUploadStage("");
       toast.error(details.join(" "));
       return;
     }
 
     setLoading("upload");
     setNotice("");
-    const fileType: CreativeAsset["fileType"] = file.type.startsWith("video/") ? "video" : "image";
+    const fileType = inferCreativeFileType(file);
     const previewUrl = URL.createObjectURL(file);
     let publicUrl = "";
     let storagePath = "";
-    let uploadWarning = "";
-    type UploadResponse = Partial<CreativeAsset> & { asset?: unknown; item?: unknown; uploadMode?: string };
+    type UploadResponse = Partial<CreativeAsset> & { asset?: unknown; item?: unknown };
 
     try {
-      if (hasSupabaseFrontendEnv) {
-        storagePath = `${workspaceId}/ads/${Date.now()}-${safeFileName(file.name)}`;
-        try {
-          const { error } = await supabase.storage.from("ad-creatives").upload(storagePath, file, {
-            contentType: file.type,
-            upsert: false,
-          });
-          if (error) throw error;
-          const { data } = supabase.storage.from("ad-creatives").getPublicUrl(storagePath);
-          publicUrl = data.publicUrl || buildFrontendStoragePublicUrl(storagePath, "ad-creatives");
-          if (!publicUrl) {
-            uploadWarning = uploadLinkMissingMessage(storageHealth);
-          }
-        } catch (error) {
-          uploadWarning = error instanceof Error ? `Supabase Storage: ${error.message}` : "Прямая загрузка в Supabase Storage не прошла.";
-          publicUrl = "";
-          storagePath = "";
+      if (!hasSupabaseFrontendEnv) {
+        const missingEnvMessage = "Для загрузки креативов нужны VITE_SUPABASE_URL и VITE_SUPABASE_ANON_KEY в Vercel.";
+        if (file.size > VERCEL_FUNCTION_FILE_LIMIT_BYTES) {
+          throw new Error(`${missingEnvMessage} Файл нельзя отправлять через Vercel. Используется прямая загрузка в Supabase Storage.`);
         }
-      } else {
-        uploadWarning = "Frontend Supabase env не переданы. Файл будет загружен через backend Storage.";
+
+        throw new Error(missingEnvMessage);
+      }
+
+      setUploadStage("Загружаем в Supabase Storage");
+      const safeWorkspaceId = safePathSegment(workspaceId || "demo-workspace", "demo-workspace");
+      storagePath = `${safeWorkspaceId}/${Date.now()}-${randomUploadId()}-${safeFileName(file.name)}`;
+      const { error: uploadError } = await supabase.storage.from("ad-creatives").upload(storagePath, file, {
+        cacheControl: "3600",
+        contentType: file.type || (fileType === "video" ? "video/mp4" : "image/jpeg"),
+        upsert: false,
+      });
+
+      if (uploadError) {
+        throw new Error(`Supabase Storage: ${uploadError.message}`);
+      }
+
+      setUploadStage("Получаем публичную ссылку");
+      const { data } = supabase.storage.from("ad-creatives").getPublicUrl(storagePath);
+      publicUrl = data.publicUrl || buildFrontendStoragePublicUrl(storagePath, "ad-creatives");
+      if (!publicUrl) {
+        throw new Error("Публичная ссылка не получена. Проверьте public access bucket ad-creatives.");
       }
 
       const fallback: CreativeAsset = {
@@ -642,54 +679,35 @@ export default function AdsAutomation() {
         publicUrl,
         storagePath,
         storageBucket: "ad-creatives",
-        status: publicUrl ? "uploaded" : "uploading",
+        status: "uploaded",
       };
 
-      let body: Extract<ApiResponse<UploadResponse>, { success: true }>;
+      setUploadStage("Сохраняем креатив");
+      const body = await crmRequest<UploadResponse>("/api/crm/ad-creatives", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          workspaceId,
+          uploadedBy: user?.email || user?.user_metadata?.full_name || "Negis user",
+          fileName: file.name,
+          fileType,
+          mimeType: file.type,
+          fileSize: file.size,
+          storageBucket: "ad-creatives",
+          storagePath,
+          publicUrl,
+          status: "uploaded",
+          metadata: {
+            source: "ads-automation",
+            uploadMode: "direct-supabase-storage",
+          },
+        }),
+      });
 
-      if (publicUrl) {
-        body = await crmRequest<UploadResponse>("/api/crm/ad-creative-upload", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            workspaceId,
-            uploadedBy: user?.email || user?.user_metadata?.full_name || "Negis user",
-            fileName: file.name,
-            fileType,
-            mimeType: file.type,
-            fileSize: file.size,
-            storageBucket: "ad-creatives",
-            storagePath,
-            publicUrl,
-            status: "uploaded",
-            metadata: {
-              source: "ads-automation",
-              uploadWarning,
-              uploadMode: "frontend-storage",
-            },
-          }),
-        });
-      } else {
-        const form = new FormData();
-        form.append("file", file, file.name);
-        form.append("workspaceId", workspaceId);
-        form.append("uploadedBy", user?.email || user?.user_metadata?.full_name || "Negis user");
-        form.append("fileName", file.name);
-        form.append("fileType", fileType);
-        form.append("mimeType", file.type);
-        form.append("fileSize", String(file.size));
-        form.append("storageBucket", "ad-creatives");
-        form.append("status", "uploaded");
-        form.append("metadata", JSON.stringify({ source: "ads-automation", uploadWarning, uploadMode: "server-storage" }));
-        body = await crmRequest<UploadResponse>("/api/crm/ad-creative-upload", {
-          method: "POST",
-          body: form,
-        });
-      }
-
-      const uploadedAsset = normalizeAsset(body.data.asset || body.data, fallback);
+      const uploadedAsset = normalizeAsset(body.data.item || body.data.asset || body.data, fallback);
       setCreative(uploadedAsset);
       setUploadDebug(buildUploadDebug(body.data, uploadedAsset));
+      setUploadStage("Креатив готов для Meta");
       goToStep(2);
       toast.success(fileType === "video" ? "Видео загружено" : "Фото загружено");
       setNotice(
@@ -697,7 +715,7 @@ export default function AdsAutomation() {
           ? uploadedAsset.fileType === "video"
             ? "Видео загружено. Публичная ссылка получена. Видео готово для подготовки в Meta."
             : "Фото загружено. Публичная ссылка получена. Креатив готов для Meta."
-          : uploadWarning || uploadLinkMissingMessage(storageHealth),
+          : uploadLinkMissingMessage(storageHealth),
       );
     } catch (error) {
       const fallback: CreativeAsset = {
@@ -723,6 +741,7 @@ export default function AdsAutomation() {
       });
       setNotice(fallback.publicUrl ? "Креатив готов для Meta, но metadata не сохранились." : error instanceof Error ? error.message : uploadLinkMissingMessage(storageHealth));
     } finally {
+      window.setTimeout(() => setUploadStage(""), 1200);
       setLoading(null);
     }
   }
@@ -734,6 +753,7 @@ export default function AdsAutomation() {
     setCompliance(null);
     setLaunchResult(null);
     setUploadDebug(null);
+    setUploadStage("");
   }
 
   async function fillWithAi() {
@@ -1028,6 +1048,7 @@ export default function AdsAutomation() {
               <div>
                 <p className="text-base font-black text-[#0F172A]">Загрузить фото или видео</p>
                 <p className="mt-1 text-sm text-[#64748B]">JPG, PNG, WEBP до 10 МБ · MP4, MOV, WEBM до 100 МБ</p>
+                {uploadStage ? <p className="mt-2 text-sm font-black text-[#0D9488]">{uploadStage}</p> : null}
               </div>
             </button>
             <div className="mt-5 flex flex-col gap-2 sm:items-end">
@@ -1063,6 +1084,11 @@ export default function AdsAutomation() {
                   </StatusPill>
                 </div>
                 <p className="mt-3 text-sm text-[#64748B]">{formatBytes(creative.fileSize)} · {creative.mimeType || "тип не определён"}</p>
+                {uploadStage ? (
+                  <div className="mt-3 rounded-2xl border border-teal-200 bg-teal-50 p-3 text-sm font-black text-teal-800">
+                    {uploadStage}
+                  </div>
+                ) : null}
                 {!creative.publicUrl ? (
                   <div className="mt-3 rounded-2xl border border-amber-200 bg-amber-50 p-3">
                     <p className="text-sm font-semibold text-amber-900">{uploadLinkMissingMessage(storageHealth)}</p>

@@ -1,7 +1,7 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { getSupabaseServerClient } from "../supabase/server";
 import { checkMetaCompliance } from "../meta/compliance";
-import { checkMetaAdAccount, getMetaCampaignStatus, getMetaConfig, launchMetaCampaign, uploadMetaVideo } from "../meta/marketing";
+import { MetaApiError, checkMetaAdAccount, getMetaCampaignStatus, getMetaConfig, launchMetaCampaign, uploadMetaVideo } from "../meta/marketing";
 
 export type CrmResource =
   | "clients"
@@ -2459,6 +2459,30 @@ function localizeMetaLaunchError(message: string) {
   return text;
 }
 
+function safeMetaLaunchError(error: unknown): JsonRecord {
+  if (error instanceof MetaApiError) {
+    const details = error.details;
+    return {
+      step: details.step || "meta",
+      message: localizeMetaLaunchError(details.message),
+      rawMessage: details.message,
+      status: details.status,
+      code: details.code,
+      error_subcode: details.errorSubcode,
+      error_user_msg: details.errorUserMsg,
+      blame_field_specs: details.blameFieldSpecs,
+      fbtrace_id: details.fbtraceId,
+    };
+  }
+
+  const message = error instanceof Error ? error.message : "Не удалось создать рекламу в Meta";
+  return {
+    step: "meta",
+    message: localizeMetaLaunchError(message),
+    rawMessage: message,
+  };
+}
+
 async function readMetaLiveLaunchEnabled(workspaceId: string, body: JsonRecord): Promise<boolean> {
   const requested = readBoolean(body.liveLaunchEnabled);
   const supabase = getSupabaseServerClient();
@@ -2860,13 +2884,15 @@ export async function handleMetaLaunch(req: VercelRequest, res: VercelResponse) 
       metaResponse = result;
     }
   } catch (error) {
-    const rawError = error instanceof Error ? error.message : "Не удалось создать рекламу в Meta";
-    const lastError = localizeMetaLaunchError(rawError);
+    const metaError = safeMetaLaunchError(error);
+    const lastError = firstString(metaError.message, "Не удалось создать рекламу в Meta");
     const saved = await persistMetaLaunch({
       workspaceId,
       payload,
       compliance: compliance as unknown as JsonRecord,
-      metaResponse: {},
+      metaResponse: {
+        error: metaError,
+      },
       status: "failed",
       metaStatus: "failed",
       lastError,
@@ -2874,7 +2900,7 @@ export async function handleMetaLaunch(req: VercelRequest, res: VercelResponse) 
     return sendJson(res, 502, {
       ...errorBody("Не удалось создать рекламу в Meta", [lastError]),
       mode: saved.mode,
-      data: { launch: saved.item, compliance, safeText: compliance.safeText },
+      data: { launch: saved.item, compliance, safeText: compliance.safeText, metaError },
     });
   }
 

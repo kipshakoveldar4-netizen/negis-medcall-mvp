@@ -26,6 +26,12 @@ function assertSourceIncludes(source: string, expected: string, label: string) {
   }
 }
 
+function assertSourceExcludes(source: string, forbidden: string, label: string) {
+  if (source.includes(forbidden)) {
+    throw new Error(`AdsAutomation source still contains ${label}`);
+  }
+}
+
 async function checkAdsAutomationSource() {
   const source = await readFile(path.join(repoRoot, "artifacts", "negis", "src", "pages", "AdsAutomation.tsx"), "utf8");
 
@@ -36,8 +42,33 @@ async function checkAdsAutomationSource() {
   assertSourceIncludes(source, "Назад к отчёту", "step 6 back to report button");
   assertSourceIncludes(source, 'videoUrl: creative?.fileType === "video" ? creativeUrl : ""', "videoUrl launch payload");
   assertSourceIncludes(source, "Файл загружается. Подождите несколько секунд.", "storage-ready upload waiting state");
+  assertSourceIncludes(source, "Загружаем в Supabase Storage", "direct Supabase upload state");
+  assertSourceIncludes(source, "/api/crm/ad-creatives", "metadata save endpoint");
+  assertSourceIncludes(source, "direct-supabase-storage", "direct upload metadata marker");
+  assertSourceIncludes(source, "VERCEL_FUNCTION_FILE_LIMIT_BYTES", "Vercel payload guard");
+  assertSourceExcludes(source, "/api/crm/ad-creative-upload", "file upload endpoint in UI");
+  assertSourceExcludes(source, "new FormData(", "multipart upload from UI");
 
   console.log("AdsAutomation source checks: ok");
+}
+
+async function checkMetaMarketingSource() {
+  const source = await readFile(path.join(repoRoot, "lib", "meta", "marketing.ts"), "utf8");
+
+  if (!source.includes("uploadMetaImageFromUrl")) {
+    throw new Error("Meta marketing source is missing uploadMetaImageFromUrl");
+  }
+  if (!source.includes("/adimages")) {
+    throw new Error("Meta marketing source is missing /adimages upload");
+  }
+  if (!source.includes("image_hash")) {
+    throw new Error("Meta marketing source is missing image_hash creative flow");
+  }
+  if (!source.includes("MetaApiError")) {
+    throw new Error("Meta marketing source is missing detailed Meta API errors");
+  }
+
+  console.log("Meta marketing source checks: ok");
 }
 
 async function checkHtmlRoute(path: string) {
@@ -135,6 +166,7 @@ async function checkCrmEndpoint(path: string, payload: Record<string, unknown>) 
 async function main() {
   console.log(`Smoke testing Negis routes at ${baseUrl}`);
   await checkAdsAutomationSource();
+  await checkMetaMarketingSource();
   for (const route of [
     "/dashboard",
     "/clients",
@@ -232,6 +264,32 @@ async function main() {
     publicUrl: "https://example.com/smoke-creative.jpg",
     status: "uploaded",
   });
+  const metadataSave = await checkJsonEndpoint("/api/crm/ad-creatives", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      workspaceId: "demo-workspace",
+      fileName: "smoke-direct-upload.jpg",
+      fileType: "image",
+      mimeType: "image/jpeg",
+      fileSize: 6_700_000,
+      storageBucket: "ad-creatives",
+      storagePath: "demo-workspace/smoke-direct-upload.jpg",
+      publicUrl: "https://example.com/smoke-direct-upload.jpg",
+      status: "uploaded",
+      metadata: {
+        source: "ads-automation",
+        uploadMode: "direct-supabase-storage",
+      },
+    }),
+  });
+  const metadataAsset = (metadataSave.data || {}) as { publicUrl?: string; item?: { publicUrl?: string; storagePath?: string } };
+  if (!metadataAsset.publicUrl && !metadataAsset.item?.publicUrl) {
+    throw new Error("/api/crm/ad-creatives did not return publicUrl for metadata save");
+  }
+  if (!metadataAsset.item?.storagePath) {
+    throw new Error("/api/crm/ad-creatives did not keep storagePath for metadata save");
+  }
   const upload = await checkJsonEndpoint("/api/crm/ad-creative-upload", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
