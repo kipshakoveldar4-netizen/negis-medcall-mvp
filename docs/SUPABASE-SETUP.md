@@ -133,8 +133,13 @@ The app should keep working even if Supabase variables are removed.
 
 Migration создаёт таблицу `ad_creative_assets` и публичный bucket `ad-creatives`.
 
-Frontend upload использует `VITE_SUPABASE_URL` и `VITE_SUPABASE_ANON_KEY`.
-Backend metadata persistence использует `SUPABASE_URL` и `SUPABASE_SERVICE_ROLE_KEY`.
+Production upload использует signed URL:
+
+- frontend использует `VITE_SUPABASE_URL` и `VITE_SUPABASE_ANON_KEY`, чтобы вызвать `uploadToSignedUrl`;
+- backend использует `SUPABASE_URL` и `SUPABASE_SERVICE_ROLE_KEY`, чтобы создать signed upload URL/token через `/api/crm/ad-creatives/signed-upload`;
+- metadata сохраняются через `POST /api/crm/ad-creatives`.
+
+Не открывайте anonymous upload policy для всех. Public bucket нужен для чтения публичного URL, а запись идёт только по signed token.
 
 Если bucket нельзя создать через SQL в вашем Supabase проекте, создайте его вручную:
 

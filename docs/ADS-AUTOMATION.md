@@ -22,7 +22,14 @@ ACTIVE запуск требует ручного подтверждения `З
 - фото: JPG, PNG, WEBP до 10 МБ;
 - видео: MP4, MOV, WEBM до 100 МБ.
 
-В production файл загружается в Supabase Storage bucket `ad-creatives`, затем metadata сохраняются через `/api/crm/ad-creative-upload`.
+В production используется signed upload flow:
+
+1. Frontend запрашивает `POST /api/crm/ad-creatives/signed-upload`.
+2. Backend через `SUPABASE_SERVICE_ROLE_KEY` создаёт signed upload URL/token и возвращает только `storagePath`, `token`, `signedUrl`, `publicUrl`.
+3. Frontend загружает файл напрямую в Supabase Storage через `uploadToSignedUrl`.
+4. После успешной загрузки metadata сохраняются через `POST /api/crm/ad-creatives`.
+
+Файл не отправляется через Vercel body, а service role key никогда не попадает на frontend. Public bucket даёт чтение, но не требует открывать anonymous upload policy для всех.
 
 Если Supabase env не настроены, страница остаётся в demo preview, но реальный Meta launch потребует публичный URL.
 
@@ -31,7 +38,9 @@ ACTIVE запуск требует ручного подтверждения `З
 Все новые endpoints работают через существующий catch-all `api/crm/[...path].ts`, чтобы не превышать лимит Vercel Hobby:
 
 - `GET /api/crm/ad-creatives`
-- `POST /api/crm/ad-creative-upload`
+- `POST /api/crm/ad-creatives/signed-upload`
+- `POST /api/crm/ad-creatives`
+- `POST /api/crm/ad-creative-upload` только как legacy local/dev fallback для маленьких файлов
 - `POST /api/crm/ad-creative-meta-upload`
 - `POST /api/crm/ads-ai-fill`
 - `POST /api/crm/meta-launch`

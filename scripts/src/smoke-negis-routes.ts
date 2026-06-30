@@ -40,14 +40,24 @@ async function checkAdsAutomationSource() {
   assertSourceIncludes(source, "Техническая информация", "collapsed technical info block");
   assertSourceIncludes(source, "Перейти к подтверждению запуска", "step 5 launch confirmation button");
   assertSourceIncludes(source, "Назад к отчёту", "step 6 back to report button");
+  assertSourceIncludes(source, 'imageUrl: creative?.fileType === "image" ? creativeUrl : ""', "imageUrl launch payload");
   assertSourceIncludes(source, 'videoUrl: creative?.fileType === "video" ? creativeUrl : ""', "videoUrl launch payload");
-  assertSourceIncludes(source, "Файл загружается. Подождите несколько секунд.", "storage-ready upload waiting state");
-  assertSourceIncludes(source, "Загружаем в Supabase Storage", "direct Supabase upload state");
+  assertSourceIncludes(source, "Загрузка не прошла. Попробуйте другой файл.", "failed upload message");
+  assertSourceIncludes(source, "getting_signed_url", "signed URL status");
+  assertSourceIncludes(source, "uploading_to_storage", "Storage upload status");
+  assertSourceIncludes(source, "saving_metadata", "metadata save status");
+  assertSourceIncludes(source, "setUploadStatus(\"failed\")", "failed upload state");
+  assertSourceIncludes(source, "creativeCanContinue = Boolean(creative?.publicUrl)", "ready state requires publicUrl");
+  assertSourceIncludes(source, "uploadToSignedUrl", "signed Supabase upload call");
+  assertSourceIncludes(source, "/api/crm/ad-creatives/signed-upload", "signed upload endpoint");
   assertSourceIncludes(source, "/api/crm/ad-creatives", "metadata save endpoint");
-  assertSourceIncludes(source, "direct-supabase-storage", "direct upload metadata marker");
+  assertSourceIncludes(source, "signed_url", "signed upload metadata marker");
+  assertSourceIncludes(source, "lastUploadError", "detailed upload error state");
   assertSourceIncludes(source, "VERCEL_FUNCTION_FILE_LIMIT_BYTES", "Vercel payload guard");
   assertSourceExcludes(source, "/api/crm/ad-creative-upload", "file upload endpoint in UI");
   assertSourceExcludes(source, "new FormData(", "multipart upload from UI");
+  assertSourceExcludes(source, ".upload(storagePath, file", "anonymous Supabase upload call");
+  assertSourceExcludes(source, "Файл загружается. Подождите несколько секунд.", "stale endless upload message");
 
   console.log("AdsAutomation source checks: ok");
 }
@@ -279,7 +289,8 @@ async function main() {
       status: "uploaded",
       metadata: {
         source: "ads-automation",
-        uploadMode: "direct-supabase-storage",
+        uploadMode: "signed_url",
+        signedUpload: true,
       },
     }),
   });
@@ -289,6 +300,84 @@ async function main() {
   }
   if (!metadataAsset.item?.storagePath) {
     throw new Error("/api/crm/ad-creatives did not keep storagePath for metadata save");
+  }
+  await checkJsonFailure(
+    "/api/crm/ad-creatives/signed-upload",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        workspaceId: "demo-workspace",
+        fileName: "smoke-bad.gif",
+        fileType: "image",
+        mimeType: "image/gif",
+        fileSize: 2048,
+      }),
+    },
+    "Формат",
+  );
+  await checkJsonFailure(
+    "/api/crm/ad-creatives/signed-upload",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        workspaceId: "demo-workspace",
+        fileName: "smoke-too-large.jpg",
+        fileType: "image",
+        mimeType: "image/jpeg",
+        fileSize: 10 * 1024 * 1024 + 1,
+      }),
+    },
+    "10 MB",
+  );
+  await checkJsonFailure(
+    "/api/crm/ad-creatives/signed-upload",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        workspaceId: "demo-workspace",
+        fileName: "smoke-too-large.mp4",
+        fileType: "video",
+        mimeType: "video/mp4",
+        fileSize: 100 * 1024 * 1024 + 1,
+      }),
+    },
+    "100 MB",
+  );
+  if (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY) {
+    const signedUpload = await checkJsonEndpoint("/api/crm/ad-creatives/signed-upload", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        workspaceId: "demo-workspace",
+        fileName: "smoke-signed-upload.jpg",
+        fileType: "image",
+        mimeType: "image/jpeg",
+        fileSize: 2048,
+      }),
+    });
+    const signedData = (signedUpload.data || {}) as { storagePath?: string; publicUrl?: string; token?: string };
+    if (!signedData.storagePath || !signedData.publicUrl || !signedData.token) {
+      throw new Error("/api/crm/ad-creatives/signed-upload did not return storagePath/publicUrl/token");
+    }
+  } else {
+    await checkJsonFailure(
+      "/api/crm/ad-creatives/signed-upload",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          workspaceId: "demo-workspace",
+          fileName: "smoke-signed-upload.jpg",
+          fileType: "image",
+          mimeType: "image/jpeg",
+          fileSize: 2048,
+        }),
+      },
+      "SUPABASE_URL",
+    );
   }
   const upload = await checkJsonEndpoint("/api/crm/ad-creative-upload", {
     method: "POST",

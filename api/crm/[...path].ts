@@ -1,6 +1,7 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import {
   handleAdCreativeMetaUpload,
+  handleAdCreativeSignedUpload,
   handleAdCreativeUpload,
   handleAdsAiFill,
   handleCrmHealth,
@@ -76,16 +77,24 @@ async function ensureParsedBody(req: VercelRequest) {
 }
 
 function readPathSegment(req: VercelRequest): string {
+  return readPathSegments(req)[0] || "";
+}
+
+function readPathSegments(req: VercelRequest): string[] {
   const pathParam = req.query.path;
-  const querySegment = Array.isArray(pathParam) ? pathParam[0] : pathParam;
+  if (Array.isArray(pathParam)) {
+    return pathParam.map((segment) => segment.trim()).filter(Boolean);
+  }
+
+  const querySegment = pathParam;
 
   if (typeof querySegment === "string" && querySegment.trim()) {
-    return querySegment.trim();
+    return querySegment.split("/").map((segment) => segment.trim()).filter(Boolean);
   }
 
   const pathname = new URL(req.url || "/", "http://localhost").pathname;
   const [, segment] = pathname.split("/api/crm/");
-  return (segment || "").split("/").filter(Boolean)[0] || "";
+  return (segment || "").split("/").filter(Boolean);
 }
 
 function isCrmResource(value: string): value is CrmResource {
@@ -103,7 +112,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     });
   }
 
-  const resource = readPathSegment(req);
+  const pathSegments = readPathSegments(req);
+  const resource = pathSegments[0] || "";
 
   if (resource === "health") {
     return handleCrmHealth(req, res);
@@ -123,6 +133,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   if (resource === "storage-health") {
     return handleStorageHealth(req, res);
+  }
+
+  if (resource === "ad-creatives" && pathSegments[1] === "signed-upload") {
+    return handleAdCreativeSignedUpload(req, res);
   }
 
   if (resource === "ad-creative-upload") {

@@ -1719,6 +1719,25 @@ function safeStorageFileName(name: string): string {
   return `${base}.${extension}`;
 }
 
+function safeStoragePathSegment(value: string, fallback: string): string {
+  return value
+    .replace(/[^a-z0-9-_]+/gi, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80) || fallback;
+}
+
+function randomStorageId(): string {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
+}
+
+function buildAdCreativeStoragePath(input: { workspaceId: string; fileName: string }): string {
+  const now = new Date();
+  const year = String(now.getUTCFullYear());
+  const month = String(now.getUTCMonth() + 1).padStart(2, "0");
+  const workspace = safeStoragePathSegment(input.workspaceId || DEMO_WORKSPACE_ID, DEMO_WORKSPACE_ID);
+  return `${workspace}/${year}/${month}/${randomStorageId()}-${safeStorageFileName(input.fileName)}`;
+}
+
 function inferMimeType(input: { fileName: string; mimeType?: string }): string {
   const mimeType = firstString(input.mimeType);
   if (mimeType && mimeType !== "application/octet-stream") return mimeType;
@@ -1731,6 +1750,39 @@ function inferMimeType(input: { fileName: string; mimeType?: string }): string {
   if (extension === "mov") return "video/quicktime";
   if (extension === "webm") return "video/webm";
   return mimeType || "application/octet-stream";
+}
+
+function validateSignedUploadBody(body: JsonRecord): { details: string[]; normalized: JsonRecord } {
+  const fileName = firstString(body.fileName, body.file_name);
+  const mimeType = inferMimeType({ fileName, mimeType: firstString(body.mimeType, body.mime_type) });
+  const fileType = normalizeCreativeFileType({ ...body, fileName, mimeType });
+  const fileSize = readNumber(body.fileSize ?? body.file_size) ?? 0;
+  const details: string[] = [];
+
+  if (!fileName) details.push("fileName is required");
+  if (fileType === "image" && !IMAGE_MIME_TYPES.has(mimeType)) {
+    details.push("Формат не поддерживается. Используйте JPG, PNG, WEBP, MP4, MOV или WEBM.");
+  }
+  if (fileType === "video" && !VIDEO_MIME_TYPES.has(mimeType)) {
+    details.push("Формат не поддерживается. Используйте JPG, PNG, WEBP, MP4, MOV или WEBM.");
+  }
+  if (fileType === "image" && fileSize > MAX_IMAGE_BYTES) {
+    details.push("Фото больше 10 MB. Сожмите изображение.");
+  }
+  if (fileType === "video" && fileSize > MAX_VIDEO_BYTES) {
+    details.push("Видео больше 100 MB. Загрузите файл меньшего размера.");
+  }
+  if (fileSize <= 0) details.push("fileSize is required");
+
+  return {
+    details,
+    normalized: {
+      fileName,
+      fileType,
+      mimeType,
+      fileSize,
+    },
+  };
 }
 
 function validateCreativeAssetBody(body: JsonRecord): string[] {
@@ -1809,6 +1861,79 @@ async function updateAdCreativeMeta(input: {
   } catch (error) {
     console.warn(supabaseWarning("ad_creative_assets meta update", error));
   }
+}
+
+export async function handleAdCreativeSignedUpload(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== "POST") {
+    return sendJson(res, 405, errorBody("Method not allowed", ["Use POST"]));
+  }
+
+  const body = asRecord(req.body);
+  const { details, normalized } = validateSignedUploadBody(body);
+  if (details.length > 0) {
+    return sendJson(res, 400, errorBody("Validation error", details));
+  }
+
+  const supabase = getSupabaseServerClient();
+  if (!supabase) {
+    return sendJson(
+      res,
+      503,
+      errorBody("Supabase Storage is not configured", [
+        "SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required to create a signed upload URL.",
+      ]),
+    );
+  }
+
+  const bucket = "ad-creatives";
+  const workspaceId = readWorkspaceId(req, body);
+  const storagePath = buildAdCreativeStoragePath({
+    workspaceId,
+    fileName: firstString(normalized.fileName),
+  });
+
+  const { data, error } = await supabase.storage.from(bucket).createSignedUploadUrl(storagePath);
+  if (error) {
+    return sendJson(
+      res,
+      502,
+      errorBody("Signed upload URL failed", [
+        error.message || "Supabase Storage did not create a signed upload URL.",
+      ]),
+    );
+  }
+
+  const signedData = asRecord(data);
+  const signedUrl = firstString(signedData.signedUrl, signedData.signedURL, signedData.url);
+  const token = firstString(signedData.token);
+  const publicUrl = buildSupabaseStoragePublicUrl({ bucket, storagePath });
+
+  if (!token || !signedUrl || !publicUrl) {
+    return sendJson(
+      res,
+      502,
+      errorBody("Signed upload URL is incomplete", [
+        "Supabase did not return token, signedUrl, or publicUrl for the creative upload.",
+      ]),
+    );
+  }
+
+  return sendJson(
+    res,
+    200,
+    success("supabase", {
+      bucket,
+      storageBucket: bucket,
+      storagePath,
+      signedUrl,
+      token,
+      publicUrl,
+      fileName: normalized.fileName,
+      fileType: normalized.fileType,
+      mimeType: normalized.mimeType,
+      fileSize: normalized.fileSize,
+    }),
+  );
 }
 
 async function handleMultipartAdCreativeUpload(req: VercelRequest, res: VercelResponse) {
