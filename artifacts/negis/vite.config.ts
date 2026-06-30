@@ -28,6 +28,10 @@ type DevApiResponse = ServerResponse & {
 
 async function readJsonBody(req: IncomingMessage): Promise<unknown> {
   if (req.method === "GET" || req.method === "HEAD") return undefined;
+  const contentType = Array.isArray(req.headers["content-type"])
+    ? req.headers["content-type"][0]
+    : req.headers["content-type"] || "";
+  if (!contentType.includes("application/json")) return undefined;
 
   const chunks: Buffer[] = [];
   for await (const chunk of req) {

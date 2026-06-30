@@ -75,6 +75,18 @@ type ResourceConfig = {
   demoItem: (body: JsonRecord) => JsonRecord;
 };
 
+type MultipartFile = {
+  fieldName: string;
+  fileName: string;
+  mimeType: string;
+  buffer: Buffer;
+};
+
+type MultipartFormData = {
+  fields: JsonRecord;
+  file?: MultipartFile;
+};
+
 const DEMO_WORKSPACE_ID = "demo-workspace";
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -84,6 +96,18 @@ function isUuid(value: unknown): value is string {
 
 function asRecord(value: unknown): JsonRecord {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as JsonRecord) : {};
+}
+
+function readJsonRecord(value: unknown): JsonRecord {
+  if (typeof value === "string" && value.trim()) {
+    try {
+      return asRecord(JSON.parse(value));
+    } catch {
+      return {};
+    }
+  }
+
+  return asRecord(value);
 }
 
 function readString(value: unknown): string {
@@ -143,11 +167,14 @@ function resolveAdCreativePublicUrl(body: JsonRecord): string {
   const directUrl = firstString(
     body.publicUrl,
     body.public_url,
+    body.publicURL,
     body.url,
     body.imageUrl,
     body.image_url,
+    body.imageURL,
     body.videoUrl,
     body.video_url,
+    body.videoURL,
     body.creativeUrl,
     body.creative_url,
   );
@@ -364,7 +391,7 @@ function buildPatchRow(resource: CrmResource, body: JsonRecord): JsonRecord {
     setRaw("file_size", ["fileSize", "file_size"]);
     setText("storage_bucket", ["storageBucket", "storage_bucket"]);
     setText("storage_path", ["storagePath", "storage_path"]);
-    setText("public_url", ["publicUrl", "public_url", "url", "creativeUrl", "creative_url"]);
+    setText("public_url", ["publicUrl", "public_url", "publicURL", "url", "imageUrl", "image_url", "imageURL", "videoUrl", "video_url", "videoURL", "creativeUrl", "creative_url"]);
     setText("meta_asset_id", ["metaAssetId", "meta_asset_id"]);
     setText("meta_video_id", ["metaVideoId", "meta_video_id", "videoId", "video_id"]);
     setText("status", ["status"]);
@@ -1587,6 +1614,125 @@ function fileExtension(fileName: string): string {
   return parts.length > 1 ? parts[parts.length - 1] : "";
 }
 
+function getHeaderValue(req: VercelRequest, name: string): string {
+  const value = req.headers[name.toLowerCase()];
+  return Array.isArray(value) ? value[0] || "" : value || "";
+}
+
+function isMultipartRequest(req: VercelRequest): boolean {
+  return getHeaderValue(req, "content-type").toLowerCase().includes("multipart/form-data");
+}
+
+function readMultipartBoundary(contentType: string): string {
+  const match = contentType.match(/boundary=(?:"([^"]+)"|([^;]+))/i);
+  return (match?.[1] || match?.[2] || "").trim();
+}
+
+async function readRequestBuffer(req: VercelRequest): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of req as AsyncIterable<Buffer | string>) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+
+  return Buffer.concat(chunks);
+}
+
+function parseHeaderParams(value: string): Record<string, string> {
+  const params: Record<string, string> = {};
+  for (const segment of value.split(";").map((item) => item.trim()).filter(Boolean)) {
+    const [rawKey, ...rawValue] = segment.split("=");
+    const key = rawKey.trim().toLowerCase();
+    const text = rawValue.join("=").trim();
+    if (!text) continue;
+    params[key] = text.replace(/^"|"$/g, "");
+  }
+
+  return params;
+}
+
+function parseMultipartFormData(buffer: Buffer, contentType: string): MultipartFormData {
+  const boundary = readMultipartBoundary(contentType);
+  if (!boundary) {
+    throw new Error("multipart boundary is missing");
+  }
+
+  const delimiter = Buffer.from(`--${boundary}`);
+  const fields: JsonRecord = {};
+  let file: MultipartFile | undefined;
+  let cursor = buffer.indexOf(delimiter);
+
+  while (cursor >= 0) {
+    cursor += delimiter.length;
+    const closing = buffer.subarray(cursor, cursor + 2).toString("utf8") === "--";
+    if (closing) break;
+    if (buffer.subarray(cursor, cursor + 2).toString("utf8") === "\r\n") cursor += 2;
+
+    const next = buffer.indexOf(delimiter, cursor);
+    if (next < 0) break;
+
+    let part = buffer.subarray(cursor, next);
+    if (part.subarray(part.length - 2).toString("utf8") === "\r\n") {
+      part = part.subarray(0, part.length - 2);
+    }
+
+    const headerEnd = part.indexOf(Buffer.from("\r\n\r\n"));
+    if (headerEnd >= 0) {
+      const rawHeaders = part.subarray(0, headerEnd).toString("utf8");
+      const body = part.subarray(headerEnd + 4);
+      const headers: Record<string, string> = {};
+
+      for (const line of rawHeaders.split("\r\n")) {
+        const separator = line.indexOf(":");
+        if (separator < 0) continue;
+        headers[line.slice(0, separator).trim().toLowerCase()] = line.slice(separator + 1).trim();
+      }
+
+      const disposition = headers["content-disposition"] || "";
+      const params = parseHeaderParams(disposition);
+      const fieldName = params.name || "";
+      const fileName = params.filename || "";
+
+      if (fieldName && fileName && !file) {
+        file = {
+          fieldName,
+          fileName,
+          mimeType: headers["content-type"] || "application/octet-stream",
+          buffer: body,
+        };
+      } else if (fieldName) {
+        fields[fieldName] = body.toString("utf8");
+      }
+    }
+
+    cursor = next;
+  }
+
+  return { fields, file };
+}
+
+function safeStorageFileName(name: string): string {
+  const extension = fileExtension(name) || "bin";
+  const base = name
+    .replace(/\.[^.]+$/, "")
+    .replace(/[^a-z0-9-_]+/gi, "-")
+    .slice(0, 42) || "creative";
+  return `${base}.${extension}`;
+}
+
+function inferMimeType(input: { fileName: string; mimeType?: string }): string {
+  const mimeType = firstString(input.mimeType);
+  if (mimeType && mimeType !== "application/octet-stream") return mimeType;
+
+  const extension = fileExtension(input.fileName);
+  if (extension === "jpg" || extension === "jpeg") return "image/jpeg";
+  if (extension === "png") return "image/png";
+  if (extension === "webp") return "image/webp";
+  if (extension === "mp4") return "video/mp4";
+  if (extension === "mov") return "video/quicktime";
+  if (extension === "webm") return "video/webm";
+  return mimeType || "application/octet-stream";
+}
+
 function validateCreativeAssetBody(body: JsonRecord): string[] {
   const details: string[] = [];
   const fileName = firstString(body.fileName, body.file_name);
@@ -1665,9 +1811,124 @@ async function updateAdCreativeMeta(input: {
   }
 }
 
+async function handleMultipartAdCreativeUpload(req: VercelRequest, res: VercelResponse) {
+  const supabase = getSupabaseServerClient();
+  if (!supabase) {
+    return sendJson(
+      res,
+      503,
+      errorBody("Supabase Storage is not configured", [
+        "SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required for server-side creative upload.",
+      ]),
+    );
+  }
+
+  let form: MultipartFormData;
+  try {
+    form = parseMultipartFormData(await readRequestBuffer(req), getHeaderValue(req, "content-type"));
+  } catch (error) {
+    return sendJson(
+      res,
+      400,
+      errorBody("Invalid multipart upload", [error instanceof Error ? error.message : "Could not parse multipart form data"]),
+    );
+  }
+
+  if (!form.file) {
+    return sendJson(res, 400, errorBody("Validation error", ["file is required"]));
+  }
+
+  const workspaceId = readWorkspaceId(req, form.fields);
+  const fileName = firstString(form.fields.fileName, form.fields.file_name, form.file.fileName);
+  const mimeType = inferMimeType({ fileName, mimeType: form.file.mimeType });
+  const storageBucket = firstString(form.fields.storageBucket, form.fields.storage_bucket, "ad-creatives");
+  const storagePath =
+    firstString(form.fields.storagePath, form.fields.storage_path) ||
+    `${workspaceId}/ads/${Date.now()}-${safeStorageFileName(fileName)}`;
+  const metadata = {
+    ...readJsonRecord(form.fields.metadata),
+    source: firstString(asRecord(readJsonRecord(form.fields.metadata)).source, "ads-automation"),
+    uploadMode: "server-storage",
+  };
+  const uploadBody: JsonRecord = {
+    ...form.fields,
+    workspaceId,
+    uploadedBy: firstString(form.fields.uploadedBy, form.fields.uploaded_by),
+    fileName,
+    fileType: normalizeCreativeFileType({ ...form.fields, fileName, mimeType }),
+    mimeType,
+    fileSize: form.file.buffer.length,
+    storageBucket,
+    storagePath,
+    status: "uploaded",
+    metadata,
+  };
+
+  const details = validateCreativeAssetBody(uploadBody);
+  if (details.length > 0) {
+    return sendJson(res, 400, errorBody("Validation error", details));
+  }
+
+  const { error: uploadError } = await supabase.storage.from(storageBucket).upload(storagePath, form.file.buffer, {
+    contentType: mimeType,
+    upsert: false,
+  });
+
+  if (uploadError) {
+    return sendJson(
+      res,
+      502,
+      errorBody("Creative upload failed", [
+        uploadError.message || "Supabase Storage did not accept the creative file.",
+      ]),
+    );
+  }
+
+  const publicUrl =
+    supabase.storage.from(storageBucket).getPublicUrl(storagePath).data.publicUrl ||
+    buildSupabaseStoragePublicUrl({ bucket: storageBucket, storagePath });
+
+  if (!publicUrl) {
+    return sendJson(
+      res,
+      502,
+      errorBody("Creative public URL is missing", [
+        "File was uploaded, but Supabase did not return a public URL. Check that bucket ad-creatives is public.",
+      ]),
+    );
+  }
+
+  const saved = await persistAdCreativeAsset({
+    workspaceId,
+    body: {
+      ...uploadBody,
+      publicUrl,
+    },
+  });
+
+  return sendJson(
+    res,
+    saved.mode === "supabase" ? 201 : 200,
+    success(
+      saved.mode,
+      {
+        ...saved.asset,
+        asset: saved.asset,
+        item: saved.asset,
+        uploadMode: "server-storage",
+      },
+      saved.warning || undefined,
+    ),
+  );
+}
+
 export async function handleAdCreativeUpload(req: VercelRequest, res: VercelResponse) {
   if (req.method !== "POST") {
     return sendJson(res, 405, errorBody("Method not allowed", ["Use POST"]));
+  }
+
+  if (isMultipartRequest(req)) {
+    return handleMultipartAdCreativeUpload(req, res);
   }
 
   const body = asRecord(req.body);

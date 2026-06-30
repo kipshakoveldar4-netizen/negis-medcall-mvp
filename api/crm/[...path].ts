@@ -12,6 +12,12 @@ import {
   type CrmResource,
 } from "../../lib/crm/server";
 
+export const config = {
+  api: {
+    bodyParser: false,
+  },
+};
+
 const resources: CrmResource[] = [
   "clients",
   "leads",
@@ -35,6 +41,40 @@ function sendJson(res: VercelResponse, status: number, payload: unknown) {
   return res.json(payload);
 }
 
+async function readRawBody(req: VercelRequest): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of req as AsyncIterable<Buffer | string>) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks);
+}
+
+async function ensureParsedBody(req: VercelRequest) {
+  if (req.body !== undefined || req.method === "GET" || req.method === "HEAD") return;
+
+  const contentType = Array.isArray(req.headers["content-type"])
+    ? req.headers["content-type"][0]
+    : req.headers["content-type"] || "";
+  if (contentType.includes("multipart/form-data")) return;
+
+  const rawBody = await readRawBody(req);
+  if (rawBody.length === 0) return;
+
+  if (contentType.includes("application/json")) {
+    req.body = JSON.parse(rawBody.toString("utf8"));
+    return;
+  }
+
+  if (contentType.includes("application/x-www-form-urlencoded")) {
+    const params = new URLSearchParams(rawBody.toString("utf8"));
+    const body: Record<string, string> = {};
+    params.forEach((value, key) => {
+      body[key] = value;
+    });
+    req.body = body;
+  }
+}
+
 function readPathSegment(req: VercelRequest): string {
   const pathParam = req.query.path;
   const querySegment = Array.isArray(pathParam) ? pathParam[0] : pathParam;
@@ -52,7 +92,17 @@ function isCrmResource(value: string): value is CrmResource {
   return resources.includes(value as CrmResource);
 }
 
-export default function handler(req: VercelRequest, res: VercelResponse) {
+export default async function handler(req: VercelRequest, res: VercelResponse) {
+  try {
+    await ensureParsedBody(req);
+  } catch {
+    return sendJson(res, 400, {
+      success: false,
+      error: "Invalid request body",
+      details: ["JSON body could not be parsed"],
+    });
+  }
+
   const resource = readPathSegment(req);
 
   if (resource === "health") {

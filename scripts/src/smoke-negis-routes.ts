@@ -1,3 +1,7 @@
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
 type ApiBody = {
   success?: boolean;
   mode?: string;
@@ -13,6 +17,28 @@ const baseUrl = (
   process.env.NEGIS_BASE_URL ||
   "http://localhost:5173"
 ).replace(/\/$/, "");
+
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
+
+function assertSourceIncludes(source: string, expected: string, label: string) {
+  if (!source.includes(expected)) {
+    throw new Error(`AdsAutomation source is missing ${label}`);
+  }
+}
+
+async function checkAdsAutomationSource() {
+  const source = await readFile(path.join(repoRoot, "artifacts", "negis", "src", "pages", "AdsAutomation.tsx"), "utf8");
+
+  assertSourceIncludes(source, "publicURL", "publicURL normalization");
+  assertSourceIncludes(source, "buildFrontendStoragePublicUrl(storagePath, storageBucket)", "publicUrl derivation from storagePath");
+  assertSourceIncludes(source, "Техническая информация", "collapsed technical info block");
+  assertSourceIncludes(source, "Перейти к подтверждению запуска", "step 5 launch confirmation button");
+  assertSourceIncludes(source, "Назад к отчёту", "step 6 back to report button");
+  assertSourceIncludes(source, 'videoUrl: creative?.fileType === "video" ? creativeUrl : ""', "videoUrl launch payload");
+  assertSourceIncludes(source, "Файл загружается. Подождите несколько секунд.", "storage-ready upload waiting state");
+
+  console.log("AdsAutomation source checks: ok");
+}
 
 async function checkHtmlRoute(path: string) {
   const response = await fetch(`${baseUrl}${path}`);
@@ -108,6 +134,7 @@ async function checkCrmEndpoint(path: string, payload: Record<string, unknown>) 
 
 async function main() {
   console.log(`Smoke testing Negis routes at ${baseUrl}`);
+  await checkAdsAutomationSource();
   for (const route of [
     "/dashboard",
     "/clients",
@@ -259,6 +286,25 @@ async function main() {
   const urlUploadedAsset = (urlUpload.data || {}) as { publicUrl?: string; asset?: { publicUrl?: string } };
   if (!urlUploadedAsset.publicUrl && !urlUploadedAsset.asset?.publicUrl) {
     throw new Error("/api/crm/ad-creative-upload did not normalize url to publicUrl");
+  }
+  const publicURLUpload = await checkJsonEndpoint("/api/crm/ad-creative-upload", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      workspaceId: "demo-workspace",
+      fileName: "smoke-upload-public-url.jpg",
+      fileType: "image",
+      mimeType: "image/jpeg",
+      fileSize: 2048,
+      storageBucket: "ad-creatives",
+      storagePath: "demo-workspace/ads/smoke-upload-public-url.jpg",
+      publicURL: "https://example.com/smoke-upload-public-url.jpg",
+      status: "uploaded",
+    }),
+  });
+  const publicURLUploadedAsset = (publicURLUpload.data || {}) as { publicUrl?: string; asset?: { publicUrl?: string } };
+  if (!publicURLUploadedAsset.publicUrl && !publicURLUploadedAsset.asset?.publicUrl) {
+    throw new Error("/api/crm/ad-creative-upload did not normalize publicURL to publicUrl");
   }
   if (process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL) {
     const derivedUpload = await checkJsonEndpoint("/api/crm/ad-creative-upload", {

@@ -136,8 +136,11 @@ type StorageHealth = {
 
 type UploadDebug = {
   assetId?: string;
+  fileName?: string;
+  fileType?: string;
   storagePath?: string;
   publicUrlExists: boolean;
+  publicUrlPreview?: string;
   responseKeys: string[];
 };
 
@@ -283,7 +286,11 @@ function normalizeAsset(value: unknown, fallback: CreativeAsset): CreativeAsset 
   const storageBucket = readStringField(record, ["storageBucket", "storage_bucket"], fallback.storageBucket || "ad-creatives");
   const storagePath = readStringField(record, ["storagePath", "storage_path"], fallback.storagePath || "");
   const publicUrl =
-    readStringField(record, ["publicUrl", "public_url", "url", "imageUrl", "image_url", "videoUrl", "video_url", "creativeUrl", "creative_url"], fallback.publicUrl || "") ||
+    readStringField(
+      record,
+      ["publicUrl", "public_url", "publicURL", "url", "imageUrl", "image_url", "imageURL", "videoUrl", "video_url", "videoURL", "creativeUrl", "creative_url"],
+      fallback.publicUrl || "",
+    ) ||
     buildFrontendStoragePublicUrl(storagePath, storageBucket);
   const explicitFileType = readStringField(record, ["fileType", "file_type", "creativeType", "creative_type"], fallback.fileType);
   return {
@@ -337,9 +344,10 @@ function statusModeLabel(value: "PAUSED" | "ACTIVE") {
 }
 
 function creativeReadyLabel(creative: CreativeAsset | null) {
-  if (!creative) return "Сначала загрузите креатив";
-  if (creative.publicUrl) return "Файл готов для Meta";
-  return "Креатив загружен, публичная ссылка не получена";
+  if (!creative) return "Сначала загрузите фото или видео";
+  if (!creative.publicUrl) return "Файл загружается";
+  if (creative.fileType === "video") return "Видео готово для подготовки в Meta";
+  return "Креатив готов для Meta";
 }
 
 function creativeReadyTone(creative: CreativeAsset | null): "green" | "amber" | "slate" {
@@ -349,7 +357,7 @@ function creativeReadyTone(creative: CreativeAsset | null): "green" | "amber" | 
 
 function uploadLinkMissingMessage(storageHealth?: StorageHealth | null) {
   if (storageHealth?.publicUrlWorks) {
-    return "Файл загружен, но upload response не передал publicUrl. Проверьте Network: POST /api/crm/ad-creative-upload должен вернуть publicUrl.";
+    return "Файл загружается. Подождите несколько секунд.";
   }
   return "Файл загружен, но публичная ссылка не получена. Проверьте Supabase Storage bucket ad-creatives.";
 }
@@ -373,8 +381,11 @@ function uploadResponseKeys(value: unknown) {
 function buildUploadDebug(value: unknown, asset: CreativeAsset): UploadDebug {
   return {
     assetId: asset.id,
+    fileName: asset.fileName,
+    fileType: asset.fileType,
     storagePath: asset.storagePath,
     publicUrlExists: Boolean(asset.publicUrl),
+    publicUrlPreview: asset.publicUrl ? asset.publicUrl.slice(0, 60) : "",
     responseKeys: uploadResponseKeys(value),
   };
 }
@@ -521,6 +532,11 @@ export default function AdsAutomation() {
     setConfirmations((current) => ({ ...current, [key]: value }));
   };
 
+  function goToStep(step: number) {
+    setCurrentStep(step);
+    window.setTimeout(() => window.scrollTo({ top: 0, behavior: "smooth" }), 0);
+  }
+
   async function checkHealth() {
     setLoading("health");
     try {
@@ -592,69 +608,119 @@ export default function AdsAutomation() {
     let publicUrl = "";
     let storagePath = "";
     let uploadWarning = "";
+    type UploadResponse = Partial<CreativeAsset> & { asset?: unknown; item?: unknown; uploadMode?: string };
 
     try {
       if (hasSupabaseFrontendEnv) {
         storagePath = `${workspaceId}/ads/${Date.now()}-${safeFileName(file.name)}`;
-        const { error } = await supabase.storage.from("ad-creatives").upload(storagePath, file, {
-          contentType: file.type,
-          upsert: false,
-        });
-        if (error) throw error;
-        const { data } = supabase.storage.from("ad-creatives").getPublicUrl(storagePath);
-        publicUrl = data.publicUrl || "";
-        if (!publicUrl) {
-          uploadWarning = uploadLinkMissingMessage(storageHealth);
+        try {
+          const { error } = await supabase.storage.from("ad-creatives").upload(storagePath, file, {
+            contentType: file.type,
+            upsert: false,
+          });
+          if (error) throw error;
+          const { data } = supabase.storage.from("ad-creatives").getPublicUrl(storagePath);
+          publicUrl = data.publicUrl || buildFrontendStoragePublicUrl(storagePath, "ad-creatives");
+          if (!publicUrl) {
+            uploadWarning = uploadLinkMissingMessage(storageHealth);
+          }
+        } catch (error) {
+          uploadWarning = error instanceof Error ? `Supabase Storage: ${error.message}` : "Прямая загрузка в Supabase Storage не прошла.";
+          publicUrl = "";
+          storagePath = "";
         }
       } else {
-        uploadWarning = "Креатив загружен в мастер, но Supabase Storage не подключён. Администратор должен настроить bucket ad-creatives.";
+        uploadWarning = "Frontend Supabase env не переданы. Файл будет загружен через backend Storage.";
       }
-    } catch (error) {
-      uploadWarning = error instanceof Error ? `Supabase Storage: ${error.message}` : "Не удалось загрузить файл в Supabase Storage.";
-    }
 
-    const fallback: CreativeAsset = {
-      fileName: file.name,
-      fileType,
-      mimeType: file.type,
-      fileSize: file.size,
-      previewUrl,
-      publicUrl,
-      storagePath,
-      storageBucket: "ad-creatives",
-      status: publicUrl ? "uploaded" : "demo",
-    };
+      const fallback: CreativeAsset = {
+        fileName: file.name,
+        fileType,
+        mimeType: file.type,
+        fileSize: file.size,
+        previewUrl,
+        publicUrl,
+        storagePath,
+        storageBucket: "ad-creatives",
+        status: publicUrl ? "uploaded" : "uploading",
+      };
 
-    try {
-      const body = await crmRequest<Partial<CreativeAsset> & { asset?: unknown; item?: unknown }>("/api/crm/ad-creative-upload", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          workspaceId,
-          uploadedBy: user?.email || user?.user_metadata?.full_name || "Negis user",
-          fileName: file.name,
-          fileType,
-          mimeType: file.type,
-          fileSize: file.size,
-          storageBucket: "ad-creatives",
-          storagePath,
-          publicUrl,
-          status: publicUrl ? "uploaded" : "demo",
-          metadata: {
-            source: "ads-automation",
-            uploadWarning,
-          },
-        }),
-      });
+      let body: Extract<ApiResponse<UploadResponse>, { success: true }>;
+
+      if (publicUrl) {
+        body = await crmRequest<UploadResponse>("/api/crm/ad-creative-upload", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            workspaceId,
+            uploadedBy: user?.email || user?.user_metadata?.full_name || "Negis user",
+            fileName: file.name,
+            fileType,
+            mimeType: file.type,
+            fileSize: file.size,
+            storageBucket: "ad-creatives",
+            storagePath,
+            publicUrl,
+            status: "uploaded",
+            metadata: {
+              source: "ads-automation",
+              uploadWarning,
+              uploadMode: "frontend-storage",
+            },
+          }),
+        });
+      } else {
+        const form = new FormData();
+        form.append("file", file, file.name);
+        form.append("workspaceId", workspaceId);
+        form.append("uploadedBy", user?.email || user?.user_metadata?.full_name || "Negis user");
+        form.append("fileName", file.name);
+        form.append("fileType", fileType);
+        form.append("mimeType", file.type);
+        form.append("fileSize", String(file.size));
+        form.append("storageBucket", "ad-creatives");
+        form.append("status", "uploaded");
+        form.append("metadata", JSON.stringify({ source: "ads-automation", uploadWarning, uploadMode: "server-storage" }));
+        body = await crmRequest<UploadResponse>("/api/crm/ad-creative-upload", {
+          method: "POST",
+          body: form,
+        });
+      }
+
       const uploadedAsset = normalizeAsset(body.data.asset || body.data, fallback);
       setCreative(uploadedAsset);
       setUploadDebug(buildUploadDebug(body.data, uploadedAsset));
-      setCurrentStep(2);
-      toast.success(fileType === "video" ? "Видео загружено" : "Креатив загружен");
-      setNotice(uploadedAsset.publicUrl ? "Креатив загружен. Файл готов для Meta." : uploadWarning || uploadLinkMissingMessage(storageHealth));
+      goToStep(2);
+      toast.success(fileType === "video" ? "Видео загружено" : "Фото загружено");
+      setNotice(
+        uploadedAsset.publicUrl
+          ? uploadedAsset.fileType === "video"
+            ? "Видео загружено. Публичная ссылка получена. Видео готово для подготовки в Meta."
+            : "Фото загружено. Публичная ссылка получена. Креатив готов для Meta."
+          : uploadWarning || uploadLinkMissingMessage(storageHealth),
+      );
     } catch (error) {
+      const fallback: CreativeAsset = {
+        fileName: file.name,
+        fileType,
+        mimeType: file.type,
+        fileSize: file.size,
+        previewUrl,
+        publicUrl,
+        storagePath,
+        storageBucket: "ad-creatives",
+        status: publicUrl ? "uploaded" : "upload_failed",
+      };
       setCreative(fallback);
-      setUploadDebug({ assetId: fallback.id, storagePath: fallback.storagePath, publicUrlExists: Boolean(fallback.publicUrl), responseKeys: ["request_failed"] });
+      setUploadDebug({
+        assetId: fallback.id,
+        fileName: fallback.fileName,
+        fileType: fallback.fileType,
+        storagePath: fallback.storagePath,
+        publicUrlExists: Boolean(fallback.publicUrl),
+        publicUrlPreview: fallback.publicUrl ? fallback.publicUrl.slice(0, 60) : "",
+        responseKeys: ["request_failed"],
+      });
       setNotice(fallback.publicUrl ? "Креатив готов для Meta, но metadata не сохранились." : error instanceof Error ? error.message : uploadLinkMissingMessage(storageHealth));
     } finally {
       setLoading(null);
@@ -695,7 +761,7 @@ export default function AdsAutomation() {
       });
       setAiPackage(body.data);
       setCompliance(null);
-      setCurrentStep(4);
+      goToStep(4);
       toast.success(body.data.generatedBy === "openai" ? "ИИ заполнил рекламу" : "Demo-пакет готов");
       if (body.warning) setNotice(body.warning);
     } catch (error) {
@@ -736,7 +802,7 @@ export default function AdsAutomation() {
       imageUrl: creative?.fileType === "image" ? creativeUrl : "",
       creativeType: creative?.fileType || "image",
       creativeUrl,
-      videoUrl: creative?.fileType === "video" ? creative.publicUrl || "" : "",
+      videoUrl: creative?.fileType === "video" ? creativeUrl : "",
       videoId: creative?.metaVideoId || "",
       startDate: brief.startDate,
       endDate: brief.endDate,
@@ -768,7 +834,7 @@ export default function AdsAutomation() {
       });
       setCompliance(body.data.compliance || null);
       setLaunchResult(body.data);
-      setCurrentStep(stayOnLaunchStep ? 6 : 5);
+      goToStep(stayOnLaunchStep ? 6 : 5);
       toast.success(stayOnLaunchStep ? "Проверка прошла без запуска" : "Проверка безопасности готова");
       setNotice(body.warning || (stayOnLaunchStep ? "Проверка прошла без запуска. Кампания в Meta не создавалась." : ""));
     } catch (error) {
@@ -816,7 +882,7 @@ export default function AdsAutomation() {
   async function ensureVideoReady(): Promise<string> {
     if (!creative || creative.fileType !== "video") return "";
     if (creative.metaVideoId) return creative.metaVideoId;
-    if (!creative.publicUrl) throw new Error("Видео загружено в Negis, но публичная ссылка не получена. Проверьте Supabase Storage bucket ad-creatives.");
+    if (!creative.publicUrl) throw new Error(uploadLinkMissingMessage(storageHealth));
 
     setLoading("video");
     try {
@@ -894,7 +960,7 @@ export default function AdsAutomation() {
       setLaunchResult(body.data);
       setCompliance(body.data.compliance || compliance);
       saveLocalLaunch(body.data, nextStatusMode);
-      setCurrentStep(6);
+      goToStep(6);
       toast.success(nextStatusMode === "ACTIVE" ? "Реклама запущена" : "Кампания создана выключенной");
       if (body.warning) setNotice(body.warning);
     } catch (error) {
@@ -951,18 +1017,26 @@ export default function AdsAutomation() {
         />
 
         {!creative ? (
-          <button
-            type="button"
-            className="mt-6 flex min-h-[220px] w-full flex-col items-center justify-center gap-4 rounded-[26px] border-2 border-dashed border-[#BFD2DF] bg-white/50 p-6 text-center transition hover:border-[#0D9488] hover:bg-white/70"
-            disabled={loading === "upload"}
-            onClick={() => fileInputRef.current?.click()}
-          >
-            {loading === "upload" ? <Loader2 className="animate-spin text-[#0D9488]" size={34} /> : <UploadCloud className="text-[#0D9488]" size={38} />}
-            <div>
-              <p className="text-base font-black text-[#0F172A]">Загрузить фото или видео</p>
-              <p className="mt-1 text-sm text-[#64748B]">JPG, PNG, WEBP до 10 МБ · MP4, MOV, WEBM до 100 МБ</p>
+          <>
+            <button
+              type="button"
+              className="mt-6 flex min-h-[220px] w-full flex-col items-center justify-center gap-4 rounded-[26px] border-2 border-dashed border-[#BFD2DF] bg-white/50 p-6 text-center transition hover:border-[#0D9488] hover:bg-white/70"
+              disabled={loading === "upload"}
+              onClick={() => fileInputRef.current?.click()}
+            >
+              {loading === "upload" ? <Loader2 className="animate-spin text-[#0D9488]" size={34} /> : <UploadCloud className="text-[#0D9488]" size={38} />}
+              <div>
+                <p className="text-base font-black text-[#0F172A]">Загрузить фото или видео</p>
+                <p className="mt-1 text-sm text-[#64748B]">JPG, PNG, WEBP до 10 МБ · MP4, MOV, WEBM до 100 МБ</p>
+              </div>
+            </button>
+            <div className="mt-5 flex flex-col gap-2 sm:items-end">
+              <button type="button" className="neu-btn-primary justify-center opacity-60" disabled>
+                Дальше к параметрам
+              </button>
+              <p className="text-sm font-bold text-[#64748B]">Сначала загрузите фото или видео</p>
             </div>
-          </button>
+          </>
         ) : (
           <div className="mt-6 grid gap-5 lg:grid-cols-[minmax(0,1fr)_320px]">
             <div className="overflow-hidden rounded-[24px] border border-white/70 bg-black/5">
@@ -979,6 +1053,10 @@ export default function AdsAutomation() {
                   <p className="min-w-0 truncate text-sm font-black text-[#0F172A]">{creative.fileName}</p>
                 </div>
                 <div className="mt-3 flex flex-wrap gap-2">
+                  <StatusPill tone="green">{creative.fileType === "video" ? "Видео загружено" : "Фото загружено"}</StatusPill>
+                  <StatusPill tone={creative.publicUrl ? "green" : "amber"}>
+                    {creative.publicUrl ? "Публичная ссылка получена" : "Публичная ссылка готовится"}
+                  </StatusPill>
                   <StatusPill tone={creativeReadyTone(creative)}>{creativeReadyLabel(creative)}</StatusPill>
                   <StatusPill tone={creative.fileType === "video" && creative.metaVideoId ? "green" : "slate"}>
                     {creative.fileType === "video" ? creative.metaVideoId ? "Meta video_id готов" : "Meta video_id нужен перед запуском" : "Фото"}
@@ -996,15 +1074,18 @@ export default function AdsAutomation() {
                   </div>
                 ) : null}
                 {uploadDebug ? (
-                  <div className="mt-3 rounded-2xl border border-blue-200 bg-blue-50 p-3">
-                    <p className="text-xs font-black uppercase tracking-[0.1em] text-blue-700">Upload debug</p>
-                    <div className="mt-2 grid gap-1 text-xs font-semibold text-blue-900">
+                  <details className="mt-3 rounded-2xl border border-blue-200 bg-blue-50 p-3">
+                    <summary className="cursor-pointer text-xs font-black uppercase tracking-[0.1em] text-blue-700">Техническая информация</summary>
+                    <div className="mt-2 grid gap-1 break-words text-xs font-semibold text-blue-900">
+                      <p>fileName: {uploadDebug.fileName || "-"}</p>
+                      <p>fileType: {uploadDebug.fileType || "-"}</p>
                       <p>assetId: {uploadDebug.assetId || "-"}</p>
                       <p>storagePath: {uploadDebug.storagePath || "-"}</p>
-                      <p>publicUrl exists: {uploadDebug.publicUrlExists ? "true" : "false"}</p>
-                      <p>response keys: {uploadDebug.responseKeys.length ? uploadDebug.responseKeys.join(", ") : "-"}</p>
+                      <p>publicUrl: {uploadDebug.publicUrlExists ? "yes" : "no"}</p>
+                      <p>publicUrlPreview: {uploadDebug.publicUrlPreview || "-"}</p>
+                      <p>upload response keys: {uploadDebug.responseKeys.length ? uploadDebug.responseKeys.join(", ") : "-"}</p>
                     </div>
-                  </div>
+                  </details>
                 ) : null}
               </div>
               <div className="grid grid-cols-2 gap-2">
@@ -1017,9 +1098,10 @@ export default function AdsAutomation() {
                   Удалить
                 </button>
               </div>
-              <button type="button" className="neu-btn-primary w-full justify-center" onClick={() => setCurrentStep(2)}>
+              <button type="button" className="neu-btn-primary w-full justify-center" disabled={!creative.publicUrl} onClick={() => goToStep(2)}>
                 Дальше к параметрам
               </button>
+              {!creative.publicUrl ? <p className="text-sm font-bold text-amber-700">Файл загружается. Подождите несколько секунд.</p> : null}
             </div>
           </div>
         )}
@@ -1068,8 +1150,8 @@ export default function AdsAutomation() {
         </div>
 
         <div className="mt-5 flex flex-col gap-2 sm:flex-row sm:justify-between">
-          <button type="button" className="neu-btn justify-center" onClick={() => setCurrentStep(1)}>Назад</button>
-          <button type="button" className="neu-btn-primary justify-center" onClick={() => setCurrentStep(3)}>Дальше к ИИ</button>
+          <button type="button" className="neu-btn justify-center" onClick={() => goToStep(1)}>Назад</button>
+          <button type="button" className="neu-btn-primary justify-center" onClick={() => goToStep(3)}>ИИ заполнить рекламу</button>
         </div>
       </section>
     );
@@ -1120,6 +1202,11 @@ export default function AdsAutomation() {
             ))}
           </div>
         ) : null}
+
+        <div className="mt-5 flex flex-col gap-2 sm:flex-row sm:justify-between">
+          <button type="button" className="neu-btn justify-center" onClick={() => goToStep(2)}>Назад</button>
+          <button type="button" className="neu-btn-primary justify-center" disabled={!aiPackage} onClick={() => goToStep(4)}>Перейти к проверке</button>
+        </div>
       </section>
     );
   }
@@ -1169,6 +1256,13 @@ export default function AdsAutomation() {
             ) : null}
           </div>
         ) : null}
+
+        <div className="mt-5 flex flex-col gap-2 sm:flex-row sm:justify-between">
+          <button type="button" className="neu-btn justify-center" onClick={() => goToStep(3)}>Назад</button>
+          <button type="button" className="neu-btn-primary justify-center" disabled={!compliance} onClick={() => goToStep(5)}>
+            Сформировать финальный отчёт
+          </button>
+        </div>
       </section>
     );
   }
@@ -1225,6 +1319,13 @@ export default function AdsAutomation() {
             <p><b>Status:</b> {statusMode}</p>
           </div>
         </details>
+
+        <div className="mt-5 flex flex-col gap-2 sm:flex-row sm:justify-between">
+          <button type="button" className="neu-btn justify-center" onClick={() => goToStep(4)}>Назад к проверке</button>
+          <button type="button" className="neu-btn-primary justify-center" onClick={() => goToStep(6)}>
+            Перейти к подтверждению запуска
+          </button>
+        </div>
       </section>
     );
   }
@@ -1298,6 +1399,9 @@ export default function AdsAutomation() {
         ) : null}
 
         <div className="mt-6 flex flex-col gap-3 sm:flex-row">
+          <button type="button" className="neu-btn justify-center" onClick={() => goToStep(5)}>
+            Назад к отчёту
+          </button>
           <button type="button" className="neu-btn justify-center" disabled={loading === "check"} onClick={() => void runComplianceCheck(true)}>
             {loading === "check" ? <Loader2 className="animate-spin" size={16} /> : <ShieldCheck size={16} />}
             Проверить без запуска
@@ -1453,7 +1557,7 @@ export default function AdsAutomation() {
                           ? "border-emerald-200 bg-white/70 text-emerald-700"
                           : "border-[#D8E4EC] bg-white/50 text-[#64748B]"
                     }`}
-                    onClick={() => setCurrentStep(step)}
+                    onClick={() => goToStep(step)}
                   >
                     <span className="block text-[11px] font-black uppercase tracking-[0.12em]">Шаг {step}</span>
                     <span className="mt-1 block text-sm font-black">{label}</span>
