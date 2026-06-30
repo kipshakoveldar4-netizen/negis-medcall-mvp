@@ -126,6 +126,39 @@ function firstString(...values: unknown[]): string {
   return "";
 }
 
+function buildSupabaseStoragePublicUrl(input: { bucket?: string; storagePath?: string }): string {
+  const supabaseUrl = firstString(process.env.SUPABASE_URL, process.env.VITE_SUPABASE_URL).replace(/\/$/, "");
+  const bucket = firstString(input.bucket, "ad-creatives");
+  const storagePath = firstString(input.storagePath);
+  if (!supabaseUrl || !bucket || !storagePath) return "";
+
+  const encodedPath = storagePath
+    .split("/")
+    .map((part) => encodeURIComponent(part))
+    .join("/");
+  return `${supabaseUrl}/storage/v1/object/public/${encodeURIComponent(bucket)}/${encodedPath}`;
+}
+
+function resolveAdCreativePublicUrl(body: JsonRecord): string {
+  const directUrl = firstString(
+    body.publicUrl,
+    body.public_url,
+    body.url,
+    body.imageUrl,
+    body.image_url,
+    body.videoUrl,
+    body.video_url,
+    body.creativeUrl,
+    body.creative_url,
+  );
+  if (directUrl) return directUrl;
+
+  return buildSupabaseStoragePublicUrl({
+    bucket: firstString(body.storageBucket, body.storage_bucket, "ad-creatives"),
+    storagePath: firstString(body.storagePath, body.storage_path),
+  });
+}
+
 function hasAnyKey(body: JsonRecord, keys: string[]): boolean {
   return keys.some((key) => Object.prototype.hasOwnProperty.call(body, key));
 }
@@ -331,7 +364,7 @@ function buildPatchRow(resource: CrmResource, body: JsonRecord): JsonRecord {
     setRaw("file_size", ["fileSize", "file_size"]);
     setText("storage_bucket", ["storageBucket", "storage_bucket"]);
     setText("storage_path", ["storagePath", "storage_path"]);
-    setText("public_url", ["publicUrl", "public_url", "creativeUrl", "creative_url"]);
+    setText("public_url", ["publicUrl", "public_url", "url", "creativeUrl", "creative_url"]);
     setText("meta_asset_id", ["metaAssetId", "meta_asset_id"]);
     setText("meta_video_id", ["metaVideoId", "meta_video_id", "videoId", "video_id"]);
     setText("status", ["status"]);
@@ -704,7 +737,7 @@ function makeAdCreativeAsset(body: JsonRecord): JsonRecord {
     fileSize: readNumber(body.fileSize ?? body.file_size) ?? null,
     storageBucket: firstString(body.storageBucket, body.storage_bucket, "ad-creatives"),
     storagePath: firstString(body.storagePath, body.storage_path),
-    publicUrl: firstString(body.publicUrl, body.public_url, body.creativeUrl, body.creative_url),
+    publicUrl: resolveAdCreativePublicUrl(body),
     metaAssetId: firstString(body.metaAssetId, body.meta_asset_id),
     metaVideoId: firstString(body.metaVideoId, body.meta_video_id, body.videoId, body.video_id),
     status: readString(body.status) || "uploaded",
@@ -1169,7 +1202,7 @@ const configs: Record<CrmResource, ResourceConfig> = {
         file_size: readNumber(body.fileSize ?? body.file_size),
         storage_bucket: firstString(body.storageBucket, body.storage_bucket, "ad-creatives"),
         storage_path: firstString(body.storagePath, body.storage_path) || null,
-        public_url: firstString(body.publicUrl, body.public_url, body.creativeUrl, body.creative_url) || null,
+        public_url: resolveAdCreativePublicUrl(body) || null,
         meta_asset_id: firstString(body.metaAssetId, body.meta_asset_id) || null,
         meta_video_id: firstString(body.metaVideoId, body.meta_video_id, body.videoId, body.video_id) || null,
         status: readString(body.status) || "uploaded",
@@ -1643,13 +1676,17 @@ export async function handleAdCreativeUpload(req: VercelRequest, res: VercelResp
     return sendJson(res, 400, errorBody("Validation error", details));
   }
 
-  const publicUrl = firstString(body.publicUrl, body.public_url, body.creativeUrl, body.creative_url);
+  const storageBucket = firstString(body.storageBucket, body.storage_bucket, "ad-creatives");
+  const storagePath = firstString(body.storagePath, body.storage_path);
+  const publicUrl = resolveAdCreativePublicUrl(body);
   if (!publicUrl) {
     return sendJson(res, 400, {
       success: false,
       error: "Не удалось получить публичную ссылку креатива",
       details: ["Файл загружен, но публичная ссылка не получена."],
-      hint: "Проверьте, что Supabase Storage bucket ad-creatives создан и public access включён.",
+      hint: storagePath
+        ? "Storage bucket работает, но SUPABASE_URL не доступен серверу для сборки publicUrl."
+        : "Проверьте, что Supabase Storage bucket ad-creatives создан, public access включён и upload response содержит storagePath.",
     });
   }
 
@@ -1660,7 +1697,9 @@ export async function handleAdCreativeUpload(req: VercelRequest, res: VercelResp
       ...body,
       workspaceId,
       status: readString(body.status) || "uploaded",
-      storageBucket: firstString(body.storageBucket, body.storage_bucket, "ad-creatives"),
+      storageBucket,
+      storagePath,
+      publicUrl,
     },
   });
 
@@ -1740,7 +1779,7 @@ export async function handleAdCreativeMetaUpload(req: VercelRequest, res: Vercel
   const workspaceId = readWorkspaceId(req, body);
   const assetId = firstString(body.assetId, body.id);
   const creativeType = normalizeCreativeFileType(body);
-  const publicUrl = firstString(body.publicUrl, body.public_url, body.videoUrl, body.video_url, body.creativeUrl, body.creative_url);
+  const publicUrl = resolveAdCreativePublicUrl(body);
   const title = firstString(body.title, body.fileName, body.file_name, "Negis video creative");
 
   if (creativeType === "image") {

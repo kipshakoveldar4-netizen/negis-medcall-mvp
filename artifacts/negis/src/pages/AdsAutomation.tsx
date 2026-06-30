@@ -134,6 +134,13 @@ type StorageHealth = {
   hint?: string;
 };
 
+type UploadDebug = {
+  assetId?: string;
+  storagePath?: string;
+  publicUrlExists: boolean;
+  responseKeys: string[];
+};
+
 type ConfirmationState = {
   textChecked: boolean;
   budgetChecked: boolean;
@@ -225,6 +232,38 @@ function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }
 
+function firstString(...values: unknown[]): string {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return "";
+}
+
+function readStringField(record: Record<string, unknown>, keys: string[], fallback = "") {
+  return firstString(...keys.map((key) => record[key]), fallback);
+}
+
+function readNumberField(record: Record<string, unknown>, keys: string[], fallback: number) {
+  for (const key of keys) {
+    const value = record[key];
+    const numeric = typeof value === "number" ? value : Number(value);
+    if (Number.isFinite(numeric)) return numeric;
+  }
+  return fallback;
+}
+
+function buildFrontendStoragePublicUrl(storagePath: string, storageBucket = "ad-creatives") {
+  const env = import.meta.env as Record<string, string | undefined>;
+  const supabaseUrl = firstString(env.VITE_SUPABASE_URL).replace(/\/$/, "");
+  if (!supabaseUrl || !storagePath) return "";
+
+  const encodedPath = storagePath
+    .split("/")
+    .map((part) => encodeURIComponent(part))
+    .join("/");
+  return `${supabaseUrl}/storage/v1/object/public/${encodeURIComponent(storageBucket)}/${encodedPath}`;
+}
+
 function readStored<T>(key: string, fallback: T): T {
   if (typeof window === "undefined") return fallback;
   try {
@@ -241,18 +280,24 @@ function readWorkspaceId() {
 
 function normalizeAsset(value: unknown, fallback: CreativeAsset): CreativeAsset {
   const record = asRecord(value);
+  const storageBucket = readStringField(record, ["storageBucket", "storage_bucket"], fallback.storageBucket || "ad-creatives");
+  const storagePath = readStringField(record, ["storagePath", "storage_path"], fallback.storagePath || "");
+  const publicUrl =
+    readStringField(record, ["publicUrl", "public_url", "url", "imageUrl", "image_url", "videoUrl", "video_url", "creativeUrl", "creative_url"], fallback.publicUrl || "") ||
+    buildFrontendStoragePublicUrl(storagePath, storageBucket);
+  const explicitFileType = readStringField(record, ["fileType", "file_type", "creativeType", "creative_type"], fallback.fileType);
   return {
-    id: typeof record.id === "string" ? record.id : fallback.id,
-    fileName: typeof record.fileName === "string" ? record.fileName : fallback.fileName,
-    fileType: record.fileType === "video" ? "video" : "image",
-    mimeType: typeof record.mimeType === "string" ? record.mimeType : fallback.mimeType,
-    fileSize: typeof record.fileSize === "number" ? record.fileSize : fallback.fileSize,
+    id: readStringField(record, ["id"], fallback.id || "") || fallback.id,
+    fileName: readStringField(record, ["fileName", "file_name"], fallback.fileName),
+    fileType: explicitFileType === "video" ? "video" : "image",
+    mimeType: readStringField(record, ["mimeType", "mime_type"], fallback.mimeType),
+    fileSize: readNumberField(record, ["fileSize", "file_size"], fallback.fileSize),
     previewUrl: fallback.previewUrl,
-    publicUrl: typeof record.publicUrl === "string" ? record.publicUrl : fallback.publicUrl,
-    storagePath: typeof record.storagePath === "string" ? record.storagePath : fallback.storagePath,
-    storageBucket: typeof record.storageBucket === "string" ? record.storageBucket : fallback.storageBucket,
-    metaVideoId: typeof record.metaVideoId === "string" ? record.metaVideoId : fallback.metaVideoId,
-    status: typeof record.status === "string" ? record.status : fallback.status,
+    publicUrl,
+    storagePath,
+    storageBucket,
+    metaVideoId: readStringField(record, ["metaVideoId", "meta_video_id", "videoId", "video_id"], fallback.metaVideoId || "") || undefined,
+    status: readStringField(record, ["status"], fallback.status),
   };
 }
 
@@ -302,14 +347,36 @@ function creativeReadyTone(creative: CreativeAsset | null): "green" | "amber" | 
   return creative.publicUrl ? "green" : "amber";
 }
 
-function missingPublicUrlMessage() {
+function uploadLinkMissingMessage(storageHealth?: StorageHealth | null) {
+  if (storageHealth?.publicUrlWorks) {
+    return "Файл загружен, но upload response не передал publicUrl. Проверьте Network: POST /api/crm/ad-creative-upload должен вернуть publicUrl.";
+  }
   return "Файл загружен, но публичная ссылка не получена. Проверьте Supabase Storage bucket ad-creatives.";
 }
 
-function realLaunchNeedsCreativeLink(creative: CreativeAsset | null) {
+function realLaunchNeedsCreativeLink(creative: CreativeAsset | null, storageHealth?: StorageHealth | null) {
   if (!creative) return "Сначала загрузите креатив. Система сама подготовит ссылку для Meta.";
-  if (!creative.publicUrl) return missingPublicUrlMessage();
+  if (!creative.publicUrl) return uploadLinkMissingMessage(storageHealth);
   return "";
+}
+
+function uploadResponseKeys(value: unknown) {
+  const record = asRecord(value);
+  const keys = new Set(Object.keys(record));
+  for (const nestedKey of ["asset", "item"]) {
+    const nested = asRecord(record[nestedKey]);
+    for (const key of Object.keys(nested)) keys.add(`${nestedKey}.${key}`);
+  }
+  return Array.from(keys).sort();
+}
+
+function buildUploadDebug(value: unknown, asset: CreativeAsset): UploadDebug {
+  return {
+    assetId: asset.id,
+    storagePath: asset.storagePath,
+    publicUrlExists: Boolean(asset.publicUrl),
+    responseKeys: uploadResponseKeys(value),
+  };
 }
 
 function formatBytes(value: number) {
@@ -416,6 +483,7 @@ export default function AdsAutomation() {
   const [statusMode, setStatusMode] = useState<"PAUSED" | "ACTIVE">("PAUSED");
   const [metaSummary, setMetaSummary] = useState<MetaSummary | null>(null);
   const [storageHealth, setStorageHealth] = useState<StorageHealth | null>(null);
+  const [uploadDebug, setUploadDebug] = useState<UploadDebug | null>(null);
   const [liveLaunchEnabled, setLiveLaunchEnabled] = useState(() => readStored("negis_meta_live_launch_enabled", false));
   const [loading, setLoading] = useState<"health" | "storage" | "upload" | "ai" | "check" | "video" | "launch" | "history" | null>(null);
   const [notice, setNotice] = useState("");
@@ -536,7 +604,7 @@ export default function AdsAutomation() {
         const { data } = supabase.storage.from("ad-creatives").getPublicUrl(storagePath);
         publicUrl = data.publicUrl || "";
         if (!publicUrl) {
-          uploadWarning = missingPublicUrlMessage();
+          uploadWarning = uploadLinkMissingMessage(storageHealth);
         }
       } else {
         uploadWarning = "Креатив загружен в мастер, но Supabase Storage не подключён. Администратор должен настроить bucket ad-creatives.";
@@ -580,12 +648,14 @@ export default function AdsAutomation() {
       });
       const uploadedAsset = normalizeAsset(body.data.asset || body.data, fallback);
       setCreative(uploadedAsset);
+      setUploadDebug(buildUploadDebug(body.data, uploadedAsset));
       setCurrentStep(2);
       toast.success(fileType === "video" ? "Видео загружено" : "Креатив загружен");
-      setNotice(uploadedAsset.publicUrl ? "Креатив загружен. Файл готов для Meta." : uploadWarning || missingPublicUrlMessage());
+      setNotice(uploadedAsset.publicUrl ? "Креатив загружен. Файл готов для Meta." : uploadWarning || uploadLinkMissingMessage(storageHealth));
     } catch (error) {
       setCreative(fallback);
-      setNotice(error instanceof Error ? error.message : missingPublicUrlMessage());
+      setUploadDebug({ assetId: fallback.id, storagePath: fallback.storagePath, publicUrlExists: Boolean(fallback.publicUrl), responseKeys: ["request_failed"] });
+      setNotice(fallback.publicUrl ? "Креатив готов для Meta, но metadata не сохранились." : error instanceof Error ? error.message : uploadLinkMissingMessage(storageHealth));
     } finally {
       setLoading(null);
     }
@@ -597,6 +667,7 @@ export default function AdsAutomation() {
     setAiPackage(null);
     setCompliance(null);
     setLaunchResult(null);
+    setUploadDebug(null);
   }
 
   async function fillWithAi() {
@@ -730,7 +801,7 @@ export default function AdsAutomation() {
     if (!confirmations.manualApproval) errors.push("Подтвердите ручное согласование.");
     if (!confirmations.spendUnderstood) errors.push("Подтвердите понимание расходов.");
     if (!metaSummary?.configured) errors.push("Meta env не настроены или не подтверждены.");
-    if (creative && !creative.publicUrl) errors.push(missingPublicUrlMessage());
+    if (creative && !creative.publicUrl) errors.push(uploadLinkMissingMessage(storageHealth));
     if (creative?.fileType === "video" && !creative.metaVideoId && !creative.publicUrl) {
       errors.push("Видео загружено в Negis, но ссылка для Meta ещё не готова. Проверьте Storage или повторите загрузку.");
     }
@@ -916,12 +987,23 @@ export default function AdsAutomation() {
                 <p className="mt-3 text-sm text-[#64748B]">{formatBytes(creative.fileSize)} · {creative.mimeType || "тип не определён"}</p>
                 {!creative.publicUrl ? (
                   <div className="mt-3 rounded-2xl border border-amber-200 bg-amber-50 p-3">
-                    <p className="text-sm font-semibold text-amber-900">{missingPublicUrlMessage()}</p>
+                    <p className="text-sm font-semibold text-amber-900">{uploadLinkMissingMessage(storageHealth)}</p>
                     {storageHealth?.hint ? <p className="mt-1 text-xs font-bold text-amber-800">{storageHealth.hint}</p> : null}
                     <button type="button" className="neu-btn mt-3 justify-center" disabled={loading === "storage"} onClick={checkStorage}>
                       {loading === "storage" ? <Loader2 className="animate-spin" size={16} /> : <ShieldCheck size={16} />}
                       Проверить Storage
                     </button>
+                  </div>
+                ) : null}
+                {uploadDebug ? (
+                  <div className="mt-3 rounded-2xl border border-blue-200 bg-blue-50 p-3">
+                    <p className="text-xs font-black uppercase tracking-[0.1em] text-blue-700">Upload debug</p>
+                    <div className="mt-2 grid gap-1 text-xs font-semibold text-blue-900">
+                      <p>assetId: {uploadDebug.assetId || "-"}</p>
+                      <p>storagePath: {uploadDebug.storagePath || "-"}</p>
+                      <p>publicUrl exists: {uploadDebug.publicUrlExists ? "true" : "false"}</p>
+                      <p>response keys: {uploadDebug.responseKeys.length ? uploadDebug.responseKeys.join(", ") : "-"}</p>
+                    </div>
                   </div>
                 ) : null}
               </div>
@@ -1149,7 +1231,7 @@ export default function AdsAutomation() {
 
   function renderLaunchStep() {
     const errors = prelaunchErrors(statusMode);
-    const realLaunchBlockedByCreative = realLaunchNeedsCreativeLink(creative);
+    const realLaunchBlockedByCreative = realLaunchNeedsCreativeLink(creative, storageHealth);
     const realLaunchBusy = loading === "launch" || loading === "video";
     const realLaunchDisabled = realLaunchBusy || Boolean(realLaunchBlockedByCreative);
     const launchResultTitle = launchResult?.dryRun

@@ -222,6 +222,64 @@ async function main() {
   if (!uploadedAsset.publicUrl && !uploadedAsset.asset?.publicUrl) {
     throw new Error("/api/crm/ad-creative-upload did not return publicUrl");
   }
+  const snakeUpload = await checkJsonEndpoint("/api/crm/ad-creative-upload", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      workspaceId: "demo-workspace",
+      file_name: "smoke-upload-snake.jpg",
+      file_type: "image",
+      mime_type: "image/jpeg",
+      file_size: 2048,
+      storage_bucket: "ad-creatives",
+      storage_path: "demo-workspace/ads/smoke-upload-snake.jpg",
+      public_url: "https://example.com/smoke-upload-snake.jpg",
+      status: "uploaded",
+    }),
+  });
+  const snakeUploadedAsset = (snakeUpload.data || {}) as { publicUrl?: string; asset?: { publicUrl?: string } };
+  if (!snakeUploadedAsset.publicUrl && !snakeUploadedAsset.asset?.publicUrl) {
+    throw new Error("/api/crm/ad-creative-upload did not normalize public_url to publicUrl");
+  }
+  const urlUpload = await checkJsonEndpoint("/api/crm/ad-creative-upload", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      workspaceId: "demo-workspace",
+      fileName: "smoke-upload-url.jpg",
+      fileType: "image",
+      mimeType: "image/jpeg",
+      fileSize: 2048,
+      storageBucket: "ad-creatives",
+      storagePath: "demo-workspace/ads/smoke-upload-url.jpg",
+      url: "https://example.com/smoke-upload-url.jpg",
+      status: "uploaded",
+    }),
+  });
+  const urlUploadedAsset = (urlUpload.data || {}) as { publicUrl?: string; asset?: { publicUrl?: string } };
+  if (!urlUploadedAsset.publicUrl && !urlUploadedAsset.asset?.publicUrl) {
+    throw new Error("/api/crm/ad-creative-upload did not normalize url to publicUrl");
+  }
+  if (process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL) {
+    const derivedUpload = await checkJsonEndpoint("/api/crm/ad-creative-upload", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        workspaceId: "demo-workspace",
+        fileName: "smoke-upload-derived.jpg",
+        fileType: "image",
+        mimeType: "image/jpeg",
+        fileSize: 2048,
+        storageBucket: "ad-creatives",
+        storagePath: "demo-workspace/ads/smoke-upload-derived.jpg",
+        status: "uploaded",
+      }),
+    });
+    const derivedUploadedAsset = (derivedUpload.data || {}) as { publicUrl?: string; asset?: { publicUrl?: string } };
+    if (!derivedUploadedAsset.publicUrl && !derivedUploadedAsset.asset?.publicUrl) {
+      throw new Error("/api/crm/ad-creative-upload did not derive publicUrl from storagePath");
+    }
+  }
   await checkJsonFailure(
     "/api/crm/ad-creative-upload",
     {
