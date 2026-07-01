@@ -77,6 +77,24 @@ async function checkMetaMarketingSource() {
   if (!source.includes("MetaApiError")) {
     throw new Error("Meta marketing source is missing detailed Meta API errors");
   }
+  if (!source.includes("INSTAGRAM_ACTOR_FALLBACK_WARNING")) {
+    throw new Error("Meta marketing source is missing Instagram actor fallback warning");
+  }
+  if (!source.includes("shouldRetryWithoutInstagramActor")) {
+    throw new Error("Meta marketing source is missing one-shot Instagram actor retry guard");
+  }
+  if (!source.includes("omitInstagramActor: true")) {
+    throw new Error("Meta marketing source is missing creative retry without Instagram actor");
+  }
+  if (!source.includes('preparedInput.status === "PAUSED"')) {
+    throw new Error("Meta marketing source must limit Instagram actor fallback to PAUSED launch");
+  }
+  if (!source.includes("instagram_actor_id: instagramActorId")) {
+    throw new Error("Meta marketing source is missing conditional instagram_actor_id payload");
+  }
+  if (!source.includes("creativeUsesInstagramActor")) {
+    throw new Error("Meta marketing source is missing creativeUsesInstagramActor result flag");
+  }
   if (!source.includes("is_adset_budget_sharing_enabled: false")) {
     throw new Error("Meta marketing source is missing campaign budget sharing opt-out");
   }
@@ -616,6 +634,7 @@ async function main() {
     metaPayload?: {
       campaign?: Record<string, unknown>;
       adSet?: Record<string, unknown>;
+      creative?: Record<string, unknown>;
     };
   };
   const campaignPayload = launchData.metaPayload?.campaign || {};
@@ -653,6 +672,13 @@ async function main() {
   const adSetTargeting = (adSetPayload.targeting || {}) as { targeting_automation?: { advantage_audience?: unknown } };
   if (adSetTargeting.targeting_automation?.advantage_audience !== 0) {
     throw new Error("/api/crm/meta-launch dry-run targeting must include targeting_automation.advantage_audience: 0");
+  }
+  const creativePayload = launchData.metaPayload?.creative || {};
+  if (typeof creativePayload.usesInstagramActor !== "boolean") {
+    throw new Error("/api/crm/meta-launch dry-run creative payload must expose usesInstagramActor");
+  }
+  if (creativePayload.instagramActorFallback !== false) {
+    throw new Error("/api/crm/meta-launch dry-run creative payload must expose instagramActorFallback false");
   }
   if (campaignPayload.status !== "PAUSED" || launchData.metaStatus !== "PAUSED") {
     throw new Error("/api/crm/meta-launch dry-run must use PAUSED status");

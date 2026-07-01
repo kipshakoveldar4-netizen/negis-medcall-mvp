@@ -67,6 +67,8 @@ export type MetaLaunchInput = {
   startTime?: string;
   endTime?: string;
   targeting?: MetaJson;
+  instagramActorId?: string;
+  omitInstagramActor?: boolean;
 };
 
 export type MetaLaunchResult = {
@@ -78,6 +80,10 @@ export type MetaLaunchResult = {
   metaAdSetId: string;
   metaCreativeId: string;
   metaAdId: string;
+  warning?: string;
+  warnings?: string[];
+  creativeUsesInstagramActor?: boolean;
+  instagramActorFallback?: boolean;
 };
 
 type MetaAdSetPayloadInput = MetaLaunchInput & {
@@ -87,6 +93,9 @@ type MetaAdSetPayloadInput = MetaLaunchInput & {
   budgetDailyUsd?: unknown;
   dailyBudget?: unknown;
 };
+
+const INSTAGRAM_ACTOR_FALLBACK_WARNING =
+  "Instagram actor ID отклонён Meta. Кампания создана через Facebook Page. Для запуска в Instagram нужно переподключить Instagram account.";
 
 function readEnv(key: string): string {
   return process.env[key]?.trim() || "";
@@ -148,6 +157,21 @@ function readMetaErrorDetails(data: unknown, status: number, step?: string): Met
   };
 }
 
+function shouldRetryWithoutInstagramActor(error: unknown): boolean {
+  const details = error instanceof MetaApiError ? error.details : undefined;
+  const text = [
+    details?.step,
+    details?.message,
+    details?.errorUserMsg,
+    error instanceof Error ? error.message : "",
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+
+  return text.includes("creative") && text.includes("instagram_actor_id") && (text.includes("valid") || text.includes("invalid"));
+}
+
 async function parseMetaResponse(response: MetaFetchResponse): Promise<MetaJson> {
   const rawText = await response.text();
   if (!rawText.trim()) return {};
@@ -158,6 +182,11 @@ async function parseMetaResponse(response: MetaFetchResponse): Promise<MetaJson>
   } catch {
     return { raw: rawText.slice(0, 500) };
   }
+}
+
+function resolveInstagramActorId(input: MetaLaunchInput, fallbackActorId: string): string {
+  if (input.omitInstagramActor) return "";
+  return (input.instagramActorId || fallbackActorId || "").trim();
 }
 
 export function getMetaConfig(): MetaConfig {
@@ -346,7 +375,8 @@ export async function uploadMetaImageFromUrl(input: { imageUrl: string; name?: s
 }
 
 export async function createImageCreative(input: MetaLaunchInput): Promise<MetaJson> {
-  const { adAccountId, pageId, instagramActorId } = assertMetaConfigured();
+  const { adAccountId, pageId, instagramActorId: configuredInstagramActorId } = assertMetaConfigured();
+  const instagramActorId = resolveInstagramActorId(input, configuredInstagramActorId);
   let imageHash = "";
 
   if (input.imageUrl) {
@@ -388,7 +418,8 @@ export async function createImageCreative(input: MetaLaunchInput): Promise<MetaJ
 }
 
 export async function createVideoCreative(input: MetaLaunchInput & { videoId: string }): Promise<MetaJson> {
-  const { adAccountId, pageId, instagramActorId } = assertMetaConfigured();
+  const { adAccountId, pageId, instagramActorId: configuredInstagramActorId } = assertMetaConfigured();
+  const instagramActorId = resolveInstagramActorId(input, configuredInstagramActorId);
   const objectStorySpec: MetaJson = {
     page_id: pageId,
     ...(instagramActorId ? { instagram_actor_id: instagramActorId } : {}),
@@ -457,7 +488,22 @@ export async function launchMetaCampaign(input: MetaLaunchInput): Promise<MetaLa
   const metaAdSetId = parseMetaId(adSet);
   if (!metaAdSetId) throw new Error("Meta ad set was created without id");
 
-  const creative = await createMetaCreative(preparedInput);
+  let creative: MetaJson;
+  let warning = "";
+  let instagramActorFallback = false;
+  let creativeUsesInstagramActor = Boolean(resolveInstagramActorId(preparedInput, getMetaConfig().instagramActorId));
+  try {
+    creative = await createMetaCreative(preparedInput);
+  } catch (error) {
+    if (preparedInput.status === "PAUSED" && shouldRetryWithoutInstagramActor(error)) {
+      instagramActorFallback = true;
+      creativeUsesInstagramActor = false;
+      warning = INSTAGRAM_ACTOR_FALLBACK_WARNING;
+      creative = await createMetaCreative({ ...preparedInput, omitInstagramActor: true });
+    } else {
+      throw error;
+    }
+  }
   const metaCreativeId = parseMetaId(creative);
   if (!metaCreativeId) throw new Error("Meta creative was created without id");
 
@@ -474,6 +520,10 @@ export async function launchMetaCampaign(input: MetaLaunchInput): Promise<MetaLa
     metaAdSetId,
     metaCreativeId,
     metaAdId,
+    warning,
+    warnings: warning ? [warning] : [],
+    creativeUsesInstagramActor,
+    instagramActorFallback,
   };
 }
 
@@ -482,6 +532,17 @@ export async function checkMetaAdAccount(): Promise<MetaJson> {
   return metaRequest(`/${adAccountId}`, "GET", {
     fields: "id,name,account_status,currency,timezone_name",
   });
+}
+
+export async function checkMetaInstagramActor(): Promise<MetaJson> {
+  const { instagramActorId } = assertMetaConfigured();
+  if (!instagramActorId) {
+    return { configured: false, valid: false };
+  }
+
+  return metaRequest(`/${instagramActorId}`, "GET", {
+    fields: "id,username,name",
+  }, "instagram_actor_validate");
 }
 
 export async function getMetaCampaignStatus(campaignId: string): Promise<MetaJson> {

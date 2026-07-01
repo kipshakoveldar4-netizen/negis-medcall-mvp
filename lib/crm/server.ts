@@ -6,6 +6,7 @@ import {
   buildMetaAdSetPayload,
   buildMetaCampaignPayload,
   checkMetaAdAccount,
+  checkMetaInstagramActor,
   getMetaCampaignStatus,
   getMetaConfig,
   launchMetaCampaign,
@@ -2685,7 +2686,11 @@ function buildMetaLaunchBody(body: JsonRecord) {
   };
 }
 
-function buildMetaPayloadPreview(launch: ReturnType<typeof buildMetaLaunchBody>, campaignId = "META_CAMPAIGN_ID"): JsonRecord {
+function buildMetaPayloadPreview(
+  launch: ReturnType<typeof buildMetaLaunchBody>,
+  campaignId = "META_CAMPAIGN_ID",
+  creativeOptions: { usesInstagramActor?: boolean; instagramActorFallback?: boolean } = {},
+): JsonRecord {
   const campaign = buildMetaCampaignPayload({
     campaignName: launch.campaignName,
     objective: launch.objective,
@@ -2732,6 +2737,10 @@ function buildMetaPayloadPreview(launch: ReturnType<typeof buildMetaLaunchBody>,
   return {
     campaign,
     adSet,
+    creative: {
+      usesInstagramActor: creativeOptions.usesInstagramActor ?? Boolean(launch.instagramActorId),
+      instagramActorFallback: creativeOptions.instagramActorFallback ?? false,
+    },
     budgetLevel: "adset",
   };
 }
@@ -2854,6 +2863,10 @@ export async function handleMetaValidate(req: VercelRequest, res: VercelResponse
         adAccountId: config.adAccountId,
         pageId: config.pageId,
         instagramActorId: config.instagramActorId,
+        instagramActor: {
+          configured: Boolean(config.instagramActorId),
+          valid: "not_checked",
+        },
         hasAccessToken: Boolean(config.accessToken),
       }),
     );
@@ -2868,6 +2881,11 @@ export async function handleMetaValidate(req: VercelRequest, res: VercelResponse
         adAccountId: config.adAccountId,
         pageId: config.pageId,
         instagramActorId: config.instagramActorId,
+        instagramActor: {
+          configured: Boolean(config.instagramActorId),
+          valid: false,
+          warning: config.instagramActorId ? "Meta env не настроены полностью, Instagram actor не проверялся." : "",
+        },
         hasAccessToken: Boolean(config.accessToken),
       }, "Meta env не настроены."),
     );
@@ -2875,6 +2893,33 @@ export async function handleMetaValidate(req: VercelRequest, res: VercelResponse
 
   try {
     const account = await checkMetaAdAccount();
+    let instagramActor: JsonRecord = {
+      configured: Boolean(config.instagramActorId),
+      valid: !config.instagramActorId,
+      warning: config.instagramActorId ? "" : "Instagram actor ID не задан. Фото-реклама будет запускаться через Facebook Page.",
+    };
+    let instagramWarning = "";
+
+    if (config.instagramActorId) {
+      try {
+        const actor = await checkMetaInstagramActor();
+        instagramActor = {
+          configured: true,
+          valid: true,
+          id: firstString(actor.id, config.instagramActorId),
+          username: firstString(actor.username, actor.name),
+        };
+      } catch {
+        instagramWarning = "Instagram actor ID невалиден или недоступен. Фото-реклама может запускаться через Facebook Page.";
+        instagramActor = {
+          configured: true,
+          valid: false,
+          id: config.instagramActorId,
+          warning: instagramWarning,
+        };
+      }
+    }
+
     return sendJson(
       res,
       200,
@@ -2884,8 +2929,9 @@ export async function handleMetaValidate(req: VercelRequest, res: VercelResponse
         adAccountId: config.adAccountId,
         pageId: config.pageId,
         instagramActorId: config.instagramActorId,
+        instagramActor,
         hasAccessToken: true,
-      }),
+      }, instagramWarning || undefined),
     );
   } catch (error) {
     return sendJson(res, 502, {
@@ -3065,13 +3111,19 @@ export async function handleMetaLaunch(req: VercelRequest, res: VercelResponse) 
         videoUrl: launch.videoUrl || launch.creativeUrl,
         videoId: launch.videoId,
         thumbnailUrl: launch.thumbnailUrl,
+        instagramActorId: launch.instagramActorId,
         startTime: launch.startDate,
         endTime: launch.endDate || undefined,
       });
+      warning = result.warning || warning;
       metaResponse = result;
       const realMetaPayload = buildMetaPayloadPreview(
         launch,
         firstString(result.metaCampaignId, asRecord(result.campaign).id, "META_CAMPAIGN_ID"),
+        {
+          usesInstagramActor: Boolean(result.creativeUsesInstagramActor),
+          instagramActorFallback: Boolean(result.instagramActorFallback),
+        },
       );
       metaPayload = realMetaPayload;
       metaResponse = {
@@ -3139,6 +3191,7 @@ export async function handleMetaLaunch(req: VercelRequest, res: VercelResponse) 
       compliance,
       safeText: compliance.safeText,
       dryRun,
+      warning: warning || saved.warning || "",
       metaPayload,
       ...ids,
       status: launchStatus,

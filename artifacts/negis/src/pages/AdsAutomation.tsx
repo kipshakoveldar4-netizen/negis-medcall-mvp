@@ -116,6 +116,7 @@ type LaunchResult = {
   safeText?: string;
   launch?: Record<string, unknown>;
   metaPayload?: Record<string, unknown>;
+  warning?: string;
 };
 
 type MetaSummary = {
@@ -924,7 +925,7 @@ export default function AdsAutomation() {
         }),
       });
       setCompliance(body.data.compliance || null);
-      setLaunchResult(body.data);
+      setLaunchResult({ ...body.data, warning: body.warning || body.data.warning });
       goToStep(stayOnLaunchStep ? 6 : 5);
       toast.success(stayOnLaunchStep ? "Проверка прошла без запуска" : "Проверка безопасности готова");
       setNotice(body.warning || (stayOnLaunchStep ? "Проверка прошла без запуска. Кампания в Meta не создавалась." : ""));
@@ -1048,7 +1049,7 @@ export default function AdsAutomation() {
       if (body.data.dryRun) {
         throw new Error("Meta вернула режим проверки для реального запуска. Кампания не создана.");
       }
-      setLaunchResult(body.data);
+      setLaunchResult({ ...body.data, warning: body.warning || body.data.warning });
       setCompliance(body.data.compliance || compliance);
       saveLocalLaunch(body.data, nextStatusMode);
       goToStep(6);
@@ -1386,6 +1387,7 @@ export default function AdsAutomation() {
     const metaPayload = asRecord(launchResult?.metaPayload);
     const campaignPayload = asRecord(metaPayload.campaign);
     const adSetPayload = asRecord(metaPayload.adSet);
+    const creativePayload = asRecord(metaPayload.creative);
     const campaignHasDailyBudget = Object.prototype.hasOwnProperty.call(campaignPayload, "daily_budget");
     const campaignBudgetSharing = Object.prototype.hasOwnProperty.call(campaignPayload, "is_adset_budget_sharing_enabled")
       ? String(campaignPayload.is_adset_budget_sharing_enabled)
@@ -1400,6 +1402,12 @@ export default function AdsAutomation() {
     const advantageAudience = Object.prototype.hasOwnProperty.call(targetingAutomation, "advantage_audience")
       ? String(targetingAutomation.advantage_audience)
       : "0";
+    const creativeUsesInstagramActor = Object.prototype.hasOwnProperty.call(creativePayload, "usesInstagramActor")
+      ? String(creativePayload.usesInstagramActor)
+      : String(Boolean(metaSummary?.instagramActorId));
+    const creativeInstagramActorFallback = Object.prototype.hasOwnProperty.call(creativePayload, "instagramActorFallback")
+      ? String(creativePayload.instagramActorFallback)
+      : "false";
 
     return (
       <section className="neu-card p-5 sm:p-6">
@@ -1457,6 +1465,8 @@ export default function AdsAutomation() {
             <p><b>adset.optimization_goal:</b> {adSetOptimizationGoal}</p>
             <p><b>adset.bid_strategy:</b> {adSetBidStrategy}</p>
             <p><b>adset.targeting.targeting_automation.advantage_audience:</b> {advantageAudience}</p>
+            <p><b>creative.usesInstagramActor:</b> {creativeUsesInstagramActor}</p>
+            <p><b>creative.instagramActorFallback:</b> {creativeInstagramActorFallback}</p>
           </div>
         </details>
 
@@ -1565,6 +1575,7 @@ export default function AdsAutomation() {
                 <p className="mt-1 text-sm font-semibold text-emerald-800">
                   {launchResult.dryRun ? "Кампания в Meta не создавалась." : `Meta Campaign ID: ${launchResult.metaCampaignId || "ожидается"}`}
                 </p>
+                {launchResult.warning ? <p className="mt-2 text-sm font-bold text-amber-800">{launchResult.warning}</p> : null}
               </div>
             </div>
             <div className="mt-4 flex flex-col gap-2 sm:flex-row">
