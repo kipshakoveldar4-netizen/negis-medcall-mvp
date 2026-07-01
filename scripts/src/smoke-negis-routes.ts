@@ -289,6 +289,8 @@ async function main() {
     "/ads-automation/history",
     "/targeting-agent",
     "/content-studio",
+    "/privacy",
+    "/terms",
     "/login",
   ]) {
     await checkHtmlRoute(route);

@@ -27,6 +27,8 @@ const routes = [
   "/ads-automation/history",
   "/targeting-agent",
   "/content-studio",
+  "/privacy",
+  "/terms",
   "/login",
 ];
 

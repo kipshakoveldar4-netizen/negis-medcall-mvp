@@ -368,16 +368,19 @@ export default function Landing() {
           v1.0.0 — BUILD 2026
         </span>
 
-        <a
-          href="/privacy"
-          style={{
-            textAlign: 'center', fontSize: 11, color: '#B0BAC6',
-            fontFamily: "'Inter', sans-serif", textDecoration: 'none',
-            marginTop: 4, letterSpacing: '0.02em',
-          }}
-        >
-          Политика конфиденциальности
-        </a>
+        <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+          textAlign: 'center', fontSize: 11, color: '#B0BAC6',
+          fontFamily: "'Inter', sans-serif", marginTop: 4, letterSpacing: '0.02em',
+        }}>
+          <a href="/privacy" style={{ color: '#B0BAC6', textDecoration: 'none' }}>
+            Политика конфиденциальности
+          </a>
+          <span style={{ color: '#D6DCE5' }}>·</span>
+          <a href="/terms" style={{ color: '#B0BAC6', textDecoration: 'none' }}>
+            Условия использования
+          </a>
+        </div>
       </div>
 
       {/* Modal */}
