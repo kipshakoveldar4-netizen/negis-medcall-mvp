@@ -29,6 +29,7 @@ const routes = [
   "/content-studio",
   "/privacy",
   "/terms",
+  "/data-deletion",
   "/login",
 ];
 

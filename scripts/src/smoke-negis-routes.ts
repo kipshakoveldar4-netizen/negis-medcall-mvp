@@ -291,6 +291,7 @@ async function main() {
     "/content-studio",
     "/privacy",
     "/terms",
+    "/data-deletion",
     "/login",
   ]) {
     await checkHtmlRoute(route);

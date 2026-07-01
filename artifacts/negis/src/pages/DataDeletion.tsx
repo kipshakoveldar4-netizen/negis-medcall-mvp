@@ -6,7 +6,7 @@ export default function DataDeletion() {
 
       <p style={P}>
         Если вы хотите удалить свои данные из Negis, отправьте запрос на email:{' '}
-        <a href="mailto:agentconcept01@gmail.com" style={A}>agentconcept01@gmail.com</a>
+        <a href="mailto:kipshakoveldar4@gmail.com" style={A}>kipshakoveldar4@gmail.com</a>
       </p>
 
       <Section title="В письме укажите">
@@ -37,7 +37,7 @@ export default function DataDeletion() {
           padding: '16px 20px', fontSize: 14, color: '#475569', lineHeight: 1.7,
         }}>
           To request deletion of your data from Negis, please email{' '}
-          <a href="mailto:agentconcept01@gmail.com" style={A}>agentconcept01@gmail.com</a>{' '}
+          <a href="mailto:kipshakoveldar4@gmail.com" style={A}>kipshakoveldar4@gmail.com</a>{' '}
           with your name, contact details, clinic name, and a clear request to delete your data.
           We will process the request within 30 days.
         </div>

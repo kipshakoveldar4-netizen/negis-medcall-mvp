@@ -4,6 +4,8 @@ import { supabaseAdmin } from "../lib/supabase-admin.js";
 import { logger } from "../lib/logger.js";
 
 const router = Router();
+const PUBLIC_SUPPORT_EMAIL = process.env.NEGIS_SUPPORT_EMAIL?.trim() || "kipshakoveldar4@gmail.com";
+const SMTP_USER = process.env.ZOHO_SMTP_USER?.trim() || PUBLIC_SUPPORT_EMAIL;
 
 /* ── Helpers ────────────────────────────────────────── */
 function generatePassword(length = 12): string {
@@ -29,7 +31,7 @@ function createTransport() {
     port: 587,
     secure: false,
     auth: {
-      user: "negissupport@negis.online",
+      user: SMTP_USER,
       pass: process.env.ZOHO_SMTP_PASSWORD ?? "",
     },
     tls: { rejectUnauthorized: false },
@@ -77,7 +79,7 @@ router.post("/auth/reset-password", async (req, res) => {
   try {
     const transport = createTransport();
     await transport.sendMail({
-      from: '"Negis Support" <negissupport@negis.online>',
+      from: `"Negis Support" <${PUBLIC_SUPPORT_EMAIL}>`,
       to: email,
       subject: "Временный пароль для входа в Negis",
       text: [
