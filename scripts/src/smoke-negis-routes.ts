@@ -80,8 +80,23 @@ async function checkMetaMarketingSource() {
   if (!source.includes("is_adset_budget_sharing_enabled: false")) {
     throw new Error("Meta marketing source is missing campaign budget sharing opt-out");
   }
-  if (!source.includes("daily_budget: input.dailyBudgetMinor")) {
-    throw new Error("Meta marketing source is missing ad set daily_budget");
+  if (!source.includes("daily_budget: String(dailyBudgetMinorUnits)")) {
+    throw new Error("Meta marketing source is missing string ad set daily_budget");
+  }
+  if (!source.includes('optimization_goal: "LINK_CLICKS"')) {
+    throw new Error("Meta marketing source must use LINK_CLICKS optimization for MVP ad sets");
+  }
+  if (!source.includes("Meta ad set payload missing daily_budget/lifetime_budget")) {
+    throw new Error("Meta marketing source is missing ad set budget assertion");
+  }
+  if (!source.includes("serializeMetaFormPayload")) {
+    throw new Error("Meta marketing source is missing explicit form serializer");
+  }
+  if (!source.includes("value !== undefined && value !== null")) {
+    throw new Error("Meta marketing serializer must preserve false and numeric payload values");
+  }
+  if (source.includes(".filter(([, value]) => value)")) {
+    throw new Error("Meta marketing serializer must not use truthy filtering");
   }
 
   console.log("Meta marketing source checks: ok");
@@ -602,8 +617,26 @@ async function main() {
   if (Object.prototype.hasOwnProperty.call(campaignPayload, "daily_budget")) {
     throw new Error("/api/crm/meta-launch dry-run campaign payload must not contain campaign-level daily_budget");
   }
-  if (adSetPayload.daily_budget !== 2000) {
-    throw new Error("/api/crm/meta-launch dry-run adset payload must keep daily_budget at ad set level");
+  if (adSetPayload.daily_budget !== "2000") {
+    throw new Error('/api/crm/meta-launch dry-run adset payload must keep daily_budget "2000" at ad set level');
+  }
+  if (Object.prototype.hasOwnProperty.call(adSetPayload, "lifetime_budget")) {
+    throw new Error("/api/crm/meta-launch dry-run adset payload must not contain lifetime_budget when daily budget is used");
+  }
+  if (Object.prototype.hasOwnProperty.call(adSetPayload, "end_time")) {
+    throw new Error("/api/crm/meta-launch dry-run adset payload must not contain end_time when daily budget is used");
+  }
+  if (adSetPayload.billing_event !== "IMPRESSIONS") {
+    throw new Error("/api/crm/meta-launch dry-run adset payload must include billing_event IMPRESSIONS");
+  }
+  if (adSetPayload.optimization_goal !== "LINK_CLICKS") {
+    throw new Error("/api/crm/meta-launch dry-run adset payload must include optimization_goal LINK_CLICKS");
+  }
+  if (adSetPayload.bid_strategy !== "LOWEST_COST_WITHOUT_CAP") {
+    throw new Error("/api/crm/meta-launch dry-run adset payload must include bid_strategy LOWEST_COST_WITHOUT_CAP");
+  }
+  if (!adSetPayload.campaign_id) {
+    throw new Error("/api/crm/meta-launch dry-run adset payload must include campaign_id");
   }
   if (campaignPayload.status !== "PAUSED" || launchData.metaStatus !== "PAUSED") {
     throw new Error("/api/crm/meta-launch dry-run must use PAUSED status");

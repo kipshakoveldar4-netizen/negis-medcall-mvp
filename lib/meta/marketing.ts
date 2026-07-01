@@ -80,6 +80,14 @@ export type MetaLaunchResult = {
   metaAdId: string;
 };
 
+type MetaAdSetPayloadInput = MetaLaunchInput & {
+  campaignId: string;
+  adSetName?: string;
+  dailyBudgetUsd?: unknown;
+  budgetDailyUsd?: unknown;
+  dailyBudget?: unknown;
+};
+
 function readEnv(key: string): string {
   return process.env[key]?.trim() || "";
 }
@@ -97,6 +105,16 @@ function appendParams(url: string, params: Record<string, unknown>) {
     query.set(key, typeof value === "object" ? JSON.stringify(value) : String(value));
   }
   return query.size > 0 ? `${url}${url.includes("?") ? "&" : "?"}${query.toString()}` : url;
+}
+
+export function serializeMetaFormPayload(payload: MetaJson): string {
+  return new URLSearchParams(
+    Object.fromEntries(
+      Object.entries(payload)
+        .filter(([, value]) => value !== undefined && value !== null && value !== "")
+        .map(([key, value]) => [key, typeof value === "object" ? JSON.stringify(value) : String(value)]),
+    ),
+  ).toString();
 }
 
 function parseMetaId(value: MetaJson): string {
@@ -190,13 +208,7 @@ export async function metaRequest(path: string, method: "GET" | "POST", body: Me
       : await safeFetch(url, {
           method: "POST",
           headers: { "Content-Type": "application/x-www-form-urlencoded" },
-          body: new URLSearchParams(
-            Object.fromEntries(
-              Object.entries(payload)
-                .filter(([, value]) => value !== undefined && value !== null && value !== "")
-                .map(([key, value]) => [key, typeof value === "object" ? JSON.stringify(value) : String(value)]),
-            ),
-          ).toString(),
+          body: serializeMetaFormPayload(payload),
         });
 
   const data = await parseMetaResponse(response);
@@ -218,14 +230,32 @@ export function buildMetaCampaignPayload(input: MetaLaunchInput): MetaJson {
   };
 }
 
-export function buildMetaAdSetPayload(input: MetaLaunchInput & { campaignId: string }): MetaJson {
+function resolveDailyBudgetMinorUnits(input: MetaAdSetPayloadInput): number {
+  const directMinorUnits = Number(input.dailyBudgetMinor);
+  if (Number.isFinite(directMinorUnits) && directMinorUnits > 0) {
+    return Math.round(directMinorUnits);
+  }
+
+  const dailyBudgetUsd = Number(input.dailyBudgetUsd ?? input.budgetDailyUsd ?? input.dailyBudget);
+  if (!Number.isFinite(dailyBudgetUsd) || dailyBudgetUsd <= 0) {
+    throw new Error("Некорректный дневной бюджет рекламы.");
+  }
+
+  return Math.round(dailyBudgetUsd * 100);
+}
+
+export function buildMetaAdSetPayload(input: MetaAdSetPayloadInput): MetaJson {
+  const dailyBudgetMinorUnits = resolveDailyBudgetMinorUnits(input);
+  if (dailyBudgetMinorUnits < 100) {
+    throw new Error("Дневной бюджет слишком маленький для Meta.");
+  }
+
   return {
-    name: `${input.campaignName} - Ad Set`,
+    name: input.adSetName || `${input.campaignName} - Ad Set`,
     campaign_id: input.campaignId,
-    daily_budget: input.dailyBudgetMinor,
-    ...(input.lifetimeBudgetMinor ? { lifetime_budget: input.lifetimeBudgetMinor } : {}),
+    daily_budget: String(dailyBudgetMinorUnits),
     billing_event: "IMPRESSIONS",
-    optimization_goal: "LEAD_GENERATION",
+    optimization_goal: "LINK_CLICKS",
     bid_strategy: "LOWEST_COST_WITHOUT_CAP",
     targeting: input.targeting || {
       geo_locations: { countries: ["KZ"] },
@@ -233,7 +263,6 @@ export function buildMetaAdSetPayload(input: MetaLaunchInput & { campaignId: str
       age_max: 55,
     },
     start_time: input.startTime,
-    end_time: input.endTime,
     status: input.status,
   };
 }
@@ -245,7 +274,11 @@ export async function createMetaCampaign(input: MetaLaunchInput): Promise<MetaJs
 
 export async function createMetaAdSet(input: MetaLaunchInput & { campaignId: string }): Promise<MetaJson> {
   const { adAccountId } = assertMetaConfigured();
-  return metaRequest(`/${adAccountId}/adsets`, "POST", buildMetaAdSetPayload(input), "adset");
+  const adsetPayload = buildMetaAdSetPayload(input);
+  if (!adsetPayload.daily_budget && !adsetPayload.lifetime_budget) {
+    throw new Error("Meta ad set payload missing daily_budget/lifetime_budget");
+  }
+  return metaRequest(`/${adAccountId}/adsets`, "POST", adsetPayload, "adset");
 }
 
 export async function uploadMetaVideo(input: { videoUrl: string; title?: string }): Promise<MetaJson> {

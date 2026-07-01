@@ -2685,7 +2685,7 @@ function buildMetaLaunchBody(body: JsonRecord) {
   };
 }
 
-function buildMetaPayloadPreview(launch: ReturnType<typeof buildMetaLaunchBody>): JsonRecord {
+function buildMetaPayloadPreview(launch: ReturnType<typeof buildMetaLaunchBody>, campaignId = "META_CAMPAIGN_ID"): JsonRecord {
   const campaign = buildMetaCampaignPayload({
     campaignName: launch.campaignName,
     objective: launch.objective,
@@ -2726,7 +2726,7 @@ function buildMetaPayloadPreview(launch: ReturnType<typeof buildMetaLaunchBody>)
     thumbnailUrl: launch.thumbnailUrl,
     startTime: launch.startDate,
     endTime: launch.endDate || undefined,
-    campaignId: "META_CAMPAIGN_ID",
+    campaignId,
   });
 
   return {
@@ -3028,7 +3028,7 @@ export async function handleMetaLaunch(req: VercelRequest, res: VercelResponse) 
 
   const dryRun = readBoolean(body.dryRun);
   const config = getMetaConfig();
-  const metaPayload = buildMetaPayloadPreview(launch);
+  let metaPayload = buildMetaPayloadPreview(launch);
   let metaResponse: JsonRecord;
   let launchStatus = launch.statusMode === "ACTIVE" ? "active" : "paused";
   let warning = "";
@@ -3069,9 +3069,14 @@ export async function handleMetaLaunch(req: VercelRequest, res: VercelResponse) 
         endTime: launch.endDate || undefined,
       });
       metaResponse = result;
+      const realMetaPayload = buildMetaPayloadPreview(
+        launch,
+        firstString(result.metaCampaignId, asRecord(result.campaign).id, "META_CAMPAIGN_ID"),
+      );
+      metaPayload = realMetaPayload;
       metaResponse = {
         ...metaResponse,
-        payload: metaPayload,
+        payload: realMetaPayload,
       };
     }
   } catch (error) {

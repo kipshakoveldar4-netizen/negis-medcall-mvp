@@ -1390,7 +1390,11 @@ export default function AdsAutomation() {
     const campaignBudgetSharing = Object.prototype.hasOwnProperty.call(campaignPayload, "is_adset_budget_sharing_enabled")
       ? String(campaignPayload.is_adset_budget_sharing_enabled)
       : "false";
-    const adSetDailyBudget = Number(adSetPayload.daily_budget || 0) || Math.round(Number(brief.dailyBudget || 0) * 100);
+    const adSetDailyBudget = adSetPayload.daily_budget ? String(adSetPayload.daily_budget) : String(Math.round(Number(brief.dailyBudget || 0) * 100));
+    const adSetCampaignId = typeof adSetPayload.campaign_id === "string" ? adSetPayload.campaign_id : "META_CAMPAIGN_ID";
+    const adSetBillingEvent = typeof adSetPayload.billing_event === "string" ? adSetPayload.billing_event : "IMPRESSIONS";
+    const adSetOptimizationGoal = typeof adSetPayload.optimization_goal === "string" ? adSetPayload.optimization_goal : "LINK_CLICKS";
+    const adSetBidStrategy = typeof adSetPayload.bid_strategy === "string" ? adSetPayload.bid_strategy : "LOWEST_COST_WITHOUT_CAP";
 
     return (
       <section className="neu-card p-5 sm:p-6">
@@ -1442,7 +1446,11 @@ export default function AdsAutomation() {
             <p><b>Status:</b> {statusMode}</p>
             <p><b>campaign.is_adset_budget_sharing_enabled:</b> {campaignBudgetSharing}</p>
             <p><b>campaign.daily_budget:</b> {campaignHasDailyBudget ? String(campaignPayload.daily_budget) : "absent"}</p>
-            <p><b>adset.daily_budget:</b> {adSetDailyBudget}</p>
+            <p><b>adset.daily_budget:</b> "{adSetDailyBudget}"</p>
+            <p><b>adset.campaign_id:</b> {adSetCampaignId}</p>
+            <p><b>adset.billing_event:</b> {adSetBillingEvent}</p>
+            <p><b>adset.optimization_goal:</b> {adSetOptimizationGoal}</p>
+            <p><b>adset.bid_strategy:</b> {adSetBidStrategy}</p>
           </div>
         </details>
 
