@@ -244,6 +244,29 @@ function resolveDailyBudgetMinorUnits(input: MetaAdSetPayloadInput): number {
   return Math.round(dailyBudgetUsd * 100);
 }
 
+function buildMetaTargeting(targeting?: MetaJson): MetaJson {
+  const hasCustomTargeting = targeting && Object.keys(targeting).length > 0;
+  const baseTargeting: MetaJson = hasCustomTargeting
+    ? { ...targeting }
+    : {
+        geo_locations: { countries: ["KZ"] },
+        age_min: 25,
+        age_max: 55,
+      };
+  const currentAutomation =
+    baseTargeting.targeting_automation && typeof baseTargeting.targeting_automation === "object" && !Array.isArray(baseTargeting.targeting_automation)
+      ? (baseTargeting.targeting_automation as MetaJson)
+      : {};
+
+  return {
+    ...baseTargeting,
+    targeting_automation: {
+      ...currentAutomation,
+      advantage_audience: 0,
+    },
+  };
+}
+
 export function buildMetaAdSetPayload(input: MetaAdSetPayloadInput): MetaJson {
   const dailyBudgetMinorUnits = resolveDailyBudgetMinorUnits(input);
   if (dailyBudgetMinorUnits < 100) {
@@ -257,11 +280,7 @@ export function buildMetaAdSetPayload(input: MetaAdSetPayloadInput): MetaJson {
     billing_event: "IMPRESSIONS",
     optimization_goal: "LINK_CLICKS",
     bid_strategy: "LOWEST_COST_WITHOUT_CAP",
-    targeting: input.targeting || {
-      geo_locations: { countries: ["KZ"] },
-      age_min: 25,
-      age_max: 55,
-    },
+    targeting: buildMetaTargeting(input.targeting),
     start_time: input.startTime,
     status: input.status,
   };

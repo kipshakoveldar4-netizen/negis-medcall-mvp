@@ -1395,6 +1395,11 @@ export default function AdsAutomation() {
     const adSetBillingEvent = typeof adSetPayload.billing_event === "string" ? adSetPayload.billing_event : "IMPRESSIONS";
     const adSetOptimizationGoal = typeof adSetPayload.optimization_goal === "string" ? adSetPayload.optimization_goal : "LINK_CLICKS";
     const adSetBidStrategy = typeof adSetPayload.bid_strategy === "string" ? adSetPayload.bid_strategy : "LOWEST_COST_WITHOUT_CAP";
+    const adSetTargeting = asRecord(adSetPayload.targeting);
+    const targetingAutomation = asRecord(adSetTargeting.targeting_automation);
+    const advantageAudience = Object.prototype.hasOwnProperty.call(targetingAutomation, "advantage_audience")
+      ? String(targetingAutomation.advantage_audience)
+      : "0";
 
     return (
       <section className="neu-card p-5 sm:p-6">
@@ -1451,6 +1456,7 @@ export default function AdsAutomation() {
             <p><b>adset.billing_event:</b> {adSetBillingEvent}</p>
             <p><b>adset.optimization_goal:</b> {adSetOptimizationGoal}</p>
             <p><b>adset.bid_strategy:</b> {adSetBidStrategy}</p>
+            <p><b>adset.targeting.targeting_automation.advantage_audience:</b> {advantageAudience}</p>
           </div>
         </details>
 

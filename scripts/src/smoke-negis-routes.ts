@@ -86,6 +86,12 @@ async function checkMetaMarketingSource() {
   if (!source.includes('optimization_goal: "LINK_CLICKS"')) {
     throw new Error("Meta marketing source must use LINK_CLICKS optimization for MVP ad sets");
   }
+  if (!source.includes("targeting_automation:")) {
+    throw new Error("Meta marketing source is missing targeting_automation inside targeting");
+  }
+  if (!source.includes("advantage_audience: 0")) {
+    throw new Error("Meta marketing source is missing advantage_audience: 0");
+  }
   if (!source.includes("Meta ad set payload missing daily_budget/lifetime_budget")) {
     throw new Error("Meta marketing source is missing ad set budget assertion");
   }
@@ -94,6 +100,9 @@ async function checkMetaMarketingSource() {
   }
   if (!source.includes("value !== undefined && value !== null")) {
     throw new Error("Meta marketing serializer must preserve false and numeric payload values");
+  }
+  if (!source.includes("typeof value === \"object\" ? JSON.stringify(value) : String(value)")) {
+    throw new Error("Meta marketing serializer must JSON-serialize nested targeting");
   }
   if (source.includes(".filter(([, value]) => value)")) {
     throw new Error("Meta marketing serializer must not use truthy filtering");
@@ -637,6 +646,13 @@ async function main() {
   }
   if (!adSetPayload.campaign_id) {
     throw new Error("/api/crm/meta-launch dry-run adset payload must include campaign_id");
+  }
+  if (Object.prototype.hasOwnProperty.call(adSetPayload, "targeting_automation")) {
+    throw new Error("/api/crm/meta-launch dry-run adset payload must keep targeting_automation inside targeting");
+  }
+  const adSetTargeting = (adSetPayload.targeting || {}) as { targeting_automation?: { advantage_audience?: unknown } };
+  if (adSetTargeting.targeting_automation?.advantage_audience !== 0) {
+    throw new Error("/api/crm/meta-launch dry-run targeting must include targeting_automation.advantage_audience: 0");
   }
   if (campaignPayload.status !== "PAUSED" || launchData.metaStatus !== "PAUSED") {
     throw new Error("/api/crm/meta-launch dry-run must use PAUSED status");
