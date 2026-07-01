@@ -74,6 +74,30 @@ async function checkMetaMarketingSource() {
   if (!source.includes("image_hash")) {
     throw new Error("Meta marketing source is missing image_hash creative flow");
   }
+  if (!source.includes("buildImageLinkCreativePayload")) {
+    throw new Error("Meta marketing source is missing explicit image link creative builder");
+  }
+  if (!source.includes("buildVideoCreativePayload")) {
+    throw new Error("Meta marketing source is missing explicit video creative builder");
+  }
+  if (!source.includes("link_data:")) {
+    throw new Error("Meta image creative source is missing object_story_spec.link_data");
+  }
+  if (!source.includes("video_data:")) {
+    throw new Error("Meta video creative source is missing object_story_spec.video_data");
+  }
+  if (!source.includes("Meta image_hash не получен")) {
+    throw new Error("Meta image creative source must fail clearly when image_hash is missing");
+  }
+  if (source.includes('input.creativeType === "video" || input.videoId')) {
+    throw new Error("Meta creative routing must not switch image assets into video path only because videoId exists");
+  }
+  if (source.includes('input.creativeType === "video" || input.videoUrl')) {
+    throw new Error("Meta launch must not switch image assets into video path only because videoUrl exists");
+  }
+  if (!source.includes("Видео-реклама через Meta API требует video_id")) {
+    throw new Error("Meta video real launch must return a controlled video_id required message");
+  }
   if (!source.includes("MetaApiError")) {
     throw new Error("Meta marketing source is missing detailed Meta API errors");
   }
@@ -89,7 +113,7 @@ async function checkMetaMarketingSource() {
   if (!source.includes('preparedInput.status === "PAUSED"')) {
     throw new Error("Meta marketing source must limit Instagram actor fallback to PAUSED launch");
   }
-  if (!source.includes("instagram_actor_id: instagramActorId")) {
+  if (!source.includes("instagram_actor_id: instagramActorId") && !source.includes("instagram_actor_id: input.instagramActorId")) {
     throw new Error("Meta marketing source is missing conditional instagram_actor_id payload");
   }
   if (!source.includes("creativeUsesInstagramActor")) {
@@ -680,9 +704,85 @@ async function main() {
   if (creativePayload.instagramActorFallback !== false) {
     throw new Error("/api/crm/meta-launch dry-run creative payload must expose instagramActorFallback false");
   }
+  const creativeAsset = (creativePayload.asset || {}) as { fileType?: unknown };
+  if (creativeAsset.fileType !== "image") {
+    throw new Error('/api/crm/meta-launch dry-run creative asset.fileType must be "image" for image assets');
+  }
+  if (creativePayload.objectStorySpecType !== "link_data") {
+    throw new Error('/api/crm/meta-launch dry-run image creative must use objectStorySpecType "link_data"');
+  }
+  if (creativePayload.usesVideoData !== false) {
+    throw new Error("/api/crm/meta-launch dry-run image creative must not use video_data");
+  }
+  if (creativePayload.usesLinkData !== true) {
+    throw new Error("/api/crm/meta-launch dry-run image creative must use link_data");
+  }
+  if (creativePayload.imageHash !== true) {
+    throw new Error("/api/crm/meta-launch dry-run image creative must show imageHash expected");
+  }
   if (campaignPayload.status !== "PAUSED" || launchData.metaStatus !== "PAUSED") {
     throw new Error("/api/crm/meta-launch dry-run must use PAUSED status");
   }
+  const videoDryRun = await checkJsonEndpoint("/api/crm/meta-launch", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      workspaceId: "demo-workspace",
+      campaignName: "Smoke Meta Video Campaign",
+      objective: "OUTCOME_LEADS",
+      statusMode: "PAUSED",
+      dailyBudget: 20,
+      totalBudget: 140,
+      currency: "USD",
+      city: "Astana",
+      targetAudience: "Women 25-55",
+      primaryText: "Professional consultation in Astana. Book a specialist consultation.",
+      headline: "Consultation in Astana",
+      description: "Book a consultation with a specialist.",
+      cta: "LEARN_MORE",
+      landingUrl: "https://example.com",
+      creativeType: "video",
+      creativeUrl: "https://example.com/smoke-creative.mp4",
+      videoUrl: "https://example.com/smoke-creative.mp4",
+      complianceConfirmed: true,
+      manualApprovalConfirmed: true,
+      dryRun: true,
+    }),
+  });
+  const videoCreativePayload = ((videoDryRun.data || {}) as { metaPayload?: { creative?: Record<string, unknown> } }).metaPayload?.creative || {};
+  if (videoCreativePayload.objectStorySpecType !== "video_data" || videoCreativePayload.usesVideoData !== true) {
+    throw new Error('/api/crm/meta-launch dry-run video creative must stay on objectStorySpecType "video_data"');
+  }
+  await checkJsonFailure(
+    "/api/crm/meta-launch",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        workspaceId: "demo-workspace",
+        campaignName: "Smoke Meta Video Campaign Real",
+        objective: "OUTCOME_LEADS",
+        statusMode: "PAUSED",
+        dailyBudget: 20,
+        totalBudget: 140,
+        currency: "USD",
+        city: "Astana",
+        targetAudience: "Women 25-55",
+        primaryText: "Professional consultation in Astana. Book a specialist consultation.",
+        headline: "Consultation in Astana",
+        description: "Book a consultation with a specialist.",
+        cta: "LEARN_MORE",
+        landingUrl: "https://example.com",
+        creativeType: "video",
+        creativeUrl: "https://example.com/smoke-creative.mp4",
+        videoUrl: "https://example.com/smoke-creative.mp4",
+        complianceConfirmed: true,
+        manualApprovalConfirmed: true,
+        dryRun: false,
+      }),
+    },
+    "Видео-реклама через Meta API требует video_id",
+  );
   await checkJsonEndpoint(`/api/crm/meta-status?campaignId=${encodeURIComponent(launchData.metaCampaignId || "dryrun_campaign_smoke")}`);
   await checkCrmEndpoint("/api/crm/release-checks", {
     checkKey: "smoke-release",

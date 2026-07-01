@@ -24,6 +24,7 @@ export type MetaApiErrorDetails = {
   errorUserMsg?: string;
   blameFieldSpecs?: unknown;
   fbtraceId?: string;
+  debug?: unknown;
 };
 
 export class MetaApiError extends Error {
@@ -84,6 +85,10 @@ export type MetaLaunchResult = {
   warnings?: string[];
   creativeUsesInstagramActor?: boolean;
   instagramActorFallback?: boolean;
+  creativeObjectStorySpecType?: "link_data" | "video_data";
+  creativeUsesLinkData?: boolean;
+  creativeUsesVideoData?: boolean;
+  imageHashReceived?: boolean;
 };
 
 type MetaAdSetPayloadInput = MetaLaunchInput & {
@@ -154,6 +159,7 @@ function readMetaErrorDetails(data: unknown, status: number, step?: string): Met
     errorUserMsg: record.error_user_msg === undefined ? undefined : String(record.error_user_msg),
     blameFieldSpecs: record.blame_field_specs,
     fbtraceId: record.fbtrace_id === undefined ? undefined : String(record.fbtrace_id),
+    debug: record.debug,
   };
 }
 
@@ -360,6 +366,19 @@ function parseMetaImageHash(data: MetaJson): string {
   return "";
 }
 
+function assertMetaImageHash(imageHash: string, debug?: unknown): string {
+  const normalized = imageHash.trim();
+  if (!normalized) {
+    throw new MetaApiError({
+      step: "image_upload",
+      message: "Meta image_hash не получен. Проверьте загрузку изображения в Meta.",
+      debug,
+    });
+  }
+
+  return normalized;
+}
+
 export async function uploadMetaImageFromUrl(input: { imageUrl: string; name?: string }): Promise<MetaJson> {
   const { adAccountId } = assertMetaConfigured();
   const imageUrl = input.imageUrl.trim();
@@ -374,34 +393,17 @@ export async function uploadMetaImageFromUrl(input: { imageUrl: string; name?: s
   }, "image_upload");
 }
 
-export async function createImageCreative(input: MetaLaunchInput): Promise<MetaJson> {
-  const { adAccountId, pageId, instagramActorId: configuredInstagramActorId } = assertMetaConfigured();
-  const instagramActorId = resolveInstagramActorId(input, configuredInstagramActorId);
-  let imageHash = "";
-
-  if (input.imageUrl) {
-    const image = await uploadMetaImageFromUrl({
-      imageUrl: input.imageUrl,
-      name: `${input.campaignName} - Image`,
-    });
-    imageHash = parseMetaImageHash(image);
-    if (!imageHash) {
-      throw new MetaApiError({
-        step: "image_upload",
-        message: "Meta image upload completed without image_hash",
-      });
-    }
-  }
-
+export function buildImageLinkCreativePayload(input: MetaLaunchInput & { pageId: string; imageHash: string; instagramActorId?: string }): MetaJson {
+  const imageHash = assertMetaImageHash(input.imageHash);
   const objectStorySpec: MetaJson = {
-    page_id: pageId,
-    ...(instagramActorId ? { instagram_actor_id: instagramActorId } : {}),
+    page_id: input.pageId,
+    ...(input.instagramActorId ? { instagram_actor_id: input.instagramActorId } : {}),
     link_data: {
       message: input.primaryText,
       link: input.landingUrl,
       name: input.headline,
       description: input.description,
-      ...(imageHash ? { image_hash: imageHash } : {}),
+      image_hash: imageHash,
       call_to_action: {
         type: input.cta || "LEARN_MORE",
         value: {
@@ -411,18 +413,16 @@ export async function createImageCreative(input: MetaLaunchInput): Promise<MetaJ
     },
   };
 
-  return metaRequest(`/${adAccountId}/adcreatives`, "POST", {
+  return {
     name: `${input.campaignName} - Creative`,
     object_story_spec: objectStorySpec,
-  }, "creative");
+  };
 }
 
-export async function createVideoCreative(input: MetaLaunchInput & { videoId: string }): Promise<MetaJson> {
-  const { adAccountId, pageId, instagramActorId: configuredInstagramActorId } = assertMetaConfigured();
-  const instagramActorId = resolveInstagramActorId(input, configuredInstagramActorId);
+export function buildVideoCreativePayload(input: MetaLaunchInput & { pageId: string; videoId: string; instagramActorId?: string }): MetaJson {
   const objectStorySpec: MetaJson = {
-    page_id: pageId,
-    ...(instagramActorId ? { instagram_actor_id: instagramActorId } : {}),
+    page_id: input.pageId,
+    ...(input.instagramActorId ? { instagram_actor_id: input.instagramActorId } : {}),
     video_data: {
       video_id: input.videoId,
       title: input.headline,
@@ -438,16 +438,62 @@ export async function createVideoCreative(input: MetaLaunchInput & { videoId: st
     },
   };
 
-  return metaRequest(`/${adAccountId}/adcreatives`, "POST", {
+  return {
     name: `${input.campaignName} - Video Creative`,
     object_story_spec: objectStorySpec,
+  };
+}
+
+export async function createImageCreative(input: MetaLaunchInput): Promise<MetaJson> {
+  const { adAccountId, pageId, instagramActorId: configuredInstagramActorId } = assertMetaConfigured();
+  const instagramActorId = resolveInstagramActorId(input, configuredInstagramActorId);
+
+  if (!input.imageUrl) {
+    throw new MetaApiError({
+      step: "image_upload",
+      message: "Meta image_hash не получен. Проверьте загрузку изображения в Meta.",
+    });
+  }
+
+  const image = await uploadMetaImageFromUrl({
+    imageUrl: input.imageUrl,
+    name: `${input.campaignName} - Image`,
+  });
+  const imageHash = assertMetaImageHash(parseMetaImageHash(image), {
+    responseKeys: Object.keys(image),
+    imageKeys:
+      image.images && typeof image.images === "object" && !Array.isArray(image.images)
+        ? Object.keys(image.images as Record<string, unknown>)
+        : [],
+  });
+
+  return metaRequest(`/${adAccountId}/adcreatives`, "POST", {
+    ...buildImageLinkCreativePayload({
+      ...input,
+      pageId,
+      imageHash,
+      instagramActorId,
+    }),
+  }, "creative");
+}
+
+export async function createVideoCreative(input: MetaLaunchInput & { videoId: string }): Promise<MetaJson> {
+  const { adAccountId, pageId, instagramActorId: configuredInstagramActorId } = assertMetaConfigured();
+  const instagramActorId = resolveInstagramActorId(input, configuredInstagramActorId);
+
+  return metaRequest(`/${adAccountId}/adcreatives`, "POST", {
+    ...buildVideoCreativePayload({
+      ...input,
+      pageId,
+      instagramActorId,
+    }),
   }, "creative");
 }
 
 export async function createMetaCreative(input: MetaLaunchInput): Promise<MetaJson> {
-  if (input.creativeType === "video" || input.videoId) {
+  if (input.creativeType === "video") {
     if (!input.videoId) {
-      throw new Error("Meta video_id is required before creating a video creative");
+      throw new Error("Видео-реклама через Meta API требует video_id. Сначала протестируйте запуск фото.");
     }
     return createVideoCreative({ ...input, videoId: input.videoId });
   }
@@ -466,19 +512,10 @@ export async function createMetaAd(input: MetaLaunchInput & { adSetId: string; c
 }
 
 export async function launchMetaCampaign(input: MetaLaunchInput): Promise<MetaLaunchResult> {
-  let preparedInput = input;
-
-  if ((input.creativeType === "video" || input.videoUrl) && !input.videoId) {
-    const video = await uploadMetaVideo({
-      videoUrl: input.videoUrl || input.imageUrl || "",
-      title: input.campaignName,
-    });
-    const metaVideoId = parseMetaId(video);
-    if (!metaVideoId) {
-      throw new Error("Meta video upload completed without video_id");
-    }
-    preparedInput = { ...input, creativeType: "video", videoId: metaVideoId };
+  if (input.creativeType === "video") {
+    throw new Error("Видео-реклама через Meta API требует video_id. Сначала протестируйте запуск фото.");
   }
+  const preparedInput = { ...input, creativeType: "image" as const, videoUrl: undefined, videoId: undefined };
 
   const campaign = await createMetaCampaign(preparedInput);
   const metaCampaignId = parseMetaId(campaign);
@@ -524,6 +561,10 @@ export async function launchMetaCampaign(input: MetaLaunchInput): Promise<MetaLa
     warnings: warning ? [warning] : [],
     creativeUsesInstagramActor,
     instagramActorFallback,
+    creativeObjectStorySpecType: "link_data",
+    creativeUsesLinkData: true,
+    creativeUsesVideoData: false,
+    imageHashReceived: true,
   };
 }
 

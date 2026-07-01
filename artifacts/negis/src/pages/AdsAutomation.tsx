@@ -137,6 +137,7 @@ type StorageHealth = {
 };
 
 type UploadStatus = "idle" | "validating" | "getting_signed_url" | "uploading_to_storage" | "saving_metadata" | "ready" | "failed";
+type RealLaunchStatus = "idle" | "creating" | "failed" | "created";
 
 type UploadDebug = {
   assetId?: string;
@@ -552,6 +553,9 @@ export default function AdsAutomation() {
   const [loading, setLoading] = useState<"health" | "storage" | "upload" | "ai" | "check" | "video" | "launch" | "history" | null>(null);
   const [notice, setNotice] = useState("");
   const [launchResult, setLaunchResult] = useState<LaunchResult | null>(null);
+  const [lastDryRunResult, setLastDryRunResult] = useState<LaunchResult | null>(null);
+  const [realLaunchStatus, setRealLaunchStatus] = useState<RealLaunchStatus>("idle");
+  const [realLaunchMessage, setRealLaunchMessage] = useState("");
   const [historyItems, setHistoryItems] = useState<LaunchHistoryItem[]>([]);
   const isHistoryView = location === "/ads-automation/history";
 
@@ -925,7 +929,11 @@ export default function AdsAutomation() {
         }),
       });
       setCompliance(body.data.compliance || null);
-      setLaunchResult({ ...body.data, warning: body.warning || body.data.warning });
+      const result = { ...body.data, warning: body.warning || body.data.warning };
+      setLaunchResult(result);
+      setLastDryRunResult(result);
+      setRealLaunchStatus("idle");
+      setRealLaunchMessage("");
       goToStep(stayOnLaunchStep ? 6 : 5);
       toast.success(stayOnLaunchStep ? "Проверка прошла без запуска" : "Проверка безопасности готова");
       setNotice(body.warning || (stayOnLaunchStep ? "Проверка прошла без запуска. Кампания в Meta не создавалась." : ""));
@@ -1032,6 +1040,9 @@ export default function AdsAutomation() {
 
     setLoading("launch");
     setNotice("");
+    setLaunchResult(null);
+    setRealLaunchStatus("creating");
+    setRealLaunchMessage(nextStatusMode === "ACTIVE" ? "Создаём и запускаем кампанию в Meta." : "Создаём кампанию в Meta выключенной.");
     try {
       let metaVideoId = creative?.metaVideoId || "";
       if (creative?.fileType === "video") {
@@ -1052,12 +1063,16 @@ export default function AdsAutomation() {
       setLaunchResult({ ...body.data, warning: body.warning || body.data.warning });
       setCompliance(body.data.compliance || compliance);
       saveLocalLaunch(body.data, nextStatusMode);
+      setRealLaunchStatus("created");
+      setRealLaunchMessage(nextStatusMode === "ACTIVE" ? "Реклама создана и запущена в Meta." : "Кампания создана в Meta выключенной.");
       goToStep(6);
       toast.success(nextStatusMode === "ACTIVE" ? "Реклама запущена" : "Кампания создана выключенной");
       if (body.warning) setNotice(body.warning);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Не удалось создать рекламу в Meta.";
       setNotice(message);
+      setRealLaunchStatus("failed");
+      setRealLaunchMessage(message);
       toast.error(message);
     } finally {
       setLoading(null);
@@ -1388,6 +1403,7 @@ export default function AdsAutomation() {
     const campaignPayload = asRecord(metaPayload.campaign);
     const adSetPayload = asRecord(metaPayload.adSet);
     const creativePayload = asRecord(metaPayload.creative);
+    const creativeAssetPayload = asRecord(creativePayload.asset);
     const campaignHasDailyBudget = Object.prototype.hasOwnProperty.call(campaignPayload, "daily_budget");
     const campaignBudgetSharing = Object.prototype.hasOwnProperty.call(campaignPayload, "is_adset_budget_sharing_enabled")
       ? String(campaignPayload.is_adset_budget_sharing_enabled)
@@ -1408,6 +1424,22 @@ export default function AdsAutomation() {
     const creativeInstagramActorFallback = Object.prototype.hasOwnProperty.call(creativePayload, "instagramActorFallback")
       ? String(creativePayload.instagramActorFallback)
       : "false";
+    const assetFileType = typeof creativeAssetPayload.fileType === "string" ? creativeAssetPayload.fileType : creative?.fileType || "image";
+    const creativeObjectStorySpecType =
+      typeof creativePayload.objectStorySpecType === "string"
+        ? creativePayload.objectStorySpecType
+        : assetFileType === "video"
+          ? "video_data"
+          : "link_data";
+    const creativeImageHash = Object.prototype.hasOwnProperty.call(creativePayload, "imageHash")
+      ? Boolean(creativePayload.imageHash)
+      : assetFileType === "image" && Boolean(creative?.publicUrl);
+    const creativeUsesVideoData = Object.prototype.hasOwnProperty.call(creativePayload, "usesVideoData")
+      ? Boolean(creativePayload.usesVideoData)
+      : creativeObjectStorySpecType === "video_data";
+    const creativeUsesLinkData = Object.prototype.hasOwnProperty.call(creativePayload, "usesLinkData")
+      ? Boolean(creativePayload.usesLinkData)
+      : creativeObjectStorySpecType === "link_data";
 
     return (
       <section className="neu-card p-5 sm:p-6">
@@ -1465,6 +1497,11 @@ export default function AdsAutomation() {
             <p><b>adset.optimization_goal:</b> {adSetOptimizationGoal}</p>
             <p><b>adset.bid_strategy:</b> {adSetBidStrategy}</p>
             <p><b>adset.targeting.targeting_automation.advantage_audience:</b> {advantageAudience}</p>
+            <p><b>asset.fileType:</b> {assetFileType}</p>
+            <p><b>creative.objectStorySpecType:</b> {creativeObjectStorySpecType}</p>
+            <p><b>creative.imageHash:</b> {creativeImageHash ? "yes" : "no"}</p>
+            <p><b>creative.usesVideoData:</b> {String(creativeUsesVideoData)}</p>
+            <p><b>creative.usesLinkData:</b> {String(creativeUsesLinkData)}</p>
             <p><b>creative.usesInstagramActor:</b> {creativeUsesInstagramActor}</p>
             <p><b>creative.instagramActorFallback:</b> {creativeInstagramActorFallback}</p>
           </div>
@@ -1485,6 +1522,13 @@ export default function AdsAutomation() {
     const realLaunchBlockedByCreative = realLaunchNeedsCreativeLink(creative, storageHealth);
     const realLaunchBusy = loading === "launch" || loading === "video";
     const realLaunchDisabled = realLaunchBusy || Boolean(realLaunchBlockedByCreative);
+    const realLaunchTone = realLaunchStatus === "failed" ? "red" : realLaunchStatus === "created" ? "green" : "blue";
+    const realLaunchLabel =
+      realLaunchStatus === "creating"
+        ? "Создаём кампанию в Meta"
+        : realLaunchStatus === "failed"
+          ? "Запуск в Meta не прошёл"
+          : "Кампания создана в Meta";
     const launchResultTitle = launchResult?.dryRun
       ? "Проверка прошла без запуска"
       : launchResult?.metaStatus === "ACTIVE" || launchResult?.status === "active"
@@ -1548,6 +1592,19 @@ export default function AdsAutomation() {
           </div>
         ) : null}
 
+        {realLaunchStatus !== "idle" ? (
+          <div className={`mt-5 rounded-2xl border p-4 ${
+            realLaunchTone === "red"
+              ? "border-red-200 bg-red-50 text-red-900"
+              : realLaunchTone === "green"
+                ? "border-emerald-200 bg-emerald-50 text-emerald-900"
+                : "border-blue-200 bg-blue-50 text-blue-900"
+          }`}>
+            <p className="text-sm font-black">{realLaunchLabel}</p>
+            {realLaunchMessage ? <p className="mt-1 text-sm font-semibold">{realLaunchMessage}</p> : null}
+          </div>
+        ) : null}
+
         <div className="mt-6 flex flex-col gap-3 sm:flex-row">
           <button type="button" className="neu-btn justify-center" onClick={() => goToStep(5)}>
             Назад к отчёту
@@ -1588,6 +1645,12 @@ export default function AdsAutomation() {
                 История запусков
               </button>
             </div>
+          </div>
+        ) : null}
+
+        {lastDryRunResult?.dryRun && (realLaunchStatus !== "idle" || (launchResult && !launchResult.dryRun)) ? (
+          <div className="mt-4 rounded-2xl border border-slate-200 bg-white/70 p-4 text-sm font-semibold text-slate-700">
+            Последняя проверка без запуска прошла. Это справка, реальный статус запуска показан выше.
           </div>
         ) : null}
       </section>

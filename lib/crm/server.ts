@@ -2607,6 +2607,7 @@ function safeMetaLaunchError(error: unknown): JsonRecord {
       error_user_msg: details.errorUserMsg,
       blame_field_specs: details.blameFieldSpecs,
       fbtrace_id: details.fbtraceId,
+      debug: details.debug,
     };
   }
 
@@ -2655,6 +2656,10 @@ function buildMetaLaunchBody(body: JsonRecord) {
   const days = dateDays(firstString(body.startDate, body.start_time), firstString(body.endDate, body.end_time));
   const totalBudget = readNumber(body.totalBudget ?? body.total_budget) ?? dailyBudget * days;
   const config = getMetaConfig();
+  const creativeType = normalizeCreativeFileType(body);
+  const creativeUrl = firstString(body.creativeUrl, body.creative_url);
+  const imageUrl = creativeType === "image" ? firstString(body.imageUrl, body.image_url, creativeUrl) : firstString(body.imageUrl, body.image_url);
+  const videoUrl = creativeType === "video" ? firstString(body.videoUrl, body.video_url, creativeUrl) : firstString(body.videoUrl, body.video_url);
 
   return {
     campaignName,
@@ -2672,10 +2677,10 @@ function buildMetaLaunchBody(body: JsonRecord) {
     description,
     cta: firstString(body.cta, "LEARN_MORE").toUpperCase().replace(/\s+/g, "_"),
     landingUrl: firstString(body.landingUrl, body.landing_url, body.websiteUrl, body.website_url),
-    imageUrl: firstString(body.imageUrl, body.image_url),
-    creativeUrl: firstString(body.creativeUrl, body.creative_url),
-    creativeType: normalizeCreativeFileType(body),
-    videoUrl: firstString(body.videoUrl, body.video_url, body.creativeUrl, body.creative_url),
+    imageUrl,
+    creativeUrl,
+    creativeType,
+    videoUrl,
     videoId: firstString(body.videoId, body.video_id, body.metaVideoId, body.meta_video_id),
     thumbnailUrl: firstString(body.thumbnailUrl, body.thumbnail_url),
     startDate: firstString(body.startDate, body.start_time, new Date(Date.now() + 3600000).toISOString()),
@@ -2691,6 +2696,10 @@ function buildMetaPayloadPreview(
   campaignId = "META_CAMPAIGN_ID",
   creativeOptions: { usesInstagramActor?: boolean; instagramActorFallback?: boolean } = {},
 ): JsonRecord {
+  const assetFileType = launch.creativeType === "video" ? "video" : "image";
+  const usesLinkData = assetFileType === "image";
+  const usesVideoData = assetFileType === "video";
+  const imageHashExpected = usesLinkData && Boolean(launch.imageUrl || launch.creativeUrl);
   const campaign = buildMetaCampaignPayload({
     campaignName: launch.campaignName,
     objective: launch.objective,
@@ -2703,10 +2712,10 @@ function buildMetaPayloadPreview(
     description: launch.description,
     cta: launch.cta,
     landingUrl: launch.landingUrl,
-    imageUrl: launch.imageUrl || launch.creativeUrl,
+    imageUrl: assetFileType === "image" ? launch.imageUrl || launch.creativeUrl : "",
     creativeType: launch.creativeType,
-    videoUrl: launch.videoUrl || launch.creativeUrl,
-    videoId: launch.videoId,
+    videoUrl: assetFileType === "video" ? launch.videoUrl || launch.creativeUrl : "",
+    videoId: assetFileType === "video" ? launch.videoId : "",
     thumbnailUrl: launch.thumbnailUrl,
     startTime: launch.startDate,
     endTime: launch.endDate || undefined,
@@ -2724,10 +2733,10 @@ function buildMetaPayloadPreview(
     description: launch.description,
     cta: launch.cta,
     landingUrl: launch.landingUrl,
-    imageUrl: launch.imageUrl || launch.creativeUrl,
+    imageUrl: assetFileType === "image" ? launch.imageUrl || launch.creativeUrl : "",
     creativeType: launch.creativeType,
-    videoUrl: launch.videoUrl || launch.creativeUrl,
-    videoId: launch.videoId,
+    videoUrl: assetFileType === "video" ? launch.videoUrl || launch.creativeUrl : "",
+    videoId: assetFileType === "video" ? launch.videoId : "",
     thumbnailUrl: launch.thumbnailUrl,
     startTime: launch.startDate,
     endTime: launch.endDate || undefined,
@@ -2738,6 +2747,11 @@ function buildMetaPayloadPreview(
     campaign,
     adSet,
     creative: {
+      asset: { fileType: assetFileType },
+      objectStorySpecType: usesLinkData ? "link_data" : "video_data",
+      imageHash: imageHashExpected,
+      usesVideoData,
+      usesLinkData,
       usesInstagramActor: creativeOptions.usesInstagramActor ?? Boolean(launch.instagramActorId),
       instagramActorFallback: creativeOptions.instagramActorFallback ?? false,
     },
@@ -2998,6 +3012,7 @@ export async function handleMetaLaunch(req: VercelRequest, res: VercelResponse) 
   const launch = buildMetaLaunchBody(body);
   const actorName = firstString(body.launchedBy, body.actorName, body.userName);
   const actorRole = firstString(body.launchedByRole, body.actorRole, "owner");
+  const dryRun = readBoolean(body.dryRun);
   const details: string[] = [];
 
   if (!launch.campaignName) details.push("Название кампании обязательно.");
@@ -3008,6 +3023,9 @@ export async function handleMetaLaunch(req: VercelRequest, res: VercelResponse) 
   if (!launch.imageUrl && !launch.creativeUrl && !launch.videoUrl) details.push("Креатив загружен, но публичная ссылка не получена.");
   if (launch.creativeType === "video" && !launch.videoId && !launch.videoUrl) {
     details.push("Для видео нужен Meta video_id или публичная ссылка для загрузки в Meta.");
+  }
+  if (!dryRun && launch.creativeType === "video") {
+    details.push("Видео-реклама через Meta API требует video_id. Сначала протестируйте запуск фото.");
   }
   if (!readBoolean(body.complianceConfirmed)) details.push("Подтвердите проверку безопасности текста.");
   if (!readBoolean(body.manualApprovalConfirmed)) details.push("Подтвердите ручное согласование запуска.");
@@ -3072,7 +3090,6 @@ export async function handleMetaLaunch(req: VercelRequest, res: VercelResponse) 
     compliance,
   };
 
-  const dryRun = readBoolean(body.dryRun);
   const config = getMetaConfig();
   let metaPayload = buildMetaPayloadPreview(launch);
   let metaResponse: JsonRecord;
@@ -3106,10 +3123,10 @@ export async function handleMetaLaunch(req: VercelRequest, res: VercelResponse) 
         description: launch.description,
         cta: launch.cta,
         landingUrl: launch.landingUrl,
-        imageUrl: launch.imageUrl || launch.creativeUrl,
+        imageUrl: launch.creativeType === "image" ? launch.imageUrl || launch.creativeUrl : "",
         creativeType: launch.creativeType,
-        videoUrl: launch.videoUrl || launch.creativeUrl,
-        videoId: launch.videoId,
+        videoUrl: launch.creativeType === "video" ? launch.videoUrl || launch.creativeUrl : "",
+        videoId: launch.creativeType === "video" ? launch.videoId : "",
         thumbnailUrl: launch.thumbnailUrl,
         instagramActorId: launch.instagramActorId,
         startTime: launch.startDate,
