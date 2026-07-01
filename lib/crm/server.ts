@@ -1,7 +1,16 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { getSupabaseServerClient } from "../supabase/server";
 import { checkMetaCompliance } from "../meta/compliance";
-import { MetaApiError, checkMetaAdAccount, getMetaCampaignStatus, getMetaConfig, launchMetaCampaign, uploadMetaVideo } from "../meta/marketing";
+import {
+  MetaApiError,
+  buildMetaAdSetPayload,
+  buildMetaCampaignPayload,
+  checkMetaAdAccount,
+  getMetaCampaignStatus,
+  getMetaConfig,
+  launchMetaCampaign,
+  uploadMetaVideo,
+} from "../meta/marketing";
 
 export type CrmResource =
   | "clients"
@@ -2676,6 +2685,57 @@ function buildMetaLaunchBody(body: JsonRecord) {
   };
 }
 
+function buildMetaPayloadPreview(launch: ReturnType<typeof buildMetaLaunchBody>): JsonRecord {
+  const campaign = buildMetaCampaignPayload({
+    campaignName: launch.campaignName,
+    objective: launch.objective,
+    status: launch.statusMode,
+    dailyBudgetMinor: launch.dailyBudgetMinor,
+    lifetimeBudgetMinor: launch.totalBudgetMinor,
+    currency: launch.currency,
+    primaryText: launch.primaryText,
+    headline: launch.headline,
+    description: launch.description,
+    cta: launch.cta,
+    landingUrl: launch.landingUrl,
+    imageUrl: launch.imageUrl || launch.creativeUrl,
+    creativeType: launch.creativeType,
+    videoUrl: launch.videoUrl || launch.creativeUrl,
+    videoId: launch.videoId,
+    thumbnailUrl: launch.thumbnailUrl,
+    startTime: launch.startDate,
+    endTime: launch.endDate || undefined,
+  });
+
+  const adSet = buildMetaAdSetPayload({
+    campaignName: launch.campaignName,
+    objective: launch.objective,
+    status: launch.statusMode,
+    dailyBudgetMinor: launch.dailyBudgetMinor,
+    lifetimeBudgetMinor: launch.totalBudgetMinor,
+    currency: launch.currency,
+    primaryText: launch.primaryText,
+    headline: launch.headline,
+    description: launch.description,
+    cta: launch.cta,
+    landingUrl: launch.landingUrl,
+    imageUrl: launch.imageUrl || launch.creativeUrl,
+    creativeType: launch.creativeType,
+    videoUrl: launch.videoUrl || launch.creativeUrl,
+    videoId: launch.videoId,
+    thumbnailUrl: launch.thumbnailUrl,
+    startTime: launch.startDate,
+    endTime: launch.endDate || undefined,
+    campaignId: "META_CAMPAIGN_ID",
+  });
+
+  return {
+    campaign,
+    adSet,
+    budgetLevel: "adset",
+  };
+}
+
 async function persistMetaLaunch(input: {
   workspaceId: string;
   payload: JsonRecord;
@@ -2968,6 +3028,7 @@ export async function handleMetaLaunch(req: VercelRequest, res: VercelResponse) 
 
   const dryRun = readBoolean(body.dryRun);
   const config = getMetaConfig();
+  const metaPayload = buildMetaPayloadPreview(launch);
   let metaResponse: JsonRecord;
   let launchStatus = launch.statusMode === "ACTIVE" ? "active" : "paused";
   let warning = "";
@@ -2980,6 +3041,7 @@ export async function handleMetaLaunch(req: VercelRequest, res: VercelResponse) 
         metaAdSetId: demoMetaId("adset"),
         metaCreativeId: demoMetaId("creative"),
         metaAdId: demoMetaId("ad"),
+        payload: metaPayload,
       };
       warning = "Проверка прошла без запуска: Meta API не вызывался.";
     } else {
@@ -3007,6 +3069,10 @@ export async function handleMetaLaunch(req: VercelRequest, res: VercelResponse) 
         endTime: launch.endDate || undefined,
       });
       metaResponse = result;
+      metaResponse = {
+        ...metaResponse,
+        payload: metaPayload,
+      };
     }
   } catch (error) {
     const metaError = safeMetaLaunchError(error);
@@ -3017,6 +3083,7 @@ export async function handleMetaLaunch(req: VercelRequest, res: VercelResponse) 
       compliance: compliance as unknown as JsonRecord,
       metaResponse: {
         error: metaError,
+        payload: metaPayload,
       },
       status: "failed",
       metaStatus: "failed",
@@ -3025,7 +3092,7 @@ export async function handleMetaLaunch(req: VercelRequest, res: VercelResponse) 
     return sendJson(res, 502, {
       ...errorBody("Не удалось создать рекламу в Meta", [lastError]),
       mode: saved.mode,
-      data: { launch: saved.item, compliance, safeText: compliance.safeText, metaError },
+      data: { launch: saved.item, compliance, safeText: compliance.safeText, metaError, metaPayload },
     });
   }
 
@@ -3067,6 +3134,7 @@ export async function handleMetaLaunch(req: VercelRequest, res: VercelResponse) 
       compliance,
       safeText: compliance.safeText,
       dryRun,
+      metaPayload,
       ...ids,
       status: launchStatus,
       metaStatus: launch.statusMode,

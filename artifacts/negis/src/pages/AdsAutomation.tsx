@@ -115,6 +115,7 @@ type LaunchResult = {
   compliance?: ComplianceResult;
   safeText?: string;
   launch?: Record<string, unknown>;
+  metaPayload?: Record<string, unknown>;
 };
 
 type MetaSummary = {
@@ -1382,6 +1383,15 @@ export default function AdsAutomation() {
 
   function renderReportStep() {
     const report = aiPackage?.humanReport || {};
+    const metaPayload = asRecord(launchResult?.metaPayload);
+    const campaignPayload = asRecord(metaPayload.campaign);
+    const adSetPayload = asRecord(metaPayload.adSet);
+    const campaignHasDailyBudget = Object.prototype.hasOwnProperty.call(campaignPayload, "daily_budget");
+    const campaignBudgetSharing = Object.prototype.hasOwnProperty.call(campaignPayload, "is_adset_budget_sharing_enabled")
+      ? String(campaignPayload.is_adset_budget_sharing_enabled)
+      : "false";
+    const adSetDailyBudget = Number(adSetPayload.daily_budget || 0) || Math.round(Number(brief.dailyBudget || 0) * 100);
+
     return (
       <section className="neu-card p-5 sm:p-6">
         <p className="text-xs font-black uppercase tracking-[0.16em] text-[#0D9488]">Шаг 5</p>
@@ -1422,7 +1432,7 @@ export default function AdsAutomation() {
         </div>
 
         <details className="mt-5 rounded-2xl border border-[#D8E4EC] bg-white/65 p-4">
-          <summary className="cursor-pointer text-sm font-black text-[#0F172A]">Подробности Meta</summary>
+          <summary className="cursor-pointer text-sm font-black text-[#0F172A]">Подробности Meta payload</summary>
           <div className="mt-4 grid gap-3 text-sm">
             <p><b>Ad account:</b> {metaSummary?.adAccountId || "env/backend"}</p>
             <p><b>Page:</b> {metaSummary?.pageId || "env/backend"}</p>
@@ -1430,6 +1440,9 @@ export default function AdsAutomation() {
             <p><b>Objective:</b> {aiPackage?.objective || "OUTCOME_LEADS"}</p>
             <p><b>CTA:</b> {aiPackage?.cta || "LEARN_MORE"}</p>
             <p><b>Status:</b> {statusMode}</p>
+            <p><b>campaign.is_adset_budget_sharing_enabled:</b> {campaignBudgetSharing}</p>
+            <p><b>campaign.daily_budget:</b> {campaignHasDailyBudget ? String(campaignPayload.daily_budget) : "absent"}</p>
+            <p><b>adset.daily_budget:</b> {adSetDailyBudget}</p>
           </div>
         </details>
 

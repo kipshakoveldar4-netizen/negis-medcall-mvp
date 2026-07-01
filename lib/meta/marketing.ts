@@ -207,20 +207,19 @@ export async function metaRequest(path: string, method: "GET" | "POST", body: Me
   return data;
 }
 
-export async function createMetaCampaign(input: MetaLaunchInput): Promise<MetaJson> {
-  const { adAccountId } = assertMetaConfigured();
-  return metaRequest(`/${adAccountId}/campaigns`, "POST", {
+export function buildMetaCampaignPayload(input: MetaLaunchInput): MetaJson {
+  return {
     name: input.campaignName,
     objective: input.objective || "OUTCOME_LEADS",
     buying_type: "AUCTION",
     special_ad_categories: [],
+    is_adset_budget_sharing_enabled: false,
     status: input.status,
-  }, "campaign");
+  };
 }
 
-export async function createMetaAdSet(input: MetaLaunchInput & { campaignId: string }): Promise<MetaJson> {
-  const { adAccountId } = assertMetaConfigured();
-  return metaRequest(`/${adAccountId}/adsets`, "POST", {
+export function buildMetaAdSetPayload(input: MetaLaunchInput & { campaignId: string }): MetaJson {
+  return {
     name: `${input.campaignName} - Ad Set`,
     campaign_id: input.campaignId,
     daily_budget: input.dailyBudgetMinor,
@@ -236,7 +235,17 @@ export async function createMetaAdSet(input: MetaLaunchInput & { campaignId: str
     start_time: input.startTime,
     end_time: input.endTime,
     status: input.status,
-  }, "adset");
+  };
+}
+
+export async function createMetaCampaign(input: MetaLaunchInput): Promise<MetaJson> {
+  const { adAccountId } = assertMetaConfigured();
+  return metaRequest(`/${adAccountId}/campaigns`, "POST", buildMetaCampaignPayload(input), "campaign");
+}
+
+export async function createMetaAdSet(input: MetaLaunchInput & { campaignId: string }): Promise<MetaJson> {
+  const { adAccountId } = assertMetaConfigured();
+  return metaRequest(`/${adAccountId}/adsets`, "POST", buildMetaAdSetPayload(input), "adset");
 }
 
 export async function uploadMetaVideo(input: { videoUrl: string; title?: string }): Promise<MetaJson> {

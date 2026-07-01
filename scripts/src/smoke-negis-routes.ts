@@ -77,6 +77,12 @@ async function checkMetaMarketingSource() {
   if (!source.includes("MetaApiError")) {
     throw new Error("Meta marketing source is missing detailed Meta API errors");
   }
+  if (!source.includes("is_adset_budget_sharing_enabled: false")) {
+    throw new Error("Meta marketing source is missing campaign budget sharing opt-out");
+  }
+  if (!source.includes("daily_budget: input.dailyBudgetMinor")) {
+    throw new Error("Meta marketing source is missing ad set daily_budget");
+  }
 
   console.log("Meta marketing source checks: ok");
 }
@@ -580,7 +586,28 @@ async function main() {
       dryRun: true,
     }),
   });
-  const launchData = (launch.data || {}) as { metaCampaignId?: string };
+  const launchData = (launch.data || {}) as {
+    metaCampaignId?: string;
+    metaStatus?: string;
+    metaPayload?: {
+      campaign?: Record<string, unknown>;
+      adSet?: Record<string, unknown>;
+    };
+  };
+  const campaignPayload = launchData.metaPayload?.campaign || {};
+  const adSetPayload = launchData.metaPayload?.adSet || {};
+  if (campaignPayload.is_adset_budget_sharing_enabled !== false) {
+    throw new Error("/api/crm/meta-launch dry-run campaign payload must contain is_adset_budget_sharing_enabled: false");
+  }
+  if (Object.prototype.hasOwnProperty.call(campaignPayload, "daily_budget")) {
+    throw new Error("/api/crm/meta-launch dry-run campaign payload must not contain campaign-level daily_budget");
+  }
+  if (adSetPayload.daily_budget !== 2000) {
+    throw new Error("/api/crm/meta-launch dry-run adset payload must keep daily_budget at ad set level");
+  }
+  if (campaignPayload.status !== "PAUSED" || launchData.metaStatus !== "PAUSED") {
+    throw new Error("/api/crm/meta-launch dry-run must use PAUSED status");
+  }
   await checkJsonEndpoint(`/api/crm/meta-status?campaignId=${encodeURIComponent(launchData.metaCampaignId || "dryrun_campaign_smoke")}`);
   await checkCrmEndpoint("/api/crm/release-checks", {
     checkKey: "smoke-release",
