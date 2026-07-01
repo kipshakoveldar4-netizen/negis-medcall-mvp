@@ -2694,12 +2694,23 @@ function buildMetaLaunchBody(body: JsonRecord) {
 function buildMetaPayloadPreview(
   launch: ReturnType<typeof buildMetaLaunchBody>,
   campaignId = "META_CAMPAIGN_ID",
-  creativeOptions: { usesInstagramActor?: boolean; instagramActorFallback?: boolean } = {},
+  creativeOptions: {
+    usesInstagramActor?: boolean;
+    instagramActorFallback?: boolean;
+    imageUploadMode?: "adimages" | "picture_url";
+    imageHash?: boolean;
+    pictureUrl?: boolean;
+    imageUploadCapabilityFallback?: boolean;
+  } = {},
 ): JsonRecord {
   const assetFileType = launch.creativeType === "video" ? "video" : "image";
   const usesLinkData = assetFileType === "image";
   const usesVideoData = assetFileType === "video";
   const imageHashExpected = usesLinkData && Boolean(launch.imageUrl || launch.creativeUrl);
+  const imageUploadMode = usesLinkData ? creativeOptions.imageUploadMode || "adimages" : undefined;
+  const imageUploadCapabilityFallback = Boolean(creativeOptions.imageUploadCapabilityFallback);
+  const pictureUrlExpected =
+    usesLinkData && (creativeOptions.pictureUrl ?? imageUploadMode === "picture_url");
   const campaign = buildMetaCampaignPayload({
     campaignName: launch.campaignName,
     objective: launch.objective,
@@ -2749,7 +2760,10 @@ function buildMetaPayloadPreview(
     creative: {
       asset: { fileType: assetFileType },
       objectStorySpecType: usesLinkData ? "link_data" : "video_data",
-      imageHash: imageHashExpected,
+      imageUploadMode,
+      imageHash: creativeOptions.imageHash ?? (imageUploadMode === "adimages" ? imageHashExpected : false),
+      pictureUrl: pictureUrlExpected,
+      imageUploadCapabilityFallback,
       usesVideoData,
       usesLinkData,
       usesInstagramActor: creativeOptions.usesInstagramActor ?? Boolean(launch.instagramActorId),
@@ -3140,6 +3154,10 @@ export async function handleMetaLaunch(req: VercelRequest, res: VercelResponse) 
         {
           usesInstagramActor: Boolean(result.creativeUsesInstagramActor),
           instagramActorFallback: Boolean(result.instagramActorFallback),
+          imageUploadMode: result.imageUploadMode,
+          imageHash: Boolean(result.imageHashReceived),
+          pictureUrl: Boolean(result.pictureUrlUsed),
+          imageUploadCapabilityFallback: Boolean(result.imageUploadCapabilityFallback),
         },
       );
       metaPayload = realMetaPayload;

@@ -1440,6 +1440,18 @@ export default function AdsAutomation() {
     const creativeUsesLinkData = Object.prototype.hasOwnProperty.call(creativePayload, "usesLinkData")
       ? Boolean(creativePayload.usesLinkData)
       : creativeObjectStorySpecType === "link_data";
+    const creativeImageUploadMode =
+      typeof creativePayload.imageUploadMode === "string"
+        ? creativePayload.imageUploadMode
+        : assetFileType === "image"
+          ? "adimages"
+          : "-";
+    const creativePictureUrl = Object.prototype.hasOwnProperty.call(creativePayload, "pictureUrl")
+      ? Boolean(creativePayload.pictureUrl)
+      : false;
+    const creativeImageUploadCapabilityFallback = Object.prototype.hasOwnProperty.call(creativePayload, "imageUploadCapabilityFallback")
+      ? Boolean(creativePayload.imageUploadCapabilityFallback)
+      : false;
 
     return (
       <section className="neu-card p-5 sm:p-6">
@@ -1499,13 +1511,22 @@ export default function AdsAutomation() {
             <p><b>adset.targeting.targeting_automation.advantage_audience:</b> {advantageAudience}</p>
             <p><b>asset.fileType:</b> {assetFileType}</p>
             <p><b>creative.objectStorySpecType:</b> {creativeObjectStorySpecType}</p>
+            <p><b>creative.imageUploadMode:</b> {creativeImageUploadMode}</p>
             <p><b>creative.imageHash:</b> {creativeImageHash ? "yes" : "no"}</p>
+            <p><b>creative.pictureUrl:</b> {creativePictureUrl ? "yes" : "no"}</p>
+            <p><b>creative.imageUploadCapabilityFallback:</b> {String(creativeImageUploadCapabilityFallback)}</p>
             <p><b>creative.usesVideoData:</b> {String(creativeUsesVideoData)}</p>
             <p><b>creative.usesLinkData:</b> {String(creativeUsesLinkData)}</p>
             <p><b>creative.usesInstagramActor:</b> {creativeUsesInstagramActor}</p>
             <p><b>creative.instagramActorFallback:</b> {creativeInstagramActorFallback}</p>
           </div>
         </details>
+
+        {creativeImageUploadCapabilityFallback ? (
+          <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm font-bold text-amber-900">
+            Meta не разрешила загрузить изображение через /adimages. Система попробовала создать креатив через публичную ссылку Supabase.
+          </div>
+        ) : null}
 
         <div className="mt-5 flex flex-col gap-2 sm:flex-row sm:justify-between">
           <button type="button" className="neu-btn justify-center" onClick={() => goToStep(4)}>Назад к проверке</button>
@@ -1529,6 +1550,8 @@ export default function AdsAutomation() {
         : realLaunchStatus === "failed"
           ? "Запуск в Meta не прошёл"
           : "Кампания создана в Meta";
+    const launchCreativePayload = asRecord(asRecord(launchResult?.metaPayload).creative);
+    const launchImageUploadCapabilityFallback = Boolean(launchCreativePayload.imageUploadCapabilityFallback);
     const launchResultTitle = launchResult?.dryRun
       ? "Проверка прошла без запуска"
       : launchResult?.metaStatus === "ACTIVE" || launchResult?.status === "active"
@@ -1633,6 +1656,11 @@ export default function AdsAutomation() {
                   {launchResult.dryRun ? "Кампания в Meta не создавалась." : `Meta Campaign ID: ${launchResult.metaCampaignId || "ожидается"}`}
                 </p>
                 {launchResult.warning ? <p className="mt-2 text-sm font-bold text-amber-800">{launchResult.warning}</p> : null}
+                {launchImageUploadCapabilityFallback ? (
+                  <p className="mt-2 text-sm font-bold text-amber-800">
+                    Meta не разрешила загрузить изображение через /adimages. Система попробовала создать креатив через публичную ссылку Supabase.
+                  </p>
+                ) : null}
               </div>
             </div>
             <div className="mt-4 flex flex-col gap-2 sm:flex-row">

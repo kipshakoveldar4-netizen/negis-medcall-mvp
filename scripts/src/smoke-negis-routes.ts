@@ -54,6 +54,10 @@ async function checkAdsAutomationSource() {
   assertSourceIncludes(source, "signed_url", "signed upload metadata marker");
   assertSourceIncludes(source, "lastUploadError", "detailed upload error state");
   assertSourceIncludes(source, "VERCEL_FUNCTION_FILE_LIMIT_BYTES", "Vercel payload guard");
+  assertSourceIncludes(source, "creative.imageUploadMode", "Meta image upload mode debug");
+  assertSourceIncludes(source, "creative.pictureUrl", "Meta picture URL fallback debug");
+  assertSourceIncludes(source, "creative.imageUploadCapabilityFallback", "Meta image upload fallback debug");
+  assertSourceIncludes(source, "Meta не разрешила загрузить изображение через /adimages", "Meta image upload fallback warning");
   assertSourceExcludes(source, "/api/crm/ad-creative-upload", "file upload endpoint in UI");
   assertSourceExcludes(source, "new FormData(", "multipart upload from UI");
   assertSourceExcludes(source, ".upload(storagePath, file", "anonymous Supabase upload call");
@@ -80,6 +84,9 @@ async function checkMetaMarketingSource() {
   if (!source.includes("buildVideoCreativePayload")) {
     throw new Error("Meta marketing source is missing explicit video creative builder");
   }
+  if (!source.includes("buildImagePictureCreativePayload")) {
+    throw new Error("Meta marketing source is missing picture URL fallback creative builder");
+  }
   if (!source.includes("link_data:")) {
     throw new Error("Meta image creative source is missing object_story_spec.link_data");
   }
@@ -88,6 +95,21 @@ async function checkMetaMarketingSource() {
   }
   if (!source.includes("Meta image_hash не получен")) {
     throw new Error("Meta image creative source must fail clearly when image_hash is missing");
+  }
+  if (!source.includes("shouldFallbackImageUploadToPictureUrl")) {
+    throw new Error("Meta marketing source is missing image upload capability fallback guard");
+  }
+  if (!source.includes('details.code === "3"')) {
+    throw new Error("Meta image upload fallback must handle Meta code 3");
+  }
+  if (!source.includes("does not have the capability")) {
+    throw new Error("Meta image upload fallback must handle capability errors");
+  }
+  if (!source.includes("picture: pictureUrl")) {
+    throw new Error("Meta image fallback creative must use link_data.picture");
+  }
+  if (!source.includes("IMAGE_UPLOAD_CAPABILITY_FALLBACK_WARNING")) {
+    throw new Error("Meta image upload fallback warning is missing");
   }
   if (source.includes('input.creativeType === "video" || input.videoId')) {
     throw new Error("Meta creative routing must not switch image assets into video path only because videoId exists");
@@ -711,6 +733,9 @@ async function main() {
   if (creativePayload.objectStorySpecType !== "link_data") {
     throw new Error('/api/crm/meta-launch dry-run image creative must use objectStorySpecType "link_data"');
   }
+  if (creativePayload.imageUploadMode !== "adimages") {
+    throw new Error('/api/crm/meta-launch dry-run image creative must default imageUploadMode to "adimages"');
+  }
   if (creativePayload.usesVideoData !== false) {
     throw new Error("/api/crm/meta-launch dry-run image creative must not use video_data");
   }
@@ -719,6 +744,12 @@ async function main() {
   }
   if (creativePayload.imageHash !== true) {
     throw new Error("/api/crm/meta-launch dry-run image creative must show imageHash expected");
+  }
+  if (creativePayload.pictureUrl !== false) {
+    throw new Error("/api/crm/meta-launch dry-run image creative must not use pictureUrl before fallback");
+  }
+  if (creativePayload.imageUploadCapabilityFallback !== false) {
+    throw new Error("/api/crm/meta-launch dry-run image creative must expose imageUploadCapabilityFallback false");
   }
   if (campaignPayload.status !== "PAUSED" || launchData.metaStatus !== "PAUSED") {
     throw new Error("/api/crm/meta-launch dry-run must use PAUSED status");

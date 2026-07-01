@@ -14,6 +14,7 @@ type MetaFetch = (
 ) => Promise<MetaFetchResponse>;
 
 type MetaJson = Record<string, unknown>;
+type MetaImageUploadMode = "adimages" | "picture_url";
 
 export type MetaApiErrorDetails = {
   step?: string;
@@ -89,6 +90,9 @@ export type MetaLaunchResult = {
   creativeUsesLinkData?: boolean;
   creativeUsesVideoData?: boolean;
   imageHashReceived?: boolean;
+  imageUploadMode?: MetaImageUploadMode;
+  imageUploadCapabilityFallback?: boolean;
+  pictureUrlUsed?: boolean;
 };
 
 type MetaAdSetPayloadInput = MetaLaunchInput & {
@@ -99,8 +103,22 @@ type MetaAdSetPayloadInput = MetaLaunchInput & {
   dailyBudget?: unknown;
 };
 
+type MetaCreativeCreateResult = {
+  data: MetaJson;
+  objectStorySpecType: "link_data" | "video_data";
+  usesLinkData: boolean;
+  usesVideoData: boolean;
+  imageHashReceived: boolean;
+  imageUploadMode?: MetaImageUploadMode;
+  imageUploadCapabilityFallback?: boolean;
+  pictureUrlUsed?: boolean;
+  warning?: string;
+};
+
 const INSTAGRAM_ACTOR_FALLBACK_WARNING =
   "Instagram actor ID отклонён Meta. Кампания создана через Facebook Page. Для запуска в Instagram нужно переподключить Instagram account.";
+const IMAGE_UPLOAD_CAPABILITY_FALLBACK_WARNING =
+  "Meta не разрешила /adimages. Креатив создан через public picture URL.";
 
 function readEnv(key: string): string {
   return process.env[key]?.trim() || "";
@@ -176,6 +194,31 @@ function shouldRetryWithoutInstagramActor(error: unknown): boolean {
     .toLowerCase();
 
   return text.includes("creative") && text.includes("instagram_actor_id") && (text.includes("valid") || text.includes("invalid"));
+}
+
+function shouldFallbackImageUploadToPictureUrl(error: unknown): boolean {
+  const details = error instanceof MetaApiError ? error.details : undefined;
+  const text = [
+    details?.step,
+    details?.message,
+    details?.errorUserMsg,
+    error instanceof Error ? error.message : "",
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+
+  return (
+    details?.step === "image_upload" &&
+    (details.code === "3" ||
+      text.includes("application does not have the capability to make this api call") ||
+      text.includes("does not have the capability"))
+  );
+}
+
+function addWarning(warnings: string[], warning?: string) {
+  const text = warning?.trim();
+  if (text && !warnings.includes(text)) warnings.push(text);
 }
 
 async function parseMetaResponse(response: MetaFetchResponse): Promise<MetaJson> {
@@ -419,6 +462,39 @@ export function buildImageLinkCreativePayload(input: MetaLaunchInput & { pageId:
   };
 }
 
+export function buildImagePictureCreativePayload(input: MetaLaunchInput & { pageId: string; pictureUrl: string; instagramActorId?: string }): MetaJson {
+  const pictureUrl = input.pictureUrl.trim();
+  if (!pictureUrl) {
+    throw new MetaApiError({
+      step: "creative",
+      message: "Meta picture URL не получен. Проверьте публичную ссылку Supabase.",
+    });
+  }
+
+  const objectStorySpec: MetaJson = {
+    page_id: input.pageId,
+    ...(input.instagramActorId ? { instagram_actor_id: input.instagramActorId } : {}),
+    link_data: {
+      message: input.primaryText,
+      link: input.landingUrl,
+      name: input.headline,
+      description: input.description,
+      picture: pictureUrl,
+      call_to_action: {
+        type: input.cta || "LEARN_MORE",
+        value: {
+          link: input.landingUrl,
+        },
+      },
+    },
+  };
+
+  return {
+    name: `${input.campaignName} - Creative`,
+    object_story_spec: objectStorySpec,
+  };
+}
+
 export function buildVideoCreativePayload(input: MetaLaunchInput & { pageId: string; videoId: string; instagramActorId?: string }): MetaJson {
   const objectStorySpec: MetaJson = {
     page_id: input.pageId,
@@ -444,7 +520,7 @@ export function buildVideoCreativePayload(input: MetaLaunchInput & { pageId: str
   };
 }
 
-export async function createImageCreative(input: MetaLaunchInput): Promise<MetaJson> {
+export async function createImageCreative(input: MetaLaunchInput): Promise<MetaCreativeCreateResult> {
   const { adAccountId, pageId, instagramActorId: configuredInstagramActorId } = assertMetaConfigured();
   const instagramActorId = resolveInstagramActorId(input, configuredInstagramActorId);
 
@@ -455,42 +531,88 @@ export async function createImageCreative(input: MetaLaunchInput): Promise<MetaJ
     });
   }
 
-  const image = await uploadMetaImageFromUrl({
-    imageUrl: input.imageUrl,
-    name: `${input.campaignName} - Image`,
-  });
-  const imageHash = assertMetaImageHash(parseMetaImageHash(image), {
-    responseKeys: Object.keys(image),
-    imageKeys:
-      image.images && typeof image.images === "object" && !Array.isArray(image.images)
-        ? Object.keys(image.images as Record<string, unknown>)
-        : [],
-  });
+  try {
+    const image = await uploadMetaImageFromUrl({
+      imageUrl: input.imageUrl,
+      name: `${input.campaignName} - Image`,
+    });
+    const imageHash = assertMetaImageHash(parseMetaImageHash(image), {
+      responseKeys: Object.keys(image),
+      imageKeys:
+        image.images && typeof image.images === "object" && !Array.isArray(image.images)
+          ? Object.keys(image.images as Record<string, unknown>)
+          : [],
+    });
 
-  return metaRequest(`/${adAccountId}/adcreatives`, "POST", {
-    ...buildImageLinkCreativePayload({
+    const data = await metaRequest(`/${adAccountId}/adcreatives`, "POST", {
+      ...buildImageLinkCreativePayload({
+        ...input,
+        pageId,
+        imageHash,
+        instagramActorId,
+      }),
+    }, "creative");
+
+    return {
+      data,
+      objectStorySpecType: "link_data",
+      usesLinkData: true,
+      usesVideoData: false,
+      imageHashReceived: true,
+      imageUploadMode: "adimages",
+      imageUploadCapabilityFallback: false,
+      pictureUrlUsed: false,
+    };
+  } catch (error) {
+    if (!shouldFallbackImageUploadToPictureUrl(error)) {
+      throw error;
+    }
+  }
+
+  const data = await metaRequest(`/${adAccountId}/adcreatives`, "POST", {
+    ...buildImagePictureCreativePayload({
       ...input,
       pageId,
-      imageHash,
+      pictureUrl: input.imageUrl,
       instagramActorId,
     }),
   }, "creative");
+
+  return {
+    data,
+    objectStorySpecType: "link_data",
+    usesLinkData: true,
+    usesVideoData: false,
+    imageHashReceived: false,
+    imageUploadMode: "picture_url",
+    imageUploadCapabilityFallback: true,
+    pictureUrlUsed: true,
+    warning: IMAGE_UPLOAD_CAPABILITY_FALLBACK_WARNING,
+  };
 }
 
-export async function createVideoCreative(input: MetaLaunchInput & { videoId: string }): Promise<MetaJson> {
+export async function createVideoCreative(input: MetaLaunchInput & { videoId: string }): Promise<MetaCreativeCreateResult> {
   const { adAccountId, pageId, instagramActorId: configuredInstagramActorId } = assertMetaConfigured();
   const instagramActorId = resolveInstagramActorId(input, configuredInstagramActorId);
 
-  return metaRequest(`/${adAccountId}/adcreatives`, "POST", {
+  const data = await metaRequest(`/${adAccountId}/adcreatives`, "POST", {
     ...buildVideoCreativePayload({
       ...input,
       pageId,
       instagramActorId,
     }),
   }, "creative");
+
+  return {
+    data,
+    objectStorySpecType: "video_data",
+    usesLinkData: false,
+    usesVideoData: true,
+    imageHashReceived: false,
+  };
 }
 
-export async function createMetaCreative(input: MetaLaunchInput): Promise<MetaJson> {
+export async function createMetaCreative(input: MetaLaunchInput): Promise<MetaCreativeCreateResult> {
   if (input.creativeType === "video") {
     if (!input.videoId) {
       throw new Error("Видео-реклама через Meta API требует video_id. Сначала протестируйте запуск фото.");
@@ -526,17 +648,42 @@ export async function launchMetaCampaign(input: MetaLaunchInput): Promise<MetaLa
   if (!metaAdSetId) throw new Error("Meta ad set was created without id");
 
   let creative: MetaJson;
-  let warning = "";
+  const warnings: string[] = [];
   let instagramActorFallback = false;
   let creativeUsesInstagramActor = Boolean(resolveInstagramActorId(preparedInput, getMetaConfig().instagramActorId));
+  let creativeObjectStorySpecType: "link_data" | "video_data" = "link_data";
+  let creativeUsesLinkData = true;
+  let creativeUsesVideoData = false;
+  let imageHashReceived = false;
+  let imageUploadMode: MetaImageUploadMode = "adimages";
+  let imageUploadCapabilityFallback = false;
+  let pictureUrlUsed = false;
   try {
-    creative = await createMetaCreative(preparedInput);
+    const creativeResult = await createMetaCreative(preparedInput);
+    creative = creativeResult.data;
+    creativeObjectStorySpecType = creativeResult.objectStorySpecType;
+    creativeUsesLinkData = creativeResult.usesLinkData;
+    creativeUsesVideoData = creativeResult.usesVideoData;
+    imageHashReceived = creativeResult.imageHashReceived;
+    imageUploadMode = creativeResult.imageUploadMode || imageUploadMode;
+    imageUploadCapabilityFallback = Boolean(creativeResult.imageUploadCapabilityFallback);
+    pictureUrlUsed = Boolean(creativeResult.pictureUrlUsed);
+    addWarning(warnings, creativeResult.warning);
   } catch (error) {
     if (preparedInput.status === "PAUSED" && shouldRetryWithoutInstagramActor(error)) {
       instagramActorFallback = true;
       creativeUsesInstagramActor = false;
-      warning = INSTAGRAM_ACTOR_FALLBACK_WARNING;
-      creative = await createMetaCreative({ ...preparedInput, omitInstagramActor: true });
+      addWarning(warnings, INSTAGRAM_ACTOR_FALLBACK_WARNING);
+      const creativeResult = await createMetaCreative({ ...preparedInput, omitInstagramActor: true });
+      creative = creativeResult.data;
+      creativeObjectStorySpecType = creativeResult.objectStorySpecType;
+      creativeUsesLinkData = creativeResult.usesLinkData;
+      creativeUsesVideoData = creativeResult.usesVideoData;
+      imageHashReceived = creativeResult.imageHashReceived;
+      imageUploadMode = creativeResult.imageUploadMode || imageUploadMode;
+      imageUploadCapabilityFallback = Boolean(creativeResult.imageUploadCapabilityFallback);
+      pictureUrlUsed = Boolean(creativeResult.pictureUrlUsed);
+      addWarning(warnings, creativeResult.warning);
     } else {
       throw error;
     }
@@ -557,14 +704,17 @@ export async function launchMetaCampaign(input: MetaLaunchInput): Promise<MetaLa
     metaAdSetId,
     metaCreativeId,
     metaAdId,
-    warning,
-    warnings: warning ? [warning] : [],
+    warning: warnings.join(" "),
+    warnings,
     creativeUsesInstagramActor,
     instagramActorFallback,
-    creativeObjectStorySpecType: "link_data",
-    creativeUsesLinkData: true,
-    creativeUsesVideoData: false,
-    imageHashReceived: true,
+    creativeObjectStorySpecType,
+    creativeUsesLinkData,
+    creativeUsesVideoData,
+    imageHashReceived,
+    imageUploadMode,
+    imageUploadCapabilityFallback,
+    pictureUrlUsed,
   };
 }
 
