@@ -16,15 +16,32 @@ type MetaFetch = (
 type MetaJson = Record<string, unknown>;
 type MetaImageUploadMode = "adimages" | "picture_url";
 type MetaGeoMode = "city" | "country";
+type MetaCityKeySource = "static" | "env" | "targeting_search" | "cache" | "fallback";
+type MetaTargetingSource = MetaCityKeySource | "input" | "api";
+
+export type MetaCityTarget = {
+  key: string | null;
+  name?: string;
+  countryCode?: string;
+  region?: string;
+  source: MetaCityKeySource;
+  warning?: string;
+  cityInput?: string;
+  normalizedCity?: string;
+};
 
 export type MetaTargetingResolution = {
+  cityInput?: string;
   city: string;
   cityKey?: string;
+  cityKeySource?: MetaTargetingSource;
+  countryCode?: string;
+  region?: string;
   geoMode: MetaGeoMode;
   radiusKm: number;
   fallbackCountry: boolean;
   warning?: string;
-  source: "input" | "env" | "api" | "fallback";
+  source: MetaTargetingSource;
 };
 
 export type MetaApiErrorDetails = {
@@ -88,6 +105,7 @@ export type MetaLaunchInput = {
   adSetName?: string;
   creativeName?: string;
   adName?: string;
+  metaCityKey?: string;
   astanaCityKey?: string;
   targetingResolution?: MetaTargetingResolution;
   omitInstagramPositions?: boolean;
@@ -144,8 +162,51 @@ const IMAGE_UPLOAD_CAPABILITY_FALLBACK_WARNING =
 const INSTAGRAM_POSITIONS = ["stream", "story", "explore", "reels"];
 const INSTAGRAM_PLACEMENT_FALLBACK_WARNING =
   "Meta rejected detailed Instagram positions. Retried ad set with publisher_platforms: [\"instagram\"].";
-const ASTANA_CITY_FALLBACK_WARNING =
-  "Meta city key for Astana was not found, Kazakhstan country targeting was used.";
+const KZ_CITY_FALLBACK_WARNING =
+  "Meta city key was not found, Kazakhstan country targeting was used.";
+const ASTANA_CITY_FALLBACK_WARNING = KZ_CITY_FALLBACK_WARNING;
+const META_KZ_CITY_KEYS: Record<string, { key: string; name: string; countryCode: string; region?: string }> = {
+  astana: {
+    key: "1301648",
+    name: "Astana",
+    countryCode: "KZ",
+    region: "Akmola Region",
+  },
+};
+const META_KZ_CITY_ALIASES: Record<string, { canonical: string; query: string; displayName: string }> = {
+  astana: { canonical: "astana", query: "Astana", displayName: "Astana" },
+  "nur-sultan": { canonical: "astana", query: "Astana", displayName: "Astana" },
+  nursultan: { canonical: "astana", query: "Astana", displayName: "Astana" },
+  астана: { canonical: "astana", query: "Astana", displayName: "Astana" },
+  "нур-султан": { canonical: "astana", query: "Astana", displayName: "Astana" },
+  алматы: { canonical: "almaty", query: "Almaty", displayName: "Almaty" },
+  almaty: { canonical: "almaty", query: "Almaty", displayName: "Almaty" },
+  шымкент: { canonical: "shymkent", query: "Shymkent", displayName: "Shymkent" },
+  shymkent: { canonical: "shymkent", query: "Shymkent", displayName: "Shymkent" },
+  караганда: { canonical: "karaganda", query: "Karaganda", displayName: "Karaganda" },
+  karaganda: { canonical: "karaganda", query: "Karaganda", displayName: "Karaganda" },
+  актобе: { canonical: "aktobe", query: "Aktobe", displayName: "Aktobe" },
+  aktobe: { canonical: "aktobe", query: "Aktobe", displayName: "Aktobe" },
+  атырау: { canonical: "atyrau", query: "Atyrau", displayName: "Atyrau" },
+  atyrau: { canonical: "atyrau", query: "Atyrau", displayName: "Atyrau" },
+  актау: { canonical: "aktau", query: "Aktau", displayName: "Aktau" },
+  aktau: { canonical: "aktau", query: "Aktau", displayName: "Aktau" },
+  павлодар: { canonical: "pavlodar", query: "Pavlodar", displayName: "Pavlodar" },
+  pavlodar: { canonical: "pavlodar", query: "Pavlodar", displayName: "Pavlodar" },
+  костанай: { canonical: "kostanay", query: "Kostanay", displayName: "Kostanay" },
+  kostanay: { canonical: "kostanay", query: "Kostanay", displayName: "Kostanay" },
+  тараз: { canonical: "taraz", query: "Taraz", displayName: "Taraz" },
+  taraz: { canonical: "taraz", query: "Taraz", displayName: "Taraz" },
+  уральск: { canonical: "oral", query: "Oral", displayName: "Oral" },
+  oral: { canonical: "oral", query: "Oral", displayName: "Oral" },
+  uralsk: { canonical: "oral", query: "Oral", displayName: "Oral" },
+  "усть-каменогорск": { canonical: "oskemen", query: "Oskemen", displayName: "Oskemen" },
+  oskemen: { canonical: "oskemen", query: "Oskemen", displayName: "Oskemen" },
+  "ust-kamenogorsk": { canonical: "oskemen", query: "Oskemen", displayName: "Oskemen" },
+  кызылорда: { canonical: "kyzylorda", query: "Kyzylorda", displayName: "Kyzylorda" },
+  kyzylorda: { canonical: "kyzylorda", query: "Kyzylorda", displayName: "Kyzylorda" },
+};
+const metaCityTargetCache = new Map<string, MetaCityTarget>();
 
 function readEnv(key: string): string {
   return process.env[key]?.trim() || "";
@@ -302,6 +363,186 @@ function resolveInstagramActorId(input: MetaLaunchInput, fallbackActorId: string
   return (input.instagramActorId || fallbackActorId || "").trim();
 }
 
+function normalizeCityToken(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[’'`]/g, "")
+    .replace(/[.,]/g, " ")
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+}
+
+function normalizeCityNameForMatch(value: string): string {
+  return normalizeCityToken(value).replace(/-/g, "");
+}
+
+function resolveCityAlias(city: string): { canonical: string; query: string; displayName: string } {
+  const trimmed = city.trim();
+  const normalized = normalizeCityToken(trimmed);
+  const compact = normalized.replace(/-/g, "");
+  const alias = META_KZ_CITY_ALIASES[normalized] || META_KZ_CITY_ALIASES[compact];
+
+  if (alias) return alias;
+
+  return {
+    canonical: normalized || "kazakhstan",
+    query: trimmed || "Kazakhstan",
+    displayName: trimmed || "Kazakhstan",
+  };
+}
+
+function cacheMetaCityTarget(cacheKey: string, target: MetaCityTarget): MetaCityTarget {
+  if (target.key) {
+    metaCityTargetCache.set(cacheKey, { ...target, source: "cache" });
+  }
+  return target;
+}
+
+function scoreMetaCitySearchResult(record: MetaJson, alias: { canonical: string; query: string; displayName: string }): number {
+  const name = typeof record.name === "string" ? record.name : "";
+  const region = typeof record.region === "string" ? record.region : "";
+  const normalizedName = normalizeCityNameForMatch(name);
+  const normalizedQuery = normalizeCityNameForMatch(alias.query);
+  const normalizedDisplay = normalizeCityNameForMatch(alias.displayName);
+  const normalizedCanonical = normalizeCityNameForMatch(alias.canonical);
+  let score = 0;
+
+  if (normalizedName === normalizedQuery || normalizedName === normalizedDisplay || normalizedName === normalizedCanonical) score += 100;
+  if (normalizedName.includes(normalizedQuery)) score += 80;
+  if (normalizedName.includes(normalizedCanonical)) score += 70;
+  if (normalizedName.includes(normalizedDisplay)) score += 60;
+  if (normalizeCityNameForMatch(region).includes(normalizedCanonical)) score += 10;
+  if (record.supports_city === true) score += 5;
+
+  return score;
+}
+
+function readBestMetaCityFromSearch(data: MetaJson, alias: { canonical: string; query: string; displayName: string }): MetaCityTarget | null {
+  const items = Array.isArray(data.data) ? data.data : [];
+  let best: { score: number; target: MetaCityTarget } | null = null;
+
+  for (const item of items) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const record = item as MetaJson;
+    const key = typeof record.key === "string" ? record.key.trim() : "";
+    const name = typeof record.name === "string" ? record.name.trim() : "";
+    const region = typeof record.region === "string" ? record.region.trim() : "";
+    const countryCode = typeof record.country_code === "string" ? record.country_code.toUpperCase() : "";
+    const type = typeof record.type === "string" ? record.type.toLowerCase() : "";
+    const supportsCity = Object.prototype.hasOwnProperty.call(record, "supports_city") ? record.supports_city === true : true;
+
+    if (!key || type !== "city" || countryCode !== "KZ" || !supportsCity) continue;
+
+    const score = scoreMetaCitySearchResult(record, alias);
+    if (score <= 0 && best) continue;
+
+    const target: MetaCityTarget = {
+      key,
+      name: name || alias.displayName,
+      countryCode,
+      region,
+      source: "targeting_search",
+      normalizedCity: alias.canonical,
+    };
+
+    if (!best || score > best.score) {
+      best = { score, target };
+    }
+  }
+
+  return best?.target || null;
+}
+
+export async function resolveMetaCityTarget(city: string, explicitCityKey = ""): Promise<MetaCityTarget> {
+  const cityInput = city.trim() || "Astana";
+  const alias = resolveCityAlias(cityInput);
+  const explicitKey = explicitCityKey.trim();
+  const legacyAstanaEnvKey = alias.canonical === "astana" ? readEnv("META_ASTANA_CITY_KEY") : "";
+
+  const staticTarget = META_KZ_CITY_KEYS[alias.canonical];
+  if (staticTarget) {
+    return cacheMetaCityTarget(alias.canonical, {
+      key: staticTarget.key,
+      name: staticTarget.name,
+      countryCode: staticTarget.countryCode,
+      region: staticTarget.region,
+      source: "static",
+      cityInput,
+      normalizedCity: alias.canonical,
+    });
+  }
+
+  if (legacyAstanaEnvKey) {
+    return cacheMetaCityTarget(alias.canonical, {
+      key: legacyAstanaEnvKey,
+      name: alias.displayName,
+      countryCode: "KZ",
+      source: "env",
+      cityInput,
+      normalizedCity: alias.canonical,
+    });
+  }
+
+  if (explicitKey) {
+    return cacheMetaCityTarget(alias.canonical, {
+      key: explicitKey,
+      name: alias.displayName,
+      countryCode: "KZ",
+      source: "env",
+      cityInput,
+      normalizedCity: alias.canonical,
+    });
+  }
+
+  const cached = metaCityTargetCache.get(alias.canonical);
+  if (cached?.key) {
+    return {
+      ...cached,
+      source: "cache",
+      cityInput,
+      normalizedCity: alias.canonical,
+    };
+  }
+
+  if (getMetaConfig().configured) {
+    try {
+      const search = await metaRequest(
+        "/search",
+        "GET",
+        {
+          type: "adgeolocation",
+          location_types: ["city"],
+          q: alias.query,
+          country_code: "KZ",
+        },
+        "targeting_search",
+      );
+      const found = readBestMetaCityFromSearch(search, alias);
+      if (found?.key) {
+        return cacheMetaCityTarget(alias.canonical, {
+          ...found,
+          cityInput,
+          normalizedCity: alias.canonical,
+        });
+      }
+    } catch {
+      // Fall through to a controlled country fallback with an explicit warning.
+    }
+  }
+
+  return {
+    key: null,
+    name: alias.displayName,
+    countryCode: "KZ",
+    source: "fallback",
+    warning: `${KZ_CITY_FALLBACK_WARNING} City: ${cityInput}.`,
+    cityInput,
+    normalizedCity: alias.canonical,
+  };
+}
+
 function isAstanaCity(city: string): boolean {
   const normalized = city.trim().toLowerCase();
   return (
@@ -330,17 +571,21 @@ function readMetaCityKeyFromSearch(data: MetaJson): string {
 }
 
 export function buildGeoLocations(city: string, cityKey?: string): MetaJson {
-  if (isAstanaCity(city) && cityKey?.trim()) {
+  const key = cityKey?.trim();
+  if (key) {
     return {
       cities: [
         {
-          key: cityKey.trim(),
+          key,
           radius: 15,
           distance_unit: "kilometer",
         },
       ],
     };
   }
+
+  const normalizedCity = city.trim();
+  if (!normalizedCity) return { countries: ["KZ"] };
 
   return { countries: ["KZ"] };
 }
@@ -349,19 +594,26 @@ export function buildMetaTargetingDebug(input: {
   resolution?: MetaTargetingResolution;
   omitInstagramPositions?: boolean;
 }): MetaJson {
+  const cityInput = input.resolution?.cityInput || input.resolution?.city || "Kazakhstan";
   const resolution = input.resolution || {
+    cityInput,
     city: "Kazakhstan",
     geoMode: "country" as const,
     radiusKm: 0,
     fallbackCountry: true,
+    cityKeySource: "fallback" as const,
     source: "fallback" as const,
   };
 
   return {
+    cityInput: resolution.cityInput,
+    cityKey: resolution.cityKey || "",
+    cityKeySource: resolution.cityKeySource,
     geoMode: resolution.geoMode,
     city: resolution.geoMode === "city" ? resolution.city : "",
     radiusKm: resolution.geoMode === "city" ? resolution.radiusKm : 0,
     fallbackCountry: resolution.fallbackCountry,
+    cityWarning: resolution.warning || "",
     warning: resolution.warning || "",
     publisher_platforms: ["instagram"],
     instagram_positions: input.omitInstagramPositions ? [] : INSTAGRAM_POSITIONS,
@@ -370,6 +622,39 @@ export function buildMetaTargetingDebug(input: {
 }
 
 export async function resolveMetaTargetingForCity(city: string, explicitCityKey = ""): Promise<MetaTargetingResolution> {
+  const target = await resolveMetaCityTarget(city, explicitCityKey);
+  const cityInput = target.cityInput || city.trim() || "Astana";
+  const cityName = target.name || cityInput;
+
+  if (target.key) {
+    return {
+      cityInput,
+      city: cityName,
+      cityKey: target.key,
+      cityKeySource: target.source,
+      countryCode: target.countryCode,
+      region: target.region,
+      geoMode: "city",
+      radiusKm: 15,
+      fallbackCountry: false,
+      warning: target.warning,
+      source: target.source,
+    };
+  }
+
+  return {
+    cityInput,
+    city: cityName,
+    cityKeySource: target.source,
+    countryCode: target.countryCode,
+    region: target.region,
+    geoMode: "country",
+    radiusKm: 0,
+    fallbackCountry: true,
+    warning: target.warning || KZ_CITY_FALLBACK_WARNING,
+    source: target.source,
+  };
+
   const normalizedCity = city.trim() || "Astana";
   const explicitKey = explicitCityKey.trim();
   const envKey = readEnv("META_ASTANA_CITY_KEY");
@@ -542,7 +827,7 @@ function buildMetaTargeting(input: MetaAdSetPayloadInput): MetaJson {
       : {};
 
   return {
-    geo_locations: buildGeoLocations(input.city || "", input.targetingResolution?.cityKey || input.astanaCityKey),
+    geo_locations: buildGeoLocations(input.city || "", input.targetingResolution?.cityKey || input.metaCityKey || input.astanaCityKey),
     age_min: Number.isFinite(ageMin) && ageMin > 0 ? ageMin : 25,
     age_max: Number.isFinite(ageMax) && ageMax > 0 ? ageMax : 55,
     targeting_automation: {

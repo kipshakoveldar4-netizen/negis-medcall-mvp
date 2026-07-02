@@ -35,7 +35,7 @@ Set these variables in Vercel:
 - `META_AD_ACCOUNT_ID`
 - `META_PAGE_ID`
 - `META_INSTAGRAM_ACTOR_ID`
-- `META_ASTANA_CITY_KEY` optional. If empty, the backend tries Meta Targeting Search for Astana/Nur-Sultan and falls back to Kazakhstan with a warning.
+- `META_ASTANA_CITY_KEY` optional legacy override for Astana. New city targeting does not require one env per city: the backend uses a Kazakhstan city resolver with a static map, in-memory cache, then Meta Targeting Search.
 
 The API may return non-secret IDs for UI previews, but returns only booleans for token and secret presence.
 
@@ -45,12 +45,23 @@ Every Meta launch gets one Kazakhstan timestamp in `YYYY-MM-DD_HH-mm` format. Th
 
 For the MVP, ad set targeting is forced server-side:
 
-- geo: Astana city with 15 km radius when `META_ASTANA_CITY_KEY` or Targeting Search provides a valid key;
+- geo: requested Kazakhstan city with 15 km radius when the resolver has a Meta city `key`;
+- static map currently includes Astana / Nur-Sultan (`1301648`);
+- aliases are normalized for Astana, Almaty, Shymkent, Karaganda, Aktobe, Atyrau, Aktau, Pavlodar, Kostanay, Taraz, Oral/Uralsk, Oskemen/Ust-Kamenogorsk, and Kyzylorda;
+- Targeting Search fallback calls `/search?type=adgeolocation&location_types=["city"]&q=<city>&country_code=KZ`;
+- successful Targeting Search city keys are cached in memory for the current server runtime;
 - fallback: Kazakhstan only, with an explicit warning if the city key is unavailable;
 - placements: Instagram only via `publisher_platforms: ["instagram"]`;
 - Instagram positions: stream, story, explore, reels.
 
 WhatsApp can still be the destination link, but WhatsApp is not used as a placement.
+
+Admin utility:
+
+- open `/admin -> Meta/Facebook Ads`;
+- use `Проверить Meta city key`;
+- the UI calls `/api/crm/meta-city-key?city=Алматы`;
+- the response shows only non-secret fields: `key`, `name`, `country_code`, `source`, `geoMode`, and warning/fallback status.
 
 ## Default PAUSED Mode
 

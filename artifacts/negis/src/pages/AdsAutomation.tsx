@@ -1446,6 +1446,10 @@ export default function AdsAutomation() {
     const publisherPlatforms = Array.isArray(adSetTargeting.publisher_platforms) ? adSetTargeting.publisher_platforms.map(String) : [];
     const instagramPositions = Array.isArray(adSetTargeting.instagram_positions) ? adSetTargeting.instagram_positions.map(String) : [];
     const targetingGeoMode = firstString(adSetTargetingDebug.geoMode, adSetTargetingDebug.geo_mode, Array.isArray(asRecord(adSetTargeting.geo_locations).cities) ? "city" : "country");
+    const targetingCityInput = firstString(adSetTargetingDebug.cityInput, brief.city);
+    const targetingCityKey = firstString(adSetTargetingDebug.cityKey);
+    const targetingCityKeySource = firstString(adSetTargetingDebug.cityKeySource, adSetTargetingDebug.source, targetingGeoMode === "city" ? "static" : "fallback");
+    const targetingCityWarning = firstString(adSetTargetingDebug.cityWarning, adSetTargetingDebug.warning);
     const targetingCity = firstString(adSetTargetingDebug.city, targetingGeoMode === "city" ? brief.city : "");
     const targetingRadiusKm = firstString(adSetTargetingDebug.radiusKm, adSetTargetingDebug.radius_km, targetingGeoMode === "city" ? "15" : "0");
     const targetingFallbackCountry = Object.prototype.hasOwnProperty.call(adSetTargetingDebug, "fallbackCountry")
@@ -1538,6 +1542,12 @@ export default function AdsAutomation() {
           </div>
         </div>
 
+        {targetingCityWarning ? (
+          <div className="mt-5 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm font-bold text-amber-900">
+            Предупреждение по гео: {targetingCityWarning}
+          </div>
+        ) : null}
+
         <details className="mt-5 rounded-2xl border border-[#D8E4EC] bg-white/65 p-4">
           <summary className="cursor-pointer text-sm font-black text-[#0F172A]">Подробности Meta payload</summary>
           <div className="mt-4 grid gap-3 text-sm">
@@ -1560,10 +1570,14 @@ export default function AdsAutomation() {
             <p><b>adset.optimization_goal:</b> {adSetOptimizationGoal}</p>
             <p><b>adset.bid_strategy:</b> {adSetBidStrategy}</p>
             <p><b>adset.targeting.targeting_automation.advantage_audience:</b> {advantageAudience}</p>
+            <p><b>adset.targeting.cityInput:</b> {targetingCityInput || "-"}</p>
+            <p><b>adset.targeting.cityKey:</b> {targetingCityKey || "-"}</p>
+            <p><b>adset.targeting.cityKeySource:</b> {targetingCityKeySource || "-"}</p>
             <p><b>adset.targeting.geoMode:</b> {targetingGeoMode}</p>
             <p><b>adset.targeting.city:</b> {targetingCity || "-"}</p>
             <p><b>adset.targeting.radiusKm:</b> {targetingRadiusKm}</p>
             <p><b>adset.targeting.fallbackCountry:</b> {targetingFallbackCountry}</p>
+            <p><b>adset.targeting.cityWarning:</b> {targetingCityWarning || "-"}</p>
             <p><b>adset.targeting.publisher_platforms:</b> {JSON.stringify(publisherPlatforms)}</p>
             <p><b>adset.targeting.instagram_positions:</b> {JSON.stringify(instagramPositions)}</p>
             <p><b>placementsMode:</b> {placementsMode}</p>

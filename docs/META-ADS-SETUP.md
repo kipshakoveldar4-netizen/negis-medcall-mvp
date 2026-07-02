@@ -12,7 +12,7 @@ Negis MVP не запускает рекламу автоматически. Р�
 - `META_AD_ACCOUNT_ID`
 - `META_PAGE_ID`
 - `META_INSTAGRAM_ACTOR_ID`
-- `META_ASTANA_CITY_KEY` optional city geo key for Astana. If it is empty, Negis tries Meta Targeting Search with the server token.
+- `META_ASTANA_CITY_KEY` optional legacy override for Astana. Do not create one env per city. Negis resolves Kazakhstan cities through a static map, in-memory cache, and Meta Targeting Search.
 
 Не вводите access token во frontend. Token должен жить только в Vercel env.
 
@@ -64,4 +64,16 @@ Detailed guide: `docs/META-LIVE-LAUNCH.md`.
 
 ## MVP targeting behavior
 
-`/ads-automation` creates PAUSED launches with unique timestamped names, Astana city targeting when a valid city key is available, and Instagram-only placements. Existing disabled test campaigns are not deleted automatically; remove old duplicates manually in Ads Manager if needed.
+`/ads-automation` creates PAUSED launches with unique timestamped names, Kazakhstan city targeting when a valid Meta city key is available, and Instagram-only placements. Existing disabled test campaigns are not deleted automatically; remove old duplicates manually in Ads Manager if needed.
+
+City targeting uses:
+
+- static map first: `astana -> 1301648`;
+- legacy env override: `META_ASTANA_CITY_KEY`;
+- in-memory cache for keys found by API;
+- Meta Targeting Search fallback: `/search?type=adgeolocation&location_types=["city"]&q=<city>&country_code=KZ`;
+- country fallback: `countries: ["KZ"]` with a warning when no city key is found.
+
+Supported aliases include Astana / Nur-Sultan, Almaty, Shymkent, Karaganda, Aktobe, Atyrau, Aktau, Pavlodar, Kostanay, Taraz, Oral / Uralsk, Oskemen / Ust-Kamenogorsk, and Kyzylorda.
+
+In `/admin -> Meta/Facebook Ads`, use `Проверить Meta city key` to test a city before launch.

@@ -13,6 +13,7 @@ import {
   getMetaCampaignStatus,
   getMetaConfig,
   launchMetaCampaign,
+  resolveMetaCityTarget,
   resolveMetaTargetingForCity,
   uploadMetaVideo,
 } from "../meta/marketing";
@@ -2694,6 +2695,16 @@ function buildMetaLaunchBody(body: JsonRecord) {
   const creativeUrl = firstString(body.creativeUrl, body.creative_url);
   const imageUrl = creativeType === "image" ? firstString(body.imageUrl, body.image_url, creativeUrl) : firstString(body.imageUrl, body.image_url);
   const videoUrl = creativeType === "video" ? firstString(body.videoUrl, body.video_url, creativeUrl) : firstString(body.videoUrl, body.video_url);
+  const metaCityKey = firstString(
+    body.metaCityKey,
+    body.meta_city_key,
+    body.cityKey,
+    body.city_key,
+    body.astanaCityKey,
+    body.astana_city_key,
+    body.metaAstanaCityKey,
+    body.meta_astana_city_key,
+  );
 
   return {
     campaignName,
@@ -2727,7 +2738,8 @@ function buildMetaLaunchBody(body: JsonRecord) {
     endDate: firstString(body.endDate, body.end_time),
     pageId: config.pageId,
     instagramActorId: config.instagramActorId,
-    astanaCityKey: firstString(body.astanaCityKey, body.astana_city_key, body.metaAstanaCityKey, body.meta_astana_city_key),
+    metaCityKey,
+    astanaCityKey: metaCityKey,
     adAccountId: config.adAccountId,
   };
 }
@@ -2782,6 +2794,7 @@ function buildMetaPayloadPreview(
     adSetName: launch.adSetName,
     creativeName: launch.creativeName,
     adName: launch.adName,
+    metaCityKey: launch.metaCityKey,
     astanaCityKey: launch.astanaCityKey,
     targetingResolution: launch.targetingResolution,
     omitInstagramPositions: creativeOptions.omitInstagramPositions,
@@ -2813,6 +2826,7 @@ function buildMetaPayloadPreview(
     adSetName: launch.adSetName,
     creativeName: launch.creativeName,
     adName: launch.adName,
+    metaCityKey: launch.metaCityKey,
     astanaCityKey: launch.astanaCityKey,
     targetingResolution: launch.targetingResolution,
     omitInstagramPositions: creativeOptions.omitInstagramPositions,
@@ -2971,6 +2985,11 @@ export async function handleMetaValidate(req: VercelRequest, res: VercelResponse
         pageId: config.pageId,
         instagramActorId: config.instagramActorId,
         astanaCityKeyConfigured: Boolean(readEnvValue("META_ASTANA_CITY_KEY")),
+        cityResolver: {
+          staticCities: ["astana"],
+          cache: "memory",
+          targetingSearch: Boolean(config.accessToken),
+        },
         instagramActor: {
           configured: Boolean(config.instagramActorId),
           valid: "not_checked",
@@ -2990,6 +3009,11 @@ export async function handleMetaValidate(req: VercelRequest, res: VercelResponse
         pageId: config.pageId,
         instagramActorId: config.instagramActorId,
         astanaCityKeyConfigured: Boolean(readEnvValue("META_ASTANA_CITY_KEY")),
+        cityResolver: {
+          staticCities: ["astana"],
+          cache: "memory",
+          targetingSearch: Boolean(config.accessToken),
+        },
         instagramActor: {
           configured: Boolean(config.instagramActorId),
           valid: false,
@@ -3002,7 +3026,7 @@ export async function handleMetaValidate(req: VercelRequest, res: VercelResponse
 
   try {
     const account = await checkMetaAdAccount();
-    const astanaTargeting = await resolveMetaTargetingForCity("Astana");
+    const defaultCityTargeting = await resolveMetaTargetingForCity("Astana");
     let instagramActor: JsonRecord = {
       configured: Boolean(config.instagramActorId),
       valid: !config.instagramActorId,
@@ -3040,7 +3064,13 @@ export async function handleMetaValidate(req: VercelRequest, res: VercelResponse
         pageId: config.pageId,
         instagramActorId: config.instagramActorId,
         astanaCityKeyConfigured: Boolean(readEnvValue("META_ASTANA_CITY_KEY")),
-        astanaTargeting,
+        astanaTargeting: defaultCityTargeting,
+        defaultCityTargeting,
+        cityResolver: {
+          staticCities: ["astana"],
+          cache: "memory",
+          targetingSearch: true,
+        },
         instagramActor,
         hasAccessToken: true,
       }, instagramWarning || undefined),
@@ -3098,6 +3128,39 @@ export async function handleMetaStatus(req: VercelRequest, res: VercelResponse) 
       status: 502,
     });
   }
+}
+
+export async function handleMetaCityKey(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== "GET" && req.method !== "POST") {
+    return sendJson(res, 405, errorBody("Method not allowed", ["Use GET or POST"]));
+  }
+
+  const body = asRecord(req.body);
+  const city = firstString(body.city, readQueryString(req.query.city), "Astana");
+  if (!city.trim()) {
+    return sendJson(res, 400, errorBody("Validation error", ["city is required"]));
+  }
+
+  const target = await resolveMetaCityTarget(city);
+  const configured = getMetaConfig().configured;
+
+  return sendJson(
+    res,
+    200,
+    success(configured ? "supabase" : "demo", {
+      city,
+      key: target.key,
+      name: target.name || city,
+      country_code: target.countryCode || "KZ",
+      countryCode: target.countryCode || "KZ",
+      region: target.region || "",
+      source: target.source,
+      warning: target.warning || "",
+      geoMode: target.key ? "city" : "country",
+      fallbackCountry: !target.key,
+      targetingSearchAvailable: configured,
+    }, target.warning),
+  );
 }
 
 export async function handleMetaLaunch(req: VercelRequest, res: VercelResponse) {
@@ -3165,7 +3228,7 @@ export async function handleMetaLaunch(req: VercelRequest, res: VercelResponse) 
     });
   }
 
-  const targetingResolution = await resolveMetaTargetingForCity(launch.city, launch.astanaCityKey);
+  const targetingResolution = await resolveMetaTargetingForCity(launch.city, launch.metaCityKey || launch.astanaCityKey);
   const resolvedLaunch = { ...launch, targetingResolution };
 
   const payload: JsonRecord = {
@@ -3190,11 +3253,15 @@ export async function handleMetaLaunch(req: VercelRequest, res: VercelResponse) 
     creativeName: resolvedLaunch.creativeName,
     adName: resolvedLaunch.adName,
     targeting: {
+      cityInput: targetingResolution.cityInput || resolvedLaunch.city,
+      cityKey: targetingResolution.cityKey || "",
+      cityKeySource: targetingResolution.cityKeySource || targetingResolution.source,
       geoMode: targetingResolution.geoMode,
       city: targetingResolution.city,
       radiusKm: targetingResolution.radiusKm,
       fallbackCountry: targetingResolution.fallbackCountry,
       source: targetingResolution.source,
+      cityWarning: targetingResolution.warning || "",
       warning: targetingResolution.warning || "",
       placementsMode: "instagram_only",
       publisher_platforms: ["instagram"],
@@ -3254,6 +3321,7 @@ export async function handleMetaLaunch(req: VercelRequest, res: VercelResponse) 
         adSetName: resolvedLaunch.adSetName,
         creativeName: resolvedLaunch.creativeName,
         adName: resolvedLaunch.adName,
+        metaCityKey: resolvedLaunch.metaCityKey,
         astanaCityKey: resolvedLaunch.astanaCityKey,
         targetingResolution,
       });
@@ -3398,6 +3466,11 @@ export async function handleCrmHealth(req: VercelRequest, res: VercelResponse) {
     pageId: readEnvValue("META_PAGE_ID"),
     instagramActorId: readEnvValue("META_INSTAGRAM_ACTOR_ID"),
     astanaCityKeyConfigured: Boolean(readEnvValue("META_ASTANA_CITY_KEY")),
+    cityResolver: {
+      staticCities: ["astana"],
+      cache: "memory",
+      targetingSearchFallback: Boolean(readEnvValue("META_ACCESS_TOKEN")),
+    },
     hasAccessToken: Boolean(readEnvValue("META_ACCESS_TOKEN")),
     hasAppSecret: Boolean(readEnvValue("META_APP_SECRET")),
   };

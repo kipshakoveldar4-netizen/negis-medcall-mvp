@@ -83,8 +83,28 @@ type SafeMetaSummary = {
   adAccountId: string;
   pageId: string;
   instagramActorId: string;
+  astanaCityKeyConfigured?: boolean;
+  cityResolver?: {
+    staticCities?: string[];
+    cache?: string;
+    targetingSearchFallback?: boolean;
+    targetingSearch?: boolean;
+  };
   hasAccessToken: boolean;
   hasAppSecret: boolean;
+};
+
+type MetaCityKeyResult = {
+  city?: string;
+  key?: string | null;
+  name?: string;
+  country_code?: string;
+  countryCode?: string;
+  region?: string;
+  source?: string;
+  warning?: string;
+  geoMode?: string;
+  fallbackCountry?: boolean;
 };
 
 type StorageHealth = {
@@ -478,6 +498,8 @@ export default function AdminCenter() {
   const [health, setHealth] = useState<CrmHealthData | null>(null);
   const [integrationCards, setIntegrationCards] = useState<IntegrationCard[]>(() => buildIntegrationCards(null));
   const [loading, setLoading] = useState<Record<string, boolean>>({});
+  const [metaCityKeyInput, setMetaCityKeyInput] = useState("Алматы");
+  const [metaCityKeyResult, setMetaCityKeyResult] = useState<MetaCityKeyResult | null>(null);
   const [staffForm, setStaffForm] = useState({
     name: "",
     email: "",
@@ -764,6 +786,30 @@ export default function AdminCenter() {
       toast.success("Meta поля заполнены из безопасных env");
     } finally {
       setBusy("meta-prefill", false);
+    }
+  }
+
+  async function checkMetaCityKey() {
+    const city = metaCityKeyInput.trim();
+    if (!city) {
+      toast.error("Введите город для проверки");
+      return;
+    }
+
+    setBusy("meta-city-key", true);
+    try {
+      const body = await crmRequest<MetaCityKeyResult>(`/api/crm/meta-city-key?city=${encodeURIComponent(city)}`);
+      const result = body.data || null;
+      setMetaCityKeyResult(result);
+      if (result?.key) {
+        toast.success(`Meta city key найден: ${result.key}`);
+      } else {
+        toast.warning(result?.warning || "City key не найден, будет использован Казахстан.");
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Не удалось проверить Meta city key");
+    } finally {
+      setBusy("meta-city-key", false);
     }
   }
 
@@ -1441,6 +1487,34 @@ export default function AdminCenter() {
             <FileCheck2 size={16} />
             Подготовить тестовый draft
           </button>
+
+          <div className="mt-5 rounded-2xl border border-[#E2E8F0] bg-white/70 p-4">
+            <h3 className="font-black text-[#0F172A]">Проверить Meta city key</h3>
+            <p className="mt-1 text-sm text-[#64748B]">Введите город Казахстана. Backend вернет безопасный city key/source без секретов.</p>
+            <div className="mt-3 flex flex-col gap-2 sm:flex-row">
+              <input
+                className="neu-input"
+                value={metaCityKeyInput}
+                placeholder="Алматы"
+                onChange={(event) => setMetaCityKeyInput(event.target.value)}
+              />
+              <button type="button" className="neu-btn-primary justify-center" disabled={loading["meta-city-key"]} onClick={() => void checkMetaCityKey()}>
+                {loading["meta-city-key"] ? <Loader2 className="animate-spin" size={16} /> : <RefreshCw size={16} />}
+                Проверить
+              </button>
+            </div>
+            {metaCityKeyResult ? (
+              <div className="mt-3 rounded-2xl border border-[#E2E8F0] bg-[#F8FAFC] p-3 text-sm font-semibold text-[#334155]">
+                <p>city: {metaCityKeyResult.city || metaCityKeyInput}</p>
+                <p>key: {metaCityKeyResult.key || "-"}</p>
+                <p>name: {metaCityKeyResult.name || "-"}</p>
+                <p>country_code: {metaCityKeyResult.country_code || metaCityKeyResult.countryCode || "KZ"}</p>
+                <p>source: {metaCityKeyResult.source || "-"}</p>
+                <p>geoMode: {metaCityKeyResult.geoMode || (metaCityKeyResult.key ? "city" : "country")}</p>
+                {metaCityKeyResult.warning ? <p className="mt-2 text-amber-700">warning: {metaCityKeyResult.warning}</p> : null}
+              </div>
+            ) : null}
+          </div>
         </section>
       </div>
     );

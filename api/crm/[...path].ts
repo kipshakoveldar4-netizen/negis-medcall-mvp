@@ -6,6 +6,7 @@ import {
   handleAdsAiFill,
   handleCrmHealth,
   handleCrmResource,
+  handleMetaCityKey,
   handleMetaLaunch,
   handleMetaStatus,
   handleMetaValidate,
@@ -129,6 +130,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   if (resource === "meta-validate") {
     return handleMetaValidate(req, res);
+  }
+
+  if (resource === "meta-city-key") {
+    return handleMetaCityKey(req, res);
   }
 
   if (resource === "storage-health") {
