@@ -105,6 +105,7 @@ type ComplianceResult = {
 
 type LaunchResult = {
   launchId?: string;
+  launchTimestamp?: string;
   metaCampaignId?: string;
   metaAdSetId?: string;
   metaCreativeId?: string;
@@ -175,8 +176,12 @@ type ConfirmationState = {
 type LaunchHistoryItem = {
   id?: string;
   campaignName?: string;
+  launchTimestamp?: string;
   status?: string;
   metaCampaignId?: string;
+  metaAdSetId?: string;
+  metaCreativeId?: string;
+  metaAdId?: string;
   metaStatus?: string;
   budgetDailyMinor?: number | null;
   currency?: string;
@@ -554,6 +559,7 @@ export default function AdsAutomation() {
   const [notice, setNotice] = useState("");
   const [launchResult, setLaunchResult] = useState<LaunchResult | null>(null);
   const [lastDryRunResult, setLastDryRunResult] = useState<LaunchResult | null>(null);
+  const [launchTimestamp, setLaunchTimestamp] = useState("");
   const [realLaunchStatus, setRealLaunchStatus] = useState<RealLaunchStatus>("idle");
   const [realLaunchMessage, setRealLaunchMessage] = useState("");
   const [historyItems, setHistoryItems] = useState<LaunchHistoryItem[]>([]);
@@ -857,6 +863,7 @@ export default function AdsAutomation() {
       });
       setAiPackage(body.data);
       setCompliance(null);
+      setLaunchTimestamp("");
       goToStep(4);
       toast.success(body.data.generatedBy === "openai" ? "ИИ заполнил рекламу" : "Demo-пакет готов");
       if (body.warning) setNotice(body.warning);
@@ -884,6 +891,7 @@ export default function AdsAutomation() {
       city: brief.city,
       offer: brief.offer,
       campaignName: aiPackage?.campaignName || `${brief.service} - ${brief.city}`,
+      launchTimestamp,
       objective: aiPackage?.objective || "OUTCOME_LEADS",
       statusMode: forcedStatusMode,
       dailyBudget: Number(brief.dailyBudget),
@@ -932,6 +940,7 @@ export default function AdsAutomation() {
       const result = { ...body.data, warning: body.warning || body.data.warning };
       setLaunchResult(result);
       setLastDryRunResult(result);
+      setLaunchTimestamp(firstString(result.launchTimestamp, asRecord(result.metaPayload).launchTimestamp, launchTimestamp));
       setRealLaunchStatus("idle");
       setRealLaunchMessage("");
       goToStep(stayOnLaunchStep ? 6 : 5);
@@ -1010,11 +1019,22 @@ export default function AdsAutomation() {
   function saveLocalLaunch(result: LaunchResult, nextStatusMode: "PAUSED" | "ACTIVE") {
     const key = localHistoryKey(workspaceId);
     const current = readStored<LaunchHistoryItem[]>(key, []);
+    const metaPayload = asRecord(result.metaPayload);
+    const campaignPayload = asRecord(metaPayload.campaign);
+    const adSetPayload = asRecord(metaPayload.adSet);
+    const creativePayload = asRecord(metaPayload.creative);
+    const adPayload = asRecord(metaPayload.ad);
+    const launchPayload = asRecord(result.launch);
+    const resolvedTimestamp = firstString(result.launchTimestamp, metaPayload.launchTimestamp, launchPayload.launchTimestamp);
     const item: LaunchHistoryItem = {
       id: result.launchId || `local-${Date.now()}`,
-      campaignName: aiPackage?.campaignName,
+      campaignName: firstString(campaignPayload.name, launchPayload.campaignName, aiPackage?.campaignName),
+      launchTimestamp: resolvedTimestamp,
       status: nextStatusMode === "ACTIVE" ? "active" : "paused",
       metaCampaignId: result.metaCampaignId,
+      metaAdSetId: result.metaAdSetId,
+      metaCreativeId: result.metaCreativeId,
+      metaAdId: result.metaAdId,
       metaStatus: result.metaStatus || nextStatusMode,
       budgetDailyMinor: Math.round(Number(brief.dailyBudget || 0) * 100),
       currency: "USD",
@@ -1025,6 +1045,12 @@ export default function AdsAutomation() {
         fileName: creative?.fileName,
         city: brief.city,
         leadDestination: brief.leadDestination,
+        launchTimestamp: resolvedTimestamp,
+        campaignName: firstString(campaignPayload.name),
+        adSetName: firstString(adSetPayload.name),
+        creativeName: firstString(creativePayload.name),
+        adName: firstString(adPayload.name),
+        placementsMode: firstString(adSetPayload.placementsMode, asRecord(adSetPayload.targetingDebug).placementsMode),
       },
     };
     window.localStorage.setItem(key, JSON.stringify([item, ...current].slice(0, 30)));
@@ -1063,6 +1089,7 @@ export default function AdsAutomation() {
       setLaunchResult({ ...body.data, warning: body.warning || body.data.warning });
       setCompliance(body.data.compliance || compliance);
       saveLocalLaunch(body.data, nextStatusMode);
+      setLaunchTimestamp("");
       setRealLaunchStatus("created");
       setRealLaunchMessage(nextStatusMode === "ACTIVE" ? "Реклама создана и запущена в Meta." : "Кампания создана в Meta выключенной.");
       goToStep(6);
@@ -1403,6 +1430,7 @@ export default function AdsAutomation() {
     const campaignPayload = asRecord(metaPayload.campaign);
     const adSetPayload = asRecord(metaPayload.adSet);
     const creativePayload = asRecord(metaPayload.creative);
+    const adPayload = asRecord(metaPayload.ad);
     const creativeAssetPayload = asRecord(creativePayload.asset);
     const campaignHasDailyBudget = Object.prototype.hasOwnProperty.call(campaignPayload, "daily_budget");
     const campaignBudgetSharing = Object.prototype.hasOwnProperty.call(campaignPayload, "is_adset_budget_sharing_enabled")
@@ -1414,6 +1442,21 @@ export default function AdsAutomation() {
     const adSetOptimizationGoal = typeof adSetPayload.optimization_goal === "string" ? adSetPayload.optimization_goal : "LINK_CLICKS";
     const adSetBidStrategy = typeof adSetPayload.bid_strategy === "string" ? adSetPayload.bid_strategy : "LOWEST_COST_WITHOUT_CAP";
     const adSetTargeting = asRecord(adSetPayload.targeting);
+    const adSetTargetingDebug = asRecord(adSetPayload.targetingDebug);
+    const publisherPlatforms = Array.isArray(adSetTargeting.publisher_platforms) ? adSetTargeting.publisher_platforms.map(String) : [];
+    const instagramPositions = Array.isArray(adSetTargeting.instagram_positions) ? adSetTargeting.instagram_positions.map(String) : [];
+    const targetingGeoMode = firstString(adSetTargetingDebug.geoMode, adSetTargetingDebug.geo_mode, Array.isArray(asRecord(adSetTargeting.geo_locations).cities) ? "city" : "country");
+    const targetingCity = firstString(adSetTargetingDebug.city, targetingGeoMode === "city" ? brief.city : "");
+    const targetingRadiusKm = firstString(adSetTargetingDebug.radiusKm, adSetTargetingDebug.radius_km, targetingGeoMode === "city" ? "15" : "0");
+    const targetingFallbackCountry = Object.prototype.hasOwnProperty.call(adSetTargetingDebug, "fallbackCountry")
+      ? String(adSetTargetingDebug.fallbackCountry)
+      : String(targetingGeoMode !== "city");
+    const placementsMode = firstString(adSetPayload.placementsMode, adSetTargetingDebug.placementsMode, "instagram_only");
+    const reportLaunchTimestamp = firstString(metaPayload.launchTimestamp, launchResult?.launchTimestamp, launchTimestamp);
+    const reportCampaignName = firstString(campaignPayload.name, aiPackage?.campaignName);
+    const reportAdSetName = firstString(adSetPayload.name);
+    const reportCreativeName = firstString(creativePayload.name);
+    const reportAdName = firstString(adPayload.name);
     const targetingAutomation = asRecord(adSetTargeting.targeting_automation);
     const advantageAudience = Object.prototype.hasOwnProperty.call(targetingAutomation, "advantage_audience")
       ? String(targetingAutomation.advantage_audience)
@@ -1484,10 +1527,13 @@ export default function AdsAutomation() {
           <div className="rounded-2xl border border-blue-200 bg-blue-50 p-4">
             <p className="text-xs font-black uppercase tracking-[0.1em] text-blue-800">Что будет создано в Meta</p>
             <ul className="mt-3 space-y-2 text-sm font-semibold text-blue-900">
-              <li>• Кампания: {aiPackage?.campaignName || "-"}</li>
-              <li>• Группа объявлений: город {brief.city}, бюджет {brief.dailyBudget} USD/день</li>
+              <li>• Кампания: {reportCampaignName || "-"}</li>
+              <li>• Группа объявлений: {reportAdSetName || `Instagram, ${brief.city}, ${brief.dailyBudget} USD/день`}</li>
+              <li>• Площадки: Instagram</li>
+              <li>• Гео: {targetingGeoMode === "city" ? `${targetingCity || brief.city}, радиус ${targetingRadiusKm} км` : "Казахстан"}</li>
               <li>• Креатив: {creative?.fileType === "video" ? "видео" : "фото"}</li>
               <li>• Объявление: {aiPackage?.headline || "-"}</li>
+              <li>• Статус: {statusMode === "ACTIVE" ? "активно" : "выключено"}</li>
             </ul>
           </div>
         </div>
@@ -1498,6 +1544,11 @@ export default function AdsAutomation() {
             <p><b>Ad account:</b> {metaSummary?.adAccountId || "env/backend"}</p>
             <p><b>Page:</b> {metaSummary?.pageId || "env/backend"}</p>
             <p><b>Instagram actor:</b> {metaSummary?.instagramActorId || "env/backend"}</p>
+            <p><b>launchTimestamp:</b> {reportLaunchTimestamp || "-"}</p>
+            <p><b>campaign.name:</b> {reportCampaignName || "-"}</p>
+            <p><b>adset.name:</b> {reportAdSetName || "-"}</p>
+            <p><b>creative.name:</b> {reportCreativeName || "-"}</p>
+            <p><b>ad.name:</b> {reportAdName || "-"}</p>
             <p><b>Objective:</b> {aiPackage?.objective || "OUTCOME_LEADS"}</p>
             <p><b>CTA:</b> {aiPackage?.cta || "LEARN_MORE"}</p>
             <p><b>Status:</b> {statusMode}</p>
@@ -1509,6 +1560,13 @@ export default function AdsAutomation() {
             <p><b>adset.optimization_goal:</b> {adSetOptimizationGoal}</p>
             <p><b>adset.bid_strategy:</b> {adSetBidStrategy}</p>
             <p><b>adset.targeting.targeting_automation.advantage_audience:</b> {advantageAudience}</p>
+            <p><b>adset.targeting.geoMode:</b> {targetingGeoMode}</p>
+            <p><b>adset.targeting.city:</b> {targetingCity || "-"}</p>
+            <p><b>adset.targeting.radiusKm:</b> {targetingRadiusKm}</p>
+            <p><b>adset.targeting.fallbackCountry:</b> {targetingFallbackCountry}</p>
+            <p><b>adset.targeting.publisher_platforms:</b> {JSON.stringify(publisherPlatforms)}</p>
+            <p><b>adset.targeting.instagram_positions:</b> {JSON.stringify(instagramPositions)}</p>
+            <p><b>placementsMode:</b> {placementsMode}</p>
             <p><b>asset.fileType:</b> {assetFileType}</p>
             <p><b>creative.objectStorySpecType:</b> {creativeObjectStorySpecType}</p>
             <p><b>creative.imageUploadMode:</b> {creativeImageUploadMode}</p>
@@ -1656,6 +1714,11 @@ export default function AdsAutomation() {
                   {launchResult.dryRun ? "Кампания в Meta не создавалась." : `Meta Campaign ID: ${launchResult.metaCampaignId || "ожидается"}`}
                 </p>
                 {launchResult.warning ? <p className="mt-2 text-sm font-bold text-amber-800">{launchResult.warning}</p> : null}
+                {!launchResult.dryRun ? (
+                  <p className="mt-2 text-sm font-bold text-amber-800">
+                    В Ads Manager могли остаться предыдущие тестовые выключенные кампании. Их можно удалить вручную.
+                  </p>
+                ) : null}
                 {launchImageUploadCapabilityFallback ? (
                   <p className="mt-2 text-sm font-bold text-amber-800">
                     Meta не разрешила загрузить изображение через /adimages. Система попробовала создать креатив через публичную ссылку Supabase.
@@ -1712,13 +1775,14 @@ export default function AdsAutomation() {
           ) : (
             historyItems.map((item, index) => {
               const payload = asRecord(item.payload);
+              const itemTimestamp = firstString(item.launchTimestamp, payload.launchTimestamp);
               return (
                 <article key={item.id || `${item.campaignName}-${index}`} className="rounded-2xl border border-[#D8E4EC] bg-white/70 p-4">
                   <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                     <div>
                       <p className="font-black text-[#0F172A]">{item.campaignName || "Meta campaign"}</p>
                       <p className="mt-1 text-sm font-semibold text-[#64748B]">
-                        {item.createdAt ? new Date(item.createdAt).toLocaleString("ru-RU") : "Дата не указана"} · {payload.creativeType === "video" ? "видео" : "фото"} · {item.status || "draft"}
+                        {item.createdAt ? new Date(item.createdAt).toLocaleString("ru-RU") : "Дата не указана"} · {itemTimestamp || "timestamp -"} · {payload.creativeType === "video" ? "видео" : "фото"} · {item.status || "draft"}
                       </p>
                     </div>
                     <div className="flex flex-wrap gap-2">
@@ -1728,9 +1792,13 @@ export default function AdsAutomation() {
                   </div>
                   <div className="mt-3 grid gap-2 text-sm font-semibold text-[#475569] md:grid-cols-2">
                     <p>Meta Campaign ID: {item.metaCampaignId || "-"}</p>
+                    <p>Meta Ad Set ID: {item.metaAdSetId || "-"}</p>
+                    <p>Meta Creative ID: {item.metaCreativeId || "-"}</p>
+                    <p>Meta Ad ID: {item.metaAdId || "-"}</p>
                     <p>Запустил: {item.launchedBy || "-"}</p>
                     <p>Город: {typeof payload.city === "string" ? payload.city : "-"}</p>
                     <p>Файл: {typeof payload.fileName === "string" ? payload.fileName : "-"}</p>
+                    <p>Ad set: {typeof payload.adSetName === "string" ? payload.adSetName : "-"}</p>
                   </div>
                   {item.lastError ? <p className="mt-3 text-sm font-bold text-red-600">{item.lastError}</p> : null}
                 </article>

@@ -35,8 +35,22 @@ Set these variables in Vercel:
 - `META_AD_ACCOUNT_ID`
 - `META_PAGE_ID`
 - `META_INSTAGRAM_ACTOR_ID`
+- `META_ASTANA_CITY_KEY` optional. If empty, the backend tries Meta Targeting Search for Astana/Nur-Sultan and falls back to Kazakhstan with a warning.
 
 The API may return non-secret IDs for UI previews, but returns only booleans for token and secret presence.
+
+## Naming, Geo, Placements
+
+Every Meta launch gets one Kazakhstan timestamp in `YYYY-MM-DD_HH-mm` format. The same timestamp is used for campaign, ad set, creative, and ad names so repeated PAUSED tests are easy to identify in Ads Manager.
+
+For the MVP, ad set targeting is forced server-side:
+
+- geo: Astana city with 15 km radius when `META_ASTANA_CITY_KEY` or Targeting Search provides a valid key;
+- fallback: Kazakhstan only, with an explicit warning if the city key is unavailable;
+- placements: Instagram only via `publisher_platforms: ["instagram"]`;
+- Instagram positions: stream, story, explore, reels.
+
+WhatsApp can still be the destination link, but WhatsApp is not used as a placement.
 
 ## Default PAUSED Mode
 

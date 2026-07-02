@@ -15,6 +15,17 @@ type MetaFetch = (
 
 type MetaJson = Record<string, unknown>;
 type MetaImageUploadMode = "adimages" | "picture_url";
+type MetaGeoMode = "city" | "country";
+
+export type MetaTargetingResolution = {
+  city: string;
+  cityKey?: string;
+  geoMode: MetaGeoMode;
+  radiusKm: number;
+  fallbackCountry: boolean;
+  warning?: string;
+  source: "input" | "env" | "api" | "fallback";
+};
 
 export type MetaApiErrorDetails = {
   step?: string;
@@ -71,6 +82,15 @@ export type MetaLaunchInput = {
   targeting?: MetaJson;
   instagramActorId?: string;
   omitInstagramActor?: boolean;
+  city?: string;
+  audienceLabel?: string;
+  launchTimestamp?: string;
+  adSetName?: string;
+  creativeName?: string;
+  adName?: string;
+  astanaCityKey?: string;
+  targetingResolution?: MetaTargetingResolution;
+  omitInstagramPositions?: boolean;
 };
 
 export type MetaLaunchResult = {
@@ -93,6 +113,7 @@ export type MetaLaunchResult = {
   imageUploadMode?: MetaImageUploadMode;
   imageUploadCapabilityFallback?: boolean;
   pictureUrlUsed?: boolean;
+  instagramPositionsFallback?: boolean;
 };
 
 type MetaAdSetPayloadInput = MetaLaunchInput & {
@@ -120,8 +141,30 @@ const INSTAGRAM_ACTOR_FALLBACK_WARNING =
 const IMAGE_UPLOAD_CAPABILITY_FALLBACK_WARNING =
   "Meta не разрешила /adimages. Креатив создан через public picture URL.";
 
+const INSTAGRAM_POSITIONS = ["stream", "story", "explore", "reels"];
+const INSTAGRAM_PLACEMENT_FALLBACK_WARNING =
+  "Meta rejected detailed Instagram positions. Retried ad set with publisher_platforms: [\"instagram\"].";
+const ASTANA_CITY_FALLBACK_WARNING =
+  "Meta city key for Astana was not found, Kazakhstan country targeting was used.";
+
 function readEnv(key: string): string {
   return process.env[key]?.trim() || "";
+}
+
+export function formatKazakhstanTimestamp(date = new Date()): string {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Almaty",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    hourCycle: "h23",
+  }).formatToParts(date);
+  const part = (type: string) => parts.find((item) => item.type === type)?.value || "00";
+
+  return `${part("year")}-${part("month")}-${part("day")}_${part("hour")}-${part("minute")}`;
 }
 
 function normalizeGraphVersion(value: string) {
@@ -216,6 +259,27 @@ function shouldFallbackImageUploadToPictureUrl(error: unknown): boolean {
   );
 }
 
+function shouldRetryWithoutInstagramPositions(error: unknown): boolean {
+  const details = error instanceof MetaApiError ? error.details : undefined;
+  const text = [
+    details?.step,
+    details?.message,
+    details?.errorUserMsg,
+    error instanceof Error ? error.message : "",
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+
+  return (
+    details?.step === "adset" &&
+    (text.includes("instagram_positions") ||
+      text.includes("instagram position") ||
+      text.includes("placement") ||
+      text.includes("publisher_platforms"))
+  );
+}
+
 function addWarning(warnings: string[], warning?: string) {
   const text = warning?.trim();
   if (text && !warnings.includes(text)) warnings.push(text);
@@ -236,6 +300,150 @@ async function parseMetaResponse(response: MetaFetchResponse): Promise<MetaJson>
 function resolveInstagramActorId(input: MetaLaunchInput, fallbackActorId: string): string {
   if (input.omitInstagramActor) return "";
   return (input.instagramActorId || fallbackActorId || "").trim();
+}
+
+function isAstanaCity(city: string): boolean {
+  const normalized = city.trim().toLowerCase();
+  return (
+    normalized.includes("astana") ||
+    normalized.includes("астана") ||
+    normalized.includes("nur-sultan") ||
+    normalized.includes("nursultan") ||
+    normalized.includes("нур-султан")
+  );
+}
+
+function readMetaCityKeyFromSearch(data: MetaJson): string {
+  const items = Array.isArray(data.data) ? data.data : [];
+  for (const item of items) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const record = item as MetaJson;
+    const key = typeof record.key === "string" ? record.key.trim() : "";
+    const name = typeof record.name === "string" ? record.name.toLowerCase() : "";
+    const countryCode = typeof record.country_code === "string" ? record.country_code.toUpperCase() : "";
+    const type = typeof record.type === "string" ? record.type.toLowerCase() : "";
+    const matchesCity = name.includes("astana") || name.includes("nur-sultan") || name.includes("nursultan");
+    if (key && type === "city" && countryCode === "KZ" && matchesCity) return key;
+  }
+
+  return "";
+}
+
+export function buildGeoLocations(city: string, cityKey?: string): MetaJson {
+  if (isAstanaCity(city) && cityKey?.trim()) {
+    return {
+      cities: [
+        {
+          key: cityKey.trim(),
+          radius: 15,
+          distance_unit: "kilometer",
+        },
+      ],
+    };
+  }
+
+  return { countries: ["KZ"] };
+}
+
+export function buildMetaTargetingDebug(input: {
+  resolution?: MetaTargetingResolution;
+  omitInstagramPositions?: boolean;
+}): MetaJson {
+  const resolution = input.resolution || {
+    city: "Kazakhstan",
+    geoMode: "country" as const,
+    radiusKm: 0,
+    fallbackCountry: true,
+    source: "fallback" as const,
+  };
+
+  return {
+    geoMode: resolution.geoMode,
+    city: resolution.geoMode === "city" ? resolution.city : "",
+    radiusKm: resolution.geoMode === "city" ? resolution.radiusKm : 0,
+    fallbackCountry: resolution.fallbackCountry,
+    warning: resolution.warning || "",
+    publisher_platforms: ["instagram"],
+    instagram_positions: input.omitInstagramPositions ? [] : INSTAGRAM_POSITIONS,
+    placementsMode: "instagram_only",
+  };
+}
+
+export async function resolveMetaTargetingForCity(city: string, explicitCityKey = ""): Promise<MetaTargetingResolution> {
+  const normalizedCity = city.trim() || "Astana";
+  const explicitKey = explicitCityKey.trim();
+  const envKey = readEnv("META_ASTANA_CITY_KEY");
+
+  if (isAstanaCity(normalizedCity)) {
+    if (explicitKey) {
+      return {
+        city: normalizedCity,
+        cityKey: explicitKey,
+        geoMode: "city",
+        radiusKm: 15,
+        fallbackCountry: false,
+        source: "input",
+      };
+    }
+
+    if (envKey) {
+      return {
+        city: normalizedCity,
+        cityKey: envKey,
+        geoMode: "city",
+        radiusKm: 15,
+        fallbackCountry: false,
+        source: "env",
+      };
+    }
+
+    if (getMetaConfig().configured) {
+      try {
+        const search = await metaRequest(
+          "/search",
+          "GET",
+          {
+            type: "adgeolocation",
+            location_types: ["city"],
+            q: "Astana",
+            country_code: "KZ",
+          },
+          "targeting_search",
+        );
+        const cityKey = readMetaCityKeyFromSearch(search);
+        if (cityKey) {
+          return {
+            city: normalizedCity,
+            cityKey,
+            geoMode: "city",
+            radiusKm: 15,
+            fallbackCountry: false,
+            source: "api",
+          };
+        }
+      } catch {
+        // Fall through to a controlled country fallback with an explicit warning.
+      }
+    }
+
+    return {
+      city: normalizedCity,
+      geoMode: "country",
+      radiusKm: 0,
+      fallbackCountry: true,
+      warning: ASTANA_CITY_FALLBACK_WARNING,
+      source: "fallback",
+    };
+  }
+
+  return {
+    city: normalizedCity,
+    geoMode: "country",
+    radiusKm: 0,
+    fallbackCountry: true,
+    warning: normalizedCity ? `Meta city key for ${normalizedCity} was not found, Kazakhstan country targeting was used.` : "",
+    source: "fallback",
+  };
 }
 
 export function getMetaConfig(): MetaConfig {
@@ -322,26 +530,27 @@ function resolveDailyBudgetMinorUnits(input: MetaAdSetPayloadInput): number {
   return Math.round(dailyBudgetUsd * 100);
 }
 
-function buildMetaTargeting(targeting?: MetaJson): MetaJson {
+function buildMetaTargeting(input: MetaAdSetPayloadInput): MetaJson {
+  const targeting = input.targeting;
   const hasCustomTargeting = targeting && Object.keys(targeting).length > 0;
-  const baseTargeting: MetaJson = hasCustomTargeting
-    ? { ...targeting }
-    : {
-        geo_locations: { countries: ["KZ"] },
-        age_min: 25,
-        age_max: 55,
-      };
+  const baseTargeting: MetaJson = hasCustomTargeting ? { ...targeting } : {};
+  const ageMin = Number(baseTargeting.age_min);
+  const ageMax = Number(baseTargeting.age_max);
   const currentAutomation =
     baseTargeting.targeting_automation && typeof baseTargeting.targeting_automation === "object" && !Array.isArray(baseTargeting.targeting_automation)
       ? (baseTargeting.targeting_automation as MetaJson)
       : {};
 
   return {
-    ...baseTargeting,
+    geo_locations: buildGeoLocations(input.city || "", input.targetingResolution?.cityKey || input.astanaCityKey),
+    age_min: Number.isFinite(ageMin) && ageMin > 0 ? ageMin : 25,
+    age_max: Number.isFinite(ageMax) && ageMax > 0 ? ageMax : 55,
     targeting_automation: {
       ...currentAutomation,
       advantage_audience: 0,
     },
+    publisher_platforms: ["instagram"],
+    ...(input.omitInstagramPositions ? {} : { instagram_positions: INSTAGRAM_POSITIONS }),
   };
 }
 
@@ -358,7 +567,7 @@ export function buildMetaAdSetPayload(input: MetaAdSetPayloadInput): MetaJson {
     billing_event: "IMPRESSIONS",
     optimization_goal: "LINK_CLICKS",
     bid_strategy: "LOWEST_COST_WITHOUT_CAP",
-    targeting: buildMetaTargeting(input.targeting),
+    targeting: buildMetaTargeting(input),
     start_time: input.startTime,
     status: input.status,
   };
@@ -457,7 +666,7 @@ export function buildImageLinkCreativePayload(input: MetaLaunchInput & { pageId:
   };
 
   return {
-    name: `${input.campaignName} - Creative`,
+    name: input.creativeName || `${input.campaignName} - Creative`,
     object_story_spec: objectStorySpec,
   };
 }
@@ -490,7 +699,7 @@ export function buildImagePictureCreativePayload(input: MetaLaunchInput & { page
   };
 
   return {
-    name: `${input.campaignName} - Creative`,
+    name: input.creativeName || `${input.campaignName} - Creative`,
     object_story_spec: objectStorySpec,
   };
 }
@@ -515,7 +724,7 @@ export function buildVideoCreativePayload(input: MetaLaunchInput & { pageId: str
   };
 
   return {
-    name: `${input.campaignName} - Video Creative`,
+    name: input.creativeName || `${input.campaignName} - Video Creative`,
     object_story_spec: objectStorySpec,
   };
 }
@@ -534,7 +743,7 @@ export async function createImageCreative(input: MetaLaunchInput): Promise<MetaC
   try {
     const image = await uploadMetaImageFromUrl({
       imageUrl: input.imageUrl,
-      name: `${input.campaignName} - Image`,
+      name: input.creativeName || `${input.campaignName} - Image`,
     });
     const imageHash = assertMetaImageHash(parseMetaImageHash(image), {
       responseKeys: Object.keys(image),
@@ -626,7 +835,7 @@ export async function createMetaCreative(input: MetaLaunchInput): Promise<MetaCr
 export async function createMetaAd(input: MetaLaunchInput & { adSetId: string; creativeId: string }): Promise<MetaJson> {
   const { adAccountId } = assertMetaConfigured();
   return metaRequest(`/${adAccountId}/ads`, "POST", {
-    name: `${input.campaignName} - Ad`,
+    name: input.adName || `${input.campaignName} - Ad`,
     adset_id: input.adSetId,
     creative: { creative_id: input.creativeId },
     status: input.status,
@@ -638,17 +847,30 @@ export async function launchMetaCampaign(input: MetaLaunchInput): Promise<MetaLa
     throw new Error("Видео-реклама через Meta API требует video_id. Сначала протестируйте запуск фото.");
   }
   const preparedInput = { ...input, creativeType: "image" as const, videoUrl: undefined, videoId: undefined };
+  const warnings: string[] = [];
+  addWarning(warnings, input.targetingResolution?.warning);
 
   const campaign = await createMetaCampaign(preparedInput);
   const metaCampaignId = parseMetaId(campaign);
   if (!metaCampaignId) throw new Error("Meta campaign was created without id");
 
-  const adSet = await createMetaAdSet({ ...preparedInput, campaignId: metaCampaignId });
+  let instagramPositionsFallback = false;
+  let adSet: MetaJson;
+  try {
+    adSet = await createMetaAdSet({ ...preparedInput, campaignId: metaCampaignId });
+  } catch (error) {
+    if (!preparedInput.omitInstagramPositions && shouldRetryWithoutInstagramPositions(error)) {
+      instagramPositionsFallback = true;
+      addWarning(warnings, INSTAGRAM_PLACEMENT_FALLBACK_WARNING);
+      adSet = await createMetaAdSet({ ...preparedInput, campaignId: metaCampaignId, omitInstagramPositions: true });
+    } else {
+      throw error;
+    }
+  }
   const metaAdSetId = parseMetaId(adSet);
   if (!metaAdSetId) throw new Error("Meta ad set was created without id");
 
   let creative: MetaJson;
-  const warnings: string[] = [];
   let instagramActorFallback = false;
   let creativeUsesInstagramActor = Boolean(resolveInstagramActorId(preparedInput, getMetaConfig().instagramActorId));
   let creativeObjectStorySpecType: "link_data" | "video_data" = "link_data";
@@ -715,6 +937,7 @@ export async function launchMetaCampaign(input: MetaLaunchInput): Promise<MetaLa
     imageUploadMode,
     imageUploadCapabilityFallback,
     pictureUrlUsed,
+    instagramPositionsFallback,
   };
 }
 

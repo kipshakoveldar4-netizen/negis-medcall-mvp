@@ -12,6 +12,7 @@ Negis MVP не запускает рекламу автоматически. Р�
 - `META_AD_ACCOUNT_ID`
 - `META_PAGE_ID`
 - `META_INSTAGRAM_ACTOR_ID`
+- `META_ASTANA_CITY_KEY` optional city geo key for Astana. If it is empty, Negis tries Meta Targeting Search with the server token.
 
 Не вводите access token во frontend. Token должен жить только в Vercel env.
 
@@ -60,3 +61,7 @@ Negis now includes `/ads-automation` for server-side Meta Marketing API launch.
 - Smoke tests use `dryRun: true` and do not create real ads.
 
 Detailed guide: `docs/META-LIVE-LAUNCH.md`.
+
+## MVP targeting behavior
+
+`/ads-automation` creates PAUSED launches with unique timestamped names, Astana city targeting when a valid city key is available, and Instagram-only placements. Existing disabled test campaigns are not deleted automatically; remove old duplicates manually in Ads Manager if needed.

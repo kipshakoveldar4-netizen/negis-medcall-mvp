@@ -123,6 +123,21 @@ async function checkMetaMarketingSource() {
   if (!source.includes("MetaApiError")) {
     throw new Error("Meta marketing source is missing detailed Meta API errors");
   }
+  if (!source.includes("formatKazakhstanTimestamp")) {
+    throw new Error("Meta marketing source is missing Kazakhstan launch timestamp helper");
+  }
+  if (!source.includes("resolveMetaTargetingForCity")) {
+    throw new Error("Meta marketing source is missing city targeting resolver");
+  }
+  if (!source.includes("buildGeoLocations")) {
+    throw new Error("Meta marketing source is missing geo location builder");
+  }
+  if (!source.includes('publisher_platforms: ["instagram"]')) {
+    throw new Error("Meta marketing source must force Instagram-only publisher platforms");
+  }
+  if (!source.includes("instagram_positions: INSTAGRAM_POSITIONS")) {
+    throw new Error("Meta marketing source must include Instagram positions in targeting");
+  }
   if (!source.includes("INSTAGRAM_ACTOR_FALLBACK_WARNING")) {
     throw new Error("Meta marketing source is missing Instagram actor fallback warning");
   }
@@ -668,10 +683,11 @@ async function main() {
       headline: "Consultation in Astana",
       description: "Book a consultation with a specialist.",
       cta: "LEARN_MORE",
-      landingUrl: "https://example.com",
+      landingUrl: "https://wa.me/77000000000",
       imageUrl: "https://example.com/smoke-creative.jpg",
       creativeType: "image",
       creativeUrl: "https://example.com/smoke-creative.jpg",
+      metaAstanaCityKey: "astana_test_city_key",
       complianceConfirmed: true,
       manualApprovalConfirmed: true,
       dryRun: true,
@@ -684,10 +700,25 @@ async function main() {
       campaign?: Record<string, unknown>;
       adSet?: Record<string, unknown>;
       creative?: Record<string, unknown>;
+      ad?: Record<string, unknown>;
+      launchTimestamp?: string;
     };
+    launchTimestamp?: string;
   };
   const campaignPayload = launchData.metaPayload?.campaign || {};
   const adSetPayload = launchData.metaPayload?.adSet || {};
+  const creativePayload = launchData.metaPayload?.creative || {};
+  const adPayload = launchData.metaPayload?.ad || {};
+  const launchTimestamp = launchData.launchTimestamp || launchData.metaPayload?.launchTimestamp || "";
+  if (!/^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}$/.test(launchTimestamp)) {
+    throw new Error("/api/crm/meta-launch dry-run must return launchTimestamp in YYYY-MM-DD_HH-mm format");
+  }
+  const payloadNames = [campaignPayload.name, adSetPayload.name, creativePayload.name, adPayload.name].map((value) =>
+    typeof value === "string" ? value : "",
+  );
+  if (payloadNames.some((name) => !name.includes(launchTimestamp))) {
+    throw new Error("/api/crm/meta-launch dry-run must use one timestamp across campaign/adset/creative/ad names");
+  }
   if (campaignPayload.is_adset_budget_sharing_enabled !== false) {
     throw new Error("/api/crm/meta-launch dry-run campaign payload must contain is_adset_budget_sharing_enabled: false");
   }
@@ -718,11 +749,34 @@ async function main() {
   if (Object.prototype.hasOwnProperty.call(adSetPayload, "targeting_automation")) {
     throw new Error("/api/crm/meta-launch dry-run adset payload must keep targeting_automation inside targeting");
   }
-  const adSetTargeting = (adSetPayload.targeting || {}) as { targeting_automation?: { advantage_audience?: unknown } };
+  const adSetTargeting = (adSetPayload.targeting || {}) as {
+    geo_locations?: { countries?: unknown; cities?: Array<{ key?: unknown; radius?: unknown; distance_unit?: unknown }> };
+    targeting_automation?: { advantage_audience?: unknown };
+    publisher_platforms?: unknown[];
+    instagram_positions?: unknown[];
+  };
+  if (!Array.isArray(adSetTargeting.geo_locations?.cities) || adSetTargeting.geo_locations?.cities?.[0]?.key !== "astana_test_city_key") {
+    throw new Error("/api/crm/meta-launch dry-run Astana targeting must use city geo mode when city key is available");
+  }
+  if (Object.prototype.hasOwnProperty.call(adSetTargeting.geo_locations || {}, "countries")) {
+    throw new Error("/api/crm/meta-launch dry-run Astana targeting must not use country-only mode when city key is available");
+  }
   if (adSetTargeting.targeting_automation?.advantage_audience !== 0) {
     throw new Error("/api/crm/meta-launch dry-run targeting must include targeting_automation.advantage_audience: 0");
   }
-  const creativePayload = launchData.metaPayload?.creative || {};
+  const publisherPlatforms = (adSetTargeting.publisher_platforms || []).map(String);
+  const instagramPositions = (adSetTargeting.instagram_positions || []).map(String);
+  if (JSON.stringify(publisherPlatforms) !== JSON.stringify(["instagram"])) {
+    throw new Error('/api/crm/meta-launch dry-run targeting must include publisher_platforms ["instagram"]');
+  }
+  if (!["stream", "story", "explore", "reels"].every((position) => instagramPositions.includes(position))) {
+    throw new Error("/api/crm/meta-launch dry-run targeting must include Instagram positions");
+  }
+  for (const forbidden of ["facebook", "messenger", "whatsapp", "threads"]) {
+    if (publisherPlatforms.includes(forbidden)) {
+      throw new Error(`/api/crm/meta-launch dry-run targeting must not include ${forbidden} placement`);
+    }
+  }
   if (typeof creativePayload.usesInstagramActor !== "boolean") {
     throw new Error("/api/crm/meta-launch dry-run creative payload must expose usesInstagramActor");
   }

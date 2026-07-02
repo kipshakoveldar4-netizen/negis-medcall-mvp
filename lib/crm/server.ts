@@ -3,13 +3,17 @@ import { getSupabaseServerClient } from "../supabase/server";
 import { checkMetaCompliance } from "../meta/compliance";
 import {
   MetaApiError,
+  type MetaTargetingResolution,
+  buildMetaTargetingDebug,
   buildMetaAdSetPayload,
   buildMetaCampaignPayload,
   checkMetaAdAccount,
   checkMetaInstagramActor,
+  formatKazakhstanTimestamp,
   getMetaCampaignStatus,
   getMetaConfig,
   launchMetaCampaign,
+  resolveMetaTargetingForCity,
   uploadMetaVideo,
 } from "../meta/marketing";
 
@@ -2357,9 +2361,10 @@ function buildAdsAiFallback(body: JsonRecord): JsonRecord {
       geo_locations: { countries: ["KZ"] },
       age_min: 25,
       age_max: 55,
-      note: `Город: ${city}. Уточнение интересов вручную в Ads Manager при необходимости.`,
+      publisher_platforms: ["instagram"],
+      instagram_positions: ["stream", "story", "explore", "reels"],
     },
-    placements: ["Facebook Feed", "Instagram Feed", "Stories/Reels"],
+    placements: ["Instagram Feed", "Instagram Stories", "Instagram Explore", "Instagram Reels"],
     budgetPlan: {
       dailyBudget,
       currency: "USD",
@@ -2545,6 +2550,26 @@ export async function handleAdsAiFill(req: VercelRequest, res: VercelResponse) {
 
 const META_MAX_DAILY_BUDGET = 50;
 const META_MAX_TOTAL_BUDGET = 300;
+const META_TIMESTAMP_SUFFIX = /\s+-\s+\d{4}-\d{2}-\d{2}_\d{2}-\d{2}$/;
+
+function normalizeLaunchTimestamp(value: unknown): string {
+  const timestamp = readString(value);
+  return /^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}$/.test(timestamp) ? timestamp : "";
+}
+
+function stripLaunchTimestamp(value: string): string {
+  return value.replace(META_TIMESTAMP_SUFFIX, "").trim();
+}
+
+function withLaunchTimestamp(value: string, timestamp: string): string {
+  const base = stripLaunchTimestamp(value).trim();
+  return base ? `${base} - ${timestamp}` : timestamp;
+}
+
+function audienceAgeLabel(value: string): string {
+  const match = value.match(/(\d{2})\s*[-–]\s*(\d{2})/);
+  return match ? `${match[1]}-${match[2]}` : "25-55";
+}
 
 function normalizeMetaStatus(value: unknown): "PAUSED" | "ACTIVE" {
   return readString(value).toUpperCase() === "ACTIVE" ? "ACTIVE" : "PAUSED";
@@ -2648,7 +2673,16 @@ async function readMetaLiveLaunchEnabled(workspaceId: string, body: JsonRecord):
 }
 
 function buildMetaLaunchBody(body: JsonRecord) {
-  const campaignName = firstString(body.campaignName, body.campaign_name);
+  const service = firstString(body.service, body.niche, body.offer, body.campaignService, "Consultation");
+  const city = firstString(body.city, "Astana");
+  const targetAudience = firstString(body.targetAudience, body.target_audience, "Women 25-55");
+  const launchTimestamp = normalizeLaunchTimestamp(body.launchTimestamp ?? body.launch_timestamp) || formatKazakhstanTimestamp();
+  const baseCampaignName = firstString(body.campaignName, body.campaign_name, `${service} - ${city} - заявки`);
+  const campaignName = withLaunchTimestamp(baseCampaignName, launchTimestamp);
+  const audienceLabel = audienceAgeLabel(targetAudience);
+  const adSetName = withLaunchTimestamp(`${city} - Instagram - ${audienceLabel}`, launchTimestamp);
+  const creativeName = withLaunchTimestamp(`Креатив - ${service}`, launchTimestamp);
+  const adName = withLaunchTimestamp(`Объявление - ${service}`, launchTimestamp);
   const primaryText = firstString(body.primaryText, body.primary_text, body.creativeText, body.caption);
   const headline = firstString(body.headline, campaignName);
   const description = firstString(body.description, body.offer, body.service, body.niche);
@@ -2670,8 +2704,14 @@ function buildMetaLaunchBody(body: JsonRecord) {
     dailyBudgetMinor: budgetToMinor(dailyBudget),
     totalBudgetMinor: budgetToMinor(totalBudget),
     currency: readString(body.currency) || "USD",
-    city: firstString(body.city, "Astana"),
-    targetAudience: firstString(body.targetAudience, body.target_audience, "Women 25-55"),
+    service,
+    city,
+    targetAudience,
+    audienceLabel,
+    launchTimestamp,
+    adSetName,
+    creativeName,
+    adName,
     primaryText,
     headline,
     description,
@@ -2687,12 +2727,17 @@ function buildMetaLaunchBody(body: JsonRecord) {
     endDate: firstString(body.endDate, body.end_time),
     pageId: config.pageId,
     instagramActorId: config.instagramActorId,
+    astanaCityKey: firstString(body.astanaCityKey, body.astana_city_key, body.metaAstanaCityKey, body.meta_astana_city_key),
     adAccountId: config.adAccountId,
   };
 }
 
+type ResolvedMetaLaunchBody = ReturnType<typeof buildMetaLaunchBody> & {
+  targetingResolution?: MetaTargetingResolution;
+};
+
 function buildMetaPayloadPreview(
-  launch: ReturnType<typeof buildMetaLaunchBody>,
+  launch: ResolvedMetaLaunchBody,
   campaignId = "META_CAMPAIGN_ID",
   creativeOptions: {
     usesInstagramActor?: boolean;
@@ -2701,6 +2746,7 @@ function buildMetaPayloadPreview(
     imageHash?: boolean;
     pictureUrl?: boolean;
     imageUploadCapabilityFallback?: boolean;
+    omitInstagramPositions?: boolean;
   } = {},
 ): JsonRecord {
   const assetFileType = launch.creativeType === "video" ? "video" : "image";
@@ -2730,6 +2776,15 @@ function buildMetaPayloadPreview(
     thumbnailUrl: launch.thumbnailUrl,
     startTime: launch.startDate,
     endTime: launch.endDate || undefined,
+    city: launch.city,
+    audienceLabel: launch.audienceLabel,
+    launchTimestamp: launch.launchTimestamp,
+    adSetName: launch.adSetName,
+    creativeName: launch.creativeName,
+    adName: launch.adName,
+    astanaCityKey: launch.astanaCityKey,
+    targetingResolution: launch.targetingResolution,
+    omitInstagramPositions: creativeOptions.omitInstagramPositions,
   });
 
   const adSet = buildMetaAdSetPayload({
@@ -2752,12 +2807,30 @@ function buildMetaPayloadPreview(
     startTime: launch.startDate,
     endTime: launch.endDate || undefined,
     campaignId,
+    city: launch.city,
+    audienceLabel: launch.audienceLabel,
+    launchTimestamp: launch.launchTimestamp,
+    adSetName: launch.adSetName,
+    creativeName: launch.creativeName,
+    adName: launch.adName,
+    astanaCityKey: launch.astanaCityKey,
+    targetingResolution: launch.targetingResolution,
+    omitInstagramPositions: creativeOptions.omitInstagramPositions,
+  });
+  const targetingDebug = buildMetaTargetingDebug({
+    resolution: launch.targetingResolution,
+    omitInstagramPositions: creativeOptions.omitInstagramPositions,
   });
 
   return {
     campaign,
-    adSet,
+    adSet: {
+      ...adSet,
+      targetingDebug,
+      placementsMode: "instagram_only",
+    },
     creative: {
+      name: launch.creativeName,
       asset: { fileType: assetFileType },
       objectStorySpecType: usesLinkData ? "link_data" : "video_data",
       imageUploadMode,
@@ -2769,7 +2842,13 @@ function buildMetaPayloadPreview(
       usesInstagramActor: creativeOptions.usesInstagramActor ?? Boolean(launch.instagramActorId),
       instagramActorFallback: creativeOptions.instagramActorFallback ?? false,
     },
+    ad: {
+      name: launch.adName,
+      status: launch.statusMode,
+    },
+    launchTimestamp: launch.launchTimestamp,
     budgetLevel: "adset",
+    warnings: [launch.targetingResolution?.warning || ""].filter(Boolean),
   };
 }
 
@@ -2891,6 +2970,7 @@ export async function handleMetaValidate(req: VercelRequest, res: VercelResponse
         adAccountId: config.adAccountId,
         pageId: config.pageId,
         instagramActorId: config.instagramActorId,
+        astanaCityKeyConfigured: Boolean(readEnvValue("META_ASTANA_CITY_KEY")),
         instagramActor: {
           configured: Boolean(config.instagramActorId),
           valid: "not_checked",
@@ -2909,6 +2989,7 @@ export async function handleMetaValidate(req: VercelRequest, res: VercelResponse
         adAccountId: config.adAccountId,
         pageId: config.pageId,
         instagramActorId: config.instagramActorId,
+        astanaCityKeyConfigured: Boolean(readEnvValue("META_ASTANA_CITY_KEY")),
         instagramActor: {
           configured: Boolean(config.instagramActorId),
           valid: false,
@@ -2921,6 +3002,7 @@ export async function handleMetaValidate(req: VercelRequest, res: VercelResponse
 
   try {
     const account = await checkMetaAdAccount();
+    const astanaTargeting = await resolveMetaTargetingForCity("Astana");
     let instagramActor: JsonRecord = {
       configured: Boolean(config.instagramActorId),
       valid: !config.instagramActorId,
@@ -2957,6 +3039,8 @@ export async function handleMetaValidate(req: VercelRequest, res: VercelResponse
         adAccountId: config.adAccountId,
         pageId: config.pageId,
         instagramActorId: config.instagramActorId,
+        astanaCityKeyConfigured: Boolean(readEnvValue("META_ASTANA_CITY_KEY")),
+        astanaTargeting,
         instagramActor,
         hasAccessToken: true,
       }, instagramWarning || undefined),
@@ -3081,23 +3165,41 @@ export async function handleMetaLaunch(req: VercelRequest, res: VercelResponse) 
     });
   }
 
+  const targetingResolution = await resolveMetaTargetingForCity(launch.city, launch.astanaCityKey);
+  const resolvedLaunch = { ...launch, targetingResolution };
+
   const payload: JsonRecord = {
     workspaceId,
     launchedBy: actorName,
     launchedByRole: actorRole,
     sourceModule: firstString(body.sourceModule, body.source_module, "ads-automation"),
     sourceId: firstString(body.sourceId, body.source_id),
-    campaignName: launch.campaignName,
-    objective: launch.objective,
-    status: launch.statusMode === "ACTIVE" ? "active" : "paused",
-    budgetDailyMinor: launch.dailyBudgetMinor,
-    budgetTotalMinor: launch.totalBudgetMinor,
-    currency: launch.currency,
-    startTime: launch.startDate,
-    endTime: launch.endDate,
-    pageId: launch.pageId,
-    instagramActorId: launch.instagramActorId,
-    adAccountId: launch.adAccountId,
+    campaignName: resolvedLaunch.campaignName,
+    objective: resolvedLaunch.objective,
+    status: resolvedLaunch.statusMode === "ACTIVE" ? "active" : "paused",
+    budgetDailyMinor: resolvedLaunch.dailyBudgetMinor,
+    budgetTotalMinor: resolvedLaunch.totalBudgetMinor,
+    currency: resolvedLaunch.currency,
+    startTime: resolvedLaunch.startDate,
+    endTime: resolvedLaunch.endDate,
+    pageId: resolvedLaunch.pageId,
+    instagramActorId: resolvedLaunch.instagramActorId,
+    adAccountId: resolvedLaunch.adAccountId,
+    launchTimestamp: resolvedLaunch.launchTimestamp,
+    adSetName: resolvedLaunch.adSetName,
+    creativeName: resolvedLaunch.creativeName,
+    adName: resolvedLaunch.adName,
+    targeting: {
+      geoMode: targetingResolution.geoMode,
+      city: targetingResolution.city,
+      radiusKm: targetingResolution.radiusKm,
+      fallbackCountry: targetingResolution.fallbackCountry,
+      source: targetingResolution.source,
+      warning: targetingResolution.warning || "",
+      placementsMode: "instagram_only",
+      publisher_platforms: ["instagram"],
+      instagram_positions: ["stream", "story", "explore", "reels"],
+    },
     payload: {
       ...sanitizeLaunchPayload(body),
     },
@@ -3105,10 +3207,11 @@ export async function handleMetaLaunch(req: VercelRequest, res: VercelResponse) 
   };
 
   const config = getMetaConfig();
-  let metaPayload = buildMetaPayloadPreview(launch);
+  let metaPayload = buildMetaPayloadPreview(resolvedLaunch);
   let metaResponse: JsonRecord;
-  let launchStatus = launch.statusMode === "ACTIVE" ? "active" : "paused";
+  let launchStatus = resolvedLaunch.statusMode === "ACTIVE" ? "active" : "paused";
   let warning = "";
+  const targetingWarning = targetingResolution.warning || "";
 
   try {
     if (dryRun) {
@@ -3120,36 +3223,44 @@ export async function handleMetaLaunch(req: VercelRequest, res: VercelResponse) 
         metaAdId: demoMetaId("ad"),
         payload: metaPayload,
       };
-      warning = "Проверка прошла без запуска: Meta API не вызывался.";
+      warning = ["Проверка прошла без запуска: Meta API не вызывался.", targetingWarning].filter(Boolean).join(" ");
     } else {
       if (!config.configured) {
         throw new Error("Meta env is not configured");
       }
       const result = await launchMetaCampaign({
-        campaignName: launch.campaignName,
-        objective: launch.objective,
-        status: launch.statusMode,
-        dailyBudgetMinor: launch.dailyBudgetMinor,
-        lifetimeBudgetMinor: launch.totalBudgetMinor,
-        currency: launch.currency,
-        primaryText: launch.primaryText,
-        headline: launch.headline,
-        description: launch.description,
-        cta: launch.cta,
-        landingUrl: launch.landingUrl,
-        imageUrl: launch.creativeType === "image" ? launch.imageUrl || launch.creativeUrl : "",
-        creativeType: launch.creativeType,
-        videoUrl: launch.creativeType === "video" ? launch.videoUrl || launch.creativeUrl : "",
-        videoId: launch.creativeType === "video" ? launch.videoId : "",
-        thumbnailUrl: launch.thumbnailUrl,
-        instagramActorId: launch.instagramActorId,
-        startTime: launch.startDate,
-        endTime: launch.endDate || undefined,
+        campaignName: resolvedLaunch.campaignName,
+        objective: resolvedLaunch.objective,
+        status: resolvedLaunch.statusMode,
+        dailyBudgetMinor: resolvedLaunch.dailyBudgetMinor,
+        lifetimeBudgetMinor: resolvedLaunch.totalBudgetMinor,
+        currency: resolvedLaunch.currency,
+        primaryText: resolvedLaunch.primaryText,
+        headline: resolvedLaunch.headline,
+        description: resolvedLaunch.description,
+        cta: resolvedLaunch.cta,
+        landingUrl: resolvedLaunch.landingUrl,
+        imageUrl: resolvedLaunch.creativeType === "image" ? resolvedLaunch.imageUrl || resolvedLaunch.creativeUrl : "",
+        creativeType: resolvedLaunch.creativeType,
+        videoUrl: resolvedLaunch.creativeType === "video" ? resolvedLaunch.videoUrl || resolvedLaunch.creativeUrl : "",
+        videoId: resolvedLaunch.creativeType === "video" ? resolvedLaunch.videoId : "",
+        thumbnailUrl: resolvedLaunch.thumbnailUrl,
+        instagramActorId: resolvedLaunch.instagramActorId,
+        startTime: resolvedLaunch.startDate,
+        endTime: resolvedLaunch.endDate || undefined,
+        city: resolvedLaunch.city,
+        audienceLabel: resolvedLaunch.audienceLabel,
+        launchTimestamp: resolvedLaunch.launchTimestamp,
+        adSetName: resolvedLaunch.adSetName,
+        creativeName: resolvedLaunch.creativeName,
+        adName: resolvedLaunch.adName,
+        astanaCityKey: resolvedLaunch.astanaCityKey,
+        targetingResolution,
       });
-      warning = result.warning || warning;
+      warning = [result.warning, targetingWarning].filter(Boolean).join(" ") || warning;
       metaResponse = result;
       const realMetaPayload = buildMetaPayloadPreview(
-        launch,
+        resolvedLaunch,
         firstString(result.metaCampaignId, asRecord(result.campaign).id, "META_CAMPAIGN_ID"),
         {
           usesInstagramActor: Boolean(result.creativeUsesInstagramActor),
@@ -3158,6 +3269,7 @@ export async function handleMetaLaunch(req: VercelRequest, res: VercelResponse) 
           imageHash: Boolean(result.imageHashReceived),
           pictureUrl: Boolean(result.pictureUrlUsed),
           imageUploadCapabilityFallback: Boolean(result.imageUploadCapabilityFallback),
+          omitInstagramPositions: Boolean(result.instagramPositionsFallback),
         },
       );
       metaPayload = realMetaPayload;
@@ -3194,12 +3306,12 @@ export async function handleMetaLaunch(req: VercelRequest, res: VercelResponse) 
     payload: {
       ...payload,
       ...ids,
-      metaStatus: launch.statusMode,
+      metaStatus: resolvedLaunch.statusMode,
     },
     compliance: compliance as unknown as JsonRecord,
     metaResponse,
     status: launchStatus,
-    metaStatus: launch.statusMode,
+    metaStatus: resolvedLaunch.statusMode,
   });
 
   const launchId = firstString(asRecord(saved.item).id);
@@ -3208,12 +3320,14 @@ export async function handleMetaLaunch(req: VercelRequest, res: VercelResponse) 
     launchId,
     actorName,
     actorRole,
-    action: dryRun ? "dry_run" : launch.statusMode === "ACTIVE" ? "launch_active" : "create_paused",
+    action: dryRun ? "dry_run" : resolvedLaunch.statusMode === "ACTIVE" ? "launch_active" : "create_paused",
     details: {
-      campaignName: launch.campaignName,
-      statusMode: launch.statusMode,
+      campaignName: resolvedLaunch.campaignName,
+      statusMode: resolvedLaunch.statusMode,
+      launchTimestamp: resolvedLaunch.launchTimestamp,
       dryRun,
       complianceStatus: compliance.status,
+      targeting: payload.targeting,
     },
   });
 
@@ -3227,10 +3341,11 @@ export async function handleMetaLaunch(req: VercelRequest, res: VercelResponse) 
       safeText: compliance.safeText,
       dryRun,
       warning: warning || saved.warning || "",
+      launchTimestamp: resolvedLaunch.launchTimestamp,
       metaPayload,
       ...ids,
       status: launchStatus,
-      metaStatus: launch.statusMode,
+      metaStatus: resolvedLaunch.statusMode,
     }, saved.warning || warning || undefined),
   );
 }
@@ -3282,6 +3397,7 @@ export async function handleCrmHealth(req: VercelRequest, res: VercelResponse) {
     adAccountId: readEnvValue("META_AD_ACCOUNT_ID"),
     pageId: readEnvValue("META_PAGE_ID"),
     instagramActorId: readEnvValue("META_INSTAGRAM_ACTOR_ID"),
+    astanaCityKeyConfigured: Boolean(readEnvValue("META_ASTANA_CITY_KEY")),
     hasAccessToken: Boolean(readEnvValue("META_ACCESS_TOKEN")),
     hasAppSecret: Boolean(readEnvValue("META_APP_SECRET")),
   };
