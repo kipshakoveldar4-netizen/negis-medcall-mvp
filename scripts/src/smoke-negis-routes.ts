@@ -57,6 +57,11 @@ async function checkAdsAutomationSource() {
   assertSourceIncludes(source, "creative.imageUploadMode", "Meta image upload mode debug");
   assertSourceIncludes(source, "creative.pictureUrl", "Meta picture URL fallback debug");
   assertSourceIncludes(source, "creative.imageUploadCapabilityFallback", "Meta image upload fallback debug");
+  assertSourceIncludes(source, "KZ_META_CITY_OPTIONS", "controlled Kazakhstan city options");
+  assertSourceIncludes(source, "selectedCityId", "selected city id launch payload");
+  assertSourceIncludes(source, "selectedCityCanonicalName", "selected city canonical name launch payload");
+  assertSourceIncludes(source, "<select", "controlled city select");
+  assertSourceExcludes(source, 'Field label="Город" value={brief.city}', "free-text city Field");
   assertSourceIncludes(source, "Meta не разрешила загрузить изображение через /adimages", "Meta image upload fallback warning");
   assertSourceExcludes(source, "/api/crm/ad-creative-upload", "file upload endpoint in UI");
   assertSourceExcludes(source, "new FormData(", "multipart upload from UI");
@@ -68,6 +73,7 @@ async function checkAdsAutomationSource() {
 
 async function checkMetaMarketingSource() {
   const source = await readFile(path.join(repoRoot, "lib", "meta", "marketing.ts"), "utf8");
+  const citiesSource = await readFile(path.join(repoRoot, "lib", "meta", "cities.ts"), "utf8");
 
   if (!source.includes("uploadMetaImageFromUrl")) {
     throw new Error("Meta marketing source is missing uploadMetaImageFromUrl");
@@ -132,11 +138,20 @@ async function checkMetaMarketingSource() {
   if (!source.includes("resolveMetaCityTarget")) {
     throw new Error("Meta marketing source is missing multi-city targeting resolver");
   }
-  if (!source.includes("META_KZ_CITY_KEYS")) {
-    throw new Error("Meta marketing source is missing Kazakhstan city key map");
+  if (!source.includes("cityOptionMatchesCandidate")) {
+    throw new Error("Meta marketing source is missing exact selected-city candidate matching");
   }
-  if (!source.includes('astana:') || !source.includes('key: "1301648"')) {
-    throw new Error("Meta marketing source must keep Astana static city key 1301648");
+  if (!source.includes("readExactMetaCityFromSearch")) {
+    throw new Error("Meta marketing source is missing exact Targeting Search candidate reader");
+  }
+  if (!citiesSource.includes("KZ_META_CITY_OPTIONS")) {
+    throw new Error("Meta city options source is missing Kazakhstan city options");
+  }
+  if (!citiesSource.includes('id: "aktobe"') || !citiesSource.includes('id: "almaty"')) {
+    throw new Error("Meta city options source must include Aktobe and Almaty");
+  }
+  if (!citiesSource.includes('metaKey: "1301648"')) {
+    throw new Error("Meta city options source must keep Astana static city key 1301648");
   }
   if (!source.includes("metaCityTargetCache")) {
     throw new Error("Meta marketing source is missing city key cache");
@@ -207,14 +222,27 @@ async function checkMetaMarketingSource() {
 
 async function checkMetaCityResolverModule() {
   const moduleUrl = pathToFileURL(path.join(repoRoot, "lib", "meta", "marketing.ts")).href;
+  const citiesModuleUrl = pathToFileURL(path.join(repoRoot, "lib", "meta", "cities.ts")).href;
+  type SmokeMetaCityOption = {
+    id: string;
+    labelRu: string;
+    labelEn: string;
+    canonicalName: string;
+    countryCode: "KZ";
+    aliases: string[];
+    metaKey?: string;
+  };
   const marketing = (await import(moduleUrl)) as {
-    resolveMetaCityTarget(city: string): Promise<{
+    resolveMetaCityTarget(city: string | SmokeMetaCityOption): Promise<{
       key: string | null;
       name?: string;
       source: string;
       warning?: string;
+      selected?: { name?: string; key?: string } | null;
+      candidates?: Array<{ name?: string; key?: string }>;
+      rejectedCandidates?: Array<{ name?: string; key?: string; reason?: string }>;
     }>;
-    resolveMetaTargetingForCity(city: string): Promise<{
+    resolveMetaTargetingForCity(city: string | SmokeMetaCityOption): Promise<{
       cityKey?: string;
       geoMode: string;
       fallbackCountry: boolean;
@@ -222,6 +250,9 @@ async function checkMetaCityResolverModule() {
       warning?: string;
     }>;
     buildMetaAdSetPayload(input: Record<string, unknown>): Record<string, unknown>;
+  };
+  const cities = (await import(citiesModuleUrl)) as {
+    getKzMetaCityOption(value: string): SmokeMetaCityOption;
   };
 
   const originalEnv = {
@@ -249,7 +280,12 @@ async function checkMetaCityResolverModule() {
       const query = (url.searchParams.get("q") || "").toLowerCase();
       const data = query.includes("almaty")
         ? [{ key: "almaty_test_city_key", name: "Almaty", type: "city", country_code: "KZ", supports_city: true }]
-        : [];
+        : query.includes("aktobe")
+          ? [
+              { key: "temir_wrong_key", name: "Temir, Aqtöbe, Kazakhstan", type: "city", country_code: "KZ", supports_city: true },
+              { key: "aktobe_exact_key", name: "Aktobe", type: "city", country_code: "KZ", supports_city: true },
+            ]
+          : [];
       return {
         ok: true,
         status: 200,
@@ -270,6 +306,14 @@ async function checkMetaCityResolverModule() {
     const almatyCached = await marketing.resolveMetaCityTarget("Almaty");
     if (almatyCached.key !== "almaty_test_city_key" || almatyCached.source !== "cache") {
       throw new Error("resolveMetaCityTarget must cache Targeting Search city keys");
+    }
+
+    const aktobe = await marketing.resolveMetaCityTarget(cities.getKzMetaCityOption("aktobe"));
+    if (aktobe.key !== "aktobe_exact_key" || aktobe.selected?.name !== "Aktobe") {
+      throw new Error("resolveMetaCityTarget must select exact Aktobe city key, not a nearby Aqtobe-region candidate");
+    }
+    if (!aktobe.rejectedCandidates?.some((candidate) => candidate.name?.includes("Temir"))) {
+      throw new Error("resolveMetaCityTarget must reject Temir when selected city is Aktobe");
     }
 
     const unknown = await marketing.resolveMetaTargetingForCity("Unknown City");
@@ -781,9 +825,20 @@ async function main() {
     }),
   });
   const cityKeyCheck = await checkJsonEndpoint(`/api/crm/meta-city-key?city=${encodeURIComponent("Астана")}`);
-  const cityKeyData = (cityKeyCheck.data || {}) as { key?: unknown; source?: unknown; geoMode?: unknown; fallbackCountry?: unknown };
+  const cityKeyData = (cityKeyCheck.data || {}) as {
+    key?: unknown;
+    source?: unknown;
+    geoMode?: unknown;
+    fallbackCountry?: unknown;
+    selected?: { key?: unknown; name?: unknown } | null;
+    candidates?: unknown[];
+    rejectedCandidates?: unknown[];
+  };
   if (cityKeyData.key !== "1301648" || cityKeyData.source !== "static" || cityKeyData.geoMode !== "city" || cityKeyData.fallbackCountry !== false) {
     throw new Error("/api/crm/meta-city-key must resolve Astana to static city key 1301648");
+  }
+  if (!cityKeyData.selected || cityKeyData.selected.key !== "1301648" || !Array.isArray(cityKeyData.candidates) || !Array.isArray(cityKeyData.rejectedCandidates)) {
+    throw new Error("/api/crm/meta-city-key must return selected/candidates/rejectedCandidates diagnostics");
   }
   await checkJsonFailure(
     "/api/crm/meta-launch",
@@ -812,6 +867,37 @@ async function main() {
       }),
     },
     "Креатив",
+  );
+  await checkJsonFailure(
+    "/api/crm/meta-launch",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        workspaceId: "demo-workspace",
+        campaignName: "Smoke Meta Campaign Aktobe no city key",
+        objective: "OUTCOME_LEADS",
+        statusMode: "PAUSED",
+        dailyBudget: 20,
+        totalBudget: 140,
+        currency: "USD",
+        city: "Актобе",
+        selectedCityId: "aktobe",
+        targetAudience: "Women 25-55",
+        primaryText: "Professional consultation in Aktobe. Book a specialist consultation.",
+        headline: "Consultation in Aktobe",
+        description: "Book a consultation with a specialist.",
+        cta: "LEARN_MORE",
+        landingUrl: "https://example.com",
+        imageUrl: "https://example.com/smoke-creative.jpg",
+        creativeType: "image",
+        creativeUrl: "https://example.com/smoke-creative.jpg",
+        complianceConfirmed: true,
+        manualApprovalConfirmed: true,
+        dryRun: false,
+      }),
+    },
+    "Meta city key",
   );
   const launch = await checkJsonEndpoint("/api/crm/meta-launch", {
     method: "POST",
@@ -901,6 +987,14 @@ async function main() {
     publisher_platforms?: unknown[];
     instagram_positions?: unknown[];
   };
+  const adSetTargetingDebug = (adSetPayload.targetingDebug || {}) as {
+    selectedCity?: { id?: unknown; labelRu?: unknown; canonicalName?: unknown };
+    cityId?: unknown;
+    cityKey?: unknown;
+    candidates?: unknown[];
+    rejectedCandidates?: unknown[];
+    fallbackCountry?: unknown;
+  };
   if (!Array.isArray(adSetTargeting.geo_locations?.cities) || adSetTargeting.geo_locations?.cities?.[0]?.key !== "1301648") {
     throw new Error("/api/crm/meta-launch dry-run Astana targeting must use static city key 1301648 when city key is available");
   }
@@ -909,6 +1003,12 @@ async function main() {
   }
   if (adSetTargeting.targeting_automation?.advantage_audience !== 0) {
     throw new Error("/api/crm/meta-launch dry-run targeting must include targeting_automation.advantage_audience: 0");
+  }
+  if (adSetTargetingDebug.selectedCity?.id !== "astana" || adSetTargetingDebug.cityKey !== "1301648") {
+    throw new Error("/api/crm/meta-launch dry-run targeting debug must expose selected city and city key");
+  }
+  if (!Array.isArray(adSetTargetingDebug.candidates) || !Array.isArray(adSetTargetingDebug.rejectedCandidates)) {
+    throw new Error("/api/crm/meta-launch dry-run targeting debug must expose candidates and rejectedCandidates arrays");
   }
   const publisherPlatforms = (adSetTargeting.publisher_platforms || []).map(String);
   const instagramPositions = (adSetTargeting.instagram_positions || []).map(String);

@@ -1,3 +1,12 @@
+import {
+  cityOptionMatchesCandidate,
+  findKzMetaCityOption,
+  getKzMetaCityOption,
+  normalizeMetaCityToken,
+  type MetaCityOption,
+  type MetaCitySearchCandidate,
+} from "./cities";
+
 type MetaFetchResponse = {
   ok: boolean;
   status: number;
@@ -27,11 +36,20 @@ export type MetaCityTarget = {
   source: MetaCityKeySource;
   warning?: string;
   cityInput?: string;
+  cityId?: string;
+  labelRu?: string;
+  canonicalName?: string;
   normalizedCity?: string;
+  selected?: MetaCitySearchCandidate | null;
+  candidates?: MetaCitySearchCandidate[];
+  rejectedCandidates?: MetaCitySearchCandidate[];
 };
 
 export type MetaTargetingResolution = {
   cityInput?: string;
+  cityId?: string;
+  labelRu?: string;
+  canonicalName?: string;
   city: string;
   cityKey?: string;
   cityKeySource?: MetaTargetingSource;
@@ -42,6 +60,9 @@ export type MetaTargetingResolution = {
   fallbackCountry: boolean;
   warning?: string;
   source: MetaTargetingSource;
+  selected?: MetaCitySearchCandidate | null;
+  candidates?: MetaCitySearchCandidate[];
+  rejectedCandidates?: MetaCitySearchCandidate[];
 };
 
 export type MetaApiErrorDetails = {
@@ -107,6 +128,9 @@ export type MetaLaunchInput = {
   adName?: string;
   metaCityKey?: string;
   astanaCityKey?: string;
+  selectedCityId?: string;
+  selectedCityLabelRu?: string;
+  selectedCityCanonicalName?: string;
   targetingResolution?: MetaTargetingResolution;
   omitInstagramPositions?: boolean;
 };
@@ -164,48 +188,6 @@ const INSTAGRAM_PLACEMENT_FALLBACK_WARNING =
   "Meta rejected detailed Instagram positions. Retried ad set with publisher_platforms: [\"instagram\"].";
 const KZ_CITY_FALLBACK_WARNING =
   "Meta city key was not found, Kazakhstan country targeting was used.";
-const ASTANA_CITY_FALLBACK_WARNING = KZ_CITY_FALLBACK_WARNING;
-const META_KZ_CITY_KEYS: Record<string, { key: string; name: string; countryCode: string; region?: string }> = {
-  astana: {
-    key: "1301648",
-    name: "Astana",
-    countryCode: "KZ",
-    region: "Akmola Region",
-  },
-};
-const META_KZ_CITY_ALIASES: Record<string, { canonical: string; query: string; displayName: string }> = {
-  astana: { canonical: "astana", query: "Astana", displayName: "Astana" },
-  "nur-sultan": { canonical: "astana", query: "Astana", displayName: "Astana" },
-  nursultan: { canonical: "astana", query: "Astana", displayName: "Astana" },
-  астана: { canonical: "astana", query: "Astana", displayName: "Astana" },
-  "нур-султан": { canonical: "astana", query: "Astana", displayName: "Astana" },
-  алматы: { canonical: "almaty", query: "Almaty", displayName: "Almaty" },
-  almaty: { canonical: "almaty", query: "Almaty", displayName: "Almaty" },
-  шымкент: { canonical: "shymkent", query: "Shymkent", displayName: "Shymkent" },
-  shymkent: { canonical: "shymkent", query: "Shymkent", displayName: "Shymkent" },
-  караганда: { canonical: "karaganda", query: "Karaganda", displayName: "Karaganda" },
-  karaganda: { canonical: "karaganda", query: "Karaganda", displayName: "Karaganda" },
-  актобе: { canonical: "aktobe", query: "Aktobe", displayName: "Aktobe" },
-  aktobe: { canonical: "aktobe", query: "Aktobe", displayName: "Aktobe" },
-  атырау: { canonical: "atyrau", query: "Atyrau", displayName: "Atyrau" },
-  atyrau: { canonical: "atyrau", query: "Atyrau", displayName: "Atyrau" },
-  актау: { canonical: "aktau", query: "Aktau", displayName: "Aktau" },
-  aktau: { canonical: "aktau", query: "Aktau", displayName: "Aktau" },
-  павлодар: { canonical: "pavlodar", query: "Pavlodar", displayName: "Pavlodar" },
-  pavlodar: { canonical: "pavlodar", query: "Pavlodar", displayName: "Pavlodar" },
-  костанай: { canonical: "kostanay", query: "Kostanay", displayName: "Kostanay" },
-  kostanay: { canonical: "kostanay", query: "Kostanay", displayName: "Kostanay" },
-  тараз: { canonical: "taraz", query: "Taraz", displayName: "Taraz" },
-  taraz: { canonical: "taraz", query: "Taraz", displayName: "Taraz" },
-  уральск: { canonical: "oral", query: "Oral", displayName: "Oral" },
-  oral: { canonical: "oral", query: "Oral", displayName: "Oral" },
-  uralsk: { canonical: "oral", query: "Oral", displayName: "Oral" },
-  "усть-каменогорск": { canonical: "oskemen", query: "Oskemen", displayName: "Oskemen" },
-  oskemen: { canonical: "oskemen", query: "Oskemen", displayName: "Oskemen" },
-  "ust-kamenogorsk": { canonical: "oskemen", query: "Oskemen", displayName: "Oskemen" },
-  кызылорда: { canonical: "kyzylorda", query: "Kyzylorda", displayName: "Kyzylorda" },
-  kyzylorda: { canonical: "kyzylorda", query: "Kyzylorda", displayName: "Kyzylorda" },
-};
 const metaCityTargetCache = new Map<string, MetaCityTarget>();
 
 function readEnv(key: string): string {
@@ -364,33 +346,7 @@ function resolveInstagramActorId(input: MetaLaunchInput, fallbackActorId: string
 }
 
 function normalizeCityToken(value: string): string {
-  return value
-    .trim()
-    .toLowerCase()
-    .replace(/[’'`]/g, "")
-    .replace(/[.,]/g, " ")
-    .replace(/\s+/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^-|-$/g, "");
-}
-
-function normalizeCityNameForMatch(value: string): string {
-  return normalizeCityToken(value).replace(/-/g, "");
-}
-
-function resolveCityAlias(city: string): { canonical: string; query: string; displayName: string } {
-  const trimmed = city.trim();
-  const normalized = normalizeCityToken(trimmed);
-  const compact = normalized.replace(/-/g, "");
-  const alias = META_KZ_CITY_ALIASES[normalized] || META_KZ_CITY_ALIASES[compact];
-
-  if (alias) return alias;
-
-  return {
-    canonical: normalized || "kazakhstan",
-    query: trimmed || "Kazakhstan",
-    displayName: trimmed || "Kazakhstan",
-  };
+  return normalizeMetaCityToken(value);
 }
 
 function cacheMetaCityTarget(cacheKey: string, target: MetaCityTarget): MetaCityTarget {
@@ -400,28 +356,14 @@ function cacheMetaCityTarget(cacheKey: string, target: MetaCityTarget): MetaCity
   return target;
 }
 
-function scoreMetaCitySearchResult(record: MetaJson, alias: { canonical: string; query: string; displayName: string }): number {
-  const name = typeof record.name === "string" ? record.name : "";
-  const region = typeof record.region === "string" ? record.region : "";
-  const normalizedName = normalizeCityNameForMatch(name);
-  const normalizedQuery = normalizeCityNameForMatch(alias.query);
-  const normalizedDisplay = normalizeCityNameForMatch(alias.displayName);
-  const normalizedCanonical = normalizeCityNameForMatch(alias.canonical);
-  let score = 0;
-
-  if (normalizedName === normalizedQuery || normalizedName === normalizedDisplay || normalizedName === normalizedCanonical) score += 100;
-  if (normalizedName.includes(normalizedQuery)) score += 80;
-  if (normalizedName.includes(normalizedCanonical)) score += 70;
-  if (normalizedName.includes(normalizedDisplay)) score += 60;
-  if (normalizeCityNameForMatch(region).includes(normalizedCanonical)) score += 10;
-  if (record.supports_city === true) score += 5;
-
-  return score;
-}
-
-function readBestMetaCityFromSearch(data: MetaJson, alias: { canonical: string; query: string; displayName: string }): MetaCityTarget | null {
+function readExactMetaCityFromSearch(data: MetaJson, option: MetaCityOption): {
+  selected: MetaCitySearchCandidate | null;
+  candidates: MetaCitySearchCandidate[];
+  rejectedCandidates: MetaCitySearchCandidate[];
+} {
   const items = Array.isArray(data.data) ? data.data : [];
-  let best: { score: number; target: MetaCityTarget } | null = null;
+  const candidates: MetaCitySearchCandidate[] = [];
+  const rejectedCandidates: MetaCitySearchCandidate[] = [];
 
   for (const item of items) {
     if (!item || typeof item !== "object" || Array.isArray(item)) continue;
@@ -431,78 +373,132 @@ function readBestMetaCityFromSearch(data: MetaJson, alias: { canonical: string; 
     const region = typeof record.region === "string" ? record.region.trim() : "";
     const countryCode = typeof record.country_code === "string" ? record.country_code.toUpperCase() : "";
     const type = typeof record.type === "string" ? record.type.toLowerCase() : "";
-    const supportsCity = Object.prototype.hasOwnProperty.call(record, "supports_city") ? record.supports_city === true : true;
-
-    if (!key || type !== "city" || countryCode !== "KZ" || !supportsCity) continue;
-
-    const score = scoreMetaCitySearchResult(record, alias);
-    if (score <= 0 && best) continue;
-
-    const target: MetaCityTarget = {
+    const supportsCity = Object.prototype.hasOwnProperty.call(record, "supports_city") ? record.supports_city === true : undefined;
+    const base: Omit<MetaCitySearchCandidate, "accepted" | "matchConfidence" | "reason"> = {
       key,
-      name: name || alias.displayName,
-      countryCode,
+      name,
+      type,
+      country_code: countryCode,
       region,
-      source: "targeting_search",
-      normalizedCity: alias.canonical,
+      supports_city: supportsCity,
     };
 
-    if (!best || score > best.score) {
-      best = { score, target };
+    if (!key || type !== "city") {
+      rejectedCandidates.push({ ...base, accepted: false, matchConfidence: "rejected", reason: "not a city result" });
+      continue;
     }
+
+    if (countryCode !== option.countryCode) {
+      rejectedCandidates.push({ ...base, accepted: false, matchConfidence: "rejected", reason: "not Kazakhstan" });
+      continue;
+    }
+
+    if (supportsCity === false) {
+      rejectedCandidates.push({ ...base, accepted: false, matchConfidence: "rejected", reason: "supports_city is false" });
+      continue;
+    }
+
+    if (!cityOptionMatchesCandidate(option, name)) {
+      rejectedCandidates.push({ ...base, accepted: false, matchConfidence: "rejected", reason: "not exact selected city" });
+      continue;
+    }
+
+    candidates.push({ ...base, accepted: true, matchConfidence: "exact" });
   }
 
-  return best?.target || null;
+  return {
+    selected: candidates[0] || null,
+    candidates,
+    rejectedCandidates,
+  };
 }
 
-export async function resolveMetaCityTarget(city: string, explicitCityKey = ""): Promise<MetaCityTarget> {
-  const cityInput = city.trim() || "Astana";
-  const alias = resolveCityAlias(cityInput);
-  const explicitKey = explicitCityKey.trim();
-  const legacyAstanaEnvKey = alias.canonical === "astana" ? readEnv("META_ASTANA_CITY_KEY") : "";
+export async function resolveMetaCityTarget(city: string | MetaCityOption, explicitCityKey = ""): Promise<MetaCityTarget> {
+  const requestedOption = typeof city === "string" ? findKzMetaCityOption(city) : city;
+  const rawCityInput = typeof city === "string" ? city.trim() : city.labelRu;
+  if (!requestedOption && rawCityInput) {
+    return {
+      key: null,
+      name: rawCityInput,
+      countryCode: "KZ",
+      source: "fallback",
+      warning: `${KZ_CITY_FALLBACK_WARNING} City: ${rawCityInput}.`,
+      cityInput: rawCityInput,
+      normalizedCity: normalizeCityToken(rawCityInput),
+      selected: null,
+      candidates: [],
+      rejectedCandidates: [],
+    };
+  }
 
-  const staticTarget = META_KZ_CITY_KEYS[alias.canonical];
-  if (staticTarget) {
-    return cacheMetaCityTarget(alias.canonical, {
-      key: staticTarget.key,
-      name: staticTarget.name,
-      countryCode: staticTarget.countryCode,
-      region: staticTarget.region,
+  const option = requestedOption || getKzMetaCityOption(typeof city === "string" ? city : city.id);
+  const cityInput = typeof city === "string" ? city.trim() || option.labelRu : option.labelRu;
+  const cacheKey = option.id;
+  const explicitKey = explicitCityKey.trim();
+  const legacyAstanaEnvKey = option.id === "astana" ? readEnv("META_ASTANA_CITY_KEY") : "";
+
+  if (option.metaKey) {
+    return cacheMetaCityTarget(cacheKey, {
+      key: option.metaKey,
+      name: option.canonicalName,
+      countryCode: option.countryCode,
       source: "static",
       cityInput,
-      normalizedCity: alias.canonical,
+      cityId: option.id,
+      labelRu: option.labelRu,
+      canonicalName: option.canonicalName,
+      normalizedCity: cacheKey,
+      selected: {
+        key: option.metaKey,
+        name: option.canonicalName,
+        type: "city",
+        country_code: option.countryCode,
+        accepted: true,
+        matchConfidence: "exact",
+      },
+      candidates: [],
+      rejectedCandidates: [],
     });
   }
 
   if (legacyAstanaEnvKey) {
-    return cacheMetaCityTarget(alias.canonical, {
+    return cacheMetaCityTarget(cacheKey, {
       key: legacyAstanaEnvKey,
-      name: alias.displayName,
-      countryCode: "KZ",
+      name: option.canonicalName,
+      countryCode: option.countryCode,
       source: "env",
       cityInput,
-      normalizedCity: alias.canonical,
+      cityId: option.id,
+      labelRu: option.labelRu,
+      canonicalName: option.canonicalName,
+      normalizedCity: cacheKey,
     });
   }
 
   if (explicitKey) {
-    return cacheMetaCityTarget(alias.canonical, {
+    return cacheMetaCityTarget(cacheKey, {
       key: explicitKey,
-      name: alias.displayName,
-      countryCode: "KZ",
+      name: option.canonicalName,
+      countryCode: option.countryCode,
       source: "env",
       cityInput,
-      normalizedCity: alias.canonical,
+      cityId: option.id,
+      labelRu: option.labelRu,
+      canonicalName: option.canonicalName,
+      normalizedCity: cacheKey,
     });
   }
 
-  const cached = metaCityTargetCache.get(alias.canonical);
+  const cached = metaCityTargetCache.get(cacheKey);
   if (cached?.key) {
     return {
       ...cached,
       source: "cache",
       cityInput,
-      normalizedCity: alias.canonical,
+      cityId: option.id,
+      labelRu: option.labelRu,
+      canonicalName: option.canonicalName,
+      normalizedCity: cacheKey,
     };
   }
 
@@ -514,19 +510,44 @@ export async function resolveMetaCityTarget(city: string, explicitCityKey = ""):
         {
           type: "adgeolocation",
           location_types: ["city"],
-          q: alias.query,
-          country_code: "KZ",
+          q: option.canonicalName,
+          country_code: option.countryCode,
         },
         "targeting_search",
       );
-      const found = readBestMetaCityFromSearch(search, alias);
-      if (found?.key) {
-        return cacheMetaCityTarget(alias.canonical, {
-          ...found,
+      const found = readExactMetaCityFromSearch(search, option);
+      if (found.selected?.key) {
+        return cacheMetaCityTarget(cacheKey, {
+          key: found.selected.key,
+          name: found.selected.name || option.canonicalName,
+          countryCode: found.selected.country_code || option.countryCode,
+          region: found.selected.region,
+          source: "targeting_search",
           cityInput,
-          normalizedCity: alias.canonical,
+          cityId: option.id,
+          labelRu: option.labelRu,
+          canonicalName: option.canonicalName,
+          normalizedCity: cacheKey,
+          selected: found.selected,
+          candidates: found.candidates,
+          rejectedCandidates: found.rejectedCandidates,
         });
       }
+      return {
+        key: null,
+        name: option.canonicalName,
+        countryCode: option.countryCode,
+        source: "fallback",
+        warning: `${KZ_CITY_FALLBACK_WARNING} City: ${option.labelRu}.`,
+        cityInput,
+        cityId: option.id,
+        labelRu: option.labelRu,
+        canonicalName: option.canonicalName,
+        normalizedCity: cacheKey,
+        selected: null,
+        candidates: found.candidates,
+        rejectedCandidates: found.rejectedCandidates,
+      };
     } catch {
       // Fall through to a controlled country fallback with an explicit warning.
     }
@@ -534,40 +555,19 @@ export async function resolveMetaCityTarget(city: string, explicitCityKey = ""):
 
   return {
     key: null,
-    name: alias.displayName,
-    countryCode: "KZ",
+    name: option.canonicalName,
+    countryCode: option.countryCode,
     source: "fallback",
-    warning: `${KZ_CITY_FALLBACK_WARNING} City: ${cityInput}.`,
+    warning: `${KZ_CITY_FALLBACK_WARNING} City: ${option.labelRu}.`,
     cityInput,
-    normalizedCity: alias.canonical,
+    cityId: option.id,
+    labelRu: option.labelRu,
+    canonicalName: option.canonicalName,
+    normalizedCity: cacheKey,
+    selected: null,
+    candidates: [],
+    rejectedCandidates: [],
   };
-}
-
-function isAstanaCity(city: string): boolean {
-  const normalized = city.trim().toLowerCase();
-  return (
-    normalized.includes("astana") ||
-    normalized.includes("астана") ||
-    normalized.includes("nur-sultan") ||
-    normalized.includes("nursultan") ||
-    normalized.includes("нур-султан")
-  );
-}
-
-function readMetaCityKeyFromSearch(data: MetaJson): string {
-  const items = Array.isArray(data.data) ? data.data : [];
-  for (const item of items) {
-    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
-    const record = item as MetaJson;
-    const key = typeof record.key === "string" ? record.key.trim() : "";
-    const name = typeof record.name === "string" ? record.name.toLowerCase() : "";
-    const countryCode = typeof record.country_code === "string" ? record.country_code.toUpperCase() : "";
-    const type = typeof record.type === "string" ? record.type.toLowerCase() : "";
-    const matchesCity = name.includes("astana") || name.includes("nur-sultan") || name.includes("nursultan");
-    if (key && type === "city" && countryCode === "KZ" && matchesCity) return key;
-  }
-
-  return "";
 }
 
 export function buildGeoLocations(city: string, cityKey?: string): MetaJson {
@@ -606,9 +606,19 @@ export function buildMetaTargetingDebug(input: {
   };
 
   return {
+    selectedCity: {
+      id: resolution.cityId || "",
+      labelRu: resolution.labelRu || "",
+      canonicalName: resolution.canonicalName || resolution.city || "",
+    },
     cityInput: resolution.cityInput,
+    cityId: resolution.cityId || "",
+    labelRu: resolution.labelRu || "",
+    canonicalName: resolution.canonicalName || resolution.city || "",
     cityKey: resolution.cityKey || "",
     cityKeySource: resolution.cityKeySource,
+    candidates: input.resolution?.candidates || [],
+    rejectedCandidates: input.resolution?.rejectedCandidates || [],
     geoMode: resolution.geoMode,
     city: resolution.geoMode === "city" ? resolution.city : "",
     radiusKm: resolution.geoMode === "city" ? resolution.radiusKm : 0,
@@ -621,14 +631,17 @@ export function buildMetaTargetingDebug(input: {
   };
 }
 
-export async function resolveMetaTargetingForCity(city: string, explicitCityKey = ""): Promise<MetaTargetingResolution> {
+export async function resolveMetaTargetingForCity(city: string | MetaCityOption, explicitCityKey = ""): Promise<MetaTargetingResolution> {
   const target = await resolveMetaCityTarget(city, explicitCityKey);
-  const cityInput = target.cityInput || city.trim() || "Astana";
+  const cityInput = target.cityInput || (typeof city === "string" ? city.trim() : city.labelRu) || "Astana";
   const cityName = target.name || cityInput;
 
   if (target.key) {
     return {
       cityInput,
+      cityId: target.cityId,
+      labelRu: target.labelRu,
+      canonicalName: target.canonicalName,
       city: cityName,
       cityKey: target.key,
       cityKeySource: target.source,
@@ -639,11 +652,17 @@ export async function resolveMetaTargetingForCity(city: string, explicitCityKey 
       fallbackCountry: false,
       warning: target.warning,
       source: target.source,
+      selected: target.selected,
+      candidates: target.candidates || [],
+      rejectedCandidates: target.rejectedCandidates || [],
     };
   }
 
   return {
     cityInput,
+    cityId: target.cityId,
+    labelRu: target.labelRu,
+    canonicalName: target.canonicalName,
     city: cityName,
     cityKeySource: target.source,
     countryCode: target.countryCode,
@@ -653,82 +672,11 @@ export async function resolveMetaTargetingForCity(city: string, explicitCityKey 
     fallbackCountry: true,
     warning: target.warning || KZ_CITY_FALLBACK_WARNING,
     source: target.source,
+    selected: target.selected,
+    candidates: target.candidates || [],
+    rejectedCandidates: target.rejectedCandidates || [],
   };
 
-  const normalizedCity = city.trim() || "Astana";
-  const explicitKey = explicitCityKey.trim();
-  const envKey = readEnv("META_ASTANA_CITY_KEY");
-
-  if (isAstanaCity(normalizedCity)) {
-    if (explicitKey) {
-      return {
-        city: normalizedCity,
-        cityKey: explicitKey,
-        geoMode: "city",
-        radiusKm: 15,
-        fallbackCountry: false,
-        source: "input",
-      };
-    }
-
-    if (envKey) {
-      return {
-        city: normalizedCity,
-        cityKey: envKey,
-        geoMode: "city",
-        radiusKm: 15,
-        fallbackCountry: false,
-        source: "env",
-      };
-    }
-
-    if (getMetaConfig().configured) {
-      try {
-        const search = await metaRequest(
-          "/search",
-          "GET",
-          {
-            type: "adgeolocation",
-            location_types: ["city"],
-            q: "Astana",
-            country_code: "KZ",
-          },
-          "targeting_search",
-        );
-        const cityKey = readMetaCityKeyFromSearch(search);
-        if (cityKey) {
-          return {
-            city: normalizedCity,
-            cityKey,
-            geoMode: "city",
-            radiusKm: 15,
-            fallbackCountry: false,
-            source: "api",
-          };
-        }
-      } catch {
-        // Fall through to a controlled country fallback with an explicit warning.
-      }
-    }
-
-    return {
-      city: normalizedCity,
-      geoMode: "country",
-      radiusKm: 0,
-      fallbackCountry: true,
-      warning: ASTANA_CITY_FALLBACK_WARNING,
-      source: "fallback",
-    };
-  }
-
-  return {
-    city: normalizedCity,
-    geoMode: "country",
-    radiusKm: 0,
-    fallbackCountry: true,
-    warning: normalizedCity ? `Meta city key for ${normalizedCity} was not found, Kazakhstan country targeting was used.` : "",
-    source: "fallback",
-  };
 }
 
 export function getMetaConfig(): MetaConfig {

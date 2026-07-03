@@ -24,6 +24,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import { apiUrl } from "@/lib/api";
 import { hasSupabaseFrontendEnv, supabase } from "@/lib/supabase";
 import { getPlanFeature, normalizePlan, planFeatureBadge, type NegisPlan } from "@/lib/planFeatures";
+import { KZ_META_CITY_OPTIONS, getKzMetaCityOption } from "../../../../lib/meta/cities";
 
 type ApiResponse<TData = Record<string, unknown>> =
   | {
@@ -59,6 +60,9 @@ type LeadDestination = "whatsapp" | "instagram_profile" | "website" | "lead_form
 type Brief = {
   service: string;
   city: string;
+  cityId: string;
+  cityLabelRu: string;
+  cityCanonicalName: string;
   leadDestination: LeadDestination;
   destinationValue: string;
   dailyBudget: string;
@@ -218,6 +222,9 @@ const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString().slice(
 const defaultBrief: Brief = {
   service: "Консультация косметолога",
   city: "Астана",
+  cityId: "astana",
+  cityLabelRu: "Астана",
+  cityCanonicalName: "Astana",
   leadDestination: "whatsapp",
   destinationValue: "+7 700 000 00 00",
   dailyBudget: "20",
@@ -301,6 +308,17 @@ function readStored<T>(key: string, fallback: T): T {
   } catch {
     return fallback;
   }
+}
+
+function normalizeBriefCity(brief: Brief): Brief {
+  const city = getKzMetaCityOption(brief.cityId || brief.city || brief.cityLabelRu);
+  return {
+    ...brief,
+    city: city.labelRu,
+    cityId: city.id,
+    cityLabelRu: city.labelRu,
+    cityCanonicalName: city.canonicalName,
+  };
 }
 
 function readWorkspaceId() {
@@ -541,7 +559,7 @@ export default function AdsAutomation() {
   const workspaceId = clinicId || readWorkspaceId();
   const [plan] = useState<NegisPlan>(() => normalizePlan(readStored("negis_plan", "demo")));
   const [currentStep, setCurrentStep] = useState(1);
-  const [brief, setBrief] = useState<Brief>(() => readStored("negis_ads_automation_brief", defaultBrief));
+  const [brief, setBrief] = useState<Brief>(() => normalizeBriefCity(readStored("negis_ads_automation_brief", defaultBrief)));
   const [creative, setCreative] = useState<CreativeAsset | null>(null);
   const [aiPackage, setAiPackage] = useState<AiPackage | null>(null);
   const [compliance, setCompliance] = useState<ComplianceResult | null>(null);
@@ -578,6 +596,7 @@ export default function AdsAutomation() {
   }, [isHistoryView]);
 
   const destination = destinationOptions.find((item) => item.value === brief.leadDestination) || destinationOptions[0];
+  const selectedCity = getKzMetaCityOption(brief.cityId || brief.city);
   const destinationUrl = aiPackage?.destinationUrl || publicDestinationUrl(brief);
   const adsManagerUrl = useMemo(() => {
     const accountId = String(metaSummary?.adAccountId || "").replace(/^act_/, "");
@@ -591,6 +610,18 @@ export default function AdsAutomation() {
   }, [brief.dailyBudget, brief.days]);
 
   const updateBrief = (key: keyof Brief, value: string) => setBrief((current) => ({ ...current, [key]: value }));
+  const updateSelectedCity = (cityId: string) => {
+    const city = getKzMetaCityOption(cityId);
+    setBrief((current) => ({
+      ...current,
+      city: city.labelRu,
+      cityId: city.id,
+      cityLabelRu: city.labelRu,
+      cityCanonicalName: city.canonicalName,
+    }));
+    setLaunchResult(null);
+    setCompliance(null);
+  };
   const updateConfirmation = (key: keyof ConfirmationState, value: boolean) => {
     setConfirmations((current) => ({ ...current, [key]: value }));
   };
@@ -850,7 +881,10 @@ export default function AdsAutomation() {
           creativeType: creative?.fileType || "image",
           creativeUrl: creative?.publicUrl || "",
           service: brief.service,
-          city: brief.city,
+          city: selectedCity.labelRu,
+          selectedCityId: selectedCity.id,
+          selectedCityLabelRu: selectedCity.labelRu,
+          selectedCityCanonicalName: selectedCity.canonicalName,
           leadDestination: brief.leadDestination,
           destinationValue: brief.destinationValue,
           dailyBudget: Number(brief.dailyBudget),
@@ -888,9 +922,12 @@ export default function AdsAutomation() {
       sourceModule: "ads-automation",
       sourceId: creative?.id || "",
       service: brief.service,
-      city: brief.city,
+      city: selectedCity.labelRu,
+      selectedCityId: selectedCity.id,
+      selectedCityLabelRu: selectedCity.labelRu,
+      selectedCityCanonicalName: selectedCity.canonicalName,
       offer: brief.offer,
-      campaignName: aiPackage?.campaignName || `${brief.service} - ${brief.city}`,
+      campaignName: aiPackage?.campaignName || `${brief.service} - ${selectedCity.labelRu}`,
       launchTimestamp,
       objective: aiPackage?.objective || "OUTCOME_LEADS",
       statusMode: forcedStatusMode,
@@ -899,7 +936,7 @@ export default function AdsAutomation() {
       currency: "USD",
       targetAudience: aiPackage?.audience || brief.knownAudience,
       primaryText: text || "",
-      headline: aiPackage?.headline || `${brief.service} в ${brief.city}`,
+      headline: aiPackage?.headline || `${brief.service} в ${selectedCity.labelRu}`,
       description: aiPackage?.description || brief.offer,
       cta: aiPackage?.cta || "LEARN_MORE",
       landingUrl: destinationUrl,
@@ -1043,7 +1080,8 @@ export default function AdsAutomation() {
       payload: {
         creativeType: creative?.fileType,
         fileName: creative?.fileName,
-        city: brief.city,
+        city: selectedCity.labelRu,
+        selectedCityId: selectedCity.id,
         leadDestination: brief.leadDestination,
         launchTimestamp: resolvedTimestamp,
         campaignName: firstString(campaignPayload.name),
@@ -1277,7 +1315,20 @@ export default function AdsAutomation() {
 
         <div className="mt-6 grid gap-4 md:grid-cols-2">
           <Field label="Услуга" value={brief.service} onChange={(value) => updateBrief("service", value)} />
-          <Field label="Город" value={brief.city} onChange={(value) => updateBrief("city", value)} />
+          <label>
+            <span style={labelStyle}>Город</span>
+            <select
+              style={inputStyle}
+              value={selectedCity.id}
+              onChange={(event) => updateSelectedCity(event.target.value)}
+            >
+              {KZ_META_CITY_OPTIONS.map((city) => (
+                <option key={city.id} value={city.id}>
+                  {city.labelRu}
+                </option>
+              ))}
+            </select>
+          </label>
           <label>
             <span style={labelStyle}>Куда вести заявки</span>
             <select
@@ -1443,10 +1494,16 @@ export default function AdsAutomation() {
     const adSetBidStrategy = typeof adSetPayload.bid_strategy === "string" ? adSetPayload.bid_strategy : "LOWEST_COST_WITHOUT_CAP";
     const adSetTargeting = asRecord(adSetPayload.targeting);
     const adSetTargetingDebug = asRecord(adSetPayload.targetingDebug);
+    const selectedCityDebug = asRecord(adSetTargetingDebug.selectedCity);
+    const debugCandidates = Array.isArray(adSetTargetingDebug.candidates) ? adSetTargetingDebug.candidates.map(asRecord) : [];
+    const debugRejectedCandidates = Array.isArray(adSetTargetingDebug.rejectedCandidates) ? adSetTargetingDebug.rejectedCandidates.map(asRecord) : [];
     const publisherPlatforms = Array.isArray(adSetTargeting.publisher_platforms) ? adSetTargeting.publisher_platforms.map(String) : [];
     const instagramPositions = Array.isArray(adSetTargeting.instagram_positions) ? adSetTargeting.instagram_positions.map(String) : [];
     const targetingGeoMode = firstString(adSetTargetingDebug.geoMode, adSetTargetingDebug.geo_mode, Array.isArray(asRecord(adSetTargeting.geo_locations).cities) ? "city" : "country");
     const targetingCityInput = firstString(adSetTargetingDebug.cityInput, brief.city);
+    const targetingSelectedCityId = firstString(selectedCityDebug.id, adSetTargetingDebug.cityId, selectedCity.id);
+    const targetingSelectedCityLabel = firstString(selectedCityDebug.labelRu, adSetTargetingDebug.labelRu, selectedCity.labelRu);
+    const targetingSelectedCityCanonicalName = firstString(selectedCityDebug.canonicalName, adSetTargetingDebug.canonicalName, selectedCity.canonicalName);
     const targetingCityKey = firstString(adSetTargetingDebug.cityKey);
     const targetingCityKeySource = firstString(adSetTargetingDebug.cityKeySource, adSetTargetingDebug.source, targetingGeoMode === "city" ? "static" : "fallback");
     const targetingCityWarning = firstString(adSetTargetingDebug.cityWarning, adSetTargetingDebug.warning);
@@ -1509,7 +1566,7 @@ export default function AdsAutomation() {
           {[
             ["Что запускаем", report.whatWillRun || `${creative?.fileType === "video" ? "Видео" : "Фото"} + объявление`],
             ["Кому показываем", aiPackage?.audience || brief.knownAudience],
-            ["Город", brief.city],
+            ["Город", selectedCity.labelRu],
             ["Бюджет", `${brief.dailyBudget} USD/день · примерно ${totalBudget} USD всего`],
             ["Куда идут заявки", report.whereLeadsGo || destinationUrl],
             ["Текст для клиента", aiPackage?.primaryText],
@@ -1532,9 +1589,9 @@ export default function AdsAutomation() {
             <p className="text-xs font-black uppercase tracking-[0.1em] text-blue-800">Что будет создано в Meta</p>
             <ul className="mt-3 space-y-2 text-sm font-semibold text-blue-900">
               <li>• Кампания: {reportCampaignName || "-"}</li>
-              <li>• Группа объявлений: {reportAdSetName || `Instagram, ${brief.city}, ${brief.dailyBudget} USD/день`}</li>
+              <li>• Группа объявлений: {reportAdSetName || `Instagram, ${selectedCity.labelRu}, ${brief.dailyBudget} USD/день`}</li>
               <li>• Площадки: Instagram</li>
-              <li>• Гео: {targetingGeoMode === "city" ? `${targetingCity || brief.city}, радиус ${targetingRadiusKm} км` : "Казахстан"}</li>
+              <li>• Гео: {targetingGeoMode === "city" ? `${targetingCity || selectedCity.labelRu}, радиус ${targetingRadiusKm} км` : `Казахстан; city key для ${targetingSelectedCityLabel} не найден`}</li>
               <li>• Креатив: {creative?.fileType === "video" ? "видео" : "фото"}</li>
               <li>• Объявление: {aiPackage?.headline || "-"}</li>
               <li>• Статус: {statusMode === "ACTIVE" ? "активно" : "выключено"}</li>
@@ -1570,9 +1627,17 @@ export default function AdsAutomation() {
             <p><b>adset.optimization_goal:</b> {adSetOptimizationGoal}</p>
             <p><b>adset.bid_strategy:</b> {adSetBidStrategy}</p>
             <p><b>adset.targeting.targeting_automation.advantage_audience:</b> {advantageAudience}</p>
+            <p><b>adset.targeting.selectedCity.id:</b> {targetingSelectedCityId || "-"}</p>
+            <p><b>adset.targeting.selectedCity.labelRu:</b> {targetingSelectedCityLabel || "-"}</p>
+            <p><b>adset.targeting.selectedCity.canonicalName:</b> {targetingSelectedCityCanonicalName || "-"}</p>
             <p><b>adset.targeting.cityInput:</b> {targetingCityInput || "-"}</p>
             <p><b>adset.targeting.cityKey:</b> {targetingCityKey || "-"}</p>
             <p><b>adset.targeting.cityKeySource:</b> {targetingCityKeySource || "-"}</p>
+            <p><b>adset.targeting.candidates:</b> {debugCandidates.length}</p>
+            <p><b>adset.targeting.rejectedCandidates:</b> {debugRejectedCandidates.length}</p>
+            {debugRejectedCandidates.length ? (
+              <p><b>adset.targeting.rejectedCandidateNames:</b> {debugRejectedCandidates.map((item) => firstString(item.name, item.reason)).filter(Boolean).join(", ")}</p>
+            ) : null}
             <p><b>adset.targeting.geoMode:</b> {targetingGeoMode}</p>
             <p><b>adset.targeting.city:</b> {targetingCity || "-"}</p>
             <p><b>adset.targeting.radiusKm:</b> {targetingRadiusKm}</p>

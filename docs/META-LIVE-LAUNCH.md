@@ -45,12 +45,14 @@ Every Meta launch gets one Kazakhstan timestamp in `YYYY-MM-DD_HH-mm` format. Th
 
 For the MVP, ad set targeting is forced server-side:
 
-- geo: requested Kazakhstan city with 15 km radius when the resolver has a Meta city `key`;
+- geo: selected Kazakhstan city from the controlled `/ads-automation` city list, with 15 km radius when the resolver has a Meta city `key`;
 - static map currently includes Astana / Nur-Sultan (`1301648`);
 - aliases are normalized for Astana, Almaty, Shymkent, Karaganda, Aktobe, Atyrau, Aktau, Pavlodar, Kostanay, Taraz, Oral/Uralsk, Oskemen/Ust-Kamenogorsk, and Kyzylorda;
-- Targeting Search fallback calls `/search?type=adgeolocation&location_types=["city"]&q=<city>&country_code=KZ`;
+- Targeting Search fallback calls `/search?type=adgeolocation&location_types=["city"]&q=<canonical city>&country_code=KZ`;
+- Targeting Search candidates must match the selected city exactly by primary city name. Nearby region results such as `Temir, Aqtöbe, Kazakhstan` are rejected for selected `Актобе` and returned in `rejectedCandidates`;
 - successful Targeting Search city keys are cached in memory for the current server runtime;
-- fallback: Kazakhstan only, with an explicit warning if the city key is unavailable;
+- dry-run fallback: Kazakhstan only, with an explicit warning if the city key is unavailable;
+- real launch fallback: blocked before Meta API call if the selected city has no key, so an employee cannot accidentally launch on all Kazakhstan;
 - placements: Instagram only via `publisher_platforms: ["instagram"]`;
 - Instagram positions: stream, story, explore, reels.
 
@@ -60,8 +62,9 @@ Admin utility:
 
 - open `/admin -> Meta/Facebook Ads`;
 - use `Проверить Meta city key`;
-- the UI calls `/api/crm/meta-city-key?city=Алматы`;
-- the response shows only non-secret fields: `key`, `name`, `country_code`, `source`, `geoMode`, and warning/fallback status.
+- choose a city from the same controlled list used by `/ads-automation`;
+- the UI calls `/api/crm/meta-city-key?city=almaty` or `/api/crm/meta-city-key?city=Алматы`;
+- the response shows only non-secret fields: `selected`, `candidates`, `rejectedCandidates`, `key`, `name`, `country_code`, `source`, `geoMode`, and warning/fallback status.
 
 ## Default PAUSED Mode
 

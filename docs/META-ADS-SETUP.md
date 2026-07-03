@@ -64,16 +64,18 @@ Detailed guide: `docs/META-LIVE-LAUNCH.md`.
 
 ## MVP targeting behavior
 
-`/ads-automation` creates PAUSED launches with unique timestamped names, Kazakhstan city targeting when a valid Meta city key is available, and Instagram-only placements. Existing disabled test campaigns are not deleted automatically; remove old duplicates manually in Ads Manager if needed.
+`/ads-automation` creates PAUSED launches with unique timestamped names, controlled Kazakhstan city targeting, and Instagram-only placements. The employee selects a city from the built-in Kazakhstan list; free-text city entry is disabled for Meta launch. Existing disabled test campaigns are not deleted automatically; remove old duplicates manually in Ads Manager if needed.
 
 City targeting uses:
 
 - static map first: `astana -> 1301648`;
 - legacy env override: `META_ASTANA_CITY_KEY`;
 - in-memory cache for keys found by API;
-- Meta Targeting Search fallback: `/search?type=adgeolocation&location_types=["city"]&q=<city>&country_code=KZ`;
-- country fallback: `countries: ["KZ"]` with a warning when no city key is found.
+- Meta Targeting Search fallback: `/search?type=adgeolocation&location_types=["city"]&q=<canonical city>&country_code=KZ`;
+- exact selected-city matching: the first comma-separated city name in a Meta result must match the selected city aliases;
+- dry-run country fallback: `countries: ["KZ"]` with a warning when no city key is found;
+- real launch block: if the selected city has no Meta city key, `/api/crm/meta-launch` returns a validation error before any Meta API call.
 
 Supported aliases include Astana / Nur-Sultan, Almaty, Shymkent, Karaganda, Aktobe, Atyrau, Aktau, Pavlodar, Kostanay, Taraz, Oral / Uralsk, Oskemen / Ust-Kamenogorsk, and Kyzylorda.
 
-In `/admin -> Meta/Facebook Ads`, use `Проверить Meta city key` to test a city before launch.
+In `/admin -> Meta/Facebook Ads`, use `Проверить Meta city key` to test a city before launch. The diagnostic response includes `selected`, `candidates`, and `rejectedCandidates`, so nearby false matches like `Temir, Aqtöbe, Kazakhstan` are visible and not used for `Актобе`.

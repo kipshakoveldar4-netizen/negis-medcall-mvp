@@ -36,6 +36,7 @@ import {
   type CrmPermission,
   type StaffRole,
 } from "@/lib/permissions";
+import { KZ_META_CITY_OPTIONS, getKzMetaCityOption, type MetaCitySearchCandidate } from "../../../../lib/meta/cities";
 
 type AdminTab =
   | "overview"
@@ -96,12 +97,18 @@ type SafeMetaSummary = {
 
 type MetaCityKeyResult = {
   city?: string;
+  cityId?: string;
+  labelRu?: string;
+  canonicalName?: string;
   key?: string | null;
   name?: string;
   country_code?: string;
   countryCode?: string;
   region?: string;
   source?: string;
+  selected?: MetaCitySearchCandidate | null;
+  candidates?: MetaCitySearchCandidate[];
+  rejectedCandidates?: MetaCitySearchCandidate[];
   warning?: string;
   geoMode?: string;
   fallbackCountry?: boolean;
@@ -498,7 +505,7 @@ export default function AdminCenter() {
   const [health, setHealth] = useState<CrmHealthData | null>(null);
   const [integrationCards, setIntegrationCards] = useState<IntegrationCard[]>(() => buildIntegrationCards(null));
   const [loading, setLoading] = useState<Record<string, boolean>>({});
-  const [metaCityKeyInput, setMetaCityKeyInput] = useState("Алматы");
+  const [metaCityKeyInput, setMetaCityKeyInput] = useState("almaty");
   const [metaCityKeyResult, setMetaCityKeyResult] = useState<MetaCityKeyResult | null>(null);
   const [staffForm, setStaffForm] = useState({
     name: "",
@@ -790,15 +797,15 @@ export default function AdminCenter() {
   }
 
   async function checkMetaCityKey() {
-    const city = metaCityKeyInput.trim();
-    if (!city) {
+    const city = getKzMetaCityOption(metaCityKeyInput);
+    if (!city.id) {
       toast.error("Введите город для проверки");
       return;
     }
 
     setBusy("meta-city-key", true);
     try {
-      const body = await crmRequest<MetaCityKeyResult>(`/api/crm/meta-city-key?city=${encodeURIComponent(city)}`);
+      const body = await crmRequest<MetaCityKeyResult>(`/api/crm/meta-city-key?city=${encodeURIComponent(city.id)}`);
       const result = body.data || null;
       setMetaCityKeyResult(result);
       if (result?.key) {
@@ -1492,12 +1499,17 @@ export default function AdminCenter() {
             <h3 className="font-black text-[#0F172A]">Проверить Meta city key</h3>
             <p className="mt-1 text-sm text-[#64748B]">Введите город Казахстана. Backend вернет безопасный city key/source без секретов.</p>
             <div className="mt-3 flex flex-col gap-2 sm:flex-row">
-              <input
+              <select
                 className="neu-input"
-                value={metaCityKeyInput}
-                placeholder="Алматы"
+                value={getKzMetaCityOption(metaCityKeyInput).id}
                 onChange={(event) => setMetaCityKeyInput(event.target.value)}
-              />
+              >
+                {KZ_META_CITY_OPTIONS.map((city) => (
+                  <option key={city.id} value={city.id}>
+                    {city.labelRu}
+                  </option>
+                ))}
+              </select>
               <button type="button" className="neu-btn-primary justify-center" disabled={loading["meta-city-key"]} onClick={() => void checkMetaCityKey()}>
                 {loading["meta-city-key"] ? <Loader2 className="animate-spin" size={16} /> : <RefreshCw size={16} />}
                 Проверить
@@ -1506,10 +1518,18 @@ export default function AdminCenter() {
             {metaCityKeyResult ? (
               <div className="mt-3 rounded-2xl border border-[#E2E8F0] bg-[#F8FAFC] p-3 text-sm font-semibold text-[#334155]">
                 <p>city: {metaCityKeyResult.city || metaCityKeyInput}</p>
+                <p>cityId: {metaCityKeyResult.cityId || getKzMetaCityOption(metaCityKeyInput).id}</p>
+                <p>canonicalName: {metaCityKeyResult.canonicalName || getKzMetaCityOption(metaCityKeyInput).canonicalName}</p>
                 <p>key: {metaCityKeyResult.key || "-"}</p>
                 <p>name: {metaCityKeyResult.name || "-"}</p>
                 <p>country_code: {metaCityKeyResult.country_code || metaCityKeyResult.countryCode || "KZ"}</p>
                 <p>source: {metaCityKeyResult.source || "-"}</p>
+                <p>selected: {metaCityKeyResult.selected?.name || "-"}</p>
+                <p>candidates: {metaCityKeyResult.candidates?.length || 0}</p>
+                <p>rejectedCandidates: {metaCityKeyResult.rejectedCandidates?.length || 0}</p>
+                {metaCityKeyResult.rejectedCandidates?.length ? (
+                  <p>rejectedCandidateNames: {metaCityKeyResult.rejectedCandidates.map((item) => item.name || item.reason || "unknown").join(", ")}</p>
+                ) : null}
                 <p>geoMode: {metaCityKeyResult.geoMode || (metaCityKeyResult.key ? "city" : "country")}</p>
                 {metaCityKeyResult.warning ? <p className="mt-2 text-amber-700">warning: {metaCityKeyResult.warning}</p> : null}
               </div>

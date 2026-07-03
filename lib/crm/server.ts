@@ -17,6 +17,7 @@ import {
   resolveMetaTargetingForCity,
   uploadMetaVideo,
 } from "../meta/marketing";
+import { KZ_META_CITY_OPTIONS, findKzMetaCityOption, getKzMetaCityOption, type MetaCitySearchCandidate } from "../meta/cities";
 
 export type CrmResource =
   | "clients"
@@ -2675,7 +2676,10 @@ async function readMetaLiveLaunchEnabled(workspaceId: string, body: JsonRecord):
 
 function buildMetaLaunchBody(body: JsonRecord) {
   const service = firstString(body.service, body.niche, body.offer, body.campaignService, "Consultation");
-  const city = firstString(body.city, "Astana");
+  const rawSelectedCity = firstString(body.selectedCityId, body.selected_city_id, body.cityId, body.city_id, body.city, "astana");
+  const matchedCity = findKzMetaCityOption(rawSelectedCity);
+  const selectedCity = matchedCity || getKzMetaCityOption("astana");
+  const city = selectedCity.labelRu;
   const targetAudience = firstString(body.targetAudience, body.target_audience, "Women 25-55");
   const launchTimestamp = normalizeLaunchTimestamp(body.launchTimestamp ?? body.launch_timestamp) || formatKazakhstanTimestamp();
   const baseCampaignName = firstString(body.campaignName, body.campaign_name, `${service} - ${city} - заявки`);
@@ -2717,6 +2721,10 @@ function buildMetaLaunchBody(body: JsonRecord) {
     currency: readString(body.currency) || "USD",
     service,
     city,
+    selectedCityId: selectedCity.id,
+    selectedCityLabelRu: selectedCity.labelRu,
+    selectedCityCanonicalName: selectedCity.canonicalName,
+    selectedCityValid: Boolean(matchedCity),
     targetAudience,
     audienceLabel,
     launchTimestamp,
@@ -2789,6 +2797,9 @@ function buildMetaPayloadPreview(
     startTime: launch.startDate,
     endTime: launch.endDate || undefined,
     city: launch.city,
+    selectedCityId: launch.selectedCityId,
+    selectedCityLabelRu: launch.selectedCityLabelRu,
+    selectedCityCanonicalName: launch.selectedCityCanonicalName,
     audienceLabel: launch.audienceLabel,
     launchTimestamp: launch.launchTimestamp,
     adSetName: launch.adSetName,
@@ -2821,6 +2832,9 @@ function buildMetaPayloadPreview(
     endTime: launch.endDate || undefined,
     campaignId,
     city: launch.city,
+    selectedCityId: launch.selectedCityId,
+    selectedCityLabelRu: launch.selectedCityLabelRu,
+    selectedCityCanonicalName: launch.selectedCityCanonicalName,
     audienceLabel: launch.audienceLabel,
     launchTimestamp: launch.launchTimestamp,
     adSetName: launch.adSetName,
@@ -2986,7 +3000,7 @@ export async function handleMetaValidate(req: VercelRequest, res: VercelResponse
         instagramActorId: config.instagramActorId,
         astanaCityKeyConfigured: Boolean(readEnvValue("META_ASTANA_CITY_KEY")),
         cityResolver: {
-          staticCities: ["astana"],
+          staticCities: KZ_META_CITY_OPTIONS.map((city) => city.id),
           cache: "memory",
           targetingSearch: Boolean(config.accessToken),
         },
@@ -3010,7 +3024,7 @@ export async function handleMetaValidate(req: VercelRequest, res: VercelResponse
         instagramActorId: config.instagramActorId,
         astanaCityKeyConfigured: Boolean(readEnvValue("META_ASTANA_CITY_KEY")),
         cityResolver: {
-          staticCities: ["astana"],
+          staticCities: KZ_META_CITY_OPTIONS.map((city) => city.id),
           cache: "memory",
           targetingSearch: Boolean(config.accessToken),
         },
@@ -3026,7 +3040,7 @@ export async function handleMetaValidate(req: VercelRequest, res: VercelResponse
 
   try {
     const account = await checkMetaAdAccount();
-    const defaultCityTargeting = await resolveMetaTargetingForCity("Astana");
+    const defaultCityTargeting = await resolveMetaTargetingForCity(getKzMetaCityOption("astana"));
     let instagramActor: JsonRecord = {
       configured: Boolean(config.instagramActorId),
       valid: !config.instagramActorId,
@@ -3067,7 +3081,7 @@ export async function handleMetaValidate(req: VercelRequest, res: VercelResponse
         astanaTargeting: defaultCityTargeting,
         defaultCityTargeting,
         cityResolver: {
-          staticCities: ["astana"],
+          staticCities: KZ_META_CITY_OPTIONS.map((city) => city.id),
           cache: "memory",
           targetingSearch: true,
         },
@@ -3136,25 +3150,35 @@ export async function handleMetaCityKey(req: VercelRequest, res: VercelResponse)
   }
 
   const body = asRecord(req.body);
-  const city = firstString(body.city, readQueryString(req.query.city), "Astana");
+  const city = firstString(body.city, body.selectedCityId, readQueryString(req.query.city), readQueryString(req.query.selectedCityId), "astana");
   if (!city.trim()) {
     return sendJson(res, 400, errorBody("Validation error", ["city is required"]));
   }
 
-  const target = await resolveMetaCityTarget(city);
+  const cityOption = getKzMetaCityOption(city);
+  const target = await resolveMetaCityTarget(cityOption);
   const configured = getMetaConfig().configured;
+  const selected = target.selected || null;
+  const candidates: MetaCitySearchCandidate[] = target.candidates || [];
+  const rejectedCandidates: MetaCitySearchCandidate[] = target.rejectedCandidates || [];
 
   return sendJson(
     res,
     200,
     success(configured ? "supabase" : "demo", {
-      city,
+      city: cityOption.labelRu,
+      cityId: cityOption.id,
+      labelRu: cityOption.labelRu,
+      canonicalName: cityOption.canonicalName,
       key: target.key,
-      name: target.name || city,
+      name: target.name || cityOption.canonicalName,
       country_code: target.countryCode || "KZ",
       countryCode: target.countryCode || "KZ",
       region: target.region || "",
       source: target.source,
+      selected,
+      candidates,
+      rejectedCandidates,
       warning: target.warning || "",
       geoMode: target.key ? "city" : "country",
       fallbackCountry: !target.key,
@@ -3177,6 +3201,7 @@ export async function handleMetaLaunch(req: VercelRequest, res: VercelResponse) 
   const details: string[] = [];
 
   if (!launch.campaignName) details.push("Название кампании обязательно.");
+  if (!launch.selectedCityValid) details.push("Выберите город из списка Казахстана. Свободный ввод города для Meta launch отключён.");
   if (!launch.primaryText) details.push("Текст объявления обязателен.");
   if (!launch.headline) details.push("Заголовок обязателен.");
   if (!launch.dailyBudget || launch.dailyBudgetMinor <= 0) details.push("Укажите дневной бюджет больше 0.");
@@ -3228,8 +3253,25 @@ export async function handleMetaLaunch(req: VercelRequest, res: VercelResponse) 
     });
   }
 
-  const targetingResolution = await resolveMetaTargetingForCity(launch.city, launch.metaCityKey || launch.astanaCityKey);
+  const selectedCity = getKzMetaCityOption(launch.selectedCityId || launch.city);
+  const targetingResolution = await resolveMetaTargetingForCity(selectedCity, launch.metaCityKey || launch.astanaCityKey);
   const resolvedLaunch = { ...launch, targetingResolution };
+  if (!dryRun && (!targetingResolution.cityKey || targetingResolution.fallbackCountry)) {
+    const cityName = targetingResolution.labelRu || selectedCity.labelRu || resolvedLaunch.city;
+    return sendJson(res, 400, {
+      ...errorBody("Validation error", [
+        `Meta city key для города ${cityName} не найден. Запуск остановлен, чтобы не запустить рекламу на весь Казахстан. Проверьте город в Admin → Meta/Facebook Ads → Проверить Meta city key.`,
+      ]),
+      data: {
+        targetingResolution,
+        selectedCity: {
+          id: selectedCity.id,
+          labelRu: selectedCity.labelRu,
+          canonicalName: selectedCity.canonicalName,
+        },
+      },
+    });
+  }
 
   const payload: JsonRecord = {
     workspaceId,
@@ -3254,8 +3296,19 @@ export async function handleMetaLaunch(req: VercelRequest, res: VercelResponse) 
     adName: resolvedLaunch.adName,
     targeting: {
       cityInput: targetingResolution.cityInput || resolvedLaunch.city,
+      selectedCity: {
+        id: targetingResolution.cityId || selectedCity.id,
+        labelRu: targetingResolution.labelRu || selectedCity.labelRu,
+        canonicalName: targetingResolution.canonicalName || selectedCity.canonicalName,
+      },
+      cityId: targetingResolution.cityId || selectedCity.id,
+      labelRu: targetingResolution.labelRu || selectedCity.labelRu,
+      canonicalName: targetingResolution.canonicalName || selectedCity.canonicalName,
       cityKey: targetingResolution.cityKey || "",
       cityKeySource: targetingResolution.cityKeySource || targetingResolution.source,
+      selected: targetingResolution.selected || null,
+      candidates: targetingResolution.candidates || [],
+      rejectedCandidates: targetingResolution.rejectedCandidates || [],
       geoMode: targetingResolution.geoMode,
       city: targetingResolution.city,
       radiusKm: targetingResolution.radiusKm,
@@ -3316,6 +3369,9 @@ export async function handleMetaLaunch(req: VercelRequest, res: VercelResponse) 
         startTime: resolvedLaunch.startDate,
         endTime: resolvedLaunch.endDate || undefined,
         city: resolvedLaunch.city,
+        selectedCityId: resolvedLaunch.selectedCityId,
+        selectedCityLabelRu: resolvedLaunch.selectedCityLabelRu,
+        selectedCityCanonicalName: resolvedLaunch.selectedCityCanonicalName,
         audienceLabel: resolvedLaunch.audienceLabel,
         launchTimestamp: resolvedLaunch.launchTimestamp,
         adSetName: resolvedLaunch.adSetName,
@@ -3467,7 +3523,7 @@ export async function handleCrmHealth(req: VercelRequest, res: VercelResponse) {
     instagramActorId: readEnvValue("META_INSTAGRAM_ACTOR_ID"),
     astanaCityKeyConfigured: Boolean(readEnvValue("META_ASTANA_CITY_KEY")),
     cityResolver: {
-      staticCities: ["astana"],
+      staticCities: KZ_META_CITY_OPTIONS.map((city) => city.id),
       cache: "memory",
       targetingSearchFallback: Boolean(readEnvValue("META_ACCESS_TOKEN")),
     },
