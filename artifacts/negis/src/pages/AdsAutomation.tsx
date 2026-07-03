@@ -122,6 +122,7 @@ type LaunchResult = {
   videoUploadMode?: string;
   videoProcessingStatus?: string;
   videoWarnings?: string[];
+  lastCheckedAt?: string;
   status?: string;
   metaStatus?: string;
   dryRun?: boolean;
@@ -151,7 +152,8 @@ type StorageHealth = {
 };
 
 type UploadStatus = "idle" | "validating" | "getting_signed_url" | "uploading_to_storage" | "saving_metadata" | "ready" | "failed";
-type RealLaunchStatus = "idle" | "creating" | "failed" | "created";
+type RealLaunchStatus = "idle" | "creating" | "failed" | "created" | "video_processing";
+type LaunchMode = "dry_run" | "video_processing" | "paused_created" | "active_created" | "failed";
 
 type UploadDebug = {
   assetId?: string;
@@ -236,6 +238,8 @@ const VIDEO_LAUNCH_ENABLED_MESSAGE = "Meta video_id flow включён: MP4 и 
 const VIDEO_REQUIREMENTS_MESSAGE = "Видео: желательно MP4, до 100 MB, кодек H.264, вертикальный формат 9:16 для Reels/Stories. MOV можно хранить в Negis, но для Meta автозапуска лучше MP4.";
 const MOV_VIDEO_WARNING = "MOV поддерживается Meta, но обработка может быть дольше. Для стабильности лучше MP4/H.264.";
 const VIDEO_FORMAT_ERROR = "Для автозапуска видео поддерживаются MP4 и MOV.";
+const DRY_RUN_REFERENCE_MESSAGE = "Последняя проверка без запуска прошла. Meta API не вызывался.";
+const VIDEO_PROCESSING_PENDING_MESSAGE = "Видео принято Meta и обрабатывается. Это не ошибка. Повторите создание объявления через несколько минут.";
 
 const defaultBrief: Brief = {
   service: "Консультация косметолога",
@@ -507,6 +511,58 @@ function localHistoryKey(workspaceId: string) {
   return `negis_ads_launch_history_${workspaceId}`;
 }
 
+function isDryRunMetaId(value?: string) {
+  return Boolean(value && value.trim().toLowerCase().startsWith("dryrun_"));
+}
+
+function isVideoStatusReady(value?: string) {
+  const text = (value || "").toLowerCase();
+  return text.includes("ready") || text.includes("available") || text.includes("complete") || text.includes("success") || text.includes("finished");
+}
+
+function resolveLaunchMode(item: LaunchHistoryItem): LaunchMode {
+  const status = (item.status || "").toLowerCase();
+  const metaStatus = (item.metaStatus || "").toLowerCase();
+  const metaResponse = asRecord(item.metaResponse);
+  const payload = asRecord(item.payload);
+  const hasDryRunIds = [item.metaCampaignId, item.metaAdSetId, item.metaCreativeId, item.metaAdId].some((id) => isDryRunMetaId(id));
+
+  if (status === "dry_run" || metaStatus === "dry_run" || metaResponse.dryRun === true || hasDryRunIds) return "dry_run";
+  if (status === "video_processing" || metaStatus === "video_processing" || metaResponse.pendingVideoProcessing === true) return "video_processing";
+  if (status === "failed" || metaStatus === "failed" || Boolean(item.lastError)) return "failed";
+
+  const realCampaignId = item.metaCampaignId && !isDryRunMetaId(item.metaCampaignId) ? item.metaCampaignId : "";
+  if (!realCampaignId) {
+    const videoId = firstString(item.metaVideoId, payload.metaVideoId);
+    if (videoId && !isDryRunMetaId(videoId)) return "video_processing";
+    return "dry_run";
+  }
+  if (status === "active" || metaStatus === "active") return "active_created";
+  return "paused_created";
+}
+
+class CrmError extends Error {
+  data: Record<string, unknown>;
+
+  constructor(message: string, data: Record<string, unknown>) {
+    super(message);
+    this.name = "CrmError";
+    this.data = data;
+  }
+}
+
+class VideoProcessingPendingError extends Error {
+  metaVideoId: string;
+  processingStatus: string;
+
+  constructor(metaVideoId: string, processingStatus: string) {
+    super(VIDEO_PROCESSING_PENDING_MESSAGE);
+    this.name = "VideoProcessingPendingError";
+    this.metaVideoId = metaVideoId;
+    this.processingStatus = processingStatus;
+  }
+}
+
 async function safeJson<T>(response: { text: () => Promise<string> }): Promise<ApiResponse<T>> {
   const text = await response.text();
   if (!text.trim()) return { success: false, error: "Пустой ответ сервера", details: ["Сервер вернул пустой ответ."] };
@@ -535,7 +591,10 @@ async function crmRequest<T>(path: string, init?: RequestInit): Promise<Extract<
       metaError.blame_field_specs ? `blame_field_specs: ${JSON.stringify(metaError.blame_field_specs).slice(0, 180)}` : "",
       firstString(metaError.fbtrace_id) ? `fbtrace_id: ${firstString(metaError.fbtrace_id)}` : "",
     ].filter(Boolean);
-    throw new Error([details || (body.success === false ? body.error : `HTTP ${response.status}`), ...metaDetails, hint].filter(Boolean).join(" "));
+    throw new CrmError(
+      [details || (body.success === false ? body.error : `HTTP ${response.status}`), ...metaDetails, hint].filter(Boolean).join(" "),
+      body.success === false ? asRecord(body.data) : {},
+    );
   }
 
   return body as Extract<ApiResponse<T>, { success: true }>;
@@ -619,6 +678,7 @@ export default function AdsAutomation() {
   const [realLaunchStatus, setRealLaunchStatus] = useState<RealLaunchStatus>("idle");
   const [realLaunchMessage, setRealLaunchMessage] = useState("");
   const [historyItems, setHistoryItems] = useState<LaunchHistoryItem[]>([]);
+  const [historyVideoCheckId, setHistoryVideoCheckId] = useState("");
   const isHistoryView = location === "/ads-automation/history";
 
   useEffect(() => {
@@ -1074,8 +1134,10 @@ export default function AdsAutomation() {
 
   async function ensureVideoReady(): Promise<string> {
     if (!creative || creative.fileType !== "video") return "";
-    if (creative.metaVideoId) return creative.metaVideoId;
-    if (!creative.publicUrl) throw new Error(uploadLinkMissingMessage(storageHealth));
+    // Reuse the stored video_id: if Meta already confirmed it is ready, no API call is needed;
+    // otherwise the server re-checks processing status for the same video_id instead of uploading again.
+    if (creative.metaVideoId && isVideoStatusReady(creative.videoProcessingStatus)) return creative.metaVideoId;
+    if (!creative.metaVideoId && !creative.publicUrl) throw new Error(uploadLinkMissingMessage(storageHealth));
 
     setLoading("video");
     try {
@@ -1083,7 +1145,9 @@ export default function AdsAutomation() {
         metaVideoId?: string;
         videoId?: string;
         uploadMode?: string;
+        videoReady?: boolean;
         processingStatus?: string;
+        lastCheckedAt?: string;
         warnings?: string[];
       }>("/api/crm/ad-creative-meta-upload", {
         method: "POST",
@@ -1095,31 +1159,59 @@ export default function AdsAutomation() {
           fileType: creative.fileType,
           mimeType: creative.mimeType,
           publicUrl: creative.publicUrl,
+          metaVideoId: creative.metaVideoId || "",
         }),
       });
       const metaVideoId = body.data.metaVideoId || body.data.videoId || "";
       if (!metaVideoId) throw new Error("Meta не вернула video_id.");
       const warnings = Array.isArray(body.data.warnings) ? body.data.warnings : [];
+      const videoReady = body.data.videoReady !== false;
+      const processingStatus = body.data.processingStatus || (videoReady ? "ready" : "processing");
       setCreative((current) =>
         current
           ? {
               ...current,
               metaVideoId,
               videoUploadMode: body.data.uploadMode || current.videoUploadMode,
-              videoProcessingStatus: body.data.processingStatus || current.videoProcessingStatus,
+              videoProcessingStatus: processingStatus,
               videoWarnings: uniqueStrings([...(current.videoWarnings || []), ...warnings]),
-              status: "meta_uploaded",
+              status: videoReady ? "meta_uploaded" : "meta_processing",
             }
           : current,
       );
       if (warnings.length) setNotice(warnings.join(" "));
+      if (!videoReady) throw new VideoProcessingPendingError(metaVideoId, processingStatus);
       return metaVideoId;
+    } catch (error) {
+      // Older/error responses report pending processing as a video_processing error with the
+      // video_id in the payload — keep that id so the next attempt does not upload again.
+      if (error instanceof CrmError) {
+        const metaError = asRecord(error.data.metaError);
+        const debug = asRecord(metaError.debug);
+        const pendingVideoId = firstString(error.data.metaVideoId, error.data.videoId, debug.videoId);
+        const isPendingProcessing = firstString(error.data.status) === "video_processing" || firstString(metaError.step) === "video_processing";
+        if (pendingVideoId && isPendingProcessing) {
+          const processingStatus = firstString(error.data.processingStatus, debug.status) || "processing";
+          setCreative((current) =>
+            current
+              ? {
+                  ...current,
+                  metaVideoId: pendingVideoId,
+                  videoProcessingStatus: processingStatus,
+                  status: "meta_processing",
+                }
+              : current,
+          );
+          throw new VideoProcessingPendingError(pendingVideoId, processingStatus);
+        }
+      }
+      throw error;
     } finally {
       setLoading(null);
     }
   }
 
-  function saveLocalLaunch(result: LaunchResult, nextStatusMode: "PAUSED" | "ACTIVE") {
+  function saveLocalLaunch(result: LaunchResult, nextStatusMode: "PAUSED" | "ACTIVE", statusOverride?: string) {
     const key = localHistoryKey(workspaceId);
     const current = readStored<LaunchHistoryItem[]>(key, []);
     const metaPayload = asRecord(result.metaPayload);
@@ -1133,13 +1225,13 @@ export default function AdsAutomation() {
       id: result.launchId || `local-${Date.now()}`,
       campaignName: firstString(campaignPayload.name, launchPayload.campaignName, aiPackage?.campaignName),
       launchTimestamp: resolvedTimestamp,
-      status: nextStatusMode === "ACTIVE" ? "active" : "paused",
+      status: statusOverride || (nextStatusMode === "ACTIVE" ? "active" : "paused"),
       metaCampaignId: result.metaCampaignId,
       metaAdSetId: result.metaAdSetId,
       metaCreativeId: result.metaCreativeId,
       metaAdId: result.metaAdId,
       metaVideoId: result.metaVideoId || result.videoId || creative?.metaVideoId,
-      metaStatus: result.metaStatus || nextStatusMode,
+      metaStatus: result.metaStatus || statusOverride?.toUpperCase() || nextStatusMode,
       budgetDailyMinor: Math.round(Number(brief.dailyBudget || 0) * 100),
       currency: "USD",
       launchedBy: user?.email || "Negis user",
@@ -1151,6 +1243,7 @@ export default function AdsAutomation() {
         metaVideoId: result.metaVideoId || result.videoId || creative?.metaVideoId,
         videoUploadMode: result.videoUploadMode || creative?.videoUploadMode,
         videoProcessingStatus: result.videoProcessingStatus || creative?.videoProcessingStatus,
+        lastCheckedAt: result.lastCheckedAt,
         videoWarnings: uniqueStrings([...(creative?.videoWarnings || []), ...(result.videoWarnings || [])]),
         city: selectedCity.labelRu,
         selectedCityId: selectedCity.id,
@@ -1207,6 +1300,21 @@ export default function AdsAutomation() {
       if (body.data.dryRun) {
         throw new Error("Meta вернула режим проверки для реального запуска. Кампания не создана.");
       }
+      if (body.data.status === "video_processing") {
+        const pendingVideoId = body.data.metaVideoId || body.data.videoId || metaVideoId;
+        if (pendingVideoId) {
+          setCreative((current) =>
+            current && current.fileType === "video"
+              ? { ...current, metaVideoId: pendingVideoId, videoProcessingStatus: body.data.videoProcessingStatus || "processing", status: "meta_processing" }
+              : current,
+          );
+        }
+        saveLocalLaunch(body.data, nextStatusMode, "video_processing");
+        setRealLaunchStatus("video_processing");
+        setRealLaunchMessage(`${VIDEO_PROCESSING_PENDING_MESSAGE}${pendingVideoId ? ` Meta Video ID: ${pendingVideoId}.` : ""}`);
+        toast.info(VIDEO_PROCESSING_PENDING_MESSAGE);
+        return;
+      }
       setLaunchResult({ ...body.data, warning: body.warning || body.data.warning });
       const launchedMetaVideoId = body.data.metaVideoId || body.data.videoId || metaVideoId;
       if (creative?.fileType === "video" && launchedMetaVideoId) {
@@ -1232,6 +1340,25 @@ export default function AdsAutomation() {
       toast.success(nextStatusMode === "ACTIVE" ? "Реклама запущена" : "Кампания создана выключенной");
       if (body.warning) setNotice(body.warning);
     } catch (error) {
+      if (error instanceof VideoProcessingPendingError) {
+        // Not a failure: Meta accepted the video and is still processing it.
+        saveLocalLaunch(
+          {
+            metaVideoId: error.metaVideoId,
+            videoId: error.metaVideoId,
+            videoProcessingStatus: error.processingStatus,
+            lastCheckedAt: new Date().toISOString(),
+            metaStatus: "VIDEO_PROCESSING",
+          },
+          nextStatusMode,
+          "video_processing",
+        );
+        setRealLaunchStatus("video_processing");
+        setRealLaunchMessage(`${VIDEO_PROCESSING_PENDING_MESSAGE} Meta Video ID: ${error.metaVideoId}.`);
+        setNotice("");
+        toast.info(VIDEO_PROCESSING_PENDING_MESSAGE);
+        return;
+      }
       const message = error instanceof Error ? error.message : "Не удалось создать рекламу в Meta.";
       setNotice(message);
       setRealLaunchStatus("failed");
@@ -1253,6 +1380,51 @@ export default function AdsAutomation() {
       setNotice(error instanceof Error ? error.message : "История запусков пока недоступна.");
     } finally {
       setLoading(null);
+    }
+  }
+
+  async function recheckHistoryVideo(item: LaunchHistoryItem) {
+    const payload = asRecord(item.payload);
+    const metaResponse = asRecord(item.metaResponse);
+    const videoId = firstString(item.metaVideoId, payload.metaVideoId, metaResponse.videoId, metaResponse.metaVideoId);
+    if (!videoId || isDryRunMetaId(videoId)) return;
+    const checkId = item.id || videoId;
+    setHistoryVideoCheckId(checkId);
+    try {
+      const body = await crmRequest<{ videoReady?: boolean; processingStatus?: string; lastCheckedAt?: string }>("/api/crm/ad-creative-meta-upload", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          workspaceId,
+          assetId: firstString(payload.sourceId),
+          fileType: "video",
+          fileName: firstString(payload.fileName, "negis-video.mp4"),
+          mimeType: firstString(payload.mimeType, "video/mp4"),
+          metaVideoId: videoId,
+        }),
+      });
+      const videoReady = body.data.videoReady === true;
+      const processingStatus = firstString(body.data.processingStatus) || (videoReady ? "ready" : "processing");
+      const lastCheckedAt = firstString(body.data.lastCheckedAt) || new Date().toISOString();
+      const patchPayload = (entry: LaunchHistoryItem): LaunchHistoryItem => ({
+        ...entry,
+        payload: { ...asRecord(entry.payload), videoProcessingStatus: processingStatus, lastCheckedAt },
+      });
+      setHistoryItems((items) => items.map((entry) => (entry === item ? patchPayload(entry) : entry)));
+      const key = localHistoryKey(workspaceId);
+      const stored = readStored<LaunchHistoryItem[]>(key, []);
+      if (item.id && stored.some((entry) => entry.id === item.id)) {
+        window.localStorage.setItem(key, JSON.stringify(stored.map((entry) => (entry.id === item.id ? patchPayload(entry) : entry))));
+      }
+      if (videoReady) {
+        toast.success("Видео в Meta готово. Можно создавать объявление.");
+      } else {
+        toast.info(VIDEO_PROCESSING_PENDING_MESSAGE);
+      }
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Не удалось проверить готовность видео.");
+    } finally {
+      setHistoryVideoCheckId("");
     }
   }
 
@@ -1852,13 +2024,16 @@ export default function AdsAutomation() {
     const realLaunchBlockedByVideo = creative?.fileType === "video" && !metaSummary?.videoLaunchEnabled ? VIDEO_REAL_LAUNCH_DISABLED_MESSAGE : "";
     const realLaunchBusy = loading === "launch" || loading === "video";
     const realLaunchDisabled = realLaunchBusy || Boolean(realLaunchBlockedByCreative) || Boolean(realLaunchBlockedByVideo);
-    const realLaunchTone = realLaunchStatus === "failed" ? "red" : realLaunchStatus === "created" ? "green" : "blue";
+    const realLaunchTone =
+      realLaunchStatus === "failed" ? "red" : realLaunchStatus === "created" ? "green" : realLaunchStatus === "video_processing" ? "amber" : "blue";
     const realLaunchLabel =
       realLaunchStatus === "creating"
         ? "Создаём кампанию в Meta"
         : realLaunchStatus === "failed"
           ? "Запуск в Meta не прошёл"
-          : "Кампания создана в Meta";
+          : realLaunchStatus === "video_processing"
+            ? "Видео обрабатывается в Meta"
+            : "Кампания создана в Meta";
     const launchCreativePayload = asRecord(asRecord(launchResult?.metaPayload).creative);
     const launchImageUploadCapabilityFallback = Boolean(launchCreativePayload.imageUploadCapabilityFallback);
     const launchMetaVideoId = firstString(launchResult?.metaVideoId, launchResult?.videoId, creative?.metaVideoId);
@@ -1866,10 +2041,10 @@ export default function AdsAutomation() {
     const launchVideoProcessingStatus = firstString(launchResult?.videoProcessingStatus, creative?.videoProcessingStatus);
     const launchVideoWarnings = uniqueStrings([...(creative?.videoWarnings || []), ...(launchResult?.videoWarnings || [])]);
     const launchResultTitle = launchResult?.dryRun
-      ? "Проверка прошла без запуска"
+      ? "Проверка без запуска (DRY-RUN)"
       : launchResult?.metaStatus === "ACTIVE" || launchResult?.status === "active"
         ? "Реклама создана и запущена в Meta"
-        : "Реклама создана в Meta выключенной";
+        : "Реклама создана в Meta выключенной (PAUSED)";
     return (
       <section className="neu-card p-5 sm:p-6">
         <p className="text-xs font-black uppercase tracking-[0.16em] text-[#0D9488]">Шаг 6</p>
@@ -1941,7 +2116,9 @@ export default function AdsAutomation() {
               ? "border-red-200 bg-red-50 text-red-900"
               : realLaunchTone === "green"
                 ? "border-emerald-200 bg-emerald-50 text-emerald-900"
-                : "border-blue-200 bg-blue-50 text-blue-900"
+                : realLaunchTone === "amber"
+                  ? "border-amber-200 bg-amber-50 text-amber-900"
+                  : "border-blue-200 bg-blue-50 text-blue-900"
           }`}>
             <p className="text-sm font-black">{realLaunchLabel}</p>
             {realLaunchMessage ? <p className="mt-1 text-sm font-semibold">{realLaunchMessage}</p> : null}
@@ -1967,13 +2144,13 @@ export default function AdsAutomation() {
         </div>
 
         {launchResult ? (
-          <div className="mt-6 rounded-[24px] border border-emerald-200 bg-emerald-50 p-5">
+          <div className={`mt-6 rounded-[24px] border p-5 ${launchResult.dryRun ? "border-slate-200 bg-white/70" : "border-emerald-200 bg-emerald-50"}`}>
             <div className="flex items-start gap-3">
-              <CheckCircle2 className="mt-0.5 text-emerald-700" size={20} />
+              <CheckCircle2 className={`mt-0.5 ${launchResult.dryRun ? "text-slate-500" : "text-emerald-700"}`} size={20} />
               <div>
-                <p className="font-black text-emerald-900">{launchResultTitle}</p>
-                <p className="mt-1 text-sm font-semibold text-emerald-800">
-                  {launchResult.dryRun ? "Кампания в Meta не создавалась." : `Meta Campaign ID: ${launchResult.metaCampaignId || "ожидается"}`}
+                <p className={`font-black ${launchResult.dryRun ? "text-slate-700" : "text-emerald-900"}`}>{launchResultTitle}</p>
+                <p className={`mt-1 text-sm font-semibold ${launchResult.dryRun ? "text-slate-600" : "text-emerald-800"}`}>
+                  {launchResult.dryRun ? DRY_RUN_REFERENCE_MESSAGE + " Кампания в Meta не создавалась." : `Meta Campaign ID: ${launchResult.metaCampaignId || "ожидается"}`}
                 </p>
                 {launchResult.warning ? <p className="mt-2 text-sm font-bold text-amber-800">{launchResult.warning}</p> : null}
                 {creative?.fileType === "video" && launchMetaVideoId ? (
@@ -1999,10 +2176,12 @@ export default function AdsAutomation() {
               </div>
             </div>
             <div className="mt-4 flex flex-col gap-2 sm:flex-row">
-              <a className="neu-btn justify-center" href={adsManagerUrl} target="_blank" rel="noopener noreferrer">
-                <ExternalLink size={16} />
-                Открыть Ads Manager
-              </a>
+              {!launchResult.dryRun ? (
+                <a className="neu-btn justify-center" href={adsManagerUrl} target="_blank" rel="noopener noreferrer">
+                  <ExternalLink size={16} />
+                  Открыть Ads Manager
+                </a>
+              ) : null}
               <button type="button" className="neu-btn-primary justify-center" onClick={() => setLocation("/ads-automation/history")}>
                 <History size={16} />
                 История запусков
@@ -2013,7 +2192,7 @@ export default function AdsAutomation() {
 
         {lastDryRunResult?.dryRun && (realLaunchStatus !== "idle" || (launchResult && !launchResult.dryRun)) ? (
           <div className="mt-4 rounded-2xl border border-slate-200 bg-white/70 p-4 text-sm font-semibold text-slate-700">
-            Последняя проверка без запуска прошла. Это справка, реальный статус запуска показан выше.
+            {DRY_RUN_REFERENCE_MESSAGE} Это справка, реальный статус запуска показан выше.
           </div>
         ) : null}
       </section>
@@ -2048,47 +2227,96 @@ export default function AdsAutomation() {
             historyItems.map((item, index) => {
               const payload = asRecord(item.payload);
               const metaResponse = asRecord(item.metaResponse);
+              const mode = resolveLaunchMode(item);
               const itemTimestamp = firstString(item.launchTimestamp, payload.launchTimestamp);
               const historyMetaVideoId = firstString(item.metaVideoId, payload.metaVideoId, metaResponse.videoId, metaResponse.metaVideoId);
               const historyVideoUploadMode = firstString(payload.videoUploadMode, metaResponse.videoUploadMode);
               const historyVideoProcessingStatus = firstString(payload.videoProcessingStatus, metaResponse.videoProcessingStatus);
+              const historyLastCheckedAt = firstString(payload.lastCheckedAt, metaResponse.lastCheckedAt);
               const historyVideoWarnings = Array.isArray(payload.videoWarnings)
                 ? payload.videoWarnings.map(String).filter(Boolean)
                 : Array.isArray(metaResponse.videoWarnings)
                   ? metaResponse.videoWarnings.map(String).filter(Boolean)
                   : [];
+              const isRealLaunch = mode === "paused_created" || mode === "active_created";
+              const modeBadge =
+                mode === "dry_run"
+                  ? { tone: "blue" as const, label: "DRY-RUN / Проверка" }
+                  : mode === "video_processing"
+                    ? { tone: "amber" as const, label: "Видео обрабатывается" }
+                    : mode === "failed"
+                      ? { tone: "red" as const, label: "Ошибка запуска" }
+                      : mode === "active_created"
+                        ? { tone: "green" as const, label: "ACTIVE / запущено" }
+                        : { tone: "green" as const, label: "PAUSED / выключено" };
+              const modeDescription =
+                mode === "dry_run"
+                  ? "Проверка без запуска. Meta API не вызывался, кампания не создавалась."
+                  : mode === "video_processing"
+                    ? "Видео принято Meta и обрабатывается. Кампания ещё не создана — это не ошибка."
+                    : mode === "failed"
+                      ? "Реальный запуск не прошёл."
+                      : mode === "active_created"
+                        ? "Реальная кампания создана и запущена в Meta."
+                        : "Реальная кампания создана в Meta выключенной (PAUSED).";
+              const checking = Boolean(historyVideoCheckId) && historyVideoCheckId === (item.id || historyMetaVideoId);
+              const showVideoDetails = payload.creativeType === "video" || mode === "video_processing";
               return (
-                <article key={item.id || `${item.campaignName}-${index}`} className="rounded-2xl border border-[#D8E4EC] bg-white/70 p-4">
+                <article key={item.id || `${item.campaignName}-${index}`} className={`rounded-2xl border p-4 ${mode === "dry_run" ? "border-slate-200 bg-white/55" : "border-[#D8E4EC] bg-white/70"}`}>
                   <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                     <div>
                       <p className="font-black text-[#0F172A]">{item.campaignName || "Meta campaign"}</p>
                       <p className="mt-1 text-sm font-semibold text-[#64748B]">
-                        {item.createdAt ? new Date(item.createdAt).toLocaleString("ru-RU") : "Дата не указана"} · {itemTimestamp || "timestamp -"} · {payload.creativeType === "video" ? "видео" : "фото"} · {item.status || "draft"}
+                        {item.createdAt ? new Date(item.createdAt).toLocaleString("ru-RU") : "Дата не указана"} · {itemTimestamp || "timestamp -"} · {payload.creativeType === "video" ? "видео" : "фото"}
                       </p>
                     </div>
                     <div className="flex flex-wrap gap-2">
-                      <StatusPill tone={item.lastError ? "red" : "green"}>{item.lastError ? "ошибка" : item.metaStatus || item.status || "создано"}</StatusPill>
+                      <StatusPill tone={modeBadge.tone}>{modeBadge.label}</StatusPill>
                       <StatusPill tone="slate">{item.budgetDailyMinor ? `${Math.round(item.budgetDailyMinor / 100)} ${item.currency || "USD"}/день` : "бюджет -"}</StatusPill>
                     </div>
                   </div>
+                  <p className="mt-2 text-sm font-semibold text-[#64748B]">{modeDescription}</p>
                   <div className="mt-3 grid gap-2 text-sm font-semibold text-[#475569] md:grid-cols-2">
-                    <p>Meta Campaign ID: {item.metaCampaignId || "-"}</p>
-                    <p>Meta Ad Set ID: {item.metaAdSetId || "-"}</p>
-                    <p>Meta Creative ID: {item.metaCreativeId || "-"}</p>
-                    <p>Meta Ad ID: {item.metaAdId || "-"}</p>
+                    {isRealLaunch || mode === "failed" ? (
+                      <>
+                        <p>Meta Campaign ID: {item.metaCampaignId || "-"}</p>
+                        <p>Meta Ad Set ID: {item.metaAdSetId || "-"}</p>
+                        <p>Meta Creative ID: {item.metaCreativeId || "-"}</p>
+                        <p>Meta Ad ID: {item.metaAdId || "-"}</p>
+                      </>
+                    ) : null}
                     <p>Запустил: {item.launchedBy || "-"}</p>
                     <p>Город: {typeof payload.city === "string" ? payload.city : "-"}</p>
                     <p>Файл: {typeof payload.fileName === "string" ? payload.fileName : "-"}</p>
                     <p>MIME: {typeof payload.mimeType === "string" ? payload.mimeType : "-"}</p>
-                    {payload.creativeType === "video" ? <p>Meta Video ID: {historyMetaVideoId || "-"}</p> : null}
-                    {payload.creativeType === "video" ? <p>Video upload: {historyVideoUploadMode || "-"}</p> : null}
-                    {payload.creativeType === "video" ? <p>Processing: {historyVideoProcessingStatus || "-"}</p> : null}
+                    {showVideoDetails ? <p>Meta Video ID: {historyMetaVideoId || "-"}</p> : null}
+                    {showVideoDetails ? <p>Video upload: {historyVideoUploadMode || "-"}</p> : null}
+                    {showVideoDetails ? <p>Processing: {historyVideoProcessingStatus || "-"}</p> : null}
+                    {showVideoDetails ? (
+                      <p>Проверено: {historyLastCheckedAt ? new Date(historyLastCheckedAt).toLocaleString("ru-RU") : "-"}</p>
+                    ) : null}
                     <p>Ad set: {typeof payload.adSetName === "string" ? payload.adSetName : "-"}</p>
                   </div>
-                  {payload.creativeType === "video" && historyVideoWarnings.length ? (
+                  {showVideoDetails && historyVideoWarnings.length ? (
                     <p className="mt-3 text-sm font-bold text-amber-700">{historyVideoWarnings.join(" ")}</p>
                   ) : null}
-                  {item.lastError ? <p className="mt-3 text-sm font-bold text-red-600">{item.lastError}</p> : null}
+                  {mode === "failed" && item.lastError ? <p className="mt-3 text-sm font-bold text-red-600">{item.lastError}</p> : null}
+                  {mode === "video_processing" && historyMetaVideoId ? (
+                    <div className="mt-3 flex flex-col gap-2 sm:flex-row">
+                      <button type="button" className="neu-btn justify-center" disabled={checking} onClick={() => void recheckHistoryVideo(item)}>
+                        {checking ? <Loader2 className="animate-spin" size={16} /> : <RefreshCw size={16} />}
+                        Проверить готовность видео
+                      </button>
+                    </div>
+                  ) : null}
+                  {isRealLaunch ? (
+                    <div className="mt-3 flex flex-col gap-2 sm:flex-row">
+                      <a className="neu-btn justify-center" href={adsManagerUrl} target="_blank" rel="noopener noreferrer">
+                        <ExternalLink size={16} />
+                        Открыть Ads Manager
+                      </a>
+                    </div>
+                  ) : null}
                 </article>
               );
             })

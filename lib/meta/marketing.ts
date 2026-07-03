@@ -79,6 +79,8 @@ export type MetaApiErrorDetails = {
   errorUserMsg?: string;
   blameFieldSpecs?: unknown;
   fbtraceId?: string;
+  // true when the video is accepted by Meta and still processing — not a real failure
+  pending?: boolean;
   debug?: unknown;
 };
 
@@ -224,6 +226,13 @@ const metaCityTargetCache = new Map<string, MetaCityTarget>();
 
 function readEnv(key: string): string {
   return process.env[key]?.trim() || "";
+}
+
+function readNonNegativeIntEnv(key: string): number | undefined {
+  const raw = readEnv(key);
+  if (!raw) return undefined;
+  const value = Number(raw);
+  return Number.isInteger(value) && value >= 0 ? value : undefined;
 }
 
 export function isMetaVideoLaunchEnabled(): boolean {
@@ -1029,8 +1038,46 @@ async function pollMetaVideoProcessing(input: {
   throw new MetaApiError({
     step: "video_processing",
     message: META_VIDEO_PROCESSING_TIMEOUT_MESSAGE,
+    pending: true,
     debug: { videoId: input.videoId, status: lastStatus, processingProgress: lastProgress, raw: lastRaw },
   });
+}
+
+export async function checkMetaVideoProcessingStatus(input: {
+  videoId: string;
+  attempts?: number;
+  delayMs?: number;
+}): Promise<{ videoId: string; status: string; progress?: number; ready: boolean; pending: boolean; raw?: unknown }> {
+  const videoId = input.videoId.trim();
+  if (!videoId) {
+    throw new Error("Meta video_id is required for processing status check");
+  }
+
+  const config = assertMetaConfigured();
+  try {
+    const processing = await pollMetaVideoProcessing({
+      config: { baseUrl: config.baseUrl, accessToken: config.accessToken },
+      videoId,
+      attempts: input.attempts ?? 1,
+      delayMs: input.delayMs ?? 0,
+    });
+    return {
+      videoId,
+      status: processing.status,
+      progress: processing.progress,
+      ready: isVideoReadyStatus(processing.status),
+      pending: false,
+      raw: processing.raw,
+    };
+  } catch (error) {
+    if (error instanceof MetaApiError && error.details.step === "video_processing" && error.details.pending) {
+      const debug = error.details.debug && typeof error.details.debug === "object" && !Array.isArray(error.details.debug) ? (error.details.debug as MetaJson) : {};
+      const status = readMetaString(debug.status) || "processing";
+      const progress = typeof debug.processingProgress === "number" && Number.isFinite(debug.processingProgress) ? debug.processingProgress : undefined;
+      return { videoId, status, progress, ready: false, pending: true, raw: debug.raw };
+    }
+    throw error;
+  }
 }
 
 function makeMultipartBody(fields: Record<string, string>, file: { fieldName: string; fileName: string; mimeType: string; buffer: Buffer }) {
@@ -1202,8 +1249,8 @@ export async function uploadMetaVideoAndGetId(input: {
   const processing = await pollMetaVideoProcessing({
     config: resolvedConfig,
     videoId,
-    attempts: input.processingPollAttempts ?? 4,
-    delayMs: input.processingPollDelayMs ?? 3000,
+    attempts: input.processingPollAttempts ?? readNonNegativeIntEnv("META_VIDEO_PROCESSING_POLL_ATTEMPTS") ?? 4,
+    delayMs: input.processingPollDelayMs ?? readNonNegativeIntEnv("META_VIDEO_PROCESSING_POLL_DELAY_MS") ?? 3000,
   });
 
   return {

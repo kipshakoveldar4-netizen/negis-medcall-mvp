@@ -14,9 +14,11 @@ import {
   getMetaConfig,
   isMetaVideoLaunchEnabled,
   launchMetaCampaign,
+  checkMetaVideoProcessingStatus,
   META_VIDEO_LAUNCH_DISABLED_MESSAGE,
   META_VIDEO_FORMAT_ERROR,
   META_MOV_VIDEO_WARNING,
+  META_VIDEO_PROCESSING_TIMEOUT_MESSAGE,
   resolveMetaCityTarget,
   resolveMetaTargetingForCity,
   isSupportedMetaVideoFormat,
@@ -2206,6 +2208,61 @@ export async function handleAdCreativeMetaUpload(req: VercelRequest, res: Vercel
     );
   }
 
+  // Reuse an already uploaded Meta video: re-check its processing status without a second upload.
+  const existingMetaVideoId = firstString(body.metaVideoId, body.meta_video_id, body.videoId, body.video_id);
+  if (existingMetaVideoId && !isDryRunMetaId(existingMetaVideoId) && !readBoolean(body.dryRun)) {
+    if (!getMetaConfig().configured) {
+      return sendJson(
+        res,
+        400,
+        errorBody("Не удалось проверить видео в Meta", [
+          "Meta env не настроены. Проверьте META_ACCESS_TOKEN, META_AD_ACCOUNT_ID и META_PAGE_ID в Vercel.",
+        ]),
+      );
+    }
+
+    try {
+      const check = await checkMetaVideoProcessingStatus({ videoId: existingMetaVideoId });
+      const lastCheckedAt = new Date().toISOString();
+      await updateAdCreativeMeta({
+        workspaceId,
+        assetId,
+        metaVideoId: existingMetaVideoId,
+        status: check.ready ? "meta_uploaded" : "meta_processing",
+        metadata: {
+          processingStatus: check.status,
+          processingProgress: check.progress ?? null,
+          lastCheckedAt,
+        },
+      });
+      return sendJson(
+        res,
+        check.ready ? 200 : 202,
+        success("supabase", {
+          assetId,
+          metaVideoId: existingMetaVideoId,
+          videoId: existingMetaVideoId,
+          reused: true,
+          videoReady: check.ready,
+          processingStatus: check.status,
+          processingProgress: check.progress,
+          lastCheckedAt,
+          status: check.ready ? "meta_uploaded" : "video_processing",
+          message: check.ready
+            ? "Видео в Meta готово. Можно создавать объявление."
+            : META_VIDEO_PROCESSING_TIMEOUT_MESSAGE,
+        }),
+      );
+    } catch (error) {
+      const metaError = safeMetaLaunchError(error);
+      const message = firstString(metaError.message, error instanceof Error ? error.message : "");
+      return sendJson(res, 502, {
+        ...errorBody("Meta не вернула статус видео", [message]),
+        data: { metaError, metaVideoId: existingMetaVideoId, videoId: existingMetaVideoId },
+      });
+    }
+  }
+
   if (!publicUrl) {
     return sendJson(
       res,
@@ -2264,13 +2321,14 @@ export async function handleAdCreativeMetaUpload(req: VercelRequest, res: Vercel
   try {
     const metaResponse = await uploadMetaVideoAndGetId({ videoUrl: publicUrl, fileName, mimeType, title });
     const metaVideoId = metaResponse.videoId;
+    const lastCheckedAt = new Date().toISOString();
 
     await updateAdCreativeMeta({
       workspaceId,
       assetId,
       metaVideoId,
       status: "meta_uploaded",
-      metadata: { metaResponse },
+      metadata: { metaResponse, processingStatus: metaResponse.processingStatus, lastCheckedAt },
     });
 
     return sendJson(
@@ -2281,13 +2339,45 @@ export async function handleAdCreativeMetaUpload(req: VercelRequest, res: Vercel
         metaVideoId,
         videoId: metaVideoId,
         uploadMode: metaResponse.uploadMode,
+        videoReady: true,
         processingStatus: metaResponse.processingStatus,
+        lastCheckedAt,
         warnings: metaResponse.warnings || [],
         status: "meta_uploaded",
         metaResponse,
       }, metaResponse.warnings?.join(" ") || (mimeType === "video/quicktime" ? META_MOV_VIDEO_WARNING : undefined)),
     );
   } catch (error) {
+    // Video accepted by Meta but still processing: keep the video_id so the next attempt reuses it.
+    if (isMetaVideoProcessingPendingError(error)) {
+      const debug = asRecord(error.details.debug);
+      const pendingVideoId = firstString(debug.videoId);
+      if (pendingVideoId) {
+        const processingStatus = firstString(debug.status) || "processing";
+        const lastCheckedAt = new Date().toISOString();
+        await updateAdCreativeMeta({
+          workspaceId,
+          assetId,
+          metaVideoId: pendingVideoId,
+          status: "meta_processing",
+          metadata: { processingStatus, lastCheckedAt },
+        });
+        return sendJson(
+          res,
+          202,
+          success("supabase", {
+            assetId,
+            metaVideoId: pendingVideoId,
+            videoId: pendingVideoId,
+            videoReady: false,
+            processingStatus,
+            lastCheckedAt,
+            status: "video_processing",
+            message: META_VIDEO_PROCESSING_TIMEOUT_MESSAGE,
+          }),
+        );
+      }
+    }
     const metaError = safeMetaLaunchError(error);
     const message = firstString(metaError.message, error instanceof Error ? error.message : "");
     return sendJson(
@@ -2628,6 +2718,14 @@ function roleCanLaunchActive(role: string): boolean {
 
 function demoMetaId(prefix: string) {
   return `dryrun_${prefix}_${Date.now()}`;
+}
+
+function isDryRunMetaId(value: unknown): boolean {
+  return typeof value === "string" && value.trim().toLowerCase().startsWith("dryrun_");
+}
+
+function isMetaVideoProcessingPendingError(error: unknown): error is MetaApiError {
+  return error instanceof MetaApiError && error.details.step === "video_processing" && error.details.pending === true;
 }
 
 function localizeMetaLaunchError(message: string) {
@@ -3394,6 +3492,8 @@ export async function handleMetaLaunch(req: VercelRequest, res: VercelResponse) 
 
   try {
     if (dryRun) {
+      // Dry-run records must never look like real PAUSED launches in history.
+      launchStatus = "dry_run";
       metaResponse = {
         dryRun: true,
         metaCampaignId: demoMetaId("campaign"),
@@ -3469,6 +3569,60 @@ export async function handleMetaLaunch(req: VercelRequest, res: VercelResponse) 
       };
     }
   } catch (error) {
+    // The video is accepted by Meta and still processing — no campaign exists yet,
+    // and this must not be recorded or shown as a failed launch.
+    if (isMetaVideoProcessingPendingError(error)) {
+      const debug = asRecord(error.details.debug);
+      const pendingVideoId = firstString(debug.videoId);
+      const processingStatus = firstString(debug.status) || "processing";
+      const lastCheckedAt = new Date().toISOString();
+      const saved = await persistMetaLaunch({
+        workspaceId,
+        payload: {
+          ...payload,
+          metaVideoId: pendingVideoId,
+          videoProcessingStatus: processingStatus,
+          lastCheckedAt,
+          payload: {
+            ...asRecord(payload.payload),
+            metaVideoId: pendingVideoId,
+            videoProcessingStatus: processingStatus,
+            lastCheckedAt,
+          },
+        },
+        compliance: compliance as unknown as JsonRecord,
+        metaResponse: {
+          videoId: pendingVideoId,
+          metaVideoId: pendingVideoId,
+          videoProcessingStatus: processingStatus,
+          pendingVideoProcessing: true,
+          lastCheckedAt,
+          payload: metaPayload,
+        },
+        status: "video_processing",
+        metaStatus: "VIDEO_PROCESSING",
+      });
+      return sendJson(
+        res,
+        202,
+        success(saved.mode, {
+          launchId: firstString(asRecord(saved.item).id),
+          launch: saved.item,
+          compliance,
+          safeText: compliance.safeText,
+          dryRun: false,
+          status: "video_processing",
+          metaStatus: "VIDEO_PROCESSING",
+          metaVideoId: pendingVideoId,
+          videoId: pendingVideoId,
+          videoProcessingStatus: processingStatus,
+          lastCheckedAt,
+          launchTimestamp: resolvedLaunch.launchTimestamp,
+          metaPayload,
+        }, META_VIDEO_PROCESSING_TIMEOUT_MESSAGE),
+      );
+    }
+
     const metaError = safeMetaLaunchError(error);
     const lastError = firstString(metaError.message, "Не удалось создать рекламу в Meta");
     const saved = await persistMetaLaunch({
@@ -3496,12 +3650,12 @@ export async function handleMetaLaunch(req: VercelRequest, res: VercelResponse) 
     payload: {
       ...payload,
       ...ids,
-      metaStatus: resolvedLaunch.statusMode,
+      metaStatus: dryRun ? "DRY_RUN" : resolvedLaunch.statusMode,
     },
     compliance: compliance as unknown as JsonRecord,
     metaResponse,
     status: launchStatus,
-    metaStatus: resolvedLaunch.statusMode,
+    metaStatus: dryRun ? "DRY_RUN" : resolvedLaunch.statusMode,
   });
 
   const launchId = firstString(asRecord(saved.item).id);

@@ -82,6 +82,17 @@ async function checkAdsAutomationSource() {
   assertSourceExcludes(source, "new FormData(", "multipart upload from UI");
   assertSourceExcludes(source, ".upload(storagePath, file", "anonymous Supabase upload call");
   assertSourceExcludes(source, "Файл загружается. Подождите несколько секунд.", "stale endless upload message");
+  assertSourceIncludes(source, "resolveLaunchMode", "history launch mode normalization");
+  assertSourceIncludes(source, "isDryRunMetaId", "dryrun_ Meta ID detection");
+  assertSourceIncludes(source, "DRY-RUN / Проверка", "dry-run history badge");
+  assertSourceIncludes(source, "Meta API не вызывался", "dry-run entries must say Meta API was not called");
+  assertSourceIncludes(source, "PAUSED / выключено", "real PAUSED history badge");
+  assertSourceIncludes(source, "Видео обрабатывается", "video processing history badge");
+  assertSourceIncludes(source, "Проверить готовность видео", "video processing recheck action");
+  assertSourceIncludes(source, "Видео принято Meta и обрабатывается. Это не ошибка.", "video processing in-progress copy");
+  assertSourceIncludes(source, "lastCheckedAt", "video processing lastCheckedAt display");
+  assertSourceIncludes(source, "VideoProcessingPendingError", "controlled pending video state");
+  assertSourceIncludes(source, 'metaVideoId: creative.metaVideoId || ""', "video_id reuse in meta upload request");
 
   console.log("AdsAutomation source checks: ok");
 }
@@ -626,6 +637,7 @@ async function checkMetaVideoModule() {
     }
 
     let processingTimeout = false;
+    let pendingDetails: { pending?: boolean; debug?: { videoId?: string; status?: string } } | undefined;
     try {
       await marketing.uploadMetaVideoAndGetId({
         videoUrl: "https://example.com/pending.mp4",
@@ -637,9 +649,16 @@ async function checkMetaVideoModule() {
       });
     } catch (error) {
       processingTimeout = error instanceof Error && error.message.includes("обрабатывается");
+      pendingDetails = (error as { details?: { pending?: boolean; debug?: { videoId?: string; status?: string } } }).details;
     }
     if (!processingTimeout) {
       throw new Error("video processing timeout must return a controlled retry message");
+    }
+    if (pendingDetails?.pending !== true) {
+      throw new Error("video processing timeout must be marked pending, not a real failure");
+    }
+    if (pendingDetails?.debug?.videoId !== "video_pending") {
+      throw new Error("video processing timeout must preserve the received Meta video_id in debug");
     }
 
     const videoCreative = marketing.buildVideoCreativePayload({
@@ -712,6 +731,228 @@ async function checkMetaVideoModule() {
   }
 
   console.log("Meta video module checks: ok");
+}
+
+async function checkCrmLaunchStateModule() {
+  const crmModuleUrl = pathToFileURL(path.join(repoRoot, "lib", "crm", "server.ts")).href;
+  const crm = (await import(crmModuleUrl)) as {
+    handleMetaLaunch(req: unknown, res: unknown): Promise<unknown>;
+    handleAdCreativeMetaUpload(req: unknown, res: unknown): Promise<unknown>;
+  };
+
+  const originalEnv = {
+    META_VIDEO_LAUNCH_ENABLED: process.env.META_VIDEO_LAUNCH_ENABLED,
+    META_ACCESS_TOKEN: process.env.META_ACCESS_TOKEN,
+    META_AD_ACCOUNT_ID: process.env.META_AD_ACCOUNT_ID,
+    META_PAGE_ID: process.env.META_PAGE_ID,
+    META_INSTAGRAM_ACTOR_ID: process.env.META_INSTAGRAM_ACTOR_ID,
+    META_VIDEO_PROCESSING_POLL_ATTEMPTS: process.env.META_VIDEO_PROCESSING_POLL_ATTEMPTS,
+    META_VIDEO_PROCESSING_POLL_DELAY_MS: process.env.META_VIDEO_PROCESSING_POLL_DELAY_MS,
+  };
+  const fetchBox = globalThis as unknown as {
+    fetch: (
+      input: string,
+      init?: { method?: string; headers?: Record<string, string>; body?: string | Buffer },
+    ) => Promise<{
+      ok: boolean;
+      status: number;
+      text: () => Promise<string>;
+      headers?: { get(name: string): string | null };
+      arrayBuffer?: () => Promise<ArrayBuffer>;
+    }>;
+  };
+  const originalFetch = fetchBox.fetch;
+  const calls: Array<{ url: string; method: string }> = [];
+
+  const jsonResponse = (data: unknown) => ({
+    ok: true,
+    status: 200,
+    headers: { get: () => null },
+    text: async () => JSON.stringify(data),
+  });
+
+  const makeRes = () => {
+    const box: { statusCode: number; body: Record<string, unknown> } = { statusCode: 0, body: {} };
+    const res = {
+      status(code: number) {
+        box.statusCode = code;
+        return res;
+      },
+      setHeader() {
+        return res;
+      },
+      json(payload: unknown) {
+        box.body = (payload || {}) as Record<string, unknown>;
+        return res;
+      },
+      end() {
+        return res;
+      },
+    };
+    return { res, box };
+  };
+
+  const baseLaunchBody = {
+    workspaceId: "demo-workspace",
+    campaignName: "Smoke CRM Video Launch",
+    objective: "OUTCOME_LEADS",
+    statusMode: "PAUSED",
+    dailyBudget: 20,
+    totalBudget: 140,
+    currency: "USD",
+    city: "Astana",
+    targetAudience: "Women 25-55",
+    primaryText: "Professional consultation in Astana. Book a specialist consultation.",
+    headline: "Consultation in Astana",
+    description: "Book a consultation with a specialist.",
+    cta: "LEARN_MORE",
+    landingUrl: "https://example.com",
+    creativeType: "video",
+    creativeUrl: "https://example.com/crm-pending.mp4",
+    videoUrl: "https://example.com/crm-pending.mp4",
+    fileName: "crm-pending.mp4",
+    mimeType: "video/mp4",
+    complianceConfirmed: true,
+    manualApprovalConfirmed: true,
+    dryRun: false,
+  };
+
+  try {
+    process.env.META_VIDEO_LAUNCH_ENABLED = "true";
+    process.env.META_ACCESS_TOKEN = "smoke_token";
+    process.env.META_AD_ACCOUNT_ID = "act_smoke";
+    process.env.META_PAGE_ID = "page_smoke";
+    delete process.env.META_INSTAGRAM_ACTOR_ID;
+    process.env.META_VIDEO_PROCESSING_POLL_ATTEMPTS = "1";
+    process.env.META_VIDEO_PROCESSING_POLL_DELAY_MS = "0";
+
+    fetchBox.fetch = async (input, init = {}) => {
+      const url = String(input);
+      const method = init.method || "GET";
+      calls.push({ url, method });
+      if (url.includes("/advideos") && method === "POST") return jsonResponse({ id: "video_pending_crm" });
+      if (url.includes("/video_pending_crm")) return jsonResponse({ status: { video_status: "processing", processing_progress: 40 } });
+      if (url.includes("/video_ready_crm")) return jsonResponse({ status: { video_status: "ready" } });
+      return jsonResponse({});
+    };
+
+    // Real video launch with pending Meta processing must become video_processing, not PAUSED and not failed.
+    const pendingLaunch = makeRes();
+    await crm.handleMetaLaunch({ method: "POST", body: { ...baseLaunchBody }, query: {}, headers: {} }, pendingLaunch.res);
+    const pendingBody = pendingLaunch.box.body as {
+      success?: boolean;
+      data?: { status?: string; metaVideoId?: string; launch?: { status?: string; metaVideoId?: string; lastError?: string } };
+    };
+    if (pendingLaunch.box.statusCode !== 202 || pendingBody.success !== true) {
+      throw new Error("meta-launch with pending video processing must return 202 success, not a failure");
+    }
+    if (pendingBody.data?.status !== "video_processing" || pendingBody.data?.metaVideoId !== "video_pending_crm") {
+      throw new Error("meta-launch pending video must report status video_processing with the Meta video_id");
+    }
+    if (pendingBody.data?.launch?.status !== "video_processing" || pendingBody.data?.launch?.metaVideoId !== "video_pending_crm") {
+      throw new Error("meta-launch pending video history record must keep status video_processing and the video_id");
+    }
+    if (pendingBody.data?.launch?.lastError) {
+      throw new Error("meta-launch pending video must not be recorded as failed");
+    }
+    if (calls.some((call) => call.url.includes("/campaigns"))) {
+      throw new Error("meta-launch must not create a campaign while the video is still processing");
+    }
+
+    // A stored video_id must be reused: status re-check only, no second /advideos upload.
+    calls.length = 0;
+    const reuse = makeRes();
+    await crm.handleAdCreativeMetaUpload(
+      {
+        method: "POST",
+        body: { workspaceId: "demo-workspace", fileType: "video", fileName: "crm-pending.mp4", mimeType: "video/mp4", metaVideoId: "video_ready_crm" },
+        query: {},
+        headers: {},
+      },
+      reuse.res,
+    );
+    const reuseBody = reuse.box.body as {
+      success?: boolean;
+      data?: { metaVideoId?: string; reused?: boolean; videoReady?: boolean; lastCheckedAt?: string };
+    };
+    if (
+      reuse.box.statusCode !== 200 ||
+      reuseBody.success !== true ||
+      reuseBody.data?.metaVideoId !== "video_ready_crm" ||
+      reuseBody.data?.reused !== true ||
+      reuseBody.data?.videoReady !== true
+    ) {
+      throw new Error("ad-creative-meta-upload must reuse an existing Meta video_id and report readiness");
+    }
+    if (!reuseBody.data?.lastCheckedAt) {
+      throw new Error("ad-creative-meta-upload recheck must report lastCheckedAt");
+    }
+    if (calls.some((call) => call.url.includes("/advideos"))) {
+      throw new Error("ad-creative-meta-upload must not upload the video again when video_id is already known");
+    }
+
+    // Rechecking a still-processing video stays video_processing and is not an error.
+    calls.length = 0;
+    const stillProcessing = makeRes();
+    await crm.handleAdCreativeMetaUpload(
+      {
+        method: "POST",
+        body: { workspaceId: "demo-workspace", fileType: "video", fileName: "crm-pending.mp4", mimeType: "video/mp4", metaVideoId: "video_pending_crm" },
+        query: {},
+        headers: {},
+      },
+      stillProcessing.res,
+    );
+    const stillBody = stillProcessing.box.body as {
+      success?: boolean;
+      data?: { status?: string; videoReady?: boolean; metaVideoId?: string };
+    };
+    if (
+      stillProcessing.box.statusCode !== 202 ||
+      stillBody.success !== true ||
+      stillBody.data?.status !== "video_processing" ||
+      stillBody.data?.videoReady !== false ||
+      stillBody.data?.metaVideoId !== "video_pending_crm"
+    ) {
+      throw new Error("ad-creative-meta-upload recheck of a processing video must stay video_processing without failing");
+    }
+
+    // ACTIVE launch must remain gated.
+    const gated = makeRes();
+    await crm.handleMetaLaunch(
+      {
+        method: "POST",
+        body: {
+          ...baseLaunchBody,
+          creativeType: "image",
+          imageUrl: "https://example.com/smoke.jpg",
+          creativeUrl: "https://example.com/smoke.jpg",
+          videoUrl: "",
+          fileName: "smoke.jpg",
+          mimeType: "image/jpeg",
+          statusMode: "ACTIVE",
+        },
+        query: {},
+        headers: {},
+      },
+      gated.res,
+    );
+    const gatedBody = gated.box.body as { success?: boolean; details?: string[] };
+    if (gated.box.statusCode < 400 || gatedBody.success !== false || !(gatedBody.details || []).some((item) => item.includes("ACTIVE"))) {
+      throw new Error("ACTIVE launch must remain gated without Admin Center live launch approval");
+    }
+  } finally {
+    fetchBox.fetch = originalFetch;
+    for (const [key, value] of Object.entries(originalEnv)) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
+
+  console.log("CRM launch state module checks: ok");
 }
 
 async function checkHtmlRoute(path: string) {
@@ -812,6 +1053,7 @@ async function main() {
   await checkMetaMarketingSource();
   await checkMetaCityResolverModule();
   await checkMetaVideoModule();
+  await checkCrmLaunchStateModule();
   for (const route of [
     "/dashboard",
     "/clients",
@@ -1319,6 +1561,8 @@ async function main() {
   const launchData = (launch.data || {}) as {
     metaCampaignId?: string;
     metaStatus?: string;
+    status?: string;
+    launch?: { status?: string };
     metaPayload?: {
       campaign?: Record<string, unknown>;
       adSet?: Record<string, unknown>;
@@ -1456,6 +1700,15 @@ async function main() {
   }
   if (campaignPayload.status !== "PAUSED" || launchData.metaStatus !== "PAUSED") {
     throw new Error("/api/crm/meta-launch dry-run must use PAUSED status");
+  }
+  if (launchData.status !== "dry_run") {
+    throw new Error("/api/crm/meta-launch dry-run must report launch status dry_run, not a real PAUSED launch");
+  }
+  if (!String(launchData.metaCampaignId || "").startsWith("dryrun_")) {
+    throw new Error("/api/crm/meta-launch dry-run must return a dryrun_ campaign id");
+  }
+  if (launchData.launch?.status !== "dry_run") {
+    throw new Error("/api/crm/meta-launch dry-run history record must be saved with status dry_run");
   }
   const videoDryRun = await checkJsonEndpoint("/api/crm/meta-launch", {
     method: "POST",
