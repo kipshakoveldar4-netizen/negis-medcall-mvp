@@ -129,6 +129,7 @@ type MetaSummary = {
   adAccountId?: string;
   pageId?: string;
   instagramActorId?: string;
+  videoLaunchEnabled?: boolean;
   hasAccessToken?: boolean;
 };
 
@@ -218,6 +219,11 @@ const labelStyle: CSSProperties = {
 };
 
 const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+const VIDEO_REAL_LAUNCH_DISABLED_MESSAGE =
+  "Видео загружено в Negis, но автозапуск видео-рекламы через Meta API ещё находится в подготовке. Сейчас можно запускать фото-рекламу. Для видео используйте Ads Manager вручную или загрузите MP4 после включения video_id flow.";
+const VIDEO_LAUNCH_SOON_MESSAGE = "Видео-запуск через Meta API будет добавлен после video_id upload flow.";
+const VIDEO_REQUIREMENTS_MESSAGE = "Видео: желательно MP4, до 100 MB, кодек H.264, вертикальный формат 9:16 для Reels/Stories. MOV можно хранить в Negis, но для Meta автозапуска лучше MP4.";
+const MOV_VIDEO_WARNING = "MOV сохранён в Negis, но для Meta автозапуска лучше загрузить MP4.";
 
 const defaultBrief: Brief = {
   service: "Консультация косметолога",
@@ -693,6 +699,8 @@ export default function AdsAutomation() {
     setUploadStage(uploadStatusLabel("validating"));
     setLastUploadError("");
     setUploadDebug(null);
+    const fileType = inferCreativeFileType(file);
+    const isMovVideo = fileType === "video" && (file.type === "video/quicktime" || file.name.toLowerCase().endsWith(".mov"));
     const details = validateFile(file);
     if (details.length > 0) {
       const message = details.join(" ");
@@ -705,8 +713,8 @@ export default function AdsAutomation() {
     }
 
     setLoading("upload");
-    setNotice("");
-    const fileType = inferCreativeFileType(file);
+    setNotice(isMovVideo ? MOV_VIDEO_WARNING : "");
+    if (isMovVideo) toast.warning(MOV_VIDEO_WARNING);
     const previewUrl = URL.createObjectURL(file);
     let publicUrl = "";
     let storagePath = "";
@@ -1014,6 +1022,7 @@ export default function AdsAutomation() {
     if (!confirmations.spendUnderstood) errors.push("Подтвердите понимание расходов.");
     if (!metaSummary?.configured) errors.push("Meta env не настроены или не подтверждены.");
     if (creative && !creative.publicUrl) errors.push(uploadLinkMissingMessage(storageHealth));
+    if (creative?.fileType === "video" && !metaSummary?.videoLaunchEnabled) errors.push(VIDEO_REAL_LAUNCH_DISABLED_MESSAGE);
     if (creative?.fileType === "video" && !creative.metaVideoId && !creative.publicUrl) {
       errors.push("Видео загружено в Negis, но ссылка для Meta ещё не готова. Проверьте Storage или повторите загрузку.");
     }
@@ -1099,6 +1108,14 @@ export default function AdsAutomation() {
     if (errors.length > 0) {
       setNotice(errors.join(" "));
       toast.error("Проверьте условия запуска");
+      return;
+    }
+
+    if (creative?.fileType === "video" && !metaSummary?.videoLaunchEnabled) {
+      setNotice(VIDEO_REAL_LAUNCH_DISABLED_MESSAGE);
+      setRealLaunchStatus("failed");
+      setRealLaunchMessage(VIDEO_REAL_LAUNCH_DISABLED_MESSAGE);
+      toast.error(VIDEO_REAL_LAUNCH_DISABLED_MESSAGE);
       return;
     }
 
@@ -1208,6 +1225,7 @@ export default function AdsAutomation() {
               <div>
                 <p className="text-base font-black text-[#0F172A]">Загрузить фото или видео</p>
                 <p className="mt-1 text-sm text-[#64748B]">JPG, PNG, WEBP до 10 МБ · MP4, MOV, WEBM до 100 МБ</p>
+                <p className="mt-2 text-xs font-bold text-[#64748B]">{VIDEO_REQUIREMENTS_MESSAGE}</p>
                 {uploadStage ? <p className="mt-2 text-sm font-black text-[#0D9488]">{uploadStage}</p> : null}
               </div>
             </button>
@@ -1241,11 +1259,29 @@ export default function AdsAutomation() {
                     {creative.publicUrl ? "Публичная ссылка получена" : uploadStatus === "failed" ? "Публичная ссылка не получена" : "Публичная ссылка готовится"}
                   </StatusPill>
                   <StatusPill tone={creativeReadyTone(creative, uploadStatus)}>{creativeReadyLabel(creative, uploadStatus)}</StatusPill>
+                  {creative.fileType === "video" ? (
+                    <>
+                      <StatusPill tone="green">Видео готово для отчёта</StatusPill>
+                      <StatusPill tone={metaSummary?.videoLaunchEnabled ? "amber" : "slate"}>
+                        {metaSummary?.videoLaunchEnabled ? "Meta video launch: experimental" : "Meta video launch: скоро"}
+                      </StatusPill>
+                    </>
+                  ) : null}
                   <StatusPill tone={creative.fileType === "video" && creative.metaVideoId ? "green" : "slate"}>
-                    {creative.fileType === "video" ? creative.metaVideoId ? "Meta video_id готов" : "Meta video_id нужен перед запуском" : "Фото"}
+                    {creative.fileType === "video" ? creative.metaVideoId ? "Meta video_id готов" : "Meta video launch: скоро" : "Фото"}
                   </StatusPill>
                 </div>
                 <p className="mt-3 text-sm text-[#64748B]">{formatBytes(creative.fileSize)} · {creative.mimeType || "тип не определён"}</p>
+                {creative.fileType === "video" ? (
+                  <div className="mt-3 rounded-2xl border border-blue-200 bg-blue-50 p-3 text-sm font-semibold text-blue-900">
+                    <p>Видео загружено. Публичная ссылка получена. Видео готово для отчёта.</p>
+                    <p className="mt-1">{VIDEO_REQUIREMENTS_MESSAGE}</p>
+                    {(creative.mimeType === "video/quicktime" || creative.fileName.toLowerCase().endsWith(".mov")) ? (
+                      <p className="mt-1 font-black text-amber-800">{MOV_VIDEO_WARNING}</p>
+                    ) : null}
+                    <p className="mt-1 font-black">{VIDEO_LAUNCH_SOON_MESSAGE}</p>
+                  </div>
+                ) : null}
                 {uploadStage ? (
                   <div className="mt-3 rounded-2xl border border-teal-200 bg-teal-50 p-3 text-sm font-black text-teal-800">
                     {uploadStage}
@@ -1561,6 +1597,10 @@ export default function AdsAutomation() {
     const creativeImageUploadCapabilityFallback = Object.prototype.hasOwnProperty.call(creativePayload, "imageUploadCapabilityFallback")
       ? Boolean(creativePayload.imageUploadCapabilityFallback)
       : false;
+    const creativeVideoLaunchEnabled = Object.prototype.hasOwnProperty.call(creativePayload, "videoLaunchEnabled")
+      ? Boolean(creativePayload.videoLaunchEnabled)
+      : Boolean(metaSummary?.videoLaunchEnabled);
+    const creativeMetaVideoLaunchStatus = firstString(creativePayload.metaVideoLaunchStatus, assetFileType === "video" ? "soon" : "not_applicable");
 
     return (
       <section className="neu-card p-5 sm:p-6">
@@ -1660,6 +1700,8 @@ export default function AdsAutomation() {
             <p><b>creative.imageUploadCapabilityFallback:</b> {String(creativeImageUploadCapabilityFallback)}</p>
             <p><b>creative.usesVideoData:</b> {String(creativeUsesVideoData)}</p>
             <p><b>creative.usesLinkData:</b> {String(creativeUsesLinkData)}</p>
+            <p><b>creative.videoLaunchEnabled:</b> {String(creativeVideoLaunchEnabled)}</p>
+            <p><b>creative.metaVideoLaunchStatus:</b> {creativeMetaVideoLaunchStatus}</p>
             <p><b>creative.usesInstagramActor:</b> {creativeUsesInstagramActor}</p>
             <p><b>creative.instagramActorFallback:</b> {creativeInstagramActorFallback}</p>
           </div>
@@ -1668,6 +1710,12 @@ export default function AdsAutomation() {
         {creativeImageUploadCapabilityFallback ? (
           <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm font-bold text-amber-900">
             Meta не разрешила загрузить изображение через /adimages. Система попробовала создать креатив через публичную ссылку Supabase.
+          </div>
+        ) : null}
+
+        {assetFileType === "video" && !creativeVideoLaunchEnabled ? (
+          <div className="mt-4 rounded-2xl border border-blue-200 bg-blue-50 p-4 text-sm font-bold text-blue-900">
+            {VIDEO_REAL_LAUNCH_DISABLED_MESSAGE}
           </div>
         ) : null}
 
@@ -1684,8 +1732,9 @@ export default function AdsAutomation() {
   function renderLaunchStep() {
     const errors = prelaunchErrors(statusMode);
     const realLaunchBlockedByCreative = realLaunchNeedsCreativeLink(creative, storageHealth);
+    const realLaunchBlockedByVideo = creative?.fileType === "video" && !metaSummary?.videoLaunchEnabled ? VIDEO_REAL_LAUNCH_DISABLED_MESSAGE : "";
     const realLaunchBusy = loading === "launch" || loading === "video";
-    const realLaunchDisabled = realLaunchBusy || Boolean(realLaunchBlockedByCreative);
+    const realLaunchDisabled = realLaunchBusy || Boolean(realLaunchBlockedByCreative) || Boolean(realLaunchBlockedByVideo);
     const realLaunchTone = realLaunchStatus === "failed" ? "red" : realLaunchStatus === "created" ? "green" : "blue";
     const realLaunchLabel =
       realLaunchStatus === "creating"
@@ -1755,6 +1804,13 @@ export default function AdsAutomation() {
               {loading === "storage" ? <Loader2 className="animate-spin" size={16} /> : <ShieldCheck size={16} />}
               Проверить Storage
             </button>
+          </div>
+        ) : null}
+
+        {realLaunchBlockedByVideo ? (
+          <div className="mt-5 rounded-2xl border border-blue-200 bg-blue-50 p-4">
+            <p className="text-sm font-black text-blue-900">{realLaunchBlockedByVideo}</p>
+            <p className="mt-1 text-sm font-semibold text-blue-800">{VIDEO_LAUNCH_SOON_MESSAGE}</p>
           </div>
         ) : null}
 

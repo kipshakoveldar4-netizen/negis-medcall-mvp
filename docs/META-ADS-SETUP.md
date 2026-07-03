@@ -12,6 +12,7 @@ Negis MVP не запускает рекламу автоматически. Р�
 - `META_AD_ACCOUNT_ID`
 - `META_PAGE_ID`
 - `META_INSTAGRAM_ACTOR_ID`
+- `META_VIDEO_LAUNCH_ENABLED=false` for MVP. Video upload/storage and dry-run stay available; real video launch should remain disabled until the Meta `video_id` flow is finished.
 - `META_ASTANA_CITY_KEY` optional legacy override for Astana. Do not create one env per city. Negis resolves Kazakhstan cities through a static map, in-memory cache, and Meta Targeting Search.
 
 Не вводите access token во frontend. Token должен жить только в Vercel env.

@@ -57,6 +57,11 @@ async function checkAdsAutomationSource() {
   assertSourceIncludes(source, "creative.imageUploadMode", "Meta image upload mode debug");
   assertSourceIncludes(source, "creative.pictureUrl", "Meta picture URL fallback debug");
   assertSourceIncludes(source, "creative.imageUploadCapabilityFallback", "Meta image upload fallback debug");
+  assertSourceIncludes(source, "VIDEO_REAL_LAUNCH_DISABLED_MESSAGE", "video real launch disabled copy");
+  assertSourceIncludes(source, "VIDEO_LAUNCH_SOON_MESSAGE", "video launch soon helper text");
+  assertSourceIncludes(source, "MOV_VIDEO_WARNING", "MOV upload warning");
+  assertSourceIncludes(source, "creative.videoLaunchEnabled", "video launch flag debug");
+  assertSourceIncludes(source, "creative.metaVideoLaunchStatus", "video launch status debug");
   assertSourceIncludes(source, "KZ_META_CITY_OPTIONS", "controlled Kazakhstan city options");
   assertSourceIncludes(source, "selectedCityId", "selected city id launch payload");
   assertSourceIncludes(source, "selectedCityCanonicalName", "selected city canonical name launch payload");
@@ -94,6 +99,18 @@ async function checkMetaMarketingSource() {
   if (!source.includes("buildVideoCreativePayload")) {
     throw new Error("Meta marketing source is missing explicit video creative builder");
   }
+  if (!source.includes("META_VIDEO_LAUNCH_DISABLED_MESSAGE")) {
+    throw new Error("Meta marketing source must expose a controlled disabled message for video real launch");
+  }
+  if (!source.includes("META_VIDEO_LAUNCH_ENABLED")) {
+    throw new Error("Meta marketing source must use META_VIDEO_LAUNCH_ENABLED feature flag");
+  }
+  if (!source.includes("uploadMetaVideoAndGetId")) {
+    throw new Error("Meta marketing source is missing future video_id upload flow skeleton");
+  }
+  if (!source.includes("poll processing status if needed")) {
+    throw new Error("Meta video upload skeleton must document future processing polling");
+  }
   if (!source.includes("buildImagePictureCreativePayload")) {
     throw new Error("Meta marketing source is missing picture URL fallback creative builder");
   }
@@ -127,8 +144,8 @@ async function checkMetaMarketingSource() {
   if (source.includes('input.creativeType === "video" || input.videoUrl')) {
     throw new Error("Meta launch must not switch image assets into video path only because videoUrl exists");
   }
-  if (!source.includes("Видео-реклама через Meta API требует video_id")) {
-    throw new Error("Meta video real launch must return a controlled video_id required message");
+  if (!source.includes("META_VIDEO_LAUNCH_DISABLED_MESSAGE")) {
+    throw new Error("Meta video real launch must return a controlled disabled message");
   }
   if (!source.includes("MetaApiError")) {
     throw new Error("Meta marketing source is missing detailed Meta API errors");
@@ -851,6 +868,25 @@ async function main() {
       dryRun: true,
     }),
   });
+  const blockedVideoMetaUpload = await checkJsonFailure(
+    "/api/crm/ad-creative-meta-upload",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        workspaceId: "demo-workspace",
+        fileName: "smoke-video.mov",
+        fileType: "video",
+        mimeType: "video/quicktime",
+        publicUrl: "https://example.com/smoke-video.mov",
+        dryRun: false,
+      }),
+    },
+    "автозапуск видео-рекламы",
+  );
+  if (((blockedVideoMetaUpload.data || {}) as { metaApiCalled?: unknown }).metaApiCalled !== false) {
+    throw new Error("/api/crm/ad-creative-meta-upload must not call Meta API while video launch flag is disabled");
+  }
   await checkJsonEndpoint("/api/crm/ads-ai-fill", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -1180,6 +1216,9 @@ async function main() {
   if (videoCreativePayload.objectStorySpecType !== "video_data" || videoCreativePayload.usesVideoData !== true) {
     throw new Error('/api/crm/meta-launch dry-run video creative must stay on objectStorySpecType "video_data"');
   }
+  if (videoCreativePayload.videoLaunchEnabled !== false || videoCreativePayload.metaVideoLaunchStatus !== "soon") {
+    throw new Error('/api/crm/meta-launch dry-run video creative must expose disabled video launch status "soon"');
+  }
   await checkJsonFailure(
     "/api/crm/meta-launch",
     {
@@ -1208,7 +1247,7 @@ async function main() {
         dryRun: false,
       }),
     },
-    "Видео-реклама через Meta API требует video_id",
+    "автозапуск видео-рекламы",
   );
   await checkJsonEndpoint(`/api/crm/meta-status?campaignId=${encodeURIComponent(launchData.metaCampaignId || "dryrun_campaign_smoke")}`);
   await checkCrmEndpoint("/api/crm/release-checks", {

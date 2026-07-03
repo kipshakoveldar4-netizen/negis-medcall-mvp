@@ -188,10 +188,16 @@ const INSTAGRAM_PLACEMENT_FALLBACK_WARNING =
   "Meta rejected detailed Instagram positions. Retried ad set with publisher_platforms: [\"instagram\"].";
 const KZ_CITY_FALLBACK_WARNING =
   "Meta city key was not found, Kazakhstan country targeting was used.";
+export const META_VIDEO_LAUNCH_DISABLED_MESSAGE =
+  "Видео загружено в Negis, но автозапуск видео-рекламы через Meta API ещё находится в подготовке. Сейчас можно запускать фото-рекламу. Для видео используйте Ads Manager вручную или загрузите MP4 после включения video_id flow.";
 const metaCityTargetCache = new Map<string, MetaCityTarget>();
 
 function readEnv(key: string): string {
   return process.env[key]?.trim() || "";
+}
+
+export function isMetaVideoLaunchEnabled(): boolean {
+  return ["true", "1", "yes", "on"].includes(readEnv("META_VIDEO_LAUNCH_ENABLED").toLowerCase());
 }
 
 export function formatKazakhstanTimestamp(date = new Date()): string {
@@ -836,6 +842,24 @@ export async function uploadMetaVideo(input: { videoUrl: string; title?: string 
   }, "video_upload");
 }
 
+export async function uploadMetaVideoAndGetId(input: { videoUrl: string; title?: string; mimeType?: string }): Promise<string> {
+  // TODO:
+  // 1. validate MP4
+  // 2. upload to Meta advideos/video_ads
+  // 3. poll processing status if needed
+  // 4. return video_id
+  if (!isMetaVideoLaunchEnabled()) {
+    throw new Error(META_VIDEO_LAUNCH_DISABLED_MESSAGE);
+  }
+
+  const data = await uploadMetaVideo(input);
+  const directId = data.id;
+  const videoId = data.video_id;
+  if (typeof directId === "string" && directId) return directId;
+  if (typeof videoId === "string" && videoId) return videoId;
+  throw new Error("Meta returned video upload response without video_id");
+}
+
 function parseMetaImageHash(data: MetaJson): string {
   const directHash = data.hash;
   if (typeof directHash === "string") return directHash;
@@ -1078,10 +1102,13 @@ export async function createMetaAd(input: MetaLaunchInput & { adSetId: string; c
 }
 
 export async function launchMetaCampaign(input: MetaLaunchInput): Promise<MetaLaunchResult> {
-  if (input.creativeType === "video") {
-    throw new Error("Видео-реклама через Meta API требует video_id. Сначала протестируйте запуск фото.");
+  if (input.creativeType === "video" && !isMetaVideoLaunchEnabled()) {
+    throw new Error(META_VIDEO_LAUNCH_DISABLED_MESSAGE);
   }
-  const preparedInput = { ...input, creativeType: "image" as const, videoUrl: undefined, videoId: undefined };
+  const preparedInput =
+    input.creativeType === "video"
+      ? { ...input, creativeType: "video" as const, imageUrl: undefined }
+      : { ...input, creativeType: "image" as const, videoUrl: undefined, videoId: undefined };
   const warnings: string[] = [];
   addWarning(warnings, input.targetingResolution?.warning);
 
@@ -1115,8 +1142,16 @@ export async function launchMetaCampaign(input: MetaLaunchInput): Promise<MetaLa
   let imageUploadMode: MetaImageUploadMode = "adimages";
   let imageUploadCapabilityFallback = false;
   let pictureUrlUsed = false;
+  let creativeInput: MetaLaunchInput = preparedInput;
+  if (preparedInput.creativeType === "video" && !preparedInput.videoId) {
+    const videoId = await uploadMetaVideoAndGetId({
+      videoUrl: preparedInput.videoUrl || "",
+      title: preparedInput.creativeName || `${preparedInput.campaignName} - Video`,
+    });
+    creativeInput = { ...preparedInput, videoId };
+  }
   try {
-    const creativeResult = await createMetaCreative(preparedInput);
+    const creativeResult = await createMetaCreative(creativeInput);
     creative = creativeResult.data;
     creativeObjectStorySpecType = creativeResult.objectStorySpecType;
     creativeUsesLinkData = creativeResult.usesLinkData;
@@ -1131,7 +1166,7 @@ export async function launchMetaCampaign(input: MetaLaunchInput): Promise<MetaLa
       instagramActorFallback = true;
       creativeUsesInstagramActor = false;
       addWarning(warnings, INSTAGRAM_ACTOR_FALLBACK_WARNING);
-      const creativeResult = await createMetaCreative({ ...preparedInput, omitInstagramActor: true });
+      const creativeResult = await createMetaCreative({ ...creativeInput, omitInstagramActor: true });
       creative = creativeResult.data;
       creativeObjectStorySpecType = creativeResult.objectStorySpecType;
       creativeUsesLinkData = creativeResult.usesLinkData;

@@ -4,7 +4,7 @@
 
 `/ads-automation` is now a Russian employee wizard. The user uploads a photo/video, fills only the key brief fields, lets AI prepare the ad package, runs a safety check, reads the final report, then confirms the Meta launch.
 
-Video creatives require a public Supabase Storage URL and a Meta `video_id` before real launch. If Meta video upload fails, Negis returns a clear error and does not create an incomplete campaign.
+Photo creatives can be created in Meta in `PAUSED` mode. Video creatives can be uploaded to Negis and used in dry-run/final reports, but real video launch is gated until the dedicated Meta `video_id` upload flow is ready.
 
 ACTIVE launch still requires Admin Center live launch enabled and the typed confirmation `ЗАПУСТИТЬ`.
 
@@ -35,6 +35,7 @@ Set these variables in Vercel:
 - `META_AD_ACCOUNT_ID`
 - `META_PAGE_ID`
 - `META_INSTAGRAM_ACTOR_ID`
+- `META_VIDEO_LAUNCH_ENABLED=false` by default. Keep this disabled for MVP. When enabled later, Negis will try the experimental `video_id` upload flow.
 - `META_ASTANA_CITY_KEY` optional legacy override for Astana. New city targeting does not require one env per city: the backend uses a Kazakhstan city resolver with a static map, in-memory cache, then Meta Targeting Search.
 
 The API may return non-secret IDs for UI previews, but returns only booleans for token and secret presence.

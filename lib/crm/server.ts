@@ -12,7 +12,9 @@ import {
   formatKazakhstanTimestamp,
   getMetaCampaignStatus,
   getMetaConfig,
+  isMetaVideoLaunchEnabled,
   launchMetaCampaign,
+  META_VIDEO_LAUNCH_DISABLED_MESSAGE,
   resolveMetaCityTarget,
   resolveMetaTargetingForCity,
   uploadMetaVideo,
@@ -2221,6 +2223,23 @@ export async function handleAdCreativeMetaUpload(req: VercelRequest, res: Vercel
     );
   }
 
+  if (!isMetaVideoLaunchEnabled()) {
+    return sendJson(
+      res,
+      409,
+      {
+        ...errorBody("Meta video launch is not ready", [META_VIDEO_LAUNCH_DISABLED_MESSAGE]),
+        data: {
+          assetId,
+          publicUrl,
+          status: "blocked",
+          featureFlag: "META_VIDEO_LAUNCH_ENABLED",
+          metaApiCalled: false,
+        },
+      },
+    );
+  }
+
   if (!getMetaConfig().configured) {
     return sendJson(
       res,
@@ -2867,6 +2886,8 @@ function buildMetaPayloadPreview(
       imageUploadCapabilityFallback,
       usesVideoData,
       usesLinkData,
+      videoLaunchEnabled: isMetaVideoLaunchEnabled(),
+      metaVideoLaunchStatus: assetFileType === "video" ? (isMetaVideoLaunchEnabled() ? "experimental" : "soon") : "not_applicable",
       usesInstagramActor: creativeOptions.usesInstagramActor ?? Boolean(launch.instagramActorId),
       instagramActorFallback: creativeOptions.instagramActorFallback ?? false,
     },
@@ -3210,8 +3231,8 @@ export async function handleMetaLaunch(req: VercelRequest, res: VercelResponse) 
   if (launch.creativeType === "video" && !launch.videoId && !launch.videoUrl) {
     details.push("Для видео нужен Meta video_id или публичная ссылка для загрузки в Meta.");
   }
-  if (!dryRun && launch.creativeType === "video") {
-    details.push("Видео-реклама через Meta API требует video_id. Сначала протестируйте запуск фото.");
+  if (!dryRun && launch.creativeType === "video" && !isMetaVideoLaunchEnabled()) {
+    details.push(META_VIDEO_LAUNCH_DISABLED_MESSAGE);
   }
   if (!readBoolean(body.complianceConfirmed)) details.push("Подтвердите проверку безопасности текста.");
   if (!readBoolean(body.manualApprovalConfirmed)) details.push("Подтвердите ручное согласование запуска.");
@@ -3529,6 +3550,7 @@ export async function handleCrmHealth(req: VercelRequest, res: VercelResponse) {
       cache: "memory",
       targetingSearchFallback: Boolean(readEnvValue("META_ACCESS_TOKEN")),
     },
+    videoLaunchEnabled: isMetaVideoLaunchEnabled(),
     hasAccessToken: Boolean(readEnvValue("META_ACCESS_TOKEN")),
     hasAppSecret: Boolean(readEnvValue("META_APP_SECRET")),
   };
