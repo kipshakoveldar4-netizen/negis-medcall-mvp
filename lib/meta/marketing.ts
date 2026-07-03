@@ -576,9 +576,9 @@ export function buildGeoLocations(city: string, cityKey?: string): MetaJson {
     return {
       cities: [
         {
+          // If radius around a point is needed later, use custom_locations with
+          // latitude/longitude instead of geo_locations.cities.
           key,
-          radius: 15,
-          distance_unit: "kilometer",
         },
       ],
     };
@@ -621,7 +621,9 @@ export function buildMetaTargetingDebug(input: {
     rejectedCandidates: input.resolution?.rejectedCandidates || [],
     geoMode: resolution.geoMode,
     city: resolution.geoMode === "city" ? resolution.city : "",
-    radiusKm: resolution.geoMode === "city" ? resolution.radiusKm : 0,
+    cityRadiusKm: "-",
+    radiusKm: 0,
+    usesRadius: false,
     fallbackCountry: resolution.fallbackCountry,
     cityWarning: resolution.warning || "",
     warning: resolution.warning || "",
@@ -648,7 +650,7 @@ export async function resolveMetaTargetingForCity(city: string | MetaCityOption,
       countryCode: target.countryCode,
       region: target.region,
       geoMode: "city",
-      radiusKm: 15,
+      radiusKm: 0,
       fallbackCountry: false,
       warning: target.warning,
       source: target.source,

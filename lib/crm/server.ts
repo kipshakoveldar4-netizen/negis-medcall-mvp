@@ -3312,6 +3312,8 @@ export async function handleMetaLaunch(req: VercelRequest, res: VercelResponse) 
       geoMode: targetingResolution.geoMode,
       city: targetingResolution.city,
       radiusKm: targetingResolution.radiusKm,
+      cityRadiusKm: "-",
+      usesRadius: false,
       fallbackCountry: targetingResolution.fallbackCountry,
       source: targetingResolution.source,
       cityWarning: targetingResolution.warning || "",

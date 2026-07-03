@@ -68,13 +68,15 @@ Detailed guide: `docs/META-LIVE-LAUNCH.md`.
 
 City targeting uses:
 
-- static map first: `astana -> 1301648`;
+- static map first: `astana -> 1301648`, `aktobe -> 1289458`;
 - legacy env override: `META_ASTANA_CITY_KEY`;
 - in-memory cache for keys found by API;
 - Meta Targeting Search fallback: `/search?type=adgeolocation&location_types=["city"]&q=<canonical city>&country_code=KZ`;
 - exact selected-city matching: the first comma-separated city name in a Meta result must match the selected city aliases;
+- city key payload uses `geo_locations.cities: [{ key }]` without `radius` or `distance_unit`;
 - dry-run country fallback: `countries: ["KZ"]` with a warning when no city key is found;
 - real launch block: if the selected city has no Meta city key, `/api/crm/meta-launch` returns a validation error before any Meta API call.
+- If radius targeting is needed later, implement `custom_locations` with latitude/longitude instead of adding radius to `geo_locations.cities`.
 
 Supported aliases include Astana / Nur-Sultan, Almaty, Shymkent, Karaganda, Aktobe, Atyrau, Aktau, Pavlodar, Kostanay, Taraz, Oral / Uralsk, Oskemen / Ust-Kamenogorsk, and Kyzylorda.
 

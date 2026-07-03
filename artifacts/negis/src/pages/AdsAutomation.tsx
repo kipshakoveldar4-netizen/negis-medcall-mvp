@@ -1508,7 +1508,12 @@ export default function AdsAutomation() {
     const targetingCityKeySource = firstString(adSetTargetingDebug.cityKeySource, adSetTargetingDebug.source, targetingGeoMode === "city" ? "static" : "fallback");
     const targetingCityWarning = firstString(adSetTargetingDebug.cityWarning, adSetTargetingDebug.warning);
     const targetingCity = firstString(adSetTargetingDebug.city, targetingGeoMode === "city" ? brief.city : "");
-    const targetingRadiusKm = firstString(adSetTargetingDebug.radiusKm, adSetTargetingDebug.radius_km, targetingGeoMode === "city" ? "15" : "0");
+    const targetingUsesRadius = Object.prototype.hasOwnProperty.call(adSetTargetingDebug, "usesRadius")
+      ? Boolean(adSetTargetingDebug.usesRadius)
+      : false;
+    const targetingCityRadiusKm = targetingUsesRadius
+      ? firstString(adSetTargetingDebug.cityRadiusKm, adSetTargetingDebug.radiusKm, adSetTargetingDebug.radius_km)
+      : "-";
     const targetingFallbackCountry = Object.prototype.hasOwnProperty.call(adSetTargetingDebug, "fallbackCountry")
       ? String(adSetTargetingDebug.fallbackCountry)
       : String(targetingGeoMode !== "city");
@@ -1591,7 +1596,7 @@ export default function AdsAutomation() {
               <li>• Кампания: {reportCampaignName || "-"}</li>
               <li>• Группа объявлений: {reportAdSetName || `Instagram, ${selectedCity.labelRu}, ${brief.dailyBudget} USD/день`}</li>
               <li>• Площадки: Instagram</li>
-              <li>• Гео: {targetingGeoMode === "city" ? `${targetingCity || selectedCity.labelRu}, радиус ${targetingRadiusKm} км` : `Казахстан; city key для ${targetingSelectedCityLabel} не найден`}</li>
+              <li>• Гео: {targetingGeoMode === "city" ? `${targetingSelectedCityLabel || targetingCity || selectedCity.labelRu}, город Meta` : `Казахстан; city key для ${targetingSelectedCityLabel} не найден`}</li>
               <li>• Креатив: {creative?.fileType === "video" ? "видео" : "фото"}</li>
               <li>• Объявление: {aiPackage?.headline || "-"}</li>
               <li>• Статус: {statusMode === "ACTIVE" ? "активно" : "выключено"}</li>
@@ -1640,7 +1645,8 @@ export default function AdsAutomation() {
             ) : null}
             <p><b>adset.targeting.geoMode:</b> {targetingGeoMode}</p>
             <p><b>adset.targeting.city:</b> {targetingCity || "-"}</p>
-            <p><b>adset.targeting.radiusKm:</b> {targetingRadiusKm}</p>
+            <p><b>adset.targeting.cityRadiusKm:</b> {targetingCityRadiusKm}</p>
+            <p><b>adset.targeting.usesRadius:</b> {String(targetingUsesRadius)}</p>
             <p><b>adset.targeting.fallbackCountry:</b> {targetingFallbackCountry}</p>
             <p><b>adset.targeting.cityWarning:</b> {targetingCityWarning || "-"}</p>
             <p><b>adset.targeting.publisher_platforms:</b> {JSON.stringify(publisherPlatforms)}</p>

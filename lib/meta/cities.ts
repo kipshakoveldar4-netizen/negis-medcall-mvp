@@ -52,6 +52,7 @@ export const KZ_META_CITY_OPTIONS: MetaCityOption[] = [
     labelEn: "Aktobe",
     canonicalName: "Aktobe",
     countryCode: "KZ",
+    metaKey: "1289458",
     aliases: ["актобе", "aktobe", "aqtobe", "aktoebe"],
   },
   {

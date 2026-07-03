@@ -62,6 +62,10 @@ async function checkAdsAutomationSource() {
   assertSourceIncludes(source, "selectedCityCanonicalName", "selected city canonical name launch payload");
   assertSourceIncludes(source, "<select", "controlled city select");
   assertSourceExcludes(source, 'Field label="Город" value={brief.city}', "free-text city Field");
+  assertSourceIncludes(source, "cityRadiusKm", "city radius disabled debug");
+  assertSourceIncludes(source, "usesRadius", "usesRadius debug");
+  assertSourceExcludes(source, "targetingRadiusKm", "city radius report variable");
+  assertSourceExcludes(source, "радиус ${targeting", "radius wording in final city report");
   assertSourceIncludes(source, "Meta не разрешила загрузить изображение через /adimages", "Meta image upload fallback warning");
   assertSourceExcludes(source, "/api/crm/ad-creative-upload", "file upload endpoint in UI");
   assertSourceExcludes(source, "new FormData(", "multipart upload from UI");
@@ -153,6 +157,9 @@ async function checkMetaMarketingSource() {
   if (!citiesSource.includes('metaKey: "1301648"')) {
     throw new Error("Meta city options source must keep Astana static city key 1301648");
   }
+  if (!citiesSource.includes('metaKey: "1289458"')) {
+    throw new Error("Meta city options source must keep Aktobe static city key 1289458");
+  }
   if (!source.includes("metaCityTargetCache")) {
     throw new Error("Meta marketing source is missing city key cache");
   }
@@ -161,6 +168,12 @@ async function checkMetaMarketingSource() {
   }
   if (!source.includes("buildGeoLocations")) {
     throw new Error("Meta marketing source is missing geo location builder");
+  }
+  if (!source.includes("custom_locations")) {
+    throw new Error("Meta marketing source must document custom_locations for future radius targeting");
+  }
+  if (source.includes("radius: 15") || source.includes('distance_unit: "kilometer"')) {
+    throw new Error("Meta marketing source must not send radius/distance_unit for geo_locations.cities");
   }
   if (!source.includes('publisher_platforms: ["instagram"]')) {
     throw new Error("Meta marketing source must force Instagram-only publisher platforms");
@@ -253,6 +266,7 @@ async function checkMetaCityResolverModule() {
   };
   const cities = (await import(citiesModuleUrl)) as {
     getKzMetaCityOption(value: string): SmokeMetaCityOption;
+    cityOptionMatchesCandidate(option: SmokeMetaCityOption, candidateName: string): boolean;
   };
 
   const originalEnv = {
@@ -308,12 +322,16 @@ async function checkMetaCityResolverModule() {
       throw new Error("resolveMetaCityTarget must cache Targeting Search city keys");
     }
 
-    const aktobe = await marketing.resolveMetaCityTarget(cities.getKzMetaCityOption("aktobe"));
-    if (aktobe.key !== "aktobe_exact_key" || aktobe.selected?.name !== "Aktobe") {
-      throw new Error("resolveMetaCityTarget must select exact Aktobe city key, not a nearby Aqtobe-region candidate");
+    const aktobeOption = cities.getKzMetaCityOption("aktobe");
+    const aktobe = await marketing.resolveMetaCityTarget(aktobeOption);
+    if (aktobe.key !== "1289458" || aktobe.source !== "static") {
+      throw new Error("resolveMetaCityTarget must resolve Aktobe from static map with key 1289458");
     }
-    if (!aktobe.rejectedCandidates?.some((candidate) => candidate.name?.includes("Temir"))) {
-      throw new Error("resolveMetaCityTarget must reject Temir when selected city is Aktobe");
+    if (cities.cityOptionMatchesCandidate(aktobeOption, "Temir, Aqtöbe, Kazakhstan")) {
+      throw new Error("cityOptionMatchesCandidate must reject Temir when selected city is Aktobe");
+    }
+    if (!cities.cityOptionMatchesCandidate(aktobeOption, "Aktobe, Kazakhstan")) {
+      throw new Error("cityOptionMatchesCandidate must accept exact Aktobe primary city name");
     }
 
     const unknown = await marketing.resolveMetaTargetingForCity("Unknown City");
@@ -337,9 +355,43 @@ async function checkMetaCityResolverModule() {
       city: "Astana",
       targetingResolution: astanaTargeting,
     });
-    const cityTargeting = cityAdSet.targeting as { geo_locations?: { cities?: Array<{ key?: string }> } };
+    const cityTargeting = cityAdSet.targeting as { geo_locations?: { cities?: Array<{ key?: string; radius?: unknown; distance_unit?: unknown }> } };
     if (cityTargeting.geo_locations?.cities?.[0]?.key !== "1301648") {
       throw new Error("city targeting must use geo_locations.cities with the resolved Meta city key");
+    }
+    if (
+      Object.prototype.hasOwnProperty.call(cityTargeting.geo_locations?.cities?.[0] || {}, "radius") ||
+      Object.prototype.hasOwnProperty.call(cityTargeting.geo_locations?.cities?.[0] || {}, "distance_unit")
+    ) {
+      throw new Error("city targeting must not send radius or distance_unit for geo_locations.cities");
+    }
+
+    const aktobeTargeting = await marketing.resolveMetaTargetingForCity(aktobeOption);
+    const aktobeAdSet = marketing.buildMetaAdSetPayload({
+      campaignName: "Smoke Aktobe",
+      campaignId: "campaign_aktobe",
+      objective: "OUTCOME_LEADS",
+      status: "PAUSED",
+      dailyBudgetMinor: 2000,
+      currency: "USD",
+      primaryText: "Text",
+      headline: "Headline",
+      description: "Description",
+      cta: "LEARN_MORE",
+      landingUrl: "https://example.com",
+      city: "Aktobe",
+      targetingResolution: aktobeTargeting,
+    });
+    const aktobePayloadTargeting = aktobeAdSet.targeting as { geo_locations?: { countries?: unknown; cities?: Array<{ key?: string; radius?: unknown; distance_unit?: unknown }> } };
+    const aktobeCity = aktobePayloadTargeting.geo_locations?.cities?.[0] || {};
+    if (aktobeCity.key !== "1289458") {
+      throw new Error("Aktobe city targeting must use static city key 1289458");
+    }
+    if (Object.prototype.hasOwnProperty.call(aktobeCity, "radius") || Object.prototype.hasOwnProperty.call(aktobeCity, "distance_unit")) {
+      throw new Error("Aktobe city targeting must not include radius or distance_unit");
+    }
+    if (Object.prototype.hasOwnProperty.call(aktobePayloadTargeting.geo_locations || {}, "countries")) {
+      throw new Error("Aktobe city targeting must not fallback to countries when city key is found");
     }
 
     const fallbackAdSet = marketing.buildMetaAdSetPayload({
@@ -840,6 +892,23 @@ async function main() {
   if (!cityKeyData.selected || cityKeyData.selected.key !== "1301648" || !Array.isArray(cityKeyData.candidates) || !Array.isArray(cityKeyData.rejectedCandidates)) {
     throw new Error("/api/crm/meta-city-key must return selected/candidates/rejectedCandidates diagnostics");
   }
+  const aktobeCityKeyCheck = await checkJsonEndpoint(`/api/crm/meta-city-key?city=${encodeURIComponent("Актобе")}`);
+  const aktobeCityKeyData = (aktobeCityKeyCheck.data || {}) as {
+    key?: unknown;
+    source?: unknown;
+    geoMode?: unknown;
+    fallbackCountry?: unknown;
+    selected?: { key?: unknown; name?: unknown } | null;
+  };
+  if (
+    aktobeCityKeyData.key !== "1289458" ||
+    aktobeCityKeyData.source !== "static" ||
+    aktobeCityKeyData.geoMode !== "city" ||
+    aktobeCityKeyData.fallbackCountry !== false ||
+    aktobeCityKeyData.selected?.key !== "1289458"
+  ) {
+    throw new Error("/api/crm/meta-city-key must resolve Aktobe to static city key 1289458");
+  }
   await checkJsonFailure(
     "/api/crm/meta-launch",
     {
@@ -868,37 +937,52 @@ async function main() {
     },
     "Креатив",
   );
-  await checkJsonFailure(
-    "/api/crm/meta-launch",
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        workspaceId: "demo-workspace",
-        campaignName: "Smoke Meta Campaign Aktobe no city key",
-        objective: "OUTCOME_LEADS",
-        statusMode: "PAUSED",
-        dailyBudget: 20,
-        totalBudget: 140,
-        currency: "USD",
-        city: "Актобе",
-        selectedCityId: "aktobe",
-        targetAudience: "Women 25-55",
-        primaryText: "Professional consultation in Aktobe. Book a specialist consultation.",
-        headline: "Consultation in Aktobe",
-        description: "Book a consultation with a specialist.",
-        cta: "LEARN_MORE",
-        landingUrl: "https://example.com",
-        imageUrl: "https://example.com/smoke-creative.jpg",
-        creativeType: "image",
-        creativeUrl: "https://example.com/smoke-creative.jpg",
-        complianceConfirmed: true,
-        manualApprovalConfirmed: true,
-        dryRun: false,
-      }),
-    },
-    "Meta city key",
-  );
+  const aktobeLaunch = await checkJsonEndpoint("/api/crm/meta-launch", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      workspaceId: "demo-workspace",
+      campaignName: "Smoke Meta Campaign Aktobe",
+      objective: "OUTCOME_LEADS",
+      statusMode: "PAUSED",
+      dailyBudget: 20,
+      totalBudget: 140,
+      currency: "USD",
+      city: "Актобе",
+      selectedCityId: "aktobe",
+      targetAudience: "Women 25-55",
+      primaryText: "Professional consultation in Aktobe. Book a specialist consultation.",
+      headline: "Consultation in Aktobe",
+      description: "Book a consultation with a specialist.",
+      cta: "LEARN_MORE",
+      landingUrl: "https://example.com",
+      imageUrl: "https://example.com/smoke-creative.jpg",
+      creativeType: "image",
+      creativeUrl: "https://example.com/smoke-creative.jpg",
+      complianceConfirmed: true,
+      manualApprovalConfirmed: true,
+      dryRun: true,
+    }),
+  });
+  const aktobeAdSetPayload = (((aktobeLaunch.data || {}) as { metaPayload?: { adSet?: Record<string, unknown> } }).metaPayload?.adSet || {}) as {
+    targeting?: {
+      geo_locations?: { countries?: unknown; cities?: Array<{ key?: unknown; radius?: unknown; distance_unit?: unknown }> };
+    };
+    targetingDebug?: { cityKey?: unknown; usesRadius?: unknown; fallbackCountry?: unknown; cityRadiusKm?: unknown };
+  };
+  const aktobeAdSetCity = aktobeAdSetPayload.targeting?.geo_locations?.cities?.[0] || {};
+  if (aktobeAdSetCity.key !== "1289458") {
+    throw new Error("/api/crm/meta-launch dry-run Aktobe targeting must use static city key 1289458");
+  }
+  if (Object.prototype.hasOwnProperty.call(aktobeAdSetCity, "radius") || Object.prototype.hasOwnProperty.call(aktobeAdSetCity, "distance_unit")) {
+    throw new Error("/api/crm/meta-launch dry-run Aktobe city targeting must not include radius or distance_unit");
+  }
+  if (Object.prototype.hasOwnProperty.call(aktobeAdSetPayload.targeting?.geo_locations || {}, "countries")) {
+    throw new Error("/api/crm/meta-launch dry-run Aktobe targeting must not fallback to countries when city key is found");
+  }
+  if (aktobeAdSetPayload.targetingDebug?.usesRadius !== false || aktobeAdSetPayload.targetingDebug?.cityRadiusKm !== "-") {
+    throw new Error("/api/crm/meta-launch dry-run Aktobe debug must expose usesRadius false and cityRadiusKm '-'");
+  }
   const launch = await checkJsonEndpoint("/api/crm/meta-launch", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -991,6 +1075,8 @@ async function main() {
     selectedCity?: { id?: unknown; labelRu?: unknown; canonicalName?: unknown };
     cityId?: unknown;
     cityKey?: unknown;
+    cityRadiusKm?: unknown;
+    usesRadius?: unknown;
     candidates?: unknown[];
     rejectedCandidates?: unknown[];
     fallbackCountry?: unknown;
@@ -1001,6 +1087,10 @@ async function main() {
   if (Object.prototype.hasOwnProperty.call(adSetTargeting.geo_locations || {}, "countries")) {
     throw new Error("/api/crm/meta-launch dry-run Astana targeting must not use country-only mode when city key is available");
   }
+  const astanaCity = adSetTargeting.geo_locations?.cities?.[0] || {};
+  if (Object.prototype.hasOwnProperty.call(astanaCity, "radius") || Object.prototype.hasOwnProperty.call(astanaCity, "distance_unit")) {
+    throw new Error("/api/crm/meta-launch dry-run Astana city targeting must not include radius or distance_unit");
+  }
   if (adSetTargeting.targeting_automation?.advantage_audience !== 0) {
     throw new Error("/api/crm/meta-launch dry-run targeting must include targeting_automation.advantage_audience: 0");
   }
@@ -1009,6 +1099,9 @@ async function main() {
   }
   if (!Array.isArray(adSetTargetingDebug.candidates) || !Array.isArray(adSetTargetingDebug.rejectedCandidates)) {
     throw new Error("/api/crm/meta-launch dry-run targeting debug must expose candidates and rejectedCandidates arrays");
+  }
+  if (adSetTargetingDebug.usesRadius !== false || adSetTargetingDebug.cityRadiusKm !== "-") {
+    throw new Error("/api/crm/meta-launch dry-run targeting debug must expose usesRadius false and cityRadiusKm '-'");
   }
   const publisherPlatforms = (adSetTargeting.publisher_platforms || []).map(String);
   const instagramPositions = (adSetTargeting.instagram_positions || []).map(String);

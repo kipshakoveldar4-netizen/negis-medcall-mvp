@@ -45,14 +45,15 @@ Every Meta launch gets one Kazakhstan timestamp in `YYYY-MM-DD_HH-mm` format. Th
 
 For the MVP, ad set targeting is forced server-side:
 
-- geo: selected Kazakhstan city from the controlled `/ads-automation` city list, with 15 km radius when the resolver has a Meta city `key`;
-- static map currently includes Astana / Nur-Sultan (`1301648`);
+- geo: selected Kazakhstan city from the controlled `/ads-automation` city list, using `geo_locations.cities: [{ key }]` without `radius` or `distance_unit`;
+- static map currently includes Astana / Nur-Sultan (`1301648`) and Aktobe (`1289458`);
 - aliases are normalized for Astana, Almaty, Shymkent, Karaganda, Aktobe, Atyrau, Aktau, Pavlodar, Kostanay, Taraz, Oral/Uralsk, Oskemen/Ust-Kamenogorsk, and Kyzylorda;
 - Targeting Search fallback calls `/search?type=adgeolocation&location_types=["city"]&q=<canonical city>&country_code=KZ`;
 - Targeting Search candidates must match the selected city exactly by primary city name. Nearby region results such as `Temir, Aqtöbe, Kazakhstan` are rejected for selected `Актобе` and returned in `rejectedCandidates`;
 - successful Targeting Search city keys are cached in memory for the current server runtime;
 - dry-run fallback: Kazakhstan only, with an explicit warning if the city key is unavailable;
 - real launch fallback: blocked before Meta API call if the selected city has no key, so an employee cannot accidentally launch on all Kazakhstan;
+- future radius targeting should use `custom_locations` with latitude/longitude, not `geo_locations.cities`;
 - placements: Instagram only via `publisher_platforms: ["instagram"]`;
 - Instagram positions: stream, story, explore, reels.
 
