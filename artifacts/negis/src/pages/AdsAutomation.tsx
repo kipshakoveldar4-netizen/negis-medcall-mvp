@@ -52,6 +52,9 @@ type CreativeAsset = {
   storagePath?: string;
   storageBucket?: string;
   metaVideoId?: string;
+  videoUploadMode?: string;
+  videoProcessingStatus?: string;
+  videoWarnings?: string[];
   status: string;
 };
 
@@ -114,6 +117,11 @@ type LaunchResult = {
   metaAdSetId?: string;
   metaCreativeId?: string;
   metaAdId?: string;
+  metaVideoId?: string;
+  videoId?: string;
+  videoUploadMode?: string;
+  videoProcessingStatus?: string;
+  videoWarnings?: string[];
   status?: string;
   metaStatus?: string;
   dryRun?: boolean;
@@ -187,6 +195,7 @@ type LaunchHistoryItem = {
   metaAdSetId?: string;
   metaCreativeId?: string;
   metaAdId?: string;
+  metaVideoId?: string;
   metaStatus?: string;
   budgetDailyMinor?: number | null;
   currency?: string;
@@ -194,6 +203,7 @@ type LaunchHistoryItem = {
   lastError?: string;
   createdAt?: string;
   payload?: Record<string, unknown>;
+  metaResponse?: Record<string, unknown>;
 };
 
 const inputStyle: CSSProperties = {
@@ -222,8 +232,10 @@ const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString().slice(
 const VIDEO_REAL_LAUNCH_DISABLED_MESSAGE =
   "Видео загружено в Negis, но автозапуск видео-рекламы через Meta API ещё находится в подготовке. Сейчас можно запускать фото-рекламу. Для видео используйте Ads Manager вручную или загрузите MP4 после включения video_id flow.";
 const VIDEO_LAUNCH_SOON_MESSAGE = "Видео-запуск через Meta API будет добавлен после video_id upload flow.";
+const VIDEO_LAUNCH_ENABLED_MESSAGE = "Meta video_id flow включён: MP4 и MOV будут загружены в Meta перед созданием объявления.";
 const VIDEO_REQUIREMENTS_MESSAGE = "Видео: желательно MP4, до 100 MB, кодек H.264, вертикальный формат 9:16 для Reels/Stories. MOV можно хранить в Negis, но для Meta автозапуска лучше MP4.";
-const MOV_VIDEO_WARNING = "MOV сохранён в Negis, но для Meta автозапуска лучше загрузить MP4.";
+const MOV_VIDEO_WARNING = "MOV поддерживается Meta, но обработка может быть дольше. Для стабильности лучше MP4/H.264.";
+const VIDEO_FORMAT_ERROR = "Для автозапуска видео поддерживаются MP4 и MOV.";
 
 const defaultBrief: Brief = {
   service: "Консультация косметолога",
@@ -354,6 +366,11 @@ function normalizeAsset(value: unknown, fallback: CreativeAsset): CreativeAsset 
     storagePath,
     storageBucket,
     metaVideoId: readStringField(record, ["metaVideoId", "meta_video_id", "videoId", "video_id"], fallback.metaVideoId || "") || undefined,
+    videoUploadMode: readStringField(record, ["videoUploadMode", "video_upload_mode", "uploadMode", "upload_mode"], fallback.videoUploadMode || "") || undefined,
+    videoProcessingStatus: readStringField(record, ["videoProcessingStatus", "video_processing_status", "processingStatus", "processing_status"], fallback.videoProcessingStatus || "") || undefined,
+    videoWarnings: Array.isArray(record.videoWarnings)
+      ? record.videoWarnings.filter((item): item is string => typeof item === "string")
+      : fallback.videoWarnings,
     status: readStringField(record, ["status"], fallback.status),
   };
 }
@@ -469,6 +486,21 @@ function inferCreativeFileType(file: File): CreativeAsset["fileType"] {
   const extension = file.name.split(".").pop()?.toLowerCase() || "";
   if (file.type.startsWith("video/") || ["mp4", "mov", "webm"].includes(extension)) return "video";
   return "image";
+}
+
+function isMovCreative(creative: Pick<CreativeAsset, "fileName" | "mimeType" | "fileType"> | null) {
+  if (!creative || creative.fileType !== "video") return false;
+  return creative.mimeType === "video/quicktime" || creative.fileName.toLowerCase().endsWith(".mov");
+}
+
+function isMetaVideoFormatSupported(creative: Pick<CreativeAsset, "fileName" | "mimeType" | "fileType"> | null) {
+  if (!creative || creative.fileType !== "video") return true;
+  const extension = creative.fileName.split(".").pop()?.toLowerCase() || "";
+  return creative.mimeType === "video/mp4" || creative.mimeType === "video/quicktime" || extension === "mp4" || extension === "mov";
+}
+
+function uniqueStrings(values: Array<string | undefined>) {
+  return Array.from(new Set(values.filter((value): value is string => Boolean(value?.trim()))));
 }
 
 function localHistoryKey(workspaceId: string) {
@@ -953,6 +985,11 @@ export default function AdsAutomation() {
       creativeUrl,
       videoUrl: creative?.fileType === "video" ? creativeUrl : "",
       videoId: creative?.metaVideoId || "",
+      metaVideoId: creative?.metaVideoId || "",
+      fileName: creative?.fileName || "",
+      fileType: creative?.fileType || "image",
+      mimeType: creative?.mimeType || "",
+      fileSize: creative?.fileSize || 0,
       startDate: brief.startDate,
       endDate: brief.endDate,
       complianceConfirmed: true,
@@ -1023,6 +1060,7 @@ export default function AdsAutomation() {
     if (!metaSummary?.configured) errors.push("Meta env не настроены или не подтверждены.");
     if (creative && !creative.publicUrl) errors.push(uploadLinkMissingMessage(storageHealth));
     if (creative?.fileType === "video" && !metaSummary?.videoLaunchEnabled) errors.push(VIDEO_REAL_LAUNCH_DISABLED_MESSAGE);
+    if (creative?.fileType === "video" && metaSummary?.videoLaunchEnabled && !isMetaVideoFormatSupported(creative)) errors.push(VIDEO_FORMAT_ERROR);
     if (creative?.fileType === "video" && !creative.metaVideoId && !creative.publicUrl) {
       errors.push("Видео загружено в Negis, но ссылка для Meta ещё не готова. Проверьте Storage или повторите загрузку.");
     }
@@ -1041,7 +1079,13 @@ export default function AdsAutomation() {
 
     setLoading("video");
     try {
-      const body = await crmRequest<{ metaVideoId?: string }>("/api/crm/ad-creative-meta-upload", {
+      const body = await crmRequest<{
+        metaVideoId?: string;
+        videoId?: string;
+        uploadMode?: string;
+        processingStatus?: string;
+        warnings?: string[];
+      }>("/api/crm/ad-creative-meta-upload", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1053,9 +1097,22 @@ export default function AdsAutomation() {
           publicUrl: creative.publicUrl,
         }),
       });
-      const metaVideoId = body.data.metaVideoId || "";
+      const metaVideoId = body.data.metaVideoId || body.data.videoId || "";
       if (!metaVideoId) throw new Error("Meta не вернула video_id.");
-      setCreative((current) => (current ? { ...current, metaVideoId, status: "meta_uploaded" } : current));
+      const warnings = Array.isArray(body.data.warnings) ? body.data.warnings : [];
+      setCreative((current) =>
+        current
+          ? {
+              ...current,
+              metaVideoId,
+              videoUploadMode: body.data.uploadMode || current.videoUploadMode,
+              videoProcessingStatus: body.data.processingStatus || current.videoProcessingStatus,
+              videoWarnings: uniqueStrings([...(current.videoWarnings || []), ...warnings]),
+              status: "meta_uploaded",
+            }
+          : current,
+      );
+      if (warnings.length) setNotice(warnings.join(" "));
       return metaVideoId;
     } finally {
       setLoading(null);
@@ -1081,6 +1138,7 @@ export default function AdsAutomation() {
       metaAdSetId: result.metaAdSetId,
       metaCreativeId: result.metaCreativeId,
       metaAdId: result.metaAdId,
+      metaVideoId: result.metaVideoId || result.videoId || creative?.metaVideoId,
       metaStatus: result.metaStatus || nextStatusMode,
       budgetDailyMinor: Math.round(Number(brief.dailyBudget || 0) * 100),
       currency: "USD",
@@ -1089,6 +1147,11 @@ export default function AdsAutomation() {
       payload: {
         creativeType: creative?.fileType,
         fileName: creative?.fileName,
+        mimeType: creative?.mimeType,
+        metaVideoId: result.metaVideoId || result.videoId || creative?.metaVideoId,
+        videoUploadMode: result.videoUploadMode || creative?.videoUploadMode,
+        videoProcessingStatus: result.videoProcessingStatus || creative?.videoProcessingStatus,
+        videoWarnings: uniqueStrings([...(creative?.videoWarnings || []), ...(result.videoWarnings || [])]),
         city: selectedCity.labelRu,
         selectedCityId: selectedCity.id,
         leadDestination: brief.leadDestination,
@@ -1099,6 +1162,7 @@ export default function AdsAutomation() {
         adName: firstString(adPayload.name),
         placementsMode: firstString(adSetPayload.placementsMode, asRecord(adSetPayload.targetingDebug).placementsMode),
       },
+      metaResponse: asRecord(result),
     };
     window.localStorage.setItem(key, JSON.stringify([item, ...current].slice(0, 30)));
   }
@@ -1128,6 +1192,8 @@ export default function AdsAutomation() {
       let metaVideoId = creative?.metaVideoId || "";
       if (creative?.fileType === "video") {
         metaVideoId = await ensureVideoReady();
+        setLoading("launch");
+        setRealLaunchMessage(nextStatusMode === "ACTIVE" ? "Создаём и запускаем кампанию в Meta." : "Создаём кампанию в Meta выключенной.");
       }
 
       const body = await crmRequest<LaunchResult>("/api/crm/meta-launch", {
@@ -1142,6 +1208,21 @@ export default function AdsAutomation() {
         throw new Error("Meta вернула режим проверки для реального запуска. Кампания не создана.");
       }
       setLaunchResult({ ...body.data, warning: body.warning || body.data.warning });
+      const launchedMetaVideoId = body.data.metaVideoId || body.data.videoId || metaVideoId;
+      if (creative?.fileType === "video" && launchedMetaVideoId) {
+        setCreative((current) =>
+          current
+            ? {
+                ...current,
+                metaVideoId: launchedMetaVideoId,
+                videoUploadMode: body.data.videoUploadMode || current.videoUploadMode,
+                videoProcessingStatus: body.data.videoProcessingStatus || current.videoProcessingStatus,
+                videoWarnings: uniqueStrings([...(current.videoWarnings || []), ...(body.data.videoWarnings || [])]),
+                status: "meta_uploaded",
+              }
+            : current,
+        );
+      }
       setCompliance(body.data.compliance || compliance);
       saveLocalLaunch(body.data, nextStatusMode);
       setLaunchTimestamp("");
@@ -1262,24 +1343,39 @@ export default function AdsAutomation() {
                   {creative.fileType === "video" ? (
                     <>
                       <StatusPill tone="green">Видео готово для отчёта</StatusPill>
-                      <StatusPill tone={metaSummary?.videoLaunchEnabled ? "amber" : "slate"}>
-                        {metaSummary?.videoLaunchEnabled ? "Meta video launch: experimental" : "Meta video launch: скоро"}
+                      <StatusPill tone={metaSummary?.videoLaunchEnabled ? "blue" : "slate"}>
+                        {metaSummary?.videoLaunchEnabled ? "Meta video_id flow: experimental" : "Meta video launch: скоро"}
                       </StatusPill>
                     </>
                   ) : null}
-                  <StatusPill tone={creative.fileType === "video" && creative.metaVideoId ? "green" : "slate"}>
-                    {creative.fileType === "video" ? creative.metaVideoId ? "Meta video_id готов" : "Meta video launch: скоро" : "Фото"}
+                  <StatusPill tone={creative.fileType === "video" && creative.metaVideoId ? "green" : loading === "video" ? "amber" : "slate"}>
+                    {creative.fileType === "video"
+                      ? creative.metaVideoId
+                        ? "Получен video_id"
+                        : loading === "video"
+                          ? "Загружаем видео в Meta"
+                          : metaSummary?.videoLaunchEnabled
+                            ? "video_id будет получен при запуске"
+                            : "Meta video launch: скоро"
+                      : "Фото"}
                   </StatusPill>
                 </div>
                 <p className="mt-3 text-sm text-[#64748B]">{formatBytes(creative.fileSize)} · {creative.mimeType || "тип не определён"}</p>
                 {creative.fileType === "video" ? (
                   <div className="mt-3 rounded-2xl border border-blue-200 bg-blue-50 p-3 text-sm font-semibold text-blue-900">
                     <p>Видео загружено. Публичная ссылка получена. Видео готово для отчёта.</p>
+                    {creative.metaVideoId ? <p className="mt-1 font-black">Получен video_id: {creative.metaVideoId}</p> : null}
+                    {creative.videoProcessingStatus ? <p className="mt-1">Meta processing: {creative.videoProcessingStatus}</p> : null}
                     <p className="mt-1">{VIDEO_REQUIREMENTS_MESSAGE}</p>
                     {(creative.mimeType === "video/quicktime" || creative.fileName.toLowerCase().endsWith(".mov")) ? (
                       <p className="mt-1 font-black text-amber-800">{MOV_VIDEO_WARNING}</p>
                     ) : null}
-                    <p className="mt-1 font-black">{VIDEO_LAUNCH_SOON_MESSAGE}</p>
+                    <p className="mt-1 font-black">{metaSummary?.videoLaunchEnabled ? VIDEO_LAUNCH_ENABLED_MESSAGE : VIDEO_LAUNCH_SOON_MESSAGE}</p>
+                    {creative.videoWarnings?.length ? (
+                      <ul className="mt-2 space-y-1 text-amber-900">
+                        {creative.videoWarnings.map((item) => <li key={item}>• {item}</li>)}
+                      </ul>
+                    ) : null}
                   </div>
                 ) : null}
                 {uploadStage ? (
@@ -1601,6 +1697,16 @@ export default function AdsAutomation() {
       ? Boolean(creativePayload.videoLaunchEnabled)
       : Boolean(metaSummary?.videoLaunchEnabled);
     const creativeMetaVideoLaunchStatus = firstString(creativePayload.metaVideoLaunchStatus, assetFileType === "video" ? "soon" : "not_applicable");
+    const creativeVideoPayload = asRecord(creativePayload.video);
+    const creativeVideoMimeType = firstString(creativeVideoPayload.mimeType, creative?.mimeType);
+    const creativeVideoUploadMode = firstString(creativeVideoPayload.uploadMode, creative?.videoUploadMode);
+    const creativeVideoId = Object.prototype.hasOwnProperty.call(creativeVideoPayload, "videoId")
+      ? Boolean(creativeVideoPayload.videoId)
+      : Boolean(creative?.metaVideoId);
+    const creativeVideoProcessingStatus = firstString(creativeVideoPayload.processingStatus, creative?.videoProcessingStatus);
+    const creativeVideoWarnings = Array.isArray(creativeVideoPayload.warnings)
+      ? creativeVideoPayload.warnings.map(String).filter(Boolean)
+      : creative?.videoWarnings || [];
 
     return (
       <section className="neu-card p-5 sm:p-6">
@@ -1702,10 +1808,21 @@ export default function AdsAutomation() {
             <p><b>creative.usesLinkData:</b> {String(creativeUsesLinkData)}</p>
             <p><b>creative.videoLaunchEnabled:</b> {String(creativeVideoLaunchEnabled)}</p>
             <p><b>creative.metaVideoLaunchStatus:</b> {creativeMetaVideoLaunchStatus}</p>
+            <p><b>video.mimeType:</b> {creativeVideoMimeType || "-"}</p>
+            <p><b>video.uploadMode:</b> {creativeVideoUploadMode || "-"}</p>
+            <p><b>video.videoId:</b> {creativeVideoId ? "yes" : "no"}</p>
+            <p><b>video.processingStatus:</b> {creativeVideoProcessingStatus || "-"}</p>
+            <p><b>video.launchEnabled:</b> {String(creativeVideoLaunchEnabled)}</p>
             <p><b>creative.usesInstagramActor:</b> {creativeUsesInstagramActor}</p>
             <p><b>creative.instagramActorFallback:</b> {creativeInstagramActorFallback}</p>
           </div>
         </details>
+
+        {assetFileType === "video" && creativeVideoWarnings.length ? (
+          <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm font-bold text-amber-900">
+            {creativeVideoWarnings.join(" ")}
+          </div>
+        ) : null}
 
         {creativeImageUploadCapabilityFallback ? (
           <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm font-bold text-amber-900">
@@ -1744,6 +1861,10 @@ export default function AdsAutomation() {
           : "Кампания создана в Meta";
     const launchCreativePayload = asRecord(asRecord(launchResult?.metaPayload).creative);
     const launchImageUploadCapabilityFallback = Boolean(launchCreativePayload.imageUploadCapabilityFallback);
+    const launchMetaVideoId = firstString(launchResult?.metaVideoId, launchResult?.videoId, creative?.metaVideoId);
+    const launchVideoUploadMode = firstString(launchResult?.videoUploadMode, creative?.videoUploadMode);
+    const launchVideoProcessingStatus = firstString(launchResult?.videoProcessingStatus, creative?.videoProcessingStatus);
+    const launchVideoWarnings = uniqueStrings([...(creative?.videoWarnings || []), ...(launchResult?.videoWarnings || [])]);
     const launchResultTitle = launchResult?.dryRun
       ? "Проверка прошла без запуска"
       : launchResult?.metaStatus === "ACTIVE" || launchResult?.status === "active"
@@ -1855,6 +1976,16 @@ export default function AdsAutomation() {
                   {launchResult.dryRun ? "Кампания в Meta не создавалась." : `Meta Campaign ID: ${launchResult.metaCampaignId || "ожидается"}`}
                 </p>
                 {launchResult.warning ? <p className="mt-2 text-sm font-bold text-amber-800">{launchResult.warning}</p> : null}
+                {creative?.fileType === "video" && launchMetaVideoId ? (
+                  <div className="mt-2 grid gap-1 text-sm font-bold text-emerald-900">
+                    <p>Meta Video ID: {launchMetaVideoId}</p>
+                    <p>Video upload mode: {launchVideoUploadMode || "-"}</p>
+                    <p>Video processing: {launchVideoProcessingStatus || "-"}</p>
+                  </div>
+                ) : null}
+                {creative?.fileType === "video" && launchVideoWarnings.length ? (
+                  <p className="mt-2 text-sm font-bold text-amber-800">{launchVideoWarnings.join(" ")}</p>
+                ) : null}
                 {!launchResult.dryRun ? (
                   <p className="mt-2 text-sm font-bold text-amber-800">
                     В Ads Manager могли остаться предыдущие тестовые выключенные кампании. Их можно удалить вручную.
@@ -1916,7 +2047,16 @@ export default function AdsAutomation() {
           ) : (
             historyItems.map((item, index) => {
               const payload = asRecord(item.payload);
+              const metaResponse = asRecord(item.metaResponse);
               const itemTimestamp = firstString(item.launchTimestamp, payload.launchTimestamp);
+              const historyMetaVideoId = firstString(item.metaVideoId, payload.metaVideoId, metaResponse.videoId, metaResponse.metaVideoId);
+              const historyVideoUploadMode = firstString(payload.videoUploadMode, metaResponse.videoUploadMode);
+              const historyVideoProcessingStatus = firstString(payload.videoProcessingStatus, metaResponse.videoProcessingStatus);
+              const historyVideoWarnings = Array.isArray(payload.videoWarnings)
+                ? payload.videoWarnings.map(String).filter(Boolean)
+                : Array.isArray(metaResponse.videoWarnings)
+                  ? metaResponse.videoWarnings.map(String).filter(Boolean)
+                  : [];
               return (
                 <article key={item.id || `${item.campaignName}-${index}`} className="rounded-2xl border border-[#D8E4EC] bg-white/70 p-4">
                   <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
@@ -1939,8 +2079,15 @@ export default function AdsAutomation() {
                     <p>Запустил: {item.launchedBy || "-"}</p>
                     <p>Город: {typeof payload.city === "string" ? payload.city : "-"}</p>
                     <p>Файл: {typeof payload.fileName === "string" ? payload.fileName : "-"}</p>
+                    <p>MIME: {typeof payload.mimeType === "string" ? payload.mimeType : "-"}</p>
+                    {payload.creativeType === "video" ? <p>Meta Video ID: {historyMetaVideoId || "-"}</p> : null}
+                    {payload.creativeType === "video" ? <p>Video upload: {historyVideoUploadMode || "-"}</p> : null}
+                    {payload.creativeType === "video" ? <p>Processing: {historyVideoProcessingStatus || "-"}</p> : null}
                     <p>Ad set: {typeof payload.adSetName === "string" ? payload.adSetName : "-"}</p>
                   </div>
+                  {payload.creativeType === "video" && historyVideoWarnings.length ? (
+                    <p className="mt-3 text-sm font-bold text-amber-700">{historyVideoWarnings.join(" ")}</p>
+                  ) : null}
                   {item.lastError ? <p className="mt-3 text-sm font-bold text-red-600">{item.lastError}</p> : null}
                 </article>
               );

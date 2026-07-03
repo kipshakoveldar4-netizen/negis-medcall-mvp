@@ -12,7 +12,7 @@ Negis MVP не запускает рекламу автоматически. Р�
 - `META_AD_ACCOUNT_ID`
 - `META_PAGE_ID`
 - `META_INSTAGRAM_ACTOR_ID`
-- `META_VIDEO_LAUNCH_ENABLED=false` for MVP. Video upload/storage and dry-run stay available; real video launch should remain disabled until the Meta `video_id` flow is finished.
+- `META_VIDEO_LAUNCH_ENABLED=false` by default. Set to `true` only to enable the experimental Meta `video_id` launch flow for MP4/MOV.
 - `META_ASTANA_CITY_KEY` optional legacy override for Astana. Do not create one env per city. Negis resolves Kazakhstan cities through a static map, in-memory cache, and Meta Targeting Search.
 
 Не вводите access token во frontend. Token должен жить только в Vercel env.
@@ -50,7 +50,7 @@ Negis MVP не запускает рекламу автоматически. Р�
 4. Убедитесь, что Meta env status не `not_configured`.
 5. Нажмите `Подготовить тестовый draft`.
 
-Реальный Meta Marketing API launch остается следующим этапом.
+Реальный Meta Marketing API launch доступен для фото и для видео MP4/MOV при включенном `META_VIDEO_LAUNCH_ENABLED=true`.
 
 ## Live Launch MVP
 
@@ -62,6 +62,32 @@ Negis now includes `/ads-automation` for server-side Meta Marketing API launch.
 - Smoke tests use `dryRun: true` and do not create real ads.
 
 Detailed guide: `docs/META-LIVE-LAUNCH.md`.
+
+## Video launch flag
+
+Default:
+
+```env
+META_VIDEO_LAUNCH_ENABLED=false
+```
+
+With the default value, video upload to Supabase and dry-run reports work, but real video creation is blocked with a controlled message.
+
+Experimental real video launch:
+
+```env
+META_VIDEO_LAUNCH_ENABLED=true
+```
+
+When enabled, Negis supports MP4 and MOV:
+
+- sends the Supabase public video URL to `/{adAccountId}/advideos`;
+- receives `video_id`;
+- polls `/{videoId}?fields=status,processing_progress`;
+- creates the creative through `object_story_spec.video_data.video_id`;
+- retries with server-to-Meta multipart binary upload if Meta cannot fetch the public URL and the file is small enough for Vercel.
+
+MOV is supported but may process longer. If Meta still processes the video after the short polling window, the API returns a controlled “retry in a few minutes” message instead of a raw technical error.
 
 ## MVP targeting behavior
 

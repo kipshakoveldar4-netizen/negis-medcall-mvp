@@ -15,9 +15,12 @@ import {
   isMetaVideoLaunchEnabled,
   launchMetaCampaign,
   META_VIDEO_LAUNCH_DISABLED_MESSAGE,
+  META_VIDEO_FORMAT_ERROR,
+  META_MOV_VIDEO_WARNING,
   resolveMetaCityTarget,
   resolveMetaTargetingForCity,
-  uploadMetaVideo,
+  isSupportedMetaVideoFormat,
+  uploadMetaVideoAndGetId,
 } from "../meta/marketing";
 import { KZ_META_CITY_OPTIONS, findKzMetaCityOption, getKzMetaCityOption, type MetaCitySearchCandidate } from "../meta/cities";
 
@@ -745,6 +748,7 @@ function makeMetaLaunch(body: JsonRecord): JsonRecord {
     metaAdSetId: firstString(body.metaAdSetId, body.meta_adset_id),
     metaCreativeId: firstString(body.metaCreativeId, body.meta_creative_id),
     metaAdId: firstString(body.metaAdId, body.meta_ad_id),
+    metaVideoId: firstString(body.metaVideoId, body.meta_video_id, body.videoId, body.video_id, asRecord(body.metaResponse ?? body.meta_response).videoId),
     metaStatus: firstString(body.metaStatus, body.meta_status),
     budgetDailyMinor: readNumber(body.budgetDailyMinor ?? body.budget_daily_minor) ?? null,
     budgetTotalMinor: readNumber(body.budgetTotalMinor ?? body.budget_total_minor) ?? null,
@@ -1212,6 +1216,7 @@ const configs: Record<CrmResource, ResourceConfig> = {
         metaAdSetId: row.meta_adset_id,
         metaCreativeId: row.meta_creative_id,
         metaAdId: row.meta_ad_id,
+        metaVideoId: firstString(asRecord(row.meta_response).videoId, asRecord(row.meta_response).metaVideoId),
         metaStatus: row.meta_status,
         budgetDailyMinor: row.budget_daily_minor,
         budgetTotalMinor: row.budget_total_minor,
@@ -2185,6 +2190,8 @@ export async function handleAdCreativeMetaUpload(req: VercelRequest, res: Vercel
   const creativeType = normalizeCreativeFileType(body);
   const publicUrl = resolveAdCreativePublicUrl(body);
   const title = firstString(body.title, body.fileName, body.file_name, "Negis video creative");
+  const fileName = firstString(body.fileName, body.file_name, title);
+  const mimeType = firstString(body.mimeType, body.mime_type);
 
   if (creativeType === "image") {
     return sendJson(
@@ -2240,6 +2247,10 @@ export async function handleAdCreativeMetaUpload(req: VercelRequest, res: Vercel
     );
   }
 
+  if (!isSupportedMetaVideoFormat({ fileName, mimeType })) {
+    return sendJson(res, 400, errorBody("Validation error", [META_VIDEO_FORMAT_ERROR]));
+  }
+
   if (!getMetaConfig().configured) {
     return sendJson(
       res,
@@ -2251,11 +2262,8 @@ export async function handleAdCreativeMetaUpload(req: VercelRequest, res: Vercel
   }
 
   try {
-    const metaResponse = await uploadMetaVideo({ videoUrl: publicUrl, title });
-    const metaVideoId = firstString(metaResponse.id, metaResponse.video_id);
-    if (!metaVideoId) {
-      throw new Error("Meta вернула ответ без video_id");
-    }
+    const metaResponse = await uploadMetaVideoAndGetId({ videoUrl: publicUrl, fileName, mimeType, title });
+    const metaVideoId = metaResponse.videoId;
 
     await updateAdCreativeMeta({
       workspaceId,
@@ -2271,19 +2279,24 @@ export async function handleAdCreativeMetaUpload(req: VercelRequest, res: Vercel
       success("supabase", {
         assetId,
         metaVideoId,
+        videoId: metaVideoId,
+        uploadMode: metaResponse.uploadMode,
+        processingStatus: metaResponse.processingStatus,
+        warnings: metaResponse.warnings || [],
         status: "meta_uploaded",
         metaResponse,
-      }),
+      }, metaResponse.warnings?.join(" ") || (mimeType === "video/quicktime" ? META_MOV_VIDEO_WARNING : undefined)),
     );
   } catch (error) {
+    const metaError = safeMetaLaunchError(error);
+    const message = firstString(metaError.message, error instanceof Error ? error.message : "");
     return sendJson(
       res,
-      502,
-      errorBody("Видео загружено в Negis, но Meta не приняла видео", [
-        error instanceof Error
-          ? `${error.message}. Проверьте формат MP4, размер и права токена.`
-          : "Проверьте формат MP4, размер и права токена.",
-      ]),
+      metaError.step === "video_processing" ? 409 : 502,
+      {
+        ...errorBody("Видео загружено в Negis, но Meta не приняла видео", [message]),
+        data: { metaError },
+      },
     );
   }
 }
@@ -2715,6 +2728,9 @@ function buildMetaLaunchBody(body: JsonRecord) {
   const totalBudget = readNumber(body.totalBudget ?? body.total_budget) ?? dailyBudget * days;
   const config = getMetaConfig();
   const creativeType = normalizeCreativeFileType(body);
+  const fileName = firstString(body.fileName, body.file_name);
+  const mimeType = firstString(body.mimeType, body.mime_type);
+  const fileSize = readNumber(body.fileSize ?? body.file_size) ?? 0;
   const creativeUrl = firstString(body.creativeUrl, body.creative_url);
   const imageUrl = creativeType === "image" ? firstString(body.imageUrl, body.image_url, creativeUrl) : firstString(body.imageUrl, body.image_url);
   const videoUrl = creativeType === "video" ? firstString(body.videoUrl, body.video_url, creativeUrl) : firstString(body.videoUrl, body.video_url);
@@ -2758,6 +2774,9 @@ function buildMetaLaunchBody(body: JsonRecord) {
     imageUrl,
     creativeUrl,
     creativeType,
+    fileName,
+    mimeType,
+    fileSize,
     videoUrl,
     videoId: firstString(body.videoId, body.video_id, body.metaVideoId, body.meta_video_id),
     thumbnailUrl: firstString(body.thumbnailUrl, body.thumbnail_url),
@@ -2786,6 +2805,10 @@ function buildMetaPayloadPreview(
     pictureUrl?: boolean;
     imageUploadCapabilityFallback?: boolean;
     omitInstagramPositions?: boolean;
+    videoId?: string;
+    videoUploadMode?: string;
+    videoProcessingStatus?: string;
+    videoWarnings?: string[];
   } = {},
 ): JsonRecord {
   const assetFileType = launch.creativeType === "video" ? "video" : "image";
@@ -2888,6 +2911,15 @@ function buildMetaPayloadPreview(
       usesLinkData,
       videoLaunchEnabled: isMetaVideoLaunchEnabled(),
       metaVideoLaunchStatus: assetFileType === "video" ? (isMetaVideoLaunchEnabled() ? "experimental" : "soon") : "not_applicable",
+      video: {
+        mimeType: assetFileType === "video" ? launch.mimeType || "" : "",
+        fileName: assetFileType === "video" ? launch.fileName || "" : "",
+        uploadMode: assetFileType === "video" ? creativeOptions.videoUploadMode || "" : "",
+        videoId: assetFileType === "video" ? Boolean(creativeOptions.videoId || launch.videoId) : false,
+        processingStatus: assetFileType === "video" ? creativeOptions.videoProcessingStatus || "" : "",
+        launchEnabled: assetFileType === "video" ? isMetaVideoLaunchEnabled() : false,
+        warnings: assetFileType === "video" ? creativeOptions.videoWarnings || [] : [],
+      },
       usesInstagramActor: creativeOptions.usesInstagramActor ?? Boolean(launch.instagramActorId),
       instagramActorFallback: creativeOptions.instagramActorFallback ?? false,
     },
@@ -2981,6 +3013,7 @@ function extractMetaIds(metaResponse: JsonRecord) {
     metaAdSetId: firstString(metaResponse.metaAdSetId, asRecord(metaResponse.adSet).id),
     metaCreativeId: firstString(metaResponse.metaCreativeId, asRecord(metaResponse.creative).id),
     metaAdId: firstString(metaResponse.metaAdId, asRecord(metaResponse.ad).id),
+    metaVideoId: firstString(metaResponse.videoId, metaResponse.metaVideoId),
   };
 }
 
@@ -3234,6 +3267,9 @@ export async function handleMetaLaunch(req: VercelRequest, res: VercelResponse) 
   if (!dryRun && launch.creativeType === "video" && !isMetaVideoLaunchEnabled()) {
     details.push(META_VIDEO_LAUNCH_DISABLED_MESSAGE);
   }
+  if (!dryRun && launch.creativeType === "video" && isMetaVideoLaunchEnabled() && !launch.videoId && !isSupportedMetaVideoFormat({ fileName: launch.fileName, mimeType: launch.mimeType })) {
+    details.push(META_VIDEO_FORMAT_ERROR);
+  }
   if (!readBoolean(body.complianceConfirmed)) details.push("Подтвердите проверку безопасности текста.");
   if (!readBoolean(body.manualApprovalConfirmed)) details.push("Подтвердите ручное согласование запуска.");
 
@@ -3385,6 +3421,9 @@ export async function handleMetaLaunch(req: VercelRequest, res: VercelResponse) 
         landingUrl: resolvedLaunch.landingUrl,
         imageUrl: resolvedLaunch.creativeType === "image" ? resolvedLaunch.imageUrl || resolvedLaunch.creativeUrl : "",
         creativeType: resolvedLaunch.creativeType,
+        fileName: resolvedLaunch.fileName,
+        mimeType: resolvedLaunch.mimeType,
+        fileSize: resolvedLaunch.fileSize,
         videoUrl: resolvedLaunch.creativeType === "video" ? resolvedLaunch.videoUrl || resolvedLaunch.creativeUrl : "",
         videoId: resolvedLaunch.creativeType === "video" ? resolvedLaunch.videoId : "",
         thumbnailUrl: resolvedLaunch.thumbnailUrl,
@@ -3417,6 +3456,10 @@ export async function handleMetaLaunch(req: VercelRequest, res: VercelResponse) 
           pictureUrl: Boolean(result.pictureUrlUsed),
           imageUploadCapabilityFallback: Boolean(result.imageUploadCapabilityFallback),
           omitInstagramPositions: Boolean(result.instagramPositionsFallback),
+          videoId: result.videoId,
+          videoUploadMode: result.videoUploadMode,
+          videoProcessingStatus: result.videoProcessingStatus,
+          videoWarnings: result.videoWarnings,
         },
       );
       metaPayload = realMetaPayload;

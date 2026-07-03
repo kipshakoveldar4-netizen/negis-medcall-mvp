@@ -10,7 +10,11 @@ import {
 type MetaFetchResponse = {
   ok: boolean;
   status: number;
+  headers?: {
+    get(name: string): string | null;
+  };
   text: () => Promise<string>;
+  arrayBuffer?: () => Promise<ArrayBuffer>;
 };
 
 type MetaFetch = (
@@ -18,12 +22,13 @@ type MetaFetch = (
   init?: {
     method?: string;
     headers?: Record<string, string>;
-    body?: string;
+    body?: string | Buffer;
   },
 ) => Promise<MetaFetchResponse>;
 
 type MetaJson = Record<string, unknown>;
 type MetaImageUploadMode = "adimages" | "picture_url";
+type MetaVideoUploadMode = "file_url" | "binary";
 type MetaGeoMode = "city" | "country";
 type MetaCityKeySource = "static" | "env" | "targeting_search" | "cache" | "fallback";
 type MetaTargetingSource = MetaCityKeySource | "input" | "api";
@@ -112,6 +117,9 @@ export type MetaLaunchInput = {
   landingUrl: string;
   imageUrl?: string;
   creativeType?: "image" | "video";
+  fileName?: string;
+  mimeType?: string;
+  fileSize?: number;
   videoUrl?: string;
   videoId?: string;
   thumbnailUrl?: string;
@@ -155,6 +163,10 @@ export type MetaLaunchResult = {
   imageUploadMode?: MetaImageUploadMode;
   imageUploadCapabilityFallback?: boolean;
   pictureUrlUsed?: boolean;
+  videoId?: string;
+  videoUploadMode?: MetaVideoUploadMode;
+  videoProcessingStatus?: string;
+  videoWarnings?: string[];
   instagramPositionsFallback?: boolean;
 };
 
@@ -178,6 +190,14 @@ type MetaCreativeCreateResult = {
   warning?: string;
 };
 
+export type MetaVideoUploadResult = {
+  videoId: string;
+  uploadMode: MetaVideoUploadMode;
+  processingStatus?: string;
+  warnings?: string[];
+  raw?: unknown;
+};
+
 const INSTAGRAM_ACTOR_FALLBACK_WARNING =
   "Instagram actor ID отклонён Meta. Кампания создана через Facebook Page. Для запуска в Instagram нужно переподключить Instagram account.";
 const IMAGE_UPLOAD_CAPABILITY_FALLBACK_WARNING =
@@ -190,6 +210,15 @@ const KZ_CITY_FALLBACK_WARNING =
   "Meta city key was not found, Kazakhstan country targeting was used.";
 export const META_VIDEO_LAUNCH_DISABLED_MESSAGE =
   "Видео загружено в Negis, но автозапуск видео-рекламы через Meta API ещё находится в подготовке. Сейчас можно запускать фото-рекламу. Для видео используйте Ads Manager вручную или загрузите MP4 после включения video_id flow.";
+export const META_MOV_VIDEO_WARNING =
+  "MOV поддерживается Meta, но обработка может быть дольше. Для максимальной стабильности используйте MP4/H.264.";
+export const META_VIDEO_FORMAT_ERROR =
+  "Для автозапуска видео поддерживаются MP4 и MOV.";
+export const META_VIDEO_PROCESSING_TIMEOUT_MESSAGE =
+  "Видео загружено в Meta и обрабатывается. Повторите создание объявления через несколько минут.";
+export const META_VIDEO_BINARY_TOO_LARGE_MESSAGE =
+  "Видео слишком большое для серверной передачи. Используйте MP4 меньшего размера или подключите background worker.";
+const META_VIDEO_BINARY_FALLBACK_LIMIT_BYTES = 25 * 1024 * 1024;
 const metaCityTargetCache = new Map<string, MetaCityTarget>();
 
 function readEnv(key: string): string {
@@ -198,6 +227,31 @@ function readEnv(key: string): string {
 
 export function isMetaVideoLaunchEnabled(): boolean {
   return ["true", "1", "yes", "on"].includes(readEnv("META_VIDEO_LAUNCH_ENABLED").toLowerCase());
+}
+
+function normalizeVideoMimeType(value = "", fileName = ""): string {
+  const mime = value.trim().toLowerCase();
+  const extension = fileName.split(".").pop()?.toLowerCase() || "";
+  if (mime) return mime;
+  if (extension === "mp4") return "video/mp4";
+  if (extension === "mov") return "video/quicktime";
+  return "";
+}
+
+export function isSupportedMetaVideoFormat(input: { mimeType?: string; fileName?: string }): boolean {
+  const mimeType = normalizeVideoMimeType(input.mimeType, input.fileName);
+  const extension = (input.fileName || "").split(".").pop()?.toLowerCase() || "";
+  return mimeType === "video/mp4" || mimeType === "video/quicktime" || extension === "mp4" || extension === "mov";
+}
+
+function assertSupportedMetaVideoFormat(input: { mimeType?: string; fileName?: string }) {
+  if (!isSupportedMetaVideoFormat(input)) {
+    throw new MetaApiError({
+      step: "video_upload",
+      message: META_VIDEO_FORMAT_ERROR,
+      debug: { mimeType: input.mimeType || "", fileName: input.fileName || "" },
+    });
+  }
 }
 
 export function formatKazakhstanTimestamp(date = new Date()): string {
@@ -724,8 +778,13 @@ export function assertMetaConfigured(): MetaConfig {
   return config;
 }
 
-export async function metaRequest(path: string, method: "GET" | "POST", body: MetaJson = {}, step?: string): Promise<MetaJson> {
-  const config = assertMetaConfigured();
+async function metaRequestWithAuth(
+  config: { baseUrl: string; accessToken: string },
+  path: string,
+  method: "GET" | "POST",
+  body: MetaJson = {},
+  step?: string,
+): Promise<MetaJson> {
   const url = `${config.baseUrl}/${path.replace(/^\//, "")}`;
   const safeFetch = fetch as unknown as MetaFetch;
   const payload = { ...body, access_token: config.accessToken };
@@ -744,6 +803,11 @@ export async function metaRequest(path: string, method: "GET" | "POST", body: Me
   }
 
   return data;
+}
+
+export async function metaRequest(path: string, method: "GET" | "POST", body: MetaJson = {}, step?: string): Promise<MetaJson> {
+  const config = assertMetaConfigured();
+  return metaRequestWithAuth(config, path, method, body, step);
 }
 
 export function buildMetaCampaignPayload(input: MetaLaunchInput): MetaJson {
@@ -842,22 +906,302 @@ export async function uploadMetaVideo(input: { videoUrl: string; title?: string 
   }, "video_upload");
 }
 
-export async function uploadMetaVideoAndGetId(input: { videoUrl: string; title?: string; mimeType?: string }): Promise<string> {
-  // TODO:
-  // 1. validate MP4
-  // 2. upload to Meta advideos/video_ads
-  // 3. poll processing status if needed
-  // 4. return video_id
+function readMetaString(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function readMetaVideoId(data: MetaJson): string {
+  return readMetaString(data.id) || readMetaString(data.video_id);
+}
+
+function shouldFallbackVideoUrlToBinary(error: unknown): boolean {
+  const details = error instanceof MetaApiError ? error.details : undefined;
+  const text = [
+    details?.step,
+    details?.message,
+    details?.errorUserMsg,
+    error instanceof Error ? error.message : "",
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+
+  return (
+    details?.step === "video_upload" &&
+    (text.includes("unable to fetch") ||
+      text.includes("could not fetch") ||
+      text.includes("can't fetch") ||
+      text.includes("cannot fetch") ||
+      text.includes("file_url") ||
+      text.includes("source url") ||
+      text.includes("download"))
+  );
+}
+
+function readVideoProcessingStatus(data: MetaJson): string {
+  const directStatus = readMetaString(data.status) || readMetaString(data.processing_status);
+  if (directStatus) return directStatus;
+
+  const statusRecord = data.status && typeof data.status === "object" && !Array.isArray(data.status) ? (data.status as MetaJson) : {};
+  const readPhaseStatus = (value: unknown): string => {
+    if (typeof value === "string") return value;
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      const record = value as MetaJson;
+      return readMetaString(record.status) || readMetaString(record.video_status) || readMetaString(record.phase);
+    }
+    return "";
+  };
+
+  return (
+    readMetaString(statusRecord.video_status) ||
+    readPhaseStatus(statusRecord.uploading_phase) ||
+    readPhaseStatus(statusRecord.processing_phase) ||
+    readPhaseStatus(statusRecord.publishing_phase)
+  );
+}
+
+function isVideoProcessingStatus(value: string): boolean {
+  const text = value.toLowerCase();
+  return text.includes("processing") || text.includes("upload") || text.includes("pending") || text.includes("progress") || text.includes("not_ready");
+}
+
+function isVideoReadyStatus(value: string): boolean {
+  const text = value.toLowerCase();
+  return text.includes("ready") || text.includes("available") || text.includes("complete") || text.includes("success") || text.includes("finished");
+}
+
+function isVideoErrorStatus(value: string): boolean {
+  const text = value.toLowerCase();
+  return text.includes("error") || text.includes("failed") || text.includes("rejected");
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
+}
+
+async function pollMetaVideoProcessing(input: {
+  config: { baseUrl: string; accessToken: string };
+  videoId: string;
+  attempts: number;
+  delayMs: number;
+}): Promise<{ status: string; raw?: unknown }> {
+  let lastStatus = "";
+  let lastRaw: unknown;
+
+  for (let attempt = 0; attempt < input.attempts; attempt += 1) {
+    const data = await metaRequestWithAuth(
+      input.config,
+      `/${input.videoId}`,
+      "GET",
+      { fields: "status,processing_progress" },
+      "video_processing",
+    );
+    const status = readVideoProcessingStatus(data);
+    lastStatus = status || lastStatus;
+    lastRaw = data;
+
+    if (!status || isVideoReadyStatus(status)) return { status: status || "ready", raw: data };
+    if (isVideoErrorStatus(status)) {
+      throw new MetaApiError({
+        step: "video_processing",
+        message: `Meta video processing failed: ${status}`,
+        debug: data,
+      });
+    }
+    if (!isVideoProcessingStatus(status)) return { status, raw: data };
+    if (attempt < input.attempts - 1) await delay(input.delayMs);
+  }
+
+  throw new MetaApiError({
+    step: "video_processing",
+    message: META_VIDEO_PROCESSING_TIMEOUT_MESSAGE,
+    debug: { status: lastStatus, raw: lastRaw },
+  });
+}
+
+function makeMultipartBody(fields: Record<string, string>, file: { fieldName: string; fileName: string; mimeType: string; buffer: Buffer }) {
+  const boundary = `----negis-meta-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  const chunks: Buffer[] = [];
+  const line = (value: string) => Buffer.from(value, "utf8");
+
+  for (const [name, value] of Object.entries(fields)) {
+    chunks.push(line(`--${boundary}\r\n`));
+    chunks.push(line(`Content-Disposition: form-data; name="${name}"\r\n\r\n`));
+    chunks.push(line(`${value}\r\n`));
+  }
+
+  chunks.push(line(`--${boundary}\r\n`));
+  chunks.push(line(`Content-Disposition: form-data; name="${file.fieldName}"; filename="${file.fileName.replace(/"/g, "")}"\r\n`));
+  chunks.push(line(`Content-Type: ${file.mimeType || "application/octet-stream"}\r\n\r\n`));
+  chunks.push(file.buffer);
+  chunks.push(line(`\r\n--${boundary}--\r\n`));
+
+  return {
+    boundary,
+    body: Buffer.concat(chunks),
+  };
+}
+
+async function downloadVideoForBinaryFallback(input: { videoUrl: string; maxBytes: number }): Promise<Buffer> {
+  const safeFetch = fetch as unknown as MetaFetch;
+  const response = await safeFetch(input.videoUrl, { method: "GET" });
+  const contentLength = Number(response.headers?.get("content-length") || 0);
+  if (Number.isFinite(contentLength) && contentLength > input.maxBytes) {
+    throw new MetaApiError({
+      step: "video_upload",
+      message: META_VIDEO_BINARY_TOO_LARGE_MESSAGE,
+      debug: { contentLength, maxBytes: input.maxBytes },
+    });
+  }
+  if (!response.ok || !response.arrayBuffer) {
+    const data = await parseMetaResponse(response);
+    throw new MetaApiError({
+      step: "video_upload",
+      status: response.status,
+      message: `Could not download public video URL for binary fallback: ${response.status}`,
+      debug: data,
+    });
+  }
+
+  const buffer = Buffer.from(await response.arrayBuffer());
+  if (buffer.length > input.maxBytes) {
+    throw new MetaApiError({
+      step: "video_upload",
+      message: META_VIDEO_BINARY_TOO_LARGE_MESSAGE,
+      debug: { contentLength: buffer.length, maxBytes: input.maxBytes },
+    });
+  }
+  return buffer;
+}
+
+async function uploadMetaVideoBinary(input: {
+  config: { baseUrl: string; accessToken: string };
+  adAccountId: string;
+  videoUrl: string;
+  fileName: string;
+  mimeType: string;
+  title: string;
+  maxBytes: number;
+}): Promise<MetaJson> {
+  const safeFetch = fetch as unknown as MetaFetch;
+  const buffer = await downloadVideoForBinaryFallback({ videoUrl: input.videoUrl, maxBytes: input.maxBytes });
+  const multipart = makeMultipartBody(
+    {
+      access_token: input.config.accessToken,
+      title: input.title,
+    },
+    {
+      fieldName: "source",
+      fileName: input.fileName || "negis-video.mp4",
+      mimeType: normalizeVideoMimeType(input.mimeType, input.fileName) || "video/mp4",
+      buffer,
+    },
+  );
+  const response = await safeFetch(`${input.config.baseUrl}/${input.adAccountId}/advideos`, {
+    method: "POST",
+    headers: {
+      "Content-Type": `multipart/form-data; boundary=${multipart.boundary}`,
+      "Content-Length": String(multipart.body.length),
+    },
+    body: multipart.body,
+  });
+  const data = await parseMetaResponse(response);
+  if (!response.ok) {
+    throw new MetaApiError(readMetaErrorDetails(data, response.status, "video_upload"));
+  }
+  return data;
+}
+
+export async function uploadMetaVideoAndGetId(input: {
+  adAccountId?: string;
+  accessToken?: string;
+  videoUrl: string;
+  fileName?: string;
+  mimeType?: string;
+  title?: string;
+  processingPollAttempts?: number;
+  processingPollDelayMs?: number;
+  maxBinaryBytes?: number;
+}): Promise<MetaVideoUploadResult> {
   if (!isMetaVideoLaunchEnabled()) {
     throw new Error(META_VIDEO_LAUNCH_DISABLED_MESSAGE);
   }
 
-  const data = await uploadMetaVideo(input);
-  const directId = data.id;
-  const videoId = data.video_id;
-  if (typeof directId === "string" && directId) return directId;
-  if (typeof videoId === "string" && videoId) return videoId;
-  throw new Error("Meta returned video upload response without video_id");
+  const config = assertMetaConfigured();
+  const resolvedConfig = {
+    baseUrl: config.baseUrl,
+    accessToken: input.accessToken?.trim() || config.accessToken,
+  };
+  const adAccountId = input.adAccountId?.trim() || config.adAccountId;
+  const videoUrl = input.videoUrl.trim();
+  const fileName = input.fileName?.trim() || "negis-video.mp4";
+  const mimeType = normalizeVideoMimeType(input.mimeType, fileName);
+  const title = input.title?.trim() || "Negis video creative";
+  const warnings: string[] = [];
+  assertSupportedMetaVideoFormat({ mimeType, fileName });
+  if (mimeType === "video/quicktime" || fileName.toLowerCase().endsWith(".mov")) addWarning(warnings, META_MOV_VIDEO_WARNING);
+
+  if (!videoUrl) {
+    throw new MetaApiError({
+      step: "video_upload",
+      message: "Video URL is required for Meta video upload",
+    });
+  }
+
+  let uploadMode: MetaVideoUploadMode = "file_url";
+  let data: MetaJson;
+  try {
+    data = await metaRequestWithAuth(
+      resolvedConfig,
+      `/${adAccountId}/advideos`,
+      "POST",
+      {
+        file_url: videoUrl,
+        title,
+      },
+      "video_upload",
+    );
+  } catch (error) {
+    if (!shouldFallbackVideoUrlToBinary(error)) throw error;
+    uploadMode = "binary";
+    addWarning(warnings, "Meta не смогла получить видео по public URL. Negis отправил видео в Meta server-to-server.");
+    data = await uploadMetaVideoBinary({
+      config: resolvedConfig,
+      adAccountId,
+      videoUrl,
+      fileName,
+      mimeType,
+      title,
+      maxBytes: input.maxBinaryBytes || META_VIDEO_BINARY_FALLBACK_LIMIT_BYTES,
+    });
+  }
+
+  const videoId = readMetaVideoId(data);
+  if (!videoId) {
+    throw new MetaApiError({
+      step: "video_upload",
+      message: "Meta returned video upload response without video_id",
+      debug: data,
+    });
+  }
+
+  const processing = await pollMetaVideoProcessing({
+    config: resolvedConfig,
+    videoId,
+    attempts: input.processingPollAttempts ?? 4,
+    delayMs: input.processingPollDelayMs ?? 3000,
+  });
+
+  return {
+    videoId,
+    uploadMode,
+    processingStatus: processing.status,
+    warnings,
+    raw: {
+      upload: data,
+      processing: processing.raw,
+    },
+  };
 }
 
 function parseMetaImageHash(data: MetaJson): string {
@@ -1111,6 +1455,18 @@ export async function launchMetaCampaign(input: MetaLaunchInput): Promise<MetaLa
       : { ...input, creativeType: "image" as const, videoUrl: undefined, videoId: undefined };
   const warnings: string[] = [];
   addWarning(warnings, input.targetingResolution?.warning);
+  let creativeInput: MetaLaunchInput = preparedInput;
+  let videoUploadResult: MetaVideoUploadResult | undefined;
+  if (preparedInput.creativeType === "video" && !preparedInput.videoId) {
+    videoUploadResult = await uploadMetaVideoAndGetId({
+      videoUrl: preparedInput.videoUrl || "",
+      fileName: preparedInput.fileName,
+      mimeType: preparedInput.mimeType,
+      title: preparedInput.creativeName || `${preparedInput.campaignName} - Video`,
+    });
+    for (const item of videoUploadResult.warnings || []) addWarning(warnings, item);
+    creativeInput = { ...preparedInput, videoId: videoUploadResult.videoId };
+  }
 
   const campaign = await createMetaCampaign(preparedInput);
   const metaCampaignId = parseMetaId(campaign);
@@ -1142,14 +1498,6 @@ export async function launchMetaCampaign(input: MetaLaunchInput): Promise<MetaLa
   let imageUploadMode: MetaImageUploadMode = "adimages";
   let imageUploadCapabilityFallback = false;
   let pictureUrlUsed = false;
-  let creativeInput: MetaLaunchInput = preparedInput;
-  if (preparedInput.creativeType === "video" && !preparedInput.videoId) {
-    const videoId = await uploadMetaVideoAndGetId({
-      videoUrl: preparedInput.videoUrl || "",
-      title: preparedInput.creativeName || `${preparedInput.campaignName} - Video`,
-    });
-    creativeInput = { ...preparedInput, videoId };
-  }
   try {
     const creativeResult = await createMetaCreative(creativeInput);
     creative = creativeResult.data;
@@ -1207,6 +1555,10 @@ export async function launchMetaCampaign(input: MetaLaunchInput): Promise<MetaLa
     imageUploadMode,
     imageUploadCapabilityFallback,
     pictureUrlUsed,
+    videoId: creativeInput.creativeType === "video" ? creativeInput.videoId : undefined,
+    videoUploadMode: videoUploadResult?.uploadMode,
+    videoProcessingStatus: videoUploadResult?.processingStatus,
+    videoWarnings: videoUploadResult?.warnings,
     instagramPositionsFallback,
   };
 }

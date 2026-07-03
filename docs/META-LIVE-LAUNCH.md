@@ -4,7 +4,7 @@
 
 `/ads-automation` is now a Russian employee wizard. The user uploads a photo/video, fills only the key brief fields, lets AI prepare the ad package, runs a safety check, reads the final report, then confirms the Meta launch.
 
-Photo creatives can be created in Meta in `PAUSED` mode. Video creatives can be uploaded to Negis and used in dry-run/final reports, but real video launch is gated until the dedicated Meta `video_id` upload flow is ready.
+Photo creatives can be created in Meta in `PAUSED` mode. Video creatives stay gated by `META_VIDEO_LAUNCH_ENABLED=false` by default, but the backend now supports the experimental Meta `video_id` flow for MP4 and MOV when the flag is set to `true`.
 
 ACTIVE launch still requires Admin Center live launch enabled and the typed confirmation `ЗАПУСТИТЬ`.
 
@@ -23,6 +23,8 @@ The backend creates, in order:
 
 All calls are server-side. `META_ACCESS_TOKEN` and `META_APP_SECRET` are never returned to the frontend.
 
+For video creatives with `META_VIDEO_LAUNCH_ENABLED=true`, the backend first uploads the public Supabase video URL to `/{adAccountId}/advideos`, reads the returned `video_id`, polls `/{videoId}?fields=status,processing_progress`, then creates the ad creative with `object_story_spec.video_data.video_id`. If Meta cannot fetch the public URL, Negis can try a server-to-Meta binary multipart fallback for smaller files.
+
 ## Required Env
 
 Set these variables in Vercel:
@@ -35,7 +37,7 @@ Set these variables in Vercel:
 - `META_AD_ACCOUNT_ID`
 - `META_PAGE_ID`
 - `META_INSTAGRAM_ACTOR_ID`
-- `META_VIDEO_LAUNCH_ENABLED=false` by default. Keep this disabled for MVP. When enabled later, Negis will try the experimental `video_id` upload flow.
+- `META_VIDEO_LAUNCH_ENABLED=false` by default. Set to `true` only when you want the experimental MP4/MOV `video_id` upload flow. Dry-run and Supabase storage work without enabling it.
 - `META_ASTANA_CITY_KEY` optional legacy override for Astana. New city targeting does not require one env per city: the backend uses a Kazakhstan city resolver with a static map, in-memory cache, then Meta Targeting Search.
 
 The API may return non-secret IDs for UI previews, but returns only booleans for token and secret presence.
@@ -134,6 +136,25 @@ Smoke tests and UI checks use:
 ```
 
 Dry-run returns simulated Meta IDs and does not call Meta API.
+
+## Video Launch
+
+Supported real video formats:
+
+- `video/mp4` / `.mp4`
+- `video/quicktime` / `.mov`
+
+MOV is allowed, but processing can take longer. The UI shows a warning and still proceeds when the feature flag is enabled.
+
+Flow:
+
+1. Supabase public video URL is sent server-side to `/{adAccountId}/advideos` as `file_url`.
+2. Meta returns `id` / `video_id`.
+3. Negis polls `/{videoId}?fields=status,processing_progress` for a short window.
+4. If ready, the creative uses `object_story_spec.video_data.video_id`.
+5. If processing is still pending, the API returns a controlled message telling the employee to retry after a few minutes.
+
+If the URL upload fails because Meta cannot fetch the file, Negis downloads the public video server-side and retries `/{adAccountId}/advideos` as multipart `source`. This fallback is capped for Vercel safety; large videos should be converted to smaller MP4/H.264 or moved to a background worker later.
 
 ## API Endpoints
 

@@ -60,8 +60,14 @@ async function checkAdsAutomationSource() {
   assertSourceIncludes(source, "VIDEO_REAL_LAUNCH_DISABLED_MESSAGE", "video real launch disabled copy");
   assertSourceIncludes(source, "VIDEO_LAUNCH_SOON_MESSAGE", "video launch soon helper text");
   assertSourceIncludes(source, "MOV_VIDEO_WARNING", "MOV upload warning");
+  assertSourceIncludes(source, "VIDEO_LAUNCH_ENABLED_MESSAGE", "video launch enabled helper text");
+  assertSourceIncludes(source, "VIDEO_FORMAT_ERROR", "video format validation message");
   assertSourceIncludes(source, "creative.videoLaunchEnabled", "video launch flag debug");
   assertSourceIncludes(source, "creative.metaVideoLaunchStatus", "video launch status debug");
+  assertSourceIncludes(source, "video.mimeType", "video MIME debug");
+  assertSourceIncludes(source, "video.uploadMode", "video upload mode debug");
+  assertSourceIncludes(source, "video.videoId", "video ID debug");
+  assertSourceIncludes(source, "Meta Video ID", "video ID launch result");
   assertSourceIncludes(source, "KZ_META_CITY_OPTIONS", "controlled Kazakhstan city options");
   assertSourceIncludes(source, "selectedCityId", "selected city id launch payload");
   assertSourceIncludes(source, "selectedCityCanonicalName", "selected city canonical name launch payload");
@@ -106,10 +112,22 @@ async function checkMetaMarketingSource() {
     throw new Error("Meta marketing source must use META_VIDEO_LAUNCH_ENABLED feature flag");
   }
   if (!source.includes("uploadMetaVideoAndGetId")) {
-    throw new Error("Meta marketing source is missing future video_id upload flow skeleton");
+    throw new Error("Meta marketing source is missing video_id upload flow");
   }
-  if (!source.includes("poll processing status if needed")) {
-    throw new Error("Meta video upload skeleton must document future processing polling");
+  if (!source.includes("/{adAccountId}/advideos") && !source.includes("`/${adAccountId}/advideos`")) {
+    throw new Error("Meta marketing source must upload videos through /advideos");
+  }
+  if (!source.includes("pollMetaVideoProcessing")) {
+    throw new Error("Meta video upload flow must poll processing status");
+  }
+  if (!source.includes("uploadMetaVideoBinary")) {
+    throw new Error("Meta video upload flow must include binary fallback");
+  }
+  if (!source.includes("META_VIDEO_PROCESSING_TIMEOUT_MESSAGE")) {
+    throw new Error("Meta video upload flow must return a controlled processing timeout message");
+  }
+  if (!source.includes("META_MOV_VIDEO_WARNING")) {
+    throw new Error("Meta marketing source must warn but allow MOV");
   }
   if (!source.includes("buildImagePictureCreativePayload")) {
     throw new Error("Meta marketing source is missing picture URL fallback creative builder");
@@ -444,6 +462,252 @@ async function checkMetaCityResolverModule() {
   console.log("Meta city resolver module checks: ok");
 }
 
+async function checkMetaVideoModule() {
+  const moduleUrl = pathToFileURL(path.join(repoRoot, "lib", "meta", "marketing.ts")).href;
+  const marketing = (await import(moduleUrl)) as {
+    uploadMetaVideoAndGetId(input: {
+      videoUrl: string;
+      fileName?: string;
+      mimeType?: string;
+      title?: string;
+      processingPollAttempts?: number;
+      processingPollDelayMs?: number;
+    }): Promise<{ videoId: string; uploadMode: string; processingStatus?: string; warnings?: string[] }>;
+    launchMetaCampaign(input: Record<string, unknown>): Promise<{ videoId?: string; videoUploadMode?: string; videoProcessingStatus?: string; metaCampaignId?: string; creativeUsesVideoData?: boolean; creativeUsesLinkData?: boolean }>;
+    buildVideoCreativePayload(input: Record<string, unknown>): Record<string, unknown>;
+    buildImageLinkCreativePayload(input: Record<string, unknown>): Record<string, unknown>;
+    isSupportedMetaVideoFormat(input: { mimeType?: string; fileName?: string }): boolean;
+  };
+
+  const originalEnv = {
+    META_VIDEO_LAUNCH_ENABLED: process.env.META_VIDEO_LAUNCH_ENABLED,
+    META_ACCESS_TOKEN: process.env.META_ACCESS_TOKEN,
+    META_AD_ACCOUNT_ID: process.env.META_AD_ACCOUNT_ID,
+    META_PAGE_ID: process.env.META_PAGE_ID,
+    META_INSTAGRAM_ACTOR_ID: process.env.META_INSTAGRAM_ACTOR_ID,
+  };
+  const fetchBox = globalThis as unknown as {
+    fetch: (
+      input: string,
+      init?: { method?: string; headers?: Record<string, string>; body?: string | Buffer },
+    ) => Promise<{
+      ok: boolean;
+      status: number;
+      text: () => Promise<string>;
+      headers?: { get(name: string): string | null };
+      arrayBuffer?: () => Promise<ArrayBuffer>;
+    }>;
+  };
+  const originalFetch = fetchBox.fetch;
+  const calls: Array<{ url: string; method: string; body: string }> = [];
+
+  const jsonResponse = (data: unknown) => ({
+    ok: true,
+    status: 200,
+    headers: { get: () => null },
+    text: async () => JSON.stringify(data),
+  });
+
+  try {
+    process.env.META_VIDEO_LAUNCH_ENABLED = "false";
+    fetchBox.fetch = async () => {
+      throw new Error("Meta API must not be called while video launch flag is disabled");
+    };
+    for (const file of [
+      { fileName: "disabled.mp4", mimeType: "video/mp4", videoUrl: "https://example.com/disabled.mp4" },
+      { fileName: "disabled.mov", mimeType: "video/quicktime", videoUrl: "https://example.com/disabled.mov" },
+    ]) {
+      let blocked = false;
+      try {
+        await marketing.launchMetaCampaign({
+          campaignName: "Disabled Video Launch",
+          objective: "OUTCOME_LEADS",
+          status: "PAUSED",
+          dailyBudgetMinor: 2000,
+          currency: "USD",
+          primaryText: "Text",
+          headline: "Headline",
+          description: "Description",
+          cta: "LEARN_MORE",
+          landingUrl: "https://example.com",
+          creativeType: "video",
+          ...file,
+        });
+      } catch (error) {
+        blocked = error instanceof Error && error.message.includes("подготовке");
+      }
+      if (!blocked) {
+        throw new Error("MP4/MOV real launch must be blocked while META_VIDEO_LAUNCH_ENABLED=false");
+      }
+    }
+
+    process.env.META_VIDEO_LAUNCH_ENABLED = "true";
+    process.env.META_ACCESS_TOKEN = "smoke_token";
+    process.env.META_AD_ACCOUNT_ID = "act_smoke";
+    process.env.META_PAGE_ID = "page_smoke";
+    delete process.env.META_INSTAGRAM_ACTOR_ID;
+
+    fetchBox.fetch = async (input, init = {}) => {
+      const url = String(input);
+      const method = init.method || "GET";
+      const body = typeof init.body === "string" ? init.body : Buffer.isBuffer(init.body) ? init.body.toString("utf8") : "";
+      calls.push({ url, method, body });
+
+      if (url.includes("/advideos") && method === "POST") {
+        const params = new URLSearchParams(body);
+        const fileUrl = params.get("file_url") || "";
+        if (fileUrl.includes("pending")) return jsonResponse({ id: "video_pending" });
+        if (fileUrl.includes("mov")) return jsonResponse({ id: "video_mov" });
+        return jsonResponse({ id: "video_launch" });
+      }
+      if (url.includes("/video_pending")) {
+        return jsonResponse({ status: { video_status: "processing" }, processing_progress: 25 });
+      }
+      if (url.includes("/video_mov")) {
+        return jsonResponse({ status: { video_status: "ready" }, processing_progress: 100 });
+      }
+      if (url.includes("/video_launch")) {
+        return jsonResponse({ status: { video_status: "ready" }, processing_progress: 100 });
+      }
+      if (url.includes("/campaigns") && method === "POST") return jsonResponse({ id: "campaign_smoke" });
+      if (url.includes("/adsets") && method === "POST") {
+        const params = new URLSearchParams(body);
+        const targeting = JSON.parse(params.get("targeting") || "{}") as { publisher_platforms?: string[]; instagram_positions?: string[] };
+        if (JSON.stringify(targeting.publisher_platforms || []) !== JSON.stringify(["instagram"])) {
+          throw new Error("video launch adset must preserve Instagram-only publisher platforms");
+        }
+        if (!["stream", "story", "explore", "reels"].every((position) => (targeting.instagram_positions || []).includes(position))) {
+          throw new Error("video launch adset must preserve Instagram positions");
+        }
+        return jsonResponse({ id: "adset_smoke" });
+      }
+      if (url.includes("/adcreatives") && method === "POST") {
+        const params = new URLSearchParams(body);
+        const spec = JSON.parse(params.get("object_story_spec") || "{}") as { video_data?: { video_id?: string }; link_data?: unknown };
+        if (spec.video_data?.video_id !== "video_launch") {
+          throw new Error("video launch creative must use object_story_spec.video_data.video_id");
+        }
+        if (spec.link_data) {
+          throw new Error("video launch creative must not use link_data");
+        }
+        return jsonResponse({ id: "creative_smoke" });
+      }
+      if (url.includes("/ads") && method === "POST") return jsonResponse({ id: "ad_smoke" });
+
+      return jsonResponse({});
+    };
+
+    if (!marketing.isSupportedMetaVideoFormat({ fileName: "smoke.mp4", mimeType: "video/mp4" })) {
+      throw new Error("MP4 must be supported for Meta video launch");
+    }
+    if (!marketing.isSupportedMetaVideoFormat({ fileName: "smoke.mov", mimeType: "video/quicktime" })) {
+      throw new Error("MOV must be supported for Meta video launch");
+    }
+    if (marketing.isSupportedMetaVideoFormat({ fileName: "smoke.webm", mimeType: "video/webm" })) {
+      throw new Error("WEBM must not be supported for real Meta video launch");
+    }
+
+    const movUpload = await marketing.uploadMetaVideoAndGetId({
+      videoUrl: "https://example.com/smoke.mov",
+      fileName: "smoke.mov",
+      mimeType: "video/quicktime",
+      title: "MOV Smoke",
+      processingPollAttempts: 1,
+      processingPollDelayMs: 0,
+    });
+    if (movUpload.videoId !== "video_mov" || movUpload.uploadMode !== "file_url" || !movUpload.warnings?.some((item) => item.includes("MOV"))) {
+      throw new Error("MOV upload must return video_id, file_url mode, and a warning");
+    }
+
+    let processingTimeout = false;
+    try {
+      await marketing.uploadMetaVideoAndGetId({
+        videoUrl: "https://example.com/pending.mp4",
+        fileName: "pending.mp4",
+        mimeType: "video/mp4",
+        title: "Pending Smoke",
+        processingPollAttempts: 1,
+        processingPollDelayMs: 0,
+      });
+    } catch (error) {
+      processingTimeout = error instanceof Error && error.message.includes("обрабатывается");
+    }
+    if (!processingTimeout) {
+      throw new Error("video processing timeout must return a controlled retry message");
+    }
+
+    const videoCreative = marketing.buildVideoCreativePayload({
+      campaignName: "Smoke",
+      creativeName: "Smoke Video Creative",
+      pageId: "page_smoke",
+      videoId: "video_123",
+      headline: "Headline",
+      primaryText: "Text",
+      description: "Description",
+      cta: "LEARN_MORE",
+      landingUrl: "https://example.com",
+    });
+    const videoSpec = videoCreative.object_story_spec as { video_data?: { video_id?: string }; link_data?: unknown };
+    if (videoSpec.video_data?.video_id !== "video_123" || videoSpec.link_data) {
+      throw new Error("video creative payload must use video_data.video_id and must not use link_data");
+    }
+
+    const imageCreative = marketing.buildImageLinkCreativePayload({
+      campaignName: "Smoke",
+      creativeName: "Smoke Image Creative",
+      pageId: "page_smoke",
+      imageHash: "image_hash_123",
+      headline: "Headline",
+      primaryText: "Text",
+      description: "Description",
+      cta: "LEARN_MORE",
+      landingUrl: "https://example.com",
+    });
+    const imageSpec = imageCreative.object_story_spec as { link_data?: { image_hash?: string }; video_data?: unknown };
+    if (imageSpec.link_data?.image_hash !== "image_hash_123" || imageSpec.video_data) {
+      throw new Error("image creative payload must still use link_data.image_hash and must not use video_data");
+    }
+
+    const launch = await marketing.launchMetaCampaign({
+      campaignName: "Smoke Video Launch",
+      objective: "OUTCOME_LEADS",
+      status: "PAUSED",
+      dailyBudgetMinor: 2000,
+      currency: "USD",
+      primaryText: "Text",
+      headline: "Headline",
+      description: "Description",
+      cta: "LEARN_MORE",
+      landingUrl: "https://example.com",
+      creativeType: "video",
+      videoUrl: "https://example.com/smoke.mp4",
+      fileName: "smoke.mp4",
+      mimeType: "video/mp4",
+      city: "Astana",
+    });
+    if (launch.videoId !== "video_launch" || launch.videoUploadMode !== "file_url" || launch.videoProcessingStatus !== "ready") {
+      throw new Error("real video launch must upload video and expose video_id/upload mode/processing status");
+    }
+    if (launch.metaCampaignId !== "campaign_smoke" || launch.creativeUsesVideoData !== true || launch.creativeUsesLinkData !== false) {
+      throw new Error("real video launch must continue through PAUSED campaign/adset/creative/ad creation");
+    }
+    if (!calls.some((call) => call.url.includes("/advideos")) || !calls.some((call) => call.url.includes("/adcreatives"))) {
+      throw new Error("real video launch must call advideos and adcreatives");
+    }
+  } finally {
+    fetchBox.fetch = originalFetch;
+    for (const [key, value] of Object.entries(originalEnv)) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
+
+  console.log("Meta video module checks: ok");
+}
+
 async function checkHtmlRoute(path: string) {
   const response = await fetch(`${baseUrl}${path}`);
   const text = await response.text();
@@ -541,6 +805,7 @@ async function main() {
   await checkAdsAutomationSource();
   await checkMetaMarketingSource();
   await checkMetaCityResolverModule();
+  await checkMetaVideoModule();
   for (const route of [
     "/dashboard",
     "/clients",
@@ -1207,6 +1472,8 @@ async function main() {
       creativeType: "video",
       creativeUrl: "https://example.com/smoke-creative.mp4",
       videoUrl: "https://example.com/smoke-creative.mp4",
+      fileName: "smoke-creative.mp4",
+      mimeType: "video/mp4",
       complianceConfirmed: true,
       manualApprovalConfirmed: true,
       dryRun: true,
@@ -1216,8 +1483,13 @@ async function main() {
   if (videoCreativePayload.objectStorySpecType !== "video_data" || videoCreativePayload.usesVideoData !== true) {
     throw new Error('/api/crm/meta-launch dry-run video creative must stay on objectStorySpecType "video_data"');
   }
-  if (videoCreativePayload.videoLaunchEnabled !== false || videoCreativePayload.metaVideoLaunchStatus !== "soon") {
-    throw new Error('/api/crm/meta-launch dry-run video creative must expose disabled video launch status "soon"');
+  const videoDebug = (videoCreativePayload.video || {}) as { mimeType?: unknown; videoId?: unknown; launchEnabled?: unknown };
+  if (videoDebug.mimeType !== "video/mp4" || videoDebug.videoId !== false) {
+    throw new Error("/api/crm/meta-launch dry-run video creative must expose video MIME and missing video_id debug");
+  }
+  const expectedVideoStatus = videoCreativePayload.videoLaunchEnabled ? "experimental" : "soon";
+  if (videoCreativePayload.metaVideoLaunchStatus !== expectedVideoStatus || videoDebug.launchEnabled !== videoCreativePayload.videoLaunchEnabled) {
+    throw new Error('/api/crm/meta-launch dry-run video creative must expose video launch flag/status debug');
   }
   await checkJsonFailure(
     "/api/crm/meta-launch",
