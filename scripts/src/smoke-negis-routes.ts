@@ -126,6 +126,9 @@ async function checkMetaMarketingSource() {
   if (!source.includes("META_VIDEO_PROCESSING_TIMEOUT_MESSAGE")) {
     throw new Error("Meta video upload flow must return a controlled processing timeout message");
   }
+  if (source.includes("status,processing_progress")) {
+    throw new Error("Meta video polling must not request top-level processing_progress (Meta #100 nonexisting field)");
+  }
   if (!source.includes("META_MOV_VIDEO_WARNING")) {
     throw new Error("Meta marketing source must warn but allow MOV");
   }
@@ -561,13 +564,16 @@ async function checkMetaVideoModule() {
         return jsonResponse({ id: "video_launch" });
       }
       if (url.includes("/video_pending")) {
-        return jsonResponse({ status: { video_status: "processing" }, processing_progress: 25 });
+        if (url.includes("processing_progress")) {
+          throw new Error("video polling must not request top-level processing_progress field");
+        }
+        return jsonResponse({ status: { video_status: "processing", processing_progress: 25 } });
       }
       if (url.includes("/video_mov")) {
-        return jsonResponse({ status: { video_status: "ready" }, processing_progress: 100 });
+        return jsonResponse({ status: { video_status: "ready", processing_progress: 100 } });
       }
       if (url.includes("/video_launch")) {
-        return jsonResponse({ status: { video_status: "ready" }, processing_progress: 100 });
+        return jsonResponse({ status: { video_status: "ready" } });
       }
       if (url.includes("/campaigns") && method === "POST") return jsonResponse({ id: "campaign_smoke" });
       if (url.includes("/adsets") && method === "POST") {

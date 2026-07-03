@@ -194,6 +194,7 @@ export type MetaVideoUploadResult = {
   videoId: string;
   uploadMode: MetaVideoUploadMode;
   processingStatus?: string;
+  processingProgress?: number;
   warnings?: string[];
   raw?: unknown;
 };
@@ -215,7 +216,7 @@ export const META_MOV_VIDEO_WARNING =
 export const META_VIDEO_FORMAT_ERROR =
   "Для автозапуска видео поддерживаются MP4 и MOV.";
 export const META_VIDEO_PROCESSING_TIMEOUT_MESSAGE =
-  "Видео загружено в Meta и обрабатывается. Повторите создание объявления через несколько минут.";
+  "Видео загружено в Meta и ещё обрабатывается. Повторите создание объявления через несколько минут.";
 export const META_VIDEO_BINARY_TOO_LARGE_MESSAGE =
   "Видео слишком большое для серверной передачи. Используйте MP4 меньшего размера или подключите background worker.";
 const META_VIDEO_BINARY_FALLBACK_LIMIT_BYTES = 25 * 1024 * 1024;
@@ -960,6 +961,16 @@ function readVideoProcessingStatus(data: MetaJson): string {
   );
 }
 
+function readVideoProcessingProgress(data: MetaJson): number | undefined {
+  // Meta rejects processing_progress as a top-level Graph field; it only exists
+  // nested inside the status object, and may be absent entirely.
+  const statusRecord = data.status && typeof data.status === "object" && !Array.isArray(data.status) ? (data.status as MetaJson) : undefined;
+  const progress = statusRecord?.processing_progress;
+  if (typeof progress === "number" && Number.isFinite(progress)) return progress;
+  if (typeof progress === "string" && progress.trim() && Number.isFinite(Number(progress))) return Number(progress);
+  return undefined;
+}
+
 function isVideoProcessingStatus(value: string): boolean {
   const text = value.toLowerCase();
   return text.includes("processing") || text.includes("upload") || text.includes("pending") || text.includes("progress") || text.includes("not_ready");
@@ -984,8 +995,9 @@ async function pollMetaVideoProcessing(input: {
   videoId: string;
   attempts: number;
   delayMs: number;
-}): Promise<{ status: string; raw?: unknown }> {
+}): Promise<{ status: string; progress?: number; raw?: unknown }> {
   let lastStatus = "";
+  let lastProgress: number | undefined;
   let lastRaw: unknown;
 
   for (let attempt = 0; attempt < input.attempts; attempt += 1) {
@@ -993,29 +1005,31 @@ async function pollMetaVideoProcessing(input: {
       input.config,
       `/${input.videoId}`,
       "GET",
-      { fields: "status,processing_progress" },
+      { fields: "status" },
       "video_processing",
     );
     const status = readVideoProcessingStatus(data);
+    const progress = readVideoProcessingProgress(data);
     lastStatus = status || lastStatus;
+    lastProgress = progress ?? lastProgress;
     lastRaw = data;
 
-    if (!status || isVideoReadyStatus(status)) return { status: status || "ready", raw: data };
+    if (!status || isVideoReadyStatus(status)) return { status: status || "ready", progress, raw: data };
     if (isVideoErrorStatus(status)) {
       throw new MetaApiError({
         step: "video_processing",
         message: `Meta video processing failed: ${status}`,
-        debug: data,
+        debug: { videoId: input.videoId, raw: data },
       });
     }
-    if (!isVideoProcessingStatus(status)) return { status, raw: data };
+    if (!isVideoProcessingStatus(status)) return { status, progress, raw: data };
     if (attempt < input.attempts - 1) await delay(input.delayMs);
   }
 
   throw new MetaApiError({
     step: "video_processing",
     message: META_VIDEO_PROCESSING_TIMEOUT_MESSAGE,
-    debug: { status: lastStatus, raw: lastRaw },
+    debug: { videoId: input.videoId, status: lastStatus, processingProgress: lastProgress, raw: lastRaw },
   });
 }
 
@@ -1196,6 +1210,7 @@ export async function uploadMetaVideoAndGetId(input: {
     videoId,
     uploadMode,
     processingStatus: processing.status,
+    processingProgress: processing.progress,
     warnings,
     raw: {
       upload: data,

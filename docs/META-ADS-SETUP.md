@@ -83,7 +83,7 @@ When enabled, Negis supports MP4 and MOV:
 
 - sends the Supabase public video URL to `/{adAccountId}/advideos`;
 - receives `video_id`;
-- polls `/{videoId}?fields=status,processing_progress`;
+- polls `/{videoId}?fields=status` (top-level `processing_progress` is not a valid Graph field and triggers Meta error #100; progress is read from the nested `status.processing_progress` when Meta returns it);
 - creates the creative through `object_story_spec.video_data.video_id`;
 - retries with server-to-Meta multipart binary upload if Meta cannot fetch the public URL and the file is small enough for Vercel.
 

@@ -23,7 +23,7 @@ The backend creates, in order:
 
 All calls are server-side. `META_ACCESS_TOKEN` and `META_APP_SECRET` are never returned to the frontend.
 
-For video creatives with `META_VIDEO_LAUNCH_ENABLED=true`, the backend first uploads the public Supabase video URL to `/{adAccountId}/advideos`, reads the returned `video_id`, polls `/{videoId}?fields=status,processing_progress`, then creates the ad creative with `object_story_spec.video_data.video_id`. If Meta cannot fetch the public URL, Negis can try a server-to-Meta binary multipart fallback for smaller files.
+For video creatives with `META_VIDEO_LAUNCH_ENABLED=true`, the backend first uploads the public Supabase video URL to `/{adAccountId}/advideos`, reads the returned `video_id`, polls `/{videoId}?fields=status` (progress, when available, comes from the nested `status.processing_progress`; requesting it as a top-level field causes Meta error #100), then creates the ad creative with `object_story_spec.video_data.video_id`. If Meta cannot fetch the public URL, Negis can try a server-to-Meta binary multipart fallback for smaller files.
 
 ## Required Env
 
@@ -150,7 +150,7 @@ Flow:
 
 1. Supabase public video URL is sent server-side to `/{adAccountId}/advideos` as `file_url`.
 2. Meta returns `id` / `video_id`.
-3. Negis polls `/{videoId}?fields=status,processing_progress` for a short window.
+3. Negis polls `/{videoId}?fields=status` for a short window, reading progress only from the nested `status.processing_progress` if present.
 4. If ready, the creative uses `object_story_spec.video_data.video_id`.
 5. If processing is still pending, the API returns a controlled message telling the employee to retry after a few minutes.
 
