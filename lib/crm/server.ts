@@ -1636,6 +1636,50 @@ const VIDEO_EXTENSIONS = new Set(["mp4", "mov", "webm"]);
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 const MAX_VIDEO_BYTES = 100 * 1024 * 1024;
 
+// Large video optimization pipeline (Phase A). Raw originals are temporary:
+// they live in a private bucket and are never sent to Meta or end users.
+const RAW_VIDEO_BUCKET = "ad-creatives-raw";
+const VIDEO_JOB_STATUSES = new Set(["awaiting_upload", "queued", "downloading", "transcoding", "uploading", "ready", "failed"]);
+export const VIDEO_OPTIMIZATION_DISABLED_MESSAGE =
+  "Оптимизация больших видео отключена. Загрузите MP4 до 100 MB или включите VIDEO_OPTIMIZATION_ENABLED в Vercel.";
+
+function readPositiveNumberEnv(key: string, fallback: number): number {
+  const value = Number(process.env[key]?.trim() ?? "");
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+export function videoOptimizationConfig(): { enabled: boolean; thresholdMb: number; maxInputMb: number } {
+  return {
+    enabled: ["true", "1", "yes", "on"].includes(String(process.env.VIDEO_OPTIMIZATION_ENABLED || "").trim().toLowerCase()),
+    thresholdMb: readPositiveNumberEnv("VIDEO_OPTIMIZATION_THRESHOLD_MB", 50),
+    maxInputMb: readPositiveNumberEnv("VIDEO_OPTIMIZATION_MAX_INPUT_MB", 500),
+  };
+}
+
+// Safe job shape for the UI: no raw paths/bucket internals, no worker claim data.
+function makeVideoJob(body: JsonRecord): JsonRecord {
+  const statusRaw = readString(body.status).toLowerCase();
+  return {
+    id: readString(body.id) || nextDemoId("video-job"),
+    workspaceId: firstString(body.workspaceId, body.workspace_id),
+    assetId: firstString(body.assetId, body.asset_id),
+    status: VIDEO_JOB_STATUSES.has(statusRaw) ? statusRaw : "awaiting_upload",
+    progress: readNumber(body.progress) ?? 0,
+    sourceFileName: firstString(body.sourceFileName, body.source_file_name),
+    sourceMimeType: firstString(body.sourceMimeType, body.source_mime_type),
+    rawSize: readNumber(body.rawSize ?? body.raw_size) ?? null,
+    outputPublicUrl: firstString(body.outputPublicUrl, body.output_public_url),
+    outputSize: readNumber(body.outputSize ?? body.output_size) ?? null,
+    thumbnailPublicUrl: firstString(body.thumbnailPublicUrl, body.thumbnail_public_url),
+    thumbnailSource: firstString(body.thumbnailSource, body.thumbnail_source),
+    error: firstString(body.error),
+    attempts: readNumber(body.attempts) ?? 0,
+    rawDeletedAt: firstString(body.rawDeletedAt, body.raw_deleted_at) || null,
+    createdAt: firstString(body.createdAt, body.created_at, new Date().toISOString()),
+    updatedAt: firstString(body.updatedAt, body.updated_at, new Date().toISOString()),
+  };
+}
+
 function fileExtension(fileName: string): string {
   const parts = fileName.toLowerCase().split(".");
   return parts.length > 1 ? parts[parts.length - 1] : "";
@@ -2391,6 +2435,210 @@ export async function handleAdCreativeMetaUpload(req: VercelRequest, res: Vercel
       },
     );
   }
+}
+
+export async function handleVideoJobs(req: VercelRequest, res: VercelResponse) {
+  const config = videoOptimizationConfig();
+
+  if (req.method === "GET") {
+    const jobId = readQueryString(req.query.id);
+    if (!jobId) {
+      return sendJson(res, 400, errorBody("Validation error", ["id is required"]));
+    }
+    const supabase = getSupabaseServerClient();
+    if (!supabase || !isUuid(jobId)) {
+      // Demo mode has no persistent jobs: report the job as queued so the UI can
+      // explain that the worker is not available in this environment.
+      return sendJson(
+        res,
+        200,
+        success("demo", { job: makeVideoJob({ id: jobId, status: "queued" }) }, "Supabase не настроен: статус задачи оптимизации недоступен в demo-режиме."),
+      );
+    }
+    try {
+      const workspaceId = readWorkspaceId(req, {});
+      let query = supabase.from("video_processing_jobs").select("*").eq("id", jobId);
+      if (isUuid(workspaceId)) query = query.eq("workspace_id", workspaceId);
+      const { data, error } = await query.single();
+      if (error) throw new Error(error.message);
+      return sendJson(res, 200, success("supabase", { job: makeVideoJob(asRecord(data)) }));
+    } catch (error) {
+      return sendJson(res, 404, {
+        ...errorBody("Задача оптимизации не найдена", [error instanceof Error ? error.message : "not found"]),
+      });
+    }
+  }
+
+  if (req.method === "POST") {
+    const body = asRecord(req.body);
+    if (!config.enabled) {
+      return sendJson(res, 409, {
+        ...errorBody("Оптимизация видео выключена", [VIDEO_OPTIMIZATION_DISABLED_MESSAGE]),
+        data: { videoOptimization: config },
+      });
+    }
+
+    const workspaceId = readWorkspaceId(req, body);
+    const fileName = firstString(body.fileName, body.file_name);
+    const mimeType = inferMimeType({ fileName, mimeType: firstString(body.mimeType, body.mime_type) });
+    const fileSize = readNumber(body.fileSize ?? body.file_size) ?? 0;
+    const maxInputBytes = config.maxInputMb * 1024 * 1024;
+    const details: string[] = [];
+    if (!fileName) details.push("fileName is required");
+    if (!VIDEO_MIME_TYPES.has(mimeType)) details.push("Для оптимизации поддерживаются только видео MP4, MOV или WEBM.");
+    if (fileSize <= 0) details.push("fileSize is required");
+    if (fileSize > maxInputBytes) details.push(`Видео больше ${config.maxInputMb} MB. Загрузите файл меньшего размера.`);
+    if (details.length > 0) {
+      return sendJson(res, 400, errorBody("Validation error", details));
+    }
+
+    const supabase = getSupabaseServerClient();
+    if (!supabase) {
+      return sendJson(
+        res,
+        200,
+        success(
+          "demo",
+          {
+            job: makeVideoJob({
+              workspaceId,
+              status: "awaiting_upload",
+              sourceFileName: fileName,
+              sourceMimeType: mimeType,
+              rawSize: fileSize,
+            }),
+            signedUpload: null,
+            assetId: "",
+          },
+          "Supabase Storage не настроен: загрузка исходника недоступна в demo-режиме.",
+        ),
+      );
+    }
+
+    const storagePath = buildAdCreativeStoragePath({ workspaceId, fileName });
+    const { data: signed, error: signedError } = await supabase.storage.from(RAW_VIDEO_BUCKET).createSignedUploadUrl(storagePath);
+    if (signedError || !signed?.token) {
+      return sendJson(res, 502, {
+        ...errorBody("Не удалось создать ссылку для загрузки исходника", [
+          signedError?.message || "signed upload URL is missing",
+          `Проверьте, что bucket ${RAW_VIDEO_BUCKET} создан (migration 016).`,
+        ]),
+      });
+    }
+
+    let assetId = "";
+    if (isUuid(workspaceId)) {
+      try {
+        const assetRow = configs["ad-creatives"].toRow(
+          {
+            uploadedBy: firstString(body.uploadedBy, body.uploaded_by),
+            fileName,
+            fileType: "video",
+            mimeType,
+            fileSize,
+            storageBucket: RAW_VIDEO_BUCKET,
+            storagePath,
+            status: "optimizing",
+            metadata: { source: "ads-automation", optimization: "pending" },
+          },
+          workspaceId,
+        );
+        const { data: assetData, error: assetError } = await supabase.from("ad_creative_assets").insert(assetRow).select("id").single();
+        if (assetError) throw new Error(assetError.message);
+        assetId = firstString(asRecord(assetData).id);
+      } catch (error) {
+        console.warn(supabaseWarning("ad_creative_assets optimizing insert", error));
+      }
+    }
+
+    try {
+      const { data: jobData, error: jobError } = await supabase
+        .from("video_processing_jobs")
+        .insert({
+          workspace_id: isUuid(workspaceId) ? workspaceId : null,
+          asset_id: isUuid(assetId) ? assetId : null,
+          status: "awaiting_upload",
+          raw_bucket: RAW_VIDEO_BUCKET,
+          raw_path: storagePath,
+          source_file_name: fileName,
+          source_mime_type: mimeType,
+          metadata: { source: "ads-automation" },
+        })
+        .select("*")
+        .single();
+      if (jobError) throw new Error(jobError.message);
+      return sendJson(
+        res,
+        201,
+        success("supabase", {
+          job: makeVideoJob(asRecord(jobData)),
+          signedUpload: {
+            bucket: RAW_VIDEO_BUCKET,
+            storageBucket: RAW_VIDEO_BUCKET,
+            storagePath,
+            token: signed.token,
+            signedUrl: firstString(asRecord(signed as unknown as JsonRecord).signedUrl),
+          },
+          assetId,
+        }),
+      );
+    } catch (error) {
+      return sendJson(res, 502, {
+        ...errorBody("Не удалось создать задачу оптимизации", [
+          error instanceof Error ? error.message : "insert failed",
+          "Проверьте, что migration 016 применена (таблица video_processing_jobs).",
+        ]),
+      });
+    }
+  }
+
+  if (req.method === "PATCH") {
+    const body = asRecord(req.body);
+    const jobId = firstString(body.id, body.jobId, readQueryString(req.query.id));
+    if (!jobId) {
+      return sendJson(res, 400, errorBody("Validation error", ["id is required"]));
+    }
+    const rawSize = readNumber(body.rawSize ?? body.raw_size) ?? null;
+
+    const supabase = getSupabaseServerClient();
+    if (!supabase || !isUuid(jobId)) {
+      return sendJson(
+        res,
+        200,
+        success("demo", { job: makeVideoJob({ id: jobId, status: "queued", rawSize }) }, "Supabase не настроен: задача помечена queued только в ответе."),
+      );
+    }
+
+    try {
+      const workspaceId = readWorkspaceId(req, body);
+      // Only the awaiting_upload → queued transition is allowed from the frontend;
+      // every other status belongs to the worker.
+      let update = supabase
+        .from("video_processing_jobs")
+        .update({ status: "queued", raw_size: rawSize, updated_at: new Date().toISOString() })
+        .eq("id", jobId)
+        .eq("status", "awaiting_upload");
+      if (isUuid(workspaceId)) update = update.eq("workspace_id", workspaceId);
+      const { data, error } = await update.select("*").maybeSingle();
+      if (error) throw new Error(error.message);
+      if (data) {
+        return sendJson(res, 200, success("supabase", { job: makeVideoJob(asRecord(data)) }));
+      }
+      const { data: current, error: currentError } = await supabase.from("video_processing_jobs").select("*").eq("id", jobId).single();
+      if (currentError) throw new Error(currentError.message);
+      return sendJson(
+        res,
+        200,
+        success("supabase", { job: makeVideoJob(asRecord(current)) }, "Задача уже не в статусе awaiting_upload."),
+      );
+    } catch (error) {
+      return sendJson(res, 404, {
+        ...errorBody("Задача оптимизации не найдена", [error instanceof Error ? error.message : "not found"]),
+      });
+    }
+  }
+
+  return sendJson(res, 405, errorBody("Method not allowed", ["Use GET, POST or PATCH"]));
 }
 
 function normalizeLeadDestination(value: unknown): "whatsapp" | "instagram_profile" | "website" | "lead_form" | "call" {
@@ -3771,6 +4019,7 @@ export async function handleCrmHealth(req: VercelRequest, res: VercelResponse) {
     videoLaunchEnabled: isMetaVideoLaunchEnabled(),
     hasAccessToken: Boolean(readEnvValue("META_ACCESS_TOKEN")),
     hasAppSecret: Boolean(readEnvValue("META_APP_SECRET")),
+    videoOptimization: videoOptimizationConfig(),
   };
 
   return sendJson(

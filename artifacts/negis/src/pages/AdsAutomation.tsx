@@ -144,6 +144,23 @@ type MetaSummary = {
   instagramActorId?: string;
   videoLaunchEnabled?: boolean;
   hasAccessToken?: boolean;
+  videoOptimization?: {
+    enabled?: boolean;
+    thresholdMb?: number;
+    maxInputMb?: number;
+  };
+};
+
+type VideoJobStatus = "awaiting_upload" | "queued" | "downloading" | "transcoding" | "uploading" | "ready" | "failed";
+
+type VideoJob = {
+  id: string;
+  status: VideoJobStatus;
+  progress?: number;
+  error?: string;
+  outputPublicUrl?: string;
+  thumbnailPublicUrl?: string;
+  thumbnailSource?: string;
 };
 
 type StorageHealth = {
@@ -247,6 +264,37 @@ const VIDEO_PROCESSING_PENDING_MESSAGE = "Видео принято Meta и об
 const THUMBNAIL_FAILED_MESSAGE = "Не удалось автоматически создать обложку видео. Попробуйте MP4 или другое видео.";
 const THUMBNAIL_READY_MESSAGE = "Обложка видео создана автоматически";
 const THUMBNAIL_REQUIRED_FOR_LAUNCH_MESSAGE = "Обложка видео не создана — она обязательна для запуска видео-рекламы. Нажмите «Создать обложку заново» или загрузите другое видео.";
+const VIDEO_OPTIMIZING_MESSAGE = "Видео загружено. Идёт оптимизация для рекламы.";
+const VIDEO_OPTIMIZED_READY_MESSAGE = "Видео оптимизировано и готово для Meta";
+const VIDEO_OPTIMIZING_LAUNCH_BLOCKED_MESSAGE =
+  "Видео ещё оптимизируется. Реальный запуск будет доступен, когда оптимизация завершится. Проверку без запуска можно сделать уже сейчас.";
+const VIDEO_OPTIMIZATION_FAILED_MESSAGE = "Не удалось оптимизировать видео. Попробуйте загрузить MP4 меньшего размера или другое видео.";
+
+const videoJobStatusLabels: Record<VideoJobStatus, string> = {
+  awaiting_upload: "Загружаем исходное видео",
+  queued: "В очереди на обработку",
+  downloading: "Скачиваем исходник",
+  transcoding: "Сжимаем и конвертируем видео",
+  uploading: "Сохраняем оптимизированное видео",
+  ready: "Готово",
+  failed: "Ошибка обработки",
+};
+
+function normalizeVideoJob(record: Record<string, unknown>): VideoJob | null {
+  const id = firstString(record.id);
+  if (!id) return null;
+  const statusRaw = firstString(record.status).toLowerCase();
+  const known: VideoJobStatus[] = ["awaiting_upload", "queued", "downloading", "transcoding", "uploading", "ready", "failed"];
+  return {
+    id,
+    status: known.includes(statusRaw as VideoJobStatus) ? (statusRaw as VideoJobStatus) : "queued",
+    progress: Number(record.progress) || 0,
+    error: firstString(record.error) || undefined,
+    outputPublicUrl: firstString(record.outputPublicUrl, record.output_public_url) || undefined,
+    thumbnailPublicUrl: firstString(record.thumbnailPublicUrl, record.thumbnail_public_url) || undefined,
+    thumbnailSource: firstString(record.thumbnailSource, record.thumbnail_source) || undefined,
+  };
+}
 
 const defaultBrief: Brief = {
   service: "Консультация косметолога",
@@ -844,6 +892,7 @@ export default function AdsAutomation() {
   const [historyVideoCheckId, setHistoryVideoCheckId] = useState("");
   const [historyFilter, setHistoryFilter] = useState<HistoryFilter>("all");
   const [historySearch, setHistorySearch] = useState("");
+  const [videoJob, setVideoJob] = useState<VideoJob | null>(null);
   const isHistoryView = location === "/ads-automation/history";
 
   useEffect(() => {
@@ -857,6 +906,17 @@ export default function AdsAutomation() {
   useEffect(() => {
     if (isHistoryView) void loadHistory();
   }, [isHistoryView]);
+
+  const videoJobPending = Boolean(videoJob && videoJob.status !== "ready" && videoJob.status !== "failed");
+
+  useEffect(() => {
+    if (!videoJob || videoJob.status === "ready" || videoJob.status === "failed") return;
+    const timer = window.setInterval(() => {
+      void pollVideoJob(videoJob.id);
+    }, 5000);
+    return () => window.clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [videoJob?.id, videoJob?.status]);
 
   const destination = destinationOptions.find((item) => item.value === brief.leadDestination) || destinationOptions[0];
   const selectedCity = getKzMetaCityOption(brief.cityId || brief.city);
@@ -944,11 +1004,144 @@ export default function AdsAutomation() {
     if ((isImage || allowedImage) && file.size > 10 * 1024 * 1024) {
       details.push("Фото больше 10 MB. Сожмите изображение.");
     }
-    if ((isVideo || allowedVideo) && file.size > 100 * 1024 * 1024) {
-      details.push("Видео больше 100 MB. Загрузите файл меньшего размера.");
+    const optimization = metaSummary?.videoOptimization;
+    const maxVideoMb = optimization?.enabled ? optimization.maxInputMb || 500 : 100;
+    if ((isVideo || allowedVideo) && file.size > maxVideoMb * 1024 * 1024) {
+      details.push(`Видео больше ${maxVideoMb} MB. Загрузите файл меньшего размера.`);
     }
 
     return details;
+  }
+
+  function applyVideoJobResult(job: VideoJob) {
+    setCreative((current) =>
+      current && current.fileType === "video"
+        ? {
+            ...current,
+            // Only the optimized public URL ever reaches Meta — never the raw original.
+            publicUrl: job.outputPublicUrl || current.publicUrl,
+            thumbnailUrl: job.thumbnailPublicUrl || current.thumbnailUrl,
+            thumbnailGeneratedAt: job.thumbnailPublicUrl ? new Date().toISOString() : current.thumbnailGeneratedAt,
+            thumbnailSource: job.thumbnailSource || (job.thumbnailPublicUrl ? "worker_frame" : current.thumbnailSource),
+            thumbnailMimeType: job.thumbnailPublicUrl ? "image/jpeg" : current.thumbnailMimeType,
+            status: "uploaded",
+          }
+        : current,
+    );
+    setNotice(`${VIDEO_OPTIMIZED_READY_MESSAGE}. Можно продолжать запуск.`);
+    toast.success(VIDEO_OPTIMIZED_READY_MESSAGE);
+  }
+
+  async function pollVideoJob(jobId: string) {
+    try {
+      const body = await crmRequest<{ job?: Record<string, unknown> }>(
+        `/api/crm/video-jobs?id=${encodeURIComponent(jobId)}&workspaceId=${encodeURIComponent(workspaceId)}`,
+      );
+      const job = normalizeVideoJob(asRecord(body.data.job));
+      if (!job || job.id !== jobId) return;
+      const wasReady = videoJob?.status === "ready";
+      setVideoJob(job);
+      if (job.status === "ready" && !wasReady) {
+        applyVideoJobResult(job);
+      }
+      if (job.status === "failed") {
+        setNotice([VIDEO_OPTIMIZATION_FAILED_MESSAGE, job.error].filter(Boolean).join(" "));
+        toast.error(VIDEO_OPTIMIZATION_FAILED_MESSAGE);
+      }
+    } catch {
+      // Keep polling silently; transient network/API errors must not kill the job card.
+    }
+  }
+
+  async function uploadLargeVideo(file: File) {
+    setLoading("upload");
+    setVideoJob(null);
+    setCreativeFile(file);
+    const previewUrl = URL.createObjectURL(file);
+    try {
+      if (!hasSupabaseFrontendEnv) {
+        throw new Error("Для загрузки креативов нужны VITE_SUPABASE_URL и VITE_SUPABASE_ANON_KEY в Vercel.");
+      }
+
+      setUploadStatus("getting_signed_url");
+      setUploadStage("Создаём задачу оптимизации видео");
+      const created = await crmRequest<{ job?: Record<string, unknown>; signedUpload?: SignedUploadData | null; assetId?: string }>(
+        "/api/crm/video-jobs",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            workspaceId,
+            uploadedBy: user?.email || user?.user_metadata?.full_name || "Negis user",
+            fileName: file.name,
+            mimeType: file.type,
+            fileSize: file.size,
+          }),
+        },
+      );
+      const createdJob = normalizeVideoJob(asRecord(created.data.job));
+      const signedUpload = created.data.signedUpload || null;
+      const storageBucket = firstString(signedUpload?.bucket, signedUpload?.storageBucket);
+      const storagePath = firstString(signedUpload?.storagePath);
+      const token = firstString(signedUpload?.token);
+      if (!createdJob || !storageBucket || !storagePath || !token) {
+        throw new Error("Сервер не вернул данные для загрузки исходного видео. Проверьте настройки Supabase и migration 016.");
+      }
+
+      setUploadStatus("uploading_to_storage");
+      setUploadStage("Загружаем исходное видео в защищённое хранилище");
+      const { error: uploadError } = await supabase.storage.from(storageBucket).uploadToSignedUrl(storagePath, token, file, {
+        contentType: file.type || "video/mp4",
+      });
+      if (uploadError) {
+        throw new Error(`Supabase Storage: ${uploadError.message}`);
+      }
+
+      setUploadStage("Подтверждаем загрузку исходника");
+      const patched = await crmRequest<{ job?: Record<string, unknown> }>("/api/crm/video-jobs", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: createdJob.id, workspaceId, rawSize: file.size }),
+      });
+      const queuedJob = normalizeVideoJob(asRecord(patched.data.job)) || { ...createdJob, status: "queued" as VideoJobStatus };
+
+      setCreative({
+        id: firstString(created.data.assetId) || undefined,
+        fileName: file.name,
+        fileType: "video",
+        mimeType: file.type,
+        fileSize: file.size,
+        previewUrl,
+        // publicUrl stays empty until the worker publishes the optimized MP4 —
+        // the raw original has no public URL and must never be sent to Meta.
+        publicUrl: "",
+        status: "optimizing",
+      });
+      setVideoJob(queuedJob);
+      setUploadStatus("ready");
+      setUploadStage("");
+      goToStep(2);
+      setNotice(`${VIDEO_OPTIMIZING_MESSAGE} ${VIDEO_OPTIMIZING_LAUNCH_BLOCKED_MESSAGE}`);
+      toast.success("Видео загружено, оптимизация запущена");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : VIDEO_OPTIMIZATION_FAILED_MESSAGE;
+      setCreative({
+        fileName: file.name,
+        fileType: "video",
+        mimeType: file.type,
+        fileSize: file.size,
+        previewUrl,
+        publicUrl: "",
+        status: "failed",
+      });
+      setUploadStatus("failed");
+      setUploadStage(uploadStatusLabel("failed"));
+      setLastUploadError(message);
+      setNotice(message);
+      toast.error(message);
+    } finally {
+      setLoading(null);
+    }
   }
 
   async function uploadVideoThumbnail(
@@ -1057,6 +1250,16 @@ export default function AdsAutomation() {
       toast.error(details.join(" "));
       return;
     }
+
+    // Large videos branch into the optimization pipeline; everything else keeps
+    // the current direct flow byte-for-byte.
+    const optimization = metaSummary?.videoOptimization;
+    const optimizationThresholdBytes = (optimization?.thresholdMb || 50) * 1024 * 1024;
+    if (fileType === "video" && optimization?.enabled && file.size > optimizationThresholdBytes) {
+      await uploadLargeVideo(file);
+      return;
+    }
+    setVideoJob(null);
 
     setLoading("upload");
     setNotice(isMovVideo ? MOV_VIDEO_WARNING : "");
@@ -1251,6 +1454,7 @@ export default function AdsAutomation() {
     if (creative?.previewUrl.startsWith("blob:")) URL.revokeObjectURL(creative.previewUrl);
     setCreative(null);
     setCreativeFile(null);
+    setVideoJob(null);
     setAiPackage(null);
     setCompliance(null);
     setLaunchResult(null);
@@ -1480,7 +1684,14 @@ export default function AdsAutomation() {
       setRealLaunchMessage("");
       goToStep(stayOnLaunchStep ? 6 : 5);
       toast.success(stayOnLaunchStep ? "Проверка прошла без запуска" : "Проверка безопасности готова");
-      setNotice(body.warning || (stayOnLaunchStep ? "Проверка прошла без запуска. Кампания в Meta не создавалась." : ""));
+      setNotice(
+        [
+          body.warning || (stayOnLaunchStep ? "Проверка прошла без запуска. Кампания в Meta не создавалась." : ""),
+          videoJobPending ? VIDEO_OPTIMIZING_LAUNCH_BLOCKED_MESSAGE : "",
+        ]
+          .filter(Boolean)
+          .join(" "),
+      );
     } catch (error) {
       const message = error instanceof Error ? error.message : "Проверка не прошла.";
       setNotice(message);
@@ -1511,13 +1722,15 @@ export default function AdsAutomation() {
     if (!confirmations.manualApproval) errors.push("Подтвердите ручное согласование.");
     if (!confirmations.spendUnderstood) errors.push("Подтвердите понимание расходов.");
     if (!metaSummary?.configured) errors.push("Meta env не настроены или не подтверждены.");
-    if (creative && !creative.publicUrl) errors.push(uploadLinkMissingMessage(storageHealth));
+    if (videoJobPending) errors.push(VIDEO_OPTIMIZING_LAUNCH_BLOCKED_MESSAGE);
+    if (videoJob?.status === "failed") errors.push(VIDEO_OPTIMIZATION_FAILED_MESSAGE);
+    if (creative && !creative.publicUrl && !videoJobPending) errors.push(uploadLinkMissingMessage(storageHealth));
     if (creative?.fileType === "video" && !metaSummary?.videoLaunchEnabled) errors.push(VIDEO_REAL_LAUNCH_DISABLED_MESSAGE);
     if (creative?.fileType === "video" && metaSummary?.videoLaunchEnabled && !isMetaVideoFormatSupported(creative)) errors.push(VIDEO_FORMAT_ERROR);
-    if (creative?.fileType === "video" && !creative.metaVideoId && !creative.publicUrl) {
+    if (creative?.fileType === "video" && !creative.metaVideoId && !creative.publicUrl && !videoJobPending) {
       errors.push("Видео загружено в Negis, но ссылка для Meta ещё не готова. Проверьте Storage или повторите загрузку.");
     }
-    if (creative?.fileType === "video" && metaSummary?.videoLaunchEnabled && !creative.thumbnailUrl) {
+    if (creative?.fileType === "video" && metaSummary?.videoLaunchEnabled && !creative.thumbnailUrl && !videoJobPending) {
       errors.push(THUMBNAIL_REQUIRED_FOR_LAUNCH_MESSAGE);
     }
     if (nextStatusMode === "ACTIVE") {
@@ -1838,12 +2051,14 @@ export default function AdsAutomation() {
   function renderCreativeStep() {
     const videoFeature = getPlanFeature(plan, "video_ads_launch");
     const uploadProblem =
-      creative && !creative.publicUrl
+      creative && !creative.publicUrl && !videoJobPending
         ? uploadStatus === "failed"
           ? lastUploadError || "Загрузка не прошла. Попробуйте другой файл."
           : uploadLinkMissingMessage(storageHealth)
         : "";
-    const creativeCanContinue = Boolean(creative?.publicUrl) && uploadStatus !== "failed";
+    // The wizard may continue while the optimization job runs: dry-run is allowed,
+    // real launch stays blocked by prelaunchErrors until the job is ready.
+    const creativeCanContinue = (Boolean(creative?.publicUrl) || videoJobPending) && uploadStatus !== "failed";
 
     return (
       <section className="neu-card p-5 sm:p-6">
@@ -1940,7 +2155,30 @@ export default function AdsAutomation() {
                   </StatusPill>
                 </div>
                 <p className="mt-3 text-sm text-[#64748B]">{formatBytes(creative.fileSize)} · {creative.mimeType || "тип не определён"}</p>
-                {creative.fileType === "video" ? (
+                {creative.fileType === "video" && videoJob ? (
+                  videoJob.status === "failed" ? (
+                    <div className="mt-3 rounded-2xl border border-red-200 bg-red-50 p-3">
+                      <p className="text-sm font-black text-red-900">{VIDEO_OPTIMIZATION_FAILED_MESSAGE}</p>
+                      {videoJob.error ? <p className="mt-1 text-xs font-semibold text-red-800">{videoJob.error}</p> : null}
+                      <p className="mt-1 text-xs font-semibold text-red-800">Загрузите видео заново или используйте файл меньшего размера.</p>
+                    </div>
+                  ) : videoJob.status === "ready" ? (
+                    <div className="mt-3 rounded-2xl border border-emerald-200 bg-emerald-50 p-3">
+                      <p className="text-sm font-black text-emerald-900">{VIDEO_OPTIMIZED_READY_MESSAGE}</p>
+                      <p className="mt-1 text-xs font-semibold text-emerald-800">Оптимизированный MP4 и обложка готовы. Можно продолжать запуск.</p>
+                    </div>
+                  ) : (
+                    <div className="mt-3 rounded-2xl border border-amber-200 bg-amber-50 p-3">
+                      <p className="text-sm font-black text-amber-900">{VIDEO_OPTIMIZING_MESSAGE}</p>
+                      <p className="mt-1 text-xs font-semibold text-amber-800">
+                        Статус: {videoJobStatusLabels[videoJob.status]}
+                        {videoJob.progress ? ` · ${videoJob.progress}%` : ""}
+                      </p>
+                      <p className="mt-1 text-xs font-semibold text-amber-800">{VIDEO_OPTIMIZING_LAUNCH_BLOCKED_MESSAGE}</p>
+                    </div>
+                  )
+                ) : null}
+                {creative.fileType === "video" && (!videoJobPending || creative.thumbnailUrl) ? (
                   creative.thumbnailUrl ? (
                     <div className="mt-3 rounded-2xl border border-emerald-200 bg-emerald-50 p-3">
                       <p className="text-sm font-black text-emerald-900">{THUMBNAIL_READY_MESSAGE}</p>

@@ -11,6 +11,7 @@ import {
   handleMetaStatus,
   handleMetaValidate,
   handleStorageHealth,
+  handleVideoJobs,
   type CrmResource,
 } from "../../lib/crm/server";
 
@@ -154,6 +155,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   if (resource === "ads-ai-fill") {
     return handleAdsAiFill(req, res);
+  }
+
+  if (resource === "video-jobs") {
+    return handleVideoJobs(req, res);
   }
 
   if (!isCrmResource(resource)) {
