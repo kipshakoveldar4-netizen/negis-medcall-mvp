@@ -127,6 +127,7 @@ async function checkAdsAutomationSource() {
   assertSourceIncludes(source, "publicUrl: job.outputPublicUrl || current.publicUrl", "creative publicUrl comes only from the optimized output");
   assertSourceIncludes(source, "thumbnailUrl: job.thumbnailPublicUrl || current.thumbnailUrl", "thumbnailUrl comes from the optimization job");
   assertSourceExcludes(source, "ad-creatives-raw", "raw bucket name hardcoded in the UI");
+  assertSourceExcludes(source, "SERVICE_ROLE", "service role key referenced in the frontend");
 
   console.log("AdsAutomation source checks: ok");
 }
@@ -1223,6 +1224,94 @@ async function checkCrmVideoJobsModule() {
   console.log("CRM video jobs module checks: ok");
 }
 
+async function checkVideoWorkerPackage() {
+  const workerDir = path.join(repoRoot, "artifacts", "video-worker");
+
+  const pkg = JSON.parse(await readFile(path.join(workerDir, "package.json"), "utf8")) as {
+    name?: string;
+    scripts?: Record<string, string>;
+  };
+  if (pkg.name !== "@workspace/video-worker") {
+    throw new Error("video worker package must be named @workspace/video-worker");
+  }
+  for (const script of ["dev", "build", "start", "typecheck"]) {
+    if (!pkg.scripts?.[script]) {
+      throw new Error(`video worker package must define the ${script} script`);
+    }
+  }
+
+  const ffmpegSource = await readFile(path.join(workerDir, "src", "ffmpeg.ts"), "utf8");
+  for (const marker of ["libx264", '"aac"', "+faststart", "force_original_aspect_ratio=decrease", "trunc(iw/2)*2", "fps=${options.fps}"]) {
+    if (!ffmpegSource.includes(marker)) {
+      throw new Error(`video worker ffmpeg source is missing ${marker}`);
+    }
+  }
+
+  const workerSource = await readFile(path.join(workerDir, "src", "worker.ts"), "utf8");
+  for (const marker of [
+    '.eq("status", "queued")',
+    "claimed_by",
+    "claimed_at",
+    "attempts",
+    "output_public_url",
+    "thumbnail_public_url",
+    '"worker_frame"',
+    'status: "ready"',
+    'status: "failed"',
+    "raw_deleted_at",
+    "raw_delete_error",
+    ".remove([",
+    "completed_at",
+    "compressionRatio",
+  ]) {
+    if (!workerSource.includes(marker)) {
+      throw new Error(`video worker source is missing ${marker}`);
+    }
+  }
+
+  // The claim must happen before processing so two workers never run the same job.
+  const indexSource = await readFile(path.join(workerDir, "src", "index.ts"), "utf8");
+  const claimIndex = indexSource.indexOf("claimNextJob");
+  const processIndex = indexSource.indexOf("processJob");
+  if (claimIndex === -1 || processIndex === -1 || claimIndex > processIndex) {
+    throw new Error("video worker loop must claim a queued job before processing it");
+  }
+
+  const dockerfile = await readFile(path.join(workerDir, "Dockerfile"), "utf8");
+  if (!dockerfile.includes("ffmpeg")) {
+    throw new Error("video worker Dockerfile must install ffmpeg");
+  }
+
+  // Functional check of the ffmpeg argument builders.
+  const ffmpegModule = (await import(pathToFileURL(path.join(workerDir, "src", "ffmpeg.ts")).href)) as {
+    buildTranscodeArgs(input: string, output: string, options: { crf: number; preset: string; maxWidth: number; maxHeight: number; fps: number }): string[];
+    buildThumbnailArgs(input: string, output: string): string[];
+  };
+  const transcodeArgs = ffmpegModule.buildTranscodeArgs("input.mov", "optimized.mp4", {
+    crf: 23,
+    preset: "medium",
+    maxWidth: 1080,
+    maxHeight: 1920,
+    fps: 30,
+  });
+  const joinedArgs = transcodeArgs.join(" ");
+  for (const flag of ["libx264", "aac", "+faststart", "min(1080,iw)", "min(1920,ih)", "fps=30", "trunc(iw/2)*2"]) {
+    if (!joinedArgs.includes(flag)) {
+      throw new Error(`video worker transcode args must include ${flag}`);
+    }
+  }
+  if (!transcodeArgs.includes("23") || !transcodeArgs.includes("medium") || !transcodeArgs.includes("optimized.mp4")) {
+    throw new Error("video worker transcode args must apply CRF, preset, and the output path");
+  }
+  const thumbnailArgs = ffmpegModule.buildThumbnailArgs("optimized.mp4", "thumbnail.jpg");
+  const joinedThumbnail = thumbnailArgs.join(" ");
+  if (!joinedThumbnail.includes("-ss 1") || !joinedThumbnail.includes("-frames:v 1") || !thumbnailArgs.includes("thumbnail.jpg")) {
+    throw new Error("video worker thumbnail args must capture one frame at ~1 second");
+  }
+
+  console.log("Video worker package checks: ok");
+}
+
 async function checkNoNewApiFiles() {
   // New CRM endpoints must live inside the existing catch-all, not new api files.
   const crmFiles = (await readdir(path.join(repoRoot, "api", "crm"))).sort();
@@ -1332,6 +1421,7 @@ async function main() {
   await checkMetaVideoModule();
   await checkCrmLaunchStateModule();
   await checkCrmVideoJobsModule();
+  await checkVideoWorkerPackage();
   await checkNoNewApiFiles();
   for (const route of [
     "/dashboard",
