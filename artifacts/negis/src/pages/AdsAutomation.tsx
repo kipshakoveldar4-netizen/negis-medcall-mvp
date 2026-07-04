@@ -55,6 +55,10 @@ type CreativeAsset = {
   videoUploadMode?: string;
   videoProcessingStatus?: string;
   videoWarnings?: string[];
+  thumbnailUrl?: string;
+  thumbnailGeneratedAt?: string;
+  thumbnailSource?: string;
+  thumbnailMimeType?: string;
   status: string;
 };
 
@@ -240,6 +244,9 @@ const MOV_VIDEO_WARNING = "MOV поддерживается Meta, но обра�
 const VIDEO_FORMAT_ERROR = "Для автозапуска видео поддерживаются MP4 и MOV.";
 const DRY_RUN_REFERENCE_MESSAGE = "Последняя проверка без запуска прошла. Meta API не вызывался.";
 const VIDEO_PROCESSING_PENDING_MESSAGE = "Видео принято Meta и обрабатывается. Это не ошибка. Повторите создание объявления через несколько минут.";
+const THUMBNAIL_FAILED_MESSAGE = "Не удалось автоматически создать обложку видео. Попробуйте MP4 или другое видео.";
+const THUMBNAIL_READY_MESSAGE = "Обложка видео создана автоматически";
+const THUMBNAIL_REQUIRED_FOR_LAUNCH_MESSAGE = "Обложка видео не создана — она обязательна для запуска видео-рекламы. Нажмите «Создать обложку заново» или загрузите другое видео.";
 
 const defaultBrief: Brief = {
   service: "Консультация косметолога",
@@ -375,6 +382,16 @@ function normalizeAsset(value: unknown, fallback: CreativeAsset): CreativeAsset 
     videoWarnings: Array.isArray(record.videoWarnings)
       ? record.videoWarnings.filter((item): item is string => typeof item === "string")
       : fallback.videoWarnings,
+    thumbnailUrl:
+      readStringField(record, ["thumbnailUrl", "thumbnail_url"], "") ||
+      readStringField(asRecord(record.metadata), ["thumbnailUrl", "thumbnail_url"], fallback.thumbnailUrl || "") ||
+      undefined,
+    thumbnailGeneratedAt:
+      readStringField(asRecord(record.metadata), ["thumbnailGeneratedAt", "thumbnail_generated_at"], fallback.thumbnailGeneratedAt || "") || undefined,
+    thumbnailSource:
+      readStringField(asRecord(record.metadata), ["thumbnailSource", "thumbnail_source"], fallback.thumbnailSource || "") || undefined,
+    thumbnailMimeType:
+      readStringField(asRecord(record.metadata), ["thumbnailMimeType", "thumbnail_mime_type"], fallback.thumbnailMimeType || "") || undefined,
     status: readStringField(record, ["status"], fallback.status),
   };
 }
@@ -509,6 +526,93 @@ function uniqueStrings(values: Array<string | undefined>) {
 
 function localHistoryKey(workspaceId: string) {
   return `negis_ads_launch_history_${workspaceId}`;
+}
+
+type VideoThumbnailCapture = { blob: Blob; mimeType: string };
+
+function captureVideoThumbnail(file: File): Promise<VideoThumbnailCapture | null> {
+  return new Promise((resolve) => {
+    const objectUrl = URL.createObjectURL(file);
+    const video = document.createElement("video");
+    video.muted = true;
+    video.playsInline = true;
+    video.preload = "auto";
+    video.src = objectUrl;
+
+    let finished = false;
+    const finish = (result: VideoThumbnailCapture | null) => {
+      if (finished) return;
+      finished = true;
+      window.clearTimeout(totalTimer);
+      video.removeAttribute("src");
+      video.load();
+      URL.revokeObjectURL(objectUrl);
+      resolve(result);
+    };
+    const totalTimer = window.setTimeout(() => finish(null), 15000);
+
+    const drawFrame = (): Promise<VideoThumbnailCapture | null> =>
+      new Promise((resolveFrame) => {
+        try {
+          const width = video.videoWidth;
+          const height = video.videoHeight;
+          if (!width || !height) return resolveFrame(null);
+          const canvas = document.createElement("canvas");
+          canvas.width = width;
+          canvas.height = height;
+          const context = canvas.getContext("2d");
+          if (!context) return resolveFrame(null);
+          context.drawImage(video, 0, 0, width, height);
+          canvas.toBlob((blob) => resolveFrame(blob && blob.size > 0 ? { blob, mimeType: "image/jpeg" } : null), "image/jpeg", 0.86);
+        } catch {
+          resolveFrame(null);
+        }
+      });
+
+    const seekTo = (time: number): Promise<boolean> =>
+      new Promise((resolveSeek) => {
+        let seekDone = false;
+        const settle = (ok: boolean) => {
+          if (seekDone) return;
+          seekDone = true;
+          window.clearTimeout(seekTimer);
+          video.removeEventListener("seeked", onSeeked);
+          video.removeEventListener("error", onSeekError);
+          resolveSeek(ok);
+        };
+        const onSeeked = () => settle(true);
+        const onSeekError = () => settle(false);
+        const seekTimer = window.setTimeout(() => settle(false), 4000);
+        try {
+          video.addEventListener("seeked", onSeeked, { once: true });
+          video.addEventListener("error", onSeekError, { once: true });
+          video.currentTime = time;
+        } catch {
+          settle(false);
+        }
+      });
+
+    video.addEventListener("error", () => finish(null), { once: true });
+    video.addEventListener(
+      "loadeddata",
+      () => {
+        void (async () => {
+          const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
+          // Prefer ~1 second in; for clips shorter than a second use 10% of the duration.
+          const preferredTime = duration >= 1 ? 1 : Math.max(duration * 0.1, 0);
+          const maxSeekable = Math.max(duration - 0.05, 0);
+          // Fallback chain: preferred moment → 0.1s → first available frame.
+          for (const time of [preferredTime, 0.1, 0]) {
+            await seekTo(Math.max(Math.min(time, maxSeekable), 0));
+            const frame = await drawFrame();
+            if (frame) return finish(frame);
+          }
+          finish(null);
+        })();
+      },
+      { once: true },
+    );
+  });
 }
 
 function isDryRunMetaId(value?: string) {
@@ -670,7 +774,8 @@ export default function AdsAutomation() {
   const [uploadStage, setUploadStage] = useState("");
   const [lastUploadError, setLastUploadError] = useState("");
   const [liveLaunchEnabled, setLiveLaunchEnabled] = useState(() => readStored("negis_meta_live_launch_enabled", false));
-  const [loading, setLoading] = useState<"health" | "storage" | "upload" | "ai" | "check" | "video" | "launch" | "history" | null>(null);
+  const [loading, setLoading] = useState<"health" | "storage" | "upload" | "ai" | "check" | "video" | "launch" | "history" | "thumbnail" | null>(null);
+  const [creativeFile, setCreativeFile] = useState<File | null>(null);
   const [notice, setNotice] = useState("");
   const [launchResult, setLaunchResult] = useState<LaunchResult | null>(null);
   const [lastDryRunResult, setLastDryRunResult] = useState<LaunchResult | null>(null);
@@ -786,6 +891,95 @@ export default function AdsAutomation() {
     return details;
   }
 
+  async function uploadVideoThumbnail(
+    capture: VideoThumbnailCapture,
+    sourceFileName: string,
+  ): Promise<{ publicUrl: string; generatedAt: string; mimeType: string } | null> {
+    try {
+      const baseName = sourceFileName.replace(/\.[^.]+$/, "") || "video";
+      const thumbnailFileName = `${baseName}-thumbnail.jpg`;
+      const signedBody = await crmRequest<SignedUploadData>("/api/crm/ad-creatives/signed-upload", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          workspaceId,
+          fileName: thumbnailFileName,
+          fileType: "image",
+          mimeType: capture.mimeType,
+          fileSize: capture.blob.size,
+        }),
+      });
+      const storageBucket = firstString(signedBody.data.bucket, signedBody.data.storageBucket, "ad-creatives");
+      const storagePath = firstString(signedBody.data.storagePath);
+      const token = firstString(signedBody.data.token);
+      const thumbnailPublicUrl = firstString(signedBody.data.publicUrl) || buildFrontendStoragePublicUrl(storagePath, storageBucket);
+      if (!storagePath || !token || !thumbnailPublicUrl) return null;
+      const { error: uploadError } = await supabase.storage.from(storageBucket).uploadToSignedUrl(storagePath, token, capture.blob, {
+        contentType: capture.mimeType,
+      });
+      if (uploadError) return null;
+      return { publicUrl: thumbnailPublicUrl, generatedAt: new Date().toISOString(), mimeType: capture.mimeType };
+    } catch {
+      return null;
+    }
+  }
+
+  async function regenerateThumbnail() {
+    if (!creative || creative.fileType !== "video") return;
+    if (!creativeFile) {
+      setNotice("Исходный файл видео недоступен в этой сессии. Загрузите видео заново, чтобы создать обложку.");
+      return;
+    }
+    setLoading("thumbnail");
+    try {
+      const capture = await captureVideoThumbnail(creativeFile);
+      const thumbnail = capture ? await uploadVideoThumbnail(capture, creativeFile.name) : null;
+      if (!thumbnail) {
+        setNotice(THUMBNAIL_FAILED_MESSAGE);
+        toast.error(THUMBNAIL_FAILED_MESSAGE);
+        return;
+      }
+      setCreative((current) =>
+        current
+          ? {
+              ...current,
+              thumbnailUrl: thumbnail.publicUrl,
+              thumbnailGeneratedAt: thumbnail.generatedAt,
+              thumbnailSource: "auto_frame",
+              thumbnailMimeType: thumbnail.mimeType,
+            }
+          : current,
+      );
+      if (creative.id) {
+        try {
+          await crmRequest("/api/crm/ad-creatives", {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              workspaceId,
+              id: creative.id,
+              metadata: {
+                source: "ads-automation",
+                uploadMode: "signed_url",
+                signedUpload: true,
+                thumbnailUrl: thumbnail.publicUrl,
+                thumbnailGeneratedAt: thumbnail.generatedAt,
+                thumbnailSource: "auto_frame",
+                thumbnailMimeType: thumbnail.mimeType,
+              },
+            }),
+          });
+        } catch {
+          // Local state keeps the thumbnail; metadata sync is best-effort.
+        }
+      }
+      setNotice("");
+      toast.success("Обложка видео создана заново");
+    } finally {
+      setLoading(null);
+    }
+  }
+
   async function uploadCreative(file: File) {
     setUploadStatus("validating");
     setUploadStage(uploadStatusLabel("validating"));
@@ -807,12 +1001,15 @@ export default function AdsAutomation() {
     setLoading("upload");
     setNotice(isMovVideo ? MOV_VIDEO_WARNING : "");
     if (isMovVideo) toast.warning(MOV_VIDEO_WARNING);
+    setCreativeFile(file);
     const previewUrl = URL.createObjectURL(file);
     let publicUrl = "";
     let storagePath = "";
     type UploadResponse = Partial<CreativeAsset> & { asset?: unknown; item?: unknown };
     let signedUpload: SignedUploadData | null = null;
     let lastError = "";
+    let thumbnail: { publicUrl: string; generatedAt: string; mimeType: string } | null = null;
+    let thumbnailWarning = "";
 
     try {
       if (!hasSupabaseFrontendEnv) {
@@ -860,6 +1057,18 @@ export default function AdsAutomation() {
         throw new Error("Публичная ссылка не получена. Проверьте public access bucket ad-creatives.");
       }
 
+      // Auto-generate a video thumbnail: Meta requires image_url inside video_data,
+      // and the clinic must not have to upload a separate cover image manually.
+      if (fileType === "video") {
+        setUploadStage("Создаём обложку видео автоматически");
+        const capture = await captureVideoThumbnail(file);
+        thumbnail = capture ? await uploadVideoThumbnail(capture, file.name) : null;
+        if (!thumbnail) {
+          thumbnailWarning = THUMBNAIL_FAILED_MESSAGE;
+          toast.warning(THUMBNAIL_FAILED_MESSAGE);
+        }
+      }
+
       const fallback: CreativeAsset = {
         fileName: file.name,
         fileType,
@@ -869,6 +1078,10 @@ export default function AdsAutomation() {
         publicUrl,
         storagePath,
         storageBucket,
+        thumbnailUrl: thumbnail?.publicUrl,
+        thumbnailGeneratedAt: thumbnail?.generatedAt,
+        thumbnailSource: thumbnail ? "auto_frame" : undefined,
+        thumbnailMimeType: thumbnail?.mimeType,
         status: "uploaded",
       };
 
@@ -892,6 +1105,14 @@ export default function AdsAutomation() {
             source: "ads-automation",
             uploadMode: "signed_url",
             signedUpload: true,
+            ...(thumbnail
+              ? {
+                  thumbnailUrl: thumbnail.publicUrl,
+                  thumbnailGeneratedAt: thumbnail.generatedAt,
+                  thumbnailSource: "auto_frame",
+                  thumbnailMimeType: thumbnail.mimeType,
+                }
+              : {}),
           },
         }),
       });
@@ -914,11 +1135,16 @@ export default function AdsAutomation() {
       goToStep(2);
       toast.success(fileType === "video" ? "Видео загружено" : "Фото загружено");
       setNotice(
-        uploadedAsset.publicUrl
-          ? uploadedAsset.fileType === "video"
-            ? "Видео загружено. Публичная ссылка получена. Видео готово для подготовки в Meta."
-            : "Фото загружено. Публичная ссылка получена. Креатив готов для Meta."
-          : uploadLinkMissingMessage(storageHealth),
+        [
+          uploadedAsset.publicUrl
+            ? uploadedAsset.fileType === "video"
+              ? "Видео загружено. Публичная ссылка получена. Видео готово для подготовки в Meta."
+              : "Фото загружено. Публичная ссылка получена. Креатив готов для Meta."
+            : uploadLinkMissingMessage(storageHealth),
+          thumbnailWarning,
+        ]
+          .filter(Boolean)
+          .join(" "),
       );
     } catch (error) {
       lastError = error instanceof Error ? error.message : uploadLinkMissingMessage(storageHealth);
@@ -931,6 +1157,10 @@ export default function AdsAutomation() {
         publicUrl,
         storagePath,
         storageBucket: firstString(signedUpload?.bucket, signedUpload?.storageBucket, "ad-creatives"),
+        thumbnailUrl: thumbnail?.publicUrl,
+        thumbnailGeneratedAt: thumbnail?.generatedAt,
+        thumbnailSource: thumbnail ? "auto_frame" : undefined,
+        thumbnailMimeType: thumbnail?.mimeType,
         status: "failed",
       };
       setUploadStatus("failed");
@@ -960,6 +1190,7 @@ export default function AdsAutomation() {
   function removeCreative() {
     if (creative?.previewUrl.startsWith("blob:")) URL.revokeObjectURL(creative.previewUrl);
     setCreative(null);
+    setCreativeFile(null);
     setAiPackage(null);
     setCompliance(null);
     setLaunchResult(null);
@@ -1046,6 +1277,8 @@ export default function AdsAutomation() {
       videoUrl: creative?.fileType === "video" ? creativeUrl : "",
       videoId: creative?.metaVideoId || "",
       metaVideoId: creative?.metaVideoId || "",
+      thumbnailUrl: creative?.fileType === "video" ? creative?.thumbnailUrl || "" : "",
+      thumbnailSource: creative?.fileType === "video" ? creative?.thumbnailSource || "" : "",
       fileName: creative?.fileName || "",
       fileType: creative?.fileType || "image",
       mimeType: creative?.mimeType || "",
@@ -1123,6 +1356,9 @@ export default function AdsAutomation() {
     if (creative?.fileType === "video" && metaSummary?.videoLaunchEnabled && !isMetaVideoFormatSupported(creative)) errors.push(VIDEO_FORMAT_ERROR);
     if (creative?.fileType === "video" && !creative.metaVideoId && !creative.publicUrl) {
       errors.push("Видео загружено в Negis, но ссылка для Meta ещё не готова. Проверьте Storage или повторите загрузку.");
+    }
+    if (creative?.fileType === "video" && metaSummary?.videoLaunchEnabled && !creative.thumbnailUrl) {
+      errors.push(THUMBNAIL_REQUIRED_FOR_LAUNCH_MESSAGE);
     }
     if (nextStatusMode === "ACTIVE") {
       if (!liveLaunchEnabled) errors.push("ACTIVE запуск выключен в Admin Center.");
@@ -1244,6 +1480,8 @@ export default function AdsAutomation() {
         videoUploadMode: result.videoUploadMode || creative?.videoUploadMode,
         videoProcessingStatus: result.videoProcessingStatus || creative?.videoProcessingStatus,
         lastCheckedAt: result.lastCheckedAt,
+        thumbnailUrl: creative?.fileType === "video" ? creative?.thumbnailUrl : undefined,
+        thumbnailSource: creative?.fileType === "video" ? creative?.thumbnailSource : undefined,
         videoWarnings: uniqueStrings([...(creative?.videoWarnings || []), ...(result.videoWarnings || [])]),
         city: selectedCity.labelRu,
         selectedCityId: selectedCity.id,
@@ -1533,6 +1771,27 @@ export default function AdsAutomation() {
                   </StatusPill>
                 </div>
                 <p className="mt-3 text-sm text-[#64748B]">{formatBytes(creative.fileSize)} · {creative.mimeType || "тип не определён"}</p>
+                {creative.fileType === "video" ? (
+                  creative.thumbnailUrl ? (
+                    <div className="mt-3 rounded-2xl border border-emerald-200 bg-emerald-50 p-3">
+                      <p className="text-sm font-black text-emerald-900">{THUMBNAIL_READY_MESSAGE}</p>
+                      <img className="mt-2 max-h-40 rounded-xl border border-emerald-200 object-contain" src={creative.thumbnailUrl} alt="Обложка видео" />
+                      <button type="button" className="neu-btn mt-3 justify-center" disabled={loading === "thumbnail"} onClick={() => void regenerateThumbnail()}>
+                        {loading === "thumbnail" ? <Loader2 className="animate-spin" size={16} /> : <RefreshCw size={16} />}
+                        Создать обложку заново
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="mt-3 rounded-2xl border border-amber-200 bg-amber-50 p-3">
+                      <p className="text-sm font-semibold text-amber-900">{THUMBNAIL_FAILED_MESSAGE}</p>
+                      <p className="mt-1 text-xs font-bold text-amber-800">Обложка обязательна для запуска видео-рекламы в Meta.</p>
+                      <button type="button" className="neu-btn mt-3 justify-center" disabled={loading === "thumbnail"} onClick={() => void regenerateThumbnail()}>
+                        {loading === "thumbnail" ? <Loader2 className="animate-spin" size={16} /> : <RefreshCw size={16} />}
+                        Создать обложку заново
+                      </button>
+                    </div>
+                  )
+                ) : null}
                 {creative.fileType === "video" ? (
                   <div className="mt-3 rounded-2xl border border-blue-200 bg-blue-50 p-3 text-sm font-semibold text-blue-900">
                     <p>Видео загружено. Публичная ссылка получена. Видео готово для отчёта.</p>
@@ -1876,6 +2135,13 @@ export default function AdsAutomation() {
       ? Boolean(creativeVideoPayload.videoId)
       : Boolean(creative?.metaVideoId);
     const creativeVideoProcessingStatus = firstString(creativeVideoPayload.processingStatus, creative?.videoProcessingStatus);
+    const creativeVideoThumbnail = Object.prototype.hasOwnProperty.call(creativeVideoPayload, "thumbnailUrl")
+      ? Boolean(creativeVideoPayload.thumbnailUrl)
+      : Boolean(creative?.thumbnailUrl);
+    const creativeVideoThumbnailSource = firstString(creativeVideoPayload.thumbnailSource, creative?.thumbnailSource);
+    const creativeVideoDataHasImageUrl = Object.prototype.hasOwnProperty.call(creativePayload, "videoDataHasImageUrl")
+      ? Boolean(creativePayload.videoDataHasImageUrl)
+      : Boolean(creative?.thumbnailUrl);
     const creativeVideoWarnings = Array.isArray(creativeVideoPayload.warnings)
       ? creativeVideoPayload.warnings.map(String).filter(Boolean)
       : creative?.videoWarnings || [];
@@ -1984,6 +2250,9 @@ export default function AdsAutomation() {
             <p><b>video.uploadMode:</b> {creativeVideoUploadMode || "-"}</p>
             <p><b>video.videoId:</b> {creativeVideoId ? "yes" : "no"}</p>
             <p><b>video.processingStatus:</b> {creativeVideoProcessingStatus || "-"}</p>
+            <p><b>video.thumbnailUrl:</b> {creativeVideoThumbnail ? "yes" : "no"}</p>
+            <p><b>video.thumbnailSource:</b> {creativeVideoThumbnailSource || "-"}</p>
+            <p><b>creative.videoDataHasImageUrl:</b> {String(creativeVideoDataHasImageUrl)}</p>
             <p><b>video.launchEnabled:</b> {String(creativeVideoLaunchEnabled)}</p>
             <p><b>creative.usesInstagramActor:</b> {creativeUsesInstagramActor}</p>
             <p><b>creative.instagramActorFallback:</b> {creativeInstagramActorFallback}</p>
@@ -2233,6 +2502,8 @@ export default function AdsAutomation() {
               const historyVideoUploadMode = firstString(payload.videoUploadMode, metaResponse.videoUploadMode);
               const historyVideoProcessingStatus = firstString(payload.videoProcessingStatus, metaResponse.videoProcessingStatus);
               const historyLastCheckedAt = firstString(payload.lastCheckedAt, metaResponse.lastCheckedAt);
+              const historyThumbnailUrl = firstString(payload.thumbnailUrl, metaResponse.thumbnailUrl);
+              const historyThumbnailSource = firstString(payload.thumbnailSource, metaResponse.thumbnailSource);
               const historyVideoWarnings = Array.isArray(payload.videoWarnings)
                 ? payload.videoWarnings.map(String).filter(Boolean)
                 : Array.isArray(metaResponse.videoWarnings)
@@ -2292,6 +2563,8 @@ export default function AdsAutomation() {
                     {showVideoDetails ? <p>Meta Video ID: {historyMetaVideoId || "-"}</p> : null}
                     {showVideoDetails ? <p>Video upload: {historyVideoUploadMode || "-"}</p> : null}
                     {showVideoDetails ? <p>Processing: {historyVideoProcessingStatus || "-"}</p> : null}
+                    {showVideoDetails ? <p>Thumbnail: {historyThumbnailUrl ? "yes" : "no"}</p> : null}
+                    {showVideoDetails ? <p>Thumbnail source: {historyThumbnailSource || "-"}</p> : null}
                     {showVideoDetails ? (
                       <p>Проверено: {historyLastCheckedAt ? new Date(historyLastCheckedAt).toLocaleString("ru-RU") : "-"}</p>
                     ) : null}

@@ -221,6 +221,8 @@ export const META_VIDEO_PROCESSING_TIMEOUT_MESSAGE =
   "Видео загружено в Meta и ещё обрабатывается. Повторите создание объявления через несколько минут.";
 export const META_VIDEO_BINARY_TOO_LARGE_MESSAGE =
   "Видео слишком большое для серверной передачи. Используйте MP4 меньшего размера или подключите background worker.";
+export const META_VIDEO_THUMBNAIL_REQUIRED_MESSAGE =
+  "Для видео-рекламы нужна обложка (video_data.image_url). Negis создаёт её автоматически при загрузке видео. Загрузите видео заново, чтобы обложка создалась.";
 const META_VIDEO_BINARY_FALLBACK_LIMIT_BYTES = 25 * 1024 * 1024;
 const metaCityTargetCache = new Map<string, MetaCityTarget>();
 
@@ -1369,7 +1371,18 @@ export function buildImagePictureCreativePayload(input: MetaLaunchInput & { page
   };
 }
 
+export function resolveVideoThumbnailUrl(input: { thumbnailUrl?: string; videoUrl?: string; creativeUrl?: string }): string {
+  const thumbnailUrl = (input.thumbnailUrl || "").trim();
+  if (!thumbnailUrl) return "";
+  // Meta rejects the video file itself as image_url — only a real image thumbnail is valid.
+  const videoUrl = (input.videoUrl || "").trim();
+  const creativeUrl = (input.creativeUrl || "").trim();
+  if (thumbnailUrl === videoUrl || (creativeUrl && thumbnailUrl === creativeUrl)) return "";
+  return thumbnailUrl;
+}
+
 export function buildVideoCreativePayload(input: MetaLaunchInput & { pageId: string; videoId: string; instagramActorId?: string }): MetaJson {
+  const thumbnailUrl = resolveVideoThumbnailUrl(input);
   const objectStorySpec: MetaJson = {
     page_id: input.pageId,
     ...(input.instagramActorId ? { instagram_actor_id: input.instagramActorId } : {}),
@@ -1378,7 +1391,7 @@ export function buildVideoCreativePayload(input: MetaLaunchInput & { pageId: str
       title: input.headline,
       message: input.primaryText,
       link_description: input.description,
-      ...(input.thumbnailUrl ? { image_url: input.thumbnailUrl } : {}),
+      ...(thumbnailUrl ? { image_url: thumbnailUrl } : {}),
       call_to_action: {
         type: input.cta || "LEARN_MORE",
         value: {
@@ -1468,6 +1481,16 @@ export async function createImageCreative(input: MetaLaunchInput): Promise<MetaC
 export async function createVideoCreative(input: MetaLaunchInput & { videoId: string }): Promise<MetaCreativeCreateResult> {
   const { adAccountId, pageId, instagramActorId: configuredInstagramActorId } = assertMetaConfigured();
   const instagramActorId = resolveInstagramActorId(input, configuredInstagramActorId);
+
+  // Meta requires image_hash or image_url inside video_data (code 100 / subcode 1443226).
+  // Block before the creative call instead of letting Meta reject the launch mid-way.
+  if (!resolveVideoThumbnailUrl(input)) {
+    throw new MetaApiError({
+      step: "creative",
+      message: META_VIDEO_THUMBNAIL_REQUIRED_MESSAGE,
+      debug: { videoId: input.videoId, thumbnailUrlProvided: Boolean(input.thumbnailUrl) },
+    });
+  }
 
   const data = await metaRequest(`/${adAccountId}/adcreatives`, "POST", {
     ...buildVideoCreativePayload({

@@ -93,6 +93,15 @@ async function checkAdsAutomationSource() {
   assertSourceIncludes(source, "lastCheckedAt", "video processing lastCheckedAt display");
   assertSourceIncludes(source, "VideoProcessingPendingError", "controlled pending video state");
   assertSourceIncludes(source, 'metaVideoId: creative.metaVideoId || ""', "video_id reuse in meta upload request");
+  assertSourceIncludes(source, "captureVideoThumbnail", "automatic video thumbnail capture");
+  assertSourceIncludes(source, "uploadVideoThumbnail", "thumbnail upload through signed storage flow");
+  assertSourceIncludes(source, "Обложка видео создана автоматически", "auto thumbnail ready message");
+  assertSourceIncludes(source, "Не удалось автоматически создать обложку видео", "controlled thumbnail failure warning");
+  assertSourceIncludes(source, "Создать обложку заново", "thumbnail regenerate action");
+  assertSourceIncludes(source, 'thumbnailSource: "auto_frame"', "auto_frame thumbnail source metadata");
+  assertSourceIncludes(source, "thumbnailGeneratedAt", "thumbnail generation timestamp metadata");
+  assertSourceIncludes(source, "video.thumbnailUrl", "thumbnail debug in technical info");
+  assertSourceIncludes(source, "creative.videoDataHasImageUrl", "video_data image_url debug in technical info");
 
   console.log("AdsAutomation source checks: ok");
 }
@@ -277,6 +286,15 @@ async function checkMetaMarketingSource() {
   }
   if (source.includes(".filter(([, value]) => value)")) {
     throw new Error("Meta marketing serializer must not use truthy filtering");
+  }
+  if (!source.includes("META_VIDEO_THUMBNAIL_REQUIRED_MESSAGE")) {
+    throw new Error("Meta marketing source must expose a controlled video thumbnail requirement message");
+  }
+  if (!source.includes("resolveVideoThumbnailUrl")) {
+    throw new Error("Meta marketing source must normalize video thumbnail URLs before creative creation");
+  }
+  if (!source.includes("image_url: thumbnailUrl")) {
+    throw new Error("Meta video creative must pass the generated thumbnail as video_data.image_url");
   }
 
   console.log("Meta marketing source checks: ok");
@@ -600,12 +618,21 @@ async function checkMetaVideoModule() {
       }
       if (url.includes("/adcreatives") && method === "POST") {
         const params = new URLSearchParams(body);
-        const spec = JSON.parse(params.get("object_story_spec") || "{}") as { video_data?: { video_id?: string }; link_data?: unknown };
+        const spec = JSON.parse(params.get("object_story_spec") || "{}") as {
+          video_data?: { video_id?: string; image_url?: string };
+          link_data?: unknown;
+        };
         if (spec.video_data?.video_id !== "video_launch") {
           throw new Error("video launch creative must use object_story_spec.video_data.video_id");
         }
         if (spec.link_data) {
           throw new Error("video launch creative must not use link_data");
+        }
+        if (spec.video_data?.image_url !== "https://example.com/smoke-thumb.jpg") {
+          throw new Error("video launch creative must pass the generated thumbnail as video_data.image_url");
+        }
+        if ((spec.video_data?.image_url || "").endsWith(".mp4")) {
+          throw new Error("video launch creative must never use the video public URL as image_url");
         }
         return jsonResponse({ id: "creative_smoke" });
       }
@@ -672,9 +699,48 @@ async function checkMetaVideoModule() {
       cta: "LEARN_MORE",
       landingUrl: "https://example.com",
     });
-    const videoSpec = videoCreative.object_story_spec as { video_data?: { video_id?: string }; link_data?: unknown };
+    const videoSpec = videoCreative.object_story_spec as { video_data?: { video_id?: string; image_url?: string }; link_data?: unknown };
     if (videoSpec.video_data?.video_id !== "video_123" || videoSpec.link_data) {
       throw new Error("video creative payload must use video_data.video_id and must not use link_data");
+    }
+    if (Object.prototype.hasOwnProperty.call(videoSpec.video_data || {}, "image_url")) {
+      throw new Error("video creative payload without thumbnail must not invent image_url");
+    }
+
+    const videoCreativeWithThumb = marketing.buildVideoCreativePayload({
+      campaignName: "Smoke",
+      creativeName: "Smoke Video Creative",
+      pageId: "page_smoke",
+      videoId: "video_123",
+      headline: "Headline",
+      primaryText: "Text",
+      description: "Description",
+      cta: "LEARN_MORE",
+      landingUrl: "https://example.com",
+      videoUrl: "https://example.com/video.mp4",
+      thumbnailUrl: "https://example.com/thumb.jpg",
+    });
+    const thumbSpec = videoCreativeWithThumb.object_story_spec as { video_data?: { image_url?: string } };
+    if (thumbSpec.video_data?.image_url !== "https://example.com/thumb.jpg") {
+      throw new Error("video creative payload must pass thumbnailUrl as video_data.image_url");
+    }
+
+    const videoCreativeVideoAsThumb = marketing.buildVideoCreativePayload({
+      campaignName: "Smoke",
+      creativeName: "Smoke Video Creative",
+      pageId: "page_smoke",
+      videoId: "video_123",
+      headline: "Headline",
+      primaryText: "Text",
+      description: "Description",
+      cta: "LEARN_MORE",
+      landingUrl: "https://example.com",
+      videoUrl: "https://example.com/video.mp4",
+      thumbnailUrl: "https://example.com/video.mp4",
+    });
+    const videoAsThumbSpec = videoCreativeVideoAsThumb.object_story_spec as { video_data?: { image_url?: string } };
+    if (Object.prototype.hasOwnProperty.call(videoAsThumbSpec.video_data || {}, "image_url")) {
+      throw new Error("video creative payload must never use the video public URL as image_url");
     }
 
     const imageCreative = marketing.buildImageLinkCreativePayload({
@@ -706,6 +772,7 @@ async function checkMetaVideoModule() {
       landingUrl: "https://example.com",
       creativeType: "video",
       videoUrl: "https://example.com/smoke.mp4",
+      thumbnailUrl: "https://example.com/smoke-thumb.jpg",
       fileName: "smoke.mp4",
       mimeType: "video/mp4",
       city: "Astana",
@@ -718,6 +785,37 @@ async function checkMetaVideoModule() {
     }
     if (!calls.some((call) => call.url.includes("/advideos")) || !calls.some((call) => call.url.includes("/adcreatives"))) {
       throw new Error("real video launch must call advideos and adcreatives");
+    }
+
+    // Missing thumbnail must block before the Meta creative call with a controlled message.
+    calls.length = 0;
+    let thumbnailBlocked = false;
+    try {
+      await marketing.launchMetaCampaign({
+        campaignName: "Smoke Video Launch No Thumb",
+        objective: "OUTCOME_LEADS",
+        status: "PAUSED",
+        dailyBudgetMinor: 2000,
+        currency: "USD",
+        primaryText: "Text",
+        headline: "Headline",
+        description: "Description",
+        cta: "LEARN_MORE",
+        landingUrl: "https://example.com",
+        creativeType: "video",
+        videoUrl: "https://example.com/smoke.mp4",
+        fileName: "smoke.mp4",
+        mimeType: "video/mp4",
+        city: "Astana",
+      });
+    } catch (error) {
+      thumbnailBlocked = error instanceof Error && error.message.includes("обложка");
+    }
+    if (!thumbnailBlocked) {
+      throw new Error("video launch without thumbnail must fail with the controlled thumbnail message");
+    }
+    if (calls.some((call) => call.url.includes("/adcreatives"))) {
+      throw new Error("missing thumbnail must block before the Meta creative call");
     }
   } finally {
     fetchBox.fetch = originalFetch;
@@ -810,6 +908,7 @@ async function checkCrmLaunchStateModule() {
     creativeType: "video",
     creativeUrl: "https://example.com/crm-pending.mp4",
     videoUrl: "https://example.com/crm-pending.mp4",
+    thumbnailUrl: "https://example.com/crm-thumb.jpg",
     fileName: "crm-pending.mp4",
     mimeType: "video/mp4",
     complianceConfirmed: true,
@@ -835,6 +934,31 @@ async function checkCrmLaunchStateModule() {
       if (url.includes("/video_ready_crm")) return jsonResponse({ status: { video_status: "ready" } });
       return jsonResponse({});
     };
+
+    // Real video launch without a thumbnail must be blocked by validation before any Meta call.
+    const missingThumb = makeRes();
+    await crm.handleMetaLaunch({ method: "POST", body: { ...baseLaunchBody, thumbnailUrl: "" }, query: {}, headers: {} }, missingThumb.res);
+    const missingThumbBody = missingThumb.box.body as { success?: boolean; details?: string[] };
+    if (missingThumb.box.statusCode !== 400 || missingThumbBody.success !== false || !(missingThumbBody.details || []).some((item) => item.includes("обложка"))) {
+      throw new Error("real video launch without thumbnail must be blocked with the controlled thumbnail message");
+    }
+    if (calls.length > 0) {
+      throw new Error("missing thumbnail must block before any Meta API call");
+    }
+
+    // The video public URL must never be accepted as the thumbnail.
+    const videoAsThumb = makeRes();
+    await crm.handleMetaLaunch(
+      { method: "POST", body: { ...baseLaunchBody, thumbnailUrl: baseLaunchBody.videoUrl }, query: {}, headers: {} },
+      videoAsThumb.res,
+    );
+    const videoAsThumbBody = videoAsThumb.box.body as { success?: boolean; details?: string[] };
+    if (videoAsThumb.box.statusCode !== 400 || videoAsThumbBody.success !== false || !(videoAsThumbBody.details || []).some((item) => item.includes("обложка"))) {
+      throw new Error("video public URL must not be accepted as video thumbnail");
+    }
+    if (calls.length > 0) {
+      throw new Error("video-as-thumbnail must block before any Meta API call");
+    }
 
     // Real video launch with pending Meta processing must become video_processing, not PAUSED and not failed.
     const pendingLaunch = makeRes();
@@ -1749,6 +1873,51 @@ async function main() {
   const expectedVideoStatus = videoCreativePayload.videoLaunchEnabled ? "experimental" : "soon";
   if (videoCreativePayload.metaVideoLaunchStatus !== expectedVideoStatus || videoDebug.launchEnabled !== videoCreativePayload.videoLaunchEnabled) {
     throw new Error('/api/crm/meta-launch dry-run video creative must expose video launch flag/status debug');
+  }
+  const videoDryRunWarning = String(((videoDryRun.data || {}) as { warning?: unknown }).warning || "");
+  if (!videoDryRunWarning.includes("обложка")) {
+    throw new Error("/api/crm/meta-launch video dry-run without thumbnail must warn about the missing cover, not fail");
+  }
+  if (videoCreativePayload.videoDataHasImageUrl !== false) {
+    throw new Error("/api/crm/meta-launch video dry-run without thumbnail must expose videoDataHasImageUrl false");
+  }
+  const videoDryRunWithThumb = await checkJsonEndpoint("/api/crm/meta-launch", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      workspaceId: "demo-workspace",
+      campaignName: "Smoke Meta Video Campaign Thumb",
+      objective: "OUTCOME_LEADS",
+      statusMode: "PAUSED",
+      dailyBudget: 20,
+      totalBudget: 140,
+      currency: "USD",
+      city: "Astana",
+      targetAudience: "Women 25-55",
+      primaryText: "Professional consultation in Astana. Book a specialist consultation.",
+      headline: "Consultation in Astana",
+      description: "Book a consultation with a specialist.",
+      cta: "LEARN_MORE",
+      landingUrl: "https://example.com",
+      creativeType: "video",
+      creativeUrl: "https://example.com/smoke-creative.mp4",
+      videoUrl: "https://example.com/smoke-creative.mp4",
+      thumbnailUrl: "https://example.com/smoke-creative-thumb.jpg",
+      fileName: "smoke-creative.mp4",
+      mimeType: "video/mp4",
+      complianceConfirmed: true,
+      manualApprovalConfirmed: true,
+      dryRun: true,
+    }),
+  });
+  const thumbCreativePayload =
+    ((videoDryRunWithThumb.data || {}) as { metaPayload?: { creative?: Record<string, unknown> } }).metaPayload?.creative || {};
+  if (thumbCreativePayload.videoDataHasImageUrl !== true) {
+    throw new Error("/api/crm/meta-launch video dry-run with thumbnail must expose videoDataHasImageUrl true");
+  }
+  const thumbVideoDebug = (thumbCreativePayload.video || {}) as { thumbnailUrl?: unknown; thumbnailSource?: unknown };
+  if (thumbVideoDebug.thumbnailUrl !== true || thumbVideoDebug.thumbnailSource !== "auto_frame") {
+    throw new Error("/api/crm/meta-launch video dry-run with thumbnail must expose thumbnail debug fields");
   }
   await checkJsonFailure(
     "/api/crm/meta-launch",

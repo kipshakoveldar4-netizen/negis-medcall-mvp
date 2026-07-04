@@ -19,6 +19,8 @@ import {
   META_VIDEO_FORMAT_ERROR,
   META_MOV_VIDEO_WARNING,
   META_VIDEO_PROCESSING_TIMEOUT_MESSAGE,
+  META_VIDEO_THUMBNAIL_REQUIRED_MESSAGE,
+  resolveVideoThumbnailUrl,
   resolveMetaCityTarget,
   resolveMetaTargetingForCity,
   isSupportedMetaVideoFormat,
@@ -3009,6 +3011,10 @@ function buildMetaPayloadPreview(
       usesLinkData,
       videoLaunchEnabled: isMetaVideoLaunchEnabled(),
       metaVideoLaunchStatus: assetFileType === "video" ? (isMetaVideoLaunchEnabled() ? "experimental" : "soon") : "not_applicable",
+      videoDataHasImageUrl:
+        assetFileType === "video"
+          ? Boolean(resolveVideoThumbnailUrl({ thumbnailUrl: launch.thumbnailUrl, videoUrl: launch.videoUrl || launch.creativeUrl }))
+          : false,
       video: {
         mimeType: assetFileType === "video" ? launch.mimeType || "" : "",
         fileName: assetFileType === "video" ? launch.fileName || "" : "",
@@ -3016,6 +3022,8 @@ function buildMetaPayloadPreview(
         videoId: assetFileType === "video" ? Boolean(creativeOptions.videoId || launch.videoId) : false,
         processingStatus: assetFileType === "video" ? creativeOptions.videoProcessingStatus || "" : "",
         launchEnabled: assetFileType === "video" ? isMetaVideoLaunchEnabled() : false,
+        thumbnailUrl: assetFileType === "video" ? Boolean(resolveVideoThumbnailUrl({ thumbnailUrl: launch.thumbnailUrl, videoUrl: launch.videoUrl || launch.creativeUrl })) : false,
+        thumbnailSource: assetFileType === "video" && launch.thumbnailUrl ? "auto_frame" : "",
         warnings: assetFileType === "video" ? creativeOptions.videoWarnings || [] : [],
       },
       usesInstagramActor: creativeOptions.usesInstagramActor ?? Boolean(launch.instagramActorId),
@@ -3368,6 +3376,13 @@ export async function handleMetaLaunch(req: VercelRequest, res: VercelResponse) 
   if (!dryRun && launch.creativeType === "video" && isMetaVideoLaunchEnabled() && !launch.videoId && !isSupportedMetaVideoFormat({ fileName: launch.fileName, mimeType: launch.mimeType })) {
     details.push(META_VIDEO_FORMAT_ERROR);
   }
+  // Meta requires a real image thumbnail in video_data.image_url; the video URL itself does not count.
+  const videoThumbnailUrl = launch.creativeType === "video"
+    ? resolveVideoThumbnailUrl({ thumbnailUrl: launch.thumbnailUrl, videoUrl: launch.videoUrl || launch.creativeUrl })
+    : "";
+  if (!dryRun && launch.creativeType === "video" && isMetaVideoLaunchEnabled() && !videoThumbnailUrl) {
+    details.push(META_VIDEO_THUMBNAIL_REQUIRED_MESSAGE);
+  }
   if (!readBoolean(body.complianceConfirmed)) details.push("Подтвердите проверку безопасности текста.");
   if (!readBoolean(body.manualApprovalConfirmed)) details.push("Подтвердите ручное согласование запуска.");
 
@@ -3502,7 +3517,13 @@ export async function handleMetaLaunch(req: VercelRequest, res: VercelResponse) 
         metaAdId: demoMetaId("ad"),
         payload: metaPayload,
       };
-      warning = ["Проверка прошла без запуска: Meta API не вызывался.", targetingWarning].filter(Boolean).join(" ");
+      warning = [
+        "Проверка прошла без запуска: Meta API не вызывался.",
+        targetingWarning,
+        resolvedLaunch.creativeType === "video" && !videoThumbnailUrl ? META_VIDEO_THUMBNAIL_REQUIRED_MESSAGE : "",
+      ]
+        .filter(Boolean)
+        .join(" ");
     } else {
       if (!config.configured) {
         throw new Error("Meta env is not configured");
