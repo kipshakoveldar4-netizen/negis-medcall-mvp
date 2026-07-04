@@ -1241,6 +1241,17 @@ export default function AdsAutomation() {
     }
   }
 
+  function startNewLaunch() {
+    removeCreative();
+    setLastDryRunResult(null);
+    setConfirmations(confirmationDefaults);
+    setRealLaunchStatus("idle");
+    setRealLaunchMessage("");
+    setNotice("");
+    setLaunchTimestamp("");
+    goToStep(1);
+  }
+
   function buildLaunchPayload(dryRun: boolean, forcedStatusMode = statusMode) {
     const text = compliance?.safeText && compliance.status !== "safe" ? compliance.safeText : aiPackage?.primaryText;
     const publicCreativeUrl = creative?.publicUrl || "";
@@ -2309,11 +2320,18 @@ export default function AdsAutomation() {
     const launchVideoUploadMode = firstString(launchResult?.videoUploadMode, creative?.videoUploadMode);
     const launchVideoProcessingStatus = firstString(launchResult?.videoProcessingStatus, creative?.videoProcessingStatus);
     const launchVideoWarnings = uniqueStrings([...(creative?.videoWarnings || []), ...(launchResult?.videoWarnings || [])]);
+    const launchIsActive = launchResult?.metaStatus === "ACTIVE" || launchResult?.status === "active";
     const launchResultTitle = launchResult?.dryRun
       ? "Проверка без запуска (DRY-RUN)"
-      : launchResult?.metaStatus === "ACTIVE" || launchResult?.status === "active"
+      : launchIsActive
         ? "Реклама создана и запущена в Meta"
-        : "Реклама создана в Meta выключенной (PAUSED)";
+        : "Реклама создана в Meta выключенной";
+    const launchCampaignName = firstString(
+      asRecord(asRecord(launchResult?.metaPayload).campaign).name,
+      asRecord(launchResult?.launch).campaignName,
+      aiPackage?.campaignName,
+      `${brief.service} - ${selectedCity.labelRu}`,
+    );
     return (
       <section className="neu-card p-5 sm:p-6">
         <p className="text-xs font-black uppercase tracking-[0.16em] text-[#0D9488]">Шаг 6</p>
@@ -2412,50 +2430,98 @@ export default function AdsAutomation() {
           </button>
         </div>
 
-        {launchResult ? (
-          <div className={`mt-6 rounded-[24px] border p-5 ${launchResult.dryRun ? "border-slate-200 bg-white/70" : "border-emerald-200 bg-emerald-50"}`}>
+        {launchResult && launchResult.dryRun ? (
+          <div className="mt-6 rounded-[24px] border border-slate-200 bg-white/70 p-5">
             <div className="flex items-start gap-3">
-              <CheckCircle2 className={`mt-0.5 ${launchResult.dryRun ? "text-slate-500" : "text-emerald-700"}`} size={20} />
+              <CheckCircle2 className="mt-0.5 text-slate-500" size={20} />
               <div>
-                <p className={`font-black ${launchResult.dryRun ? "text-slate-700" : "text-emerald-900"}`}>{launchResultTitle}</p>
-                <p className={`mt-1 text-sm font-semibold ${launchResult.dryRun ? "text-slate-600" : "text-emerald-800"}`}>
-                  {launchResult.dryRun ? DRY_RUN_REFERENCE_MESSAGE + " Кампания в Meta не создавалась." : `Meta Campaign ID: ${launchResult.metaCampaignId || "ожидается"}`}
-                </p>
+                <p className="font-black text-slate-700">{launchResultTitle}</p>
+                <p className="mt-1 text-sm font-semibold text-slate-600">{DRY_RUN_REFERENCE_MESSAGE} Кампания в Meta не создавалась.</p>
                 {launchResult.warning ? <p className="mt-2 text-sm font-bold text-amber-800">{launchResult.warning}</p> : null}
-                {creative?.fileType === "video" && launchMetaVideoId ? (
-                  <div className="mt-2 grid gap-1 text-sm font-bold text-emerald-900">
-                    <p>Meta Video ID: {launchMetaVideoId}</p>
-                    <p>Video upload mode: {launchVideoUploadMode || "-"}</p>
-                    <p>Video processing: {launchVideoProcessingStatus || "-"}</p>
-                  </div>
-                ) : null}
-                {creative?.fileType === "video" && launchVideoWarnings.length ? (
-                  <p className="mt-2 text-sm font-bold text-amber-800">{launchVideoWarnings.join(" ")}</p>
-                ) : null}
-                {!launchResult.dryRun ? (
-                  <p className="mt-2 text-sm font-bold text-amber-800">
-                    В Ads Manager могли остаться предыдущие тестовые выключенные кампании. Их можно удалить вручную.
-                  </p>
-                ) : null}
-                {launchImageUploadCapabilityFallback ? (
-                  <p className="mt-2 text-sm font-bold text-amber-800">
-                    Meta не разрешила загрузить изображение через /adimages. Система попробовала создать креатив через публичную ссылку Supabase.
-                  </p>
-                ) : null}
               </div>
             </div>
             <div className="mt-4 flex flex-col gap-2 sm:flex-row">
-              {!launchResult.dryRun ? (
-                <a className="neu-btn justify-center" href={adsManagerUrl} target="_blank" rel="noopener noreferrer">
-                  <ExternalLink size={16} />
-                  Открыть Ads Manager
-                </a>
-              ) : null}
               <button type="button" className="neu-btn-primary justify-center" onClick={() => setLocation("/ads-automation/history")}>
                 <History size={16} />
                 История запусков
               </button>
             </div>
+          </div>
+        ) : null}
+
+        {launchResult && !launchResult.dryRun ? (
+          <div className="mt-6 rounded-[24px] border border-emerald-200 bg-emerald-50 p-5">
+            <div className="flex items-start gap-3">
+              <CheckCircle2 className="mt-0.5 text-emerald-700" size={20} />
+              <div className="min-w-0 flex-1">
+                <p className="text-lg font-black text-emerald-900">{launchResultTitle}</p>
+                <p className="mt-1 text-sm font-semibold text-emerald-800">
+                  {launchIsActive
+                    ? "Кампания активна и может тратить бюджет. Контролируйте её в Ads Manager."
+                    : "Кампания не тратит деньги: она создана выключенной. Включить её можно в Ads Manager после проверки."}
+                </p>
+              </div>
+            </div>
+
+            <div className="mt-4 grid gap-2 sm:grid-cols-2">
+              {[
+                ["Кампания", launchCampaignName],
+                ["Услуга", brief.service],
+                ["Город", selectedCity.labelRu],
+                ["Бюджет в день", `${brief.dailyBudget || 0} USD`],
+                ["Бюджет всего (примерно)", `${totalBudget} USD`],
+                ["Плейсмент", "Instagram"],
+                ["Куда идут заявки", destination.label],
+                ["Тип креатива", creative?.fileType === "video" ? "видео" : "фото"],
+                ["Статус", launchIsActive ? "активна (ACTIVE)" : "выключено (PAUSED)"],
+              ].map(([label, value]) => (
+                <div key={label} className="rounded-2xl border border-emerald-100 bg-white/70 px-4 py-3">
+                  <p className="text-xs font-black uppercase tracking-[0.1em] text-emerald-700">{label}</p>
+                  <p className="mt-1 truncate text-sm font-bold text-[#0F172A]">{value || "-"}</p>
+                </div>
+              ))}
+            </div>
+
+            {launchResult.warning ? <p className="mt-3 text-sm font-bold text-amber-800">{launchResult.warning}</p> : null}
+            {creative?.fileType === "video" && launchVideoWarnings.length ? (
+              <p className="mt-2 text-sm font-bold text-amber-800">{launchVideoWarnings.join(" ")}</p>
+            ) : null}
+            {launchImageUploadCapabilityFallback ? (
+              <p className="mt-2 text-sm font-bold text-amber-800">
+                Meta не разрешила загрузить изображение через /adimages. Система попробовала создать креатив через публичную ссылку Supabase.
+              </p>
+            ) : null}
+            <p className="mt-2 text-xs font-semibold text-amber-800">
+              В Ads Manager могли остаться предыдущие тестовые выключенные кампании. Их можно удалить вручную.
+            </p>
+
+            <div className="mt-4 flex flex-col gap-2 sm:flex-row">
+              <a className="neu-btn-primary justify-center" href={adsManagerUrl} target="_blank" rel="noopener noreferrer">
+                <ExternalLink size={16} />
+                Открыть Ads Manager
+              </a>
+              <button type="button" className="neu-btn justify-center" onClick={() => setLocation("/ads-automation/history")}>
+                <History size={16} />
+                История запусков
+              </button>
+              <button type="button" className="neu-btn justify-center" onClick={startNewLaunch}>
+                <RefreshCw size={16} />
+                Создать новый запуск
+              </button>
+            </div>
+
+            <details className="mt-4 rounded-2xl border border-emerald-100 bg-white/60 p-3">
+              <summary className="cursor-pointer text-xs font-black uppercase tracking-[0.1em] text-emerald-700">Технические данные</summary>
+              <div className="mt-2 grid gap-1 break-words text-xs font-semibold text-[#475569]">
+                <p>Campaign ID: {launchResult.metaCampaignId || "-"}</p>
+                <p>Ad Set ID: {launchResult.metaAdSetId || "-"}</p>
+                <p>Creative ID: {launchResult.metaCreativeId || "-"}</p>
+                <p>Ad ID: {launchResult.metaAdId || "-"}</p>
+                {creative?.fileType === "video" ? <p>Video ID: {launchMetaVideoId || "-"}</p> : null}
+                {creative?.fileType === "video" ? <p>Video upload mode: {launchVideoUploadMode || "-"}</p> : null}
+                {creative?.fileType === "video" ? <p>Video processing: {launchVideoProcessingStatus || "-"}</p> : null}
+              </div>
+            </details>
           </div>
         ) : null}
 

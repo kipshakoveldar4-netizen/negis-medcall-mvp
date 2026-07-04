@@ -102,6 +102,13 @@ async function checkAdsAutomationSource() {
   assertSourceIncludes(source, "thumbnailGeneratedAt", "thumbnail generation timestamp metadata");
   assertSourceIncludes(source, "video.thumbnailUrl", "thumbnail debug in technical info");
   assertSourceIncludes(source, "creative.videoDataHasImageUrl", "video_data image_url debug in technical info");
+  assertSourceIncludes(source, "Реклама создана в Meta выключенной", "paused launch success title");
+  assertSourceIncludes(source, "Технические данные", "collapsed technical IDs on the success screen");
+  assertSourceIncludes(source, "Создать новый запуск", "start new launch action on the success screen");
+  assertSourceIncludes(source, "Бюджет в день", "human budget summary on the success screen");
+  assertSourceIncludes(source, "Тип креатива", "creative type in the success summary");
+  assertSourceIncludes(source, 'text-amber-800">{launchResult.warning}', "launch warnings rendered amber, not red");
+  assertSourceIncludes(source, "launchResult && !launchResult.dryRun", "success screen only for real launches");
 
   console.log("AdsAutomation source checks: ok");
 }
