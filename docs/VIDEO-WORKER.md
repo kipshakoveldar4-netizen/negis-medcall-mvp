@@ -68,6 +68,7 @@ SUPABASE_URL=... SUPABASE_SERVICE_ROLE_KEY=... pnpm run dev
 
 1. Railway → New Service → Deploy from GitHub repo (`negis-medcall-mvp`).
 2. Service settings → **Root Directory**: `artifacts/video-worker`. Railway picks up the `Dockerfile` there (it installs ffmpeg — do not switch to plain Nixpacks Node without adding ffmpeg).
+   The package is fully standalone: its `tsconfig.json` inlines all compiler options and it must never reference the repo root (`tsconfig.base.json`, `workspace:`/`catalog:` deps) — the Docker build context contains only `package.json`, `tsconfig.json`, and `src/`.
 3. Variables: set `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` (plus any `VIDEO_WORKER_*` overrides).
 4. Start command: none needed — the image `CMD` is `npm start`.
 5. Deploy. Logs show `[video-worker] started as ...`; the worker logs only job ids, statuses, and byte sizes — never URLs or credentials.

@@ -1240,6 +1240,17 @@ async function checkVideoWorkerPackage() {
     }
   }
 
+  // Railway builds the worker with root directory artifacts/video-worker:
+  // nothing may reference files outside the package (root tsconfig, workspace deps).
+  const workerTsconfig = await readFile(path.join(workerDir, "tsconfig.json"), "utf8");
+  if (workerTsconfig.includes("extends") || workerTsconfig.includes("tsconfig.base")) {
+    throw new Error("video worker tsconfig must be standalone and not extend the root tsconfig.base.json");
+  }
+  const workerPackageJson = await readFile(path.join(workerDir, "package.json"), "utf8");
+  if (workerPackageJson.includes("workspace:") || workerPackageJson.includes("catalog:")) {
+    throw new Error("video worker package must not use workspace or catalog dependencies");
+  }
+
   const ffmpegSource = await readFile(path.join(workerDir, "src", "ffmpeg.ts"), "utf8");
   for (const marker of ["libx264", '"aac"', "+faststart", "force_original_aspect_ratio=decrease", "trunc(iw/2)*2", "fps=${options.fps}"]) {
     if (!ffmpegSource.includes(marker)) {
