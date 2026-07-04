@@ -1,10 +1,23 @@
 # Meta Live Ads Launch
 
+## Current working status
+
+Confirmed working in production (release checklist: `docs/ADS-AUTOMATION-RELEASE.md`):
+
+- Photo `PAUSED` launch works end to end (campaign, ad set, creative, ad).
+- Video MP4/MOV `PAUSED` launch works with `META_VIDEO_LAUNCH_ENABLED=true`.
+- Video thumbnail is auto-generated from the video frame and used as `video_data.image_url` — the employee does not upload a cover image manually.
+- Meta `video_id` flow works: upload to `/advideos`, processing polling, `video_id` reuse on repeated launches.
+- City select works (controlled Kazakhstan list, no free-text input for launch).
+- Placements stay Instagram-only.
+- WhatsApp destination link works.
+- ACTIVE launch remains gated (Admin Center switch + role + typed `ЗАПУСТИТЬ`).
+
 ## Ads Automation wizard update
 
 `/ads-automation` is now a Russian employee wizard. The user uploads a photo/video, fills only the key brief fields, lets AI prepare the ad package, runs a safety check, reads the final report, then confirms the Meta launch.
 
-Photo creatives can be created in Meta in `PAUSED` mode. Video creatives stay gated by `META_VIDEO_LAUNCH_ENABLED=false` by default, but the backend now supports the experimental Meta `video_id` flow for MP4 and MOV when the flag is set to `true`.
+Photo creatives can be created in Meta in `PAUSED` mode. Video creatives require `META_VIDEO_LAUNCH_ENABLED=true`; with the flag on, the Meta `video_id` flow for MP4 and MOV works, including automatic thumbnail generation.
 
 ACTIVE launch still requires Admin Center live launch enabled and the typed confirmation `ЗАПУСТИТЬ`.
 
@@ -23,7 +36,7 @@ The backend creates, in order:
 
 All calls are server-side. `META_ACCESS_TOKEN` and `META_APP_SECRET` are never returned to the frontend.
 
-For video creatives with `META_VIDEO_LAUNCH_ENABLED=true`, the backend first uploads the public Supabase video URL to `/{adAccountId}/advideos`, reads the returned `video_id`, polls `/{videoId}?fields=status` (progress, when available, comes from the nested `status.processing_progress`; requesting it as a top-level field causes Meta error #100), then creates the ad creative with `object_story_spec.video_data.video_id`. If Meta cannot fetch the public URL, Negis can try a server-to-Meta binary multipart fallback for smaller files.
+For video creatives with `META_VIDEO_LAUNCH_ENABLED=true`, the backend first uploads the public Supabase video URL to `/{adAccountId}/advideos`, reads the returned `video_id`, polls `/{videoId}?fields=status` (progress, when available, comes from the nested `status.processing_progress`; requesting it as a top-level field causes Meta error #100), then creates the ad creative with `object_story_spec.video_data.video_id` and `object_story_spec.video_data.image_url` set to the auto-generated thumbnail (Meta requires image_hash or image_url in video_data — error 100 / subcode 1443226 otherwise; the video URL itself is never used as image_url). If Meta cannot fetch the public URL, Negis can try a server-to-Meta binary multipart fallback for smaller files.
 
 ## Required Env
 
@@ -148,11 +161,12 @@ MOV is allowed, but processing can take longer. The UI shows a warning and still
 
 Flow:
 
-1. Supabase public video URL is sent server-side to `/{adAccountId}/advideos` as `file_url`.
-2. Meta returns `id` / `video_id`.
-3. Negis polls `/{videoId}?fields=status` for a short window, reading progress only from the nested `status.processing_progress` if present.
-4. If ready, the creative uses `object_story_spec.video_data.video_id`.
-5. If processing is still pending, the API returns a controlled message telling the employee to retry after a few minutes.
+1. On upload, the frontend auto-generates a thumbnail from the video (~1 second frame, canvas → JPEG), uploads it to Supabase through the signed upload flow, and stores `thumbnailUrl`, `thumbnailGeneratedAt`, `thumbnailSource: "auto_frame"`, `thumbnailMimeType` in the asset metadata. The UI shows «Обложка видео создана автоматически» with a preview and a «Создать обложку заново» button.
+2. Supabase public video URL is sent server-side to `/{adAccountId}/advideos` as `file_url`.
+3. Meta returns `id` / `video_id`. The `video_id` is stored immediately and reused on repeated launches — the video is not uploaded twice.
+4. Negis polls `/{videoId}?fields=status` for a short window, reading progress only from the nested `status.processing_progress` if present.
+5. If ready, the creative uses `object_story_spec.video_data.video_id` with the auto thumbnail as `object_story_spec.video_data.image_url`. A real launch without a thumbnail is blocked before any Meta call with a controlled message; dry-run only warns.
+6. If processing is still pending, the API returns a controlled message telling the employee to retry after a few minutes; history shows the entry as «Видео обрабатывается» with a re-check action.
 
 If the URL upload fails because Meta cannot fetch the file, Negis downloads the public video server-side and retries `/{adAccountId}/advideos` as multipart `source`. This fallback is capped for Vercel safety; large videos should be converted to smaller MP4/H.264 or moved to a background worker later.
 
@@ -194,4 +208,6 @@ For emergency stop, use Meta Ads Manager directly.
 - `Compliance blocked`: apply the safe rewritten text and run dry-run again.
 - `Live launch is disabled`: enable `Разрешить live launch` in `/admin`.
 - `activeConfirmation must be ЗАПУСТИТЬ`: enter the exact confirmation word.
+- Video creative error 100 / subcode 1443226 (`specify one of image_hash or image_url in video_data`): the video has no thumbnail. Negis generates it automatically on upload; re-upload the video or press «Создать обложку заново». Videos uploaded before the auto-thumbnail release need to be re-uploaded once.
+- «Не удалось автоматически создать обложку видео»: the browser could not decode a frame; try MP4/H.264 or another video file.
 - Meta API error: open `/admin -> Meta/Facebook Ads`, run `Проверить Meta`, then verify token permissions and ad account access.

@@ -50,18 +50,27 @@ Negis MVP не запускает рекламу автоматически. Р�
 4. Убедитесь, что Meta env status не `not_configured`.
 5. Нажмите `Подготовить тестовый draft`.
 
-Реальный Meta Marketing API launch доступен для фото и для видео MP4/MOV при включенном `META_VIDEO_LAUNCH_ENABLED=true`.
+Реальный Meta Marketing API launch доступен для фото и для видео MP4/MOV при включенном `META_VIDEO_LAUNCH_ENABLED=true`. Обложка видео создаётся автоматически — отдельно загружать её не нужно.
 
 ## Live Launch MVP
 
 Negis now includes `/ads-automation` for server-side Meta Marketing API launch.
+
+Working release status:
+
+- Photo `PAUSED` launch — works.
+- Video MP4/MOV `PAUSED` launch (with `META_VIDEO_LAUNCH_ENABLED=true`) — works, including auto thumbnail and `video_id` reuse.
+- City select, Instagram-only placements, WhatsApp destination — work.
+- `ACTIVE` launch — remains gated.
+
+Details:
 
 - Default mode creates campaigns as `PAUSED`.
 - `ACTIVE` launch requires `/admin -> Meta/Facebook Ads -> Разрешить live launch`.
 - `META_ACCESS_TOKEN` and `META_APP_SECRET` stay server-side only.
 - Smoke tests use `dryRun: true` and do not create real ads.
 
-Detailed guide: `docs/META-LIVE-LAUNCH.md`.
+Detailed guide: `docs/META-LIVE-LAUNCH.md`. Release checklist: `docs/ADS-AUTOMATION-RELEASE.md`.
 
 ## Video launch flag
 
@@ -73,7 +82,7 @@ META_VIDEO_LAUNCH_ENABLED=false
 
 With the default value, video upload to Supabase and dry-run reports work, but real video creation is blocked with a controlled message.
 
-Experimental real video launch:
+Real video launch (working):
 
 ```env
 META_VIDEO_LAUNCH_ENABLED=true
@@ -81,10 +90,12 @@ META_VIDEO_LAUNCH_ENABLED=true
 
 When enabled, Negis supports MP4 and MOV:
 
+- auto-generates a thumbnail from the video frame on upload (canvas → JPEG, uploaded to Supabase, saved as `thumbnailUrl` in asset metadata) — the employee does not upload a cover image manually;
 - sends the Supabase public video URL to `/{adAccountId}/advideos`;
-- receives `video_id`;
+- receives `video_id` and reuses it on repeated launches (no duplicate upload);
 - polls `/{videoId}?fields=status` (top-level `processing_progress` is not a valid Graph field and triggers Meta error #100; progress is read from the nested `status.processing_progress` when Meta returns it);
-- creates the creative through `object_story_spec.video_data.video_id`;
+- creates the creative through `object_story_spec.video_data.video_id` with the auto thumbnail as `object_story_spec.video_data.image_url` (required by Meta — error 100 / subcode 1443226 without it; the video URL is never used as `image_url`);
+- blocks a real launch before any Meta call if the thumbnail is missing (dry-run only warns);
 - retries with server-to-Meta multipart binary upload if Meta cannot fetch the public URL and the file is small enough for Vercel.
 
 MOV is supported but may process longer. If Meta still processes the video after the short polling window, the API returns a controlled “retry in a few minutes” message instead of a raw technical error.
