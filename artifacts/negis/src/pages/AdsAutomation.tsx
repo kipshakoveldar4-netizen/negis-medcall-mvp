@@ -645,6 +645,64 @@ function resolveLaunchMode(item: LaunchHistoryItem): LaunchMode {
   return "paused_created";
 }
 
+type HistoryFilter = "all" | "real" | "dry_run" | "video_processing" | "failed" | "photo" | "video";
+
+const historyFilterOptions: Array<{ id: HistoryFilter; label: string }> = [
+  { id: "all", label: "Все" },
+  { id: "real", label: "Реальные запуски" },
+  { id: "dry_run", label: "Проверки без запуска" },
+  { id: "video_processing", label: "Видео обрабатывается" },
+  { id: "failed", label: "Ошибки" },
+  { id: "photo", label: "Фото" },
+  { id: "video", label: "Видео" },
+];
+
+function historyDestinationLabel(payload: Record<string, unknown>): string {
+  const direct = firstString(payload.leadDestination);
+  if (direct) {
+    return destinationOptions.find((option) => option.value === direct)?.label || direct;
+  }
+  const url = firstString(payload.landingUrl).toLowerCase();
+  if (url.includes("wa.me") || url.includes("whatsapp")) return "WhatsApp";
+  if (url.includes("instagram.com")) return "Instagram профиль";
+  if (url.startsWith("tel:")) return "Звонок";
+  if (url) return "Сайт";
+  return "-";
+}
+
+function matchesHistoryFilter(item: LaunchHistoryItem, filter: HistoryFilter): boolean {
+  if (filter === "all") return true;
+  const mode = resolveLaunchMode(item);
+  const creativeType = firstString(asRecord(item.payload).creativeType) === "video" ? "video" : "photo";
+  if (filter === "real") return mode === "paused_created" || mode === "active_created";
+  if (filter === "dry_run") return mode === "dry_run";
+  if (filter === "video_processing") return mode === "video_processing";
+  if (filter === "failed") return mode === "failed";
+  if (filter === "photo") return creativeType === "photo";
+  return creativeType === "video";
+}
+
+function matchesHistorySearch(item: LaunchHistoryItem, query: string): boolean {
+  const text = query.trim().toLowerCase();
+  if (!text) return true;
+  const payload = asRecord(item.payload);
+  const haystack = [
+    item.campaignName,
+    payload.service,
+    payload.city,
+    item.metaCampaignId,
+    item.metaAdSetId,
+    item.metaCreativeId,
+    item.metaAdId,
+    item.metaVideoId,
+    payload.metaVideoId,
+  ]
+    .map((value) => String(value ?? ""))
+    .join(" ")
+    .toLowerCase();
+  return haystack.includes(text);
+}
+
 class CrmError extends Error {
   data: Record<string, unknown>;
 
@@ -784,6 +842,8 @@ export default function AdsAutomation() {
   const [realLaunchMessage, setRealLaunchMessage] = useState("");
   const [historyItems, setHistoryItems] = useState<LaunchHistoryItem[]>([]);
   const [historyVideoCheckId, setHistoryVideoCheckId] = useState("");
+  const [historyFilter, setHistoryFilter] = useState<HistoryFilter>("all");
+  const [historySearch, setHistorySearch] = useState("");
   const isHistoryView = location === "/ads-automation/history";
 
   useEffect(() => {
@@ -1241,6 +1301,95 @@ export default function AdsAutomation() {
     }
   }
 
+  function repeatLaunchFromHistory(item: LaunchHistoryItem) {
+    const payload = asRecord(item.payload);
+    const city = getKzMetaCityOption(firstString(payload.selectedCityId, payload.city) || brief.cityId);
+    const landingUrl = firstString(payload.landingUrl);
+    const storedDestination = firstString(payload.leadDestination);
+    const knownDestinations: LeadDestination[] = ["whatsapp", "instagram_profile", "website", "lead_form", "call"];
+    const inferredDestination: LeadDestination = landingUrl.includes("wa.me")
+      ? "whatsapp"
+      : landingUrl.includes("instagram.com")
+        ? "instagram_profile"
+        : landingUrl.startsWith("tel:")
+          ? "call"
+          : "website";
+    const leadDestination = knownDestinations.includes(storedDestination as LeadDestination)
+      ? (storedDestination as LeadDestination)
+      : landingUrl
+        ? inferredDestination
+        : brief.leadDestination;
+    const destinationValue =
+      firstString(payload.destinationValue) ||
+      (leadDestination === "whatsapp" && landingUrl.includes("wa.me/") ? `+${landingUrl.split("wa.me/")[1]}` : "") ||
+      (landingUrl && leadDestination !== "lead_form" ? landingUrl : "") ||
+      brief.destinationValue;
+    const dailyBudget = item.budgetDailyMinor
+      ? String(Math.round(item.budgetDailyMinor / 100))
+      : firstString(payload.dailyBudget) || brief.dailyBudget;
+
+    setBrief((current) => ({
+      ...current,
+      service: firstString(payload.service) || current.service,
+      city: city.labelRu,
+      cityId: city.id,
+      cityLabelRu: city.labelRu,
+      cityCanonicalName: city.canonicalName,
+      leadDestination,
+      destinationValue,
+      dailyBudget,
+      offer: firstString(payload.offer) || current.offer,
+      knownAudience: firstString(payload.targetAudience, payload.knownAudience) || current.knownAudience,
+      // Dates are intentionally reset to fresh defaults — the old launch window is in the past.
+      startDate: tomorrow,
+      endDate: "",
+    }));
+
+    // Restore the creative from its stored public URL when possible; metaVideoId and thumbnail
+    // are reused so the video is not uploaded to Meta a second time.
+    const creativeUrl = firstString(payload.creativeUrl, payload.videoUrl, payload.imageUrl);
+    const restoredFileType = firstString(payload.creativeType, payload.fileType) === "video" ? "video" : "image";
+    if (creativeUrl) {
+      const restoredVideoId = firstString(item.metaVideoId, payload.metaVideoId);
+      setCreative({
+        id: firstString(payload.sourceId) || undefined,
+        fileName: firstString(payload.fileName) || (restoredFileType === "video" ? "video.mp4" : "photo.jpg"),
+        fileType: restoredFileType,
+        mimeType: firstString(payload.mimeType),
+        fileSize: Number(payload.fileSize) || 0,
+        previewUrl: creativeUrl,
+        publicUrl: creativeUrl,
+        metaVideoId: restoredVideoId && !isDryRunMetaId(restoredVideoId) ? restoredVideoId : undefined,
+        videoProcessingStatus: firstString(payload.videoProcessingStatus) || undefined,
+        thumbnailUrl: firstString(payload.thumbnailUrl) || undefined,
+        thumbnailSource: firstString(payload.thumbnailSource) || undefined,
+        status: "uploaded",
+      });
+    } else {
+      setCreative(null);
+    }
+    setCreativeFile(null);
+
+    // Only prefill — never auto-launch: the AI package, safety check, and every
+    // confirmation checkbox must be walked through again by the employee.
+    setAiPackage(null);
+    setCompliance(null);
+    setLaunchResult(null);
+    setLastDryRunResult(null);
+    setConfirmations(confirmationDefaults);
+    setRealLaunchStatus("idle");
+    setRealLaunchMessage("");
+    setActiveConfirmation("");
+    setLaunchTimestamp("");
+    setUploadDebug(null);
+    setUploadStage("");
+    setUploadStatus("idle");
+    setLocation("/ads-automation");
+    goToStep(creativeUrl ? 2 : 1);
+    setNotice("Параметры перенесены из истории. Проверьте шаги, пройдите проверку безопасности и запустите заново — автозапуска нет.");
+    toast.success("Параметры перенесены из истории");
+  }
+
   function startNewLaunch() {
     removeCreative();
     setLastDryRunResult(null);
@@ -1487,6 +1636,15 @@ export default function AdsAutomation() {
         creativeType: creative?.fileType,
         fileName: creative?.fileName,
         mimeType: creative?.mimeType,
+        fileSize: creative?.fileSize,
+        creativeUrl: creative?.publicUrl,
+        sourceId: creative?.id,
+        service: brief.service,
+        offer: brief.offer,
+        destinationValue: brief.destinationValue,
+        landingUrl: destinationUrl,
+        dailyBudget: brief.dailyBudget,
+        targetAudience: aiPackage?.audience || brief.knownAudience,
         metaVideoId: result.metaVideoId || result.videoId || creative?.metaVideoId,
         videoUploadMode: result.videoUploadMode || creative?.videoUploadMode,
         videoProcessingStatus: result.videoProcessingStatus || creative?.videoProcessingStatus,
@@ -2535,6 +2693,9 @@ export default function AdsAutomation() {
   }
 
   function renderHistory() {
+    const visibleHistoryItems = historyItems.filter(
+      (item) => matchesHistoryFilter(item, historyFilter) && matchesHistorySearch(item, historySearch),
+    );
     return (
       <section className="neu-card p-5 sm:p-6">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -2553,13 +2714,43 @@ export default function AdsAutomation() {
           </div>
         </div>
 
-        <div className="mt-6 grid gap-3">
+        <div className="mt-5 flex flex-wrap gap-2">
+          {historyFilterOptions.map((option) => (
+            <button
+              key={option.id}
+              type="button"
+              className={`rounded-full border px-4 py-2 text-xs font-black ${
+                historyFilter === option.id
+                  ? "border-[#0D9488] bg-[#0D9488] text-white"
+                  : "border-[#D8E4EC] bg-white/70 text-[#475569]"
+              }`}
+              onClick={() => setHistoryFilter(option.id)}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+        <div className="mt-3">
+          <input
+            style={inputStyle}
+            type="search"
+            value={historySearch}
+            placeholder="Поиск: услуга, город, название кампании или Meta ID"
+            onChange={(event) => setHistorySearch(event.target.value)}
+          />
+        </div>
+
+        <div className="mt-5 grid gap-3">
           {historyItems.length === 0 ? (
             <div className="rounded-2xl border border-[#D8E4EC] bg-white/65 p-5 text-sm font-semibold text-[#64748B]">
               История пока пустая. Первый запуск появится здесь после проверки без запуска или создания кампании.
             </div>
+          ) : visibleHistoryItems.length === 0 ? (
+            <div className="rounded-2xl border border-[#D8E4EC] bg-white/65 p-5 text-sm font-semibold text-[#64748B]">
+              Ничего не найдено. Измените фильтр или поисковый запрос.
+            </div>
           ) : (
-            historyItems.map((item, index) => {
+            visibleHistoryItems.map((item, index) => {
               const payload = asRecord(item.payload);
               const metaResponse = asRecord(item.metaResponse);
               const mode = resolveLaunchMode(item);
@@ -2614,7 +2805,7 @@ export default function AdsAutomation() {
                   </div>
                   <p className="mt-2 text-sm font-semibold text-[#64748B]">{modeDescription}</p>
                   <div className="mt-3 grid gap-2 text-sm font-semibold text-[#475569] md:grid-cols-2">
-                    {isRealLaunch || mode === "failed" ? (
+                    {isRealLaunch ? (
                       <>
                         <p>Meta Campaign ID: {item.metaCampaignId || "-"}</p>
                         <p>Meta Ad Set ID: {item.metaAdSetId || "-"}</p>
@@ -2623,7 +2814,9 @@ export default function AdsAutomation() {
                       </>
                     ) : null}
                     <p>Запустил: {item.launchedBy || "-"}</p>
+                    <p>Услуга: {typeof payload.service === "string" && payload.service ? payload.service : "-"}</p>
                     <p>Город: {typeof payload.city === "string" ? payload.city : "-"}</p>
+                    <p>Заявки: {historyDestinationLabel(payload)}</p>
                     <p>Файл: {typeof payload.fileName === "string" ? payload.fileName : "-"}</p>
                     <p>MIME: {typeof payload.mimeType === "string" ? payload.mimeType : "-"}</p>
                     {showVideoDetails ? <p>Meta Video ID: {historyMetaVideoId || "-"}</p> : null}
@@ -2640,22 +2833,24 @@ export default function AdsAutomation() {
                     <p className="mt-3 text-sm font-bold text-amber-700">{historyVideoWarnings.join(" ")}</p>
                   ) : null}
                   {mode === "failed" && item.lastError ? <p className="mt-3 text-sm font-bold text-red-600">{item.lastError}</p> : null}
-                  {mode === "video_processing" && historyMetaVideoId ? (
-                    <div className="mt-3 flex flex-col gap-2 sm:flex-row">
+                  <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:flex-wrap">
+                    {mode === "video_processing" && historyMetaVideoId ? (
                       <button type="button" className="neu-btn justify-center" disabled={checking} onClick={() => void recheckHistoryVideo(item)}>
                         {checking ? <Loader2 className="animate-spin" size={16} /> : <RefreshCw size={16} />}
                         Проверить готовность видео
                       </button>
-                    </div>
-                  ) : null}
-                  {isRealLaunch ? (
-                    <div className="mt-3 flex flex-col gap-2 sm:flex-row">
+                    ) : null}
+                    {isRealLaunch ? (
                       <a className="neu-btn justify-center" href={adsManagerUrl} target="_blank" rel="noopener noreferrer">
                         <ExternalLink size={16} />
                         Открыть Ads Manager
                       </a>
-                    </div>
-                  ) : null}
+                    ) : null}
+                    <button type="button" className="neu-btn justify-center" onClick={() => repeatLaunchFromHistory(item)}>
+                      <Rocket size={16} />
+                      Повторить запуск с этими параметрами
+                    </button>
+                  </div>
                 </article>
               );
             })

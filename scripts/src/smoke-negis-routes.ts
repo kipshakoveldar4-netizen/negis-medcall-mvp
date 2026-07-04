@@ -109,6 +109,15 @@ async function checkAdsAutomationSource() {
   assertSourceIncludes(source, "Тип креатива", "creative type in the success summary");
   assertSourceIncludes(source, 'text-amber-800">{launchResult.warning}', "launch warnings rendered amber, not red");
   assertSourceIncludes(source, "launchResult && !launchResult.dryRun", "success screen only for real launches");
+  assertSourceIncludes(source, "matchesHistoryFilter", "history filter logic");
+  assertSourceIncludes(source, "matchesHistorySearch", "history search logic");
+  assertSourceIncludes(source, "Реальные запуски", "real launches history filter");
+  assertSourceIncludes(source, "Проверки без запуска", "dry-run history filter");
+  assertSourceIncludes(source, "Поиск: услуга, город, название кампании или Meta ID", "history search placeholder");
+  assertSourceIncludes(source, "Повторить запуск с этими параметрами", "repeat launch prefill action");
+  assertSourceIncludes(source, "repeatLaunchFromHistory", "repeat launch prefill handler");
+  assertSourceIncludes(source, "Параметры перенесены из истории", "prefill without auto-launch notice");
+  assertSourceExcludes(source, "isRealLaunch || mode === \"failed\" ? (", "Meta IDs shown outside real launches");
 
   console.log("AdsAutomation source checks: ok");
 }
