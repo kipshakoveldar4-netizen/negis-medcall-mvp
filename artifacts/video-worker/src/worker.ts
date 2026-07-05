@@ -17,6 +17,7 @@ export type JobRow = {
   source_file_name: string | null;
   source_mime_type: string | null;
   output_bucket: string | null;
+  optimized_bucket: string | null;
   claimed_by: string | null;
   metadata: Record<string, unknown> | null;
 };
@@ -115,7 +116,7 @@ export async function processJob(supabase: SupabaseClient, config: WorkerConfig,
 
     // uploading
     await setJobProgress(supabase, job.id, "uploading", PROGRESS.uploading);
-    const outputBucket = job.output_bucket || "ad-creatives";
+    const outputBucket = job.optimized_bucket || job.output_bucket || "ad-creatives";
     const workspaceSegment = job.workspace_id || "demo";
     const outputStoragePath = `optimized/${workspaceSegment}/${job.id}.mp4`;
     const thumbnailStoragePath = `optimized/${workspaceSegment}/${job.id}-thumbnail.jpg`;
@@ -187,13 +188,23 @@ export async function processJob(supabase: SupabaseClient, config: WorkerConfig,
         output_path: outputStoragePath,
         output_public_url: outputPublicUrl,
         output_size: outputSizeBytes,
+        optimized_bucket: outputBucket,
+        optimized_path: outputStoragePath,
+        optimized_public_url: outputPublicUrl,
+        input_mime_type: job.source_mime_type || null,
+        output_mime_type: "video/mp4",
+        input_size_bytes: inputSizeBytes,
+        output_size_bytes: outputSizeBytes,
+        compression_ratio: compressionRatio,
         thumbnail_path: thumbnailStoragePath,
         thumbnail_public_url: thumbnailPublicUrl,
+        thumbnail_url: thumbnailPublicUrl,
         thumbnail_source: "worker_frame",
         raw_deleted_at: rawDeletedAt,
         raw_delete_error: rawDeleteError,
         completed_at: now,
         error: null,
+        error_message: null,
         updated_at: now,
       })
       .eq("id", job.id);
@@ -208,7 +219,7 @@ export async function processJob(supabase: SupabaseClient, config: WorkerConfig,
     try {
       await supabase
         .from("video_processing_jobs")
-        .update({ status: "failed", error: message, updated_at: new Date().toISOString() })
+        .update({ status: "failed", error: message, error_message: message, updated_at: new Date().toISOString() })
         .eq("id", job.id);
       if (job.asset_id) {
         await supabase

@@ -12,6 +12,7 @@ import {
   handleMetaValidate,
   handleStorageHealth,
   handleVideoJobs,
+  handleVideoProcessingJobs,
   type CrmResource,
 } from "../../lib/crm/server";
 
@@ -159,6 +160,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   if (resource === "video-jobs") {
     return handleVideoJobs(req, res);
+  }
+
+  if (resource === "video-processing-jobs") {
+    return handleVideoProcessingJobs(req, res, pathSegments.slice(1));
   }
 
   if (!isCrmResource(resource)) {

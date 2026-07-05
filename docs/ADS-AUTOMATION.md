@@ -33,6 +33,9 @@ ACTIVE запуск требует ручного подтверждения `З
 
 Если Supabase env не настроены, страница остаётся в demo preview, но реальный Meta launch потребует публичный URL.
 
+Large video foundation описан отдельно: [LARGE-VIDEO-PIPELINE.md](./LARGE-VIDEO-PIPELINE.md).
+Видео выше `VIDEO_OPTIMIZATION_THRESHOLD_MB` не считается готовым к Meta и переводится в состояние оптимизации вместо старого прямого upload path.
+
 ## API
 
 Все новые endpoints работают через существующий catch-all `api/crm/[...path].ts`, чтобы не превышать лимит Vercel Hobby:
@@ -42,6 +45,9 @@ ACTIVE запуск требует ручного подтверждения `З
 - `POST /api/crm/ad-creatives`
 - `POST /api/crm/ad-creative-upload` только как legacy local/dev fallback для маленьких файлов
 - `POST /api/crm/ad-creative-meta-upload`
+- `POST /api/crm/video-processing-jobs`
+- `GET /api/crm/video-processing-jobs/:id`
+- `POST /api/crm/video-processing-jobs/:id/retry`
 - `POST /api/crm/ads-ai-fill`
 - `POST /api/crm/meta-launch`
 - `POST /api/crm/meta-validate`
@@ -58,10 +64,13 @@ ACTIVE запуск требует ручного подтверждения `З
 
 ## Supabase migration
 
-Новая migration:
+Основные migrations:
 
 ```text
 migrations/015_ad_creative_assets.sql
+migrations/016_video_processing_jobs.sql
+migrations/017_video_jobs_completed_at.sql
+migrations/018_video_processing_jobs_contract.sql
 ```
 
-Она создаёт таблицу `ad_creative_assets`, индексы и bucket `ad-creatives`.
+Они создают таблицу `ad_creative_assets`, bucket `ad-creatives`, private raw bucket `ad-creatives-raw` и контракт `video_processing_jobs` для будущей оптимизации больших видео.

@@ -45,6 +45,7 @@ async function checkAdsAutomationSource() {
   assertSourceIncludes(source, "getCreativeReadiness", "central creative readiness helper");
   assertSourceIncludes(source, "getPreviewReadiness", "central preview readiness helper");
   assertSourceIncludes(source, "ready_for_meta", "ready_for_meta creative status");
+  assertSourceIncludes(source, "needs_optimization", "large video optimization readiness status");
   assertSourceIncludes(source, "needs_thumbnail", "video thumbnail readiness status");
   assertSourceIncludes(source, "too_large", "large video readiness status");
   assertSourceIncludes(source, "Предпросмотр выбранного файла", "local preview must be labelled as selected-file preview");
@@ -160,7 +161,11 @@ async function checkAdsAutomationSource() {
   assertSourceExcludes(source, "ad-creatives-raw", "raw bucket name hardcoded in the UI");
   assertSourceExcludes(source, "SERVICE_ROLE", "service role key referenced in the frontend");
   assertSourceExcludes(source, "Следующим этапом будет добавлена", "stale future-optimization promise text");
-  assertSourceIncludes(source, "Автоматическая оптимизация видео сейчас выключена", "disabled optimization too-large message");
+  assertSourceIncludes(source, "Автоматическая оптимизация видео скоро будет доступна", "disabled optimization too-large message");
+  assertSourceIncludes(source, "Видео большое. Для запуска рекламы его нужно оптимизировать.", "large video needs optimization client copy");
+  assertSourceIncludes(source, "Следующим этапом система подготовит MP4-версию для Meta.", "future MP4 optimization copy");
+  assertSourceIncludes(source, "video_optimization_required", "large video is not sent through direct upload when optimization is disabled");
+  assertSourceIncludes(source, "creative.status === \"needs_optimization\"", "needs optimization readiness branch");
   assertSourceIncludes(source, '"config_loading"', "config loading readiness state");
   assertSourceIncludes(source, '"optimizing"', "optimizing readiness state");
   assertSourceIncludes(source, '"optimization_ready"', "optimization ready readiness state");
@@ -1151,6 +1156,7 @@ async function checkCrmVideoJobsModule() {
   const crmModuleUrl = pathToFileURL(path.join(repoRoot, "lib", "crm", "server.ts")).href;
   const crm = (await import(crmModuleUrl)) as {
     handleVideoJobs(req: unknown, res: unknown): Promise<unknown>;
+    handleVideoProcessingJobs(req: unknown, res: unknown, pathSegments?: string[]): Promise<unknown>;
     videoOptimizationConfig(): { enabled: boolean; thresholdMb: number; maxInputMb: number };
   };
 
@@ -1158,6 +1164,8 @@ async function checkCrmVideoJobsModule() {
     VIDEO_OPTIMIZATION_ENABLED: process.env.VIDEO_OPTIMIZATION_ENABLED,
     VIDEO_OPTIMIZATION_THRESHOLD_MB: process.env.VIDEO_OPTIMIZATION_THRESHOLD_MB,
     VIDEO_OPTIMIZATION_MAX_INPUT_MB: process.env.VIDEO_OPTIMIZATION_MAX_INPUT_MB,
+    VIDEO_OPTIMIZATION_RAW_BUCKET: process.env.VIDEO_OPTIMIZATION_RAW_BUCKET,
+    VIDEO_OPTIMIZATION_WORKER_SECRET: process.env.VIDEO_OPTIMIZATION_WORKER_SECRET,
   };
 
   const makeRes = () => {
@@ -1185,11 +1193,16 @@ async function checkCrmVideoJobsModule() {
     delete process.env.VIDEO_OPTIMIZATION_ENABLED;
     delete process.env.VIDEO_OPTIMIZATION_THRESHOLD_MB;
     delete process.env.VIDEO_OPTIMIZATION_MAX_INPUT_MB;
+    delete process.env.VIDEO_OPTIMIZATION_RAW_BUCKET;
+    delete process.env.VIDEO_OPTIMIZATION_WORKER_SECRET;
 
     // Defaults: optimization is off, threshold 50 MB, max input 500 MB.
     const defaults = crm.videoOptimizationConfig();
     if (defaults.enabled !== false || defaults.thresholdMb !== 50 || defaults.maxInputMb !== 500) {
       throw new Error("video optimization config must default to disabled with 50/500 MB limits");
+    }
+    if (!("rawBucket" in defaults) || (defaults as { rawBucket?: string }).rawBucket !== "ad-creatives-raw") {
+      throw new Error("video optimization config must expose the safe raw bucket default");
     }
 
     // Flag off: creating jobs must be blocked with a controlled message.
@@ -1253,6 +1266,56 @@ async function checkCrmVideoJobsModule() {
         throw new Error(`video-jobs GET must not expose ${forbidden}`);
       }
     }
+
+    // Public foundation contract: create/get/retry via /api/crm/video-processing-jobs.
+    const foundationCreated = makeRes();
+    await crm.handleVideoProcessingJobs(
+      {
+        method: "POST",
+        body: {
+          workspaceId: "demo-workspace",
+          fileName: "large.mov",
+          inputMimeType: "video/quicktime",
+          inputSizeBytes: 120 * 1024 * 1024,
+          rawPath: "private/raw/large.mov",
+          rawPublicUrl: "https://example.com/should-not-be-exposed.mov",
+        },
+        query: {},
+        headers: {},
+      },
+      foundationCreated.res,
+      [],
+    );
+    const foundationCreatedBody = foundationCreated.box.body as { success?: boolean; data?: { job?: Record<string, unknown> } };
+    const foundationJob = foundationCreatedBody.data?.job || {};
+    if (foundationCreatedBody.success !== true || foundationJob.status !== "queued" || foundationJob.inputSizeBytes !== 120 * 1024 * 1024) {
+      throw new Error("video-processing-jobs POST must create a queued safe job response");
+    }
+    for (const forbidden of ["rawPath", "raw_path", "rawBucket", "raw_bucket", "rawPublicUrl", "raw_public_url", "claimedBy", "claimed_by"]) {
+      if (Object.prototype.hasOwnProperty.call(foundationJob, forbidden)) {
+        throw new Error(`video-processing-jobs POST must not expose ${forbidden}`);
+      }
+    }
+
+    const foundationPolled = makeRes();
+    await crm.handleVideoProcessingJobs({ method: "GET", body: {}, query: {}, headers: {} }, foundationPolled.res, [String(foundationJob.id || "job-smoke")]);
+    const foundationPolledBody = foundationPolled.box.body as { success?: boolean; data?: { job?: Record<string, unknown> } };
+    if (foundationPolledBody.success !== true || !foundationPolledBody.data?.job?.status) {
+      throw new Error("video-processing-jobs GET must return safe job status");
+    }
+
+    const retryReady = makeRes();
+    await crm.handleVideoProcessingJobs({ method: "POST", body: { status: "ready" }, query: {}, headers: {} }, retryReady.res, ["ready-job", "retry"]);
+    if (retryReady.box.statusCode !== 409) {
+      throw new Error("video-processing-jobs retry must reject non-failed jobs");
+    }
+
+    const retryFailed = makeRes();
+    await crm.handleVideoProcessingJobs({ method: "POST", body: { status: "failed" }, query: {}, headers: {} }, retryFailed.res, ["failed-job", "retry"]);
+    const retryFailedBody = retryFailed.box.body as { success?: boolean; data?: { job?: Record<string, unknown> } };
+    if (retryFailedBody.success !== true || retryFailedBody.data?.job?.status !== "queued" || retryFailedBody.data?.job?.progress !== 0) {
+      throw new Error("video-processing-jobs retry must reset failed jobs to queued");
+    }
   } finally {
     for (const [key, value] of Object.entries(originalEnv)) {
       if (value === undefined) {
@@ -1311,7 +1374,9 @@ async function checkVideoWorkerPackage() {
     "claimed_at",
     "attempts",
     "output_public_url",
+    "optimized_public_url",
     "thumbnail_public_url",
+    "thumbnail_url",
     '"worker_frame"',
     'status: "ready"',
     'status: "failed"',
@@ -1319,6 +1384,9 @@ async function checkVideoWorkerPackage() {
     "raw_delete_error",
     ".remove([",
     "completed_at",
+    "input_size_bytes",
+    "output_size_bytes",
+    "error_message",
     "compressionRatio",
     'import WebSocket from "ws"',
     "transport: WebSocket",
@@ -1376,6 +1444,24 @@ async function checkNoNewApiFiles() {
   const crmFiles = (await readdir(path.join(repoRoot, "api", "crm"))).sort();
   if (crmFiles.length !== 1 || crmFiles[0] !== "[...path].ts") {
     throw new Error(`api/crm must contain only the catch-all route, found: ${crmFiles.join(", ")}`);
+  }
+  const apiSource = await readFile(path.join(repoRoot, "api", "crm", "[...path].ts"), "utf8");
+  if (!apiSource.includes("video-processing-jobs") || !apiSource.includes("handleVideoProcessingJobs")) {
+    throw new Error("api/crm catch-all must route /api/crm/video-processing-jobs");
+  }
+  const migration = await readFile(path.join(repoRoot, "migrations", "018_video_processing_jobs_contract.sql"), "utf8");
+  for (const marker of [
+    "optimized_public_url",
+    "input_size_bytes",
+    "output_size_bytes",
+    "compression_ratio",
+    "error_message",
+    "video_processing_jobs_status_check",
+    "'deleted_original'",
+  ]) {
+    if (!migration.includes(marker)) {
+      throw new Error(`migration 018 is missing ${marker}`);
+    }
   }
   console.log("API file layout checks: ok");
 }
@@ -1509,10 +1595,13 @@ async function main() {
   }
   await checkTargetingHealth();
   const crmHealth = await checkJsonEndpoint("/api/crm/health");
-  const crmHealthMeta = ((crmHealth.data || {}) as { meta?: { videoOptimization?: { enabled?: unknown; thresholdMb?: unknown; maxInputMb?: unknown } } }).meta;
+  const crmHealthMeta = ((crmHealth.data || {}) as { meta?: { videoOptimization?: { enabled?: unknown; thresholdMb?: unknown; maxInputMb?: unknown; rawBucket?: unknown } } }).meta;
   const healthOptimization = crmHealthMeta?.videoOptimization;
   if (!healthOptimization || healthOptimization.enabled !== false || healthOptimization.thresholdMb !== 50 || healthOptimization.maxInputMb !== 500) {
     throw new Error("/api/crm/health must expose videoOptimization config with safe defaults (disabled, 50 MB threshold, 500 MB max)");
+  }
+  if (healthOptimization.rawBucket !== "ad-creatives-raw") {
+    throw new Error("/api/crm/health must expose the planned raw bucket without exposing secrets");
   }
   await checkJsonFailure(
     "/api/crm/video-jobs",
@@ -1523,6 +1612,37 @@ async function main() {
     },
     "Оптимизация",
   );
+  const videoProcessingCreated = await checkJsonEndpoint("/api/crm/video-processing-jobs", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      workspaceId: "demo-workspace",
+      fileName: "large.mov",
+      inputMimeType: "video/quicktime",
+      inputSizeBytes: 120 * 1024 * 1024,
+      rawPath: "private/raw/large.mov",
+      rawPublicUrl: "https://example.com/should-not-be-exposed.mov",
+    }),
+  });
+  const videoProcessingJob = ((videoProcessingCreated.data || {}) as { job?: Record<string, unknown> }).job || {};
+  if (videoProcessingJob.status !== "queued" || !videoProcessingJob.id || videoProcessingJob.rawPath || videoProcessingJob.rawPublicUrl) {
+    throw new Error("/api/crm/video-processing-jobs must create a safe queued job without raw URL fields");
+  }
+  await checkJsonEndpoint(`/api/crm/video-processing-jobs/${encodeURIComponent(String(videoProcessingJob.id))}`);
+  await checkJsonFailure(
+    "/api/crm/video-processing-jobs/ready-job/retry",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status: "ready" }),
+    },
+    "Only failed jobs",
+  );
+  await checkJsonEndpoint("/api/crm/video-processing-jobs/failed-job/retry", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ status: "failed" }),
+  });
   await checkJsonEndpoint("/api/crm/storage-health");
   await checkCrmEndpoint("/api/crm/clients", {
     name: "Smoke Client",

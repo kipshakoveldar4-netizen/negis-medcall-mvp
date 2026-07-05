@@ -2,7 +2,10 @@
 
 Background worker for the large-video pipeline (`artifacts/video-worker`, `@workspace/video-worker`).
 It runs **outside Vercel** (Railway or any Docker host) and processes `video_processing_jobs`
-created by `POST /api/crm/video-jobs` (Phase A, migration 016; `completed_at` added in migration 017).
+created by the CRM API. The UI's signed raw-upload handshake still uses `POST /api/crm/video-jobs`;
+the public foundation contract is `POST /api/crm/video-processing-jobs` plus
+`GET /api/crm/video-processing-jobs/:id` and `POST /api/crm/video-processing-jobs/:id/retry`
+(migrations 016, 017, and 018).
 
 ## What it does
 
@@ -42,6 +45,8 @@ Downscale-only fit inside 1080x1920, aspect ratio preserved (no crop), even dime
 |---|---|---|
 | `SUPABASE_URL` | required | same project as the app |
 | `SUPABASE_SERVICE_ROLE_KEY` | required | server-side only — never in the frontend |
+| `VIDEO_OPTIMIZATION_RAW_BUCKET` | `ad-creatives-raw` | private raw-original bucket |
+| `VIDEO_OPTIMIZATION_WORKER_SECRET` | optional | reserved for protected worker callbacks; never expose to frontend |
 | `VIDEO_WORKER_POLL_INTERVAL_MS` | `5000` | queue poll interval |
 | `VIDEO_WORKER_ID` | `video-worker-<host>-<pid>` | shown in `claimed_by` |
 | `VIDEO_WORKER_MAX_ATTEMPTS` | `3` | jobs at the limit stay failed/unclaimed |
@@ -88,4 +93,4 @@ SUPABASE_URL=... SUPABASE_SERVICE_ROLE_KEY=... pnpm run dev
 
 - The service role key exists only in Vercel and Railway env — never in `artifacts/negis` (enforced by a smoke test).
 - Raw originals live in a private bucket, are never publicly served, and are deleted after successful optimization.
-- The UI polls `GET /api/crm/video-jobs`, which exposes only safe fields (no raw paths, no claim data).
+- The UI polls safe job endpoints, which expose only safe fields (no raw paths, no claim data).

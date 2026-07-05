@@ -147,6 +147,8 @@ type MetaSummary = {
     enabled?: boolean;
     thresholdMb?: number;
     maxInputMb?: number;
+    rawBucket?: string;
+    workerSecretConfigured?: boolean;
   };
 };
 
@@ -182,6 +184,7 @@ type CreativeReadinessStatus =
   | "failed"
   | "too_large"
   | "needs_thumbnail"
+  | "needs_optimization"
   | "optimizing"
   | "optimization_ready"
   | "optimization_failed"
@@ -293,7 +296,9 @@ const VIDEO_OPTIMIZATION_FAILED_MESSAGE = "Не удалось оптимизи�
 const VIDEO_OPTIMIZATION_CONFIG_LOADING_MESSAGE =
   "Настройки оптимизации видео ещё загружаются. Подождите несколько секунд и попробуйте снова.";
 const VIDEO_OPTIMIZATION_DISABLED_TOO_LARGE_MESSAGE =
-  "Видео слишком большое для прямой загрузки. Автоматическая оптимизация видео сейчас выключена.";
+  "Автоматическая оптимизация видео скоро будет доступна. Сейчас загрузите видео до 50 МБ или MP4 H.264.";
+const VIDEO_NEEDS_OPTIMIZATION_MESSAGE = "Видео большое. Для запуска рекламы его нужно оптимизировать.";
+const VIDEO_OPTIMIZATION_NEXT_STEP_MESSAGE = "Следующим этапом система подготовит MP4-версию для Meta.";
 
 const videoJobStatusLabels: Record<VideoJobStatus, string> = {
   awaiting_upload: "Загружаем исходное видео",
@@ -664,6 +669,21 @@ function getCreativeReadiness({
       isReadyForMeta: false,
       isBlocking: false,
       clientMessage: "Загрузите фото или видео.",
+      adminMessage: rawError,
+    };
+  }
+
+  if (creative.status === "needs_optimization") {
+    return {
+      status: "needs_optimization",
+      label: "Видео нужно оптимизировать",
+      tone: "amber",
+      isReadyForMeta: false,
+      isBlocking: true,
+      clientMessage:
+        videoOptimization?.enabled === true
+          ? `${VIDEO_NEEDS_OPTIMIZATION_MESSAGE} Видео будет отправлено на оптимизацию перед запуском.`
+          : `${VIDEO_NEEDS_OPTIMIZATION_MESSAGE} ${VIDEO_OPTIMIZATION_NEXT_STEP_MESSAGE} ${VIDEO_OPTIMIZATION_DISABLED_TOO_LARGE_MESSAGE}`,
       adminMessage: rawError,
     };
   }
@@ -1635,6 +1655,15 @@ export default function AdsAutomation() {
     const optimizationThresholdBytes = optimizationThresholdMb * 1024 * 1024;
     const fileSizeMb = Number((file.size / (1024 * 1024)).toFixed(1));
     const exceedsThreshold = fileType === "video" && file.size > optimizationThresholdBytes;
+    const optimizationDebug: Partial<UploadDebug> = {
+      videoOptimizationLoaded: Boolean(optimization),
+      videoOptimizationEnabled: Boolean(optimization?.enabled),
+      videoOptimizationThresholdMb: optimizationThresholdMb,
+      videoOptimizationMaxInputMb: optimization?.maxInputMb || 500,
+      fileSizeMb,
+      largeVideoBranch: exceedsThreshold && optimization?.enabled === true,
+      uploadTarget: "ad-creatives",
+    };
 
     // A large video must never silently fall back to the direct ad-creatives upload.
     // If the optimization config has not arrived from /api/crm/health yet, block and refresh.
@@ -1646,6 +1675,41 @@ export default function AdsAutomation() {
       setNotice(VIDEO_OPTIMIZATION_CONFIG_LOADING_MESSAGE);
       toast.error(VIDEO_OPTIMIZATION_CONFIG_LOADING_MESSAGE);
       void checkHealth();
+      return;
+    }
+
+    if (exceedsThreshold && optimization?.enabled !== true) {
+      const previewUrl = URL.createObjectURL(file);
+      const message = `${VIDEO_NEEDS_OPTIMIZATION_MESSAGE} ${VIDEO_OPTIMIZATION_NEXT_STEP_MESSAGE} ${VIDEO_OPTIMIZATION_DISABLED_TOO_LARGE_MESSAGE}`;
+      setCreativeFile(file);
+      setVideoJob(null);
+      setCreative({
+        fileName: file.name,
+        fileType: "video",
+        mimeType: file.type,
+        fileSize: file.size,
+        previewUrl,
+        publicUrl: "",
+        status: "needs_optimization",
+      });
+      setUploadStatus("idle");
+      setUploadStage("Видео нужно оптимизировать");
+      setLastUploadError(message);
+      setUploadDebug({
+        ...optimizationDebug,
+        fileName: file.name,
+        fileType: "video",
+        uploadMode: "video_optimization_required",
+        signedUpload: false,
+        storagePathExists: false,
+        publicUrlExists: false,
+        publicUrlPreview: "",
+        uploadStage: "needs_optimization",
+        lastError: message,
+        responseKeys: ["localFile", "videoOptimization"],
+      });
+      setNotice(message);
+      toast.warning("Видео нужно оптимизировать");
       return;
     }
 
@@ -1662,15 +1726,6 @@ export default function AdsAutomation() {
     }
 
     const largeVideoBranch = exceedsThreshold && optimization?.enabled === true;
-    const optimizationDebug: Partial<UploadDebug> = {
-      videoOptimizationLoaded: Boolean(optimization),
-      videoOptimizationEnabled: Boolean(optimization?.enabled),
-      videoOptimizationThresholdMb: optimizationThresholdMb,
-      videoOptimizationMaxInputMb: optimization?.maxInputMb || 500,
-      fileSizeMb,
-      largeVideoBranch,
-      uploadTarget: "ad-creatives",
-    };
 
     if (largeVideoBranch) {
       await uploadLargeVideo(file, optimizationDebug);
@@ -2678,6 +2733,8 @@ export default function AdsAutomation() {
                       <p>videoOptimization.enabled: {uploadDebug.videoOptimizationEnabled === undefined ? "-" : String(uploadDebug.videoOptimizationEnabled)}</p>
                       <p>videoOptimization.thresholdMb: {uploadDebug.videoOptimizationThresholdMb ?? "-"}</p>
                       <p>videoOptimization.maxInputMb: {uploadDebug.videoOptimizationMaxInputMb ?? "-"}</p>
+                      <p>videoOptimization.rawBucket: {metaSummary?.videoOptimization?.rawBucket || "-"}</p>
+                      <p>videoOptimization.workerSecretConfigured: {metaSummary?.videoOptimization?.workerSecretConfigured === undefined ? "-" : String(metaSummary.videoOptimization.workerSecretConfigured)}</p>
                       <p>fileSizeMb: {uploadDebug.fileSizeMb ?? "-"} (1 MB = 1024×1024 байт)</p>
                       <p>largeVideoBranch: {uploadDebug.largeVideoBranch === undefined ? "-" : String(uploadDebug.largeVideoBranch)}</p>
                       <p>uploadTarget: {uploadDebug.uploadTarget || "-"}</p>

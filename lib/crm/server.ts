@@ -1638,8 +1638,8 @@ const MAX_VIDEO_BYTES = 100 * 1024 * 1024;
 
 // Large video optimization pipeline (Phase A). Raw originals are temporary:
 // they live in a private bucket and are never sent to Meta or end users.
-const RAW_VIDEO_BUCKET = "ad-creatives-raw";
-const VIDEO_JOB_STATUSES = new Set(["awaiting_upload", "queued", "downloading", "transcoding", "uploading", "ready", "failed"]);
+const DEFAULT_RAW_VIDEO_BUCKET = "ad-creatives-raw";
+const VIDEO_JOB_STATUSES = new Set(["awaiting_upload", "queued", "downloading", "transcoding", "uploading", "ready", "failed", "deleted_original"]);
 export const VIDEO_OPTIMIZATION_DISABLED_MESSAGE =
   "Оптимизация больших видео отключена. Загрузите MP4 до 100 MB или включите VIDEO_OPTIMIZATION_ENABLED в Vercel.";
 
@@ -1648,17 +1648,27 @@ function readPositiveNumberEnv(key: string, fallback: number): number {
   return Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
-export function videoOptimizationConfig(): { enabled: boolean; thresholdMb: number; maxInputMb: number } {
+export function videoOptimizationConfig(): {
+  enabled: boolean;
+  thresholdMb: number;
+  maxInputMb: number;
+  rawBucket: string;
+  workerSecretConfigured: boolean;
+} {
   return {
     enabled: ["true", "1", "yes", "on"].includes(String(process.env.VIDEO_OPTIMIZATION_ENABLED || "").trim().toLowerCase()),
     thresholdMb: readPositiveNumberEnv("VIDEO_OPTIMIZATION_THRESHOLD_MB", 50),
     maxInputMb: readPositiveNumberEnv("VIDEO_OPTIMIZATION_MAX_INPUT_MB", 500),
+    rawBucket: firstString(process.env.VIDEO_OPTIMIZATION_RAW_BUCKET, DEFAULT_RAW_VIDEO_BUCKET),
+    workerSecretConfigured: Boolean(firstString(process.env.VIDEO_OPTIMIZATION_WORKER_SECRET)),
   };
 }
 
 // Safe job shape for the UI: no raw paths/bucket internals, no worker claim data.
 function makeVideoJob(body: JsonRecord): JsonRecord {
   const statusRaw = readString(body.status).toLowerCase();
+  const inputSizeBytes = readNumber(body.inputSizeBytes ?? body.input_size_bytes ?? body.rawSize ?? body.raw_size) ?? null;
+  const outputSizeBytes = readNumber(body.outputSizeBytes ?? body.output_size_bytes ?? body.optimizedSizeBytes ?? body.optimized_size_bytes ?? body.outputSize ?? body.output_size) ?? null;
   return {
     id: readString(body.id) || nextDemoId("video-job"),
     workspaceId: firstString(body.workspaceId, body.workspace_id),
@@ -1666,15 +1676,26 @@ function makeVideoJob(body: JsonRecord): JsonRecord {
     status: VIDEO_JOB_STATUSES.has(statusRaw) ? statusRaw : "awaiting_upload",
     progress: readNumber(body.progress) ?? 0,
     sourceFileName: firstString(body.sourceFileName, body.source_file_name),
-    sourceMimeType: firstString(body.sourceMimeType, body.source_mime_type),
-    rawSize: readNumber(body.rawSize ?? body.raw_size) ?? null,
-    outputPublicUrl: firstString(body.outputPublicUrl, body.output_public_url),
-    outputSize: readNumber(body.outputSize ?? body.output_size) ?? null,
-    thumbnailPublicUrl: firstString(body.thumbnailPublicUrl, body.thumbnail_public_url),
+    sourceMimeType: firstString(body.sourceMimeType, body.source_mime_type, body.inputMimeType, body.input_mime_type),
+    inputMimeType: firstString(body.inputMimeType, body.input_mime_type, body.sourceMimeType, body.source_mime_type),
+    outputMimeType: firstString(body.outputMimeType, body.output_mime_type),
+    rawSize: inputSizeBytes,
+    inputSizeBytes,
+    outputPublicUrl: firstString(body.outputPublicUrl, body.output_public_url, body.optimizedPublicUrl, body.optimized_public_url),
+    optimizedPublicUrl: firstString(body.optimizedPublicUrl, body.optimized_public_url, body.outputPublicUrl, body.output_public_url),
+    outputSize: outputSizeBytes,
+    outputSizeBytes,
+    thumbnailPublicUrl: firstString(body.thumbnailPublicUrl, body.thumbnail_public_url, body.thumbnailUrl, body.thumbnail_url),
+    thumbnailUrl: firstString(body.thumbnailUrl, body.thumbnail_url, body.thumbnailPublicUrl, body.thumbnail_public_url),
     thumbnailSource: firstString(body.thumbnailSource, body.thumbnail_source),
-    error: firstString(body.error),
+    compressionRatio: readNumber(body.compressionRatio ?? body.compression_ratio) ?? null,
+    metaVideoId: firstString(body.metaVideoId, body.meta_video_id),
+    error: firstString(body.error, body.errorMessage, body.error_message),
+    errorMessage: firstString(body.errorMessage, body.error_message, body.error),
     attempts: readNumber(body.attempts) ?? 0,
     rawDeletedAt: firstString(body.rawDeletedAt, body.raw_deleted_at) || null,
+    startedAt: firstString(body.startedAt, body.started_at) || null,
+    completedAt: firstString(body.completedAt, body.completed_at) || null,
     createdAt: firstString(body.createdAt, body.created_at, new Date().toISOString()),
     updatedAt: firstString(body.updatedAt, body.updated_at, new Date().toISOString()),
   };
@@ -2439,6 +2460,7 @@ export async function handleAdCreativeMetaUpload(req: VercelRequest, res: Vercel
 
 export async function handleVideoJobs(req: VercelRequest, res: VercelResponse) {
   const config = videoOptimizationConfig();
+  const rawBucket = config.rawBucket;
 
   if (req.method === "GET") {
     const jobId = readQueryString(req.query.id);
@@ -2516,12 +2538,12 @@ export async function handleVideoJobs(req: VercelRequest, res: VercelResponse) {
     }
 
     const storagePath = buildAdCreativeStoragePath({ workspaceId, fileName });
-    const { data: signed, error: signedError } = await supabase.storage.from(RAW_VIDEO_BUCKET).createSignedUploadUrl(storagePath);
+    const { data: signed, error: signedError } = await supabase.storage.from(rawBucket).createSignedUploadUrl(storagePath);
     if (signedError || !signed?.token) {
       return sendJson(res, 502, {
         ...errorBody("Не удалось создать ссылку для загрузки исходника", [
           signedError?.message || "signed upload URL is missing",
-          `Проверьте, что bucket ${RAW_VIDEO_BUCKET} создан (migration 016).`,
+          `Проверьте, что bucket ${rawBucket} создан (migration 016).`,
         ]),
       });
     }
@@ -2536,7 +2558,7 @@ export async function handleVideoJobs(req: VercelRequest, res: VercelResponse) {
             fileType: "video",
             mimeType,
             fileSize,
-            storageBucket: RAW_VIDEO_BUCKET,
+            storageBucket: rawBucket,
             storagePath,
             status: "optimizing",
             metadata: { source: "ads-automation", optimization: "pending" },
@@ -2558,7 +2580,7 @@ export async function handleVideoJobs(req: VercelRequest, res: VercelResponse) {
           workspace_id: isUuid(workspaceId) ? workspaceId : null,
           asset_id: isUuid(assetId) ? assetId : null,
           status: "awaiting_upload",
-          raw_bucket: RAW_VIDEO_BUCKET,
+          raw_bucket: rawBucket,
           raw_path: storagePath,
           source_file_name: fileName,
           source_mime_type: mimeType,
@@ -2573,8 +2595,8 @@ export async function handleVideoJobs(req: VercelRequest, res: VercelResponse) {
         success("supabase", {
           job: makeVideoJob(asRecord(jobData)),
           signedUpload: {
-            bucket: RAW_VIDEO_BUCKET,
-            storageBucket: RAW_VIDEO_BUCKET,
+            bucket: rawBucket,
+            storageBucket: rawBucket,
             storagePath,
             token: signed.token,
             signedUrl: firstString(asRecord(signed as unknown as JsonRecord).signedUrl),
@@ -2639,6 +2661,164 @@ export async function handleVideoJobs(req: VercelRequest, res: VercelResponse) {
   }
 
   return sendJson(res, 405, errorBody("Method not allowed", ["Use GET, POST or PATCH"]));
+}
+
+export async function handleVideoProcessingJobs(req: VercelRequest, res: VercelResponse, pathSegments: string[] = []) {
+  const config = videoOptimizationConfig();
+  const rawBucket = firstString(config.rawBucket, DEFAULT_RAW_VIDEO_BUCKET);
+  const pathJobId = firstString(pathSegments[0], readQueryString(req.query.id));
+  const action = firstString(pathSegments[1]).toLowerCase();
+
+  if (req.method === "GET") {
+    const jobId = pathJobId;
+    if (!jobId) {
+      return sendJson(res, 400, errorBody("Validation error", ["id is required"]));
+    }
+
+    const supabase = getSupabaseServerClient();
+    if (!supabase || !isUuid(jobId)) {
+      return sendJson(
+        res,
+        200,
+        success("demo", { job: makeVideoJob({ id: jobId, status: "queued" }) }, "Supabase не настроен: статус задачи доступен только как demo-ответ."),
+      );
+    }
+
+    try {
+      const workspaceId = readWorkspaceId(req, {});
+      let query = supabase.from("video_processing_jobs").select("*").eq("id", jobId);
+      if (isUuid(workspaceId)) query = query.eq("workspace_id", workspaceId);
+      const { data, error } = await query.single();
+      if (error) throw new Error(error.message);
+      return sendJson(res, 200, success("supabase", { job: makeVideoJob(asRecord(data)) }));
+    } catch (error) {
+      return sendJson(res, 404, errorBody("Задача оптимизации не найдена", [error instanceof Error ? error.message : "not found"]));
+    }
+  }
+
+  if (req.method === "POST" && action === "retry") {
+    const jobId = pathJobId;
+    if (!jobId) {
+      return sendJson(res, 400, errorBody("Validation error", ["id is required"]));
+    }
+
+    const body = asRecord(req.body);
+    const supabase = getSupabaseServerClient();
+    if (!supabase || !isUuid(jobId)) {
+      const status = firstString(body.status, "failed").toLowerCase();
+      if (status !== "failed") {
+        return sendJson(res, 409, errorBody("Retry is not allowed", ["Only failed jobs can be retried"]));
+      }
+      return sendJson(
+        res,
+        200,
+        success("demo", { job: makeVideoJob({ id: jobId, status: "queued", progress: 0 }) }, "Supabase не настроен: retry выполнен только в demo-ответе."),
+      );
+    }
+
+    try {
+      const workspaceId = readWorkspaceId(req, body);
+      let update = supabase
+        .from("video_processing_jobs")
+        .update({
+          status: "queued",
+          progress: 0,
+          error: null,
+          error_message: null,
+          started_at: null,
+          completed_at: null,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", jobId)
+        .eq("status", "failed");
+      if (isUuid(workspaceId)) update = update.eq("workspace_id", workspaceId);
+      const { data, error } = await update.select("*").maybeSingle();
+      if (error) throw new Error(error.message);
+      if (data) return sendJson(res, 200, success("supabase", { job: makeVideoJob(asRecord(data)) }));
+
+      const { data: current, error: currentError } = await supabase.from("video_processing_jobs").select("status").eq("id", jobId).maybeSingle();
+      if (currentError) throw new Error(currentError.message);
+      if (current) {
+        return sendJson(res, 409, errorBody("Retry is not allowed", ["Only failed jobs can be retried"]));
+      }
+      return sendJson(res, 404, errorBody("Задача оптимизации не найдена", ["not found"]));
+    } catch (error) {
+      return sendJson(res, 502, errorBody("Не удалось повторить задачу оптимизации", [error instanceof Error ? error.message : "retry failed"]));
+    }
+  }
+
+  if (req.method === "POST") {
+    const body = asRecord(req.body);
+    const workspaceId = readWorkspaceId(req, body);
+    const assetId = firstString(body.assetId, body.asset_id);
+    const rawPath = firstString(body.rawPath, body.raw_path);
+    const rawPublicUrl = firstString(body.rawPublicUrl, body.raw_public_url);
+    const inputMimeType = inferMimeType({
+      fileName: firstString(body.fileName, body.file_name, "video.mp4"),
+      mimeType: firstString(body.inputMimeType, body.input_mime_type, body.mimeType, body.mime_type),
+    });
+    const inputSizeBytes = readNumber(body.inputSizeBytes ?? body.input_size_bytes ?? body.fileSize ?? body.file_size) ?? 0;
+    const fileName = firstString(body.fileName, body.file_name);
+    const details: string[] = [];
+
+    if (!VIDEO_MIME_TYPES.has(inputMimeType)) details.push("inputMimeType must be MP4, MOV or WEBM");
+    if (inputSizeBytes <= 0) details.push("inputSizeBytes is required");
+    if (inputSizeBytes > config.maxInputMb * 1024 * 1024) details.push(`Видео больше ${config.maxInputMb} MB. Загрузите файл меньшего размера.`);
+    if (details.length > 0) return sendJson(res, 400, errorBody("Validation error", details));
+
+    const demoJob = makeVideoJob({
+      workspaceId,
+      assetId,
+      status: "queued",
+      progress: 0,
+      rawBucket,
+      rawPath,
+      rawPublicUrl,
+      sourceFileName: fileName,
+      inputMimeType,
+      inputSizeBytes,
+    });
+    const supabase = getSupabaseServerClient();
+    if (!supabase) {
+      return sendJson(
+        res,
+        200,
+        success("demo", { job: demoJob }, "Supabase не настроен: задача оптимизации создана только как demo-ответ."),
+      );
+    }
+
+    try {
+      const { data, error } = await supabase
+        .from("video_processing_jobs")
+        .insert({
+          workspace_id: isUuid(workspaceId) ? workspaceId : null,
+          asset_id: isUuid(assetId) ? assetId : null,
+          status: "queued",
+          progress: 0,
+          raw_bucket: rawBucket,
+          raw_path: rawPath || null,
+          raw_public_url: rawPublicUrl || null,
+          source_file_name: fileName || null,
+          source_mime_type: inputMimeType,
+          input_mime_type: inputMimeType,
+          raw_size: inputSizeBytes,
+          input_size_bytes: inputSizeBytes,
+          output_bucket: "ad-creatives",
+          optimized_bucket: "ad-creatives",
+          metadata: { source: "video-processing-jobs-api", fileName },
+        })
+        .select("*")
+        .single();
+      if (error) throw new Error(error.message);
+      return sendJson(res, 201, success("supabase", { job: makeVideoJob(asRecord(data)) }));
+    } catch (error) {
+      const warning = supabaseWarning("video_processing_jobs insert", error);
+      console.warn(warning);
+      return sendJson(res, 200, success("demo", { job: demoJob }, warning));
+    }
+  }
+
+  return sendJson(res, 405, errorBody("Method not allowed", ["Use GET or POST"]));
 }
 
 function normalizeLeadDestination(value: unknown): "whatsapp" | "instagram_profile" | "website" | "lead_form" | "call" {
