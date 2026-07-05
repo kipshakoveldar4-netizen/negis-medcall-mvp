@@ -74,6 +74,16 @@ SUPABASE_URL=... SUPABASE_SERVICE_ROLE_KEY=... pnpm run dev
 5. Deploy. Logs show `[video-worker] started as ...`; the worker logs only job ids, statuses, and byte sizes — never URLs or credentials.
 6. Scale: one instance is enough for MVP. Multiple instances are safe — claims are atomic — but keep one until volume demands more.
 
+## Troubleshooting
+
+- `Node.js 20 detected without native WebSocket support` (fatal at startup):
+  supabase-js requires a WebSocket transport on Node < 22. The worker ships the fix already —
+  the `ws` dependency plus `realtime: { transport: WebSocket }` in `createSupabase`
+  (`src/worker.ts`). If it reappears, check that `ws` is still in `package.json` and the
+  transport option was not removed. Do not use a browser WebSocket polyfill.
+- `ffmpeg is not available`: the container image must include ffmpeg (the provided Dockerfile installs it via apt).
+- Jobs stay `queued`: worker not running or `SUPABASE_URL`/`SUPABASE_SERVICE_ROLE_KEY` missing; check Railway logs for `[video-worker] started`.
+
 ## Security
 
 - The service role key exists only in Vercel and Railway env — never in `artifacts/negis` (enforced by a smoke test).

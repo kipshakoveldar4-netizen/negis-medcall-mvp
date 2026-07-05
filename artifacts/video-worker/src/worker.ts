@@ -1,4 +1,5 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import WebSocket from "ws";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { WorkerConfig } from "./config.js";
@@ -25,6 +26,12 @@ const PROGRESS = { downloading: 10, transcoding: 40, uploading: 80, ready: 100 }
 export function createSupabase(config: WorkerConfig): SupabaseClient {
   return createClient(config.supabaseUrl, config.serviceRoleKey, {
     auth: { persistSession: false, autoRefreshToken: false },
+    realtime: {
+      // Node.js 20 has no native WebSocket; supabase-js crashes at startup
+      // without an explicit transport. The worker never opens realtime
+      // channels, but the client still requires a valid constructor.
+      transport: WebSocket as unknown as typeof globalThis.WebSocket,
+    },
   });
 }
 

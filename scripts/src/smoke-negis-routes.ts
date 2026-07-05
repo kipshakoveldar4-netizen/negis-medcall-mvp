@@ -1250,6 +1250,10 @@ async function checkVideoWorkerPackage() {
   if (workerPackageJson.includes("workspace:") || workerPackageJson.includes("catalog:")) {
     throw new Error("video worker package must not use workspace or catalog dependencies");
   }
+  const workerDependencies = (JSON.parse(workerPackageJson) as { dependencies?: Record<string, string> }).dependencies || {};
+  if (!workerDependencies.ws) {
+    throw new Error("video worker must depend on ws for the Node 20 Supabase realtime transport");
+  }
 
   const ffmpegSource = await readFile(path.join(workerDir, "src", "ffmpeg.ts"), "utf8");
   for (const marker of ["libx264", '"aac"', "+faststart", "force_original_aspect_ratio=decrease", "trunc(iw/2)*2", "fps=${options.fps}"]) {
@@ -1274,6 +1278,8 @@ async function checkVideoWorkerPackage() {
     ".remove([",
     "completed_at",
     "compressionRatio",
+    'import WebSocket from "ws"',
+    "transport: WebSocket",
   ]) {
     if (!workerSource.includes(marker)) {
       throw new Error(`video worker source is missing ${marker}`);
