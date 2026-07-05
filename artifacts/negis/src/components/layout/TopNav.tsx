@@ -2,7 +2,6 @@ import { useEffect, useRef, useState, type CSSProperties } from 'react';
 import { Link, useLocation } from 'wouter';
 import {
   BarChart2,
-  BrainCircuit,
   CalendarDays,
   Building2,
   Briefcase,
@@ -28,7 +27,6 @@ import { agentInitials, type AgentDisplayInfo } from '@/lib/agentDisplay';
 
 const NAV = [
   { href: '/ads-automation', icon: Rocket, label: 'AI запуск рекламы', permission: 'ads' },
-  { href: '/targeting-agent', icon: BrainCircuit, label: 'ИИ таргетолог', permission: 'ads' },
   { href: '/content-studio', icon: Clapperboard, label: 'ИИ студия контента', permission: 'ads' },
   { href: '/dashboard', icon: BarChart2, label: 'Дашборд', permission: 'dashboard' },
   { href: '/appointments', icon: CalendarDays, label: 'Запись', permission: 'booking' },

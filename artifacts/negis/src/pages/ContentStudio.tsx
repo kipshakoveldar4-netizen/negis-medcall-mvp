@@ -535,20 +535,8 @@ export default function ContentStudio() {
     }
   };
 
-  const transferToTargeting = () => {
-    localStorage.setItem(
-      "negis_targeting_prefill",
-      JSON.stringify({
-        creativeText: current.caption || current.script || current.hook || form.title,
-        niche: current.niche,
-        offer: current.cta || current.goal,
-        targetAudience: current.audience,
-      }),
-    );
-    toast.success("Контент передан в ИИ таргетолог");
-    setLocation("/targeting-agent");
-  };
-
+  // AI Target is no longer a standalone module: the studio hands content
+  // straight to Ads Automation, where "ИИ заполнит" covers targeting.
   const transferToAdsAutomation = () => {
     localStorage.setItem(
       "negis_ads_automation_prefill",
@@ -588,15 +576,6 @@ export default function ContentStudio() {
           <button
             type="button"
             className="neu-btn-primary inline-flex items-center gap-2 px-5 py-2.5 text-sm"
-            onClick={transferToTargeting}
-          >
-            <Megaphone size={16} />
-            Передать в ИИ таргетолог
-            <ArrowRight size={15} />
-          </button>
-          <button
-            type="button"
-            className="neu-btn inline-flex items-center gap-2 px-5 py-2.5 text-sm"
             onClick={transferToAdsAutomation}
           >
             <Rocket size={16} />

@@ -1929,23 +1929,17 @@ function DemoAdsPage() {
                   <BrainCircuit size={24} />
                 </div>
                 <div>
-                  <h3 className="text-xl font-bold text-[#0B1220]">ИИ таргетолог</h3>
-                  <p className="text-sm text-[#64748B]">Рекламный помощник для MVP-кампаний</p>
+                  <h3 className="text-xl font-bold text-[#0B1220]">ИИ помощник рекламы</h3>
+                  <p className="text-sm text-[#64748B]">Живёт внутри «AI запуск рекламы» — кнопка «ИИ заполнит»</p>
                 </div>
               </div>
               <p className="max-w-3xl text-sm leading-relaxed text-[#334155]">
-                AI анализирует креатив, подбирает аудиторию, рассчитывает бюджет и готовит отчёт по кампании.
+                AI анализирует креатив, подбирает аудиторию, рассчитывает бюджет и готовит отчёт по кампании прямо внутри автозапуска.
               </p>
               <Link href="/ads-automation">
                 <div className="neu-btn-primary mt-5 inline-flex cursor-pointer items-center gap-2 px-5 py-2.5 text-sm">
                   <Rocket size={16} />
                   AI запуск рекламы
-                </div>
-              </Link>
-              <Link href="/targeting-agent">
-                <div className="neu-btn-primary mt-5 inline-flex cursor-pointer items-center gap-2 px-5 py-2.5 text-sm">
-                  <BrainCircuit size={16} />
-                  Открыть ИИ таргетолога
                 </div>
               </Link>
             </div>
@@ -2020,7 +2014,7 @@ function DemoAdsPage() {
             <div className="neu-sm p-4">
               <p className="font-bold text-[#0B1220]">Настройки будут подключены позже</p>
               <p className="mt-2 text-sm leading-relaxed text-[#64748B]">
-                В MVP Meta Marketing API не подключается. Сейчас можно проверить сценарий анализа, черновика кампании и отчёта через ИИ таргетолога.
+                В MVP Meta Marketing API не подключается. Сценарий анализа, черновика кампании и отчёта доступен внутри «AI запуск рекламы».
               </p>
             </div>
           )}

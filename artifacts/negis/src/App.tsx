@@ -1,5 +1,5 @@
 import { useEffect, type ComponentType } from "react";
-import { Switch, Route, Router as WouterRouter, useLocation } from "wouter";
+import { Switch, Route, Redirect, Router as WouterRouter, useLocation } from "wouter";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -16,7 +16,6 @@ import Ads from "@/pages/Ads";
 import AdsAutomation from "@/pages/AdsAutomation";
 import AdsCallback from "@/pages/AdsCallback";
 import { AppointmentsPage } from "@/pages/AppointmentsPage";
-import TargetingAgent from "@/pages/TargetingAgent";
 import ContentStudio from "@/pages/ContentStudio";
 import AdminCenter from "@/pages/AdminCenter";
 import {
@@ -159,7 +158,11 @@ function Router() {
       <Route path="/ads/callback" component={AdsCallback} />
       <Route path="/reports" component={() => <ProtectedPage component={DemoReports} permission="ads" />} />
       <Route path="/profile" component={() => <ProtectedPage component={() => <DemoPlaceholder title="Профиль" />} permission="dashboard" />} />
-      <Route path="/targeting-agent" component={TargetingAgent} />
+      {/* AI Target is no longer a standalone module: its functionality lives inside
+          Ads Automation ("ИИ заполнит"). Old links land on /ads-automation. */}
+      <Route path="/targeting-agent">
+        <Redirect to="/ads-automation" />
+      </Route>
       <Route path="/content-studio" component={() => <ProtectedPage component={ContentStudio} permission="ads" />} />
       <Route path="/ai-content-studio" component={() => <ProtectedPage component={ContentStudio} permission="ads" />} />
       <Route path="/content" component={() => <ProtectedPage component={ContentStudio} permission="ads" />} />

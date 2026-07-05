@@ -974,7 +974,7 @@ export function DemoChat() {
 export function DemoMarket() {
   const modules = [
     { title: "ИИ студия контента", text: "Сценарии, avatar prompt, TapNow prompt и Telegram handoff.", href: "/content-studio", icon: Sparkles },
-    { title: "ИИ таргетолог", text: "Анализ креативов, запуск pending кампаний и demo reports.", href: "/targeting-agent", icon: Target },
+    { title: "AI запуск рекламы", text: "ИИ заполнит кампанию, анализ креативов и PAUSED запуск в Meta.", href: "/ads-automation", icon: Target },
     { title: "Реклама", text: "Meta Ads MVP и настройки рекламного кабинета.", href: "/ads", icon: Megaphone },
     { title: "Отчёты", text: "Недельная аналитика, CPL, записи и рекомендации AI.", href: "/reports", icon: BarChart3 },
   ];
@@ -1029,7 +1029,7 @@ export function DemoReports() {
   return (
     <PageLayout>
       <div className="space-y-7">
-        <PageHeader title="Отчёты" subtitle="Demo аналитика по лидам, записям, конверсии и доходу Concept Clinic." action={<Link href="/targeting-agent"><div className="neu-btn-primary inline-flex items-center gap-2 px-5 py-2.5 text-sm"><Target size={16} />Открыть ИИ таргетолога</div></Link>} />
+        <PageHeader title="Отчёты" subtitle="Demo аналитика по лидам, записям, конверсии и доходу Concept Clinic." action={<Link href="/ads-automation"><div className="neu-btn-primary inline-flex items-center gap-2 px-5 py-2.5 text-sm"><Target size={16} />AI запуск рекламы</div></Link>} />
         <MetricGrid
           metrics={[
             { label: "Лиды", value: "182", icon: Users, tone: "blue" },

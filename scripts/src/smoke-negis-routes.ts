@@ -1439,6 +1439,54 @@ async function checkVideoWorkerPackage() {
   console.log("Video worker package checks: ok");
 }
 
+async function checkNavigationCleanup() {
+  const layoutDir = path.join(repoRoot, "artifacts", "negis", "src", "components", "layout");
+  const pagesDir = path.join(repoRoot, "artifacts", "negis", "src", "pages");
+
+  // AI Target is retired as a standalone module: no visible navigation may link to it.
+  for (const [name, file] of [
+    ["Sidebar", path.join(layoutDir, "Sidebar.tsx")],
+    ["MobileNav", path.join(layoutDir, "MobileNav.tsx")],
+    ["TopNav", path.join(layoutDir, "TopNav.tsx")],
+    ["Topbar", path.join(layoutDir, "Topbar.tsx")],
+    ["Dashboard", path.join(pagesDir, "Dashboard.tsx")],
+  ] as const) {
+    const source = await readFile(file, "utf8");
+    if (source.includes("targeting-agent")) {
+      throw new Error(`${name} must not link to the retired AI Target module`);
+    }
+  }
+
+  const app = await readFile(path.join(pagesDir, "..", "App.tsx"), "utf8");
+  if (!app.includes('<Route path="/targeting-agent">') || !app.includes('<Redirect to="/ads-automation" />')) {
+    throw new Error("App must redirect /targeting-agent to /ads-automation");
+  }
+
+  const contentStudio = await readFile(path.join(pagesDir, "ContentStudio.tsx"), "utf8");
+  if (contentStudio.includes("Передать в ИИ таргетолог") || contentStudio.includes('setLocation("/targeting-agent")')) {
+    throw new Error("Content Studio must hand off to Ads Automation, not the retired AI Target module");
+  }
+  if (!contentStudio.includes("transferToAdsAutomation")) {
+    throw new Error("Content Studio must keep the Ads Automation handoff");
+  }
+
+  // The AI assistant stays inside Ads Automation.
+  const adsAutomation = await readFile(path.join(pagesDir, "AdsAutomation.tsx"), "utf8");
+  if (!adsAutomation.includes("ads-ai-fill") || !adsAutomation.includes("ИИ заполнить рекламу")) {
+    throw new Error("Ads Automation must keep the built-in AI fill");
+  }
+
+  // The concept document exists with the required sections.
+  const concept = await readFile(path.join(repoRoot, "docs", "AI-CONTENT-STUDIO-CONCEPT.md"), "utf8");
+  for (const marker of ["Product vision", "User roles", "Generation modes", "Compliance rules", "Implementation phases", "Phase 4", "Phase 5"]) {
+    if (!concept.includes(marker)) {
+      throw new Error(`AI Content Studio concept doc is missing the "${marker}" section`);
+    }
+  }
+
+  console.log("Navigation cleanup checks: ok");
+}
+
 async function checkNoNewApiFiles() {
   // New CRM endpoints must live inside the existing catch-all, not new api files.
   const crmFiles = (await readdir(path.join(repoRoot, "api", "crm"))).sort();
@@ -1567,6 +1615,7 @@ async function main() {
   await checkCrmLaunchStateModule();
   await checkCrmVideoJobsModule();
   await checkVideoWorkerPackage();
+  await checkNavigationCleanup();
   await checkNoNewApiFiles();
   for (const route of [
     "/dashboard",

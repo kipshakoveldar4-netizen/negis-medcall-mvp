@@ -2,7 +2,6 @@ import { useState } from "react";
 import { useLocation } from "wouter";
 import {
   BarChart2,
-  BrainCircuit,
   CalendarDays,
   Clapperboard,
   ClipboardList,
@@ -37,7 +36,6 @@ const primaryItems: MobileNavItem[] = [
 
 const drawerItems: MobileNavItem[] = [
   { href: "/ads-automation", label: "AI запуск рекламы", icon: Rocket, permission: "ads" },
-  { href: "/targeting-agent", label: "ИИ таргетолог", icon: BrainCircuit, permission: "ads" },
   { href: "/content-studio", label: "ИИ студия контента", icon: Clapperboard, permission: "ads" },
   { href: "/ads", label: "Реклама", icon: Megaphone, permission: "ads" },
   { href: "/reception", label: "Ресепшн", icon: User, permission: "reception" },

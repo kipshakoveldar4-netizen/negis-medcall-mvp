@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Link, useLocation } from 'wouter';
-import { BarChart2, CalendarDays, Settings, LogOut, X, Check, KeyRound, User, Megaphone, ClipboardList, BrainCircuit, Clapperboard, Rocket, Users } from 'lucide-react';
+import { BarChart2, CalendarDays, Settings, LogOut, X, Check, KeyRound, User, Megaphone, ClipboardList, Clapperboard, Rocket, Users } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
 import { supabase } from '@/lib/supabase';
 import { toast } from 'sonner';
@@ -11,7 +11,6 @@ const NAV = [
   { href: '/ads-automation/history', icon: ClipboardList, label: 'История запусков', roles: ['owner', 'manager'] },
   { href: '/clients', icon: Users, label: 'Клиенты', roles: ['owner', 'manager', 'agent'] },
   { href: '/content-studio', icon: Clapperboard, label: 'Контент-студия', roles: ['owner', 'manager'] },
-  { href: '/targeting-agent', icon: BrainCircuit, label: 'AI таргетолог', roles: ['owner', 'manager'] },
   { href: '/appointments', icon: CalendarDays, label: 'Записи', roles: ['owner', 'manager', 'agent', 'booking_agent'] },
   { href: '/leads', icon: Megaphone, label: 'Лиды', roles: ['owner', 'manager', 'agent'] },
   { href: '/admin', icon: Settings, label: 'Настройки', roles: ['owner', 'manager'] },

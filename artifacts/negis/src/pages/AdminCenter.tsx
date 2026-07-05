@@ -16,6 +16,7 @@ import {
   Megaphone,
   MessageCircle,
   RefreshCw,
+  Rocket,
   Save,
   ShieldCheck,
   Sparkles,
@@ -1081,9 +1082,9 @@ export default function AdminCenter() {
                 <UserPlus size={16} />
                 Добавить сотрудника
               </button>
-              <button type="button" className="neu-btn w-full justify-center" onClick={() => setLocation("/targeting-agent")}>
-                <BrainCircuit size={16} />
-                ИИ таргетолог
+              <button type="button" className="neu-btn w-full justify-center" onClick={() => setLocation("/ads-automation")}>
+                <Rocket size={16} />
+                AI запуск рекламы
               </button>
             </div>
           </section>

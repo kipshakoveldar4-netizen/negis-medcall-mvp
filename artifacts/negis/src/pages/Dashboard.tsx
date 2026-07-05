@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { PageLayout } from '@/components/layout/PageLayout';
 import { Link } from 'wouter';
-import { BarChart3, BrainCircuit, Calendar, CalendarCheck, DollarSign, PhoneCall, TrendingUp, Users } from 'lucide-react';
+import { BarChart3, Calendar, CalendarCheck, DollarSign, PhoneCall, Rocket, TrendingUp, Users } from 'lucide-react';
 import { useGetDashboardMetrics } from '@workspace/api-client-react';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/contexts/AuthContext';
@@ -52,7 +52,7 @@ function DemoDashboard() {
     { label: 'Расход рекламы', value: '300 USD', icon: DollarSign, color: 'text-[#F59E0B]', bg: 'bg-yellow-500/10' },
   ];
   const sections = [
-    { href: '/targeting-agent', label: 'ИИ таргетолог', value: 'Оценка креатива 86', icon: BrainCircuit },
+    { href: '/ads-automation', label: 'AI запуск рекламы', value: 'ИИ заполнит и запустит кампанию', icon: Rocket },
     { href: '/leads', label: 'Лиды', value: '24 активных лида', icon: Users },
     { href: '/calls', label: 'Звонки', value: '18 звонков в очереди', icon: PhoneCall },
     { href: '/appointments', label: 'Записи', value: '7 запланированных визитов', icon: CalendarCheck },
@@ -142,10 +142,10 @@ function DemoDashboard() {
                 <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#94A3B8]">Оценка креатива</p>
                 <p className="text-3xl font-bold text-[#1A56DB] mt-1">86</p>
               </div>
-              <Link href="/targeting-agent">
+              <Link href="/ads-automation">
                 <div className="neu-btn-primary inline-flex items-center gap-2 cursor-pointer">
-                  <BrainCircuit size={16} />
-                  ИИ таргетолог
+                  <Rocket size={16} />
+                  AI запуск рекламы
                 </div>
               </Link>
             </div>
