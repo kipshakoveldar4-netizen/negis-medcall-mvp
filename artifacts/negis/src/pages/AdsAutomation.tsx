@@ -172,6 +172,7 @@ type StorageHealth = {
 };
 
 type UploadStatus = "idle" | "validating" | "getting_signed_url" | "uploading_to_storage" | "saving_metadata" | "ready" | "failed";
+type CreativeReadinessStatus = "idle" | "selected" | "uploading" | "uploaded" | "generating_thumbnail" | "ready_for_meta" | "failed" | "too_large" | "needs_thumbnail";
 type RealLaunchStatus = "idle" | "creating" | "failed" | "created" | "video_processing";
 type LaunchMode = "dry_run" | "video_processing" | "paused_created" | "active_created" | "failed";
 
@@ -492,35 +493,197 @@ function uploadStatusLabel(status: UploadStatus) {
     uploading_to_storage: "Загружаем файл",
     saving_metadata: "Сохраняем креатив",
     ready: "Креатив готов для Meta",
-    failed: "Ошибка загрузки",
+    failed: "Не удалось подготовить креатив",
   };
   return labels[status];
 }
 
-function creativeReadyLabel(creative: CreativeAsset | null, uploadStatus: UploadStatus = "idle") {
-  if (!creative) return "Сначала загрузите фото или видео";
-  if (uploadStatus === "failed" || creative.status === "failed" || creative.status === "upload_failed") return "Загрузка не прошла";
-  if (!creative.publicUrl) return "Файл готовится";
-  if (creative.fileType === "video" && !creative.thumbnailUrl) return "Нужна обложка видео";
-  return "Готово";
+type CreativeReadiness = {
+  status: CreativeReadinessStatus;
+  label: string;
+  tone: "green" | "amber" | "red" | "blue" | "slate";
+  isReadyForMeta: boolean;
+  isBlocking: boolean;
+  clientMessage: string;
+  adminMessage: string;
+};
+
+function isTooLargeUploadError(value?: string) {
+  const text = (value || "").toLowerCase();
+  return Boolean(
+    text &&
+      (text.includes("too large") ||
+        text.includes("maximum allowed size") ||
+        text.includes("exceeded the maximum") ||
+        text.includes("object exceeded") ||
+        text.includes("payload too large") ||
+        text.includes("file_size_limit") ||
+        text.includes("размер") ||
+        text.includes("больше") ||
+        text.includes("100 mb") ||
+        text.includes("100 мб")),
+  );
 }
 
-function creativeReadyTone(creative: CreativeAsset | null, uploadStatus: UploadStatus = "idle"): "green" | "amber" | "red" | "slate" {
-  if (!creative) return "slate";
-  if (uploadStatus === "failed" || creative.status === "failed" || creative.status === "upload_failed") return "red";
-  return creative.publicUrl ? "green" : "amber";
+function friendlyCreativeError(rawError: string, creative?: CreativeAsset | null) {
+  const text = rawError.toLowerCase();
+  if (isTooLargeUploadError(rawError)) {
+    return creative?.fileType === "image"
+      ? "Файл слишком большой для прямой загрузки."
+      : "Видео слишком большое для прямой загрузки. Следующим этапом будет добавлена автоматическая оптимизация видео.";
+  }
+  if (text.includes("publicurl") || text.includes("public url") || text.includes("публич")) {
+    return "Не удалось подготовить публичную ссылку для Meta.";
+  }
+  if (text.includes("thumbnail") || text.includes("облож")) {
+    return "Не удалось создать обложку видео. Для запуска видео в Meta нужна обложка.";
+  }
+  if (text.includes("supabase storage") || text.includes("upload") || text.includes("signed")) {
+    return "Не удалось загрузить файл.";
+  }
+  return rawError ? "Не удалось подготовить креатив." : "Не удалось подготовить креатив.";
+}
+
+function getCreativeReadiness({
+  creative,
+  uploadStatus,
+  loading,
+  videoJobPending,
+  lastUploadError,
+}: {
+  creative: CreativeAsset | null;
+  uploadStatus: UploadStatus;
+  loading?: string | null;
+  videoJobPending?: boolean;
+  lastUploadError?: string;
+}): CreativeReadiness {
+  const rawError = lastUploadError || "";
+  const failed = uploadStatus === "failed" || creative?.status === "failed" || creative?.status === "upload_failed";
+  const tooLarge = failed && isTooLargeUploadError(rawError);
+
+  if (!creative) {
+    if (failed) {
+      return {
+        status: tooLarge ? "too_large" : "failed",
+        label: tooLarge ? "Видео слишком большое для прямой загрузки" : "Не удалось подготовить креатив",
+        tone: "red",
+        isReadyForMeta: false,
+        isBlocking: true,
+        clientMessage: friendlyCreativeError(rawError, creative),
+        adminMessage: rawError,
+      };
+    }
+    if (loading === "upload" || uploadStatus === "validating" || uploadStatus === "getting_signed_url" || uploadStatus === "uploading_to_storage" || uploadStatus === "saving_metadata") {
+      return {
+        status: uploadStatus === "saving_metadata" ? "uploaded" : "uploading",
+        label: uploadStatus === "saving_metadata" ? "Файл загружен" : "Загружаем файл",
+        tone: "blue",
+        isReadyForMeta: false,
+        isBlocking: false,
+        clientMessage: "Файл выбран. Идёт подготовка.",
+        adminMessage: rawError,
+      };
+    }
+    return {
+      status: "idle",
+      label: "Креатив не загружен",
+      tone: "slate",
+      isReadyForMeta: false,
+      isBlocking: false,
+      clientMessage: "Загрузите фото или видео.",
+      adminMessage: rawError,
+    };
+  }
+
+  if (tooLarge) {
+    return {
+      status: "too_large",
+      label: "Видео слишком большое для прямой загрузки",
+      tone: "red",
+      isReadyForMeta: false,
+      isBlocking: true,
+      clientMessage: friendlyCreativeError(rawError, creative),
+      adminMessage: rawError,
+    };
+  }
+
+  if (failed) {
+    return {
+      status: "failed",
+      label: "Не удалось подготовить креатив",
+      tone: "red",
+      isReadyForMeta: false,
+      isBlocking: true,
+      clientMessage: friendlyCreativeError(rawError, creative),
+      adminMessage: rawError,
+    };
+  }
+
+  if (loading === "thumbnail") {
+    return {
+      status: "generating_thumbnail",
+      label: "Создаём обложку видео",
+      tone: "blue",
+      isReadyForMeta: false,
+      isBlocking: false,
+      clientMessage: "Для видео готовится обложка.",
+      adminMessage: rawError,
+    };
+  }
+
+  if (!creative.publicUrl) {
+    const uploading = loading === "upload" || videoJobPending || creative.status === "optimizing" || uploadStatus !== "idle";
+    return {
+      status: uploading ? "uploading" : "selected",
+      label: uploading ? "Загружаем файл" : "Файл выбран. Идёт подготовка.",
+      tone: uploading ? "blue" : "amber",
+      isReadyForMeta: false,
+      isBlocking: false,
+      clientMessage: uploading ? "Файл выбран. Идёт подготовка." : "Не удалось подготовить публичную ссылку для Meta.",
+      adminMessage: rawError,
+    };
+  }
+
+  if (creative.fileType === "video" && !creative.thumbnailUrl) {
+    return {
+      status: "needs_thumbnail",
+      label: "Для видео нужна обложка",
+      tone: "amber",
+      isReadyForMeta: false,
+      isBlocking: true,
+      clientMessage: "Не удалось создать обложку видео. Для запуска видео в Meta нужна обложка.",
+      adminMessage: rawError,
+    };
+  }
+
+  return {
+    status: "ready_for_meta",
+    label: "Креатив готов для Meta",
+    tone: "green",
+    isReadyForMeta: true,
+    isBlocking: false,
+    clientMessage: "Креатив готов для Meta",
+    adminMessage: rawError,
+  };
+}
+
+function creativeReadyLabel(creative: CreativeAsset | null, uploadStatus: UploadStatus = "idle", lastUploadError = "") {
+  return getCreativeReadiness({ creative, uploadStatus, lastUploadError }).label;
+}
+
+function creativeReadyTone(creative: CreativeAsset | null, uploadStatus: UploadStatus = "idle", lastUploadError = ""): "green" | "amber" | "red" | "blue" | "slate" {
+  return getCreativeReadiness({ creative, uploadStatus, lastUploadError }).tone;
 }
 
 function uploadLinkMissingMessage(storageHealth?: StorageHealth | null) {
   if (storageHealth?.publicUrlWorks) {
-    return "Файл ещё готовится для рекламы. Повторите загрузку, если статус не меняется.";
+    return "Не удалось подготовить публичную ссылку для Meta.";
   }
-  return "Файл загружен, но пока не готов для рекламы. Проверьте подключение хранилища в админ-режиме.";
+  return "Не удалось подготовить публичную ссылку для Meta.";
 }
 
-function realLaunchNeedsCreativeLink(creative: CreativeAsset | null, storageHealth?: StorageHealth | null) {
-  if (!creative) return "Сначала загрузите креатив. Система сама подготовит ссылку для Meta.";
-  if (!creative.publicUrl) return uploadLinkMissingMessage(storageHealth);
+function realLaunchNeedsCreativeReadiness(readiness: CreativeReadiness) {
+  if (!readiness.isReadyForMeta) return readiness.clientMessage || readiness.label;
   return "";
 }
 
@@ -1096,7 +1259,8 @@ export default function AdsAutomation() {
         applyVideoJobResult(job);
       }
       if (job.status === "failed") {
-        setNotice([VIDEO_OPTIMIZATION_FAILED_MESSAGE, job.error].filter(Boolean).join(" "));
+        setNotice(friendlyCreativeError(job.error || VIDEO_OPTIMIZATION_FAILED_MESSAGE, creative));
+        setLastUploadError(job.error || VIDEO_OPTIMIZATION_FAILED_MESSAGE);
         toast.error(VIDEO_OPTIMIZATION_FAILED_MESSAGE);
       }
     } catch {
@@ -1185,13 +1349,13 @@ export default function AdsAutomation() {
         uploadTarget: storageBucket,
         responseKeys: uploadResponseKeys({ job: created.data.job, signedUpload }),
       });
-      setUploadStatus("ready");
-      setUploadStage("");
-      goToStep(2);
+      setUploadStatus("uploading_to_storage");
+      setUploadStage(VIDEO_OPTIMIZING_MESSAGE);
       setNotice(`${VIDEO_OPTIMIZING_MESSAGE} ${VIDEO_OPTIMIZING_LAUNCH_BLOCKED_MESSAGE}`);
       toast.success("Видео загружено, оптимизация запущена");
     } catch (error) {
       const message = error instanceof Error ? error.message : VIDEO_OPTIMIZATION_FAILED_MESSAGE;
+      const friendlyMessage = friendlyCreativeError(message, { fileName: file.name, fileType: "video", mimeType: file.type, fileSize: file.size, previewUrl, status: "failed" });
       setCreative({
         fileName: file.name,
         fileType: "video",
@@ -1214,8 +1378,8 @@ export default function AdsAutomation() {
         lastError: message,
         responseKeys: ["error"],
       });
-      setNotice(message);
-      toast.error(message);
+      setNotice(friendlyMessage);
+      toast.error(friendlyMessage);
     } finally {
       setLoading(null);
     }
@@ -1340,11 +1504,12 @@ export default function AdsAutomation() {
     const details = validateFile(file);
     if (details.length > 0) {
       const message = details.join(" ");
+      const friendlyMessage = friendlyCreativeError(message, { fileName: file.name, fileType, mimeType: file.type, fileSize: file.size, previewUrl: "", status: "failed" });
       setUploadStatus("failed");
       setUploadStage(uploadStatusLabel("failed"));
       setLastUploadError(message);
-      setNotice(message);
-      toast.error(details.join(" "));
+      setNotice(friendlyMessage);
+      toast.error(friendlyMessage);
       return;
     }
 
@@ -1499,20 +1664,10 @@ export default function AdsAutomation() {
           },
         ),
       );
-      goToStep(2);
       toast.success(fileType === "video" ? "Видео загружено" : "Фото загружено");
-      setNotice(
-        [
-          uploadedAsset.publicUrl
-            ? uploadedAsset.fileType === "video"
-              ? "Видео загружено. Публичная ссылка получена. Видео готово для подготовки в Meta."
-              : "Фото загружено. Публичная ссылка получена. Креатив готов для Meta."
-            : uploadLinkMissingMessage(storageHealth),
-          thumbnailWarning,
-        ]
-          .filter(Boolean)
-          .join(" "),
-      );
+      const uploadedReadiness = getCreativeReadiness({ creative: uploadedAsset, uploadStatus: "ready", loading: null, videoJobPending: false, lastUploadError: "" });
+      if (uploadedReadiness.isReadyForMeta) goToStep(2);
+      setNotice([uploadedReadiness.clientMessage, thumbnailWarning].filter(Boolean).join(" "));
     } catch (error) {
       lastError = error instanceof Error ? error.message : uploadLinkMissingMessage(storageHealth);
       const fallback: CreativeAsset = {
@@ -1549,7 +1704,7 @@ export default function AdsAutomation() {
         lastError,
         responseKeys: signedUpload ? uploadResponseKeys({ signedUpload }) : ["error"],
       });
-      setNotice(fallback.publicUrl ? "Креатив загружен в Storage, но metadata не сохранились." : lastError);
+      setNotice(friendlyCreativeError(lastError, fallback));
     } finally {
       setLoading(null);
     }
@@ -1570,6 +1725,13 @@ export default function AdsAutomation() {
   }
 
   async function fillWithAi() {
+    const readiness = getCreativeReadiness({ creative, uploadStatus, loading, videoJobPending, lastUploadError });
+    if (!readiness.isReadyForMeta) {
+      setNotice(readiness.clientMessage);
+      toast.error("Креатив ещё не готов");
+      goToStep(1);
+      return;
+    }
     setLoading("ai");
     setNotice("");
     try {
@@ -1811,8 +1973,10 @@ export default function AdsAutomation() {
     const dailyBudget = Number(brief.dailyBudget);
     const start = new Date(brief.startDate);
     const end = brief.endDate ? new Date(brief.endDate) : null;
+    const readiness = getCreativeReadiness({ creative, uploadStatus, loading, videoJobPending, lastUploadError });
 
     if (!creative) errors.push("Добавьте фото или видео.");
+    if (creative && !readiness.isReadyForMeta) errors.push(readiness.clientMessage);
     if (!aiPackage) errors.push("Нажмите «ИИ заполнить рекламу».");
     if (!destinationUrl) errors.push("Укажите, куда должны приходить заявки.");
     if (brief.leadDestination === "lead_form" && !brief.destinationValue.trim()) errors.push("Для Meta Lead Form нужен form_id. Пока этот режим только для черновика.");
@@ -1829,21 +1993,14 @@ export default function AdsAutomation() {
     if (!metaSummary?.configured) errors.push("Meta env не настроены или не подтверждены.");
     if (videoJobPending) errors.push(VIDEO_OPTIMIZING_LAUNCH_BLOCKED_MESSAGE);
     if (videoJob?.status === "failed") errors.push(VIDEO_OPTIMIZATION_FAILED_MESSAGE);
-    if (creative && !creative.publicUrl && !videoJobPending) errors.push(uploadLinkMissingMessage(storageHealth));
     if (creative?.fileType === "video" && !metaSummary?.videoLaunchEnabled) errors.push(VIDEO_REAL_LAUNCH_DISABLED_MESSAGE);
     if (creative?.fileType === "video" && metaSummary?.videoLaunchEnabled && !isMetaVideoFormatSupported(creative)) errors.push(VIDEO_FORMAT_ERROR);
-    if (creative?.fileType === "video" && !creative.metaVideoId && !creative.publicUrl && !videoJobPending) {
-      errors.push("Видео загружено в Negis, но ссылка для Meta ещё не готова. Проверьте Storage или повторите загрузку.");
-    }
-    if (creative?.fileType === "video" && metaSummary?.videoLaunchEnabled && !creative.thumbnailUrl && !videoJobPending) {
-      errors.push(THUMBNAIL_REQUIRED_FOR_LAUNCH_MESSAGE);
-    }
     if (nextStatusMode === "ACTIVE") {
       if (!liveLaunchEnabled) errors.push("ACTIVE запуск выключен в Admin Center.");
       if (!["owner", "admin", "manager"].includes(userRole || "")) errors.push("ACTIVE запуск доступен только owner/admin/manager.");
       if (activeConfirmation.trim().toUpperCase() !== "ЗАПУСТИТЬ") errors.push("Для ACTIVE введите ЗАПУСТИТЬ.");
     }
-    return errors;
+    return Array.from(new Set(errors));
   }
 
   async function ensureVideoReady(): Promise<string> {
@@ -2155,15 +2312,9 @@ export default function AdsAutomation() {
 
   function renderCreativeStep() {
     const videoFeature = getPlanFeature(plan, "video_ads_launch");
-    const uploadProblem =
-      creative && !creative.publicUrl && !videoJobPending
-        ? uploadStatus === "failed"
-          ? lastUploadError || "Загрузка не прошла. Попробуйте другой файл."
-          : uploadLinkMissingMessage(storageHealth)
-        : "";
-    // The wizard may continue while the optimization job runs: dry-run is allowed,
-    // real launch stays blocked by prelaunchErrors until the job is ready.
-    const creativeCanContinue = (Boolean(creative?.publicUrl) || videoJobPending) && uploadStatus !== "failed";
+    const readiness = getCreativeReadiness({ creative, uploadStatus, loading, videoJobPending, lastUploadError });
+    const uploadProblem = readiness.clientMessage;
+    const creativeCanContinue = readiness.isReadyForMeta;
 
     return (
       <section className="neu-card p-5 sm:p-6">
@@ -2213,12 +2364,21 @@ export default function AdsAutomation() {
               <button type="button" className="neu-btn-primary justify-center opacity-60" disabled>
                 Дальше к параметрам
               </button>
-              <p className="text-sm font-bold text-[#64748B]">Сначала загрузите фото или видео</p>
+              <p className={`text-sm font-bold ${readiness.isBlocking ? "text-red-700" : "text-[#64748B]"}`}>{readiness.isBlocking ? uploadProblem : "Сначала загрузите фото или видео"}</p>
+              {isAdminMode && readiness.adminMessage ? (
+                <details className="w-full rounded-2xl border border-blue-200 bg-blue-50 p-3 text-left">
+                  <summary className="cursor-pointer text-xs font-black uppercase tracking-[0.1em] text-blue-700">Технические данные</summary>
+                  <p className="mt-2 break-words text-xs font-semibold text-blue-900">upload error raw: {readiness.adminMessage}</p>
+                </details>
+              ) : null}
             </div>
           </>
         ) : (
           <div className="mt-6 grid gap-5 lg:grid-cols-[minmax(0,1fr)_320px]">
             <div className="overflow-hidden rounded-[24px] border border-white/70 bg-black/5">
+              <div className="border-b border-white/70 bg-white/80 px-4 py-2 text-xs font-black uppercase tracking-[0.1em] text-[#64748B]">
+                Предпросмотр выбранного файла
+              </div>
               {creative.fileType === "video" ? (
                 <video className="h-full max-h-[460px] w-full bg-black object-contain" controls src={creative.previewUrl} />
               ) : (
@@ -2232,28 +2392,18 @@ export default function AdsAutomation() {
                   <p className="min-w-0 truncate text-sm font-black text-[#0F172A]">{creative.fileName}</p>
                 </div>
                 <div className="mt-3 flex flex-wrap gap-2">
-                  <StatusPill tone={uploadStatus === "failed" ? "red" : creative.publicUrl ? "green" : "amber"}>
-                    {uploadStatus === "failed" ? "Загрузка не прошла" : creative.fileType === "video" ? "Видео загружено" : "Фото загружено"}
-                  </StatusPill>
-                  <StatusPill tone={creative.publicUrl ? "green" : uploadStatus === "failed" ? "red" : "amber"}>
-                    {creative.publicUrl
-                      ? "Файл подготовлен"
-                      : uploadStatus === "failed"
-                        ? "Файл не готов"
-                        : videoJobPending
-                          ? "Видео оптимизируется"
-                          : "Файл готовится"}
-                  </StatusPill>
-                  <StatusPill tone={creativeReadyTone(creative, uploadStatus)}>{creativeReadyLabel(creative, uploadStatus)}</StatusPill>
-                  {creative.fileType === "video" ? (
+                  <StatusPill tone={readiness.tone}>{readiness.label}</StatusPill>
+                  {!readiness.isBlocking && creative.publicUrl ? <StatusPill tone="green">Файл загружен</StatusPill> : null}
+                  {!readiness.isBlocking && creative.fileType === "video" ? (
                     <>
-                      <StatusPill tone="green">Видео готово для отчёта</StatusPill>
+                      {creative.thumbnailUrl ? <StatusPill tone="green">Обложка готова</StatusPill> : <StatusPill tone="amber">Для видео нужна обложка</StatusPill>}
+                      {readiness.isReadyForMeta ? <StatusPill tone="green">Видео готово для Meta</StatusPill> : null}
                       <StatusPill tone={metaSummary?.videoLaunchEnabled ? "blue" : "slate"}>
                         {metaSummary?.videoLaunchEnabled ? "Подготовка Meta включена" : "Meta запуск скоро"}
                       </StatusPill>
                     </>
                   ) : null}
-                  <StatusPill tone={creative.fileType === "video" && creative.metaVideoId ? "green" : loading === "video" ? "amber" : "slate"}>
+                  {!readiness.isBlocking ? <StatusPill tone={creative.fileType === "video" && creative.metaVideoId ? "green" : loading === "video" ? "amber" : "slate"}>
                     {creative.fileType === "video"
                       ? creative.metaVideoId
                         ? "Видео принято Meta"
@@ -2263,14 +2413,14 @@ export default function AdsAutomation() {
                             ? "Подготовится при запуске"
                             : "Meta запуск скоро"
                       : "Фото"}
-                  </StatusPill>
+                  </StatusPill> : null}
                 </div>
                 <p className="mt-3 text-sm text-[#64748B]">{formatBytes(creative.fileSize)} · {creative.mimeType || "тип не определён"}</p>
                 {creative.fileType === "video" && videoJob ? (
                   videoJob.status === "failed" ? (
                     <div className="mt-3 rounded-2xl border border-red-200 bg-red-50 p-3">
                       <p className="text-sm font-black text-red-900">{VIDEO_OPTIMIZATION_FAILED_MESSAGE}</p>
-                      {videoJob.error ? <p className="mt-1 text-xs font-semibold text-red-800">{videoJob.error}</p> : null}
+                      {isAdminMode && videoJob.error ? <p className="mt-1 text-xs font-semibold text-red-800">{videoJob.error}</p> : null}
                       <p className="mt-1 text-xs font-semibold text-red-800">Загрузите видео заново или используйте файл меньшего размера.</p>
                     </div>
                   ) : videoJob.status === "ready" ? (
@@ -2310,9 +2460,15 @@ export default function AdsAutomation() {
                     </div>
                   )
                 ) : null}
-                {creative.fileType === "video" ? (
+                {creative.fileType === "video" && !readiness.isBlocking ? (
                   <div className="mt-3 rounded-2xl border border-blue-200 bg-blue-50 p-3 text-sm font-semibold text-blue-900">
-                    <p>Видео загружено. Файл подготовлен. Видео готово для отчёта.</p>
+                    <p>
+                      {readiness.isReadyForMeta
+                        ? "Видео загружено. Файл подготовлен. Обложка готова. Креатив готов для Meta."
+                        : readiness.status === "needs_thumbnail"
+                          ? "Видео загружено, но перед запуском нужна обложка."
+                          : "Файл выбран. Идёт подготовка."}
+                    </p>
                     {creative.metaVideoId ? <p className="mt-1 font-black">Видео принято Meta.</p> : null}
                     {creative.videoProcessingStatus ? <p className="mt-1">Видео обрабатывается.</p> : null}
                     <p className="mt-1">{VIDEO_REQUIREMENTS_MESSAGE}</p>
@@ -2332,7 +2488,7 @@ export default function AdsAutomation() {
                     {uploadStage}
                   </div>
                 ) : null}
-                {!creative.publicUrl ? (
+                {!readiness.isReadyForMeta ? (
                   <div className={`mt-3 rounded-2xl border p-3 ${uploadStatus === "failed" ? "border-red-200 bg-red-50" : "border-amber-200 bg-amber-50"}`}>
                     <p className={`text-sm font-semibold ${uploadStatus === "failed" ? "text-red-900" : "text-amber-900"}`}>{uploadProblem}</p>
                     {isAdminMode && storageHealth?.hint ? <p className="mt-1 text-xs font-bold text-amber-800">{storageHealth.hint}</p> : null}
@@ -2348,12 +2504,16 @@ export default function AdsAutomation() {
                     <div className="mt-2 grid gap-1 break-words text-xs font-semibold text-blue-900">
                       <p>fileName: {uploadDebug.fileName || "-"}</p>
                       <p>fileType: {uploadDebug.fileType || "-"}</p>
+                      <p>internalStatus: {readiness.status}</p>
                       <p>assetId: {uploadDebug.assetId || "-"}</p>
                       <p>uploadMode: {uploadDebug.uploadMode || "-"}</p>
                       <p>signedUpload: {uploadDebug.signedUpload ? "yes" : "no"}</p>
                       <p>storagePath: {uploadDebug.storagePathExists ? "yes" : "no"}</p>
                       <p>storagePathValue: {uploadDebug.storagePath || "-"}</p>
                       <p>publicUrl: {uploadDebug.publicUrlExists ? "yes" : "no"}</p>
+                      <p>thumbnailUrl: {creative.thumbnailUrl ? "yes" : "no"}</p>
+                      <p>fileSize: {formatBytes(creative.fileSize)}</p>
+                      <p>mimeType: {creative.mimeType || "-"}</p>
                       <p>publicUrlPreview: {uploadDebug.publicUrlPreview || "-"}</p>
                       <p>uploadStage: {uploadDebug.uploadStage || "-"}</p>
                       <p>lastError: {uploadDebug.lastError || "-"}</p>
@@ -2381,7 +2541,7 @@ export default function AdsAutomation() {
               <button type="button" className="neu-btn-primary w-full justify-center" disabled={!creativeCanContinue} onClick={() => goToStep(2)}>
                 Дальше к параметрам
               </button>
-              {!creative.publicUrl ? (
+              {!readiness.isReadyForMeta ? (
                 <p className={`text-sm font-bold ${uploadStatus === "failed" ? "text-red-700" : "text-amber-700"}`}>{uploadProblem}</p>
               ) : null}
             </div>
@@ -2392,6 +2552,7 @@ export default function AdsAutomation() {
   }
 
   function renderBriefStep() {
+    const readiness = getCreativeReadiness({ creative, uploadStatus, loading, videoJobPending, lastUploadError });
     return (
       <section className="neu-card p-5 sm:p-6">
         <p className="text-xs font-black uppercase tracking-[0.16em] text-[#0D9488]">Шаг 2</p>
@@ -2446,7 +2607,10 @@ export default function AdsAutomation() {
 
         <div className="mt-5 flex flex-col gap-2 sm:flex-row sm:justify-between">
           <button type="button" className="neu-btn justify-center" onClick={() => goToStep(1)}>Назад</button>
-          <button type="button" className="neu-btn-primary justify-center" onClick={() => goToStep(3)}>ИИ заполнить рекламу</button>
+          <div className="flex flex-col gap-2 sm:items-end">
+            <button type="button" className="neu-btn-primary justify-center" disabled={!readiness.isReadyForMeta} onClick={() => goToStep(3)}>ИИ заполнить рекламу</button>
+            {!readiness.isReadyForMeta ? <p className="max-w-sm text-sm font-bold text-amber-700">{readiness.clientMessage}</p> : null}
+          </div>
         </div>
       </section>
     );
@@ -2454,6 +2618,7 @@ export default function AdsAutomation() {
 
   function renderAiStep() {
     const analysisFeature = getPlanFeature(plan, "ai_creative_analysis");
+    const readiness = getCreativeReadiness({ creative, uploadStatus, loading, videoJobPending, lastUploadError });
     return (
       <section className="neu-card p-5 sm:p-6">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
@@ -2473,7 +2638,13 @@ export default function AdsAutomation() {
           </div>
         ) : null}
 
-        <button type="button" className="neu-btn-primary mt-6 w-full justify-center sm:w-auto" disabled={loading === "ai"} onClick={fillWithAi}>
+        {!readiness.isReadyForMeta ? (
+          <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-amber-900">
+            {readiness.clientMessage}
+          </div>
+        ) : null}
+
+        <button type="button" className="neu-btn-primary mt-6 w-full justify-center sm:w-auto" disabled={loading === "ai" || !readiness.isReadyForMeta} onClick={fillWithAi}>
           {loading === "ai" ? <Loader2 className="animate-spin" size={16} /> : <Wand2 size={16} />}
           ИИ заполнить рекламу
         </button>
@@ -2814,8 +2985,9 @@ export default function AdsAutomation() {
   }
 
   function renderLaunchStep() {
+    const readiness = getCreativeReadiness({ creative, uploadStatus, loading, videoJobPending, lastUploadError });
     const errors = prelaunchErrors("PAUSED");
-    const realLaunchBlockedByCreative = realLaunchNeedsCreativeLink(creative, storageHealth);
+    const realLaunchBlockedByCreative = realLaunchNeedsCreativeReadiness(readiness);
     const realLaunchBlockedByVideo = creative?.fileType === "video" && !metaSummary?.videoLaunchEnabled ? VIDEO_REAL_LAUNCH_DISABLED_MESSAGE : "";
     const realLaunchBusy = loading === "launch" || loading === "video";
     const realLaunchDisabled = realLaunchBusy || Boolean(realLaunchBlockedByCreative) || Boolean(realLaunchBlockedByVideo);
@@ -2902,6 +3074,12 @@ export default function AdsAutomation() {
               {loading === "storage" ? <Loader2 className="animate-spin" size={16} /> : <ShieldCheck size={16} />}
               Проверить загрузку
             </button>
+          </div>
+        ) : null}
+
+        {!readiness.isReadyForMeta ? (
+          <div className="mt-5 rounded-2xl border border-blue-200 bg-blue-50 p-4 text-sm font-semibold text-blue-900">
+            Это тест без создания рекламы. Креатив ещё не готов для запуска.
           </div>
         ) : null}
 
@@ -3222,14 +3400,13 @@ export default function AdsAutomation() {
 
   const stepContent = [renderCreativeStep, renderBriefStep, renderAiStep, renderComplianceStep, renderReportStep, renderLaunchStep][currentStep - 1]();
   const activeClientStep = clientStepForInternal(currentStep);
+  const creativeReadinessInfo = getCreativeReadiness({ creative, uploadStatus, loading, videoJobPending, lastUploadError });
   const creativeReadiness: ReadinessState =
-    uploadStatus === "failed" || creative?.status === "failed" || creative?.status === "upload_failed"
-      ? "error"
-      : creative?.publicUrl
-        ? creative.fileType === "video" && !creative.thumbnailUrl
-          ? "action"
-          : "ready"
-        : loading === "upload" || videoJobPending
+    creativeReadinessInfo.status === "ready_for_meta"
+      ? "ready"
+      : creativeReadinessInfo.status === "failed" || creativeReadinessInfo.status === "too_large"
+        ? "error"
+        : creativeReadinessInfo.status === "uploading" || creativeReadinessInfo.status === "generating_thumbnail"
           ? "checking"
           : "action";
   const parametersReadiness: ReadinessState =
@@ -3237,7 +3414,7 @@ export default function AdsAutomation() {
   const previewReadiness: ReadinessState = compliance?.status === "blocked" ? "error" : aiPackage && compliance ? "ready" : loading === "ai" || loading === "check" ? "checking" : "action";
   const metaReadiness: ReadinessState = loading === "health" ? "checking" : metaSummary?.configured ? "ready" : "action";
   const storageReadiness: ReadinessState =
-    uploadStatus === "failed" ? "error" : creative?.publicUrl || storageHealth?.publicUrlWorks || hasSupabaseFrontendEnv ? "ready" : loading === "storage" ? "checking" : "action";
+    uploadStatus === "failed" ? "error" : creativeReadinessInfo.isReadyForMeta || storageHealth?.publicUrlWorks || hasSupabaseFrontendEnv ? "ready" : loading === "storage" ? "checking" : "action";
   const summaryRows = [
     ["Клиника", firstString(asRecord(user).workspaceName, asRecord(user).clinicName, "Concept Med")],
     ["Услуга", brief.service],
@@ -3353,11 +3530,11 @@ export default function AdsAutomation() {
                     <h2 className="text-base font-black text-[#0F172A]">Готовность</h2>
                   </div>
                   <div className="mt-4 space-y-2">
-                    <ReadinessRow label="Креатив" state={creativeReadiness} note={creative ? creativeReadyLabel(creative, uploadStatus) : "Загрузите фото или видео"} />
+                    <ReadinessRow label="Креатив" state={creativeReadiness} note={creativeReadinessInfo.label} />
                     <ReadinessRow label="Параметры" state={parametersReadiness} note={`${selectedCity.labelRu || "Город"} · ${destination.label}`} />
                     <ReadinessRow label="Предпросмотр" state={previewReadiness} note={aiPackage ? "Текст подготовлен" : "Сначала создайте рекламный пакет"} />
                     <ReadinessRow label="Meta" state={metaReadiness} note={metaSummary?.configured ? "Подключение найдено" : "Проверьте подключение"} />
-                    <ReadinessRow label="Storage" state={storageReadiness} note={creative?.publicUrl ? "Файл готов" : "Файл подготовится после загрузки"} />
+                    <ReadinessRow label="Storage" state={storageReadiness} note={creativeReadinessInfo.isReadyForMeta ? "Файл готов" : "Файл подготовится после загрузки"} />
                   </div>
                 </section>
 
