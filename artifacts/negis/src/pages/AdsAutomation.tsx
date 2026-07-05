@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { Link, useLocation } from "wouter";
 import {
-  AlertTriangle,
   CheckCircle2,
   ClipboardList,
   ExternalLink,
@@ -259,9 +258,9 @@ const labelStyle: CSSProperties = {
 
 const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
 const VIDEO_REAL_LAUNCH_DISABLED_MESSAGE =
-  "Видео загружено в Negis, но автозапуск видео-рекламы через Meta API ещё находится в подготовке. Сейчас можно запускать фото-рекламу. Для видео используйте Ads Manager вручную или загрузите MP4 после включения video_id flow.";
-const VIDEO_LAUNCH_SOON_MESSAGE = "Видео-запуск через Meta API будет добавлен после video_id upload flow.";
-const VIDEO_LAUNCH_ENABLED_MESSAGE = "Meta video_id flow включён: MP4 и MOV будут загружены в Meta перед созданием объявления.";
+  "Видео загружено в Negis. Реклама будет подготовлена безопасно и создана выключенной после проверки.";
+const VIDEO_LAUNCH_SOON_MESSAGE = "Видео-запуск через Meta API будет добавлен после отдельной проверки команды.";
+const VIDEO_LAUNCH_ENABLED_MESSAGE = "Видео будет подготовлено для Meta автоматически перед созданием объявления.";
 const VIDEO_REQUIREMENTS_MESSAGE = "Видео: желательно MP4, до 100 MB, кодек H.264, вертикальный формат 9:16 для Reels/Stories. MOV можно хранить в Negis, но для Meta автозапуска лучше MP4.";
 const MOV_VIDEO_WARNING = "MOV поддерживается Meta, но обработка может быть дольше. Для стабильности лучше MP4/H.264.";
 const VIDEO_FORMAT_ERROR = "Для автозапуска видео поддерживаются MP4 и MOV.";
@@ -340,13 +339,11 @@ const destinationOptions: Array<{ value: LeadDestination; label: string; placeho
   { value: "call", label: "Звонок", placeholder: "+7 700 000 00 00" },
 ];
 
-const wizardSteps = [
-  "Креатив",
-  "Параметры",
-  "ИИ заполнит",
-  "Проверка",
-  "Отчёт",
-  "Запуск",
+const clientWizardSteps = [
+  { label: "Креатив", description: "Фото или видео", targetStep: 1 },
+  { label: "Параметры", description: "Город, бюджет, заявки", targetStep: 2 },
+  { label: "Предпросмотр", description: "Текст и проверка", targetStep: 3 },
+  { label: "Запуск", description: "Создать выключенной", targetStep: 6 },
 ];
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -484,15 +481,15 @@ function ctaLabel(value?: string) {
 }
 
 function statusModeLabel(value: "PAUSED" | "ACTIVE") {
-  return value === "ACTIVE" ? "Реклама сразу активна" : "Создать выключенной";
+  return value === "ACTIVE" ? "Реклама сразу активна" : "Будет создана выключенной";
 }
 
 function uploadStatusLabel(status: UploadStatus) {
   const labels: Record<UploadStatus, string> = {
     idle: "",
     validating: "Проверяем файл",
-    getting_signed_url: "Получаем signed upload URL",
-    uploading_to_storage: "Загружаем в Supabase Storage",
+    getting_signed_url: "Готовим загрузку",
+    uploading_to_storage: "Загружаем файл",
     saving_metadata: "Сохраняем креатив",
     ready: "Креатив готов для Meta",
     failed: "Ошибка загрузки",
@@ -503,9 +500,9 @@ function uploadStatusLabel(status: UploadStatus) {
 function creativeReadyLabel(creative: CreativeAsset | null, uploadStatus: UploadStatus = "idle") {
   if (!creative) return "Сначала загрузите фото или видео";
   if (uploadStatus === "failed" || creative.status === "failed" || creative.status === "upload_failed") return "Загрузка не прошла";
-  if (!creative.publicUrl) return "Файл загружается";
-  if (creative.fileType === "video") return "Видео готово для подготовки в Meta";
-  return "Креатив готов для Meta";
+  if (!creative.publicUrl) return "Файл готовится";
+  if (creative.fileType === "video" && !creative.thumbnailUrl) return "Нужна обложка видео";
+  return "Готово";
 }
 
 function creativeReadyTone(creative: CreativeAsset | null, uploadStatus: UploadStatus = "idle"): "green" | "amber" | "red" | "slate" {
@@ -516,9 +513,9 @@ function creativeReadyTone(creative: CreativeAsset | null, uploadStatus: UploadS
 
 function uploadLinkMissingMessage(storageHealth?: StorageHealth | null) {
   if (storageHealth?.publicUrlWorks) {
-    return "Публичная ссылка пока не получена. Повторите загрузку или проверьте ошибку выше.";
+    return "Файл ещё готовится для рекламы. Повторите загрузку, если статус не меняется.";
   }
-  return "Файл загружен, но публичная ссылка не получена. Проверьте Supabase Storage bucket ad-creatives.";
+  return "Файл загружен, но пока не готов для рекламы. Проверьте подключение хранилища в админ-режиме.";
 }
 
 function realLaunchNeedsCreativeLink(creative: CreativeAsset | null, storageHealth?: StorageHealth | null) {
@@ -868,6 +865,45 @@ function FeatureBadge({ plan, feature }: { plan: NegisPlan; feature: Parameters<
   return <StatusPill tone={config.enabled ? "green" : "amber"}>{config.badge || planFeatureBadge(plan, feature)}</StatusPill>;
 }
 
+type UiMode = "client" | "admin";
+type ReadinessState = "ready" | "action" | "checking" | "error";
+
+function clientStepForInternal(step: number) {
+  if (step <= 1) return 1;
+  if (step === 2) return 2;
+  if (step <= 5) return 3;
+  return 4;
+}
+
+function readinessLabel(state: ReadinessState) {
+  const labels: Record<ReadinessState, string> = {
+    ready: "Готово",
+    action: "Нужно действие",
+    checking: "Проверяется",
+    error: "Ошибка",
+  };
+  return labels[state];
+}
+
+function readinessTone(state: ReadinessState): "green" | "amber" | "red" | "blue" {
+  if (state === "ready") return "green";
+  if (state === "error") return "red";
+  if (state === "checking") return "blue";
+  return "amber";
+}
+
+function ReadinessRow({ label, state, note }: { label: string; state: ReadinessState; note?: string }) {
+  return (
+    <div className="flex items-start justify-between gap-3 rounded-2xl border border-[#D8E4EC] bg-white/70 px-4 py-3">
+      <div className="min-w-0">
+        <p className="text-sm font-black text-[#0F172A]">{label}</p>
+        {note ? <p className="mt-1 text-xs font-semibold text-[#64748B]">{note}</p> : null}
+      </div>
+      <StatusPill tone={readinessTone(state)}>{readinessLabel(state)}</StatusPill>
+    </div>
+  );
+}
+
 export default function AdsAutomation() {
   const [location, setLocation] = useLocation();
   const { user, userRole, clinicId } = useAuth();
@@ -881,7 +917,8 @@ export default function AdsAutomation() {
   const [compliance, setCompliance] = useState<ComplianceResult | null>(null);
   const [confirmations, setConfirmations] = useState<ConfirmationState>(confirmationDefaults);
   const [activeConfirmation, setActiveConfirmation] = useState("");
-  const [statusMode, setStatusMode] = useState<"PAUSED" | "ACTIVE">("PAUSED");
+  const statusMode: "PAUSED" = "PAUSED";
+  const [uiMode, setUiMode] = useState<UiMode>(() => (readStored<UiMode>("negis_ads_automation_ui_mode", "client") === "admin" ? "admin" : "client"));
   const [metaSummary, setMetaSummary] = useState<MetaSummary | null>(null);
   const [storageHealth, setStorageHealth] = useState<StorageHealth | null>(null);
   const [uploadDebug, setUploadDebug] = useState<UploadDebug | null>(null);
@@ -903,10 +940,15 @@ export default function AdsAutomation() {
   const [historySearch, setHistorySearch] = useState("");
   const [videoJob, setVideoJob] = useState<VideoJob | null>(null);
   const isHistoryView = location === "/ads-automation/history";
+  const isAdminMode = uiMode === "admin";
 
   useEffect(() => {
     window.localStorage.setItem("negis_ads_automation_brief", JSON.stringify(brief));
   }, [brief]);
+
+  useEffect(() => {
+    window.localStorage.setItem("negis_ads_automation_ui_mode", JSON.stringify(uiMode));
+  }, [uiMode]);
 
   useEffect(() => {
     void checkHealth();
@@ -983,15 +1025,15 @@ export default function AdsAutomation() {
       const body = await crmRequest<StorageHealth>("/api/crm/storage-health");
       setStorageHealth(body.data);
       if (body.data.exists && body.data.publicAccess) {
-        setNotice("Storage проверен: bucket ad-creatives найден, public access включён.");
-        toast.success("Storage готов");
+        setNotice("Загрузка проверена: файлы готовы для рекламы.");
+        toast.success("Загрузка готова");
       } else {
-        const message = body.data.hint || "Bucket ad-creatives требует проверки администратора.";
+        const message = body.data.hint || "Хранилище файлов требует проверки администратора.";
         setNotice(message);
         toast.warning(message);
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Не удалось проверить Supabase Storage.";
+      const message = error instanceof Error ? error.message : "Не удалось проверить загрузку файлов.";
       setNotice(message);
       toast.error(message);
     } finally {
@@ -1668,7 +1710,7 @@ export default function AdsAutomation() {
     goToStep(1);
   }
 
-  function buildLaunchPayload(dryRun: boolean, forcedStatusMode = statusMode) {
+  function buildLaunchPayload(dryRun: boolean, forcedStatusMode: "PAUSED" | "ACTIVE" = statusMode) {
     const text = compliance?.safeText && compliance.status !== "safe" ? compliance.safeText : aiPackage?.primaryText;
     const publicCreativeUrl = creative?.publicUrl || "";
     const dryRunPreviewUrl = dryRun ? creative?.previewUrl || "" : "";
@@ -1994,7 +2036,7 @@ export default function AdsAutomation() {
         }
         saveLocalLaunch(body.data, nextStatusMode, "video_processing");
         setRealLaunchStatus("video_processing");
-        setRealLaunchMessage(`${VIDEO_PROCESSING_PENDING_MESSAGE}${pendingVideoId ? ` Meta Video ID: ${pendingVideoId}.` : ""}`);
+        setRealLaunchMessage(VIDEO_PROCESSING_PENDING_MESSAGE);
         toast.info(VIDEO_PROCESSING_PENDING_MESSAGE);
         return;
       }
@@ -2037,7 +2079,7 @@ export default function AdsAutomation() {
           "video_processing",
         );
         setRealLaunchStatus("video_processing");
-        setRealLaunchMessage(`${VIDEO_PROCESSING_PENDING_MESSAGE} Meta Video ID: ${error.metaVideoId}.`);
+        setRealLaunchMessage(VIDEO_PROCESSING_PENDING_MESSAGE);
         setNotice("");
         toast.info(VIDEO_PROCESSING_PENDING_MESSAGE);
         return;
@@ -2195,31 +2237,31 @@ export default function AdsAutomation() {
                   </StatusPill>
                   <StatusPill tone={creative.publicUrl ? "green" : uploadStatus === "failed" ? "red" : "amber"}>
                     {creative.publicUrl
-                      ? "Публичная ссылка получена"
+                      ? "Файл подготовлен"
                       : uploadStatus === "failed"
-                        ? "Публичная ссылка не получена"
+                        ? "Файл не готов"
                         : videoJobPending
                           ? "Видео оптимизируется"
-                          : "Публичная ссылка готовится"}
+                          : "Файл готовится"}
                   </StatusPill>
                   <StatusPill tone={creativeReadyTone(creative, uploadStatus)}>{creativeReadyLabel(creative, uploadStatus)}</StatusPill>
                   {creative.fileType === "video" ? (
                     <>
                       <StatusPill tone="green">Видео готово для отчёта</StatusPill>
                       <StatusPill tone={metaSummary?.videoLaunchEnabled ? "blue" : "slate"}>
-                        {metaSummary?.videoLaunchEnabled ? "Meta video_id flow: experimental" : "Meta video launch: скоро"}
+                        {metaSummary?.videoLaunchEnabled ? "Подготовка Meta включена" : "Meta запуск скоро"}
                       </StatusPill>
                     </>
                   ) : null}
                   <StatusPill tone={creative.fileType === "video" && creative.metaVideoId ? "green" : loading === "video" ? "amber" : "slate"}>
                     {creative.fileType === "video"
                       ? creative.metaVideoId
-                        ? "Получен video_id"
+                        ? "Видео принято Meta"
                         : loading === "video"
-                          ? "Загружаем видео в Meta"
+                          ? "Готовим видео в Meta"
                           : metaSummary?.videoLaunchEnabled
-                            ? "video_id будет получен при запуске"
-                            : "Meta video launch: скоро"
+                            ? "Подготовится при запуске"
+                            : "Meta запуск скоро"
                       : "Фото"}
                   </StatusPill>
                 </div>
@@ -2270,9 +2312,9 @@ export default function AdsAutomation() {
                 ) : null}
                 {creative.fileType === "video" ? (
                   <div className="mt-3 rounded-2xl border border-blue-200 bg-blue-50 p-3 text-sm font-semibold text-blue-900">
-                    <p>Видео загружено. Публичная ссылка получена. Видео готово для отчёта.</p>
-                    {creative.metaVideoId ? <p className="mt-1 font-black">Получен video_id: {creative.metaVideoId}</p> : null}
-                    {creative.videoProcessingStatus ? <p className="mt-1">Meta processing: {creative.videoProcessingStatus}</p> : null}
+                    <p>Видео загружено. Файл подготовлен. Видео готово для отчёта.</p>
+                    {creative.metaVideoId ? <p className="mt-1 font-black">Видео принято Meta.</p> : null}
+                    {creative.videoProcessingStatus ? <p className="mt-1">Видео обрабатывается.</p> : null}
                     <p className="mt-1">{VIDEO_REQUIREMENTS_MESSAGE}</p>
                     {(creative.mimeType === "video/quicktime" || creative.fileName.toLowerCase().endsWith(".mov")) ? (
                       <p className="mt-1 font-black text-amber-800">{MOV_VIDEO_WARNING}</p>
@@ -2293,14 +2335,14 @@ export default function AdsAutomation() {
                 {!creative.publicUrl ? (
                   <div className={`mt-3 rounded-2xl border p-3 ${uploadStatus === "failed" ? "border-red-200 bg-red-50" : "border-amber-200 bg-amber-50"}`}>
                     <p className={`text-sm font-semibold ${uploadStatus === "failed" ? "text-red-900" : "text-amber-900"}`}>{uploadProblem}</p>
-                    {storageHealth?.hint ? <p className="mt-1 text-xs font-bold text-amber-800">{storageHealth.hint}</p> : null}
+                    {isAdminMode && storageHealth?.hint ? <p className="mt-1 text-xs font-bold text-amber-800">{storageHealth.hint}</p> : null}
                     <button type="button" className="neu-btn mt-3 justify-center" disabled={loading === "storage"} onClick={checkStorage}>
                       {loading === "storage" ? <Loader2 className="animate-spin" size={16} /> : <ShieldCheck size={16} />}
-                      Проверить Storage
+                      Проверить загрузку
                     </button>
                   </div>
                 ) : null}
-                {uploadDebug ? (
+                {isAdminMode && uploadDebug ? (
                   <details className="mt-3 rounded-2xl border border-blue-200 bg-blue-50 p-3">
                     <summary className="cursor-pointer text-xs font-black uppercase tracking-[0.1em] text-blue-700">Техническая информация</summary>
                     <div className="mt-2 grid gap-1 break-words text-xs font-semibold text-blue-900">
@@ -2653,7 +2695,7 @@ export default function AdsAutomation() {
           <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4">
             <p className="text-xs font-black uppercase tracking-[0.1em] text-amber-800">Риски</p>
             <ul className="mt-3 space-y-2 text-sm font-semibold text-amber-900">
-              {(report.risks || ["Проверить текст, бюджет и адрес заявок перед ACTIVE запуском."]).map((item) => <li key={item}>• {item}</li>)}
+              {(report.risks || ["Проверить текст, бюджет и адрес заявок перед созданием кампании."]).map((item) => <li key={item}>• {item}</li>)}
             </ul>
           </div>
           <div className="rounded-2xl border border-blue-200 bg-blue-50 p-4">
@@ -2665,7 +2707,7 @@ export default function AdsAutomation() {
               <li>• Гео: {targetingGeoMode === "city" ? `${targetingSelectedCityLabel || targetingCity || selectedCity.labelRu}, город Meta` : `Казахстан; city key для ${targetingSelectedCityLabel} не найден`}</li>
               <li>• Креатив: {creative?.fileType === "video" ? "видео" : "фото"}</li>
               <li>• Объявление: {aiPackage?.headline || "-"}</li>
-              <li>• Статус: {statusMode === "ACTIVE" ? "активно" : "выключено"}</li>
+              <li>• Статус: выключено</li>
             </ul>
           </div>
         </div>
@@ -2676,9 +2718,10 @@ export default function AdsAutomation() {
           </div>
         ) : null}
 
-        <details className="mt-5 rounded-2xl border border-[#D8E4EC] bg-white/65 p-4">
-          <summary className="cursor-pointer text-sm font-black text-[#0F172A]">Подробности Meta payload</summary>
-          <div className="mt-4 grid gap-3 text-sm">
+        {isAdminMode ? (
+          <details className="mt-5 rounded-2xl border border-[#D8E4EC] bg-white/65 p-4">
+            <summary className="cursor-pointer text-sm font-black text-[#0F172A]">Подробности Meta payload</summary>
+            <div className="mt-4 grid gap-3 text-sm">
             <p><b>Ad account:</b> {metaSummary?.adAccountId || "env/backend"}</p>
             <p><b>Page:</b> {metaSummary?.pageId || "env/backend"}</p>
             <p><b>Instagram actor:</b> {metaSummary?.instagramActorId || "env/backend"}</p>
@@ -2738,8 +2781,9 @@ export default function AdsAutomation() {
             <p><b>video.launchEnabled:</b> {String(creativeVideoLaunchEnabled)}</p>
             <p><b>creative.usesInstagramActor:</b> {creativeUsesInstagramActor}</p>
             <p><b>creative.instagramActorFallback:</b> {creativeInstagramActorFallback}</p>
-          </div>
-        </details>
+            </div>
+          </details>
+        ) : null}
 
         {assetFileType === "video" && creativeVideoWarnings.length ? (
           <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm font-bold text-amber-900">
@@ -2749,7 +2793,7 @@ export default function AdsAutomation() {
 
         {creativeImageUploadCapabilityFallback ? (
           <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm font-bold text-amber-900">
-            Meta не разрешила загрузить изображение через /adimages. Система попробовала создать креатив через публичную ссылку Supabase.
+            Meta не разрешила стандартную загрузку изображения. Система попробовала создать креатив через подготовленную публичную ссылку файла.
           </div>
         ) : null}
 
@@ -2770,7 +2814,7 @@ export default function AdsAutomation() {
   }
 
   function renderLaunchStep() {
-    const errors = prelaunchErrors(statusMode);
+    const errors = prelaunchErrors("PAUSED");
     const realLaunchBlockedByCreative = realLaunchNeedsCreativeLink(creative, storageHealth);
     const realLaunchBlockedByVideo = creative?.fileType === "video" && !metaSummary?.videoLaunchEnabled ? VIDEO_REAL_LAUNCH_DISABLED_MESSAGE : "";
     const realLaunchBusy = loading === "launch" || loading === "video";
@@ -2793,7 +2837,7 @@ export default function AdsAutomation() {
     const launchVideoWarnings = uniqueStrings([...(creative?.videoWarnings || []), ...(launchResult?.videoWarnings || [])]);
     const launchIsActive = launchResult?.metaStatus === "ACTIVE" || launchResult?.status === "active";
     const launchResultTitle = launchResult?.dryRun
-      ? "Проверка без запуска (DRY-RUN)"
+      ? "Проверка без запуска"
       : launchIsActive
         ? "Реклама создана и запущена в Meta"
         : "Реклама создана в Meta выключенной";
@@ -2809,7 +2853,7 @@ export default function AdsAutomation() {
         <h2 className="mt-1 text-2xl font-black text-[#0F172A]">Подтверждение запуска</h2>
         <div className="mt-4 flex flex-wrap gap-2">
           <StatusPill tone={metaSummary?.configured ? "green" : "amber"}>{metaSummary?.configured ? "Meta env настроены" : "Meta env не подтверждены"}</StatusPill>
-          <StatusPill tone={liveLaunchEnabled ? "green" : "slate"}>{liveLaunchEnabled ? "ACTIVE разрешён в Admin" : "ACTIVE выключен в Admin"}</StatusPill>
+          <StatusPill tone="green">Безопасный режим</StatusPill>
           <StatusPill tone={creative?.fileType === "video" ? "blue" : "slate"}>{creative?.fileType === "video" ? "Видео" : "Фото"}</StatusPill>
         </div>
 
@@ -2833,16 +2877,16 @@ export default function AdsAutomation() {
           ))}
         </div>
 
-        <div className="mt-5 grid gap-4 md:grid-cols-2">
-          <label>
-            <span style={labelStyle}>Режим запуска</span>
-            <select style={inputStyle} value={statusMode} onChange={(event) => setStatusMode(event.target.value as "PAUSED" | "ACTIVE")}>
-              <option value="PAUSED">Создать в Meta выключенным</option>
-              <option value="ACTIVE">Запустить рекламу сразу</option>
-            </select>
-            <p className="mt-2 text-xs font-bold text-[#64748B]">{statusModeLabel(statusMode)}</p>
-          </label>
-          <Field label="Для ACTIVE введите ЗАПУСТИТЬ" value={activeConfirmation} onChange={setActiveConfirmation} />
+        <div className="mt-5 rounded-[24px] border border-emerald-200 bg-emerald-50 p-5">
+          <div className="flex items-start gap-3">
+            <ShieldCheck className="mt-0.5 text-emerald-700" size={22} />
+            <div>
+              <p className="text-base font-black text-emerald-950">Безопасный режим: реклама создаётся выключенной</p>
+              <p className="mt-1 text-sm font-semibold leading-relaxed text-emerald-800">
+                Negis подготовит кампанию в Meta, но она не начнёт тратить бюджет. Сотрудник или администратор сможет проверить объявление и включить его вручную в Ads Manager.
+              </p>
+            </div>
+          </div>
         </div>
 
         {errors.length ? (
@@ -2856,7 +2900,7 @@ export default function AdsAutomation() {
             <p className="text-sm font-semibold text-amber-900">{realLaunchBlockedByCreative}</p>
             <button type="button" className="neu-btn mt-3 justify-center" disabled={loading === "storage"} onClick={checkStorage}>
               {loading === "storage" ? <Loader2 className="animate-spin" size={16} /> : <ShieldCheck size={16} />}
-              Проверить Storage
+              Проверить загрузку
             </button>
           </div>
         ) : null}
@@ -2894,10 +2938,6 @@ export default function AdsAutomation() {
           <button type="button" className="neu-btn-primary justify-center" disabled={realLaunchDisabled} onClick={() => void launch("PAUSED")}>
             {realLaunchBusy ? <Loader2 className="animate-spin" size={16} /> : <Rocket size={16} />}
             Создать в Meta выключенным
-          </button>
-          <button type="button" className="neu-btn justify-center border-red-200 text-red-700" disabled={realLaunchDisabled} onClick={() => void launch("ACTIVE")}>
-            <AlertTriangle size={16} />
-            Запустить рекламу
           </button>
         </div>
 
@@ -2944,7 +2984,7 @@ export default function AdsAutomation() {
                 ["Плейсмент", "Instagram"],
                 ["Куда идут заявки", destination.label],
                 ["Тип креатива", creative?.fileType === "video" ? "видео" : "фото"],
-                ["Статус", launchIsActive ? "активна (ACTIVE)" : "выключено (PAUSED)"],
+                ["Статус", launchIsActive ? "активна" : "выключено"],
               ].map(([label, value]) => (
                 <div key={label} className="rounded-2xl border border-emerald-100 bg-white/70 px-4 py-3">
                   <p className="text-xs font-black uppercase tracking-[0.1em] text-emerald-700">{label}</p>
@@ -2959,7 +2999,7 @@ export default function AdsAutomation() {
             ) : null}
             {launchImageUploadCapabilityFallback ? (
               <p className="mt-2 text-sm font-bold text-amber-800">
-                Meta не разрешила загрузить изображение через /adimages. Система попробовала создать креатив через публичную ссылку Supabase.
+                Meta не разрешила стандартную загрузку изображения. Система попробовала создать креатив через подготовленную публичную ссылку файла.
               </p>
             ) : null}
             <p className="mt-2 text-xs font-semibold text-amber-800">
@@ -2981,18 +3021,20 @@ export default function AdsAutomation() {
               </button>
             </div>
 
-            <details className="mt-4 rounded-2xl border border-emerald-100 bg-white/60 p-3">
-              <summary className="cursor-pointer text-xs font-black uppercase tracking-[0.1em] text-emerald-700">Технические данные</summary>
-              <div className="mt-2 grid gap-1 break-words text-xs font-semibold text-[#475569]">
-                <p>Campaign ID: {launchResult.metaCampaignId || "-"}</p>
-                <p>Ad Set ID: {launchResult.metaAdSetId || "-"}</p>
-                <p>Creative ID: {launchResult.metaCreativeId || "-"}</p>
-                <p>Ad ID: {launchResult.metaAdId || "-"}</p>
-                {creative?.fileType === "video" ? <p>Video ID: {launchMetaVideoId || "-"}</p> : null}
-                {creative?.fileType === "video" ? <p>Video upload mode: {launchVideoUploadMode || "-"}</p> : null}
-                {creative?.fileType === "video" ? <p>Video processing: {launchVideoProcessingStatus || "-"}</p> : null}
-              </div>
-            </details>
+            {isAdminMode ? (
+              <details className="mt-4 rounded-2xl border border-emerald-100 bg-white/60 p-3">
+                <summary className="cursor-pointer text-xs font-black uppercase tracking-[0.1em] text-emerald-700">Технические данные</summary>
+                <div className="mt-2 grid gap-1 break-words text-xs font-semibold text-[#475569]">
+                  <p>Campaign ID: {launchResult.metaCampaignId || "-"}</p>
+                  <p>Ad Set ID: {launchResult.metaAdSetId || "-"}</p>
+                  <p>Creative ID: {launchResult.metaCreativeId || "-"}</p>
+                  <p>Ad ID: {launchResult.metaAdId || "-"}</p>
+                  {creative?.fileType === "video" ? <p>Video ID: {launchMetaVideoId || "-"}</p> : null}
+                  {creative?.fileType === "video" ? <p>Video upload mode: {launchVideoUploadMode || "-"}</p> : null}
+                  {creative?.fileType === "video" ? <p>Video processing: {launchVideoProcessingStatus || "-"}</p> : null}
+                </div>
+              </details>
+            ) : null}
           </div>
         ) : null}
 
@@ -3082,24 +3124,24 @@ export default function AdsAutomation() {
               const isRealLaunch = mode === "paused_created" || mode === "active_created";
               const modeBadge =
                 mode === "dry_run"
-                  ? { tone: "blue" as const, label: "DRY-RUN / Проверка" }
+                  ? { tone: "blue" as const, label: "Проверка" }
                   : mode === "video_processing"
                     ? { tone: "amber" as const, label: "Видео обрабатывается" }
                     : mode === "failed"
                       ? { tone: "red" as const, label: "Ошибка запуска" }
                       : mode === "active_created"
-                        ? { tone: "green" as const, label: "ACTIVE / запущено" }
-                        : { tone: "green" as const, label: "PAUSED / выключено" };
+                        ? { tone: "green" as const, label: "Запущено" }
+                        : { tone: "green" as const, label: "Выключено" };
               const modeDescription =
                 mode === "dry_run"
-                  ? "Проверка без запуска. Meta API не вызывался, кампания не создавалась."
+                  ? "Проверка без запуска. Кампания не создавалась."
                   : mode === "video_processing"
                     ? "Видео принято Meta и обрабатывается. Кампания ещё не создана — это не ошибка."
                     : mode === "failed"
                       ? "Реальный запуск не прошёл."
                       : mode === "active_created"
                         ? "Реальная кампания создана и запущена в Meta."
-                        : "Реальная кампания создана в Meta выключенной (PAUSED).";
+                        : "Реальная кампания создана в Meta выключенной.";
               const checking = Boolean(historyVideoCheckId) && historyVideoCheckId === (item.id || historyMetaVideoId);
               const showVideoDetails = payload.creativeType === "video" || mode === "video_processing";
               return (
@@ -3118,7 +3160,7 @@ export default function AdsAutomation() {
                   </div>
                   <p className="mt-2 text-sm font-semibold text-[#64748B]">{modeDescription}</p>
                   <div className="mt-3 grid gap-2 text-sm font-semibold text-[#475569] md:grid-cols-2">
-                    {isRealLaunch ? (
+                    {isAdminMode && isRealLaunch ? (
                       <>
                         <p>Meta Campaign ID: {item.metaCampaignId || "-"}</p>
                         <p>Meta Ad Set ID: {item.metaAdSetId || "-"}</p>
@@ -3131,12 +3173,13 @@ export default function AdsAutomation() {
                     <p>Город: {typeof payload.city === "string" ? payload.city : "-"}</p>
                     <p>Заявки: {historyDestinationLabel(payload)}</p>
                     <p>Файл: {typeof payload.fileName === "string" ? payload.fileName : "-"}</p>
-                    <p>MIME: {typeof payload.mimeType === "string" ? payload.mimeType : "-"}</p>
-                    {showVideoDetails ? <p>Meta Video ID: {historyMetaVideoId || "-"}</p> : null}
-                    {showVideoDetails ? <p>Video upload: {historyVideoUploadMode || "-"}</p> : null}
-                    {showVideoDetails ? <p>Processing: {historyVideoProcessingStatus || "-"}</p> : null}
-                    {showVideoDetails ? <p>Thumbnail: {historyThumbnailUrl ? "yes" : "no"}</p> : null}
-                    {showVideoDetails ? <p>Thumbnail source: {historyThumbnailSource || "-"}</p> : null}
+                    {isAdminMode ? <p>MIME: {typeof payload.mimeType === "string" ? payload.mimeType : "-"}</p> : null}
+                    {showVideoDetails ? <p>Видео: {historyVideoProcessingStatus ? "обрабатывается" : "готово к проверке"}</p> : null}
+                    {isAdminMode && showVideoDetails ? <p>Meta Video ID: {historyMetaVideoId || "-"}</p> : null}
+                    {isAdminMode && showVideoDetails ? <p>Video upload: {historyVideoUploadMode || "-"}</p> : null}
+                    {isAdminMode && showVideoDetails ? <p>Processing: {historyVideoProcessingStatus || "-"}</p> : null}
+                    {showVideoDetails ? <p>Обложка: {historyThumbnailUrl ? "готова" : "не найдена"}</p> : null}
+                    {isAdminMode && showVideoDetails ? <p>Thumbnail source: {historyThumbnailSource || "-"}</p> : null}
                     {showVideoDetails ? (
                       <p>Проверено: {historyLastCheckedAt ? new Date(historyLastCheckedAt).toLocaleString("ru-RU") : "-"}</p>
                     ) : null}
@@ -3145,7 +3188,11 @@ export default function AdsAutomation() {
                   {showVideoDetails && historyVideoWarnings.length ? (
                     <p className="mt-3 text-sm font-bold text-amber-700">{historyVideoWarnings.join(" ")}</p>
                   ) : null}
-                  {mode === "failed" && item.lastError ? <p className="mt-3 text-sm font-bold text-red-600">{item.lastError}</p> : null}
+                  {mode === "failed" && item.lastError ? (
+                    <p className="mt-3 text-sm font-bold text-red-600">
+                      {isAdminMode ? item.lastError : "Запуск не прошёл. Откройте админ-режим, чтобы посмотреть техническую причину."}
+                    </p>
+                  ) : null}
                   <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:flex-wrap">
                     {mode === "video_processing" && historyMetaVideoId ? (
                       <button type="button" className="neu-btn justify-center" disabled={checking} onClick={() => void recheckHistoryVideo(item)}>
@@ -3174,33 +3221,75 @@ export default function AdsAutomation() {
   }
 
   const stepContent = [renderCreativeStep, renderBriefStep, renderAiStep, renderComplianceStep, renderReportStep, renderLaunchStep][currentStep - 1]();
+  const activeClientStep = clientStepForInternal(currentStep);
+  const creativeReadiness: ReadinessState =
+    uploadStatus === "failed" || creative?.status === "failed" || creative?.status === "upload_failed"
+      ? "error"
+      : creative?.publicUrl
+        ? creative.fileType === "video" && !creative.thumbnailUrl
+          ? "action"
+          : "ready"
+        : loading === "upload" || videoJobPending
+          ? "checking"
+          : "action";
+  const parametersReadiness: ReadinessState =
+    brief.service.trim() && selectedCity.labelRu && Number(brief.dailyBudget) > 0 && brief.destinationValue.trim() ? "ready" : "action";
+  const previewReadiness: ReadinessState = compliance?.status === "blocked" ? "error" : aiPackage && compliance ? "ready" : loading === "ai" || loading === "check" ? "checking" : "action";
+  const metaReadiness: ReadinessState = loading === "health" ? "checking" : metaSummary?.configured ? "ready" : "action";
+  const storageReadiness: ReadinessState =
+    uploadStatus === "failed" ? "error" : creative?.publicUrl || storageHealth?.publicUrlWorks || hasSupabaseFrontendEnv ? "ready" : loading === "storage" ? "checking" : "action";
+  const summaryRows = [
+    ["Клиника", firstString(asRecord(user).workspaceName, asRecord(user).clinicName, "Concept Med")],
+    ["Услуга", brief.service],
+    ["Город", selectedCity.labelRu || brief.city],
+    ["Площадка", "Instagram"],
+    ["Бюджет", `${brief.dailyBudget || 0} USD/день · ${totalBudget} USD примерно`],
+    ["Назначение", destination.label],
+    ["Статус", statusModeLabel("PAUSED")],
+  ];
 
   return (
     <PageLayout>
-      <div className="space-y-6">
-        <header className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
-          <div>
-            <p className="text-xs font-black uppercase tracking-[0.16em] text-[#0D9488]">Meta/Facebook/Instagram Ads</p>
-            <h1 className="mt-2 text-3xl font-black text-[#0F172A]">Автозапуск рекламы</h1>
-            <p className="mt-2 max-w-3xl text-sm leading-relaxed text-[#64748B]">
-              Русский мастер для сотрудника: загрузить креатив, ответить на ключевые вопросы, проверить безопасность и создать рекламу в Meta.
-            </p>
-          </div>
-          <div className="flex flex-col gap-2 sm:flex-row">
-            <Link href="/ads">
-              <button type="button" className="neu-btn justify-center">
-                <Megaphone size={16} />
-                Раздел рекламы
+      <div className="mx-auto max-w-[1440px] space-y-6 px-4 py-5 sm:px-6 lg:px-8">
+        <header className="rounded-[28px] border border-white/70 bg-white/82 p-5 shadow-[0_18px_55px_rgba(15,118,110,0.10)] sm:p-6">
+          <div className="flex flex-col gap-5 xl:flex-row xl:items-end xl:justify-between">
+            <div>
+              <p className="text-xs font-black uppercase tracking-[0.18em] text-[#0D9488]">Meta Ads · Clean Medical</p>
+              <h1 className="mt-2 text-3xl font-black text-[#0F172A] sm:text-4xl">Запуск рекламы в Meta</h1>
+              <p className="mt-3 max-w-3xl text-sm leading-relaxed text-[#64748B]">
+                Спокойный мастер для клиники: загрузите креатив, заполните параметры, проверьте предпросмотр и создайте кампанию выключенной.
+              </p>
+            </div>
+            <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap xl:justify-end">
+              <div className="inline-flex rounded-2xl border border-[#D8E4EC] bg-[#F8FCFB] p-1">
+                {(["client", "admin"] as UiMode[]).map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    className={`rounded-xl px-3 py-2 text-xs font-black transition ${
+                      uiMode === mode ? "bg-[#0D9488] text-white shadow-sm" : "text-[#64748B] hover:bg-white"
+                    }`}
+                    onClick={() => setUiMode(mode)}
+                  >
+                    {mode === "client" ? "Клиентский режим" : "Админ режим"}
+                  </button>
+                ))}
+              </div>
+              <Link href="/ads">
+                <button type="button" className="neu-btn justify-center">
+                  <Megaphone size={16} />
+                  Раздел рекламы
+                </button>
+              </Link>
+              <button type="button" className="neu-btn justify-center" onClick={() => setLocation(isHistoryView ? "/ads-automation" : "/ads-automation/history")}>
+                <History size={16} />
+                {isHistoryView ? "Новый запуск" : "История запусков"}
               </button>
-            </Link>
-            <button type="button" className="neu-btn justify-center" onClick={() => setLocation(isHistoryView ? "/ads-automation" : "/ads-automation/history")}>
-              <History size={16} />
-              {isHistoryView ? "Новый запуск" : "История запусков"}
-            </button>
-            <button type="button" className="neu-btn-primary justify-center" disabled={loading === "health"} onClick={() => void checkHealth()}>
-              {loading === "health" ? <Loader2 className="animate-spin" size={16} /> : <ShieldCheck size={16} />}
-              Проверить Meta
-            </button>
+              <button type="button" className="neu-btn-primary justify-center" disabled={loading === "health"} onClick={() => void checkHealth()}>
+                {loading === "health" ? <Loader2 className="animate-spin" size={16} /> : <ShieldCheck size={16} />}
+                Проверить Meta
+              </button>
+            </div>
           </div>
         </header>
 
@@ -3214,59 +3303,73 @@ export default function AdsAutomation() {
           renderHistory()
         ) : (
           <>
-            <nav className="grid gap-2 sm:grid-cols-2 lg:grid-cols-6" aria-label="Шаги запуска рекламы">
-              {wizardSteps.map((label, index) => {
+            <nav className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4" aria-label="Шаги запуска рекламы">
+              {clientWizardSteps.map((item, index) => {
                 const step = index + 1;
-                const active = step === currentStep;
-                const done = step < currentStep;
+                const active = step === activeClientStep;
+                const done = step < activeClientStep;
                 return (
                   <button
-                    key={label}
+                    key={item.label}
                     type="button"
-                    className={`rounded-2xl border px-3 py-3 text-left transition ${
+                    className={`rounded-[24px] border px-4 py-4 text-left shadow-sm transition ${
                       active
-                        ? "border-[#0D9488] bg-[#F0FDFA] text-[#0F172A]"
+                        ? "border-[#0D9488] bg-white text-[#0F172A] shadow-[0_16px_38px_rgba(13,148,136,0.14)]"
                         : done
-                          ? "border-emerald-200 bg-white/70 text-emerald-700"
-                          : "border-[#D8E4EC] bg-white/50 text-[#64748B]"
+                          ? "border-emerald-200 bg-white/78 text-emerald-800"
+                          : "border-[#D8E4EC] bg-white/58 text-[#64748B] hover:bg-white/80"
                     }`}
-                    onClick={() => goToStep(step)}
+                    onClick={() => goToStep(item.targetStep)}
                   >
-                    <span className="block text-[11px] font-black uppercase tracking-[0.12em]">Шаг {step}</span>
-                    <span className="mt-1 block text-sm font-black">{label}</span>
+                    <span className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-[#E6F7F5] text-xs font-black text-[#0D9488]">{step}</span>
+                    <span className="mt-3 block text-base font-black">{item.label}</span>
+                    <span className="mt-1 block text-xs font-semibold leading-relaxed">{item.description}</span>
                   </button>
                 );
               })}
             </nav>
 
-            <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_330px]">
-              <div>{stepContent}</div>
-              <aside className="space-y-4">
-                <section className="neu-card p-5">
+            <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">
+              <div className="min-w-0">{stepContent}</div>
+              <aside className="space-y-4 xl:sticky xl:top-6 xl:self-start">
+                <section className="rounded-[28px] border border-white/70 bg-white/86 p-5 shadow-[0_18px_50px_rgba(15,118,110,0.10)]">
                   <div className="flex items-center gap-2">
                     <ClipboardList size={18} className="text-[#0D9488]" />
-                    <h2 className="text-base font-black text-[#0F172A]">Сводка</h2>
+                    <h2 className="text-base font-black text-[#0F172A]">Сводка запуска</h2>
                   </div>
-                  <div className="mt-4 space-y-3 text-sm">
-                    <p><b>Креатив:</b> {creative ? `${creative.fileType === "video" ? "Видео" : "Фото"} · ${creative.fileName}` : "не загружен"}</p>
-                    <p><b>Услуга:</b> {brief.service}</p>
-                    <p><b>Город:</b> {brief.city}</p>
-                    <p><b>Заявки:</b> {destination.label}</p>
-                    <p><b>Бюджет:</b> {brief.dailyBudget || 0} USD/день · {totalBudget} USD примерно</p>
-                    <p><b>Статус:</b> {statusModeLabel(statusMode)}</p>
+                  <div className="mt-4 grid gap-3 text-sm">
+                    {summaryRows.map(([label, value]) => (
+                      <div key={label} className="rounded-2xl border border-[#E2EDF2] bg-[#F8FCFB] px-4 py-3">
+                        <p className="text-[11px] font-black uppercase tracking-[0.1em] text-[#6B7B8F]">{label}</p>
+                        <p className="mt-1 break-words font-bold text-[#0F172A]">{value || "-"}</p>
+                      </div>
+                    ))}
                   </div>
                 </section>
-                <section className="neu-card p-5">
+
+                <section className="rounded-[28px] border border-white/70 bg-white/86 p-5 shadow-[0_18px_50px_rgba(15,118,110,0.10)]">
                   <div className="flex items-center gap-2">
                     <Sparkles size={18} className="text-[#0D9488]" />
                     <h2 className="text-base font-black text-[#0F172A]">Готовность</h2>
                   </div>
-                  <div className="mt-4 flex flex-wrap gap-2">
-                    <StatusPill tone={creative ? "green" : "slate"}>Креатив</StatusPill>
-                    <StatusPill tone={aiPackage ? "green" : "slate"}>ИИ пакет</StatusPill>
-                    <StatusPill tone={compliance ? (compliance.status === "blocked" ? "red" : "green") : "slate"}>Проверка</StatusPill>
-                    <StatusPill tone={metaSummary?.configured ? "green" : "amber"}>Meta</StatusPill>
-                    <StatusPill tone={hasSupabaseFrontendEnv ? "green" : "amber"}>Supabase Storage</StatusPill>
+                  <div className="mt-4 space-y-2">
+                    <ReadinessRow label="Креатив" state={creativeReadiness} note={creative ? creativeReadyLabel(creative, uploadStatus) : "Загрузите фото или видео"} />
+                    <ReadinessRow label="Параметры" state={parametersReadiness} note={`${selectedCity.labelRu || "Город"} · ${destination.label}`} />
+                    <ReadinessRow label="Предпросмотр" state={previewReadiness} note={aiPackage ? "Текст подготовлен" : "Сначала создайте рекламный пакет"} />
+                    <ReadinessRow label="Meta" state={metaReadiness} note={metaSummary?.configured ? "Подключение найдено" : "Проверьте подключение"} />
+                    <ReadinessRow label="Storage" state={storageReadiness} note={creative?.publicUrl ? "Файл готов" : "Файл подготовится после загрузки"} />
+                  </div>
+                </section>
+
+                <section className="rounded-[28px] border border-emerald-200 bg-emerald-50 p-5">
+                  <div className="flex items-start gap-3">
+                    <ShieldCheck className="mt-0.5 text-emerald-700" size={20} />
+                    <div>
+                      <p className="font-black text-emerald-950">Безопасный режим</p>
+                      <p className="mt-1 text-sm font-semibold leading-relaxed text-emerald-800">
+                        Реклама создаётся выключенной. Деньги не тратятся, пока её вручную не включат в Ads Manager.
+                      </p>
+                    </div>
                   </div>
                 </section>
               </aside>

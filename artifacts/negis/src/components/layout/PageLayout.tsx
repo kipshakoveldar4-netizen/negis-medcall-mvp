@@ -1,6 +1,7 @@
 import React from 'react';
 import { Topbar } from './Topbar';
 import { MobileNav } from './MobileNav';
+import { Sidebar } from './Sidebar';
 import { useAuth } from '@/contexts/AuthContext';
 import { Redirect } from 'wouter';
 
@@ -31,17 +32,24 @@ export function PageLayout({ children, requireAuth = true }: PageLayoutProps) {
 
   return (
     <div
-      className="negis-app-shell min-h-[100dvh] flex flex-col font-sans"
+      className="negis-app-shell min-h-[100dvh] font-sans"
       style={{
-        background: 'radial-gradient(circle at 16% 0%, rgba(13, 148, 136, 0.10), transparent 30%), radial-gradient(circle at 86% 4%, rgba(15, 118, 110, 0.08), transparent 28%), #EEF4F8',
+        background: 'linear-gradient(135deg, #F8FCFB 0%, #EEF8F7 46%, #EEF6FF 100%)',
         color: '#0F172A',
         paddingTop: isImpersonation ? 40 : 0,
       }}
     >
-      <Topbar />
-      <main className="negis-main flex-1 overflow-y-auto">
-        {children}
-      </main>
+      <div className="hidden md:block">
+        <Sidebar />
+      </div>
+      <div className="flex min-h-[100dvh] flex-col md:pl-[248px]">
+        <div className="md:hidden">
+          <Topbar />
+        </div>
+        <main className="negis-main flex-1 overflow-y-auto pb-24 md:pb-0">
+          {children}
+        </main>
+      </div>
       <MobileNav />
     </div>
   );

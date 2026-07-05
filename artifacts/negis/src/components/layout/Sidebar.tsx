@@ -1,20 +1,20 @@
 import { useState } from 'react';
 import { Link, useLocation } from 'wouter';
-import { BarChart2, CalendarDays, Building2, Briefcase, Settings, LogOut, X, Check, KeyRound, User, Megaphone, ClipboardList, BrainCircuit, Clapperboard } from 'lucide-react';
+import { BarChart2, CalendarDays, Settings, LogOut, X, Check, KeyRound, User, Megaphone, ClipboardList, BrainCircuit, Clapperboard, Rocket, Users } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
 import { supabase } from '@/lib/supabase';
 import { toast } from 'sonner';
 
 const NAV = [
-  { href: '/targeting-agent', icon: BrainCircuit, label: 'ИИ таргетолог', roles: ['owner', 'manager'] },
-  { href: '/content-studio', icon: Clapperboard, label: 'ИИ студия контента', roles: ['owner', 'manager'] },
-  { href: '/dashboard', icon: BarChart2,    label: 'Дашборд',  roles: ['owner', 'manager'] },
-  { href: '/appointments', icon: CalendarDays, label: 'Запись', roles: ['owner', 'manager', 'agent', 'booking_agent'] },
-  { href: '/reception', icon: Building2,    label: 'Ресепшн',  roles: ['owner', 'manager', 'receptionist', 'booking_agent'] },
-  { href: '/sales',     icon: Briefcase,    label: 'Клиенты',  roles: ['owner', 'manager', 'agent'] },
-  { href: '/tasks',     icon: ClipboardList, label: 'Задачи',   roles: ['owner', 'manager', 'agent'] },
-  { href: '/ads',       icon: Megaphone,    label: 'Реклама',  roles: ['owner', 'manager'] },
-  { href: '/admin',     icon: Settings,     label: 'Админ',    roles: ['owner', 'manager'] },
+  { href: '/dashboard', icon: BarChart2, label: 'Дашборд', roles: ['owner', 'manager'] },
+  { href: '/ads-automation', icon: Rocket, label: 'Реклама', roles: ['owner', 'manager'] },
+  { href: '/ads-automation/history', icon: ClipboardList, label: 'История запусков', roles: ['owner', 'manager'] },
+  { href: '/clients', icon: Users, label: 'Клиенты', roles: ['owner', 'manager', 'agent'] },
+  { href: '/content-studio', icon: Clapperboard, label: 'Контент-студия', roles: ['owner', 'manager'] },
+  { href: '/targeting-agent', icon: BrainCircuit, label: 'AI таргетолог', roles: ['owner', 'manager'] },
+  { href: '/appointments', icon: CalendarDays, label: 'Записи', roles: ['owner', 'manager', 'agent', 'booking_agent'] },
+  { href: '/leads', icon: Megaphone, label: 'Лиды', roles: ['owner', 'manager', 'agent'] },
+  { href: '/admin', icon: Settings, label: 'Настройки', roles: ['owner', 'manager'] },
 ];
 
 export function Sidebar() {
@@ -65,22 +65,24 @@ export function Sidebar() {
     <>
       <aside
         className="fixed left-0 top-0 h-screen flex flex-col z-20 select-none"
-        style={{ width: 78, background: '#EEF2F6', borderRight: '1px solid #E7ECF3' }}
+        style={{ width: 248, background: 'rgba(255,255,255,0.88)', borderRight: '1px solid #DDEBEA', boxShadow: '8px 0 28px rgba(15, 23, 42, 0.04)', backdropFilter: 'blur(18px)' }}
       >
         {/* Logo */}
-        <div className="flex items-center justify-center shrink-0" style={{ height: 72 }}>
-          <div style={{
-            background: '#DDE5EE', borderRadius: 12, padding: '7px 10px',
-            boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.6), 0 1px 3px rgba(15,23,42,0.06)',
-            letterSpacing: '0.16em', fontSize: 11, fontWeight: 600, color: '#0B1220',
-            textTransform: 'uppercase' as const, fontFamily: "'Inter', sans-serif",
-          }}>
+        <div className="flex items-center gap-3 shrink-0 px-5" style={{ height: 78 }}>
+          <div
+            className="flex h-11 w-11 items-center justify-center rounded-2xl"
+            style={{ background: '#DDF7F2', border: '1px solid #BDEBE2', color: '#0F766E', fontWeight: 900, letterSpacing: '0.08em' }}
+          >
             N
+          </div>
+          <div className="min-w-0">
+            <p className="text-sm font-black text-[#0F172A]">Negis MedCall</p>
+            <p className="mt-0.5 text-xs font-bold text-[#64748B]">Clean Medical CRM</p>
           </div>
         </div>
 
         {/* Nav */}
-        <nav className="flex-1 flex flex-col items-center gap-2 pt-2 pb-4">
+        <nav className="flex-1 flex flex-col gap-1.5 px-3 pt-2 pb-4">
           {filtered.map(({ href, icon: Icon, label }) => {
             const active = location === href || location.startsWith(href + '/');
             return (
@@ -90,18 +92,23 @@ export function Sidebar() {
                   className="control-node"
                   data-active={active}
                   style={{
-                    width: 48, height: 48, borderRadius: 14,
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    minHeight: 44,
+                    borderRadius: 16,
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 12,
+                    padding: '10px 13px',
                     cursor: 'pointer', transition: 'all 0.15s ease',
-                    background: active ? '#FFFFFF' : 'transparent',
-                    border: active ? '1px solid #E7ECF3' : '1px solid transparent',
+                    background: active ? '#ECFDF8' : 'transparent',
+                    border: active ? '1px solid #BDEBE2' : '1px solid transparent',
                     boxShadow: active
-                      ? '0 2px 8px rgba(15,23,42,0.07), inset 0 1px 0 rgba(255,255,255,0.9)'
-                      : '0 1px 2px rgba(15,23,42,0.04), inset 0 1px 0 rgba(255,255,255,0.7)',
-                    color: active ? '#1E325C' : '#64748B',
+                      ? '0 8px 20px rgba(13,148,136,0.08), inset 0 1px 0 rgba(255,255,255,0.9)'
+                      : 'none',
+                    color: active ? '#0F766E' : '#64748B',
                   }}
                 >
                   <Icon size={20} strokeWidth={active ? 2 : 1.75} />
+                  <span className="truncate text-sm font-black">{label}</span>
                 </div>
               </Link>
             );
@@ -110,8 +117,8 @@ export function Sidebar() {
 
         {/* User + Signout */}
         <div
-          className="shrink-0 flex flex-col items-center gap-3 pb-5 pt-3"
-          style={{ borderTop: '1px solid #E7ECF3' }}
+          className="shrink-0 flex items-center gap-3 px-4 pb-5 pt-3"
+          style={{ borderTop: '1px solid #DDEBEA' }}
         >
           {/* Avatar — clickable */}
           <button
@@ -135,6 +142,14 @@ export function Sidebar() {
             }}
           >
             {initials}
+          </button>
+          <button
+            onClick={openProfile}
+            className="min-w-0 flex-1 text-left"
+            style={{ color: '#0F172A' }}
+          >
+            <p className="truncate text-sm font-black">{user?.user_metadata?.full_name || 'Профиль'}</p>
+            <p className="truncate text-xs font-semibold text-[#64748B]">{user?.email || 'demo mode'}</p>
           </button>
 
           {/* Logout */}
