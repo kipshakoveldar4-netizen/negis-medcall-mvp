@@ -172,7 +172,21 @@ type StorageHealth = {
 };
 
 type UploadStatus = "idle" | "validating" | "getting_signed_url" | "uploading_to_storage" | "saving_metadata" | "ready" | "failed";
-type CreativeReadinessStatus = "idle" | "selected" | "uploading" | "uploaded" | "generating_thumbnail" | "ready_for_meta" | "failed" | "too_large" | "needs_thumbnail";
+type CreativeReadinessStatus =
+  | "idle"
+  | "selected"
+  | "uploading"
+  | "uploaded"
+  | "generating_thumbnail"
+  | "ready_for_meta"
+  | "failed"
+  | "too_large"
+  | "needs_thumbnail"
+  | "optimizing"
+  | "optimization_ready"
+  | "optimization_failed"
+  | "direct_upload_too_large_disabled"
+  | "config_loading";
 type RealLaunchStatus = "idle" | "creating" | "failed" | "created" | "video_processing";
 type LaunchMode = "dry_run" | "video_processing" | "paused_created" | "active_created" | "failed";
 
@@ -189,6 +203,7 @@ type UploadDebug = {
   uploadStage?: string;
   lastError?: string;
   responseKeys: string[];
+  videoOptimizationLoaded?: boolean;
   videoOptimizationEnabled?: boolean;
   videoOptimizationThresholdMb?: number;
   videoOptimizationMaxInputMb?: number;
@@ -277,6 +292,8 @@ const VIDEO_OPTIMIZING_LAUNCH_BLOCKED_MESSAGE =
 const VIDEO_OPTIMIZATION_FAILED_MESSAGE = "Не удалось оптимизировать видео. Попробуйте загрузить MP4 меньшего размера или другое видео.";
 const VIDEO_OPTIMIZATION_CONFIG_LOADING_MESSAGE =
   "Настройки оптимизации видео ещё загружаются. Подождите несколько секунд и попробуйте снова.";
+const VIDEO_OPTIMIZATION_DISABLED_TOO_LARGE_MESSAGE =
+  "Видео слишком большое для прямой загрузки. Автоматическая оптимизация видео сейчас выключена.";
 
 const videoJobStatusLabels: Record<VideoJobStatus, string> = {
   awaiting_upload: "Загружаем исходное видео",
@@ -530,7 +547,7 @@ function friendlyCreativeError(rawError: string, creative?: CreativeAsset | null
   if (isTooLargeUploadError(rawError)) {
     return creative?.fileType === "image"
       ? "Файл слишком большой для прямой загрузки."
-      : "Видео слишком большое для прямой загрузки. Следующим этапом будет добавлена автоматическая оптимизация видео.";
+      : "Видео слишком большое для прямой загрузки. Попробуйте файл меньшего размера.";
   }
   if (text.includes("publicurl") || text.includes("public url") || text.includes("публич")) {
     return "Не удалось подготовить публичную ссылку для Meta.";
@@ -550,16 +567,70 @@ function getCreativeReadiness({
   loading,
   videoJobPending,
   lastUploadError,
+  videoJob,
+  videoOptimization,
+  configBlocked,
 }: {
   creative: CreativeAsset | null;
   uploadStatus: UploadStatus;
   loading?: string | null;
   videoJobPending?: boolean;
   lastUploadError?: string;
+  videoJob?: VideoJob | null;
+  videoOptimization?: { enabled?: boolean; thresholdMb?: number; maxInputMb?: number } | null;
+  configBlocked?: boolean;
 }): CreativeReadiness {
   const rawError = lastUploadError || "";
   const failed = uploadStatus === "failed" || creative?.status === "failed" || creative?.status === "upload_failed";
   const tooLarge = failed && isTooLargeUploadError(rawError);
+
+  // Optimization pipeline states take priority: a failure inside the large-video
+  // branch must never be reported as a "direct upload too large" problem.
+  if (configBlocked) {
+    return {
+      status: "config_loading",
+      label: "Настройки оптимизации загружаются",
+      tone: "amber",
+      isReadyForMeta: false,
+      isBlocking: true,
+      clientMessage: VIDEO_OPTIMIZATION_CONFIG_LOADING_MESSAGE,
+      adminMessage: rawError,
+    };
+  }
+  if (videoJob?.status === "failed") {
+    return {
+      status: "optimization_failed",
+      label: "Не удалось оптимизировать видео",
+      tone: "red",
+      isReadyForMeta: false,
+      isBlocking: true,
+      clientMessage: VIDEO_OPTIMIZATION_FAILED_MESSAGE,
+      adminMessage: videoJob.error || rawError,
+    };
+  }
+  if (videoJobPending) {
+    return {
+      status: "optimizing",
+      label: "Идёт оптимизация видео",
+      tone: "blue",
+      isReadyForMeta: false,
+      isBlocking: false,
+      clientMessage: `${VIDEO_OPTIMIZING_MESSAGE} ${VIDEO_OPTIMIZING_LAUNCH_BLOCKED_MESSAGE}`,
+      adminMessage: rawError,
+    };
+  }
+  // Direct upload rejected by size while the optimization pipeline is disabled.
+  if (tooLarge && videoOptimization && videoOptimization.enabled !== true && creative?.fileType !== "image") {
+    return {
+      status: "direct_upload_too_large_disabled",
+      label: "Видео слишком большое для прямой загрузки",
+      tone: "red",
+      isReadyForMeta: false,
+      isBlocking: true,
+      clientMessage: VIDEO_OPTIMIZATION_DISABLED_TOO_LARGE_MESSAGE,
+      adminMessage: rawError,
+    };
+  }
 
   if (!creative) {
     if (failed) {
@@ -656,13 +727,14 @@ function getCreativeReadiness({
     };
   }
 
+  const optimizationReady = videoJob?.status === "ready";
   return {
-    status: "ready_for_meta",
-    label: "Креатив готов для Meta",
+    status: optimizationReady ? "optimization_ready" : "ready_for_meta",
+    label: optimizationReady ? VIDEO_OPTIMIZED_READY_MESSAGE : "Креатив готов для Meta",
     tone: "green",
     isReadyForMeta: true,
     isBlocking: false,
-    clientMessage: "Креатив готов для Meta",
+    clientMessage: optimizationReady ? `${VIDEO_OPTIMIZED_READY_MESSAGE}. Можно продолжать запуск.` : "Креатив готов для Meta",
     adminMessage: rawError,
   };
 }
@@ -1102,6 +1174,7 @@ export default function AdsAutomation() {
   const [historyFilter, setHistoryFilter] = useState<HistoryFilter>("all");
   const [historySearch, setHistorySearch] = useState("");
   const [videoJob, setVideoJob] = useState<VideoJob | null>(null);
+  const [videoConfigBlocked, setVideoConfigBlocked] = useState(false);
   const isHistoryView = location === "/ads-automation/history";
   const isAdminMode = uiMode === "admin";
 
@@ -1122,6 +1195,18 @@ export default function AdsAutomation() {
   }, [isHistoryView]);
 
   const videoJobPending = Boolean(videoJob && videoJob.status !== "ready" && videoJob.status !== "failed");
+
+  const readCreativeReadiness = () =>
+    getCreativeReadiness({
+      creative,
+      uploadStatus,
+      loading,
+      videoJobPending,
+      lastUploadError,
+      videoJob,
+      videoOptimization: metaSummary?.videoOptimization || null,
+      configBlocked: videoConfigBlocked,
+    });
 
   useEffect(() => {
     if (!videoJob || videoJob.status === "ready" || videoJob.status === "failed") return;
@@ -1221,7 +1306,11 @@ export default function AdsAutomation() {
     const optimization = metaSummary?.videoOptimization;
     const maxVideoMb = optimization?.enabled ? optimization.maxInputMb || 500 : 100;
     if ((isVideo || allowedVideo) && file.size > maxVideoMb * 1024 * 1024) {
-      details.push(`Видео больше ${maxVideoMb} MB. Загрузите файл меньшего размера.`);
+      details.push(
+        optimization && optimization.enabled !== true
+          ? VIDEO_OPTIMIZATION_DISABLED_TOO_LARGE_MESSAGE
+          : `Видео больше ${maxVideoMb} MB. Загрузите файл меньшего размера.`,
+      );
     }
 
     return details;
@@ -1309,7 +1398,9 @@ export default function AdsAutomation() {
         contentType: file.type || "video/mp4",
       });
       if (uploadError) {
-        throw new Error(`Supabase Storage: ${uploadError.message}`);
+        throw new Error(
+          `Не удалось загрузить исходное видео в хранилище оптимизации: ${uploadError.message}. Проверьте общий лимит загрузки файлов в Supabase (Settings → Storage → Upload file size limit).`,
+        );
       }
 
       setUploadStage("Подтверждаем загрузку исходника");
@@ -1355,7 +1446,6 @@ export default function AdsAutomation() {
       toast.success("Видео загружено, оптимизация запущена");
     } catch (error) {
       const message = error instanceof Error ? error.message : VIDEO_OPTIMIZATION_FAILED_MESSAGE;
-      const friendlyMessage = friendlyCreativeError(message, { fileName: file.name, fileType: "video", mimeType: file.type, fileSize: file.size, previewUrl, status: "failed" });
       setCreative({
         fileName: file.name,
         fileType: "video",
@@ -1365,6 +1455,9 @@ export default function AdsAutomation() {
         publicUrl: "",
         status: "failed",
       });
+      // Mark the failure as an optimization-branch failure so the readiness card
+      // reports optimization_failed instead of the direct-upload too-large state.
+      setVideoJob({ id: "local-failed", status: "failed", error: message });
       setUploadStatus("failed");
       setUploadStage(uploadStatusLabel("failed"));
       setLastUploadError(message);
@@ -1378,8 +1471,8 @@ export default function AdsAutomation() {
         lastError: message,
         responseKeys: ["error"],
       });
-      setNotice(friendlyMessage);
-      toast.error(friendlyMessage);
+      setNotice(message);
+      toast.error(VIDEO_OPTIMIZATION_FAILED_MESSAGE);
     } finally {
       setLoading(null);
     }
@@ -1492,9 +1585,11 @@ export default function AdsAutomation() {
 
     // A large video must never silently fall back to the direct ad-creatives upload.
     // If the optimization config has not arrived from /api/crm/health yet, block and refresh.
+    setVideoConfigBlocked(false);
     if (exceedsThreshold && !optimization) {
       setUploadStatus("idle");
       setUploadStage("");
+      setVideoConfigBlocked(true);
       setNotice(VIDEO_OPTIMIZATION_CONFIG_LOADING_MESSAGE);
       toast.error(VIDEO_OPTIMIZATION_CONFIG_LOADING_MESSAGE);
       void checkHealth();
@@ -1515,6 +1610,7 @@ export default function AdsAutomation() {
 
     const largeVideoBranch = exceedsThreshold && optimization?.enabled === true;
     const optimizationDebug: Partial<UploadDebug> = {
+      videoOptimizationLoaded: Boolean(optimization),
       videoOptimizationEnabled: Boolean(optimization?.enabled),
       videoOptimizationThresholdMb: optimizationThresholdMb,
       videoOptimizationMaxInputMb: optimization?.maxInputMb || 500,
@@ -1715,6 +1811,7 @@ export default function AdsAutomation() {
     setCreative(null);
     setCreativeFile(null);
     setVideoJob(null);
+    setVideoConfigBlocked(false);
     setAiPackage(null);
     setCompliance(null);
     setLaunchResult(null);
@@ -1725,7 +1822,7 @@ export default function AdsAutomation() {
   }
 
   async function fillWithAi() {
-    const readiness = getCreativeReadiness({ creative, uploadStatus, loading, videoJobPending, lastUploadError });
+    const readiness = readCreativeReadiness();
     if (!readiness.isReadyForMeta) {
       setNotice(readiness.clientMessage);
       toast.error("Креатив ещё не готов");
@@ -1973,7 +2070,7 @@ export default function AdsAutomation() {
     const dailyBudget = Number(brief.dailyBudget);
     const start = new Date(brief.startDate);
     const end = brief.endDate ? new Date(brief.endDate) : null;
-    const readiness = getCreativeReadiness({ creative, uploadStatus, loading, videoJobPending, lastUploadError });
+    const readiness = readCreativeReadiness();
 
     if (!creative) errors.push("Добавьте фото или видео.");
     if (creative && !readiness.isReadyForMeta) errors.push(readiness.clientMessage);
@@ -2312,7 +2409,7 @@ export default function AdsAutomation() {
 
   function renderCreativeStep() {
     const videoFeature = getPlanFeature(plan, "video_ads_launch");
-    const readiness = getCreativeReadiness({ creative, uploadStatus, loading, videoJobPending, lastUploadError });
+    const readiness = readCreativeReadiness();
     const uploadProblem = readiness.clientMessage;
     const creativeCanContinue = readiness.isReadyForMeta;
 
@@ -2517,6 +2614,7 @@ export default function AdsAutomation() {
                       <p>publicUrlPreview: {uploadDebug.publicUrlPreview || "-"}</p>
                       <p>uploadStage: {uploadDebug.uploadStage || "-"}</p>
                       <p>lastError: {uploadDebug.lastError || "-"}</p>
+                      <p>videoOptimization.loaded: {uploadDebug.videoOptimizationLoaded === undefined ? "-" : String(uploadDebug.videoOptimizationLoaded)}</p>
                       <p>videoOptimization.enabled: {uploadDebug.videoOptimizationEnabled === undefined ? "-" : String(uploadDebug.videoOptimizationEnabled)}</p>
                       <p>videoOptimization.thresholdMb: {uploadDebug.videoOptimizationThresholdMb ?? "-"}</p>
                       <p>videoOptimization.maxInputMb: {uploadDebug.videoOptimizationMaxInputMb ?? "-"}</p>
@@ -2552,7 +2650,7 @@ export default function AdsAutomation() {
   }
 
   function renderBriefStep() {
-    const readiness = getCreativeReadiness({ creative, uploadStatus, loading, videoJobPending, lastUploadError });
+    const readiness = readCreativeReadiness();
     return (
       <section className="neu-card p-5 sm:p-6">
         <p className="text-xs font-black uppercase tracking-[0.16em] text-[#0D9488]">Шаг 2</p>
@@ -2618,7 +2716,7 @@ export default function AdsAutomation() {
 
   function renderAiStep() {
     const analysisFeature = getPlanFeature(plan, "ai_creative_analysis");
-    const readiness = getCreativeReadiness({ creative, uploadStatus, loading, videoJobPending, lastUploadError });
+    const readiness = readCreativeReadiness();
     return (
       <section className="neu-card p-5 sm:p-6">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
@@ -2985,7 +3083,7 @@ export default function AdsAutomation() {
   }
 
   function renderLaunchStep() {
-    const readiness = getCreativeReadiness({ creative, uploadStatus, loading, videoJobPending, lastUploadError });
+    const readiness = readCreativeReadiness();
     const errors = prelaunchErrors("PAUSED");
     const realLaunchBlockedByCreative = realLaunchNeedsCreativeReadiness(readiness);
     const realLaunchBlockedByVideo = creative?.fileType === "video" && !metaSummary?.videoLaunchEnabled ? VIDEO_REAL_LAUNCH_DISABLED_MESSAGE : "";
@@ -3400,13 +3498,19 @@ export default function AdsAutomation() {
 
   const stepContent = [renderCreativeStep, renderBriefStep, renderAiStep, renderComplianceStep, renderReportStep, renderLaunchStep][currentStep - 1]();
   const activeClientStep = clientStepForInternal(currentStep);
-  const creativeReadinessInfo = getCreativeReadiness({ creative, uploadStatus, loading, videoJobPending, lastUploadError });
+  const creativeReadinessInfo = readCreativeReadiness();
   const creativeReadiness: ReadinessState =
-    creativeReadinessInfo.status === "ready_for_meta"
+    creativeReadinessInfo.status === "ready_for_meta" || creativeReadinessInfo.status === "optimization_ready"
       ? "ready"
-      : creativeReadinessInfo.status === "failed" || creativeReadinessInfo.status === "too_large"
+      : creativeReadinessInfo.status === "failed" ||
+          creativeReadinessInfo.status === "too_large" ||
+          creativeReadinessInfo.status === "optimization_failed" ||
+          creativeReadinessInfo.status === "direct_upload_too_large_disabled"
         ? "error"
-        : creativeReadinessInfo.status === "uploading" || creativeReadinessInfo.status === "generating_thumbnail"
+        : creativeReadinessInfo.status === "uploading" ||
+            creativeReadinessInfo.status === "generating_thumbnail" ||
+            creativeReadinessInfo.status === "optimizing" ||
+            creativeReadinessInfo.status === "config_loading"
           ? "checking"
           : "action";
   const parametersReadiness: ReadinessState =

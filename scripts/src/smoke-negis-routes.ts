@@ -148,6 +148,17 @@ async function checkAdsAutomationSource() {
   assertSourceIncludes(source, "thumbnailUrl: job.thumbnailPublicUrl || current.thumbnailUrl", "thumbnailUrl comes from the optimization job");
   assertSourceExcludes(source, "ad-creatives-raw", "raw bucket name hardcoded in the UI");
   assertSourceExcludes(source, "SERVICE_ROLE", "service role key referenced in the frontend");
+  assertSourceExcludes(source, "Следующим этапом будет добавлена", "stale future-optimization promise text");
+  assertSourceIncludes(source, "Автоматическая оптимизация видео сейчас выключена", "disabled optimization too-large message");
+  assertSourceIncludes(source, '"config_loading"', "config loading readiness state");
+  assertSourceIncludes(source, '"optimizing"', "optimizing readiness state");
+  assertSourceIncludes(source, '"optimization_ready"', "optimization ready readiness state");
+  assertSourceIncludes(source, '"optimization_failed"', "optimization failed readiness state");
+  assertSourceIncludes(source, '"direct_upload_too_large_disabled"', "direct upload too large while disabled readiness state");
+  assertSourceIncludes(source, "videoOptimizationLoaded", "videoOptimization.loaded debug field");
+  assertSourceIncludes(source, "videoOptimization.loaded:", "videoOptimization.loaded visible in technical info");
+  assertSourceIncludes(source, "configBlocked: videoConfigBlocked", "readiness receives the config-loading block flag");
+  assertSourceIncludes(source, 'setVideoJob({ id: "local-failed", status: "failed"', "optimization branch failures are classified as optimization_failed");
 
   console.log("AdsAutomation source checks: ok");
 }
