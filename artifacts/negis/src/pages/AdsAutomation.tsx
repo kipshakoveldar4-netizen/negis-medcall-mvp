@@ -189,6 +189,12 @@ type UploadDebug = {
   uploadStage?: string;
   lastError?: string;
   responseKeys: string[];
+  videoOptimizationEnabled?: boolean;
+  videoOptimizationThresholdMb?: number;
+  videoOptimizationMaxInputMb?: number;
+  fileSizeMb?: number;
+  largeVideoBranch?: boolean;
+  uploadTarget?: string;
 };
 
 type SignedUploadData = {
@@ -269,6 +275,8 @@ const VIDEO_OPTIMIZED_READY_MESSAGE = "Видео оптимизировано �
 const VIDEO_OPTIMIZING_LAUNCH_BLOCKED_MESSAGE =
   "Видео ещё оптимизируется. Реальный запуск будет доступен, когда оптимизация завершится. Проверку без запуска можно сделать уже сейчас.";
 const VIDEO_OPTIMIZATION_FAILED_MESSAGE = "Не удалось оптимизировать видео. Попробуйте загрузить MP4 меньшего размера или другое видео.";
+const VIDEO_OPTIMIZATION_CONFIG_LOADING_MESSAGE =
+  "Настройки оптимизации видео ещё загружаются. Подождите несколько секунд и попробуйте снова.";
 
 const videoJobStatusLabels: Record<VideoJobStatus, string> = {
   awaiting_upload: "Загружаем исходное видео",
@@ -531,6 +539,7 @@ function uploadResponseKeys(value: unknown) {
 
 function buildUploadDebug(value: unknown, asset: CreativeAsset, extra: Partial<UploadDebug> = {}): UploadDebug {
   return {
+    ...extra,
     uploadMode: extra.uploadMode,
     signedUpload: extra.signedUpload,
     assetId: asset.id,
@@ -1053,7 +1062,7 @@ export default function AdsAutomation() {
     }
   }
 
-  async function uploadLargeVideo(file: File) {
+  async function uploadLargeVideo(file: File, optimizationDebug: Partial<UploadDebug> = {}) {
     setLoading("upload");
     setVideoJob(null);
     setCreativeFile(file);
@@ -1118,6 +1127,22 @@ export default function AdsAutomation() {
         status: "optimizing",
       });
       setVideoJob(queuedJob);
+      setUploadDebug({
+        ...optimizationDebug,
+        assetId: firstString(created.data.assetId) || undefined,
+        fileName: file.name,
+        fileType: "video",
+        uploadMode: "video_job_signed_url",
+        signedUpload: true,
+        storagePath,
+        storagePathExists: true,
+        publicUrlExists: false,
+        publicUrlPreview: "",
+        uploadStage: VIDEO_OPTIMIZING_MESSAGE,
+        // The raw bucket name comes from the server response — the UI never hardcodes it.
+        uploadTarget: storageBucket,
+        responseKeys: uploadResponseKeys({ job: created.data.job, signedUpload }),
+      });
       setUploadStatus("ready");
       setUploadStage("");
       goToStep(2);
@@ -1137,6 +1162,16 @@ export default function AdsAutomation() {
       setUploadStatus("failed");
       setUploadStage(uploadStatusLabel("failed"));
       setLastUploadError(message);
+      setUploadDebug({
+        ...optimizationDebug,
+        fileName: file.name,
+        fileType: "video",
+        uploadMode: "video_job_signed_url",
+        publicUrlExists: false,
+        uploadStage: uploadStatusLabel("failed"),
+        lastError: message,
+        responseKeys: ["error"],
+      });
       setNotice(message);
       toast.error(message);
     } finally {
@@ -1240,6 +1275,26 @@ export default function AdsAutomation() {
     setUploadDebug(null);
     const fileType = inferCreativeFileType(file);
     const isMovVideo = fileType === "video" && (file.type === "video/quicktime" || file.name.toLowerCase().endsWith(".mov"));
+
+    // Large-video branch decision. All "MB" here means MiB (1024*1024 bytes),
+    // consistently with the server-side limits and the bucket file_size_limit.
+    const optimization = metaSummary?.videoOptimization;
+    const optimizationThresholdMb = optimization?.thresholdMb || 50;
+    const optimizationThresholdBytes = optimizationThresholdMb * 1024 * 1024;
+    const fileSizeMb = Number((file.size / (1024 * 1024)).toFixed(1));
+    const exceedsThreshold = fileType === "video" && file.size > optimizationThresholdBytes;
+
+    // A large video must never silently fall back to the direct ad-creatives upload.
+    // If the optimization config has not arrived from /api/crm/health yet, block and refresh.
+    if (exceedsThreshold && !optimization) {
+      setUploadStatus("idle");
+      setUploadStage("");
+      setNotice(VIDEO_OPTIMIZATION_CONFIG_LOADING_MESSAGE);
+      toast.error(VIDEO_OPTIMIZATION_CONFIG_LOADING_MESSAGE);
+      void checkHealth();
+      return;
+    }
+
     const details = validateFile(file);
     if (details.length > 0) {
       const message = details.join(" ");
@@ -1251,12 +1306,18 @@ export default function AdsAutomation() {
       return;
     }
 
-    // Large videos branch into the optimization pipeline; everything else keeps
-    // the current direct flow byte-for-byte.
-    const optimization = metaSummary?.videoOptimization;
-    const optimizationThresholdBytes = (optimization?.thresholdMb || 50) * 1024 * 1024;
-    if (fileType === "video" && optimization?.enabled && file.size > optimizationThresholdBytes) {
-      await uploadLargeVideo(file);
+    const largeVideoBranch = exceedsThreshold && optimization?.enabled === true;
+    const optimizationDebug: Partial<UploadDebug> = {
+      videoOptimizationEnabled: Boolean(optimization?.enabled),
+      videoOptimizationThresholdMb: optimizationThresholdMb,
+      videoOptimizationMaxInputMb: optimization?.maxInputMb || 500,
+      fileSizeMb,
+      largeVideoBranch,
+      uploadTarget: "ad-creatives",
+    };
+
+    if (largeVideoBranch) {
+      await uploadLargeVideo(file, optimizationDebug);
       return;
     }
     setVideoJob(null);
@@ -1389,6 +1450,7 @@ export default function AdsAutomation() {
           { signedUpload, metadata: body.data },
           uploadedAsset,
           {
+            ...optimizationDebug,
             uploadMode: "signed_url",
             signedUpload: true,
             uploadStage: uploadStatusLabel("ready"),
@@ -1431,6 +1493,7 @@ export default function AdsAutomation() {
       setLastUploadError(lastError);
       setCreative(fallback);
       setUploadDebug({
+        ...optimizationDebug,
         assetId: fallback.id,
         fileName: fallback.fileName,
         fileType: fallback.fileType,
@@ -2131,7 +2194,13 @@ export default function AdsAutomation() {
                     {uploadStatus === "failed" ? "Загрузка не прошла" : creative.fileType === "video" ? "Видео загружено" : "Фото загружено"}
                   </StatusPill>
                   <StatusPill tone={creative.publicUrl ? "green" : uploadStatus === "failed" ? "red" : "amber"}>
-                    {creative.publicUrl ? "Публичная ссылка получена" : uploadStatus === "failed" ? "Публичная ссылка не получена" : "Публичная ссылка готовится"}
+                    {creative.publicUrl
+                      ? "Публичная ссылка получена"
+                      : uploadStatus === "failed"
+                        ? "Публичная ссылка не получена"
+                        : videoJobPending
+                          ? "Видео оптимизируется"
+                          : "Публичная ссылка готовится"}
                   </StatusPill>
                   <StatusPill tone={creativeReadyTone(creative, uploadStatus)}>{creativeReadyLabel(creative, uploadStatus)}</StatusPill>
                   {creative.fileType === "video" ? (
@@ -2246,6 +2315,12 @@ export default function AdsAutomation() {
                       <p>publicUrlPreview: {uploadDebug.publicUrlPreview || "-"}</p>
                       <p>uploadStage: {uploadDebug.uploadStage || "-"}</p>
                       <p>lastError: {uploadDebug.lastError || "-"}</p>
+                      <p>videoOptimization.enabled: {uploadDebug.videoOptimizationEnabled === undefined ? "-" : String(uploadDebug.videoOptimizationEnabled)}</p>
+                      <p>videoOptimization.thresholdMb: {uploadDebug.videoOptimizationThresholdMb ?? "-"}</p>
+                      <p>videoOptimization.maxInputMb: {uploadDebug.videoOptimizationMaxInputMb ?? "-"}</p>
+                      <p>fileSizeMb: {uploadDebug.fileSizeMb ?? "-"} (1 MB = 1024×1024 байт)</p>
+                      <p>largeVideoBranch: {uploadDebug.largeVideoBranch === undefined ? "-" : String(uploadDebug.largeVideoBranch)}</p>
+                      <p>uploadTarget: {uploadDebug.uploadTarget || "-"}</p>
                       <p>upload response keys: {uploadDebug.responseKeys.length ? uploadDebug.responseKeys.join(", ") : "-"}</p>
                     </div>
                   </details>

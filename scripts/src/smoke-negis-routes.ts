@@ -119,7 +119,15 @@ async function checkAdsAutomationSource() {
   assertSourceIncludes(source, "Параметры перенесены из истории", "prefill without auto-launch notice");
   assertSourceExcludes(source, "isRealLaunch || mode === \"failed\" ? (", "Meta IDs shown outside real launches");
   assertSourceIncludes(source, "uploadLargeVideo", "large video optimization branch");
-  assertSourceIncludes(source, "optimization?.enabled && file.size > optimizationThresholdBytes", "large video branch gated by flag and threshold");
+  assertSourceIncludes(source, "file.size > optimizationThresholdBytes", "threshold comparison in bytes");
+  assertSourceIncludes(source, "exceedsThreshold && optimization?.enabled === true", "large video branch gated by flag and threshold");
+  assertSourceIncludes(source, "exceedsThreshold && !optimization", "large files blocked while optimization config is missing");
+  assertSourceIncludes(source, "Настройки оптимизации видео ещё загружаются", "config loading block message");
+  assertSourceIncludes(source, "largeVideoBranch", "large video branch debug flag");
+  assertSourceIncludes(source, "fileSizeMb", "file size debug field");
+  assertSourceIncludes(source, 'uploadTarget: "ad-creatives"', "direct upload target debug");
+  assertSourceIncludes(source, "uploadTarget: storageBucket", "raw upload target debug from server response");
+  assertSourceIncludes(source, "Видео оптимизируется", "public link pill replaced while optimizing");
   assertSourceIncludes(source, "Идёт оптимизация для рекламы", "video optimization in-progress message");
   assertSourceIncludes(source, "Видео оптимизировано и готово для Meta", "video optimization ready message");
   assertSourceIncludes(source, "Видео ещё оптимизируется", "real launch blocked while optimizing message");
