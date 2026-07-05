@@ -43,6 +43,7 @@ async function checkAdsAutomationSource() {
   assertSourceIncludes(source, "Сводка запуска", "clean medical launch summary");
   assertSourceIncludes(source, "Безопасный режим: реклама создаётся выключенной", "safe launch mode copy");
   assertSourceIncludes(source, "getCreativeReadiness", "central creative readiness helper");
+  assertSourceIncludes(source, "getPreviewReadiness", "central preview readiness helper");
   assertSourceIncludes(source, "ready_for_meta", "ready_for_meta creative status");
   assertSourceIncludes(source, "needs_thumbnail", "video thumbnail readiness status");
   assertSourceIncludes(source, "too_large", "large video readiness status");
@@ -51,8 +52,18 @@ async function checkAdsAutomationSource() {
   assertSourceIncludes(source, "Не удалось подготовить публичную ссылку для Meta", "friendly publicUrl error");
   assertSourceIncludes(source, "Не удалось создать обложку видео. Для запуска видео в Meta нужна обложка.", "friendly thumbnail error");
   assertSourceIncludes(source, "upload error raw", "admin-only raw upload error detail");
-  assertSourceIncludes(source, "Перейти к подтверждению запуска", "step 5 launch confirmation button");
-  assertSourceIncludes(source, "Назад к отчёту", "step 6 back to report button");
+  assertSourceIncludes(source, "Так будет выглядеть реклама", "client-friendly ad preview title");
+  assertSourceIncludes(source, "Сначала подготовьте креатив.", "preview blocked when creative is not ready");
+  assertSourceIncludes(source, "Заполните параметры кампании.", "preview blocked when parameters are missing");
+  assertSourceIncludes(source, "Кнопка ведёт в WhatsApp", "WhatsApp destination preview");
+  assertSourceIncludes(source, "Площадка: Instagram", "Instagram placement preview");
+  assertSourceIncludes(source, "Мы создадим кампанию в Meta выключенной", "safe preview launch copy");
+  assertSourceIncludes(source, "Технические данные предпросмотра", "admin-only preview technical details");
+  assertSourceIncludes(source, "launch status target:", "preview technical launch status");
+  assertSourceIncludes(source, "Перейти к запуску", "preview launch button");
+  assertSourceIncludes(source, "Назад к предпросмотру", "step 6 back to preview button");
+  assertSourceIncludes(source, "Создать рекламу в Meta выключенной", "paused-only real launch button");
+  assertSourceIncludes(source, "errors.length > 0", "real launch button is disabled until preview/prelaunch checks pass");
   assertSourceIncludes(source, 'imageUrl: creative?.fileType === "image" ? creativeUrl : ""', "imageUrl launch payload");
   assertSourceIncludes(source, 'videoUrl: creative?.fileType === "video" ? creativeUrl : ""', "videoUrl launch payload");
   assertSourceIncludes(source, "Не удалось загрузить файл.", "failed upload message");

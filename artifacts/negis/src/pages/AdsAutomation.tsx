@@ -498,10 +498,6 @@ function ctaLabel(value?: string) {
   return "Кнопка: Подробнее";
 }
 
-function statusModeLabel(value: "PAUSED" | "ACTIVE") {
-  return value === "ACTIVE" ? "Реклама сразу активна" : "Будет создана выключенной";
-}
-
 function uploadStatusLabel(status: UploadStatus) {
   const labels: Record<UploadStatus, string> = {
     idle: "",
@@ -523,6 +519,12 @@ type CreativeReadiness = {
   isBlocking: boolean;
   clientMessage: string;
   adminMessage: string;
+};
+
+type PreviewReadiness = {
+  isReady: boolean;
+  message: string;
+  details: string[];
 };
 
 function isTooLargeUploadError(value?: string) {
@@ -757,6 +759,41 @@ function uploadLinkMissingMessage(storageHealth?: StorageHealth | null) {
 function realLaunchNeedsCreativeReadiness(readiness: CreativeReadiness) {
   if (!readiness.isReadyForMeta) return readiness.clientMessage || readiness.label;
   return "";
+}
+
+function getPreviewReadiness({
+  creativeReadiness,
+  brief,
+  cityLabel,
+  adText,
+  requireAdText = true,
+}: {
+  creativeReadiness: CreativeReadiness;
+  brief: Brief;
+  cityLabel: string;
+  adText?: string;
+  requireAdText?: boolean;
+}): PreviewReadiness {
+  const details: string[] = [];
+  const dailyBudget = Number(brief.dailyBudget);
+  const hasCampaignParameters =
+    Boolean(brief.service.trim()) &&
+    Boolean(cityLabel.trim()) &&
+    Number.isFinite(dailyBudget) &&
+    dailyBudget > 0 &&
+    Boolean(brief.days.trim()) &&
+    Boolean(brief.destinationValue.trim());
+
+  if (!creativeReadiness.isReadyForMeta) details.push("Сначала подготовьте креатив.");
+  if (!hasCampaignParameters) details.push("Заполните параметры кампании.");
+  if (brief.leadDestination !== "whatsapp") details.push("Для безопасного MVP-запуска выберите WhatsApp как назначение заявки.");
+  if (requireAdText && !firstString(adText)) details.push("Подготовьте текст объявления.");
+
+  return {
+    isReady: details.length === 0,
+    message: details[0] || "Предпросмотр готов.",
+    details,
+  };
 }
 
 function uploadResponseKeys(value: unknown) {
@@ -1220,6 +1257,8 @@ export default function AdsAutomation() {
   const destination = destinationOptions.find((item) => item.value === brief.leadDestination) || destinationOptions[0];
   const selectedCity = getKzMetaCityOption(brief.cityId || brief.city);
   const destinationUrl = aiPackage?.destinationUrl || publicDestinationUrl(brief);
+  const clinicName = firstString(asRecord(user).workspaceName, asRecord(user).clinicName, "Concept Med");
+  const previewAdText = firstString(compliance?.safeText, aiPackage?.primaryText, brief.offer);
   const adsManagerUrl = useMemo(() => {
     const accountId = String(metaSummary?.adAccountId || "").replace(/^act_/, "");
     return accountId ? `https://adsmanager.facebook.com/adsmanager/manage/campaigns?act=${accountId}` : "https://adsmanager.facebook.com/";
@@ -1248,7 +1287,21 @@ export default function AdsAutomation() {
     setConfirmations((current) => ({ ...current, [key]: value }));
   };
 
-  function goToStep(step: number) {
+  function goToStep(step: number, options: { skipGuard?: boolean } = {}) {
+    if (!options.skipGuard && clientStepForInternal(step) >= 3) {
+      const previewGate = getPreviewReadiness({
+        creativeReadiness: readCreativeReadiness(),
+        brief,
+        cityLabel: selectedCity.labelRu,
+        adText: previewAdText,
+        requireAdText: step >= 4,
+      });
+      if (!previewGate.isReady) {
+        setNotice(previewGate.message);
+        toast.warning(previewGate.message);
+        return;
+      }
+    }
     setCurrentStep(step);
     window.setTimeout(() => window.scrollTo({ top: 0, behavior: "smooth" }), 0);
   }
@@ -1857,7 +1910,7 @@ export default function AdsAutomation() {
       setAiPackage(body.data);
       setCompliance(null);
       setLaunchTimestamp("");
-      goToStep(4);
+      goToStep(5, { skipGuard: true });
       toast.success(body.data.generatedBy === "openai" ? "ИИ заполнил рекламу" : "Demo-пакет готов");
       if (body.warning) setNotice(body.warning);
     } catch (error) {
@@ -2071,9 +2124,16 @@ export default function AdsAutomation() {
     const start = new Date(brief.startDate);
     const end = brief.endDate ? new Date(brief.endDate) : null;
     const readiness = readCreativeReadiness();
+    const previewGate = getPreviewReadiness({
+      creativeReadiness: readiness,
+      brief,
+      cityLabel: selectedCity.labelRu,
+      adText: previewAdText,
+    });
 
     if (!creative) errors.push("Добавьте фото или видео.");
     if (creative && !readiness.isReadyForMeta) errors.push(readiness.clientMessage);
+    if (!previewGate.isReady) errors.push(previewGate.message);
     if (!aiPackage) errors.push("Нажмите «ИИ заполнить рекламу».");
     if (!destinationUrl) errors.push("Укажите, куда должны приходить заявки.");
     if (brief.leadDestination === "lead_form" && !brief.destinationValue.trim()) errors.push("Для Meta Lead Form нужен form_id. Пока этот режим только для черновика.");
@@ -2769,7 +2829,9 @@ export default function AdsAutomation() {
 
         <div className="mt-5 flex flex-col gap-2 sm:flex-row sm:justify-between">
           <button type="button" className="neu-btn justify-center" onClick={() => goToStep(2)}>Назад</button>
-          <button type="button" className="neu-btn-primary justify-center" disabled={!aiPackage} onClick={() => goToStep(4)}>Перейти к проверке</button>
+          <button type="button" className="neu-btn-primary justify-center" disabled={!aiPackage} onClick={() => goToStep(5)}>
+            Перейти к предпросмотру
+          </button>
         </div>
       </section>
     );
@@ -2938,11 +3000,142 @@ export default function AdsAutomation() {
     const creativeVideoWarnings = Array.isArray(creativeVideoPayload.warnings)
       ? creativeVideoPayload.warnings.map(String).filter(Boolean)
       : creative?.videoWarnings || [];
+    const previewHeadline = firstString(aiPackage?.headline, `${brief.service} в ${selectedCity.labelRu}`);
+    const previewDescription = firstString(aiPackage?.description, brief.offer);
+    const previewCampaignName = firstString(reportCampaignName, aiPackage?.campaignName, `${brief.service} - ${selectedCity.labelRu}`);
+    const previewMediaUrl =
+      creative?.fileType === "video"
+        ? firstString(creative.thumbnailUrl, creative.previewUrl, creative.publicUrl)
+        : firstString(creative?.previewUrl, creative?.publicUrl);
+    const previewGate = getPreviewReadiness({
+      creativeReadiness: readCreativeReadiness(),
+      brief,
+      cityLabel: selectedCity.labelRu,
+      adText: previewAdText,
+    });
+
+    if (!previewGate.isReady) {
+      return (
+        <section className="neu-card p-5 sm:p-6">
+          <p className="text-xs font-black uppercase tracking-[0.16em] text-[#0D9488]">Шаг 3</p>
+          <h2 className="mt-1 text-2xl font-black text-[#0F172A]">Предпросмотр рекламы</h2>
+          <div className="mt-5 rounded-[24px] border border-amber-200 bg-amber-50 p-5">
+            <p className="text-base font-black text-amber-950">{previewGate.message}</p>
+            {previewGate.details.length > 1 ? (
+              <ul className="mt-3 space-y-2 text-sm font-semibold text-amber-900">
+                {previewGate.details.map((item) => <li key={item}>• {item}</li>)}
+              </ul>
+            ) : null}
+          </div>
+          <div className="mt-5 flex flex-col gap-2 sm:flex-row sm:justify-between">
+            <button type="button" className="neu-btn justify-center" onClick={() => goToStep(2)}>Назад</button>
+            <button type="button" className="neu-btn-primary justify-center" onClick={() => goToStep(3)}>
+              Подготовить текст объявления
+            </button>
+          </div>
+        </section>
+      );
+    }
 
     return (
       <section className="neu-card p-5 sm:p-6">
-        <p className="text-xs font-black uppercase tracking-[0.16em] text-[#0D9488]">Шаг 5</p>
-        <h2 className="mt-1 text-2xl font-black text-[#0F172A]">Финальный отчёт перед запуском</h2>
+        <p className="text-xs font-black uppercase tracking-[0.16em] text-[#0D9488]">Шаг 3</p>
+        <h2 className="mt-1 text-2xl font-black text-[#0F172A]">Так будет выглядеть реклама</h2>
+
+        <div className="mt-6 grid gap-5 xl:grid-cols-[minmax(0,420px)_minmax(0,1fr)]">
+          <article className="mx-auto w-full max-w-[400px] overflow-hidden rounded-[28px] border border-[#D8E4EC] bg-white shadow-[0_22px_55px_rgba(15,23,42,0.12)]">
+            <div className="flex items-center justify-between gap-3 border-b border-[#E2EDF2] px-4 py-3">
+              <div className="min-w-0">
+                <p className="truncate text-sm font-black text-[#0F172A]">{clinicName}</p>
+                <p className="text-xs font-bold text-[#64748B]">Площадка: Instagram</p>
+              </div>
+              <StatusPill tone="green">Выключена</StatusPill>
+            </div>
+
+            <div className="relative aspect-[9/16] w-full bg-[#E6F7F5]">
+              {creative?.fileType === "video" && previewMediaUrl ? (
+                <img src={previewMediaUrl} alt="Обложка видео для рекламы" className="h-full w-full object-cover" />
+              ) : previewMediaUrl ? (
+                <img src={previewMediaUrl} alt="Креатив рекламы" className="h-full w-full object-cover" />
+              ) : (
+                <div className="flex h-full items-center justify-center text-[#0D9488]">
+                  {creative?.fileType === "video" ? <Video size={42} /> : <FileImage size={42} />}
+                </div>
+              )}
+              <div className="absolute left-3 top-3 rounded-full bg-black/58 px-3 py-1 text-xs font-black text-white">
+                Instagram Reels
+              </div>
+              {creative?.fileType === "video" ? (
+                <div className="absolute bottom-3 left-3 rounded-full bg-white/88 px-3 py-1 text-xs font-black text-[#0F172A]">
+                  Видео · обложка готова
+                </div>
+              ) : null}
+            </div>
+
+            <div className="space-y-3 p-4">
+              <div>
+                <p className="text-xs font-black uppercase tracking-[0.1em] text-[#64748B]">Клиника и услуга</p>
+                <h3 className="mt-1 break-words text-lg font-black text-[#0F172A]">{brief.service}</h3>
+                <p className="mt-1 text-sm font-semibold text-[#64748B]">Город показа: {selectedCity.labelRu}</p>
+              </div>
+              <p className="break-words text-sm font-semibold leading-relaxed text-[#334155]">{previewAdText}</p>
+              <button type="button" className="w-full rounded-2xl bg-[#25D366] px-4 py-3 text-sm font-black text-white shadow-sm">
+                WhatsApp
+              </button>
+              <p className="text-center text-xs font-bold text-[#64748B]">Кнопка ведёт в WhatsApp</p>
+            </div>
+          </article>
+
+          <div className="min-w-0 space-y-4">
+            <div className="grid gap-3 sm:grid-cols-2">
+              {[
+                ["Название кампании", previewCampaignName],
+                ["Заголовок", previewHeadline],
+                ["Описание", previewDescription],
+                ["Площадка", "Instagram"],
+                ["Бюджет в день", `${brief.dailyBudget} USD`],
+                ["Примерный общий бюджет", `${totalBudget} USD`],
+                ["Назначение", "WhatsApp"],
+                ["Статус", "будет создана выключенной"],
+              ].map(([label, value]) => (
+                <div key={label} className="rounded-2xl border border-[#D8E4EC] bg-white/65 p-4">
+                  <p className="text-xs font-black uppercase tracking-[0.1em] text-[#64748B]">{label}</p>
+                  <p className="mt-2 break-words text-sm font-semibold leading-relaxed text-[#0F172A]">{value || "-"}</p>
+                </div>
+              ))}
+            </div>
+
+            <div className="rounded-[24px] border border-emerald-200 bg-emerald-50 p-5">
+              <div className="flex items-start gap-3">
+                <ShieldCheck className="mt-0.5 text-emerald-700" size={22} />
+                <div>
+                  <p className="text-base font-black text-emerald-950">Безопасный запуск</p>
+                  <p className="mt-1 text-sm font-semibold leading-relaxed text-emerald-800">
+                    Мы создадим кампанию в Meta выключенной. Включить её можно вручную в Meta Ads Manager после проверки.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {isAdminMode ? (
+              <details className="rounded-2xl border border-[#D8E4EC] bg-white/65 p-4">
+                <summary className="cursor-pointer text-sm font-black text-[#0F172A]">Технические данные предпросмотра</summary>
+                <div className="mt-4 grid gap-2 text-sm font-semibold text-[#475569]">
+                  <p><b>creative type:</b> {creative?.fileType || "-"}</p>
+                  <p><b>publicUrl present:</b> {creative?.publicUrl ? "true" : "false"}</p>
+                  <p><b>thumbnailUrl present:</b> {creative?.thumbnailUrl ? "true" : "false"}</p>
+                  <p><b>placement config:</b> Instagram / Reels</p>
+                  <p><b>destination config:</b> WhatsApp</p>
+                  <p><b>launch status target:</b> PAUSED</p>
+                  <p><b>campaign name:</b> {previewCampaignName}</p>
+                  <p><b>adset name:</b> {reportAdSetName || `Instagram, ${selectedCity.labelRu}, ${brief.dailyBudget} USD/day`}</p>
+                  <p><b>creative name:</b> {reportCreativeName || previewHeadline}</p>
+                  <p><b>ad name:</b> {reportAdName || previewHeadline}</p>
+                </div>
+              </details>
+            ) : null}
+          </div>
+        </div>
 
         <div className="mt-6 grid gap-4 lg:grid-cols-2">
           {[
@@ -3073,9 +3266,9 @@ export default function AdsAutomation() {
         ) : null}
 
         <div className="mt-5 flex flex-col gap-2 sm:flex-row sm:justify-between">
-          <button type="button" className="neu-btn justify-center" onClick={() => goToStep(4)}>Назад к проверке</button>
+          <button type="button" className="neu-btn justify-center" onClick={() => goToStep(2)}>Назад</button>
           <button type="button" className="neu-btn-primary justify-center" onClick={() => goToStep(6)}>
-            Перейти к подтверждению запуска
+            Перейти к запуску
           </button>
         </div>
       </section>
@@ -3088,7 +3281,7 @@ export default function AdsAutomation() {
     const realLaunchBlockedByCreative = realLaunchNeedsCreativeReadiness(readiness);
     const realLaunchBlockedByVideo = creative?.fileType === "video" && !metaSummary?.videoLaunchEnabled ? VIDEO_REAL_LAUNCH_DISABLED_MESSAGE : "";
     const realLaunchBusy = loading === "launch" || loading === "video";
-    const realLaunchDisabled = realLaunchBusy || Boolean(realLaunchBlockedByCreative) || Boolean(realLaunchBlockedByVideo);
+    const realLaunchDisabled = realLaunchBusy || errors.length > 0 || Boolean(realLaunchBlockedByCreative) || Boolean(realLaunchBlockedByVideo);
     const realLaunchTone =
       realLaunchStatus === "failed" ? "red" : realLaunchStatus === "created" ? "green" : realLaunchStatus === "video_processing" ? "amber" : "blue";
     const realLaunchLabel =
@@ -3205,7 +3398,7 @@ export default function AdsAutomation() {
 
         <div className="mt-6 flex flex-col gap-3 sm:flex-row">
           <button type="button" className="neu-btn justify-center" onClick={() => goToStep(5)}>
-            Назад к отчёту
+            Назад к предпросмотру
           </button>
           <button type="button" className="neu-btn justify-center" disabled={loading === "check"} onClick={() => void runComplianceCheck(true)}>
             {loading === "check" ? <Loader2 className="animate-spin" size={16} /> : <ShieldCheck size={16} />}
@@ -3213,7 +3406,7 @@ export default function AdsAutomation() {
           </button>
           <button type="button" className="neu-btn-primary justify-center" disabled={realLaunchDisabled} onClick={() => void launch("PAUSED")}>
             {realLaunchBusy ? <Loader2 className="animate-spin" size={16} /> : <Rocket size={16} />}
-            Создать в Meta выключенным
+            Создать рекламу в Meta выключенной
           </button>
         </div>
 
@@ -3515,18 +3708,26 @@ export default function AdsAutomation() {
           : "action";
   const parametersReadiness: ReadinessState =
     brief.service.trim() && selectedCity.labelRu && Number(brief.dailyBudget) > 0 && brief.destinationValue.trim() ? "ready" : "action";
-  const previewReadiness: ReadinessState = compliance?.status === "blocked" ? "error" : aiPackage && compliance ? "ready" : loading === "ai" || loading === "check" ? "checking" : "action";
+  const previewReadinessInfo = getPreviewReadiness({
+    creativeReadiness: creativeReadinessInfo,
+    brief,
+    cityLabel: selectedCity.labelRu,
+    adText: previewAdText,
+  });
+  const previewReadiness: ReadinessState =
+    compliance?.status === "blocked" ? "error" : previewReadinessInfo.isReady ? "ready" : loading === "ai" || loading === "check" ? "checking" : "action";
   const metaReadiness: ReadinessState = loading === "health" ? "checking" : metaSummary?.configured ? "ready" : "action";
   const storageReadiness: ReadinessState =
     uploadStatus === "failed" ? "error" : creativeReadinessInfo.isReadyForMeta || storageHealth?.publicUrlWorks || hasSupabaseFrontendEnv ? "ready" : loading === "storage" ? "checking" : "action";
   const summaryRows = [
-    ["Клиника", firstString(asRecord(user).workspaceName, asRecord(user).clinicName, "Concept Med")],
+    ["Клиника", clinicName],
     ["Услуга", brief.service],
     ["Город", selectedCity.labelRu || brief.city],
     ["Площадка", "Instagram"],
-    ["Бюджет", `${brief.dailyBudget || 0} USD/день · ${totalBudget} USD примерно`],
+    ["Бюджет в день", `${brief.dailyBudget || 0} USD`],
+    ["Примерный общий бюджет", `${totalBudget} USD`],
     ["Назначение", destination.label],
-    ["Статус", statusModeLabel("PAUSED")],
+    ["Статус", "будет создана выключенной"],
   ];
 
   return (
@@ -3636,7 +3837,7 @@ export default function AdsAutomation() {
                   <div className="mt-4 space-y-2">
                     <ReadinessRow label="Креатив" state={creativeReadiness} note={creativeReadinessInfo.label} />
                     <ReadinessRow label="Параметры" state={parametersReadiness} note={`${selectedCity.labelRu || "Город"} · ${destination.label}`} />
-                    <ReadinessRow label="Предпросмотр" state={previewReadiness} note={aiPackage ? "Текст подготовлен" : "Сначала создайте рекламный пакет"} />
+                    <ReadinessRow label="Предпросмотр" state={previewReadiness} note={previewReadinessInfo.isReady ? "Реклама готова к проверке" : previewReadinessInfo.message} />
                     <ReadinessRow label="Meta" state={metaReadiness} note={metaSummary?.configured ? "Подключение найдено" : "Проверьте подключение"} />
                     <ReadinessRow label="Storage" state={storageReadiness} note={creativeReadinessInfo.isReadyForMeta ? "Файл готов" : "Файл подготовится после загрузки"} />
                   </div>
