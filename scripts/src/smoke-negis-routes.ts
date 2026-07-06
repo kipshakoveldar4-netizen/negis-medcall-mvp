@@ -1439,6 +1439,94 @@ async function checkVideoWorkerPackage() {
   console.log("Video worker package checks: ok");
 }
 
+async function checkContentStudioPhaseOne() {
+  // Deterministic demo generation must work without OPENAI_API_KEY and stay compliance-safe.
+  const coreUrl = pathToFileURL(path.join(repoRoot, "lib", "content-studio", "core.ts")).href;
+  const core = (await import(coreUrl)) as {
+    demoContentPackage(input?: Record<string, unknown>): Record<string, unknown>;
+  };
+  const demo = core.demoContentPackage({ service: "Чистка лица", city: "Астана", offer: "Бесплатная консультация", goal: "leads" });
+  const requiredFields = [
+    "ideaTitle",
+    "hook",
+    "script",
+    "shotList",
+    "textOnScreen",
+    "voiceover",
+    "caption",
+    "adPrimaryText",
+    "adHeadline",
+    "cta",
+    "photoPrompt",
+    "videoPrompt",
+    "whatsappMessage",
+    "complianceNotes",
+  ];
+  for (const field of requiredFields) {
+    const value = demo[field];
+    const empty = Array.isArray(value) ? value.length === 0 : !(typeof value === "string" && value.trim());
+    if (empty) {
+      throw new Error(`demo content package must include ${field}`);
+    }
+  }
+  // Public-facing texts must never guarantee results (complianceNotes describe the rules and are exempt).
+  for (const field of ["adPrimaryText", "adHeadline", "caption", "script", "voiceover", "hook"]) {
+    const text = String(demo[field] || "").toLowerCase();
+    if (text.includes("100%") || text.includes("гарантиру") || text.includes("гарантия результата")) {
+      throw new Error(`demo content package field ${field} must not guarantee results`);
+    }
+  }
+
+  // Content Studio Phase 1 UI markers.
+  const studio = await readFile(path.join(repoRoot, "artifacts", "negis", "src", "pages", "ContentStudio.tsx"), "utf8");
+  for (const marker of [
+    "AI Контент-студия",
+    "Из идеи",
+    "Из материалов клиники",
+    "Для рекламы",
+    "Для соцсетей",
+    "Reels 9:16",
+    "TikTok 9:16",
+    "Stories 9:16",
+    "Feed 1:1",
+    "Universal",
+    "экспертно",
+    "премиально",
+    "generate-package",
+    "Сгенерировать пакет",
+    "Использовать в AI запуске рекламы",
+    'source: "content_studio"',
+    "generatedAt",
+    "contentPackageId",
+    "Демо-режим: подключите AI provider для настоящей генерации.",
+    "checkMetaCompliance",
+    "Проверка безопасных формулировок",
+    "Photo prompt",
+    "Video prompt",
+    "WhatsApp сообщение",
+    "Текст объявления Meta",
+  ]) {
+    if (!studio.includes(marker)) {
+      throw new Error(`Content Studio Phase 1 is missing "${marker}"`);
+    }
+  }
+
+  // Ads Automation must consume the studio prefill exactly once, without arming a launch.
+  const adsAutomation = await readFile(path.join(repoRoot, "artifacts", "negis", "src", "pages", "AdsAutomation.tsx"), "utf8");
+  for (const marker of [
+    'const STUDIO_PREFILL_KEY = "negis_ads_automation_prefill"',
+    "window.localStorage.removeItem(STUDIO_PREFILL_KEY)",
+    "Данные перенесены из AI Контент-студии. Проверьте параметры перед запуском.",
+    'setActiveConfirmation("");',
+  ]) {
+    if (!adsAutomation.includes(marker)) {
+      throw new Error(`Ads Automation studio prefill import is missing ${marker}`);
+    }
+  }
+
+  console.log("Content Studio Phase 1 checks: ok");
+}
+
 async function checkNavigationCleanup() {
   const layoutDir = path.join(repoRoot, "artifacts", "negis", "src", "components", "layout");
   const pagesDir = path.join(repoRoot, "artifacts", "negis", "src", "pages");
@@ -1616,6 +1704,7 @@ async function main() {
   await checkCrmVideoJobsModule();
   await checkVideoWorkerPackage();
   await checkNavigationCleanup();
+  await checkContentStudioPhaseOne();
   await checkNoNewApiFiles();
   for (const route of [
     "/dashboard",
@@ -2464,6 +2553,32 @@ async function main() {
       duration: "30-45 seconds",
     }),
   });
+  const packageGeneration = await checkJsonEndpoint("/api/content-studio/generate-package", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      workspaceId: "demo-workspace",
+      mode: "idea",
+      format: "reels",
+      service: "Консультация косметолога",
+      city: "Астана",
+      offer: "Бесплатная консультация",
+      audience: "Женщины 25-45",
+      goal: "leads",
+      tone: "доверительно",
+    }),
+  });
+  const packageData = (packageGeneration.data || {}) as Record<string, unknown>;
+  for (const field of ["ideaTitle", "hook", "script", "shotList", "caption", "adPrimaryText", "adHeadline", "photoPrompt", "videoPrompt", "whatsappMessage", "complianceNotes"]) {
+    const value = packageData[field];
+    const empty = Array.isArray(value) ? value.length === 0 : !(typeof value === "string" && value.trim());
+    if (empty) {
+      throw new Error(`/api/content-studio/generate-package must return ${field}`);
+    }
+  }
+  if (packageGeneration.mode !== "demo" && packageGeneration.mode !== "openai") {
+    throw new Error("/api/content-studio/generate-package must report demo or openai mode");
+  }
   await checkJsonEndpoint("/api/content-studio/generate-avatar-prompt", {
     method: "POST",
     headers: { "Content-Type": "application/json" },

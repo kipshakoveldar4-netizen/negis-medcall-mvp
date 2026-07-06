@@ -10,7 +10,7 @@ const NAV = [
   { href: '/ads-automation', icon: Rocket, label: 'Реклама', roles: ['owner', 'manager'] },
   { href: '/ads-automation/history', icon: ClipboardList, label: 'История запусков', roles: ['owner', 'manager'] },
   { href: '/clients', icon: Users, label: 'Клиенты', roles: ['owner', 'manager', 'agent'] },
-  { href: '/content-studio', icon: Clapperboard, label: 'Контент-студия', roles: ['owner', 'manager'] },
+  { href: '/content-studio', icon: Clapperboard, label: 'AI Контент-студия', roles: ['owner', 'manager'] },
   { href: '/appointments', icon: CalendarDays, label: 'Записи', roles: ['owner', 'manager', 'agent', 'booking_agent'] },
   { href: '/leads', icon: Megaphone, label: 'Лиды', roles: ['owner', 'manager', 'agent'] },
   { href: '/admin', icon: Settings, label: 'Настройки', roles: ['owner', 'manager'] },

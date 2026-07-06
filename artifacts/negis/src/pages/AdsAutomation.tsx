@@ -295,6 +295,8 @@ const VIDEO_OPTIMIZING_LAUNCH_BLOCKED_MESSAGE =
 const VIDEO_OPTIMIZATION_FAILED_MESSAGE = "Не удалось оптимизировать видео. Попробуйте загрузить MP4 меньшего размера или другое видео.";
 const VIDEO_OPTIMIZATION_CONFIG_LOADING_MESSAGE =
   "Настройки оптимизации видео ещё загружаются. Подождите несколько секунд и попробуйте снова.";
+const STUDIO_PREFILL_KEY = "negis_ads_automation_prefill";
+const STUDIO_PREFILL_NOTICE = "Данные перенесены из AI Контент-студии. Проверьте параметры перед запуском.";
 const VIDEO_OPTIMIZATION_DISABLED_TOO_LARGE_MESSAGE =
   "Автоматическая оптимизация видео скоро будет доступна. Сейчас загрузите видео до 50 МБ или MP4 H.264.";
 const VIDEO_NEEDS_OPTIMIZATION_MESSAGE = "Видео большое. Для запуска рекламы его нужно оптимизировать.";
@@ -1245,6 +1247,61 @@ export default function AdsAutomation() {
 
   useEffect(() => {
     void checkHealth();
+  }, []);
+
+  // Import a package handed off by AI Контент-студия (or legacy pages writing the
+  // same key). Consume-once: the key is removed immediately so the import never
+  // repeats. Nothing is launched or confirmed automatically.
+  useEffect(() => {
+    let raw = "";
+    try {
+      raw = window.localStorage.getItem(STUDIO_PREFILL_KEY) || "";
+      if (!raw) return;
+      window.localStorage.removeItem(STUDIO_PREFILL_KEY);
+      const data = asRecord(JSON.parse(raw));
+
+      const service = firstString(data.service, data.niche);
+      const offer = firstString(data.offer);
+      const audience = firstString(data.audience, data.targetAudience);
+      const cityInput = firstString(data.cityId, data.city);
+      const city = cityInput ? getKzMetaCityOption(cityInput) : null;
+      setBrief((current) => ({
+        ...current,
+        service: service || current.service,
+        offer: offer || current.offer,
+        knownAudience: audience || current.knownAudience,
+        ...(city && city.id
+          ? { city: city.labelRu, cityId: city.id, cityLabelRu: city.labelRu, cityCanonicalName: city.canonicalName }
+          : {}),
+      }));
+
+      const adText = firstString(data.adText, data.primaryText, data.caption, data.script);
+      const headline = firstString(data.headline, data.hook, data.title);
+      if (adText || headline) {
+        const knownCtas = ["LEARN_MORE", "CONTACT_US", "CALL_NOW"];
+        const ctaRaw = firstString(data.cta).toUpperCase();
+        setAiPackage({
+          campaignName: firstString(data.campaignName, data.title) || undefined,
+          primaryText: adText || undefined,
+          headline: headline || undefined,
+          description: firstString(data.caption, data.offer) || undefined,
+          cta: knownCtas.includes(ctaRaw) ? ctaRaw : "LEARN_MORE",
+          audience: audience || undefined,
+          generatedBy: "content-studio",
+        });
+        setCompliance(null);
+      }
+
+      // Never pre-arm a launch from an import.
+      setActiveConfirmation("");
+      setLaunchResult(null);
+      setLastDryRunResult(null);
+      setNotice(STUDIO_PREFILL_NOTICE);
+      toast.success("Данные из AI Контент-студии загружены");
+    } catch {
+      // A broken payload must never break the wizard; the key is already consumed.
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {

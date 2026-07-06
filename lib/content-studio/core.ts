@@ -37,6 +37,122 @@ export type PromptPackage = {
 
 export type ContentStudioMode = "demo" | "openai" | "telegram" | "mock";
 
+// Phase 1 content package: everything a clinic needs for one creative —
+// short-form video script, ad text, prompts, and the WhatsApp opener.
+export type ContentPackage = {
+  ideaTitle: string;
+  hook: string;
+  script: string;
+  shotList: string[];
+  textOnScreen: string[];
+  voiceover: string;
+  caption: string;
+  adPrimaryText: string;
+  adHeadline: string;
+  cta: string;
+  photoPrompt: string;
+  videoPrompt: string;
+  whatsappMessage: string;
+  complianceNotes: string[];
+};
+
+export type ContentPackageBrief = {
+  mode?: unknown;
+  format?: unknown;
+  service?: unknown;
+  city?: unknown;
+  offer?: unknown;
+  audience?: unknown;
+  goal?: unknown;
+  tone?: unknown;
+  materialNotes?: unknown;
+};
+
+function briefString(value: unknown, fallback: string): string {
+  return typeof value === "string" && value.trim() ? value.trim() : fallback;
+}
+
+// Deterministic, compliance-safe demo package. Never promises results,
+// never uses "100%", never diagnoses by appearance.
+export function demoContentPackage(input: ContentPackageBrief = {}): ContentPackage {
+  const service = briefString(input.service, "услуга клиники");
+  const city = briefString(input.city, "вашем городе");
+  const offer = briefString(input.offer, "бесплатная первичная консультация");
+  const audience = briefString(input.audience, "взрослые, которые заботятся о здоровье");
+  const tone = briefString(input.tone, "доверительно");
+  const format = briefString(input.format, "reels");
+  const goal = briefString(input.goal, "leads");
+  const materialNotes = briefString(input.materialNotes, "");
+
+  const goalCta = goal === "appointment" ? "Записаться на приём" : goal === "awareness" ? "Узнать подробнее" : "Получить консультацию";
+
+  return {
+    ideaTitle: `${service} в ${city}: как проходит приём`,
+    hook: `Думаете про ${service.toLowerCase()}? Вот что важно знать перед первым визитом.`,
+    script: [
+      `1. Хук (0-3 сек): «${service}: что происходит на первом приёме?»`,
+      "2. Проблема (3-10 сек): многие откладывают визит, потому что не знают, чего ожидать.",
+      `3. Решение (10-25 сек): врач рассказывает, как проходит консультация по услуге «${service}», какие вопросы задать и как подготовиться.`,
+      `4. Предложение (25-35 сек): ${offer}.`,
+      `5. CTA (35-45 сек): «${goalCta} — напишите нам в WhatsApp».`,
+    ].join("\n"),
+    shotList: [
+      "Кадр 1: врач в кабинете, взгляд в камеру, дневной свет.",
+      "Кадр 2: ресепшн клиники, администратор встречает пациента.",
+      `Кадр 3: крупный план процесса консультации по услуге «${service}» (без медицинских манипуляций в кадре).`,
+      "Кадр 4: пациент и врач обсуждают план — спокойная атмосфера.",
+      "Кадр 5: финальный кадр с логотипом клиники и CTA.",
+    ],
+    textOnScreen: [
+      `${service} — как проходит приём`,
+      "Расскажем и покажем без сложных терминов",
+      offer,
+      `${goalCta} → WhatsApp`,
+    ],
+    voiceover: `Если вы давно думаете про ${service.toLowerCase()}, начните с консультации. Врач осмотрит, ответит на вопросы и предложит план, который подходит именно вам. ${offer}. Напишите нам в WhatsApp — администратор подберёт удобное время.`,
+    caption: `${service} в ${city} 🏥\n\nРассказываем, как проходит первый приём: без спешки, с понятными объяснениями и планом действий.\n\n${offer}.\n\nНапишите в WhatsApp — ответим на вопросы и подберём время. Тон: ${tone}.`,
+    adPrimaryText: `${service} в ${city}. Первый шаг — консультация: врач ответит на вопросы и предложит индивидуальный план. ${offer}. Запись в WhatsApp.`,
+    adHeadline: `${service} в ${city}`,
+    cta: goalCta,
+    photoPrompt: `Реалистичное фото для медицинской рекламы: современный кабинет клиники, врач-специалист по направлению «${service}», доброжелательная атмосфера, мягкий дневной свет, чистые тона, без текста на изображении, формат ${format}. Без изображений процедур и шприцев крупным планом.${materialNotes ? ` Материалы клиники: ${materialNotes}.` : ""}`,
+    videoPrompt: `Короткое вертикальное видео (${format}, 9:16, 30-45 секунд) для клиники: врач рассказывает про «${service}», кадры кабинета и ресепшн, спокойный ${tone} тон, субтитры на русском, финальный кадр с CTA «${goalCta}». Аудитория: ${audience}. Без обещаний результата и без кадров «до/после».`,
+    whatsappMessage: `Здравствуйте! Пишу по рекламе про «${service}». Хочу узнать подробнее и записаться на консультацию.`,
+    complianceNotes: [
+      "Формулировки без гарантий результата и без «100% результат».",
+      "Нет диагностики по внешности и обещаний «до/после».",
+      "Медицинская услуга подаётся через консультацию и индивидуальный план.",
+    ],
+  };
+}
+
+function normalizeStringArray(value: unknown, fallback: string[]): string[] {
+  if (!Array.isArray(value)) return fallback;
+  const items = value.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
+  return items.length > 0 ? items : fallback;
+}
+
+export function normalizeContentPackage(value: unknown, fallback: ContentPackage): ContentPackage {
+  const record = value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+  const read = (key: keyof ContentPackage) =>
+    typeof record[key] === "string" && (record[key] as string).trim() ? (record[key] as string).trim() : (fallback[key] as string);
+  return {
+    ideaTitle: read("ideaTitle"),
+    hook: read("hook"),
+    script: read("script"),
+    shotList: normalizeStringArray(record.shotList, fallback.shotList),
+    textOnScreen: normalizeStringArray(record.textOnScreen, fallback.textOnScreen),
+    voiceover: read("voiceover"),
+    caption: read("caption"),
+    adPrimaryText: read("adPrimaryText"),
+    adHeadline: read("adHeadline"),
+    cta: read("cta"),
+    photoPrompt: read("photoPrompt"),
+    videoPrompt: read("videoPrompt"),
+    whatsappMessage: read("whatsappMessage"),
+    complianceNotes: normalizeStringArray(record.complianceNotes, fallback.complianceNotes),
+  };
+}
+
 type CreateVideoInput = {
   title?: unknown;
   niche?: unknown;

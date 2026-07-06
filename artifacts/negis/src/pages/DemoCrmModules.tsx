@@ -973,7 +973,7 @@ export function DemoChat() {
 
 export function DemoMarket() {
   const modules = [
-    { title: "ИИ студия контента", text: "Сценарии, avatar prompt, TapNow prompt и Telegram handoff.", href: "/content-studio", icon: Sparkles },
+    { title: "AI Контент-студия", text: "Пакеты контента: сценарии, тексты объявлений, prompts и WhatsApp-сообщения.", href: "/content-studio", icon: Sparkles },
     { title: "AI запуск рекламы", text: "ИИ заполнит кампанию, анализ креативов и PAUSED запуск в Meta.", href: "/ads-automation", icon: Target },
     { title: "Реклама", text: "Meta Ads MVP и настройки рекламного кабинета.", href: "/ads", icon: Megaphone },
     { title: "Отчёты", text: "Недельная аналитика, CPL, записи и рекомендации AI.", href: "/reports", icon: BarChart3 },

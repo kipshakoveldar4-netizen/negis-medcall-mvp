@@ -16,6 +16,8 @@ import {
 import { toast } from "sonner";
 import { PageLayout } from "@/components/layout/PageLayout";
 import { apiUrl } from "@/lib/api";
+import { checkMetaCompliance } from "../../../../lib/meta/compliance";
+import type { ContentPackage } from "../../../../lib/content-studio/core";
 
 type ContentVideoStatus = "idea" | "script_ready" | "avatar_ready" | "telegram_ready";
 
@@ -72,6 +74,64 @@ type TelegramResponse = {
 };
 
 const STORAGE_KEY = "negis_content_studio_videos";
+
+type PackageBrief = {
+  mode: string;
+  format: string;
+  service: string;
+  city: string;
+  offer: string;
+  audience: string;
+  goal: string;
+  tone: string;
+  materialNotes: string;
+};
+
+const packageModes = [
+  { id: "idea", label: "Из идеи" },
+  { id: "materials", label: "Из материалов клиники" },
+  { id: "ads", label: "Для рекламы" },
+  { id: "social", label: "Для соцсетей" },
+];
+
+const packageFormats = [
+  { id: "reels", label: "Reels 9:16" },
+  { id: "tiktok", label: "TikTok 9:16" },
+  { id: "stories", label: "Stories 9:16" },
+  { id: "feed", label: "Feed 1:1" },
+  { id: "universal", label: "Universal" },
+];
+
+const packageGoals = [
+  { id: "leads", label: "Заявки" },
+  { id: "awareness", label: "Узнаваемость" },
+  { id: "appointment", label: "Запись на приём" },
+  { id: "post", label: "Контент-пост" },
+];
+
+const packageTones = ["экспертно", "доверительно", "легко", "премиально"];
+
+const defaultPackageBrief: PackageBrief = {
+  mode: "idea",
+  format: "reels",
+  service: "Консультация косметолога",
+  city: "Астана",
+  offer: "Бесплатная первичная консультация",
+  audience: "Женщины 25-45, уход за кожей",
+  goal: "leads",
+  tone: "доверительно",
+  materialNotes: "",
+};
+
+const DEMO_AI_NOTICE = "Демо-режим: подключите AI provider для настоящей генерации.";
+
+const complianceRules = [
+  "Без гарантий результата",
+  "Без «100% результат»",
+  "Без диагностики по внешности",
+  "Без нереалистичных обещаний «до/после»",
+  "Без давления и медицинских страхов",
+];
 
 const inputStyle: CSSProperties = {
   width: "100%",
@@ -266,8 +326,112 @@ export default function ContentStudio() {
   const [form, setForm] = useState(initialVideo);
   const [videos, setVideos] = useState<ContentVideo[]>([]);
   const [activeId, setActiveId] = useState<string>("");
-  const [loading, setLoading] = useState<"video" | "script" | "avatar" | "tapnow" | "telegram" | "telegram-test" | null>(null);
+  const [loading, setLoading] = useState<"video" | "script" | "avatar" | "tapnow" | "telegram" | "telegram-test" | "package" | null>(null);
   const [notice, setNotice] = useState("");
+  const [packageBrief, setPackageBrief] = useState<PackageBrief>(defaultPackageBrief);
+  const [contentPackage, setContentPackage] = useState<ContentPackage | null>(null);
+  const [packageGenerationMode, setPackageGenerationMode] = useState("");
+  const [contentPackageId, setContentPackageId] = useState("");
+
+  const updatePackageBrief = (key: keyof PackageBrief, value: string) =>
+    setPackageBrief((current) => ({ ...current, [key]: value }));
+
+  const packageCompliance = useMemo(
+    () =>
+      contentPackage
+        ? checkMetaCompliance({
+            headline: contentPackage.adHeadline,
+            text: contentPackage.adPrimaryText,
+            description: contentPackage.caption,
+          })
+        : null,
+    [contentPackage],
+  );
+
+  const generatePackage = async () => {
+    setLoading("package");
+    setNotice("");
+    try {
+      const response = await fetch(apiUrl("/api/content-studio/generate-package"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...packageBrief, workspaceId: readWorkspaceId() }),
+      });
+      const body = await safeJson<ContentPackage>(response);
+      if (!response.ok || body?.success !== true) {
+        throw new Error(body?.success === false ? body.error : "Не удалось сгенерировать пакет контента");
+      }
+      setContentPackage(body.data);
+      setPackageGenerationMode(body.mode);
+      toast.success(body.mode === "demo" ? "Demo-пакет контента готов" : "Пакет контента готов");
+
+      // Persist the package: content_videos stores the whole body in raw_payload.
+      try {
+        const saveResponse = await fetch(apiUrl("/api/crm/content-videos"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            workspaceId: readWorkspaceId(),
+            title: body.data.ideaTitle,
+            niche: packageBrief.service,
+            goal: packageBrief.goal,
+            duration: "30-45 seconds",
+            style: packageBrief.tone,
+            audience: packageBrief.audience,
+            hook: body.data.hook,
+            script: body.data.script,
+            voiceover: body.data.voiceover,
+            cta: body.data.cta,
+            caption: body.data.caption,
+            status: "script_ready",
+            packageBrief,
+            packageData: body.data,
+          }),
+        });
+        const saveBody = await safeJson<{ video?: { id?: string }; item?: { id?: string } }>(saveResponse);
+        if (saveBody?.success === true) {
+          const savedId = saveBody.data.video?.id || saveBody.data.item?.id || "";
+          if (savedId) setContentPackageId(savedId);
+        }
+      } catch {
+        // localStorage/demo mode: the package still lives in state.
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Ошибка генерации пакета";
+      setNotice(message);
+      toast.error(message);
+    } finally {
+      setLoading(null);
+    }
+  };
+
+  const useInAdsAutomation = () => {
+    if (!contentPackage) {
+      toast.error("Сначала сгенерируйте пакет контента");
+      return;
+    }
+    localStorage.setItem(
+      "negis_ads_automation_prefill",
+      JSON.stringify({
+        source: "content_studio",
+        service: packageBrief.service,
+        city: packageBrief.city,
+        offer: packageBrief.offer,
+        audience: packageBrief.audience,
+        adText: contentPackage.adPrimaryText,
+        headline: contentPackage.adHeadline,
+        caption: contentPackage.caption,
+        cta: contentPackage.cta,
+        format: packageBrief.format,
+        creativeBrief: contentPackage.videoPrompt,
+        generatedAt: new Date().toISOString(),
+        contentPackageId: contentPackageId || undefined,
+        title: contentPackage.ideaTitle,
+      }),
+    );
+    toast.success("Пакет передан в AI запуск рекламы");
+    setLocation("/ads-automation");
+  };
 
   useEffect(() => {
     const saved = readVideos();
@@ -568,9 +732,9 @@ export default function ContentStudio() {
       <div className="space-y-6">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
           <div>
-            <h2 className="text-2xl font-black text-[#0B1220]">ИИ студия контента</h2>
+            <h2 className="text-2xl font-black text-[#0B1220]">AI Контент-студия</h2>
             <p className="mt-1 max-w-3xl text-sm leading-relaxed text-[#64748B]">
-              Создавайте идеи роликов, сценарии, voiceover, prompts для Avatar/TapNow и пакет для Telegram review.
+              Пакеты контента для рекламы и соцсетей: идеи, сценарии, тексты объявлений, prompts и WhatsApp-сообщения. Дальше — в AI запуск рекламы.
             </p>
           </div>
           <button
@@ -583,6 +747,164 @@ export default function ContentStudio() {
             <ArrowRight size={15} />
           </button>
         </div>
+
+        <section className="neu-card p-6">
+          <SectionTitle
+            icon={WandSparkles}
+            title="Пакет контента"
+            subtitle="Выберите режим и формат, заполните бриф — ИИ соберёт сценарий, тексты, prompts и WhatsApp-сообщение."
+          />
+
+          <p style={labelStyle}>Режим создания</p>
+          <div className="mb-4 flex flex-wrap gap-2">
+            {packageModes.map((mode) => (
+              <button
+                key={mode.id}
+                type="button"
+                className={`rounded-full border px-4 py-2 text-xs font-black ${
+                  packageBrief.mode === mode.id ? "border-[#0D9488] bg-[#0D9488] text-white" : "border-[#E7ECF3] bg-white text-[#475569]"
+                }`}
+                onClick={() => updatePackageBrief("mode", mode.id)}
+              >
+                {mode.label}
+              </button>
+            ))}
+          </div>
+
+          <p style={labelStyle}>Формат</p>
+          <div className="mb-4 flex flex-wrap gap-2">
+            {packageFormats.map((format) => (
+              <button
+                key={format.id}
+                type="button"
+                className={`rounded-full border px-4 py-2 text-xs font-black ${
+                  packageBrief.format === format.id ? "border-[#0D9488] bg-[#0D9488] text-white" : "border-[#E7ECF3] bg-white text-[#475569]"
+                }`}
+                onClick={() => updatePackageBrief("format", format.id)}
+              >
+                {format.label}
+              </button>
+            ))}
+          </div>
+
+          <div className="grid gap-4 md:grid-cols-2">
+            <Field label="Услуга" value={packageBrief.service} onChange={(value) => updatePackageBrief("service", value)} />
+            <Field label="Город" value={packageBrief.city} onChange={(value) => updatePackageBrief("city", value)} />
+            <Field label="Оффер" value={packageBrief.offer} onChange={(value) => updatePackageBrief("offer", value)} />
+            <Field label="Аудитория" value={packageBrief.audience} onChange={(value) => updatePackageBrief("audience", value)} />
+            <label>
+              <span style={labelStyle}>Цель</span>
+              <select style={inputStyle} value={packageBrief.goal} onChange={(event) => updatePackageBrief("goal", event.target.value)}>
+                {packageGoals.map((goal) => (
+                  <option key={goal.id} value={goal.id}>
+                    {goal.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <span style={labelStyle}>Тон</span>
+              <select style={inputStyle} value={packageBrief.tone} onChange={(event) => updatePackageBrief("tone", event.target.value)}>
+                {packageTones.map((tone) => (
+                  <option key={tone} value={tone}>
+                    {tone}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+          <div className="mt-4">
+            <Field
+              label="Материалы клиники (заметки, если есть фото/видео)"
+              value={packageBrief.materialNotes}
+              onChange={(value) => updatePackageBrief("materialNotes", value)}
+              textarea
+            />
+          </div>
+
+          <div className="mt-5 flex flex-col gap-2 sm:flex-row">
+            <button
+              type="button"
+              className="neu-btn-primary inline-flex items-center justify-center gap-2 px-5 py-2.5 text-sm"
+              disabled={loading === "package"}
+              onClick={() => void generatePackage()}
+            >
+              <Sparkles size={16} />
+              {loading === "package" ? "Генерируем пакет..." : "Сгенерировать пакет"}
+            </button>
+            {contentPackage ? (
+              <button
+                type="button"
+                className="neu-btn inline-flex items-center justify-center gap-2 px-5 py-2.5 text-sm"
+                onClick={useInAdsAutomation}
+              >
+                <Rocket size={16} />
+                Использовать в AI запуске рекламы
+                <ArrowRight size={15} />
+              </button>
+            ) : null}
+          </div>
+
+          {packageGenerationMode === "demo" ? (
+            <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-3 text-sm font-semibold text-amber-900">
+              {DEMO_AI_NOTICE}
+            </div>
+          ) : null}
+
+          {contentPackage ? (
+            <div className="mt-6 space-y-4">
+              <div className="rounded-2xl border border-[#E7ECF3] bg-white p-4">
+                <p className="text-xs font-bold uppercase text-[#64748B]">Идея</p>
+                <p className="mt-1 text-base font-black text-[#0B1220]">{contentPackage.ideaTitle}</p>
+                <p className="mt-2 text-sm font-semibold text-[#334155]">{contentPackage.hook}</p>
+              </div>
+
+              <div className="grid gap-4 xl:grid-cols-2">
+                <PromptBox title="Сценарий Reels/TikTok" value={contentPackage.script} onCopy={() => void copyText(contentPackage.script, "Сценарий")} />
+                <PromptBox title="Shot list" value={contentPackage.shotList.join("\n")} onCopy={() => void copyText(contentPackage.shotList.join("\n"), "Shot list")} />
+                <PromptBox title="Текст на экране" value={contentPackage.textOnScreen.join("\n")} onCopy={() => void copyText(contentPackage.textOnScreen.join("\n"), "Текст на экране")} />
+                <PromptBox title="Voiceover" value={contentPackage.voiceover} onCopy={() => void copyText(contentPackage.voiceover, "Voiceover")} />
+                <PromptBox title="Caption для соцсетей" value={contentPackage.caption} onCopy={() => void copyText(contentPackage.caption, "Caption")} />
+                <PromptBox
+                  title="Текст объявления Meta"
+                  value={`${contentPackage.adPrimaryText}\n\nЗаголовок: ${contentPackage.adHeadline}\nCTA: ${contentPackage.cta}`}
+                  onCopy={() => void copyText(contentPackage.adPrimaryText, "Текст объявления")}
+                />
+                <PromptBox title="Photo prompt" value={contentPackage.photoPrompt} onCopy={() => void copyText(contentPackage.photoPrompt, "Photo prompt")} />
+                <PromptBox title="Video prompt" value={contentPackage.videoPrompt} onCopy={() => void copyText(contentPackage.videoPrompt, "Video prompt")} />
+                <PromptBox title="WhatsApp сообщение" value={contentPackage.whatsappMessage} onCopy={() => void copyText(contentPackage.whatsappMessage, "WhatsApp сообщение")} />
+              </div>
+
+              <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4">
+                <p className="text-sm font-black text-emerald-900">Проверка безопасных формулировок</p>
+                <ul className="mt-2 space-y-1 text-sm font-semibold text-emerald-800">
+                  {complianceRules.map((rule) => (
+                    <li key={rule}>✓ {rule}</li>
+                  ))}
+                </ul>
+                {contentPackage.complianceNotes.length ? (
+                  <ul className="mt-3 space-y-1 text-sm font-semibold text-emerald-800">
+                    {contentPackage.complianceNotes.map((note) => (
+                      <li key={note}>• {note}</li>
+                    ))}
+                  </ul>
+                ) : null}
+                {packageCompliance && packageCompliance.status !== "safe" ? (
+                  <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm font-semibold text-amber-900">
+                    Статус проверки: {packageCompliance.status === "blocked" ? "заблокировано — перепишите текст" : "нужна ручная проверка"}
+                    <ul className="mt-1 space-y-1">
+                      {(packageCompliance.issues || []).map((issue, index) => (
+                        <li key={`${issue.code || "issue"}-${index}`}>• {issue.message}</li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : (
+                  <p className="mt-3 text-sm font-semibold text-emerald-800">Статус проверки: безопасно для медицинской рекламы.</p>
+                )}
+              </div>
+            </div>
+          ) : null}
+        </section>
 
         <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">
           <section className="neu-card p-6">

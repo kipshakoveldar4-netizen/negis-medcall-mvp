@@ -2,10 +2,12 @@ import type { VercelRequest, VercelResponse } from "@vercel/node";
 import {
   createContentVideo,
   demoAvatarPrompt,
+  demoContentPackage,
   demoScriptPackage,
   demoTapNowPrompt,
   generateOpenAIJson,
   listContentVideos,
+  normalizeContentPackage,
   normalizePromptPackage,
   normalizeScriptPackage,
   telegramPackageText,
@@ -201,6 +203,66 @@ async function handleVideos(req: VercelRequest, res: VercelResponse) {
   }
 
   return methodNotAllowed(res, ["Use GET or POST"]);
+}
+
+async function handleGeneratePackage(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== "POST") {
+    return methodNotAllowed(res, ["Use POST"]);
+  }
+
+  try {
+    const payload = readBody(req);
+    const fallback = demoContentPackage(payload);
+    const result = await generateOpenAIJson({
+      system:
+        "You are a Russian medical/cosmetology marketing copywriter for clinics. Return valid JSON only. No markdown. " +
+        "Strict compliance rules: never guarantee results, never write '100%', never diagnose by appearance, " +
+        "never promise unrealistic before/after outcomes, never use fear-based medical claims. " +
+        "Use safe wording: consultation, individual plan, doctor's assessment.",
+      user: {
+        task: "Generate a full clinic creative content package for short-form video and Meta ads.",
+        requiredJsonFields: [
+          "ideaTitle",
+          "hook",
+          "script",
+          "shotList",
+          "textOnScreen",
+          "voiceover",
+          "caption",
+          "adPrimaryText",
+          "adHeadline",
+          "cta",
+          "photoPrompt",
+          "videoPrompt",
+          "whatsappMessage",
+          "complianceNotes",
+        ],
+        requirements: {
+          language: "Russian",
+          script: "numbered scenes with timing for a 30-45 second vertical video",
+          shotList: "array of 4-6 shot descriptions",
+          textOnScreen: "array of 3-5 short on-screen lines",
+          adPrimaryText: "Meta ad primary text, 2-4 sentences, no result guarantees",
+          complianceNotes: "array of short notes confirming safe medical wording",
+        },
+        input: payload,
+      },
+      fallback,
+      normalize: (value) => normalizeContentPackage(value, fallback),
+    });
+
+    return sendJson(res, 200, {
+      success: true,
+      mode: result.mode,
+      data: result.data,
+    });
+  } catch (error) {
+    return sendJson(res, 500, {
+      success: false,
+      error: "Generation error",
+      details: [error instanceof Error ? error.message : "Failed to generate content package"],
+    });
+  }
 }
 
 async function handleGenerateScript(req: VercelRequest, res: VercelResponse) {
@@ -471,6 +533,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const resource = readPathSegment(req);
 
   if (resource === "videos") return handleVideos(req, res);
+  if (resource === "generate-package") return handleGeneratePackage(req, res);
   if (resource === "generate-script") return handleGenerateScript(req, res);
   if (resource === "generate-avatar-prompt") return handleGenerateAvatarPrompt(req, res);
   if (resource === "generate-tapnow-prompt") return handleGenerateTapNowPrompt(req, res);

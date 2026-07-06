@@ -27,7 +27,7 @@ import { agentInitials, type AgentDisplayInfo } from '@/lib/agentDisplay';
 
 const NAV = [
   { href: '/ads-automation', icon: Rocket, label: 'AI запуск рекламы', permission: 'ads' },
-  { href: '/content-studio', icon: Clapperboard, label: 'ИИ студия контента', permission: 'ads' },
+  { href: '/content-studio', icon: Clapperboard, label: 'AI Контент-студия', permission: 'ads' },
   { href: '/dashboard', icon: BarChart2, label: 'Дашборд', permission: 'dashboard' },
   { href: '/appointments', icon: CalendarDays, label: 'Запись', permission: 'booking' },
   { href: '/reception', icon: Building2, label: 'Ресепшн', permission: 'reception' },

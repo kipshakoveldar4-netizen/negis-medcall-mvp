@@ -36,7 +36,7 @@ const primaryItems: MobileNavItem[] = [
 
 const drawerItems: MobileNavItem[] = [
   { href: "/ads-automation", label: "AI запуск рекламы", icon: Rocket, permission: "ads" },
-  { href: "/content-studio", label: "ИИ студия контента", icon: Clapperboard, permission: "ads" },
+  { href: "/content-studio", label: "AI Контент-студия", icon: Clapperboard, permission: "ads" },
   { href: "/ads", label: "Реклама", icon: Megaphone, permission: "ads" },
   { href: "/reception", label: "Ресепшн", icon: User, permission: "reception" },
   { href: "/calls", label: "Звонки", icon: PhoneCall, permission: "reception" },
