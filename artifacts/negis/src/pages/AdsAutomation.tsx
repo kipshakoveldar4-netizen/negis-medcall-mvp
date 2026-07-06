@@ -1292,6 +1292,23 @@ export default function AdsAutomation() {
         setCompliance(null);
       }
 
+      // Restore a ready image creative from the studio's photo builder: the URL
+      // points at the already-uploaded render in the public ad-creatives bucket.
+      const creativeUrl = firstString(data.creativeUrl, data.imageUrl);
+      if (creativeUrl && firstString(data.creativeType) !== "video") {
+        setCreative({
+          fileName: firstString(data.fileName) || "studio-creative.jpg",
+          fileType: "image",
+          mimeType: firstString(data.mimeType) || "image/jpeg",
+          fileSize: Number(data.fileSize) || 0,
+          previewUrl: creativeUrl,
+          publicUrl: creativeUrl,
+          status: "uploaded",
+        });
+        setCreativeFile(null);
+        setVideoJob(null);
+      }
+
       // Never pre-arm a launch from an import.
       setActiveConfirmation("");
       setLaunchResult(null);

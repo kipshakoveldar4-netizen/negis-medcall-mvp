@@ -1527,6 +1527,53 @@ async function checkContentStudioPhaseOne() {
   console.log("Content Studio Phase 1 checks: ok");
 }
 
+async function checkPhotoCreativeBuilder() {
+  const studio = await readFile(path.join(repoRoot, "artifacts", "negis", "src", "pages", "ContentStudio.tsx"), "utf8");
+  for (const marker of [
+    "Фото-креатив",
+    'accept="image/*"',
+    "Загрузить фото",
+    "Фото врача",
+    "Кабинет клиники",
+    "Процедура",
+    "Общее фото клиники",
+    "Reels/Stories 9:16",
+    "Feed 1:1",
+    "Universal 4:5",
+    "Заголовок сверху + CTA снизу",
+    "Тёмный градиент снизу",
+    "Чистая медицинская карточка",
+    "Минимальный премиум",
+    "renderPhotoCreative",
+    "canvas.toBlob",
+    "Сгенерировать макет",
+    "Скачать изображение",
+    "Копировать текст",
+    "Создать другую версию",
+    "Использовать в AI запуске рекламы",
+    "До: исходное фото",
+    "После: готовый креатив",
+    "Рискованные формулировки",
+    'source: "content_studio_photo"',
+    "uploadToSignedUrl",
+    "Дисклеймер",
+  ]) {
+    if (!studio.includes(marker)) {
+      throw new Error(`Photo creative builder is missing "${marker}"`);
+    }
+  }
+
+  // Ads Automation must restore the studio image creative from the prefill.
+  const adsAutomation = await readFile(path.join(repoRoot, "artifacts", "negis", "src", "pages", "AdsAutomation.tsx"), "utf8");
+  for (const marker of ["firstString(data.creativeUrl", 'fileType: "image"']) {
+    if (!adsAutomation.includes(marker)) {
+      throw new Error(`Ads Automation prefill must restore image creatives (${marker})`);
+    }
+  }
+
+  console.log("Photo creative builder checks: ok");
+}
+
 async function checkNavigationCleanup() {
   const layoutDir = path.join(repoRoot, "artifacts", "negis", "src", "components", "layout");
   const pagesDir = path.join(repoRoot, "artifacts", "negis", "src", "pages");
@@ -1705,6 +1752,7 @@ async function main() {
   await checkVideoWorkerPackage();
   await checkNavigationCleanup();
   await checkContentStudioPhaseOne();
+  await checkPhotoCreativeBuilder();
   await checkNoNewApiFiles();
   for (const route of [
     "/dashboard",

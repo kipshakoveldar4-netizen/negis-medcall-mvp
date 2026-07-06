@@ -1,12 +1,15 @@
-import { useEffect, useMemo, useState, type CSSProperties } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { useLocation } from "wouter";
 import {
   ArrowRight,
   Check,
   Clapperboard,
   Copy,
+  Download,
   FileText,
+  ImagePlus,
   Megaphone,
+  RefreshCw,
   Rocket,
   Send,
   Sparkles,
@@ -16,6 +19,7 @@ import {
 import { toast } from "sonner";
 import { PageLayout } from "@/components/layout/PageLayout";
 import { apiUrl } from "@/lib/api";
+import { supabase, hasSupabaseFrontendEnv } from "@/lib/supabase";
 import { checkMetaCompliance } from "../../../../lib/meta/compliance";
 import type { ContentPackage } from "../../../../lib/content-studio/core";
 
@@ -124,6 +128,218 @@ const defaultPackageBrief: PackageBrief = {
 };
 
 const DEMO_AI_NOTICE = "Демо-режим: подключите AI provider для настоящей генерации.";
+
+type PhotoFormatId = "story" | "feed" | "universal";
+type PhotoLayoutId = "top_bottom" | "gradient_bottom" | "medical_card" | "minimal_premium";
+
+type PhotoCreativeTexts = {
+  headline: string;
+  offer: string;
+  cta: string;
+  disclaimer: string;
+};
+
+const photoFormats: Array<{ id: PhotoFormatId; label: string; width: number; height: number }> = [
+  { id: "story", label: "Reels/Stories 9:16", width: 1080, height: 1920 },
+  { id: "feed", label: "Feed 1:1", width: 1080, height: 1080 },
+  { id: "universal", label: "Universal 4:5", width: 1080, height: 1350 },
+];
+
+const photoLayouts: Array<{ id: PhotoLayoutId; label: string }> = [
+  { id: "top_bottom", label: "Заголовок сверху + CTA снизу" },
+  { id: "gradient_bottom", label: "Тёмный градиент снизу" },
+  { id: "medical_card", label: "Чистая медицинская карточка" },
+  { id: "minimal_premium", label: "Минимальный премиум" },
+];
+
+const photoSourceTypes = ["Фото врача", "Кабинет клиники", "Процедура", "Общее фото клиники"];
+
+const defaultPhotoTexts: PhotoCreativeTexts = {
+  headline: "Консультация косметолога",
+  offer: "Бесплатная первичная консультация",
+  cta: "Записаться в WhatsApp",
+  disclaimer: "Имеются противопоказания. Необходима консультация специалиста.",
+};
+
+function loadCanvasImage(url: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error("Не удалось загрузить фото для макета"));
+    image.src = url;
+  });
+}
+
+function wrapCanvasText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string[] {
+  const words = text.trim().split(/\s+/).filter(Boolean);
+  const lines: string[] = [];
+  let line = "";
+  for (const word of words) {
+    const candidate = line ? `${line} ${word}` : word;
+    if (ctx.measureText(candidate).width > maxWidth && line) {
+      lines.push(line);
+      line = word;
+    } else {
+      line = candidate;
+    }
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+
+function drawWrapped(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  x: number,
+  y: number,
+  maxWidth: number,
+  lineHeight: number,
+): number {
+  const lines = wrapCanvasText(ctx, text, maxWidth);
+  lines.forEach((line, index) => ctx.fillText(line, x, y + index * lineHeight));
+  return y + lines.length * lineHeight;
+}
+
+function drawRoundedRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+// Browser-only renderer: cover-fit the photo into the target format and paint
+// one of the safe preset layouts. Exported as JPEG via canvas.toBlob.
+export async function renderPhotoCreative(input: {
+  imageUrl: string;
+  width: number;
+  height: number;
+  layout: PhotoLayoutId;
+  texts: PhotoCreativeTexts;
+}): Promise<Blob | null> {
+  const image = await loadCanvasImage(input.imageUrl);
+  const { width, height, layout, texts } = input;
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return null;
+
+  const scale = Math.max(width / image.width, height / image.height);
+  const drawWidth = image.width * scale;
+  const drawHeight = image.height * scale;
+  ctx.drawImage(image, (width - drawWidth) / 2, (height - drawHeight) / 2, drawWidth, drawHeight);
+
+  const margin = Math.round(width * 0.07);
+  const contentWidth = width - margin * 2;
+  const headlineFont = `900 ${Math.round(width * 0.062)}px Inter, Arial, sans-serif`;
+  const offerFont = `600 ${Math.round(width * 0.04)}px Inter, Arial, sans-serif`;
+  const ctaFont = `800 ${Math.round(width * 0.038)}px Inter, Arial, sans-serif`;
+  const headlineLine = Math.round(width * 0.075);
+  const offerLine = Math.round(width * 0.052);
+
+  ctx.textAlign = "left";
+  ctx.textBaseline = "top";
+
+  if (layout === "top_bottom") {
+    ctx.font = headlineFont;
+    const headlineLines = wrapCanvasText(ctx, texts.headline, contentWidth);
+    const bandHeight = margin * 1.2 + headlineLines.length * headlineLine;
+    ctx.fillStyle = "rgba(255,255,255,0.94)";
+    ctx.fillRect(0, 0, width, bandHeight);
+    ctx.fillStyle = "#0F172A";
+    drawWrapped(ctx, texts.headline, margin, margin * 0.7, contentWidth, headlineLine);
+
+    ctx.font = offerFont;
+    const offerLines = wrapCanvasText(ctx, texts.offer, contentWidth);
+    const bottomBand = margin * 2.4 + offerLines.length * offerLine + Math.round(width * 0.1);
+    ctx.fillStyle = "rgba(255,255,255,0.94)";
+    ctx.fillRect(0, height - bottomBand, width, bottomBand);
+    ctx.fillStyle = "#334155";
+    const afterOffer = drawWrapped(ctx, texts.offer, margin, height - bottomBand + margin * 0.6, contentWidth, offerLine);
+    ctx.fillStyle = "#0D9488";
+    drawRoundedRect(ctx, margin, afterOffer + margin * 0.3, Math.min(contentWidth, width * 0.62), Math.round(width * 0.09), Math.round(width * 0.045));
+    ctx.fill();
+    ctx.fillStyle = "#FFFFFF";
+    ctx.font = ctaFont;
+    ctx.fillText(texts.cta, margin + Math.round(width * 0.04), afterOffer + margin * 0.3 + Math.round(width * 0.026));
+  }
+
+  if (layout === "gradient_bottom") {
+    const gradient = ctx.createLinearGradient(0, height * 0.45, 0, height);
+    gradient.addColorStop(0, "rgba(2,6,23,0)");
+    gradient.addColorStop(1, "rgba(2,6,23,0.88)");
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, height * 0.45, width, height * 0.55);
+
+    ctx.font = offerFont;
+    const offerLines = wrapCanvasText(ctx, texts.offer, contentWidth);
+    ctx.font = headlineFont;
+    const headlineLines = wrapCanvasText(ctx, texts.headline, contentWidth);
+    const blockHeight = headlineLines.length * headlineLine + offerLines.length * offerLine + Math.round(width * 0.16);
+    let cursor = height - blockHeight - margin;
+    ctx.fillStyle = "#FFFFFF";
+    cursor = drawWrapped(ctx, texts.headline, margin, cursor, contentWidth, headlineLine);
+    ctx.font = offerFont;
+    ctx.fillStyle = "rgba(255,255,255,0.85)";
+    cursor = drawWrapped(ctx, texts.offer, margin, cursor + Math.round(width * 0.015), contentWidth, offerLine);
+    ctx.fillStyle = "#2DD4BF";
+    ctx.font = ctaFont;
+    ctx.fillText(`→ ${texts.cta}`, margin, cursor + Math.round(width * 0.02));
+  }
+
+  if (layout === "medical_card") {
+    ctx.font = headlineFont;
+    const headlineLines = wrapCanvasText(ctx, texts.headline, contentWidth - margin);
+    ctx.font = offerFont;
+    const offerLines = wrapCanvasText(ctx, texts.offer, contentWidth - margin);
+    const cardHeight = headlineLines.length * headlineLine + offerLines.length * offerLine + Math.round(width * 0.22);
+    const cardTop = height - cardHeight - margin;
+    ctx.fillStyle = "rgba(255,255,255,0.97)";
+    drawRoundedRect(ctx, margin * 0.7, cardTop, width - margin * 1.4, cardHeight, Math.round(width * 0.03));
+    ctx.fill();
+    ctx.fillStyle = "#0D9488";
+    ctx.fillRect(margin * 0.7, cardTop, Math.round(width * 0.012), cardHeight);
+    ctx.fillStyle = "#0F172A";
+    ctx.font = headlineFont;
+    let cursor = drawWrapped(ctx, texts.headline, margin * 1.3, cardTop + margin * 0.6, contentWidth - margin, headlineLine);
+    ctx.fillStyle = "#475569";
+    ctx.font = offerFont;
+    cursor = drawWrapped(ctx, texts.offer, margin * 1.3, cursor + Math.round(width * 0.012), contentWidth - margin, offerLine);
+    ctx.fillStyle = "#0D9488";
+    ctx.font = ctaFont;
+    ctx.fillText(texts.cta, margin * 1.3, cursor + Math.round(width * 0.015));
+  }
+
+  if (layout === "minimal_premium") {
+    ctx.fillStyle = "rgba(15,23,42,0.30)";
+    ctx.fillRect(0, 0, width, height);
+    ctx.fillStyle = "#FFFFFF";
+    ctx.font = `700 ${Math.round(width * 0.05)}px Georgia, 'Times New Roman', serif`;
+    const cursor = drawWrapped(ctx, texts.headline.toUpperCase(), margin, margin, contentWidth, Math.round(width * 0.068));
+    ctx.fillRect(margin, cursor + Math.round(width * 0.012), Math.round(width * 0.14), 3);
+    ctx.font = offerFont;
+    ctx.fillStyle = "rgba(255,255,255,0.9)";
+    drawWrapped(ctx, texts.offer, margin, cursor + Math.round(width * 0.04), contentWidth, offerLine);
+    ctx.font = ctaFont;
+    ctx.fillStyle = "#FFFFFF";
+    const ctaY = height - margin - Math.round(width * 0.05);
+    ctx.fillText(texts.cta, margin, ctaY);
+    ctx.fillRect(margin, ctaY + Math.round(width * 0.05), ctx.measureText(texts.cta).width, 2);
+  }
+
+  if (texts.disclaimer.trim()) {
+    ctx.font = `500 ${Math.round(width * 0.02)}px Inter, Arial, sans-serif`;
+    ctx.textAlign = "center";
+    ctx.fillStyle = layout === "top_bottom" || layout === "medical_card" ? "rgba(51,65,85,0.85)" : "rgba(255,255,255,0.8)";
+    ctx.fillText(texts.disclaimer, width / 2, height - Math.round(width * 0.035));
+    ctx.textAlign = "left";
+  }
+
+  return new Promise((resolve) => canvas.toBlob((blob) => resolve(blob), "image/jpeg", 0.92));
+}
 
 const complianceRules = [
   "Без гарантий результата",
@@ -332,6 +548,241 @@ export default function ContentStudio() {
   const [contentPackage, setContentPackage] = useState<ContentPackage | null>(null);
   const [packageGenerationMode, setPackageGenerationMode] = useState("");
   const [contentPackageId, setContentPackageId] = useState("");
+  const photoFileInputRef = useRef<HTMLInputElement | null>(null);
+  const [photoSourceUrl, setPhotoSourceUrl] = useState("");
+  const [photoSourceName, setPhotoSourceName] = useState("");
+  const [photoSourceType, setPhotoSourceType] = useState(photoSourceTypes[0]);
+  const [photoFormat, setPhotoFormat] = useState<PhotoFormatId>("story");
+  const [photoLayout, setPhotoLayout] = useState<PhotoLayoutId>("gradient_bottom");
+  const [photoTexts, setPhotoTexts] = useState<PhotoCreativeTexts>(defaultPhotoTexts);
+  const [photoPreviewUrl, setPhotoPreviewUrl] = useState("");
+  const [photoBlob, setPhotoBlob] = useState<Blob | null>(null);
+  const [photoBusy, setPhotoBusy] = useState<"render" | "suggest" | "handoff" | null>(null);
+  const [photoSuggestMode, setPhotoSuggestMode] = useState("");
+
+  const updatePhotoTexts = (key: keyof PhotoCreativeTexts, value: string) =>
+    setPhotoTexts((current) => ({ ...current, [key]: value }));
+
+  const photoCompliance = useMemo(
+    () => checkMetaCompliance({ headline: photoTexts.headline, text: photoTexts.offer, description: photoTexts.cta }),
+    [photoTexts],
+  );
+
+  const onPhotoFileSelected = (file: File | null) => {
+    if (!file) return;
+    if (!file.type.startsWith("image/")) {
+      toast.error("Загрузите изображение (JPG, PNG или WEBP)");
+      return;
+    }
+    if (photoSourceUrl.startsWith("blob:")) URL.revokeObjectURL(photoSourceUrl);
+    if (photoPreviewUrl.startsWith("blob:")) URL.revokeObjectURL(photoPreviewUrl);
+    setPhotoSourceUrl(URL.createObjectURL(file));
+    setPhotoSourceName(file.name);
+    setPhotoPreviewUrl("");
+    setPhotoBlob(null);
+  };
+
+  const suggestPhotoTexts = async () => {
+    setPhotoBusy("suggest");
+    try {
+      const response = await fetch(apiUrl("/api/content-studio/generate-package"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          workspaceId: readWorkspaceId(),
+          mode: "ads",
+          format: photoFormat,
+          service: packageBrief.service,
+          city: packageBrief.city,
+          offer: packageBrief.offer,
+          audience: packageBrief.audience,
+          goal: packageBrief.goal,
+          tone: packageBrief.tone,
+          materialNotes: `${photoSourceType}${photoSourceName ? `: ${photoSourceName}` : ""}`,
+        }),
+      });
+      const body = await safeJson<ContentPackage>(response);
+      if (!response.ok || body?.success !== true) {
+        throw new Error(body?.success === false ? body.error : "Не удалось предложить тексты");
+      }
+      setPhotoTexts((current) => ({
+        ...current,
+        headline: body.data.adHeadline || current.headline,
+        offer: packageBrief.offer || body.data.adPrimaryText.split(".")[0] || current.offer,
+        cta: body.data.cta || current.cta,
+      }));
+      setPhotoSuggestMode(body.mode);
+      toast.success(body.mode === "demo" ? "Demo-тексты готовы" : "Тексты готовы");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Ошибка генерации текстов");
+    } finally {
+      setPhotoBusy(null);
+    }
+  };
+
+  const generatePhotoLayout = async (layoutOverride?: PhotoLayoutId) => {
+    if (!photoSourceUrl) {
+      toast.error("Сначала загрузите фото клиники");
+      return;
+    }
+    const layout = layoutOverride || photoLayout;
+    setPhotoBusy("render");
+    try {
+      const format = photoFormats.find((item) => item.id === photoFormat) || photoFormats[0];
+      const blob = await renderPhotoCreative({
+        imageUrl: photoSourceUrl,
+        width: format.width,
+        height: format.height,
+        layout,
+        texts: photoTexts,
+      });
+      if (!blob) throw new Error("Не удалось создать макет");
+      if (photoPreviewUrl.startsWith("blob:")) URL.revokeObjectURL(photoPreviewUrl);
+      setPhotoBlob(blob);
+      setPhotoPreviewUrl(URL.createObjectURL(blob));
+      toast.success("Макет креатива готов");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Ошибка создания макета");
+    } finally {
+      setPhotoBusy(null);
+    }
+  };
+
+  const createAnotherPhotoVersion = async () => {
+    const currentIndex = photoLayouts.findIndex((item) => item.id === photoLayout);
+    const next = photoLayouts[(currentIndex + 1) % photoLayouts.length].id;
+    setPhotoLayout(next);
+    await generatePhotoLayout(next);
+  };
+
+  const downloadPhotoCreative = () => {
+    if (!photoPreviewUrl) {
+      toast.error("Сначала сгенерируйте макет");
+      return;
+    }
+    const link = document.createElement("a");
+    link.href = photoPreviewUrl;
+    link.download = `negis-photo-creative-${photoFormat}.jpg`;
+    link.click();
+    toast.success("Изображение скачивается");
+  };
+
+  const copyPhotoTexts = () =>
+    void copyText([photoTexts.headline, photoTexts.offer, photoTexts.cta].filter(Boolean).join("\n"), "Тексты креатива");
+
+  const usePhotoInAdsAutomation = async () => {
+    if (!photoBlob) {
+      toast.error("Сначала сгенерируйте макет");
+      return;
+    }
+    setPhotoBusy("handoff");
+    try {
+      // Upload the rendered JPEG through the existing signed upload flow so
+      // Ads Automation gets a real public creative URL.
+      let creativeUrl = "";
+      let fileName = `photo-creative-${Date.now()}.jpg`;
+      if (hasSupabaseFrontendEnv) {
+        try {
+          const signedResponse = await fetch(apiUrl("/api/crm/ad-creatives/signed-upload"), {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              workspaceId: readWorkspaceId(),
+              fileName,
+              fileType: "image",
+              mimeType: "image/jpeg",
+              fileSize: photoBlob.size,
+            }),
+          });
+          const signedBody = await safeJson<{ bucket?: string; storageBucket?: string; storagePath?: string; token?: string; publicUrl?: string }>(signedResponse);
+          if (signedResponse.ok && signedBody?.success === true) {
+            const bucket = signedBody.data.bucket || signedBody.data.storageBucket || "ad-creatives";
+            const storagePath = signedBody.data.storagePath || "";
+            const token = signedBody.data.token || "";
+            if (storagePath && token) {
+              const { error: uploadError } = await supabase.storage.from(bucket).uploadToSignedUrl(storagePath, token, photoBlob, {
+                contentType: "image/jpeg",
+              });
+              if (!uploadError) {
+                creativeUrl = signedBody.data.publicUrl || "";
+                if (!creativeUrl) {
+                  const env = import.meta.env as Record<string, string | undefined>;
+                  const supabaseUrl = (env.VITE_SUPABASE_URL || "").replace(/\/$/, "");
+                  if (supabaseUrl) {
+                    creativeUrl = `${supabaseUrl}/storage/v1/object/public/${bucket}/${storagePath.split("/").map(encodeURIComponent).join("/")}`;
+                  }
+                }
+              }
+            }
+          }
+        } catch {
+          creativeUrl = "";
+        }
+      }
+      if (!creativeUrl) {
+        toast.warning("Не удалось загрузить креатив в Storage — передаём только тексты. Изображение можно скачать и загрузить вручную.");
+        fileName = "";
+      }
+
+      const formatLabel = photoFormats.find((item) => item.id === photoFormat)?.label || photoFormat;
+      const layoutLabel = photoLayouts.find((item) => item.id === photoLayout)?.label || photoLayout;
+
+      // Persist metadata: content_videos keeps the whole body in raw_payload.
+      try {
+        await fetch(apiUrl("/api/crm/content-videos"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            workspaceId: readWorkspaceId(),
+            title: photoTexts.headline,
+            niche: packageBrief.service,
+            goal: "photo_creative",
+            style: layoutLabel,
+            audience: packageBrief.audience,
+            caption: photoTexts.offer,
+            cta: photoTexts.cta,
+            status: "idea",
+            photoCreative: {
+              format: photoFormat,
+              layout: photoLayout,
+              sourceType: photoSourceType,
+              creativeUrl,
+              texts: photoTexts,
+            },
+          }),
+        });
+      } catch {
+        // Metadata persistence is best-effort in demo mode.
+      }
+
+      localStorage.setItem(
+        "negis_ads_automation_prefill",
+        JSON.stringify({
+          source: "content_studio_photo",
+          service: packageBrief.service,
+          city: packageBrief.city,
+          offer: photoTexts.offer,
+          audience: packageBrief.audience,
+          adText: `${photoTexts.offer}. ${photoTexts.cta}.`,
+          headline: photoTexts.headline,
+          cta: "LEARN_MORE",
+          format: photoFormat,
+          creativeUrl,
+          creativeType: "image",
+          fileName,
+          mimeType: "image/jpeg",
+          fileSize: photoBlob.size,
+          creativeBrief: `Фото-креатив: ${layoutLabel}, формат ${formatLabel}, CTA «${photoTexts.cta}»`,
+          generatedAt: new Date().toISOString(),
+          title: photoTexts.headline,
+        }),
+      );
+      toast.success("Фото-креатив передан в AI запуск рекламы");
+      setLocation("/ads-automation");
+    } finally {
+      setPhotoBusy(null);
+    }
+  };
 
   const updatePackageBrief = (key: keyof PackageBrief, value: string) =>
     setPackageBrief((current) => ({ ...current, [key]: value }));
@@ -900,6 +1351,171 @@ export default function ContentStudio() {
                   </div>
                 ) : (
                   <p className="mt-3 text-sm font-semibold text-emerald-800">Статус проверки: безопасно для медицинской рекламы.</p>
+                )}
+              </div>
+            </div>
+          ) : null}
+        </section>
+
+        <section className="neu-card p-6">
+          <SectionTitle
+            icon={ImagePlus}
+            title="Фото-креатив"
+            subtitle="Загрузите фото клиники — Negis соберёт готовый рекламный креатив с безопасным текстом. Скачайте или отправьте в AI запуск рекламы."
+          />
+
+          <div className="grid gap-4 md:grid-cols-2">
+            <div>
+              <p style={labelStyle}>Фото клиники</p>
+              <input
+                ref={photoFileInputRef}
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={(event) => onPhotoFileSelected(event.target.files?.[0] || null)}
+              />
+              <button
+                type="button"
+                className="neu-btn inline-flex items-center gap-2 px-5 py-2.5 text-sm"
+                onClick={() => photoFileInputRef.current?.click()}
+              >
+                <ImagePlus size={16} />
+                {photoSourceName ? "Заменить фото" : "Загрузить фото"}
+              </button>
+              {photoSourceName ? <p className="mt-2 text-xs font-semibold text-[#64748B]">{photoSourceName}</p> : null}
+            </div>
+            <label>
+              <span style={labelStyle}>Тип фото</span>
+              <select style={inputStyle} value={photoSourceType} onChange={(event) => setPhotoSourceType(event.target.value)}>
+                {photoSourceTypes.map((type) => (
+                  <option key={type} value={type}>
+                    {type}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+
+          <p className="mt-4" style={labelStyle}>Формат</p>
+          <div className="mb-3 flex flex-wrap gap-2">
+            {photoFormats.map((format) => (
+              <button
+                key={format.id}
+                type="button"
+                className={`rounded-full border px-4 py-2 text-xs font-black ${
+                  photoFormat === format.id ? "border-[#0D9488] bg-[#0D9488] text-white" : "border-[#E7ECF3] bg-white text-[#475569]"
+                }`}
+                onClick={() => setPhotoFormat(format.id)}
+              >
+                {format.label}
+              </button>
+            ))}
+          </div>
+
+          <p style={labelStyle}>Макет</p>
+          <div className="mb-4 flex flex-wrap gap-2">
+            {photoLayouts.map((layout) => (
+              <button
+                key={layout.id}
+                type="button"
+                className={`rounded-full border px-4 py-2 text-xs font-black ${
+                  photoLayout === layout.id ? "border-[#0D9488] bg-[#0D9488] text-white" : "border-[#E7ECF3] bg-white text-[#475569]"
+                }`}
+                onClick={() => setPhotoLayout(layout.id)}
+              >
+                {layout.label}
+              </button>
+            ))}
+          </div>
+
+          <div className="grid gap-4 md:grid-cols-2">
+            <Field label="Заголовок" value={photoTexts.headline} onChange={(value) => updatePhotoTexts("headline", value)} />
+            <Field label="Оффер" value={photoTexts.offer} onChange={(value) => updatePhotoTexts("offer", value)} />
+            <Field label="CTA" value={photoTexts.cta} onChange={(value) => updatePhotoTexts("cta", value)} />
+            <Field label="Дисклеймер (необязательно)" value={photoTexts.disclaimer} onChange={(value) => updatePhotoTexts("disclaimer", value)} />
+          </div>
+
+          {photoCompliance.status !== "safe" ? (
+            <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-3 text-sm font-semibold text-amber-900">
+              Рискованные формулировки для медицинской рекламы —{" "}
+              {photoCompliance.status === "blocked" ? "перепишите текст перед использованием." : "проверьте текст вручную."}
+              <ul className="mt-1 space-y-1">
+                {(photoCompliance.issues || []).map((issue, index) => (
+                  <li key={`photo-issue-${index}`}>• {issue.message}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+
+          {photoSuggestMode === "demo" ? (
+            <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-3 text-sm font-semibold text-amber-900">
+              {DEMO_AI_NOTICE}
+            </div>
+          ) : null}
+
+          <div className="mt-5 flex flex-wrap gap-2">
+            <button
+              type="button"
+              className="neu-btn inline-flex items-center gap-2 px-4 py-2.5 text-sm"
+              disabled={photoBusy === "suggest"}
+              onClick={() => void suggestPhotoTexts()}
+            >
+              <Sparkles size={15} />
+              {photoBusy === "suggest" ? "Подбираем тексты..." : "Предложить тексты"}
+            </button>
+            <button
+              type="button"
+              className="neu-btn-primary inline-flex items-center gap-2 px-4 py-2.5 text-sm"
+              disabled={photoBusy === "render"}
+              onClick={() => void generatePhotoLayout()}
+            >
+              <WandSparkles size={15} />
+              {photoBusy === "render" ? "Собираем макет..." : "Сгенерировать макет"}
+            </button>
+            <button type="button" className="neu-btn inline-flex items-center gap-2 px-4 py-2.5 text-sm" onClick={downloadPhotoCreative}>
+              <Download size={15} />
+              Скачать изображение
+            </button>
+            <button type="button" className="neu-btn inline-flex items-center gap-2 px-4 py-2.5 text-sm" onClick={copyPhotoTexts}>
+              <Copy size={15} />
+              Копировать текст
+            </button>
+            <button
+              type="button"
+              className="neu-btn inline-flex items-center gap-2 px-4 py-2.5 text-sm"
+              disabled={photoBusy === "render"}
+              onClick={() => void createAnotherPhotoVersion()}
+            >
+              <RefreshCw size={15} />
+              Создать другую версию
+            </button>
+            <button
+              type="button"
+              className="neu-btn-primary inline-flex items-center gap-2 px-4 py-2.5 text-sm"
+              disabled={photoBusy === "handoff"}
+              onClick={() => void usePhotoInAdsAutomation()}
+            >
+              <Rocket size={15} />
+              {photoBusy === "handoff" ? "Передаём..." : "Использовать в AI запуске рекламы"}
+            </button>
+          </div>
+
+          {photoSourceUrl || photoPreviewUrl ? (
+            <div className="mt-6 grid gap-4 md:grid-cols-2">
+              <div className="neu-sm p-3">
+                <p className="mb-2 text-xs font-bold uppercase text-[#64748B]">До: исходное фото</p>
+                {photoSourceUrl ? (
+                  <img src={photoSourceUrl} alt="Исходное фото клиники" className="max-h-[420px] w-full rounded-xl object-contain" />
+                ) : (
+                  <p className="text-sm font-semibold text-[#64748B]">Загрузите фото клиники.</p>
+                )}
+              </div>
+              <div className="neu-sm p-3">
+                <p className="mb-2 text-xs font-bold uppercase text-[#64748B]">После: готовый креатив</p>
+                {photoPreviewUrl ? (
+                  <img src={photoPreviewUrl} alt="Готовый фото-креатив" className="max-h-[420px] w-full rounded-xl object-contain" />
+                ) : (
+                  <p className="text-sm font-semibold text-[#64748B]">Нажмите «Сгенерировать макет», чтобы увидеть креатив.</p>
                 )}
               </div>
             </div>
