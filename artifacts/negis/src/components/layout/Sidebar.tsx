@@ -75,8 +75,8 @@ export function Sidebar() {
             N
           </div>
           <div className="min-w-0">
-            <p className="text-sm font-black text-[#0F172A]">Negis MedCall</p>
-            <p className="mt-0.5 text-xs font-bold text-[#64748B]">Clean Medical CRM</p>
+            <p className="text-sm font-black text-[#0F172A]">Negis OS</p>
+            <p className="mt-0.5 text-xs font-bold text-[#64748B]">AI Business OS для клиник</p>
           </div>
         </div>
 

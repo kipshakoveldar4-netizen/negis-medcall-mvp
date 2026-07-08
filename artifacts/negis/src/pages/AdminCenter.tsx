@@ -1019,7 +1019,7 @@ export default function AdminCenter() {
     try {
       await navigator.clipboard.writeText(
         [
-          "Negis CRM login",
+          "Negis OS login",
           `Email: ${createdCredentials.email}`,
           `Temporary password: ${createdCredentials.temporaryPassword}`,
           `URL: ${createdCredentials.loginUrl}`,
@@ -1640,7 +1640,7 @@ export default function AdminCenter() {
         <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
           <div>
             <p className="text-xs font-bold uppercase tracking-[0.18em] text-[#64748B]">Admin Center</p>
-            <h1 className="mt-2 text-3xl font-black text-[#0F172A]">Release-ready управление Negis CRM</h1>
+            <h1 className="mt-2 text-3xl font-black text-[#0F172A]">Release-ready управление Negis OS</h1>
             <p className="mt-2 max-w-3xl text-sm text-[#64748B]">
               Workspace: {workspaceId}. Owner: {user?.email || "demo user"}. Секретные ключи хранятся только в Vercel env.
             </p>

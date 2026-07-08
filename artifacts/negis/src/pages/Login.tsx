@@ -148,7 +148,7 @@ export default function Login() {
                   <ShieldCheck size={14} />
                   Staff access
                 </div>
-                <h1 className="max-w-md text-4xl font-black leading-tight">Negis CRM для сотрудников клиники</h1>
+                <h1 className="max-w-md text-4xl font-black leading-tight">Negis OS для сотрудников клиники</h1>
                 <p className="mt-4 max-w-md text-sm leading-6 text-white/70">
                   Войдите по email и временному паролю, который выдал администратор. После входа откроется рабочий dashboard.
                 </p>

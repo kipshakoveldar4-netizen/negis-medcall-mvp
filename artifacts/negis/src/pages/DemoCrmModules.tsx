@@ -1227,7 +1227,7 @@ export function DemoAdmin() {
     if (!createdCredentials) return;
 
     const text = [
-      "Negis CRM",
+      "Negis OS",
       `Login: ${createdCredentials.loginUrl}`,
       `Email: ${createdCredentials.email}`,
       `Role: ${roleLabels[createdCredentials.role]}`,
