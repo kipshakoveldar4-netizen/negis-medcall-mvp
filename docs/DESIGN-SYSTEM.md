@@ -234,3 +234,81 @@ Negis OS соединяет весь операционный цикл клин�
 | D6 | CRM / Leads | Экраны заявок и карточек клиента |
 | D7 | Admin Dashboard | `/admin/*`: обзор платформы, клиники, подписки, доходы, health, логи |
 | D8 | Partner / Marketplace | Партнёрский слой и маркетплейс (позже) |
+
+---
+
+## 14. Theme System / Clinic Brand Customization
+
+**Design System ≠ Theme Preset.**
+
+- **Design System** (этот документ) задаёт UX-структуру: роли, информационную архитектуру,
+  layout-правила, видимость клиент/админ, компоненты, тон, инварианты. Это неизменный слой.
+- **Theme Preset** задаёт визуальную «шкурку»: цвета, поверхности, радиусы, тени, шрифтовую шкалу.
+  Это сменный слой поверх Design System.
+
+Клиники позже смогут выбирать оформление платформы (в рамках тарифа). Выбор темы —
+только визуальный.
+
+**Default MVP theme: Glass Morphic Medical AI** — светлые glass-поверхности, пастельные
+градиенты, teal/mint (медицинское доверие) + violet/blue (AI-акценты), мягкие тени,
+скруглённые карточки, премиальное SaaS-ощущение.
+
+### Theme selection must NEVER change
+
+Смена темы не влияет и не может влиять на:
+
+- permissions (права ролей);
+- client/admin visibility (что видит клиент vs админ);
+- Ads Automation safety (безопасный режим рекламы);
+- ACTIVE gating (запуск ACTIVE остаётся gated);
+- Meta launch status (кампании создаются выключенными / PAUSED);
+- technical details policy (технические детали скрыты в клиентском режиме).
+
+Тема — это только цвета/поверхности/радиусы/тени. Никакой бизнес-логики.
+
+### Future theme presets
+
+| Preset | id | Для кого | Визуальный тон |
+|---|---|---|---|
+| Medical Clean | `medical-clean` | классические клиники, стоматология, диагностика | спокойный white/mint/blue |
+| Glass AI | `glass-ai` | премиум-клиники, современные медицинские сети | glass-поверхности, градиенты, AI-акценты (**default MVP**) |
+| Beauty Premium | `beauty-premium` | косметология, beauty, wellness | мягкий beige, blush, gold/pink акценты |
+| Organic Care | `organic-care` | wellness, реабилитация, семейная медицина, нутрициология | натуральный зелёный, cream, органичные формы |
+| Dark Pro | `dark-pro` | админ/разработчик/продвинутые пользователи | тёмный операционный дашборд, сильный контраст |
+| Brand Custom | `brand-custom` | Business/Managed/White-label | логотип клиники, свои цвета, брендированные отчёты, домен (позже) |
+
+### Future configurable brand tokens
+
+Планируемые поля бренда клиники (пока НЕ в БД, только концепт):
+
+- `theme_preset` — выбранный пресет;
+- `brand_primary_color` — основной цвет;
+- `brand_secondary_color` — вторичный цвет;
+- `brand_logo_url` — логотип;
+- `brand_accent_style` — стиль акцента (glass / flat / soft);
+- `card_style` — стиль карточек;
+- `radius_scale` — шкала скруглений;
+- `font_scale` — шкала шрифта;
+- `dark_mode_enabled` — тёмный режим.
+
+### CSS token foundation (реализовано в этой задаче)
+
+Базовые токены темы по умолчанию заведены как CSS-переменные `--negis-*` в
+`artifacts/negis/src/index.css` (дополняют существующие `--ng-*`, ничего не ломая):
+
+`--negis-bg`, `--negis-surface`, `--negis-surface-glass`, `--negis-border`, `--negis-primary`,
+`--negis-primary-soft`, `--negis-secondary`, `--negis-ai`, `--negis-success`, `--negis-warning`,
+`--negis-error`, `--negis-text`, `--negis-muted`, `--negis-radius-card`, `--negis-shadow-card`.
+
+Метаданные пресетов (без runtime-переключения) — в
+`artifacts/negis/src/lib/themePresets.ts`.
+
+### Tariff idea (концепт монетизации оформления)
+
+- **Start** — только тема Negis OS по умолчанию (Glass Morphic Medical AI);
+- **Growth** — пресеты тем на выбор;
+- **Business/Pro** — свои цвета и логотип;
+- **Managed/White-label** — полный брендинг и собственный домен (позже).
+
+> В этой задаче: только документация + CSS-токены + метаданные пресетов. Без переключателя тем,
+> без сохранения выбранной темы, без полей в БД.

@@ -1635,6 +1635,62 @@ async function checkLayoutFoundation() {
   console.log("Layout foundation checks: ok");
 }
 
+async function checkThemeFoundation() {
+  const negisDir = path.join(repoRoot, "artifacts", "negis", "src");
+
+  // Default-theme CSS tokens exist (additive over --ng-*).
+  const css = await readFile(path.join(negisDir, "index.css"), "utf8");
+  for (const token of [
+    "--negis-bg",
+    "--negis-surface",
+    "--negis-surface-glass",
+    "--negis-border",
+    "--negis-primary",
+    "--negis-primary-soft",
+    "--negis-secondary",
+    "--negis-ai",
+    "--negis-success",
+    "--negis-warning",
+    "--negis-error",
+    "--negis-text",
+    "--negis-muted",
+    "--negis-radius-card",
+    "--negis-shadow-card",
+    ".negis-glass",
+  ]) {
+    if (!css.includes(token)) {
+      throw new Error(`index.css is missing theme token/utility "${token}"`);
+    }
+  }
+
+  // Theme preset metadata exists (no runtime switching).
+  const presets = await readFile(path.join(negisDir, "lib", "themePresets.ts"), "utf8");
+  for (const id of ["medical-clean", "glass-ai", "beauty-premium", "organic-care", "dark-pro", "brand-custom"]) {
+    if (!presets.includes(`"${id}"`)) {
+      throw new Error(`themePresets.ts is missing preset "${id}"`);
+    }
+  }
+  if (!presets.includes('defaultThemePresetId = "glass-ai"')) {
+    throw new Error("themePresets.ts must set glass-ai as the default preset");
+  }
+
+  // AI Control Center consumes the tokens.
+  const acc = await readFile(path.join(negisDir, "pages", "AiControlCenter.tsx"), "utf8");
+  if (!acc.includes("negis-glass") || !acc.includes("var(--negis-")) {
+    throw new Error("AI Control Center must use the Negis OS theme tokens");
+  }
+
+  // Design system documents the theme system.
+  const doc = await readFile(path.join(repoRoot, "docs", "DESIGN-SYSTEM.md"), "utf8");
+  for (const marker of ["Theme System", "Glass Morphic Medical AI", "Theme selection must NEVER change", "brand-custom"]) {
+    if (!doc.includes(marker)) {
+      throw new Error(`DESIGN-SYSTEM.md theme section is missing "${marker}"`);
+    }
+  }
+
+  console.log("Theme foundation checks: ok");
+}
+
 async function checkNavigationCleanup() {
   const layoutDir = path.join(repoRoot, "artifacts", "negis", "src", "components", "layout");
   const pagesDir = path.join(repoRoot, "artifacts", "negis", "src", "pages");
@@ -1813,6 +1869,7 @@ async function main() {
   await checkVideoWorkerPackage();
   await checkNavigationCleanup();
   await checkLayoutFoundation();
+  await checkThemeFoundation();
   await checkContentStudioPhaseOne();
   await checkPhotoCreativeBuilder();
   await checkNoNewApiFiles();

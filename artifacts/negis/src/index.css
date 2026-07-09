@@ -63,6 +63,25 @@
   --ng-warning:   #F59E0B;
   --ng-error:     #EF4444;
 
+  /* Negis OS theme tokens — default preset: Glass Morphic Medical AI.
+     Additive layer over --ng-* (see docs/DESIGN-SYSTEM.md §14). A future theme
+     preset only remaps these values; it never changes business logic. */
+  --negis-bg:            #EEF4F8;
+  --negis-surface:       rgba(255, 255, 255, 0.78);
+  --negis-surface-glass: rgba(255, 255, 255, 0.55);
+  --negis-border:        rgba(100, 116, 139, 0.18);
+  --negis-primary:       #0D9488;
+  --negis-primary-soft:  #E6F7F3;
+  --negis-secondary:     #2563EB;
+  --negis-ai:            #7C3AED;
+  --negis-success:       #10B981;
+  --negis-warning:       #F59E0B;
+  --negis-error:         #EF4444;
+  --negis-text:          #0F172A;
+  --negis-muted:         #64748B;
+  --negis-radius-card:   24px;
+  --negis-shadow-card:   0 10px 30px rgba(15, 23, 42, 0.06);
+
   --background: 204 36% 95%;
   --foreground: 222 47% 11%;
   --border: 215 16% 78%;
@@ -165,6 +184,26 @@
     border: 1px solid var(--ng-plate);
     border-radius: 12px;
     box-shadow: inset 0 1px 4px rgba(15, 23, 42, 0.08);
+  }
+
+  /* Negis OS glass surface (default theme) — uses --negis-* tokens so a future
+     theme preset can restyle it without touching component markup. */
+  .negis-glass {
+    background: var(--negis-surface-glass);
+    border: 1px solid var(--negis-border);
+    border-radius: var(--negis-radius-card);
+    box-shadow: var(--negis-shadow-card);
+    backdrop-filter: blur(18px);
+  }
+  .negis-glass-hero {
+    background:
+      radial-gradient(circle at 12% 0%, rgba(13, 148, 136, 0.12), transparent 42%),
+      radial-gradient(circle at 92% 8%, rgba(124, 58, 237, 0.12), transparent 40%),
+      var(--negis-surface-glass);
+    border: 1px solid var(--negis-border);
+    border-radius: var(--negis-radius-card);
+    box-shadow: var(--negis-shadow-card);
+    backdrop-filter: blur(18px);
   }
 
   /* Card container */
