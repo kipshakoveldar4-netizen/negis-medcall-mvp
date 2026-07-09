@@ -158,6 +158,21 @@ async function checkAdsAutomationSource() {
   assertSourceIncludes(source, "if (videoJobPending) errors.push(VIDEO_OPTIMIZING_LAUNCH_BLOCKED_MESSAGE)", "prelaunch gate while optimization job runs");
   assertSourceIncludes(source, "publicUrl: job.outputPublicUrl || current.publicUrl", "creative publicUrl comes only from the optimized output");
   assertSourceIncludes(source, "thumbnailUrl: job.thumbnailPublicUrl || current.thumbnailUrl", "thumbnailUrl comes from the optimization job");
+  // Optimized-video → Meta wiring (worker output becomes the ready creative).
+  assertSourceIncludes(source, 'mimeType: job.outputPublicUrl ? job.outputMimeType || "video/mp4"', "ready optimized creative is treated as video/mp4");
+  assertSourceIncludes(source, 'job.thumbnailPublicUrl ? "worker"', "ready thumbnail source falls back to worker");
+  assertSourceIncludes(source, "Итоговый размер:", "optimized output size shown when the job is ready");
+  assertSourceIncludes(source, "меньше на ${Math.round((1 - videoJob.compressionRatio)", "compression ratio shown as a size reduction");
+  assertSourceIncludes(source, 'optimized: creative?.fileType === "video" && videoJob?.status === "ready"', "launch payload flags optimized video output");
+  assertSourceIncludes(source, "optimizedOutputSizeBytes: creative?.fileType === \"video\" ? videoJob?.outputSizeBytes", "launch payload carries optimized output size");
+  assertSourceIncludes(source, "optimized_public_url present:", "admin details show optimized public URL presence");
+  assertSourceIncludes(source, "thumbnail_url present:", "admin details show thumbnail URL presence");
+  assertSourceIncludes(source, "output_size_bytes:", "admin details show optimized output size");
+  assertSourceIncludes(source, "compression_ratio:", "admin details show compression ratio");
+  assertSourceIncludes(source, "thumbnail_source: {videoJob.thumbnailSource", "admin details show thumbnail source");
+  assertSourceIncludes(source, "raw deleted:", "admin details show raw deletion state");
+  assertSourceIncludes(source, "Оптимизировано: да", "history marks optimized video launches");
+  assertSourceExcludes(source, "rawBucket: \"ad-creatives-raw\"", "raw bucket value hardcoded in the UI");
   assertSourceExcludes(source, "ad-creatives-raw", "raw bucket name hardcoded in the UI");
   assertSourceExcludes(source, "SERVICE_ROLE", "service role key referenced in the frontend");
   assertSourceExcludes(source, "Следующим этапом будет добавлена", "stale future-optimization promise text");

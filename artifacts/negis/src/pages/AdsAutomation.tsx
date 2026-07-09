@@ -162,6 +162,10 @@ type VideoJob = {
   outputPublicUrl?: string;
   thumbnailPublicUrl?: string;
   thumbnailSource?: string;
+  outputMimeType?: string;
+  outputSizeBytes?: number;
+  compressionRatio?: number;
+  rawDeletedAt?: string;
 };
 
 type StorageHealth = {
@@ -320,14 +324,24 @@ function normalizeVideoJob(record: Record<string, unknown>): VideoJob | null {
   if (!id) return null;
   const statusRaw = firstString(record.status).toLowerCase();
   const known: VideoJobStatus[] = ["awaiting_upload", "queued", "downloading", "transcoding", "uploading", "ready", "failed"];
+  const outputSizeBytes = Number(record.outputSizeBytes ?? record.output_size_bytes ?? record.outputSize ?? record.output_size);
+  const compressionRatio = Number(record.compressionRatio ?? record.compression_ratio);
   return {
     id,
     status: known.includes(statusRaw as VideoJobStatus) ? (statusRaw as VideoJobStatus) : "queued",
     progress: Number(record.progress) || 0,
-    error: firstString(record.error) || undefined,
-    outputPublicUrl: firstString(record.outputPublicUrl, record.output_public_url) || undefined,
-    thumbnailPublicUrl: firstString(record.thumbnailPublicUrl, record.thumbnail_public_url) || undefined,
+    error: firstString(record.error, record.errorMessage, record.error_message) || undefined,
+    // Only the optimized output URL is ever surfaced — the raw original has no public URL
+    // and the server (makeVideoJob) never returns raw bucket/path fields.
+    outputPublicUrl:
+      firstString(record.outputPublicUrl, record.output_public_url, record.optimizedPublicUrl, record.optimized_public_url) || undefined,
+    thumbnailPublicUrl:
+      firstString(record.thumbnailPublicUrl, record.thumbnail_public_url, record.thumbnailUrl, record.thumbnail_url) || undefined,
     thumbnailSource: firstString(record.thumbnailSource, record.thumbnail_source) || undefined,
+    outputMimeType: firstString(record.outputMimeType, record.output_mime_type) || undefined,
+    outputSizeBytes: Number.isFinite(outputSizeBytes) && outputSizeBytes > 0 ? outputSizeBytes : undefined,
+    compressionRatio: Number.isFinite(compressionRatio) && compressionRatio > 0 ? compressionRatio : undefined,
+    rawDeletedAt: firstString(record.rawDeletedAt, record.raw_deleted_at) || undefined,
   };
 }
 
@@ -1473,9 +1487,11 @@ export default function AdsAutomation() {
             ...current,
             // Only the optimized public URL ever reaches Meta — never the raw original.
             publicUrl: job.outputPublicUrl || current.publicUrl,
+            // The worker always outputs an MP4 (H.264 + AAC); treat the ready creative as video/mp4.
+            mimeType: job.outputPublicUrl ? job.outputMimeType || "video/mp4" : current.mimeType,
             thumbnailUrl: job.thumbnailPublicUrl || current.thumbnailUrl,
             thumbnailGeneratedAt: job.thumbnailPublicUrl ? new Date().toISOString() : current.thumbnailGeneratedAt,
-            thumbnailSource: job.thumbnailSource || (job.thumbnailPublicUrl ? "worker_frame" : current.thumbnailSource),
+            thumbnailSource: job.thumbnailSource || (job.thumbnailPublicUrl ? "worker" : current.thumbnailSource),
             thumbnailMimeType: job.thumbnailPublicUrl ? "image/jpeg" : current.thumbnailMimeType,
             status: "uploaded",
           }
@@ -2220,6 +2236,10 @@ export default function AdsAutomation() {
       metaVideoId: creative?.metaVideoId || "",
       thumbnailUrl: creative?.fileType === "video" ? creative?.thumbnailUrl || "" : "",
       thumbnailSource: creative?.fileType === "video" ? creative?.thumbnailSource || "" : "",
+      // Optimized-video metadata (worker output). Never carries raw bucket/path/URL.
+      optimized: creative?.fileType === "video" && videoJob?.status === "ready",
+      optimizedOutputSizeBytes: creative?.fileType === "video" ? videoJob?.outputSizeBytes || 0 : 0,
+      optimizedCompressionRatio: creative?.fileType === "video" ? videoJob?.compressionRatio || 0 : 0,
       fileName: creative?.fileName || "",
       fileType: creative?.fileType || "image",
       mimeType: creative?.mimeType || "",
@@ -2443,6 +2463,10 @@ export default function AdsAutomation() {
         lastCheckedAt: result.lastCheckedAt,
         thumbnailUrl: creative?.fileType === "video" ? creative?.thumbnailUrl : undefined,
         thumbnailSource: creative?.fileType === "video" ? creative?.thumbnailSource : undefined,
+        // Optimized-video metadata for history. Raw bucket/path/URL are never stored.
+        optimized: creative?.fileType === "video" ? videoJob?.status === "ready" : undefined,
+        optimizedOutputSizeBytes: creative?.fileType === "video" ? videoJob?.outputSizeBytes : undefined,
+        optimizedCompressionRatio: creative?.fileType === "video" ? videoJob?.compressionRatio : undefined,
         videoWarnings: uniqueStrings([...(creative?.videoWarnings || []), ...(result.videoWarnings || [])]),
         city: selectedCity.labelRu,
         selectedCityId: selectedCity.id,
@@ -2753,6 +2777,14 @@ export default function AdsAutomation() {
                     <div className="mt-3 rounded-2xl border border-emerald-200 bg-emerald-50 p-3">
                       <p className="text-sm font-black text-emerald-900">{VIDEO_OPTIMIZED_READY_MESSAGE}</p>
                       <p className="mt-1 text-xs font-semibold text-emerald-800">Оптимизированный MP4 и обложка готовы. Можно продолжать запуск.</p>
+                      {videoJob.outputSizeBytes ? (
+                        <p className="mt-1 text-xs font-semibold text-emerald-800">
+                          Итоговый размер: {formatBytes(videoJob.outputSizeBytes)}
+                          {videoJob.compressionRatio && videoJob.compressionRatio < 1
+                            ? ` · меньше на ${Math.round((1 - videoJob.compressionRatio) * 100)}%`
+                            : ""}
+                        </p>
+                      ) : null}
                     </div>
                   ) : (
                     <div className="mt-3 rounded-2xl border border-amber-200 bg-amber-50 p-3">
@@ -2860,10 +2892,15 @@ export default function AdsAutomation() {
                           <p>job.status: {videoJob.status}</p>
                           <p>job.progress: {videoJob.progress ?? "-"}</p>
                           <p>job.errorMessage: {videoJob.error || "-"}</p>
+                          <p>optimized_public_url present: {videoJob.outputPublicUrl ? "yes" : "no"}</p>
+                          <p>thumbnail_url present: {videoJob.thumbnailPublicUrl ? "yes" : "no"}</p>
+                          <p>output_size_bytes: {videoJob.outputSizeBytes ?? "-"}</p>
+                          <p>compression_ratio: {videoJob.compressionRatio ?? "-"}</p>
+                          <p>thumbnail_source: {videoJob.thumbnailSource || "-"}</p>
+                          <p>raw deleted: {videoJob.status === "ready" ? (videoJob.rawDeletedAt ? "yes" : "no") : "-"}</p>
                           <p>rawBucket: {uploadDebug.uploadTarget || "-"}</p>
                           <p>rawPath: {uploadDebug.storagePath || "-"}</p>
                           <p>rawPublicUrl present: {uploadDebug.publicUrlExists ? "yes" : "no"}</p>
-                          <p>inputMimeType: {creative.mimeType || "-"}</p>
                           <p>inputSizeBytes: {creative.fileSize || 0}</p>
                         </>
                       ) : null}
@@ -3771,6 +3808,9 @@ export default function AdsAutomation() {
               const historyLastCheckedAt = firstString(payload.lastCheckedAt, metaResponse.lastCheckedAt);
               const historyThumbnailUrl = firstString(payload.thumbnailUrl, metaResponse.thumbnailUrl);
               const historyThumbnailSource = firstString(payload.thumbnailSource, metaResponse.thumbnailSource);
+              const historyOptimized = payload.optimized === true;
+              const historyOptimizedSize = Number(payload.optimizedOutputSizeBytes) || 0;
+              const historyOptimizedRatio = Number(payload.optimizedCompressionRatio) || 0;
               const historyVideoWarnings = Array.isArray(payload.videoWarnings)
                 ? payload.videoWarnings.map(String).filter(Boolean)
                 : Array.isArray(metaResponse.videoWarnings)
@@ -3835,6 +3875,13 @@ export default function AdsAutomation() {
                     {isAdminMode && showVideoDetails ? <p>Processing: {historyVideoProcessingStatus || "-"}</p> : null}
                     {showVideoDetails ? <p>Обложка: {historyThumbnailUrl ? "готова" : "не найдена"}</p> : null}
                     {isAdminMode && showVideoDetails ? <p>Thumbnail source: {historyThumbnailSource || "-"}</p> : null}
+                    {showVideoDetails && historyOptimized ? (
+                      <p>
+                        Оптимизировано: да
+                        {historyOptimizedSize ? ` · ${formatBytes(historyOptimizedSize)}` : ""}
+                        {historyOptimizedRatio && historyOptimizedRatio < 1 ? ` · меньше на ${Math.round((1 - historyOptimizedRatio) * 100)}%` : ""}
+                      </p>
+                    ) : null}
                     {showVideoDetails ? (
                       <p>Проверено: {historyLastCheckedAt ? new Date(historyLastCheckedAt).toLocaleString("ru-RU") : "-"}</p>
                     ) : null}
