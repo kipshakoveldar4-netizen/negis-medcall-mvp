@@ -1574,6 +1574,67 @@ async function checkPhotoCreativeBuilder() {
   console.log("Photo creative builder checks: ok");
 }
 
+async function checkLayoutFoundation() {
+  const pagesDir = path.join(repoRoot, "artifacts", "negis", "src", "pages");
+  const layoutDir = path.join(repoRoot, "artifacts", "negis", "src", "components", "layout");
+
+  // AI Control Center placeholder exists and is routed.
+  const acc = await readFile(path.join(pagesDir, "AiControlCenter.tsx"), "utf8");
+  for (const marker of [
+    "AI Control Center",
+    "Главный экран Negis OS",
+    "Заявки сегодня",
+    "Необработанные лиды",
+    "Реклама требует внимания",
+    "Пациенты для повторного визита",
+    "AI подготовил действия",
+    "Запустить рекламу",
+    "Открыть заявки",
+    "Посмотреть рекомендации",
+    "Полный AI Control Center будет собран следующим этапом.",
+  ]) {
+    if (!acc.includes(marker)) {
+      throw new Error(`AI Control Center placeholder is missing "${marker}"`);
+    }
+  }
+
+  const app = await readFile(path.join(pagesDir, "..", "App.tsx"), "utf8");
+  if (!app.includes('path="/ai-control-center"') || !app.includes("AiControlCenter")) {
+    throw new Error("App must route /ai-control-center to the AiControlCenter page");
+  }
+  if (!app.includes('path="/dashboard"')) {
+    throw new Error("App must keep /dashboard for compatibility");
+  }
+
+  // Sidebar reflects the new IA and never links to the retired AI Target module.
+  const sidebar = await readFile(path.join(layoutDir, "Sidebar.tsx"), "utf8");
+  for (const marker of ["AI Control Center", "Заявки", "CRM", "Записи", "Реклама", "Контент", "Аналитика", "AI-сотрудники", "Настройки"]) {
+    if (!sidebar.includes(marker)) {
+      throw new Error(`Sidebar is missing IA item "${marker}"`);
+    }
+  }
+
+  // Admin identity band separates admin from the client app, without exposing secrets.
+  const admin = await readFile(path.join(pagesDir, "AdminCenter.tsx"), "utf8");
+  if (!admin.includes("Панель платформы · Negis OS") || !admin.includes("Admin OS")) {
+    throw new Error("AdminCenter must show a distinct platform admin band");
+  }
+  for (const secret of ["service role key", "SERVICE_ROLE", "app_secret", "APP_SECRET"]) {
+    // The admin band explicitly states secrets are not shown; ensure no secret VALUE is printed.
+    if (admin.includes(`process.env.${secret}`) || admin.includes(`${secret}=`)) {
+      throw new Error(`AdminCenter must not expose ${secret}`);
+    }
+  }
+
+  // Dashboard keeps a link to the new main screen.
+  const dashboard = await readFile(path.join(pagesDir, "Dashboard.tsx"), "utf8");
+  if (!dashboard.includes("Новый главный экран: AI Control Center") || !dashboard.includes("/ai-control-center")) {
+    throw new Error("Dashboard must link to /ai-control-center");
+  }
+
+  console.log("Layout foundation checks: ok");
+}
+
 async function checkNavigationCleanup() {
   const layoutDir = path.join(repoRoot, "artifacts", "negis", "src", "components", "layout");
   const pagesDir = path.join(repoRoot, "artifacts", "negis", "src", "pages");
@@ -1751,10 +1812,12 @@ async function main() {
   await checkCrmVideoJobsModule();
   await checkVideoWorkerPackage();
   await checkNavigationCleanup();
+  await checkLayoutFoundation();
   await checkContentStudioPhaseOne();
   await checkPhotoCreativeBuilder();
   await checkNoNewApiFiles();
   for (const route of [
+    "/ai-control-center",
     "/dashboard",
     "/clients",
     "/appointments",

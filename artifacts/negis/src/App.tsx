@@ -11,6 +11,7 @@ import Register from "@/pages/Register";
 import Login from "@/pages/Login";
 import Onboarding from "@/pages/Onboarding";
 import Dashboard from "@/pages/Dashboard";
+import AiControlCenter from "@/pages/AiControlCenter";
 import Agent from "@/pages/Agent";
 import Ads from "@/pages/Ads";
 import AdsAutomation from "@/pages/AdsAutomation";
@@ -39,6 +40,7 @@ import FbPixelInit from "@/components/FbPixelInit";
 const queryClient = new QueryClient();
 
 const ROUTE_PERMISSIONS: Record<string, string> = {
+  '/ai-control-center': 'dashboard',
   '/dashboard': 'dashboard',
   '/booking': 'booking',
   '/appointments': 'booking',
@@ -137,6 +139,7 @@ function Router() {
       <Route path="/login" component={Login} />
       <Route path="/register" component={Register} />
       <Route path="/onboarding" component={Onboarding} />
+      <Route path="/ai-control-center" component={() => <ProtectedPage component={AiControlCenter} permission="dashboard" />} />
       <Route path="/dashboard" component={() => <ProtectedPage component={Dashboard} permission="dashboard" />} />
       <Route path="/booking" component={() => <ProtectedPage component={AppointmentsPage} permission="booking" />} />
       <Route path="/appointments" component={() => <ProtectedPage component={AppointmentsPage} permission="booking" />} />

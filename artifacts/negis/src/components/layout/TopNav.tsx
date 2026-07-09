@@ -6,6 +6,7 @@ import {
   Building2,
   Briefcase,
   Clapperboard,
+  LayoutDashboard,
   Settings,
   LogOut,
   X,
@@ -26,6 +27,7 @@ import { toast } from 'sonner';
 import { agentInitials, type AgentDisplayInfo } from '@/lib/agentDisplay';
 
 const NAV = [
+  { href: '/ai-control-center', icon: LayoutDashboard, label: 'AI Control Center', permission: 'dashboard' },
   { href: '/ads-automation', icon: Rocket, label: 'AI запуск рекламы', permission: 'ads' },
   { href: '/content-studio', icon: Clapperboard, label: 'AI Контент-студия', permission: 'ads' },
   { href: '/dashboard', icon: BarChart2, label: 'Дашборд', permission: 'dashboard' },

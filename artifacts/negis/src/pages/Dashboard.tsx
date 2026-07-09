@@ -71,6 +71,16 @@ function DemoDashboard() {
           </p>
         </div>
 
+        <Link href="/ai-control-center">
+          <div className="flex cursor-pointer items-center justify-between gap-3 rounded-[22px] border border-[#BDEBE2] bg-[#ECFDF8] p-4 transition-transform duration-150 hover:-translate-y-0.5">
+            <div>
+              <p className="text-sm font-black text-[#0F766E]">Новый главный экран: AI Control Center</p>
+              <p className="mt-0.5 text-sm font-semibold text-[#0F766E]/80">Заявки, реклама, продажи и AI-рекомендации в одном месте.</p>
+            </div>
+            <span className="shrink-0 text-sm font-black text-[#0F766E]">Открыть →</span>
+          </div>
+        </Link>
+
         <div className={`rounded-[22px] border p-4 ${releaseComplete ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-amber-200 bg-amber-50 text-amber-800'}`}>
           <p className="font-bold">
             {releaseComplete ? 'Платформа готова к тестовой работе сотрудников' : 'Платформа в режиме подготовки к релизу'}

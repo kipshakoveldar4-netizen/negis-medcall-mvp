@@ -1,18 +1,23 @@
 import { useState } from 'react';
 import { Link, useLocation } from 'wouter';
-import { BarChart2, CalendarDays, Settings, LogOut, X, Check, KeyRound, User, Megaphone, ClipboardList, Clapperboard, Rocket, Users } from 'lucide-react';
+import { BarChart2, Bot, CalendarDays, Clapperboard, Inbox, LayoutDashboard, Rocket, Settings, Users, LogOut, X, Check, KeyRound, User, type LucideIcon } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
 import { supabase } from '@/lib/supabase';
 import { toast } from 'sonner';
 
-const NAV = [
-  { href: '/dashboard', icon: BarChart2, label: 'Дашборд', roles: ['owner', 'manager'] },
-  { href: '/ads-automation', icon: Rocket, label: 'Реклама', roles: ['owner', 'manager'] },
-  { href: '/ads-automation/history', icon: ClipboardList, label: 'История запусков', roles: ['owner', 'manager'] },
-  { href: '/clients', icon: Users, label: 'Клиенты', roles: ['owner', 'manager', 'agent'] },
-  { href: '/content-studio', icon: Clapperboard, label: 'AI Контент-студия', roles: ['owner', 'manager'] },
+// Negis OS client information architecture (see docs/DESIGN-SYSTEM.md §5).
+// `future` items are visible but disabled — routes are built in later design tasks.
+type NavItem = { href: string; icon: LucideIcon; label: string; roles: string[]; future?: boolean };
+
+const NAV: NavItem[] = [
+  { href: '/ai-control-center', icon: LayoutDashboard, label: 'AI Control Center', roles: ['owner', 'manager'] },
+  { href: '/leads', icon: Inbox, label: 'Заявки', roles: ['owner', 'manager', 'agent'] },
+  { href: '/clients', icon: Users, label: 'CRM', roles: ['owner', 'manager', 'agent'] },
   { href: '/appointments', icon: CalendarDays, label: 'Записи', roles: ['owner', 'manager', 'agent', 'booking_agent'] },
-  { href: '/leads', icon: Megaphone, label: 'Лиды', roles: ['owner', 'manager', 'agent'] },
+  { href: '/ads-automation', icon: Rocket, label: 'Реклама', roles: ['owner', 'manager'] },
+  { href: '/content-studio', icon: Clapperboard, label: 'Контент', roles: ['owner', 'manager'] },
+  { href: '/dashboard', icon: BarChart2, label: 'Аналитика', roles: ['owner', 'manager'] },
+  { href: '', icon: Bot, label: 'AI-сотрудники', roles: ['owner', 'manager'], future: true },
   { href: '/admin', icon: Settings, label: 'Настройки', roles: ['owner', 'manager'] },
 ];
 
@@ -82,7 +87,35 @@ export function Sidebar() {
 
         {/* Nav */}
         <nav className="flex-1 flex flex-col gap-1.5 px-3 pt-2 pb-4">
-          {filtered.map(({ href, icon: Icon, label }) => {
+          {filtered.map(({ href, icon: Icon, label, future }) => {
+            if (future) {
+              return (
+                <div
+                  key={label}
+                  title="Появится на следующем этапе"
+                  style={{
+                    minHeight: 44,
+                    borderRadius: 16,
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 12,
+                    padding: '10px 13px',
+                    cursor: 'default',
+                    color: '#94A3B8',
+                    opacity: 0.75,
+                  }}
+                >
+                  <Icon size={20} strokeWidth={1.75} />
+                  <span className="truncate text-sm font-black">{label}</span>
+                  <span
+                    className="ml-auto rounded-full px-2 py-0.5 text-[10px] font-black uppercase tracking-[0.08em]"
+                    style={{ background: '#EEF2F7', color: '#94A3B8' }}
+                  >
+                    скоро
+                  </span>
+                </div>
+              );
+            }
             const active = location === href || location.startsWith(href + '/');
             return (
               <Link key={href} href={href}>

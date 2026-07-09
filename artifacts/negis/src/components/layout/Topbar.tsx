@@ -8,6 +8,7 @@ import { agentDisplayName, loadAgentRoleMaps, type AgentDisplayInfo } from '@/li
 import { TopNav } from './TopNav';
 
 const PAGE_LABELS: Record<string, string> = {
+  '/ai-control-center': 'AI Control Center',
   '/content-studio': 'AI Контент-студия',
   '/ai-content-studio': 'AI Контент-студия',
   '/content': 'AI Контент-студия',

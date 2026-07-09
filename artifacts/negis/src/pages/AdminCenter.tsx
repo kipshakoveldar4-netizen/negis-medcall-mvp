@@ -1645,10 +1645,46 @@ export default function AdminCenter() {
               Workspace: {workspaceId}. Owner: {user?.email || "demo user"}. Секретные ключи хранятся только в Vercel env.
             </p>
           </div>
-          <button type="button" className="neu-btn w-full justify-center xl:w-auto" onClick={() => setLocation("/dashboard")}>
-            Вернуться в dashboard
+          <button type="button" className="neu-btn w-full justify-center xl:w-auto" onClick={() => setLocation("/ai-control-center")}>
+            Вернуться в приложение
           </button>
         </div>
+
+        {/* Admin identity band — visually separates the platform admin from the client app. */}
+        <section className="rounded-[24px] border border-slate-700 bg-slate-900 p-5 text-white">
+          <p className="text-[11px] font-black uppercase tracking-[0.18em] text-teal-300">Панель платформы · Negis OS</p>
+          <h2 className="mt-1 text-xl font-black">Admin OS</h2>
+          <p className="mt-1 max-w-3xl text-sm font-semibold text-slate-300">
+            Технические разделы платформы. Секреты, токены и service role key здесь не отображаются.
+          </p>
+          <div className="mt-4 flex flex-wrap gap-2">
+            {[
+              { label: "Обзор платформы", active: true },
+              { label: "Клиники", active: false },
+              { label: "Подписки", active: false },
+              { label: "Доходы", active: false },
+              { label: "Рекламные запуски", active: false },
+              { label: "Видео-обработка", active: false },
+              { label: "Usage", active: false },
+              { label: "System Health", active: false },
+              { label: "Логи", active: false },
+              { label: "Настройки платформы", active: false },
+            ].map((section) => (
+              <span
+                key={section.label}
+                className={`rounded-full px-3 py-1.5 text-xs font-black ${
+                  section.active ? "bg-teal-400 text-slate-900" : "border border-slate-600 text-slate-400"
+                }`}
+              >
+                {section.label}
+                {section.active ? "" : " · скоро"}
+              </span>
+            ))}
+          </div>
+          <p className="mt-3 text-xs font-semibold text-slate-400">
+            Разделы платформы будут собраны на следующих этапах. Сейчас доступен обзор ниже.
+          </p>
+        </section>
 
         <ReleaseBanner readiness={readiness} />
 

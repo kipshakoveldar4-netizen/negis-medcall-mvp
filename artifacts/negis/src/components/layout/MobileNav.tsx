@@ -5,6 +5,7 @@ import {
   CalendarDays,
   Clapperboard,
   ClipboardList,
+  LayoutDashboard,
   MessageCircle,
   Megaphone,
   Menu,
@@ -35,6 +36,7 @@ const primaryItems: MobileNavItem[] = [
 ];
 
 const drawerItems: MobileNavItem[] = [
+  { href: "/ai-control-center", label: "AI Control Center", icon: LayoutDashboard, permission: "dashboard" },
   { href: "/ads-automation", label: "AI запуск рекламы", icon: Rocket, permission: "ads" },
   { href: "/content-studio", label: "AI Контент-студия", icon: Clapperboard, permission: "ads" },
   { href: "/ads", label: "Реклама", icon: Megaphone, permission: "ads" },
