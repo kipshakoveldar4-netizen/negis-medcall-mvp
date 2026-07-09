@@ -93,24 +93,38 @@ VIDEO_OPTIMIZATION_ENABLED=false
 VIDEO_OPTIMIZATION_THRESHOLD_MB=50
 VIDEO_OPTIMIZATION_MAX_INPUT_MB=500
 VIDEO_OPTIMIZATION_RAW_BUCKET=ad-creatives-raw
+VIDEO_OPTIMIZATION_OUTPUT_BUCKET=ad-creatives
 VIDEO_OPTIMIZATION_WORKER_SECRET=
 ```
 
-Worker-side env:
+Worker-side env (Railway):
 
 ```text
 SUPABASE_URL=
 SUPABASE_SERVICE_ROLE_KEY=
+VIDEO_OPTIMIZATION_RAW_BUCKET=ad-creatives-raw
+VIDEO_OPTIMIZATION_OUTPUT_BUCKET=ad-creatives
 VIDEO_WORKER_POLL_INTERVAL_MS=5000
 VIDEO_WORKER_ID=
 VIDEO_WORKER_MAX_ATTEMPTS=3
+VIDEO_WORKER_MAX_CONCURRENT_JOBS=1
 VIDEO_WORKER_TMP_DIR=/tmp
+FFMPEG_PATH=ffmpeg
+FFPROBE_PATH=ffprobe
 VIDEO_WORKER_CRF=23
 VIDEO_WORKER_PRESET=medium
 VIDEO_WORKER_MAX_WIDTH=1080
-VIDEO_WORKER_MAX_HEIGHT=1920
 VIDEO_WORKER_FPS=30
 ```
+
+ffmpeg optimization (implemented in `artifacts/video-worker/src/ffmpeg.ts`):
+
+```text
+-vf "scale='min(1080,iw)':-2,fps=30" -c:v libx264 -preset medium -crf 23
+-pix_fmt yuv420p -c:a aac -b:a 128k -movflags +faststart -map_metadata -1
+```
+
+Width-capped, aspect/orientation preserved, no crop, metadata stripped, H.264 + AAC + faststart.
 
 Secrets stay server-side only. Do not add service role keys or worker secrets to Vite frontend env.
 
@@ -128,31 +142,37 @@ If a video is above `VIDEO_OPTIMIZATION_THRESHOLD_MB`:
 
 If optimization is disabled, the UI asks the user to upload a video below the threshold or MP4/H.264.
 
-## Future Worker Command
+## Worker (implemented)
 
-The existing worker package lives at:
+The worker package lives at:
 
 ```text
 artifacts/video-worker
 ```
 
-Planned command:
+Commands:
 
 ```bash
 cd artifacts/video-worker
-pnpm run dev
+pnpm install         # or npm install
+pnpm run dev         # run locally (needs ffmpeg on PATH + Supabase env)
+pnpm run build       # compile to dist/
+pnpm run start       # run compiled worker
 ```
 
-The worker will later:
+Deploy to Railway with **Root Directory** `artifacts/video-worker` (the Dockerfile installs ffmpeg). See `docs/VIDEO-WORKER.md`.
 
-1. poll `video_processing_jobs`;
-2. download raw video from `ad-creatives-raw`;
-3. transcode to MP4/H.264;
-4. generate a thumbnail;
-5. upload optimized files to `ad-creatives`;
-6. update `ad_creative_assets`;
-7. mark the job `ready`;
-8. delete the raw original.
+The worker (see `artifacts/video-worker/src/worker.ts`):
+
+1. polls `video_processing_jobs` for `status = queued`;
+2. claims one atomically (`queued → downloading` guarded by `status = 'queued'`);
+3. downloads the raw video from `ad-creatives-raw` (service role);
+4. transcodes to MP4/H.264 + AAC (`transcoding`);
+5. generates a thumbnail from the optimized MP4;
+6. uploads optimized files to `ad-creatives` (`uploading`);
+7. updates `ad_creative_assets`;
+8. marks the job `ready` with the 018 contract fields (`optimized_public_url`, `thumbnail_url`, `output_size_bytes`, `compression_ratio`, `completed_at`, …);
+9. deletes the raw original (records `raw_deleted_at`; a delete failure never fails the ready video).
 
 ## Current implementation status
 

@@ -17,27 +17,33 @@ the public foundation contract is `POST /api/crm/video-processing-jobs` plus
 6. Uploads both to the public `ad-creatives` bucket:
    - `optimized/{workspaceId|demo}/{jobId}.mp4`
    - `optimized/{workspaceId|demo}/{jobId}-thumbnail.jpg`
-7. Updates the `ad_creative_assets` row: `public_url`/`storage_bucket`/`storage_path` now point at the optimized MP4, `status = ready`, metadata gets `optimized`, `optimizationStatus`, `thumbnailUrl`, `thumbnailSource: worker_frame`, `inputSizeBytes`, `outputSizeBytes`, `compressionRatio`. Meta launches read `public_url`, so the raw original can never reach Meta.
-8. Marks the job `ready` (progress 100) with output/thumbnail fields and `completed_at`.
-9. Deletes the raw original **after** the optimized upload succeeded. Success sets `raw_deleted_at`; a failed delete keeps `status = ready` and records `raw_delete_error` instead.
-10. On any failure the job becomes `failed` with a truncated error message; the UI shows a controlled Russian message.
+7. Updates the `ad_creative_assets` row: `public_url`/`storage_bucket`/`storage_path` now point at the optimized MP4, `status = ready`, metadata gets `optimized`, `optimizationStatus`, `thumbnailUrl`, `thumbnailSource: worker`, `inputSizeBytes`, `outputSizeBytes`, `compressionRatio`. Meta launches read `public_url`, so the raw original can never reach Meta.
+8. Marks the job `ready` (progress 100) with the migration-018 contract fields: `optimized_bucket`, `optimized_path`, `optimized_public_url`, `thumbnail_url`, `thumbnail_source = worker`, `output_mime_type = video/mp4`, `input_size_bytes`, `output_size_bytes`, `compression_ratio`, `completed_at`.
+9. Deletes the raw original **after** the optimized upload succeeded. Success sets `raw_deleted_at`; a failed delete keeps `status = ready` and records `raw_delete_error` (a raw-deletion failure never fails a ready optimized video). The job stays `status = ready` rather than flipping to `deleted_original`, so the app's ready check still matches.
+10. On any controlled failure (raw object missing, ffmpeg failed, upload failed, thumbnail failed) the job becomes `status = failed` with a truncated `error_message`; the UI shows a controlled Russian message and offers retry.
 
-Status flow: `awaiting_upload → queued → downloading (10%) → transcoding (40%) → uploading (80%) → ready (100%)`, or `failed`.
+Status flow: `awaiting_upload → queued → downloading (10%) → transcoding (40%) → uploading (80%) → ready (100%)`, or `failed`. Retry (`POST /api/crm/video-processing-jobs/:id/retry`) resets a failed job to `queued`.
+
+Concurrency: one job at a time by default (`VIDEO_WORKER_MAX_CONCURRENT_JOBS = 1`). The `queued → downloading` UPDATE guarded by `status = 'queued'` is the lock — two workers can never process the same job.
 
 ## ffmpeg command
 
 ```
 ffmpeg -y -i input.<ext> \
-  -vf "scale='min(1080,iw)':'min(1920,ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2,fps=30" \
+  -vf "scale='min(1080,iw)':-2,fps=30" \
   -c:v libx264 -preset medium -crf 23 -pix_fmt yuv420p \
   -c:a aac -b:a 128k \
   -movflags +faststart \
+  -map_metadata -1 \
   optimized.mp4
 
 ffmpeg -y -ss 1 -i optimized.mp4 -frames:v 1 -q:v 3 thumbnail.jpg
 ```
 
-Downscale-only fit inside 1080x1920, aspect ratio preserved (no crop), even dimensions enforced, 30 fps. CRF/preset/dimensions/fps are tunable via env.
+Cap width to `MAX_WIDTH` (1080) and auto-compute height with `-2` — this preserves aspect
+ratio and orientation, keeps an even height for libx264, and never crops faces. `-map_metadata -1`
+strips source metadata; output is MP4 H.264 + AAC with `+faststart`. CRF/preset/width/fps are
+tunable via env. The thumbnail is taken from the **optimized** MP4 (~1s frame), never the raw original.
 
 ## Env vars
 
@@ -45,16 +51,20 @@ Downscale-only fit inside 1080x1920, aspect ratio preserved (no crop), even dime
 |---|---|---|
 | `SUPABASE_URL` | required | same project as the app |
 | `SUPABASE_SERVICE_ROLE_KEY` | required | server-side only — never in the frontend |
-| `VIDEO_OPTIMIZATION_RAW_BUCKET` | `ad-creatives-raw` | private raw-original bucket |
+| `VIDEO_OPTIMIZATION_RAW_BUCKET` | `ad-creatives-raw` | private raw-original (input) bucket |
+| `VIDEO_OPTIMIZATION_OUTPUT_BUCKET` | `ad-creatives` | public optimized (output) bucket |
 | `VIDEO_OPTIMIZATION_WORKER_SECRET` | optional | reserved for protected worker callbacks; never expose to frontend |
 | `VIDEO_WORKER_POLL_INTERVAL_MS` | `5000` | queue poll interval |
 | `VIDEO_WORKER_ID` | `video-worker-<host>-<pid>` | shown in `claimed_by` |
 | `VIDEO_WORKER_MAX_ATTEMPTS` | `3` | jobs at the limit stay failed/unclaimed |
+| `VIDEO_WORKER_MAX_CONCURRENT_JOBS` | `1` | jobs processed at once (kept at 1 for MVP) |
 | `VIDEO_WORKER_TMP_DIR` | OS tmp (`/tmp`) | scratch space for downloads/transcodes |
+| `FFMPEG_PATH` | `ffmpeg` | ffmpeg binary path |
+| `FFPROBE_PATH` | `ffprobe` | ffprobe binary path (reserved) |
 | `VIDEO_WORKER_CRF` | `23` | quality (lower = better/larger) |
 | `VIDEO_WORKER_PRESET` | `medium` | libx264 preset |
-| `VIDEO_WORKER_MAX_WIDTH` | `1080` | fit box width |
-| `VIDEO_WORKER_MAX_HEIGHT` | `1920` | fit box height |
+| `VIDEO_WORKER_MAX_WIDTH` | `1080` | width cap |
+| `VIDEO_WORKER_MAX_HEIGHT` | `1920` | reserved (not used by the width-cap filter) |
 | `VIDEO_WORKER_FPS` | `30` | output fps |
 
 ## Run locally

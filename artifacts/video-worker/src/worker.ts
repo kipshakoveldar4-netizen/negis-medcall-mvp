@@ -93,7 +93,7 @@ function inputExtension(job: JobRow): string {
 export async function processJob(supabase: SupabaseClient, config: WorkerConfig, job: JobRow): Promise<void> {
   const tmpBase = await mkdtemp(path.join(config.tmpDir, "negis-video-"));
   try {
-    const rawBucket = job.raw_bucket || "ad-creatives-raw";
+    const rawBucket = job.raw_bucket || config.rawBucket;
     const rawPath = job.raw_path || "";
     if (!rawPath) throw new Error("job has no raw_path");
 
@@ -106,17 +106,18 @@ export async function processJob(supabase: SupabaseClient, config: WorkerConfig,
     await writeFile(inputPath, Buffer.from(await rawBlob.arrayBuffer()));
     const inputSizeBytes = (await stat(inputPath)).size;
 
-    // transcoding
+    // transcoding — optimized MP4 (H.264 + AAC, +faststart, metadata stripped)
     await setJobProgress(supabase, job.id, "transcoding", PROGRESS.transcoding);
     const optimizedTmpPath = path.join(tmpBase, "optimized.mp4");
-    await runFfmpeg(buildTranscodeArgs(inputPath, optimizedTmpPath, config));
+    await runFfmpeg(config.ffmpegPath, buildTranscodeArgs(inputPath, optimizedTmpPath, config));
+    // Thumbnail is taken from the OPTIMIZED video, never the raw original.
     const thumbnailTmpPath = path.join(tmpBase, "thumbnail.jpg");
-    await runFfmpeg(buildThumbnailArgs(optimizedTmpPath, thumbnailTmpPath));
+    await runFfmpeg(config.ffmpegPath, buildThumbnailArgs(optimizedTmpPath, thumbnailTmpPath));
     const outputSizeBytes = (await stat(optimizedTmpPath)).size;
 
     // uploading
     await setJobProgress(supabase, job.id, "uploading", PROGRESS.uploading);
-    const outputBucket = job.optimized_bucket || job.output_bucket || "ad-creatives";
+    const outputBucket = job.optimized_bucket || job.output_bucket || config.outputBucket;
     const workspaceSegment = job.workspace_id || "demo";
     const outputStoragePath = `optimized/${workspaceSegment}/${job.id}.mp4`;
     const thumbnailStoragePath = `optimized/${workspaceSegment}/${job.id}-thumbnail.jpg`;
@@ -167,7 +168,7 @@ export async function processJob(supabase: SupabaseClient, config: WorkerConfig,
             optimized: true,
             optimizationStatus: "ready",
             thumbnailUrl: thumbnailPublicUrl,
-            thumbnailSource: "worker_frame",
+            thumbnailSource: "worker",
             thumbnailGeneratedAt: now,
             thumbnailMimeType: "image/jpeg",
             inputSizeBytes,
@@ -199,7 +200,10 @@ export async function processJob(supabase: SupabaseClient, config: WorkerConfig,
         thumbnail_path: thumbnailStoragePath,
         thumbnail_public_url: thumbnailPublicUrl,
         thumbnail_url: thumbnailPublicUrl,
-        thumbnail_source: "worker_frame",
+        thumbnail_source: "worker",
+        // Raw original is deleted after a successful optimized upload. We keep
+        // status = ready (not deleted_original) so the app's ready check still
+        // matches; deletion is recorded via raw_deleted_at / raw_delete_error.
         raw_deleted_at: rawDeletedAt,
         raw_delete_error: rawDeleteError,
         completed_at: now,

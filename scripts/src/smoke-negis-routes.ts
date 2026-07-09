@@ -1377,7 +1377,7 @@ async function checkVideoWorkerPackage() {
   }
 
   const ffmpegSource = await readFile(path.join(workerDir, "src", "ffmpeg.ts"), "utf8");
-  for (const marker of ["libx264", '"aac"', "+faststart", "force_original_aspect_ratio=decrease", "trunc(iw/2)*2", "fps=${options.fps}"]) {
+  for (const marker of ["libx264", '"aac"', "+faststart", "-map_metadata", "':-2", "fps=${options.fps}"]) {
     if (!ffmpegSource.includes(marker)) {
       throw new Error(`video worker ffmpeg source is missing ${marker}`);
     }
@@ -1393,7 +1393,7 @@ async function checkVideoWorkerPackage() {
     "optimized_public_url",
     "thumbnail_public_url",
     "thumbnail_url",
-    '"worker_frame"',
+    'thumbnail_source: "worker"',
     'status: "ready"',
     'status: "failed"',
     "raw_deleted_at",
@@ -1404,6 +1404,9 @@ async function checkVideoWorkerPackage() {
     "output_size_bytes",
     "error_message",
     "compressionRatio",
+    "config.ffmpegPath",
+    "config.rawBucket",
+    "config.outputBucket",
     'import WebSocket from "ws"',
     "transport: WebSocket",
   ]) {
@@ -1438,10 +1441,13 @@ async function checkVideoWorkerPackage() {
     fps: 30,
   });
   const joinedArgs = transcodeArgs.join(" ");
-  for (const flag of ["libx264", "aac", "+faststart", "min(1080,iw)", "min(1920,ih)", "fps=30", "trunc(iw/2)*2"]) {
+  for (const flag of ["libx264", "aac", "+faststart", "min(1080,iw)", ":-2", "fps=30", "-map_metadata"]) {
     if (!joinedArgs.includes(flag)) {
       throw new Error(`video worker transcode args must include ${flag}`);
     }
+  }
+  if (joinedArgs.includes("force_original_aspect_ratio") || joinedArgs.includes("trunc(iw/2)")) {
+    throw new Error("video worker transcode filter must be the scale=min(width,iw):-2 form (no crop/force filters)");
   }
   if (!transcodeArgs.includes("23") || !transcodeArgs.includes("medium") || !transcodeArgs.includes("optimized.mp4")) {
     throw new Error("video worker transcode args must apply CRF, preset, and the output path");

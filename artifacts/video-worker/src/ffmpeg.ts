@@ -8,14 +8,11 @@ export type TranscodeOptions = {
   fps: number;
 };
 
-// Downscale-only fit inside maxWidth x maxHeight, preserve aspect ratio (no crop),
-// force even dimensions for libx264, normalize fps.
+// Cap width to maxWidth, auto-compute height with -2 (preserves aspect ratio,
+// preserves orientation, keeps an even height for libx264), normalize fps.
+// No crop by default — faces are never cut.
 export function buildScaleFilter(options: TranscodeOptions): string {
-  return [
-    `scale='min(${options.maxWidth},iw)':'min(${options.maxHeight},ih)':force_original_aspect_ratio=decrease`,
-    "scale=trunc(iw/2)*2:trunc(ih/2)*2",
-    `fps=${options.fps}`,
-  ].join(",");
+  return `scale='min(${options.maxWidth},iw)':-2,fps=${options.fps}`;
 }
 
 export function buildTranscodeArgs(inputPath: string, outputPath: string, options: TranscodeOptions): string[] {
@@ -39,18 +36,21 @@ export function buildTranscodeArgs(inputPath: string, outputPath: string, option
     "128k",
     "-movflags",
     "+faststart",
+    "-map_metadata",
+    "-1",
     outputPath,
   ];
 }
 
-// Thumbnail from the OPTIMIZED video at ~1 second.
+// Thumbnail from the OPTIMIZED video at ~1 second (first valid frame).
 export function buildThumbnailArgs(inputPath: string, outputPath: string): string[] {
   return ["-y", "-ss", "1", "-i", inputPath, "-frames:v", "1", "-q:v", "3", outputPath];
 }
 
-export function runFfmpeg(args: string[]): Promise<void> {
+// Runs the configured ffmpeg binary (FFMPEG_PATH, default "ffmpeg").
+export function runFfmpeg(ffmpegPath: string, args: string[]): Promise<void> {
   return new Promise((resolve, reject) => {
-    const child = spawn("ffmpeg", args, { stdio: ["ignore", "ignore", "pipe"] });
+    const child = spawn(ffmpegPath || "ffmpeg", args, { stdio: ["ignore", "ignore", "pipe"] });
     let stderrTail = "";
     child.stderr.on("data", (chunk: Buffer | string) => {
       stderrTail = (stderrTail + String(chunk)).slice(-2000);
