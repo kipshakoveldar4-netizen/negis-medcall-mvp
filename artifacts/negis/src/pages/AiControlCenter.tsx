@@ -1,4 +1,4 @@
-import type { CSSProperties, ReactNode } from "react";
+import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
 import { Link } from "wouter";
 import {
   ArrowRight,
@@ -21,19 +21,21 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { PageLayout } from "@/components/layout/PageLayout";
+import { apiUrl } from "@/lib/api";
 import { defaultThemePresetId, getThemePreset } from "@/lib/themePresets";
 
-// D3 — AI Control Center UI MVP (Glass Morphic Medical AI). UI-first: this screen
-// establishes the owner's daily picture. No real analytics are wired yet, so every
-// metric shows "—" and AI recommendations are clearly labelled as examples. Visuals
-// use the --negis-* theme tokens (see docs/DESIGN-SYSTEM.md §7, §14).
+// D3B — AI Control Center with minimal REAL operational data (Glass Morphic Medical AI).
+// Real: latest ad launch + failed-launch count (from /api/crm/meta-launches), and system
+// health (API / Supabase Storage / Targeting Agent / Meta configured). Everything CRM/sales
+// (заявки, лиды, записи, выручка) stays an honest placeholder — no fake numbers. AI
+// recommendations are simple rule-based signals from real statuses, not AI predictions.
 
 const EMPTY_METRIC_HINT = "Данные появятся после подключения CRM.";
 
 type Tone = "primary" | "ai" | "success" | "warning" | "error" | "muted";
 
 function toneColor(tone: Tone): string {
-  return `var(--negis-${tone === "muted" ? "muted" : tone})`;
+  return `var(--negis-${tone})`;
 }
 
 function toneSoftBg(tone: Tone): string {
@@ -53,7 +55,96 @@ function toneSoftBg(tone: Tone): string {
   }
 }
 
-function ControlMetricCard({ label, icon: Icon, tone }: { label: string; icon: LucideIcon; tone: Tone }) {
+type HealthState = "loading" | "ready" | "check" | "disconnected" | "unknown";
+
+const healthLabel: Record<HealthState, { label: string; tone: Tone }> = {
+  loading: { label: "Проверяем…", tone: "muted" },
+  ready: { label: "Готово", tone: "success" },
+  check: { label: "Требует проверки", tone: "warning" },
+  disconnected: { label: "Не подключено", tone: "muted" },
+  unknown: { label: "Не удалось проверить", tone: "muted" },
+};
+
+type LaunchMode = "paused" | "failed" | "dry_run" | "video_processing" | "unknown";
+
+type LaunchItem = {
+  status?: string;
+  metaStatus?: string;
+  metaCampaignId?: string;
+  lastError?: string;
+  createdAt?: string;
+  payload?: Record<string, unknown>;
+};
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+function str(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+function isDryRunId(value: unknown): boolean {
+  return typeof value === "string" && value.trim().toLowerCase().startsWith("dryrun_");
+}
+
+function classifyLaunch(item: LaunchItem): LaunchMode {
+  const status = str(item.status).toLowerCase();
+  const metaStatus = str(item.metaStatus).toLowerCase();
+  if (status === "dry_run" || metaStatus === "dry_run" || isDryRunId(item.metaCampaignId)) return "dry_run";
+  if (status === "video_processing" || metaStatus === "video_processing") return "video_processing";
+  if (status === "failed" || metaStatus === "failed" || str(item.lastError)) return "failed";
+  if (item.metaCampaignId && !isDryRunId(item.metaCampaignId)) return "paused";
+  return "unknown";
+}
+
+const launchModeLabel: Record<LaunchMode, string> = {
+  paused: "Создана выключенной",
+  failed: "Не удалось создать",
+  dry_run: "Тест без создания рекламы",
+  video_processing: "Видео обрабатывается",
+  unknown: "Статус неизвестен",
+};
+
+function readWorkspaceId(): string {
+  try {
+    const raw = localStorage.getItem("negis_demo_workspace");
+    if (!raw) return "demo-workspace";
+    const workspace = JSON.parse(raw) as { id?: unknown };
+    return typeof workspace.id === "string" && workspace.id.trim() ? workspace.id.trim() : "demo-workspace";
+  } catch {
+    return "demo-workspace";
+  }
+}
+
+async function fetchJson(path: string): Promise<{ ok: boolean; body: Record<string, unknown> }> {
+  try {
+    const response = await fetch(apiUrl(path));
+    const text = await response.text();
+    const body = text ? (JSON.parse(text) as Record<string, unknown>) : {};
+    return { ok: response.ok, body };
+  } catch {
+    return { ok: false, body: {} };
+  }
+}
+
+/* ── Presentational components ─────────────────────────────── */
+
+function ControlMetricCard({
+  label,
+  icon: Icon,
+  tone,
+  value,
+  hint,
+  loading,
+}: {
+  label: string;
+  icon: LucideIcon;
+  tone: Tone;
+  value?: string;
+  hint?: string;
+  loading?: boolean;
+}) {
   return (
     <div className="negis-glass p-4 sm:p-5">
       <div className="flex items-center gap-3">
@@ -62,8 +153,8 @@ function ControlMetricCard({ label, icon: Icon, tone }: { label: string; icon: L
         </div>
         <p className="text-sm font-black" style={{ color: "var(--negis-text)" }}>{label}</p>
       </div>
-      <p className="mt-3 text-3xl font-black" style={{ color: "var(--negis-text)" }}>—</p>
-      <p className="mt-1 text-xs font-semibold leading-relaxed" style={{ color: "var(--negis-muted)" }}>{EMPTY_METRIC_HINT}</p>
+      <p className="mt-3 text-3xl font-black" style={{ color: "var(--negis-text)" }}>{loading ? "…" : value ?? "—"}</p>
+      <p className="mt-1 text-xs font-semibold leading-relaxed" style={{ color: "var(--negis-muted)" }}>{hint ?? EMPTY_METRIC_HINT}</p>
     </div>
   );
 }
@@ -76,19 +167,9 @@ const priorityMeta: Record<Priority, { label: string; tone: Tone }> = {
   low: { label: "Низкий", tone: "muted" },
 };
 
-function AIActionCard({
-  title,
-  priority,
-  explanation,
-  action,
-  openHref,
-}: {
-  title: string;
-  priority: Priority;
-  explanation: string;
-  action: string;
-  openHref?: string;
-}) {
+type Recommendation = { title: string; priority: Priority; explanation: string; action: string; openHref?: string };
+
+function AIActionCard({ title, priority, explanation, action, openHref }: Recommendation) {
   const meta = priorityMeta[priority];
   return (
     <div className="negis-glass flex flex-col gap-3 p-5">
@@ -148,31 +229,24 @@ function QuickActionButton({ label, icon: Icon, href, disabled }: { label: strin
 type FlowState = "active" | "soon" | "pending";
 
 function BusinessFlowStep({ label, state }: { label: string; state: FlowState }) {
-  const tag = state === "active" ? "" : state === "soon" ? "скоро" : "данные не подключены";
+  const tag = state === "active" ? "активно" : state === "soon" ? "скоро" : "данные не подключены";
   const color = state === "active" ? "var(--negis-primary)" : "var(--negis-muted)";
   return (
-    <div
-      className="negis-glass flex shrink-0 flex-col gap-1 px-4 py-3"
-      style={{ minWidth: 128 }}
-    >
+    <div className="negis-glass flex shrink-0 flex-col gap-1 px-4 py-3" style={{ minWidth: 128 }}>
       <span className="text-sm font-black" style={{ color: "var(--negis-text)" }}>{label}</span>
-      {tag ? <span className="text-[10px] font-black uppercase tracking-[0.06em]" style={{ color }}>{tag}</span> : (
-        <span className="text-[10px] font-black uppercase tracking-[0.06em]" style={{ color: "var(--negis-primary)" }}>активно</span>
-      )}
+      <span className="text-[10px] font-black uppercase tracking-[0.06em]" style={{ color }}>{tag}</span>
     </div>
   );
 }
 
-function ReadinessRow({ label, ready }: { label: string; ready: boolean }) {
+function HealthRow({ label, state }: { label: string; state: HealthState }) {
+  const meta = healthLabel[state];
+  const ready = state === "ready";
   return (
     <div className="flex items-center gap-3">
-      {ready ? (
-        <CheckCircle2 size={18} style={{ color: "var(--negis-success)" }} />
-      ) : (
-        <Circle size={18} style={{ color: "var(--negis-muted)" }} />
-      )}
+      {ready ? <CheckCircle2 size={18} style={{ color: "var(--negis-success)" }} /> : <Circle size={18} style={{ color: toneColor(meta.tone) }} />}
       <span className="text-sm font-bold" style={{ color: ready ? "var(--negis-text)" : "var(--negis-muted)" }}>{label}</span>
-      <span className="ml-auto text-xs font-bold" style={{ color: "var(--negis-muted)" }}>{ready ? "готово" : "ожидает"}</span>
+      <span className="ml-auto text-xs font-bold" style={{ color: toneColor(meta.tone) }}>{meta.label}</span>
     </div>
   );
 }
@@ -186,32 +260,96 @@ function SectionTitle({ children, hint }: { children: ReactNode; hint?: string }
   );
 }
 
-const chipStyle: CSSProperties = {
-  borderRadius: 999,
-  padding: "4px 12px",
-  fontSize: 11,
-  fontWeight: 800,
-};
+const chipStyle: CSSProperties = { borderRadius: 999, padding: "4px 12px", fontSize: 11, fontWeight: 800 };
 
 export default function AiControlCenter() {
   const theme = getThemePreset(defaultThemePresetId);
   const todayLabel = new Date().toLocaleDateString("ru-RU", { day: "numeric", month: "long" });
 
-  const metrics: Array<{ label: string; icon: LucideIcon; tone: Tone }> = [
+  const [loading, setLoading] = useState(true);
+  const [launchesLoaded, setLaunchesLoaded] = useState(false);
+  const [launches, setLaunches] = useState<LaunchItem[]>([]);
+  const [apiState, setApiState] = useState<HealthState>("loading");
+  const [storageState, setStorageState] = useState<HealthState>("loading");
+  const [targetingState, setTargetingState] = useState<HealthState>("loading");
+  const [metaState, setMetaState] = useState<HealthState>("loading");
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      const workspaceId = readWorkspaceId();
+      // Independent fetches: one failing endpoint must not block the page.
+      const [health, storage, targeting, launchesRes] = await Promise.all([
+        fetchJson("/api/crm/health"),
+        fetchJson("/api/crm/storage-health"),
+        fetchJson("/api/targeting/health"),
+        fetchJson(`/api/crm/meta-launches?workspaceId=${encodeURIComponent(workspaceId)}`),
+      ]);
+      if (cancelled) return;
+
+      // API health
+      setApiState(health.ok && health.body.success === true ? "ready" : "unknown");
+
+      // Meta configured (from health.meta.configured)
+      if (health.ok && health.body.success === true) {
+        const meta = asRecord(asRecord(health.body.data).meta);
+        setMetaState(meta.configured === true ? "ready" : "disconnected");
+      } else {
+        setMetaState("unknown");
+      }
+
+      // Supabase Storage
+      if (storage.ok && storage.body.success === true) {
+        const data = asRecord(storage.body.data);
+        if (data.exists && data.publicAccess) setStorageState("ready");
+        else if (data.exists) setStorageState("check");
+        else setStorageState("disconnected");
+      } else {
+        setStorageState("unknown");
+      }
+
+      // Targeting Agent (external; often unavailable)
+      setTargetingState(targeting.ok && targeting.body.success === true ? "ready" : "disconnected");
+
+      // Ad launches
+      if (launchesRes.ok && launchesRes.body.success === true) {
+        const data = asRecord(launchesRes.body.data);
+        const list = (Array.isArray(data.launches) ? data.launches : Array.isArray(data.items) ? data.items : []) as LaunchItem[];
+        const sorted = [...list].sort((a, b) => str(b.createdAt).localeCompare(str(a.createdAt)));
+        setLaunches(sorted);
+        setLaunchesLoaded(true);
+      }
+
+      setLoading(false);
+    }
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const latest = launches[0];
+  const latestMode = latest ? classifyLaunch(latest) : null;
+  const failedCount = launches.filter((item) => classifyLaunch(item) === "failed").length;
+
+  const metrics: Array<{ label: string; icon: LucideIcon; tone: Tone; value?: string; hint?: string; real?: boolean }> = [
     { label: "Новые заявки", icon: Inbox, tone: "primary" },
     { label: "Необработанные лиды", icon: Users, tone: "warning" },
     { label: "Записи сегодня", icon: CalendarCheck, tone: "primary" },
     { label: "Пациенты для повторного визита", icon: RefreshCw, tone: "ai" },
-    { label: "Реклама требует внимания", icon: Megaphone, tone: "warning" },
+    {
+      label: "Реклама требует внимания",
+      icon: Megaphone,
+      tone: failedCount > 0 ? "error" : "success",
+      value: launchesLoaded ? String(failedCount) : undefined,
+      hint: launchesLoaded
+        ? failedCount > 0
+          ? "Неудачные запуски рекламы. Проверьте историю."
+          : "Неудачных запусков нет."
+        : "Проверяем статусы запусков…",
+      real: true,
+    },
     { label: "Выручка сегодня", icon: DollarSign, tone: "success" },
-  ];
-
-  const recommendations: Array<{ title: string; priority: Priority; explanation: string; action: string; openHref?: string }> = [
-    { title: "Лиды без ответа", priority: "high", explanation: "Часть заявок ждёт первого ответа. Быстрый ответ повышает шанс записи.", action: "Ответить в течение 15 минут", openHref: "/leads" },
-    { title: "Кампания требует проверки", priority: "medium", explanation: "Рекламу стоит проверить перед включением в Ads Manager.", action: "Открыть автозапуск рекламы", openHref: "/ads-automation" },
-    { title: "Пациентов можно вернуть", priority: "medium", explanation: "Есть пациенты, которым пора на повторный визит.", action: "Подготовить сообщение для WhatsApp", openHref: "/clients" },
-    { title: "Администратор не обработал заявку", priority: "high", explanation: "Заявка висит без действия. Назначьте ответственного.", action: "Назначить задачу администратору", openHref: "/tasks" },
-    { title: "Контент-идея на основе частого вопроса", priority: "low", explanation: "Частый вопрос пациентов можно превратить в рекламный контент.", action: "Создать пакет в контент-студии", openHref: "/content-studio" },
   ];
 
   const flowSteps: Array<{ label: string; state: FlowState }> = [
@@ -224,13 +362,35 @@ export default function AiControlCenter() {
     { label: "AI-действие", state: "soon" },
   ];
 
-  const readiness: Array<{ label: string; ready: boolean }> = [
-    { label: "CRM подключена", ready: false },
-    { label: "Источники заявок", ready: false },
-    { label: "WhatsApp", ready: false },
-    { label: "Реклама", ready: true },
-    { label: "AI-рекомендации", ready: false },
-  ];
+  // Rule-based operational recommendations from real statuses only (no AI).
+  const recommendations: Recommendation[] = [];
+  if (failedCount > 0) {
+    recommendations.push({
+      title: "Проверьте неудачный запуск рекламы",
+      priority: "high",
+      explanation: `Есть неудачные запуски: ${failedCount}. Откройте историю и посмотрите причину.`,
+      action: "Открыть историю запусков",
+      openHref: "/ads-automation/history",
+    });
+  }
+  if (metaState === "disconnected") {
+    recommendations.push({
+      title: "Проверьте подключение Meta",
+      priority: "high",
+      explanation: "Meta ещё не подключена — реклама не сможет запуститься.",
+      action: "Открыть автозапуск рекламы",
+      openHref: "/ads-automation",
+    });
+  }
+  if (storageState === "disconnected" || storageState === "check") {
+    recommendations.push({
+      title: "Проверьте Supabase Storage",
+      priority: "medium",
+      explanation: "Хранилище креативов недоступно — загрузка фото и видео может не работать.",
+      action: "Открыть автозапуск рекламы",
+      openHref: "/ads-automation",
+    });
+  }
 
   return (
     <PageLayout>
@@ -256,27 +416,38 @@ export default function AiControlCenter() {
 
         {/* 2. Today metrics */}
         <section>
-          <SectionTitle hint="Реальные цифры появятся после подключения CRM и источников заявок.">Сегодня в клинике</SectionTitle>
+          <SectionTitle hint="Реклама — реальные статусы. CRM, заявки и выручка подключаются позже.">Сегодня в клинике</SectionTitle>
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
             {metrics.map((metric) => (
-              <ControlMetricCard key={metric.label} label={metric.label} icon={metric.icon} tone={metric.tone} />
+              <ControlMetricCard
+                key={metric.label}
+                label={metric.label}
+                icon={metric.icon}
+                tone={metric.tone}
+                value={metric.value}
+                hint={metric.hint}
+                loading={metric.real ? loading : false}
+              />
             ))}
           </div>
         </section>
 
-        {/* 3. AI recommendations */}
+        {/* 3. Operational recommendations */}
         <section>
-          <SectionTitle hint="Примеры интерфейса. Реальные AI-рекомендации появятся после подключения заявок, CRM и рекламных данных.">
-            AI-рекомендации
-          </SectionTitle>
-          <div className="mb-3 rounded-2xl border p-3 text-xs font-bold" style={{ borderColor: "var(--negis-border)", background: "rgba(124,58,237,0.06)", color: "var(--negis-ai)" }}>
-            Пример: реальные рекомендации появятся после подключения заявок, CRM и рекламных данных.
-          </div>
-          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-            {recommendations.map((rec) => (
-              <AIActionCard key={rec.title} {...rec} />
-            ))}
-          </div>
+          <SectionTitle hint="Рекомендации формируются по системным статусам, без AI-прогнозов.">AI-рекомендации</SectionTitle>
+          {loading ? (
+            <div className="negis-glass p-5 text-sm font-semibold" style={{ color: "var(--negis-muted)" }}>Проверяем статусы…</div>
+          ) : recommendations.length > 0 ? (
+            <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+              {recommendations.map((rec) => (
+                <AIActionCard key={rec.title} {...rec} />
+              ))}
+            </div>
+          ) : (
+            <div className="negis-glass p-5 text-sm font-semibold leading-relaxed" style={{ color: "var(--negis-muted)" }}>
+              Критичных действий пока нет. Подключите CRM и заявки, чтобы AI давал больше рекомендаций.
+            </div>
+          )}
         </section>
 
         {/* 4. Quick actions */}
@@ -305,7 +476,7 @@ export default function AiControlCenter() {
           </div>
         </section>
 
-        {/* 6 + 7. Ads health + Readiness */}
+        {/* 6 + 7. Ads health + system readiness */}
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
           <section className="negis-glass p-5">
             <SectionTitle>Реклама</SectionTitle>
@@ -313,28 +484,45 @@ export default function AiControlCenter() {
               <span style={{ ...chipStyle, background: "rgba(16,185,129,0.12)", color: "var(--negis-success)" }}>Безопасный режим</span>
               <span style={{ ...chipStyle, background: "var(--negis-primary-soft)", color: "var(--negis-primary)" }}>Instagram</span>
             </div>
-            <p className="mt-3 text-sm font-semibold leading-relaxed" style={{ color: "var(--negis-muted)" }}>
-              Последний запуск: <span style={{ color: "var(--negis-text)" }}>нет данных</span>
-            </p>
+            {loading ? (
+              <p className="mt-3 text-sm font-semibold" style={{ color: "var(--negis-muted)" }}>Загрузка…</p>
+            ) : latest && latestMode ? (
+              <div className="mt-3 space-y-1 text-sm font-semibold" style={{ color: "var(--negis-muted)" }}>
+                <p>Последний запуск: <span style={{ color: "var(--negis-text)" }}>{launchModeLabel[latestMode]}</span></p>
+                {latest.createdAt ? <p>Дата: <span style={{ color: "var(--negis-text)" }}>{new Date(latest.createdAt).toLocaleDateString("ru-RU")}</span></p> : null}
+                <p>Тип креатива: <span style={{ color: "var(--negis-text)" }}>{str(asRecord(latest.payload).creativeType) === "video" ? "видео" : "фото"}</span></p>
+                {str(asRecord(latest.payload).city) ? <p>Город: <span style={{ color: "var(--negis-text)" }}>{str(asRecord(latest.payload).city)}</span></p> : null}
+                {str(asRecord(latest.payload).service) ? <p>Услуга: <span style={{ color: "var(--negis-text)" }}>{str(asRecord(latest.payload).service)}</span></p> : null}
+              </div>
+            ) : (
+              <p className="mt-3 text-sm font-semibold" style={{ color: "var(--negis-text)" }}>Запусков пока нет.</p>
+            )}
             <p className="mt-2 text-sm font-semibold leading-relaxed" style={{ color: "var(--negis-muted)" }}>
               Реклама в Negis OS создаётся выключенной. Включить её можно вручную в Meta Ads Manager.
             </p>
-            <div className="mt-4">
+            <div className="mt-4 flex flex-wrap gap-2">
               <Link href="/ads-automation">
                 <button type="button" className="neu-btn-primary justify-center gap-2 px-5 py-2.5 text-sm">
                   <Rocket size={16} />
                   Открыть рекламу
                 </button>
               </Link>
+              <Link href="/ads-automation/history">
+                <button type="button" className="neu-btn justify-center gap-2 px-5 py-2.5 text-sm">
+                  <ClipboardList size={16} />
+                  История запусков
+                </button>
+              </Link>
             </div>
           </section>
 
           <section className="negis-glass p-5">
-            <SectionTitle hint="Что подключить, чтобы AI Control Center заработал полностью.">Готовность к работе</SectionTitle>
+            <SectionTitle hint="Реальные статусы систем. Технические детали доступны только администратору.">Готовность систем</SectionTitle>
             <div className="space-y-3">
-              {readiness.map((item) => (
-                <ReadinessRow key={item.label} label={item.label} ready={item.ready} />
-              ))}
+              <HealthRow label="API" state={apiState} />
+              <HealthRow label="Хранилище креативов" state={storageState} />
+              <HealthRow label="Targeting Agent" state={targetingState} />
+              <HealthRow label="Meta подключена" state={metaState} />
             </div>
             <p className="mt-4 flex items-center gap-2 text-xs font-semibold" style={{ color: "var(--negis-muted)" }}>
               <MessageCircle size={14} style={{ color: "var(--negis-primary)" }} />

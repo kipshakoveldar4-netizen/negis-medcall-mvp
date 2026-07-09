@@ -1599,6 +1599,15 @@ async function checkLayoutFoundation() {
     "Безопасный режим",
     "Реклама в Negis OS создаётся выключенной. Включить её можно вручную в Meta Ads Manager.",
     "AI помогает находить действия, но важные решения подтверждает пользователь.",
+    // D3B operational data (real sources, graceful degradation)
+    "/api/crm/meta-launches",
+    "/api/crm/health",
+    "/api/crm/storage-health",
+    "/api/targeting/health",
+    "Запусков пока нет.",
+    "Готовность систем",
+    "по системным статусам",
+    "Проверьте неудачный запуск рекламы",
   ]) {
     if (!acc.includes(marker)) {
       throw new Error(`AI Control Center MVP is missing "${marker}"`);
