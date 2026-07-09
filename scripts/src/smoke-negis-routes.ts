@@ -175,6 +175,22 @@ async function checkAdsAutomationSource() {
   assertSourceIncludes(source, "videoOptimization.loaded:", "videoOptimization.loaded visible in technical info");
   assertSourceIncludes(source, "configBlocked: videoConfigBlocked", "readiness receives the config-loading block flag");
   assertSourceIncludes(source, 'setVideoJob({ id: "local-failed", status: "failed"', "optimization branch failures are classified as optimization_failed");
+  // D3C raw large-video upload polish (canonical /api/crm/video-jobs)
+  assertSourceIncludes(source, '"/api/crm/video-jobs"', "large video uses the canonical video-jobs endpoint");
+  assertSourceIncludes(source, "Видео загружено для оптимизации", "optimizing card title");
+  assertSourceIncludes(source, "Мы подготовим MP4-версию для Meta. Запуск будет доступен после обработки.", "optimizing card body");
+  assertSourceIncludes(source, "Запуск рекламы будет доступен после оптимизации.", "launch-after-optimization message");
+  assertSourceIncludes(source, "Оптимизируем видео", "transcoding status label");
+  assertSourceIncludes(source, "Подготовка файла", "downloading status label");
+  assertSourceIncludes(source, "Сохраняем готовое видео", "uploading status label");
+  assertSourceIncludes(source, "retryVideoJob", "retry handler exists");
+  assertSourceIncludes(source, "Повторить обработку", "retry button label");
+  assertSourceIncludes(source, "/api/crm/video-processing-jobs/${encodeURIComponent(jobId)}/retry", "retry uses the lower-level job endpoint");
+  assertSourceIncludes(source, "jobId: {videoJob.id}", "admin job id detail");
+  assertSourceIncludes(source, "rawPath: {uploadDebug.storagePath", "admin raw path detail");
+  assertSourceIncludes(source, "inputSizeBytes: {creative.fileSize", "admin input size detail");
+  // Client-mode safety: raw job details only inside the admin technical block.
+  assertSourceIncludes(source, "isAdminMode && uploadDebug ?", "raw job details gated behind admin mode");
 
   console.log("AdsAutomation source checks: ok");
 }

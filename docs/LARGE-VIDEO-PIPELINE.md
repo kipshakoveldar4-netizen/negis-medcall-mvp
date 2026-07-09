@@ -49,11 +49,27 @@ All endpoints live in the existing CRM catch-all function:
 api/crm/[...path].ts
 ```
 
-Endpoints:
+**Canonical browser upload endpoint: `/api/crm/video-jobs`.** This is the endpoint Ads
+Automation uses to upload a large video. Its `POST` returns a **signed upload URL** for the
+raw bucket and creates the job (`awaiting_upload`); the browser uploads the raw original to
+`ad-creatives-raw`, then `PATCH` confirms the upload and moves the job to `queued`. Polling
+uses `GET /api/crm/video-jobs?id=...`.
+
+```text
+POST  /api/crm/video-jobs         → signed raw upload + create job (awaiting_upload)
+PATCH /api/crm/video-jobs         → confirm raw upload → queued
+GET   /api/crm/video-jobs?id=...  → poll safe job status
+```
+
+`/api/crm/video-processing-jobs` is a **lower-level job CRUD/status/retry** endpoint (it does
+not issue signed uploads). Ads Automation uses only its retry action:
 
 - `POST /api/crm/video-processing-jobs`
 - `GET /api/crm/video-processing-jobs/:id`
-- `POST /api/crm/video-processing-jobs/:id/retry`
+- `POST /api/crm/video-processing-jobs/:id/retry` — used by the “Повторить обработку” button
+
+Both endpoints write/read the same `video_processing_jobs` table, and the worker claims
+`queued` jobs from that table regardless of which endpoint created them.
 
 The response exposes safe fields only:
 
@@ -138,9 +154,27 @@ The worker will later:
 7. mark the job `ready`;
 8. delete the raw original.
 
+## Current implementation status
+
+Implemented (browser side, via `/api/crm/video-jobs`):
+
+- Raw large-video upload to `ad-creatives-raw` through a signed upload URL.
+- `video_processing_jobs` record creation.
+- Polling of the job by id (every ~5s), stopping on `ready` or `failed`.
+- Launch/preview blocked until the job is `ready` (`ready_for_meta` is never true for a raw video).
+- Friendly Russian client statuses; raw bucket/path/URL hidden in client mode, shown only in admin technical details.
+- Retry of a failed job via `POST /api/crm/video-processing-jobs/:id/retry` (“Повторить обработку”).
+
+Pending (future ffmpeg worker):
+
+- The worker is not running in production yet, so a `queued` job stays `queued` — the UI treats this as a normal pending state, not a failure.
+- Meta optimized-video usage: the launch will use the worker’s `optimized_public_url`; the raw original is never sent to Meta.
+- Raw original deletion after successful optimization.
+
 ## Not Implemented In This Step
 
 - No new full ffmpeg worker behavior was enabled.
 - No ACTIVE launch was enabled.
 - No database schema change is required for existing photo/small-video launches.
 - No Meta launch logic was rewritten.
+- No new Vercel API files were added (existing catch-all only).

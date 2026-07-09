@@ -305,12 +305,15 @@ const VIDEO_OPTIMIZATION_NEXT_STEP_MESSAGE = "Следующим этапом с
 const videoJobStatusLabels: Record<VideoJobStatus, string> = {
   awaiting_upload: "Загружаем исходное видео",
   queued: "В очереди на обработку",
-  downloading: "Скачиваем исходник",
-  transcoding: "Сжимаем и конвертируем видео",
-  uploading: "Сохраняем оптимизированное видео",
-  ready: "Готово",
-  failed: "Ошибка обработки",
+  downloading: "Подготовка файла",
+  transcoding: "Оптимизируем видео",
+  uploading: "Сохраняем готовое видео",
+  ready: "Видео оптимизировано и готово",
+  failed: "Не удалось оптимизировать видео",
 };
+const VIDEO_OPTIMIZING_TITLE = "Видео загружено для оптимизации";
+const VIDEO_OPTIMIZING_BODY = "Мы подготовим MP4-версию для Meta. Запуск будет доступен после обработки.";
+const VIDEO_OPTIMIZING_LAUNCH_AFTER_MESSAGE = "Запуск рекламы будет доступен после оптимизации.";
 
 function normalizeVideoJob(record: Record<string, unknown>): VideoJob | null {
   const id = firstString(record.id);
@@ -1501,6 +1504,34 @@ export default function AdsAutomation() {
       }
     } catch {
       // Keep polling silently; transient network/API errors must not kill the job card.
+    }
+  }
+
+  // Retry a failed optimization job via the lower-level job endpoint. It resets the
+  // job to queued; the existing polling effect resumes automatically. Launch stays blocked.
+  async function retryVideoJob(jobId: string) {
+    if (!jobId) return;
+    setLoading("video");
+    try {
+      const body = await crmRequest<{ job?: Record<string, unknown> }>(
+        `/api/crm/video-processing-jobs/${encodeURIComponent(jobId)}/retry`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ workspaceId, status: "failed" }),
+        },
+      );
+      const job = normalizeVideoJob(asRecord(body.data.job));
+      if (job) {
+        setVideoJob(job);
+        setLastUploadError("");
+        setNotice(`${VIDEO_OPTIMIZING_BODY} ${VIDEO_OPTIMIZING_LAUNCH_AFTER_MESSAGE}`);
+        toast.success("Обработка перезапущена");
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : VIDEO_OPTIMIZATION_FAILED_MESSAGE);
+    } finally {
+      setLoading(null);
     }
   }
 
@@ -2707,7 +2738,16 @@ export default function AdsAutomation() {
                     <div className="mt-3 rounded-2xl border border-red-200 bg-red-50 p-3">
                       <p className="text-sm font-black text-red-900">{VIDEO_OPTIMIZATION_FAILED_MESSAGE}</p>
                       {isAdminMode && videoJob.error ? <p className="mt-1 text-xs font-semibold text-red-800">{videoJob.error}</p> : null}
-                      <p className="mt-1 text-xs font-semibold text-red-800">Загрузите видео заново или используйте файл меньшего размера.</p>
+                      <p className="mt-1 text-xs font-semibold text-red-800">Повторите обработку или загрузите другое видео.</p>
+                      <button
+                        type="button"
+                        className="neu-btn mt-3 justify-center"
+                        disabled={loading === "video"}
+                        onClick={() => void retryVideoJob(videoJob.id)}
+                      >
+                        {loading === "video" ? <Loader2 className="animate-spin" size={16} /> : <RefreshCw size={16} />}
+                        Повторить обработку
+                      </button>
                     </div>
                   ) : videoJob.status === "ready" ? (
                     <div className="mt-3 rounded-2xl border border-emerald-200 bg-emerald-50 p-3">
@@ -2716,12 +2756,14 @@ export default function AdsAutomation() {
                     </div>
                   ) : (
                     <div className="mt-3 rounded-2xl border border-amber-200 bg-amber-50 p-3">
-                      <p className="text-sm font-black text-amber-900">{VIDEO_OPTIMIZING_MESSAGE}</p>
+                      <p className="text-sm font-black text-amber-900">{VIDEO_OPTIMIZING_TITLE}</p>
+                      <p className="mt-1 text-xs font-semibold text-amber-800">{VIDEO_OPTIMIZING_BODY}</p>
+                      <p className="mt-2 text-xs font-semibold text-amber-800">Размер файла: {formatBytes(creative.fileSize)}</p>
                       <p className="mt-1 text-xs font-semibold text-amber-800">
                         Статус: {videoJobStatusLabels[videoJob.status]}
                         {videoJob.progress ? ` · ${videoJob.progress}%` : ""}
                       </p>
-                      <p className="mt-1 text-xs font-semibold text-amber-800">{VIDEO_OPTIMIZING_LAUNCH_BLOCKED_MESSAGE}</p>
+                      <p className="mt-1 text-xs font-bold text-amber-900">{VIDEO_OPTIMIZING_LAUNCH_AFTER_MESSAGE}</p>
                     </div>
                   )
                 ) : null}
@@ -2812,6 +2854,19 @@ export default function AdsAutomation() {
                       <p>fileSizeMb: {uploadDebug.fileSizeMb ?? "-"} (1 MB = 1024×1024 байт)</p>
                       <p>largeVideoBranch: {uploadDebug.largeVideoBranch === undefined ? "-" : String(uploadDebug.largeVideoBranch)}</p>
                       <p>uploadTarget: {uploadDebug.uploadTarget || "-"}</p>
+                      {videoJob ? (
+                        <>
+                          <p>jobId: {videoJob.id}</p>
+                          <p>job.status: {videoJob.status}</p>
+                          <p>job.progress: {videoJob.progress ?? "-"}</p>
+                          <p>job.errorMessage: {videoJob.error || "-"}</p>
+                          <p>rawBucket: {uploadDebug.uploadTarget || "-"}</p>
+                          <p>rawPath: {uploadDebug.storagePath || "-"}</p>
+                          <p>rawPublicUrl present: {uploadDebug.publicUrlExists ? "yes" : "no"}</p>
+                          <p>inputMimeType: {creative.mimeType || "-"}</p>
+                          <p>inputSizeBytes: {creative.fileSize || 0}</p>
+                        </>
+                      ) : null}
                       <p>upload response keys: {uploadDebug.responseKeys.length ? uploadDebug.responseKeys.join(", ") : "-"}</p>
                     </div>
                   </details>
