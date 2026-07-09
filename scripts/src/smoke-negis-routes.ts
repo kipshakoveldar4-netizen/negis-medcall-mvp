@@ -1578,23 +1578,36 @@ async function checkLayoutFoundation() {
   const pagesDir = path.join(repoRoot, "artifacts", "negis", "src", "pages");
   const layoutDir = path.join(repoRoot, "artifacts", "negis", "src", "components", "layout");
 
-  // AI Control Center placeholder exists and is routed.
+  // AI Control Center UI MVP exists and is routed.
   const acc = await readFile(path.join(pagesDir, "AiControlCenter.tsx"), "utf8");
   for (const marker of [
     "AI Control Center",
-    "Главный экран Negis OS",
-    "Заявки сегодня",
+    "Главная картина клиники",
+    "Новые заявки",
     "Необработанные лиды",
-    "Реклама требует внимания",
+    "Записи сегодня",
     "Пациенты для повторного визита",
-    "AI подготовил действия",
+    "Реклама требует внимания",
+    "Выручка сегодня",
+    "AI-рекомендации",
+    "Данные появятся после подключения CRM.",
     "Запустить рекламу",
-    "Открыть заявки",
-    "Посмотреть рекомендации",
-    "Полный AI Control Center будет собран следующим этапом.",
+    "Открыть историю запусков",
+    '"/ads-automation"',
+    '"/ads-automation/history"',
+    '"/content-studio"',
+    "Безопасный режим",
+    "Реклама в Negis OS создаётся выключенной. Включить её можно вручную в Meta Ads Manager.",
+    "AI помогает находить действия, но важные решения подтверждает пользователь.",
   ]) {
     if (!acc.includes(marker)) {
-      throw new Error(`AI Control Center placeholder is missing "${marker}"`);
+      throw new Error(`AI Control Center MVP is missing "${marker}"`);
+    }
+  }
+  // Client view must not leak raw technical labels.
+  for (const forbidden of ["publicUrl", "video_id", "raw_payload"]) {
+    if (acc.includes(forbidden)) {
+      throw new Error(`AI Control Center must not show technical label "${forbidden}"`);
     }
   }
 
