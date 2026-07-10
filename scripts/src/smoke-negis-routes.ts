@@ -137,13 +137,22 @@ async function checkAdsAutomationSource() {
   assertSourceIncludes(source, "matchesHistorySearch", "history search logic");
   assertSourceIncludes(source, "mergeHistoryCollections", "local and API history deduplication");
   assertSourceIncludes(source, "historyLoaded", "history loading and empty-state separation");
-  assertSourceIncludes(source, "Создано в Meta", "created campaigns history filter");
-  assertSourceIncludes(source, "Видео в обработке", "video processing history filter");
-  assertSourceIncludes(source, "Требуют внимания", "failed launch history filter");
+  // Negis OS history header (exact spec copy).
+  assertSourceIncludes(source, "Все рекламные кампании, созданные через Negis OS.", "Negis OS history subtitle");
+  // Summary metric cards.
+  assertSourceIncludes(source, "Всего запусков", "total launches metric");
+  assertSourceIncludes(source, "Создано выключенными", "paused-created count metric");
+  assertSourceIncludes(source, "Видео оптимизировано", "optimized video count metric");
+  assertSourceIncludes(source, "Тесты без создания рекламы", "dry-run count metric");
+  // Client-friendly filters (exact spec set).
+  assertSourceIncludes(source, "Создано выключенной", "created-paused history filter");
+  assertSourceIncludes(source, "Ошибки", "failed launch history filter");
+  assertSourceIncludes(source, "Оптимизированные видео", "optimized video history filter");
   assertSourceIncludes(source, "Кампания, услуга или город", "client-safe history search placeholder");
   assertSourceIncludes(source, "Кампания, услуга, город или Meta ID", "admin history search placeholder");
   assertSourceIncludes(source, "Сбросить фильтры", "history no-results recovery action");
-  assertSourceIncludes(source, "Подробности запуска", "collapsed client and admin history details");
+  assertSourceIncludes(source, "Подробнее", "collapsed client and admin history details");
+  assertSourceIncludes(source, "Запусков пока нет", "history empty-state title");
   assertSourceIncludes(source, "never the raw video URL", "history video preview uses thumbnail only");
   assertSourceIncludes(source, "Повторить запуск с этими параметрами", "repeat launch prefill action");
   assertSourceIncludes(source, "repeatLaunchFromHistory", "repeat launch prefill handler");

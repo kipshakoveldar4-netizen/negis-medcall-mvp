@@ -1014,13 +1014,12 @@ function resolveLaunchMode(item: LaunchHistoryItem): LaunchMode {
   return "paused_created";
 }
 
-type HistoryFilter = "all" | "real" | "processing" | "failed" | "dry_run" | "photo" | "video" | "optimized";
+type HistoryFilter = "all" | "real" | "failed" | "dry_run" | "photo" | "video" | "optimized";
 
 const historyFilterOptions: Array<{ id: HistoryFilter; label: string }> = [
   { id: "all", label: "Все" },
-  { id: "real", label: "Создано в Meta" },
-  { id: "processing", label: "Видео в обработке" },
-  { id: "failed", label: "Требуют внимания" },
+  { id: "real", label: "Создано выключенной" },
+  { id: "failed", label: "Ошибки" },
   { id: "dry_run", label: "Тесты" },
   { id: "photo", label: "Фото" },
   { id: "video", label: "Видео" },
@@ -1045,7 +1044,6 @@ function matchesHistoryFilter(item: LaunchHistoryItem, filter: HistoryFilter): b
   const mode = resolveLaunchMode(item);
   const creativeType = firstString(asRecord(item.payload).creativeType) === "video" ? "video" : "photo";
   if (filter === "real") return mode === "paused_created" || mode === "active_created";
-  if (filter === "processing") return mode === "video_processing";
   if (filter === "dry_run") return mode === "dry_run";
   if (filter === "failed") return mode === "failed";
   if (filter === "photo") return creativeType === "photo";
@@ -3863,14 +3861,15 @@ export default function AdsAutomation() {
     );
     const historyModes = historyItems.map((item) => resolveLaunchMode(item));
     const createdCount = historyModes.filter((mode) => mode === "paused_created" || mode === "active_created").length;
-    const processingCount = historyModes.filter((mode) => mode === "video_processing").length;
     const failedCount = historyModes.filter((m) => m === "failed").length;
     const dryRunCount = historyModes.filter((m) => m === "dry_run").length;
+    const optimizedCount = historyItems.filter((item) => asRecord(item.payload).optimized === true).length;
     const summaryMetrics: Array<{ label: string; value: number; icon: LucideIcon; tone: NegisTone }> = [
-      { label: "Создано в Meta", value: createdCount, icon: CheckCircle2, tone: "success" },
-      { label: "Видео в обработке", value: processingCount, icon: Video, tone: processingCount > 0 ? "warning" : "muted" },
-      { label: "Требуют внимания", value: failedCount, icon: AlertTriangle, tone: failedCount > 0 ? "error" : "muted" },
-      { label: "Тестов без создания", value: dryRunCount, icon: FlaskConical, tone: "secondary" },
+      { label: "Всего запусков", value: historyItems.length, icon: Rocket, tone: "primary" },
+      { label: "Создано выключенными", value: createdCount, icon: CheckCircle2, tone: "success" },
+      { label: "Ошибки", value: failedCount, icon: AlertTriangle, tone: failedCount > 0 ? "error" : "muted" },
+      { label: "Видео оптимизировано", value: optimizedCount, icon: Video, tone: "ai" },
+      { label: "Тесты без создания рекламы", value: dryRunCount, icon: FlaskConical, tone: "secondary" },
     ];
     const showingInitialLoader = !historyLoaded && historyItems.length === 0;
 
@@ -3890,7 +3889,7 @@ export default function AdsAutomation() {
           </button>
         </div>
 
-        <section className="grid grid-cols-2 gap-3 lg:grid-cols-4" aria-label="Сводка по запускам">
+        <section className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5" aria-label="Сводка по запускам">
           {summaryMetrics.map((metric) => (
             <HistoryMetricCard key={metric.label} label={metric.label} value={metric.value} icon={metric.icon} tone={metric.tone} />
           ))}
@@ -4014,11 +4013,11 @@ export default function AdsAutomation() {
                 : firstString(payload.thumbnailUrl, payload.creativeUrl, payload.imageUrl);
               const modeBadge =
                 mode === "dry_run"
-                  ? { tone: "blue" as const, label: "Тест завершён" }
+                  ? { tone: "blue" as const, label: "Тест без создания рекламы" }
                   : mode === "video_processing"
                     ? { tone: "amber" as const, label: "Видео обрабатывается" }
                     : mode === "failed"
-                      ? { tone: "red" as const, label: "Требует внимания" }
+                      ? { tone: "red" as const, label: "Ошибка" }
                       : mode === "active_created"
                         ? { tone: "green" as const, label: "Активна" }
                         : { tone: "green" as const, label: "Создана выключенной" };
@@ -4147,7 +4146,7 @@ export default function AdsAutomation() {
 
                   <details className="mt-3 overflow-hidden rounded-2xl border" style={{ borderColor: "var(--negis-border)" }}>
                     <summary className="cursor-pointer list-none px-4 py-2.5 text-xs font-black uppercase tracking-[0.1em]" style={{ color: "var(--negis-primary)" }}>
-                      Подробности запуска
+                      Подробнее
                     </summary>
                     <div className="grid gap-1.5 px-4 pb-4 pt-1 text-xs font-semibold" style={{ color: "var(--negis-muted)" }}>
                       <p>Что создано: {whatCreated}</p>
@@ -4263,11 +4262,11 @@ export default function AdsAutomation() {
                 {isHistoryView ? "Negis OS · Реклама" : "Meta Ads · Clean Medical"}
               </p>
               <h1 className="mt-2 text-3xl font-black text-[#0F172A] sm:text-4xl">
-                {isHistoryView ? "История запусков рекламы" : "Запуск рекламы в Meta"}
+                {isHistoryView ? "История запусков" : "Запуск рекламы в Meta"}
               </h1>
               <p className="mt-3 max-w-3xl text-sm leading-relaxed text-[#64748B]">
                 {isHistoryView
-                  ? "Здесь видно, что было создано в Meta, какие запуски требуют внимания и какой следующий шаг нужен клинике."
+                  ? "Все рекламные кампании, созданные через Negis OS."
                   : "Спокойный мастер для клиники: загрузите креатив, заполните параметры, проверьте предпросмотр и создайте кампанию выключенной."}
               </p>
             </div>
