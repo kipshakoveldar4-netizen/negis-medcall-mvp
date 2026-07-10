@@ -1692,6 +1692,87 @@ async function checkLeadsPageSource() {
   console.log("Leads page checks: ok");
 }
 
+async function checkClientsPageSource() {
+  const source = await readFile(path.join(repoRoot, "artifacts", "negis", "src", "pages", "ClientsPage.tsx"), "utf8");
+  for (const marker of [
+    // Header + data source
+    "Клиенты",
+    "База пациентов, история обращений, записей и повторных визитов.",
+    "Добавить клиента",
+    '"/api/crm/clients"',
+    "useDemoCollection",
+    // Related history uses the existing sibling endpoints (client_id or phone match)
+    '"/api/crm/leads"',
+    '"/api/crm/appointments"',
+    '"/api/crm/calls"',
+    "matchesClient",
+    // Summary metrics (real counts from loaded clients)
+    "Всего клиентов",
+    "Новые",
+    "Активные",
+    "Нужен повторный визит",
+    "Без последнего визита",
+    // Filters
+    "Повторный визит",
+    "Без визита",
+    // Status mapping (visual normalization only, no new status table)
+    "normalizeClientStatus",
+    "Новый",
+    "Активный",
+    "Неактивный",
+    // Search
+    "Поиск: имя, телефон, WhatsApp, источник или заметка",
+    // Empty state
+    "Клиентов пока нет",
+    "Когда клиника начнёт получать заявки и создавать записи, пациенты появятся здесь.",
+    // Client actions (WhatsApp/call are phone-safe, Записать reuses the appointment prefill)
+    "toWhatsappHref",
+    "toTelHref",
+    "saveAppointmentPrefill",
+    "Подробнее",
+    // Detail drawer: related history + honest empty state + AI placeholder
+    "Заявки этого клиента",
+    "Записи этого клиента",
+    "Звонки этого клиента",
+    "История появится после новых заявок, записей и звонков.",
+    "AI-рекомендация по клиенту появится после подключения CRM-аналитики.",
+    // Add/edit form
+    "Новый клиент",
+    "Изменить клиента",
+    // Admin-only technical details (client mode hides them)
+    "isAdminMode ? (",
+    "client id:",
+    "related leads:",
+    "related appointments:",
+    "related calls:",
+    "Данные ограничены текущей клиникой (workspace).",
+  ]) {
+    if (!source.includes(marker)) {
+      throw new Error(`Clients page is missing "${marker}"`);
+    }
+  }
+  // Client-safe: no secrets, no raw storage internals in the clients screen.
+  for (const forbidden of ["SERVICE_ROLE", "service_role", "ad-creatives-raw"]) {
+    if (source.includes(forbidden)) {
+      throw new Error(`Clients page must not reference "${forbidden}"`);
+    }
+  }
+
+  // Route wiring: /clients uses the real ClientsPage, not the demo module.
+  const app = await readFile(path.join(repoRoot, "artifacts", "negis", "src", "App.tsx"), "utf8");
+  if (!app.includes('import ClientsPage from "@/pages/ClientsPage"')) {
+    throw new Error("App must import the real ClientsPage");
+  }
+  if (!app.includes('path="/clients" component={() => <ProtectedPage component={ClientsPage}')) {
+    throw new Error("App must route /clients to ClientsPage");
+  }
+  if (app.includes('path="/clients" component={() => <ProtectedPage component={DemoClients}')) {
+    throw new Error("App must no longer route /clients to DemoClients");
+  }
+
+  console.log("Clients page checks: ok");
+}
+
 async function checkLayoutFoundation() {
   const pagesDir = path.join(repoRoot, "artifacts", "negis", "src", "pages");
   const layoutDir = path.join(repoRoot, "artifacts", "negis", "src", "components", "layout");
@@ -2013,6 +2094,7 @@ async function main() {
   await checkContentStudioPhaseOne();
   await checkPhotoCreativeBuilder();
   await checkLeadsPageSource();
+  await checkClientsPageSource();
   await checkNoNewApiFiles();
   for (const route of [
     "/ai-control-center",

@@ -20,6 +20,7 @@ import { AppointmentsPage } from "@/pages/AppointmentsPage";
 import ContentStudio from "@/pages/ContentStudio";
 import AdminCenter from "@/pages/AdminCenter";
 import LeadsPage from "@/pages/LeadsPage";
+import ClientsPage from "@/pages/ClientsPage";
 import {
   DemoCalls,
   DemoChat,
@@ -147,7 +148,7 @@ function Router() {
       <Route path="/calls" component={() => <ProtectedPage component={DemoCalls} permission="reception" />} />
       <Route path="/sales" component={() => <ProtectedPage component={DemoClients} permission="crm" />} />
       <Route path="/leads" component={() => <ProtectedPage component={LeadsPage} permission="crm" />} />
-      <Route path="/clients" component={() => <ProtectedPage component={DemoClients} permission="crm" />} />
+      <Route path="/clients" component={() => <ProtectedPage component={ClientsPage} permission="crm" />} />
       <Route path="/tasks" component={() => <ProtectedPage component={DemoTasks} permission="tasks" />} />
       <Route path="/chat" component={() => <ProtectedPage component={DemoChat} permission="chat" />} />
       <Route path="/marketplace" component={() => <ProtectedPage component={DemoMarket} permission="marketplace" />} />

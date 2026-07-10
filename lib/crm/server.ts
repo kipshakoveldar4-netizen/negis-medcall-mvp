@@ -577,6 +577,8 @@ function makeClient(body: JsonRecord): JsonRecord {
     status: readString(body.status) || "new",
     comment: firstString(body.comment, body.notes),
     lastVisit: firstString(body.lastVisit, body.last_visit_at),
+    createdAt: firstString(body.createdAt, body.created_at),
+    updatedAt: firstString(body.updatedAt, body.updated_at),
   };
 }
 
@@ -615,6 +617,7 @@ function makeAppointment(body: JsonRecord): JsonRecord {
     durationMinutes: readNumber(body.durationMinutes ?? body.duration_minutes) ?? 60,
     duration_minutes: readNumber(body.durationMinutes ?? body.duration_minutes) ?? 60,
     source: readString(body.source),
+    clientId: firstString(body.clientId, body.client_id),
   };
 }
 
@@ -628,6 +631,7 @@ function makeCall(body: JsonRecord): JsonRecord {
     source: readString(body.source),
     result: readString(body.result),
     summary: readString(body.summary),
+    clientId: firstString(body.clientId, body.client_id),
   };
 }
 
@@ -843,6 +847,8 @@ const configs: Record<CrmResource, ResourceConfig> = {
         status: row.status,
         comment: row.notes,
         lastVisit: row.last_visit_at,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
       }),
   },
   leads: {
@@ -912,6 +918,7 @@ const configs: Record<CrmResource, ResourceConfig> = {
         notes: row.notes,
         durationMinutes: row.duration_minutes,
         source: row.source,
+        client_id: row.client_id,
       }),
   },
   calls: {
@@ -938,6 +945,7 @@ const configs: Record<CrmResource, ResourceConfig> = {
         source: row.source,
         result: row.result,
         summary: row.summary,
+        client_id: row.client_id,
       }),
   },
   tasks: {
