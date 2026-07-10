@@ -19,11 +19,11 @@ import AdsCallback from "@/pages/AdsCallback";
 import { AppointmentsPage } from "@/pages/AppointmentsPage";
 import ContentStudio from "@/pages/ContentStudio";
 import AdminCenter from "@/pages/AdminCenter";
+import LeadsPage from "@/pages/LeadsPage";
 import {
   DemoCalls,
   DemoChat,
   DemoClients,
-  DemoLeads,
   DemoMarket,
   DemoReception,
   DemoReports,
@@ -146,7 +146,7 @@ function Router() {
       <Route path="/reception" component={() => <ProtectedPage component={DemoReception} permission="reception" />} />
       <Route path="/calls" component={() => <ProtectedPage component={DemoCalls} permission="reception" />} />
       <Route path="/sales" component={() => <ProtectedPage component={DemoClients} permission="crm" />} />
-      <Route path="/leads" component={() => <ProtectedPage component={DemoLeads} permission="crm" />} />
+      <Route path="/leads" component={() => <ProtectedPage component={LeadsPage} permission="crm" />} />
       <Route path="/clients" component={() => <ProtectedPage component={DemoClients} permission="crm" />} />
       <Route path="/tasks" component={() => <ProtectedPage component={DemoTasks} permission="tasks" />} />
       <Route path="/chat" component={() => <ProtectedPage component={DemoChat} permission="chat" />} />

@@ -260,7 +260,8 @@ function buildPatchRow(resource: CrmResource, body: JsonRecord): JsonRecord {
     setText("source", ["source"]);
     setText("campaign", ["campaign"]);
     setText("status", ["status"]);
-    setText("notes", ["notes", "owner"]);
+    // notes holds real notes only (no owner overload).
+    setText("notes", ["notes"]);
     row.updated_at = new Date().toISOString();
   }
 
@@ -589,6 +590,10 @@ function makeLead(body: JsonRecord): JsonRecord {
     status: readString(body.status) || "new",
     owner: firstString(body.owner, body.responsibleName, body.assignee_name),
     notes: readString(body.notes),
+    responsibleUserId: firstString(body.responsibleUserId, body.responsible_user_id),
+    clientId: firstString(body.clientId, body.client_id),
+    createdAt: firstString(body.createdAt, body.created_at),
+    updatedAt: firstString(body.updatedAt, body.updated_at),
   };
 }
 
@@ -853,7 +858,9 @@ const configs: Record<CrmResource, ResourceConfig> = {
       source: readString(body.source) || null,
       campaign: readString(body.campaign) || null,
       status: readString(body.status) || "new",
-      notes: firstString(body.notes, body.owner) || null,
+      // notes holds real notes only — the responsible person lives in
+      // responsible_user_id (a staff_users FK), never overloaded into notes.
+      notes: readString(body.notes) || null,
       updated_at: new Date().toISOString(),
     }),
     fromRow: (row) =>
@@ -864,8 +871,11 @@ const configs: Record<CrmResource, ResourceConfig> = {
         source: row.source,
         campaign: row.campaign,
         status: row.status,
-        owner: row.notes,
         notes: row.notes,
+        responsible_user_id: row.responsible_user_id,
+        client_id: row.client_id,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
       }),
   },
   appointments: {

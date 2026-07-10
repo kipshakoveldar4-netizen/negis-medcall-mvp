@@ -1627,6 +1627,71 @@ async function checkPhotoCreativeBuilder() {
   console.log("Photo creative builder checks: ok");
 }
 
+async function checkLeadsPageSource() {
+  const source = await readFile(path.join(repoRoot, "artifacts", "negis", "src", "pages", "LeadsPage.tsx"), "utf8");
+  for (const marker of [
+    // Header + data source
+    "Заявки",
+    "Новые обращения из рекламы, сайта, WhatsApp и других источников.",
+    "Добавить заявку",
+    '"/api/crm/leads"',
+    "useDemoCollection",
+    // Summary metrics (real counts from loaded leads)
+    "Всего заявок",
+    "Новые",
+    "В работе",
+    "Записаны",
+    "Потеряны",
+    // Status mapping (visual normalization only, no lead_stages table)
+    "normalizeLeadStatus",
+    "Новая",
+    "Записана",
+    "Потеряна",
+    // Search + filters container
+    "Поиск: имя, телефон, источник или кампания",
+    // Empty state
+    "Заявок пока нет",
+    "Когда клиника начнёт получать обращения из рекламы, сайта или WhatsApp, они появятся здесь.",
+    // Lead actions (WhatsApp/call are phone-safe)
+    "toWhatsappHref",
+    "toTelHref",
+    "saveAppointmentPrefill",
+    "Подробнее",
+    // Detail drawer + AI placeholder
+    "AI-рекомендация появится после подключения CRM-аналитики.",
+    // Add/edit form fields
+    "Новая заявка",
+    // Admin-only technical details (client mode hides them)
+    "isAdminMode ? (",
+    "client_id present:",
+    "responsible_user_id present:",
+  ]) {
+    if (!source.includes(marker)) {
+      throw new Error(`Leads page is missing "${marker}"`);
+    }
+  }
+  // Client-safe: no secrets, no raw storage internals in the leads screen.
+  for (const forbidden of ["SERVICE_ROLE", "service_role", "ad-creatives-raw"]) {
+    if (source.includes(forbidden)) {
+      throw new Error(`Leads page must not reference "${forbidden}"`);
+    }
+  }
+
+  // Route wiring: /leads uses the real LeadsPage, not the demo module.
+  const app = await readFile(path.join(repoRoot, "artifacts", "negis", "src", "App.tsx"), "utf8");
+  if (!app.includes('import LeadsPage from "@/pages/LeadsPage"')) {
+    throw new Error("App must import the real LeadsPage");
+  }
+  if (!app.includes("<ProtectedPage component={LeadsPage} permission=\"crm\" />")) {
+    throw new Error("App must route /leads to LeadsPage");
+  }
+  if (app.includes("component={DemoLeads}")) {
+    throw new Error("App must no longer route /leads to DemoLeads");
+  }
+
+  console.log("Leads page checks: ok");
+}
+
 async function checkLayoutFoundation() {
   const pagesDir = path.join(repoRoot, "artifacts", "negis", "src", "pages");
   const layoutDir = path.join(repoRoot, "artifacts", "negis", "src", "components", "layout");
@@ -1947,6 +2012,7 @@ async function main() {
   await checkThemeFoundation();
   await checkContentStudioPhaseOne();
   await checkPhotoCreativeBuilder();
+  await checkLeadsPageSource();
   await checkNoNewApiFiles();
   for (const route of [
     "/ai-control-center",
