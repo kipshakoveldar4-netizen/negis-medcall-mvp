@@ -1,21 +1,25 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { Link, useLocation } from "wouter";
 import {
+  AlertTriangle,
   CheckCircle2,
   ClipboardList,
   ExternalLink,
   FileImage,
+  FlaskConical,
   History,
   Loader2,
   Megaphone,
   RefreshCw,
   Rocket,
+  Search,
   ShieldCheck,
   Sparkles,
   Trash2,
   UploadCloud,
   Video,
   Wand2,
+  type LucideIcon,
 } from "lucide-react";
 import { toast } from "sonner";
 import { PageLayout } from "@/components/layout/PageLayout";
@@ -1010,16 +1014,17 @@ function resolveLaunchMode(item: LaunchHistoryItem): LaunchMode {
   return "paused_created";
 }
 
-type HistoryFilter = "all" | "real" | "dry_run" | "video_processing" | "failed" | "photo" | "video";
+type HistoryFilter = "all" | "real" | "processing" | "failed" | "dry_run" | "photo" | "video" | "optimized";
 
 const historyFilterOptions: Array<{ id: HistoryFilter; label: string }> = [
   { id: "all", label: "Все" },
-  { id: "real", label: "Реальные запуски" },
-  { id: "dry_run", label: "Проверки без запуска" },
-  { id: "video_processing", label: "Видео обрабатывается" },
-  { id: "failed", label: "Ошибки" },
+  { id: "real", label: "Создано в Meta" },
+  { id: "processing", label: "Видео в обработке" },
+  { id: "failed", label: "Требуют внимания" },
+  { id: "dry_run", label: "Тесты" },
   { id: "photo", label: "Фото" },
   { id: "video", label: "Видео" },
+  { id: "optimized", label: "Оптимизированные видео" },
 ];
 
 function historyDestinationLabel(payload: Record<string, unknown>): string {
@@ -1040,10 +1045,11 @@ function matchesHistoryFilter(item: LaunchHistoryItem, filter: HistoryFilter): b
   const mode = resolveLaunchMode(item);
   const creativeType = firstString(asRecord(item.payload).creativeType) === "video" ? "video" : "photo";
   if (filter === "real") return mode === "paused_created" || mode === "active_created";
+  if (filter === "processing") return mode === "video_processing";
   if (filter === "dry_run") return mode === "dry_run";
-  if (filter === "video_processing") return mode === "video_processing";
   if (filter === "failed") return mode === "failed";
   if (filter === "photo") return creativeType === "photo";
+  if (filter === "optimized") return asRecord(item.payload).optimized === true;
   return creativeType === "video";
 }
 
@@ -1066,6 +1072,61 @@ function matchesHistorySearch(item: LaunchHistoryItem, query: string): boolean {
     .join(" ")
     .toLowerCase();
   return haystack.includes(text);
+}
+
+function historyItemTimestamp(item: LaunchHistoryItem): number {
+  const payload = asRecord(item.payload);
+  for (const value of [item.createdAt, item.launchTimestamp, payload.launchTimestamp]) {
+    const timestamp = Date.parse(String(value || ""));
+    if (Number.isFinite(timestamp)) return timestamp;
+  }
+  return 0;
+}
+
+function historyItemIdentity(item: LaunchHistoryItem): string {
+  const payload = asRecord(item.payload);
+  const campaignId = firstString(item.metaCampaignId, asRecord(item.metaResponse).metaCampaignId);
+  if (campaignId) return `campaign:${campaignId}`;
+
+  const eventTimestamp = firstString(item.launchTimestamp, payload.launchTimestamp, item.createdAt);
+  const campaignName = firstString(item.campaignName, payload.campaignName);
+  if (eventTimestamp && campaignName) return `event:${eventTimestamp}:${campaignName}:${resolveLaunchMode(item)}`;
+  if (item.id) return `launch:${item.id}`;
+
+  return `legacy:${campaignName}:${item.status || ""}:${item.createdAt || ""}`;
+}
+
+function mergeHistoryItem(base: LaunchHistoryItem, incoming: LaunchHistoryItem): LaunchHistoryItem {
+  return {
+    id: incoming.id || base.id,
+    campaignName: incoming.campaignName || base.campaignName,
+    launchTimestamp: incoming.launchTimestamp || base.launchTimestamp,
+    status: incoming.status || base.status,
+    metaCampaignId: incoming.metaCampaignId || base.metaCampaignId,
+    metaAdSetId: incoming.metaAdSetId || base.metaAdSetId,
+    metaCreativeId: incoming.metaCreativeId || base.metaCreativeId,
+    metaAdId: incoming.metaAdId || base.metaAdId,
+    metaVideoId: incoming.metaVideoId || base.metaVideoId,
+    metaStatus: incoming.metaStatus || base.metaStatus,
+    budgetDailyMinor: incoming.budgetDailyMinor ?? base.budgetDailyMinor,
+    currency: incoming.currency || base.currency,
+    launchedBy: incoming.launchedBy || base.launchedBy,
+    lastError: incoming.lastError || base.lastError,
+    createdAt: incoming.createdAt || base.createdAt,
+    payload: { ...asRecord(base.payload), ...asRecord(incoming.payload) },
+    metaResponse: { ...asRecord(base.metaResponse), ...asRecord(incoming.metaResponse) },
+  };
+}
+
+function mergeHistoryCollections(localItems: LaunchHistoryItem[], remoteItems: LaunchHistoryItem[]): LaunchHistoryItem[] {
+  const merged = new Map<string, LaunchHistoryItem>();
+  for (const item of [...localItems, ...remoteItems]) {
+    const key = historyItemIdentity(item);
+    const current = merged.get(key);
+    merged.set(key, current ? mergeHistoryItem(current, item) : item);
+  }
+
+  return [...merged.values()].sort((left, right) => historyItemTimestamp(right) - historyItemTimestamp(left)).slice(0, 40);
 }
 
 class CrmError extends Error {
@@ -1170,6 +1231,56 @@ function StatusPill({ tone, children }: { tone: "green" | "amber" | "red" | "blu
   return <span className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-black ${palette[tone]}`}>{children}</span>;
 }
 
+// Negis OS Glass Morphic Medical AI tone helpers (mirrors AiControlCenter): teal/mint
+// success, violet/blue AI accents, amber warnings, soft red only for real failures.
+type NegisTone = "primary" | "secondary" | "ai" | "success" | "warning" | "error" | "muted";
+
+function negisToneColor(tone: NegisTone): string {
+  return `var(--negis-${tone})`;
+}
+
+function negisToneSoftBg(tone: NegisTone): string {
+  switch (tone) {
+    case "ai":
+      return "rgba(124,58,237,0.10)";
+    case "secondary":
+      return "rgba(37,99,235,0.10)";
+    case "success":
+      return "rgba(16,185,129,0.12)";
+    case "warning":
+      return "rgba(245,158,11,0.14)";
+    case "error":
+      return "rgba(239,68,68,0.10)";
+    case "muted":
+      return "rgba(148,163,184,0.14)";
+    default:
+      return "var(--negis-primary-soft)";
+  }
+}
+
+function HistoryMetricCard({ label, value, icon: Icon, tone }: { label: string; value: number; icon: LucideIcon; tone: NegisTone }) {
+  return (
+    <div className="negis-glass p-4">
+      <div className="flex items-center gap-2.5">
+        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl" style={{ background: negisToneSoftBg(tone), color: negisToneColor(tone) }}>
+          <Icon size={16} />
+        </div>
+        <p className="text-xs font-black leading-tight" style={{ color: "var(--negis-muted)" }}>{label}</p>
+      </div>
+      <p className="mt-2 text-2xl font-black" style={{ color: "var(--negis-text)" }}>{value}</p>
+    </div>
+  );
+}
+
+function HistoryFact({ label, value }: { label: string; value: ReactNode }) {
+  return (
+    <p className="flex min-w-0 items-start justify-between gap-3">
+      <span className="shrink-0 font-semibold" style={{ color: "var(--negis-muted)" }}>{label}</span>
+      <span className="min-w-0 break-words text-right font-bold" style={{ color: "var(--negis-text)" }}>{value}</span>
+    </p>
+  );
+}
+
 function FeatureBadge({ plan, feature }: { plan: NegisPlan; feature: Parameters<typeof getPlanFeature>[1] }) {
   const config = getPlanFeature(plan, feature);
   if (config.enabled && config.badge !== "Standard" && config.badge !== "Pro") return null;
@@ -1249,6 +1360,7 @@ export default function AdsAutomation() {
   const [historyVideoCheckId, setHistoryVideoCheckId] = useState("");
   const [historyFilter, setHistoryFilter] = useState<HistoryFilter>("all");
   const [historySearch, setHistorySearch] = useState("");
+  const [historyLoaded, setHistoryLoaded] = useState(false);
   const [videoJob, setVideoJob] = useState<VideoJob | null>(null);
   const [videoConfigBlocked, setVideoConfigBlocked] = useState(false);
   const isHistoryView = location === "/ads-automation/history";
@@ -2593,15 +2705,21 @@ export default function AdsAutomation() {
   }
 
   async function loadHistory() {
+    const local = readStored<LaunchHistoryItem[]>(localHistoryKey(workspaceId), []);
+    setHistoryItems(mergeHistoryCollections(local, []));
     setLoading("history");
+    setNotice("");
     try {
       const body = await crmRequest<{ launches?: LaunchHistoryItem[]; items?: LaunchHistoryItem[] }>(`/api/crm/meta-launches?workspaceId=${encodeURIComponent(workspaceId)}`);
       const remote = body.data.launches || body.data.items || [];
-      const local = readStored<LaunchHistoryItem[]>(localHistoryKey(workspaceId), []);
-      setHistoryItems([...local, ...remote].slice(0, 40));
+      setHistoryItems(mergeHistoryCollections(local, remote));
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : "История запусков пока недоступна.");
+      const fallbackMessage = local.length
+        ? "Не удалось обновить историю. Показываем запуски, сохранённые на этом устройстве."
+        : "История запусков временно недоступна. Попробуйте обновить страницу позже.";
+      setNotice(isAdminMode && error instanceof Error ? `${fallbackMessage} ${error.message}` : fallbackMessage);
     } finally {
+      setHistoryLoaded(true);
       setLoading(null);
     }
   }
@@ -3743,158 +3861,330 @@ export default function AdsAutomation() {
     const visibleHistoryItems = historyItems.filter(
       (item) => matchesHistoryFilter(item, historyFilter) && matchesHistorySearch(item, historySearch),
     );
+    const historyModes = historyItems.map((item) => resolveLaunchMode(item));
+    const createdCount = historyModes.filter((mode) => mode === "paused_created" || mode === "active_created").length;
+    const processingCount = historyModes.filter((mode) => mode === "video_processing").length;
+    const failedCount = historyModes.filter((m) => m === "failed").length;
+    const dryRunCount = historyModes.filter((m) => m === "dry_run").length;
+    const summaryMetrics: Array<{ label: string; value: number; icon: LucideIcon; tone: NegisTone }> = [
+      { label: "Создано в Meta", value: createdCount, icon: CheckCircle2, tone: "success" },
+      { label: "Видео в обработке", value: processingCount, icon: Video, tone: processingCount > 0 ? "warning" : "muted" },
+      { label: "Требуют внимания", value: failedCount, icon: AlertTriangle, tone: failedCount > 0 ? "error" : "muted" },
+      { label: "Тестов без создания", value: dryRunCount, icon: FlaskConical, tone: "secondary" },
+    ];
+    const showingInitialLoader = !historyLoaded && historyItems.length === 0;
+
     return (
-      <section className="neu-card p-5 sm:p-6">
+      <div className="space-y-5">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <p className="text-xs font-black uppercase tracking-[0.16em] text-[#0D9488]">История</p>
-            <h1 className="mt-1 text-2xl font-black text-[#0F172A]">История запусков</h1>
-          </div>
-          <div className="flex flex-col gap-2 sm:flex-row">
-            <button type="button" className="neu-btn justify-center" disabled={loading === "history"} onClick={() => void loadHistory()}>
-              {loading === "history" ? <Loader2 className="animate-spin" size={16} /> : <RefreshCw size={16} />}
-              Обновить
-            </button>
-            <button type="button" className="neu-btn-primary justify-center" onClick={() => setLocation("/ads-automation")}>
-              Новый запуск
-            </button>
-          </div>
+          <p className="text-sm font-semibold" style={{ color: "var(--negis-muted)" }}>
+            {showingInitialLoader
+              ? "Загружаем историю запусков"
+              : historyItems.length === 0
+                ? "Пока нет запусков"
+                : `Показано ${visibleHistoryItems.length} из ${historyItems.length}`}
+          </p>
+          <button type="button" className="neu-btn justify-center sm:w-auto" disabled={loading === "history"} onClick={() => void loadHistory()}>
+            {loading === "history" ? <Loader2 className="animate-spin" size={16} /> : <RefreshCw size={16} />}
+            Обновить
+          </button>
         </div>
 
-        <div className="mt-5 flex flex-wrap gap-2">
-          {historyFilterOptions.map((option) => (
-            <button
-              key={option.id}
-              type="button"
-              className={`rounded-full border px-4 py-2 text-xs font-black ${
-                historyFilter === option.id
-                  ? "border-[#0D9488] bg-[#0D9488] text-white"
-                  : "border-[#D8E4EC] bg-white/70 text-[#475569]"
-              }`}
-              onClick={() => setHistoryFilter(option.id)}
-            >
-              {option.label}
-            </button>
+        <section className="grid grid-cols-2 gap-3 lg:grid-cols-4" aria-label="Сводка по запускам">
+          {summaryMetrics.map((metric) => (
+            <HistoryMetricCard key={metric.label} label={metric.label} value={metric.value} icon={metric.icon} tone={metric.tone} />
           ))}
-        </div>
-        <div className="mt-3">
-          <input
-            style={inputStyle}
-            type="search"
-            value={historySearch}
-            placeholder="Поиск: услуга, город, название кампании или Meta ID"
-            onChange={(event) => setHistorySearch(event.target.value)}
-          />
-        </div>
+        </section>
 
-        <div className="mt-5 grid gap-3">
-          {historyItems.length === 0 ? (
-            <div className="rounded-2xl border border-[#D8E4EC] bg-white/65 p-5 text-sm font-semibold text-[#64748B]">
-              История пока пустая. Первый запуск появится здесь после проверки без запуска или создания кампании.
+        <section className="negis-glass p-4 sm:p-5">
+          <div>
+            <h2 className="text-sm font-black" style={{ color: "var(--negis-text)" }}>Найти запуск</h2>
+            <p className="mt-1 text-xs font-semibold" style={{ color: "var(--negis-muted)" }}>
+              Отфильтруйте историю по результату или типу креатива.
+            </p>
+          </div>
+          <div className="mt-4 flex flex-wrap gap-2" aria-label="Фильтры истории запусков">
+            {historyFilterOptions.map((option) => {
+              const active = historyFilter === option.id;
+              return (
+                <button
+                  key={option.id}
+                  type="button"
+                  className="rounded-full border px-4 py-2 text-xs font-black transition"
+                  style={
+                    active
+                      ? { background: "var(--negis-primary)", borderColor: "var(--negis-primary)", color: "#FFFFFF" }
+                      : { background: "var(--negis-surface)", borderColor: "var(--negis-border)", color: "var(--negis-muted)" }
+                  }
+                  aria-pressed={active}
+                  onClick={() => setHistoryFilter(option.id)}
+                >
+                  {option.label}
+                </button>
+              );
+            })}
+          </div>
+          <label className="relative mt-3 block">
+            <span className="sr-only">Поиск по истории запусков</span>
+            <Search className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2" size={17} style={{ color: "var(--negis-muted)" }} />
+            <input
+              style={{ ...inputStyle, paddingLeft: 42 }}
+              type="search"
+              value={historySearch}
+              placeholder={isAdminMode ? "Кампания, услуга, город или Meta ID" : "Кампания, услуга или город"}
+              onChange={(event) => setHistorySearch(event.target.value)}
+            />
+          </label>
+        </section>
+
+        {showingInitialLoader ? (
+          <section className="negis-glass flex min-h-44 flex-col items-center justify-center gap-3 p-8 text-center" aria-live="polite">
+            <Loader2 className="animate-spin" size={24} style={{ color: "var(--negis-primary)" }} />
+            <p className="text-sm font-bold" style={{ color: "var(--negis-muted)" }}>Собираем запуски из Negis OS</p>
+          </section>
+        ) : historyItems.length === 0 ? (
+          <section className="negis-glass-hero flex flex-col items-center gap-3 p-8 text-center">
+            <div className="flex h-14 w-14 items-center justify-center rounded-2xl" style={{ background: "var(--negis-primary-soft)", color: "var(--negis-primary)" }}>
+              <Rocket size={24} />
             </div>
-          ) : visibleHistoryItems.length === 0 ? (
-            <div className="rounded-2xl border border-[#D8E4EC] bg-white/65 p-5 text-sm font-semibold text-[#64748B]">
+            <h2 className="text-xl font-black" style={{ color: "var(--negis-text)" }}>Запусков пока нет</h2>
+            <p className="max-w-md text-sm font-semibold leading-relaxed" style={{ color: "var(--negis-muted)" }}>
+              Создайте первую рекламную кампанию. Negis OS подготовит креатив, проверит данные и создаст кампанию в Meta выключенной.
+            </p>
+            <button type="button" className="neu-btn-primary justify-center" onClick={() => setLocation("/ads-automation")}>
+              <Rocket size={16} />
+              Создать рекламу
+            </button>
+          </section>
+        ) : visibleHistoryItems.length === 0 ? (
+          <section className="negis-glass flex flex-col items-center gap-3 p-6 text-center">
+            <p className="text-sm font-semibold" style={{ color: "var(--negis-muted)" }}>
               Ничего не найдено. Измените фильтр или поисковый запрос.
-            </div>
-          ) : (
-            visibleHistoryItems.map((item, index) => {
+            </p>
+            <button
+              type="button"
+              className="neu-btn justify-center"
+              onClick={() => {
+                setHistoryFilter("all");
+                setHistorySearch("");
+              }}
+            >
+              Сбросить фильтры
+            </button>
+          </section>
+        ) : (
+          <section className="space-y-3">
+            {visibleHistoryItems.map((item, index) => {
               const payload = asRecord(item.payload);
               const metaResponse = asRecord(item.metaResponse);
               const mode = resolveLaunchMode(item);
-              const itemTimestamp = firstString(item.launchTimestamp, payload.launchTimestamp);
               const historyMetaVideoId = firstString(item.metaVideoId, payload.metaVideoId, metaResponse.videoId, metaResponse.metaVideoId);
               const historyVideoUploadMode = firstString(payload.videoUploadMode, metaResponse.videoUploadMode);
               const historyVideoProcessingStatus = firstString(payload.videoProcessingStatus, metaResponse.videoProcessingStatus);
               const historyLastCheckedAt = firstString(payload.lastCheckedAt, metaResponse.lastCheckedAt);
               const historyThumbnailUrl = firstString(payload.thumbnailUrl, metaResponse.thumbnailUrl);
               const historyThumbnailSource = firstString(payload.thumbnailSource, metaResponse.thumbnailSource);
+              const historyImageHash = firstString(payload.imageHash, payload.image_hash, metaResponse.imageHash);
               const historyOptimized = payload.optimized === true;
               const historyOptimizedSize = Number(payload.optimizedOutputSizeBytes) || 0;
               const historyOptimizedRatio = Number(payload.optimizedCompressionRatio) || 0;
+              const optimizedReductionText =
+                historyOptimizedRatio && historyOptimizedRatio < 1 ? ` · меньше на ${Math.round((1 - historyOptimizedRatio) * 100)}%` : "";
               const historyVideoWarnings = Array.isArray(payload.videoWarnings)
                 ? payload.videoWarnings.map(String).filter(Boolean)
                 : Array.isArray(metaResponse.videoWarnings)
                   ? metaResponse.videoWarnings.map(String).filter(Boolean)
                   : [];
               const isRealLaunch = mode === "paused_created" || mode === "active_created";
+              const isVideo = payload.creativeType === "video" || mode === "video_processing";
+              const creativeTypeLabel = isVideo ? "Видео" : "Фото";
+              const service = typeof payload.service === "string" && payload.service ? payload.service : "";
+              const city = typeof payload.city === "string" && payload.city ? payload.city : "";
+              const payloadDailyBudget = firstString(payload.dailyBudget);
+              const budgetPerDay = item.budgetDailyMinor != null
+                ? `${Math.round(item.budgetDailyMinor / 100)} ${item.currency || "USD"}/день`
+                : payloadDailyBudget
+                  ? `${payloadDailyBudget} USD/день`
+                  : "—";
+              const createdAt = historyItemTimestamp(item);
+              const createdAtLabel = createdAt ? new Date(createdAt).toLocaleString("ru-RU") : "Дата не указана";
+              // A video history card renders only its thumbnail, never the raw video URL.
+              const creativePreviewUrl = isVideo
+                ? historyThumbnailUrl
+                : firstString(payload.thumbnailUrl, payload.creativeUrl, payload.imageUrl);
               const modeBadge =
                 mode === "dry_run"
-                  ? { tone: "blue" as const, label: "Проверка" }
+                  ? { tone: "blue" as const, label: "Тест завершён" }
                   : mode === "video_processing"
                     ? { tone: "amber" as const, label: "Видео обрабатывается" }
                     : mode === "failed"
-                      ? { tone: "red" as const, label: "Ошибка запуска" }
+                      ? { tone: "red" as const, label: "Требует внимания" }
                       : mode === "active_created"
-                        ? { tone: "green" as const, label: "Запущено" }
-                        : { tone: "green" as const, label: "Выключено" };
+                        ? { tone: "green" as const, label: "Активна" }
+                        : { tone: "green" as const, label: "Создана выключенной" };
               const modeDescription =
                 mode === "dry_run"
-                  ? "Проверка без запуска. Кампания не создавалась."
+                  ? "Параметры проверены. Реклама в Meta не создавалась."
                   : mode === "video_processing"
                     ? "Видео принято Meta и обрабатывается. Кампания ещё не создана — это не ошибка."
                     : mode === "failed"
-                      ? "Реальный запуск не прошёл."
+                      ? "Не удалось создать рекламу. Ниже указан безопасный следующий шаг."
                       : mode === "active_created"
-                        ? "Реальная кампания создана и запущена в Meta."
-                        : "Реальная кампания создана в Meta выключенной.";
+                        ? "Кампания активна в Meta. Следите за расходом в Ads Manager."
+                        : "Кампания создана в Meta выключенной и пока не тратит бюджет.";
+              const whatCreated =
+                mode === "dry_run"
+                  ? "Проверка без создания рекламы."
+                  : mode === "video_processing"
+                    ? "Видео обрабатывается, кампания ещё не создана."
+                  : mode === "failed"
+                      ? "Кампания не создана."
+                      : mode === "active_created"
+                        ? "Кампания создана и активна в Meta."
+                        : "Кампания создана в Meta выключенной.";
+              const nextAction =
+                mode === "dry_run"
+                  ? "Создайте кампанию, когда параметры проверены."
+                  : mode === "video_processing"
+                    ? "Дождитесь готовности видео и проверьте снова."
+                  : mode === "failed"
+                      ? "Проверьте детали и создайте новый запуск."
+                      : mode === "active_created"
+                        ? "Проверьте результаты и расход в Ads Manager."
+                        : "Откройте Ads Manager и включите кампанию, когда будете готовы.";
               const checking = Boolean(historyVideoCheckId) && historyVideoCheckId === (item.id || historyMetaVideoId);
-              const showVideoDetails = payload.creativeType === "video" || mode === "video_processing";
               return (
-                <article key={item.id || `${item.campaignName}-${index}`} className={`rounded-2xl border p-4 ${mode === "dry_run" ? "border-slate-200 bg-white/55" : "border-[#D8E4EC] bg-white/70"}`}>
-                  <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-                    <div>
-                      <p className="font-black text-[#0F172A]">{item.campaignName || "Meta campaign"}</p>
-                      <p className="mt-1 text-sm font-semibold text-[#64748B]">
-                        {item.createdAt ? new Date(item.createdAt).toLocaleString("ru-RU") : "Дата не указана"} · {itemTimestamp || "timestamp -"} · {payload.creativeType === "video" ? "видео" : "фото"}
-                      </p>
+                <article
+                  key={item.id || `${item.campaignName}-${index}`}
+                  className="negis-glass p-4 sm:p-5"
+                  style={mode === "failed" ? { borderColor: "var(--negis-error)" } : undefined}
+                >
+                  <div className="flex min-w-0 items-start gap-3 sm:gap-4">
+                    <div
+                      className="relative flex h-20 w-16 shrink-0 items-center justify-center overflow-hidden rounded-2xl border"
+                      style={{
+                        background: negisToneSoftBg(isVideo ? "ai" : "primary"),
+                        borderColor: "var(--negis-border)",
+                        color: negisToneColor(isVideo ? "ai" : "primary"),
+                      }}
+                    >
+                      {isVideo ? <Video size={20} /> : <FileImage size={20} />}
+                      {creativePreviewUrl ? (
+                        <img
+                          alt={isVideo ? "Обложка видео" : "Превью рекламного креатива"}
+                          className="absolute inset-0 h-full w-full object-cover"
+                          loading="lazy"
+                          src={creativePreviewUrl}
+                          onError={(event) => {
+                            event.currentTarget.style.display = "none";
+                          }}
+                        />
+                      ) : null}
                     </div>
-                    <div className="flex flex-wrap gap-2">
-                      <StatusPill tone={modeBadge.tone}>{modeBadge.label}</StatusPill>
-                      <StatusPill tone="slate">{item.budgetDailyMinor ? `${Math.round(item.budgetDailyMinor / 100)} ${item.currency || "USD"}/день` : "бюджет -"}</StatusPill>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                        <div className="min-w-0">
+                          <p className="break-words font-black" style={{ color: "var(--negis-text)" }}>{item.campaignName || "Рекламная кампания"}</p>
+                          <p className="mt-1 text-xs font-semibold" style={{ color: "var(--negis-muted)" }}>
+                            {createdAtLabel} · {creativeTypeLabel}
+                          </p>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-2 sm:justify-end">
+                          <StatusPill tone={modeBadge.tone}>{modeBadge.label}</StatusPill>
+                          {historyOptimized ? <StatusPill tone="blue">Видео оптимизировано</StatusPill> : null}
+                        </div>
+                      </div>
+                      <p className="mt-2 text-sm font-semibold leading-relaxed" style={{ color: "var(--negis-muted)" }}>{modeDescription}</p>
                     </div>
                   </div>
-                  <p className="mt-2 text-sm font-semibold text-[#64748B]">{modeDescription}</p>
-                  <div className="mt-3 grid gap-2 text-sm font-semibold text-[#475569] md:grid-cols-2">
-                    {isAdminMode && isRealLaunch ? (
-                      <>
-                        <p>Meta Campaign ID: {item.metaCampaignId || "-"}</p>
-                        <p>Meta Ad Set ID: {item.metaAdSetId || "-"}</p>
-                        <p>Meta Creative ID: {item.metaCreativeId || "-"}</p>
-                        <p>Meta Ad ID: {item.metaAdId || "-"}</p>
-                      </>
+
+                  <div className="mt-4 grid gap-x-5 gap-y-2 border-t pt-4 text-sm sm:grid-cols-2" style={{ borderColor: "var(--negis-border)" }}>
+                    <HistoryFact label="Услуга" value={service || "—"} />
+                    <HistoryFact label="Город" value={city || "—"} />
+                    <HistoryFact label="Заявки" value={historyDestinationLabel(payload)} />
+                    <HistoryFact label="Площадка" value="Instagram" />
+                    <HistoryFact label="Тип креатива" value={creativeTypeLabel} />
+                    <HistoryFact label="Бюджет в день" value={budgetPerDay} />
+                    <HistoryFact label="Запустил" value={item.launchedBy || "—"} />
+                    {historyOptimized ? (
+                      <HistoryFact
+                        label="Оптимизация видео"
+                        value={`${historyOptimizedSize ? formatBytes(historyOptimizedSize) : "готово"}${optimizedReductionText}`}
+                      />
                     ) : null}
-                    <p>Запустил: {item.launchedBy || "-"}</p>
-                    <p>Услуга: {typeof payload.service === "string" && payload.service ? payload.service : "-"}</p>
-                    <p>Город: {typeof payload.city === "string" ? payload.city : "-"}</p>
-                    <p>Заявки: {historyDestinationLabel(payload)}</p>
-                    <p>Файл: {typeof payload.fileName === "string" ? payload.fileName : "-"}</p>
-                    {isAdminMode ? <p>MIME: {typeof payload.mimeType === "string" ? payload.mimeType : "-"}</p> : null}
-                    {showVideoDetails ? <p>Видео: {historyVideoProcessingStatus ? "обрабатывается" : "готово к проверке"}</p> : null}
-                    {isAdminMode && showVideoDetails ? <p>Meta Video ID: {historyMetaVideoId || "-"}</p> : null}
-                    {isAdminMode && showVideoDetails ? <p>Video upload: {historyVideoUploadMode || "-"}</p> : null}
-                    {isAdminMode && showVideoDetails ? <p>Processing: {historyVideoProcessingStatus || "-"}</p> : null}
-                    {showVideoDetails ? <p>Обложка: {historyThumbnailUrl ? "готова" : "не найдена"}</p> : null}
-                    {isAdminMode && showVideoDetails ? <p>Thumbnail source: {historyThumbnailSource || "-"}</p> : null}
-                    {showVideoDetails && historyOptimized ? (
+                    {isVideo ? <HistoryFact label="Обложка" value={historyThumbnailUrl ? "готова" : "не найдена"} /> : null}
+                    {isVideo ? (
+                      <HistoryFact label="Проверено" value={historyLastCheckedAt ? new Date(historyLastCheckedAt).toLocaleString("ru-RU") : "—"} />
+                    ) : null}
+                  </div>
+
+                  {historyVideoWarnings.length ? (
+                    <div className="mt-3 rounded-2xl border border-amber-200 bg-amber-50 p-3 text-sm font-bold text-amber-800">
+                      {historyVideoWarnings.join(" ")}
+                    </div>
+                  ) : null}
+
+                  {mode === "failed" ? (
+                    <div className="mt-3 rounded-2xl border border-red-200 bg-red-50 p-3">
+                      <p className="text-sm font-black text-red-800">Запуск не прошёл. Кампания в Meta не создана.</p>
+                      {isAdminMode && item.lastError ? (
+                        <p className="mt-1 break-words text-xs font-semibold text-red-700">{item.lastError}</p>
+                      ) : (
+                        <p className="mt-1 text-xs font-semibold text-red-700">Техническая причина скрыта. Нажмите «Проверить детали».</p>
+                      )}
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        {!isAdminMode ? (
+                          <button type="button" className="neu-btn justify-center px-4 py-2 text-xs" onClick={() => setUiMode("admin")}>
+                            Проверить детали
+                          </button>
+                        ) : null}
+                        <button type="button" className="neu-btn justify-center px-4 py-2 text-xs" onClick={() => setLocation("/ads-automation")}>
+                          Создать новый запуск
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
+
+                  <details className="mt-3 overflow-hidden rounded-2xl border" style={{ borderColor: "var(--negis-border)" }}>
+                    <summary className="cursor-pointer list-none px-4 py-2.5 text-xs font-black uppercase tracking-[0.1em]" style={{ color: "var(--negis-primary)" }}>
+                      Подробности запуска
+                    </summary>
+                    <div className="grid gap-1.5 px-4 pb-4 pt-1 text-xs font-semibold" style={{ color: "var(--negis-muted)" }}>
+                      <p>Что создано: {whatCreated}</p>
+                      <p>Услуга и город: {[service, city].filter(Boolean).join(" · ") || "—"}</p>
+                      <p>Бюджет в день: {budgetPerDay}</p>
+                      <p>Тип креатива: {creativeTypeLabel}</p>
                       <p>
-                        Оптимизировано: да
-                        {historyOptimizedSize ? ` · ${formatBytes(historyOptimizedSize)}` : ""}
-                        {historyOptimizedRatio && historyOptimizedRatio < 1 ? ` · меньше на ${Math.round((1 - historyOptimizedRatio) * 100)}%` : ""}
+                        Оптимизация видео:{" "}
+                        {historyOptimized
+                          ? `видео оптимизировано${historyOptimizedSize ? ` (${formatBytes(historyOptimizedSize)}${optimizedReductionText})` : ""}`
+                          : isVideo
+                            ? "не требовалась или не выполнялась"
+                            : "не требуется"}
                       </p>
-                    ) : null}
-                    {showVideoDetails ? (
-                      <p>Проверено: {historyLastCheckedAt ? new Date(historyLastCheckedAt).toLocaleString("ru-RU") : "-"}</p>
-                    ) : null}
-                    <p>Ad set: {typeof payload.adSetName === "string" ? payload.adSetName : "-"}</p>
-                  </div>
-                  {showVideoDetails && historyVideoWarnings.length ? (
-                    <p className="mt-3 text-sm font-bold text-amber-700">{historyVideoWarnings.join(" ")}</p>
-                  ) : null}
-                  {mode === "failed" && item.lastError ? (
-                    <p className="mt-3 text-sm font-bold text-red-600">
-                      {isAdminMode ? item.lastError : "Запуск не прошёл. Откройте админ-режим, чтобы посмотреть техническую причину."}
-                    </p>
-                  ) : null}
+                      {historyVideoWarnings.length ? <p>Предупреждения: {historyVideoWarnings.join(" ")}</p> : null}
+                      <p>Следующий шаг: {nextAction}</p>
+                      {isAdminMode ? (
+                        <div className="mt-2 grid gap-1 border-t pt-2" style={{ borderColor: "var(--negis-border)" }}>
+                          <p className="font-black uppercase tracking-[0.1em]" style={{ color: "var(--negis-muted)" }}>Технические данные</p>
+                          <p>Campaign ID: {item.metaCampaignId || "-"}</p>
+                          <p>Ad Set ID: {item.metaAdSetId || "-"}</p>
+                          <p>Ad ID: {item.metaAdId || "-"}</p>
+                          <p>Creative ID: {item.metaCreativeId || "-"}</p>
+                          <p>Meta Video ID: {historyMetaVideoId || "-"}</p>
+                          <p>Image hash: {historyImageHash || "-"}</p>
+                          <p>publicUrl present: {payload.creativeUrl ? "yes" : "no"}</p>
+                          <p>thumbnailUrl present: {historyThumbnailUrl ? "yes" : "no"}</p>
+                          <p>video upload: {historyVideoUploadMode || "-"}</p>
+                          <p>processing: {historyVideoProcessingStatus || "-"}</p>
+                          <p>thumbnail source: {historyThumbnailSource || "-"}</p>
+                          <p>файл: {typeof payload.fileName === "string" ? payload.fileName : "-"}</p>
+                          <p>MIME: {typeof payload.mimeType === "string" ? payload.mimeType : "-"}</p>
+                        </div>
+                      ) : null}
+                    </div>
+                  </details>
+
                   <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:flex-wrap">
                     {mode === "video_processing" && historyMetaVideoId ? (
                       <button type="button" className="neu-btn justify-center" disabled={checking} onClick={() => void recheckHistoryVideo(item)}>
@@ -3915,10 +4205,10 @@ export default function AdsAutomation() {
                   </div>
                 </article>
               );
-            })
-          )}
-        </div>
-      </section>
+            })}
+          </section>
+        )}
+      </div>
     );
   }
 
@@ -3969,10 +4259,16 @@ export default function AdsAutomation() {
         <header className="rounded-[28px] border border-white/70 bg-white/82 p-5 shadow-[0_18px_55px_rgba(15,118,110,0.10)] sm:p-6">
           <div className="flex flex-col gap-5 xl:flex-row xl:items-end xl:justify-between">
             <div>
-              <p className="text-xs font-black uppercase tracking-[0.18em] text-[#0D9488]">Meta Ads · Clean Medical</p>
-              <h1 className="mt-2 text-3xl font-black text-[#0F172A] sm:text-4xl">Запуск рекламы в Meta</h1>
+              <p className="text-xs font-black uppercase tracking-[0.18em] text-[#0D9488]">
+                {isHistoryView ? "Negis OS · Реклама" : "Meta Ads · Clean Medical"}
+              </p>
+              <h1 className="mt-2 text-3xl font-black text-[#0F172A] sm:text-4xl">
+                {isHistoryView ? "История запусков рекламы" : "Запуск рекламы в Meta"}
+              </h1>
               <p className="mt-3 max-w-3xl text-sm leading-relaxed text-[#64748B]">
-                Спокойный мастер для клиники: загрузите креатив, заполните параметры, проверьте предпросмотр и создайте кампанию выключенной.
+                {isHistoryView
+                  ? "Здесь видно, что было создано в Meta, какие запуски требуют внимания и какой следующий шаг нужен клинике."
+                  : "Спокойный мастер для клиники: загрузите креатив, заполните параметры, проверьте предпросмотр и создайте кампанию выключенной."}
               </p>
             </div>
             <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap xl:justify-end">
@@ -3996,14 +4292,20 @@ export default function AdsAutomation() {
                   Раздел рекламы
                 </button>
               </Link>
-              <button type="button" className="neu-btn justify-center" onClick={() => setLocation(isHistoryView ? "/ads-automation" : "/ads-automation/history")}>
-                <History size={16} />
-                {isHistoryView ? "Новый запуск" : "История запусков"}
+              <button
+                type="button"
+                className={`${isHistoryView ? "neu-btn-primary" : "neu-btn"} justify-center`}
+                onClick={() => setLocation(isHistoryView ? "/ads-automation" : "/ads-automation/history")}
+              >
+                {isHistoryView ? <Rocket size={16} /> : <History size={16} />}
+                {isHistoryView ? "Создать рекламу" : "История запусков"}
               </button>
-              <button type="button" className="neu-btn-primary justify-center" disabled={loading === "health"} onClick={() => void checkHealth()}>
-                {loading === "health" ? <Loader2 className="animate-spin" size={16} /> : <ShieldCheck size={16} />}
-                Проверить Meta
-              </button>
+              {!isHistoryView ? (
+                <button type="button" className="neu-btn-primary justify-center" disabled={loading === "health"} onClick={() => void checkHealth()}>
+                  {loading === "health" ? <Loader2 className="animate-spin" size={16} /> : <ShieldCheck size={16} />}
+                  Проверить Meta
+                </button>
+              ) : null}
             </div>
           </div>
         </header>
