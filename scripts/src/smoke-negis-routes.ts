@@ -1829,15 +1829,41 @@ async function checkLayoutFoundation() {
     "/api/targeting/health",
     "Запусков пока нет.",
     "Готовность систем",
-    "по системным статусам",
     "Проверьте неудачный запуск рекламы",
+    // CRM5 — real CRM counts wired from the existing endpoints
+    "/api/crm/leads",
+    "/api/crm/clients",
+    "/api/crm/appointments",
+    "normalizeLeadStatus",
+    "isRepeatClient",
+    "Не удалось проверить",
+    // Revenue stays an honest placeholder until deals/sales exist
+    "Будет доступно после подключения продаж.",
+    // Rule-based CRM recommendations (no AI calls)
+    "Рекомендации формируются по данным CRM и системным статусам",
+    "Обработайте новые заявки",
+    "Свяжите заявки с клиентами",
+    "Проверьте записи на сегодня",
+    "Подготовьте повторное предложение",
+    "Критичных CRM-действий пока нет.",
+    // Quick actions into the CRM screens
+    "Открыть заявки",
+    "Открыть клиентов",
+    "Открыть записи",
+    '"/leads"',
+    '"/clients"',
+    '"/appointments"',
+    // Readiness rows
+    "Продажи",
+    "Ожидает",
+    "Частично готово",
   ]) {
     if (!acc.includes(marker)) {
       throw new Error(`AI Control Center MVP is missing "${marker}"`);
     }
   }
-  // Client view must not leak raw technical labels.
-  for (const forbidden of ["publicUrl", "video_id", "raw_payload"]) {
+  // Client view must not leak raw technical labels or invented revenue.
+  for (const forbidden of ["publicUrl", "video_id", "raw_payload", "₸"]) {
     if (acc.includes(forbidden)) {
       throw new Error(`AI Control Center must not show technical label "${forbidden}"`);
     }

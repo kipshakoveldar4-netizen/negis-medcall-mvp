@@ -12,16 +12,15 @@ import {
   Inbox,
   Megaphone,
   MessageCircle,
-  Plus,
   RefreshCw,
   Rocket,
-  ShieldCheck,
   Sparkles,
   Users,
   type LucideIcon,
 } from "lucide-react";
 import { PageLayout } from "@/components/layout/PageLayout";
 import { apiUrl } from "@/lib/api";
+import { readDemoStorage } from "@/lib/demoStorage";
 import { defaultThemePresetId, getThemePreset } from "@/lib/themePresets";
 
 // D3B — AI Control Center with minimal REAL operational data (Glass Morphic Medical AI).
@@ -55,7 +54,7 @@ function toneSoftBg(tone: Tone): string {
   }
 }
 
-type HealthState = "loading" | "ready" | "check" | "disconnected" | "unknown";
+type HealthState = "loading" | "ready" | "check" | "disconnected" | "unknown" | "pending" | "partial";
 
 const healthLabel: Record<HealthState, { label: string; tone: Tone }> = {
   loading: { label: "Проверяем…", tone: "muted" },
@@ -63,6 +62,8 @@ const healthLabel: Record<HealthState, { label: string; tone: Tone }> = {
   check: { label: "Требует проверки", tone: "warning" },
   disconnected: { label: "Не подключено", tone: "muted" },
   unknown: { label: "Не удалось проверить", tone: "muted" },
+  pending: { label: "Ожидает", tone: "muted" },
+  partial: { label: "Частично готово", tone: "warning" },
 };
 
 type LaunchMode = "paused" | "failed" | "dry_run" | "video_processing" | "unknown";
@@ -126,6 +127,49 @@ async function fetchJson(path: string): Promise<{ ok: boolean; body: Record<stri
   } catch {
     return { ok: false, body: {} };
   }
+}
+
+/* ── CRM data (real counts, no AI, no invented numbers) ─────── */
+
+// Same visual normalization as LeadsPage/ClientsPage — stored statuses stay untouched.
+function normalizeLeadStatus(raw: string): "new" | "in_progress" | "booked" | "lost" {
+  const value = raw.toLowerCase();
+  if (/(work|в работе|прогресс|progress|contact|связ|звон)/.test(value)) return "in_progress";
+  if (/(book|запис|schedul|пришёл|пришел|приш|arriv|visit|came|показ)/.test(value)) return "booked";
+  if (/(lost|потер|отказ|reject|declin|cancel|отмен|fail|неудач|спам)/.test(value)) return "lost";
+  return "new";
+}
+
+function isRepeatClient(status: string, lastVisit: string): boolean {
+  const value = status.toLowerCase();
+  if (/(неактив|inactive|arch)/.test(value)) return false;
+  if (/(повтор|repeat|return|вернул)/.test(value)) return true;
+  // Operational hint, not a medical rule: no visit for 90+ days suggests a follow-up.
+  const visitTime = Date.parse(lastVisit);
+  return Number.isFinite(visitTime) && Date.now() - visitTime > 90 * 24 * 60 * 60 * 1000;
+}
+
+function isTodayDate(value: string): boolean {
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) return false;
+  const date = new Date(timestamp);
+  const now = new Date();
+  return date.getFullYear() === now.getFullYear() && date.getMonth() === now.getMonth() && date.getDate() === now.getDate();
+}
+
+type CrmList = { responded: boolean; items: Array<Record<string, unknown>> };
+
+// Real API items when Supabase answers; in demo mode the endpoint responds but the
+// data lives in the CRM pages' localStorage (read-only fallback). A failed endpoint
+// reports responded: false and the metric shows "Не удалось проверить".
+async function fetchCrmList(path: string, listKey: string, demoKey: string): Promise<CrmList> {
+  const { ok, body } = await fetchJson(path);
+  if (!ok || body.success !== true) return { responded: false, items: [] };
+  if (body.mode === "supabase") {
+    const rawItems = asRecord(body.data)[listKey];
+    return { responded: true, items: Array.isArray(rawItems) ? rawItems.map((item) => asRecord(item)) : [] };
+  }
+  return { responded: true, items: readDemoStorage<unknown[]>(demoKey, []).map((item) => asRecord(item)) };
 }
 
 /* ── Presentational components ─────────────────────────────── */
@@ -273,19 +317,46 @@ export default function AiControlCenter() {
   const [storageState, setStorageState] = useState<HealthState>("loading");
   const [targetingState, setTargetingState] = useState<HealthState>("loading");
   const [metaState, setMetaState] = useState<HealthState>("loading");
+  const [leadsState, setLeadsState] = useState<HealthState>("loading");
+  const [clientsState, setClientsState] = useState<HealthState>("loading");
+  const [appointmentsState, setAppointmentsState] = useState<HealthState>("loading");
+  const [crmCounts, setCrmCounts] = useState({ newLeads: 0, unprocessedLeads: 0, appointmentsToday: 0, repeatClients: 0 });
 
   useEffect(() => {
     let cancelled = false;
     async function load() {
       const workspaceId = readWorkspaceId();
+      const workspaceQuery = `workspaceId=${encodeURIComponent(workspaceId)}`;
       // Independent fetches: one failing endpoint must not block the page.
-      const [health, storage, targeting, launchesRes] = await Promise.all([
+      const [health, storage, targeting, launchesRes, leadsRes, clientsRes, appointmentsRes] = await Promise.all([
         fetchJson("/api/crm/health"),
         fetchJson("/api/crm/storage-health"),
         fetchJson("/api/targeting/health"),
-        fetchJson(`/api/crm/meta-launches?workspaceId=${encodeURIComponent(workspaceId)}`),
+        fetchJson(`/api/crm/meta-launches?${workspaceQuery}`),
+        fetchCrmList(`/api/crm/leads?${workspaceQuery}`, "leads", "negis_demo_leads"),
+        fetchCrmList(`/api/crm/clients?${workspaceQuery}`, "clients", "negis_demo_clients"),
+        fetchCrmList(`/api/crm/appointments?${workspaceQuery}`, "appointments", "negis_demo_appointments"),
       ]);
       if (cancelled) return;
+
+      // CRM counts — real data only; failed endpoints stay "Не удалось проверить".
+      setLeadsState(leadsRes.responded ? "ready" : "unknown");
+      setClientsState(clientsRes.responded ? "ready" : "unknown");
+      setAppointmentsState(appointmentsRes.responded ? "ready" : "unknown");
+      setCrmCounts({
+        newLeads: leadsRes.items.filter((lead) => normalizeLeadStatus(str(lead.status)) === "new").length,
+        unprocessedLeads: leadsRes.items.filter((lead) => {
+          const status = normalizeLeadStatus(str(lead.status));
+          const hasClient = Boolean(str(lead.clientId) || str(lead.client_id));
+          return status === "new" || (!hasClient && status !== "lost" && status !== "booked");
+        }).length,
+        appointmentsToday: appointmentsRes.items.filter((item) =>
+          isTodayDate(str(item.startsAt) || str(item.starts_at) || str(item.time)),
+        ).length,
+        repeatClients: clientsRes.items.filter((client) =>
+          isRepeatClient(str(client.status), str(client.lastVisit) || str(client.last_visit_at)),
+        ).length,
+      });
 
       // API health
       setApiState(health.ok && health.body.success === true ? "ready" : "unknown");
@@ -332,11 +403,39 @@ export default function AiControlCenter() {
   const latestMode = latest ? classifyLaunch(latest) : null;
   const failedCount = launches.filter((item) => classifyLaunch(item) === "failed").length;
 
-  const metrics: Array<{ label: string; icon: LucideIcon; tone: Tone; value?: string; hint?: string; real?: boolean }> = [
-    { label: "Новые заявки", icon: Inbox, tone: "primary" },
-    { label: "Необработанные лиды", icon: Users, tone: "warning" },
-    { label: "Записи сегодня", icon: CalendarCheck, tone: "primary" },
-    { label: "Пациенты для повторного визита", icon: RefreshCw, tone: "ai" },
+  // CRM metric helper: value only when the endpoint responded, honest "Не удалось
+  // проверить" when it failed — never invented numbers.
+  const crmMetric = (state: HealthState, count: number, readyHint: string) => ({
+    value: state === "ready" ? String(count) : undefined,
+    hint: state === "unknown" ? "Не удалось проверить" : state === "ready" ? readyHint : "Загружаем данные CRM…",
+    loading: state === "loading",
+  });
+
+  const metrics: Array<{ label: string; icon: LucideIcon; tone: Tone; value?: string; hint?: string; loading?: boolean }> = [
+    {
+      label: "Новые заявки",
+      icon: Inbox,
+      tone: "primary",
+      ...crmMetric(leadsState, crmCounts.newLeads, "Ждут первого контакта."),
+    },
+    {
+      label: "Необработанные лиды",
+      icon: Users,
+      tone: crmCounts.unprocessedLeads > 0 ? "warning" : "success",
+      ...crmMetric(leadsState, crmCounts.unprocessedLeads, "Новые или ещё не связаны с карточкой клиента."),
+    },
+    {
+      label: "Записи сегодня",
+      icon: CalendarCheck,
+      tone: "primary",
+      ...crmMetric(appointmentsState, crmCounts.appointmentsToday, "По календарю записей на сегодня."),
+    },
+    {
+      label: "Пациенты для повторного визита",
+      icon: RefreshCw,
+      tone: "ai",
+      ...crmMetric(clientsState, crmCounts.repeatClients, "Статус «повторный визит» или нет визита более 90 дней — операционная подсказка."),
+    },
     {
       label: "Реклама требует внимания",
       icon: Megaphone,
@@ -347,23 +446,60 @@ export default function AiControlCenter() {
           ? "Неудачные запуски рекламы. Проверьте историю."
           : "Неудачных запусков нет."
         : "Проверяем статусы запусков…",
-      real: true,
+      loading,
     },
-    { label: "Выручка сегодня", icon: DollarSign, tone: "success" },
+    // Honest placeholder until a deals/sales table exists — no invented revenue.
+    { label: "Выручка сегодня", icon: DollarSign, tone: "success", hint: "Будет доступно после подключения продаж." },
   ];
 
   const flowSteps: Array<{ label: string; state: FlowState }> = [
     { label: "Реклама", state: "active" },
-    { label: "Заявка", state: "soon" },
-    { label: "CRM", state: "soon" },
-    { label: "Запись", state: "soon" },
+    { label: "Заявка", state: "active" },
+    { label: "CRM", state: "active" },
+    { label: "Запись", state: "active" },
     { label: "Продажа", state: "pending" },
-    { label: "Повторный визит", state: "pending" },
+    { label: "Повторный визит", state: "soon" },
     { label: "AI-действие", state: "soon" },
   ];
 
-  // Rule-based operational recommendations from real statuses only (no AI).
+  // Rule-based operational recommendations from real CRM data and system statuses only (no AI calls).
   const recommendations: Recommendation[] = [];
+  if (crmCounts.newLeads > 0) {
+    recommendations.push({
+      title: "Обработайте новые заявки",
+      priority: "high",
+      explanation: `Новых заявок: ${crmCounts.newLeads}. Свяжитесь с клиентами, пока обращения свежие.`,
+      action: "Открыть заявки",
+      openHref: "/leads",
+    });
+  }
+  if (crmCounts.unprocessedLeads > 0) {
+    recommendations.push({
+      title: "Свяжите заявки с клиентами",
+      priority: "medium",
+      explanation: `Заявок без карточки клиента: ${crmCounts.unprocessedLeads}. Создайте клиентов, чтобы вести историю пациента.`,
+      action: "Открыть заявки",
+      openHref: "/leads",
+    });
+  }
+  if (crmCounts.appointmentsToday > 0) {
+    recommendations.push({
+      title: "Проверьте записи на сегодня",
+      priority: "medium",
+      explanation: `Записей на сегодня: ${crmCounts.appointmentsToday}. Подтвердите визиты и подготовьте расписание.`,
+      action: "Открыть записи",
+      openHref: "/appointments",
+    });
+  }
+  if (crmCounts.repeatClients > 0) {
+    recommendations.push({
+      title: "Подготовьте повторное предложение",
+      priority: "low",
+      explanation: `Пациентов для повторного визита: ${crmCounts.repeatClients}. Напомните о себе в WhatsApp.`,
+      action: "Открыть клиентов",
+      openHref: "/clients",
+    });
+  }
   if (failedCount > 0) {
     recommendations.push({
       title: "Проверьте неудачный запуск рекламы",
@@ -416,7 +552,7 @@ export default function AiControlCenter() {
 
         {/* 2. Today metrics */}
         <section>
-          <SectionTitle hint="Реклама — реальные статусы. CRM, заявки и выручка подключаются позже.">Сегодня в клинике</SectionTitle>
+          <SectionTitle hint="Заявки, клиенты, записи и реклама — реальные данные. Выручка подключается после продаж.">Сегодня в клинике</SectionTitle>
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
             {metrics.map((metric) => (
               <ControlMetricCard
@@ -426,7 +562,7 @@ export default function AiControlCenter() {
                 tone={metric.tone}
                 value={metric.value}
                 hint={metric.hint}
-                loading={metric.real ? loading : false}
+                loading={metric.loading ?? false}
               />
             ))}
           </div>
@@ -434,7 +570,7 @@ export default function AiControlCenter() {
 
         {/* 3. Operational recommendations */}
         <section>
-          <SectionTitle hint="Рекомендации формируются по системным статусам, без AI-прогнозов.">AI-рекомендации</SectionTitle>
+          <SectionTitle hint="Рекомендации формируются по данным CRM и системным статусам, без AI-прогнозов.">AI-рекомендации</SectionTitle>
           {loading ? (
             <div className="negis-glass p-5 text-sm font-semibold" style={{ color: "var(--negis-muted)" }}>Проверяем статусы…</div>
           ) : recommendations.length > 0 ? (
@@ -445,7 +581,7 @@ export default function AiControlCenter() {
             </div>
           ) : (
             <div className="negis-glass p-5 text-sm font-semibold leading-relaxed" style={{ color: "var(--negis-muted)" }}>
-              Критичных действий пока нет. Подключите CRM и заявки, чтобы AI давал больше рекомендаций.
+              Критичных CRM-действий пока нет.
             </div>
           )}
         </section>
@@ -454,12 +590,12 @@ export default function AiControlCenter() {
         <section className="negis-glass p-5">
           <SectionTitle>Быстрые действия</SectionTitle>
           <div className="flex flex-wrap gap-2">
+            <QuickActionButton label="Открыть заявки" icon={Inbox} href="/leads" />
+            <QuickActionButton label="Открыть клиентов" icon={Users} href="/clients" />
+            <QuickActionButton label="Открыть записи" icon={CalendarCheck} href="/appointments" />
             <QuickActionButton label="Запустить рекламу" icon={Rocket} href="/ads-automation" />
             <QuickActionButton label="Открыть историю запусков" icon={ClipboardList} href="/ads-automation/history" />
-            <QuickActionButton label="Добавить заявку" icon={Plus} href="/leads" />
-            <QuickActionButton label="Создать задачу" icon={CheckCircle2} href="/tasks" />
             <QuickActionButton label="Открыть контент-студию" icon={Clapperboard} href="/content-studio" />
-            <QuickActionButton label="Проверить Meta" icon={ShieldCheck} href="/ads-automation" />
           </div>
         </section>
 
@@ -523,10 +659,15 @@ export default function AiControlCenter() {
               <HealthRow label="Хранилище креативов" state={storageState} />
               <HealthRow label="Targeting Agent" state={targetingState} />
               <HealthRow label="Meta подключена" state={metaState} />
+              <HealthRow label="Заявки" state={leadsState} />
+              <HealthRow label="Клиенты" state={clientsState} />
+              <HealthRow label="Записи" state={appointmentsState} />
+              <HealthRow label="Продажи" state="pending" />
+              <HealthRow label="AI-рекомендации" state="partial" />
             </div>
             <p className="mt-4 flex items-center gap-2 text-xs font-semibold" style={{ color: "var(--negis-muted)" }}>
               <MessageCircle size={14} style={{ color: "var(--negis-primary)" }} />
-              Подключение источников заявок и CRM откроет реальные метрики и рекомендации.
+              Продажи и полный AI-слой подключаются следующими этапами.
             </p>
           </section>
         </div>
