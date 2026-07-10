@@ -13,6 +13,7 @@ import {
   RefreshCw,
   Search,
   Sparkles,
+  UserPlus,
   Users,
   X,
   XCircle,
@@ -20,8 +21,9 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { PageLayout } from "@/components/layout/PageLayout";
-import { useDemoCollection } from "@/lib/demoStorage";
-import { formatPhone, toTelHref, toWhatsappHref } from "@/lib/phone";
+import { useDemoCollection, readDemoStorage, writeDemoStorage } from "@/lib/demoStorage";
+import { apiUrl } from "@/lib/api";
+import { formatPhone, phoneDigits, toTelHref, toWhatsappHref } from "@/lib/phone";
 
 // CRM2 — real "Заявки" (leads) screen for Negis OS, Glass Morphic Medical AI.
 // Backed by the existing /api/crm/leads generic resource (workspace_id schema,
@@ -165,12 +167,94 @@ function formatCreatedAt(value?: string): string {
   return new Date(timestamp).toLocaleString("ru-RU", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
 }
 
+// Appointment prefill consumed by /appointments (clientName/phone/whatsapp/service/source);
+// clientId and notes ride along for the future client_id-aware appointment flow.
 function saveAppointmentPrefill(lead: Lead) {
   if (typeof window === "undefined") return;
   window.localStorage.setItem(
     APPOINTMENT_PREFILL_KEY,
-    JSON.stringify({ clientName: lead.name, phone: lead.phone, source: lead.source, service: lead.campaign }),
+    JSON.stringify({
+      clientId: lead.clientId || "",
+      clientName: lead.name,
+      phone: lead.phone,
+      whatsapp: lead.phone,
+      source: lead.source,
+      service: lead.campaign,
+      notes: lead.campaign ? `Заявка из кампании «${lead.campaign}»` : "Заявка из CRM",
+    }),
   );
+}
+
+// Minimal client shape shared with ClientsPage (localStorage key negis_demo_clients).
+type ExistingClient = {
+  id: string;
+  name: string;
+  phone: string;
+  whatsapp: string;
+  source: string;
+  status: string;
+  comment?: string;
+  lastVisit?: string;
+  createdAt?: string;
+};
+
+function readWorkspaceId(): string {
+  if (typeof window === "undefined") return "demo-workspace";
+  for (const key of ["negis_staff_user", "negis_staff_session", "negis_demo_workspace"]) {
+    try {
+      const raw = window.localStorage.getItem(key);
+      if (!raw) continue;
+      const value = JSON.parse(raw) as { id?: unknown; workspaceId?: unknown; workspace_id?: unknown };
+      const workspaceId =
+        typeof value.workspaceId === "string" && value.workspaceId.trim()
+          ? value.workspaceId.trim()
+          : typeof value.workspace_id === "string" && value.workspace_id.trim()
+            ? value.workspace_id.trim()
+            : key === "negis_demo_workspace" && typeof value.id === "string" && value.id.trim()
+              ? value.id.trim()
+              : "";
+      if (workspaceId) return workspaceId;
+    } catch {
+      // Ignore malformed localStorage; fall back to demo.
+    }
+  }
+  return "demo-workspace";
+}
+
+function toStr(value: unknown): string {
+  return typeof value === "string" ? value : value == null ? "" : String(value);
+}
+
+function clientFromRecord(raw: unknown): ExistingClient {
+  const record = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  return {
+    id: toStr(record.id),
+    name: toStr(record.name) || toStr(record.full_name),
+    phone: toStr(record.phone),
+    whatsapp: toStr(record.whatsapp),
+    source: toStr(record.source),
+    status: toStr(record.status) || "new",
+    comment: toStr(record.comment) || toStr(record.notes) || undefined,
+    lastVisit: toStr(record.lastVisit) || toStr(record.last_visit_at) || undefined,
+    createdAt: toStr(record.createdAt) || toStr(record.created_at) || undefined,
+  };
+}
+
+// Duplicate check source: real API clients when Supabase answers, otherwise the
+// /clients demo storage (read-only here; created clients are prepended separately).
+async function loadExistingClients(): Promise<ExistingClient[]> {
+  try {
+    const workspaceId = readWorkspaceId();
+    const response = await fetch(apiUrl(`/api/crm/clients?workspaceId=${encodeURIComponent(workspaceId)}`));
+    const text = await response.text();
+    const body = text ? (JSON.parse(text) as { success?: boolean; mode?: string; data?: { clients?: unknown[] } }) : null;
+    if (response.ok && body?.success === true && body.mode === "supabase" && Array.isArray(body.data?.clients)) {
+      return body.data.clients.map(clientFromRecord);
+    }
+  } catch {
+    // Network/API problems fall through to demo storage.
+  }
+  return readDemoStorage<unknown[]>("negis_demo_clients", []).map(clientFromRecord);
 }
 
 type LeadForm = { name: string; phone: string; source: string; campaign: string; status: LeadStatusKey; notes: string };
@@ -219,6 +303,9 @@ export default function LeadsPage() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState<LeadForm>(emptyForm);
   const [detailId, setDetailId] = useState<string | null>(null);
+  const [convertingId, setConvertingId] = useState<string | null>(null);
+  // Admin-only diagnostics: whether the conversion matched an existing client (per lead).
+  const [conversionMatched, setConversionMatched] = useState<Record<string, boolean>>({});
 
   const setMode = (admin: boolean) => {
     setIsAdminMode(admin);
@@ -307,6 +394,97 @@ export default function LeadsPage() {
 
   function changeStatus(lead: Lead, status: LeadStatusKey) {
     updateItem(lead.id, { status });
+  }
+
+  // «Записать»: store the appointment prefill and confirm; navigation is the Link itself.
+  function handleBookFromLead(lead: Lead) {
+    try {
+      saveAppointmentPrefill(lead);
+      toast.success("Данные переданы в запись.");
+    } catch {
+      toast.error("Не удалось подготовить запись.");
+    }
+  }
+
+  // Lead → client conversion: reuse an existing client matched by normalized phone,
+  // otherwise create a new client from the lead fields, then link the lead via client_id.
+  async function convertLeadToClient(lead: Lead) {
+    if (convertingId || lead.clientId) return;
+    setConvertingId(lead.id);
+    try {
+      const leadDigits = phoneDigits(lead.phone);
+      if (!leadDigits) {
+        toast.warning("У заявки нет телефона. Проверьте данные клиента.");
+      }
+
+      const existingClients = await loadExistingClients();
+      const matched = leadDigits
+        ? existingClients.find((client) => [phoneDigits(client.phone), phoneDigits(client.whatsapp)].includes(leadDigits))
+        : undefined;
+
+      if (matched && matched.id) {
+        try {
+          updateItem(lead.id, { clientId: matched.id });
+          setConversionMatched((current) => ({ ...current, [lead.id]: true }));
+          toast.success("Заявка связана с существующим клиентом.");
+        } catch {
+          toast.error("Не удалось связать заявку с клиентом.");
+        }
+        return;
+      }
+
+      // No duplicate — create a new client from the lead fields.
+      const contextParts = [lead.source, lead.campaign].filter(Boolean).join(", ");
+      const newClient: ExistingClient = {
+        id: `client-${Date.now()}`,
+        name: lead.name || formatPhone(lead.phone) || "Клиент из заявки",
+        phone: lead.phone,
+        whatsapp: lead.phone,
+        source: lead.source,
+        status: "new",
+        comment: contextParts ? `Создан из заявки (${contextParts})` : "Создан из заявки",
+        createdAt: new Date().toISOString(),
+      };
+
+      let savedClient = newClient;
+      try {
+        const workspaceId = readWorkspaceId();
+        const response = await fetch(apiUrl("/api/crm/clients"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            workspaceId,
+            name: newClient.name,
+            phone: newClient.phone,
+            whatsapp: newClient.whatsapp,
+            source: newClient.source,
+            status: newClient.status,
+            comment: newClient.comment,
+          }),
+        });
+        const text = await response.text();
+        const body = text ? (JSON.parse(text) as { success?: boolean; mode?: string; data?: { item?: unknown } }) : null;
+        if (response.ok && body?.success === true && body.mode === "supabase" && body.data?.item) {
+          const persisted = clientFromRecord(body.data.item);
+          if (persisted.id) savedClient = { ...persisted, comment: persisted.comment ?? newClient.comment };
+        }
+      } catch {
+        // Offline/demo: the local client below still keeps the flow working.
+      }
+
+      // Show the client in /clients immediately (shared demo storage, newest first).
+      writeDemoStorage("negis_demo_clients", [savedClient, ...readDemoStorage<unknown[]>("negis_demo_clients", []).map(clientFromRecord).filter((client) => client.id !== savedClient.id)]);
+
+      // Link the lead and move a fresh lead into work (never downgrade booked/lost).
+      const statusPatch = normalizeLeadStatus(lead.status) === "new" ? { status: "in_progress" as LeadStatusKey } : {};
+      updateItem(lead.id, { clientId: savedClient.id, ...statusPatch });
+      setConversionMatched((current) => ({ ...current, [lead.id]: false }));
+      toast.success("Клиент создан из заявки.");
+    } catch {
+      toast.error("Не удалось создать клиента.");
+    } finally {
+      setConvertingId(null);
+    }
   }
 
   return (
@@ -439,6 +617,7 @@ export default function LeadsPage() {
                     </div>
                     <div className="flex flex-wrap items-center gap-2">
                       <StatusPill tone={leadStatusPill[statusKey]}>{leadStatusLabel[statusKey]}</StatusPill>
+                      {lead.clientId ? <StatusPill tone="green">Клиент создан</StatusPill> : null}
                     </div>
                   </div>
 
@@ -474,10 +653,26 @@ export default function LeadsPage() {
                       <PhoneCall size={16} />
                       Позвонить
                     </a>
-                    <Link href="/appointments" className="neu-btn justify-center" onClick={() => saveAppointmentPrefill(lead)}>
+                    <Link href="/appointments" className="neu-btn justify-center" onClick={() => handleBookFromLead(lead)}>
                       <CalendarCheck size={16} />
                       Записать
                     </Link>
+                    {lead.clientId ? (
+                      <Link href="/clients" className="neu-btn justify-center">
+                        <Users size={16} />
+                        Открыть клиентов
+                      </Link>
+                    ) : (
+                      <button
+                        type="button"
+                        className="neu-btn justify-center"
+                        disabled={convertingId === lead.id}
+                        onClick={() => void convertLeadToClient(lead)}
+                      >
+                        {convertingId === lead.id ? <Loader2 className="animate-spin" size={16} /> : <UserPlus size={16} />}
+                        Создать клиента
+                      </button>
+                    )}
                     <button type="button" className="neu-btn justify-center" onClick={() => setDetailId(lead.id)}>
                       <ClipboardList size={16} />
                       Подробнее
@@ -560,8 +755,37 @@ export default function LeadsPage() {
               <Fact label="Источник" value={detailLead.source || "—"} />
               <Fact label="Кампания" value={detailLead.campaign || "—"} />
               <Fact label="Ответственный" value={detailLead.owner || (detailLead.responsibleUserId ? "Назначен" : "—")} />
+              <Fact label="Клиент" value={detailLead.clientId ? "Создан" : "Не создан"} />
               <Fact label="Создана" value={formatCreatedAt(detailLead.createdAt)} />
               <Fact label="Заметки" value={detailLead.notes || "—"} />
+            </div>
+
+            {/* Lead → client conversion */}
+            <div className="mt-4 rounded-2xl border p-3" style={{ borderColor: "var(--negis-border)" }}>
+              {detailLead.clientId ? (
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                  <p className="text-sm font-bold" style={{ color: "var(--negis-text)" }}>Клиент уже создан</p>
+                  <Link href="/clients" className="neu-btn justify-center px-4 py-2 text-xs">
+                    <Users size={15} />
+                    Открыть клиентов
+                  </Link>
+                </div>
+              ) : (
+                <div className="flex flex-col gap-2">
+                  <p className="text-sm font-semibold" style={{ color: "var(--negis-muted)" }}>
+                    Сначала создайте клиента, чтобы связать запись с карточкой пациента.
+                  </p>
+                  <button
+                    type="button"
+                    className="neu-btn-primary justify-center"
+                    disabled={convertingId === detailLead.id}
+                    onClick={() => void convertLeadToClient(detailLead)}
+                  >
+                    {convertingId === detailLead.id ? <Loader2 className="animate-spin" size={16} /> : <UserPlus size={16} />}
+                    Создать клиента
+                  </button>
+                </div>
+              )}
             </div>
 
             {/* Quick status change */}
@@ -602,6 +826,7 @@ export default function LeadsPage() {
                   <p>lead id: {detailLead.id || "-"}</p>
                   <p>client_id present: {detailLead.clientId ? "yes" : "no"}</p>
                   <p>responsible_user_id present: {detailLead.responsibleUserId ? "yes" : "no"}</p>
+                  <p>matched existing client: {detailLead.id in conversionMatched ? (conversionMatched[detailLead.id] ? "yes" : "no") : "-"}</p>
                   <p>Данные ограничены текущей клиникой (workspace).</p>
                 </div>
               </details>
@@ -612,7 +837,7 @@ export default function LeadsPage() {
                 <Pencil size={16} />
                 Изменить
               </button>
-              <Link href="/appointments" className="neu-btn justify-center" onClick={() => saveAppointmentPrefill(detailLead)}>
+              <Link href="/appointments" className="neu-btn justify-center" onClick={() => handleBookFromLead(detailLead)}>
                 <CalendarCheck size={16} />
                 Записать
               </Link>

@@ -262,6 +262,12 @@ function buildPatchRow(resource: CrmResource, body: JsonRecord): JsonRecord {
     setText("status", ["status"]);
     // notes holds real notes only (no owner overload).
     setText("notes", ["notes"]);
+    // Lead → client conversion: client_id is a uuid FK. Non-uuid values (demo ids)
+    // become null so a bad id can never fail the whole update row.
+    if (hasAnyKey(body, ["clientId", "client_id"])) {
+      const clientId = firstString(body.clientId, body.client_id);
+      row.client_id = isUuid(clientId) ? clientId : null;
+    }
     row.updated_at = new Date().toISOString();
   }
 

@@ -1665,10 +1665,34 @@ async function checkLeadsPageSource() {
     "isAdminMode ? (",
     "client_id present:",
     "responsible_user_id present:",
+    // CRM4: lead → client conversion + appointment prefill
+    "Создать клиента",
+    "Клиент уже создан",
+    "Открыть клиентов",
+    "convertLeadToClient",
+    "loadExistingClients",
+    "Клиент создан из заявки.",
+    "Заявка связана с существующим клиентом.",
+    "Данные переданы в запись.",
+    "У заявки нет телефона. Проверьте данные клиента.",
+    "Сначала создайте клиента, чтобы связать запись с карточкой пациента.",
+    "Не удалось создать клиента.",
+    "Не удалось связать заявку с клиентом.",
+    "Не удалось подготовить запись.",
+    // Relation is stored through the real client_id field, prefill carries it too.
+    "clientId: savedClient.id",
+    'clientId: lead.clientId || ""',
+    "matched existing client:",
   ]) {
     if (!source.includes(marker)) {
       throw new Error(`Leads page is missing "${marker}"`);
     }
+  }
+
+  // Server mapping: PATCH lead.client_id must persist (uuid-guarded).
+  const crmServer = await readFile(path.join(repoRoot, "lib", "crm", "server.ts"), "utf8");
+  if (!crmServer.includes("row.client_id = isUuid(clientId) ? clientId : null;")) {
+    throw new Error("leads PATCH mapping must persist client_id (uuid-guarded)");
   }
   // Client-safe: no secrets, no raw storage internals in the leads screen.
   for (const forbidden of ["SERVICE_ROLE", "service_role", "ad-creatives-raw"]) {
