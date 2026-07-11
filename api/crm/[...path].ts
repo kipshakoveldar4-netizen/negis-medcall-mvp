@@ -27,6 +27,7 @@ const resources: CrmResource[] = [
   "leads",
   "lead-stages",
   "lead-sources",
+  "deals",
   "appointments",
   "calls",
   "tasks",

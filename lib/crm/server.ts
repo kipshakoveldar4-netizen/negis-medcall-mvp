@@ -33,6 +33,7 @@ export type CrmResource =
   | "leads"
   | "lead-stages"
   | "lead-sources"
+  | "deals"
   | "appointments"
   | "calls"
   | "tasks"
@@ -323,6 +324,35 @@ function buildPatchRow(resource: CrmResource, body: JsonRecord): JsonRecord {
     row.updated_at = new Date().toISOString();
   }
 
+  if (resource === "deals") {
+    setText("title", ["title"]);
+    if (hasAnyKey(body, ["amountMinor", "amount_minor"])) {
+      row.amount_minor = readDealAmountMinor(body);
+    }
+    if (hasAnyKey(body, ["currency"])) {
+      row.currency = readString(body.currency).toUpperCase() || "KZT";
+    }
+    setText("payment_method", ["paymentMethod", "payment_method"]);
+    setText("notes", ["notes"]);
+    setDate("paid_at", ["paidAt", "paid_at"]);
+    setDate("closed_at", ["closedAt", "closed_at"]);
+    if (hasAnyKey(body, ["status"])) {
+      const status = readString(body.status).toLowerCase();
+      if (DEAL_STATUSES.has(status)) {
+        row.status = status;
+        // paid stamps paid_at; terminal statuses stamp closed_at. Explicit values
+        // win; setting pending never auto-clears historical timestamps.
+        if (status === "paid" && !hasAnyKey(body, ["paidAt", "paid_at"])) {
+          row.paid_at = new Date().toISOString();
+        }
+        if (status !== "pending" && !hasAnyKey(body, ["closedAt", "closed_at"])) {
+          row.closed_at = new Date().toISOString();
+        }
+      }
+    }
+    row.updated_at = new Date().toISOString();
+  }
+
   if (resource === "appointments") {
     setText("client_name", ["client", "client_name", "clientName"]);
     setText("client_phone", ["phone", "client_phone", "clientPhone"]);
@@ -543,6 +573,14 @@ function resourceValidationDetails(resource: CrmResource, body: JsonRecord): str
     details.push("name or phone is required");
   }
 
+  if (resource === "deals") {
+    if (!readString(body.title)) details.push("title is required");
+    const amount = readNumber(body.amountMinor ?? body.amount_minor);
+    if (typeof amount === "number" && amount < 0) details.push("amountMinor must be >= 0");
+    const status = readString(body.status).toLowerCase();
+    if (status && !DEAL_STATUSES.has(status)) details.push("status must be one of pending, paid, cancelled, refunded");
+  }
+
   if (resource === "lead-stages") {
     if (!firstString(body.stageKey, body.stage_key)) details.push("stageKey is required");
     if (!readString(body.name)) details.push("name is required");
@@ -711,6 +749,54 @@ function makeLead(body: JsonRecord): JsonRecord {
     metaCampaignLaunchId: firstString(body.metaCampaignLaunchId, body.meta_campaign_launch_id),
     createdAt: firstString(body.createdAt, body.created_at),
     updatedAt: firstString(body.updatedAt, body.updated_at),
+  };
+}
+
+// CRM9 — clinic sales/deals. UI term is «Продажи»; a "deal" carries the full
+// lifecycle. Only status = paid counts as revenue (by paid_at). No ad-efficiency math.
+const DEAL_STATUSES = new Set(["pending", "paid", "cancelled", "refunded"]);
+
+function normalizeDealStatus(raw: unknown): string {
+  const status = readString(raw).toLowerCase();
+  return DEAL_STATUSES.has(status) ? status : "pending";
+}
+
+function readDealAmountMinor(body: JsonRecord): number {
+  const amount = readNumber(body.amountMinor ?? body.amount_minor);
+  return Math.max(0, Math.round(typeof amount === "number" ? amount : 0));
+}
+
+// paid stamps paid_at; every terminal status stamps closed_at. Explicit values win;
+// pending never invents timestamps (and PATCH never auto-clears history).
+function dealStatusTimestamps(status: string, paidAt: unknown, closedAt: unknown): { paid_at: string | null; closed_at: string | null } {
+  const now = new Date().toISOString();
+  return {
+    paid_at: maybeDate(paidAt) ?? (status === "paid" ? now : null),
+    closed_at: maybeDate(closedAt) ?? (status !== "pending" ? now : null),
+  };
+}
+
+function makeDeal(body: JsonRecord): JsonRecord {
+  const status = normalizeDealStatus(body.status);
+  const timestamps = dealStatusTimestamps(status, body.paidAt ?? body.paid_at, body.closedAt ?? body.closed_at);
+  return {
+    id: readString(body.id) || nextDemoId("deal"),
+    workspaceId: firstString(body.workspaceId, body.workspace_id),
+    title: readString(body.title),
+    amountMinor: readDealAmountMinor(body),
+    currency: readString(body.currency).toUpperCase() || "KZT",
+    status,
+    paidAt: timestamps.paid_at,
+    closedAt: timestamps.closed_at,
+    paymentMethod: firstString(body.paymentMethod, body.payment_method),
+    clientId: firstString(body.clientId, body.client_id),
+    leadId: firstString(body.leadId, body.lead_id),
+    appointmentId: firstString(body.appointmentId, body.appointment_id),
+    metaCampaignLaunchId: firstString(body.metaCampaignLaunchId, body.meta_campaign_launch_id),
+    responsibleUserId: firstString(body.responsibleUserId, body.responsible_user_id),
+    notes: readString(body.notes),
+    createdAt: firstString(body.createdAt, body.created_at, new Date().toISOString()),
+    updatedAt: firstString(body.updatedAt, body.updated_at, new Date().toISOString()),
   };
 }
 
@@ -1055,6 +1141,52 @@ const configs: Record<CrmResource, ResourceConfig> = {
       updated_at: new Date().toISOString(),
     }),
     fromRow: makeLeadSource,
+  },
+  deals: {
+    table: "deals",
+    listKey: "deals",
+    requiredPost: [],
+    sortableColumn: "created_at",
+    demoItem: makeDeal,
+    // Reference columns (client_id/lead_id/appointment_id/meta_campaign_launch_id/
+    // responsible_user_id) are written only through buildDealReferenceRow, which
+    // validates that every referenced row belongs to the same workspace.
+    toRow: (body, workspaceId) => {
+      const status = normalizeDealStatus(body.status);
+      const timestamps = dealStatusTimestamps(status, body.paidAt ?? body.paid_at, body.closedAt ?? body.closed_at);
+      return {
+        workspace_id: workspaceId,
+        title: readString(body.title),
+        amount_minor: readDealAmountMinor(body),
+        currency: readString(body.currency).toUpperCase() || "KZT",
+        status,
+        paid_at: timestamps.paid_at,
+        closed_at: timestamps.closed_at,
+        payment_method: firstString(body.paymentMethod, body.payment_method) || null,
+        notes: readString(body.notes) || null,
+        updated_at: new Date().toISOString(),
+      };
+    },
+    fromRow: (row) =>
+      makeDeal({
+        id: row.id,
+        workspace_id: row.workspace_id,
+        title: row.title,
+        amount_minor: row.amount_minor,
+        currency: row.currency,
+        status: row.status,
+        paid_at: row.paid_at,
+        closed_at: row.closed_at,
+        payment_method: row.payment_method,
+        client_id: row.client_id,
+        lead_id: row.lead_id,
+        appointment_id: row.appointment_id,
+        meta_campaign_launch_id: row.meta_campaign_launch_id,
+        responsible_user_id: row.responsible_user_id,
+        notes: row.notes,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+      }),
   },
   appointments: {
     table: "appointments",
@@ -1551,7 +1683,7 @@ type CrmSupabaseClient = NonNullable<ReturnType<typeof getSupabaseServerClient>>
 async function readWorkspaceReference(input: {
   supabase: CrmSupabaseClient;
   workspaceId: string;
-  table: "lead_stages" | "lead_sources" | "meta_campaign_launches";
+  table: "lead_stages" | "lead_sources" | "meta_campaign_launches" | "clients" | "leads" | "appointments" | "staff_users";
   id: string;
   select: string;
   fieldName: string;
@@ -1636,6 +1768,49 @@ async function buildLeadReferenceRow(
       });
       row.meta_campaign_launch_id = campaign.id;
       row.campaign = readString(campaign.campaign_name);
+    }
+  }
+
+  return row;
+}
+
+// CRM9: every deal reference must belong to the same workspace as the deal.
+// A foreign-workspace or malformed id returns a safe validation error, never
+// a raw SQL error. Empty values unlink (null).
+async function buildDealReferenceRow(
+  supabase: CrmSupabaseClient,
+  workspaceId: string,
+  body: JsonRecord,
+): Promise<JsonRecord> {
+  const row: JsonRecord = {};
+  const referenceFields: Array<{
+    keys: [string, string];
+    column: string;
+    table: "clients" | "leads" | "appointments" | "meta_campaign_launches" | "staff_users";
+    fieldName: string;
+  }> = [
+    { keys: ["clientId", "client_id"], column: "client_id", table: "clients", fieldName: "clientId" },
+    { keys: ["leadId", "lead_id"], column: "lead_id", table: "leads", fieldName: "leadId" },
+    { keys: ["appointmentId", "appointment_id"], column: "appointment_id", table: "appointments", fieldName: "appointmentId" },
+    { keys: ["metaCampaignLaunchId", "meta_campaign_launch_id"], column: "meta_campaign_launch_id", table: "meta_campaign_launches", fieldName: "metaCampaignLaunchId" },
+    { keys: ["responsibleUserId", "responsible_user_id"], column: "responsible_user_id", table: "staff_users", fieldName: "responsibleUserId" },
+  ];
+
+  for (const field of referenceFields) {
+    if (!hasAnyKey(body, field.keys)) continue;
+    const id = firstString(body[field.keys[0]], body[field.keys[1]]);
+    if (!id) {
+      row[field.column] = null;
+    } else {
+      const reference = await readWorkspaceReference({
+        supabase,
+        workspaceId,
+        table: field.table,
+        id,
+        select: "id",
+        fieldName: field.fieldName,
+      });
+      row[field.column] = reference.id;
     }
   }
 
@@ -1838,6 +2013,9 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
     if (resource === "leads") {
       Object.assign(row, await buildLeadReferenceRow(supabase, workspaceId, body));
     }
+    if (resource === "deals") {
+      Object.assign(row, await buildDealReferenceRow(supabase, workspaceId, body));
+    }
     const query = config.upsertConflict
       ? supabase.from(config.table).upsert(row, { onConflict: config.upsertConflict }).select(config.selectColumns ?? "*").single()
       : supabase.from(config.table).insert(row).select(config.selectColumns ?? "*").single();
@@ -1897,6 +2075,9 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
     const row = buildPatchRow(resource, patchBody);
     if (resource === "leads") {
       Object.assign(row, await buildLeadReferenceRow(supabase, workspaceId, patchBody));
+    }
+    if (resource === "deals") {
+      Object.assign(row, await buildDealReferenceRow(supabase, workspaceId, patchBody));
     }
 
     if (Object.keys(row).length === 0) {

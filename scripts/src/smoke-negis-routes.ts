@@ -1915,6 +1915,132 @@ async function checkCrmProductionGuards() {
   console.log("CRM production guard checks: ok");
 }
 
+// CRM9a+b — deals foundation: migration 020 + generic CRM API resource.
+async function checkCrmDealsFoundation() {
+  const migration = await readFile(path.join(repoRoot, "migrations", "020_crm_deals_foundation.sql"), "utf8");
+  for (const marker of [
+    "create table if not exists public.deals",
+    "workspace_id uuid not null references public.workspaces(id) on delete cascade",
+    "client_id uuid references public.clients(id) on delete set null",
+    "lead_id uuid references public.leads(id) on delete set null",
+    "appointment_id uuid references public.appointments(id) on delete set null",
+    "meta_campaign_launch_id uuid references public.meta_campaign_launches(id) on delete set null",
+    "responsible_user_id uuid references public.staff_users(id) on delete set null",
+    "amount_minor bigint not null default 0 check (amount_minor >= 0)",
+    "status in ('pending', 'paid', 'cancelled', 'refunded')",
+    "currency text not null default 'KZT'",
+    "deals_workspace_status_idx",
+    "deals_workspace_paid_at_idx",
+    "deals_workspace_created_at_idx",
+    "deals_workspace_meta_campaign_launch_idx",
+  ]) {
+    if (!migration.includes(marker)) {
+      throw new Error(`migration 020 is missing ${marker}`);
+    }
+  }
+
+  const server = await readFile(path.join(repoRoot, "lib", "crm", "server.ts"), "utf8");
+  for (const marker of [
+    '| "deals"',
+    "makeDeal",
+    "DEAL_STATUSES",
+    "dealStatusTimestamps",
+    // Same-workspace reference validation (CRM6 pattern) for every deal link.
+    "buildDealReferenceRow",
+    'table: "clients", fieldName: "clientId"',
+    'table: "staff_users", fieldName: "responsibleUserId"',
+    // Status timestamps: paid stamps paid_at; terminal statuses stamp closed_at.
+    'status === "paid" && !hasAnyKey(body, ["paidAt", "paid_at"])',
+    'status !== "pending" && !hasAnyKey(body, ["closedAt", "closed_at"])',
+  ]) {
+    if (!server.includes(marker)) {
+      throw new Error(`CRM server deals mapping is missing ${marker}`);
+    }
+  }
+  // Deals foundation counts money honestly — no ad-efficiency math in the CRM server.
+  for (const forbidden of ["CPL", "ROI", "ROMI"]) {
+    if (server.includes(forbidden)) {
+      throw new Error(`CRM server must not calculate "${forbidden}"`);
+    }
+  }
+
+  const catchAll = await readFile(path.join(repoRoot, "api", "crm", "[...path].ts"), "utf8");
+  if (!catchAll.includes('"deals"')) {
+    throw new Error("api/crm catch-all must register the deals resource");
+  }
+
+  const doc = await readFile(path.join(repoRoot, "docs", "CRM-DEALS.md"), "utf8");
+  for (const marker of [
+    "Продажи",
+    "Ожидает оплаты",
+    "Оплачена",
+    "Отменена",
+    "Возврат",
+    "amount_minor",
+    "paid_at",
+    "readWorkspaceReference",
+    "Future scope",
+  ]) {
+    if (!doc.includes(marker)) {
+      throw new Error(`CRM deals documentation is missing ${marker}`);
+    }
+  }
+
+  // Functional demo-mode checks against the running dev server.
+  const created = await checkJsonEndpoint("/api/crm/deals", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ workspaceId: "demo-workspace", title: "Чистка лица", amountMinor: 2500000, status: "paid" }),
+  });
+  const createdItem = (created.data && typeof created.data === "object" ? (created.data as { item?: Record<string, unknown> }).item : undefined) || {};
+  if (createdItem.status !== "paid" || !createdItem.paidAt || !createdItem.closedAt) {
+    throw new Error("POST /api/crm/deals with status paid must stamp paidAt and closedAt");
+  }
+  if (createdItem.amountMinor !== 2500000 || createdItem.currency !== "KZT") {
+    throw new Error("POST /api/crm/deals must keep amountMinor and default currency KZT");
+  }
+
+  const patched = await checkJsonEndpoint("/api/crm/deals", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id: "deal-smoke-1", workspaceId: "demo-workspace", updates: { title: "Чистка лица", status: "paid" } }),
+  });
+  const patchedItem = (patched.data && typeof patched.data === "object" ? (patched.data as { item?: Record<string, unknown> }).item : undefined) || {};
+  if (patchedItem.status !== "paid" || !patchedItem.paidAt) {
+    throw new Error("PATCH /api/crm/deals status paid must stamp paidAt");
+  }
+
+  await checkJsonFailure(
+    "/api/crm/deals",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workspaceId: "demo-workspace", amountMinor: 1000 }),
+    },
+    "title is required",
+  );
+  await checkJsonFailure(
+    "/api/crm/deals",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workspaceId: "demo-workspace", title: "Тест", status: "archived" }),
+    },
+    "status must be one of",
+  );
+  await checkJsonFailure(
+    "/api/crm/deals",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workspaceId: "demo-workspace", title: "Тест", amountMinor: -5 }),
+    },
+    "amountMinor must be >= 0",
+  );
+
+  console.log("CRM deals foundation checks: ok");
+}
+
 async function checkLayoutFoundation() {
   const pagesDir = path.join(repoRoot, "artifacts", "negis", "src", "pages");
   const layoutDir = path.join(repoRoot, "artifacts", "negis", "src", "components", "layout");
@@ -2437,6 +2563,11 @@ async function main() {
     phone: "+7 700 111 22 33",
     source: "smoke",
   });
+  await checkCrmEndpoint("/api/crm/deals", {
+    title: "Smoke Deal",
+    amountMinor: 1500000,
+  });
+  await checkCrmDealsFoundation();
   await checkCrmEndpoint("/api/crm/appointments", {
     client: "Smoke Client",
     phone: "+7 700 222 33 44",
