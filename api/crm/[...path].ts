@@ -25,6 +25,8 @@ export const config = {
 const resources: CrmResource[] = [
   "clients",
   "leads",
+  "lead-stages",
+  "lead-sources",
   "appointments",
   "calls",
   "tasks",

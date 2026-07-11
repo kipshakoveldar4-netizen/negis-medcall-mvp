@@ -1,4 +1,4 @@
-import { useMemo, useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import { Link } from "wouter";
 import {
   CalendarCheck,
@@ -23,14 +23,24 @@ import { toast } from "sonner";
 import { PageLayout } from "@/components/layout/PageLayout";
 import { useDemoCollection, readDemoStorage, writeDemoStorage } from "@/lib/demoStorage";
 import { apiUrl } from "@/lib/api";
+import {
+  FALLBACK_LEAD_SOURCES,
+  FALLBACK_LEAD_STAGES,
+  leadSourceDefinitionFromUnknown,
+  leadStageDefinitionFromUnknown,
+  semanticGroupForLead,
+  type LeadSemanticGroup,
+  type LeadSourceDefinition,
+  type LeadStageDefinition,
+} from "@/lib/leadPipeline";
 import { formatPhone, phoneDigits, toTelHref, toWhatsappHref } from "@/lib/phone";
 
 // CRM2 — real "Заявки" (leads) screen for Negis OS, Glass Morphic Medical AI.
 // Backed by the existing /api/crm/leads generic resource (workspace_id schema,
-// migration 010) via useDemoCollection: Supabase when configured, localStorage
-// fallback otherwise. No migrations, no new API files, no attribution/deals yet.
+// migrations 010 + 019) via useDemoCollection: Supabase when configured,
+// localStorage fallback otherwise. Legacy status/source snapshots stay readable.
 
-type LeadStatusKey = "new" | "in_progress" | "booked" | "lost";
+type LeadStatusKey = LeadSemanticGroup;
 
 type Lead = {
   id: string;
@@ -43,12 +53,21 @@ type Lead = {
   notes?: string;
   responsibleUserId?: string;
   clientId?: string;
+  stageId?: string;
+  stageName?: string;
+  stageKey?: string;
+  stageColor?: string;
+  semanticGroup?: LeadSemanticGroup;
+  sourceId?: string;
+  sourceName?: string;
+  sourceKey?: string;
+  sourceChannel?: string;
+  sourceColor?: string;
+  metaCampaignLaunchId?: string;
   createdAt?: string;
 };
 
 type NegisTone = "primary" | "secondary" | "ai" | "success" | "warning" | "error" | "muted";
-
-const STATUS_ORDER: LeadStatusKey[] = ["new", "in_progress", "booked", "lost"];
 
 const leadStatusLabel: Record<LeadStatusKey, string> = {
   new: "Новая",
@@ -63,23 +82,6 @@ const leadStatusPill: Record<LeadStatusKey, "blue" | "amber" | "green" | "red"> 
   booked: "green",
   lost: "red",
 };
-
-const leadStatusMetricTone: Record<LeadStatusKey, NegisTone> = {
-  new: "secondary",
-  in_progress: "warning",
-  booked: "success",
-  lost: "error",
-};
-
-// Legacy statuses in demo/prod data are free text (English or Russian). Normalize for
-// display and counting without migrating the stored values.
-function normalizeLeadStatus(raw?: string): LeadStatusKey {
-  const value = (raw || "").toLowerCase();
-  if (/(work|в работе|прогресс|progress|contact|связ|звон)/.test(value)) return "in_progress";
-  if (/(book|запис|schedul|пришёл|пришел|приш|arriv|visit|came|показ)/.test(value)) return "booked";
-  if (/(lost|потер|отказ|reject|declin|cancel|отмен|fail|неудач|спам)/.test(value)) return "lost";
-  return "new";
-}
 
 const leadsSeed: Lead[] = [
   { id: "lead-1", name: "Лаура Ким", phone: "+7 700 801 77 21", source: "Instagram", campaign: "Бесплатная консультация", status: "new", owner: "Ресепшн", notes: "Хочет диагностику кожи на этой неделе", createdAt: new Date(Date.now() - 45 * 60 * 1000).toISOString() },
@@ -257,48 +259,162 @@ async function loadExistingClients(): Promise<ExistingClient[]> {
   return readDemoStorage<unknown[]>("negis_demo_clients", []).map(clientFromRecord);
 }
 
-type LeadForm = { name: string; phone: string; source: string; campaign: string; status: LeadStatusKey; notes: string };
+const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-const emptyForm: LeadForm = { name: "", phone: "", source: "", campaign: "", status: "new", notes: "" };
+function isUuid(value?: string): value is string {
+  return Boolean(value && uuidPattern.test(value));
+}
+
+function orderedActiveStages(stages: LeadStageDefinition[]): LeadStageDefinition[] {
+  return stages.filter((stage) => stage.isActive).sort((left, right) => left.sortOrder - right.sortOrder);
+}
+
+function orderedActiveSources(sources: LeadSourceDefinition[]): LeadSourceDefinition[] {
+  return sources.filter((source) => source.isActive).sort((left, right) => left.sortOrder - right.sortOrder);
+}
+
+function stageForLead(lead: Lead, stages: LeadStageDefinition[]): LeadStageDefinition | undefined {
+  return stages.find((stage) => stage.id === lead.stageId)
+    ?? stages.find((stage) => stage.stageKey === lead.stageKey)
+    ?? stages.find((stage) => stage.stageKey === lead.status)
+    ?? stages.find((stage) => stage.isDefault && stage.semanticGroup === semanticGroupForLead(lead))
+    ?? stages.find((stage) => stage.semanticGroup === semanticGroupForLead(lead));
+}
+
+function sourceForLead(lead: Lead, sources: LeadSourceDefinition[]): LeadSourceDefinition | undefined {
+  const normalizedSource = (lead.sourceName || lead.source || "").trim().toLowerCase();
+  return sources.find((source) => source.id === lead.sourceId)
+    ?? sources.find((source) => source.sourceKey === lead.sourceKey)
+    ?? sources.find((source) => source.name.trim().toLowerCase() === normalizedSource);
+}
+
+function leadStageName(lead: Lead, stages: LeadStageDefinition[]): string {
+  return lead.stageName || stageForLead(lead, stages)?.name || leadStatusLabel[semanticGroupForLead(lead)];
+}
+
+function leadSourceName(lead: Lead, sources: LeadSourceDefinition[]): string {
+  return lead.sourceName || sourceForLead(lead, sources)?.name || lead.source || "—";
+}
+
+async function loadTaxonomyList<TItem>(input: {
+  endpoint: string;
+  listKey: string;
+  workspaceId: string;
+  mapItem: (value: unknown) => TItem | null;
+}): Promise<{ mode: string; items: TItem[] }> {
+  const response = await fetch(apiUrl(`${input.endpoint}?workspaceId=${encodeURIComponent(input.workspaceId)}`));
+  const text = await response.text();
+  const body = text
+    ? (JSON.parse(text) as { success?: boolean; mode?: string; data?: Record<string, unknown> })
+    : null;
+  if (!response.ok || body?.success !== true) return { mode: "demo", items: [] };
+  const rawItems = body.data?.[input.listKey];
+  const items = Array.isArray(rawItems)
+    ? rawItems.map(input.mapItem).filter((item): item is TItem => item !== null)
+    : [];
+  return { mode: body.mode || "demo", items };
+}
+
+type LeadForm = {
+  name: string;
+  phone: string;
+  sourceId: string;
+  sourceText: string;
+  campaign: string;
+  stageId: string;
+  notes: string;
+};
+
+const emptyForm: LeadForm = {
+  name: "",
+  phone: "",
+  sourceId: "",
+  sourceText: "",
+  campaign: "",
+  stageId: "fallback:new",
+  notes: "",
+};
+
+function leadFromApi(raw: unknown): Lead {
+  const record = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  const str = (value: unknown) => (typeof value === "string" ? value : value == null ? "" : String(value));
+  return {
+    id: str(record.id) || `lead-${Date.now()}`,
+    name: str(record.name) || str(record.full_name),
+    phone: str(record.phone),
+    source: str(record.source),
+    campaign: str(record.campaign),
+    status: str(record.status) || "new",
+    owner: str(record.owner) || undefined,
+    notes: str(record.notes) || undefined,
+    responsibleUserId: str(record.responsibleUserId) || str(record.responsible_user_id) || undefined,
+    clientId: str(record.clientId) || str(record.client_id) || undefined,
+    stageId: str(record.stageId) || str(record.stage_id) || undefined,
+    stageName: str(record.stageName) || str(record.stage_name) || undefined,
+    stageKey: str(record.stageKey) || str(record.stage_key) || undefined,
+    stageColor: str(record.stageColor) || str(record.stage_color) || undefined,
+    semanticGroup: semanticGroupForLead(record),
+    sourceId: str(record.sourceId) || str(record.source_id) || undefined,
+    sourceName: str(record.sourceName) || str(record.source_name) || undefined,
+    sourceKey: str(record.sourceKey) || str(record.source_key) || undefined,
+    sourceChannel: str(record.sourceChannel) || str(record.source_channel) || undefined,
+    sourceColor: str(record.sourceColor) || str(record.source_color) || undefined,
+    metaCampaignLaunchId: str(record.metaCampaignLaunchId) || str(record.meta_campaign_launch_id) || undefined,
+    createdAt: str(record.createdAt) || str(record.created_at) || undefined,
+  };
+}
+
+function leadToApi(lead: Lead): Record<string, unknown> {
+  return {
+    name: lead.name,
+    phone: lead.phone,
+    source: lead.source,
+    campaign: lead.campaign,
+    status: lead.status,
+    notes: lead.notes || "",
+    ...(isUuid(lead.stageId) ? { stageId: lead.stageId } : {}),
+    ...(isUuid(lead.sourceId) ? { sourceId: lead.sourceId } : {}),
+    ...(isUuid(lead.metaCampaignLaunchId) ? { metaCampaignLaunchId: lead.metaCampaignLaunchId } : {}),
+  };
+}
+
+function leadPatchToApi(patch: Partial<Lead>): Record<string, unknown> {
+  return {
+    name: patch.name,
+    phone: patch.phone,
+    source: patch.source,
+    campaign: patch.campaign,
+    status: patch.status,
+    notes: patch.notes,
+    clientId: patch.clientId,
+    ...(patch.stageId !== undefined && isUuid(patch.stageId) ? { stageId: patch.stageId } : {}),
+    ...(patch.sourceId !== undefined && isUuid(patch.sourceId) ? { sourceId: patch.sourceId } : {}),
+    ...(patch.metaCampaignLaunchId !== undefined && isUuid(patch.metaCampaignLaunchId)
+      ? { metaCampaignLaunchId: patch.metaCampaignLaunchId }
+      : {}),
+  };
+}
 
 export default function LeadsPage() {
   const { items, addItem, updateItem } = useDemoCollection<Lead>("negis_demo_leads", leadsSeed, {
     endpoint: "/api/crm/leads",
     listKey: "leads",
     itemKey: "item",
-    fromApi: (raw) => {
-      const record = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
-      const str = (value: unknown) => (typeof value === "string" ? value : value == null ? "" : String(value));
-      return {
-        id: str(record.id) || `lead-${Date.now()}`,
-        name: str(record.name) || str(record.full_name),
-        phone: str(record.phone),
-        source: str(record.source),
-        campaign: str(record.campaign),
-        status: str(record.status) || "new",
-        owner: str(record.owner) || undefined,
-        notes: str(record.notes) || undefined,
-        responsibleUserId: str(record.responsibleUserId) || str(record.responsible_user_id) || undefined,
-        clientId: str(record.clientId) || str(record.client_id) || undefined,
-        createdAt: str(record.createdAt) || str(record.created_at) || undefined,
-      };
-    },
-    toApi: (lead) => ({
-      name: lead.name,
-      phone: lead.phone,
-      source: lead.source,
-      campaign: lead.campaign,
-      status: lead.status,
-      notes: lead.notes || "",
-    }),
+    fromApi: leadFromApi,
+    toApi: leadToApi,
+    patchToApi: leadPatchToApi,
   });
 
+  const [stageDefinitions, setStageDefinitions] = useState<LeadStageDefinition[]>(FALLBACK_LEAD_STAGES);
+  const [sourceDefinitions, setSourceDefinitions] = useState<LeadSourceDefinition[]>(FALLBACK_LEAD_SOURCES);
+  const [structuredStagesAvailable, setStructuredStagesAvailable] = useState(false);
+  const [structuredSourcesAvailable, setStructuredSourcesAvailable] = useState(false);
   const [isAdminMode, setIsAdminMode] = useState<boolean>(() => {
     if (typeof window === "undefined") return false;
     return window.localStorage.getItem(LEADS_UI_MODE_KEY) === "admin";
   });
   const [search, setSearch] = useState("");
-  const [filter, setFilter] = useState<"all" | LeadStatusKey>("all");
+  const [filter, setFilter] = useState("all");
   const [formOpen, setFormOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState<LeadForm>(emptyForm);
@@ -307,6 +423,39 @@ export default function LeadsPage() {
   // Admin-only diagnostics: whether the conversion matched an existing client (per lead).
   const [conversionMatched, setConversionMatched] = useState<Record<string, boolean>>({});
 
+  useEffect(() => {
+    let cancelled = false;
+    const workspaceId = readWorkspaceId();
+
+    void Promise.all([
+      loadTaxonomyList({ endpoint: "/api/crm/lead-stages", listKey: "stages", workspaceId, mapItem: leadStageDefinitionFromUnknown }),
+      loadTaxonomyList({ endpoint: "/api/crm/lead-sources", listKey: "sources", workspaceId, mapItem: leadSourceDefinitionFromUnknown }),
+    ])
+      .then(([stageResult, sourceResult]) => {
+        if (cancelled) return;
+        const structuredStages = stageResult.mode === "supabase" && stageResult.items.length > 0;
+        const structuredSources = sourceResult.mode === "supabase" && sourceResult.items.length > 0;
+        setStructuredStagesAvailable(structuredStages);
+        setStructuredSourcesAvailable(structuredSources);
+        setStageDefinitions(structuredStages ? orderedActiveStages(stageResult.items) : FALLBACK_LEAD_STAGES);
+        setSourceDefinitions(structuredSources ? orderedActiveSources(sourceResult.items) : FALLBACK_LEAD_SOURCES);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setStructuredStagesAvailable(false);
+        setStructuredSourcesAvailable(false);
+        setStageDefinitions(FALLBACK_LEAD_STAGES);
+        setSourceDefinitions(FALLBACK_LEAD_SOURCES);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const activeStages = useMemo(() => orderedActiveStages(stageDefinitions), [stageDefinitions]);
+  const activeSources = useMemo(() => orderedActiveSources(sourceDefinitions), [sourceDefinitions]);
+
   const setMode = (admin: boolean) => {
     setIsAdminMode(admin);
     if (typeof window !== "undefined") window.localStorage.setItem(LEADS_UI_MODE_KEY, admin ? "admin" : "client");
@@ -314,7 +463,7 @@ export default function LeadsPage() {
 
   const metrics = useMemo(() => {
     const counts: Record<LeadStatusKey, number> = { new: 0, in_progress: 0, booked: 0, lost: 0 };
-    for (const lead of items) counts[normalizeLeadStatus(lead.status)] += 1;
+    for (const lead of items) counts[semanticGroupForLead(lead)] += 1;
     return counts;
   }, [items]);
 
@@ -326,39 +475,54 @@ export default function LeadsPage() {
     { label: "Потеряны", value: metrics.lost, icon: XCircle, tone: metrics.lost > 0 ? "error" : "muted" },
   ];
 
-  const filterOptions: Array<{ id: "all" | LeadStatusKey; label: string }> = [
+  const filterOptions = [
     { id: "all", label: "Все" },
-    { id: "new", label: "Новые" },
-    { id: "in_progress", label: "В работе" },
-    { id: "booked", label: "Записаны" },
-    { id: "lost", label: "Потеряны" },
+    ...activeStages.map((stage) => ({ id: stage.id, label: stage.name })),
   ];
 
   const visibleLeads = useMemo(() => {
     const query = search.trim().toLowerCase();
     return items.filter((lead) => {
-      if (filter !== "all" && normalizeLeadStatus(lead.status) !== filter) return false;
+      const selectedStage = filter === "all" ? null : activeStages.find((stage) => stage.id === filter);
+      if (selectedStage) {
+        const exactStructuredMatch = Boolean(lead.stageId && lead.stageId === selectedStage.id);
+        const keyMatch = Boolean(lead.stageKey && lead.stageKey === selectedStage.stageKey);
+        const legacySemanticMatch = !lead.stageId && selectedStage.isDefault && semanticGroupForLead(lead) === selectedStage.semanticGroup;
+        if (!exactStructuredMatch && !keyMatch && !legacySemanticMatch) return false;
+      }
       if (!query) return true;
-      return [lead.name, lead.phone, lead.source, lead.campaign].some((field) => (field || "").toLowerCase().includes(query));
+      return [lead.name, lead.phone, leadSourceName(lead, activeSources), lead.campaign].some((field) => (field || "").toLowerCase().includes(query));
     });
-  }, [items, filter, search]);
+  }, [activeSources, activeStages, items, filter, search]);
 
   const detailLead = detailId ? items.find((lead) => lead.id === detailId) || null : null;
 
   function openAdd() {
+    const defaultStage = activeStages.find((stage) => stage.semanticGroup === "new") ?? activeStages[0];
+    const defaultSource = structuredSourcesAvailable
+      ? activeSources.find((source) => source.sourceKey === "manual") ?? activeSources[0]
+      : undefined;
     setEditingId(null);
-    setForm(emptyForm);
+    setForm({
+      ...emptyForm,
+      stageId: defaultStage?.id || "fallback:new",
+      sourceId: defaultSource?.id || "",
+      sourceText: defaultSource?.name || "",
+    });
     setFormOpen(true);
   }
 
   function openEdit(lead: Lead) {
+    const currentStage = stageForLead(lead, activeStages);
+    const currentSource = sourceForLead(lead, activeSources);
     setEditingId(lead.id);
     setForm({
       name: lead.name,
       phone: lead.phone,
-      source: lead.source,
+      sourceId: currentSource?.id || "",
+      sourceText: leadSourceName(lead, activeSources) === "—" ? "" : leadSourceName(lead, activeSources),
       campaign: lead.campaign,
-      status: normalizeLeadStatus(lead.status),
+      stageId: currentStage?.id || `fallback:${semanticGroupForLead(lead)}`,
       notes: lead.notes || "",
     });
     setDetailId(null);
@@ -372,13 +536,28 @@ export default function LeadsPage() {
       toast.error("Укажите имя или телефон заявки");
       return;
     }
+    const selectedStage = activeStages.find((stage) => stage.id === form.stageId)
+      ?? activeStages.find((stage) => stage.stageKey === form.stageId)
+      ?? activeStages.find((stage) => stage.semanticGroup === "new");
+    const selectedSource = activeSources.find((source) => source.id === form.sourceId);
+    const sourceSnapshot = selectedSource?.name || form.sourceText.trim();
     const patch = {
       name,
       phone,
-      source: form.source.trim(),
+      source: sourceSnapshot,
       campaign: form.campaign.trim(),
-      status: form.status,
+      status: selectedStage?.stageKey || "new",
       notes: form.notes.trim(),
+      stageName: selectedStage?.name,
+      stageKey: selectedStage?.stageKey,
+      stageColor: selectedStage?.color,
+      semanticGroup: selectedStage?.semanticGroup || "new",
+      sourceName: sourceSnapshot,
+      sourceKey: selectedSource?.sourceKey,
+      sourceChannel: selectedSource?.channel,
+      sourceColor: selectedSource?.color,
+      ...(structuredStagesAvailable && isUuid(selectedStage?.id) ? { stageId: selectedStage.id } : {}),
+      ...(structuredSourcesAvailable && isUuid(selectedSource?.id) ? { sourceId: selectedSource.id } : {}),
     };
     if (editingId) {
       updateItem(editingId, patch);
@@ -392,8 +571,15 @@ export default function LeadsPage() {
     setForm(emptyForm);
   }
 
-  function changeStatus(lead: Lead, status: LeadStatusKey) {
-    updateItem(lead.id, { status });
+  function changeStatus(lead: Lead, stage: LeadStageDefinition) {
+    updateItem(lead.id, {
+      status: stage.stageKey,
+      stageName: stage.name,
+      stageKey: stage.stageKey,
+      stageColor: stage.color,
+      semanticGroup: stage.semanticGroup,
+      ...(structuredStagesAvailable && isUuid(stage.id) ? { stageId: stage.id } : {}),
+    });
   }
 
   // «Записать»: store the appointment prefill and confirm; navigation is the Link itself.
@@ -476,7 +662,18 @@ export default function LeadsPage() {
       writeDemoStorage("negis_demo_clients", [savedClient, ...readDemoStorage<unknown[]>("negis_demo_clients", []).map(clientFromRecord).filter((client) => client.id !== savedClient.id)]);
 
       // Link the lead and move a fresh lead into work (never downgrade booked/lost).
-      const statusPatch = normalizeLeadStatus(lead.status) === "new" ? { status: "in_progress" as LeadStatusKey } : {};
+      const inProgressStage = activeStages.find((stage) => stage.isDefault && stage.semanticGroup === "in_progress")
+        ?? activeStages.find((stage) => stage.semanticGroup === "in_progress");
+      const statusPatch = semanticGroupForLead(lead) === "new"
+        ? {
+            status: inProgressStage?.stageKey || "in_progress",
+            semanticGroup: "in_progress" as LeadStatusKey,
+            stageName: inProgressStage?.name,
+            stageKey: inProgressStage?.stageKey,
+            stageColor: inProgressStage?.color,
+            ...(structuredStagesAvailable && isUuid(inProgressStage?.id) ? { stageId: inProgressStage.id } : {}),
+          }
+        : {};
       updateItem(lead.id, { clientId: savedClient.id, ...statusPatch });
       setConversionMatched((current) => ({ ...current, [lead.id]: false }));
       toast.success("Клиент создан из заявки.");
@@ -597,7 +794,7 @@ export default function LeadsPage() {
         ) : (
           <section className="space-y-3">
             {visibleLeads.map((lead) => {
-              const statusKey = normalizeLeadStatus(lead.status);
+              const statusKey = semanticGroupForLead(lead);
               const hasPhone = Boolean((lead.phone || "").replace(/\D/g, ""));
               return (
                 <article key={lead.id} className="negis-glass p-4 sm:p-5">
@@ -611,18 +808,18 @@ export default function LeadsPage() {
                       </div>
                       <p className="mt-1 text-xs font-semibold" style={{ color: "var(--negis-muted)" }}>
                         {formatPhone(lead.phone) || "Телефон не указан"}
-                        {lead.source ? ` · ${lead.source}` : ""}
+                        {leadSourceName(lead, activeSources) !== "—" ? ` · ${leadSourceName(lead, activeSources)}` : ""}
                         {lead.campaign ? ` · ${lead.campaign}` : ""}
                       </p>
                     </div>
                     <div className="flex flex-wrap items-center gap-2">
-                      <StatusPill tone={leadStatusPill[statusKey]}>{leadStatusLabel[statusKey]}</StatusPill>
+                      <StatusPill tone={leadStatusPill[statusKey]}>{leadStageName(lead, activeStages)}</StatusPill>
                       {lead.clientId ? <StatusPill tone="green">Клиент создан</StatusPill> : null}
                     </div>
                   </div>
 
                   <div className="mt-3 grid gap-x-5 gap-y-1.5 text-sm sm:grid-cols-2">
-                    <Fact label="Источник" value={lead.source || "—"} />
+                    <Fact label="Источник" value={leadSourceName(lead, activeSources)} />
                     <Fact label="Кампания" value={lead.campaign || "—"} />
                     <Fact label="Ответственный" value={lead.owner || (lead.responsibleUserId ? "Назначен" : "—")} />
                     <Fact label="Создана" value={formatCreatedAt(lead.createdAt)} />
@@ -705,7 +902,34 @@ export default function LeadsPage() {
               <div className="grid gap-3 sm:grid-cols-2">
                 <label className="block">
                   <span className="mb-1 block text-xs font-black uppercase tracking-[0.05em]" style={{ color: "var(--negis-muted)" }}>Источник</span>
-                  <input style={inputStyle} value={form.source} onChange={(event) => setForm((current) => ({ ...current, source: event.target.value }))} placeholder="Instagram, WhatsApp, сайт…" />
+                  {structuredSourcesAvailable ? (
+                    <select
+                      style={inputStyle}
+                      value={form.sourceId}
+                      aria-label="Источник заявки"
+                      data-testid="lead-source-select"
+                      onChange={(event) => {
+                        const selected = activeSources.find((source) => source.id === event.target.value);
+                        setForm((current) => ({
+                          ...current,
+                          sourceId: event.target.value,
+                          sourceText: selected?.name || current.sourceText,
+                        }));
+                      }}
+                    >
+                      {!form.sourceId && form.sourceText ? <option value="">Текущий: {form.sourceText}</option> : null}
+                      {activeSources.map((source) => <option key={source.id} value={source.id}>{source.name}</option>)}
+                    </select>
+                  ) : (
+                    <input
+                      style={inputStyle}
+                      value={form.sourceText}
+                      aria-label="Источник заявки"
+                      data-testid="lead-source-input"
+                      onChange={(event) => setForm((current) => ({ ...current, sourceText: event.target.value }))}
+                      placeholder="Instagram, WhatsApp, сайт…"
+                    />
+                  )}
                 </label>
                 <label className="block">
                   <span className="mb-1 block text-xs font-black uppercase tracking-[0.05em]" style={{ color: "var(--negis-muted)" }}>Кампания</span>
@@ -713,10 +937,16 @@ export default function LeadsPage() {
                 </label>
               </div>
               <label className="block">
-                <span className="mb-1 block text-xs font-black uppercase tracking-[0.05em]" style={{ color: "var(--negis-muted)" }}>Статус</span>
-                <select style={inputStyle} value={form.status} onChange={(event) => setForm((current) => ({ ...current, status: event.target.value as LeadStatusKey }))}>
-                  {STATUS_ORDER.map((key) => (
-                    <option key={key} value={key}>{leadStatusLabel[key]}</option>
+                <span className="mb-1 block text-xs font-black uppercase tracking-[0.05em]" style={{ color: "var(--negis-muted)" }}>Этап</span>
+                <select
+                  style={inputStyle}
+                  value={form.stageId}
+                  aria-label="Этап заявки"
+                  data-testid="lead-stage-select"
+                  onChange={(event) => setForm((current) => ({ ...current, stageId: event.target.value }))}
+                >
+                  {activeStages.map((stage) => (
+                    <option key={stage.id} value={stage.id}>{stage.name}</option>
                   ))}
                 </select>
               </label>
@@ -748,11 +978,11 @@ export default function LeadsPage() {
             </div>
 
             <div className="mt-3">
-              <StatusPill tone={leadStatusPill[normalizeLeadStatus(detailLead.status)]}>{leadStatusLabel[normalizeLeadStatus(detailLead.status)]}</StatusPill>
+              <StatusPill tone={leadStatusPill[semanticGroupForLead(detailLead)]}>{leadStageName(detailLead, activeStages)}</StatusPill>
             </div>
 
             <div className="mt-4 grid gap-1.5 text-sm">
-              <Fact label="Источник" value={detailLead.source || "—"} />
+              <Fact label="Источник" value={leadSourceName(detailLead, activeSources)} />
               <Fact label="Кампания" value={detailLead.campaign || "—"} />
               <Fact label="Ответственный" value={detailLead.owner || (detailLead.responsibleUserId ? "Назначен" : "—")} />
               <Fact label="Клиент" value={detailLead.clientId ? "Создан" : "Не создан"} />
@@ -792,17 +1022,19 @@ export default function LeadsPage() {
             <div className="mt-4">
               <p className="mb-2 text-xs font-black uppercase tracking-[0.05em]" style={{ color: "var(--negis-muted)" }}>Статус</p>
               <div className="flex flex-wrap gap-2">
-                {STATUS_ORDER.map((key) => {
-                  const active = normalizeLeadStatus(detailLead.status) === key;
+                {activeStages.map((stage) => {
+                  const active = detailLead.stageId
+                    ? detailLead.stageId === stage.id
+                    : semanticGroupForLead(detailLead) === stage.semanticGroup;
                   return (
                     <button
-                      key={key}
+                      key={stage.id}
                       type="button"
                       className="rounded-full border px-3 py-1.5 text-xs font-black transition"
                       style={active ? { background: "var(--negis-primary)", borderColor: "var(--negis-primary)", color: "#FFFFFF" } : { background: "var(--negis-surface)", borderColor: "var(--negis-border)", color: "var(--negis-muted)" }}
-                      onClick={() => changeStatus(detailLead, key)}
+                      onClick={() => changeStatus(detailLead, stage)}
                     >
-                      {leadStatusLabel[key]}
+                      {stage.name}
                     </button>
                   );
                 })}
@@ -826,6 +1058,9 @@ export default function LeadsPage() {
                   <p>lead id: {detailLead.id || "-"}</p>
                   <p>client_id present: {detailLead.clientId ? "yes" : "no"}</p>
                   <p>responsible_user_id present: {detailLead.responsibleUserId ? "yes" : "no"}</p>
+                  <p>stage_id present: {detailLead.stageId ? "yes" : "no"}</p>
+                  <p>source_id present: {detailLead.sourceId ? "yes" : "no"}</p>
+                  <p>meta_campaign_launch_id present: {detailLead.metaCampaignLaunchId ? "yes" : "no"}</p>
                   <p>matched existing client: {detailLead.id in conversionMatched ? (conversionMatched[detailLead.id] ? "yes" : "no") : "-"}</p>
                   <p>Данные ограничены текущей клиникой (workspace).</p>
                 </div>

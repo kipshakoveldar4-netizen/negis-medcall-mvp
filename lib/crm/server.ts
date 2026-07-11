@@ -31,6 +31,8 @@ import { KZ_META_CITY_OPTIONS, findKzMetaCityOption, getKzMetaCityOption, type M
 export type CrmResource =
   | "clients"
   | "leads"
+  | "lead-stages"
+  | "lead-sources"
   | "appointments"
   | "calls"
   | "tasks"
@@ -94,6 +96,8 @@ type ResourceConfig = {
   requiredPost: string[];
   requiredPatch?: string[];
   sortableColumn: string;
+  sortableAscending?: boolean;
+  selectColumns?: string;
   upsertConflict?: string;
   toRow: (body: JsonRecord, workspaceId: string) => JsonRecord;
   fromRow: (row: JsonRecord) => JsonRecord;
@@ -115,12 +119,26 @@ type MultipartFormData = {
 const DEMO_WORKSPACE_ID = "demo-workspace";
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
+class CrmReferenceValidationError extends Error {
+  readonly details: string[];
+
+  constructor(details: string[]) {
+    super("Validation error");
+    this.name = "CrmReferenceValidationError";
+    this.details = details;
+  }
+}
+
 function isUuid(value: unknown): value is string {
   return typeof value === "string" && uuidPattern.test(value);
 }
 
 function asRecord(value: unknown): JsonRecord {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as JsonRecord) : {};
+}
+
+function asRelatedRecord(value: unknown): JsonRecord {
+  return asRecord(Array.isArray(value) ? value[0] : value);
 }
 
 function readJsonRecord(value: unknown): JsonRecord {
@@ -243,6 +261,18 @@ function buildPatchRow(resource: CrmResource, body: JsonRecord): JsonRecord {
     }
   };
 
+  const setNumber = (column: string, keys: string[]) => {
+    if (hasAnyKey(body, keys)) {
+      row[column] = readNumber(keys.map((key) => body[key]).find((value) => value !== undefined));
+    }
+  };
+
+  const setBoolean = (column: string, keys: string[]) => {
+    if (hasAnyKey(body, keys)) {
+      row[column] = readBoolean(keys.map((key) => body[key]).find((value) => value !== undefined));
+    }
+  };
+
   if (resource === "clients") {
     setText("full_name", ["name", "full_name", "fullName"]);
     setText("phone", ["phone"]);
@@ -268,6 +298,28 @@ function buildPatchRow(resource: CrmResource, body: JsonRecord): JsonRecord {
       const clientId = firstString(body.clientId, body.client_id);
       row.client_id = isUuid(clientId) ? clientId : null;
     }
+    row.updated_at = new Date().toISOString();
+  }
+
+  if (resource === "lead-stages") {
+    setText("stage_key", ["stageKey", "stage_key"]);
+    setText("name", ["name"]);
+    setText("color", ["color"]);
+    setText("semantic_group", ["semanticGroup", "semantic_group"]);
+    setNumber("sort_order", ["sortOrder", "sort_order"]);
+    setBoolean("is_default", ["isDefault", "is_default"]);
+    setBoolean("is_active", ["isActive", "is_active"]);
+    row.updated_at = new Date().toISOString();
+  }
+
+  if (resource === "lead-sources") {
+    setText("source_key", ["sourceKey", "source_key"]);
+    setText("name", ["name"]);
+    setText("channel", ["channel"]);
+    setText("color", ["color"]);
+    setNumber("sort_order", ["sortOrder", "sort_order"]);
+    setBoolean("is_default", ["isDefault", "is_default"]);
+    setBoolean("is_active", ["isActive", "is_active"]);
     row.updated_at = new Date().toISOString();
   }
 
@@ -491,6 +543,22 @@ function resourceValidationDetails(resource: CrmResource, body: JsonRecord): str
     details.push("name or phone is required");
   }
 
+  if (resource === "lead-stages") {
+    if (!firstString(body.stageKey, body.stage_key)) details.push("stageKey is required");
+    if (!readString(body.name)) details.push("name is required");
+    const semanticGroup = firstString(body.semanticGroup, body.semantic_group);
+    if (!semanticGroup) {
+      details.push("semanticGroup is required");
+    } else if (!["new", "in_progress", "booked", "lost"].includes(semanticGroup)) {
+      details.push("semanticGroup must be new, in_progress, booked or lost");
+    }
+  }
+
+  if (resource === "lead-sources") {
+    if (!firstString(body.sourceKey, body.source_key)) details.push("sourceKey is required");
+    if (!readString(body.name)) details.push("name is required");
+  }
+
   if (resource === "appointments" && !firstString(body.client, body.client_name, body.clientName)) {
     details.push("client is required");
   }
@@ -588,6 +656,36 @@ function makeClient(body: JsonRecord): JsonRecord {
   };
 }
 
+function makeLeadStage(body: JsonRecord): JsonRecord {
+  return {
+    id: readString(body.id) || nextDemoId("lead-stage"),
+    stageKey: firstString(body.stageKey, body.stage_key),
+    name: readString(body.name),
+    color: readString(body.color),
+    semanticGroup: firstString(body.semanticGroup, body.semantic_group) || "new",
+    sortOrder: readNumber(body.sortOrder ?? body.sort_order) ?? 0,
+    isDefault: readBoolean(body.isDefault ?? body.is_default),
+    isActive: hasAnyKey(body, ["isActive", "is_active"]) ? readBoolean(body.isActive ?? body.is_active) : true,
+    createdAt: firstString(body.createdAt, body.created_at),
+    updatedAt: firstString(body.updatedAt, body.updated_at),
+  };
+}
+
+function makeLeadSource(body: JsonRecord): JsonRecord {
+  return {
+    id: readString(body.id) || nextDemoId("lead-source"),
+    sourceKey: firstString(body.sourceKey, body.source_key),
+    name: readString(body.name),
+    channel: readString(body.channel),
+    color: readString(body.color),
+    sortOrder: readNumber(body.sortOrder ?? body.sort_order) ?? 0,
+    isDefault: readBoolean(body.isDefault ?? body.is_default),
+    isActive: hasAnyKey(body, ["isActive", "is_active"]) ? readBoolean(body.isActive ?? body.is_active) : true,
+    createdAt: firstString(body.createdAt, body.created_at),
+    updatedAt: firstString(body.updatedAt, body.updated_at),
+  };
+}
+
 function makeLead(body: JsonRecord): JsonRecord {
   return {
     id: readString(body.id) || nextDemoId("lead"),
@@ -600,6 +698,17 @@ function makeLead(body: JsonRecord): JsonRecord {
     notes: readString(body.notes),
     responsibleUserId: firstString(body.responsibleUserId, body.responsible_user_id),
     clientId: firstString(body.clientId, body.client_id),
+    stageId: firstString(body.stageId, body.stage_id),
+    stageName: firstString(body.stageName, body.stage_name),
+    stageKey: firstString(body.stageKey, body.stage_key),
+    stageColor: firstString(body.stageColor, body.stage_color),
+    semanticGroup: firstString(body.semanticGroup, body.semantic_group),
+    sourceId: firstString(body.sourceId, body.source_id),
+    sourceName: firstString(body.sourceName, body.source_name),
+    sourceKey: firstString(body.sourceKey, body.source_key),
+    sourceChannel: firstString(body.sourceChannel, body.source_channel),
+    sourceColor: firstString(body.sourceColor, body.source_color),
+    metaCampaignLaunchId: firstString(body.metaCampaignLaunchId, body.meta_campaign_launch_id),
     createdAt: firstString(body.createdAt, body.created_at),
     updatedAt: firstString(body.updatedAt, body.updated_at),
   };
@@ -862,6 +971,8 @@ const configs: Record<CrmResource, ResourceConfig> = {
     listKey: "leads",
     requiredPost: [],
     sortableColumn: "created_at",
+    selectColumns:
+      "*,stage_definition:lead_stages(id,stage_key,name,color,semantic_group,sort_order,is_default,is_active),source_definition:lead_sources(id,source_key,name,channel,color,sort_order,is_default,is_active)",
     demoItem: makeLead,
     toRow: (body, workspaceId) => ({
       workspace_id: workspaceId,
@@ -875,8 +986,11 @@ const configs: Record<CrmResource, ResourceConfig> = {
       notes: readString(body.notes) || null,
       updated_at: new Date().toISOString(),
     }),
-    fromRow: (row) =>
-      makeLead({
+    fromRow: (row) => {
+      const stage = asRelatedRecord(row.stage_definition);
+      const source = asRelatedRecord(row.source_definition);
+
+      return makeLead({
         id: row.id,
         name: row.full_name,
         phone: row.phone,
@@ -886,9 +1000,61 @@ const configs: Record<CrmResource, ResourceConfig> = {
         notes: row.notes,
         responsible_user_id: row.responsible_user_id,
         client_id: row.client_id,
+        stage_id: row.stage_id,
+        stage_name: stage.name,
+        stage_key: stage.stage_key,
+        stage_color: stage.color,
+        semantic_group: stage.semantic_group,
+        source_id: row.source_id,
+        source_name: source.name,
+        source_key: source.source_key,
+        source_channel: source.channel,
+        source_color: source.color,
+        meta_campaign_launch_id: row.meta_campaign_launch_id,
         created_at: row.created_at,
         updated_at: row.updated_at,
-      }),
+      });
+    },
+  },
+  "lead-stages": {
+    table: "lead_stages",
+    listKey: "stages",
+    requiredPost: [],
+    sortableColumn: "sort_order",
+    sortableAscending: true,
+    demoItem: makeLeadStage,
+    toRow: (body, workspaceId) => ({
+      workspace_id: workspaceId,
+      stage_key: firstString(body.stageKey, body.stage_key),
+      name: readString(body.name),
+      color: readString(body.color) || null,
+      semantic_group: firstString(body.semanticGroup, body.semantic_group),
+      sort_order: readNumber(body.sortOrder ?? body.sort_order) ?? 0,
+      is_default: readBoolean(body.isDefault ?? body.is_default),
+      is_active: hasAnyKey(body, ["isActive", "is_active"]) ? readBoolean(body.isActive ?? body.is_active) : true,
+      updated_at: new Date().toISOString(),
+    }),
+    fromRow: makeLeadStage,
+  },
+  "lead-sources": {
+    table: "lead_sources",
+    listKey: "sources",
+    requiredPost: [],
+    sortableColumn: "sort_order",
+    sortableAscending: true,
+    demoItem: makeLeadSource,
+    toRow: (body, workspaceId) => ({
+      workspace_id: workspaceId,
+      source_key: firstString(body.sourceKey, body.source_key),
+      name: readString(body.name),
+      channel: readString(body.channel) || null,
+      color: readString(body.color) || null,
+      sort_order: readNumber(body.sortOrder ?? body.sort_order) ?? 0,
+      is_default: readBoolean(body.isDefault ?? body.is_default),
+      is_active: hasAnyKey(body, ["isActive", "is_active"]) ? readBoolean(body.isActive ?? body.is_active) : true,
+      updated_at: new Date().toISOString(),
+    }),
+    fromRow: makeLeadSource,
   },
   appointments: {
     table: "appointments",
@@ -1380,6 +1546,102 @@ async function createSupabaseAuthUser(input: {
   };
 }
 
+type CrmSupabaseClient = NonNullable<ReturnType<typeof getSupabaseServerClient>>;
+
+async function readWorkspaceReference(input: {
+  supabase: CrmSupabaseClient;
+  workspaceId: string;
+  table: "lead_stages" | "lead_sources" | "meta_campaign_launches";
+  id: string;
+  select: string;
+  fieldName: string;
+}): Promise<JsonRecord> {
+  if (!isUuid(input.id)) {
+    throw new CrmReferenceValidationError([`${input.fieldName} must be a valid id`]);
+  }
+
+  const { data, error } = await input.supabase
+    .from(input.table)
+    .select(input.select)
+    .eq("id", input.id)
+    .eq("workspace_id", input.workspaceId)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  if (!data) {
+    throw new CrmReferenceValidationError([`${input.fieldName} does not belong to this workspace`]);
+  }
+
+  return asRecord(data);
+}
+
+async function buildLeadReferenceRow(
+  supabase: CrmSupabaseClient,
+  workspaceId: string,
+  body: JsonRecord,
+): Promise<JsonRecord> {
+  const row: JsonRecord = {};
+
+  if (hasAnyKey(body, ["stageId", "stage_id"])) {
+    const stageId = firstString(body.stageId, body.stage_id);
+    if (!stageId) {
+      row.stage_id = null;
+    } else {
+      const stage = await readWorkspaceReference({
+        supabase,
+        workspaceId,
+        table: "lead_stages",
+        id: stageId,
+        select: "id,stage_key,name",
+        fieldName: "stageId",
+      });
+      row.stage_id = stage.id;
+      row.status = firstString(stage.stage_key, stage.name);
+    }
+  }
+
+  if (hasAnyKey(body, ["sourceId", "source_id"])) {
+    const sourceId = firstString(body.sourceId, body.source_id);
+    if (!sourceId) {
+      row.source_id = null;
+    } else {
+      const source = await readWorkspaceReference({
+        supabase,
+        workspaceId,
+        table: "lead_sources",
+        id: sourceId,
+        select: "id,source_key,name",
+        fieldName: "sourceId",
+      });
+      row.source_id = source.id;
+      row.source = readString(source.name);
+    }
+  }
+
+  if (hasAnyKey(body, ["metaCampaignLaunchId", "meta_campaign_launch_id"])) {
+    const campaignId = firstString(body.metaCampaignLaunchId, body.meta_campaign_launch_id);
+    if (!campaignId) {
+      row.meta_campaign_launch_id = null;
+    } else {
+      const campaign = await readWorkspaceReference({
+        supabase,
+        workspaceId,
+        table: "meta_campaign_launches",
+        id: campaignId,
+        select: "id,campaign_name",
+        fieldName: "metaCampaignLaunchId",
+      });
+      row.meta_campaign_launch_id = campaign.id;
+      row.campaign = readString(campaign.campaign_name);
+    }
+  }
+
+  return row;
+}
+
 async function listItems(resource: CrmResource, req: VercelRequest, res: VercelResponse) {
   const config = configs[resource];
   const workspaceId = readWorkspaceId(req, {});
@@ -1397,8 +1659,8 @@ async function listItems(resource: CrmResource, req: VercelRequest, res: VercelR
   try {
     let query = supabase
       .from(config.table)
-      .select("*")
-      .order(config.sortableColumn, { ascending: false });
+      .select(config.selectColumns ?? "*")
+      .order(config.sortableColumn, { ascending: config.sortableAscending ?? false });
 
     if (emailFilter) {
       query = query.eq("email", emailFilter).limit(1);
@@ -1573,9 +1835,12 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
 
   try {
     const row = config.toRow(body, workspaceId);
+    if (resource === "leads") {
+      Object.assign(row, await buildLeadReferenceRow(supabase, workspaceId, body));
+    }
     const query = config.upsertConflict
-      ? supabase.from(config.table).upsert(row, { onConflict: config.upsertConflict }).select("*").single()
-      : supabase.from(config.table).insert(row).select("*").single();
+      ? supabase.from(config.table).upsert(row, { onConflict: config.upsertConflict }).select(config.selectColumns ?? "*").single()
+      : supabase.from(config.table).insert(row).select(config.selectColumns ?? "*").single();
     const { data, error } = await query;
 
     if (error) {
@@ -1585,6 +1850,9 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
     const item = config.fromRow(asRecord(data));
     return sendJson(res, 201, success("supabase", { [resource === "content-videos" ? "video" : "item"]: item, item }));
   } catch (error) {
+    if (error instanceof CrmReferenceValidationError) {
+      return sendJson(res, 400, errorBody(error.message, error.details));
+    }
     const warning = supabaseWarning(config.table, error);
     console.warn(warning);
     return sendJson(res, 200, success("demo", { [resource === "content-videos" ? "video" : "item"]: demoItem, item: demoItem }, warning));
@@ -1627,6 +1895,9 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
 
   try {
     const row = buildPatchRow(resource, patchBody);
+    if (resource === "leads") {
+      Object.assign(row, await buildLeadReferenceRow(supabase, workspaceId, patchBody));
+    }
 
     if (Object.keys(row).length === 0) {
       return sendJson(res, 200, success("supabase", { [resource === "content-videos" ? "video" : "item"]: demoItem, item: demoItem }));
@@ -1637,7 +1908,7 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
       .update(row)
       .eq("id", id)
       .eq("workspace_id", workspaceId)
-      .select("*")
+      .select(config.selectColumns ?? "*")
       .single();
 
     if (error) {
@@ -1647,6 +1918,9 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
     const item = config.fromRow(asRecord(data));
     return sendJson(res, 200, success("supabase", { [resource === "content-videos" ? "video" : "item"]: item, item }));
   } catch (error) {
+    if (error instanceof CrmReferenceValidationError) {
+      return sendJson(res, 400, errorBody(error.message, error.details));
+    }
     const warning = supabaseWarning(config.table, error);
     console.warn(warning);
     return sendJson(res, 200, success("demo", { [resource === "content-videos" ? "video" : "item"]: demoItem, item: demoItem }, warning));

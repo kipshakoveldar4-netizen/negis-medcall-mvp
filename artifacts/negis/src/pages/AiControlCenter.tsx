@@ -21,6 +21,7 @@ import {
 import { PageLayout } from "@/components/layout/PageLayout";
 import { apiUrl } from "@/lib/api";
 import { readDemoStorage } from "@/lib/demoStorage";
+import { semanticGroupForLead } from "@/lib/leadPipeline";
 import { defaultThemePresetId, getThemePreset } from "@/lib/themePresets";
 
 // D3B — AI Control Center with minimal REAL operational data (Glass Morphic Medical AI).
@@ -130,15 +131,6 @@ async function fetchJson(path: string): Promise<{ ok: boolean; body: Record<stri
 }
 
 /* ── CRM data (real counts, no AI, no invented numbers) ─────── */
-
-// Same visual normalization as LeadsPage/ClientsPage — stored statuses stay untouched.
-function normalizeLeadStatus(raw: string): "new" | "in_progress" | "booked" | "lost" {
-  const value = raw.toLowerCase();
-  if (/(work|в работе|прогресс|progress|contact|связ|звон)/.test(value)) return "in_progress";
-  if (/(book|запис|schedul|пришёл|пришел|приш|arriv|visit|came|показ)/.test(value)) return "booked";
-  if (/(lost|потер|отказ|reject|declin|cancel|отмен|fail|неудач|спам)/.test(value)) return "lost";
-  return "new";
-}
 
 function isRepeatClient(status: string, lastVisit: string): boolean {
   const value = status.toLowerCase();
@@ -344,11 +336,11 @@ export default function AiControlCenter() {
       setClientsState(clientsRes.responded ? "ready" : "unknown");
       setAppointmentsState(appointmentsRes.responded ? "ready" : "unknown");
       setCrmCounts({
-        newLeads: leadsRes.items.filter((lead) => normalizeLeadStatus(str(lead.status)) === "new").length,
+        newLeads: leadsRes.items.filter((lead) => semanticGroupForLead(lead) === "new").length,
         unprocessedLeads: leadsRes.items.filter((lead) => {
-          const status = normalizeLeadStatus(str(lead.status));
+          const status = semanticGroupForLead(lead);
           const hasClient = Boolean(str(lead.clientId) || str(lead.client_id));
-          return status === "new" || (!hasClient && status !== "lost" && status !== "booked");
+          return !hasClient && (status === "new" || status === "in_progress");
         }).length,
         appointmentsToday: appointmentsRes.items.filter((item) =>
           isTodayDate(str(item.startsAt) || str(item.starts_at) || str(item.time)),

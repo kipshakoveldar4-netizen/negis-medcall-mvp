@@ -87,10 +87,30 @@ async function checkResponsiveCss() {
   console.log(`responsive CSS markers: ok (${viewportWidths.join(", ")}px audit matrix)`);
 }
 
+async function checkLeadsPipelineMobileSource() {
+  const leadsPath = join(repoRoot, "artifacts", "negis", "src", "pages", "LeadsPage.tsx");
+  const source = await readFile(leadsPath, "utf8");
+  for (const marker of [
+    'data-testid="lead-stage-select"',
+    'data-testid="lead-source-select"',
+    'data-testid="lead-source-input"',
+    "max-h-[90vh] overflow-y-auto",
+    "flex flex-col gap-2 sm:flex-row",
+    "grid gap-3 sm:grid-cols-2",
+  ]) {
+    if (!source.includes(marker)) {
+      throw new Error(`Leads mobile pipeline marker missing: ${marker}`);
+    }
+  }
+
+  console.log("/leads pipeline controls: mobile-safe source markers ok");
+}
+
 async function main() {
   console.log(`Mobile layout smoke at ${baseUrl}`);
   await checkManifest();
   await checkResponsiveCss();
+  await checkLeadsPipelineMobileSource();
   for (const route of routes) {
     await checkRoute(route);
   }

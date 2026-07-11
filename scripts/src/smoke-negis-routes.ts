@@ -1642,8 +1642,15 @@ async function checkLeadsPageSource() {
     "В работе",
     "Записаны",
     "Потеряны",
-    // Status mapping (visual normalization only, no lead_stages table)
-    "normalizeLeadStatus",
+    // CRM6 structured pipeline with legacy fallback
+    '"/api/crm/lead-stages"',
+    '"/api/crm/lead-sources"',
+    "semanticGroupForLead",
+    "structuredStagesAvailable",
+    "structuredSourcesAvailable",
+    'data-testid="lead-stage-select"',
+    'data-testid="lead-source-select"',
+    'data-testid="lead-source-input"',
     "Новая",
     "Записана",
     "Потеряна",
@@ -1665,6 +1672,9 @@ async function checkLeadsPageSource() {
     "isAdminMode ? (",
     "client_id present:",
     "responsible_user_id present:",
+    "stage_id present:",
+    "source_id present:",
+    "meta_campaign_launch_id present:",
     // CRM4: lead → client conversion + appointment prefill
     "Создать клиента",
     "Клиент уже создан",
@@ -1693,6 +1703,18 @@ async function checkLeadsPageSource() {
   const crmServer = await readFile(path.join(repoRoot, "lib", "crm", "server.ts"), "utf8");
   if (!crmServer.includes("row.client_id = isUuid(clientId) ? clientId : null;")) {
     throw new Error("leads PATCH mapping must persist client_id (uuid-guarded)");
+  }
+  for (const marker of [
+    'table: "lead_stages"',
+    'table: "lead_sources"',
+    "buildLeadReferenceRow",
+    "does not belong to this workspace",
+    "row.status = firstString(stage.stage_key, stage.name)",
+    "row.source = readString(source.name)",
+  ]) {
+    if (!crmServer.includes(marker)) {
+      throw new Error(`CRM6 server mapping is missing "${marker}"`);
+    }
   }
   // Client-safe: no secrets, no raw storage internals in the leads screen.
   for (const forbidden of ["SERVICE_ROLE", "service_role", "ad-creatives-raw"]) {
@@ -1834,7 +1856,8 @@ async function checkLayoutFoundation() {
     "/api/crm/leads",
     "/api/crm/clients",
     "/api/crm/appointments",
-    "normalizeLeadStatus",
+    "semanticGroupForLead",
+    'status === "new" || status === "in_progress"',
     "isRepeatClient",
     "Не удалось проверить",
     // Revenue stays an honest placeholder until deals/sales exist
@@ -2020,6 +2043,11 @@ async function checkNoNewApiFiles() {
   if (!apiSource.includes("video-processing-jobs") || !apiSource.includes("handleVideoProcessingJobs")) {
     throw new Error("api/crm catch-all must route /api/crm/video-processing-jobs");
   }
+  for (const resource of ['"lead-stages"', '"lead-sources"']) {
+    if (!apiSource.includes(resource)) {
+      throw new Error(`api/crm catch-all must register ${resource}`);
+    }
+  }
   const migration = await readFile(path.join(repoRoot, "migrations", "018_video_processing_jobs_contract.sql"), "utf8");
   for (const marker of [
     "optimized_public_url",
@@ -2032,6 +2060,32 @@ async function checkNoNewApiFiles() {
   ]) {
     if (!migration.includes(marker)) {
       throw new Error(`migration 018 is missing ${marker}`);
+    }
+  }
+
+  const pipelineMigration = await readFile(path.join(repoRoot, "migrations", "019_crm_lead_pipeline_foundation.sql"), "utf8");
+  for (const marker of [
+    "create table if not exists public.lead_stages",
+    "create table if not exists public.lead_sources",
+    "unique (workspace_id, stage_key)",
+    "unique (workspace_id, source_key)",
+    "semantic_group in ('new', 'in_progress', 'booked', 'lost')",
+    "add column if not exists stage_id uuid",
+    "add column if not exists source_id uuid",
+    "add column if not exists meta_campaign_launch_id uuid",
+    "seed_default_lead_taxonomy",
+    "'legacy_' || md5",
+    "having count(distinct launch.id) = 1",
+  ]) {
+    if (!pipelineMigration.includes(marker)) {
+      throw new Error(`migration 019 is missing ${marker}`);
+    }
+  }
+
+  const pipelineDoc = await readFile(path.join(repoRoot, "docs", "CRM-LEAD-PIPELINE.md"), "utf8");
+  for (const marker of ["lead_stages", "lead_sources", "Dual-write", "workspace_id", "legacy_<hash>", "meta_campaign_launch_id"]) {
+    if (!pipelineDoc.toLowerCase().includes(marker.toLowerCase())) {
+      throw new Error(`CRM lead pipeline documentation is missing ${marker}`);
     }
   }
   console.log("API file layout checks: ok");
@@ -2227,6 +2281,20 @@ async function main() {
     name: "Smoke Client",
     phone: "+7 700 000 00 00",
     source: "smoke",
+  });
+  await checkCrmEndpoint("/api/crm/lead-stages", {
+    stageKey: "smoke_stage",
+    name: "Smoke stage",
+    semanticGroup: "in_progress",
+    sortOrder: 500,
+    isActive: true,
+  });
+  await checkCrmEndpoint("/api/crm/lead-sources", {
+    sourceKey: "smoke_source",
+    name: "Smoke source",
+    channel: "other",
+    sortOrder: 500,
+    isActive: true,
   });
   await checkCrmEndpoint("/api/crm/leads", {
     name: "Smoke Lead",
