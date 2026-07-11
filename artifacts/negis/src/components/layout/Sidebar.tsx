@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Link, useLocation } from 'wouter';
-import { BarChart2, Bot, CalendarDays, Clapperboard, Inbox, LayoutDashboard, Rocket, Settings, Users, LogOut, X, Check, KeyRound, User, type LucideIcon } from 'lucide-react';
+import { BadgeDollarSign, BarChart2, Bot, CalendarDays, Clapperboard, Inbox, LayoutDashboard, Rocket, Settings, Users, LogOut, X, Check, KeyRound, User, type LucideIcon } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
 import { supabase } from '@/lib/supabase';
 import { toast } from 'sonner';
@@ -14,6 +14,7 @@ const NAV: NavItem[] = [
   { href: '/leads', icon: Inbox, label: 'Заявки', roles: ['owner', 'manager', 'agent'] },
   { href: '/clients', icon: Users, label: 'CRM', roles: ['owner', 'manager', 'agent'] },
   { href: '/appointments', icon: CalendarDays, label: 'Записи', roles: ['owner', 'manager', 'agent', 'booking_agent'] },
+  { href: '/sales', icon: BadgeDollarSign, label: 'Продажи', roles: ['owner', 'manager', 'agent'] },
   { href: '/ads-automation', icon: Rocket, label: 'Реклама', roles: ['owner', 'manager'] },
   { href: '/content-studio', icon: Clapperboard, label: 'Контент', roles: ['owner', 'manager'] },
   { href: '/dashboard', icon: BarChart2, label: 'Аналитика', roles: ['owner', 'manager'] },

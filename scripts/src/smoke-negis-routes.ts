@@ -1859,6 +1859,110 @@ async function checkClientsPageSource() {
   console.log("Clients page checks: ok");
 }
 
+// CRM9c — real Sales UI over the existing workspace-scoped deals resource.
+async function checkSalesPageSource() {
+  const negisSrc = path.join(repoRoot, "artifacts", "negis", "src");
+  const source = await readFile(path.join(negisSrc, "pages", "SalesPage.tsx"), "utf8");
+  for (const marker of [
+    "Negis OS · CRM",
+    "Продажи",
+    "Оплаты, услуги и выручка клиники.",
+    "Добавить продажу",
+    "Продаж пока нет",
+    "Сумма оплаченных",
+    "Ожидает оплаты",
+    "Оплачена",
+    "Отменена",
+    "Возврат",
+    'useDemoCollection<Deal>("negis_demo_deals", dealsSeed',
+    'endpoint: "/api/crm/deals"',
+    'listKey: "deals"',
+    "tengeToAmountMinor",
+    "amountMinorToTengeInput",
+    'const paid = items.filter((deal) => deal.status === "paid");',
+    "paid.reduce((sum, deal) => sum + deal.amountMinor, 0)",
+    "loadReferenceCollection",
+    "negis_deal_prefill",
+    "handleLeadSelection",
+    "current.clientId || lead?.clientId",
+    "current.metaCampaignLaunchId || lead?.metaCampaignLaunchId",
+    'data-testid="deal-client-select"',
+    'data-testid="deal-lead-select"',
+    'data-testid="deal-appointment-select"',
+    'data-testid="deal-campaign-select"',
+    "Загружаем данные…",
+    "!loaded ? (",
+    "if (isRealWorkspace()) return [];",
+    "Технические данные продажи",
+    "deal id present:",
+    "client_id present:",
+    "lead_id present:",
+    "appointment_id present:",
+    "meta_campaign_launch_id present:",
+    "responsible_user_id present:",
+  ]) {
+    if (!source.includes(marker)) {
+      throw new Error(`Sales page is missing "${marker}"`);
+    }
+  }
+
+  // Client mode never renders raw linked IDs. Admin details expose presence only.
+  for (const forbidden of [
+    "publicUrl",
+    "raw_payload",
+    "META_ACCESS_TOKEN",
+    "accessToken",
+    "deal id: {deal.id}",
+    "client_id: {deal.clientId}",
+    "lead_id: {deal.leadId}",
+    "appointment_id: {deal.appointmentId}",
+    "meta_campaign_launch_id: {deal.metaCampaignLaunchId}",
+    "responsible_user_id: {deal.responsibleUserId}",
+    "costPerLead",
+    "cost_per_lead",
+    "returnOnInvestment",
+    "return_on_investment",
+    "revenueByCampaign",
+    "roiValue",
+    "romiValue",
+  ]) {
+    if (source.includes(forbidden)) {
+      throw new Error(`Sales page must not expose or calculate "${forbidden}"`);
+    }
+  }
+
+  const app = await readFile(path.join(negisSrc, "App.tsx"), "utf8");
+  if (!app.includes('import SalesPage from "@/pages/SalesPage"')) {
+    throw new Error("App must import the real SalesPage");
+  }
+  if (!app.includes('path="/sales" component={() => <ProtectedPage component={SalesPage} permission="crm" />}')) {
+    throw new Error("App must route /sales to SalesPage");
+  }
+  if (app.includes('path="/sales" component={() => <ProtectedPage component={DemoClients}')) {
+    throw new Error("App must no longer route /sales to DemoClients");
+  }
+
+  const sidebar = await readFile(path.join(negisSrc, "components", "layout", "Sidebar.tsx"), "utf8");
+  const topNav = await readFile(path.join(negisSrc, "components", "layout", "TopNav.tsx"), "utf8");
+  const mobileNav = await readFile(path.join(negisSrc, "components", "layout", "MobileNav.tsx"), "utf8");
+  const topbar = await readFile(path.join(negisSrc, "components", "layout", "Topbar.tsx"), "utf8");
+  for (const [name, navSource] of [["Sidebar", sidebar], ["TopNav", topNav], ["MobileNav", mobileNav], ["Topbar", topbar]] as const) {
+    if (!navSource.includes("/sales") || !navSource.includes("Продажи")) {
+      throw new Error(`${name} must expose the Sales page with a friendly label`);
+    }
+  }
+
+  const leads = await readFile(path.join(negisSrc, "pages", "LeadsPage.tsx"), "utf8");
+  const clients = await readFile(path.join(negisSrc, "pages", "ClientsPage.tsx"), "utf8");
+  for (const [name, pageSource] of [["LeadsPage", leads], ["ClientsPage", clients]] as const) {
+    if (!pageSource.includes("negis_deal_prefill") || !pageSource.includes("Оформить продажу") || !pageSource.includes('href="/sales"')) {
+      throw new Error(`${name} must provide the Sales prefill entry point`);
+    }
+  }
+
+  console.log("Sales page checks: ok");
+}
+
 // CRM6.1 — production (UUID workspace) must never render or persist demo data.
 async function checkCrmProductionGuards() {
   const negisSrc = path.join(repoRoot, "artifacts", "negis", "src");
@@ -1904,6 +2008,13 @@ async function checkCrmProductionGuards() {
   for (const marker of ["Загружаем данные…", "!loaded ? (", "if (isRealWorkspace()) return [];"]) {
     if (!clients.includes(marker)) {
       throw new Error(`ClientsPage production guard is missing "${marker}"`);
+    }
+  }
+
+  const sales = await readFile(path.join(negisSrc, "pages", "SalesPage.tsx"), "utf8");
+  for (const marker of ["Загружаем данные…", "!loaded ? (", "if (isRealWorkspace()) return [];", 'useDemoCollection<Deal>("negis_demo_deals", dealsSeed']) {
+    if (!sales.includes(marker)) {
+      throw new Error(`SalesPage production guard is missing "${marker}"`);
     }
   }
 
@@ -1980,6 +2091,11 @@ async function checkCrmDealsFoundation() {
     "paid_at",
     "readWorkspaceReference",
     "Future scope",
+    "CRM9c",
+    "UI ₸ → API `amountMinor`",
+    "negis_deal_prefill",
+    "negis_demo_deals",
+    "CRM9d",
   ]) {
     if (!doc.includes(marker)) {
       throw new Error(`CRM deals documentation is missing ${marker}`);
@@ -2460,12 +2576,14 @@ async function main() {
   await checkPhotoCreativeBuilder();
   await checkLeadsPageSource();
   await checkClientsPageSource();
+  await checkSalesPageSource();
   await checkCrmProductionGuards();
   await checkNoNewApiFiles();
   for (const route of [
     "/ai-control-center",
     "/dashboard",
     "/clients",
+    "/sales",
     "/appointments",
     "/booking",
     "/reception",

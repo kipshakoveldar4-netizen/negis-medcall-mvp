@@ -24,7 +24,7 @@ const PAGE_LABELS: Record<string, string> = {
   '/dashboard': 'Дашборд',
   '/booking': 'Запись',
   '/reception': 'Ресепшн',
-  '/sales': 'Клиенты',
+  '/sales': 'Продажи',
   '/tasks': 'Задачи',
   '/chat': 'Чат',
   '/marketplace': 'Маркетплейс',

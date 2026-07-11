@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useLocation } from "wouter";
 import {
+  BadgeDollarSign,
   BarChart2,
   CalendarDays,
   Clapperboard,
@@ -37,6 +38,7 @@ const primaryItems: MobileNavItem[] = [
 
 const drawerItems: MobileNavItem[] = [
   { href: "/ai-control-center", label: "AI Control Center", icon: LayoutDashboard, permission: "dashboard" },
+  { href: "/sales", label: "Продажи", icon: BadgeDollarSign, permission: "crm" },
   { href: "/ads-automation", label: "AI запуск рекламы", icon: Rocket, permission: "ads" },
   { href: "/content-studio", label: "AI Контент-студия", icon: Clapperboard, permission: "ads" },
   { href: "/ads", label: "Реклама", icon: Megaphone, permission: "ads" },

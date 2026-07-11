@@ -21,10 +21,10 @@ import ContentStudio from "@/pages/ContentStudio";
 import AdminCenter from "@/pages/AdminCenter";
 import LeadsPage from "@/pages/LeadsPage";
 import ClientsPage from "@/pages/ClientsPage";
+import SalesPage from "@/pages/SalesPage";
 import {
   DemoCalls,
   DemoChat,
-  DemoClients,
   DemoMarket,
   DemoReception,
   DemoReports,
@@ -146,7 +146,7 @@ function Router() {
       <Route path="/appointments" component={() => <ProtectedPage component={AppointmentsPage} permission="booking" />} />
       <Route path="/reception" component={() => <ProtectedPage component={DemoReception} permission="reception" />} />
       <Route path="/calls" component={() => <ProtectedPage component={DemoCalls} permission="reception" />} />
-      <Route path="/sales" component={() => <ProtectedPage component={DemoClients} permission="crm" />} />
+      <Route path="/sales" component={() => <ProtectedPage component={SalesPage} permission="crm" />} />
       <Route path="/leads" component={() => <ProtectedPage component={LeadsPage} permission="crm" />} />
       <Route path="/clients" component={() => <ProtectedPage component={ClientsPage} permission="crm" />} />
       <Route path="/tasks" component={() => <ProtectedPage component={DemoTasks} permission="tasks" />} />

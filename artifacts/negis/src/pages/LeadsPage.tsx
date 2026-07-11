@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import { Link } from "wouter";
 import {
+  BadgeDollarSign,
   CalendarCheck,
   CheckCircle2,
   ClipboardList,
@@ -93,6 +94,7 @@ const leadsSeed: Lead[] = [
 const AI_RECOMMENDATION_PLACEHOLDER = "AI-рекомендация появится после подключения CRM-аналитики.";
 const LEADS_UI_MODE_KEY = "negis_leads_ui_mode";
 const APPOINTMENT_PREFILL_KEY = "negis_appointment_prefill";
+const DEAL_PREFILL_KEY = "negis_deal_prefill";
 
 const inputStyle: CSSProperties = {
   width: "100%",
@@ -183,6 +185,19 @@ function saveAppointmentPrefill(lead: Lead) {
       source: lead.source,
       service: lead.campaign,
       notes: lead.campaign ? `Заявка из кампании «${lead.campaign}»` : "Заявка из CRM",
+    }),
+  );
+}
+
+function saveDealPrefill(lead: Lead) {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(
+    DEAL_PREFILL_KEY,
+    JSON.stringify({
+      title: lead.campaign || "",
+      leadId: lead.id,
+      clientId: lead.clientId || "",
+      metaCampaignLaunchId: lead.metaCampaignLaunchId || "",
     }),
   );
 }
@@ -1265,6 +1280,10 @@ export default function LeadsPage() {
               <Link href="/appointments" className="neu-btn justify-center" onClick={() => handleBookFromLead(detailLead)}>
                 <CalendarCheck size={16} />
                 Записать
+              </Link>
+              <Link href="/sales" className="neu-btn-primary justify-center" onClick={() => saveDealPrefill(detailLead)}>
+                <BadgeDollarSign size={16} />
+                Оформить продажу
               </Link>
             </div>
           </div>

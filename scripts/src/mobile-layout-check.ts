@@ -12,6 +12,7 @@ const baseUrl = (
 const routes = [
   "/dashboard",
   "/clients",
+  "/sales",
   "/leads",
   "/appointments",
   "/booking",
@@ -106,11 +107,31 @@ async function checkLeadsPipelineMobileSource() {
   console.log("/leads pipeline controls: mobile-safe source markers ok");
 }
 
+async function checkSalesMobileSource() {
+  const salesPath = join(repoRoot, "artifacts", "negis", "src", "pages", "SalesPage.tsx");
+  const source = await readFile(salesPath, "utf8");
+  for (const marker of [
+    "grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5",
+    "grid gap-3 xl:grid-cols-2",
+    "max-h-[90vh] w-full max-w-2xl overflow-y-auto",
+    "grid gap-3 sm:grid-cols-2",
+    "flex flex-col gap-2 sm:flex-row",
+    "flex flex-wrap justify-end gap-2",
+  ]) {
+    if (!source.includes(marker)) {
+      throw new Error(`Sales mobile marker missing: ${marker}`);
+    }
+  }
+
+  console.log("/sales controls: mobile-safe source markers ok");
+}
+
 async function main() {
   console.log(`Mobile layout smoke at ${baseUrl}`);
   await checkManifest();
   await checkResponsiveCss();
   await checkLeadsPipelineMobileSource();
+  await checkSalesMobileSource();
   for (const route of routes) {
     await checkRoute(route);
   }

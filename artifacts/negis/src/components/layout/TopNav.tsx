@@ -33,7 +33,7 @@ const NAV = [
   { href: '/dashboard', icon: BarChart2, label: 'Дашборд', permission: 'dashboard' },
   { href: '/appointments', icon: CalendarDays, label: 'Запись', permission: 'booking' },
   { href: '/reception', icon: Building2, label: 'Ресепшн', permission: 'reception' },
-  { href: '/sales', icon: Briefcase, label: 'Клиенты', permission: 'crm' },
+  { href: '/sales', icon: Briefcase, label: 'Продажи', permission: 'crm' },
   { href: '/tasks', icon: ClipboardList, label: 'Задачи', permission: 'tasks' },
   { href: '/chat', icon: MessageCircle, label: 'Чат', permission: 'chat' },
   { href: '/marketplace', icon: Store, label: 'Маркет', permission: 'marketplace' },

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import { Link } from "wouter";
 import {
+  BadgeDollarSign,
   CalendarCheck,
   CheckCircle2,
   ClipboardList,
@@ -29,7 +30,8 @@ import { formatPhone, phoneDigits, toTelHref, toWhatsappHref } from "@/lib/phone
 // migration 010) via useDemoCollection: Supabase when configured, localStorage
 // fallback otherwise. Related history (заявки/записи/звонки) is read through the
 // existing leads/appointments/calls endpoints and matched by client_id or phone.
-// No migrations, no new API files, no deals/sales yet.
+// Sales entry points only hand a client prefill to /sales; this screen keeps its
+// existing client CRUD and related-history responsibilities.
 // TODO(CRM): /ai-control-center can later count clients from /api/crm/clients.
 
 type ClientStatusKey = "new" | "active" | "repeat" | "inactive";
@@ -93,6 +95,7 @@ const AI_RECOMMENDATION_PLACEHOLDER = "AI-рекомендация по клие
 const HISTORY_EMPTY_MESSAGE = "История появится после новых заявок, записей и звонков.";
 const CLIENTS_UI_MODE_KEY = "negis_clients_ui_mode";
 const APPOINTMENT_PREFILL_KEY = "negis_appointment_prefill";
+const DEAL_PREFILL_KEY = "negis_deal_prefill";
 
 const inputStyle: CSSProperties = {
   width: "100%",
@@ -244,6 +247,11 @@ function saveAppointmentPrefill(client: Client) {
     APPOINTMENT_PREFILL_KEY,
     JSON.stringify({ clientName: client.name, phone: client.phone, source: client.source }),
   );
+}
+
+function saveDealPrefill(client: Client) {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(DEAL_PREFILL_KEY, JSON.stringify({ clientId: client.id, clientName: client.name }));
 }
 
 type ClientForm = { name: string; phone: string; whatsapp: string; source: string; status: ClientStatusKey; lastVisit: string; comment: string };
@@ -833,6 +841,10 @@ export default function ClientsPage() {
               <Link href="/appointments" className="neu-btn justify-center" onClick={() => saveAppointmentPrefill(detailClient)}>
                 <CalendarCheck size={16} />
                 Записать
+              </Link>
+              <Link href="/sales" className="neu-btn-primary justify-center" onClick={() => saveDealPrefill(detailClient)}>
+                <BadgeDollarSign size={16} />
+                Оформить продажу
               </Link>
             </div>
           </div>
