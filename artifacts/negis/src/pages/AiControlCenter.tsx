@@ -315,7 +315,15 @@ export default function AiControlCenter() {
   const [leadsState, setLeadsState] = useState<HealthState>("loading");
   const [clientsState, setClientsState] = useState<HealthState>("loading");
   const [appointmentsState, setAppointmentsState] = useState<HealthState>("loading");
-  const [crmCounts, setCrmCounts] = useState({ newLeads: 0, unprocessedLeads: 0, appointmentsToday: 0, repeatClients: 0 });
+  const [crmCounts, setCrmCounts] = useState({
+    newLeads: 0,
+    unprocessedLeads: 0,
+    appointmentsToday: 0,
+    repeatClients: 0,
+    // CRM8: attribution counts only — no CPL/ROI/revenue math.
+    attributedLeads: 0,
+    unattributedLeads: 0,
+  });
 
   useEffect(() => {
     let cancelled = false;
@@ -351,6 +359,9 @@ export default function AiControlCenter() {
         repeatClients: clientsRes.items.filter((client) =>
           isRepeatClient(str(client.status), str(client.lastVisit) || str(client.last_visit_at)),
         ).length,
+        // Attributed = lead linked to a Meta launch via meta_campaign_launch_id.
+        attributedLeads: leadsRes.items.filter((lead) => Boolean(str(lead.metaCampaignLaunchId) || str(lead.meta_campaign_launch_id))).length,
+        unattributedLeads: leadsRes.items.filter((lead) => !(str(lead.metaCampaignLaunchId) || str(lead.meta_campaign_launch_id))).length,
       });
 
       // API health
@@ -493,6 +504,16 @@ export default function AiControlCenter() {
       explanation: `Пациентов для повторного визита: ${crmCounts.repeatClients}. Напомните о себе в WhatsApp.`,
       action: "Открыть клиентов",
       openHref: "/clients",
+    });
+  }
+  // CRM8: only when leads exist and some are missing attribution — no CPL/ROI math.
+  if (crmCounts.unattributedLeads > 0) {
+    recommendations.push({
+      title: "Свяжите заявки с рекламными кампаниями",
+      priority: "low",
+      explanation: `Заявок без рекламной кампании: ${crmCounts.unattributedLeads}. Это поможет позже считать эффективность рекламы.`,
+      action: "Открыть заявки",
+      openHref: "/leads",
     });
   }
   if (failedCount > 0) {

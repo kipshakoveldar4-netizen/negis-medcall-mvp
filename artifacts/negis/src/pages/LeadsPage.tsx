@@ -521,6 +521,8 @@ export default function LeadsPage() {
   const [conversionMatched, setConversionMatched] = useState<Record<string, boolean>>({});
   // CRM7: safe Meta launch records offered for lead attribution.
   const [campaignLaunchOptions, setCampaignLaunchOptions] = useState<CampaignLaunchOption[]>([]);
+  // CRM8: secondary attribution filter — works on top of stage filter and search.
+  const [attributionFilter, setAttributionFilter] = useState<"all" | "with_ads" | "without_ads">("all");
 
   useEffect(() => {
     let cancelled = false;
@@ -589,6 +591,18 @@ export default function LeadsPage() {
     ...activeStages.map((stage) => ({ id: stage.id, label: stage.name })),
   ];
 
+  // CRM8: attribution counts — pure lead/meta_campaign_launch_id counting, no CPL/ROI.
+  const attributionCounts = useMemo(() => {
+    const attributed = items.filter((lead) => Boolean(lead.metaCampaignLaunchId)).length;
+    return { attributed, unattributed: items.length - attributed };
+  }, [items]);
+
+  const attributionFilterOptions: Array<{ id: typeof attributionFilter; label: string }> = [
+    { id: "all", label: "Все" },
+    { id: "with_ads", label: "С рекламой" },
+    { id: "without_ads", label: "Без рекламы" },
+  ];
+
   const visibleLeads = useMemo(() => {
     const query = search.trim().toLowerCase();
     return items.filter((lead) => {
@@ -599,10 +613,13 @@ export default function LeadsPage() {
         const legacySemanticMatch = !lead.stageId && selectedStage.isDefault && semanticGroupForLead(lead) === selectedStage.semanticGroup;
         if (!exactStructuredMatch && !keyMatch && !legacySemanticMatch) return false;
       }
+      // CRM8: attribution filter — "С рекламой" keeps only leads linked to a launch.
+      if (attributionFilter === "with_ads" && !lead.metaCampaignLaunchId) return false;
+      if (attributionFilter === "without_ads" && lead.metaCampaignLaunchId) return false;
       if (!query) return true;
       return [lead.name, lead.phone, leadSourceName(lead, activeSources), lead.campaign].some((field) => (field || "").toLowerCase().includes(query));
     });
-  }, [activeSources, activeStages, items, filter, search]);
+  }, [activeSources, activeStages, attributionFilter, items, filter, search]);
 
   const detailLead = detailId ? items.find((lead) => lead.id === detailId) || null : null;
 
@@ -843,6 +860,16 @@ export default function LeadsPage() {
           ))}
         </section>
 
+        {/* CRM8: attribution counts in a compact strip — mobile stays uncluttered. */}
+        <section className="negis-glass flex flex-wrap items-center gap-x-6 gap-y-1.5 p-4 text-sm" aria-label="Атрибуция рекламы">
+          <p className="font-semibold" style={{ color: "var(--negis-muted)" }}>
+            Связаны с рекламой: <span className="font-black" style={{ color: "var(--negis-text)" }}>{attributionCounts.attributed}</span>
+          </p>
+          <p className="font-semibold" style={{ color: "var(--negis-muted)" }}>
+            Без рекламной кампании: <span className="font-black" style={{ color: "var(--negis-text)" }}>{attributionCounts.unattributed}</span>
+          </p>
+        </section>
+
         {/* Filters + search */}
         <section className="negis-glass p-4 sm:p-5">
           <div className="flex flex-wrap gap-2" aria-label="Фильтры заявок">
@@ -860,6 +887,29 @@ export default function LeadsPage() {
                   }
                   aria-pressed={active}
                   onClick={() => setFilter(option.id)}
+                >
+                  {option.label}
+                </button>
+              );
+            })}
+          </div>
+          {/* CRM8: secondary attribution filter (independent of stage filter). */}
+          <div className="mt-3 flex flex-wrap items-center gap-2" aria-label="Фильтр по рекламе">
+            <span className="text-xs font-black uppercase tracking-[0.05em]" style={{ color: "var(--negis-muted)" }}>Реклама:</span>
+            {attributionFilterOptions.map((option) => {
+              const active = attributionFilter === option.id;
+              return (
+                <button
+                  key={option.id}
+                  type="button"
+                  className="rounded-full border px-3 py-1.5 text-xs font-black transition"
+                  style={
+                    active
+                      ? { background: "var(--negis-ai)", borderColor: "var(--negis-ai)", color: "#FFFFFF" }
+                      : { background: "var(--negis-surface)", borderColor: "var(--negis-border)", color: "var(--negis-muted)" }
+                  }
+                  aria-pressed={active}
+                  onClick={() => setAttributionFilter(option.id)}
                 >
                   {option.label}
                 </button>
@@ -907,6 +957,7 @@ export default function LeadsPage() {
               className="neu-btn justify-center"
               onClick={() => {
                 setFilter("all");
+                setAttributionFilter("all");
                 setSearch("");
               }}
             >

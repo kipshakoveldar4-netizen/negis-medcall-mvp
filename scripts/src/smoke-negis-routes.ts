@@ -1709,9 +1709,33 @@ async function checkLeadsPageSource() {
     'status === "failed"',
     // Linked launch persists via metaCampaignLaunchId (uuid or explicit unlink).
     "metaCampaignLaunchId: form.metaCampaignLaunchId",
+    // CRM8 — attribution metrics foundation (counts + secondary filter only)
+    "attributionFilter",
+    "attributionCounts",
+    "С рекламой",
+    "Без рекламы",
+    "Связаны с рекламой",
+    "Без рекламной кампании",
+    'attributionFilter === "with_ads" && !lead.metaCampaignLaunchId',
   ]) {
     if (!source.includes(marker)) {
       throw new Error(`Leads page is missing "${marker}"`);
+    }
+  }
+  // CRM8 counts leads only. Guard against actual metric implementations while
+  // allowing comments that explicitly document their absence.
+  for (const forbidden of [
+    "costPerLead",
+    "cost_per_lead",
+    "attributedRevenue",
+    "returnOnInvestment",
+    "return_on_investment",
+    'label: "CPL"',
+    'label: "ROI"',
+    'label: "ROMI"',
+  ]) {
+    if (source.includes(forbidden)) {
+      throw new Error(`Leads page must not implement attribution metric "${forbidden}"`);
     }
   }
 
@@ -1954,13 +1978,32 @@ async function checkLayoutFoundation() {
     "Частично готово",
     // CRM7 — attribution readiness (leads + meta-launches endpoints responded)
     "Атрибуция рекламы",
+    // CRM8 — attribution counts + rule-based recommendation (no CPL/ROI)
+    "attributedLeads",
+    "unattributedLeads",
+    "Свяжите заявки с рекламными кампаниями",
+    "Это поможет позже считать эффективность рекламы.",
   ]) {
     if (!acc.includes(marker)) {
       throw new Error(`AI Control Center MVP is missing "${marker}"`);
     }
   }
-  // Client view must not leak raw technical labels or invented revenue.
-  for (const forbidden of ["publicUrl", "video_id", "raw_payload", "₸"]) {
+  // Client view must not leak raw technical labels, invented revenue, or
+  // ad-efficiency calculations. Documentation comments may name deferred metrics.
+  for (const forbidden of [
+    "publicUrl",
+    "video_id",
+    "raw_payload",
+    "₸",
+    "costPerLead",
+    "cost_per_lead",
+    "attributedRevenue",
+    "returnOnInvestment",
+    "return_on_investment",
+    'label: "CPL"',
+    'label: "ROI"',
+    'label: "ROMI"',
+  ]) {
     if (acc.includes(forbidden)) {
       throw new Error(`AI Control Center must not show technical label "${forbidden}"`);
     }
@@ -2157,6 +2200,7 @@ async function checkNoNewApiFiles() {
   }
 
   const pipelineDoc = await readFile(path.join(repoRoot, "docs", "CRM-LEAD-PIPELINE.md"), "utf8");
+  const normalizedPipelineDoc = pipelineDoc.replace(/\s+/g, " ").toLowerCase();
   for (const marker of [
     "lead_stages",
     "lead_sources",
@@ -2168,8 +2212,14 @@ async function checkNoNewApiFiles() {
     "Campaign attribution",
     "Рекламная кампания",
     "future scope",
+    // CRM8 — safe counts only; efficiency and sales/deals remain deferred.
+    "CRM8",
+    "Связаны с рекламой",
+    "Без рекламной кампании",
+    "ROI/ROMI",
+    "продаж/deals",
   ]) {
-    if (!pipelineDoc.toLowerCase().includes(marker.toLowerCase())) {
+    if (!normalizedPipelineDoc.includes(marker.toLowerCase())) {
       throw new Error(`CRM lead pipeline documentation is missing ${marker}`);
     }
   }
