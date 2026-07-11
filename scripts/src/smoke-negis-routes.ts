@@ -1819,6 +1819,62 @@ async function checkClientsPageSource() {
   console.log("Clients page checks: ok");
 }
 
+// CRM6.1 — production (UUID workspace) must never render or persist demo data.
+async function checkCrmProductionGuards() {
+  const negisSrc = path.join(repoRoot, "artifacts", "negis", "src");
+  const storage = await readFile(path.join(negisSrc, "lib", "demoStorage.ts"), "utf8");
+  for (const marker of [
+    // Workspace detection shared with pages (same discriminator as the server).
+    "export function readWorkspaceId",
+    "export function isRealWorkspace",
+    // Production collections start empty and never show seeds before the API answers.
+    "const [productionMode] = useState(() => Boolean(endpoint) && isRealWorkspace());",
+    "useState<TItem[]>(() => (productionMode ? [] : seed))",
+    "const [loaded, setLoaded] = useState(() => !productionMode);",
+    // Production skips the demo localStorage hydrate/write entirely.
+    "if (productionMode) return;",
+    // Supabase data is never cached into negis_demo_* keys.
+    "if (!productionMode) writeDemoStorage(key, mapped);",
+    "if (!productionMode) writeDemoStorage(key, value);",
+    // loaded settles after the first API response (success or failure).
+    "setLoaded(true)",
+    // Demo mode keeps the original seed + localStorage fallback.
+    "const nextItems = Array.isArray(saved) && saved.length > 0 ? saved : seed;",
+  ]) {
+    if (!storage.includes(marker)) {
+      throw new Error(`demoStorage production guard is missing "${marker}"`);
+    }
+  }
+
+  const leads = await readFile(path.join(negisSrc, "pages", "LeadsPage.tsx"), "utf8");
+  for (const marker of [
+    "Загружаем данные…",
+    "!loaded ? (",
+    // Production duplicate check never uses demo clients.
+    "if (isRealWorkspace()) return [];",
+    // Production conversion never writes into negis_demo_clients.
+    "if (!isRealWorkspace()) {",
+  ]) {
+    if (!leads.includes(marker)) {
+      throw new Error(`LeadsPage production guard is missing "${marker}"`);
+    }
+  }
+
+  const clients = await readFile(path.join(negisSrc, "pages", "ClientsPage.tsx"), "utf8");
+  for (const marker of ["Загружаем данные…", "!loaded ? (", "if (isRealWorkspace()) return [];"]) {
+    if (!clients.includes(marker)) {
+      throw new Error(`ClientsPage production guard is missing "${marker}"`);
+    }
+  }
+
+  const controlCenter = await readFile(path.join(negisSrc, "pages", "AiControlCenter.tsx"), "utf8");
+  if (!controlCenter.includes("if (isRealWorkspace()) return { responded: false, items: [] };")) {
+    throw new Error("AiControlCenter must not count demo CRM data for a UUID workspace");
+  }
+
+  console.log("CRM production guard checks: ok");
+}
+
 async function checkLayoutFoundation() {
   const pagesDir = path.join(repoRoot, "artifacts", "negis", "src", "pages");
   const layoutDir = path.join(repoRoot, "artifacts", "negis", "src", "components", "layout");
@@ -2199,6 +2255,7 @@ async function main() {
   await checkPhotoCreativeBuilder();
   await checkLeadsPageSource();
   await checkClientsPageSource();
+  await checkCrmProductionGuards();
   await checkNoNewApiFiles();
   for (const route of [
     "/ai-control-center",

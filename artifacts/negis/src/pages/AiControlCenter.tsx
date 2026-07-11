@@ -20,7 +20,7 @@ import {
 } from "lucide-react";
 import { PageLayout } from "@/components/layout/PageLayout";
 import { apiUrl } from "@/lib/api";
-import { readDemoStorage } from "@/lib/demoStorage";
+import { readDemoStorage, isRealWorkspace } from "@/lib/demoStorage";
 import { semanticGroupForLead } from "@/lib/leadPipeline";
 import { defaultThemePresetId, getThemePreset } from "@/lib/themePresets";
 
@@ -161,6 +161,9 @@ async function fetchCrmList(path: string, listKey: string, demoKey: string): Pro
     const rawItems = asRecord(body.data)[listKey];
     return { responded: true, items: Array.isArray(rawItems) ? rawItems.map((item) => asRecord(item)) : [] };
   }
+  // Production (UUID workspace): a non-supabase answer means the data is genuinely
+  // unavailable — report an honest failure instead of counting demo localStorage.
+  if (isRealWorkspace()) return { responded: false, items: [] };
   return { responded: true, items: readDemoStorage<unknown[]>(demoKey, []).map((item) => asRecord(item)) };
 }
 

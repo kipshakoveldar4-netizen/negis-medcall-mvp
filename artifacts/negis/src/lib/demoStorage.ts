@@ -40,7 +40,7 @@ export function writeDemoStorage<TValue>(key: string, value: TValue) {
   window.localStorage.setItem(key, JSON.stringify(value));
 }
 
-function readWorkspaceId(): string {
+export function readWorkspaceId(): string {
   if (typeof window === "undefined") return "demo-workspace";
 
   try {
@@ -72,6 +72,14 @@ function readWorkspaceId(): string {
   }
 }
 
+// Same discriminator as the server (lib/crm/server.ts isUuid): a UUID workspace is
+// Supabase-backed production; anything else ("demo-workspace") is local demo mode.
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+export function isRealWorkspace(workspaceId: string = readWorkspaceId()): boolean {
+  return UUID_PATTERN.test(workspaceId);
+}
+
 async function safeJson<TData>(response: globalThis.Response): Promise<ApiResponse<TData> | null> {
   const text = await response.text();
   if (!text) return null;
@@ -88,7 +96,6 @@ export function useDemoCollection<TItem extends { id: string }>(
   seed: TItem[],
   options: ApiCollectionOptions<TItem> = {},
 ) {
-  const [items, setItems] = useState<TItem[]>(seed);
   const {
     endpoint,
     listKey = "items",
@@ -98,7 +105,16 @@ export function useDemoCollection<TItem extends { id: string }>(
     fromApi,
   } = options;
 
+  // Production = UUID workspace with an API-backed collection: never render demo
+  // seeds, never read/write the negis_demo_* localStorage cache, and never fall
+  // back to demo data. Demo workspaces keep the original behavior untouched.
+  const [productionMode] = useState(() => Boolean(endpoint) && isRealWorkspace());
+  const [items, setItems] = useState<TItem[]>(() => (productionMode ? [] : seed));
+  // loaded: demo mode is ready immediately; production waits for the first API settle.
+  const [loaded, setLoaded] = useState(() => !productionMode);
+
   useEffect(() => {
+    if (productionMode) return;
     const raw = typeof window === "undefined" ? null : window.localStorage.getItem(key);
     const saved = raw ? readDemoStorage<TItem[] | null>(key, null) : null;
     const nextItems = Array.isArray(saved) && saved.length > 0 ? saved : seed;
@@ -106,7 +122,7 @@ export function useDemoCollection<TItem extends { id: string }>(
     if (!raw || !Array.isArray(saved) || saved.length === 0) {
       writeDemoStorage(key, nextItems);
     }
-  }, [key, seed]);
+  }, [key, seed, productionMode]);
 
   useEffect(() => {
     if (!endpoint) return;
@@ -125,6 +141,7 @@ export function useDemoCollection<TItem extends { id: string }>(
           body?.success !== true ||
           body.mode !== "supabase"
         ) {
+          // Production stays empty (honest state) — no demo fallback.
           return;
         }
 
@@ -133,9 +150,12 @@ export function useDemoCollection<TItem extends { id: string }>(
 
         const mapped = rawItems.map((item) => (fromApi ? fromApi(item) : (item as TItem)));
         setItems(mapped);
-        writeDemoStorage(key, mapped);
+        // Supabase data must never be cached into the demo localStorage keys.
+        if (!productionMode) writeDemoStorage(key, mapped);
       } catch {
-        // Keep localStorage seed/data as the offline fallback.
+        // Demo keeps localStorage seed/data as the offline fallback; production stays empty.
+      } finally {
+        if (!cancelled) setLoaded(true);
       }
     };
 
@@ -144,12 +164,12 @@ export function useDemoCollection<TItem extends { id: string }>(
     return () => {
       cancelled = true;
     };
-  }, [endpoint, fromApi, key, listKey, seed]);
+  }, [endpoint, fromApi, key, listKey, seed, productionMode]);
 
   const setStoredItems = (next: TItem[] | ((current: TItem[]) => TItem[])) => {
     setItems((current) => {
       const value = typeof next === "function" ? next(current) : next;
-      writeDemoStorage(key, value);
+      if (!productionMode) writeDemoStorage(key, value);
       return value;
     });
   };
@@ -208,5 +228,5 @@ export function useDemoCollection<TItem extends { id: string }>(
     })();
   };
 
-  return { items, setItems: setStoredItems, addItem, updateItem };
+  return { items, loaded, setItems: setStoredItems, addItem, updateItem };
 }

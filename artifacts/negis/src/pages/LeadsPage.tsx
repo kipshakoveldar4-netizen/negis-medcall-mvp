@@ -21,7 +21,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { PageLayout } from "@/components/layout/PageLayout";
-import { useDemoCollection, readDemoStorage, writeDemoStorage } from "@/lib/demoStorage";
+import { useDemoCollection, readDemoStorage, writeDemoStorage, isRealWorkspace } from "@/lib/demoStorage";
 import { apiUrl } from "@/lib/api";
 import {
   FALLBACK_LEAD_SOURCES,
@@ -254,8 +254,10 @@ async function loadExistingClients(): Promise<ExistingClient[]> {
       return body.data.clients.map(clientFromRecord);
     }
   } catch {
-    // Network/API problems fall through to demo storage.
+    // Network/API problems fall through to demo storage (demo mode only).
   }
+  // Production duplicate check must never run against demo clients.
+  if (isRealWorkspace()) return [];
   return readDemoStorage<unknown[]>("negis_demo_clients", []).map(clientFromRecord);
 }
 
@@ -396,7 +398,7 @@ function leadPatchToApi(patch: Partial<Lead>): Record<string, unknown> {
 }
 
 export default function LeadsPage() {
-  const { items, addItem, updateItem } = useDemoCollection<Lead>("negis_demo_leads", leadsSeed, {
+  const { items, loaded, addItem, updateItem } = useDemoCollection<Lead>("negis_demo_leads", leadsSeed, {
     endpoint: "/api/crm/leads",
     listKey: "leads",
     itemKey: "item",
@@ -658,8 +660,11 @@ export default function LeadsPage() {
         // Offline/demo: the local client below still keeps the flow working.
       }
 
-      // Show the client in /clients immediately (shared demo storage, newest first).
-      writeDemoStorage("negis_demo_clients", [savedClient, ...readDemoStorage<unknown[]>("negis_demo_clients", []).map(clientFromRecord).filter((client) => client.id !== savedClient.id)]);
+      // Demo mode: show the client in /clients immediately (shared demo storage,
+      // newest first). Production clients live in Supabase only — never in demo keys.
+      if (!isRealWorkspace()) {
+        writeDemoStorage("negis_demo_clients", [savedClient, ...readDemoStorage<unknown[]>("negis_demo_clients", []).map(clientFromRecord).filter((client) => client.id !== savedClient.id)]);
+      }
 
       // Link the lead and move a fresh lead into work (never downgrade booked/lost).
       const inProgressStage = activeStages.find((stage) => stage.isDefault && stage.semanticGroup === "in_progress")
@@ -762,8 +767,13 @@ export default function LeadsPage() {
           </label>
         </section>
 
-        {/* List / empty state */}
-        {items.length === 0 ? (
+        {/* Loading (production waits for the first Supabase response) / list / empty state */}
+        {!loaded ? (
+          <section className="negis-glass flex min-h-40 flex-col items-center justify-center gap-3 p-8 text-center" aria-live="polite">
+            <Loader2 className="animate-spin" size={22} style={{ color: "var(--negis-primary)" }} />
+            <p className="text-sm font-bold" style={{ color: "var(--negis-muted)" }}>Загружаем данные…</p>
+          </section>
+        ) : items.length === 0 ? (
           <section className="negis-glass-hero flex flex-col items-center gap-3 p-8 text-center">
             <div className="flex h-14 w-14 items-center justify-center rounded-2xl" style={{ background: "var(--negis-primary-soft)", color: "var(--negis-primary)" }}>
               <Inbox size={24} />

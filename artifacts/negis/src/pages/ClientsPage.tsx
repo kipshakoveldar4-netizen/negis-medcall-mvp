@@ -20,7 +20,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { PageLayout } from "@/components/layout/PageLayout";
-import { useDemoCollection, readDemoStorage } from "@/lib/demoStorage";
+import { useDemoCollection, readDemoStorage, isRealWorkspace } from "@/lib/demoStorage";
 import { apiUrl } from "@/lib/api";
 import { formatPhone, phoneDigits, toTelHref, toWhatsappHref } from "@/lib/phone";
 
@@ -224,8 +224,10 @@ async function loadRelatedCollection<TItem>(
       return mapAll(body.data?.[listKey]);
     }
   } catch {
-    // Network/API problems fall through to the demo storage below.
+    // Network/API problems fall through to the demo storage below (demo mode only).
   }
+  // Production related history comes from Supabase only — never from demo keys.
+  if (isRealWorkspace()) return [];
   return mapAll(readDemoStorage<unknown[]>(demoKey, []));
 }
 
@@ -249,7 +251,7 @@ type ClientForm = { name: string; phone: string; whatsapp: string; source: strin
 const emptyForm: ClientForm = { name: "", phone: "", whatsapp: "", source: "", status: "new", lastVisit: "", comment: "" };
 
 export default function ClientsPage() {
-  const { items, addItem, updateItem } = useDemoCollection<Client>("negis_demo_clients", clientsSeed, {
+  const { items, loaded, addItem, updateItem } = useDemoCollection<Client>("negis_demo_clients", clientsSeed, {
     endpoint: "/api/crm/clients",
     listKey: "clients",
     itemKey: "item",
@@ -534,8 +536,13 @@ export default function ClientsPage() {
           </label>
         </section>
 
-        {/* List / empty state */}
-        {items.length === 0 ? (
+        {/* Loading (production waits for the first Supabase response) / list / empty state */}
+        {!loaded ? (
+          <section className="negis-glass flex min-h-40 flex-col items-center justify-center gap-3 p-8 text-center" aria-live="polite">
+            <Loader2 className="animate-spin" size={22} style={{ color: "var(--negis-primary)" }} />
+            <p className="text-sm font-bold" style={{ color: "var(--negis-muted)" }}>Загружаем данные…</p>
+          </section>
+        ) : items.length === 0 ? (
           <section className="negis-glass-hero flex flex-col items-center gap-3 p-8 text-center">
             <div className="flex h-14 w-14 items-center justify-center rounded-2xl" style={{ background: "var(--negis-primary-soft)", color: "var(--negis-primary)" }}>
               <Users size={24} />
