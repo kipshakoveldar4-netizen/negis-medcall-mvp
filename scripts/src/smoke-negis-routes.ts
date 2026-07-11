@@ -1693,6 +1693,22 @@ async function checkLeadsPageSource() {
     "clientId: savedClient.id",
     'clientId: lead.clientId || ""',
     "matched existing client:",
+    // CRM7 — campaign attribution UI (existing meta-launches endpoint only)
+    "/api/crm/meta-launches",
+    "loadCampaignLaunchOptions",
+    "campaignLaunchOptionFromRecord",
+    "Рекламная кампания",
+    "Не выбрана",
+    "Кампания / услуга",
+    "Кампания не связана",
+    "создана выключенной",
+    'data-testid="lead-campaign-select"',
+    "linkedCampaignLabel",
+    // Dry-run/test and failed launches are never offered as attribution targets.
+    "isDryRunLaunchId",
+    'status === "failed"',
+    // Linked launch persists via metaCampaignLaunchId (uuid or explicit unlink).
+    "metaCampaignLaunchId: form.metaCampaignLaunchId",
   ]) {
     if (!source.includes(marker)) {
       throw new Error(`Leads page is missing "${marker}"`);
@@ -1936,6 +1952,8 @@ async function checkLayoutFoundation() {
     "Продажи",
     "Ожидает",
     "Частично готово",
+    // CRM7 — attribution readiness (leads + meta-launches endpoints responded)
+    "Атрибуция рекламы",
   ]) {
     if (!acc.includes(marker)) {
       throw new Error(`AI Control Center MVP is missing "${marker}"`);
@@ -2139,7 +2157,18 @@ async function checkNoNewApiFiles() {
   }
 
   const pipelineDoc = await readFile(path.join(repoRoot, "docs", "CRM-LEAD-PIPELINE.md"), "utf8");
-  for (const marker of ["lead_stages", "lead_sources", "Dual-write", "workspace_id", "legacy_<hash>", "meta_campaign_launch_id"]) {
+  for (const marker of [
+    "lead_stages",
+    "lead_sources",
+    "Dual-write",
+    "workspace_id",
+    "legacy_<hash>",
+    "meta_campaign_launch_id",
+    // CRM7 — campaign attribution UI is documented; sales/CPL stay future scope.
+    "Campaign attribution",
+    "Рекламная кампания",
+    "future scope",
+  ]) {
     if (!pipelineDoc.toLowerCase().includes(marker.toLowerCase())) {
       throw new Error(`CRM lead pipeline documentation is missing ${marker}`);
     }

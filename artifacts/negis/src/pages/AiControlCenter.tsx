@@ -657,6 +657,8 @@ export default function AiControlCenter() {
               <HealthRow label="Заявки" state={leadsState} />
               <HealthRow label="Клиенты" state={clientsState} />
               <HealthRow label="Записи" state={appointmentsState} />
+              {/* CRM7: leads can link to launch records; CPL/analytics come later. */}
+              <HealthRow label="Атрибуция рекламы" state={leadsState === "ready" && launchesLoaded ? "partial" : "pending"} />
               <HealthRow label="Продажи" state="pending" />
               <HealthRow label="AI-рекомендации" state="partial" />
             </div>

@@ -261,6 +261,98 @@ async function loadExistingClients(): Promise<ExistingClient[]> {
   return readDemoStorage<unknown[]>("negis_demo_clients", []).map(clientFromRecord);
 }
 
+// CRM7 — campaign attribution: a lead can link to a real Meta launch record through
+// meta_campaign_launch_id. Only safe launches are offered; no CPL/analytics yet.
+type CampaignLaunchOption = {
+  id: string;
+  name: string;
+  label: string;
+  createdAt: string;
+};
+
+function isDryRunLaunchId(value: string): boolean {
+  return value.trim().toLowerCase().startsWith("dryrun_");
+}
+
+// Attribution targets are real created launches only: dry-run tests, failed launches
+// and records without a usable name are excluded. The shape check stays tolerant —
+// either a real Meta campaign id or a safe status is enough.
+function campaignLaunchOptionFromRecord(raw: unknown): CampaignLaunchOption | null {
+  const record = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  const id = toStr(record.id);
+  if (!id || isDryRunLaunchId(id)) return null;
+
+  const status = toStr(record.status).toLowerCase();
+  const metaStatus = (toStr(record.metaStatus) || toStr(record.meta_status)).toLowerCase();
+  const metaCampaignId = toStr(record.metaCampaignId) || toStr(record.meta_campaign_id);
+  const lastError = toStr(record.lastError) || toStr(record.last_error);
+  if (status === "dry_run" || metaStatus === "dry_run" || isDryRunLaunchId(metaCampaignId)) return null;
+  if (status === "failed" || metaStatus === "failed" || lastError) return null;
+
+  const hasRealCampaignId = Boolean(metaCampaignId) && !isDryRunLaunchId(metaCampaignId);
+  const safeStatus = ["paused", "active", "created", "success"].includes(status) || ["paused", "active"].includes(metaStatus);
+  if (!hasRealCampaignId && !safeStatus) return null;
+
+  const payload = (record.payload && typeof record.payload === "object" ? record.payload : {}) as Record<string, unknown>;
+  const service = toStr(payload.service);
+  const city = toStr(payload.city);
+  const name = toStr(record.campaignName) || toStr(record.campaign_name) || [service, city].filter(Boolean).join(" · ");
+  if (!name) return null;
+
+  const createdAt = toStr(record.createdAt) || toStr(record.created_at);
+  const details = [service, city].filter(Boolean).join(", ");
+  const label = [
+    name,
+    details && details !== name ? details : "",
+    createdAt ? formatCreatedAt(createdAt) : "",
+    "создана выключенной",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  return { id, name, label, createdAt };
+}
+
+// Real API launches when Supabase answers; the local demo launch history in demo
+// mode. Production never falls back to demo data (CRM6.1 rule).
+async function loadCampaignLaunchOptions(): Promise<CampaignLaunchOption[]> {
+  const mapAll = (rawItems: unknown[]): CampaignLaunchOption[] =>
+    rawItems.map(campaignLaunchOptionFromRecord).filter((option): option is CampaignLaunchOption => option !== null);
+
+  try {
+    const workspaceId = readWorkspaceId();
+    const response = await fetch(apiUrl(`/api/crm/meta-launches?workspaceId=${encodeURIComponent(workspaceId)}`));
+    const text = await response.text();
+    const body = text
+      ? (JSON.parse(text) as { success?: boolean; mode?: string; data?: { launches?: unknown[] } })
+      : null;
+    if (response.ok && body?.success === true && body.mode === "supabase" && Array.isArray(body.data?.launches)) {
+      return mapAll(body.data.launches);
+    }
+  } catch {
+    // Fall through to the demo history below (demo mode only).
+  }
+  if (isRealWorkspace()) return [];
+  return mapAll(readDemoStorage<unknown[]>(`negis_ads_launch_history_${readWorkspaceId()}`, []));
+}
+
+function linkedCampaignOption(lead: Lead, options: CampaignLaunchOption[]): CampaignLaunchOption | undefined {
+  return lead.metaCampaignLaunchId ? options.find((option) => option.id === lead.metaCampaignLaunchId) : undefined;
+}
+
+// Friendly client-safe label: campaign name, never raw Meta IDs/payloads.
+function linkedCampaignLabel(lead: Lead, options: CampaignLaunchOption[]): string {
+  if (!lead.metaCampaignLaunchId) return "Кампания не связана";
+  return linkedCampaignOption(lead, options)?.name || lead.campaign || "Связана с запуском";
+}
+
+// Detail view adds date/status when the linked launch is known.
+function linkedCampaignDetail(lead: Lead, options: CampaignLaunchOption[]): string {
+  if (!lead.metaCampaignLaunchId) return "Кампания не связана";
+  const option = linkedCampaignOption(lead, options);
+  if (!option) return lead.campaign || "Связана с запуском";
+  return [option.name, option.createdAt ? formatCreatedAt(option.createdAt) : "", "создана выключенной"].filter(Boolean).join(" · ");
+}
+
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function isUuid(value?: string): value is string {
@@ -323,6 +415,7 @@ type LeadForm = {
   sourceId: string;
   sourceText: string;
   campaign: string;
+  metaCampaignLaunchId: string;
   stageId: string;
   notes: string;
 };
@@ -333,6 +426,7 @@ const emptyForm: LeadForm = {
   sourceId: "",
   sourceText: "",
   campaign: "",
+  metaCampaignLaunchId: "",
   stageId: "fallback:new",
   notes: "",
 };
@@ -391,7 +485,8 @@ function leadPatchToApi(patch: Partial<Lead>): Record<string, unknown> {
     clientId: patch.clientId,
     ...(patch.stageId !== undefined && isUuid(patch.stageId) ? { stageId: patch.stageId } : {}),
     ...(patch.sourceId !== undefined && isUuid(patch.sourceId) ? { sourceId: patch.sourceId } : {}),
-    ...(patch.metaCampaignLaunchId !== undefined && isUuid(patch.metaCampaignLaunchId)
+    // A uuid links the launch; an explicit empty string unlinks it server-side.
+    ...(patch.metaCampaignLaunchId !== undefined && (patch.metaCampaignLaunchId === "" || isUuid(patch.metaCampaignLaunchId))
       ? { metaCampaignLaunchId: patch.metaCampaignLaunchId }
       : {}),
   };
@@ -424,6 +519,18 @@ export default function LeadsPage() {
   const [convertingId, setConvertingId] = useState<string | null>(null);
   // Admin-only diagnostics: whether the conversion matched an existing client (per lead).
   const [conversionMatched, setConversionMatched] = useState<Record<string, boolean>>({});
+  // CRM7: safe Meta launch records offered for lead attribution.
+  const [campaignLaunchOptions, setCampaignLaunchOptions] = useState<CampaignLaunchOption[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void loadCampaignLaunchOptions().then((options) => {
+      if (!cancelled) setCampaignLaunchOptions(options);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -524,6 +631,7 @@ export default function LeadsPage() {
       sourceId: currentSource?.id || "",
       sourceText: leadSourceName(lead, activeSources) === "—" ? "" : leadSourceName(lead, activeSources),
       campaign: lead.campaign,
+      metaCampaignLaunchId: lead.metaCampaignLaunchId || "",
       stageId: currentStage?.id || `fallback:${semanticGroupForLead(lead)}`,
       notes: lead.notes || "",
     });
@@ -543,11 +651,15 @@ export default function LeadsPage() {
       ?? activeStages.find((stage) => stage.semanticGroup === "new");
     const selectedSource = activeSources.find((source) => source.id === form.sourceId);
     const sourceSnapshot = selectedSource?.name || form.sourceText.trim();
+    const selectedLaunch = campaignLaunchOptions.find((option) => option.id === form.metaCampaignLaunchId);
+    // The free-text campaign stays a compatible snapshot: a linked launch fills it when empty.
+    const campaignSnapshot = form.campaign.trim() || selectedLaunch?.name || "";
     const patch = {
       name,
       phone,
       source: sourceSnapshot,
-      campaign: form.campaign.trim(),
+      campaign: campaignSnapshot,
+      metaCampaignLaunchId: form.metaCampaignLaunchId,
       status: selectedStage?.stageKey || "new",
       notes: form.notes.trim(),
       stageName: selectedStage?.name,
@@ -831,6 +943,7 @@ export default function LeadsPage() {
                   <div className="mt-3 grid gap-x-5 gap-y-1.5 text-sm sm:grid-cols-2">
                     <Fact label="Источник" value={leadSourceName(lead, activeSources)} />
                     <Fact label="Кампания" value={lead.campaign || "—"} />
+                    <Fact label="Рекламная кампания" value={linkedCampaignLabel(lead, campaignLaunchOptions)} />
                     <Fact label="Ответственный" value={lead.owner || (lead.responsibleUserId ? "Назначен" : "—")} />
                     <Fact label="Создана" value={formatCreatedAt(lead.createdAt)} />
                   </div>
@@ -942,10 +1055,25 @@ export default function LeadsPage() {
                   )}
                 </label>
                 <label className="block">
-                  <span className="mb-1 block text-xs font-black uppercase tracking-[0.05em]" style={{ color: "var(--negis-muted)" }}>Кампания</span>
+                  <span className="mb-1 block text-xs font-black uppercase tracking-[0.05em]" style={{ color: "var(--negis-muted)" }}>Кампания / услуга</span>
                   <input style={inputStyle} value={form.campaign} onChange={(event) => setForm((current) => ({ ...current, campaign: event.target.value }))} placeholder="Название кампании" />
                 </label>
               </div>
+              <label className="block">
+                <span className="mb-1 block text-xs font-black uppercase tracking-[0.05em]" style={{ color: "var(--negis-muted)" }}>Рекламная кампания</span>
+                <select
+                  style={inputStyle}
+                  value={form.metaCampaignLaunchId}
+                  aria-label="Рекламная кампания"
+                  data-testid="lead-campaign-select"
+                  onChange={(event) => setForm((current) => ({ ...current, metaCampaignLaunchId: event.target.value }))}
+                >
+                  <option value="">Не выбрана</option>
+                  {campaignLaunchOptions.map((option) => (
+                    <option key={option.id} value={option.id}>{option.label}</option>
+                  ))}
+                </select>
+              </label>
               <label className="block">
                 <span className="mb-1 block text-xs font-black uppercase tracking-[0.05em]" style={{ color: "var(--negis-muted)" }}>Этап</span>
                 <select
@@ -994,6 +1122,7 @@ export default function LeadsPage() {
             <div className="mt-4 grid gap-1.5 text-sm">
               <Fact label="Источник" value={leadSourceName(detailLead, activeSources)} />
               <Fact label="Кампания" value={detailLead.campaign || "—"} />
+              <Fact label="Рекламная кампания" value={linkedCampaignDetail(detailLead, campaignLaunchOptions)} />
               <Fact label="Ответственный" value={detailLead.owner || (detailLead.responsibleUserId ? "Назначен" : "—")} />
               <Fact label="Клиент" value={detailLead.clientId ? "Создан" : "Не создан"} />
               <Fact label="Создана" value={formatCreatedAt(detailLead.createdAt)} />
