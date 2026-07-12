@@ -20,15 +20,13 @@ import {
 } from "lucide-react";
 import { PageLayout } from "@/components/layout/PageLayout";
 import { apiUrl } from "@/lib/api";
-import { readDemoStorage, isRealWorkspace } from "@/lib/demoStorage";
+import { readDemoStorage, isRealWorkspace, readWorkspaceId } from "@/lib/demoStorage";
 import { semanticGroupForLead } from "@/lib/leadPipeline";
 import { defaultThemePresetId, getThemePreset } from "@/lib/themePresets";
 
-// D3B — AI Control Center with minimal REAL operational data (Glass Morphic Medical AI).
-// Real: latest ad launch + failed-launch count (from /api/crm/meta-launches), and system
-// health (API / Supabase Storage / Targeting Agent / Meta configured). Everything CRM/sales
-// (заявки, лиды, записи, выручка) stays an honest placeholder — no fake numbers. AI
-// recommendations are simple rule-based signals from real statuses, not AI predictions.
+// AI Control Center uses real workspace-scoped CRM collections and system health.
+// Revenue comes only from paid deals for the current local date. Recommendations
+// are rule-based operational signals, not AI predictions or campaign analytics.
 
 const EMPTY_METRIC_HINT = "Данные появятся после подключения CRM.";
 
@@ -86,6 +84,16 @@ function str(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
 
+function numberValue(value: unknown): number {
+  const result = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(result) ? result : 0;
+}
+
+function formatRevenueMinor(amountMinor: number): string {
+  const tenge = Math.max(0, amountMinor) / 100;
+  return `${new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 2 }).format(tenge)} ₸`;
+}
+
 function isDryRunId(value: unknown): boolean {
   return typeof value === "string" && value.trim().toLowerCase().startsWith("dryrun_");
 }
@@ -107,17 +115,6 @@ const launchModeLabel: Record<LaunchMode, string> = {
   video_processing: "Видео обрабатывается",
   unknown: "Статус неизвестен",
 };
-
-function readWorkspaceId(): string {
-  try {
-    const raw = localStorage.getItem("negis_demo_workspace");
-    if (!raw) return "demo-workspace";
-    const workspace = JSON.parse(raw) as { id?: unknown };
-    return typeof workspace.id === "string" && workspace.id.trim() ? workspace.id.trim() : "demo-workspace";
-  } catch {
-    return "demo-workspace";
-  }
-}
 
 async function fetchJson(path: string): Promise<{ ok: boolean; body: Record<string, unknown> }> {
   try {
@@ -315,14 +312,19 @@ export default function AiControlCenter() {
   const [leadsState, setLeadsState] = useState<HealthState>("loading");
   const [clientsState, setClientsState] = useState<HealthState>("loading");
   const [appointmentsState, setAppointmentsState] = useState<HealthState>("loading");
+  const [dealsState, setDealsState] = useState<HealthState>("loading");
   const [crmCounts, setCrmCounts] = useState({
     newLeads: 0,
     unprocessedLeads: 0,
     appointmentsToday: 0,
     repeatClients: 0,
-    // CRM8: attribution counts only — no CPL/ROI/revenue math.
+    // CRM8 attribution counts remain separate from sales revenue.
     attributedLeads: 0,
     unattributedLeads: 0,
+    // CRM9d: honest deal metrics only, never grouped by campaign.
+    paidDealsToday: 0,
+    revenueTodayMinor: 0,
+    pendingDealsCount: 0,
   });
 
   useEffect(() => {
@@ -331,7 +333,7 @@ export default function AiControlCenter() {
       const workspaceId = readWorkspaceId();
       const workspaceQuery = `workspaceId=${encodeURIComponent(workspaceId)}`;
       // Independent fetches: one failing endpoint must not block the page.
-      const [health, storage, targeting, launchesRes, leadsRes, clientsRes, appointmentsRes] = await Promise.all([
+      const [health, storage, targeting, launchesRes, leadsRes, clientsRes, appointmentsRes, dealsRes] = await Promise.all([
         fetchJson("/api/crm/health"),
         fetchJson("/api/crm/storage-health"),
         fetchJson("/api/targeting/health"),
@@ -339,6 +341,7 @@ export default function AiControlCenter() {
         fetchCrmList(`/api/crm/leads?${workspaceQuery}`, "leads", "negis_demo_leads"),
         fetchCrmList(`/api/crm/clients?${workspaceQuery}`, "clients", "negis_demo_clients"),
         fetchCrmList(`/api/crm/appointments?${workspaceQuery}`, "appointments", "negis_demo_appointments"),
+        fetchCrmList(`/api/crm/deals?${workspaceQuery}`, "deals", "negis_demo_deals"),
       ]);
       if (cancelled) return;
 
@@ -346,6 +349,11 @@ export default function AiControlCenter() {
       setLeadsState(leadsRes.responded ? "ready" : "unknown");
       setClientsState(clientsRes.responded ? "ready" : "unknown");
       setAppointmentsState(appointmentsRes.responded ? "ready" : "unknown");
+      setDealsState(dealsRes.responded ? "ready" : "unknown");
+      const paidDealsToday = dealsRes.items.filter((deal) =>
+        str(deal.status).toLowerCase() === "paid"
+        && isTodayDate(str(deal.paidAt) || str(deal.paid_at)),
+      );
       setCrmCounts({
         newLeads: leadsRes.items.filter((lead) => semanticGroupForLead(lead) === "new").length,
         unprocessedLeads: leadsRes.items.filter((lead) => {
@@ -362,6 +370,12 @@ export default function AiControlCenter() {
         // Attributed = lead linked to a Meta launch via meta_campaign_launch_id.
         attributedLeads: leadsRes.items.filter((lead) => Boolean(str(lead.metaCampaignLaunchId) || str(lead.meta_campaign_launch_id))).length,
         unattributedLeads: leadsRes.items.filter((lead) => !(str(lead.metaCampaignLaunchId) || str(lead.meta_campaign_launch_id))).length,
+        paidDealsToday: paidDealsToday.length,
+        revenueTodayMinor: paidDealsToday.reduce(
+          (sum, deal) => sum + Math.max(0, Math.round(numberValue(deal.amountMinor ?? deal.amount_minor))),
+          0,
+        ),
+        pendingDealsCount: dealsRes.items.filter((deal) => str(deal.status).toLowerCase() === "pending").length,
       });
 
       // API health
@@ -454,8 +468,18 @@ export default function AiControlCenter() {
         : "Проверяем статусы запусков…",
       loading,
     },
-    // Honest placeholder until a deals/sales table exists — no invented revenue.
-    { label: "Выручка сегодня", icon: DollarSign, tone: "success", hint: "Будет доступно после подключения продаж." },
+    {
+      label: "Выручка сегодня",
+      icon: DollarSign,
+      tone: crmCounts.paidDealsToday > 0 ? "success" : "muted",
+      value: dealsState === "ready" ? formatRevenueMinor(crmCounts.revenueTodayMinor) : undefined,
+      hint: dealsState === "unknown"
+        ? "Не удалось проверить"
+        : dealsState === "ready"
+          ? "По оплаченным продажам за сегодня."
+          : "Загружаем данные CRM…",
+      loading: dealsState === "loading",
+    },
   ];
 
   const flowSteps: Array<{ label: string; state: FlowState }> = [
@@ -463,7 +487,7 @@ export default function AiControlCenter() {
     { label: "Заявка", state: "active" },
     { label: "CRM", state: "active" },
     { label: "Запись", state: "active" },
-    { label: "Продажа", state: "pending" },
+    { label: "Продажа", state: dealsState === "ready" ? "active" : "pending" },
     { label: "Повторный визит", state: "soon" },
     { label: "AI-действие", state: "soon" },
   ];
@@ -495,6 +519,15 @@ export default function AiControlCenter() {
       explanation: `Записей на сегодня: ${crmCounts.appointmentsToday}. Подтвердите визиты и подготовьте расписание.`,
       action: "Открыть записи",
       openHref: "/appointments",
+    });
+  }
+  if (dealsState === "ready" && crmCounts.pendingDealsCount > 0) {
+    recommendations.push({
+      title: "Подтвердите оплату продаж",
+      priority: "medium",
+      explanation: `Есть продажи в статусе ожидания оплаты: ${crmCounts.pendingDealsCount}.`,
+      action: "Открыть продажи",
+      openHref: "/sales",
     });
   }
   if (crmCounts.repeatClients > 0) {
@@ -568,7 +601,7 @@ export default function AiControlCenter() {
 
         {/* 2. Today metrics */}
         <section>
-          <SectionTitle hint="Заявки, клиенты, записи и реклама — реальные данные. Выручка подключается после продаж.">Сегодня в клинике</SectionTitle>
+          <SectionTitle hint="Заявки, клиенты, записи, продажи и реклама — реальные данные текущей клиники.">Сегодня в клинике</SectionTitle>
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
             {metrics.map((metric) => (
               <ControlMetricCard
@@ -609,6 +642,7 @@ export default function AiControlCenter() {
             <QuickActionButton label="Открыть заявки" icon={Inbox} href="/leads" />
             <QuickActionButton label="Открыть клиентов" icon={Users} href="/clients" />
             <QuickActionButton label="Открыть записи" icon={CalendarCheck} href="/appointments" />
+            <QuickActionButton label="Открыть продажи" icon={DollarSign} href="/sales" />
             <QuickActionButton label="Запустить рекламу" icon={Rocket} href="/ads-automation" />
             <QuickActionButton label="Открыть историю запусков" icon={ClipboardList} href="/ads-automation/history" />
             <QuickActionButton label="Открыть контент-студию" icon={Clapperboard} href="/content-studio" />
@@ -680,12 +714,12 @@ export default function AiControlCenter() {
               <HealthRow label="Записи" state={appointmentsState} />
               {/* CRM7: leads can link to launch records; CPL/analytics come later. */}
               <HealthRow label="Атрибуция рекламы" state={leadsState === "ready" && launchesLoaded ? "partial" : "pending"} />
-              <HealthRow label="Продажи" state="pending" />
+              <HealthRow label="Продажи" state={dealsState} />
               <HealthRow label="AI-рекомендации" state="partial" />
             </div>
             <p className="mt-4 flex items-center gap-2 text-xs font-semibold" style={{ color: "var(--negis-muted)" }}>
               <MessageCircle size={14} style={{ color: "var(--negis-primary)" }} />
-              Продажи и полный AI-слой подключаются следующими этапами.
+              Полный AI-слой подключается по мере готовности проверенных данных.
             </p>
           </section>
         </div>

@@ -2096,6 +2096,10 @@ async function checkCrmDealsFoundation() {
     "negis_deal_prefill",
     "negis_demo_deals",
     "CRM9d",
+    "paidAt",
+    "Подтвердите оплату продаж",
+    "Не удалось проверить",
+    "выручка по рекламной кампании",
   ]) {
     if (!doc.includes(marker)) {
       throw new Error(`CRM deals documentation is missing ${marker}`);
@@ -2194,26 +2198,40 @@ async function checkLayoutFoundation() {
     "/api/crm/leads",
     "/api/crm/clients",
     "/api/crm/appointments",
+    // CRM9d — real deal revenue for the current local date.
+    "/api/crm/deals",
+    '"deals", "negis_demo_deals"',
     "semanticGroupForLead",
     'status === "new" || status === "in_progress"',
     "isRepeatClient",
     "Не удалось проверить",
-    // Revenue stays an honest placeholder until deals/sales exist
-    "Будет доступно после подключения продаж.",
+    "paidDealsToday",
+    "revenueTodayMinor",
+    "pendingDealsCount",
+    'str(deal.status).toLowerCase() === "paid"',
+    "isTodayDate(str(deal.paidAt) || str(deal.paid_at))",
+    "deal.amountMinor ?? deal.amount_minor",
+    "formatRevenueMinor",
+    "По оплаченным продажам за сегодня.",
+    'dealsState === "unknown"',
     // Rule-based CRM recommendations (no AI calls)
     "Рекомендации формируются по данным CRM и системным статусам",
     "Обработайте новые заявки",
     "Свяжите заявки с клиентами",
     "Проверьте записи на сегодня",
     "Подготовьте повторное предложение",
+    "Подтвердите оплату продаж",
+    "Есть продажи в статусе ожидания оплаты:",
     "Критичных CRM-действий пока нет.",
     // Quick actions into the CRM screens
     "Открыть заявки",
     "Открыть клиентов",
     "Открыть записи",
+    "Открыть продажи",
     '"/leads"',
     '"/clients"',
     '"/appointments"',
+    '"/sales"',
     // Readiness rows
     "Продажи",
     "Ожидает",
@@ -2225,6 +2243,9 @@ async function checkLayoutFoundation() {
     "unattributedLeads",
     "Свяжите заявки с рекламными кампаниями",
     "Это поможет позже считать эффективность рекламы.",
+    // Sales readiness and the business flow depend on the deals endpoint response.
+    '<HealthRow label="Продажи" state={dealsState} />',
+    'state: dealsState === "ready" ? "active" : "pending"',
   ]) {
     if (!acc.includes(marker)) {
       throw new Error(`AI Control Center MVP is missing "${marker}"`);
@@ -2236,12 +2257,17 @@ async function checkLayoutFoundation() {
     "publicUrl",
     "video_id",
     "raw_payload",
-    "₸",
     "costPerLead",
     "cost_per_lead",
     "attributedRevenue",
     "returnOnInvestment",
     "return_on_investment",
+    "revenueByCampaign",
+    "revenue_by_campaign",
+    "conversionRate",
+    "conversion_rate",
+    "roiValue",
+    "romiValue",
     'label: "CPL"',
     'label: "ROI"',
     'label: "ROMI"',
@@ -2249,6 +2275,9 @@ async function checkLayoutFoundation() {
     if (acc.includes(forbidden)) {
       throw new Error(`AI Control Center must not show technical label "${forbidden}"`);
     }
+  }
+  if (acc.includes("Будет доступно после подключения продаж.")) {
+    throw new Error("AI Control Center must not keep the CRM9c revenue placeholder");
   }
 
   const app = await readFile(path.join(pagesDir, "..", "App.tsx"), "utf8");
