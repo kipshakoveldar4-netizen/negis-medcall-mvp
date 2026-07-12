@@ -1900,6 +1900,17 @@ async function checkSalesPageSource() {
     "appointment_id present:",
     "meta_campaign_launch_id present:",
     "responsible_user_id present:",
+    // CRM10 — honest revenue attribution (manual campaign links, paid deals only)
+    "attributionFilter",
+    "С рекламой",
+    "Без рекламы",
+    "Оплачено с рекламой",
+    "Оплачено без рекламы",
+    "Выручка по связанным кампаниям",
+    "Без учёта расходов на рекламу.",
+    'attributionFilter === "with_ads" && !deal.metaCampaignLaunchId',
+    "campaignRevenueRows",
+    'deal.status !== "paid" || !deal.metaCampaignLaunchId',
   ]) {
     if (!source.includes(marker)) {
       throw new Error(`Sales page is missing "${marker}"`);
@@ -2099,7 +2110,13 @@ async function checkCrmDealsFoundation() {
     "paidAt",
     "Подтвердите оплату продаж",
     "Не удалось проверить",
-    "выручка по рекламной кампании",
+    // CRM10 — attribution is documented as manual counting, never effectiveness.
+    "CRM10",
+    "Оплачено с рекламой",
+    "Выручка по связанным кампаниям",
+    "Без учёта расходов на рекламу.",
+    "Свяжите продажи с рекламными кампаниями",
+    "не ROI",
   ]) {
     if (!doc.includes(marker)) {
       throw new Error(`CRM deals documentation is missing ${marker}`);
@@ -2222,6 +2239,13 @@ async function checkLayoutFoundation() {
     "Подготовьте повторное предложение",
     "Подтвердите оплату продаж",
     "Есть продажи в статусе ожидания оплаты:",
+    // CRM10 — linked-revenue counts and recommendation (manual attribution only)
+    "paidAttributedRevenueMinor",
+    "paidUnattributedDealsCount",
+    "Свяжите продажи с рекламными кампаниями",
+    "Есть оплаченные продажи без рекламной кампании:",
+    "Из них с рекламой:",
+    "(связано вручную)",
     "Критичных CRM-действий пока нет.",
     // Quick actions into the CRM screens
     "Открыть заявки",

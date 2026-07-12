@@ -371,6 +371,8 @@ export default function SalesPage() {
   const [references, setReferences] = useState<SalesReferences>({ clients: [], leads: [], appointments: [], campaigns: [] });
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<"all" | DealStatus>("all");
+  // CRM10: secondary attribution filter — works on top of status filter and search.
+  const [attributionFilter, setAttributionFilter] = useState<"all" | "with_ads" | "without_ads">("all");
   const [formOpen, setFormOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState<DealForm>(() => emptyForm());
@@ -436,10 +438,48 @@ export default function SalesPage() {
     };
   }, [items]);
 
+  // CRM10 — honest revenue attribution: paid deals only, split by the manual
+  // meta_campaign_launch_id link. Pure counting — no spend, no ad-efficiency math.
+  const attribution = useMemo(() => {
+    const paid = items.filter((deal) => deal.status === "paid");
+    const attributed = paid.filter((deal) => Boolean(deal.metaCampaignLaunchId));
+    const unattributed = paid.filter((deal) => !deal.metaCampaignLaunchId);
+    return {
+      attributedCount: attributed.length,
+      attributedAmountMinor: attributed.reduce((sum, deal) => sum + deal.amountMinor, 0),
+      unattributedCount: unattributed.length,
+      unattributedAmountMinor: unattributed.reduce((sum, deal) => sum + deal.amountMinor, 0),
+    };
+  }, [items]);
+
+  // Paid revenue grouped by campaign — friendly labels only, sorted by amount for
+  // readability (not a performance ranking; spend is not part of this data).
+  const campaignRevenueRows = useMemo(() => {
+    const groups = new Map<string, { amountMinor: number; count: number }>();
+    for (const deal of items) {
+      if (deal.status !== "paid" || !deal.metaCampaignLaunchId) continue;
+      const group = groups.get(deal.metaCampaignLaunchId) || { amountMinor: 0, count: 0 };
+      group.amountMinor += deal.amountMinor;
+      group.count += 1;
+      groups.set(deal.metaCampaignLaunchId, group);
+    }
+    return [...groups.entries()]
+      .map(([campaignId, group]) => ({
+        campaignId,
+        name: campaignNames.get(campaignId) || "Связанная рекламная кампания",
+        amountMinor: group.amountMinor,
+        count: group.count,
+      }))
+      .sort((left, right) => right.amountMinor - left.amountMinor);
+  }, [campaignNames, items]);
+
   const visibleDeals = useMemo(() => {
     const query = search.trim().toLowerCase();
     return items.filter((deal) => {
       if (filter !== "all" && deal.status !== filter) return false;
+      // CRM10: attribution filter — "С рекламой" keeps only deals linked to a launch.
+      if (attributionFilter === "with_ads" && !deal.metaCampaignLaunchId) return false;
+      if (attributionFilter === "without_ads" && deal.metaCampaignLaunchId) return false;
       if (!query) return true;
       return [
         deal.title,
@@ -448,7 +488,7 @@ export default function SalesPage() {
         deal.leadId ? leadNames.get(deal.leadId) : "",
       ].some((value) => (value || "").toLowerCase().includes(query));
     });
-  }, [clientNames, filter, items, leadNames, search]);
+  }, [attributionFilter, clientNames, filter, items, leadNames, search]);
 
   const summaryMetrics: Array<{ label: string; value: string | number; icon: LucideIcon; tone: NegisTone }> = [
     { label: "Всего продаж", value: metrics.total, icon: ReceiptText, tone: "primary" },
@@ -461,6 +501,12 @@ export default function SalesPage() {
   const filterOptions: Array<{ id: "all" | DealStatus; label: string }> = [
     { id: "all", label: "Все" },
     ...statusOrder.map((status) => ({ id: status, label: statusLabels[status] })),
+  ];
+
+  const attributionFilterOptions: Array<{ id: typeof attributionFilter; label: string }> = [
+    { id: "all", label: "Все" },
+    { id: "with_ads", label: "С рекламой" },
+    { id: "without_ads", label: "Без рекламы" },
   ];
 
   function setMode(admin: boolean) {
@@ -588,6 +634,42 @@ export default function SalesPage() {
           {summaryMetrics.map((metric) => <MetricCard key={metric.label} {...metric} />)}
         </section>
 
+        {/* CRM10: honest attribution split — paid deals only, manual campaign link. */}
+        <section className="negis-glass flex flex-wrap items-center gap-x-6 gap-y-1.5 p-4 text-sm" aria-label="Атрибуция выручки">
+          <p className="font-semibold" style={{ color: "var(--negis-muted)" }}>
+            Оплачено с рекламой:{" "}
+            <span className="font-black" style={{ color: "var(--negis-text)" }}>{formatAmount(attribution.attributedAmountMinor)}</span>
+            <span className="font-semibold"> ({attribution.attributedCount})</span>
+          </p>
+          <p className="font-semibold" style={{ color: "var(--negis-muted)" }}>
+            Оплачено без рекламы:{" "}
+            <span className="font-black" style={{ color: "var(--negis-text)" }}>{formatAmount(attribution.unattributedAmountMinor)}</span>
+            <span className="font-semibold"> ({attribution.unattributedCount})</span>
+          </p>
+        </section>
+
+        {/* CRM10: paid revenue by manually linked campaign — friendly labels only,
+            no spend, no efficiency claims. Rendered only when linked revenue exists. */}
+        {campaignRevenueRows.length > 0 ? (
+          <section className="negis-glass p-4 sm:p-5" aria-label="Выручка по связанным кампаниям">
+            <h2 className="text-sm font-black" style={{ color: "var(--negis-text)" }}>Выручка по связанным кампаниям</h2>
+            <p className="mt-1 text-xs font-semibold" style={{ color: "var(--negis-muted)" }}>
+              По оплаченным продажам, связанным вручную. Без учёта расходов на рекламу.
+            </p>
+            <div className="mt-3 grid gap-1.5">
+              {campaignRevenueRows.map((row) => (
+                <p key={row.campaignId} className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-0.5 text-sm">
+                  <span className="min-w-0 break-words font-semibold" style={{ color: "var(--negis-muted)" }}>{row.name}</span>
+                  <span className="shrink-0 font-black" style={{ color: "var(--negis-text)" }}>
+                    {formatAmount(row.amountMinor)}
+                    <span className="font-semibold" style={{ color: "var(--negis-muted)" }}> · {row.count} прод.</span>
+                  </span>
+                </p>
+              ))}
+            </div>
+          </section>
+        ) : null}
+
         <section className="negis-glass p-4 sm:p-5">
           <div className="flex flex-wrap gap-2" aria-label="Фильтры продаж">
             {filterOptions.map((option) => {
@@ -602,6 +684,27 @@ export default function SalesPage() {
                     : { background: "var(--negis-surface)", borderColor: "var(--negis-border)", color: "var(--negis-muted)" }}
                   aria-pressed={active}
                   onClick={() => setFilter(option.id)}
+                >
+                  {option.label}
+                </button>
+              );
+            })}
+          </div>
+          {/* CRM10: secondary attribution filter (independent of status filter). */}
+          <div className="mt-3 flex flex-wrap items-center gap-2" aria-label="Фильтр по рекламе">
+            <span className="text-xs font-black uppercase tracking-[0.05em]" style={{ color: "var(--negis-muted)" }}>Реклама:</span>
+            {attributionFilterOptions.map((option) => {
+              const active = attributionFilter === option.id;
+              return (
+                <button
+                  key={option.id}
+                  type="button"
+                  className="rounded-full border px-3 py-1.5 text-xs font-black transition"
+                  style={active
+                    ? { background: "var(--negis-ai)", borderColor: "var(--negis-ai)", color: "#FFFFFF" }
+                    : { background: "var(--negis-surface)", borderColor: "var(--negis-border)", color: "var(--negis-muted)" }}
+                  aria-pressed={active}
+                  onClick={() => setAttributionFilter(option.id)}
                 >
                   {option.label}
                 </button>
@@ -639,7 +742,7 @@ export default function SalesPage() {
         ) : visibleDeals.length === 0 ? (
           <section className="negis-glass flex flex-col items-center gap-3 p-6 text-center">
             <p className="text-sm font-semibold" style={{ color: "var(--negis-muted)" }}>Ничего не найдено. Измените фильтр или поисковый запрос.</p>
-            <button type="button" className="neu-btn justify-center" onClick={() => { setFilter("all"); setSearch(""); }}>Сбросить фильтры</button>
+            <button type="button" className="neu-btn justify-center" onClick={() => { setFilter("all"); setAttributionFilter("all"); setSearch(""); }}>Сбросить фильтры</button>
           </section>
         ) : (
           <section className="grid gap-3 xl:grid-cols-2">

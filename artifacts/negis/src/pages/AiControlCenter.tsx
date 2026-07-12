@@ -325,6 +325,9 @@ export default function AiControlCenter() {
     paidDealsToday: 0,
     revenueTodayMinor: 0,
     pendingDealsCount: 0,
+    // CRM10: linked-revenue counts — manual attribution only, no ad-efficiency math.
+    paidAttributedRevenueMinor: 0,
+    paidUnattributedDealsCount: 0,
   });
 
   useEffect(() => {
@@ -376,6 +379,15 @@ export default function AiControlCenter() {
           0,
         ),
         pendingDealsCount: dealsRes.items.filter((deal) => str(deal.status).toLowerCase() === "pending").length,
+        // Linked share of today's revenue (manual attribution, not effectiveness).
+        paidAttributedRevenueMinor: paidDealsToday
+          .filter((deal) => Boolean(str(deal.metaCampaignLaunchId) || str(deal.meta_campaign_launch_id)))
+          .reduce((sum, deal) => sum + Math.max(0, Math.round(numberValue(deal.amountMinor ?? deal.amount_minor))), 0),
+        // All paid deals still missing a campaign link (any date) — drives the recommendation.
+        paidUnattributedDealsCount: dealsRes.items.filter((deal) =>
+          str(deal.status).toLowerCase() === "paid"
+          && !(str(deal.metaCampaignLaunchId) || str(deal.meta_campaign_launch_id)),
+        ).length,
       });
 
       // API health
@@ -473,10 +485,13 @@ export default function AiControlCenter() {
       icon: DollarSign,
       tone: crmCounts.paidDealsToday > 0 ? "success" : "muted",
       value: dealsState === "ready" ? formatRevenueMinor(crmCounts.revenueTodayMinor) : undefined,
+      // CRM10: the linked share is manually attributed revenue, not ad effectiveness.
       hint: dealsState === "unknown"
         ? "Не удалось проверить"
         : dealsState === "ready"
-          ? "По оплаченным продажам за сегодня."
+          ? crmCounts.paidAttributedRevenueMinor > 0
+            ? `По оплаченным продажам за сегодня. Из них с рекламой: ${formatRevenueMinor(crmCounts.paidAttributedRevenueMinor)} (связано вручную).`
+            : "По оплаченным продажам за сегодня."
           : "Загружаем данные CRM…",
       loading: dealsState === "loading",
     },
@@ -526,6 +541,17 @@ export default function AiControlCenter() {
       title: "Подтвердите оплату продаж",
       priority: "medium",
       explanation: `Есть продажи в статусе ожидания оплаты: ${crmCounts.pendingDealsCount}.`,
+      action: "Открыть продажи",
+      openHref: "/sales",
+    });
+  }
+  // CRM10: only when the deals endpoint answered and paid deals miss a campaign link.
+  // Hidden when there are no paid deals or all of them are attributed.
+  if (dealsState === "ready" && crmCounts.paidUnattributedDealsCount > 0) {
+    recommendations.push({
+      title: "Свяжите продажи с рекламными кампаниями",
+      priority: "low",
+      explanation: `Есть оплаченные продажи без рекламной кампании: ${crmCounts.paidUnattributedDealsCount}. Это поможет позже считать эффективность рекламы.`,
       action: "Открыть продажи",
       openHref: "/sales",
     });
