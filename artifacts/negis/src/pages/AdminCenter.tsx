@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useLocation } from "wouter";
 import {
   AlertTriangle,
@@ -29,6 +29,7 @@ import { toast } from "sonner";
 import { PageLayout } from "@/components/layout/PageLayout";
 import { useAuth } from "@/contexts/AuthContext";
 import { apiUrl } from "@/lib/api";
+import { getSupabaseAccessToken } from "@/lib/serverAuth";
 import {
   permissionLabels,
   permissionsForRole,
@@ -62,6 +63,18 @@ type ApiResponse<T> = {
   details?: string[];
   telegramDescription?: string;
   hint?: string;
+};
+
+type AdminAuthContextData = {
+  workspaceId: string;
+  role: "owner" | "admin";
+  staffUserId: string;
+  isAdmin: boolean;
+};
+
+type ServerAdminAuthState = {
+  status: "checking" | "confirmed" | "reauth" | "forbidden" | "unavailable";
+  role?: "owner" | "admin";
 };
 
 type ProviderPresence = {
@@ -504,6 +517,7 @@ export default function AdminCenter() {
     return hasMetaFormValues(readStored("negis_meta_account", metaDefaults)) ? "local" : "none";
   });
   const [health, setHealth] = useState<CrmHealthData | null>(null);
+  const [serverAdminAuth, setServerAdminAuth] = useState<ServerAdminAuthState>({ status: "checking" });
   const [integrationCards, setIntegrationCards] = useState<IntegrationCard[]>(() => buildIntegrationCards(null));
   const [loading, setLoading] = useState<Record<string, boolean>>({});
   const [metaCityKeyInput, setMetaCityKeyInput] = useState("almaty");
@@ -530,6 +544,49 @@ export default function AdminCenter() {
   }, [releaseChecks]);
 
   const setBusy = (key: string, value: boolean) => setLoading((current) => ({ ...current, [key]: value }));
+
+  async function checkServerAdminAccess() {
+    setServerAdminAuth({ status: "checking" });
+
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(workspaceId)) {
+      setServerAdminAuth({ status: "reauth" });
+      return;
+    }
+
+    try {
+      const accessToken = await getSupabaseAccessToken();
+      if (!accessToken) {
+        setServerAdminAuth({ status: "reauth" });
+        return;
+      }
+
+      const response = await fetch(apiUrl(`/api/crm/auth-context?workspaceId=${encodeURIComponent(workspaceId)}`), {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      const body = await safeJson<AdminAuthContextData>(response);
+
+      if (response.status === 401) {
+        setServerAdminAuth({ status: "reauth" });
+        return;
+      }
+      if (response.status === 403) {
+        setServerAdminAuth({ status: "forbidden" });
+        return;
+      }
+      if (!response.ok || body.success !== true || !body.data?.isAdmin) {
+        setServerAdminAuth({ status: "unavailable" });
+        return;
+      }
+
+      setServerAdminAuth({ status: "confirmed", role: body.data.role });
+    } catch {
+      setServerAdminAuth({ status: "unavailable" });
+    }
+  }
+
+  useEffect(() => {
+    void checkServerAdminAccess();
+  }, [workspaceId]);
 
   async function checkCrmHealth() {
     setBusy("crm-health", true);
@@ -1684,6 +1741,46 @@ export default function AdminCenter() {
           <p className="mt-3 text-xs font-semibold text-slate-400">
             Разделы платформы будут собраны на следующих этапах. Сейчас доступен обзор ниже.
           </p>
+        </section>
+
+        <section className="neu-card flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between" data-testid="server-admin-auth">
+          <div className="flex min-w-0 items-start gap-3">
+            <span className="mt-0.5 grid h-10 w-10 shrink-0 place-items-center rounded-2xl bg-teal-50 text-teal-700">
+              {serverAdminAuth.status === "checking" ? (
+                <Loader2 className="animate-spin" size={19} />
+              ) : serverAdminAuth.status === "confirmed" ? (
+                <ShieldCheck size={19} />
+              ) : (
+                <AlertTriangle size={19} />
+              )}
+            </span>
+            <div className="min-w-0">
+              <p className="text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">Server auth</p>
+              <h2 className="mt-1 text-base font-black text-[#0F172A]">
+                {serverAdminAuth.status === "confirmed" && "Админ-доступ подтверждён"}
+                {serverAdminAuth.status === "reauth" && "Нужно войти заново"}
+                {serverAdminAuth.status === "forbidden" && "Недостаточно прав"}
+                {serverAdminAuth.status === "unavailable" && "Не удалось проверить админ-доступ"}
+                {serverAdminAuth.status === "checking" && "Проверяем админ-доступ…"}
+              </h2>
+              <p className="mt-1 text-sm text-[#64748B]">
+                {serverAdminAuth.status === "confirmed" && `Supabase подтвердил активную роль ${serverAdminAuth.role} для текущего workspace.`}
+                {serverAdminAuth.status === "reauth" && "Supabase-сессия отсутствует или истекла. Войдите снова для защищённых действий."}
+                {serverAdminAuth.status === "forbidden" && "Для этого workspace нужна активная роль owner или admin."}
+                {serverAdminAuth.status === "unavailable" && "Сервис авторизации временно недоступен. Остальные разделы можно использовать."}
+                {serverAdminAuth.status === "checking" && "Проверяем Supabase-сессию и роль сотрудника на сервере."}
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            className="neu-btn w-full shrink-0 justify-center sm:w-auto"
+            onClick={() => void checkServerAdminAccess()}
+            disabled={serverAdminAuth.status === "checking"}
+          >
+            <RefreshCw size={16} />
+            Проверить доступ
+          </button>
         </section>
 
         <ReleaseBanner readiness={readiness} />

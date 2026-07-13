@@ -4,6 +4,7 @@ import {
   handleAdCreativeSignedUpload,
   handleAdCreativeUpload,
   handleAdsAiFill,
+  handleCrmAuthContext,
   handleCrmHealth,
   handleCrmResource,
   handleMetaCityKey,
@@ -123,6 +124,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   if (resource === "health") {
     return handleCrmHealth(req, res);
+  }
+
+  if (resource === "auth-context") {
+    return handleCrmAuthContext(req, res);
   }
 
   if (resource === "meta-launch") {

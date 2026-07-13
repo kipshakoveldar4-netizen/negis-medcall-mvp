@@ -1,4 +1,5 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
+import { requireWorkspaceAdmin, WorkspaceAdminAuthError } from "../auth/server";
 import { getSupabaseServerClient } from "../supabase/server";
 import { checkMetaCompliance } from "../meta/compliance";
 import {
@@ -4693,6 +4694,36 @@ export async function handleCrmHealth(req: VercelRequest, res: VercelResponse) {
       secrets: "masked",
     }),
   );
+}
+
+export async function handleCrmAuthContext(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== "GET") {
+    return sendJson(res, 405, errorBody("Method not allowed", ["Use GET"]));
+  }
+
+  const workspaceId = readWorkspaceId(req, {});
+  if (!isUuid(workspaceId)) {
+    return sendJson(res, 400, errorBody("Validation error", ["workspaceId must be a UUID"]));
+  }
+
+  try {
+    const context = await requireWorkspaceAdmin(req, workspaceId);
+    return sendJson(
+      res,
+      200,
+      success("supabase", {
+        workspaceId: context.workspaceId,
+        role: context.role,
+        staffUserId: context.staffUserId,
+        isAdmin: true,
+      }),
+    );
+  } catch (error) {
+    if (error instanceof WorkspaceAdminAuthError) {
+      return sendJson(res, error.statusCode, errorBody(error.message));
+    }
+    return sendJson(res, 503, errorBody("Authorization service unavailable"));
+  }
 }
 
 export async function handleCrmResource(resource: CrmResource, req: VercelRequest, res: VercelResponse) {

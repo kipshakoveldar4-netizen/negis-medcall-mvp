@@ -2246,6 +2246,107 @@ async function checkMetaInsightsSchemaFoundation() {
   console.log("Meta Insights schema foundation checks: ok");
 }
 
+async function checkCrmServerAuthFoundation() {
+  const authHelper = await readFile(path.join(repoRoot, "lib", "auth", "server.ts"), "utf8");
+  for (const marker of [
+    "requireWorkspaceAdmin",
+    "req.headers.authorization",
+    "Bearer",
+    "supabase.auth.getUser(token)",
+    '.from("staff_users")',
+    '.eq("auth_user_id", userId)',
+    '.eq("workspace_id", workspaceId)',
+    '.eq("status", "active")',
+    'new Set(["owner", "admin"])',
+    "WorkspaceAdminAuthError(401",
+    "WorkspaceAdminAuthError(403",
+  ]) {
+    if (!authHelper.includes(marker)) {
+      throw new Error(`CRM server auth helper is missing ${marker}`);
+    }
+  }
+  for (const forbidden of ["localStorage", "SUPABASE_SERVICE_ROLE_KEY", "access_token:", "mode: \"demo\""]) {
+    if (authHelper.includes(forbidden)) {
+      throw new Error(`CRM server auth helper must not trust or expose ${forbidden}`);
+    }
+  }
+
+  const crmServer = await readFile(path.join(repoRoot, "lib", "crm", "server.ts"), "utf8");
+  for (const marker of [
+    "handleCrmAuthContext",
+    "requireWorkspaceAdmin(req, workspaceId)",
+    'success("supabase"',
+    "staffUserId: context.staffUserId",
+    "isAdmin: true",
+  ]) {
+    if (!crmServer.includes(marker)) {
+      throw new Error(`CRM auth-context handler is missing ${marker}`);
+    }
+  }
+  const authContextHandler = crmServer.slice(
+    crmServer.indexOf("export async function handleCrmAuthContext"),
+    crmServer.indexOf("export async function handleCrmResource"),
+  );
+  if (!authContextHandler || authContextHandler.includes('success("demo"')) {
+    throw new Error("CRM auth-context endpoint must not have a demo fallback");
+  }
+
+  const apiSource = await readFile(path.join(repoRoot, "api", "crm", "[...path].ts"), "utf8");
+  if (!apiSource.includes('resource === "auth-context"') || !apiSource.includes("handleCrmAuthContext(req, res)")) {
+    throw new Error("api/crm catch-all must route /api/crm/auth-context");
+  }
+  for (const forbiddenEndpoint of ["meta-insights-sync", "meta-campaign-insights"]) {
+    if (apiSource.includes(forbiddenEndpoint)) {
+      throw new Error(`CRM11-auth must not implement ${forbiddenEndpoint}`);
+    }
+  }
+
+  const frontendHelper = await readFile(path.join(repoRoot, "artifacts", "negis", "src", "lib", "serverAuth.ts"), "utf8");
+  for (const marker of ["supabase.auth.getSession()", "data.session?.access_token", "getSupabaseAccessToken"]) {
+    if (!frontendHelper.includes(marker)) {
+      throw new Error(`Frontend server auth helper is missing ${marker}`);
+    }
+  }
+  if (frontendHelper.includes("localStorage")) {
+    throw new Error("Frontend Bearer helper must read the Supabase session, not localStorage role data");
+  }
+
+  const adminCenter = await readFile(path.join(repoRoot, "artifacts", "negis", "src", "pages", "AdminCenter.tsx"), "utf8");
+  for (const marker of [
+    "/api/crm/auth-context?workspaceId=",
+    "getSupabaseAccessToken()",
+    "Authorization: `Bearer ${accessToken}`",
+    "Админ-доступ подтверждён",
+    "Нужно войти заново",
+    "Недостаточно прав",
+  ]) {
+    if (!adminCenter.includes(marker)) {
+      throw new Error(`Admin Center server auth status is missing ${marker}`);
+    }
+  }
+
+  const doc = await readFile(path.join(repoRoot, "docs", "CRM-SERVER-AUTH.md"), "utf8");
+  for (const marker of [
+    "localStorage",
+    "Authorization: Bearer",
+    "supabase.auth.getUser(token)",
+    "auth_user_id",
+    "status = active",
+    "owner",
+    "admin",
+    "Demo/localStorage-сессия не получает доступ",
+    "ручная синхронизация Meta Insights",
+    "POST /api/crm/meta-insights-sync",
+    "GET /api/crm/meta-campaign-insights",
+  ]) {
+    if (!doc.includes(marker)) {
+      throw new Error(`CRM server auth documentation is missing ${marker}`);
+    }
+  }
+
+  console.log("CRM server admin auth foundation checks: ok");
+}
+
 async function checkLayoutFoundation() {
   const pagesDir = path.join(repoRoot, "artifacts", "negis", "src", "pages");
   const layoutDir = path.join(repoRoot, "artifacts", "negis", "src", "components", "layout");
@@ -2701,6 +2802,7 @@ async function main() {
   await checkCrmProductionGuards();
   await checkNoNewApiFiles();
   await checkMetaInsightsSchemaFoundation();
+  await checkCrmServerAuthFoundation();
   for (const route of [
     "/ai-control-center",
     "/dashboard",
@@ -2730,6 +2832,16 @@ async function main() {
   }
   await checkTargetingHealth();
   const crmHealth = await checkJsonEndpoint("/api/crm/health");
+  await checkJsonFailure(
+    "/api/crm/auth-context?workspaceId=853340e2-14e3-4e40-8414-295ec6c2abe2",
+    { method: "GET" },
+    "Authentication required",
+  );
+  await checkJsonFailure(
+    "/api/crm/auth-context?workspaceId=853340e2-14e3-4e40-8414-295ec6c2abe2",
+    { method: "GET", headers: { Authorization: "Bearer invalid-token" } },
+    "Authentication required",
+  );
   const crmHealthMeta = ((crmHealth.data || {}) as { meta?: { videoOptimization?: { enabled?: unknown; thresholdMb?: unknown; maxInputMb?: unknown; rawBucket?: unknown } } }).meta;
   const healthOptimization = crmHealthMeta?.videoOptimization;
   if (!healthOptimization || healthOptimization.enabled !== false || healthOptimization.thresholdMb !== 50 || healthOptimization.maxInputMb !== 500) {
