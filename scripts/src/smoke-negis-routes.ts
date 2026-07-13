@@ -2178,6 +2178,74 @@ async function checkCrmDealsFoundation() {
   console.log("CRM deals foundation checks: ok");
 }
 
+// CRM11a — schema-only foundation for normalized daily Meta Insights.
+async function checkMetaInsightsSchemaFoundation() {
+  const migration = await readFile(path.join(repoRoot, "migrations", "021_meta_campaign_insights_foundation.sql"), "utf8");
+  for (const marker of [
+    "create table if not exists public.meta_campaign_insights",
+    "workspace_id uuid not null references public.workspaces(id) on delete cascade",
+    "meta_campaign_launch_id uuid not null references public.meta_campaign_launches(id) on delete cascade",
+    "meta_campaign_id text not null",
+    "date_start date not null",
+    "date_stop date not null",
+    "spend_minor bigint not null default 0 check (spend_minor >= 0)",
+    "currency_exponent integer not null default 2 check (currency_exponent >= 0 and currency_exponent <= 6)",
+    "action_counts jsonb not null default '{}'::jsonb",
+    "fetched_at timestamptz not null default now()",
+    "unique (workspace_id, meta_campaign_launch_id, date_start, date_stop)",
+    "check (date_stop >= date_start)",
+    "meta_campaign_insights_workspace_launch_date_idx",
+    "meta_campaign_insights_workspace_date_idx",
+    "meta_campaign_insights_workspace_campaign_date_idx",
+    "meta_campaign_insights_workspace_fetched_at_idx",
+    "create table if not exists public.meta_insights_sync_runs",
+    "status in ('pending', 'running', 'succeeded', 'failed')",
+    "rows_upserted integer not null default 0 check (rows_upserted >= 0)",
+    "error_code text",
+    "error_message text",
+    "meta_insights_sync_runs_workspace_created_at_idx",
+    "meta_insights_sync_runs_workspace_status_created_at_idx",
+    "meta_insights_sync_runs_workspace_launch_created_at_idx",
+  ]) {
+    if (!migration.includes(marker)) {
+      throw new Error(`migration 021 is missing ${marker}`);
+    }
+  }
+
+  for (const forbidden of ["raw_meta_response", "raw_response jsonb", "paging_url", "access_token", "app_secret"]) {
+    if (migration.toLowerCase().includes(forbidden)) {
+      throw new Error(`migration 021 must not store ${forbidden}`);
+    }
+  }
+
+  const doc = await readFile(path.join(repoRoot, "docs", "META-INSIGHTS-FOUNDATION.md"), "utf8");
+  for (const marker of [
+    "плановый бюджет, а не фактический расход",
+    "`time_increment=1`",
+    "`reach` неаддитивен",
+    "`meta_leads` не является количеством заявок CRM",
+    "Сырые ответы Meta не сохраняются",
+    "Paging URL не сохраняются",
+    "фактический расход по кампании",
+    "оплаченную выручку, вручную связанную с кампанией",
+    "оплаченную выручку без рекламной атрибуции",
+    "## Что пока не рассчитывается",
+    "CPL",
+    "ROI",
+    "ROMI",
+    "автоматические рекомендации по бюджету",
+    "server-only helper",
+    "ручную admin-синхронизацию",
+    "фоновую синхронизацию",
+  ]) {
+    if (!doc.includes(marker)) {
+      throw new Error(`Meta Insights foundation documentation is missing ${marker}`);
+    }
+  }
+
+  console.log("Meta Insights schema foundation checks: ok");
+}
+
 async function checkLayoutFoundation() {
   const pagesDir = path.join(repoRoot, "artifacts", "negis", "src", "pages");
   const layoutDir = path.join(repoRoot, "artifacts", "negis", "src", "components", "layout");
@@ -2632,6 +2700,7 @@ async function main() {
   await checkSalesPageSource();
   await checkCrmProductionGuards();
   await checkNoNewApiFiles();
+  await checkMetaInsightsSchemaFoundation();
   for (const route of [
     "/ai-control-center",
     "/dashboard",
