@@ -6,7 +6,7 @@ CRM11-auth добавляет серверную проверку админис
 
 - `localStorage` остаётся только UX-состоянием интерфейса. Значения роли, workspace и режима из браузера не являются доказательством прав на сервере.
 - Защищённый запрос передаёт `Authorization: Bearer <Supabase access token>`.
-- Сервер проверяет токен через `supabase.auth.getUser(token)`.
+- Сервер проверяет токен через `GET ${SUPABASE_URL}/auth/v1/user`, передавая Bearer-токен и server-only `apikey` из service role key.
 - После проверки пользователя сервер ищет активную строку `staff_users` по `auth_user_id`, `workspace_id` и `status = active`.
 - Доступ получают только роли `owner` и `admin`.
 - Demo/localStorage-сессия не получает доступ к защищённым операциям.

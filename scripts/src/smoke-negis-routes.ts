@@ -2252,7 +2252,9 @@ async function checkCrmServerAuthFoundation() {
     "requireWorkspaceAdmin",
     "req.headers.authorization",
     "Bearer",
-    "supabase.auth.getUser(token)",
+    "/auth/v1/user",
+    "Authorization: `Bearer ${token}`",
+    "apikey: serviceRoleKey",
     '.from("staff_users")',
     '.eq("auth_user_id", userId)',
     '.eq("workspace_id", workspaceId)',
@@ -2265,7 +2267,13 @@ async function checkCrmServerAuthFoundation() {
       throw new Error(`CRM server auth helper is missing ${marker}`);
     }
   }
-  for (const forbidden of ["localStorage", "SUPABASE_SERVICE_ROLE_KEY", "access_token:", "mode: \"demo\""]) {
+  for (const forbidden of [
+    "localStorage",
+    "access_token:",
+    "mode: \"demo\"",
+    "supabase.auth.getUser(",
+    "admin.getUserById",
+  ]) {
     if (authHelper.includes(forbidden)) {
       throw new Error(`CRM server auth helper must not trust or expose ${forbidden}`);
     }
@@ -2329,7 +2337,7 @@ async function checkCrmServerAuthFoundation() {
   for (const marker of [
     "localStorage",
     "Authorization: Bearer",
-    "supabase.auth.getUser(token)",
+    "/auth/v1/user",
     "auth_user_id",
     "status = active",
     "owner",
