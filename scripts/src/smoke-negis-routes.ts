@@ -2762,6 +2762,218 @@ async function checkMetaInsightsHistoryFoundation() {
   console.log("Meta Insights Ads History foundation checks: ok");
 }
 
+async function checkMetaInsightsSchedulerFoundation() {
+  const migration = await readFile(
+    path.join(
+      repoRoot,
+      "migrations",
+      "022_meta_insights_scheduler_foundation.sql",
+    ),
+    "utf8",
+  );
+  const evaluator = await readFile(
+    path.join(repoRoot, "lib", "meta", "insightsCompleteness.ts"),
+    "utf8",
+  );
+  const tests = await readFile(
+    path.join(repoRoot, "scripts", "src", "meta-insights-completeness.test.ts"),
+    "utf8",
+  );
+  const rootPackage = await readFile(
+    path.join(repoRoot, "package.json"),
+    "utf8",
+  );
+  const scriptsPackage = await readFile(
+    path.join(repoRoot, "scripts", "package.json"),
+    "utf8",
+  );
+  const apiSource = await readFile(
+    path.join(repoRoot, "api", "crm", "[...path].ts"),
+    "utf8",
+  );
+  const doc = await readFile(
+    path.join(repoRoot, "docs", "META-INSIGHTS-FOUNDATION.md"),
+    "utf8",
+  );
+
+  for (const marker of [
+    "create table if not exists public.meta_insights_sync_state",
+    "workspace_id uuid not null references public.workspaces(id) on delete cascade",
+    "meta_campaign_launch_id uuid not null references public.meta_campaign_launches(id) on delete cascade",
+    "next_sync_at timestamptz",
+    "last_attempt_at timestamptz",
+    "last_success_at timestamptz",
+    "last_complete_date date",
+    "completeness_status text not null default 'never_synced'",
+    "consecutive_failure_count integer not null default 0",
+    "lease_owner text",
+    "lease_expires_at timestamptz",
+    "last_error_code text",
+    "paused_until timestamptz",
+    "pause_reason text",
+    "unique (workspace_id, meta_campaign_launch_id)",
+    "meta_insights_sync_state_lease_pair_check",
+    "meta_insights_sync_state_workspace_next_sync_idx",
+    "meta_insights_sync_state_workspace_status_next_sync_idx",
+    "meta_insights_sync_state_workspace_lease_expires_idx",
+    "meta_insights_sync_state_workspace_paused_until_idx",
+    "alter table public.meta_insights_sync_state enable row level security",
+    "grant all on table public.meta_insights_sync_state to service_role",
+  ]) {
+    if (!migration.includes(marker))
+      throw new Error(`migration 022 is missing ${marker}`);
+  }
+  for (const status of [
+    "never_synced",
+    "syncing",
+    "zero_delivery",
+    "partial",
+    "current",
+    "stale",
+    "failed",
+    "unavailable",
+  ]) {
+    if (!migration.includes(`'${status}'`))
+      throw new Error(`migration 022 is missing completeness status ${status}`);
+  }
+  for (const marker of [
+    `"trigger" text not null default 'manual'`,
+    "request_key text",
+    "attempt integer not null default 1",
+    "pages_fetched integer not null default 0",
+    "coverage_complete boolean not null default false",
+    "heartbeat_at timestamptz",
+    `check ("trigger" in ('manual', 'background', 'operator'))`,
+    "check (attempt >= 1)",
+    "check (pages_fetched >= 0)",
+    "meta_insights_sync_runs_workspace_request_key_idx",
+    "meta_insights_sync_runs_workspace_trigger_created_idx",
+    "meta_insights_sync_runs_workspace_coverage_finished_idx",
+    "meta_insights_sync_runs_workspace_heartbeat_idx",
+    "mark_manual_meta_insights_coverage_complete",
+  ]) {
+    if (!migration.includes(marker))
+      throw new Error(`migration 022 sync-run extension is missing ${marker}`);
+  }
+
+  for (const marker of [
+    "claim_due_meta_insights_sync_states",
+    "for update skip locked",
+    "state.next_sync_at <= now()",
+    "state.paused_until is null or state.paused_until <= now()",
+    "state.lease_expires_at is null or state.lease_expires_at <= now()",
+    "state.workspace_id = any(p_workspace_ids)",
+    "least(greatest(coalesce(p_limit, 1), 1), 50)",
+    "completeness_status = 'syncing'",
+    "security definer",
+    "set search_path = pg_catalog, public",
+    "revoke all on function public.claim_due_meta_insights_sync_states",
+    "grant execute on function public.claim_due_meta_insights_sync_states",
+  ]) {
+    if (!migration.toLowerCase().includes(marker.toLowerCase())) {
+      throw new Error(`migration 022 atomic claim is missing ${marker}`);
+    }
+  }
+  for (const forbidden of [
+    "access_token",
+    "app_secret",
+    "worker_secret",
+    "service_role_key",
+    "raw_response",
+    "paging_url",
+  ]) {
+    if (migration.toLowerCase().includes(forbidden)) {
+      throw new Error(`migration 022 must not store or expose ${forbidden}`);
+    }
+  }
+
+  for (const marker of [
+    "META_INSIGHTS_COMPLETENESS_STATUSES",
+    "mergeMetaInsightsDateRanges",
+    "findMetaInsightsUnknownGaps",
+    "isMetaInsightsLeaseActive",
+    "evaluateMetaInsightsCompleteness",
+    "accountTimeZone must be explicit",
+    "coverageComplete",
+    "completedAt",
+    "insightRowCountInRequiredRange === 0",
+    '"zero_delivery"',
+    '"current"',
+    '"stale"',
+    '"failed"',
+  ]) {
+    if (!evaluator.includes(marker))
+      throw new Error(
+        `Meta Insights completeness evaluator is missing ${marker}`,
+      );
+  }
+  for (const forbidden of [
+    "process.env",
+    "createClient",
+    "supabase",
+    "fetch(",
+    "accessToken",
+    "reach",
+  ]) {
+    if (evaluator.includes(forbidden)) {
+      throw new Error(
+        `Meta Insights completeness evaluator must stay pure and omit ${forbidden}`,
+      );
+    }
+  }
+  for (const marker of [
+    "fully covered successful zero-row range is zero_delivery",
+    "expired lease can be reclaimed",
+    "internal uncovered day",
+    "failed attempt does not erase fresh complete coverage",
+    "overlapping successful ranges merge",
+    "adjacent successful ranges merge",
+    "workspace allowlist",
+    "request key uniqueness",
+    "existing manual sync runs remain compatible",
+  ]) {
+    if (!tests.includes(marker))
+      throw new Error(`Meta Insights completeness tests are missing ${marker}`);
+  }
+  if (
+    !rootPackage.includes('"test:insights-completeness"') ||
+    !scriptsPackage.includes('"test:insights-completeness"')
+  ) {
+    throw new Error(
+      "Meta Insights completeness executable test command is missing",
+    );
+  }
+
+  for (const forbiddenRoute of [
+    'resource === "meta-insights-cron"',
+    'resource === "meta-insights-scheduler"',
+    'resource === "meta-insights-worker"',
+  ]) {
+    if (apiSource.includes(forbiddenRoute))
+      throw new Error(`CRM11e.1 must not add ${forbiddenRoute}`);
+  }
+
+  for (const marker of [
+    "## CRM11e.1: scheduler state и completeness foundation",
+    "одна scheduler-state строка",
+    "на один launch внутри workspace",
+    "FOR UPDATE SKIP LOCKED",
+    "request_key",
+    "zero_delivery",
+    "unknown gap",
+    "coverage_complete = true",
+    "server-to-server",
+    "Фоновый worker и cron endpoint в CRM11e.1",
+    "Ручная синхронизация остаётся защищённой",
+    "CPL, ROI и ROMI",
+  ]) {
+    if (!doc.includes(marker))
+      throw new Error(`CRM11e.1 documentation is missing ${marker}`);
+  }
+
+  console.log("Meta Insights scheduler and completeness foundation checks: ok");
+}
+
 async function checkLayoutFoundation() {
   const pagesDir = path.join(repoRoot, "artifacts", "negis", "src", "pages");
   const layoutDir = path.join(repoRoot, "artifacts", "negis", "src", "components", "layout");
@@ -3220,6 +3432,7 @@ async function main() {
   await checkCrmServerAuthFoundation();
   await checkMetaInsightsSyncFoundation();
   await checkMetaInsightsHistoryFoundation();
+  await checkMetaInsightsSchedulerFoundation();
   for (const route of [
     "/ai-control-center",
     "/dashboard",

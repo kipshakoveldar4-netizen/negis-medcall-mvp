@@ -10,6 +10,7 @@
     "typecheck:libs": "tsc --build",
     "typecheck": "node scripts/run-pnpm.cjs run typecheck:libs && node scripts/run-pnpm.cjs -r --filter \"./artifacts/**\" --filter \"./scripts\" --if-present run typecheck",
     "test:mobile": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:mobile",
+    "test:insights-completeness": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:insights-completeness",
     "test:routes": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:routes",
     "test:targeting": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:targeting"
   },
