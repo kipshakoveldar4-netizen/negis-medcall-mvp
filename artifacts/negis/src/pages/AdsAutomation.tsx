@@ -25,6 +25,7 @@ import { toast } from "sonner";
 import { PageLayout } from "@/components/layout/PageLayout";
 import { useAuth } from "@/contexts/AuthContext";
 import { apiUrl } from "@/lib/api";
+import { getSupabaseAccessToken } from "@/lib/serverAuth";
 import { hasSupabaseFrontendEnv, supabase } from "@/lib/supabase";
 import { getPlanFeature, normalizePlan, planFeatureBadge, type NegisPlan } from "@/lib/planFeatures";
 import { KZ_META_CITY_OPTIONS, getKzMetaCityOption } from "../../../../lib/meta/cities";
@@ -259,6 +260,43 @@ type LaunchHistoryItem = {
   createdAt?: string;
   payload?: Record<string, unknown>;
   metaResponse?: Record<string, unknown>;
+};
+
+type MetaInsightsHistoryAvailability = "available" | "not_synced" | "empty" | "running" | "failed" | "unavailable";
+
+type MetaInsightsHistorySummary = {
+  metaCampaignLaunchId: string;
+  availability: MetaInsightsHistoryAvailability;
+  lastRun: {
+    status: string;
+    dateStart: string | null;
+    dateStop: string | null;
+    rowsUpserted: number;
+    startedAt: string | null;
+    finishedAt: string | null;
+    safeErrorMessage: string | null;
+  } | null;
+  coveredDateStart: string | null;
+  coveredDateStop: string | null;
+  latestFetchedAt: string | null;
+  rowCount: number;
+  spendByCurrency: Array<{
+    currency: string;
+    currencyExponent: number;
+    spendMinor: string;
+  }>;
+  impressions: string;
+  clicks: string;
+  inlineLinkClicks: string;
+  metaLeads: string | null;
+};
+
+type HistoryInsightsAccess = "idle" | "checking" | "confirmed" | "required" | "forbidden" | "unavailable";
+
+type ServerAdminAuthContext = {
+  workspaceId?: string;
+  role?: string;
+  isAdmin?: boolean;
 };
 
 const inputStyle: CSSProperties = {
@@ -988,6 +1026,10 @@ function isDryRunMetaId(value?: string) {
   return Boolean(value && value.trim().toLowerCase().startsWith("dryrun_"));
 }
 
+function isServerLaunchUuid(value?: string): value is string {
+  return Boolean(value && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value));
+}
+
 function isVideoStatusReady(value?: string) {
   const text = (value || "").toLowerCase();
   return text.includes("ready") || text.includes("available") || text.includes("complete") || text.includes("success") || text.includes("finished");
@@ -1279,6 +1321,82 @@ function HistoryFact({ label, value }: { label: string; value: ReactNode }) {
   );
 }
 
+function formatMetaInsightsMinor(spendMinor: string, currencyExponent: number, currency: string): string {
+  if (!/^\d+$/.test(spendMinor) || !Number.isInteger(currencyExponent) || currencyExponent < 0 || currencyExponent > 6) return "—";
+  const amount = BigInt(spendMinor);
+  const divisor = 10n ** BigInt(currencyExponent);
+  const major = amount / divisor;
+  const fraction = currencyExponent > 0 ? (amount % divisor).toString().padStart(currencyExponent, "0") : "";
+  const majorLabel = new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 }).format(major);
+  const currencyLabel = currency === "KZT" ? "₸" : currency === "USD" ? "$" : currency;
+  return `${majorLabel}${fraction ? `,${fraction}` : ""} ${currencyLabel}`;
+}
+
+function formatMetaInsightsCount(value: string | null): string {
+  if (value === null || !/^\d+$/.test(value)) return "—";
+  return new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 }).format(BigInt(value));
+}
+
+function formatMetaInsightsDateTime(value: string | null): string {
+  if (!value) return "—";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "—" : date.toLocaleString("ru-RU");
+}
+
+function MetaInsightsHistoryDetails({ summary }: { summary: MetaInsightsHistorySummary | null }) {
+  const availability = summary?.availability || "unavailable";
+  const stateMessage =
+    availability === "not_synced"
+      ? "Insights ещё не синхронизированы."
+      : availability === "empty"
+        ? "Meta не вернула данные за выбранный период. Это нормально для выключенных или не откручивавшихся кампаний."
+        : availability === "running"
+          ? "Синхронизация выполняется."
+          : availability === "failed"
+            ? summary?.lastRun?.safeErrorMessage || "Не удалось получить Meta Insights."
+            : "Insights недоступны для этого запуска.";
+
+  return (
+    <section className="mt-3 min-w-0 rounded-2xl border border-[#D8E4EC] bg-white/70 p-3 sm:p-4" data-testid="history-meta-insights">
+      <h3 className="text-sm font-black" style={{ color: "var(--negis-text)" }}>Meta Insights</h3>
+      {availability === "available" && summary ? (
+        <>
+          <div className="mt-3 grid min-w-0 gap-x-6 gap-y-2 text-xs sm:grid-cols-2">
+            <div className="min-w-0 sm:col-span-2">
+              <p className="font-semibold" style={{ color: "var(--negis-muted)" }}>Фактический расход Meta</p>
+              <div className="mt-1 grid gap-1">
+                {summary.spendByCurrency.length > 0 ? summary.spendByCurrency.map((spend) => (
+                  <p key={`${spend.currency}:${spend.currencyExponent}`} className="break-words font-black" style={{ color: "var(--negis-text)" }}>
+                    {formatMetaInsightsMinor(spend.spendMinor, spend.currencyExponent, spend.currency)}
+                  </p>
+                )) : <p className="font-black" style={{ color: "var(--negis-text)" }}>—</p>}
+              </div>
+            </div>
+            <HistoryFact label="Показы" value={formatMetaInsightsCount(summary.impressions)} />
+            <HistoryFact label="Клики" value={formatMetaInsightsCount(summary.clicks)} />
+            <HistoryFact label="Клики по ссылке" value={formatMetaInsightsCount(summary.inlineLinkClicks)} />
+            <HistoryFact label="Лиды по данным Meta" value={formatMetaInsightsCount(summary.metaLeads)} />
+            <HistoryFact
+              label="Период данных"
+              value={summary.coveredDateStart && summary.coveredDateStop ? `${summary.coveredDateStart} — ${summary.coveredDateStop}` : "—"}
+            />
+            <HistoryFact label="Обновлено" value={formatMetaInsightsDateTime(summary.latestFetchedAt)} />
+          </div>
+          <div className="mt-3 border-t border-[#D8E4EC] pt-3 text-xs font-semibold leading-relaxed" style={{ color: "var(--negis-muted)" }}>
+            <p>Фактический расход Meta показывается отдельно от планового бюджета.</p>
+            <p>Лиды по данным Meta не равны заявкам CRM.</p>
+            <p>Это не оценка эффективности рекламы.</p>
+          </div>
+        </>
+      ) : (
+        <p className={`mt-2 break-words text-sm font-semibold ${availability === "failed" ? "text-red-700" : ""}`} style={availability === "failed" ? undefined : { color: "var(--negis-muted)" }}>
+          {stateMessage}
+        </p>
+      )}
+    </section>
+  );
+}
+
 function FeatureBadge({ plan, feature }: { plan: NegisPlan; feature: Parameters<typeof getPlanFeature>[1] }) {
   const config = getPlanFeature(plan, feature);
   if (config.enabled && config.badge !== "Standard" && config.badge !== "Pro") return null;
@@ -1359,6 +1477,10 @@ export default function AdsAutomation() {
   const [historyFilter, setHistoryFilter] = useState<HistoryFilter>("all");
   const [historySearch, setHistorySearch] = useState("");
   const [historyLoaded, setHistoryLoaded] = useState(false);
+  const [historyInsightsAccess, setHistoryInsightsAccess] = useState<HistoryInsightsAccess>("idle");
+  const [historyInsightsByLaunch, setHistoryInsightsByLaunch] = useState<Record<string, MetaInsightsHistorySummary>>({});
+  const [historyInsightsMessage, setHistoryInsightsMessage] = useState("");
+  const historyInsightsRequestRef = useRef(0);
   const [videoJob, setVideoJob] = useState<VideoJob | null>(null);
   const [videoConfigBlocked, setVideoConfigBlocked] = useState(false);
   const isHistoryView = location === "/ads-automation/history";
@@ -1451,6 +1573,109 @@ export default function AdsAutomation() {
   useEffect(() => {
     if (isHistoryView) void loadHistory();
   }, [isHistoryView]);
+
+  useEffect(() => {
+    const requestId = historyInsightsRequestRef.current + 1;
+    historyInsightsRequestRef.current = requestId;
+    setHistoryInsightsByLaunch({});
+    setHistoryInsightsMessage("");
+    setHistoryInsightsAccess("idle");
+
+    // The local admin UI toggle is presentation only. Insights require a verified
+    // Supabase session and a server-confirmed workspace owner/admin role.
+    if (!isHistoryView || !isAdminMode) return;
+    if (!isServerLaunchUuid(workspaceId)) {
+      setHistoryInsightsAccess("required");
+      setHistoryInsightsMessage("Подтвердите админ-доступ для просмотра Meta Insights.");
+      return;
+    }
+
+    setHistoryInsightsAccess("checking");
+    void (async () => {
+      let serverAdminConfirmed = false;
+      try {
+        const accessToken = await getSupabaseAccessToken();
+        if (historyInsightsRequestRef.current !== requestId) return;
+        if (!accessToken) {
+          setHistoryInsightsAccess("required");
+          setHistoryInsightsMessage("Подтвердите админ-доступ для просмотра Meta Insights.");
+          return;
+        }
+
+        const authResponse = await fetch(apiUrl(`/api/crm/auth-context?workspaceId=${encodeURIComponent(workspaceId)}`), {
+          headers: { Authorization: `Bearer ${accessToken}` },
+        });
+        const authBody = await safeJson<ServerAdminAuthContext>(authResponse);
+        if (historyInsightsRequestRef.current !== requestId) return;
+        if (authResponse.status === 401) {
+          setHistoryInsightsAccess("required");
+          setHistoryInsightsMessage("Подтвердите админ-доступ для просмотра Meta Insights.");
+          return;
+        }
+        if (authResponse.status === 403) {
+          setHistoryInsightsAccess("forbidden");
+          setHistoryInsightsMessage("Недостаточно прав для просмотра Meta Insights.");
+          return;
+        }
+        if (
+          !authResponse.ok ||
+          authBody.success !== true ||
+          authBody.mode !== "supabase" ||
+          authBody.data.isAdmin !== true ||
+          authBody.data.workspaceId !== workspaceId
+        ) {
+          setHistoryInsightsAccess("unavailable");
+          setHistoryInsightsMessage("Не удалось подтвердить админ-доступ к Meta Insights.");
+          return;
+        }
+        serverAdminConfirmed = true;
+
+        const insightsResponse = await fetch(apiUrl(`/api/crm/meta-insights-history?workspaceId=${encodeURIComponent(workspaceId)}`), {
+          headers: { Authorization: `Bearer ${accessToken}` },
+        });
+        const insightsBody = await safeJson<{ summaries?: MetaInsightsHistorySummary[] }>(insightsResponse);
+        if (historyInsightsRequestRef.current !== requestId) return;
+        if (insightsResponse.status === 401) {
+          setHistoryInsightsAccess("required");
+          setHistoryInsightsMessage("Подтвердите админ-доступ для просмотра Meta Insights.");
+          return;
+        }
+        if (insightsResponse.status === 403) {
+          setHistoryInsightsAccess("forbidden");
+          setHistoryInsightsMessage("Недостаточно прав для просмотра Meta Insights.");
+          return;
+        }
+        if (!insightsResponse.ok || insightsBody.success !== true || insightsBody.mode !== "supabase") {
+          const errorMessage = insightsBody.success === false ? insightsBody.details?.[0] || insightsBody.error : "";
+          setHistoryInsightsAccess("confirmed");
+          setHistoryInsightsMessage(errorMessage || "Не удалось загрузить Meta Insights.");
+          return;
+        }
+
+        const summaries = insightsBody.data.summaries || [];
+        const byLaunch: Record<string, MetaInsightsHistorySummary> = {};
+        for (const summary of summaries) {
+          if (isServerLaunchUuid(summary.metaCampaignLaunchId)) {
+            byLaunch[summary.metaCampaignLaunchId] = summary;
+          }
+        }
+        setHistoryInsightsByLaunch(byLaunch);
+        setHistoryInsightsAccess("confirmed");
+      } catch {
+        if (historyInsightsRequestRef.current !== requestId) return;
+        setHistoryInsightsAccess(serverAdminConfirmed ? "confirmed" : "unavailable");
+        setHistoryInsightsMessage(
+          serverAdminConfirmed
+            ? "Не удалось загрузить Meta Insights."
+            : "Не удалось подтвердить админ-доступ к Meta Insights.",
+        );
+      }
+    })();
+
+    return () => {
+      if (historyInsightsRequestRef.current === requestId) historyInsightsRequestRef.current += 1;
+    };
+  }, [isAdminMode, isHistoryView, workspaceId]);
 
   const videoJobPending = Boolean(videoJob && videoJob.status !== "ready" && videoJob.status !== "failed");
 
@@ -3889,6 +4114,19 @@ export default function AdsAutomation() {
           </button>
         </div>
 
+        {isAdminMode && historyInsightsAccess !== "confirmed" ? (
+          <p className="break-words rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-amber-900" aria-live="polite">
+            {historyInsightsAccess === "checking"
+              ? "Проверяем админ-доступ к Meta Insights…"
+              : historyInsightsMessage || "Подтвердите админ-доступ для просмотра Meta Insights."}
+          </p>
+        ) : null}
+        {isAdminMode && historyInsightsAccess === "confirmed" && historyInsightsMessage ? (
+          <p className="break-words rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-amber-900" aria-live="polite">
+            {historyInsightsMessage}
+          </p>
+        ) : null}
+
         <section className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5" aria-label="Сводка по запускам">
           {summaryMetrics.map((metric) => (
             <HistoryMetricCard key={metric.label} label={metric.label} value={metric.value} icon={metric.icon} tone={metric.tone} />
@@ -4052,6 +4290,13 @@ export default function AdsAutomation() {
                         ? "Проверьте результаты и расход в Ads Manager."
                         : "Откройте Ads Manager и включите кампанию, когда будете готовы.";
               const checking = Boolean(historyVideoCheckId) && historyVideoCheckId === (item.id || historyMetaVideoId);
+              const historyInsightsSummary =
+                isAdminMode &&
+                historyInsightsAccess === "confirmed" &&
+                !historyInsightsMessage &&
+                isServerLaunchUuid(item.id)
+                  ? historyInsightsByLaunch[item.id] || null
+                  : null;
               return (
                 <article
                   key={item.id || `${item.campaignName}-${index}`}
@@ -4090,6 +4335,7 @@ export default function AdsAutomation() {
                         </div>
                         <div className="flex flex-wrap items-center gap-2 sm:justify-end">
                           <StatusPill tone={modeBadge.tone}>{modeBadge.label}</StatusPill>
+                          {historyInsightsSummary?.availability === "available" ? <StatusPill tone="slate">Insights доступны</StatusPill> : null}
                           {historyOptimized ? <StatusPill tone="blue">Видео оптимизировано</StatusPill> : null}
                         </div>
                       </div>
@@ -4163,6 +4409,9 @@ export default function AdsAutomation() {
                       </p>
                       {historyVideoWarnings.length ? <p>Предупреждения: {historyVideoWarnings.join(" ")}</p> : null}
                       <p>Следующий шаг: {nextAction}</p>
+                      {isAdminMode && historyInsightsAccess === "confirmed" && !historyInsightsMessage ? (
+                        <MetaInsightsHistoryDetails summary={historyInsightsSummary} />
+                      ) : null}
                       {isAdminMode ? (
                         <div className="mt-2 grid gap-1 border-t pt-2" style={{ borderColor: "var(--negis-border)" }}>
                           <p className="font-black uppercase tracking-[0.1em]" style={{ color: "var(--negis-muted)" }}>Технические данные</p>

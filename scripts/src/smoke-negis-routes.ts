@@ -2610,6 +2610,158 @@ async function checkMetaInsightsSyncFoundation() {
   console.log("Meta Insights manual sync and diagnostics foundation checks: ok");
 }
 
+async function checkMetaInsightsHistoryFoundation() {
+  const crmServer = await readFile(path.join(repoRoot, "lib", "crm", "server.ts"), "utf8");
+  const apiSource = await readFile(path.join(repoRoot, "api", "crm", "[...path].ts"), "utf8");
+  const adsHistory = await readFile(path.join(repoRoot, "artifacts", "negis", "src", "pages", "AdsAutomation.tsx"), "utf8");
+  const doc = await readFile(path.join(repoRoot, "docs", "META-INSIGHTS-FOUNDATION.md"), "utf8");
+
+  for (const marker of [
+    'resource === "meta-insights-history"',
+    "handleMetaInsightsHistory(req, res)",
+  ]) {
+    if (!apiSource.includes(marker)) throw new Error(`CRM catch-all is missing ${marker}`);
+  }
+
+  const helperStart = crmServer.indexOf('type MetaInsightsHistoryAvailability =');
+  const helperEnd = crmServer.indexOf("function asSafeMetaInsightsError", helperStart);
+  const handlerStart = crmServer.indexOf("export async function handleMetaInsightsHistory");
+  const handlerEnd = crmServer.indexOf("export async function handleMetaInsightsSyncRuns", handlerStart);
+  if (helperStart < 0 || helperEnd < 0 || handlerStart < 0 || handlerEnd < 0) {
+    throw new Error("Meta Insights history helper or handler boundaries are missing");
+  }
+  const historyHelper = crmServer.slice(helperStart, helperEnd);
+  const historyHandler = crmServer.slice(handlerStart, handlerEnd);
+
+  for (const marker of [
+    "META_INSIGHTS_HISTORY_LAUNCH_LIMIT = 40",
+    "loadLatestMetaInsightsRunsByLaunch",
+    '.eq("meta_campaign_launch_id", launchId)',
+    ".limit(1)",
+    'select("id", { count: "exact", head: true })',
+    ".range(offset, pageStop)",
+    "rows.length !== rowCount",
+    "META_INSIGHTS_HISTORY_MAX_ROWS",
+    "BigInt(",
+    "currencyExponent",
+    "currencyKey",
+    '.from("meta_campaign_insights")',
+    "meta_campaign_launch_id",
+    '"available"',
+    '"not_synced"',
+    '"empty"',
+    '"running"',
+    '"failed"',
+    '"unavailable"',
+  ]) {
+    if (!historyHelper.includes(marker)) throw new Error(`Meta Insights history aggregation is missing ${marker}`);
+  }
+  if (/\.limit\((?:20|500)\)/.test(historyHelper)) {
+    throw new Error("Meta Insights history must not silently truncate runs or insight rows at 20/500");
+  }
+  if (/\breach\b/.test(historyHelper)) {
+    throw new Error("Meta Insights history aggregate must deliberately omit non-additive daily reach");
+  }
+  for (const forbidden of ["raw_response", "paging.next", "pagingUrl", "accessToken", "appSecret", "action_counts"]) {
+    if (historyHelper.includes(forbidden)) throw new Error(`Meta Insights history helper must not expose ${forbidden}`);
+  }
+
+  for (const marker of [
+    "requireWorkspaceAdmin(req, workspaceId)",
+    '.from("meta_campaign_launches")',
+    "expectedCampaignByLaunch",
+    "metaCampaignLaunchId: launchId",
+    'success("supabase"',
+  ]) {
+    if (!historyHandler.includes(marker)) throw new Error(`Meta Insights history endpoint is missing ${marker}`);
+  }
+  if (historyHandler.includes('success("demo"')) {
+    throw new Error("Meta Insights history endpoint must not have a demo fallback");
+  }
+  const summaryDto = historyHandler.slice(historyHandler.indexOf("const summaries"), historyHandler.indexOf("return sendJson"));
+  for (const forbidden of ["reach", "rawResponse", "raw_response", "paging", "accessToken", "appSecret", "payload:", "metaCampaignId:"]) {
+    if (summaryDto.includes(forbidden)) throw new Error(`Meta Insights history DTO must not expose ${forbidden}`);
+  }
+
+  const authEffectStart = adsHistory.indexOf("The local admin UI toggle is presentation only");
+  const authEffectEnd = adsHistory.indexOf("const videoJobPending", authEffectStart);
+  if (authEffectStart < 0 || authEffectEnd < 0) throw new Error("Ads History Insights auth effect boundaries are missing");
+  const authEffect = adsHistory.slice(authEffectStart, authEffectEnd);
+  for (const marker of [
+    "if (!isHistoryView || !isAdminMode) return",
+    "getSupabaseAccessToken()",
+    "/api/crm/auth-context?workspaceId=",
+    "Authorization: `Bearer ${accessToken}`",
+    "authBody.data.isAdmin !== true",
+    "authBody.data.workspaceId !== workspaceId",
+    "/api/crm/meta-insights-history?workspaceId=",
+  ]) {
+    if (!authEffect.includes(marker)) throw new Error(`Ads History server auth is missing ${marker}`);
+  }
+  if (authEffect.indexOf("/api/crm/meta-insights-history?workspaceId=") < authEffect.indexOf("authBody.data.isAdmin !== true")) {
+    throw new Error("Ads History must verify server admin access before requesting Insights");
+  }
+  if (authEffect.indexOf("if (!isHistoryView || !isAdminMode) return") > authEffect.indexOf("getSupabaseAccessToken()")) {
+    throw new Error("Ads History client mode must exit before reading a Supabase session");
+  }
+  if (authEffect.includes("localStorage")) {
+    throw new Error("Ads History must not cache Meta Insights in localStorage");
+  }
+
+  for (const marker of [
+    "isServerLaunchUuid(item.id)",
+    'historyInsightsAccess === "confirmed"',
+    "Insights доступны",
+    "Фактический расход Meta",
+    "Лиды по данным Meta",
+    "Insights ещё не синхронизированы",
+    "Meta не вернула данные за выбранный период",
+    "Синхронизация выполняется",
+    "Insights недоступны для этого запуска",
+    "Фактический расход Meta показывается отдельно от планового бюджета.",
+    "Лиды по данным Meta не равны заявкам CRM.",
+    "Это не оценка эффективности рекламы.",
+    "Подтвердите админ-доступ для просмотра Meta Insights.",
+    "formatMetaInsightsMinor",
+    "BigInt(spendMinor)",
+  ]) {
+    if (!adsHistory.includes(marker)) throw new Error(`Ads History Insights UI is missing ${marker}`);
+  }
+  if (adsHistory.includes('"/api/crm/meta-insights-sync"')) {
+    throw new Error("Ads History must not add a manual Insights synchronization trigger");
+  }
+  if (/\b(?:CPL|ROI|ROMI)\b/.test(adsHistory)) {
+    throw new Error("Ads History must not calculate or display CPL, ROI or ROMI");
+  }
+  const insightsPanel = adsHistory.slice(
+    adsHistory.indexOf("function MetaInsightsHistoryDetails"),
+    adsHistory.indexOf("function FeatureBadge"),
+  );
+  for (const marker of ["min-w-0", "sm:grid-cols-2", "break-words"]) {
+    if (!insightsPanel.includes(marker)) throw new Error(`Ads History Insights mobile layout is missing ${marker}`);
+  }
+  if (/\breach\b/.test(insightsPanel)) {
+    throw new Error("Ads History Insights UI must not display aggregate reach");
+  }
+
+  for (const marker of [
+    "## CRM11d: read-only Insights в истории рекламы",
+    "активную роль `owner` или `admin`",
+    "meta_campaign_launches.id = meta_campaign_insights.meta_campaign_launch_id",
+    "Client mode не получает access token",
+    "Local/demo-запуски исключены",
+    "Разные валюты не объединяются",
+    "`reach` намеренно отсутствует",
+    "Meta action metric, а не заявки CRM",
+    "только в Admin Center; в Ads History нет sync-кнопки.",
+    "не рассчитывает CPL, ROI, ROMI",
+  ]) {
+    if (!doc.includes(marker)) throw new Error(`CRM11d documentation is missing ${marker}`);
+  }
+
+  console.log("Meta Insights Ads History foundation checks: ok");
+}
+
 async function checkLayoutFoundation() {
   const pagesDir = path.join(repoRoot, "artifacts", "negis", "src", "pages");
   const layoutDir = path.join(repoRoot, "artifacts", "negis", "src", "components", "layout");
@@ -3067,6 +3219,7 @@ async function main() {
   await checkMetaInsightsSchemaFoundation();
   await checkCrmServerAuthFoundation();
   await checkMetaInsightsSyncFoundation();
+  await checkMetaInsightsHistoryFoundation();
   for (const route of [
     "/ai-control-center",
     "/dashboard",
@@ -3135,6 +3288,16 @@ async function main() {
   await checkJsonFailure(
     "/api/crm/meta-campaign-insights?workspaceId=9eb6f100-bb6a-4f99-9719-e85c34513a03",
     { method: "GET" },
+    "Authentication required",
+  );
+  await checkJsonFailure(
+    "/api/crm/meta-insights-history?workspaceId=9eb6f100-bb6a-4f99-9719-e85c34513a03",
+    { method: "GET" },
+    "Authentication required",
+  );
+  await checkJsonFailure(
+    "/api/crm/meta-insights-history?workspaceId=9eb6f100-bb6a-4f99-9719-e85c34513a03",
+    { method: "GET", headers: { Authorization: "Bearer invalid-token" } },
     "Authentication required",
   );
   const crmHealthMeta = ((crmHealth.data || {}) as { meta?: { videoOptimization?: { enabled?: unknown; thresholdMb?: unknown; maxInputMb?: unknown; rawBucket?: unknown } } }).meta;

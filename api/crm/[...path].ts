@@ -9,6 +9,7 @@ import {
   handleCrmResource,
   handleMetaCityKey,
   handleMetaCampaignInsights,
+  handleMetaInsightsHistory,
   handleMetaInsightsSync,
   handleMetaInsightsSyncRuns,
   handleMetaLaunch,
@@ -155,6 +156,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   if (resource === "meta-campaign-insights") {
     return handleMetaCampaignInsights(req, res);
+  }
+
+  if (resource === "meta-insights-history") {
+    return handleMetaInsightsHistory(req, res);
   }
 
   if (resource === "meta-insights-sync-runs") {

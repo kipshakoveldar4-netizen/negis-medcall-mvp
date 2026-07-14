@@ -4951,6 +4951,215 @@ function mapMetaInsightsSyncRun(rowValue: unknown): JsonRecord {
   };
 }
 
+type MetaInsightsHistoryAvailability = "available" | "not_synced" | "empty" | "running" | "failed" | "unavailable";
+
+type MetaInsightsHistoryAggregate = {
+  coveredDateStart: string | null;
+  coveredDateStop: string | null;
+  latestFetchedAt: string | null;
+  latestFetchedTimestamp: number;
+  rowCount: number;
+  spendByCurrency: Map<string, { currency: string; currencyExponent: number; spendMinor: bigint }>;
+  impressions: bigint;
+  clicks: bigint;
+  inlineLinkClicks: bigint;
+  metaLeads: bigint;
+  hasMetaLeads: boolean;
+};
+
+const META_INSIGHTS_HISTORY_LAUNCH_LIMIT = 40;
+const META_INSIGHTS_HISTORY_PAGE_SIZE = 500;
+const META_INSIGHTS_HISTORY_MAX_ROWS = 20_000;
+const META_INSIGHTS_HISTORY_RUN_BATCH_SIZE = 8;
+
+function isMetaInsightsHistoryLaunchEligible(launch: JsonRecord): boolean {
+  const status = readString(launch.status).toLowerCase();
+  const metaStatus = readString(launch.meta_status).toLowerCase();
+  return (
+    isUuid(readString(launch.id)) &&
+    isRealMetaCampaignId(readString(launch.meta_campaign_id)) &&
+    !launchUsesDryRun(launch) &&
+    ![status, metaStatus].some((value) => value === "failed" || value === "video_processing")
+  );
+}
+
+function strictDatabaseIntegerString(value: unknown, fieldName: string): string {
+  const normalized = databaseIntegerString(value, "");
+  if (!normalized) {
+    throw new MetaInsightsError("persistence_failed", `Сохранённое поле ${fieldName} имеет некорректный формат.`);
+  }
+  return normalized;
+}
+
+function emptyMetaInsightsHistoryAggregate(): MetaInsightsHistoryAggregate {
+  return {
+    coveredDateStart: null,
+    coveredDateStop: null,
+    latestFetchedAt: null,
+    latestFetchedTimestamp: Number.NEGATIVE_INFINITY,
+    rowCount: 0,
+    spendByCurrency: new Map(),
+    impressions: 0n,
+    clicks: 0n,
+    inlineLinkClicks: 0n,
+    metaLeads: 0n,
+    hasMetaLeads: false,
+  };
+}
+
+function aggregateMetaInsightsHistoryRow(
+  aggregate: MetaInsightsHistoryAggregate,
+  row: JsonRecord,
+  expectedMetaCampaignId: string,
+) {
+  const rowMetaCampaignId = readString(row.meta_campaign_id);
+  if (rowMetaCampaignId !== expectedMetaCampaignId) {
+    throw new MetaInsightsError("persistence_failed", "Сохранённые Insights не совпали с исходным Meta launch.");
+  }
+
+  const currency = readString(row.currency).toUpperCase();
+  const currencyExponent = readNumber(row.currency_exponent);
+  if (!currency || currencyExponent === null || !Number.isInteger(currencyExponent) || currencyExponent < 0 || currencyExponent > 6) {
+    throw new MetaInsightsError("persistence_failed", "Сохранённая валюта Insights имеет некорректный формат.");
+  }
+
+  const spendMinor = BigInt(strictDatabaseIntegerString(row.spend_minor, "spend_minor"));
+  const currencyKey = `${currency}:${currencyExponent}`;
+  const currentSpend = aggregate.spendByCurrency.get(currencyKey);
+  aggregate.spendByCurrency.set(currencyKey, {
+    currency,
+    currencyExponent,
+    spendMinor: (currentSpend?.spendMinor || 0n) + spendMinor,
+  });
+
+  aggregate.impressions += BigInt(strictDatabaseIntegerString(row.impressions, "impressions"));
+  aggregate.clicks += BigInt(strictDatabaseIntegerString(row.clicks, "clicks"));
+  aggregate.inlineLinkClicks += BigInt(strictDatabaseIntegerString(row.inline_link_clicks, "inline_link_clicks"));
+  if (row.meta_leads !== null && row.meta_leads !== undefined) {
+    aggregate.metaLeads += BigInt(strictDatabaseIntegerString(row.meta_leads, "meta_leads"));
+    aggregate.hasMetaLeads = true;
+  }
+
+  const dateStart = readString(row.date_start);
+  const dateStop = readString(row.date_stop);
+  aggregate.coveredDateStart = !aggregate.coveredDateStart || dateStart < aggregate.coveredDateStart ? dateStart : aggregate.coveredDateStart;
+  aggregate.coveredDateStop = !aggregate.coveredDateStop || dateStop > aggregate.coveredDateStop ? dateStop : aggregate.coveredDateStop;
+
+  const fetchedAt = readString(row.fetched_at);
+  const fetchedTimestamp = Date.parse(fetchedAt);
+  if (Number.isFinite(fetchedTimestamp) && fetchedTimestamp > aggregate.latestFetchedTimestamp) {
+    aggregate.latestFetchedTimestamp = fetchedTimestamp;
+    aggregate.latestFetchedAt = fetchedAt;
+  }
+  aggregate.rowCount += 1;
+}
+
+async function loadLatestMetaInsightsRunsByLaunch(
+  supabase: CrmSupabaseClient,
+  workspaceId: string,
+  launchIds: string[],
+): Promise<Map<string, JsonRecord>> {
+  const latestRuns = new Map<string, JsonRecord>();
+
+  for (let offset = 0; offset < launchIds.length; offset += META_INSIGHTS_HISTORY_RUN_BATCH_SIZE) {
+    const batch = launchIds.slice(offset, offset + META_INSIGHTS_HISTORY_RUN_BATCH_SIZE);
+    const results = await Promise.all(
+      batch.map(async (launchId) => {
+        const { data, error } = await supabase
+          .from("meta_insights_sync_runs")
+          .select("id,meta_campaign_launch_id,status,date_start,date_stop,rows_upserted,error_message,started_at,finished_at,created_at")
+          .eq("workspace_id", workspaceId)
+          .eq("meta_campaign_launch_id", launchId)
+          .order("created_at", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        if (error) {
+          throw new MetaInsightsError("persistence_failed", "Не удалось прочитать последний статус синхронизации Insights.");
+        }
+        return { launchId, run: asRecord(data) };
+      }),
+    );
+
+    for (const result of results) {
+      if (readString(result.run.id)) latestRuns.set(result.launchId, result.run);
+    }
+  }
+
+  return latestRuns;
+}
+
+async function loadMetaInsightsHistoryRows(
+  supabase: CrmSupabaseClient,
+  workspaceId: string,
+  launchIds: string[],
+): Promise<JsonRecord[]> {
+  if (launchIds.length === 0) return [];
+
+  const { count, error: countError } = await supabase
+    .from("meta_campaign_insights")
+    .select("id", { count: "exact", head: true })
+    .eq("workspace_id", workspaceId)
+    .in("meta_campaign_launch_id", launchIds);
+  if (countError) {
+    throw new MetaInsightsError("persistence_failed", "Не удалось проверить объём сохранённых Meta Insights.");
+  }
+  const rowCount = count || 0;
+  if (rowCount > META_INSIGHTS_HISTORY_MAX_ROWS) {
+    throw new MetaInsightsError("persistence_failed", "Сводка Meta Insights превышает безопасный лимит строк.");
+  }
+
+  const rows: JsonRecord[] = [];
+  for (let offset = 0; offset < rowCount; offset += META_INSIGHTS_HISTORY_PAGE_SIZE) {
+    const pageStop = Math.min(offset + META_INSIGHTS_HISTORY_PAGE_SIZE - 1, rowCount - 1);
+    const { data, error } = await supabase
+      .from("meta_campaign_insights")
+      .select("id,meta_campaign_launch_id,meta_campaign_id,date_start,date_stop,spend_minor,currency,currency_exponent,impressions,clicks,inline_link_clicks,meta_leads,fetched_at")
+      .eq("workspace_id", workspaceId)
+      .in("meta_campaign_launch_id", launchIds)
+      .order("date_start", { ascending: true })
+      .order("id", { ascending: true })
+      .range(offset, pageStop);
+    if (error) {
+      throw new MetaInsightsError("persistence_failed", "Не удалось прочитать сохранённые Meta Insights.");
+    }
+    rows.push(...(Array.isArray(data) ? data.map(asRecord) : []));
+  }
+
+  if (rows.length !== rowCount) {
+    throw new MetaInsightsError("persistence_failed", "Сохранённые Meta Insights изменились во время построения сводки.");
+  }
+  return rows;
+}
+
+function mapMetaInsightsHistoryLastRun(run: JsonRecord | undefined): JsonRecord | null {
+  if (!run || !readString(run.id)) return null;
+  return {
+    status: readString(run.status),
+    dateStart: firstString(run.date_start) || null,
+    dateStop: firstString(run.date_stop) || null,
+    rowsUpserted: readNumber(run.rows_upserted) ?? 0,
+    startedAt: firstString(run.started_at) || null,
+    finishedAt: firstString(run.finished_at) || null,
+    safeErrorMessage: firstString(run.error_message) || null,
+  };
+}
+
+function resolveMetaInsightsHistoryAvailability(input: {
+  eligible: boolean;
+  aggregate?: MetaInsightsHistoryAggregate;
+  latestRun?: JsonRecord;
+}): MetaInsightsHistoryAvailability {
+  if (!input.eligible) return "unavailable";
+  if (input.aggregate && input.aggregate.rowCount > 0) return "available";
+
+  const runStatus = readString(input.latestRun?.status).toLowerCase();
+  if (runStatus === "pending" || runStatus === "running") return "running";
+  if (runStatus === "failed") return "failed";
+  if (runStatus === "succeeded" && (readNumber(input.latestRun?.rows_upserted) ?? 0) === 0) return "empty";
+  if (runStatus === "succeeded") return "failed";
+  return "not_synced";
+}
+
 function asSafeMetaInsightsError(error: unknown): MetaInsightsError {
   if (
     error instanceof MetaInsightsError &&
@@ -5214,6 +5423,105 @@ export async function handleMetaCampaignInsights(req: VercelRequest, res: Vercel
 
   const insights = (Array.isArray(data) ? data : []).map(mapMetaCampaignInsight);
   return sendJson(res, 200, success("supabase", { insights, items: insights }));
+}
+
+export async function handleMetaInsightsHistory(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== "GET") {
+    return sendJson(res, 405, errorBody("Method not allowed", ["Use GET"]));
+  }
+
+  const workspaceId = readWorkspaceId(req, {});
+  if (!isUuid(workspaceId)) {
+    return sendJson(res, 400, errorBody("Validation error", ["workspaceId must be a UUID"]));
+  }
+
+  try {
+    await requireWorkspaceAdmin(req, workspaceId);
+  } catch (error) {
+    return sendWorkspaceAdminAuthError(res, error);
+  }
+
+  const supabase = getSupabaseServerClient();
+  if (!supabase) {
+    return sendMetaInsightsFailure(
+      res,
+      new MetaInsightsError("persistence_failed", "Supabase недоступен для чтения сводки Insights."),
+    );
+  }
+
+  try {
+    const { data: launchData, error: launchError } = await supabase
+      .from("meta_campaign_launches")
+      .select("id,status,meta_status,meta_campaign_id,payload,meta_response,created_at")
+      .eq("workspace_id", workspaceId)
+      .order("created_at", { ascending: false })
+      .limit(META_INSIGHTS_HISTORY_LAUNCH_LIMIT);
+    if (launchError) {
+      throw new MetaInsightsError("persistence_failed", "Не удалось прочитать историю Meta launch.");
+    }
+
+    const launches = (Array.isArray(launchData) ? launchData : []).map(asRecord);
+    const launchIds = launches.map((launch) => readString(launch.id)).filter(isUuid);
+    const eligibleLaunches = launches.filter(isMetaInsightsHistoryLaunchEligible);
+    const eligibleLaunchIds = eligibleLaunches.map((launch) => readString(launch.id));
+    const expectedCampaignByLaunch = new Map(
+      eligibleLaunches.map((launch) => [readString(launch.id), readString(launch.meta_campaign_id)]),
+    );
+
+    const [latestRunsByLaunch, insightRows] = await Promise.all([
+      loadLatestMetaInsightsRunsByLaunch(supabase, workspaceId, launchIds),
+      loadMetaInsightsHistoryRows(supabase, workspaceId, eligibleLaunchIds),
+    ]);
+
+    const aggregates = new Map<string, MetaInsightsHistoryAggregate>();
+    for (const row of insightRows) {
+      const launchId = readString(row.meta_campaign_launch_id);
+      const expectedMetaCampaignId = expectedCampaignByLaunch.get(launchId);
+      if (!expectedMetaCampaignId) {
+        throw new MetaInsightsError("persistence_failed", "Сохранённые Insights ссылаются на неподходящий Meta launch.");
+      }
+      const aggregate = aggregates.get(launchId) || emptyMetaInsightsHistoryAggregate();
+      aggregateMetaInsightsHistoryRow(aggregate, row, expectedMetaCampaignId);
+      aggregates.set(launchId, aggregate);
+    }
+
+    const summaries = launches.map((launch) => {
+      const launchId = readString(launch.id);
+      const eligible = isMetaInsightsHistoryLaunchEligible(launch);
+      const aggregate = aggregates.get(launchId);
+      const latestRun = latestRunsByLaunch.get(launchId);
+      return {
+        metaCampaignLaunchId: launchId,
+        availability: resolveMetaInsightsHistoryAvailability({ eligible, aggregate, latestRun }),
+        lastRun: mapMetaInsightsHistoryLastRun(latestRun),
+        coveredDateStart: aggregate?.coveredDateStart || null,
+        coveredDateStop: aggregate?.coveredDateStop || null,
+        latestFetchedAt: aggregate?.latestFetchedAt || null,
+        rowCount: aggregate?.rowCount || 0,
+        spendByCurrency: aggregate
+          ? [...aggregate.spendByCurrency.values()]
+              .sort((left, right) => `${left.currency}:${left.currencyExponent}`.localeCompare(`${right.currency}:${right.currencyExponent}`))
+              .map((item) => ({
+                currency: item.currency,
+                currencyExponent: item.currencyExponent,
+                spendMinor: item.spendMinor.toString(),
+              }))
+          : [],
+        impressions: (aggregate?.impressions || 0n).toString(),
+        clicks: (aggregate?.clicks || 0n).toString(),
+        inlineLinkClicks: (aggregate?.inlineLinkClicks || 0n).toString(),
+        metaLeads: aggregate?.hasMetaLeads ? aggregate.metaLeads.toString() : null,
+      };
+    });
+
+    return sendJson(res, 200, success("supabase", { summaries, items: summaries }));
+  } catch (error) {
+    const safeError =
+      error instanceof MetaInsightsError
+        ? error
+        : new MetaInsightsError("persistence_failed", "Не удалось построить безопасную сводку Meta Insights.");
+    return sendMetaInsightsFailure(res, safeError);
+  }
 }
 
 export async function handleMetaInsightsSyncRuns(req: VercelRequest, res: VercelResponse) {
