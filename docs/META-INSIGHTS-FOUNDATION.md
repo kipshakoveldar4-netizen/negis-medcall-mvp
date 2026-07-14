@@ -333,3 +333,104 @@ metric rows. Отсутствие строки внутри успешно и п
 Будущий worker потребует отдельную server-to-server авторизацию и не будет
 доверять demo/localStorage-сессии или одному `workspaceId`. Этот этап не добавляет
 CPL, ROI и ROMI, оценки эффективности или рекомендации по бюджету.
+
+## CRM11e.2: фоновый оркестратор синхронизации
+
+CRM11e.2 добавляет защищённый server-to-server фоновый цикл Meta Insights и
+отдельный короткоживущий Railway Cron worker. Развёртывание и расписание в этом
+этапе не включаются: это canary-инфраструктура с консервативными лимитами.
+
+### HMAC-авторизация worker
+
+Фоновый endpoint `POST /api/crm/meta-insights-background-cycle` живёт в том же CRM
+catch-all и **не** создаёт отдельную Vercel Function. Он не принимает user Bearer
+и вообще не использует пользовательскую сессию. Единственное доказательство —
+подпись HMAC-SHA256, которую проверяет server-only helper `lib/auth/worker.ts`.
+
+Канонический payload: `METHOD \n PATH \n TIMESTAMP \n NONCE \n SHA256(body)`.
+Подпись = `HMAC-SHA256(worker secret, canonical payload)` и сверяется через
+`timingSafeEqual`. Заголовки запроса: `x-negis-worker-timestamp`,
+`x-negis-worker-nonce`, `x-negis-worker-signature`, `x-negis-worker-request-id`.
+Отсутствующие или искажённые заголовки, timestamp вне допустимого окна
+(`META_INSIGHTS_WORKER_MAX_CLOCK_SKEW_SECONDS`, по умолчанию 300 секунд) и
+неверная подпись отклоняются безопасной ошибкой. Один `workspaceId` никогда не
+считается авторизацией. Секрет и подпись никогда не возвращаются и не логируются.
+
+Серверные секреты (`META_INSIGHTS_WORKER_SECRET`,
+`META_INSIGHTS_WORKSPACE_ALLOWLIST`) хранятся только на Vercel. Endpoint
+пересекает запрошенные `workspaceIds` с серверным allowlist; workspace вне
+allowlist просто не обрабатывается.
+
+### Защита от повторов (replay)
+
+`x-negis-worker-request-id` используется как основа `request_key` каждого launch
+в цикле (`bg:<requestId>:<launchId>`). Уникальный индекс
+`(workspace_id, request_key)` в `meta_insights_sync_runs` гарантирует, что
+повторно доставленный цикл не запускает дублирующую синхронизацию: существующий
+run возвращается как безопасный `already_processed`, а гонка на вставке
+завершается тем же безопасным путём.
+
+### Manual vs background
+
+Один общий внутренний core `syncMetaInsightsForLaunch` обслуживает оба пути, чтобы
+не дублировать нормализацию и пагинацию Meta. Ручной путь (`trigger=manual`,
+`authMode=user_admin`) сохраняет проверку `requireWorkspaceAdmin` и прежнее
+поведение. Фоновый путь (`trigger=background`, `authMode=worker_hmac`) не требует
+user Bearer, использует `request_key` цикла и получает лимиты из HMAC-контекста.
+
+### Canary-политика дат
+
+Фоновый цикл читает только завершённые account-local дни: сегодняшний день всегда
+исключён, по умолчанию берутся предыдущие 3 завершённых дня. Будущие даты
+запрещены, максимум диапазона — 31 день. Таймзона берётся из Meta account context;
+при недоступной таймзоне используется резервная `Asia/Almaty`, а полнота помечается
+как `partial` (безопасно), потому что границы суток не подтверждены. Полная матрица
+жизненного цикла в этом этапе не реализуется.
+
+### Lease и жизненный цикл scheduler-state
+
+Задачи выбираются атомарно через `claim_due_meta_insights_sync_states`
+(`FOR UPDATE SKIP LOCKED`), который ставит lease на 120 секунд и переводит
+состояние в `syncing`. Concurrency canary — 1: захваченные launch обрабатываются
+последовательно, максимум 2 launch за цикл (абсолютный максимум 10, prod default
+2).
+
+Перед синхронизацией run фиксирует `heartbeat_at` и обновляет его до и после
+Meta fetch. При успехе: дневной upsert, run `succeeded` с `pages_fetched`,
+`rows_upserted` и `coverage_complete=true` только после полной пагинации и
+сохранения; scheduler-state получает `last_success_at`, `last_complete_date`,
+`consecutive_failure_count=0`, очищенный lease, статус полноты из
+`insightsCompleteness`, а `next_sync_at` для PAUSED-canary = сейчас + 24 часа.
+Пустой ответ Meta — это успешный run с `coverage_complete=true` без искусственных
+строк (полнота может быть `zero_delivery`).
+
+При ошибке сохраняется только безопасный код: run `failed`, lease очищается,
+`consecutive_failure_count` увеличивается, backoff `next_sync_at` (1-я ошибка
++15 мин, 2-я +1 час, 3+ +6 часов). Повтор `meta_auth`/`meta_permission` дважды
+переводит state в паузу `paused_until = сейчас + 6 часов` с безопасным
+`pause_reason`. Активный lease никогда не остаётся после обработанного завершения
+или ошибки.
+
+### Безопасность и логи
+
+Ответ содержит только безопасную сводку: `success`, `requestId`, `claimed`,
+`succeeded`, `failed`, `skipped` и `results` с
+`{ metaCampaignLaunchId, runId, status, rowsUpserted, safeErrorCode }`. Логи могут
+содержать `requestId`, `workerId`, `workspaceId`, внутренние UUID launch и run,
+безопасный статус/код и счётчики. Логи и ответ никогда не содержат worker secret,
+HMAC-подпись, Authorization Bearer, service-role key, Meta access token, Meta App
+Secret, сырой ответ или тело Meta, `paging.next` и технические URL с токеном.
+
+### Отдельный Railway Cron worker
+
+Пакет `artifacts/meta-insights-worker` (`@workspace/meta-insights-worker`) —
+отдельный короткоживущий worker и не связан с `artifacts/video-worker`. Он
+подписывает один цикл, делает POST к production catch-all, печатает безопасную
+сводку и выходит (код 0 при успехе, ненулевой при ошибке). Polling-цикла нет.
+Worker хранит только shared worker secret и **не** содержит `META_ACCESS_TOKEN`,
+`META_APP_SECRET` или `SUPABASE_SERVICE_ROLE_KEY`. Переменные окружения и
+инструкции по запуску описаны в `artifacts/meta-insights-worker/README.md`.
+
+CRM11e.2 не меняет логику Ads Automation, создание кампаний Meta и gating ACTIVE.
+Он не рассчитывает CPL, ROI, ROMI, эффективность или рекомендации по бюджету.
+Развёртывание worker и расписание в рамках этого этапа не выполняются.

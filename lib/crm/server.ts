@@ -1,5 +1,14 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { requireWorkspaceAdmin, WorkspaceAdminAuthError } from "../auth/server";
+import {
+  META_INSIGHTS_BACKGROUND_CYCLE_PATH,
+  WorkerAuthError,
+  getWorkerAuthConfig,
+  verifyWorkerRequest,
+  type VerifiedWorkerRequest,
+  type WorkerAuthConfig,
+} from "../auth/worker";
+import { evaluateMetaInsightsCompleteness } from "../meta/insightsCompleteness";
 import { getSupabaseServerClient } from "../supabase/server";
 import { checkMetaCompliance } from "../meta/compliance";
 import {
@@ -5198,6 +5207,612 @@ function sendWorkspaceAdminAuthError(res: VercelResponse, error: unknown) {
   return sendJson(res, 503, errorBody("Authorization service unavailable"));
 }
 
+// CRM11e.2 shared sync core.
+//
+// The manual admin endpoint and the background worker cycle both drive the same
+// Meta Insights sync so normalization and pagination are never duplicated. The
+// core owns only the sync run lifecycle and the daily upsert. Scheduler-state
+// lifecycle (lease, backoff, completeness, cadence) is owned by the background
+// cycle handler; the manual endpoint does not touch scheduler state.
+
+type MetaInsightsSyncTrigger = "manual" | "background";
+type MetaInsightsSyncAuthMode = "user_admin" | "worker_hmac";
+
+type SyncMetaInsightsForLaunchParams = {
+  supabase: CrmSupabaseClient;
+  workspaceId: string;
+  metaCampaignLaunchId: string;
+  dateStart?: string;
+  dateStop?: string;
+  trigger: MetaInsightsSyncTrigger;
+  authMode: MetaInsightsSyncAuthMode;
+  requestKey?: string;
+};
+
+type MetaInsightsSyncOutcome = {
+  runId: string | null;
+  status: "succeeded" | "failed" | "already_processed";
+  rowsUpserted: number;
+  pagesFetched: number;
+  coverageComplete: boolean;
+  empty: boolean;
+  dateStart: string | null;
+  dateStop: string | null;
+  accountTimezone: string | null;
+  timezoneFallback: boolean;
+  finishedAt: string | null;
+  error: MetaInsightsError | null;
+  run: JsonRecord | null;
+};
+
+const META_INSIGHTS_BACKGROUND_LOOKBACK_DAYS = 3;
+const META_INSIGHTS_BACKGROUND_LEASE_SECONDS = 120;
+const META_INSIGHTS_BACKGROUND_MAX_LAUNCHES_DEFAULT = 2;
+const META_INSIGHTS_BACKGROUND_MAX_LAUNCHES_ABSOLUTE = 10;
+const META_INSIGHTS_BACKGROUND_FRESHNESS_SLA_HOURS = 36;
+const META_INSIGHTS_BACKGROUND_PAUSED_NEXT_SYNC_HOURS = 24;
+
+function asSafeMetaInsightsErrorCode(value: unknown): MetaInsightsSafeErrorCode {
+  const code = readString(value);
+  return META_INSIGHTS_SAFE_ERROR_CODES.includes(code as MetaInsightsSafeErrorCode)
+    ? (code as MetaInsightsSafeErrorCode)
+    : "sync_timeout";
+}
+
+function isUniqueViolationError(error: unknown): boolean {
+  return readString(asRecord(error).code) === "23505";
+}
+
+// Background canary date policy: only completed account-local days. Today is
+// always excluded; the default lookback is the previous 3 completed days. When
+// the account timezone is unavailable the product timezone is used and the
+// caller is told so it can mark completeness as partial rather than current.
+function resolveBackgroundInsightsDateRange(timeZone: string): {
+  dateStart: string;
+  dateStop: string;
+  timezoneFallback: boolean;
+} {
+  let today: string;
+  let timezoneFallback = false;
+  try {
+    today = formatDateInTimeZone(timeZone);
+  } catch {
+    today = formatDateInTimeZone(META_INSIGHTS_DEFAULT_TIMEZONE);
+    timezoneFallback = true;
+  }
+  const dateStop = addCalendarDays(today, -1);
+  const dateStart = addCalendarDays(dateStop, -(META_INSIGHTS_BACKGROUND_LOOKBACK_DAYS - 1));
+  return { dateStart, dateStop, timezoneFallback };
+}
+
+async function syncMetaInsightsForLaunch(
+  params: SyncMetaInsightsForLaunchParams,
+): Promise<MetaInsightsSyncOutcome> {
+  const { supabase, workspaceId, trigger, requestKey } = params;
+
+  const fail = (error: MetaInsightsError, runId: string | null): MetaInsightsSyncOutcome => ({
+    runId,
+    status: "failed",
+    rowsUpserted: 0,
+    pagesFetched: 0,
+    coverageComplete: false,
+    empty: false,
+    dateStart: null,
+    dateStop: null,
+    accountTimezone: null,
+    timezoneFallback: false,
+    finishedAt: new Date().toISOString(),
+    error,
+    run: null,
+  });
+
+  // Replay protection: a background cycle keys each launch by a unique
+  // request_key. If a run for that key already exists, return its safe summary
+  // without starting a duplicate sync run.
+  if (requestKey) {
+    const { data: existingRunValue } = await supabase
+      .from("meta_insights_sync_runs")
+      .select("id,status,rows_upserted,pages_fetched,coverage_complete,date_start,date_stop,error_code")
+      .eq("workspace_id", workspaceId)
+      .eq("request_key", requestKey)
+      .maybeSingle();
+    const existing = asRecord(existingRunValue);
+    if (readString(existing.id)) {
+      const rows = readNumber(existing.rows_upserted) ?? 0;
+      const existingCode = readString(existing.error_code);
+      return {
+        runId: readString(existing.id),
+        status: "already_processed",
+        rowsUpserted: rows,
+        pagesFetched: readNumber(existing.pages_fetched) ?? 0,
+        coverageComplete: readBoolean(existing.coverage_complete),
+        empty: rows === 0,
+        dateStart: firstString(existing.date_start) || null,
+        dateStop: firstString(existing.date_stop) || null,
+        accountTimezone: null,
+        timezoneFallback: false,
+        finishedAt: null,
+        error: existingCode
+          ? new MetaInsightsError(asSafeMetaInsightsErrorCode(existingCode), "Синхронизация уже была обработана.")
+          : null,
+        run: null,
+      };
+    }
+  }
+
+  let launchContext: MetaInsightsLaunchContext;
+  let dateRange: { dateStart: string; dateStop: string };
+  let timezoneFallback = false;
+  try {
+    launchContext = await loadMetaInsightsLaunchContext(supabase, workspaceId, params.metaCampaignLaunchId);
+    if (trigger === "background") {
+      const resolved = resolveBackgroundInsightsDateRange(launchContext.accountTimezone);
+      dateRange = { dateStart: resolved.dateStart, dateStop: resolved.dateStop };
+      timezoneFallback = resolved.timezoneFallback;
+    } else {
+      dateRange = resolveMetaInsightsDateRange(
+        { dateStart: params.dateStart, dateStop: params.dateStop },
+        launchContext.accountTimezone,
+      );
+    }
+  } catch (error) {
+    return fail(asSafeMetaInsightsError(error), null);
+  }
+
+  const createdAt = new Date().toISOString();
+  const { data: pendingRunValue, error: pendingRunError } = await supabase
+    .from("meta_insights_sync_runs")
+    .insert({
+      workspace_id: workspaceId,
+      meta_campaign_launch_id: launchContext.launchId,
+      sync_scope: "campaign",
+      status: "pending",
+      trigger,
+      attempt: 1,
+      pages_fetched: 0,
+      coverage_complete: false,
+      heartbeat_at: createdAt,
+      date_start: dateRange.dateStart,
+      date_stop: dateRange.dateStop,
+      rows_upserted: 0,
+      error_code: null,
+      error_message: null,
+      updated_at: createdAt,
+      ...(requestKey ? { request_key: requestKey } : {}),
+    })
+    .select("id,workspace_id,meta_campaign_launch_id,status,date_start,date_stop,rows_upserted,error_code,error_message,started_at,finished_at,created_at")
+    .single();
+  if (pendingRunError) {
+    if (requestKey && isUniqueViolationError(pendingRunError)) {
+      // A concurrent cycle already created the run for this key: treat as an
+      // already-processed no-op instead of a duplicate sync run.
+      return {
+        ...fail(new MetaInsightsError("persistence_failed", "Синхронизация уже выполняется."), null),
+        status: "already_processed",
+        error: null,
+        dateStart: dateRange.dateStart,
+        dateStop: dateRange.dateStop,
+        accountTimezone: launchContext.accountTimezone,
+        timezoneFallback,
+      };
+    }
+    return fail(
+      new MetaInsightsError("persistence_failed", "Не удалось создать журнал синхронизации Insights."),
+      null,
+    );
+  }
+
+  const pendingRun = asRecord(pendingRunValue);
+  const runId = readString(pendingRun.id);
+  if (!runId) {
+    return fail(
+      new MetaInsightsError("persistence_failed", "Журнал синхронизации Insights не вернул идентификатор."),
+      null,
+    );
+  }
+
+  const startedAt = new Date().toISOString();
+  const { error: runningError } = await supabase
+    .from("meta_insights_sync_runs")
+    .update({ status: "running", started_at: startedAt, heartbeat_at: startedAt, updated_at: startedAt })
+    .eq("id", runId)
+    .eq("workspace_id", workspaceId);
+  if (runningError) {
+    const finishedAt = new Date().toISOString();
+    await supabase
+      .from("meta_insights_sync_runs")
+      .update({
+        status: "failed",
+        error_code: "persistence_failed",
+        error_message: "Не удалось запустить журнал синхронизации Insights.",
+        heartbeat_at: finishedAt,
+        finished_at: finishedAt,
+        updated_at: finishedAt,
+      })
+      .eq("id", runId)
+      .eq("workspace_id", workspaceId);
+    return {
+      ...fail(new MetaInsightsError("persistence_failed", "Не удалось запустить журнал синхронизации Insights."), runId),
+      dateStart: dateRange.dateStart,
+      dateStop: dateRange.dateStop,
+      accountTimezone: launchContext.accountTimezone,
+      timezoneFallback,
+    };
+  }
+
+  try {
+    const fetched = await fetchCampaignInsightsDaily({
+      workspaceId,
+      metaCampaignLaunchId: launchContext.launchId,
+      metaCampaignId: launchContext.metaCampaignId,
+      adAccountId: launchContext.adAccountId,
+      expectedCurrency: launchContext.currency,
+      accountTimezone: launchContext.accountTimezone,
+      attributionSetting: launchContext.attributionSetting,
+      dateStart: dateRange.dateStart,
+      dateStop: dateRange.dateStop,
+    });
+
+    // Heartbeat after the Meta fetch and before persistence.
+    const afterFetchAt = new Date().toISOString();
+    await supabase
+      .from("meta_insights_sync_runs")
+      .update({ heartbeat_at: afterFetchAt, pages_fetched: fetched.pagesFetched, updated_at: afterFetchAt })
+      .eq("id", runId)
+      .eq("workspace_id", workspaceId);
+
+    if (fetched.rows.length > 0) {
+      const rows = fetched.rows.map(normalizedInsightToDatabaseRow);
+      const { error: upsertError } = await supabase
+        .from("meta_campaign_insights")
+        .upsert(rows, {
+          onConflict: "workspace_id,meta_campaign_launch_id,date_start,date_stop",
+        });
+      if (upsertError) {
+        throw new MetaInsightsError("persistence_failed", "Не удалось сохранить нормализованные строки Insights.");
+      }
+    }
+
+    // coverage_complete is set true only after full pagination and persistence.
+    const finishedAt = new Date().toISOString();
+    const { data: succeededRunValue, error: succeededRunError } = await supabase
+      .from("meta_insights_sync_runs")
+      .update({
+        status: "succeeded",
+        rows_upserted: fetched.rows.length,
+        pages_fetched: fetched.pagesFetched,
+        coverage_complete: true,
+        error_code: null,
+        error_message: null,
+        heartbeat_at: finishedAt,
+        finished_at: finishedAt,
+        updated_at: finishedAt,
+      })
+      .eq("id", runId)
+      .eq("workspace_id", workspaceId)
+      .select("id,workspace_id,meta_campaign_launch_id,status,date_start,date_stop,rows_upserted,error_code,error_message,started_at,finished_at,created_at")
+      .single();
+    if (succeededRunError) {
+      throw new MetaInsightsError("persistence_failed", "Не удалось завершить журнал синхронизации Insights.");
+    }
+
+    return {
+      runId,
+      status: "succeeded",
+      rowsUpserted: fetched.rows.length,
+      pagesFetched: fetched.pagesFetched,
+      coverageComplete: true,
+      empty: fetched.rows.length === 0,
+      dateStart: dateRange.dateStart,
+      dateStop: dateRange.dateStop,
+      accountTimezone: launchContext.accountTimezone,
+      timezoneFallback,
+      finishedAt,
+      error: null,
+      run: mapMetaInsightsSyncRun(succeededRunValue),
+    };
+  } catch (error) {
+    let safeError = asSafeMetaInsightsError(error);
+    const finishedAt = new Date().toISOString();
+    const { error: failedRunError } = await supabase
+      .from("meta_insights_sync_runs")
+      .update({
+        status: "failed",
+        rows_upserted: 0,
+        error_code: safeError.code,
+        error_message: safeError.message,
+        heartbeat_at: finishedAt,
+        finished_at: finishedAt,
+        updated_at: finishedAt,
+      })
+      .eq("id", runId)
+      .eq("workspace_id", workspaceId);
+    if (failedRunError) {
+      safeError = new MetaInsightsError("persistence_failed", "Не удалось сохранить безопасный результат синхронизации.");
+    }
+    return {
+      runId,
+      status: "failed",
+      rowsUpserted: 0,
+      pagesFetched: 0,
+      coverageComplete: false,
+      empty: false,
+      dateStart: dateRange.dateStart,
+      dateStop: dateRange.dateStop,
+      accountTimezone: launchContext.accountTimezone,
+      timezoneFallback,
+      finishedAt,
+      error: safeError,
+      run: null,
+    };
+  }
+}
+
+type ClaimedInsightsState = {
+  id: string;
+  workspaceId: string;
+  metaCampaignLaunchId: string;
+  consecutiveFailureCount: number;
+};
+
+function backoffSecondsForFailureCount(failureCount: number): number {
+  if (failureCount <= 1) return 15 * 60;
+  if (failureCount === 2) return 60 * 60;
+  return 6 * 60 * 60;
+}
+
+// Scheduler-state lifecycle for the background canary. Always clears our lease so
+// a handled completion or failure never leaves an active lease behind.
+async function finalizeBackgroundSchedulerState(
+  supabase: CrmSupabaseClient,
+  workerId: string,
+  state: ClaimedInsightsState,
+  outcome: MetaInsightsSyncOutcome,
+): Promise<void> {
+  const now = new Date();
+  const nowIso = now.toISOString();
+  const clearLease = { lease_owner: null, lease_expires_at: null };
+  const pausedCadenceIso = new Date(
+    now.getTime() + META_INSIGHTS_BACKGROUND_PAUSED_NEXT_SYNC_HOURS * 3_600_000,
+  ).toISOString();
+
+  const scopeUpdate = (values: JsonRecord) =>
+    supabase
+      .from("meta_insights_sync_state")
+      .update({ ...values, updated_at: nowIso })
+      .eq("id", state.id)
+      .eq("workspace_id", state.workspaceId)
+      .eq("lease_owner", workerId);
+
+  if (outcome.status === "succeeded") {
+    const completeness = evaluateMetaInsightsCompleteness({
+      launchEligible: true,
+      configurationAvailable: true,
+      now: nowIso,
+      accountTimeZone: outcome.accountTimezone || META_INSIGHTS_DEFAULT_TIMEZONE,
+      requiredRange: {
+        dateStart: outcome.dateStart ?? nowIso.slice(0, 10),
+        dateStop: outcome.dateStop ?? nowIso.slice(0, 10),
+      },
+      freshnessDeadline: new Date(
+        now.getTime() - META_INSIGHTS_BACKGROUND_FRESHNESS_SLA_HOURS * 3_600_000,
+      ).toISOString(),
+      latestRun: { status: "succeeded", coverageComplete: true },
+      lease: null,
+      successfulRuns: [
+        {
+          dateStart: outcome.dateStart ?? nowIso.slice(0, 10),
+          dateStop: outcome.dateStop ?? nowIso.slice(0, 10),
+          coverageComplete: true,
+          completedAt: outcome.finishedAt ?? nowIso,
+        },
+      ],
+      insightRowCountInRequiredRange: outcome.rowsUpserted,
+    });
+    // An uncertain account timezone leaves day boundaries untrusted, so the
+    // canary records partial rather than a confident current/zero_delivery.
+    const completenessStatus = outcome.timezoneFallback ? "partial" : completeness.status;
+
+    await scopeUpdate({
+      ...clearLease,
+      last_success_at: outcome.finishedAt ?? nowIso,
+      last_complete_date: completeness.lastCompleteDate,
+      consecutive_failure_count: 0,
+      last_error_code: null,
+      paused_until: null,
+      pause_reason: null,
+      completeness_status: completenessStatus,
+      next_sync_at: pausedCadenceIso,
+    });
+    return;
+  }
+
+  if (outcome.status === "already_processed") {
+    await scopeUpdate({ ...clearLease, next_sync_at: pausedCadenceIso });
+    return;
+  }
+
+  const failureCount = state.consecutiveFailureCount + 1;
+  const errorCode = outcome.error?.code ?? "sync_timeout";
+  const repeatedAuthFailure =
+    (errorCode === "meta_auth" || errorCode === "meta_permission") && failureCount >= 2;
+  const backoffSeconds = repeatedAuthFailure
+    ? 6 * 60 * 60
+    : backoffSecondsForFailureCount(failureCount);
+  const nextSyncAt = new Date(now.getTime() + backoffSeconds * 1000).toISOString();
+  const pausedUntil = repeatedAuthFailure
+    ? new Date(now.getTime() + 6 * 3_600_000).toISOString()
+    : null;
+
+  await scopeUpdate({
+    ...clearLease,
+    consecutive_failure_count: failureCount,
+    last_error_code: errorCode,
+    completeness_status: "failed",
+    next_sync_at: nextSyncAt,
+    ...(pausedUntil ? { paused_until: pausedUntil, pause_reason: `${errorCode}_repeated` } : {}),
+  });
+}
+
+function readWorkerRawBody(req: VercelRequest): Buffer {
+  const raw = (req as { rawBody?: unknown }).rawBody;
+  if (Buffer.isBuffer(raw)) return raw;
+  if (typeof raw === "string") return Buffer.from(raw, "utf8");
+  return Buffer.from("");
+}
+
+function sendWorkerAuthError(res: VercelResponse, error: unknown) {
+  const statusCode = error instanceof WorkerAuthError ? error.statusCode : 503;
+  // Never echo the worker secret, signature, or the specific failure detail.
+  return sendJson(res, statusCode, {
+    ...errorBody("Worker authentication failed"),
+    code: "worker_unauthorized",
+  });
+}
+
+// POST /api/crm/meta-insights-background-cycle — HMAC-authenticated background
+// Meta Insights sync. It never requires a user Bearer token, never trusts a
+// workspaceId as proof, and returns only a safe summary.
+export async function handleMetaInsightsBackgroundCycle(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== "POST") {
+    return sendJson(res, 405, errorBody("Method not allowed", ["Use POST"]));
+  }
+
+  let authConfig: WorkerAuthConfig;
+  let verified: VerifiedWorkerRequest;
+  try {
+    authConfig = getWorkerAuthConfig();
+    verified = verifyWorkerRequest({
+      method: "POST",
+      path: META_INSIGHTS_BACKGROUND_CYCLE_PATH,
+      headers: req.headers,
+      rawBody: readWorkerRawBody(req),
+      config: authConfig,
+    });
+  } catch (error) {
+    return sendWorkerAuthError(res, error);
+  }
+
+  const body = asRecord(req.body);
+  const workerId = firstString(body.workerId, body.worker_id);
+  if (!workerId || workerId.length > 200) {
+    return sendJson(res, 400, errorBody("Validation error", ["workerId is required"]));
+  }
+
+  const supabase = getSupabaseServerClient();
+  if (!supabase) {
+    return sendJson(res, 503, {
+      ...errorBody("Meta Insights background cycle unavailable", ["Supabase недоступен."]),
+      code: "persistence_failed",
+      data: { requestId: verified.requestId },
+    });
+  }
+
+  const allowlist = authConfig.workspaceAllowlist;
+  const requestedWorkspaceIds = readJsonArray(body.workspaceIds ?? body.workspace_ids)
+    .map((value) => readString(value).toLowerCase())
+    .filter((value) => isUuid(value));
+  const effectiveWorkspaceIds = requestedWorkspaceIds.length > 0
+    ? requestedWorkspaceIds.filter((id) => allowlist.includes(id))
+    : allowlist;
+
+  const summary = {
+    success: true as const,
+    requestId: verified.requestId,
+    claimed: 0,
+    succeeded: 0,
+    failed: 0,
+    skipped: 0,
+    results: [] as JsonRecord[],
+  };
+
+  if (effectiveWorkspaceIds.length === 0) {
+    console.log(`[meta-insights-cycle] request ${verified.requestId} worker ${workerId} no allowed workspaces`);
+    return sendJson(res, 200, summary);
+  }
+
+  const maxLaunchesRaw = readNumber(body.maxLaunches ?? body.max_launches);
+  const maxLaunches = Math.min(
+    Math.max(
+      maxLaunchesRaw && maxLaunchesRaw > 0
+        ? Math.trunc(maxLaunchesRaw)
+        : META_INSIGHTS_BACKGROUND_MAX_LAUNCHES_DEFAULT,
+      1,
+    ),
+    META_INSIGHTS_BACKGROUND_MAX_LAUNCHES_ABSOLUTE,
+  );
+
+  let claimedRows: JsonRecord[];
+  try {
+    const { data, error } = await supabase.rpc("claim_due_meta_insights_sync_states", {
+      p_worker_id: workerId,
+      p_limit: maxLaunches,
+      p_lease_seconds: META_INSIGHTS_BACKGROUND_LEASE_SECONDS,
+      p_workspace_ids: effectiveWorkspaceIds,
+    });
+    if (error) throw error;
+    claimedRows = Array.isArray(data) ? data.map((row) => asRecord(row)) : [];
+  } catch {
+    return sendJson(res, 503, {
+      ...errorBody("Meta Insights background cycle unavailable", ["Не удалось получить задачи синхронизации."]),
+      code: "persistence_failed",
+      data: { requestId: verified.requestId },
+    });
+  }
+
+  summary.claimed = claimedRows.length;
+
+  // Canary concurrency is 1: claimed launches are processed sequentially.
+  for (const row of claimedRows) {
+    const state: ClaimedInsightsState = {
+      id: readString(row.id),
+      workspaceId: readString(row.workspace_id),
+      metaCampaignLaunchId: readString(row.meta_campaign_launch_id),
+      consecutiveFailureCount: readNumber(row.consecutive_failure_count) ?? 0,
+    };
+    if (!isUuid(state.id) || !isUuid(state.workspaceId) || !isUuid(state.metaCampaignLaunchId)) {
+      summary.skipped += 1;
+      continue;
+    }
+
+    const outcome = await syncMetaInsightsForLaunch({
+      supabase,
+      workspaceId: state.workspaceId,
+      metaCampaignLaunchId: state.metaCampaignLaunchId,
+      trigger: "background",
+      authMode: "worker_hmac",
+      requestKey: `bg:${verified.requestId}:${state.metaCampaignLaunchId}`,
+    });
+
+    try {
+      await finalizeBackgroundSchedulerState(supabase, workerId, state, outcome);
+    } catch {
+      // Scheduler bookkeeping failure must not leak details; the run row already
+      // carries the safe result and the lease expires on its own.
+    }
+
+    if (outcome.status === "succeeded") summary.succeeded += 1;
+    else if (outcome.status === "failed") summary.failed += 1;
+    else summary.skipped += 1;
+
+    summary.results.push({
+      metaCampaignLaunchId: state.metaCampaignLaunchId,
+      runId: outcome.runId,
+      status: outcome.status,
+      rowsUpserted: outcome.rowsUpserted,
+      safeErrorCode: outcome.error?.code ?? null,
+    });
+
+    console.log(
+      `[meta-insights-cycle] request ${verified.requestId} worker ${workerId} workspace ${state.workspaceId} ` +
+        `launch ${state.metaCampaignLaunchId} run ${outcome.runId ?? "none"} status ${outcome.status} ` +
+        `rows ${outcome.rowsUpserted} code ${outcome.error?.code ?? "none"}`,
+    );
+  }
+
+  return sendJson(res, 200, summary);
+}
+
 export async function handleMetaInsightsSync(req: VercelRequest, res: VercelResponse) {
   if (req.method !== "POST") {
     return sendJson(res, 405, errorBody("Method not allowed", ["Use POST"]));
@@ -5223,150 +5838,36 @@ export async function handleMetaInsightsSync(req: VercelRequest, res: VercelResp
     );
   }
 
-  const launchId = firstString(body.metaCampaignLaunchId, body.meta_campaign_launch_id);
-  let launchContext: MetaInsightsLaunchContext;
-  let dateRange: { dateStart: string; dateStop: string };
-  try {
-    launchContext = await loadMetaInsightsLaunchContext(supabase, workspaceId, launchId);
-    dateRange = resolveMetaInsightsDateRange(body, launchContext.accountTimezone);
-  } catch (error) {
-    return sendMetaInsightsFailure(res, asSafeMetaInsightsError(error));
-  }
+  const outcome = await syncMetaInsightsForLaunch({
+    supabase,
+    workspaceId,
+    metaCampaignLaunchId: firstString(body.metaCampaignLaunchId, body.meta_campaign_launch_id),
+    dateStart: firstString(body.dateStart, body.date_start) || undefined,
+    dateStop: firstString(body.dateStop, body.date_stop) || undefined,
+    trigger: "manual",
+    authMode: "user_admin",
+  });
 
-  const now = new Date().toISOString();
-  const { data: pendingRunValue, error: pendingRunError } = await supabase
-    .from("meta_insights_sync_runs")
-    .insert({
-      workspace_id: workspaceId,
-      meta_campaign_launch_id: launchContext.launchId,
-      sync_scope: "campaign",
-      status: "pending",
-      date_start: dateRange.dateStart,
-      date_stop: dateRange.dateStop,
-      rows_upserted: 0,
-      error_code: null,
-      error_message: null,
-      updated_at: now,
-    })
-    .select("id,workspace_id,meta_campaign_launch_id,status,date_start,date_stop,rows_upserted,error_code,error_message,started_at,finished_at,created_at")
-    .single();
-  if (pendingRunError) {
+  if (outcome.status !== "succeeded" || !outcome.run) {
     return sendMetaInsightsFailure(
       res,
-      new MetaInsightsError("persistence_failed", "Не удалось создать журнал синхронизации Insights."),
+      outcome.error ?? new MetaInsightsError("sync_timeout", "Синхронизация Meta Insights не завершилась."),
+      outcome.runId ?? undefined,
     );
   }
 
-  const pendingRun = asRecord(pendingRunValue);
-  const runId = readString(pendingRun.id);
-  if (!runId) {
-    return sendMetaInsightsFailure(
-      res,
-      new MetaInsightsError("persistence_failed", "Журнал синхронизации Insights не вернул идентификатор."),
-    );
-  }
-  const startedAt = new Date().toISOString();
-  const { error: runningError } = await supabase
-    .from("meta_insights_sync_runs")
-    .update({ status: "running", started_at: startedAt, updated_at: startedAt })
-    .eq("id", runId)
-    .eq("workspace_id", workspaceId);
-  if (runningError) {
-    const finishedAt = new Date().toISOString();
-    await supabase
-      .from("meta_insights_sync_runs")
-      .update({
-        status: "failed",
-        error_code: "persistence_failed",
-        error_message: "Не удалось запустить журнал синхронизации Insights.",
-        finished_at: finishedAt,
-        updated_at: finishedAt,
-      })
-      .eq("id", runId)
-      .eq("workspace_id", workspaceId);
-    return sendMetaInsightsFailure(
-      res,
-      new MetaInsightsError("persistence_failed", "Не удалось запустить журнал синхронизации Insights."),
-      runId,
-    );
-  }
-
-  try {
-    const fetched = await fetchCampaignInsightsDaily({
-      workspaceId,
-      metaCampaignLaunchId: launchContext.launchId,
-      metaCampaignId: launchContext.metaCampaignId,
-      adAccountId: launchContext.adAccountId,
-      expectedCurrency: launchContext.currency,
-      accountTimezone: launchContext.accountTimezone,
-      attributionSetting: launchContext.attributionSetting,
-      dateStart: dateRange.dateStart,
-      dateStop: dateRange.dateStop,
-    });
-
-    if (fetched.rows.length > 0) {
-      const rows = fetched.rows.map(normalizedInsightToDatabaseRow);
-      const { error: upsertError } = await supabase
-        .from("meta_campaign_insights")
-        .upsert(rows, {
-          onConflict: "workspace_id,meta_campaign_launch_id,date_start,date_stop",
-        });
-      if (upsertError) {
-        throw new MetaInsightsError("persistence_failed", "Не удалось сохранить нормализованные строки Insights.");
-      }
-    }
-
-    const finishedAt = new Date().toISOString();
-    const { data: succeededRunValue, error: succeededRunError } = await supabase
-      .from("meta_insights_sync_runs")
-      .update({
-        status: "succeeded",
-        rows_upserted: fetched.rows.length,
-        error_code: null,
-        error_message: null,
-        finished_at: finishedAt,
-        updated_at: finishedAt,
-      })
-      .eq("id", runId)
-      .eq("workspace_id", workspaceId)
-      .select("id,workspace_id,meta_campaign_launch_id,status,date_start,date_stop,rows_upserted,error_code,error_message,started_at,finished_at,created_at")
-      .single();
-    if (succeededRunError) {
-      throw new MetaInsightsError("persistence_failed", "Не удалось завершить журнал синхронизации Insights.");
-    }
-
-    return sendJson(
-      res,
-      200,
-      success("supabase", {
-        run: mapMetaInsightsSyncRun(succeededRunValue),
-        rowsUpserted: fetched.rows.length,
-        empty: fetched.rows.length === 0,
-        pagesFetched: fetched.pagesFetched,
-        dateStart: dateRange.dateStart,
-        dateStop: dateRange.dateStop,
-      }),
-    );
-  } catch (error) {
-    let safeError = asSafeMetaInsightsError(error);
-    const finishedAt = new Date().toISOString();
-    const { error: failedRunError } = await supabase
-      .from("meta_insights_sync_runs")
-      .update({
-        status: "failed",
-        rows_upserted: 0,
-        error_code: safeError.code,
-        error_message: safeError.message,
-        finished_at: finishedAt,
-        updated_at: finishedAt,
-      })
-      .eq("id", runId)
-      .eq("workspace_id", workspaceId);
-    if (failedRunError) {
-      safeError = new MetaInsightsError("persistence_failed", "Не удалось сохранить безопасный результат синхронизации.");
-    }
-    return sendMetaInsightsFailure(res, safeError, runId);
-  }
+  return sendJson(
+    res,
+    200,
+    success("supabase", {
+      run: outcome.run,
+      rowsUpserted: outcome.rowsUpserted,
+      empty: outcome.empty,
+      pagesFetched: outcome.pagesFetched,
+      dateStart: outcome.dateStart,
+      dateStop: outcome.dateStop,
+    }),
+  );
 }
 
 export async function handleMetaCampaignInsights(req: VercelRequest, res: VercelResponse) {

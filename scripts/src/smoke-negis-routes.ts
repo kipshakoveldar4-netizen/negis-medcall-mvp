@@ -2530,10 +2530,64 @@ async function checkMetaInsightsSyncFoundation() {
     "handleMetaCampaignInsights(req, res)",
     'resource === "meta-insights-sync-runs"',
     "handleMetaInsightsSyncRuns(req, res)",
+    'resource === "meta-insights-background-cycle"',
+    "handleMetaInsightsBackgroundCycle(req, res)",
   ]) {
     if (!apiSource.includes(marker)) {
       throw new Error(`CRM catch-all is missing ${marker}`);
     }
+  }
+
+  // CRM11e.2 background orchestrator: HMAC-only worker auth and safe wiring.
+  for (const marker of [
+    "export async function handleMetaInsightsBackgroundCycle",
+    "async function syncMetaInsightsForLaunch",
+    "verifyWorkerRequest(",
+    "getWorkerAuthConfig()",
+    'supabase.rpc("claim_due_meta_insights_sync_states"',
+    'status: "already_processed"',
+    "META_INSIGHTS_BACKGROUND_LEASE_SECONDS = 120",
+  ]) {
+    if (!crmServer.includes(marker)) {
+      throw new Error(`CRM background cycle is missing ${marker}`);
+    }
+  }
+  const backgroundCycleHandler = crmServer.slice(
+    crmServer.indexOf("export async function handleMetaInsightsBackgroundCycle"),
+    crmServer.indexOf("export async function handleMetaInsightsSync("),
+  );
+  if (backgroundCycleHandler.includes("requireWorkspaceAdmin")) {
+    throw new Error("Background cycle must not require user admin auth");
+  }
+  for (const forbidden of ["accessToken", "appSecret", "SERVICE_ROLE", "paging"]) {
+    if (backgroundCycleHandler.includes(forbidden)) {
+      throw new Error(`Background cycle must not expose ${forbidden}`);
+    }
+  }
+
+  const workerAuthSource = await readFile(path.join(repoRoot, "lib", "auth", "worker.ts"), "utf8");
+  for (const marker of [
+    "timingSafeEqual",
+    "META_INSIGHTS_WORKER_SECRET",
+    "META_INSIGHTS_WORKSPACE_ALLOWLIST",
+    "x-negis-worker-signature",
+  ]) {
+    if (!workerAuthSource.includes(marker)) {
+      throw new Error(`Worker auth helper is missing ${marker}`);
+    }
+  }
+
+  const insightsWorkerSource = await readFile(
+    path.join(repoRoot, "artifacts", "meta-insights-worker", "src", "index.ts"),
+    "utf8",
+  );
+  for (const forbidden of ["META_ACCESS_TOKEN", "META_APP_SECRET", "SUPABASE_SERVICE_ROLE_KEY"]) {
+    if (insightsWorkerSource.includes(forbidden)) {
+      throw new Error(`Meta Insights worker must not reference ${forbidden}`);
+    }
+  }
+  if (insightsWorkerSource.includes("while (")) {
+    throw new Error("Meta Insights worker must run one cycle without a polling loop");
   }
 
   const adminCenter = await readFile(path.join(repoRoot, "artifacts", "negis", "src", "pages", "AdminCenter.tsx"), "utf8");

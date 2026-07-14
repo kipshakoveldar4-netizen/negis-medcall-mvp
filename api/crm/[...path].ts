@@ -9,6 +9,7 @@ import {
   handleCrmResource,
   handleMetaCityKey,
   handleMetaCampaignInsights,
+  handleMetaInsightsBackgroundCycle,
   handleMetaInsightsHistory,
   handleMetaInsightsSync,
   handleMetaInsightsSyncRuns,
@@ -70,6 +71,8 @@ async function ensureParsedBody(req: VercelRequest) {
   if (contentType.includes("multipart/form-data")) return;
 
   const rawBody = await readRawBody(req);
+  // Preserve the exact bytes so signed worker requests can recompute SHA256(body).
+  (req as VercelRequest & { rawBody?: Buffer }).rawBody = rawBody;
   if (rawBody.length === 0) return;
 
   if (contentType.includes("application/json")) {
@@ -152,6 +155,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   if (resource === "meta-insights-sync") {
     return handleMetaInsightsSync(req, res);
+  }
+
+  if (resource === "meta-insights-background-cycle") {
+    return handleMetaInsightsBackgroundCycle(req, res);
   }
 
   if (resource === "meta-campaign-insights") {
