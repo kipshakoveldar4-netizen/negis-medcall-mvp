@@ -2303,12 +2303,6 @@ async function checkCrmServerAuthFoundation() {
   if (!apiSource.includes('resource === "auth-context"') || !apiSource.includes("handleCrmAuthContext(req, res)")) {
     throw new Error("api/crm catch-all must route /api/crm/auth-context");
   }
-  for (const forbiddenEndpoint of ["meta-insights-sync", "meta-campaign-insights"]) {
-    if (apiSource.includes(forbiddenEndpoint)) {
-      throw new Error(`CRM11-auth must not implement ${forbiddenEndpoint}`);
-    }
-  }
-
   const frontendHelper = await readFile(path.join(repoRoot, "artifacts", "negis", "src", "lib", "serverAuth.ts"), "utf8");
   for (const marker of ["supabase.auth.getSession()", "data.session?.access_token", "getSupabaseAccessToken"]) {
     if (!frontendHelper.includes(marker)) {
@@ -2353,6 +2347,239 @@ async function checkCrmServerAuthFoundation() {
   }
 
   console.log("CRM server admin auth foundation checks: ok");
+}
+
+async function checkMetaInsightsSyncFoundation() {
+  const insightsPath = path.join(repoRoot, "lib", "meta", "insights.ts");
+  const insightsSource = await readFile(insightsPath, "utf8");
+  for (const marker of [
+    "fetchCampaignInsightsDaily",
+    "normalizeInsightRow",
+    "decimalToMinor",
+    "normalizeActionCounts",
+    "/insights?",
+    "date_start",
+    "date_stop",
+    "campaign_id",
+    "account_currency",
+    "spend",
+    "impressions",
+    "reach",
+    "clicks",
+    "inline_link_clicks",
+    "actions",
+    'time_increment: "1"',
+    'action_report_time: "conversion"',
+    'limit: "100"',
+    "cursors",
+    'query.set("after", after)',
+    "seenCursors",
+    "pageLimit ?? 10",
+    "BigInt(combined)",
+    'action_type) !== "lead"',
+    "Authorization: `Bearer ${config.accessToken}`",
+  ]) {
+    if (!insightsSource.includes(marker)) {
+      throw new Error(`Meta Insights helper is missing ${marker}`);
+    }
+  }
+  for (const forbidden of ["paging.next", 'paging["next"]', "console.log", "console.warn", "parseFloat(", "access_token="]) {
+    if (insightsSource.includes(forbidden)) {
+      throw new Error(`Meta Insights helper must not use or expose ${forbidden}`);
+    }
+  }
+  const moneyFunction = insightsSource.slice(
+    insightsSource.indexOf("export function decimalToMinor"),
+    insightsSource.indexOf("export function normalizeActionCounts"),
+  );
+  if (!moneyFunction.includes("BigInt") || moneyFunction.includes("parseFloat") || moneyFunction.includes("Number(value)")) {
+    throw new Error("Meta spend normalization must use integer-safe decimal parsing without floating point money");
+  }
+
+  const insightsModule = (await import(`${pathToFileURL(insightsPath).href}?crm11b=${Date.now()}`)) as {
+    decimalToMinor(spend: string, exponent: number): string;
+    normalizeActionCounts(actions: unknown): Record<string, string>;
+    normalizeInsightRow(
+      value: unknown,
+      context: {
+        workspaceId: string;
+        metaCampaignLaunchId: string;
+        metaCampaignId: string;
+        expectedCurrency: string;
+        apiVersion: string;
+      },
+    ): { spendMinor: string; metaLeads: string | null; actionCounts: Record<string, string> };
+  };
+  if (
+    insightsModule.decimalToMinor("12.34", 2) !== "1234" ||
+    insightsModule.decimalToMinor("0.01", 2) !== "1" ||
+    insightsModule.decimalToMinor("7", 2) !== "700"
+  ) {
+    throw new Error("decimalToMinor produced an incorrect minor-unit value");
+  }
+  let excessPrecisionRejected = false;
+  try {
+    insightsModule.decimalToMinor("1.001", 2);
+  } catch {
+    excessPrecisionRejected = true;
+  }
+  if (!excessPrecisionRejected) {
+    throw new Error("decimalToMinor must reject non-zero precision beyond the currency exponent");
+  }
+  const actionCounts = insightsModule.normalizeActionCounts([
+    { action_type: "lead", value: "2" },
+    { action_type: "purchase", value: "99" },
+    { action_type: "lead", value: "3" },
+  ]);
+  if (actionCounts.lead !== "5" || Object.keys(actionCounts).length !== 1) {
+    throw new Error("Meta action normalization must allowlist and aggregate only lead actions");
+  }
+  const normalized = insightsModule.normalizeInsightRow(
+    {
+      date_start: "2026-07-01",
+      date_stop: "2026-07-01",
+      campaign_id: "123456789",
+      account_currency: "KZT",
+      spend: "10.25",
+      impressions: "20",
+      reach: "15",
+      clicks: "4",
+      inline_link_clicks: "3",
+      actions: [{ action_type: "lead", value: "1" }],
+    },
+    {
+      workspaceId: "9eb6f100-bb6a-4f99-9719-e85c34513a03",
+      metaCampaignLaunchId: "11111111-1111-4111-8111-111111111111",
+      metaCampaignId: "123456789",
+      expectedCurrency: "KZT",
+      apiVersion: "v23.0",
+    },
+  );
+  if (normalized.spendMinor !== "1025" || normalized.metaLeads !== "1" || normalized.actionCounts.lead !== "1") {
+    throw new Error("Meta daily insight normalization produced incorrect safe values");
+  }
+
+  const crmServer = await readFile(path.join(repoRoot, "lib", "crm", "server.ts"), "utf8");
+  for (const marker of [
+    "handleMetaInsightsSync",
+    "handleMetaCampaignInsights",
+    "handleMetaInsightsSyncRuns",
+    "loadMetaInsightsLaunchContext",
+    "requireWorkspaceAdmin(req, workspaceId)",
+    '.from("meta_insights_sync_runs")',
+    '.from("meta_campaign_insights")',
+    'status: "pending"',
+    'status: "running"',
+    'status: "succeeded"',
+    'status: "failed"',
+    'onConflict: "workspace_id,meta_campaign_launch_id,date_start,date_stop"',
+    "fetched.rows.length === 0",
+    "META_INSIGHTS_MAX_RANGE_DAYS = 31",
+  ]) {
+    if (!crmServer.includes(marker)) {
+      throw new Error(`CRM Meta Insights handlers are missing ${marker}`);
+    }
+  }
+  for (const code of [
+    "meta_auth",
+    "meta_permission",
+    "meta_rate_limited",
+    "invalid_range",
+    "launch_not_eligible",
+    "normalization_failed",
+    "persistence_failed",
+    "sync_timeout",
+  ]) {
+    if (!insightsSource.includes(`"${code}"`)) {
+      throw new Error(`Meta Insights safe error allowlist is missing ${code}`);
+    }
+  }
+
+  const syncHandler = crmServer.slice(
+    crmServer.indexOf("export async function handleMetaInsightsSync"),
+    crmServer.indexOf("export async function handleMetaCampaignInsights"),
+  );
+  const readHandler = crmServer.slice(
+    crmServer.indexOf("export async function handleMetaCampaignInsights"),
+    crmServer.indexOf("export async function handleMetaInsightsSyncRuns"),
+  );
+  for (const [name, handler] of [["sync", syncHandler], ["read", readHandler]] as const) {
+    if (!handler.includes("requireWorkspaceAdmin(req, workspaceId)")) {
+      throw new Error(`Meta Insights ${name} endpoint must require server-verified workspace admin`);
+    }
+    if (handler.includes('success("demo"')) {
+      throw new Error(`Meta Insights ${name} endpoint must not have a demo fallback`);
+    }
+  }
+
+  const databaseMapper = crmServer.slice(
+    crmServer.indexOf("function normalizedInsightToDatabaseRow"),
+    crmServer.indexOf("function databaseIntegerString"),
+  );
+  for (const forbidden of ["raw_response", "rawMeta", "paging", "accessToken", "appSecret", "publicUrl"]) {
+    if (databaseMapper.includes(forbidden)) {
+      throw new Error(`Meta Insights persistence mapper must not store ${forbidden}`);
+    }
+  }
+
+  const apiSource = await readFile(path.join(repoRoot, "api", "crm", "[...path].ts"), "utf8");
+  for (const marker of [
+    'resource === "meta-insights-sync"',
+    "handleMetaInsightsSync(req, res)",
+    'resource === "meta-campaign-insights"',
+    "handleMetaCampaignInsights(req, res)",
+    'resource === "meta-insights-sync-runs"',
+    "handleMetaInsightsSyncRuns(req, res)",
+  ]) {
+    if (!apiSource.includes(marker)) {
+      throw new Error(`CRM catch-all is missing ${marker}`);
+    }
+  }
+
+  const adminCenter = await readFile(path.join(repoRoot, "artifacts", "negis", "src", "pages", "AdminCenter.tsx"), "utf8");
+  for (const marker of [
+    "Meta Insights: ручная синхронизация",
+    "Синхронизировать Insights",
+    "/api/crm/meta-insights-sync",
+    "/api/crm/meta-insights-sync-runs",
+    "getSupabaseAccessToken()",
+    "Authorization: `Bearer ${accessToken}`",
+    "Строк сохранено",
+    "Кампания и её статус не изменяются",
+  ]) {
+    if (!adminCenter.includes(marker)) {
+      throw new Error(`Admin Center Meta Insights diagnostics are missing ${marker}`);
+    }
+  }
+
+  const doc = await readFile(path.join(repoRoot, "docs", "META-INSIGHTS-FOUNDATION.md"), "utf8");
+  for (const marker of [
+    "## CRM11b: ручная синхронизация",
+    "server-only",
+    "owner",
+    "admin",
+    "31 дня",
+    "10 страниц",
+    "cursors.after",
+    "pending",
+    "running",
+    "succeeded",
+    "failed",
+    "Искусственные нулевые строки",
+    "background sync",
+  ]) {
+    if (!doc.toLowerCase().includes(marker.toLowerCase())) {
+      throw new Error(`Meta Insights CRM11b documentation is missing ${marker}`);
+    }
+  }
+
+  for (const source of [insightsSource, crmServer, adminCenter]) {
+    if (/\b(?:cpl|roi|romi)\s*[:=]/i.test(source)) {
+      throw new Error("CRM11b must not add CPL, ROI or ROMI calculations");
+    }
+  }
+
+  console.log("Meta Insights manual sync foundation checks: ok");
 }
 
 async function checkLayoutFoundation() {
@@ -2811,6 +3038,7 @@ async function main() {
   await checkNoNewApiFiles();
   await checkMetaInsightsSchemaFoundation();
   await checkCrmServerAuthFoundation();
+  await checkMetaInsightsSyncFoundation();
   for (const route of [
     "/ai-control-center",
     "/dashboard",
@@ -2848,6 +3076,37 @@ async function main() {
   await checkJsonFailure(
     "/api/crm/auth-context?workspaceId=853340e2-14e3-4e40-8414-295ec6c2abe2",
     { method: "GET", headers: { Authorization: "Bearer invalid-token" } },
+    "Authentication required",
+  );
+  await checkJsonFailure(
+    "/api/crm/meta-insights-sync",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        workspaceId: "9eb6f100-bb6a-4f99-9719-e85c34513a03",
+        metaCampaignLaunchId: "11111111-1111-4111-8111-111111111111",
+        dateStart: "2026-07-01",
+        dateStop: "2026-07-01",
+      }),
+    },
+    "Authentication required",
+  );
+  await checkJsonFailure(
+    "/api/crm/meta-insights-sync",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer invalid-token" },
+      body: JSON.stringify({
+        workspaceId: "9eb6f100-bb6a-4f99-9719-e85c34513a03",
+        metaCampaignLaunchId: "11111111-1111-4111-8111-111111111111",
+      }),
+    },
+    "Authentication required",
+  );
+  await checkJsonFailure(
+    "/api/crm/meta-campaign-insights?workspaceId=9eb6f100-bb6a-4f99-9719-e85c34513a03",
+    { method: "GET" },
     "Authentication required",
   );
   const crmHealthMeta = ((crmHealth.data || {}) as { meta?: { videoOptimization?: { enabled?: unknown; thresholdMb?: unknown; maxInputMb?: unknown; rawBucket?: unknown } } }).meta;

@@ -194,6 +194,37 @@ type MetaAccount = {
   permissions: Record<string, boolean>;
 };
 
+type MetaInsightsLaunchOption = {
+  id: string;
+  campaignName: string;
+  status: string;
+  metaStatus: string;
+  metaCampaignId: string;
+  createdAt?: string;
+};
+
+type MetaInsightsSyncRun = {
+  id: string;
+  metaCampaignLaunchId: string | null;
+  status: "pending" | "running" | "succeeded" | "failed";
+  dateStart: string | null;
+  dateStop: string | null;
+  rowsUpserted: number;
+  errorCode: string | null;
+  errorMessage: string | null;
+  finishedAt: string | null;
+  createdAt: string | null;
+};
+
+type MetaInsightsSyncResult = {
+  run: MetaInsightsSyncRun;
+  rowsUpserted: number;
+  empty: boolean;
+  pagesFetched: number;
+  dateStart: string;
+  dateStop: string;
+};
+
 type ReleaseCheck = {
   checkKey: string;
   title: string;
@@ -444,6 +475,40 @@ async function crmRequest<T>(path: string, init?: globalThis.RequestInit): Promi
   return body;
 }
 
+async function adminCrmRequest<T>(
+  path: string,
+  init?: {
+    method?: string;
+    headers?: Record<string, string>;
+    body?: string;
+  },
+): Promise<ApiResponse<T>> {
+  const accessToken = await getSupabaseAccessToken();
+  if (!accessToken) throw new Error("Нужно войти заново для защищённой синхронизации.");
+
+  const response = await fetch(apiUrl(path), {
+    ...init,
+    headers: {
+      ...init?.headers,
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+  const body = await safeJson<T>(response);
+  if (!response.ok || body.success !== true) {
+    throw new Error(body.details?.[0] || body.error || `HTTP ${response.status}`);
+  }
+  return body;
+}
+
+function localIsoDateOffset(days: number): string {
+  const date = new Date();
+  date.setDate(date.getDate() + days);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
 function statusLabel(status: Status | ReleaseStatus) {
   const labels: Record<string, string> = {
     configured: "Настроено",
@@ -522,6 +587,12 @@ export default function AdminCenter() {
   const [loading, setLoading] = useState<Record<string, boolean>>({});
   const [metaCityKeyInput, setMetaCityKeyInput] = useState("almaty");
   const [metaCityKeyResult, setMetaCityKeyResult] = useState<MetaCityKeyResult | null>(null);
+  const [metaInsightsLaunches, setMetaInsightsLaunches] = useState<MetaInsightsLaunchOption[]>([]);
+  const [metaInsightsLaunchId, setMetaInsightsLaunchId] = useState("");
+  const [metaInsightsDateStart, setMetaInsightsDateStart] = useState(() => localIsoDateOffset(-6));
+  const [metaInsightsDateStop, setMetaInsightsDateStop] = useState(() => localIsoDateOffset(0));
+  const [metaInsightsLastRun, setMetaInsightsLastRun] = useState<MetaInsightsSyncRun | null>(null);
+  const [metaInsightsMessage, setMetaInsightsMessage] = useState("");
   const [staffForm, setStaffForm] = useState({
     name: "",
     email: "",
@@ -587,6 +658,98 @@ export default function AdminCenter() {
   useEffect(() => {
     void checkServerAdminAccess();
   }, [workspaceId]);
+
+  function isEligibleInsightsLaunch(launch: MetaInsightsLaunchOption): boolean {
+    const status = launch.status.trim().toLowerCase();
+    const metaStatus = launch.metaStatus.trim().toLowerCase();
+    return (
+      /^\d+$/.test(launch.metaCampaignId.trim()) &&
+      ![status, metaStatus].some((value) => ["failed", "video_processing", "dry_run"].includes(value))
+    );
+  }
+
+  async function loadMetaInsightsDiagnostics() {
+    if (serverAdminAuth.status !== "confirmed") return;
+    setBusy("meta-insights-load", true);
+    setMetaInsightsMessage("");
+    try {
+      const [launchesBody, runsBody] = await Promise.all([
+        adminCrmRequest<{ launches?: MetaInsightsLaunchOption[] }>(
+          `/api/crm/meta-launches?workspaceId=${encodeURIComponent(workspaceId)}`,
+        ),
+        adminCrmRequest<{ runs?: MetaInsightsSyncRun[] }>(
+          `/api/crm/meta-insights-sync-runs?workspaceId=${encodeURIComponent(workspaceId)}`,
+        ),
+      ]);
+      if (launchesBody.mode !== "supabase" || runsBody.mode !== "supabase") {
+        throw new Error("Meta Insights доступны только для рабочего Supabase workspace.");
+      }
+
+      const launches = (launchesBody.data?.launches || []).filter(isEligibleInsightsLaunch);
+      setMetaInsightsLaunches(launches);
+      setMetaInsightsLaunchId((current) =>
+        current && launches.some((launch) => launch.id === current) ? current : launches[0]?.id || "",
+      );
+      setMetaInsightsLastRun(runsBody.data?.runs?.[0] || null);
+    } catch (error) {
+      setMetaInsightsMessage(error instanceof Error ? error.message : "Не удалось загрузить диагностику Insights.");
+    } finally {
+      setBusy("meta-insights-load", false);
+    }
+  }
+
+  async function synchronizeMetaInsights() {
+    if (serverAdminAuth.status !== "confirmed") {
+      setMetaInsightsMessage("Сначала подтвердите админ-доступ.");
+      return;
+    }
+    if (!metaInsightsLaunchId) {
+      setMetaInsightsMessage("Выберите реальный запуск Meta.");
+      return;
+    }
+
+    setBusy("meta-insights-sync", true);
+    setMetaInsightsMessage("");
+    try {
+      const body = await adminCrmRequest<MetaInsightsSyncResult>("/api/crm/meta-insights-sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          workspaceId,
+          metaCampaignLaunchId: metaInsightsLaunchId,
+          dateStart: metaInsightsDateStart,
+          dateStop: metaInsightsDateStop,
+        }),
+      });
+      if (body.mode !== "supabase" || !body.data?.run) {
+        throw new Error("Синхронизация не вернула подтверждённый Supabase run.");
+      }
+      setMetaInsightsLastRun(body.data.run);
+      setMetaInsightsMessage(
+        body.data.empty
+          ? "Синхронизация завершена: Meta не вернула дневные строки за выбранный период."
+          : `Синхронизация завершена. Сохранено строк: ${body.data.rowsUpserted}.`,
+      );
+      toast.success("Meta Insights синхронизированы");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Не удалось синхронизировать Meta Insights.";
+      toast.error(message);
+      await loadMetaInsightsDiagnostics();
+      setMetaInsightsMessage(message);
+    } finally {
+      setBusy("meta-insights-sync", false);
+    }
+  }
+
+  useEffect(() => {
+    if (serverAdminAuth.status === "confirmed") {
+      void loadMetaInsightsDiagnostics();
+    } else {
+      setMetaInsightsLaunches([]);
+      setMetaInsightsLaunchId("");
+      setMetaInsightsLastRun(null);
+    }
+  }, [serverAdminAuth.status, workspaceId]);
 
   async function checkCrmHealth() {
     setBusy("crm-health", true);
@@ -1658,6 +1821,14 @@ export default function AdminCenter() {
 
   function renderDiagnostics() {
     const providers = health?.providers ? Object.entries(health.providers) : [];
+    const lastRunLabel = metaInsightsLastRun
+      ? {
+          pending: "Ожидает",
+          running: "Выполняется",
+          succeeded: "Завершена",
+          failed: "Ошибка",
+        }[metaInsightsLastRun.status]
+      : "Ещё не запускалась";
     return (
       <div className="space-y-5">
         <section className="neu-card flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -1669,6 +1840,119 @@ export default function AdminCenter() {
             {loading["crm-health"] ? <Loader2 className="animate-spin" size={16} /> : <RefreshCw size={16} />}
             Обновить
           </button>
+        </section>
+        <section className="neu-card" data-testid="meta-insights-manual-sync">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+            <div>
+              <p className="text-xs font-bold uppercase tracking-[0.12em] text-[#0D9488]">Admin · read-only</p>
+              <h2 className="mt-1 text-lg font-black text-[#0F172A]">Meta Insights: ручная синхронизация</h2>
+              <p className="mt-1 max-w-3xl text-sm text-[#64748B]">
+                Получает дневные факты Meta для выбранного сохранённого запуска. Кампания и её статус не изменяются; коэффициенты эффективности не рассчитываются.
+              </p>
+            </div>
+            <span className={`w-fit rounded-full px-3 py-1 text-xs font-black ${
+              serverAdminAuth.status === "confirmed"
+                ? "bg-emerald-50 text-emerald-700"
+                : "bg-amber-50 text-amber-700"
+            }`}>
+              {serverAdminAuth.status === "confirmed" ? "Админ подтверждён" : "Требуется админ-доступ"}
+            </span>
+          </div>
+
+          <div className="mt-5 grid gap-4 lg:grid-cols-[minmax(0,1fr)_180px_180px]">
+            <label className="min-w-0 text-sm font-bold text-[#334155]">
+              Кампания Meta
+              <select
+                className="neu-input mt-2 w-full"
+                value={metaInsightsLaunchId}
+                onChange={(event) => setMetaInsightsLaunchId(event.target.value)}
+                disabled={loading["meta-insights-load"] || serverAdminAuth.status !== "confirmed"}
+              >
+                {metaInsightsLaunches.length === 0 ? <option value="">Нет подходящих реальных запусков</option> : null}
+                {metaInsightsLaunches.map((launch) => (
+                  <option key={launch.id} value={launch.id}>
+                    {launch.campaignName || "Кампания без названия"} · {launch.metaStatus || launch.status || "создана"}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="text-sm font-bold text-[#334155]">
+              Дата начала
+              <input
+                type="date"
+                className="neu-input mt-2 w-full"
+                value={metaInsightsDateStart}
+                max={localIsoDateOffset(0)}
+                onChange={(event) => setMetaInsightsDateStart(event.target.value)}
+              />
+            </label>
+            <label className="text-sm font-bold text-[#334155]">
+              Дата окончания
+              <input
+                type="date"
+                className="neu-input mt-2 w-full"
+                value={metaInsightsDateStop}
+                max={localIsoDateOffset(0)}
+                onChange={(event) => setMetaInsightsDateStop(event.target.value)}
+              />
+            </label>
+          </div>
+
+          <div className="mt-4 flex flex-col gap-2 sm:flex-row">
+            <button
+              type="button"
+              className="neu-btn w-full justify-center sm:w-auto"
+              onClick={() => void loadMetaInsightsDiagnostics()}
+              disabled={loading["meta-insights-load"] || serverAdminAuth.status !== "confirmed"}
+            >
+              {loading["meta-insights-load"] ? <Loader2 className="animate-spin" size={16} /> : <RefreshCw size={16} />}
+              Обновить список
+            </button>
+            <button
+              type="button"
+              className="neu-btn-primary w-full justify-center sm:w-auto"
+              onClick={() => void synchronizeMetaInsights()}
+              disabled={
+                loading["meta-insights-sync"] ||
+                serverAdminAuth.status !== "confirmed" ||
+                !metaInsightsLaunchId ||
+                !metaInsightsDateStart ||
+                !metaInsightsDateStop
+              }
+            >
+              {loading["meta-insights-sync"] ? <Loader2 className="animate-spin" size={16} /> : <Database size={16} />}
+              Синхронизировать Insights
+            </button>
+          </div>
+
+          <div className="mt-5 grid gap-3 rounded-2xl border border-[#E2E8F0] bg-[#F8FAFC] p-4 sm:grid-cols-3">
+            <div>
+              <p className="text-xs font-bold uppercase tracking-[0.1em] text-[#64748B]">Последний запуск</p>
+              <p className="mt-1 font-black text-[#0F172A]">{lastRunLabel}</p>
+            </div>
+            <div>
+              <p className="text-xs font-bold uppercase tracking-[0.1em] text-[#64748B]">Строк сохранено</p>
+              <p className="mt-1 font-black text-[#0F172A]">{metaInsightsLastRun?.rowsUpserted ?? "—"}</p>
+            </div>
+            <div>
+              <p className="text-xs font-bold uppercase tracking-[0.1em] text-[#64748B]">Период</p>
+              <p className="mt-1 font-black text-[#0F172A]">
+                {metaInsightsLastRun?.dateStart && metaInsightsLastRun?.dateStop
+                  ? `${metaInsightsLastRun.dateStart} — ${metaInsightsLastRun.dateStop}`
+                  : "—"}
+              </p>
+            </div>
+          </div>
+          {metaInsightsLastRun?.status === "failed" && metaInsightsLastRun.errorMessage ? (
+            <p className="mt-3 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-800">
+              {metaInsightsLastRun.errorMessage}
+            </p>
+          ) : null}
+          {metaInsightsMessage ? (
+            <p className="mt-3 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-[#334155]">
+              {metaInsightsMessage}
+            </p>
+          ) : null}
         </section>
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
           {providers.length === 0 ? (

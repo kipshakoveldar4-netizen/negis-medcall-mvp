@@ -1,7 +1,8 @@
 # Meta Insights Foundation
 
-CRM11a добавляет только структуру хранения будущих фактических метрик Meta Ads.
-Загрузка данных из Meta, API-ресурс и интерфейс на этом этапе не реализованы.
+CRM11a добавил структуру хранения фактических метрик Meta Ads. CRM11b добавляет
+ручную admin-синхронизацию через server-only helper для подтверждённого owner/admin. Автоматическая
+синхронизация и аналитические коэффициенты на этом этапе не реализованы.
 
 ## Текущее состояние
 
@@ -93,9 +94,106 @@ attribution, валют и временных диапазонов.
 
 ## Следующие этапы
 
-1. Добавить server-only helper для read-only Meta Insights fetch.
-2. Добавить ручную admin-синхронизацию в существующий CRM catch-all.
-3. Добавить диагностику прав, периода покрытия и безопасных ошибок.
-4. Добавить read-only UI фактических метрик без коэффициентов.
-5. После production-проверки добавить фоновую синхронизацию.
-6. Только затем отдельно оценить коэффициенты после проверки покрытия spend и revenue.
+1. Провести production canary ручной синхронизации на одной PAUSED-кампании и периоде 1–3 дня.
+2. Добавить read-only UI фактических метрик без коэффициентов.
+3. Добавить доступность spend в AI Control Center как отдельный факт, без оценки эффективности.
+4. После production-проверки добавить фоновую синхронизацию.
+5. Только затем отдельно оценить коэффициенты после проверки покрытия spend и revenue.
+
+## CRM11b: ручная синхронизация
+
+`POST /api/crm/meta-insights-sync` запускает read-only запрос Meta Insights для
+одного сохранённого запуска. Endpoint находится в существующем CRM catch-all и
+не создаёт отдельную Vercel Function. Доступ разрешён только с валидным
+`Authorization: Bearer <Supabase access token>` после server-side проверки
+активной роли `owner` или `admin` в запрошенном workspace.
+
+Demo/localStorage-сессия не получает fallback для Insights. Если Supabase,
+server auth или Meta token недоступны, endpoint возвращает контролируемую ошибку
+и не подставляет тестовые метрики.
+
+Подходящий запуск должен:
+
+- принадлежать подтверждённому workspace;
+- иметь реальный числовой `meta_campaign_id`;
+- не быть dry-run, `failed` или `video_processing`;
+- относиться к настроенному Meta ad account, если оба account ID доступны.
+
+Статус PAUSED разрешён: синхронизация только читает Insights и не изменяет
+кампанию, ad set, creative или ad. ACTIVE launch остаётся закрыт существующим
+gating и не связан с CRM11b.
+
+## Запрос и пагинация
+
+server-only helper вызывает `GET /{campaign_id}/insights` с полями:
+
+- `date_start`, `date_stop`, `campaign_id`, `account_id`, `account_currency`;
+- `spend`, `impressions`, `reach`, `clicks`, `inline_link_clicks`;
+- `actions`.
+
+Запрос использует `time_increment=1`, `action_report_time=conversion` и лимит
+100 строк на страницу. По умолчанию берутся последние семь account-local дней.
+Пользователь может выбрать период до 31 дня включительно; будущие даты
+запрещены.
+
+Переход между страницами строится заново по `cursors.after`. Курсор живёт только
+в памяти процесса. Лимит — 10 страниц, повторяющийся cursor завершает run
+безопасной ошибкой. Paging URL не сохраняются и не логируются.
+
+## Нормализация CRM11b
+
+`spend` преобразуется из decimal string в `spend_minor` строковой целочисленной
+арифметикой и `BigInt`, без floating point. Сейчас явно поддерживаются:
+
+- USD, exponent 2;
+- KZT, exponent 2.
+
+Неизвестная валюта или лишняя ненулевая точность приводят к
+`normalization_failed`, а не к округлению. Дата начала обязана совпадать с датой
+окончания для каждой дневной строки. Показы, охват и клики принимаются только как
+неотрицательные целые значения.
+
+Из `actions` разрешён только `action_type = lead`. Остальные actions
+игнорируются. `action_counts` содержит только allowlist, а `meta_leads` остаётся
+`null`, если Meta не вернула lead action. Это Meta-reported action, а не заявка CRM.
+
+## Жизненный цикл run
+
+Подтверждённая синхронизация записывает последовательность:
+
+1. `pending` — журнал создан;
+2. `running` — server-side Meta fetch начат;
+3. `succeeded` — дневные строки upsert выполнен;
+4. `failed` — сохранена только безопасная причина ошибки.
+
+Повторный запуск идемпотентно обновляет строки по
+`workspace_id, meta_campaign_launch_id, date_start, date_stop`. Пустой ответ Meta
+завершает run как `succeeded` с `rows_upserted = 0`; искусственные нулевые строки
+не создаются.
+
+Разрешённые коды ошибок: `meta_auth`, `meta_permission`, `meta_rate_limited`,
+`invalid_range`, `launch_not_eligible`, `normalization_failed`,
+`persistence_failed`, `sync_timeout`. Сырые ответы Meta не сохраняются. Token,
+app secret, paging URL и public URL креативов не возвращаются в API и не
+записываются в журнал.
+
+## Защищённое чтение и Admin Center
+
+`GET /api/crm/meta-campaign-insights` возвращает только нормализованные строки
+подтверждённому workspace admin. `GET /api/crm/meta-insights-sync-runs`
+возвращает безопасные сводки run. Оба endpoint используют ту же server-side
+проверку Bearer-сессии и не имеют demo fallback.
+
+В Admin Center раздел «Meta Insights: ручная синхронизация» позволяет выбрать
+реальный launch, период и увидеть статус последнего run и `rows_upserted`. Он не
+показывает CPL, ROI, ROMI, рейтинги кампаний или рекомендации по бюджету.
+
+## После CRM11b
+
+Будущие отдельные этапы:
+
+- background sync по ограниченному расписанию;
+- read-only представление исходных spend/impressions/clicks;
+- availability-флаг spend в AI Control Center;
+- коэффициенты только после отдельного согласования полноты расходов, CRM lead
+  attribution, revenue attribution, валют и временных диапазонов.

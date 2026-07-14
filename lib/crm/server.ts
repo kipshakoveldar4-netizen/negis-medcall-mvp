@@ -28,6 +28,13 @@ import {
   uploadMetaVideoAndGetId,
 } from "../meta/marketing";
 import { KZ_META_CITY_OPTIONS, findKzMetaCityOption, getKzMetaCityOption, type MetaCitySearchCandidate } from "../meta/cities";
+import {
+  META_INSIGHTS_SAFE_ERROR_CODES,
+  MetaInsightsError,
+  fetchCampaignInsightsDaily,
+  type MetaInsightsSafeErrorCode,
+  type NormalizedMetaInsightRow,
+} from "../meta/insights";
 
 export type CrmResource =
   | "clients"
@@ -4694,6 +4701,568 @@ export async function handleCrmHealth(req: VercelRequest, res: VercelResponse) {
       secrets: "masked",
     }),
   );
+}
+
+type MetaInsightsLaunchContext = {
+  launchId: string;
+  metaCampaignId: string;
+  adAccountId: string;
+  currency: string;
+  accountTimezone: string;
+  attributionSetting: string;
+};
+
+const META_INSIGHTS_DEFAULT_TIMEZONE = "Asia/Almaty";
+const META_INSIGHTS_MAX_RANGE_DAYS = 31;
+
+function isIsoCalendarDate(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+}
+
+function addCalendarDays(value: string, days: number): string {
+  const date = new Date(`${value}T00:00:00.000Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
+function formatDateInTimeZone(timeZone: string): string {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  const value = `${values.year}-${values.month}-${values.day}`;
+  if (!isIsoCalendarDate(value)) throw new Error("Invalid formatted date");
+  return value;
+}
+
+function dateInTimeZone(timeZone: string): string {
+  try {
+    return formatDateInTimeZone(timeZone);
+  } catch {
+    // Invalid account timezone falls back to the product's Kazakhstan timezone.
+  }
+
+  return formatDateInTimeZone(META_INSIGHTS_DEFAULT_TIMEZONE);
+}
+
+function resolveMetaInsightsDateRange(
+  input: JsonRecord,
+  timeZone: string,
+): { dateStart: string; dateStop: string } {
+  const requestedStart = firstString(input.dateStart, input.date_start);
+  const requestedStop = firstString(input.dateStop, input.date_stop);
+  if (Boolean(requestedStart) !== Boolean(requestedStop)) {
+    throw new MetaInsightsError("invalid_range", "Укажите обе даты периода Insights.");
+  }
+
+  const today = dateInTimeZone(timeZone);
+  const dateStop = requestedStop || today;
+  const dateStart = requestedStart || addCalendarDays(dateStop, -6);
+  if (!isIsoCalendarDate(dateStart) || !isIsoCalendarDate(dateStop)) {
+    throw new MetaInsightsError("invalid_range", "Период Insights должен быть в формате YYYY-MM-DD.");
+  }
+  if (dateStart > dateStop) {
+    throw new MetaInsightsError("invalid_range", "Начало периода Insights не может быть позже окончания.");
+  }
+  if (dateStart > today || dateStop > today) {
+    throw new MetaInsightsError("invalid_range", "Период Insights не может включать будущие даты.");
+  }
+
+  const start = new Date(`${dateStart}T00:00:00.000Z`).getTime();
+  const stop = new Date(`${dateStop}T00:00:00.000Z`).getTime();
+  const rangeDays = Math.floor((stop - start) / 86_400_000) + 1;
+  if (rangeDays > META_INSIGHTS_MAX_RANGE_DAYS) {
+    throw new MetaInsightsError("invalid_range", `Период Insights не может быть больше ${META_INSIGHTS_MAX_RANGE_DAYS} дней.`);
+  }
+
+  return { dateStart, dateStop };
+}
+
+function normalizeMetaAccountId(value: unknown): string {
+  return readString(value).toLowerCase().replace(/^act_/, "");
+}
+
+function isRealMetaCampaignId(value: string): boolean {
+  const normalized = value.trim().toLowerCase();
+  return /^\d+$/.test(normalized) && !normalized.startsWith("0");
+}
+
+function launchUsesDryRun(launch: JsonRecord): boolean {
+  const payload = asRecord(launch.payload);
+  const sourcePayload = asRecord(payload.payload);
+  const metaResponse = asRecord(launch.meta_response);
+  return (
+    readBoolean(payload.dryRun) ||
+    readBoolean(payload.dry_run) ||
+    readBoolean(sourcePayload.dryRun) ||
+    readBoolean(sourcePayload.dry_run) ||
+    readBoolean(metaResponse.dryRun) ||
+    readString(launch.status).toLowerCase() === "dry_run" ||
+    readString(launch.meta_status).toUpperCase() === "DRY_RUN"
+  );
+}
+
+async function loadMetaInsightsLaunchContext(
+  supabase: CrmSupabaseClient,
+  workspaceId: string,
+  launchId: string,
+): Promise<MetaInsightsLaunchContext> {
+  if (!isUuid(launchId)) {
+    throw new MetaInsightsError("launch_not_eligible", "Выберите сохранённый запуск Meta.");
+  }
+
+  const { data, error } = await supabase
+    .from("meta_campaign_launches")
+    .select("id,workspace_id,status,meta_status,meta_campaign_id,ad_account_id,currency,payload,meta_response")
+    .eq("id", launchId)
+    .eq("workspace_id", workspaceId)
+    .maybeSingle();
+  if (error) {
+    throw new MetaInsightsError("persistence_failed", "Не удалось проверить запуск в Supabase.");
+  }
+
+  const launch = asRecord(data);
+  if (!readString(launch.id)) {
+    throw new MetaInsightsError("launch_not_eligible", "Запуск не найден в текущем workspace.");
+  }
+
+  const status = readString(launch.status).toLowerCase();
+  const metaStatus = readString(launch.meta_status).toLowerCase();
+  if ([status, metaStatus].some((value) => value === "failed" || value === "video_processing")) {
+    throw new MetaInsightsError("launch_not_eligible", "Insights доступны только для завершённого реального запуска Meta.");
+  }
+  if (launchUsesDryRun(launch)) {
+    throw new MetaInsightsError("launch_not_eligible", "Dry-run запуск не имеет фактических Meta Insights.");
+  }
+
+  const metaCampaignId = readString(launch.meta_campaign_id);
+  if (!isRealMetaCampaignId(metaCampaignId)) {
+    throw new MetaInsightsError("launch_not_eligible", "У запуска нет реального Meta campaign ID.");
+  }
+
+  const config = getMetaConfig();
+  const launchAdAccountId = readString(launch.ad_account_id);
+  const configuredAccount = normalizeMetaAccountId(config.adAccountId);
+  const launchAccount = normalizeMetaAccountId(launchAdAccountId);
+  if (configuredAccount && launchAccount && configuredAccount !== launchAccount) {
+    throw new MetaInsightsError("launch_not_eligible", "Запуск относится к другому Meta ad account.");
+  }
+
+  const { data: accountRows, error: accountError } = await supabase
+    .from("meta_ad_accounts")
+    .select("ad_account_id,currency,timezone_name,metadata")
+    .eq("workspace_id", workspaceId)
+    .order("updated_at", { ascending: false })
+    .limit(20);
+  if (accountError) {
+    throw new MetaInsightsError("persistence_failed", "Не удалось проверить настройки Meta account в Supabase.");
+  }
+
+  const preferredAccount = configuredAccount || launchAccount;
+  const accounts = (Array.isArray(accountRows) ? accountRows : []).map((row) => asRecord(row));
+  const account =
+    accounts.find((row) => normalizeMetaAccountId(row.ad_account_id) === preferredAccount) ||
+    accounts[0] ||
+    {};
+  const metadata = asRecord(account.metadata);
+
+  return {
+    launchId: readString(launch.id),
+    metaCampaignId,
+    adAccountId: launchAdAccountId || config.adAccountId,
+    currency: firstString(account.currency, launch.currency),
+    accountTimezone: firstString(account.timezone_name, metadata.timezoneName, metadata.timezone_name, META_INSIGHTS_DEFAULT_TIMEZONE),
+    attributionSetting: firstString(metadata.attributionSetting, metadata.attribution_setting),
+  };
+}
+
+function normalizedInsightToDatabaseRow(row: NormalizedMetaInsightRow): JsonRecord {
+  return {
+    workspace_id: row.workspaceId,
+    meta_campaign_launch_id: row.metaCampaignLaunchId,
+    meta_campaign_id: row.metaCampaignId,
+    ad_account_id: row.adAccountId,
+    date_start: row.dateStart,
+    date_stop: row.dateStop,
+    spend_minor: row.spendMinor,
+    currency: row.currency,
+    currency_exponent: row.currencyExponent,
+    impressions: row.impressions,
+    reach: row.reach,
+    clicks: row.clicks,
+    inline_link_clicks: row.inlineLinkClicks,
+    meta_leads: row.metaLeads,
+    action_counts: row.actionCounts,
+    api_version: row.apiVersion,
+    account_timezone: row.accountTimezone,
+    attribution_setting: row.attributionSetting,
+    fetched_at: row.fetchedAt,
+    updated_at: new Date().toISOString(),
+  };
+}
+
+function databaseIntegerString(value: unknown, fallback = "0"): string {
+  if (typeof value === "string" && /^\d+$/.test(value)) return value;
+  if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) return String(value);
+  return fallback;
+}
+
+function mapMetaCampaignInsight(rowValue: unknown): JsonRecord {
+  const row = asRecord(rowValue);
+  return {
+    id: readString(row.id),
+    workspaceId: readString(row.workspace_id),
+    metaCampaignLaunchId: readString(row.meta_campaign_launch_id),
+    metaCampaignId: readString(row.meta_campaign_id),
+    dateStart: readString(row.date_start),
+    dateStop: readString(row.date_stop),
+    spendMinor: databaseIntegerString(row.spend_minor),
+    currency: readString(row.currency),
+    impressions: databaseIntegerString(row.impressions),
+    reach: databaseIntegerString(row.reach),
+    clicks: databaseIntegerString(row.clicks),
+    inlineLinkClicks: databaseIntegerString(row.inline_link_clicks),
+    metaLeads: row.meta_leads === null || row.meta_leads === undefined ? null : databaseIntegerString(row.meta_leads),
+    actionCounts: asRecord(row.action_counts),
+    fetchedAt: firstString(row.fetched_at, row.updated_at),
+  };
+}
+
+function mapMetaInsightsSyncRun(rowValue: unknown): JsonRecord {
+  const row = asRecord(rowValue);
+  return {
+    id: readString(row.id),
+    workspaceId: readString(row.workspace_id),
+    metaCampaignLaunchId: firstString(row.meta_campaign_launch_id) || null,
+    status: readString(row.status),
+    dateStart: firstString(row.date_start) || null,
+    dateStop: firstString(row.date_stop) || null,
+    rowsUpserted: readNumber(row.rows_upserted) ?? 0,
+    errorCode: firstString(row.error_code) || null,
+    errorMessage: firstString(row.error_message) || null,
+    startedAt: firstString(row.started_at) || null,
+    finishedAt: firstString(row.finished_at) || null,
+    createdAt: firstString(row.created_at) || null,
+  };
+}
+
+function asSafeMetaInsightsError(error: unknown): MetaInsightsError {
+  if (
+    error instanceof MetaInsightsError &&
+    META_INSIGHTS_SAFE_ERROR_CODES.includes(error.code as MetaInsightsSafeErrorCode)
+  ) {
+    return error;
+  }
+  return new MetaInsightsError("sync_timeout", "Синхронизация Meta Insights не завершилась.");
+}
+
+function metaInsightsErrorStatus(error: MetaInsightsError): number {
+  if (error.code === "invalid_range") return 400;
+  if (error.code === "launch_not_eligible") return 422;
+  if (error.code === "meta_rate_limited") return 429;
+  if (error.code === "persistence_failed") return 503;
+  if (error.code === "sync_timeout") return 504;
+  return 502;
+}
+
+function sendMetaInsightsFailure(
+  res: VercelResponse,
+  error: MetaInsightsError,
+  runId?: string,
+) {
+  return sendJson(res, metaInsightsErrorStatus(error), {
+    ...errorBody("Meta Insights request failed", [error.message]),
+    code: error.code,
+    ...(runId ? { data: { runId, status: "failed" } } : {}),
+  });
+}
+
+function sendWorkspaceAdminAuthError(res: VercelResponse, error: unknown) {
+  if (error instanceof WorkspaceAdminAuthError) {
+    return sendJson(res, error.statusCode, errorBody(error.message));
+  }
+  return sendJson(res, 503, errorBody("Authorization service unavailable"));
+}
+
+export async function handleMetaInsightsSync(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== "POST") {
+    return sendJson(res, 405, errorBody("Method not allowed", ["Use POST"]));
+  }
+
+  const body = asRecord(req.body);
+  const workspaceId = readWorkspaceId(req, body);
+  if (!isUuid(workspaceId)) {
+    return sendJson(res, 400, errorBody("Validation error", ["workspaceId must be a UUID"]));
+  }
+
+  try {
+    await requireWorkspaceAdmin(req, workspaceId);
+  } catch (error) {
+    return sendWorkspaceAdminAuthError(res, error);
+  }
+
+  const supabase = getSupabaseServerClient();
+  if (!supabase) {
+    return sendMetaInsightsFailure(
+      res,
+      new MetaInsightsError("persistence_failed", "Supabase недоступен для синхронизации Insights."),
+    );
+  }
+
+  const launchId = firstString(body.metaCampaignLaunchId, body.meta_campaign_launch_id);
+  let launchContext: MetaInsightsLaunchContext;
+  let dateRange: { dateStart: string; dateStop: string };
+  try {
+    launchContext = await loadMetaInsightsLaunchContext(supabase, workspaceId, launchId);
+    dateRange = resolveMetaInsightsDateRange(body, launchContext.accountTimezone);
+  } catch (error) {
+    return sendMetaInsightsFailure(res, asSafeMetaInsightsError(error));
+  }
+
+  const now = new Date().toISOString();
+  const { data: pendingRunValue, error: pendingRunError } = await supabase
+    .from("meta_insights_sync_runs")
+    .insert({
+      workspace_id: workspaceId,
+      meta_campaign_launch_id: launchContext.launchId,
+      sync_scope: "campaign",
+      status: "pending",
+      date_start: dateRange.dateStart,
+      date_stop: dateRange.dateStop,
+      rows_upserted: 0,
+      error_code: null,
+      error_message: null,
+      updated_at: now,
+    })
+    .select("id,workspace_id,meta_campaign_launch_id,status,date_start,date_stop,rows_upserted,error_code,error_message,started_at,finished_at,created_at")
+    .single();
+  if (pendingRunError) {
+    return sendMetaInsightsFailure(
+      res,
+      new MetaInsightsError("persistence_failed", "Не удалось создать журнал синхронизации Insights."),
+    );
+  }
+
+  const pendingRun = asRecord(pendingRunValue);
+  const runId = readString(pendingRun.id);
+  if (!runId) {
+    return sendMetaInsightsFailure(
+      res,
+      new MetaInsightsError("persistence_failed", "Журнал синхронизации Insights не вернул идентификатор."),
+    );
+  }
+  const startedAt = new Date().toISOString();
+  const { error: runningError } = await supabase
+    .from("meta_insights_sync_runs")
+    .update({ status: "running", started_at: startedAt, updated_at: startedAt })
+    .eq("id", runId)
+    .eq("workspace_id", workspaceId);
+  if (runningError) {
+    const finishedAt = new Date().toISOString();
+    await supabase
+      .from("meta_insights_sync_runs")
+      .update({
+        status: "failed",
+        error_code: "persistence_failed",
+        error_message: "Не удалось запустить журнал синхронизации Insights.",
+        finished_at: finishedAt,
+        updated_at: finishedAt,
+      })
+      .eq("id", runId)
+      .eq("workspace_id", workspaceId);
+    return sendMetaInsightsFailure(
+      res,
+      new MetaInsightsError("persistence_failed", "Не удалось запустить журнал синхронизации Insights."),
+      runId,
+    );
+  }
+
+  try {
+    const fetched = await fetchCampaignInsightsDaily({
+      workspaceId,
+      metaCampaignLaunchId: launchContext.launchId,
+      metaCampaignId: launchContext.metaCampaignId,
+      adAccountId: launchContext.adAccountId,
+      expectedCurrency: launchContext.currency,
+      accountTimezone: launchContext.accountTimezone,
+      attributionSetting: launchContext.attributionSetting,
+      dateStart: dateRange.dateStart,
+      dateStop: dateRange.dateStop,
+    });
+
+    if (fetched.rows.length > 0) {
+      const rows = fetched.rows.map(normalizedInsightToDatabaseRow);
+      const { error: upsertError } = await supabase
+        .from("meta_campaign_insights")
+        .upsert(rows, {
+          onConflict: "workspace_id,meta_campaign_launch_id,date_start,date_stop",
+        });
+      if (upsertError) {
+        throw new MetaInsightsError("persistence_failed", "Не удалось сохранить нормализованные строки Insights.");
+      }
+    }
+
+    const finishedAt = new Date().toISOString();
+    const { data: succeededRunValue, error: succeededRunError } = await supabase
+      .from("meta_insights_sync_runs")
+      .update({
+        status: "succeeded",
+        rows_upserted: fetched.rows.length,
+        error_code: null,
+        error_message: null,
+        finished_at: finishedAt,
+        updated_at: finishedAt,
+      })
+      .eq("id", runId)
+      .eq("workspace_id", workspaceId)
+      .select("id,workspace_id,meta_campaign_launch_id,status,date_start,date_stop,rows_upserted,error_code,error_message,started_at,finished_at,created_at")
+      .single();
+    if (succeededRunError) {
+      throw new MetaInsightsError("persistence_failed", "Не удалось завершить журнал синхронизации Insights.");
+    }
+
+    return sendJson(
+      res,
+      200,
+      success("supabase", {
+        run: mapMetaInsightsSyncRun(succeededRunValue),
+        rowsUpserted: fetched.rows.length,
+        empty: fetched.rows.length === 0,
+        pagesFetched: fetched.pagesFetched,
+        dateStart: dateRange.dateStart,
+        dateStop: dateRange.dateStop,
+      }),
+    );
+  } catch (error) {
+    let safeError = asSafeMetaInsightsError(error);
+    const finishedAt = new Date().toISOString();
+    const { error: failedRunError } = await supabase
+      .from("meta_insights_sync_runs")
+      .update({
+        status: "failed",
+        rows_upserted: 0,
+        error_code: safeError.code,
+        error_message: safeError.message,
+        finished_at: finishedAt,
+        updated_at: finishedAt,
+      })
+      .eq("id", runId)
+      .eq("workspace_id", workspaceId);
+    if (failedRunError) {
+      safeError = new MetaInsightsError("persistence_failed", "Не удалось сохранить безопасный результат синхронизации.");
+    }
+    return sendMetaInsightsFailure(res, safeError, runId);
+  }
+}
+
+export async function handleMetaCampaignInsights(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== "GET") {
+    return sendJson(res, 405, errorBody("Method not allowed", ["Use GET"]));
+  }
+
+  const workspaceId = readWorkspaceId(req, {});
+  if (!isUuid(workspaceId)) {
+    return sendJson(res, 400, errorBody("Validation error", ["workspaceId must be a UUID"]));
+  }
+
+  try {
+    await requireWorkspaceAdmin(req, workspaceId);
+  } catch (error) {
+    return sendWorkspaceAdminAuthError(res, error);
+  }
+
+  const supabase = getSupabaseServerClient();
+  if (!supabase) {
+    return sendMetaInsightsFailure(
+      res,
+      new MetaInsightsError("persistence_failed", "Supabase недоступен для чтения Insights."),
+    );
+  }
+
+  const launchId = readQueryString(req.query.metaCampaignLaunchId ?? req.query.meta_campaign_launch_id);
+  if (launchId && !isUuid(launchId)) {
+    return sendMetaInsightsFailure(res, new MetaInsightsError("launch_not_eligible", "metaCampaignLaunchId должен быть UUID."));
+  }
+  const dateStart = readQueryString(req.query.dateStart ?? req.query.date_start);
+  const dateStop = readQueryString(req.query.dateStop ?? req.query.date_stop);
+  if ((dateStart && !isIsoCalendarDate(dateStart)) || (dateStop && !isIsoCalendarDate(dateStop)) || (dateStart && dateStop && dateStart > dateStop)) {
+    return sendMetaInsightsFailure(res, new MetaInsightsError("invalid_range", "Период Insights указан неверно."));
+  }
+
+  let query = supabase
+    .from("meta_campaign_insights")
+    .select("id,workspace_id,meta_campaign_launch_id,meta_campaign_id,date_start,date_stop,spend_minor,currency,impressions,reach,clicks,inline_link_clicks,meta_leads,action_counts,fetched_at,updated_at")
+    .eq("workspace_id", workspaceId)
+    .order("date_start", { ascending: false })
+    .limit(500);
+  if (launchId) query = query.eq("meta_campaign_launch_id", launchId);
+  if (dateStart) query = query.gte("date_start", dateStart);
+  if (dateStop) query = query.lte("date_stop", dateStop);
+
+  const { data, error } = await query;
+  if (error) {
+    return sendMetaInsightsFailure(
+      res,
+      new MetaInsightsError("persistence_failed", "Не удалось прочитать нормализованные Meta Insights."),
+    );
+  }
+
+  const insights = (Array.isArray(data) ? data : []).map(mapMetaCampaignInsight);
+  return sendJson(res, 200, success("supabase", { insights, items: insights }));
+}
+
+export async function handleMetaInsightsSyncRuns(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== "GET") {
+    return sendJson(res, 405, errorBody("Method not allowed", ["Use GET"]));
+  }
+
+  const workspaceId = readWorkspaceId(req, {});
+  if (!isUuid(workspaceId)) {
+    return sendJson(res, 400, errorBody("Validation error", ["workspaceId must be a UUID"]));
+  }
+
+  try {
+    await requireWorkspaceAdmin(req, workspaceId);
+  } catch (error) {
+    return sendWorkspaceAdminAuthError(res, error);
+  }
+
+  const supabase = getSupabaseServerClient();
+  if (!supabase) {
+    return sendMetaInsightsFailure(
+      res,
+      new MetaInsightsError("persistence_failed", "Supabase недоступен для чтения журнала Insights."),
+    );
+  }
+
+  const launchId = readQueryString(req.query.metaCampaignLaunchId ?? req.query.meta_campaign_launch_id);
+  if (launchId && !isUuid(launchId)) {
+    return sendMetaInsightsFailure(res, new MetaInsightsError("launch_not_eligible", "metaCampaignLaunchId должен быть UUID."));
+  }
+
+  let query = supabase
+    .from("meta_insights_sync_runs")
+    .select("id,workspace_id,meta_campaign_launch_id,status,date_start,date_stop,rows_upserted,error_code,error_message,started_at,finished_at,created_at")
+    .eq("workspace_id", workspaceId)
+    .order("created_at", { ascending: false })
+    .limit(20);
+  if (launchId) query = query.eq("meta_campaign_launch_id", launchId);
+
+  const { data, error } = await query;
+  if (error) {
+    return sendMetaInsightsFailure(
+      res,
+      new MetaInsightsError("persistence_failed", "Не удалось прочитать журнал синхронизаций Insights."),
+    );
+  }
+
+  const runs = (Array.isArray(data) ? data : []).map(mapMetaInsightsSyncRun);
+  return sendJson(res, 200, success("supabase", { runs, items: runs }));
 }
 
 export async function handleCrmAuthContext(req: VercelRequest, res: VercelResponse) {

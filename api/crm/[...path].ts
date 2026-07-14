@@ -8,6 +8,9 @@ import {
   handleCrmHealth,
   handleCrmResource,
   handleMetaCityKey,
+  handleMetaCampaignInsights,
+  handleMetaInsightsSync,
+  handleMetaInsightsSyncRuns,
   handleMetaLaunch,
   handleMetaStatus,
   handleMetaValidate,
@@ -144,6 +147,18 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   if (resource === "meta-city-key") {
     return handleMetaCityKey(req, res);
+  }
+
+  if (resource === "meta-insights-sync") {
+    return handleMetaInsightsSync(req, res);
+  }
+
+  if (resource === "meta-campaign-insights") {
+    return handleMetaCampaignInsights(req, res);
+  }
+
+  if (resource === "meta-insights-sync-runs") {
+    return handleMetaInsightsSyncRuns(req, res);
   }
 
   if (resource === "storage-health") {
