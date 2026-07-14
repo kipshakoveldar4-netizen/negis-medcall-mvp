@@ -2539,16 +2539,38 @@ async function checkMetaInsightsSyncFoundation() {
   const adminCenter = await readFile(path.join(repoRoot, "artifacts", "negis", "src", "pages", "AdminCenter.tsx"), "utf8");
   for (const marker of [
     "Meta Insights: ручная синхронизация",
+    "Meta Insights · диагностика",
     "Синхронизировать Insights",
     "/api/crm/meta-insights-sync",
     "/api/crm/meta-insights-sync-runs",
+    "/api/crm/meta-campaign-insights",
     "getSupabaseAccessToken()",
     "Authorization: `Bearer ${accessToken}`",
-    "Строк сохранено",
+    "summarizeMetaInsightRows",
+    "BigInt(row.spendMinor)",
+    "Всего строк Insights",
+    "Последние данные fetched_at",
+    "Meta не вернула данные за выбранный период. Это нормально для выключенных или не откручивавшихся кампаний.",
+    "Расходы Meta показываются отдельно от выручки CRM.",
+    "Это ещё не ROI и не эффективность рекламы.",
     "Кампания и её статус не изменяются",
   ]) {
     if (!adminCenter.includes(marker)) {
       throw new Error(`Admin Center Meta Insights diagnostics are missing ${marker}`);
+    }
+  }
+  const diagnosticsCardStart = adminCenter.indexOf('data-testid="meta-insights-diagnostics"');
+  const diagnosticsCardEnd = adminCenter.indexOf(
+    '<div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">',
+    diagnosticsCardStart,
+  );
+  if (diagnosticsCardStart < 0 || diagnosticsCardEnd < 0) {
+    throw new Error("Admin Center Meta Insights diagnostics card boundaries are missing");
+  }
+  const diagnosticsCard = adminCenter.slice(diagnosticsCardStart, diagnosticsCardEnd);
+  for (const forbidden of ["rawResponse", "raw_response", "paging.next", "pagingUrl", "accessToken", "appSecret"]) {
+    if (diagnosticsCard.includes(forbidden)) {
+      throw new Error(`Admin Center Meta Insights diagnostics must not expose ${forbidden}`);
     }
   }
 
@@ -2567,9 +2589,15 @@ async function checkMetaInsightsSyncFoundation() {
     "failed",
     "Искусственные нулевые строки",
     "background sync",
+    "## CRM11c: диагностика доступности Insights",
+    "Meta Insights · диагностика",
+    "succeeded` с `rows_upserted = 0",
+    "планового бюджета кампании",
+    "Расходы Meta также показываются отдельно от выручки CRM",
+    "ещё не является ROI",
   ]) {
     if (!doc.toLowerCase().includes(marker.toLowerCase())) {
-      throw new Error(`Meta Insights CRM11b documentation is missing ${marker}`);
+      throw new Error(`Meta Insights documentation is missing ${marker}`);
     }
   }
 
@@ -2579,7 +2607,7 @@ async function checkMetaInsightsSyncFoundation() {
     }
   }
 
-  console.log("Meta Insights manual sync foundation checks: ok");
+  console.log("Meta Insights manual sync and diagnostics foundation checks: ok");
 }
 
 async function checkLayoutFoundation() {
