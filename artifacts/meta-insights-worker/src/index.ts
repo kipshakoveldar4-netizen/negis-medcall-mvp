@@ -100,7 +100,11 @@ async function runCycle(config: WorkerConfig): Promise<void> {
   const nonce = randomUUID();
   const timestamp = Math.floor(Date.now() / 1000).toString();
 
-  // Serialize the body once and sign those exact bytes.
+  // Serialize the body ONCE and use this exact string for both the HMAC hash and
+  // the fetch body — never stringify twice. Property order ({ workerId,
+  // maxLaunches, workspaceIds? }) is part of the signed-body contract: the server
+  // verifier reproduces these same bytes from a parsed body via JSON.stringify, so
+  // reordering or reshaping the payload would break signature verification.
   const bodyString = JSON.stringify({
     workerId: config.workerId,
     maxLaunches: config.maxLaunches,

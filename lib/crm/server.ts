@@ -2,8 +2,10 @@ import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { requireWorkspaceAdmin, WorkspaceAdminAuthError } from "../auth/server";
 import {
   META_INSIGHTS_BACKGROUND_CYCLE_PATH,
+  WORKER_REQUEST_ID_HEADER,
   WorkerAuthError,
   getWorkerAuthConfig,
+  resolveSignedRawBody,
   verifyWorkerRequest,
   type VerifiedWorkerRequest,
   type WorkerAuthConfig,
@@ -5655,14 +5657,32 @@ async function finalizeBackgroundSchedulerState(
 }
 
 function readWorkerRawBody(req: VercelRequest): Buffer {
-  const raw = (req as { rawBody?: unknown }).rawBody;
-  if (Buffer.isBuffer(raw)) return raw;
-  if (typeof raw === "string") return Buffer.from(raw, "utf8");
-  return Buffer.from("");
+  // Prefer exact raw bytes; fall back to the parsed body when the Vercel runtime
+  // delivered req.body without req.rawBody. See resolveSignedRawBody for why the
+  // parsed-body fallback is safe for this fixed JSON contract.
+  const source = req as { rawBody?: unknown; body?: unknown };
+  return resolveSignedRawBody({ rawBody: source.rawBody, body: source.body });
 }
 
-function sendWorkerAuthError(res: VercelResponse, error: unknown) {
+// The request id header is client-provided on a failed (unauthenticated) request,
+// so sanitize it before logging: strip anything outside a safe id charset and cap
+// the length to prevent log forging.
+function readSafeWorkerRequestId(req: VercelRequest): string {
+  const value = req.headers[WORKER_REQUEST_ID_HEADER];
+  const raw = Array.isArray(value) ? value[0] : value;
+  return typeof raw === "string" ? raw.replace(/[^A-Za-z0-9._:-]/g, "").slice(0, 64) : "";
+}
+
+function sendWorkerAuthError(res: VercelResponse, error: unknown, req?: VercelRequest) {
   const statusCode = error instanceof WorkerAuthError ? error.statusCode : 503;
+  // Safe server-side diagnostics only: endpoint, reason code, and a sanitized
+  // request id. Never the secret, signature, canonical payload, body, body hash,
+  // nonce, tokens, or the Authorization header. The reason is NOT sent to clients.
+  const reason = error instanceof WorkerAuthError ? error.reason : "unknown";
+  const requestId = req ? readSafeWorkerRequestId(req) : "";
+  console.warn(
+    `[meta-insights-cycle] worker auth rejected reason=${reason}${requestId ? ` requestId=${requestId}` : ""}`,
+  );
   // Never echo the worker secret, signature, or the specific failure detail.
   return sendJson(res, statusCode, {
     ...errorBody("Worker authentication failed"),
@@ -5690,7 +5710,7 @@ export async function handleMetaInsightsBackgroundCycle(req: VercelRequest, res:
       config: authConfig,
     });
   } catch (error) {
-    return sendWorkerAuthError(res, error);
+    return sendWorkerAuthError(res, error, req);
   }
 
   const body = asRecord(req.body);

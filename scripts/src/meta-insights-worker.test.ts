@@ -38,6 +38,7 @@ const workerAuth = (await import(`${pathToFileURL(workerAuthPath).href}?test=${D
     nowSeconds?: number;
     config?: { secret: string; workspaceAllowlist: string[]; maxClockSkewSeconds: number };
   }): { requestId: string; timestamp: number; nonce: string };
+  resolveSignedRawBody(source: { rawBody?: unknown; body?: unknown }): Buffer;
 };
 
 const TEST_SECRET = "unit-test-worker-secret-value";
@@ -383,8 +384,12 @@ test("26 the cycle handler and core never expose raw secrets", () => {
     assert.ok(!cycleSlice.includes(forbidden), `cycle handler must not reference ${forbidden}`);
     assert.ok(!coreSlice.includes(forbidden), `sync core must not reference ${forbidden}`);
   }
+  // The reason may be used for a server-side log, but must never reach the HTTP
+  // response. Check the response payload (from `return sendJson`) specifically.
   const authError = sliceBetween(crmServerSource, "function sendWorkerAuthError", "// POST /api/crm");
-  assert.ok(!authError.includes("error.reason"), "auth error must not echo the failure detail");
+  const authResponse = authError.slice(authError.indexOf("return sendJson"));
+  assert.ok(!authResponse.includes("reason"), "auth error response must not echo the failure reason");
+  assert.ok(authResponse.includes('code: "worker_unauthorized"'));
 });
 
 // Separate Railway Cron worker (tests 27–30)
@@ -416,4 +421,209 @@ test("30 the worker is a separate package from the video worker", () => {
   assert.notEqual(pkg.name, "@workspace/video-worker");
   // Self-contained: no workspace dependencies to keep the Dockerfile npm-only.
   assert.equal(pkg.dependencies, undefined);
+});
+
+// ---------------------------------------------------------------------------
+// CRM11e.2 hotfix — runtime-independent body verification (tests 31–50).
+// These use the REAL lib/auth/worker helpers (signer + verifier + resolver) and
+// never re-implement canonicalization inside the test.
+// ---------------------------------------------------------------------------
+
+// A real 64-character base64url secret (dummy — never a production value).
+const B64URL_SECRET = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-_";
+const baseConfig = { secret: B64URL_SECRET, workspaceAllowlist: [] as string[], maxClockSkewSeconds: 300 };
+const PROD_TS = "1700000000";
+// The exact production-shape body: POST /api/crm/meta-insights-background-cycle.
+const PROD_BODY = JSON.stringify({
+  workerId: "crm11e-canary",
+  maxLaunches: 2,
+  workspaceIds: ["9eb6f100-bb6a-4f99-9719-e85c34513a03"],
+});
+
+function prodHeaders(input?: { secret?: string; body?: string; path?: string; nonce?: string }) {
+  return signedHeaders({
+    secret: input?.secret ?? B64URL_SECRET,
+    body: input?.body ?? PROD_BODY,
+    timestamp: PROD_TS,
+    nonce: input?.nonce ?? "nonce-hotfix",
+    requestId: "req-hotfix",
+    path: input?.path ?? CYCLE_PATH,
+  });
+}
+
+// Resolve the raw body exactly as the server does, then run the real verifier.
+function verifyResolved(
+  source: { rawBody?: unknown; body?: unknown },
+  opts?: {
+    headers?: Record<string, string | string[] | undefined>;
+    method?: string;
+    path?: string;
+    config?: { secret: string; workspaceAllowlist: string[]; maxClockSkewSeconds: number };
+  },
+) {
+  const rawBody = workerAuth.resolveSignedRawBody(source);
+  return workerAuth.verifyWorkerRequest({
+    method: opts?.method ?? "POST",
+    path: opts?.path ?? CYCLE_PATH,
+    headers: opts?.headers ?? prodHeaders(),
+    rawBody,
+    nowSeconds: Number(PROD_TS),
+    config: opts?.config ?? baseConfig,
+  });
+}
+
+test("31 exact rawBody Buffer round-trip passes", () => {
+  const v = verifyResolved({ rawBody: Buffer.from(PROD_BODY, "utf8") });
+  assert.equal(v.requestId, "req-hotfix");
+});
+
+test("32 rawBody string round-trip passes", () => {
+  const v = verifyResolved({ rawBody: PROD_BODY });
+  assert.equal(v.nonce, "nonce-hotfix");
+});
+
+test("33 Uint8Array rawBody round-trip passes", () => {
+  const v = verifyResolved({ rawBody: new Uint8Array(Buffer.from(PROD_BODY, "utf8")) });
+  assert.equal(v.requestId, "req-hotfix");
+});
+
+test("34 parsed object only (no rawBody) passes — the production runtime case", () => {
+  const v = verifyResolved({ body: JSON.parse(PROD_BODY) });
+  assert.equal(v.requestId, "req-hotfix");
+});
+
+test("35 parsed string body only passes", () => {
+  const v = verifyResolved({ body: PROD_BODY });
+  assert.equal(v.requestId, "req-hotfix");
+});
+
+test("36 tampered parsed body fails", () => {
+  const tampered = { ...JSON.parse(PROD_BODY), maxLaunches: 9 };
+  assert.throws(
+    () => verifyResolved({ body: tampered }),
+    (e: unknown) => e instanceof workerAuth.WorkerAuthError && e.reason === "invalid_signature",
+  );
+});
+
+test("37 missing rawBody and missing body fails authentication safely", () => {
+  assert.throws(
+    () => verifyResolved({}),
+    (e: unknown) => e instanceof workerAuth.WorkerAuthError && e.reason === "invalid_signature",
+  );
+});
+
+test("38 trailing-slash path fails", () => {
+  assert.throws(
+    () => verifyResolved({ rawBody: PROD_BODY }, { path: `${CYCLE_PATH}/` }),
+    (e: unknown) => e instanceof workerAuth.WorkerAuthError && e.reason === "invalid_signature",
+  );
+});
+
+test("39 different method fails", () => {
+  assert.throws(
+    () => verifyResolved({ rawBody: PROD_BODY }, { method: "PUT" }),
+    (e: unknown) => e instanceof workerAuth.WorkerAuthError && e.reason === "invalid_signature",
+  );
+});
+
+test("40 different body key order fails unless the signer signed that exact order", () => {
+  const reordered = JSON.stringify({
+    maxLaunches: 2,
+    workerId: "crm11e-canary",
+    workspaceIds: ["9eb6f100-bb6a-4f99-9719-e85c34513a03"],
+  });
+  // Signature was for PROD_BODY (workerId first); a reordered body must not verify.
+  assert.throws(
+    () => verifyResolved({ rawBody: reordered }),
+    (e: unknown) => e instanceof workerAuth.WorkerAuthError && e.reason === "invalid_signature",
+  );
+  // But signing the reordered order explicitly and sending it does verify.
+  const v = verifyResolved({ rawBody: reordered }, { headers: prodHeaders({ body: reordered }) });
+  assert.equal(v.requestId, "req-hotfix");
+});
+
+test("41 whitespace-modified raw JSON fails when the signature was for compact JSON", () => {
+  const pretty = JSON.stringify(JSON.parse(PROD_BODY), null, 2);
+  assert.notEqual(pretty, PROD_BODY);
+  assert.throws(
+    () => verifyResolved({ rawBody: pretty }),
+    (e: unknown) => e instanceof workerAuth.WorkerAuthError && e.reason === "invalid_signature",
+  );
+});
+
+test("42 CRLF inside a JSON string value round-trips correctly", () => {
+  const crlfBody = JSON.stringify({
+    workerId: "crm11e\r\ncanary",
+    maxLaunches: 2,
+    workspaceIds: ["9eb6f100-bb6a-4f99-9719-e85c34513a03"],
+  });
+  const headers = prodHeaders({ body: crlfBody });
+  // Both the exact bytes and the parsed-body fallback reproduce the escaped \r\n.
+  assert.equal(verifyResolved({ rawBody: crlfBody }, { headers }).requestId, "req-hotfix");
+  assert.equal(verifyResolved({ body: JSON.parse(crlfBody) }, { headers }).requestId, "req-hotfix");
+});
+
+test("43 a 64-character base64url secret passes", () => {
+  assert.equal(B64URL_SECRET.length, 64);
+  assert.match(B64URL_SECRET, /^[A-Za-z0-9_-]{64}$/);
+  assert.equal(verifyResolved({ rawBody: PROD_BODY }).requestId, "req-hotfix");
+});
+
+test("44 a secret with different bytes fails", () => {
+  const otherSecret = `${B64URL_SECRET.slice(0, 63)}X`;
+  assert.throws(
+    () => verifyResolved({ rawBody: PROD_BODY }, { config: { ...baseConfig, secret: otherSecret } }),
+    (e: unknown) => e instanceof workerAuth.WorkerAuthError && e.reason === "invalid_signature",
+  );
+});
+
+test("45 query-string path does not match the bare endpoint pathname contract", () => {
+  // The signed path is the exact constant; a path carrying a query must not verify.
+  assert.throws(
+    () => verifyResolved({ rawBody: PROD_BODY }, { path: `${CYCLE_PATH}?workspaceId=x` }),
+    (e: unknown) => e instanceof workerAuth.WorkerAuthError && e.reason === "invalid_signature",
+  );
+  assert.equal(verifyResolved({ rawBody: PROD_BODY }, { path: CYCLE_PATH }).requestId, "req-hotfix");
+});
+
+test("46 the HTTP auth response stays generic and does not expose WorkerAuthError.reason", () => {
+  const authError = sliceBetween(crmServerSource, "function sendWorkerAuthError", "// POST /api/crm");
+  const authResponse = authError.slice(authError.indexOf("return sendJson"));
+  assert.ok(!authResponse.includes("reason"), "response payload must not include the reason");
+  assert.ok(authResponse.includes('code: "worker_unauthorized"'));
+});
+
+test("47 the safe auth log statement contains no secret, signature, or body", () => {
+  const authError = sliceBetween(crmServerSource, "function sendWorkerAuthError", "// POST /api/crm");
+  const logStart = authError.indexOf("console.warn(");
+  assert.notEqual(logStart, -1, "a safe server-side log must exist");
+  const logStmt = authError.slice(logStart, authError.indexOf(");", logStart) + 2);
+  assert.ok(logStmt.includes("reason="), "the log must carry the safe reason code");
+  for (const forbidden of ["secret", "signature", "canonical", "bodySha", "Authorization", "accessToken", "nonce"]) {
+    assert.ok(!logStmt.includes(forbidden), `auth log statement must not reference ${forbidden}`);
+  }
+});
+
+test("48 the worker hashes and sends the exact same body variable", () => {
+  assert.ok(workerSource.includes("const bodyString = JSON.stringify("));
+  assert.ok(workerSource.includes("sha256Hex(bodyString)"));
+  assert.ok(workerSource.includes("body: bodyString"));
+  // Exactly one body serialization — never stringified twice.
+  assert.equal(workerSource.split("const bodyString = JSON.stringify(").length - 1, 1);
+});
+
+test("49 replay/dedup wiring remains intact", () => {
+  assert.ok(coreSlice.includes('.eq("request_key", requestKey)'));
+  assert.ok(coreSlice.includes('status: "already_processed"'));
+  assert.ok(cycleSlice.includes("requestKey: `bg:${verified.requestId}:${state.metaCampaignLaunchId}`"));
+});
+
+test("50 manual owner/admin sync auth is unchanged", () => {
+  const manual = sliceBetween(
+    crmServerSource,
+    "export async function handleMetaInsightsSync(",
+    "export async function handleMetaCampaignInsights",
+  );
+  assert.ok(manual.includes("requireWorkspaceAdmin(req, workspaceId)"));
+  assert.ok(!manual.includes('success("demo"'));
 });

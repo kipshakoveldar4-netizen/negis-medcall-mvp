@@ -134,6 +134,27 @@ export function signWorkerCanonicalPayload(secret: string, canonicalPayload: str
   return createHmac("sha256", secret).update(canonicalPayload).digest("hex");
 }
 
+// Resolves the exact bytes to hash for signature verification, independent of
+// how the platform delivered the request body. Vercel's @vercel/node runtime may
+// parse a JSON POST into `req.body` before the handler runs, leaving `req.rawBody`
+// unset; naively hashing an empty body then breaks every correctly signed request.
+//
+// Exact raw bytes are always preferred. The parsed-body fallback is safe for this
+// endpoint because the worker's signed body is exactly `JSON.stringify(payload)`
+// over a fixed-order contract ({ workerId, maxLaunches, workspaceIds? }), and
+// re-serializing the parsed object reproduces those same bytes. It does NOT trim,
+// sort keys, normalize whitespace, or transform values — any real difference from
+// the signed bytes still yields a mismatched hash and is correctly rejected.
+export function resolveSignedRawBody(source: { rawBody?: unknown; body?: unknown }): Buffer {
+  const { rawBody, body } = source;
+  if (Buffer.isBuffer(rawBody)) return rawBody;
+  if (rawBody instanceof Uint8Array) return Buffer.from(rawBody);
+  if (typeof rawBody === "string") return Buffer.from(rawBody, "utf8");
+  if (typeof body === "string") return Buffer.from(body, "utf8");
+  if (body !== null && typeof body === "object") return Buffer.from(JSON.stringify(body), "utf8");
+  return Buffer.from("", "utf8");
+}
+
 // Constant-time comparison of two hex signatures. Returns false for any
 // malformed input instead of throwing, so timing does not leak validity.
 export function verifyWorkerSignatureHex(expectedHex: string, providedHex: string): boolean {

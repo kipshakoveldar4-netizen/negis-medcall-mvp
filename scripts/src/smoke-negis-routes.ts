@@ -2565,12 +2565,18 @@ async function checkMetaInsightsSyncFoundation() {
     }
   }
 
+  // CRM11e.2 hotfix: verification must resolve raw bytes runtime-independently.
+  if (!crmServer.includes("resolveSignedRawBody({ rawBody: source.rawBody, body: source.body })")) {
+    throw new Error("Worker body verification must use the runtime-independent resolveSignedRawBody");
+  }
+
   const workerAuthSource = await readFile(path.join(repoRoot, "lib", "auth", "worker.ts"), "utf8");
   for (const marker of [
     "timingSafeEqual",
     "META_INSIGHTS_WORKER_SECRET",
     "META_INSIGHTS_WORKSPACE_ALLOWLIST",
     "x-negis-worker-signature",
+    "export function resolveSignedRawBody",
   ]) {
     if (!workerAuthSource.includes(marker)) {
       throw new Error(`Worker auth helper is missing ${marker}`);
