@@ -29,26 +29,27 @@ type MobileNavItem = {
   permission: string;
 };
 
+// Medina OS mobile IA: the four highest-frequency operational routes + "Ещё".
 const primaryItems: MobileNavItem[] = [
-  { href: "/dashboard", label: "Дашборд", icon: BarChart2, permission: "dashboard" },
-  { href: "/appointments", label: "Запись", icon: CalendarDays, permission: "booking" },
+  { href: "/leads", label: "Заявки", icon: ClipboardList, permission: "crm" },
+  { href: "/appointments", label: "Записи", icon: CalendarDays, permission: "booking" },
   { href: "/clients", label: "Клиенты", icon: Users, permission: "crm" },
-  { href: "/leads", label: "Лиды", icon: ClipboardList, permission: "crm" },
+  { href: "/sales", label: "Продажи", icon: BadgeDollarSign, permission: "crm" },
 ];
 
 const drawerItems: MobileNavItem[] = [
-  { href: "/ai-control-center", label: "AI Control Center", icon: LayoutDashboard, permission: "dashboard" },
-  { href: "/sales", label: "Продажи", icon: BadgeDollarSign, permission: "crm" },
-  { href: "/ads-automation", label: "AI запуск рекламы", icon: Rocket, permission: "ads" },
-  { href: "/content-studio", label: "AI Контент-студия", icon: Clapperboard, permission: "ads" },
-  { href: "/ads", label: "Реклама", icon: Megaphone, permission: "ads" },
+  { href: "/ai-control-center", label: "Главная", icon: LayoutDashboard, permission: "dashboard" },
+  { href: "/dashboard", label: "Аналитика", icon: BarChart2, permission: "dashboard" },
+  { href: "/ads-automation", label: "Реклама", icon: Rocket, permission: "ads" },
+  { href: "/content-studio", label: "Контент", icon: Clapperboard, permission: "ads" },
+  { href: "/ads", label: "Кабинет рекламы", icon: Megaphone, permission: "ads" },
   { href: "/reception", label: "Ресепшн", icon: User, permission: "reception" },
   { href: "/calls", label: "Звонки", icon: PhoneCall, permission: "reception" },
   { href: "/tasks", label: "Задачи", icon: ClipboardList, permission: "tasks" },
   { href: "/chat", label: "Чат", icon: MessageCircle, permission: "chat" },
   { href: "/market", label: "Маркет", icon: Store, permission: "marketplace" },
   { href: "/reports", label: "Отчёты", icon: BarChart2, permission: "ads" },
-  { href: "/admin", label: "Админ", icon: Settings, permission: "admin" },
+  { href: "/admin", label: "Настройки", icon: Settings, permission: "admin" },
   { href: "/profile", label: "Профиль", icon: User, permission: "dashboard" },
 ];
 
@@ -74,8 +75,8 @@ export function MobileNav() {
           <section className="mobile-nav-sheet" onClick={(event) => event.stopPropagation()}>
             <div className="mb-4 flex items-center justify-between gap-3">
               <div>
-                <p className="text-xs font-bold uppercase tracking-[0.16em] text-[#64748B]">Меню</p>
-                <h2 className="mt-1 text-lg font-black text-[#0F172A]">Разделы Negis</h2>
+                <p className="text-xs font-semibold uppercase tracking-[0.08em]" style={{ color: "var(--ng-muted)" }}>Меню</p>
+                <h2 className="mt-1 text-lg font-semibold" style={{ color: "var(--ng-text)" }}>Разделы Medina OS</h2>
               </div>
               <button type="button" className="neu-icon-btn" onClick={() => setOpen(false)} aria-label="Закрыть меню">
                 <X size={18} />

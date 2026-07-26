@@ -86,7 +86,7 @@ export function Topbar() {
   const deletedIdsRef = useRef<Set<string>>(new Set());
 
   const cleanLocation = location.split('?')[0];
-  const pageLabel = PAGE_LABELS[cleanLocation] ?? 'NEGIS';
+  const pageLabel = PAGE_LABELS[cleanLocation] ?? 'Medina OS';
   const unread = notifs.filter(n => !n.read).length;
 
   const today = new Date().toLocaleDateString('ru', {
@@ -179,36 +179,16 @@ export function Topbar() {
     <header
       className="negis-topbar grid shrink-0 sticky top-0 z-30 items-center gap-4 px-8"
       style={{
-        background: 'rgba(238, 244, 248, 0.86)',
-        backdropFilter: 'blur(18px)',
-        borderBottom: '1px solid rgba(224, 231, 239, 0.9)',
+        background: 'var(--ng-surface)',
+        borderBottom: '1px solid var(--ng-border)',
       }}
     >
-      <div className="flex min-w-0 items-center gap-2">
-        <span
-          style={{
-            fontSize: 12,
-            fontWeight: 500,
-            letterSpacing: '0.16em',
-            color: '#8EA0B7',
-            fontFamily: "'Inter', sans-serif",
-            userSelect: 'none',
-          }}
-        >
-          NEGIS
+      <div className="flex min-w-0 items-center gap-2 select-none">
+        <span className="text-xs font-semibold tracking-[0.06em]" style={{ color: 'var(--ng-primary)' }}>
+          Medina OS
         </span>
-        <span style={{ color: '#CAD8E5', fontSize: 14 }}>/</span>
-        <span
-          className="truncate"
-          style={{
-            fontSize: 12,
-            fontWeight: 600,
-            letterSpacing: '0.08em',
-            color: '#4F6078',
-            fontFamily: "'Inter', sans-serif",
-            userSelect: 'none',
-          }}
-        >
+        <span aria-hidden style={{ color: 'var(--ng-border)', fontSize: 14 }}>/</span>
+        <span className="truncate text-xs font-semibold tracking-[0.04em]" style={{ color: 'var(--ng-text-2)' }}>
           {pageLabel}
         </span>
       </div>
@@ -240,10 +220,12 @@ export function Topbar() {
         <Popover open={open} onOpenChange={setOpen}>
           <PopoverTrigger asChild>
             <button
+              type="button"
               className="neu-icon-btn relative"
-              style={{ width: 36, height: 36, borderRadius: 12 }}
+              style={{ width: 36, height: 36 }}
+              aria-label={unread > 0 ? `Уведомления, непрочитанных: ${unread}` : 'Уведомления'}
             >
-              <Bell size={16} strokeWidth={1.75} />
+              <Bell size={16} strokeWidth={1.75} aria-hidden />
               {unread > 0 && (
                 <span
                   className="absolute -top-1 -right-1 flex items-center justify-center rounded-full text-white font-bold"
@@ -265,10 +247,10 @@ export function Topbar() {
             className="w-[min(24rem,calc(100vw-24px))] p-0"
             align="end"
             style={{
-              background: 'rgba(255,255,255,0.94)',
-              border: '1px solid #E3EAF2',
-              borderRadius: 18,
-              boxShadow: '0 16px 40px rgba(15,23,42,0.12)',
+              background: '#FFFFFF',
+              border: '1px solid var(--ng-border)',
+              borderRadius: 10,
+              boxShadow: '0 12px 32px rgba(17, 24, 39, 0.14)',
               overflow: 'hidden',
             }}
           >

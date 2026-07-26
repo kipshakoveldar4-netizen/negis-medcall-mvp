@@ -352,11 +352,11 @@ export default function Landing() {
           <div style={circleInner}>
             <span style={{
               fontFamily: "'Inter', system-ui, sans-serif", fontWeight: 500,
-              fontSize: 17, letterSpacing: '0.28em', color: '#475569',
+              fontSize: 15, letterSpacing: '0.18em', color: '#475569',
               textTransform: 'uppercase', userSelect: 'none', position: 'relative',
               textShadow: '0 1px 0 rgba(255,255,255,0.70)',
             }}>
-              NEGIS
+              MEDINA OS
             </span>
           </div>
         </button>
@@ -407,10 +407,10 @@ export default function Landing() {
             {/* Header */}
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 28 }}>
               <div style={{
-                background: '#DDE5EE', borderRadius: 8, padding: '5px 10px',
-                fontSize: 10, fontWeight: 600, letterSpacing: '0.18em', color: '#0B1220',
+                background: '#E4F2EF', borderRadius: 8, padding: '5px 10px',
+                fontSize: 10, fontWeight: 600, letterSpacing: '0.12em', color: '#0F766E',
                 fontFamily: "'Inter', sans-serif", textTransform: 'uppercase',
-              }}>NEGIS</div>
+              }}>MEDINA OS</div>
               <span style={{ fontSize: 12, color: '#94A3B8', letterSpacing: '0.06em', fontFamily: "'Inter', sans-serif" }}>
                 {modalLabel}
               </span>

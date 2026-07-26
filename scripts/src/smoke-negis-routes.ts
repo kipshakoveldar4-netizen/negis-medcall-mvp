@@ -3168,9 +3168,12 @@ async function checkLayoutFoundation() {
     throw new Error("App must keep /dashboard for compatibility");
   }
 
-  // Sidebar reflects the new IA and never links to the retired AI Target module.
+  // Sidebar reflects the Medina OS IA (UI-1) and never links to the retired
+  // AI Target module. The disabled "AI-сотрудники" placeholder was removed by
+  // explicit UI-1 scope; /ai-control-center is now labeled "Главная" and
+  // /clients is labeled "Клиенты".
   const sidebar = await readFile(path.join(layoutDir, "Sidebar.tsx"), "utf8");
-  for (const marker of ["AI Control Center", "Заявки", "CRM", "Записи", "Реклама", "Контент", "Аналитика", "AI-сотрудники", "Настройки"]) {
+  for (const marker of ["Главная", "Заявки", "Клиенты", "Записи", "Продажи", "Реклама", "Контент", "Аналитика", "Настройки"]) {
     if (!sidebar.includes(marker)) {
       throw new Error(`Sidebar is missing IA item "${marker}"`);
     }

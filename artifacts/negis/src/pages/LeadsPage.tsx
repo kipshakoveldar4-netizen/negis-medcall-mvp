@@ -22,6 +22,9 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { PageLayout } from "@/components/layout/PageLayout";
+import { PageHeader } from "@/components/ui/page-header";
+import { MetricCard } from "@/components/ui/metric-card";
+import { EmptyState } from "@/components/ui/empty-state";
 import { useDemoCollection, readDemoStorage, writeDemoStorage, isRealWorkspace } from "@/lib/demoStorage";
 import { apiUrl } from "@/lib/api";
 import {
@@ -139,20 +142,6 @@ function StatusPill({ tone, children }: { tone: "green" | "amber" | "red" | "blu
     slate: "border-slate-200 bg-white/70 text-slate-700",
   };
   return <span className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-black ${palette[tone]}`}>{children}</span>;
-}
-
-function LeadMetricCard({ label, value, icon: Icon, tone }: { label: string; value: number; icon: LucideIcon; tone: NegisTone }) {
-  return (
-    <div className="negis-glass p-4">
-      <div className="flex items-center gap-2.5">
-        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl" style={{ background: negisToneSoftBg(tone), color: negisToneColor(tone) }}>
-          <Icon size={16} />
-        </div>
-        <p className="text-xs font-black leading-tight" style={{ color: "var(--negis-muted)" }}>{label}</p>
-      </div>
-      <p className="mt-2 text-2xl font-black" style={{ color: "var(--negis-text)" }}>{value}</p>
-    </div>
-  );
 }
 
 function Fact({ label, value }: { label: string; value: ReactNode }) {
@@ -593,9 +582,9 @@ export default function LeadsPage() {
     return counts;
   }, [items]);
 
-  const summaryMetrics: Array<{ label: string; value: number; icon: LucideIcon; tone: NegisTone }> = [
+  const summaryMetrics: Array<{ label: string; value: number; icon: LucideIcon; tone: "primary" | "info" | "success" | "warning" | "error" | "muted" }> = [
     { label: "Всего заявок", value: items.length, icon: Inbox, tone: "primary" },
-    { label: "Новые", value: metrics.new, icon: Sparkles, tone: "secondary" },
+    { label: "Новые", value: metrics.new, icon: Sparkles, tone: "info" },
     { label: "В работе", value: metrics.in_progress, icon: ClipboardList, tone: "warning" },
     { label: "Записаны", value: metrics.booked, icon: CheckCircle2, tone: "success" },
     { label: "Потеряны", value: metrics.lost, icon: XCircle, tone: metrics.lost > 0 ? "error" : "muted" },
@@ -837,23 +826,20 @@ export default function LeadsPage() {
     <PageLayout>
       <div className="mx-auto max-w-[1440px] space-y-5 px-4 py-5 sm:px-6 lg:px-8">
         {/* Header */}
-        <header className="negis-glass-hero p-5 sm:p-6">
-          <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
-            <div>
-              <p className="text-xs font-black uppercase tracking-[0.18em]" style={{ color: "var(--negis-primary)" }}>Negis OS · CRM</p>
-              <h1 className="mt-2 text-3xl font-black sm:text-4xl" style={{ color: "var(--negis-text)" }}>Заявки</h1>
-              <p className="mt-3 max-w-3xl text-sm leading-relaxed" style={{ color: "var(--negis-muted)" }}>
-                Новые обращения из рекламы, сайта, WhatsApp и других источников.
-              </p>
-            </div>
-            <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap xl:justify-end">
-              <div className="inline-flex rounded-2xl border p-1" style={{ borderColor: "var(--negis-border)", background: "var(--negis-surface)" }}>
+        <PageHeader
+          kicker="Medina OS · CRM"
+          title="Заявки"
+          description="Новые обращения из рекламы, сайта, WhatsApp и других источников."
+          actions={
+            <>
+              <div className="inline-flex rounded-lg border p-0.5" style={{ borderColor: "var(--negis-border)", background: "var(--negis-surface)" }} role="group" aria-label="Режим интерфейса">
                 {([false, true] as const).map((admin) => (
                   <button
                     key={admin ? "admin" : "client"}
                     type="button"
-                    className="rounded-xl px-3 py-2 text-xs font-black transition"
+                    className="rounded-md px-3 py-1.5 text-xs font-semibold transition"
                     style={isAdminMode === admin ? { background: "var(--negis-primary)", color: "#FFFFFF" } : { color: "var(--negis-muted)" }}
+                    aria-pressed={isAdminMode === admin}
                     onClick={() => setMode(admin)}
                   >
                     {admin ? "Админ режим" : "Клиентский режим"}
@@ -861,40 +847,40 @@ export default function LeadsPage() {
                 ))}
               </div>
               <button type="button" className="neu-btn-primary justify-center" onClick={openAdd}>
-                <Plus size={16} />
+                <Plus size={16} aria-hidden />
                 Добавить заявку
               </button>
-            </div>
-          </div>
-        </header>
+            </>
+          }
+        />
 
         {/* Summary metrics */}
         <section className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5" aria-label="Сводка по заявкам">
           {summaryMetrics.map((metric) => (
-            <LeadMetricCard key={metric.label} label={metric.label} value={metric.value} icon={metric.icon} tone={metric.tone} />
+            <MetricCard key={metric.label} label={metric.label} value={metric.value} icon={metric.icon} tone={metric.tone} loading={!loaded} />
           ))}
         </section>
 
         {/* CRM8: attribution counts in a compact strip — mobile stays uncluttered. */}
         <section className="negis-glass flex flex-wrap items-center gap-x-6 gap-y-1.5 p-4 text-sm" aria-label="Атрибуция рекламы">
-          <p className="font-semibold" style={{ color: "var(--negis-muted)" }}>
-            Связаны с рекламой: <span className="font-black" style={{ color: "var(--negis-text)" }}>{attributionCounts.attributed}</span>
+          <p className="font-medium" style={{ color: "var(--negis-muted)" }}>
+            Связаны с рекламой: <span className="font-semibold tabular-nums" style={{ color: "var(--negis-text)" }}>{attributionCounts.attributed}</span>
           </p>
-          <p className="font-semibold" style={{ color: "var(--negis-muted)" }}>
-            Без рекламной кампании: <span className="font-black" style={{ color: "var(--negis-text)" }}>{attributionCounts.unattributed}</span>
+          <p className="font-medium" style={{ color: "var(--negis-muted)" }}>
+            Без рекламной кампании: <span className="font-semibold tabular-nums" style={{ color: "var(--negis-text)" }}>{attributionCounts.unattributed}</span>
           </p>
         </section>
 
         {/* Filters + search */}
         <section className="negis-glass p-4 sm:p-5">
-          <div className="flex flex-wrap gap-2" aria-label="Фильтры заявок">
+          <div className="flex flex-wrap gap-2" role="group" aria-label="Фильтры заявок">
             {filterOptions.map((option) => {
               const active = filter === option.id;
               return (
                 <button
                   key={option.id}
                   type="button"
-                  className="rounded-full border px-4 py-2 text-xs font-black transition"
+                  className="rounded-full border px-3.5 py-1.5 text-xs font-semibold transition"
                   style={
                     active
                       ? { background: "var(--negis-primary)", borderColor: "var(--negis-primary)", color: "#FFFFFF" }
@@ -909,18 +895,18 @@ export default function LeadsPage() {
             })}
           </div>
           {/* CRM8: secondary attribution filter (independent of stage filter). */}
-          <div className="mt-3 flex flex-wrap items-center gap-2" aria-label="Фильтр по рекламе">
-            <span className="text-xs font-black uppercase tracking-[0.05em]" style={{ color: "var(--negis-muted)" }}>Реклама:</span>
+          <div className="mt-3 flex flex-wrap items-center gap-2" role="group" aria-label="Фильтр по рекламе">
+            <span className="text-xs font-semibold uppercase tracking-[0.05em]" style={{ color: "var(--negis-muted)" }}>Реклама:</span>
             {attributionFilterOptions.map((option) => {
               const active = attributionFilter === option.id;
               return (
                 <button
                   key={option.id}
                   type="button"
-                  className="rounded-full border px-3 py-1.5 text-xs font-black transition"
+                  className="rounded-full border px-3 py-1.5 text-xs font-semibold transition"
                   style={
                     active
-                      ? { background: "var(--negis-ai)", borderColor: "var(--negis-ai)", color: "#FFFFFF" }
+                      ? { background: "var(--negis-primary)", borderColor: "var(--negis-primary)", color: "#FFFFFF" }
                       : { background: "var(--negis-surface)", borderColor: "var(--negis-border)", color: "var(--negis-muted)" }
                   }
                   aria-pressed={active}
@@ -951,34 +937,35 @@ export default function LeadsPage() {
             <p className="text-sm font-bold" style={{ color: "var(--negis-muted)" }}>Загружаем данные…</p>
           </section>
         ) : items.length === 0 ? (
-          <section className="negis-glass-hero flex flex-col items-center gap-3 p-8 text-center">
-            <div className="flex h-14 w-14 items-center justify-center rounded-2xl" style={{ background: "var(--negis-primary-soft)", color: "var(--negis-primary)" }}>
-              <Inbox size={24} />
-            </div>
-            <h2 className="text-xl font-black" style={{ color: "var(--negis-text)" }}>Заявок пока нет</h2>
-            <p className="max-w-md text-sm font-semibold leading-relaxed" style={{ color: "var(--negis-muted)" }}>
-              Когда клиника начнёт получать обращения из рекламы, сайта или WhatsApp, они появятся здесь.
-            </p>
-            <button type="button" className="neu-btn-primary justify-center" onClick={openAdd}>
-              <Plus size={16} />
-              Добавить заявку
-            </button>
-          </section>
+          <EmptyState
+            icon={Inbox}
+            title="Заявок пока нет"
+            description="Когда клиника начнёт получать обращения из рекламы, сайта или WhatsApp, они появятся здесь."
+            action={
+              <button type="button" className="neu-btn-primary justify-center" onClick={openAdd}>
+                <Plus size={16} aria-hidden />
+                Добавить заявку
+              </button>
+            }
+          />
         ) : visibleLeads.length === 0 ? (
-          <section className="negis-glass flex flex-col items-center gap-3 p-6 text-center">
-            <p className="text-sm font-semibold" style={{ color: "var(--negis-muted)" }}>Ничего не найдено. Измените фильтр или поисковый запрос.</p>
-            <button
-              type="button"
-              className="neu-btn justify-center"
-              onClick={() => {
-                setFilter("all");
-                setAttributionFilter("all");
-                setSearch("");
-              }}
-            >
-              Сбросить фильтры
-            </button>
-          </section>
+          <EmptyState
+            title="Ничего не найдено"
+            description="Ничего не найдено. Измените фильтр или поисковый запрос."
+            action={
+              <button
+                type="button"
+                className="neu-btn justify-center"
+                onClick={() => {
+                  setFilter("all");
+                  setAttributionFilter("all");
+                  setSearch("");
+                }}
+              >
+                Сбросить фильтры
+              </button>
+            }
+          />
         ) : (
           <section className="space-y-3">
             {visibleLeads.map((lead) => {

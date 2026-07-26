@@ -148,7 +148,7 @@ export default function Login() {
                   <ShieldCheck size={14} />
                   Staff access
                 </div>
-                <h1 className="max-w-md text-4xl font-black leading-tight">Negis OS для сотрудников клиники</h1>
+                <h1 className="max-w-md text-3xl font-semibold leading-tight">Medina OS для сотрудников клиники</h1>
                 <p className="mt-4 max-w-md text-sm leading-6 text-white/70">
                   Войдите по email и временному паролю, который выдал администратор. После входа откроется рабочий dashboard.
                 </p>
@@ -160,7 +160,7 @@ export default function Login() {
           <div className="p-7 sm:p-10">
             <div className="mb-8">
               <Link href="/">
-                <span className="text-xs font-bold uppercase tracking-[0.16em] text-[#64748B]">NEGIS</span>
+                <span className="text-xs font-semibold uppercase tracking-[0.08em]" style={{ color: "var(--ng-primary)" }}>Medina OS</span>
               </Link>
               <h2 className="mt-5 text-2xl font-black text-[#0F172A]">Вход сотрудника</h2>
               <p className="mt-2 text-sm leading-6 text-[#64748B]">
