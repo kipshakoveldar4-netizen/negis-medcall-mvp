@@ -129,9 +129,12 @@ export default function Agent() {
   const weeklyTarget = agentInfo?.weekly_target ?? 20;
   const weekPct      = Math.min(Math.round((weeklyBookings / weeklyTarget) * 100), 100);
 
+  /* Every state of this route carries the page heading: without it these
+     branches rendered no h1 at all. */
   if (loading) {
     return (
       <PageLayout>
+        <h1 className="sr-only">Рабочее место</h1>
         <div className="flex items-center justify-center h-64 text-[#94A3B8]">Загрузка...</div>
       </PageLayout>
     );
@@ -140,8 +143,11 @@ export default function Agent() {
   if (!agentInfo) {
     return (
       <PageLayout>
-        <div className="flex items-center justify-center h-64 text-[#94A3B8] text-center">
-          Профиль агента не найден.<br />Обратитесь к администратору.
+        <div className="flex h-64 flex-col items-center justify-center text-center">
+          <h1 className="text-lg font-semibold" style={{ color: 'var(--ng-text)' }}>Рабочее место</h1>
+          <p className="mt-2 text-sm" style={{ color: 'var(--ng-muted)' }}>
+            Профиль агента не найден. Обратитесь к администратору.
+          </p>
         </div>
       </PageLayout>
     );
@@ -152,7 +158,9 @@ export default function Agent() {
       <div className="max-w-4xl mx-auto space-y-6">
         <div className="flex flex-col md:flex-row justify-between items-center gap-4 bg-[#E8EDF2] border-b border-border pb-6">
           <div>
-            <h2 className="text-3xl font-extrabold text-[#1E293B]">Рабочее место</h2>
+            {/* Page title is h1: this page does not use PageHeader, and it was
+                the only inspected route rendering no h1 at all. */}
+            <h1 className="text-3xl font-extrabold text-[#1E293B]">Рабочее место</h1>
             <p className="text-[#64748B] font-medium mt-1">{agentInfo.name} • Оператор</p>
           </div>
           <div className="neu-sm px-6 py-3 flex flex-col items-end">

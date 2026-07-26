@@ -2,7 +2,7 @@
   "name": "Medina OS — медицинская CRM",
   "short_name": "Medina OS",
   "description": "Операционная CRM-платформа для медицинских клиник: заявки, записи, клиенты, продажи и реклама.",
-  "start_url": "/dashboard",
+  "start_url": "/ai-control-center",
   "display": "standalone",
   "background_color": "#F4F6F5",
   "theme_color": "#0F766E",

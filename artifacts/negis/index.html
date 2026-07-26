@@ -1,8 +1,9 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="ru">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1" />
+    <!-- No maximum-scale: pinch-zoom must stay available (WCAG 1.4.4). -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Medina OS — медицинская CRM для клиник</title>
     <meta name="description" content="Medina OS — операционная CRM-платформа для медицинских клиник: заявки, записи, клиенты, продажи и реклама." />
     <meta name="theme-color" content="#0F766E" />
@@ -13,27 +14,24 @@
     <meta property="og:title" content="Medina OS — медицинская CRM для клиник" />
     <meta property="og:description" content="Medina OS — операционная CRM-платформа для медицинских клиник: заявки, записи, клиенты, продажи и реклама." />
     <meta property="og:type" content="website" />
+    <meta property="og:locale" content="ru_RU" />
+    <meta property="og:image" content="/opengraph.jpg" />
+    <meta property="og:image:width" content="1280" />
+    <meta property="og:image:height" content="720" />
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:title" content="Medina OS — медицинская CRM для клиник" />
     <meta name="twitter:description" content="Medina OS — операционная CRM-платформа для медицинских клиник: заявки, записи, клиенты, продажи и реклама." />
+    <meta name="twitter:image" content="/opengraph.jpg" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg?v=3" />
     <link rel="shortcut icon" href="/favicon.svg?v=3" />
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <!-- Facebook Pixel Code -->
-    <script>
-      !function(f,b,e,v,n,t,s)
-      {if(f.fbq)return;n=f.fbq=function(){n.callMethod?
-      n.callMethod.apply(n,arguments):n.queue.push(arguments)};
-      if(!f._fbq)f._fbq=n;n.push=n;n.loaded=!0;n.version='2.0';
-      n.queue=[];t=b.createElement(e);t.async=!0;
-      t.src=v;s=b.getElementsByTagName(e)[0];
-      s.parentNode.insertBefore(t,s)}(window, document,'script',
-      'https://connect.facebook.net/en_US/fbevents.js');
-    </script>
-    <!-- End Facebook Pixel Code -->
+    <!-- Facebook Pixel loads lazily from src/lib/fbpixel.ts, and only for
+         clinics that actually have a pixel id configured. Shipping the base
+         script to every visitor here sent data to a third party before any
+         consent and cost ~100 KB on the landing page. -->
   </head>
   <body>
     <div id="root"></div>

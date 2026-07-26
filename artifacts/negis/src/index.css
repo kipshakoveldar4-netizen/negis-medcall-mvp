@@ -1,4 +1,5 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+/* Inter is loaded once, via <link> in index.html — a second @import here
+   double-fetched the family and delayed first paint. */
 @import "tailwindcss";
 @import "tw-animate-css";
 @plugin "@tailwindcss/typography";
@@ -127,13 +128,9 @@
   --radius: 0.5rem;
 }
 
-.dark {
-  --background: 216 40% 96%;
-  --foreground: 222 62% 10%;
-  --border: 214 30% 90%;
-  --card: 0 0% 100%;
-  --card-foreground: 222 62% 10%;
-}
+/* The former `.dark` block set LIGHT values (background 96% lightness), so a
+   dark theme never actually existed. Removed until a real dark palette is
+   designed — an honest absence beats a broken toggle. */
 
 @layer base {
   * {
@@ -410,130 +407,8 @@
   .badge-error   { color: #B91C1C; background: #FEF2F2; }
   .badge-muted   { color: var(--ng-muted); background: #F3F4F6; }
 
-  .soft-dock {
-    background: var(--ng-surface);
-    border-bottom: 1px solid var(--ng-border);
-    overflow: visible;
-  }
-
-  .topnav-scroll {
-    scrollbar-width: thin;
-    scrollbar-color: rgba(142, 160, 183, 0.35) transparent;
-    overflow-y: visible;
-    max-width: min(66vw, 920px);
-    padding-top: 16px;
-    padding-bottom: 10px;
-  }
-
-  .dock-shell {
-    overflow: visible;
-    align-items: flex-end;
-    min-height: 52px;
-  }
-
-  .topnav-scroll::-webkit-scrollbar {
-    height: 8px;
-  }
-
-  .topnav-scroll::-webkit-scrollbar-track {
-    background: transparent;
-  }
-
-  .topnav-scroll::-webkit-scrollbar-thumb {
-    background: rgba(142, 160, 183, 0.28);
-    border-radius: 999px;
-  }
-
-  .topnav-item {
-    height: 58px;
-    min-width: 78px;
-    padding: 7px 10px 6px;
-    border-radius: 22px;
-    display: inline-flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 5px;
-    color: var(--ng-muted);
-    font-size: 11px;
-    font-weight: 700;
-    white-space: nowrap;
-    cursor: pointer;
-    transform-origin: bottom center;
-    transition: transform 0.24s cubic-bezier(.2,.8,.2,1), box-shadow 0.2s ease, background 0.2s ease, color 0.2s ease;
-  }
-
-  .topnav-item:hover {
-    color: var(--ng-primary);
-    background: var(--ng-surface-2);
-  }
-
-  .topnav-item.is-active {
-    color: var(--ng-primary);
-    background: var(--negis-primary-soft);
-  }
-
-  .topnav-profile-item {
-    background: var(--ng-surface-2);
-  }
-
-  .topnav-profile-avatar {
-    width: 34px;
-    height: 34px;
-    min-width: 34px;
-    aspect-ratio: 1 / 1;
-    border-radius: 999px;
-    font-size: 10px;
-    box-shadow: none;
-  }
-
-  .topnav-profile-item:hover .topnav-profile-avatar {
-    transform: none;
-  }
-
-  @media (max-width: 1180px) {
-    .topnav-scroll {
-      max-width: min(58vw, 760px);
-    }
-    .topnav-item {
-      min-width: 70px;
-      font-size: 10px;
-    }
-  }
-
-  .soft-avatar,
-  .soft-icon-btn {
-    width: 42px;
-    height: 42px;
-    min-width: 42px;
-    aspect-ratio: 1 / 1;
-    border-radius: 8px;
-    border: 1px solid var(--ng-border);
-    background: var(--ng-surface);
-    color: var(--ng-primary);
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    font-weight: 700;
-    font-size: 12px;
-    letter-spacing: 0.04em;
-    cursor: pointer;
-    box-shadow: 0 1px 2px rgba(17, 24, 39, 0.05);
-    transition: background 0.15s ease, border-color 0.15s ease;
-  }
-
-  .soft-avatar img {
-    display: block;
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-  }
-
-  .soft-avatar:hover,
-  .soft-icon-btn:hover {
-    background: var(--ng-surface-2);
-    border-color: #CBD5D1;
-  }
+  /* .soft-dock / .topnav-* / .soft-avatar / .soft-icon-btn removed together
+     with TopNav — the component was never visible at any viewport width. */
 
   .soft-modal {
     border-radius: 12px;
@@ -573,9 +448,16 @@
     padding: 24px clamp(18px, 3vw, 40px) 40px;
   }
 
+  /* Header renders at every width now — it hosts the notification bell. */
   .negis-topbar {
-    grid-template-columns: minmax(150px, 1fr) minmax(0, auto) minmax(190px, 1fr);
-    min-height: 98px;
+    min-height: 56px;
+  }
+
+  /* Compact on desktop, full touch target where touch is likely. */
+  .negis-bell {
+    width: 36px;
+    height: 36px;
+    min-height: 36px;
   }
 
   .neu-card,
@@ -585,22 +467,31 @@
     overflow-wrap: anywhere;
   }
 
-  .neu-btn,
-  .neu-btn-primary,
-  .neu-btn-success,
-  .neu-btn-danger,
-  .neu-icon-btn,
-  .soft-icon-btn,
-  button {
-    min-height: 44px;
-  }
+  /* Touch-target sizing is applied only where touch is likely: forcing a
+     44px minimum on every <button> globally destroyed desktop density. */
+  @media (max-width: 767px), (pointer: coarse) {
+    .neu-btn,
+    .neu-btn-primary,
+    .neu-btn-success,
+    .neu-btn-danger,
+    .neu-icon-btn,
+    button {
+      min-height: 44px;
+    }
 
-  .neu-btn,
-  .neu-btn-primary,
-  .neu-btn-success,
-  .neu-btn-danger {
-    white-space: normal;
-    text-align: center;
+    .negis-bell {
+      width: 44px;
+      height: 44px;
+      min-height: 44px;
+    }
+
+    .neu-btn,
+    .neu-btn-primary,
+    .neu-btn-success,
+    .neu-btn-danger {
+      white-space: normal;
+      text-align: center;
+    }
   }
 
   .mobile-bottom-nav {
@@ -705,15 +596,10 @@
     }
 
     .negis-topbar {
-      grid-template-columns: minmax(0, 1fr) auto;
-      min-height: 66px;
+      min-height: 60px;
       padding-left: 16px;
       padding-right: 16px;
       gap: 10px;
-    }
-
-    .negis-topbar-nav {
-      display: none;
     }
 
     .negis-topbar-date {
@@ -755,10 +641,6 @@
       font-size: 16px;
     }
 
-    .topnav-shell {
-      display: none;
-    }
-
     .soft-modal {
       left: 12px !important;
       right: 12px !important;
@@ -777,5 +659,20 @@
     .mobile-nav-backdrop {
       display: none;
     }
+  }
+}
+
+/* Unlayered on purpose: unlayered rules outrank @layer ones, so this wins over
+   Tailwind's animation utilities. The header's live-status dot animates
+   continuously and now renders at every viewport width, so honouring the
+   reduced-motion preference is no longer optional. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }

@@ -1765,7 +1765,7 @@ async function checkLeadsPageSource() {
 
   // Route wiring: /leads uses the real LeadsPage, not the demo module.
   const app = await readFile(path.join(repoRoot, "artifacts", "negis", "src", "App.tsx"), "utf8");
-  if (!app.includes('import LeadsPage from "@/pages/LeadsPage"')) {
+  if (!app.includes('const LeadsPage = lazy(() => import("@/pages/LeadsPage"))')) {
     throw new Error("App must import the real LeadsPage");
   }
   if (!app.includes("<ProtectedPage component={LeadsPage} permission=\"crm\" />")) {
@@ -1846,7 +1846,7 @@ async function checkClientsPageSource() {
 
   // Route wiring: /clients uses the real ClientsPage, not the demo module.
   const app = await readFile(path.join(repoRoot, "artifacts", "negis", "src", "App.tsx"), "utf8");
-  if (!app.includes('import ClientsPage from "@/pages/ClientsPage"')) {
+  if (!app.includes('const ClientsPage = lazy(() => import("@/pages/ClientsPage"))')) {
     throw new Error("App must import the real ClientsPage");
   }
   if (!app.includes('path="/clients" component={() => <ProtectedPage component={ClientsPage}')) {
@@ -1943,7 +1943,7 @@ async function checkSalesPageSource() {
   }
 
   const app = await readFile(path.join(negisSrc, "App.tsx"), "utf8");
-  if (!app.includes('import SalesPage from "@/pages/SalesPage"')) {
+  if (!app.includes('const SalesPage = lazy(() => import("@/pages/SalesPage"))')) {
     throw new Error("App must import the real SalesPage");
   }
   if (!app.includes('path="/sales" component={() => <ProtectedPage component={SalesPage} permission="crm" />}')) {
@@ -1953,11 +1953,12 @@ async function checkSalesPageSource() {
     throw new Error("App must no longer route /sales to DemoClients");
   }
 
+  // TopNav was removed: it was mounted only under md:hidden while its root
+  // class was display:none below 768px, so it was never visible anywhere.
   const sidebar = await readFile(path.join(negisSrc, "components", "layout", "Sidebar.tsx"), "utf8");
-  const topNav = await readFile(path.join(negisSrc, "components", "layout", "TopNav.tsx"), "utf8");
   const mobileNav = await readFile(path.join(negisSrc, "components", "layout", "MobileNav.tsx"), "utf8");
   const topbar = await readFile(path.join(negisSrc, "components", "layout", "Topbar.tsx"), "utf8");
-  for (const [name, navSource] of [["Sidebar", sidebar], ["TopNav", topNav], ["MobileNav", mobileNav], ["Topbar", topbar]] as const) {
+  for (const [name, navSource] of [["Sidebar", sidebar], ["MobileNav", mobileNav], ["Topbar", topbar]] as const) {
     if (!navSource.includes("/sales") || !navSource.includes("Продажи")) {
       throw new Error(`${name} must expose the Sales page with a friendly label`);
     }
@@ -3275,7 +3276,6 @@ async function checkNavigationCleanup() {
   for (const [name, file] of [
     ["Sidebar", path.join(layoutDir, "Sidebar.tsx")],
     ["MobileNav", path.join(layoutDir, "MobileNav.tsx")],
-    ["TopNav", path.join(layoutDir, "TopNav.tsx")],
     ["Topbar", path.join(layoutDir, "Topbar.tsx")],
     ["Dashboard", path.join(pagesDir, "Dashboard.tsx")],
   ] as const) {

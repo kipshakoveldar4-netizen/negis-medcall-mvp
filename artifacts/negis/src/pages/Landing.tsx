@@ -350,14 +350,16 @@ export default function Landing() {
           }}
         >
           <div style={circleInner}>
-            <span style={{
+            {/* h1: the page's only heading — without it the landing had no
+                heading structure at all for crawlers and screen readers. */}
+            <h1 style={{
               fontFamily: "'Inter', system-ui, sans-serif", fontWeight: 500,
               fontSize: 15, letterSpacing: '0.18em', color: '#475569',
               textTransform: 'uppercase', userSelect: 'none', position: 'relative',
-              textShadow: '0 1px 0 rgba(255,255,255,0.70)',
+              textShadow: '0 1px 0 rgba(255,255,255,0.70)', margin: 0,
             }}>
               MEDINA OS
-            </span>
+            </h1>
           </div>
         </button>
 

@@ -9,6 +9,9 @@ import { toast } from 'sonner';
 // exist; role arrays are unchanged from the previous IA. The former disabled
 // "AI-сотрудники" item was removed — future modules are documented in the audit,
 // not rendered as dead navigation.
+// NOTE: this is one of the two navigation surfaces (the other is MobileNav).
+// Keep their route sets in sync — smoke-negis-routes.ts and
+// medina-commercial.test.ts assert on both files.
 type NavItem = { href: string; icon: LucideIcon; label: string; roles: string[] };
 type NavGroup = { title: string; items: NavItem[] };
 

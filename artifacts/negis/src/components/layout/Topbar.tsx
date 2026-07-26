@@ -5,32 +5,33 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/contexts/AuthContext';
 import { agentDisplayName, loadAgentRoleMaps, type AgentDisplayInfo } from '@/lib/agentDisplay';
-import { TopNav } from './TopNav';
 
 const PAGE_LABELS: Record<string, string> = {
-  '/ai-control-center': 'AI Control Center',
-  '/content-studio': 'AI Контент-студия',
-  '/ai-content-studio': 'AI Контент-студия',
-  '/content': 'AI Контент-студия',
-  '/studio': 'AI Контент-студия',
+  '/ai-control-center': 'Главная',
+  '/content-studio': 'Контент',
+  '/ai-content-studio': 'Контент',
+  '/content': 'Контент',
+  '/studio': 'Контент',
   '/appointments': 'Записи',
   '/calls': 'Звонки',
-  '/leads': 'Лиды',
+  '/leads': 'Заявки',
   '/clients': 'Клиенты',
   '/market': 'Маркет',
   '/advertising': 'Реклама',
   '/reports': 'Отчёты',
   '/profile': 'Профиль',
-  '/dashboard': 'Дашборд',
-  '/booking': 'Запись',
+  '/dashboard': 'Аналитика',
+  '/booking': 'Записи',
   '/reception': 'Ресепшн',
   '/sales': 'Продажи',
   '/tasks': 'Задачи',
   '/chat': 'Чат',
   '/marketplace': 'Маркетплейс',
   '/ads': 'Реклама',
-  '/agent': 'Агент',
-  '/admin': 'Админ',
+  '/ads-automation': 'Реклама',
+  '/ads-automation/history': 'История запусков',
+  '/agent': 'Моя смена',
+  '/admin': 'Настройки',
 };
 
 interface Notif {
@@ -43,9 +44,24 @@ interface Notif {
   read: boolean;
 }
 
-function playBeep() {
+/* Autoplay policy: an AudioContext created outside a user gesture stays
+   suspended and the beep never sounds. We create it once, on the first
+   pointer/key interaction, and reuse it for every notification after that. */
+let sharedAudioCtx: AudioContext | null = null;
+
+function unlockAudio() {
   try {
-    const ctx = new AudioContext();
+    if (!sharedAudioCtx) sharedAudioCtx = new AudioContext();
+    if (sharedAudioCtx.state === 'suspended') void sharedAudioCtx.resume();
+  } catch {
+    // AudioContext not available
+  }
+}
+
+function playBeep() {
+  const ctx = sharedAudioCtx;
+  if (!ctx || ctx.state !== 'running') return; // no gesture yet — skip silently
+  try {
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
     osc.connect(gain);
@@ -55,9 +71,8 @@ function playBeep() {
     gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.15);
     osc.start(ctx.currentTime);
     osc.stop(ctx.currentTime + 0.15);
-    osc.onended = () => ctx.close();
   } catch {
-    // AudioContext not available
+    // ignore playback errors
   }
 }
 
@@ -74,6 +89,12 @@ function readStoredIds(key: string) {
 
 function writeStoredIds(key: string, ids: Set<string>) {
   localStorage.setItem(key, JSON.stringify(Array.from(ids)));
+}
+
+/* Keep stored id sets bounded: drop ids that no longer correspond to a
+   fetched booking, otherwise the lists grow forever. */
+function pruneStoredIds(ids: Set<string>, currentIds: Set<string>) {
+  return new Set(Array.from(ids).filter((id) => currentIds.has(id)));
 }
 
 export function Topbar() {
@@ -108,6 +129,16 @@ export function Topbar() {
     read: readIdsRef.current.has(r.id),
   }), []);
 
+  // Unlock the shared AudioContext on the first real user interaction.
+  useEffect(() => {
+    window.addEventListener('pointerdown', unlockAudio, { once: true });
+    window.addEventListener('keydown', unlockAudio, { once: true });
+    return () => {
+      window.removeEventListener('pointerdown', unlockAudio);
+      window.removeEventListener('keydown', unlockAudio);
+    };
+  }, []);
+
   useEffect(() => {
     if (isDemoMode) {
       setNotifs([]);
@@ -131,7 +162,15 @@ export function Topbar() {
       const agentRows = (agentsData ?? []) as AgentDisplayInfo[];
       const maps = await loadAgentRoleMaps(supabase, clinicId, agentRows);
       agentsRef.current = Object.fromEntries(agentRows.map(a => [a.id, agentDisplayName(a, maps.customRoleMap, maps.userRoleMap)]));
-      setNotifs((bookings ?? [])
+
+      const rows = bookings ?? [];
+      const currentIds = new Set(rows.map(row => row.id));
+      readIdsRef.current = pruneStoredIds(readIdsRef.current, currentIds);
+      deletedIdsRef.current = pruneStoredIds(deletedIdsRef.current, currentIds);
+      writeStoredIds(readKey(clinicId), readIdsRef.current);
+      writeStoredIds(deletedKey(clinicId), deletedIdsRef.current);
+
+      setNotifs(rows
         .filter(row => !deletedIdsRef.current.has(row.id))
         .map(buildNotif));
     };
@@ -177,7 +216,7 @@ export function Topbar() {
 
   return (
     <header
-      className="negis-topbar grid shrink-0 sticky top-0 z-30 items-center gap-4 px-8"
+      className="negis-topbar sticky top-0 z-30 flex shrink-0 items-center gap-4 px-5 md:px-8"
       style={{
         background: 'var(--ng-surface)',
         borderBottom: '1px solid var(--ng-border)',
@@ -193,17 +232,12 @@ export function Topbar() {
         </span>
       </div>
 
-      <div className="negis-topbar-nav min-w-0 justify-self-center">
-        <TopNav />
-      </div>
-
-      <div className="negis-topbar-actions flex min-w-0 items-center justify-end gap-4">
+      <div className="negis-topbar-actions ml-auto flex min-w-0 items-center justify-end gap-4">
         <span
           className="negis-topbar-date"
           style={{
             fontSize: 12,
-            color: '#94A3B8',
-            fontFamily: "'Inter', sans-serif",
+            color: 'var(--ng-muted)',
             letterSpacing: '0.01em',
             display: 'flex',
             alignItems: 'center',
@@ -221,8 +255,7 @@ export function Topbar() {
           <PopoverTrigger asChild>
             <button
               type="button"
-              className="neu-icon-btn relative"
-              style={{ width: 36, height: 36 }}
+              className="neu-icon-btn negis-bell relative"
               aria-label={unread > 0 ? `Уведомления, непрочитанных: ${unread}` : 'Уведомления'}
             >
               <Bell size={16} strokeWidth={1.75} aria-hidden />
@@ -235,7 +268,6 @@ export function Topbar() {
                     minWidth: 16,
                     height: 16,
                     padding: '0 4px',
-                    fontFamily: "'Inter', sans-serif",
                   }}
                 >
                   {unread > 9 ? '9+' : unread}
@@ -256,51 +288,60 @@ export function Topbar() {
           >
             <div
               className="px-5 py-4 font-semibold text-sm flex items-center justify-between"
-              style={{ borderBottom: '1px solid #E7ECF3', color: '#0B1220', letterSpacing: '0.01em' }}
+              style={{ borderBottom: '1px solid var(--ng-border)', color: 'var(--ng-text)', letterSpacing: '0.01em' }}
             >
               <span>Уведомления</span>
               {notifs.length > 0 && (
-                <span style={{ fontSize: 11, color: '#94A3B8', fontWeight: 400 }}>
+                <span style={{ fontSize: 11, color: 'var(--ng-muted)', fontWeight: 400 }}>
                   {unread} непрочитанных
                 </span>
               )}
             </div>
             <div className="max-h-80 overflow-y-auto">
               {notifs.length === 0 ? (
-                <div className="px-5 py-8 text-center" style={{ color: '#94A3B8', fontSize: 13 }}>
+                <div className="px-5 py-8 text-center" style={{ color: 'var(--ng-muted)', fontSize: 13 }}>
                   Нет уведомлений
                 </div>
               ) : notifs.map(n => (
                 <div
                   key={n.id}
-                  className="px-5 py-4 transition-colors"
+                  role="button"
+                  tabIndex={0}
+                  aria-label={`Открыть запись: ${n.clientName}, ${fmtDate(n.date)} в ${n.time}`}
+                  className="px-5 py-4 transition-colors focus-visible:outline-2"
                   style={{
-                    borderBottom: '1px solid #F1F5F9',
-                    background: n.read ? 'transparent' : '#F0F6FF',
+                    borderBottom: '1px solid var(--ng-plate)',
+                    background: n.read ? 'transparent' : 'var(--negis-primary-soft)',
                     cursor: 'pointer',
                   }}
                   onClick={() => openEvent(n)}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      openEvent(n);
+                    }
+                  }}
                 >
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
-                      <p className="text-sm font-semibold" style={{ color: '#0B1220' }}>
+                      <p className="text-sm font-semibold" style={{ color: 'var(--ng-text)' }}>
                         Новая запись — {n.clientName}
                       </p>
-                      <p className="text-xs mt-1" style={{ color: '#64748B' }}>
+                      <p className="text-xs mt-1" style={{ color: 'var(--ng-muted)' }}>
                         {fmtDate(n.date)} в {n.time}
                         {n.agentName !== '—' && <> · {n.agentName}</>}
                       </p>
-                      <p className="text-xs mt-0.5" style={{ color: '#CBD5E1' }}>
+                      <p className="text-xs mt-0.5" style={{ color: 'var(--ng-border)' }}>
                         {new Date(n.createdAt).toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}
                       </p>
                     </div>
-                    {!n.read && <span className="mt-1 h-2 w-2 shrink-0 rounded-full bg-[#0D9488]" />}
+                    {!n.read && <span className="mt-1 h-2 w-2 shrink-0 rounded-full" style={{ background: 'var(--ng-primary)' }} />}
                   </div>
                   <div className="mt-3 flex gap-2">
                     <button
                       type="button"
                       className="neu-btn"
-                      style={{ padding: '6px 10px', borderRadius: 12, fontSize: 12 }}
+                      style={{ padding: '6px 10px', borderRadius: 8, fontSize: 12, minHeight: 32 }}
                       onClick={e => {
                         e.stopPropagation();
                         markRead(n.id);
@@ -312,7 +353,7 @@ export function Topbar() {
                     <button
                       type="button"
                       className="neu-btn"
-                      style={{ padding: '6px 10px', borderRadius: 12, fontSize: 12, color: '#DC2626' }}
+                      style={{ padding: '6px 10px', borderRadius: 8, fontSize: 12, minHeight: 32, color: 'var(--ng-error)' }}
                       onClick={e => {
                         e.stopPropagation();
                         deleteNotif(n.id);

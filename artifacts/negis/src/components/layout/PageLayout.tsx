@@ -40,9 +40,10 @@ export function PageLayout({ children, requireAuth = true }: PageLayoutProps) {
         <Sidebar />
       </div>
       <div className="flex min-h-[100dvh] flex-col md:pl-[248px]">
-        <div className="md:hidden">
-          <Topbar />
-        </div>
+        {/* The header renders at every width: it is the only place the
+            notification bell lives, so hiding it on desktop made realtime
+            booking notifications unreachable there. */}
+        <Topbar />
         <main className="negis-main flex-1 overflow-y-auto pb-24 md:pb-0">
           {children}
         </main>

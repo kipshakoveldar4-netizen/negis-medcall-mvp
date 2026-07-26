@@ -1,4 +1,4 @@
-import { useEffect, type ComponentType } from "react";
+import { lazy, Suspense, useEffect, type ComponentType } from "react";
 import { Switch, Route, Redirect, Router as WouterRouter, useLocation } from "wouter";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "sonner";
@@ -6,37 +6,52 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { AuthProvider } from "@/contexts/AuthContext";
 import { useAuth } from "@/contexts/AuthContext";
 
+// Eager: the public entry (Landing) and the shared fallbacks stay in the main
+// chunk so the first paint never waits on a second request.
 import Landing from "@/pages/Landing";
-import Register from "@/pages/Register";
-import Login from "@/pages/Login";
-import Onboarding from "@/pages/Onboarding";
-import Dashboard from "@/pages/Dashboard";
-import AiControlCenter from "@/pages/AiControlCenter";
-import Agent from "@/pages/Agent";
-import Ads from "@/pages/Ads";
-import AdsAutomation from "@/pages/AdsAutomation";
-import AdsCallback from "@/pages/AdsCallback";
-import { AppointmentsPage } from "@/pages/AppointmentsPage";
-import ContentStudio from "@/pages/ContentStudio";
-import AdminCenter from "@/pages/AdminCenter";
-import LeadsPage from "@/pages/LeadsPage";
-import ClientsPage from "@/pages/ClientsPage";
-import SalesPage from "@/pages/SalesPage";
-import {
-  DemoCalls,
-  DemoChat,
-  DemoMarket,
-  DemoReception,
-  DemoReports,
-  DemoTasks,
-} from "@/pages/DemoCrmModules";
 import DemoPlaceholder from "@/pages/DemoPlaceholder";
-import Privacy from "@/pages/Privacy";
-import Terms from "@/pages/Terms";
-import DataDeletion from "@/pages/DataDeletion";
-import ResetPassword from "@/pages/ResetPassword";
 import NotFound from "@/pages/not-found";
 import FbPixelInit from "@/components/FbPixelInit";
+import { RouteErrorBoundary } from "@/components/layout/RouteErrorBoundary";
+
+// Lazy: every operational screen loads as its own chunk. Before this, all 28
+// routes (including the 4.6k-line AdsAutomation) shipped in one bundle that
+// the landing page had to download.
+const Register = lazy(() => import("@/pages/Register"));
+const Login = lazy(() => import("@/pages/Login"));
+const Onboarding = lazy(() => import("@/pages/Onboarding"));
+const Dashboard = lazy(() => import("@/pages/Dashboard"));
+const AiControlCenter = lazy(() => import("@/pages/AiControlCenter"));
+const Agent = lazy(() => import("@/pages/Agent"));
+const Ads = lazy(() => import("@/pages/Ads"));
+const AdsAutomation = lazy(() => import("@/pages/AdsAutomation"));
+const AdsCallback = lazy(() => import("@/pages/AdsCallback"));
+const AppointmentsPage = lazy(() => import("@/pages/AppointmentsPage").then(m => ({ default: m.AppointmentsPage })));
+const ContentStudio = lazy(() => import("@/pages/ContentStudio"));
+const AdminCenter = lazy(() => import("@/pages/AdminCenter"));
+const LeadsPage = lazy(() => import("@/pages/LeadsPage"));
+const ClientsPage = lazy(() => import("@/pages/ClientsPage"));
+const SalesPage = lazy(() => import("@/pages/SalesPage"));
+const DemoCalls = lazy(() => import("@/pages/DemoCrmModules").then(m => ({ default: m.DemoCalls })));
+const DemoChat = lazy(() => import("@/pages/DemoCrmModules").then(m => ({ default: m.DemoChat })));
+const DemoMarket = lazy(() => import("@/pages/DemoCrmModules").then(m => ({ default: m.DemoMarket })));
+const DemoReception = lazy(() => import("@/pages/DemoCrmModules").then(m => ({ default: m.DemoReception })));
+const DemoReports = lazy(() => import("@/pages/DemoCrmModules").then(m => ({ default: m.DemoReports })));
+const DemoTasks = lazy(() => import("@/pages/DemoCrmModules").then(m => ({ default: m.DemoTasks })));
+const Privacy = lazy(() => import("@/pages/Privacy"));
+const Terms = lazy(() => import("@/pages/Terms"));
+const DataDeletion = lazy(() => import("@/pages/DataDeletion"));
+const ResetPassword = lazy(() => import("@/pages/ResetPassword"));
+
+function RouteFallback() {
+  return (
+    <div className="flex min-h-screen items-center justify-center" style={{ background: "var(--ng-bg)" }}>
+      <div className="text-xs font-medium tracking-[0.14em]" style={{ color: "var(--ng-muted)" }}>
+        ЗАГРУЗКА…
+      </div>
+    </div>
+  );
+}
 
 const queryClient = new QueryClient();
 
@@ -135,6 +150,8 @@ function ProtectedPage({
 /* ── Router ── */
 function Router() {
   return (
+    <RouteErrorBoundary>
+    <Suspense fallback={<RouteFallback />}>
     <Switch>
       <Route path="/" component={Landing} />
       <Route path="/login" component={Login} />
@@ -153,6 +170,15 @@ function Router() {
       <Route path="/chat" component={() => <ProtectedPage component={DemoChat} permission="chat" />} />
       <Route path="/marketplace" component={() => <ProtectedPage component={DemoMarket} permission="marketplace" />} />
       <Route path="/market" component={() => <ProtectedPage component={DemoMarket} permission="marketplace" />} />
+      {/* /agent is intentionally NOT wrapped in ProtectedPage: it is the
+          employee's personal shift screen (start/stop shift, own bookings),
+          and module permissions would lock out the very agents it exists for.
+          NOTE: PageLayout's redirect is client-side UX, not authorization.
+          Unlike the CRM pages (which go through api/crm), this page queries
+          Supabase directly with the anon key, so its tenant isolation rests
+          entirely on RLS for agents/bookings/shifts. Those tables predate the
+          in-repo migrations and their RLS state is not verifiable here —
+          confirm it in the Supabase project before treating this as secure. */}
       <Route path="/agent" component={Agent} />
       <Route path="/admin" component={() => <ProtectedPage component={AdminCenter} permission="admin" />} />
       <Route path="/ads" component={() => <ProtectedPage component={Ads} permission="ads" />} />
@@ -177,6 +203,8 @@ function Router() {
       <Route path="/reset-password" component={ResetPassword} />
       <Route component={NotFound} />
     </Switch>
+    </Suspense>
+    </RouteErrorBoundary>
   );
 }
 
