@@ -37,20 +37,16 @@ const primaryItems: MobileNavItem[] = [
   { href: "/sales", label: "Продажи", icon: BadgeDollarSign, permission: "crm" },
 ];
 
+// Commercial-1: the customer drawer lists only working modules. Demo-only
+// fixtures (Ресепшн, Звонки, Задачи, Чат, Маркет, Отчёты) are reachable by
+// direct URL in demo mode but are not advertised in the sellable navigation.
 const drawerItems: MobileNavItem[] = [
   { href: "/ai-control-center", label: "Главная", icon: LayoutDashboard, permission: "dashboard" },
   { href: "/dashboard", label: "Аналитика", icon: BarChart2, permission: "dashboard" },
   { href: "/ads-automation", label: "Реклама", icon: Rocket, permission: "ads" },
+  { href: "/ads-automation/history", label: "История запусков", icon: Megaphone, permission: "ads" },
   { href: "/content-studio", label: "Контент", icon: Clapperboard, permission: "ads" },
-  { href: "/ads", label: "Кабинет рекламы", icon: Megaphone, permission: "ads" },
-  { href: "/reception", label: "Ресепшн", icon: User, permission: "reception" },
-  { href: "/calls", label: "Звонки", icon: PhoneCall, permission: "reception" },
-  { href: "/tasks", label: "Задачи", icon: ClipboardList, permission: "tasks" },
-  { href: "/chat", label: "Чат", icon: MessageCircle, permission: "chat" },
-  { href: "/market", label: "Маркет", icon: Store, permission: "marketplace" },
-  { href: "/reports", label: "Отчёты", icon: BarChart2, permission: "ads" },
-  { href: "/admin", label: "Настройки", icon: Settings, permission: "admin" },
-  { href: "/profile", label: "Профиль", icon: User, permission: "dashboard" },
+  { href: "/admin", label: "Настройки клиники", icon: Settings, permission: "admin" },
 ];
 
 function isActive(location: string, href: string) {

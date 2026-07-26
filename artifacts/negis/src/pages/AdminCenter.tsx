@@ -1322,7 +1322,7 @@ export default function AdminCenter() {
     try {
       await navigator.clipboard.writeText(
         [
-          "Negis OS login",
+          "Medina OS login",
           `Email: ${createdCredentials.email}`,
           `Temporary password: ${createdCredentials.temporaryPassword}`,
           `URL: ${createdCredentials.loginUrl}`,
@@ -1347,12 +1347,11 @@ export default function AdminCenter() {
 
     return (
       <div className="space-y-5">
-        <ReleaseBanner readiness={readiness} />
-        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-          <MetricCard title="Release readiness" value={`${readiness.score}%`} icon={Gauge} tone={readiness.complete ? "emerald" : "amber"} />
-          <MetricCard title="Critical blockers" value={String(readiness.blockers)} icon={AlertTriangle} tone={readiness.blockers ? "red" : "emerald"} />
-          <MetricCard title="Integration health" value={`${connected}/${integrationCards.length}`} icon={Database} tone="blue" />
-          <MetricCard title="Staff count" value={String(staff.length)} icon={Users} tone="teal" />
+        {/* Commercial-1: платформенная готовность живёт во внутреннем разделе
+            диагностики; клиника видит только состояние интеграций и команду. */}
+        <div className="grid gap-4 sm:grid-cols-2">
+          <MetricCard title="Состояние интеграций" value={`${connected}/${integrationCards.length}`} icon={Database} tone="blue" />
+          <MetricCard title="Сотрудники" value={String(staff.length)} icon={Users} tone="teal" />
         </div>
         <div className="grid gap-5 lg:grid-cols-3">
           <section className="neu-card lg:col-span-2">
@@ -1853,7 +1852,7 @@ export default function AdminCenter() {
             <p className="text-sm text-[#64748B]">Хранится в release_checks, fallback: negis_release_checks.</p>
           </div>
           <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center">
-            <StatusPill status={readiness.complete ? "passed" : "pending"} label={readiness.complete ? "Готово" : `${readiness.blockers} blockers`} />
+            <StatusPill status={readiness.complete ? "passed" : "pending"} label={readiness.complete ? "Готово" : `Проблем: ${readiness.blockers}`} />
             <button type="button" className="neu-btn-primary w-full justify-center sm:w-auto" disabled={loading["release-autocheck"]} onClick={runReleaseAutocheck}>
               {loading["release-autocheck"] ? <Loader2 className="animate-spin" size={16} /> : <RefreshCw size={16} />}
               Автопроверка релиза
@@ -2138,10 +2137,10 @@ export default function AdminCenter() {
       <div className="space-y-6">
         <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
           <div>
-            <p className="text-xs font-bold uppercase tracking-[0.18em] text-[#64748B]">Admin Center</p>
-            <h1 className="mt-2 text-3xl font-black text-[#0F172A]">Release-ready управление Negis OS</h1>
+            <p className="text-xs font-bold uppercase tracking-[0.18em] text-[#64748B]">Администрирование</p>
+            <h1 className="mt-2 text-2xl font-semibold text-[#0F172A]">Настройки клиники</h1>
             <p className="mt-2 max-w-3xl text-sm text-[#64748B]">
-              Workspace: {workspaceId}. Owner: {user?.email || "demo user"}. Секретные ключи хранятся только в Vercel env.
+              Клиника: {workspaceId}. Владелец: {user?.email || "demo user"}.
             </p>
           </div>
           <button type="button" className="neu-btn w-full justify-center xl:w-auto" onClick={() => setLocation("/ai-control-center")}>
@@ -2149,41 +2148,24 @@ export default function AdminCenter() {
           </button>
         </div>
 
-        {/* Admin identity band — visually separates the platform admin from the client app. */}
-        <section className="rounded-[24px] border border-slate-700 bg-slate-900 p-5 text-white">
-          <p className="text-[11px] font-black uppercase tracking-[0.18em] text-teal-300">Панель платформы · Negis OS</p>
-          <h2 className="mt-1 text-xl font-black">Admin OS</h2>
-          <p className="mt-1 max-w-3xl text-sm font-semibold text-slate-300">
-            Технические разделы платформы. Секреты, токены и service role key здесь не отображаются.
-          </p>
-          <div className="mt-4 flex flex-wrap gap-2">
-            {[
-              { label: "Обзор платформы", active: true },
-              { label: "Клиники", active: false },
-              { label: "Подписки", active: false },
-              { label: "Доходы", active: false },
-              { label: "Рекламные запуски", active: false },
-              { label: "Видео-обработка", active: false },
-              { label: "Usage", active: false },
-              { label: "System Health", active: false },
-              { label: "Логи", active: false },
-              { label: "Настройки платформы", active: false },
-            ].map((section) => (
-              <span
-                key={section.label}
-                className={`rounded-full px-3 py-1.5 text-xs font-black ${
-                  section.active ? "bg-teal-400 text-slate-900" : "border border-slate-600 text-slate-400"
-                }`}
-              >
-                {section.label}
-                {section.active ? "" : " · скоро"}
-              </span>
-            ))}
+        {/* Internal platform diagnostics — progressive disclosure for Medina
+            Platform staff only; hidden by default from the clinic settings flow.
+            Commercial-2+ will move this behind a server-verified superadmin role. */}
+        <details className="rounded-xl border border-slate-700 bg-slate-900 text-white">
+          <summary className="cursor-pointer select-none p-4 text-sm font-semibold text-slate-200">
+            Диагностика платформы · внутренний раздел Medina Platform
+          </summary>
+          <div className="border-t border-slate-700 p-5">
+            <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-teal-300">Панель платформы · Medina OS</p>
+            <h2 className="mt-1 text-lg font-semibold">Внутренняя диагностика платформы</h2>
+            <p className="mt-1 max-w-3xl text-sm text-slate-300">
+              Раздел для команды Medina Platform. Секреты, токены и service role key здесь не отображаются.
+            </p>
+            <div className="mt-4">
+              <ReleaseBanner readiness={readiness} />
+            </div>
           </div>
-          <p className="mt-3 text-xs font-semibold text-slate-400">
-            Разделы платформы будут собраны на следующих этапах. Сейчас доступен обзор ниже.
-          </p>
-        </section>
+        </details>
 
         <section className="neu-card flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between" data-testid="server-admin-auth">
           <div className="flex min-w-0 items-start gap-3">
@@ -2197,35 +2179,44 @@ export default function AdminCenter() {
               )}
             </span>
             <div className="min-w-0">
-              <p className="text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">Server auth</p>
+              <p className="text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">Сессия</p>
               <h2 className="mt-1 text-base font-black text-[#0F172A]">
                 {serverAdminAuth.status === "confirmed" && "Админ-доступ подтверждён"}
-                {serverAdminAuth.status === "reauth" && "Нужно войти заново"}
+                {serverAdminAuth.status === "reauth" && "Сессия завершена"}
                 {serverAdminAuth.status === "forbidden" && "Недостаточно прав"}
-                {serverAdminAuth.status === "unavailable" && "Не удалось проверить админ-доступ"}
-                {serverAdminAuth.status === "checking" && "Проверяем админ-доступ…"}
+                {serverAdminAuth.status === "unavailable" && "Не удалось проверить доступ"}
+                {serverAdminAuth.status === "checking" && "Проверяем доступ…"}
               </h2>
               <p className="mt-1 text-sm text-[#64748B]">
-                {serverAdminAuth.status === "confirmed" && `Supabase подтвердил активную роль ${serverAdminAuth.role} для текущего workspace.`}
-                {serverAdminAuth.status === "reauth" && "Supabase-сессия отсутствует или истекла. Войдите снова для защищённых действий."}
-                {serverAdminAuth.status === "forbidden" && "Для этого workspace нужна активная роль owner или admin."}
+                {serverAdminAuth.status === "confirmed" && "Доступ администратора подтверждён для текущей клиники."}
+                {serverAdminAuth.status === "reauth" && "Для защиты данных необходимо войти в аккаунт повторно."}
+                {serverAdminAuth.status === "forbidden" && "Для этого раздела нужна активная роль владельца или администратора."}
                 {serverAdminAuth.status === "unavailable" && "Сервис авторизации временно недоступен. Остальные разделы можно использовать."}
-                {serverAdminAuth.status === "checking" && "Проверяем Supabase-сессию и роль сотрудника на сервере."}
+                {serverAdminAuth.status === "checking" && "Проверяем сессию и права доступа."}
               </p>
             </div>
           </div>
-          <button
-            type="button"
-            className="neu-btn w-full shrink-0 justify-center sm:w-auto"
-            onClick={() => void checkServerAdminAccess()}
-            disabled={serverAdminAuth.status === "checking"}
-          >
-            <RefreshCw size={16} />
-            Проверить доступ
-          </button>
+          <div className="flex w-full shrink-0 flex-col gap-2 sm:w-auto sm:flex-row">
+            {serverAdminAuth.status === "reauth" ? (
+              <button
+                type="button"
+                className="neu-btn-primary w-full justify-center sm:w-auto"
+                onClick={() => setLocation("/login")}
+              >
+                Войти снова
+              </button>
+            ) : null}
+            <button
+              type="button"
+              className="neu-btn w-full justify-center sm:w-auto"
+              onClick={() => void checkServerAdminAccess()}
+              disabled={serverAdminAuth.status === "checking"}
+            >
+              <RefreshCw size={16} />
+              Проверить доступ
+            </button>
+          </div>
         </section>
-
-        <ReleaseBanner readiness={readiness} />
 
         <div className="md:hidden">
           <label className="mb-2 block text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">Раздел админки</label>
@@ -2366,7 +2357,7 @@ function ReleaseBanner({ readiness }: { readiness: { complete: boolean; blockers
                 : "Платформа в режиме подготовки к релизу"}
             </p>
             <p className={`mt-1 text-sm ${readiness.complete ? "text-emerald-700" : "text-amber-700"}`}>
-              Readiness {readiness.score}% · blockers {readiness.blockers}
+              Готовность платформы: {readiness.score}% · критические проблемы: {readiness.blockers}
             </p>
             <p className={`mt-1 text-xs ${readiness.complete ? "text-emerald-700" : "text-amber-700"}`}>
               Optional AI providers вроде ElevenLabs, HeyGen, Gemini, Anthropic и TapNow не считаются blocker.

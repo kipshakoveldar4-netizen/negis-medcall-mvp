@@ -3190,7 +3190,9 @@ async function checkLayoutFoundation() {
 
   // Admin identity band separates admin from the client app, without exposing secrets.
   const admin = await readFile(path.join(pagesDir, "AdminCenter.tsx"), "utf8");
-  if (!admin.includes("Панель платформы · Negis OS") || !admin.includes("Admin OS")) {
+  // Commercial-1: the platform band is Medina-branded and lives behind
+  // progressive disclosure as an internal Medina Platform section.
+  if (!admin.includes("Панель платформы · Medina OS") || !admin.includes("Внутренняя диагностика платформы")) {
     throw new Error("AdminCenter must show a distinct platform admin band");
   }
   for (const secret of ["service role key", "SERVICE_ROLE", "app_secret", "APP_SECRET"]) {
