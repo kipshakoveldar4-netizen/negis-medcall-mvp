@@ -3041,15 +3041,16 @@ async function checkLayoutFoundation() {
   // AI Control Center UI MVP exists and is routed.
   const acc = await readFile(path.join(pagesDir, "AiControlCenter.tsx"), "utf8");
   for (const marker of [
-    "AI Control Center",
-    "Главная картина клиники",
+    // UI-2: the route is the Medina OS operational overview.
+    "Операционный обзор",
+    "Заявки, записи, продажи, реклама и состояние систем",
     "Новые заявки",
     "Необработанные лиды",
     "Записи сегодня",
     "Пациенты для повторного визита",
     "Реклама требует внимания",
     "Выручка сегодня",
-    "AI-рекомендации",
+    "Требует внимания",
     "Данные появятся после подключения CRM.",
     "Запустить рекламу",
     "Открыть историю запусков",
@@ -3057,8 +3058,16 @@ async function checkLayoutFoundation() {
     '"/ads-automation/history"',
     '"/content-studio"',
     "Безопасный режим",
-    "Реклама в Negis OS создаётся выключенной. Включить её можно вручную в Meta Ads Manager.",
-    "AI помогает находить действия, но важные решения подтверждает пользователь.",
+    "Реклама в Medina OS создаётся выключенной. Включить её можно вручную в Meta Ads Manager.",
+    // UI-2 work queues and honest recency (same CRM responses, no extra requests).
+    "Очереди работы",
+    "Ближайшие записи",
+    "Неоплаченные продажи",
+    "buildNewLeadsQueue",
+    "buildUpcomingAppointmentsQueue",
+    "buildPendingDealsQueue",
+    "buildRecentRecords",
+    "buildLeadSourceDistribution",
     // D3B operational data (real sources, graceful degradation)
     "/api/crm/meta-launches",
     "/api/crm/health",

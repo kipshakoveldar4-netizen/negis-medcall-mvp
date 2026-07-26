@@ -64,7 +64,7 @@ function DemoDashboard() {
       <div className="space-y-7">
         <div className="flex flex-col gap-2">
           <p className="text-xs font-semibold uppercase tracking-[0.18em] text-[#64748B]">Демо-режим</p>
-          <h1 className="text-3xl font-bold text-[#0F172A]">Negis OS</h1>
+          <h1 className="text-3xl font-bold text-[#0F172A]">Medina OS</h1>
           <p className="text-sm text-[#64748B]">{clinicId || 'demo-workspace'}</p>
           <p className="text-sm text-[#64748B]">
             Демо-режим: данные сохранены локально, подключение Supabase будет в production-версии.

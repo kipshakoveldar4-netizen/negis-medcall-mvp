@@ -7,6 +7,7 @@
     "hello": "tsx ./src/hello.ts",
     "test:insights-completeness": "tsx --test ./src/meta-insights-completeness.test.ts",
     "test:meta-insights-worker": "tsx --test ./src/meta-insights-worker.test.ts",
+    "test:dashboard": "tsx --test ./src/medina-dashboard.test.ts",
     "test:mobile": "tsx ./src/mobile-layout-check.ts",
     "test:routes": "tsx ./src/smoke-negis-routes.ts",
     "test:targeting": "tsx ./src/test-targeting-agent.ts",

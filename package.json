@@ -12,6 +12,7 @@
     "test:mobile": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:mobile",
     "test:insights-completeness": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:insights-completeness",
     "test:meta-insights-worker": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:meta-insights-worker",
+    "test:dashboard": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:dashboard",
     "test:routes": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:routes",
     "test:targeting": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:targeting"
   },
