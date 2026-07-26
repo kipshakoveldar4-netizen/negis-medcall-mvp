@@ -2218,6 +2218,42 @@ export default function AdminCenter() {
           </div>
         </section>
 
+        {/* Commercial-2: honest pilot status + support path. There is no billing
+            domain yet — no payment claims, no fake purchase flow, no dead CTA
+            buttons. The only action is a functional workspace-ID copy for support. */}
+        <div className="grid gap-4 lg:grid-cols-2">
+          <section className="neu-card" aria-label="Тариф и подключение">
+            <p className="text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">Тариф и подключение</p>
+            <h2 className="mt-1 text-base font-black text-[#0F172A]">
+              {workspaceId === "demo-workspace" ? "Демо-режим" : "Пилотное подключение"}
+            </h2>
+            <p className="mt-1 text-sm text-[#64748B]">
+              Автоматическая оплата пока не подключена. Условия пилота и тариф согласуются с менеджером Medina OS.
+            </p>
+          </section>
+          <section className="neu-card" aria-label="Поддержка">
+            <p className="text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">Поддержка</p>
+            <h2 className="mt-1 text-base font-black text-[#0F172A]">Связь с Medina OS</h2>
+            <p className="mt-1 text-sm text-[#64748B]">
+              Канал поддержки настраивается для вашей клиники. До подключения обращайтесь к вашему менеджеру Medina OS и указывайте идентификатор клиники.
+            </p>
+            <button
+              type="button"
+              className="neu-btn mt-3"
+              onClick={async () => {
+                try {
+                  await navigator.clipboard.writeText(workspaceId);
+                  toast.success("Идентификатор клиники скопирован");
+                } catch {
+                  toast.error("Не удалось скопировать идентификатор");
+                }
+              }}
+            >
+              Скопировать идентификатор клиники
+            </button>
+          </section>
+        </div>
+
         <div className="md:hidden">
           <label className="mb-2 block text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">Раздел админки</label>
           <select className="neu-input w-full" value={activeTab} onChange={(event) => setActiveTab(event.target.value as AdminTab)}>

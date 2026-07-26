@@ -310,8 +310,23 @@ function SectionTitle({ children, hint }: { children: ReactNode; hint?: string }
 
 const chipStyle: CSSProperties = { borderRadius: 999, padding: "4px 12px", fontSize: 11, fontWeight: 800 };
 
+const ONBOARDING_HINT_KEY = "negis_onboarding_hint_dismissed";
+
 export default function AiControlCenter() {
   const todayLabel = new Date().toLocaleDateString("ru-RU", { day: "numeric", month: "long" });
+  // Commercial-2: dismissible onboarding reminder. Dismissal only hides this
+  // card — step completion is derived from real data on /onboarding.
+  const [showOnboardingHint, setShowOnboardingHint] = useState(
+    () => typeof window !== "undefined" && window.localStorage.getItem(ONBOARDING_HINT_KEY) !== "1",
+  );
+  const dismissOnboardingHint = () => {
+    setShowOnboardingHint(false);
+    try {
+      window.localStorage.setItem(ONBOARDING_HINT_KEY, "1");
+    } catch {
+      // Storage unavailable — the card simply reappears next visit.
+    }
+  };
 
   const [loading, setLoading] = useState(true);
   const [launchesLoaded, setLaunchesLoaded] = useState(false);
@@ -656,6 +671,24 @@ export default function AiControlCenter() {
             Заявки, записи, продажи, реклама и состояние систем — реальные данные текущей клиники.
           </p>
         </header>
+
+        {/* Commercial-2: onboarding entry card (dismissible; never marks setup done) */}
+        {showOnboardingHint ? (
+          <section className="neu flex flex-wrap items-center justify-between gap-3 p-4" aria-label="Настройка клиники">
+            <p className="min-w-0 text-sm" style={{ color: "var(--negis-muted)" }}>
+              <span className="font-semibold" style={{ color: "var(--negis-text)" }}>Продолжите настройку клиники.</span>{" "}
+              Профиль, сотрудники и первая заявка — статусы шагов рассчитываются по реальным данным.
+            </p>
+            <div className="flex shrink-0 gap-2">
+              <Link href="/onboarding">
+                <span className="neu-btn-primary inline-flex cursor-pointer items-center text-sm">Открыть настройку</span>
+              </Link>
+              <button type="button" className="neu-btn text-sm" onClick={dismissOnboardingHint}>
+                Скрыть
+              </button>
+            </div>
+          </section>
+        ) : null}
 
         {/* 2. Today metrics */}
         <section>

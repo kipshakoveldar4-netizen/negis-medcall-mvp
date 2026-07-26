@@ -9,6 +9,7 @@
     "test:meta-insights-worker": "tsx --test ./src/meta-insights-worker.test.ts",
     "test:dashboard": "tsx --test ./src/medina-dashboard.test.ts",
     "test:commercial": "tsx --test ./src/medina-commercial.test.ts",
+    "test:onboarding": "tsx --test ./src/medina-onboarding.test.ts",
     "test:mobile": "tsx ./src/mobile-layout-check.ts",
     "test:routes": "tsx ./src/smoke-negis-routes.ts",
     "test:targeting": "tsx ./src/test-targeting-agent.ts",

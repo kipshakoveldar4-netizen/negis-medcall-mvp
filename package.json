@@ -14,6 +14,7 @@
     "test:meta-insights-worker": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:meta-insights-worker",
     "test:dashboard": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:dashboard",
     "test:commercial": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:commercial",
+    "test:onboarding": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:onboarding",
     "test:routes": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:routes",
     "test:targeting": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:targeting"
   },
