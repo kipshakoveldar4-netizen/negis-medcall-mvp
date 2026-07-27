@@ -16,6 +16,7 @@
     "test:commercial": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:commercial",
     "test:onboarding": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:onboarding",
     "test:security1a": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:security1a",
+    "test:security1b": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:security1b",
     "test:routes": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:routes",
     "test:targeting": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:targeting"
   },

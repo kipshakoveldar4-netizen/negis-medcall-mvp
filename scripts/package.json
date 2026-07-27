@@ -11,6 +11,7 @@
     "test:commercial": "tsx --test ./src/medina-commercial.test.ts",
     "test:onboarding": "tsx --test ./src/medina-onboarding.test.ts",
     "test:security1a": "tsx --test ./src/medina-security1a.test.ts",
+    "test:security1b": "tsx --test ./src/medina-security1b.test.ts",
     "test:mobile": "tsx ./src/mobile-layout-check.ts",
     "test:routes": "tsx ./src/smoke-negis-routes.ts",
     "test:targeting": "tsx ./src/test-targeting-agent.ts",
