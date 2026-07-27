@@ -17,15 +17,17 @@ import { RouteErrorBoundary } from "@/components/layout/RouteErrorBoundary";
 // Lazy: every operational screen loads as its own chunk. Before this, all 28
 // routes (including the 4.6k-line AdsAutomation) shipped in one bundle that
 // the landing page had to download.
-const Register = lazy(() => import("@/pages/Register"));
 const Login = lazy(() => import("@/pages/Login"));
 const Onboarding = lazy(() => import("@/pages/Onboarding"));
 const Dashboard = lazy(() => import("@/pages/Dashboard"));
 const AiControlCenter = lazy(() => import("@/pages/AiControlCenter"));
-const Agent = lazy(() => import("@/pages/Agent"));
-const Ads = lazy(() => import("@/pages/Ads"));
+// Security-1A: /agent, /ads and /ads/callback were removed from the router.
+// Their pages query legacy tables that do not exist in the production Supabase
+// project (agents, bookings, shifts, ad_accounts, ad_reports, platform_configs,
+// clinics), so every request failed. Shift tracking and the legacy ad cabinet
+// are out of the first commercial release; /ads-automation is the supported
+// advertising module. Direct URLs now fall through to the not-found route.
 const AdsAutomation = lazy(() => import("@/pages/AdsAutomation"));
-const AdsCallback = lazy(() => import("@/pages/AdsCallback"));
 const AppointmentsPage = lazy(() => import("@/pages/AppointmentsPage").then(m => ({ default: m.AppointmentsPage })));
 const ContentStudio = lazy(() => import("@/pages/ContentStudio"));
 const AdminCenter = lazy(() => import("@/pages/AdminCenter"));
@@ -70,9 +72,7 @@ const ROUTE_PERMISSIONS: Record<string, string> = {
   '/marketplace': 'marketplace',
   '/market': 'marketplace',
   '/admin': 'admin',
-  '/ads': 'ads',
   '/ads-automation': 'ads',
-  '/advertising': 'ads',
   '/reports': 'ads',
   '/profile': 'dashboard',
   '/targeting-agent': 'ads',
@@ -155,7 +155,6 @@ function Router() {
     <Switch>
       <Route path="/" component={Landing} />
       <Route path="/login" component={Login} />
-      <Route path="/register" component={Register} />
       <Route path="/onboarding" component={Onboarding} />
       <Route path="/ai-control-center" component={() => <ProtectedPage component={AiControlCenter} permission="dashboard" />} />
       <Route path="/dashboard" component={() => <ProtectedPage component={Dashboard} permission="dashboard" />} />
@@ -170,22 +169,13 @@ function Router() {
       <Route path="/chat" component={() => <ProtectedPage component={DemoChat} permission="chat" />} />
       <Route path="/marketplace" component={() => <ProtectedPage component={DemoMarket} permission="marketplace" />} />
       <Route path="/market" component={() => <ProtectedPage component={DemoMarket} permission="marketplace" />} />
-      {/* /agent is intentionally NOT wrapped in ProtectedPage: it is the
-          employee's personal shift screen (start/stop shift, own bookings),
-          and module permissions would lock out the very agents it exists for.
-          NOTE: PageLayout's redirect is client-side UX, not authorization.
-          Unlike the CRM pages (which go through api/crm), this page queries
-          Supabase directly with the anon key, so its tenant isolation rests
-          entirely on RLS for agents/bookings/shifts. Those tables predate the
-          in-repo migrations and their RLS state is not verifiable here —
-          confirm it in the Supabase project before treating this as secure. */}
-      <Route path="/agent" component={Agent} />
       <Route path="/admin" component={() => <ProtectedPage component={AdminCenter} permission="admin" />} />
-      <Route path="/ads" component={() => <ProtectedPage component={Ads} permission="ads" />} />
       <Route path="/ads-automation/history" component={() => <ProtectedPage component={AdsAutomation} permission="ads" />} />
       <Route path="/ads-automation" component={() => <ProtectedPage component={AdsAutomation} permission="ads" />} />
-      <Route path="/advertising" component={() => <ProtectedPage component={Ads} permission="ads" />} />
-      <Route path="/ads/callback" component={AdsCallback} />
+      {/* Legacy ad cabinet links keep working by pointing at the supported module. */}
+      <Route path="/advertising">
+        <Redirect to="/ads-automation" />
+      </Route>
       <Route path="/reports" component={() => <ProtectedPage component={DemoReports} permission="ads" />} />
       <Route path="/profile" component={() => <ProtectedPage component={() => <DemoPlaceholder title="Профиль" />} permission="dashboard" />} />
       {/* AI Target is no longer a standalone module: its functionality lives inside

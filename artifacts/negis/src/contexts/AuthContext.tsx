@@ -445,7 +445,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             setIsLoading(false);
             return;
           }
-          await fetchUserRole(sess.user.id);
+          applyNoWorkspaceAccess();
         })();
       } else {
         setClinicId(null);
@@ -489,7 +489,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setIsLoading(false);
         return;
       }
-      await fetchUserRole(sess.user.id);
+      applyNoWorkspaceAccess();
     } else {
       setIsLoading(false);
     }
@@ -584,57 +584,23 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   };
 
-  /* ── 4. Fetch user role (normal auth only) ────────────── */
-  const fetchRolePermissions = async (userId: string, activeClinicId: string, role: UserRole) => {
-    if (role === 'owner' || role === 'manager') {
-      setRolePermissions(ALL_PERMISSIONS);
-      return;
-    }
+  /* ── 4. Resolve access for a Supabase-authenticated user ──
+     Security-1A: the previous implementation read `user_roles`, `agents` and
+     `roles` directly from the browser. None of those tables exist in the
+     production project, so the queries always failed and surfaced a generic
+     "не удалось загрузить профиль" error.
 
-    const fallback = SYSTEM_ROLE_PERMISSIONS[role] ?? {};
-    const { data: agentRow } = await supabase
-      .from('agents')
-      .select('role_id')
-      .eq('clinic_id', activeClinicId)
-      .eq('user_id', userId)
-      .maybeSingle();
-
-    if (!agentRow?.role_id) {
-      setRolePermissions(fallback);
-      return;
-    }
-
-    const { data: customRole } = await supabase
-      .from('roles')
-      .select('permissions')
-      .eq('clinic_id', activeClinicId)
-      .eq('id', agentRow.role_id)
-      .maybeSingle();
-
-    setRolePermissions((customRole?.permissions as RolePermissions | null) || fallback);
-  };
-
-  const fetchUserRole = async (userId: string) => {
-    try {
-      const { data, error } = await supabase
-        .from('user_roles')
-        .select('clinic_id, role')
-        .eq('user_id', userId)
-        .single();
-      if (error) throw error;
-      if (data) {
-        setClinicId(data.clinic_id);
-        const role = data.role as UserRole;
-        setUserRole(role);
-        await fetchRolePermissions(userId, data.clinic_id, role);
-      } else {
-        setLocation('/onboarding');
-      }
-    } catch {
-      toast.error('Не удалось загрузить профиль. Попробуйте перезайти.');
-    } finally {
-      setIsLoading(false);
-    }
+     The authoritative path is `tryApplySupabaseStaffUser`, which resolves the
+     workspace and role through the server API (/api/crm/staff, service-role
+     backed). It runs before this function. Reaching here therefore means the
+     signed-in account is not linked to any clinic — we grant NO role and NO
+     permissions rather than guessing or elevating. */
+  const applyNoWorkspaceAccess = () => {
+    setClinicId(null);
+    setUserRole(null);
+    setRolePermissions({});
+    setIsLoading(false);
+    toast.error('Аккаунт не связан с клиникой. Обратитесь к администратору клиники.');
   };
 
   /* ── 5. Sign out ──────────────────────────────────────── */

@@ -162,15 +162,16 @@ export default function Landing() {
   const handleLogin = async (data: LoginValues) => {
     setIsLoading(true); setError('');
     try {
-      const { data: authData, error } = await supabase.auth.signInWithPassword({
+      const { error } = await supabase.auth.signInWithPassword({
         email: data.email, password: data.password,
       });
       if (error) throw error;
-      const { data: roleRow } = await supabase
-        .from('user_roles').select('role')
-        .eq('user_id', authData.user?.id).single();
+      // Security-1A: the post-login role lookup used to read `user_roles`,
+      // which does not exist in production. Role and workspace are resolved by
+      // AuthContext through the server API (/api/crm/staff); we simply land on
+      // the default authenticated route and let that resolution drive access.
       closeModal();
-      setLocation(roleRoute(roleRow?.role ?? null));
+      setLocation(roleRoute(null));
     } catch (e: any) {
       setError(e.message || 'Ошибка входа');
     } finally { setIsLoading(false); }
