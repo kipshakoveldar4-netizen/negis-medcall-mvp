@@ -15,7 +15,10 @@
     "test:mobile": "tsx ./src/mobile-layout-check.ts",
     "test:routes": "tsx ./src/smoke-negis-routes.ts",
     "test:targeting": "tsx ./src/test-targeting-agent.ts",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test:meta-launch-payload": "tsx --test ./src/medina-meta-launch-payload.test.ts",
+    "test:crm-auth-foundation": "tsx --test ./src/medina-crm-auth-foundation.test.ts",
+    "test:legacy-webhook": "tsx --test ./src/medina-legacy-webhook.test.ts"
   },
   "devDependencies": {
     "@types/node": "catalog:",

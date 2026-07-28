@@ -10,6 +10,10 @@ import {
   type VerifiedWorkerRequest,
   type WorkerAuthConfig,
 } from "../auth/worker";
+import {
+  buildMetaLaunchPayloadPreview,
+  type MetaLaunchPayloadOptions,
+} from "./meta-launch-payload";
 import { evaluateMetaInsightsCompleteness } from "../meta/insightsCompleteness";
 import { getSupabaseServerClient } from "../supabase/server";
 import { checkMetaCompliance } from "../meta/compliance";
@@ -3823,146 +3827,15 @@ type ResolvedMetaLaunchBody = ReturnType<typeof buildMetaLaunchBody> & {
 function buildMetaPayloadPreview(
   launch: ResolvedMetaLaunchBody,
   campaignId = "META_CAMPAIGN_ID",
-  creativeOptions: {
-    usesInstagramActor?: boolean;
-    instagramActorFallback?: boolean;
-    imageUploadMode?: "adimages" | "picture_url";
-    imageHash?: boolean;
-    pictureUrl?: boolean;
-    imageUploadCapabilityFallback?: boolean;
-    omitInstagramPositions?: boolean;
-    videoId?: string;
-    videoUploadMode?: string;
-    videoProcessingStatus?: string;
-    videoWarnings?: string[];
-  } = {},
+  creativeOptions: MetaLaunchPayloadOptions = {},
 ): JsonRecord {
-  const assetFileType = launch.creativeType === "video" ? "video" : "image";
-  const usesLinkData = assetFileType === "image";
-  const usesVideoData = assetFileType === "video";
-  const imageHashExpected = usesLinkData && Boolean(launch.imageUrl || launch.creativeUrl);
-  const imageUploadMode = usesLinkData ? creativeOptions.imageUploadMode || "adimages" : undefined;
-  const imageUploadCapabilityFallback = Boolean(creativeOptions.imageUploadCapabilityFallback);
-  const pictureUrlExpected =
-    usesLinkData && (creativeOptions.pictureUrl ?? imageUploadMode === "picture_url");
-  const campaign = buildMetaCampaignPayload({
-    campaignName: launch.campaignName,
-    objective: launch.objective,
-    status: launch.statusMode,
-    dailyBudgetMinor: launch.dailyBudgetMinor,
-    lifetimeBudgetMinor: launch.totalBudgetMinor,
-    currency: launch.currency,
-    primaryText: launch.primaryText,
-    headline: launch.headline,
-    description: launch.description,
-    cta: launch.cta,
-    landingUrl: launch.landingUrl,
-    imageUrl: assetFileType === "image" ? launch.imageUrl || launch.creativeUrl : "",
-    creativeType: launch.creativeType,
-    videoUrl: assetFileType === "video" ? launch.videoUrl || launch.creativeUrl : "",
-    videoId: assetFileType === "video" ? launch.videoId : "",
-    thumbnailUrl: launch.thumbnailUrl,
-    startTime: launch.startDate,
-    endTime: launch.endDate || undefined,
-    city: launch.city,
-    selectedCityId: launch.selectedCityId,
-    selectedCityLabelRu: launch.selectedCityLabelRu,
-    selectedCityCanonicalName: launch.selectedCityCanonicalName,
-    audienceLabel: launch.audienceLabel,
-    launchTimestamp: launch.launchTimestamp,
-    adSetName: launch.adSetName,
-    creativeName: launch.creativeName,
-    adName: launch.adName,
-    metaCityKey: launch.metaCityKey,
-    astanaCityKey: launch.astanaCityKey,
-    targetingResolution: launch.targetingResolution,
-    omitInstagramPositions: creativeOptions.omitInstagramPositions,
+  // Security-2A: the builder itself lives in ./meta-launch-payload so the Meta
+  // safety invariants can be asserted without an HTTP request. This wrapper is
+  // the only place that reads the environment for it, keeping that module pure.
+  return buildMetaLaunchPayloadPreview(launch, campaignId, {
+    ...creativeOptions,
+    videoLaunchEnabled: isMetaVideoLaunchEnabled(),
   });
-
-  const adSet = buildMetaAdSetPayload({
-    campaignName: launch.campaignName,
-    objective: launch.objective,
-    status: launch.statusMode,
-    dailyBudgetMinor: launch.dailyBudgetMinor,
-    lifetimeBudgetMinor: launch.totalBudgetMinor,
-    currency: launch.currency,
-    primaryText: launch.primaryText,
-    headline: launch.headline,
-    description: launch.description,
-    cta: launch.cta,
-    landingUrl: launch.landingUrl,
-    imageUrl: assetFileType === "image" ? launch.imageUrl || launch.creativeUrl : "",
-    creativeType: launch.creativeType,
-    videoUrl: assetFileType === "video" ? launch.videoUrl || launch.creativeUrl : "",
-    videoId: assetFileType === "video" ? launch.videoId : "",
-    thumbnailUrl: launch.thumbnailUrl,
-    startTime: launch.startDate,
-    endTime: launch.endDate || undefined,
-    campaignId,
-    city: launch.city,
-    selectedCityId: launch.selectedCityId,
-    selectedCityLabelRu: launch.selectedCityLabelRu,
-    selectedCityCanonicalName: launch.selectedCityCanonicalName,
-    audienceLabel: launch.audienceLabel,
-    launchTimestamp: launch.launchTimestamp,
-    adSetName: launch.adSetName,
-    creativeName: launch.creativeName,
-    adName: launch.adName,
-    metaCityKey: launch.metaCityKey,
-    astanaCityKey: launch.astanaCityKey,
-    targetingResolution: launch.targetingResolution,
-    omitInstagramPositions: creativeOptions.omitInstagramPositions,
-  });
-  const targetingDebug = buildMetaTargetingDebug({
-    resolution: launch.targetingResolution,
-    omitInstagramPositions: creativeOptions.omitInstagramPositions,
-  });
-
-  return {
-    campaign,
-    adSet: {
-      ...adSet,
-      targetingDebug,
-      placementsMode: "instagram_only",
-    },
-    creative: {
-      name: launch.creativeName,
-      asset: { fileType: assetFileType },
-      objectStorySpecType: usesLinkData ? "link_data" : "video_data",
-      imageUploadMode,
-      imageHash: creativeOptions.imageHash ?? (imageUploadMode === "adimages" ? imageHashExpected : false),
-      pictureUrl: pictureUrlExpected,
-      imageUploadCapabilityFallback,
-      usesVideoData,
-      usesLinkData,
-      videoLaunchEnabled: isMetaVideoLaunchEnabled(),
-      metaVideoLaunchStatus: assetFileType === "video" ? (isMetaVideoLaunchEnabled() ? "experimental" : "soon") : "not_applicable",
-      videoDataHasImageUrl:
-        assetFileType === "video"
-          ? Boolean(resolveVideoThumbnailUrl({ thumbnailUrl: launch.thumbnailUrl, videoUrl: launch.videoUrl || launch.creativeUrl }))
-          : false,
-      video: {
-        mimeType: assetFileType === "video" ? launch.mimeType || "" : "",
-        fileName: assetFileType === "video" ? launch.fileName || "" : "",
-        uploadMode: assetFileType === "video" ? creativeOptions.videoUploadMode || "" : "",
-        videoId: assetFileType === "video" ? Boolean(creativeOptions.videoId || launch.videoId) : false,
-        processingStatus: assetFileType === "video" ? creativeOptions.videoProcessingStatus || "" : "",
-        launchEnabled: assetFileType === "video" ? isMetaVideoLaunchEnabled() : false,
-        thumbnailUrl: assetFileType === "video" ? Boolean(resolveVideoThumbnailUrl({ thumbnailUrl: launch.thumbnailUrl, videoUrl: launch.videoUrl || launch.creativeUrl })) : false,
-        thumbnailSource: assetFileType === "video" && launch.thumbnailUrl ? "auto_frame" : "",
-        warnings: assetFileType === "video" ? creativeOptions.videoWarnings || [] : [],
-      },
-      usesInstagramActor: creativeOptions.usesInstagramActor ?? Boolean(launch.instagramActorId),
-      instagramActorFallback: creativeOptions.instagramActorFallback ?? false,
-    },
-    ad: {
-      name: launch.adName,
-      status: launch.statusMode,
-    },
-    launchTimestamp: launch.launchTimestamp,
-    budgetLevel: "adset",
-    warnings: [launch.targetingResolution?.warning || ""].filter(Boolean),
-  };
 }
 
 async function persistMetaLaunch(input: {

@@ -2258,11 +2258,19 @@ async function checkCrmServerAuthFoundation() {
     "apikey: serviceRoleKey",
     '.from("staff_users")',
     '.eq("auth_user_id", userId)',
-    '.eq("workspace_id", workspaceId)',
     '.eq("status", "active")',
-    'new Set(["owner", "admin"])',
+    // Security-2A: the workspace is no longer filtered in SQL because the helper
+    // now resolves every active membership and matches the requested workspace
+    // in code. The guarantee is unchanged and strict equality is still required.
+    "entry.workspaceId === requested",
+    // Replaces the inline new Set(["owner", "admin"]); the same two roles now
+    // come from the shared server catalog in lib/auth/permissions.ts.
+    "workspaceAdminRoles",
     "WorkspaceAdminAuthError(401",
     "WorkspaceAdminAuthError(403",
+    // Security-2A additions: fail closed on an Auth outage and bound the request.
+    "WorkspaceAdminAuthError(503",
+    "AbortController",
   ]) {
     if (!authHelper.includes(marker)) {
       throw new Error(`CRM server auth helper is missing ${marker}`);
