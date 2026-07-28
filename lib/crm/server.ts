@@ -727,14 +727,13 @@ function envStatus(keys: string[]) {
         ? "partial"
         : "not_configured";
 
+  // Security-2C: only the coarse count is reported. The per-key array named
+  // every environment variable the deployment expects, which told a reader
+  // exactly which secrets exist and which are missing.
   return {
     status,
     configured: configured.length,
     total: keys.length,
-    keys: keys.map((key) => ({
-      key,
-      configured: Boolean(process.env[key]?.trim()),
-    })),
   };
 }
 
@@ -4698,10 +4697,13 @@ export async function handleCrmHealth(req: VercelRequest, res: VercelResponse) {
       Boolean(readEnvValue("META_INSTAGRAM_ACTOR_ID")) &&
       Boolean(readEnvValue("META_ACCESS_TOKEN")) &&
       Boolean(readEnvValue("META_APP_SECRET")),
-    businessId: readEnvValue("META_BUSINESS_ID"),
-    adAccountId: readEnvValue("META_AD_ACCOUNT_ID"),
-    pageId: readEnvValue("META_PAGE_ID"),
-    instagramActorId: readEnvValue("META_INSTAGRAM_ACTOR_ID"),
+    // Presence only. These are the platform's Meta account identifiers; a
+    // clinic administrator has no reason to read them, and a per-workspace
+    // record already carries the clinic's own values.
+    businessIdConfigured: Boolean(readEnvValue("META_BUSINESS_ID")),
+    adAccountConfigured: Boolean(readEnvValue("META_AD_ACCOUNT_ID")),
+    pageConfigured: Boolean(readEnvValue("META_PAGE_ID")),
+    instagramActorConfigured: Boolean(readEnvValue("META_INSTAGRAM_ACTOR_ID")),
     astanaCityKeyConfigured: Boolean(readEnvValue("META_ASTANA_CITY_KEY")),
     cityResolver: {
       staticCities: KZ_META_CITY_OPTIONS.map((city) => city.id),

@@ -81,7 +81,6 @@ type ProviderPresence = {
   status: Status;
   configured: number;
   total: number;
-  keys: Array<{ key: string; configured: boolean }>;
 };
 
 type CrmHealthData = {
@@ -94,10 +93,10 @@ type CrmHealthData = {
 
 type SafeMetaSummary = {
   configured: boolean;
-  businessId: string;
-  adAccountId: string;
-  pageId: string;
-  instagramActorId: string;
+  businessIdConfigured: boolean;
+  adAccountConfigured: boolean;
+  pageConfigured: boolean;
+  instagramActorConfigured: boolean;
   astanaCityKeyConfigured?: boolean;
   cityResolver?: {
     staticCities?: string[];
@@ -1076,10 +1075,11 @@ export default function AdminCenter() {
       }
       const next: MetaAccount = {
         ...metaAccount,
-        metaBusinessId: meta.businessId || metaAccount.metaBusinessId,
-        adAccountId: meta.adAccountId || metaAccount.adAccountId,
-        pageId: meta.pageId || metaAccount.pageId,
-        instagramActorId: meta.instagramActorId || metaAccount.instagramActorId,
+        // The clinic's own stored record is the only source of these values now.
+        metaBusinessId: metaAccount.metaBusinessId,
+        adAccountId: metaAccount.adAccountId,
+        pageId: metaAccount.pageId,
+        instagramActorId: metaAccount.instagramActorId,
         accountName: "Negis Meta Ads",
         currency: "USD",
         timezoneName: "Asia/Almaty",
@@ -1087,9 +1087,9 @@ export default function AdminCenter() {
         permissions: {
           ...metaAccount.permissions,
           appCreated: meta.hasAppSecret || metaAccount.permissions.appCreated,
-          adAccountConnected: Boolean(meta.adAccountId) || metaAccount.permissions.adAccountConnected,
-          pageConnected: Boolean(meta.pageId) || metaAccount.permissions.pageConnected,
-          instagramConnected: Boolean(meta.instagramActorId) || metaAccount.permissions.instagramConnected,
+          adAccountConnected: Boolean(meta.adAccountConfigured) || metaAccount.permissions.adAccountConnected,
+          pageConnected: Boolean(meta.pageConfigured) || metaAccount.permissions.pageConnected,
+          instagramConnected: Boolean(meta.instagramActorConfigured) || metaAccount.permissions.instagramConnected,
           manualApproval: true,
         },
       };
@@ -1677,10 +1677,10 @@ export default function AdminCenter() {
     const metaSummary = health?.meta;
     const metaEnvFound = Boolean(
       metaSummary?.configured ||
-        metaSummary?.businessId ||
-        metaSummary?.adAccountId ||
-        metaSummary?.pageId ||
-        metaSummary?.instagramActorId ||
+        metaSummary?.businessIdConfigured ||
+        metaSummary?.adAccountConfigured ||
+        metaSummary?.pageConfigured ||
+        metaSummary?.instagramActorConfigured ||
         metaSummary?.hasAccessToken ||
         metaSummary?.hasAppSecret,
     );

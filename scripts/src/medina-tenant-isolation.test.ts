@@ -651,6 +651,35 @@ test("K4 configuration resources remain administrator-only", async () => {
   });
 });
 
+test("K4b diagnostics report presence, never names or identifier values", async () => {
+  // Before Security-2B /api/crm/health was public. It is administrator-only now,
+  // but it still listed every expected environment variable by name and echoed
+  // the platform's Meta account identifiers. Both are removed: a diagnostics
+  // endpoint reports whether things are configured, not what they are.
+  const server = await readFile(serverPath, "utf8");
+  const envFn = server.slice(server.indexOf("function envStatus"), server.indexOf("function singleEnvStatus"));
+  assert.ok(!envFn.includes("keys: keys.map"), "envStatus must not enumerate variable names");
+  assert.ok(envFn.includes("configured: configured.length"), "a coarse configured count is still reported");
+
+  const meta = server.slice(server.indexOf("const safeMeta = {"), server.indexOf("secrets: \"masked\""));
+  for (const leaked of [
+    'businessId: readEnvValue',
+    'adAccountId: readEnvValue',
+    'pageId: readEnvValue',
+    'instagramActorId: readEnvValue',
+  ]) {
+    assert.ok(!meta.includes(leaked), `health must not return the value of ${leaked.split(":")[0]}`);
+  }
+  for (const flag of [
+    "businessIdConfigured",
+    "adAccountConfigured",
+    "pageConfigured",
+    "instagramActorConfigured",
+  ]) {
+    assert.ok(meta.includes(flag), `health must report ${flag} as presence only`);
+  }
+});
+
 test("K5 the Meta payload semantics are untouched by this phase", async () => {
   const payload = await readFile(path.join(repoRoot, "lib", "crm", "meta-launch-payload.ts"), "utf8");
   assert.ok(payload.includes('placementsMode: "instagram_only"'), "Instagram-only placement flag retained");
