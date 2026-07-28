@@ -19,14 +19,26 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { PageLayout } from "@/components/layout/PageLayout";
-import { apiUrl } from "@/lib/api";
+import { WorkQueue } from "@/components/dashboard/work-queue";
+import { RecentRecords } from "@/components/dashboard/recent-records";
+import { DistributionPanel } from "@/components/dashboard/distribution-panel";
+import { apiUrl, crmFetch } from "@/lib/api";
+import {
+  buildLeadSourceDistribution,
+  buildNewLeadsQueue,
+  buildPendingDealsQueue,
+  buildRecentRecords,
+  buildUpcomingAppointmentsQueue,
+  type DashboardRecord,
+} from "@/lib/dashboardData";
 import { readDemoStorage, isRealWorkspace, readWorkspaceId } from "@/lib/demoStorage";
 import { semanticGroupForLead } from "@/lib/leadPipeline";
-import { defaultThemePresetId, getThemePreset } from "@/lib/themePresets";
 
-// AI Control Center uses real workspace-scoped CRM collections and system health.
-// Revenue comes only from paid deals for the current local date. Recommendations
-// are rule-based operational signals, not AI predictions or campaign analytics.
+// Операционный обзор (Medina OS UI-2) uses real workspace-scoped CRM
+// collections and system health. Revenue comes only from paid deals for the
+// current local date. Recommendations are rule-based operational signals, not
+// AI predictions or campaign analytics. Work queues and recent records reuse
+// the same single set of CRM responses — no extra requests.
 
 const EMPTY_METRIC_HINT = "Данные появятся после подключения CRM.";
 
@@ -118,7 +130,7 @@ const launchModeLabel: Record<LaunchMode, string> = {
 
 async function fetchJson(path: string): Promise<{ ok: boolean; body: Record<string, unknown> }> {
   try {
-    const response = await fetch(apiUrl(path));
+    const response = await crmFetch(path);
     const text = await response.text();
     const body = text ? (JSON.parse(text) as Record<string, unknown>) : {};
     return { ok: response.ok, body };
@@ -298,9 +310,23 @@ function SectionTitle({ children, hint }: { children: ReactNode; hint?: string }
 
 const chipStyle: CSSProperties = { borderRadius: 999, padding: "4px 12px", fontSize: 11, fontWeight: 800 };
 
+const ONBOARDING_HINT_KEY = "negis_onboarding_hint_dismissed";
+
 export default function AiControlCenter() {
-  const theme = getThemePreset(defaultThemePresetId);
   const todayLabel = new Date().toLocaleDateString("ru-RU", { day: "numeric", month: "long" });
+  // Commercial-2: dismissible onboarding reminder. Dismissal only hides this
+  // card — step completion is derived from real data on /onboarding.
+  const [showOnboardingHint, setShowOnboardingHint] = useState(
+    () => typeof window !== "undefined" && window.localStorage.getItem(ONBOARDING_HINT_KEY) !== "1",
+  );
+  const dismissOnboardingHint = () => {
+    setShowOnboardingHint(false);
+    try {
+      window.localStorage.setItem(ONBOARDING_HINT_KEY, "1");
+    } catch {
+      // Storage unavailable — the card simply reappears next visit.
+    }
+  };
 
   const [loading, setLoading] = useState(true);
   const [launchesLoaded, setLaunchesLoaded] = useState(false);
@@ -313,6 +339,14 @@ export default function AiControlCenter() {
   const [clientsState, setClientsState] = useState<HealthState>("loading");
   const [appointmentsState, setAppointmentsState] = useState<HealthState>("loading");
   const [dealsState, setDealsState] = useState<HealthState>("loading");
+  // UI-2: keep the fetched records for work queues, recency, and distribution.
+  // Same responses as the counters — no additional requests.
+  const [crmRecords, setCrmRecords] = useState<{
+    leads: DashboardRecord[];
+    clients: DashboardRecord[];
+    appointments: DashboardRecord[];
+    deals: DashboardRecord[];
+  }>({ leads: [], clients: [], appointments: [], deals: [] });
   const [crmCounts, setCrmCounts] = useState({
     newLeads: 0,
     unprocessedLeads: 0,
@@ -353,6 +387,12 @@ export default function AiControlCenter() {
       setClientsState(clientsRes.responded ? "ready" : "unknown");
       setAppointmentsState(appointmentsRes.responded ? "ready" : "unknown");
       setDealsState(dealsRes.responded ? "ready" : "unknown");
+      setCrmRecords({
+        leads: leadsRes.items,
+        clients: clientsRes.items,
+        appointments: appointmentsRes.items,
+        deals: dealsRes.items,
+      });
       const paidDealsToday = dealsRes.items.filter((deal) =>
         str(deal.status).toLowerCase() === "paid"
         && isTodayDate(str(deal.paidAt) || str(deal.paid_at)),
@@ -434,6 +474,19 @@ export default function AiControlCenter() {
   const latest = launches[0];
   const latestMode = latest ? classifyLaunch(latest) : null;
   const failedCount = launches.filter((item) => classifyLaunch(item) === "failed").length;
+
+  // UI-2 work queues and honest recency — pure derivations over the fetched records.
+  const todayIso = new Date().toISOString();
+  const newLeadsQueue = buildNewLeadsQueue(crmRecords.leads);
+  const upcomingAppointmentsQueue = buildUpcomingAppointmentsQueue(crmRecords.appointments, todayIso);
+  const pendingDealsQueue = buildPendingDealsQueue(crmRecords.deals);
+  const recentRecords = buildRecentRecords({
+    lead: crmRecords.leads,
+    client: crmRecords.clients,
+    appointment: crmRecords.appointments,
+    deal: crmRecords.deals,
+  });
+  const leadSourceSlices = buildLeadSourceDistribution(crmRecords.leads);
 
   // CRM metric helper: value only when the endpoint responded, honest "Не удалось
   // проверить" when it failed — never invented numbers.
@@ -606,24 +659,36 @@ export default function AiControlCenter() {
   return (
     <PageLayout>
       <div className="mx-auto max-w-6xl space-y-6 px-4 py-6 sm:px-6">
-        {/* 1. Hero */}
-        <header className="negis-glass-hero p-5 sm:p-6">
+        {/* 1. Page header */}
+        <header className="flex flex-col gap-2 border-b pb-5" style={{ borderColor: "var(--negis-border)" }}>
           <div className="flex flex-wrap items-center gap-2">
-            <span style={{ ...chipStyle, background: "var(--negis-primary-soft)", color: "var(--negis-primary)" }}>Negis OS</span>
-            <span style={{ ...chipStyle, background: "rgba(37,99,235,0.10)", color: "var(--negis-secondary)" }}>Сегодня · {todayLabel}</span>
-            {theme ? <span style={{ ...chipStyle, background: "rgba(124,58,237,0.10)", color: "var(--negis-ai)" }}>Glass AI</span> : null}
+            <span className="text-xs font-semibold uppercase tracking-[0.08em]" style={{ color: "var(--negis-primary)" }}>Medina OS</span>
+            <span aria-hidden style={{ color: "var(--negis-border)" }}>·</span>
+            <span className="text-xs font-medium" style={{ color: "var(--negis-muted)" }}>Сегодня · {todayLabel}</span>
           </div>
-          <h1 className="mt-3 text-3xl font-black" style={{ color: "var(--negis-text)" }}>AI Control Center</h1>
-          <p className="mt-2 max-w-3xl text-sm leading-relaxed" style={{ color: "var(--negis-muted)" }}>
-            Главная картина клиники: заявки, реклама, записи, продажи и AI-рекомендации.
+          <h1 className="text-2xl font-semibold leading-tight" style={{ color: "var(--negis-text)" }}>Операционный обзор</h1>
+          <p className="max-w-3xl text-sm leading-relaxed" style={{ color: "var(--negis-muted)" }}>
+            Заявки, записи, продажи, реклама и состояние систем — реальные данные текущей клиники.
           </p>
-          <div className="mt-3 flex items-start gap-2 rounded-2xl p-3" style={{ background: "rgba(124,58,237,0.06)" }}>
-            <Bot size={16} className="mt-0.5" style={{ color: "var(--negis-ai)" }} />
-            <p className="text-xs font-semibold leading-relaxed" style={{ color: "var(--negis-muted)" }}>
-              AI помогает находить действия, но важные решения подтверждает пользователь.
-            </p>
-          </div>
         </header>
+
+        {/* Commercial-2: onboarding entry card (dismissible; never marks setup done) */}
+        {showOnboardingHint ? (
+          <section className="neu flex flex-wrap items-center justify-between gap-3 p-4" aria-label="Настройка клиники">
+            <p className="min-w-0 text-sm" style={{ color: "var(--negis-muted)" }}>
+              <span className="font-semibold" style={{ color: "var(--negis-text)" }}>Продолжите настройку клиники.</span>{" "}
+              Профиль, сотрудники и первая заявка — статусы шагов рассчитываются по реальным данным.
+            </p>
+            <div className="flex shrink-0 gap-2">
+              <Link href="/onboarding">
+                <span className="neu-btn-primary inline-flex cursor-pointer items-center text-sm">Открыть настройку</span>
+              </Link>
+              <button type="button" className="neu-btn text-sm" onClick={dismissOnboardingHint}>
+                Скрыть
+              </button>
+            </div>
+          </section>
+        ) : null}
 
         {/* 2. Today metrics */}
         <section>
@@ -643,9 +708,9 @@ export default function AiControlCenter() {
           </div>
         </section>
 
-        {/* 3. Operational recommendations */}
+        {/* 3. Attention summary — rule-based signals from real data */}
         <section>
-          <SectionTitle hint="Рекомендации формируются по данным CRM и системным статусам, без AI-прогнозов.">AI-рекомендации</SectionTitle>
+          <SectionTitle hint="Рекомендации формируются по данным CRM и системным статусам, без AI-прогнозов.">Требует внимания</SectionTitle>
           {loading ? (
             <div className="negis-glass p-5 text-sm font-semibold" style={{ color: "var(--negis-muted)" }}>Проверяем статусы…</div>
           ) : recommendations.length > 0 ? (
@@ -660,6 +725,45 @@ export default function AiControlCenter() {
             </div>
           )}
         </section>
+
+        {/* 3b. Work queues — same CRM responses, no extra requests */}
+        <section>
+          <SectionTitle hint="Ближайшая работа по реальным записям CRM.">Очереди работы</SectionTitle>
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+            <WorkQueue
+              title="Новые заявки"
+              items={newLeadsQueue}
+              loading={loading}
+              emptyText="Новых заявок нет."
+              href="/leads"
+            />
+            <WorkQueue
+              title="Ближайшие записи"
+              items={upcomingAppointmentsQueue}
+              loading={loading}
+              emptyText="Запланированных записей нет."
+              href="/appointments"
+            />
+            <WorkQueue
+              title="Неоплаченные продажи"
+              items={pendingDealsQueue}
+              loading={loading}
+              emptyText="Продаж в ожидании оплаты нет."
+              href="/sales"
+            />
+          </div>
+        </section>
+
+        {/* 3c. Distribution + honest recency */}
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+          <DistributionPanel
+            title="Заявки по источникам"
+            hint="Распределение всех загруженных заявок по источнику обращения."
+            slices={leadSourceSlices}
+            loading={loading}
+          />
+          <RecentRecords records={recentRecords} loading={loading} />
+        </div>
 
         {/* 4. Quick actions */}
         <section className="negis-glass p-5">
@@ -677,7 +781,7 @@ export default function AiControlCenter() {
 
         {/* 5. Business flow strip */}
         <section className="negis-glass p-5">
-          <SectionTitle hint="Стратегическая цепочка Negis OS.">Путь клиента</SectionTitle>
+          <SectionTitle hint="Операционная цепочка клиники.">Путь клиента</SectionTitle>
           <div className="flex flex-wrap items-stretch gap-2">
             {flowSteps.map((step, index) => (
               <div key={step.label} className="flex items-center gap-2">
@@ -710,7 +814,7 @@ export default function AiControlCenter() {
               <p className="mt-3 text-sm font-semibold" style={{ color: "var(--negis-text)" }}>Запусков пока нет.</p>
             )}
             <p className="mt-2 text-sm font-semibold leading-relaxed" style={{ color: "var(--negis-muted)" }}>
-              Реклама в Negis OS создаётся выключенной. Включить её можно вручную в Meta Ads Manager.
+              Реклама в Medina OS создаётся выключенной. Включить её можно вручную в Meta Ads Manager.
             </p>
             <div className="mt-4 flex flex-wrap gap-2">
               <Link href="/ads-automation">
@@ -741,17 +845,8 @@ export default function AiControlCenter() {
               {/* CRM7: leads can link to launch records; CPL/analytics come later. */}
               <HealthRow label="Атрибуция рекламы" state={leadsState === "ready" && launchesLoaded ? "partial" : "pending"} />
               <HealthRow label="Продажи" state={dealsState} />
-              <HealthRow label="AI-рекомендации" state="partial" />
             </div>
-            <p className="mt-4 flex items-center gap-2 text-xs font-semibold" style={{ color: "var(--negis-muted)" }}>
-              <MessageCircle size={14} style={{ color: "var(--negis-primary)" }} />
-              Полный AI-слой подключается по мере готовности проверенных данных.
-            </p>
           </section>
-        </div>
-
-        <div className="rounded-2xl border p-4 text-sm font-semibold" style={{ borderColor: "var(--negis-warning)", background: "rgba(245,158,11,0.10)", color: "#8A5A00" }}>
-          Полный AI Control Center собирается поэтапно: метрики и AI-рекомендации подключаются по мере готовности данных.
         </div>
       </div>
     </PageLayout>

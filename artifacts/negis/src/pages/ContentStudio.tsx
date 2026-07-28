@@ -18,8 +18,9 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { PageLayout } from "@/components/layout/PageLayout";
-import { apiUrl } from "@/lib/api";
+import { apiUrl, crmFetch } from "@/lib/api";
 import { supabase, hasSupabaseFrontendEnv } from "@/lib/supabase";
+import { readWorkspaceId } from "@/lib/demoStorage";
 import { checkMetaCompliance } from "../../../../lib/meta/compliance";
 import type { ContentPackage } from "../../../../lib/content-studio/core";
 
@@ -420,16 +421,6 @@ async function safeJson<TData>(response: Response): Promise<ApiResponse<TData> |
   }
 }
 
-function readWorkspaceId(): string {
-  try {
-    const raw = localStorage.getItem("negis_demo_workspace");
-    if (!raw) return "demo-workspace";
-    const workspace = JSON.parse(raw) as { id?: unknown };
-    return typeof workspace.id === "string" && workspace.id.trim() ? workspace.id.trim() : "demo-workspace";
-  } catch {
-    return "demo-workspace";
-  }
-}
 
 function readVideos(): ContentVideo[] {
   try {
@@ -683,7 +674,7 @@ export default function ContentStudio() {
       let fileName = `photo-creative-${Date.now()}.jpg`;
       if (hasSupabaseFrontendEnv) {
         try {
-          const signedResponse = await fetch(apiUrl("/api/crm/ad-creatives/signed-upload"), {
+          const signedResponse = await crmFetch("/api/crm/ad-creatives/signed-upload", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -729,7 +720,7 @@ export default function ContentStudio() {
 
       // Persist metadata: content_videos keeps the whole body in raw_payload.
       try {
-        await fetch(apiUrl("/api/crm/content-videos"), {
+        await crmFetch("/api/crm/content-videos", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -818,7 +809,7 @@ export default function ContentStudio() {
 
       // Persist the package: content_videos stores the whole body in raw_payload.
       try {
-        const saveResponse = await fetch(apiUrl("/api/crm/content-videos"), {
+        const saveResponse = await crmFetch("/api/crm/content-videos", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -894,7 +885,7 @@ export default function ContentStudio() {
     const loadApiVideos = async () => {
       try {
         const workspaceId = readWorkspaceId();
-        const response = await fetch(apiUrl(`/api/crm/content-videos?workspaceId=${encodeURIComponent(workspaceId)}`));
+        const response = await crmFetch(`/api/crm/content-videos?workspaceId=${encodeURIComponent(workspaceId)}`);
         const body = await safeJson<{ videos?: ContentVideo[]; items?: ContentVideo[] }>(response);
         if (!response.ok || body?.success !== true || body.mode !== "supabase") return;
 
@@ -943,7 +934,7 @@ export default function ContentStudio() {
 
   const persistCurrentVideoPatch = async (videoId: string, patch: Partial<ContentVideo>) => {
     try {
-      await fetch(apiUrl("/api/crm/content-videos"), {
+      await crmFetch("/api/crm/content-videos", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -967,7 +958,7 @@ export default function ContentStudio() {
     setNotice("");
 
     try {
-      const response = await fetch(apiUrl("/api/crm/content-videos"), {
+      const response = await crmFetch("/api/crm/content-videos", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

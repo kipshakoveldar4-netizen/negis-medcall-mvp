@@ -162,15 +162,16 @@ export default function Landing() {
   const handleLogin = async (data: LoginValues) => {
     setIsLoading(true); setError('');
     try {
-      const { data: authData, error } = await supabase.auth.signInWithPassword({
+      const { error } = await supabase.auth.signInWithPassword({
         email: data.email, password: data.password,
       });
       if (error) throw error;
-      const { data: roleRow } = await supabase
-        .from('user_roles').select('role')
-        .eq('user_id', authData.user?.id).single();
+      // Security-1A: the post-login role lookup used to read `user_roles`,
+      // which does not exist in production. Role and workspace are resolved by
+      // AuthContext through the server API (/api/crm/staff); we simply land on
+      // the default authenticated route and let that resolution drive access.
       closeModal();
-      setLocation(roleRoute(roleRow?.role ?? null));
+      setLocation(roleRoute(null));
     } catch (e: any) {
       setError(e.message || 'Ошибка входа');
     } finally { setIsLoading(false); }
@@ -350,14 +351,16 @@ export default function Landing() {
           }}
         >
           <div style={circleInner}>
-            <span style={{
+            {/* h1: the page's only heading — without it the landing had no
+                heading structure at all for crawlers and screen readers. */}
+            <h1 style={{
               fontFamily: "'Inter', system-ui, sans-serif", fontWeight: 500,
-              fontSize: 17, letterSpacing: '0.28em', color: '#475569',
+              fontSize: 15, letterSpacing: '0.18em', color: '#475569',
               textTransform: 'uppercase', userSelect: 'none', position: 'relative',
-              textShadow: '0 1px 0 rgba(255,255,255,0.70)',
+              textShadow: '0 1px 0 rgba(255,255,255,0.70)', margin: 0,
             }}>
-              NEGIS
-            </span>
+              MEDINA OS
+            </h1>
           </div>
         </button>
 
@@ -407,10 +410,10 @@ export default function Landing() {
             {/* Header */}
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 28 }}>
               <div style={{
-                background: '#DDE5EE', borderRadius: 8, padding: '5px 10px',
-                fontSize: 10, fontWeight: 600, letterSpacing: '0.18em', color: '#0B1220',
+                background: '#E4F2EF', borderRadius: 8, padding: '5px 10px',
+                fontSize: 10, fontWeight: 600, letterSpacing: '0.12em', color: '#0F766E',
                 fontFamily: "'Inter', sans-serif", textTransform: 'uppercase',
-              }}>NEGIS</div>
+              }}>MEDINA OS</div>
               <span style={{ fontSize: 12, color: '#94A3B8', letterSpacing: '0.06em', fontFamily: "'Inter', sans-serif" }}>
                 {modalLabel}
               </span>

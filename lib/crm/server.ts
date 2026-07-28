@@ -1,5 +1,11 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import { requireWorkspaceAdmin, WorkspaceAdminAuthError } from "../auth/server";
+import { canAssignRole, isStaffRole } from "../auth/permissions";
+import {
+  listAuthContextMemberships,
+  requireWorkspaceAdmin,
+  WorkspaceAdminAuthError,
+  type WorkspaceAccessContext,
+} from "../auth/server";
 import {
   META_INSIGHTS_BACKGROUND_CYCLE_PATH,
   WORKER_REQUEST_ID_HEADER,
@@ -10,6 +16,10 @@ import {
   type VerifiedWorkerRequest,
   type WorkerAuthConfig,
 } from "../auth/worker";
+import {
+  buildMetaLaunchPayloadPreview,
+  type MetaLaunchPayloadOptions,
+} from "./meta-launch-payload";
 import { evaluateMetaInsightsCompleteness } from "../meta/insightsCompleteness";
 import { getSupabaseServerClient } from "../supabase/server";
 import { checkMetaCompliance } from "../meta/compliance";
@@ -258,6 +268,27 @@ function maybeDate(value: unknown): string | null {
   if (!text) return null;
   const date = new Date(text);
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+// Security-2B: columns the browser may never set on an update. workspace_id is
+// the tenant itself, id and created_at identify the row, and auth_user_id is the
+// link to a Supabase Auth identity — accepting it would let a caller bind
+// someone else's login to a privileged staff row.
+const SERVER_OWNED_COLUMNS = new Set([
+  "id",
+  "workspace_id",
+  "workspaceId",
+  "auth_user_id",
+  "authUserId",
+  "created_at",
+  "createdAt",
+]);
+
+function stripServerOwnedColumns(row: JsonRecord): JsonRecord {
+  for (const column of Object.keys(row)) {
+    if (SERVER_OWNED_COLUMNS.has(column)) delete row[column];
+  }
+  return row;
 }
 
 function buildPatchRow(resource: CrmResource, body: JsonRecord): JsonRecord {
@@ -540,7 +571,9 @@ function buildPatchRow(resource: CrmResource, body: JsonRecord): JsonRecord {
     row.updated_at = new Date().toISOString();
   }
 
-  return Object.fromEntries(Object.entries(row).filter(([, value]) => value !== undefined));
+  return stripServerOwnedColumns(
+    Object.fromEntries(Object.entries(row).filter(([, value]) => value !== undefined)),
+  );
 }
 
 function nextDemoId(prefix: string): string {
@@ -569,10 +602,30 @@ function errorBody(error: string, details: string[] = []) {
   };
 }
 
-function readWorkspaceId(req: VercelRequest, body: JsonRecord): string {
-  const queryValue = req.query.workspaceId ?? req.query.workspace_id;
-  const queryWorkspaceId = Array.isArray(queryValue) ? queryValue[0] : queryValue;
-  return firstString(body.workspaceId, body.workspace_id, queryWorkspaceId, DEMO_WORKSPACE_ID);
+// Security-2B: the tenant comes from the verified workspace context the router
+// attached after JWT + membership verification. The browser can still send a
+// workspaceId, but it is only a selector consumed by lib/auth/server.ts when the
+// context is built; past this point it has no effect at all.
+const WORKSPACE_CONTEXT_KEY = "__medinaWorkspaceContext" as const;
+
+type RequestWithWorkspaceContext = VercelRequest & {
+  [WORKSPACE_CONTEXT_KEY]?: WorkspaceAccessContext;
+};
+
+export function attachWorkspaceContext(req: VercelRequest, context: WorkspaceAccessContext): void {
+  (req as RequestWithWorkspaceContext)[WORKSPACE_CONTEXT_KEY] = context;
+}
+
+export function readWorkspaceContext(req: VercelRequest): WorkspaceAccessContext | null {
+  return (req as RequestWithWorkspaceContext)[WORKSPACE_CONTEXT_KEY] ?? null;
+}
+
+function readWorkspaceId(req: VercelRequest, _body: JsonRecord): string {
+  const context = readWorkspaceContext(req);
+  // No context means the router did not authorize this request. Returning the
+  // demo sentinel keeps every handler on its non-database branch instead of
+  // silently querying with a browser-supplied tenant.
+  return context ? context.workspaceId : DEMO_WORKSPACE_ID;
 }
 
 function validationDetails(body: JsonRecord, fields: string[]): string[] {
@@ -674,14 +727,13 @@ function envStatus(keys: string[]) {
         ? "partial"
         : "not_configured";
 
+  // Security-2C: only the coarse count is reported. The per-key array named
+  // every environment variable the deployment expects, which told a reader
+  // exactly which secrets exist and which are missing.
   return {
     status,
     configured: configured.length,
     total: keys.length,
-    keys: keys.map((key) => ({
-      key,
-      configured: Boolean(process.env[key]?.trim()),
-    })),
   };
 }
 
@@ -1839,10 +1891,12 @@ async function buildDealReferenceRow(
 async function listItems(resource: CrmResource, req: VercelRequest, res: VercelResponse) {
   const config = configs[resource];
   const workspaceId = readWorkspaceId(req, {});
-  const emailFilter = resource === "staff" ? readQueryString(req.query.email).toLowerCase() : "";
+  // Security-2B: the ?email= lookup is gone. It answered for any address in any
+  // workspace and was how a caller discovered workspace_id, role and status.
+  // The current user is identified by the verified JWT via /api/crm/auth-context.
   const supabase = getSupabaseServerClient();
 
-  if (!supabase || (!emailFilter && !isUuid(workspaceId))) {
+  if (!supabase || !isUuid(workspaceId)) {
     return sendJson(
       res,
       200,
@@ -1856,11 +1910,7 @@ async function listItems(resource: CrmResource, req: VercelRequest, res: VercelR
       .select(config.selectColumns ?? "*")
       .order(config.sortableColumn, { ascending: config.sortableAscending ?? false });
 
-    if (emailFilter) {
-      query = query.eq("email", emailFilter).limit(1);
-    } else {
-      query = query.eq("workspace_id", workspaceId);
-    }
+    query = query.eq("workspace_id", workspaceId);
 
     const { data, error } = await query;
 
@@ -2056,6 +2106,45 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
   }
 }
 
+/**
+ * Security-2B staff update rules. The actor is the verified context; the target
+ * row must already have been fetched inside the acting workspace.
+ */
+function staffPatchRejection(
+  context: WorkspaceAccessContext,
+  targetRole: string,
+  targetStaffUserId: string,
+  requestedRole: string,
+): { status: number; message: string; code: string } | null {
+  const actorRole = context.role;
+
+  // Only owners may touch an owner row. An admin must not demote, rename or
+  // deactivate the account that can restore everything else.
+  if (targetRole === "owner" && actorRole !== "owner") {
+    return { status: 403, message: "Insufficient permissions", code: "permission_denied" };
+  }
+
+  if (!requestedRole) return null;
+
+  if (!isStaffRole(requestedRole)) {
+    return { status: 400, message: "Validation error", code: "invalid_role" };
+  }
+
+  // Self-promotion through the request body was the escalation Commercial-3A
+  // found; an actor may never change its own role here.
+  if (targetStaffUserId && targetStaffUserId === context.staffUserId) {
+    return { status: 403, message: "Insufficient permissions", code: "permission_denied" };
+  }
+
+  // owner is never assignable through the generic endpoint, and no actor may
+  // grant a role at or above its own rank.
+  if (!canAssignRole(actorRole, requestedRole)) {
+    return { status: 403, message: "Insufficient permissions", code: "permission_denied" };
+  }
+
+  return null;
+}
+
 async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelResponse) {
   const config = configs[resource];
   const body = asRecord(req.body);
@@ -2091,6 +2180,61 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
   }
 
   try {
+    if (resource === "staff") {
+      const context = readWorkspaceContext(req);
+      if (!context) {
+        return sendJson(res, 403, { success: false, error: "Access denied", code: "workspace_access_denied" });
+      }
+
+      // Read the target inside the acting workspace. A foreign or missing id is
+      // reported identically so membership in another clinic never leaks.
+      const { data: targetData, error: targetError } = await supabase
+        .from("staff_users")
+        .select("id, role, status")
+        .eq("id", id)
+        .eq("workspace_id", workspaceId)
+        .maybeSingle();
+
+      if (targetError || !targetData) {
+        return sendJson(res, 404, { success: false, error: "Resource not found", code: "resource_not_found" });
+      }
+
+      const target = asRecord(targetData);
+      const targetRole = readString(target.role).toLowerCase();
+      const requestedRole = readString(patchBody.role).toLowerCase();
+      const rejection = staffPatchRejection(context, targetRole, readString(target.id), requestedRole);
+      if (rejection) {
+        return sendJson(res, rejection.status, {
+          success: false,
+          error: rejection.message,
+          code: rejection.code,
+        });
+      }
+
+      // Last-owner protection. The generic endpoint refuses any change that
+      // could remove the final active owner; a safe atomic flow for that belongs
+      // to a dedicated ownership-transfer path, not to a field update.
+      if (targetRole === "owner") {
+        const demoting = Boolean(requestedRole) && requestedRole !== "owner";
+        const deactivating = readString(patchBody.status).toLowerCase() === "inactive";
+        if (demoting || deactivating) {
+          const { count, error: countError } = await supabase
+            .from("staff_users")
+            .select("id", { count: "exact", head: true })
+            .eq("workspace_id", workspaceId)
+            .eq("role", "owner")
+            .eq("status", "active");
+          if (countError || (count ?? 0) <= 1) {
+            return sendJson(res, 409, {
+              success: false,
+              error: "The last active owner cannot be removed",
+              code: "last_owner_protected",
+            });
+          }
+        }
+      }
+    }
+
     const row = buildPatchRow(resource, patchBody);
     if (resource === "leads") {
       Object.assign(row, await buildLeadReferenceRow(supabase, workspaceId, patchBody));
@@ -3823,146 +3967,15 @@ type ResolvedMetaLaunchBody = ReturnType<typeof buildMetaLaunchBody> & {
 function buildMetaPayloadPreview(
   launch: ResolvedMetaLaunchBody,
   campaignId = "META_CAMPAIGN_ID",
-  creativeOptions: {
-    usesInstagramActor?: boolean;
-    instagramActorFallback?: boolean;
-    imageUploadMode?: "adimages" | "picture_url";
-    imageHash?: boolean;
-    pictureUrl?: boolean;
-    imageUploadCapabilityFallback?: boolean;
-    omitInstagramPositions?: boolean;
-    videoId?: string;
-    videoUploadMode?: string;
-    videoProcessingStatus?: string;
-    videoWarnings?: string[];
-  } = {},
+  creativeOptions: MetaLaunchPayloadOptions = {},
 ): JsonRecord {
-  const assetFileType = launch.creativeType === "video" ? "video" : "image";
-  const usesLinkData = assetFileType === "image";
-  const usesVideoData = assetFileType === "video";
-  const imageHashExpected = usesLinkData && Boolean(launch.imageUrl || launch.creativeUrl);
-  const imageUploadMode = usesLinkData ? creativeOptions.imageUploadMode || "adimages" : undefined;
-  const imageUploadCapabilityFallback = Boolean(creativeOptions.imageUploadCapabilityFallback);
-  const pictureUrlExpected =
-    usesLinkData && (creativeOptions.pictureUrl ?? imageUploadMode === "picture_url");
-  const campaign = buildMetaCampaignPayload({
-    campaignName: launch.campaignName,
-    objective: launch.objective,
-    status: launch.statusMode,
-    dailyBudgetMinor: launch.dailyBudgetMinor,
-    lifetimeBudgetMinor: launch.totalBudgetMinor,
-    currency: launch.currency,
-    primaryText: launch.primaryText,
-    headline: launch.headline,
-    description: launch.description,
-    cta: launch.cta,
-    landingUrl: launch.landingUrl,
-    imageUrl: assetFileType === "image" ? launch.imageUrl || launch.creativeUrl : "",
-    creativeType: launch.creativeType,
-    videoUrl: assetFileType === "video" ? launch.videoUrl || launch.creativeUrl : "",
-    videoId: assetFileType === "video" ? launch.videoId : "",
-    thumbnailUrl: launch.thumbnailUrl,
-    startTime: launch.startDate,
-    endTime: launch.endDate || undefined,
-    city: launch.city,
-    selectedCityId: launch.selectedCityId,
-    selectedCityLabelRu: launch.selectedCityLabelRu,
-    selectedCityCanonicalName: launch.selectedCityCanonicalName,
-    audienceLabel: launch.audienceLabel,
-    launchTimestamp: launch.launchTimestamp,
-    adSetName: launch.adSetName,
-    creativeName: launch.creativeName,
-    adName: launch.adName,
-    metaCityKey: launch.metaCityKey,
-    astanaCityKey: launch.astanaCityKey,
-    targetingResolution: launch.targetingResolution,
-    omitInstagramPositions: creativeOptions.omitInstagramPositions,
+  // Security-2A: the builder itself lives in ./meta-launch-payload so the Meta
+  // safety invariants can be asserted without an HTTP request. This wrapper is
+  // the only place that reads the environment for it, keeping that module pure.
+  return buildMetaLaunchPayloadPreview(launch, campaignId, {
+    ...creativeOptions,
+    videoLaunchEnabled: isMetaVideoLaunchEnabled(),
   });
-
-  const adSet = buildMetaAdSetPayload({
-    campaignName: launch.campaignName,
-    objective: launch.objective,
-    status: launch.statusMode,
-    dailyBudgetMinor: launch.dailyBudgetMinor,
-    lifetimeBudgetMinor: launch.totalBudgetMinor,
-    currency: launch.currency,
-    primaryText: launch.primaryText,
-    headline: launch.headline,
-    description: launch.description,
-    cta: launch.cta,
-    landingUrl: launch.landingUrl,
-    imageUrl: assetFileType === "image" ? launch.imageUrl || launch.creativeUrl : "",
-    creativeType: launch.creativeType,
-    videoUrl: assetFileType === "video" ? launch.videoUrl || launch.creativeUrl : "",
-    videoId: assetFileType === "video" ? launch.videoId : "",
-    thumbnailUrl: launch.thumbnailUrl,
-    startTime: launch.startDate,
-    endTime: launch.endDate || undefined,
-    campaignId,
-    city: launch.city,
-    selectedCityId: launch.selectedCityId,
-    selectedCityLabelRu: launch.selectedCityLabelRu,
-    selectedCityCanonicalName: launch.selectedCityCanonicalName,
-    audienceLabel: launch.audienceLabel,
-    launchTimestamp: launch.launchTimestamp,
-    adSetName: launch.adSetName,
-    creativeName: launch.creativeName,
-    adName: launch.adName,
-    metaCityKey: launch.metaCityKey,
-    astanaCityKey: launch.astanaCityKey,
-    targetingResolution: launch.targetingResolution,
-    omitInstagramPositions: creativeOptions.omitInstagramPositions,
-  });
-  const targetingDebug = buildMetaTargetingDebug({
-    resolution: launch.targetingResolution,
-    omitInstagramPositions: creativeOptions.omitInstagramPositions,
-  });
-
-  return {
-    campaign,
-    adSet: {
-      ...adSet,
-      targetingDebug,
-      placementsMode: "instagram_only",
-    },
-    creative: {
-      name: launch.creativeName,
-      asset: { fileType: assetFileType },
-      objectStorySpecType: usesLinkData ? "link_data" : "video_data",
-      imageUploadMode,
-      imageHash: creativeOptions.imageHash ?? (imageUploadMode === "adimages" ? imageHashExpected : false),
-      pictureUrl: pictureUrlExpected,
-      imageUploadCapabilityFallback,
-      usesVideoData,
-      usesLinkData,
-      videoLaunchEnabled: isMetaVideoLaunchEnabled(),
-      metaVideoLaunchStatus: assetFileType === "video" ? (isMetaVideoLaunchEnabled() ? "experimental" : "soon") : "not_applicable",
-      videoDataHasImageUrl:
-        assetFileType === "video"
-          ? Boolean(resolveVideoThumbnailUrl({ thumbnailUrl: launch.thumbnailUrl, videoUrl: launch.videoUrl || launch.creativeUrl }))
-          : false,
-      video: {
-        mimeType: assetFileType === "video" ? launch.mimeType || "" : "",
-        fileName: assetFileType === "video" ? launch.fileName || "" : "",
-        uploadMode: assetFileType === "video" ? creativeOptions.videoUploadMode || "" : "",
-        videoId: assetFileType === "video" ? Boolean(creativeOptions.videoId || launch.videoId) : false,
-        processingStatus: assetFileType === "video" ? creativeOptions.videoProcessingStatus || "" : "",
-        launchEnabled: assetFileType === "video" ? isMetaVideoLaunchEnabled() : false,
-        thumbnailUrl: assetFileType === "video" ? Boolean(resolveVideoThumbnailUrl({ thumbnailUrl: launch.thumbnailUrl, videoUrl: launch.videoUrl || launch.creativeUrl })) : false,
-        thumbnailSource: assetFileType === "video" && launch.thumbnailUrl ? "auto_frame" : "",
-        warnings: assetFileType === "video" ? creativeOptions.videoWarnings || [] : [],
-      },
-      usesInstagramActor: creativeOptions.usesInstagramActor ?? Boolean(launch.instagramActorId),
-      instagramActorFallback: creativeOptions.instagramActorFallback ?? false,
-    },
-    ad: {
-      name: launch.adName,
-      status: launch.statusMode,
-    },
-    launchTimestamp: launch.launchTimestamp,
-    budgetLevel: "adset",
-    warnings: [launch.targetingResolution?.warning || ""].filter(Boolean),
-  };
 }
 
 async function persistMetaLaunch(input: {
@@ -4684,10 +4697,13 @@ export async function handleCrmHealth(req: VercelRequest, res: VercelResponse) {
       Boolean(readEnvValue("META_INSTAGRAM_ACTOR_ID")) &&
       Boolean(readEnvValue("META_ACCESS_TOKEN")) &&
       Boolean(readEnvValue("META_APP_SECRET")),
-    businessId: readEnvValue("META_BUSINESS_ID"),
-    adAccountId: readEnvValue("META_AD_ACCOUNT_ID"),
-    pageId: readEnvValue("META_PAGE_ID"),
-    instagramActorId: readEnvValue("META_INSTAGRAM_ACTOR_ID"),
+    // Presence only. These are the platform's Meta account identifiers; a
+    // clinic administrator has no reason to read them, and a per-workspace
+    // record already carries the clinic's own values.
+    businessIdConfigured: Boolean(readEnvValue("META_BUSINESS_ID")),
+    adAccountConfigured: Boolean(readEnvValue("META_AD_ACCOUNT_ID")),
+    pageConfigured: Boolean(readEnvValue("META_PAGE_ID")),
+    instagramActorConfigured: Boolean(readEnvValue("META_INSTAGRAM_ACTOR_ID")),
     astanaCityKeyConfigured: Boolean(readEnvValue("META_ASTANA_CITY_KEY")),
     cityResolver: {
       staticCities: KZ_META_CITY_OPTIONS.map((city) => city.id),
@@ -6099,28 +6115,38 @@ export async function handleCrmAuthContext(req: VercelRequest, res: VercelRespon
     return sendJson(res, 405, errorBody("Method not allowed", ["Use GET"]));
   }
 
-  const workspaceId = readWorkspaceId(req, {});
-  if (!isUuid(workspaceId)) {
-    return sendJson(res, 400, errorBody("Validation error", ["workspaceId must be a UUID"]));
-  }
-
+  // Security-2B: identity bootstrap. The router already verified the JWT; this
+  // returns only the caller's own active memberships with server-computed
+  // permissions. No email lookup, no browser role, no impersonation input.
   try {
-    const context = await requireWorkspaceAdmin(req, workspaceId);
+    const { memberships } = await listAuthContextMemberships(req);
+    const safeMemberships = memberships.map((membership) => ({
+      staffUserId: membership.staffUserId,
+      workspaceId: membership.workspaceId,
+      role: membership.role,
+      permissions: membership.permissions,
+      status: "active",
+    }));
+
     return sendJson(
       res,
       200,
       success("supabase", {
-        workspaceId: context.workspaceId,
-        role: context.role,
-        staffUserId: context.staffUserId,
-        isAdmin: true,
+        memberships: safeMemberships,
+        // With exactly one membership the server may select it; with several the
+        // client must choose, so no workspace is implied here.
+        workspaceId: safeMemberships.length === 1 ? safeMemberships[0].workspaceId : null,
+        role: safeMemberships.length === 1 ? safeMemberships[0].role : null,
+        staffUserId: safeMemberships.length === 1 ? safeMemberships[0].staffUserId : null,
+        permissions: safeMemberships.length === 1 ? safeMemberships[0].permissions : [],
+        requiresWorkspaceSelection: safeMemberships.length > 1,
       }),
     );
   } catch (error) {
     if (error instanceof WorkspaceAdminAuthError) {
-      return sendJson(res, error.statusCode, errorBody(error.message));
+      return sendJson(res, error.statusCode, { success: false, error: error.message, code: error.code });
     }
-    return sendJson(res, 503, errorBody("Authorization service unavailable"));
+    return sendJson(res, 503, errorBody("Authentication service unavailable"));
   }
 }
 

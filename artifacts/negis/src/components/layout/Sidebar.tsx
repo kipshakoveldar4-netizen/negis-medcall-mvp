@@ -1,36 +1,66 @@
 import { useState } from 'react';
 import { Link, useLocation } from 'wouter';
-import { BadgeDollarSign, BarChart2, Bot, CalendarDays, Clapperboard, Inbox, LayoutDashboard, Rocket, Settings, Users, LogOut, X, Check, KeyRound, User, type LucideIcon } from 'lucide-react';
+import { BadgeDollarSign, BarChart2, CalendarDays, Clapperboard, Inbox, LayoutDashboard, Rocket, Settings, Users, LogOut, X, KeyRound, User, type LucideIcon } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
 import { supabase } from '@/lib/supabase';
 import { toast } from 'sonner';
 
-// Negis OS client information architecture (see docs/DESIGN-SYSTEM.md §5).
-// `future` items are visible but disabled — routes are built in later design tasks.
-type NavItem = { href: string; icon: LucideIcon; label: string; roles: string[]; future?: boolean };
+// Medina OS information architecture (UI-1). Groups map only to routes that
+// exist; role arrays are unchanged from the previous IA. The former disabled
+// "AI-сотрудники" item was removed — future modules are documented in the audit,
+// not rendered as dead navigation.
+// NOTE: this is one of the two navigation surfaces (the other is MobileNav).
+// Keep their route sets in sync — smoke-negis-routes.ts and
+// medina-commercial.test.ts assert on both files.
+type NavItem = { href: string; icon: LucideIcon; label: string; roles: string[] };
+type NavGroup = { title: string; items: NavItem[] };
 
-const NAV: NavItem[] = [
-  { href: '/ai-control-center', icon: LayoutDashboard, label: 'AI Control Center', roles: ['owner', 'manager'] },
-  { href: '/leads', icon: Inbox, label: 'Заявки', roles: ['owner', 'manager', 'agent'] },
-  { href: '/clients', icon: Users, label: 'CRM', roles: ['owner', 'manager', 'agent'] },
-  { href: '/appointments', icon: CalendarDays, label: 'Записи', roles: ['owner', 'manager', 'agent', 'booking_agent'] },
-  { href: '/sales', icon: BadgeDollarSign, label: 'Продажи', roles: ['owner', 'manager', 'agent'] },
-  { href: '/ads-automation', icon: Rocket, label: 'Реклама', roles: ['owner', 'manager'] },
-  { href: '/content-studio', icon: Clapperboard, label: 'Контент', roles: ['owner', 'manager'] },
-  { href: '/dashboard', icon: BarChart2, label: 'Аналитика', roles: ['owner', 'manager'] },
-  { href: '', icon: Bot, label: 'AI-сотрудники', roles: ['owner', 'manager'], future: true },
-  { href: '/admin', icon: Settings, label: 'Настройки', roles: ['owner', 'manager'] },
+const NAV_GROUPS: NavGroup[] = [
+  {
+    title: 'Обзор',
+    items: [
+      { href: '/ai-control-center', icon: LayoutDashboard, label: 'Главная', roles: ['owner', 'manager'] },
+      { href: '/dashboard', icon: BarChart2, label: 'Аналитика', roles: ['owner', 'manager'] },
+    ],
+  },
+  {
+    title: 'Операции',
+    items: [
+      { href: '/leads', icon: Inbox, label: 'Заявки', roles: ['owner', 'manager', 'agent'] },
+      { href: '/clients', icon: Users, label: 'Клиенты', roles: ['owner', 'manager', 'agent'] },
+      { href: '/appointments', icon: CalendarDays, label: 'Записи', roles: ['owner', 'manager', 'agent', 'booking_agent'] },
+      { href: '/sales', icon: BadgeDollarSign, label: 'Продажи', roles: ['owner', 'manager', 'agent'] },
+    ],
+  },
+  {
+    title: 'Рост',
+    items: [
+      { href: '/ads-automation', icon: Rocket, label: 'Реклама', roles: ['owner', 'manager'] },
+      { href: '/content-studio', icon: Clapperboard, label: 'Контент', roles: ['owner', 'manager'] },
+    ],
+  },
+  {
+    title: 'Управление',
+    items: [
+      { href: '/admin', icon: Settings, label: 'Настройки', roles: ['owner', 'manager'] },
+    ],
+  },
 ];
 
 export function Sidebar() {
   const [location] = useLocation();
-  const { signOut, user, userRole } = useAuth();
+  const { signOut, user, userRole, isDemoMode } = useAuth();
   const [showProfile, setShowProfile] = useState(false);
   const [fullName, setFullName] = useState(user?.user_metadata?.full_name ?? '');
   const [newPassword, setNewPassword] = useState('');
   const [saving, setSaving] = useState(false);
 
-  const filtered = NAV.filter(item => !userRole || userRole === 'owner' || userRole === 'manager' || userRole === 'admin' || item.roles.includes(userRole));
+  const canUse = (item: NavItem) =>
+    !userRole || userRole === 'owner' || userRole === 'manager' || userRole === 'admin' || item.roles.includes(userRole);
+  const visibleGroups = NAV_GROUPS
+    .map((group) => ({ ...group, items: group.items.filter(canUse) }))
+    .filter((group) => group.items.length > 0);
+
   const initials = (user?.user_metadata?.full_name ?? user?.email ?? 'U')
     .split(' ').map((w: string) => w[0]).join('').slice(0, 2).toUpperCase();
 
@@ -59,154 +89,84 @@ export function Sidebar() {
     } finally { setSaving(false); }
   };
 
-  const IS: React.CSSProperties = {
-    background: '#F4F7FB', border: '1px solid #E7ECF3', borderRadius: 10,
-    padding: '10px 13px', fontSize: 14, color: '#0B1220',
-    fontFamily: "'Inter', sans-serif", outline: 'none', width: '100%',
-    transition: 'border-color 0.15s ease, box-shadow 0.15s ease',
-  };
-
   return (
     <>
       <aside
-        className="fixed left-0 top-0 h-screen flex flex-col z-20 select-none"
-        style={{ width: 248, background: 'rgba(255,255,255,0.88)', borderRight: '1px solid #DDEBEA', boxShadow: '8px 0 28px rgba(15, 23, 42, 0.04)', backdropFilter: 'blur(18px)' }}
+        className="fixed left-0 top-0 z-20 flex h-screen w-[248px] select-none flex-col"
+        style={{ background: 'var(--medina-sidebar-bg)', borderRight: '1px solid var(--medina-sidebar-border)' }}
       >
-        {/* Logo */}
-        <div className="flex items-center gap-3 shrink-0 px-5" style={{ height: 78 }}>
+        {/* Brand */}
+        <div className="flex h-[64px] shrink-0 items-center gap-3 px-5" style={{ borderBottom: '1px solid var(--medina-sidebar-border)' }}>
           <div
-            className="flex h-11 w-11 items-center justify-center rounded-2xl"
-            style={{ background: '#DDF7F2', border: '1px solid #BDEBE2', color: '#0F766E', fontWeight: 900, letterSpacing: '0.08em' }}
+            aria-hidden
+            className="flex h-9 w-9 items-center justify-center rounded-lg text-sm font-bold"
+            style={{ background: 'var(--ng-primary)', color: '#FFFFFF' }}
           >
-            N
+            M
           </div>
           <div className="min-w-0">
-            <p className="text-sm font-black text-[#0F172A]">Negis OS</p>
-            <p className="mt-0.5 text-xs font-bold text-[#64748B]">AI Business OS для клиник</p>
+            <p className="truncate text-sm font-semibold" style={{ color: 'var(--medina-sidebar-text)' }}>Medina OS</p>
+            <p className="mt-0.5 truncate text-[11px] font-medium" style={{ color: 'var(--medina-sidebar-muted)' }}>
+              {isDemoMode ? 'Демо-режим' : 'Медицинская CRM'}
+            </p>
           </div>
         </div>
 
-        {/* Nav */}
-        <nav className="flex-1 flex flex-col gap-1.5 px-3 pt-2 pb-4">
-          {filtered.map(({ href, icon: Icon, label, future }) => {
-            if (future) {
-              return (
-                <div
-                  key={label}
-                  title="Появится на следующем этапе"
-                  style={{
-                    minHeight: 44,
-                    borderRadius: 16,
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 12,
-                    padding: '10px 13px',
-                    cursor: 'default',
-                    color: '#94A3B8',
-                    opacity: 0.75,
-                  }}
-                >
-                  <Icon size={20} strokeWidth={1.75} />
-                  <span className="truncate text-sm font-black">{label}</span>
-                  <span
-                    className="ml-auto rounded-full px-2 py-0.5 text-[10px] font-black uppercase tracking-[0.08em]"
-                    style={{ background: '#EEF2F7', color: '#94A3B8' }}
-                  >
-                    скоро
-                  </span>
-                </div>
-              );
-            }
-            const active = location === href || location.startsWith(href + '/');
-            return (
-              <Link key={href} href={href}>
-                <div
-                  title={label}
-                  className="control-node"
-                  data-active={active}
-                  style={{
-                    minHeight: 44,
-                    borderRadius: 16,
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 12,
-                    padding: '10px 13px',
-                    cursor: 'pointer', transition: 'all 0.15s ease',
-                    background: active ? '#ECFDF8' : 'transparent',
-                    border: active ? '1px solid #BDEBE2' : '1px solid transparent',
-                    boxShadow: active
-                      ? '0 8px 20px rgba(13,148,136,0.08), inset 0 1px 0 rgba(255,255,255,0.9)'
-                      : 'none',
-                    color: active ? '#0F766E' : '#64748B',
-                  }}
-                >
-                  <Icon size={20} strokeWidth={active ? 2 : 1.75} />
-                  <span className="truncate text-sm font-black">{label}</span>
-                </div>
-              </Link>
-            );
-          })}
+        {/* Navigation */}
+        <nav className="flex-1 overflow-y-auto px-3 pb-4 pt-3" aria-label="Основная навигация">
+          {visibleGroups.map((group) => (
+            <div key={group.title} className="mb-4">
+              <p className="px-2.5 pb-1.5 text-[11px] font-semibold uppercase tracking-[0.08em]" style={{ color: 'var(--medina-sidebar-muted)' }}>
+                {group.title}
+              </p>
+              <div className="flex flex-col gap-0.5">
+                {group.items.map(({ href, icon: Icon, label }) => {
+                  const active = location === href || location.startsWith(href + '/');
+                  return (
+                    <Link key={href} href={href}>
+                      <div
+                        className="flex min-h-[40px] cursor-pointer items-center gap-3 rounded-lg px-2.5 py-2 text-sm font-medium transition-colors"
+                        data-active={active}
+                        style={{
+                          background: active ? 'var(--medina-sidebar-active)' : 'transparent',
+                          color: active ? '#FFFFFF' : 'var(--medina-sidebar-muted)',
+                          boxShadow: active ? 'inset 2px 0 0 var(--ng-primary)' : 'none',
+                        }}
+                      >
+                        <Icon size={18} strokeWidth={active ? 2 : 1.75} aria-hidden />
+                        <span className="truncate">{label}</span>
+                      </div>
+                    </Link>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
         </nav>
 
-        {/* User + Signout */}
-        <div
-          className="shrink-0 flex items-center gap-3 px-4 pb-5 pt-3"
-          style={{ borderTop: '1px solid #DDEBEA' }}
-        >
-          {/* Avatar — clickable */}
+        {/* Profile */}
+        <div className="flex shrink-0 items-center gap-3 px-4 pb-4 pt-3" style={{ borderTop: '1px solid var(--medina-sidebar-border)' }}>
           <button
+            type="button"
             onClick={openProfile}
-            title="Профиль"
-            style={{
-              width: 36, height: 36, borderRadius: 10,
-              background: '#DDE5EE', border: '1px solid #E0E7EF',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              fontSize: 11, fontWeight: 600, color: '#1E325C',
-              letterSpacing: '0.04em', fontFamily: "'Inter', sans-serif",
-              cursor: 'pointer', transition: 'all 0.15s ease',
-            }}
-            onMouseEnter={e => {
-              (e.currentTarget as HTMLButtonElement).style.background = '#FFFFFF';
-              (e.currentTarget as HTMLButtonElement).style.boxShadow = '0 2px 8px rgba(15,23,42,0.10)';
-            }}
-            onMouseLeave={e => {
-              (e.currentTarget as HTMLButtonElement).style.background = '#DDE5EE';
-              (e.currentTarget as HTMLButtonElement).style.boxShadow = 'none';
-            }}
+            aria-label="Открыть профиль"
+            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-[11px] font-semibold transition-colors"
+            style={{ background: 'var(--medina-sidebar-border)', color: 'var(--medina-sidebar-text)' }}
           >
             {initials}
           </button>
-          <button
-            onClick={openProfile}
-            className="min-w-0 flex-1 text-left"
-            style={{ color: '#0F172A' }}
-          >
-            <p className="truncate text-sm font-black">{user?.user_metadata?.full_name || 'Профиль'}</p>
-            <p className="truncate text-xs font-semibold text-[#64748B]">{user?.email || 'demo mode'}</p>
+          <button type="button" onClick={openProfile} className="min-w-0 flex-1 text-left">
+            <p className="truncate text-sm font-semibold" style={{ color: 'var(--medina-sidebar-text)' }}>{user?.user_metadata?.full_name || 'Профиль'}</p>
+            <p className="truncate text-xs" style={{ color: 'var(--medina-sidebar-muted)' }}>{user?.email || 'demo mode'}</p>
           </button>
-
-          {/* Logout */}
           <button
+            type="button"
             onClick={signOut}
-            title="Выйти"
-            style={{
-              width: 36, height: 36, borderRadius: 10,
-              background: 'transparent', border: '1px solid transparent',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              cursor: 'pointer', color: '#94A3B8', transition: 'all 0.15s ease',
-            }}
-            onMouseEnter={e => {
-              const el = e.currentTarget as HTMLButtonElement;
-              el.style.background = '#FFFFFF'; el.style.borderColor = '#E7ECF3';
-              el.style.color = '#DC2626';
-            }}
-            onMouseLeave={e => {
-              const el = e.currentTarget as HTMLButtonElement;
-              el.style.background = 'transparent'; el.style.borderColor = 'transparent';
-              el.style.color = '#94A3B8';
-            }}
+            aria-label="Выйти"
+            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg transition-colors hover:text-red-400"
+            style={{ color: 'var(--medina-sidebar-muted)' }}
           >
-            <LogOut size={17} />
+            <LogOut size={17} aria-hidden />
           </button>
         </div>
       </aside>
@@ -214,142 +174,75 @@ export function Sidebar() {
       {/* Profile Modal */}
       {showProfile && (
         <div
-          className="fixed inset-0 flex items-center justify-center z-50 p-4"
-          style={{ background: 'rgba(11,18,32,0.18)', backdropFilter: 'blur(8px)' }}
+          className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          style={{ background: 'rgba(17, 24, 39, 0.4)' }}
           onClick={e => { if (e.target === e.currentTarget) setShowProfile(false); }}
         >
-          <div style={{
-            background: '#FFFFFF', border: '1px solid #E7ECF3', borderRadius: 20,
-            boxShadow: '0 24px 64px rgba(15,23,42,0.14)',
-            width: '100%', maxWidth: 360, padding: '32px 28px',
-          }}>
-            {/* Header */}
-            <div className="flex items-center justify-between mb-6">
+          <div role="dialog" aria-modal="true" aria-label="Профиль сотрудника" className="w-full max-w-[360px] rounded-xl border bg-white p-7" style={{ borderColor: 'var(--ng-border)', boxShadow: '0 20px 45px rgba(17, 24, 39, 0.18)' }}>
+            <div className="mb-6 flex items-center justify-between">
               <div className="flex items-center gap-3">
-                <div style={{
-                  width: 40, height: 40, borderRadius: 12,
-                  background: '#DDE5EE', border: '1px solid #E0E7EF',
-                  display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  fontSize: 13, fontWeight: 700, color: '#1E325C',
-                  fontFamily: "'Inter', sans-serif",
-                }}>
+                <div aria-hidden className="flex h-10 w-10 items-center justify-center rounded-lg text-[13px] font-semibold" style={{ background: 'var(--negis-primary-soft)', color: 'var(--ng-primary)' }}>
                   {initials}
                 </div>
                 <div>
-                  <div style={{ fontSize: 14, fontWeight: 600, color: '#0B1220' }}>
+                  <div className="text-sm font-semibold" style={{ color: 'var(--ng-text)' }}>
                     {user?.user_metadata?.full_name || 'Профиль'}
                   </div>
-                  <div style={{ fontSize: 12, color: '#94A3B8', marginTop: 1 }}>
+                  <div className="mt-0.5 text-xs" style={{ color: 'var(--ng-muted)' }}>
                     {user?.email}
                   </div>
                 </div>
               </div>
               <button
+                type="button"
                 onClick={() => setShowProfile(false)}
-                style={{
-                  width: 32, height: 32, borderRadius: 8, border: '1px solid #E7ECF3',
-                  background: '#F4F7FB', cursor: 'pointer',
-                  display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  color: '#64748B',
-                }}
+                aria-label="Закрыть профиль"
+                className="neu-icon-btn"
+                style={{ height: 32, width: 32 }}
               >
-                <X size={15} />
+                <X size={15} aria-hidden />
               </button>
             </div>
 
-            {/* Fields */}
             <div className="space-y-4">
               <div>
-                <label style={{ fontSize: 11, fontWeight: 500, color: '#64748B', display: 'block', marginBottom: 6 }}>
-                  <User size={11} style={{ display: 'inline', marginRight: 5 }} />
+                <label htmlFor="profile-full-name" className="mb-1.5 block text-[11px] font-medium" style={{ color: 'var(--ng-muted)' }}>
+                  <User size={11} aria-hidden style={{ display: 'inline', marginRight: 5 }} />
                   ИМЯ
                 </label>
                 <input
-                  style={IS}
+                  id="profile-full-name"
+                  className="neu-input"
                   placeholder="Ваше имя"
                   value={fullName}
                   onChange={e => setFullName(e.target.value)}
-                  onFocus={e => {
-                    e.target.style.borderColor = '#2859C5';
-                    e.target.style.boxShadow = '0 0 0 3px rgba(40,89,197,0.10)';
-                  }}
-                  onBlur={e => {
-                    e.target.style.borderColor = '#E7ECF3';
-                    e.target.style.boxShadow = 'none';
-                  }}
                 />
               </div>
 
               <div>
-                <label style={{ fontSize: 11, fontWeight: 500, color: '#64748B', display: 'block', marginBottom: 6 }}>
-                  <KeyRound size={11} style={{ display: 'inline', marginRight: 5 }} />
+                <label htmlFor="profile-new-password" className="mb-1.5 block text-[11px] font-medium" style={{ color: 'var(--ng-muted)' }}>
+                  <KeyRound size={11} aria-hidden style={{ display: 'inline', marginRight: 5 }} />
                   НОВЫЙ ПАРОЛЬ
                 </label>
                 <input
+                  id="profile-new-password"
                   type="password"
-                  style={IS}
+                  className="neu-input"
                   placeholder="Оставьте пустым, чтобы не менять"
                   value={newPassword}
                   onChange={e => setNewPassword(e.target.value)}
-                  onFocus={e => {
-                    e.target.style.borderColor = '#2859C5';
-                    e.target.style.boxShadow = '0 0 0 3px rgba(40,89,197,0.10)';
-                  }}
-                  onBlur={e => {
-                    e.target.style.borderColor = '#E7ECF3';
-                    e.target.style.boxShadow = 'none';
-                  }}
                 />
               </div>
             </div>
 
-            {/* Actions */}
-            <div className="flex gap-3 mt-6">
-              <button
-                onClick={() => setShowProfile(false)}
-                style={{
-                  flex: 1, padding: '11px 16px', borderRadius: 12,
-                  background: '#F4F7FB', border: '1px solid #E7ECF3',
-                  fontSize: 14, fontWeight: 500, color: '#475569',
-                  cursor: 'pointer', fontFamily: "'Inter', sans-serif",
-                }}
-              >
+            <div className="mt-6 flex gap-3">
+              <button type="button" className="neu-btn flex-1" onClick={() => setShowProfile(false)}>
                 Отмена
               </button>
-              <button
-                onClick={saveProfile}
-                disabled={saving}
-                style={{
-                  flex: 1, padding: '11px 16px', borderRadius: 12,
-                  background: '#1E325C', border: '1px solid #1E325C',
-                  fontSize: 14, fontWeight: 500, color: '#FFFFFF',
-                  cursor: saving ? 'not-allowed' : 'pointer',
-                  fontFamily: "'Inter', sans-serif", opacity: saving ? 0.65 : 1,
-                  display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
-                }}
-              >
-                <Check size={15} />
-                {saving ? 'Сохранение...' : 'Сохранить'}
+              <button type="button" className="neu-btn-primary flex-1" disabled={saving} onClick={saveProfile}>
+                {saving ? 'Сохраняем…' : 'Сохранить'}
               </button>
             </div>
-
-            {/* Logout row */}
-            <button
-              onClick={() => { setShowProfile(false); signOut(); }}
-              style={{
-                width: '100%', marginTop: 12, padding: '10px',
-                borderRadius: 12, background: 'none', border: '1px solid #FEE2E2',
-                fontSize: 13, fontWeight: 500, color: '#DC2626',
-                cursor: 'pointer', fontFamily: "'Inter', sans-serif",
-                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 7,
-                transition: 'background 0.15s ease',
-              }}
-              onMouseEnter={e => (e.currentTarget.style.background = '#FEF2F2')}
-              onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-            >
-              <LogOut size={14} />
-              Выйти из системы
-            </button>
           </div>
         </div>
       )}

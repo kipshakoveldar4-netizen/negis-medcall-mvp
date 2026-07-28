@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Link, useLocation } from "wouter";
 import { KeyRound, LogIn, ShieldCheck } from "lucide-react";
 import { toast } from "sonner";
-import { apiUrl } from "@/lib/api";
+import { apiUrl, crmFetch } from "@/lib/api";
 import { hasSupabaseFrontendEnv, supabase } from "@/lib/supabase";
 import { isStaffRole, roleLabels } from "@/lib/permissions";
 
@@ -111,18 +111,20 @@ export default function Login() {
         throw new Error(error.message);
       }
 
-      const response = await fetch(apiUrl(`/api/crm/staff?email=${encodeURIComponent(normalizedEmail)}`));
-      const body = await safeJson(response);
-      const staff = body?.success === true ? firstStaffUser(body.data) : null;
+      // Security-2B: the staff lookup by email is gone — it answered for any
+      // address in any workspace. Membership now comes from the verified session
+      // via /api/crm/auth-context, which AuthContext resolves on the next render.
+      const context = await crmFetch("/api/crm/auth-context")
+        .then((res) => (res.ok ? res.json() as Promise<{ success?: boolean; data?: { memberships?: unknown[] } }> : null))
+        .catch(() => null);
+      const memberships = Array.isArray(context?.data?.memberships) ? context!.data!.memberships! : [];
 
-      if (!response.ok || !staff) {
+      if (context?.success !== true || memberships.length === 0) {
         await supabase.auth.signOut();
-        throw new Error("Сотрудник не найден в staff_users. Проверьте, что администратор создал профиль.");
+        throw new Error("Аккаунт не связан с клиникой. Обратитесь к администратору Medina OS.");
       }
 
-      saveStaffSession(staff, normalizedEmail, data.user?.id);
-      const role = isStaffRole(staff.role) ? roleLabels[staff.role] : "сотрудник";
-      toast.success(`Вход выполнен: ${role}`);
+      toast.success("Вход выполнен");
       setLocation("/dashboard");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Не удалось войти");
@@ -148,7 +150,7 @@ export default function Login() {
                   <ShieldCheck size={14} />
                   Staff access
                 </div>
-                <h1 className="max-w-md text-4xl font-black leading-tight">Negis OS для сотрудников клиники</h1>
+                <h1 className="max-w-md text-3xl font-semibold leading-tight">Medina OS для сотрудников клиники</h1>
                 <p className="mt-4 max-w-md text-sm leading-6 text-white/70">
                   Войдите по email и временному паролю, который выдал администратор. После входа откроется рабочий dashboard.
                 </p>
@@ -160,7 +162,7 @@ export default function Login() {
           <div className="p-7 sm:p-10">
             <div className="mb-8">
               <Link href="/">
-                <span className="text-xs font-bold uppercase tracking-[0.16em] text-[#64748B]">NEGIS</span>
+                <span className="text-xs font-semibold uppercase tracking-[0.08em]" style={{ color: "var(--ng-primary)" }}>Medina OS</span>
               </Link>
               <h2 className="mt-5 text-2xl font-black text-[#0F172A]">Вход сотрудника</h2>
               <p className="mt-2 text-sm leading-6 text-[#64748B]">

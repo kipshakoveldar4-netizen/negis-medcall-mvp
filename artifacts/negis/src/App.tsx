@@ -1,4 +1,4 @@
-import { useEffect, type ComponentType } from "react";
+import { lazy, Suspense, useEffect, type ComponentType } from "react";
 import { Switch, Route, Redirect, Router as WouterRouter, useLocation } from "wouter";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "sonner";
@@ -6,37 +6,54 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { AuthProvider } from "@/contexts/AuthContext";
 import { useAuth } from "@/contexts/AuthContext";
 
+// Eager: the public entry (Landing) and the shared fallbacks stay in the main
+// chunk so the first paint never waits on a second request.
 import Landing from "@/pages/Landing";
-import Register from "@/pages/Register";
-import Login from "@/pages/Login";
-import Onboarding from "@/pages/Onboarding";
-import Dashboard from "@/pages/Dashboard";
-import AiControlCenter from "@/pages/AiControlCenter";
-import Agent from "@/pages/Agent";
-import Ads from "@/pages/Ads";
-import AdsAutomation from "@/pages/AdsAutomation";
-import AdsCallback from "@/pages/AdsCallback";
-import { AppointmentsPage } from "@/pages/AppointmentsPage";
-import ContentStudio from "@/pages/ContentStudio";
-import AdminCenter from "@/pages/AdminCenter";
-import LeadsPage from "@/pages/LeadsPage";
-import ClientsPage from "@/pages/ClientsPage";
-import SalesPage from "@/pages/SalesPage";
-import {
-  DemoCalls,
-  DemoChat,
-  DemoMarket,
-  DemoReception,
-  DemoReports,
-  DemoTasks,
-} from "@/pages/DemoCrmModules";
 import DemoPlaceholder from "@/pages/DemoPlaceholder";
-import Privacy from "@/pages/Privacy";
-import Terms from "@/pages/Terms";
-import DataDeletion from "@/pages/DataDeletion";
-import ResetPassword from "@/pages/ResetPassword";
 import NotFound from "@/pages/not-found";
 import FbPixelInit from "@/components/FbPixelInit";
+import { RouteErrorBoundary } from "@/components/layout/RouteErrorBoundary";
+
+// Lazy: every operational screen loads as its own chunk. Before this, all 28
+// routes (including the 4.6k-line AdsAutomation) shipped in one bundle that
+// the landing page had to download.
+const Login = lazy(() => import("@/pages/Login"));
+const Onboarding = lazy(() => import("@/pages/Onboarding"));
+const Dashboard = lazy(() => import("@/pages/Dashboard"));
+const AiControlCenter = lazy(() => import("@/pages/AiControlCenter"));
+// Security-1A: /agent, /ads and /ads/callback were removed from the router.
+// Their pages query legacy tables that do not exist in the production Supabase
+// project (agents, bookings, shifts, ad_accounts, ad_reports, platform_configs,
+// clinics), so every request failed. Shift tracking and the legacy ad cabinet
+// are out of the first commercial release; /ads-automation is the supported
+// advertising module. Direct URLs now fall through to the not-found route.
+const AdsAutomation = lazy(() => import("@/pages/AdsAutomation"));
+const AppointmentsPage = lazy(() => import("@/pages/AppointmentsPage").then(m => ({ default: m.AppointmentsPage })));
+const ContentStudio = lazy(() => import("@/pages/ContentStudio"));
+const AdminCenter = lazy(() => import("@/pages/AdminCenter"));
+const LeadsPage = lazy(() => import("@/pages/LeadsPage"));
+const ClientsPage = lazy(() => import("@/pages/ClientsPage"));
+const SalesPage = lazy(() => import("@/pages/SalesPage"));
+const DemoCalls = lazy(() => import("@/pages/DemoCrmModules").then(m => ({ default: m.DemoCalls })));
+const DemoChat = lazy(() => import("@/pages/DemoCrmModules").then(m => ({ default: m.DemoChat })));
+const DemoMarket = lazy(() => import("@/pages/DemoCrmModules").then(m => ({ default: m.DemoMarket })));
+const DemoReception = lazy(() => import("@/pages/DemoCrmModules").then(m => ({ default: m.DemoReception })));
+const DemoReports = lazy(() => import("@/pages/DemoCrmModules").then(m => ({ default: m.DemoReports })));
+const DemoTasks = lazy(() => import("@/pages/DemoCrmModules").then(m => ({ default: m.DemoTasks })));
+const Privacy = lazy(() => import("@/pages/Privacy"));
+const Terms = lazy(() => import("@/pages/Terms"));
+const DataDeletion = lazy(() => import("@/pages/DataDeletion"));
+const ResetPassword = lazy(() => import("@/pages/ResetPassword"));
+
+function RouteFallback() {
+  return (
+    <div className="flex min-h-screen items-center justify-center" style={{ background: "var(--ng-bg)" }}>
+      <div className="text-xs font-medium tracking-[0.14em]" style={{ color: "var(--ng-muted)" }}>
+        ЗАГРУЗКА…
+      </div>
+    </div>
+  );
+}
 
 const queryClient = new QueryClient();
 
@@ -55,9 +72,7 @@ const ROUTE_PERMISSIONS: Record<string, string> = {
   '/marketplace': 'marketplace',
   '/market': 'marketplace',
   '/admin': 'admin',
-  '/ads': 'ads',
   '/ads-automation': 'ads',
-  '/advertising': 'ads',
   '/reports': 'ads',
   '/profile': 'dashboard',
   '/targeting-agent': 'ads',
@@ -135,10 +150,11 @@ function ProtectedPage({
 /* ── Router ── */
 function Router() {
   return (
+    <RouteErrorBoundary>
+    <Suspense fallback={<RouteFallback />}>
     <Switch>
       <Route path="/" component={Landing} />
       <Route path="/login" component={Login} />
-      <Route path="/register" component={Register} />
       <Route path="/onboarding" component={Onboarding} />
       <Route path="/ai-control-center" component={() => <ProtectedPage component={AiControlCenter} permission="dashboard" />} />
       <Route path="/dashboard" component={() => <ProtectedPage component={Dashboard} permission="dashboard" />} />
@@ -153,13 +169,13 @@ function Router() {
       <Route path="/chat" component={() => <ProtectedPage component={DemoChat} permission="chat" />} />
       <Route path="/marketplace" component={() => <ProtectedPage component={DemoMarket} permission="marketplace" />} />
       <Route path="/market" component={() => <ProtectedPage component={DemoMarket} permission="marketplace" />} />
-      <Route path="/agent" component={Agent} />
       <Route path="/admin" component={() => <ProtectedPage component={AdminCenter} permission="admin" />} />
-      <Route path="/ads" component={() => <ProtectedPage component={Ads} permission="ads" />} />
       <Route path="/ads-automation/history" component={() => <ProtectedPage component={AdsAutomation} permission="ads" />} />
       <Route path="/ads-automation" component={() => <ProtectedPage component={AdsAutomation} permission="ads" />} />
-      <Route path="/advertising" component={() => <ProtectedPage component={Ads} permission="ads" />} />
-      <Route path="/ads/callback" component={AdsCallback} />
+      {/* Legacy ad cabinet links keep working by pointing at the supported module. */}
+      <Route path="/advertising">
+        <Redirect to="/ads-automation" />
+      </Route>
       <Route path="/reports" component={() => <ProtectedPage component={DemoReports} permission="ads" />} />
       <Route path="/profile" component={() => <ProtectedPage component={() => <DemoPlaceholder title="Профиль" />} permission="dashboard" />} />
       {/* AI Target is no longer a standalone module: its functionality lives inside
@@ -177,6 +193,8 @@ function Router() {
       <Route path="/reset-password" component={ResetPassword} />
       <Route component={NotFound} />
     </Switch>
+    </Suspense>
+    </RouteErrorBoundary>
   );
 }
 

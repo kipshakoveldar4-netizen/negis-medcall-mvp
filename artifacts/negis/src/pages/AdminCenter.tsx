@@ -28,7 +28,8 @@ import {
 import { toast } from "sonner";
 import { PageLayout } from "@/components/layout/PageLayout";
 import { useAuth } from "@/contexts/AuthContext";
-import { apiUrl } from "@/lib/api";
+import { apiUrl, crmFetch } from "@/lib/api";
+import { readWorkspaceId } from "@/lib/demoStorage";
 import { getSupabaseAccessToken } from "@/lib/serverAuth";
 import {
   permissionLabels,
@@ -81,7 +82,6 @@ type ProviderPresence = {
   status: Status;
   configured: number;
   total: number;
-  keys: Array<{ key: string; configured: boolean }>;
 };
 
 type CrmHealthData = {
@@ -94,10 +94,10 @@ type CrmHealthData = {
 
 type SafeMetaSummary = {
   configured: boolean;
-  businessId: string;
-  adAccountId: string;
-  pageId: string;
-  instagramActorId: string;
+  businessIdConfigured: boolean;
+  adAccountConfigured: boolean;
+  pageConfigured: boolean;
+  instagramActorConfigured: boolean;
   astanaCityKeyConfigured?: boolean;
   cityResolver?: {
     staticCities?: string[];
@@ -489,8 +489,11 @@ async function safeJson<T>(response: globalThis.Response): Promise<ApiResponse<T
   }
 }
 
+// Security-2B: same reason as AdsAutomation — the token belongs to crmFetch,
+// not to each call site. adminCrmRequest below stays separate because it also
+// refuses to run at all without a session.
 async function crmRequest<T>(path: string, init?: globalThis.RequestInit): Promise<ApiResponse<T>> {
-  const response = await fetch(apiUrl(path), init);
+  const response = await crmFetch(path, init);
   const body = await safeJson<T>(response);
   if (!response.ok || body.success === false) {
     throw new Error(body.error || body.details?.join(", ") || `HTTP ${response.status}`);
@@ -506,16 +509,12 @@ async function adminCrmRequest<T>(
     body?: string;
   },
 ): Promise<ApiResponse<T>> {
+  // The session is checked up front so the operator gets this message rather
+  // than a bare 401; crmFetch then resolves and attaches the token itself.
   const accessToken = await getSupabaseAccessToken();
   if (!accessToken) throw new Error("Нужно войти заново для защищённой синхронизации.");
 
-  const response = await fetch(apiUrl(path), {
-    ...init,
-    headers: {
-      ...init?.headers,
-      Authorization: `Bearer ${accessToken}`,
-    },
-  });
+  const response = await crmFetch(path, { ...init, accessToken });
   const body = await safeJson<T>(response);
   if (!response.ok || body.success !== true) {
     throw new Error(body.details?.[0] || body.error || `HTTP ${response.status}`);
@@ -636,7 +635,7 @@ function permissionSummary(permissions: CrmPermission[]) {
 export default function AdminCenter() {
   const [, setLocation] = useLocation();
   const { clinicId, user } = useAuth();
-  const workspaceId = clinicId || "demo-workspace";
+  const workspaceId = clinicId || readWorkspaceId();
   const [activeTab, setActiveTab] = useState<AdminTab>("overview");
   const [clinic, setClinic] = useState<ClinicSettings>(() => readStored("negis_clinic_settings", clinicDefaults));
   const [staff, setStaff] = useState<StaffMember[]>(() => readStored("negis_demo_staff", staffDefaults));
@@ -705,7 +704,7 @@ export default function AdminCenter() {
         return;
       }
 
-      const response = await fetch(apiUrl(`/api/crm/auth-context?workspaceId=${encodeURIComponent(workspaceId)}`), {
+      const response = await crmFetch(`/api/crm/auth-context?workspaceId=${encodeURIComponent(workspaceId)}`, {
         headers: { Authorization: `Bearer ${accessToken}` },
       });
       const body = await safeJson<AdminAuthContextData>(response);
@@ -1076,10 +1075,11 @@ export default function AdminCenter() {
       }
       const next: MetaAccount = {
         ...metaAccount,
-        metaBusinessId: meta.businessId || metaAccount.metaBusinessId,
-        adAccountId: meta.adAccountId || metaAccount.adAccountId,
-        pageId: meta.pageId || metaAccount.pageId,
-        instagramActorId: meta.instagramActorId || metaAccount.instagramActorId,
+        // The clinic's own stored record is the only source of these values now.
+        metaBusinessId: metaAccount.metaBusinessId,
+        adAccountId: metaAccount.adAccountId,
+        pageId: metaAccount.pageId,
+        instagramActorId: metaAccount.instagramActorId,
         accountName: "Negis Meta Ads",
         currency: "USD",
         timezoneName: "Asia/Almaty",
@@ -1087,9 +1087,9 @@ export default function AdminCenter() {
         permissions: {
           ...metaAccount.permissions,
           appCreated: meta.hasAppSecret || metaAccount.permissions.appCreated,
-          adAccountConnected: Boolean(meta.adAccountId) || metaAccount.permissions.adAccountConnected,
-          pageConnected: Boolean(meta.pageId) || metaAccount.permissions.pageConnected,
-          instagramConnected: Boolean(meta.instagramActorId) || metaAccount.permissions.instagramConnected,
+          adAccountConnected: Boolean(meta.adAccountConfigured) || metaAccount.permissions.adAccountConnected,
+          pageConnected: Boolean(meta.pageConfigured) || metaAccount.permissions.pageConnected,
+          instagramConnected: Boolean(meta.instagramActorConfigured) || metaAccount.permissions.instagramConnected,
           manualApproval: true,
         },
       };
@@ -1322,7 +1322,7 @@ export default function AdminCenter() {
     try {
       await navigator.clipboard.writeText(
         [
-          "Negis OS login",
+          "Medina OS login",
           `Email: ${createdCredentials.email}`,
           `Temporary password: ${createdCredentials.temporaryPassword}`,
           `URL: ${createdCredentials.loginUrl}`,
@@ -1347,12 +1347,11 @@ export default function AdminCenter() {
 
     return (
       <div className="space-y-5">
-        <ReleaseBanner readiness={readiness} />
-        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-          <MetricCard title="Release readiness" value={`${readiness.score}%`} icon={Gauge} tone={readiness.complete ? "emerald" : "amber"} />
-          <MetricCard title="Critical blockers" value={String(readiness.blockers)} icon={AlertTriangle} tone={readiness.blockers ? "red" : "emerald"} />
-          <MetricCard title="Integration health" value={`${connected}/${integrationCards.length}`} icon={Database} tone="blue" />
-          <MetricCard title="Staff count" value={String(staff.length)} icon={Users} tone="teal" />
+        {/* Commercial-1: платформенная готовность живёт во внутреннем разделе
+            диагностики; клиника видит только состояние интеграций и команду. */}
+        <div className="grid gap-4 sm:grid-cols-2">
+          <MetricCard title="Состояние интеграций" value={`${connected}/${integrationCards.length}`} icon={Database} tone="blue" />
+          <MetricCard title="Сотрудники" value={String(staff.length)} icon={Users} tone="teal" />
         </div>
         <div className="grid gap-5 lg:grid-cols-3">
           <section className="neu-card lg:col-span-2">
@@ -1678,10 +1677,10 @@ export default function AdminCenter() {
     const metaSummary = health?.meta;
     const metaEnvFound = Boolean(
       metaSummary?.configured ||
-        metaSummary?.businessId ||
-        metaSummary?.adAccountId ||
-        metaSummary?.pageId ||
-        metaSummary?.instagramActorId ||
+        metaSummary?.businessIdConfigured ||
+        metaSummary?.adAccountConfigured ||
+        metaSummary?.pageConfigured ||
+        metaSummary?.instagramActorConfigured ||
         metaSummary?.hasAccessToken ||
         metaSummary?.hasAppSecret,
     );
@@ -1853,7 +1852,7 @@ export default function AdminCenter() {
             <p className="text-sm text-[#64748B]">Хранится в release_checks, fallback: negis_release_checks.</p>
           </div>
           <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center">
-            <StatusPill status={readiness.complete ? "passed" : "pending"} label={readiness.complete ? "Готово" : `${readiness.blockers} blockers`} />
+            <StatusPill status={readiness.complete ? "passed" : "pending"} label={readiness.complete ? "Готово" : `Проблем: ${readiness.blockers}`} />
             <button type="button" className="neu-btn-primary w-full justify-center sm:w-auto" disabled={loading["release-autocheck"]} onClick={runReleaseAutocheck}>
               {loading["release-autocheck"] ? <Loader2 className="animate-spin" size={16} /> : <RefreshCw size={16} />}
               Автопроверка релиза
@@ -2138,10 +2137,10 @@ export default function AdminCenter() {
       <div className="space-y-6">
         <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
           <div>
-            <p className="text-xs font-bold uppercase tracking-[0.18em] text-[#64748B]">Admin Center</p>
-            <h1 className="mt-2 text-3xl font-black text-[#0F172A]">Release-ready управление Negis OS</h1>
+            <p className="text-xs font-bold uppercase tracking-[0.18em] text-[#64748B]">Администрирование</p>
+            <h1 className="mt-2 text-2xl font-semibold text-[#0F172A]">Настройки клиники</h1>
             <p className="mt-2 max-w-3xl text-sm text-[#64748B]">
-              Workspace: {workspaceId}. Owner: {user?.email || "demo user"}. Секретные ключи хранятся только в Vercel env.
+              Клиника: {workspaceId}. Владелец: {user?.email || "demo user"}.
             </p>
           </div>
           <button type="button" className="neu-btn w-full justify-center xl:w-auto" onClick={() => setLocation("/ai-control-center")}>
@@ -2149,41 +2148,24 @@ export default function AdminCenter() {
           </button>
         </div>
 
-        {/* Admin identity band — visually separates the platform admin from the client app. */}
-        <section className="rounded-[24px] border border-slate-700 bg-slate-900 p-5 text-white">
-          <p className="text-[11px] font-black uppercase tracking-[0.18em] text-teal-300">Панель платформы · Negis OS</p>
-          <h2 className="mt-1 text-xl font-black">Admin OS</h2>
-          <p className="mt-1 max-w-3xl text-sm font-semibold text-slate-300">
-            Технические разделы платформы. Секреты, токены и service role key здесь не отображаются.
-          </p>
-          <div className="mt-4 flex flex-wrap gap-2">
-            {[
-              { label: "Обзор платформы", active: true },
-              { label: "Клиники", active: false },
-              { label: "Подписки", active: false },
-              { label: "Доходы", active: false },
-              { label: "Рекламные запуски", active: false },
-              { label: "Видео-обработка", active: false },
-              { label: "Usage", active: false },
-              { label: "System Health", active: false },
-              { label: "Логи", active: false },
-              { label: "Настройки платформы", active: false },
-            ].map((section) => (
-              <span
-                key={section.label}
-                className={`rounded-full px-3 py-1.5 text-xs font-black ${
-                  section.active ? "bg-teal-400 text-slate-900" : "border border-slate-600 text-slate-400"
-                }`}
-              >
-                {section.label}
-                {section.active ? "" : " · скоро"}
-              </span>
-            ))}
+        {/* Internal platform diagnostics — progressive disclosure for Medina
+            Platform staff only; hidden by default from the clinic settings flow.
+            Commercial-2+ will move this behind a server-verified superadmin role. */}
+        <details className="rounded-xl border border-slate-700 bg-slate-900 text-white">
+          <summary className="cursor-pointer select-none p-4 text-sm font-semibold text-slate-200">
+            Диагностика платформы · внутренний раздел Medina Platform
+          </summary>
+          <div className="border-t border-slate-700 p-5">
+            <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-teal-300">Панель платформы · Medina OS</p>
+            <h2 className="mt-1 text-lg font-semibold">Внутренняя диагностика платформы</h2>
+            <p className="mt-1 max-w-3xl text-sm text-slate-300">
+              Раздел для команды Medina Platform. Секреты, токены и service role key здесь не отображаются.
+            </p>
+            <div className="mt-4">
+              <ReleaseBanner readiness={readiness} />
+            </div>
           </div>
-          <p className="mt-3 text-xs font-semibold text-slate-400">
-            Разделы платформы будут собраны на следующих этапах. Сейчас доступен обзор ниже.
-          </p>
-        </section>
+        </details>
 
         <section className="neu-card flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between" data-testid="server-admin-auth">
           <div className="flex min-w-0 items-start gap-3">
@@ -2197,35 +2179,80 @@ export default function AdminCenter() {
               )}
             </span>
             <div className="min-w-0">
-              <p className="text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">Server auth</p>
+              <p className="text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">Сессия</p>
               <h2 className="mt-1 text-base font-black text-[#0F172A]">
                 {serverAdminAuth.status === "confirmed" && "Админ-доступ подтверждён"}
-                {serverAdminAuth.status === "reauth" && "Нужно войти заново"}
+                {serverAdminAuth.status === "reauth" && "Сессия завершена"}
                 {serverAdminAuth.status === "forbidden" && "Недостаточно прав"}
-                {serverAdminAuth.status === "unavailable" && "Не удалось проверить админ-доступ"}
-                {serverAdminAuth.status === "checking" && "Проверяем админ-доступ…"}
+                {serverAdminAuth.status === "unavailable" && "Не удалось проверить доступ"}
+                {serverAdminAuth.status === "checking" && "Проверяем доступ…"}
               </h2>
               <p className="mt-1 text-sm text-[#64748B]">
-                {serverAdminAuth.status === "confirmed" && `Supabase подтвердил активную роль ${serverAdminAuth.role} для текущего workspace.`}
-                {serverAdminAuth.status === "reauth" && "Supabase-сессия отсутствует или истекла. Войдите снова для защищённых действий."}
-                {serverAdminAuth.status === "forbidden" && "Для этого workspace нужна активная роль owner или admin."}
+                {serverAdminAuth.status === "confirmed" && "Доступ администратора подтверждён для текущей клиники."}
+                {serverAdminAuth.status === "reauth" && "Для защиты данных необходимо войти в аккаунт повторно."}
+                {serverAdminAuth.status === "forbidden" && "Для этого раздела нужна активная роль владельца или администратора."}
                 {serverAdminAuth.status === "unavailable" && "Сервис авторизации временно недоступен. Остальные разделы можно использовать."}
-                {serverAdminAuth.status === "checking" && "Проверяем Supabase-сессию и роль сотрудника на сервере."}
+                {serverAdminAuth.status === "checking" && "Проверяем сессию и права доступа."}
               </p>
             </div>
           </div>
-          <button
-            type="button"
-            className="neu-btn w-full shrink-0 justify-center sm:w-auto"
-            onClick={() => void checkServerAdminAccess()}
-            disabled={serverAdminAuth.status === "checking"}
-          >
-            <RefreshCw size={16} />
-            Проверить доступ
-          </button>
+          <div className="flex w-full shrink-0 flex-col gap-2 sm:w-auto sm:flex-row">
+            {serverAdminAuth.status === "reauth" ? (
+              <button
+                type="button"
+                className="neu-btn-primary w-full justify-center sm:w-auto"
+                onClick={() => setLocation("/login")}
+              >
+                Войти снова
+              </button>
+            ) : null}
+            <button
+              type="button"
+              className="neu-btn w-full justify-center sm:w-auto"
+              onClick={() => void checkServerAdminAccess()}
+              disabled={serverAdminAuth.status === "checking"}
+            >
+              <RefreshCw size={16} />
+              Проверить доступ
+            </button>
+          </div>
         </section>
 
-        <ReleaseBanner readiness={readiness} />
+        {/* Commercial-2: honest pilot status + support path. There is no billing
+            domain yet — no payment claims, no fake purchase flow, no dead CTA
+            buttons. The only action is a functional workspace-ID copy for support. */}
+        <div className="grid gap-4 lg:grid-cols-2">
+          <section className="neu-card" aria-label="Тариф и подключение">
+            <p className="text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">Тариф и подключение</p>
+            <h2 className="mt-1 text-base font-black text-[#0F172A]">
+              {workspaceId === "demo-workspace" ? "Демо-режим" : "Пилотное подключение"}
+            </h2>
+            <p className="mt-1 text-sm text-[#64748B]">
+              Автоматическая оплата пока не подключена. Условия пилота и тариф согласуются с менеджером Medina OS.
+            </p>
+          </section>
+          <section className="neu-card" aria-label="Поддержка">
+            <p className="text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">Поддержка</p>
+            <h2 className="mt-1 text-base font-black text-[#0F172A]">Связь с Medina OS</h2>
+            <p className="mt-1 text-sm text-[#64748B]">
+              Канал поддержки настраивается для вашей клиники. До подключения обращайтесь к вашему менеджеру Medina OS и указывайте идентификатор клиники.
+            </p>
+            <button
+              type="button"
+              className="neu-btn mt-3"
+              onClick={async () => {
+                try {
+                  await navigator.clipboard.writeText(workspaceId);
+                  toast.success("Идентификатор клиники скопирован");
+                } catch {
+                  toast.error("Не удалось скопировать идентификатор");
+                }
+              }}
+            >
+              Скопировать идентификатор клиники
+            </button>
+          </section>
+        </div>
 
         <div className="md:hidden">
           <label className="mb-2 block text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">Раздел админки</label>
@@ -2366,7 +2393,7 @@ function ReleaseBanner({ readiness }: { readiness: { complete: boolean; blockers
                 : "Платформа в режиме подготовки к релизу"}
             </p>
             <p className={`mt-1 text-sm ${readiness.complete ? "text-emerald-700" : "text-amber-700"}`}>
-              Readiness {readiness.score}% · blockers {readiness.blockers}
+              Готовность платформы: {readiness.score}% · критические проблемы: {readiness.blockers}
             </p>
             <p className={`mt-1 text-xs ${readiness.complete ? "text-emerald-700" : "text-amber-700"}`}>
               Optional AI providers вроде ElevenLabs, HeyGen, Gemini, Anthropic и TapNow не считаются blocker.

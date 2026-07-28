@@ -24,7 +24,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { PageLayout } from "@/components/layout/PageLayout";
-import { useDemoCollection } from "@/lib/demoStorage";
+import { readWorkspaceId as readCurrentWorkspaceId, useDemoCollection } from "@/lib/demoStorage";
 import { apiUrl } from "@/lib/api";
 import { formatPhone, toTelHref, toWhatsappHref } from "@/lib/phone";
 import {
@@ -269,29 +269,6 @@ function generateTemporaryPassword() {
   return `Negis2026!${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function readCurrentWorkspaceId() {
-  if (typeof window === "undefined") return "demo-workspace";
-
-  for (const key of ["negis_staff_user", "negis_staff_session", "negis_demo_workspace"]) {
-    try {
-      const raw = window.localStorage.getItem(key);
-      if (!raw) continue;
-      const value = JSON.parse(raw) as { id?: unknown; workspaceId?: unknown; workspace_id?: unknown };
-      const workspaceId = typeof value.workspaceId === "string" && value.workspaceId.trim()
-        ? value.workspaceId.trim()
-        : typeof value.workspace_id === "string" && value.workspace_id.trim()
-          ? value.workspace_id.trim()
-          : key === "negis_demo_workspace" && typeof value.id === "string" && value.id.trim()
-            ? value.id.trim()
-            : "";
-      if (workspaceId) return workspaceId;
-    } catch {
-      // Ignore malformed localStorage and keep fallback mode.
-    }
-  }
-
-  return "demo-workspace";
-}
 
 async function readApiJson(response: globalThis.Response) {
   const text = await response.text();
@@ -1162,56 +1139,9 @@ export function DemoAdmin() {
 
     setStaff((current) => [localStaff, ...current]);
 
-    try {
-      const response = await fetch(apiUrl("/api/crm/staff"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          name: localStaff.name,
-          email: localStaff.email,
-          phone: localStaff.phone,
-          role: localStaff.role,
-          status: localStaff.status,
-          workspaceId,
-          temporaryPassword: password,
-        }),
-      });
-      const body = await readApiJson(response);
-
-      if (!response.ok || body?.success !== true) {
-        throw new Error(body?.details?.join(", ") || body?.error || "Не удалось создать сотрудника");
-      }
-
-      const savedStaff = staffFromApi(body.data?.staff ?? body.data?.item, localStaff);
-      setStaff((current) => current.map((member) => (member.id === localStaff.id ? savedStaff : member)));
-      const returnedPassword = typeof body.data?.temporaryPassword === "string" ? body.data.temporaryPassword : password;
-
-      setCreatedCredentials({
-        email: savedStaff.email,
-        role: savedStaff.role,
-        temporaryPassword: returnedPassword,
-        loginUrl: typeof body.data?.loginUrl === "string" ? body.data.loginUrl : "/login",
-        warning: body.warning,
-        authUserCreated: Boolean(body.data?.authUserCreated),
-      });
-
-      if (body.warning) {
-        toast.warning(body.warning);
-      } else {
-        toast.success("Сотрудник создан");
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Сотрудник сохранён локально";
-      setCreatedCredentials({
-        email: localStaff.email,
-        role: localStaff.role,
-        temporaryPassword: password,
-        loginUrl: "/login",
-        warning: message,
-        authUserCreated: false,
-      });
-      toast.warning(message);
-    }
+    // Security-2B: demo mode is local-only. It must never call the production
+    // CRM API, and generic staff creation is disabled server-side anyway.
+    toast.success("Сотрудник добавлен в демо-данные");
 
     setStaffForm({
       name: "",

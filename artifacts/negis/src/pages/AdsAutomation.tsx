@@ -24,9 +24,10 @@ import {
 import { toast } from "sonner";
 import { PageLayout } from "@/components/layout/PageLayout";
 import { useAuth } from "@/contexts/AuthContext";
-import { apiUrl } from "@/lib/api";
+import { apiUrl, crmFetch } from "@/lib/api";
 import { getSupabaseAccessToken } from "@/lib/serverAuth";
 import { hasSupabaseFrontendEnv, supabase } from "@/lib/supabase";
+import { readWorkspaceId } from "@/lib/demoStorage";
 import { getPlanFeature, normalizePlan, planFeatureBadge, type NegisPlan } from "@/lib/planFeatures";
 import { KZ_META_CITY_OPTIONS, getKzMetaCityOption } from "../../../../lib/meta/cities";
 
@@ -487,9 +488,6 @@ function normalizeBriefCity(brief: Brief): Brief {
   };
 }
 
-function readWorkspaceId() {
-  return readStored<{ id?: string }>("negis_demo_workspace", { id: "demo-workspace" }).id || "demo-workspace";
-}
 
 function normalizeAsset(value: unknown, fallback: CreativeAsset): CreativeAsset {
   const record = asRecord(value);
@@ -1202,8 +1200,11 @@ async function safeJson<T>(response: { text: () => Promise<string> }): Promise<A
   }
 }
 
+// Security-2B: /api/crm/* is authenticated server-side. This wrapper keeps the
+// page's Meta error formatting but delegates the request itself to crmFetch, so
+// the access token is attached exactly once, in one place.
 async function crmRequest<T>(path: string, init?: RequestInit): Promise<Extract<ApiResponse<T>, { success: true }>> {
-  const response = await fetch(apiUrl(path), init);
+  const response = await crmFetch(path, init);
   const body = await safeJson<T>(response);
 
   if (!response.ok || body.success === false) {
@@ -1602,7 +1603,7 @@ export default function AdsAutomation() {
           return;
         }
 
-        const authResponse = await fetch(apiUrl(`/api/crm/auth-context?workspaceId=${encodeURIComponent(workspaceId)}`), {
+        const authResponse = await crmFetch(`/api/crm/auth-context?workspaceId=${encodeURIComponent(workspaceId)}`, {
           headers: { Authorization: `Bearer ${accessToken}` },
         });
         const authBody = await safeJson<ServerAdminAuthContext>(authResponse);
@@ -1630,7 +1631,7 @@ export default function AdsAutomation() {
         }
         serverAdminConfirmed = true;
 
-        const insightsResponse = await fetch(apiUrl(`/api/crm/meta-insights-history?workspaceId=${encodeURIComponent(workspaceId)}`), {
+        const insightsResponse = await crmFetch(`/api/crm/meta-insights-history?workspaceId=${encodeURIComponent(workspaceId)}`, {
           headers: { Authorization: `Bearer ${accessToken}` },
         });
         const insightsBody = await safeJson<{ summaries?: MetaInsightsHistorySummary[] }>(insightsResponse);

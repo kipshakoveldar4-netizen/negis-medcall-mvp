@@ -21,8 +21,8 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { PageLayout } from "@/components/layout/PageLayout";
-import { useDemoCollection, readDemoStorage, isRealWorkspace } from "@/lib/demoStorage";
-import { apiUrl } from "@/lib/api";
+import { useDemoCollection, readDemoStorage, isRealWorkspace, readWorkspaceId } from "@/lib/demoStorage";
+import { apiUrl, crmFetch } from "@/lib/api";
 import { formatPhone, phoneDigits, toTelHref, toWhatsappHref } from "@/lib/phone";
 
 // CRM3 — real "Клиенты" (patient CRM) screen for Negis OS, Glass Morphic Medical AI.
@@ -180,28 +180,6 @@ function formatDateTimeValue(value?: string): string {
   return new Date(timestamp).toLocaleString("ru-RU", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
 }
 
-function readWorkspaceId(): string {
-  if (typeof window === "undefined") return "demo-workspace";
-  for (const key of ["negis_staff_user", "negis_staff_session", "negis_demo_workspace"]) {
-    try {
-      const raw = window.localStorage.getItem(key);
-      if (!raw) continue;
-      const value = JSON.parse(raw) as { id?: unknown; workspaceId?: unknown; workspace_id?: unknown };
-      const workspaceId =
-        typeof value.workspaceId === "string" && value.workspaceId.trim()
-          ? value.workspaceId.trim()
-          : typeof value.workspace_id === "string" && value.workspace_id.trim()
-            ? value.workspace_id.trim()
-            : key === "negis_demo_workspace" && typeof value.id === "string" && value.id.trim()
-              ? value.id.trim()
-              : "";
-      if (workspaceId) return workspaceId;
-    } catch {
-      // Ignore malformed localStorage; fall back to demo.
-    }
-  }
-  return "demo-workspace";
-}
 
 function str(value: unknown): string {
   return typeof value === "string" ? value : value == null ? "" : String(value);
@@ -220,7 +198,7 @@ async function loadRelatedCollection<TItem>(
 
   try {
     const workspaceId = readWorkspaceId();
-    const response = await fetch(apiUrl(`${endpoint}?workspaceId=${encodeURIComponent(workspaceId)}`));
+    const response = await crmFetch(`${endpoint}?workspaceId=${encodeURIComponent(workspaceId)}`);
     const text = await response.text();
     const body = text ? (JSON.parse(text) as { success?: boolean; mode?: string; data?: Record<string, unknown> }) : null;
     if (response.ok && body?.success === true && body.mode === "supabase") {

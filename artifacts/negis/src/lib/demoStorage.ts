@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { apiUrl } from "@/lib/api";
+import { crmFetch } from "@/lib/api";
 
 type ApiCollectionOptions<TItem extends { id: string }> = {
   endpoint?: string;
@@ -40,10 +40,24 @@ export function writeDemoStorage<TValue>(key: string, value: TValue) {
   window.localStorage.setItem(key, JSON.stringify(value));
 }
 
+/**
+ * Where AuthContext stores the workspace it resolved from /api/crm/auth-context.
+ *
+ * Security-2B made the server the sole tenant authority, and the bootstrap no
+ * longer writes the old negis_staff_user / negis_staff_session blobs. Reading
+ * those first therefore fell through to "demo-workspace" for a signed-in user
+ * and every CRM request came back 403. The verified selector is checked first;
+ * the legacy keys stay only so demo mode keeps working.
+ */
+export const WORKSPACE_SELECTOR_KEY = "negis_workspace_selector";
+
 export function readWorkspaceId(): string {
   if (typeof window === "undefined") return "demo-workspace";
 
   try {
+    const verified = window.localStorage.getItem(WORKSPACE_SELECTOR_KEY);
+    if (typeof verified === "string" && verified.trim()) return verified.trim();
+
     const staffUserRaw = window.localStorage.getItem("negis_staff_user");
     if (staffUserRaw) {
       const staffUser = JSON.parse(staffUserRaw) as { workspaceId?: unknown; workspace_id?: unknown };
@@ -132,7 +146,7 @@ export function useDemoCollection<TItem extends { id: string }>(
     const loadFromApi = async () => {
       try {
         const workspaceId = readWorkspaceId();
-        const response = await fetch(apiUrl(`${endpoint}?workspaceId=${encodeURIComponent(workspaceId)}`));
+        const response = await crmFetch(`${endpoint}?workspaceId=${encodeURIComponent(workspaceId)}`);
         const body = await safeJson<Record<string, unknown>>(response);
 
         if (
@@ -186,7 +200,7 @@ export function useDemoCollection<TItem extends { id: string }>(
           ...(toApi ? toApi(item) : item),
           workspaceId,
         };
-        const response = await fetch(apiUrl(endpoint), {
+        const response = await crmFetch(endpoint, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
@@ -213,7 +227,7 @@ export function useDemoCollection<TItem extends { id: string }>(
     void (async () => {
       try {
         const workspaceId = readWorkspaceId();
-        await fetch(apiUrl(endpoint), {
+        await crmFetch(endpoint, {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({

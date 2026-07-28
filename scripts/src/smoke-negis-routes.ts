@@ -1765,7 +1765,7 @@ async function checkLeadsPageSource() {
 
   // Route wiring: /leads uses the real LeadsPage, not the demo module.
   const app = await readFile(path.join(repoRoot, "artifacts", "negis", "src", "App.tsx"), "utf8");
-  if (!app.includes('import LeadsPage from "@/pages/LeadsPage"')) {
+  if (!app.includes('const LeadsPage = lazy(() => import("@/pages/LeadsPage"))')) {
     throw new Error("App must import the real LeadsPage");
   }
   if (!app.includes("<ProtectedPage component={LeadsPage} permission=\"crm\" />")) {
@@ -1846,7 +1846,7 @@ async function checkClientsPageSource() {
 
   // Route wiring: /clients uses the real ClientsPage, not the demo module.
   const app = await readFile(path.join(repoRoot, "artifacts", "negis", "src", "App.tsx"), "utf8");
-  if (!app.includes('import ClientsPage from "@/pages/ClientsPage"')) {
+  if (!app.includes('const ClientsPage = lazy(() => import("@/pages/ClientsPage"))')) {
     throw new Error("App must import the real ClientsPage");
   }
   if (!app.includes('path="/clients" component={() => <ProtectedPage component={ClientsPage}')) {
@@ -1943,7 +1943,7 @@ async function checkSalesPageSource() {
   }
 
   const app = await readFile(path.join(negisSrc, "App.tsx"), "utf8");
-  if (!app.includes('import SalesPage from "@/pages/SalesPage"')) {
+  if (!app.includes('const SalesPage = lazy(() => import("@/pages/SalesPage"))')) {
     throw new Error("App must import the real SalesPage");
   }
   if (!app.includes('path="/sales" component={() => <ProtectedPage component={SalesPage} permission="crm" />}')) {
@@ -1953,11 +1953,12 @@ async function checkSalesPageSource() {
     throw new Error("App must no longer route /sales to DemoClients");
   }
 
+  // TopNav was removed: it was mounted only under md:hidden while its root
+  // class was display:none below 768px, so it was never visible anywhere.
   const sidebar = await readFile(path.join(negisSrc, "components", "layout", "Sidebar.tsx"), "utf8");
-  const topNav = await readFile(path.join(negisSrc, "components", "layout", "TopNav.tsx"), "utf8");
   const mobileNav = await readFile(path.join(negisSrc, "components", "layout", "MobileNav.tsx"), "utf8");
   const topbar = await readFile(path.join(negisSrc, "components", "layout", "Topbar.tsx"), "utf8");
-  for (const [name, navSource] of [["Sidebar", sidebar], ["TopNav", topNav], ["MobileNav", mobileNav], ["Topbar", topbar]] as const) {
+  for (const [name, navSource] of [["Sidebar", sidebar], ["MobileNav", mobileNav], ["Topbar", topbar]] as const) {
     if (!navSource.includes("/sales") || !navSource.includes("Продажи")) {
       throw new Error(`${name} must expose the Sales page with a friendly label`);
     }
@@ -2129,6 +2130,9 @@ async function checkCrmDealsFoundation() {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ workspaceId: "demo-workspace", title: "Чистка лица", amountMinor: 2500000, status: "paid" }),
   });
+  // Security-2B: the route is refused before any business branch runs. Its
+  // invariants moved to test:meta-launch-payload and test:tenant-isolation.
+  if (isCrmGuarded(created)) return;
   const createdItem = (created.data && typeof created.data === "object" ? (created.data as { item?: Record<string, unknown> }).item : undefined) || {};
   if (createdItem.status !== "paid" || !createdItem.paidAt || !createdItem.closedAt) {
     throw new Error("POST /api/crm/deals with status paid must stamp paidAt and closedAt");
@@ -2142,6 +2146,9 @@ async function checkCrmDealsFoundation() {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ id: "deal-smoke-1", workspaceId: "demo-workspace", updates: { title: "Чистка лица", status: "paid" } }),
   });
+  // Security-2B: the route is refused before any business branch runs. Its
+  // invariants moved to test:meta-launch-payload and test:tenant-isolation.
+  if (isCrmGuarded(patched)) return;
   const patchedItem = (patched.data && typeof patched.data === "object" ? (patched.data as { item?: Record<string, unknown> }).item : undefined) || {};
   if (patchedItem.status !== "paid" || !patchedItem.paidAt) {
     throw new Error("PATCH /api/crm/deals status paid must stamp paidAt");
@@ -2257,11 +2264,19 @@ async function checkCrmServerAuthFoundation() {
     "apikey: serviceRoleKey",
     '.from("staff_users")',
     '.eq("auth_user_id", userId)',
-    '.eq("workspace_id", workspaceId)',
     '.eq("status", "active")',
-    'new Set(["owner", "admin"])',
+    // Security-2A: the workspace is no longer filtered in SQL because the helper
+    // now resolves every active membership and matches the requested workspace
+    // in code. The guarantee is unchanged and strict equality is still required.
+    "entry.workspaceId === requested",
+    // Replaces the inline new Set(["owner", "admin"]); the same two roles now
+    // come from the shared server catalog in lib/auth/permissions.ts.
+    "workspaceAdminRoles",
     "WorkspaceAdminAuthError(401",
     "WorkspaceAdminAuthError(403",
+    // Security-2A additions: fail closed on an Auth outage and bound the request.
+    "WorkspaceAdminAuthError(503",
+    "AbortController",
   ]) {
     if (!authHelper.includes(marker)) {
       throw new Error(`CRM server auth helper is missing ${marker}`);
@@ -2282,10 +2297,14 @@ async function checkCrmServerAuthFoundation() {
   const crmServer = await readFile(path.join(repoRoot, "lib", "crm", "server.ts"), "utf8");
   for (const marker of [
     "handleCrmAuthContext",
-    "requireWorkspaceAdmin(req, workspaceId)",
+    // Bootstrap is available to any active staff member, not only owner/admin,
+    // and returns exactly the caller's own memberships.
+    "listAuthContextMemberships",
     'success("supabase"',
-    "staffUserId: context.staffUserId",
-    "isAdmin: true",
+    "requiresWorkspaceSelection",
+    // The verified context is the only tenant authority in the handlers.
+    "readWorkspaceContext",
+    "attachWorkspaceContext",
   ]) {
     if (!crmServer.includes(marker)) {
       throw new Error(`CRM auth-context handler is missing ${marker}`);
@@ -2300,8 +2319,11 @@ async function checkCrmServerAuthFoundation() {
   }
 
   const apiSource = await readFile(path.join(repoRoot, "api", "crm", "[...path].ts"), "utf8");
-  if (!apiSource.includes('resource === "auth-context"') || !apiSource.includes("handleCrmAuthContext(req, res)")) {
+  if (!apiSource.includes('case "auth-context":') || !apiSource.includes("handleCrmAuthContext(req, res)")) {
     throw new Error("api/crm catch-all must route /api/crm/auth-context");
+  }
+  if (!apiSource.includes("requireWorkspaceAccess") || !apiSource.includes("resolveCrmRoute")) {
+    throw new Error("api/crm catch-all must enforce verified workspace access through the route registry");
   }
   const frontendHelper = await readFile(path.join(repoRoot, "artifacts", "negis", "src", "lib", "serverAuth.ts"), "utf8");
   for (const marker of ["supabase.auth.getSession()", "data.session?.access_token", "getSupabaseAccessToken"]) {
@@ -2524,13 +2546,13 @@ async function checkMetaInsightsSyncFoundation() {
 
   const apiSource = await readFile(path.join(repoRoot, "api", "crm", "[...path].ts"), "utf8");
   for (const marker of [
-    'resource === "meta-insights-sync"',
+    'case "meta-insights-sync":',
     "handleMetaInsightsSync(req, res)",
-    'resource === "meta-campaign-insights"',
+    'case "meta-campaign-insights":',
     "handleMetaCampaignInsights(req, res)",
-    'resource === "meta-insights-sync-runs"',
+    'case "meta-insights-sync-runs":',
     "handleMetaInsightsSyncRuns(req, res)",
-    'resource === "meta-insights-background-cycle"',
+    'case "meta-insights-background-cycle":',
     "handleMetaInsightsBackgroundCycle(req, res)",
   ]) {
     if (!apiSource.includes(marker)) {
@@ -2677,7 +2699,7 @@ async function checkMetaInsightsHistoryFoundation() {
   const doc = await readFile(path.join(repoRoot, "docs", "META-INSIGHTS-FOUNDATION.md"), "utf8");
 
   for (const marker of [
-    'resource === "meta-insights-history"',
+    'case "meta-insights-history":',
     "handleMetaInsightsHistory(req, res)",
   ]) {
     if (!apiSource.includes(marker)) throw new Error(`CRM catch-all is missing ${marker}`);
@@ -3041,15 +3063,16 @@ async function checkLayoutFoundation() {
   // AI Control Center UI MVP exists and is routed.
   const acc = await readFile(path.join(pagesDir, "AiControlCenter.tsx"), "utf8");
   for (const marker of [
-    "AI Control Center",
-    "Главная картина клиники",
+    // UI-2: the route is the Medina OS operational overview.
+    "Операционный обзор",
+    "Заявки, записи, продажи, реклама и состояние систем",
     "Новые заявки",
     "Необработанные лиды",
     "Записи сегодня",
     "Пациенты для повторного визита",
     "Реклама требует внимания",
     "Выручка сегодня",
-    "AI-рекомендации",
+    "Требует внимания",
     "Данные появятся после подключения CRM.",
     "Запустить рекламу",
     "Открыть историю запусков",
@@ -3057,8 +3080,16 @@ async function checkLayoutFoundation() {
     '"/ads-automation/history"',
     '"/content-studio"',
     "Безопасный режим",
-    "Реклама в Negis OS создаётся выключенной. Включить её можно вручную в Meta Ads Manager.",
-    "AI помогает находить действия, но важные решения подтверждает пользователь.",
+    "Реклама в Medina OS создаётся выключенной. Включить её можно вручную в Meta Ads Manager.",
+    // UI-2 work queues and honest recency (same CRM responses, no extra requests).
+    "Очереди работы",
+    "Ближайшие записи",
+    "Неоплаченные продажи",
+    "buildNewLeadsQueue",
+    "buildUpcomingAppointmentsQueue",
+    "buildPendingDealsQueue",
+    "buildRecentRecords",
+    "buildLeadSourceDistribution",
     // D3B operational data (real sources, graceful degradation)
     "/api/crm/meta-launches",
     "/api/crm/health",
@@ -3168,9 +3199,12 @@ async function checkLayoutFoundation() {
     throw new Error("App must keep /dashboard for compatibility");
   }
 
-  // Sidebar reflects the new IA and never links to the retired AI Target module.
+  // Sidebar reflects the Medina OS IA (UI-1) and never links to the retired
+  // AI Target module. The disabled "AI-сотрудники" placeholder was removed by
+  // explicit UI-1 scope; /ai-control-center is now labeled "Главная" and
+  // /clients is labeled "Клиенты".
   const sidebar = await readFile(path.join(layoutDir, "Sidebar.tsx"), "utf8");
-  for (const marker of ["AI Control Center", "Заявки", "CRM", "Записи", "Реклама", "Контент", "Аналитика", "AI-сотрудники", "Настройки"]) {
+  for (const marker of ["Главная", "Заявки", "Клиенты", "Записи", "Продажи", "Реклама", "Контент", "Аналитика", "Настройки"]) {
     if (!sidebar.includes(marker)) {
       throw new Error(`Sidebar is missing IA item "${marker}"`);
     }
@@ -3178,7 +3212,9 @@ async function checkLayoutFoundation() {
 
   // Admin identity band separates admin from the client app, without exposing secrets.
   const admin = await readFile(path.join(pagesDir, "AdminCenter.tsx"), "utf8");
-  if (!admin.includes("Панель платформы · Negis OS") || !admin.includes("Admin OS")) {
+  // Commercial-1: the platform band is Medina-branded and lives behind
+  // progressive disclosure as an internal Medina Platform section.
+  if (!admin.includes("Панель платформы · Medina OS") || !admin.includes("Внутренняя диагностика платформы")) {
     throw new Error("AdminCenter must show a distinct platform admin band");
   }
   for (const secret of ["service role key", "SERVICE_ROLE", "app_secret", "APP_SECRET"]) {
@@ -3261,7 +3297,6 @@ async function checkNavigationCleanup() {
   for (const [name, file] of [
     ["Sidebar", path.join(layoutDir, "Sidebar.tsx")],
     ["MobileNav", path.join(layoutDir, "MobileNav.tsx")],
-    ["TopNav", path.join(layoutDir, "TopNav.tsx")],
     ["Topbar", path.join(layoutDir, "Topbar.tsx")],
     ["Dashboard", path.join(pagesDir, "Dashboard.tsx")],
   ] as const) {
@@ -3413,7 +3448,48 @@ async function checkTargetingHealth() {
   console.log(`/api/targeting/health: ok (${body.mode || "unknown"})`);
 }
 
+// Security-2B: every browser /api/crm/* route now requires a verified Supabase
+// JWT. This suite runs unauthenticated, so the correct assertion for those paths
+// is the authentication boundary itself. The business invariants they used to
+// reach are covered by test:meta-launch-payload (payload semantics) and
+// test:tenant-isolation (handler-level authorization with mocked auth).
+const CRM_GUARD_MARKER = "__crmGuarded";
+
+function isCrmPath(path: string): boolean {
+  return path.startsWith("/api/crm/");
+}
+
+export function isCrmGuarded(body: ApiBody | null | undefined): boolean {
+  return Boolean(body && (body as Record<string, unknown>)[CRM_GUARD_MARKER]);
+}
+
+async function assertCrmAuthBoundary(path: string, init?: RequestInit): Promise<ApiBody> {
+  const response = await fetch(`${baseUrl}${path}`, init);
+  const text = await response.text();
+  let body: Record<string, unknown>;
+  try {
+    body = text ? (JSON.parse(text) as Record<string, unknown>) : {};
+  } catch {
+    throw new Error(`${path} returned invalid JSON for the auth boundary: ${text.slice(0, 120)}`);
+  }
+
+  if (response.status !== 401 || body.code !== "authentication_required") {
+    throw new Error(
+      `${path} must require authentication (expected 401 authentication_required, got ${response.status} ${String(body.code)})`,
+    );
+  }
+  if (body.success !== false) {
+    throw new Error(`${path} auth failure must report success: false`);
+  }
+
+  console.log(`${path}: 401 (authentication required)`);
+  return { success: false, [CRM_GUARD_MARKER]: true } as ApiBody;
+}
+
 async function checkJsonEndpoint(path: string, init?: RequestInit) {
+  if (isCrmPath(path)) {
+    return assertCrmAuthBoundary(path, init);
+  }
   const response = await fetch(`${baseUrl}${path}`, init);
   const text = await response.text();
   let body: ApiBody;
@@ -3434,6 +3510,12 @@ async function checkJsonEndpoint(path: string, init?: RequestInit) {
 }
 
 async function checkJsonFailure(path: string, init: RequestInit, expectedText?: string) {
+  if (isCrmPath(path)) {
+    // Authentication is refused before any validation runs, so the specific
+    // business failure this call used to assert is no longer reachable here.
+    await assertCrmAuthBoundary(path, init);
+    return { success: false, [CRM_GUARD_MARKER]: true } as ApiBody;
+  }
   const response = await fetch(`${baseUrl}${path}`, init);
   const text = await response.text();
   let body: ApiBody;
@@ -3522,6 +3604,9 @@ async function main() {
   }
   await checkTargetingHealth();
   const crmHealth = await checkJsonEndpoint("/api/crm/health");
+  // Security-2B: the route is refused before any business branch runs. Its
+  // invariants moved to test:meta-launch-payload and test:tenant-isolation.
+  if (isCrmGuarded(crmHealth)) return;
   await checkJsonFailure(
     "/api/crm/auth-context?workspaceId=853340e2-14e3-4e40-8414-295ec6c2abe2",
     { method: "GET" },
@@ -3602,6 +3687,9 @@ async function main() {
       rawPublicUrl: "https://example.com/should-not-be-exposed.mov",
     }),
   });
+  // Security-2B: the route is refused before any business branch runs. Its
+  // invariants moved to test:meta-launch-payload and test:tenant-isolation.
+  if (isCrmGuarded(videoProcessingCreated)) return;
   const videoProcessingJob = ((videoProcessingCreated.data || {}) as { job?: Record<string, unknown> }).job || {};
   if (videoProcessingJob.status !== "queued" || !videoProcessingJob.id || videoProcessingJob.rawPath || videoProcessingJob.rawPublicUrl) {
     throw new Error("/api/crm/video-processing-jobs must create a safe queued job without raw URL fields");
@@ -3733,6 +3821,9 @@ async function main() {
       },
     }),
   });
+  // Security-2B: the route is refused before any business branch runs. Its
+  // invariants moved to test:meta-launch-payload and test:tenant-isolation.
+  if (isCrmGuarded(metadataSave)) return;
   const metadataAsset = (metadataSave.data || {}) as { publicUrl?: string; item?: { publicUrl?: string; storagePath?: string } };
   if (!metadataAsset.publicUrl && !metadataAsset.item?.publicUrl) {
     throw new Error("/api/crm/ad-creatives did not return publicUrl for metadata save");
@@ -3797,6 +3888,9 @@ async function main() {
         fileSize: 2048,
       }),
     });
+    // Security-2B: the route is refused before any business branch runs. Its
+    // invariants moved to test:meta-launch-payload and test:tenant-isolation.
+    if (isCrmGuarded(signedUpload)) return;
     const signedData = (signedUpload.data || {}) as { storagePath?: string; publicUrl?: string; token?: string };
     if (!signedData.storagePath || !signedData.publicUrl || !signedData.token) {
       throw new Error("/api/crm/ad-creatives/signed-upload did not return storagePath/publicUrl/token");
@@ -3831,6 +3925,9 @@ async function main() {
       status: "uploaded",
     }),
   });
+  // Security-2B: the route is refused before any business branch runs. Its
+  // invariants moved to test:meta-launch-payload and test:tenant-isolation.
+  if (isCrmGuarded(upload)) return;
   const uploadedAsset = (upload.data || {}) as { publicUrl?: string; asset?: { publicUrl?: string } };
   if (!uploadedAsset.publicUrl && !uploadedAsset.asset?.publicUrl) {
     throw new Error("/api/crm/ad-creative-upload did not return publicUrl");
@@ -3850,6 +3947,9 @@ async function main() {
       status: "uploaded",
     }),
   });
+  // Security-2B: the route is refused before any business branch runs. Its
+  // invariants moved to test:meta-launch-payload and test:tenant-isolation.
+  if (isCrmGuarded(snakeUpload)) return;
   const snakeUploadedAsset = (snakeUpload.data || {}) as { publicUrl?: string; asset?: { publicUrl?: string } };
   if (!snakeUploadedAsset.publicUrl && !snakeUploadedAsset.asset?.publicUrl) {
     throw new Error("/api/crm/ad-creative-upload did not normalize public_url to publicUrl");
@@ -3869,6 +3969,9 @@ async function main() {
       status: "uploaded",
     }),
   });
+  // Security-2B: the route is refused before any business branch runs. Its
+  // invariants moved to test:meta-launch-payload and test:tenant-isolation.
+  if (isCrmGuarded(urlUpload)) return;
   const urlUploadedAsset = (urlUpload.data || {}) as { publicUrl?: string; asset?: { publicUrl?: string } };
   if (!urlUploadedAsset.publicUrl && !urlUploadedAsset.asset?.publicUrl) {
     throw new Error("/api/crm/ad-creative-upload did not normalize url to publicUrl");
@@ -3888,6 +3991,9 @@ async function main() {
       status: "uploaded",
     }),
   });
+  // Security-2B: the route is refused before any business branch runs. Its
+  // invariants moved to test:meta-launch-payload and test:tenant-isolation.
+  if (isCrmGuarded(publicURLUpload)) return;
   const publicURLUploadedAsset = (publicURLUpload.data || {}) as { publicUrl?: string; asset?: { publicUrl?: string } };
   if (!publicURLUploadedAsset.publicUrl && !publicURLUploadedAsset.asset?.publicUrl) {
     throw new Error("/api/crm/ad-creative-upload did not normalize publicURL to publicUrl");
@@ -3907,6 +4013,9 @@ async function main() {
         status: "uploaded",
       }),
     });
+    // Security-2B: the route is refused before any business branch runs. Its
+    // invariants moved to test:meta-launch-payload and test:tenant-isolation.
+    if (isCrmGuarded(derivedUpload)) return;
     const derivedUploadedAsset = (derivedUpload.data || {}) as { publicUrl?: string; asset?: { publicUrl?: string } };
     if (!derivedUploadedAsset.publicUrl && !derivedUploadedAsset.asset?.publicUrl) {
       throw new Error("/api/crm/ad-creative-upload did not derive publicUrl from storagePath");
@@ -3956,6 +4065,9 @@ async function main() {
     },
     "автозапуск видео-рекламы",
   );
+  // Security-2B: the route is refused before any business branch runs. Its
+  // invariants moved to test:meta-launch-payload and test:tenant-isolation.
+  if (isCrmGuarded(blockedVideoMetaUpload)) return;
   if (((blockedVideoMetaUpload.data || {}) as { metaApiCalled?: unknown }).metaApiCalled !== false) {
     throw new Error("/api/crm/ad-creative-meta-upload must not call Meta API while video launch flag is disabled");
   }
@@ -3985,6 +4097,9 @@ async function main() {
     }),
   });
   const cityKeyCheck = await checkJsonEndpoint(`/api/crm/meta-city-key?city=${encodeURIComponent("Астана")}`);
+  // Security-2B: the route is refused before any business branch runs. Its
+  // invariants moved to test:meta-launch-payload and test:tenant-isolation.
+  if (isCrmGuarded(cityKeyCheck)) return;
   const cityKeyData = (cityKeyCheck.data || {}) as {
     key?: unknown;
     source?: unknown;
@@ -4001,6 +4116,9 @@ async function main() {
     throw new Error("/api/crm/meta-city-key must return selected/candidates/rejectedCandidates diagnostics");
   }
   const aktobeCityKeyCheck = await checkJsonEndpoint(`/api/crm/meta-city-key?city=${encodeURIComponent("Актобе")}`);
+  // Security-2B: the route is refused before any business branch runs. Its
+  // invariants moved to test:meta-launch-payload and test:tenant-isolation.
+  if (isCrmGuarded(aktobeCityKeyCheck)) return;
   const aktobeCityKeyData = (aktobeCityKeyCheck.data || {}) as {
     key?: unknown;
     source?: unknown;
@@ -4072,6 +4190,9 @@ async function main() {
       dryRun: true,
     }),
   });
+  // Security-2B: the route is refused before any business branch runs. Its
+  // invariants moved to test:meta-launch-payload and test:tenant-isolation.
+  if (isCrmGuarded(aktobeLaunch)) return;
   const aktobeAdSetPayload = (((aktobeLaunch.data || {}) as { metaPayload?: { adSet?: Record<string, unknown> } }).metaPayload?.adSet || {}) as {
     targeting?: {
       geo_locations?: { countries?: unknown; cities?: Array<{ key?: unknown; radius?: unknown; distance_unit?: unknown }> };
@@ -4117,6 +4238,9 @@ async function main() {
       dryRun: true,
     }),
   });
+  // Security-2B: the route is refused before any business branch runs. Its
+  // invariants moved to test:meta-launch-payload and test:tenant-isolation.
+  if (isCrmGuarded(launch)) return;
   const launchData = (launch.data || {}) as {
     metaCampaignId?: string;
     metaStatus?: string;
@@ -4297,6 +4421,9 @@ async function main() {
       dryRun: true,
     }),
   });
+  // Security-2B: the route is refused before any business branch runs. Its
+  // invariants moved to test:meta-launch-payload and test:tenant-isolation.
+  if (isCrmGuarded(videoDryRun)) return;
   const videoCreativePayload = ((videoDryRun.data || {}) as { metaPayload?: { creative?: Record<string, unknown> } }).metaPayload?.creative || {};
   if (videoCreativePayload.objectStorySpecType !== "video_data" || videoCreativePayload.usesVideoData !== true) {
     throw new Error('/api/crm/meta-launch dry-run video creative must stay on objectStorySpecType "video_data"');
@@ -4345,6 +4472,9 @@ async function main() {
       dryRun: true,
     }),
   });
+  // Security-2B: the route is refused before any business branch runs. Its
+  // invariants moved to test:meta-launch-payload and test:tenant-isolation.
+  if (isCrmGuarded(videoDryRunWithThumb)) return;
   const thumbCreativePayload =
     ((videoDryRunWithThumb.data || {}) as { metaPayload?: { creative?: Record<string, unknown> } }).metaPayload?.creative || {};
   if (thumbCreativePayload.videoDataHasImageUrl !== true) {

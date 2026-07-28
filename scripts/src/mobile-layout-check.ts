@@ -60,8 +60,9 @@ async function checkManifest() {
     throw new Error(`/manifest.webmanifest returned HTTP ${response.status}`);
   }
 
+  // UI-2 brand completion: the visible PWA identity is Medina OS.
   const manifest = JSON.parse(text) as { name?: string; theme_color?: string; display?: string };
-  if (manifest.name !== "Negis MedCall CRM" || manifest.theme_color !== "#0D9488" || manifest.display !== "standalone") {
+  if (manifest.name !== "Medina OS — медицинская CRM" || manifest.theme_color !== "#0F766E" || manifest.display !== "standalone") {
     throw new Error("manifest.webmanifest is missing mobile-ready metadata");
   }
 
