@@ -833,3 +833,77 @@ test("L5c no page keeps a private workspace resolver that ignores the selector",
   }
   assert.deepEqual(literalOffenders, [], "a page falls back to the demo literal for a signed-in user");
 });
+
+test("L5d every CRM call site goes through the authenticated helper", async () => {
+  // AdsAutomation and AdminCenter each kept a private crmRequest built on a bare
+  // fetch(apiUrl(...)). Once Security-2B required a token, every call through
+  // them answered 401 — including /api/crm/meta-launch, so the whole Ads
+  // Automation flow was dead in the preview while the dashboard looked fine.
+  //
+  // The rule: a /api/crm/ path may only reach the network through crmFetch. Page
+  // wrappers are fine as long as they delegate to it. Non-CRM endpoints are not
+  // covered here — ContentStudio's /api/content-studio/* calls are a different
+  // contract.
+  const roots = ["pages", "components", "lib", "contexts"].map((dir) => path.join(negisSrc, dir));
+  const sharedHelpers = new Set(["crmFetch", "crmRequest", "crmJson"]);
+  const offenders: string[] = [];
+
+  for (const root of roots) {
+    let names: string[] = [];
+    try {
+      names = await readdir(root);
+    } catch {
+      continue;
+    }
+    for (const name of names) {
+      if (!name.endsWith(".ts") && !name.endsWith(".tsx")) continue;
+      if (name === "api.ts") continue; // the one place allowed to call fetch for a CRM path
+      const source = await readFile(path.join(root, name), "utf8");
+
+      const receivers = new Set<string>();
+      for (const match of source.matchAll(/([A-Za-z_$][A-Za-z0-9_$]*)\s*(?:<[^<>()]*>)?\s*\(\s*[`"'][^`"']*\/api\/crm\//g)) {
+        receivers.add(match[1]);
+      }
+
+      // A page may wrap the helper, and wrap the wrapper: AiControlCenter's
+      // fetchCrmList calls fetchJson calls crmFetch. Grow the safe set until it
+      // stops growing, then require every receiver of a CRM path to be in it.
+      const locals = [...source.matchAll(/(?:async )?function ([A-Za-z_$][A-Za-z0-9_$]*)\s*[<(]/g)].map((m) => ({
+        name: m[1],
+        body: source.slice(m.index ?? 0, (m.index ?? 0) + 1200),
+      }));
+      const localNames = new Set(locals.map((local) => local.name));
+      // Only the imported helpers start out safe. A local function that happens
+      // to be called crmRequest — both offending pages had one — has to earn it
+      // from its own body, which is the whole point of this check.
+      const imported = (source.match(/import \{([^}]*)\} from ["']@\/lib\/api["']/)?.[1] ?? "")
+        .split(",")
+        .map((entry) => entry.trim())
+        .filter((entry) => sharedHelpers.has(entry) && !localNames.has(entry));
+      const safe = new Set(imported);
+      for (let pass = 0; pass < locals.length + 1; pass += 1) {
+        let grew = false;
+        for (const local of locals) {
+          if (safe.has(local.name)) continue;
+          if ([...safe].some((known) => new RegExp(known + "[<(]").test(local.body))) {
+            safe.add(local.name);
+            grew = true;
+          }
+        }
+        if (!grew) break;
+      }
+
+      for (const helper of receivers) {
+        if (helper === "fetch") {
+          offenders.push(name + ": a CRM path is handed straight to fetch");
+          continue;
+        }
+        if (!safe.has(helper)) {
+          offenders.push(name + ": CRM paths flow through " + helper + ", which never reaches crmFetch");
+        }
+      }
+    }
+  }
+
+  assert.deepEqual(offenders, [], "these CRM call sites bypass crmFetch and will answer 401");
+});

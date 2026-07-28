@@ -1,4 +1,4 @@
-import { apiUrl } from '@/lib/api';
+import { crmFetch } from '@/lib/api';
 
 export const CRM_SOURCES = ['Instagram', 'Google', 'WhatsApp', '2GIS', 'Вручную', 'Webhook', 'Import', 'Negis App'];
 export const BOOKING_SOURCES = ['CRM', 'Instagram', 'WhatsApp', 'Import', 'Negis App'];
@@ -28,7 +28,7 @@ export const BONUS_STATUS_LABELS: Record<string, string> = {
 };
 
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(apiUrl(path), {
+  const response = await crmFetch(path, {
     ...init,
     headers: {
       'Content-Type': 'application/json',

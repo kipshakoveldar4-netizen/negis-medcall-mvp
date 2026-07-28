@@ -489,8 +489,11 @@ async function safeJson<T>(response: globalThis.Response): Promise<ApiResponse<T
   }
 }
 
+// Security-2B: same reason as AdsAutomation — the token belongs to crmFetch,
+// not to each call site. adminCrmRequest below stays separate because it also
+// refuses to run at all without a session.
 async function crmRequest<T>(path: string, init?: globalThis.RequestInit): Promise<ApiResponse<T>> {
-  const response = await fetch(apiUrl(path), init);
+  const response = await crmFetch(path, init);
   const body = await safeJson<T>(response);
   if (!response.ok || body.success === false) {
     throw new Error(body.error || body.details?.join(", ") || `HTTP ${response.status}`);
@@ -506,16 +509,12 @@ async function adminCrmRequest<T>(
     body?: string;
   },
 ): Promise<ApiResponse<T>> {
+  // The session is checked up front so the operator gets this message rather
+  // than a bare 401; crmFetch then resolves and attaches the token itself.
   const accessToken = await getSupabaseAccessToken();
   if (!accessToken) throw new Error("Нужно войти заново для защищённой синхронизации.");
 
-  const response = await fetch(apiUrl(path), {
-    ...init,
-    headers: {
-      ...init?.headers,
-      Authorization: `Bearer ${accessToken}`,
-    },
-  });
+  const response = await crmFetch(path, { ...init, accessToken });
   const body = await safeJson<T>(response);
   if (!response.ok || body.success !== true) {
     throw new Error(body.details?.[0] || body.error || `HTTP ${response.status}`);

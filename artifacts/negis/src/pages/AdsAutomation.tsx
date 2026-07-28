@@ -1200,8 +1200,11 @@ async function safeJson<T>(response: { text: () => Promise<string> }): Promise<A
   }
 }
 
+// Security-2B: /api/crm/* is authenticated server-side. This wrapper keeps the
+// page's Meta error formatting but delegates the request itself to crmFetch, so
+// the access token is attached exactly once, in one place.
 async function crmRequest<T>(path: string, init?: RequestInit): Promise<Extract<ApiResponse<T>, { success: true }>> {
-  const response = await fetch(apiUrl(path), init);
+  const response = await crmFetch(path, init);
   const body = await safeJson<T>(response);
 
   if (!response.ok || body.success === false) {
