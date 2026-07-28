@@ -25,7 +25,7 @@ import { PageLayout } from "@/components/layout/PageLayout";
 import { PageHeader } from "@/components/ui/page-header";
 import { MetricCard } from "@/components/ui/metric-card";
 import { EmptyState } from "@/components/ui/empty-state";
-import { useDemoCollection, readDemoStorage, writeDemoStorage, isRealWorkspace } from "@/lib/demoStorage";
+import { useDemoCollection, readDemoStorage, writeDemoStorage, isRealWorkspace, readWorkspaceId } from "@/lib/demoStorage";
 import { apiUrl, crmFetch } from "@/lib/api";
 import {
   FALLBACK_LEAD_SOURCES,
@@ -204,28 +204,6 @@ type ExistingClient = {
   createdAt?: string;
 };
 
-function readWorkspaceId(): string {
-  if (typeof window === "undefined") return "demo-workspace";
-  for (const key of ["negis_staff_user", "negis_staff_session", "negis_demo_workspace"]) {
-    try {
-      const raw = window.localStorage.getItem(key);
-      if (!raw) continue;
-      const value = JSON.parse(raw) as { id?: unknown; workspaceId?: unknown; workspace_id?: unknown };
-      const workspaceId =
-        typeof value.workspaceId === "string" && value.workspaceId.trim()
-          ? value.workspaceId.trim()
-          : typeof value.workspace_id === "string" && value.workspace_id.trim()
-            ? value.workspace_id.trim()
-            : key === "negis_demo_workspace" && typeof value.id === "string" && value.id.trim()
-              ? value.id.trim()
-              : "";
-      if (workspaceId) return workspaceId;
-    } catch {
-      // Ignore malformed localStorage; fall back to demo.
-    }
-  }
-  return "demo-workspace";
-}
 
 function toStr(value: unknown): string {
   return typeof value === "string" ? value : value == null ? "" : String(value);

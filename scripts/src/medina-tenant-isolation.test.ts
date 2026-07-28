@@ -806,3 +806,30 @@ test("L6 demo collections reach the CRM only through the authorized helper", asy
   assert.ok(!storage.includes("fetch(apiUrl("), "no unauthenticated CRM fetch may remain");
   assert.ok(storage.includes("isRealWorkspace"), "demo mode must stay on the local branch");
 });
+
+test("L5c no page keeps a private workspace resolver that ignores the selector", async () => {
+  // The same defect as L5b, one layer up: six pages had each copied their own
+  // readWorkspaceId/readCurrentWorkspaceId that consulted only the pre-Security-2B
+  // demo blobs. Fixing the shared helper did nothing for them, so /leads, /clients,
+  // /appointments and /content-studio still sent workspaceId=demo-workspace and the
+  // server correctly answered 403. One helper, imported everywhere.
+  const pagesDir = path.join(negisSrc, "pages");
+  const files = (await readdir(pagesDir)).filter((name) => name.endsWith(".tsx"));
+  const offenders: string[] = [];
+  for (const name of files) {
+    const source = await readFile(path.join(pagesDir, name), "utf8");
+    const declaresResolver = /function\s+read(Current)?WorkspaceId\s*\(/.test(source);
+    if (declaresResolver) offenders.push(name);
+  }
+  assert.deepEqual(offenders, [], "these pages redeclare a workspace resolver instead of importing the shared one");
+
+  // And every page that sends a workspaceId gets it from the shared helper or the
+  // verified auth context, never from a bare demo literal.
+  const literalOffenders: string[] = [];
+  for (const name of files) {
+    const source = await readFile(path.join(pagesDir, name), "utf8");
+    if (!source.includes("workspaceId=${encodeURIComponent(") && !source.includes("workspaceId,")) continue;
+    if (/=\s*clinicId\s*\|\|\s*"demo-workspace"/.test(source)) literalOffenders.push(name);
+  }
+  assert.deepEqual(literalOffenders, [], "a page falls back to the demo literal for a signed-in user");
+});

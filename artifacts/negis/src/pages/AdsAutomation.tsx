@@ -27,6 +27,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import { apiUrl, crmFetch } from "@/lib/api";
 import { getSupabaseAccessToken } from "@/lib/serverAuth";
 import { hasSupabaseFrontendEnv, supabase } from "@/lib/supabase";
+import { readWorkspaceId } from "@/lib/demoStorage";
 import { getPlanFeature, normalizePlan, planFeatureBadge, type NegisPlan } from "@/lib/planFeatures";
 import { KZ_META_CITY_OPTIONS, getKzMetaCityOption } from "../../../../lib/meta/cities";
 
@@ -487,9 +488,6 @@ function normalizeBriefCity(brief: Brief): Brief {
   };
 }
 
-function readWorkspaceId() {
-  return readStored<{ id?: string }>("negis_demo_workspace", { id: "demo-workspace" }).id || "demo-workspace";
-}
 
 function normalizeAsset(value: unknown, fallback: CreativeAsset): CreativeAsset {
   const record = asRecord(value);

@@ -20,6 +20,7 @@ import { toast } from "sonner";
 import { PageLayout } from "@/components/layout/PageLayout";
 import { apiUrl, crmFetch } from "@/lib/api";
 import { supabase, hasSupabaseFrontendEnv } from "@/lib/supabase";
+import { readWorkspaceId } from "@/lib/demoStorage";
 import { checkMetaCompliance } from "../../../../lib/meta/compliance";
 import type { ContentPackage } from "../../../../lib/content-studio/core";
 
@@ -420,16 +421,6 @@ async function safeJson<TData>(response: Response): Promise<ApiResponse<TData> |
   }
 }
 
-function readWorkspaceId(): string {
-  try {
-    const raw = localStorage.getItem("negis_demo_workspace");
-    if (!raw) return "demo-workspace";
-    const workspace = JSON.parse(raw) as { id?: unknown };
-    return typeof workspace.id === "string" && workspace.id.trim() ? workspace.id.trim() : "demo-workspace";
-  } catch {
-    return "demo-workspace";
-  }
-}
 
 function readVideos(): ContentVideo[] {
   try {

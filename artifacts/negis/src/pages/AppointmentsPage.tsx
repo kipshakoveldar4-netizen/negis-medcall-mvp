@@ -17,7 +17,7 @@ import {
 import { toast } from "sonner";
 import { PageLayout } from "@/components/layout/PageLayout";
 import { apiUrl, crmFetch } from "@/lib/api";
-import { useDemoCollection } from "@/lib/demoStorage";
+import { readWorkspaceId as readCurrentWorkspaceId, useDemoCollection } from "@/lib/demoStorage";
 import { formatPhone, toTelHref, toWhatsappHref } from "@/lib/phone";
 
 type AppointmentStatus = "scheduled" | "confirmed" | "arrived" | "no_show" | "cancelled";
@@ -199,29 +199,6 @@ function generateSlots(): string[] {
   return slots;
 }
 
-function readCurrentWorkspaceId(): string {
-  if (typeof window === "undefined") return "demo-workspace";
-
-  for (const key of ["negis_staff_user", "negis_staff_session", "negis_demo_workspace"]) {
-    try {
-      const raw = window.localStorage.getItem(key);
-      if (!raw) continue;
-      const value = JSON.parse(raw) as { id?: unknown; workspaceId?: unknown; workspace_id?: unknown };
-      const workspaceId = typeof value.workspaceId === "string" && value.workspaceId.trim()
-        ? value.workspaceId.trim()
-        : typeof value.workspace_id === "string" && value.workspace_id.trim()
-          ? value.workspace_id.trim()
-          : key === "negis_demo_workspace" && typeof value.id === "string" && value.id.trim()
-            ? value.id.trim()
-            : "";
-      if (workspaceId) return workspaceId;
-    } catch {
-      // Keep demo fallback.
-    }
-  }
-
-  return "demo-workspace";
-}
 
 function readString(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";

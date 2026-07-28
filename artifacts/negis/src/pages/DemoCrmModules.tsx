@@ -24,7 +24,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { PageLayout } from "@/components/layout/PageLayout";
-import { useDemoCollection } from "@/lib/demoStorage";
+import { readWorkspaceId as readCurrentWorkspaceId, useDemoCollection } from "@/lib/demoStorage";
 import { apiUrl } from "@/lib/api";
 import { formatPhone, toTelHref, toWhatsappHref } from "@/lib/phone";
 import {
@@ -269,29 +269,6 @@ function generateTemporaryPassword() {
   return `Negis2026!${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function readCurrentWorkspaceId() {
-  if (typeof window === "undefined") return "demo-workspace";
-
-  for (const key of ["negis_staff_user", "negis_staff_session", "negis_demo_workspace"]) {
-    try {
-      const raw = window.localStorage.getItem(key);
-      if (!raw) continue;
-      const value = JSON.parse(raw) as { id?: unknown; workspaceId?: unknown; workspace_id?: unknown };
-      const workspaceId = typeof value.workspaceId === "string" && value.workspaceId.trim()
-        ? value.workspaceId.trim()
-        : typeof value.workspace_id === "string" && value.workspace_id.trim()
-          ? value.workspace_id.trim()
-          : key === "negis_demo_workspace" && typeof value.id === "string" && value.id.trim()
-            ? value.id.trim()
-            : "";
-      if (workspaceId) return workspaceId;
-    } catch {
-      // Ignore malformed localStorage and keep fallback mode.
-    }
-  }
-
-  return "demo-workspace";
-}
 
 async function readApiJson(response: globalThis.Response) {
   const text = await response.text();

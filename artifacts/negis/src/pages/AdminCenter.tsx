@@ -29,6 +29,7 @@ import { toast } from "sonner";
 import { PageLayout } from "@/components/layout/PageLayout";
 import { useAuth } from "@/contexts/AuthContext";
 import { apiUrl, crmFetch } from "@/lib/api";
+import { readWorkspaceId } from "@/lib/demoStorage";
 import { getSupabaseAccessToken } from "@/lib/serverAuth";
 import {
   permissionLabels,
@@ -635,7 +636,7 @@ function permissionSummary(permissions: CrmPermission[]) {
 export default function AdminCenter() {
   const [, setLocation] = useLocation();
   const { clinicId, user } = useAuth();
-  const workspaceId = clinicId || "demo-workspace";
+  const workspaceId = clinicId || readWorkspaceId();
   const [activeTab, setActiveTab] = useState<AdminTab>("overview");
   const [clinic, setClinic] = useState<ClinicSettings>(() => readStored("negis_clinic_settings", clinicDefaults));
   const [staff, setStaff] = useState<StaffMember[]>(() => readStored("negis_demo_staff", staffDefaults));
