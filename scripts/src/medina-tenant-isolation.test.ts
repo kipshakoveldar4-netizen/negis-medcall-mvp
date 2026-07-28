@@ -655,7 +655,17 @@ test("K5 the Meta payload semantics are untouched by this phase", async () => {
   const payload = await readFile(path.join(repoRoot, "lib", "crm", "meta-launch-payload.ts"), "utf8");
   assert.ok(payload.includes('placementsMode: "instagram_only"'), "Instagram-only placement flag retained");
   assert.ok(payload.includes("status: launch.statusMode"), "the ad status still mirrors the requested status");
-  assert.ok(!payload.includes('"ACTIVE"'), "no ACTIVE literal is introduced");
+
+  // "ACTIVE" may appear only in the status union that narrows what a caller is
+  // allowed to pass. No runtime expression may produce or default to it.
+  const code = payload
+    .split(String.fromCharCode(10))
+    .filter((line) => !line.trim().startsWith("//"))
+    .filter((line) => !/statusMode:s*"PAUSED"s*|s*"ACTIVE";/.test(line))
+    .join(String.fromCharCode(10));
+  assert.ok(!code.includes("ACTIVE"), "no runtime path may introduce ACTIVE");
+  assert.ok(!/status[^:]*:s*"ACTIVE"/.test(payload), "no payload field may be hardcoded to ACTIVE");
+  assert.ok(payload.includes('statusMode: "PAUSED" | "ACTIVE";'), "the status stays a narrow union, not a free string");
 });
 
 // ===========================================================================

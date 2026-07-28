@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": [
+    "api/**/*.ts",
+    "lib/auth/**/*.ts",
+    "lib/crm/**/*.ts",
+    "lib/meta/**/*.ts",
+    "lib/supabase/**/*.ts",
+    "lib/targeting-agent/**/*.ts"
+  ],
+  "exclude": ["node_modules", "**/*.test.ts"]
+}

@@ -27,7 +27,10 @@ import {
 export type MetaLaunchPayloadInput = {
   campaignName: string;
   objective: string;
-  statusMode: string;
+  // Deliberately as narrow as the Meta builders themselves. Widening these to
+  // string would let a future caller hand "ACTIVE" — or any other value — to the
+  // campaign builder without the compiler objecting.
+  statusMode: "PAUSED" | "ACTIVE";
   dailyBudgetMinor: number;
   totalBudgetMinor: number;
   currency: string;
@@ -38,7 +41,7 @@ export type MetaLaunchPayloadInput = {
   landingUrl: string;
   imageUrl: string;
   creativeUrl: string;
-  creativeType: string;
+  creativeType: "image" | "video";
   videoUrl: string;
   videoId: string;
   thumbnailUrl: string;
