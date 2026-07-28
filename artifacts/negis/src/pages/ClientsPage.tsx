@@ -22,7 +22,7 @@ import {
 import { toast } from "sonner";
 import { PageLayout } from "@/components/layout/PageLayout";
 import { useDemoCollection, readDemoStorage, isRealWorkspace } from "@/lib/demoStorage";
-import { apiUrl } from "@/lib/api";
+import { apiUrl, crmFetch } from "@/lib/api";
 import { formatPhone, phoneDigits, toTelHref, toWhatsappHref } from "@/lib/phone";
 
 // CRM3 — real "Клиенты" (patient CRM) screen for Negis OS, Glass Morphic Medical AI.
@@ -220,7 +220,7 @@ async function loadRelatedCollection<TItem>(
 
   try {
     const workspaceId = readWorkspaceId();
-    const response = await fetch(apiUrl(`${endpoint}?workspaceId=${encodeURIComponent(workspaceId)}`));
+    const response = await crmFetch(`${endpoint}?workspaceId=${encodeURIComponent(workspaceId)}`);
     const text = await response.text();
     const body = text ? (JSON.parse(text) as { success?: boolean; mode?: string; data?: Record<string, unknown> }) : null;
     if (response.ok && body?.success === true && body.mode === "supabase") {

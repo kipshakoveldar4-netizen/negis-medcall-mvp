@@ -28,7 +28,7 @@ import {
 import { toast } from "sonner";
 import { PageLayout } from "@/components/layout/PageLayout";
 import { useAuth } from "@/contexts/AuthContext";
-import { apiUrl } from "@/lib/api";
+import { apiUrl, crmFetch } from "@/lib/api";
 import { getSupabaseAccessToken } from "@/lib/serverAuth";
 import {
   permissionLabels,
@@ -705,7 +705,7 @@ export default function AdminCenter() {
         return;
       }
 
-      const response = await fetch(apiUrl(`/api/crm/auth-context?workspaceId=${encodeURIComponent(workspaceId)}`), {
+      const response = await crmFetch(`/api/crm/auth-context?workspaceId=${encodeURIComponent(workspaceId)}`, {
         headers: { Authorization: `Bearer ${accessToken}` },
       });
       const body = await safeJson<AdminAuthContextData>(response);

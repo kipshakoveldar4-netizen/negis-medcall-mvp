@@ -290,7 +290,9 @@ test("12 duplicate insert on a request_key is treated as already_processed, not 
 
 // Background cycle endpoint (tests 13–26)
 test("13 the cycle endpoint is registered in the existing catch-all and adds no new api file", () => {
-  assert.ok(apiSource.includes('resource === "meta-insights-background-cycle"'));
+  // Security-2B routes through an explicit registry and switch instead of an
+  // inline resource comparison; the endpoint is still the same catch-all file.
+  assert.ok(apiSource.includes('case "meta-insights-background-cycle":'));
   assert.ok(apiSource.includes("handleMetaInsightsBackgroundCycle(req, res)"));
   assert.ok(apiSource.includes("rawBody = rawBody"), "raw body must be preserved for HMAC");
 });

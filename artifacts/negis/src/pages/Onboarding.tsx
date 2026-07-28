@@ -5,7 +5,7 @@ import { PageLayout } from "@/components/layout/PageLayout";
 import { PageHeader } from "@/components/ui/page-header";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { useAuth } from "@/contexts/AuthContext";
-import { apiUrl } from "@/lib/api";
+import { apiUrl, crmFetch } from "@/lib/api";
 import { readWorkspaceId } from "@/lib/demoStorage";
 
 // Medina OS Commercial-2 — clinic onboarding checklist.
@@ -37,7 +37,7 @@ function str(value: unknown): string {
 
 async function fetchJson(path: string): Promise<{ ok: boolean; body: Record<string, unknown> }> {
   try {
-    const response = await fetch(apiUrl(path));
+    const response = await crmFetch(path);
     const text = await response.text();
     const body = text ? (JSON.parse(text) as Record<string, unknown>) : {};
     return { ok: response.ok && body.success === true, body };

@@ -14,3 +14,87 @@ export function publicApiUrl(path: string): string {
   const base = configuredApiBase || `${window.location.origin}${appBasePath}`;
   return `${base}${normalizedPath}`;
 }
+
+// Security-2B: every /api/crm/* request is authenticated server-side, so the
+// browser must attach the current Supabase access token. The token goes in the
+// Authorization header only — never in the URL, never in a log line.
+
+export class CrmApiError extends Error {
+  readonly status: number;
+  readonly code: string;
+
+  constructor(status: number, code: string, message: string) {
+    super(message);
+    this.name = "CrmApiError";
+    this.status = status;
+    this.code = code;
+  }
+}
+
+/** Russian copy for the states a clinic user can actually hit. */
+export function crmErrorMessage(error: unknown): string {
+  if (!(error instanceof CrmApiError)) return "Не удалось загрузить данные. Попробуйте позже.";
+  if (error.status === 401) return "Сессия истекла. Войдите снова.";
+  if (error.status === 403) return "Недостаточно прав для этого действия.";
+  if (error.status === 404) return "Запись не найдена.";
+  if (error.status === 503) return "Сервис авторизации временно недоступен. Попробуйте позже.";
+  return "Не удалось выполнить запрос. Попробуйте позже.";
+}
+
+type CrmFetchInit = RequestInit & { accessToken?: string };
+
+/**
+ * Resolves the current access token from the Supabase session.
+ *
+ * Deliberately a low-level lookup rather than a React context read: AuthContext
+ * itself calls the CRM API during bootstrap, and importing it here would close
+ * a dependency cycle. Nothing is cached, so a rotated or cleared session takes
+ * effect on the very next request.
+ */
+async function resolveAccessToken(explicit?: string): Promise<string> {
+  const provided = (explicit || "").trim();
+  if (provided) return provided;
+
+  const { getSupabaseAccessToken } = await import("@/lib/serverAuth");
+  return (await getSupabaseAccessToken()).trim();
+}
+
+/**
+ * Single entry point for CRM requests. Without a token the request is not sent
+ * at all: an unauthenticated call would only come back as 401, and firing it
+ * anyway invites retry loops.
+ */
+export async function crmFetch(path: string, init: CrmFetchInit = {}): Promise<Response> {
+  const { accessToken, headers, ...rest } = init;
+  const token = await resolveAccessToken(accessToken);
+  if (!token) {
+    throw new CrmApiError(401, "authentication_required", "Authentication required");
+  }
+
+  // Built from scratch so a caller cannot smuggle in its own Authorization.
+  const mergedHeaders = new Headers(headers);
+  mergedHeaders.delete("Authorization");
+  mergedHeaders.set("Authorization", `Bearer ${token}`);
+
+  return fetch(apiUrl(path), { ...rest, headers: mergedHeaders });
+}
+
+/** crmFetch + crmJson in one call, for the common read path. */
+export async function crmRequest<T = unknown>(path: string, init: CrmFetchInit = {}): Promise<T> {
+  const response = await crmFetch(path, init);
+  return crmJson<T>(response);
+}
+
+/** Parses a CRM response, turning auth failures into typed errors. */
+export async function crmJson<T = unknown>(response: Response): Promise<T> {
+  const text = await response.text();
+  const body = text ? (JSON.parse(text) as Record<string, unknown>) : null;
+
+  if (!response.ok) {
+    const code = typeof body?.code === "string" ? body.code : "request_failed";
+    const message = typeof body?.error === "string" ? body.error : "Request failed";
+    throw new CrmApiError(response.status, code, message);
+  }
+
+  return body as T;
+}

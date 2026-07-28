@@ -21,7 +21,8 @@
     "test:targeting": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:targeting",
     "test:meta-launch-payload": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:meta-launch-payload",
     "test:crm-auth-foundation": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:crm-auth-foundation",
-    "test:legacy-webhook": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:legacy-webhook"
+    "test:legacy-webhook": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:legacy-webhook",
+    "test:tenant-isolation": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:tenant-isolation"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.105.4",

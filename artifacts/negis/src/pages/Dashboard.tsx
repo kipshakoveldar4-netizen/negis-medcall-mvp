@@ -3,7 +3,7 @@ import { PageLayout } from '@/components/layout/PageLayout';
 import { Link } from 'wouter';
 import { BarChart3, Calendar, CalendarCheck, DollarSign, PhoneCall, Rocket, Users } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
-import { apiUrl } from '@/lib/api';
+import { apiUrl, crmFetch } from '@/lib/api';
 import { readWorkspaceId } from '@/lib/demoStorage';
 import { MetricCard } from '@/components/ui/metric-card';
 import { PageHeader } from '@/components/ui/page-header';
@@ -14,7 +14,7 @@ type CrmRecord = Record<string, unknown>;
    render an honest "—" instead of a fabricated zero. */
 async function fetchList(path: string, listKey: string): Promise<{ ok: boolean; items: CrmRecord[] }> {
   try {
-    const response = await fetch(apiUrl(path));
+    const response = await crmFetch(path);
     const text = await response.text();
     const body = text ? (JSON.parse(text) as Record<string, unknown>) : {};
     if (!response.ok || body.success !== true) return { ok: false, items: [] };

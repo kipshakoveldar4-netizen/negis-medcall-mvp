@@ -14,7 +14,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { PageLayout } from "@/components/layout/PageLayout";
-import { apiUrl } from "@/lib/api";
+import { apiUrl, crmFetch } from "@/lib/api";
 import { isRealWorkspace, readDemoStorage, readWorkspaceId, useDemoCollection } from "@/lib/demoStorage";
 
 type DealStatus = "pending" | "paid" | "cancelled" | "refunded";
@@ -229,7 +229,7 @@ function paymentMethodLabel(value?: string): string {
 async function loadReferenceCollection(endpoint: string, listKey: string, demoKey: string): Promise<unknown[]> {
   try {
     const workspaceId = readWorkspaceId();
-    const response = await fetch(apiUrl(`${endpoint}?workspaceId=${encodeURIComponent(workspaceId)}`));
+    const response = await crmFetch(`${endpoint}?workspaceId=${encodeURIComponent(workspaceId)}`);
     const text = await response.text();
     const body = text ? JSON.parse(text) as { success?: boolean; mode?: string; data?: Record<string, unknown> } : null;
     if (response.ok && body?.success === true && body.mode === "supabase") {

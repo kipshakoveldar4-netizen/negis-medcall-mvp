@@ -26,7 +26,7 @@ import { PageHeader } from "@/components/ui/page-header";
 import { MetricCard } from "@/components/ui/metric-card";
 import { EmptyState } from "@/components/ui/empty-state";
 import { useDemoCollection, readDemoStorage, writeDemoStorage, isRealWorkspace } from "@/lib/demoStorage";
-import { apiUrl } from "@/lib/api";
+import { apiUrl, crmFetch } from "@/lib/api";
 import {
   FALLBACK_LEAD_SOURCES,
   FALLBACK_LEAD_STAGES,
@@ -251,7 +251,7 @@ function clientFromRecord(raw: unknown): ExistingClient {
 async function loadExistingClients(): Promise<ExistingClient[]> {
   try {
     const workspaceId = readWorkspaceId();
-    const response = await fetch(apiUrl(`/api/crm/clients?workspaceId=${encodeURIComponent(workspaceId)}`));
+    const response = await crmFetch(`/api/crm/clients?workspaceId=${encodeURIComponent(workspaceId)}`);
     const text = await response.text();
     const body = text ? (JSON.parse(text) as { success?: boolean; mode?: string; data?: { clients?: unknown[] } }) : null;
     if (response.ok && body?.success === true && body.mode === "supabase" && Array.isArray(body.data?.clients)) {
@@ -324,7 +324,7 @@ async function loadCampaignLaunchOptions(): Promise<CampaignLaunchOption[]> {
 
   try {
     const workspaceId = readWorkspaceId();
-    const response = await fetch(apiUrl(`/api/crm/meta-launches?workspaceId=${encodeURIComponent(workspaceId)}`));
+    const response = await crmFetch(`/api/crm/meta-launches?workspaceId=${encodeURIComponent(workspaceId)}`);
     const text = await response.text();
     const body = text
       ? (JSON.parse(text) as { success?: boolean; mode?: string; data?: { launches?: unknown[] } })
@@ -400,7 +400,7 @@ async function loadTaxonomyList<TItem>(input: {
   workspaceId: string;
   mapItem: (value: unknown) => TItem | null;
 }): Promise<{ mode: string; items: TItem[] }> {
-  const response = await fetch(apiUrl(`${input.endpoint}?workspaceId=${encodeURIComponent(input.workspaceId)}`));
+  const response = await crmFetch(`${input.endpoint}?workspaceId=${encodeURIComponent(input.workspaceId)}`);
   const text = await response.text();
   const body = text
     ? (JSON.parse(text) as { success?: boolean; mode?: string; data?: Record<string, unknown> })
@@ -770,7 +770,7 @@ export default function LeadsPage() {
       let savedClient = newClient;
       try {
         const workspaceId = readWorkspaceId();
-        const response = await fetch(apiUrl("/api/crm/clients"), {
+        const response = await crmFetch("/api/crm/clients", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({

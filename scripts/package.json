@@ -18,7 +18,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test:meta-launch-payload": "tsx --test ./src/medina-meta-launch-payload.test.ts",
     "test:crm-auth-foundation": "tsx --test ./src/medina-crm-auth-foundation.test.ts",
-    "test:legacy-webhook": "tsx --test ./src/medina-legacy-webhook.test.ts"
+    "test:legacy-webhook": "tsx --test ./src/medina-legacy-webhook.test.ts",
+    "test:tenant-isolation": "tsx --test ./src/medina-tenant-isolation.test.ts"
   },
   "devDependencies": {
     "@types/node": "catalog:",

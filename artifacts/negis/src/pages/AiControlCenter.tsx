@@ -22,7 +22,7 @@ import { PageLayout } from "@/components/layout/PageLayout";
 import { WorkQueue } from "@/components/dashboard/work-queue";
 import { RecentRecords } from "@/components/dashboard/recent-records";
 import { DistributionPanel } from "@/components/dashboard/distribution-panel";
-import { apiUrl } from "@/lib/api";
+import { apiUrl, crmFetch } from "@/lib/api";
 import {
   buildLeadSourceDistribution,
   buildNewLeadsQueue,
@@ -130,7 +130,7 @@ const launchModeLabel: Record<LaunchMode, string> = {
 
 async function fetchJson(path: string): Promise<{ ok: boolean; body: Record<string, unknown> }> {
   try {
-    const response = await fetch(apiUrl(path));
+    const response = await crmFetch(path);
     const text = await response.text();
     const body = text ? (JSON.parse(text) as Record<string, unknown>) : {};
     return { ok: response.ok, body };

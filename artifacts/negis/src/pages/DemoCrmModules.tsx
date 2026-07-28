@@ -1162,56 +1162,9 @@ export function DemoAdmin() {
 
     setStaff((current) => [localStaff, ...current]);
 
-    try {
-      const response = await fetch(apiUrl("/api/crm/staff"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          name: localStaff.name,
-          email: localStaff.email,
-          phone: localStaff.phone,
-          role: localStaff.role,
-          status: localStaff.status,
-          workspaceId,
-          temporaryPassword: password,
-        }),
-      });
-      const body = await readApiJson(response);
-
-      if (!response.ok || body?.success !== true) {
-        throw new Error(body?.details?.join(", ") || body?.error || "Не удалось создать сотрудника");
-      }
-
-      const savedStaff = staffFromApi(body.data?.staff ?? body.data?.item, localStaff);
-      setStaff((current) => current.map((member) => (member.id === localStaff.id ? savedStaff : member)));
-      const returnedPassword = typeof body.data?.temporaryPassword === "string" ? body.data.temporaryPassword : password;
-
-      setCreatedCredentials({
-        email: savedStaff.email,
-        role: savedStaff.role,
-        temporaryPassword: returnedPassword,
-        loginUrl: typeof body.data?.loginUrl === "string" ? body.data.loginUrl : "/login",
-        warning: body.warning,
-        authUserCreated: Boolean(body.data?.authUserCreated),
-      });
-
-      if (body.warning) {
-        toast.warning(body.warning);
-      } else {
-        toast.success("Сотрудник создан");
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Сотрудник сохранён локально";
-      setCreatedCredentials({
-        email: localStaff.email,
-        role: localStaff.role,
-        temporaryPassword: password,
-        loginUrl: "/login",
-        warning: message,
-        authUserCreated: false,
-      });
-      toast.warning(message);
-    }
+    // Security-2B: demo mode is local-only. It must never call the production
+    // CRM API, and generic staff creation is disabled server-side anyway.
+    toast.success("Сотрудник добавлен в демо-данные");
 
     setStaffForm({
       name: "",

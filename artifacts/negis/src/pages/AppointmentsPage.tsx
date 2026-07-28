@@ -16,7 +16,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { PageLayout } from "@/components/layout/PageLayout";
-import { apiUrl } from "@/lib/api";
+import { apiUrl, crmFetch } from "@/lib/api";
 import { useDemoCollection } from "@/lib/demoStorage";
 import { formatPhone, toTelHref, toWhatsappHref } from "@/lib/phone";
 
@@ -571,7 +571,7 @@ export function AppointmentsPage() {
   };
 
   const patchAppointment = async (appointment: Appointment) => {
-    const response = await fetch(apiUrl("/api/crm/appointments"), {
+    const response = await crmFetch("/api/crm/appointments", {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({

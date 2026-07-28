@@ -24,7 +24,7 @@ import {
 import { toast } from "sonner";
 import { PageLayout } from "@/components/layout/PageLayout";
 import { useAuth } from "@/contexts/AuthContext";
-import { apiUrl } from "@/lib/api";
+import { apiUrl, crmFetch } from "@/lib/api";
 import { getSupabaseAccessToken } from "@/lib/serverAuth";
 import { hasSupabaseFrontendEnv, supabase } from "@/lib/supabase";
 import { getPlanFeature, normalizePlan, planFeatureBadge, type NegisPlan } from "@/lib/planFeatures";
@@ -1602,7 +1602,7 @@ export default function AdsAutomation() {
           return;
         }
 
-        const authResponse = await fetch(apiUrl(`/api/crm/auth-context?workspaceId=${encodeURIComponent(workspaceId)}`), {
+        const authResponse = await crmFetch(`/api/crm/auth-context?workspaceId=${encodeURIComponent(workspaceId)}`, {
           headers: { Authorization: `Bearer ${accessToken}` },
         });
         const authBody = await safeJson<ServerAdminAuthContext>(authResponse);
@@ -1630,7 +1630,7 @@ export default function AdsAutomation() {
         }
         serverAdminConfirmed = true;
 
-        const insightsResponse = await fetch(apiUrl(`/api/crm/meta-insights-history?workspaceId=${encodeURIComponent(workspaceId)}`), {
+        const insightsResponse = await crmFetch(`/api/crm/meta-insights-history?workspaceId=${encodeURIComponent(workspaceId)}`, {
           headers: { Authorization: `Bearer ${accessToken}` },
         });
         const insightsBody = await safeJson<{ summaries?: MetaInsightsHistorySummary[] }>(insightsResponse);

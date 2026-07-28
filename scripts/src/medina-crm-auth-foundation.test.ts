@@ -283,16 +283,16 @@ test("14 multiple memberships require an explicit selector instead of silently p
   });
 });
 
-test("15 a workspace id in the body is treated as a selector, not authority", async () => {
+test("15 a workspace id in the body has no effect on the acting workspace", async () => {
+  // The body is data being written, not a selector. Only ?workspaceId= selects,
+  // so a workspace field in a payload can neither redirect nor deny the request.
   await withAuth({ rows: [activeA] }, async (mod, deps) => {
-    await expectStatus(
-      mod.requireWorkspaceAccess(
-        request({ authorization: `Bearer ${VALID_TOKEN}` }, {}, { workspaceId: WORKSPACE_B }),
-        undefined,
-        deps,
-      ),
-      403,
+    const context = await mod.requireWorkspaceAccess(
+      request({ authorization: `Bearer ${VALID_TOKEN}` }, {}, { workspaceId: WORKSPACE_B, workspace_id: WORKSPACE_B }),
+      undefined,
+      deps,
     );
+    assert.equal(context.workspaceId, WORKSPACE_A, "the body must not steer the tenant");
   });
 });
 
@@ -454,14 +454,58 @@ test("27 the auth helper never logs the token and never trusts browser state", a
   assert.ok(code.includes("AbortController"), "the Auth request must be time-bounded");
 });
 
-test("28 the foundation is not wired into the CRM router yet", async () => {
-  // Security-2B connects it. If this starts failing, the router change landed
-  // and the tenant-isolation suite must exist before it ships.
+test("28 the CRM router enforces the foundation with no way around it", async () => {
+  // Replaces the Security-2A marker that asserted the gate was still off. The
+  // guarantee is now the opposite and strictly stronger: the router must use the
+  // verified-access helper, deny unknown routes, keep the worker route separate,
+  // and ship alongside the tenant-isolation suite.
   const router = await readFile(path.join(repoRoot, "api", "crm", "[...path].ts"), "utf8");
+  const registry = await readFile(path.join(repoRoot, "lib", "crm", "authorization.ts"), "utf8");
+
+  assert.ok(router.includes("requireWorkspaceAccess"), "browser routes must resolve a verified workspace context");
+  assert.ok(router.includes("requireAuthenticatedUser"), "the bootstrap route must still verify the token");
+  assert.ok(router.includes("resolveCrmRoute"), "dispatch must go through the explicit route registry");
+  assert.ok(router.includes("normalizeCrmSegments"), "paths must be normalised before resolution");
+  assert.ok(router.includes("attachWorkspaceContext"), "handlers must receive the verified context");
+
+  // Unknown routes and unsupported methods are closed by default.
+  assert.ok(router.includes("if (!route) {"), "an unregistered route must not reach a handler");
+  assert.ok(router.includes("method_not_allowed"), "unsupported methods must be refused");
+  assert.ok(router.includes("resource_not_found"), "unknown routes must return the generic not-found shape");
+
+  // The worker route keeps its own contract and never builds a browser context.
+  assert.ok(registry.includes('"internal_hmac"'), "the worker route must be classified separately");
   assert.ok(
-    !router.includes("requireWorkspaceAccess"),
-    "Security-2A must not enable the router gate; that is Security-2B",
+    router.includes('route.authorization.kind === "internal_hmac"'),
+    "the HMAC branch must be explicit, not a fallthrough",
   );
+
+  // No environment, host or header controlled way around authentication.
+  const routerCode = router
+    .split(String.fromCharCode(10))
+    .filter((line) => !line.trim().startsWith("//"))
+    .join(String.fromCharCode(10));
+  for (const forbidden of ["NODE_ENV", "process.env.VERCEL_ENV", "x-debug", "skipAuth", "bypass"]) {
+    assert.ok(!routerCode.includes(forbidden), `the router must not reference ${forbidden}`);
+  }
+  // "localhost" appears only as the base for URL parsing of a relative path; it
+  // must never gate authorization.
+  assert.ok(
+    !/localhost[sS]{0,80}(auth|skip|allow)/i.test(routerCode),
+    "the host must not influence authorization",
+  );
+
+  // Authorization happens before dispatch: every dispatch call sits after an
+  // await on an auth helper inside the try block.
+  const dispatchIndex = routerCode.indexOf("return await dispatch(route.key, route.resource, segments, req, res);");
+  const accessIndex = routerCode.indexOf("await requireWorkspaceAccess(");
+  assert.ok(accessIndex > 0 && dispatchIndex > 0, "both the guard and the dispatch must exist");
+
+  // The isolation suite must be registered so the gate cannot ship untested.
+  const scriptsPkg = JSON.parse(await readFile(path.join(repoRoot, "scripts", "package.json"), "utf8")) as {
+    scripts: Record<string, string>;
+  };
+  assert.ok(scriptsPkg.scripts["test:tenant-isolation"], "test:tenant-isolation must be registered");
 });
 
 test("29 the server and browser permission catalogs stay identical", async () => {

@@ -256,11 +256,18 @@ export async function listActiveMemberships(
   return memberships;
 }
 
+/**
+ * The one agreed selector form: `?workspaceId=`.
+ *
+ * The request body is deliberately not consulted. A body field is data being
+ * written, and treating it as a selector would blur the line between "which
+ * tenant am I acting as" and "what am I saving" — so a workspace id in a create
+ * or update payload has no effect on the acting workspace at all.
+ */
 function readRequestedWorkspaceId(req: VercelRequest): string {
   const queryValue = req.query?.workspaceId ?? req.query?.workspace_id;
   const fromQuery = Array.isArray(queryValue) ? queryValue[0] : queryValue;
-  const body = readRecord((req as VercelRequest & { body?: unknown }).body);
-  return readString(fromQuery) || readString(body?.workspaceId) || readString(body?.workspace_id);
+  return readString(fromQuery);
 }
 
 /**

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { apiUrl } from "@/lib/api";
+import { crmFetch } from "@/lib/api";
 
 type ApiCollectionOptions<TItem extends { id: string }> = {
   endpoint?: string;
@@ -132,7 +132,7 @@ export function useDemoCollection<TItem extends { id: string }>(
     const loadFromApi = async () => {
       try {
         const workspaceId = readWorkspaceId();
-        const response = await fetch(apiUrl(`${endpoint}?workspaceId=${encodeURIComponent(workspaceId)}`));
+        const response = await crmFetch(`${endpoint}?workspaceId=${encodeURIComponent(workspaceId)}`);
         const body = await safeJson<Record<string, unknown>>(response);
 
         if (
@@ -186,7 +186,7 @@ export function useDemoCollection<TItem extends { id: string }>(
           ...(toApi ? toApi(item) : item),
           workspaceId,
         };
-        const response = await fetch(apiUrl(endpoint), {
+        const response = await crmFetch(endpoint, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
@@ -213,7 +213,7 @@ export function useDemoCollection<TItem extends { id: string }>(
     void (async () => {
       try {
         const workspaceId = readWorkspaceId();
-        await fetch(apiUrl(endpoint), {
+        await crmFetch(endpoint, {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({

@@ -3,7 +3,8 @@ import { Session, User } from '@supabase/supabase-js';
 import { supabase } from '@/lib/supabase';
 import { useLocation } from 'wouter';
 import { toast } from 'sonner';
-import { apiUrl } from '@/lib/api';
+import { apiUrl, crmFetch } from '@/lib/api';
+import { getSupabaseAccessToken } from '@/lib/serverAuth';
 import { isStaffRole, permissionsForRole, type StaffRole } from '@/lib/permissions';
 
 /* ── Types ────────────────────────────────────────────────── */
@@ -248,6 +249,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [isDemoMode,              setIsDemoMode]              = useState(false);
   const [isStaffMode,             setIsStaffMode]             = useState(false);
   const [impersonationClinicName, setImpersonationClinicName] = useState<string | null>(null);
+  // Memberships the server confirmed for this user; drives explicit workspace choice.
+  const [availableWorkspaces, setAvailableWorkspaces] = useState<Array<{ id: string; role: string }>>([]);
   const [, setLocation] = useLocation();
 
   const subscriptionRef = useRef<{ unsubscribe: () => void } | null>(null);
@@ -313,43 +316,98 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setUser(staffUser);
   };
 
-  const fetchStaffByEmail = async (email: string): Promise<StaffUserData | null> => {
-    if (!email.trim()) return null;
+  // Security-2B: identity comes from the verified session, not from an email
+  // lookup. GET /api/crm/auth-context returns only this user's active
+  // memberships with server-computed permissions; the browser never decides its
+  // own role and never asks the server about another address.
+  const WORKSPACE_SELECTOR_KEY = 'negis_workspace_selector';
 
+  type AuthContextMembership = {
+    staffUserId: string;
+    workspaceId: string;
+    role: string;
+    permissions: string[];
+  };
+
+  const fetchAuthContext = async (): Promise<{
+    memberships: AuthContextMembership[];
+    status: number;
+  }> => {
     try {
-      const response = await fetch(apiUrl(`/api/crm/staff?email=${encodeURIComponent(email.trim().toLowerCase())}`));
-      const text = await response.text();
-      const body = text ? JSON.parse(text) as { success?: boolean; data?: Record<string, unknown> } : null;
-      if (!response.ok || body?.success !== true || !body.data) return null;
+      const accessToken = await getSupabaseAccessToken();
+      if (!accessToken) return { memberships: [], status: 401 };
 
-      const staffList = Array.isArray(body.data.staff)
-        ? body.data.staff
-        : Array.isArray(body.data.items)
-          ? body.data.items
-          : [];
-      return normalizeStaffUser(staffList[0]);
+      const response = await crmFetch('/api/crm/auth-context', { accessToken });
+      if (!response.ok) return { memberships: [], status: response.status };
+
+      const text = await response.text();
+      const body = text ? (JSON.parse(text) as { success?: boolean; data?: Record<string, unknown> }) : null;
+      if (body?.success !== true || !body.data) return { memberships: [], status: response.status };
+
+      const raw = Array.isArray(body.data.memberships) ? body.data.memberships : [];
+      const memberships = raw
+        .map((entry) => entry as Record<string, unknown>)
+        .filter((entry) => typeof entry.workspaceId === 'string' && typeof entry.role === 'string')
+        .map((entry) => ({
+          staffUserId: String(entry.staffUserId || ''),
+          workspaceId: String(entry.workspaceId),
+          role: String(entry.role),
+          permissions: Array.isArray(entry.permissions) ? entry.permissions.map(String) : [],
+        }));
+
+      return { memberships, status: response.status };
     } catch {
-      return null;
+      // A network failure must not upgrade anyone; it resolves to no access.
+      return { memberships: [], status: 0 };
     }
   };
 
   const tryApplySupabaseStaffUser = async (supabaseUser: User): Promise<boolean> => {
-    const email = supabaseUser.email || '';
-    const staffUser = await fetchStaffByEmail(email);
-    if (!staffUser) return false;
+    const { memberships } = await fetchAuthContext();
+    if (memberships.length === 0) return false;
 
-    const sessionData: StaffSessionData = {
-      mode: 'staff',
-      authenticated: true,
-      createdAt: new Date().toISOString(),
-      email,
-      workspaceId: staffUser.workspaceId || staffUser.workspace_id,
-      supabaseUserId: supabaseUser.id,
-    };
+    // A stored selector is a UX convenience only: it is discarded unless the
+    // server still lists it among this user's memberships.
+    const storedSelector = (() => {
+      try {
+        return localStorage.getItem(WORKSPACE_SELECTOR_KEY) || '';
+      } catch {
+        return '';
+      }
+    })();
 
-    localStorage.setItem(STAFF_USER_KEY, JSON.stringify(staffUser));
-    localStorage.setItem(STAFF_SESSION_KEY, JSON.stringify(sessionData));
-    applyStaffWorkspaceState({ user: staffUser, session: sessionData }, supabaseUser);
+    const selected =
+      memberships.find((entry) => entry.workspaceId === storedSelector) ||
+      (memberships.length === 1 ? memberships[0] : null);
+
+    if (!selected) {
+      // Several memberships and no valid stored choice: the server does not pick
+      // one, and neither do we.
+      try {
+        localStorage.removeItem(WORKSPACE_SELECTOR_KEY);
+      } catch {
+        /* selector is best-effort only */
+      }
+      setAvailableWorkspaces(memberships.map((entry) => ({ id: entry.workspaceId, role: entry.role })));
+      return false;
+    }
+
+    try {
+      localStorage.setItem(WORKSPACE_SELECTOR_KEY, selected.workspaceId);
+    } catch {
+      /* selector is best-effort only */
+    }
+
+    const role = isStaffRole(selected.role) ? selected.role : 'receptionist';
+    setIsDemoMode(false);
+    setIsImpersonation(false);
+    setIsStaffMode(true);
+    setClinicId(selected.workspaceId);
+    setImpersonationClinicName(null);
+    setUserRole(role);
+    setRolePermissions(routePermissionsForStaffRole(role));
+    setUser(supabaseUser);
+    setAvailableWorkspaces(memberships.map((entry) => ({ id: entry.workspaceId, role: entry.role })));
     return true;
   };
 

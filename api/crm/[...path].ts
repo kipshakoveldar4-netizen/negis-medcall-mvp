@@ -19,8 +19,23 @@ import {
   handleStorageHealth,
   handleVideoJobs,
   handleVideoProcessingJobs,
+  attachWorkspaceContext,
   type CrmResource,
 } from "../../lib/crm/server";
+import { normalizeCrmSegments, resolveCrmRoute } from "../../lib/crm/authorization";
+import {
+  requireAuthenticatedUser,
+  requireWorkspaceAccess,
+  WorkspaceAdminAuthError,
+} from "../../lib/auth/server";
+
+// Security-2B — deny-by-default tenant authorization for /api/crm/*.
+//
+// Handlers below run on a service-role Supabase client, which bypasses RLS. The
+// router therefore resolves a verified workspace context *before* dispatching,
+// and the handlers read the tenant from that context instead of from the
+// request. A path that is not registered in lib/crm/authorization.ts is a 404;
+// there is no permissive fallback and no environment-controlled bypass.
 
 export const config = {
   api: {
@@ -52,6 +67,32 @@ const resources: CrmResource[] = [
 function sendJson(res: VercelResponse, status: number, payload: unknown) {
   res.status(status).setHeader("Content-Type", "application/json; charset=utf-8");
   return res.json(payload);
+}
+
+function sendAuthError(res: VercelResponse, error: WorkspaceAdminAuthError) {
+  // The message and code are already generic; nothing about the workspace, the
+  // membership or the underlying Supabase failure reaches the caller.
+  return sendJson(res, error.statusCode, {
+    success: false,
+    error: error.message,
+    code: error.code,
+  });
+}
+
+function notFound(res: VercelResponse) {
+  return sendJson(res, 404, {
+    success: false,
+    error: "Resource not found",
+    code: "resource_not_found",
+  });
+}
+
+function methodNotAllowed(res: VercelResponse) {
+  return sendJson(res, 405, {
+    success: false,
+    error: "Method not allowed",
+    code: "method_not_allowed",
+  });
 }
 
 async function readRawBody(req: VercelRequest): Promise<Buffer> {
@@ -90,10 +131,6 @@ async function ensureParsedBody(req: VercelRequest) {
   }
 }
 
-function readPathSegment(req: VercelRequest): string {
-  return readPathSegments(req)[0] || "";
-}
-
 function readPathSegments(req: VercelRequest): string[] {
   const pathParam = req.query.path;
   if (Array.isArray(pathParam)) {
@@ -115,99 +152,127 @@ function isCrmResource(value: string): value is CrmResource {
   return resources.includes(value as CrmResource);
 }
 
+/** Dispatch runs only after the route has been authorized. */
+async function dispatch(
+  routeKey: string,
+  resource: string | undefined,
+  segments: string[],
+  req: VercelRequest,
+  res: VercelResponse,
+) {
+  switch (routeKey) {
+    case "auth-context":
+      return handleCrmAuthContext(req, res);
+    case "health":
+      return handleCrmHealth(req, res);
+    case "storage-health":
+      return handleStorageHealth(req, res);
+    case "meta-launch":
+      return handleMetaLaunch(req, res);
+    case "meta-status":
+      return handleMetaStatus(req, res);
+    case "meta-validate":
+      return handleMetaValidate(req, res);
+    case "meta-city-key":
+      return handleMetaCityKey(req, res);
+    case "meta-insights-sync":
+      return handleMetaInsightsSync(req, res);
+    case "meta-insights-background-cycle":
+      return handleMetaInsightsBackgroundCycle(req, res);
+    case "meta-campaign-insights":
+      return handleMetaCampaignInsights(req, res);
+    case "meta-insights-history":
+      return handleMetaInsightsHistory(req, res);
+    case "meta-insights-sync-runs":
+      return handleMetaInsightsSyncRuns(req, res);
+    case "ad-creatives/signed-upload":
+      return handleAdCreativeSignedUpload(req, res);
+    case "ad-creative-upload":
+      return handleAdCreativeUpload(req, res);
+    case "ad-creative-meta-upload":
+      return handleAdCreativeMetaUpload(req, res);
+    case "ads-ai-fill":
+      return handleAdsAiFill(req, res);
+    case "video-jobs":
+      return handleVideoJobs(req, res);
+    case "video-processing-jobs":
+      return handleVideoProcessingJobs(req, res, segments.slice(1));
+    default:
+      break;
+  }
+
+  if (resource && isCrmResource(resource)) {
+    return handleCrmResource(resource, req, res);
+  }
+
+  // Unreachable for a registered route; kept as a closed default.
+  return notFound(res);
+}
+
 export default async function handler(req: VercelRequest, res: VercelResponse) {
+  const rawSegments = readPathSegments(req);
+  const segments = normalizeCrmSegments(rawSegments);
+  if (!segments) {
+    return notFound(res);
+  }
+
+  const route = resolveCrmRoute(segments);
+  if (!route) {
+    return notFound(res);
+  }
+
+  const method = (req.method || "GET").toUpperCase();
+  if (route.authorization.disabledMethods?.includes(method)) {
+    // Registered but intentionally refused. Staff creation is the only case: a
+    // verified enrollment flow does not exist yet, and the previous behaviour
+    // let a caller mint privileged membership in any workspace.
+    return sendJson(res, 409, {
+      success: false,
+      error: "Staff invitation requires an approved enrollment flow",
+      code: "staff_invitation_required",
+    });
+  }
+  if (!route.authorization.methods.includes(method)) {
+    return methodNotAllowed(res);
+  }
+
   try {
     await ensureParsedBody(req);
   } catch {
     return sendJson(res, 400, {
       success: false,
       error: "Invalid request body",
-      details: ["JSON body could not be parsed"],
+      code: "invalid_request_body",
     });
   }
 
-  const pathSegments = readPathSegments(req);
-  const resource = pathSegments[0] || "";
+  try {
+    if (route.authorization.kind === "internal_hmac") {
+      // The handler performs its own HMAC verification; a browser JWT can never
+      // satisfy it, and this branch never builds a workspace context.
+      return await dispatch(route.key, route.resource, segments, req, res);
+    }
 
-  if (resource === "health") {
-    return handleCrmHealth(req, res);
-  }
+    if (route.authorization.kind === "bootstrap") {
+      // Identity only: the user may not have selected a workspace yet.
+      await requireAuthenticatedUser(req);
+      return await dispatch(route.key, route.resource, segments, req, res);
+    }
 
-  if (resource === "auth-context") {
-    return handleCrmAuthContext(req, res);
-  }
-
-  if (resource === "meta-launch") {
-    return handleMetaLaunch(req, res);
-  }
-
-  if (resource === "meta-status") {
-    return handleMetaStatus(req, res);
-  }
-
-  if (resource === "meta-validate") {
-    return handleMetaValidate(req, res);
-  }
-
-  if (resource === "meta-city-key") {
-    return handleMetaCityKey(req, res);
-  }
-
-  if (resource === "meta-insights-sync") {
-    return handleMetaInsightsSync(req, res);
-  }
-
-  if (resource === "meta-insights-background-cycle") {
-    return handleMetaInsightsBackgroundCycle(req, res);
-  }
-
-  if (resource === "meta-campaign-insights") {
-    return handleMetaCampaignInsights(req, res);
-  }
-
-  if (resource === "meta-insights-history") {
-    return handleMetaInsightsHistory(req, res);
-  }
-
-  if (resource === "meta-insights-sync-runs") {
-    return handleMetaInsightsSyncRuns(req, res);
-  }
-
-  if (resource === "storage-health") {
-    return handleStorageHealth(req, res);
-  }
-
-  if (resource === "ad-creatives" && pathSegments[1] === "signed-upload") {
-    return handleAdCreativeSignedUpload(req, res);
-  }
-
-  if (resource === "ad-creative-upload") {
-    return handleAdCreativeUpload(req, res);
-  }
-
-  if (resource === "ad-creative-meta-upload") {
-    return handleAdCreativeMetaUpload(req, res);
-  }
-
-  if (resource === "ads-ai-fill") {
-    return handleAdsAiFill(req, res);
-  }
-
-  if (resource === "video-jobs") {
-    return handleVideoJobs(req, res);
-  }
-
-  if (resource === "video-processing-jobs") {
-    return handleVideoProcessingJobs(req, res, pathSegments.slice(1));
-  }
-
-  if (!isCrmResource(resource)) {
-    return sendJson(res, 404, {
-      success: false,
-      error: "Not found",
-      details: ["Unknown CRM resource"],
+    const permission = route.authorization.permissions?.[method];
+    const context = await requireWorkspaceAccess(req, undefined, {
+      ...(route.authorization.roles ? { roles: route.authorization.roles } : {}),
+      ...(permission ? { permission } : {}),
     });
-  }
 
-  return handleCrmResource(resource, req, res);
+    // From here on the verified workspace is the only tenant authority; the
+    // selector in the query or body has no further effect.
+    attachWorkspaceContext(req, context);
+    return await dispatch(route.key, route.resource, segments, req, res);
+  } catch (error) {
+    if (error instanceof WorkspaceAdminAuthError) {
+      return sendAuthError(res, error);
+    }
+    throw error;
+  }
 }
