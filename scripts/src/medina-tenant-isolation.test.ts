@@ -510,13 +510,37 @@ test("F2 update cannot move a row to another workspace or change server-owned co
 // H. Staff
 // ===========================================================================
 
-test("H1 generic staff creation is disabled with a structured response", async () => {
+test("H1 generic staff creation is disabled, but only after authorization", async () => {
+  const attackerBody = {
+    name: "Attacker",
+    email: "a@b.c",
+    role: "owner",
+    auth_user_id: USER_A,
+    workspaceId: WORKSPACE_B,
+  };
+
+  // Unauthenticated callers learn nothing about the capability.
   await withRouter({ memberships: [memberA] }, async (ctx) => {
-    const { res, log } = await ctx.call({
+    const { res, log } = await ctx.call({ segments: ["staff"], method: "POST", body: attackerBody, token: null });
+    assert.equal(res.statusCode, 401, "authentication is refused before the disabled capability is disclosed");
+    assert.equal(res.body.code, "authentication_required");
+    assert.equal(businessQueries(log).length, 0);
+  });
+
+  // A member without staff-management permission is refused too.
+  await withRouter({ memberships: [memberBReception] }, async (ctx) => {
+    const { res } = await ctx.call({
       segments: ["staff"],
       method: "POST",
-      body: { name: "Attacker", email: "a@b.c", role: "owner", auth_user_id: USER_A, workspaceId: WORKSPACE_B },
+      query: { workspaceId: WORKSPACE_B },
+      body: attackerBody,
     });
+    assert.equal(res.statusCode, 403, "a receptionist must not learn the invitation state either");
+  });
+
+  // Only an authorized administrator sees the structured refusal, and nothing is written.
+  await withRouter({ memberships: [memberA] }, async (ctx) => {
+    const { res, log } = await ctx.call({ segments: ["staff"], method: "POST", body: attackerBody });
     assert.equal(res.statusCode, 409);
     assert.equal(res.body.code, "staff_invitation_required");
     assert.equal(businessQueries(log).length, 0, "no staff row may be written");

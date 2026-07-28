@@ -222,17 +222,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   const method = (req.method || "GET").toUpperCase();
-  if (route.authorization.disabledMethods?.includes(method)) {
-    // Registered but intentionally refused. Staff creation is the only case: a
-    // verified enrollment flow does not exist yet, and the previous behaviour
-    // let a caller mint privileged membership in any workspace.
-    return sendJson(res, 409, {
-      success: false,
-      error: "Staff invitation requires an approved enrollment flow",
-      code: "staff_invitation_required",
-    });
-  }
-  if (!route.authorization.methods.includes(method)) {
+  const isDisabledMethod = Boolean(route.authorization.disabledMethods?.includes(method));
+  if (!isDisabledMethod && !route.authorization.methods.includes(method)) {
     return methodNotAllowed(res);
   }
 
@@ -264,6 +255,18 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       ...(route.authorization.roles ? { roles: route.authorization.roles } : {}),
       ...(permission ? { permission } : {}),
     });
+
+    if (isDisabledMethod) {
+      // Registered but intentionally refused, and only revealed to a caller who
+      // was already authorized for it. Staff creation is the single case: no
+      // verified enrollment flow ties an email to a Supabase Auth user yet, and
+      // the previous behaviour let a caller mint privileged membership anywhere.
+      return sendJson(res, 409, {
+        success: false,
+        error: "Staff invitation requires an approved enrollment flow",
+        code: "staff_invitation_required",
+      });
+    }
 
     // From here on the verified workspace is the only tenant authority; the
     // selector in the query or body has no further effect.

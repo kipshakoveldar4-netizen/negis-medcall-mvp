@@ -96,7 +96,9 @@ export const CRM_RESOURCE_AUTHORIZATION: Readonly<Record<string, RouteAuthorizat
     kind: "browser",
     methods: ["GET", "PATCH"],
     disabledMethods: ["POST"],
-    permissions: { GET: "manage_staff", PATCH: "manage_staff" },
+    // POST carries a permission too: the disabled capability is only disclosed
+    // to a caller who authenticated and was authorized for staff management.
+    permissions: { GET: "manage_staff", PATCH: "manage_staff", POST: "manage_staff" },
   },
   "content-videos": {
     kind: "browser",
