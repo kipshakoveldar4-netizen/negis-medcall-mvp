@@ -40,10 +40,24 @@ export function writeDemoStorage<TValue>(key: string, value: TValue) {
   window.localStorage.setItem(key, JSON.stringify(value));
 }
 
+/**
+ * Where AuthContext stores the workspace it resolved from /api/crm/auth-context.
+ *
+ * Security-2B made the server the sole tenant authority, and the bootstrap no
+ * longer writes the old negis_staff_user / negis_staff_session blobs. Reading
+ * those first therefore fell through to "demo-workspace" for a signed-in user
+ * and every CRM request came back 403. The verified selector is checked first;
+ * the legacy keys stay only so demo mode keeps working.
+ */
+export const WORKSPACE_SELECTOR_KEY = "negis_workspace_selector";
+
 export function readWorkspaceId(): string {
   if (typeof window === "undefined") return "demo-workspace";
 
   try {
+    const verified = window.localStorage.getItem(WORKSPACE_SELECTOR_KEY);
+    if (typeof verified === "string" && verified.trim()) return verified.trim();
+
     const staffUserRaw = window.localStorage.getItem("negis_staff_user");
     if (staffUserRaw) {
       const staffUser = JSON.parse(staffUserRaw) as { workspaceId?: unknown; workspace_id?: unknown };

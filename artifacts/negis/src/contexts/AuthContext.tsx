@@ -5,6 +5,7 @@ import { useLocation } from 'wouter';
 import { toast } from 'sonner';
 import { apiUrl, crmFetch } from '@/lib/api';
 import { getSupabaseAccessToken } from '@/lib/serverAuth';
+import { WORKSPACE_SELECTOR_KEY } from '@/lib/demoStorage';
 import { isStaffRole, permissionsForRole, type StaffRole } from '@/lib/permissions';
 
 /* ── Types ────────────────────────────────────────────────── */
@@ -320,7 +321,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   // lookup. GET /api/crm/auth-context returns only this user's active
   // memberships with server-computed permissions; the browser never decides its
   // own role and never asks the server about another address.
-  const WORKSPACE_SELECTOR_KEY = 'negis_workspace_selector';
 
   type AuthContextMembership = {
     staffUserId: string;

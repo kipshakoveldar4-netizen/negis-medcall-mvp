@@ -739,6 +739,35 @@ test("L5 the login screen no longer resolves identity from an email", async () =
   assert.ok(login.includes("/api/crm/auth-context"), "identity comes from the verified session");
 });
 
+test("L5b the workspace the browser sends is the one the server verified", async () => {
+  // Regression: readWorkspaceId used to consult only the pre-Security-2B staff
+  // blobs, which the new bootstrap no longer writes, so a signed-in user sent
+  // "demo-workspace" and every CRM request came back 403. Both sides must read
+  // the same key, and the verified selector must win.
+  const storage = await readFile(path.join(negisSrc, "lib", "demoStorage.ts"), "utf8");
+  const authContext = await readFile(path.join(negisSrc, "contexts", "AuthContext.tsx"), "utf8");
+
+  assert.ok(
+    storage.includes('export const WORKSPACE_SELECTOR_KEY = "negis_workspace_selector"'),
+    "the selector key must be defined once and exported",
+  );
+  assert.ok(
+    authContext.includes("WORKSPACE_SELECTOR_KEY") && authContext.includes("from '@/lib/demoStorage'"),
+    "AuthContext must import the shared key instead of repeating the literal",
+  );
+  assert.ok(
+    !/const WORKSPACE_SELECTOR_KEYs*=/.test(authContext),
+    "AuthContext must not redeclare the key and let the two drift apart",
+  );
+
+  // The verified selector is read before any legacy fallback.
+  const fn = storage.slice(storage.indexOf("export function readWorkspaceId"));
+  const verifiedAt = fn.indexOf("WORKSPACE_SELECTOR_KEY");
+  const legacyAt = fn.indexOf("negis_staff_user");
+  assert.ok(verifiedAt > 0, "readWorkspaceId must consult the verified selector");
+  assert.ok(legacyAt === -1 || verifiedAt < legacyAt, "the verified selector must take precedence over legacy keys");
+});
+
 test("L6 demo collections reach the CRM only through the authorized helper", async () => {
   // DemoCrmModules names CRM endpoints, but useDemoCollection only calls them for
   // a real workspace; in demo mode the data is local. Whichever branch runs, the
