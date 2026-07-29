@@ -48,3 +48,9 @@ Thumbs.db
 .cache/
 .local/
 .vercel
+
+# Secrets. The service-role key, the HMAC secret and the database URI all live
+# in these; the repository is public, and one `git add .` is all it takes.
+.env
+.env.*
+!.env.example

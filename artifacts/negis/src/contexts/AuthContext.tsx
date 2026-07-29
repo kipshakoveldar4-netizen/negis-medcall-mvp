@@ -417,9 +417,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const token  = params.get('impersonate_token');
     const testHash = params.get('test_token_hash');
 
-    /* A) E2E test login via access/refresh tokens (URL params) */
-    const devAccessToken  = params.get('dev_access_token');
-    const devRefreshToken = params.get('dev_refresh_token');
+    /* A) E2E test login via access/refresh tokens (URL params).
+     *
+     * Development only. `import.meta.env.DEV` is replaced with a literal at
+     * build time, so this whole branch is eliminated from the production
+     * bundle rather than merely skipped at runtime — a session established
+     * from a query string would have put the tokens through the address bar,
+     * the Referer header, access logs and browser history before cleanUrl()
+     * could remove them. The endpoint that mints these tokens
+     * (artifacts/api-server, POST /api/test/login) is not part of the Vercel
+     * deployment at all; this closes the consuming half. */
+    const devAccessToken  = import.meta.env.DEV ? params.get('dev_access_token') : null;
+    const devRefreshToken = import.meta.env.DEV ? params.get('dev_refresh_token') : null;
     if (devAccessToken && devRefreshToken) {
       cleanUrl();
       const { error } = await supabase.auth.setSession({
