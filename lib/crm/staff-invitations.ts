@@ -187,12 +187,16 @@ function publicInvitation(row: InvitationRow) {
  * already has an account — must not leave a half-created invitation behind.
  */
 async function sendSupabaseInviteEmail(email: string, redirectTo: string): Promise<{ sent: boolean; reason?: string }> {
+  // Typed structurally rather than through the global Response: the serverless
+  // build compiles this file without the DOM lib, where `Response` has neither
+  // `ok` nor `status`. lib/content-studio does the same for its Telegram call.
+  type InviteResponse = { ok: boolean; status: number };
   const supabaseUrl = process.env.SUPABASE_URL?.trim().replace(/\/+$/, "");
   const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim();
   if (!supabaseUrl || !serviceRoleKey) return { sent: false, reason: "auth_not_configured" };
 
   try {
-    const response = await fetch(`${supabaseUrl}/auth/v1/invite`, {
+    const response = (await fetch(`${supabaseUrl}/auth/v1/invite`, {
       method: "POST",
       headers: {
         apikey: serviceRoleKey,
@@ -200,7 +204,7 @@ async function sendSupabaseInviteEmail(email: string, redirectTo: string): Promi
         "Content-Type": "application/json",
       },
       body: JSON.stringify({ email, redirect_to: redirectTo }),
-    });
+    })) as unknown as InviteResponse;
     if (response.ok) return { sent: true };
     // The status is enough to act on; the body may echo the address.
     return { sent: false, reason: response.status === 422 ? "already_registered" : "invite_rejected" };

@@ -276,4 +276,11 @@ test("I17 a mail failure does not invalidate an invitation that already exists",
     "the row is written first, so the invitation survives a mail outage",
   );
   assert.ok(/acceptUrl: link/.test(post), "and the administrator gets the link back either way");
+
+  // The serverless build compiles this file without the DOM lib, where the
+  // global Response carries neither ok nor status. Reading them off the fetch
+  // result directly type-checks locally and fails the Vercel build, so the
+  // shape is declared here instead.
+  assert.ok(/type InviteResponse = \{ ok: boolean; status: number \}/.test(send), "the response shape is declared locally");
+  assert.ok(/as unknown as InviteResponse/.test(send), "and the fetch result is read through it");
 });
