@@ -284,3 +284,106 @@ test("25 SECURITY DEFINER functions everywhere must pin search_path", () => {
     assert.ok(sql.includes("set search_path"), `${file} defines a SECURITY DEFINER function and must pin search_path`);
   }
 });
+
+// ---------------------------------------------------------------------------
+// Server reachability of new tables (assertions 26-28)
+// ---------------------------------------------------------------------------
+
+// Tables created before the service-role grant had to be written down. They are
+// listed rather than inferred, so the exemption is a decision someone made once
+// and not a rule that quietly widens.
+const PRE_EXPLICIT_GRANT_ALLOWLIST = new Set(
+  [...PRE_HARDENING_RLS_ALLOWLIST].concat([
+    "016_video_processing_jobs.sql",
+    "017_video_jobs_completed_at.sql",
+    "018_video_processing_jobs_contract.sql",
+    "019_crm_lead_pipeline_foundation.sql",
+    "020_crm_deals_foundation.sql",
+    "021_crm_deal_payments.sql",
+  ]),
+);
+
+/** Tables a migration creates, in the order the chain creates them. */
+function createdTables(sql: string): string[] {
+  const names: string[] = [];
+  for (const match of sql.matchAll(/create table (?:if not exists )?(?:public\.)?([a-z0-9_]+)/g)) {
+    names.push(match[1]);
+  }
+  return names;
+}
+
+/**
+ * Does anything in the chain grant this table to service_role?
+ *
+ * Deliberately chain-wide rather than per-file: a forward repair in a later
+ * migration is the correct way to fix an omission, because the earlier one has
+ * already run somewhere and must keep describing what it did.
+ */
+function grantsToServiceRole(chain: Iterable<[string, string]>, table: string): boolean {
+  // String.raw, because a plain template literal would swallow the backslashes
+  // and leave a pattern that matches nothing while looking correct.
+  const pattern = new RegExp(
+    String.raw`grant[^;]*on\s+table\s+(?:public\.)?${table}\b[^;]*to[^;]*service_role`,
+  );
+  for (const [, source] of chain) {
+    if (pattern.test(normalize(source))) return true;
+  }
+  return false;
+}
+
+test("26 every new application table is reachable by the server that owns it", () => {
+  // The routes run as service_role on a table created by postgres, which grants
+  // it nothing. Migration 024 shipped without the grant: the invitation routes
+  // authorized correctly and then failed on the query, in production, with a
+  // 503 that said nothing. The rule is chain-wide, so a repair migration counts.
+  const offenders: string[] = [];
+  for (const [file, source] of migrations) {
+    if (PRE_EXPLICIT_GRANT_ALLOWLIST.has(file)) continue;
+    for (const table of createdTables(normalize(source))) {
+      if (!grantsToServiceRole(migrations, table)) {
+        offenders.push(`${file}: ${table} is never granted to service_role`);
+      }
+    }
+  }
+  assert.deepEqual(offenders, [], "a table the server cannot read is a feature that fails after it authorizes");
+});
+
+test("27 the rule detects the omission it was written for", () => {
+  // Proof by fixture rather than by inspection: strip the repair out of a copy
+  // of the chain and the check must fail. Without this, test 26 could be
+  // asserting nothing and nobody would know.
+  const withoutRepair = new Map(migrations);
+  for (const [file, source] of withoutRepair) {
+    withoutRepair.set(file, source.replace(/grant[^;]*staff_invitations[^;]*service_role[^;]*;/g, ""));
+  }
+  assert.equal(
+    grantsToServiceRole(withoutRepair, "staff_invitations"),
+    false,
+    "the fixture must actually remove the grant, or this proves nothing",
+  );
+  assert.equal(
+    grantsToServiceRole(migrations, "staff_invitations"),
+    true,
+    "and the real chain must carry it",
+  );
+});
+
+test("28 the applied invitation migration is not rewritten to hide the omission", () => {
+  const created = migrations.get("024_staff_invitations.sql") ?? "";
+  const repair = migrations.get("025_staff_invitations_service_role_grant.sql") ?? "";
+
+  assert.ok(created.length > 0, "024 must remain in the chain");
+  assert.ok(repair.length > 0, "025 must carry the forward repair");
+  assert.ok(
+    !/grant[^;]*staff_invitations[^;]*service_role/.test(normalize(created)),
+    "024 has already run in production; the grant belongs in 025, not backdated into it",
+  );
+
+  const repairSql = normalize(repair);
+  assert.ok(/grant[^;]*on\s+table\s+public\.staff_invitations[^;]*to\s+service_role/.test(repairSql));
+  assert.ok(!/(anon|authenticated|to\s+public)\b/.test(repairSql), "the repair grants nothing to a browser role");
+  assert.ok(!/alter default privileges/.test(repairSql), "and says nothing about future tables");
+  assert.ok(!/disable row level security/.test(repairSql), "RLS stays on");
+  assert.equal((repairSql.match(/begin;/g) || []).length, 1);
+  assert.equal((repairSql.match(/commit;/g) || []).length, 1);
+});

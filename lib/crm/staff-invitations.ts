@@ -213,11 +213,34 @@ async function sendSupabaseInviteEmail(email: string, redirectTo: string): Promi
   }
 }
 
+/**
+ * The redemption link.
+ *
+ * The token travels in the fragment, not the query. A fragment is never sent to
+ * the server, never appears in an access log or a Referer header, and is not
+ * part of what a proxy or an analytics script sees. The page reads it once and
+ * removes it from the address bar before anything else runs.
+ */
 function acceptUrl(req: VercelRequest, token: string): string {
   const host = String(req.headers["x-forwarded-host"] || req.headers.host || "").split(",")[0].trim();
   const proto = String(req.headers["x-forwarded-proto"] || "https").split(",")[0].trim();
-  if (!host) return `/join?token=${encodeURIComponent(token)}`;
-  return `${proto}://${host}/join?token=${encodeURIComponent(token)}`;
+  const fragment = `/join#token=${encodeURIComponent(token)}`;
+  if (!host) return fragment;
+  return `${proto}://${host}${fragment}`;
+}
+
+/**
+ * What an operator can see afterwards.
+ *
+ * Enough to answer "did the invitation go out, was it redeemed, why was it
+ * refused" and nothing more: no token, no digest, no address, no row contents.
+ * The workspace and the invitation id are the join keys an operator needs.
+ */
+function auditInvitation(event: string, fields: Record<string, string | number | boolean | undefined>) {
+  const parts = Object.entries(fields)
+    .filter(([, value]) => value !== undefined && value !== "")
+    .map(([key, value]) => `${key}=${String(value)}`);
+  console.info(`[staff-invitations] ${event}${parts.length ? " " + parts.join(" ") : ""}`);
 }
 
 /** GET / POST / PATCH /api/crm/staff-invitations — workspace administration. */
@@ -291,6 +314,14 @@ export async function handleStaffInvitations(req: VercelRequest, res: VercelResp
 
     const link = acceptUrl(req, token);
     const email = await sendSupabaseInviteEmail(validated.email, link);
+    auditInvitation("created", {
+      workspace: context.workspaceId,
+      invitation: (data as InvitationRow).id,
+      role: validated.role,
+      by: context.staffUserId,
+      emailSent: email.sent,
+      emailStatus: email.reason,
+    });
 
     return sendJson(res, 201, {
       success: true,
@@ -329,6 +360,11 @@ export async function handleStaffInvitations(req: VercelRequest, res: VercelResp
     return sendJson(res, 404, { success: false, error: "Invitation not found", code: "invitation_not_found" });
   }
 
+  auditInvitation("revoked", {
+    workspace: context.workspaceId,
+    invitation: (data as InvitationRow).id,
+    by: context.staffUserId,
+  });
   return sendJson(res, 200, { success: true, mode: "supabase", data: { invitation: publicInvitation(data as InvitationRow) } });
 }
 
@@ -369,7 +405,12 @@ export async function handleStaffInvitationAccept(req: VercelRequest, res: Verce
 
   const invitation = data as (InvitationRow & { token_hash: string }) | null;
   const rejection = validateAcceptance({ invitation, userEmail: user.email ?? "" });
-  if (rejection) return sendRejection(res, rejection);
+  if (rejection) {
+    // The reason is recorded for the operator and never returned in a form that
+    // distinguishes "wrong token" from "wrong person".
+    auditInvitation("redemption_refused", { reason: rejection.code, user: user.id });
+    return sendRejection(res, rejection);
+  }
   if (!invitation) return sendRejection(res, { status: 404, error: "Invitation not found", code: "invitation_not_found" });
 
   // Claim it first. The conditional update is what makes redemption single-use:
@@ -413,6 +454,13 @@ export async function handleStaffInvitationAccept(req: VercelRequest, res: Verce
 
   const staffUserId = (member as { id: string }).id;
   await supabase.from("staff_invitations").update({ accepted_staff_user_id: staffUserId }).eq("id", invitation.id);
+
+  auditInvitation("redeemed", {
+    workspace: invitation.workspace_id,
+    invitation: invitation.id,
+    role: invitation.role,
+    staffUser: staffUserId,
+  });
 
   return sendJson(res, 201, {
     success: true,

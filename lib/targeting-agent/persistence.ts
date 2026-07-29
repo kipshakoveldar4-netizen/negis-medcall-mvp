@@ -6,12 +6,6 @@ import type {
 
 type PersistenceMode = "demo" | "supabase";
 
-type WorkspacePersistenceResult = {
-  workspaceId: string;
-  persistenceMode: PersistenceMode;
-  warning?: string;
-};
-
 const DEMO_WORKSPACE_ID = "demo-workspace";
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -41,53 +35,14 @@ function persistenceWarning(scope: string, error: unknown): string {
   return `${scope} Supabase persistence skipped: ${detail}`;
 }
 
-export async function persistWorkspaceIfAvailable(input: {
-  workspaceName: string;
-  ownerEmail: string;
-}): Promise<WorkspacePersistenceResult> {
-  const supabase = getSupabaseServerClient();
-
-  if (!supabase) {
-    return {
-      workspaceId: DEMO_WORKSPACE_ID,
-      persistenceMode: "demo",
-    };
-  }
-
-  try {
-    const { data, error } = await supabase
-      .from("workspaces")
-      .insert({
-        name: input.workspaceName,
-        owner_email: input.ownerEmail,
-      })
-      .select("id")
-      .single();
-
-    if (error) {
-      throw new Error(error.message);
-    }
-
-    const workspaceId = readString(asRecord(data).id);
-    if (!workspaceId) {
-      throw new Error("Supabase did not return workspace id");
-    }
-
-    return {
-      workspaceId,
-      persistenceMode: "supabase",
-    };
-  } catch (error) {
-    const warning = persistenceWarning("Workspace", error);
-    console.warn(warning);
-
-    return {
-      workspaceId: DEMO_WORKSPACE_ID,
-      persistenceMode: "demo",
-      warning,
-    };
-  }
-}
+// Commercial-3B: the workspace insert that used to live here is gone.
+//
+// It existed for /api/auth/register, which took an unauthenticated POST and
+// created a tenant for anyone who asked. That route is disabled, and leaving the
+// function behind would leave a loaded gun: the next caller to reach for it
+// would create a clinic with no verified owner, which is the whole thing the
+// enrollment flow exists to prevent. A real provisioning path has to write the
+// workspace and its owner membership together, against a verified identity.
 
 export async function persistTargetingCampaignIfAvailable(
   payload: LaunchCampaignPayload,

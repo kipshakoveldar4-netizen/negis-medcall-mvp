@@ -21,9 +21,18 @@ export default function JoinWorkspace() {
   const [message, setMessage] = useState("");
   const [fullName, setFullName] = useState("");
 
+  // Read once from the fragment, then take it out of the address bar. A
+  // fragment never reaches the server, a Referer header or an access log, and
+  // removing it here keeps it out of browser history and out of anything that
+  // reads location later. The value lives only in this component's memory.
   const token = useMemo(() => {
     if (typeof window === "undefined") return "";
-    return new URLSearchParams(window.location.search).get("token")?.trim() || "";
+    const raw = window.location.hash.startsWith("#") ? window.location.hash.slice(1) : "";
+    const captured = new URLSearchParams(raw).get("token")?.trim() || "";
+    if (captured) {
+      window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
+    }
+    return captured;
   }, []);
 
   useEffect(() => {
