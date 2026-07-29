@@ -3,7 +3,6 @@ import { useLocation } from 'wouter';
 import { ArrowRight } from 'lucide-react';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/contexts/AuthContext';
-import { apiUrl } from '@/lib/api';
 import { z } from 'zod';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
@@ -11,17 +10,6 @@ import { zodResolver } from '@hookform/resolvers/zod';
 const loginSchema = z.object({
   email: z.string().email('Неверный формат email'),
   password: z.string().min(6, 'Минимум 6 символов'),
-});
-
-const registerSchema = z.object({
-  ownerName: z.string().min(1, 'Введите имя'),
-  clinicName: z.string().min(1, 'Введите название'),
-  email: z.string().email('Неверный формат email'),
-  password: z.string().min(8, 'Минимум 8 символов'),
-  confirmPassword: z.string().min(1, 'Подтвердите пароль'),
-}).refine(d => d.password === d.confirmPassword, {
-  message: 'Пароли не совпадают',
-  path: ['confirmPassword'],
 });
 
 const resetSchema = z.object({
@@ -37,68 +25,10 @@ const newPasswordSchema = z.object({
 });
 
 type LoginValues      = z.infer<typeof loginSchema>;
-type RegisterValues   = z.infer<typeof registerSchema>;
 type ResetValues      = z.infer<typeof resetSchema>;
 type NewPasswordValues = z.infer<typeof newPasswordSchema>;
-type ModalState = 'idle' | 'choice' | 'login' | 'register' | 'reset' | 'newpassword';
+type ModalState = 'idle' | 'choice' | 'login' | 'reset' | 'newpassword';
 
-type RegisterSuccess = {
-  success: true;
-  mode?: string;
-  data: {
-    workspaceId: string;
-    workspaceName: string;
-    user: {
-      id?: string;
-      name: string;
-      email: string;
-    };
-    redirectTo?: string;
-  };
-};
-
-type RegisterError = {
-  success: false;
-  error: string;
-  details?: string[];
-};
-
-type RegisterResponse = RegisterSuccess | RegisterError;
-
-async function safeJson<T>(response: Response): Promise<T | null> {
-  const text = await response.text();
-  if (!text) return null;
-
-  try {
-    return JSON.parse(text) as T;
-  } catch {
-    return null;
-  }
-}
-
-function persistDemoWorkspace(data: RegisterSuccess['data']) {
-  const createdAt = new Date().toISOString();
-  const user = {
-    id: data.user.id || 'demo-user',
-    name: data.user.name,
-    email: data.user.email,
-  };
-  const workspace = {
-    id: data.workspaceId || 'demo-workspace',
-    name: data.workspaceName,
-  };
-  const session = {
-    mode: 'demo',
-    authenticated: true,
-    createdAt,
-  };
-
-  localStorage.setItem('negis_demo_user', JSON.stringify(user));
-  localStorage.setItem('negis_demo_workspace', JSON.stringify(workspace));
-  localStorage.setItem('negis_demo_session', JSON.stringify(session));
-  localStorage.removeItem('negis_clinic_id');
-  localStorage.removeItem('negis_session');
-}
 
 const roleRoute = (role: string | null) => {
   if (role === 'owner' || role === 'manager') return '/dashboard';
@@ -125,7 +55,6 @@ export default function Landing() {
   }, [authLoading, session, clinicId, userRole, isDemoMode]);
 
   const loginForm       = useForm<LoginValues>      ({ resolver: zodResolver(loginSchema) });
-  const registerForm    = useForm<RegisterValues>   ({ resolver: zodResolver(registerSchema) });
   const resetForm       = useForm<ResetValues>      ({ resolver: zodResolver(resetSchema) });
   const newPasswordForm = useForm<NewPasswordValues>({ resolver: zodResolver(newPasswordSchema) });
 
@@ -143,7 +72,6 @@ export default function Landing() {
     if (session) { setLocation(roleRoute(userRole)); return; }
     setError(''); setSuccessMsg('');
     loginForm.reset();
-    registerForm.reset();
     setModalState('choice');
   };
 
@@ -177,63 +105,18 @@ export default function Landing() {
     } finally { setIsLoading(false); }
   };
 
-  /* Register */
-  const handleRegister = async (data: RegisterValues) => {
-    setIsLoading(true); setError('');
-    try {
-      const registerRes = await fetch(apiUrl('/api/auth/register'), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          ownerName: data.ownerName,
-          clinicName: data.clinicName,
-          email: data.email,
-          password: data.password,
-        }),
-      });
-
-      const registerJson = await safeJson<RegisterResponse>(registerRes);
-      if (!registerJson) {
-        throw new Error('Registration service returned an empty response');
-      }
-
-      if (!registerRes.ok || registerJson.success === false) {
-        const details = registerJson.success === false ? registerJson.details?.join(', ') : '';
-        throw new Error(
-          registerJson.success === false
-            ? [registerJson.error, details].filter(Boolean).join(': ')
-            : 'Registration failed',
-        );
-      }
-
-      persistDemoWorkspace(registerJson.data);
-
-      if (registerJson.mode === 'supabase') {
-        await supabase.auth.signInWithPassword({
-          email: data.email,
-          password: data.password,
-        }).catch(() => undefined);
-      }
-
-      closeModal();
-      window.location.href = registerJson.data.redirectTo || '/dashboard';
-    } catch (e: any) {
-      setError(e.message || 'Registration failed');
-    } finally { setIsLoading(false); }
-  };
-
   /* Reset password — send temp password via API ── */
   const handleSendReset = async (data: ResetValues) => {
     setIsLoading(true); setError(''); setSuccessMsg('');
     try {
-      const res = await fetch(apiUrl('/api/auth/reset-password'), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: data.email }),
+      // Security-2D: /api/auth/reset-password does not exist and never did, so
+      // this always failed. Supabase Auth already owns the recovery link that
+      // handleNewPassword below consumes — ask it directly.
+      const { error } = await supabase.auth.resetPasswordForEmail(data.email, {
+        redirectTo: `${window.location.origin}/reset-password`,
       });
-      const json = await safeJson<{ error?: string }>(res);
-      if (!res.ok) throw new Error(json?.error || 'Ошибка сервера');
-      setSuccessMsg('Письмо с паролем для входа отправлено. Проверьте почту.');
+      if (error) throw error;
+      setSuccessMsg('Ссылка для сброса пароля отправлена. Проверьте почту.');
     } catch (e: any) {
       setError('Не удалось отправить письмо. Проверьте email и попробуйте снова.');
     } finally { setIsLoading(false); }
@@ -314,7 +197,6 @@ export default function Landing() {
   const modalLabel =
     modalState === 'choice'      ? 'ВХОД В СИСТЕМУ'
     : modalState === 'login'     ? 'АВТОРИЗАЦИЯ'
-    : modalState === 'register'  ? 'СОЗДАТЬ ПРОСТРАНСТВО'
     : modalState === 'reset'     ? 'ВОССТАНОВЛЕНИЕ ПАРОЛЯ'
     :                              'НОВЫЙ ПАРОЛЬ';
 
@@ -428,12 +310,12 @@ export default function Landing() {
                   onClick={() => { setError(''); setModalState('login'); }}
                   testId="button-choice-login"
                 />
-                <ChoiceButton
-                  label="Создать пространство"
-                  sub="Новая клиника с нуля"
-                  onClick={() => { setError(''); setModalState('register'); }}
-                  testId="button-choice-register"
-                />
+                {/* Security-2D: self-registration never worked — the endpoint wrote an
+                    orphan workspace row and created no account — so the button is gone
+                    rather than left as a CTA that cannot succeed. */}
+                <p style={{ fontSize: 13, color: '#64748B', fontFamily: "'Inter', sans-serif", lineHeight: 1.5, margin: '2px 0 0', textAlign: 'center' }}>
+                  Доступ для новой клиники открывает владелец пространства.
+                </p>
               </div>
             )}
 
@@ -546,38 +428,6 @@ export default function Landing() {
                     {isLoading ? 'Сохранение...' : 'Установить новый пароль'}
                   </button>
                 )}
-              </form>
-            )}
-
-            {/* ── Register ── */}
-            {modalState === 'register' && (
-              <form onSubmit={registerForm.handleSubmit(handleRegister)} style={{ display: 'flex', flexDirection: 'column', gap: 11 }}>
-                {(
-                  [
-                    { name: 'ownerName',        placeholder: 'Ваше имя',                type: 'text'     },
-                    { name: 'clinicName',        placeholder: 'Название клиники',        type: 'text'     },
-                    { name: 'email',             placeholder: 'Email',                   type: 'email'    },
-                    { name: 'password',          placeholder: 'Пароль (мин. 8 символов)', type: 'password' },
-                    { name: 'confirmPassword',   placeholder: 'Подтвердите пароль',      type: 'password' },
-                  ] as const
-                ).map(({ name, placeholder, type }) => (
-                  <div key={name}>
-                    <input type={type} placeholder={placeholder} style={IS}
-                      data-testid={`input-${name}`}
-                      {...registerForm.register(name)}
-                      onFocus={onFocus} onBlur={onBlur} />
-                    {registerForm.formState.errors[name] && (
-                      <p style={{ color: '#DC2626', fontSize: 12, marginTop: 3, paddingLeft: 2 }}>
-                        {registerForm.formState.errors[name]?.message as string}
-                      </p>
-                    )}
-                  </div>
-                ))}
-                {error && <p style={{ color: '#DC2626', fontSize: 13, textAlign: 'center' }}>{error}</p>}
-                <button type="submit" style={{ ...PrimaryBtn, marginTop: 4 }} disabled={isLoading} data-testid="button-register">
-                  {isLoading ? 'Создание...' : 'Создать пространство'}
-                </button>
-                <BackLink label="Назад" onClick={() => setModalState('choice')} />
               </form>
             )}
           </div>

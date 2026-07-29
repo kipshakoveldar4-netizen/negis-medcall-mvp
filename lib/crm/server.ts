@@ -6175,7 +6175,11 @@ export async function persistContentVideoPatchIfAvailable(input: {
   const workspaceId = readString(input.workspaceId);
   const supabase = getSupabaseServerClient();
 
-  if (!supabase || !isUuid(id)) {
+  // Security-2D: the workspace is required, not optional. This ran on the
+  // service-role client, so an update filtered by id alone would patch whichever
+  // workspace owned that row — and until this phase the id and the workspace
+  // both came straight from an unauthenticated request body.
+  if (!supabase || !isUuid(id) || !isUuid(workspaceId)) {
     return;
   }
 
@@ -6185,12 +6189,11 @@ export async function persistContentVideoPatchIfAvailable(input: {
   }
 
   try {
-    const query = supabase.from("content_videos").update(row).eq("id", id);
-    if (isUuid(workspaceId)) {
-      query.eq("workspace_id", workspaceId);
-    }
-
-    const { error } = await query;
+    const { error } = await supabase
+      .from("content_videos")
+      .update(row)
+      .eq("id", id)
+      .eq("workspace_id", workspaceId);
     if (error) {
       throw new Error(error.message);
     }

@@ -1,12 +1,10 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import {
-  createContentVideo,
   demoAvatarPrompt,
   demoContentPackage,
   demoScriptPackage,
   demoTapNowPrompt,
   generateOpenAIJson,
-  listContentVideos,
   normalizeContentPackage,
   normalizePromptPackage,
   normalizeScriptPackage,
@@ -14,6 +12,64 @@ import {
   updateContentVideo,
 } from "../../lib/content-studio/core";
 import { persistContentVideoPatchIfAvailable } from "../../lib/crm/server";
+import {
+  authorizePrivateRoute,
+  normalizeRouteSegment,
+  sendNotFound,
+  type PrivateRouteAuthorization,
+} from "../../lib/auth/route-guard";
+import type { WorkspaceAccessContext } from "../../lib/auth/server";
+
+// Security-2D — Content Studio is a private workspace surface.
+//
+// Every generator here calls OpenAI on the platform's key and then writes the
+// result back to the caller's content_videos row. Until this phase none of that
+// required a token, and the row was chosen by a workspaceId in the request body,
+// so an anonymous caller could spend the platform's OpenAI budget and patch
+// another clinic's generated content. send-telegram was worse: it accepted a
+// chatId and relayed arbitrary text through the platform's bot.
+//
+// The registry below is the only description of what this function serves.
+// Unknown segment is 404, wrong method is 405, and the workspace is always the
+// verified one — payload.workspaceId is ignored.
+
+const CONTENT_STUDIO_AUTHORIZATION: Readonly<Record<string, PrivateRouteAuthorization>> = {
+  // The in-memory video list predates the CRM content-videos resource, has no
+  // caller left, and its module-level store is shared by every tenant that
+  // happens to hit the same warm lambda. Registered so it answers 410 rather
+  // than quietly serving another workspace's drafts.
+  videos: {
+    kind: "disabled",
+    methods: ["GET", "POST"],
+    permissions: { GET: "view_ai_content", POST: "manage_ai_content" },
+    disabledReason: "Use /api/crm/content-videos",
+  },
+  "generate-package": {
+    kind: "browser",
+    methods: ["POST"],
+    permissions: { POST: "manage_ai_content" },
+  },
+  "generate-script": {
+    kind: "browser",
+    methods: ["POST"],
+    permissions: { POST: "manage_ai_content" },
+  },
+  "generate-avatar-prompt": {
+    kind: "browser",
+    methods: ["POST"],
+    permissions: { POST: "manage_ai_content" },
+  },
+  "generate-tapnow-prompt": {
+    kind: "browser",
+    methods: ["POST"],
+    permissions: { POST: "manage_ai_content" },
+  },
+  "send-telegram": {
+    kind: "browser",
+    methods: ["POST"],
+    permissions: { POST: "manage_ai_content" },
+  },
+};
 
 type TelegramFetchResponse = {
   ok: boolean;
@@ -40,14 +96,6 @@ type TelegramApiBody = {
 function sendJson(res: VercelResponse, status: number, payload: unknown) {
   res.status(status).setHeader("Content-Type", "application/json; charset=utf-8");
   return res.json(payload);
-}
-
-function methodNotAllowed(res: VercelResponse, details: string[]) {
-  return sendJson(res, 405, {
-    success: false,
-    error: "Method not allowed",
-    details,
-  });
 }
 
 function readBody(req: VercelRequest): Record<string, unknown> {
@@ -180,36 +228,7 @@ async function sendTelegramMessage(input: {
   };
 }
 
-async function handleVideos(req: VercelRequest, res: VercelResponse) {
-  if (req.method === "GET") {
-    return sendJson(res, 200, {
-      success: true,
-      mode: "mock",
-      data: {
-        videos: listContentVideos(),
-      },
-    });
-  }
-
-  if (req.method === "POST") {
-    const video = createContentVideo(readBody(req));
-    return sendJson(res, 201, {
-      success: true,
-      mode: "mock",
-      data: {
-        video,
-      },
-    });
-  }
-
-  return methodNotAllowed(res, ["Use GET or POST"]);
-}
-
-async function handleGeneratePackage(req: VercelRequest, res: VercelResponse) {
-  if (req.method !== "POST") {
-    return methodNotAllowed(res, ["Use POST"]);
-  }
-
+async function handleGeneratePackage(req: VercelRequest, res: VercelResponse, context: WorkspaceAccessContext) {
   try {
     const payload = readBody(req);
     const fallback = demoContentPackage(payload);
@@ -265,11 +284,7 @@ async function handleGeneratePackage(req: VercelRequest, res: VercelResponse) {
   }
 }
 
-async function handleGenerateScript(req: VercelRequest, res: VercelResponse) {
-  if (req.method !== "POST") {
-    return methodNotAllowed(res, ["Use POST"]);
-  }
-
+async function handleGenerateScript(req: VercelRequest, res: VercelResponse, context: WorkspaceAccessContext) {
   try {
     const payload = readBody(req);
     const result = await generateOpenAIJson({
@@ -296,7 +311,7 @@ async function handleGenerateScript(req: VercelRequest, res: VercelResponse) {
       updateContentVideo(payload.videoId, patch);
       await persistContentVideoPatchIfAvailable({
         videoId: payload.videoId,
-        workspaceId: payload.workspaceId,
+        workspaceId: context.workspaceId,
         patch,
       });
     }
@@ -315,11 +330,7 @@ async function handleGenerateScript(req: VercelRequest, res: VercelResponse) {
   }
 }
 
-async function handleGenerateAvatarPrompt(req: VercelRequest, res: VercelResponse) {
-  if (req.method !== "POST") {
-    return methodNotAllowed(res, ["Use POST"]);
-  }
-
+async function handleGenerateAvatarPrompt(req: VercelRequest, res: VercelResponse, context: WorkspaceAccessContext) {
   try {
     const payload = readBody(req);
     const fallback = demoAvatarPrompt(payload);
@@ -345,7 +356,7 @@ async function handleGenerateAvatarPrompt(req: VercelRequest, res: VercelRespons
       updateContentVideo(payload.videoId, patch);
       await persistContentVideoPatchIfAvailable({
         videoId: payload.videoId,
-        workspaceId: payload.workspaceId,
+        workspaceId: context.workspaceId,
         patch,
       });
     }
@@ -364,11 +375,7 @@ async function handleGenerateAvatarPrompt(req: VercelRequest, res: VercelRespons
   }
 }
 
-async function handleGenerateTapNowPrompt(req: VercelRequest, res: VercelResponse) {
-  if (req.method !== "POST") {
-    return methodNotAllowed(res, ["Use POST"]);
-  }
-
+async function handleGenerateTapNowPrompt(req: VercelRequest, res: VercelResponse, context: WorkspaceAccessContext) {
   try {
     const payload = readBody(req);
     const fallback = demoTapNowPrompt(payload);
@@ -400,7 +407,7 @@ async function handleGenerateTapNowPrompt(req: VercelRequest, res: VercelRespons
       updateContentVideo(payload.videoId, patch);
       await persistContentVideoPatchIfAvailable({
         videoId: payload.videoId,
-        workspaceId: payload.workspaceId,
+        workspaceId: context.workspaceId,
         patch,
       });
     }
@@ -419,11 +426,7 @@ async function handleGenerateTapNowPrompt(req: VercelRequest, res: VercelRespons
   }
 }
 
-async function handleSendTelegram(req: VercelRequest, res: VercelResponse) {
-  if (req.method !== "POST") {
-    return methodNotAllowed(res, ["Use POST"]);
-  }
-
+async function handleSendTelegram(req: VercelRequest, res: VercelResponse, context: WorkspaceAccessContext) {
   const payload = readBody(req);
   const isTest = payload.test === true;
   const packageText = telegramPackageText({
@@ -439,7 +442,9 @@ async function handleSendTelegram(req: VercelRequest, res: VercelResponse) {
   });
 
   const token = process.env.TELEGRAM_BOT_TOKEN?.trim();
-  const chatId = (typeof payload.chatId === "string" ? payload.chatId : process.env.TELEGRAM_CHAT_ID)?.trim();
+  // The bot token belongs to the platform, so the destination does too: a
+  // caller-supplied chatId turned this into an open relay.
+  const chatId = process.env.TELEGRAM_CHAT_ID?.trim();
   const messageText = isTest ? "✅ Telegram подключён к Negis Content Studio" : packageText;
 
   if (!token || !chatId) {
@@ -448,7 +453,7 @@ async function handleSendTelegram(req: VercelRequest, res: VercelResponse) {
       updateContentVideo(payload.videoId, patch);
       await persistContentVideoPatchIfAvailable({
         videoId: payload.videoId,
-        workspaceId: payload.workspaceId,
+        workspaceId: context.workspaceId,
         patch,
       });
     }
@@ -504,7 +509,7 @@ async function handleSendTelegram(req: VercelRequest, res: VercelResponse) {
       updateContentVideo(payload.videoId, patch);
       await persistContentVideoPatchIfAvailable({
         videoId: payload.videoId,
-        workspaceId: payload.workspaceId,
+        workspaceId: context.workspaceId,
         patch,
       });
     }
@@ -530,18 +535,20 @@ async function handleSendTelegram(req: VercelRequest, res: VercelResponse) {
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
-  const resource = readPathSegment(req);
+  const resource = normalizeRouteSegment(readPathSegment(req));
+  const authorization = CONTENT_STUDIO_AUTHORIZATION[resource];
+  if (!authorization) return sendNotFound(res);
 
-  if (resource === "videos") return handleVideos(req, res);
-  if (resource === "generate-package") return handleGeneratePackage(req, res);
-  if (resource === "generate-script") return handleGenerateScript(req, res);
-  if (resource === "generate-avatar-prompt") return handleGenerateAvatarPrompt(req, res);
-  if (resource === "generate-tapnow-prompt") return handleGenerateTapNowPrompt(req, res);
-  if (resource === "send-telegram") return handleSendTelegram(req, res);
+  // Nothing below this line runs for an unauthenticated caller: no OpenAI
+  // request, no Telegram request, no Supabase client.
+  const context = await authorizePrivateRoute(req, res, authorization);
+  if (!context) return;
 
-  return sendJson(res, 404, {
-    success: false,
-    error: "Not found",
-    details: ["Unknown Content Studio route"],
-  });
+  if (resource === "generate-package") return handleGeneratePackage(req, res, context);
+  if (resource === "generate-script") return handleGenerateScript(req, res, context);
+  if (resource === "generate-avatar-prompt") return handleGenerateAvatarPrompt(req, res, context);
+  if (resource === "generate-tapnow-prompt") return handleGenerateTapNowPrompt(req, res, context);
+  if (resource === "send-telegram") return handleSendTelegram(req, res, context);
+
+  return sendNotFound(res);
 }

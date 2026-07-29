@@ -1,88 +1,35 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import { persistWorkspaceIfAvailable } from "../../lib/targeting-agent/persistence";
 
-type RegisterBody = {
-  name?: string;
-  ownerName?: string;
-  fullName?: string;
-  workspaceName?: string;
-  companyName?: string;
-  clinicName?: string;
-  email?: string;
-  password?: string;
-  confirmPassword?: string;
+// Security-2D — self-registration is disabled.
+//
+// This route accepted an unauthenticated POST and inserted a row into
+// `workspaces` on the service-role client: anyone could create clinics in the
+// production database, as fast as they could send requests. It also took a
+// `password` field, validated its length, and then threw it away — no Supabase
+// Auth user was ever created, so the account it appeared to open could not be
+// logged into. The only durable effect was an orphan workspace row.
+//
+// Access is provisioned by the clinic owner today, and the staff route says the
+// same thing (`409 staff_invitation_required`) until a verified invitation flow
+// exists. Nothing here constructs a Supabase client or reads the body, so a
+// request costs a database round trip of exactly zero.
+//
+// Do not re-enable this by adding an insert back. A real signup needs a
+// verified email, a Supabase Auth user, an owner membership written in the same
+// transaction, and abuse protection — that is a phase, not a patch.
+
+export const config = {
+  api: {
+    bodyParser: false,
+  },
 };
 
-function readString(value: unknown): string {
-  return typeof value === "string" ? value.trim() : "";
-}
-
-function sendJson(res: VercelResponse, status: number, payload: unknown) {
-  res.status(status).setHeader("Content-Type", "application/json; charset=utf-8");
-  return res.json(payload);
-}
-
-function errorBody(error: string, details: string[] = []) {
-  return {
-    success: false,
-    error,
-    details,
-  };
-}
-
 export default async function handler(req: VercelRequest, res: VercelResponse) {
-  if (req.method !== "POST") {
-    return sendJson(res, 405, errorBody("Method not allowed", ["Use POST"]));
-  }
-
-  const body = (req.body || {}) as RegisterBody;
-  const name =
-    readString(body.name) ||
-    readString(body.ownerName) ||
-    readString(body.fullName);
-  const workspaceName =
-    readString(body.workspaceName) ||
-    readString(body.companyName) ||
-    readString(body.clinicName);
-  const email = readString(body.email);
-  const password = typeof body.password === "string" ? body.password : "";
-  const confirmPassword =
-    typeof body.confirmPassword === "string" ? body.confirmPassword : password;
-  const details: string[] = [];
-
-  if (!name) details.push("name is required");
-  if (!workspaceName) details.push("workspaceName is required");
-  if (!email) details.push("email is required");
-  if (!password) details.push("password is required");
-  if (!email.includes("@") && email) details.push("email must be valid");
-  if (password && password.length < 8) details.push("password must be at least 8 characters");
-  if (password && confirmPassword && password !== confirmPassword) {
-    details.push("passwords do not match");
-  }
-
-  if (details.length > 0) {
-    return sendJson(res, 400, errorBody("Validation error", details));
-  }
-
-  const persistence = await persistWorkspaceIfAvailable({
-    workspaceName,
-    ownerEmail: email,
-  });
-
-  return sendJson(res, 200, {
-    success: true,
-    mode: "demo",
-    ...(persistence.warning ? { warning: persistence.warning } : {}),
-    data: {
-      workspaceId: persistence.workspaceId,
-      workspaceName,
-      persistenceMode: persistence.persistenceMode,
-      user: {
-        id: "demo-user",
-        name,
-        email,
-      },
-      redirectTo: "/dashboard",
-    },
+  res.status(410).setHeader("Content-Type", "application/json; charset=utf-8");
+  return res.json({
+    success: false,
+    error: "Self-registration is disabled",
+    code: "self_registration_disabled",
+    details: ["Access is provisioned by the clinic owner."],
   });
 }

@@ -422,6 +422,14 @@ async function safeJson<TData>(response: Response): Promise<ApiResponse<TData> |
 }
 
 
+// Security-2D: Content Studio is authenticated now, and the workspace travels as
+// a query selector the server verifies against the caller's membership — never
+// as a field in the body.
+function withWorkspace(path: string): string {
+  const workspaceId = readWorkspaceId();
+  return `${path}${path.includes("?") ? "&" : "?"}workspaceId=${encodeURIComponent(workspaceId)}`;
+}
+
 function readVideos(): ContentVideo[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -576,12 +584,11 @@ export default function ContentStudio() {
   const suggestPhotoTexts = async () => {
     setPhotoBusy("suggest");
     try {
-      const response = await fetch(apiUrl("/api/content-studio/generate-package"), {
+      const response = await crmFetch(withWorkspace("/api/content-studio/generate-package"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          workspaceId: readWorkspaceId(),
-          mode: "ads",
+                    mode: "ads",
           format: photoFormat,
           service: packageBrief.service,
           city: packageBrief.city,
@@ -678,8 +685,7 @@ export default function ContentStudio() {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-              workspaceId: readWorkspaceId(),
-              fileName,
+                            fileName,
               fileType: "image",
               mimeType: "image/jpeg",
               fileSize: photoBlob.size,
@@ -724,8 +730,7 @@ export default function ContentStudio() {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            workspaceId: readWorkspaceId(),
-            title: photoTexts.headline,
+                        title: photoTexts.headline,
             niche: packageBrief.service,
             goal: "photo_creative",
             style: layoutLabel,
@@ -794,10 +799,10 @@ export default function ContentStudio() {
     setLoading("package");
     setNotice("");
     try {
-      const response = await fetch(apiUrl("/api/content-studio/generate-package"), {
+      const response = await crmFetch(withWorkspace("/api/content-studio/generate-package"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...packageBrief, workspaceId: readWorkspaceId() }),
+        body: JSON.stringify({ ...packageBrief }),
       });
       const body = await safeJson<ContentPackage>(response);
       if (!response.ok || body?.success !== true) {
@@ -813,8 +818,7 @@ export default function ContentStudio() {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            workspaceId: readWorkspaceId(),
-            title: body.data.ideaTitle,
+                        title: body.data.ideaTitle,
             niche: packageBrief.service,
             goal: packageBrief.goal,
             duration: "30-45 seconds",
@@ -939,8 +943,7 @@ export default function ContentStudio() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           id: videoId,
-          workspaceId: readWorkspaceId(),
-          ...patch,
+                    ...patch,
         }),
       });
     } catch {
@@ -963,8 +966,7 @@ export default function ContentStudio() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           ...form,
-          workspaceId: readWorkspaceId(),
-        }),
+                  }),
       });
       const body = await safeJson<{ video: ContentVideo }>(response);
       const apiVideo = body?.success === true ? body.data.video : null;
@@ -996,8 +998,8 @@ export default function ContentStudio() {
     setNotice("");
 
     try {
-      const payload = { ...form, ...activeVideo, videoId: activeVideo?.id, workspaceId: readWorkspaceId() };
-      const response = await fetch(apiUrl("/api/content-studio/generate-script"), {
+      const payload = { ...form, ...activeVideo, videoId: activeVideo?.id };
+      const response = await crmFetch(withWorkspace("/api/content-studio/generate-script"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
@@ -1043,10 +1045,10 @@ export default function ContentStudio() {
         : "/api/content-studio/generate-tapnow-prompt";
 
     try {
-      const response = await fetch(apiUrl(path), {
+      const response = await crmFetch(withWorkspace(path), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...form, ...activeVideo, videoId: activeVideo?.id, workspaceId: readWorkspaceId() }),
+        body: JSON.stringify({ ...form, ...activeVideo, videoId: activeVideo?.id }),
       });
       const body = await safeJson<PromptPackage>(response);
       if (!response.ok || body?.success !== true) {
@@ -1071,7 +1073,7 @@ export default function ContentStudio() {
     setNotice("");
 
     try {
-      const response = await fetch(apiUrl("/api/content-studio/send-telegram"), {
+      const response = await crmFetch(withWorkspace("/api/content-studio/send-telegram"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ test: true }),
@@ -1111,7 +1113,7 @@ export default function ContentStudio() {
     setNotice("");
 
     try {
-      const response = await fetch(apiUrl("/api/content-studio/send-telegram"), {
+      const response = await crmFetch(withWorkspace("/api/content-studio/send-telegram"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(activeVideo),

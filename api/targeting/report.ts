@@ -2,14 +2,22 @@ import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { targetingAgentClient } from "../../lib/targeting-agent/client";
 import { persistTargetingReportIfAvailable } from "../../lib/targeting-agent/persistence";
 
+import {
+  authorizePrivateRoute,
+  type PrivateRouteAuthorization,
+} from "../../lib/auth/route-guard";
+
+// Security-2D: this ran without a token, read a campaign row and wrote a
+// targeting_reports row on the service-role client.
+const AUTHORIZATION: PrivateRouteAuthorization = {
+  kind: "browser",
+  methods: ["GET"],
+  permissions: { GET: "view_marketing" },
+};
+
 export default async function handler(req: VercelRequest, res: VercelResponse) {
-  if (req.method !== "GET") {
-    return res.status(405).json({
-      success: false,
-      error: "Method not allowed",
-      details: [],
-    });
-  }
+  const context = await authorizePrivateRoute(req, res, AUTHORIZATION);
+  if (!context) return;
 
   const campaignIdParam = req.query.campaignId;
   const campaignId = (

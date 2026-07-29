@@ -92,6 +92,12 @@ export async function persistWorkspaceIfAvailable(input: {
 export async function persistTargetingCampaignIfAvailable(
   payload: LaunchCampaignPayload,
   responseBody: TargetingAgentBody,
+  /**
+   * Security-2D: the verified workspace from the route guard. It used to be read
+   * off the request body, which on a service-role client meant an anonymous
+   * caller could file a campaign under any clinic.
+   */
+  verifiedWorkspaceId?: string,
 ): Promise<void> {
   if (responseBody.success !== true) {
     return;
@@ -104,7 +110,7 @@ export async function persistTargetingCampaignIfAvailable(
 
   const responseData = asRecord(responseBody.data);
   const campaignId = readString(responseData.campaignId);
-  const workspaceId = readString(payload.workspaceId);
+  const workspaceId = readString(verifiedWorkspaceId);
   const budget = readNumber(payload.budget);
   const row: Record<string, unknown> = {
     campaign_name: readString(payload.campaignName),
