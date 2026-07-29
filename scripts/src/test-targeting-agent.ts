@@ -16,11 +16,18 @@ type ApiResponse<TData = unknown> =
 
 const baseUrl = (process.env.NEGIS_TARGETING_PROXY_URL || "http://localhost:3000").replace(/\/$/, "");
 
+// Security-2D: /api/targeting/* writes targeting_campaigns and targeting_reports
+// on the service-role client, so it is authenticated now. This script exercises
+// the real proxy, which means it needs a real session: export a workspace member's
+// access token as NEGIS_VERIFICATION_TOKEN before running it.
+const accessToken = (process.env.NEGIS_VERIFICATION_TOKEN || "").trim();
+
 async function request<TData>(path: string, init?: RequestInit): Promise<ApiSuccess<TData>> {
   const response = await fetch(`${baseUrl}${path}`, {
     ...init,
     headers: {
       "Content-Type": "application/json",
+      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
       ...(init?.headers ?? {}),
     },
   });
@@ -39,6 +46,14 @@ async function request<TData>(path: string, init?: RequestInit): Promise<ApiSucc
 
 async function main() {
   console.log(`Testing Targeting Agent proxy at ${baseUrl}`);
+
+  if (!accessToken) {
+    console.log(
+      "Skipped: /api/targeting/* requires an authenticated workspace member since Security-2D. " +
+        "Set NEGIS_VERIFICATION_TOKEN to a member's access token to run this suite.",
+    );
+    return;
+  }
 
   const health = await request("/api/targeting/health");
   console.log(`health: ${health.success ? health.mode : "failed"}`);
