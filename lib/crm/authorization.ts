@@ -133,6 +133,15 @@ export const CRM_ROUTE_AUTHORIZATION: Readonly<Record<string, RouteAuthorization
   health: { kind: "browser", methods: ["GET"], roles: WORKSPACE_ADMIN },
   "storage-health": { kind: "browser", methods: ["GET"], roles: WORKSPACE_ADMIN },
 
+  // Staff enrollment. The invitation is the verified path the disabled staff
+  // POST has been pointing at: an administrator names an email and a role here,
+  // and the person who proves control of that address becomes the member.
+  "staff-invitations": {
+    kind: "browser",
+    methods: ["GET", "POST", "PATCH"],
+    permissions: { GET: "manage_staff", POST: "manage_staff", PATCH: "manage_staff" },
+  },
+
   // Advertising actions touch the live Meta account.
   "meta-launch": { kind: "browser", methods: ["POST"], permissions: { POST: "manage_marketing" } },
   "meta-status": { kind: "browser", methods: ["GET"], permissions: { GET: "view_marketing" } },
@@ -158,6 +167,12 @@ export const CRM_ROUTE_AUTHORIZATION: Readonly<Record<string, RouteAuthorization
 
 /** Sub-path routes, matched as `<resource>/<segment>`. */
 export const CRM_SUBROUTE_AUTHORIZATION: Readonly<Record<string, RouteAuthorization>> = {
+  // Redeeming an invitation is a bootstrap: the caller is authenticated but has
+  // no membership yet, which is exactly what the request is asking to create.
+  "staff-invitations/accept": {
+    kind: "bootstrap",
+    methods: ["POST"],
+  },
   "ad-creatives/signed-upload": {
     kind: "browser",
     methods: ["POST"],
