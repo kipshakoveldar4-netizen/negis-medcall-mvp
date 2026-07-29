@@ -671,3 +671,55 @@ test("S26 no mutation probe survives in the verification tooling", async () => {
   }
   assert.deepEqual(offenders, [], "verification scripts must route mutations through the guard");
 });
+
+/* ── Repository and bundle hygiene (Security-2E) ────────────── */
+
+test("S27 env files cannot be committed to a public repository", async () => {
+  // The repository is public. A local .env holds the service-role key, the HMAC
+  // secret and the database URI, and one `git add .` would publish all three.
+  const ignore = await readFile(path.join(repoRoot, ".gitignore"), "utf8");
+  const lines = ignore.split("\n").map((line) => line.trim());
+
+  assert.ok(lines.includes(".env"), ".gitignore must ignore .env");
+  assert.ok(lines.includes(".env.*"), "and every variant of it");
+  assert.ok(lines.includes("!.env.example"), "while keeping the committed template");
+});
+
+test("S28 no session can be established from a query string in production", async () => {
+  // dev_access_token / dev_refresh_token set a real Supabase session. Tokens in
+  // a URL reach the Referer header, access logs, proxies and browser history
+  // before any cleanup runs — the same problem the invitation token was moved
+  // to a fragment to avoid. import.meta.env.DEV is a build-time literal, so the
+  // branch is removed from the production bundle rather than skipped at runtime.
+  const authContext = await readFile(path.join(negisSrc, "contexts", "AuthContext.tsx"), "utf8");
+  const initAuth = authContext.slice(authContext.indexOf("const initAuth"), authContext.indexOf("/* ── 2."));
+
+  for (const param of ["dev_access_token", "dev_refresh_token"]) {
+    const needle = "params.get('" + param + "')";
+    const occurrences = initAuth.split(needle).length - 1;
+    assert.equal(occurrences, 1, param + " should be read exactly once");
+  }
+  assert.ok(
+    initAuth.includes("import.meta.env.DEV ? params.get('dev_access_token')"),
+    "the access token read must be behind the build-time development flag",
+  );
+  assert.ok(
+    initAuth.includes("import.meta.env.DEV ? params.get('dev_refresh_token')"),
+    "and so must the refresh token read",
+  );
+
+  // The route that mints those tokens is not part of the Vercel deployment; if
+  // that ever changes, this is where someone should notice.
+  const vercel = JSON.parse(await readFile(path.join(repoRoot, "vercel.json"), "utf8")) as {
+    buildCommand?: string;
+    routes?: Array<{ src?: string; dest?: string }>;
+  };
+  assert.ok(
+    !(vercel.routes ?? []).some((route) => /test/.test(route.dest ?? "")),
+    "no test-login route may be routed in production",
+  );
+  assert.ok(
+    !/api-server/.test(vercel.buildCommand ?? ""),
+    "the Express test-auth app must stay out of the deployed build",
+  );
+});
