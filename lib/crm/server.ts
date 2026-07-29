@@ -2281,6 +2281,9 @@ const MAX_VIDEO_BYTES = 100 * 1024 * 1024;
 // Large video optimization pipeline (Phase A). Raw originals are temporary:
 // they live in a private bucket and are never sent to Meta or end users.
 const DEFAULT_RAW_VIDEO_BUCKET = "ad-creatives-raw";
+// The one bucket a browser-initiated creative upload may ever reach. It is
+// public by design (migration 015) because Meta fetches creatives by URL.
+const AD_CREATIVE_BUCKET = "ad-creatives";
 const VIDEO_JOB_STATUSES = new Set(["awaiting_upload", "queued", "downloading", "transcoding", "uploading", "ready", "failed", "deleted_original"]);
 export const VIDEO_OPTIMIZATION_DISABLED_MESSAGE =
   "Оптимизация больших видео отключена. Загрузите MP4 до 100 MB или включите VIDEO_OPTIMIZATION_ENABLED в Vercel.";
@@ -2472,6 +2475,27 @@ function buildAdCreativeStoragePath(input: { workspaceId: string; fileName: stri
   return `${workspace}/${year}/${month}/${randomStorageId()}-${safeStorageFileName(input.fileName)}`;
 }
 
+/**
+ * Storage-1: an object key that arrives from a browser must live under the
+ * caller's own workspace prefix.
+ *
+ * The video worker reads `raw_path` off the job row with the service-role
+ * client, publishes the transcoded result to the public bucket, and then
+ * deletes the original. An arbitrary key therefore let a member of one
+ * workspace have another workspace's private raw video republished publicly
+ * and then removed. `buildAdCreativeStoragePath` is the only legitimate
+ * producer of these keys and always starts them with the workspace segment,
+ * so the check costs a legitimate caller nothing.
+ *
+ * Demo mode has no workspace of its own and never reaches the worker: without
+ * a UUID there is nothing to compare against, and the handler already refuses
+ * to persist.
+ */
+function isOwnWorkspaceStoragePath(storagePath: string, workspaceId: string): boolean {
+  if (!isUuid(workspaceId)) return true;
+  return storagePath.startsWith(`${safeStoragePathSegment(workspaceId, DEMO_WORKSPACE_ID)}/`);
+}
+
 function inferMimeType(input: { fileName: string; mimeType?: string }): string {
   const mimeType = firstString(input.mimeType);
   if (mimeType && mimeType !== "application/octet-stream") return mimeType;
@@ -2619,7 +2643,7 @@ export async function handleAdCreativeSignedUpload(req: VercelRequest, res: Verc
     );
   }
 
-  const bucket = "ad-creatives";
+  const bucket = AD_CREATIVE_BUCKET;
   const workspaceId = readWorkspaceId(req, body);
   const storagePath = buildAdCreativeStoragePath({
     workspaceId,
@@ -2700,10 +2724,18 @@ async function handleMultipartAdCreativeUpload(req: VercelRequest, res: VercelRe
   const workspaceId = readWorkspaceId(req, form.fields);
   const fileName = firstString(form.fields.fileName, form.fields.file_name, form.file.fileName);
   const mimeType = inferMimeType({ fileName, mimeType: form.file.mimeType });
-  const storageBucket = firstString(form.fields.storageBucket, form.fields.storage_bucket, "ad-creatives");
-  const storagePath =
-    firstString(form.fields.storagePath, form.fields.storage_path) ||
-    `${workspaceId}/ads/${Date.now()}-${safeStorageFileName(fileName)}`;
+  // Storage-1: the browser never chooses the bucket or the object key.
+  //
+  // This branch writes with the service-role client, which bypasses Storage
+  // RLS entirely, so a caller-supplied bucket or path was a tenant boundary
+  // hole: any member holding manage_marketing could write under another
+  // workspace's prefix, or into the private ad-creatives-raw bucket that
+  // migration 016 states must never be served to Meta or end users. The
+  // sibling signed-upload route already derives both server-side; this branch
+  // now uses the same builder. No caller sends these fields — the UI is pinned
+  // away from FormData by test:routes — so nothing legitimate changes.
+  const storageBucket = AD_CREATIVE_BUCKET;
+  const storagePath = buildAdCreativeStoragePath({ workspaceId, fileName });
   const metadata = {
     ...readJsonRecord(form.fields.metadata),
     source: firstString(asRecord(readJsonRecord(form.fields.metadata)).source, "ads-automation"),
@@ -3378,7 +3410,14 @@ export async function handleVideoProcessingJobs(req: VercelRequest, res: VercelR
       if (error) throw new Error(error.message);
       if (data) return sendJson(res, 200, success("supabase", { job: makeVideoJob(asRecord(data)) }));
 
-      const { data: current, error: currentError } = await supabase.from("video_processing_jobs").select("status").eq("id", jobId).maybeSingle();
+      // Storage-1: this second lookup exists to tell "job is not failed" (409)
+      // from "job does not exist" (404). Unscoped, it answered 409 for a job in
+      // someone else's workspace, which turned the route into a cross-tenant
+      // existence oracle. Scoped, a foreign id is indistinguishable from a
+      // missing one.
+      let currentQuery = supabase.from("video_processing_jobs").select("status").eq("id", jobId);
+      if (isUuid(workspaceId)) currentQuery = currentQuery.eq("workspace_id", workspaceId);
+      const { data: current, error: currentError } = await currentQuery.maybeSingle();
       if (currentError) throw new Error(currentError.message);
       if (current) {
         return sendJson(res, 409, errorBody("Retry is not allowed", ["Only failed jobs can be retried"]));
@@ -3406,6 +3445,9 @@ export async function handleVideoProcessingJobs(req: VercelRequest, res: VercelR
     if (!VIDEO_MIME_TYPES.has(inputMimeType)) details.push("inputMimeType must be MP4, MOV or WEBM");
     if (inputSizeBytes <= 0) details.push("inputSizeBytes is required");
     if (inputSizeBytes > config.maxInputMb * 1024 * 1024) details.push(`Видео больше ${config.maxInputMb} MB. Загрузите файл меньшего размера.`);
+    if (rawPath && !isOwnWorkspaceStoragePath(rawPath, workspaceId)) {
+      details.push("rawPath must point at an object inside this workspace");
+    }
     if (details.length > 0) return sendJson(res, 400, errorBody("Validation error", details));
 
     const demoJob = makeVideoJob({
