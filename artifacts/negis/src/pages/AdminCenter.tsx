@@ -41,6 +41,15 @@ import {
 } from "@/lib/permissions";
 import { KZ_META_CITY_OPTIONS, getKzMetaCityOption, type MetaCitySearchCandidate } from "../../../../lib/meta/cities";
 
+type StaffInvitation = {
+  id: string;
+  email: string;
+  role: string;
+  status: "pending" | "accepted" | "revoked" | "expired";
+  expiresAt: string;
+  createdAt: string;
+};
+
 type AdminTab =
   | "overview"
   | "staff"
@@ -669,15 +678,12 @@ export default function AdminCenter() {
   const [metaInsightsLastRun, setMetaInsightsLastRun] = useState<MetaInsightsSyncRun | null>(null);
   const [metaInsightsRows, setMetaInsightsRows] = useState<MetaCampaignInsight[]>([]);
   const [metaInsightsMessage, setMetaInsightsMessage] = useState("");
-  const [staffForm, setStaffForm] = useState({
-    name: "",
-    email: "",
-    phone: "",
-    role: "receptionist" as StaffRole,
-    status: "active",
-    temporaryPassword: defaultTemporaryPassword(),
-  });
-  const [createdCredentials, setCreatedCredentials] = useState<{ email: string; temporaryPassword: string; loginUrl: string } | null>(null);
+  // Commercial-3B: staff are added by invitation. The clinic names an address
+  // and a role; the person proves control of that address through Supabase Auth
+  // and redeems the token. Nothing here mints a password or a membership.
+  const [inviteForm, setInviteForm] = useState({ email: "", role: "receptionist" as StaffRole });
+  const [invitations, setInvitations] = useState<StaffInvitation[]>([]);
+  const [issuedInvite, setIssuedInvite] = useState<{ email: string; acceptUrl: string; emailSent: boolean } | null>(null);
 
   const readiness = useMemo(() => {
     const total = releaseChecks.length || 1;
@@ -1149,59 +1155,71 @@ export default function AdminCenter() {
     }
   }
 
-  async function createStaffMember() {
-    if (!staffForm.name.trim() || !staffForm.email.trim()) {
-      toast.error("Укажите имя и email сотрудника");
+  // The pending list is only meaningful on the staff tab, and it is the one
+  // place it can go stale while someone works elsewhere in the admin centre.
+  useEffect(() => {
+    if (activeTab !== "staff") return;
+    void loadInvitations();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, workspaceId]);
+
+  async function loadInvitations() {
+    try {
+      const body = await crmRequest<{ invitations?: StaffInvitation[] }>(
+        `/api/crm/staff-invitations?workspaceId=${encodeURIComponent(workspaceId)}`,
+      );
+      setInvitations(body.data?.invitations || []);
+    } catch {
+      // A clinic without the enrollment table yet simply has no invitations.
+      setInvitations([]);
+    }
+  }
+
+  async function sendInvitation() {
+    const email = inviteForm.email.trim().toLowerCase();
+    if (!email) {
+      toast.error("Укажите email сотрудника");
       return;
     }
 
     setBusy("staff", true);
-    const draft: StaffMember = {
-      id: `staff-${Date.now()}`,
-      name: staffForm.name.trim(),
-      email: staffForm.email.trim().toLowerCase(),
-      phone: staffForm.phone.trim(),
-      role: staffForm.role,
-      status: staffForm.status,
-      temporaryPasswordSet: true,
-    };
-
     try {
-      const body = await crmRequest<{ item?: StaffMember; staff?: StaffMember; temporaryPassword?: string; loginUrl?: string }>("/api/crm/staff", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          workspaceId,
-          ...draft,
-          temporaryPassword: staffForm.temporaryPassword,
-        }),
+      const body = await crmRequest<{ invitation?: StaffInvitation; acceptUrl?: string; emailSent?: boolean }>(
+        `/api/crm/staff-invitations?workspaceId=${encodeURIComponent(workspaceId)}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email, role: inviteForm.role }),
+        },
+      );
+      setIssuedInvite({
+        email,
+        acceptUrl: body.data?.acceptUrl || "",
+        emailSent: Boolean(body.data?.emailSent),
       });
-      const item = body.data?.staff || body.data?.item || draft;
-      const next = [item, ...staff.filter((member) => member.email !== item.email)];
-      setStaff(next);
-      writeStored("negis_demo_staff", next);
-      setCreatedCredentials({
-        email: item.email,
-        temporaryPassword: body.data?.temporaryPassword || staffForm.temporaryPassword,
-        loginUrl: body.data?.loginUrl || "/login",
-      });
-      setStaffForm({
-        name: "",
-        email: "",
-        phone: "",
-        role: "receptionist",
-        status: "active",
-        temporaryPassword: defaultTemporaryPassword(),
-      });
-      toast.success("Сотрудник добавлен");
+      setInviteForm({ email: "", role: "receptionist" });
+      await loadInvitations();
+      toast.success(body.data?.emailSent ? "Приглашение отправлено" : "Приглашение создано — передайте ссылку");
     } catch (error) {
-      const next = [draft, ...staff.filter((member) => member.email !== draft.email)];
-      setStaff(next);
-      writeStored("negis_demo_staff", next);
-      setCreatedCredentials({ email: draft.email, temporaryPassword: staffForm.temporaryPassword, loginUrl: "/login" });
-      toast.warning(error instanceof Error ? error.message : "Сотрудник сохранен локально");
+      // No local fallback: an invitation that only exists in this browser would
+      // be a person who believes they have access and does not.
+      toast.error(error instanceof Error ? error.message : "Не удалось создать приглашение");
     } finally {
       setBusy("staff", false);
+    }
+  }
+
+  async function revokeInvitation(id: string) {
+    try {
+      await crmRequest(`/api/crm/staff-invitations?workspaceId=${encodeURIComponent(workspaceId)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id }),
+      });
+      await loadInvitations();
+      toast.success("Приглашение отозвано");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Не удалось отозвать приглашение");
     }
   }
 
@@ -1325,18 +1343,11 @@ export default function AdminCenter() {
     }
   }
 
-  async function copyCredentials() {
-    if (!createdCredentials) return;
+  async function copyInviteLink() {
+    if (!issuedInvite?.acceptUrl) return;
     try {
-      await navigator.clipboard.writeText(
-        [
-          "Medina OS login",
-          `Email: ${createdCredentials.email}`,
-          `Temporary password: ${createdCredentials.temporaryPassword}`,
-          `URL: ${createdCredentials.loginUrl}`,
-        ].join("\n"),
-      );
-      toast.success("Данные входа скопированы");
+      await navigator.clipboard.writeText(issuedInvite.acceptUrl);
+      toast.success("Ссылка скопирована");
     } catch {
       toast.error("Не удалось скопировать автоматически");
     }
@@ -1470,38 +1481,73 @@ export default function AdminCenter() {
         </section>
 
         <section className="neu-card">
-          <h2 className="text-lg font-black text-[#0F172A]">Новый сотрудник</h2>
+          <h2 className="text-lg font-black text-[#0F172A]">Пригласить сотрудника</h2>
+          <p className="mt-1 text-sm text-[#64748B]">
+            Сотрудник получает письмо, задаёт свой пароль в Supabase Auth и принимает приглашение. Пароли за него не создаются.
+          </p>
           <div className="mt-4 grid gap-3">
-            <input className="neu-input" placeholder="Имя" value={staffForm.name} onChange={(event) => setStaffForm({ ...staffForm, name: event.target.value })} />
-            <input className="neu-input" placeholder="Email" value={staffForm.email} onChange={(event) => setStaffForm({ ...staffForm, email: event.target.value })} />
-            <input className="neu-input" placeholder="Телефон" value={staffForm.phone} onChange={(event) => setStaffForm({ ...staffForm, phone: event.target.value })} />
-            <select className="neu-input" value={staffForm.role} onChange={(event) => setStaffForm({ ...staffForm, role: event.target.value as StaffRole })}>
-              {staffRoles.map((role) => (
-                <option key={role} value={role}>{roleLabels[role]}</option>
-              ))}
-            </select>
             <input
               className="neu-input"
-              placeholder="Временный пароль"
-              value={staffForm.temporaryPassword}
-              onChange={(event) => setStaffForm({ ...staffForm, temporaryPassword: event.target.value })}
+              type="email"
+              placeholder="Email"
+              value={inviteForm.email}
+              onChange={(event) => setInviteForm({ ...inviteForm, email: event.target.value })}
             />
-            <button type="button" className="neu-btn-primary w-full justify-center" disabled={loading.staff} onClick={createStaffMember}>
+            <select
+              className="neu-input"
+              value={inviteForm.role}
+              onChange={(event) => setInviteForm({ ...inviteForm, role: event.target.value as StaffRole })}
+            >
+              {staffRoles
+                .filter((role) => role !== "owner")
+                .map((role) => (
+                  <option key={role} value={role}>{roleLabels[role]}</option>
+                ))}
+            </select>
+            <button type="button" className="neu-btn-primary w-full justify-center" disabled={loading.staff} onClick={sendInvitation}>
               {loading.staff ? <Loader2 className="animate-spin" size={16} /> : <UserPlus size={16} />}
-              Создать сотрудника
+              Отправить приглашение
             </button>
           </div>
-          {createdCredentials && (
+
+          {issuedInvite && (
             <div className="mt-4 rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-800">
-              <p className="font-bold">Данные для входа готовы</p>
-              <p className="mt-1">Email: {createdCredentials.email}</p>
-              <p>Пароль: {createdCredentials.temporaryPassword}</p>
-              <button type="button" className="neu-btn mt-3 w-full justify-center bg-white/80" onClick={copyCredentials}>
+              <p className="font-bold">Приглашение для {issuedInvite.email}</p>
+              <p className="mt-1">
+                {issuedInvite.emailSent
+                  ? "Письмо отправлено. Ссылка ниже — на случай, если оно не дошло."
+                  : "Письмо отправить не удалось. Передайте ссылку сотруднику лично."}
+              </p>
+              <p className="mt-2 break-all font-mono text-xs text-emerald-900">{issuedInvite.acceptUrl}</p>
+              <button type="button" className="neu-btn mt-3 w-full justify-center bg-white/80" onClick={copyInviteLink}>
                 <Copy size={15} />
-                Скопировать
+                Скопировать ссылку
               </button>
             </div>
           )}
+
+          <div className="mt-6">
+            <h3 className="text-sm font-black uppercase tracking-[0.12em] text-[#94A3B8]">Ожидают принятия</h3>
+            {invitations.filter((invitation) => invitation.status === "pending").length === 0 ? (
+              <p className="mt-2 text-sm text-[#64748B]">Активных приглашений нет.</p>
+            ) : (
+              <ul className="mt-3 grid gap-2">
+                {invitations
+                  .filter((invitation) => invitation.status === "pending")
+                  .map((invitation) => (
+                    <li key={invitation.id} className="flex items-center justify-between gap-3 rounded-2xl border border-[#E2E8F0] bg-white/70 px-3 py-2">
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-semibold text-[#0F172A]">{invitation.email}</p>
+                        <p className="text-xs text-[#64748B]">{roleLabels[invitation.role as StaffRole] || invitation.role}</p>
+                      </div>
+                      <button type="button" className="neu-btn px-3 py-1.5 text-xs" onClick={() => revokeInvitation(invitation.id)}>
+                        Отозвать
+                      </button>
+                    </li>
+                  ))}
+              </ul>
+            )}
+          </div>
         </section>
       </div>
     );

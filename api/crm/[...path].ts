@@ -23,6 +23,7 @@ import {
   type CrmResource,
 } from "../../lib/crm/server";
 import { normalizeCrmSegments, resolveCrmRoute } from "../../lib/crm/authorization";
+import { handleStaffInvitationAccept, handleStaffInvitations } from "../../lib/crm/staff-invitations";
 import {
   requireAuthenticatedUser,
   requireWorkspaceAccess,
@@ -163,6 +164,10 @@ async function dispatch(
   switch (routeKey) {
     case "auth-context":
       return handleCrmAuthContext(req, res);
+    case "staff-invitations":
+      return handleStaffInvitations(req, res);
+    case "staff-invitations/accept":
+      return handleStaffInvitationAccept(req, res);
     case "health":
       return handleCrmHealth(req, res);
     case "storage-health":
@@ -258,13 +263,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     if (isDisabledMethod) {
       // Registered but intentionally refused, and only revealed to a caller who
-      // was already authorized for it. Staff creation is the single case: no
-      // verified enrollment flow ties an email to a Supabase Auth user yet, and
-      // the previous behaviour let a caller mint privileged membership anywhere.
+      // was already authorized for it. Direct staff creation stays closed: it
+      // would take an auth_user_id from the browser, which is how a caller could
+      // mint privileged membership for any account. Commercial-3B added the
+      // verified path — /api/crm/staff-invitations — where the workspace names
+      // the address and the person proves they control it.
       return sendJson(res, 409, {
         success: false,
-        error: "Staff invitation requires an approved enrollment flow",
+        error: "Staff are added by invitation",
         code: "staff_invitation_required",
+        details: ["Use POST /api/crm/staff-invitations"],
       });
     }
 

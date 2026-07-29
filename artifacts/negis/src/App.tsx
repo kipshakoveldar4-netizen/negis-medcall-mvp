@@ -19,6 +19,7 @@ import { RouteErrorBoundary } from "@/components/layout/RouteErrorBoundary";
 // the landing page had to download.
 const Login = lazy(() => import("@/pages/Login"));
 const Onboarding = lazy(() => import("@/pages/Onboarding"));
+const JoinWorkspace = lazy(() => import("@/pages/JoinWorkspace"));
 const Dashboard = lazy(() => import("@/pages/Dashboard"));
 const AiControlCenter = lazy(() => import("@/pages/AiControlCenter"));
 // Security-1A: /agent, /ads and /ads/callback were removed from the router.
@@ -156,6 +157,7 @@ function Router() {
       <Route path="/" component={Landing} />
       <Route path="/login" component={Login} />
       <Route path="/onboarding" component={Onboarding} />
+      <Route path="/join" component={JoinWorkspace} />
       <Route path="/ai-control-center" component={() => <ProtectedPage component={AiControlCenter} permission="dashboard" />} />
       <Route path="/dashboard" component={() => <ProtectedPage component={Dashboard} permission="dashboard" />} />
       <Route path="/booking" component={() => <ProtectedPage component={AppointmentsPage} permission="booking" />} />
