@@ -38,9 +38,30 @@ tooling, so nothing refused the request.
 | Other rows affected | none |
 | Data exposed | none — no business row contents were read or transmitted |
 
-**Cleanup.** Exactly one row, matched on all three of id, name and workspace,
-deleted as a single operation after a preflight that confirmed one match and no
-dependent rows. Recorded in the Security-2D final report.
+**Cleanup — done, 2026-07-29.** Executed in the Supabase SQL editor as the
+`postgres` role.
+
+The display name is stored in `public.leads.full_name`; the API exposes it as
+`name`, which is why the first preflight written against a `name` column failed
+with `42703`. Matching on the real column, the preflight returned
+`probe_count = 1`.
+
+Dependency check, from schema metadata only: one inbound foreign key,
+`public.deals.lead_id → leads.id`, `ON DELETE SET NULL`. Rows referencing this
+lead: `0`. Nothing to cascade, and nothing else to modify.
+
+The delete carried all three identity predicates and returned the id:
+
+| Check | Result |
+|---|---|
+| `preflight_count` | 1 |
+| `deleted_rows` | 1 |
+| `returned_id` | `cc290928-8ad3-4581-bc6b-7ffbe4ddcef0` |
+| `remaining_count` | 0 |
+| rows named `__probe_never_committed__` remaining | 0 |
+| dependent rows touched | 0 |
+
+No other row was read, updated or deleted; no row contents left the database.
 
 **Prevention.**
 
