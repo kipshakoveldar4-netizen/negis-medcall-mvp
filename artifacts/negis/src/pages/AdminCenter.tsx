@@ -153,7 +153,6 @@ type StaffMember = {
   phone: string;
   role: StaffRole;
   status: string;
-  temporaryPasswordSet?: boolean;
 };
 
 type ClinicSettings = {
@@ -291,27 +290,6 @@ const clinicDefaults: ClinicSettings = {
   legalDisclaimer: "Информация не является медицинской рекомендацией. Перед процедурой нужна консультация специалиста.",
   timezone: "Asia/Almaty",
 };
-
-const staffDefaults: StaffMember[] = [
-  {
-    id: "staff-owner",
-    name: "Администратор Negis",
-    email: "owner@negis.demo",
-    phone: "+7 700 000 00 01",
-    role: "owner",
-    status: "active",
-    temporaryPasswordSet: true,
-  },
-  {
-    id: "staff-reception",
-    name: "Ресепшн",
-    email: "reception@negis.demo",
-    phone: "+7 700 000 00 02",
-    role: "receptionist",
-    status: "active",
-    temporaryPasswordSet: true,
-  },
-];
 
 const aiDefaults: AiProviderSetting[] = [
   {
@@ -623,10 +601,6 @@ function localStorageCount(key: string) {
   return Array.isArray(value) ? value.length : 0;
 }
 
-function defaultTemporaryPassword() {
-  return `Negis2026!${Math.random().toString(36).slice(2, 8)}`;
-}
-
 function providerStatus(health: CrmHealthData | null, key: string): Status {
   const item = health?.providers?.[key];
   if (!item) return "not_configured";
@@ -655,7 +629,11 @@ export default function AdminCenter() {
   const workspaceId = clinicId || readWorkspaceId();
   const [activeTab, setActiveTab] = useState<AdminTab>("overview");
   const [clinic, setClinic] = useState<ClinicSettings>(() => readStored("negis_clinic_settings", clinicDefaults));
-  const [staff, setStaff] = useState<StaffMember[]>(() => readStored("negis_demo_staff", staffDefaults));
+  // Commercial-3B: the team is whatever the server says it is. This list used
+  // to be seeded from localStorage demo data and written back there, so an
+  // administrator saw people who were not members and suspended people who
+  // still had access.
+  const [staff, setStaff] = useState<StaffMember[]>([]);
   const [releaseChecks, setReleaseChecks] = useState<ReleaseCheck[]>(() => mergeReleaseChecks(readStored("negis_release_checks", releaseDefaults)));
   const [aiProviders, setAiProviders] = useState<AiProviderSetting[]>(() => readStored("negis_ai_provider_settings", aiDefaults));
   const [metaAccount, setMetaAccount] = useState<MetaAccount>(() => readStored("negis_meta_account", metaDefaults));
@@ -1159,6 +1137,7 @@ export default function AdminCenter() {
   // place it can go stale while someone works elsewhere in the admin centre.
   useEffect(() => {
     if (activeTab !== "staff") return;
+    void loadStaff();
     void loadInvitations();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab, workspaceId]);
@@ -1223,10 +1202,33 @@ export default function AdminCenter() {
     }
   }
 
-  function updateStaffStatus(id: string, status: string) {
-    const next = staff.map((member) => (member.id === id ? { ...member, status } : member));
-    setStaff(next);
-    writeStored("negis_demo_staff", next);
+  async function loadStaff() {
+    try {
+      const body = await crmRequest<{ staff?: StaffMember[]; items?: StaffMember[] }>(
+        `/api/crm/staff?workspaceId=${encodeURIComponent(workspaceId)}`,
+      );
+      setStaff(body.data?.staff || body.data?.items || []);
+    } catch {
+      // An administrator who cannot read the team is shown an empty table
+      // rather than a plausible-looking one.
+      setStaff([]);
+    }
+  }
+
+  async function updateStaffStatus(id: string, status: string) {
+    try {
+      await crmRequest(`/api/crm/staff?workspaceId=${encodeURIComponent(workspaceId)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id, status }),
+      });
+      await loadStaff();
+      toast.success(status === "active" ? "Сотрудник активирован" : "Доступ приостановлен");
+    } catch (error) {
+      // No local edit on failure: the previous behaviour changed the row in
+      // this browser only, so a suspended colleague kept working.
+      toast.error(error instanceof Error ? error.message : "Не удалось изменить статус");
+    }
   }
 
   async function saveAiProvider(provider: AiProviderSetting) {
