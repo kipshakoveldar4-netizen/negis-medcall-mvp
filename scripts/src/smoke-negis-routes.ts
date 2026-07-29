@@ -3428,24 +3428,32 @@ async function checkHtmlRoute(path: string) {
 }
 
 async function checkTargetingHealth() {
-  const response = await fetch(`${baseUrl}/api/targeting/health`);
-  const text = await response.text();
-  let body: ApiBody;
+  // Security-2D: the agent's health is workspace-administrator diagnostics now,
+  // at the same level as /api/crm/health, so unauthenticated is a 401.
+  await checkJsonEndpoint("/api/targeting/health");
+}
 
+async function checkSelfRegistrationDisabled() {
+  const response = await fetch(`${baseUrl}/api/auth/register`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email: "smoke@example.com", password: "smoke-password" }),
+  });
+  const text = await response.text();
+  let body: Record<string, unknown>;
   try {
-    body = JSON.parse(text) as ApiBody;
+    body = text ? (JSON.parse(text) as Record<string, unknown>) : {};
   } catch {
-    throw new Error(`/api/targeting/health returned invalid JSON: ${text.slice(0, 120)}`);
+    throw new Error(`/api/auth/register returned invalid JSON: ${text.slice(0, 120)}`);
   }
 
-  if (!response.ok || body.success !== true) {
-    const details = body.details?.join(", ");
+  if (response.status !== 410 || body.code !== "self_registration_disabled") {
     throw new Error(
-      `/api/targeting/health failed: ${body.error || `HTTP ${response.status}`}${details ? ` (${details})` : ""}`,
+      `/api/auth/register must stay disabled (expected 410 self_registration_disabled, got ${response.status} ${String(body.code)})`,
     );
   }
 
-  console.log(`/api/targeting/health: ok (${body.mode || "unknown"})`);
+  console.log("/api/auth/register: 410 (self-registration disabled)");
 }
 
 // Security-2B: every browser /api/crm/* route now requires a verified Supabase
@@ -3455,8 +3463,14 @@ async function checkTargetingHealth() {
 // test:tenant-isolation (handler-level authorization with mocked auth).
 const CRM_GUARD_MARKER = "__crmGuarded";
 
-function isCrmPath(path: string): boolean {
-  return path.startsWith("/api/crm/");
+// Security-2D: the authenticated surface is no longer just /api/crm/*. Content
+// Studio spends the platform's OpenAI budget and patches content_videos, and the
+// targeting routes write targeting_campaigns / targeting_reports — all of it on
+// the service-role client, so all of it is behind the same gate now.
+const PRIVATE_API_PREFIXES = ["/api/crm/", "/api/content-studio/", "/api/targeting/"];
+
+function isPrivateApiPath(path: string): boolean {
+  return PRIVATE_API_PREFIXES.some((prefix) => path.startsWith(prefix));
 }
 
 export function isCrmGuarded(body: ApiBody | null | undefined): boolean {
@@ -3487,7 +3501,7 @@ async function assertCrmAuthBoundary(path: string, init?: RequestInit): Promise<
 }
 
 async function checkJsonEndpoint(path: string, init?: RequestInit) {
-  if (isCrmPath(path)) {
+  if (isPrivateApiPath(path)) {
     return assertCrmAuthBoundary(path, init);
   }
   const response = await fetch(`${baseUrl}${path}`, init);
@@ -3510,7 +3524,7 @@ async function checkJsonEndpoint(path: string, init?: RequestInit) {
 }
 
 async function checkJsonFailure(path: string, init: RequestInit, expectedText?: string) {
-  if (isCrmPath(path)) {
+  if (isPrivateApiPath(path)) {
     // Authentication is refused before any validation runs, so the specific
     // business failure this call used to assert is no longer reachable here.
     await assertCrmAuthBoundary(path, init);
@@ -3603,6 +3617,7 @@ async function main() {
     await checkHtmlRoute(route);
   }
   await checkTargetingHealth();
+  await checkSelfRegistrationDisabled();
   const crmHealth = await checkJsonEndpoint("/api/crm/health");
   // Security-2B: the route is refused before any business branch runs. Its
   // invariants moved to test:meta-launch-payload and test:tenant-isolation.
@@ -4521,15 +4536,6 @@ async function main() {
     notes: "Smoke test",
   });
   await checkJsonEndpoint("/api/content-studio/videos");
-  await checkJsonEndpoint("/api/content-studio/videos", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      title: "Smoke content studio video",
-      niche: "medical marketing",
-      goal: "book more appointments",
-    }),
-  });
   await checkJsonEndpoint("/api/content-studio/generate-script", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -4542,32 +4548,11 @@ async function main() {
       duration: "30-45 seconds",
     }),
   });
-  const packageGeneration = await checkJsonEndpoint("/api/content-studio/generate-package", {
+  await checkJsonEndpoint("/api/content-studio/generate-package", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      workspaceId: "demo-workspace",
-      mode: "idea",
-      format: "reels",
-      service: "Консультация косметолога",
-      city: "Астана",
-      offer: "Бесплатная консультация",
-      audience: "Женщины 25-45",
-      goal: "leads",
-      tone: "доверительно",
-    }),
+    body: JSON.stringify({ mode: "idea", format: "reels" }),
   });
-  const packageData = (packageGeneration.data || {}) as Record<string, unknown>;
-  for (const field of ["ideaTitle", "hook", "script", "shotList", "caption", "adPrimaryText", "adHeadline", "photoPrompt", "videoPrompt", "whatsappMessage", "complianceNotes"]) {
-    const value = packageData[field];
-    const empty = Array.isArray(value) ? value.length === 0 : !(typeof value === "string" && value.trim());
-    if (empty) {
-      throw new Error(`/api/content-studio/generate-package must return ${field}`);
-    }
-  }
-  if (packageGeneration.mode !== "demo" && packageGeneration.mode !== "openai") {
-    throw new Error("/api/content-studio/generate-package must report demo or openai mode");
-  }
   await checkJsonEndpoint("/api/content-studio/generate-avatar-prompt", {
     method: "POST",
     headers: { "Content-Type": "application/json" },

@@ -489,6 +489,14 @@ async function safeJson<T>(response: globalThis.Response): Promise<ApiResponse<T
   }
 }
 
+// Security-2D: Content Studio is authenticated now, and the workspace travels as
+// a query selector the server verifies against the caller's membership — never
+// as a field in the body.
+function withWorkspace(path: string): string {
+  const workspaceId = readWorkspaceId();
+  return `${path}${path.includes("?") ? "&" : "?"}workspaceId=${encodeURIComponent(workspaceId)}`;
+}
+
 // Security-2B: same reason as AdsAutomation — the token belongs to crmFetch,
 // not to each call site. adminCrmRequest below stays separate because it also
 // refuses to run at all without a session.
@@ -853,7 +861,7 @@ export default function AdminCenter() {
   async function checkTelegram() {
     setBusy("telegram", true);
     try {
-      const response = await fetch(apiUrl("/api/content-studio/send-telegram"), {
+      const response = await crmFetch(withWorkspace("/api/content-studio/send-telegram"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ test: true }),
@@ -979,7 +987,7 @@ export default function AdminCenter() {
       const telegramOk = telegramEnvConfigured
         ? await (async () => {
             try {
-              const response = await fetch(apiUrl("/api/content-studio/send-telegram"), {
+              const response = await crmFetch(withWorkspace("/api/content-studio/send-telegram"), {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ test: true }),

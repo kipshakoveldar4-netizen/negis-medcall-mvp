@@ -5,16 +5,24 @@ import {
   type AnalyzeCreativePayload,
 } from "../../lib/targeting-agent/client";
 
+import {
+  authorizePrivateRoute,
+  type PrivateRouteAuthorization,
+} from "../../lib/auth/route-guard";
+
+// Security-2D: this ran without a token, spending the targeting agent's budget
+// for whoever called it.
+const AUTHORIZATION: PrivateRouteAuthorization = {
+  kind: "browser",
+  methods: ["POST"],
+  permissions: { POST: "manage_marketing" },
+};
+
 const requiredFields = ["clinicName", "niche", "city", "offer", "creativeText"];
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
-  if (req.method !== "POST") {
-    return res.status(405).json({
-      success: false,
-      error: "Method not allowed",
-      details: [],
-    });
-  }
+  const context = await authorizePrivateRoute(req, res, AUTHORIZATION);
+  if (!context) return;
 
   const details = validateRequiredFields(req.body, requiredFields);
   if (details.length > 0) {

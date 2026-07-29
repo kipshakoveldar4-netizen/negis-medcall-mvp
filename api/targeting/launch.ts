@@ -6,16 +6,24 @@ import {
 } from "../../lib/targeting-agent/client";
 import { persistTargetingCampaignIfAvailable } from "../../lib/targeting-agent/persistence";
 
+import {
+  authorizePrivateRoute,
+  type PrivateRouteAuthorization,
+} from "../../lib/auth/route-guard";
+
+// Security-2D: this ran without a token and wrote a targeting_campaigns row on
+// the service-role client, with the workspace taken from the request body.
+const AUTHORIZATION: PrivateRouteAuthorization = {
+  kind: "browser",
+  methods: ["POST"],
+  permissions: { POST: "manage_marketing" },
+};
+
 const requiredFields = ["clinicName", "campaignName", "city", "budget", "objective"];
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
-  if (req.method !== "POST") {
-    return res.status(405).json({
-      success: false,
-      error: "Method not allowed",
-      details: [],
-    });
-  }
+  const context = await authorizePrivateRoute(req, res, AUTHORIZATION);
+  if (!context) return;
 
   const details = validateRequiredFields(req.body, requiredFields);
   if (details.length > 0) {
@@ -28,7 +36,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   const payload = req.body as LaunchCampaignPayload;
   const result = await targetingAgentClient.launchCampaign(payload);
-  await persistTargetingCampaignIfAvailable(payload, result.body);
+  await persistTargetingCampaignIfAvailable(payload, result.body, context.workspaceId);
 
   return res.status(result.status).json(result.body);
 }

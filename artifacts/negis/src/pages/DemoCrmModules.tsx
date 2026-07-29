@@ -25,6 +25,7 @@ import {
 import { toast } from "sonner";
 import { PageLayout } from "@/components/layout/PageLayout";
 import { readWorkspaceId as readCurrentWorkspaceId, useDemoCollection } from "@/lib/demoStorage";
+import { crmFetch } from "@/lib/api";
 import { apiUrl } from "@/lib/api";
 import { formatPhone, toTelHref, toWhatsappHref } from "@/lib/phone";
 import {
@@ -1100,7 +1101,7 @@ export function DemoAdmin() {
   const checkTargeting = async () => {
     setTargetingStatus("проверяем...");
     try {
-      const response = await fetch("/api/targeting/health");
+      const response = await crmFetch("/api/targeting/health");
       const text = await response.text();
       const body = text ? (JSON.parse(text) as { success?: boolean }) : {};
       setTargetingStatus(response.ok && body.success ? "подключён" : "ошибка health");
