@@ -1569,7 +1569,10 @@ async function checkContentStudioPhaseOne() {
   const adsAutomation = await readFile(path.join(repoRoot, "artifacts", "negis", "src", "pages", "AdsAutomation.tsx"), "utf8");
   for (const marker of [
     'const STUDIO_PREFILL_KEY = "negis_ads_automation_prefill"',
-    "window.localStorage.removeItem(STUDIO_PREFILL_KEY)",
+    // Selection-2 bound the handoff to the clinic it was made in, so the key is
+    // no longer the bare constant. The property this line is here to check —
+    // that the prefill is consumed exactly once — is unchanged.
+    "window.localStorage.removeItem(workspaceScopedKey(STUDIO_PREFILL_KEY))",
     "Данные перенесены из AI Контент-студии. Проверьте параметры перед запуском.",
     'setActiveConfirmation("");',
   ]) {
