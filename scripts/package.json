@@ -23,7 +23,8 @@
     "test:api-surface-authorization": "tsx --test ./src/medina-api-surface-authorization.test.ts",
     "test:staff-invitations": "tsx --test ./src/medina-staff-invitations.test.ts",
     "test:storage-isolation": "tsx --test ./src/medina-storage-isolation.test.ts",
-    "test:workspace-selection": "tsx --test ./src/medina-workspace-selection.test.ts"
+    "test:workspace-selection": "tsx --test ./src/medina-workspace-selection.test.ts",
+    "test:failure-honesty": "tsx --test ./src/medina-failure-honesty.test.ts"
   },
   "devDependencies": {
     "@types/node": "catalog:",

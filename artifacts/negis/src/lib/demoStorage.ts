@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { toast } from "sonner";
 import { crmFetch } from "@/lib/api";
 
 type ApiCollectionOptions<TItem extends { id: string }> = {
@@ -208,6 +209,24 @@ export function useDemoCollection<TItem extends { id: string }>(
     };
   }, [endpoint, fromApi, key, listKey, seed, productionMode, workspaceId]);
 
+  /**
+   * Security-2F: an optimistic row that the server refused must not stay.
+   *
+   * Every write here paints the row first and then posts it. The server used to
+   * answer a failed production write with 200 and a demo item, and this hook
+   * dropped anything that was not mode "supabase" on the floor — so the row sat
+   * on screen, was never saved, and disappeared on the next load. The server
+   * now reports the failure; this puts the list back and says so.
+   *
+   * Demo mode is untouched: there the localStorage copy is the record, and a
+   * demo response is the expected answer rather than a failure.
+   */
+  const revertWrite = (restore: (current: TItem[]) => TItem[]) => {
+    if (!productionMode) return;
+    setStoredItems(restore);
+    toast.error("Не удалось сохранить. Изменение отменено, повторите попытку.");
+  };
+
   const setStoredItems = (next: TItem[] | ((current: TItem[]) => TItem[])) => {
     setItems((current) => {
       const value = typeof next === "function" ? next(current) : next;
@@ -234,7 +253,10 @@ export function useDemoCollection<TItem extends { id: string }>(
           body: JSON.stringify(payload),
         });
         const body = await safeJson<Record<string, unknown>>(response);
-        if (!response.ok || body?.success !== true || body.mode !== "supabase") return;
+        if (!response.ok || body?.success !== true || body.mode !== "supabase") {
+          revertWrite((current) => current.filter((entry) => entry.id !== item.id));
+          return;
+        }
 
         const rawItem = body.data[itemKey];
         if (!rawItem) return;
@@ -242,20 +264,26 @@ export function useDemoCollection<TItem extends { id: string }>(
         const savedItem = fromApi ? fromApi(rawItem) : (rawItem as TItem);
         setStoredItems((current) => current.map((currentItem) => (currentItem.id === item.id ? savedItem : currentItem)));
       } catch {
-        // Local optimistic item remains saved in localStorage.
+        revertWrite((current) => current.filter((entry) => entry.id !== item.id));
       }
     })();
   };
 
   const updateItem = (id: string, patch: Partial<TItem>) => {
+    // Captured from this render rather than from inside the updater, so the
+    // rollback does not depend on when React runs it.
+    const previous = items.find((entry) => entry.id === id);
     setStoredItems((current) => current.map((item) => (item.id === id ? { ...item, ...patch } : item)));
 
     if (!endpoint) return;
 
+    const restore = (current: TItem[]): TItem[] =>
+      previous ? current.map((entry) => (entry.id === id ? previous : entry)) : current;
+
     void (async () => {
       try {
         const workspaceId = readWorkspaceId();
-        await crmFetch(endpoint, {
+        const response = await crmFetch(endpoint, {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -264,8 +292,14 @@ export function useDemoCollection<TItem extends { id: string }>(
             updates: patchToApi ? patchToApi(patch) : patch,
           }),
         });
+        const body = await safeJson<Record<string, unknown>>(response);
+        // The patch used to be posted and forgotten, so a refused update looked
+        // identical to an accepted one.
+        if (!response.ok || body?.success !== true || body.mode !== "supabase") {
+          revertWrite(restore);
+        }
       } catch {
-        // Local optimistic patch remains saved in localStorage.
+        revertWrite(restore);
       }
     })();
   };

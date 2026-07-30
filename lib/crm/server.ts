@@ -750,6 +750,27 @@ function supabaseWarning(scope: string, error: unknown): string {
   return `${scope} Supabase persistence skipped: ${detail}`;
 }
 
+/**
+ * Security-2F: what a caller may be told about a database or storage failure.
+ *
+ * These handlers echoed the text Postgres and Supabase Storage produce —
+ * constraint and table names, "permission denied for table x", row-level
+ * security policy messages — to any authenticated member. The router has said
+ * since Security-2B that "nothing about the workspace, the membership or the
+ * underlying Supabase failure reaches the caller"; that was true of the auth
+ * errors and never of the data path.
+ *
+ * The detail still reaches the server log, where an operator can read it
+ * against a request; the caller gets the fallback and nothing else.
+ */
+const SERVICE_FAILURE_DETAIL = "Сбой на стороне сервиса. Подробности записаны в логах сервера.";
+
+function redactedDetail(scope: string, error: unknown, fallback: string): string {
+  const detail = error instanceof Error ? error.message : String(error);
+  console.warn(`[crm] ${scope} failed: ${detail}`);
+  return fallback;
+}
+
 function makeClient(body: JsonRecord): JsonRecord {
   return {
     id: readString(body.id) || nextDemoId("client"),
@@ -1921,9 +1942,13 @@ async function listItems(resource: CrmResource, req: VercelRequest, res: VercelR
     const items = (Array.isArray(data) ? data : []).map((row) => config.fromRow(asRecord(row)));
     return sendJson(res, 200, success("supabase", { [config.listKey]: items, items }));
   } catch (error) {
-    const warning = supabaseWarning(config.table, error);
-    console.warn(warning);
-    return sendJson(res, 200, success("demo", { [config.listKey]: [], items: [] }, warning));
+    // Security-2F: an empty list is an answer, and it was the wrong one — a
+    // failed read looked exactly like a clinic with no records.
+    return sendJson(
+      res,
+      502,
+      errorBody("Не удалось загрузить данные", [redactedDetail(config.table, error, SERVICE_FAILURE_DETAIL)]),
+    );
   }
 }
 
@@ -2100,9 +2125,16 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
     if (error instanceof CrmReferenceValidationError) {
       return sendJson(res, 400, errorBody(error.message, error.details));
     }
-    const warning = supabaseWarning(config.table, error);
-    console.warn(warning);
-    return sendJson(res, 200, success("demo", { [resource === "content-videos" ? "video" : "item"]: demoItem, item: demoItem }, warning));
+    // Security-2F: a write the database refused is not a success. This answered
+    // 200 with a demo item and a warning, which the browser dropped on the
+    // floor — the operator saw the record appear in the list and it was gone on
+    // the next load. Demo mode is unaffected: it is chosen before the query,
+    // not after it fails.
+    return sendJson(
+      res,
+      502,
+      errorBody("Не удалось сохранить запись", [redactedDetail(config.table, error, SERVICE_FAILURE_DETAIL)]),
+    );
   }
 }
 
@@ -2265,9 +2297,16 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
     if (error instanceof CrmReferenceValidationError) {
       return sendJson(res, 400, errorBody(error.message, error.details));
     }
-    const warning = supabaseWarning(config.table, error);
-    console.warn(warning);
-    return sendJson(res, 200, success("demo", { [resource === "content-videos" ? "video" : "item"]: demoItem, item: demoItem }, warning));
+    // Security-2F: a write the database refused is not a success. This answered
+    // 200 with a demo item and a warning, which the browser dropped on the
+    // floor — the operator saw the record appear in the list and it was gone on
+    // the next load. Demo mode is unaffected: it is chosen before the query,
+    // not after it fails.
+    return sendJson(
+      res,
+      502,
+      errorBody("Не удалось сохранить запись", [redactedDetail(config.table, error, SERVICE_FAILURE_DETAIL)]),
+    );
   }
 }
 
@@ -2656,7 +2695,7 @@ export async function handleAdCreativeSignedUpload(req: VercelRequest, res: Verc
       res,
       502,
       errorBody("Signed upload URL failed", [
-        error.message || "Supabase Storage did not create a signed upload URL.",
+        redactedDetail("ad-creatives signed upload", error, SERVICE_FAILURE_DETAIL),
       ]),
     );
   }
@@ -3160,7 +3199,7 @@ export async function handleVideoJobs(req: VercelRequest, res: VercelResponse) {
       return sendJson(res, 200, success("supabase", { job: makeVideoJob(asRecord(data)) }));
     } catch (error) {
       return sendJson(res, 404, {
-        ...errorBody("Задача оптимизации не найдена", [error instanceof Error ? error.message : "not found"]),
+        ...errorBody("Задача оптимизации не найдена", [redactedDetail("video job lookup", error, "not found")]),
       });
     }
   }
@@ -3281,7 +3320,7 @@ export async function handleVideoJobs(req: VercelRequest, res: VercelResponse) {
     } catch (error) {
       return sendJson(res, 502, {
         ...errorBody("Не удалось создать задачу оптимизации", [
-          error instanceof Error ? error.message : "insert failed",
+          redactedDetail("video job insert", error, SERVICE_FAILURE_DETAIL),
           "Проверьте, что migration 016 применена (таблица video_processing_jobs).",
         ]),
       });
@@ -3329,7 +3368,7 @@ export async function handleVideoJobs(req: VercelRequest, res: VercelResponse) {
       );
     } catch (error) {
       return sendJson(res, 404, {
-        ...errorBody("Задача оптимизации не найдена", [error instanceof Error ? error.message : "not found"]),
+        ...errorBody("Задача оптимизации не найдена", [redactedDetail("video job lookup", error, "not found")]),
       });
     }
   }
@@ -3366,7 +3405,7 @@ export async function handleVideoProcessingJobs(req: VercelRequest, res: VercelR
       if (error) throw new Error(error.message);
       return sendJson(res, 200, success("supabase", { job: makeVideoJob(asRecord(data)) }));
     } catch (error) {
-      return sendJson(res, 404, errorBody("Задача оптимизации не найдена", [error instanceof Error ? error.message : "not found"]));
+      return sendJson(res, 404, errorBody("Задача оптимизации не найдена", [redactedDetail("video job lookup", error, "not found")]));
     }
   }
 
@@ -3424,7 +3463,7 @@ export async function handleVideoProcessingJobs(req: VercelRequest, res: VercelR
       }
       return sendJson(res, 404, errorBody("Задача оптимизации не найдена", ["not found"]));
     } catch (error) {
-      return sendJson(res, 502, errorBody("Не удалось повторить задачу оптимизации", [error instanceof Error ? error.message : "retry failed"]));
+      return sendJson(res, 502, errorBody("Не удалось повторить задачу оптимизации", [redactedDetail("video job retry", error, SERVICE_FAILURE_DETAIL)]));
     }
   }
 
@@ -3496,9 +3535,15 @@ export async function handleVideoProcessingJobs(req: VercelRequest, res: VercelR
       if (error) throw new Error(error.message);
       return sendJson(res, 201, success("supabase", { job: makeVideoJob(asRecord(data)) }));
     } catch (error) {
-      const warning = supabaseWarning("video_processing_jobs insert", error);
-      console.warn(warning);
-      return sendJson(res, 200, success("demo", { job: demoJob }, warning));
+      // Security-2F: a job the database refused has no id to poll, so reporting
+      // it as queued left the browser watching a job that never existed.
+      return sendJson(
+        res,
+        502,
+        errorBody("Не удалось создать задачу оптимизации", [
+          redactedDetail("video_processing_jobs insert", error, SERVICE_FAILURE_DETAIL),
+        ]),
+      );
     }
   }
 
