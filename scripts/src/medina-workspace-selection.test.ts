@@ -406,3 +406,41 @@ test("W12 the ACTIVE launch mirror is per clinic, and the real gate is still the
   assert.ok(body.includes('from("workspace_settings")'), "the gate reads the workspace's own setting");
   assert.ok(body.includes('eq("workspace_id", workspaceId)'), "scoped to the verified workspace");
 });
+
+test("W13 a collection refetches when the clinic changes, without relying on the page unmounting", async () => {
+  const source = await readFile(path.join(negisSrc, "lib", "demoStorage.ts"), "utf8");
+  const hook = source.slice(source.indexOf("export function useDemoCollection"));
+
+  assert.ok(
+    hook.includes("const workspaceId = readWorkspaceId();"),
+    "the workspace must be read where the hook can depend on it, not inside the effect",
+  );
+  assert.ok(
+    hook.includes("productionMode, workspaceId]"),
+    "and must be in the fetch effect's dependencies, so a switch refetches",
+  );
+
+  const fetchEffect = hook.slice(hook.indexOf("const loadFromApi"));
+  assert.equal(
+    fetchEffect.slice(0, fetchEffect.indexOf("};")).includes("readWorkspaceId()"),
+    false,
+    "reading it again inside the effect would reintroduce the hidden dependency",
+  );
+});
+
+test("W14 clearing the selection takes the current page down with it", async () => {
+  const auth = await readFile(path.join(negisSrc, "contexts", "AuthContext.tsx"), "utf8");
+  const clear = auth.slice(auth.indexOf("const clearWorkspaceSelection"));
+  const body = clear.slice(0, clear.indexOf("  };"));
+  // Permissions are what ProtectedPage gates on. Leaving them in place — to
+  // avoid a flicker, say — would keep the previous clinic's page mounted
+  // underneath the picker with its rows still on screen.
+  assert.ok(body.includes("setRolePermissions({})"), "the switch must drop the permissions");
+  assert.ok(body.includes("setClinicId(null)"), "and the workspace");
+
+  const app = await readFile(path.join(negisSrc, "App.tsx"), "utf8");
+  assert.ok(
+    app.includes("if (isLoading || !allowed) return null;"),
+    "ProtectedPage must render nothing once permissions are gone",
+  );
+});

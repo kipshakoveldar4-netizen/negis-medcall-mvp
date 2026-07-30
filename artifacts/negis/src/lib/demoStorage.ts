@@ -137,6 +137,17 @@ export function useDemoCollection<TItem extends { id: string }>(
     fromApi,
   } = options;
 
+  // Selection-2: which clinic this collection belongs to, read on every render
+  // so that a workspace change is a change of dependency and not a silent one.
+  //
+  // The effect below used to call readWorkspaceId() inside itself while
+  // depending on nothing that moves when the workspace does. Today the switch
+  // unmounts the page — ProtectedPage renders null the moment permissions are
+  // cleared — so a stale list never reached the screen. That is a property of a
+  // component two files away, and not something this hook should be relying on
+  // to keep one clinic's records off another clinic's page.
+  const workspaceId = readWorkspaceId();
+
   // Production = UUID workspace with an API-backed collection: never render demo
   // seeds, never read/write the negis_demo_* localStorage cache, and never fall
   // back to demo data. Demo workspaces keep the original behavior untouched.
@@ -163,7 +174,6 @@ export function useDemoCollection<TItem extends { id: string }>(
 
     const loadFromApi = async () => {
       try {
-        const workspaceId = readWorkspaceId();
         const response = await crmFetch(`${endpoint}?workspaceId=${encodeURIComponent(workspaceId)}`);
         const body = await safeJson<Record<string, unknown>>(response);
 
@@ -196,7 +206,7 @@ export function useDemoCollection<TItem extends { id: string }>(
     return () => {
       cancelled = true;
     };
-  }, [endpoint, fromApi, key, listKey, seed, productionMode]);
+  }, [endpoint, fromApi, key, listKey, seed, productionMode, workspaceId]);
 
   const setStoredItems = (next: TItem[] | ((current: TItem[]) => TItem[])) => {
     setItems((current) => {
