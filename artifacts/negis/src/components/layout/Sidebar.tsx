@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Link, useLocation } from 'wouter';
-import { BadgeDollarSign, BarChart2, CalendarDays, Clapperboard, Inbox, LayoutDashboard, Rocket, Settings, Users, LogOut, X, KeyRound, User, type LucideIcon } from 'lucide-react';
+import { BadgeDollarSign, BarChart2, Building2, CalendarDays, Clapperboard, Inbox, LayoutDashboard, Rocket, Settings, Users, LogOut, X, KeyRound, User, type LucideIcon } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
 import { supabase } from '@/lib/supabase';
 import { toast } from 'sonner';
@@ -49,7 +49,7 @@ const NAV_GROUPS: NavGroup[] = [
 
 export function Sidebar() {
   const [location] = useLocation();
-  const { signOut, user, userRole, isDemoMode } = useAuth();
+  const { signOut, user, userRole, isDemoMode, availableWorkspaces, clearWorkspaceSelection } = useAuth();
   const [showProfile, setShowProfile] = useState(false);
   const [fullName, setFullName] = useState(user?.user_metadata?.full_name ?? '');
   const [newPassword, setNewPassword] = useState('');
@@ -159,6 +159,21 @@ export function Sidebar() {
             <p className="truncate text-sm font-semibold" style={{ color: 'var(--medina-sidebar-text)' }}>{user?.user_metadata?.full_name || 'Профиль'}</p>
             <p className="truncate text-xs" style={{ color: 'var(--medina-sidebar-muted)' }}>{user?.email || 'demo mode'}</p>
           </button>
+          {availableWorkspaces.length > 1 && (
+            // Selection-1: without this the first choice was permanent — the
+            // stored selector is reapplied on every sign-in, so signing out did
+            // not return anyone to the picker.
+            <button
+              type="button"
+              onClick={clearWorkspaceSelection}
+              aria-label="Сменить клинику"
+              title="Сменить клинику"
+              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg transition-colors hover:text-white"
+              style={{ color: 'var(--medina-sidebar-muted)' }}
+            >
+              <Building2 size={17} aria-hidden />
+            </button>
+          )}
           <button
             type="button"
             onClick={signOut}

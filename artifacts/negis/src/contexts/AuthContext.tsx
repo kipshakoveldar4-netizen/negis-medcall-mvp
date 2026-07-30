@@ -80,8 +80,21 @@ interface AuthContextType {
   isDemoMode: boolean;
   isStaffMode: boolean;
   impersonationClinicName: string | null;
+  /**
+   * Selection-1: every workspace the server listed for this user. The server
+   * has said `requiresWorkspaceSelection` since Security-2B; this is the list
+   * the choice is made from, and it is never wider than the memberships the
+   * server verified.
+   */
+  availableWorkspaces: WorkspaceChoice[];
+  /** Applies one of `availableWorkspaces`. Anything else is refused. */
+  selectWorkspace: (workspaceId: string) => void;
+  /** Drops the current choice and returns the user to the picker. */
+  clearWorkspaceSelection: () => void;
   signOut: () => Promise<void>;
 }
+
+export type WorkspaceChoice = { id: string; name: string; role: string };
 
 /* ── Constants ────────────────────────────────────────────── */
 const IMP_KEY     = 'negis_impersonation';
@@ -251,7 +264,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [isStaffMode,             setIsStaffMode]             = useState(false);
   const [impersonationClinicName, setImpersonationClinicName] = useState<string | null>(null);
   // Memberships the server confirmed for this user; drives explicit workspace choice.
-  const [availableWorkspaces, setAvailableWorkspaces] = useState<Array<{ id: string; role: string }>>([]);
+  const [availableWorkspaces, setAvailableWorkspaces] = useState<WorkspaceChoice[]>([]);
+  // The picker runs long after the bootstrap resolved, so the memberships and
+  // the verified user are kept in refs: reading them from state inside the
+  // callback would capture whatever the closure saw when it was created.
+  const membershipsRef = useRef<AuthContextMembership[]>([]);
+  const userRef = useRef<User | null>(null);
+  useEffect(() => {
+    userRef.current = user;
+  }, [user]);
   const [, setLocation] = useLocation();
 
   const subscriptionRef = useRef<{ unsubscribe: () => void } | null>(null);
@@ -325,6 +346,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   type AuthContextMembership = {
     staffUserId: string;
     workspaceId: string;
+    workspaceName: string;
     role: string;
     permissions: string[];
   };
@@ -351,6 +373,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         .map((entry) => ({
           staffUserId: String(entry.staffUserId || ''),
           workspaceId: String(entry.workspaceId),
+          workspaceName: String(entry.workspaceName || ''),
           role: String(entry.role),
           permissions: Array.isArray(entry.permissions) ? entry.permissions.map(String) : [],
         }));
@@ -362,9 +385,48 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   };
 
+  const toWorkspaceChoices = (memberships: AuthContextMembership[]): WorkspaceChoice[] =>
+    memberships.map((entry) => ({
+      id: entry.workspaceId,
+      name: entry.workspaceName,
+      role: entry.role,
+    }));
+
+  const rememberSelector = (workspaceId: string | null) => {
+    try {
+      if (workspaceId) localStorage.setItem(WORKSPACE_SELECTOR_KEY, workspaceId);
+      else localStorage.removeItem(WORKSPACE_SELECTOR_KEY);
+    } catch {
+      /* selector is best-effort only */
+    }
+  };
+
+  const applyMembership = (
+    supabaseUser: User,
+    selected: AuthContextMembership,
+    memberships: AuthContextMembership[],
+  ) => {
+    rememberSelector(selected.workspaceId);
+
+    const role = isStaffRole(selected.role) ? selected.role : 'receptionist';
+    setIsDemoMode(false);
+    setIsImpersonation(false);
+    setIsStaffMode(true);
+    setClinicId(selected.workspaceId);
+    setImpersonationClinicName(null);
+    setUserRole(role);
+    setRolePermissions(routePermissionsForStaffRole(role));
+    setUser(supabaseUser);
+    setAvailableWorkspaces(toWorkspaceChoices(memberships));
+  };
+
   const tryApplySupabaseStaffUser = async (supabaseUser: User): Promise<boolean> => {
     const { memberships } = await fetchAuthContext();
-    if (memberships.length === 0) return false;
+    membershipsRef.current = memberships;
+    if (memberships.length === 0) {
+      setAvailableWorkspaces([]);
+      return false;
+    }
 
     // A stored selector is a UX convenience only: it is discarded unless the
     // server still lists it among this user's memberships.
@@ -382,33 +444,50 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     if (!selected) {
       // Several memberships and no valid stored choice: the server does not pick
-      // one, and neither do we.
-      try {
-        localStorage.removeItem(WORKSPACE_SELECTOR_KEY);
-      } catch {
-        /* selector is best-effort only */
-      }
-      setAvailableWorkspaces(memberships.map((entry) => ({ id: entry.workspaceId, role: entry.role })));
+      // one, and neither do we. Selection-1: the list is published so the user
+      // can, which is what `requiresWorkspaceSelection` has been asking for.
+      rememberSelector(null);
+      setUser(supabaseUser);
+      setAvailableWorkspaces(toWorkspaceChoices(memberships));
       return false;
     }
 
-    try {
-      localStorage.setItem(WORKSPACE_SELECTOR_KEY, selected.workspaceId);
-    } catch {
-      /* selector is best-effort only */
+    applyMembership(supabaseUser, selected, memberships);
+    return true;
+  };
+
+  /**
+   * Selection-1: applies a workspace the user picked.
+   *
+   * The candidate has to come from the memberships the server returned for this
+   * session — a workspace id from anywhere else is refused here, and would be
+   * refused again by every request, since the browser has not been the tenant
+   * authority since Security-2B.
+   */
+  const selectWorkspace = (workspaceId: string) => {
+    const memberships = membershipsRef.current;
+    const selected = memberships.find((entry) => entry.workspaceId === workspaceId);
+    const supabaseUser = userRef.current;
+
+    if (!selected || !supabaseUser) {
+      toast.error('Клиника недоступна. Войдите заново.');
+      return;
     }
 
-    const role = isStaffRole(selected.role) ? selected.role : 'receptionist';
-    setIsDemoMode(false);
-    setIsImpersonation(false);
-    setIsStaffMode(true);
-    setClinicId(selected.workspaceId);
-    setImpersonationClinicName(null);
-    setUserRole(role);
-    setRolePermissions(routePermissionsForStaffRole(role));
-    setUser(supabaseUser);
-    setAvailableWorkspaces(memberships.map((entry) => ({ id: entry.workspaceId, role: entry.role })));
-    return true;
+    applyMembership(supabaseUser, selected, memberships);
+    // Every staff role in the permission table carries `dashboard`, and
+    // ProtectedPage redirects anyone it does not fit, so this lands correctly
+    // without duplicating the route table here.
+    setLocation('/dashboard');
+  };
+
+  /** Returns a multi-clinic user to the picker without ending the session. */
+  const clearWorkspaceSelection = () => {
+    if (membershipsRef.current.length < 2) return;
+    rememberSelector(null);
+    setClinicId(null);
+    setUserRole(null);
+    setRolePermissions({});
   };
 
   /* ── 1. Init ──────────────────────────────────────────── */
@@ -667,6 +746,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setUserRole(null);
     setRolePermissions({});
     setIsLoading(false);
+    // Selection-1: a user with several memberships is not unlinked, they have
+    // not chosen yet. Telling them to call their administrator sent them to
+    // someone who could not have helped.
+    if (membershipsRef.current.length > 1) return;
     toast.error('Аккаунт не связан с клиникой. Обратитесь к администратору клиники.');
   };
 
@@ -727,6 +810,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       session, user, clinicId, userRole, isLoading,
       rolePermissions,
       isImpersonation, isDemoMode, isStaffMode, impersonationClinicName,
+      availableWorkspaces, selectWorkspace, clearWorkspaceSelection,
       signOut,
     }}>
       {children}

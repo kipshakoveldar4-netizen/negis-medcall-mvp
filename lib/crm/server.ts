@@ -6152,6 +6152,42 @@ export async function handleMetaInsightsSyncRuns(req: VercelRequest, res: Vercel
   return sendJson(res, 200, success("supabase", { runs, items: runs }));
 }
 
+/**
+ * Names for workspaces the caller is already a verified member of.
+ *
+ * Selection-1: the ids come from listAuthContextMemberships and never from the
+ * request, so this discloses nothing the caller was not already told. It is a
+ * separate query rather than a join in listActiveMemberships because that runs
+ * on every authorized request and this is needed once, at the bootstrap.
+ *
+ * A failure here is not an authentication failure: the picker falls back to the
+ * role and the id, which is worse to read but still correct.
+ */
+async function lookupWorkspaceNames(workspaceIds: string[]): Promise<Record<string, string>> {
+  const ids = [...new Set(workspaceIds.filter((id) => isUuid(id)))];
+  if (ids.length === 0) return {};
+
+  const supabase = getSupabaseServerClient();
+  if (!supabase) return {};
+
+  try {
+    const { data, error } = await supabase.from("workspaces").select("id, name").in("id", ids);
+    if (error) throw new Error(error.message);
+
+    const names: Record<string, string> = {};
+    for (const row of Array.isArray(data) ? data : []) {
+      const record = asRecord(row);
+      const id = firstString(record.id);
+      const name = firstString(record.name);
+      if (id && name) names[id] = name;
+    }
+    return names;
+  } catch (error) {
+    console.warn(supabaseWarning("workspace names", error));
+    return {};
+  }
+}
+
 export async function handleCrmAuthContext(req: VercelRequest, res: VercelResponse) {
   if (req.method !== "GET") {
     return sendJson(res, 405, errorBody("Method not allowed", ["Use GET"]));
@@ -6162,9 +6198,13 @@ export async function handleCrmAuthContext(req: VercelRequest, res: VercelRespon
   // permissions. No email lookup, no browser role, no impersonation input.
   try {
     const { memberships } = await listAuthContextMemberships(req);
+    // Selection-1: a caller with several memberships has to pick one, and a
+    // list of UUIDs is not a choice anyone can make.
+    const workspaceNames = await lookupWorkspaceNames(memberships.map((membership) => membership.workspaceId));
     const safeMemberships = memberships.map((membership) => ({
       staffUserId: membership.staffUserId,
       workspaceId: membership.workspaceId,
+      workspaceName: workspaceNames[membership.workspaceId] || "",
       role: membership.role,
       permissions: membership.permissions,
       status: "active",

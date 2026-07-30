@@ -325,6 +325,7 @@ async function loadHandler(file: string, options: HandlerOptions = {}) {
         order: () => chain(),
         limit: () => chain(),
         eq: (column: string, value: unknown) => { entry.filters[column] = value; return chain(); },
+        in: (column: string, values: unknown) => { entry.filters[column] = values; return chain(); },
         maybeSingle: () => Promise.resolve({ data: tableRows[0] ?? null, error: null }),
         single: () => Promise.resolve({ data: tableRows[0] ?? null, error: null }),
         then: (resolve: (value: { data: unknown; error: null }) => void) => resolve({ data: tableRows, error: null }),

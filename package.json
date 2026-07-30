@@ -26,7 +26,8 @@
     "test:tenant-isolation": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:tenant-isolation",
     "test:api-surface-authorization": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:api-surface-authorization",
     "test:staff-invitations": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:staff-invitations",
-    "test:storage-isolation": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:storage-isolation"
+    "test:storage-isolation": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:storage-isolation",
+    "test:workspace-selection": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:workspace-selection"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.105.4",

@@ -45,6 +45,7 @@ function spyClient(rows: Record<string, unknown[]>, log: QueryLog[]) {
         single: () => chain(),
         maybeSingle: () => Promise.resolve({ data: (rows[table] ?? [])[0] ?? null, error: null }),
         eq(column: string, value: unknown) { entry.filters[column] = value; return chain(); },
+        in(column: string, values: unknown) { entry.filters[column] = values; return chain(); },
         then(resolve: (value: { data: unknown; error: null; count?: number }) => void) {
           const table_rows = rows[table] ?? [];
           resolve({ data: table_rows, error: null, count: table_rows.length });
