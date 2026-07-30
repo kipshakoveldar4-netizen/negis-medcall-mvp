@@ -24,7 +24,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { PageLayout } from "@/components/layout/PageLayout";
-import { readWorkspaceId as readCurrentWorkspaceId, useDemoCollection } from "@/lib/demoStorage";
+import { readWorkspaceId as readCurrentWorkspaceId, useDemoCollection, workspaceScopedKey } from "@/lib/demoStorage";
 import { crmFetch } from "@/lib/api";
 import { apiUrl } from "@/lib/api";
 import { formatPhone, toTelHref, toWhatsappHref } from "@/lib/phone";
@@ -406,7 +406,7 @@ function QuickActionLink({
 
 function saveAppointmentPrefill(prefill: { clientName: string; phone: string; source?: string; service?: string }) {
   if (typeof window === "undefined") return;
-  window.localStorage.setItem("negis_appointment_prefill", JSON.stringify(prefill));
+  window.localStorage.setItem(workspaceScopedKey("negis_appointment_prefill"), JSON.stringify(prefill));
 }
 
 export function DemoClients() {

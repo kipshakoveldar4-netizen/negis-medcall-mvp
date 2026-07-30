@@ -270,3 +270,139 @@ test("W8 a user with several memberships is no longer told their account is unli
   assert.ok(guardAt > 0, "the multi-membership case must be recognised");
   assert.ok(toastAt > guardAt, "and must return before the misleading message");
 });
+
+// ===========================================================================
+// C. Selection-2: nothing one clinic cached may appear in another
+// ===========================================================================
+
+// These caches were written when a browser could only ever be in one workspace,
+// so nothing could cross. Selection-1 made switching possible and turned every
+// unscoped key into a leak: a patient's name and phone prefilled into another
+// clinic's appointment form, one clinic's WhatsApp destination in another
+// clinic's campaign brief, one clinic's Meta ad account shown — and saved — on
+// another clinic's admin screen.
+
+/** localStorage keys that are per-user or per-browser, not per-clinic. */
+const UNSCOPED_BY_DESIGN = new Set([
+  "negis_ads_automation_ui_mode",
+  "negis_onboarding_hint_dismissed",
+  "negis_plan",
+  // Auth and demo-session plumbing: read before a workspace is even known.
+  "negis_staff_user",
+  "negis_staff_session",
+  "negis_demo_user",
+  "negis_demo_workspace",
+  "negis_demo_session",
+  "negis_clinic_id",
+  "negis_session",
+  "negis_impersonation",
+  "negis_workspace_selector",
+]);
+
+async function readPageSources(): Promise<Array<{ file: string; source: string }>> {
+  const dir = path.join(negisSrc, "pages");
+  const { readdir } = await import("node:fs/promises");
+  const files = (await readdir(dir)).filter((entry) => entry.endsWith(".tsx"));
+  return Promise.all(
+    files.map(async (file) => ({ file, source: await readFile(path.join(dir, file), "utf8") })),
+  );
+}
+
+test("W9 the scoping helper binds a key to the current workspace", async () => {
+  const source = await readFile(path.join(negisSrc, "lib", "demoStorage.ts"), "utf8");
+  const fn = source.slice(source.indexOf("export function workspaceScopedKey"));
+  const body = fn.slice(0, fn.indexOf("\n}"));
+
+  assert.ok(body.includes("readWorkspaceId()"), "the scope must be the workspace in effect right now");
+  assert.ok(body.includes("`${key}::"), "and must be part of the key, not a separate entry");
+});
+
+test("W10 no page stores one clinic's data under a key another clinic can read", async () => {
+  const offenders: string[] = [];
+  for (const { file, source } of await readPageSources()) {
+    // Only literal keys: a variable is either already scoped or covered by W11.
+    for (const match of source.matchAll(/localStorage\.(?:get|set|remove)Item\(\s*"([a-z0-9_]+)"/g)) {
+      if (!UNSCOPED_BY_DESIGN.has(match[1])) offenders.push(`${file}: ${match[1]}`);
+    }
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    "wrap the key in workspaceScopedKey, or add it to UNSCOPED_BY_DESIGN with a reason if it is not clinic data",
+  );
+});
+
+test("W11 the handoff and admin caches are scoped at every site", async () => {
+  const sources = new Map((await readPageSources()).map((entry) => [entry.file, entry.source]));
+
+  // Appointment, deal and Content Studio handoffs: written on one page, read on
+  // another, so both ends have to agree on the scope.
+  for (const [file, keys] of [
+    ["ClientsPage.tsx", ["APPOINTMENT_PREFILL_KEY", "DEAL_PREFILL_KEY"]],
+    ["LeadsPage.tsx", ["APPOINTMENT_PREFILL_KEY", "DEAL_PREFILL_KEY"]],
+    ["AdsAutomation.tsx", ["STUDIO_PREFILL_KEY"]],
+  ] as const) {
+    const source = sources.get(file) ?? "";
+    const lines = source.split(/\r?\n/);
+    for (const key of keys) {
+      // Plain string matching on purpose: a RegExp built in a template literal
+      // has lost its backslashes twice in this repository already.
+      for (const call of ["getItem(", "setItem(", "removeItem("]) {
+        assert.equal(
+          source.includes(`localStorage.${call}${key}`),
+          false,
+          `${file} passes ${key} to ${call} without a workspace scope`,
+        );
+      }
+      // The same call split across lines, with the key as the first argument.
+      assert.equal(
+        lines.some((line) => line.trim() === `${key},`),
+        false,
+        `${file} passes ${key} as a bare argument without a workspace scope`,
+      );
+    }
+  }
+
+  // The reading pages derive their key once per effect.
+  for (const file of ["AppointmentsPage.tsx", "SalesPage.tsx"]) {
+    const source = sources.get(file) ?? "";
+    assert.ok(
+      source.includes("const prefillKey = workspaceScopedKey("),
+      `${file} must derive the prefill key from the current workspace`,
+    );
+  }
+
+  // AdminCenter holds the clinic's settings and its Meta ids; the scope is in
+  // its two storage helpers so no call site can forget it.
+  const admin = sources.get("AdminCenter.tsx") ?? "";
+  assert.ok(
+    admin.includes("window.localStorage.getItem(workspaceScopedKey(key))") &&
+      admin.includes("window.localStorage.setItem(workspaceScopedKey(key)"),
+    "AdminCenter's readStored/writeStored must scope every key they touch",
+  );
+});
+
+test("W12 the ACTIVE launch mirror is per clinic, and the real gate is still the server's", async () => {
+  const ads = await readFile(path.join(negisSrc, "pages", "AdsAutomation.tsx"), "utf8");
+  const admin = await readFile(path.join(negisSrc, "pages", "AdminCenter.tsx"), "utf8");
+
+  // Unscoped, enabling live launch in one clinic lit the affordance up in the
+  // next one. Scoped, an unknown clinic reads false, which can only close the
+  // gate, never open it.
+  for (const match of ads.matchAll(/readStored\(\s*"negis_meta_live_launch_enabled"/g)) {
+    assert.fail(`AdsAutomation reads the live launch flag unscoped at index ${match.index}`);
+  }
+  assert.ok(
+    ads.includes('readStored(workspaceScopedKey("negis_meta_live_launch_enabled"), false)'),
+    "the flag defaults to off for a clinic that has not enabled it",
+  );
+  assert.ok(admin.includes('"negis_meta_live_launch_enabled"'), "AdminCenter still owns the toggle");
+
+  // And the flag is a mirror: the server reads workspace_settings for the
+  // verified workspace, so no browser value can open ACTIVE on its own.
+  const server = await readFile(path.join(repoRoot, "lib", "crm", "server.ts"), "utf8");
+  const gate = server.slice(server.indexOf("async function readMetaLiveLaunchEnabled"));
+  const body = gate.slice(0, gate.indexOf("\n}"));
+  assert.ok(body.includes('from("workspace_settings")'), "the gate reads the workspace's own setting");
+  assert.ok(body.includes('eq("workspace_id", workspaceId)'), "scoped to the verified workspace");
+});

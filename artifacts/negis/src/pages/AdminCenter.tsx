@@ -29,7 +29,7 @@ import { toast } from "sonner";
 import { PageLayout } from "@/components/layout/PageLayout";
 import { useAuth } from "@/contexts/AuthContext";
 import { apiUrl, crmFetch } from "@/lib/api";
-import { readWorkspaceId } from "@/lib/demoStorage";
+import { readWorkspaceId, workspaceScopedKey } from "@/lib/demoStorage";
 import { getSupabaseAccessToken } from "@/lib/serverAuth";
 import {
   permissionLabels,
@@ -426,10 +426,15 @@ const envList = [
   "TAPNOW_API_KEY",
 ];
 
+// Selection-2: every key these two touch holds one clinic's data — its
+// settings, its Meta ad account and page ids, its release checklist, its AI
+// providers — so the scope belongs here rather than at fourteen call sites.
+// Unscoped, switching clinics showed the previous clinic's Meta ids on the new
+// clinic's admin screen, and saving the form wrote them to the new clinic.
 function readStored<T>(key: string, fallback: T): T {
   if (typeof window === "undefined") return fallback;
   try {
-    const raw = window.localStorage.getItem(key);
+    const raw = window.localStorage.getItem(workspaceScopedKey(key));
     return raw ? (JSON.parse(raw) as T) : fallback;
   } catch {
     return fallback;
@@ -437,7 +442,7 @@ function readStored<T>(key: string, fallback: T): T {
 }
 
 function writeStored<T>(key: string, value: T) {
-  window.localStorage.setItem(key, JSON.stringify(value));
+  window.localStorage.setItem(workspaceScopedKey(key), JSON.stringify(value));
 }
 
 function mergeReleaseChecks(stored: ReleaseCheck[]): ReleaseCheck[] {

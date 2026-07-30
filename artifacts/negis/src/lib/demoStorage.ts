@@ -86,6 +86,24 @@ export function readWorkspaceId(): string {
   }
 }
 
+/**
+ * Selection-2: a localStorage key that holds one clinic's data, bound to that
+ * clinic.
+ *
+ * These caches were written when a browser could only ever be in one workspace:
+ * the selector was set by redeeming an invitation and nothing could change it,
+ * so nothing could cross. Selection-1 made switching possible, and an unscoped
+ * key then carried the previous clinic's data into the next one — a patient's
+ * name and phone into another clinic's appointment form, or one clinic's
+ * WhatsApp destination into another clinic's campaign brief.
+ *
+ * Scoping rather than clearing on switch keeps each clinic's own draft intact
+ * when the user switches back.
+ */
+export function workspaceScopedKey(key: string): string {
+  return `${key}::${readWorkspaceId()}`;
+}
+
 // Same discriminator as the server (lib/crm/server.ts isUuid): a UUID workspace is
 // Supabase-backed production; anything else ("demo-workspace") is local demo mode.
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
