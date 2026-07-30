@@ -1,14 +1,23 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { targetingAgentClient } from "../../lib/targeting-agent/client";
-import { persistTargetingReportIfAvailable } from "../../lib/targeting-agent/persistence";
+import {
+  campaignBelongsToWorkspace,
+  persistTargetingReportIfAvailable,
+} from "../../lib/targeting-agent/persistence";
 
 import {
   authorizePrivateRoute,
+  sendNotFound,
   type PrivateRouteAuthorization,
 } from "../../lib/auth/route-guard";
 
 // Security-2D: this ran without a token, read a campaign row and wrote a
 // targeting_reports row on the service-role client.
+//
+// Security-2E: a token was not enough. The campaign id is caller-supplied, so
+// it is checked against the verified workspace before the agent is asked for
+// the report — an id from another clinic is a 404, indistinguishable from one
+// that does not exist.
 const AUTHORIZATION: PrivateRouteAuthorization = {
   kind: "browser",
   methods: ["GET"],
@@ -30,6 +39,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       error: "Validation error",
       details: ["campaignId is required"],
     });
+  }
+
+  if (!(await campaignBelongsToWorkspace(campaignId, context.workspaceId))) {
+    return sendNotFound(res);
   }
 
   const result = await targetingAgentClient.getCampaignReport(campaignId);
