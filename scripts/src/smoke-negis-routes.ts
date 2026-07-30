@@ -1,6 +1,7 @@
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { formatAuthBoundaryCoverage } from "./smoke-auth-boundary-report";
 
 type ApiBody = {
   success?: boolean;
@@ -3477,6 +3478,18 @@ export function isCrmGuarded(body: ApiBody | null | undefined): boolean {
   return Boolean(body && (body as Record<string, unknown>)[CRM_GUARD_MARKER]);
 }
 
+// Security-2E: what this run did NOT check has to be as visible as what it did.
+//
+// Since Security-2B every /api/crm/, /api/content-studio/ and /api/targeting/
+// call in this suite stops at the 401, and the callers built on top of it bail
+// out through isCrmGuarded. The payload contracts written below those calls —
+// publicUrl derivation, job state machines, launch history shapes — are then
+// never exercised. That is the correct behaviour for an unauthenticated smoke
+// run, but a run that prints a wall of green while silently skipping them is
+// the same trap the targeting script used to set: a coverage hole that reads as
+// coverage. The summary at the end of main() names the count out loud.
+const authBoundaryPaths = new Set<string>();
+
 async function assertCrmAuthBoundary(path: string, init?: RequestInit): Promise<ApiBody> {
   const response = await fetch(`${baseUrl}${path}`, init);
   const text = await response.text();
@@ -3496,6 +3509,7 @@ async function assertCrmAuthBoundary(path: string, init?: RequestInit): Promise<
     throw new Error(`${path} auth failure must report success: false`);
   }
 
+  authBoundaryPaths.add(path.split("?")[0]);
   console.log(`${path}: 401 (authentication required)`);
   return { success: false, [CRM_GUARD_MARKER]: true } as ApiBody;
 }
@@ -4583,7 +4597,18 @@ async function main() {
   });
 }
 
-main().catch((error) => {
-  console.error(error instanceof Error ? error.message : error);
-  process.exitCode = 1;
-});
+function reportAuthBoundaryCoverage() {
+  for (const line of formatAuthBoundaryCoverage(authBoundaryPaths)) {
+    console.log(line);
+  }
+}
+
+main()
+  .then(reportAuthBoundaryCoverage)
+  .catch((error) => {
+    // Report the coverage gap even on failure: a run that died halfway checked
+    // even less than a clean one, which is exactly when it matters.
+    reportAuthBoundaryCoverage();
+    console.error(error instanceof Error ? error.message : error);
+    process.exitCode = 1;
+  });

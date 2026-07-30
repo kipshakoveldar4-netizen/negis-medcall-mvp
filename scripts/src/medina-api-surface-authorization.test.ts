@@ -827,3 +827,40 @@ test("S33 the report path no longer creates a campaign row that belongs to no wo
     "the ownership check lives next to the tables it guards",
   );
 });
+
+/* ── Security-2E: the smoke run says what it did not check ─────────────────── */
+
+// 161 call sites in the route smoke suite address a private path, and since
+// Security-2B every one of them stops at the 401 while the payload assertions
+// underneath are skipped through isCrmGuarded. The run used to print only
+// green. It now names the routes it did not get past.
+test("S34 the smoke run reports the private routes it only reached the auth boundary of", async () => {
+  const { formatAuthBoundaryCoverage } = (await import(
+    pathToFileURL(path.join(repoRoot, "scripts", "src", "smoke-auth-boundary-report.ts")).href
+  )) as { formatAuthBoundaryCoverage: (paths: Iterable<string>) => string[] };
+
+  assert.deepEqual(formatAuthBoundaryCoverage([]), [], "a run that checked nothing must not print an empty heading");
+
+  const lines = formatAuthBoundaryCoverage([
+    "/api/crm/leads",
+    "/api/targeting/report",
+    "/api/crm/leads",
+  ]);
+  assert.equal(lines.length, 4, "a blank line, the summary, then one line per unique route");
+  assert.ok(lines[1].startsWith("NOT CHECKED: 2 private routes"), `unexpected summary: ${lines[1]}`);
+  assert.deepEqual(lines.slice(2), ["  - /api/crm/leads", "  - /api/targeting/report"]);
+
+  // And the smoke suite has to actually call it, on both the clean and the
+  // failed path — a run that died halfway checked even less.
+  const smoke = await readFile(path.join(repoRoot, "scripts", "src", "smoke-negis-routes.ts"), "utf8");
+  assert.ok(smoke.includes("formatAuthBoundaryCoverage"), "the smoke suite must print the report");
+  assert.ok(
+    smoke.includes(".then(reportAuthBoundaryCoverage)"),
+    "the report must print after a clean run",
+  );
+  const catchBlock = smoke.slice(smoke.indexOf(".catch((error)"));
+  assert.ok(
+    catchBlock.includes("reportAuthBoundaryCoverage()"),
+    "and after a failed one",
+  );
+});
