@@ -12,6 +12,7 @@ import Landing from "@/pages/Landing";
 import DemoPlaceholder from "@/pages/DemoPlaceholder";
 import NotFound from "@/pages/not-found";
 import FbPixelInit from "@/components/FbPixelInit";
+import { WorkspacePicker } from "@/components/WorkspacePicker";
 import { RouteErrorBoundary } from "@/components/layout/RouteErrorBoundary";
 
 // Lazy: every operational screen loads as its own chunk. Before this, all 28
@@ -209,6 +210,7 @@ function App() {
           <TooltipProvider>
             <FbPixelInit />
             <ImpersonationBanner />
+            <WorkspacePicker />
             <Router />
             <Toaster position="bottom-right" />
           </TooltipProvider>

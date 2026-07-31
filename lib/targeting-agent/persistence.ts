@@ -102,6 +102,58 @@ export async function persistTargetingCampaignIfAvailable(
   }
 }
 
+/**
+ * Security-2E: a targeting report is addressed by campaign id alone, so the id
+ * has to be checked against the caller's workspace before the agent is asked
+ * for anything.
+ *
+ * Security-2D put a token in front of the report routes but left the campaign
+ * id unchecked, which meant any member holding view_marketing in any workspace
+ * could read another clinic's campaign name, city, offer, budget, insights and
+ * recommendations — and file a targeting_reports row against that clinic's
+ * campaign, since reports inherit their tenancy from campaign_id and nothing
+ * else.
+ *
+ * A campaign with no workspace_id belongs to no one and is treated as foreign:
+ * the launch route has stamped the verified workspace on every row it writes
+ * since Security-2D, so a null there is either pre-Security-2D residue or the
+ * report-backfill path that no longer exists.
+ */
+export async function campaignBelongsToWorkspace(
+  campaignId: string,
+  workspaceId: string,
+): Promise<boolean> {
+  if (!isUuid(campaignId) || !isUuid(workspaceId)) {
+    return false;
+  }
+
+  const supabase = getSupabaseServerClient();
+  // Unreachable in practice: the route guard needs the same client to resolve
+  // membership, so a caller cannot get this far without one. Refusing rather
+  // than assuming keeps the failure closed if that ever stops being true.
+  if (!supabase) {
+    return false;
+  }
+
+  try {
+    const { data, error } = await supabase
+      .from("targeting_campaigns")
+      .select("workspace_id")
+      .eq("id", campaignId)
+      .eq("workspace_id", workspaceId)
+      .maybeSingle();
+
+    if (error) {
+      throw new Error(error.message);
+    }
+
+    return isUuid(asRecord(data).workspace_id);
+  } catch (error) {
+    console.warn(persistenceWarning("Targeting campaign ownership", error));
+    return false;
+  }
+}
+
 export async function persistTargetingReportIfAvailable(
   campaignId: string,
   responseBody: TargetingAgentBody,
@@ -118,25 +170,15 @@ export async function persistTargetingReportIfAvailable(
   const responseData = asRecord(responseBody.data);
   const report = asRecord(responseData.report);
 
+  // Security-2E: the report-backfill upsert that used to stand here is gone.
+  //
+  // It created a targeting_campaigns row with no workspace_id whenever a report
+  // arrived for an unknown campaign — a tenant-less row, and the same loaded
+  // gun the workspace insert above was removed for. The report routes now
+  // refuse a campaign that does not already belong to the caller, so the
+  // campaign always exists by the time this runs and the upsert could only
+  // ever fire on a path that is no longer reachable.
   try {
-    const { error: campaignError } = await supabase
-      .from("targeting_campaigns")
-      .upsert(
-        {
-          id: campaignId,
-          status: "pending",
-          raw_payload: {
-            source: "report-backfill",
-            campaignId,
-          },
-        },
-        { onConflict: "id", ignoreDuplicates: true },
-      );
-
-    if (campaignError) {
-      throw new Error(campaignError.message);
-    }
-
     const { error } = await supabase.from("targeting_reports").insert({
       campaign_id: campaignId,
       summary: readString(report.executiveSummary) || readString(report.summary),

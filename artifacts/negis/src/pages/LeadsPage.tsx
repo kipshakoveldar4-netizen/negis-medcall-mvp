@@ -25,7 +25,7 @@ import { PageLayout } from "@/components/layout/PageLayout";
 import { PageHeader } from "@/components/ui/page-header";
 import { MetricCard } from "@/components/ui/metric-card";
 import { EmptyState } from "@/components/ui/empty-state";
-import { useDemoCollection, readDemoStorage, writeDemoStorage, isRealWorkspace, readWorkspaceId } from "@/lib/demoStorage";
+import { useDemoCollection, readDemoStorage, writeDemoStorage, isRealWorkspace, readWorkspaceId, workspaceScopedKey } from "@/lib/demoStorage";
 import { apiUrl, crmFetch } from "@/lib/api";
 import {
   FALLBACK_LEAD_SOURCES,
@@ -165,7 +165,7 @@ function formatCreatedAt(value?: string): string {
 function saveAppointmentPrefill(lead: Lead) {
   if (typeof window === "undefined") return;
   window.localStorage.setItem(
-    APPOINTMENT_PREFILL_KEY,
+    workspaceScopedKey(APPOINTMENT_PREFILL_KEY),
     JSON.stringify({
       clientId: lead.clientId || "",
       clientName: lead.name,
@@ -181,7 +181,7 @@ function saveAppointmentPrefill(lead: Lead) {
 function saveDealPrefill(lead: Lead) {
   if (typeof window === "undefined") return;
   window.localStorage.setItem(
-    DEAL_PREFILL_KEY,
+    workspaceScopedKey(DEAL_PREFILL_KEY),
     JSON.stringify({
       title: lead.campaign || "",
       leadId: lead.id,

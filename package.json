@@ -25,7 +25,11 @@
     "test:legacy-webhook": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:legacy-webhook",
     "test:tenant-isolation": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:tenant-isolation",
     "test:api-surface-authorization": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:api-surface-authorization",
-    "test:staff-invitations": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:staff-invitations"
+    "test:staff-invitations": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:staff-invitations",
+    "test:storage-isolation": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:storage-isolation",
+    "test:workspace-selection": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:workspace-selection",
+    "test:failure-honesty": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:failure-honesty",
+    "test:migration-chain": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:migration-chain"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.105.4",

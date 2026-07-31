@@ -750,6 +750,27 @@ function supabaseWarning(scope: string, error: unknown): string {
   return `${scope} Supabase persistence skipped: ${detail}`;
 }
 
+/**
+ * Security-2F: what a caller may be told about a database or storage failure.
+ *
+ * These handlers echoed the text Postgres and Supabase Storage produce —
+ * constraint and table names, "permission denied for table x", row-level
+ * security policy messages — to any authenticated member. The router has said
+ * since Security-2B that "nothing about the workspace, the membership or the
+ * underlying Supabase failure reaches the caller"; that was true of the auth
+ * errors and never of the data path.
+ *
+ * The detail still reaches the server log, where an operator can read it
+ * against a request; the caller gets the fallback and nothing else.
+ */
+const SERVICE_FAILURE_DETAIL = "Сбой на стороне сервиса. Подробности записаны в логах сервера.";
+
+function redactedDetail(scope: string, error: unknown, fallback: string): string {
+  const detail = error instanceof Error ? error.message : String(error);
+  console.warn(`[crm] ${scope} failed: ${detail}`);
+  return fallback;
+}
+
 function makeClient(body: JsonRecord): JsonRecord {
   return {
     id: readString(body.id) || nextDemoId("client"),
@@ -1921,9 +1942,13 @@ async function listItems(resource: CrmResource, req: VercelRequest, res: VercelR
     const items = (Array.isArray(data) ? data : []).map((row) => config.fromRow(asRecord(row)));
     return sendJson(res, 200, success("supabase", { [config.listKey]: items, items }));
   } catch (error) {
-    const warning = supabaseWarning(config.table, error);
-    console.warn(warning);
-    return sendJson(res, 200, success("demo", { [config.listKey]: [], items: [] }, warning));
+    // Security-2F: an empty list is an answer, and it was the wrong one — a
+    // failed read looked exactly like a clinic with no records.
+    return sendJson(
+      res,
+      502,
+      errorBody("Не удалось загрузить данные", [redactedDetail(config.table, error, SERVICE_FAILURE_DETAIL)]),
+    );
   }
 }
 
@@ -2100,9 +2125,16 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
     if (error instanceof CrmReferenceValidationError) {
       return sendJson(res, 400, errorBody(error.message, error.details));
     }
-    const warning = supabaseWarning(config.table, error);
-    console.warn(warning);
-    return sendJson(res, 200, success("demo", { [resource === "content-videos" ? "video" : "item"]: demoItem, item: demoItem }, warning));
+    // Security-2F: a write the database refused is not a success. This answered
+    // 200 with a demo item and a warning, which the browser dropped on the
+    // floor — the operator saw the record appear in the list and it was gone on
+    // the next load. Demo mode is unaffected: it is chosen before the query,
+    // not after it fails.
+    return sendJson(
+      res,
+      502,
+      errorBody("Не удалось сохранить запись", [redactedDetail(config.table, error, SERVICE_FAILURE_DETAIL)]),
+    );
   }
 }
 
@@ -2265,9 +2297,16 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
     if (error instanceof CrmReferenceValidationError) {
       return sendJson(res, 400, errorBody(error.message, error.details));
     }
-    const warning = supabaseWarning(config.table, error);
-    console.warn(warning);
-    return sendJson(res, 200, success("demo", { [resource === "content-videos" ? "video" : "item"]: demoItem, item: demoItem }, warning));
+    // Security-2F: a write the database refused is not a success. This answered
+    // 200 with a demo item and a warning, which the browser dropped on the
+    // floor — the operator saw the record appear in the list and it was gone on
+    // the next load. Demo mode is unaffected: it is chosen before the query,
+    // not after it fails.
+    return sendJson(
+      res,
+      502,
+      errorBody("Не удалось сохранить запись", [redactedDetail(config.table, error, SERVICE_FAILURE_DETAIL)]),
+    );
   }
 }
 
@@ -2281,6 +2320,9 @@ const MAX_VIDEO_BYTES = 100 * 1024 * 1024;
 // Large video optimization pipeline (Phase A). Raw originals are temporary:
 // they live in a private bucket and are never sent to Meta or end users.
 const DEFAULT_RAW_VIDEO_BUCKET = "ad-creatives-raw";
+// The one bucket a browser-initiated creative upload may ever reach. It is
+// public by design (migration 015) because Meta fetches creatives by URL.
+const AD_CREATIVE_BUCKET = "ad-creatives";
 const VIDEO_JOB_STATUSES = new Set(["awaiting_upload", "queued", "downloading", "transcoding", "uploading", "ready", "failed", "deleted_original"]);
 export const VIDEO_OPTIMIZATION_DISABLED_MESSAGE =
   "Оптимизация больших видео отключена. Загрузите MP4 до 100 MB или включите VIDEO_OPTIMIZATION_ENABLED в Vercel.";
@@ -2472,6 +2514,27 @@ function buildAdCreativeStoragePath(input: { workspaceId: string; fileName: stri
   return `${workspace}/${year}/${month}/${randomStorageId()}-${safeStorageFileName(input.fileName)}`;
 }
 
+/**
+ * Storage-1: an object key that arrives from a browser must live under the
+ * caller's own workspace prefix.
+ *
+ * The video worker reads `raw_path` off the job row with the service-role
+ * client, publishes the transcoded result to the public bucket, and then
+ * deletes the original. An arbitrary key therefore let a member of one
+ * workspace have another workspace's private raw video republished publicly
+ * and then removed. `buildAdCreativeStoragePath` is the only legitimate
+ * producer of these keys and always starts them with the workspace segment,
+ * so the check costs a legitimate caller nothing.
+ *
+ * Demo mode has no workspace of its own and never reaches the worker: without
+ * a UUID there is nothing to compare against, and the handler already refuses
+ * to persist.
+ */
+function isOwnWorkspaceStoragePath(storagePath: string, workspaceId: string): boolean {
+  if (!isUuid(workspaceId)) return true;
+  return storagePath.startsWith(`${safeStoragePathSegment(workspaceId, DEMO_WORKSPACE_ID)}/`);
+}
+
 function inferMimeType(input: { fileName: string; mimeType?: string }): string {
   const mimeType = firstString(input.mimeType);
   if (mimeType && mimeType !== "application/octet-stream") return mimeType;
@@ -2619,7 +2682,7 @@ export async function handleAdCreativeSignedUpload(req: VercelRequest, res: Verc
     );
   }
 
-  const bucket = "ad-creatives";
+  const bucket = AD_CREATIVE_BUCKET;
   const workspaceId = readWorkspaceId(req, body);
   const storagePath = buildAdCreativeStoragePath({
     workspaceId,
@@ -2632,7 +2695,7 @@ export async function handleAdCreativeSignedUpload(req: VercelRequest, res: Verc
       res,
       502,
       errorBody("Signed upload URL failed", [
-        error.message || "Supabase Storage did not create a signed upload URL.",
+        redactedDetail("ad-creatives signed upload", error, SERVICE_FAILURE_DETAIL),
       ]),
     );
   }
@@ -2700,10 +2763,18 @@ async function handleMultipartAdCreativeUpload(req: VercelRequest, res: VercelRe
   const workspaceId = readWorkspaceId(req, form.fields);
   const fileName = firstString(form.fields.fileName, form.fields.file_name, form.file.fileName);
   const mimeType = inferMimeType({ fileName, mimeType: form.file.mimeType });
-  const storageBucket = firstString(form.fields.storageBucket, form.fields.storage_bucket, "ad-creatives");
-  const storagePath =
-    firstString(form.fields.storagePath, form.fields.storage_path) ||
-    `${workspaceId}/ads/${Date.now()}-${safeStorageFileName(fileName)}`;
+  // Storage-1: the browser never chooses the bucket or the object key.
+  //
+  // This branch writes with the service-role client, which bypasses Storage
+  // RLS entirely, so a caller-supplied bucket or path was a tenant boundary
+  // hole: any member holding manage_marketing could write under another
+  // workspace's prefix, or into the private ad-creatives-raw bucket that
+  // migration 016 states must never be served to Meta or end users. The
+  // sibling signed-upload route already derives both server-side; this branch
+  // now uses the same builder. No caller sends these fields — the UI is pinned
+  // away from FormData by test:routes — so nothing legitimate changes.
+  const storageBucket = AD_CREATIVE_BUCKET;
+  const storagePath = buildAdCreativeStoragePath({ workspaceId, fileName });
   const metadata = {
     ...readJsonRecord(form.fields.metadata),
     source: firstString(asRecord(readJsonRecord(form.fields.metadata)).source, "ads-automation"),
@@ -3121,14 +3192,24 @@ export async function handleVideoJobs(req: VercelRequest, res: VercelResponse) {
     }
     try {
       const workspaceId = readWorkspaceId(req, {});
-      let query = supabase.from("video_processing_jobs").select("*").eq("id", jobId);
-      if (isUuid(workspaceId)) query = query.eq("workspace_id", workspaceId);
+      // The tenant filter below is not optional. Everywhere else in this file
+      // the workspace is applied unconditionally; here it was applied only when
+      // it happened to be a UUID, so a missing context would have silently
+      // dropped it and let the query see another clinic's job. The router never
+      // reaches a browser route without a verified workspace, which is exactly
+      // why an unverified one must end the request rather than widen it.
+      if (!isUuid(workspaceId)) throw new Error("workspace is not verified");
+      const query = supabase
+        .from("video_processing_jobs")
+        .select("*")
+        .eq("id", jobId)
+        .eq("workspace_id", workspaceId);
       const { data, error } = await query.single();
       if (error) throw new Error(error.message);
       return sendJson(res, 200, success("supabase", { job: makeVideoJob(asRecord(data)) }));
     } catch (error) {
       return sendJson(res, 404, {
-        ...errorBody("Задача оптимизации не найдена", [error instanceof Error ? error.message : "not found"]),
+        ...errorBody("Задача оптимизации не найдена", [redactedDetail("video job lookup", error, "not found")]),
       });
     }
   }
@@ -3157,7 +3238,11 @@ export async function handleVideoJobs(req: VercelRequest, res: VercelResponse) {
     }
 
     const supabase = getSupabaseServerClient();
-    if (!supabase) {
+    // A job row with workspace_id null belongs to no clinic, and the worker
+    // processes it all the same: it downloads the raw object, publishes the
+    // result to the public bucket and deletes the original. Without a verified
+    // workspace there is nothing to file it under, so it stays a demo answer.
+    if (!supabase || !isUuid(workspaceId)) {
       return sendJson(
         res,
         200,
@@ -3191,35 +3276,33 @@ export async function handleVideoJobs(req: VercelRequest, res: VercelResponse) {
     }
 
     let assetId = "";
-    if (isUuid(workspaceId)) {
-      try {
-        const assetRow = configs["ad-creatives"].toRow(
-          {
-            uploadedBy: firstString(body.uploadedBy, body.uploaded_by),
-            fileName,
-            fileType: "video",
-            mimeType,
-            fileSize,
-            storageBucket: rawBucket,
-            storagePath,
-            status: "optimizing",
-            metadata: { source: "ads-automation", optimization: "pending" },
-          },
-          workspaceId,
-        );
-        const { data: assetData, error: assetError } = await supabase.from("ad_creative_assets").insert(assetRow).select("id").single();
-        if (assetError) throw new Error(assetError.message);
-        assetId = firstString(asRecord(assetData).id);
-      } catch (error) {
-        console.warn(supabaseWarning("ad_creative_assets optimizing insert", error));
-      }
+    try {
+      const assetRow = configs["ad-creatives"].toRow(
+        {
+          uploadedBy: firstString(body.uploadedBy, body.uploaded_by),
+          fileName,
+          fileType: "video",
+          mimeType,
+          fileSize,
+          storageBucket: rawBucket,
+          storagePath,
+          status: "optimizing",
+          metadata: { source: "ads-automation", optimization: "pending" },
+        },
+        workspaceId,
+      );
+      const { data: assetData, error: assetError } = await supabase.from("ad_creative_assets").insert(assetRow).select("id").single();
+      if (assetError) throw new Error(assetError.message);
+      assetId = firstString(asRecord(assetData).id);
+    } catch (error) {
+      console.warn(supabaseWarning("ad_creative_assets optimizing insert", error));
     }
 
     try {
       const { data: jobData, error: jobError } = await supabase
         .from("video_processing_jobs")
         .insert({
-          workspace_id: isUuid(workspaceId) ? workspaceId : null,
+          workspace_id: workspaceId,
           asset_id: isUuid(assetId) ? assetId : null,
           status: "awaiting_upload",
           raw_bucket: rawBucket,
@@ -3249,7 +3332,7 @@ export async function handleVideoJobs(req: VercelRequest, res: VercelResponse) {
     } catch (error) {
       return sendJson(res, 502, {
         ...errorBody("Не удалось создать задачу оптимизации", [
-          error instanceof Error ? error.message : "insert failed",
+          redactedDetail("video job insert", error, SERVICE_FAILURE_DETAIL),
           "Проверьте, что migration 016 применена (таблица video_processing_jobs).",
         ]),
       });
@@ -3277,12 +3360,19 @@ export async function handleVideoJobs(req: VercelRequest, res: VercelResponse) {
       const workspaceId = readWorkspaceId(req, body);
       // Only the awaiting_upload → queued transition is allowed from the frontend;
       // every other status belongs to the worker.
-      let update = supabase
+      // The tenant filter below is not optional. Everywhere else in this file
+      // the workspace is applied unconditionally; here it was applied only when
+      // it happened to be a UUID, so a missing context would have silently
+      // dropped it and let the query see another clinic's job. The router never
+      // reaches a browser route without a verified workspace, which is exactly
+      // why an unverified one must end the request rather than widen it.
+      if (!isUuid(workspaceId)) throw new Error("workspace is not verified");
+      const update = supabase
         .from("video_processing_jobs")
         .update({ status: "queued", raw_size: rawSize, updated_at: new Date().toISOString() })
         .eq("id", jobId)
-        .eq("status", "awaiting_upload");
-      if (isUuid(workspaceId)) update = update.eq("workspace_id", workspaceId);
+        .eq("status", "awaiting_upload")
+        .eq("workspace_id", workspaceId);
       const { data, error } = await update.select("*").maybeSingle();
       if (error) throw new Error(error.message);
       if (data) {
@@ -3297,7 +3387,7 @@ export async function handleVideoJobs(req: VercelRequest, res: VercelResponse) {
       );
     } catch (error) {
       return sendJson(res, 404, {
-        ...errorBody("Задача оптимизации не найдена", [error instanceof Error ? error.message : "not found"]),
+        ...errorBody("Задача оптимизации не найдена", [redactedDetail("video job lookup", error, "not found")]),
       });
     }
   }
@@ -3328,13 +3418,23 @@ export async function handleVideoProcessingJobs(req: VercelRequest, res: VercelR
 
     try {
       const workspaceId = readWorkspaceId(req, {});
-      let query = supabase.from("video_processing_jobs").select("*").eq("id", jobId);
-      if (isUuid(workspaceId)) query = query.eq("workspace_id", workspaceId);
+      // The tenant filter below is not optional. Everywhere else in this file
+      // the workspace is applied unconditionally; here it was applied only when
+      // it happened to be a UUID, so a missing context would have silently
+      // dropped it and let the query see another clinic's job. The router never
+      // reaches a browser route without a verified workspace, which is exactly
+      // why an unverified one must end the request rather than widen it.
+      if (!isUuid(workspaceId)) throw new Error("workspace is not verified");
+      const query = supabase
+        .from("video_processing_jobs")
+        .select("*")
+        .eq("id", jobId)
+        .eq("workspace_id", workspaceId);
       const { data, error } = await query.single();
       if (error) throw new Error(error.message);
       return sendJson(res, 200, success("supabase", { job: makeVideoJob(asRecord(data)) }));
     } catch (error) {
-      return sendJson(res, 404, errorBody("Задача оптимизации не найдена", [error instanceof Error ? error.message : "not found"]));
+      return sendJson(res, 404, errorBody("Задача оптимизации не найдена", [redactedDetail("video job lookup", error, "not found")]));
     }
   }
 
@@ -3360,7 +3460,10 @@ export async function handleVideoProcessingJobs(req: VercelRequest, res: VercelR
 
     try {
       const workspaceId = readWorkspaceId(req, body);
-      let update = supabase
+      // Same rule as the lookups above: the workspace is applied
+      // unconditionally, and an unverified one ends the request.
+      if (!isUuid(workspaceId)) throw new Error("workspace is not verified");
+      const update = supabase
         .from("video_processing_jobs")
         .update({
           status: "queued",
@@ -3372,20 +3475,30 @@ export async function handleVideoProcessingJobs(req: VercelRequest, res: VercelR
           updated_at: new Date().toISOString(),
         })
         .eq("id", jobId)
-        .eq("status", "failed");
-      if (isUuid(workspaceId)) update = update.eq("workspace_id", workspaceId);
+        .eq("status", "failed")
+        .eq("workspace_id", workspaceId);
       const { data, error } = await update.select("*").maybeSingle();
       if (error) throw new Error(error.message);
       if (data) return sendJson(res, 200, success("supabase", { job: makeVideoJob(asRecord(data)) }));
 
-      const { data: current, error: currentError } = await supabase.from("video_processing_jobs").select("status").eq("id", jobId).maybeSingle();
+      // Storage-1: this second lookup exists to tell "job is not failed" (409)
+      // from "job does not exist" (404). Unscoped, it answered 409 for a job in
+      // someone else's workspace, which turned the route into a cross-tenant
+      // existence oracle. Scoped, a foreign id is indistinguishable from a
+      // missing one.
+      const { data: current, error: currentError } = await supabase
+        .from("video_processing_jobs")
+        .select("status")
+        .eq("id", jobId)
+        .eq("workspace_id", workspaceId)
+        .maybeSingle();
       if (currentError) throw new Error(currentError.message);
       if (current) {
         return sendJson(res, 409, errorBody("Retry is not allowed", ["Only failed jobs can be retried"]));
       }
       return sendJson(res, 404, errorBody("Задача оптимизации не найдена", ["not found"]));
     } catch (error) {
-      return sendJson(res, 502, errorBody("Не удалось повторить задачу оптимизации", [error instanceof Error ? error.message : "retry failed"]));
+      return sendJson(res, 502, errorBody("Не удалось повторить задачу оптимизации", [redactedDetail("video job retry", error, SERVICE_FAILURE_DETAIL)]));
     }
   }
 
@@ -3406,6 +3519,9 @@ export async function handleVideoProcessingJobs(req: VercelRequest, res: VercelR
     if (!VIDEO_MIME_TYPES.has(inputMimeType)) details.push("inputMimeType must be MP4, MOV or WEBM");
     if (inputSizeBytes <= 0) details.push("inputSizeBytes is required");
     if (inputSizeBytes > config.maxInputMb * 1024 * 1024) details.push(`Видео больше ${config.maxInputMb} MB. Загрузите файл меньшего размера.`);
+    if (rawPath && !isOwnWorkspaceStoragePath(rawPath, workspaceId)) {
+      details.push("rawPath must point at an object inside this workspace");
+    }
     if (details.length > 0) return sendJson(res, 400, errorBody("Validation error", details));
 
     const demoJob = makeVideoJob({
@@ -3421,7 +3537,8 @@ export async function handleVideoProcessingJobs(req: VercelRequest, res: VercelR
       inputSizeBytes,
     });
     const supabase = getSupabaseServerClient();
-    if (!supabase) {
+    // Same rule as /api/crm/video-jobs: no verified workspace, no row.
+    if (!supabase || !isUuid(workspaceId)) {
       return sendJson(
         res,
         200,
@@ -3433,7 +3550,7 @@ export async function handleVideoProcessingJobs(req: VercelRequest, res: VercelR
       const { data, error } = await supabase
         .from("video_processing_jobs")
         .insert({
-          workspace_id: isUuid(workspaceId) ? workspaceId : null,
+          workspace_id: workspaceId,
           asset_id: isUuid(assetId) ? assetId : null,
           status: "queued",
           progress: 0,
@@ -3454,9 +3571,15 @@ export async function handleVideoProcessingJobs(req: VercelRequest, res: VercelR
       if (error) throw new Error(error.message);
       return sendJson(res, 201, success("supabase", { job: makeVideoJob(asRecord(data)) }));
     } catch (error) {
-      const warning = supabaseWarning("video_processing_jobs insert", error);
-      console.warn(warning);
-      return sendJson(res, 200, success("demo", { job: demoJob }, warning));
+      // Security-2F: a job the database refused has no id to poll, so reporting
+      // it as queued left the browser watching a job that never existed.
+      return sendJson(
+        res,
+        502,
+        errorBody("Не удалось создать задачу оптимизации", [
+          redactedDetail("video_processing_jobs insert", error, SERVICE_FAILURE_DETAIL),
+        ]),
+      );
     }
   }
 
@@ -6110,6 +6233,42 @@ export async function handleMetaInsightsSyncRuns(req: VercelRequest, res: Vercel
   return sendJson(res, 200, success("supabase", { runs, items: runs }));
 }
 
+/**
+ * Names for workspaces the caller is already a verified member of.
+ *
+ * Selection-1: the ids come from listAuthContextMemberships and never from the
+ * request, so this discloses nothing the caller was not already told. It is a
+ * separate query rather than a join in listActiveMemberships because that runs
+ * on every authorized request and this is needed once, at the bootstrap.
+ *
+ * A failure here is not an authentication failure: the picker falls back to the
+ * role and the id, which is worse to read but still correct.
+ */
+async function lookupWorkspaceNames(workspaceIds: string[]): Promise<Record<string, string>> {
+  const ids = [...new Set(workspaceIds.filter((id) => isUuid(id)))];
+  if (ids.length === 0) return {};
+
+  const supabase = getSupabaseServerClient();
+  if (!supabase) return {};
+
+  try {
+    const { data, error } = await supabase.from("workspaces").select("id, name").in("id", ids);
+    if (error) throw new Error(error.message);
+
+    const names: Record<string, string> = {};
+    for (const row of Array.isArray(data) ? data : []) {
+      const record = asRecord(row);
+      const id = firstString(record.id);
+      const name = firstString(record.name);
+      if (id && name) names[id] = name;
+    }
+    return names;
+  } catch (error) {
+    console.warn(supabaseWarning("workspace names", error));
+    return {};
+  }
+}
+
 export async function handleCrmAuthContext(req: VercelRequest, res: VercelResponse) {
   if (req.method !== "GET") {
     return sendJson(res, 405, errorBody("Method not allowed", ["Use GET"]));
@@ -6120,9 +6279,13 @@ export async function handleCrmAuthContext(req: VercelRequest, res: VercelRespon
   // permissions. No email lookup, no browser role, no impersonation input.
   try {
     const { memberships } = await listAuthContextMemberships(req);
+    // Selection-1: a caller with several memberships has to pick one, and a
+    // list of UUIDs is not a choice anyone can make.
+    const workspaceNames = await lookupWorkspaceNames(memberships.map((membership) => membership.workspaceId));
     const safeMemberships = memberships.map((membership) => ({
       staffUserId: membership.staffUserId,
       workspaceId: membership.workspaceId,
+      workspaceName: workspaceNames[membership.workspaceId] || "",
       role: membership.role,
       permissions: membership.permissions,
       status: "active",

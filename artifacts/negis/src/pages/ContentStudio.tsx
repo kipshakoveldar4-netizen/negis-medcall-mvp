@@ -20,7 +20,7 @@ import { toast } from "sonner";
 import { PageLayout } from "@/components/layout/PageLayout";
 import { apiUrl, crmFetch } from "@/lib/api";
 import { supabase, hasSupabaseFrontendEnv } from "@/lib/supabase";
-import { readWorkspaceId } from "@/lib/demoStorage";
+import { readWorkspaceId, workspaceScopedKey } from "@/lib/demoStorage";
 import { checkMetaCompliance } from "../../../../lib/meta/compliance";
 import type { ContentPackage } from "../../../../lib/content-studio/core";
 
@@ -432,7 +432,7 @@ function withWorkspace(path: string): string {
 
 function readVideos(): ContentVideo[] {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = localStorage.getItem(workspaceScopedKey(STORAGE_KEY));
     if (!raw) return [];
     const parsed = JSON.parse(raw) as ContentVideo[];
     return Array.isArray(parsed) ? parsed : [];
@@ -442,7 +442,7 @@ function readVideos(): ContentVideo[] {
 }
 
 function writeVideos(videos: ContentVideo[]) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(videos));
+  localStorage.setItem(workspaceScopedKey(STORAGE_KEY), JSON.stringify(videos));
 }
 
 function combinePrompt(result: PromptPackage) {
@@ -752,7 +752,7 @@ export default function ContentStudio() {
       }
 
       localStorage.setItem(
-        "negis_ads_automation_prefill",
+        workspaceScopedKey("negis_ads_automation_prefill"),
         JSON.stringify({
           source: "content_studio_photo",
           service: packageBrief.service,
@@ -857,7 +857,7 @@ export default function ContentStudio() {
       return;
     }
     localStorage.setItem(
-      "negis_ads_automation_prefill",
+      workspaceScopedKey("negis_ads_automation_prefill"),
       JSON.stringify({
         source: "content_studio",
         service: packageBrief.service,
@@ -1147,7 +1147,7 @@ export default function ContentStudio() {
   // straight to Ads Automation, where "ИИ заполнит" covers targeting.
   const transferToAdsAutomation = () => {
     localStorage.setItem(
-      "negis_ads_automation_prefill",
+      workspaceScopedKey("negis_ads_automation_prefill"),
       JSON.stringify({
         sourceModule: "content-studio",
         sourceId: current.id,

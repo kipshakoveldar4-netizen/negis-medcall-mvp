@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { toast } from "sonner";
 import { crmFetch } from "@/lib/api";
 
 type ApiCollectionOptions<TItem extends { id: string }> = {
@@ -86,6 +87,24 @@ export function readWorkspaceId(): string {
   }
 }
 
+/**
+ * Selection-2: a localStorage key that holds one clinic's data, bound to that
+ * clinic.
+ *
+ * These caches were written when a browser could only ever be in one workspace:
+ * the selector was set by redeeming an invitation and nothing could change it,
+ * so nothing could cross. Selection-1 made switching possible, and an unscoped
+ * key then carried the previous clinic's data into the next one — a patient's
+ * name and phone into another clinic's appointment form, or one clinic's
+ * WhatsApp destination into another clinic's campaign brief.
+ *
+ * Scoping rather than clearing on switch keeps each clinic's own draft intact
+ * when the user switches back.
+ */
+export function workspaceScopedKey(key: string): string {
+  return `${key}::${readWorkspaceId()}`;
+}
+
 // Same discriminator as the server (lib/crm/server.ts isUuid): a UUID workspace is
 // Supabase-backed production; anything else ("demo-workspace") is local demo mode.
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -119,6 +138,17 @@ export function useDemoCollection<TItem extends { id: string }>(
     fromApi,
   } = options;
 
+  // Selection-2: which clinic this collection belongs to, read on every render
+  // so that a workspace change is a change of dependency and not a silent one.
+  //
+  // The effect below used to call readWorkspaceId() inside itself while
+  // depending on nothing that moves when the workspace does. Today the switch
+  // unmounts the page — ProtectedPage renders null the moment permissions are
+  // cleared — so a stale list never reached the screen. That is a property of a
+  // component two files away, and not something this hook should be relying on
+  // to keep one clinic's records off another clinic's page.
+  const workspaceId = readWorkspaceId();
+
   // Production = UUID workspace with an API-backed collection: never render demo
   // seeds, never read/write the negis_demo_* localStorage cache, and never fall
   // back to demo data. Demo workspaces keep the original behavior untouched.
@@ -145,7 +175,6 @@ export function useDemoCollection<TItem extends { id: string }>(
 
     const loadFromApi = async () => {
       try {
-        const workspaceId = readWorkspaceId();
         const response = await crmFetch(`${endpoint}?workspaceId=${encodeURIComponent(workspaceId)}`);
         const body = await safeJson<Record<string, unknown>>(response);
 
@@ -178,7 +207,25 @@ export function useDemoCollection<TItem extends { id: string }>(
     return () => {
       cancelled = true;
     };
-  }, [endpoint, fromApi, key, listKey, seed, productionMode]);
+  }, [endpoint, fromApi, key, listKey, seed, productionMode, workspaceId]);
+
+  /**
+   * Security-2F: an optimistic row that the server refused must not stay.
+   *
+   * Every write here paints the row first and then posts it. The server used to
+   * answer a failed production write with 200 and a demo item, and this hook
+   * dropped anything that was not mode "supabase" on the floor — so the row sat
+   * on screen, was never saved, and disappeared on the next load. The server
+   * now reports the failure; this puts the list back and says so.
+   *
+   * Demo mode is untouched: there the localStorage copy is the record, and a
+   * demo response is the expected answer rather than a failure.
+   */
+  const revertWrite = (restore: (current: TItem[]) => TItem[]) => {
+    if (!productionMode) return;
+    setStoredItems(restore);
+    toast.error("Не удалось сохранить. Изменение отменено, повторите попытку.");
+  };
 
   const setStoredItems = (next: TItem[] | ((current: TItem[]) => TItem[])) => {
     setItems((current) => {
@@ -206,7 +253,10 @@ export function useDemoCollection<TItem extends { id: string }>(
           body: JSON.stringify(payload),
         });
         const body = await safeJson<Record<string, unknown>>(response);
-        if (!response.ok || body?.success !== true || body.mode !== "supabase") return;
+        if (!response.ok || body?.success !== true || body.mode !== "supabase") {
+          revertWrite((current) => current.filter((entry) => entry.id !== item.id));
+          return;
+        }
 
         const rawItem = body.data[itemKey];
         if (!rawItem) return;
@@ -214,20 +264,26 @@ export function useDemoCollection<TItem extends { id: string }>(
         const savedItem = fromApi ? fromApi(rawItem) : (rawItem as TItem);
         setStoredItems((current) => current.map((currentItem) => (currentItem.id === item.id ? savedItem : currentItem)));
       } catch {
-        // Local optimistic item remains saved in localStorage.
+        revertWrite((current) => current.filter((entry) => entry.id !== item.id));
       }
     })();
   };
 
   const updateItem = (id: string, patch: Partial<TItem>) => {
+    // Captured from this render rather than from inside the updater, so the
+    // rollback does not depend on when React runs it.
+    const previous = items.find((entry) => entry.id === id);
     setStoredItems((current) => current.map((item) => (item.id === id ? { ...item, ...patch } : item)));
 
     if (!endpoint) return;
 
+    const restore = (current: TItem[]): TItem[] =>
+      previous ? current.map((entry) => (entry.id === id ? previous : entry)) : current;
+
     void (async () => {
       try {
         const workspaceId = readWorkspaceId();
-        await crmFetch(endpoint, {
+        const response = await crmFetch(endpoint, {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -236,8 +292,14 @@ export function useDemoCollection<TItem extends { id: string }>(
             updates: patchToApi ? patchToApi(patch) : patch,
           }),
         });
+        const body = await safeJson<Record<string, unknown>>(response);
+        // The patch used to be posted and forgotten, so a refused update looked
+        // identical to an accepted one.
+        if (!response.ok || body?.success !== true || body.mode !== "supabase") {
+          revertWrite(restore);
+        }
       } catch {
-        // Local optimistic patch remains saved in localStorage.
+        revertWrite(restore);
       }
     })();
   };

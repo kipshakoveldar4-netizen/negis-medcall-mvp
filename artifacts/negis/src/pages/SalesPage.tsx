@@ -15,7 +15,7 @@ import {
 import { toast } from "sonner";
 import { PageLayout } from "@/components/layout/PageLayout";
 import { apiUrl, crmFetch } from "@/lib/api";
-import { isRealWorkspace, readDemoStorage, readWorkspaceId, useDemoCollection } from "@/lib/demoStorage";
+import { isRealWorkspace, readDemoStorage, readWorkspaceId, useDemoCollection, workspaceScopedKey } from "@/lib/demoStorage";
 
 type DealStatus = "pending" | "paid" | "cancelled" | "refunded";
 type PaymentMethod = "" | "cash" | "card" | "kaspi" | "transfer" | "other";
@@ -401,7 +401,9 @@ export default function SalesPage() {
 
   useEffect(() => {
     if (typeof window === "undefined") return;
-    const raw = window.localStorage.getItem(DEAL_PREFILL_KEY);
+    // Selection-2: a handoff belongs to the clinic it was made in.
+    const prefillKey = workspaceScopedKey(DEAL_PREFILL_KEY);
+    const raw = window.localStorage.getItem(prefillKey);
     if (!raw) return;
     try {
       const prefill = asRecord(JSON.parse(raw));
@@ -418,7 +420,7 @@ export default function SalesPage() {
     } catch {
       toast.error("Не удалось подготовить продажу. Откройте форму вручную.");
     } finally {
-      window.localStorage.removeItem(DEAL_PREFILL_KEY);
+      window.localStorage.removeItem(prefillKey);
     }
   }, []);
 

@@ -17,7 +17,7 @@ import {
 import { toast } from "sonner";
 import { PageLayout } from "@/components/layout/PageLayout";
 import { apiUrl, crmFetch } from "@/lib/api";
-import { readWorkspaceId as readCurrentWorkspaceId, useDemoCollection } from "@/lib/demoStorage";
+import { readWorkspaceId as readCurrentWorkspaceId, useDemoCollection, workspaceScopedKey } from "@/lib/demoStorage";
 import { formatPhone, toTelHref, toWhatsappHref } from "@/lib/phone";
 
 type AppointmentStatus = "scheduled" | "confirmed" | "arrived" | "no_show" | "cancelled";
@@ -489,8 +489,11 @@ export function AppointmentsPage() {
   useEffect(() => {
     if (typeof window === "undefined") return;
 
+    // Selection-2: a handoff belongs to the clinic it was made in.
+    const prefillKey = workspaceScopedKey(APPOINTMENT_PREFILL_KEY);
+
     try {
-      const raw = window.localStorage.getItem(APPOINTMENT_PREFILL_KEY);
+      const raw = window.localStorage.getItem(prefillKey);
       if (!raw) return;
       const prefill = JSON.parse(raw) as Record<string, unknown>;
       const nextForm = {
@@ -504,9 +507,9 @@ export function AppointmentsPage() {
       setForm(nextForm);
       setEditingId(null);
       setModalOpen(true);
-      window.localStorage.removeItem(APPOINTMENT_PREFILL_KEY);
+      window.localStorage.removeItem(prefillKey);
     } catch {
-      window.localStorage.removeItem(APPOINTMENT_PREFILL_KEY);
+      window.localStorage.removeItem(prefillKey);
     }
   }, [selectedDate]);
 

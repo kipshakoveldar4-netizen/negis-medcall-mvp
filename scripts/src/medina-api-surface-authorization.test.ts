@@ -263,7 +263,14 @@ type StaffRow = { id: string; workspace_id: string; role: string; status: string
 type HandlerOptions = {
   memberships?: StaffRow[];
   authOk?: boolean;
+  /**
+   * Rows per table. Without it every table answers with the membership rows,
+   * which is what the tests written before this existed expect.
+   */
+  tables?: Record<string, unknown[]>;
 };
+
+type QueryLog = { table: string; filters: Record<string, unknown> };
 
 type ProviderCalls = { auth: number; openai: number; telegram: number; agent: number; supabaseClients: number };
 
@@ -301,23 +308,31 @@ async function loadHandler(file: string, options: HandlerOptions = {}) {
   )) as { setSupabaseServerClientFactoryForTests: (factory: (() => unknown) | null) => void };
 
   const rows = options.memberships ?? [];
+  const queries: QueryLog[] = [];
   supabaseModule.setSupabaseServerClientFactoryForTests(() => {
     calls.supabaseClients += 1;
-    const builder: Record<string, unknown> = {};
-    const chain = () => builder;
-    Object.assign(builder, {
-      select: () => chain(),
-      insert: () => chain(),
-      update: () => chain(),
-      upsert: () => chain(),
-      order: () => chain(),
-      limit: () => chain(),
-      eq: () => chain(),
-      maybeSingle: () => Promise.resolve({ data: rows[0] ?? null, error: null }),
-      single: () => Promise.resolve({ data: rows[0] ?? null, error: null }),
-      then: (resolve: (value: { data: unknown; error: null }) => void) => resolve({ data: rows, error: null }),
-    });
-    return { from: () => builder };
+    const makeBuilder = (table: string) => {
+      const tableRows = options.tables?.[table] ?? rows;
+      const entry: QueryLog = { table, filters: {} };
+      queries.push(entry);
+      const builder: Record<string, unknown> = {};
+      const chain = () => builder;
+      Object.assign(builder, {
+        select: () => chain(),
+        insert: () => chain(),
+        update: () => chain(),
+        upsert: () => chain(),
+        order: () => chain(),
+        limit: () => chain(),
+        eq: (column: string, value: unknown) => { entry.filters[column] = value; return chain(); },
+        in: (column: string, values: unknown) => { entry.filters[column] = values; return chain(); },
+        maybeSingle: () => Promise.resolve({ data: tableRows[0] ?? null, error: null }),
+        single: () => Promise.resolve({ data: tableRows[0] ?? null, error: null }),
+        then: (resolve: (value: { data: unknown; error: null }) => void) => resolve({ data: tableRows, error: null }),
+      });
+      return builder;
+    };
+    return { from: (table: string) => makeBuilder(String(table ?? "")) };
   });
 
   const module = (await import(pathToFileURL(path.join(apiRoot, file)).href)) as {
@@ -330,6 +345,7 @@ async function loadHandler(file: string, options: HandlerOptions = {}) {
     calls.telegram = 0;
     calls.agent = 0;
     calls.supabaseClients = 0;
+    queries.length = 0;
     const res = mockResponse();
     await module.default(
       {
@@ -341,7 +357,7 @@ async function loadHandler(file: string, options: HandlerOptions = {}) {
       },
       res,
     );
-    return { status: res.statusCode, body: res.body, calls: { ...calls } };
+    return { status: res.statusCode, body: res.body, calls: { ...calls }, queries: queries.map((entry) => ({ ...entry })) };
   };
 
   const restore = () => {
@@ -721,6 +737,132 @@ test("S28 no session can be established from a query string in production", asyn
   assert.ok(
     !/api-server/.test(vercel.buildCommand ?? ""),
     "the Express test-auth app must stay out of the deployed build",
+  );
+});
+
+/* ── Security-2E: campaign ownership on the targeting report routes ────────── */
+
+// A token proved who the caller is; it never proved the campaign is theirs. The
+// report is addressed by a campaign id alone, and targeting_reports inherits its
+// tenancy from campaign_id and nothing else, so an unchecked id let one clinic
+// read another's campaign and file reports against it.
+const CAMPAIGN_A = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+const reportRoutes = ["targeting/report.ts", "targeting/reports/[campaignId].ts"];
+
+test("S30 a report for a campaign outside the workspace is a 404 and never reaches the agent", async () => {
+  for (const file of reportRoutes) {
+    const { call, restore } = await loadHandler(file, {
+      memberships: [activeMembership],
+      // The ownership lookup filters on the caller's workspace, so a campaign
+      // belonging to someone else does not come back at all.
+      tables: { staff_users: [activeMembership], targeting_campaigns: [] },
+    });
+    try {
+      const result = await call({ query: { campaignId: CAMPAIGN_A } });
+      assert.equal(result.status, 404, `${file} disclosed a foreign campaign`);
+      assert.equal(result.body.code, "resource_not_found");
+      assert.equal(result.calls.agent, 0, `${file} asked the agent about a campaign the caller does not own`);
+    } finally {
+      restore();
+    }
+  }
+});
+
+test("S31 the ownership lookup is filtered by both the campaign and the workspace", async () => {
+  for (const file of reportRoutes) {
+    const { call, restore } = await loadHandler(file, {
+      memberships: [activeMembership],
+      tables: { staff_users: [activeMembership], targeting_campaigns: [] },
+    });
+    try {
+      const result = await call({ query: { campaignId: CAMPAIGN_A } });
+      const lookup = result.queries.find((entry) => entry.table === "targeting_campaigns");
+      assert.ok(lookup, `${file} must look the campaign up before calling the agent`);
+      assert.equal(lookup.filters.id, CAMPAIGN_A);
+      assert.equal(
+        lookup.filters.workspace_id,
+        WORKSPACE_A,
+        `${file} must scope the lookup to the verified workspace, not to the id alone`,
+      );
+    } finally {
+      restore();
+    }
+  }
+});
+
+test("S32 a report for the caller's own campaign is served", async () => {
+  for (const file of reportRoutes) {
+    const { call, restore } = await loadHandler(file, {
+      memberships: [activeMembership],
+      tables: {
+        staff_users: [activeMembership],
+        targeting_campaigns: [{ workspace_id: WORKSPACE_A }],
+      },
+    });
+    try {
+      const result = await call({ query: { campaignId: CAMPAIGN_A } });
+      assert.equal(result.status, 200, `${file} refused the caller's own campaign: ${JSON.stringify(result.body)}`);
+      assert.equal(result.calls.agent, 1, `${file} must ask the agent for an owned campaign`);
+    } finally {
+      restore();
+    }
+  }
+});
+
+test("S33 the report path no longer creates a campaign row that belongs to no workspace", async () => {
+  const source = await readFile(path.join(repoRoot, "lib", "targeting-agent", "persistence.ts"), "utf8");
+  // Same discipline as S6: read the code, not the commentary about it. The
+  // first draft of this test grepped the whole file for "report-backfill" and
+  // was tripped by the comment recording that the backfill was removed.
+  const reportFn = source.slice(source.indexOf("export async function persistTargetingReportIfAvailable"));
+  assert.ok(
+    !reportFn.includes('from("targeting_campaigns")'),
+    "persisting a report must not write to targeting_campaigns: such a row carries no workspace_id",
+  );
+  assert.ok(
+    !reportFn.includes("upsert("),
+    "a report is an insert into targeting_reports and nothing else",
+  );
+  assert.ok(
+    source.includes("export async function campaignBelongsToWorkspace"),
+    "the ownership check lives next to the tables it guards",
+  );
+});
+
+/* ── Security-2E: the smoke run says what it did not check ─────────────────── */
+
+// 161 call sites in the route smoke suite address a private path, and since
+// Security-2B every one of them stops at the 401 while the payload assertions
+// underneath are skipped through isCrmGuarded. The run used to print only
+// green. It now names the routes it did not get past.
+test("S34 the smoke run reports the private routes it only reached the auth boundary of", async () => {
+  const { formatAuthBoundaryCoverage } = (await import(
+    pathToFileURL(path.join(repoRoot, "scripts", "src", "smoke-auth-boundary-report.ts")).href
+  )) as { formatAuthBoundaryCoverage: (paths: Iterable<string>) => string[] };
+
+  assert.deepEqual(formatAuthBoundaryCoverage([]), [], "a run that checked nothing must not print an empty heading");
+
+  const lines = formatAuthBoundaryCoverage([
+    "/api/crm/leads",
+    "/api/targeting/report",
+    "/api/crm/leads",
+  ]);
+  assert.equal(lines.length, 4, "a blank line, the summary, then one line per unique route");
+  assert.ok(lines[1].startsWith("NOT CHECKED: 2 private routes"), `unexpected summary: ${lines[1]}`);
+  assert.deepEqual(lines.slice(2), ["  - /api/crm/leads", "  - /api/targeting/report"]);
+
+  // And the smoke suite has to actually call it, on both the clean and the
+  // failed path — a run that died halfway checked even less.
+  const smoke = await readFile(path.join(repoRoot, "scripts", "src", "smoke-negis-routes.ts"), "utf8");
+  assert.ok(smoke.includes("formatAuthBoundaryCoverage"), "the smoke suite must print the report");
+  assert.ok(
+    smoke.includes(".then(reportAuthBoundaryCoverage)"),
+    "the report must print after a clean run",
+  );
+  const catchBlock = smoke.slice(smoke.indexOf(".catch((error)"));
+  assert.ok(
+    catchBlock.includes("reportAuthBoundaryCoverage()"),
+    "and after a failed one",
   );
 });
 

@@ -21,7 +21,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { PageLayout } from "@/components/layout/PageLayout";
-import { useDemoCollection, readDemoStorage, isRealWorkspace, readWorkspaceId } from "@/lib/demoStorage";
+import { useDemoCollection, readDemoStorage, isRealWorkspace, readWorkspaceId, workspaceScopedKey } from "@/lib/demoStorage";
 import { apiUrl, crmFetch } from "@/lib/api";
 import { formatPhone, phoneDigits, toTelHref, toWhatsappHref } from "@/lib/phone";
 
@@ -222,14 +222,14 @@ function matchesClient(client: Client, clientId: string | undefined, phone: stri
 function saveAppointmentPrefill(client: Client) {
   if (typeof window === "undefined") return;
   window.localStorage.setItem(
-    APPOINTMENT_PREFILL_KEY,
+    workspaceScopedKey(APPOINTMENT_PREFILL_KEY),
     JSON.stringify({ clientName: client.name, phone: client.phone, source: client.source }),
   );
 }
 
 function saveDealPrefill(client: Client) {
   if (typeof window === "undefined") return;
-  window.localStorage.setItem(DEAL_PREFILL_KEY, JSON.stringify({ clientId: client.id, clientName: client.name }));
+  window.localStorage.setItem(workspaceScopedKey(DEAL_PREFILL_KEY), JSON.stringify({ clientId: client.id, clientName: client.name }));
 }
 
 type ClientForm = { name: string; phone: string; whatsapp: string; source: string; status: ClientStatusKey; lastVisit: string; comment: string };

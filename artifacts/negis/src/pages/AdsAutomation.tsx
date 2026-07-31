@@ -27,7 +27,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import { apiUrl, crmFetch } from "@/lib/api";
 import { getSupabaseAccessToken } from "@/lib/serverAuth";
 import { hasSupabaseFrontendEnv, supabase } from "@/lib/supabase";
-import { readWorkspaceId } from "@/lib/demoStorage";
+import { readWorkspaceId, workspaceScopedKey } from "@/lib/demoStorage";
 import { getPlanFeature, normalizePlan, planFeatureBadge, type NegisPlan } from "@/lib/planFeatures";
 import { KZ_META_CITY_OPTIONS, getKzMetaCityOption } from "../../../../lib/meta/cities";
 
@@ -1450,7 +1450,7 @@ export default function AdsAutomation() {
   const workspaceId = clinicId || readWorkspaceId();
   const [plan] = useState<NegisPlan>(() => normalizePlan(readStored("negis_plan", "demo")));
   const [currentStep, setCurrentStep] = useState(1);
-  const [brief, setBrief] = useState<Brief>(() => normalizeBriefCity(readStored("negis_ads_automation_brief", defaultBrief)));
+  const [brief, setBrief] = useState<Brief>(() => normalizeBriefCity(readStored(workspaceScopedKey("negis_ads_automation_brief"), defaultBrief)));
   const [creative, setCreative] = useState<CreativeAsset | null>(null);
   const [aiPackage, setAiPackage] = useState<AiPackage | null>(null);
   const [compliance, setCompliance] = useState<ComplianceResult | null>(null);
@@ -1464,7 +1464,7 @@ export default function AdsAutomation() {
   const [uploadStatus, setUploadStatus] = useState<UploadStatus>("idle");
   const [uploadStage, setUploadStage] = useState("");
   const [lastUploadError, setLastUploadError] = useState("");
-  const [liveLaunchEnabled, setLiveLaunchEnabled] = useState(() => readStored("negis_meta_live_launch_enabled", false));
+  const [liveLaunchEnabled, setLiveLaunchEnabled] = useState(() => readStored(workspaceScopedKey("negis_meta_live_launch_enabled"), false));
   const [loading, setLoading] = useState<"health" | "storage" | "upload" | "ai" | "check" | "video" | "launch" | "history" | "thumbnail" | null>(null);
   const [creativeFile, setCreativeFile] = useState<File | null>(null);
   const [notice, setNotice] = useState("");
@@ -1488,7 +1488,7 @@ export default function AdsAutomation() {
   const isAdminMode = uiMode === "admin";
 
   useEffect(() => {
-    window.localStorage.setItem("negis_ads_automation_brief", JSON.stringify(brief));
+    window.localStorage.setItem(workspaceScopedKey("negis_ads_automation_brief"), JSON.stringify(brief));
   }, [brief]);
 
   useEffect(() => {
@@ -1505,9 +1505,9 @@ export default function AdsAutomation() {
   useEffect(() => {
     let raw = "";
     try {
-      raw = window.localStorage.getItem(STUDIO_PREFILL_KEY) || "";
+      raw = window.localStorage.getItem(workspaceScopedKey(STUDIO_PREFILL_KEY)) || "";
       if (!raw) return;
-      window.localStorage.removeItem(STUDIO_PREFILL_KEY);
+      window.localStorage.removeItem(workspaceScopedKey(STUDIO_PREFILL_KEY));
       const data = asRecord(JSON.parse(raw));
 
       const service = firstString(data.service, data.niche);
@@ -1758,7 +1758,7 @@ export default function AdsAutomation() {
     try {
       const body = await crmRequest<{ meta?: MetaSummary }>("/api/crm/health");
       setMetaSummary(body.data.meta || null);
-      setLiveLaunchEnabled(Boolean(readStored("negis_meta_live_launch_enabled", false)));
+      setLiveLaunchEnabled(Boolean(readStored(workspaceScopedKey("negis_meta_live_launch_enabled"), false)));
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Не удалось проверить Meta env.");
     } finally {
