@@ -40,6 +40,11 @@ function dbSpy(rows: Record<string, unknown[]>, log: QueryLog[]) {
     const settle = (shape: "one" | "list") => {
       const tableRows = rows[table] ?? [];
       if (shape === "list") return Promise.resolve({ data: tableRows, error: null, count: tableRows.length });
+      // `insert(...).select().single()` returns the row that was written, and a
+      // handler that maps the response back to the caller depends on it.
+      if (entry.op === "insert" && tableRows.length === 0) {
+        return Promise.resolve({ data: entry.row ?? null, error: null });
+      }
       return Promise.resolve({ data: tableRows[0] ?? null, error: null });
     };
     const builder: Record<string, unknown> = {};
@@ -462,4 +467,91 @@ test("ST10 a handler reached without a verified workspace refuses instead of que
   } finally {
     supabaseModule.setSupabaseServerClientFactoryForTests(null);
   }
+});
+
+// ===========================================================================
+// E. The creative registration contract, moved somewhere it actually runs
+// ===========================================================================
+
+// test:routes checked these five shapes against a deployment. Since
+// Security-2B the route answers 401 first, so each check bails out through
+// isCrmGuarded and none of them has run since. The comment left at those call
+// sites says the invariants "moved to test:meta-launch-payload and
+// test:tenant-isolation"; grep for publicUrl in either suite returns nothing,
+// so they did not move — they stopped. Here they run against the real handler
+// with a verified workspace and no network.
+
+const CREATIVE_BASE = {
+  fileName: "creative.jpg",
+  fileType: "image",
+  mimeType: "image/jpeg",
+  fileSize: 2048,
+  status: "uploaded",
+};
+
+function assetPublicUrl(body: Record<string, unknown>): string {
+  const data = (body.data ?? {}) as Record<string, unknown>;
+  const asset = (data.asset ?? {}) as Record<string, unknown>;
+  return String(data.publicUrl ?? asset.publicUrl ?? "");
+}
+
+test("ST11 a creative URL is accepted under every spelling the clients send", async () => {
+  const url = "https://cdn.example.test/creative.jpg";
+  for (const field of [
+    "publicUrl",
+    "public_url",
+    "publicURL",
+    "url",
+    "imageUrl",
+    "image_url",
+    "videoUrl",
+    "creativeUrl",
+  ]) {
+    await withRouter({}, async (ctx) => {
+      const { res } = await ctx.call({
+        segments: ["ad-creative-upload"],
+        method: "POST",
+        body: { ...CREATIVE_BASE, [field]: url },
+      });
+
+      assert.equal(res.statusCode < 400, true, `${field} was refused: ${JSON.stringify(res.body)}`);
+      assert.equal(assetPublicUrl(res.body), url, `${field} did not reach the saved asset`);
+    });
+  }
+});
+
+test("ST12 with no URL the public link is derived from the stored object", async () => {
+  await withRouter({}, async (ctx) => {
+    const { res } = await ctx.call({
+      segments: ["ad-creative-upload"],
+      method: "POST",
+      body: {
+        ...CREATIVE_BASE,
+        storageBucket: "ad-creatives",
+        storagePath: `${WORKSPACE_A}/2026/07/creative.jpg`,
+      },
+    });
+
+    assert.equal(res.statusCode < 400, true, JSON.stringify(res.body));
+    const publicUrl = assetPublicUrl(res.body);
+    assert.ok(publicUrl.includes("/storage/v1/object/public/ad-creatives/"), `unexpected link: ${publicUrl}`);
+    assert.ok(publicUrl.includes(WORKSPACE_A), "the derived link must point at the caller's own object");
+  });
+});
+
+test("ST13 a creative with neither a URL nor a stored object is refused, not saved blind", async () => {
+  await withRouter({}, async (ctx) => {
+    const { res, queries } = await ctx.call({
+      segments: ["ad-creative-upload"],
+      method: "POST",
+      body: CREATIVE_BASE,
+    });
+
+    assert.equal(res.statusCode, 400, JSON.stringify(res.body));
+    assert.equal(
+      queries.some((entry) => entry.table === "ad_creative_assets"),
+      false,
+      "a creative with no reachable link must not reach the table",
+    );
+  });
 });

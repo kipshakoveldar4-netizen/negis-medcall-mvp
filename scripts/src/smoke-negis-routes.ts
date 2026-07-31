@@ -2135,7 +2135,9 @@ async function checkCrmDealsFoundation() {
     body: JSON.stringify({ workspaceId: "demo-workspace", title: "Чистка лица", amountMinor: 2500000, status: "paid" }),
   });
   // Security-2B: the route is refused before any business branch runs. Its
-  // invariants moved to test:meta-launch-payload and test:tenant-isolation.
+  // invariants are covered by the handler-level suites, which run without a
+  // deployment; the NOT CHECKED summary at the end of the run lists what this
+  // run itself did not get past.
   if (isCrmGuarded(created)) return;
   const createdItem = (created.data && typeof created.data === "object" ? (created.data as { item?: Record<string, unknown> }).item : undefined) || {};
   if (createdItem.status !== "paid" || !createdItem.paidAt || !createdItem.closedAt) {
@@ -2151,7 +2153,9 @@ async function checkCrmDealsFoundation() {
     body: JSON.stringify({ id: "deal-smoke-1", workspaceId: "demo-workspace", updates: { title: "Чистка лица", status: "paid" } }),
   });
   // Security-2B: the route is refused before any business branch runs. Its
-  // invariants moved to test:meta-launch-payload and test:tenant-isolation.
+  // invariants are covered by the handler-level suites, which run without a
+  // deployment; the NOT CHECKED summary at the end of the run lists what this
+  // run itself did not get past.
   if (isCrmGuarded(patched)) return;
   const patchedItem = (patched.data && typeof patched.data === "object" ? (patched.data as { item?: Record<string, unknown> }).item : undefined) || {};
   if (patchedItem.status !== "paid" || !patchedItem.paidAt) {
@@ -3637,7 +3641,9 @@ async function main() {
   await checkSelfRegistrationDisabled();
   const crmHealth = await checkJsonEndpoint("/api/crm/health");
   // Security-2B: the route is refused before any business branch runs. Its
-  // invariants moved to test:meta-launch-payload and test:tenant-isolation.
+  // invariants are covered by the handler-level suites, which run without a
+  // deployment; the NOT CHECKED summary at the end of the run lists what this
+  // run itself did not get past.
   if (isCrmGuarded(crmHealth)) return;
   await checkJsonFailure(
     "/api/crm/auth-context?workspaceId=853340e2-14e3-4e40-8414-295ec6c2abe2",
@@ -3720,7 +3726,9 @@ async function main() {
     }),
   });
   // Security-2B: the route is refused before any business branch runs. Its
-  // invariants moved to test:meta-launch-payload and test:tenant-isolation.
+  // invariants are covered by the handler-level suites, which run without a
+  // deployment; the NOT CHECKED summary at the end of the run lists what this
+  // run itself did not get past.
   if (isCrmGuarded(videoProcessingCreated)) return;
   const videoProcessingJob = ((videoProcessingCreated.data || {}) as { job?: Record<string, unknown> }).job || {};
   if (videoProcessingJob.status !== "queued" || !videoProcessingJob.id || videoProcessingJob.rawPath || videoProcessingJob.rawPublicUrl) {
@@ -3854,7 +3862,9 @@ async function main() {
     }),
   });
   // Security-2B: the route is refused before any business branch runs. Its
-  // invariants moved to test:meta-launch-payload and test:tenant-isolation.
+  // invariants are covered by the handler-level suites, which run without a
+  // deployment; the NOT CHECKED summary at the end of the run lists what this
+  // run itself did not get past.
   if (isCrmGuarded(metadataSave)) return;
   const metadataAsset = (metadataSave.data || {}) as { publicUrl?: string; item?: { publicUrl?: string; storagePath?: string } };
   if (!metadataAsset.publicUrl && !metadataAsset.item?.publicUrl) {
@@ -3921,7 +3931,9 @@ async function main() {
       }),
     });
     // Security-2B: the route is refused before any business branch runs. Its
-    // invariants moved to test:meta-launch-payload and test:tenant-isolation.
+    // invariants are covered by the handler-level suites, which run without a
+  // deployment; the NOT CHECKED summary at the end of the run lists what this
+  // run itself did not get past.
     if (isCrmGuarded(signedUpload)) return;
     const signedData = (signedUpload.data || {}) as { storagePath?: string; publicUrl?: string; token?: string };
     if (!signedData.storagePath || !signedData.publicUrl || !signedData.token) {
@@ -3958,7 +3970,9 @@ async function main() {
     }),
   });
   // Security-2B: the route is refused before any business branch runs. Its
-  // invariants moved to test:meta-launch-payload and test:tenant-isolation.
+  // invariants are covered by the handler-level suites, which run without a
+  // deployment; the NOT CHECKED summary at the end of the run lists what this
+  // run itself did not get past.
   if (isCrmGuarded(upload)) return;
   const uploadedAsset = (upload.data || {}) as { publicUrl?: string; asset?: { publicUrl?: string } };
   if (!uploadedAsset.publicUrl && !uploadedAsset.asset?.publicUrl) {
@@ -3980,7 +3994,9 @@ async function main() {
     }),
   });
   // Security-2B: the route is refused before any business branch runs. Its
-  // invariants moved to test:meta-launch-payload and test:tenant-isolation.
+  // invariants are covered by the handler-level suites, which run without a
+  // deployment; the NOT CHECKED summary at the end of the run lists what this
+  // run itself did not get past.
   if (isCrmGuarded(snakeUpload)) return;
   const snakeUploadedAsset = (snakeUpload.data || {}) as { publicUrl?: string; asset?: { publicUrl?: string } };
   if (!snakeUploadedAsset.publicUrl && !snakeUploadedAsset.asset?.publicUrl) {
@@ -4002,7 +4018,9 @@ async function main() {
     }),
   });
   // Security-2B: the route is refused before any business branch runs. Its
-  // invariants moved to test:meta-launch-payload and test:tenant-isolation.
+  // invariants are covered by the handler-level suites, which run without a
+  // deployment; the NOT CHECKED summary at the end of the run lists what this
+  // run itself did not get past.
   if (isCrmGuarded(urlUpload)) return;
   const urlUploadedAsset = (urlUpload.data || {}) as { publicUrl?: string; asset?: { publicUrl?: string } };
   if (!urlUploadedAsset.publicUrl && !urlUploadedAsset.asset?.publicUrl) {
@@ -4024,7 +4042,9 @@ async function main() {
     }),
   });
   // Security-2B: the route is refused before any business branch runs. Its
-  // invariants moved to test:meta-launch-payload and test:tenant-isolation.
+  // invariants are covered by the handler-level suites, which run without a
+  // deployment; the NOT CHECKED summary at the end of the run lists what this
+  // run itself did not get past.
   if (isCrmGuarded(publicURLUpload)) return;
   const publicURLUploadedAsset = (publicURLUpload.data || {}) as { publicUrl?: string; asset?: { publicUrl?: string } };
   if (!publicURLUploadedAsset.publicUrl && !publicURLUploadedAsset.asset?.publicUrl) {
@@ -4046,7 +4066,9 @@ async function main() {
       }),
     });
     // Security-2B: the route is refused before any business branch runs. Its
-    // invariants moved to test:meta-launch-payload and test:tenant-isolation.
+    // invariants are covered by the handler-level suites, which run without a
+  // deployment; the NOT CHECKED summary at the end of the run lists what this
+  // run itself did not get past.
     if (isCrmGuarded(derivedUpload)) return;
     const derivedUploadedAsset = (derivedUpload.data || {}) as { publicUrl?: string; asset?: { publicUrl?: string } };
     if (!derivedUploadedAsset.publicUrl && !derivedUploadedAsset.asset?.publicUrl) {
@@ -4098,7 +4120,9 @@ async function main() {
     "автозапуск видео-рекламы",
   );
   // Security-2B: the route is refused before any business branch runs. Its
-  // invariants moved to test:meta-launch-payload and test:tenant-isolation.
+  // invariants are covered by the handler-level suites, which run without a
+  // deployment; the NOT CHECKED summary at the end of the run lists what this
+  // run itself did not get past.
   if (isCrmGuarded(blockedVideoMetaUpload)) return;
   if (((blockedVideoMetaUpload.data || {}) as { metaApiCalled?: unknown }).metaApiCalled !== false) {
     throw new Error("/api/crm/ad-creative-meta-upload must not call Meta API while video launch flag is disabled");
@@ -4130,7 +4154,9 @@ async function main() {
   });
   const cityKeyCheck = await checkJsonEndpoint(`/api/crm/meta-city-key?city=${encodeURIComponent("Астана")}`);
   // Security-2B: the route is refused before any business branch runs. Its
-  // invariants moved to test:meta-launch-payload and test:tenant-isolation.
+  // invariants are covered by the handler-level suites, which run without a
+  // deployment; the NOT CHECKED summary at the end of the run lists what this
+  // run itself did not get past.
   if (isCrmGuarded(cityKeyCheck)) return;
   const cityKeyData = (cityKeyCheck.data || {}) as {
     key?: unknown;
@@ -4149,7 +4175,9 @@ async function main() {
   }
   const aktobeCityKeyCheck = await checkJsonEndpoint(`/api/crm/meta-city-key?city=${encodeURIComponent("Актобе")}`);
   // Security-2B: the route is refused before any business branch runs. Its
-  // invariants moved to test:meta-launch-payload and test:tenant-isolation.
+  // invariants are covered by the handler-level suites, which run without a
+  // deployment; the NOT CHECKED summary at the end of the run lists what this
+  // run itself did not get past.
   if (isCrmGuarded(aktobeCityKeyCheck)) return;
   const aktobeCityKeyData = (aktobeCityKeyCheck.data || {}) as {
     key?: unknown;
@@ -4223,7 +4251,9 @@ async function main() {
     }),
   });
   // Security-2B: the route is refused before any business branch runs. Its
-  // invariants moved to test:meta-launch-payload and test:tenant-isolation.
+  // invariants are covered by the handler-level suites, which run without a
+  // deployment; the NOT CHECKED summary at the end of the run lists what this
+  // run itself did not get past.
   if (isCrmGuarded(aktobeLaunch)) return;
   const aktobeAdSetPayload = (((aktobeLaunch.data || {}) as { metaPayload?: { adSet?: Record<string, unknown> } }).metaPayload?.adSet || {}) as {
     targeting?: {
@@ -4271,7 +4301,9 @@ async function main() {
     }),
   });
   // Security-2B: the route is refused before any business branch runs. Its
-  // invariants moved to test:meta-launch-payload and test:tenant-isolation.
+  // invariants are covered by the handler-level suites, which run without a
+  // deployment; the NOT CHECKED summary at the end of the run lists what this
+  // run itself did not get past.
   if (isCrmGuarded(launch)) return;
   const launchData = (launch.data || {}) as {
     metaCampaignId?: string;
@@ -4454,7 +4486,9 @@ async function main() {
     }),
   });
   // Security-2B: the route is refused before any business branch runs. Its
-  // invariants moved to test:meta-launch-payload and test:tenant-isolation.
+  // invariants are covered by the handler-level suites, which run without a
+  // deployment; the NOT CHECKED summary at the end of the run lists what this
+  // run itself did not get past.
   if (isCrmGuarded(videoDryRun)) return;
   const videoCreativePayload = ((videoDryRun.data || {}) as { metaPayload?: { creative?: Record<string, unknown> } }).metaPayload?.creative || {};
   if (videoCreativePayload.objectStorySpecType !== "video_data" || videoCreativePayload.usesVideoData !== true) {
@@ -4505,7 +4539,9 @@ async function main() {
     }),
   });
   // Security-2B: the route is refused before any business branch runs. Its
-  // invariants moved to test:meta-launch-payload and test:tenant-isolation.
+  // invariants are covered by the handler-level suites, which run without a
+  // deployment; the NOT CHECKED summary at the end of the run lists what this
+  // run itself did not get past.
   if (isCrmGuarded(videoDryRunWithThumb)) return;
   const thumbCreativePayload =
     ((videoDryRunWithThumb.data || {}) as { metaPayload?: { creative?: Record<string, unknown> } }).metaPayload?.creative || {};
