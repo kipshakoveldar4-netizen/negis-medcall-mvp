@@ -1,3 +1,5 @@
+import test from "node:test";
+
 type ApiSuccess<TData = unknown> = {
   success: true;
   mode: string;
@@ -44,16 +46,25 @@ async function request<TData>(path: string, init?: RequestInit): Promise<ApiSucc
   return body;
 }
 
-async function main() {
-  console.log(`Testing Targeting Agent proxy at ${baseUrl}`);
+// Reported as a real skip rather than a silent early return.
+//
+// This suite drives the live Railway agent through the deployed proxy, so it
+// needs both a running proxy and a workspace member's session. Without them the
+// old script printed a line and exited 0 — indistinguishable from a pass in a
+// normal run, which made a coverage hole look like coverage. As a node:test
+// skip it shows up in the TAP output and in the "skipped" count, so anyone
+// reading a run sees that this suite did not check anything.
+//
+// The authorization half of these routes is covered without the network:
+// test:api-surface-authorization S14 and S15 drive the real handlers with a
+// mocked auth endpoint and assert the agent is never called before the token is
+// verified. What is uncovered here is the live integration.
+const skipReason = accessToken
+  ? undefined
+  : "needs NEGIS_VERIFICATION_TOKEN (a workspace member's access token) and a reachable proxy";
 
-  if (!accessToken) {
-    console.log(
-      "Skipped: /api/targeting/* requires an authenticated workspace member since Security-2D. " +
-        "Set NEGIS_VERIFICATION_TOKEN to a member's access token to run this suite.",
-    );
-    return;
-  }
+test("targeting agent proxy round trip", { skip: skipReason }, async () => {
+  console.log(`Testing Targeting Agent proxy at ${baseUrl}`);
 
   const health = await request("/api/targeting/health");
   console.log(`health: ${health.success ? health.mode : "failed"}`);
@@ -88,9 +99,4 @@ async function main() {
     `/api/targeting/report?campaignId=${encodeURIComponent(launch.data.campaignId)}`,
   );
   console.log(`report: ${report.data.campaignId}`);
-}
-
-main().catch((error) => {
-  console.error(error instanceof Error ? error.message : error);
-  process.exitCode = 1;
 });

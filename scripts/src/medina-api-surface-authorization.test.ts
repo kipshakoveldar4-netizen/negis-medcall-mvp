@@ -723,3 +723,26 @@ test("S28 no session can be established from a query string in production", asyn
     "the Express test-auth app must stay out of the deployed build",
   );
 });
+
+test("S29 a suite that cannot run says so instead of passing quietly", async () => {
+  // test:targeting drives the live Railway agent and needs a session token, so
+  // it usually cannot run. It used to print a line and exit 0, which in a normal
+  // run is indistinguishable from a pass — a coverage hole that looked like
+  // coverage. It reports a real skip now, which shows up in the TAP output and
+  // in the skipped count.
+  const suite = await readFile(path.join(repoRoot, "scripts", "src", "test-targeting-agent.ts"), "utf8");
+
+  assert.ok(suite.includes('import test from "node:test"'), "the suite runs under the test runner");
+  assert.ok(/test\([^)]*\{ skip: skipReason \}/s.test(suite), "and reports its unmet precondition as a skip");
+  assert.ok(!/process\.exitCode = 1/.test(suite), "the hand-rolled catch is gone");
+  assert.ok(!/main\(\)\.catch/.test(suite), "and so is the bare main()");
+
+  const scripts = JSON.parse(await readFile(path.join(repoRoot, "scripts", "package.json"), "utf8")) as {
+    scripts?: Record<string, string>;
+  };
+  assert.match(
+    scripts.scripts?.["test:targeting"] ?? "",
+    /--test\b/,
+    "the runner flag is what makes the skip visible",
+  );
+});
