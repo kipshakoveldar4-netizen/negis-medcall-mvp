@@ -264,3 +264,34 @@ test("F8 the browser puts back a row the server refused", async () => {
   assert.ok(update.includes("revertWrite("), "a refused update must roll back");
   assert.ok(update.includes("const response = await crmFetch("), "the update must read the response at all");
 });
+
+test("F9 a refused production read reaches the operator instead of an empty clinic", async () => {
+  const source = await readFile(path.join(negisSrc, "lib", "demoStorage.ts"), "utf8");
+  const hook = source.slice(source.indexOf("export function useDemoCollection"));
+
+  // The reporter exists, keeps demo mode quiet, and dedupes by toast id so a
+  // page with several collections shows one message, not three.
+  const reporter = hook.slice(hook.indexOf("const reportLoadFailure ="));
+  const body = reporter.slice(0, reporter.indexOf("  };"));
+  assert.ok(body.includes("if (!productionMode) return;"), "demo mode owns its copy and must stay quiet");
+  assert.ok(body.includes("setLoadError(true)"), "the state must be exposed, not just toasted");
+  assert.ok(body.includes('id: "crm-load-failed"'), "several collections load at once; the toast must dedupe");
+
+  // Both failure paths report: the non-supabase answer and the thrown fetch.
+  const effect = hook.slice(hook.indexOf("const loadFromApi"), hook.indexOf("void loadFromApi()"));
+  const branchAt = effect.indexOf('body.mode !== "supabase"');
+  assert.ok(branchAt > 0, "the refused-answer branch must exist");
+  assert.ok(
+    effect.slice(branchAt).includes("reportLoadFailure();"),
+    "a refused answer must report",
+  );
+  const catchAt = effect.indexOf("} catch {");
+  assert.ok(
+    effect.slice(catchAt).includes("if (!cancelled) reportLoadFailure();"),
+    "a thrown fetch must report too, but never after unmount",
+  );
+
+  // And a later successful load clears it.
+  assert.ok(effect.includes("setLoadError(false)"), "success must clear the error");
+  assert.ok(hook.includes("loadError, setItems"), "loadError must be part of the hook's return");
+});
