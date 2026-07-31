@@ -3192,8 +3192,18 @@ export async function handleVideoJobs(req: VercelRequest, res: VercelResponse) {
     }
     try {
       const workspaceId = readWorkspaceId(req, {});
-      let query = supabase.from("video_processing_jobs").select("*").eq("id", jobId);
-      if (isUuid(workspaceId)) query = query.eq("workspace_id", workspaceId);
+      // The tenant filter below is not optional. Everywhere else in this file
+      // the workspace is applied unconditionally; here it was applied only when
+      // it happened to be a UUID, so a missing context would have silently
+      // dropped it and let the query see another clinic's job. The router never
+      // reaches a browser route without a verified workspace, which is exactly
+      // why an unverified one must end the request rather than widen it.
+      if (!isUuid(workspaceId)) throw new Error("workspace is not verified");
+      const query = supabase
+        .from("video_processing_jobs")
+        .select("*")
+        .eq("id", jobId)
+        .eq("workspace_id", workspaceId);
       const { data, error } = await query.single();
       if (error) throw new Error(error.message);
       return sendJson(res, 200, success("supabase", { job: makeVideoJob(asRecord(data)) }));
@@ -3228,7 +3238,11 @@ export async function handleVideoJobs(req: VercelRequest, res: VercelResponse) {
     }
 
     const supabase = getSupabaseServerClient();
-    if (!supabase) {
+    // A job row with workspace_id null belongs to no clinic, and the worker
+    // processes it all the same: it downloads the raw object, publishes the
+    // result to the public bucket and deletes the original. Without a verified
+    // workspace there is nothing to file it under, so it stays a demo answer.
+    if (!supabase || !isUuid(workspaceId)) {
       return sendJson(
         res,
         200,
@@ -3262,35 +3276,33 @@ export async function handleVideoJobs(req: VercelRequest, res: VercelResponse) {
     }
 
     let assetId = "";
-    if (isUuid(workspaceId)) {
-      try {
-        const assetRow = configs["ad-creatives"].toRow(
-          {
-            uploadedBy: firstString(body.uploadedBy, body.uploaded_by),
-            fileName,
-            fileType: "video",
-            mimeType,
-            fileSize,
-            storageBucket: rawBucket,
-            storagePath,
-            status: "optimizing",
-            metadata: { source: "ads-automation", optimization: "pending" },
-          },
-          workspaceId,
-        );
-        const { data: assetData, error: assetError } = await supabase.from("ad_creative_assets").insert(assetRow).select("id").single();
-        if (assetError) throw new Error(assetError.message);
-        assetId = firstString(asRecord(assetData).id);
-      } catch (error) {
-        console.warn(supabaseWarning("ad_creative_assets optimizing insert", error));
-      }
+    try {
+      const assetRow = configs["ad-creatives"].toRow(
+        {
+          uploadedBy: firstString(body.uploadedBy, body.uploaded_by),
+          fileName,
+          fileType: "video",
+          mimeType,
+          fileSize,
+          storageBucket: rawBucket,
+          storagePath,
+          status: "optimizing",
+          metadata: { source: "ads-automation", optimization: "pending" },
+        },
+        workspaceId,
+      );
+      const { data: assetData, error: assetError } = await supabase.from("ad_creative_assets").insert(assetRow).select("id").single();
+      if (assetError) throw new Error(assetError.message);
+      assetId = firstString(asRecord(assetData).id);
+    } catch (error) {
+      console.warn(supabaseWarning("ad_creative_assets optimizing insert", error));
     }
 
     try {
       const { data: jobData, error: jobError } = await supabase
         .from("video_processing_jobs")
         .insert({
-          workspace_id: isUuid(workspaceId) ? workspaceId : null,
+          workspace_id: workspaceId,
           asset_id: isUuid(assetId) ? assetId : null,
           status: "awaiting_upload",
           raw_bucket: rawBucket,
@@ -3348,12 +3360,19 @@ export async function handleVideoJobs(req: VercelRequest, res: VercelResponse) {
       const workspaceId = readWorkspaceId(req, body);
       // Only the awaiting_upload → queued transition is allowed from the frontend;
       // every other status belongs to the worker.
-      let update = supabase
+      // The tenant filter below is not optional. Everywhere else in this file
+      // the workspace is applied unconditionally; here it was applied only when
+      // it happened to be a UUID, so a missing context would have silently
+      // dropped it and let the query see another clinic's job. The router never
+      // reaches a browser route without a verified workspace, which is exactly
+      // why an unverified one must end the request rather than widen it.
+      if (!isUuid(workspaceId)) throw new Error("workspace is not verified");
+      const update = supabase
         .from("video_processing_jobs")
         .update({ status: "queued", raw_size: rawSize, updated_at: new Date().toISOString() })
         .eq("id", jobId)
-        .eq("status", "awaiting_upload");
-      if (isUuid(workspaceId)) update = update.eq("workspace_id", workspaceId);
+        .eq("status", "awaiting_upload")
+        .eq("workspace_id", workspaceId);
       const { data, error } = await update.select("*").maybeSingle();
       if (error) throw new Error(error.message);
       if (data) {
@@ -3399,8 +3418,18 @@ export async function handleVideoProcessingJobs(req: VercelRequest, res: VercelR
 
     try {
       const workspaceId = readWorkspaceId(req, {});
-      let query = supabase.from("video_processing_jobs").select("*").eq("id", jobId);
-      if (isUuid(workspaceId)) query = query.eq("workspace_id", workspaceId);
+      // The tenant filter below is not optional. Everywhere else in this file
+      // the workspace is applied unconditionally; here it was applied only when
+      // it happened to be a UUID, so a missing context would have silently
+      // dropped it and let the query see another clinic's job. The router never
+      // reaches a browser route without a verified workspace, which is exactly
+      // why an unverified one must end the request rather than widen it.
+      if (!isUuid(workspaceId)) throw new Error("workspace is not verified");
+      const query = supabase
+        .from("video_processing_jobs")
+        .select("*")
+        .eq("id", jobId)
+        .eq("workspace_id", workspaceId);
       const { data, error } = await query.single();
       if (error) throw new Error(error.message);
       return sendJson(res, 200, success("supabase", { job: makeVideoJob(asRecord(data)) }));
@@ -3431,7 +3460,10 @@ export async function handleVideoProcessingJobs(req: VercelRequest, res: VercelR
 
     try {
       const workspaceId = readWorkspaceId(req, body);
-      let update = supabase
+      // Same rule as the lookups above: the workspace is applied
+      // unconditionally, and an unverified one ends the request.
+      if (!isUuid(workspaceId)) throw new Error("workspace is not verified");
+      const update = supabase
         .from("video_processing_jobs")
         .update({
           status: "queued",
@@ -3443,8 +3475,8 @@ export async function handleVideoProcessingJobs(req: VercelRequest, res: VercelR
           updated_at: new Date().toISOString(),
         })
         .eq("id", jobId)
-        .eq("status", "failed");
-      if (isUuid(workspaceId)) update = update.eq("workspace_id", workspaceId);
+        .eq("status", "failed")
+        .eq("workspace_id", workspaceId);
       const { data, error } = await update.select("*").maybeSingle();
       if (error) throw new Error(error.message);
       if (data) return sendJson(res, 200, success("supabase", { job: makeVideoJob(asRecord(data)) }));
@@ -3454,9 +3486,12 @@ export async function handleVideoProcessingJobs(req: VercelRequest, res: VercelR
       // someone else's workspace, which turned the route into a cross-tenant
       // existence oracle. Scoped, a foreign id is indistinguishable from a
       // missing one.
-      let currentQuery = supabase.from("video_processing_jobs").select("status").eq("id", jobId);
-      if (isUuid(workspaceId)) currentQuery = currentQuery.eq("workspace_id", workspaceId);
-      const { data: current, error: currentError } = await currentQuery.maybeSingle();
+      const { data: current, error: currentError } = await supabase
+        .from("video_processing_jobs")
+        .select("status")
+        .eq("id", jobId)
+        .eq("workspace_id", workspaceId)
+        .maybeSingle();
       if (currentError) throw new Error(currentError.message);
       if (current) {
         return sendJson(res, 409, errorBody("Retry is not allowed", ["Only failed jobs can be retried"]));
@@ -3502,7 +3537,8 @@ export async function handleVideoProcessingJobs(req: VercelRequest, res: VercelR
       inputSizeBytes,
     });
     const supabase = getSupabaseServerClient();
-    if (!supabase) {
+    // Same rule as /api/crm/video-jobs: no verified workspace, no row.
+    if (!supabase || !isUuid(workspaceId)) {
       return sendJson(
         res,
         200,
@@ -3514,7 +3550,7 @@ export async function handleVideoProcessingJobs(req: VercelRequest, res: VercelR
       const { data, error } = await supabase
         .from("video_processing_jobs")
         .insert({
-          workspace_id: isUuid(workspaceId) ? workspaceId : null,
+          workspace_id: workspaceId,
           asset_id: isUuid(assetId) ? assetId : null,
           status: "queued",
           progress: 0,

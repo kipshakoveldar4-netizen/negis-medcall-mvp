@@ -154,6 +154,7 @@ async function loadRouter(rows: Record<string, unknown[]> = {}) {
     body?: unknown;
     rawBody?: Buffer;
     contentType?: string;
+    query?: Record<string, unknown>;
   }) => {
     queries.length = 0;
     storage.length = 0;
@@ -164,7 +165,7 @@ async function loadRouter(rows: Record<string, unknown[]> = {}) {
     const req: MockRequest = {
       method: input.method ?? "GET",
       headers,
-      query: { path: input.segments },
+      query: { path: input.segments, ...(input.query ?? {}) },
       body: input.body,
     };
     // The multipart branch reads the raw stream itself, so the request has to
@@ -390,4 +391,75 @@ test("ST8 the raw bucket stays private and the worker still reads its key off th
   const worker = await readFile(workerPath, "utf8");
   assert.ok(worker.includes("job.raw_path"), "the worker reads raw_path from the job row");
   assert.ok(worker.includes("storage.from(rawBucket).remove"), "the worker deletes the raw original it processed");
+});
+
+// ===========================================================================
+// D. The tenant filter is not optional
+// ===========================================================================
+
+// Everywhere else in lib/crm/server.ts the workspace is applied
+// unconditionally. The video job handlers applied it only when it happened to
+// be a UUID — `if (isUuid(workspaceId)) query = query.eq(...)` — so a request
+// that somehow arrived without a verified workspace would have run the query
+// with no tenant filter at all, and a job row could be written with
+// workspace_id null for the worker to process on nobody's behalf.
+
+test("ST9 no query in the CRM server makes the workspace filter conditional", async () => {
+  const source = await readFile(serverPath, "utf8");
+
+  assert.equal(
+    source.includes("if (isUuid(workspaceId))"),
+    false,
+    "a tenant filter that disappears when the workspace is missing fails open",
+  );
+  assert.equal(
+    source.includes("workspace_id: isUuid(workspaceId) ? workspaceId : null"),
+    false,
+    "a row with workspace_id null belongs to no clinic and the worker processes it anyway",
+  );
+  assert.ok(
+    source.includes('if (!isUuid(workspaceId)) throw new Error("workspace is not verified");'),
+    "an unverified workspace must end the request instead of widening the query",
+  );
+});
+
+test("ST10 a handler reached without a verified workspace refuses instead of querying", async () => {
+  // The router never lets this happen: a browser route always carries a
+  // verified workspace, so with the filter conditional or unconditional the
+  // observable behaviour through the router is identical. That is precisely why
+  // the old shape was dangerous — nothing would have noticed it fail open. This
+  // calls the handler the way a future caller might: directly, with no context.
+  const queries: QueryLog[] = [];
+  const storage: StorageCall[] = [];
+
+  process.env.SUPABASE_URL = "https://project.example.test";
+  process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key";
+
+  const supabaseModule = (await import(
+    pathToFileURL(path.join(repoRoot, "lib", "supabase", "server.ts")).href
+  )) as { setSupabaseServerClientFactoryForTests: (factory: (() => unknown) | null) => void };
+
+  const jobId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+  supabaseModule.setSupabaseServerClientFactoryForTests(() => ({
+    from: dbSpy({ video_processing_jobs: [{ id: jobId, workspace_id: WORKSPACE_B, status: "ready" }] }, queries),
+    storage: storageSpy(storage),
+  }));
+
+  try {
+    const serverModule = (await import(
+      pathToFileURL(path.join(repoRoot, "lib", "crm", "server.ts")).href
+    )) as { handleVideoJobs: (req: unknown, res: MockResponse) => Promise<unknown> };
+
+    const res = mockResponse();
+    await serverModule.handleVideoJobs({ method: "GET", headers: {}, query: { id: jobId } }, res);
+
+    assert.equal(res.statusCode, 404, `a job was served without a workspace: ${JSON.stringify(res.body)}`);
+    assert.equal(
+      JSON.stringify(res.body).includes(WORKSPACE_B),
+      false,
+      "and nothing of the owning workspace may appear in the answer",
+    );
+  } finally {
+    supabaseModule.setSupabaseServerClientFactoryForTests(null);
+  }
 });
