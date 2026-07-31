@@ -156,6 +156,24 @@ export function useDemoCollection<TItem extends { id: string }>(
   const [items, setItems] = useState<TItem[]>(() => (productionMode ? [] : seed));
   // loaded: demo mode is ready immediately; production waits for the first API settle.
   const [loaded, setLoaded] = useState(() => !productionMode);
+  // A failed production read was the last silent failure left: the server has
+  // answered 502 since the failure-honesty change, but this hook dropped the
+  // answer and the page showed an empty clinic. Refused writes already speak
+  // through revertWrite's toast; a refused read now speaks the same way, and
+  // loadError is exposed for any page that wants to render more than a toast.
+  const [loadError, setLoadError] = useState(false);
+
+  const reportLoadFailure = () => {
+    // Demo mode owns its localStorage copy: an unreachable API is the normal
+    // state there, not a failure worth announcing.
+    if (!productionMode) return;
+    setLoadError(true);
+    // One toast per page, not one per collection — several lists load at once
+    // and sonner dedupes by id.
+    toast.error("Не удалось загрузить данные. Обновите страницу или повторите попытку позже.", {
+      id: "crm-load-failed",
+    });
+  };
 
   useEffect(() => {
     if (productionMode) return;
@@ -178,13 +196,11 @@ export function useDemoCollection<TItem extends { id: string }>(
         const response = await crmFetch(`${endpoint}?workspaceId=${encodeURIComponent(workspaceId)}`);
         const body = await safeJson<Record<string, unknown>>(response);
 
-        if (
-          cancelled ||
-          !response.ok ||
-          body?.success !== true ||
-          body.mode !== "supabase"
-        ) {
-          // Production stays empty (honest state) — no demo fallback.
+        if (cancelled) return;
+
+        if (!response.ok || body?.success !== true || body.mode !== "supabase") {
+          // Production stays empty — no demo fallback — but no longer silent.
+          reportLoadFailure();
           return;
         }
 
@@ -193,10 +209,12 @@ export function useDemoCollection<TItem extends { id: string }>(
 
         const mapped = rawItems.map((item) => (fromApi ? fromApi(item) : (item as TItem)));
         setItems(mapped);
+        setLoadError(false);
         // Supabase data must never be cached into the demo localStorage keys.
         if (!productionMode) writeDemoStorage(key, mapped);
       } catch {
-        // Demo keeps localStorage seed/data as the offline fallback; production stays empty.
+        // Demo keeps localStorage seed/data as the offline fallback.
+        if (!cancelled) reportLoadFailure();
       } finally {
         if (!cancelled) setLoaded(true);
       }
@@ -304,5 +322,5 @@ export function useDemoCollection<TItem extends { id: string }>(
     })();
   };
 
-  return { items, loaded, setItems: setStoredItems, addItem, updateItem };
+  return { items, loaded, loadError, setItems: setStoredItems, addItem, updateItem };
 }
