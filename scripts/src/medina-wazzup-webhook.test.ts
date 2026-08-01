@@ -15,6 +15,8 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."
 const WORKSPACE_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const CHANNEL_A = "c04a11e1-0000-4000-8000-000000000001";
 const MESSAGE_1 = "0e000000-0000-4000-8000-000000000001";
+const STAGE_NEW = "5ba0e000-0000-4000-8000-000000000001";
+const SOURCE_WHATSAPP = "50c0e000-0000-4000-8000-000000000001";
 const SECRET = "test-webhook-secret";
 
 type QueryLog = { table: string; op: string; filters: Record<string, unknown>; row?: unknown };
@@ -66,6 +68,7 @@ function spyClient(options: SpyOptions, log: QueryLog[]) {
         eq(column: string, value: unknown) { entry.filters[column] = value; return builder; },
         neq(column: string, value: unknown) { entry.filters[`neq:${column}`] = value; return builder; },
         not(column: string, op: string) { entry.filters[`not:${column}`] = op; return builder; },
+        order(column: string) { entry.filters[`order:${column}`] = true; return builder; },
         limit: () => builder,
         single: () => settle("one"),
         maybeSingle: () => settle("one"),
@@ -292,6 +295,53 @@ test("WZ9 an inbound message becomes a lead in the channel's workspace", async (
     const ledger = log.find((entry) => entry.table === "wazzup_inbound_messages" && entry.op === "insert");
     assert.ok(ledger, "the ledger row must be written");
     assert.equal((ledger.row as Record<string, unknown>).kind, "created");
+  });
+});
+
+test("WZ18 a filed lead joins the funnel — first `new` stage and the whatsapp source", async () => {
+  // Without this the lead exists but sits outside every stage-keyed view and
+  // outside source analytics, while `lead_sources` already holds a seeded
+  // whatsapp row (migration 019) that nothing referenced.
+  await withHandler({
+    rows: {
+      wazzup_channels: [channelRow],
+      leads: [],
+      lead_stages: [{ id: STAGE_NEW }],
+      lead_sources: [{ id: SOURCE_WHATSAPP }],
+    },
+  }, {}, async (ctx) => {
+    const { res, log } = await ctx.call({ secret: SECRET, body: { messages: [inboundMessage()] } });
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+
+    const row = leadInserts(log)[0]?.row as Record<string, unknown>;
+    assert.ok(row, "the lead must be inserted");
+    assert.equal(row.stage_id, STAGE_NEW, "a lead with no stage never enters the funnel");
+    assert.equal(row.source_id, SOURCE_WHATSAPP, "and with no source_id it is invisible to source analytics");
+
+    // Both lookups are the channel's workspace, never the payload's.
+    for (const table of ["lead_stages", "lead_sources"]) {
+      const lookup = log.find((entry) => entry.table === table);
+      assert.ok(lookup, `${table} must be consulted`);
+      assert.equal(lookup.filters.workspace_id, WORKSPACE_A, `${table} lookup must be workspace-scoped`);
+    }
+  });
+});
+
+test("WZ19 a reshaped funnel costs the classification, never the lead", async () => {
+  // No `new` stage and no whatsapp source: the message must still become a
+  // lead rather than a 503 and an endless Wazzup retry.
+  await withHandler({
+    rows: { wazzup_channels: [channelRow], leads: [], lead_stages: [], lead_sources: [] },
+  }, {}, async (ctx) => {
+    const { res, log } = await ctx.call({ secret: SECRET, body: { messages: [inboundMessage()] } });
+
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+    assert.equal(res.body.created, 1);
+    const row = leadInserts(log)[0]?.row as Record<string, unknown>;
+    assert.ok(row, "the lead must still be inserted");
+    assert.equal(row.stage_id, undefined, "an unresolved stage is left unset, not invented");
+    assert.equal(row.source_id, undefined);
+    assert.equal(row.source, "whatsapp", "the legacy text column still carries the origin");
   });
 });
 
