@@ -61,16 +61,26 @@ export function wazzupSecretMatches(provided: string, expected: string): boolean
  * explicitly allow a query string in webhooksUri, and it is the only channel
  * the plain webhook subscription can carry). A path segment would have needed
  * a dynamic route entry in vercel.json, which is a protected file.
+ *
+ * Both are returned, and the caller accepts a match on either. Preferring the
+ * header and stopping there was a trap: Wazzup sends `Authorization: Bearer
+ * <crmKey>` whenever the account has a crmKey at all, and that value is not
+ * our secret. A request whose URL secret was perfectly correct would then be
+ * answered 401 — forever, because Wazzup retries a non-200 and every retry
+ * carries the same header. The endpoint would look configured and file no
+ * leads. Checking both weakens nothing: each candidate is still compared in
+ * constant time against the one expected value.
  */
-function readProvidedSecret(req: VercelRequest): string {
+function readProvidedSecrets(req: VercelRequest): string[] {
   const header = Array.isArray(req.headers.authorization)
     ? req.headers.authorization[0]
     : req.headers.authorization || "";
   const bearer = header.startsWith("Bearer ") ? header.slice("Bearer ".length).trim() : "";
-  if (bearer) return bearer;
 
   const fromQuery = req.query?.secret;
-  return readString(Array.isArray(fromQuery) ? fromQuery[0] : fromQuery);
+  const query = readString(Array.isArray(fromQuery) ? fromQuery[0] : fromQuery);
+
+  return [bearer, query].filter((candidate) => candidate.length > 0);
 }
 
 type InboundMessage = {
@@ -121,7 +131,8 @@ export async function handleWazzupWebhook(req: VercelRequest, res: VercelRespons
     return sendJson(res, 503, { success: false, error: "Webhook is not configured" });
   }
 
-  if (!wazzupSecretMatches(readProvidedSecret(req), expected)) {
+  const provided = readProvidedSecrets(req);
+  if (!provided.some((candidate) => wazzupSecretMatches(candidate, expected))) {
     return sendJson(res, 401, { success: false, error: "Unauthorized" });
   }
 
