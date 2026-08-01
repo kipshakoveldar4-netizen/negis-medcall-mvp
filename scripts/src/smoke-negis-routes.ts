@@ -1987,10 +1987,12 @@ async function checkCrmProductionGuards() {
     // Workspace detection shared with pages (same discriminator as the server).
     "export function readWorkspaceId",
     "export function isRealWorkspace",
-    // Production collections start empty and never show seeds before the API answers.
+    // Production collections never show demo seeds: the initial state is the
+    // cached last supabase answer or empty, and `seed` is demo-only.
     "const [productionMode] = useState(() => Boolean(endpoint) && isRealWorkspace());",
-    "useState<TItem[]>(() => (productionMode ? [] : seed))",
-    "const [loaded, setLoaded] = useState(() => !productionMode);",
+    "if (!productionMode) return seed;",
+    "if (!cached) return [];",
+    "() => !productionMode || (Boolean(endpoint) && readFreshListCache(endpoint as string, workspaceId) !== null)",
     // Production skips the demo localStorage hydrate/write entirely.
     "if (productionMode) return;",
     // Supabase data is never cached into negis_demo_* keys.

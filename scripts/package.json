@@ -26,7 +26,8 @@
     "test:workspace-selection": "tsx --test ./src/medina-workspace-selection.test.ts",
     "test:failure-honesty": "tsx --test ./src/medina-failure-honesty.test.ts",
     "test:migration-chain": "tsx --test ./src/medina-migration-chain.test.ts",
-    "test:wazzup-webhook": "tsx --test ./src/medina-wazzup-webhook.test.ts"
+    "test:wazzup-webhook": "tsx --test ./src/medina-wazzup-webhook.test.ts",
+    "test:transition-performance": "tsx --test ./src/medina-transition-performance.test.ts"
   },
   "devDependencies": {
     "@types/node": "catalog:",
