@@ -89,6 +89,16 @@ const API_SURFACE: readonly RouteClassification[] = [
     rationale: "Same contract as targeting/report, addressed by path.",
   },
   {
+    file: "webhooks/wazzup.ts",
+    classification: "C",
+    rationale:
+      "Signed inbound webhook: Wazzup WhatsApp message events become CRM leads. POST only; authenticated " +
+      "by a dedicated shared secret (Authorization: Bearer or the ?secret= query the Wazzup docs allow), " +
+      "compared in constant time — never a browser JWT. Tenancy comes from the wazzup_channels row, never " +
+      "the payload; an unknown channel answers 200 without disclosure; a database outage answers 503 so " +
+      "Wazzup retries; the ledger keyed by messageId makes replays no-ops. Covered by test:wazzup-webhook.",
+  },
+  {
     file: "auth/register.ts",
     classification: "F",
     rationale:
