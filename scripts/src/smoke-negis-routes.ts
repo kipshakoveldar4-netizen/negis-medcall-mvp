@@ -3464,6 +3464,40 @@ async function checkSelfRegistrationDisabled() {
   console.log("/api/auth/register: 410 (self-registration disabled)");
 }
 
+async function checkWazzupWebhookBoundary() {
+  // The Wazzup inbound webhook fails closed in both of its unauthenticated
+  // shapes: 503 while WAZZUP_WEBHOOK_SECRET is not configured (Wazzup retries,
+  // nothing is lost), 401 once it is and the secret does not match. Either
+  // answer proves the route is wired and the door is shut; HTML would mean the
+  // request fell through to the SPA fallback.
+  const response = await fetch(`${baseUrl}/api/webhooks/wazzup`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ test: true }),
+  });
+  const text = await response.text();
+  let body: Record<string, unknown>;
+  try {
+    body = text ? (JSON.parse(text) as Record<string, unknown>) : {};
+  } catch {
+    throw new Error(`/api/webhooks/wazzup returned non-JSON — the route is not wired: ${text.slice(0, 120)}`);
+  }
+
+  if (![401, 503].includes(response.status) || body.success !== false) {
+    throw new Error(
+      `/api/webhooks/wazzup must fail closed without the secret (expected 401 or 503, got ${response.status})`,
+    );
+  }
+  const disclosed = JSON.stringify(body).toLowerCase();
+  for (const leak of ["wazzup_webhook_secret", "env", "channel"]) {
+    if (disclosed.includes(leak)) {
+      throw new Error(`/api/webhooks/wazzup boundary answer discloses "${leak}"`);
+    }
+  }
+
+  console.log(`/api/webhooks/wazzup: ${response.status} (fail-closed boundary)`);
+}
+
 // Security-2B: every browser /api/crm/* route now requires a verified Supabase
 // JWT. This suite runs unauthenticated, so the correct assertion for those paths
 // is the authentication boundary itself. The business invariants they used to
@@ -3639,6 +3673,7 @@ async function main() {
   }
   await checkTargetingHealth();
   await checkSelfRegistrationDisabled();
+  await checkWazzupWebhookBoundary();
   const crmHealth = await checkJsonEndpoint("/api/crm/health");
   // Security-2B: the route is refused before any business branch runs. Its
   // invariants are covered by the handler-level suites, which run without a
