@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { crmFetch } from "@/lib/api";
 
@@ -162,6 +162,17 @@ export function useDemoCollection<TItem extends { id: string }>(
   seed: TItem[],
   options: ApiCollectionOptions<TItem> = {},
 ) {
+  // Options are configuration, captured once. Pages pass them as inline
+  // literals, so their identity changes on every render; treating them as
+  // reactive dependencies turned the refresh effect into a loop — the fetch
+  // settled, setItems rendered, the new fromApi identity re-armed the effect,
+  // and the same list was requested again, forever, at roughly one request per
+  // response time. Measured on production: /api/crm/clients every ~700ms for
+  // as long as the clients page stayed open. Whether a page's mapper happened
+  // to be a module constant (LeadsPage) or an inline arrow (ClientsPage)
+  // decided whether it looped — a distinction no caller should have to know
+  // exists.
+  const stable = useRef({ seed, ...options }).current;
   const {
     endpoint,
     listKey = "items",
@@ -169,7 +180,7 @@ export function useDemoCollection<TItem extends { id: string }>(
     toApi,
     patchToApi,
     fromApi,
-  } = options;
+  } = stable;
 
   // Selection-2: which clinic this collection belongs to, read on every render
   // so that a workspace change is a change of dependency and not a silent one.
@@ -187,7 +198,7 @@ export function useDemoCollection<TItem extends { id: string }>(
   // back to demo data. Demo workspaces keep the original behavior untouched.
   const [productionMode] = useState(() => Boolean(endpoint) && isRealWorkspace());
   const [items, setItems] = useState<TItem[]>(() => {
-    if (!productionMode) return seed;
+    if (!productionMode) return stable.seed;
     const cached = endpoint ? readFreshListCache(endpoint, workspaceId) : null;
     if (!cached) return [];
     return cached.map((row) => (fromApi ? fromApi(row) : (row as TItem)));
@@ -220,12 +231,14 @@ export function useDemoCollection<TItem extends { id: string }>(
     if (productionMode) return;
     const raw = typeof window === "undefined" ? null : window.localStorage.getItem(key);
     const saved = raw ? readDemoStorage<TItem[] | null>(key, null) : null;
-    const nextItems = Array.isArray(saved) && saved.length > 0 ? saved : seed;
+    const nextItems = Array.isArray(saved) && saved.length > 0 ? saved : stable.seed;
     setItems(nextItems);
     if (!raw || !Array.isArray(saved) || saved.length === 0) {
       writeDemoStorage(key, nextItems);
     }
-  }, [key, seed, productionMode]);
+    // stable is captured once by design — see the useRef above.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key, productionMode]);
 
   useEffect(() => {
     if (!endpoint) return;
@@ -272,7 +285,12 @@ export function useDemoCollection<TItem extends { id: string }>(
     return () => {
       cancelled = true;
     };
-  }, [endpoint, fromApi, key, listKey, seed, productionMode, workspaceId]);
+    // The dependencies are the identity of the data — which list, which
+    // clinic — never the identity of caller-supplied functions. A mapper
+    // recreated on each render must not be able to re-arm this effect: that
+    // is exactly the refetch loop this hook once had.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [endpoint, key, productionMode, workspaceId]);
 
   /**
    * Security-2F: an optimistic row that the server refused must not stay.

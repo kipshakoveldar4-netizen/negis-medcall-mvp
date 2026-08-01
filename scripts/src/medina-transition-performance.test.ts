@@ -134,6 +134,30 @@ test("P9 the honesty contract survives the cache: a refused read still reports",
   assert.ok(source.includes('id: "crm-load-failed"'), "and still deduplicate through the shared toast id");
 });
 
+test("P11 the refresh effect cannot be re-armed by caller-supplied function identity", async () => {
+  const source = await readSource("lib", "demoStorage.ts");
+
+  // Pages pass options as inline literals, so fromApi's identity changes on
+  // every render. With it in the dependency list, every settled fetch
+  // re-armed the effect: /api/crm/clients was measured refetching every
+  // ~700ms for as long as the page stayed open.
+  assert.ok(
+    source.includes("useRef({ seed, ...options }).current"),
+    "options must be captured once — they are configuration, not reactive state",
+  );
+  assert.ok(
+    source.includes("}, [endpoint, key, productionMode, workspaceId]);"),
+    "the load effect must depend on the identity of the data, never of the mapper",
+  );
+  const deps = source.match(/\}, \[[^\]]*\]\);/g) || [];
+  for (const dep of deps) {
+    assert.ok(
+      !dep.includes("fromApi") && !dep.includes("seed"),
+      `a function or seed identity is back in a dependency list: ${dep}`,
+    );
+  }
+});
+
 // ===========================================================================
 // C. Route chunks are warmed after auth instead of inside the transition
 // ===========================================================================

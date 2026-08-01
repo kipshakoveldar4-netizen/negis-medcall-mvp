@@ -1990,7 +1990,7 @@ async function checkCrmProductionGuards() {
     // Production collections never show demo seeds: the initial state is the
     // cached last supabase answer or empty, and `seed` is demo-only.
     "const [productionMode] = useState(() => Boolean(endpoint) && isRealWorkspace());",
-    "if (!productionMode) return seed;",
+    "if (!productionMode) return stable.seed;",
     "if (!cached) return [];",
     "() => !productionMode || (Boolean(endpoint) && readFreshListCache(endpoint as string, workspaceId) !== null)",
     // Production skips the demo localStorage hydrate/write entirely.
