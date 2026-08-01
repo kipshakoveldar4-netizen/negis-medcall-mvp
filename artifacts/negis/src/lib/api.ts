@@ -60,6 +60,22 @@ async function resolveAccessToken(explicit?: string): Promise<string> {
 }
 
 /**
+ * Concurrent identical GETs share one network request.
+ *
+ * Measured on production: the auth bootstrap fired /api/crm/auth-context three
+ * times in a 15ms window (three serverless invocations, 1.4–4.3s each), and
+ * the clients page issued the same list read twice more — every page paid for
+ * its data several times over, which is most of what "переход подвисает" was.
+ *
+ * Only GET is deduplicated, and only while the request is in flight: a write
+ * must never be swallowed by another write, and sequential reads (polling) are
+ * untouched because the entry is gone by the time the next one starts. The key
+ * includes the token so two sessions can never share a response. Followers get
+ * clone()s, so each caller still reads its own body.
+ */
+const inflightGets = new Map<string, Promise<Response>>();
+
+/**
  * Single entry point for CRM requests. Without a token the request is not sent
  * at all: an unauthenticated call would only come back as 401, and firing it
  * anyway invites retry loops.
@@ -76,7 +92,25 @@ export async function crmFetch(path: string, init: CrmFetchInit = {}): Promise<R
   mergedHeaders.delete("Authorization");
   mergedHeaders.set("Authorization", `Bearer ${token}`);
 
-  return fetch(apiUrl(path), { ...rest, headers: mergedHeaders });
+  const method = (rest.method || "GET").toUpperCase();
+  if (method !== "GET") {
+    return fetch(apiUrl(path), { ...rest, headers: mergedHeaders });
+  }
+
+  const dedupeKey = `${path}::${token}`;
+  const pending = inflightGets.get(dedupeKey);
+  if (pending) {
+    return pending.then((response) => response.clone());
+  }
+
+  const request = fetch(apiUrl(path), { ...rest, headers: mergedHeaders });
+  inflightGets.set(dedupeKey, request);
+  request
+    .catch(() => undefined)
+    .finally(() => {
+      inflightGets.delete(dedupeKey);
+    });
+  return request.then((response) => response.clone());
 }
 
 /** crmFetch + crmJson in one call, for the common read path. */

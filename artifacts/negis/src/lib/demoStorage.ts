@@ -124,6 +124,39 @@ async function safeJson<TData>(response: globalThis.Response): Promise<ApiRespon
   }
 }
 
+/**
+ * The last successful production read of each list, so a page transition paints
+ * the previous answer immediately instead of a skeleton while the same list is
+ * fetched again — a round trip that measured 0.7–2.4s per collection on
+ * production, several collections per page. The refresh still happens on every
+ * mount; the cache only decides what is on screen while it runs.
+ *
+ * Scope and honesty rules:
+ *   - The key is endpoint + workspace: one clinic's rows can never appear on
+ *     another clinic's page, and a workspace switch is a cache miss by
+ *     construction (Selection-2 stays intact).
+ *   - Raw API rows are cached, not mapped items: pages that read the same
+ *     endpoint with different `fromApi` mappers each map for themselves.
+ *   - Only a successful mode:"supabase" answer is ever cached, and the cache
+ *     lives in module memory — nothing here touches the demo localStorage keys.
+ *   - A failed refresh still calls reportLoadFailure(): showing recent data
+ *     does not excuse hiding that the current read was refused.
+ */
+type CachedList = { rows: unknown[]; at: number };
+const listReadCache = new Map<string, CachedList>();
+const LIST_READ_TTL_MS = 60_000;
+
+function listCacheKey(endpoint: string, workspaceId: string): string {
+  return `${endpoint}::${workspaceId}`;
+}
+
+function readFreshListCache(endpoint: string, workspaceId: string): unknown[] | null {
+  const entry = listReadCache.get(listCacheKey(endpoint, workspaceId));
+  if (!entry) return null;
+  if (Date.now() - entry.at > LIST_READ_TTL_MS) return null;
+  return entry.rows;
+}
+
 export function useDemoCollection<TItem extends { id: string }>(
   key: string,
   seed: TItem[],
@@ -153,9 +186,17 @@ export function useDemoCollection<TItem extends { id: string }>(
   // seeds, never read/write the negis_demo_* localStorage cache, and never fall
   // back to demo data. Demo workspaces keep the original behavior untouched.
   const [productionMode] = useState(() => Boolean(endpoint) && isRealWorkspace());
-  const [items, setItems] = useState<TItem[]>(() => (productionMode ? [] : seed));
-  // loaded: demo mode is ready immediately; production waits for the first API settle.
-  const [loaded, setLoaded] = useState(() => !productionMode);
+  const [items, setItems] = useState<TItem[]>(() => {
+    if (!productionMode) return seed;
+    const cached = endpoint ? readFreshListCache(endpoint, workspaceId) : null;
+    if (!cached) return [];
+    return cached.map((row) => (fromApi ? fromApi(row) : (row as TItem)));
+  });
+  // loaded: demo mode is ready immediately; production paints a fresh cached
+  // read at once and refreshes behind it, or waits for the first API settle.
+  const [loaded, setLoaded] = useState(
+    () => !productionMode || (Boolean(endpoint) && readFreshListCache(endpoint as string, workspaceId) !== null),
+  );
   // A failed production read was the last silent failure left: the server has
   // answered 502 since the failure-honesty change, but this hook dropped the
   // answer and the page showed an empty clinic. Refused writes already speak
@@ -207,6 +248,12 @@ export function useDemoCollection<TItem extends { id: string }>(
         const rawItems = body.data[listKey];
         if (!Array.isArray(rawItems)) return;
 
+        // Only a confirmed supabase answer is worth remembering; the raw rows
+        // go in so every consumer keeps applying its own fromApi.
+        if (productionMode) {
+          listReadCache.set(listCacheKey(endpoint, workspaceId), { rows: rawItems, at: Date.now() });
+        }
+
         const mapped = rawItems.map((item) => (fromApi ? fromApi(item) : (item as TItem)));
         setItems(mapped);
         setLoadError(false);
@@ -246,6 +293,10 @@ export function useDemoCollection<TItem extends { id: string }>(
   };
 
   const setStoredItems = (next: TItem[] | ((current: TItem[]) => TItem[])) => {
+    // Any local write makes the cached read stale — including a rollback, whose
+    // outcome the cache has no way to know. The next mount fetches fresh rather
+    // than briefly resurrecting a list from before the write.
+    if (productionMode && endpoint) listReadCache.delete(listCacheKey(endpoint, workspaceId));
     setItems((current) => {
       const value = typeof next === "function" ? next(current) : next;
       if (!productionMode) writeDemoStorage(key, value);

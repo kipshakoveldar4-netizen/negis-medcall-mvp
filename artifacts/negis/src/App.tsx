@@ -47,6 +47,47 @@ const Terms = lazy(() => import("@/pages/Terms"));
 const DataDeletion = lazy(() => import("@/pages/DataDeletion"));
 const ResetPassword = lazy(() => import("@/pages/ResetPassword"));
 
+/**
+ * Warms the lazy route chunks once the user is authenticated and the browser
+ * is idle. Measured on production: ProtectedPage keeps a route unmounted until
+ * auth resolves, so the page's chunk request used to start only ~2.3s into a
+ * cold load, and every first visit to a section paid its chunk fetch inside
+ * the transition. Vite deduplicates dynamic imports, so a warmed chunk makes
+ * the later route render use it from module cache — and a prefetch failure is
+ * harmless, the route import simply fetches again.
+ */
+const PREFETCH_ROUTES: Array<() => Promise<unknown>> = [
+  () => import("@/pages/AiControlCenter"),
+  () => import("@/pages/Dashboard"),
+  () => import("@/pages/LeadsPage"),
+  () => import("@/pages/ClientsPage"),
+  () => import("@/pages/AppointmentsPage"),
+  () => import("@/pages/SalesPage"),
+  () => import("@/pages/AdminCenter"),
+  () => import("@/pages/DemoCrmModules"),
+  // The two heaviest chunks benefit the most: AdsAutomation alone is ~34KB
+  // gzip, which used to sit inside the first transition to /ads-automation.
+  () => import("@/pages/AdsAutomation"),
+  () => import("@/pages/ContentStudio"),
+];
+
+function RoutePrefetcher() {
+  const { isLoading, userRole } = useAuth();
+
+  useEffect(() => {
+    if (isLoading || !userRole) return;
+    const idle: (cb: () => void) => number =
+      typeof window.requestIdleCallback === "function"
+        ? (cb) => window.requestIdleCallback(cb)
+        : (cb) => window.setTimeout(cb, 1200);
+    idle(() => {
+      for (const load of PREFETCH_ROUTES) void load().catch(() => undefined);
+    });
+  }, [isLoading, userRole]);
+
+  return null;
+}
+
 function RouteFallback() {
   return (
     <div className="flex min-h-screen items-center justify-center" style={{ background: "var(--ng-bg)" }}>
@@ -211,6 +252,7 @@ function App() {
             <FbPixelInit />
             <ImpersonationBanner />
             <WorkspacePicker />
+            <RoutePrefetcher />
             <Router />
             <Toaster position="bottom-right" />
           </TooltipProvider>
