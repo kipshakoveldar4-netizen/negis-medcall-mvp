@@ -215,6 +215,30 @@ test("WZ5 the secret is honoured from the Authorization header too", async () =>
   });
 });
 
+test("WZ16 a foreign Authorization header does not shadow a correct URL secret", async () => {
+  // Wazzup attaches `Authorization: Bearer <crmKey>` whenever the account has
+  // a crmKey, and that value is not our secret. A handler that trusted the
+  // header alone would answer 401 to a perfectly correct subscription — and
+  // keep answering it, because every retry carries the same header.
+  await withHandler({ rows: {} }, {}, async (ctx) => {
+    const { res } = await ctx.call({ bearer: "wazzup-crm-key-that-is-not-ours", secret: SECRET, body: { test: true } });
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  });
+});
+
+test("WZ17 and when neither channel carries the secret it is still 401", async () => {
+  await withHandler({ rows: {} }, {}, async (ctx) => {
+    const { res, log } = await ctx.call({
+      bearer: "wazzup-crm-key-that-is-not-ours",
+      secret: "also-wrong",
+      body: { messages: [inboundMessage()] },
+    });
+    assert.equal(res.statusCode, 401);
+    assert.equal(log.length, 0, "no query may run before authentication");
+    assert.equal(ctx.clientCreations, 0, "no service-role client before authentication");
+  });
+});
+
 test("WZ6 a database outage answers 503 so Wazzup retries", async () => {
   // Factory returns null — the configured-but-unreachable shape.
   await withHandler({}, {}, async (ctx) => {
