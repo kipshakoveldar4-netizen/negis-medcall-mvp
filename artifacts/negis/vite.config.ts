@@ -97,7 +97,8 @@ function targetingApiDevMiddleware(): Plugin {
           !pathname.startsWith("/api/targeting") &&
           !pathname.startsWith("/api/content-studio") &&
           !pathname.startsWith("/api/crm") &&
-          pathname !== "/api/auth/register"
+          pathname !== "/api/auth/register" &&
+          pathname !== "/api/webhooks/wazzup"
         ) {
           next();
           return;
@@ -109,6 +110,12 @@ function targetingApiDevMiddleware(): Plugin {
 
           if (pathname === "/api/auth/register") {
             modulePath = apiModule("api", "auth", "register.ts");
+          } else if (pathname === "/api/webhooks/wazzup") {
+            // Dev parity for the Wazzup inbound webhook: in production the
+            // filesystem handler routes the plain file; without this entry the
+            // dev server dropped the same request into the SPA fallback and
+            // the route could not be exercised locally at all.
+            modulePath = apiModule("api", "webhooks", "wazzup.ts");
           } else if (pathname.startsWith("/api/content-studio/")) {
             const contentPath = pathname.replace(/^\/api\/content-studio\//, "").split("/").filter(Boolean);
             modulePath = apiModule("api", "content-studio", "[...path].ts");
