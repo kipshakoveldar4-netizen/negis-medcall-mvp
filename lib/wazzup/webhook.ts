@@ -83,6 +83,49 @@ function readProvidedSecrets(req: VercelRequest): string[] {
   return [bearer, query].filter((candidate) => candidate.length > 0);
 }
 
+type LeadTaxonomy = { stageId: string | null; sourceId: string | null };
+
+/**
+ * The funnel taxonomy introduced in 019: besides the legacy `source` text a
+ * lead carries `stage_id` and `source_id`. A lead created in the interface
+ * gets both because the form sends them — a lead filed by this webhook got
+ * neither, so it sat outside every stage-keyed view and outside source
+ * analytics, while the `whatsapp` row seeded in `lead_sources` went unused.
+ *
+ * Resolution mirrors the backfill 019 already performs for existing rows: the
+ * first stage of the `new` semantic group, and the source keyed `whatsapp`.
+ * Both are workspace-scoped, and both are optional — a clinic that reshaped
+ * its funnel simply gets a lead without them, exactly as before this change.
+ * A failed lookup is treated as "not found" rather than thrown for the same
+ * reason: losing a classification field must not turn a working pipeline into
+ * a retry loop, and the message itself is the thing worth keeping.
+ */
+async function resolveLeadTaxonomy(
+  supabase: NonNullable<ReturnType<typeof getSupabaseServerClient>>,
+  workspaceId: string,
+): Promise<LeadTaxonomy> {
+  const stage = await supabase
+    .from("lead_stages")
+    .select("id")
+    .eq("workspace_id", workspaceId)
+    .eq("semantic_group", "new")
+    .order("sort_order", { ascending: true })
+    .limit(1)
+    .maybeSingle();
+
+  const source = await supabase
+    .from("lead_sources")
+    .select("id")
+    .eq("workspace_id", workspaceId)
+    .eq("source_key", "whatsapp")
+    .maybeSingle();
+
+  return {
+    stageId: stage.error ? null : readString(asRecord(stage.data).id) || null,
+    sourceId: source.error ? null : readString(asRecord(source.data).id) || null,
+  };
+}
+
 type InboundMessage = {
   messageId: string;
   channelId: string;
@@ -156,6 +199,8 @@ export async function handleWazzupWebhook(req: VercelRequest, res: VercelRespons
   let created = 0;
   let repeats = 0;
   let ignored = 0;
+  // One resolution per workspace per batch, not per message.
+  const taxonomyByWorkspace = new Map<string, LeadTaxonomy>();
 
   try {
     for (const message of inbound) {
@@ -207,6 +252,12 @@ export async function handleWazzupWebhook(req: VercelRequest, res: VercelRespons
       let kind: "created" | "repeat" = "repeat";
 
       if (!existing) {
+        let taxonomy = taxonomyByWorkspace.get(workspaceId);
+        if (!taxonomy) {
+          taxonomy = await resolveLeadTaxonomy(supabase, workspaceId);
+          taxonomyByWorkspace.set(workspaceId, taxonomy);
+        }
+
         const { data: lead, error: leadError } = await supabase
           .from("leads")
           .insert({
@@ -215,6 +266,8 @@ export async function handleWazzupWebhook(req: VercelRequest, res: VercelRespons
             phone: message.phone,
             source: "whatsapp",
             status: "new",
+            ...(taxonomy.stageId ? { stage_id: taxonomy.stageId } : {}),
+            ...(taxonomy.sourceId ? { source_id: taxonomy.sourceId } : {}),
             notes: message.text ? `WhatsApp: ${message.text.slice(0, NOTES_LIMIT)}` : null,
           })
           .select("id")
