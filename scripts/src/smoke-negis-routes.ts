@@ -2001,7 +2001,7 @@ async function checkCrmProductionGuards() {
     // loaded settles after the first API response (success or failure).
     "setLoaded(true)",
     // Demo mode keeps the original seed + localStorage fallback.
-    "const nextItems = Array.isArray(saved) && saved.length > 0 ? saved : seed;",
+    "const nextItems = Array.isArray(saved) && saved.length > 0 ? saved : stable.seed;",
   ]) {
     if (!storage.includes(marker)) {
       throw new Error(`demoStorage production guard is missing "${marker}"`);
