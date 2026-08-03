@@ -52,6 +52,19 @@ function mockResponse(): MockResponse {
 type SpyOptions = {
   rows?: Record<string, unknown[]>;
   errors?: Record<string, string>;
+  /**
+   * Models a database where migration 028 has not been applied: any query
+   * filtering on leads.phone_normalized answers Postgres 42703 the way
+   * PostgREST reports it. Everything else behaves normally.
+   */
+  missingPhoneNormalized?: boolean;
+  /**
+   * A real failure of the exact lookup only: the query filtering on
+   * phone_normalized fails with something that is NOT 42703, while the
+   * fallback scan would succeed. Distinguishes "fall back on a missing
+   * column" from "fall back on anything".
+   */
+  phoneNormalizedLookupError?: string;
 };
 
 function spyClient(options: SpyOptions, log: QueryLog[]) {
@@ -60,10 +73,36 @@ function spyClient(options: SpyOptions, log: QueryLog[]) {
       const entry: QueryLog = { table, op: "select", filters: {} };
       log.push(entry);
       const settle = (shape: "one" | "list") => {
+        if (options.phoneNormalizedLookupError && "phone_normalized" in entry.filters) {
+          return Promise.resolve({
+            data: null,
+            error: { code: "08006", message: options.phoneNormalizedLookupError },
+          });
+        }
+        if (options.missingPhoneNormalized && "phone_normalized" in entry.filters) {
+          return Promise.resolve({
+            data: null,
+            error: { code: "42703", message: "column leads.phone_normalized does not exist" },
+          });
+        }
         const message = options.errors?.[table];
         if (message) return Promise.resolve({ data: null, error: { message } });
         const rows = options.rows?.[table] ?? [];
-        if (shape === "list") return Promise.resolve({ data: rows, error: null });
+        if (shape === "list") {
+          // An equality on phone_normalized is answered by the database, not by
+          // the fixture: the column is STORED GENERATED, so the query returns
+          // only rows already carrying that exact value. Modelling that is what
+          // keeps CW14 sensitive — a handler that sends the raw phone, or the
+          // wrong canonical form, matches nothing and files a duplicate.
+          const wanted = entry.filters.phone_normalized;
+          if (wanted !== undefined) {
+            const matched = rows.filter(
+              (row) => (row as Record<string, unknown>).phone_normalized === wanted,
+            );
+            return Promise.resolve({ data: matched, error: null });
+          }
+          return Promise.resolve({ data: rows, error: null });
+        }
         if (entry.op === "insert" && rows.length === 0) {
           const row = { id: "11111111-1111-4111-8111-111111111199", ...(entry.row as object) };
           return Promise.resolve({ data: row, error: null });
@@ -412,7 +451,13 @@ test("CW14 an open lead with the same phone in another spelling is a repeat, not
     rows: {
       whatsapp_cloud_numbers: [numberRow],
       whatsapp_cloud_inbound_messages: [],
-      leads: [{ id: "22222222-2222-4222-8222-222222222222", phone: "8 701 000-00-01" }],
+      // The operator typed the trunk spelling; the generated column holds what
+      // migration 028's expression makes of it. Meta sends 77010000001.
+      leads: [{
+        id: "22222222-2222-4222-8222-222222222222",
+        phone: "8 701 000-00-01",
+        phone_normalized: "+77010000001",
+      }],
     },
   }, {}, async (ctx) => {
     const body = inboundPayload();
@@ -425,6 +470,95 @@ test("CW14 an open lead with the same phone in another spelling is a repeat, not
     const ledger = log.find((entry) => entry.table === "whatsapp_cloud_inbound_messages" && entry.op === "insert");
     assert.ok(ledger, "the repeat is recorded");
     assert.equal((ledger.row as Record<string, unknown>).kind, "repeat");
+  });
+});
+
+// ===========================================================================
+// Dedup lookup: exact where possible, scanning only where it must be
+//
+// The shared core (lib/crm/inbound-whatsapp.ts) is the same code the Wazzup
+// adapter runs, and WZ20/WZ21/WZ22 pin this behaviour there. It is pinned
+// again here because the Cloud adapter is the second caller and doubled the
+// traffic through it: a regression reached by this door has to fail a Cloud
+// fixture, not only a Wazzup one.
+//
+// The scan these replace was a dedup rule only while a workspace stayed under
+// 1000 open leads — PostgREST returned an arbitrary window with no ORDER BY,
+// the returning patient's lead could sit outside it, and a duplicate was
+// filed. Confirmed by review on 2026-08-03.
+// ===========================================================================
+
+test("CW23 the repeat check is an indexed equality on the canonical phone", async () => {
+  await withHandler({
+    rows: {
+      whatsapp_cloud_numbers: [numberRow],
+      whatsapp_cloud_inbound_messages: [],
+      leads: [{ id: "22222222-2222-4222-8222-222222222222", phone_normalized: "+77010000001" }],
+    },
+  }, {}, async (ctx) => {
+    const body = inboundPayload();
+    const { res, log } = await ctx.call({ rawBody: body, signature: sign(body) });
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.repeats, 1);
+
+    const lookup = log.find((entry) => entry.table === "leads" && entry.op === "select");
+    assert.ok(lookup, "the lead lookup must run");
+    assert.equal(lookup.filters.phone_normalized, "+77010000001", "the query must carry the canonical phone");
+    assert.equal(lookup.filters.workspace_id, WORKSPACE_A, "and stay inside the number's workspace");
+    assert.equal(lookup.filters["neq:status"], "lost", "open leads only");
+    // The old path read a 1000-row window and searched it in JS. If that is
+    // still what runs, the phone never reaches the query at all.
+    assert.equal(
+      log.filter((entry) => entry.table === "leads" && entry.op === "select").length,
+      1,
+      "one exact lookup, not a scan followed by a client-side search",
+    );
+  });
+});
+
+test("CW24 a database without migration 028 still dedups, through the scanning fallback", async () => {
+  // A deploy can reach production before the migration is applied by hand. A
+  // hard dependency would answer 503 to every inbound message in that gap —
+  // on a live number that is a Meta retry loop and lost patients.
+  await withHandler({
+    rows: {
+      whatsapp_cloud_numbers: [numberRow],
+      whatsapp_cloud_inbound_messages: [],
+      leads: [{ id: "22222222-2222-4222-8222-222222222222", phone: "8 701 000-00-01" }],
+    },
+    missingPhoneNormalized: true,
+  }, {}, async (ctx) => {
+    const body = inboundPayload();
+    const { res, log } = await ctx.call({ rawBody: body, signature: sign(body) });
+
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+    assert.equal(res.body.repeats, 1, "the repeat must still be recognised without the column");
+    assert.equal(leadInserts(log).length, 0, "and no duplicate lead may be filed");
+
+    const selects = log.filter((entry) => entry.table === "leads" && entry.op === "select");
+    assert.equal(selects.length, 2, "the exact lookup is attempted first, then the fallback scan");
+    assert.equal(selects[1].filters["not:phone"], "is", "the fallback is the old phone-scanning query");
+  });
+});
+
+test("CW25 a real lead-lookup failure is still a 503 — the fallback is not a catch-all", async () => {
+  // The exact lookup fails with a connection error while the scan WOULD
+  // succeed and find the repeat. A handler that falls back on any error
+  // answers 200 here and silently downgrades to the defective path on every
+  // transient failure; the correct answer is 503, and Meta retries.
+  await withHandler({
+    rows: {
+      whatsapp_cloud_numbers: [numberRow],
+      whatsapp_cloud_inbound_messages: [],
+      leads: [{ id: "22222222-2222-4222-8222-222222222222", phone: "8 701 000-00-01" }],
+    },
+    phoneNormalizedLookupError: "connection refused",
+  }, {}, async (ctx) => {
+    const body = inboundPayload();
+    const { res, log } = await ctx.call({ rawBody: body, signature: sign(body) });
+    assert.equal(res.statusCode, 503, "an outage must not be mistaken for a missing column");
+    assert.equal(leadInserts(log).length, 0, "and nothing is filed on the way out");
   });
 });
 
