@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import path from "node:path";
+import { PassThrough } from "node:stream";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -488,6 +489,131 @@ test("CW18 a non-text message still files the lead — the contact is the value,
     const row = leadInserts(log)[0]?.row as Record<string, unknown>;
     assert.equal(row.notes, null, "no text body — no invented notes");
     assert.equal(row.phone, "+77010000001");
+  });
+});
+
+// ===========================================================================
+// D. The entry point reads the bytes Meta signed — not what a parser rebuilt
+//
+// The adversarial review caught the original entry point trusting
+// `config.api.bodyParser = false`, a Next.js convention @vercel/node ignores:
+// the platform helpers had already buffered the body and installed req.body
+// as a lazy JSON getter, the entry read it first, and the HMAC was computed
+// over JSON.stringify(JSON.parse(bytes)) — which differs from Meta's bytes on
+// any \uXXXX-escaped Cyrillic, i.e. on essentially all real traffic of this
+// CRM. These tests drive the REAL entry point in a faithful model of each
+// environment. What the runtime actually does is pinned from its source
+// (@vercel/node dist: addHelpers → readBody → restoreBody replays the exact
+// bytes through a PassThrough redirected to req.on("data"/"end")).
+// ===========================================================================
+
+async function loadEntryPoint() {
+  const module = (await import(
+    pathToFileURL(path.join(repoRoot, "api", "webhooks", "whatsapp.ts")).href
+  )) as { default: (req: unknown, res: MockResponse & { end?: (body: string) => void }) => Promise<unknown> };
+  return module.default;
+}
+
+/** A request the way the Vercel helpers leave it: raw bytes replayed through
+ * a PassThrough behind req.on("data"/"end"), req.body a LAZY getter. */
+function helpersShapedRequest(rawBytes: Buffer, headers: Record<string, string>) {
+  const stream = new PassThrough();
+  let lazyGetterTouched = false;
+  const req = Object.assign(stream, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...headers },
+    query: {},
+  });
+  Object.defineProperty(req, "body", {
+    configurable: true,
+    get() {
+      lazyGetterTouched = true;
+      return JSON.parse(rawBytes.toString("utf8"));
+    },
+  });
+  stream.write(rawBytes);
+  stream.end();
+  return { req, wasLazyGetterTouched: () => lazyGetterTouched };
+}
+
+function entryResponse() {
+  const res = mockResponse() as MockResponse & { end: (body: string) => void };
+  res.end = (payload: string) => {
+    try { res.body = JSON.parse(payload); } catch { res.text = payload; }
+    return res;
+  };
+  return res;
+}
+
+test("CW20 under Vercel helpers the signature is verified over Meta's bytes, not a re-serialization", async () => {
+  await withHandler({
+    rows: { whatsapp_cloud_numbers: [numberRow], whatsapp_cloud_inbound_messages: [], leads: [] },
+  }, {}, async () => {
+    const entry = await loadEntryPoint();
+
+    // Meta-style bytes: \uXXXX-escaped Cyrillic and an escaped slash. A
+    // JSON.parse → JSON.stringify round-trip of these bytes produces
+    // DIFFERENT bytes (raw UTF-8, bare slash), so a handler that verifies
+    // the round-trip would answer 401 to a perfectly signed delivery.
+    const rawBytes = Buffer.from(
+      JSON.stringify(JSON.parse(inboundPayload({ text: "Здравствуйте, хочу записаться" })))
+        .replace(/[-￿]/g, (ch) => "\\u" + ch.charCodeAt(0).toString(16).padStart(4, "0"))
+        .replace(/\//g, "\\/"),
+      "utf8",
+    );
+    assert.notEqual(
+      JSON.stringify(JSON.parse(rawBytes.toString("utf8"))),
+      rawBytes.toString("utf8"),
+      "the fixture must be a payload whose round-trip differs — otherwise this test proves nothing",
+    );
+
+    const { req, wasLazyGetterTouched } = helpersShapedRequest(rawBytes, {
+      "x-hub-signature-256": `sha256=${createHmac("sha256", APP_SECRET).update(rawBytes).digest("hex")}`,
+    });
+    const res = entryResponse();
+    await entry(req, res);
+
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+    assert.equal(res.body.created, 1, "the signed Cyrillic delivery must file its lead");
+    assert.equal(wasLazyGetterTouched(), false, "req.body is a lazy parse of the wrong bytes and must never be read");
+  });
+});
+
+test("CW21 the dev middleware shape (plain body value, consumed stream) neither hangs nor crashes", async () => {
+  await withHandler({ rows: {} }, {}, async () => {
+    const entry = await loadEntryPoint();
+
+    // vite.config's middleware consumes the stream WITHOUT restoring it and
+    // assigns req.body as a plain value property. The entry must take the
+    // fallback instead of waiting forever on an "end" that already fired.
+    const stream = new PassThrough();
+    stream.end();
+    const req = Object.assign(stream, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      query: {},
+      body: { object: "whatsapp_business_account", entry: [] },
+    });
+    const res = entryResponse();
+
+    const outcome = await Promise.race([
+      entry(req, res).then(() => "settled"),
+      new Promise((resolve) => setTimeout(() => resolve("hung"), 2000)),
+    ]);
+    assert.equal(outcome, "settled", "a consumed stream with a value body is the dev shape and must settle");
+    assert.equal(res.statusCode, 401, "no signature over the fallback bytes — still a closed door");
+  });
+});
+
+test("CW22 a body over the limit is answered 413 — and the limit clears a maximal legitimate batch", async () => {
+  await withHandler({ rows: {} }, {}, async () => {
+    const entry = await loadEntryPoint();
+
+    const oversized = Buffer.alloc(4 * 1024 * 1024 + 1024, 0x61);
+    const { req } = helpersShapedRequest(oversized, {});
+    const res = entryResponse();
+    await entry(req, res);
+    assert.equal(res.statusCode, 413);
   });
 });
 
