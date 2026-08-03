@@ -3466,6 +3466,47 @@ async function checkSelfRegistrationDisabled() {
   console.log("/api/auth/register: 410 (self-registration disabled)");
 }
 
+async function checkWhatsAppCloudWebhookBoundary() {
+  // The Cloud API webhook fails closed in both unauthenticated shapes: 503
+  // while WHATSAPP_APP_SECRET is not configured (Meta retries, nothing is
+  // lost), 401 once it is and the signature is missing or wrong. Either
+  // answer proves the route is wired and the door is shut; HTML would mean
+  // the request fell through to the SPA fallback.
+  const response = await fetch(`${baseUrl}/api/webhooks/whatsapp`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ object: "whatsapp_business_account", entry: [] }),
+  });
+  const text = await response.text();
+  let body: Record<string, unknown>;
+  try {
+    body = text ? (JSON.parse(text) as Record<string, unknown>) : {};
+  } catch {
+    throw new Error(`/api/webhooks/whatsapp returned non-JSON — the route is not wired: ${text.slice(0, 120)}`);
+  }
+
+  if (![401, 503].includes(response.status) || body.success !== false) {
+    throw new Error(
+      `/api/webhooks/whatsapp must fail closed (401/503) without a signature, got ${response.status}: ${text.slice(0, 120)}`,
+    );
+  }
+
+  // The handshake half: without the right verify token the challenge must
+  // never be echoed. 403 when configured, 503 when not — never 200.
+  const verify = await fetch(
+    `${baseUrl}/api/webhooks/whatsapp?hub.mode=subscribe&hub.verify_token=wrong&hub.challenge=12345`,
+  );
+  if (![403, 503].includes(verify.status)) {
+    throw new Error(`/api/webhooks/whatsapp verify handshake must refuse a wrong token, got ${verify.status}`);
+  }
+  const verifyText = await verify.text();
+  if (verifyText.includes("12345")) {
+    throw new Error("/api/webhooks/whatsapp echoed the challenge to a wrong verify token");
+  }
+
+  console.log(`/api/webhooks/whatsapp: ${response.status} (fail-closed boundary), verify ${verify.status}`);
+}
+
 async function checkWazzupWebhookBoundary() {
   // The Wazzup inbound webhook fails closed in both of its unauthenticated
   // shapes: 503 while WAZZUP_WEBHOOK_SECRET is not configured (Wazzup retries,
@@ -3676,6 +3717,7 @@ async function main() {
   await checkTargetingHealth();
   await checkSelfRegistrationDisabled();
   await checkWazzupWebhookBoundary();
+  await checkWhatsAppCloudWebhookBoundary();
   const crmHealth = await checkJsonEndpoint("/api/crm/health");
   // Security-2B: the route is refused before any business branch runs. Its
   // invariants are covered by the handler-level suites, which run without a

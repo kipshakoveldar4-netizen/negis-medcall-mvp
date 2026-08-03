@@ -98,7 +98,8 @@ function targetingApiDevMiddleware(): Plugin {
           !pathname.startsWith("/api/content-studio") &&
           !pathname.startsWith("/api/crm") &&
           pathname !== "/api/auth/register" &&
-          pathname !== "/api/webhooks/wazzup"
+          pathname !== "/api/webhooks/wazzup" &&
+          pathname !== "/api/webhooks/whatsapp"
         ) {
           next();
           return;
@@ -116,6 +117,12 @@ function targetingApiDevMiddleware(): Plugin {
             // dev server dropped the same request into the SPA fallback and
             // the route could not be exercised locally at all.
             modulePath = apiModule("api", "webhooks", "wazzup.ts");
+          } else if (pathname === "/api/webhooks/whatsapp") {
+            // Same parity for the WhatsApp Cloud API webhook. The middleware
+            // has already consumed the stream, so the entry point falls back
+            // to the parsed body — enough for the unauthenticated boundary,
+            // which is all dev exercises.
+            modulePath = apiModule("api", "webhooks", "whatsapp.ts");
           } else if (pathname.startsWith("/api/content-studio/")) {
             const contentPath = pathname.replace(/^\/api\/content-studio\//, "").split("/").filter(Boolean);
             modulePath = apiModule("api", "content-studio", "[...path].ts");

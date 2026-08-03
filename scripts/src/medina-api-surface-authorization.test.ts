@@ -99,6 +99,19 @@ const API_SURFACE: readonly RouteClassification[] = [
       "Wazzup retries; the ledger keyed by messageId makes replays no-ops. Covered by test:wazzup-webhook.",
   },
   {
+    file: "webhooks/whatsapp.ts",
+    classification: "C",
+    rationale:
+      "Signed inbound webhook: WhatsApp Cloud API message events become CRM leads (§14, the same pipeline " +
+      "as webhooks/wazzup.ts through lib/crm/inbound-whatsapp.ts). GET is Meta's subscription handshake — " +
+      "hub.challenge is echoed only when hub.verify_token matches WHATSAPP_VERIFY_TOKEN in constant time. " +
+      "POST is authenticated by X-Hub-Signature-256: HMAC-SHA256 of the raw body keyed with " +
+      "WHATSAPP_APP_SECRET, verified before parsing — never a browser JWT. Tenancy comes from the " +
+      "whatsapp_cloud_numbers row, never the payload; an unknown number answers 200 without disclosure; " +
+      "a database outage answers 503 so Meta retries; the ledger keyed by the wamid makes replays no-ops. " +
+      "Covered by test:whatsapp-cloud-webhook.",
+  },
+  {
     file: "auth/register.ts",
     classification: "F",
     rationale:
