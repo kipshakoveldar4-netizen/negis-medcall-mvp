@@ -112,6 +112,70 @@ async function resolveLeadTaxonomy(
   };
 }
 
+/** Postgres "column does not exist" — the one error the fallback answers to. */
+const UNDEFINED_COLUMN = "42703";
+
+function isMissingColumn(error: { code?: unknown; message?: unknown } | null): boolean {
+  if (!error) return false;
+  if (readString(error.code) === UNDEFINED_COLUMN) return true;
+  const message = readString(error.message).toLowerCase();
+  return message.includes("phone_normalized") && message.includes("does not exist");
+}
+
+/**
+ * The open lead this phone already has in this workspace, or nothing.
+ *
+ * Preferred path: an equality match on `leads.phone_normalized`, the stored
+ * generated column migration 028 adds, backed by a partial index. Exact, and
+ * it does not care how many leads the clinic has.
+ *
+ * Fallback path: read up to 1000 open leads and compare canonical forms in
+ * code. That was the only implementation until 028, and it is a dedup rule
+ * only while a workspace stays under a thousand open leads — past that,
+ * PostgREST returns an arbitrary window, the existing lead can fall outside
+ * it, and a duplicate is filed. It survives here for exactly one reason: a
+ * deployment reaches production before its migration is applied by hand, and
+ * a hard dependency would answer 503 to every inbound message in that gap —
+ * on a live channel that means a retry loop and lost patients. The fallback
+ * is entered only on "column does not exist", never on a real database
+ * failure, and it disappears from use the moment 028 lands.
+ */
+async function findOpenLeadByPhone(
+  supabase: SupabaseServerClient,
+  workspaceId: string,
+  phone: string,
+): Promise<JsonRecord | undefined> {
+  const indexed = await supabase
+    .from("leads")
+    .select("id")
+    .eq("workspace_id", workspaceId)
+    .eq("phone_normalized", phone)
+    .neq("status", "lost")
+    .limit(1);
+
+  if (!indexed.error) {
+    const rows = Array.isArray(indexed.data) ? indexed.data : [];
+    return rows.length > 0 ? asRecord(rows[0]) : undefined;
+  }
+
+  if (!isMissingColumn(indexed.error)) {
+    throw new Error(`lead lookup: ${indexed.error.message}`);
+  }
+
+  const { data: candidates, error: candidatesError } = await supabase
+    .from("leads")
+    .select("id, phone")
+    .eq("workspace_id", workspaceId)
+    .neq("status", "lost")
+    .not("phone", "is", null)
+    .limit(1000);
+  if (candidatesError) throw new Error(`lead lookup: ${candidatesError.message}`);
+
+  return (Array.isArray(candidates) ? candidates : [])
+    .map((row) => asRecord(row))
+    .find((row) => normalizePhone(readString(row.phone)) === phone);
+}
+
 /**
  * Files each authenticated inbound message: a lead in the channel's workspace,
  * or a recorded repeat, or a counted ignore. Throws on database failure — the
@@ -158,21 +222,8 @@ export async function processInboundWhatsAppMessages(
     }
 
     // W3 default: an open lead (anything but 'lost') with the same phone in
-    // the same workspace is a repeat contact, not a new lead. Stored phones
-    // arrive in every spelling operators type, so the comparison happens on
-    // the canonical form in code rather than on raw strings in SQL.
-    const { data: candidates, error: candidatesError } = await supabase
-      .from("leads")
-      .select("id, phone")
-      .eq("workspace_id", workspaceId)
-      .neq("status", "lost")
-      .not("phone", "is", null)
-      .limit(1000);
-    if (candidatesError) throw new Error(`lead lookup: ${candidatesError.message}`);
-
-    const existing = (Array.isArray(candidates) ? candidates : [])
-      .map((row) => asRecord(row))
-      .find((row) => normalizePhone(readString(row.phone)) === message.phone);
+    // the same workspace is a repeat contact, not a new lead.
+    const existing = await findOpenLeadByPhone(supabase, workspaceId, message.phone);
 
     let leadId = readString(asRecord(existing).id);
     let kind: "created" | "repeat" = "repeat";
