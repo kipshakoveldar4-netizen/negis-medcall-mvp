@@ -43,6 +43,19 @@ function mockResponse(): MockResponse {
 type SpyOptions = {
   rows?: Record<string, unknown[]>;
   errors?: Record<string, string>;
+  /**
+   * Models a database where migration 028 has not been applied: any query
+   * filtering on leads.phone_normalized answers Postgres 42703 the way
+   * PostgREST reports it. Everything else behaves normally.
+   */
+  missingPhoneNormalized?: boolean;
+  /**
+   * A real failure of the exact lookup only: the query filtering on
+   * phone_normalized fails with something that is NOT 42703, while the
+   * fallback scan would succeed. Distinguishes "fall back on a missing
+   * column" from "fall back on anything".
+   */
+  phoneNormalizedLookupError?: string;
 };
 
 function spyClient(options: SpyOptions, log: QueryLog[]) {
@@ -51,6 +64,21 @@ function spyClient(options: SpyOptions, log: QueryLog[]) {
       const entry: QueryLog = { table, op: "select", filters: {} };
       log.push(entry);
       const settle = (shape: "one" | "list") => {
+        if (options.phoneNormalizedLookupError && "phone_normalized" in entry.filters) {
+          return Promise.resolve({
+            data: null,
+            error: { code: "08006", message: options.phoneNormalizedLookupError },
+          });
+        }
+        if (options.missingPhoneNormalized && "phone_normalized" in entry.filters) {
+          return Promise.resolve({
+            data: null,
+            error: {
+              code: "42703",
+              message: 'column leads.phone_normalized does not exist',
+            },
+          });
+        }
         const message = options.errors?.[table];
         if (message) return Promise.resolve({ data: null, error: { message } });
         const rows = options.rows?.[table] ?? [];
@@ -408,6 +436,80 @@ test("WZ12 an open lead with the same phone in another spelling is a repeat, not
       assert.equal(row.lead_id, "lead-1", "pointing at the lead that already exists");
     },
   );
+});
+
+// ===========================================================================
+// Dedup lookup: exact where possible, scanning only where it must be
+//
+// Migration 028 adds leads.phone_normalized (stored generated) so the repeat
+// check is an indexed equality. The scan it replaces was a dedup rule only
+// while a workspace stayed under 1000 open leads: PostgREST returned an
+// arbitrary window with no ORDER BY, the returning patient's lead could sit
+// outside it, and a duplicate was filed. Confirmed by review on 2026-08-03.
+// ===========================================================================
+
+test("WZ20 the repeat check is an indexed equality on the canonical phone", async () => {
+  await withHandler({
+    rows: { wazzup_channels: [channelRow], leads: [{ id: "22222222-2222-4222-8222-222222222222" }] },
+  }, {}, async (ctx) => {
+    const { res, log } = await ctx.call({ secret: SECRET, body: { messages: [inboundMessage()] } });
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.repeats, 1);
+
+    const lookup = log.find((entry) => entry.table === "leads" && entry.op === "select");
+    assert.ok(lookup, "the lead lookup must run");
+    assert.equal(lookup.filters.phone_normalized, "+77010000001", "the query must carry the canonical phone");
+    assert.equal(lookup.filters.workspace_id, WORKSPACE_A, "and stay inside the channel's workspace");
+    assert.equal(lookup.filters["neq:status"], "lost", "open leads only");
+    // The old path read a 1000-row window and searched it in JS. If that is
+    // still what runs, the phone never reaches the query at all.
+    assert.equal(
+      log.filter((entry) => entry.table === "leads" && entry.op === "select").length,
+      1,
+      "one exact lookup, not a scan followed by a client-side search",
+    );
+  });
+});
+
+test("WZ21 a database without migration 028 still dedups, through the scanning fallback", async () => {
+  // A deploy can reach production before the migration is applied by hand. A
+  // hard dependency would answer 503 to every inbound message in that gap —
+  // on a live channel that is a retry loop and lost patients.
+  await withHandler({
+    rows: {
+      wazzup_channels: [channelRow],
+      leads: [{ id: "22222222-2222-4222-8222-222222222222", phone: "8 701 000-00-01" }],
+    },
+    missingPhoneNormalized: true,
+  }, {}, async (ctx) => {
+    const { res, log } = await ctx.call({ secret: SECRET, body: { messages: [inboundMessage()] } });
+
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+    assert.equal(res.body.repeats, 1, "the repeat must still be recognised without the column");
+    assert.equal(leadInserts(log).length, 0, "and no duplicate lead may be filed");
+
+    const selects = log.filter((entry) => entry.table === "leads" && entry.op === "select");
+    assert.equal(selects.length, 2, "the exact lookup is attempted first, then the fallback scan");
+    assert.equal(selects[1].filters["not:phone"], "is", "the fallback is the old phone-scanning query");
+  });
+});
+
+test("WZ22 a real lead-lookup failure is still a 503 — the fallback is not a catch-all", async () => {
+  // The exact lookup fails with a connection error while the scan WOULD
+  // succeed and find the repeat. A handler that falls back on any error
+  // answers 200 here and silently downgrades to the defective path on every
+  // transient failure; the correct answer is 503, and the provider retries.
+  await withHandler({
+    rows: {
+      wazzup_channels: [channelRow],
+      leads: [{ id: "22222222-2222-4222-8222-222222222222", phone: "8 701 000-00-01" }],
+    },
+    phoneNormalizedLookupError: "connection refused",
+  }, {}, async (ctx) => {
+    const { res } = await ctx.call({ secret: SECRET, body: { messages: [inboundMessage()] } });
+    assert.equal(res.statusCode, 503, "an outage must not be mistaken for a missing column");
+  });
 });
 
 test("WZ13 a lost lead does not block a new one — the W3 default, pinned", async () => {

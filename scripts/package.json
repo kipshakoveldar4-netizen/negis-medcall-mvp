@@ -28,7 +28,8 @@
     "test:migration-chain": "tsx --test ./src/medina-migration-chain.test.ts",
     "test:wazzup-webhook": "tsx --test ./src/medina-wazzup-webhook.test.ts",
     "test:transition-performance": "tsx --test ./src/medina-transition-performance.test.ts",
-    "test:whatsapp-cloud-webhook": "tsx --test ./src/medina-whatsapp-cloud-webhook.test.ts"
+    "test:whatsapp-cloud-webhook": "tsx --test ./src/medina-whatsapp-cloud-webhook.test.ts",
+    "test:crm-phone-parity": "tsx --test ./src/medina-crm-phone-parity.test.ts"
   },
   "devDependencies": {
     "@types/node": "catalog:",
