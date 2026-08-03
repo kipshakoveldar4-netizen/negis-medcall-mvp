@@ -31,7 +31,8 @@
     "test:failure-honesty": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:failure-honesty",
     "test:migration-chain": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:migration-chain",
     "test:wazzup-webhook": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:wazzup-webhook",
-    "test:transition-performance": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:transition-performance"
+    "test:transition-performance": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:transition-performance",
+    "test:whatsapp-cloud-webhook": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:whatsapp-cloud-webhook"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.105.4",

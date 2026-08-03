@@ -2,6 +2,11 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { getSupabaseServerClient } from "../supabase/server";
 import { normalizePhone } from "../crm/phone";
+import {
+  processInboundWhatsAppMessages,
+  type InboundProviderTables,
+  type InboundWhatsAppMessage,
+} from "../crm/inbound-whatsapp";
 
 // Wazzup inbound webhook, phase 1: an inbound WhatsApp message becomes a lead
 // in the workspace that owns the channel.
@@ -18,17 +23,22 @@ import { normalizePhone } from "../crm/phone";
 //   - Anything but 200 is retried, so a replay must be a no-op and a database
 //     outage must answer 503, not 200.
 //
-// Tenancy: the payload says nothing about workspaces and is never trusted to.
-// The wazzup_channels row for channelId is the only authority; an unknown or
-// disabled channel is acknowledged with 200 and ignored, so a caller probing
-// the endpoint learns nothing about which channels exist.
+// This file is the Wazzup adapter only: transport, secret, payload parsing.
+// Everything after "here is an inbound message on channel X" — tenancy from
+// wazzup_channels, the idempotency ledger, phone dedup, funnel taxonomy, the
+// lead itself — lives in lib/crm/inbound-whatsapp.ts, shared verbatim with
+// the WhatsApp Cloud API adapter (§14: адаптер, не форк).
 //
 // Personal data: phones, names and message texts are patient data. They go to
 // the database and nowhere else — log lines carry scopes and counts only.
 
 type JsonRecord = Record<string, unknown>;
 
-const NOTES_LIMIT = 1000;
+const WAZZUP_TABLES: InboundProviderTables = {
+  channelTable: "wazzup_channels",
+  channelKeyColumn: "channel_id",
+  ledgerTable: "wazzup_inbound_messages",
+};
 
 function asRecord(value: unknown): JsonRecord {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
@@ -83,61 +93,10 @@ function readProvidedSecrets(req: VercelRequest): string[] {
   return [bearer, query].filter((candidate) => candidate.length > 0);
 }
 
-type LeadTaxonomy = { stageId: string | null; sourceId: string | null };
-
-/**
- * The funnel taxonomy introduced in 019: besides the legacy `source` text a
- * lead carries `stage_id` and `source_id`. A lead created in the interface
- * gets both because the form sends them — a lead filed by this webhook got
- * neither, so it sat outside every stage-keyed view and outside source
- * analytics, while the `whatsapp` row seeded in `lead_sources` went unused.
- *
- * Resolution mirrors the backfill 019 already performs for existing rows: the
- * first stage of the `new` semantic group, and the source keyed `whatsapp`.
- * Both are workspace-scoped, and both are optional — a clinic that reshaped
- * its funnel simply gets a lead without them, exactly as before this change.
- * A failed lookup is treated as "not found" rather than thrown for the same
- * reason: losing a classification field must not turn a working pipeline into
- * a retry loop, and the message itself is the thing worth keeping.
- */
-async function resolveLeadTaxonomy(
-  supabase: NonNullable<ReturnType<typeof getSupabaseServerClient>>,
-  workspaceId: string,
-): Promise<LeadTaxonomy> {
-  const stage = await supabase
-    .from("lead_stages")
-    .select("id")
-    .eq("workspace_id", workspaceId)
-    .eq("semantic_group", "new")
-    .order("sort_order", { ascending: true })
-    .limit(1)
-    .maybeSingle();
-
-  const source = await supabase
-    .from("lead_sources")
-    .select("id")
-    .eq("workspace_id", workspaceId)
-    .eq("source_key", "whatsapp")
-    .maybeSingle();
-
-  return {
-    stageId: stage.error ? null : readString(asRecord(stage.data).id) || null,
-    sourceId: source.error ? null : readString(asRecord(source.data).id) || null,
-  };
-}
-
-type InboundMessage = {
-  messageId: string;
-  channelId: string;
-  phone: string;
-  contactName: string;
-  text: string;
-};
-
 /** Inbound WhatsApp messages only; everything else in the batch is ignored. */
-function readInboundMessages(body: JsonRecord): InboundMessage[] {
+function readInboundMessages(body: JsonRecord): InboundWhatsAppMessage[] {
   const raw = Array.isArray(body.messages) ? body.messages : [];
-  const inbound: InboundMessage[] = [];
+  const inbound: InboundWhatsAppMessage[] = [];
 
   for (const entry of raw) {
     const message = asRecord(entry);
@@ -151,8 +110,8 @@ function readInboundMessages(body: JsonRecord): InboundMessage[] {
     if (!messageId || !channelId || !phone) continue;
 
     inbound.push({
+      channelKey: channelId,
       messageId,
-      channelId,
       phone,
       contactName: readString(asRecord(message.contact).name),
       text: readString(message.text),
@@ -196,108 +155,9 @@ export async function handleWazzupWebhook(req: VercelRequest, res: VercelRespons
     return sendJson(res, 503, { success: false, error: "Service unavailable" });
   }
 
-  let created = 0;
-  let repeats = 0;
-  let ignored = 0;
-  // One resolution per workspace per batch, not per message.
-  const taxonomyByWorkspace = new Map<string, LeadTaxonomy>();
-
   try {
-    for (const message of inbound) {
-      // Replays first: Wazzup retries until it sees 200, and a message that is
-      // already in the ledger has already produced whatever it was going to.
-      const { data: seen, error: seenError } = await supabase
-        .from("wazzup_inbound_messages")
-        .select("id")
-        .eq("message_id", message.messageId)
-        .maybeSingle();
-      if (seenError) throw new Error(`ledger lookup: ${seenError.message}`);
-      if (seen) {
-        ignored += 1;
-        continue;
-      }
-
-      // The channel row is the tenant authority. Unknown or disabled channels
-      // are acknowledged and ignored — not an error, and not information.
-      const { data: channel, error: channelError } = await supabase
-        .from("wazzup_channels")
-        .select("workspace_id, enabled")
-        .eq("channel_id", message.channelId)
-        .maybeSingle();
-      if (channelError) throw new Error(`channel lookup: ${channelError.message}`);
-      const workspaceId = readString(asRecord(channel).workspace_id);
-      if (!workspaceId || asRecord(channel).enabled !== true) {
-        ignored += 1;
-        continue;
-      }
-
-      // W3 default: an open lead (anything but 'lost') with the same phone in
-      // the same workspace is a repeat contact, not a new lead. Stored phones
-      // arrive in every spelling operators type, so the comparison happens on
-      // the canonical form in code rather than on raw strings in SQL.
-      const { data: candidates, error: candidatesError } = await supabase
-        .from("leads")
-        .select("id, phone")
-        .eq("workspace_id", workspaceId)
-        .neq("status", "lost")
-        .not("phone", "is", null)
-        .limit(1000);
-      if (candidatesError) throw new Error(`lead lookup: ${candidatesError.message}`);
-
-      const existing = (Array.isArray(candidates) ? candidates : [])
-        .map((row) => asRecord(row))
-        .find((row) => normalizePhone(readString(row.phone)) === message.phone);
-
-      let leadId = readString(asRecord(existing).id);
-      let kind: "created" | "repeat" = "repeat";
-
-      if (!existing) {
-        let taxonomy = taxonomyByWorkspace.get(workspaceId);
-        if (!taxonomy) {
-          taxonomy = await resolveLeadTaxonomy(supabase, workspaceId);
-          taxonomyByWorkspace.set(workspaceId, taxonomy);
-        }
-
-        const { data: lead, error: leadError } = await supabase
-          .from("leads")
-          .insert({
-            workspace_id: workspaceId,
-            full_name: message.contactName || message.phone,
-            phone: message.phone,
-            source: "whatsapp",
-            status: "new",
-            ...(taxonomy.stageId ? { stage_id: taxonomy.stageId } : {}),
-            ...(taxonomy.sourceId ? { source_id: taxonomy.sourceId } : {}),
-            notes: message.text ? `WhatsApp: ${message.text.slice(0, NOTES_LIMIT)}` : null,
-          })
-          .select("id")
-          .single();
-        if (leadError) throw new Error(`lead insert: ${leadError.message}`);
-        leadId = readString(asRecord(lead).id);
-        kind = "created";
-      }
-
-      // Ledger last: if anything above failed we answered 503 and Wazzup will
-      // retry into a clean slate. A unique violation here means a concurrent
-      // duplicate delivery — the phone dedup above already kept the lead
-      // single, so the loss is only a double count, never a double lead.
-      const { error: ledgerError } = await supabase.from("wazzup_inbound_messages").insert({
-        message_id: message.messageId,
-        channel_id: message.channelId,
-        workspace_id: workspaceId,
-        lead_id: leadId || null,
-        kind,
-      });
-      if (ledgerError) {
-        const text = ledgerError.message || "";
-        if (!text.includes("duplicate") && !text.includes("23505")) {
-          throw new Error(`ledger insert: ${ledgerError.message}`);
-        }
-      }
-
-      if (kind === "created") created += 1;
-      else repeats += 1;
-    }
+    const counts = await processInboundWhatsAppMessages(supabase, WAZZUP_TABLES, inbound);
+    return sendJson(res, 200, { success: true, ...counts });
   } catch (error) {
     // Scope only — never the payload: phones, names and texts are patient
     // data and must not reach the logs.
@@ -305,6 +165,4 @@ export async function handleWazzupWebhook(req: VercelRequest, res: VercelRespons
     console.warn(`[wazzup] webhook processing failed: ${detail}`);
     return sendJson(res, 503, { success: false, error: "Service unavailable" });
   }
-
-  return sendJson(res, 200, { success: true, created, repeats, ignored });
 }
