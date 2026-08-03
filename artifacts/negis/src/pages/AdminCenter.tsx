@@ -27,6 +27,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { PageLayout } from "@/components/layout/PageLayout";
+import { WhatsAppChannels } from "@/components/admin/WhatsAppChannels";
 import { useAuth } from "@/contexts/AuthContext";
 import { apiUrl, crmFetch } from "@/lib/api";
 import { readWorkspaceId, workspaceScopedKey } from "@/lib/demoStorage";
@@ -55,6 +56,7 @@ type AdminTab =
   | "staff"
   | "roles"
   | "clinic"
+  | "whatsapp"
   | "integrations"
   | "ai"
   | "meta"
@@ -270,6 +272,7 @@ const tabs: Array<{ id: AdminTab; label: string; icon: LucideIcon }> = [
   { id: "staff", label: "Сотрудники", icon: Users },
   { id: "roles", label: "Роли и доступы", icon: ShieldCheck },
   { id: "clinic", label: "Клиника", icon: Building2 },
+  { id: "whatsapp", label: "WhatsApp", icon: MessageCircle },
   { id: "integrations", label: "Интеграции", icon: Database },
   { id: "ai", label: "Нейросети", icon: Sparkles },
   { id: "meta", label: "Meta/Facebook Ads", icon: Facebook },
@@ -2346,6 +2349,7 @@ export default function AdminCenter() {
         {activeTab === "staff" && renderStaff()}
         {activeTab === "roles" && renderRoles()}
         {activeTab === "clinic" && renderClinic()}
+        {activeTab === "whatsapp" && <WhatsAppChannels />}
         {activeTab === "integrations" && renderIntegrations()}
         {activeTab === "ai" && renderAiProviders()}
         {activeTab === "meta" && renderMeta()}

@@ -161,6 +161,12 @@ export const CRM_ROUTE_AUTHORIZATION: Readonly<Record<string, RouteAuthorization
   "meta-insights-history": { kind: "browser", methods: ["GET"], roles: WORKSPACE_ADMIN },
   "meta-insights-sync-runs": { kind: "browser", methods: ["GET"], roles: WORKSPACE_ADMIN },
 
+  // The clinic's own WhatsApp connection: which channels feed its inbound
+  // pipeline, how much they have filed, and the switch that stops one. It
+  // touches the tenancy tables the webhooks trust, so it stays at the
+  // administrator level like every other configuration resource.
+  "whatsapp-channels": { kind: "browser", methods: ["GET", "PATCH"], roles: WORKSPACE_ADMIN },
+
   // Worker route: HMAC only. A browser JWT must never satisfy it.
   "meta-insights-background-cycle": { kind: "internal_hmac", methods: ["POST"] },
 };

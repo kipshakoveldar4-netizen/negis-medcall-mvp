@@ -3466,6 +3466,29 @@ async function checkSelfRegistrationDisabled() {
   console.log("/api/auth/register: 410 (self-registration disabled)");
 }
 
+async function checkWhatsAppChannelsBoundary() {
+  // The clinic-facing WhatsApp connection route. Unauthenticated it must be
+  // 401 — registered and guarded. A 404 would mean the route never made it
+  // into lib/crm/authorization.ts and the settings tab would be dead; HTML
+  // would mean the request fell through to the SPA fallback.
+  const response = await fetch(`${baseUrl}/api/crm/whatsapp-channels`);
+  const text = await response.text();
+  let body: Record<string, unknown>;
+  try {
+    body = text ? (JSON.parse(text) as Record<string, unknown>) : {};
+  } catch {
+    throw new Error(`/api/crm/whatsapp-channels returned non-JSON — the route is not wired: ${text.slice(0, 120)}`);
+  }
+
+  if (response.status !== 401 || body.success !== false) {
+    throw new Error(
+      `/api/crm/whatsapp-channels must be registered and guarded (401), got ${response.status}: ${text.slice(0, 120)}`,
+    );
+  }
+
+  console.log(`/api/crm/whatsapp-channels: ${response.status} (registered, authentication required)`);
+}
+
 async function checkWhatsAppCloudWebhookBoundary() {
   // The Cloud API webhook fails closed in both unauthenticated shapes: 503
   // while WHATSAPP_APP_SECRET is not configured (Meta retries, nothing is
@@ -3718,6 +3741,7 @@ async function main() {
   await checkSelfRegistrationDisabled();
   await checkWazzupWebhookBoundary();
   await checkWhatsAppCloudWebhookBoundary();
+  await checkWhatsAppChannelsBoundary();
   const crmHealth = await checkJsonEndpoint("/api/crm/health");
   // Security-2B: the route is refused before any business branch runs. Its
   // invariants are covered by the handler-level suites, which run without a
