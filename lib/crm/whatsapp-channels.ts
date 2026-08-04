@@ -24,9 +24,23 @@ import { readWorkspaceContext } from "./server";
 
 type JsonRecord = Record<string, unknown>;
 
-/** Postgres codes that mean "this provider was never provisioned here". */
-const UNDEFINED_TABLE = "42P01";
-const UNDEFINED_COLUMN = "42703";
+/**
+ * "This provider was never provisioned here", in the two shapes it arrives in.
+ *
+ * PostgREST answers a table that is not in its schema cache itself, without
+ * ever reaching Postgres: HTTP 404 with code PGRST205, "Could not find the
+ * table 'public.x' in the schema cache" (postgrest.org, Schema Cache group).
+ * That is the shape hosted Supabase returns, and the first version of this
+ * file matched only the Postgres codes — so on production, where migration 027
+ * is deliberately not applied, the whole tab would have answered 502 and taken
+ * the kill switch for a live channel down with it. Caught by review before it
+ * shipped; PGRST205 is now the first thing checked.
+ *
+ * 42P01/42703 stay for a self-hosted PostgREST that does reach Postgres. The
+ * loose "does not exist" substring is gone: it would have swallowed a mistyped
+ * column in our own select and reported it as "not provisioned".
+ */
+const NOT_PROVISIONED_CODES = new Set(["PGRST205", "42P01", "42703"]);
 
 type ProviderSpec = {
   provider: "wazzup" | "whatsapp_cloud";
@@ -78,10 +92,9 @@ function sendJson(res: VercelResponse, status: number, payload: unknown) {
  */
 function isMissingRelation(error: { code?: unknown; message?: unknown } | null): boolean {
   if (!error) return false;
-  const code = readString(error.code);
-  if (code === UNDEFINED_TABLE || code === UNDEFINED_COLUMN) return true;
-  const message = readString(error.message).toLowerCase();
-  return message.includes("does not exist");
+  if (NOT_PROVISIONED_CODES.has(readString(error.code))) return true;
+  // Net for a PostgREST that reports the same condition without the code.
+  return readString(error.message).toLowerCase().includes("schema cache");
 }
 
 /**
@@ -124,40 +137,82 @@ async function readProviderChannels(
   const rows = (Array.isArray(data) ? data : []).map(asRecord);
   if (rows.length === 0) return { channels: [], available: true };
 
-  // Activity per channel, counted from the ledger. Rows are never returned to
-  // the caller — only how many there are and when the last one arrived.
-  const ledger = await supabase
-    .from(spec.ledger)
-    .select("channel_id, kind, received_at")
-    .eq("workspace_id", workspaceId);
-
-  const ledgerRows = ledger.error ? [] : (Array.isArray(ledger.data) ? ledger.data : []).map(asRecord);
-  if (ledger.error && !isMissingRelation(ledger.error)) {
-    throw new Error(`${spec.ledger}: ${ledger.error.message}`);
-  }
-
-  return {
-    available: true,
-    channels: rows.map((row) => {
+  const channels = await Promise.all(
+    rows.map(async (row) => {
       const key = readString(row[spec.keyColumn]);
-      const mine = ledgerRows.filter((entry) => readString(entry.channel_id) === key);
-      const timestamps = mine
-        .map((entry) => readString(entry.received_at))
-        .filter(Boolean)
-        .sort();
-
+      const activity = await readChannelActivity(supabase, workspaceId, spec, key);
       return {
         id: readString(row.id),
         provider: spec.provider,
         keyMasked: maskKey(key),
         enabled: row.enabled === true,
         createdAt: readString(row.created_at) || null,
-        leadsFiled: mine.filter((entry) => readString(entry.kind) === "created").length,
-        repeatsSeen: mine.filter((entry) => readString(entry.kind) === "repeat").length,
-        lastInboundAt: timestamps.length > 0 ? timestamps[timestamps.length - 1] : null,
+        ...activity,
       };
     }),
+  );
+
+  return { available: true, channels };
+}
+
+/**
+ * How much this channel has brought, asked of the database rather than counted
+ * in code.
+ *
+ * The first version read the workspace's whole ledger with no limit and no
+ * order and tallied it here. That is the trap this project already paid for in
+ * the inbound dedup path: PostgREST caps a select at the project's max-rows
+ * setting and, without ORDER BY, returns an arbitrary window — so a clinic past
+ * that many messages would have seen its counters frozen and a "last inbound"
+ * taken from whichever rows came back. Counts are now exact aggregates the
+ * database computes, and the timestamp is one ordered row.
+ *
+ * Ledger rows still never reach the caller: `head: true` returns no body at
+ * all, and the last-inbound query selects a single timestamp.
+ */
+async function readChannelActivity(
+  supabase: SupabaseServerClient,
+  workspaceId: string,
+  spec: ProviderSpec,
+  channelKey: string,
+): Promise<{ leadsFiled: number; repeatsSeen: number; lastInboundAt: string | null }> {
+  const countOf = async (kind: "created" | "repeat") => {
+    const { count, error } = await supabase
+      .from(spec.ledger)
+      .select("id", { count: "exact", head: true })
+      .eq("workspace_id", workspaceId)
+      .eq("channel_id", channelKey)
+      .eq("kind", kind);
+    if (error) {
+      if (isMissingRelation(error)) return 0;
+      throw new Error(`${spec.ledger}: ${error.message}`);
+    }
+    return typeof count === "number" ? count : 0;
   };
+
+  const lastInbound = async () => {
+    const { data, error } = await supabase
+      .from(spec.ledger)
+      .select("received_at")
+      .eq("workspace_id", workspaceId)
+      .eq("channel_id", channelKey)
+      .order("received_at", { ascending: false })
+      .limit(1);
+    if (error) {
+      if (isMissingRelation(error)) return null;
+      throw new Error(`${spec.ledger}: ${error.message}`);
+    }
+    const rows = Array.isArray(data) ? data : [];
+    return rows.length > 0 ? readString(asRecord(rows[0]).received_at) || null : null;
+  };
+
+  const [leadsFiled, repeatsSeen, lastInboundAt] = await Promise.all([
+    countOf("created"),
+    countOf("repeat"),
+    lastInbound(),
+  ]);
+
+  return { leadsFiled, repeatsSeen, lastInboundAt };
 }
 
 async function listChannels(workspaceId: string, res: VercelResponse) {

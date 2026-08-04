@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { MessageCircle, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 import { crmFetch } from "@/lib/api";
@@ -45,8 +45,14 @@ export function WhatsAppChannels() {
   const [loading, setLoading] = useState(true);
   const [failed, setFailed] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
+  // A refresh that started before a toggle was confirmed carries the old
+  // state. Applying it afterwards would flip the switch back on screen while
+  // the database holds the new value — the operator sees their own action
+  // undone. Each load takes a ticket; only the newest one may paint.
+  const loadTicket = useRef(0);
 
   const load = useCallback(async () => {
+    const ticket = ++loadTicket.current;
     setLoading(true);
     try {
       const response = await crmFetch("/api/crm/whatsapp-channels");
@@ -54,6 +60,7 @@ export function WhatsAppChannels() {
         success?: boolean;
         data?: { channels?: Channel[]; providers?: ProviderAvailability[] };
       };
+      if (ticket !== loadTicket.current) return;
       if (!response.ok || body.success !== true) {
         // Security-2F honesty: a refused read is not an empty clinic.
         setFailed(true);
@@ -63,9 +70,9 @@ export function WhatsAppChannels() {
       setProviders(Array.isArray(body.data?.providers) ? body.data.providers : []);
       setFailed(false);
     } catch {
-      setFailed(true);
+      if (ticket === loadTicket.current) setFailed(true);
     } finally {
-      setLoading(false);
+      if (ticket === loadTicket.current) setLoading(false);
     }
   }, []);
 
@@ -87,6 +94,8 @@ export function WhatsAppChannels() {
         toast.error("Не удалось изменить канал. Попробуйте ещё раз.");
         return;
       }
+      // The confirmed state wins over anything a refresh in flight might carry.
+      loadTicket.current += 1;
       setChannels((current) => current.map((entry) => (entry.id === channel.id ? { ...entry, enabled: next } : entry)));
       toast.success(next ? "Канал включён — заявки снова создаются." : "Канал выключен — новые заявки не создаются.");
     } catch {
@@ -105,7 +114,8 @@ export function WhatsAppChannels() {
           <h2 className="text-lg font-black text-[#0F172A]">WhatsApp: заявки от пациентов</h2>
           <p className="text-sm text-[#64748B]">
             Сообщение пациента на номер клиники автоматически становится заявкой в разделе «Заявки».
-            Повторное сообщение с того же номера новую заявку не создаёт.
+            Пока по пациенту есть незакрытая заявка, его новые сообщения в неё же и засчитываются, а не плодят
+            дубли.
           </p>
         </div>
         <button type="button" className="neu-btn w-full sm:w-auto" onClick={() => void load()} disabled={loading}>

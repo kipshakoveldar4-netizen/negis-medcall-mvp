@@ -24,7 +24,16 @@ const USER_A = "11111111-1111-4111-8111-111111111111";
 const CHANNEL_ROW_A = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 const TOKEN = "header.payload.signature";
 
-type QueryLog = { table: string; op: string; filters: Record<string, unknown>; row?: unknown };
+type QueryLog = {
+  table: string;
+  op: string;
+  filters: Record<string, unknown>;
+  row?: unknown;
+  /** An aggregate read: PostgREST returns a count and no rows. */
+  head?: boolean;
+  ordered?: string;
+  limited?: number;
+};
 
 type MockResponse = {
   statusCode: number;
@@ -83,28 +92,72 @@ async function loadRouter(options: LoadOptions = {}) {
       log.push(entry);
       const settle = (shape: "one" | "list") => {
         if (options.missingTables?.includes(table)) {
+          // The shape hosted Supabase actually returns: PostgREST answers a
+          // table that is not in its schema cache itself, without reaching
+          // Postgres — HTTP 404, code PGRST205, no 42P01 and no "does not
+          // exist". Pinning the Postgres shape instead is what let the first
+          // version of this route pass its tests while failing in production.
           return Promise.resolve({
             data: null,
-            error: { code: "42P01", message: `relation "public.${table}" does not exist` },
+            count: null,
+            error: {
+              code: "PGRST205",
+              details: null,
+              hint: null,
+              message: `Could not find the table 'public.${table}' in the schema cache`,
+            },
           });
         }
         const message = options.errors?.[table];
-        if (message) return Promise.resolve({ data: null, error: { code: "08006", message } });
+        if (message) return Promise.resolve({ data: null, count: null, error: { code: "08006", message } });
         const rows =
           table === "staff_users"
             ? [membershipFor(options.role ?? "owner")]
             : options.rows?.[table] ?? [];
+        // Only columns the fixture row actually carries are matched, so a
+        // fixture may stay minimal without silently filtering itself out.
+        const matches = (row: unknown) => {
+          const record = row as Record<string, unknown>;
+          return Object.entries(entry.filters).every(([column, value]) =>
+            column.includes(":") || !(column in record) ? true : record[column] === value,
+          );
+        };
+
+        // Aggregate reads (head: true) answer with a count and no body.
+        if (entry.head) {
+          return Promise.resolve({ data: null, error: null, count: rows.filter(matches).length });
+        }
+
+        // An update ... select() returns the rows AS THEY NOW ARE, which is
+        // what the caller reports back. Returning the pre-update fixture would
+        // let a handler that writes nothing still look correct.
+        if (entry.op === "update") {
+          const updated = rows
+            .filter(matches)
+            .map((row) => ({ ...(row as Record<string, unknown>), ...(entry.row as Record<string, unknown>) }));
+          return Promise.resolve({ data: updated, error: null, count: updated.length });
+        }
+
+        const visible = rows.filter(matches);
         return Promise.resolve(
-          shape === "list" ? { data: rows, error: null, count: rows.length } : { data: rows[0] ?? null, error: null },
+          shape === "list"
+            ? { data: visible, error: null, count: visible.length }
+            : { data: visible[0] ?? null, error: null },
         );
       };
       const builder: Record<string, unknown> = {};
       Object.assign(builder, {
-        select: () => builder,
+        select: (_columns?: unknown, options?: { count?: string; head?: boolean }) => {
+          if (options?.head) entry.head = true;
+          return builder;
+        },
         insert: (row: unknown) => { entry.op = "insert"; entry.row = row; return builder; },
         update: (row: unknown) => { entry.op = "update"; entry.row = row; return builder; },
-        order: () => builder,
-        limit: () => builder,
+        order: (column: string, options?: { ascending?: boolean }) => {
+          entry.ordered = `${column}:${options?.ascending === false ? "desc" : "asc"}`;
+          return builder;
+        },
+        limit: (value: number) => { entry.limited = value; return builder; },
         eq(column: string, value: unknown) { entry.filters[column] = value; return builder; },
         in(column: string, value: unknown) { entry.filters[column] = value; return builder; },
         is: () => builder,
@@ -209,17 +262,54 @@ test("WC2 activity is counted, never quoted — no ledger row reaches the caller
       whatsapp_cloud_inbound_messages: [],
     },
   }, async (ctx) => {
-    const { res } = await ctx.call({});
+    const { res, log } = await ctx.call({});
 
     const channel = channelsOf(res.body)[0];
     assert.ok(channel, "the channel must be listed");
     assert.equal(channel.leadsFiled, 1);
     assert.equal(channel.repeatsSeen, 1);
-    assert.equal(channel.lastInboundAt, "2026-08-02T12:00:00.000Z", "the newest inbound of THIS channel");
 
     const serialized = JSON.stringify(res.body);
     assert.equal(serialized.includes("lead-1"), false, "ledger rows are counted, not returned");
     assert.equal(serialized.includes("message_id"), false);
+
+    // Counted by the database, not tallied in code from an unbounded read.
+    const ledgerReads = log.filter((entry) => entry.table === "wazzup_inbound_messages");
+    assert.ok(ledgerReads.length > 0, "the ledger must be consulted");
+    for (const read of ledgerReads) {
+      assert.equal(read.filters.channel_id, wazzupChannel.channel_id, "each read is scoped to this channel");
+      assert.ok(
+        read.head === true || typeof read.limited === "number",
+        "every ledger read is either an aggregate or a bounded one — never an open scan",
+      );
+    }
+  });
+});
+
+test("WC2b the last inbound is the newest, asked of the database in order", async () => {
+  // The first version sorted ISO strings from an unbounded, unordered read.
+  // The fixture is deliberately out of order: a query that does not order
+  // would hand back the first row and be wrong.
+  await withRouter({
+    rows: {
+      wazzup_channels: [wazzupChannel],
+      whatsapp_cloud_numbers: [],
+      wazzup_inbound_messages: [
+        { channel_id: wazzupChannel.channel_id, kind: "created", received_at: "2026-08-03T09:00:00.000Z" },
+        { channel_id: wazzupChannel.channel_id, kind: "repeat", received_at: "2026-08-01T08:00:00.000Z" },
+      ],
+      whatsapp_cloud_inbound_messages: [],
+    },
+  }, async (ctx) => {
+    const { res, log } = await ctx.call({});
+
+    const lastRead = log.find((entry) => entry.table === "wazzup_inbound_messages" && entry.ordered);
+    assert.ok(lastRead, "the last-inbound read must order");
+    assert.equal(lastRead.ordered, "received_at:desc", "newest first");
+    assert.equal(lastRead.limited, 1, "and one row is enough");
+
+    const channel = channelsOf(res.body)[0];
+    assert.equal(channel.lastInboundAt, "2026-08-03T09:00:00.000Z");
   });
 });
 
@@ -288,6 +378,41 @@ test("WC5 the switch cannot reach another clinic's channel", async () => {
     // No row matched, because the fixture has none in this workspace.
     assert.equal(res.statusCode, 404, "an id from another clinic is simply not found");
     assert.equal(JSON.stringify(res.body).includes(WORKSPACE_B), false);
+  });
+});
+
+test("WC5b a switch inside the clinic writes exactly what it claims to write", async () => {
+  // WC5 proves the update cannot reach another clinic. Nothing proved the
+  // successful path: what column is written, with what value, and what the
+  // caller is told. A route whose PATCH silently wrote nothing would have
+  // passed the whole suite.
+  await withRouter({
+    rows: {
+      wazzup_channels: [{ ...wazzupChannel, enabled: false }],
+      whatsapp_cloud_numbers: [],
+      wazzup_inbound_messages: [],
+      whatsapp_cloud_inbound_messages: [],
+    },
+  }, async (ctx) => {
+    const { res, log } = await ctx.call({
+      method: "PATCH",
+      body: { id: CHANNEL_ROW_A, provider: "wazzup", enabled: true },
+    });
+
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+    const update = log.find((entry) => entry.op === "update");
+    assert.ok(update, "the update must run");
+    assert.equal(update.table, "wazzup_channels", "the provider decides the table, not the request");
+
+    const written = update.row as Record<string, unknown>;
+    assert.equal(written.enabled, true, "the flag the caller asked for");
+    assert.ok(typeof written.updated_at === "string", "and a fresh updated_at");
+    assert.equal(Object.keys(written).sort().join(","), "enabled,updated_at", "nothing else may be written");
+
+    const data = res.body.data as Record<string, unknown>;
+    const item = data.item as Record<string, unknown>;
+    assert.equal(item.id, CHANNEL_ROW_A);
+    assert.equal(item.enabled, true, "the caller is told the state the database now holds");
   });
 });
 
