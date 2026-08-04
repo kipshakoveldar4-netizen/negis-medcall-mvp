@@ -3718,6 +3718,11 @@ async function main() {
   await checkSelfRegistrationDisabled();
   await checkWazzupWebhookBoundary();
   await checkWhatsAppCloudWebhookBoundary();
+  // Through the shared helper, so the route joins the Security-2E "NOT
+  // CHECKED" summary instead of being silently absent from it: this run
+  // proves the door is shut, and says so, but never exercises the contract
+  // behind it — that is test:whatsapp-channels' job.
+  await assertCrmAuthBoundary("/api/crm/whatsapp-channels");
   const crmHealth = await checkJsonEndpoint("/api/crm/health");
   // Security-2B: the route is refused before any business branch runs. Its
   // invariants are covered by the handler-level suites, which run without a
