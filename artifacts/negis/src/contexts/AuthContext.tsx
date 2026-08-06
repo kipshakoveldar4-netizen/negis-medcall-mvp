@@ -3,7 +3,7 @@ import { Session, User } from '@supabase/supabase-js';
 import { supabase } from '@/lib/supabase';
 import { useLocation } from 'wouter';
 import { toast } from 'sonner';
-import { apiUrl, crmFetch } from '@/lib/api';
+import { apiUrl, clearCrmCache, crmFetch } from '@/lib/api';
 import { getSupabaseAccessToken } from '@/lib/serverAuth';
 import { WORKSPACE_SELECTOR_KEY } from '@/lib/demoStorage';
 import { isStaffRole, permissionsForRole, type StaffRole } from '@/lib/permissions';
@@ -474,6 +474,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       return;
     }
 
+    // The read cache is keyed by path, and workspaceId travels in the path, so
+    // the previous clinic's answers could not be served here anyway. Dropping
+    // them is belt and braces: a cache that outlives a tenant switch is exactly
+    // the bug that would leak one clinic's list into another's screen.
+    clearCrmCache();
     applyMembership(supabaseUser, selected, memberships);
     // Every staff role in the permission table carries `dashboard`, and
     // ProtectedPage redirects anyone it does not fit, so this lands correctly
@@ -484,6 +489,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   /** Returns a multi-clinic user to the picker without ending the session. */
   const clearWorkspaceSelection = () => {
     if (membershipsRef.current.length < 2) return;
+    clearCrmCache();
     rememberSelector(null);
     setClinicId(null);
     setUserRole(null);
@@ -755,6 +761,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   /* ── 5. Sign out ──────────────────────────────────────── */
   const signOut = async () => {
+    // Nothing the previous account read may survive into the next one.
+    clearCrmCache();
     if (isDemoMode) {
       clearDemoStorage();
       clearStaffStorage();

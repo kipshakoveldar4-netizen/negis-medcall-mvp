@@ -179,3 +179,95 @@ test("P10 operational route chunks are prefetched once the user is authenticated
     );
   }
 });
+
+// ===========================================================================
+// D. Answers survive a navigation — measured 2026-08-06 on production
+//
+// Real clicks in the sidebar, warm cache, logged-in owner. Entering /leads
+// fired four reads in parallel (leads 665ms, lead-sources 1189ms,
+// meta-launches 1225ms, lead-stages 1262ms) and painted nothing until the
+// slowest returned. Going to /clients and back a few seconds later repeated
+// all four (566/570/1149/1395ms). Zero long tasks were recorded and the route
+// chunk is 9.6kB gzipped, so the wait was network latency start to finish —
+// not bundle size and not render cost. These tests pin the fix.
+// ===========================================================================
+
+test("P12 a GET answer is reused on the next navigation instead of refetched", async () => {
+  const source = await readSource("lib", "api.ts");
+
+  assert.ok(source.includes("getCache"), "the answer cache must exist");
+  assert.ok(
+    source.includes("getCache.get(dedupeKey)") && source.includes("getCache.set(dedupeKey"),
+    "a repeat GET must be served from the cache, not sent again",
+  );
+  assert.ok(
+    /Date\.now\(\)\s*-\s*hit\.at\s*<\s*ttlFor\(path\)/.test(source),
+    "the entry must expire — a cache without a TTL is a stale screen",
+  );
+});
+
+test("P13 the cache key carries the token, so two sessions never share an answer", async () => {
+  const source = await readSource("lib", "api.ts");
+
+  const cacheRead = source.indexOf("getCache.get(dedupeKey)");
+  assert.ok(cacheRead > 0, "the cache must be read by the dedupe key");
+  assert.ok(
+    source.includes("const dedupeKey = `${path}::${token}`"),
+    "the key must include the token; workspaceId travels in the path",
+  );
+});
+
+test("P14 only a confirmed answer is cached", async () => {
+  const source = await readSource("lib", "api.ts");
+
+  assert.ok(
+    /if \(!cacheable \|\| !response\.ok\) return;/.test(source),
+    "a 401 or 502 held for ten seconds turns one bad moment into a stuck screen",
+  );
+});
+
+test("P15 a write drops the cache", async () => {
+  const source = await readSource("lib", "api.ts");
+
+  const writeBranch = source.slice(source.indexOf('if (method !== "GET")'), source.indexOf("const dedupeKey"));
+  assert.ok(
+    writeBranch.includes("clearCrmCache()"),
+    "after a write the previous list is wrong; guessing which entries it touched is how stale rows reach a patient card",
+  );
+});
+
+test("P16 polled and authorization endpoints bypass the cache", async () => {
+  const source = await readSource("lib", "api.ts");
+
+  assert.ok(source.includes("isUncacheable"), "the bypass must be explicit");
+  assert.ok(
+    source.includes('path.includes("/video-jobs")'),
+    "video-jobs is polled on a timer while a render runs — a cached answer freezes the progress card",
+  );
+  assert.ok(
+    source.includes('path.includes("/auth-context")'),
+    "a revoked membership must take effect on the next navigation, not up to ten seconds later",
+  );
+});
+
+test("P17 the cache is memory-only — patient rows never reach disk", async () => {
+  const source = await readSource("lib", "api.ts");
+
+  assert.ok(source.includes("new Map<string, CachedGet>()"), "an in-memory map, which dies with the tab");
+  // The word itself is allowed to appear — the comment above the cache explains
+  // why disk is off limits. What must not appear is a call.
+  assert.ok(
+    !/\b(local|session)Storage\s*\.\s*(set|get|remove)Item/.test(source),
+    "this is a medical CRM: cached answers must not be written to browser storage",
+  );
+});
+
+test("P18 sign-out and a clinic switch drop the cache", async () => {
+  const source = await readSource("contexts", "AuthContext.tsx");
+
+  assert.ok(source.includes("clearCrmCache"), "AuthContext must be able to drop it");
+  const signOut = source.slice(source.indexOf("const signOut = async"), source.indexOf("const signOut = async") + 400);
+  assert.ok(signOut.includes("clearCrmCache()"), "nothing the previous account read may survive into the next one");
+  const select = source.slice(source.indexOf("const selectWorkspace"), source.indexOf("const clearWorkspaceSelection"));
+  assert.ok(select.includes("clearCrmCache()"), "a cache that outlives a tenant switch leaks one clinic into another");
+});
