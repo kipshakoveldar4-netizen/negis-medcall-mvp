@@ -295,3 +295,41 @@ test("F9 a refused production read reaches the operator instead of an empty clin
   assert.ok(effect.includes("setLoadError(false)"), "success must clear the error");
   assert.ok(hook.includes("loadError, setItems"), "loadError must be part of the hook's return");
 });
+
+test("F10 a refused client creation does not report success, and leaves the lead alone", async () => {
+  const source = await readFile(path.join(negisSrc, "pages", "LeadsPage.tsx"), "utf8");
+
+  // crmFetch does not throw on 4xx/5xx, so the POST result had to be inspected
+  // by hand — and it was not. A refusal fell through to the locally built
+  // object: the lead was linked to an id that never existed and the toast said
+  // «Клиент создан из заявки». Reachable with an ordinary role, not only in an
+  // outage: POST /api/crm/clients needs `manage_clients`, `marketer` has
+  // `view_clients` + `manage_leads` and not that one, and the button is not
+  // gated. The registrar saw success and no error.
+  const convert = source.slice(source.indexOf("// No duplicate — create a new client"));
+  assert.ok(convert.length > 0, "the conversion path must still exist");
+
+  assert.ok(
+    convert.includes("persistedOnServer"),
+    "the outcome of the POST has to be carried explicitly, not inferred from a local object",
+  );
+  assert.ok(
+    convert.includes("isUuid(persisted.id)"),
+    "a uuid is the only proof the row reached Supabase; any truthy id passed before",
+  );
+
+  const guard = convert.indexOf("if (isRealWorkspace() && !persistedOnServer)");
+  const link = convert.indexOf("updateItem(lead.id, { clientId: savedClient.id");
+  const success = convert.indexOf('toast.success("Клиент создан из заявки.")');
+
+  assert.ok(guard > 0, "a real clinic must refuse when the server did");
+  assert.ok(
+    guard < link && guard < success,
+    "the refusal must come before the lead is linked and before the success toast",
+  );
+  assert.ok(
+    convert.slice(guard, guard + 260).includes("return"),
+    "refusing means leaving: the statusPatch below persists, and a lead moved into «В работе» " +
+      "against a client that does not exist is the damage that outlives the wrong toast",
+  );
+});
