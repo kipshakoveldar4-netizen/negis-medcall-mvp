@@ -1845,6 +1845,36 @@ async function buildLeadReferenceRow(
     }
   }
 
+  // Who owns this lead. The column has existed since 010 and fromRow has always
+  // returned it, but no write path set it: the card could only say «Назначен»
+  // or «—», and nothing in the product could put a name there. A clinic with
+  // two registrars had no way to divide the queue.
+  //
+  // Routed through readWorkspaceReference like every other reference, so a
+  // staff id from another clinic is refused rather than stored — the FK alone
+  // would accept it, since staff_users carries its own workspace_id.
+  if (hasAnyKey(body, ["responsibleUserId", "responsible_user_id"])) {
+    const responsibleId = firstString(body.responsibleUserId, body.responsible_user_id);
+    if (!responsibleId) {
+      row.responsible_user_id = null;
+    } else {
+      const staff = await readWorkspaceReference({
+        supabase,
+        workspaceId,
+        table: "staff_users",
+        id: responsibleId,
+        select: "id,full_name,status",
+        fieldName: "responsibleUserId",
+      });
+      // A deactivated colleague must not stay assignable: the lead would sit in
+      // a queue nobody reads.
+      if (readString(staff.status).toLowerCase() !== "active") {
+        throw new CrmReferenceValidationError(["responsibleUserId must be an active staff member"]);
+      }
+      row.responsible_user_id = staff.id;
+    }
+  }
+
   if (hasAnyKey(body, ["metaCampaignLaunchId", "meta_campaign_launch_id"])) {
     const campaignId = firstString(body.metaCampaignLaunchId, body.meta_campaign_launch_id);
     if (!campaignId) {

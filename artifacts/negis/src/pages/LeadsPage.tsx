@@ -399,8 +399,33 @@ type LeadForm = {
   campaign: string;
   metaCampaignLaunchId: string;
   stageId: string;
+  responsibleUserId: string;
   notes: string;
 };
+
+/** A colleague the lead can be handed to. Only active staff are offered. */
+type StaffOption = { id: string; name: string; role: string };
+
+function staffOptionFromUnknown(raw: unknown): StaffOption | null {
+  const record = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  const id = typeof record.id === "string" ? record.id : "";
+  const status = typeof record.status === "string" ? record.status.toLowerCase() : "active";
+  if (!isUuid(id) || status !== "active") return null;
+  const name = [record.name, record.fullName, record.full_name, record.email]
+    .find((value) => typeof value === "string" && value.trim().length > 0);
+  return {
+    id,
+    name: typeof name === "string" ? name.trim() : "Сотрудник",
+    role: typeof record.role === "string" ? record.role : "",
+  };
+}
+
+/** The card used to say «Назначен» — true but useless with two registrars. */
+function responsibleName(lead: Lead, staff: StaffOption[]): string {
+  if (lead.owner) return lead.owner;
+  if (!lead.responsibleUserId) return "—";
+  return staff.find((member) => member.id === lead.responsibleUserId)?.name ?? "Назначен";
+}
 
 const emptyForm: LeadForm = {
   name: "",
@@ -410,6 +435,7 @@ const emptyForm: LeadForm = {
   campaign: "",
   metaCampaignLaunchId: "",
   stageId: "fallback:new",
+  responsibleUserId: "",
   notes: "",
 };
 
@@ -503,6 +529,7 @@ export default function LeadsPage() {
   const [conversionMatched, setConversionMatched] = useState<Record<string, boolean>>({});
   // CRM7: safe Meta launch records offered for lead attribution.
   const [campaignLaunchOptions, setCampaignLaunchOptions] = useState<CampaignLaunchOption[]>([]);
+  const [staffOptions, setStaffOptions] = useState<StaffOption[]>([]);
   // CRM8: secondary attribution filter — works on top of stage filter and search.
   const [attributionFilter, setAttributionFilter] = useState<"all" | "with_ads" | "without_ads">("all");
 
@@ -523,9 +550,14 @@ export default function LeadsPage() {
     void Promise.all([
       loadTaxonomyList({ endpoint: "/api/crm/lead-stages", listKey: "stages", workspaceId, mapItem: leadStageDefinitionFromUnknown }),
       loadTaxonomyList({ endpoint: "/api/crm/lead-sources", listKey: "sources", workspaceId, mapItem: leadSourceDefinitionFromUnknown }),
+      // Colleagues the lead can be handed to. Reference data like the two
+      // above: rarely edited, and crmFetch keeps it for five minutes, so this
+      // does not add a wait to every visit.
+      loadTaxonomyList({ endpoint: "/api/crm/staff", listKey: "staff", workspaceId, mapItem: staffOptionFromUnknown }),
     ])
-      .then(([stageResult, sourceResult]) => {
+      .then(([stageResult, sourceResult, staffResult]) => {
         if (cancelled) return;
+        setStaffOptions(staffResult.mode === "supabase" ? staffResult.items : []);
         const structuredStages = stageResult.mode === "supabase" && stageResult.items.length > 0;
         const structuredSources = sourceResult.mode === "supabase" && sourceResult.items.length > 0;
         setStructuredStagesAvailable(structuredStages);
@@ -632,6 +664,7 @@ export default function LeadsPage() {
       campaign: lead.campaign,
       metaCampaignLaunchId: lead.metaCampaignLaunchId || "",
       stageId: currentStage?.id || `fallback:${semanticGroupForLead(lead)}`,
+      responsibleUserId: lead.responsibleUserId || "",
       notes: lead.notes || "",
     });
     setDetailId(null);
@@ -671,6 +704,9 @@ export default function LeadsPage() {
       sourceColor: selectedSource?.color,
       ...(structuredStagesAvailable && isUuid(selectedStage?.id) ? { stageId: selectedStage.id } : {}),
       ...(structuredSourcesAvailable && isUuid(selectedSource?.id) ? { sourceId: selectedSource.id } : {}),
+      // Always sent: an empty string is how the operator takes the lead off a
+      // colleague, and the server turns it into null.
+      responsibleUserId: form.responsibleUserId,
     };
     if (editingId) {
       updateItem(editingId, patch);
@@ -999,7 +1035,7 @@ export default function LeadsPage() {
                     <Fact label="Источник" value={leadSourceName(lead, activeSources)} />
                     <Fact label="Кампания" value={lead.campaign || "—"} />
                     <Fact label="Рекламная кампания" value={linkedCampaignLabel(lead, campaignLaunchOptions)} />
-                    <Fact label="Ответственный" value={lead.owner || (lead.responsibleUserId ? "Назначен" : "—")} />
+                    <Fact label="Ответственный" value={responsibleName(lead, staffOptions)} />
                     <Fact label="Создана" value={formatCreatedAt(lead.createdAt)} />
                   </div>
 
@@ -1143,6 +1179,23 @@ export default function LeadsPage() {
                   ))}
                 </select>
               </label>
+              {staffOptions.length > 0 && (
+                <label className="block">
+                  <span className="mb-1 block text-xs font-black uppercase tracking-[0.05em]" style={{ color: "var(--negis-muted)" }}>Ответственный</span>
+                  <select
+                    style={inputStyle}
+                    value={form.responsibleUserId}
+                    aria-label="Ответственный за заявку"
+                    data-testid="lead-responsible-select"
+                    onChange={(event) => setForm((current) => ({ ...current, responsibleUserId: event.target.value }))}
+                  >
+                    <option value="">Не назначен</option>
+                    {staffOptions.map((member) => (
+                      <option key={member.id} value={member.id}>{member.name}</option>
+                    ))}
+                  </select>
+                </label>
+              )}
               <label className="block">
                 <span className="mb-1 block text-xs font-black uppercase tracking-[0.05em]" style={{ color: "var(--negis-muted)" }}>Заметки</span>
                 <textarea style={{ ...inputStyle, minHeight: 84, resize: "vertical" }} value={form.notes} onChange={(event) => setForm((current) => ({ ...current, notes: event.target.value }))} placeholder="Что просит клиент, договорённости…" />
@@ -1178,7 +1231,7 @@ export default function LeadsPage() {
               <Fact label="Источник" value={leadSourceName(detailLead, activeSources)} />
               <Fact label="Кампания" value={detailLead.campaign || "—"} />
               <Fact label="Рекламная кампания" value={linkedCampaignDetail(detailLead, campaignLaunchOptions)} />
-              <Fact label="Ответственный" value={detailLead.owner || (detailLead.responsibleUserId ? "Назначен" : "—")} />
+              <Fact label="Ответственный" value={responsibleName(detailLead, staffOptions)} />
               <Fact label="Клиент" value={detailLead.clientId ? "Создан" : "Не создан"} />
               <Fact label="Создана" value={formatCreatedAt(detailLead.createdAt)} />
               <Fact label="Заметки" value={detailLead.notes || "—"} />

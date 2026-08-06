@@ -908,3 +908,62 @@ test("L5d every CRM call site goes through the authenticated helper", async () =
 
   assert.deepEqual(offenders, [], "these CRM call sites bypass crmFetch and will answer 401");
 });
+
+// ===========================================================================
+// M. A reference a lead points at must belong to the acting clinic
+//
+// Assigning a lead to a colleague is the first lead write that stores a foreign
+// key to a row the browser chose. The FK alone is not isolation: staff_users
+// carries its own workspace_id, so a valid id from clinic B satisfies the
+// constraint while pointing across the tenant line. readWorkspaceReference is
+// what makes it safe.
+//
+// Pinned at the source rather than driven end to end: the harness above fakes
+// query results instead of modelling stored rows, so it answers a lookup for a
+// foreign id with a row and cannot express "not found". Expressing this
+// behaviourally needs a harness that keeps rows per table and filters them —
+// worth building, not built here.
+// ===========================================================================
+
+test("M1 every lead reference is resolved inside the acting workspace before it is stored", async () => {
+  const source = await readFile(serverPath, "utf8");
+  const start = source.indexOf("async function buildLeadReferenceRow");
+  const end = source.indexOf("async function", start + 10);
+  const builder = source.slice(start, end);
+  assert.ok(builder.length > 0, "the lead reference builder must exist");
+
+  // Literal assignments, not a regex: the id written to the column must be the
+  // one the workspace-scoped lookup returned, never the one the browser sent.
+  for (const [field, assignment] of [
+    ["stageId", "row.stage_id = stage.id;"],
+    ["sourceId", "row.source_id = source.id;"],
+    ["responsibleUserId", "row.responsible_user_id = staff.id;"],
+  ]) {
+    assert.ok(builder.includes(`"${field}"`), `${field} must be handled here`);
+    assert.ok(
+      builder.includes(assignment),
+      `${field} must be stored as ${assignment} — writing the request value directly would cross the tenant line`,
+    );
+  }
+
+  assert.equal(
+    (builder.match(/readWorkspaceReference\(/g) ?? []).length,
+    4,
+    "each of the four references must go through the workspace-scoped lookup",
+  );
+});
+
+test("M2 an inactive colleague cannot be made responsible for a lead", async () => {
+  const source = await readFile(serverPath, "utf8");
+  const start = source.indexOf('fieldName: "responsibleUserId"');
+  const block = source.slice(start, start + 420);
+
+  assert.ok(
+    block.includes('readString(staff.status).toLowerCase() !== "active"'),
+    "a deactivated colleague would leave the lead in a queue nobody reads",
+  );
+  assert.ok(
+    block.includes("CrmReferenceValidationError"),
+    "the refusal must be the validation error the router turns into 400, not a raw failure",
+  );
+});
