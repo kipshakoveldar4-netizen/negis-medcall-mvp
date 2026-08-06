@@ -76,6 +76,62 @@ async function resolveAccessToken(explicit?: string): Promise<string> {
 const inflightGets = new Map<string, Promise<Response>>();
 
 /**
+ * A short-lived cache for answers that already came back, layered on top of the
+ * in-flight dedupe above. The dedupe only helps callers that overlap in time;
+ * this helps the user who walks between pages.
+ *
+ * Measured on production 2026-08-06, warm cache, real clicks in the sidebar:
+ * entering /leads fired four reads in parallel — leads 665ms, lead-sources
+ * 1189ms, meta-launches 1225ms, lead-stages 1262ms — and the page showed
+ * nothing until the slowest returned. Leaving to /clients and coming back a few
+ * seconds later paid the full price again (leads 566ms, lead-sources 570ms,
+ * lead-stages 1149ms, meta-launches 1395ms): no answer survived a navigation.
+ * The main thread was never blocked (zero long tasks) and the route chunk is
+ * 9.6kB gzipped, so what the owner called «подвисает при переходе» was, in
+ * full, waiting for the network.
+ *
+ * In memory only, deliberately: this is a medical CRM and patient rows must not
+ * be left in localStorage. The map dies with the tab.
+ *
+ * Tenant and session isolation come from the key, not from a check: the token
+ * is part of it, and workspaceId travels in the path, so neither a second
+ * session nor a second clinic can read an entry that is not theirs.
+ */
+type CachedGet = { at: number; status: number; body: string; contentType: string };
+
+const getCache = new Map<string, CachedGet>();
+
+/** Reference rows a clinic edits perhaps monthly — the funnel's own skeleton. */
+const REFERENCE_TTL_MS = 5 * 60_000;
+/** Everything else: long enough to make going back instant, short enough that
+ *  a lead filed on another device shows up on the next visit. */
+const LIST_TTL_MS = 10_000;
+
+/**
+ * Two endpoints must always hit the network.
+ *
+ * `video-jobs` is polled on a timer while a render runs (AdsAutomation.tsx:1697)
+ * and a cached answer would freeze the progress card. `auth-context` decides
+ * what the user may see, so a revoked membership has to take effect on the very
+ * next navigation rather than up to ten seconds later.
+ */
+function isUncacheable(path: string): boolean {
+  return path.includes("/video-jobs") || path.includes("/auth-context");
+}
+
+function ttlFor(path: string): number {
+  return /\/(lead-stages|lead-sources)\b/.test(path) ? REFERENCE_TTL_MS : LIST_TTL_MS;
+}
+
+/**
+ * Drops every cached answer. Called on sign-out and when the operator switches
+ * clinic, so nothing from the previous session or tenant can be painted.
+ */
+export function clearCrmCache(): void {
+  getCache.clear();
+}
+
+/**
  * Single entry point for CRM requests. Without a token the request is not sent
  * at all: an unauthenticated call would only come back as 401, and firing it
  * anyway invites retry loops.
@@ -94,10 +150,25 @@ export async function crmFetch(path: string, init: CrmFetchInit = {}): Promise<R
 
   const method = (rest.method || "GET").toUpperCase();
   if (method !== "GET") {
+    // A write can change anything the cache is holding, and guessing which
+    // entries it touched is how stale rows reach a patient card. Drop all.
+    clearCrmCache();
     return fetch(apiUrl(path), { ...rest, headers: mergedHeaders });
   }
 
   const dedupeKey = `${path}::${token}`;
+  const cacheable = !isUncacheable(path);
+
+  if (cacheable) {
+    const hit = getCache.get(dedupeKey);
+    if (hit && Date.now() - hit.at < ttlFor(path)) {
+      return new Response(hit.body, {
+        status: hit.status,
+        headers: { "content-type": hit.contentType },
+      });
+    }
+  }
+
   const pending = inflightGets.get(dedupeKey);
   if (pending) {
     return pending.then((response) => response.clone());
@@ -106,6 +177,18 @@ export async function crmFetch(path: string, init: CrmFetchInit = {}): Promise<R
   const request = fetch(apiUrl(path), { ...rest, headers: mergedHeaders });
   inflightGets.set(dedupeKey, request);
   request
+    .then(async (response) => {
+      // Only a confirmed answer is worth keeping. A 401 or a 502 cached for ten
+      // seconds would turn one bad moment into a stuck screen.
+      if (!cacheable || !response.ok) return;
+      const body = await response.clone().text();
+      getCache.set(dedupeKey, {
+        at: Date.now(),
+        status: response.status,
+        body,
+        contentType: response.headers.get("content-type") || "application/json",
+      });
+    })
     .catch(() => undefined)
     .finally(() => {
       inflightGets.delete(dedupeKey);
