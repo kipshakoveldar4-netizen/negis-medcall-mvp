@@ -43,16 +43,16 @@ export function Topbar() {
     <header
       className="negis-topbar sticky top-0 z-30 flex shrink-0 items-center gap-4 px-5 md:px-8"
       style={{
-        background: 'var(--ng-surface)',
-        borderBottom: '1px solid var(--ng-border)',
+        background: 'var(--negis-surface)',
+        borderBottom: '1px solid var(--negis-border)',
       }}
     >
       <div className="flex min-w-0 items-center gap-2 select-none">
-        <span className="text-xs font-semibold tracking-[0.06em]" style={{ color: 'var(--ng-primary)' }}>
+        <span className="text-xs font-semibold tracking-[0.06em]" style={{ color: 'var(--negis-primary)' }}>
           Medina OS
         </span>
-        <span aria-hidden style={{ color: 'var(--ng-border)', fontSize: 14 }}>/</span>
-        <span className="truncate text-xs font-semibold tracking-[0.04em]" style={{ color: 'var(--ng-text-2)' }}>
+        <span aria-hidden style={{ color: 'var(--negis-border)', fontSize: 14 }}>/</span>
+        <span className="truncate text-xs font-semibold tracking-[0.04em]" style={{ color: 'var(--negis-text-2)' }}>
           {pageLabel}
         </span>
       </div>
@@ -62,7 +62,7 @@ export function Topbar() {
           className="negis-topbar-date"
           style={{
             fontSize: 12,
-            color: 'var(--ng-muted)',
+            color: 'var(--negis-muted)',
             letterSpacing: '0.01em',
           }}
         >

@@ -71,8 +71,8 @@ export function MobileNav() {
           <section className="mobile-nav-sheet" onClick={(event) => event.stopPropagation()}>
             <div className="mb-4 flex items-center justify-between gap-3">
               <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.08em]" style={{ color: "var(--ng-muted)" }}>Меню</p>
-                <h2 className="mt-1 text-lg font-semibold" style={{ color: "var(--ng-text)" }}>Разделы Medina OS</h2>
+                <p className="text-xs font-semibold uppercase tracking-[0.08em]" style={{ color: "var(--negis-muted)" }}>Меню</p>
+                <h2 className="mt-1 text-lg font-semibold" style={{ color: "var(--negis-text)" }}>Разделы Medina OS</h2>
               </div>
               <button type="button" className="neu-icon-btn" onClick={() => setOpen(false)} aria-label="Закрыть меню">
                 <X size={18} />

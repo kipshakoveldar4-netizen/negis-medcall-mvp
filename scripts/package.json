@@ -30,7 +30,8 @@
     "test:transition-performance": "tsx --test ./src/medina-transition-performance.test.ts",
     "test:whatsapp-cloud-webhook": "tsx --test ./src/medina-whatsapp-cloud-webhook.test.ts",
     "test:crm-phone-parity": "tsx --test ./src/medina-crm-phone-parity.test.ts",
-    "test:whatsapp-channels": "tsx --test ./src/medina-whatsapp-channels.test.ts"
+    "test:whatsapp-channels": "tsx --test ./src/medina-whatsapp-channels.test.ts",
+    "test:design-tokens": "tsx --test ./src/medina-design-tokens.test.ts"
   },
   "devDependencies": {
     "@types/node": "catalog:",

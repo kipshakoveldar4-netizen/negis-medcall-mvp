@@ -100,7 +100,7 @@ export function Sidebar() {
           <div
             aria-hidden
             className="flex h-9 w-9 items-center justify-center rounded-lg text-sm font-bold"
-            style={{ background: 'var(--ng-primary)', color: '#FFFFFF' }}
+            style={{ background: 'var(--negis-primary)', color: '#FFFFFF' }}
           >
             M
           </div>
@@ -130,7 +130,7 @@ export function Sidebar() {
                         style={{
                           background: active ? 'var(--medina-sidebar-active)' : 'transparent',
                           color: active ? '#FFFFFF' : 'var(--medina-sidebar-muted)',
-                          boxShadow: active ? 'inset 2px 0 0 var(--ng-primary)' : 'none',
+                          boxShadow: active ? 'inset 2px 0 0 var(--negis-primary)' : 'none',
                         }}
                       >
                         <Icon size={18} strokeWidth={active ? 2 : 1.75} aria-hidden />
@@ -193,17 +193,17 @@ export function Sidebar() {
           style={{ background: 'rgba(17, 24, 39, 0.4)' }}
           onClick={e => { if (e.target === e.currentTarget) setShowProfile(false); }}
         >
-          <div role="dialog" aria-modal="true" aria-label="Профиль сотрудника" className="w-full max-w-[360px] rounded-xl border bg-white p-7" style={{ borderColor: 'var(--ng-border)', boxShadow: '0 20px 45px rgba(17, 24, 39, 0.18)' }}>
+          <div role="dialog" aria-modal="true" aria-label="Профиль сотрудника" className="w-full max-w-[360px] rounded-xl border bg-white p-7" style={{ borderColor: 'var(--negis-border)', boxShadow: '0 20px 45px rgba(17, 24, 39, 0.18)' }}>
             <div className="mb-6 flex items-center justify-between">
               <div className="flex items-center gap-3">
-                <div aria-hidden className="flex h-10 w-10 items-center justify-center rounded-lg text-[13px] font-semibold" style={{ background: 'var(--negis-primary-soft)', color: 'var(--ng-primary)' }}>
+                <div aria-hidden className="flex h-10 w-10 items-center justify-center rounded-lg text-[13px] font-semibold" style={{ background: 'var(--negis-primary-soft)', color: 'var(--negis-primary)' }}>
                   {initials}
                 </div>
                 <div>
-                  <div className="text-sm font-semibold" style={{ color: 'var(--ng-text)' }}>
+                  <div className="text-sm font-semibold" style={{ color: 'var(--negis-text)' }}>
                     {user?.user_metadata?.full_name || 'Профиль'}
                   </div>
-                  <div className="mt-0.5 text-xs" style={{ color: 'var(--ng-muted)' }}>
+                  <div className="mt-0.5 text-xs" style={{ color: 'var(--negis-muted)' }}>
                     {user?.email}
                   </div>
                 </div>
@@ -221,7 +221,7 @@ export function Sidebar() {
 
             <div className="space-y-4">
               <div>
-                <label htmlFor="profile-full-name" className="mb-1.5 block text-[11px] font-medium" style={{ color: 'var(--ng-muted)' }}>
+                <label htmlFor="profile-full-name" className="mb-1.5 block text-[11px] font-medium" style={{ color: 'var(--negis-muted)' }}>
                   <User size={11} aria-hidden style={{ display: 'inline', marginRight: 5 }} />
                   ИМЯ
                 </label>
@@ -235,7 +235,7 @@ export function Sidebar() {
               </div>
 
               <div>
-                <label htmlFor="profile-new-password" className="mb-1.5 block text-[11px] font-medium" style={{ color: 'var(--ng-muted)' }}>
+                <label htmlFor="profile-new-password" className="mb-1.5 block text-[11px] font-medium" style={{ color: 'var(--negis-muted)' }}>
                   <KeyRound size={11} aria-hidden style={{ display: 'inline', marginRight: 5 }} />
                   НОВЫЙ ПАРОЛЬ
                 </label>

@@ -34,13 +34,13 @@ export class RouteErrorBoundary extends Component<Props, State> {
     return (
       <div
         className="flex min-h-[100dvh] items-center justify-center p-6"
-        style={{ background: 'var(--ng-bg)' }}
+        style={{ background: 'var(--negis-bg)' }}
       >
         <div className="neu-card max-w-[420px] text-center">
-          <h1 className="text-base font-semibold" style={{ color: 'var(--ng-text)' }}>
+          <h1 className="text-base font-semibold" style={{ color: 'var(--negis-text)' }}>
             Не удалось загрузить раздел
           </h1>
-          <p className="mt-2 text-sm" style={{ color: 'var(--ng-muted)' }}>
+          <p className="mt-2 text-sm" style={{ color: 'var(--negis-muted)' }}>
             Проверьте подключение и обновите страницу. Если приложение недавно обновилось,
             обновление загрузит новую версию.
           </p>

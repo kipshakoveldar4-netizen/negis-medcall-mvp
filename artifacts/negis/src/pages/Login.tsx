@@ -162,7 +162,7 @@ export default function Login() {
           <div className="p-7 sm:p-10">
             <div className="mb-8">
               <Link href="/">
-                <span className="text-xs font-semibold uppercase tracking-[0.08em]" style={{ color: "var(--ng-primary)" }}>Medina OS</span>
+                <span className="text-xs font-semibold uppercase tracking-[0.08em]" style={{ color: "var(--negis-primary)" }}>Medina OS</span>
               </Link>
               <h2 className="mt-5 text-2xl font-black text-[#0F172A]">Вход сотрудника</h2>
               <p className="mt-2 text-sm leading-6 text-[#64748B]">

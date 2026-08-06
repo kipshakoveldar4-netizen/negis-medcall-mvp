@@ -31,7 +31,7 @@ export function WorkspacePicker() {
     >
       <div
         className="w-full max-w-md rounded-2xl p-6 shadow-xl"
-        style={{ background: 'var(--medina-surface, #ffffff)', color: 'var(--medina-text, #101828)' }}
+        style={{ background: 'var(--negis-surface)', color: 'var(--negis-text)' }}
       >
         <h2 className="text-lg font-semibold">Выберите клинику</h2>
         <p className="mt-1 text-sm opacity-70">
@@ -45,7 +45,7 @@ export function WorkspacePicker() {
                 type="button"
                 onClick={() => selectWorkspace(workspace.id)}
                 className="flex w-full items-center justify-between gap-3 rounded-xl border px-4 py-3 text-left transition-colors hover:opacity-90"
-                style={{ borderColor: 'var(--medina-border, #e4e7ec)' }}
+                style={{ borderColor: 'var(--negis-border)' }}
               >
                 <span className="min-w-0">
                   <span className="block truncate text-sm font-medium">

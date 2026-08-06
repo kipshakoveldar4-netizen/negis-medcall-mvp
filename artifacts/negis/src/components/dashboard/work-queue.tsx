@@ -24,9 +24,9 @@ export function WorkQueue({
   return (
     <section className="neu flex min-w-0 flex-col p-4" aria-label={title}>
       <div className="mb-3 flex items-center justify-between gap-2">
-        <h3 className="text-sm font-semibold" style={{ color: "var(--ng-text)" }}>{title}</h3>
+        <h3 className="text-sm font-semibold" style={{ color: "var(--negis-text)" }}>{title}</h3>
         <Link href={href}>
-          <span className="inline-flex cursor-pointer items-center gap-1 text-xs font-semibold" style={{ color: "var(--ng-primary)" }}>
+          <span className="inline-flex cursor-pointer items-center gap-1 text-xs font-semibold" style={{ color: "var(--negis-primary)" }}>
             {linkLabel}
             <ArrowRight size={12} aria-hidden />
           </span>
@@ -35,11 +35,11 @@ export function WorkQueue({
       {loading ? (
         <div className="space-y-2" aria-hidden>
           {[0, 1, 2].map((row) => (
-            <div key={row} className="h-12 animate-pulse rounded-lg" style={{ background: "var(--ng-plate)" }} />
+            <div key={row} className="h-12 animate-pulse rounded-lg" style={{ background: "var(--negis-plate)" }} />
           ))}
         </div>
       ) : items.length === 0 ? (
-        <p className="rounded-lg p-3 text-sm" style={{ background: "var(--ng-surface-2)", color: "var(--ng-muted)" }}>
+        <p className="rounded-lg p-3 text-sm" style={{ background: "var(--negis-surface-2)", color: "var(--negis-muted)" }}>
           {emptyText}
         </p>
       ) : (
@@ -47,14 +47,14 @@ export function WorkQueue({
           {items.map((item) => (
             <li key={item.id}>
               <Link href={href}>
-                <span className="flex cursor-pointer items-center justify-between gap-3 rounded-lg border px-3 py-2 transition-colors hover:bg-[var(--ng-surface-2)]" style={{ borderColor: "var(--ng-border)" }}>
+                <span className="flex cursor-pointer items-center justify-between gap-3 rounded-lg border px-3 py-2 transition-colors hover:bg-[var(--negis-surface-2)]" style={{ borderColor: "var(--negis-border)" }}>
                   <span className="min-w-0">
-                    <span className="block truncate text-sm font-medium" style={{ color: "var(--ng-text)" }}>{item.title}</span>
-                    <span className="block truncate text-xs" style={{ color: "var(--ng-muted)" }}>{item.subtitle}</span>
+                    <span className="block truncate text-sm font-medium" style={{ color: "var(--negis-text)" }}>{item.title}</span>
+                    <span className="block truncate text-xs" style={{ color: "var(--negis-muted)" }}>{item.subtitle}</span>
                   </span>
                   <span className="flex shrink-0 flex-col items-end gap-1">
                     <StatusBadge tone={item.statusTone}>{item.statusLabel}</StatusBadge>
-                    <span className="text-[11px] tabular-nums" style={{ color: "var(--ng-muted)" }}>{item.meta}</span>
+                    <span className="text-[11px] tabular-nums" style={{ color: "var(--negis-muted)" }}>{item.meta}</span>
                   </span>
                 </span>
               </Link>
