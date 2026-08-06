@@ -191,6 +191,31 @@ function ProtectedPage({
 }
 
 /* ── Router ── */
+/**
+ * Pages that answer to more than one path get one stable component each.
+ *
+ * `component={() => <ProtectedPage ... />}` written inline creates a new
+ * function on every Route, so two paths pointing at the same page are two
+ * different element types to React. Switching between them unmounts the page
+ * and mounts it again from scratch instead of keeping the mounted tree.
+ *
+ * On /ads-automation that was expensive in a way the user feels: opening
+ * «История запусков» and coming back dropped the whole wizard — the uploaded
+ * creative, the AI package, the confirmations — and silently killed the
+ * setInterval watching a running video optimisation (AdsAutomation.tsx:1697),
+ * so the job kept finishing on the server while the screen showed an empty
+ * step 1. The other three pairs lose their page state the same way.
+ *
+ * Single-path routes below keep their inline wrapper: Router does not
+ * re-render (only Switch subscribes to location), so those closures are stable
+ * for the life of the app, and moving between two different pages is supposed
+ * to unmount anyway.
+ */
+const AppointmentsRoute = () => <ProtectedPage component={AppointmentsPage} permission="booking" />;
+const MarketRoute = () => <ProtectedPage component={DemoMarket} permission="marketplace" />;
+const AdsAutomationRoute = () => <ProtectedPage component={AdsAutomation} permission="ads" />;
+const ContentStudioRoute = () => <ProtectedPage component={ContentStudio} permission="ads" />;
+
 function Router() {
   return (
     <RouteErrorBoundary>
@@ -202,8 +227,8 @@ function Router() {
       <Route path="/join" component={JoinWorkspace} />
       <Route path="/ai-control-center" component={() => <ProtectedPage component={AiControlCenter} permission="dashboard" />} />
       <Route path="/dashboard" component={() => <ProtectedPage component={Dashboard} permission="dashboard" />} />
-      <Route path="/booking" component={() => <ProtectedPage component={AppointmentsPage} permission="booking" />} />
-      <Route path="/appointments" component={() => <ProtectedPage component={AppointmentsPage} permission="booking" />} />
+      <Route path="/booking" component={AppointmentsRoute} />
+      <Route path="/appointments" component={AppointmentsRoute} />
       <Route path="/reception" component={() => <ProtectedPage component={DemoReception} permission="reception" />} />
       <Route path="/calls" component={() => <ProtectedPage component={DemoCalls} permission="reception" />} />
       <Route path="/sales" component={() => <ProtectedPage component={SalesPage} permission="crm" />} />
@@ -211,11 +236,11 @@ function Router() {
       <Route path="/clients" component={() => <ProtectedPage component={ClientsPage} permission="crm" />} />
       <Route path="/tasks" component={() => <ProtectedPage component={DemoTasks} permission="tasks" />} />
       <Route path="/chat" component={() => <ProtectedPage component={DemoChat} permission="chat" />} />
-      <Route path="/marketplace" component={() => <ProtectedPage component={DemoMarket} permission="marketplace" />} />
-      <Route path="/market" component={() => <ProtectedPage component={DemoMarket} permission="marketplace" />} />
+      <Route path="/marketplace" component={MarketRoute} />
+      <Route path="/market" component={MarketRoute} />
       <Route path="/admin" component={() => <ProtectedPage component={AdminCenter} permission="admin" />} />
-      <Route path="/ads-automation/history" component={() => <ProtectedPage component={AdsAutomation} permission="ads" />} />
-      <Route path="/ads-automation" component={() => <ProtectedPage component={AdsAutomation} permission="ads" />} />
+      <Route path="/ads-automation/history" component={AdsAutomationRoute} />
+      <Route path="/ads-automation" component={AdsAutomationRoute} />
       {/* Legacy ad cabinet links keep working by pointing at the supported module. */}
       <Route path="/advertising">
         <Redirect to="/ads-automation" />
@@ -227,10 +252,10 @@ function Router() {
       <Route path="/targeting-agent">
         <Redirect to="/ads-automation" />
       </Route>
-      <Route path="/content-studio" component={() => <ProtectedPage component={ContentStudio} permission="ads" />} />
-      <Route path="/ai-content-studio" component={() => <ProtectedPage component={ContentStudio} permission="ads" />} />
-      <Route path="/content" component={() => <ProtectedPage component={ContentStudio} permission="ads" />} />
-      <Route path="/studio" component={() => <ProtectedPage component={ContentStudio} permission="ads" />} />
+      <Route path="/content-studio" component={ContentStudioRoute} />
+      <Route path="/ai-content-studio" component={ContentStudioRoute} />
+      <Route path="/content" component={ContentStudioRoute} />
+      <Route path="/studio" component={ContentStudioRoute} />
       <Route path="/privacy" component={Privacy} />
       <Route path="/terms" component={Terms} />
       <Route path="/data-deletion" component={DataDeletion} />
