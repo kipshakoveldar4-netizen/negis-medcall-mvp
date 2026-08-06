@@ -746,6 +746,7 @@ export default function LeadsPage() {
       };
 
       let savedClient = newClient;
+      let persistedOnServer = false;
       try {
         const workspaceId = readWorkspaceId();
         const response = await crmFetch("/api/crm/clients", {
@@ -765,10 +766,33 @@ export default function LeadsPage() {
         const body = text ? (JSON.parse(text) as { success?: boolean; mode?: string; data?: { item?: unknown } }) : null;
         if (response.ok && body?.success === true && body.mode === "supabase" && body.data?.item) {
           const persisted = clientFromRecord(body.data.item);
-          if (persisted.id) savedClient = { ...persisted, comment: persisted.comment ?? newClient.comment };
+          // A uuid is the only proof the row reached Supabase. Accepting any
+          // truthy id let a server answer without one pass as success.
+          if (isUuid(persisted.id)) {
+            savedClient = { ...persisted, comment: persisted.comment ?? newClient.comment };
+            persistedOnServer = true;
+          }
         }
       } catch {
         // Offline/demo: the local client below still keeps the flow working.
+      }
+
+      // In a real clinic the client exists only if Supabase saved it.
+      //
+      // crmFetch does not throw on 4xx/5xx, so a refusal used to fall straight
+      // through: the locally built object was linked to the lead and the toast
+      // said «Клиент создан из заявки». It is reachable with an ordinary role,
+      // not only in an outage — POST /api/crm/clients needs `manage_clients`,
+      // which `marketer` does not have (lib/auth/permissions.ts), while the
+      // button is not gated. The registrar saw success, the pill «Клиент
+      // создан», and no error at all.
+      //
+      // Worse than the wrong pill: the statusPatch below persists, so the lead
+      // moved into «В работе» against a client that does not exist. Refusing
+      // here leaves the lead exactly as it was.
+      if (isRealWorkspace() && !persistedOnServer) {
+        toast.error("Не удалось создать клиента. Заявка осталась без изменений.");
+        return;
       }
 
       // Demo mode: show the client in /clients immediately (shared demo storage,
