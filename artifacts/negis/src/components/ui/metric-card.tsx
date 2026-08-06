@@ -20,12 +20,12 @@ export function MetricCard({
   loading?: boolean;
 }) {
   const toneColor: Record<string, { fg: string; bg: string }> = {
-    primary: { fg: "var(--ng-primary)", bg: "var(--negis-primary-soft)" },
+    primary: { fg: "var(--negis-primary)", bg: "var(--negis-primary-soft)" },
     info: { fg: "#1D4ED8", bg: "#EFF6FF" },
     success: { fg: "#047857", bg: "#ECFDF5" },
     warning: { fg: "#B45309", bg: "#FFFBEB" },
     error: { fg: "#B91C1C", bg: "#FEF2F2" },
-    muted: { fg: "var(--ng-muted)", bg: "#F3F4F6" },
+    muted: { fg: "var(--negis-muted)", bg: "#F3F4F6" },
   };
   const palette = toneColor[tone] ?? toneColor.primary;
   const shown = value === null || value === undefined || value === "" ? "—" : value;
@@ -38,19 +38,19 @@ export function MetricCard({
             <Icon size={15} />
           </span>
         ) : null}
-        <p className="text-xs font-semibold leading-tight" style={{ color: "var(--ng-muted)" }}>
+        <p className="text-xs font-semibold leading-tight" style={{ color: "var(--negis-muted)" }}>
           {label}
         </p>
       </div>
       {loading ? (
         <Skeleton className="mt-3 h-7 w-16" />
       ) : (
-        <p data-metric-value className="mt-2 text-2xl font-semibold tabular-nums" style={{ color: "var(--ng-text)" }}>
+        <p data-metric-value className="mt-2 text-2xl font-semibold tabular-nums" style={{ color: "var(--negis-text)" }}>
           {shown}
         </p>
       )}
       {delta && !loading ? (
-        <p className="mt-1 text-xs font-medium" style={{ color: "var(--ng-muted)" }}>
+        <p className="mt-1 text-xs font-medium" style={{ color: "var(--negis-muted)" }}>
           {delta}
         </p>
       ) : null}

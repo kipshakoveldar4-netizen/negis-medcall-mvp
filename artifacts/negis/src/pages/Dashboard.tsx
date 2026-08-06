@@ -73,13 +73,13 @@ function DemoDashboard() {
         <Link href="/ai-control-center">
           <div
             className="neu-sm flex cursor-pointer items-center justify-between gap-3 p-4"
-            style={{ background: 'var(--negis-primary-soft)', borderColor: 'var(--ng-primary)' }}
+            style={{ background: 'var(--negis-primary-soft)', borderColor: 'var(--negis-primary)' }}
           >
             <div>
-              <p className="text-sm font-semibold" style={{ color: 'var(--ng-accent)' }}>Новый главный экран: AI Control Center</p>
-              <p className="mt-0.5 text-sm" style={{ color: 'var(--ng-primary)' }}>Заявки, реклама, продажи и AI-рекомендации в одном месте.</p>
+              <p className="text-sm font-semibold" style={{ color: 'var(--negis-accent)' }}>Новый главный экран: AI Control Center</p>
+              <p className="mt-0.5 text-sm" style={{ color: 'var(--negis-primary)' }}>Заявки, реклама, продажи и AI-рекомендации в одном месте.</p>
             </div>
-            <span className="shrink-0 text-sm font-semibold" style={{ color: 'var(--ng-accent)' }}>Открыть →</span>
+            <span className="shrink-0 text-sm font-semibold" style={{ color: 'var(--negis-accent)' }}>Открыть →</span>
           </div>
         </Link>
 
@@ -107,14 +107,14 @@ function DemoDashboard() {
                 <div className="mb-4 flex items-center justify-between gap-3">
                   <span
                     className="flex h-8 w-8 items-center justify-center rounded-lg"
-                    style={{ background: 'var(--negis-primary-soft)', color: 'var(--ng-primary)' }}
+                    style={{ background: 'var(--negis-primary-soft)', color: 'var(--negis-primary)' }}
                   >
                     <Icon size={15} />
                   </span>
-                  <span className="text-xs font-semibold" style={{ color: 'var(--ng-muted)' }}>Открыть</span>
+                  <span className="text-xs font-semibold" style={{ color: 'var(--negis-muted)' }}>Открыть</span>
                 </div>
-                <h2 className="text-sm font-semibold" style={{ color: 'var(--ng-text)' }}>{label}</h2>
-                <p className="mt-1.5 text-sm" style={{ color: 'var(--ng-muted)' }}>{value}</p>
+                <h2 className="text-sm font-semibold" style={{ color: 'var(--negis-text)' }}>{label}</h2>
+                <p className="mt-1.5 text-sm" style={{ color: 'var(--negis-muted)' }}>{value}</p>
               </div>
             </Link>
           ))}
@@ -122,34 +122,34 @@ function DemoDashboard() {
 
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
           <div className="neu-card lg:col-span-2">
-            <h2 className="mb-4 text-base font-semibold" style={{ color: 'var(--ng-text)' }}>Воронка на сегодня</h2>
+            <h2 className="mb-4 text-base font-semibold" style={{ color: 'var(--negis-text)' }}>Воронка на сегодня</h2>
             <div className="space-y-2.5">
               {([
                 ['Новые лиды', '24', 'var(--negis-secondary)'],
-                ['Квалифицированные звонки', '14', 'var(--ng-primary)'],
-                ['Записанные визиты', '7', 'var(--ng-success)'],
+                ['Квалифицированные звонки', '14', 'var(--negis-primary)'],
+                ['Записанные визиты', '7', 'var(--negis-success)'],
               ] as const).map(([label, value, color]) => (
                 <div key={label} className="neu-pressed-sm flex items-center justify-between p-3 px-4">
                   <div className="flex items-center gap-3">
                     <span aria-hidden className="h-2.5 w-2.5 rounded-full" style={{ background: color }} />
-                    <span className="text-sm font-medium" style={{ color: 'var(--ng-text-2)' }}>{label}</span>
+                    <span className="text-sm font-medium" style={{ color: 'var(--negis-text-2)' }}>{label}</span>
                   </div>
-                  <span className="text-sm font-semibold tabular-nums" style={{ color: 'var(--ng-text)' }}>{value}</span>
+                  <span className="text-sm font-semibold tabular-nums" style={{ color: 'var(--negis-text)' }}>{value}</span>
                 </div>
               ))}
             </div>
           </div>
 
           <div className="neu-card">
-            <h2 className="mb-4 text-base font-semibold" style={{ color: 'var(--ng-text)' }}>Срез кампании</h2>
+            <h2 className="mb-4 text-base font-semibold" style={{ color: 'var(--negis-text)' }}>Срез кампании</h2>
             <div className="space-y-4">
               <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.08em]" style={{ color: 'var(--ng-muted)' }}>Статус</p>
-                <p className="mt-1 text-sm font-semibold" style={{ color: 'var(--ng-text)' }}>Ожидает запуска</p>
+                <p className="text-xs font-semibold uppercase tracking-[0.08em]" style={{ color: 'var(--negis-muted)' }}>Статус</p>
+                <p className="mt-1 text-sm font-semibold" style={{ color: 'var(--negis-text)' }}>Ожидает запуска</p>
               </div>
               <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.08em]" style={{ color: 'var(--ng-muted)' }}>Оценка креатива</p>
-                <p className="mt-1 text-2xl font-semibold tabular-nums" style={{ color: 'var(--ng-primary)' }}>86</p>
+                <p className="text-xs font-semibold uppercase tracking-[0.08em]" style={{ color: 'var(--negis-muted)' }}>Оценка креатива</p>
+                <p className="mt-1 text-2xl font-semibold tabular-nums" style={{ color: 'var(--negis-primary)' }}>86</p>
               </div>
               <Link href="/ads-automation">
                 <div className="neu-btn-primary inline-flex cursor-pointer items-center gap-2">
@@ -240,7 +240,7 @@ function LiveDashboard() {
           />
         </div>
 
-        <p className="text-xs leading-relaxed" style={{ color: 'var(--ng-muted)' }}>
+        <p className="text-xs leading-relaxed" style={{ color: 'var(--negis-muted)' }}>
           Показатели рассчитываются по реальным данным CRM за текущую дату. «—» означает, что данные не удалось загрузить.
         </p>
       </div>

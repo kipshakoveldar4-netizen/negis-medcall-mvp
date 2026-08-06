@@ -15,8 +15,8 @@ export function PageLayout({ children, requireAuth = true }: PageLayoutProps) {
 
   if (isLoading) {
     return (
-      <div className="flex min-h-screen items-center justify-center" style={{ background: 'var(--ng-bg)' }}>
-        <div className="text-xs font-medium tracking-[0.14em]" style={{ color: 'var(--ng-muted)' }}>
+      <div className="flex min-h-screen items-center justify-center" style={{ background: 'var(--negis-bg)' }}>
+        <div className="text-xs font-medium tracking-[0.14em]" style={{ color: 'var(--negis-muted)' }}>
           ЗАГРУЗКА…
         </div>
       </div>
@@ -31,8 +31,8 @@ export function PageLayout({ children, requireAuth = true }: PageLayoutProps) {
     <div
       className="negis-app-shell min-h-[100dvh] font-sans"
       style={{
-        background: 'var(--ng-bg)',
-        color: 'var(--ng-text)',
+        background: 'var(--negis-bg)',
+        color: 'var(--negis-text)',
         paddingTop: isImpersonation ? 40 : 0,
       }}
     >

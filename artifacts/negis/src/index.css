@@ -49,23 +49,20 @@
 }
 
 :root {
-  /* Medina OS design tokens (UI-1). The historical --ng- and --negis- token
-     names are kept so existing pages restyle without markup changes — only the
-     VALUES changed: restrained enterprise palette, opaque surfaces, border-first
-     elevation. One primary accent (deep teal); blue is informational only. */
-  --ng-bg:        #F4F6F5;
-  --ng-surface:   #FFFFFF;
-  --ng-surface-2: #F8FAF9;
-  --ng-plate:     #EDF1EF;
-  --ng-border:    #E2E8E5;
-  --ng-text:      #111827;
-  --ng-text-2:    #374151;
-  --ng-muted:     #6B7280;
-  --ng-primary:   #0F766E;
-  --ng-accent:    #115E59;
-  --ng-success:   #059669;
-  --ng-warning:   #D97706;
-  --ng-error:     #DC2626;
+  /* Medina OS design tokens (UI-1). Restrained enterprise palette, opaque
+     surfaces, border-first elevation. One primary accent (deep teal); blue is
+     informational only.
+
+     One vocabulary, deliberately. Two prefixes used to carry the same palette:
+     --ng- and --negis- declared identical values for bg, surface, border, text,
+     muted, primary, success, warning and error, and pages picked whichever the
+     author reached for that day. Nothing looked broken — every screen was
+     correct on its own — but a colour could not be changed in one place, and
+     that is most of why the product read as unfinished. The --ng- block is gone
+     and its four unique tokens (surface-2, plate, text-2, accent) live here.
+
+     --medina-* stays: it is the dark sidebar, a genuinely separate surface, not
+     a second name for the same thing. */
 
   --negis-bg:            #F4F6F5;
   --negis-surface:       #FFFFFF;
@@ -81,6 +78,10 @@
   --negis-error:         #DC2626;
   --negis-text:          #111827;
   --negis-muted:         #6B7280;
+  --negis-accent:        #115E59;
+  --negis-text-2:        #374151;
+  --negis-plate:         #EDF1EF;
+  --negis-surface-2:     #F8FAF9;
   --negis-radius-card:   10px;
   --negis-shadow-card:   0 1px 2px rgba(17, 24, 39, 0.05);
 
@@ -138,8 +139,8 @@
   }
   body {
     @apply font-sans antialiased;
-    background: var(--ng-bg);
-    color: var(--ng-text);
+    background: var(--negis-bg);
+    color: var(--negis-text);
     font-size: 14px;
     line-height: 1.6;
   }
@@ -152,7 +153,7 @@
 
   /* Enterprise focus policy: keyboard focus is always visible. */
   :focus-visible {
-    outline: 2px solid var(--ng-primary);
+    outline: 2px solid var(--negis-primary);
     outline-offset: 2px;
   }
 
@@ -160,34 +161,34 @@
 
   /* Cards / Surfaces — Medina: opaque, border-first, minimal elevation. */
   .neu {
-    background: var(--ng-surface);
-    border: 1px solid var(--ng-border);
+    background: var(--negis-surface);
+    border: 1px solid var(--negis-border);
     border-radius: 10px;
     box-shadow: 0 1px 2px rgba(17, 24, 39, 0.05);
     transition: box-shadow 0.15s ease;
   }
   .neu-sm {
-    background: var(--ng-surface);
-    border: 1px solid var(--ng-border);
+    background: var(--negis-surface);
+    border: 1px solid var(--negis-border);
     border-radius: 10px;
     box-shadow: 0 1px 2px rgba(17, 24, 39, 0.05);
     transition: box-shadow 0.15s ease;
   }
   .neu-lg {
-    background: var(--ng-surface);
-    border: 1px solid var(--ng-border);
+    background: var(--negis-surface);
+    border: 1px solid var(--negis-border);
     border-radius: 12px;
     box-shadow: 0 1px 3px rgba(17, 24, 39, 0.07);
   }
   .neu-pressed {
-    background: var(--ng-surface-2);
-    border: 1px solid var(--ng-border);
+    background: var(--negis-surface-2);
+    border: 1px solid var(--negis-border);
     border-radius: 8px;
     box-shadow: none;
   }
   .neu-pressed-sm {
-    background: var(--ng-surface-2);
-    border: 1px solid var(--ng-plate);
+    background: var(--negis-surface-2);
+    border: 1px solid var(--negis-plate);
     border-radius: 8px;
     box-shadow: none;
   }
@@ -208,8 +209,8 @@
 
   /* Card container */
   .neu-card {
-    background: var(--ng-surface);
-    border: 1px solid var(--ng-border);
+    background: var(--negis-surface);
+    border: 1px solid var(--negis-border);
     border-radius: 10px;
     padding: 20px;
     box-shadow: 0 1px 2px rgba(17, 24, 39, 0.05);
@@ -217,23 +218,23 @@
 
   /* Input */
   .neu-input {
-    background: var(--ng-surface);
-    border: 1px solid var(--ng-border);
+    background: var(--negis-surface);
+    border: 1px solid var(--negis-border);
     border-radius: 8px;
     outline: none;
     padding: 9px 12px;
     width: 100%;
     font-size: 14px;
-    color: var(--ng-text);
+    color: var(--negis-text);
     font-family: 'Inter', sans-serif;
     box-shadow: none;
     transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
   }
   .neu-input:focus {
-    border-color: var(--ng-primary);
+    border-color: var(--negis-primary);
     box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.15);
   }
-  .neu-input::placeholder { color: var(--ng-muted); }
+  .neu-input::placeholder { color: var(--negis-muted); }
 
   select.neu-input,
   textarea.neu-input,
@@ -246,15 +247,15 @@
   }
 
   table {
-    color: var(--ng-text);
+    color: var(--negis-text);
   }
 
   thead {
-    background: var(--ng-surface-2);
+    background: var(--negis-surface-2);
   }
 
   th {
-    color: var(--ng-muted);
+    color: var(--negis-muted);
     font-weight: 600;
   }
 
@@ -263,7 +264,7 @@
   }
 
   tbody tr:hover {
-    background: var(--ng-surface-2);
+    background: var(--negis-surface-2);
   }
 
   td,
@@ -277,14 +278,14 @@
 
   /* Buttons — flat enterprise controls. */
   .neu-btn {
-    background: var(--ng-surface);
-    border: 1px solid var(--ng-border);
+    background: var(--negis-surface);
+    border: 1px solid var(--negis-border);
     border-radius: 8px;
     font-weight: 600;
     font-size: 14px;
     padding: 9px 16px;
     cursor: pointer;
-    color: var(--ng-text);
+    color: var(--negis-text);
     font-family: 'Inter', sans-serif;
     box-shadow: 0 1px 2px rgba(17, 24, 39, 0.05);
     transition: background 0.15s ease, border-color 0.15s ease;
@@ -295,17 +296,17 @@
     white-space: nowrap;
   }
   .neu-btn:hover {
-    background: var(--ng-surface-2);
+    background: var(--negis-surface-2);
     border-color: #CBD5D1;
   }
   .neu-btn:active {
-    background: var(--ng-plate);
+    background: var(--negis-plate);
   }
 
   .neu-btn-primary {
-    background: var(--ng-primary);
+    background: var(--negis-primary);
     color: white;
-    border: 1px solid var(--ng-primary);
+    border: 1px solid var(--negis-primary);
     border-radius: 8px;
     font-weight: 600;
     font-size: 14px;
@@ -321,8 +322,8 @@
     white-space: nowrap;
   }
   .neu-btn-primary:hover {
-    background: var(--ng-accent);
-    border-color: var(--ng-accent);
+    background: var(--negis-accent);
+    border-color: var(--negis-accent);
   }
   .neu-btn-primary:active {
     background: #0B4F4A;
@@ -333,9 +334,9 @@
   }
 
   .neu-btn-success {
-    background: var(--ng-success);
+    background: var(--negis-success);
     color: white;
-    border: 1px solid var(--ng-success);
+    border: 1px solid var(--negis-success);
     border-radius: 8px;
     font-weight: 600;
     font-size: 13px;
@@ -351,9 +352,9 @@
   .neu-btn-success:hover { background: #047857; }
 
   .neu-btn-danger {
-    background: var(--ng-error);
+    background: var(--negis-error);
     color: white;
-    border: 1px solid var(--ng-error);
+    border: 1px solid var(--negis-error);
     border-radius: 8px;
     font-weight: 600;
     font-size: 13px;
@@ -369,26 +370,26 @@
   .neu-btn-danger:hover { background: #B91C1C; }
 
   .neu-icon-btn {
-    background: var(--ng-surface);
-    border: 1px solid var(--ng-border);
+    background: var(--negis-surface);
+    border: 1px solid var(--negis-border);
     border-radius: 8px;
     cursor: pointer;
     display: flex;
     align-items: center;
     justify-content: center;
     transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
-    color: var(--ng-text-2);
+    color: var(--negis-text-2);
     height: 40px;
     width: 40px;
     box-shadow: 0 1px 2px rgba(17, 24, 39, 0.05);
   }
   .neu-icon-btn:hover {
-    background: var(--ng-surface-2);
-    color: var(--ng-primary);
+    background: var(--negis-surface-2);
+    color: var(--negis-primary);
     border-color: #CBD5D1;
   }
   .neu-icon-btn:active {
-    background: var(--ng-plate);
+    background: var(--negis-plate);
   }
 
   /* Badge — status pills keep the pill shape by design. */
@@ -405,14 +406,14 @@
   .badge-blue    { color: #1D4ED8; background: #EFF6FF; }
   .badge-warning { color: #B45309; background: #FFFBEB; }
   .badge-error   { color: #B91C1C; background: #FEF2F2; }
-  .badge-muted   { color: var(--ng-muted); background: #F3F4F6; }
+  .badge-muted   { color: var(--negis-muted); background: #F3F4F6; }
 
   /* .soft-dock / .topnav-* / .soft-avatar / .soft-icon-btn removed together
      with TopNav — the component was never visible at any viewport width. */
 
   .soft-modal {
     border-radius: 12px;
-    border: 1px solid var(--ng-border);
+    border: 1px solid var(--negis-border);
     background: #FFFFFF;
     box-shadow: 0 20px 45px rgba(17, 24, 39, 0.18);
   }
@@ -504,7 +505,7 @@
     grid-template-columns: repeat(5, minmax(0, 1fr));
     gap: 4px;
     padding: 6px;
-    border: 1px solid var(--ng-border);
+    border: 1px solid var(--negis-border);
     border-radius: 14px;
     background: #FFFFFF;
     box-shadow: 0 8px 24px rgba(17, 24, 39, 0.12);
@@ -516,7 +517,7 @@
     border: 0;
     border-radius: 10px;
     background: transparent;
-    color: var(--ng-muted);
+    color: var(--negis-muted);
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -530,7 +531,7 @@
 
   .mobile-bottom-nav-item.is-active {
     background: var(--negis-primary-soft);
-    color: var(--ng-primary);
+    color: var(--negis-primary);
   }
 
   .mobile-nav-backdrop {
@@ -547,7 +548,7 @@
     width: 100%;
     max-height: min(72dvh, 620px);
     overflow-y: auto;
-    border: 1px solid var(--ng-border);
+    border: 1px solid var(--negis-border);
     border-radius: 14px;
     background: #FFFFFF;
     box-shadow: 0 16px 48px rgba(17, 24, 39, 0.18);
@@ -558,10 +559,10 @@
   .mobile-nav-logout {
     min-width: 0;
     min-height: 52px;
-    border: 1px solid var(--ng-border);
+    border: 1px solid var(--negis-border);
     border-radius: 10px;
-    background: var(--ng-surface-2);
-    color: var(--ng-text);
+    background: var(--negis-surface-2);
+    color: var(--negis-text);
     display: flex;
     align-items: center;
     gap: 10px;

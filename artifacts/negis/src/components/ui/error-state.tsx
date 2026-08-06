@@ -18,11 +18,11 @@ export function ErrorState({
       <span aria-hidden className="flex h-12 w-12 items-center justify-center rounded-xl" style={{ background: "#FEF2F2", color: "#B91C1C" }}>
         <AlertTriangle size={22} />
       </span>
-      <h2 className="text-lg font-semibold" style={{ color: "var(--ng-text)" }}>
+      <h2 className="text-lg font-semibold" style={{ color: "var(--negis-text)" }}>
         {title}
       </h2>
       {description ? (
-        <p className="max-w-md text-sm leading-relaxed" style={{ color: "var(--ng-muted)" }}>
+        <p className="max-w-md text-sm leading-relaxed" style={{ color: "var(--negis-muted)" }}>
           {description}
         </p>
       ) : null}

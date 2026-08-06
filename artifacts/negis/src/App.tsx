@@ -90,8 +90,8 @@ function RoutePrefetcher() {
 
 function RouteFallback() {
   return (
-    <div className="flex min-h-screen items-center justify-center" style={{ background: "var(--ng-bg)" }}>
-      <div className="text-xs font-medium tracking-[0.14em]" style={{ color: "var(--ng-muted)" }}>
+    <div className="flex min-h-screen items-center justify-center" style={{ background: "var(--negis-bg)" }}>
+      <div className="text-xs font-medium tracking-[0.14em]" style={{ color: "var(--negis-muted)" }}>
         ЗАГРУЗКА…
       </div>
     </div>

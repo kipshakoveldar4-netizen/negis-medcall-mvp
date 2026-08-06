@@ -16,15 +16,15 @@ export function EmptyState({
   return (
     <section className="neu flex flex-col items-center gap-3 p-8 text-center">
       {Icon ? (
-        <span aria-hidden className="flex h-12 w-12 items-center justify-center rounded-xl" style={{ background: "var(--negis-primary-soft)", color: "var(--ng-primary)" }}>
+        <span aria-hidden className="flex h-12 w-12 items-center justify-center rounded-xl" style={{ background: "var(--negis-primary-soft)", color: "var(--negis-primary)" }}>
           <Icon size={22} />
         </span>
       ) : null}
-      <h2 className="text-lg font-semibold" style={{ color: "var(--ng-text)" }}>
+      <h2 className="text-lg font-semibold" style={{ color: "var(--negis-text)" }}>
         {title}
       </h2>
       {description ? (
-        <p className="max-w-md text-sm leading-relaxed" style={{ color: "var(--ng-muted)" }}>
+        <p className="max-w-md text-sm leading-relaxed" style={{ color: "var(--negis-muted)" }}>
           {description}
         </p>
       ) : null}

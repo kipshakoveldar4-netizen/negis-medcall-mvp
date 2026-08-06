@@ -62,15 +62,15 @@ function StepRow({ step, index }: { step: SetupStep; index: number }) {
     <li aria-current={!done && !unknown && step.state !== "loading" ? "step" : undefined}>
       <div className="neu flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex min-w-0 items-start gap-3">
-          <span aria-hidden className="mt-0.5 shrink-0" style={{ color: done ? "var(--ng-success)" : "var(--ng-muted)" }}>
+          <span aria-hidden className="mt-0.5 shrink-0" style={{ color: done ? "var(--negis-success)" : "var(--negis-muted)" }}>
             {done ? <CheckCircle2 size={20} /> : <Circle size={20} />}
           </span>
           <div className="min-w-0">
-            <p className="text-sm font-semibold" style={{ color: "var(--ng-text)" }}>
+            <p className="text-sm font-semibold" style={{ color: "var(--negis-text)" }}>
               {index}. {step.title}
-              {step.optional ? <span className="ml-2 text-xs font-medium" style={{ color: "var(--ng-muted)" }}>необязательно</span> : null}
+              {step.optional ? <span className="ml-2 text-xs font-medium" style={{ color: "var(--negis-muted)" }}>необязательно</span> : null}
             </p>
-            <p className="mt-1 text-sm leading-relaxed" style={{ color: "var(--ng-muted)" }}>{step.explanation}</p>
+            <p className="mt-1 text-sm leading-relaxed" style={{ color: "var(--negis-muted)" }}>{step.explanation}</p>
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-3">
@@ -218,18 +218,18 @@ export default function Onboarding() {
 
         <section aria-label="Прогресс настройки" className="neu p-4">
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <p className="text-sm font-semibold" style={{ color: "var(--ng-text)" }}>
+            <p className="text-sm font-semibold" style={{ color: "var(--negis-text)" }}>
               {clinicName || "Клиника"}
-              {user?.email ? <span className="ml-2 text-xs font-medium" style={{ color: "var(--ng-muted)" }}>Администратор: {user.email}</span> : null}
+              {user?.email ? <span className="ml-2 text-xs font-medium" style={{ color: "var(--negis-muted)" }}>Администратор: {user.email}</span> : null}
             </p>
-            <p aria-live="polite" className="text-sm font-medium tabular-nums" style={{ color: "var(--ng-muted)" }}>
+            <p aria-live="polite" className="text-sm font-medium tabular-nums" style={{ color: "var(--negis-muted)" }}>
               {anyLoading ? "Проверяем настройку…" : `Выполнено обязательных шагов: ${doneRequired} из ${requiredSteps.length}`}
             </p>
           </div>
-          <div aria-hidden className="mt-3 h-1.5 overflow-hidden rounded-full" style={{ background: "var(--ng-plate)" }}>
+          <div aria-hidden className="mt-3 h-1.5 overflow-hidden rounded-full" style={{ background: "var(--negis-plate)" }}>
             <div
               className="h-full rounded-full transition-all"
-              style={{ width: `${requiredSteps.length ? (doneRequired / requiredSteps.length) * 100 : 0}%`, background: "var(--ng-primary)" }}
+              style={{ width: `${requiredSteps.length ? (doneRequired / requiredSteps.length) * 100 : 0}%`, background: "var(--negis-primary)" }}
             />
           </div>
         </section>
@@ -243,10 +243,10 @@ export default function Onboarding() {
         {allRequiredDone ? (
           <section className="neu p-5" aria-live="polite">
             <div className="flex items-start gap-3">
-              <CheckCircle2 size={22} aria-hidden style={{ color: "var(--ng-success)" }} />
+              <CheckCircle2 size={22} aria-hidden style={{ color: "var(--negis-success)" }} />
               <div>
-                <h2 className="text-lg font-semibold" style={{ color: "var(--ng-text)" }}>Клиника готова к работе</h2>
-                <p className="mt-1 text-sm" style={{ color: "var(--ng-muted)" }}>
+                <h2 className="text-lg font-semibold" style={{ color: "var(--negis-text)" }}>Клиника готова к работе</h2>
+                <p className="mt-1 text-sm" style={{ color: "var(--negis-muted)" }}>
                   Обязательные шаги выполнены. Реклама остаётся необязательной и настраивается отдельно.
                 </p>
                 <div className="mt-3 flex flex-wrap gap-2">
@@ -258,7 +258,7 @@ export default function Onboarding() {
           </section>
         ) : null}
 
-        <p className="text-xs leading-relaxed" style={{ color: "var(--ng-muted)" }}>
+        <p className="text-xs leading-relaxed" style={{ color: "var(--negis-muted)" }}>
           Статусы шагов определяются по реальным данным рабочего пространства. Открытие этой страницы не отмечает шаги выполненными.
         </p>
       </div>
