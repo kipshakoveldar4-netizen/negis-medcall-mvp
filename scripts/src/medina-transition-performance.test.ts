@@ -271,3 +271,46 @@ test("P18 sign-out and a clinic switch drop the cache", async () => {
   const select = source.slice(source.indexOf("const selectWorkspace"), source.indexOf("const clearWorkspaceSelection"));
   assert.ok(select.includes("clearCrmCache()"), "a cache that outlives a tenant switch leaks one clinic into another");
 });
+
+// ===========================================================================
+// E. A page behind two paths keeps its mounted tree
+// ===========================================================================
+
+test("P19 no page is reachable through two different inline route wrappers", async () => {
+  const source = await readSource("App.tsx");
+
+  // `component={() => <ProtectedPage component={X} ... />}` written twice makes
+  // two element types for one page: switching between the paths unmounts it and
+  // mounts it again. On /ads-automation that dropped the wizard and killed the
+  // interval watching a running video optimisation; /booking↔/appointments,
+  // /marketplace↔/market and the four content-studio aliases lost their state
+  // the same way. Ten routes, four pages.
+  const inline = [...source.matchAll(/component=\{\(\) => <ProtectedPage component=\{(\w+)\}/g)].map((m) => m[1]);
+  const seen = new Map<string, number>();
+  for (const page of inline) seen.set(page, (seen.get(page) ?? 0) + 1);
+
+  const duplicated = [...seen.entries()].filter(([, count]) => count > 1).map(([page]) => page);
+  assert.deepEqual(
+    duplicated,
+    [],
+    `these pages answer to several paths and must share one hoisted component: ${duplicated.join(", ")}`,
+  );
+});
+
+test("P20 the shared pages point at hoisted components, not at fresh closures", async () => {
+  const source = await readSource("App.tsx");
+
+  for (const wrapper of ["AppointmentsRoute", "MarketRoute", "AdsAutomationRoute", "ContentStudioRoute"]) {
+    const declaration = `const ${wrapper} = () => <ProtectedPage`;
+    assert.equal(
+      source.split(declaration).length - 1,
+      1,
+      `${wrapper} must be declared exactly once, at module level`,
+    );
+  }
+  assert.ok(
+    source.includes('path="/ads-automation/history" component={AdsAutomationRoute}') &&
+      source.includes('path="/ads-automation" component={AdsAutomationRoute}'),
+    "both ads paths must resolve to the same component so the wizard survives a trip to history",
+  );
+});
