@@ -120,7 +120,10 @@ function isUncacheable(path: string): boolean {
 }
 
 function ttlFor(path: string): number {
-  return /\/(lead-stages|lead-sources)\b/.test(path) ? REFERENCE_TTL_MS : LIST_TTL_MS;
+  // `staff` joins the funnel's skeleton here: the lead card reads it to name the
+  // colleague a lead is assigned to, and a clinic's roster changes about as
+  // often as its stages do.
+  return /\/(lead-stages|lead-sources|staff)\b/.test(path) ? REFERENCE_TTL_MS : LIST_TTL_MS;
 }
 
 /**
