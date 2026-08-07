@@ -85,6 +85,28 @@
   --negis-radius-card:   10px;
   --negis-shadow-card:   0 1px 2px rgba(17, 24, 39, 0.05);
 
+  /* UI-3 — приветственный экран. Тёплый светлый фон, мятная заливка на главной
+     цифре, чёрные пилюли активного состояния. Живёт в том же словаре: третьего
+     префикса не заводим, урок --ng- усвоен. */
+  --negis-ground:       #EEF0EA;
+  --negis-mint:         #A9E7C5;
+  --negis-mint-soft:    #CFF3DF;
+  --negis-mint-deep:    #0C5E3D;
+  --negis-mint-ink:     #07452C;
+  --negis-ink-strong:   #101410;
+  --negis-ink-2:        #39423B;
+  --negis-muted-2:      #7B857D;
+  --negis-faint:        #AEB6AF;
+  --negis-hair:         #F2F4F0;
+  --negis-black:        #121614;
+  --negis-shadow-soft:  0 6px 12px rgba(14, 26, 18, 0.07);
+  --negis-shadow-lift:  0 14px 26px rgba(14, 26, 18, 0.14);
+  /* Тёмная поверхность содержимого — не панель навигации. У --medina-* своя
+     роль, и подменять её маркетинговым блоком значит заводить второй словарь. */
+  --negis-dark:         #141A17;
+  --negis-dark-text:    #E8EDEA;
+  --negis-dark-muted:   #97A39C;
+
   /* Medina sidebar (deep graphite) */
   --medina-sidebar-bg:      #111827;
   --medina-sidebar-border:  #1F2937;
