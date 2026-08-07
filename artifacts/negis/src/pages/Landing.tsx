@@ -501,8 +501,8 @@ export default function Landing() {
             {/* Header */}
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 28 }}>
               <div style={{
-                background: '#E4F2EF', borderRadius: 8, padding: '5px 10px',
-                fontSize: 10, fontWeight: 600, letterSpacing: '0.12em', color: '#0F766E',
+                background: 'var(--negis-primary-soft)', borderRadius: 999, padding: '5px 10px',
+                fontSize: 10, fontWeight: 600, letterSpacing: '0.12em', color: 'var(--negis-primary)',
                 fontFamily: "'Inter', sans-serif", textTransform: 'uppercase',
               }}>MEDINA OS</div>
               <span style={{ fontSize: 12, color: '#94A3B8', letterSpacing: '0.06em', fontFamily: "'Inter', sans-serif" }}>

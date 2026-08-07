@@ -205,6 +205,44 @@ test("D9 the retired .neu-lg surface is gone from stylesheet and markup", async 
   );
 });
 
+test("D11 the product has exactly one metric card, not one per screen", async () => {
+  // Six screens had each grown their own: ClientMetricCard, HistoryMetricCard,
+  // ControlMetricCard and three plain MetricCards, all drawing the same thing
+  // with different icon sizes, weights and — on Записи and админке — colours
+  // hard-coded past the palette. That is why changing the brand green left two
+  // screens behind: there was no single place to change.
+  const definitions: string[] = [];
+  for (const file of await sourceFiles()) {
+    if (!/\.tsx$/.test(file)) continue;
+    const source = await readFile(file, "utf8");
+    for (const match of source.matchAll(/^(?:export\s+)?function\s+(\w*Metric\w*Card)\b/gm)) {
+      // Separators are normalized so the expectation reads the same on Windows.
+      definitions.push(`${path.relative(repoRoot, file).split(path.sep).join("/")} → ${match[1]}`);
+    }
+  }
+  assert.deepEqual(
+    definitions,
+    ["artifacts/negis/src/components/ui/metric-card.tsx → MetricCard"],
+    `a screen that draws its own metric card stops following the shared one: ${definitions.join(", ")}`,
+  );
+});
+
+test("D12 the retired teal is gone from every screen", async () => {
+  // --negis-primary moved to the mint family. Screens that had written the old
+  // value out as a literal, or reached for Tailwind's teal-*, kept the previous
+  // brand colour and became the odd ones out. Status tints are not brand and
+  // stay: this test names only the retired brand values.
+  const retired = ["#0F766E", "#115E59", "#0B4F4A", "#E4F2EF"];
+  const offenders: string[] = [];
+  for (const file of await sourceFiles()) {
+    const source = await readFile(file, "utf8");
+    for (const value of retired) {
+      if (new RegExp(value, "i").test(source)) offenders.push(`${path.relative(repoRoot, file)} → ${value}`);
+    }
+  }
+  assert.deepEqual(offenders, [], `the old brand colour still shows on these screens: ${offenders.join(", ")}`);
+});
+
 test("D6 the welcome screen paints from the token vocabulary, not from literals", async () => {
   const landing = await readFile(path.join(negisSrc, "pages", "Landing.tsx"), "utf8");
   const presentation = landing.slice(landing.indexOf("  return ("), landing.indexOf("{/* Modal */}"));

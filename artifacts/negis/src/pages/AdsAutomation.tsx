@@ -23,6 +23,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { PageLayout } from "@/components/layout/PageLayout";
+import { MetricCard } from "@/components/ui/metric-card";
 import { useAuth } from "@/contexts/AuthContext";
 import { apiUrl, crmFetch } from "@/lib/api";
 import { getSupabaseAccessToken } from "@/lib/serverAuth";
@@ -1297,20 +1298,6 @@ function negisToneSoftBg(tone: NegisTone): string {
     default:
       return "var(--negis-primary-soft)";
   }
-}
-
-function HistoryMetricCard({ label, value, icon: Icon, tone }: { label: string; value: number; icon: LucideIcon; tone: NegisTone }) {
-  return (
-    <div className="negis-glass p-4">
-      <div className="flex items-center gap-2.5">
-        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl" style={{ background: negisToneSoftBg(tone), color: negisToneColor(tone) }}>
-          <Icon size={16} />
-        </div>
-        <p className="text-xs font-black leading-tight" style={{ color: "var(--negis-muted)" }}>{label}</p>
-      </div>
-      <p className="mt-2 text-2xl font-black" style={{ color: "var(--negis-text)" }}>{value}</p>
-    </div>
-  );
 }
 
 function HistoryFact({ label, value }: { label: string; value: ReactNode }) {
@@ -4129,8 +4116,8 @@ export default function AdsAutomation() {
         ) : null}
 
         <section className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5" aria-label="Сводка по запускам">
-          {summaryMetrics.map((metric) => (
-            <HistoryMetricCard key={metric.label} label={metric.label} value={metric.value} icon={metric.icon} tone={metric.tone} />
+          {summaryMetrics.map((metric, index) => (
+            <MetricCard key={metric.label} label={metric.label} value={metric.value} icon={metric.icon} tone={metric.tone} accent={index === 0} />
           ))}
         </section>
 

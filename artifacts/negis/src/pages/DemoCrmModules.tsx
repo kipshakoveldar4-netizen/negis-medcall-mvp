@@ -255,7 +255,7 @@ const staffSeed: StaffMember[] = [
 
 const toneClasses: Record<NonNullable<Metric["tone"]>, { bg: string; text: string }> = {
   blue: { bg: "bg-blue-500/10", text: "text-[#1A56DB]" },
-  teal: { bg: "bg-teal-500/10", text: "text-[#0F766E]" },
+  teal: { bg: "bg-[color:var(--negis-primary-soft)]", text: "text-[color:var(--negis-primary)]" },
   green: { bg: "bg-green-500/10", text: "text-[#16A34A]" },
   amber: { bg: "bg-amber-500/10", text: "text-[#D97706]" },
   rose: { bg: "bg-rose-500/10", text: "text-[#E11D48]" },
@@ -816,7 +816,7 @@ export function DemoCalls() {
           </section>
           <aside className="neu-card">
             <div className="mb-4 flex items-center gap-3">
-              <div className="rounded-xl bg-teal-500/10 p-2 text-[#0F766E]"><Bot size={20} /></div>
+              <div className="rounded-xl bg-[color:var(--negis-primary-soft)] p-2 text-[color:var(--negis-primary)]"><Bot size={20} /></div>
               <h2 className="text-lg font-bold text-[#0F172A]">Medina AI телефонист</h2>
             </div>
             <p className="text-sm leading-relaxed text-[#64748B]">Medina принимает звонки, фиксирует намерение клиента и передаёт задачи ресепшну.</p>
