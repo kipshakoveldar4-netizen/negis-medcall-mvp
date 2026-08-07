@@ -70,30 +70,21 @@ test("D2 every token a page asks for is declared", async () => {
   );
 });
 
-test("D3 --medina- stays what it is: the dark sidebar, not a second palette", async () => {
-  const users: string[] = [];
+test("D3 no retired vocabulary survives, in code or in declarations", async () => {
+  // --ng- went first; --medina- followed when the dark navigation slab became a
+  // floating rail and the dark surfaces moved into --negis-dark*. A prefix that
+  // nothing references is not harmless: it is the next author's false lead.
+  const offenders: string[] = [];
   for (const file of await sourceFiles()) {
     const source = await readFile(file, "utf8");
-    if (/var\(--medina-/.test(source)) users.push(path.basename(file));
+    for (const retired of ["--ng-", "--medina-"]) {
+      if (source.includes(`var(${retired}`) || new RegExp(`^\s*${retired}[a-z0-9-]+\s*:`, "m").test(source)) {
+        offenders.push(`${path.relative(repoRoot, file)} → ${retired}`);
+      }
+    }
   }
-
-  assert.ok(users.length > 0, "the sidebar tokens must still be in use");
-  const strays = users.filter((name) => !/^(Sidebar|MobileNav|Topbar|PageLayout|index)\./.test(name));
-  assert.deepEqual(
-    strays,
-    [],
-    `--medina-* describes the dark navigation surface; a page reaching for it is starting a third vocabulary: ${strays.join(", ")}`,
-  );
+  assert.deepEqual(offenders, [], `retired token prefixes are still alive: ${offenders.join(", ")}`);
 });
-
-// ===========================================================================
-// UI-3 — приветственный экран
-//
-// The page a visitor meets before signing in. The product has no self-service
-// registration: access to a new clinic is opened by the workspace owner. A hero
-// button saying «Попробовать бесплатно» would be a promise the product cannot
-// keep — the same class of dishonesty the server side already refuses.
-// ===========================================================================
 
 test("D4 the welcome screen offers only what the product can deliver", async () => {
   const landing = await readFile(path.join(negisSrc, "pages", "Landing.tsx"), "utf8");

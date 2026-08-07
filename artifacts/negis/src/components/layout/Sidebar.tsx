@@ -92,21 +92,21 @@ export function Sidebar() {
   return (
     <>
       <aside
-        className="fixed left-0 top-0 z-20 flex h-screen w-[248px] select-none flex-col"
-        style={{ background: 'var(--medina-sidebar-bg)', borderRight: '1px solid var(--medina-sidebar-border)' }}
+        className="fixed bottom-4 left-4 top-4 z-20 flex w-[236px] select-none flex-col overflow-hidden rounded-[28px]"
+        style={{ background: 'var(--negis-dark)', boxShadow: 'var(--negis-shadow-lift)' }}
       >
         {/* Brand */}
-        <div className="flex h-[64px] shrink-0 items-center gap-3 px-5" style={{ borderBottom: '1px solid var(--medina-sidebar-border)' }}>
+        <div className="flex h-[68px] shrink-0 items-center gap-3 px-5">
           <div
             aria-hidden
             className="flex h-9 w-9 items-center justify-center rounded-lg text-sm font-bold"
-            style={{ background: 'var(--negis-primary)', color: '#FFFFFF' }}
+            style={{ background: 'var(--negis-mint)', color: 'var(--negis-mint-ink)' }}
           >
             M
           </div>
           <div className="min-w-0">
-            <p className="truncate text-sm font-semibold" style={{ color: 'var(--medina-sidebar-text)' }}>Medina OS</p>
-            <p className="mt-0.5 truncate text-[11px] font-medium" style={{ color: 'var(--medina-sidebar-muted)' }}>
+            <p className="truncate text-sm font-semibold" style={{ color: 'var(--negis-dark-text)' }}>Medina OS</p>
+            <p className="mt-0.5 truncate text-[11px] font-medium" style={{ color: 'var(--negis-dark-muted)' }}>
               {isDemoMode ? 'Демо-режим' : 'Медицинская CRM'}
             </p>
           </div>
@@ -116,7 +116,7 @@ export function Sidebar() {
         <nav className="flex-1 overflow-y-auto px-3 pb-4 pt-3" aria-label="Основная навигация">
           {visibleGroups.map((group) => (
             <div key={group.title} className="mb-4">
-              <p className="px-2.5 pb-1.5 text-[11px] font-semibold uppercase tracking-[0.08em]" style={{ color: 'var(--medina-sidebar-muted)' }}>
+              <p className="px-2.5 pb-1.5 text-[11px] font-semibold uppercase tracking-[0.08em]" style={{ color: 'var(--negis-dark-muted)' }}>
                 {group.title}
               </p>
               <div className="flex flex-col gap-0.5">
@@ -125,12 +125,12 @@ export function Sidebar() {
                   return (
                     <Link key={href} href={href}>
                       <div
-                        className="flex min-h-[40px] cursor-pointer items-center gap-3 rounded-lg px-2.5 py-2 text-sm font-medium transition-colors"
+                        className="flex min-h-[42px] cursor-pointer items-center gap-3 rounded-xl px-3 py-2 text-sm font-medium transition-colors"
                         data-active={active}
                         style={{
-                          background: active ? 'var(--medina-sidebar-active)' : 'transparent',
-                          color: active ? '#FFFFFF' : 'var(--medina-sidebar-muted)',
-                          boxShadow: active ? 'inset 2px 0 0 var(--negis-primary)' : 'none',
+                          background: active ? 'var(--negis-mint)' : 'transparent',
+                          color: active ? 'var(--negis-mint-ink)' : 'var(--negis-dark-muted)',
+                          fontWeight: active ? 620 : 500,
                         }}
                       >
                         <Icon size={18} strokeWidth={active ? 2 : 1.75} aria-hidden />
@@ -145,19 +145,19 @@ export function Sidebar() {
         </nav>
 
         {/* Profile */}
-        <div className="flex shrink-0 items-center gap-3 px-4 pb-4 pt-3" style={{ borderTop: '1px solid var(--medina-sidebar-border)' }}>
+        <div className="flex shrink-0 items-center gap-3 px-4 pb-4 pt-3" style={{ borderTop: '1px solid var(--negis-dark-line)' }}>
           <button
             type="button"
             onClick={openProfile}
             aria-label="Открыть профиль"
             className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-[11px] font-semibold transition-colors"
-            style={{ background: 'var(--medina-sidebar-border)', color: 'var(--medina-sidebar-text)' }}
+            style={{ background: 'var(--negis-dark-line)', color: 'var(--negis-dark-text)' }}
           >
             {initials}
           </button>
           <button type="button" onClick={openProfile} className="min-w-0 flex-1 text-left">
-            <p className="truncate text-sm font-semibold" style={{ color: 'var(--medina-sidebar-text)' }}>{user?.user_metadata?.full_name || 'Профиль'}</p>
-            <p className="truncate text-xs" style={{ color: 'var(--medina-sidebar-muted)' }}>{user?.email || 'demo mode'}</p>
+            <p className="truncate text-sm font-semibold" style={{ color: 'var(--negis-dark-text)' }}>{user?.user_metadata?.full_name || 'Профиль'}</p>
+            <p className="truncate text-xs" style={{ color: 'var(--negis-dark-muted)' }}>{user?.email || 'demo mode'}</p>
           </button>
           {availableWorkspaces.length > 1 && (
             // Selection-1: without this the first choice was permanent — the
@@ -169,7 +169,7 @@ export function Sidebar() {
               aria-label="Сменить клинику"
               title="Сменить клинику"
               className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg transition-colors hover:text-white"
-              style={{ color: 'var(--medina-sidebar-muted)' }}
+              style={{ color: 'var(--negis-dark-muted)' }}
             >
               <Building2 size={17} aria-hidden />
             </button>
@@ -179,7 +179,7 @@ export function Sidebar() {
             onClick={signOut}
             aria-label="Выйти"
             className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg transition-colors hover:text-red-400"
-            style={{ color: 'var(--medina-sidebar-muted)' }}
+            style={{ color: 'var(--negis-dark-muted)' }}
           >
             <LogOut size={17} aria-hidden />
           </button>

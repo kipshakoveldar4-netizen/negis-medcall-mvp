@@ -31,7 +31,7 @@ export function PageLayout({ children, requireAuth = true }: PageLayoutProps) {
     <div
       className="negis-app-shell min-h-[100dvh] font-sans"
       style={{
-        background: 'var(--negis-bg)',
+        background: 'var(--negis-ground)',
         color: 'var(--negis-text)',
         paddingTop: isImpersonation ? 40 : 0,
       }}
@@ -39,7 +39,7 @@ export function PageLayout({ children, requireAuth = true }: PageLayoutProps) {
       <div className="hidden md:block">
         <Sidebar />
       </div>
-      <div className="flex min-h-[100dvh] flex-col md:pl-[248px]">
+      <div className="flex min-h-[100dvh] flex-col md:pl-[268px]">
         {/* The header renders at every width: it is the only place the
             notification bell lives, so hiding it on desktop made realtime
             booking notifications unreachable there. */}
