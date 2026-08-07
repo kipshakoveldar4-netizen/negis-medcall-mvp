@@ -61,8 +61,10 @@
      that is most of why the product read as unfinished. The --ng- block is gone
      and its four unique tokens (surface-2, plate, text-2, accent) live here.
 
-     --medina-* stays: it is the dark sidebar, a genuinely separate surface, not
-     a second name for the same thing. */
+     UI-4: --medina-* retired too. It described the dark navigation slab; the
+     slab is gone, and the dark surfaces that remain live in --negis-dark*.
+     Nothing referenced it any more, and six dead declarations are the same
+     sloppiness this whole clean-up is about. */
 
   --negis-bg:            #F4F6F5;
   --negis-surface:       #FFFFFF;
@@ -106,13 +108,8 @@
   --negis-dark:         #141A17;
   --negis-dark-text:    #E8EDEA;
   --negis-dark-muted:   #97A39C;
+  --negis-dark-line:    #232C27;
 
-  /* Medina sidebar (deep graphite) */
-  --medina-sidebar-bg:      #111827;
-  --medina-sidebar-border:  #1F2937;
-  --medina-sidebar-text:    #E5E7EB;
-  --medina-sidebar-muted:   #9CA3AF;
-  --medina-sidebar-active:  rgba(15, 118, 110, 0.35);
 
   --background: 150 8% 96%;
   --foreground: 220 39% 11%;

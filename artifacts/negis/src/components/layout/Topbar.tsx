@@ -43,8 +43,8 @@ export function Topbar() {
     <header
       className="negis-topbar sticky top-0 z-30 flex shrink-0 items-center gap-4 px-5 md:px-8"
       style={{
-        background: 'var(--negis-surface)',
-        borderBottom: '1px solid var(--negis-border)',
+        background: 'transparent',
+        borderBottom: 'none',
       }}
     >
       <div className="flex min-w-0 items-center gap-2 select-none">
