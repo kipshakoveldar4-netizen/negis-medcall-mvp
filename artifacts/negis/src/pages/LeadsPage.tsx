@@ -894,8 +894,16 @@ export default function LeadsPage() {
 
         {/* Summary metrics */}
         <section className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5" aria-label="Сводка по заявкам">
-          {summaryMetrics.map((metric) => (
-            <MetricCard key={metric.label} label={metric.label} value={metric.value} icon={metric.icon} tone={metric.tone} loading={!loaded} />
+          {summaryMetrics.map((metric, index) => (
+            <MetricCard
+              key={metric.label}
+              label={metric.label}
+              value={metric.value}
+              icon={metric.icon}
+              tone={metric.tone}
+              loading={!loaded}
+              accent={index === 0}
+            />
           ))}
         </section>
 
@@ -918,11 +926,11 @@ export default function LeadsPage() {
                 <button
                   key={option.id}
                   type="button"
-                  className="rounded-full border px-3.5 py-1.5 text-xs font-semibold transition"
+                  className="rounded-full px-4 py-2 text-xs font-semibold transition"
                   style={
                     active
-                      ? { background: "var(--negis-primary)", borderColor: "var(--negis-primary)", color: "#FFFFFF" }
-                      : { background: "var(--negis-surface)", borderColor: "var(--negis-border)", color: "var(--negis-muted)" }
+                      ? { background: "var(--negis-black)", color: "#FFFFFF" }
+                      : { background: "var(--negis-ground)", color: "var(--negis-ink-2)" }
                   }
                   aria-pressed={active}
                   onClick={() => setFilter(option.id)}

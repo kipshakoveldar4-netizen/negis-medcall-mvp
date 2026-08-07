@@ -11,6 +11,7 @@ export function MetricCard({
   tone = "primary",
   delta,
   loading = false,
+  accent = false,
 }: {
   label: string;
   value: number | string | null | undefined;
@@ -18,6 +19,9 @@ export function MetricCard({
   tone?: "primary" | "info" | "success" | "warning" | "error" | "muted";
   delta?: ReactNode;
   loading?: boolean;
+  /** Одна метрика на экране может быть залита акцентом — та, ради которой
+   *  на страницу и заходят. Две залитые спорят друг с другом. */
+  accent?: boolean;
 }) {
   const toneColor: Record<string, { fg: string; bg: string }> = {
     primary: { fg: "var(--negis-primary)", bg: "var(--negis-primary-soft)" },
@@ -31,21 +35,27 @@ export function MetricCard({
   const shown = value === null || value === undefined || value === "" ? "—" : value;
 
   return (
-    <div className="neu-sm p-4">
+    <div className="neu-sm p-4" style={accent ? { background: "var(--negis-mint)", boxShadow: "none" } : undefined}>
       <div className="flex items-center gap-2.5">
         {Icon ? (
-          <span aria-hidden className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg" style={{ background: palette.bg, color: palette.fg }}>
+          <span
+            aria-hidden
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg"
+            style={accent
+              ? { background: "rgba(255,255,255,0.55)", color: "var(--negis-mint-deep)" }
+              : { background: palette.bg, color: palette.fg }}
+          >
             <Icon size={15} />
           </span>
         ) : null}
-        <p className="text-xs font-semibold leading-tight" style={{ color: "var(--negis-muted)" }}>
+        <p className="text-xs font-semibold leading-tight" style={{ color: accent ? "var(--negis-mint-deep)" : "var(--negis-muted)" }}>
           {label}
         </p>
       </div>
       {loading ? (
         <Skeleton className="mt-3 h-7 w-16" />
       ) : (
-        <p data-metric-value className="mt-2 text-2xl font-semibold tabular-nums" style={{ color: "var(--negis-text)" }}>
+        <p data-metric-value className="mt-2 text-2xl font-semibold tabular-nums" style={{ color: accent ? "var(--negis-mint-ink)" : "var(--negis-text)" }}>
           {shown}
         </p>
       )}
