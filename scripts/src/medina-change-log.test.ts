@@ -427,6 +427,96 @@ test("CL16 the actor comes from the verified context, never from the request", a
   );
 });
 
+/* ── The panel ── */
+
+const negisSrc = path.join(repoRoot, "artifacts", "negis", "src");
+const panelPath = path.join(negisSrc, "components", "crm", "change-log-panel.tsx");
+
+test("CL18 a history that failed to load is not shown as a history with nothing in it", async () => {
+  const panel = await readFile(panelPath, "utf8");
+
+  // The block this panel sits beside on ClientsPage swallows its own failure
+  // and prints «История появится после…», so a refused read and a genuinely
+  // new client look identical. That is the habit this whole suite exists
+  // against, and it must not be copied into the new panel.
+  assert.ok(panel.includes('setState("failed")'), "a failed load has its own state");
+  const ready = panel.indexOf('state === "ready" && events.length === 0');
+  const failed = panel.indexOf('state === "failed"');
+  assert.ok(failed > 0 && ready > 0 && failed < ready, "the failure is rendered, and before the empty case");
+  assert.ok(
+    panel.includes("Не удалось загрузить историю"),
+    "and it says so in words the operator can act on",
+  );
+  assert.ok(
+    /if \(!response\.ok \|\| body\.success !== true\)/.test(panel),
+    "crmFetch does not throw on 5xx: the answer has to be inspected, not assumed",
+  );
+});
+
+test("CL19 the history is never served from cache", async () => {
+  const api = await readFile(path.join(negisSrc, "lib", "api.ts"), "utf8");
+  const guard = api.slice(api.indexOf("function isUncacheable("), api.indexOf("function ttlFor("));
+
+  assert.ok(
+    guard.includes("/change-log"),
+    "a write clears the cache when the request starts, not when the server answers, and the browser's "
+      + "own update is optimistic — a timeline reopened right after an edit would race the row it describes",
+  );
+
+  // And the path must not collide with the five-minute reference bucket.
+  const ttl = api.slice(api.indexOf("function ttlFor("));
+  const referencePattern = /\/\\?\/\((.*?)\)\\b\//.exec(ttl);
+  if (referencePattern) {
+    for (const name of referencePattern[1].split("|")) {
+      assert.ok(!"change-log".includes(name), `change-log must not fall into the ${name} reference bucket`);
+    }
+  }
+});
+
+test("CL20 there is one history panel, not one per screen", async () => {
+  // Six metric cards had grown one per page in this codebase, and the cost was
+  // that two screens kept the old brand colour when it changed because there
+  // was no single place to change. The panel starts shared.
+  const pagesDir = path.join(negisSrc, "pages");
+  const { readdir } = await import("node:fs/promises");
+  const definitions: string[] = [];
+  for (const name of await readdir(pagesDir)) {
+    if (!name.endsWith(".tsx")) continue;
+    const source = await readFile(path.join(pagesDir, name), "utf8");
+    for (const match of source.matchAll(/^(?:export\s+)?function\s+(\w*ChangeLog\w*|\w*HistoryPanel\w*)\b/gm)) {
+      definitions.push(`${name} → ${match[1]}`);
+    }
+  }
+  assert.deepEqual(definitions, [], `a page drawing its own history panel stops following the shared one: ${definitions.join(", ")}`);
+
+  const leads = await readFile(path.join(pagesDir, "LeadsPage.tsx"), "utf8");
+  const clients = await readFile(path.join(pagesDir, "ClientsPage.tsx"), "utf8");
+  for (const [name, source] of [["LeadsPage", leads], ["ClientsPage", clients]] as const) {
+    assert.ok(
+      source.includes('from "@/components/crm/change-log-panel"'),
+      `${name} must use the shared panel`,
+    );
+  }
+});
+
+test("CL21 the panel shows the words the clinic uses, not the keys the database stores", async () => {
+  const leads = await readFile(path.join(negisSrc, "pages", "LeadsPage.tsx"), "utf8");
+  const resolver = leads.slice(leads.indexOf("function makeLeadHistoryResolver("), leads.indexOf("function formatCreatedAt("));
+  assert.ok(resolver.length > 0, "the resolver must still exist");
+
+  // The journal stores what was written and never rewrites the past when a
+  // stage is renamed; the readable name is applied here instead. Resolving
+  // against ALL stages, not the active ones, is the point: a lead can sit in a
+  // stage the clinic has since switched off, and the history has to keep
+  // calling it what it was called.
+  assert.ok(resolver.includes("stages.find"), "a stage key becomes a stage name");
+  assert.ok(resolver.includes("staff.find"), "an assignee id becomes a colleague's name");
+  assert.ok(
+    leads.includes("makeLeadHistoryResolver(stageDefinitions, sourceDefinitions, staffOptions)"),
+    "and it is fed every stage the clinic has ever had, not only the enabled ones",
+  );
+});
+
 test("CL17 the writer cannot fail a save", async () => {
   const source = await readFile(journalPath, "utf8");
   const writer = source.slice(source.indexOf("export async function recordCrmChange("));

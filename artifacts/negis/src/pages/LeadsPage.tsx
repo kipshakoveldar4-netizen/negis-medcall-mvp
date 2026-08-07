@@ -24,6 +24,7 @@ import { toast } from "sonner";
 import { PageLayout } from "@/components/layout/PageLayout";
 import { PageHeader } from "@/components/ui/page-header";
 import { MetricCard } from "@/components/ui/metric-card";
+import { ChangeLogPanel } from "@/components/crm/change-log-panel";
 import { EmptyState } from "@/components/ui/empty-state";
 import { useDemoCollection, readDemoStorage, writeDemoStorage, isRealWorkspace, readWorkspaceId, workspaceScopedKey } from "@/lib/demoStorage";
 import { apiUrl, crmFetch } from "@/lib/api";
@@ -151,6 +152,35 @@ function Fact({ label, value }: { label: string; value: ReactNode }) {
       <span className="text-right font-bold" style={{ color: "var(--negis-text)" }}>{value}</span>
     </p>
   );
+}
+
+/**
+ * Журнал не знает, что «new» — это «Новая», а uuid — это Айгерим, и не должен:
+ * он хранит то, что было записано. Расшифровка живёт на экране, где под рукой
+ * и таксономия, и список сотрудников.
+ */
+function makeLeadHistoryResolver(
+  stages: LeadStageDefinition[],
+  sources: LeadSourceDefinition[],
+  staff: StaffOption[],
+): (field: string, value: string | null) => string | null {
+  return (field, value) => {
+    if (!value) return value;
+    if (field === "status") {
+      const stage = stages.find((item) => item.stageKey === value || item.id === value);
+      return stage?.name ?? value;
+    }
+    if (field === "responsible_user_id") {
+      return staff.find((member) => member.id === value)?.name ?? "Сотрудник";
+    }
+    if (field === "source") {
+      return sources.find((item) => item.sourceKey === value || item.name === value)?.name ?? value;
+    }
+    // Ссылки на другие записи: uuid оператору ничего не говорит, а факт связи
+    // говорит всё.
+    if (field.endsWith("_id")) return "привязано";
+    return value;
+  };
 }
 
 function formatCreatedAt(value?: string): string {
@@ -588,6 +618,12 @@ export default function LeadsPage() {
 
   const activeStages = useMemo(() => orderedActiveStages(stageDefinitions), [stageDefinitions]);
   const activeSources = useMemo(() => orderedActiveSources(sourceDefinitions), [sourceDefinitions]);
+  const resolveLeadHistoryValue = useMemo(
+    // Все стадии, не только активные: заявка могла стоять в стадии, которую
+    // клиника с тех пор отключила, и история обязана называть её как было.
+    () => makeLeadHistoryResolver(stageDefinitions, sourceDefinitions, staffOptions),
+    [stageDefinitions, sourceDefinitions, staffOptions],
+  );
 
   const setMode = (admin: boolean) => {
     setIsAdminMode(admin);
@@ -1303,6 +1339,16 @@ export default function LeadsPage() {
                 })}
               </div>
             </div>
+
+            {isRealWorkspace() ? (
+              <div className="mt-4">
+                <ChangeLogPanel
+                  entityType="lead"
+                  entityId={detailLead.id}
+                  resolveValue={resolveLeadHistoryValue}
+                />
+              </div>
+            ) : null}
 
             {/* AI recommendation placeholder */}
             <div className="mt-4 rounded-2xl p-3" style={{ background: negisToneSoftBg("ai") }}>
