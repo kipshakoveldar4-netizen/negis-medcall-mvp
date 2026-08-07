@@ -22,6 +22,12 @@ import {
 } from "./meta-launch-payload";
 import { evaluateMetaInsightsCompleteness } from "../meta/insightsCompleteness";
 import { getSupabaseServerClient } from "../supabase/server";
+import {
+  diffForJournal,
+  journaledEntityFor,
+  readRowBeforeChange,
+  recordCrmChange,
+} from "./change-journal";
 import { checkMetaCompliance } from "../meta/compliance";
 import {
   MetaApiError,
@@ -626,6 +632,38 @@ function readWorkspaceId(req: VercelRequest, _body: JsonRecord): string {
   // demo sentinel keeps every handler on its non-database branch instead of
   // silently querying with a browser-supplied tenant.
   return context ? context.workspaceId : DEMO_WORKSPACE_ID;
+}
+
+/**
+ * Who to attribute a journal entry to.
+ *
+ * Everything here comes from the verified context, never from the body. The one
+ * actor field this codebase already had — meta_launch_audit_logs.actor_name —
+ * is filled from the request, which means a journal that records whatever the
+ * caller claims. This one cannot: the id is the membership the router proved,
+ * and the snapshot beside it is the address that JWT belongs to.
+ *
+ * The snapshot is stored as well as the id because a journal is read years
+ * later: a staff row that is renamed, or deactivated and no longer listed,
+ * would otherwise turn every past entry into «Сотрудник».
+ */
+function journalActor(req: VercelRequest): {
+  actorName: string;
+  actorRole: string;
+  actorStaffUserId: string;
+  actorKind: "manual";
+} {
+  const context = readWorkspaceContext(req);
+  return {
+    actorName: readString(context?.email),
+    actorRole: readString(context?.role),
+    actorStaffUserId: readString(context?.staffUserId),
+    // Everything reaching this pipeline is a signed-in member acting in the
+    // CRM. Webhooks file leads through lib/crm/inbound-whatsapp.ts, which does
+    // not pass through here — when that path starts journaling, it passes
+    // "integration" and the timeline can finally tell the two apart.
+    actorKind: "manual",
+  };
 }
 
 function validationDetails(body: JsonRecord, fields: string[]): string[] {
@@ -2150,6 +2188,26 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
     }
 
     const item = config.fromRow(asRecord(data));
+
+    // Журнал пишется ПОСЛЕ доменной записи и только на успехе. Порядок здесь
+    // не стилистический: тесты изоляции ищут первую вставку в журнале запросов
+    // без указания таблицы, и строка журнала впереди подменила бы им предмет
+    // проверки. А запись на отказанной мутации сломала бы восемь проверок
+    // «ни одного запроса к данным», которые и есть доказательство отказа.
+    const createdEntity = journaledEntityFor(resource);
+    if (createdEntity) {
+      const stored = asRecord(data);
+      await recordCrmChange({
+        supabase,
+        workspaceId,
+        entity: createdEntity,
+        entityId: readString(stored.id),
+        action: "created",
+        changes: diffForJournal(createdEntity, {}, stored),
+        ...journalActor(req),
+      });
+    }
+
     return sendJson(res, 201, success("supabase", { [resource === "content-videos" ? "video" : "item"]: item, item }));
   } catch (error) {
     if (error instanceof CrmReferenceValidationError) {
@@ -2309,6 +2367,15 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
       return sendJson(res, 200, success("supabase", { [resource === "content-videos" ? "video" : "item"]: demoItem, item: demoItem }));
     }
 
+    // «Было» приходится читать отдельно: PostgREST возвращает строку после
+    // записи, а не до, и полного пред-чтения в этом проекте не было нигде.
+    // Один лишний запрос — и только на журналируемых ресурсах, и только на
+    // записи, которая и так редка по сравнению с чтением.
+    const patchedEntity = journaledEntityFor(resource);
+    const before = patchedEntity
+      ? await readRowBeforeChange(supabase, config.table, workspaceId, id)
+      : {};
+
     const { data, error } = await supabase
       .from(config.table)
       .update(row)
@@ -2322,6 +2389,22 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
     }
 
     const item = config.fromRow(asRecord(data));
+
+    if (patchedEntity) {
+      // Сравнивается с `row`, а не с сохранённой строкой: в `row` лежит ровно
+      // то, чего коснулась правка, поэтому поле, которого патч не касался, не
+      // попадёт в ленту даже как «не изменилось».
+      await recordCrmChange({
+        supabase,
+        workspaceId,
+        entity: patchedEntity,
+        entityId: id,
+        action: "updated",
+        changes: diffForJournal(patchedEntity, before, row),
+        ...journalActor(req),
+      });
+    }
+
     return sendJson(res, 200, success("supabase", { [resource === "content-videos" ? "video" : "item"]: item, item }));
   } catch (error) {
     if (error instanceof CrmReferenceValidationError) {

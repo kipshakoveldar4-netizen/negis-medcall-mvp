@@ -25,6 +25,7 @@ import {
 import { normalizeCrmSegments, resolveCrmRoute } from "../../lib/crm/authorization";
 import { handleStaffInvitationAccept, handleStaffInvitations } from "../../lib/crm/staff-invitations";
 import { handleWhatsAppChannels } from "../../lib/crm/whatsapp-channels";
+import { handleCrmChangeLog } from "../../lib/crm/change-log";
 import {
   requireAuthenticatedUser,
   requireWorkspaceAccess,
@@ -199,6 +200,8 @@ async function dispatch(
       return handleAdCreativeMetaUpload(req, res);
     case "ads-ai-fill":
       return handleAdsAiFill(req, res);
+    case "change-log":
+      return handleCrmChangeLog(req, res);
     case "whatsapp-channels":
       return handleWhatsAppChannels(req, res);
     case "video-jobs":
