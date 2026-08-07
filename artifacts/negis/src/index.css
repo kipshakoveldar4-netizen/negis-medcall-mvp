@@ -70,17 +70,22 @@
   --negis-surface:       #FFFFFF;
   --negis-surface-glass: #FFFFFF;
   --negis-border:        #E2E8E5;
-  --negis-primary:       #0F766E;
-  --negis-primary-soft:  #E4F2EF;
+  /* UI-6. Бирюзовый и мятный — два разных зелёных, и вместе они мутят
+     картинку. Роль остаётся за именем, значение приходит из мятной семьи
+     ссылкой, а не копией литерала: ровно та дублирующая пара, которую мы
+     убирали в UI-2, иначе завелась бы заново. На белом #0C5E3D даёт 7.8:1
+     против прежних 5.5:1 — контраст вырос, а не просел. */
+  --negis-primary:       var(--negis-mint-deep);
+  --negis-primary-soft:  var(--negis-mint-soft);
   --negis-secondary:     #2563EB;
   /* Purple "AI" accent retired: operational UI uses the primary accent. */
-  --negis-ai:            #0F766E;
+  --negis-ai:            var(--negis-mint-deep);
   --negis-success:       #059669;
   --negis-warning:       #D97706;
   --negis-error:         #DC2626;
   --negis-text:          #111827;
   --negis-muted:         #6B7280;
-  --negis-accent:        #115E59;
+  --negis-accent:        var(--negis-mint-ink);
   --negis-text-2:        #374151;
   --negis-plate:         #EDF1EF;
   --negis-surface-2:     #F8FAF9;
@@ -178,68 +183,65 @@
 
   /* ── NEGIS DESIGN SYSTEM UTILITIES ───────────────────────── */
 
-  /* Cards / Surfaces — Medina: opaque, border-first, minimal elevation. */
+  /* Cards / Surfaces — непрозрачные, без рамки: границу держит тень. */
   .neu {
     background: var(--negis-surface);
-    border: 1px solid var(--negis-border);
-    border-radius: 10px;
-    box-shadow: 0 1px 2px rgba(17, 24, 39, 0.05);
+    border: none;
+    border-radius: 22px;
+    box-shadow: var(--negis-shadow-soft);
     transition: box-shadow 0.15s ease;
   }
   .neu-sm {
     background: var(--negis-surface);
-    border: 1px solid var(--negis-border);
-    border-radius: 10px;
-    box-shadow: 0 1px 2px rgba(17, 24, 39, 0.05);
+    border: none;
+    border-radius: 18px;
+    box-shadow: var(--negis-shadow-soft);
     transition: box-shadow 0.15s ease;
-  }
-  .neu-lg {
-    background: var(--negis-surface);
-    border: 1px solid var(--negis-border);
-    border-radius: 12px;
-    box-shadow: 0 1px 3px rgba(17, 24, 39, 0.07);
   }
   .neu-pressed {
     background: var(--negis-surface-2);
-    border: 1px solid var(--negis-border);
-    border-radius: 8px;
+    border: none;
+    border-radius: 14px;
     box-shadow: none;
   }
   .neu-pressed-sm {
     background: var(--negis-surface-2);
-    border: 1px solid var(--negis-plate);
-    border-radius: 8px;
+    border: none;
+    border-radius: 12px;
     box-shadow: none;
   }
 
   /* Former glass surfaces — now plain Medina surfaces (names kept for markup). */
+  /* UI-5. Карточки перестали быть обведёнными плитками: на тёплом фоне
+     определённость даёт тень, а не рамка, и скругление крупнее. Одно место —
+     и все экраны переезжают вместе, ради этого словарь и приводили в порядок. */
   .negis-glass {
     background: var(--negis-surface);
-    border: 1px solid var(--negis-border);
-    border-radius: var(--negis-radius-card);
-    box-shadow: var(--negis-shadow-card);
+    border: none;
+    border-radius: 22px;
+    box-shadow: var(--negis-shadow-soft);
   }
   .negis-glass-hero {
     background: var(--negis-surface);
-    border: 1px solid var(--negis-border);
-    border-radius: var(--negis-radius-card);
-    box-shadow: var(--negis-shadow-card);
+    border: none;
+    border-radius: 26px;
+    box-shadow: var(--negis-shadow-lift);
   }
 
   /* Card container */
   .neu-card {
     background: var(--negis-surface);
-    border: 1px solid var(--negis-border);
-    border-radius: 10px;
-    padding: 20px;
-    box-shadow: 0 1px 2px rgba(17, 24, 39, 0.05);
+    border: none;
+    border-radius: 22px;
+    padding: 22px;
+    box-shadow: var(--negis-shadow-soft);
   }
 
   /* Input */
   .neu-input {
     background: var(--negis-surface);
     border: 1px solid var(--negis-border);
-    border-radius: 8px;
+    border-radius: 14px;
     outline: none;
     padding: 9px 12px;
     width: 100%;
@@ -292,22 +294,25 @@
   }
 
   ::selection {
-    background: rgba(15, 118, 110, 0.18);
+    background: rgba(12, 94, 61, 0.18);
   }
 
   /* Buttons — flat enterprise controls. */
+  /* UI-6. Прямоугольник 8px с серой рамкой — самая заметная примета
+     наспех собранного интерфейса. Управляющие элементы переходят в пилюли:
+     первичное действие чёрное, вторичное — тёплое без рамки. */
   .neu-btn {
-    background: var(--negis-surface);
-    border: 1px solid var(--negis-border);
-    border-radius: 8px;
+    background: var(--negis-ground);
+    border: none;
+    border-radius: 999px;
     font-weight: 600;
     font-size: 14px;
-    padding: 9px 16px;
+    padding: 10px 18px;
     cursor: pointer;
-    color: var(--negis-text);
+    color: var(--negis-ink-2);
     font-family: 'Inter', sans-serif;
-    box-shadow: 0 1px 2px rgba(17, 24, 39, 0.05);
-    transition: background 0.15s ease, border-color 0.15s ease;
+    box-shadow: none;
+    transition: background 0.15s ease, color 0.15s ease;
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -315,24 +320,24 @@
     white-space: nowrap;
   }
   .neu-btn:hover {
-    background: var(--negis-surface-2);
-    border-color: #CBD5D1;
+    background: var(--negis-hair);
+    color: var(--negis-ink-strong);
   }
   .neu-btn:active {
     background: var(--negis-plate);
   }
 
   .neu-btn-primary {
-    background: var(--negis-primary);
+    background: var(--negis-black);
     color: white;
-    border: 1px solid var(--negis-primary);
-    border-radius: 8px;
+    border: none;
+    border-radius: 999px;
     font-weight: 600;
     font-size: 14px;
-    padding: 9px 16px;
+    padding: 10px 18px;
     cursor: pointer;
     font-family: 'Inter', sans-serif;
-    box-shadow: 0 1px 2px rgba(17, 24, 39, 0.08);
+    box-shadow: var(--negis-shadow-soft);
     transition: background 0.15s ease;
     display: inline-flex;
     align-items: center;
@@ -341,11 +346,10 @@
     white-space: nowrap;
   }
   .neu-btn-primary:hover {
-    background: var(--negis-accent);
-    border-color: var(--negis-accent);
+    background: var(--negis-ink-strong);
   }
   .neu-btn-primary:active {
-    background: #0B4F4A;
+    background: var(--negis-ink-2);
   }
   .neu-btn-primary:disabled {
     opacity: 0.55;
@@ -355,8 +359,8 @@
   .neu-btn-success {
     background: var(--negis-success);
     color: white;
-    border: 1px solid var(--negis-success);
-    border-radius: 8px;
+    border: none;
+    border-radius: 999px;
     font-weight: 600;
     font-size: 13px;
     padding: 8px 14px;
@@ -373,8 +377,8 @@
   .neu-btn-danger {
     background: var(--negis-error);
     color: white;
-    border: 1px solid var(--negis-error);
-    border-radius: 8px;
+    border: none;
+    border-radius: 999px;
     font-weight: 600;
     font-size: 13px;
     padding: 8px 14px;
@@ -389,9 +393,9 @@
   .neu-btn-danger:hover { background: #B91C1C; }
 
   .neu-icon-btn {
-    background: var(--negis-surface);
-    border: 1px solid var(--negis-border);
-    border-radius: 8px;
+    background: var(--negis-ground);
+    border: none;
+    border-radius: 999px;
     cursor: pointer;
     display: flex;
     align-items: center;
@@ -400,12 +404,11 @@
     color: var(--negis-text-2);
     height: 40px;
     width: 40px;
-    box-shadow: 0 1px 2px rgba(17, 24, 39, 0.05);
+    box-shadow: none;
   }
   .neu-icon-btn:hover {
-    background: var(--negis-surface-2);
+    background: var(--negis-hair);
     color: var(--negis-primary);
-    border-color: #CBD5D1;
   }
   .neu-icon-btn:active {
     background: var(--negis-plate);
@@ -431,8 +434,8 @@
      with TopNav — the component was never visible at any viewport width. */
 
   .soft-modal {
-    border-radius: 12px;
-    border: 1px solid var(--negis-border);
+    border-radius: 24px;
+    border: none;
     background: #FFFFFF;
     box-shadow: 0 20px 45px rgba(17, 24, 39, 0.18);
   }
@@ -630,9 +633,11 @@
       gap: 8px;
     }
 
+    /* На узком экране карточка теснее по внутреннему отступу, но скругление
+       остаётся крупным — иначе телефон выглядит как другой продукт. */
     .neu-card {
       padding: 16px;
-      border-radius: 10px;
+      border-radius: 18px;
     }
 
     .neu-card.p-6,

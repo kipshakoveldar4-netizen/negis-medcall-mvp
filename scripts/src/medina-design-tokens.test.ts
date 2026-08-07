@@ -115,6 +115,73 @@ test("D5 the welcome screen keeps the links Meta review depends on", async () =>
   }
 });
 
+// The surface language, pinned.
+//
+// UI-5/UI-6 moved every card off the hairline-bordered 8–10px tile and every
+// control off the square grey rectangle. Both changes live in one place on
+// purpose — the whole product moves together or the screens disagree with each
+// other, which is the specific way this app read as thrown together. A later
+// author reaching for `border: 1px solid var(--negis-border); border-radius:
+// 10px` on a shared surface would undo it silently and only on some screens.
+
+const SURFACE_RULES = [".negis-glass", ".negis-glass-hero", ".neu-card", ".neu-sm", ".neu"];
+const PILL_CONTROLS = [".neu-btn", ".neu-btn-primary", ".neu-btn-success", ".neu-btn-danger", ".neu-icon-btn"];
+
+function ruleBody(css: string, selector: string): string {
+  // Only top-level component rules; the mobile media query redeclares some of
+  // these deliberately and is checked separately.
+  const at = css.indexOf(`\n  ${selector} {`);
+  assert.ok(at >= 0, `${selector} is no longer declared in index.css`);
+  return css.slice(at, css.indexOf("}", at));
+}
+
+test("D7 shared card surfaces carry no hairline border and no small radius", async () => {
+  const css = await readFile(path.join(negisSrc, "index.css"), "utf8");
+  const offenders: string[] = [];
+  for (const selector of SURFACE_RULES) {
+    const body = ruleBody(css, selector);
+    if (/border:\s*1px solid/.test(body)) offenders.push(`${selector} → hairline border`);
+    const radius = /border-radius:\s*(\d+)px/.exec(body);
+    if (radius && Number(radius[1]) < 18) offenders.push(`${selector} → radius ${radius[1]}px`);
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    `a bordered tile beside a shadowed card is the mismatch that reads as unfinished: ${offenders.join(", ")}`,
+  );
+});
+
+test("D8 shared controls are pills, and the primary action is the black one", async () => {
+  const css = await readFile(path.join(negisSrc, "index.css"), "utf8");
+  const offenders: string[] = [];
+  for (const selector of PILL_CONTROLS) {
+    const body = ruleBody(css, selector);
+    if (!/border-radius:\s*999px/.test(body)) offenders.push(`${selector} → not a pill`);
+    if (/border:\s*1px solid/.test(body)) offenders.push(`${selector} → hairline border`);
+  }
+  assert.deepEqual(offenders, [], `controls drifted back to squared rectangles: ${offenders.join(", ")}`);
+
+  assert.match(
+    ruleBody(css, ".neu-btn-primary"),
+    /background:\s*var\(--negis-black\)/,
+    "the primary action is the black pill; mint marks where you are and which number matters, "
+      + "and a second filled accent competing with it is what made the old screens noisy",
+  );
+});
+
+test("D9 the retired .neu-lg surface is gone from stylesheet and markup", async () => {
+  const offenders: string[] = [];
+  for (const file of await sourceFiles()) {
+    const source = await readFile(file, "utf8");
+    if (/(^|\s|")neu-lg(\s|"|\s*\{)/.test(source)) offenders.push(path.relative(repoRoot, file));
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    `a surface class no page uses is the next author's false lead: ${offenders.join(", ")}`,
+  );
+});
+
 test("D6 the welcome screen paints from the token vocabulary, not from literals", async () => {
   const landing = await readFile(path.join(negisSrc, "pages", "Landing.tsx"), "utf8");
   const presentation = landing.slice(landing.indexOf("  return ("), landing.indexOf("{/* Modal */}"));
