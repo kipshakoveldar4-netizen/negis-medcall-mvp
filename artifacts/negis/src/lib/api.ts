@@ -116,7 +116,13 @@ const LIST_TTL_MS = 10_000;
  * next navigation rather than up to ten seconds later.
  */
 function isUncacheable(path: string): boolean {
-  return path.includes("/video-jobs") || path.includes("/auth-context");
+  // `change-log` is the third. A write clears this cache at the moment the
+  // request starts, not when the server answers, and the browser's own update
+  // is optimistic — so a history reopened right after an edit would race the
+  // row it is meant to describe and could be served the answer from before it.
+  // Ten seconds of a stale timeline is exactly the ten seconds an operator
+  // spends checking that their change took.
+  return path.includes("/video-jobs") || path.includes("/auth-context") || path.includes("/change-log");
 }
 
 function ttlFor(path: string): number {

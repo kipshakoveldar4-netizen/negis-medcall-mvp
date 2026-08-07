@@ -167,6 +167,14 @@ export const CRM_ROUTE_AUTHORIZATION: Readonly<Record<string, RouteAuthorization
   // administrator level like every other configuration resource.
   "whatsapp-channels": { kind: "browser", methods: ["GET", "PATCH"], roles: WORKSPACE_ADMIN },
 
+  // One record's history. Registered at membership level on purpose: the
+  // permission that matters depends on which entity is being asked about, and
+  // a single key here would either lock a receptionist out of the lead history
+  // they work with all day, or hand a marketer the client history they must
+  // not see. The handler resolves the right one from entityType and refuses
+  // with 403 — see lib/crm/change-log.ts.
+  "change-log": { kind: "browser", methods: ["GET"] },
+
   // Worker route: HMAC only. A browser JWT must never satisfy it.
   "meta-insights-background-cycle": { kind: "internal_hmac", methods: ["POST"] },
 };

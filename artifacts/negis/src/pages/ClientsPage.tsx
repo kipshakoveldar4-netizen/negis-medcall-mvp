@@ -22,6 +22,7 @@ import {
 import { toast } from "sonner";
 import { PageLayout } from "@/components/layout/PageLayout";
 import { MetricCard } from "@/components/ui/metric-card";
+import { ChangeLogPanel } from "@/components/crm/change-log-panel";
 import { useDemoCollection, readDemoStorage, isRealWorkspace, readWorkspaceId, workspaceScopedKey } from "@/lib/demoStorage";
 import { apiUrl, crmFetch } from "@/lib/api";
 import { formatPhone, phoneDigits, toTelHref, toWhatsappHref } from "@/lib/phone";
@@ -724,6 +725,16 @@ export default function ClientsPage() {
                 })}
               </div>
             </div>
+
+            {/* Кто и когда правил саму карточку — отдельно от того, что с
+                клиентом происходило: записи, продажи, звонки. Два разных
+                вопроса, и смешивать их в одну ленту значит не ответить ни на
+                один. */}
+            {isRealWorkspace() ? (
+              <div className="mt-4">
+                <ChangeLogPanel entityType="client" entityId={detailClient.id} />
+              </div>
+            ) : null}
 
             {/* Related history */}
             <div className="mt-4">
