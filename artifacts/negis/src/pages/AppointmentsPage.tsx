@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { PageLayout } from "@/components/layout/PageLayout";
+import { MetricCard } from "@/components/ui/metric-card";
 import { apiUrl, crmFetch } from "@/lib/api";
 import { readWorkspaceId as readCurrentWorkspaceId, useDemoCollection, workspaceScopedKey } from "@/lib/demoStorage";
 import { formatPhone, toTelHref, toWhatsappHref } from "@/lib/phone";
@@ -335,20 +336,6 @@ function isWithinWeek(appointment: Appointment, weekStart: string): boolean {
 
 function statusBadge(status: AppointmentStatus) {
   return <span className={`rounded-full px-3 py-1 text-xs font-bold ${getAppointmentStatusClass(status)}`}>{getAppointmentStatusLabel(status)}</span>;
-}
-
-function MetricCard({ label, value, icon: Icon }: { label: string; value: string; icon: typeof CalendarCheck }) {
-  return (
-    <div className="neu-card p-4">
-      <div className="flex items-center gap-3">
-        <div className="rounded-xl bg-teal-500/10 p-2 text-[#0F766E]">
-          <Icon size={18} />
-        </div>
-        <p className="text-sm font-semibold text-[#64748B]">{label}</p>
-      </div>
-      <p className="mt-3 text-2xl font-black text-[#0F172A]">{value}</p>
-    </div>
-  );
 }
 
 function Detail({ label, children }: { label: string; children: ReactNode }) {
@@ -744,10 +731,10 @@ export function AppointmentsPage() {
         </div>
 
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-          <MetricCard label="Сегодня записей" value={String(todayAppointments.length)} icon={CalendarCheck} />
-          <MetricCard label="Подтверждено" value={String(todayAppointments.filter((item) => item.status === "confirmed").length)} icon={CheckCircle2} />
-          <MetricCard label="Ждут подтверждения" value={String(todayAppointments.filter((item) => item.status === "scheduled").length)} icon={Clock3} />
-          <MetricCard label="Не пришли" value={String(todayAppointments.filter((item) => item.status === "no_show").length)} icon={UserCheck} />
+          <MetricCard label="Сегодня записей" value={todayAppointments.length} icon={CalendarCheck} tone="primary" accent />
+          <MetricCard label="Подтверждено" value={todayAppointments.filter((item) => item.status === "confirmed").length} icon={CheckCircle2} tone="success" />
+          <MetricCard label="Ждут подтверждения" value={todayAppointments.filter((item) => item.status === "scheduled").length} icon={Clock3} tone="warning" />
+          <MetricCard label="Не пришли" value={todayAppointments.filter((item) => item.status === "no_show").length} icon={UserCheck} tone="error" />
         </div>
 
         <section className="neu-card">

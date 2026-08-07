@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { PageLayout } from "@/components/layout/PageLayout";
+import { MetricCard } from "@/components/ui/metric-card";
 import { apiUrl, crmFetch } from "@/lib/api";
 import { isRealWorkspace, readDemoStorage, readWorkspaceId, useDemoCollection, workspaceScopedKey } from "@/lib/demoStorage";
 
@@ -335,20 +336,6 @@ function StatusPill({ status }: { status: DealStatus }) {
   return <span className={`inline-flex rounded-full border px-3 py-1 text-xs font-black ${palette[statusTones[status]]}`}>{statusLabels[status]}</span>;
 }
 
-function MetricCard({ label, value, icon: Icon, tone }: { label: string; value: string | number; icon: LucideIcon; tone: NegisTone }) {
-  return (
-    <div className="negis-glass min-w-0 p-4">
-      <div className="flex items-center gap-2.5">
-        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl" style={{ background: toneBackground(tone), color: toneColor(tone) }}>
-          <Icon size={16} />
-        </div>
-        <p className="min-w-0 text-xs font-black leading-tight" style={{ color: "var(--negis-muted)" }}>{label}</p>
-      </div>
-      <p className="mt-2 break-words text-2xl font-black" style={{ color: "var(--negis-text)" }}>{value}</p>
-    </div>
-  );
-}
-
 function DealFact({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div className="min-w-0">
@@ -633,7 +620,11 @@ export default function SalesPage() {
         </header>
 
         <section className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5" aria-label="Сводка по продажам">
-          {summaryMetrics.map((metric) => <MetricCard key={metric.label} {...metric} />)}
+          {/* Акцент — на сумме: ради неё этот экран и открывают, а не ради
+              количества строк. */}
+          {summaryMetrics.map((metric) => (
+            <MetricCard key={metric.label} {...metric} accent={metric.label === "Сумма оплаченных"} />
+          ))}
         </section>
 
         {/* CRM10: honest attribution split — paid deals only, manual campaign link. */}
@@ -680,10 +671,8 @@ export default function SalesPage() {
                 <button
                   key={option.id}
                   type="button"
-                  className="rounded-full border px-4 py-2 text-xs font-black transition"
-                  style={active
-                    ? { background: "var(--negis-primary)", borderColor: "var(--negis-primary)", color: "#FFFFFF" }
-                    : { background: "var(--negis-surface)", borderColor: "var(--negis-border)", color: "var(--negis-muted)" }}
+                  className="rounded-full px-4 py-2 text-xs font-semibold transition"
+                  style={active ? { background: "var(--negis-black)", color: "#FFFFFF" } : { background: "var(--negis-ground)", color: "var(--negis-ink-2)" }}
                   aria-pressed={active}
                   onClick={() => setFilter(option.id)}
                 >
@@ -701,10 +690,8 @@ export default function SalesPage() {
                 <button
                   key={option.id}
                   type="button"
-                  className="rounded-full border px-3 py-1.5 text-xs font-black transition"
-                  style={active
-                    ? { background: "var(--negis-ai)", borderColor: "var(--negis-ai)", color: "#FFFFFF" }
-                    : { background: "var(--negis-surface)", borderColor: "var(--negis-border)", color: "var(--negis-muted)" }}
+                  className="rounded-full px-3.5 py-1.5 text-xs font-semibold transition"
+                  style={active ? { background: "var(--negis-black)", color: "#FFFFFF" } : { background: "var(--negis-ground)", color: "var(--negis-ink-2)" }}
                   aria-pressed={active}
                   onClick={() => setAttributionFilter(option.id)}
                 >

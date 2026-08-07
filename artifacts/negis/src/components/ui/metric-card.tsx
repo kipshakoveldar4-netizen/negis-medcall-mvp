@@ -16,7 +16,10 @@ export function MetricCard({
   label: string;
   value: number | string | null | undefined;
   icon?: LucideIcon;
-  tone?: "primary" | "info" | "success" | "warning" | "error" | "muted";
+  /* Страницы говорят на словаре NegisTone (secondary/ai), панель — на своём
+   * (info). Раньше это и было причиной, по которой каждый экран заводил
+   * собственную карточку вместо общей: объединение принимает оба. */
+  tone?: "primary" | "info" | "secondary" | "ai" | "success" | "warning" | "error" | "muted";
   delta?: ReactNode;
   loading?: boolean;
   /** Одна метрика на экране может быть залита акцентом — та, ради которой
@@ -25,7 +28,9 @@ export function MetricCard({
 }) {
   const toneColor: Record<string, { fg: string; bg: string }> = {
     primary: { fg: "var(--negis-primary)", bg: "var(--negis-primary-soft)" },
+    ai: { fg: "var(--negis-primary)", bg: "var(--negis-primary-soft)" },
     info: { fg: "#1D4ED8", bg: "#EFF6FF" },
+    secondary: { fg: "#1D4ED8", bg: "#EFF6FF" },
     success: { fg: "#047857", bg: "#ECFDF5" },
     warning: { fg: "#B45309", bg: "#FFFBEB" },
     error: { fg: "#B91C1C", bg: "#FEF2F2" },

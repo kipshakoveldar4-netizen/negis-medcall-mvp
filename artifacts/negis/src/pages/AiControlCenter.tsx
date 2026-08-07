@@ -19,6 +19,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { PageLayout } from "@/components/layout/PageLayout";
+import { MetricCard } from "@/components/ui/metric-card";
 import { WorkQueue } from "@/components/dashboard/work-queue";
 import { RecentRecords } from "@/components/dashboard/recent-records";
 import { DistributionPanel } from "@/components/dashboard/distribution-panel";
@@ -177,35 +178,6 @@ async function fetchCrmList(path: string, listKey: string, demoKey: string): Pro
 }
 
 /* ── Presentational components ─────────────────────────────── */
-
-function ControlMetricCard({
-  label,
-  icon: Icon,
-  tone,
-  value,
-  hint,
-  loading,
-}: {
-  label: string;
-  icon: LucideIcon;
-  tone: Tone;
-  value?: string;
-  hint?: string;
-  loading?: boolean;
-}) {
-  return (
-    <div className="negis-glass p-4 sm:p-5">
-      <div className="flex items-center gap-3">
-        <div className="flex h-10 w-10 items-center justify-center rounded-2xl" style={{ background: toneSoftBg(tone), color: toneColor(tone) }}>
-          <Icon size={18} />
-        </div>
-        <p className="text-sm font-black" style={{ color: "var(--negis-text)" }}>{label}</p>
-      </div>
-      <p className="mt-3 text-3xl font-black" style={{ color: "var(--negis-text)" }}>{loading ? "…" : value ?? "—"}</p>
-      <p className="mt-1 text-xs font-semibold leading-relaxed" style={{ color: "var(--negis-muted)" }}>{hint ?? EMPTY_METRIC_HINT}</p>
-    </div>
-  );
-}
 
 type Priority = "high" | "medium" | "low";
 
@@ -695,13 +667,13 @@ export default function AiControlCenter() {
           <SectionTitle hint="Заявки, клиенты, записи, продажи и реклама — реальные данные текущей клиники.">Сегодня в клинике</SectionTitle>
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
             {metrics.map((metric) => (
-              <ControlMetricCard
+              <MetricCard
                 key={metric.label}
                 label={metric.label}
                 icon={metric.icon}
                 tone={metric.tone}
                 value={metric.value}
-                hint={metric.hint}
+                delta={metric.hint ?? EMPTY_METRIC_HINT}
                 loading={metric.loading ?? false}
               />
             ))}

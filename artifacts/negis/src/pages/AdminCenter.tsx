@@ -27,6 +27,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { PageLayout } from "@/components/layout/PageLayout";
+import { MetricCard } from "@/components/ui/metric-card";
 import { WhatsAppChannels } from "@/components/admin/WhatsAppChannels";
 import { useAuth } from "@/contexts/AuthContext";
 import { apiUrl, crmFetch } from "@/lib/api";
@@ -1379,8 +1380,8 @@ export default function AdminCenter() {
         {/* Commercial-1: платформенная готовность живёт во внутреннем разделе
             диагностики; клиника видит только состояние интеграций и команду. */}
         <div className="grid gap-4 sm:grid-cols-2">
-          <MetricCard title="Состояние интеграций" value={`${connected}/${integrationCards.length}`} icon={Database} tone="blue" />
-          <MetricCard title="Сотрудники" value={String(staff.length)} icon={Users} tone="teal" />
+          <MetricCard label="Состояние интеграций" value={`${connected}/${integrationCards.length}`} icon={Database} tone="info" />
+          <MetricCard label="Сотрудники" value={staff.length} icon={Users} tone="primary" />
         </div>
         <div className="grid gap-5 lg:grid-cols-3">
           <section className="neu-card lg:col-span-2">
@@ -2466,28 +2467,6 @@ function ReleaseBanner({ readiness }: { readiness: { complete: boolean; blockers
           </div>
         </div>
       </div>
-    </section>
-  );
-}
-
-function MetricCard({ title, value, icon: Icon, tone }: { title: string; value: string; icon: LucideIcon; tone: "emerald" | "amber" | "red" | "blue" | "teal" }) {
-  const toneClass = {
-    emerald: "bg-emerald-50 text-emerald-700",
-    amber: "bg-amber-50 text-amber-700",
-    red: "bg-red-50 text-red-700",
-    blue: "bg-blue-50 text-blue-700",
-    teal: "bg-teal-50 text-teal-700",
-  }[tone];
-
-  return (
-    <section className="neu-card">
-      <div className="mb-3 flex items-center gap-3">
-        <div className={`rounded-2xl p-2 ${toneClass}`}>
-          <Icon size={20} />
-        </div>
-        <p className="text-sm font-bold text-[#64748B]">{title}</p>
-      </div>
-      <p className="text-3xl font-black text-[#0F172A]">{value}</p>
     </section>
   );
 }
