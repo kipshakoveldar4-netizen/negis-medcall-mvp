@@ -169,6 +169,29 @@ test("D8 shared controls are pills, and the primary action is the black one", as
   );
 });
 
+test("D10 no shared control is painted in the page's own background colour", async () => {
+  // Caught by rendering the control inventory against the built stylesheet:
+  // .neu-btn and .neu-icon-btn were filled with --negis-ground, which is also
+  // what PageLayout paints the page with. Inside a card they read fine; on a
+  // page toolbar — where the export and refresh buttons actually live — they
+  // disappeared completely. A control has to survive both backgrounds.
+  const css = await readFile(path.join(negisSrc, "index.css"), "utf8");
+  const pageBackground = /--negis-ground:\s*([^;]+);/.exec(css)?.[1].trim();
+  assert.ok(pageBackground, "--negis-ground is the page background and must stay declared");
+
+  const offenders: string[] = [];
+  for (const selector of PILL_CONTROLS) {
+    const body = ruleBody(css, selector);
+    const background = /background:\s*([^;]+);/.exec(body)?.[1].trim();
+    if (background === "var(--negis-ground)") offenders.push(selector);
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    `these controls vanish on a page toolbar, because that is exactly the colour behind them: ${offenders.join(", ")}`,
+  );
+});
+
 test("D9 the retired .neu-lg surface is gone from stylesheet and markup", async () => {
   const offenders: string[] = [];
   for (const file of await sourceFiles()) {
