@@ -201,72 +201,281 @@ export default function Landing() {
     :                              'НОВЫЙ ПАРОЛЬ';
 
   return (
-    <div
-      className="relative min-h-screen flex flex-col items-center justify-center overflow-hidden"
-      style={{ background: '#F4F7FB' }}
-    >
-      {/* Crosshair */}
-      <svg className="absolute inset-0 w-full h-full pointer-events-none" xmlns="http://www.w3.org/2000/svg" style={{ zIndex: 0 }}>
-        <line x1="50%" y1="0" x2="50%" y2="calc(50% - 168px)" stroke="#DDE5EE" strokeWidth="1" />
-        <circle cx="50%" cy="4" r="2" fill="#DDE5EE" />
-        <line x1="50%" y1="100%" x2="50%" y2="calc(50% + 168px)" stroke="#DDE5EE" strokeWidth="1" />
-        <circle cx="50%" cy="99.5%" r="2" fill="#DDE5EE" />
-        <line x1="0" y1="50%" x2="calc(50% - 168px)" y2="50%" stroke="#DDE5EE" strokeWidth="1" />
-        <circle cx="4" cy="50%" r="2" fill="#DDE5EE" />
-        <line x1="100%" y1="50%" x2="calc(50% + 168px)" y2="50%" stroke="#DDE5EE" strokeWidth="1" />
-        <circle cx="99.5%" cy="50%" r="2" fill="#DDE5EE" />
-      </svg>
+    <div className="min-h-screen" style={{ background: 'var(--negis-ground)' }}>
 
-      {/* Core circle */}
-      <div className="relative flex flex-col items-center gap-6" style={{ zIndex: 1 }}>
-        <button
-          onClick={handleCircleClick}
-          data-testid="button-negis-main"
-          style={circleOuter}
-          onMouseEnter={e => {
-            if (!pressed) (e.currentTarget as HTMLButtonElement).style.boxShadow =
-              '0 14px 34px rgba(15,23,42,0.21), 0 5px 12px rgba(15,23,42,0.12), 0 1px 3px rgba(15,23,42,0.06), inset 0 1px 0 rgba(255,255,255,0.72), inset 0 -1px 3px rgba(15,23,42,0.10), inset 0 0 0 1px rgba(15,23,42,0.06)';
-          }}
-          onMouseLeave={e => {
-            if (!pressed) (e.currentTarget as HTMLButtonElement).style.boxShadow =
-              '0 10px 28px rgba(15,23,42,0.18), 0 4px 10px rgba(15,23,42,0.10), 0 1px 3px rgba(15,23,42,0.06), inset 0 1px 0 rgba(255,255,255,0.72), inset 0 -1px 3px rgba(15,23,42,0.10), inset 0 0 0 1px rgba(15,23,42,0.06)';
-          }}
+      {/* ── Шапка ─────────────────────────────────────────── */}
+      <header
+        className="mx-auto flex w-full max-w-[1180px] items-center gap-4 px-5 py-5 sm:px-8"
+      >
+        <span
+          className="grid h-10 w-10 place-items-center rounded-full text-[15px] font-bold"
+          style={{ background: 'var(--negis-black)', color: 'var(--negis-mint)' }}
+          aria-hidden
         >
-          <div style={circleInner}>
-            {/* h1: the page's only heading — without it the landing had no
-                heading structure at all for crawlers and screen readers. */}
-            <h1 style={{
-              fontFamily: "'Inter', system-ui, sans-serif", fontWeight: 500,
-              fontSize: 15, letterSpacing: '0.18em', color: '#475569',
-              textTransform: 'uppercase', userSelect: 'none', position: 'relative',
-              textShadow: '0 1px 0 rgba(255,255,255,0.70)', margin: 0,
-            }}>
-              MEDINA OS
-            </h1>
-          </div>
-        </button>
-
-        <span style={{
-          fontSize: 10, letterSpacing: '0.16em', color: '#B0BAC6',
-          fontFamily: "'Inter', sans-serif", textTransform: 'uppercase', userSelect: 'none',
-        }}>
-          v1.0.0 — BUILD 2026
+          M
+        </span>
+        <span className="text-[19px] font-bold tracking-tight" style={{ color: 'var(--negis-ink-strong)' }}>
+          Medina&nbsp;OS
         </span>
 
-        <div style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
-          textAlign: 'center', fontSize: 11, color: '#B0BAC6',
-          fontFamily: "'Inter', sans-serif", marginTop: 4, letterSpacing: '0.02em',
-        }}>
-          <a href="/privacy" style={{ color: '#B0BAC6', textDecoration: 'none' }}>
-            Политика конфиденциальности
-          </a>
-          <span style={{ color: '#D6DCE5' }}>·</span>
-          <a href="/terms" style={{ color: '#B0BAC6', textDecoration: 'none' }}>
-            Условия использования
-          </a>
+        <nav className="ml-8 hidden items-center gap-7 lg:flex" aria-label="Разделы страницы">
+          {[
+            ['Как это работает', '#how'],
+            ['Что внутри', '#what'],
+            ['Безопасность', '#safety'],
+          ].map(([label, href]) => (
+            <a
+              key={href}
+              href={href}
+              className="text-sm font-medium transition-colors hover:opacity-70"
+              style={{ color: 'var(--negis-muted-2)' }}
+            >
+              {label}
+            </a>
+          ))}
+        </nav>
+
+        <button
+          type="button"
+          onClick={openModal}
+          data-testid="button-negis-main"
+          className="ml-auto rounded-full px-6 py-2.5 text-sm font-semibold transition-transform active:scale-[0.98]"
+          style={{
+            background: 'var(--negis-black)',
+            color: '#FFFFFF',
+            boxShadow: 'var(--negis-shadow-soft)',
+          }}
+        >
+          Войти
+        </button>
+      </header>
+
+      {/* ── Первый экран ──────────────────────────────────── */}
+      <section className="mx-auto grid w-full max-w-[1180px] gap-12 px-5 pb-4 pt-10 sm:px-8 lg:grid-cols-[1fr_minmax(0,520px)] lg:items-center lg:pt-16">
+        <div>
+          <p
+            className="inline-flex items-center gap-2 rounded-full px-4 py-2 text-xs font-semibold"
+            style={{ background: '#FFFFFF', color: 'var(--negis-ink-2)', boxShadow: 'var(--negis-shadow-soft)' }}
+          >
+            <span className="h-2 w-2 rounded-full" style={{ background: 'var(--negis-success)' }} aria-hidden />
+            Официальный WhatsApp Business API
+          </p>
+
+          <h1
+            className="mt-7 text-[clamp(2.6rem,7vw,4.6rem)] font-bold leading-[1.03] tracking-[-0.035em]"
+            style={{ color: 'var(--negis-ink-strong)' }}
+          >
+            Ни одна заявка<br />не теряется
+          </h1>
+
+          <p className="mt-6 max-w-[46ch] text-[17px] leading-relaxed" style={{ color: 'var(--negis-ink-2)' }}>
+            Пациент пишет в WhatsApp — заявка уже в CRM: с телефоном, источником и ответственным.
+            Повторное обращение с того же номера не создаёт вторую заявку.
+          </p>
+
+          <div className="mt-9 flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              onClick={openModal}
+              className="rounded-full px-8 py-4 text-[15px] font-semibold transition-transform active:scale-[0.98]"
+              style={{
+                background: 'var(--negis-black)',
+                color: '#FFFFFF',
+                boxShadow: 'var(--negis-shadow-lift)',
+              }}
+            >
+              Войти в систему
+            </button>
+            <a
+              href="#how"
+              className="rounded-full px-8 py-4 text-[15px] font-semibold"
+              style={{
+                background: '#FFFFFF',
+                color: 'var(--negis-ink-2)',
+                boxShadow: 'var(--negis-shadow-soft)',
+              }}
+            >
+              Как это работает
+            </a>
+          </div>
+
+          {/* Честно про доступ: самостоятельной регистрации в продукте нет,
+              и обещать её на первом экране нельзя. */}
+          <p className="mt-5 text-[13.5px]" style={{ color: 'var(--negis-muted-2)' }}>
+            Доступ новой клинике открывает владелец пространства — регистрация не самостоятельная.
+          </p>
         </div>
-      </div>
+
+        {/* Превью продукта: то, что человек увидит после входа */}
+        <div
+          className="overflow-hidden rounded-3xl"
+          style={{ background: '#FFFFFF', boxShadow: 'var(--negis-shadow-lift)' }}
+          aria-label="Пример экрана заявок"
+        >
+          <div
+            className="flex items-center gap-2 px-5 py-3.5"
+            style={{ background: 'var(--negis-ground)' }}
+          >
+            {[0, 1, 2].map(n => (
+              <span key={n} className="h-2.5 w-2.5 rounded-full" style={{ background: 'var(--negis-border)' }} aria-hidden />
+            ))}
+            <span className="ml-3 text-[11px]" style={{ color: 'var(--negis-faint)' }}>
+              medina.os / заявки
+            </span>
+          </div>
+
+          <div className="grid grid-cols-3 gap-2.5 px-5 pt-5">
+            <div className="rounded-2xl px-4 py-3.5" style={{ background: 'var(--negis-mint)' }}>
+              <p className="text-[11px] font-semibold" style={{ color: 'var(--negis-mint-deep)' }}>Новые</p>
+              <p className="mt-1 text-[30px] font-bold leading-none tracking-tight" style={{ color: 'var(--negis-mint-ink)' }}>16</p>
+            </div>
+            {[['1', 'в работе'], ['4', 'без ответств.']].map(([n, l]) => (
+              <div key={l} className="rounded-2xl px-4 py-3.5" style={{ background: 'var(--negis-ground)' }}>
+                <p className="text-[11px] font-semibold" style={{ color: 'var(--negis-muted-2)' }}>{l}</p>
+                <p className="mt-1 text-[30px] font-bold leading-none tracking-tight" style={{ color: 'var(--negis-ink-strong)' }}>{n}</p>
+              </div>
+            ))}
+          </div>
+
+          <ul className="px-5 pb-5 pt-4">
+            {[
+              ['Лаура Ким', 'WhatsApp', 'Новая', 'var(--negis-secondary)'],
+              ['Жанна Абди', 'Instagram', 'В работе', 'var(--negis-warning)'],
+              ['Мария Ли', 'Сайт', 'Записана', 'var(--negis-success)'],
+            ].map(([name, src2, stage, color], idx) => (
+              <li
+                key={name}
+                className="flex items-center gap-3 py-3"
+                style={{ borderTop: idx ? '1px solid var(--negis-hair)' : 'none' }}
+              >
+                <span className="truncate text-[13.5px] font-medium" style={{ color: 'var(--negis-ink-strong)' }}>{name}</span>
+                <span className="ml-auto hidden text-[12px] sm:inline" style={{ color: 'var(--negis-muted-2)' }}>{src2}</span>
+                <span
+                  className="inline-flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-semibold"
+                  style={{ color, background: 'var(--negis-ground)' }}
+                >
+                  <span className="h-1.5 w-1.5 rounded-full" style={{ background: color }} aria-hidden />
+                  {stage}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      </section>
+
+      {/* ── Три факта ─────────────────────────────────────── */}
+      <section id="what" className="mx-auto grid w-full max-w-[1180px] gap-4 px-5 py-14 sm:px-8 md:grid-cols-3">
+        {[
+          ['Свой номер', 'Номер клиники остаётся её собственным — официальный Cloud API, без посредника между вами и пациентом.'],
+          ['Без дублей', 'Повторное обращение с того же телефона попадает в существующую заявку, а не заводит вторую.'],
+          ['Данные раздельно', 'Каждая клиника видит только своё. Это закреплено тестами, а не обещанием в договоре.'],
+        ].map(([title, text]) => (
+          <article
+            key={title}
+            className="rounded-3xl p-7"
+            style={{ background: '#FFFFFF', boxShadow: 'var(--negis-shadow-soft)' }}
+          >
+            <span
+              className="grid h-9 w-9 place-items-center rounded-full text-[15px] font-bold"
+              style={{ background: 'var(--negis-mint-soft)', color: 'var(--negis-mint-deep)' }}
+              aria-hidden
+            >
+              ✓
+            </span>
+            <h3 className="mt-4 text-[19px] font-semibold tracking-tight" style={{ color: 'var(--negis-ink-strong)' }}>{title}</h3>
+            <p className="mt-2 text-[14px] leading-relaxed" style={{ color: 'var(--negis-muted-2)' }}>{text}</p>
+          </article>
+        ))}
+      </section>
+
+      {/* ── Как это работает ──────────────────────────────── */}
+      <section id="how" className="mx-auto w-full max-w-[1180px] px-5 py-6 sm:px-8">
+        <h2 className="text-[clamp(1.8rem,4vw,2.6rem)] font-bold tracking-[-0.03em]" style={{ color: 'var(--negis-ink-strong)' }}>
+          Как это работает
+        </h2>
+        <p className="mt-3 text-[16px]" style={{ color: 'var(--negis-muted-2)' }}>
+          Три шага, и обращения перестают теряться в переписке
+        </p>
+
+        <ol className="mt-9 grid gap-4 md:grid-cols-3">
+          {[
+            ['Пациент пишет', 'В WhatsApp клиники, из рекламы или с сайта — как ему удобно.'],
+            ['Заявка создаётся сама', 'С телефоном, источником и стадией «Новая». Дубль не появится.'],
+            ['Регистратор ведёт', 'Назначает ответственного, двигает по воронке, записывает на приём.'],
+          ].map(([title, text], i2) => (
+            <li
+              key={title}
+              className="rounded-3xl p-7"
+              style={{ background: '#FFFFFF', boxShadow: 'var(--negis-shadow-soft)' }}
+            >
+              <span className="text-[26px] font-bold tabular-nums" style={{ color: 'var(--negis-hair)' }} aria-hidden>
+                0{i2 + 1}
+              </span>
+              <h3 className="mt-3 text-[19px] font-semibold tracking-tight" style={{ color: 'var(--negis-ink-strong)' }}>{title}</h3>
+              <p className="mt-2 text-[14px] leading-relaxed" style={{ color: 'var(--negis-muted-2)' }}>{text}</p>
+            </li>
+          ))}
+        </ol>
+      </section>
+
+      {/* ── Безопасность ──────────────────────────────────── */}
+      <section id="safety" className="mx-auto w-full max-w-[1180px] px-5 py-14 sm:px-8">
+        <div className="rounded-3xl p-8 sm:p-11" style={{ background: 'var(--negis-dark)' }}>
+          <h2 className="max-w-[22ch] text-[clamp(1.6rem,3.4vw,2.2rem)] font-bold leading-tight tracking-[-0.025em] text-white">
+            Медицинские данные требуют другого отношения
+          </h2>
+          <p className="mt-4 max-w-[62ch] text-[15px]" style={{ color: 'var(--negis-dark-muted)' }}>
+            Не строчка в футере, а то, что проверяется автоматически при каждой правке кода.
+            Если проверка падает — изменение не выходит в продукт.
+          </p>
+
+          <dl className="mt-9 grid gap-6 sm:grid-cols-3">
+            {[
+              ['Клиника видит только своё', '51 проверка изоляции'],
+              ['Отказ не выдаёт себя за успех', '9 проверок честности'],
+              ['Ключи не попадают в браузер', '35 проверок доступа'],
+            ].map(([title, count]) => (
+              <div key={title}>
+                <dt className="text-[15px] font-semibold" style={{ color: 'var(--negis-dark-text)' }}>{title}</dt>
+                <dd className="mt-1.5 text-[13px] tabular-nums" style={{ color: 'var(--negis-dark-muted)' }}>{count}</dd>
+              </div>
+            ))}
+          </dl>
+        </div>
+      </section>
+
+      {/* ── Финальный призыв ──────────────────────────────── */}
+      <section className="mx-auto w-full max-w-[1180px] px-5 pb-14 sm:px-8">
+        <div className="rounded-3xl px-8 py-11 text-center" style={{ background: 'var(--negis-mint)' }}>
+          <h2 className="mx-auto max-w-[24ch] text-[clamp(1.5rem,3.2vw,2.1rem)] font-bold leading-tight tracking-[-0.025em]" style={{ color: 'var(--negis-mint-ink)' }}>
+            Уже работаете с нами? Войдите и продолжайте
+          </h2>
+          <p className="mx-auto mt-3 max-w-[52ch] text-[15px]" style={{ color: 'var(--negis-mint-deep)' }}>
+            Новой клинике доступ открывает владелец пространства: он заводит сотрудника и выдаёт роль.
+          </p>
+          <button
+            type="button"
+            onClick={openModal}
+            className="mt-7 rounded-full px-9 py-4 text-[15px] font-semibold transition-transform active:scale-[0.98]"
+            style={{ background: 'var(--negis-black)', color: '#FFFFFF', boxShadow: 'var(--negis-shadow-lift)' }}
+          >
+            Войти в систему
+          </button>
+        </div>
+      </section>
+
+      {/* ── Подвал ────────────────────────────────────────── */}
+      <footer className="mx-auto w-full max-w-[1180px] px-5 pb-14 sm:px-8">
+        <div className="flex flex-wrap items-center gap-x-6 gap-y-3 border-t pt-7" style={{ borderColor: 'var(--negis-border)' }}>
+          <span className="text-[14px] font-bold" style={{ color: 'var(--negis-ink-strong)' }}>Medina&nbsp;OS</span>
+          <span className="text-[13px]" style={{ color: 'var(--negis-muted-2)' }}>CRM для медицинских клиник</span>
+          <div className="ml-auto flex flex-wrap items-center gap-x-5 gap-y-2 text-[13px]">
+            <a href="/privacy" style={{ color: 'var(--negis-muted-2)' }}>Политика конфиденциальности</a>
+            <a href="/terms" style={{ color: 'var(--negis-muted-2)' }}>Условия использования</a>
+            <a href="/data-deletion" style={{ color: 'var(--negis-muted-2)' }}>Удаление данных</a>
+          </div>
+        </div>
+      </footer>
 
       {/* Modal */}
       {modalState !== 'idle' && (

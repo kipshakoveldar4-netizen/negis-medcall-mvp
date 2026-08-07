@@ -85,3 +85,54 @@ test("D3 --medina- stays what it is: the dark sidebar, not a second palette", as
     `--medina-* describes the dark navigation surface; a page reaching for it is starting a third vocabulary: ${strays.join(", ")}`,
   );
 });
+
+// ===========================================================================
+// UI-3 — приветственный экран
+//
+// The page a visitor meets before signing in. The product has no self-service
+// registration: access to a new clinic is opened by the workspace owner. A hero
+// button saying «Попробовать бесплатно» would be a promise the product cannot
+// keep — the same class of dishonesty the server side already refuses.
+// ===========================================================================
+
+test("D4 the welcome screen offers only what the product can deliver", async () => {
+  const landing = await readFile(path.join(negisSrc, "pages", "Landing.tsx"), "utf8");
+  const code = landing
+    .split("\n")
+    .filter((line) => !line.trim().startsWith("//") && !line.trim().startsWith("*"))
+    .join("\n");
+
+  for (const promise of ["Попробовать бесплатно", "Зарегистрироваться", "Создать аккаунт", "Начать бесплатно"]) {
+    assert.ok(
+      !code.includes(promise),
+      `«${promise}» offers self-service signup, which does not exist — the owner opens access`,
+    );
+  }
+  assert.ok(
+    code.includes("Доступ новой клинике открывает владелец пространства"),
+    "the page has to say plainly how a new clinic gets in, on the first screen and not only in the modal",
+  );
+});
+
+test("D5 the welcome screen keeps the links Meta review depends on", async () => {
+  const landing = await readFile(path.join(negisSrc, "pages", "Landing.tsx"), "utf8");
+  for (const href of ["/privacy", "/terms", "/data-deletion"]) {
+    assert.ok(
+      landing.includes(`href="${href}"`),
+      `${href} must stay reachable from the entry page — the Meta app review checks it`,
+    );
+  }
+});
+
+test("D6 the welcome screen paints from the token vocabulary, not from literals", async () => {
+  const landing = await readFile(path.join(negisSrc, "pages", "Landing.tsx"), "utf8");
+  const presentation = landing.slice(landing.indexOf("  return ("), landing.indexOf("{/* Modal */}"));
+
+  const literals = [...presentation.matchAll(/#[0-9a-fA-F]{6}\b/g)].map((m) => m[0])
+    .filter((hex) => hex.toUpperCase() !== "#FFFFFF");
+  assert.deepEqual(
+    literals,
+    [],
+    `hard-coded colours drift away from the palette on the very first screen a visitor sees: ${literals.join(", ")}`,
+  );
+});
