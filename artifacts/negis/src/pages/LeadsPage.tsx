@@ -476,6 +476,11 @@ function leadToApi(lead: Lead): Record<string, unknown> {
     campaign: lead.campaign,
     status: lead.status,
     notes: lead.notes || "",
+    // Always sent, like on the patch path: an empty string is how a lead is
+    // left unassigned, and the server turns it into null. Omitting the key
+    // instead is what made the «Ответственный» select a control that changed
+    // nothing — the value reached this function and stopped here.
+    responsibleUserId: lead.responsibleUserId ?? "",
     ...(isUuid(lead.stageId) ? { stageId: lead.stageId } : {}),
     ...(isUuid(lead.sourceId) ? { sourceId: lead.sourceId } : {}),
     ...(isUuid(lead.metaCampaignLaunchId) ? { metaCampaignLaunchId: lead.metaCampaignLaunchId } : {}),
@@ -491,6 +496,9 @@ function leadPatchToApi(patch: Partial<Lead>): Record<string, unknown> {
     status: patch.status,
     notes: patch.notes,
     clientId: patch.clientId,
+    // undefined is dropped by JSON.stringify, so a patch that does not touch
+    // the assignee leaves it alone; "" reaches the server and clears it.
+    responsibleUserId: patch.responsibleUserId,
     ...(patch.stageId !== undefined && isUuid(patch.stageId) ? { stageId: patch.stageId } : {}),
     ...(patch.sourceId !== undefined && isUuid(patch.sourceId) ? { sourceId: patch.sourceId } : {}),
     // A uuid links the launch; an explicit empty string unlinks it server-side.

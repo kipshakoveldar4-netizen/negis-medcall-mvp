@@ -296,6 +296,65 @@ test("F9 a refused production read reaches the operator instead of an empty clin
   assert.ok(hook.includes("loadError, setItems"), "loadError must be part of the hook's return");
 });
 
+/**
+ * Fields the lead form computes for the browser's own use and deliberately does
+ * not send. They are snapshots the server recomputes from the taxonomy tables
+ * (a stage's colour is not a property of the lead), so shipping them would let a
+ * renamed stage rewrite history. Every other key the form assigns is a value the
+ * operator typed or chose, and it has to reach the API.
+ */
+const LEAD_FORM_DISPLAY_ONLY = new Set([
+  "stageName",
+  "stageKey",
+  "stageColor",
+  "semanticGroup",
+  "sourceName",
+  "sourceKey",
+  "sourceChannel",
+  "sourceColor",
+]);
+
+test("F11 every value the lead form collects reaches the API", async () => {
+  const source = await readFile(path.join(negisSrc, "pages", "LeadsPage.tsx"), "utf8");
+
+  // The «Ответственный» select was added with a staff list, a server-side
+  // check that refuses a colleague from another clinic, and tests pinning that
+  // check — and it changed nothing. The value reached submitForm's patch and
+  // stopped at the serializer, which never named it. The operator saw
+  // «Заявка обновлена», and the assignee was gone on the next load: a silent
+  // failure with a success toast, which is the whole subject of this suite.
+  //
+  // Derived, not listed: the expectation is read out of the form itself, so a
+  // field added tomorrow is covered without anyone remembering this test.
+  const submit = source.slice(source.indexOf("function submitForm()"), source.indexOf("function changeStatus("));
+  assert.ok(submit.length > 0, "submitForm must still exist");
+
+  const literalStart = submit.indexOf("const patch = {");
+  assert.ok(literalStart > 0, "the form must still build one patch object");
+  const literal = submit.slice(literalStart, submit.indexOf("\n    };", literalStart));
+
+  const collected = [...literal.matchAll(/^ {6}(?:\.\.\.\([^)]*\?\s*\{\s*)?([a-zA-Z][a-zA-Z0-9]*)\s*:/gm)]
+    .map((match) => match[1])
+    .filter((key) => !LEAD_FORM_DISPLAY_ONLY.has(key));
+  assert.ok(collected.length >= 6, `the form should collect several fields, found: ${collected.join(", ")}`);
+
+  const toApi = source.slice(source.indexOf("function leadToApi("), source.indexOf("function leadPatchToApi("));
+  const patchToApi = source.slice(source.indexOf("function leadPatchToApi("), source.indexOf("export default function LeadsPage"));
+
+  const dropped = collected.filter((key) => !patchToApi.includes(key));
+  assert.deepEqual(
+    dropped,
+    [],
+    `leadPatchToApi never names these, so editing a lead silently discards them: ${dropped.join(", ")}`,
+  );
+
+  // The create path runs through the other serializer, and it forgot the same field.
+  assert.ok(
+    toApi.includes("responsibleUserId"),
+    "leadToApi must send the assignee too — a new lead created with a responsible person kept none",
+  );
+});
+
 test("F10 a refused client creation does not report success, and leaves the lead alone", async () => {
   const source = await readFile(path.join(negisSrc, "pages", "LeadsPage.tsx"), "utf8");
 
