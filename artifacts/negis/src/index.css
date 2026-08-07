@@ -301,8 +301,11 @@
   /* UI-6. Прямоугольник 8px с серой рамкой — самая заметная примета
      наспех собранного интерфейса. Управляющие элементы переходят в пилюли:
      первичное действие чёрное, вторичное — тёплое без рамки. */
+  /* Вторичная кнопка белая, а не цвета фона: фон страницы — тот же
+     --negis-ground, и на нём заливка фоном делает кнопку невидимой.
+     Отделяет её тень, поэтому она читается и на фоне, и внутри карточки. */
   .neu-btn {
-    background: var(--negis-ground);
+    background: var(--negis-surface);
     border: none;
     border-radius: 999px;
     font-weight: 600;
@@ -311,7 +314,7 @@
     cursor: pointer;
     color: var(--negis-ink-2);
     font-family: 'Inter', sans-serif;
-    box-shadow: none;
+    box-shadow: var(--negis-shadow-soft);
     transition: background 0.15s ease, color 0.15s ease;
     display: inline-flex;
     align-items: center;
@@ -393,7 +396,7 @@
   .neu-btn-danger:hover { background: #B91C1C; }
 
   .neu-icon-btn {
-    background: var(--negis-ground);
+    background: var(--negis-surface);
     border: none;
     border-radius: 999px;
     cursor: pointer;
@@ -404,7 +407,7 @@
     color: var(--negis-text-2);
     height: 40px;
     width: 40px;
-    box-shadow: none;
+    box-shadow: var(--negis-shadow-soft);
   }
   .neu-icon-btn:hover {
     background: var(--negis-hair);
