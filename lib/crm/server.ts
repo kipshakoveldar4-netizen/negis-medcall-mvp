@@ -1958,6 +1958,110 @@ async function buildLeadReferenceRow(
 // A foreign-workspace or malformed id returns a safe validation error, never
 // a raw SQL error. Empty values unlink (null).
 /**
+ * Two appointments for one doctor at one time.
+ *
+ * The check existed only in the browser, over the array the page happened to
+ * have loaded (AppointmentsPage findConflict). That is wrong twice. It is wrong
+ * at scale, because the list read has no limit and is therefore capped by
+ * whatever PostgREST is configured with — past that point the conflicting
+ * appointment is simply not in the window, and the clinic double-books with no
+ * warning at all. And it is wrong at any scale, because two registrars on two
+ * devices each hold their own array: neither sees the booking the other made a
+ * second ago. A rule enforced only in one browser is not a rule.
+ *
+ * It stays advisory on purpose. Clinics do overbook deliberately — a doctor
+ * takes an urgent case into an occupied slot — so the answer is a refusal the
+ * operator can override with an explicit `allowConflict`, not a prohibition.
+ * What changes is that the override is now a decision someone made, rather than
+ * a gap nobody saw.
+ */
+export class AppointmentConflictError extends Error {
+  readonly conflict: { id: string; startsAt: string; clientName: string; doctorName: string };
+
+  constructor(conflict: { id: string; startsAt: string; clientName: string; doctorName: string }) {
+    super("Appointment conflict");
+    this.name = "AppointmentConflictError";
+    this.conflict = conflict;
+  }
+}
+
+/** Statuses that still occupy the slot; a cancelled or no-show visit does not. */
+const OCCUPYING_APPOINTMENT_STATUSES = ["scheduled", "confirmed", "arrived"];
+const DEFAULT_APPOINTMENT_MINUTES = 60;
+/**
+ * How far back to look for a booking that could still be running.
+ *
+ * The overlap itself is computed in code because the end of a visit is
+ * `starts_at + duration_minutes`, which PostgREST cannot filter on. So the
+ * database narrows by the one thing it has an index for — (doctor_name,
+ * starts_at), migration 012 — and the window has to be wide enough to catch a
+ * long appointment that began before the candidate. A day is far past any
+ * plausible visit and still a handful of rows for one doctor.
+ */
+const CONFLICT_LOOKBACK_MS = 24 * 60 * 60 * 1000;
+
+function appointmentMinutes(value: unknown): number {
+  const minutes = readNumber(value);
+  return typeof minutes === "number" && minutes > 0 ? minutes : DEFAULT_APPOINTMENT_MINUTES;
+}
+
+async function assertNoAppointmentConflict(
+  supabase: CrmSupabaseClient,
+  workspaceId: string,
+  candidate: { id?: string; doctorName: string; startsAt: string; durationMinutes: number; status: string },
+): Promise<void> {
+  if (!candidate.doctorName || !candidate.startsAt) return;
+  // A visit that is cancelled or was a no-show does not hold its slot.
+  if (!OCCUPYING_APPOINTMENT_STATUSES.includes(candidate.status.toLowerCase())) return;
+
+  const start = Date.parse(candidate.startsAt);
+  if (!Number.isFinite(start)) return;
+  const end = start + candidate.durationMinutes * 60_000;
+
+  const { data, error } = await supabase
+    .from("appointments")
+    .select("id, client_name, doctor_name, starts_at, duration_minutes, status")
+    .eq("workspace_id", workspaceId)
+    .eq("doctor_name", candidate.doctorName)
+    .gte("starts_at", new Date(start - CONFLICT_LOOKBACK_MS).toISOString())
+    .lt("starts_at", new Date(end).toISOString());
+
+  // A check that cannot run must not become a check that passed. But it must
+  // not block the clinic either: the refusal below is advisory, so an
+  // unavailable check degrades to the browser's own — the state before this
+  // function existed — and says so in the operator log.
+  if (error) {
+    console.warn("appointments: conflict check unavailable", error.message);
+    return;
+  }
+
+  for (const raw of Array.isArray(data) ? data : []) {
+    const row = asRecord(raw);
+    const id = readString(row.id);
+    if (candidate.id && id === candidate.id) continue;
+    if (!OCCUPYING_APPOINTMENT_STATUSES.includes(readString(row.status).toLowerCase())) continue;
+
+    const otherStart = Date.parse(readString(row.starts_at));
+    if (!Number.isFinite(otherStart)) continue;
+    const otherEnd = otherStart + appointmentMinutes(row.duration_minutes) * 60_000;
+
+    if (start < otherEnd && otherStart < end) {
+      throw new AppointmentConflictError({
+        id,
+        startsAt: readString(row.starts_at),
+        clientName: readString(row.client_name),
+        doctorName: readString(row.doctor_name),
+      });
+    }
+  }
+}
+
+/** The caller states plainly that it means to overbook. Absence is not consent. */
+function allowsAppointmentConflict(body: JsonRecord): boolean {
+  return body.allowConflict === true || body.allow_conflict === true;
+}
+
+/**
  * The appointment's link to the patient it is for.
  *
  * The column has existed since 010 and fromRow has always returned it, but no
@@ -2236,6 +2340,14 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
     }
     if (resource === "appointments") {
       Object.assign(row, await buildAppointmentReferenceRow(supabase, workspaceId, body));
+      if (!allowsAppointmentConflict(body)) {
+        await assertNoAppointmentConflict(supabase, workspaceId, {
+          doctorName: readString(row.doctor_name),
+          startsAt: readString(row.starts_at),
+          durationMinutes: appointmentMinutes(row.duration_minutes),
+          status: readString(row.status),
+        });
+      }
     }
     const query = config.upsertConflict
       ? supabase.from(config.table).upsert(row, { onConflict: config.upsertConflict }).select(config.selectColumns ?? "*").single()
@@ -2269,6 +2381,14 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
 
     return sendJson(res, 201, success("supabase", { [resource === "content-videos" ? "video" : "item"]: item, item }));
   } catch (error) {
+    if (error instanceof AppointmentConflictError) {
+      return sendJson(res, 409, {
+        success: false,
+        error: "Это время у врача уже занято",
+        code: "appointment_conflict",
+        conflict: error.conflict,
+      });
+    }
     if (error instanceof CrmReferenceValidationError) {
       return sendJson(res, 400, errorBody(error.message, error.details));
     }
@@ -2438,6 +2558,19 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
       ? await readRowBeforeChange(supabase, config.table, workspaceId, id)
       : {};
 
+    if (patchedEntity === "appointment" && !allowsAppointmentConflict(patchBody)) {
+      // Проверять надо по СЛИЯНИЮ: патч может нести только новое время, только
+      // нового врача или только статус, а занимает слот их сочетание. `before`
+      // уже прочитан для журнала — второго запроса это не стоит.
+      await assertNoAppointmentConflict(supabase, workspaceId, {
+        id,
+        doctorName: readString(row.doctor_name ?? before.doctor_name),
+        startsAt: readString(row.starts_at ?? before.starts_at),
+        durationMinutes: appointmentMinutes(row.duration_minutes ?? before.duration_minutes),
+        status: readString(row.status ?? before.status),
+      });
+    }
+
     const { data, error } = await supabase
       .from(config.table)
       .update(row)
@@ -2469,6 +2602,14 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
 
     return sendJson(res, 200, success("supabase", { [resource === "content-videos" ? "video" : "item"]: item, item }));
   } catch (error) {
+    if (error instanceof AppointmentConflictError) {
+      return sendJson(res, 409, {
+        success: false,
+        error: "Это время у врача уже занято",
+        code: "appointment_conflict",
+        conflict: error.conflict,
+      });
+    }
     if (error instanceof CrmReferenceValidationError) {
       return sendJson(res, 400, errorBody(error.message, error.details));
     }

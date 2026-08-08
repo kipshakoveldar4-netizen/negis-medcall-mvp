@@ -18,7 +18,7 @@ import { toast } from "sonner";
 import { PageLayout } from "@/components/layout/PageLayout";
 import { MetricCard } from "@/components/ui/metric-card";
 import { apiUrl, crmFetch } from "@/lib/api";
-import { readWorkspaceId as readCurrentWorkspaceId, useDemoCollection, workspaceScopedKey } from "@/lib/demoStorage";
+import { isRealWorkspace, readWorkspaceId as readCurrentWorkspaceId, useDemoCollection, workspaceScopedKey } from "@/lib/demoStorage";
 import { formatPhone, toTelHref, toWhatsappHref } from "@/lib/phone";
 
 type AppointmentStatus = "scheduled" | "confirmed" | "arrived" | "no_show" | "cancelled";
@@ -323,6 +323,37 @@ function appointmentFromForm(form: AppointmentForm, existingId?: string): Appoin
   };
 }
 
+/**
+ * Отказ «слот занят» — не то же, что отказ базы: его показывают в модалке
+ * рядом с кнопкой «Сохранить всё равно», а не тостом поверх закрытой формы.
+ */
+class SlotTakenError extends Error {
+  readonly conflict: { startsAt: string; clientName: string; doctorName: string };
+
+  constructor(conflict: { startsAt: string; clientName: string; doctorName: string }) {
+    super("appointment_conflict");
+    this.name = "SlotTakenError";
+    this.conflict = conflict;
+  }
+}
+
+function conflictFromBody(body: unknown): SlotTakenError | null {
+  const record = asRecord(body);
+  if (readString(record.code) !== "appointment_conflict") return null;
+  const conflict = asRecord(record.conflict);
+  return new SlotTakenError({
+    startsAt: readString(conflict.startsAt),
+    clientName: readString(conflict.clientName),
+    doctorName: readString(conflict.doctorName),
+  });
+}
+
+function describeConflict(error: SlotTakenError): string {
+  const at = error.conflict.startsAt ? timeKeyFromStartsAt(error.conflict.startsAt) : "";
+  const who = error.conflict.clientName || "другой пациент";
+  return `У врача уже есть запись на это время: ${who}${at ? `, ${at}` : ""}. Сохранить всё равно?`;
+}
+
 function appointmentInterval(appointment: Appointment) {
   const start = new Date(appointment.startsAt).getTime();
   return {
@@ -548,17 +579,20 @@ export function AppointmentsPage() {
     setModalOpen(true);
   };
 
-  const patchAppointment = async (appointment: Appointment) => {
+  const patchAppointment = async (appointment: Appointment, allowConflict = false) => {
     const response = await crmFetch("/api/crm/appointments", {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         id: appointment.id,
         workspaceId: readCurrentWorkspaceId(),
-        updates: appointmentToApi(appointment),
+        updates: { ...appointmentToApi(appointment), ...(allowConflict ? { allowConflict: true } : {}) },
       }),
     });
     const body = await safeJson(response);
+
+    const conflict = conflictFromBody(body);
+    if (conflict) throw conflict;
 
     if (!response.ok || body?.success !== true) {
       const details = body?.success === false ? body.details?.join(", ") : "";
@@ -568,6 +602,44 @@ export function AppointmentsPage() {
     if (body.mode !== "supabase" && body.warning) {
       toast.info("Сервер недоступен, изменение сохранено локально");
     }
+  };
+
+  /**
+   * Создание записи ждёт ответ сервера.
+   *
+   * Прежде оно шло оптимистично через addItem и отказ приходил уже после
+   * закрытия модалки — generic-тостом, без причины и без введённых данных.
+   * Для отказа «слот занят» это неприемлемо: оператору нужно решить, занимать
+   * ли время всё равно, а решать он может только пока форма открыта.
+   * Демо-режим не трогаем: там коллекция и есть запись, сервера нет.
+   */
+  const createAppointment = async (appointment: Appointment, allowConflict: boolean) => {
+    if (!isRealWorkspace()) {
+      addItem(appointment);
+      return;
+    }
+
+    const response = await crmFetch("/api/crm/appointments", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ...appointmentToApi(appointment),
+        workspaceId: readCurrentWorkspaceId(),
+        ...(allowConflict ? { allowConflict: true } : {}),
+      }),
+    });
+    const body = await safeJson(response);
+
+    const conflict = conflictFromBody(body);
+    if (conflict) throw conflict;
+
+    if (!response.ok || body?.success !== true || body.mode !== "supabase") {
+      const details = body?.success === false ? body.details?.join(", ") : "";
+      throw new Error(details || (body?.success === false ? body.error : "Не удалось создать запись на сервере"));
+    }
+
+    const saved = body.data?.item;
+    setItems((current) => [saved ? appointmentFromApi(saved) : appointment, ...current]);
   };
 
   const updateAppointmentStatus = async (appointment: Appointment, status: AppointmentStatus) => {
@@ -611,9 +683,14 @@ export function AppointmentsPage() {
     }
 
     const appointment = appointmentFromForm(form, editingId || undefined);
-    const conflict = findConflict(appointment);
-    if (conflict && !allowConflict) {
-      setConflictMessage(`У врача уже есть запись на это время: ${conflict.client}, ${timeKeyFromStartsAt(conflict.startsAt)}. Сохранить всё равно?`);
+
+    // Быстрый локальный префильтр: если конфликт виден в уже загруженном
+    // расписании, спрашиваем без обращения к серверу. Авторитет — не здесь:
+    // этот массив может быть усечён, и он не знает, что записал коллега
+    // секунду назад с другого устройства.
+    const localConflict = findConflict(appointment);
+    if (localConflict && !allowConflict) {
+      setConflictMessage(`У врача уже есть запись на это время: ${localConflict.client}, ${timeKeyFromStartsAt(localConflict.startsAt)}. Сохранить всё равно?`);
       return;
     }
 
@@ -621,21 +698,35 @@ export function AppointmentsPage() {
       const previous = items.find((item) => item.id === editingId);
       setItems((current) => current.map((item) => (item.id === editingId ? appointment : item)));
       try {
-        await patchAppointment(appointment);
+        await patchAppointment(appointment, allowConflict);
         toast.success("Запись обновлена");
       } catch (error) {
-        // Та же честность, что и у статуса: отказ виден отказом, строка
-        // возвращается к серверной правде, детали — в консоль оператора.
         if (previous) {
           setItems((current) => current.map((item) => (item.id === editingId ? previous : item)));
         }
+        if (error instanceof SlotTakenError) {
+          setConflictMessage(describeConflict(error));
+          return;
+        }
+        // Та же честность, что и у статуса: отказ виден отказом, строка
+        // возвращается к серверной правде, детали — в консоль оператора.
         console.warn("appointments: patch refused", error instanceof Error ? error.message : error);
         toast.error("Не удалось сохранить запись. Изменение отменено.");
         return;
       }
     } else {
-      addItem(appointment);
-      toast.success("Запись создана");
+      try {
+        await createAppointment(appointment, allowConflict);
+        toast.success("Запись создана");
+      } catch (error) {
+        if (error instanceof SlotTakenError) {
+          setConflictMessage(describeConflict(error));
+          return;
+        }
+        console.warn("appointments: create refused", error instanceof Error ? error.message : error);
+        toast.error("Не удалось создать запись. Ничего не сохранено.");
+        return;
+      }
     }
 
     setModalOpen(false);
