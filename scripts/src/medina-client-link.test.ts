@@ -46,6 +46,7 @@ function spyClient(
   rows: Record<string, unknown[]>,
   log: QueryLog[],
   missingColumns: Set<string> = new Set(),
+  hardFailTables: Set<string> = new Set(),
 ) {
   return {
     from(table: string) {
@@ -73,11 +74,19 @@ function spyClient(
           // ошибка PostgREST 42703, а не пустой результат. Отличать одно от
           // другого важно: от этого зависит, деградирует поиск или врёт.
           if (missingColumns.has(column)) entry.filters.__missingColumn = column;
+          if (column === "__fail") entry.filters.__hardFailure = value;
           entry.filters[column] = value;
           return chain();
         },
         in(column: string, values: unknown) { entry.filters[column] = values; return chain(); },
         then(resolve: (value: { data: unknown; error: unknown; count?: number }) => void) {
+          if (hardFailTables.has(table)) {
+            resolve({
+              data: null,
+              error: { message: `canceling statement due to statement timeout on ${table}`, code: "57014" },
+            });
+            return;
+          }
           if (entry.filters.__missingColumn) {
             resolve({
               data: null,
@@ -118,7 +127,11 @@ function mockResponse(): MockResponse {
   return res;
 }
 
-async function loadRouter(rows: Record<string, unknown[]>, missingColumns: string[] = []) {
+async function loadRouter(
+  rows: Record<string, unknown[]>,
+  missingColumns: string[] = [],
+  hardFailTables: string[] = [],
+) {
   const log: QueryLog[] = [];
   process.env.SUPABASE_URL = "https://project.example.test";
   process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key";
@@ -136,7 +149,7 @@ async function loadRouter(rows: Record<string, unknown[]>, missingColumns: strin
   const owner: StaffRow = { id: STAFF_A, workspace_id: WORKSPACE_A, role: "owner", status: "active" };
   const clientRows: Record<string, unknown[]> = { staff_users: [owner], ...rows };
   supabaseModule.setSupabaseServerClientFactoryForTests(() =>
-    spyClient(clientRows, log, new Set(missingColumns)));
+    spyClient(clientRows, log, new Set(missingColumns), new Set(hardFailTables)));
 
   const routerModule = (await import(pathToFileURL(routerPath).href)) as {
     default: (req: unknown, res: MockResponse) => Promise<unknown>;
@@ -483,11 +496,13 @@ test("CLK16 without the phone parameter the list behaves exactly as before", asy
   );
 });
 
-test("CLK17 a migration that has not been applied yet degrades to «no match», not to a failure", async () => {
-  // Production runs ahead of hand-applied migrations by design in this project.
-  // Until 030 is applied the columns do not exist, and PostgREST answers 42703.
-  // The conversion must then create a client — what it did before this existed —
-  // rather than refusing to convert at all.
+test("CLK17 before the migration lands the check still works — it does not silently switch off", async () => {
+  // A deployment reaches production before its migrations are applied by hand
+  // here. The first version of this branch answered that window with an empty
+  // list, which is not "degraded" — it is OFF: every conversion would file a
+  // second card for a returning patient, including one whose number is spelled
+  // identically, which the browser this replaced did catch. Strictly worse than
+  // what it replaced, for as long as the owner had not run the SQL.
   const warnings: string[] = [];
   const realWarn = console.warn;
   console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(" ")); };
@@ -496,20 +511,35 @@ test("CLK17 a migration that has not been applied yet degrades to «no match», 
     const { res } = await call({ segments: ["clients"], query: { phone: PHONE_TRUNK } });
 
     assert.equal(res.statusCode, 200, JSON.stringify(res.body));
-    const found = (res.body.data as { clients: unknown[] }).clients;
-    assert.equal(found.length, 0, "no columns, no match — and no 502 that would block the conversion");
+    const found = (res.body.data as { clients: Array<Record<string, unknown>> }).clients;
+    assert.equal(found.length, 1, "the comparison moves into code on a bounded read, exactly as it does for leads");
+    assert.equal(found[0].id, CLIENT_ID);
   } finally {
     console.warn = realWarn;
   }
 
   assert.ok(
-    warnings.some((line) => line.includes("phone lookup on")),
-    "a lookup that silently stopped working has to say so in the operator log",
+    warnings.some((line) => line.includes("migration 030")),
+    "and the operator log says which migration would make it exact again",
   );
-  assert.ok(
-    !warnings.join("\n").includes("701"),
-    "and it must not carry a patient's number into the log",
-  );
+  assert.ok(!warnings.join(" ").includes("701"), "without carrying a patient's number into the log");
+});
+
+test("CLK19 a database failure is a failure, not «this clinic has no such patient»", async () => {
+  // The rule this file states for the unfiltered read, and the rule
+  // test:wazzup-webhook WZ22 pins for the identical lookup on leads. The first
+  // version of this branch swallowed every error class alike, so a statement
+  // timeout answered 200 with an empty list — and the conversion, taking that
+  // as authoritative, created the duplicate the branch exists to prevent.
+  const call = await loadRouter({ clients: [clientRow()] }, [], ["clients"]);
+  const { res } = await call({ segments: ["clients"], query: { phone: PHONE_TRUNK } });
+
+  assert.equal(res.statusCode, 502, JSON.stringify(res.body));
+  assert.equal(res.body.success, false);
+  const text = JSON.stringify(res.body);
+  for (const leak of ["statement timeout", "57014"]) {
+    assert.ok(!text.includes(leak), `the answer must not quote the database: ${leak}`);
+  }
 });
 
 test("CLK18 the conversion asks the server instead of downloading the clinic", async () => {

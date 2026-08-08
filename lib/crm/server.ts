@@ -2190,22 +2190,7 @@ async function findClientsByPhone(
   const found: JsonRecord[] = [];
   const seen = new Set<string>();
 
-  for (const column of ["phone_normalized", "whatsapp_normalized"]) {
-    const { data, error } = await supabase
-      .from(config.table)
-      .select(config.selectColumns ?? "*")
-      .eq("workspace_id", workspaceId)
-      .eq(column, canonical)
-      .limit(CLIENT_PHONE_MATCH_LIMIT);
-
-    // A column the database does not have yet (migration 030 not applied) is
-    // "no match here", not a failure of the whole conversion: the caller falls
-    // back to creating a client, which is what it did before this existed.
-    if (error) {
-      console.warn(`clients: phone lookup on ${column} unavailable`, error.message);
-      continue;
-    }
-
+  const collect = (data: unknown) => {
     for (const raw of Array.isArray(data) ? data : []) {
       const row = asRecord(raw);
       const id = readString(row.id);
@@ -2213,10 +2198,87 @@ async function findClientsByPhone(
       seen.add(id);
       found.push(row);
     }
+  };
+
+  for (const column of ["phone_normalized", "whatsapp_normalized"]) {
+    const { data, error } = await supabase
+      .from(config.table)
+      .select(config.selectColumns ?? "*")
+      // Newest first, and stated rather than left to the plan. Without it
+      // PostgREST returns whatever order the executor produced, and the caller
+      // takes the first row — so a patient who already has two cards would be
+      // attached to a different one after any update that moved a row. The
+      // browser this replaced was deterministic by accident: it read the list
+      // ordered by created_at and searched that.
+      .order("created_at", { ascending: false })
+      .eq("workspace_id", workspaceId)
+      .eq(column, canonical)
+      .limit(CLIENT_PHONE_MATCH_LIMIT);
+
+    if (!error) {
+      collect(data);
+      continue;
+    }
+
+    // Only "the column is not there yet" may degrade. Everything else — a
+    // timeout, a revoked grant, a dropped connection — is a failure, and
+    // answering it with an empty list would say «this clinic has no such
+    // patient» when the truth is unknown. That is the Security-2F rule this
+    // file states二 lines below for the unfiltered read, and the rule
+    // test:wazzup-webhook WZ22 pins for the identical lookup on leads.
+    if (!isMissingColumn(error, column)) {
+      throw new Error(`client lookup: ${error.message}`);
+    }
+
+    // Migration 030 is not applied yet. A deployment reaches production before
+    // its migrations are applied by hand here, and without this the dedup
+    // would not merely be unavailable in that window — it would be OFF, and
+    // every conversion would file a second card for a returning patient,
+    // including one whose number is spelled identically. Worse than the state
+    // this branch replaced. So the comparison happens in code, on a bounded
+    // read, exactly as lib/crm/inbound-whatsapp.ts does for leads.
+    console.warn(`clients: ${column} not present yet, comparing in code until migration 030 is applied`);
+    const { data: candidates, error: candidatesError } = await supabase
+      .from(config.table)
+      .select(config.selectColumns ?? "*")
+      .order("created_at", { ascending: false })
+      .eq("workspace_id", workspaceId)
+      .limit(CLIENT_FALLBACK_SCAN_LIMIT);
+    if (candidatesError) throw new Error(`client lookup: ${candidatesError.message}`);
+
+    collect(
+      (Array.isArray(candidates) ? candidates : [])
+        .map((row) => asRecord(row))
+        .filter((row) =>
+          [normalizePhone(readString(row.phone)), normalizePhone(readString(row.whatsapp))].includes(canonical))
+        .slice(0, CLIENT_PHONE_MATCH_LIMIT),
+    );
+    // Both columns are missing or present together, so one pass is enough.
+    break;
   }
 
   return found;
 }
+
+/** Postgres "column does not exist" — the one error the fallback answers to. */
+const UNDEFINED_COLUMN = "42703";
+
+function isMissingColumn(error: { code?: unknown; message?: unknown } | null, column: string): boolean {
+  if (!error) return false;
+  if (readString(error.code) === UNDEFINED_COLUMN) return true;
+  const message = readString(error.message).toLowerCase();
+  return message.includes(column) && message.includes("does not exist");
+}
+
+/**
+ * The fallback's ceiling, and an honest one.
+ *
+ * This is the window before migration 030 is applied, and inside it the check
+ * is only as good as the read: a clinic past this many clients can have the
+ * existing card outside the window, which is the very defect 030 removes. It
+ * is a bridge, not a design — it stops being used the moment the columns exist.
+ */
+const CLIENT_FALLBACK_SCAN_LIMIT = 1000;
 
 /**
  * A handful is enough to decide. The question is "does this patient already
