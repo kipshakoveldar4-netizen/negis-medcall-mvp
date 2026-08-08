@@ -256,10 +256,28 @@ function clientFromRecord(raw: unknown): ExistingClient {
 
 // Duplicate check source: real API clients when Supabase answers, otherwise the
 // /clients demo storage (read-only here; created clients are prepended separately).
-async function loadExistingClients(): Promise<ExistingClient[]> {
+/**
+ * Клиенты с этим номером — вопросом к базе, а не выгрузкой всей клиники.
+ *
+ * Прежде здесь читались ВСЕ клиенты рабочей области, и совпадение искалось в
+ * браузере. Дубль карточки пациента получался двумя путями. За тем пределом
+ * строк, который настроен у PostgREST — а он в репозитории не задан нигде, —
+ * карточка вернувшегося пациента просто не попадала в отданное окно. И, вне
+ * всякого предела, сравнение шло по одним цифрам: «8 701 000 00 01» и
+ * «+7 701 000 00 01» были для дедупа разными людьми, хотя канонизатор проекта
+ * знает, что это один абонент.
+ *
+ * Номер уходит на сервер как есть. Канонизация живёт в двух местах —
+ * lib/crm/phone.ts и выражение генерируемой колонки, — и test:crm-phone-parity
+ * держит их вместе; третья копия в браузере снова развела бы их.
+ */
+async function findClientsByPhone(phone: string): Promise<ExistingClient[]> {
+  if (!phoneDigits(phone)) return [];
+
   try {
     const workspaceId = readWorkspaceId();
-    const response = await crmFetch(`/api/crm/clients?workspaceId=${encodeURIComponent(workspaceId)}`);
+    const query = `phone=${encodeURIComponent(phone)}&workspaceId=${encodeURIComponent(workspaceId)}`;
+    const response = await crmFetch(`/api/crm/clients?${query}`);
     const text = await response.text();
     const body = text ? (JSON.parse(text) as { success?: boolean; mode?: string; data?: { clients?: unknown[] } }) : null;
     if (response.ok && body?.success === true && body.mode === "supabase" && Array.isArray(body.data?.clients)) {
@@ -270,7 +288,13 @@ async function loadExistingClients(): Promise<ExistingClient[]> {
   }
   // Production duplicate check must never run against demo clients.
   if (isRealWorkspace()) return [];
-  return readDemoStorage<unknown[]>("negis_demo_clients", []).map(clientFromRecord);
+
+  // Демо-режим сервера не имеет вовсе: сравниваем как и раньше, по цифрам.
+  // Данные здесь — фиксированный сид в localStorage, а не история клиники.
+  const digits = phoneDigits(phone);
+  return readDemoStorage<unknown[]>("negis_demo_clients", [])
+    .map(clientFromRecord)
+    .filter((client) => [phoneDigits(client.phone), phoneDigits(client.whatsapp)].includes(digits));
 }
 
 // CRM7 — campaign attribution: a lead can link to a real Meta launch record through
@@ -796,10 +820,9 @@ export default function LeadsPage() {
         toast.warning("У заявки нет телефона. Проверьте данные клиента.");
       }
 
-      const existingClients = await loadExistingClients();
-      const matched = leadDigits
-        ? existingClients.find((client) => [phoneDigits(client.phone), phoneDigits(client.whatsapp)].includes(leadDigits))
-        : undefined;
+      // Сравнение по канонической форме делает сервер по индексу; здесь берём
+      // первое совпадение.
+      const matched = leadDigits ? (await findClientsByPhone(lead.phone))[0] : undefined;
 
       if (matched && matched.id) {
         try {

@@ -1,5 +1,6 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { canAssignRole, isStaffRole } from "../auth/permissions";
+import { normalizePhone } from "./phone";
 import {
   listAuthContextMemberships,
   requireWorkspaceAdmin,
@@ -2162,6 +2163,68 @@ async function buildDealReferenceRow(
   return row;
 }
 
+/**
+ * The patient this number already belongs to, asked of the database.
+ *
+ * Lead → client conversion used to answer this by reading every client of the
+ * workspace and searching the array in the browser. Two ways that produced a
+ * duplicate card: past whatever row cap PostgREST is configured with the
+ * returning patient was simply not in the window, and the browser compared
+ * digits only — so the trunk form «8 701…» and «+7 701…» were already two
+ * different people at any clinic size.
+ *
+ * Both numbers are checked because a patient reached on WhatsApp at a second
+ * number is still that patient. Two indexed equalities rather than one `.or()`:
+ * PostgREST's or-filter is a string mini-language this codebase uses nowhere
+ * else, and each of these hits its own partial index from migration 030.
+ */
+async function findClientsByPhone(
+  supabase: CrmSupabaseClient,
+  workspaceId: string,
+  rawPhone: string,
+): Promise<JsonRecord[]> {
+  const canonical = normalizePhone(rawPhone);
+  if (!canonical) return [];
+
+  const config = configs.clients;
+  const found: JsonRecord[] = [];
+  const seen = new Set<string>();
+
+  for (const column of ["phone_normalized", "whatsapp_normalized"]) {
+    const { data, error } = await supabase
+      .from(config.table)
+      .select(config.selectColumns ?? "*")
+      .eq("workspace_id", workspaceId)
+      .eq(column, canonical)
+      .limit(CLIENT_PHONE_MATCH_LIMIT);
+
+    // A column the database does not have yet (migration 030 not applied) is
+    // "no match here", not a failure of the whole conversion: the caller falls
+    // back to creating a client, which is what it did before this existed.
+    if (error) {
+      console.warn(`clients: phone lookup on ${column} unavailable`, error.message);
+      continue;
+    }
+
+    for (const raw of Array.isArray(data) ? data : []) {
+      const row = asRecord(raw);
+      const id = readString(row.id);
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      found.push(row);
+    }
+  }
+
+  return found;
+}
+
+/**
+ * A handful is enough to decide. The question is "does this patient already
+ * have a card", and a workspace with more than a few cards on one number has a
+ * data problem the conversion screen is not the place to solve.
+ */
+const CLIENT_PHONE_MATCH_LIMIT = 5;
+
 async function listItems(resource: CrmResource, req: VercelRequest, res: VercelResponse) {
   const config = configs[resource];
   const workspaceId = readWorkspaceId(req, {});
@@ -2179,6 +2242,19 @@ async function listItems(resource: CrmResource, req: VercelRequest, res: VercelR
   }
 
   try {
+    // A caller asking «does this number already have a card» gets exactly that,
+    // instead of the whole clinic to search in the browser. The filter is a
+    // narrowing of the same authorized read — same route, same view_clients
+    // permission, same workspace scope — so it opens nothing new.
+    if (resource === "clients") {
+      const phone = readQueryString(req.query.phone);
+      if (phone) {
+        const rows = await findClientsByPhone(supabase, workspaceId, phone);
+        const matches = rows.map((row) => config.fromRow(row));
+        return sendJson(res, 200, success("supabase", { [config.listKey]: matches, items: matches }));
+      }
+    }
+
     let query = supabase
       .from(config.table)
       .select(config.selectColumns ?? "*")

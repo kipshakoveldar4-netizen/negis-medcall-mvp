@@ -24,6 +24,7 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."
 const routerPath = path.join(repoRoot, "api", "crm", "[...path].ts");
 
 const WORKSPACE_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const WORKSPACE_B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const USER_A = "11111111-1111-4111-8111-111111111111";
 const STAFF_A = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
 const LEAD_ID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
@@ -41,7 +42,11 @@ type QueryLog = { table: string; filters: Record<string, unknown>; op: string };
  * honours the recorded eq filters, because readWorkspaceReference is exactly
  * a filtered maybeSingle and these tests exist to prove the filter matters.
  */
-function spyClient(rows: Record<string, unknown[]>, log: QueryLog[]) {
+function spyClient(
+  rows: Record<string, unknown[]>,
+  log: QueryLog[],
+  missingColumns: Set<string> = new Set(),
+) {
   return {
     from(table: string) {
       const entry: QueryLog = { table, filters: {}, op: "select" };
@@ -63,11 +68,30 @@ function spyClient(rows: Record<string, unknown[]>, log: QueryLog[]) {
           const found = (rows[table] ?? []).map((r) => r as Record<string, unknown>).find(matches) ?? null;
           return Promise.resolve({ data: found, error: null });
         },
-        eq(column: string, value: unknown) { entry.filters[column] = value; return chain(); },
+        eq(column: string, value: unknown) {
+          // Колонка, которой в базе ещё нет (миграция не применена), — это
+          // ошибка PostgREST 42703, а не пустой результат. Отличать одно от
+          // другого важно: от этого зависит, деградирует поиск или врёт.
+          if (missingColumns.has(column)) entry.filters.__missingColumn = column;
+          entry.filters[column] = value;
+          return chain();
+        },
         in(column: string, values: unknown) { entry.filters[column] = values; return chain(); },
-        then(resolve: (value: { data: unknown; error: null; count?: number }) => void) {
+        then(resolve: (value: { data: unknown; error: unknown; count?: number }) => void) {
+          if (entry.filters.__missingColumn) {
+            resolve({
+              data: null,
+              error: { message: `column clients.${String(entry.filters.__missingColumn)} does not exist`, code: "42703" },
+            });
+            return;
+          }
+          // Точечный поиск фильтрует по-настоящему; списочное чтение — нет,
+          // как и раньше.
           const tableRows = rows[table] ?? [];
-          resolve({ data: tableRows, error: null, count: tableRows.length });
+          const filtered = Object.keys(entry.filters).some((c) => c.endsWith("_normalized"))
+            ? tableRows.map((r) => r as Record<string, unknown>).filter(matches)
+            : tableRows;
+          resolve({ data: filtered, error: null, count: filtered.length });
         },
       });
       return builder;
@@ -94,7 +118,7 @@ function mockResponse(): MockResponse {
   return res;
 }
 
-async function loadRouter(rows: Record<string, unknown[]>) {
+async function loadRouter(rows: Record<string, unknown[]>, missingColumns: string[] = []) {
   const log: QueryLog[] = [];
   process.env.SUPABASE_URL = "https://project.example.test";
   process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key";
@@ -111,20 +135,21 @@ async function loadRouter(rows: Record<string, unknown[]>) {
 
   const owner: StaffRow = { id: STAFF_A, workspace_id: WORKSPACE_A, role: "owner", status: "active" };
   const clientRows: Record<string, unknown[]> = { staff_users: [owner], ...rows };
-  supabaseModule.setSupabaseServerClientFactoryForTests(() => spyClient(clientRows, log));
+  supabaseModule.setSupabaseServerClientFactoryForTests(() =>
+    spyClient(clientRows, log, new Set(missingColumns)));
 
   const routerModule = (await import(pathToFileURL(routerPath).href)) as {
     default: (req: unknown, res: MockResponse) => Promise<unknown>;
   };
 
-  return async (input: { segments: string[]; method?: string; body?: unknown }) => {
+  return async (input: { segments: string[]; method?: string; body?: unknown; query?: Record<string, unknown> }) => {
     log.length = 0;
     const res = mockResponse();
     await routerModule.default(
       {
         method: input.method ?? "GET",
         headers: { authorization: `Bearer ${TOKEN}` },
-        query: { path: input.segments, workspaceId: WORKSPACE_A },
+        query: { path: input.segments, workspaceId: WORKSPACE_A, ...(input.query ?? {}) },
         body: input.body,
       },
       res,
@@ -141,7 +166,7 @@ test("CLK1 linking a lead to another clinic's client is refused before anything 
   // The foreign client exists — in someone else's workspace. Under the old
   // uuid-shape guard this request stored the id; the FK had nothing to say.
   const call = await loadRouter({
-    clients: [{ id: FOREIGN_CLIENT_ID, workspace_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" }],
+    clients: [{ id: FOREIGN_CLIENT_ID, workspace_id: WORKSPACE_B }],
     leads: [{ id: LEAD_ID, workspace_id: WORKSPACE_A, full_name: "Лаура" }],
   });
   const { res, log } = await call({
@@ -219,7 +244,7 @@ test("CLK4 an appointment created from a lead's handoff stores the patient it is
 
 test("CLK5 an appointment refuses another clinic's client the same way the lead does", async () => {
   const call = await loadRouter({
-    clients: [{ id: FOREIGN_CLIENT_ID, workspace_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" }],
+    clients: [{ id: FOREIGN_CLIENT_ID, workspace_id: WORKSPACE_B }],
   });
   const { res, log } = await call({
     segments: ["appointments"],
@@ -379,6 +404,130 @@ test("CLK11 both «Записать» handoffs carry the client card, and a manu
       `editing «${field}» must clear the inherited link — the hint line disappearing is the operator's signal`,
     );
   }
+});
+
+/* ── Finding the patient this number already belongs to ── */
+
+const PHONE_TRUNK = "8 701 000 00 01";
+const PHONE_INTERNATIONAL = "+7 701 000-00-01";
+const CANONICAL = "+77010000001";
+
+const clientRow = (over: Record<string, unknown> = {}) => ({
+  id: CLIENT_ID,
+  workspace_id: WORKSPACE_A,
+  full_name: "Лаура Ким",
+  phone: PHONE_INTERNATIONAL,
+  phone_normalized: CANONICAL,
+  whatsapp: null,
+  whatsapp_normalized: null,
+  ...over,
+});
+
+test("CLK12 the trunk form and the international form find the same patient", async () => {
+  // The defect that had nothing to do with size: the browser compared digits
+  // only, so «8 701…» and «+7 701…» were two different people and the
+  // conversion filed a second card for a patient who already had one.
+  const call = await loadRouter({ clients: [clientRow()] });
+  const { res, log } = await call({ segments: ["clients"], query: { phone: PHONE_TRUNK } });
+
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  const found = (res.body.data as { clients: Array<Record<string, unknown>> }).clients;
+  assert.equal(found.length, 1, "one patient, however the number was typed");
+  assert.equal(found[0].id, CLIENT_ID);
+
+  const lookup = log.find((e) => e.table === "clients" && "phone_normalized" in e.filters);
+  assert.ok(lookup, "the match is an indexed equality on the canonical form, not a scan in the browser");
+  assert.equal(lookup.filters.phone_normalized, CANONICAL);
+  assert.equal(lookup.filters.workspace_id, WORKSPACE_A);
+});
+
+test("CLK13 a patient reached on WhatsApp at a second number is still that patient", async () => {
+  const call = await loadRouter({
+    clients: [clientRow({ phone: null, phone_normalized: null, whatsapp: PHONE_INTERNATIONAL, whatsapp_normalized: CANONICAL })],
+  });
+  const { res } = await call({ segments: ["clients"], query: { phone: PHONE_TRUNK } });
+
+  const found = (res.body.data as { clients: Array<Record<string, unknown>> }).clients;
+  assert.equal(found.length, 1, "the conversion matches on both numbers, so the lookup must too");
+});
+
+test("CLK14 asking about a number nobody has returns nobody — not the whole clinic", async () => {
+  const call = await loadRouter({ clients: [clientRow()] });
+  const { res } = await call({ segments: ["clients"], query: { phone: "+7 747 000 00 00" } });
+
+  const found = (res.body.data as { clients: Array<Record<string, unknown>> }).clients;
+  assert.equal(found.length, 0, "an unfiltered answer here is exactly how a duplicate card gets created");
+});
+
+test("CLK15 another clinic's patient is not a match", async () => {
+  const call = await loadRouter({ clients: [clientRow({ workspace_id: WORKSPACE_B })] });
+  const { res, log } = await call({ segments: ["clients"], query: { phone: PHONE_TRUNK } });
+
+  const found = (res.body.data as { clients: Array<Record<string, unknown>> }).clients;
+  assert.equal(found.length, 0);
+  for (const lookup of log.filter((e) => e.table === "clients")) {
+    assert.equal(lookup.filters.workspace_id, WORKSPACE_A, "every read stays scoped, filter included");
+  }
+});
+
+test("CLK16 without the phone parameter the list behaves exactly as before", async () => {
+  const call = await loadRouter({ clients: [clientRow(), clientRow({ id: FOREIGN_CLIENT_ID })] });
+  const { res, log } = await call({ segments: ["clients"] });
+
+  const found = (res.body.data as { clients: unknown[] }).clients;
+  assert.equal(found.length, 2, "the filter is additive: absent means unchanged");
+  assert.equal(
+    log.filter((e) => e.table === "clients" && "phone_normalized" in e.filters).length,
+    0,
+    "and no lookup runs",
+  );
+});
+
+test("CLK17 a migration that has not been applied yet degrades to «no match», not to a failure", async () => {
+  // Production runs ahead of hand-applied migrations by design in this project.
+  // Until 030 is applied the columns do not exist, and PostgREST answers 42703.
+  // The conversion must then create a client — what it did before this existed —
+  // rather than refusing to convert at all.
+  const warnings: string[] = [];
+  const realWarn = console.warn;
+  console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(" ")); };
+  try {
+    const call = await loadRouter({ clients: [clientRow()] }, ["phone_normalized", "whatsapp_normalized"]);
+    const { res } = await call({ segments: ["clients"], query: { phone: PHONE_TRUNK } });
+
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+    const found = (res.body.data as { clients: unknown[] }).clients;
+    assert.equal(found.length, 0, "no columns, no match — and no 502 that would block the conversion");
+  } finally {
+    console.warn = realWarn;
+  }
+
+  assert.ok(
+    warnings.some((line) => line.includes("phone lookup on")),
+    "a lookup that silently stopped working has to say so in the operator log",
+  );
+  assert.ok(
+    !warnings.join("\n").includes("701"),
+    "and it must not carry a patient's number into the log",
+  );
+});
+
+test("CLK18 the conversion asks the server instead of downloading the clinic", async () => {
+  const source = await readFile(
+    path.join(repoRoot, "artifacts", "negis", "src", "pages", "LeadsPage.tsx"),
+    "utf8",
+  );
+
+  assert.ok(
+    !source.includes("loadExistingClients"),
+    "the whole-clinic read is gone, not merely unused",
+  );
+  const finder = source.slice(source.indexOf("async function findClientsByPhone("), source.indexOf("// CRM7"));
+  assert.ok(finder.includes("phone=${encodeURIComponent(phone)}"), "the number is the query, not a post-filter");
+  assert.ok(
+    !finder.includes("normalizePhone"),
+    "canonicalization stays in the two places test:crm-phone-parity holds together; a browser copy would be a third",
+  );
 });
 
 test("CLK9 the old uuid-shape guard is gone from the lead mapping", async () => {
