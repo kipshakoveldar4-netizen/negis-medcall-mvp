@@ -150,6 +150,101 @@ test("PH4 the index the dedup relies on is there and matches the query's filters
   );
 });
 
+/**
+ * The same canonicalization now lives on clients too (migration 030), because
+ * lead → client conversion had the mirror image of the defect 028 repaired:
+ * it read every client of the workspace and matched in the browser by digits
+ * alone, so the trunk form and the international form were two different
+ * patients at any clinic size, and past the row cap the returning patient's
+ * card was not in the window at all.
+ *
+ * Two columns, because the conversion matches on the WhatsApp number as well:
+ * a patient reached at a second number is still that patient.
+ */
+const clientsMigrationPath = path.join(repoRoot, "migrations", "030_clients_phone_normalized.sql");
+
+/** The one expression, with the column name as its only variable. */
+function expectedExpression(column: string): string {
+  return (
+    "case " +
+    `when ${column} is null then null ` +
+    `when regexp_replace(${column}, '\\D', '', 'g') = '' then null ` +
+    `when length(regexp_replace(${column}, '\\D', '', 'g')) > 11 ` +
+    `and left(regexp_replace(${column}, '\\D', '', 'g'), 2) = '00' ` +
+    `then '+' || substr(regexp_replace(${column}, '\\D', '', 'g'), 3) ` +
+    `when length(regexp_replace(${column}, '\\D', '', 'g')) = 11 ` +
+    `and left(regexp_replace(${column}, '\\D', '', 'g'), 1) = '8' ` +
+    `then '+7' || substr(regexp_replace(${column}, '\\D', '', 'g'), 2) ` +
+    `else '+' || regexp_replace(${column}, '\\D', '', 'g') ` +
+    "end"
+  );
+}
+
+function generatedExpressions(sql: string): string[] {
+  const found: string[] = [];
+  let at = sql.indexOf("generated always as (");
+  while (at >= 0) {
+    const end = sql.indexOf(") stored;", at);
+    assert.ok(end > at, "a virtual column cannot be indexed — it must be stored");
+    found.push(sql.slice(at + "generated always as (".length, end).replace(/\s+/g, " ").trim());
+    at = sql.indexOf("generated always as (", end);
+  }
+  return found;
+}
+
+test("PH6 the clients columns carry character-for-character the same rule as leads", async () => {
+  const sql = await readFile(clientsMigrationPath, "utf8");
+  const expressions = generatedExpressions(sql);
+
+  assert.equal(expressions.length, 2, "both the phone and the WhatsApp number are canonicalized");
+  assert.equal(
+    expressions[0],
+    expectedExpression("phone"),
+    "clients.phone_normalized drifted from the rule this suite models",
+  );
+  assert.equal(
+    expressions[1],
+    expectedExpression("whatsapp"),
+    "clients.whatsapp_normalized drifted from the rule this suite models",
+  );
+
+  // And the model itself still agrees with phone.ts on every spelling, which
+  // is what makes pinning the text meaningful rather than circular.
+  for (const input of CASES) {
+    const modelled = sqlPhoneNormalized(input);
+    assert.equal(modelled === null ? "" : modelled, normalizePhone(input));
+  }
+});
+
+test("PH7 the clients lookup has its indexes, scoped to the workspace first", async () => {
+  const sql = await readFile(clientsMigrationPath, "utf8");
+
+  for (const [name, columns] of [
+    ["clients_workspace_phone_normalized_idx", "(workspace_id, phone_normalized)"],
+    ["clients_workspace_whatsapp_normalized_idx", "(workspace_id, whatsapp_normalized)"],
+  ]) {
+    assert.ok(sql.includes(name), `without ${name} the exact match is a sequential scan on a growing table`);
+    assert.ok(sql.includes(columns), `${name} must lead with the tenant: ${columns}`);
+  }
+});
+
+test("PH8 030 adds columns and touches nothing that exists", async () => {
+  const sql = await readFile(clientsMigrationPath, "utf8");
+
+  for (const forbidden of ["drop column", "drop table", "delete from", "update public.clients", "alter column"]) {
+    assert.equal(
+      sql.toLowerCase().includes(forbidden),
+      false,
+      `030 must be additive; found "${forbidden}"`,
+    );
+  }
+  assert.equal(
+    (sql.match(/add column if not exists/g) ?? []).length,
+    2,
+    "re-running the migration must be a no-op for both columns",
+  );
+});
+
 test("PH5 028 adds a column and touches nothing that exists", async () => {
   const sql = await readFile(migrationPath, "utf8");
 

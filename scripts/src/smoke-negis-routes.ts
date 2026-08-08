@@ -1684,7 +1684,13 @@ async function checkLeadsPageSource() {
     "Клиент уже создан",
     "Открыть клиентов",
     "convertLeadToClient",
-    "loadExistingClients",
+    // The duplicate check asks the server about one number. It used to read
+    // every client of the workspace and search the array here, which produced a
+    // second card for a returning patient two ways: past PostgREST's row cap
+    // the existing card was not in the window, and the browser compared digits
+    // only, so «8 701…» and «+7 701…» were different people at any size.
+    "findClientsByPhone",
+    "phone=${encodeURIComponent(phone)}",
     "Клиент создан из заявки.",
     "Заявка связана с существующим клиентом.",
     "Данные переданы в запись.",

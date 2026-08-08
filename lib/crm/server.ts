@@ -1,5 +1,6 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { canAssignRole, isStaffRole } from "../auth/permissions";
+import { normalizePhone } from "./phone";
 import {
   listAuthContextMemberships,
   requireWorkspaceAdmin,
@@ -2162,6 +2163,130 @@ async function buildDealReferenceRow(
   return row;
 }
 
+/**
+ * The patient this number already belongs to, asked of the database.
+ *
+ * Lead → client conversion used to answer this by reading every client of the
+ * workspace and searching the array in the browser. Two ways that produced a
+ * duplicate card: past whatever row cap PostgREST is configured with the
+ * returning patient was simply not in the window, and the browser compared
+ * digits only — so the trunk form «8 701…» and «+7 701…» were already two
+ * different people at any clinic size.
+ *
+ * Both numbers are checked because a patient reached on WhatsApp at a second
+ * number is still that patient. Two indexed equalities rather than one `.or()`:
+ * PostgREST's or-filter is a string mini-language this codebase uses nowhere
+ * else, and each of these hits its own partial index from migration 030.
+ */
+async function findClientsByPhone(
+  supabase: CrmSupabaseClient,
+  workspaceId: string,
+  rawPhone: string,
+): Promise<JsonRecord[]> {
+  const canonical = normalizePhone(rawPhone);
+  if (!canonical) return [];
+
+  const config = configs.clients;
+  const found: JsonRecord[] = [];
+  const seen = new Set<string>();
+
+  const collect = (data: unknown) => {
+    for (const raw of Array.isArray(data) ? data : []) {
+      const row = asRecord(raw);
+      const id = readString(row.id);
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      found.push(row);
+    }
+  };
+
+  for (const column of ["phone_normalized", "whatsapp_normalized"]) {
+    const { data, error } = await supabase
+      .from(config.table)
+      .select(config.selectColumns ?? "*")
+      // Newest first, and stated rather than left to the plan. Without it
+      // PostgREST returns whatever order the executor produced, and the caller
+      // takes the first row — so a patient who already has two cards would be
+      // attached to a different one after any update that moved a row. The
+      // browser this replaced was deterministic by accident: it read the list
+      // ordered by created_at and searched that.
+      .order("created_at", { ascending: false })
+      .eq("workspace_id", workspaceId)
+      .eq(column, canonical)
+      .limit(CLIENT_PHONE_MATCH_LIMIT);
+
+    if (!error) {
+      collect(data);
+      continue;
+    }
+
+    // Only "the column is not there yet" may degrade. Everything else — a
+    // timeout, a revoked grant, a dropped connection — is a failure, and
+    // answering it with an empty list would say «this clinic has no such
+    // patient» when the truth is unknown. That is the Security-2F rule this
+    // file states二 lines below for the unfiltered read, and the rule
+    // test:wazzup-webhook WZ22 pins for the identical lookup on leads.
+    if (!isMissingColumn(error, column)) {
+      throw new Error(`client lookup: ${error.message}`);
+    }
+
+    // Migration 030 is not applied yet. A deployment reaches production before
+    // its migrations are applied by hand here, and without this the dedup
+    // would not merely be unavailable in that window — it would be OFF, and
+    // every conversion would file a second card for a returning patient,
+    // including one whose number is spelled identically. Worse than the state
+    // this branch replaced. So the comparison happens in code, on a bounded
+    // read, exactly as lib/crm/inbound-whatsapp.ts does for leads.
+    console.warn(`clients: ${column} not present yet, comparing in code until migration 030 is applied`);
+    const { data: candidates, error: candidatesError } = await supabase
+      .from(config.table)
+      .select(config.selectColumns ?? "*")
+      .order("created_at", { ascending: false })
+      .eq("workspace_id", workspaceId)
+      .limit(CLIENT_FALLBACK_SCAN_LIMIT);
+    if (candidatesError) throw new Error(`client lookup: ${candidatesError.message}`);
+
+    collect(
+      (Array.isArray(candidates) ? candidates : [])
+        .map((row) => asRecord(row))
+        .filter((row) =>
+          [normalizePhone(readString(row.phone)), normalizePhone(readString(row.whatsapp))].includes(canonical))
+        .slice(0, CLIENT_PHONE_MATCH_LIMIT),
+    );
+    // Both columns are missing or present together, so one pass is enough.
+    break;
+  }
+
+  return found;
+}
+
+/** Postgres "column does not exist" — the one error the fallback answers to. */
+const UNDEFINED_COLUMN = "42703";
+
+function isMissingColumn(error: { code?: unknown; message?: unknown } | null, column: string): boolean {
+  if (!error) return false;
+  if (readString(error.code) === UNDEFINED_COLUMN) return true;
+  const message = readString(error.message).toLowerCase();
+  return message.includes(column) && message.includes("does not exist");
+}
+
+/**
+ * The fallback's ceiling, and an honest one.
+ *
+ * This is the window before migration 030 is applied, and inside it the check
+ * is only as good as the read: a clinic past this many clients can have the
+ * existing card outside the window, which is the very defect 030 removes. It
+ * is a bridge, not a design — it stops being used the moment the columns exist.
+ */
+const CLIENT_FALLBACK_SCAN_LIMIT = 1000;
+
+/**
+ * A handful is enough to decide. The question is "does this patient already
+ * have a card", and a workspace with more than a few cards on one number has a
+ * data problem the conversion screen is not the place to solve.
+ */
+const CLIENT_PHONE_MATCH_LIMIT = 5;
+
 async function listItems(resource: CrmResource, req: VercelRequest, res: VercelResponse) {
   const config = configs[resource];
   const workspaceId = readWorkspaceId(req, {});
@@ -2179,6 +2304,19 @@ async function listItems(resource: CrmResource, req: VercelRequest, res: VercelR
   }
 
   try {
+    // A caller asking «does this number already have a card» gets exactly that,
+    // instead of the whole clinic to search in the browser. The filter is a
+    // narrowing of the same authorized read — same route, same view_clients
+    // permission, same workspace scope — so it opens nothing new.
+    if (resource === "clients") {
+      const phone = readQueryString(req.query.phone);
+      if (phone) {
+        const rows = await findClientsByPhone(supabase, workspaceId, phone);
+        const matches = rows.map((row) => config.fromRow(row));
+        return sendJson(res, 200, success("supabase", { [config.listKey]: matches, items: matches }));
+      }
+    }
+
     let query = supabase
       .from(config.table)
       .select(config.selectColumns ?? "*")
