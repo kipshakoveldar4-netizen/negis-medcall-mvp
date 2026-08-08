@@ -65,6 +65,23 @@ alter table public.tasks
 alter table public.tasks
   add column if not exists created_by_kind text;
 
+-- Словарь вида автора — в базе, а не только в прозе. Без ограничения любой
+-- будущий писатель положит своё написание ('ai', 'AI', 'medina'), и колонка,
+-- заведённая ради того, чтобы отличать автосозданную задачу от поручения
+-- человека, перестанет различать что-либо. NULL допустим: строки, созданные
+-- до этой миграции, вида автора не имеют и придумывать его им нельзя.
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint where conname = 'tasks_created_by_kind_check'
+  ) then
+    alter table public.tasks
+      add constraint tasks_created_by_kind_check
+      check (created_by_kind is null
+             or created_by_kind in ('manual', 'integration', 'automation', 'system'));
+  end if;
+end $$;
+
 -- When it stopped being work. Distinct from updated_at, which any edit moves.
 alter table public.tasks
   add column if not exists completed_at timestamptz;
@@ -89,6 +106,51 @@ create index if not exists tasks_workspace_client_idx
 create index if not exists tasks_workspace_appointment_idx
   on public.tasks(workspace_id, appointment_id)
   where appointment_id is not null;
+
+-- Одноразовое приведение уже записанных значений к канону.
+--
+-- Единственный экран задач писал в эти колонки русские подписи, а 010 ставит
+-- английские значения по умолчанию — в одном столбце лежат оба словаря. Без
+-- этого шага фильтр `?status=done` не нашёл бы ни одной старой закрытой задачи:
+-- он сравнивает канон с содержимым колонки, а там «Готово». И собственным
+-- написанием тоже не нашёл бы — параметр канонизируется по дороге. Список
+-- противоречил бы сам себе, и это расхождение было бы постоянным.
+--
+-- Только заведомо известные написания. Значение, которого нет в списке, не
+-- трогается: догадываться о чужом статусе задним числом — не дело миграции.
+update public.tasks
+set status = case lower(btrim(status))
+  when 'новые' then 'new'
+  when 'новая' then 'new'
+  when 'todo' then 'new'
+  when 'open' then 'new'
+  when 'в работе' then 'in_progress'
+  when 'progress' then 'in_progress'
+  when 'готово' then 'done'
+  when 'выполнено' then 'done'
+  when 'завершено' then 'done'
+  when 'completed' then 'done'
+  when 'closed' then 'done'
+  else status
+end
+where status is not null
+  and lower(btrim(status)) in (
+    'новые', 'новая', 'todo', 'open',
+    'в работе', 'progress',
+    'готово', 'выполнено', 'завершено', 'completed', 'closed'
+  );
+
+update public.tasks
+set priority = case lower(btrim(priority))
+  when 'низкий' then 'low'
+  when 'средний' then 'medium'
+  when 'высокий' then 'high'
+  when 'normal' then 'medium'
+  when 'urgent' then 'high'
+  else priority
+end
+where priority is not null
+  and lower(btrim(priority)) in ('низкий', 'средний', 'высокий', 'normal', 'urgent');
 
 alter table public.tasks enable row level security;
 

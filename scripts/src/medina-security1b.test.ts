@@ -257,8 +257,13 @@ const ALTER_DISCIPLINE_MIGRATION = "031_tasks_links_and_authorship.sql";
 /** Tables a migration alters, as opposed to creates. */
 function alteredTables(sql: string): string[] {
   const names = new Set<string>();
-  for (const match of sql.matchAll(/alter table (?:if exists )?(?:public\.)?([a-z0-9_]+)/g)) {
-    names.add(match[1]);
+  // ONLY — ключевое слово формы ALTER TABLE ONLY, а не имя таблицы; схема,
+  // отличная от public, этому правилу не подчиняется. Без обеих оговорок
+  // проверка потребовала бы грант для несуществующего объекта «only».
+  for (const match of sql.matchAll(/alter table (?:if exists )?(?:only )?(?:([a-z0-9_]+)\.)?([a-z0-9_]+)/g)) {
+    const schema = match[1] ?? "public";
+    if (schema !== "public") continue;
+    names.add(match[2]);
   }
   for (const created of sql.matchAll(/create table (?:if not exists )?(?:public\.)?([a-z0-9_]+)/g)) {
     names.delete(created[1]);

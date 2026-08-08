@@ -138,7 +138,9 @@ const TASK_FIELDS: Record<string, FieldPolicy> = {
   completed_at: { label: "Закрыта", sensitivity: "value" },
   title: { label: "Заголовок", sensitivity: "fact" },
   description: { label: "Описание", sensitivity: "fact" },
-  assignee_name: { label: "Исполнитель", sensitivity: "masked" },
+  // assignee_name — снимок того же назначения, что и ссылка выше. Держать оба
+  // в журнале значит показывать одно событие дважды, причём первой строкой —
+  // uuid, который на экране ничего не значит.
 };
 
 const ENTITY_POLICY: Record<ChangeEntityType, {

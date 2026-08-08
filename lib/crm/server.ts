@@ -436,14 +436,15 @@ function buildPatchRow(resource: CrmResource, body: JsonRecord): JsonRecord {
     setText("title", ["title"]);
     setText("description", ["description"]);
     setText("assignee_name", ["owner", "assignee_name", "assigneeName"]);
-    if (hasAnyKey(body, ["priority"])) row.priority = normalizeTaskPriority(body.priority);
+    if (hasAnyKey(body, ["priority"])) {
+      const priority = canonicalTaskPriority(body.priority);
+      if (!priority) throw new CrmReferenceValidationError(["priority must be one of: low, medium, high"]);
+      row.priority = priority;
+    }
     if (hasAnyKey(body, ["status"])) {
-      const status = normalizeTaskStatus(body.status);
+      const status = canonicalTaskStatus(body.status);
+      if (!status) throw new CrmReferenceValidationError(["status must be one of: new, in_progress, done"]);
       row.status = status;
-      // Время закрытия — отдельная величина от updated_at, который двигает
-      // любая правка. Без него «сделано сегодня» и «просрочено» не считаются.
-      // Повторное открытие задачи его снимает: закрытой она больше не была.
-      row.completed_at = status === "done" ? new Date().toISOString() : null;
     }
     setDate("due_at", ["deadline", "due_at", "dueAt"]);
     row.updated_at = new Date().toISOString();
@@ -684,6 +685,15 @@ function resourceValidationDetails(resource: CrmResource, body: JsonRecord): str
 
   if (resource === "clients" && !firstString(body.name, body.full_name, body.fullName)) {
     details.push("name is required");
+  }
+
+  if (resource === "tasks") {
+    if (hasAnyKey(body, ["status"]) && !canonicalTaskStatus(body.status)) {
+      details.push("status must be one of: new, in_progress, done");
+    }
+    if (hasAnyKey(body, ["priority"]) && !canonicalTaskPriority(body.priority)) {
+      details.push("priority must be one of: low, medium, high");
+    }
   }
 
   if (resource === "leads" && !firstString(body.name, body.full_name, body.fullName, body.phone)) {
@@ -1008,18 +1018,27 @@ const TASK_PRIORITY_ALIASES: Record<string, string> = {
   urgent: "high",
 };
 
-function normalizeTaskStatus(value: unknown): string {
+/**
+ * Приводит написание к канону — или отказывает.
+ *
+ * Возвращает null на то, чего в словаре нет. Прежняя версия молча отдавала
+ * «new», и это было хуже, чем кажется: опечатка в PATCH понижала задачу из
+ * «В работе» обратно в «Новые» и стирала время закрытия, отвечая 200, а тот
+ * же мусор в фильтре возвращал уверенно неверный список вместо 400 — при том
+ * что соседний параметр с плохим uuid в трёх строках выше честно отвечает 400.
+ */
+function canonicalTaskStatus(value: unknown): string | null {
   const raw = readString(value).toLowerCase();
-  if (!raw) return "new";
+  if (!raw) return null;
   if ((TASK_STATUSES as readonly string[]).includes(raw)) return raw;
-  return TASK_STATUS_ALIASES[raw] ?? "new";
+  return TASK_STATUS_ALIASES[raw] ?? null;
 }
 
-function normalizeTaskPriority(value: unknown): string {
+function canonicalTaskPriority(value: unknown): string | null {
   const raw = readString(value).toLowerCase();
-  if (!raw) return "medium";
+  if (!raw) return null;
   if ((TASK_PRIORITIES as readonly string[]).includes(raw)) return raw;
-  return TASK_PRIORITY_ALIASES[raw] ?? "medium";
+  return TASK_PRIORITY_ALIASES[raw] ?? null;
 }
 
 function makeTask(body: JsonRecord): JsonRecord {
@@ -1029,8 +1048,13 @@ function makeTask(body: JsonRecord): JsonRecord {
     description: readString(body.description),
     owner: firstString(body.owner, body.assignee_name, body.assigneeName),
     deadline: firstString(body.deadline, body.due_at),
-    priority: normalizeTaskPriority(body.priority),
-    status: normalizeTaskStatus(body.status),
+    // Значение отдаётся как есть. makeTask обслуживает и fromRow, поэтому
+    // канонизация здесь переписывала бы то, что лежит в базе, на пути ЧТЕНИЯ —
+    // а единственный экран задач сравнивает статус с русскими подписями и
+    // веткой не тронут. Все три колонки доски опустели бы разом. Канон живёт
+    // на записи; хранимые русские написания приводит миграция 031.
+    priority: readString(body.priority) || "medium",
+    status: readString(body.status) || "new",
     assigneeUserId: firstString(body.assigneeUserId, body.assignee_user_id),
     leadId: firstString(body.leadId, body.lead_id),
     clientId: firstString(body.clientId, body.client_id),
@@ -1455,8 +1479,8 @@ const configs: Record<CrmResource, ResourceConfig> = {
       title: readString(body.title),
       description: readString(body.description) || null,
       assignee_name: firstString(body.owner, body.assignee_name, body.assigneeName) || null,
-      priority: normalizeTaskPriority(body.priority),
-      status: normalizeTaskStatus(body.status),
+      priority: canonicalTaskPriority(body.priority) ?? "medium",
+      status: canonicalTaskStatus(body.status) ?? "new",
       // `deadline` читается и здесь. PATCH принимал его с самого начала, POST —
       // нет, поэтому задача, созданная в интерфейсе со сроком, ложилась в базу
       // с due_at = null: на экране срок был, в базе его не было. В демо-режиме
@@ -2232,6 +2256,14 @@ async function buildTaskReferenceRow(
 
   for (const field of referenceFields) {
     if (!hasAnyKey(body, field.keys)) continue;
+    const raw = body[field.keys[0]] ?? body[field.keys[1]];
+    // Отвязка — это ЯВНАЯ пустая строка. Число, булево или объект попадали бы
+    // в ту же ветку через firstString и стирали связь, отвечая 200: клиент,
+    // который шлёт `leadId: 0` вместо «не выбрано», получал бы стёртую связь
+    // и запись в журнале как об осознанном действии оператора.
+    if (typeof raw !== "string" && raw !== null && raw !== undefined) {
+      throw new CrmReferenceValidationError([`${field.fieldName} must be a valid id`]);
+    }
     const id = firstString(body[field.keys[0]], body[field.keys[1]]);
     if (!id) {
       row[field.column] = null;
@@ -2405,6 +2437,45 @@ async function findClientsByPhone(
 /** Postgres "column does not exist" — the one error the fallback answers to. */
 const UNDEFINED_COLUMN = "42703";
 
+/** Колонки, которых нет в базе, пока не применена forward-миграция 031. */
+const TASK_COLUMNS_FROM_031 = [
+  "lead_id",
+  "client_id",
+  "appointment_id",
+  "created_by_staff_user_id",
+  "created_by_kind",
+  "completed_at",
+];
+
+function isMissingAnyColumn(error: { code?: unknown; message?: unknown } | null): boolean {
+  if (!error) return false;
+  if (readString(error.code) === UNDEFINED_COLUMN) return true;
+  return readString(error.message).toLowerCase().includes("does not exist");
+}
+
+/**
+ * Строка без колонок, которых в базе может ещё не быть.
+ *
+ * Деплой доходит до production раньше, чем миграция применяется руками —
+ * штатный порядок здесь. Первая версия этой ветки писала created_by_kind в
+ * КАЖДОМ создании задачи, поэтому в этом окне ломалось не «связывание с
+ * заявкой», а создание задачи вообще: PostgREST отвергал вставку по
+ * неизвестной колонке, и обработчик отвечал 502. Ломалось то, что до ветки
+ * работало, — и собственный документ ветки утверждал обратное.
+ */
+function taskRowWithout031(row: JsonRecord): { row: JsonRecord; dropped: string[] } {
+  const stripped: JsonRecord = {};
+  const dropped: string[] = [];
+  for (const [key, value] of Object.entries(row)) {
+    if (TASK_COLUMNS_FROM_031.includes(key)) {
+      if (value !== null && value !== undefined) dropped.push(key);
+      continue;
+    }
+    stripped[key] = value;
+  }
+  return { row: stripped, dropped };
+}
+
 function isMissingColumn(error: { code?: unknown; message?: unknown } | null, column: string): boolean {
   if (!error) return false;
   if (readString(error.code) === UNDEFINED_COLUMN) return true;
@@ -2482,7 +2553,16 @@ async function listItems(resource: CrmResource, req: VercelRequest, res: VercelR
       }
 
       const status = readQueryString(req.query.status);
-      if (status) equalities.push(["status", normalizeTaskStatus(status)]);
+      if (status) {
+        const canonical = canonicalTaskStatus(status);
+        if (!canonical) {
+          // Соседние параметры при мусоре отвечают 400 и до базы не доходят.
+          // Прежняя версия отдавала 200 со списком НОВЫХ задач: вызывающая
+          // сторона не могла отличить «таких задач нет» от «такого статуса нет».
+          return sendJson(res, 400, errorBody("Validation error", ["status must be one of: new, in_progress, done"]));
+        }
+        equalities.push(["status", canonical]);
+      }
 
       const rawDueBefore = readQueryString(req.query.dueBefore ?? req.query.due_before);
       if (rawDueBefore) {
@@ -2707,10 +2787,24 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
         });
       }
     }
-    const query = config.upsertConflict
-      ? supabase.from(config.table).upsert(row, { onConflict: config.upsertConflict }).select(config.selectColumns ?? "*").single()
-      : supabase.from(config.table).insert(row).select(config.selectColumns ?? "*").single();
-    const { data, error } = await query;
+    const runInsert = (candidate: JsonRecord) => (config.upsertConflict
+      ? supabase.from(config.table).upsert(candidate, { onConflict: config.upsertConflict }).select(config.selectColumns ?? "*").single()
+      : supabase.from(config.table).insert(candidate).select(config.selectColumns ?? "*").single());
+
+    let { data, error } = await runInsert(row);
+
+    // Пока 031 не применена, колонок связи и авторства в базе нет. Отказать
+    // в создании задачи целиком — хуже, чем создать её без связи: до этой
+    // ветки задачи создавались, и окно между деплоем и миграцией не повод
+    // это отнимать. Тот же приём, которым закрыт поиск клиента по телефону.
+    if (error && resource === "tasks" && isMissingAnyColumn(error)) {
+      const fallback = taskRowWithout031(row);
+      console.warn(
+        `tasks: columns from migration 031 are not present yet (${fallback.dropped.join(", ") || "none set"}); `
+          + "creating without them",
+      );
+      ({ data, error } = await runInsert(fallback.row));
+    }
 
     if (error) {
       throw new Error(error.message);
@@ -2917,6 +3011,14 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
     }
     if (resource === "tasks") {
       Object.assign(row, await buildTaskReferenceRow(supabase, workspaceId, patchBody));
+
+      // Свободный текст исполнителя правят старым путём, не трогая ссылку.
+      // Тогда карточка показывает одно имя, а «мои задачи» по ссылке относят
+      // задачу другому: имя перестаёт быть снимком того, на кого назначено.
+      // Правка имени без ссылки снимает ссылку — имя снова просто текст.
+      if ("assignee_name" in row && !("assignee_user_id" in row)) {
+        row.assignee_user_id = null;
+      }
     }
     if (resource === "appointments") {
       Object.assign(row, await buildAppointmentReferenceRow(supabase, workspaceId, patchBody));
@@ -2934,6 +3036,19 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
     const before = patchedEntity
       ? await readRowBeforeChange(supabase, config.table, workspaceId, id)
       : {};
+
+    if (patchedEntity === "task" && typeof row.status === "string") {
+      // Время закрытия двигает ПЕРЕХОД, а не присутствие ключа в теле. Форма
+      // редактирования шлёт объект целиком, включая неизменившийся статус, —
+      // прежняя версия сдвигала бы дату закрытия на «сейчас» при каждом
+      // сохранении, роняя давно закрытую задачу в отчёт «сделано сегодня» и
+      // порождая ложную строку «Закрыта: понедельник → пятница» в истории.
+      // `before` уже прочитан для журнала, второго запроса это не стоит.
+      const wasDone = readString(before.status) === "done";
+      const isDone = row.status === "done";
+      if (isDone && !wasDone) row.completed_at = new Date().toISOString();
+      else if (!isDone && wasDone) row.completed_at = null;
+    }
 
     if (patchedEntity === "appointment" && !allowsAppointmentConflict(patchBody)) {
       // Проверять надо по СЛИЯНИЮ: патч может нести только новое время, только
@@ -2975,13 +3090,24 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
       }
     }
 
-    const { data, error } = await supabase
+    const runUpdate = (candidate: JsonRecord) => supabase
       .from(config.table)
-      .update(row)
+      .update(candidate)
       .eq("id", id)
       .eq("workspace_id", workspaceId)
       .select(config.selectColumns ?? "*")
       .single();
+
+    let { data, error } = await runUpdate(row);
+
+    if (error && resource === "tasks" && isMissingAnyColumn(error)) {
+      const fallback = taskRowWithout031(row);
+      console.warn(
+        `tasks: columns from migration 031 are not present yet (${fallback.dropped.join(", ") || "none set"}); `
+          + "saving without them",
+      );
+      ({ data, error } = await runUpdate(fallback.row));
+    }
 
     if (error) {
       throw new Error(error.message);
