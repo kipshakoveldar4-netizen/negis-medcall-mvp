@@ -26,6 +26,8 @@ type CalendarView = "day" | "week" | "list";
 
 type Appointment = {
   id: string;
+  /** Ссылка на карточку клиента. Пустая строка — визит без привязки. */
+  clientId: string;
   client: string;
   phone: string;
   whatsapp: string;
@@ -39,6 +41,7 @@ type Appointment = {
 };
 
 type AppointmentForm = {
+  clientId: string;
   client: string;
   phone: string;
   whatsapp: string;
@@ -119,6 +122,7 @@ function makeSeedAppointment(
 ): Appointment {
   return {
     id,
+    clientId: "",
     client,
     phone,
     whatsapp: phone,
@@ -221,6 +225,7 @@ function appointmentFromApi(value: unknown): Appointment {
 
   return {
     id: readString(record.id) || `appointment-${Date.now()}`,
+    clientId: readString(record.clientId) || readString(record.client_id),
     client: readString(record.client) || readString(record.client_name) || readString(record.clientName) || "Клиент",
     phone,
     whatsapp: readString(record.whatsapp) || phone,
@@ -237,6 +242,7 @@ function appointmentFromApi(value: unknown): Appointment {
 function appointmentToApi(appointment: Appointment): Record<string, unknown> {
   return {
     id: appointment.id,
+    clientId: appointment.clientId ?? "",
     client: appointment.client,
     clientName: appointment.client,
     phone: appointment.phone,
@@ -268,6 +274,7 @@ async function safeJson(response: globalThis.Response): Promise<ApiResponse | nu
 
 function defaultForm(date: string, time = "09:00"): AppointmentForm {
   return {
+    clientId: "",
     client: "",
     phone: "",
     whatsapp: "",
@@ -284,6 +291,7 @@ function defaultForm(date: string, time = "09:00"): AppointmentForm {
 
 function formFromAppointment(appointment: Appointment): AppointmentForm {
   return {
+    clientId: appointment.clientId || "",
     client: appointment.client,
     phone: appointment.phone,
     whatsapp: appointment.whatsapp || appointment.phone,
@@ -301,6 +309,7 @@ function formFromAppointment(appointment: Appointment): AppointmentForm {
 function appointmentFromForm(form: AppointmentForm, existingId?: string): Appointment {
   return {
     id: existingId || `appointment-${Date.now()}`,
+    clientId: form.clientId || "",
     client: form.client.trim(),
     phone: form.phone.trim(),
     whatsapp: (form.whatsapp || form.phone).trim(),
@@ -485,6 +494,8 @@ export function AppointmentsPage() {
       const prefill = JSON.parse(raw) as Record<string, unknown>;
       const nextForm = {
         ...defaultForm(selectedDate),
+        // Заявка передаёт карточку клиента с самого начала — терялась она здесь.
+        clientId: readString(prefill.clientId),
         client: readString(prefill.clientName) || readString(prefill.name),
         phone: readString(prefill.phone),
         whatsapp: readString(prefill.whatsapp) || readString(prefill.phone),
@@ -567,7 +578,13 @@ export function AppointmentsPage() {
       await patchAppointment(updated);
       toast.success(`Статус: ${getAppointmentStatusLabel(status)}`);
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Не удалось обновить статус. Изменение сохранено локально.");
+      // Отказ сервера — откат, а не фантомный статус до перезагрузки. Прежний
+      // текст обещал сохранение на этом устройстве, которого в рабочей клинике
+      // не происходит. Причина отказа — оператору в консоль, тост остаётся
+      // по-русски и без внутренних имён полей.
+      setItems((current) => current.map((item) => (item.id === appointment.id ? appointment : item)));
+      console.warn("appointments: status patch refused", error instanceof Error ? error.message : error);
+      toast.error("Не удалось обновить статус. Изменение отменено.");
     }
   };
 
@@ -601,12 +618,20 @@ export function AppointmentsPage() {
     }
 
     if (editingId) {
+      const previous = items.find((item) => item.id === editingId);
       setItems((current) => current.map((item) => (item.id === editingId ? appointment : item)));
       try {
         await patchAppointment(appointment);
         toast.success("Запись обновлена");
       } catch (error) {
-        toast.error(error instanceof Error ? error.message : "Запись сохранена локально, но сервер не ответил");
+        // Та же честность, что и у статуса: отказ виден отказом, строка
+        // возвращается к серверной правде, детали — в консоль оператора.
+        if (previous) {
+          setItems((current) => current.map((item) => (item.id === editingId ? previous : item)));
+        }
+        console.warn("appointments: patch refused", error instanceof Error ? error.message : error);
+        toast.error("Не удалось сохранить запись. Изменение отменено.");
+        return;
       }
     } else {
       addItem(appointment);
@@ -828,8 +853,20 @@ export function AppointmentsPage() {
             </div>
 
             <div className="grid gap-4 md:grid-cols-2">
-              <TextField label="Клиент/имя" value={form.client} onChange={(client) => setForm((current) => ({ ...current, client }))} placeholder="Имя клиента" />
-              <TextField label="Телефон" value={form.phone} onChange={(phone) => setForm((current) => ({ ...current, phone }))} placeholder="+7..." />
+              <div>
+                {/* Смена имени или телефона снимает унаследованную связь: форма,
+                    открытая из заявки Лауры, в которую вписали другого человека,
+                    иначе сохранила бы визит в карточку Лауры. Ложная связь в
+                    медицинской истории хуже потерянной; сигнал оператору —
+                    исчезающая строка «Будет привязана…». */}
+                <TextField label="Клиент/имя" value={form.client} onChange={(client) => setForm((current) => ({ ...current, client, clientId: "" }))} placeholder="Имя клиента" />
+                {form.clientId ? (
+                  <p className="mt-1 text-[11px] font-semibold" style={{ color: "var(--negis-primary)" }} data-testid="appointment-client-linked">
+                    Будет привязана к карточке клиента
+                  </p>
+                ) : null}
+              </div>
+              <TextField label="Телефон" value={form.phone} onChange={(phone) => setForm((current) => ({ ...current, phone, clientId: "" }))} placeholder="+7..." />
               <TextField label="WhatsApp" value={form.whatsapp} onChange={(whatsapp) => setForm((current) => ({ ...current, whatsapp }))} placeholder="+7..." />
               <TextField label="Услуга" value={form.service} onChange={(service) => setForm((current) => ({ ...current, service }))} />
               <SelectField label="Врач" value={form.doctor} onChange={(doctor) => setForm((current) => ({ ...current, doctor }))}>

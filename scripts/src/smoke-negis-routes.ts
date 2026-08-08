@@ -1743,10 +1743,32 @@ async function checkLeadsPageSource() {
     }
   }
 
-  // Server mapping: PATCH lead.client_id must persist (uuid-guarded).
+  // Server mapping: PATCH lead.client_id must persist — and through the
+  // workspace-scoped lookup, not the old uuid-shape guard. The uuid check told
+  // apart demo ids from real ones and nothing else: a client id from another
+  // clinic is also a uuid, and the FK has no workspace clause to stop it.
   const crmServer = await readFile(path.join(repoRoot, "lib", "crm", "server.ts"), "utf8");
-  if (!crmServer.includes("row.client_id = isUuid(clientId) ? clientId : null;")) {
-    throw new Error("leads PATCH mapping must persist client_id (uuid-guarded)");
+  if (crmServer.includes("row.client_id = isUuid(clientId) ? clientId : null;")) {
+    throw new Error("lead client_id must go through readWorkspaceReference, not a uuid-shape check");
+  }
+  // The literal also lives in the appointment builder, so the check is scoped
+  // to buildLeadReferenceRow — a file-wide includes() would keep passing after
+  // the lead path was deleted.
+  const leadBuilder = crmServer.slice(
+    crmServer.indexOf("async function buildLeadReferenceRow"),
+    crmServer.indexOf("async function buildAppointmentReferenceRow"),
+  );
+  if (!leadBuilder.includes("row.client_id = client.id;")) {
+    throw new Error("leads mapping must persist client_id from the workspace-scoped lookup");
+  }
+  // The definition alone proves nothing; both pipeline paths must call it.
+  for (const wiring of [
+    "await buildAppointmentReferenceRow(supabase, workspaceId, body)",
+    "await buildAppointmentReferenceRow(supabase, workspaceId, patchBody)",
+  ]) {
+    if (!crmServer.includes(wiring)) {
+      throw new Error("appointments must persist client_id on both create and patch — a visit belongs to a patient");
+    }
   }
   for (const marker of [
     'table: "lead_stages"',
