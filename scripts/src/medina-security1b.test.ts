@@ -246,6 +246,60 @@ test("22 new public tables must enable RLS and grant nothing to browser roles", 
   }
 });
 
+/**
+ * The first migration required to satisfy assertion 22b.
+ *
+ * Compared by filename, exactly as the two allowlists above are: everything
+ * before this predates the rule and keeps describing what it actually did.
+ */
+const ALTER_DISCIPLINE_MIGRATION = "031_tasks_links_and_authorship.sql";
+
+/** Tables a migration alters, as opposed to creates. */
+function alteredTables(sql: string): string[] {
+  const names = new Set<string>();
+  for (const match of sql.matchAll(/alter table (?:if exists )?(?:public\.)?([a-z0-9_]+)/g)) {
+    names.add(match[1]);
+  }
+  for (const created of sql.matchAll(/create table (?:if not exists )?(?:public\.)?([a-z0-9_]+)/g)) {
+    names.delete(created[1]);
+  }
+  return [...names];
+}
+
+test("22b a migration that only alters a table does not get a free pass on RLS and grants", () => {
+  // Assertion 22 and assertion 26 both begin by skipping any file without
+  // `create table`. That is right for what they were written to catch — a new
+  // table arriving unprotected — and it leaves a gap the other way round: a
+  // migration that adds columns and indexes to a pre-023 table passes both
+  // gates without a word, and the table it just extended keeps whatever it had,
+  // which for the 010-era tables is no explicit grant and, by that migration's
+  // own text, no RLS. Found by an adversarial review of the tasks branch, whose
+  // own migration would have been the first to walk through it.
+  //
+  // The rule is deliberately narrow: a migration reaching for an existing table
+  // must leave that table with RLS on and an explicit service_role grant
+  // somewhere in the chain. It need not do both itself — a forward repair in a
+  // later file is the sanctioned shape — but it may no longer stay silent.
+  for (const [file, source] of migrations) {
+    if (file < ALTER_DISCIPLINE_MIGRATION) continue;
+    const sql = normalize(source);
+
+    for (const table of alteredTables(sql)) {
+      assert.ok(
+        grantsToServiceRole(migrations, table),
+        `${file} alters ${table}, which nothing in the chain grants to service_role — `
+          + "add the grant here rather than leaving the server's access to whatever production happens to hold",
+      );
+      const rlsPattern = new RegExp(`alter table (?:public\\.)?${table} enable row level security`);
+      const enabledSomewhere = [...migrations].some(([, other]) => rlsPattern.test(normalize(other)));
+      assert.ok(
+        enabledSomewhere,
+        `${file} alters ${table} without the chain ever enabling row level security on it`,
+      );
+    }
+  }
+});
+
 test("23 new public functions must not become browser-callable by default", () => {
   for (const file of laterMigrations) {
     const sql = normalize(migrations.get(file) ?? "");

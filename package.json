@@ -35,6 +35,7 @@
     "test:whatsapp-cloud-webhook": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:whatsapp-cloud-webhook",
     "test:crm-phone-parity": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:crm-phone-parity",
     "test:whatsapp-channels": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:whatsapp-channels",
+    "test:tasks": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:tasks",
     "test:booking-conflict": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:booking-conflict",
     "test:client-link": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:client-link",
     "test:change-log": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:change-log",

@@ -436,8 +436,15 @@ function buildPatchRow(resource: CrmResource, body: JsonRecord): JsonRecord {
     setText("title", ["title"]);
     setText("description", ["description"]);
     setText("assignee_name", ["owner", "assignee_name", "assigneeName"]);
-    setText("priority", ["priority"]);
-    setText("status", ["status"]);
+    if (hasAnyKey(body, ["priority"])) row.priority = normalizeTaskPriority(body.priority);
+    if (hasAnyKey(body, ["status"])) {
+      const status = normalizeTaskStatus(body.status);
+      row.status = status;
+      // Время закрытия — отдельная величина от updated_at, который двигает
+      // любая правка. Без него «сделано сегодня» и «просрочено» не считаются.
+      // Повторное открытие задачи его снимает: закрытой она больше не была.
+      row.completed_at = status === "done" ? new Date().toISOString() : null;
+    }
     setDate("due_at", ["deadline", "due_at", "dueAt"]);
     row.updated_at = new Date().toISOString();
   }
@@ -966,6 +973,55 @@ function makeCall(body: JsonRecord): JsonRecord {
   };
 }
 
+/**
+ * Канонические словари задачи.
+ *
+ * У колонок нет CHECK, а демо-экран писал в ту же колонку русские подписи
+ * («Новые», «Готово») поверх английских значений по умолчанию из 010. Со
+ * временем в одном столбце оказались бы оба словаря — и индекс по status,
+ * построенный там же, считал бы по половине. Ключ хранится канонический,
+ * подпись живёт на экране: ровно так устроены стадии заявки.
+ */
+const TASK_STATUSES = ["new", "in_progress", "done"] as const;
+const TASK_PRIORITIES = ["low", "medium", "high"] as const;
+
+/** Русские написания, которые уже могли попасть в базу с демо-экрана. */
+const TASK_STATUS_ALIASES: Record<string, string> = {
+  "новые": "new",
+  "новая": "new",
+  "в работе": "in_progress",
+  "готово": "done",
+  "выполнено": "done",
+  "завершено": "done",
+  todo: "new",
+  open: "new",
+  progress: "in_progress",
+  completed: "done",
+  closed: "done",
+};
+
+const TASK_PRIORITY_ALIASES: Record<string, string> = {
+  "низкий": "low",
+  "средний": "medium",
+  "высокий": "high",
+  normal: "medium",
+  urgent: "high",
+};
+
+function normalizeTaskStatus(value: unknown): string {
+  const raw = readString(value).toLowerCase();
+  if (!raw) return "new";
+  if ((TASK_STATUSES as readonly string[]).includes(raw)) return raw;
+  return TASK_STATUS_ALIASES[raw] ?? "new";
+}
+
+function normalizeTaskPriority(value: unknown): string {
+  const raw = readString(value).toLowerCase();
+  if (!raw) return "medium";
+  if ((TASK_PRIORITIES as readonly string[]).includes(raw)) return raw;
+  return TASK_PRIORITY_ALIASES[raw] ?? "medium";
+}
+
 function makeTask(body: JsonRecord): JsonRecord {
   return {
     id: readString(body.id) || nextDemoId("task"),
@@ -973,8 +1029,14 @@ function makeTask(body: JsonRecord): JsonRecord {
     description: readString(body.description),
     owner: firstString(body.owner, body.assignee_name, body.assigneeName),
     deadline: firstString(body.deadline, body.due_at),
-    priority: readString(body.priority) || "medium",
-    status: readString(body.status) || "new",
+    priority: normalizeTaskPriority(body.priority),
+    status: normalizeTaskStatus(body.status),
+    assigneeUserId: firstString(body.assigneeUserId, body.assignee_user_id),
+    leadId: firstString(body.leadId, body.lead_id),
+    clientId: firstString(body.clientId, body.client_id),
+    appointmentId: firstString(body.appointmentId, body.appointment_id),
+    completedAt: firstString(body.completedAt, body.completed_at),
+    createdByKind: firstString(body.createdByKind, body.created_by_kind),
   };
 }
 
@@ -1393,9 +1455,14 @@ const configs: Record<CrmResource, ResourceConfig> = {
       title: readString(body.title),
       description: readString(body.description) || null,
       assignee_name: firstString(body.owner, body.assignee_name, body.assigneeName) || null,
-      priority: readString(body.priority) || "medium",
-      status: readString(body.status) || "new",
-      due_at: maybeDate(body.due_at ?? body.dueAt),
+      priority: normalizeTaskPriority(body.priority),
+      status: normalizeTaskStatus(body.status),
+      // `deadline` читается и здесь. PATCH принимал его с самого начала, POST —
+      // нет, поэтому задача, созданная в интерфейсе со сроком, ложилась в базу
+      // с due_at = null: на экране срок был, в базе его не было. В демо-режиме
+      // баг невидим — там ответ собирает makeTask, который deadline читает, —
+      // и ровно поэтому он дожил до сих пор.
+      due_at: maybeDate(body.deadline ?? body.due_at ?? body.dueAt),
       updated_at: new Date().toISOString(),
     }),
     fromRow: (row) =>
@@ -1407,6 +1474,12 @@ const configs: Record<CrmResource, ResourceConfig> = {
         priority: row.priority,
         status: row.status,
         deadline: row.due_at,
+        assigneeUserId: row.assignee_user_id,
+        leadId: row.lead_id,
+        clientId: row.client_id,
+        appointmentId: row.appointment_id,
+        completedAt: row.completed_at,
+        createdByKind: row.created_by_kind,
       }),
   },
   chat: {
@@ -2123,6 +2196,75 @@ async function buildAppointmentReferenceRow(
   return row;
 }
 
+/**
+ * What a task is about, and who it is for — each verified inside the clinic.
+ *
+ * Every reference the CRM stores goes through readWorkspaceReference, and the
+ * one that did not — a lead's client_id, guarded by isUuid alone — turned out
+ * to accept another clinic's patient id, because a uuid is a shape and not a
+ * tenancy. Tasks get four references at once here, so they start on the
+ * validated path rather than being repaired onto it later.
+ *
+ * assignee_user_id has existed since 010 as a real foreign key and has never
+ * been written by anything: the server stored only the free-text
+ * assignee_name, which is why «мои задачи» was not merely unimplemented but
+ * unexpressible — there was no id to compare against. It is filled here, and
+ * the display name is kept alongside it as a snapshot, the same way the
+ * journal keeps the actor's name.
+ */
+async function buildTaskReferenceRow(
+  supabase: CrmSupabaseClient,
+  workspaceId: string,
+  body: JsonRecord,
+): Promise<JsonRecord> {
+  const row: JsonRecord = {};
+  const referenceFields: Array<{
+    keys: [string, string];
+    column: string;
+    table: "leads" | "clients" | "appointments" | "staff_users";
+    fieldName: string;
+  }> = [
+    { keys: ["leadId", "lead_id"], column: "lead_id", table: "leads", fieldName: "leadId" },
+    { keys: ["clientId", "client_id"], column: "client_id", table: "clients", fieldName: "clientId" },
+    { keys: ["appointmentId", "appointment_id"], column: "appointment_id", table: "appointments", fieldName: "appointmentId" },
+    { keys: ["assigneeUserId", "assignee_user_id"], column: "assignee_user_id", table: "staff_users", fieldName: "assigneeUserId" },
+  ];
+
+  for (const field of referenceFields) {
+    if (!hasAnyKey(body, field.keys)) continue;
+    const id = firstString(body[field.keys[0]], body[field.keys[1]]);
+    if (!id) {
+      row[field.column] = null;
+      // Taking the task off a colleague clears the name with the id, or the
+      // card would keep showing someone who is no longer responsible for it.
+      if (field.column === "assignee_user_id") row.assignee_name = null;
+      continue;
+    }
+
+    const isAssignee = field.column === "assignee_user_id";
+    const reference = await readWorkspaceReference({
+      supabase,
+      workspaceId,
+      table: field.table,
+      id,
+      select: isAssignee ? "id,full_name,status" : "id",
+      fieldName: field.fieldName,
+    });
+    row[field.column] = reference.id;
+
+    if (isAssignee) {
+      // A deactivated colleague would leave the task in a queue nobody reads —
+      // the same rule the lead's responsible person already follows.
+      if (readString(reference.status).toLowerCase() !== "active") {
+        throw new CrmReferenceValidationError(["assigneeUserId must be an active staff member"]);
+      }
+      row.assignee_name = readString(reference.full_name) || null;
+    }
+  }
+
+  return row;
+}
+
 async function buildDealReferenceRow(
   supabase: CrmSupabaseClient,
   workspaceId: string,
@@ -2317,12 +2459,54 @@ async function listItems(resource: CrmResource, req: VercelRequest, res: VercelR
       }
     }
 
+    // Параметры разбираются ДО того, как построен запрос: мусор в фильтре
+    // отвергается, не коснувшись базы. Обратный порядок работал бы так же с
+    // точки зрения ответа, но заводил бы обращение к таблице ради заведомо
+    // невалидного запроса — и тест это заметил.
+    const equalities: Array<[string, string]> = [];
+    let dueBefore: string | null = null;
+
+    if (resource === "tasks") {
+      for (const [param, column] of [
+        ["assigneeUserId", "assignee_user_id"],
+        ["leadId", "lead_id"],
+        ["clientId", "client_id"],
+        ["appointmentId", "appointment_id"],
+      ] as const) {
+        const value = readQueryString(req.query[param]);
+        if (!value) continue;
+        if (!isUuid(value)) {
+          return sendJson(res, 400, errorBody("Validation error", [`${param} must be a valid id`]));
+        }
+        equalities.push([column, value]);
+      }
+
+      const status = readQueryString(req.query.status);
+      if (status) equalities.push(["status", normalizeTaskStatus(status)]);
+
+      const rawDueBefore = readQueryString(req.query.dueBefore ?? req.query.due_before);
+      if (rawDueBefore) {
+        dueBefore = maybeDate(rawDueBefore);
+        if (!dueBefore) {
+          return sendJson(res, 400, errorBody("Validation error", ["dueBefore must be a valid date"]));
+        }
+      }
+    }
+
     let query = supabase
       .from(config.table)
       .select(config.selectColumns ?? "*")
       .order(config.sortableColumn, { ascending: config.sortableAscending ?? false });
 
     query = query.eq("workspace_id", workspaceId);
+
+    // Задачи спрашивают узко: что открыто у меня, что просрочено, что висит на
+    // этой заявке. Отдать весь workspace и отфильтровать в браузере — это тот
+    // самый механизм, которым список превращается в свалку ровно тогда, когда
+    // PostgREST молча обрежет выдачу. Сужение того же авторизованного чтения,
+    // как у clients?phone: тот же маршрут, то же право, тот же скоуп.
+    for (const [column, value] of equalities) query = query.eq(column, value);
+    if (dueBefore) query = query.lt("due_at", dueBefore);
 
     const { data, error } = await query;
 
@@ -2500,6 +2684,17 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
     }
     if (resource === "deals") {
       Object.assign(row, await buildDealReferenceRow(supabase, workspaceId, body));
+    }
+    if (resource === "tasks") {
+      Object.assign(row, await buildTaskReferenceRow(supabase, workspaceId, body));
+      // Кто поставил задачу — из проверенного контекста, не из тела. Вид автора
+      // берёт словарь журнала изменений: продукт уже обещает задачи, которые
+      // ставит не человек, и список, где автосозданный follow-up неотличим от
+      // поручения заведующей, перестают читать.
+      const author = journalActor(req);
+      if (isUuid(author.actorStaffUserId)) row.created_by_staff_user_id = author.actorStaffUserId;
+      row.created_by_kind = author.actorKind;
+      if (readString(row.status) === "done") row.completed_at = new Date().toISOString();
     }
     if (resource === "appointments") {
       Object.assign(row, await buildAppointmentReferenceRow(supabase, workspaceId, body));
@@ -2719,6 +2914,9 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
     }
     if (resource === "deals") {
       Object.assign(row, await buildDealReferenceRow(supabase, workspaceId, patchBody));
+    }
+    if (resource === "tasks") {
+      Object.assign(row, await buildTaskReferenceRow(supabase, workspaceId, patchBody));
     }
     if (resource === "appointments") {
       Object.assign(row, await buildAppointmentReferenceRow(supabase, workspaceId, patchBody));
