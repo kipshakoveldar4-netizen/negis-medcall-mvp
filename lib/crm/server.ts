@@ -349,12 +349,11 @@ function buildPatchRow(resource: CrmResource, body: JsonRecord): JsonRecord {
     setText("status", ["status"]);
     // notes holds real notes only (no owner overload).
     setText("notes", ["notes"]);
-    // Lead → client conversion: client_id is a uuid FK. Non-uuid values (demo ids)
-    // become null so a bad id can never fail the whole update row.
-    if (hasAnyKey(body, ["clientId", "client_id"])) {
-      const clientId = firstString(body.clientId, body.client_id);
-      row.client_id = isUuid(clientId) ? clientId : null;
-    }
+    // client_id moved to buildLeadReferenceRow. It used to be written here with
+    // only a uuid-shape check, which is not a tenancy check: the FK points at
+    // clients(id) with no workspace clause, so a uuid from another clinic's
+    // client would have been accepted and stored. Every other reference on the
+    // lead already went through readWorkspaceReference for exactly that reason.
     row.updated_at = new Date().toISOString();
   }
 
@@ -1883,6 +1882,27 @@ async function buildLeadReferenceRow(
     }
   }
 
+  // Lead → client conversion, and the manual link to an existing client. An
+  // empty string is the deliberate unlink. Until now this was written in
+  // buildPatchRow guarded only by isUuid — a shape check, not a tenancy check —
+  // so a client id from another clinic passed straight into the FK.
+  if (hasAnyKey(body, ["clientId", "client_id"])) {
+    const clientId = firstString(body.clientId, body.client_id);
+    if (!clientId) {
+      row.client_id = null;
+    } else {
+      const client = await readWorkspaceReference({
+        supabase,
+        workspaceId,
+        table: "clients",
+        id: clientId,
+        select: "id",
+        fieldName: "clientId",
+      });
+      row.client_id = client.id;
+    }
+  }
+
   // Who owns this lead. The column has existed since 010 and fromRow has always
   // returned it, but no write path set it: the card could only say «Назначен»
   // or «—», and nothing in the product could put a name there. A clinic with
@@ -1937,6 +1957,42 @@ async function buildLeadReferenceRow(
 // CRM9: every deal reference must belong to the same workspace as the deal.
 // A foreign-workspace or malformed id returns a safe validation error, never
 // a raw SQL error. Empty values unlink (null).
+/**
+ * The appointment's link to the patient it is for.
+ *
+ * The column has existed since 010 and fromRow has always returned it, but no
+ * write path set it — a visit was never attached to the client card, and the
+ * clinic's own history of a patient could not include their appointments. Same
+ * rule as every reference: the id is looked up inside the acting workspace, so
+ * another clinic's client is refused, and an explicit empty string unlinks.
+ */
+async function buildAppointmentReferenceRow(
+  supabase: CrmSupabaseClient,
+  workspaceId: string,
+  body: JsonRecord,
+): Promise<JsonRecord> {
+  const row: JsonRecord = {};
+
+  if (hasAnyKey(body, ["clientId", "client_id"])) {
+    const clientId = firstString(body.clientId, body.client_id);
+    if (!clientId) {
+      row.client_id = null;
+    } else {
+      const client = await readWorkspaceReference({
+        supabase,
+        workspaceId,
+        table: "clients",
+        id: clientId,
+        select: "id",
+        fieldName: "clientId",
+      });
+      row.client_id = client.id;
+    }
+  }
+
+  return row;
+}
+
 async function buildDealReferenceRow(
   supabase: CrmSupabaseClient,
   workspaceId: string,
@@ -2178,6 +2234,9 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
     if (resource === "deals") {
       Object.assign(row, await buildDealReferenceRow(supabase, workspaceId, body));
     }
+    if (resource === "appointments") {
+      Object.assign(row, await buildAppointmentReferenceRow(supabase, workspaceId, body));
+    }
     const query = config.upsertConflict
       ? supabase.from(config.table).upsert(row, { onConflict: config.upsertConflict }).select(config.selectColumns ?? "*").single()
       : supabase.from(config.table).insert(row).select(config.selectColumns ?? "*").single();
@@ -2361,6 +2420,9 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
     }
     if (resource === "deals") {
       Object.assign(row, await buildDealReferenceRow(supabase, workspaceId, patchBody));
+    }
+    if (resource === "appointments") {
+      Object.assign(row, await buildAppointmentReferenceRow(supabase, workspaceId, patchBody));
     }
 
     if (Object.keys(row).length === 0) {

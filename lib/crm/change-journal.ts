@@ -107,6 +107,7 @@ const DEAL_FIELDS: Record<string, FieldPolicy> = {
 };
 
 const APPOINTMENT_FIELDS: Record<string, FieldPolicy> = {
+  client_id: { label: "Клиент", sensitivity: "value" },
   status: { label: "Статус", sensitivity: "value" },
   service: { label: "Услуга", sensitivity: "value" },
   starts_at: { label: "Время", sensitivity: "value" },

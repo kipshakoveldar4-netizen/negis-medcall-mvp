@@ -1743,10 +1743,19 @@ async function checkLeadsPageSource() {
     }
   }
 
-  // Server mapping: PATCH lead.client_id must persist (uuid-guarded).
+  // Server mapping: PATCH lead.client_id must persist — and through the
+  // workspace-scoped lookup, not the old uuid-shape guard. The uuid check told
+  // apart demo ids from real ones and nothing else: a client id from another
+  // clinic is also a uuid, and the FK has no workspace clause to stop it.
   const crmServer = await readFile(path.join(repoRoot, "lib", "crm", "server.ts"), "utf8");
-  if (!crmServer.includes("row.client_id = isUuid(clientId) ? clientId : null;")) {
-    throw new Error("leads PATCH mapping must persist client_id (uuid-guarded)");
+  if (crmServer.includes("row.client_id = isUuid(clientId) ? clientId : null;")) {
+    throw new Error("lead client_id must go through readWorkspaceReference, not a uuid-shape check");
+  }
+  if (!crmServer.includes("row.client_id = client.id;")) {
+    throw new Error("leads mapping must persist client_id from the workspace-scoped lookup");
+  }
+  if (!crmServer.includes("buildAppointmentReferenceRow")) {
+    throw new Error("appointments must persist client_id — a visit belongs to a patient");
   }
   for (const marker of [
     'table: "lead_stages"',

@@ -938,6 +938,10 @@ test("M1 every lead reference is resolved inside the acting workspace before it 
     ["stageId", "row.stage_id = stage.id;"],
     ["sourceId", "row.source_id = source.id;"],
     ["responsibleUserId", "row.responsible_user_id = staff.id;"],
+    // The fifth reference. client_id used to be written in buildPatchRow behind
+    // an isUuid check — a shape check, not a tenancy check — and moved here so
+    // that another clinic's client id is refused like every other reference.
+    ["clientId", "row.client_id = client.id;"],
   ]) {
     assert.ok(builder.includes(`"${field}"`), `${field} must be handled here`);
     assert.ok(
@@ -948,8 +952,8 @@ test("M1 every lead reference is resolved inside the acting workspace before it 
 
   assert.equal(
     (builder.match(/readWorkspaceReference\(/g) ?? []).length,
-    4,
-    "each of the four references must go through the workspace-scoped lookup",
+    5,
+    "each of the five references must go through the workspace-scoped lookup",
   );
 });
 
