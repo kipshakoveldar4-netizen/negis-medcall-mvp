@@ -31,6 +31,7 @@
     "test:whatsapp-cloud-webhook": "tsx --test ./src/medina-whatsapp-cloud-webhook.test.ts",
     "test:crm-phone-parity": "tsx --test ./src/medina-crm-phone-parity.test.ts",
     "test:whatsapp-channels": "tsx --test ./src/medina-whatsapp-channels.test.ts",
+    "test:tasks": "tsx --test ./src/medina-tasks.test.ts",
     "test:booking-conflict": "tsx --test ./src/medina-booking-conflict.test.ts",
     "test:client-link": "tsx --test ./src/medina-client-link.test.ts",
     "test:change-log": "tsx --test ./src/medina-change-log.test.ts",

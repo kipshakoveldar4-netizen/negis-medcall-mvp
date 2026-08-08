@@ -436,8 +436,16 @@ function buildPatchRow(resource: CrmResource, body: JsonRecord): JsonRecord {
     setText("title", ["title"]);
     setText("description", ["description"]);
     setText("assignee_name", ["owner", "assignee_name", "assigneeName"]);
-    setText("priority", ["priority"]);
-    setText("status", ["status"]);
+    if (hasAnyKey(body, ["priority"])) {
+      const priority = canonicalTaskPriority(body.priority);
+      if (!priority) throw new CrmReferenceValidationError(["priority must be one of: low, medium, high"]);
+      row.priority = priority;
+    }
+    if (hasAnyKey(body, ["status"])) {
+      const status = canonicalTaskStatus(body.status);
+      if (!status) throw new CrmReferenceValidationError(["status must be one of: new, in_progress, done"]);
+      row.status = status;
+    }
     setDate("due_at", ["deadline", "due_at", "dueAt"]);
     row.updated_at = new Date().toISOString();
   }
@@ -677,6 +685,15 @@ function resourceValidationDetails(resource: CrmResource, body: JsonRecord): str
 
   if (resource === "clients" && !firstString(body.name, body.full_name, body.fullName)) {
     details.push("name is required");
+  }
+
+  if (resource === "tasks") {
+    if (hasAnyKey(body, ["status"]) && !canonicalTaskStatus(body.status)) {
+      details.push("status must be one of: new, in_progress, done");
+    }
+    if (hasAnyKey(body, ["priority"]) && !canonicalTaskPriority(body.priority)) {
+      details.push("priority must be one of: low, medium, high");
+    }
   }
 
   if (resource === "leads" && !firstString(body.name, body.full_name, body.fullName, body.phone)) {
@@ -966,6 +983,64 @@ function makeCall(body: JsonRecord): JsonRecord {
   };
 }
 
+/**
+ * Канонические словари задачи.
+ *
+ * У колонок нет CHECK, а демо-экран писал в ту же колонку русские подписи
+ * («Новые», «Готово») поверх английских значений по умолчанию из 010. Со
+ * временем в одном столбце оказались бы оба словаря — и индекс по status,
+ * построенный там же, считал бы по половине. Ключ хранится канонический,
+ * подпись живёт на экране: ровно так устроены стадии заявки.
+ */
+const TASK_STATUSES = ["new", "in_progress", "done"] as const;
+const TASK_PRIORITIES = ["low", "medium", "high"] as const;
+
+/** Русские написания, которые уже могли попасть в базу с демо-экрана. */
+const TASK_STATUS_ALIASES: Record<string, string> = {
+  "новые": "new",
+  "новая": "new",
+  "в работе": "in_progress",
+  "готово": "done",
+  "выполнено": "done",
+  "завершено": "done",
+  todo: "new",
+  open: "new",
+  progress: "in_progress",
+  completed: "done",
+  closed: "done",
+};
+
+const TASK_PRIORITY_ALIASES: Record<string, string> = {
+  "низкий": "low",
+  "средний": "medium",
+  "высокий": "high",
+  normal: "medium",
+  urgent: "high",
+};
+
+/**
+ * Приводит написание к канону — или отказывает.
+ *
+ * Возвращает null на то, чего в словаре нет. Прежняя версия молча отдавала
+ * «new», и это было хуже, чем кажется: опечатка в PATCH понижала задачу из
+ * «В работе» обратно в «Новые» и стирала время закрытия, отвечая 200, а тот
+ * же мусор в фильтре возвращал уверенно неверный список вместо 400 — при том
+ * что соседний параметр с плохим uuid в трёх строках выше честно отвечает 400.
+ */
+function canonicalTaskStatus(value: unknown): string | null {
+  const raw = readString(value).toLowerCase();
+  if (!raw) return null;
+  if ((TASK_STATUSES as readonly string[]).includes(raw)) return raw;
+  return TASK_STATUS_ALIASES[raw] ?? null;
+}
+
+function canonicalTaskPriority(value: unknown): string | null {
+  const raw = readString(value).toLowerCase();
+  if (!raw) return null;
+  if ((TASK_PRIORITIES as readonly string[]).includes(raw)) return raw;
+  return TASK_PRIORITY_ALIASES[raw] ?? null;
+}
+
 function makeTask(body: JsonRecord): JsonRecord {
   return {
     id: readString(body.id) || nextDemoId("task"),
@@ -973,8 +1048,19 @@ function makeTask(body: JsonRecord): JsonRecord {
     description: readString(body.description),
     owner: firstString(body.owner, body.assignee_name, body.assigneeName),
     deadline: firstString(body.deadline, body.due_at),
+    // Значение отдаётся как есть. makeTask обслуживает и fromRow, поэтому
+    // канонизация здесь переписывала бы то, что лежит в базе, на пути ЧТЕНИЯ —
+    // а единственный экран задач сравнивает статус с русскими подписями и
+    // веткой не тронут. Все три колонки доски опустели бы разом. Канон живёт
+    // на записи; хранимые русские написания приводит миграция 031.
     priority: readString(body.priority) || "medium",
     status: readString(body.status) || "new",
+    assigneeUserId: firstString(body.assigneeUserId, body.assignee_user_id),
+    leadId: firstString(body.leadId, body.lead_id),
+    clientId: firstString(body.clientId, body.client_id),
+    appointmentId: firstString(body.appointmentId, body.appointment_id),
+    completedAt: firstString(body.completedAt, body.completed_at),
+    createdByKind: firstString(body.createdByKind, body.created_by_kind),
   };
 }
 
@@ -1393,9 +1479,14 @@ const configs: Record<CrmResource, ResourceConfig> = {
       title: readString(body.title),
       description: readString(body.description) || null,
       assignee_name: firstString(body.owner, body.assignee_name, body.assigneeName) || null,
-      priority: readString(body.priority) || "medium",
-      status: readString(body.status) || "new",
-      due_at: maybeDate(body.due_at ?? body.dueAt),
+      priority: canonicalTaskPriority(body.priority) ?? "medium",
+      status: canonicalTaskStatus(body.status) ?? "new",
+      // `deadline` читается и здесь. PATCH принимал его с самого начала, POST —
+      // нет, поэтому задача, созданная в интерфейсе со сроком, ложилась в базу
+      // с due_at = null: на экране срок был, в базе его не было. В демо-режиме
+      // баг невидим — там ответ собирает makeTask, который deadline читает, —
+      // и ровно поэтому он дожил до сих пор.
+      due_at: maybeDate(body.deadline ?? body.due_at ?? body.dueAt),
       updated_at: new Date().toISOString(),
     }),
     fromRow: (row) =>
@@ -1407,6 +1498,12 @@ const configs: Record<CrmResource, ResourceConfig> = {
         priority: row.priority,
         status: row.status,
         deadline: row.due_at,
+        assigneeUserId: row.assignee_user_id,
+        leadId: row.lead_id,
+        clientId: row.client_id,
+        appointmentId: row.appointment_id,
+        completedAt: row.completed_at,
+        createdByKind: row.created_by_kind,
       }),
   },
   chat: {
@@ -2123,6 +2220,83 @@ async function buildAppointmentReferenceRow(
   return row;
 }
 
+/**
+ * What a task is about, and who it is for — each verified inside the clinic.
+ *
+ * Every reference the CRM stores goes through readWorkspaceReference, and the
+ * one that did not — a lead's client_id, guarded by isUuid alone — turned out
+ * to accept another clinic's patient id, because a uuid is a shape and not a
+ * tenancy. Tasks get four references at once here, so they start on the
+ * validated path rather than being repaired onto it later.
+ *
+ * assignee_user_id has existed since 010 as a real foreign key and has never
+ * been written by anything: the server stored only the free-text
+ * assignee_name, which is why «мои задачи» was not merely unimplemented but
+ * unexpressible — there was no id to compare against. It is filled here, and
+ * the display name is kept alongside it as a snapshot, the same way the
+ * journal keeps the actor's name.
+ */
+async function buildTaskReferenceRow(
+  supabase: CrmSupabaseClient,
+  workspaceId: string,
+  body: JsonRecord,
+): Promise<JsonRecord> {
+  const row: JsonRecord = {};
+  const referenceFields: Array<{
+    keys: [string, string];
+    column: string;
+    table: "leads" | "clients" | "appointments" | "staff_users";
+    fieldName: string;
+  }> = [
+    { keys: ["leadId", "lead_id"], column: "lead_id", table: "leads", fieldName: "leadId" },
+    { keys: ["clientId", "client_id"], column: "client_id", table: "clients", fieldName: "clientId" },
+    { keys: ["appointmentId", "appointment_id"], column: "appointment_id", table: "appointments", fieldName: "appointmentId" },
+    { keys: ["assigneeUserId", "assignee_user_id"], column: "assignee_user_id", table: "staff_users", fieldName: "assigneeUserId" },
+  ];
+
+  for (const field of referenceFields) {
+    if (!hasAnyKey(body, field.keys)) continue;
+    const raw = body[field.keys[0]] ?? body[field.keys[1]];
+    // Отвязка — это ЯВНАЯ пустая строка. Число, булево или объект попадали бы
+    // в ту же ветку через firstString и стирали связь, отвечая 200: клиент,
+    // который шлёт `leadId: 0` вместо «не выбрано», получал бы стёртую связь
+    // и запись в журнале как об осознанном действии оператора.
+    if (typeof raw !== "string" && raw !== null && raw !== undefined) {
+      throw new CrmReferenceValidationError([`${field.fieldName} must be a valid id`]);
+    }
+    const id = firstString(body[field.keys[0]], body[field.keys[1]]);
+    if (!id) {
+      row[field.column] = null;
+      // Taking the task off a colleague clears the name with the id, or the
+      // card would keep showing someone who is no longer responsible for it.
+      if (field.column === "assignee_user_id") row.assignee_name = null;
+      continue;
+    }
+
+    const isAssignee = field.column === "assignee_user_id";
+    const reference = await readWorkspaceReference({
+      supabase,
+      workspaceId,
+      table: field.table,
+      id,
+      select: isAssignee ? "id,full_name,status" : "id",
+      fieldName: field.fieldName,
+    });
+    row[field.column] = reference.id;
+
+    if (isAssignee) {
+      // A deactivated colleague would leave the task in a queue nobody reads —
+      // the same rule the lead's responsible person already follows.
+      if (readString(reference.status).toLowerCase() !== "active") {
+        throw new CrmReferenceValidationError(["assigneeUserId must be an active staff member"]);
+      }
+      row.assignee_name = readString(reference.full_name) || null;
+    }
+  }
+
+  return row;
+}
+
 async function buildDealReferenceRow(
   supabase: CrmSupabaseClient,
   workspaceId: string,
@@ -2263,6 +2437,45 @@ async function findClientsByPhone(
 /** Postgres "column does not exist" — the one error the fallback answers to. */
 const UNDEFINED_COLUMN = "42703";
 
+/** Колонки, которых нет в базе, пока не применена forward-миграция 031. */
+const TASK_COLUMNS_FROM_031 = [
+  "lead_id",
+  "client_id",
+  "appointment_id",
+  "created_by_staff_user_id",
+  "created_by_kind",
+  "completed_at",
+];
+
+function isMissingAnyColumn(error: { code?: unknown; message?: unknown } | null): boolean {
+  if (!error) return false;
+  if (readString(error.code) === UNDEFINED_COLUMN) return true;
+  return readString(error.message).toLowerCase().includes("does not exist");
+}
+
+/**
+ * Строка без колонок, которых в базе может ещё не быть.
+ *
+ * Деплой доходит до production раньше, чем миграция применяется руками —
+ * штатный порядок здесь. Первая версия этой ветки писала created_by_kind в
+ * КАЖДОМ создании задачи, поэтому в этом окне ломалось не «связывание с
+ * заявкой», а создание задачи вообще: PostgREST отвергал вставку по
+ * неизвестной колонке, и обработчик отвечал 502. Ломалось то, что до ветки
+ * работало, — и собственный документ ветки утверждал обратное.
+ */
+function taskRowWithout031(row: JsonRecord): { row: JsonRecord; dropped: string[] } {
+  const stripped: JsonRecord = {};
+  const dropped: string[] = [];
+  for (const [key, value] of Object.entries(row)) {
+    if (TASK_COLUMNS_FROM_031.includes(key)) {
+      if (value !== null && value !== undefined) dropped.push(key);
+      continue;
+    }
+    stripped[key] = value;
+  }
+  return { row: stripped, dropped };
+}
+
 function isMissingColumn(error: { code?: unknown; message?: unknown } | null, column: string): boolean {
   if (!error) return false;
   if (readString(error.code) === UNDEFINED_COLUMN) return true;
@@ -2317,12 +2530,63 @@ async function listItems(resource: CrmResource, req: VercelRequest, res: VercelR
       }
     }
 
+    // Параметры разбираются ДО того, как построен запрос: мусор в фильтре
+    // отвергается, не коснувшись базы. Обратный порядок работал бы так же с
+    // точки зрения ответа, но заводил бы обращение к таблице ради заведомо
+    // невалидного запроса — и тест это заметил.
+    const equalities: Array<[string, string]> = [];
+    let dueBefore: string | null = null;
+
+    if (resource === "tasks") {
+      for (const [param, column] of [
+        ["assigneeUserId", "assignee_user_id"],
+        ["leadId", "lead_id"],
+        ["clientId", "client_id"],
+        ["appointmentId", "appointment_id"],
+      ] as const) {
+        const value = readQueryString(req.query[param]);
+        if (!value) continue;
+        if (!isUuid(value)) {
+          return sendJson(res, 400, errorBody("Validation error", [`${param} must be a valid id`]));
+        }
+        equalities.push([column, value]);
+      }
+
+      const status = readQueryString(req.query.status);
+      if (status) {
+        const canonical = canonicalTaskStatus(status);
+        if (!canonical) {
+          // Соседние параметры при мусоре отвечают 400 и до базы не доходят.
+          // Прежняя версия отдавала 200 со списком НОВЫХ задач: вызывающая
+          // сторона не могла отличить «таких задач нет» от «такого статуса нет».
+          return sendJson(res, 400, errorBody("Validation error", ["status must be one of: new, in_progress, done"]));
+        }
+        equalities.push(["status", canonical]);
+      }
+
+      const rawDueBefore = readQueryString(req.query.dueBefore ?? req.query.due_before);
+      if (rawDueBefore) {
+        dueBefore = maybeDate(rawDueBefore);
+        if (!dueBefore) {
+          return sendJson(res, 400, errorBody("Validation error", ["dueBefore must be a valid date"]));
+        }
+      }
+    }
+
     let query = supabase
       .from(config.table)
       .select(config.selectColumns ?? "*")
       .order(config.sortableColumn, { ascending: config.sortableAscending ?? false });
 
     query = query.eq("workspace_id", workspaceId);
+
+    // Задачи спрашивают узко: что открыто у меня, что просрочено, что висит на
+    // этой заявке. Отдать весь workspace и отфильтровать в браузере — это тот
+    // самый механизм, которым список превращается в свалку ровно тогда, когда
+    // PostgREST молча обрежет выдачу. Сужение того же авторизованного чтения,
+    // как у clients?phone: тот же маршрут, то же право, тот же скоуп.
+    for (const [column, value] of equalities) query = query.eq(column, value);
+    if (dueBefore) query = query.lt("due_at", dueBefore);
 
     const { data, error } = await query;
 
@@ -2501,6 +2765,17 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
     if (resource === "deals") {
       Object.assign(row, await buildDealReferenceRow(supabase, workspaceId, body));
     }
+    if (resource === "tasks") {
+      Object.assign(row, await buildTaskReferenceRow(supabase, workspaceId, body));
+      // Кто поставил задачу — из проверенного контекста, не из тела. Вид автора
+      // берёт словарь журнала изменений: продукт уже обещает задачи, которые
+      // ставит не человек, и список, где автосозданный follow-up неотличим от
+      // поручения заведующей, перестают читать.
+      const author = journalActor(req);
+      if (isUuid(author.actorStaffUserId)) row.created_by_staff_user_id = author.actorStaffUserId;
+      row.created_by_kind = author.actorKind;
+      if (readString(row.status) === "done") row.completed_at = new Date().toISOString();
+    }
     if (resource === "appointments") {
       Object.assign(row, await buildAppointmentReferenceRow(supabase, workspaceId, body));
       if (!allowsAppointmentConflict(body)) {
@@ -2512,10 +2787,24 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
         });
       }
     }
-    const query = config.upsertConflict
-      ? supabase.from(config.table).upsert(row, { onConflict: config.upsertConflict }).select(config.selectColumns ?? "*").single()
-      : supabase.from(config.table).insert(row).select(config.selectColumns ?? "*").single();
-    const { data, error } = await query;
+    const runInsert = (candidate: JsonRecord) => (config.upsertConflict
+      ? supabase.from(config.table).upsert(candidate, { onConflict: config.upsertConflict }).select(config.selectColumns ?? "*").single()
+      : supabase.from(config.table).insert(candidate).select(config.selectColumns ?? "*").single());
+
+    let { data, error } = await runInsert(row);
+
+    // Пока 031 не применена, колонок связи и авторства в базе нет. Отказать
+    // в создании задачи целиком — хуже, чем создать её без связи: до этой
+    // ветки задачи создавались, и окно между деплоем и миграцией не повод
+    // это отнимать. Тот же приём, которым закрыт поиск клиента по телефону.
+    if (error && resource === "tasks" && isMissingAnyColumn(error)) {
+      const fallback = taskRowWithout031(row);
+      console.warn(
+        `tasks: columns from migration 031 are not present yet (${fallback.dropped.join(", ") || "none set"}); `
+          + "creating without them",
+      );
+      ({ data, error } = await runInsert(fallback.row));
+    }
 
     if (error) {
       throw new Error(error.message);
@@ -2720,6 +3009,17 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
     if (resource === "deals") {
       Object.assign(row, await buildDealReferenceRow(supabase, workspaceId, patchBody));
     }
+    if (resource === "tasks") {
+      Object.assign(row, await buildTaskReferenceRow(supabase, workspaceId, patchBody));
+
+      // Свободный текст исполнителя правят старым путём, не трогая ссылку.
+      // Тогда карточка показывает одно имя, а «мои задачи» по ссылке относят
+      // задачу другому: имя перестаёт быть снимком того, на кого назначено.
+      // Правка имени без ссылки снимает ссылку — имя снова просто текст.
+      if ("assignee_name" in row && !("assignee_user_id" in row)) {
+        row.assignee_user_id = null;
+      }
+    }
     if (resource === "appointments") {
       Object.assign(row, await buildAppointmentReferenceRow(supabase, workspaceId, patchBody));
     }
@@ -2736,6 +3036,19 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
     const before = patchedEntity
       ? await readRowBeforeChange(supabase, config.table, workspaceId, id)
       : {};
+
+    if (patchedEntity === "task" && typeof row.status === "string") {
+      // Время закрытия двигает ПЕРЕХОД, а не присутствие ключа в теле. Форма
+      // редактирования шлёт объект целиком, включая неизменившийся статус, —
+      // прежняя версия сдвигала бы дату закрытия на «сейчас» при каждом
+      // сохранении, роняя давно закрытую задачу в отчёт «сделано сегодня» и
+      // порождая ложную строку «Закрыта: понедельник → пятница» в истории.
+      // `before` уже прочитан для журнала, второго запроса это не стоит.
+      const wasDone = readString(before.status) === "done";
+      const isDone = row.status === "done";
+      if (isDone && !wasDone) row.completed_at = new Date().toISOString();
+      else if (!isDone && wasDone) row.completed_at = null;
+    }
 
     if (patchedEntity === "appointment" && !allowsAppointmentConflict(patchBody)) {
       // Проверять надо по СЛИЯНИЮ: патч может нести только новое время, только
@@ -2777,13 +3090,24 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
       }
     }
 
-    const { data, error } = await supabase
+    const runUpdate = (candidate: JsonRecord) => supabase
       .from(config.table)
-      .update(row)
+      .update(candidate)
       .eq("id", id)
       .eq("workspace_id", workspaceId)
       .select(config.selectColumns ?? "*")
       .single();
+
+    let { data, error } = await runUpdate(row);
+
+    if (error && resource === "tasks" && isMissingAnyColumn(error)) {
+      const fallback = taskRowWithout031(row);
+      console.warn(
+        `tasks: columns from migration 031 are not present yet (${fallback.dropped.join(", ") || "none set"}); `
+          + "saving without them",
+      );
+      ({ data, error } = await runUpdate(fallback.row));
+    }
 
     if (error) {
       throw new Error(error.message);

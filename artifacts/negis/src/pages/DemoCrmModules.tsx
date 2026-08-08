@@ -91,13 +91,61 @@ type CallItem = {
   summary: string;
 };
 
+/**
+ * Ключ канонический, подпись — на экране.
+ *
+ * Прежде экран сравнивал статус со своими же русскими подписями и писал их в
+ * ту же колонку, куда 010 кладёт английские значения по умолчанию: в базе
+ * копились оба словаря, а индекс по status считал бы по половине. Сервер
+ * теперь канонизирует на записи и не трогает значение на чтении, поэтому
+ * подписи живут здесь — как названия стадий заявки.
+ */
+type TaskStatusKey = "new" | "in_progress" | "done";
+
+const TASK_STATUS_LABEL: Record<TaskStatusKey, string> = {
+  new: "Новые",
+  in_progress: "В работе",
+  done: "Готово",
+};
+
+const TASK_PRIORITY_LABEL: Record<string, string> = {
+  low: "Низкий",
+  medium: "Средний",
+  high: "Высокий",
+};
+
+/**
+ * Русское написание, которое могло попасть в базу до канонизации. Миграция 031
+ * приводит такие строки к ключу, но пока она не применена — и для клиник,
+ * которые её ещё не прогнали, — карточка должна попадать в свою колонку, а не
+ * исчезать с доски.
+ */
+const TASK_STATUS_ALIASES: Record<string, TaskStatusKey> = {
+  "новые": "new",
+  "новая": "new",
+  "в работе": "in_progress",
+  "готово": "done",
+  "выполнено": "done",
+};
+
+function taskStatusKey(raw: string): TaskStatusKey {
+  const value = (raw || "").trim().toLowerCase();
+  if (value === "new" || value === "in_progress" || value === "done") return value;
+  return TASK_STATUS_ALIASES[value] ?? "new";
+}
+
+function taskPriorityLabel(raw: string): string {
+  const value = (raw || "").trim().toLowerCase();
+  return TASK_PRIORITY_LABEL[value] ?? (raw || "Средний");
+}
+
 type TaskItem = {
   id: string;
   title: string;
   owner: string;
   deadline: string;
   priority: string;
-  status: "Новые" | "В работе" | "Готово";
+  status: string;
 };
 
 type ChatMessage = {
@@ -235,9 +283,9 @@ const callsSeed: CallItem[] = [
 ];
 
 const tasksSeed: TaskItem[] = [
-  { id: "task-1", title: "Перезвонить Марии по лазеру", owner: "Ресепшн", deadline: "Сегодня 14:00", priority: "Высокий", status: "Новые" },
-  { id: "task-2", title: "Подготовить сторис по ботоксу", owner: "Маркетолог", deadline: "Сегодня 17:00", priority: "Средний", status: "В работе" },
-  { id: "task-3", title: "Проверить отчёт кампании", owner: "Админ", deadline: "Завтра", priority: "Низкий", status: "Готово" },
+  { id: "task-1", title: "Перезвонить Марии по лазеру", owner: "Ресепшн", deadline: "", priority: "high", status: "new" },
+  { id: "task-2", title: "Подготовить сторис по ботоксу", owner: "Маркетолог", deadline: "", priority: "medium", status: "in_progress" },
+  { id: "task-3", title: "Проверить отчёт кампании", owner: "Админ", deadline: "", priority: "low", status: "done" },
 ];
 
 const chatSeed: ChatMessage[] = [
@@ -832,23 +880,33 @@ export function DemoCalls() {
   );
 }
 
+/** Срок приходит из базы как timestamptz; «Сегодня» — это формат показа, а не значение. */
+function formatTaskDue(value: string): string {
+  const raw = (value || "").trim();
+  if (!raw) return "";
+  const at = Date.parse(raw);
+  if (!Number.isFinite(at)) return raw;
+  return new Date(at).toLocaleString("ru-RU", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
+}
+
 export function DemoTasks() {
   const { items, addItem, updateItem } = useDemoCollection("negis_demo_tasks", tasksSeed, {
     endpoint: "/api/crm/tasks",
     listKey: "tasks",
   });
-  const columns: TaskItem["status"][] = ["Новые", "В работе", "Готово"];
+  const columns: TaskStatusKey[] = ["new", "in_progress", "done"];
+  const inColumn = (column: TaskStatusKey) => items.filter((task) => taskStatusKey(task.status) === column);
 
   const addTask = () => {
     addItem({
       id: newId("task"),
-      title: "Новая demo задача",
+      title: "Новая задача",
       owner: "Ресепшн",
-      deadline: "Сегодня",
-      priority: "Средний",
-      status: "Новые",
+      deadline: "",
+      priority: "medium",
+      status: "new",
     });
-    toast.success("Задача создана локально");
+    toast.success("Задача создана");
   };
 
   return (
@@ -859,27 +917,27 @@ export function DemoTasks() {
           {columns.map((column) => (
             <section key={column} className="neu-card">
               <div className="mb-4 flex items-center justify-between">
-                <h2 className="text-lg font-bold text-[#0F172A]">{column}</h2>
-                <span className="rounded-full bg-[#F8FAFC] px-3 py-1 text-xs font-bold text-[#64748B]">{items.filter((task) => task.status === column).length}</span>
+                <h2 className="text-lg font-bold text-[#0F172A]">{TASK_STATUS_LABEL[column]}</h2>
+                <span className="rounded-full bg-[#F8FAFC] px-3 py-1 text-xs font-bold text-[#64748B]">{inColumn(column).length}</span>
               </div>
               <div className="space-y-3">
-                {items.filter((task) => task.status === column).map((task) => (
+                {inColumn(column).map((task) => (
                   <article key={task.id} className="neu-sm p-4">
                     <h3 className="font-bold text-[#0F172A]">{task.title}</h3>
-                    <p className="mt-2 text-sm text-[#64748B]">{task.owner} · {task.deadline}</p>
+                    <p className="mt-2 text-sm text-[#64748B]">{[task.owner, formatTaskDue(task.deadline)].filter(Boolean).join(" · ") || "Без исполнителя"}</p>
                     <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                      <StatusPill value={task.priority} />
+                      <StatusPill value={taskPriorityLabel(task.priority)} />
                       <div className="grid grid-cols-2 gap-2 sm:flex">
-                        {columns.filter((next) => next !== task.status).map((next) => (
+                        {columns.filter((next) => next !== taskStatusKey(task.status)).map((next) => (
                           <button key={`${task.id}-${next}`} type="button" className="neu-btn min-h-11 px-3 py-2 text-xs" onClick={() => updateItem(task.id, { status: next })}>
-                            {next}
+                            {TASK_STATUS_LABEL[next]}
                           </button>
                         ))}
                       </div>
                     </div>
                   </article>
                 ))}
-                {items.filter((task) => task.status === column).length === 0 ? <EmptyHint>Нет задач в этой колонке.</EmptyHint> : null}
+                {inColumn(column).length === 0 ? <EmptyHint>Нет задач в этой колонке.</EmptyHint> : null}
               </div>
             </section>
           ))}
