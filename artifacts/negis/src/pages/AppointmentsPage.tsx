@@ -499,6 +499,11 @@ export function AppointmentsPage() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState<AppointmentForm>(() => defaultForm(todayKeyAtLoad));
   const [conflictMessage, setConflictMessage] = useState("");
+  // Создание теперь ждёт сервер, а модалка остаётся открытой всё это время.
+  // Без этого второй клик по «Создать запись» или «Сохранить всё равно»
+  // отправлял второй POST: при allowConflict сервер не проверяет ничего, а
+  // toRow не переносит клиентский id — получались две одинаковые записи.
+  const [saving, setSaving] = useState(false);
 
   const { items, addItem, setItems } = useDemoCollection<Appointment>("negis_demo_appointments", appointmentsSeed, {
     endpoint: "/api/crm/appointments",
@@ -672,6 +677,7 @@ export function AppointmentsPage() {
   };
 
   const submitForm = async (allowConflict = false) => {
+    if (saving) return;
     if (!form.client.trim()) {
       toast.error("Укажите имя клиента");
       return;
@@ -694,6 +700,8 @@ export function AppointmentsPage() {
       return;
     }
 
+    setSaving(true);
+    try {
     if (editingId) {
       const previous = items.find((item) => item.id === editingId);
       setItems((current) => current.map((item) => (item.id === editingId ? appointment : item)));
@@ -724,7 +732,9 @@ export function AppointmentsPage() {
           return;
         }
         console.warn("appointments: create refused", error instanceof Error ? error.message : error);
-        toast.error("Не удалось создать запись. Ничего не сохранено.");
+        // Не утверждаем, что на сервере ничего не осталось: сюда попадает и
+        // обрыв связи, брошенный до ответа, когда вставка уже могла пройти.
+        toast.error("Не удалось создать запись. Проверьте расписание перед повтором.");
         return;
       }
     }
@@ -732,6 +742,9 @@ export function AppointmentsPage() {
     setModalOpen(false);
     setConflictMessage("");
     setSelectedDate(form.date);
+    } finally {
+      setSaving(false);
+    }
   };
 
   const renderDay = () => (
@@ -985,11 +998,13 @@ export function AppointmentsPage() {
             ) : null}
 
             <div className="mt-6 flex flex-col gap-2 sm:flex-row sm:justify-end">
-              <button type="button" className="neu-btn px-5 py-2.5 text-sm" onClick={() => setModalOpen(false)}>Отмена</button>
+              <button type="button" className="neu-btn px-5 py-2.5 text-sm" onClick={() => setModalOpen(false)} disabled={saving}>Отмена</button>
               {conflictMessage ? (
-                <button type="button" className="neu-btn px-5 py-2.5 text-sm text-amber-700" onClick={() => void submitForm(true)}>Сохранить всё равно</button>
+                <button type="button" className="neu-btn px-5 py-2.5 text-sm text-amber-700" onClick={() => void submitForm(true)} disabled={saving}>Сохранить всё равно</button>
               ) : null}
-              <button type="submit" className="neu-btn-primary px-5 py-2.5 text-sm">{editingId ? "Сохранить изменения" : "Создать запись"}</button>
+              <button type="submit" className="neu-btn-primary px-5 py-2.5 text-sm" disabled={saving}>
+                {saving ? "Сохраняем…" : editingId ? "Сохранить изменения" : "Создать запись"}
+              </button>
             </div>
           </form>
         </div>

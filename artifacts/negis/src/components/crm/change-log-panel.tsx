@@ -45,6 +45,7 @@ export type ValueResolver = (field: string, value: string | null) => string | nu
 const ACTION_LABEL: Record<string, string> = {
   created: "Запись создана",
   updated: "Изменение",
+  overbooked: "Время занято — записано поверх",
 };
 
 const ACTOR_KIND_LABEL: Record<string, string> = {

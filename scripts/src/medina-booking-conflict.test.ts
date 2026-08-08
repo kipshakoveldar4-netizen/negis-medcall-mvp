@@ -62,7 +62,12 @@ function occupiedRow(over: Record<string, unknown> = {}) {
 }
 
 /** A spy that actually applies eq/gte/lt, so the range query is really exercised. */
-function spyClient(rows: Record<string, unknown[]>, log: QueryLog[], failTables: Set<string>) {
+function spyClient(
+  rows: Record<string, unknown[]>,
+  log: QueryLog[],
+  failTables: Set<string>,
+  failReadsOn: Set<string>,
+) {
   return {
     from(table: string) {
       const entry: QueryLog = { table, op: "select", filters: {} };
@@ -70,7 +75,13 @@ function spyClient(rows: Record<string, unknown[]>, log: QueryLog[], failTables:
       const applied: Filter[] = [];
       const builder: Record<string, unknown> = {};
       const chain = () => builder;
+      // failTables kills the table outright. failReadsOn kills only reads, which
+      // is what a statement timeout or a lost index actually looks like — and it
+      // is the only way to test that the guard degrades rather than that the
+      // whole write path fails.
       const failure = failTables.has(table) ? { message: `relation ${table} unavailable`, code: "42P01" } : null;
+      const readFailure = failure
+        ?? (failReadsOn.has(table) ? { message: `canceling statement due to statement timeout on ${table}`, code: "57014" } : null);
 
       const matching = () =>
         (rows[table] ?? []).map((r) => r as Record<string, unknown>).filter((row) =>
@@ -91,14 +102,16 @@ function spyClient(rows: Record<string, unknown[]>, log: QueryLog[], failTables:
         order: () => chain(),
         limit: () => chain(),
         single: () => chain(),
-        maybeSingle: () => Promise.resolve({ data: matching()[0] ?? null, error: failure }),
+        maybeSingle: () => Promise.resolve({ data: matching()[0] ?? null, error: readFailure }),
         eq(column: string, value: unknown) { applied.push({ column, op: "eq", value }); entry.filters[column] = value; return chain(); },
         gte(column: string, value: unknown) { applied.push({ column, op: "gte", value }); entry.filters[`${column}__gte`] = value; return chain(); },
         lt(column: string, value: unknown) { applied.push({ column, op: "lt", value }); entry.filters[`${column}__lt`] = value; return chain(); },
         in(column: string, value: unknown) { entry.filters[column] = value; return chain(); },
         then(resolve: (value: { data: unknown; error: unknown; count?: number }) => void) {
           const found = matching();
-          resolve({ data: found, error: failure, count: found.length });
+          // A write chain resolves through here too; only reads may be failed
+          // selectively, so an insert still lands while its guard cannot run.
+          resolve({ data: found, error: entry.op === "select" ? readFailure : failure, count: found.length });
         },
       });
       return builder;
@@ -125,7 +138,11 @@ function mockResponse(): MockResponse {
   return res;
 }
 
-async function loadRouter(options: { appointments?: unknown[]; failTables?: string[] } = {}) {
+async function loadRouter(options: {
+  appointments?: unknown[];
+  failTables?: string[];
+  failReadsOn?: string[];
+} = {}) {
   const log: QueryLog[] = [];
   process.env.SUPABASE_URL = "https://project.example.test";
   process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key";
@@ -148,7 +165,7 @@ async function loadRouter(options: { appointments?: unknown[]; failTables?: stri
     appointments: options.appointments ?? [],
   };
   supabaseModule.setSupabaseServerClientFactoryForTests(() =>
-    spyClient(rows, log, new Set(options.failTables ?? [])));
+    spyClient(rows, log, new Set(options.failTables ?? []), new Set(options.failReadsOn ?? [])));
 
   const routerModule = (await import(pathToFileURL(routerPath).href)) as {
     default: (req: unknown, res: MockResponse) => Promise<unknown>;
@@ -323,19 +340,141 @@ test("BC13 a patch that carries only a status is judged on the merged row, not t
 
 /* ── Degradation ── */
 
-test("BC14 a check that cannot run does not become a check that passed — nor a clinic that cannot book", async () => {
-  const call = await loadRouter({ appointments: [occupiedRow()], failTables: ["appointments"] });
-  const { res } = await call({ body: booking() });
+test("BC14 when only the guard's read fails, the clinic still books and the reason reaches the operator log", async () => {
+  // The first version of this test killed the whole appointments table, so the
+  // 502 it asserted came from the pre-existing write-failure path and it would
+  // have passed with the guard deleted entirely. Review caught that. Here only
+  // the SELECT fails — a statement timeout, a lost index — which is the shape
+  // this degradation actually takes.
+  const warnings: string[] = [];
+  const realWarn = console.warn;
+  console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(" ")); };
+  try {
+    const call = await loadRouter({ appointments: [occupiedRow()], failReadsOn: ["appointments"] });
+    const { res, log } = await call({ body: booking() });
 
-  // The read fails, so the conflict cannot be seen. Refusing every booking on
-  // a failed advisory check would be worse than the state before this existed;
-  // the write is attempted and its own failure is reported honestly.
-  assert.equal(res.statusCode, 502, JSON.stringify(res.body));
-  assert.equal(res.body.success, false);
-  const text = JSON.stringify(res.body);
-  for (const leak of ["relation", "42P01"]) {
-    assert.ok(!text.includes(leak), `the answer must not quote the database: ${leak}`);
+    // Refusing every booking because an advisory check is unavailable would be
+    // worse than the state before this existed. The booking goes through.
+    assert.equal(res.statusCode, 201, JSON.stringify(res.body));
+    assert.equal(writes(log).length, 1, "the clinic is not blocked by its own guard");
+  } finally {
+    console.warn = realWarn;
   }
+
+  assert.ok(
+    warnings.some((line) => line.includes("conflict check unavailable")),
+    "a guarantee that silently disappears is worse than none: the operator log has to say so",
+  );
+  assert.ok(
+    !warnings.join("\n").includes("Лаура"),
+    "and it must not carry patient data into the log",
+  );
+});
+
+test("BC17 confirming an arrival does not re-judge an appointment that has not moved", async () => {
+  // The regression this branch created and review caught. A registrar puts an
+  // urgent case over a busy hour on purpose — allowed, BC3 — and then the
+  // patient arrives. Pressing «Пришёл» sends a full PATCH with no override, and
+  // the first version answered 409 from the NEIGHBOUR: the buttons stopped
+  // working forever on both rows, with no explanation and no way around. The
+  // same blow landed on every appointment already in production, none of which
+  // had ever passed this check.
+  const call = await loadRouter({
+    appointments: [
+      occupiedRow(),
+      occupiedRow({ id: OTHER_ID, client_name: "Мария Ли", status: "scheduled" }),
+    ],
+  });
+  const { res, log } = await call({
+    method: "PATCH",
+    body: { id: OTHER_ID, updates: { status: "arrived" } },
+  });
+
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  assert.equal(
+    log.filter((e) => e.table === "appointments" && e.op === "select" && "doctor_name" in e.filters).length,
+    0,
+    "an appointment staying where it is takes nothing new; there is nothing to judge and no query to run",
+  );
+});
+
+test("BC18 a status the product does not know still holds its slot", async () => {
+  // The browser normalises anything unknown to «scheduled» and paints it as
+  // booked; the first version of the server read the same row as free. Client
+  // and server disagreed, and the unsafe reading was the default. The column
+  // has no CHECK, and clearing the field writes NULL.
+  for (const status of ["ожидает", "", "новая"]) {
+    const call = await loadRouter({ appointments: [occupiedRow({ status })] });
+    const { res } = await call({ body: booking() });
+    assert.equal(res.statusCode, 409, `status ${JSON.stringify(status)} must keep holding the slot`);
+  }
+});
+
+test("BC19 clearing the doctor is judged on the cleared value, not on the one being removed", async () => {
+  // buildPatchRow spells «clear this field» as null — the same null it uses for
+  // «not in the patch» — so a merge through ?? judged the removal by the doctor
+  // being removed and refused a change that would have freed the slot.
+  const call = await loadRouter({
+    appointments: [occupiedRow(), occupiedRow({ id: OTHER_ID, client_name: "Мария Ли" })],
+  });
+  const { res, log } = await call({
+    method: "PATCH",
+    body: { id: OTHER_ID, updates: { doctor: "" } },
+  });
+
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  const update = log.find((e) => e.table === "appointments" && e.op === "update");
+  assert.equal((update?.filters.__row as Record<string, unknown>).doctor_name, null);
+});
+
+test("BC20 the column and the arithmetic agree on how long a visit is", async () => {
+  // readNumber("") is 0, which is finite, so the old `?? 60` never caught it:
+  // the row stored 0 while the check treated the visit as an hour. The card
+  // said «0 мин» and the refusal said the hour was taken.
+  const call = await loadRouter();
+  const { res, log } = await call({ body: booking({ durationMinutes: "" }) });
+
+  assert.equal(res.statusCode, 201, JSON.stringify(res.body));
+  const insert = log.find((e) => e.table === "appointments" && e.op === "insert");
+  assert.equal(
+    (insert?.filters.__row as Record<string, unknown>).duration_minutes,
+    60,
+    "what the check assumes is what the column holds",
+  );
+});
+
+test("BC21 an appointment does not conflict with itself because of letter case", async () => {
+  // Postgres compares uuid canonically and renders it lower-case; a caller
+  // passing the same id upper-cased would have failed to match itself here.
+  const call = await loadRouter({ appointments: [occupiedRow()] });
+  const { res } = await call({
+    method: "PATCH",
+    body: { id: EXISTING_ID.toUpperCase(), updates: { starts_at: SLOT_START } },
+  });
+  assert.notEqual(res.statusCode, 409, "the row must recognise itself whatever case the id arrived in");
+});
+
+test("BC22 a deliberate overbooking leaves a trace someone can find later", async () => {
+  // «The override becomes a decision someone made» is the whole justification
+  // for allowing it. A decision with no record is not one: the owner could not
+  // tell a deliberate double booking from an ordinary one, nor who authorised
+  // it, nor how many there were.
+  const call = await loadRouter({ appointments: [occupiedRow()] });
+  const { res, log } = await call({ body: booking({ allowConflict: true }) });
+
+  assert.equal(res.statusCode, 201, JSON.stringify(res.body));
+  const journalRows = log
+    .filter((e) => e.table === "audit_logs" && e.op === "insert")
+    .map((e) => e.filters.__row as Record<string, unknown>);
+
+  assert.ok(
+    journalRows.some((row) => row.action === "overbooked"),
+    `the override must be journaled; entries were: ${journalRows.map((r) => r.action).join(", ") || "none"}`,
+  );
+  const overbooked = journalRows.find((row) => row.action === "overbooked");
+  assert.equal(overbooked?.entity_type, "appointment");
+  assert.equal(overbooked?.workspace_id, WORKSPACE_A);
+  assert.ok(overbooked?.actor_staff_user_id, "and it names who decided");
 });
 
 /* ── Source pins ── */

@@ -1331,7 +1331,7 @@ const configs: Record<CrmResource, ResourceConfig> = {
       service: readString(body.service) || null,
       doctor_name: firstString(body.doctor, body.doctor_name, body.doctorName) || null,
       starts_at: maybeDate(body.starts_at ?? body.startsAt),
-      duration_minutes: readNumber(body.durationMinutes ?? body.duration_minutes) ?? 60,
+      duration_minutes: appointmentMinutes(body.durationMinutes ?? body.duration_minutes),
       status: readString(body.status) || "scheduled",
       notes: firstString(body.notes, body.time) || null,
       source: readString(body.source) || null,
@@ -1985,8 +1985,22 @@ export class AppointmentConflictError extends Error {
   }
 }
 
-/** Statuses that still occupy the slot; a cancelled or no-show visit does not. */
-const OCCUPYING_APPOINTMENT_STATUSES = ["scheduled", "confirmed", "arrived"];
+/**
+ * Only these two release the slot; everything else holds it.
+ *
+ * The first version listed the three occupying statuses instead, and an
+ * unknown value therefore freed the time — while the browser normalises
+ * anything unknown to «scheduled» and paints it as booked
+ * (AppointmentsPage normalizeStatus). Client and server disagreed about the
+ * same row, and the unsafe reading was the default: a status the column has no
+ * CHECK against, or a NULL left by clearing the field, made an appointment
+ * invisible to every future check while it kept its place on the calendar.
+ */
+const RELEASING_APPOINTMENT_STATUSES = ["cancelled", "no_show"];
+
+function occupiesSlot(status: string): boolean {
+  return !RELEASING_APPOINTMENT_STATUSES.includes(status.trim().toLowerCase());
+}
 const DEFAULT_APPOINTMENT_MINUTES = 60;
 /**
  * How far back to look for a booking that could still be running.
@@ -2000,6 +2014,14 @@ const DEFAULT_APPOINTMENT_MINUTES = 60;
  */
 const CONFLICT_LOOKBACK_MS = 24 * 60 * 60 * 1000;
 
+/**
+ * One number for the column and for the arithmetic.
+ *
+ * `readNumber("")` and `readNumber(null)` are 0, which is finite, so the old
+ * `?? 60` never caught them: the row stored 0 while the check treated the
+ * visit as an hour. The card said «0 мин» and the refusal said the hour was
+ * taken. Both sides now go through here.
+ */
 function appointmentMinutes(value: unknown): number {
   const minutes = readNumber(value);
   return typeof minutes === "number" && minutes > 0 ? minutes : DEFAULT_APPOINTMENT_MINUTES;
@@ -2012,7 +2034,7 @@ async function assertNoAppointmentConflict(
 ): Promise<void> {
   if (!candidate.doctorName || !candidate.startsAt) return;
   // A visit that is cancelled or was a no-show does not hold its slot.
-  if (!OCCUPYING_APPOINTMENT_STATUSES.includes(candidate.status.toLowerCase())) return;
+  if (!occupiesSlot(candidate.status)) return;
 
   const start = Date.parse(candidate.startsAt);
   if (!Number.isFinite(start)) return;
@@ -2038,8 +2060,11 @@ async function assertNoAppointmentConflict(
   for (const raw of Array.isArray(data) ? data : []) {
     const row = asRecord(raw);
     const id = readString(row.id);
-    if (candidate.id && id === candidate.id) continue;
-    if (!OCCUPYING_APPOINTMENT_STATUSES.includes(readString(row.status).toLowerCase())) continue;
+    // #4: Postgres compares uuid canonically and renders it lower-case, so a
+    // caller passing the same id in upper case would fail to match itself here
+    // and the appointment would conflict with itself on every edit.
+    if (candidate.id && id.toLowerCase() === candidate.id.toLowerCase()) continue;
+    if (!occupiesSlot(readString(row.status))) continue;
 
     const otherStart = Date.parse(readString(row.starts_at));
     if (!Number.isFinite(otherStart)) continue;
@@ -2377,6 +2402,22 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
         changes: diffForJournal(createdEntity, {}, stored),
         ...journalActor(req),
       });
+
+      // Обоснование гейта — «перезапись стала решением, которое кто-то принял».
+      // Решение без следа таковым не является: владелец не смог бы ни отличить
+      // сознательную перезапись от рядовой брони, ни узнать, кто её
+      // санкционировал. Отдельная строка журнала — и есть этот след.
+      if (resource === "appointments" && allowsAppointmentConflict(body)) {
+        await recordCrmChange({
+          supabase,
+          workspaceId,
+          entity: "appointment",
+          entityId: readString(stored.id),
+          action: "overbooked",
+          changes: [],
+          ...journalActor(req),
+        });
+      }
     }
 
     return sendJson(res, 201, success("supabase", { [resource === "content-videos" ? "video" : "item"]: item, item }));
@@ -2562,13 +2603,40 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
       // Проверять надо по СЛИЯНИЮ: патч может нести только новое время, только
       // нового врача или только статус, а занимает слот их сочетание. `before`
       // уже прочитан для журнала — второго запроса это не стоит.
-      await assertNoAppointmentConflict(supabase, workspaceId, {
-        id,
-        doctorName: readString(row.doctor_name ?? before.doctor_name),
-        startsAt: readString(row.starts_at ?? before.starts_at),
-        durationMinutes: appointmentMinutes(row.duration_minutes ?? before.duration_minutes),
-        status: readString(row.status ?? before.status),
-      });
+      //
+      // «Есть в патче», а не `??`: buildPatchRow кодирует «очистить поле» тем же
+      // null, что и «поля нет», поэтому `??` судил снятие врача по прежнему
+      // врачу и отказывал в правке, которая ничей слот бы не заняла.
+      const merged = {
+        doctorName: readString("doctor_name" in row ? row.doctor_name : before.doctor_name),
+        startsAt: readString("starts_at" in row ? row.starts_at : before.starts_at),
+        durationMinutes: appointmentMinutes("duration_minutes" in row ? row.duration_minutes : before.duration_minutes),
+        status: readString("status" in row ? row.status : before.status),
+      };
+
+      // И только если правка действительно ДВИГАЕТ запись или ОЖИВЛЯЕТ её.
+      //
+      // Первая версия проверяла любой PATCH — и этим ломала будни клиники,
+      // которые сама же и создала. Регистратор сознательно ставит срочный
+      // случай поверх занятого часа («Сохранить всё равно», это разрешено);
+      // пациент приходит, регистратор жмёт «Пришёл» — и ловит 409 от соседней
+      // записи, у которой на карточке нет кнопки обхода. Кнопки «Подтвердить»
+      // и «Пришёл» переставали работать навсегда на обеих записях. Тем же
+      // ударом накрывало всю уже существующую историю production, которая
+      // никогда этой проверки не проходила.
+      //
+      // Запись, которая остаётся на своём месте в своём статусе, не занимает
+      // ничего нового — судить её повторно не за что.
+      const moved = ["doctor_name", "starts_at", "duration_minutes"].some(
+        (column) => column in row && readString(row[column]) !== readString(before[column]),
+      );
+      const revived = "status" in row
+        && occupiesSlot(merged.status)
+        && !occupiesSlot(readString(before.status));
+
+      if (moved || revived) {
+        await assertNoAppointmentConflict(supabase, workspaceId, { id, ...merged });
+      }
     }
 
     const { data, error } = await supabase
