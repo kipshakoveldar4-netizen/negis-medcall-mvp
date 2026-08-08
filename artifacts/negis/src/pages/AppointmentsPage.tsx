@@ -578,7 +578,13 @@ export function AppointmentsPage() {
       await patchAppointment(updated);
       toast.success(`Статус: ${getAppointmentStatusLabel(status)}`);
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Не удалось обновить статус. Изменение сохранено локально.");
+      // Отказ сервера — откат, а не фантомный статус до перезагрузки. Прежний
+      // текст обещал сохранение на этом устройстве, которого в рабочей клинике
+      // не происходит. Причина отказа — оператору в консоль, тост остаётся
+      // по-русски и без внутренних имён полей.
+      setItems((current) => current.map((item) => (item.id === appointment.id ? appointment : item)));
+      console.warn("appointments: status patch refused", error instanceof Error ? error.message : error);
+      toast.error("Не удалось обновить статус. Изменение отменено.");
     }
   };
 
@@ -612,12 +618,20 @@ export function AppointmentsPage() {
     }
 
     if (editingId) {
+      const previous = items.find((item) => item.id === editingId);
       setItems((current) => current.map((item) => (item.id === editingId ? appointment : item)));
       try {
         await patchAppointment(appointment);
         toast.success("Запись обновлена");
       } catch (error) {
-        toast.error(error instanceof Error ? error.message : "Запись сохранена локально, но сервер не ответил");
+        // Та же честность, что и у статуса: отказ виден отказом, строка
+        // возвращается к серверной правде, детали — в консоль оператора.
+        if (previous) {
+          setItems((current) => current.map((item) => (item.id === editingId ? previous : item)));
+        }
+        console.warn("appointments: patch refused", error instanceof Error ? error.message : error);
+        toast.error("Не удалось сохранить запись. Изменение отменено.");
+        return;
       }
     } else {
       addItem(appointment);
@@ -840,14 +854,19 @@ export function AppointmentsPage() {
 
             <div className="grid gap-4 md:grid-cols-2">
               <div>
-                <TextField label="Клиент/имя" value={form.client} onChange={(client) => setForm((current) => ({ ...current, client }))} placeholder="Имя клиента" />
+                {/* Смена имени или телефона снимает унаследованную связь: форма,
+                    открытая из заявки Лауры, в которую вписали другого человека,
+                    иначе сохранила бы визит в карточку Лауры. Ложная связь в
+                    медицинской истории хуже потерянной; сигнал оператору —
+                    исчезающая строка «Будет привязана…». */}
+                <TextField label="Клиент/имя" value={form.client} onChange={(client) => setForm((current) => ({ ...current, client, clientId: "" }))} placeholder="Имя клиента" />
                 {form.clientId ? (
                   <p className="mt-1 text-[11px] font-semibold" style={{ color: "var(--negis-primary)" }} data-testid="appointment-client-linked">
                     Будет привязана к карточке клиента
                   </p>
                 ) : null}
               </div>
-              <TextField label="Телефон" value={form.phone} onChange={(phone) => setForm((current) => ({ ...current, phone }))} placeholder="+7..." />
+              <TextField label="Телефон" value={form.phone} onChange={(phone) => setForm((current) => ({ ...current, phone, clientId: "" }))} placeholder="+7..." />
               <TextField label="WhatsApp" value={form.whatsapp} onChange={(whatsapp) => setForm((current) => ({ ...current, whatsapp }))} placeholder="+7..." />
               <TextField label="Услуга" value={form.service} onChange={(service) => setForm((current) => ({ ...current, service }))} />
               <SelectField label="Врач" value={form.doctor} onChange={(doctor) => setForm((current) => ({ ...current, doctor }))}>

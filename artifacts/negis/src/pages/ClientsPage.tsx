@@ -211,7 +211,10 @@ function saveAppointmentPrefill(client: Client) {
   if (typeof window === "undefined") return;
   window.localStorage.setItem(
     workspaceScopedKey(APPOINTMENT_PREFILL_KEY),
-    JSON.stringify({ clientName: client.name, phone: client.phone, source: client.source }),
+    // clientId — то, ради чего запись вообще привязывается к карточке.
+    // Сосед saveDealPrefill передавал его всегда; здесь он был потерян, и
+    // самый прямой поток «записать клиента» создавал визит без связи.
+    JSON.stringify({ clientId: client.id, clientName: client.name, phone: client.phone, source: client.source }),
   );
 }
 

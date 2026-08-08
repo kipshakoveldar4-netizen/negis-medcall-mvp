@@ -86,14 +86,18 @@ const LEAD_FIELDS: Record<string, FieldPolicy> = {
   notes: { label: "Заметка", sensitivity: "fact" },
 };
 
+// Keys are the COLUMN names buildPatchRow writes, never the browser's field
+// names: the diff runs against the written row. The first version listed
+// `comment` and `last_visit` here — the browser's spelling — and both were
+// dead: a diff key that matches no column journals nothing, silently.
 const CLIENT_FIELDS: Record<string, FieldPolicy> = {
   status: { label: "Статус", sensitivity: "value" },
   source: { label: "Источник", sensitivity: "value" },
-  last_visit: { label: "Последний визит", sensitivity: "value" },
+  last_visit_at: { label: "Последний визит", sensitivity: "value" },
   full_name: { label: "Имя", sensitivity: "masked" },
   phone: { label: "Телефон", sensitivity: "masked" },
   whatsapp: { label: "WhatsApp", sensitivity: "masked" },
-  comment: { label: "Заметка", sensitivity: "fact" },
+  notes: { label: "Заметка", sensitivity: "fact" },
 };
 
 const DEAL_FIELDS: Record<string, FieldPolicy> = {
@@ -111,9 +115,9 @@ const APPOINTMENT_FIELDS: Record<string, FieldPolicy> = {
   status: { label: "Статус", sensitivity: "value" },
   service: { label: "Услуга", sensitivity: "value" },
   starts_at: { label: "Время", sensitivity: "value" },
-  doctor: { label: "Врач", sensitivity: "value" },
+  doctor_name: { label: "Врач", sensitivity: "value" },
   client_name: { label: "Пациент", sensitivity: "masked" },
-  phone: { label: "Телефон", sensitivity: "masked" },
+  client_phone: { label: "Телефон", sensitivity: "masked" },
   notes: { label: "Заметка", sensitivity: "fact" },
 };
 

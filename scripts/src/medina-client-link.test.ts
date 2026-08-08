@@ -308,6 +308,79 @@ test("CLK8 the appointments page carries clientId through every step that used t
   }
 });
 
+test("CLK10 a refused patch rolls the page back and does not claim a local save", async () => {
+  // Adversarial review of this branch: the page applied the edit to state,
+  // called the server, and on refusal showed only a toast — the list kept the
+  // phantom status until the next full load. And the fallback texts promised
+  // «сохранено локально», which in a real clinic is simply false: nothing is
+  // saved locally there. This branch introduced the first 400 on this route,
+  // so it owns making the refusal visible and rolled back.
+  const source = await readFile(
+    path.join(repoRoot, "artifacts", "negis", "src", "pages", "AppointmentsPage.tsx"),
+    "utf8",
+  );
+
+  const statusHandler = source.slice(
+    source.indexOf("const updateAppointmentStatus"),
+    source.indexOf("const findConflict"),
+  );
+  const statusCatch = statusHandler.slice(statusHandler.indexOf("catch"));
+  assert.ok(
+    statusCatch.includes("item.id === appointment.id ? appointment : item"),
+    "a refused status change must put the previous appointment back",
+  );
+
+  const submit = source.slice(source.indexOf("const submitForm"), source.indexOf("const renderDay"));
+  assert.ok(submit.includes("const previous = items.find"), "the edit path must capture what it is replacing");
+  const submitCatch = submit.slice(submit.indexOf("catch"));
+  assert.ok(
+    submitCatch.includes("? previous : item"),
+    "a refused edit must restore the previous appointment, not keep the phantom",
+  );
+
+  // Scoped to the refusal paths on purpose: the demo-mode info toast is
+  // truthful — there the collection really does live in localStorage. The lie
+  // was promising a local save in a catch block a real clinic can reach.
+  for (const [name, block] of [["status", statusCatch], ["edit", submitCatch]] as const) {
+    assert.ok(
+      !block.includes("локально"),
+      `the ${name} refusal path must not promise a local save that does not happen in a real clinic`,
+    );
+  }
+});
+
+test("CLK11 both «Записать» handoffs carry the client card, and a manual replacement drops it", async () => {
+  // Three review lenses converged on the same defect: the handoff from the
+  // client card itself — the most direct «записать клиента» flow there is —
+  // never included clientId, so only the lead path produced a linked visit.
+  const clients = await readFile(
+    path.join(repoRoot, "artifacts", "negis", "src", "pages", "ClientsPage.tsx"),
+    "utf8",
+  );
+  const clientPrefill = clients.slice(
+    clients.indexOf("function saveAppointmentPrefill("),
+    clients.indexOf("function saveDealPrefill("),
+  );
+  assert.ok(
+    clientPrefill.includes("clientId: client.id"),
+    "the client card's own handoff must name the client it is about",
+  );
+
+  // And the inherited link must not survive the operator writing a different
+  // person into the form: a visit filed to the wrong patient card is worse
+  // than an unlinked visit.
+  const appointments = await readFile(
+    path.join(repoRoot, "artifacts", "negis", "src", "pages", "AppointmentsPage.tsx"),
+    "utf8",
+  );
+  for (const field of ["client", "phone"]) {
+    assert.ok(
+      new RegExp(`\\.\\.\\.current, ${field}, clientId: ""`).test(appointments),
+      `editing «${field}» must clear the inherited link — the hint line disappearing is the operator's signal`,
+    );
+  }
+});
+
 test("CLK9 the old uuid-shape guard is gone from the lead mapping", async () => {
   const server = await readFile(path.join(repoRoot, "lib", "crm", "server.ts"), "utf8");
   assert.ok(
