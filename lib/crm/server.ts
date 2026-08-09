@@ -70,6 +70,8 @@ export type CrmResource =
   | "lead-stages"
   | "lead-sources"
   | "clinic-services"
+  | "clinic-doctors"
+  | "doctor-schedule"
   | "deals"
   | "appointments"
   | "calls"
@@ -453,6 +455,47 @@ function buildPatchRow(resource: CrmResource, body: JsonRecord): JsonRecord {
     if (Object.keys(row).length > 0) row.updated_at = new Date().toISOString();
   }
 
+  if (resource === "clinic-doctors") {
+    // Пустое имя — не «очистить поле», а нарушение NOT NULL.
+    if (hasAnyKey(body, ["fullName", "full_name", "name"])) {
+      const fullName = firstString(body.fullName, body.full_name, body.name);
+      if (!fullName) throw new CrmReferenceValidationError(["fullName is required"]);
+      row.full_name = fullName;
+    }
+    setText("specialty", ["specialty"]);
+    setNumber("sort_order", ["sortOrder", "sort_order"]);
+    setBoolean("is_active", ["isActive", "is_active"]);
+    if (Object.keys(row).length > 0) row.updated_at = new Date().toISOString();
+  }
+
+  if (resource === "doctor-schedule") {
+    // Тот же список проверок, что и на создании: расходиться им нельзя.
+    const details = doctorShiftDetails(body);
+    if (details.length > 0) throw new CrmReferenceValidationError(details);
+
+    if (hasAnyKey(body, ["weekday"])) row.weekday = readNullableNumber(body.weekday);
+    if (hasAnyKey(body, ["onDate", "on_date"])) {
+      const onDate = firstString(body.onDate, body.on_date);
+      row.on_date = onDate || null;
+      // Конец диапазона следует за началом, если его не прислали отдельно:
+      // иначе правка даты оставила бы прошлый конец и перекрытие считалось бы
+      // по диапазону, которого клиника не задавала.
+      if (!hasAnyKey(body, ["onDateEnd", "on_date_end"])) row.on_date_end = onDate || null;
+    }
+    if (hasAnyKey(body, ["onDateEnd", "on_date_end"])) {
+      row.on_date_end = firstString(body.onDateEnd, body.on_date_end) || null;
+    }
+    setBoolean("is_working", ["isWorking", "is_working"]);
+    if (hasAnyKey(body, ["startMinute", "start_minute"])) {
+      row.start_minute = readNullableNumber(body.startMinute ?? body.start_minute);
+    }
+    if (hasAnyKey(body, ["endMinute", "end_minute"])) {
+      row.end_minute = readNullableNumber(body.endMinute ?? body.end_minute);
+    }
+    setText("note", ["note"]);
+    if (Object.keys(row).length > 0) row.updated_at = new Date().toISOString();
+  }
+
   if (resource === "deals") {
     setText("title", ["title"]);
     if (hasAnyKey(body, ["amountMinor", "amount_minor"])) {
@@ -793,6 +836,75 @@ function serviceNumberDetails(body: JsonRecord): string[] {
   return details;
 }
 
+const MINUTES_IN_DAY = 1440;
+
+/**
+ * Проверки строки графика, одинаковые на создании и на правке.
+ *
+ * Они намеренно повторяют CHECK-ограничения миграции 033. Ограничение, до
+ * которого долетел запрос, возвращается из Postgres пятьсот второй «сбой
+ * сервиса» без единого слова о том, что именно не так, — а здесь оператор
+ * получает поле и причину.
+ */
+function doctorShiftDetails(body: JsonRecord): string[] {
+  const details: string[] = [];
+
+  const hasWeekday = hasAnyKey(body, ["weekday"]) && body.weekday !== null && body.weekday !== "";
+  const onDate = firstString(body.onDate, body.on_date);
+  if (hasWeekday === Boolean(onDate)) {
+    // Ровно один ключ строки: либо день недели, либо дата. Обе сразу — это два
+    // разных правила в одной строке, и разрешать их значит выбирать за клинику,
+    // какое из них главнее.
+    details.push("either weekday or onDate is required, not both");
+  }
+
+  if (hasWeekday) {
+    const weekday = readNullableNumber(body.weekday);
+    if (weekday === null || !Number.isInteger(weekday) || weekday < 1 || weekday > 7) {
+      details.push("weekday must be an integer between 1 (Monday) and 7 (Sunday)");
+    }
+  }
+
+  if (onDate) {
+    if (!maybeDate(onDate)) details.push("onDate must be a valid date");
+    const onDateEnd = firstString(body.onDateEnd, body.on_date_end);
+    if (onDateEnd) {
+      if (!maybeDate(onDateEnd)) details.push("onDateEnd must be a valid date");
+      else if (onDateEnd < onDate) details.push("onDateEnd must not be earlier than onDate");
+    }
+  }
+
+  const isWorking = hasAnyKey(body, ["isWorking", "is_working"])
+    ? readBoolean(body.isWorking ?? body.is_working)
+    : true;
+  const rawStart = body.startMinute ?? body.start_minute;
+  const rawEnd = body.endMinute ?? body.end_minute;
+  const start = readNullableNumber(rawStart);
+  const end = readNullableNumber(rawEnd);
+
+  if (!isWorking) {
+    // Выходной — это пустые часы. Часы у выходного означали бы строку, которая
+    // одновременно говорит «не работает» и «работает с девяти».
+    if (start !== null || end !== null) details.push("a day off must not carry working hours");
+  } else {
+    if (isUnreadableNumber(rawStart) || isUnreadableNumber(rawEnd)) {
+      details.push("startMinute and endMinute must be numbers");
+    } else if (start === null || end === null) {
+      details.push("startMinute and endMinute are required for a working row");
+    } else if (!Number.isInteger(start) || !Number.isInteger(end)) {
+      details.push("startMinute and endMinute must be integers");
+    } else if (start < 0 || start >= MINUTES_IN_DAY) {
+      details.push("startMinute must be between 0 and 1439");
+    } else if (end <= start || end > MINUTES_IN_DAY * 2 || end - start > MINUTES_IN_DAY) {
+      // Конец может уехать за полночь — ночной приём существует, — но смена
+      // длиннее суток сменой уже не является.
+      details.push("endMinute must be after startMinute and no more than 24 hours later");
+    }
+  }
+
+  return details;
+}
+
 function resourceValidationDetails(resource: CrmResource, body: JsonRecord): string[] {
   const details: string[] = [];
 
@@ -850,6 +962,17 @@ function resourceValidationDetails(resource: CrmResource, body: JsonRecord): str
     // в уникальном индексе 032, а его нарушение переводится в 400 ниже.
     if (!readString(body.name)) details.push("name is required");
     details.push(...serviceNumberDetails(body));
+  }
+
+  if (resource === "clinic-doctors") {
+    if (!firstString(body.fullName, body.full_name, body.name)) details.push("fullName is required");
+  }
+
+  if (resource === "doctor-schedule") {
+    // doctor_id объявлен NOT NULL: строка графика без врача не имеет смысла, и
+    // отсутствие ссылки — это отказ здесь, а не запись null в базу.
+    if (!firstString(body.doctorId, body.doctor_id)) details.push("doctorId is required");
+    details.push(...doctorShiftDetails(body));
   }
 
   if (resource === "appointments" && !firstString(body.client, body.client_name, body.clientName)) {
@@ -1022,6 +1145,52 @@ function makeClinicService(body: JsonRecord): JsonRecord {
   };
 }
 
+/**
+ * Строка справочника врачей.
+ *
+ * Живёт отдельно от staff_users не из-за колонок — там есть всё нужное, — а
+ * из-за людей: попасть в staff_users можно только через приглашение на почту,
+ * и приезжий врач, который в CRM не заходит, строки там не получит никогда.
+ * Плюс читать staff_users вправе только владелец и администратор, поэтому
+ * список врачей оказался бы пуст ровно у регистратора, который и записывает.
+ */
+function makeClinicDoctor(body: JsonRecord): JsonRecord {
+  return {
+    id: readString(body.id) || nextDemoId("clinic-doctor"),
+    fullName: firstString(body.fullName, body.full_name, body.name),
+    specialty: readString(body.specialty),
+    staffUserId: firstString(body.staffUserId, body.staff_user_id),
+    sortOrder: readNumber(body.sortOrder ?? body.sort_order) ?? 0,
+    isActive: hasAnyKey(body, ["isActive", "is_active"]) ? readBoolean(body.isActive ?? body.is_active) : true,
+    createdAt: firstString(body.createdAt, body.created_at),
+    updatedAt: firstString(body.updatedAt, body.updated_at),
+  };
+}
+
+/**
+ * Строка графика врача: либо недельный образец, либо исключение на диапазон дат.
+ *
+ * Минуты и день недели идут через readNullableNumber, а не readNumber: ноль —
+ * законная минута начала (полночь), и превратить «не задано» в ноль значило бы
+ * объявить, что врач работает с полуночи. Тот же урок, за который заплатила
+ * цена услуги в 032.
+ */
+function makeDoctorShift(body: JsonRecord): JsonRecord {
+  return {
+    id: readString(body.id) || nextDemoId("doctor-shift"),
+    doctorId: firstString(body.doctorId, body.doctor_id),
+    weekday: readNullableNumber(body.weekday),
+    onDate: firstString(body.onDate, body.on_date),
+    onDateEnd: firstString(body.onDateEnd, body.on_date_end),
+    isWorking: hasAnyKey(body, ["isWorking", "is_working"]) ? readBoolean(body.isWorking ?? body.is_working) : true,
+    startMinute: readNullableNumber(body.startMinute ?? body.start_minute),
+    endMinute: readNullableNumber(body.endMinute ?? body.end_minute),
+    note: readString(body.note),
+    createdAt: firstString(body.createdAt, body.created_at),
+    updatedAt: firstString(body.updatedAt, body.updated_at),
+  };
+}
+
 function makeLead(body: JsonRecord): JsonRecord {
   return {
     id: readString(body.id) || nextDemoId("lead"),
@@ -1125,6 +1294,9 @@ function makeAppointment(body: JsonRecord): JsonRecord {
     // статуса, поэтому колонка, которую он не может прочитать, приходит назад
     // пустой строкой — и следующий же клик «Пришёл» затирает связь в null.
     serviceId: firstString(body.serviceId, body.service_id),
+    // Та же причина, что и у serviceId: связь, которую нельзя прочитать,
+    // затирается первым же сохранением статуса.
+    doctorId: firstString(body.doctorId, body.doctor_id),
   };
 }
 
@@ -1540,6 +1712,51 @@ const configs: Record<CrmResource, ResourceConfig> = {
     }),
     fromRow: makeClinicService,
   },
+  "clinic-doctors": {
+    table: "clinic_doctors",
+    listKey: "doctors",
+    requiredPost: [],
+    sortableColumn: "sort_order",
+    sortableAscending: true,
+    demoItem: makeClinicDoctor,
+    toRow: (body, workspaceId) => ({
+      workspace_id: workspaceId,
+      full_name: firstString(body.fullName, body.full_name, body.name),
+      specialty: readString(body.specialty) || null,
+      sort_order: readNumber(body.sortOrder ?? body.sort_order) ?? 0,
+      is_active: hasAnyKey(body, ["isActive", "is_active"]) ? readBoolean(body.isActive ?? body.is_active) : true,
+      updated_at: new Date().toISOString(),
+      // staff_user_id здесь НЕ пишется: это ссылка на другую таблицу, и её
+      // принадлежность клинике проверяется отдельно, как все остальные ссылки.
+    }),
+    fromRow: makeClinicDoctor,
+  },
+  "doctor-schedule": {
+    table: "clinic_doctor_shifts",
+    listKey: "shifts",
+    requiredPost: [],
+    sortableColumn: "created_at",
+    sortableAscending: true,
+    demoItem: makeDoctorShift,
+    toRow: (body, workspaceId) => {
+      const onDate = firstString(body.onDate, body.on_date);
+      return {
+        workspace_id: workspaceId,
+        weekday: readNullableNumber(body.weekday),
+        on_date: onDate || null,
+        // Конец диапазона проставляется сервером, если тело его не прислало:
+        // тогда фильтр перекрытия остаётся честным сравнением двух дат, а не
+        // coalesce, которого в PostgREST-пути этого проекта нет.
+        on_date_end: onDate ? (firstString(body.onDateEnd, body.on_date_end) || onDate) : null,
+        is_working: hasAnyKey(body, ["isWorking", "is_working"]) ? readBoolean(body.isWorking ?? body.is_working) : true,
+        start_minute: readNullableNumber(body.startMinute ?? body.start_minute),
+        end_minute: readNullableNumber(body.endMinute ?? body.end_minute),
+        note: readString(body.note) || null,
+        updated_at: new Date().toISOString(),
+      };
+    },
+    fromRow: makeDoctorShift,
+  },
   deals: {
     table: "deals",
     listKey: "deals",
@@ -1623,6 +1840,7 @@ const configs: Record<CrmResource, ResourceConfig> = {
         source: row.source,
         client_id: row.client_id,
         service_id: row.service_id,
+        doctor_id: row.doctor_id,
       }),
   },
   calls: {
@@ -2098,6 +2316,7 @@ async function readWorkspaceReference(input: {
     | "lead_stages"
     | "lead_sources"
     | "clinic_services"
+    | "clinic_doctors"
     | "meta_campaign_launches"
     | "clients"
     | "leads"
@@ -2377,6 +2596,282 @@ function allowsAppointmentConflict(body: JsonRecord): boolean {
 }
 
 /**
+ * Отказ «врач не работает в это время».
+ *
+ * Отдельный класс и отдельный флаг обхода, а не расширение конфликта записей:
+ * «Сохранить всё равно» в браузере уже снимает проверку пересечений целиком, и
+ * один клик не имеет права снимать два разных правила сразу.
+ *
+ * Интервалы приходят наружу УЖЕ отформатированными во времени клиники. Если бы
+ * браузер выводил их сам, он вывел бы их в поясе ноутбука оператора — и два
+ * регистратора на по-разному настроенных машинах прочитали бы разное время в
+ * одном и том же отказе про одну и ту же запись.
+ */
+export class AppointmentOutsideScheduleError extends Error {
+  readonly schedule: {
+    doctorName: string;
+    timeZone: string;
+    localDate: string;
+    localTime: string;
+    weekdayLabel: string;
+    intervals: string[];
+  };
+
+  constructor(schedule: AppointmentOutsideScheduleError["schedule"]) {
+    super("Appointment outside doctor schedule");
+    this.name = "AppointmentOutsideScheduleError";
+    this.schedule = schedule;
+  }
+}
+
+/** Обход правила графика — свой, отдельный от обхода пересечений. */
+function allowsOutsideSchedule(body: JsonRecord): boolean {
+  return body.allowOutsideSchedule === true || body.allow_outside_schedule === true;
+}
+
+const WEEKDAY_LABELS = ["", "понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"];
+
+/**
+ * Часовой пояс клиники. Живёт в workspace_settings под ключом clinic_schedule,
+ * поэтому миграции не требует: таблица заведена 013, а строка — не схема.
+ *
+ * Отсутствие ключа — не сбой: это клиника, которая пояс ещё не задала, и
+ * правило графика для неё просто не работает. Неразбираемая строка пояса тоже
+ * возвращает null, а не пятьсот вторую: Intl бросает RangeError, и уронить на
+ * этом создание записи было бы худшим из возможных ответов.
+ */
+async function readClinicScheduleTimeZone(
+  supabase: CrmSupabaseClient,
+  workspaceId: string,
+): Promise<string | null> {
+  try {
+    const { data, error } = await supabase
+      .from("workspace_settings")
+      .select("value")
+      .eq("workspace_id", workspaceId)
+      .eq("key", "clinic_schedule")
+      .maybeSingle();
+
+    if (error) throw new Error(error.message);
+
+    const value = asRecord(asRecord(data).value);
+    if (!Object.prototype.hasOwnProperty.call(value, "timeZone")) return null;
+
+    const timeZone = readString(value.timeZone);
+    if (!timeZone) return null;
+
+    try {
+      new Intl.DateTimeFormat(undefined, { timeZone });
+    } catch {
+      console.warn(`workspace_settings clinic_schedule: unusable time zone, schedule rule stays off`);
+      return null;
+    }
+
+    return timeZone;
+  } catch (error) {
+    console.warn(supabaseWarning("workspace_settings clinic_schedule", error));
+    return null;
+  }
+}
+
+/**
+ * Мгновение → настенные часы клиники.
+ *
+ * Единственный мост между тем, как запись хранится (timestamptz, мгновение), и
+ * тем, как задан график (местное время). getHours() и getDay() здесь не
+ * появляются ни разу: они читают пояс машины, поэтому проверка проходила бы в
+ * CI (UTC) и падала на ноутбуке разработчика — или наоборот. День недели
+ * считается арифметически, а не из локализованной строки.
+ */
+function clinicWallClock(instantMs: number, timeZone: string): {
+  localDate: string;
+  localMinute: number;
+  isoWeekday: number;
+} {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    hourCycle: "h23",
+  }).formatToParts(new Date(instantMs));
+
+  const pick = (type: string) => Number(parts.find((part) => part.type === type)?.value ?? "0");
+  const year = pick("year");
+  const month = pick("month");
+  const day = pick("day");
+  const hour = pick("hour");
+  const minute = pick("minute");
+
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return {
+    localDate: `${year}-${pad(month)}-${pad(day)}`,
+    localMinute: hour * 60 + minute,
+    isoWeekday: new Date(Date.UTC(year, month - 1, day)).getUTCDay() || 7,
+  };
+}
+
+/** «540» → «09:00», во времени клиники. Минуты за полночь сворачиваются. */
+function formatClinicMinute(minute: number): string {
+  const normalized = ((minute % MINUTES_IN_DAY) + MINUTES_IN_DAY) % MINUTES_IN_DAY;
+  const hours = Math.floor(normalized / 60);
+  const minutes = normalized % 60;
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
+}
+
+function previousLocalDate(localDate: string): string {
+  const [year, month, day] = localDate.split("-").map(Number);
+  const previous = new Date(Date.UTC(year, month - 1, day - 1));
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${previous.getUTCFullYear()}-${pad(previous.getUTCMonth() + 1)}-${pad(previous.getUTCDate())}`;
+}
+
+type ShiftRow = {
+  weekday: unknown;
+  on_date: unknown;
+  on_date_end: unknown;
+  is_working: unknown;
+  start_minute: unknown;
+  end_minute: unknown;
+};
+
+/**
+ * Интервалы работы врача на одну местную дату, в минутах от её полуночи.
+ *
+ * Исключение на дату ЗАМЕЩАЕТ недельный образец целиком: клиника, поставившая
+ * отпуск, не должна помнить, что под ним остался вторник.
+ */
+function intervalsForDate(input: {
+  localDate: string;
+  isoWeekday: number;
+  weekly: ShiftRow[];
+  dated: ShiftRow[];
+}): { intervals: Array<[number, number]>; explicitDayOff: boolean; hasRule: boolean } {
+  const covering = input.dated.filter((row) => {
+    const from = readString(row.on_date);
+    const to = readString(row.on_date_end) || from;
+    return Boolean(from) && from <= input.localDate && input.localDate <= to;
+  });
+
+  const source = covering.length > 0
+    ? covering
+    : input.weekly.filter((row) => readNullableNumber(row.weekday) === input.isoWeekday);
+
+  if (source.length === 0) return { intervals: [], explicitDayOff: false, hasRule: false };
+
+  const explicitDayOff = source.every((row) => !readBoolean(row.is_working));
+  const intervals: Array<[number, number]> = [];
+  for (const row of source) {
+    if (!readBoolean(row.is_working)) continue;
+    const start = readNullableNumber(row.start_minute);
+    const end = readNullableNumber(row.end_minute);
+    if (start === null || end === null) continue;
+    intervals.push([start, end]);
+  }
+
+  return { intervals, explicitDayOff, hasRule: true };
+}
+
+/**
+ * «Работает ли врач в это время» — правило, которого у продукта не было.
+ *
+ * Семь выходов «пропустить молча», и каждый из них намеренный: правило,
+ * которое отказывает при любой неопределённости, закрыло бы регистратуру в
+ * первый же день у клиники, которая график не заполняла. Отсутствие графика —
+ * это отсутствие правила, а не «закрыто».
+ *
+ * Проверяется только НАЧАЛО визита. Дневная сетка не рисует длительность —
+ * полуторачасовой визит в 10:00 оставляет строки 10:30 и 11:00 подписанными
+ * «Свободно», — поэтому правило про конец визита отказывало бы в записи,
+ * которую экран показывает свободной, без единого видимого основания.
+ */
+async function assertDoctorIsWorking(
+  supabase: CrmSupabaseClient,
+  workspaceId: string,
+  candidate: { id?: string; doctorId: string; doctorName: string; startsAt: string; status: string },
+): Promise<void> {
+  // (a) свободный ввод врача, старая запись, смоук-тест — связи нет, судить не о чем.
+  if (!candidate.doctorId) return;
+  // (b) отменённая запись слот не занимает и графику не подчиняется.
+  if (!occupiesSlot(candidate.status)) return;
+  // (c) непарсимое время. Это НЕ валидатор даты: maybeDate молча пишет null.
+  const instant = Date.parse(candidate.startsAt);
+  if (!Number.isFinite(instant)) return;
+
+  // (d) пояс клиники не задан или не читается — правила нет.
+  const timeZone = await readClinicScheduleTimeZone(supabase, workspaceId);
+  if (!timeZone) return;
+
+  const wall = clinicWallClock(instant, timeZone);
+  const previous = previousLocalDate(wall.localDate);
+
+  let weekly: ShiftRow[] = [];
+  let dated: ShiftRow[] = [];
+  try {
+    // (e) любой отказ чтения — предупреждение без единого слова о пациенте,
+    // и пропуск: график не должен становиться новым способом сломать запись.
+    const [weeklyResult, datedResult] = await Promise.all([
+      supabase
+        .from("clinic_doctor_shifts")
+        .select("weekday,on_date,on_date_end,is_working,start_minute,end_minute")
+        .eq("workspace_id", workspaceId)
+        .eq("doctor_id", candidate.doctorId)
+        .gte("weekday", 1),
+      supabase
+        .from("clinic_doctor_shifts")
+        .select("weekday,on_date,on_date_end,is_working,start_minute,end_minute")
+        .eq("workspace_id", workspaceId)
+        .eq("doctor_id", candidate.doctorId)
+        .lte("on_date", wall.localDate)
+        .gte("on_date_end", previous),
+    ]);
+
+    if (weeklyResult.error) throw new Error(weeklyResult.error.message);
+    if (datedResult.error) throw new Error(datedResult.error.message);
+
+    weekly = (Array.isArray(weeklyResult.data) ? weeklyResult.data : []) as ShiftRow[];
+    dated = (Array.isArray(datedResult.data) ? datedResult.data : []) as ShiftRow[];
+  } catch (error) {
+    console.warn(supabaseWarning("clinic_doctor_shifts", error));
+    return;
+  }
+
+  const today = intervalsForDate({ localDate: wall.localDate, isoWeekday: wall.isoWeekday, weekly, dated });
+
+  // (f) графика у врача нет вовсе — правила нет.
+  const yesterdayWeekday = wall.isoWeekday === 1 ? 7 : wall.isoWeekday - 1;
+  const yesterday = intervalsForDate({ localDate: previous, isoWeekday: yesterdayWeekday, weekly, dated });
+  if (!today.hasRule && !yesterday.hasRule) return;
+
+  // Ночная смена вчерашнего дня доживает до утра сегодняшнего: её интервал
+  // сдвигается на сутки назад и сравнивается на той же оси.
+  const intervals: Array<[number, number]> = [
+    ...today.intervals,
+    ...yesterday.intervals.map(([start, end]) => [start - MINUTES_IN_DAY, end - MINUTES_IN_DAY] as [number, number]),
+  ];
+
+  const inside = intervals.some(([start, end]) => wall.localMinute >= start && wall.localMinute < end);
+  if (inside) return;
+
+  // Выходной, поставленный на дату, отказывает даже если недельный образец
+  // что-то разрешал: исключение сильнее образца.
+  const formatted = today.intervals.map(([start, end]) => `${formatClinicMinute(start)}–${formatClinicMinute(end)}`);
+
+  throw new AppointmentOutsideScheduleError({
+    doctorName: candidate.doctorName,
+    timeZone,
+    localDate: wall.localDate,
+    localTime: formatClinicMinute(wall.localMinute),
+    weekdayLabel: WEEKDAY_LABELS[wall.isoWeekday] || "",
+    intervals: today.explicitDayOff ? [] : formatted,
+  });
+}
+
+
+/**
  * The appointment's link to the patient it is for.
  *
  * The column has existed since 010 and fromRow has always returned it, but no
@@ -2600,6 +3095,119 @@ async function buildServiceLinkRow(
 }
 
 /**
+ * Ссылка записи на врача справочника. Точная копия правил buildServiceLinkRow:
+ * внешний ключ смотрит на clinic_doctors(id) без оговорки о клинике, а uuid —
+ * это форма, а не принадлежность.
+ *
+ * Имя врача эта функция НЕ пишет. Снимок «кто принимал» ставит форма: оба
+ * пишущих пути браузера отправляют объект целиком, и серверная перезапись
+ * затирала бы поправленное вручную имя на каждом сохранении.
+ */
+async function buildDoctorLinkRow(
+  supabase: CrmSupabaseClient,
+  workspaceId: string,
+  body: JsonRecord,
+  options: { requireActive: boolean },
+): Promise<JsonRecord> {
+  const row: JsonRecord = {};
+  if (!hasAnyKey(body, ["doctorId", "doctor_id"])) return row;
+
+  const raw = body.doctorId ?? body.doctor_id;
+  if (typeof raw !== "string" && raw !== null && raw !== undefined) {
+    throw new CrmReferenceValidationError(["doctorId must be a valid id"]);
+  }
+
+  const doctorId = firstString(body.doctorId, body.doctor_id);
+  if (!doctorId) {
+    row.doctor_id = null;
+    return row;
+  }
+
+  const doctor = await readWorkspaceReference({
+    supabase,
+    workspaceId,
+    table: "clinic_doctors",
+    id: doctorId,
+    select: "id,full_name,is_active",
+    fieldName: "doctorId",
+  });
+
+  // requireActive только на создании: правка прошлой записи, чей врач успел
+  // уехать в архив, обязана проходить — карточка шлёт объект целиком.
+  if (options.requireActive && !readBoolean(doctor.is_active)) {
+    throw new CrmReferenceValidationError(["doctorId must be an active doctor"]);
+  }
+
+  row.doctor_id = doctor.id;
+  return row;
+}
+
+/** Мост «врач справочника → сотрудник системы». Необязателен и проверяется как
+ *  все остальные ссылки: чужой сотрудник не имеет права оказаться врачом. */
+async function buildDoctorStaffLinkRow(
+  supabase: CrmSupabaseClient,
+  workspaceId: string,
+  body: JsonRecord,
+): Promise<JsonRecord> {
+  const row: JsonRecord = {};
+  if (!hasAnyKey(body, ["staffUserId", "staff_user_id"])) return row;
+
+  const raw = body.staffUserId ?? body.staff_user_id;
+  if (typeof raw !== "string" && raw !== null && raw !== undefined) {
+    throw new CrmReferenceValidationError(["staffUserId must be a valid id"]);
+  }
+
+  const staffUserId = firstString(body.staffUserId, body.staff_user_id);
+  if (!staffUserId) {
+    row.staff_user_id = null;
+    return row;
+  }
+
+  const staff = await readWorkspaceReference({
+    supabase,
+    workspaceId,
+    table: "staff_users",
+    id: staffUserId,
+    select: "id,status",
+    fieldName: "staffUserId",
+  });
+
+  row.staff_user_id = staff.id;
+  return row;
+}
+
+/** Врач, которому принадлежит строка графика. В отличие от связи записи, эта
+ *  ссылка обязательна: график без врача — строка ни о чём. */
+async function buildShiftDoctorLinkRow(
+  supabase: CrmSupabaseClient,
+  workspaceId: string,
+  body: JsonRecord,
+  options: { requireActive: boolean },
+): Promise<JsonRecord> {
+  const row: JsonRecord = {};
+  if (!hasAnyKey(body, ["doctorId", "doctor_id"])) return row;
+
+  const doctorId = firstString(body.doctorId, body.doctor_id);
+  if (!doctorId) throw new CrmReferenceValidationError(["doctorId is required"]);
+
+  const doctor = await readWorkspaceReference({
+    supabase,
+    workspaceId,
+    table: "clinic_doctors",
+    id: doctorId,
+    select: "id,is_active",
+    fieldName: "doctorId",
+  });
+
+  if (options.requireActive && !readBoolean(doctor.is_active)) {
+    throw new CrmReferenceValidationError(["doctorId must be an active doctor"]);
+  }
+
+  row.doctor_id = doctor.id;
+  return row;
+}
+
+/**
  * The patient this number already belongs to, asked of the database.
  *
  * Lead → client conversion used to answer this by reading every client of the
@@ -2730,20 +3338,47 @@ function isMissingAnyColumn(error: { code?: unknown; message?: unknown } | null)
   return message.includes("does not exist") || message.includes("schema cache");
 }
 
-/** Колонки, которых нет в базе, пока не применена forward-миграция 032. */
-const SERVICE_LINK_COLUMNS_FROM_032 = ["service_id"];
+/**
+ * Колонки связей и миграции, которые их заводят.
+ *
+ * Один проход, а не по функции на миграцию. Две независимые попытки исходили бы
+ * из ИСХОДНОЙ строки, поэтому в окне до 033 запись со связанной услугой
+ * потребовала бы трёх вставок и всё равно кончилась бы отказом — то есть ветка
+ * сломала бы то, что до неё работало.
+ */
+const LINK_COLUMNS_BY_MIGRATION: ReadonlyArray<readonly [string, readonly string[]]> = [
+  ["032", ["service_id"]],
+  ["033", ["doctor_id"]],
+];
 
-function rowWithout032(row: JsonRecord): { row: JsonRecord; dropped: string[] } {
+const ALL_LINK_COLUMNS: readonly string[] = LINK_COLUMNS_BY_MIGRATION.flatMap(([, columns]) => [...columns]);
+
+function rowWithoutLinkColumns(row: JsonRecord): { row: JsonRecord; dropped: Record<string, string[]> } {
   const stripped: JsonRecord = {};
-  const dropped: string[] = [];
+  const dropped: Record<string, string[]> = {};
+  for (const [migration] of LINK_COLUMNS_BY_MIGRATION) dropped[migration] = [];
+
   for (const [key, value] of Object.entries(row)) {
-    if (SERVICE_LINK_COLUMNS_FROM_032.includes(key)) {
-      if (value !== null && value !== undefined) dropped.push(key);
+    if (ALL_LINK_COLUMNS.includes(key)) {
+      if (value !== null && value !== undefined) {
+        const owner = LINK_COLUMNS_BY_MIGRATION.find(([, columns]) => columns.includes(key));
+        if (owner) dropped[owner[0]].push(key);
+      }
       continue;
     }
     stripped[key] = value;
   }
   return { row: stripped, dropped };
+}
+
+/** Одна строка лога на миграцию, в прежней формулировке. */
+function warnDroppedLinkColumns(resource: string, dropped: Record<string, string[]>, verb: "creating" | "saving") {
+  for (const [migration, columns] of Object.entries(dropped)) {
+    console.warn(
+      `${resource}: columns from migration ${migration} are not present yet (${columns.join(", ") || "none set"}); `
+        + `${verb} without them`,
+    );
+  }
 }
 
 /**
@@ -2763,6 +3398,12 @@ function isMissingClinicServices(error: { code?: unknown; message?: unknown } | 
   if (!error) return false;
   if (CATALOG_MISSING_CODES.has(readString(error.code))) return true;
   return readString(error.message).toLowerCase().includes("schema cache");
+}
+
+/** То же условие для таблиц миграции 033. Отдельное имя, а не переименование
+ *  соседа: два справочника — два экрана и два разных сообщения оператору. */
+function isMissingDirectoryTable(error: { code?: unknown; message?: unknown } | null): boolean {
+  return isMissingClinicServices(error);
 }
 
 /**
@@ -2885,6 +3526,19 @@ async function listItems(resource: CrmResource, req: VercelRequest, res: VercelR
       }
     }
 
+    // Редактор графика спрашивает узко — по одному врачу; форма записи читает
+    // весь (небольшой) набор. Сужение того же авторизованного чтения, как у
+    // задач: тот же маршрут, то же право, тот же скоуп.
+    if (resource === "doctor-schedule") {
+      const doctorId = readQueryString(req.query.doctorId ?? req.query.doctor_id);
+      if (doctorId) {
+        if (!isUuid(doctorId)) {
+          return sendJson(res, 400, errorBody("Validation error", ["doctorId must be a valid id"]));
+        }
+        equalities.push(["doctor_id", doctorId]);
+      }
+    }
+
     let query = supabase
       .from(config.table)
       .select(config.selectColumns ?? "*")
@@ -2925,6 +3579,19 @@ async function listItems(resource: CrmResource, req: VercelRequest, res: VercelR
       return sendJson(res, 200, success("supabase", { [config.listKey]: [], items: [], catalogAvailable: false }));
     }
 
+    // То же самое для двух таблиц 033. Отдельные флаги, потому что экраны
+    // разные: справочник врачей и редактор графика показывают разное «ещё не
+    // включено», и объединять их значило бы врать одному из двух.
+    if (error && resource === "clinic-doctors" && isMissingDirectoryTable(error)) {
+      console.warn("clinic-doctors: migration 033 is not applied yet; answering with an unavailable directory");
+      return sendJson(res, 200, success("supabase", { [config.listKey]: [], items: [], directoryAvailable: false }));
+    }
+
+    if (error && resource === "doctor-schedule" && isMissingDirectoryTable(error)) {
+      console.warn("doctor-schedule: migration 033 is not applied yet; answering with an unavailable schedule");
+      return sendJson(res, 200, success("supabase", { [config.listKey]: [], items: [], scheduleAvailable: false }));
+    }
+
     if (error) {
       throw new Error(error.message);
     }
@@ -2937,6 +3604,8 @@ async function listItems(resource: CrmResource, req: VercelRequest, res: VercelR
         [config.listKey]: items,
         items,
         ...(resource === "clinic-services" ? { catalogAvailable: true } : {}),
+        ...(resource === "clinic-doctors" ? { directoryAvailable: true } : {}),
+        ...(resource === "doctor-schedule" ? { scheduleAvailable: true } : {}),
       }),
     );
   } catch (error) {
@@ -3120,6 +3789,12 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
       row.created_by_kind = author.actorKind;
       if (readString(row.status) === "done") row.completed_at = new Date().toISOString();
     }
+    if (resource === "clinic-doctors") {
+      Object.assign(row, await buildDoctorStaffLinkRow(supabase, workspaceId, body));
+    }
+    if (resource === "doctor-schedule") {
+      Object.assign(row, await buildShiftDoctorLinkRow(supabase, workspaceId, body, { requireActive: true }));
+    }
     if (resource === "appointments") {
       Object.assign(row, await buildAppointmentReferenceRow(supabase, workspaceId, body));
       // Строго до проверки пересечения: услуга может задать длительность, и
@@ -3127,11 +3802,22 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
       // минут. Поменять эти две строки местами — значит проверять не тот слот,
       // который будет записан.
       Object.assign(row, await buildServiceLinkRow(supabase, workspaceId, body, { requireActive: true, prefillDuration: true }));
+      Object.assign(row, await buildDoctorLinkRow(supabase, workspaceId, body, { requireActive: true }));
       if (!allowsAppointmentConflict(body)) {
         await assertNoAppointmentConflict(supabase, workspaceId, {
           doctorName: readString(row.doctor_name),
           startsAt: readString(row.starts_at),
           durationMinutes: appointmentMinutes(row.duration_minutes),
+          status: readString(row.status),
+        });
+      }
+      // После проверки пересечений: если время занято И вне графика, оператор
+      // сначала получает знакомый ему отказ про занятый слот.
+      if (!allowsOutsideSchedule(body)) {
+        await assertDoctorIsWorking(supabase, workspaceId, {
+          doctorId: readString(row.doctor_id),
+          doctorName: readString(row.doctor_name),
+          startsAt: readString(row.starts_at),
           status: readString(row.status),
         });
       }
@@ -3159,11 +3845,8 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
     // обязаны создаваться в окне между деплоем и миграцией. Теряется только
     // связь с услугой — и оператор узнаёт из лога, какой именно.
     if (error && (resource === "appointments" || resource === "deals") && isMissingAnyColumn(error)) {
-      const fallback = rowWithout032(row);
-      console.warn(
-        `${resource}: columns from migration 032 are not present yet (${fallback.dropped.join(", ") || "none set"}); `
-          + "creating without them",
-      );
+      const fallback = rowWithoutLinkColumns(row);
+      warnDroppedLinkColumns(resource, fallback.dropped, "creating");
       ({ data, error } = await runInsert(fallback.row));
     }
 
@@ -3176,6 +3859,13 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
       if (resource === "clinic-services" && readString((error as { code?: unknown }).code) === UNIQUE_VIOLATION) {
         return sendJson(res, 400, errorBody("Услуга с таким названием уже есть", [
           "name must be unique within the workspace",
+        ]));
+      }
+      // Частичный уникальный индекс 033 сработает и на двух настоящих
+      // однофамильцах — без этой ветки владелец получил бы «сбой сервиса».
+      if (resource === "clinic-doctors" && readString((error as { code?: unknown }).code) === UNIQUE_VIOLATION) {
+        return sendJson(res, 400, errorBody("Врач с таким именем уже есть", [
+          "fullName must be unique within the workspace",
         ]));
       }
       throw new Error(error.message);
@@ -3226,6 +3916,14 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
         error: "Это время у врача уже занято",
         code: "appointment_conflict",
         conflict: error.conflict,
+      });
+    }
+    if (error instanceof AppointmentOutsideScheduleError) {
+      return sendJson(res, 409, {
+        success: false,
+        error: "Врач не работает в это время",
+        code: "outside_doctor_schedule",
+        schedule: error.schedule,
       });
     }
     if (error instanceof CrmReferenceValidationError) {
@@ -3396,9 +4094,16 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
         row.assignee_user_id = null;
       }
     }
+    if (resource === "clinic-doctors") {
+      Object.assign(row, await buildDoctorStaffLinkRow(supabase, workspaceId, patchBody));
+    }
+    if (resource === "doctor-schedule") {
+      Object.assign(row, await buildShiftDoctorLinkRow(supabase, workspaceId, patchBody, { requireActive: false }));
+    }
     if (resource === "appointments") {
       Object.assign(row, await buildAppointmentReferenceRow(supabase, workspaceId, patchBody));
       Object.assign(row, await buildServiceLinkRow(supabase, workspaceId, patchBody, { requireActive: false, prefillDuration: false }));
+      Object.assign(row, await buildDoctorLinkRow(supabase, workspaceId, patchBody, { requireActive: false }));
     }
 
     if (Object.keys(row).length === 0) {
@@ -3467,6 +4172,32 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
       }
     }
 
+    if (patchedEntity === "appointment" && !allowsOutsideSchedule(patchBody)) {
+      // Свой гейт, по своим полям: график зависит от врача и времени начала, а
+      // длительность на него не влияет — проверяется только начало визита.
+      // Тот же довод, что и у проверки пересечений: правило, применённое к
+      // каждому PATCH, отказало бы кнопкам «Подтвердить» и «Пришёл» и накрыло
+      // бы всю уже накопленную историю, которая этого правила не проходила.
+      // Записей вне часов приёма в истории заведомо больше, чем наложений.
+      const status = readString("status" in row ? row.status : before.status);
+      const rescheduled = ["doctor_id", "starts_at"].some(
+        (column) => column in row && readString(row[column]) !== readString(before[column]),
+      );
+      const revivedForSchedule = "status" in row
+        && occupiesSlot(status)
+        && !occupiesSlot(readString(before.status));
+
+      if (rescheduled || revivedForSchedule) {
+        await assertDoctorIsWorking(supabase, workspaceId, {
+          id,
+          doctorId: readString("doctor_id" in row ? row.doctor_id : before.doctor_id),
+          doctorName: readString("doctor_name" in row ? row.doctor_name : before.doctor_name),
+          startsAt: readString("starts_at" in row ? row.starts_at : before.starts_at),
+          status,
+        });
+      }
+    }
+
     const runUpdate = (candidate: JsonRecord) => supabase
       .from(config.table)
       .update(candidate)
@@ -3487,11 +4218,8 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
     }
 
     if (error && (resource === "appointments" || resource === "deals") && isMissingAnyColumn(error)) {
-      const fallback = rowWithout032(row);
-      console.warn(
-        `${resource}: columns from migration 032 are not present yet (${fallback.dropped.join(", ") || "none set"}); `
-          + "saving without them",
-      );
+      const fallback = rowWithoutLinkColumns(row);
+      warnDroppedLinkColumns(resource, fallback.dropped, "saving");
       ({ data, error } = await runUpdate(fallback.row));
     }
 
@@ -3501,6 +4229,13 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
       if (resource === "clinic-services" && readString((error as { code?: unknown }).code) === UNIQUE_VIOLATION) {
         return sendJson(res, 400, errorBody("Услуга с таким названием уже есть", [
           "name must be unique within the workspace",
+        ]));
+      }
+      // Частичный уникальный индекс 033 сработает и на двух настоящих
+      // однофамильцах — без этой ветки владелец получил бы «сбой сервиса».
+      if (resource === "clinic-doctors" && readString((error as { code?: unknown }).code) === UNIQUE_VIOLATION) {
+        return sendJson(res, 400, errorBody("Врач с таким именем уже есть", [
+          "fullName must be unique within the workspace",
         ]));
       }
       throw new Error(error.message);
@@ -3531,6 +4266,14 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
         error: "Это время у врача уже занято",
         code: "appointment_conflict",
         conflict: error.conflict,
+      });
+    }
+    if (error instanceof AppointmentOutsideScheduleError) {
+      return sendJson(res, 409, {
+        success: false,
+        error: "Врач не работает в это время",
+        code: "outside_doctor_schedule",
+        schedule: error.schedule,
       });
     }
     if (error instanceof CrmReferenceValidationError) {
