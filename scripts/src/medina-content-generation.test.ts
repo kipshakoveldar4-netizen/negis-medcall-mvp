@@ -473,3 +473,68 @@ test("GEN23 новые вызовы идут через crmFetch и на зар�
     assert.ok(pattern.test(source), `${segment} должен вызываться через crmFetch с workspace в запросе`);
   }
 });
+
+test("GEN24 «сгенерировано, но не сохранено» — отдельный ответ, а не «не удалось сгенерировать»", async () => {
+  const source = await readFile(apiFile, "utf8");
+  const handler = source.slice(
+    source.indexOf("async function handleGeneratePhoto"),
+    source.indexOf("function jobHandleSecret"),
+  );
+  assert.ok(handler.length > 0, "обработчик изображения должен быть на месте");
+
+  // С момента ответа провайдера картинка уже оплачена. Один общий catch
+  // сказал бы «не удалось сгенерировать», и оператор нажал бы ещё раз, заплатив
+  // второй раз за то, что уже сделано.
+  assert.ok(
+    handler.includes("Изображение сгенерировано, но не сохранено"),
+    "отказ хранилища обязан отличаться от отказа генерации",
+  );
+  assert.ok(
+    /hint:[^\n]*повторный запуск|повторный запуск создаст новое/i.test(handler),
+    "оператор должен узнать, что повторное нажатие стоит денег",
+  );
+  assert.equal(
+    (handler.match(/sendProviderFailure\(/g) || []).length,
+    1,
+    "отказ провайдера пересказывается один раз — на шаге генерации",
+  );
+});
+
+test("GEN25 опрос без настроенного хранилища отвечает «не подключено», а не «не найдено»", async () => {
+  const source = await readFile(apiFile, "utf8");
+  const handler = source.slice(
+    source.indexOf("async function handleVideoGeneration"),
+    source.indexOf("export default async function handler"),
+  );
+  const secretGuard = handler.slice(handler.indexOf("const secret = jobHandleSecret()"), handler.indexOf("const handleParam"));
+
+  // «Задача не найдена» отправило бы оператора искать несуществующую ошибку:
+  // задача есть, проверить её принадлежность нечем.
+  assert.ok(/sendJson\(res,\s*503/.test(secretGuard), "отсутствие хранилища — отказ конфигурации, 503");
+  assert.ok(!/sendJson\(res,\s*404/.test(secretGuard));
+});
+
+test("GEN26 задача рендера переживает уход со страницы и не возвращается после новой", async () => {
+  const source = await readFile(studioPage, "utf8");
+
+  // Ролик оплачен в момент постановки задачи. Идентификатор, живущий только в
+  // состоянии React, терялся бы при любом переходе — вместе с оплаченным файлом.
+  assert.ok(source.includes("VIDEO_JOB_KEY"), "подписанный идентификатор задачи обязан переживать переход");
+  assert.ok(
+    /writeStoredVideoJob\(\{[\s\S]{0,200}url: genVideo\?\.url/.test(source),
+    "готовая задача хранится вместе со ссылкой, иначе возврат опросил бы её заново и записал ролик второй раз",
+  );
+  assert.ok(
+    /setGenVideo\(null\);[\s\S]{0,400}writeStoredVideoJob\(null\)/.test(source),
+    "новая задача стирает прошлую, иначе после перезагрузки вернулся бы старый ролик",
+  );
+});
+
+test("GEN27 опрос рендера не кэшируется браузером", async () => {
+  const api = await readFile(path.join(repoRoot, "artifacts", "negis", "src", "lib", "api.ts"), "utf8");
+  const guard = api.slice(api.indexOf("function isUncacheable"), api.indexOf("function ttlFor"));
+
+  // Ответ, переживший десять секунд, показал бы застывший процент, а на
+  // последнем шаге — «ещё рендерится» вместо готовой ссылки.
+  assert.ok(guard.includes("/video-generation"), "опрос по таймеру обязан ходить в сеть каждый раз");
+});

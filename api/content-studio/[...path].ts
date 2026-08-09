@@ -661,14 +661,23 @@ async function handleGeneratePhoto(req: VercelRequest, res: VercelResponse, cont
 
   const size = imageSizeForFormat(payload.format);
 
+  let image: Awaited<ReturnType<typeof generateImage>>;
   try {
-    const image = await generateImage({
+    image = await generateImage({
       fetchImpl: fetch as unknown as GenerationFetch,
       config,
       prompt,
       size,
     });
+  } catch (error) {
+    return sendProviderFailure(res, error, "Не удалось сгенерировать изображение");
+  }
 
+  // Отдельная попытка — отдельный текст отказа. С этой строки картинка уже
+  // сделана и оплачена, и «не удалось сгенерировать» здесь было бы неправдой:
+  // сгенерировать удалось, не удалось сохранить, и оператор должен понимать,
+  // что повторное нажатие потратит деньги второй раз.
+  try {
     const stored = await storeGeneratedCreative({
       workspaceId: context.workspaceId,
       fileName: generatedFileName("photo", image.mimeType),
@@ -698,7 +707,12 @@ async function handleGeneratePhoto(req: VercelRequest, res: VercelResponse, cont
       },
     });
   } catch (error) {
-    return sendProviderFailure(res, error, "Не удалось сгенерировать изображение");
+    return sendJson(res, 502, {
+      success: false,
+      error: "Изображение сгенерировано, но не сохранено",
+      details: [error instanceof Error ? error.message : "Хранилище не приняло файл"],
+      hint: "Генерация уже оплачена. Проверьте хранилище прежде, чем повторять — повторный запуск создаст новое изображение за новую цену.",
+    });
   }
 }
 
@@ -772,10 +786,19 @@ async function handleVideoGeneration(req: VercelRequest, res: VercelResponse, co
   if (refusal) return sendRefusal(res, refusal);
 
   const secret = jobHandleSecret();
+  if (!secret) {
+    // Отдельно от «не найдено» ниже: без хранилища подпись проверить нечем, и
+    // это отказ конфигурации, а не отказ доступа. Сказать «задача не найдена»
+    // означало бы отправить оператора искать несуществующую ошибку.
+    return sendJson(res, 503, {
+      success: false,
+      error: "Генерация видео не подключена",
+      details: ["Не настроено хранилище: проверить принадлежность задачи и сохранить ролик нечем."],
+    });
+  }
+
   const handleParam = Array.isArray(req.query.handle) ? req.query.handle[0] : req.query.handle;
-  const jobId = secret
-    ? readSignedVideoJobHandle({ handle: handleParam, workspaceId: context.workspaceId, secret })
-    : null;
+  const jobId = readSignedVideoJobHandle({ handle: handleParam, workspaceId: context.workspaceId, secret });
 
   if (!jobId) {
     // Один ответ и на подделанную подпись, и на чужую задачу, и на мусор:

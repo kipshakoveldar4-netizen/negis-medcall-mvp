@@ -152,6 +152,46 @@ type VideoJobState = {
 
 const VIDEO_POLL_INTERVAL_MS = 12_000;
 
+/**
+ * Задача рендера переживает уход со страницы.
+ *
+ * Ролик рендерится минутами и уже оплачен в момент постановки задачи. Если
+ * подписанный идентификатор жил бы только в состоянии React, любой переход на
+ * соседний экран терял бы его: провайдер досчитал бы ролик, деньги списались
+ * бы, а забрать файл стало бы нечем. Поэтому задача лежит в localStorage под
+ * ключом рабочего пространства.
+ *
+ * Медицинских данных здесь нет: подписанный идентификатор задачи и ссылка на
+ * публичный файл креатива. Готовая задача хранится вместе со ссылкой, поэтому
+ * возврат на страницу показывает результат, а не опрашивает провайдера заново —
+ * повторный опрос готовой задачи скачал бы и записал тот же ролик второй раз.
+ */
+const VIDEO_JOB_KEY = "negis_content_studio_video_job";
+
+type StoredVideoJob = VideoJobState & { url?: string; mimeType?: string; fileSize?: number };
+
+function readStoredVideoJob(): StoredVideoJob | null {
+  try {
+    const raw = localStorage.getItem(workspaceScopedKey(VIDEO_JOB_KEY));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as StoredVideoJob;
+    return parsed && typeof parsed.handle === "string" && parsed.handle ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredVideoJob(value: StoredVideoJob | null) {
+  try {
+    const key = workspaceScopedKey(VIDEO_JOB_KEY);
+    if (value) localStorage.setItem(key, JSON.stringify(value));
+    else localStorage.removeItem(key);
+  } catch {
+    // Переполненное или запрещённое хранилище не должно ронять генерацию:
+    // задача продолжит опрашиваться в этой вкладке.
+  }
+}
+
 const videoJobLabels: Record<VideoJobState["status"], string> = {
   queued: "Ролик в очереди",
   in_progress: "Ролик рендерится",
@@ -887,7 +927,16 @@ export default function ContentStudio() {
         model: body.data.model,
         fileSize: body.data.fileSize,
       });
-      toast.success("Изображение сгенерировано и сохранено в библиотеку креативов");
+      // Файл может лечь в хранилище, а строка в библиотеке креативов — нет.
+      // Ссылка при этом рабочая, поэтому это предупреждение, а не отказ; но
+      // промолчать нельзя: в списке креативов файла не будет.
+      if (body.warning) {
+        setGenNotice({
+          tone: "warning",
+          text: `Файл сохранён, ссылка работает, но запись в библиотеке креативов не создана: ${body.warning}`,
+        });
+      }
+      toast.success("Изображение сгенерировано");
     } catch (error) {
       setGenNotice({
         tone: "error",
@@ -908,6 +957,10 @@ export default function ContentStudio() {
     setGenBusy("video");
     setGenNotice(null);
     setGenVideo(null);
+    // Прошлая задача перестаёт нас интересовать в тот же момент, когда
+    // поставлена новая: иначе после перезагрузки страницы вернулся бы старый
+    // ролик рядом с новым описанием.
+    writeStoredVideoJob(null);
     try {
       const response = await crmFetch(withWorkspace("/api/content-studio/generate-video"), {
         method: "POST",
@@ -1027,7 +1080,13 @@ export default function ContentStudio() {
             model: "",
             fileSize: body.data.fileSize || 0,
           });
-          toast.success("Ролик готов и сохранён в библиотеку креативов");
+          if (body.warning) {
+            setGenNotice({
+              tone: "warning",
+              text: `Ролик сохранён, ссылка работает, но запись в библиотеке креативов не создана: ${body.warning}`,
+            });
+          }
+          toast.success("Ролик готов");
           return;
         }
       } catch (error) {
@@ -1048,6 +1107,17 @@ export default function ContentStudio() {
       if (timer) clearTimeout(timer);
     };
   }, [videoJob?.handle, videoJob?.status]);
+
+  // Задача и её результат переживают уход со страницы: см. VIDEO_JOB_KEY.
+  useEffect(() => {
+    if (!videoJob) return;
+    writeStoredVideoJob({
+      ...videoJob,
+      url: genVideo?.url,
+      mimeType: genVideo?.mimeType,
+      fileSize: genVideo?.fileSize,
+    });
+  }, [videoJob, genVideo]);
 
   const useGeneratedInAdsAutomation = (file: GeneratedFile, creativeType: "image" | "video") => {
     localStorage.setItem(
@@ -1180,6 +1250,26 @@ export default function ContentStudio() {
   };
 
   useEffect(() => {
+    const storedJob = readStoredVideoJob();
+    if (storedJob) {
+      setVideoJob({
+        handle: storedJob.handle,
+        // Готовая задача без ссылки — состояние, которого быть не должно;
+        // считаем её незавершённой, чтобы карточка не осталась мёртвой.
+        status: storedJob.status === "completed" && !storedJob.url ? "in_progress" : storedJob.status,
+        progress: storedJob.progress,
+        formatSubstituted: Boolean(storedJob.formatSubstituted),
+      });
+      if (storedJob.url) {
+        setGenVideo({
+          url: storedJob.url,
+          mimeType: storedJob.mimeType || "video/mp4",
+          model: "",
+          fileSize: storedJob.fileSize || 0,
+        });
+      }
+    }
+
     const saved = readVideos();
     if (saved.length > 0) {
       setVideos(saved);
@@ -1812,8 +1902,8 @@ export default function ContentStudio() {
               </div>
               {videoJob.status !== "completed" ? (
                 <p className="mt-2 text-xs font-semibold text-[#64748B]">
-                  Рендер идёт на стороне сервиса и занимает минуты. Страницу можно не держать открытой только после того, как
-                  ролик появится ниже: состояние живёт до перезагрузки.
+                  Рендер идёт на стороне сервиса и занимает минуты. Страницу можно закрыть: задача сохраняется и опрос
+                  продолжится, когда вы вернётесь в этот раздел.
                 </p>
               ) : null}
             </div>
