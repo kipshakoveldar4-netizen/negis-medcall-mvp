@@ -33,11 +33,17 @@ export class CrmApiError extends Error {
 
 /** Russian copy for the states a clinic user can actually hit. */
 export function crmErrorMessage(error: unknown): string {
-  if (!(error instanceof CrmApiError)) return "Не удалось загрузить данные. Попробуйте позже.";
-  if (error.status === 401) return "Сессия истекла. Войдите снова.";
-  if (error.status === 403) return "Недостаточно прав для этого действия.";
-  if (error.status === 404) return "Запись не найдена.";
-  if (error.status === 503) return "Сервис авторизации временно недоступен. Попробуйте позже.";
+  // Принимает и брошенную ошибку, и просто код ответа. Второе — потому что
+  // crmFetch не бросает на 4xx/5xx: вызывающий держит статус в руках и без
+  // этого писал бы собственный набор строк, расходящийся с этим по смыслу.
+  const status = error instanceof CrmApiError
+    ? error.status
+    : (typeof error === "number" ? error : null);
+  if (status === null) return "Не удалось загрузить данные. Попробуйте позже.";
+  if (status === 401) return "Сессия истекла. Войдите снова.";
+  if (status === 403) return "Недостаточно прав для этого действия.";
+  if (status === 404) return "Запись не найдена.";
+  if (status === 503) return "Сервис авторизации временно недоступен. Попробуйте позже.";
   return "Не удалось выполнить запрос. Попробуйте позже.";
 }
 

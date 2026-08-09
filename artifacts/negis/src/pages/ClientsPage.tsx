@@ -23,6 +23,8 @@ import { toast } from "sonner";
 import { PageLayout } from "@/components/layout/PageLayout";
 import { MetricCard } from "@/components/ui/metric-card";
 import { ChangeLogPanel } from "@/components/crm/change-log-panel";
+import { TaskPanel } from "@/components/crm/task-panel";
+import { useAuth } from "@/contexts/AuthContext";
 import { useDemoCollection, readDemoStorage, isRealWorkspace, readWorkspaceId, workspaceScopedKey } from "@/lib/demoStorage";
 import { apiUrl, crmFetch } from "@/lib/api";
 import { formatPhone, phoneDigits, toTelHref, toWhatsappHref } from "@/lib/phone";
@@ -228,6 +230,7 @@ type ClientForm = { name: string; phone: string; whatsapp: string; source: strin
 const emptyForm: ClientForm = { name: "", phone: "", whatsapp: "", source: "", status: "new", lastVisit: "", comment: "" };
 
 export default function ClientsPage() {
+  const { rolePermissions } = useAuth();
   const { items, loaded, addItem, updateItem } = useDemoCollection<Client>("negis_demo_clients", clientsSeed, {
     endpoint: "/api/crm/clients",
     listKey: "clients",
@@ -728,6 +731,15 @@ export default function ClientsPage() {
                 })}
               </div>
             </div>
+
+            {isRealWorkspace() && rolePermissions.tasks ? (
+              <div className="mt-4">
+                <TaskPanel
+                  entityType="client"
+                  entityId={detailClient.id}
+                />
+              </div>
+            ) : null}
 
             {/* Кто и когда правил саму карточку — отдельно от того, что с
                 клиентом происходило: записи, продажи, звонки. Два разных

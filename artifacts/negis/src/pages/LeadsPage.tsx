@@ -25,6 +25,8 @@ import { PageLayout } from "@/components/layout/PageLayout";
 import { PageHeader } from "@/components/ui/page-header";
 import { MetricCard } from "@/components/ui/metric-card";
 import { ChangeLogPanel } from "@/components/crm/change-log-panel";
+import { TaskPanel } from "@/components/crm/task-panel";
+import { useAuth } from "@/contexts/AuthContext";
 import { EmptyState } from "@/components/ui/empty-state";
 import { useDemoCollection, readDemoStorage, writeDemoStorage, isRealWorkspace, readWorkspaceId, workspaceScopedKey } from "@/lib/demoStorage";
 import { apiUrl, crmFetch } from "@/lib/api";
@@ -563,6 +565,7 @@ function leadPatchToApi(patch: Partial<Lead>): Record<string, unknown> {
 }
 
 export default function LeadsPage() {
+  const { rolePermissions } = useAuth();
   const { items, loaded, addItem, updateItem } = useDemoCollection<Lead>("negis_demo_leads", leadsSeed, {
     endpoint: "/api/crm/leads",
     listKey: "leads",
@@ -1362,6 +1365,16 @@ export default function LeadsPage() {
                 })}
               </div>
             </div>
+
+            {isRealWorkspace() && rolePermissions.tasks ? (
+              <div className="mt-4">
+                <TaskPanel
+                  entityType="lead"
+                  entityId={detailLead.id}
+                  clientId={detailLead.clientId}
+                />
+              </div>
+            ) : null}
 
             {isRealWorkspace() ? (
               <div className="mt-4">
