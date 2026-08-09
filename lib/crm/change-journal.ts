@@ -337,7 +337,7 @@ type RecordChangeInput = {
   workspaceId: string;
   entity: ChangeEntityType;
   entityId: string;
-  action: "created" | "updated" | "overbooked";
+  action: "created" | "updated" | "overbooked" | "booked_outside_schedule";
   changes: ChangeEntry[];
   actorName: string;
   actorRole: string;

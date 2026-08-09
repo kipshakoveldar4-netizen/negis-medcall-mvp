@@ -211,6 +211,31 @@ function formatShiftMinute(minute: number): string {
  * Третья строка обязательна: это единственное место, где продукт признаёт,
  * что для этого врача правило не работает вовсе.
  */
+function shiftsForDate(shifts: DoctorShift[], dateKey: string, isoWeekday: number): DoctorShift[] {
+  const covering = shifts.filter(
+    (shift) => shift.onDate && shift.onDate <= dateKey && dateKey <= (shift.onDateEnd || shift.onDate),
+  );
+  // Исключение на дату замещает недельный образец целиком — как на сервере.
+  return covering.length > 0 ? covering : shifts.filter((shift) => shift.weekday === isoWeekday);
+}
+
+function previousDateKey(dateKey: string): string {
+  const [year, month, day] = dateKey.split("-").map(Number);
+  const previous = new Date(Date.UTC(year, month - 1, day - 1));
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${previous.getUTCFullYear()}-${pad(previous.getUTCMonth() + 1)}-${pad(previous.getUTCDate())}`;
+}
+
+/**
+ * Что сказать оператору про график выбранного врача на выбранный день.
+ *
+ * Повторяет решение сервера, включая ночной хвост предыдущего дня: подсказка,
+ * расходящаяся с правилом, хуже отсутствующей — она обещает отказ там, где его
+ * не будет, и наоборот.
+ *
+ * Строка «График не задан» обязательна: это единственное место, где продукт
+ * признаёт, что для этого врача правило не работает вовсе.
+ */
 function describeDoctorDay(shifts: DoctorShift[], doctorId: string, dateKey: string): string {
   if (!doctorId || !dateKey) return "";
   const [year, month, day] = dateKey.split("-").map(Number);
@@ -219,16 +244,25 @@ function describeDoctorDay(shifts: DoctorShift[], doctorId: string, dateKey: str
   const mine = shifts.filter((shift) => shift.doctorId === doctorId);
   if (mine.length === 0) return "График не задан — запись не ограничивается.";
 
-  const covering = mine.filter((shift) => shift.onDate && shift.onDate <= dateKey && dateKey <= (shift.onDateEnd || shift.onDate));
-  const source = covering.length > 0 ? covering : mine.filter((shift) => shift.weekday === isoWeekday);
-  if (source.length === 0) return `${WEEKDAY_SHORT[isoWeekday]}: выходной (время клиники)`;
+  const today = shiftsForDate(mine, dateKey, isoWeekday);
+  const yesterdayWeekday = isoWeekday === 1 ? 7 : isoWeekday - 1;
+  const yesterday = shiftsForDate(mine, previousDateKey(dateKey), yesterdayWeekday);
 
-  const intervals = source
-    .filter((shift) => shift.isWorking && shift.startMinute !== null && shift.endMinute !== null)
-    .map((shift) => `${formatShiftMinute(shift.startMinute as number)}–${formatShiftMinute(shift.endMinute as number)}`);
+  const toInterval = (shift: DoctorShift) =>
+    `${formatShiftMinute(shift.startMinute as number)}–${formatShiftMinute(shift.endMinute as number)}`;
+  const working = (rows: DoctorShift[]) =>
+    rows.filter((shift) => shift.isWorking && shift.startMinute !== null && shift.endMinute !== null);
 
-  if (intervals.length === 0) return `${WEEKDAY_SHORT[isoWeekday]}: выходной (время клиники)`;
-  return `${WEEKDAY_SHORT[isoWeekday]}: ${intervals.join(", ")} (время клиники)`;
+  const intervals = working(today).map(toInterval);
+  // Смена, начавшаяся вчера вечером, доживает до утра — правило её учитывает,
+  // и подсказка обязана тоже.
+  const overnight = working(yesterday)
+    .filter((shift) => (shift.endMinute as number) > 1440)
+    .map((shift) => `с вечера до ${formatShiftMinute(shift.endMinute as number)}`);
+
+  const parts = [...intervals, ...overnight];
+  if (parts.length === 0) return `${WEEKDAY_SHORT[isoWeekday]}: выходной (время клиники)`;
+  return `${WEEKDAY_SHORT[isoWeekday]}: ${parts.join(", ")} (время клиники)`;
 }
 const activeStatuses: AppointmentStatus[] = ["scheduled", "confirmed", "arrived"];
 const statusOptions: AppointmentStatus[] = ["scheduled", "confirmed", "arrived", "no_show", "cancelled"];
@@ -737,6 +771,10 @@ export function AppointmentsPage() {
   const [directory, setDirectory] = useState<{ items: DirectoryDoctor[]; available: boolean }>({ items: [], available: false });
   const [shifts, setShifts] = useState<DoctorShift[]>([]);
   const [clinicTimeZone, setClinicTimeZone] = useState("");
+  // Прочитать график не удалось — это НЕ то же самое, что «пояс не задан».
+  // Утверждать второе, когда верно первое, — ровно та подмена, которую этот
+  // продукт ловит у себя везде остальное.
+  const [scheduleReadable, setScheduleReadable] = useState(true);
   const [scheduleMessage, setScheduleMessage] = useState("");
   const deviceTimeZone = useMemo(() => readDeviceTimeZone(), []);
 
@@ -754,6 +792,7 @@ export function AppointmentsPage() {
       // Пояс приходит вместе с графиком: маршрут настроек доступен только
       // владельцу и администратору, и регистратор получил бы оттуда отказ.
       setClinicTimeZone(result.timeZone);
+      setScheduleReadable(result.available);
     });
     return () => {
       cancelled = true;
@@ -872,6 +911,10 @@ export function AppointmentsPage() {
   };
 
   const openEdit = (appointment: Appointment) => {
+    // Обе панели закрываются: отказ, оставшийся от прошлой записи, предлагал бы
+    // «Записать вне графика» для совсем другого визита.
+    setConflictMessage("");
+    setScheduleMessage("");
     setEditingId(appointment.id);
     setConflictMessage("");
     setForm(formFromAppointment(appointment));
@@ -999,7 +1042,15 @@ export function AppointmentsPage() {
     const resolvedServiceId = form.serviceId
       || activeCatalog.find((service) => service.name.trim().toLowerCase() === form.service.trim().toLowerCase())?.id
       || "";
-    const appointment = appointmentFromForm({ ...form, serviceId: resolvedServiceId }, editingId || undefined);
+    // То же для врача: набранное точное имя связывается, иначе правило графика
+    // молча не применилось бы к записи, которую оператор считает связанной.
+    const resolvedDoctorId = form.doctorId
+      || activeDoctors.find((doctor) => doctor.fullName.trim().toLowerCase() === form.doctor.trim().toLowerCase())?.id
+      || "";
+    const appointment = appointmentFromForm(
+      { ...form, serviceId: resolvedServiceId, doctorId: resolvedDoctorId },
+      editingId || undefined,
+    );
 
     // Быстрый локальный префильтр: если конфликт виден в уже загруженном
     // расписании, спрашиваем без обращения к серверу. Авторитет — не здесь:
@@ -1176,9 +1227,15 @@ export function AppointmentsPage() {
           Время на экране может отличаться от времени клиники.
         </div>
       ) : null}
-      {!clinicTimeZone ? (
+      {!clinicTimeZone && scheduleReadable ? (
         <div className="mb-4 rounded-2xl bg-slate-100 p-4 text-sm font-semibold" style={{ color: "var(--negis-muted)" }}>
           Часовой пояс клиники не задан — график врачей при записи не применяется.
+        </div>
+      ) : null}
+      {!scheduleReadable ? (
+        <div className="mb-4 rounded-2xl bg-amber-50 p-4 text-sm font-semibold text-amber-800">
+          Не удалось прочитать график врачей. Это не значит, что его нет: подсказки под временем могут быть неполными,
+          а сервер всё равно проверит запись по своему графику.
         </div>
       ) : null}
       <div className="space-y-7">
@@ -1470,11 +1527,14 @@ export function AppointmentsPage() {
               {conflictMessage ? (
                 <button type="button" className="neu-btn px-5 py-2.5 text-sm text-amber-700" onClick={() => void submitForm(true)} disabled={saving}>Сохранить всё равно</button>
               ) : null}
+              {/* Только обход графика. Прежняя версия передавала сюда
+                  Boolean(conflictMessage), и один клик снимал заодно проверку
+                  пересечений — ровно то, ради чего флаги и разделены. */}
               {scheduleMessage ? (
                 <button
                   type="button"
                   className="neu-btn px-5 py-2.5 text-sm text-sky-700"
-                  onClick={() => void submitForm(Boolean(conflictMessage), true)}
+                  onClick={() => void submitForm(false, true)}
                   disabled={saving}
                 >
                   Записать вне графика

@@ -358,9 +358,14 @@ test("DS6 запись создаётся и до применения мигр�
   assert.equal(inserts.length, 2, "одна попытка отвергается, вторая идёт без колонки");
   assert.equal((inserts[1].filters.__row as Record<string, unknown>).doctor_id, undefined);
   assert.ok(warned.some((line) => line.includes("033") && line.includes("doctor_id")));
-  // Один проход по обеим миграциям: две независимые попытки исходили бы из
-  // исходной строки, и запись со связанной услугой потребовала бы третьей.
-  assert.ok(warned.some((line) => line.includes("032")), "лог обязан назвать обе миграции");
+  // Снимается ровно та колонка, которой нет, и называется её миграция. Снимать
+  // разом все связи значило бы терять связь с услугой в окне, когда не хватает
+  // только связи с врачом: одна применённая миграция молча отменялась бы
+  // другой, ещё не применённой.
+  assert.ok(
+    !warned.some((line) => line.includes("032")),
+    "миграция 032 применена — её колонку снимать не за что",
+  );
 });
 
 /* ── Правило графика ── */
@@ -739,6 +744,173 @@ test("DS26 часовой пояс едет вместе с графиком, а
 
   assert.equal(res.statusCode, 200, JSON.stringify(res.body));
   assert.equal((res.body.data as Record<string, unknown>).timeZone, "Asia/Almaty");
+});
+
+test("DS31 повторное сохранение той же записи не подпадает под правило", async () => {
+  // Самая дорогая находка ревью: row.starts_at нормализуется в …T15:00:00.000Z,
+  // а прочитанное «до» приходит из базы как …T15:00:00+00:00. Это ОДИН момент
+  // в двух записях, и сравнение строк объявляло его изменившимся всегда —
+  // то есть «Подтвердить» и «Пришёл» отказывали навсегда на любой записи вне
+  // часов приёма, где кнопки обхода на карточке нет.
+  const call = await loadRouter({
+    rows: {
+      clinic_doctors: [activeDoctor],
+      clinic_doctor_shifts: [mondayShift],
+      workspace_settings: [scheduleSetting("Asia/Almaty")],
+      appointments: [{
+        id: APPOINTMENT_ID,
+        workspace_id: WORKSPACE_A,
+        client_name: "Пациент",
+        doctor_id: DOCTOR_ID,
+        doctor_name: "Сауле Ахметова",
+        // Ровно так это печатает PostgREST для timestamptz.
+        starts_at: "2026-09-07T15:00:00+00:00",
+        status: "scheduled",
+      }],
+    },
+  });
+  const { res } = await call({
+    resource: "appointments",
+    method: "PATCH",
+    body: {
+      id: APPOINTMENT_ID,
+      updates: {
+        // Браузер шлёт объект целиком на каждом нажатии статуса.
+        startsAt: "2026-09-07T15:00:00.000Z",
+        starts_at: "2026-09-07T15:00:00.000Z",
+        doctorId: DOCTOR_ID,
+        status: "confirmed",
+      },
+    },
+  });
+
+  assert.equal(res.statusCode, 200, `запись не двигали — судить её повторно не за что: ${JSON.stringify(res.body)}`);
+});
+
+test("DS32 у врача с графиком правило действует во все дни, а не через день", async () => {
+  // «Есть ли график» — свойство врача, а не конкретного дня. Прежняя версия
+  // спрашивала про сегодня и вчера: у врача Пн–Пт суббота отвергалась (у
+  // пятницы строка есть), а воскресенье проходило (у субботы нет).
+  const weekdays = [1, 2, 3, 4, 5].map((iso) => ({
+    ...mondayShift,
+    id: `${SHIFT_ID}-${iso}`,
+    weekday: iso,
+  }));
+  const call = await loadRouter({
+    rows: {
+      clinic_doctors: [activeDoctor],
+      clinic_doctor_shifts: weekdays,
+      workspace_settings: [scheduleSetting("Asia/Almaty")],
+    },
+  });
+
+  // 2026-09-12 — суббота, 2026-09-13 — воскресенье. Обе в 06:00Z = 11:00 Алматы.
+  for (const [day, startsAt] of [["суббота", "2026-09-12T06:00:00.000Z"], ["воскресенье", "2026-09-13T06:00:00.000Z"]] as const) {
+    const { res } = await call({
+      resource: "appointments",
+      method: "POST",
+      body: { client: "Пациент", doctorId: DOCTOR_ID, startsAt },
+    });
+    assert.equal(res.statusCode, 409, `${day} обязана отвергаться так же, как и соседний день`);
+  }
+});
+
+test("DS33 исключение на дату замещает недельный образец", async () => {
+  const rows = {
+    clinic_doctors: [activeDoctor],
+    clinic_doctor_shifts: [
+      mondayShift,
+      {
+        ...mondayShift,
+        id: `${SHIFT_ID}-vacation`,
+        weekday: null,
+        on_date: "2026-09-01",
+        on_date_end: "2026-09-14",
+        is_working: false,
+        start_minute: null,
+        end_minute: null,
+      },
+    ],
+    workspace_settings: [scheduleSetting("Asia/Almaty")],
+  };
+
+  // 06:00Z в понедельник 2026-09-07 = 11:00 Алматы — внутри недельных часов,
+  // но внутри отпуска. Отпуск сильнее образца.
+  const call = await loadRouter({ rows });
+  const { res } = await call({
+    resource: "appointments",
+    method: "POST",
+    body: { client: "Пациент", doctorId: DOCTOR_ID, doctor: "Сауле Ахметова", startsAt: MONDAY_INSIDE },
+  });
+  assert.equal(res.statusCode, 409, JSON.stringify(res.body));
+  assert.deepEqual((res.body.schedule as Record<string, unknown>).intervals, [], "в отпуске часов приёма нет");
+});
+
+test("DS34 ночная смена доживает до утра следующего дня", async () => {
+  const call = await loadRouter({
+    rows: {
+      clinic_doctors: [activeDoctor],
+      // Пятница 22:00 — 02:00 субботы.
+      clinic_doctor_shifts: [{ ...mondayShift, weekday: 5, start_minute: 1320, end_minute: 1560 }],
+      workspace_settings: [scheduleSetting("Asia/Almaty")],
+    },
+  });
+
+  // 2026-09-11 — пятница. 20:00Z = 01:00 субботы в Алматы: внутри хвоста.
+  const inside = await call({
+    resource: "appointments",
+    method: "POST",
+    body: { client: "Пациент", doctorId: DOCTOR_ID, startsAt: "2026-09-11T20:00:00.000Z" },
+  });
+  assert.equal(inside.res.statusCode, 201, `хвост ночной смены обязан считаться: ${JSON.stringify(inside.res.body)}`);
+
+  // 22:00Z = 03:00 субботы — хвост уже кончился.
+  const outside = await call({
+    resource: "appointments",
+    method: "POST",
+    body: { client: "Пациент", doctorId: DOCTOR_ID, startsAt: "2026-09-11T22:00:00.000Z" },
+  });
+  assert.equal(outside.res.statusCode, 409, "после конца смены — отказ");
+});
+
+test("DS35 откат снимает только отсутствующую колонку, сохраняя связь с услугой", async () => {
+  const call = await loadRouter({
+    rows: { clinic_doctors: [activeDoctor], clinic_services: [{ id: SHIFT_ID, workspace_id: WORKSPACE_A, name: "Ботокс", is_active: true }] },
+    missingColumns: ["doctor_id"],
+  });
+  const { res, log } = await call({
+    resource: "appointments",
+    method: "POST",
+    body: { client: "Пациент", doctorId: DOCTOR_ID, serviceId: SHIFT_ID, startsAt: MONDAY_INSIDE },
+  });
+
+  assert.equal(res.statusCode, 201, JSON.stringify(res.body));
+  const inserts = log.filter((entry) => entry.table === "appointments" && entry.op === "insert");
+  const second = inserts[inserts.length - 1].filters.__row as Record<string, unknown>;
+  assert.equal(second.doctor_id, undefined, "отсутствующая колонка снята");
+  assert.equal(second.service_id, SHIFT_ID, "применённая миграция не отменяется ещё не применённой");
+});
+
+test("DS36 обход графика оставляет след в журнале", async () => {
+  const call = await loadRouter({
+    rows: {
+      clinic_doctors: [activeDoctor],
+      clinic_doctor_shifts: [mondayShift],
+      workspace_settings: [scheduleSetting("Asia/Almaty")],
+    },
+  });
+  const { res, log } = await call({
+    resource: "appointments",
+    method: "POST",
+    body: { client: "Пациент", doctorId: DOCTOR_ID, startsAt: MONDAY_OUTSIDE, allowOutsideSchedule: true },
+  });
+
+  assert.equal(res.statusCode, 201, JSON.stringify(res.body));
+  const journal = log.filter((entry) => entry.table === "audit_logs" && entry.op === "insert");
+  assert.ok(
+    journal.some((entry) => (entry.filters.__row as Record<string, unknown>).action === "booked_outside_schedule"),
+    "запись вне графика, которую нельзя потом найти, — это и есть то, ради чего журнал заводили",
+  );
 });
 
 /* ── Источники ── */

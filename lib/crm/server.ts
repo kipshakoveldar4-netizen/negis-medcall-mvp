@@ -469,8 +469,9 @@ function buildPatchRow(resource: CrmResource, body: JsonRecord): JsonRecord {
   }
 
   if (resource === "doctor-schedule") {
-    // Тот же список проверок, что и на создании: расходиться им нельзя.
-    const details = doctorShiftDetails(body);
+    // Тот же список проверок, что и на создании, но применённый к частичному
+    // телу: правка несёт только изменяемые поля.
+    const details = doctorShiftDetails(body, { partial: true });
     if (details.length > 0) throw new CrmReferenceValidationError(details);
 
     if (hasAnyKey(body, ["weekday"])) row.weekday = readNullableNumber(body.weekday);
@@ -846,12 +847,16 @@ const MINUTES_IN_DAY = 1440;
  * сервиса» без единого слова о том, что именно не так, — а здесь оператор
  * получает поле и причину.
  */
-function doctorShiftDetails(body: JsonRecord): string[] {
+function doctorShiftDetails(body: JsonRecord, options: { partial?: boolean } = {}): string[] {
   const details: string[] = [];
 
   const hasWeekday = hasAnyKey(body, ["weekday"]) && body.weekday !== null && body.weekday !== "";
   const onDate = firstString(body.onDate, body.on_date);
-  if (hasWeekday === Boolean(onDate)) {
+  const touchesKey = hasAnyKey(body, ["weekday", "onDate", "on_date"]);
+  // На правке тело несёт только то, что меняют. Требовать от него полный набор
+  // ключей строки значило бы отвергать любую узкую правку — и «снять
+  // исключение», и «поменять только часы».
+  if (!(options.partial && !touchesKey) && hasWeekday === Boolean(onDate)) {
     // Ровно один ключ строки: либо день недели, либо дата. Обе сразу — это два
     // разных правила в одной строке, и разрешать их значит выбирать за клинику,
     // какое из них главнее.
@@ -873,6 +878,9 @@ function doctorShiftDetails(body: JsonRecord): string[] {
       else if (onDateEnd < onDate) details.push("onDateEnd must not be earlier than onDate");
     }
   }
+
+  const touchesHours = hasAnyKey(body, ["isWorking", "is_working", "startMinute", "start_minute", "endMinute", "end_minute"]);
+  if (options.partial && !touchesHours) return details;
 
   const isWorking = hasAnyKey(body, ["isWorking", "is_working"])
     ? readBoolean(body.isWorking ?? body.is_working)
@@ -2624,6 +2632,26 @@ export class AppointmentOutsideScheduleError extends Error {
   }
 }
 
+/**
+ * Сравнение «поменялось ли поле» для колонок, которые база и сервер печатают
+ * по-разному.
+ *
+ * `row.starts_at` проходит через maybeDate и становится `…T15:00:00.000Z`, а
+ * `before.starts_at` приходит из PostgREST как `…T15:00:00+00:00`: это ОДИН
+ * момент в двух записях, и обычное сравнение строк объявляет его изменившимся
+ * всегда. На проверке пересечений это было безвредно — она исключает саму
+ * запись, — а на графике означало 409 на каждом нажатии «Пришёл», то есть
+ * ровно ту поломку, которую гейт и заведён предотвращать.
+ */
+function sameFieldValue(column: string, next: unknown, previous: unknown): boolean {
+  if (column.endsWith("_at")) {
+    const a = Date.parse(readString(next));
+    const b = Date.parse(readString(previous));
+    if (Number.isFinite(a) && Number.isFinite(b)) return a === b;
+  }
+  return readString(next) === readString(previous);
+}
+
 /** Обход правила графика — свой, отдельный от обхода пересечений. */
 function allowsOutsideSchedule(body: JsonRecord): boolean {
   return body.allowOutsideSchedule === true || body.allow_outside_schedule === true;
@@ -2839,12 +2867,18 @@ async function assertDoctorIsWorking(
     return;
   }
 
-  const today = intervalsForDate({ localDate: wall.localDate, isoWeekday: wall.isoWeekday, weekly, dated });
-
   // (f) графика у врача нет вовсе — правила нет.
+  //
+  // Проверяется НАЛИЧИЕ строк у врача, а не наличие строки на конкретный день.
+  // Прежняя версия спрашивала «есть ли правило сегодня или вчера», и от этого
+  // зависело, применяется ли правило вообще: у врача с понедельника по пятницу
+  // суббота отвергалась (потому что у пятницы строка есть), а воскресенье
+  // проходило (потому что у субботы её нет). Предсказать это оператор не мог.
+  if (weekly.length === 0 && dated.length === 0) return;
+
+  const today = intervalsForDate({ localDate: wall.localDate, isoWeekday: wall.isoWeekday, weekly, dated });
   const yesterdayWeekday = wall.isoWeekday === 1 ? 7 : wall.isoWeekday - 1;
   const yesterday = intervalsForDate({ localDate: previous, isoWeekday: yesterdayWeekday, weekly, dated });
-  if (!today.hasRule && !yesterday.hasRule) return;
 
   // Ночная смена вчерашнего дня доживает до утра сегодняшнего: её интервал
   // сдвигается на сутки назад и сравнивается на той же оси.
@@ -3353,17 +3387,30 @@ const LINK_COLUMNS_BY_MIGRATION: ReadonlyArray<readonly [string, readonly string
 
 const ALL_LINK_COLUMNS: readonly string[] = LINK_COLUMNS_BY_MIGRATION.flatMap(([, columns]) => [...columns]);
 
-function rowWithoutLinkColumns(row: JsonRecord): { row: JsonRecord; dropped: Record<string, string[]> } {
-  const stripped: JsonRecord = {};
-  const dropped: Record<string, string[]> = {};
-  for (const [migration] of LINK_COLUMNS_BY_MIGRATION) dropped[migration] = [];
+/**
+ * Какие колонки снимать — решает сама ошибка, а не список.
+ *
+ * И PostgREST, и Postgres называют отсутствующую колонку в тексте: «Could not
+ * find the 'doctor_id' column …» и «column appointments.doctor_id does not
+ * exist». Снимать разом все колонки связей — значит терять связь с услугой в
+ * окне, когда не хватает только связи с врачом: одна применённая миграция
+ * молча отменялась бы другой, ещё не применённой.
+ */
+function missingColumnsFromError(error: { message?: unknown } | null): string[] {
+  const message = readString(error?.message);
+  const named = Array.from(message.matchAll(/['"`]?([a-z_]+\.)?([a-z_]+)['"`]?\s+column|column\s+['"`]?([a-z_]+\.)?([a-z_]+)['"`]?/gi))
+    .flatMap((match) => [match[2], match[4]])
+    .filter((name): name is string => Boolean(name));
+  return ALL_LINK_COLUMNS.filter((column) => named.includes(column) || message.includes(column));
+}
 
+function rowWithoutLinkColumns(row: JsonRecord, columns: readonly string[]): { row: JsonRecord; dropped: string[] } {
+  const targets = columns.length > 0 ? columns : ALL_LINK_COLUMNS;
+  const stripped: JsonRecord = {};
+  const dropped: string[] = [];
   for (const [key, value] of Object.entries(row)) {
-    if (ALL_LINK_COLUMNS.includes(key)) {
-      if (value !== null && value !== undefined) {
-        const owner = LINK_COLUMNS_BY_MIGRATION.find(([, columns]) => columns.includes(key));
-        if (owner) dropped[owner[0]].push(key);
-      }
+    if (targets.includes(key)) {
+      if (value !== null && value !== undefined) dropped.push(key);
       continue;
     }
     stripped[key] = value;
@@ -3371,12 +3418,13 @@ function rowWithoutLinkColumns(row: JsonRecord): { row: JsonRecord; dropped: Rec
   return { row: stripped, dropped };
 }
 
-/** Одна строка лога на миграцию, в прежней формулировке. */
-function warnDroppedLinkColumns(resource: string, dropped: Record<string, string[]>, verb: "creating" | "saving") {
-  for (const [migration, columns] of Object.entries(dropped)) {
+/** Одна строка лога на миграцию, и только на ту, чью колонку сняли. */
+function warnDroppedLinkColumns(resource: string, dropped: string[], verb: "creating" | "saving") {
+  for (const [migration, columns] of LINK_COLUMNS_BY_MIGRATION) {
+    const mine = dropped.filter((column) => columns.includes(column));
+    if (mine.length === 0) continue;
     console.warn(
-      `${resource}: columns from migration ${migration} are not present yet (${columns.join(", ") || "none set"}); `
-        + `${verb} without them`,
+      `${resource}: columns from migration ${migration} are not present yet (${mine.join(", ")}); ${verb} without them`,
     );
   }
 }
@@ -3852,7 +3900,7 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
     // обязаны создаваться в окне между деплоем и миграцией. Теряется только
     // связь с услугой — и оператор узнаёт из лога, какой именно.
     if (error && (resource === "appointments" || resource === "deals") && isMissingAnyColumn(error)) {
-      const fallback = rowWithoutLinkColumns(row);
+      const fallback = rowWithoutLinkColumns(row, missingColumnsFromError(error));
       warnDroppedLinkColumns(resource, fallback.dropped, "creating");
       ({ data, error } = await runInsert(fallback.row));
     }
@@ -3870,10 +3918,14 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
       }
       // Частичный уникальный индекс 033 сработает и на двух настоящих
       // однофамильцах — без этой ветки владелец получил бы «сбой сервиса».
+      // Уникальных индексов у врача два: по имени и по сотруднику. Называть
+      // любой из них «однофамильцем» значило бы отправить владельца исправлять
+      // не то поле.
       if (resource === "clinic-doctors" && readString((error as { code?: unknown }).code) === UNIQUE_VIOLATION) {
-        return sendJson(res, 400, errorBody("Врач с таким именем уже есть", [
-          "fullName must be unique within the workspace",
-        ]));
+        const staffCollision = readString((error as { message?: unknown }).message).includes("staff_user");
+        return sendJson(res, 400, staffCollision
+          ? errorBody("Этот сотрудник уже привязан к другому врачу", ["staffUserId must be unique within the workspace"])
+          : errorBody("Врач с таким именем уже есть", ["fullName must be unique within the workspace"]));
       }
       throw new Error(error.message);
     }
@@ -3909,6 +3961,20 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
           entity: "appointment",
           entityId: readString(stored.id),
           action: "overbooked",
+          changes: [],
+          ...journalActor(req),
+        });
+      }
+      if (resource === "appointments" && allowsOutsideSchedule(body)) {
+        // Тот же след, что и у сознательного овербукинга: запись вне часов
+        // приёма, которую нельзя потом найти, — это и есть то, ради чего
+        // журнал заводили.
+        await recordCrmChange({
+          supabase,
+          workspaceId,
+          entity: "appointment",
+          entityId: readString(stored.id),
+          action: "booked_outside_schedule",
           changes: [],
           ...journalActor(req),
         });
@@ -4126,6 +4192,11 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
       ? await readRowBeforeChange(supabase, config.table, workspaceId, id)
       : {};
 
+    // Пред-чтение возвращает пустой объект и тогда, когда прочитать строку не
+    // удалось. Судить по нему «поменялось ли время» нельзя: любое поле
+    // оказалось бы изменившимся, и оба гейта сработали бы на ровном месте.
+    const beforeIsReadable = Object.keys(before).length > 0;
+
     if (patchedEntity === "task" && typeof row.status === "string") {
       // Время закрытия двигает ПЕРЕХОД, а не присутствие ключа в теле. Форма
       // редактирования шлёт объект целиком, включая неизменившийся статус, —
@@ -4168,15 +4239,30 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
       // Запись, которая остаётся на своём месте в своём статусе, не занимает
       // ничего нового — судить её повторно не за что.
       const moved = ["doctor_name", "starts_at", "duration_minutes"].some(
-        (column) => column in row && readString(row[column]) !== readString(before[column]),
+        (column) => column in row && !sameFieldValue(column, row[column], before[column]),
       );
       const revived = "status" in row
         && occupiesSlot(merged.status)
         && !occupiesSlot(readString(before.status));
 
-      if (moved || revived) {
+      if (beforeIsReadable && (moved || revived)) {
         await assertNoAppointmentConflict(supabase, workspaceId, { id, ...merged });
       }
+    }
+
+    if (patchedEntity === "appointment" && allowsOutsideSchedule(patchBody)) {
+      // Обход оставляет след. Метка для него уже есть в ленте изменений, и
+      // запись «вне графика», которую никто не может найти потом, — это ровно
+      // то, ради чего журнал и заводили.
+      await recordCrmChange({
+        supabase,
+        workspaceId,
+        entity: "appointment",
+        entityId: id,
+        action: "booked_outside_schedule",
+        changes: [],
+        ...journalActor(req),
+      });
     }
 
     if (patchedEntity === "appointment" && !allowsOutsideSchedule(patchBody)) {
@@ -4188,13 +4274,13 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
       // Записей вне часов приёма в истории заведомо больше, чем наложений.
       const status = readString("status" in row ? row.status : before.status);
       const rescheduled = ["doctor_id", "starts_at"].some(
-        (column) => column in row && readString(row[column]) !== readString(before[column]),
+        (column) => column in row && !sameFieldValue(column, row[column], before[column]),
       );
       const revivedForSchedule = "status" in row
         && occupiesSlot(status)
         && !occupiesSlot(readString(before.status));
 
-      if (rescheduled || revivedForSchedule) {
+      if (beforeIsReadable && (rescheduled || revivedForSchedule)) {
         await assertDoctorIsWorking(supabase, workspaceId, {
           id,
           doctorId: readString("doctor_id" in row ? row.doctor_id : before.doctor_id),
@@ -4225,7 +4311,7 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
     }
 
     if (error && (resource === "appointments" || resource === "deals") && isMissingAnyColumn(error)) {
-      const fallback = rowWithoutLinkColumns(row);
+      const fallback = rowWithoutLinkColumns(row, missingColumnsFromError(error));
       warnDroppedLinkColumns(resource, fallback.dropped, "saving");
       ({ data, error } = await runUpdate(fallback.row));
     }
@@ -4240,10 +4326,14 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
       }
       // Частичный уникальный индекс 033 сработает и на двух настоящих
       // однофамильцах — без этой ветки владелец получил бы «сбой сервиса».
+      // Уникальных индексов у врача два: по имени и по сотруднику. Называть
+      // любой из них «однофамильцем» значило бы отправить владельца исправлять
+      // не то поле.
       if (resource === "clinic-doctors" && readString((error as { code?: unknown }).code) === UNIQUE_VIOLATION) {
-        return sendJson(res, 400, errorBody("Врач с таким именем уже есть", [
-          "fullName must be unique within the workspace",
-        ]));
+        const staffCollision = readString((error as { message?: unknown }).message).includes("staff_user");
+        return sendJson(res, 400, staffCollision
+          ? errorBody("Этот сотрудник уже привязан к другому врачу", ["staffUserId must be unique within the workspace"])
+          : errorBody("Врач с таким именем уже есть", ["fullName must be unique within the workspace"]));
       }
       throw new Error(error.message);
     }

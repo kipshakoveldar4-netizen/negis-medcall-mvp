@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Plus, RefreshCw, Trash2, X } from "lucide-react";
+import { Plus, RefreshCw, X } from "lucide-react";
 import { toast } from "sonner";
 import { useAuth } from "@/contexts/AuthContext";
 import { crmErrorMessage, crmFetch } from "@/lib/api";
@@ -36,6 +36,9 @@ type Shift = {
 };
 
 type ScreenState = "loading" | "ready" | "failed" | "unavailable";
+
+/** Общепринятые русские сокращения. label.slice(0, 2) давал «По», «Че», «Пя». */
+const WEEKDAY_SHORT: Record<number, string> = { 1: "Пн", 2: "Вт", 3: "Ср", 4: "Чт", 5: "Пт", 6: "Сб", 7: "Вс" };
 
 const WEEKDAYS: Array<{ iso: number; label: string }> = [
   { iso: 1, label: "Понедельник" },
@@ -327,11 +330,19 @@ export function DoctorSchedule() {
     }
     // Смена через полночь: 22:00–02:00 хранится как [1320, 1560).
     const normalizedEnd = endMinute <= startMinute ? endMinute + 1440 : endMinute;
-    const existing = weeklyByDay.get(iso)?.[0];
+    // Строк на один день может оказаться несколько: правится КАЖДАЯ. Прежняя
+    // версия трогала первую, рапортовала успех — и правило продолжало читать
+    // вторую, то есть экран показывал одно, а сервер судил по другому.
+    const existing = weeklyByDay.get(iso) ?? [];
     const payload = { doctorId: selectedId, weekday: iso, isWorking: true, startMinute, endMinute: normalizedEnd };
-    const ok = existing
-      ? await write("/api/crm/doctor-schedule", "PATCH", { id: existing.id, ...payload })
-      : await write("/api/crm/doctor-schedule", "POST", payload);
+    let ok = true;
+    if (existing.length === 0) {
+      ok = await write("/api/crm/doctor-schedule", "POST", payload);
+    } else {
+      for (const row of existing) {
+        ok = (await write("/api/crm/doctor-schedule", "PATCH", { id: row.id, ...payload })) && ok;
+      }
+    }
     if (!ok) return;
     toast.success("График сохранён");
     await load({ quiet: true });
@@ -339,11 +350,16 @@ export function DoctorSchedule() {
 
   const setDayOff = async (iso: number) => {
     if (!selectedId) return;
-    const existing = weeklyByDay.get(iso)?.[0];
+    const existing = weeklyByDay.get(iso) ?? [];
     const payload = { doctorId: selectedId, weekday: iso, isWorking: false, startMinute: null, endMinute: null };
-    const ok = existing
-      ? await write("/api/crm/doctor-schedule", "PATCH", { id: existing.id, ...payload })
-      : await write("/api/crm/doctor-schedule", "POST", payload);
+    let ok = true;
+    if (existing.length === 0) {
+      ok = await write("/api/crm/doctor-schedule", "POST", payload);
+    } else {
+      for (const row of existing) {
+        ok = (await write("/api/crm/doctor-schedule", "PATCH", { id: row.id, ...payload })) && ok;
+      }
+    }
     if (!ok) return;
     toast.success("День отмечен как нерабочий");
     await load({ quiet: true });
@@ -379,13 +395,28 @@ export function DoctorSchedule() {
     await load({ quiet: true });
   };
 
-  const removeException = async (shift: Shift) => {
-    // DELETE платформа не поддерживает: «убрать» — это снять часы и пометить
-    // строку как нерабочую… но у исключения это уже значение. Поэтому строка
-    // превращается в обычный рабочий день, что и означает «правила нет».
-    const ok = await write("/api/crm/doctor-schedule", "PATCH", { id: shift.id, onDate: "", onDateEnd: "" });
+  /**
+   * Исключение можно ПЕРЕНЕСТИ, но нельзя удалить.
+   *
+   * У платформы нет DELETE ни для одного ресурса, а у строки графика нет
+   * колонки «архивная»: снять её нечем. Прежняя кнопка «Снять» отправляла
+   * пустую дату — сервер отвергал такое тело, а если бы принял, строка
+   * нарушила бы ограничение «ровно один ключ: день недели или дата».
+   * Кнопки, которая не может сработать, здесь больше нет; вместо неё —
+   * перенос дат, и честная строка о том, что удаления пока не существует.
+   */
+  const moveException = async (shift: Shift, from: string, to: string) => {
+    if (!from) {
+      toast.error("Укажите дату");
+      return;
+    }
+    const ok = await write("/api/crm/doctor-schedule", "PATCH", {
+      id: shift.id,
+      onDate: from,
+      onDateEnd: to || from,
+    });
     if (!ok) return;
-    toast.success("Исключение снято");
+    toast.success("Даты исключения изменены");
     await load({ quiet: true });
   };
 
@@ -400,11 +431,15 @@ export function DoctorSchedule() {
     if (!selected) return "";
     const working = WEEKDAYS
       .filter((day) => (weeklyByDay.get(day.iso) ?? []).some((shift) => shift.isWorking))
-      .map((day) => day.label.slice(0, 2));
-    if (working.length === 0) return "График не задан — запись к этому врачу ничем не ограничена.";
+      .map((day) => WEEKDAY_SHORT[day.iso]);
+    // «Строк нет вовсе» и «все дни отмечены нерабочими» — разные состояния, и
+    // второе правило как раз ПРИМЕНЯЕТ, отказывая всю неделю. Прежняя сводка
+    // печатала для него «ничем не ограничена» — прямо наоборот.
+    if (mine.length === 0) return "График не задан — запись к этому врачу ничем не ограничена.";
+    if (working.length === 0) return "Все дни отмечены нерабочими: запись будет предупреждать в любой день.";
     if (working.length === 7) return "Врач принимает все дни недели.";
     return `Врач принимает: ${working.join(", ")}. В остальные дни запись будет предупреждать.`;
-  }, [selected, weeklyByDay]);
+  }, [mine.length, selected, weeklyByDay]);
 
   return (
     <div className="grid gap-5 xl:grid-cols-[minmax(280px,360px)_minmax(0,1fr)]">
@@ -538,7 +573,11 @@ export function DoctorSchedule() {
                     <span className="w-32 text-sm font-bold text-[#0F172A]">{day.label}</span>
                     {working ? (
                       <>
+                        {/* key включает врача и сами значения: без него поле с
+                            defaultValue не обновляется при смене врача, и у
+                            второго врача показывались часы первого. */}
                         <input
+                          key={`start-${selectedId}-${day.iso}-${working.startMinute}`}
                           className="neu-input w-28"
                           type="time"
                           step={300}
@@ -548,6 +587,7 @@ export function DoctorSchedule() {
                         />
                         <span className="text-sm text-[#64748B]">до</span>
                         <input
+                          key={`end-${selectedId}-${day.iso}-${working.endMinute}`}
                           className="neu-input w-28"
                           type="time"
                           step={300}
@@ -587,6 +627,10 @@ export function DoctorSchedule() {
 
             <div>
               <h3 className="mb-2 text-sm font-black text-[#0F172A]">Исключения: отпуск, выходной, особые часы</h3>
+              <p className="mb-2 text-xs text-[#64748B]">
+                Исключение можно перенести на другую дату, но удалить его в этой версии нельзя — у строк графика ещё нет
+                архивирования.
+              </p>
               {exceptions.length === 0 ? (
                 <p className="text-sm text-[#64748B]">Исключений нет.</p>
               ) : (
@@ -604,10 +648,19 @@ export function DoctorSchedule() {
                       </span>
                       {shift.note ? <span className="text-[#64748B]">· {shift.note}</span> : null}
                       {canManage ? (
-                        <button type="button" className="neu-btn ml-auto px-3 py-1.5 text-xs" onClick={() => void removeException(shift)}>
-                          <Trash2 size={13} />
-                          Снять
-                        </button>
+                        <label className="ml-auto flex items-center gap-2 text-xs font-semibold text-[#64748B]">
+                          Перенести на
+                          <input
+                            className="neu-input w-36"
+                            type="date"
+                            defaultValue={shift.onDate}
+                            onBlur={(event) => {
+                              if (event.target.value && event.target.value !== shift.onDate) {
+                                void moveException(shift, event.target.value, shift.onDateEnd);
+                              }
+                            }}
+                          />
+                        </label>
                       ) : null}
                     </div>
                   ))}
