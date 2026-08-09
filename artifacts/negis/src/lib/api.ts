@@ -128,7 +128,17 @@ function isUncacheable(path: string): boolean {
   // row it is meant to describe and could be served the answer from before it.
   // Ten seconds of a stale timeline is exactly the ten seconds an operator
   // spends checking that their change took.
-  return path.includes("/video-jobs") || path.includes("/auth-context") || path.includes("/change-log");
+  // `video-generation` — четвёртый, и по той же причине, что `video-jobs`:
+  // это опрос рендера по таймеру. Ответ, переживший десять секунд, показал бы
+  // застывший процент, а на последнем шаге — «ещё рендерится» вместо готовой
+  // ссылки. Интервал опроса сейчас больше времени жизни кэша, но полагаться на
+  // это соотношение нельзя: оно меняется правкой константы в другом файле.
+  return (
+    path.includes("/video-jobs") ||
+    path.includes("/video-generation") ||
+    path.includes("/auth-context") ||
+    path.includes("/change-log")
+  );
 }
 
 function ttlFor(path: string): number {

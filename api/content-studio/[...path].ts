@@ -11,7 +11,25 @@ import {
   telegramPackageText,
   updateContentVideo,
 } from "../../lib/content-studio/core";
-import { persistContentVideoPatchIfAvailable } from "../../lib/crm/server";
+import {
+  createVideoJob,
+  downloadVideoContent,
+  fetchVideoJob,
+  generateImage,
+  GenerationProviderError,
+  imageGenerationRefusal,
+  imageSizeForFormat,
+  normalizePrompt,
+  readGenerationConfig,
+  readSignedVideoJobHandle,
+  signVideoJobHandle,
+  videoFormatWasSubstituted,
+  videoGenerationRefusal,
+  videoSizeForFormat,
+  type GenerationFetch,
+  type GenerationRefusal,
+} from "../../lib/content-studio/generation";
+import { persistContentVideoPatchIfAvailable, storeGeneratedCreative } from "../../lib/crm/server";
 import {
   authorizePrivateRoute,
   normalizeRouteSegment,
@@ -68,6 +86,25 @@ const CONTENT_STUDIO_AUTHORIZATION: Readonly<Record<string, PrivateRouteAuthoriz
     kind: "browser",
     methods: ["POST"],
     permissions: { POST: "manage_ai_content" },
+  },
+  // Настоящая генерация файла, а не текста. Право то же самое: тот, кому
+  // доверено писать рекламный текст клиники, распоряжается и картинкой.
+  "generate-photo": {
+    kind: "browser",
+    methods: ["POST"],
+    permissions: { POST: "manage_ai_content" },
+  },
+  "generate-video": {
+    kind: "browser",
+    methods: ["POST"],
+    permissions: { POST: "manage_ai_content" },
+  },
+  // Опрос состояния — чтение, но оно доводит готовый ролик до библиотеки
+  // креативов, то есть пишет. Право записи, не просмотра.
+  "video-generation": {
+    kind: "browser",
+    methods: ["GET"],
+    permissions: { GET: "manage_ai_content" },
   },
 };
 
@@ -534,6 +571,321 @@ async function handleSendTelegram(req: VercelRequest, res: VercelResponse, conte
   }
 }
 
+// ---------------------------------------------------------------------------
+// Генерация файлов
+//
+// Отличие от всего, что выше: у генерации изображения нет демо-режима. Текст
+// без ключа можно отдать заготовкой — она читается как текст и приносит
+// пользу. Картинки-заготовки не существует, поэтому «не подключено» здесь
+// говорится прямо, с именем переменной окружения, и кнопка в интерфейсе
+// выключается. Тихая заглушка на этом месте означала бы рекламный креатив,
+// которого никто не создавал.
+// ---------------------------------------------------------------------------
+
+function sendRefusal(res: VercelResponse, refusal: GenerationRefusal) {
+  return sendJson(res, refusal.status, {
+    success: false,
+    error: refusal.error,
+    details: refusal.details,
+    ...(refusal.hint ? { hint: refusal.hint } : {}),
+  });
+}
+
+/**
+ * Отказ провайдера пересказывается оператору как есть, но своим статусом.
+ *
+ * 401 от OpenAI — это наш ключ, а не сессия оператора: вернуть его наружу
+ * значило бы выкинуть человека на экран входа из-за чужой проблемы. Наружу
+ * уходит 502 «сервис генерации ответил отказом» с исходным текстом.
+ */
+function sendProviderFailure(res: VercelResponse, error: unknown, subject: string) {
+  if (error instanceof GenerationProviderError) {
+    if (error.status === 429) {
+      return sendJson(res, 429, {
+        success: false,
+        error: `${subject}: сервис генерации ограничил частоту запросов`,
+        details: [error.message],
+        hint: "Попробуйте через минуту. Если повторяется — проверьте лимиты и баланс аккаунта OpenAI.",
+      });
+    }
+    if (error.status === 400 || error.status === 422) {
+      // Отказ по содержанию запроса: провайдер отклонил prompt. Это не сбой,
+      // это ответ, который оператору нужно прочитать и переписать текст.
+      return sendJson(res, 422, {
+        success: false,
+        error: `${subject}: сервис генерации отклонил запрос`,
+        details: [error.message],
+        hint: "Перепишите описание кадра: провайдер отклоняет медицинские обещания, узнаваемых людей и защищённые бренды.",
+      });
+    }
+    return sendJson(res, 502, {
+      success: false,
+      error: `${subject}: сервис генерации ответил отказом`,
+      details: [error.message],
+    });
+  }
+
+  return sendJson(res, 502, {
+    success: false,
+    error: subject,
+    details: [error instanceof Error ? error.message : "Неизвестная ошибка"],
+  });
+}
+
+function generatedFileName(kind: "photo" | "video", mimeType: string): string {
+  const extension =
+    mimeType === "image/png"
+      ? "png"
+      : mimeType === "image/webp"
+        ? "webp"
+        : mimeType === "image/jpeg"
+          ? "jpg"
+          : "mp4";
+  return `negis-${kind}-${Date.now()}.${extension}`;
+}
+
+async function handleGeneratePhoto(req: VercelRequest, res: VercelResponse, context: WorkspaceAccessContext) {
+  const payload = readBody(req);
+  const config = readGenerationConfig();
+  const refusal = imageGenerationRefusal(config);
+  if (refusal) return sendRefusal(res, refusal);
+
+  const prompt = normalizePrompt(payload.prompt);
+  if (!prompt) {
+    return sendJson(res, 400, {
+      success: false,
+      error: "Validation error",
+      details: ["Опишите кадр — без описания генерировать нечего."],
+    });
+  }
+
+  const size = imageSizeForFormat(payload.format);
+
+  let image: Awaited<ReturnType<typeof generateImage>>;
+  try {
+    image = await generateImage({
+      fetchImpl: fetch as unknown as GenerationFetch,
+      config,
+      prompt,
+      size,
+    });
+  } catch (error) {
+    return sendProviderFailure(res, error, "Не удалось сгенерировать изображение");
+  }
+
+  // Отдельная попытка — отдельный текст отказа. С этой строки картинка уже
+  // сделана и оплачена, и «не удалось сгенерировать» здесь было бы неправдой:
+  // сгенерировать удалось, не удалось сохранить, и оператор должен понимать,
+  // что повторное нажатие потратит деньги второй раз.
+  try {
+    const stored = await storeGeneratedCreative({
+      workspaceId: context.workspaceId,
+      fileName: generatedFileName("photo", image.mimeType),
+      mimeType: image.mimeType,
+      buffer: image.buffer,
+      metadata: {
+        source: "content-studio",
+        kind: "generated-photo",
+        provider: "openai",
+        model: image.model,
+        size,
+        prompt,
+      },
+    });
+
+    return sendJson(res, 200, {
+      success: true,
+      mode: "openai",
+      ...(stored.warning ? { warning: stored.warning } : {}),
+      data: {
+        creativeUrl: stored.publicUrl,
+        assetId: typeof stored.asset.id === "string" ? stored.asset.id : "",
+        mimeType: image.mimeType,
+        fileSize: image.buffer.length,
+        size,
+        model: image.model,
+      },
+    });
+  } catch (error) {
+    return sendJson(res, 502, {
+      success: false,
+      error: "Изображение сгенерировано, но не сохранено",
+      details: [error instanceof Error ? error.message : "Хранилище не приняло файл"],
+      hint: "Генерация уже оплачена. Проверьте хранилище прежде, чем повторять — повторный запуск создаст новое изображение за новую цену.",
+    });
+  }
+}
+
+/**
+ * Ключ подписи идентификатора задачи.
+ *
+ * Служебный ключ Supabase взят потому, что он есть на сервере всегда, когда
+ * вообще есть куда сохранять результат, и не существует в браузере. HMAC его
+ * не раскрывает: наружу уходит только дайджест.
+ */
+function jobHandleSecret(): string {
+  return (process.env.SUPABASE_SERVICE_ROLE_KEY || "").trim();
+}
+
+async function handleGenerateVideo(req: VercelRequest, res: VercelResponse, context: WorkspaceAccessContext) {
+  const payload = readBody(req);
+  const config = readGenerationConfig();
+  const refusal = videoGenerationRefusal(config);
+  if (refusal) return sendRefusal(res, refusal);
+
+  const secret = jobHandleSecret();
+  if (!secret) {
+    return sendJson(res, 503, {
+      success: false,
+      error: "Генерация видео не подключена",
+      details: ["Не настроено хранилище: без него готовый ролик некуда положить."],
+    });
+  }
+
+  const prompt = normalizePrompt(payload.prompt);
+  if (!prompt) {
+    return sendJson(res, 400, {
+      success: false,
+      error: "Validation error",
+      details: ["Опишите ролик — без описания генерировать нечего."],
+    });
+  }
+
+  const size = videoSizeForFormat(payload.format);
+
+  try {
+    const job = await createVideoJob({
+      fetchImpl: fetch as unknown as GenerationFetch,
+      config,
+      prompt,
+      size,
+    });
+
+    return sendJson(res, 202, {
+      success: true,
+      mode: "openai",
+      data: {
+        handle: signVideoJobHandle({ workspaceId: context.workspaceId, jobId: job.id, secret }),
+        status: job.status,
+        progress: job.progress,
+        size,
+        model: config.videoModel,
+        // Квадрата у видеомодели нет. Молча снять вертикально и не сказать —
+        // значит отдать в Feed кадр, обрезанный не там, где ожидали.
+        formatSubstituted: videoFormatWasSubstituted(payload.format),
+      },
+    });
+  } catch (error) {
+    return sendProviderFailure(res, error, "Не удалось запустить генерацию видео");
+  }
+}
+
+async function handleVideoGeneration(req: VercelRequest, res: VercelResponse, context: WorkspaceAccessContext) {
+  const config = readGenerationConfig();
+  const refusal = videoGenerationRefusal(config);
+  if (refusal) return sendRefusal(res, refusal);
+
+  const secret = jobHandleSecret();
+  if (!secret) {
+    // Отдельно от «не найдено» ниже: без хранилища подпись проверить нечем, и
+    // это отказ конфигурации, а не отказ доступа. Сказать «задача не найдена»
+    // означало бы отправить оператора искать несуществующую ошибку.
+    return sendJson(res, 503, {
+      success: false,
+      error: "Генерация видео не подключена",
+      details: ["Не настроено хранилище: проверить принадлежность задачи и сохранить ролик нечем."],
+    });
+  }
+
+  const handleParam = Array.isArray(req.query.handle) ? req.query.handle[0] : req.query.handle;
+  const jobId = readSignedVideoJobHandle({ handle: handleParam, workspaceId: context.workspaceId, secret });
+
+  if (!jobId) {
+    // Один ответ и на подделанную подпись, и на чужую задачу, и на мусор:
+    // различать их наружу — значит подсказывать, какой идентификатор угадан.
+    return sendJson(res, 404, {
+      success: false,
+      error: "Задача генерации не найдена",
+      details: ["Идентификатор задачи не принадлежит этому рабочему пространству."],
+    });
+  }
+
+  try {
+    const job = await fetchVideoJob({ fetchImpl: fetch as unknown as GenerationFetch, config, jobId });
+
+    if (job.status === "failed") {
+      return sendJson(res, 200, {
+        success: true,
+        mode: "openai",
+        data: {
+          status: "failed",
+          progress: job.progress,
+          creativeUrl: "",
+          failureReason: job.error || "Сервис генерации не сообщил причину.",
+        },
+      });
+    }
+
+    if (job.status !== "completed") {
+      return sendJson(res, 200, {
+        success: true,
+        mode: "openai",
+        data: { status: job.status, progress: job.progress, creativeUrl: "" },
+      });
+    }
+
+    const buffer = await downloadVideoContent({ fetchImpl: fetch as unknown as GenerationFetch, config, jobId });
+
+    // Ролик уже отрендерен и оплачен. Отказ хранилища — не отказ генерации, и
+    // называть его так означало бы предложить оператору запустить рендер ещё
+    // раз. Ссылка провайдера живёт час, поэтому повтор опроса в этот час ещё
+    // может забрать тот же файл: об этом и говорит подсказка.
+    try {
+      const stored = await storeGeneratedCreative({
+        workspaceId: context.workspaceId,
+        fileName: generatedFileName("video", "video/mp4"),
+        mimeType: "video/mp4",
+        buffer,
+        metadata: {
+          source: "content-studio",
+          kind: "generated-video",
+          provider: "openai",
+          model: config.videoModel,
+          jobId,
+        },
+        // Опрос — обычный GET, и провайдер отвечает «completed» на каждый
+        // запрос. Потерянный по дороге ответ, перезагрузка страницы или второй
+        // клик без этого ключа дали бы второй объект в хранилище и вторую
+        // строку в библиотеке: два неразличимых креатива за одну генерацию.
+        idempotencyKey: jobId,
+      });
+
+      return sendJson(res, 200, {
+        success: true,
+        mode: "openai",
+        ...(stored.warning ? { warning: stored.warning } : {}),
+        data: {
+          status: "completed",
+          progress: 100,
+          creativeUrl: stored.publicUrl,
+          assetId: typeof stored.asset.id === "string" ? stored.asset.id : "",
+          fileSize: buffer.length,
+          mimeType: "video/mp4",
+        },
+      });
+    } catch (storageError) {
+      return sendJson(res, 502, {
+        success: false,
+        error: "Ролик отрендерен, но не сохранён",
+        details: [storageError instanceof Error ? storageError.message : "Хранилище не приняло файл"],
+        hint: "Рендер уже оплачен. Ссылка у провайдера живёт около часа — проверьте хранилище и повторите опрос, не запуская генерацию заново.",
+      });
+    }
+  } catch (error) {
+    return sendProviderFailure(res, error, "Не удалось получить готовый ролик");
+  }
+}
+
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   const resource = normalizeRouteSegment(readPathSegment(req));
   const authorization = CONTENT_STUDIO_AUTHORIZATION[resource];
@@ -549,6 +901,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (resource === "generate-avatar-prompt") return handleGenerateAvatarPrompt(req, res, context);
   if (resource === "generate-tapnow-prompt") return handleGenerateTapNowPrompt(req, res, context);
   if (resource === "send-telegram") return handleSendTelegram(req, res, context);
+  if (resource === "generate-photo") return handleGeneratePhoto(req, res, context);
+  if (resource === "generate-video") return handleGenerateVideo(req, res, context);
+  if (resource === "video-generation") return handleVideoGeneration(req, res, context);
 
   return sendNotFound(res);
 }

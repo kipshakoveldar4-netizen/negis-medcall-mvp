@@ -3,6 +3,9 @@
   "installCommand": "pnpm install --frozen-lockfile",
   "buildCommand": "pnpm --filter @workspace/negis run build",
   "outputDirectory": "artifacts/negis/dist/public",
+  "functions": {
+    "api/content-studio/*.ts": { "maxDuration": 60 }
+  },
   "routes": [
     {
       "src": "/api/leads/webhook/([^/]+)",

@@ -396,7 +396,18 @@ const activeMembership: StaffRow = { id: STAFF_A, workspace_id: WORKSPACE_A, rol
 test("S10 Content Studio spends nothing without a token", async () => {
   const { call, restore } = await loadHandler("content-studio/[...path].ts");
   try {
-    for (const resource of ["generate-package", "generate-script", "generate-avatar-prompt", "generate-tapnow-prompt", "send-telegram"]) {
+    // generate-photo и generate-video стоят здесь не для симметрии: картинка и
+    // ролик стоят на порядок дороже текста, поэтому анонимный вызов, дошедший
+    // до провайдера, оплачивался бы платформой в разы быстрее остальных.
+    for (const resource of [
+      "generate-package",
+      "generate-script",
+      "generate-avatar-prompt",
+      "generate-tapnow-prompt",
+      "send-telegram",
+      "generate-photo",
+      "generate-video",
+    ]) {
       const result = await call({ method: "POST", query: { path: resource }, token: null, body: { title: "x" } });
       assert.equal(result.status, 401, `${resource} must require a token`);
       assert.equal(result.body.code, "authentication_required");
@@ -404,6 +415,13 @@ test("S10 Content Studio spends nothing without a token", async () => {
       assert.equal(result.calls.telegram, 0, `${resource} called Telegram before authenticating`);
       assert.equal(result.calls.supabaseClients, 0, `${resource} built a service-role client before authenticating`);
     }
+
+    // Опрос состояния — GET, поэтому в цикле выше он дал бы 405 и проверка
+    // прошла бы, ничего не проверив.
+    const poll = await call({ method: "GET", query: { path: "video-generation", handle: "video_x.sig" }, token: null });
+    assert.equal(poll.status, 401, "video-generation must require a token");
+    assert.equal(poll.body.code, "authentication_required");
+    assert.equal(poll.calls.openai, 0, "video-generation called OpenAI before authenticating");
   } finally {
     restore();
   }
