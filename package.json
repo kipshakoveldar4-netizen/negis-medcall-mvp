@@ -39,7 +39,8 @@
     "test:booking-conflict": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:booking-conflict",
     "test:client-link": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:client-link",
     "test:change-log": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:change-log",
-    "test:design-tokens": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:design-tokens"
+    "test:design-tokens": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:design-tokens",
+    "test:content-generation": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:content-generation"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.105.4",

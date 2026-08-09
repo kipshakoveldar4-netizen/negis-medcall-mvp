@@ -130,6 +130,41 @@ const defaultPackageBrief: PackageBrief = {
 
 const DEMO_AI_NOTICE = "Демо-режим: подключите AI provider для настоящей генерации.";
 
+// Настоящая генерация файла. В отличие от текста, у неё нет демо-режима:
+// картинки-заготовки не бывает, поэтому сервер отвечает честным «не
+// подключено», а экран показывает этот ответ дословно, включая имя переменной
+// окружения, которую должен задать владелец.
+type GenerationNotice = { tone: "error" | "warning" | "info"; text: string };
+
+type GeneratedFile = {
+  url: string;
+  mimeType: string;
+  model: string;
+  fileSize: number;
+};
+
+type VideoJobState = {
+  handle: string;
+  status: "queued" | "in_progress" | "completed" | "failed";
+  progress: number;
+  formatSubstituted: boolean;
+};
+
+const VIDEO_POLL_INTERVAL_MS = 12_000;
+
+const videoJobLabels: Record<VideoJobState["status"], string> = {
+  queued: "Ролик в очереди",
+  in_progress: "Ролик рендерится",
+  completed: "Ролик готов",
+  failed: "Генерация не удалась",
+};
+
+function formatFileSize(bytes: number): string {
+  if (!bytes) return "";
+  const mb = bytes / (1024 * 1024);
+  return mb >= 1 ? `${mb.toFixed(1)} МБ` : `${Math.max(1, Math.round(bytes / 1024))} КБ`;
+}
+
 type PhotoFormatId = "story" | "feed" | "universal";
 type PhotoLayoutId = "top_bottom" | "gradient_bottom" | "medical_card" | "minimal_premium";
 
@@ -388,15 +423,25 @@ const initialVideo: Omit<ContentVideo, "id" | "status" | "createdAt"> = {
   tapnowPrompt: "",
 };
 
-const workflow = [
-  "Идея",
-  "Сценарий",
-  "Avatar prompt",
-  "TapNow prompt",
-  "ElevenLabs MP3",
-  "HeyGen video",
-  "CapCut subtitles",
-  "Публикация",
+/**
+ * Раньше здесь стоял список из восьми шагов, среди которых были ElevenLabs,
+ * HeyGen и CapCut. Ни один из трёх сервисов в коде не вызывается — экран
+ * перечислял цепочку, которой не существует, и клиника могла решить, что
+ * озвучка и монтаж происходят внутри продукта.
+ *
+ * Список теперь разделён: слева то, что действительно делает Negis, справа —
+ * то, что остаётся делать руками во внешних инструментах. Если шаг переедет
+ * внутрь продукта, он переезжает и здесь, а не наоборот.
+ */
+const workflow: Array<{ step: string; inProduct: boolean }> = [
+  { step: "Пакет контента: сценарий, тексты объявления, prompts", inProduct: true },
+  { step: "Изображение из описания", inProduct: true },
+  { step: "Ролик из описания", inProduct: true },
+  { step: "Фото-креатив из фотографии клиники", inProduct: true },
+  { step: "Проверка формулировок и передача в запуск рекламы", inProduct: true },
+  { step: "Озвучка диктором или синтезом речи", inProduct: false },
+  { step: "Монтаж, субтитры, брендирование", inProduct: false },
+  { step: "Публикация в соцсетях клиники", inProduct: false },
 ];
 
 const statusLabels: Record<ContentVideoStatus, string> = {
@@ -458,6 +503,21 @@ function telegramErrorMessage<TData>(body: ApiResponse<TData> | null, fallback: 
   }
 
   return fallback;
+}
+
+/**
+ * Отказ сервера пересказывается оператору целиком: заголовок, подробности и
+ * подсказка. Обрезать до одной строки здесь нельзя — в подробностях лежит имя
+ * переменной окружения, без которого «не подключено» превращается в загадку.
+ */
+function generationRefusalText<TData>(body: ApiResponse<TData> | null, status: number, fallback: string): string {
+  if (body?.success === false) {
+    const parts = [body.error, ...(body.details || []), body.hint].filter(Boolean) as string[];
+    // Заголовок часто дублирует первую подробность — показываем один раз.
+    const unique = parts.filter((part, index) => parts.indexOf(part) === index);
+    if (unique.length > 0) return unique.join(" — ");
+  }
+  return `${fallback} (HTTP ${status})`;
 }
 
 function buildTelegramPackage(video: ContentVideo) {
@@ -558,6 +618,15 @@ export default function ContentStudio() {
   const [photoBlob, setPhotoBlob] = useState<Blob | null>(null);
   const [photoBusy, setPhotoBusy] = useState<"render" | "suggest" | "handoff" | null>(null);
   const [photoSuggestMode, setPhotoSuggestMode] = useState("");
+
+  const [genPrompt, setGenPrompt] = useState("");
+  const [genFormat, setGenFormat] = useState("reels");
+  const [genBusy, setGenBusy] = useState<"photo" | "video" | null>(null);
+  const [genNotice, setGenNotice] = useState<GenerationNotice | null>(null);
+  const [genImage, setGenImage] = useState<GeneratedFile | null>(null);
+  const [genVideo, setGenVideo] = useState<GeneratedFile | null>(null);
+  const [videoJob, setVideoJob] = useState<VideoJobState | null>(null);
+  const pollGeneration = useRef(0);
 
   const updatePhotoTexts = (key: keyof PhotoCreativeTexts, value: string) =>
     setPhotoTexts((current) => ({ ...current, [key]: value }));
@@ -780,6 +849,233 @@ export default function ContentStudio() {
     }
   };
 
+  // --- Настоящая генерация изображения и видео -----------------------------
+
+  const generatePhoto = async () => {
+    const prompt = genPrompt.trim();
+    if (!prompt) {
+      setGenNotice({ tone: "warning", text: "Опишите кадр — без описания генерировать нечего." });
+      return;
+    }
+
+    setGenBusy("photo");
+    setGenNotice(null);
+    try {
+      const response = await crmFetch(withWorkspace("/api/content-studio/generate-photo"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt, format: genFormat }),
+      });
+      const body = await safeJson<{
+        creativeUrl: string;
+        mimeType: string;
+        model: string;
+        fileSize: number;
+      }>(response);
+
+      if (!response.ok || body?.success !== true) {
+        setGenNotice({
+          tone: "error",
+          text: generationRefusalText(body, response.status, "Не удалось сгенерировать изображение"),
+        });
+        return;
+      }
+
+      setGenImage({
+        url: body.data.creativeUrl,
+        mimeType: body.data.mimeType,
+        model: body.data.model,
+        fileSize: body.data.fileSize,
+      });
+      toast.success("Изображение сгенерировано и сохранено в библиотеку креативов");
+    } catch (error) {
+      setGenNotice({
+        tone: "error",
+        text: error instanceof Error ? error.message : "Не удалось сгенерировать изображение",
+      });
+    } finally {
+      setGenBusy(null);
+    }
+  };
+
+  const generateVideo = async () => {
+    const prompt = genPrompt.trim();
+    if (!prompt) {
+      setGenNotice({ tone: "warning", text: "Опишите ролик — без описания генерировать нечего." });
+      return;
+    }
+
+    setGenBusy("video");
+    setGenNotice(null);
+    setGenVideo(null);
+    try {
+      const response = await crmFetch(withWorkspace("/api/content-studio/generate-video"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt, format: genFormat }),
+      });
+      const body = await safeJson<{
+        handle: string;
+        status: VideoJobState["status"];
+        progress: number;
+        formatSubstituted: boolean;
+      }>(response);
+
+      if (!response.ok || body?.success !== true) {
+        setVideoJob(null);
+        setGenNotice({
+          tone: "error",
+          text: generationRefusalText(body, response.status, "Не удалось запустить генерацию видео"),
+        });
+        return;
+      }
+
+      setVideoJob({
+        handle: body.data.handle,
+        status: body.data.status,
+        progress: body.data.progress,
+        formatSubstituted: Boolean(body.data.formatSubstituted),
+      });
+      if (body.data.formatSubstituted) {
+        setGenNotice({
+          tone: "info",
+          text: "У видеомодели нет квадратного формата — ролик снимается вертикально 9:16.",
+        });
+      }
+    } catch (error) {
+      setVideoJob(null);
+      setGenNotice({
+        tone: "error",
+        text: error instanceof Error ? error.message : "Не удалось запустить генерацию видео",
+      });
+    } finally {
+      setGenBusy(null);
+    }
+  };
+
+  /**
+   * Опрос состояния ролика.
+   *
+   * Счётчик поколений — против того же дефекта, что и в панели задач: ответ на
+   * предыдущую задачу не должен перезаписать состояние новой. Цепочка таймеров,
+   * а не интервал: следующий запрос ставится только после ответа предыдущего,
+   * поэтому медленный ответ не копит очередь.
+   */
+  useEffect(() => {
+    if (!videoJob) return;
+    if (videoJob.status === "completed" || videoJob.status === "failed") return;
+
+    const generation = pollGeneration.current + 1;
+    pollGeneration.current = generation;
+    const handle = videoJob.handle;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let stopped = false;
+
+    const isStale = () => stopped || generation !== pollGeneration.current;
+
+    const tick = async () => {
+      if (isStale()) return;
+      try {
+        const response = await crmFetch(
+          withWorkspace(`/api/content-studio/video-generation?handle=${encodeURIComponent(handle)}`),
+        );
+        const body = await safeJson<{
+          status: VideoJobState["status"];
+          progress: number;
+          creativeUrl?: string;
+          failureReason?: string;
+          mimeType?: string;
+          fileSize?: number;
+        }>(response);
+        if (isStale()) return;
+
+        if (!response.ok || body?.success !== true) {
+          setVideoJob((current) => (current && current.handle === handle ? { ...current, status: "failed" } : current));
+          setGenNotice({
+            tone: "error",
+            text: generationRefusalText(body, response.status, "Не удалось получить состояние ролика"),
+          });
+          return;
+        }
+
+        setVideoJob((current) =>
+          current && current.handle === handle
+            ? { ...current, status: body.data.status, progress: body.data.progress }
+            : current,
+        );
+
+        if (body.data.status === "failed") {
+          setGenNotice({
+            tone: "error",
+            text: `Сервис генерации не смог собрать ролик: ${body.data.failureReason || "причина не сообщена"}.`,
+          });
+          return;
+        }
+
+        if (body.data.status === "completed") {
+          const url = body.data.creativeUrl || "";
+          if (!url) {
+            setGenNotice({
+              tone: "error",
+              text: "Сервис сообщил, что ролик готов, но ссылка на файл не пришла.",
+            });
+            return;
+          }
+          setGenVideo({
+            url,
+            mimeType: body.data.mimeType || "video/mp4",
+            model: "",
+            fileSize: body.data.fileSize || 0,
+          });
+          toast.success("Ролик готов и сохранён в библиотеку креативов");
+          return;
+        }
+      } catch (error) {
+        if (isStale()) return;
+        setGenNotice({
+          tone: "warning",
+          text: error instanceof Error ? error.message : "Связь с сервером прервалась, опрос продолжается.",
+        });
+      }
+
+      if (isStale()) return;
+      timer = setTimeout(() => void tick(), VIDEO_POLL_INTERVAL_MS);
+    };
+
+    timer = setTimeout(() => void tick(), VIDEO_POLL_INTERVAL_MS);
+    return () => {
+      stopped = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [videoJob?.handle, videoJob?.status]);
+
+  const useGeneratedInAdsAutomation = (file: GeneratedFile, creativeType: "image" | "video") => {
+    localStorage.setItem(
+      workspaceScopedKey("negis_ads_automation_prefill"),
+      JSON.stringify({
+        source: "content_studio_generated",
+        service: packageBrief.service,
+        city: packageBrief.city,
+        offer: packageBrief.offer,
+        audience: packageBrief.audience,
+        adText: contentPackage?.adPrimaryText || packageBrief.offer,
+        headline: contentPackage?.adHeadline || packageBrief.service,
+        caption: contentPackage?.caption,
+        cta: "LEARN_MORE",
+        format: genFormat,
+        creativeUrl: file.url,
+        creativeType,
+        mimeType: file.mimeType,
+        fileSize: file.fileSize,
+        creativeBrief: genPrompt.trim(),
+        generatedAt: new Date().toISOString(),
+        title: contentPackage?.ideaTitle || packageBrief.service,
+      }),
+    );
+    toast.success(creativeType === "image" ? "Изображение передано в AI запуск рекламы" : "Ролик передан в AI запуск рекламы");
+    setLocation("/ads-automation");
+  };
+
   const updatePackageBrief = (key: keyof PackageBrief, value: string) =>
     setPackageBrief((current) => ({ ...current, [key]: value }));
 
@@ -810,6 +1106,10 @@ export default function ContentStudio() {
       }
       setContentPackage(body.data);
       setPackageGenerationMode(body.mode);
+      // Готовый photo prompt — это ровно то, что нужно генератору изображения.
+      // Заполняем только пустое поле: перезаписать текст, который оператор уже
+      // правил руками, — худшее, что здесь можно сделать.
+      setGenPrompt((current) => (current.trim() ? current : body.data.photoPrompt));
       toast.success(body.mode === "demo" ? "Demo-пакет контента готов" : "Пакет контента готов");
 
       // Persist the package: content_videos stores the whole body in raw_payload.
@@ -938,7 +1238,7 @@ export default function ContentStudio() {
 
   const persistCurrentVideoPatch = async (videoId: string, patch: Partial<ContentVideo>) => {
     try {
-      await crmFetch("/api/crm/content-videos", {
+      const response = await crmFetch("/api/crm/content-videos", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -946,8 +1246,19 @@ export default function ContentStudio() {
                     ...patch,
         }),
       });
+      // Ответ раньше не читался вообще: сценарий, prompt или статус могли не
+      // сохраниться на сервере, а экран продолжал показывать их как записанные.
+      // Ошибку здесь нельзя показывать как отказ — локальная копия уже
+      // обновлена и работает, — но и молчать о ней нельзя.
+      if (!response.ok) {
+        const body = await safeJson<unknown>(response);
+        setNotice(
+          `${generationRefusalText(body, response.status, "Сервер не сохранил изменение")}. ` +
+            "Изменение осталось только в этом браузере.",
+        );
+      }
     } catch {
-      // LocalStorage remains the source of truth in demo/offline mode.
+      setNotice("Нет связи с сервером: изменение осталось только в этом браузере.");
     }
   };
 
@@ -969,7 +1280,7 @@ export default function ContentStudio() {
                   }),
       });
       const body = await safeJson<{ video: ContentVideo }>(response);
-      const apiVideo = body?.success === true ? body.data.video : null;
+      const apiVideo = response.ok && body?.success === true ? body.data.video : null;
       const video: ContentVideo = apiVideo || {
         ...form,
         id: newVideoId(),
@@ -978,7 +1289,17 @@ export default function ContentStudio() {
       };
 
       saveVideos([video, ...videos.filter((item) => item.id !== video.id)], video.id);
-      toast.success("Идея ролика создана");
+
+      if (apiVideo) {
+        toast.success("Идея ролика создана");
+      } else {
+        // Отказ сервера доходил сюда молча: ответ не проверялся, идея падала в
+        // localStorage, и экран говорил «создана». На другом устройстве её не
+        // было. Теперь видно и то, что сохранено локально, и почему.
+        const message = generationRefusalText(body, response.status, "Сервер не принял идею");
+        setNotice(`${message}. Идея сохранена только в этом браузере.`);
+        toast.warning("Идея сохранена локально: сервер её не принял");
+      }
     } catch {
       const fallbackVideo: ContentVideo = {
         ...form,
@@ -1319,33 +1640,241 @@ export default function ContentStudio() {
                 <PromptBox title="WhatsApp сообщение" value={contentPackage.whatsappMessage} onCopy={() => void copyText(contentPackage.whatsappMessage, "WhatsApp сообщение")} />
               </div>
 
-              <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4">
-                <p className="text-sm font-black text-emerald-900">Проверка безопасных формулировок</p>
-                <ul className="mt-2 space-y-1 text-sm font-semibold text-emerald-800">
-                  {complianceRules.map((rule) => (
-                    <li key={rule}>✓ {rule}</li>
-                  ))}
-                </ul>
-                {contentPackage.complianceNotes.length ? (
-                  <ul className="mt-3 space-y-1 text-sm font-semibold text-emerald-800">
-                    {contentPackage.complianceNotes.map((note) => (
-                      <li key={note}>• {note}</li>
+              {/*
+                Раньше здесь стояли пять зелёных галочек из постоянного массива:
+                они появлялись всегда, независимо от текста, и означали лишь
+                то, что список правил существует. В медицинском продукте это
+                худший вид неправды — экран сообщал клинике, что её объявление
+                безопасно, ничего не проверив. Теперь цвет и вердикт берутся
+                из checkMetaCompliance по фактическому тексту, а список правил
+                подписан как перечень проверок, а не как их результат.
+              */}
+              <div
+                className={`rounded-2xl border p-4 ${
+                  !packageCompliance
+                    ? "border-[#E7ECF3] bg-white"
+                    : packageCompliance.status === "safe"
+                      ? "border-emerald-200 bg-emerald-50"
+                      : packageCompliance.status === "blocked"
+                        ? "border-rose-200 bg-rose-50"
+                        : "border-amber-200 bg-amber-50"
+                }`}
+              >
+                <p
+                  className={`text-sm font-black ${
+                    !packageCompliance
+                      ? "text-[#0B1220]"
+                      : packageCompliance.status === "safe"
+                        ? "text-emerald-900"
+                        : packageCompliance.status === "blocked"
+                          ? "text-rose-900"
+                          : "text-amber-900"
+                  }`}
+                >
+                  {!packageCompliance
+                    ? "Проверка формулировок"
+                    : packageCompliance.status === "safe"
+                      ? "Запрещённых формулировок не найдено"
+                      : packageCompliance.status === "blocked"
+                        ? "Текст нельзя запускать — перепишите"
+                        : "Нужна ручная проверка текста"}
+                </p>
+
+                {packageCompliance && packageCompliance.status !== "safe" ? (
+                  <ul className="mt-2 space-y-1 text-sm font-semibold text-[#334155]">
+                    {(packageCompliance.issues || []).map((issue, index) => (
+                      <li key={`${issue.code || "issue"}-${index}`}>• {issue.message}</li>
                     ))}
                   </ul>
                 ) : null}
-                {packageCompliance && packageCompliance.status !== "safe" ? (
-                  <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm font-semibold text-amber-900">
-                    Статус проверки: {packageCompliance.status === "blocked" ? "заблокировано — перепишите текст" : "нужна ручная проверка"}
-                    <ul className="mt-1 space-y-1">
-                      {(packageCompliance.issues || []).map((issue, index) => (
-                        <li key={`${issue.code || "issue"}-${index}`}>• {issue.message}</li>
+
+                <p className="mt-3 text-xs font-bold uppercase text-[#64748B]">Что проверяется автоматически</p>
+                <ul className="mt-1 space-y-1 text-sm font-semibold text-[#475569]">
+                  {complianceRules.map((rule) => (
+                    <li key={rule}>— {rule}</li>
+                  ))}
+                </ul>
+                <p className="mt-2 text-xs font-semibold text-[#64748B]">
+                  Проверка ищет known-запрещённые формулировки в заголовке, основном тексте и подписи. Она не заменяет
+                  юридическую проверку рекламы медицинских услуг.
+                </p>
+
+                {contentPackage.complianceNotes.length ? (
+                  <>
+                    <p className="mt-3 text-xs font-bold uppercase text-[#64748B]">Комментарий модели (не результат проверки)</p>
+                    <ul className="mt-1 space-y-1 text-sm font-semibold text-[#475569]">
+                      {contentPackage.complianceNotes.map((note) => (
+                        <li key={note}>• {note}</li>
                       ))}
                     </ul>
-                  </div>
-                ) : (
-                  <p className="mt-3 text-sm font-semibold text-emerald-800">Статус проверки: безопасно для медицинской рекламы.</p>
-                )}
+                  </>
+                ) : null}
               </div>
+            </div>
+          ) : null}
+        </section>
+
+        <section className="neu-card p-6">
+          <SectionTitle
+            icon={Sparkles}
+            title="Генерация изображения и видео"
+            subtitle="Описание кадра уходит в сервис генерации, а готовый файл сразу попадает в библиотеку креативов — оттуда его берёт AI запуск рекламы."
+          />
+
+          <div className="mb-4">
+            <Field
+              label="Что должно быть в кадре"
+              value={genPrompt}
+              onChange={setGenPrompt}
+              textarea
+            />
+            {contentPackage ? (
+              <div className="mt-2 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  className="neu-btn inline-flex items-center gap-2 px-3 py-1.5 text-xs"
+                  onClick={() => setGenPrompt(contentPackage.photoPrompt)}
+                >
+                  <ImagePlus size={13} />
+                  Подставить photo prompt из пакета
+                </button>
+                <button
+                  type="button"
+                  className="neu-btn inline-flex items-center gap-2 px-3 py-1.5 text-xs"
+                  onClick={() => setGenPrompt(contentPackage.videoPrompt)}
+                >
+                  <Clapperboard size={13} />
+                  Подставить video prompt из пакета
+                </button>
+              </div>
+            ) : null}
+          </div>
+
+          <p style={labelStyle}>Формат</p>
+          <div className="mb-4 flex flex-wrap gap-2">
+            {packageFormats.map((format) => (
+              <button
+                key={format.id}
+                type="button"
+                className={`rounded-full border px-4 py-2 text-xs font-black ${
+                  genFormat === format.id ? "border-[#0D9488] bg-[#0D9488] text-white" : "border-[#E7ECF3] bg-white text-[#475569]"
+                }`}
+                onClick={() => setGenFormat(format.id)}
+              >
+                {format.label}
+              </button>
+            ))}
+          </div>
+
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              className="neu-btn-primary inline-flex items-center gap-2 px-4 py-2.5 text-sm"
+              disabled={genBusy !== null}
+              onClick={() => void generatePhoto()}
+            >
+              <ImagePlus size={15} />
+              {genBusy === "photo" ? "Генерируем изображение..." : "Сгенерировать изображение"}
+            </button>
+            <button
+              type="button"
+              className="neu-btn inline-flex items-center gap-2 px-4 py-2.5 text-sm"
+              disabled={genBusy !== null || videoJob?.status === "queued" || videoJob?.status === "in_progress"}
+              onClick={() => void generateVideo()}
+            >
+              <Clapperboard size={15} />
+              {genBusy === "video" ? "Отправляем задачу..." : "Сгенерировать видео"}
+            </button>
+          </div>
+
+          {genNotice ? (
+            <div
+              className={`mt-4 rounded-2xl border p-3 text-sm font-semibold ${
+                genNotice.tone === "error"
+                  ? "border-rose-200 bg-rose-50 text-rose-900"
+                  : genNotice.tone === "warning"
+                    ? "border-amber-200 bg-amber-50 text-amber-900"
+                    : "border-sky-200 bg-sky-50 text-sky-900"
+              }`}
+            >
+              {genNotice.text}
+            </div>
+          ) : null}
+
+          {videoJob && videoJob.status !== "failed" ? (
+            <div className="mt-4 rounded-2xl border border-[#E7ECF3] bg-white p-4">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="text-sm font-black text-[#0B1220]">{videoJobLabels[videoJob.status]}</p>
+                <p className="text-sm font-bold text-[#64748B]">{videoJob.progress}%</p>
+              </div>
+              <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-[#E7ECF3]">
+                <div className="h-full rounded-full bg-[#0D9488]" style={{ width: `${Math.max(3, videoJob.progress)}%` }} />
+              </div>
+              {videoJob.status !== "completed" ? (
+                <p className="mt-2 text-xs font-semibold text-[#64748B]">
+                  Рендер идёт на стороне сервиса и занимает минуты. Страницу можно не держать открытой только после того, как
+                  ролик появится ниже: состояние живёт до перезагрузки.
+                </p>
+              ) : null}
+            </div>
+          ) : null}
+
+          {genImage || genVideo ? (
+            <div className="mt-6 grid gap-4 md:grid-cols-2">
+              {genImage ? (
+                <div className="neu-sm p-3">
+                  <p className="mb-2 text-xs font-bold uppercase text-[#64748B]">Сгенерированное изображение</p>
+                  <img src={genImage.url} alt="Сгенерированное изображение" className="max-h-[420px] w-full rounded-xl object-contain" />
+                  <p className="mt-2 text-xs font-semibold text-[#64748B]">
+                    {[genImage.model, formatFileSize(genImage.fileSize)].filter(Boolean).join(" · ")}
+                  </p>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <a
+                      className="neu-btn inline-flex items-center gap-2 px-3 py-1.5 text-xs"
+                      href={genImage.url}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      <Download size={13} />
+                      Открыть файл
+                    </a>
+                    <button
+                      type="button"
+                      className="neu-btn-primary inline-flex items-center gap-2 px-3 py-1.5 text-xs"
+                      onClick={() => useGeneratedInAdsAutomation(genImage, "image")}
+                    >
+                      <Rocket size={13} />
+                      В AI запуск рекламы
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+              {genVideo ? (
+                <div className="neu-sm p-3">
+                  <p className="mb-2 text-xs font-bold uppercase text-[#64748B]">Сгенерированный ролик</p>
+                  <video src={genVideo.url} controls playsInline className="max-h-[420px] w-full rounded-xl bg-black object-contain" />
+                  <p className="mt-2 text-xs font-semibold text-[#64748B]">{formatFileSize(genVideo.fileSize)}</p>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <a
+                      className="neu-btn inline-flex items-center gap-2 px-3 py-1.5 text-xs"
+                      href={genVideo.url}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      <Download size={13} />
+                      Открыть файл
+                    </a>
+                    <button
+                      type="button"
+                      className="neu-btn-primary inline-flex items-center gap-2 px-3 py-1.5 text-xs"
+                      onClick={() => useGeneratedInAdsAutomation(genVideo, "video")}
+                    >
+                      <Rocket size={13} />
+                      В AI запуск рекламы
+                    </button>
+                  </div>
+                </div>
+              ) : null}
             </div>
           ) : null}
         </section>
@@ -1597,12 +2126,19 @@ export default function ContentStudio() {
             <div className="neu-sm p-4">
               <p className="text-xs font-bold uppercase text-[#64748B]">Caption / hashtags</p>
               <p className="mt-2 text-sm leading-relaxed text-[#334155]">{current.caption || "Данные появятся после генерации."}</p>
+              {/* Здесь стояли три придуманных хэштега — они появлялись даже
+                  тогда, когда модель не вернула ни одного, и выглядели как
+                  результат генерации. Пустой список честнее выдуманного. */}
               <div className="mt-3 flex flex-wrap gap-2">
-                {(current.hashtags?.length ? current.hashtags : ["#ai", "#clinic", "#crm"]).map((tag) => (
-                  <span key={tag} className="rounded-full bg-[#E0F2FE] px-3 py-1 text-xs font-bold text-[#0369A1]">
-                    {tag}
-                  </span>
-                ))}
+                {current.hashtags?.length ? (
+                  current.hashtags.map((tag) => (
+                    <span key={tag} className="rounded-full bg-[#E0F2FE] px-3 py-1 text-xs font-bold text-[#0369A1]">
+                      {tag}
+                    </span>
+                  ))
+                ) : (
+                  <span className="text-xs font-semibold text-[#64748B]">Хэштеги появятся после генерации сценария.</span>
+                )}
               </div>
             </div>
           </div>
@@ -1659,12 +2195,25 @@ export default function ContentStudio() {
         </section>
 
         <section className="neu-card p-6">
-          <SectionTitle icon={Clapperboard} title="Workflow" subtitle="Полная цепочка production-процесса SAAF внутри Negis." />
+          <SectionTitle
+            icon={Clapperboard}
+            title="Как собирается ролик"
+            subtitle="Что делает Negis и что остаётся сделать во внешних инструментах."
+          />
           <div className="grid gap-3 md:grid-cols-4">
-            {workflow.map((step, index) => (
-              <div key={step} className="neu-sm p-4">
-                <p className="text-xs font-black text-[#1A56DB]">{String(index + 1).padStart(2, "0")}</p>
-                <p className="mt-2 text-sm font-bold text-[#0B1220]">{step}</p>
+            {workflow.map((item, index) => (
+              <div key={item.step} className="neu-sm p-4">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-xs font-black text-[#1A56DB]">{String(index + 1).padStart(2, "0")}</p>
+                  <span
+                    className={`rounded-full px-2 py-0.5 text-[10px] font-black uppercase ${
+                      item.inProduct ? "bg-[#D1FAE5] text-[#065F46]" : "bg-[#F1F5F9] text-[#64748B]"
+                    }`}
+                  >
+                    {item.inProduct ? "в Negis" : "вручную"}
+                  </span>
+                </div>
+                <p className="mt-2 text-sm font-bold text-[#0B1220]">{item.step}</p>
               </div>
             ))}
           </div>

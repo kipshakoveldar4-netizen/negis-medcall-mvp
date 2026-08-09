@@ -3501,6 +3501,93 @@ async function persistAdCreativeAsset(input: { workspaceId: string; body: JsonRe
   }
 }
 
+export type StoredGeneratedCreative = {
+  publicUrl: string;
+  asset: JsonRecord;
+  mode: CrmMode;
+  warning: string;
+};
+
+/**
+ * Сгенерированный файл кладётся туда же, куда загруженный руками, — в
+ * библиотеку креативов.
+ *
+ * Своего хранилища у контент-студии нет намеренно: единственное, ради чего
+ * клиника генерирует картинку или ролик, — запустить с ним рекламу, а запуск
+ * читает `ad_creative_assets`. Отдельная таблица означала бы, что оператор
+ * скачивает файл и загружает его обратно в соседнем разделе.
+ *
+ * Storage-1 соблюдается тем же способом, что и на загрузке: ни bucket, ни ключ
+ * объекта не приходят снаружи — оба выводятся здесь из проверенного
+ * workspaceId. Вызывающий передаёт только байты и имя файла.
+ */
+export async function storeGeneratedCreative(input: {
+  workspaceId: string;
+  fileName: string;
+  mimeType: string;
+  buffer: Buffer;
+  metadata?: JsonRecord;
+}): Promise<StoredGeneratedCreative> {
+  const supabase = getSupabaseServerClient();
+  const storageBucket = AD_CREATIVE_BUCKET;
+  const storagePath = buildAdCreativeStoragePath({ workspaceId: input.workspaceId, fileName: input.fileName });
+  const body: JsonRecord = {
+    workspaceId: input.workspaceId,
+    fileName: input.fileName,
+    fileType: normalizeCreativeFileType({ fileName: input.fileName, mimeType: input.mimeType }),
+    mimeType: input.mimeType,
+    fileSize: input.buffer.length,
+    storageBucket,
+    storagePath,
+    status: "uploaded",
+    metadata: { ...(input.metadata || {}), uploadMode: "ai-generated" },
+  };
+
+  // Тот же список допустимых типов и тот же предел размера, что и на ручной
+  // загрузке: файл, который Meta не примет, лучше не заводить в библиотеку.
+  const details = validateCreativeAssetBody(body);
+  if (details.length > 0) {
+    throw new Error(details.join("; "));
+  }
+
+  if (!supabase || !isUuid(input.workspaceId)) {
+    // Демо-рабочее пространство не имеет хранилища. Молча вернуть «готово»
+    // здесь нельзя: наверху это превратится в карточку без изображения.
+    throw new Error(
+      !supabase
+        ? "Supabase Storage is not configured"
+        : "Демо-режим не хранит сгенерированные файлы — войдите в рабочее пространство клиники.",
+    );
+  }
+
+  const { error: uploadError } = await supabase.storage.from(storageBucket).upload(storagePath, input.buffer, {
+    contentType: input.mimeType,
+    upsert: false,
+  });
+  if (uploadError) {
+    throw new Error(uploadError.message || "Supabase Storage did not accept the generated file.");
+  }
+
+  const publicUrl =
+    supabase.storage.from(storageBucket).getPublicUrl(storagePath).data.publicUrl ||
+    buildSupabaseStoragePublicUrl({ bucket: storageBucket, storagePath });
+  if (!publicUrl) {
+    throw new Error("Файл сохранён, но Supabase не вернул публичную ссылку. Проверьте, что bucket ad-creatives публичный.");
+  }
+
+  const saved = await persistAdCreativeAsset({
+    workspaceId: input.workspaceId,
+    body: { ...body, publicUrl },
+  });
+
+  return {
+    publicUrl,
+    asset: asRecord(saved.asset),
+    mode: saved.mode,
+    warning: saved.warning || "",
+  };
+}
+
 async function updateAdCreativeMeta(input: {
   workspaceId: string;
   assetId: string;
