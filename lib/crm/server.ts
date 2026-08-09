@@ -221,6 +221,29 @@ function readNullableNumber(value: unknown): number | null {
 /** Потолок длительности услуги — тот же, что в CHECK миграции 032. */
 const SERVICE_DURATION_MAX = 600;
 
+/**
+ * Потолок цены услуги: сто миллионов тенге в тиынах.
+ *
+ * Не педантизм: колонка bigint, и число за её пределами возвращается отказом
+ * базы, то есть пятьсот второй «сбой сервиса» вместо внятного «столько не
+ * бывает». Предел с огромным запасом — самая дорогая процедура в клинике на
+ * три порядка меньше.
+ */
+const SERVICE_PRICE_MAX_MINOR = 10_000_000_000;
+
+/**
+ * «Прислали, но прочитать не смогли» — не то же самое, что «не прислали».
+ *
+ * readNullableNumber возвращает null и на пустоту, и на мусор, а проверки ниже
+ * пропускают null. Без этой функции `basePriceMinor: "15 000 тг"` сохранялся бы
+ * как «цена не указана» с ответом 201: различие NULL и нуля, ради которого
+ * колонка и заведена nullable, ломается ровно там, где оно важнее всего.
+ */
+function isUnreadableNumber(value: unknown): boolean {
+  if (value === null || value === undefined || value === "") return false;
+  return readNumber(value) === null;
+}
+
 /** Postgres «нарушение уникальности». Единственный код базы, отвечающий 400. */
 const UNIQUE_VIOLATION = "23505";
 
@@ -411,19 +434,14 @@ function buildPatchRow(resource: CrmResource, body: JsonRecord): JsonRecord {
     }
     setText("category", ["category"]);
     setText("description", ["description"]);
+    // Тот же список проверок, что и на создании: расходиться им нельзя.
+    const numberDetails = serviceNumberDetails(body);
+    if (numberDetails.length > 0) throw new CrmReferenceValidationError(numberDetails);
     if (hasAnyKey(body, ["basePriceMinor", "base_price_minor"])) {
-      const price = readNullableNumber(body.basePriceMinor ?? body.base_price_minor);
-      if (price !== null && (!Number.isInteger(price) || price < 0)) {
-        throw new CrmReferenceValidationError(["basePriceMinor must be an integer >= 0"]);
-      }
-      row.base_price_minor = price;
+      row.base_price_minor = readNullableNumber(body.basePriceMinor ?? body.base_price_minor);
     }
     if (hasAnyKey(body, ["durationMinutes", "duration_minutes"])) {
-      const minutes = readNullableNumber(body.durationMinutes ?? body.duration_minutes);
-      if (minutes !== null && (!Number.isInteger(minutes) || minutes <= 0 || minutes > SERVICE_DURATION_MAX)) {
-        throw new CrmReferenceValidationError([`durationMinutes must be between 1 and ${SERVICE_DURATION_MAX}`]);
-      }
-      row.duration_minutes = minutes;
+      row.duration_minutes = readNullableNumber(body.durationMinutes ?? body.duration_minutes);
     }
     setNumber("sort_order", ["sortOrder", "sort_order"]);
     setBoolean("is_active", ["isActive", "is_active"]);
@@ -735,6 +753,46 @@ function validationDetails(body: JsonRecord, fields: string[]): string[] {
     .map((field) => `${field} is required`);
 }
 
+/**
+ * Числовые поля услуги, проверенные одинаково на создании и на правке.
+ *
+ * Один список на два пути — потому что расхождение между ними уже случалось в
+ * этом файле: POST принимал одно, PATCH другое, и разница жила молча.
+ */
+function serviceNumberDetails(body: JsonRecord): string[] {
+  const details: string[] = [];
+
+  const rawPrice = body.basePriceMinor ?? body.base_price_minor;
+  if (isUnreadableNumber(rawPrice)) {
+    details.push("basePriceMinor must be a number");
+  } else {
+    const price = readNullableNumber(rawPrice);
+    if (price !== null && (!Number.isInteger(price) || price < 0 || price > SERVICE_PRICE_MAX_MINOR)) {
+      details.push("basePriceMinor must be an integer >= 0");
+    }
+  }
+
+  const rawMinutes = body.durationMinutes ?? body.duration_minutes;
+  if (isUnreadableNumber(rawMinutes)) {
+    details.push("durationMinutes must be a number");
+  } else {
+    const minutes = readNullableNumber(rawMinutes);
+    if (minutes !== null && (!Number.isInteger(minutes) || minutes <= 0 || minutes > SERVICE_DURATION_MAX)) {
+      details.push(`durationMinutes must be between 1 and ${SERVICE_DURATION_MAX}`);
+    }
+  }
+
+  // sort_order объявлен NOT NULL, а setNumber кладёт туда null на нечисло:
+  // без этой проверки опечатка через API отвечала бы «сбой сервиса» вместо
+  // «поле не то».
+  const rawOrder = body.sortOrder ?? body.sort_order;
+  if (rawOrder !== undefined && (isUnreadableNumber(rawOrder) || readNullableNumber(rawOrder) === null)) {
+    details.push("sortOrder must be a number");
+  }
+
+  return details;
+}
+
 function resourceValidationDetails(resource: CrmResource, body: JsonRecord): string[] {
   const details: string[] = [];
 
@@ -791,14 +849,7 @@ function resourceValidationDetails(resource: CrmResource, body: JsonRecord): str
     // клиент базы. Проверки на дубль названия здесь быть не может — она живёт
     // в уникальном индексе 032, а его нарушение переводится в 400 ниже.
     if (!readString(body.name)) details.push("name is required");
-    const price = readNullableNumber(body.basePriceMinor ?? body.base_price_minor);
-    if (price !== null && (!Number.isInteger(price) || price < 0)) {
-      details.push("basePriceMinor must be an integer >= 0");
-    }
-    const minutes = readNullableNumber(body.durationMinutes ?? body.duration_minutes);
-    if (minutes !== null && (!Number.isInteger(minutes) || minutes <= 0 || minutes > SERVICE_DURATION_MAX)) {
-      details.push(`durationMinutes must be between 1 and ${SERVICE_DURATION_MAX}`);
-    }
+    details.push(...serviceNumberDetails(body));
   }
 
   if (resource === "appointments" && !firstString(body.client, body.client_name, body.clientName)) {
@@ -1041,6 +1092,9 @@ function makeDeal(body: JsonRecord): JsonRecord {
     appointmentId: firstString(body.appointmentId, body.appointment_id),
     metaCampaignLaunchId: firstString(body.metaCampaignLaunchId, body.meta_campaign_launch_id),
     responsibleUserId: firstString(body.responsibleUserId, body.responsible_user_id),
+    // См. makeAppointment: связь, которую нельзя прочитать, стирается первой же
+    // правкой карточки — и выручку по услуге считать снова не из чего.
+    serviceId: firstString(body.serviceId, body.service_id),
     notes: readString(body.notes),
     createdAt: firstString(body.createdAt, body.created_at, new Date().toISOString()),
     updatedAt: firstString(body.updatedAt, body.updated_at, new Date().toISOString()),
@@ -1066,6 +1120,11 @@ function makeAppointment(body: JsonRecord): JsonRecord {
     duration_minutes: readNumber(body.durationMinutes ?? body.duration_minutes) ?? 60,
     source: readString(body.source),
     clientId: firstString(body.clientId, body.client_id),
+    // Ссылка на услугу обязана возвращаться наружу, а не только записываться.
+    // Браузер отправляет объект целиком на каждом сохранении, включая смену
+    // статуса, поэтому колонка, которую он не может прочитать, приходит назад
+    // пустой строкой — и следующий же клик «Пришёл» затирает связь в null.
+    serviceId: firstString(body.serviceId, body.service_id),
   };
 }
 
@@ -1522,6 +1581,7 @@ const configs: Record<CrmResource, ResourceConfig> = {
         appointment_id: row.appointment_id,
         meta_campaign_launch_id: row.meta_campaign_launch_id,
         responsible_user_id: row.responsible_user_id,
+        service_id: row.service_id,
         notes: row.notes,
         created_at: row.created_at,
         updated_at: row.updated_at,
@@ -1562,6 +1622,7 @@ const configs: Record<CrmResource, ResourceConfig> = {
         durationMinutes: row.duration_minutes,
         source: row.source,
         client_id: row.client_id,
+        service_id: row.service_id,
       }),
   },
   calls: {
@@ -2648,10 +2709,25 @@ const TASK_COLUMNS_FROM_031 = [
   "completed_at",
 ];
 
+/**
+ * PostgREST отвергает запись в неизвестную колонку из кэша схемы, не доходя до
+ * Postgres: код PGRST204, текст «Could not find the 'x' column of 'y' in the
+ * schema cache». 42703 приходит из самого Postgres и в этой ситуации на hosted
+ * Supabase почти не встречается.
+ *
+ * Проверять только коды Postgres здесь уже пробовали в соседнем файле
+ * (lib/crm/whatsapp-channels.ts) — и это увело бы всю вкладку в 502. Ровно
+ * поэтому оба кода, а не один: иначе откат «сохранить без новых колонок» не
+ * срабатывал бы никогда, и всё окно между деплоем и миграцией запись просто не
+ * создавалась бы.
+ */
+const MISSING_COLUMN_CODES = new Set([UNDEFINED_COLUMN, "PGRST204"]);
+
 function isMissingAnyColumn(error: { code?: unknown; message?: unknown } | null): boolean {
   if (!error) return false;
-  if (readString(error.code) === UNDEFINED_COLUMN) return true;
-  return readString(error.message).toLowerCase().includes("does not exist");
+  if (MISSING_COLUMN_CODES.has(readString(error.code))) return true;
+  const message = readString(error.message).toLowerCase();
+  return message.includes("does not exist") || message.includes("schema cache");
 }
 
 /** Колонки, которых нет в базе, пока не применена forward-миграция 032. */
@@ -3303,6 +3379,11 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
     }
     if (resource === "deals") {
       Object.assign(row, await buildDealReferenceRow(supabase, workspaceId, patchBody));
+      // Без этой строки выбор услуги в карточке продажи не делал ничего:
+      // PATCH проходил по остальным полям, отвечал 200 и «Продажа обновлена»,
+      // а связь не записывалась ни разу — то есть выручка по услуге так и
+      // оставалась невычислимой, при работающем на вид интерфейсе.
+      Object.assign(row, await buildServiceLinkRow(supabase, workspaceId, patchBody, { requireActive: false, prefillDuration: false }));
     }
     if (resource === "tasks") {
       Object.assign(row, await buildTaskReferenceRow(supabase, workspaceId, patchBody));

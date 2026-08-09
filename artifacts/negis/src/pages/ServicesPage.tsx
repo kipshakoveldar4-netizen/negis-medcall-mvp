@@ -108,7 +108,12 @@ function serviceFromApi(record: Record<string, unknown>): ClinicService {
  */
 function priceInputFromMinor(minor: number | null): string {
   if (minor === null) return "";
-  return String(Math.round(minor / 100));
+  // Округлять здесь нельзя: цена 10,50 ₸ подставилась бы в форму как «11», и
+  // сохранение без единой правки переписало бы её на 11 ₸. Та же форма записи
+  // числа, что на экране продаж, — иначе один и тот же тиын показывается на
+  // двух экранах разными числами.
+  const tenge = minor / 100;
+  return Number.isInteger(tenge) ? String(tenge) : tenge.toFixed(2);
 }
 
 function priceMinorFromInput(value: string): number | null {
@@ -121,7 +126,12 @@ function priceMinorFromInput(value: string): number | null {
 
 function formatPrice(minor: number | null): string {
   if (minor === null) return "—";
-  return `${new Intl.NumberFormat("ru-RU").format(Math.round(minor / 100))} ₸`;
+  const tenge = minor / 100;
+  const formatted = new Intl.NumberFormat("ru-RU", {
+    minimumFractionDigits: Number.isInteger(tenge) ? 0 : 2,
+    maximumFractionDigits: 2,
+  }).format(tenge);
+  return `${formatted} ₸`;
 }
 
 function formatDuration(minutes: number | null): string {
@@ -250,6 +260,19 @@ export default function ServicesPage() {
     void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Модальное окно без Escape — клавиатурный тупик: закрыть его можно только
+  // мышью по крестику или по фону.
+  useEffect(() => {
+    if (!formOpen && !confirmHideId) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      if (confirmHideId) setConfirmHideId("");
+      else setFormOpen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [confirmHideId, formOpen]);
 
   const persistDemo = (next: ClinicService[]) => {
     writeDemoStorage(workspaceScopedKey(DEMO_KEY), next);
@@ -504,7 +527,11 @@ export default function ServicesPage() {
           <EmptyState
             icon={Tag}
             title="Услуг пока нет"
-            description="Когда вы добавите услуги клиники, они появятся здесь и в форме записи."
+            description={
+              canManage
+                ? "Когда вы добавите услуги клиники, они появятся здесь и в форме записи."
+                : "Прайс заполняет администратор клиники. Когда услуги добавят, они появятся здесь и в форме записи."
+            }
             action={
               canManage ? (
                 <button type="button" className="neu-btn-primary justify-center" onClick={openAdd}>

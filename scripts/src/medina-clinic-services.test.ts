@@ -37,6 +37,7 @@ const authorizationPath = path.join(repoRoot, "lib", "crm", "authorization.ts");
 const migrationPath = path.join(repoRoot, "migrations", "032_clinic_services_directory.sql");
 
 const WORKSPACE_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const WORKSPACE_B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const USER_A = "11111111-1111-4111-8111-111111111111";
 const STAFF_A = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
 const SERVICE_ID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
@@ -386,9 +387,15 @@ test("CS8 «справочник не включён» отличается от
 /* ── Связь записи и продажи с услугой ── */
 
 test("CS9 услуга чужой клиники не становится связью", async () => {
+  // Чужая строка обязана существовать в заглушке. Без неё отказ приходил бы из
+  // «такой строки нет», и проверка на принадлежность клинике не выполнялась бы
+  // вовсе — тест был бы зелёным, ничего не проверив.
   const call = await loadRouter({
     rows: {
-      clinic_services: [activeService],
+      clinic_services: [
+        activeService,
+        { id: FOREIGN_SERVICE_ID, workspace_id: WORKSPACE_B, name: "Чужая услуга", duration_minutes: 30, is_active: true },
+      ],
       appointments: [],
     },
   });
@@ -486,6 +493,123 @@ test("CS13 правка услуги попадает в журнал измен
   const journal = log.find((entry) => entry.table === "audit_logs" && entry.op === "insert");
   assert.ok(journal, "справочник цен без истории — это «кто поднял цену» без ответа");
   assert.equal((journal?.filters.__row as Record<string, unknown>).entity_type, "service");
+});
+
+test("CS18 связь возвращается наружу, а не только записывается", async () => {
+  // Браузер отправляет объект целиком на каждом сохранении. Колонка, которую
+  // он не может прочитать, приходит назад пустой строкой — и следующая правка
+  // затирает связь в null. Проверялась только запись, поэтому дефект и дожил.
+  const call = await loadRouter({ rows: { clinic_services: [activeService] } });
+
+  const created = await call({
+    resource: "appointments",
+    method: "POST",
+    body: { client: "Пациент", serviceId: SERVICE_ID, startsAt: "2026-09-01T09:00:00.000Z" },
+  });
+  assert.equal(created.res.statusCode, 201, JSON.stringify(created.res.body));
+  const item = (created.res.body.data as Record<string, Record<string, unknown>>).item;
+  assert.equal(item.serviceId, SERVICE_ID, "запись обязана вернуть связь, иначе браузеру нечего эхом отправить назад");
+
+  const deal = await call({
+    resource: "deals",
+    method: "POST",
+    body: { title: "Ботокс", amountMinor: 1000, serviceId: SERVICE_ID },
+  });
+  assert.equal(deal.res.statusCode, 201, JSON.stringify(deal.res.body));
+  assert.equal((deal.res.body.data as Record<string, Record<string, unknown>>).item.serviceId, SERVICE_ID);
+});
+
+test("CS19 продажа связывается с услугой и на правке, а не только при создании", async () => {
+  const call = await loadRouter({
+    rows: {
+      clinic_services: [activeService],
+      deals: [{ id: APPOINTMENT_ID, workspace_id: WORKSPACE_A, title: "Ботокс", amount_minor: 1000 }],
+    },
+  });
+  const { res, log } = await call({
+    resource: "deals",
+    method: "PATCH",
+    body: { id: APPOINTMENT_ID, updates: { serviceId: SERVICE_ID } },
+  });
+
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  assert.equal(
+    writtenTo(log, "deals")?.service_id,
+    SERVICE_ID,
+    "иначе выбор услуги в карточке продажи отвечает «обновлено» и не делает ничего",
+  );
+});
+
+test("CS20 запись создаётся и когда отсутствие колонки приходит из кэша схемы", async () => {
+  // PostgREST отвергает запись в неизвестную колонку кодом PGRST204, не доходя
+  // до Postgres. Откат, знающий только 42703, не сработал бы ни разу на hosted
+  // Supabase — и всё окно между деплоем и миграцией запись не создавалась бы.
+  const call = await loadRouter({
+    rows: { clinic_services: [activeService] },
+    injected: [{
+      table: "appointments",
+      op: "insert",
+      code: "PGRST204",
+      message: "Could not find the 'service_id' column of 'appointments' in the schema cache",
+    }],
+  });
+  const { res, warnings: warned } = await call({
+    resource: "appointments",
+    method: "POST",
+    body: { client: "Пациент", serviceId: SERVICE_ID, startsAt: "2026-09-01T09:00:00.000Z" },
+  });
+
+  // Заглушка отвечает отказом на каждую вставку, поэтому вторая попытка тоже
+  // не пройдёт; проверяется, что она вообще СОСТОЯЛАСЬ — то есть код распознал
+  // форму ошибки и пошёл на откат, а не сразу в пятьсот вторую.
+  assert.ok(
+    warned.some((line) => line.includes("032") && line.includes("service_id")),
+    `откат обязан сработать на PGRST204, а не только на 42703: ${JSON.stringify(warned)}`,
+  );
+  assert.equal(res.statusCode, 502, "после второй неудачи ответ остаётся честным отказом");
+});
+
+test("CS21 «Скрыть услугу» действительно скрывает", async () => {
+  // Единственная форма удаления, которая есть у платформы. Без этой проверки
+  // можно было удалить строку setBoolean и остаться зелёным: экран сказал бы
+  // «Услуга скрыта», а услуга продолжила бы предлагаться в форме записи.
+  const call = await loadRouter({ rows: { clinic_services: [activeService] } });
+  const { res, log } = await call({ method: "PATCH", body: { id: SERVICE_ID, isActive: false } });
+
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  assert.equal(writtenTo(log, "clinic_services")?.is_active, false);
+});
+
+test("CS22 нечисло в цене, длительности и порядке отвергается, а не превращается в «не задано»", async () => {
+  const call = await loadRouter({ rows: { clinic_services: [activeService] } });
+
+  for (const body of [
+    { name: "Ботокс", basePriceMinor: "15 000 тг" },
+    { name: "Ботокс", durationMinutes: "час" },
+    { name: "Ботокс", sortOrder: "первый" },
+  ]) {
+    const { res } = await call({ method: "POST", body });
+    assert.equal(res.statusCode, 400, `${JSON.stringify(body)} → ${JSON.stringify(res.body)}`);
+  }
+
+  // Правка обязана отвергать то же самое: расхождение POST и PATCH в этом
+  // файле уже случалось и жило молча.
+  const patched = await call({ method: "PATCH", body: { id: SERVICE_ID, updates: { basePriceMinor: "дорого" } } });
+  assert.equal(patched.res.statusCode, 400, JSON.stringify(patched.res.body));
+});
+
+test("CS23 неуказанная цена возвращается пустой, а не нулём", async () => {
+  // Обратная половина CS6: там проверялось, что уходит в базу, здесь — что
+  // приходит обратно. Подмена readNullableNumber на readNumber прошла бы
+  // мимо всех остальных проверок, а на экране каждая неоценённая услуга
+  // показала бы «0 ₸» — цифру, которой владелец не писал.
+  const call = await loadRouter();
+  const { res } = await call({ method: "POST", body: { name: "Комплекс" } });
+
+  assert.equal(res.statusCode, 201, JSON.stringify(res.body));
+  const item = (res.body.data as Record<string, Record<string, unknown>>).item;
+  assert.equal(item.basePriceMinor, null);
+  assert.equal(item.durationMinutes, null);
 });
 
 /* ── Пять реестров, которые компилятор не связывает ── */

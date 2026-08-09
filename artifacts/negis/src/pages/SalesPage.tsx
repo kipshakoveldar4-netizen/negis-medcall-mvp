@@ -410,7 +410,10 @@ export default function SalesPage() {
         // него нет: загрузчик вернёт пустой список, выбор услуги просто не
         // появится, и поле останется свободным текстом. Это честная деградация,
         // а не ошибка, поэтому и обрабатывается тем же общим загрузчиком.
-        loadReferenceCollection("/api/crm/clinic-services", "services", "negis_demo_clinic_services"),
+        // Ключ обязан совпадать с тем, под которым пишет экран «Услуги»:
+        // без области рабочего пространства демо-справочник не доезжает сюда
+        // вовсе, и обещание «услуги подставляются в продажу» не выполняется.
+        loadReferenceCollection("/api/crm/clinic-services", "services", workspaceScopedKey("negis_demo_clinic_services")),
       ]);
       if (cancelled) return;
       setReferences({

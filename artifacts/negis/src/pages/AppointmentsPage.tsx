@@ -1099,17 +1099,26 @@ export function AppointmentsPage() {
                     {activeCatalog.map((service) => (
                       <option key={service.id} value={service.id}>{service.name}</option>
                     ))}
+                    {/* Услуга записи могла уехать в архив после того, как её
+                        записали. Без этого варианта список не содержал бы
+                        выбранного значения: поле рисовалось бы пустым, а один
+                        случайный клик по нему переписал бы и связь, и снимок
+                        названия на другую услугу. */}
+                    {form.serviceId && !activeCatalog.some((service) => service.id === form.serviceId) ? (
+                      <option value={form.serviceId}>{form.service || "Услуга скрыта"}</option>
+                    ) : null}
                     <option value={OTHER_SERVICE_OPTION}>Другая услуга…</option>
                   </SelectField>
-                  {!form.serviceId ? (
-                    <div className="mt-2">
-                      <TextField
-                        label="Название услуги"
-                        value={form.service}
-                        onChange={(service) => setForm((current) => ({ ...current, service }))}
-                      />
-                    </div>
-                  ) : null}
+                  {/* Название видно всегда: связь ссылается на строку каталога,
+                      а в записи хранится снимок на момент визита, и переименование
+                      услуги не должно менять того, что записано в карточке. */}
+                  <div className="mt-2">
+                    <TextField
+                      label="Название услуги в записи"
+                      value={form.service}
+                      onChange={(service) => setForm((current) => ({ ...current, service }))}
+                    />
+                  </div>
                 </div>
               ) : (
                 <TextField label="Услуга" value={form.service} onChange={(service) => setForm((current) => ({ ...current, service, serviceId: "" }))} />
