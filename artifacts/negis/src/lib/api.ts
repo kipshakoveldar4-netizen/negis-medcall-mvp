@@ -148,7 +148,7 @@ function ttlFor(path: string): number {
   // `clinic-services` joins them for the same reason: the booking form reads the
   // price list every time it opens, and a clinic edits that list about as often
   // as it edits its stages.
-  return /\/(lead-stages|lead-sources|staff|clinic-services)\b/.test(path) ? REFERENCE_TTL_MS : LIST_TTL_MS;
+  return /\/(lead-stages|lead-sources|staff|clinic-services|clinic-doctors|doctor-schedule)\b/.test(path) ? REFERENCE_TTL_MS : LIST_TTL_MS;
 }
 
 /**

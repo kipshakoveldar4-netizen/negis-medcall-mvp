@@ -498,8 +498,13 @@ test("BC15 the server is the authority, and the browser is only a fast pre-filte
     "the page must tell a busy slot apart from a database failure — they need different screens",
   );
   const submit = page.slice(page.indexOf("const submitForm"), page.indexOf("const renderDay"));
+  // Открывающая скобка без закрывающей — намеренно. Проверяется то, ради чего
+  // строка здесь стоит: создание ЖДЁТ сервер и несёт решение оператора об
+  // обходе. Точный список аргументов к этому смыслу отношения не имеет, а
+  // пинать литерал целиком значит красить набор в красный на каждой правке
+  // сигнатуры — что и случилось, когда у графика врача появился свой обход.
   assert.ok(
-    submit.includes("await createAppointment(appointment, allowConflict)"),
+    submit.includes("await createAppointment(appointment, allowConflict"),
     "creating must await the server: an optimistic create cannot ask the operator anything",
   );
   assert.ok(

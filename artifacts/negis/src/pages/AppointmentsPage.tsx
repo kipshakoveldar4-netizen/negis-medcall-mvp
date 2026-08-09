@@ -35,6 +35,8 @@ type Appointment = {
   /** Ссылка на строку справочника услуг. Пустая — услуга набрана текстом. */
   serviceId: string;
   doctor: string;
+  /** Ссылка на строку справочника врачей. Пустая — врач набран текстом. */
+  doctorId: string;
   startsAt: string;
   durationMinutes: number;
   status: AppointmentStatus;
@@ -50,6 +52,7 @@ type AppointmentForm = {
   service: string;
   serviceId: string;
   doctor: string;
+  doctorId: string;
   date: string;
   time: string;
   durationMinutes: number;
@@ -63,7 +66,6 @@ type ApiResponse =
   | { success: false; error: string; details?: string[] };
 
 const APPOINTMENT_PREFILL_KEY = "negis_appointment_prefill";
-const defaultDoctors = ["д-р Сауле", "д-р Айжан", "д-р Наргиз", "д-р Тимур"];
 
 /** Строка справочника услуг — ровно те поля, которые нужны форме записи. */
 type CatalogService = {
@@ -115,6 +117,143 @@ async function loadCatalogServices(): Promise<CatalogService[]> {
 
 /** Значение поля «Услуга», когда в каталоге нужной строки нет. */
 const OTHER_SERVICE_OPTION = "__other__";
+
+/** Строка справочника врачей — то, что нужно форме записи. */
+type DirectoryDoctor = { id: string; fullName: string; specialty: string; sortOrder: number; isActive: boolean };
+
+/** Строка графика врача. Минуты — от полуночи по времени клиники. */
+type DoctorShift = {
+  doctorId: string;
+  weekday: number | null;
+  onDate: string;
+  onDateEnd: string;
+  isWorking: boolean;
+  startMinute: number | null;
+  endMinute: number | null;
+};
+
+/**
+ * Справочник врачей и график для формы записи.
+ *
+ * Флаг «включено» здесь сохраняется, в отличие от загрузчика услуг: форма по
+ * нему выбирает между списком и текстовым полем, и «справочник выключен» не
+ * имеет права выглядеть как «врачей нет».
+ */
+async function loadDirectory<T>(path: string, listKey: string, availableKey: string, map: (record: Record<string, unknown>) => T): Promise<{ items: T[]; available: boolean }> {
+  if (!isRealWorkspace()) return { items: [], available: false };
+  try {
+    const workspaceId = readCurrentWorkspaceId();
+    const response = await crmFetch(`${path}?workspaceId=${encodeURIComponent(workspaceId)}`);
+    const text = await response.text();
+    const body = text ? (JSON.parse(text) as { success?: boolean; mode?: string; data?: Record<string, unknown> }) : null;
+    if (!response.ok || body?.success !== true || body.mode !== "supabase") return { items: [], available: false };
+    const raw = body.data?.[listKey] ?? body.data?.items;
+    const list = Array.isArray(raw) ? raw : [];
+    return {
+      items: list.map((item) => map(asRecord(item))),
+      available: body.data?.[availableKey] !== false,
+    };
+  } catch {
+    return { items: [], available: false };
+  }
+}
+
+function directoryDoctorFromApi(record: Record<string, unknown>): DirectoryDoctor {
+  return {
+    id: readString(record.id),
+    fullName: readString(record.fullName) || readString(record.full_name),
+    specialty: readString(record.specialty),
+    sortOrder: readNumber(record.sortOrder ?? record.sort_order, 0),
+    isActive:
+      record.isActive === undefined && record.is_active === undefined
+        ? true
+        : Boolean(record.isActive ?? record.is_active),
+  };
+}
+
+function doctorShiftFromApi(record: Record<string, unknown>): DoctorShift {
+  const minute = (value: unknown) =>
+    value === null || value === undefined || value === "" ? null : readNumber(value, 0);
+  return {
+    doctorId: readString(record.doctorId) || readString(record.doctor_id),
+    weekday: minute(record.weekday),
+    onDate: readString(record.onDate) || readString(record.on_date),
+    onDateEnd: readString(record.onDateEnd) || readString(record.on_date_end),
+    isWorking:
+      record.isWorking === undefined && record.is_working === undefined
+        ? true
+        : Boolean(record.isWorking ?? record.is_working),
+    startMinute: minute(record.startMinute ?? record.start_minute),
+    endMinute: minute(record.endMinute ?? record.end_minute),
+  };
+}
+
+/**
+ * Часовой пояс клиники, чтобы экран мог честно сказать, что он с поясом
+ * устройства не совпадает. Пустая строка — пояс не задан, и правило графика
+ * при записи не применяется.
+ */
+async function loadClinicTimeZone(): Promise<string> {
+  if (!isRealWorkspace()) return "";
+  try {
+    const workspaceId = readCurrentWorkspaceId();
+    const response = await crmFetch(`/api/crm/admin-settings?workspaceId=${encodeURIComponent(workspaceId)}`);
+    const text = await response.text();
+    const body = text ? (JSON.parse(text) as { success?: boolean; data?: Record<string, unknown> }) : null;
+    if (!response.ok || body?.success !== true) return "";
+    const items = Array.isArray(body.data?.items) ? body.data.items : [];
+    for (const item of items) {
+      const record = asRecord(item);
+      if (readString(record.key) !== "clinic_schedule") continue;
+      return readString(asRecord(record.value).timeZone);
+    }
+    return "";
+  } catch {
+    return "";
+  }
+}
+
+/** Пояс ноутбука оператора. Ровно для того, чтобы сказать о расхождении. */
+function readDeviceTimeZone(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "";
+  } catch {
+    return "";
+  }
+}
+
+const WEEKDAY_SHORT = ["", "Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"];
+
+function formatShiftMinute(minute: number): string {
+  const normalized = ((minute % 1440) + 1440) % 1440;
+  return `${String(Math.floor(normalized / 60)).padStart(2, "0")}:${String(normalized % 60).padStart(2, "0")}`;
+}
+
+/**
+ * Что сказать оператору про график выбранного врача на выбранный день.
+ *
+ * Третья строка обязательна: это единственное место, где продукт признаёт,
+ * что для этого врача правило не работает вовсе.
+ */
+function describeDoctorDay(shifts: DoctorShift[], doctorId: string, dateKey: string): string {
+  if (!doctorId || !dateKey) return "";
+  const [year, month, day] = dateKey.split("-").map(Number);
+  if (!year || !month || !day) return "";
+  const isoWeekday = new Date(Date.UTC(year, month - 1, day)).getUTCDay() || 7;
+  const mine = shifts.filter((shift) => shift.doctorId === doctorId);
+  if (mine.length === 0) return "График не задан — запись не ограничивается.";
+
+  const covering = mine.filter((shift) => shift.onDate && shift.onDate <= dateKey && dateKey <= (shift.onDateEnd || shift.onDate));
+  const source = covering.length > 0 ? covering : mine.filter((shift) => shift.weekday === isoWeekday);
+  if (source.length === 0) return `${WEEKDAY_SHORT[isoWeekday]}: выходной (время клиники)`;
+
+  const intervals = source
+    .filter((shift) => shift.isWorking && shift.startMinute !== null && shift.endMinute !== null)
+    .map((shift) => `${formatShiftMinute(shift.startMinute as number)}–${formatShiftMinute(shift.endMinute as number)}`);
+
+  if (intervals.length === 0) return `${WEEKDAY_SHORT[isoWeekday]}: выходной (время клиники)`;
+  return `${WEEKDAY_SHORT[isoWeekday]}: ${intervals.join(", ")} (время клиники)`;
+}
 const activeStatuses: AppointmentStatus[] = ["scheduled", "confirmed", "arrived"];
 const statusOptions: AppointmentStatus[] = ["scheduled", "confirmed", "arrived", "no_show", "cancelled"];
 const viewLabels: Record<CalendarView, string> = {
@@ -180,9 +319,10 @@ function makeSeedAppointment(
     phone,
     whatsapp: phone,
     service,
-    // Демо-записи не ссылаются на каталог: у демо-пространства его нет.
+    // Демо-записи не ссылаются ни на каталог, ни на справочник врачей.
     serviceId: "",
     doctor,
+    doctorId: "",
     startsAt: toStartsAt(date, time),
     durationMinutes: 60,
     status,
@@ -286,7 +426,10 @@ function appointmentFromApi(value: unknown): Appointment {
     whatsapp: readString(record.whatsapp) || phone,
     service: readString(record.service) || "Консультация",
     serviceId: readString(record.serviceId) || readString(record.service_id),
-    doctor: readString(record.doctor) || readString(record.doctor_name) || readString(record.doctorName) || "д-р Сауле",
+    // Никакого имени по умолчанию. Запись без врача рисовалась как «д-р Сауле» —
+    // именем, которого в базе нет, и оператор не мог отличить её от настоящей.
+    doctor: readString(record.doctor) || readString(record.doctor_name) || readString(record.doctorName),
+    doctorId: readString(record.doctorId) || readString(record.doctor_id),
     startsAt,
     durationMinutes: readNumber(record.durationMinutes ?? record.duration_minutes, 60),
     status: normalizeStatus(readString(record.status)),
@@ -310,6 +453,8 @@ function appointmentToApi(appointment: Appointment): Record<string, unknown> {
     serviceId: appointment.serviceId || "",
     doctor: appointment.doctor,
     doctorName: appointment.doctor,
+    // Всегда, как и serviceId: пустая строка — осознанная отвязка.
+    doctorId: appointment.doctorId || "",
     starts_at: appointment.startsAt,
     startsAt: appointment.startsAt,
     duration_minutes: appointment.durationMinutes,
@@ -339,7 +484,10 @@ function defaultForm(date: string, time = "09:00"): AppointmentForm {
     whatsapp: "",
     service: "Консультация",
     serviceId: "",
-    doctor: defaultDoctors[0],
+    // Пусто, а не первый из выдуманных: регистратор, не тронувший поле,
+    // заводил настоящий визит на несуществующего врача.
+    doctor: "",
+    doctorId: "",
     date,
     time,
     durationMinutes: 60,
@@ -358,6 +506,7 @@ function formFromAppointment(appointment: Appointment): AppointmentForm {
     service: appointment.service,
     serviceId: appointment.serviceId || "",
     doctor: appointment.doctor,
+    doctorId: appointment.doctorId || "",
     date: dateKeyFromStartsAt(appointment.startsAt),
     time: timeKeyFromStartsAt(appointment.startsAt),
     durationMinutes: appointment.durationMinutes,
@@ -377,6 +526,7 @@ function appointmentFromForm(form: AppointmentForm, existingId?: string): Appoin
     service: form.service.trim(),
     serviceId: form.serviceId || "",
     doctor: form.doctor.trim(),
+    doctorId: form.doctorId || "",
     startsAt: toStartsAt(form.date, form.time),
     durationMinutes: form.durationMinutes,
     status: form.status,
@@ -408,6 +558,46 @@ function conflictFromBody(body: unknown): SlotTakenError | null {
     clientName: readString(conflict.clientName),
     doctorName: readString(conflict.doctorName),
   });
+}
+
+/**
+ * Отказ «врач не работает в это время» — свой класс, свой разбор и свой текст.
+ *
+ * Интервалы печатаются РОВНО так, как их прислал сервер: он уже перевёл их во
+ * время клиники. Пересчитать их здесь значило бы показать время в поясе
+ * ноутбука оператора — и два регистратора прочитали бы разное время в одном
+ * и том же отказе про одну и ту же запись.
+ */
+class OutsideScheduleError extends Error {
+  readonly schedule: { doctorName: string; localTime: string; weekdayLabel: string; intervals: string[] };
+
+  constructor(schedule: OutsideScheduleError["schedule"]) {
+    super("outside_doctor_schedule");
+    this.name = "OutsideScheduleError";
+    this.schedule = schedule;
+  }
+}
+
+function scheduleRefusalFromBody(body: unknown): OutsideScheduleError | null {
+  const record = asRecord(body);
+  if (readString(record.code) !== "outside_doctor_schedule") return null;
+  const schedule = asRecord(record.schedule);
+  const intervals = Array.isArray(schedule.intervals) ? schedule.intervals.map((item) => readString(item)) : [];
+  return new OutsideScheduleError({
+    doctorName: readString(schedule.doctorName),
+    localTime: readString(schedule.localTime),
+    weekdayLabel: readString(schedule.weekdayLabel),
+    intervals: intervals.filter(Boolean),
+  });
+}
+
+function describeSchedule(error: OutsideScheduleError): string {
+  const who = error.schedule.doctorName || "Врач";
+  const when = [error.schedule.weekdayLabel, error.schedule.localTime].filter(Boolean).join(", ");
+  const hours = error.schedule.intervals.length > 0
+    ? `Приём: ${error.schedule.intervals.join(", ")}.`
+    : "В этот день приёма нет.";
+  return `${who} не работает в это время${when ? ` (${when}, время клиники)` : ""}. ${hours} Записать всё равно?`;
 }
 
 function describeConflict(error: SlotTakenError): string {
@@ -568,16 +758,38 @@ export function AppointmentsPage() {
   const [saving, setSaving] = useState(false);
 
   const [catalog, setCatalog] = useState<CatalogService[]>([]);
+  const [directory, setDirectory] = useState<{ items: DirectoryDoctor[]; available: boolean }>({ items: [], available: false });
+  const [shifts, setShifts] = useState<DoctorShift[]>([]);
+  const [clinicTimeZone, setClinicTimeZone] = useState("");
+  const [scheduleMessage, setScheduleMessage] = useState("");
+  const deviceTimeZone = useMemo(() => readDeviceTimeZone(), []);
 
   useEffect(() => {
     let cancelled = false;
     void loadCatalogServices().then((list) => {
       if (!cancelled) setCatalog(list);
     });
+    void loadDirectory("/api/crm/clinic-doctors", "doctors", "directoryAvailable", directoryDoctorFromApi).then((result) => {
+      if (!cancelled) setDirectory(result);
+    });
+    void loadDirectory("/api/crm/doctor-schedule", "shifts", "scheduleAvailable", doctorShiftFromApi).then((result) => {
+      if (!cancelled) setShifts(result.items);
+    });
+    void loadClinicTimeZone().then((zone) => {
+      if (!cancelled) setClinicTimeZone(zone);
+    });
     return () => {
       cancelled = true;
     };
   }, []);
+
+  /** Активные врачи в порядке справочника — то, из чего выбирают в форме. */
+  const activeDoctors = useMemo(
+    () => directory.items
+      .filter((doctor) => doctor.isActive)
+      .sort((a, b) => a.sortOrder - b.sortOrder || a.fullName.localeCompare(b.fullName, "ru")),
+    [directory.items],
+  );
 
   const { items, addItem, setItems } = useDemoCollection<Appointment>("negis_demo_appointments", appointmentsSeed, {
     endpoint: "/api/crm/appointments",
@@ -586,7 +798,16 @@ export function AppointmentsPage() {
     fromApi: appointmentFromApi,
   });
 
-  const doctors = useMemo(() => Array.from(new Set([...defaultDoctors, ...items.map((item) => item.doctor).filter(Boolean)])).sort(), [items]);
+  // Справочник плюс то, что уже записано. Объединение обязательно: фильтр
+  // сравнивает СНИМОК имени на равенство строк, поэтому без исторических
+  // написаний старые записи перестали бы находиться.
+  const doctors = useMemo(
+    () => Array.from(new Set([
+      ...activeDoctors.map((doctor) => doctor.fullName),
+      ...items.map((item) => item.doctor).filter(Boolean),
+    ])).sort((a, b) => a.localeCompare(b, "ru")),
+    [activeDoctors, items],
+  );
 
   // Фильтр сравнивает СНИМОК названия на равенство строк, поэтому список
   // значений обязан быть объединением каталога и того, что уже записано.
@@ -661,7 +882,15 @@ export function AppointmentsPage() {
   const openCreate = (date = selectedDate, time = "09:00") => {
     setEditingId(null);
     setConflictMessage("");
-    setForm(defaultForm(date, time));
+    setScheduleMessage("");
+    // Врач из активного фильтра — то, что регистратор и так выбрал глазами.
+    const preselected = doctorFilter !== "all"
+      ? activeDoctors.find((doctor) => doctor.fullName === doctorFilter)
+      : undefined;
+    setForm({
+      ...defaultForm(date, time),
+      ...(doctorFilter !== "all" ? { doctor: doctorFilter, doctorId: preselected?.id ?? "" } : {}),
+    });
     setModalOpen(true);
   };
 
@@ -672,20 +901,28 @@ export function AppointmentsPage() {
     setModalOpen(true);
   };
 
-  const patchAppointment = async (appointment: Appointment, allowConflict = false) => {
+  const patchAppointment = async (appointment: Appointment, allowConflict = false, allowOutsideSchedule = false) => {
     const response = await crmFetch("/api/crm/appointments", {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         id: appointment.id,
         workspaceId: readCurrentWorkspaceId(),
-        updates: { ...appointmentToApi(appointment), ...(allowConflict ? { allowConflict: true } : {}) },
+        updates: {
+          ...appointmentToApi(appointment),
+          ...(allowConflict ? { allowConflict: true } : {}),
+          // Отдельный флаг: «Сохранить всё равно» снимает проверку пересечений
+          // целиком, и один клик не имеет права снимать заодно график врача.
+          ...(allowOutsideSchedule ? { allowOutsideSchedule: true } : {}),
+        },
       }),
     });
     const body = await safeJson(response);
 
     const conflict = conflictFromBody(body);
     if (conflict) throw conflict;
+    const outside = scheduleRefusalFromBody(body);
+    if (outside) throw outside;
 
     if (!response.ok || body?.success !== true) {
       const details = body?.success === false ? body.details?.join(", ") : "";
@@ -706,7 +943,7 @@ export function AppointmentsPage() {
    * ли время всё равно, а решать он может только пока форма открыта.
    * Демо-режим не трогаем: там коллекция и есть запись, сервера нет.
    */
-  const createAppointment = async (appointment: Appointment, allowConflict: boolean) => {
+  const createAppointment = async (appointment: Appointment, allowConflict: boolean, allowOutsideSchedule = false) => {
     if (!isRealWorkspace()) {
       addItem(appointment);
       return;
@@ -719,12 +956,15 @@ export function AppointmentsPage() {
         ...appointmentToApi(appointment),
         workspaceId: readCurrentWorkspaceId(),
         ...(allowConflict ? { allowConflict: true } : {}),
+        ...(allowOutsideSchedule ? { allowOutsideSchedule: true } : {}),
       }),
     });
     const body = await safeJson(response);
 
     const conflict = conflictFromBody(body);
     if (conflict) throw conflict;
+    const outside = scheduleRefusalFromBody(body);
+    if (outside) throw outside;
 
     if (!response.ok || body?.success !== true || body.mode !== "supabase") {
       const details = body?.success === false ? body.details?.join(", ") : "";
@@ -764,7 +1004,7 @@ export function AppointmentsPage() {
     }) ?? null;
   };
 
-  const submitForm = async (allowConflict = false) => {
+  const submitForm = async (allowConflict = false, allowOutsideSchedule = false) => {
     if (saving) return;
     if (!form.client.trim()) {
       toast.error("Укажите имя клиента");
@@ -795,12 +1035,13 @@ export function AppointmentsPage() {
     }
 
     setSaving(true);
+    setScheduleMessage("");
     try {
     if (editingId) {
       const previous = items.find((item) => item.id === editingId);
       setItems((current) => current.map((item) => (item.id === editingId ? appointment : item)));
       try {
-        await patchAppointment(appointment, allowConflict);
+        await patchAppointment(appointment, allowConflict, allowOutsideSchedule);
         toast.success("Запись обновлена");
       } catch (error) {
         if (previous) {
@@ -808,6 +1049,10 @@ export function AppointmentsPage() {
         }
         if (error instanceof SlotTakenError) {
           setConflictMessage(describeConflict(error));
+          return;
+        }
+        if (error instanceof OutsideScheduleError) {
+          setScheduleMessage(describeSchedule(error));
           return;
         }
         // Та же честность, что и у статуса: отказ виден отказом, строка
@@ -818,11 +1063,15 @@ export function AppointmentsPage() {
       }
     } else {
       try {
-        await createAppointment(appointment, allowConflict);
+        await createAppointment(appointment, allowConflict, allowOutsideSchedule);
         toast.success("Запись создана");
       } catch (error) {
         if (error instanceof SlotTakenError) {
           setConflictMessage(describeConflict(error));
+          return;
+        }
+        if (error instanceof OutsideScheduleError) {
+          setScheduleMessage(describeSchedule(error));
           return;
         }
         console.warn("appointments: create refused", error instanceof Error ? error.message : error);
@@ -938,6 +1187,23 @@ export function AppointmentsPage() {
 
   return (
     <PageLayout>
+      {/*
+        Честность про время. Правило графика считается в поясе клиники, но
+        часы, которые набирает регистратор, всё ещё читаются в поясе его
+        ноутбука — и продукт этого не исправляет в этой ветке. Молчать об
+        этом нельзя: расхождение видно только тому, кто о нём знает.
+      */}
+      {clinicTimeZone && deviceTimeZone && clinicTimeZone !== deviceTimeZone ? (
+        <div className="mb-4 rounded-2xl bg-amber-50 p-4 text-sm font-semibold text-amber-800">
+          Часовой пояс устройства ({deviceTimeZone}) отличается от часового пояса клиники ({clinicTimeZone}).
+          Время на экране может отличаться от времени клиники.
+        </div>
+      ) : null}
+      {!clinicTimeZone ? (
+        <div className="mb-4 rounded-2xl bg-slate-100 p-4 text-sm font-semibold" style={{ color: "var(--negis-muted)" }}>
+          Часовой пояс клиники не задан — график врачей при записи не применяется.
+        </div>
+      ) : null}
       <div className="space-y-7">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
           <div className="min-w-0">
@@ -1123,11 +1389,74 @@ export function AppointmentsPage() {
               ) : (
                 <TextField label="Услуга" value={form.service} onChange={(service) => setForm((current) => ({ ...current, service, serviceId: "" }))} />
               )}
-              <SelectField label="Врач" value={form.doctor} onChange={(doctor) => setForm((current) => ({ ...current, doctor }))}>
-                {doctors.map((doctor) => <option key={doctor} value={doctor}>{doctor}</option>)}
-              </SelectField>
+              {/*
+                Раньше это был закрытый список из четырёх выдуманных имён:
+                нового врача через форму записи ввести было нельзя вообще.
+                Теперь — справочник со свободным вводом как откатом, ровно как
+                у услуги. Пока справочник пуст или не включён, поле выглядит и
+                работает как обычный текстовый ввод.
+              */}
+              {activeDoctors.length > 0 ? (
+                <div>
+                  <SelectField
+                    label="Врач"
+                    value={form.doctorId || OTHER_SERVICE_OPTION}
+                    onChange={(value) => {
+                      if (value === OTHER_SERVICE_OPTION) {
+                        setForm((current) => ({ ...current, doctorId: "" }));
+                        return;
+                      }
+                      const doctor = activeDoctors.find((item) => item.id === value);
+                      if (!doctor) return;
+                      // Снимок имени ставит форма, а не сервер: оба пишущих
+                      // пути шлют объект целиком, и серверная перезапись
+                      // затирала бы поправленное вручную имя на каждом
+                      // сохранении.
+                      setForm((current) => ({ ...current, doctorId: doctor.id, doctor: doctor.fullName }));
+                    }}
+                  >
+                    {activeDoctors.map((doctor) => (
+                      <option key={doctor.id} value={doctor.id}>
+                        {doctor.specialty ? `${doctor.fullName} — ${doctor.specialty}` : doctor.fullName}
+                      </option>
+                    ))}
+                    {/* Врач записи мог уехать в архив после того, как её
+                        завели. Без этого варианта поле рисовалось бы пустым, а
+                        один случайный клик переписал бы и связь, и имя. */}
+                    {form.doctorId && !activeDoctors.some((doctor) => doctor.id === form.doctorId) ? (
+                      <option value={form.doctorId}>{form.doctor || "Врач скрыт"}</option>
+                    ) : null}
+                    <option value={OTHER_SERVICE_OPTION}>Другой врач…</option>
+                  </SelectField>
+                  {/* Имя видно всегда: в записи хранится снимок на момент
+                      визита, и переименование врача не меняет того, что
+                      записано в карточке. */}
+                  <div className="mt-2">
+                    <TextField
+                      label="Имя врача в записи"
+                      value={form.doctor}
+                      onChange={(doctor) => setForm((current) => ({ ...current, doctor }))}
+                    />
+                  </div>
+                </div>
+              ) : (
+                <TextField
+                  label="Врач"
+                  value={form.doctor}
+                  onChange={(doctor) => setForm((current) => ({ ...current, doctor, doctorId: "" }))}
+                />
+              )}
               <TextField label="Дата" type="date" value={form.date} onChange={(date) => setForm((current) => ({ ...current, date }))} />
-              <TextField label="Время начала" type="time" value={form.time} onChange={(time) => setForm((current) => ({ ...current, time }))} />
+              <div>
+                <TextField label="Время начала" type="time" value={form.time} onChange={(time) => setForm((current) => ({ ...current, time }))} />
+                {/* Единственное место, где продукт признаёт, что для этого
+                    врача правило не работает вовсе. */}
+                {form.doctorId ? (
+                  <p className="mt-1 text-[11px] font-semibold" style={{ color: "var(--negis-muted)" }}>
+                    {describeDoctorDay(shifts, form.doctorId, form.date)}
+                  </p>
+                ) : null}
+              </div>
               <SelectField label="Длительность" value={String(form.durationMinutes)} onChange={(durationMinutes) => setForm((current) => ({ ...current, durationMinutes: Number(durationMinutes) }))}>
                 {/* Длительность услуги может не совпасть с четырьмя жёсткими
                     значениями — семидесятипятиминутная процедура выбрала бы
@@ -1153,10 +1482,26 @@ export function AppointmentsPage() {
               </div>
             ) : null}
 
+            {scheduleMessage ? (
+              <div className="mt-3 rounded-2xl bg-sky-50 p-4 text-sm font-semibold text-sky-900">
+                {scheduleMessage}
+              </div>
+            ) : null}
+
             <div className="mt-6 flex flex-col gap-2 sm:flex-row sm:justify-end">
               <button type="button" className="neu-btn px-5 py-2.5 text-sm" onClick={() => setModalOpen(false)} disabled={saving}>Отмена</button>
               {conflictMessage ? (
                 <button type="button" className="neu-btn px-5 py-2.5 text-sm text-amber-700" onClick={() => void submitForm(true)} disabled={saving}>Сохранить всё равно</button>
+              ) : null}
+              {scheduleMessage ? (
+                <button
+                  type="button"
+                  className="neu-btn px-5 py-2.5 text-sm text-sky-700"
+                  onClick={() => void submitForm(Boolean(conflictMessage), true)}
+                  disabled={saving}
+                >
+                  Записать вне графика
+                </button>
               ) : null}
               <button type="submit" className="neu-btn-primary px-5 py-2.5 text-sm" disabled={saving}>
                 {saving ? "Сохраняем…" : editingId ? "Сохранить изменения" : "Создать запись"}
