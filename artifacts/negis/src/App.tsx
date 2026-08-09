@@ -36,6 +36,7 @@ const AdminCenter = lazy(() => import("@/pages/AdminCenter"));
 const LeadsPage = lazy(() => import("@/pages/LeadsPage"));
 const ClientsPage = lazy(() => import("@/pages/ClientsPage"));
 const SalesPage = lazy(() => import("@/pages/SalesPage"));
+const ServicesPage = lazy(() => import("@/pages/ServicesPage"));
 const DemoCalls = lazy(() => import("@/pages/DemoCrmModules").then(m => ({ default: m.DemoCalls })));
 const DemoChat = lazy(() => import("@/pages/DemoCrmModules").then(m => ({ default: m.DemoChat })));
 const DemoMarket = lazy(() => import("@/pages/DemoCrmModules").then(m => ({ default: m.DemoMarket })));
@@ -105,6 +106,7 @@ const ROUTE_PERMISSIONS: Record<string, string> = {
   '/dashboard': 'dashboard',
   '/booking': 'booking',
   '/appointments': 'booking',
+  '/services': 'booking',
   '/reception': 'reception',
   '/calls': 'reception',
   '/sales': 'crm',
@@ -232,6 +234,7 @@ function Router() {
       <Route path="/reception" component={() => <ProtectedPage component={DemoReception} permission="reception" />} />
       <Route path="/calls" component={() => <ProtectedPage component={DemoCalls} permission="reception" />} />
       <Route path="/sales" component={() => <ProtectedPage component={SalesPage} permission="crm" />} />
+      <Route path="/services" component={() => <ProtectedPage component={ServicesPage} permission="booking" />} />
       <Route path="/leads" component={() => <ProtectedPage component={LeadsPage} permission="crm" />} />
       <Route path="/clients" component={() => <ProtectedPage component={ClientsPage} permission="crm" />} />
       <Route path="/tasks" component={() => <ProtectedPage component={DemoTasks} permission="tasks" />} />

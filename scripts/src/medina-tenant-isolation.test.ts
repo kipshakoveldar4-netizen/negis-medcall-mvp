@@ -383,7 +383,7 @@ test("C6 every registered route is classified and no route is public", async () 
     assert.ok(kinds.has(entry.kind), `${key} has an unclassified kind`);
     assert.ok(entry.methods.length > 0, `${key} must declare its methods`);
   }
-  assert.equal(Object.keys(registry.CRM_RESOURCE_AUTHORIZATION).length, 18, "all 18 generic resources registered");
+  assert.equal(Object.keys(registry.CRM_RESOURCE_AUTHORIZATION).length, 19, "all 19 generic resources registered");
 });
 
 test("C7 health diagnostics are no longer public", async () => {

@@ -60,6 +60,16 @@ export const CRM_RESOURCE_AUTHORIZATION: Readonly<Record<string, RouteAuthorizat
     methods: ["GET", "POST", "PATCH"],
     permissions: { GET: "view_leads", POST: "manage_leads", PATCH: "manage_leads" },
   },
+  // Справочник услуг читает тот, кто записывает, а правит тот, кто отвечает за
+  // прайс. Права разрешаются ПО МЕТОДУ, поэтому «читают все, правят
+  // администраторы» выражается одной записью; поле roles этого не дало бы —
+  // оно применяется ко всем методам сразу и отняло бы у ресепшн чтение, на
+  // котором держится форма записи.
+  "clinic-services": {
+    kind: "browser",
+    methods: ["GET", "POST", "PATCH"],
+    permissions: { GET: "view_appointments", POST: "view_admin", PATCH: "view_admin" },
+  },
   // Deals sit in the same "crm" group as leads and clients in the app's own
   // route permission map, so they reuse the client permissions rather than
   // inventing a new one.

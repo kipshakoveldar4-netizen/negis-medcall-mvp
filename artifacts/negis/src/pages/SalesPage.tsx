@@ -34,6 +34,8 @@ type Deal = {
   clientId?: string;
   leadId?: string;
   appointmentId?: string;
+  /** Услуга справочника, ради которой выручка по услуге вообще вычислима. */
+  serviceId?: string;
   metaCampaignLaunchId?: string;
   responsibleUserId?: string;
   notes?: string;
@@ -52,15 +54,20 @@ type LeadOption = {
 type AppointmentOption = { id: string; client: string; service: string; startsAt?: string };
 type CampaignOption = { id: string; name: string; label: string };
 
+/** Строка справочника услуг, в объёме, который нужен карточке продажи. */
+type ServiceOption = { id: string; name: string; basePriceMinor: number | null; sortOrder: number };
+
 type SalesReferences = {
   clients: ClientOption[];
   leads: LeadOption[];
   appointments: AppointmentOption[];
   campaigns: CampaignOption[];
+  services: ServiceOption[];
 };
 
 type DealForm = {
   title: string;
+  serviceId: string;
   amountTenge: string;
   status: DealStatus;
   paymentMethod: PaymentMethod;
@@ -146,6 +153,7 @@ function dealFromApi(value: unknown): Deal {
     clientId: str(record.clientId) || str(record.client_id) || undefined,
     leadId: str(record.leadId) || str(record.lead_id) || undefined,
     appointmentId: str(record.appointmentId) || str(record.appointment_id) || undefined,
+    serviceId: str(record.serviceId) || str(record.service_id) || undefined,
     metaCampaignLaunchId: str(record.metaCampaignLaunchId) || str(record.meta_campaign_launch_id) || undefined,
     responsibleUserId: str(record.responsibleUserId) || str(record.responsible_user_id) || undefined,
     notes: str(record.notes) || undefined,
@@ -164,6 +172,8 @@ function dealToApi(deal: Deal): Record<string, unknown> {
     clientId: deal.clientId || "",
     leadId: deal.leadId || "",
     appointmentId: deal.appointmentId || "",
+    // Всегда, а не по условию: пустая строка — осознанная отвязка.
+    serviceId: deal.serviceId || "",
     metaCampaignLaunchId: deal.metaCampaignLaunchId || "",
     responsibleUserId: deal.responsibleUserId || "",
     notes: deal.notes || "",
@@ -182,6 +192,7 @@ function dealPatchToApi(patch: Partial<Deal>): Record<string, unknown> {
   if (patch.clientId !== undefined) payload.clientId = patch.clientId || "";
   if (patch.leadId !== undefined) payload.leadId = patch.leadId || "";
   if (patch.appointmentId !== undefined) payload.appointmentId = patch.appointmentId || "";
+  if (patch.serviceId !== undefined) payload.serviceId = patch.serviceId || "";
   if (patch.metaCampaignLaunchId !== undefined) payload.metaCampaignLaunchId = patch.metaCampaignLaunchId || "";
   if (patch.responsibleUserId !== undefined) payload.responsibleUserId = patch.responsibleUserId || "";
   if (patch.notes !== undefined) payload.notes = patch.notes || "";
@@ -277,6 +288,26 @@ function appointmentOption(value: unknown): AppointmentOption | null {
   };
 }
 
+function serviceOption(value: unknown): ServiceOption | null {
+  const record = asRecord(value);
+  const id = str(record.id);
+  const name = str(record.name);
+  if (!id || !name) return null;
+  // Скрытые услуги в выбор не попадают: иначе «Скрыть» ничего бы не значило.
+  const active = record.isActive === undefined && record.is_active === undefined
+    ? true
+    : Boolean(record.isActive ?? record.is_active);
+  if (!active) return null;
+  const price = record.basePriceMinor ?? record.base_price_minor;
+  return {
+    id,
+    name,
+    // Цена может быть не задана, и это не то же самое, что ноль.
+    basePriceMinor: price === null || price === undefined || price === "" ? null : Math.round(numberValue(price)),
+    sortOrder: Math.round(numberValue(record.sortOrder ?? record.sort_order)),
+  };
+}
+
 function campaignOption(value: unknown): CampaignOption | null {
   const record = asRecord(value);
   const id = str(record.id);
@@ -302,6 +333,7 @@ function campaignOption(value: unknown): CampaignOption | null {
 function emptyForm(): DealForm {
   return {
     title: "",
+    serviceId: "",
     amountTenge: "",
     status: "pending",
     paymentMethod: "",
@@ -355,7 +387,7 @@ export default function SalesPage() {
     patchToApi: dealPatchToApi,
   });
 
-  const [references, setReferences] = useState<SalesReferences>({ clients: [], leads: [], appointments: [], campaigns: [] });
+  const [references, setReferences] = useState<SalesReferences>({ clients: [], leads: [], appointments: [], campaigns: [], services: [] });
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<"all" | DealStatus>("all");
   // CRM10: secondary attribution filter — works on top of status filter and search.
@@ -369,11 +401,16 @@ export default function SalesPage() {
     let cancelled = false;
     void (async () => {
       const workspaceId = readWorkspaceId();
-      const [clientsRaw, leadsRaw, appointmentsRaw, campaignsRaw] = await Promise.all([
+      const [clientsRaw, leadsRaw, appointmentsRaw, campaignsRaw, servicesRaw] = await Promise.all([
         loadReferenceCollection("/api/crm/clients", "clients", "negis_demo_clients"),
         loadReferenceCollection("/api/crm/leads", "leads", "negis_demo_leads"),
         loadReferenceCollection("/api/crm/appointments", "appointments", "negis_demo_appointments"),
         loadReferenceCollection("/api/crm/meta-launches", "launches", `negis_ads_launch_history_${workspaceId}`),
+        // Маркетолог доходит до этого экрана, но права на чтение каталога у
+        // него нет: загрузчик вернёт пустой список, выбор услуги просто не
+        // появится, и поле останется свободным текстом. Это честная деградация,
+        // а не ошибка, поэтому и обрабатывается тем же общим загрузчиком.
+        loadReferenceCollection("/api/crm/clinic-services", "services", "negis_demo_clinic_services"),
       ]);
       if (cancelled) return;
       setReferences({
@@ -381,6 +418,7 @@ export default function SalesPage() {
         leads: leadsRaw.map(leadOption).filter((item): item is LeadOption => item !== null),
         appointments: appointmentsRaw.map(appointmentOption).filter((item): item is AppointmentOption => item !== null),
         campaigns: campaignsRaw.map(campaignOption).filter((item): item is CampaignOption => item !== null),
+        services: servicesRaw.map(serviceOption).filter((item): item is ServiceOption => item !== null),
       });
     })();
     return () => { cancelled = true; };
@@ -513,6 +551,7 @@ export default function SalesPage() {
     setEditingId(deal.id);
     setForm({
       title: deal.title,
+      serviceId: deal.serviceId || "",
       amountTenge: amountMinorToTengeInput(deal.amountMinor),
       status: deal.status,
       paymentMethod: normalizePaymentMethod(deal.paymentMethod),
@@ -563,6 +602,7 @@ export default function SalesPage() {
       clientId: form.clientId || undefined,
       leadId: form.leadId || undefined,
       appointmentId: form.appointmentId || undefined,
+      serviceId: form.serviceId || undefined,
       metaCampaignLaunchId: form.metaCampaignLaunchId || undefined,
       responsibleUserId: existing?.responsibleUserId,
       notes: form.notes.trim() || undefined,
@@ -799,6 +839,43 @@ export default function SalesPage() {
             </div>
 
             <div className="mt-5 grid gap-4">
+              {/*
+                Выбор услуги появляется только когда справочник есть и доступен.
+                Он заполняет название и цену, но оставляет оба поля
+                редактируемыми: скидки существуют, и продажа записывает то,
+                сколько реально заплатили, а не то, что стоит в прайсе.
+              */}
+              {references.services.length > 0 ? (
+                <label className="block">
+                  <span className="mb-1 block text-xs font-black uppercase tracking-[0.05em]" style={{ color: "var(--negis-muted)" }}>Услуга из справочника</span>
+                  <select
+                    style={inputStyle}
+                    value={form.serviceId}
+                    onChange={(event) => {
+                      const serviceId = event.target.value;
+                      const service = references.services.find((item) => item.id === serviceId);
+                      setForm((current) => ({
+                        ...current,
+                        serviceId,
+                        title: service ? service.name : current.title,
+                        amountTenge:
+                          service && service.basePriceMinor !== null && !current.amountTenge.trim()
+                            ? amountMinorToTengeInput(service.basePriceMinor)
+                            : current.amountTenge,
+                      }));
+                    }}
+                  >
+                    <option value="">Не выбрана</option>
+                    {[...references.services]
+                      .sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name, "ru"))
+                      .map((service) => (
+                        <option key={service.id} value={service.id}>{service.name}</option>
+                      ))}
+                    {fallbackOption(form.serviceId, references.services, "Услуга недоступна")}
+                  </select>
+                </label>
+              ) : null}
+
               <label className="block">
                 <span className="mb-1 block text-xs font-black uppercase tracking-[0.05em]" style={{ color: "var(--negis-muted)" }}>Название услуги / продажи</span>
                 <input style={inputStyle} value={form.title} onChange={(event) => setForm((current) => ({ ...current, title: event.target.value }))} placeholder="Например, консультация косметолога" />

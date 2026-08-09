@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Link, useLocation } from 'wouter';
-import { BadgeDollarSign, BarChart2, Building2, CalendarDays, Clapperboard, Inbox, LayoutDashboard, Rocket, Settings, Users, LogOut, X, KeyRound, User, type LucideIcon } from 'lucide-react';
+import { BadgeDollarSign, BarChart2, Building2, CalendarDays, Clapperboard, Inbox, LayoutDashboard, Rocket, Settings, Tag, Users, LogOut, X, KeyRound, User, type LucideIcon } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
 import { supabase } from '@/lib/supabase';
 import { toast } from 'sonner';
@@ -30,6 +30,9 @@ const NAV_GROUPS: NavGroup[] = [
       { href: '/clients', icon: Users, label: 'Клиенты', roles: ['owner', 'manager', 'agent'] },
       { href: '/appointments', icon: CalendarDays, label: 'Записи', roles: ['owner', 'manager', 'agent', 'booking_agent'] },
       { href: '/sales', icon: BadgeDollarSign, label: 'Продажи', roles: ['owner', 'manager', 'agent'] },
+      // Услуги стоят в «Операциях», а не в «Управлении»: право на чтение здесь
+      // то же, что у записей, и справочник открывают в момент записи пациента.
+      { href: '/services', icon: Tag, label: 'Услуги', roles: ['owner', 'manager', 'agent', 'booking_agent'] },
     ],
   },
   {

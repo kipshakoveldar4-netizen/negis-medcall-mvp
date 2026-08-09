@@ -145,7 +145,10 @@ function ttlFor(path: string): number {
   // `staff` joins the funnel's skeleton here: the lead card reads it to name the
   // colleague a lead is assigned to, and a clinic's roster changes about as
   // often as its stages do.
-  return /\/(lead-stages|lead-sources|staff)\b/.test(path) ? REFERENCE_TTL_MS : LIST_TTL_MS;
+  // `clinic-services` joins them for the same reason: the booking form reads the
+  // price list every time it opens, and a clinic edits that list about as often
+  // as it edits its stages.
+  return /\/(lead-stages|lead-sources|staff|clinic-services)\b/.test(path) ? REFERENCE_TTL_MS : LIST_TTL_MS;
 }
 
 /**
