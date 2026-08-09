@@ -14,6 +14,7 @@ import {
   Rocket,
   Settings,
   Store,
+  Tag,
   User,
   Users,
   X,
@@ -45,6 +46,7 @@ const drawerItems: MobileNavItem[] = [
   { href: "/dashboard", label: "Аналитика", icon: BarChart2, permission: "dashboard" },
   { href: "/ads-automation", label: "Реклама", icon: Rocket, permission: "ads" },
   { href: "/ads-automation/history", label: "История запусков", icon: Megaphone, permission: "ads" },
+  { href: "/services", label: "Услуги", icon: Tag, permission: "booking" },
   { href: "/content-studio", label: "Контент", icon: Clapperboard, permission: "ads" },
   { href: "/admin", label: "Настройки клиники", icon: Settings, permission: "admin" },
 ];

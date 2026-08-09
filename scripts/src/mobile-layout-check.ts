@@ -13,6 +13,7 @@ const routes = [
   "/dashboard",
   "/clients",
   "/sales",
+  "/services",
   "/leads",
   "/appointments",
   "/booking",

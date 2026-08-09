@@ -32,6 +32,8 @@ type Appointment = {
   phone: string;
   whatsapp: string;
   service: string;
+  /** Ссылка на строку справочника услуг. Пустая — услуга набрана текстом. */
+  serviceId: string;
   doctor: string;
   startsAt: string;
   durationMinutes: number;
@@ -46,6 +48,7 @@ type AppointmentForm = {
   phone: string;
   whatsapp: string;
   service: string;
+  serviceId: string;
   doctor: string;
   date: string;
   time: string;
@@ -61,7 +64,57 @@ type ApiResponse =
 
 const APPOINTMENT_PREFILL_KEY = "negis_appointment_prefill";
 const defaultDoctors = ["д-р Сауле", "д-р Айжан", "д-р Наргиз", "д-р Тимур"];
-const defaultServices = ["Консультация", "Ботокс", "Чистка лица", "Лазерная процедура", "Диагностика кожи"];
+
+/** Строка справочника услуг — ровно те поля, которые нужны форме записи. */
+type CatalogService = {
+  id: string;
+  name: string;
+  durationMinutes: number | null;
+  sortOrder: number;
+  isActive: boolean;
+};
+
+/**
+ * Справочник услуг для формы записи.
+ *
+ * Отказ здесь — не ошибка экрана: у роли может не быть права на чтение
+ * каталога, а до применения миграции 032 его вовсе нет. В обоих случаях
+ * правильный ответ один — пустой список, и поле «Услуга» остаётся тем же
+ * текстовым вводом, что и раньше.
+ */
+async function loadCatalogServices(): Promise<CatalogService[]> {
+  if (!isRealWorkspace()) return [];
+  try {
+    const workspaceId = readCurrentWorkspaceId();
+    const response = await crmFetch(`/api/crm/clinic-services?workspaceId=${encodeURIComponent(workspaceId)}`);
+    const text = await response.text();
+    const body = text ? (JSON.parse(text) as { success?: boolean; mode?: string; data?: Record<string, unknown> }) : null;
+    if (!response.ok || body?.success !== true || body.mode !== "supabase") return [];
+    const raw = body.data?.services ?? body.data?.items;
+    const list = Array.isArray(raw) ? raw : [];
+    return list
+      .map((item) => {
+        const record = asRecord(item);
+        const duration = record.durationMinutes ?? record.duration_minutes;
+        return {
+          id: readString(record.id),
+          name: readString(record.name),
+          durationMinutes: duration === null || duration === undefined || duration === "" ? null : readNumber(duration, 0) || null,
+          sortOrder: readNumber(record.sortOrder ?? record.sort_order, 0),
+          isActive:
+            record.isActive === undefined && record.is_active === undefined
+              ? true
+              : Boolean(record.isActive ?? record.is_active),
+        };
+      })
+      .filter((service) => service.id && service.name);
+  } catch {
+    return [];
+  }
+}
+
+/** Значение поля «Услуга», когда в каталоге нужной строки нет. */
+const OTHER_SERVICE_OPTION = "__other__";
 const activeStatuses: AppointmentStatus[] = ["scheduled", "confirmed", "arrived"];
 const statusOptions: AppointmentStatus[] = ["scheduled", "confirmed", "arrived", "no_show", "cancelled"];
 const viewLabels: Record<CalendarView, string> = {
@@ -127,6 +180,8 @@ function makeSeedAppointment(
     phone,
     whatsapp: phone,
     service,
+    // Демо-записи не ссылаются на каталог: у демо-пространства его нет.
+    serviceId: "",
     doctor,
     startsAt: toStartsAt(date, time),
     durationMinutes: 60,
@@ -230,6 +285,7 @@ function appointmentFromApi(value: unknown): Appointment {
     phone,
     whatsapp: readString(record.whatsapp) || phone,
     service: readString(record.service) || "Консультация",
+    serviceId: readString(record.serviceId) || readString(record.service_id),
     doctor: readString(record.doctor) || readString(record.doctor_name) || readString(record.doctorName) || "д-р Сауле",
     startsAt,
     durationMinutes: readNumber(record.durationMinutes ?? record.duration_minutes, 60),
@@ -249,6 +305,9 @@ function appointmentToApi(appointment: Appointment): Record<string, unknown> {
     clientPhone: appointment.phone,
     whatsapp: appointment.whatsapp,
     service: appointment.service,
+    // Всегда, а не по условию: пустая строка — это осознанная отвязка, и
+    // старая запись, которая её пришлёт, запишет null поверх null.
+    serviceId: appointment.serviceId || "",
     doctor: appointment.doctor,
     doctorName: appointment.doctor,
     starts_at: appointment.startsAt,
@@ -279,6 +338,7 @@ function defaultForm(date: string, time = "09:00"): AppointmentForm {
     phone: "",
     whatsapp: "",
     service: "Консультация",
+    serviceId: "",
     doctor: defaultDoctors[0],
     date,
     time,
@@ -296,6 +356,7 @@ function formFromAppointment(appointment: Appointment): AppointmentForm {
     phone: appointment.phone,
     whatsapp: appointment.whatsapp || appointment.phone,
     service: appointment.service,
+    serviceId: appointment.serviceId || "",
     doctor: appointment.doctor,
     date: dateKeyFromStartsAt(appointment.startsAt),
     time: timeKeyFromStartsAt(appointment.startsAt),
@@ -314,6 +375,7 @@ function appointmentFromForm(form: AppointmentForm, existingId?: string): Appoin
     phone: form.phone.trim(),
     whatsapp: (form.whatsapp || form.phone).trim(),
     service: form.service.trim(),
+    serviceId: form.serviceId || "",
     doctor: form.doctor.trim(),
     startsAt: toStartsAt(form.date, form.time),
     durationMinutes: form.durationMinutes,
@@ -505,6 +567,18 @@ export function AppointmentsPage() {
   // toRow не переносит клиентский id — получались две одинаковые записи.
   const [saving, setSaving] = useState(false);
 
+  const [catalog, setCatalog] = useState<CatalogService[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void loadCatalogServices().then((list) => {
+      if (!cancelled) setCatalog(list);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const { items, addItem, setItems } = useDemoCollection<Appointment>("negis_demo_appointments", appointmentsSeed, {
     endpoint: "/api/crm/appointments",
     listKey: "appointments",
@@ -513,7 +587,21 @@ export function AppointmentsPage() {
   });
 
   const doctors = useMemo(() => Array.from(new Set([...defaultDoctors, ...items.map((item) => item.doctor).filter(Boolean)])).sort(), [items]);
-  const services = useMemo(() => Array.from(new Set([...defaultServices, ...items.map((item) => item.service).filter(Boolean)])).sort(), [items]);
+
+  // Фильтр сравнивает СНИМОК названия на равенство строк, поэтому список
+  // значений обязан быть объединением каталога и того, что уже записано.
+  // Без объединения любое историческое написание перестало бы находиться —
+  // а до применения 032 каталог пуст и весь список состоит из истории.
+  const services = useMemo(
+    () => Array.from(new Set([...catalog.map((service) => service.name), ...items.map((item) => item.service).filter(Boolean)])).sort(),
+    [catalog, items],
+  );
+
+  /** Активные услуги в порядке справочника — то, из чего выбирают в форме. */
+  const activeCatalog = useMemo(
+    () => catalog.filter((service) => service.isActive).sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name, "ru")),
+    [catalog],
+  );
   const slots = useMemo(() => generateSlots(), []);
   const weekStart = useMemo(() => startOfWeekKey(selectedDate), [selectedDate]);
   const weekDays = useMemo(() => Array.from({ length: 7 }, (_, index) => addDaysKey(weekStart, index)), [weekStart]);
@@ -688,7 +776,13 @@ export function AppointmentsPage() {
       return;
     }
 
-    const appointment = appointmentFromForm(form, editingId || undefined);
+    // Услуга, набранная точным названием из каталога, всё равно связывается:
+    // одно место, детерминированно, и оператору не приходится помнить, что
+    // выбирать надо из списка.
+    const resolvedServiceId = form.serviceId
+      || activeCatalog.find((service) => service.name.trim().toLowerCase() === form.service.trim().toLowerCase())?.id
+      || "";
+    const appointment = appointmentFromForm({ ...form, serviceId: resolvedServiceId }, editingId || undefined);
 
     // Быстрый локальный префильтр: если конфликт виден в уже загруженном
     // расписании, спрашиваем без обращения к серверу. Авторитет — не здесь:
@@ -972,14 +1066,76 @@ export function AppointmentsPage() {
               </div>
               <TextField label="Телефон" value={form.phone} onChange={(phone) => setForm((current) => ({ ...current, phone, clientId: "" }))} placeholder="+7..." />
               <TextField label="WhatsApp" value={form.whatsapp} onChange={(whatsapp) => setForm((current) => ({ ...current, whatsapp }))} placeholder="+7..." />
-              <TextField label="Услуга" value={form.service} onChange={(service) => setForm((current) => ({ ...current, service }))} />
+              {/*
+                Услуга выбирается из справочника, но свободный ввод остаётся:
+                регистратор за стойкой не должен упираться в отсутствующую
+                строку каталога. Пока каталог пуст — а до применения миграции
+                032 он пуст всегда — поле выглядит ровно как раньше.
+              */}
+              {activeCatalog.length > 0 ? (
+                <div>
+                  <SelectField
+                    label="Услуга"
+                    value={form.serviceId || OTHER_SERVICE_OPTION}
+                    onChange={(value) => {
+                      if (value === OTHER_SERVICE_OPTION) {
+                        setForm((current) => ({ ...current, serviceId: "" }));
+                        return;
+                      }
+                      const service = activeCatalog.find((item) => item.id === value);
+                      if (!service) return;
+                      // Снимок названия ставит форма, а не сервер: оба пишущих
+                      // пути шлют объект целиком, и серверная перезапись
+                      // затирала бы поправленный вручную текст на каждом
+                      // сохранении, а не только при смене услуги.
+                      setForm((current) => ({
+                        ...current,
+                        serviceId: service.id,
+                        service: service.name,
+                        durationMinutes: service.durationMinutes ?? current.durationMinutes,
+                      }));
+                    }}
+                  >
+                    {activeCatalog.map((service) => (
+                      <option key={service.id} value={service.id}>{service.name}</option>
+                    ))}
+                    {/* Услуга записи могла уехать в архив после того, как её
+                        записали. Без этого варианта список не содержал бы
+                        выбранного значения: поле рисовалось бы пустым, а один
+                        случайный клик по нему переписал бы и связь, и снимок
+                        названия на другую услугу. */}
+                    {form.serviceId && !activeCatalog.some((service) => service.id === form.serviceId) ? (
+                      <option value={form.serviceId}>{form.service || "Услуга скрыта"}</option>
+                    ) : null}
+                    <option value={OTHER_SERVICE_OPTION}>Другая услуга…</option>
+                  </SelectField>
+                  {/* Название видно всегда: связь ссылается на строку каталога,
+                      а в записи хранится снимок на момент визита, и переименование
+                      услуги не должно менять того, что записано в карточке. */}
+                  <div className="mt-2">
+                    <TextField
+                      label="Название услуги в записи"
+                      value={form.service}
+                      onChange={(service) => setForm((current) => ({ ...current, service }))}
+                    />
+                  </div>
+                </div>
+              ) : (
+                <TextField label="Услуга" value={form.service} onChange={(service) => setForm((current) => ({ ...current, service, serviceId: "" }))} />
+              )}
               <SelectField label="Врач" value={form.doctor} onChange={(doctor) => setForm((current) => ({ ...current, doctor }))}>
                 {doctors.map((doctor) => <option key={doctor} value={doctor}>{doctor}</option>)}
               </SelectField>
               <TextField label="Дата" type="date" value={form.date} onChange={(date) => setForm((current) => ({ ...current, date }))} />
               <TextField label="Время начала" type="time" value={form.time} onChange={(time) => setForm((current) => ({ ...current, time }))} />
               <SelectField label="Длительность" value={String(form.durationMinutes)} onChange={(durationMinutes) => setForm((current) => ({ ...current, durationMinutes: Number(durationMinutes) }))}>
-                {[30, 45, 60, 90].map((duration) => <option key={duration} value={duration}>{duration} минут</option>)}
+                {/* Длительность услуги может не совпасть с четырьмя жёсткими
+                    значениями — семидесятипятиминутная процедура выбрала бы
+                    отсутствующий вариант и поле осталось бы пустым. */}
+                {Array.from(new Set([30, 45, 60, 90, form.durationMinutes]))
+                  .filter((duration) => Number.isFinite(duration) && duration > 0)
+                  .sort((a, b) => a - b)
+                  .map((duration) => <option key={duration} value={duration}>{duration} минут</option>)}
               </SelectField>
               <SelectField label="Статус" value={form.status} onChange={(status) => setForm((current) => ({ ...current, status: normalizeStatus(status) }))}>
                 {statusOptions.map((status) => <option key={status} value={status}>{getAppointmentStatusLabel(status)}</option>)}

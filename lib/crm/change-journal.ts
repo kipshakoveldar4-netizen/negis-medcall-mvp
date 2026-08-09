@@ -57,7 +57,7 @@ type SupabaseServerClient = NonNullable<ReturnType<typeof getSupabaseServerClien
 export type ChangeActorKind = "manual" | "integration" | "automation" | "system";
 
 /** The entity kinds a clinic looks up history for. Adding one is a three-line change here. */
-export type ChangeEntityType = "lead" | "client" | "deal" | "appointment" | "task";
+export type ChangeEntityType = "lead" | "client" | "deal" | "appointment" | "task" | "service";
 
 /**
  * How each column is allowed to appear in the journal.
@@ -143,6 +143,25 @@ const TASK_FIELDS: Record<string, FieldPolicy> = {
   // uuid, который на экране ничего не значит.
 };
 
+/**
+ * Прайс — не персональные данные, поэтому значения пишутся целиком: «кто и
+ * когда поднял цену на ботокс» и есть вопрос, ради которого журнал заводили.
+ * Описание — свободный текст, значит «факт», по общему правилу этого файла.
+ * sort_order опущен намеренно: перетаскивание строк — шум, а не событие.
+ *
+ * Ключи — имена КОЛОНОК базы, не полей браузера. Ошибка на этом месте уже
+ * стоила одному ресурсу пустого журнала: поле с браузерным именем не
+ * журналируется вообще и молча.
+ */
+const SERVICE_FIELDS: Record<string, FieldPolicy> = {
+  name: { label: "Название", sensitivity: "value" },
+  category: { label: "Категория", sensitivity: "value" },
+  base_price_minor: { label: "Цена", sensitivity: "value" },
+  duration_minutes: { label: "Длительность", sensitivity: "value" },
+  is_active: { label: "Активна", sensitivity: "value" },
+  description: { label: "Описание", sensitivity: "fact" },
+};
+
 const ENTITY_POLICY: Record<ChangeEntityType, {
   table: string;
   permission: CrmPermission;
@@ -153,6 +172,7 @@ const ENTITY_POLICY: Record<ChangeEntityType, {
   deal: { table: "deals", permission: "view_clients", fields: DEAL_FIELDS },
   appointment: { table: "appointments", permission: "view_appointments", fields: APPOINTMENT_FIELDS },
   task: { table: "tasks", permission: "view_tasks", fields: TASK_FIELDS },
+  service: { table: "clinic_services", permission: "view_appointments", fields: SERVICE_FIELDS },
 };
 
 /** Resource name as the CRM router knows it → the entity kind the journal knows. */
@@ -162,6 +182,7 @@ const RESOURCE_ENTITY: Record<string, ChangeEntityType> = {
   deals: "deal",
   appointments: "appointment",
   tasks: "task",
+  "clinic-services": "service",
 };
 
 export function journaledEntityFor(resource: string): ChangeEntityType | null {

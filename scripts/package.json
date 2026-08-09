@@ -36,7 +36,8 @@
     "test:client-link": "tsx --test ./src/medina-client-link.test.ts",
     "test:change-log": "tsx --test ./src/medina-change-log.test.ts",
     "test:design-tokens": "tsx --test ./src/medina-design-tokens.test.ts",
-    "test:content-generation": "tsx --test ./src/medina-content-generation.test.ts"
+    "test:content-generation": "tsx --test ./src/medina-content-generation.test.ts",
+    "test:clinic-services": "tsx --test ./src/medina-clinic-services.test.ts"
   },
   "devDependencies": {
     "@types/node": "catalog:",

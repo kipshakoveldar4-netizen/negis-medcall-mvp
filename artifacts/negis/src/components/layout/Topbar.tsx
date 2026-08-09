@@ -21,6 +21,7 @@ const PAGE_LABELS: Record<string, string> = {
   '/dashboard': 'Аналитика',
   '/booking': 'Записи',
   '/sales': 'Продажи',
+  '/services': 'Услуги',
   '/ads-automation': 'Реклама',
   '/ads-automation/history': 'История запусков',
   '/onboarding': 'Настройка клиники',
