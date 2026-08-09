@@ -139,22 +139,23 @@ type DoctorShift = {
  * нему выбирает между списком и текстовым полем, и «справочник выключен» не
  * имеет права выглядеть как «врачей нет».
  */
-async function loadDirectory<T>(path: string, listKey: string, availableKey: string, map: (record: Record<string, unknown>) => T): Promise<{ items: T[]; available: boolean }> {
-  if (!isRealWorkspace()) return { items: [], available: false };
+async function loadDirectory<T>(path: string, listKey: string, availableKey: string, map: (record: Record<string, unknown>) => T): Promise<{ items: T[]; available: boolean; timeZone: string }> {
+  if (!isRealWorkspace()) return { items: [], available: false, timeZone: "" };
   try {
     const workspaceId = readCurrentWorkspaceId();
     const response = await crmFetch(`${path}?workspaceId=${encodeURIComponent(workspaceId)}`);
     const text = await response.text();
     const body = text ? (JSON.parse(text) as { success?: boolean; mode?: string; data?: Record<string, unknown> }) : null;
-    if (!response.ok || body?.success !== true || body.mode !== "supabase") return { items: [], available: false };
+    if (!response.ok || body?.success !== true || body.mode !== "supabase") return { items: [], available: false, timeZone: "" };
     const raw = body.data?.[listKey] ?? body.data?.items;
     const list = Array.isArray(raw) ? raw : [];
     return {
       items: list.map((item) => map(asRecord(item))),
       available: body.data?.[availableKey] !== false,
+      timeZone: readString(body.data?.timeZone),
     };
   } catch {
-    return { items: [], available: false };
+    return { items: [], available: false, timeZone: "" };
   }
 }
 
@@ -186,31 +187,6 @@ function doctorShiftFromApi(record: Record<string, unknown>): DoctorShift {
     startMinute: minute(record.startMinute ?? record.start_minute),
     endMinute: minute(record.endMinute ?? record.end_minute),
   };
-}
-
-/**
- * Часовой пояс клиники, чтобы экран мог честно сказать, что он с поясом
- * устройства не совпадает. Пустая строка — пояс не задан, и правило графика
- * при записи не применяется.
- */
-async function loadClinicTimeZone(): Promise<string> {
-  if (!isRealWorkspace()) return "";
-  try {
-    const workspaceId = readCurrentWorkspaceId();
-    const response = await crmFetch(`/api/crm/admin-settings?workspaceId=${encodeURIComponent(workspaceId)}`);
-    const text = await response.text();
-    const body = text ? (JSON.parse(text) as { success?: boolean; data?: Record<string, unknown> }) : null;
-    if (!response.ok || body?.success !== true) return "";
-    const items = Array.isArray(body.data?.items) ? body.data.items : [];
-    for (const item of items) {
-      const record = asRecord(item);
-      if (readString(record.key) !== "clinic_schedule") continue;
-      return readString(asRecord(record.value).timeZone);
-    }
-    return "";
-  } catch {
-    return "";
-  }
 }
 
 /** Пояс ноутбука оператора. Ровно для того, чтобы сказать о расхождении. */
@@ -773,10 +749,11 @@ export function AppointmentsPage() {
       if (!cancelled) setDirectory(result);
     });
     void loadDirectory("/api/crm/doctor-schedule", "shifts", "scheduleAvailable", doctorShiftFromApi).then((result) => {
-      if (!cancelled) setShifts(result.items);
-    });
-    void loadClinicTimeZone().then((zone) => {
-      if (!cancelled) setClinicTimeZone(zone);
+      if (cancelled) return;
+      setShifts(result.items);
+      // Пояс приходит вместе с графиком: маршрут настроек доступен только
+      // владельцу и администратору, и регистратор получил бы оттуда отказ.
+      setClinicTimeZone(result.timeZone);
     });
     return () => {
       cancelled = true;

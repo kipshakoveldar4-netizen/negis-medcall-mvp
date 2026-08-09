@@ -3589,7 +3589,7 @@ async function listItems(resource: CrmResource, req: VercelRequest, res: VercelR
 
     if (error && resource === "doctor-schedule" && isMissingDirectoryTable(error)) {
       console.warn("doctor-schedule: migration 033 is not applied yet; answering with an unavailable schedule");
-      return sendJson(res, 200, success("supabase", { [config.listKey]: [], items: [], scheduleAvailable: false }));
+      return sendJson(res, 200, success("supabase", { [config.listKey]: [], items: [], scheduleAvailable: false, timeZone: "" }));
     }
 
     if (error) {
@@ -3597,6 +3597,9 @@ async function listItems(resource: CrmResource, req: VercelRequest, res: VercelR
     }
 
     const items = (Array.isArray(data) ? data : []).map((row) => config.fromRow(asRecord(row)));
+    const scheduleTimeZone = resource === "doctor-schedule"
+      ? (await readClinicScheduleTimeZone(supabase, workspaceId)) || ""
+      : "";
     return sendJson(
       res,
       200,
@@ -3605,7 +3608,11 @@ async function listItems(resource: CrmResource, req: VercelRequest, res: VercelR
         items,
         ...(resource === "clinic-services" ? { catalogAvailable: true } : {}),
         ...(resource === "clinic-doctors" ? { directoryAvailable: true } : {}),
-        ...(resource === "doctor-schedule" ? { scheduleAvailable: true } : {}),
+        // Пояс едет вместе с графиком, а не отдельным запросом к настройкам:
+        // настройки доступны только владельцу и администратору, и регистратор,
+        // читая их, получил бы отказ — то есть экран сказал бы «пояс не задан»
+        // клинике, которая его задала.
+        ...(resource === "doctor-schedule" ? { scheduleAvailable: true, timeZone: scheduleTimeZone } : {}),
       }),
     );
   } catch (error) {
