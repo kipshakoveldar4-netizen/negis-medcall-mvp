@@ -85,7 +85,15 @@ function spyClient(
         limit: () => chain(),
         single: () => { single = true; return chain(); },
         maybeSingle: () => Promise.resolve({ data: matching()[0] ?? null, error: null }),
-        eq(column: string, value: unknown) { applied.push({ column, op: "eq", value }); entry.filters[column] = value; return chain(); },
+        eq(column: string, value: unknown) {
+          // Фильтр по колонке, которой нет в базе, PostgREST отвергает так же,
+          // как и запись в неё. Прежняя заглушка выражала только второе, и
+          // окно «деплой раньше миграции» на пути ЧТЕНИЯ было непроверяемым.
+          if (missingColumns.has(column)) entry.filters.__missing = column;
+          applied.push({ column, op: "eq", value });
+          entry.filters[column] = value;
+          return chain();
+        },
         lt(column: string, value: unknown) { applied.push({ column, op: "lt", value }); entry.filters[`${column}__lt`] = value; return chain(); },
         gte(column: string, value: unknown) { entry.filters[`${column}__gte`] = value; return chain(); },
         in(column: string, value: unknown) { entry.filters[column] = value; return chain(); },
@@ -571,7 +579,7 @@ test("TK29 создание ждёт сервер и не обещает тог�
   const create = panel.slice(panel.indexOf("  const create = async ()"), panel.indexOf("  const close = async ("));
 
   assert.ok(create.includes("if (!trimmed || saving) return;"), "повторный клик не отправляет второй POST");
-  assert.ok(create.includes("await load();"), "список перечитывается после подтверждения сервером");
+  assert.ok(create.includes("await load({ quiet: true })"), "список перечитывается после подтверждения сервером");
   const successAt = create.indexOf('toast.success("Задача поставлена")');
   const guardAt = create.indexOf("if (!response.ok || body.success !== true)");
   assert.ok(guardAt > 0 && successAt > guardAt, "успех показывается только после проверки ответа");
@@ -585,17 +593,123 @@ test("TK30 закрытие задачи тоже проверяет ответ"
   const panel = await readFile(panelPath, "utf8");
   const close = panel.slice(panel.indexOf("  const close = async ("));
   assert.ok(close.includes("if (!response.ok || body.success !== true)"), "отказ виден отказом");
-  assert.ok(close.includes("await load();"), "и состояние берётся у сервера, а не додумывается");
+  assert.ok(close.includes("await load({ quiet: true })"), "и состояние берётся у сервера, а не додумывается");
 });
 
-test("TK31 панель прячется у роли без права на задачи", async () => {
+test("TK31 панель прячется у роли без права на задачи, и мёртвого «только чтение» нет", async () => {
   for (const page of ["LeadsPage.tsx", "ClientsPage.tsx"]) {
     const source = await readFile(path.join(repoRoot, "artifacts", "negis", "src", "pages", page), "utf8");
     assert.ok(
       source.includes("isRealWorkspace() && rolePermissions.tasks ?"),
       `${page}: кнопка, которую сервер отклонит после клика, — уже разобранный в этом репозитории сценарий`,
     );
+    // canManage вычислялся тем же выражением, что и условие показа, поэтому
+    // не мог быть false ни при одном состоянии авторизации: ветка «только
+    // смотреть» существовала лишь в типе и притворялась живой.
+    assert.ok(!source.includes("canManage="), `${page}: проп, который всегда true, — не гейт`);
   }
+
+  const panel = await readFile(panelPath, "utf8");
+  assert.ok(!panel.includes("canManage"), "панель не должна принимать недостижимый режим");
+});
+
+test("TK32 словарь статусов панели совпадает с серверным", async () => {
+  // Первая версия была копией вдвое короче: «завершено», completed и closed
+  // сервер знает как «сделано», а панель относила к открытым — закрытая
+  // задача висела в работе с зелёным счётчиком.
+  const server = await readFile(serverPath, "utf8");
+  const panel = await readFile(panelPath, "utf8");
+
+  const serverAliases = server.slice(server.indexOf("const TASK_STATUS_ALIASES"), server.indexOf("const TASK_PRIORITY_ALIASES"));
+  const panelAliases = panel.slice(panel.indexOf("const STATUS_ALIASES"), panel.indexOf("function statusKey("));
+
+  const keysOf = (block: string) =>
+    [...block.matchAll(/^\s*"?([a-zа-я_ ]+)"?:/gm)].map((m) => m[1].trim()).filter((k) => k && !k.startsWith("const")).sort();
+
+  assert.deepEqual(
+    keysOf(panelAliases),
+    keysOf(serverAliases),
+    "написание, которое сервер считает закрытым, панель обязана считать закрытым",
+  );
+});
+
+test("TK33 отказ назван по своей причине, а не одним текстом на все случаи", async () => {
+  const panel = await readFile(panelPath, "utf8");
+
+  assert.ok(panel.includes("crmErrorMessage"), "готовое сопоставление статусов на русские тексты уже есть в api.ts");
+  assert.ok(
+    panel.includes("function refusalText(status: number, details?: string[])"),
+    "детали от сервера называют, какое поле не прошло проверку",
+  );
+  // Единственный диагностический канал панели не должен быть пуст.
+  for (const call of ["tasks: create refused", "tasks: close refused"]) {
+    const at = panel.indexOf(call);
+    assert.ok(at > 0, `${call} должен логироваться`);
+    assert.ok(
+      panel.slice(at, at + 160).includes("body.details"),
+      `${call}: разобранное тело выбрасывать нельзя — в консоли остался бы один код`,
+    );
+  }
+});
+
+test("TK34 в исполнители не попадают уволенные, а пустой список не рисуется", async () => {
+  const panel = await readFile(panelPath, "utf8");
+
+  const staffMapper = panel.slice(panel.indexOf("function staffFromRecord("), panel.indexOf("/** Срок хранится"));
+  assert.ok(
+    staffMapper.includes('if (status !== "active") return null;'),
+    "сервер отказывает в задаче на неактивного сотрудника — предлагать его значит вести оператора в тупик",
+  );
+  assert.ok(
+    panel.includes("{staff.length > 0 ? ("),
+    "право manage_staff есть только у owner и admin: у остальных пустой селект выглядел бы так, "
+      + "будто в клинике нет сотрудников",
+  );
+});
+
+test("TK35 перечитывание после записи не гасит панель и не путает порядок ответов", async () => {
+  const panel = await readFile(panelPath, "utf8");
+
+  assert.ok(panel.includes("const generation = useRef(0)"), "ответ устаревшего запроса должен игнорироваться");
+  assert.ok(panel.includes("if (mine !== generation.current) return;"), "и проверяться после await");
+  assert.ok(
+    panel.includes("await load({ quiet: true })"),
+    "иначе одно нажатие галочки стирает весь список и форму до спиннера",
+  );
+  assert.ok(panel.includes("if (closingId) return;"), "повторный клик по закрытию не отправляет второй PATCH");
+});
+
+test("TK36 до применения 031 панель получает пустой список, а не отказ", async () => {
+  // У пути ЗАПИСИ откат на отсутствующие колонки был с самого начала, у
+  // ЧТЕНИЯ — нет. Панель фильтрует по lead_id, поэтому во всём окне между
+  // деплоем и ручной миграцией она показывала бы «не удалось загрузить
+  // задачи» на каждой карточке заявки и пациента. Правильный ответ известен
+  // и без базы: связанных задач нет, потому что связывать пока нечем.
+  const warnings: string[] = [];
+  const realWarn = console.warn;
+  console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(" ")); };
+  try {
+    const call = await loadRouter({ tasks: [{ id: TASK_ID, workspace_id: WORKSPACE_A }] }, ["lead_id"]);
+    const { res } = await call({ method: "GET", query: { leadId: LEAD_ID } });
+
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+    assert.deepEqual((res.body.data as { tasks: unknown[] }).tasks, []);
+  } finally {
+    console.warn = realWarn;
+  }
+
+  assert.ok(
+    warnings.some((line) => line.includes("031")),
+    "и лог оператора называет миграцию, которая включит связи",
+  );
+});
+
+test("TK37 предел длины заголовка — правило продукта, а не одного поля ввода", async () => {
+  const call = await loadRouter();
+  const { res, log } = await call({ body: { title: "х".repeat(201) } });
+
+  assert.equal(res.statusCode, 400, "иначе любой другой вызывающий растянет карточку заявки на весь экран");
+  assert.equal(log.filter((e) => e.op === "insert").length, 0);
 });
 
 /* ── Пины исходников и миграции ── */

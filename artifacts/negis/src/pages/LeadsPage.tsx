@@ -1372,7 +1372,6 @@ export default function LeadsPage() {
                   entityType="lead"
                   entityId={detailLead.id}
                   clientId={detailLead.clientId}
-                  canManage={rolePermissions.tasks === true}
                 />
               </div>
             ) : null}

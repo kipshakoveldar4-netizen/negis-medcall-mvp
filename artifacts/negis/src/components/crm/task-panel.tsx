@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CheckCircle2, ListTodo, Loader2, Plus } from "lucide-react";
 import { toast } from "sonner";
-import { crmFetch } from "@/lib/api";
+import { crmErrorMessage, crmFetch } from "@/lib/api";
 import { readWorkspaceId } from "@/lib/demoStorage";
 
 // Задачи по одной записи.
@@ -17,6 +17,11 @@ import { readWorkspaceId } from "@/lib/demoStorage";
 // исполнителя после создания, не заводит подзадач и напоминаний. Первая
 // версия отвечает на один вопрос и закрывает задачу в один клик; остальное
 // живёт на экране задач.
+//
+// Режима «только смотреть» здесь нет намеренно: в каталоге прав нет роли,
+// у которой есть view_tasks без manage_tasks, поэтому проп, который никогда
+// не бывает false, был бы мёртвой веткой, притворяющейся живой. Когда права
+// разделят, режим появится вместе с ролью, а не заранее.
 
 export type TaskEntity = "lead" | "client";
 
@@ -36,18 +41,33 @@ type LoadState = "loading" | "ready" | "failed";
 
 const OPEN_STATUSES = new Set(["new", "in_progress"]);
 
-/** Русские написания, которые могли попасть в базу до канонизации (миграция 031). */
+/**
+ * Написания, которые могли попасть в базу до канонизации (миграция 031).
+ *
+ * Список обязан совпадать с серверным (TASK_STATUS_ALIASES в lib/crm/server.ts).
+ * Первая версия была копией вдвое короче, и три написания, означающие «сделано»
+ * — «завершено», completed, closed, — панель относила к открытым: закрытая
+ * задача висела в работе с зелёным счётчиком.
+ */
 const STATUS_ALIASES: Record<string, string> = {
   "новые": "new",
   "новая": "new",
   "в работе": "in_progress",
   "готово": "done",
   "выполнено": "done",
+  "завершено": "done",
+  todo: "new",
+  open: "new",
+  progress: "in_progress",
+  completed: "done",
+  closed: "done",
 };
 
 function statusKey(raw: string): string {
   const value = (raw || "").trim().toLowerCase();
   if (value === "new" || value === "in_progress" || value === "done") return value;
+  // Неизвестное показываем как открытое: спрятать работу хуже, чем показать
+  // лишнюю строку. Угадывать «сделано» сервер отказывается, и панель тоже.
   return STATUS_ALIASES[value] ?? "new";
 }
 
@@ -68,15 +88,25 @@ function taskFromRecord(raw: unknown): Task {
   };
 }
 
+/**
+ * Только те, кому задачу действительно можно поручить.
+ *
+ * Сервер отказывает в задаче на неактивного сотрудника (400), а панель
+ * показывала бы общий тост без причины — оператор жал бы «поставить» снова и
+ * снова с тем же исходом. Соседний список того же штата на той же карточке
+ * фильтрует так же.
+ */
 function staffFromRecord(raw: unknown): StaffOption | null {
   const record = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
   const id = str(record.id);
   if (!id) return null;
+  const status = (str(record.status) || "active").toLowerCase();
+  if (status !== "active") return null;
   const name = str(record.name) || str(record.full_name) || str(record.fullName) || str(record.email) || "Сотрудник";
   return { id, name };
 }
 
-/** Срок хранится как момент времени; «Сегодня» — это формат показа, а не значение. */
+/** Срок хранится как момент времени; «сегодня» — это формат показа, а не значение. */
 function formatDue(value: string): string {
   const raw = (value || "").trim();
   if (!raw) return "";
@@ -102,47 +132,76 @@ function toIso(local: string): string {
   return Number.isFinite(at) ? new Date(at).toISOString() : "";
 }
 
+/** Причина отказа словами оператора, а не одним текстом на все случаи. */
+function refusalText(status: number, details?: string[]): string {
+  const detail = (details ?? []).filter(Boolean).join(", ");
+  if (detail) return detail;
+  return crmErrorMessage(status);
+}
+
 export function TaskPanel({
   entityType,
   entityId,
   clientId,
-  canManage,
 }: {
   entityType: TaskEntity;
   entityId: string;
   /** Заявка почти всегда «про пациента»: связь ставится обеими, когда она известна. */
   clientId?: string;
-  canManage: boolean;
 }) {
   const [state, setState] = useState<LoadState>("loading");
+  const [failureText, setFailureText] = useState("");
   const [tasks, setTasks] = useState<Task[]>([]);
   const [staff, setStaff] = useState<StaffOption[]>([]);
   const [title, setTitle] = useState("");
   const [due, setDue] = useState("");
   const [assignee, setAssignee] = useState("");
   const [saving, setSaving] = useState(false);
+  const [closingId, setClosingId] = useState("");
+
+  /**
+   * Номер поколения запроса.
+   *
+   * Два закрытия подряд запускают два перечитывания, и ответ первого может
+   * прийти последним — тогда только что закрытая задача снова нарисуется
+   * открытой. Ответ более старого поколения просто игнорируется. Тот же
+   * механизм закрывает и переключение между карточками.
+   */
+  const generation = useRef(0);
 
   const filterParam = entityType === "lead" ? "leadId" : "clientId";
 
-  const load = useCallback(async () => {
-    if (!entityId) return;
-    setState("loading");
+  const load = useCallback(async (options: { quiet?: boolean } = {}) => {
+    if (!entityId) {
+      setTasks([]);
+      setState("ready");
+      return;
+    }
+    const mine = ++generation.current;
+    // Перечитывание после записи не гасит список: иначе одно нажатие галочки
+    // стирало бы всю панель до спиннера вместе с формой и набранным текстом.
+    if (!options.quiet) setState("loading");
     try {
       const workspaceId = readWorkspaceId();
       const query = `${filterParam}=${encodeURIComponent(entityId)}`
         + (workspaceId ? `&workspaceId=${encodeURIComponent(workspaceId)}` : "");
       const response = await crmFetch(`/api/crm/tasks?${query}`);
-      const body = (await response.json()) as { success?: boolean; mode?: string; data?: { tasks?: unknown[] } };
+      const body = (await response.json()) as { success?: boolean; details?: string[]; data?: { tasks?: unknown[] } };
+      if (mine !== generation.current) return;
       // Отказ базы приходит как 502. Показать его пустым списком значило бы
       // соврать: запись без задач и запись, задачи которой не удалось
       // прочитать, выглядели бы одинаково.
       if (!response.ok || body.success !== true) {
+        setFailureText(refusalText(response.status, body.details));
         setState("failed");
         return;
       }
       setTasks((Array.isArray(body.data?.tasks) ? body.data.tasks : []).map(taskFromRecord));
       setState("ready");
-    } catch {
+    } catch (error) {
+      if (mine !== generation.current) return;
+      const status = typeof (error as { status?: unknown })?.status === "number" ? (error as { status: number }).status : 0;
+      setFailureText(refusalText(status));
       setState("failed");
     }
   }, [entityId, filterParam]);
@@ -152,23 +211,25 @@ export function TaskPanel({
   }, [load]);
 
   useEffect(() => {
-    if (!canManage) return;
     let cancelled = false;
     void (async () => {
       try {
         const workspaceId = readWorkspaceId();
         const response = await crmFetch(`/api/crm/staff?workspaceId=${encodeURIComponent(workspaceId)}`);
         const body = (await response.json()) as { success?: boolean; data?: { staff?: unknown[] } };
-        if (cancelled || body.success !== true) return;
+        if (cancelled || !response.ok || body.success !== true) return;
         setStaff((Array.isArray(body.data?.staff) ? body.data.staff : []).map(staffFromRecord).filter(Boolean) as StaffOption[]);
       } catch {
-        // Без списка сотрудников задачу всё равно можно поставить — без исполнителя.
+        // Список сотрудников читается правом manage_staff, которого нет ни у
+        // ресепшн, ни у врача, ни у маркетолога, ни у менеджера. Для них поле
+        // «Исполнитель» просто не появится — пустой выпадающий список выглядел
+        // бы так, будто в клинике нет сотрудников.
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [canManage]);
+  }, []);
 
   const { open, closed } = useMemo(() => {
     const openTasks: Task[] = [];
@@ -207,21 +268,22 @@ export function TaskPanel({
           ...(entityType === "lead" && clientId ? { clientId } : {}),
         }),
       });
-      const body = (await response.json()) as { success?: boolean; mode?: string };
+      const body = (await response.json()) as { success?: boolean; error?: string; details?: string[] };
       if (!response.ok || body.success !== true) {
-        // Причина уходит оператору в консоль, тост остаётся по-русски и без
-        // внутренних имён полей.
-        console.warn("tasks: create refused", response.status);
-        toast.error("Не удалось поставить задачу. Ничего не сохранено.");
+        // Разобранное тело называет, какое именно поле не прошло проверку.
+        // Выбрасывать его и логировать один код ответа значило бы оставить
+        // единственный диагностический канал панели пустым.
+        console.warn("tasks: create refused", response.status, body.error ?? "", (body.details ?? []).join("; "));
+        toast.error(refusalText(response.status, body.details));
         return;
       }
       setTitle("");
       setDue("");
       setAssignee("");
       toast.success("Задача поставлена");
-      await load();
+      await load({ quiet: true });
     } catch (error) {
-      console.warn("tasks: create failed", error instanceof Error ? error.message : error);
+      console.warn("tasks: create failed", error instanceof Error ? error.message : String(error));
       toast.error("Не удалось поставить задачу. Проверьте список перед повтором.");
     } finally {
       setSaving(false);
@@ -229,6 +291,8 @@ export function TaskPanel({
   };
 
   const close = async (task: Task) => {
+    if (closingId) return;
+    setClosingId(task.id);
     try {
       const response = await crmFetch("/api/crm/tasks", {
         method: "PATCH",
@@ -239,18 +303,22 @@ export function TaskPanel({
           updates: { status: "done" },
         }),
       });
-      const body = (await response.json()) as { success?: boolean };
+      const body = (await response.json()) as { success?: boolean; error?: string; details?: string[] };
       if (!response.ok || body.success !== true) {
-        console.warn("tasks: close refused", response.status);
-        toast.error("Не удалось закрыть задачу. Изменение отменено.");
+        console.warn("tasks: close refused", response.status, body.error ?? "", (body.details ?? []).join("; "));
+        toast.error(refusalText(response.status, body.details));
         return;
       }
-      await load();
+      await load({ quiet: true });
     } catch (error) {
-      console.warn("tasks: close failed", error instanceof Error ? error.message : error);
+      console.warn("tasks: close failed", error instanceof Error ? error.message : String(error));
       toast.error("Не удалось закрыть задачу. Изменение отменено.");
+    } finally {
+      setClosingId("");
     }
   };
+
+  const showList = state === "ready" || (state === "loading" && tasks.length > 0);
 
   return (
     <section className="neu-sm p-4" aria-label="Задачи">
@@ -259,7 +327,7 @@ export function TaskPanel({
         <p className="text-xs font-semibold" style={{ color: "var(--negis-ink-strong)" }}>
           Задачи
         </p>
-        {state === "ready" && open.length > 0 ? (
+        {showList && open.length > 0 ? (
           <span
             className="rounded-full px-2 py-0.5 text-[10px] font-bold"
             style={{ background: "var(--negis-mint)", color: "var(--negis-mint-ink)" }}
@@ -269,7 +337,7 @@ export function TaskPanel({
         ) : null}
       </div>
 
-      {state === "loading" ? (
+      {state === "loading" && tasks.length === 0 ? (
         <div className="flex items-center gap-2 py-2" style={{ color: "var(--negis-muted-2)" }}>
           <Loader2 className="animate-spin" size={14} />
           <span className="text-xs">Загружаем…</span>
@@ -278,11 +346,11 @@ export function TaskPanel({
 
       {state === "failed" ? (
         <p className="text-xs" style={{ color: "var(--negis-error)" }}>
-          Не удалось загрузить задачи. Это не значит, что их нет — попробуйте открыть карточку ещё раз.
+          {failureText || "Не удалось загрузить задачи."} Это не значит, что задач нет.
         </p>
       ) : null}
 
-      {state === "ready" ? (
+      {showList ? (
         <div className="flex flex-col gap-2.5">
           {open.length === 0 && closed.length === 0 ? (
             <p className="text-xs" style={{ color: "var(--negis-muted-2)" }}>
@@ -292,19 +360,19 @@ export function TaskPanel({
 
           {open.map((task) => (
             <div key={task.id} className="flex items-start gap-2.5">
-              {canManage ? (
-                <button
-                  type="button"
-                  aria-label="Закрыть задачу"
-                  className="mt-0.5 shrink-0"
-                  style={{ color: "var(--negis-faint)" }}
-                  onClick={() => void close(task)}
-                >
-                  <CheckCircle2 size={16} />
-                </button>
-              ) : null}
-              <div className="min-w-0">
-                <p className="text-xs font-semibold" style={{ color: "var(--negis-ink-strong)" }}>
+              <button
+                type="button"
+                aria-label={`Закрыть задачу: ${task.title}`}
+                title="Закрыть задачу"
+                className="grid h-9 w-9 shrink-0 place-items-center rounded-full"
+                style={{ background: "var(--negis-ground)", color: "var(--negis-ink-2)" }}
+                disabled={closingId === task.id}
+                onClick={() => void close(task)}
+              >
+                {closingId === task.id ? <Loader2 className="animate-spin" size={15} /> : <CheckCircle2 size={16} />}
+              </button>
+              <div className="min-w-0 pt-1">
+                <p className="break-words text-xs font-semibold" style={{ color: "var(--negis-ink-strong)" }}>
                   {task.title}
                 </p>
                 <p className="text-[11px]" style={{ color: isOverdue(task.deadline) ? "var(--negis-error)" : "var(--negis-muted-2)" }}>
@@ -321,7 +389,7 @@ export function TaskPanel({
               </summary>
               <ul className="mt-1.5 flex flex-col gap-1">
                 {closed.map((task) => (
-                  <li key={task.id} className="text-[11px]" style={{ color: "var(--negis-faint)" }}>
+                  <li key={task.id} className="break-words text-[11px]" style={{ color: "var(--negis-faint)" }}>
                     {task.title}
                   </li>
                 ))}
@@ -331,7 +399,9 @@ export function TaskPanel({
         </div>
       ) : null}
 
-      {canManage && state !== "loading" ? (
+      {/* Форма показывается только когда список прочитан. Форма поверх отказа
+          принимает ввод, результат которого оператор всё равно не увидит. */}
+      {showList ? (
         <div className="mt-3 flex flex-col gap-2 border-t pt-3" style={{ borderColor: "var(--negis-hair)" }}>
           <input
             className="neu-input text-xs"
@@ -349,17 +419,19 @@ export function TaskPanel({
               onChange={(event) => setDue(event.target.value)}
               aria-label="Срок"
             />
-            <select
-              className="neu-input text-xs sm:flex-1"
-              value={assignee}
-              onChange={(event) => setAssignee(event.target.value)}
-              aria-label="Исполнитель"
-            >
-              <option value="">Без исполнителя</option>
-              {staff.map((member) => (
-                <option key={member.id} value={member.id}>{member.name}</option>
-              ))}
-            </select>
+            {staff.length > 0 ? (
+              <select
+                className="neu-input text-xs sm:flex-1"
+                value={assignee}
+                onChange={(event) => setAssignee(event.target.value)}
+                aria-label="Исполнитель"
+              >
+                <option value="">Без исполнителя</option>
+                {staff.map((member) => (
+                  <option key={member.id} value={member.id}>{member.name}</option>
+                ))}
+              </select>
+            ) : null}
           </div>
           <button
             type="button"

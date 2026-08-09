@@ -688,6 +688,13 @@ function resourceValidationDetails(resource: CrmResource, body: JsonRecord): str
   }
 
   if (resource === "tasks") {
+    // Предел заголовка — правило продукта, а не браузера. Без него атрибут
+    // maxLength на одном поле ввода ничего не значит: любой другой вызывающий
+    // сохранит заголовок в пять тысяч символов, и карточка заявки растянется
+    // им на весь экран.
+    if (readString(body.title).length > TASK_TITLE_MAX) {
+      details.push(`title must be at most ${TASK_TITLE_MAX} characters`);
+    }
     if (hasAnyKey(body, ["status"]) && !canonicalTaskStatus(body.status)) {
       details.push("status must be one of: new, in_progress, done");
     }
@@ -992,6 +999,9 @@ function makeCall(body: JsonRecord): JsonRecord {
  * построенный там же, считал бы по половине. Ключ хранится канонический,
  * подпись живёт на экране: ровно так устроены стадии заявки.
  */
+/** Столько же, сколько принимает поле ввода в панели задач. */
+const TASK_TITLE_MAX = 200;
+
 const TASK_STATUSES = ["new", "in_progress", "done"] as const;
 const TASK_PRIORITIES = ["low", "medium", "high"] as const;
 
@@ -2588,7 +2598,21 @@ async function listItems(resource: CrmResource, req: VercelRequest, res: VercelR
     for (const [column, value] of equalities) query = query.eq(column, value);
     if (dueBefore) query = query.lt("due_at", dueBefore);
 
-    const { data, error } = await query;
+    let { data, error } = await query;
+
+    // Пока 031 не применена, колонок связи в таблице нет, и фильтр по ним
+    // PostgREST отвергает. Ответить отказом значило бы показать «не удалось
+    // загрузить задачи» на каждой карточке заявки и пациента — при том что
+    // правильный ответ известен точно и без базы: связанных задач нет, потому
+    // что связывать пока нечем. Путь ЗАПИСИ такой откат уже имеет; у чтения
+    // его не было, и это делало панель нерабочей во всём окне до миграции.
+    if (error && resource === "tasks" && isMissingAnyColumn(error)) {
+      const filtered = equalities.some(([column]) => TASK_COLUMNS_FROM_031.includes(column));
+      if (filtered) {
+        console.warn("tasks: link columns from migration 031 are not present yet; answering with no linked tasks");
+        return sendJson(res, 200, success("supabase", { [config.listKey]: [], items: [] }));
+      }
+    }
 
     if (error) {
       throw new Error(error.message);

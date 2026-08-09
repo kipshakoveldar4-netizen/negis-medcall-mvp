@@ -732,20 +732,19 @@ export default function ClientsPage() {
               </div>
             </div>
 
-            {/* Кто и когда правил саму карточку — отдельно от того, что с
-                клиентом происходило: записи, продажи, звонки. Два разных
-                вопроса, и смешивать их в одну ленту значит не ответить ни на
-                один. */}
             {isRealWorkspace() && rolePermissions.tasks ? (
               <div className="mt-4">
                 <TaskPanel
                   entityType="client"
                   entityId={detailClient.id}
-                  canManage={rolePermissions.tasks === true}
                 />
               </div>
             ) : null}
 
+            {/* Кто и когда правил саму карточку — отдельно от того, что с
+                клиентом происходило: записи, продажи, звонки. Два разных
+                вопроса, и смешивать их в одну ленту значит не ответить ни на
+                один. */}
             {isRealWorkspace() ? (
               <div className="mt-4">
                 <ChangeLogPanel entityType="client" entityId={detailClient.id} />
