@@ -406,8 +406,24 @@ export async function fetchVideoJob(input: {
  * Ключ подписи в результат не попадает: HMAC его не раскрывает, а сравнение
  * идёт по времени, не зависящему от данных.
  */
+/**
+ * Ключ подписи выводится из переданного секрета, а не равен ему.
+ *
+ * Секретом служит служебный ключ Supabase — он есть на сервере всегда, когда
+ * вообще есть куда сохранять результат. Подписывать им напрямую значило бы
+ * держать ключ полного доступа к базе и ключ подписи одним значением: любая
+ * будущая отладочная печать «ключа подписи» раскрывала бы не способность
+ * подделать идентификатор задачи, а всю базу. Разделение по назначению стоит
+ * одного вызова HMAC и убирает эту связь.
+ */
+const JOB_HANDLE_KEY_INFO = "negis/content-studio/video-job/v1";
+
+function jobHandleKey(secret: string): Buffer {
+  return createHmac("sha256", secret).update(JOB_HANDLE_KEY_INFO).digest();
+}
+
 function jobHandleSignature(input: { workspaceId: string; jobId: string; secret: string }): string {
-  return createHmac("sha256", input.secret)
+  return createHmac("sha256", jobHandleKey(input.secret))
     .update(`${input.workspaceId}:${input.jobId}`)
     .digest("base64url");
 }
@@ -460,5 +476,30 @@ export async function downloadVideoContent(input: {
   if (buffer.length === 0) {
     throw new GenerationProviderError(502, "Провайдер вернул пустой файл ролика.");
   }
+  if (buffer.length > VIDEO_MAX_BYTES) {
+    // Тот же предел, что и у ручной загрузки креатива. Оговорка: ответ уже
+    // прочитан целиком в память — этот предел отсекает файл до записи в
+    // хранилище, но не защищает от расхода памяти на само чтение. Потоковая
+    // загрузка потребовала бы другого клиента хранилища.
+    throw new GenerationProviderError(502, "Готовый ролик больше 100 МБ — такой файл не принимает библиотека креативов.");
+  }
+  if (!looksLikeMp4(buffer)) {
+    // Тип берётся по сигнатуре, как и у картинки: дальше файл уйдёт в
+    // публичный bucket с заявленным video/mp4, и записать туда что-то другое
+    // означало бы отдать Meta файл, который она отклонит на запуске.
+    throw new GenerationProviderError(502, "Провайдер вернул файл, который не является MP4.");
+  }
   return buffer;
+}
+
+/** Предел размера ролика — как у ручной загрузки креатива (lib/crm/server.ts). */
+export const VIDEO_MAX_BYTES = 100 * 1024 * 1024;
+
+/**
+ * MP4 начинается с box'а размером в 4 байта и типом `ftyp`. Проверяется именно
+ * он, а не расширение: имя файла придумываем мы сами и оно ничего не доказывает.
+ */
+export function looksLikeMp4(bytes: Uint8Array): boolean {
+  if (bytes.length < 12) return false;
+  return bytes[4] === 0x66 && bytes[5] === 0x74 && bytes[6] === 0x79 && bytes[7] === 0x70;
 }

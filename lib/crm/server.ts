@@ -3376,12 +3376,18 @@ function randomStorageId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
 }
 
-function buildAdCreativeStoragePath(input: { workspaceId: string; fileName: string }): string {
+function buildAdCreativeStoragePath(input: { workspaceId: string; fileName: string; stableId?: string }): string {
   const now = new Date();
   const year = String(now.getUTCFullYear());
   const month = String(now.getUTCMonth() + 1).padStart(2, "0");
   const workspace = safeStoragePathSegment(input.workspaceId || DEMO_WORKSPACE_ID, DEMO_WORKSPACE_ID);
-  return `${workspace}/${year}/${month}/${randomStorageId()}-${safeStorageFileName(input.fileName)}`;
+  // stableId делает путь воспроизводимым: один и тот же вызов даёт один и тот
+  // же объект. Нужен там, где операция может честно повториться (опрос
+  // готового рендера), и не используется там, где повтор означает новый файл.
+  // Он проходит ту же санацию, что и имя файла: наружу он не выходит, но и
+  // доверять ему как сегменту пути нельзя.
+  const identity = input.stableId ? safeStoragePathSegment(input.stableId, randomStorageId()) : randomStorageId();
+  return `${workspace}/${year}/${month}/${identity}-${safeStorageFileName(input.fileName)}`;
 }
 
 /**
@@ -3527,10 +3533,27 @@ export async function storeGeneratedCreative(input: {
   mimeType: string;
   buffer: Buffer;
   metadata?: JsonRecord;
+  /**
+   * Ключ повторяемости: одинаковый ключ обязан дать один файл и одну строку,
+   * сколько бы раз вызов ни повторился.
+   *
+   * Нужен видео. Опрос состояния — обычный GET, и провайдер отвечает
+   * «completed» на каждый запрос: потерянный по дороге ответ, перезагрузка
+   * страницы или второй клик привели бы к повторному скачиванию того же
+   * ролика, второму объекту в хранилище и второй строке в библиотеке
+   * креативов — двум «одинаковым» креативам, которые оператор не различит.
+   *
+   * У картинки такого ключа нет намеренно: каждое нажатие — это новая
+   * картинка, и совпадение здесь было бы ошибкой, а не экономией.
+   */
+  idempotencyKey?: string;
 }): Promise<StoredGeneratedCreative> {
   const supabase = getSupabaseServerClient();
   const storageBucket = AD_CREATIVE_BUCKET;
-  const storagePath = buildAdCreativeStoragePath({ workspaceId: input.workspaceId, fileName: input.fileName });
+  const idempotencyKey = readString(input.idempotencyKey);
+  const storagePath = idempotencyKey
+    ? buildAdCreativeStoragePath({ workspaceId: input.workspaceId, fileName: input.fileName, stableId: idempotencyKey })
+    : buildAdCreativeStoragePath({ workspaceId: input.workspaceId, fileName: input.fileName });
   const body: JsonRecord = {
     workspaceId: input.workspaceId,
     fileName: input.fileName,
@@ -3560,19 +3583,49 @@ export async function storeGeneratedCreative(input: {
     );
   }
 
+  // Повторяемый вызов перезаписывает свой же объект вместо того, чтобы
+  // заводить второй. Без ключа поведение прежнее — upsert: false, чтобы
+  // случайное совпадение случайных имён не затёрло чужой файл.
   const { error: uploadError } = await supabase.storage.from(storageBucket).upload(storagePath, input.buffer, {
     contentType: input.mimeType,
-    upsert: false,
+    upsert: Boolean(idempotencyKey),
   });
   if (uploadError) {
-    throw new Error(uploadError.message || "Supabase Storage did not accept the generated file.");
+    // Security-2F: текст Supabase Storage наружу не идёт — имена bucket'ов,
+    // политики и «permission denied for …» ничего не говорят оператору и
+    // описывают устройство сервиса. Подробность уходит в лог.
+    throw new Error(
+      redactedDetail("generated creative upload", uploadError, "Хранилище не приняло сгенерированный файл."),
+    );
   }
 
   const publicUrl =
     supabase.storage.from(storageBucket).getPublicUrl(storagePath).data.publicUrl ||
     buildSupabaseStoragePublicUrl({ bucket: storageBucket, storagePath });
   if (!publicUrl) {
-    throw new Error("Файл сохранён, но Supabase не вернул публичную ссылку. Проверьте, что bucket ad-creatives публичный.");
+    // Файл уже лежит в хранилище и уже занимает место. Оставить его — значит
+    // копить оплаченные объекты, на которые не ссылается ни одна строка и
+    // которых не видно нигде в продукте.
+    try {
+      await supabase.storage.from(storageBucket).remove([storagePath]);
+    } catch (removeError) {
+      console.warn(supabaseWarning("generated creative cleanup", removeError));
+    }
+    throw new Error("Файл не удалось опубликовать: Supabase не вернул ссылку. Проверьте, что bucket ad-creatives публичный.");
+  }
+
+  // Повторный вызов с тем же ключом не должен заводить вторую строку.
+  // Объект в хранилище один (перезаписан выше), а строк без этой проверки
+  // стало бы столько, сколько раз повторился опрос: два «одинаковых» креатива
+  // в библиотеке, которые оператор не различит.
+  if (idempotencyKey) {
+    const existing = await findAdCreativeByStoragePath({
+      workspaceId: input.workspaceId,
+      storagePath,
+    });
+    if (existing) {
+      return { publicUrl, asset: existing, mode: "supabase", warning: "" };
+    }
   }
 
   const saved = await persistAdCreativeAsset({
@@ -3584,8 +3637,47 @@ export async function storeGeneratedCreative(input: {
     publicUrl,
     asset: asRecord(saved.asset),
     mode: saved.mode,
-    warning: saved.warning || "",
+    // Security-2F и здесь: persistAdCreativeAsset складывает в warning текст
+    // Postgres, а он уходил бы прямо на экран оператора. Подробность уже в
+    // логе (там же, где её пишет persistAdCreativeAsset), наружу — факт.
+    warning:
+      saved.mode === "supabase"
+        ? ""
+        : "Файл сохранён и доступен по ссылке, но строка в библиотеке креативов не создана.",
   };
+}
+
+/**
+ * Ищет уже заведённый креатив по ключу объекта — внутри рабочего пространства.
+ *
+ * Фильтр по workspace_id обязателен, а не «на всякий случай»: запрос идёт
+ * служебным клиентом в обход RLS, и ключ объекта хоть и начинается с сегмента
+ * рабочего пространства, но это свойство пути, а не проверка.
+ */
+async function findAdCreativeByStoragePath(input: {
+  workspaceId: string;
+  storagePath: string;
+}): Promise<JsonRecord | null> {
+  const supabase = getSupabaseServerClient();
+  if (!supabase) return null;
+
+  try {
+    const { data, error } = await supabase
+      .from("ad_creative_assets")
+      .select("*")
+      .eq("workspace_id", input.workspaceId)
+      .eq("storage_path", input.storagePath)
+      .limit(1);
+    if (error) throw new Error(error.message);
+    const rows = Array.isArray(data) ? data : [];
+    return rows.length > 0 ? configs["ad-creatives"].fromRow(asRecord(rows[0])) : null;
+  } catch (error) {
+    // Не найти существующую строку — не повод отказать: хуже всего здесь
+    // потерять готовый файл. Дальше пойдёт обычная вставка, и в худшем случае
+    // строк станет две — это видно, в отличие от пропавшего ролика.
+    console.warn(supabaseWarning("ad_creative_assets lookup", error));
+    return null;
+  }
 }
 
 async function updateAdCreativeMeta(input: {

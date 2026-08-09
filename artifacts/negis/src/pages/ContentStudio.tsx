@@ -666,7 +666,6 @@ export default function ContentStudio() {
   const [genImage, setGenImage] = useState<GeneratedFile | null>(null);
   const [genVideo, setGenVideo] = useState<GeneratedFile | null>(null);
   const [videoJob, setVideoJob] = useState<VideoJobState | null>(null);
-  const pollGeneration = useRef(0);
 
   const updatePhotoTexts = (key: keyof PhotoCreativeTexts, value: string) =>
     setPhotoTexts((current) => ({ ...current, [key]: value }));
@@ -958,8 +957,11 @@ export default function ContentStudio() {
     setGenNotice(null);
     setGenVideo(null);
     // Прошлая задача перестаёт нас интересовать в тот же момент, когда
-    // поставлена новая: иначе после перезагрузки страницы вернулся бы старый
-    // ролик рядом с новым описанием.
+    // поставлена новая — и в состоянии тоже, а не только в хранилище. Пока
+    // ответ на новый POST не пришёл, карточка иначе показывала бы «Ролик готов
+    // 100%» от прошлой задачи рядом с кнопкой «Отправляем задачу...», причём
+    // без самого ролика: genVideo уже очищен строкой выше.
+    setVideoJob(null);
     writeStoredVideoJob(null);
     try {
       const response = await crmFetch(withWorkspace("/api/content-studio/generate-video"), {
@@ -983,18 +985,15 @@ export default function ContentStudio() {
         return;
       }
 
+      // Подмена формата живёт в карточке задачи, а не в genNotice: genNotice
+      // общий с генерацией изображения, и один клик по соседней кнопке стирал
+      // бы предупреждение о том, что «квадратный» ролик на самом деле 9:16.
       setVideoJob({
         handle: body.data.handle,
         status: body.data.status,
         progress: body.data.progress,
         formatSubstituted: Boolean(body.data.formatSubstituted),
       });
-      if (body.data.formatSubstituted) {
-        setGenNotice({
-          tone: "info",
-          text: "У видеомодели нет квадратного формата — ролик снимается вертикально 9:16.",
-        });
-      }
     } catch (error) {
       setVideoJob(null);
       setGenNotice({
@@ -1018,13 +1017,16 @@ export default function ContentStudio() {
     if (!videoJob) return;
     if (videoJob.status === "completed" || videoJob.status === "failed") return;
 
-    const generation = pollGeneration.current + 1;
-    pollGeneration.current = generation;
     const handle = videoJob.handle;
     let timer: ReturnType<typeof setTimeout> | null = null;
     let stopped = false;
 
-    const isStale = () => stopped || generation !== pollGeneration.current;
+    // Одного флага достаточно: React всегда выполняет очистку предыдущего
+    // эффекта до запуска следующего, поэтому к моменту старта новой задачи
+    // старая цепочка уже помечена как остановленная. Счётчик поколений здесь
+    // был бы вторым названием того же условия — и следующему читателю пришлось
+    // бы гадать, какое из двух настоящее.
+    const isStale = () => stopped;
 
     const tick = async () => {
       if (isStale()) return;
@@ -1101,7 +1103,10 @@ export default function ContentStudio() {
       timer = setTimeout(() => void tick(), VIDEO_POLL_INTERVAL_MS);
     };
 
-    timer = setTimeout(() => void tick(), VIDEO_POLL_INTERVAL_MS);
+    // Первый опрос — сразу. Так карточка перестаёт стоять на нуле двенадцать
+    // секунд, и так же работает кнопка «Проверить ещё раз»: она возвращает
+    // статус в «идёт рендер», эффект перезапускается и спрашивает немедленно.
+    void tick();
     return () => {
       stopped = true;
       if (timer) clearTimeout(timer);
@@ -1603,6 +1608,22 @@ export default function ContentStudio() {
           </button>
         </div>
 
+        {/*
+          notice пишут четыре разных места страницы: Telegram, создание идеи,
+          сохранение сценария и сохранение prompt'ов. Раньше он выводился один
+          раз — внизу, в карточке Telegram. Оператор, нажавший «Создать идею» в
+          середине страницы, видел исчезающий тост, а объяснение «сохранено
+          только в этом браузере» оставалось там, куда он не смотрит.
+        */}
+        {notice ? (
+          <div
+            aria-live="polite"
+            className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-amber-900"
+          >
+            {notice}
+          </div>
+        ) : null}
+
         <section className="neu-card p-6">
           <SectionTitle
             icon={WandSparkles}
@@ -1846,6 +1867,10 @@ export default function ContentStudio() {
               <button
                 key={format.id}
                 type="button"
+                // Выбранный формат отличается только заливкой. Без aria-pressed
+                // читалка с экрана перечислит пять одинаковых кнопок и не
+                // скажет, в каком формате сейчас будет сгенерирован файл.
+                aria-pressed={genFormat === format.id}
                 className={`rounded-full border px-4 py-2 text-xs font-black ${
                   genFormat === format.id ? "border-[#0D9488] bg-[#0D9488] text-white" : "border-[#E7ECF3] bg-white text-[#475569]"
                 }`}
@@ -1879,6 +1904,7 @@ export default function ContentStudio() {
 
           {genNotice ? (
             <div
+              aria-live="polite"
               className={`mt-4 rounded-2xl border p-3 text-sm font-semibold ${
                 genNotice.tone === "error"
                   ? "border-rose-200 bg-rose-50 text-rose-900"
@@ -1891,20 +1917,68 @@ export default function ContentStudio() {
             </div>
           ) : null}
 
-          {videoJob && videoJob.status !== "failed" ? (
-            <div className="mt-4 rounded-2xl border border-[#E7ECF3] bg-white p-4">
+          {/*
+            Карточка остаётся на экране и после неудачи. Раньше она исчезала —
+            вместе с единственной копией подписанного идентификатора задачи, —
+            и оператору оставалось нажать «Сгенерировать видео» ещё раз, оплатив
+            новый рендер, хотя прошлый мог давно закончиться и упасть уже у нас,
+            на скачивании или записи в хранилище.
+          */}
+          {videoJob ? (
+            <div
+              className={`mt-4 rounded-2xl border p-4 ${
+                videoJob.status === "failed" ? "border-rose-200 bg-rose-50" : "border-[#E7ECF3] bg-white"
+              }`}
+              aria-live="polite"
+            >
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <p className="text-sm font-black text-[#0B1220]">{videoJobLabels[videoJob.status]}</p>
+                <p className={`text-sm font-black ${videoJob.status === "failed" ? "text-rose-900" : "text-[#0B1220]"}`}>
+                  {videoJobLabels[videoJob.status]}
+                </p>
                 <p className="text-sm font-bold text-[#64748B]">{videoJob.progress}%</p>
               </div>
-              <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-[#E7ECF3]">
-                <div className="h-full rounded-full bg-[#0D9488]" style={{ width: `${Math.max(3, videoJob.progress)}%` }} />
+              <div
+                className="mt-2 h-2 w-full overflow-hidden rounded-full bg-[#E7ECF3]"
+                role="progressbar"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={videoJob.progress}
+                aria-label={videoJobLabels[videoJob.status]}
+              >
+                <div
+                  className={`h-full rounded-full ${videoJob.status === "failed" ? "bg-rose-400" : "bg-[#0D9488]"}`}
+                  style={{ width: `${Math.max(3, videoJob.progress)}%` }}
+                />
               </div>
-              {videoJob.status !== "completed" ? (
+              {videoJob.formatSubstituted ? (
+                <p className="mt-2 text-xs font-bold text-[#0369A1]">
+                  У видеомодели нет квадратного формата — этот ролик снимается вертикально 9:16.
+                </p>
+              ) : null}
+              {videoJob.status === "queued" || videoJob.status === "in_progress" ? (
                 <p className="mt-2 text-xs font-semibold text-[#64748B]">
                   Рендер идёт на стороне сервиса и занимает минуты. Страницу можно закрыть: задача сохраняется и опрос
                   продолжится, когда вы вернётесь в этот раздел.
                 </p>
+              ) : null}
+              {videoJob.status === "failed" ? (
+                <div className="mt-3">
+                  <p className="text-xs font-semibold text-rose-900">
+                    Если рендер у сервиса уже закончился, повторная проверка заберёт готовый файл и не будет стоить ничего.
+                    Кнопка «Сгенерировать видео» запустит новый платный рендер.
+                  </p>
+                  <button
+                    type="button"
+                    className="neu-btn mt-2 inline-flex items-center gap-2 px-3 py-1.5 text-xs"
+                    onClick={() => {
+                      setGenNotice(null);
+                      setVideoJob((current) => (current ? { ...current, status: "in_progress" } : current));
+                    }}
+                  >
+                    <RefreshCw size={13} />
+                    Проверить ещё раз
+                  </button>
+                </div>
               ) : null}
             </div>
           ) : null}
@@ -1914,7 +1988,21 @@ export default function ContentStudio() {
               {genImage ? (
                 <div className="neu-sm p-3">
                   <p className="mb-2 text-xs font-bold uppercase text-[#64748B]">Сгенерированное изображение</p>
-                  <img src={genImage.url} alt="Сгенерированное изображение" className="max-h-[420px] w-full rounded-xl object-contain" />
+                  {/* Ссылка ведёт в хранилище, и она может не открыться:
+                      объект удалили, bucket перестал быть публичным, файл ещё
+                      не разошёлся. Без обработчика оператор увидел бы значок
+                      битой картинки сразу после тоста «готово». */}
+                  <img
+                    src={genImage.url}
+                    alt="Сгенерированное изображение"
+                    className="max-h-[420px] w-full rounded-xl object-contain"
+                    onError={() =>
+                      setGenNotice({
+                        tone: "error",
+                        text: "Файл сохранён, но не открывается по ссылке. Проверьте, что bucket ad-creatives публичный.",
+                      })
+                    }
+                  />
                   <p className="mt-2 text-xs font-semibold text-[#64748B]">
                     {[genImage.model, formatFileSize(genImage.fileSize)].filter(Boolean).join(" · ")}
                   </p>
@@ -1942,7 +2030,19 @@ export default function ContentStudio() {
               {genVideo ? (
                 <div className="neu-sm p-3">
                   <p className="mb-2 text-xs font-bold uppercase text-[#64748B]">Сгенерированный ролик</p>
-                  <video src={genVideo.url} controls playsInline className="max-h-[420px] w-full rounded-xl bg-black object-contain" />
+                  <video
+                    src={genVideo.url}
+                    controls
+                    playsInline
+                    preload="metadata"
+                    className="max-h-[420px] w-full rounded-xl bg-black object-contain"
+                    onError={() =>
+                      setGenNotice({
+                        tone: "error",
+                        text: "Ролик сохранён, но не открывается по ссылке. Проверьте, что bucket ad-creatives публичный.",
+                      })
+                    }
+                  />
                   <p className="mt-2 text-xs font-semibold text-[#64748B]">{formatFileSize(genVideo.fileSize)}</p>
                   <div className="mt-3 flex flex-wrap gap-2">
                     <a
@@ -2260,11 +2360,7 @@ export default function ContentStudio() {
             title="Telegram handoff"
             subtitle="Пакет можно отправить в Telegram или скопировать, если Telegram env ещё не подключены."
           />
-          {notice ? (
-            <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-amber-800">
-              {notice}
-            </div>
-          ) : null}
+          {/* Сообщение теперь выводится один раз — вверху страницы. */}
           <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_260px]">
             <textarea readOnly style={{ ...inputStyle, minHeight: 230, resize: "vertical", background: "#FFFFFF" }} value={packageText} />
             <div className="flex flex-col gap-3">

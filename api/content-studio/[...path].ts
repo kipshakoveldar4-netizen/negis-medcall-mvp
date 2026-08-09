@@ -835,33 +835,52 @@ async function handleVideoGeneration(req: VercelRequest, res: VercelResponse, co
     }
 
     const buffer = await downloadVideoContent({ fetchImpl: fetch as unknown as GenerationFetch, config, jobId });
-    const stored = await storeGeneratedCreative({
-      workspaceId: context.workspaceId,
-      fileName: generatedFileName("video", "video/mp4"),
-      mimeType: "video/mp4",
-      buffer,
-      metadata: {
-        source: "content-studio",
-        kind: "generated-video",
-        provider: "openai",
-        model: config.videoModel,
-        jobId,
-      },
-    });
 
-    return sendJson(res, 200, {
-      success: true,
-      mode: "openai",
-      ...(stored.warning ? { warning: stored.warning } : {}),
-      data: {
-        status: "completed",
-        progress: 100,
-        creativeUrl: stored.publicUrl,
-        assetId: typeof stored.asset.id === "string" ? stored.asset.id : "",
-        fileSize: buffer.length,
+    // Ролик уже отрендерен и оплачен. Отказ хранилища — не отказ генерации, и
+    // называть его так означало бы предложить оператору запустить рендер ещё
+    // раз. Ссылка провайдера живёт час, поэтому повтор опроса в этот час ещё
+    // может забрать тот же файл: об этом и говорит подсказка.
+    try {
+      const stored = await storeGeneratedCreative({
+        workspaceId: context.workspaceId,
+        fileName: generatedFileName("video", "video/mp4"),
         mimeType: "video/mp4",
-      },
-    });
+        buffer,
+        metadata: {
+          source: "content-studio",
+          kind: "generated-video",
+          provider: "openai",
+          model: config.videoModel,
+          jobId,
+        },
+        // Опрос — обычный GET, и провайдер отвечает «completed» на каждый
+        // запрос. Потерянный по дороге ответ, перезагрузка страницы или второй
+        // клик без этого ключа дали бы второй объект в хранилище и вторую
+        // строку в библиотеке: два неразличимых креатива за одну генерацию.
+        idempotencyKey: jobId,
+      });
+
+      return sendJson(res, 200, {
+        success: true,
+        mode: "openai",
+        ...(stored.warning ? { warning: stored.warning } : {}),
+        data: {
+          status: "completed",
+          progress: 100,
+          creativeUrl: stored.publicUrl,
+          assetId: typeof stored.asset.id === "string" ? stored.asset.id : "",
+          fileSize: buffer.length,
+          mimeType: "video/mp4",
+        },
+      });
+    } catch (storageError) {
+      return sendJson(res, 502, {
+        success: false,
+        error: "Ролик отрендерен, но не сохранён",
+        details: [storageError instanceof Error ? storageError.message : "Хранилище не приняло файл"],
+        hint: "Рендер уже оплачен. Ссылка у провайдера живёт около часа — проверьте хранилище и повторите опрос, не запуская генерацию заново.",
+      });
+    }
   } catch (error) {
     return sendProviderFailure(res, error, "Не удалось получить готовый ролик");
   }

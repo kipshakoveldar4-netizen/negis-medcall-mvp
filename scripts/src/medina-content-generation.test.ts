@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHmac } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
@@ -50,6 +51,8 @@ type GenerationModuleShape = {
   videoFormatWasSubstituted: (format: unknown) => boolean;
   videoGenerationRefusal: (config: GenerationConfig) => GenerationRefusal | null;
   videoSizeForFormat: (format: unknown) => string;
+  looksLikeMp4: (bytes: Uint8Array) => boolean;
+  VIDEO_MAX_BYTES: number;
 };
 
 type CoreModuleShape = {
@@ -333,7 +336,8 @@ test("GEN11 незнакомый статус задачи не считаетс
 });
 
 test("GEN12 готовый ролик скачивается как видео, пустой файл — отказ", async () => {
-  const bytes = new Uint8Array([0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70]);
+  // Настоящая сигнатура MP4: размер box'а, затем "ftyp" и бренд.
+  const bytes = new Uint8Array([0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70, 0x6d, 0x70, 0x34, 0x32]);
   const ok = stubFetch(() => ({ ok: true, status: 200, bytes }));
   const buffer = await downloadVideoContent({
     fetchImpl: ok.fetchImpl,
@@ -524,10 +528,80 @@ test("GEN26 задача рендера переживает уход со ст�
     /writeStoredVideoJob\(\{[\s\S]{0,200}url: genVideo\?\.url/.test(source),
     "готовая задача хранится вместе со ссылкой, иначе возврат опросил бы её заново и записал ролик второй раз",
   );
-  assert.ok(
-    /setGenVideo\(null\);[\s\S]{0,400}writeStoredVideoJob\(null\)/.test(source),
-    "новая задача стирает прошлую, иначе после перезагрузки вернулся бы старый ролик",
+  const generateVideo = source.slice(
+    source.indexOf("const generateVideo = async"),
+    source.indexOf("Опрос состояния ролика"),
   );
+  assert.ok(generateVideo.length > 0, "обработчик генерации видео должен быть на месте");
+
+  // Новая задача обязана стереть прошлую в трёх местах сразу. Оставленный
+  // videoJob показывал бы «Ролик готов 100%» от прошлой задачи рядом с кнопкой
+  // «Отправляем задачу...» и без самого ролика; оставленная запись в хранилище
+  // вернула бы старый ролик после перезагрузки.
+  for (const reset of ["setGenVideo(null)", "setVideoJob(null)", "writeStoredVideoJob(null)"]) {
+    assert.ok(generateVideo.includes(reset), `новая задача обязана выполнить ${reset}`);
+  }
+});
+
+test("GEN28 готовый ролик проверяется по сигнатуре и по размеру", async () => {
+  const mp4 = new Uint8Array([0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70, 0x6d, 0x70, 0x34, 0x32]);
+  assert.equal(generation.looksLikeMp4(mp4), true);
+  // HTML-страница прокси вместо файла, обрезанный ответ, пустой box.
+  assert.equal(generation.looksLikeMp4(Buffer.from("<html><body>error</body>", "latin1")), false);
+  assert.equal(generation.looksLikeMp4(new Uint8Array([0x00, 0x00])), false);
+
+  // Не-MP4 не должен попасть в публичный bucket с заявленным video/mp4:
+  // Meta отклонила бы такой файл уже на запуске рекламы.
+  const notVideo = stubFetch(() => ({ ok: true, status: 200, bytes: Buffer.from("not a video at all", "latin1") }));
+  const error = await downloadVideoContent({
+    fetchImpl: notVideo.fetchImpl,
+    config: config({ videoModel: "sora-2" }),
+    jobId: "video_1",
+  }).then(() => null, (thrown: unknown) => thrown);
+  assert.ok(error instanceof GenerationProviderError);
+});
+
+test("GEN29 ключ подписи выводится из секрета, а не равен ему", () => {
+  // Служебный ключ Supabase и ключ подписи — разные значения: печать «ключа
+  // подписи» в отладке не должна раскрывать доступ ко всей базе.
+  const handle = signVideoJobHandle({ workspaceId: "ws-a", jobId: "video_abc", secret: SECRET });
+  const signature = handle.slice(handle.lastIndexOf(".") + 1);
+
+  const naive = createHmac("sha256", SECRET).update("ws-a:video_abc").digest("base64url");
+  assert.notEqual(signature, naive, "подпись не должна считаться напрямую секретом");
+
+  const derived = createHmac("sha256", createHmac("sha256", SECRET).update("negis/content-studio/video-job/v1").digest())
+    .update("ws-a:video_abc")
+    .digest("base64url");
+  assert.equal(signature, derived, "ключ выводится разделением по назначению");
+});
+
+test("GEN30 повторный опрос готовой задачи не заводит второй файл и вторую строку", async () => {
+  const source = await readFile(apiFile, "utf8");
+  const handler = source.slice(
+    source.indexOf("async function handleVideoGeneration"),
+    source.indexOf("export default async function handler"),
+  );
+
+  // Провайдер отвечает «completed» на каждый запрос: без ключа повторяемости
+  // потерянный ответ, перезагрузка или второй клик дали бы два неразличимых
+  // креатива за одну оплаченную генерацию.
+  assert.ok(/idempotencyKey:\s*jobId/.test(handler), "сохранение ролика обязано быть повторяемым по идентификатору задачи");
+
+  const server = await readFile(path.join(repoRoot, "lib", "crm", "server.ts"), "utf8");
+  const store = server.slice(
+    server.indexOf("export async function storeGeneratedCreative"),
+    server.indexOf("async function findAdCreativeByStoragePath"),
+  );
+  assert.ok(/upsert:\s*Boolean\(idempotencyKey\)/.test(store), "повторяемый вызов перезаписывает свой объект");
+  assert.ok(/findAdCreativeByStoragePath/.test(store), "и не заводит вторую строку в библиотеке");
+
+  // Объект, который не удалось опубликовать, не остаётся оплаченным мусором.
+  assert.ok(/\.remove\(\[storagePath\]\)/.test(store), "неопубликованный объект удаляется");
+
+  // Security-2F: текст Postgres и Storage наружу не идёт.
+  assert.ok(/redactedDetail\(/.test(store), "подробность отказа хранилища уходит в лог, а не оператору");
+  assert.ok(!/uploadError\.message/.test(store), "сырой текст Supabase Storage не пересказывается вызывающему");
 });
 
 test("GEN27 опрос рендера не кэшируется браузером", async () => {
