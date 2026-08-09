@@ -505,6 +505,99 @@ test("TK25 неизвестный статус в фильтре — отказ,
   assert.equal(log.filter((e) => e.table === "tasks").length, 0);
 });
 
+/* ── Панель на карточках ── */
+
+const panelPath = path.join(repoRoot, "artifacts", "negis", "src", "components", "crm", "task-panel.tsx");
+
+test("TK26 панель одна на весь продукт, а не по копии на экран", async () => {
+  // Шесть карточек метрики выросли по одной на страницу, и цена была в том,
+  // что два экрана остались со старым бренд-цветом: менять было негде.
+  const { readdir } = await import("node:fs/promises");
+  const pagesDir = path.join(repoRoot, "artifacts", "negis", "src", "pages");
+  const definitions: string[] = [];
+  for (const name of await readdir(pagesDir)) {
+    if (!name.endsWith(".tsx")) continue;
+    const source = await readFile(path.join(pagesDir, name), "utf8");
+    for (const match of source.matchAll(/^(?:export\s+)?function\s+(\w*Task\w*Panel\w*)/gm)) {
+      definitions.push(`${name} → ${match[1]}`);
+    }
+  }
+  assert.deepEqual(definitions, [], `экран, рисующий свою панель задач, перестаёт следовать общей: ${definitions.join(", ")}`);
+
+  for (const page of ["LeadsPage.tsx", "ClientsPage.tsx"]) {
+    const source = await readFile(path.join(pagesDir, page), "utf8");
+    assert.ok(source.includes('from "@/components/crm/task-panel"'), `${page} должна использовать общую панель`);
+  }
+});
+
+test("TK27 список задач сужает сервер, а не браузер", async () => {
+  const panel = await readFile(panelPath, "utf8");
+
+  assert.ok(
+    panel.includes('const filterParam = entityType === "lead" ? "leadId" : "clientId";'),
+    "вопрос «что по этой записи» задаётся серверу параметром",
+  );
+  assert.ok(
+    /crmFetch\(`\/api\/crm\/tasks\?\$\{query\}`\)/.test(panel),
+    "запрос идёт с фильтром",
+  );
+  // Фильтрация всего массива в браузере — это тот самый механизм, которым
+  // список превращается в свалку, когда PostgREST молча обрежет выдачу.
+  assert.ok(
+    !/tasks\.filter\(\(task\) => task\.(leadId|clientId)/.test(panel),
+    "и не пересеивается по связи повторно в браузере",
+  );
+});
+
+test("TK28 отказ чтения показан отказом, а не пустым списком задач", async () => {
+  const panel = await readFile(panelPath, "utf8");
+
+  assert.ok(panel.includes('setState("failed")'), "у отказа своё состояние");
+  const failed = panel.indexOf('state === "failed"');
+  const empty = panel.indexOf("Задач пока нет");
+  assert.ok(failed > 0 && empty > 0 && failed < empty, "отказ рисуется, и раньше пустого случая");
+  assert.ok(
+    panel.includes("Не удалось загрузить задачи"),
+    "запись без задач и запись, задачи которой не прочитались, обязаны выглядеть по-разному",
+  );
+  assert.ok(
+    /if \(!response\.ok \|\| body\.success !== true\)/.test(panel),
+    "crmFetch не бросает на 5xx: ответ надо проверять, а не предполагать",
+  );
+});
+
+test("TK29 создание ждёт сервер и не обещает того, чего не было", async () => {
+  const panel = await readFile(panelPath, "utf8");
+  const create = panel.slice(panel.indexOf("  const create = async ()"), panel.indexOf("  const close = async ("));
+
+  assert.ok(create.includes("if (!trimmed || saving) return;"), "повторный клик не отправляет второй POST");
+  assert.ok(create.includes("await load();"), "список перечитывается после подтверждения сервером");
+  const successAt = create.indexOf('toast.success("Задача поставлена")');
+  const guardAt = create.indexOf("if (!response.ok || body.success !== true)");
+  assert.ok(guardAt > 0 && successAt > guardAt, "успех показывается только после проверки ответа");
+  assert.ok(
+    !create.includes("сохранено локально"),
+    "локально здесь ничего не сохраняется, и обещать это нельзя",
+  );
+});
+
+test("TK30 закрытие задачи тоже проверяет ответ", async () => {
+  const panel = await readFile(panelPath, "utf8");
+  const close = panel.slice(panel.indexOf("  const close = async ("));
+  assert.ok(close.includes("if (!response.ok || body.success !== true)"), "отказ виден отказом");
+  assert.ok(close.includes("await load();"), "и состояние берётся у сервера, а не додумывается");
+});
+
+test("TK31 панель прячется у роли без права на задачи", async () => {
+  for (const page of ["LeadsPage.tsx", "ClientsPage.tsx"]) {
+    const source = await readFile(path.join(repoRoot, "artifacts", "negis", "src", "pages", page), "utf8");
+    assert.ok(
+      source.includes("isRealWorkspace() && rolePermissions.tasks ?"),
+      `${page}: кнопка, которую сервер отклонит после клика, — уже разобранный в этом репозитории сценарий`,
+    );
+  }
+});
+
 /* ── Пины исходников и миграции ── */
 
 test("TK17 ссылки задачи идут через ту же проверку клиники, что и все остальные", async () => {
@@ -523,11 +616,13 @@ test("TK17 ссылки задачи идут через ту же провер�
     "проверка формы (isUuid) не является проверкой принадлежности — этот урок уже оплачен на client_id заявки",
   );
 
-  for (const wiring of [
-    'if (resource === "tasks") {\n      Object.assign(row, await buildTaskReferenceRow(supabase, workspaceId, body));',
-    'if (resource === "tasks") {\n      Object.assign(row, await buildTaskReferenceRow(supabase, workspaceId, patchBody));',
-  ]) {
-    assert.ok(source.includes(wiring), "оба пути записи должны звать построитель");
+  // Не по отступам: пин, ломающийся от переноса строки, ловит форматирование,
+  // а не подключение. Проверяется факт вызова с каждым из двух тел.
+  for (const argument of ["workspaceId, body)", "workspaceId, patchBody)"]) {
+    assert.ok(
+      source.includes(`buildTaskReferenceRow(supabase, ${argument}`),
+      `оба пути записи должны звать построитель: ${argument}`,
+    );
   }
 });
 
