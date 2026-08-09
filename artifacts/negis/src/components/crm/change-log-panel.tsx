@@ -46,6 +46,7 @@ const ACTION_LABEL: Record<string, string> = {
   created: "Запись создана",
   updated: "Изменение",
   overbooked: "Время занято — записано поверх",
+  booked_outside_schedule: "Вне графика врача — записано поверх",
 };
 
 const ACTOR_KIND_LABEL: Record<string, string> = {

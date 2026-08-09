@@ -29,6 +29,7 @@ import { toast } from "sonner";
 import { PageLayout } from "@/components/layout/PageLayout";
 import { MetricCard } from "@/components/ui/metric-card";
 import { WhatsAppChannels } from "@/components/admin/WhatsAppChannels";
+import { DoctorSchedule } from "@/components/admin/DoctorSchedule";
 import { useAuth } from "@/contexts/AuthContext";
 import { apiUrl, crmFetch } from "@/lib/api";
 import { readWorkspaceId, workspaceScopedKey } from "@/lib/demoStorage";
@@ -55,6 +56,7 @@ type StaffInvitation = {
 type AdminTab =
   | "overview"
   | "staff"
+  | "doctors"
   | "roles"
   | "clinic"
   | "whatsapp"
@@ -164,8 +166,6 @@ type ClinicSettings = {
   phone: string;
   whatsapp: string;
   address: string;
-  workingHours: string;
-  defaultDoctors: string;
   defaultServices: string;
   brandTone: string;
   legalDisclaimer: string;
@@ -271,6 +271,7 @@ type ReleaseCheck = {
 const tabs: Array<{ id: AdminTab; label: string; icon: LucideIcon }> = [
   { id: "overview", label: "Обзор", icon: Gauge },
   { id: "staff", label: "Сотрудники", icon: Users },
+  { id: "doctors", label: "Врачи", icon: Stethoscope },
   { id: "roles", label: "Роли и доступы", icon: ShieldCheck },
   { id: "clinic", label: "Клиника", icon: Building2 },
   { id: "whatsapp", label: "WhatsApp", icon: MessageCircle },
@@ -287,8 +288,6 @@ const clinicDefaults: ClinicSettings = {
   phone: "+7 700 000 00 00",
   whatsapp: "+7 700 000 00 00",
   address: "Astana, Kazakhstan",
-  workingHours: "Пн-Сб 09:00-20:00",
-  defaultDoctors: "Косметолог, стоматолог, администратор",
   defaultServices: "Консультация, диагностика, первичный прием",
   brandTone: "Спокойный, экспертный, заботливый",
   legalDisclaimer: "Информация не является медицинской рекомендацией. Перед процедурой нужна консультация специалиста.",
@@ -1613,8 +1612,6 @@ export default function AdminCenter() {
           <Field label="phone" value={clinic.phone} onChange={(value) => update("phone", value)} />
           <Field label="whatsapp" value={clinic.whatsapp} onChange={(value) => update("whatsapp", value)} />
           <Field label="address" value={clinic.address} onChange={(value) => update("address", value)} />
-          <Field label="workingHours" value={clinic.workingHours} onChange={(value) => update("workingHours", value)} />
-          <Field label="defaultDoctors" value={clinic.defaultDoctors} onChange={(value) => update("defaultDoctors", value)} />
           <Field label="defaultServices" value={clinic.defaultServices} onChange={(value) => update("defaultServices", value)} />
           <Field label="brandTone" value={clinic.brandTone} onChange={(value) => update("brandTone", value)} />
           <Field label="timezone" value={clinic.timezone} onChange={(value) => update("timezone", value)} />
@@ -2348,6 +2345,7 @@ export default function AdminCenter() {
 
         {activeTab === "overview" && renderOverview()}
         {activeTab === "staff" && renderStaff()}
+        {activeTab === "doctors" && <DoctorSchedule />}
         {activeTab === "roles" && renderRoles()}
         {activeTab === "clinic" && renderClinic()}
         {activeTab === "whatsapp" && <WhatsAppChannels />}

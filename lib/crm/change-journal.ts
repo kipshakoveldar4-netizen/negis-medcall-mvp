@@ -57,7 +57,7 @@ type SupabaseServerClient = NonNullable<ReturnType<typeof getSupabaseServerClien
 export type ChangeActorKind = "manual" | "integration" | "automation" | "system";
 
 /** The entity kinds a clinic looks up history for. Adding one is a three-line change here. */
-export type ChangeEntityType = "lead" | "client" | "deal" | "appointment" | "task" | "service";
+export type ChangeEntityType = "lead" | "client" | "deal" | "appointment" | "task" | "service" | "doctor" | "doctor_shift";
 
 /**
  * How each column is allowed to appear in the journal.
@@ -162,6 +162,32 @@ const SERVICE_FIELDS: Record<string, FieldPolicy> = {
   description: { label: "Описание", sensitivity: "fact" },
 };
 
+/**
+ * Врач — не персональные данные пациента, поэтому значения пишутся целиком:
+ * «кто убрал врача из списка» и «кто переименовал» — ровно те вопросы, ради
+ * которых журнал заводили. sort_order опущен: перетаскивание строк — шум.
+ *
+ * Ключи — имена КОЛОНОК базы. Браузерное имя не журналируется вообще и молча.
+ */
+const DOCTOR_FIELDS: Record<string, FieldPolicy> = {
+  full_name: { label: "Имя", sensitivity: "value" },
+  specialty: { label: "Специальность", sensitivity: "value" },
+  staff_user_id: { label: "Сотрудник", sensitivity: "value" },
+  is_active: { label: "Активен", sensitivity: "value" },
+};
+
+/** График: всё значениями — «кто снял врача со среды» без значений не ответить.
+ *  Заметка свободная, поэтому «факт», по общему правилу этого файла. */
+const DOCTOR_SHIFT_FIELDS: Record<string, FieldPolicy> = {
+  weekday: { label: "День недели", sensitivity: "value" },
+  on_date: { label: "Дата", sensitivity: "value" },
+  on_date_end: { label: "Дата окончания", sensitivity: "value" },
+  is_working: { label: "Работает", sensitivity: "value" },
+  start_minute: { label: "Начало", sensitivity: "value" },
+  end_minute: { label: "Окончание", sensitivity: "value" },
+  note: { label: "Комментарий", sensitivity: "fact" },
+};
+
 const ENTITY_POLICY: Record<ChangeEntityType, {
   table: string;
   permission: CrmPermission;
@@ -173,6 +199,8 @@ const ENTITY_POLICY: Record<ChangeEntityType, {
   appointment: { table: "appointments", permission: "view_appointments", fields: APPOINTMENT_FIELDS },
   task: { table: "tasks", permission: "view_tasks", fields: TASK_FIELDS },
   service: { table: "clinic_services", permission: "view_appointments", fields: SERVICE_FIELDS },
+  doctor: { table: "clinic_doctors", permission: "view_appointments", fields: DOCTOR_FIELDS },
+  doctor_shift: { table: "clinic_doctor_shifts", permission: "view_appointments", fields: DOCTOR_SHIFT_FIELDS },
 };
 
 /** Resource name as the CRM router knows it → the entity kind the journal knows. */
@@ -183,6 +211,8 @@ const RESOURCE_ENTITY: Record<string, ChangeEntityType> = {
   appointments: "appointment",
   tasks: "task",
   "clinic-services": "service",
+  "clinic-doctors": "doctor",
+  "doctor-schedule": "doctor_shift",
 };
 
 export function journaledEntityFor(resource: string): ChangeEntityType | null {
@@ -307,7 +337,7 @@ type RecordChangeInput = {
   workspaceId: string;
   entity: ChangeEntityType;
   entityId: string;
-  action: "created" | "updated" | "overbooked";
+  action: "created" | "updated" | "overbooked" | "booked_outside_schedule";
   changes: ChangeEntry[];
   actorName: string;
   actorRole: string;
