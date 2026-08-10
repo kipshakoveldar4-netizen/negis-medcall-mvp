@@ -85,7 +85,16 @@ export default function MarketplacePage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          provider: app.provider || app.id,
+          // Ключ заявки отдельный, а не provider приложения.
+          //
+          // POST этого ресурса — upsert по паре (workspace_id, provider), и он
+          // перезаписывает строку целиком: masked_identifier и last_error
+          // обнуляются. Сегодня заявку можно оставить только у приложений без
+          // provider, поэтому затирать нечего, — но стоит однажды дописать
+          // provider «планируемому» приложению, и заявка сотрёт настоящее
+          // состояние подключения. Заявка и подключение — разные вещи, и
+          // жить им в разных строках.
+          provider: `request:${app.id}`,
           status: "requested",
           metadata: { app: app.id, title: app.title },
         }),

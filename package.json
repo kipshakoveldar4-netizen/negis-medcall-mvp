@@ -47,6 +47,7 @@
     "test:meta-compliance": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:meta-compliance",
     "test:ad-text-improve": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:ad-text-improve",
     "test:platform-owner": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:platform-owner",
+    "test:active-launch-gate": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:active-launch-gate",
     "seed:clinic": "node scripts/run-pnpm.cjs --filter @workspace/scripts run seed:clinic"
   },
   "dependencies": {

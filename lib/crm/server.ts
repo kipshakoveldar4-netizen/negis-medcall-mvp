@@ -6254,13 +6254,23 @@ function safeMetaLaunchError(error: unknown): JsonRecord {
   };
 }
 
-async function readMetaLiveLaunchEnabled(workspaceId: string, body: JsonRecord): Promise<boolean> {
-  const requested = readBoolean(body.liveLaunchEnabled);
+/**
+ * Включён ли живой запуск рекламы в этом рабочем пространстве.
+ *
+ * Отвечает ТОЛЬКО сохранённая настройка. Тело запроса здесь не читается вовсе:
+ * раньше при отсутствии строки настройки и при любой ошибке чтения функция
+ * возвращала `readBoolean(body.liveLaunchEnabled)` — то есть разрешение на
+ * живую кампанию давал тот же, кто её запускал. Клиника, ни разу не трогавшая
+ * переключатель в админ-центре, строки не имеет по определению, поэтому
+ * «замок» был открыт у всех новых клиник сразу.
+ *
+ * Умолчание — отказ, и отказ же при сбое чтения. Не смогли прочитать
+ * настройку — значит не знаем, разрешено ли; «не знаю» для живой рекламы за
+ * чужие деньги означает «нет».
+ */
+async function readMetaLiveLaunchEnabled(workspaceId: string): Promise<boolean> {
   const supabase = getSupabaseServerClient();
-
-  if (!supabase || !isUuid(workspaceId)) {
-    return requested;
-  }
+  if (!supabase || !isUuid(workspaceId)) return false;
 
   try {
     const { data, error } = await supabase
@@ -6279,7 +6289,7 @@ async function readMetaLiveLaunchEnabled(workspaceId: string, body: JsonRecord):
     console.warn(supabaseWarning("workspace_settings meta_live_launch_enabled", error));
   }
 
-  return requested;
+  return false;
 }
 
 function buildMetaLaunchBody(body: JsonRecord) {
@@ -6701,7 +6711,23 @@ export async function handleMetaLaunch(req: VercelRequest, res: VercelResponse) 
   const workspaceId = readWorkspaceId(req, body);
   const launch = buildMetaLaunchBody(body);
   const actorName = firstString(body.launchedBy, body.actorName, body.userName);
-  const actorRole = firstString(body.launchedByRole, body.actorRole, "owner");
+
+  // Роль решает три вещи: включать ли живую кампанию, снимать ли потолок
+  // дневного бюджета и снимать ли потолок общего. Брать её из тела запроса
+  // нельзя ни при каких условиях.
+  //
+  // Здесь стояло `firstString(body.launchedByRole, body.actorRole, "owner")` —
+  // то есть роль называл сам вызывающий, а умолчанием был владелец. Маршрут
+  // требует право manage_marketing, и оно есть у маркетолога, который ни
+  // владельцем, ни администратором не является. Один POST с собственным
+  // настоящим токеном и `"launchedByRole": "owner"` в теле снимал оба потолка
+  // бюджета и запускал ACTIVE-кампанию за деньги клиники, а в журнал попадала
+  // роль «owner» — та, что назвал отправитель.
+  //
+  // Проверенная роль лежит в контексте, который поставил маршрутизатор, и
+  // подделать её нельзя: она выведена из членства в staff_users по проверенному
+  // токену. Нет контекста — нет и роли: пустая строка не проходит ни один гейт.
+  const actorRole = readWorkspaceContext(req)?.role || "";
   const dryRun = readBoolean(body.dryRun);
   const details: string[] = [];
 
@@ -6739,7 +6765,7 @@ export async function handleMetaLaunch(req: VercelRequest, res: VercelResponse) 
     details.push(`Общий бюджет больше ${META_MAX_TOTAL_BUDGET} ${launch.currency}; нужен owner/admin override.`);
   }
 
-  const liveLaunchEnabled = await readMetaLiveLaunchEnabled(workspaceId, body);
+  const liveLaunchEnabled = await readMetaLiveLaunchEnabled(workspaceId);
   if (launch.statusMode === "ACTIVE") {
     if (!liveLaunchEnabled) details.push("ACTIVE запуск выключен в Admin Center.");
     if (!roleCanLaunchActive(actorRole)) details.push("ACTIVE запуск доступен только owner/admin.");
