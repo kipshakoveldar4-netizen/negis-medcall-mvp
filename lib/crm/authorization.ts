@@ -14,7 +14,19 @@ export type RouteKind =
   /** Verified JWT only; runs before a workspace has been selected. */
   | "bootstrap"
   /** Worker-to-server route protected by the existing HMAC contract. */
-  | "internal_hmac";
+  | "internal_hmac"
+  /**
+   * Панель владельца ПЛАТФОРМЫ: читает поперёк арендаторов.
+   *
+   * Отдельный вид, а не роль и не право. Роли живут в staff_users, и назначает
+   * их владелец клиники — значит роль «владелец платформы» он назначит себе.
+   * Здесь пропуск даёт только список идентификаторов в переменной окружения,
+   * править который может лишь тот, у кого есть доступ к развёртыванию.
+   *
+   * Эта ветка НЕ строит контекст рабочего пространства: у запроса его нет по
+   * определению, и подставлять сюда чей-то workspaceId нельзя.
+   */
+  | "platform";
 
 export type RouteAuthorization = {
   kind: RouteKind;
@@ -150,6 +162,15 @@ export const CRM_RESOURCE_AUTHORIZATION: Readonly<Record<string, RouteAuthorizat
 export const CRM_ROUTE_AUTHORIZATION: Readonly<Record<string, RouteAuthorization>> = {
   // Identity bootstrap: any authenticated user, before a workspace is chosen.
   "auth-context": { kind: "bootstrap", methods: ["GET"] },
+
+  // Панель владельца платформы: единственный маршрут, читающий поперёк клиник.
+  //
+  // Ни roles, ни permissions здесь нет намеренно — и то и другое разрешается из
+  // членства в одном рабочем пространстве, а у этого запроса рабочего
+  // пространства нет. Пропуск даёт список идентификаторов в переменной
+  // окружения (см. lib/auth/platform.ts). Список пуст — маршрут отвечает 404.
+  "platform-overview": { kind: "platform", methods: ["GET"] },
+  "platform-subscriptions": { kind: "platform", methods: ["GET", "POST", "PATCH"] },
 
   // Diagnostics were previously unauthenticated and enumerated which secrets are
   // configured. They are now administrator-only and the payload is coarse.

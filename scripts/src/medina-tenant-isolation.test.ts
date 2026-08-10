@@ -378,10 +378,31 @@ test("C6 every registered route is classified and no route is public", async () 
     ...registry.CRM_ROUTE_AUTHORIZATION,
     ...registry.CRM_SUBROUTE_AUTHORIZATION,
   };
-  const kinds = new Set(["browser", "bootstrap", "internal_hmac"]);
+  // "platform" — панель владельца платформы: единственный вид, читающий
+  // поперёк арендаторов. Он допущен сюда сознательно и с условиями ниже, а не
+  // потому, что набор не заметил нового значения.
+  const kinds = new Set(["browser", "bootstrap", "internal_hmac", "platform"]);
   for (const [key, entry] of Object.entries(all)) {
     assert.ok(kinds.has(entry.kind), `${key} has an unclassified kind`);
     assert.ok(entry.methods.length > 0, `${key} must declare its methods`);
+  }
+
+  // Роли и права разрешаются из членства в ОДНОМ рабочем пространстве, а у
+  // запроса платформы рабочего пространства нет. Указать их здесь значило бы
+  // объявить проверку, которой не существует.
+  const platformRoutes = Object.entries(all).filter(([, entry]) => entry.kind === "platform");
+  assert.ok(platformRoutes.length > 0, "платформенный вид объявлен — значит хотя бы один маршрут его использует");
+  for (const [key, entry] of platformRoutes) {
+    const declared = entry as { roles?: unknown; permissions?: unknown };
+    assert.ok(!declared.roles, `${key}: роль клиники не решает доступ к панели платформы`);
+    assert.ok(!declared.permissions, `${key}: право клиники не решает доступ к панели платформы`);
+    assert.ok(key.startsWith("platform-"), `${key}: платформенные маршруты называются с префиксом platform-`);
+  }
+
+  // Ни один ресурс общего вида не имеет права быть платформенным: они ходят
+  // через readWorkspaceId и обязаны иметь арендатора.
+  for (const [key, entry] of Object.entries(registry.CRM_RESOURCE_AUTHORIZATION)) {
+    assert.notEqual(entry.kind, "platform", `${key}: обычный ресурс не может читать поперёк клиник`);
   }
   assert.equal(Object.keys(registry.CRM_RESOURCE_AUTHORIZATION).length, 21, "all 21 generic resources registered");
 });

@@ -45,7 +45,9 @@
     "test:doctor-schedule": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:doctor-schedule",
     "test:clinic-day": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:clinic-day",
     "test:meta-compliance": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:meta-compliance",
-    "test:ad-text-improve": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:ad-text-improve"
+    "test:ad-text-improve": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:ad-text-improve",
+    "test:platform-owner": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:platform-owner",
+    "seed:clinic": "node scripts/run-pnpm.cjs --filter @workspace/scripts run seed:clinic"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.105.4",

@@ -41,7 +41,9 @@
     "test:doctor-schedule": "tsx --test ./src/medina-doctor-schedule.test.ts",
     "test:clinic-day": "tsx --test ./src/medina-clinic-day.test.ts",
     "test:meta-compliance": "tsx --test ./src/medina-meta-compliance.test.ts",
-    "test:ad-text-improve": "tsx --test ./src/medina-ad-text-improve.test.ts"
+    "test:ad-text-improve": "tsx --test ./src/medina-ad-text-improve.test.ts",
+    "test:platform-owner": "tsx --test ./src/medina-platform-owner.test.ts",
+    "seed:clinic": "tsx ./src/seed-clinic.ts"
   },
   "devDependencies": {
     "@types/node": "catalog:",

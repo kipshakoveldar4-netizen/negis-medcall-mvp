@@ -5644,8 +5644,25 @@ export async function handleVideoJobs(req: VercelRequest, res: VercelResponse) {
       if (data) {
         return sendJson(res, 200, success("supabase", { job: makeVideoJob(asRecord(data)) }));
       }
-      const { data: current, error: currentError } = await supabase.from("video_processing_jobs").select("*").eq("id", jobId).single();
+      // Тот же фильтр арендатора, что и у обновления выше, и по той же причине.
+      //
+      // Здесь его не было. Обновление промахивалось по двум причинам — задача
+      // уже не в awaiting_upload ЛИБО задача чужая, — и обе приводили сюда, где
+      // строка перечитывалась по одному id. Ответ уезжал спрашивавшему целиком:
+      // чужой workspaceId и публичные ссылки на чужой ролик. Комментарий двадцатью
+      // строками выше объясняет, почему фильтр не факультативен, а следующий же
+      // запрос его терял.
+      //
+      // maybeSingle, а не single: промах теперь означает «нет такой задачи у этой
+      // клиники» и обязан стать 404, а не ошибкой PostgREST в теле ответа.
+      const { data: current, error: currentError } = await supabase
+        .from("video_processing_jobs")
+        .select("*")
+        .eq("id", jobId)
+        .eq("workspace_id", workspaceId)
+        .maybeSingle();
       if (currentError) throw new Error(currentError.message);
+      if (!current) throw new Error("job not found in this workspace");
       return sendJson(
         res,
         200,
