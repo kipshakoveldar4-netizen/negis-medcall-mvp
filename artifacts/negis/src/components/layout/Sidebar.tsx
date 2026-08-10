@@ -110,7 +110,7 @@ export function Sidebar() {
           <div className="min-w-0">
             <p className="truncate text-sm font-semibold" style={{ color: 'var(--negis-dark-text)' }}>Medina OS</p>
             <p className="mt-0.5 truncate text-[11px] font-medium" style={{ color: 'var(--negis-dark-muted)' }}>
-              {isDemoMode ? 'Демо-режим' : 'Медицинская CRM'}
+              {isDemoMode ? 'Пробный доступ' : 'Медицинская CRM'}
             </p>
           </div>
         </div>

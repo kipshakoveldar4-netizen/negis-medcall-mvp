@@ -1295,7 +1295,7 @@ export function AppointmentsPage() {
       <div className="space-y-7">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
           <div className="min-w-0">
-            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-[#64748B]">Demo CRM</p>
+            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-[#64748B]">Medina CRM</p>
             <h1 className="mt-2 break-words text-2xl font-black text-[#0F172A] sm:text-3xl">Запись</h1>
             <p className="mt-2 max-w-3xl text-sm leading-relaxed text-[#64748B]">
               Календарь приёмов, статусы визитов и быстрые действия ресепшена

@@ -39,7 +39,8 @@ const SalesPage = lazy(() => import("@/pages/SalesPage"));
 const ServicesPage = lazy(() => import("@/pages/ServicesPage"));
 const DemoCalls = lazy(() => import("@/pages/DemoCrmModules").then(m => ({ default: m.DemoCalls })));
 const DemoChat = lazy(() => import("@/pages/DemoCrmModules").then(m => ({ default: m.DemoChat })));
-const DemoMarket = lazy(() => import("@/pages/DemoCrmModules").then(m => ({ default: m.DemoMarket })));
+const MarketplacePage = lazy(() => import("@/pages/MarketplacePage"));
+const PlatformOwnerPage = lazy(() => import("@/pages/PlatformOwnerPage"));
 const DemoReception = lazy(() => import("@/pages/DemoCrmModules").then(m => ({ default: m.DemoReception })));
 const DemoReports = lazy(() => import("@/pages/DemoCrmModules").then(m => ({ default: m.DemoReports })));
 const DemoTasks = lazy(() => import("@/pages/DemoCrmModules").then(m => ({ default: m.DemoTasks })));
@@ -214,7 +215,7 @@ function ProtectedPage({
  * to unmount anyway.
  */
 const AppointmentsRoute = () => <ProtectedPage component={AppointmentsPage} permission="booking" />;
-const MarketRoute = () => <ProtectedPage component={DemoMarket} permission="marketplace" />;
+const MarketRoute = () => <ProtectedPage component={MarketplacePage} permission="marketplace" />;
 const AdsAutomationRoute = () => <ProtectedPage component={AdsAutomation} permission="ads" />;
 const ContentStudioRoute = () => <ProtectedPage component={ContentStudio} permission="ads" />;
 
@@ -240,6 +241,14 @@ function Router() {
       <Route path="/tasks" component={() => <ProtectedPage component={DemoTasks} permission="tasks" />} />
       <Route path="/chat" component={() => <ProtectedPage component={DemoChat} permission="chat" />} />
       <Route path="/marketplace" component={MarketRoute} />
+      {/*
+        Панель платформы намеренно НЕ обёрнута в ProtectedPage: тот решает
+        доступ по роли в клинике, а роль в клинике к платформе отношения не
+        имеет. Единственный настоящий гейт стоит на сервере — список
+        идентификаторов в переменной окружения. Экран показывает «страницы нет»,
+        когда сервер отвечает 404, и это и есть отказ.
+      */}
+      <Route path="/platform" component={PlatformOwnerPage} />
       <Route path="/market" component={MarketRoute} />
       <Route path="/admin" component={() => <ProtectedPage component={AdminCenter} permission="admin" />} />
       <Route path="/ads-automation/history" component={AdsAutomationRoute} />

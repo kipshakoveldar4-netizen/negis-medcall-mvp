@@ -159,9 +159,14 @@ test("16 the Meta Pixel stays disabled without a supported configuration source"
   assert.ok(fbPixel.includes("return null"));
 });
 
-test("17 demo mode remains explicitly labelled", () => {
-  assert.ok(sidebar.includes("Демо-режим"));
-  assert.ok(dashboard.includes("Демо-режим"));
+test("17 режим без базы по-прежнему подписан, просто другим словом", () => {
+  // Важна подпись, а не слово. Оператор обязан видеть, что работает
+  // без базы клиники; без этого он примет локальные записи за общие.
+  assert.ok(sidebar.includes("Пробный доступ"), "боковое меню называет режим");
+  assert.ok(dashboard.includes("Пробный доступ"), "и сводка тоже");
+  for (const [name, source] of [["sidebar", sidebar], ["dashboard", dashboard]] as const) {
+    assert.ok(!/"Демо-режим"|>\s*Демо-режим\s*</.test(source), `${name}: слова «демо» на платформе нет`);
+  }
 });
 
 test("18 /agent and /register fall through to the intentional not-found route", () => {

@@ -364,7 +364,7 @@ function PageHeader({ title, subtitle, action }: { title: string; subtitle: stri
   return (
     <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
       <div className="min-w-0">
-        <p className="text-xs font-semibold uppercase tracking-[0.18em] text-[#64748B]">Demo CRM</p>
+        <p className="text-xs font-semibold uppercase tracking-[0.18em] text-[#64748B]">Medina CRM</p>
         <h1 className="mt-2 break-words text-2xl font-black text-[#0F172A] sm:text-3xl">{title}</h1>
         <p className="mt-2 max-w-3xl text-sm leading-relaxed text-[#64748B]">{subtitle}</p>
       </div>
@@ -1200,7 +1200,7 @@ export function DemoAdmin() {
 
     // Security-2B: demo mode is local-only. It must never call the production
     // CRM API, and generic staff creation is disabled server-side anyway.
-    toast.success("Сотрудник добавлен в демо-данные");
+    toast.success("Сотрудник добавлен");
 
     setStaffForm({
       name: "",

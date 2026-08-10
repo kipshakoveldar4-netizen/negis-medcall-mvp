@@ -211,7 +211,7 @@ export default function Onboarding() {
     <PageLayout>
       <div className="mx-auto max-w-3xl space-y-6 px-4 py-6 sm:px-6">
         <PageHeader
-          kicker={isDemoMode ? "Medina OS · Демо-режим" : "Medina OS"}
+          kicker={isDemoMode ? "Medina OS · Пробный доступ" : "Medina OS"}
           title="Настроим Medina OS для вашей клиники"
           description="Проверьте данные клиники, добавьте сотрудников и создайте первую рабочую запись."
         />

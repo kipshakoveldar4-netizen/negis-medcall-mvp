@@ -61,14 +61,14 @@ function DemoDashboard() {
     { href: '/leads', label: 'Лиды', value: '24 активных лида', icon: Users },
     { href: '/calls', label: 'Звонки', value: '18 звонков в очереди', icon: PhoneCall },
     { href: '/appointments', label: 'Записи', value: '7 запланированных визитов', icon: CalendarCheck },
-    { href: '/reports', label: 'Отчёты', value: 'Демо-отчёт кампании', icon: BarChart3 },
+    { href: '/reports', label: 'Отчёты', value: 'Отчёт по кампании', icon: BarChart3 },
   ];
 
   return (
     <PageLayout>
       <div className="space-y-6">
         <PageHeader
-          kicker="Демо-режим"
+          kicker="Пробный доступ"
           title="Medina OS"
           description={`${clinicId || 'demo-workspace'} · данные сохранены локально, подключение Supabase будет в production-версии.`}
         />

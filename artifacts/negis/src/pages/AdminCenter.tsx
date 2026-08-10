@@ -2287,7 +2287,7 @@ export default function AdminCenter() {
           <section className="neu-card" aria-label="Тариф и подключение">
             <p className="text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">Тариф и подключение</p>
             <h2 className="mt-1 text-base font-black text-[#0F172A]">
-              {workspaceId === "demo-workspace" ? "Демо-режим" : "Пилотное подключение"}
+              {workspaceId === "demo-workspace" ? "Пробный доступ" : "Пилотное подключение"}
             </h2>
             <p className="mt-1 text-sm text-[#64748B]">
               Автоматическая оплата пока не подключена. Условия пилота и тариф согласуются с менеджером Medina OS.
