@@ -10,10 +10,13 @@ import path from "node:path";
 //
 // Что здесь сделано осознанно, а не по недосмотру:
 //
-// ТЕЛЕФОНЫ. Только шаблон +7 700 000 00 NN. Правдоподобный казахстанский номер
-// в медицинской CRM — это чужой человек, которому позвонят или напишут с
-// предпоказа от имени клиники. Репозиторий уже применяет этот шаблон к
-// сотрудникам, и он единственный, про который видно, что он вымышлен.
+// ТЕЛЕФОНЫ. Только шаблон +7 700 000 XX XX, и у каждой сущности свой диапазон.
+// Правдоподобный казахстанский номер в медицинской CRM — это чужой человек,
+// которому позвонят или напишут с предпоказа от имени клиники.
+//
+// ВЫХОДНЫЕ. Записи не ставятся в дни, которые этот же скрипт объявил
+// нерабочими: экран печатает врачу «Вс: выходной» и тут же под этой строкой
+// показывает его визиты, а любой их перенос упирается в отказ сервера.
 //
 // ЗАМЕТКИ. Только административные: «просит напомнить за час», «первичный
 // визит». Ни диагнозов, ни жалоб, ни назначений. Выдуманная клиническая деталь
@@ -62,9 +65,19 @@ function arg(name: string): string {
 
 const CONFIRM = "СОЗДАТЬ-НОВУЮ-КЛИНИКУ";
 
-/** Телефон, про который видно, что он вымышлен. */
-function phone(index: number): string {
-  return `+7 700 000 00 ${String(index % 100).padStart(2, "0")}`;
+/**
+ * Телефон, про который видно, что он вымышлен.
+ *
+ * Номер собирается из четырёх цифр, а не из двух, и каждая сущность получает
+ * свой диапазон. Двух цифр не хватало: 42 клиента и 58 заявок заворачивались по
+ * модулю сотни, и восемь заявок получали номер чужого пациента. На предпоказе
+ * это значит, что «Создать клиента» из такой заявки молча привязывает её к
+ * карточке другого человека и показывает зелёный тост об успехе.
+ */
+function phone(range: "staff" | "client" | "lead", index: number): string {
+  const base = { staff: 0, client: 1000, lead: 5000 }[range] + index;
+  const digits = String(base).padStart(4, "0");
+  return `+7 700 000 ${digits.slice(0, 2)} ${digits.slice(2)}`;
 }
 
 /** Часовой пояс задаёт владелец: придумывать его нельзя. */
@@ -127,16 +140,46 @@ function clinicDayStart(offsetDays: number): Date {
   return base;
 }
 
+/**
+ * Смещение пояса клиники относительно UTC в заданное мгновение.
+ *
+ * Через formatToParts, а не через toLocaleString: прежний вариант сравнивал
+ * дату, разобранную в поясе МАШИНЫ, с исходной, поэтому у владельца, чей
+ * ноутбук стоит в поясе клиники, смещение выходило нулевым — и все записи
+ * уезжали на пять часов. Ошибка обратная той, ради которой всё это писалось:
+ * скрипт, наполняющий базу для проверки суток клиники, сам считал по машине.
+ */
+function zoneOffsetMinutes(instantMs: number): number {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    hour12: false,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).formatToParts(new Date(instantMs));
+  const pick = (type: string) => Number(parts.find((part) => part.type === type)?.value || "0");
+  const asUtc = Date.UTC(pick("year"), pick("month") - 1, pick("day"), pick("hour") % 24, pick("minute"), pick("second"));
+  return Math.round((asUtc - instantMs) / 60000);
+}
+
 /** Мгновение для записи: день клиники плюс часы и минуты по её же часам. */
 function at(offsetDays: number, hour: number, minute: number): string {
   const day = clinicDayStart(offsetDays);
-  // Смещение пояса вычисляется через ту же дату, а не константой: в стране
-  // может быть переход на летнее время, и константа тогда врёт полгода.
-  const probe = new Date(Date.UTC(day.getUTCFullYear(), day.getUTCMonth(), day.getUTCDate(), 12, 0, 0));
-  const local = new Date(probe.toLocaleString("en-US", { timeZone }));
-  const offsetMinutes = Math.round((local.getTime() - probe.getTime()) / 60000);
-  const utc = Date.UTC(day.getUTCFullYear(), day.getUTCMonth(), day.getUTCDate(), hour, minute, 0);
-  return new Date(utc - offsetMinutes * 60000).toISOString();
+  const guess = Date.UTC(day.getUTCFullYear(), day.getUTCMonth(), day.getUTCDate(), hour, minute, 0);
+  // Два прохода: первый даёт смещение около нужного мгновения, второй
+  // поправляет его в сутках, где происходит переход на летнее время.
+  const first = guess - zoneOffsetMinutes(guess) * 60000;
+  return new Date(guess - zoneOffsetMinutes(first) * 60000).toISOString();
+}
+
+/** День недели в поясе клиники: 1 — понедельник, 7 — воскресенье. */
+function clinicWeekday(offsetDays: number): number {
+  const day = clinicDayStart(offsetDays);
+  const weekday = new Date(Date.UTC(day.getUTCFullYear(), day.getUTCMonth(), day.getUTCDate())).getUTCDay();
+  return weekday === 0 ? 7 : weekday;
 }
 
 async function insert<T>(table: string, rows: T[], label: string): Promise<Array<Record<string, unknown>>> {
@@ -169,9 +212,9 @@ async function main() {
   const staff = await insert(
     "staff_users",
     [
-      { workspace_id: workspaceId, email: ownerEmail, full_name: "Владелец клиники", role: "owner", status: "active", auth_user_id: ownerAuthId, phone: phone(1) },
-      { workspace_id: workspaceId, email: `reception@${ownerEmail.split("@")[1]}`, full_name: "Асель Ким", role: "receptionist", status: "active", phone: phone(2) },
-      { workspace_id: workspaceId, email: `marketing@${ownerEmail.split("@")[1]}`, full_name: "Тимур Ли", role: "marketer", status: "active", phone: phone(3) },
+      { workspace_id: workspaceId, email: ownerEmail, full_name: "Владелец клиники", role: "owner", status: "active", auth_user_id: ownerAuthId, phone: phone("staff", 1) },
+      { workspace_id: workspaceId, email: `reception@${ownerEmail.split("@")[1]}`, full_name: "Асель Ким", role: "receptionist", status: "active", phone: phone("staff", 2) },
+      { workspace_id: workspaceId, email: `marketing@${ownerEmail.split("@")[1]}`, full_name: "Тимур Ли", role: "marketer", status: "active", phone: phone("staff", 3) },
     ],
     "сотрудники",
   );
@@ -228,8 +271,8 @@ async function main() {
     Array.from({ length: 42 }, (_, index) => ({
       workspace_id: workspaceId,
       full_name: `${pick(firstNames, index)} ${pick(lastNames, index * 3 + 1)}`,
-      phone: phone(index + 10),
-      whatsapp: phone(index + 10),
+      phone: phone("client", index),
+      whatsapp: phone("client", index),
       source: pick(sources, index),
       status: pick(["new", "active", "repeat", "active"], index),
       notes: pick(["Просит напомнить за час", "Удобно после 18:00", "", "Приходит с подругой"], index),
@@ -240,19 +283,25 @@ async function main() {
 
   await insert(
     "leads",
-    Array.from({ length: 58 }, (_, index) => ({
-      workspace_id: workspaceId,
-      full_name: `${pick(firstNames, index * 2)} ${pick(lastNames, index)}`,
-      phone: phone(index + 60),
-      source: pick(sources, index * 2),
-      campaign: index % 4 === 0 ? "Instagram, август" : null,
-      status: pick(["new", "new", "in_progress", "in_progress", "booked", "lost"], index),
-      notes: pick(["Спрашивает про свободное время", "", "Просит перезвонить вечером"], index),
-      // Связь с клиентом — только у тех, кто дошёл до визита, и только на
-      // клиента ЭТОГО же пространства.
-      client_id: index % 6 === 4 ? clients[index % clients.length].id : null,
-      responsible_user_id: pick([owner.id, reception.id], index),
-    })),
+    Array.from({ length: 58 }, (_, index) => {
+      // Заявка, дошедшая до пациента, — это ТОТ ЖЕ человек: имя и телефон
+      // берутся у клиента, на которого она ссылается. Прежняя версия ставила
+      // client_id независимо от имени, и заявка «Асем Абенова» указывала на
+      // карточку «Гульнары Мухамед»: задача, поставленная из такой заявки,
+      // уходила в историю не того пациента.
+      const linked = index % 6 === 4 ? clients[index % clients.length] : null;
+      return {
+        workspace_id: workspaceId,
+        full_name: linked ? String(linked.full_name) : `${pick(firstNames, index * 2)} ${pick(lastNames, index)}`,
+        phone: linked ? String(linked.phone) : phone("lead", index),
+        source: pick(sources, index * 2),
+        campaign: index % 4 === 0 ? "Instagram, август" : null,
+        status: linked ? "booked" : pick(["new", "new", "in_progress", "in_progress", "lost"], index),
+        notes: pick(["Спрашивает про свободное время", "", "Просит перезвонить вечером"], index),
+        client_id: linked ? linked.id : null,
+        responsible_user_id: pick([owner.id, reception.id], index),
+      };
+    }),
     "заявки",
   );
 
@@ -260,14 +309,21 @@ async function main() {
   const appointments: Array<Record<string, unknown>> = [];
   let slot = 0;
   for (let day = -7; day <= 7; day += 1) {
-    const perDay = day === 0 ? 6 : 4;
+    // Воскресенье в графике выше объявлено выходным для всех врачей. Запись в
+    // выходной — не «полнее выглядит», а противоречие, которое экран показывает
+    // прямо: под строкой «Вс: выходной» стоят визиты.
+    if (clinicWeekday(day) === 7) continue;
+
+    const perDay = day === 0 ? 9 : 6;
     for (let n = 0; n < perDay; n += 1) {
       const doctor = doctors[n % doctors.length];
       const service = pick(services, slot);
       const client = pick(clients, slot);
       // Час зависит от номера приёма у ЭТОГО врача в этот день, поэтому два
-      // приёма одного врача никогда не попадают в один слот.
-      const hour = 9 + Math.floor(n / doctors.length) * 2;
+      // приёма одного врача никогда не попадают в один слот. Шаг в три часа
+      // разносит визиты по смене: прежние два часа держали всю клинику в 09:00
+      // и 11:00, а девять часов смены оставались пустыми.
+      const hour = 9 + Math.floor(n / doctors.length) * 3;
       appointments.push({
         workspace_id: workspaceId,
         client_id: client.id,
@@ -294,8 +350,13 @@ async function main() {
     .filter((appointment) => appointment.status === "arrived" || appointment.status === "confirmed")
     .map((appointment, index) => {
       const service = services.find((item) => item.id === appointment.service_id) || services[0];
-      const paid = index % 3 !== 2;
-      const today = index % 5 === 0;
+      // Оплата не может быть датирована будущим. Прежняя версия ставила
+      // paid_at равным времени записи, включая записи на неделю вперёд, и
+      // четверть суммы на экране продаж оказывалась платежами из будущего.
+      const startsAt = String(appointment.starts_at);
+      const inFuture = Date.parse(startsAt) > Date.now();
+      const paid = index % 3 !== 2 && !inFuture;
+      const today = paid && index % 5 === 0;
       return {
         workspace_id: workspaceId,
         title: String(service.name),
@@ -305,7 +366,7 @@ async function main() {
         service_id: service.id,
         client_id: appointment.client_id,
         appointment_id: appointment.id,
-        paid_at: paid ? (today ? at(0, 13, 0) : String(appointment.starts_at)) : null,
+        paid_at: paid ? (today ? at(0, 13, 0) : startsAt) : null,
       };
     });
   await insert("deals", deals, "продажи");

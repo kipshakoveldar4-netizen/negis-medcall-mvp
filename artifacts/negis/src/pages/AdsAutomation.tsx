@@ -2458,7 +2458,7 @@ export default function AdsAutomation() {
     setImproved(null);
       setLaunchTimestamp("");
       goToStep(5, { skipGuard: true });
-      toast.success(body.data.generatedBy === "openai" ? "ИИ заполнил рекламу" : "Demo-пакет готов");
+      toast.success(body.data.generatedBy === "openai" ? "ИИ заполнил рекламу" : "Образец пакета готов");
       if (body.warning) setNotice(body.warning);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Не удалось подготовить рекламу.";
@@ -3451,7 +3451,7 @@ export default function AdsAutomation() {
 
         {!analysisFeature.enabled ? (
           <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-amber-800">
-            Расширенный анализ отмечен как Standard+. В MVP owner может продолжить в demo-режиме.
+            Расширенный анализ отмечен как Standard+. Владелец может продолжить без него.
           </div>
         ) : null}
 

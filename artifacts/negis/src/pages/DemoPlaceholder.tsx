@@ -19,7 +19,7 @@ export default function DemoPlaceholder({ title }: DemoPlaceholderProps) {
           </p>
           <h1 className="mt-3 text-2xl font-bold text-[#0F172A]">Раздел в разработке</h1>
           <p className="mt-3 text-sm leading-relaxed text-[#64748B]">
-            Этот модуль будет подключен в следующей версии. Сейчас demo-режим сохраняет данные локально и
+            Этот модуль будет подключен в следующей версии. Пока клиника не выбрана, данные хранятся локально и
             оставляет CRM-навигацию доступной без пустых экранов.
           </p>
           <Link href="/dashboard">

@@ -728,7 +728,7 @@ export default function ContentStudio() {
         cta: body.data.cta || current.cta,
       }));
       setPhotoSuggestMode(body.mode);
-      toast.success(body.mode === "demo" ? "Demo-тексты готовы" : "Тексты готовы");
+      toast.success(body.mode === "demo" ? "Образец текстов готов" : "Тексты готовы");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Ошибка генерации текстов");
     } finally {
@@ -1195,7 +1195,7 @@ export default function ContentStudio() {
       // Заполняем только пустое поле: перезаписать текст, который оператор уже
       // правил руками, — худшее, что здесь можно сделать.
       setGenPrompt((current) => (current.trim() ? current : body.data.photoPrompt));
-      toast.success(body.mode === "demo" ? "Demo-пакет контента готов" : "Пакет контента готов");
+      toast.success(body.mode === "demo" ? "Образец пакета готов" : "Пакет контента готов");
 
       // Persist the package: content_videos stores the whole body in raw_payload.
       try {
@@ -1453,7 +1453,7 @@ export default function ContentStudio() {
         saveVideos([video, ...videos], video.id);
       }
 
-      toast.success(body.mode === "demo" ? "Demo-сценарий готов" : "Сценарий готов");
+      toast.success(body.mode === "demo" ? "Образец сценария готов" : "Сценарий готов");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Ошибка генерации сценария");
     } finally {

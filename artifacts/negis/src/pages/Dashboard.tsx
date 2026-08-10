@@ -70,7 +70,7 @@ function DemoDashboard() {
         <PageHeader
           kicker="Пробный доступ"
           title="Medina OS"
-          description={`${clinicId || 'demo-workspace'} · данные сохранены локально, подключение Supabase будет в production-версии.`}
+          description={`${clinicId || 'клиника не выбрана'} · данные сохранены локально и не видны коллегам.`}
         />
 
         <Link href="/ai-control-center">

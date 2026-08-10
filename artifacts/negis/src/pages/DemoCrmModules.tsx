@@ -473,7 +473,7 @@ export function DemoClients() {
       source: "Ресепшн",
       lastVisit: "Новая заявка",
       status: "Новый",
-      comment: "Добавлен в demo CRM",
+      comment: "Добавлен в CRM",
     });
     toast.success("Клиент добавлен локально");
   };
@@ -1224,7 +1224,7 @@ export function DemoAdmin() {
   return (
     <PageLayout>
       <div className="space-y-7">
-        <PageHeader title="Админ" subtitle="Demo-safe панель настроек: пользователи, роли и статусы интеграций без показа секретов." action={<PrimaryButton onClick={checkTargeting}><Target size={16} />Проверить health</PrimaryButton>} />
+        <PageHeader title="Админ" subtitle="Панель настроек: пользователи, роли и статусы интеграций без показа секретов." action={<PrimaryButton onClick={checkTargeting}><Target size={16} />Проверить health</PrimaryButton>} />
         <div className="grid gap-5 lg:grid-cols-3">
           <section className="neu-card">
             <h2 className="text-lg font-bold text-[#0F172A]">Сотрудники</h2>

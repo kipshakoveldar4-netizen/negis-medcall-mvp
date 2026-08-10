@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Link, useLocation } from 'wouter';
-import { BadgeDollarSign, BarChart2, Building2, CalendarDays, Clapperboard, Inbox, LayoutDashboard, Rocket, Settings, Tag, Users, LogOut, X, KeyRound, User, type LucideIcon } from 'lucide-react';
+import { BadgeDollarSign, BarChart2, Building2, CalendarDays, Clapperboard, Inbox, LayoutDashboard, Rocket, Settings, Store, Tag, Users, LogOut, X, KeyRound, User, type LucideIcon } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
 import { supabase } from '@/lib/supabase';
 import { toast } from 'sonner';
@@ -40,6 +40,11 @@ const NAV_GROUPS: NavGroup[] = [
     items: [
       { href: '/ads-automation', icon: Rocket, label: 'Реклама', roles: ['owner', 'manager'] },
       { href: '/content-studio', icon: Clapperboard, label: 'Контент', roles: ['owner', 'manager'] },
+      // Маркет был недостижим: маршрут объявлен, а ссылки на него не было ни в
+      // боковом меню, ни в мобильном — страница открывалась только вводом
+      // адреса. Панель платформы сюда не ставится намеренно: она не экран
+      // клиники, и ссылка на неё вела бы всех остальных в «страницы нет».
+      { href: '/marketplace', icon: Store, label: 'Маркет', roles: ['owner', 'manager'] },
     ],
   },
   {
@@ -160,7 +165,7 @@ export function Sidebar() {
           </button>
           <button type="button" onClick={openProfile} className="min-w-0 flex-1 text-left">
             <p className="truncate text-sm font-semibold" style={{ color: 'var(--negis-dark-text)' }}>{user?.user_metadata?.full_name || 'Профиль'}</p>
-            <p className="truncate text-xs" style={{ color: 'var(--negis-dark-muted)' }}>{user?.email || 'demo mode'}</p>
+            <p className="truncate text-xs" style={{ color: 'var(--negis-dark-muted)' }}>{user?.email || 'вход не выполнен'}</p>
           </button>
           {availableWorkspaces.length > 1 && (
             // Selection-1: without this the first choice was permanent — the

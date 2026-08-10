@@ -44,6 +44,7 @@
     "test:ad-text-improve": "tsx --test ./src/medina-ad-text-improve.test.ts",
     "test:platform-owner": "tsx --test ./src/medina-platform-owner.test.ts",
     "test:active-launch-gate": "tsx --test ./src/medina-active-launch-gate.test.ts",
+    "test:no-demo-copy": "tsx --test ./src/medina-no-demo-copy.test.ts",
     "seed:clinic": "tsx ./src/seed-clinic.ts"
   },
   "devDependencies": {

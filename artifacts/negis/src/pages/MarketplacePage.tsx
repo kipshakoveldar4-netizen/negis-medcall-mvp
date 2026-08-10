@@ -9,7 +9,7 @@ import {
   APP_SETUP_LABEL,
   APP_STATE_LABEL,
   appsByCategory,
-  isConnected,
+  isRequested,
   type MarketplaceApp,
 } from "../../../../lib/marketplace/catalogue";
 
@@ -51,6 +51,9 @@ function PageHeader({ title, subtitle }: { title: string; subtitle?: string }) {
 export default function MarketplacePage() {
   const [statuses, setStatuses] = useState<StatusRow[]>([]);
   const [loading, setLoading] = useState(true);
+  // Чтение состояния доступно только владельцу и администратору клиники.
+  // Маркетолог страницу видит, а строки — нет, и это не «заявок нет».
+  const [statusesReadable, setStatusesReadable] = useState(true);
   const [requested, setRequested] = useState<Record<string, boolean>>({});
   const workspaceId = readWorkspaceId();
 
@@ -64,9 +67,12 @@ export default function MarketplacePage() {
         const items = Array.isArray(body?.data?.items) ? body.data.items : [];
         if (!cancelled) setStatuses(items as StatusRow[]);
       } catch {
-        // Состояние прочитать не удалось — это НЕ то же самое, что «ничего не
-        // подключено». Каталог показывается, а подключённость не утверждается.
-        if (!cancelled) setStatuses([]);
+        // Отказ чтения — это НЕ «заявок нет». Каталог показывается, а про
+        // заявки экран честно говорит, что не знает.
+        if (!cancelled) {
+          setStatuses([]);
+          setStatusesReadable(false);
+        }
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -122,7 +128,9 @@ export default function MarketplacePage() {
             <h2 className="text-lg font-black text-[#0F172A]">{group.title}</h2>
             <div className="mt-3 grid gap-4 lg:grid-cols-2">
               {group.apps.map((app) => {
-                const connected = isConnected(app, statuses);
+                // Заявка переживает перезагрузку: она лежит строкой в базе.
+                // Пока строки не прочитаны, полагаемся на память вкладки.
+                const alreadyRequested = Boolean(requested[app.id]) || isRequested(app, statuses);
                 return (
                   <article key={app.id} className="neu-card p-5">
                     <div className="flex items-start justify-between gap-3">
@@ -147,17 +155,15 @@ export default function MarketplacePage() {
                     </ul>
 
                     <div className="mt-4 flex items-center justify-between gap-3">
-                      <span className="text-xs font-black text-[#475569]">
-                        {connected ? "Подключено" : APP_SETUP_LABEL[app.setup]}
-                      </span>
+                      <span className="text-xs font-black text-[#475569]">{APP_SETUP_LABEL[app.setup]}</span>
                       {app.state === "planned" ? (
                         <button
                           type="button"
                           className="neu-btn justify-center text-sm"
-                          disabled={Boolean(requested[app.id])}
+                          disabled={alreadyRequested}
                           onClick={() => void requestApp(app)}
                         >
-                          {requested[app.id] ? "Заявка записана" : "Оставить заявку"}
+                          {alreadyRequested ? "Заявка оставлена" : "Оставить заявку"}
                         </button>
                       ) : null}
                     </div>
@@ -179,6 +185,7 @@ export default function MarketplacePage() {
       <p className="mt-8 rounded-2xl border border-[#D8E4EC] bg-white/65 p-4 text-sm font-semibold leading-relaxed text-[#475569]">
         Подключение сейчас делается вместе с нами: ключи доступа хранятся на стороне платформы, и канал привязывается
         к клинике при настройке. Самостоятельного подключения из интерфейса пока нет ни у одного приложения.
+        {statusesReadable ? null : " Оставленные заявки видны владельцу и администратору клиники."}
       </p>
     </PageLayout>
   );

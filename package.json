@@ -48,6 +48,7 @@
     "test:ad-text-improve": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:ad-text-improve",
     "test:platform-owner": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:platform-owner",
     "test:active-launch-gate": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:active-launch-gate",
+    "test:no-demo-copy": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:no-demo-copy",
     "seed:clinic": "node scripts/run-pnpm.cjs --filter @workspace/scripts run seed:clinic"
   },
   "dependencies": {

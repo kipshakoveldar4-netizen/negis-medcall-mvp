@@ -2,9 +2,11 @@
 //
 // Каталог живёт в коде, а не в базе, и это осознанно. Строка в таблице
 // принимает любое значение provider — свободный текст без белого списка, — а
-// каталог обязан описывать то, что в продукте ДЕЙСТВИТЕЛЬНО есть. Состояние
-// подключения при этом берётся из integration_statuses (миграция 013): каталог
-// говорит «что бывает», таблица — «что подключено у этой клиники».
+// каталог обязан описывать то, что в продукте ДЕЙСТВИТЕЛЬНО есть.
+//
+// Из таблицы integration_statuses (миграция 013) читаются только ЗАЯВКИ: это
+// единственное состояние, которое продукт туда действительно пишет. Признака
+// «подключено» здесь нет — см. isRequested ниже.
 //
 // Этот продукт уже один раз объявлял провайдеров, которых в коде не было:
 // ElevenLabs, HeyGen и TapNow перечислены в интерфейсе, а их ключи не читаются
@@ -115,8 +117,8 @@ export const MARKETPLACE_APPS: readonly MarketplaceApp[] = [
     setup: "with_us",
     provider: "openai",
     limits: [
-      "Объём генераций ограничен тарифом",
-      "Видео доступно только на тарифе Про",
+      "Видео включается на стороне платформы, а не в настройках клиники",
+      "Ограничений по объёму генераций в продукте пока не реализовано",
     ],
   },
   {
@@ -183,19 +185,23 @@ export const APP_SETUP_LABEL: Readonly<Record<AppSetup, string>> = {
 };
 
 /**
- * Подключено ли приложение у этой клиники.
+ * Оставлена ли заявка на это приложение.
  *
- * Строка состояния сама по себе ничего не доказывает: provider — свободный
- * текст, и в таблице может лежать запись о приложении, которого в каталоге нет.
- * Поэтому подключением считается только совпадение с каталогом плюс статус,
- * который действительно означает работу.
+ * Заявка — единственное состояние, которое продукт в эту таблицу действительно
+ * пишет, и потому единственное, которое отсюда можно читать.
+ *
+ * Признака «подключено» здесь сознательно нет. Он был, и он был недостижим:
+ * ни один код продукта не записывает в integration_statuses статус
+ * «connected», «active» или «ok» — по умолчанию туда попадает
+ * «not_configured». Настоящее состояние канала живёт в других таблицах
+ * (wazzup_channels.enabled, whatsapp_cloud_numbers.enabled), и пока маркет их
+ * не читает, утверждать подключённость он не вправе. Кнопка, которая не может
+ * зажечься, хуже отсутствующей: она обещает работающий механизм.
  */
-export function isConnected(app: MarketplaceApp, statuses: Array<{ provider?: unknown; status?: unknown }>): boolean {
-  if (!app.provider) return false;
-  const row = statuses.find((item) => String(item.provider || "").toLowerCase() === app.provider);
-  if (!row) return false;
-  const status = String(row.status || "").toLowerCase();
-  return status === "connected" || status === "active" || status === "ok";
+export function isRequested(app: MarketplaceApp, statuses: Array<{ provider?: unknown; status?: unknown }>): boolean {
+  const key = `request:${app.id}`.toLowerCase();
+  const row = statuses.find((item) => String(item.provider || "").toLowerCase() === key);
+  return Boolean(row) && String(row?.status || "").toLowerCase() === "requested";
 }
 
 export function appsByCategory(): Array<{ category: AppCategory; title: string; apps: MarketplaceApp[] }> {

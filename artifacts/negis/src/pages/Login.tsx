@@ -97,7 +97,7 @@ export default function Login() {
           },
           normalizedEmail,
         );
-        toast.success("Demo-вход сотрудника выполнен");
+        toast.success("Вход выполнен без подключения к базе");
         setLocation("/dashboard");
         return;
       }
@@ -155,7 +155,7 @@ export default function Login() {
                   Войдите по email и временному паролю, который выдал администратор. После входа откроется рабочий dashboard.
                 </p>
               </div>
-              <p className="text-xs text-white/50">Если Supabase frontend env не настроены, страница работает в demo fallback.</p>
+              <p className="text-xs text-white/50">Без настроек Supabase вход работает без подключения к базе.</p>
             </div>
           </div>
 
