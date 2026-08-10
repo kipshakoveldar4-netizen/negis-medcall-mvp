@@ -11,6 +11,7 @@ import {
   telegramPackageText,
   updateContentVideo,
 } from "../../lib/content-studio/core";
+import { improveAdText } from "../../lib/meta/improve";
 import {
   createVideoJob,
   downloadVideoContent,
@@ -63,6 +64,13 @@ const CONTENT_STUDIO_AUTHORIZATION: Readonly<Record<string, PrivateRouteAuthoriz
     disabledReason: "Use /api/crm/content-videos",
   },
   "generate-package": {
+    kind: "browser",
+    methods: ["POST"],
+    permissions: { POST: "manage_ai_content" },
+  },
+  // Переписывание текста объявления. Право то же, что у генерации: тратится
+  // тот же ключ платформы, и текст принадлежит тому же рабочему пространству.
+  "improve-ad-text": {
     kind: "browser",
     methods: ["POST"],
     permissions: { POST: "manage_ai_content" },
@@ -317,6 +325,71 @@ async function handleGeneratePackage(req: VercelRequest, res: VercelResponse, co
       success: false,
       error: "Generation error",
       details: [error instanceof Error ? error.message : "Failed to generate content package"],
+    });
+  }
+}
+
+/**
+ * Переписать объявление так, чтобы оно прошло модерацию Meta.
+ *
+ * Отличие от остальных генераторов здесь одно и оно главное: ответ модели не
+ * принимается на слово. improveAdText прогоняет его теми же правилами, что и
+ * проверка текста, и возвращает вердикт по переписанному варианту. Экран
+ * показывает именно этот вердикт, поэтому «улучшили» не может разойтись с
+ * «стало можно запускать».
+ */
+async function handleImproveAdText(req: VercelRequest, res: VercelResponse, context: WorkspaceAccessContext) {
+  void context;
+  try {
+    const payload = readBody(req);
+    const result = await improveAdText({
+      fields: {
+        headline: typeof payload.headline === "string" ? payload.headline : "",
+        text: typeof payload.text === "string" ? payload.text : "",
+        description: typeof payload.description === "string" ? payload.description : "",
+      },
+      // Генератор внедряется здесь, а не импортируется внутри improve.ts:
+      // модуль обязан проверяться без сети и без ключа.
+      generate: (input) => generateOpenAIJson({
+        system: input.system,
+        user: input.user,
+        fallback: {},
+        normalize: (value) => value,
+      }),
+    });
+
+    if (result.refusal) {
+      return sendJson(res, 502, {
+        success: false,
+        error: "Не удалось переписать текст",
+        details: [result.refusal],
+        data: { before: result.before },
+      });
+    }
+
+    return sendJson(res, 200, {
+      success: true,
+      mode: result.mode,
+      data: {
+        mode: result.mode,
+        fields: result.fields,
+        status: result.status,
+        issues: result.issues,
+        // Улучшение обязано уметь проиграть исходному тексту. Без этого поля
+        // экран показал бы кнопку «взять вариант», подставляющую то же самое.
+        changed: result.changed,
+        before: result.before,
+        invented: result.candidates.flatMap((candidate) => candidate.invented),
+        attempts: result.candidates.filter((candidate) => candidate.source !== "original").length,
+        // Провайдер мог отказать на второй попытке — первая при этом цела.
+        refusal: result.refusal,
+      },
+    });
+  } catch (error) {
+    return sendJson(res, 500, {
+      success: false,
+      error: "Не удалось переписать текст",
+      details: [error instanceof Error ? error.message : "Провайдер не ответил"],
     });
   }
 }
@@ -897,6 +970,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (!context) return;
 
   if (resource === "generate-package") return handleGeneratePackage(req, res, context);
+  if (resource === "improve-ad-text") return handleImproveAdText(req, res, context);
   if (resource === "generate-script") return handleGenerateScript(req, res, context);
   if (resource === "generate-avatar-prompt") return handleGenerateAvatarPrompt(req, res, context);
   if (resource === "generate-tapnow-prompt") return handleGenerateTapNowPrompt(req, res, context);

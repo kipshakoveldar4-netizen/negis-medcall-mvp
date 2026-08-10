@@ -128,6 +128,28 @@ type ComplianceResult = {
   safeParts?: { headline?: string; text?: string; description?: string };
 };
 
+/**
+ * Ответ переписывания текста.
+ *
+ * Отличается от ComplianceResult одним, и это главное: `status` здесь — вердикт
+ * по ПЕРЕПИСАННОМУ тексту, посчитанный сервером теми же правилами. Поэтому
+ * «улучшили» не может разойтись с «стало можно запускать»: если переписать
+ * начисто не вышло, статус так и скажет.
+ */
+type ImprovedText = {
+  mode?: "model" | "rules";
+  fields?: { headline?: string; text?: string; description?: string };
+  status?: "safe" | "needs_review" | "blocked";
+  issues?: Array<{ code?: string; message?: string }>;
+  // Улучшение умеет проиграть исходному тексту: если ни один вариант не
+  // оказался лучше, сервер возвращает исходный и changed === false.
+  changed?: boolean;
+  before?: { status?: string; issues?: Array<{ code?: string; message?: string }> };
+  invented?: string[];
+  attempts?: number;
+  refusal?: string;
+};
+
 type LaunchResult = {
   launchId?: string;
   launchTimestamp?: string;
@@ -1449,6 +1471,7 @@ export default function AdsAutomation() {
   const [creative, setCreative] = useState<CreativeAsset | null>(null);
   const [aiPackage, setAiPackage] = useState<AiPackage | null>(null);
   const [compliance, setCompliance] = useState<ComplianceResult | null>(null);
+  const [improved, setImproved] = useState<ImprovedText | null>(null);
   const [confirmations, setConfirmations] = useState<ConfirmationState>(confirmationDefaults);
   const [activeConfirmation, setActiveConfirmation] = useState("");
   const statusMode: "PAUSED" = "PAUSED";
@@ -1460,7 +1483,7 @@ export default function AdsAutomation() {
   const [uploadStage, setUploadStage] = useState("");
   const [lastUploadError, setLastUploadError] = useState("");
   const [liveLaunchEnabled, setLiveLaunchEnabled] = useState(() => readStored(workspaceScopedKey("negis_meta_live_launch_enabled"), false));
-  const [loading, setLoading] = useState<"health" | "storage" | "upload" | "ai" | "check" | "video" | "launch" | "history" | "thumbnail" | null>(null);
+  const [loading, setLoading] = useState<"health" | "storage" | "upload" | "ai" | "check" | "improve" | "video" | "launch" | "history" | "thumbnail" | null>(null);
   const [creativeFile, setCreativeFile] = useState<File | null>(null);
   const [notice, setNotice] = useState("");
   const [launchResult, setLaunchResult] = useState<LaunchResult | null>(null);
@@ -1535,6 +1558,7 @@ export default function AdsAutomation() {
           generatedBy: "content-studio",
         });
         setCompliance(null);
+    setImproved(null);
       }
 
       // Restore a ready image creative from the studio's photo builder: the URL
@@ -1700,20 +1724,19 @@ export default function AdsAutomation() {
   const selectedCity = getKzMetaCityOption(brief.cityId || brief.city);
   const destinationUrl = aiPackage?.destinationUrl || publicDestinationUrl(brief);
   const clinicName = firstString(asRecord(user).workspaceName, asRecord(user).clinicName, "Concept Med");
-  // Один источник правды для «какой текст уедет в Meta».
+  // Один источник правды для «какой текст уедет в Meta»: то, что в пакете.
   //
-  // Предпросмотр брал safeText всегда, а запуск — только когда исходный текст
-  // не был безопасным (см. buildLaunchPayload). При безопасном тексте экран
-  // показывал версию с дисклеймером, а в Meta уходила версия без него: клиника
-  // утверждала одно объявление, а публиковала другое.
+  // Раньше здесь стояла скрытая подмена: при любом статусе кроме «safe» запуск
+  // отправлял вместо основного текста `compliance.safeText` — переписанную
+  // СКЛЕЙКУ всех трёх полей. Объявление уезжало с заголовком, напечатанным
+  // дважды, и с описанием, вклеенным в основной текст, а сам заголовок при
+  // этом оставался непереписанным. Пока правила молчали, статус почти всегда
+  // был «safe» и подмена не срабатывала; как только они ожили, а называние
+  // состояния стало замечанием — «needs_review» стал обычным делом.
   //
-  // Здесь исправлено расхождение, а не поведение запуска: в Meta уходит ровно
-  // то же, что и раньше. Из-за этого дисклеймер по-прежнему не попадает в
-  // объявление, если текст и без него признан безопасным, — это отдельный
-  // вопрос к владельцу, а не то, что стоит менять молча.
-  const adTextForLaunch = compliance?.safeText && compliance.status !== "safe"
-    ? compliance.safeText
-    : aiPackage?.primaryText || "";
+  // Скрытых автоправок здесь больше нет. Переписанный вариант применяется
+  // только кнопкой и только по полям — оператор видит, что именно уедет.
+  const adTextForLaunch = aiPackage?.primaryText || "";
   const previewAdText = firstString(adTextForLaunch, brief.offer);
   const adsManagerUrl = useMemo(() => {
     const accountId = String(metaSummary?.adAccountId || "").replace(/^act_/, "");
@@ -1738,6 +1761,7 @@ export default function AdsAutomation() {
     }));
     setLaunchResult(null);
     setCompliance(null);
+    setImproved(null);
   };
   const updateConfirmation = (key: keyof ConfirmationState, value: boolean) => {
     setConfirmations((current) => ({ ...current, [key]: value }));
@@ -2388,6 +2412,7 @@ export default function AdsAutomation() {
     setVideoConfigBlocked(false);
     setAiPackage(null);
     setCompliance(null);
+    setImproved(null);
     setLaunchResult(null);
     setUploadDebug(null);
     setUploadStage("");
@@ -2430,6 +2455,7 @@ export default function AdsAutomation() {
       });
       setAiPackage(body.data);
       setCompliance(null);
+    setImproved(null);
       setLaunchTimestamp("");
       goToStep(5, { skipGuard: true });
       toast.success(body.data.generatedBy === "openai" ? "ИИ заполнил рекламу" : "Demo-пакет готов");
@@ -2516,6 +2542,7 @@ export default function AdsAutomation() {
     // confirmation checkbox must be walked through again by the employee.
     setAiPackage(null);
     setCompliance(null);
+    setImproved(null);
     setLaunchResult(null);
     setLastDryRunResult(null);
     setConfirmations(confirmationDefaults);
@@ -2599,6 +2626,51 @@ export default function AdsAutomation() {
       activeConfirmation: activeConfirmation.trim(),
       dryRun,
     };
+  }
+
+  /**
+   * Попросить платформу переписать объявление.
+   *
+   * Раньше единственным ответом продукта на «текст нельзя запускать» была
+   * таблица замен: «лечение» → «консультация», «навсегда» → пусто. Она не
+   * согласует падежи и не знает, о чём объявление, поэтому «лечение без риска»
+   * превращалось в «консультация после консультации» — текст, который клиника
+   * в Meta не отправит.
+   *
+   * Здесь то же делает модель, а сервер прогоняет её ответ теми же правилами и
+   * возвращает вердикт по переписанному варианту. Ничего не применяется само:
+   * оператор видит результат и решает.
+   */
+  async function improveText() {
+    if (!aiPackage) {
+      toast.error("Сначала нажмите «ИИ заполнить рекламу»");
+      return;
+    }
+    setLoading("improve");
+    try {
+      const body = await crmRequest<ImprovedText>("/api/content-studio/improve-ad-text", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          headline: aiPackage.headline || "",
+          text: aiPackage.primaryText || "",
+          description: aiPackage.description || "",
+        }),
+      });
+      setImproved(body.data);
+      if (!body.data?.changed) {
+        toast.message("Переписать лучше не получилось — оставили исходный текст");
+      } else {
+        toast.success(body.data?.status === "safe" ? "Текст переписан" : "Текст переписан, замечания остались");
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Не удалось переписать текст.";
+      setImproved(null);
+      setNotice(message);
+      toast.error(message);
+    } finally {
+      setLoading(null);
+    }
   }
 
   async function runComplianceCheck(stayOnLaunchStep = false) {
@@ -3434,10 +3506,110 @@ export default function AdsAutomation() {
           Проверяем медицинские формулировки и готовим безопасную версию перед запуском.
         </p>
 
-        <button type="button" className="neu-btn-primary mt-6 justify-center" disabled={loading === "check"} onClick={() => void runComplianceCheck()}>
-          {loading === "check" ? <Loader2 className="animate-spin" size={16} /> : <ShieldCheck size={16} />}
-          Проверить безопасность
-        </button>
+        <div className="mt-6 flex flex-col gap-2 sm:flex-row">
+          <button type="button" className="neu-btn-primary justify-center" disabled={loading === "check"} onClick={() => void runComplianceCheck()}>
+            {loading === "check" ? <Loader2 className="animate-spin" size={16} /> : <ShieldCheck size={16} />}
+            Проверить безопасность
+          </button>
+          {/*
+            Кнопка стоит рядом с проверкой, а не прячется за её отказом.
+            Проверка отвечает «что здесь нельзя», и до этого весь ответ продукта
+            на этот вопрос состоял из таблицы замен, которая не согласует падежи.
+            Здесь текст переписывает модель, а сервер прогоняет её ответ теми же
+            правилами — экран показывает вердикт по переписанному варианту.
+          */}
+          <button type="button" className="neu-btn justify-center" disabled={loading === "improve" || !aiPackage} onClick={() => void improveText()}>
+            {loading === "improve" ? <Loader2 className="animate-spin" size={16} /> : <Wand2 size={16} />}
+            Улучшить текст
+          </button>
+        </div>
+
+        {improved ? (
+          <div
+            className={`mt-5 rounded-2xl border p-4 ${
+              improved.status === "safe"
+                ? "border-emerald-200 bg-emerald-50"
+                : improved.status === "blocked"
+                  ? "border-rose-200 bg-rose-50"
+                  : "border-amber-200 bg-amber-50"
+            }`}
+          >
+            <p className="text-xs font-black uppercase tracking-[0.1em] text-[#0F172A]">
+              {improved.changed === false
+                ? "Улучшить не получилось — это исходный текст"
+                : `${improved.mode === "rules" ? "Переписано автозаменой" : "Переписано ИИ"}${
+                    improved.status === "safe" ? " — запрещённых формулировок не осталось" : " — замечания остались"
+                  }`}
+            </p>
+            {improved.changed === false ? (
+              // Ни один вариант не оказался строго лучше исходного. Показать
+              // при этом кнопку «взять этот вариант» значило бы предложить
+              // заменить текст на него же.
+              <p className="mt-1 text-xs font-semibold text-[#64748B]">
+                Ни одна из попыток не вышла лучше того, что уже написано. Попробуйте изменить оффер и собрать
+                пакет заново.
+              </p>
+            ) : null}
+            {improved.refusal ? (
+              <p className="mt-1 text-xs font-semibold text-rose-700">Провайдер прервал работу: {improved.refusal}</p>
+            ) : null}
+            {improved.mode === "rules" ? (
+              // Ключ провайдера не настроен. Называть подстановку по словарю
+              // работой ИИ нельзя — оператор должен знать, что именно он читает.
+              <p className="mt-1 text-xs font-semibold text-[#64748B]">
+                ИИ-провайдер не подключён, поэтому текст переписан по словарю замен. Он грубее: падежи не
+                согласуются. Подключите провайдера в админ-центре.
+              </p>
+            ) : null}
+
+            <div className="mt-3 grid gap-3 lg:grid-cols-3">
+              {[
+                ["Заголовок", improved.fields?.headline],
+                ["Основной текст", improved.fields?.text],
+                ["Описание", improved.fields?.description],
+              ].map(([label, value]) => (
+                <div key={label} className="rounded-2xl border border-[#D8E4EC] bg-white/70 p-3">
+                  <p className="text-xs font-black uppercase tracking-[0.1em] text-[#64748B]">{label}</p>
+                  <p className="mt-1 text-sm font-semibold leading-relaxed text-[#0F172A]">{value || "—"}</p>
+                </div>
+              ))}
+            </div>
+
+            {improved.issues?.length ? (
+              <ul className="mt-3 space-y-1 text-xs font-semibold text-[#475569]">
+                {improved.issues.map((issue, index) => (
+                  <li key={`improved-${issue.code || index}`}>• {issue.message || issue.code}</li>
+                ))}
+              </ul>
+            ) : null}
+
+            {improved.changed === false ? null : (
+            <button
+              type="button"
+              className="neu-btn mt-3 justify-center"
+              onClick={() => {
+                const fields = improved.fields;
+                setAiPackage((current) => current
+                  ? {
+                      ...current,
+                      headline: fields?.headline || current.headline,
+                      primaryText: fields?.text || current.primaryText,
+                      description: fields?.description || current.description,
+                    }
+                  : current);
+                // Прошлый вердикт относится к прошлому тексту. Оставить его
+                // рядом с новым — та же неправда, которую этот экран уже
+                // показывал: зелёная плашка над изменившейся строкой.
+                setCompliance(null);
+                setImproved(null);
+                toast.success("Текст заменён. Проверьте безопасность заново.");
+              }}
+            >
+              Взять этот вариант
+            </button>
+            )}
+          </div>
+        ) : null}
 
         {compliance ? (
           <div className="mt-6 space-y-4">

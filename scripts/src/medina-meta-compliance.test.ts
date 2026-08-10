@@ -266,9 +266,11 @@ test("MC16 safeTextStatus — это настоящий вердикт по пе
 
 test("MC17 переписывание не притворяется безопасным, когда убрало не всё", () => {
   // «акне» — медицинское состояние, нейтрального эквивалента у него нет, и
-  // придумывать его за клинику функция не должна.
+  // придумывать его за клинику таблица замен не должна. Само по себе называние
+  // состояния запуск не блокирует (это делает обращение к читателю), но и
+  // объявлять такой текст безопасным нельзя: замечание остаётся.
   const stillBad = checkMetaCompliance(CANONICAL_BAD);
-  assert.equal(stillBad.safeTextStatus, "blocked");
+  assert.notEqual(stillBad.safeTextStatus, "safe", "убрано не всё — значит не безопасно");
   assert.ok(stillBad.safeTextIssues.some((issue) => issue.code === "medical_condition_claim"));
 
   const fullyRewritten = checkMetaCompliance({

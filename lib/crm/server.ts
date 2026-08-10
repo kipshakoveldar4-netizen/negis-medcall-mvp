@@ -6740,9 +6740,11 @@ export async function handleMetaLaunch(req: VercelRequest, res: VercelResponse) 
       data: { compliance, safeText: compliance.safeText },
     });
   }
-  if (compliance.status === "needs_review" && !readBoolean(body.manualApprovalConfirmed)) {
-    details.push("Нужно ручное согласование текста со статусом needs_review.");
-  }
+  // Ветки «needs_review требует ручного согласования» здесь больше нет.
+  // Она была мертва: `manualApprovalConfirmed` проверяется безусловно двадцатью
+  // строками выше, поэтому при false замечание уже добавлено, а при true эта
+  // ветка не срабатывает. Отдельного подтверждения именно текста в протоколе
+  // запроса нет, и придумывать его молча — не то же самое, что чинить.
 
   if (details.length > 0) {
     return sendJson(res, 400, {
