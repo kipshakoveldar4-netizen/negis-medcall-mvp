@@ -20,6 +20,7 @@ import { MetricCard } from "@/components/ui/metric-card";
 import { apiUrl, crmFetch } from "@/lib/api";
 import { isRealWorkspace, readWorkspaceId as readCurrentWorkspaceId, useDemoCollection, workspaceScopedKey } from "@/lib/demoStorage";
 import { formatPhone, toTelHref, toWhatsappHref } from "@/lib/phone";
+import { clinicToday, dayKeyInZone, isOnClinicDay } from "@/lib/clinicDay";
 
 type AppointmentStatus = "scheduled" | "confirmed" | "arrived" | "no_show" | "cancelled";
 type CalendarView = "day" | "week" | "list";
@@ -624,12 +625,29 @@ function appointmentInterval(appointment: Appointment) {
   };
 }
 
-function isSameDate(appointment: Appointment, dateKey: string): boolean {
-  return dateKeyFromStartsAt(appointment.startsAt) === dateKey;
+/**
+ * Попадает ли запись в календарный день клиники.
+ *
+ * Не то же самое, что dateKeyFromStartsAt: тот считает день по поясу
+ * устройства и живёт в паре с timeKeyFromStartsAt, обслуживая форму
+ * редактирования. Здесь же сравниваются списки, а вторая сторона сравнения —
+ * todayKey — посчитана в поясе клиники. Пока эти две половины считались в
+ * разных поясах, «Сегодня записей» было верно ровно в том случае, когда пояса
+ * совпадают, то есть именно тогда, когда исправлять было нечего: в UTC+5 на
+ * ноутбуке по Гринвичу карточка называла число записей за чужие сутки.
+ */
+function isOnDay(appointment: Appointment, dateKey: string, timeZone: string): boolean {
+  return isOnClinicDay(appointment.startsAt, dateKey, timeZone);
 }
 
-function isWithinWeek(appointment: Appointment, weekStart: string): boolean {
-  const appointmentDate = dateKeyFromStartsAt(appointment.startsAt);
+function isWithinWeek(appointment: Appointment, weekStart: string, timeZone: string): boolean {
+  const instant = Date.parse(appointment.startsAt);
+  // Прежняя версия на нечитаемой дате подставляла todayKeyAtLoad и молча
+  // относила такую запись к сегодняшней неделе. Нечитаемая дата — это «не
+  // знаю», а не «сегодня».
+  if (!Number.isFinite(instant)) return false;
+
+  const appointmentDate = dayKeyInZone(instant, timeZone);
   const start = toLocalDate(weekStart).getTime();
   const end = toLocalDate(addDaysKey(weekStart, 7)).getTime();
   const current = toLocalDate(appointmentDate).getTime();
@@ -778,6 +796,33 @@ export function AppointmentsPage() {
   const [scheduleMessage, setScheduleMessage] = useState("");
   const deviceTimeZone = useMemo(() => readDeviceTimeZone(), []);
 
+  /**
+   * Сегодняшний день клиники — состояние, а не константа модуля.
+   *
+   * Прежде «сегодня» вычислялось один раз при загрузке страницы, поэтому
+   * вкладка, оставленная на ночь, бесконечно показывала вчерашнее «Сегодня
+   * записей». Минутный тик стоит ничего и переводит счётчик ровно в полночь
+   * клиники, а не в полночь ноутбука.
+   */
+  const [todayKey, setTodayKey] = useState(() => clinicToday(""));
+
+  useEffect(() => {
+    const tick = () => setTodayKey(clinicToday(clinicTimeZone));
+    tick();
+    const timer = window.setInterval(tick, 60_000);
+    return () => window.clearInterval(timer);
+  }, [clinicTimeZone]);
+
+  // Пояс приезжает вместе со списком, то есть уже после первого рендера, а
+  // выбранный день до этого момента — день устройства. Как только пояс известен,
+  // открытый день переводится на сутки клиники — но только если оператор ещё
+  // ничего не выбрал сам. Иначе экран отнимал бы у него выбор на каждой
+  // загрузке.
+  useEffect(() => {
+    if (!clinicTimeZone) return;
+    setSelectedDate((current) => (current === todayKeyAtLoad ? clinicToday(clinicTimeZone) : current));
+  }, [clinicTimeZone]);
+
   useEffect(() => {
     let cancelled = false;
     void loadCatalogServices().then((list) => {
@@ -885,9 +930,18 @@ export function AppointmentsPage() {
       .sort((a, b) => new Date(a.startsAt).getTime() - new Date(b.startsAt).getTime());
   }, [doctorFilter, items, search, serviceFilter, statusFilter]);
 
-  const dayAppointments = useMemo(() => filteredItems.filter((appointment) => isSameDate(appointment, selectedDate)), [filteredItems, selectedDate]);
-  const weekAppointments = useMemo(() => filteredItems.filter((appointment) => isWithinWeek(appointment, weekStart)), [filteredItems, weekStart]);
-  const todayAppointments = useMemo(() => items.filter((appointment) => isSameDate(appointment, todayKeyAtLoad)), [items]);
+  const dayAppointments = useMemo(
+    () => filteredItems.filter((appointment) => isOnDay(appointment, selectedDate, clinicTimeZone)),
+    [filteredItems, selectedDate, clinicTimeZone],
+  );
+  const weekAppointments = useMemo(
+    () => filteredItems.filter((appointment) => isWithinWeek(appointment, weekStart, clinicTimeZone)),
+    [filteredItems, weekStart, clinicTimeZone],
+  );
+  const todayAppointments = useMemo(
+    () => items.filter((appointment) => isOnDay(appointment, todayKey, clinicTimeZone)),
+    [items, todayKey, clinicTimeZone],
+  );
   const nextAppointment = useMemo(() => {
     const now = Date.now();
     return items
@@ -1160,7 +1214,7 @@ export function AppointmentsPage() {
   const renderWeek = () => (
     <section className="grid gap-3 xl:grid-cols-7">
       {weekDays.map((day) => {
-        const dayItems = filteredItems.filter((appointment) => isSameDate(appointment, day));
+        const dayItems = filteredItems.filter((appointment) => isOnDay(appointment, day, clinicTimeZone));
         return (
           <article key={day} className="neu-card p-4">
             <div className="flex items-start justify-between gap-3 xl:block">
@@ -1264,7 +1318,7 @@ export function AppointmentsPage() {
           <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_360px] xl:items-start">
             <div className="space-y-4">
               <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
-                <button type="button" className="neu-btn px-4 py-2 text-sm" onClick={() => setSelectedDate(toDateKey(new Date()))}>Сегодня</button>
+                <button type="button" className="neu-btn px-4 py-2 text-sm" onClick={() => setSelectedDate(todayKey)}>Сегодня</button>
                 <div className="grid grid-cols-[44px_minmax(0,1fr)_44px] items-center gap-2 sm:max-w-md">
                   <button type="button" className="neu-icon-btn" onClick={() => setSelectedDate(addDaysKey(selectedDate, -1))} aria-label="Предыдущий день">
                     <ChevronLeft size={18} />

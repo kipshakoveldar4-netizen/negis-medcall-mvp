@@ -5,6 +5,7 @@ import { BarChart3, Calendar, CalendarCheck, DollarSign, PhoneCall, Rocket, User
 import { useAuth } from '@/contexts/AuthContext';
 import { apiUrl, crmFetch } from '@/lib/api';
 import { readWorkspaceId } from '@/lib/demoStorage';
+import { clinicToday, isOnClinicDay } from '@/lib/clinicDay';
 import { MetricCard } from '@/components/ui/metric-card';
 import { PageHeader } from '@/components/ui/page-header';
 
@@ -12,17 +13,19 @@ type CrmRecord = Record<string, unknown>;
 
 /* Real CRM list read. A failed endpoint reports ok:false so the metric can
    render an honest "—" instead of a fabricated zero. */
-async function fetchList(path: string, listKey: string): Promise<{ ok: boolean; items: CrmRecord[] }> {
+async function fetchList(path: string, listKey: string): Promise<{ ok: boolean; items: CrmRecord[]; timeZone: string }> {
   try {
     const response = await crmFetch(path);
     const text = await response.text();
     const body = text ? (JSON.parse(text) as Record<string, unknown>) : {};
-    if (!response.ok || body.success !== true) return { ok: false, items: [] };
+    if (!response.ok || body.success !== true) return { ok: false, items: [], timeZone: '' };
     const data = (body.data && typeof body.data === 'object' ? body.data : {}) as Record<string, unknown>;
     const list = Array.isArray(data[listKey]) ? data[listKey] : Array.isArray(data.items) ? data.items : [];
-    return { ok: true, items: list as CrmRecord[] };
+    // Пояс клиники приезжает вместе со списком записей: спрашивать его у
+    // маршрута настроек нельзя — он открыт только владельцу и администратору.
+    return { ok: true, items: list as CrmRecord[], timeZone: typeof data.timeZone === 'string' ? data.timeZone : '' };
   } catch {
-    return { ok: false, items: [] };
+    return { ok: false, items: [], timeZone: '' };
   }
 }
 
@@ -195,8 +198,13 @@ function LiveDashboard() {
       ]);
       if (cancelled) return;
 
-      const today = new Date().toISOString().slice(0, 10);
-      const isToday = (value: unknown) => typeof value === 'string' && value.slice(0, 10) === today;
+      // «Сегодня» — это сутки клиники, а не UTC. Прежняя строка брала
+      // toISOString(), то есть Гринвич, под комментарием «текущая локальная
+      // дата»: в UTC+5 экран называл чужой день примерно пять часов каждую
+      // ночь, и обе цифры ниже в это время были не про сегодня.
+      const timeZone = appointments.timeZone;
+      const today = clinicToday(timeZone);
+      const isToday = (value: unknown) => isOnClinicDay(value, today, timeZone);
 
       setCounts({
         appointmentsToday: appointments.ok
@@ -206,7 +214,7 @@ function LiveDashboard() {
           ? leads.items.filter((item) => String(item.status ?? '').toLowerCase() === 'new').length
           : null,
         clients: clients.ok ? clients.items.length : null,
-        // CRM9d definition: paid deals whose paidAt falls on the current local date.
+        // CRM9d definition: paid deals whose paidAt falls on the clinic's day.
         revenueTodayMinor: deals.ok
           ? deals.items
               .filter((item) => String(item.status ?? '').toLowerCase() === 'paid' && isToday(item.paidAt ?? item.paid_at))

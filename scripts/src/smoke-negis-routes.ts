@@ -1554,7 +1554,15 @@ async function checkContentStudioPhaseOne() {
     "contentPackageId",
     "Демо-режим: подключите AI provider для настоящей генерации.",
     "checkMetaCompliance",
-    "Проверка безопасных формулировок",
+    // Раньше здесь пинился один статичный заголовок «Проверка безопасных
+    // формулировок». Он перестал существовать в a657345, когда пять постоянных
+    // зелёных галочек заменили настоящим вердиктом по тексту, — и с тех пор
+    // этот смоук был красным. Пин обновлён на все четыре состояния: так он
+    // закрепляет то, ради чего заголовок и менялся — вердикт зависит от текста.
+    "Проверка формулировок",
+    "Запрещённых формулировок не найдено",
+    "Текст нельзя запускать — перепишите",
+    "Нужна ручная проверка текста",
     "Photo prompt",
     "Video prompt",
     "WhatsApp сообщение",
@@ -2065,7 +2073,11 @@ async function checkCrmProductionGuards() {
   }
 
   const controlCenter = await readFile(path.join(negisSrc, "pages", "AiControlCenter.tsx"), "utf8");
-  if (!controlCenter.includes("if (isRealWorkspace()) return { responded: false, items: [] };")) {
+  // Литерал обрезан до закрывающей скобки намеренно: список записей теперь
+  // везёт с собой ещё и пояс клиники, поэтому у пустого ответа появилось третье
+  // поле. Смысл пина — «для настоящего рабочего пространства демо-данные не
+  // считаются» — от этого не изменился.
+  if (!controlCenter.includes("if (isRealWorkspace()) return { responded: false, items: []")) {
     throw new Error("AiControlCenter must not count demo CRM data for a UUID workspace");
   }
 
@@ -3140,7 +3152,7 @@ async function checkLayoutFoundation() {
     "/api/crm/leads",
     "/api/crm/clients",
     "/api/crm/appointments",
-    // CRM9d — real deal revenue for the current local date.
+    // CRM9d — real deal revenue for the clinic's own day, not the viewer's.
     "/api/crm/deals",
     '"deals", "negis_demo_deals"',
     "semanticGroupForLead",
@@ -3151,7 +3163,15 @@ async function checkLayoutFoundation() {
     "revenueTodayMinor",
     "pendingDealsCount",
     'str(deal.status).toLowerCase() === "paid"',
-    "isTodayDate(str(deal.paidAt) || str(deal.paid_at))",
+    // Закрывающая скобка снята из литерала намеренно. Раньше «сегодня» здесь
+    // считалось по поясу ноутбука оператора, поэтому у isTodayDate не было
+    // аргументов; теперь день и пояс клиники передаются явно. Источник даты
+    // остаётся тем же и по-прежнему закреплён, а форма вызова — уже нет.
+    "isTodayDate(str(deal.paidAt) || str(deal.paid_at)",
+    // И сам день обязан быть днём клиники, иначе выручка «за сегодня» в UTC+5
+    // примерно пять часов каждую ночь считается за чужие сутки.
+    "clinicDayKey",
+    "clinicTimeZone",
     "deal.amountMinor ?? deal.amount_minor",
     "formatRevenueMinor",
     "По оплаченным продажам за сегодня.",
@@ -3188,7 +3208,11 @@ async function checkLayoutFoundation() {
     // CRM7 — attribution readiness (leads + meta-launches endpoints responded)
     "Атрибуция рекламы",
     // CRM8 — attribution counts + rule-based recommendation (no CPL/ROI)
-    "attributedLeads",
+    //
+    // Пин "attributedLeads" отсюда убран. Счётчик привязанных заявок считался
+    // на каждой загрузке и не выводился нигде — он удалён как мёртвый. Сам пин
+    // при этом продолжал проходить, потому что "unattributedLeads" содержит ту
+    // же подстроку: он не проверял ничего уже тогда, когда счётчик ещё был жив.
     "unattributedLeads",
     "Свяжите заявки с рекламными кампаниями",
     "Это поможет позже считать эффективность рекламы.",

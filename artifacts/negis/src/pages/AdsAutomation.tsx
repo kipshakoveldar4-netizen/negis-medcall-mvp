@@ -118,6 +118,14 @@ type ComplianceResult = {
   status?: "safe" | "needs_review" | "blocked";
   issues?: Array<{ code?: string; message?: string; severity?: string }>;
   safeText?: string;
+  // Вердикт по переписанному тексту. У части запрещённых слов нейтрального
+  // эквивалента нет — переписывание их не убирает, и называть результат
+  // безопасным нельзя, пока сервер не сказал этого о нём самом.
+  safeTextStatus?: "safe" | "needs_review" | "blocked";
+  safeTextIssues?: Array<{ code?: string; message?: string; severity?: string }>;
+  // Переписанные поля по отдельности. safeText — это переписанная склейка всех
+  // трёх, и класть её в одно поле нельзя.
+  safeParts?: { headline?: string; text?: string; description?: string };
 };
 
 type LaunchResult = {
@@ -1692,7 +1700,21 @@ export default function AdsAutomation() {
   const selectedCity = getKzMetaCityOption(brief.cityId || brief.city);
   const destinationUrl = aiPackage?.destinationUrl || publicDestinationUrl(brief);
   const clinicName = firstString(asRecord(user).workspaceName, asRecord(user).clinicName, "Concept Med");
-  const previewAdText = firstString(compliance?.safeText, aiPackage?.primaryText, brief.offer);
+  // Один источник правды для «какой текст уедет в Meta».
+  //
+  // Предпросмотр брал safeText всегда, а запуск — только когда исходный текст
+  // не был безопасным (см. buildLaunchPayload). При безопасном тексте экран
+  // показывал версию с дисклеймером, а в Meta уходила версия без него: клиника
+  // утверждала одно объявление, а публиковала другое.
+  //
+  // Здесь исправлено расхождение, а не поведение запуска: в Meta уходит ровно
+  // то же, что и раньше. Из-за этого дисклеймер по-прежнему не попадает в
+  // объявление, если текст и без него признан безопасным, — это отдельный
+  // вопрос к владельцу, а не то, что стоит менять молча.
+  const adTextForLaunch = compliance?.safeText && compliance.status !== "safe"
+    ? compliance.safeText
+    : aiPackage?.primaryText || "";
+  const previewAdText = firstString(adTextForLaunch, brief.offer);
   const adsManagerUrl = useMemo(() => {
     const accountId = String(metaSummary?.adAccountId || "").replace(/^act_/, "");
     return accountId ? `https://adsmanager.facebook.com/adsmanager/manage/campaigns?act=${accountId}` : "https://adsmanager.facebook.com/";
@@ -2522,7 +2544,8 @@ export default function AdsAutomation() {
   }
 
   function buildLaunchPayload(dryRun: boolean, forcedStatusMode: "PAUSED" | "ACTIVE" = statusMode) {
-    const text = compliance?.safeText && compliance.status !== "safe" ? compliance.safeText : aiPackage?.primaryText;
+    // Тот же выбор, что показан в предпросмотре, — см. adTextForLaunch выше.
+    const text = adTextForLaunch;
     const publicCreativeUrl = creative?.publicUrl || "";
     const dryRunPreviewUrl = dryRun ? creative?.previewUrl || "" : "";
     const creativeUrl = publicCreativeUrl || dryRunPreviewUrl;
@@ -2614,6 +2637,18 @@ export default function AdsAutomation() {
       );
     } catch (error) {
       const message = error instanceof Error ? error.message : "Проверка не прошла.";
+
+      // Отказ по тексту — это и есть результат проверки, а не её отсутствие.
+      //
+      // Сервер при blocked кладёт в 400 полный разбор: сработавшие правила,
+      // найденную фразу и смягчённую версию. CrmError это тело уже нёс — его
+      // просто никто не читал: setCompliance вызывался только на успешном пути.
+      // Оператор видел красную строку «проверка заблокировала текст» и ни
+      // одного замечания, то есть без указания, что именно править. И раз
+      // compliance не сбрасывался, предыдущий зелёный вердикт оставался висеть
+      // на экране рядом с красной строкой, противореча ей.
+      const refused = error instanceof CrmError ? asRecord(error.data.compliance) : {};
+      setCompliance(Object.keys(refused).length ? (refused as ComplianceResult) : null);
       setNotice(message);
       toast.error(message);
     } finally {
@@ -3416,19 +3451,103 @@ export default function AdsAutomation() {
                 ))}
               </div>
             ) : null}
+            {/*
+              Раньше этот блок всегда был зелёным и всегда назывался «Безопасная
+              версия», а кнопка выставляла status: "safe" не перепроверив ничего.
+              Вместе со сломанными границами слов это давало прямую неправду:
+              переписывание на кириллице не меняло ни буквы, экран показывал ту
+              же самую строку как безопасную, оператор жал кнопку — и «У вас
+              акне? Гарантируем 100%» становилось зелёным. Теперь вердикт по
+              переписанному тексту считает сервер, и кнопка переносит именно его.
+            */}
             {compliance.safeText ? (
-              <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4">
-                <p className="text-xs font-black uppercase tracking-[0.1em] text-emerald-700">Безопасная версия</p>
-                <p className="mt-2 text-sm font-semibold leading-relaxed text-emerald-900">{compliance.safeText}</p>
+              <div
+                className={`rounded-2xl border p-4 ${
+                  compliance.safeTextStatus === "blocked"
+                    ? "border-rose-200 bg-rose-50"
+                    : compliance.safeTextStatus === "needs_review"
+                      ? "border-amber-200 bg-amber-50"
+                      : "border-emerald-200 bg-emerald-50"
+                }`}
+              >
+                <p
+                  className={`text-xs font-black uppercase tracking-[0.1em] ${
+                    compliance.safeTextStatus === "blocked"
+                      ? "text-rose-700"
+                      : compliance.safeTextStatus === "needs_review"
+                        ? "text-amber-700"
+                        : "text-emerald-700"
+                  }`}
+                >
+                  {compliance.safeTextStatus === "blocked" || compliance.safeTextStatus === "needs_review"
+                    ? "Смягчённая версия — этого мало"
+                    : "Безопасная версия"}
+                </p>
+                <p
+                  className={`mt-2 text-sm font-semibold leading-relaxed ${
+                    compliance.safeTextStatus === "blocked"
+                      ? "text-rose-900"
+                      : compliance.safeTextStatus === "needs_review"
+                        ? "text-amber-900"
+                        : "text-emerald-900"
+                  }`}
+                >
+                  {compliance.safeText}
+                </p>
+                {compliance.safeTextStatus === "blocked" || compliance.safeTextStatus === "needs_review" ? (
+                  <p className="mt-2 text-xs font-semibold leading-relaxed text-[#475569]">
+                    Автозамена убрала не всё: {(compliance.safeTextIssues || []).map((issue) => issue.message || issue.code).join(" ") ||
+                      "часть формулировок нужно переписать вручную."}
+                    {" "}
+                    {/*
+                      Поля пакета на этом шаге показываются, но не редактируются
+                      (см. блок «Основной текст» выше — это <p>, а не поле ввода).
+                      Поэтому здесь говорится ровно то, что оператор может
+                      сделать: вернуться назад и перегенерировать пакет.
+                    */}
+                    Текст здесь не редактируется — вернитесь назад, поправьте оффер и соберите пакет заново.
+                  </p>
+                ) : null}
                 <button
                   type="button"
                   className="neu-btn mt-3 justify-center"
                   onClick={() => {
-                    setAiPackage((current) => current ? { ...current, primaryText: compliance.safeText } : current);
-                    setCompliance((current) => current ? { ...current, status: "safe" } : current);
+                    // По полям, а не одной строкой.
+                    //
+                    // safeText — это переписанная склейка трёх полей. Кнопка
+                    // клала её целиком в основной текст, а заголовок и описание
+                    // уезжали в Meta непереписанными: объявление получало свой
+                    // заголовок дважды — в headline и первой строкой основного
+                    // текста, — и запрещённая формулировка оставалась в тех
+                    // самых полях, ради которых проверку и запускали.
+                    // Запасной ветки «нет полей — положим склейку» здесь нет
+                    // намеренно. Она была бы ровно тем дефектом, ради которого
+                    // поля и разделили, и жила бы в коде как готовая к
+                    // случайному включению. Если полей нет, честнее не менять
+                    // ничего, чем склеить три поля в одно.
+                    const parts = compliance.safeParts;
+                    setAiPackage((current) => current
+                      ? {
+                          ...current,
+                          headline: parts?.headline || current.headline,
+                          primaryText: parts?.text || current.primaryText,
+                          description: parts?.description || current.description,
+                        }
+                      : current);
+                    setCompliance((current) =>
+                      current
+                        ? {
+                            ...current,
+                            status: current.safeTextStatus || current.status,
+                            issues: current.safeTextIssues || [],
+                          }
+                        : current,
+                    );
                   }}
                 >
-                  Принять безопасную версию
+                  {compliance.safeTextStatus === "blocked" || compliance.safeTextStatus === "needs_review"
+                    ? "Взять смягчённую версию"
+                    : "Принять безопасную версию"}
                 </button>
               </div>
             ) : null}

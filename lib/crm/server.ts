@@ -3645,7 +3645,14 @@ async function listItems(resource: CrmResource, req: VercelRequest, res: VercelR
     }
 
     const items = (Array.isArray(data) ? data : []).map((row) => config.fromRow(asRecord(row)));
-    const scheduleTimeZone = resource === "doctor-schedule"
+    // Пояс клиники едет пассажиром списка записей ровно по той же причине, по
+    // которой он едет с графиком: маршрут настроек доступен только владельцу и
+    // администратору, и любой другой экран, спросив его напрямую, получил бы
+    // отказ — то есть сказал бы «пояс не задан» клинике, которая его задала.
+    //
+    // Записям он нужен не меньше: без него «сегодня» на сводке считается в UTC,
+    // и в UTC+5 примерно пять часов каждую ночь экран называет чужие сутки.
+    const scheduleTimeZone = resource === "doctor-schedule" || resource === "appointments"
       ? (await readClinicScheduleTimeZone(supabase, workspaceId)) || ""
       : "";
     return sendJson(
@@ -3661,6 +3668,7 @@ async function listItems(resource: CrmResource, req: VercelRequest, res: VercelR
         // читая их, получил бы отказ — то есть экран сказал бы «пояс не задан»
         // клинике, которая его задала.
         ...(resource === "doctor-schedule" ? { scheduleAvailable: true, timeZone: scheduleTimeZone } : {}),
+        ...(resource === "appointments" ? { timeZone: scheduleTimeZone } : {}),
       }),
     );
   } catch (error) {

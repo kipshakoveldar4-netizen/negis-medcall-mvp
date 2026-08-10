@@ -670,8 +670,18 @@ export default function ContentStudio() {
   const updatePhotoTexts = (key: keyof PhotoCreativeTexts, value: string) =>
     setPhotoTexts((current) => ({ ...current, [key]: value }));
 
+  // Дисклеймер печатается на самом макете, но в проверку не отдавался — и
+  // правило про дисклеймер требовало добавить то, что уже стоит на картинке.
+  // Раньше этого не было видно: правило не срабатывало вообще ни на чём.
+  // Проверять надо весь текст, который окажется на креативе, а не три поля из
+  // четырёх.
   const photoCompliance = useMemo(
-    () => checkMetaCompliance({ headline: photoTexts.headline, text: photoTexts.offer, description: photoTexts.cta }),
+    () =>
+      checkMetaCompliance({
+        headline: photoTexts.headline,
+        text: photoTexts.offer,
+        description: [photoTexts.cta, photoTexts.disclaimer].filter(Boolean).join("\n"),
+      }),
     [photoTexts],
   );
 
@@ -2149,8 +2159,18 @@ export default function ContentStudio() {
 
           {photoCompliance.status !== "safe" ? (
             <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-3 text-sm font-semibold text-amber-900">
-              Рискованные формулировки для медицинской рекламы —{" "}
-              {photoCompliance.status === "blocked" ? "перепишите текст перед использованием." : "проверьте текст вручную."}
+              {/*
+                Заголовок раньше был один на все случаи и утверждал, что в
+                тексте есть рискованная формулировка. Единственное замечание
+                уровня review может быть про отсутствующий дисклеймер — то есть
+                про то, чего в тексте НЕТ. Называть это рискованной
+                формулировкой значит сообщать клинике неправду о её же тексте.
+              */}
+              {photoCompliance.issues.some((issue) => issue.code !== "missing_disclaimer")
+                ? `Рискованные формулировки для медицинской рекламы — ${
+                    photoCompliance.status === "blocked" ? "перепишите текст перед использованием." : "проверьте текст вручную."
+                  }`
+                : "Текст без запрещённых формулировок, но дисклеймера в нём нет."}
               <ul className="mt-1 space-y-1">
                 {(photoCompliance.issues || []).map((issue, index) => (
                   <li key={`photo-issue-${index}`}>• {issue.message}</li>
