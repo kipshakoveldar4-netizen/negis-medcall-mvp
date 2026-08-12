@@ -253,16 +253,29 @@ export function resolveCrmRoute(segments: readonly string[]): ResolvedRoute | nu
   const first = segments[0] ?? "";
   if (!first) return null;
 
+  // Поиск строго по СОБСТВЕННЫМ ключам реестра.
+  //
+  // Обычное обращение по индексу находит и ключи прототипа: `constructor`,
+  // `toString`, `valueOf`. Сегмент «constructor» проходит нормализацию — он в
+  // нижнем регистре и состоит из латиницы, — и реестр возвращал функцию
+  // Object вместо null. Дальше роутер читал у неё `methods`, получал undefined
+  // и падал с TypeError ВНЕ блока try: наружу уходил 500 вместо 404.
+  //
+  // Шапка этого файла обещает «всё, чего нет в списке, неизвестно и запрещено».
+  // Пока поиск шёл по цепочке прототипов, обещание не выполнялось.
+  const own = <T,>(registry: Readonly<Record<string, T>>, key: string): T | undefined =>
+    Object.prototype.hasOwnProperty.call(registry, key) ? registry[key] : undefined;
+
   if (segments.length >= 2) {
     const subKey = `${first}/${segments[1]}`;
-    const sub = CRM_SUBROUTE_AUTHORIZATION[subKey];
+    const sub = own(CRM_SUBROUTE_AUTHORIZATION, subKey);
     if (sub) return { key: subKey, authorization: sub };
   }
 
-  const direct = CRM_ROUTE_AUTHORIZATION[first];
+  const direct = own(CRM_ROUTE_AUTHORIZATION, first);
   if (direct) return { key: first, authorization: direct };
 
-  const resource = CRM_RESOURCE_AUTHORIZATION[first];
+  const resource = own(CRM_RESOURCE_AUTHORIZATION, first);
   if (resource) return { key: first, authorization: resource, resource: first };
 
   return null;

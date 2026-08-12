@@ -961,7 +961,11 @@ async function handleVideoGeneration(req: VercelRequest, res: VercelResponse, co
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   const resource = normalizeRouteSegment(readPathSegment(req));
-  const authorization = CONTENT_STUDIO_AUTHORIZATION[resource];
+  // По собственным ключам, а не по цепочке прототипов: сегмент «constructor»
+  // иначе находит функцию Object, и запрос падает с TypeError вместо 404.
+  const authorization = Object.prototype.hasOwnProperty.call(CONTENT_STUDIO_AUTHORIZATION, resource)
+    ? CONTENT_STUDIO_AUTHORIZATION[resource]
+    : undefined;
   if (!authorization) return sendNotFound(res);
 
   // Nothing below this line runs for an unauthenticated caller: no OpenAI

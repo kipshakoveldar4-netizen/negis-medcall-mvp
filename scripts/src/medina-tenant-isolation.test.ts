@@ -407,6 +407,26 @@ test("C6 every registered route is classified and no route is public", async () 
   assert.equal(Object.keys(registry.CRM_RESOURCE_AUTHORIZATION).length, 21, "all 21 generic resources registered");
 });
 
+test("C6a ключи прототипа не являются маршрутами", async () => {
+  const registry = (await import(pathToFileURL(registryPath).href)) as {
+    normalizeCrmSegments: (segments: string[]) => string[] | null;
+    resolveCrmRoute: (segments: string[]) => unknown;
+  };
+
+  // Шапка реестра обещает: всё, чего нет в списке, неизвестно и запрещено.
+  // Обычное обращение по индексу находило и ключи прототипа: сегмент
+  // «constructor» возвращал функцию Object, роутер читал у неё methods и падал
+  // вне блока try — наружу уходил 500 вместо 404.
+  for (const segment of ["constructor", "toString", "valueOf", "hasOwnProperty", "__proto__"]) {
+    const normalized = registry.normalizeCrmSegments([segment]);
+    const route = normalized ? registry.resolveCrmRoute(normalized) : null;
+    assert.equal(route, null, `${segment} не маршрут`);
+  }
+
+  // И настоящие маршруты при этом находятся.
+  assert.notEqual(registry.resolveCrmRoute(registry.normalizeCrmSegments(["leads"]) || []), null);
+});
+
 test("C7 health diagnostics are no longer public", async () => {
   await withRouter({ memberships: [] }, async (ctx) => {
     for (const segment of ["health", "storage-health"]) {

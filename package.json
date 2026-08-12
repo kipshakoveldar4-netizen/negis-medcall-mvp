@@ -49,6 +49,7 @@
     "test:platform-owner": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:platform-owner",
     "test:active-launch-gate": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:active-launch-gate",
     "test:no-demo-copy": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:no-demo-copy",
+    "test:platform-billing": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:platform-billing",
     "seed:clinic": "node scripts/run-pnpm.cjs --filter @workspace/scripts run seed:clinic"
   },
   "dependencies": {

@@ -66,9 +66,9 @@ type ClinicRow = {
   currency: string;
   billingPeriod: string;
   monthlyMinor: number;
-  staffCount: number;
-  leadCount: number;
-  appointmentCount: number;
+  staffCount: number | null;
+  leadCount: number | null;
+  appointmentCount: number | null;
   lastActivityAt: string;
 };
 
@@ -83,19 +83,20 @@ async function countRows(
   supabase: ReturnType<typeof getSupabaseServerClient>,
   table: string,
   workspaceId: string,
-): Promise<number> {
-  if (!supabase) return 0;
+): Promise<number | null> {
+  if (!supabase) return null;
   try {
     const { count, error } = await supabase
       .from(table)
       .select("id", { count: "exact", head: true })
       .eq("workspace_id", workspaceId);
-    if (error) return 0;
-    return typeof count === "number" ? count : 0;
+    if (error) return null;
+    return typeof count === "number" ? count : null;
   } catch {
-    // Таблицы может не быть на этом развёртывании. Ноль честнее падения:
-    // панель говорит «нечего показать», а не рушится целиком из-за счётчика.
-    return 0;
+    // null, а не 0. «В клинике ноль заявок» и «не смог посчитать заявки» —
+    // разные новости, и панель обязана их различать: ноль от сбоя выглядит
+    // как мёртвая клиника, и владелец сделает по нему вывод.
+    return null;
   }
 }
 
@@ -126,10 +127,21 @@ async function handleOverview(res: VercelResponse) {
 
   // Подписки читаются одним запросом, а не по одной на клинику: клиник может
   // стать много, а вызов панели — один.
-  const { data: subscriptionRows } = await supabase
+  const { data: subscriptionRows, error: subscriptionError } = await supabase
     .from("platform_subscriptions")
     .select("workspace_id, plan, status, price_minor, currency, billing_period, started_at")
     .eq("status", "active");
+
+  // Отказ чтения подписок молча давал «выручка 0 ₸» — число, по которому
+  // владелец сделал бы вывод о своём же бизнесе. Не прочитали — так и говорим.
+  if (subscriptionError) {
+    return sendJson(res, 502, {
+      success: false,
+      error: "Не удалось прочитать подписки",
+      code: "subscriptions_unavailable",
+      details: ["Список клиник прочитан, но выручку по нему считать нельзя."],
+    });
+  }
 
   const subscriptions = new Map<string, JsonRecord>();
   for (const row of (subscriptionRows || []).map(asRecord)) {
@@ -137,20 +149,30 @@ async function handleOverview(res: VercelResponse) {
     if (key) subscriptions.set(key, row);
   }
 
-  const clinics: ClinicRow[] = [];
-  for (const workspace of workspaces) {
-    const id = readString(workspace.id);
-    if (!UUID_PATTERN.test(id)) continue;
+  // Счётчики всех клиник считаются одной волной, а не по клинике за раз.
+  // Прежний цикл ждал три запроса на каждую клинику последовательно: при
+  // пятидесяти клиниках это пятьдесят волн, и панель открывалась минутами.
+  const known = workspaces.filter((workspace) => UUID_PATTERN.test(readString(workspace.id)));
+  const counts = await Promise.all(
+    known.map(async (workspace) => {
+      const id = readString(workspace.id);
+      const [staffCount, leadCount, appointmentCount] = await Promise.all([
+        countRows(supabase, "staff_users", id),
+        countRows(supabase, "leads", id),
+        countRows(supabase, "appointments", id),
+      ]);
+      return { id, staffCount, leadCount, appointmentCount };
+    }),
+  );
+  const countsById = new Map(counts.map((entry) => [entry.id, entry]));
 
+  const clinics: ClinicRow[] = [];
+  for (const workspace of known) {
+    const id = readString(workspace.id);
     const subscription = subscriptions.get(id) || {};
     const priceMinor = readInteger(subscription.price_minor);
     const billingPeriod = readString(subscription.billing_period) || "monthly";
-
-    const [staffCount, leadCount, appointmentCount] = await Promise.all([
-      countRows(supabase, "staff_users", id),
-      countRows(supabase, "leads", id),
-      countRows(supabase, "appointments", id),
-    ]);
+    const counted = countsById.get(id) || { staffCount: null, leadCount: null, appointmentCount: null };
 
     clinics.push({
       id,
@@ -163,9 +185,9 @@ async function handleOverview(res: VercelResponse) {
       currency: readString(subscription.currency) || "KZT",
       billingPeriod,
       monthlyMinor: subscription.plan ? monthlyMinor(priceMinor, billingPeriod) : 0,
-      staffCount,
-      leadCount,
-      appointmentCount,
+      staffCount: counted.staffCount,
+      leadCount: counted.leadCount,
+      appointmentCount: counted.appointmentCount,
       lastActivityAt: readString(subscription.started_at),
     });
   }
@@ -226,36 +248,15 @@ async function handleSubscriptions(req: VercelRequest, res: VercelResponse) {
     });
   }
 
-  const plan = readString(body.plan).toLowerCase();
-  if (!["basic", "standard", "pro"].includes(plan)) {
-    return sendJson(res, 400, {
-      success: false,
-      error: "Неизвестный тариф",
-      code: "plan_invalid",
-      details: ["Допустимые тарифы: basic, standard, pro."],
-    });
-  }
-
-  // Цену задаёт владелец, а не код. Значения по умолчанию здесь нет намеренно:
-  // подставленная цена на панели читается как настоящая цена продукта.
-  const priceMinor = readInteger(body.priceMinor ?? body.price_minor);
-  if (priceMinor < 0) {
-    return sendJson(res, 400, { success: false, error: "Цена не может быть отрицательной", code: "price_invalid" });
-  }
-
-  const billingPeriod = readString(body.billingPeriod ?? body.billing_period) || "monthly";
-  if (!["monthly", "yearly"].includes(billingPeriod)) {
-    return sendJson(res, 400, { success: false, error: "Период может быть monthly или yearly", code: "period_invalid" });
-  }
-
-  const currency = (readString(body.currency) || "KZT").toUpperCase();
-  const now = new Date().toISOString();
-
+  // PATCH меняет только статус: поставить подписку на паузу или отменить её.
+  // Прежде он требовал тариф и цену, которых у такого запроса нет по смыслу, —
+  // и паузу поставить было нельзя вообще, отказ приходил раньше проверки статуса.
   if (method === "PATCH") {
     const status = readString(body.status).toLowerCase();
     if (!["active", "paused", "cancelled"].includes(status)) {
       return sendJson(res, 400, { success: false, error: "Неизвестный статус", code: "status_invalid" });
     }
+    const now = new Date().toISOString();
     const { data, error } = await supabase
       .from("platform_subscriptions")
       .update({ status, ended_at: status === "cancelled" ? now : null, updated_at: now })
@@ -272,14 +273,67 @@ async function handleSubscriptions(req: VercelRequest, res: VercelResponse) {
     return sendJson(res, 200, { success: true, data: { item: asRecord(data) } });
   }
 
+  const plan = readString(body.plan).toLowerCase();
+  if (!["basic", "standard", "pro"].includes(plan)) {
+    return sendJson(res, 400, {
+      success: false,
+      error: "Неизвестный тариф",
+      code: "plan_invalid",
+      details: ["Допустимые тарифы: basic, standard, pro."],
+    });
+  }
+
+  // Цену задаёт владелец, а не код. Значения по умолчанию здесь нет намеренно:
+  // подставленная цена на панели читается как настоящая цена продукта.
+  //
+  // Пустое поле — это НЕ ноль. readInteger вернул бы 0 и на пустой строке, и на
+  // мусоре, и подписка сохранялась бы «бесплатной» с зелёным сообщением об
+  // успехе. Бесплатный доступ существует, но его назначают, а не получают по
+  // недосмотру.
+  const rawPrice = body.priceMinor ?? body.price_minor;
+  const priceNumber = typeof rawPrice === "number" ? rawPrice : Number(readString(rawPrice));
+  if (rawPrice === undefined || rawPrice === null || readString(rawPrice) === "" || !Number.isFinite(priceNumber)) {
+    return sendJson(res, 400, {
+      success: false,
+      error: "Нужна цена",
+      code: "price_required",
+      details: ["Укажите цену в тиынах. Ноль — законное значение, но его нужно указать явно."],
+    });
+  }
+  const priceMinor = Math.trunc(priceNumber);
+  if (priceMinor < 0) {
+    return sendJson(res, 400, { success: false, error: "Цена не может быть отрицательной", code: "price_invalid" });
+  }
+
+  const billingPeriod = readString(body.billingPeriod ?? body.billing_period) || "monthly";
+  if (!["monthly", "yearly"].includes(billingPeriod)) {
+    return sendJson(res, 400, { success: false, error: "Период может быть monthly или yearly", code: "period_invalid" });
+  }
+
+  const currency = (readString(body.currency) || "KZT").toUpperCase();
+  const now = new Date().toISOString();
+
   // POST — новая подписка. Прежняя действующая закрывается: частичный
   // уникальный индекс миграции 034 не даст существовать двум сразу, и лучше
   // закрыть её здесь явно, чем получить отказ базы с непонятным текстом.
-  await supabase
+  const { error: cancelError } = await supabase
     .from("platform_subscriptions")
     .update({ status: "cancelled", ended_at: now, updated_at: now })
     .eq("workspace_id", workspaceId)
     .eq("status", "active");
+
+  // Отказ отмены игнорировать нельзя: следом идёт вставка, а частичный
+  // уникальный индекс не даст существовать двум действующим подпискам сразу.
+  // Молча проглотив отказ, мы получили бы непонятную ошибку базы вместо
+  // внятной причины.
+  if (cancelError) {
+    return sendJson(res, 502, {
+      success: false,
+      error: "Не удалось закрыть прежнюю подписку",
+      code: "unavailable",
+      details: ["Новая подписка не создана: у клиники осталась прежняя."],
+    });
+  }
 
   const { data, error } = await supabase
     .from("platform_subscriptions")

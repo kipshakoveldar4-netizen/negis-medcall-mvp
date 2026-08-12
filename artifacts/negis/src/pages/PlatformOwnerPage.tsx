@@ -28,9 +28,11 @@ type Clinic = {
   currency: string;
   billingPeriod: string;
   monthlyMinor: number;
-  staffCount: number;
-  leadCount: number;
-  appointmentCount: number;
+  // null — «не смог посчитать», а не ноль. Мёртвая клиника и сбой чтения
+  // выглядят одинаково только если их сложить в одно число.
+  staffCount: number | null;
+  leadCount: number | null;
+  appointmentCount: number | null;
 };
 
 type Totals = {
@@ -69,6 +71,7 @@ export default function PlatformOwnerPage() {
   const [editing, setEditing] = useState<string>("");
   const [plan, setPlan] = useState<PlanKey>("basic");
   const [price, setPrice] = useState("");
+  const [period, setPeriod] = useState<"monthly" | "yearly">("monthly");
   const [saving, setSaving] = useState(false);
 
   async function load() {
@@ -99,14 +102,31 @@ export default function PlatformOwnerPage() {
     setEditing(clinic.id);
     const nextPlan = (PLAN_KEYS as readonly string[]).includes(clinic.plan) ? (clinic.plan as PlanKey) : "basic";
     setPlan(nextPlan);
-    // Подставляется либо уже назначенная цена, либо подсказка из тарифа.
-    // Подсказка — это подсказка: она правится до сохранения, и сохраняется
-    // именно то, что видно в поле.
-    setPrice(String(Math.trunc((clinic.priceMinor || PLANS[nextPlan].suggestedMonthlyMinor) / 100)));
+
+    // Период берётся у самой подписки, а не назначается формой.
+    //
+    // Прежде форма всегда отправляла monthly. У клиники на годовой подписке
+    // price_minor — годовая сумма, и правка тарифа превращала её в месячную по
+    // годовой цене: выручка платформы вырастала в двенадцать раз одним нажатием.
+    const nextPeriod = clinic.billingPeriod === "yearly" ? "yearly" : "monthly";
+    setPeriod(nextPeriod);
+
+    // Уже назначенная цена показывается как есть, включая ноль: бесплатный
+    // доступ существует и подставлять поверх него прайс нельзя. Подсказка из
+    // тарифа берётся только когда подписки нет вовсе.
+    const assigned = clinic.plan ? clinic.priceMinor : PLANS[nextPlan].suggestedMonthlyMinor;
+    setPrice(String(Math.trunc(assigned / 100)));
   }
 
   async function saveSubscription(clinicId: string) {
-    const whole = Number(price.replace(/\s/g, ""));
+    const typed = price.replace(/\s/g, "");
+    // Пустое поле — это не ноль: Number("") равен нулю, и подписка сохранялась
+    // бы бесплатной с зелёным сообщением об успехе.
+    if (!typed) {
+      toast.error("Укажите цену. Ноль — законное значение, но его нужно ввести явно.");
+      return;
+    }
+    const whole = Number(typed);
     if (!Number.isFinite(whole) || whole < 0) {
       toast.error("Цена должна быть неотрицательным числом");
       return;
@@ -120,7 +140,7 @@ export default function PlatformOwnerPage() {
           workspaceId: clinicId,
           plan,
           priceMinor: Math.round(whole * 100),
-          billingPeriod: "monthly",
+          billingPeriod: period,
           currency: "KZT",
         }),
       });
@@ -217,9 +237,9 @@ export default function PlatformOwnerPage() {
                     <td className="px-4 py-3 font-semibold text-[#334155]">
                       {clinic.plan ? formatMinor(clinic.monthlyMinor, clinic.currency) : "—"}
                     </td>
-                    <td className="px-4 py-3 font-semibold text-[#334155]">{clinic.staffCount}</td>
-                    <td className="px-4 py-3 font-semibold text-[#334155]">{clinic.leadCount}</td>
-                    <td className="px-4 py-3 font-semibold text-[#334155]">{clinic.appointmentCount}</td>
+                    <td className="px-4 py-3 font-semibold text-[#334155]">{clinic.staffCount ?? "—"}</td>
+                    <td className="px-4 py-3 font-semibold text-[#334155]">{clinic.leadCount ?? "—"}</td>
+                    <td className="px-4 py-3 font-semibold text-[#334155]">{clinic.appointmentCount ?? "—"}</td>
                     <td className="px-4 py-3">
                       <button type="button" className="neu-btn text-sm" onClick={() => startEditing(clinic)}>
                         {clinic.plan ? "Изменить" : "Назначить"}
@@ -236,7 +256,7 @@ export default function PlatformOwnerPage() {
       {editing ? (
         <section className="mt-6 neu-card p-5">
           <h3 className="text-base font-black text-[#0F172A]">Подписка клиники</h3>
-          <div className="mt-3 grid gap-3 sm:grid-cols-3">
+          <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
             <label className="text-sm font-semibold text-[#334155]">
               Тариф
               <select
@@ -245,7 +265,9 @@ export default function PlatformOwnerPage() {
                 onChange={(event) => {
                   const next = event.target.value as PlanKey;
                   setPlan(next);
-                  setPrice(String(Math.trunc(PLANS[next].suggestedMonthlyMinor / 100)));
+                  // Подсказка тарифа — месячная. При годовом периоде подставлять
+                  // её в поле нельзя: получилась бы годовая цена, равная месячной.
+                  if (period === "monthly") setPrice(String(Math.trunc(PLANS[next].suggestedMonthlyMinor / 100)));
                 }}
               >
                 {PLAN_KEYS.map((key) => (
@@ -256,7 +278,18 @@ export default function PlatformOwnerPage() {
               </select>
             </label>
             <label className="text-sm font-semibold text-[#334155]">
-              Цена в месяц, ₸
+              Период
+              <select
+                className="neu-input mt-1 w-full"
+                value={period}
+                onChange={(event) => setPeriod(event.target.value === "yearly" ? "yearly" : "monthly")}
+              >
+                <option value="monthly">Помесячно</option>
+                <option value="yearly">За год</option>
+              </select>
+            </label>
+            <label className="text-sm font-semibold text-[#334155]">
+              {period === "yearly" ? "Цена за год, ₸" : "Цена в месяц, ₸"}
               <input className="neu-input mt-1 w-full" value={price} onChange={(event) => setPrice(event.target.value)} />
             </label>
             <div className="flex items-end gap-2">
