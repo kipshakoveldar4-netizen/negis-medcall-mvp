@@ -10,6 +10,7 @@ import { useAuth } from "@/contexts/AuthContext";
 // chunk so the first paint never waits on a second request.
 import Landing from "@/pages/Landing";
 import DemoPlaceholder from "@/pages/DemoPlaceholder";
+import { UpdatePrompt } from "@/components/layout/UpdatePrompt";
 import NotFound from "@/pages/not-found";
 import FbPixelInit from "@/components/FbPixelInit";
 import { WorkspacePicker } from "@/components/WorkspacePicker";
@@ -291,6 +292,7 @@ function App() {
             <WorkspacePicker />
             <RoutePrefetcher />
             <Router />
+            <UpdatePrompt />
             <Toaster position="bottom-right" />
           </TooltipProvider>
         </AuthProvider>

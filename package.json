@@ -50,6 +50,8 @@
     "test:active-launch-gate": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:active-launch-gate",
     "test:no-demo-copy": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:no-demo-copy",
     "test:platform-billing": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:platform-billing",
+    "test:installable-app": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:installable-app",
+    "build:icons": "node scripts/run-pnpm.cjs --filter @workspace/scripts run build:icons",
     "seed:clinic": "node scripts/run-pnpm.cjs --filter @workspace/scripts run seed:clinic"
   },
   "dependencies": {
