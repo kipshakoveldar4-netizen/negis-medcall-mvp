@@ -88,17 +88,24 @@ test("ND2 сама проверка умеет краснеть", () => {
 
 test("ND3 подпись режима без базы осталась на месте", async () => {
   // Слово убрано, смысл сохранён. Экран, скрывающий, что данные лежат в
-  // браузере, а не в базе клиники, — это та самая неправда, которую вся
+  // браузере, а не в базе клиники, — та самая неправда, которую вся
   // остальная работа из продукта убирает.
+  //
+  // Админ-центр из этого списка вышел: блок тарифа теперь отвечает на другой
+  // вопрос — какой у клиники тариф, а не есть ли у неё база, — и подписывать
+  // там режим больше нечему.
   const sidebar = await readFile(path.join(uiRoot, "components", "layout", "Sidebar.tsx"), "utf8");
   const dashboard = await readFile(path.join(uiRoot, "pages", "Dashboard.tsx"), "utf8");
-  const admin = await readFile(path.join(uiRoot, "pages", "AdminCenter.tsx"), "utf8");
 
-  for (const [name, source] of [["боковое меню", sidebar], ["сводка", dashboard], ["админ-центр", admin]] as const) {
+  for (const [name, source] of [["боковое меню", sidebar], ["сводка", dashboard]] as const) {
     assert.ok(/Пробный доступ/.test(source), `${name}: режим без базы обязан быть подписан`);
   }
-
-  // И подпись обязана зависеть от состояния, а не быть постоянной строкой.
   assert.ok(/isDemoMode \? 'Пробный доступ'/.test(sidebar), "боковое меню выбирает подпись по состоянию");
-  assert.ok(/workspaceId === "demo-workspace" \? "Пробный доступ"/.test(admin), "админ-центр — тоже");
+});
+
+test("ND4 тариф клиники не подменяется прайсом", async () => {
+  const calculator = await readFile(path.join(uiRoot, "components", "admin", "PlanCalculator.tsx"), "utf8");
+
+  assert.ok(calculator.includes("Тариф не назначен"), "отсутствие подписки названо вслух");
+  assert.ok(calculator.includes("Не удалось прочитать тариф"), "отказ чтения — не «тарифа нет»");
 });

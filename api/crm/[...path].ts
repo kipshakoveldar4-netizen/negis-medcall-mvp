@@ -21,6 +21,7 @@ import {
   handleVideoProcessingJobs,
   attachWorkspaceContext,
   type CrmResource,
+  readWorkspaceContext,
 } from "../../lib/crm/server";
 import { normalizeCrmSegments, resolveCrmRoute } from "../../lib/crm/authorization";
 import { handleStaffInvitationAccept, handleStaffInvitations } from "../../lib/crm/staff-invitations";
@@ -32,7 +33,7 @@ import {
   WorkspaceAdminAuthError,
 } from "../../lib/auth/server";
 import { PlatformAuthError, requirePlatformOwner } from "../../lib/auth/platform";
-import { handlePlatformOverview, handlePlatformSubscriptions } from "../../lib/crm/platform";
+import { handlePlatformOverview, handlePlatformSubscriptions, handleWorkspaceSubscription } from "../../lib/crm/platform";
 
 // Security-2B — deny-by-default tenant authorization for /api/crm/*.
 //
@@ -171,6 +172,12 @@ async function dispatch(
   switch (routeKey) {
     case "auth-context":
       return handleCrmAuthContext(req, res);
+    case "subscription": {
+      // Арендатор из проверенного контекста: тот же источник, что и у любого
+      // другого браузерного маршрута.
+      const context = readWorkspaceContext(req);
+      return handleWorkspaceSubscription(context ? context.workspaceId : "", res);
+    }
     case "platform-overview":
       return handlePlatformOverview(req, res);
     case "platform-subscriptions":

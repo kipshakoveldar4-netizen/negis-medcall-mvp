@@ -133,6 +133,41 @@ test("PB9 суммы показываются с валютой и без раз
   assert.equal(formatMinor(1_234_567_800), `12${NB}345${NB}678${NB}₸`, "разряды режутся по три");
 });
 
+test("PB11 клиника читает СВОЮ подписку, а не чужую", async () => {
+  const handler = await codeOf(handlerPath);
+  const registry = (await import(pathToFileURL(path.join(repoRoot, "lib", "crm", "authorization.ts")).href)) as {
+    CRM_ROUTE_AUTHORIZATION: Record<string, { kind: string; methods: string[]; roles?: readonly string[] }>;
+  };
+
+  const route = registry.CRM_ROUTE_AUTHORIZATION.subscription;
+  assert.ok(route, "маршрут есть");
+  assert.equal(route.kind, "browser", "арендатор берётся из контекста, а не из списка владельцев");
+  assert.deepEqual([...route.methods], ["GET"], "только чтение: тариф назначает платформа");
+  assert.ok(route.roles && route.roles.length > 0, "цена — коммерческое условие, регистратору она не нужна");
+
+  // Фильтр арендатора в самой выборке: без него это был бы второй способ
+  // узнать условия чужой клиники.
+  const start = handler.indexOf("export async function handleWorkspaceSubscription");
+  const body = handler.slice(start, handler.indexOf("export async function handlePlatformOverview"));
+  assert.ok(/\.eq\("workspace_id", workspaceId\)/.test(body), "выборка прибита к арендатору");
+  assert.ok(/code: "subscription_unavailable"/.test(body), "отказ чтения не выдаётся за «тарифа нет»");
+});
+
+test("PB12 калькулятор не утверждает чужих цен", async () => {
+  const calculator = await codeOf(
+    path.join(repoRoot, "artifacts", "negis", "src", "components", "admin", "PlanCalculator.tsx"),
+  );
+
+  // Цены Wazzup и рекламный бюджет — чужие тарифы: они меняются без
+  // нашего ведома, и число в коде было бы утверждением чужой цены как своей.
+  assert.ok(!/6\s*000|12\s*000|24\s*000|36\s*000/.test(calculator), "тарифы вендоров не вписаны");
+  assert.ok(/setWazzup/.test(calculator) && /setAdBudget/.test(calculator), "их вводит оператор");
+
+  // Назначенная цена выигрывает у прайса: у клиники может быть особое условие.
+  assert.ok(/subscription\?\.plan === plan/.test(calculator), "своя цена берётся из подписки");
+  assert.ok(/billing_period === "yearly"/.test(calculator), "и годовая приводится к месяцу");
+});
+
 test("PB10 цены тарифов — те, что назначил владелец", () => {
   // Подсказка для панели, а не источник правды: правда живёт в строке
   // подписки конкретной клиники. Но подсказка обязана совпадать с прайсом.

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useLocation } from "wouter";
+import { PlanCalculator } from "@/components/admin/PlanCalculator";
 import {
   AlertTriangle,
   Bot,
@@ -2317,15 +2318,15 @@ export default function AdminCenter() {
             domain yet — no payment claims, no fake purchase flow, no dead CTA
             buttons. The only action is a functional workspace-ID copy for support. */}
         <div className="grid gap-4 lg:grid-cols-2">
-          <section className="neu-card" aria-label="Тариф и подключение">
-            <p className="text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">Тариф и подключение</p>
-            <h2 className="mt-1 text-base font-black text-[#0F172A]">
-              {workspaceId === "demo-workspace" ? "Пробный доступ" : "Пилотное подключение"}
-            </h2>
-            <p className="mt-1 text-sm text-[#64748B]">
-              Автоматическая оплата пока не подключена. Условия пилота и тариф согласуются с менеджером Medina OS.
-            </p>
-          </section>
+          {/*
+            Здесь была одна фраза: «условия пилота и тариф согласуются с
+            менеджером». Тарифов на экране не было вовсе — их ключи жили во
+            фронтенде, цен не было нигде, и клиника не могла узнать, за что и
+            сколько платит. Теперь текущий тариф читается из её собственной
+            подписки, рядом стоит прайс, а расчёт стоимости считает нашу часть
+            счёта и позволяет вписать чужую.
+          */}
+          <PlanCalculator />
           <section className="neu-card" aria-label="Поддержка">
             <p className="text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">Поддержка</p>
             <h2 className="mt-1 text-base font-black text-[#0F172A]">Связь с Medina OS</h2>

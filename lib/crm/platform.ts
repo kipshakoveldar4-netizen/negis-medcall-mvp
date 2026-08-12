@@ -357,6 +357,45 @@ async function handleSubscriptions(req: VercelRequest, res: VercelResponse) {
   return sendJson(res, 201, { success: true, data: { item: asRecord(data) } });
 }
 
+/**
+ * Подписка ЭТОЙ клиники: тариф, цена, период.
+ *
+ * Арендатор берётся из проверенного контекста, а не из запроса, и в выборке
+ * стоит фильтром — иначе это был бы второй, никем не охраняемый способ узнать
+ * условия чужой клиники.
+ *
+ * Нет строки — так и отвечаем: `subscription: null`. Подставить сюда цену из
+ * прайса значило бы показать клинике счёт, которого ей никто не выставлял.
+ */
+export async function handleWorkspaceSubscription(
+  workspaceId: string,
+  res: VercelResponse,
+) {
+  const supabase = getSupabaseServerClient();
+  if (!supabase || !UUID_PATTERN.test(workspaceId)) {
+    return sendJson(res, 200, { success: true, data: { subscription: null } });
+  }
+
+  const { data, error } = await supabase
+    .from("platform_subscriptions")
+    .select("plan, status, price_minor, currency, billing_period, started_at")
+    .eq("workspace_id", workspaceId)
+    .eq("status", "active")
+    .maybeSingle();
+
+  if (error) {
+    // Отказ чтения — не «подписки нет». Второе экран показал бы как «тариф не
+    // назначен», и клиника решила бы, что ей ничего не выставлено.
+    return sendJson(res, 502, {
+      success: false,
+      error: "Не удалось прочитать тариф",
+      code: "subscription_unavailable",
+    });
+  }
+
+  return sendJson(res, 200, { success: true, data: { subscription: data ? asRecord(data) : null } });
+}
+
 export async function handlePlatformOverview(_req: VercelRequest, res: VercelResponse) {
   return handleOverview(res);
 }

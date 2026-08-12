@@ -13,6 +13,7 @@ const negisSrc = path.join(repoRoot, "artifacts", "negis", "src");
 
 const onboarding = await readFile(path.join(negisSrc, "pages", "Onboarding.tsx"), "utf8");
 const admin = await readFile(path.join(negisSrc, "pages", "AdminCenter.tsx"), "utf8");
+const calculator = await readFile(path.join(negisSrc, "components", "admin", "PlanCalculator.tsx"), "utf8");
 const acc = await readFile(path.join(negisSrc, "pages", "AiControlCenter.tsx"), "utf8");
 
 test("01 the old fake onboarding wizard is gone", () => {
@@ -58,11 +59,15 @@ test("07 the dashboard reminder is dismiss-only convenience", () => {
   assert.ok(!onboarding.includes("negis_onboarding_hint_dismissed"), "onboarding completion ignores the hint flag");
 });
 
-test("08 pilot status makes no payment claims", () => {
-  assert.ok(admin.includes("Тариф и подключение"));
-  assert.ok(admin.includes("Автоматическая оплата пока не подключена"));
-  for (const forbidden of ["Активная подписка", "Оплачено", "checkout", "invoice", "Оплатить картой"]) {
-    assert.ok(!admin.includes(forbidden), `pilot card must not claim ${forbidden}`);
+test("08 тариф показан, но оплаты не обещает", () => {
+  // Блок с одной фразой «условия согласуются с менеджером» заменён
+  // настоящим тарифом и расчётом стоимости. Инвариант при этом тот же и
+  // его важно удержать: платёжного флоу в продукте нет, и экран не вправе
+  // изображать его кнопкой, которая никуда не ведёт.
+  assert.ok(admin.includes("PlanCalculator"), "блок тарифа на месте");
+  assert.ok(calculator.includes("Автоматической оплаты в продукте нет"), "отсутствие оплаты названо вслух");
+  for (const forbidden of ["Оплачено", "checkout", "invoice", "Оплатить картой", "Продлить подписку"]) {
+    assert.ok(!calculator.includes(forbidden), `экран не вправе обещать ${forbidden}`);
   }
 });
 
@@ -74,11 +79,13 @@ test("09 support surface has no fabricated contacts", () => {
   }
 });
 
-test("10 рабочее пространство без базы подписано честно", () => {
-  // Слово «демо» убрано с платформы по решению владельца. Сама подпись
-  // осталась и обязана остаться: экран, скрывающий, что данные лежат
-  // в браузере, а не в базе клиники, — это та самая неправда,
-  // которую вся остальная работа из продукта убирает. Менялось слово, не смысл.
-  assert.ok(admin.includes('workspaceId === "demo-workspace" ? "Пробный доступ" : "Пилотное подключение"'));
-  assert.ok(!/>\s*Демо-режим\s*</.test(admin), "слова «демо» на экране нет");
+test("10 тариф клиники показан честно", () => {
+  // Нет строки подписки — так и написано. Подставить сюда цену из прайса
+  // значило бы показать клинике счёт, которого ей никто не выставлял.
+  assert.ok(calculator.includes("Тариф не назначен"), "отсутствие подписки называется вслух");
+  assert.ok(/\/api\/crm\/subscription/.test(calculator), "текущий тариф читается из подписки клиники");
+  assert.ok(
+    /отказ чтения/i.test(calculator) || calculator.includes("Не удалось прочитать тариф"),
+    "отказ чтения отличается от «тарифа нет»",
+  );
 });
