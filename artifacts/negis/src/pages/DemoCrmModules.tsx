@@ -364,7 +364,7 @@ function PageHeader({ title, subtitle, action }: { title: string; subtitle: stri
   return (
     <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
       <div className="min-w-0">
-        <p className="text-xs font-semibold uppercase tracking-[0.18em] text-[#64748B]">Demo CRM</p>
+        <p className="text-xs font-semibold uppercase tracking-[0.18em] text-[#64748B]">Medina CRM</p>
         <h1 className="mt-2 break-words text-2xl font-black text-[#0F172A] sm:text-3xl">{title}</h1>
         <p className="mt-2 max-w-3xl text-sm leading-relaxed text-[#64748B]">{subtitle}</p>
       </div>
@@ -473,7 +473,7 @@ export function DemoClients() {
       source: "Ресепшн",
       lastVisit: "Новая заявка",
       status: "Новый",
-      comment: "Добавлен в demo CRM",
+      comment: "Добавлен в CRM",
     });
     toast.success("Клиент добавлен локально");
   };
@@ -482,12 +482,18 @@ export function DemoClients() {
     <PageLayout>
       <div className="space-y-7">
         <PageHeader title="Клиенты" subtitle="Единая база пациентов Concept Clinic с источниками, статусами и последними визитами." action={<PrimaryButton onClick={addClient}><UserPlus size={16} />Добавить клиента</PrimaryButton>} />
+        {/*
+          Плитки здесь были захардкожены и показывались как данные клиники:
+          одни и те же числа при любой базе, включая пустую. Осталось только
+          то, что считается по реально загруженным строкам; для остального
+          источника в продукте нет, и правдоподобное число вместо него —
+          худший из возможных ответов.
+        */}
         <MetricGrid
           metrics={[
-            { label: "Всего клиентов", value: "128", icon: Users, tone: "blue" },
-            { label: "Новые за неделю", value: "24", icon: UserPlus, tone: "teal" },
-            { label: "Повторные", value: "46", icon: CheckCircle2, tone: "green" },
-            { label: "VIP", value: "8", icon: Crown, tone: "amber" },
+            { label: "Всего клиентов", value: String(items.length), icon: Users, tone: "blue" },
+            { label: "Новые", value: String(items.filter((item) => String(item.status) === "new").length), icon: UserPlus, tone: "teal" },
+            { label: "Повторные", value: String(items.filter((item) => String(item.status) === "repeat").length), icon: CheckCircle2, tone: "green" },
           ]}
         />
         <section className="neu-card">
@@ -632,64 +638,12 @@ export function DemoAppointments() {
   );
 }
 
-export function DemoReception() {
-  const { items, updateItem } = useDemoCollection("negis_demo_reception", receptionSeed);
-
-  const action = (id: string, label: string) => {
-    updateItem(id, { status: label });
-    toast.success(`${label}: действие сохранено`);
-  };
-
-  return (
-    <PageLayout>
-      <div className="space-y-7">
-        <PageHeader title="Ресепшн" subtitle="Операционный пульт: входящие лиды, звонки на сегодня и неподтверждённые записи." />
-        <MetricGrid
-          metrics={[
-            { label: "Входящие лиды", value: "12", icon: Users, tone: "blue" },
-            { label: "Звонки сегодня", value: "18", icon: PhoneCall, tone: "teal" },
-            { label: "Неподтверждённые", value: "4", icon: CalendarCheck, tone: "amber" },
-            { label: "Закрыто", value: "9", icon: CheckCircle2, tone: "green" },
-          ]}
-        />
-        <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">
-          <section className="neu-card">
-            <h2 className="mb-4 text-lg font-bold text-[#0F172A]">Очередь входящих лидов</h2>
-            <div className="space-y-3">
-              {items.map((lead) => (
-                <div key={lead.id} className="neu-sm p-4">
-                  <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-                    <div>
-                      <p className="font-bold text-[#0F172A]">{lead.name}</p>
-                      <p className="text-sm text-[#64748B]">{lead.phone} · {lead.source}</p>
-                      <p className="mt-1 text-sm text-[#334155]">{lead.request}</p>
-                    </div>
-                    <StatusPill value={lead.status} />
-                  </div>
-                  <div className="mt-4 flex flex-wrap gap-2">
-                    {["Позвонить", "Написать WhatsApp", "Записать", "Закрыть"].map((label) => (
-                      <button key={`${lead.id}-${label}`} type="button" className="neu-btn px-3 py-1.5 text-xs" onClick={() => action(lead.id, label)}>
-                        {label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </section>
-          <aside className="neu-card">
-            <h2 className="mb-4 text-lg font-bold text-[#0F172A]">Фокус дня</h2>
-            <div className="space-y-3">
-              {["Перезвонить пропущенные до 14:00", "Подтвердить 4 записи", "Отправить WhatsApp по новым лидам"].map((item) => (
-                <div key={item} className="rounded-xl bg-[#F8FAFC] p-4 text-sm font-semibold text-[#334155]">{item}</div>
-              ))}
-            </div>
-          </aside>
-        </div>
-      </div>
-    </PageLayout>
-  );
-}
+// Экран «Ресепшн» удалён.
+//
+// У него не было источника данных вообще: ни маршрута в API, ни ресурса в
+// реестре. Любому пользователю настоящей клиники он показывал трёх
+// выдуманных пациентов с телефонами — одни и те же при любой базе,
+// включая пустую. /reception теперь ведёт на заявки.
 
 export function DemoLeads() {
   const { items, addItem } = useDemoCollection("negis_demo_leads", leadsSeed, {
@@ -799,12 +753,17 @@ export function DemoCalls() {
     <PageLayout>
       <div className="space-y-7">
         <PageHeader title="Звонки" subtitle="Журнал разговоров, пропущенные вызовы и блок Medina AI телефониста." />
+        {/*
+          Плитки здесь были захардкожены и показывались как данные клиники:
+          одни и те же числа при любой базе, включая пустую. Осталось только
+          то, что считается по реально загруженным строкам; для остального
+          источника в продукте нет, и правдоподобное число вместо него —
+          худший из возможных ответов.
+        */}
         <MetricGrid
           metrics={[
-            { label: "Всего звонков", value: "18", icon: PhoneCall, tone: "blue" },
-            { label: "Принято Medina", value: "11", icon: Bot, tone: "teal" },
-            { label: "Пропущено", value: "3", icon: PhoneCall, tone: "rose" },
-            { label: "Записей после звонка", value: "7", icon: CalendarCheck, tone: "green" },
+            { label: "Всего звонков", value: String(items.length), icon: PhoneCall, tone: "blue" },
+            { label: "Пропущено", value: String(items.filter((item) => String(item.result) === "missed").length), icon: PhoneCall, tone: "rose" },
           ]}
         />
         <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">
@@ -973,7 +932,7 @@ export function DemoChat() {
   return (
     <PageLayout>
       <div className="space-y-7">
-        <PageHeader title="Чат" subtitle="Внутренняя коммуникация клиники и demo-диалоги по операционным задачам." />
+        <PageHeader title="Чат" subtitle="Внутренняя коммуникация клиники по операционным задачам." />
         <section className="grid min-h-[620px] gap-6 lg:grid-cols-[320px_minmax(0,1fr)]">
           <aside className="neu-card">
             <h2 className="mb-4 text-lg font-bold text-[#0F172A]">Диалоги</h2>
@@ -1007,131 +966,20 @@ export function DemoChat() {
   );
 }
 
-export function DemoMarket() {
-  const modules = [
-    { title: "AI Контент-студия", text: "Пакеты контента: сценарии, тексты объявлений, prompts и WhatsApp-сообщения.", href: "/content-studio", icon: Sparkles },
-    { title: "AI запуск рекламы", text: "ИИ заполнит кампанию, анализ креативов и PAUSED запуск в Meta.", href: "/ads-automation", icon: Target },
-    { title: "Реклама", text: "Meta Ads MVP и настройки рекламного кабинета.", href: "/ads", icon: Megaphone },
-    { title: "Отчёты", text: "Недельная аналитика, CPL, записи и рекомендации AI.", href: "/reports", icon: BarChart3 },
-  ];
+// Экран «Маркет» удалён.
+//
+// Он показывал четыре плитки с выдуманными числами — 300 USD расхода, 24 лида,
+// CPL 12.5, 7 записей, — не связанными ни с одним источником данных, и вёл на
+// маршрут, которого в продукте больше нет. Маршрут /market и /marketplace теперь
+// отдаёт MarketplacePage: каталог того, что клиника действительно может
+// подключить, с честным состоянием каждой карточки.
 
-  return (
-    <PageLayout>
-      <div className="space-y-7">
-        <PageHeader title="Маркет" subtitle="Маркетинговый центр: контент, таргетинг, рекламные кампании и отчёты." />
-        <MetricGrid
-          metrics={[
-            { label: "Расход", value: "300 USD", icon: WalletCards, tone: "amber" },
-            { label: "Лиды", value: "24", icon: Users, tone: "blue" },
-            { label: "CPL", value: "12.5 USD", icon: Target, tone: "teal" },
-            { label: "Записи", value: "7", icon: CalendarCheck, tone: "green" },
-          ]}
-        />
-        <div className="neu-card">
-          <div className="mb-4 flex items-center justify-between">
-            <h2 className="text-lg font-bold text-[#0F172A]">ROMI demo</h2>
-            <span className="rounded-full bg-green-50 px-3 py-1 text-xs font-bold text-green-700">+218%</span>
-          </div>
-          <p className="text-sm text-[#64748B]">Demo расчёт показывает, как маркетинг связан с лидами, записями и доходом клиники.</p>
-        </div>
-        <div className="grid gap-5 md:grid-cols-2 xl:grid-cols-4">
-          {modules.map(({ title, text, href, icon: Icon }) => (
-            <Link key={href} href={href}>
-              <article className="neu-card h-full cursor-pointer transition-transform hover:-translate-y-0.5">
-                <div className="mb-5 flex h-11 w-11 items-center justify-center rounded-xl bg-[#E0F2FE] text-[#0369A1]">
-                  <Icon size={21} />
-                </div>
-                <h2 className="text-lg font-black text-[#0F172A]">{title}</h2>
-                <p className="mt-2 text-sm leading-relaxed text-[#64748B]">{text}</p>
-                <p className="mt-5 text-sm font-bold text-[#1A56DB]">Открыть</p>
-              </article>
-            </Link>
-          ))}
-        </div>
-      </div>
-    </PageLayout>
-  );
-}
-
-export function DemoReports() {
-  const weekly = [
-    ["Понедельник", "31", "6", "19%", "420 000 ₸"],
-    ["Вторник", "28", "5", "18%", "360 000 ₸"],
-    ["Среда", "42", "9", "21%", "610 000 ₸"],
-    ["Четверг", "37", "8", "22%", "540 000 ₸"],
-    ["Пятница", "44", "11", "25%", "740 000 ₸"],
-  ];
-
-  return (
-    <PageLayout>
-      <div className="space-y-7">
-        <PageHeader title="Отчёты" subtitle="Demo аналитика по лидам, записям, конверсии и доходу Concept Clinic." action={<Link href="/ads-automation"><div className="neu-btn-primary inline-flex items-center gap-2 px-5 py-2.5 text-sm"><Target size={16} />AI запуск рекламы</div></Link>} />
-        <MetricGrid
-          metrics={[
-            { label: "Лиды", value: "182", icon: Users, tone: "blue" },
-            { label: "Записи", value: "39", icon: CalendarCheck, tone: "green" },
-            { label: "Конверсия", value: "21%", icon: BarChart3, tone: "teal" },
-            { label: "Доход demo", value: "2.67M ₸", icon: WalletCards, tone: "amber" },
-          ]}
-        />
-        <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">
-          <section className="neu-card">
-            <h2 className="mb-4 text-lg font-bold text-[#0F172A]">Недельный отчёт</h2>
-            <div className="space-y-3 md:hidden">
-              {weekly.map(([day, leads, appointments, conversion, revenue]) => (
-                <article key={day} className="neu-sm p-4">
-                  <div className="flex items-center justify-between gap-3">
-                    <h3 className="font-black text-[#0F172A]">{day}</h3>
-                    <span className="rounded-full bg-green-50 px-3 py-1 text-xs font-bold text-green-700">{conversion}</span>
-                  </div>
-                  <div className="mt-4 grid grid-cols-2 gap-3">
-                    <MobileDetail label="Лиды" value={leads} />
-                    <MobileDetail label="Записи" value={appointments} />
-                    <MobileDetail label="Доход" value={revenue} />
-                  </div>
-                </article>
-              ))}
-            </div>
-            <div className="hidden overflow-x-auto md:block">
-            <table className="w-full min-w-[680px] text-left text-sm">
-              <thead className="text-xs uppercase text-[#94A3B8]">
-                <tr>
-                  {["День", "Лиды", "Записи", "Конверсия", "Доход"].map((header) => (
-                    <th key={header} className="border-b border-[#E7ECF3] px-3 py-3 font-bold">{header}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {weekly.map(([day, leads, appointments, conversion, revenue]) => (
-                  <tr key={day} className="border-b border-[#EEF2F7] last:border-0">
-                    <td className="px-3 py-4 font-bold text-[#0F172A]">{day}</td>
-                    <td className="px-3 py-4">{leads}</td>
-                    <td className="px-3 py-4">{appointments}</td>
-                    <td className="px-3 py-4">{conversion}</td>
-                    <td className="px-3 py-4 font-bold text-[#0F172A]">{revenue}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            </div>
-          </section>
-          <aside className="neu-card">
-            <h2 className="mb-4 text-lg font-bold text-[#0F172A]">Рекомендации AI</h2>
-            <div className="space-y-3">
-              {[
-                "Усилить follow-up по пропущенным звонкам до 15 минут.",
-                "Продолжить тест Reels-креативов для консультаций.",
-                "Разделить лиды Instagram и WhatsApp по разным скриптам ресепшна.",
-              ].map((item) => (
-                <div key={item} className="rounded-xl bg-[#F8FAFC] p-4 text-sm leading-relaxed text-[#334155]">{item}</div>
-              ))}
-            </div>
-          </aside>
-        </div>
-      </div>
-    </PageLayout>
-  );
-}
+// Экран «Отчёты» удалён.
+//
+// Плитки с выдуманными числами убрали раньше, но под ними оставалась
+// таблица «Недельный отчёт» с выручкой от 420 000 до 740 000 тенге —
+// такая же выдумка, только в другой разметке. Те же показатели
+// считаются на сводке по строкам клиники, туда /reports и ведёт.
 
 export function DemoAdmin() {
   const { items: staff, setItems: setStaff, updateItem } = useDemoCollection("negis_demo_staff", staffSeed, {
@@ -1200,7 +1048,7 @@ export function DemoAdmin() {
 
     // Security-2B: demo mode is local-only. It must never call the production
     // CRM API, and generic staff creation is disabled server-side anyway.
-    toast.success("Сотрудник добавлен в демо-данные");
+    toast.success("Сотрудник добавлен");
 
     setStaffForm({
       name: "",
@@ -1244,7 +1092,7 @@ export function DemoAdmin() {
   return (
     <PageLayout>
       <div className="space-y-7">
-        <PageHeader title="Админ" subtitle="Demo-safe панель настроек: пользователи, роли и статусы интеграций без показа секретов." action={<PrimaryButton onClick={checkTargeting}><Target size={16} />Проверить health</PrimaryButton>} />
+        <PageHeader title="Админ" subtitle="Панель настроек: пользователи, роли и статусы интеграций без показа секретов." action={<PrimaryButton onClick={checkTargeting}><Target size={16} />Проверить health</PrimaryButton>} />
         <div className="grid gap-5 lg:grid-cols-3">
           <section className="neu-card">
             <h2 className="text-lg font-bold text-[#0F172A]">Сотрудники</h2>

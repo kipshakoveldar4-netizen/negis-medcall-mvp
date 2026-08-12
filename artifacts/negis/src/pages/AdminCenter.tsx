@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import { useLocation } from "wouter";
+import { Link, useLocation } from "wouter";
+import { PlanCalculator } from "@/components/admin/PlanCalculator";
 import {
   AlertTriangle,
   Bot,
@@ -587,7 +588,7 @@ function statusLabel(status: Status | ReleaseStatus) {
     partial: "Частично",
     error: "Ошибка",
     checking: "Проверяется",
-    demo: "Demo fallback",
+    demo: "Без подключения",
     draft: "Draft",
     pending: "Ожидает",
     passed: "Пройдено",
@@ -636,7 +637,26 @@ export default function AdminCenter() {
   const { clinicId, user } = useAuth();
   const workspaceId = clinicId || readWorkspaceId();
   const [activeTab, setActiveTab] = useState<AdminTab>("overview");
+  // Проба маршрута платформы. Не владелец платформы получает 404 и ссылки не
+  // видит; владелец видит. Одна проба на открытие админ-центра, не на каждый
+  // экран продукта.
+  const [platformPanelAvailable, setPlatformPanelAvailable] = useState(false);
   const [clinic, setClinic] = useState<ClinicSettings>(() => readStored("negis_clinic_settings", clinicDefaults));
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const response = await crmFetch("/api/crm/platform-overview");
+        if (!cancelled) setPlatformPanelAvailable(response.ok);
+      } catch {
+        if (!cancelled) setPlatformPanelAvailable(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   // Commercial-3B: the team is whatever the server says it is. This list used
   // to be seeded from localStorage demo data and written back there, so an
   // administrator saw people who were not members and suspended people who
@@ -2220,6 +2240,20 @@ export default function AdminCenter() {
           <div className="border-t border-slate-700 p-5">
             <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-teal-300">Панель платформы · Medina OS</p>
             <h2 className="mt-1 text-lg font-semibold">Внутренняя диагностика платформы</h2>
+            {/*
+              Ссылка на панель владельца платформы появляется только после
+              успешной пробы серверного маршрута. Показывать её всем нельзя:
+              владелец клиники узнал бы, что в продукте есть экран со списком
+              всех клиник, — а существование панели тоже сведения. Не владелец
+              платформы пробу не проходит и ссылки не видит.
+            */}
+            {platformPanelAvailable ? (
+              <Link href="/platform">
+                <div className="neu-btn mt-3 inline-flex items-center gap-2 px-4 py-2 text-sm">
+                  Открыть панель платформы
+                </div>
+              </Link>
+            ) : null}
             <p className="mt-1 max-w-3xl text-sm text-slate-300">
               Раздел для команды Medina Platform. Секреты, токены и service role key здесь не отображаются.
             </p>
@@ -2284,15 +2318,15 @@ export default function AdminCenter() {
             domain yet — no payment claims, no fake purchase flow, no dead CTA
             buttons. The only action is a functional workspace-ID copy for support. */}
         <div className="grid gap-4 lg:grid-cols-2">
-          <section className="neu-card" aria-label="Тариф и подключение">
-            <p className="text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">Тариф и подключение</p>
-            <h2 className="mt-1 text-base font-black text-[#0F172A]">
-              {workspaceId === "demo-workspace" ? "Демо-режим" : "Пилотное подключение"}
-            </h2>
-            <p className="mt-1 text-sm text-[#64748B]">
-              Автоматическая оплата пока не подключена. Условия пилота и тариф согласуются с менеджером Medina OS.
-            </p>
-          </section>
+          {/*
+            Здесь была одна фраза: «условия пилота и тариф согласуются с
+            менеджером». Тарифов на экране не было вовсе — их ключи жили во
+            фронтенде, цен не было нигде, и клиника не могла узнать, за что и
+            сколько платит. Теперь текущий тариф читается из её собственной
+            подписки, рядом стоит прайс, а расчёт стоимости считает нашу часть
+            счёта и позволяет вписать чужую.
+          */}
+          <PlanCalculator />
           <section className="neu-card" aria-label="Поддержка">
             <p className="text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">Поддержка</p>
             <h2 className="mt-1 text-base font-black text-[#0F172A]">Связь с Medina OS</h2>

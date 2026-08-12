@@ -3645,7 +3645,14 @@ async function listItems(resource: CrmResource, req: VercelRequest, res: VercelR
     }
 
     const items = (Array.isArray(data) ? data : []).map((row) => config.fromRow(asRecord(row)));
-    const scheduleTimeZone = resource === "doctor-schedule"
+    // Пояс клиники едет пассажиром списка записей ровно по той же причине, по
+    // которой он едет с графиком: маршрут настроек доступен только владельцу и
+    // администратору, и любой другой экран, спросив его напрямую, получил бы
+    // отказ — то есть сказал бы «пояс не задан» клинике, которая его задала.
+    //
+    // Записям он нужен не меньше: без него «сегодня» на сводке считается в UTC,
+    // и в UTC+5 примерно пять часов каждую ночь экран называет чужие сутки.
+    const scheduleTimeZone = resource === "doctor-schedule" || resource === "appointments"
       ? (await readClinicScheduleTimeZone(supabase, workspaceId)) || ""
       : "";
     return sendJson(
@@ -3661,6 +3668,7 @@ async function listItems(resource: CrmResource, req: VercelRequest, res: VercelR
         // читая их, получил бы отказ — то есть экран сказал бы «пояс не задан»
         // клинике, которая его задала.
         ...(resource === "doctor-schedule" ? { scheduleAvailable: true, timeZone: scheduleTimeZone } : {}),
+        ...(resource === "appointments" ? { timeZone: scheduleTimeZone } : {}),
       }),
     );
   } catch (error) {
@@ -5636,8 +5644,25 @@ export async function handleVideoJobs(req: VercelRequest, res: VercelResponse) {
       if (data) {
         return sendJson(res, 200, success("supabase", { job: makeVideoJob(asRecord(data)) }));
       }
-      const { data: current, error: currentError } = await supabase.from("video_processing_jobs").select("*").eq("id", jobId).single();
+      // Тот же фильтр арендатора, что и у обновления выше, и по той же причине.
+      //
+      // Здесь его не было. Обновление промахивалось по двум причинам — задача
+      // уже не в awaiting_upload ЛИБО задача чужая, — и обе приводили сюда, где
+      // строка перечитывалась по одному id. Ответ уезжал спрашивавшему целиком:
+      // чужой workspaceId и публичные ссылки на чужой ролик. Комментарий двадцатью
+      // строками выше объясняет, почему фильтр не факультативен, а следующий же
+      // запрос его терял.
+      //
+      // maybeSingle, а не single: промах теперь означает «нет такой задачи у этой
+      // клиники» и обязан стать 404, а не ошибкой PostgREST в теле ответа.
+      const { data: current, error: currentError } = await supabase
+        .from("video_processing_jobs")
+        .select("*")
+        .eq("id", jobId)
+        .eq("workspace_id", workspaceId)
+        .maybeSingle();
       if (currentError) throw new Error(currentError.message);
+      if (!current) throw new Error("job not found in this workspace");
       return sendJson(
         res,
         200,
@@ -6229,13 +6254,23 @@ function safeMetaLaunchError(error: unknown): JsonRecord {
   };
 }
 
-async function readMetaLiveLaunchEnabled(workspaceId: string, body: JsonRecord): Promise<boolean> {
-  const requested = readBoolean(body.liveLaunchEnabled);
+/**
+ * Включён ли живой запуск рекламы в этом рабочем пространстве.
+ *
+ * Отвечает ТОЛЬКО сохранённая настройка. Тело запроса здесь не читается вовсе:
+ * раньше при отсутствии строки настройки и при любой ошибке чтения функция
+ * возвращала `readBoolean(body.liveLaunchEnabled)` — то есть разрешение на
+ * живую кампанию давал тот же, кто её запускал. Клиника, ни разу не трогавшая
+ * переключатель в админ-центре, строки не имеет по определению, поэтому
+ * «замок» был открыт у всех новых клиник сразу.
+ *
+ * Умолчание — отказ, и отказ же при сбое чтения. Не смогли прочитать
+ * настройку — значит не знаем, разрешено ли; «не знаю» для живой рекламы за
+ * чужие деньги означает «нет».
+ */
+async function readMetaLiveLaunchEnabled(workspaceId: string): Promise<boolean> {
   const supabase = getSupabaseServerClient();
-
-  if (!supabase || !isUuid(workspaceId)) {
-    return requested;
-  }
+  if (!supabase || !isUuid(workspaceId)) return false;
 
   try {
     const { data, error } = await supabase
@@ -6254,7 +6289,7 @@ async function readMetaLiveLaunchEnabled(workspaceId: string, body: JsonRecord):
     console.warn(supabaseWarning("workspace_settings meta_live_launch_enabled", error));
   }
 
-  return requested;
+  return false;
 }
 
 function buildMetaLaunchBody(body: JsonRecord) {
@@ -6676,7 +6711,23 @@ export async function handleMetaLaunch(req: VercelRequest, res: VercelResponse) 
   const workspaceId = readWorkspaceId(req, body);
   const launch = buildMetaLaunchBody(body);
   const actorName = firstString(body.launchedBy, body.actorName, body.userName);
-  const actorRole = firstString(body.launchedByRole, body.actorRole, "owner");
+
+  // Роль решает три вещи: включать ли живую кампанию, снимать ли потолок
+  // дневного бюджета и снимать ли потолок общего. Брать её из тела запроса
+  // нельзя ни при каких условиях.
+  //
+  // Здесь стояло `firstString(body.launchedByRole, body.actorRole, "owner")` —
+  // то есть роль называл сам вызывающий, а умолчанием был владелец. Маршрут
+  // требует право manage_marketing, и оно есть у маркетолога, который ни
+  // владельцем, ни администратором не является. Один POST с собственным
+  // настоящим токеном и `"launchedByRole": "owner"` в теле снимал оба потолка
+  // бюджета и запускал ACTIVE-кампанию за деньги клиники, а в журнал попадала
+  // роль «owner» — та, что назвал отправитель.
+  //
+  // Проверенная роль лежит в контексте, который поставил маршрутизатор, и
+  // подделать её нельзя: она выведена из членства в staff_users по проверенному
+  // токену. Нет контекста — нет и роли: пустая строка не проходит ни один гейт.
+  const actorRole = readWorkspaceContext(req)?.role || "";
   const dryRun = readBoolean(body.dryRun);
   const details: string[] = [];
 
@@ -6714,7 +6765,7 @@ export async function handleMetaLaunch(req: VercelRequest, res: VercelResponse) 
     details.push(`Общий бюджет больше ${META_MAX_TOTAL_BUDGET} ${launch.currency}; нужен owner/admin override.`);
   }
 
-  const liveLaunchEnabled = await readMetaLiveLaunchEnabled(workspaceId, body);
+  const liveLaunchEnabled = await readMetaLiveLaunchEnabled(workspaceId);
   if (launch.statusMode === "ACTIVE") {
     if (!liveLaunchEnabled) details.push("ACTIVE запуск выключен в Admin Center.");
     if (!roleCanLaunchActive(actorRole)) details.push("ACTIVE запуск доступен только owner/admin.");
@@ -6732,9 +6783,11 @@ export async function handleMetaLaunch(req: VercelRequest, res: VercelResponse) 
       data: { compliance, safeText: compliance.safeText },
     });
   }
-  if (compliance.status === "needs_review" && !readBoolean(body.manualApprovalConfirmed)) {
-    details.push("Нужно ручное согласование текста со статусом needs_review.");
-  }
+  // Ветки «needs_review требует ручного согласования» здесь больше нет.
+  // Она была мертва: `manualApprovalConfirmed` проверяется безусловно двадцатью
+  // строками выше, поэтому при false замечание уже добавлено, а при true эта
+  // ветка не срабатывает. Отдельного подтверждения именно текста в протоколе
+  // запроса нет, и придумывать его молча — не то же самое, что чинить.
 
   if (details.length > 0) {
     return sendJson(res, 400, {

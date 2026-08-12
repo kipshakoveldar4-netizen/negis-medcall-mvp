@@ -1,7 +1,8 @@
 import { useState } from 'react';
 import { Link, useLocation } from 'wouter';
-import { BadgeDollarSign, BarChart2, Building2, CalendarDays, Clapperboard, Inbox, LayoutDashboard, Rocket, Settings, Tag, Users, LogOut, X, KeyRound, User, type LucideIcon } from 'lucide-react';
+import { BadgeDollarSign, BarChart2, Building2, CalendarDays, Clapperboard, Inbox, LayoutDashboard, Rocket, Settings, Store, Tag, Users, LogOut, X, KeyRound, User, type LucideIcon } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
+import { isRealWorkspace } from '@/lib/demoStorage';
 import { supabase } from '@/lib/supabase';
 import { toast } from 'sonner';
 
@@ -40,6 +41,11 @@ const NAV_GROUPS: NavGroup[] = [
     items: [
       { href: '/ads-automation', icon: Rocket, label: 'Реклама', roles: ['owner', 'manager'] },
       { href: '/content-studio', icon: Clapperboard, label: 'Контент', roles: ['owner', 'manager'] },
+      // Маркет был недостижим: маршрут объявлен, а ссылки на него не было ни в
+      // боковом меню, ни в мобильном — страница открывалась только вводом
+      // адреса. Панель платформы сюда не ставится намеренно: она не экран
+      // клиники, и ссылка на неё вела бы всех остальных в «страницы нет».
+      { href: '/marketplace', icon: Store, label: 'Маркет', roles: ['owner', 'manager'] },
     ],
   },
   {
@@ -52,7 +58,17 @@ const NAV_GROUPS: NavGroup[] = [
 
 export function Sidebar() {
   const [location] = useLocation();
-  const { signOut, user, userRole, isDemoMode, availableWorkspaces, clearWorkspaceSelection } = useAuth();
+  const { signOut, user, userRole, availableWorkspaces, clearWorkspaceSelection } = useAuth();
+
+  // Подпись «работаем без базы клиники» вешалась на isDemoMode, а он не
+  // становится истинным никогда: флаг включается только из сохранённой сессии
+  // с mode:'demo', а такую сессию в репозитории никто не записывает — ключи
+  // только читаются и удаляются. То есть подпись стояла на ветке, до которой
+  // выполнение не доходит, и оператор не видел её ни разу.
+  //
+  // Достижимое условие — рабочее пространство не выбрано: тогда экраны берут
+  // данные из браузера, а не из базы, и сказать об этом обязательно.
+  const noClinicSelected = !isRealWorkspace();
   const [showProfile, setShowProfile] = useState(false);
   const [fullName, setFullName] = useState(user?.user_metadata?.full_name ?? '');
   const [newPassword, setNewPassword] = useState('');
@@ -110,7 +126,7 @@ export function Sidebar() {
           <div className="min-w-0">
             <p className="truncate text-sm font-semibold" style={{ color: 'var(--negis-dark-text)' }}>Medina OS</p>
             <p className="mt-0.5 truncate text-[11px] font-medium" style={{ color: 'var(--negis-dark-muted)' }}>
-              {isDemoMode ? 'Демо-режим' : 'Медицинская CRM'}
+              {noClinicSelected ? 'Пробный доступ' : 'Медицинская CRM'}
             </p>
           </div>
         </div>
@@ -160,7 +176,7 @@ export function Sidebar() {
           </button>
           <button type="button" onClick={openProfile} className="min-w-0 flex-1 text-left">
             <p className="truncate text-sm font-semibold" style={{ color: 'var(--negis-dark-text)' }}>{user?.user_metadata?.full_name || 'Профиль'}</p>
-            <p className="truncate text-xs" style={{ color: 'var(--negis-dark-muted)' }}>{user?.email || 'demo mode'}</p>
+            <p className="truncate text-xs" style={{ color: 'var(--negis-dark-muted)' }}>{user?.email || 'вход не выполнен'}</p>
           </button>
           {availableWorkspaces.length > 1 && (
             // Selection-1: without this the first choice was permanent — the

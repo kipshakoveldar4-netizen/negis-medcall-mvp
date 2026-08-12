@@ -2,6 +2,10 @@ import { defineConfig, type Plugin, type ViteDevServer } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import path from "path";
+// Статически, а не через await import: загрузчик конфига Vite перехватывает
+// динамические импорты внутри плагина и падает на них.
+import { createHash } from "node:crypto";
+import { readdir, readFile, writeFile } from "node:fs/promises";
 import runtimeErrorOverlay from "@replit/vite-plugin-runtime-error-modal";
 import type { IncomingMessage, ServerResponse } from "node:http";
 
@@ -171,12 +175,50 @@ function targetingApiDevMiddleware(): Plugin {
   };
 }
 
+/**
+ * Штампует в service worker отпечаток сборки.
+ *
+ * Браузер решает, что вышла новая версия, по одному признаку: файл sw.js стал
+ * другим. Пока в нём стоит постоянная строка, деплой проходит незамеченным, и
+ * установленное приложение продолжает открывать старую сборку — то есть
+ * «обновляется само» перестаёт быть правдой.
+ *
+ * Отпечаток берётся от ИМЁН собранных файлов, а не от времени: имена содержат
+ * хэш содержимого, поэтому сборка без изменений даёт тот же отпечаток и лишнего
+ * обновления не будет.
+ */
+function stampServiceWorker(): Plugin {
+  return {
+    name: "negis-service-worker-build-id",
+    apply: "build",
+    async closeBundle() {
+      const outDir = path.resolve(import.meta.dirname, "dist/public");
+      const swPath = path.join(outDir, "sw.js");
+
+      let source: string;
+      try {
+        source = await readFile(swPath, "utf8");
+      } catch {
+        // sw.js кладётся из public; если его нет — молчать нельзя, иначе
+        // приложение останется без обновлений и никто об этом не узнает.
+        this.error("sw.js не найден в сборке: обновления работать не будут");
+        return;
+      }
+
+      const assets = await readdir(path.join(outDir, "assets")).catch(() => [] as string[]);
+      const buildId = createHash("sha256").update(assets.sort().join("|")).digest("hex").slice(0, 12);
+      await writeFile(swPath, source.replace("__BUILD_ID__", buildId), "utf8");
+    },
+  };
+}
+
 export default defineConfig(async () => ({
   base: basePath,
   plugins: [
     react(),
     tailwindcss(),
     targetingApiDevMiddleware(),
+    stampServiceWorker(),
     runtimeErrorOverlay(),
     ...(process.env.NODE_ENV !== "production" &&
     process.env.REPL_ID !== undefined

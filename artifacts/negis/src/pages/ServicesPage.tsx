@@ -444,7 +444,7 @@ export default function ServicesPage() {
 
         {demoMode ? (
           <section className="negis-glass p-4 text-sm font-semibold" style={{ color: "var(--negis-muted)" }}>
-            Демо-режим: справочник хранится в этом браузере и не виден коллегам.
+            Клиника не выбрана: справочник хранится в этом браузере и не виден коллегам.
           </section>
         ) : null}
 

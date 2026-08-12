@@ -38,9 +38,13 @@ const primaryItems: MobileNavItem[] = [
   { href: "/sales", label: "Продажи", icon: BadgeDollarSign, permission: "crm" },
 ];
 
-// Commercial-1: the customer drawer lists only working modules. Demo-only
-// fixtures (Ресепшн, Звонки, Задачи, Чат, Маркет, Отчёты) are reachable by
-// direct URL in demo mode but are not advertised in the sellable navigation.
+// Commercial-1: the customer drawer lists only working modules. The remaining
+// fixture screens (Ресепшн, Звонки, Задачи, Чат, Отчёты) are reachable by
+// direct URL but are not advertised in the sellable navigation.
+//
+// «Маркет» из этого списка исключений вышел: он больше не фикстура с
+// выдуманными числами, а каталог того, что клиника действительно может
+// подключить, — поэтому он в ящике ниже, как обычный рабочий экран.
 const drawerItems: MobileNavItem[] = [
   { href: "/ai-control-center", label: "Главная", icon: LayoutDashboard, permission: "dashboard" },
   { href: "/dashboard", label: "Аналитика", icon: BarChart2, permission: "dashboard" },
@@ -48,6 +52,7 @@ const drawerItems: MobileNavItem[] = [
   { href: "/ads-automation/history", label: "История запусков", icon: Megaphone, permission: "ads" },
   { href: "/services", label: "Услуги", icon: Tag, permission: "booking" },
   { href: "/content-studio", label: "Контент", icon: Clapperboard, permission: "ads" },
+  { href: "/marketplace", label: "Маркет", icon: Store, permission: "marketplace" },
   { href: "/admin", label: "Настройки клиники", icon: Settings, permission: "admin" },
 ];
 

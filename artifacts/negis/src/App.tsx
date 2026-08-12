@@ -10,6 +10,7 @@ import { useAuth } from "@/contexts/AuthContext";
 // chunk so the first paint never waits on a second request.
 import Landing from "@/pages/Landing";
 import DemoPlaceholder from "@/pages/DemoPlaceholder";
+import { UpdatePrompt } from "@/components/layout/UpdatePrompt";
 import NotFound from "@/pages/not-found";
 import FbPixelInit from "@/components/FbPixelInit";
 import { WorkspacePicker } from "@/components/WorkspacePicker";
@@ -39,9 +40,10 @@ const SalesPage = lazy(() => import("@/pages/SalesPage"));
 const ServicesPage = lazy(() => import("@/pages/ServicesPage"));
 const DemoCalls = lazy(() => import("@/pages/DemoCrmModules").then(m => ({ default: m.DemoCalls })));
 const DemoChat = lazy(() => import("@/pages/DemoCrmModules").then(m => ({ default: m.DemoChat })));
-const DemoMarket = lazy(() => import("@/pages/DemoCrmModules").then(m => ({ default: m.DemoMarket })));
-const DemoReception = lazy(() => import("@/pages/DemoCrmModules").then(m => ({ default: m.DemoReception })));
-const DemoReports = lazy(() => import("@/pages/DemoCrmModules").then(m => ({ default: m.DemoReports })));
+const MarketplacePage = lazy(() => import("@/pages/MarketplacePage"));
+const PlatformOwnerPage = lazy(() => import("@/pages/PlatformOwnerPage"));
+
+
 const DemoTasks = lazy(() => import("@/pages/DemoCrmModules").then(m => ({ default: m.DemoTasks })));
 const Privacy = lazy(() => import("@/pages/Privacy"));
 const Terms = lazy(() => import("@/pages/Terms"));
@@ -214,7 +216,7 @@ function ProtectedPage({
  * to unmount anyway.
  */
 const AppointmentsRoute = () => <ProtectedPage component={AppointmentsPage} permission="booking" />;
-const MarketRoute = () => <ProtectedPage component={DemoMarket} permission="marketplace" />;
+const MarketRoute = () => <ProtectedPage component={MarketplacePage} permission="marketplace" />;
 const AdsAutomationRoute = () => <ProtectedPage component={AdsAutomation} permission="ads" />;
 const ContentStudioRoute = () => <ProtectedPage component={ContentStudio} permission="ads" />;
 
@@ -231,7 +233,18 @@ function Router() {
       <Route path="/dashboard" component={() => <ProtectedPage component={Dashboard} permission="dashboard" />} />
       <Route path="/booking" component={AppointmentsRoute} />
       <Route path="/appointments" component={AppointmentsRoute} />
-      <Route path="/reception" component={() => <ProtectedPage component={DemoReception} permission="reception" />} />
+      {/*
+        /reception и /reports вели на экраны без единого источника данных: ни
+        маршрута в API, ни ресурса в реестре. Любому пользователю настоящей
+        клиники они показывали трёх выдуманных пациентов с телефонами и
+        недельную выручку в сотни тысяч тенге — числа, одинаковые при любой
+        базе, включая пустую.
+        Оба ведут туда, где то же самое считается по строкам клиники: приём —
+        это заявки и записи, отчёты — сводка.
+      */}
+      <Route path="/reception">
+        <Redirect to="/leads" />
+      </Route>
       <Route path="/calls" component={() => <ProtectedPage component={DemoCalls} permission="reception" />} />
       <Route path="/sales" component={() => <ProtectedPage component={SalesPage} permission="crm" />} />
       <Route path="/services" component={() => <ProtectedPage component={ServicesPage} permission="booking" />} />
@@ -240,6 +253,14 @@ function Router() {
       <Route path="/tasks" component={() => <ProtectedPage component={DemoTasks} permission="tasks" />} />
       <Route path="/chat" component={() => <ProtectedPage component={DemoChat} permission="chat" />} />
       <Route path="/marketplace" component={MarketRoute} />
+      {/*
+        Панель платформы намеренно НЕ обёрнута в ProtectedPage: тот решает
+        доступ по роли в клинике, а роль в клинике к платформе отношения не
+        имеет. Единственный настоящий гейт стоит на сервере — список
+        идентификаторов в переменной окружения. Экран показывает «страницы нет»,
+        когда сервер отвечает 404, и это и есть отказ.
+      */}
+      <Route path="/platform" component={PlatformOwnerPage} />
       <Route path="/market" component={MarketRoute} />
       <Route path="/admin" component={() => <ProtectedPage component={AdminCenter} permission="admin" />} />
       <Route path="/ads-automation/history" component={AdsAutomationRoute} />
@@ -248,7 +269,9 @@ function Router() {
       <Route path="/advertising">
         <Redirect to="/ads-automation" />
       </Route>
-      <Route path="/reports" component={() => <ProtectedPage component={DemoReports} permission="ads" />} />
+      <Route path="/reports">
+        <Redirect to="/dashboard" />
+      </Route>
       <Route path="/profile" component={() => <ProtectedPage component={() => <DemoPlaceholder title="Профиль" />} permission="dashboard" />} />
       {/* AI Target is no longer a standalone module: its functionality lives inside
           Ads Automation ("ИИ заполнит"). Old links land on /ads-automation. */}
@@ -282,6 +305,7 @@ function App() {
             <WorkspacePicker />
             <RoutePrefetcher />
             <Router />
+            <UpdatePrompt />
             <Toaster position="bottom-right" />
           </TooltipProvider>
         </AuthProvider>

@@ -24,6 +24,7 @@ import { WorkQueue } from "@/components/dashboard/work-queue";
 import { RecentRecords } from "@/components/dashboard/recent-records";
 import { DistributionPanel } from "@/components/dashboard/distribution-panel";
 import { apiUrl, crmFetch } from "@/lib/api";
+import { clinicToday, isOnClinicDay } from "@/lib/clinicDay";
 import {
   buildLeadSourceDistribution,
   buildNewLeadsQueue,
@@ -151,30 +152,36 @@ function isRepeatClient(status: string, lastVisit: string): boolean {
   return Number.isFinite(visitTime) && Date.now() - visitTime > 90 * 24 * 60 * 60 * 1000;
 }
 
-function isTodayDate(value: string): boolean {
-  const timestamp = Date.parse(value);
-  if (!Number.isFinite(timestamp)) return false;
-  const date = new Date(timestamp);
-  const now = new Date();
-  return date.getFullYear() === now.getFullYear() && date.getMonth() === now.getMonth() && date.getDate() === now.getDate();
+// Прежняя версия сравнивала getFullYear/getMonth/getDate — то есть сутки
+// ноутбука оператора. Два экрана отвечали на один вопрос по-разному, и оба не
+// про клинику. Теперь общий помощник и пояс, приехавший вместе со списком.
+function isTodayDate(value: string, dayKey: string, timeZone: string): boolean {
+  return isOnClinicDay(value, dayKey, timeZone);
 }
 
-type CrmList = { responded: boolean; items: Array<Record<string, unknown>> };
+type CrmList = { responded: boolean; items: Array<Record<string, unknown>>; timeZone: string };
 
 // Real API items when Supabase answers; in demo mode the endpoint responds but the
 // data lives in the CRM pages' localStorage (read-only fallback). A failed endpoint
 // reports responded: false and the metric shows "Не удалось проверить".
 async function fetchCrmList(path: string, listKey: string, demoKey: string): Promise<CrmList> {
   const { ok, body } = await fetchJson(path);
-  if (!ok || body.success !== true) return { responded: false, items: [] };
+  if (!ok || body.success !== true) return { responded: false, items: [], timeZone: "" };
   if (body.mode === "supabase") {
-    const rawItems = asRecord(body.data)[listKey];
-    return { responded: true, items: Array.isArray(rawItems) ? rawItems.map((item) => asRecord(item)) : [] };
+    const data = asRecord(body.data);
+    const rawItems = data[listKey];
+    return {
+      responded: true,
+      items: Array.isArray(rawItems) ? rawItems.map((item) => asRecord(item)) : [],
+      // Пояс клиники едет вместе со списком записей: маршрут настроек открыт
+      // только владельцу и администратору, и спросить его напрямую нельзя.
+      timeZone: str(data.timeZone),
+    };
   }
   // Production (UUID workspace): a non-supabase answer means the data is genuinely
   // unavailable — report an honest failure instead of counting demo localStorage.
-  if (isRealWorkspace()) return { responded: false, items: [] };
-  return { responded: true, items: readDemoStorage<unknown[]>(demoKey, []).map((item) => asRecord(item)) };
+  if (isRealWorkspace()) return { responded: false, items: [], timeZone: "" };
+  return { responded: true, items: readDemoStorage<unknown[]>(demoKey, []).map((item) => asRecord(item)), timeZone: "" };
 }
 
 /* ── Presentational components ─────────────────────────────── */
@@ -325,7 +332,6 @@ export default function AiControlCenter() {
     appointmentsToday: 0,
     repeatClients: 0,
     // CRM8 attribution counts remain separate from sales revenue.
-    attributedLeads: 0,
     unattributedLeads: 0,
     // CRM9d: honest deal metrics only, never grouped by campaign.
     paidDealsToday: 0,
@@ -354,6 +360,10 @@ export default function AiControlCenter() {
       ]);
       if (cancelled) return;
 
+      // Сутки клиники, а не сутки ноутбука: пояс приезжает вместе с записями.
+      const clinicTimeZone = appointmentsRes.timeZone;
+      const clinicDayKey = clinicToday(clinicTimeZone);
+
       // CRM counts — real data only; failed endpoints stay "Не удалось проверить".
       setLeadsState(leadsRes.responded ? "ready" : "unknown");
       setClientsState(clientsRes.responded ? "ready" : "unknown");
@@ -367,7 +377,7 @@ export default function AiControlCenter() {
       });
       const paidDealsToday = dealsRes.items.filter((deal) =>
         str(deal.status).toLowerCase() === "paid"
-        && isTodayDate(str(deal.paidAt) || str(deal.paid_at)),
+        && isTodayDate(str(deal.paidAt) || str(deal.paid_at), clinicDayKey, clinicTimeZone),
       );
       setCrmCounts({
         newLeads: leadsRes.items.filter((lead) => semanticGroupForLead(lead) === "new").length,
@@ -377,13 +387,12 @@ export default function AiControlCenter() {
           return !hasClient && (status === "new" || status === "in_progress");
         }).length,
         appointmentsToday: appointmentsRes.items.filter((item) =>
-          isTodayDate(str(item.startsAt) || str(item.starts_at) || str(item.time)),
+          isTodayDate(str(item.startsAt) || str(item.starts_at) || str(item.time), clinicDayKey, clinicTimeZone),
         ).length,
         repeatClients: clientsRes.items.filter((client) =>
           isRepeatClient(str(client.status), str(client.lastVisit) || str(client.last_visit_at)),
         ).length,
         // Attributed = lead linked to a Meta launch via meta_campaign_launch_id.
-        attributedLeads: leadsRes.items.filter((lead) => Boolean(str(lead.metaCampaignLaunchId) || str(lead.meta_campaign_launch_id))).length,
         unattributedLeads: leadsRes.items.filter((lead) => !(str(lead.metaCampaignLaunchId) || str(lead.meta_campaign_launch_id))).length,
         paidDealsToday: paidDealsToday.length,
         revenueTodayMinor: paidDealsToday.reduce(

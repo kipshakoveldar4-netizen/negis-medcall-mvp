@@ -21,6 +21,7 @@ import {
   handleVideoProcessingJobs,
   attachWorkspaceContext,
   type CrmResource,
+  readWorkspaceContext,
 } from "../../lib/crm/server";
 import { normalizeCrmSegments, resolveCrmRoute } from "../../lib/crm/authorization";
 import { handleStaffInvitationAccept, handleStaffInvitations } from "../../lib/crm/staff-invitations";
@@ -31,6 +32,8 @@ import {
   requireWorkspaceAccess,
   WorkspaceAdminAuthError,
 } from "../../lib/auth/server";
+import { PlatformAuthError, requirePlatformOwner } from "../../lib/auth/platform";
+import { handlePlatformOverview, handlePlatformSubscriptions, handleWorkspaceSubscription } from "../../lib/crm/platform";
 
 // Security-2B — deny-by-default tenant authorization for /api/crm/*.
 //
@@ -169,6 +172,16 @@ async function dispatch(
   switch (routeKey) {
     case "auth-context":
       return handleCrmAuthContext(req, res);
+    case "subscription": {
+      // Арендатор из проверенного контекста: тот же источник, что и у любого
+      // другого браузерного маршрута.
+      const context = readWorkspaceContext(req);
+      return handleWorkspaceSubscription(context ? context.workspaceId : "", res);
+    }
+    case "platform-overview":
+      return handlePlatformOverview(req, res);
+    case "platform-subscriptions":
+      return handlePlatformSubscriptions(req, res);
     case "staff-invitations":
       return handleStaffInvitations(req, res);
     case "staff-invitations/accept":
@@ -252,6 +265,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   try {
+    if (route.authorization.kind === "platform") {
+      // Владелец ПЛАТФОРМЫ, а не клиники. attachWorkspaceContext здесь не
+      // вызывается сознательно: у запроса нет и не может быть арендатора, и
+      // подставить сюда чей-то workspaceId значило бы выдать одну из клиник за
+      // «свою» для запроса, который читает их все.
+      await requirePlatformOwner(req);
+      return await dispatch(route.key, route.resource, segments, req, res);
+    }
+
     if (route.authorization.kind === "internal_hmac") {
       // The handler performs its own HMAC verification; a browser JWT can never
       // satisfy it, and this branch never builds a workspace context.
@@ -290,6 +312,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     attachWorkspaceContext(req, context);
     return await dispatch(route.key, route.resource, segments, req, res);
   } catch (error) {
+    if (error instanceof PlatformAuthError) {
+      // 404, а не 403: существование панели — тоже сведения.
+      return notFound(res);
+    }
     if (error instanceof WorkspaceAdminAuthError) {
       return sendAuthError(res, error);
     }

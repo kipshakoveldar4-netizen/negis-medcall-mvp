@@ -14,7 +14,19 @@ export type RouteKind =
   /** Verified JWT only; runs before a workspace has been selected. */
   | "bootstrap"
   /** Worker-to-server route protected by the existing HMAC contract. */
-  | "internal_hmac";
+  | "internal_hmac"
+  /**
+   * Панель владельца ПЛАТФОРМЫ: читает поперёк арендаторов.
+   *
+   * Отдельный вид, а не роль и не право. Роли живут в staff_users, и назначает
+   * их владелец клиники — значит роль «владелец платформы» он назначит себе.
+   * Здесь пропуск даёт только список идентификаторов в переменной окружения,
+   * править который может лишь тот, у кого есть доступ к развёртыванию.
+   *
+   * Эта ветка НЕ строит контекст рабочего пространства: у запроса его нет по
+   * определению, и подставлять сюда чей-то workspaceId нельзя.
+   */
+  | "platform";
 
 export type RouteAuthorization = {
   kind: RouteKind;
@@ -151,6 +163,24 @@ export const CRM_ROUTE_AUTHORIZATION: Readonly<Record<string, RouteAuthorization
   // Identity bootstrap: any authenticated user, before a workspace is chosen.
   "auth-context": { kind: "bootstrap", methods: ["GET"] },
 
+  // Панель владельца платформы: единственный маршрут, читающий поперёк клиник.
+  //
+  // Ни roles, ни permissions здесь нет намеренно — и то и другое разрешается из
+  // членства в одном рабочем пространстве, а у этого запроса рабочего
+  // пространства нет. Пропуск даёт список идентификаторов в переменной
+  // окружения (см. lib/auth/platform.ts). Список пуст — маршрут отвечает 404.
+  // Клиника читает СВОЮ подписку: тариф, цену и период. Только чтение и только
+  // администратор рабочего пространства — цена это коммерческое условие, а не
+  // операционные данные, и регистратору она не нужна.
+  //
+  // Отдельно от platform-subscriptions: тот читает поперёк клиник и закрыт
+  // списком владельцев платформы. Здесь арендатор берётся из проверенного
+  // контекста, как у любого другого браузерного маршрута.
+  subscription: { kind: "browser", methods: ["GET"], roles: WORKSPACE_ADMIN },
+
+  "platform-overview": { kind: "platform", methods: ["GET"] },
+  "platform-subscriptions": { kind: "platform", methods: ["GET", "POST", "PATCH"] },
+
   // Diagnostics were previously unauthenticated and enumerated which secrets are
   // configured. They are now administrator-only and the payload is coarse.
   health: { kind: "browser", methods: ["GET"], roles: WORKSPACE_ADMIN },
@@ -232,16 +262,29 @@ export function resolveCrmRoute(segments: readonly string[]): ResolvedRoute | nu
   const first = segments[0] ?? "";
   if (!first) return null;
 
+  // Поиск строго по СОБСТВЕННЫМ ключам реестра.
+  //
+  // Обычное обращение по индексу находит и ключи прототипа: `constructor`,
+  // `toString`, `valueOf`. Сегмент «constructor» проходит нормализацию — он в
+  // нижнем регистре и состоит из латиницы, — и реестр возвращал функцию
+  // Object вместо null. Дальше роутер читал у неё `methods`, получал undefined
+  // и падал с TypeError ВНЕ блока try: наружу уходил 500 вместо 404.
+  //
+  // Шапка этого файла обещает «всё, чего нет в списке, неизвестно и запрещено».
+  // Пока поиск шёл по цепочке прототипов, обещание не выполнялось.
+  const own = <T,>(registry: Readonly<Record<string, T>>, key: string): T | undefined =>
+    Object.prototype.hasOwnProperty.call(registry, key) ? registry[key] : undefined;
+
   if (segments.length >= 2) {
     const subKey = `${first}/${segments[1]}`;
-    const sub = CRM_SUBROUTE_AUTHORIZATION[subKey];
+    const sub = own(CRM_SUBROUTE_AUTHORIZATION, subKey);
     if (sub) return { key: subKey, authorization: sub };
   }
 
-  const direct = CRM_ROUTE_AUTHORIZATION[first];
+  const direct = own(CRM_ROUTE_AUTHORIZATION, first);
   if (direct) return { key: first, authorization: direct };
 
-  const resource = CRM_RESOURCE_AUTHORIZATION[first];
+  const resource = own(CRM_RESOURCE_AUTHORIZATION, first);
   if (resource) return { key: first, authorization: resource, resource: first };
 
   return null;

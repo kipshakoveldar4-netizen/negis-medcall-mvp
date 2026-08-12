@@ -42,7 +42,17 @@
     "test:design-tokens": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:design-tokens",
     "test:content-generation": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:content-generation",
     "test:clinic-services": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:clinic-services",
-    "test:doctor-schedule": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:doctor-schedule"
+    "test:doctor-schedule": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:doctor-schedule",
+    "test:clinic-day": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:clinic-day",
+    "test:meta-compliance": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:meta-compliance",
+    "test:ad-text-improve": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:ad-text-improve",
+    "test:platform-owner": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:platform-owner",
+    "test:active-launch-gate": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:active-launch-gate",
+    "test:no-demo-copy": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:no-demo-copy",
+    "test:platform-billing": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:platform-billing",
+    "test:installable-app": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:installable-app",
+    "build:icons": "node scripts/run-pnpm.cjs --filter @workspace/scripts run build:icons",
+    "seed:clinic": "node scripts/run-pnpm.cjs --filter @workspace/scripts run seed:clinic"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.105.4",
