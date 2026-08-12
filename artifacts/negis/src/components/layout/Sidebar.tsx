@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Link, useLocation } from 'wouter';
 import { BadgeDollarSign, BarChart2, Building2, CalendarDays, Clapperboard, Inbox, LayoutDashboard, Rocket, Settings, Store, Tag, Users, LogOut, X, KeyRound, User, type LucideIcon } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
+import { isRealWorkspace } from '@/lib/demoStorage';
 import { supabase } from '@/lib/supabase';
 import { toast } from 'sonner';
 
@@ -57,7 +58,17 @@ const NAV_GROUPS: NavGroup[] = [
 
 export function Sidebar() {
   const [location] = useLocation();
-  const { signOut, user, userRole, isDemoMode, availableWorkspaces, clearWorkspaceSelection } = useAuth();
+  const { signOut, user, userRole, availableWorkspaces, clearWorkspaceSelection } = useAuth();
+
+  // Подпись «работаем без базы клиники» вешалась на isDemoMode, а он не
+  // становится истинным никогда: флаг включается только из сохранённой сессии
+  // с mode:'demo', а такую сессию в репозитории никто не записывает — ключи
+  // только читаются и удаляются. То есть подпись стояла на ветке, до которой
+  // выполнение не доходит, и оператор не видел её ни разу.
+  //
+  // Достижимое условие — рабочее пространство не выбрано: тогда экраны берут
+  // данные из браузера, а не из базы, и сказать об этом обязательно.
+  const noClinicSelected = !isRealWorkspace();
   const [showProfile, setShowProfile] = useState(false);
   const [fullName, setFullName] = useState(user?.user_metadata?.full_name ?? '');
   const [newPassword, setNewPassword] = useState('');
@@ -115,7 +126,7 @@ export function Sidebar() {
           <div className="min-w-0">
             <p className="truncate text-sm font-semibold" style={{ color: 'var(--negis-dark-text)' }}>Medina OS</p>
             <p className="mt-0.5 truncate text-[11px] font-medium" style={{ color: 'var(--negis-dark-muted)' }}>
-              {isDemoMode ? 'Пробный доступ' : 'Медицинская CRM'}
+              {noClinicSelected ? 'Пробный доступ' : 'Медицинская CRM'}
             </p>
           </div>
         </div>

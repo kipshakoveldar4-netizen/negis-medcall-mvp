@@ -3289,10 +3289,18 @@ async function checkLayoutFoundation() {
     }
   }
 
-  // Dashboard keeps a link to the new main screen.
-  const dashboard = await readFile(path.join(pagesDir, "Dashboard.tsx"), "utf8");
-  if (!dashboard.includes("Новый главный экран: AI Control Center") || !dashboard.includes("/ai-control-center")) {
-    throw new Error("Dashboard must link to /ai-control-center");
+  // Главный экран достижим из навигации, а не из сводки.
+  //
+  // Раньше здесь проверялась ссылка внутри Dashboard.tsx, но она жила в ветке
+  // DemoDashboard, которая не выполнялась никогда: флаг isDemoMode включается
+  // только из сохранённой сессии, которую в репозитории никто не записывает.
+  // Проверка закрепляла мёртвый код и прошла бы, даже если бы главный экран
+  // был недоступен из интерфейса вовсе.
+  const navDir = path.join(repoRoot, "artifacts", "negis", "src", "components", "layout");
+  const sidebarNav = await readFile(path.join(navDir, "Sidebar.tsx"), "utf8");
+  const mobileNav = await readFile(path.join(navDir, "MobileNav.tsx"), "utf8");
+  if (!sidebarNav.includes("/ai-control-center") || !mobileNav.includes("/ai-control-center")) {
+    throw new Error("Главный экран обязан быть в обеих навигациях");
   }
 
   console.log("Layout foundation checks: ok");

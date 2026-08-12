@@ -638,68 +638,12 @@ export function DemoAppointments() {
   );
 }
 
-export function DemoReception() {
-  const { items, updateItem } = useDemoCollection("negis_demo_reception", receptionSeed);
-
-  const action = (id: string, label: string) => {
-    updateItem(id, { status: label });
-    toast.success(`${label}: действие сохранено`);
-  };
-
-  return (
-    <PageLayout>
-      <div className="space-y-7">
-        <PageHeader title="Ресепшн" subtitle="Операционный пульт: входящие лиды, звонки на сегодня и неподтверждённые записи." />
-        {/*
-          Плитки здесь были захардкожены и показывались как данные клиники:
-          одни и те же числа при любой базе, включая пустую. Осталось только
-          то, что считается по реально загруженным строкам; для остального
-          источника в продукте нет, и правдоподобное число вместо него —
-          худший из возможных ответов.
-        */}
-        <MetricGrid
-          metrics={[
-            { label: "Входящие лиды", value: String(items.length), icon: Users, tone: "blue" },
-          ]}
-        />
-        <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">
-          <section className="neu-card">
-            <h2 className="mb-4 text-lg font-bold text-[#0F172A]">Очередь входящих лидов</h2>
-            <div className="space-y-3">
-              {items.map((lead) => (
-                <div key={lead.id} className="neu-sm p-4">
-                  <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-                    <div>
-                      <p className="font-bold text-[#0F172A]">{lead.name}</p>
-                      <p className="text-sm text-[#64748B]">{lead.phone} · {lead.source}</p>
-                      <p className="mt-1 text-sm text-[#334155]">{lead.request}</p>
-                    </div>
-                    <StatusPill value={lead.status} />
-                  </div>
-                  <div className="mt-4 flex flex-wrap gap-2">
-                    {["Позвонить", "Написать WhatsApp", "Записать", "Закрыть"].map((label) => (
-                      <button key={`${lead.id}-${label}`} type="button" className="neu-btn px-3 py-1.5 text-xs" onClick={() => action(lead.id, label)}>
-                        {label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </section>
-          <aside className="neu-card">
-            <h2 className="mb-4 text-lg font-bold text-[#0F172A]">Фокус дня</h2>
-            <div className="space-y-3">
-              {["Перезвонить пропущенные до 14:00", "Подтвердить 4 записи", "Отправить WhatsApp по новым лидам"].map((item) => (
-                <div key={item} className="rounded-xl bg-[#F8FAFC] p-4 text-sm font-semibold text-[#334155]">{item}</div>
-              ))}
-            </div>
-          </aside>
-        </div>
-      </div>
-    </PageLayout>
-  );
-}
+// Экран «Ресепшн» удалён.
+//
+// У него не было источника данных вообще: ни маршрута в API, ни ресурса в
+// реестре. Любому пользователю настоящей клиники он показывал трёх
+// выдуманных пациентов с телефонами — одни и те же при любой базе,
+// включая пустую. /reception теперь ведёт на заявки.
 
 export function DemoLeads() {
   const { items, addItem } = useDemoCollection("negis_demo_leads", leadsSeed, {
@@ -1030,88 +974,12 @@ export function DemoChat() {
 // отдаёт MarketplacePage: каталог того, что клиника действительно может
 // подключить, с честным состоянием каждой карточки.
 
-export function DemoReports() {
-  const weekly = [
-    ["Понедельник", "31", "6", "19%", "420 000 ₸"],
-    ["Вторник", "28", "5", "18%", "360 000 ₸"],
-    ["Среда", "42", "9", "21%", "610 000 ₸"],
-    ["Четверг", "37", "8", "22%", "540 000 ₸"],
-    ["Пятница", "44", "11", "25%", "740 000 ₸"],
-  ];
-
-  return (
-    <PageLayout>
-      <div className="space-y-7">
-        <PageHeader title="Отчёты" subtitle="Аналитика по лидам, записям и конверсии." action={<Link href="/ads-automation"><div className="neu-btn-primary inline-flex items-center gap-2 px-5 py-2.5 text-sm"><Target size={16} />AI запуск рекламы</div></Link>} />
-        {/*
-          Плитки здесь были захардкожены и показывались как данные клиники:
-          одни и те же числа при любой базе, включая пустую. Осталось только
-          то, что считается по реально загруженным строкам; для остального
-          источника в продукте нет, и правдоподобное число вместо него —
-          худший из возможных ответов.
-        */}
-        <p className="neu-card p-4 text-sm font-semibold leading-relaxed text-[#475569]">
-          Сводные показатели считаются на главном экране и в сводке — по строкам вашей клиники.
-          Здесь их не дублируем, чтобы не показать два разных ответа на один вопрос.
-        </p>
-        <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">
-          <section className="neu-card">
-            <h2 className="mb-4 text-lg font-bold text-[#0F172A]">Недельный отчёт</h2>
-            <div className="space-y-3 md:hidden">
-              {weekly.map(([day, leads, appointments, conversion, revenue]) => (
-                <article key={day} className="neu-sm p-4">
-                  <div className="flex items-center justify-between gap-3">
-                    <h3 className="font-black text-[#0F172A]">{day}</h3>
-                    <span className="rounded-full bg-green-50 px-3 py-1 text-xs font-bold text-green-700">{conversion}</span>
-                  </div>
-                  <div className="mt-4 grid grid-cols-2 gap-3">
-                    <MobileDetail label="Лиды" value={leads} />
-                    <MobileDetail label="Записи" value={appointments} />
-                    <MobileDetail label="Доход" value={revenue} />
-                  </div>
-                </article>
-              ))}
-            </div>
-            <div className="hidden overflow-x-auto md:block">
-            <table className="w-full min-w-[680px] text-left text-sm">
-              <thead className="text-xs uppercase text-[#94A3B8]">
-                <tr>
-                  {["День", "Лиды", "Записи", "Конверсия", "Доход"].map((header) => (
-                    <th key={header} className="border-b border-[#E7ECF3] px-3 py-3 font-bold">{header}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {weekly.map(([day, leads, appointments, conversion, revenue]) => (
-                  <tr key={day} className="border-b border-[#EEF2F7] last:border-0">
-                    <td className="px-3 py-4 font-bold text-[#0F172A]">{day}</td>
-                    <td className="px-3 py-4">{leads}</td>
-                    <td className="px-3 py-4">{appointments}</td>
-                    <td className="px-3 py-4">{conversion}</td>
-                    <td className="px-3 py-4 font-bold text-[#0F172A]">{revenue}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            </div>
-          </section>
-          <aside className="neu-card">
-            <h2 className="mb-4 text-lg font-bold text-[#0F172A]">Рекомендации AI</h2>
-            <div className="space-y-3">
-              {[
-                "Усилить follow-up по пропущенным звонкам до 15 минут.",
-                "Продолжить тест Reels-креативов для консультаций.",
-                "Разделить лиды Instagram и WhatsApp по разным скриптам ресепшна.",
-              ].map((item) => (
-                <div key={item} className="rounded-xl bg-[#F8FAFC] p-4 text-sm leading-relaxed text-[#334155]">{item}</div>
-              ))}
-            </div>
-          </aside>
-        </div>
-      </div>
-    </PageLayout>
-  );
-}
+// Экран «Отчёты» удалён.
+//
+// Плитки с выдуманными числами убрали раньше, но под ними оставалась
+// таблица «Недельный отчёт» с выручкой от 420 000 до 740 000 тенге —
+// такая же выдумка, только в другой разметке. Те же показатели
+// считаются на сводке по строкам клиники, туда /reports и ведёт.
 
 export function DemoAdmin() {
   const { items: staff, setItems: setStaff, updateItem } = useDemoCollection("negis_demo_staff", staffSeed, {
