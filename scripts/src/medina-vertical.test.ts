@@ -140,3 +140,37 @@ test("VT8 имена таблиц, ресурсов и ролей ниша не 
   assert.ok(registry.includes('"doctor-schedule"'), "ключ ресурса не переименован");
   assert.ok(/"doctor"/.test(permissions), "роль тоже");
 });
+
+test("VT9 право на справочники отделено от права на секреты", async () => {
+  const permissions = (await import(
+    pathToFileURL(path.join(repoRoot, "lib", "auth", "permissions.ts")).href
+  )) as { permissionsForRole?: (role: string) => string[]; rolePermissions?: unknown } & Record<string, unknown>;
+  const registry = await codeOf(path.join(repoRoot, "lib", "crm", "authorization.ts"));
+
+  // Прайс и график правит тот, кто ведёт запись каждый день. Дать ему
+  // view_admin значило бы открыть и ключи интеграций, и список сотрудников:
+  // право на прайс не должно тянуть за собой право на секреты.
+  const catalogue = await codeOf(path.join(repoRoot, "lib", "auth", "permissions.ts"));
+  assert.ok(catalogue.includes('"manage_directory"'), "право существует");
+  assert.ok(
+    /receptionist: \[[\s\S]{0,200}"manage_directory"/.test(catalogue),
+    "и есть у регистратора — администратора салона",
+  );
+
+  for (const resource of ["clinic-services", "clinic-doctors", "doctor-schedule"]) {
+    const block = registry.slice(registry.indexOf(`"${resource}"`), registry.indexOf(`"${resource}"`) + 400);
+    assert.ok(block.includes("manage_directory"), `${resource}: запись — по праву справочников`);
+    assert.ok(!/POST: "view_admin"/.test(block), `${resource}: view_admin больше не требуется`);
+  }
+});
+
+test("VT10 страница справочников доступна без админ-центра", async () => {
+  const app = await codeOf(path.join(repoRoot, "artifacts", "negis", "src", "App.tsx"));
+  const sidebar = await codeOf(path.join(repoRoot, "artifacts", "negis", "src", "components", "layout", "Sidebar.tsx"));
+
+  assert.ok(/path="\/staff-schedule"/.test(app), "маршрут есть");
+  assert.ok(/'\/staff-schedule': 'directory'/.test(app), "и закрыт правом справочников, а не админки");
+  assert.ok(/'\/staff-schedule'[\s\S]{0,120}'receptionist'/.test(sidebar), "пункт меню виден регистратору");
+  // Подпись пункта зависит от ниши: у клиники врачи, у салона мастера.
+  assert.ok(/href === '\/staff-schedule'[\s\S]{0,120}terms\.specialistPlural/.test(sidebar), "подпись — из словаря вертикали");
+});

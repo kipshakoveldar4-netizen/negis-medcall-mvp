@@ -3,6 +3,7 @@ import { Link, useLocation } from 'wouter';
 import { BadgeDollarSign, BarChart2, Building2, CalendarDays, Clapperboard, Inbox, LayoutDashboard, Rocket, Settings, Store, Tag, Users, LogOut, X, KeyRound, User, type LucideIcon } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
 import { isRealWorkspace } from '@/lib/demoStorage';
+import { capitalize, termsFor } from '../../../../../lib/vertical/terms';
 import { supabase } from '@/lib/supabase';
 import { toast } from 'sonner';
 
@@ -34,6 +35,9 @@ const NAV_GROUPS: NavGroup[] = [
       // Услуги стоят в «Операциях», а не в «Управлении»: право на чтение здесь
       // то же, что у записей, и справочник открывают в момент записи пациента.
       { href: '/services', icon: Tag, label: 'Услуги', roles: ['owner', 'manager', 'agent', 'booking_agent'] },
+      // Регистратор (в салоне — администратор) правит исполнителей и смены сам:
+      // право manage_directory даёт ему эту страницу, не открывая админ-центр.
+      { href: '/staff-schedule', icon: CalendarDays, label: 'Специалисты и график', roles: ['owner', 'manager', 'receptionist'] },
     ],
   },
   {
@@ -58,7 +62,7 @@ const NAV_GROUPS: NavGroup[] = [
 
 export function Sidebar() {
   const [location] = useLocation();
-  const { signOut, user, userRole, availableWorkspaces, clearWorkspaceSelection } = useAuth();
+  const { signOut, user, userRole, availableWorkspaces, clearWorkspaceSelection, vertical } = useAuth();
 
   // Подпись «работаем без базы клиники» вешалась на isDemoMode, а он не
   // становится истинным никогда: флаг включается только из сохранённой сессии
@@ -69,6 +73,7 @@ export function Sidebar() {
   // Достижимое условие — рабочее пространство не выбрано: тогда экраны берут
   // данные из браузера, а не из базы, и сказать об этом обязательно.
   const noClinicSelected = !isRealWorkspace();
+  const terms = termsFor(vertical);
   const [showProfile, setShowProfile] = useState(false);
   const [fullName, setFullName] = useState(user?.user_metadata?.full_name ?? '');
   const [newPassword, setNewPassword] = useState('');
@@ -139,7 +144,12 @@ export function Sidebar() {
                 {group.title}
               </p>
               <div className="flex flex-col gap-0.5">
-                {group.items.map(({ href, icon: Icon, label }) => {
+                {group.items.map(({ href, icon: Icon, label: staticLabel }) => {
+                  // Единственный пункт, чья подпись зависит от ниши: у клиники
+                  // это врачи, у салона — мастера. Словарь один — lib/vertical.
+                  const label = href === '/staff-schedule'
+                    ? `${capitalize(terms.specialistPlural)} и график`
+                    : staticLabel;
                   const active = location === href || location.startsWith(href + '/');
                   return (
                     <Link key={href} href={href}>

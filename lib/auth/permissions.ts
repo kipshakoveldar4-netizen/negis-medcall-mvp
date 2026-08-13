@@ -31,6 +31,14 @@ export const crmPermissions = [
   "manage_targeting",
   "view_reports",
   "view_admin",
+  // Справочники клиники: прайс, исполнители и их график.
+  //
+  // Отдельно от view_admin намеренно. Прайс и расписание правит тот, кто ведёт
+  // запись каждый день, — в салоне это администратор, в клинике старший
+  // регистратор. Дать им view_admin значило бы открыть и ключи интеграций, и
+  // список сотрудников: право на прайс не должно тянуть за собой право на
+  // секреты.
+  "manage_directory",
   "manage_staff",
   "manage_integrations",
 ] as const;
@@ -40,6 +48,7 @@ export type CrmPermission = (typeof crmPermissions)[number];
 const rolePermissions: Record<StaffRole, CrmPermission[]> = {
   owner: [...crmPermissions],
   admin: [
+    "manage_directory",
     "view_clients",
     "manage_clients",
     "view_appointments",
@@ -64,6 +73,10 @@ const rolePermissions: Record<StaffRole, CrmPermission[]> = {
     "manage_integrations",
   ],
   receptionist: [
+    // Администратор салона правит прайс, мастеров и их смены: без этого он не
+    // может выполнять свою работу и вынужден звать владельца ради каждой
+    // новой услуги.
+    "manage_directory",
     "view_clients",
     "manage_clients",
     "view_appointments",
@@ -103,6 +116,9 @@ const rolePermissions: Record<StaffRole, CrmPermission[]> = {
     "send_chat",
   ],
   manager: [
+    // Управляющий правил прайс через view_admin; с выделением отдельного
+    // права справочников оно ему возвращается явно, а не через админку.
+    "manage_directory",
     "view_clients",
     "manage_clients",
     "view_appointments",

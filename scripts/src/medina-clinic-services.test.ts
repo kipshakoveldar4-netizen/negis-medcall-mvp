@@ -270,14 +270,23 @@ test("CS1 список услуг читается в пределах пров�
   assert.equal(read?.filters.workspace_id, WORKSPACE_A, "чтение обязано быть сужено рабочим пространством");
 });
 
-test("CS2 ресепшн читает прайс, но не правит его", async () => {
+test("CS2 регистратор правит прайс, врач и маркетолог — нет", async () => {
+  // Политика изменена сознательно: прайс и справочники правит тот, кто ведёт
+  // запись каждый день, — в салоне это администратор, в клинике старший
+  // регистратор. Право отдельное (manage_directory), а не view_admin: право на
+  // прайс не должно тянуть за собой ключи интеграций и список сотрудников.
   const reception = await loadRouter({ role: "receptionist" });
-  const refused = await reception({ method: "POST", body: { name: "Новая услуга" } });
-  assert.equal(refused.res.statusCode, 403, JSON.stringify(refused.res.body));
+  const allowed = await reception({ method: "POST", body: { name: "Новая услуга" } });
+  assert.equal(allowed.res.statusCode, 201, JSON.stringify(allowed.res.body));
 
   const owner = await loadRouter();
-  const allowed = await owner({ method: "POST", body: { name: "Новая услуга" } });
-  assert.equal(allowed.res.statusCode, 201, JSON.stringify(allowed.res.body));
+  const ownerToo = await owner({ method: "POST", body: { name: "Новая услуга" } });
+  assert.equal(ownerToo.res.statusCode, 201, JSON.stringify(ownerToo.res.body));
+
+  // А у ролей, которые записью не занимаются, права нет по-прежнему.
+  const marketer = await loadRouter({ role: "marketer" });
+  const refused = await marketer({ method: "POST", body: { name: "Новая услуга" } });
+  assert.equal(refused.res.statusCode, 403, JSON.stringify(refused.res.body));
 });
 
 test("CS3 врач не правит прайс, администратор клиники правит", async () => {

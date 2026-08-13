@@ -41,6 +41,7 @@ const ServicesPage = lazy(() => import("@/pages/ServicesPage"));
 const DemoCalls = lazy(() => import("@/pages/DemoCrmModules").then(m => ({ default: m.DemoCalls })));
 const DemoChat = lazy(() => import("@/pages/DemoCrmModules").then(m => ({ default: m.DemoChat })));
 const MarketplacePage = lazy(() => import("@/pages/MarketplacePage"));
+const DirectoryPage = lazy(() => import("@/pages/DirectoryPage"));
 const PlatformOwnerPage = lazy(() => import("@/pages/PlatformOwnerPage"));
 
 
@@ -109,6 +110,7 @@ const ROUTE_PERMISSIONS: Record<string, string> = {
   '/booking': 'booking',
   '/appointments': 'booking',
   '/services': 'booking',
+  '/staff-schedule': 'directory',
   '/reception': 'reception',
   '/calls': 'reception',
   '/sales': 'crm',
@@ -248,6 +250,13 @@ function Router() {
       <Route path="/calls" component={() => <ProtectedPage component={DemoCalls} permission="reception" />} />
       <Route path="/sales" component={() => <ProtectedPage component={SalesPage} permission="crm" />} />
       <Route path="/services" component={() => <ProtectedPage component={ServicesPage} permission="booking" />} />
+      {/*
+        Мастера и график — отдельным маршрутом, а не только вкладкой
+        админ-центра. Правит их тот, кто ведёт запись каждый день: у
+        администратора салона права manage_directory достаточно, а весь
+        админ-центр с ключами интеграций ему по-прежнему закрыт.
+      */}
+      <Route path="/staff-schedule" component={() => <ProtectedPage component={DirectoryPage} permission="directory" />} />
       <Route path="/leads" component={() => <ProtectedPage component={LeadsPage} permission="crm" />} />
       <Route path="/clients" component={() => <ProtectedPage component={ClientsPage} permission="crm" />} />
       <Route path="/tasks" component={() => <ProtectedPage component={DemoTasks} permission="tasks" />} />

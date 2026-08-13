@@ -253,12 +253,21 @@ const MONDAY_OUTSIDE = "2026-09-07T15:00:00.000Z";
 
 /* ── Права и регистрация ── */
 
-test("DS1 справочник читает тот, кто записывает, а правит тот, кто отвечает за клинику", async () => {
+test("DS1 справочник читает тот, кто записывает, и он же его правит", async () => {
+  // Политика изменена сознательно: исполнителей и смены правит тот, кто ведёт
+  // запись каждый день, — у салона это администратор (роль receptionist).
+  // Право отдельное (manage_directory), а не view_admin: право на график не
+  // должно тянуть за собой ключи интеграций и список сотрудников. Роли без
+  // этого права — врач, маркетолог — по-прежнему получают отказ.
   const reception = await loadRouter({ role: "receptionist", rows: { clinic_doctors: [activeDoctor] } });
   const read = await reception({ method: "GET" });
   assert.equal(read.res.statusCode, 200, JSON.stringify(read.res.body));
 
-  const refused = await reception({ method: "POST", body: { fullName: "Новый врач" } });
+  const written = await reception({ method: "POST", body: { fullName: "Новый врач" } });
+  assert.equal(written.res.statusCode, 201, JSON.stringify(written.res.body));
+
+  const doctor = await loadRouter({ role: "doctor", rows: { clinic_doctors: [activeDoctor] } });
+  const refused = await doctor({ method: "POST", body: { fullName: "Новый врач" } });
   assert.equal(refused.res.statusCode, 403, JSON.stringify(refused.res.body));
 
   const owner = await loadRouter();

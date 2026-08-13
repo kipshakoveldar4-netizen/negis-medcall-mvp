@@ -80,7 +80,7 @@ export const CRM_RESOURCE_AUTHORIZATION: Readonly<Record<string, RouteAuthorizat
   "clinic-services": {
     kind: "browser",
     methods: ["GET", "POST", "PATCH"],
-    permissions: { GET: "view_appointments", POST: "view_admin", PATCH: "view_admin" },
+    permissions: { GET: "view_appointments", POST: "manage_directory", PATCH: "manage_directory" },
   },
   // Справочник врачей и график — тот же раскол, что у услуг, и по той же
   // причине: форма записи без списка врачей и без их часов бесполезна, а
@@ -88,12 +88,12 @@ export const CRM_RESOURCE_AUTHORIZATION: Readonly<Record<string, RouteAuthorizat
   "clinic-doctors": {
     kind: "browser",
     methods: ["GET", "POST", "PATCH"],
-    permissions: { GET: "view_appointments", POST: "view_admin", PATCH: "view_admin" },
+    permissions: { GET: "view_appointments", POST: "manage_directory", PATCH: "manage_directory" },
   },
   "doctor-schedule": {
     kind: "browser",
     methods: ["GET", "POST", "PATCH"],
-    permissions: { GET: "view_appointments", POST: "view_admin", PATCH: "view_admin" },
+    permissions: { GET: "view_appointments", POST: "manage_directory", PATCH: "manage_directory" },
   },
   // Deals sit in the same "crm" group as leads and clients in the app's own
   // route permission map, so they reuse the client permissions rather than

@@ -220,6 +220,10 @@ function routePermissionsForStaffRole(role: StaffRole): RolePermissions {
     chat: crmPermissions.has('view_chat') || crmPermissions.has('send_chat'),
     marketplace: crmPermissions.has('view_marketing') || crmPermissions.has('manage_marketing'),
     admin: crmPermissions.has('view_admin') || crmPermissions.has('manage_staff'),
+    // Справочники — отдельный маршрут, а не вкладка админ-центра: администратор
+    // салона правит прайс и смены, но ключи интеграций и список сотрудников ему
+    // по-прежнему закрыты.
+    directory: crmPermissions.has('manage_directory'),
     reports: crmPermissions.has('view_reports'),
     ads:
       crmPermissions.has('view_marketing') ||
