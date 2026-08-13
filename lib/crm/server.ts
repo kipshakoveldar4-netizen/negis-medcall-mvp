@@ -6773,11 +6773,17 @@ export async function handleMetaLaunch(req: VercelRequest, res: VercelResponse) 
     if (readString(body.activeConfirmation).toUpperCase() !== "ЗАПУСТИТЬ") details.push("Для ACTIVE введите ЗАПУСТИТЬ");
   }
 
-  const compliance = checkMetaCompliance({
-    headline: launch.headline,
-    text: launch.primaryText,
-    description: launch.description,
-  });
+  // Ниша решает, какие правила применяются: салону запрещено обещать лечение,
+  // клинике — нет; клинике «морщины» дают замечание, салону это название услуги.
+  const vertical = await readWorkspaceVertical(workspaceId);
+  const compliance = checkMetaCompliance(
+    {
+      headline: launch.headline,
+      text: launch.primaryText,
+      description: launch.description,
+    },
+    vertical,
+  );
   if (compliance.status === "blocked") {
     return sendJson(res, 400, {
       ...errorBody("Проверка безопасности заблокировала текст", ["Перепишите текст перед запуском."]),
@@ -8566,6 +8572,21 @@ export async function handleMetaInsightsSyncRuns(req: VercelRequest, res: Vercel
  * readVertical вернёт умолчание. Отказ чтения тоже даёт умолчание: подписи —
  * не то, ради чего стоит отказывать пользователю во входе.
  */
+/**
+ * Ниша ОДНОГО рабочего пространства — для серверных проверок.
+ *
+ * Отдельно от списочного чтения: запуск рекламы касается одной клиники, и
+ * тащить ради него выборку по списку незачем.
+ *
+ * Отказ чтения даёт умолчание — клинику. Это осознанно несимметрично: у клиники
+ * правила строже, и сбой настройки не должен их снимать. Обратное умолчание
+ * означало бы, что сбой чтения разрешает медицинской клинике то, что ей нельзя.
+ */
+async function readWorkspaceVertical(workspaceId: string): Promise<Vertical> {
+  const verticals = await lookupWorkspaceVerticals([workspaceId]);
+  return verticals[workspaceId] || DEFAULT_VERTICAL;
+}
+
 async function lookupWorkspaceVerticals(workspaceIds: string[]): Promise<Record<string, Vertical>> {
   const ids = [...new Set(workspaceIds.filter((id) => isUuid(id)))];
   if (ids.length === 0) return {};

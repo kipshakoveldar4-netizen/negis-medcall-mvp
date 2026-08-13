@@ -39,7 +39,10 @@ type ComplianceResult = {
   disclaimer: string;
 };
 type ComplianceModule = {
-  checkMetaCompliance: (input: { text?: string; headline?: string; description?: string }) => ComplianceResult;
+  checkMetaCompliance: (
+    input: { text?: string; headline?: string; description?: string },
+    vertical?: "clinic" | "beauty",
+  ) => ComplianceResult;
 };
 
 const { checkMetaCompliance } = (await import(pathToFileURL(compliancePath).href)) as ComplianceModule;

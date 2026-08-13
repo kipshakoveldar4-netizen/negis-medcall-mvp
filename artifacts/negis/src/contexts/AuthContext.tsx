@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useEffect, useRef, useState } from 'react';
 import { Session, User } from '@supabase/supabase-js';
 import { supabase } from '@/lib/supabase';
+import { DEFAULT_VERTICAL, readVertical, type Vertical } from '../../../../lib/vertical/terms';
 import { useLocation } from 'wouter';
 import { toast } from 'sonner';
 import { apiUrl, clearCrmCache, crmFetch } from '@/lib/api';
@@ -79,6 +80,8 @@ interface AuthContextType {
   isImpersonation: boolean;
   isDemoMode: boolean;
   isStaffMode: boolean;
+  /** Ниша рабочего пространства: она решает подписи и правила рекламы. */
+  vertical: Vertical;
   impersonationClinicName: string | null;
   /**
    * Selection-1: every workspace the server listed for this user. The server
@@ -257,6 +260,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user,                    setUser]                    = useState<User | null>(null);
   const [clinicId,                setClinicId]                = useState<string | null>(null);
   const [userRole,                setUserRole]                = useState<UserRole | null>(null);
+  const [vertical,                setVertical]                = useState<Vertical>(DEFAULT_VERTICAL);
   const [rolePermissions,         setRolePermissions]         = useState<RolePermissions>({});
   const [isLoading,               setIsLoading]               = useState(true);
   const [isImpersonation,         setIsImpersonation]         = useState(false);
@@ -349,6 +353,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     workspaceName: string;
     role: string;
     permissions: string[];
+    vertical: Vertical;
   };
 
   const fetchAuthContext = async (): Promise<{
@@ -376,6 +381,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           workspaceName: String(entry.workspaceName || ''),
           role: String(entry.role),
           permissions: Array.isArray(entry.permissions) ? entry.permissions.map(String) : [],
+          // Ниша приезжает вместе с членством: словарь подписей выбирается до
+          // первого запроса данных, а переключение клиники меняет его сразу.
+          // Неизвестное значение — клиника: readVertical сам падает в умолчание.
+          vertical: readVertical(entry.vertical),
         }));
 
       return { memberships, status: response.status };
@@ -415,6 +424,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setClinicId(selected.workspaceId);
     setImpersonationClinicName(null);
     setUserRole(role);
+    setVertical(selected.vertical);
     setRolePermissions(routePermissionsForStaffRole(role));
     setUser(supabaseUser);
     setAvailableWorkspaces(toWorkspaceChoices(memberships));
@@ -817,7 +827,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     <AuthContext.Provider value={{
       session, user, clinicId, userRole, isLoading,
       rolePermissions,
-      isImpersonation, isDemoMode, isStaffMode, impersonationClinicName,
+      isImpersonation, isDemoMode, isStaffMode, impersonationClinicName, vertical,
       availableWorkspaces, selectWorkspace, clearWorkspaceSelection,
       signOut,
     }}>

@@ -47,6 +47,7 @@
     "test:no-demo-copy": "tsx --test ./src/medina-no-demo-copy.test.ts",
     "test:platform-billing": "tsx --test ./src/medina-platform-billing.test.ts",
     "test:installable-app": "tsx --test ./src/medina-installable-app.test.ts",
+    "test:vertical": "tsx --test ./src/medina-vertical.test.ts",
     "build:icons": "tsx ./src/build-app-icons.ts",
     "seed:clinic": "tsx ./src/seed-clinic.ts"
   },

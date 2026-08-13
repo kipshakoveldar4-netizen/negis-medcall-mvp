@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useLocation } from "wouter";
 import { PlanCalculator } from "@/components/admin/PlanCalculator";
+import { VerticalSwitch } from "@/components/admin/VerticalSwitch";
 import {
   AlertTriangle,
   Bot,
@@ -2327,6 +2328,7 @@ export default function AdminCenter() {
             счёта и позволяет вписать чужую.
           */}
           <PlanCalculator />
+          <VerticalSwitch />
           <section className="neu-card" aria-label="Поддержка">
             <p className="text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">Поддержка</p>
             <h2 className="mt-1 text-base font-black text-[#0F172A]">Связь с Medina OS</h2>
