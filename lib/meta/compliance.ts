@@ -1,3 +1,5 @@
+import { DEFAULT_VERTICAL, type Vertical } from "../vertical/terms";
+
 export type MetaComplianceStatus = "safe" | "needs_review" | "blocked";
 
 export type MetaComplianceIssue = {
@@ -32,7 +34,20 @@ export type MetaComplianceResult = {
   disclaimer: string;
 };
 
-const disclaimer = "Результаты индивидуальны. Перед процедурой нужна консультация специалиста.";
+/**
+ * Дисклеймер зависит от ниши, и это не косметика формулировки.
+ *
+ * «Перед процедурой нужна консультация специалиста» — медицинская фраза. Салону
+ * она не просто не нужна: продукт прикручивал её к каждому объявлению
+ * принудительно. Правило про дисклеймер срабатывает на любом тексте без слов
+ * «консультац/индивидуальн/специалист», а задание модели прямо требует упомянуть
+ * консультацию специалиста — то есть салон, рекламирующий окрашивание, получал
+ * в объявление медицинскую оговорку, которой сам не делал.
+ */
+const DISCLAIMERS: Readonly<Record<Vertical, string>> = {
+  clinic: "Результаты индивидуальны. Перед процедурой нужна консультация специалиста.",
+  beauty: "Результат зависит от исходных данных. Подберём вариант на консультации.",
+};
 
 // Границы слова — руками, а не через \b.
 //
@@ -84,12 +99,32 @@ function phrase(alternatives: string, unbounded = ""): RegExp {
   return new RegExp(`${EDGE_BEFORE}(${body})`, "iu");
 }
 
-const rules: Array<{
+/**
+ * Слова, обозначающие состояние внешности или тела.
+ *
+ * Нужны дважды: сами по себе и рядом с притяжательным местоимением, поэтому
+ * вынесены отдельно, а не продублированы в двух паттернах.
+ */
+const CONDITION_WORDS =
+  "акне|постакне|морщин\\p{L}*|пигментац\\p{L}*|кож\\p{L}*|волос\\p{L}*|ногт\\p{L}*"
+  + "|заболеван\\p{L}*|болезн\\p{L}*|диагноз\\p{L}*";
+
+type Rule = {
   code: string;
   severity: "review" | "block";
   pattern: RegExp;
   message: string;
-}> = [
+};
+
+/**
+ * Правила, общие для всех ниш.
+ *
+ * Из семи правил медицинских — два. Остальные пять описывают политику Meta про
+ * обращение к читателю и обещание результата, и салону они применимы один в
+ * один: «У вас тусклая кожа?» запрещено ровно так же, как «У вас акне?», а
+ * «Гарантия результата» на окрашивании — так же, как на инъекциях.
+ */
+const SHARED_RULES: Rule[] = [
   // Что запрещает Meta, а что просто стоит смягчить.
   //
   // Правила ниже написаны так, будто блокируют всё подряд, — и это сходило с
@@ -115,20 +150,16 @@ const rules: Array<{
     // состояния оно им становится, поэтому здесь напоминание, а не отказ.
     code: "personal_possessive",
     severity: "review",
-    pattern: phrase("ваши|ваша|ваше|твой|твоя|твои"),
-    message: "Прямое обращение на «вы/ты» рядом с названием состояния Meta читает как персональный признак.",
-  },
-  {
-    code: "medical_condition_claim",
-    severity: "review",
-    // «постакне» и «излечение» перечислены отдельно, а не сняты левой границей.
-    // Снять её у всего правила нельзя: «болезн» живёт внутри «безболезненная
-    // процедура» — обычной фразы косметологии, которую блокировать не за что.
-    pattern: phrase(
-      "акне|постакне|морщин\\p{L}*|пигментац\\p{L}*|заболеван\\p{L}*|болезн\\p{L}*"
-      + "|диагноз\\p{L}*|лечени\\p{L}*|излечени\\p{L}*|вылечим|избавиться",
+    // Условие теперь совпадает с сообщением, а раньше — нет: сообщение обещает
+    // «рядом с названием состояния», а паттерн ловил голое «ваши» где угодно.
+    // У салона «ваш мастер», «ваша запись», «ваши брови» — обычная речь, и
+    // правило горело бы на каждом объявлении. Неустранимое вечное замечание —
+    // это способ приучить оператора не читать замечания вовсе.
+    pattern: new RegExp(
+      `${EDGE_BEFORE}((?:ваши|ваша|ваше|ваш|твой|твоя|твои)[^\\n]{0,24}?(?:${CONDITION_WORDS}))`,
+      "iu",
     ),
-    message: "Названо медицинское или эстетическое состояние — уберите обращение к читателю рядом с ним.",
+    message: "Прямое обращение на «вы/ты» рядом с названием состояния Meta читает как персональный признак.",
   },
   {
     code: "guarantee",
@@ -170,17 +201,72 @@ const rules: Array<{
     ),
     message: "Агрессивное обещание или давление лучше смягчить перед запуском.",
   },
-  {
+];
+
+/** Названо эстетическое состояние: у клиники — замечание, у салона — норма. */
+const AESTHETIC_CONDITION: Rule = {
+  code: "aesthetic_condition",
+  severity: "review",
+  pattern: phrase("акне|постакне|морщин\\p{L}*|пигментац\\p{L}*"),
+  message: "Названо эстетическое состояние — уберите обращение к читателю рядом с ним.",
+};
+
+/**
+ * Заявление о лечении.
+ *
+ * У клиники это замечание: она вправе говорить «лечение». У салона — отказ, и
+ * это УЖЕСТОЧЕНИЕ, а не послабление. Салон, обещающий вылечить, заявляет
+ * услугу, которой не оказывает, и отвечать за это будет он.
+ *
+ * «излечени» перечислено отдельно, а не снято левой границей: «болезн» живёт
+ * внутри «безболезненная процедура» — обычной фразы косметологии, которую
+ * блокировать не за что.
+ */
+function treatmentClaim(vertical: Vertical): Rule {
+  return {
+    code: "medical_treatment_claim",
+    severity: vertical === "beauty" ? "block" : "review",
+    pattern: phrase(
+      "заболеван\\p{L}*|болезн\\p{L}*|диагноз\\p{L}*|лечени\\p{L}*|излечени\\p{L}*|вылечим|избавиться",
+    ),
+    message:
+      vertical === "beauty"
+        ? "Салон не лечит: слова про лечение и диагноз в рекламу ставить нельзя."
+        : "Названо лечение или диагноз — уберите обращение к читателю рядом с ним.",
+  };
+}
+
+function disclaimerRule(vertical: Vertical): Rule {
+  const words = vertical === "beauty" ? "консультац|подбер|мастер" : "консультац|индивидуальн|специалист";
+  return {
     code: "missing_disclaimer",
     severity: "review",
     // Прежняя версия была `^((?!…).)*$` — точка не переходит через перевод
-    // строки, а три поля объявления склеиваются именно им. Поэтому у любого
-    // объявления из двух и более полей правило не срабатывало вообще, и
-    // напоминание про дисклеймер не появлялось никогда.
-    pattern: /^(?:(?!консультац|индивидуальн|специалист)[\s\S])*$/i,
-    message: "Добавьте нейтральный дисклеймер о консультации специалиста.",
-  },
-];
+    // строки, а три поля объявления склеиваются именно им, поэтому у объявления
+    // из двух и более полей правило не срабатывало вообще.
+    pattern: new RegExp(`^(?:(?!${words})[\\s\\S])*$`, "i"),
+    message:
+      vertical === "beauty"
+        ? "Добавьте оговорку о том, что результат подбирается индивидуально."
+        : "Добавьте нейтральный дисклеймер о консультации специалиста.",
+  };
+}
+
+/**
+ * Набор правил для ниши.
+ *
+ * У салона нет правила про эстетическое состояние — и это главное изменение.
+ * «Морщины» и «пигментация» для него не диагноз, а название того, что он делает.
+ * Замечание было неустранимым, но попадало в счётчик, по которому переписывание
+ * выбирает лучший вариант, — то есть продукт вознаграждал тот вариант, из
+ * которого услуга ВЫЧЕРКНУТА.
+ */
+export function rulesFor(vertical: Vertical): Rule[] {
+  const rules = [...SHARED_RULES, treatmentClaim(vertical)];
+  if (vertical === "clinic") rules.push(AESTHETIC_CONDITION);
+  rules.push(disclaimerRule(vertical));
+  return rules;
+}
 
 function uniqueIssues(issues: MetaComplianceIssue[]) {
   const seen = new Set<string>();
@@ -266,7 +352,7 @@ function rewriteField(text: string): string {
   return tidy(rewrites.reduce(applyRewrite, text));
 }
 
-function rewriteText(text: string): string {
+function rewriteText(text: string, disclaimer: string): string {
   const normalized = rewriteField(text);
 
   // Пустой считается и строка из одних знаков препинания: «Навсегда!» после
@@ -279,7 +365,7 @@ function rewriteText(text: string): string {
     : `${safe}\n\nЗапишитесь на консультацию. ${disclaimer}`;
 }
 
-function evaluate(text: string): { status: MetaComplianceStatus; issues: MetaComplianceIssue[] } {
+function evaluate(text: string, rules: Rule[]): { status: MetaComplianceStatus; issues: MetaComplianceIssue[] } {
   const issues = uniqueIssues(
     rules.flatMap((rule) => {
       const match = text.match(rule.pattern);
@@ -303,13 +389,18 @@ function evaluate(text: string): { status: MetaComplianceStatus; issues: MetaCom
   return { status: hasBlocked ? "blocked" : hasReview ? "needs_review" : "safe", issues };
 }
 
-export function checkMetaCompliance(input: { text?: string; headline?: string; description?: string }): MetaComplianceResult {
+export function checkMetaCompliance(
+  input: { text?: string; headline?: string; description?: string },
+  vertical: Vertical = DEFAULT_VERTICAL,
+): MetaComplianceResult {
+  const rules = rulesFor(vertical);
+  const disclaimer = DISCLAIMERS[vertical];
   const text = [input.headline, input.text, input.description].filter(Boolean).join("\n").trim();
-  const verdict = evaluate(text);
-  const safeText = rewriteText(text);
+  const verdict = evaluate(text, rules);
+  const safeText = rewriteText(text, disclaimer);
   // Тем же набором правил — по переписанному тексту. Иначе «безопасная версия»
   // остаётся обещанием, за которое никто не отвечает.
-  const safeVerdict = evaluate(safeText);
+  const safeVerdict = evaluate(safeText, rules);
 
   return {
     status: verdict.status,

@@ -885,6 +885,7 @@ export function AppointmentsPage() {
     [catalog],
   );
   const slots = useMemo(() => generateSlots(), []);
+
   const weekStart = useMemo(() => startOfWeekKey(selectedDate), [selectedDate]);
   const weekDays = useMemo(() => Array.from({ length: 7 }, (_, index) => addDaysKey(weekStart, index)), [weekStart]);
 
@@ -934,6 +935,52 @@ export function AppointmentsPage() {
     () => filteredItems.filter((appointment) => isOnDay(appointment, selectedDate, clinicTimeZone)),
     [filteredItems, selectedDate, clinicTimeZone],
   );
+
+  /**
+   * Записи, разложенные по строкам дневной сетки.
+   *
+   * Раньше строка искала записи точным совпадением времени: `timeKeyFromStartsAt
+   * (...) === slot`. Сетка идёт получасовыми шагами с 09:00 до 21:00, поэтому
+   * визит в 10:15 не попадал ни в 10:00, ни в 10:30 и ИСЧЕЗАЛ с экрана дня —
+   * при том что счётчик над сеткой его считал. Оператор видел «7 записей» и
+   * шесть карточек.
+   *
+   * Теперь запись попадает в ту строку, в которую она попадает по времени: в
+   * последнюю, чьё начало не позже её собственного. А всё, что вне сетки —
+   * раньше открытия, позже закрытия или с нечитаемой датой, — собирается
+   * отдельно и показывается над ней. Спрятать такую запись нельзя: именно она
+   * чаще всего и есть ошибка, которую оператор ищет.
+   */
+  const dayBuckets = useMemo(() => {
+    const buckets = new Map<string, Appointment[]>(slots.map((slot) => [slot, [] as Appointment[]]));
+    const outside: Appointment[] = [];
+
+    const minutesOf = (value: string) => {
+      const [hours, minutes] = value.split(":").map(Number);
+      return hours * 60 + minutes;
+    };
+    const slotMinutes = slots.map(minutesOf);
+
+    for (const appointment of dayAppointments) {
+      const instant = Date.parse(appointment.startsAt);
+      if (!Number.isFinite(instant)) {
+        outside.push(appointment);
+        continue;
+      }
+      const minutes = minutesOf(timeKeyFromStartsAt(appointment.startsAt));
+      let index = -1;
+      for (let i = 0; i < slotMinutes.length; i += 1) {
+        if (slotMinutes[i] <= minutes) index = i;
+      }
+      if (index < 0) {
+        outside.push(appointment);
+        continue;
+      }
+      buckets.get(slots[index])!.push(appointment);
+    }
+
+    return { buckets, outside };
+  }, [dayAppointments, slots]);
   const weekAppointments = useMemo(
     () => filteredItems.filter((appointment) => isWithinWeek(appointment, weekStart, clinicTimeZone)),
     [filteredItems, weekStart, clinicTimeZone],
@@ -1182,8 +1229,26 @@ export function AppointmentsPage() {
         <span className="rounded-full bg-[#F8FAFC] px-3 py-1 text-xs font-bold text-[#64748B]">{dayAppointments.length} записей</span>
       </div>
       <div className="space-y-3">
+        {dayBuckets.outside.length ? (
+          <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4">
+            <p className="text-sm font-black text-amber-900">
+              Вне сетки дня: {dayBuckets.outside.length}
+            </p>
+            <p className="mt-1 text-xs font-semibold text-amber-800">
+              Эти записи начинаются раньше 09:00, позже 21:00 или их время не удалось прочитать. Сетка их не
+              показывает, а счётчик считает — поэтому они здесь.
+            </p>
+            <ul className="mt-2 space-y-1 text-sm font-semibold text-amber-900">
+              {dayBuckets.outside.map((appointment) => (
+                <li key={appointment.id}>
+                  {timeKeyFromStartsAt(appointment.startsAt)} · {appointment.client} · {appointment.doctor || "без врача"}
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
         {slots.map((slot) => {
-          const slotAppointments = dayAppointments.filter((appointment) => timeKeyFromStartsAt(appointment.startsAt) === slot);
+          const slotAppointments = dayBuckets.buckets.get(slot) || [];
           return (
             <div key={slot} className="grid gap-3 rounded-2xl bg-[#F8FAFC] p-3 md:grid-cols-[84px_minmax(0,1fr)]">
               <div className="flex items-center justify-between gap-3 md:block">

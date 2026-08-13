@@ -30,6 +30,7 @@ import {
   recordCrmChange,
 } from "./change-journal";
 import { checkMetaCompliance } from "../meta/compliance";
+import { DEFAULT_VERTICAL, readVertical, VERTICAL_SETTINGS_KEY, type Vertical } from "../vertical/terms";
 import {
   MetaApiError,
   type MetaTargetingResolution,
@@ -8555,6 +8556,44 @@ export async function handleMetaInsightsSyncRuns(req: VercelRequest, res: Vercel
  * A failure here is not an authentication failure: the picker falls back to the
  * role and the id, which is worse to read but still correct.
  */
+/**
+ * Вертикаль каждого рабочего пространства: клиника или салон.
+ *
+ * Читается одним запросом на весь список членств, а не по одному на клинику:
+ * контекст запрашивается при каждом входе, и лишние обращения тут заметны.
+ *
+ * Отсутствие строки — не сбой, а клиника, которая вертикаль не задавала;
+ * readVertical вернёт умолчание. Отказ чтения тоже даёт умолчание: подписи —
+ * не то, ради чего стоит отказывать пользователю во входе.
+ */
+async function lookupWorkspaceVerticals(workspaceIds: string[]): Promise<Record<string, Vertical>> {
+  const ids = [...new Set(workspaceIds.filter((id) => isUuid(id)))];
+  if (ids.length === 0) return {};
+
+  const supabase = getSupabaseServerClient();
+  if (!supabase) return {};
+
+  try {
+    const { data, error } = await supabase
+      .from("workspace_settings")
+      .select("workspace_id, value")
+      .in("workspace_id", ids)
+      .eq("key", VERTICAL_SETTINGS_KEY);
+    if (error) throw new Error(error.message);
+
+    const verticals: Record<string, Vertical> = {};
+    for (const row of Array.isArray(data) ? data : []) {
+      const record = asRecord(row);
+      const id = firstString(record.workspace_id);
+      if (id) verticals[id] = readVertical(asRecord(record.value).vertical);
+    }
+    return verticals;
+  } catch (error) {
+    console.warn(supabaseWarning("workspace_settings workspace_vertical", error));
+    return {};
+  }
+}
+
 async function lookupWorkspaceNames(workspaceIds: string[]): Promise<Record<string, string>> {
   const ids = [...new Set(workspaceIds.filter((id) => isUuid(id)))];
   if (ids.length === 0) return {};
@@ -8592,11 +8631,18 @@ export async function handleCrmAuthContext(req: VercelRequest, res: VercelRespon
     const { memberships } = await listAuthContextMemberships(req);
     // Selection-1: a caller with several memberships has to pick one, and a
     // list of UUIDs is not a choice anyone can make.
-    const workspaceNames = await lookupWorkspaceNames(memberships.map((membership) => membership.workspaceId));
+    const workspaceIds = memberships.map((membership) => membership.workspaceId);
+    const [workspaceNames, workspaceVerticals] = await Promise.all([
+      lookupWorkspaceNames(workspaceIds),
+      lookupWorkspaceVerticals(workspaceIds),
+    ]);
     const safeMemberships = memberships.map((membership) => ({
       staffUserId: membership.staffUserId,
       workspaceId: membership.workspaceId,
       workspaceName: workspaceNames[membership.workspaceId] || "",
+      // Вертикаль едет вместе с членством: браузер выбирает словарь подписей
+      // до первого запроса данных, и переключение клиники меняет его сразу.
+      vertical: workspaceVerticals[membership.workspaceId] || DEFAULT_VERTICAL,
       role: membership.role,
       permissions: membership.permissions,
       status: "active",

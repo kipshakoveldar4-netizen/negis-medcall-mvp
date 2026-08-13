@@ -1,4 +1,5 @@
 import { checkMetaCompliance, type MetaComplianceResult, type MetaComplianceStatus } from "./compliance";
+import { DEFAULT_VERTICAL, type Vertical } from "../vertical/terms";
 
 // Платформа чинит текст, а не запирает дверь.
 //
@@ -79,6 +80,20 @@ export type AdTextGenerator = (input: {
 
 const MAX_ATTEMPTS = 2;
 
+/**
+ * Задание модели зависит от ниши.
+ *
+ * Прежний текст был один на всех и требовал «упомянуть консультацию
+ * специалиста». Для салона это принудительная медицинская оговорка в каждом
+ * объявлении: он рекламирует окрашивание, а получает фразу про специалиста,
+ * которой сам не делал. И наоборот — прежний текст называл нежелательным
+ * упоминание «морщин» и «пигментации», то есть просил салон вычеркнуть
+ * название собственной услуги.
+ */
+export function improveSystemPrompt(vertical: Vertical = DEFAULT_VERTICAL): string {
+  return vertical === "beauty" ? BEAUTY_SYSTEM_PROMPT : IMPROVE_SYSTEM_PROMPT;
+}
+
 export const IMPROVE_SYSTEM_PROMPT = [
   "Ты пишешь рекламные объявления для медицинских и косметологических клиник на русском языке.",
   "Отвечай только валидным JSON с полями headline, text, description. Без markdown, без пояснений.",
@@ -106,6 +121,39 @@ export const IMPROVE_SYSTEM_PROMPT = [
   "Если в исходнике скидки не было, её не должно быть и в ответе — ни цифрой, ни прописью.",
 ].join("\n");
 
+/**
+ * То же для салона.
+ *
+ * Отличий три, и все три существенны. Салону разрешено называть услугу своим
+ * именем — «работа с пигментацией» это описание услуги, а не диагноз. Салону
+ * запрещено говорить про лечение — он его не оказывает. И оговорка у него своя,
+ * без «консультации специалиста».
+ */
+const BEAUTY_SYSTEM_PROMPT = [
+  "\u0422\u044b \u043f\u0438\u0448\u0435\u0448\u044c \u0440\u0435\u043a\u043b\u0430\u043c\u043d\u044b\u0435 \u043e\u0431\u044a\u044f\u0432\u043b\u0435\u043d\u0438\u044f \u0434\u043b\u044f \u0441\u0430\u043b\u043e\u043d\u043e\u0432 \u043a\u0440\u0430\u0441\u043e\u0442\u044b \u043d\u0430 \u0440\u0443\u0441\u0441\u043a\u043e\u043c \u044f\u0437\u044b\u043a\u0435.",
+  "\u041e\u0442\u0432\u0435\u0447\u0430\u0439 \u0442\u043e\u043b\u044c\u043a\u043e \u0432\u0430\u043b\u0438\u0434\u043d\u044b\u043c JSON \u0441 \u043f\u043e\u043b\u044f\u043c\u0438 headline, text, description. \u0411\u0435\u0437 markdown, \u0431\u0435\u0437 \u043f\u043e\u044f\u0441\u043d\u0435\u043d\u0438\u0439.",
+  "",
+  "\u0417\u0430\u0434\u0430\u0447\u0430: \u043f\u0435\u0440\u0435\u043f\u0438\u0441\u0430\u0442\u044c \u043e\u0431\u044a\u044f\u0432\u043b\u0435\u043d\u0438\u0435 \u0442\u0430\u043a, \u0447\u0442\u043e\u0431\u044b \u043e\u043d\u043e \u043f\u0440\u043e\u0448\u043b\u043e \u043c\u043e\u0434\u0435\u0440\u0430\u0446\u0438\u044e Meta, \u0441\u043e\u0445\u0440\u0430\u043d\u0438\u0432 \u0441\u043c\u044b\u0441\u043b \u043f\u0440\u0435\u0434\u043b\u043e\u0436\u0435\u043d\u0438\u044f.",
+  "",
+  "\u0417\u0430\u043f\u0440\u0435\u0449\u0435\u043d\u043e:",
+  "\u2014 \u043e\u0431\u0440\u0430\u0449\u0430\u0442\u044c\u0441\u044f \u043a \u0432\u043d\u0435\u0448\u043d\u043e\u0441\u0442\u0438 \u0447\u0438\u0442\u0430\u0442\u0435\u043b\u044f (\u00ab\u0443 \u0432\u0430\u0441 \u0442\u0443\u0441\u043a\u043b\u0430\u044f \u043a\u043e\u0436\u0430\u00bb, \u00ab\u0441\u0442\u0440\u0430\u0434\u0430\u0435\u0442\u0435\u00bb, \u00ab\u0445\u043e\u0442\u0438\u0442\u0435 \u0438\u0437\u0431\u0430\u0432\u0438\u0442\u044c\u0441\u044f\u00bb);",
+  "\u2014 \u043e\u0431\u0435\u0449\u0430\u0442\u044c \u0440\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442, \u0433\u0430\u0440\u0430\u043d\u0442\u0438\u044e, \u00ab\u043d\u0430\u0432\u0441\u0435\u0433\u0434\u0430\u00bb, \u00ab100%\u00bb, \u00ab\u0431\u0435\u0437 \u0440\u0438\u0441\u043a\u0430\u00bb;",
+  "\u2014 \u0444\u043e\u0440\u043c\u0443\u043b\u0438\u0440\u043e\u0432\u043a\u0438 \u0432 \u0434\u0443\u0445\u0435 \u00ab\u0434\u043e \u0438 \u043f\u043e\u0441\u043b\u0435\u00bb, \u00ab\u0434\u043e/\u043f\u043e\u0441\u043b\u0435\u00bb, \u00abbefore & after\u00bb;",
+  "\u2014 \u0434\u0430\u0432\u043b\u0435\u043d\u0438\u0435: \u00ab\u0441\u0440\u043e\u0447\u043d\u043e\u00bb, \u00ab\u0442\u043e\u043b\u044c\u043a\u043e \u0441\u0435\u0433\u043e\u0434\u043d\u044f\u00bb, \u00ab\u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0439 \u0448\u0430\u043d\u0441\u00bb, \u00ab\u0443\u0441\u043f\u0435\u0439\u0442\u0435\u00bb, \u00ab\u043b\u0443\u0447\u0448\u0438\u0439\u00bb;",
+  "\u2014 \u0441\u043b\u043e\u0432\u0430 \u043f\u0440\u043e \u043b\u0435\u0447\u0435\u043d\u0438\u0435, \u0434\u0438\u0430\u0433\u043d\u043e\u0437 \u0438 \u0437\u0430\u0431\u043e\u043b\u0435\u0432\u0430\u043d\u0438\u044f: \u0441\u0430\u043b\u043e\u043d \u043d\u0435 \u043b\u0435\u0447\u0438\u0442, \u0438 \u0437\u0430\u044f\u0432\u043b\u044f\u0442\u044c \u044d\u0442\u043e \u043d\u0435\u043b\u044c\u0437\u044f.",
+  "",
+  "\u041e\u0431\u044f\u0437\u0430\u0442\u0435\u043b\u044c\u043d\u043e:",
+  "\u2014 \u043f\u0438\u0441\u0430\u0442\u044c \u043e\u0431 \u0443\u0441\u043b\u0443\u0433\u0435 \u0441\u0430\u043b\u043e\u043d\u0430, \u0430 \u043d\u0435 \u043e \u0442\u0435\u043b\u0435 \u0447\u0438\u0442\u0430\u0442\u0435\u043b\u044f;",
+  "\u2014 \u0443\u043f\u043e\u043c\u044f\u043d\u0443\u0442\u044c, \u0447\u0442\u043e \u0432\u0430\u0440\u0438\u0430\u043d\u0442 \u043f\u043e\u0434\u0431\u0438\u0440\u0430\u0435\u0442\u0441\u044f \u043d\u0430 \u043a\u043e\u043d\u0441\u0443\u043b\u044c\u0442\u0430\u0446\u0438\u0438 \u0441 \u043c\u0430\u0441\u0442\u0435\u0440\u043e\u043c;",
+  "\u2014 \u0441\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c \u0434\u043b\u0438\u043d\u0443 \u043f\u043e\u043b\u0435\u0439 \u043f\u0440\u0438\u043c\u0435\u0440\u043d\u043e \u043a\u0430\u043a \u0432 \u0438\u0441\u0445\u043e\u0434\u043d\u0438\u043a\u0435.",
+  "",
+  "\u041d\u0430\u0437\u044b\u0432\u0430\u0442\u044c \u0443\u0441\u043b\u0443\u0433\u0443 \u0441\u0432\u043e\u0438\u043c \u0438\u043c\u0435\u043d\u0435\u043c \u041c\u041e\u0416\u041d\u041e \u0438 \u043d\u0443\u0436\u043d\u043e: \u00ab\u0443\u0445\u043e\u0434 \u0437\u0430 \u043a\u043e\u0436\u0435\u0439\u00bb, \u00ab\u0440\u0430\u0431\u043e\u0442\u0430 \u0441 \u043f\u0438\u0433\u043c\u0435\u043d\u0442\u0430\u0446\u0438\u0435\u0439\u00bb,",
+  "\u00ab\u043a\u043e\u0440\u0440\u0435\u043a\u0446\u0438\u044f \u043c\u043e\u0440\u0449\u0438\u043d\u00bb \u2014 \u044d\u0442\u043e \u043e\u043f\u0438\u0441\u0430\u043d\u0438\u0435 \u0443\u0441\u043b\u0443\u0433\u0438 \u0441\u0430\u043b\u043e\u043d\u0430, \u0430 \u043d\u0435 \u0434\u0438\u0430\u0433\u043d\u043e\u0437.",
+  "",
+  "\u041d\u0438\u0447\u0435\u0433\u043e \u043d\u0435 \u0432\u044b\u0434\u0443\u043c\u044b\u0432\u0430\u0442\u044c: \u043d\u0435 \u0434\u043e\u0431\u0430\u0432\u043b\u044f\u0442\u044c \u0446\u0435\u043d, \u0441\u043a\u0438\u0434\u043e\u043a, \u0430\u043a\u0446\u0438\u0439, \u043f\u043e\u0434\u0430\u0440\u043a\u043e\u0432, \u043f\u0440\u043e\u043c\u043e\u043a\u043e\u0434\u043e\u0432,",
+  "\u0440\u0430\u0441\u0441\u0440\u043e\u0447\u043a\u0438, \u0441\u0440\u043e\u043a\u043e\u0432, \u043f\u0440\u043e\u0446\u0435\u043d\u0442\u043e\u0432 \u0438 \u043b\u044e\u0431\u044b\u0445 \u0447\u0438\u0441\u0435\u043b, \u043a\u043e\u0442\u043e\u0440\u044b\u0445 \u043d\u0435\u0442 \u0432 \u0438\u0441\u0445\u043e\u0434\u043d\u043e\u043c \u0442\u0435\u043a\u0441\u0442\u0435.",
+].join("\n");
+
 function asString(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
 }
@@ -128,8 +176,11 @@ function sameFields(left: AdFields, right: AdFields): boolean {
   return left.headline === right.headline && left.text === right.text && left.description === right.description;
 }
 
-function verdictOf(fields: AdFields): MetaComplianceResult {
-  return checkMetaCompliance({ headline: fields.headline, text: fields.text, description: fields.description });
+function verdictOf(fields: AdFields, vertical: Vertical): MetaComplianceResult {
+  return checkMetaCompliance(
+    { headline: fields.headline, text: fields.text, description: fields.description },
+    vertical,
+  );
 }
 
 function issuesOf(result: MetaComplianceResult): ImproveIssue[] {
@@ -204,8 +255,13 @@ export function inventedOffers(before: AdFields, after: AdFields): string[] {
   ];
 }
 
-function candidateOf(source: ImproveCandidate["source"], fields: AdFields, original: AdFields): ImproveCandidate {
-  const result = verdictOf(fields);
+function candidateOf(
+  source: ImproveCandidate["source"],
+  fields: AdFields,
+  original: AdFields,
+  vertical: Vertical,
+): ImproveCandidate {
+  const result = verdictOf(fields, vertical);
   return {
     source,
     fields,
@@ -256,13 +312,16 @@ function goodEnough(candidate: ImproveCandidate): boolean {
 export async function improveAdText(input: {
   fields: AdFields;
   generate?: AdTextGenerator | null;
+  /** Ниша решает и правила, и задание модели, и текст оговорки. */
+  vertical?: Vertical;
 }): Promise<ImproveResult> {
+  const vertical = input.vertical || DEFAULT_VERTICAL;
   const original: AdFields = {
     headline: asString(input.fields.headline),
     text: asString(input.fields.text),
     description: asString(input.fields.description),
   };
-  const originalCandidate = candidateOf("original", original, original);
+  const originalCandidate = candidateOf("original", original, original, vertical);
   const before = { status: originalCandidate.status, issues: originalCandidate.issues };
 
   function finish(mode: ImproveMode, candidates: ImproveCandidate[], refusal: string): ImproveResult {
@@ -281,7 +340,7 @@ export async function improveAdText(input: {
 
   /** Таблица замен. Пустое поле не публикуется: оно исчезло бы из объявления. */
   function rulesCandidate(): ImproveCandidate {
-    const parts = verdictOf(original).safeParts;
+    const parts = verdictOf(original, vertical).safeParts;
     const fields: AdFields = {
       headline: parts.headline || original.headline,
       text: parts.text || original.text,
@@ -289,7 +348,7 @@ export async function improveAdText(input: {
     };
     // Вердикт считается по тем полям, которые реально уедут в объявление, а не
     // по огрызку без исчезнувшего заголовка.
-    return candidateOf("rules", fields, original);
+    return candidateOf("rules", fields, original, vertical);
   }
 
   if (!input.generate) {
@@ -304,7 +363,7 @@ export async function improveAdText(input: {
     let generated: { mode: string; data: unknown };
     try {
       generated = await input.generate({
-        system: IMPROVE_SYSTEM_PROMPT,
+        system: improveSystemPrompt(vertical),
         user: {
           original,
           previousAttempt: previous.source === "original" ? null : previous.fields,
@@ -333,7 +392,7 @@ export async function improveAdText(input: {
       return finish("rules", [originalCandidate, rulesCandidate()], "");
     }
 
-    const candidate = candidateOf("model", readAdFields(generated.data, original), original);
+    const candidate = candidateOf("model", readAdFields(generated.data, original), original, vertical);
     candidates.push(candidate);
 
     if (goodEnough(candidate)) break;

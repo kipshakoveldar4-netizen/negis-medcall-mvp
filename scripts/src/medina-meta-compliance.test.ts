@@ -88,9 +88,13 @@ test("MC1 канонический плохой текст блокируетс�
   const result = checkMetaCompliance(CANONICAL_BAD);
 
   assert.equal(result.status, "blocked");
-  for (const code of ["personal_attribute_question", "medical_condition_claim", "guarantee", "before_after"]) {
+  // Блокируют три правила: обращение к читателю, обещание результата и
+  // before/after. Называние состояния («акне») с ними в один ряд не ставится —
+  // Meta запрещает не называние услуги, а обращение к состоянию читателя.
+  for (const code of ["personal_attribute_question", "guarantee", "before_after"]) {
     assert.ok(codes(result).includes(code), `правило ${code} обязано сработать`);
   }
+  assert.ok(codes(result).includes("aesthetic_condition"), "и состояние названо замечанием");
 });
 
 test("MC2 в правилах не осталось \\b — на кириллице это тождественный ноль", async () => {
@@ -154,11 +158,11 @@ test("MC7 before/after ловится не только через слэш", ()
 
 test("MC8 основы слов и приставочные формы", () => {
   const cases: Array<[string, string]> = [
-    ["Морщинами занимается косметолог.", "medical_condition_claim"],
-    ["Курс лечения подбирается врачом.", "medical_condition_claim"],
-    ["Пигментация — частый запрос.", "medical_condition_claim"],
-    ["Полное излечение.", "medical_condition_claim"],
-    ["Постакне уходит.", "medical_condition_claim"],
+    ["Морщинами занимается косметолог.", "aesthetic_condition"],
+    ["Курс лечения подбирается врачом.", "medical_treatment_claim"],
+    ["Пигментация — частый запрос.", "aesthetic_condition"],
+    ["Полное излечение.", "medical_treatment_claim"],
+    ["Постакне уходит.", "aesthetic_condition"],
     ["Лучшая клиника города.", "aggressive_claim"],
     ["Самая эффективная методика.", "aggressive_claim"],
   ];
@@ -271,7 +275,7 @@ test("MC17 переписывание не притворяется безопа
   // объявлять такой текст безопасным нельзя: замечание остаётся.
   const stillBad = checkMetaCompliance(CANONICAL_BAD);
   assert.notEqual(stillBad.safeTextStatus, "safe", "убрано не всё — значит не безопасно");
-  assert.ok(stillBad.safeTextIssues.some((issue) => issue.code === "medical_condition_claim"));
+  assert.ok(stillBad.safeTextIssues.some((issue) => issue.code === "aesthetic_condition"));
 
   const fullyRewritten = checkMetaCompliance({
     headline: "Хотите избавиться от пятен?",
@@ -385,4 +389,52 @@ test("MC25 сервер по-прежнему отказывает в запус
 
   assert.ok(/compliance\.status === "blocked"/.test(server), "заблокированный текст не уходит в Meta");
   assert.ok(/checkMetaCompliance\(/.test(server), "и проверяется на сервере, а не только в браузере");
+});
+
+test("MC26 у салона называние услуги перестаёт быть замечанием", () => {
+  // «Морщины» и «пигментация» для салона — не диагноз, а название того, что он
+  // делает. Замечание было неустранимым, но попадало в счётчик, по которому
+  // переписывание выбирает лучший вариант: продукт вознаграждал тот текст, из
+  // которого услуга ВЫЧЕРКНУТА.
+  const text = "Работаем с морщинами и пигментацией. Подберём уход на консультации.";
+
+  assert.equal(checkMetaCompliance({ text }, "clinic").status, "needs_review");
+  assert.equal(checkMetaCompliance({ text }, "beauty").status, "safe");
+});
+
+test("MC27 салону запрещено обещать лечение, клинике — нет", () => {
+  // Ужесточение, а не послабление: салон, обещающий вылечить, заявляет услугу,
+  // которой не оказывает, и отвечать за это будет он.
+  const text = "Лечение акне. Подберём уход на консультации.";
+
+  assert.equal(checkMetaCompliance({ text }, "clinic").status, "needs_review");
+  assert.equal(checkMetaCompliance({ text }, "beauty").status, "blocked");
+});
+
+test("MC28 обращение к читателю и обещание результата запрещены обеим нишам", () => {
+  for (const vertical of ["clinic", "beauty"] as const) {
+    assert.equal(checkMetaCompliance({ text: "У вас тусклая кожа?" }, vertical).status, "blocked", vertical);
+    assert.equal(checkMetaCompliance({ text: "Гарантия результата." }, vertical).status, "blocked", vertical);
+    assert.equal(checkMetaCompliance({ text: "До и после." }, vertical).status, "blocked", vertical);
+  }
+});
+
+test("MC29 обычная речь салона не горит вечным замечанием", () => {
+  // Сообщение правила обещает «рядом с названием состояния», а паттерн ловил
+  // голое «ваши» где угодно. У салона «ваш мастер» и «ваша запись» — обычная
+  // речь, и неустранимое замечание приучило бы оператора их не читать.
+  const normal = checkMetaCompliance({ text: "Ваш мастер подберёт уход. Записаться к мастеру." }, "beauty");
+  assert.equal(normal.status, "safe");
+
+  const nearCondition = checkMetaCompliance({ text: "Ваши морщины уйдут. Подберём уход." }, "beauty");
+  assert.ok(nearCondition.issues.some((issue) => issue.code === "personal_possessive"));
+});
+
+test("MC30 оговорка у салона своя, без «консультации специалиста»", () => {
+  const clinic = checkMetaCompliance({ text: "Стрижка" }, "clinic");
+  const beauty = checkMetaCompliance({ text: "Стрижка" }, "beauty");
+
+  assert.ok(clinic.disclaimer.includes("специалиста"), "у клиники медицинская формула");
+  assert.ok(!beauty.disclaimer.includes("специалиста"), "салону её навязывать нельзя");
+  assert.ok(beauty.disclaimer.includes("консультации"), "но оговорка у него есть");
 });
