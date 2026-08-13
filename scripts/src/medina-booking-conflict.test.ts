@@ -140,6 +140,8 @@ function mockResponse(): MockResponse {
 
 async function loadRouter(options: {
   appointments?: unknown[];
+  /** Строки справочника мастеров: у них живёт ёмкость. */
+  doctors?: unknown[];
   failTables?: string[];
   failReadsOn?: string[];
 } = {}) {
@@ -163,6 +165,7 @@ async function loadRouter(options: {
     // (lib/auth/server.ts), and a row without it is simply not a member here.
     staff_users: [{ id: STAFF_A, auth_user_id: USER_A, workspace_id: WORKSPACE_A, role: "owner", status: "active" }],
     appointments: options.appointments ?? [],
+    clinic_doctors: options.doctors ?? [],
   };
   supabaseModule.setSupabaseServerClientFactoryForTests(() =>
     spyClient(rows, log, new Set(options.failTables ?? []), new Set(options.failReadsOn ?? [])));
@@ -531,4 +534,61 @@ test("BC16 the override is sent only when the operator chose it", async () => {
     !/allowConflict:\s*true\s*,?\s*\n/.test(page.replace(/allowConflict \? \{ allowConflict: true \} : \{\}/g, "")),
     "nothing may hard-code the override",
   );
+});
+
+// —— Ёмкость мастера ————————————————————————————————————————————————————
+
+/** Строка справочника с заданной ёмкостью. */
+function doctorRow(capacity: number) {
+  return { id: "d0000000-0000-4000-8000-000000000001", workspace_id: WORKSPACE_A, full_name: DOCTOR, capacity };
+}
+
+test("BC23 без справочника ёмкость равна единице — поведение клиник не меняется", async () => {
+  // Свободно введённое имя мастера, которого в справочнике нет, не должно
+  // молча получать неограниченную ёмкость.
+  const call = await loadRouter({ appointments: [occupiedRow()], doctors: [] });
+  const { res } = await call({ body: booking() });
+
+  assert.equal(res.statusCode, 409, "занятый слот по-прежнему занят");
+});
+
+test("BC24 ёмкость два пускает второго клиента и отказывает третьему", async () => {
+  // Мастер ведёт двоих параллельно: одному нанесена краска, второму делают
+  // укладку. Это рутина салона, а не перезапись.
+  const second = await loadRouter({ appointments: [occupiedRow()], doctors: [doctorRow(2)] });
+  const allowed = await second({ body: booking() });
+  assert.equal(allowed.res.statusCode, 201, JSON.stringify(allowed.res.body));
+
+  const third = await loadRouter({
+    appointments: [occupiedRow(), occupiedRow({ id: "a0000000-0000-4000-8000-000000000009", client_name: "Второй" })],
+    doctors: [doctorRow(2)],
+  });
+  const refused = await third({ body: booking() });
+  assert.equal(refused.res.statusCode, 409, "третий сверх ёмкости — уже настоящее пересечение");
+});
+
+test("BC25 переполнение ёмкости — это отказ, а не тихая запись", async () => {
+  const call = await loadRouter({
+    appointments: [occupiedRow(), occupiedRow({ id: "a0000000-0000-4000-8000-000000000009", client_name: "Второй" })],
+    doctors: [doctorRow(2)],
+  });
+  const { res, log } = await call({ body: booking() });
+
+  assert.equal(res.statusCode, 409);
+  assert.equal(writes(log).length, 0, "ничего не записано");
+  const conflict = res.body.conflict as Record<string, unknown>;
+  assert.ok(conflict && conflict.clientName, "отказ по-прежнему называет, кто занимает слот");
+});
+
+test("BC26 отказ чтения справочника не поднимает ёмкость", async () => {
+  // Единственное место, где сбой чтения мог бы РАЗРЕШИТЬ запись, которую
+  // правило обязано отклонить. Умолчание при сбое — единица.
+  const call = await loadRouter({
+    appointments: [occupiedRow()],
+    doctors: [doctorRow(4)],
+    failReadsOn: ["clinic_doctors"],
+  });
+  const { res } = await call({ body: booking() });
+
+  assert.equal(res.statusCode, 409, "не прочитали ёмкость — значит не знаем, значит нельзя");
 });

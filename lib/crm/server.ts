@@ -464,6 +464,12 @@ function buildPatchRow(resource: CrmResource, body: JsonRecord): JsonRecord {
       row.full_name = fullName;
     }
     setText("specialty", ["specialty"]);
+    // Ёмкость: сколько клиентов мастер ведёт одновременно. Ниже единицы не
+    // бывает, выше двенадцати — опечатка, а не настройка.
+    if (body.capacity !== undefined || body.capacity_value !== undefined) {
+      const capacity = Number(body.capacity ?? body.capacity_value);
+      if (Number.isFinite(capacity)) row.capacity = Math.min(Math.max(Math.trunc(capacity), 1), 12);
+    }
     setNumber("sort_order", ["sortOrder", "sort_order"]);
     setBoolean("is_active", ["isActive", "is_active"]);
     if (Object.keys(row).length > 0) row.updated_at = new Date().toISOString();
@@ -1168,6 +1174,7 @@ function makeClinicDoctor(body: JsonRecord): JsonRecord {
     id: readString(body.id) || nextDemoId("clinic-doctor"),
     fullName: firstString(body.fullName, body.full_name, body.name),
     specialty: readString(body.specialty),
+    capacity: Number(body.capacity) || 1,
     staffUserId: firstString(body.staffUserId, body.staff_user_id),
     sortOrder: readNumber(body.sortOrder ?? body.sort_order) ?? 0,
     isActive: hasAnyKey(body, ["isActive", "is_active"]) ? readBoolean(body.isActive ?? body.is_active) : true,
@@ -1732,6 +1739,7 @@ const configs: Record<CrmResource, ResourceConfig> = {
       workspace_id: workspaceId,
       full_name: firstString(body.fullName, body.full_name, body.name),
       specialty: readString(body.specialty) || null,
+      capacity: Math.min(Math.max(Math.trunc(Number(body.capacity) || 1), 1), 12),
       sort_order: readNumber(body.sortOrder ?? body.sort_order) ?? 0,
       is_active: hasAnyKey(body, ["isActive", "is_active"]) ? readBoolean(body.isActive ?? body.is_active) : true,
       updated_at: new Date().toISOString(),
@@ -2545,10 +2553,56 @@ function appointmentMinutes(value: unknown): number {
   return typeof minutes === "number" && minutes > 0 ? minutes : DEFAULT_APPOINTMENT_MINUTES;
 }
 
+/**
+ * Сколько клиентов исполнитель ведёт одновременно.
+ *
+ * Ищется сперва по ссылке, потом по имени — в том же порядке, в каком проверка
+ * пересечений вообще опознаёт исполнителя. Ссылка есть не у всех записей: у
+ * всей истории doctor_id пуст (033), поэтому имя остаётся рабочим ключом.
+ *
+ * Не нашли строку справочника — единица, то есть сегодняшнее поведение. Это
+ * важнее удобства: свободно введённое имя врача, которого в справочнике нет,
+ * не должно молча получать неограниченную ёмкость.
+ */
+async function readDoctorCapacity(
+  supabase: CrmSupabaseClient,
+  workspaceId: string,
+  doctorId: string,
+  doctorName: string,
+): Promise<number> {
+  try {
+    let query = supabase
+      .from("clinic_doctors")
+      .select("capacity")
+      .eq("workspace_id", workspaceId)
+      .limit(1);
+    query = isUuid(doctorId) ? query.eq("id", doctorId) : query.eq("full_name", doctorName);
+
+    const { data, error } = await query.maybeSingle();
+    if (error) throw new Error(error.message);
+
+    const capacity = Number(asRecord(data).capacity);
+    return Number.isFinite(capacity) && capacity >= 1 ? Math.trunc(capacity) : 1;
+  } catch (error) {
+    // Не прочитали — единица. Ёмкость по умолчанию НЕ должна расти от сбоя:
+    // это единственное место, где ошибка чтения могла бы разрешить запись,
+    // которую правило обязано отклонить.
+    console.warn(supabaseWarning("clinic_doctors capacity", error));
+    return 1;
+  }
+}
+
 async function assertNoAppointmentConflict(
   supabase: CrmSupabaseClient,
   workspaceId: string,
-  candidate: { id?: string; doctorName: string; startsAt: string; durationMinutes: number; status: string },
+  candidate: {
+    id?: string;
+    doctorId?: string;
+    doctorName: string;
+    startsAt: string;
+    durationMinutes: number;
+    status: string;
+  },
 ): Promise<void> {
   if (!candidate.doctorName || !candidate.startsAt) return;
   // A visit that is cancelled or was a no-show does not hold its slot.
@@ -2575,6 +2629,14 @@ async function assertNoAppointmentConflict(
     return;
   }
 
+  // Пересечения СЧИТАЮТСЯ, а не отклоняются по первому.
+  //
+  // Прежняя версия бросала отказ на первом же наложении. Для врача это верно,
+  // для мастера — нет: он ведёт двух клиентов параллельно постоянно, и обойти
+  // отказ можно было только кнопкой, снимающей проверку целиком. Салон,
+  // привыкший её жать, терял защиту и от настоящей двойной записи.
+  const overlapping: Array<{ id: string; startsAt: string; clientName: string; doctorName: string }> = [];
+
   for (const raw of Array.isArray(data) ? data : []) {
     const row = asRecord(raw);
     const id = readString(row.id);
@@ -2589,7 +2651,7 @@ async function assertNoAppointmentConflict(
     const otherEnd = otherStart + appointmentMinutes(row.duration_minutes) * 60_000;
 
     if (start < otherEnd && otherStart < end) {
-      throw new AppointmentConflictError({
+      overlapping.push({
         id,
         startsAt: readString(row.starts_at),
         clientName: readString(row.client_name),
@@ -2597,6 +2659,17 @@ async function assertNoAppointmentConflict(
       });
     }
   }
+
+  if (overlapping.length === 0) return;
+
+  // Ёмкость читается только когда пересечение уже найдено: у подавляющего
+  // большинства записей его нет, и лишний запрос к справочнику там ни к чему.
+  const capacity = await readDoctorCapacity(supabase, workspaceId, readString(candidate.doctorId), candidate.doctorName);
+
+  // Кандидат занимает одно место, поэтому сравнение с «ёмкость минус один».
+  if (overlapping.length < capacity) return;
+
+  throw new AppointmentConflictError(overlapping[0]);
 }
 
 /** The caller states plainly that it means to overbook. Absence is not consent. */
@@ -3869,6 +3942,9 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
       Object.assign(row, await buildDoctorLinkRow(supabase, workspaceId, body, { requireActive: true }));
       if (!allowsAppointmentConflict(body)) {
         await assertNoAppointmentConflict(supabase, workspaceId, {
+          // Ссылка нужна, чтобы найти ёмкость: имя работает как ключ проверки,
+          // но у справочника ключ — идентификатор, и по нему поиск точнее.
+          doctorId: readString(row.doctor_id),
           doctorName: readString(row.doctor_name),
           startsAt: readString(row.starts_at),
           durationMinutes: appointmentMinutes(row.duration_minutes),
@@ -4228,6 +4304,7 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
       // null, что и «поля нет», поэтому `??` судил снятие врача по прежнему
       // врачу и отказывал в правке, которая ничей слот бы не заняла.
       const merged = {
+        doctorId: readString("doctor_id" in row ? row.doctor_id : before.doctor_id),
         doctorName: readString("doctor_name" in row ? row.doctor_name : before.doctor_name),
         startsAt: readString("starts_at" in row ? row.starts_at : before.starts_at),
         durationMinutes: appointmentMinutes("duration_minutes" in row ? row.duration_minutes : before.duration_minutes),

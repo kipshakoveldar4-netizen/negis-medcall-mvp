@@ -19,6 +19,8 @@ type ClinicDoctor = {
   id: string;
   fullName: string;
   specialty: string;
+  /** Сколько клиентов ведёт одновременно. Единица — обычный приём. */
+  capacity: number;
   sortOrder: number;
   isActive: boolean;
 };
@@ -82,6 +84,7 @@ function doctorFromApi(record: Record<string, unknown>): ClinicDoctor {
     id: readText(record.id),
     fullName: readText(record.fullName) || readText(record.full_name),
     specialty: readText(record.specialty),
+    capacity: Number(record.capacity) || 1,
     sortOrder: readNullableInt(record.sortOrder ?? record.sort_order) ?? 0,
     isActive:
       record.isActive === undefined && record.is_active === undefined
@@ -171,7 +174,7 @@ export function DoctorSchedule() {
   const [selectedId, setSelectedId] = useState("");
   const [formOpen, setFormOpen] = useState(false);
   const [editingId, setEditingId] = useState("");
-  const [form, setForm] = useState({ fullName: "", specialty: "", sortOrder: "0", isActive: true });
+  const [form, setForm] = useState({ fullName: "", specialty: "", capacity: "1", sortOrder: "0", isActive: true });
   const [saving, setSaving] = useState(false);
   const [exception, setException] = useState({ from: "", to: "", note: "", working: false, start: "09:00", end: "18:00" });
 
@@ -291,6 +294,7 @@ export function DoctorSchedule() {
       const fields = {
         fullName,
         specialty: form.specialty.trim(),
+        capacity: readNullableInt(form.capacity) ?? 1,
         sortOrder: readNullableInt(form.sortOrder) ?? 0,
         isActive: form.isActive,
       };
@@ -455,7 +459,7 @@ export function DoctorSchedule() {
               className="neu-btn px-3 py-2"
               onClick={() => {
                 setEditingId("");
-                setForm({ fullName: "", specialty: "", sortOrder: "0", isActive: true });
+                setForm({ fullName: "", specialty: "", capacity: "1", sortOrder: "0", isActive: true });
                 setFormOpen(true);
               }}
             >
@@ -508,6 +512,7 @@ export function DoctorSchedule() {
                 <span className="block font-bold text-[#0F172A]">{doctor.fullName}</span>
                 <span className="mt-0.5 block text-xs text-[#64748B]">
                   {doctor.specialty || "Специальность не указана"}
+                  {doctor.capacity > 1 ? ` · ведёт ${doctor.capacity} одновременно` : ""}
                   {doctor.isActive ? "" : " · скрыт"}
                 </span>
                 {canManage ? (
@@ -519,6 +524,7 @@ export function DoctorSchedule() {
                       setForm({
                         fullName: doctor.fullName,
                         specialty: doctor.specialty,
+                        capacity: String(doctor.capacity),
                         sortOrder: String(doctor.sortOrder),
                         isActive: doctor.isActive,
                       });
@@ -718,6 +724,24 @@ export function DoctorSchedule() {
               <label className="block">
                 <span className="mb-1 block text-xs font-bold uppercase text-[#64748B]">Специальность</span>
                 <input className="neu-input w-full" value={form.specialty} onChange={(event) => setForm((c) => ({ ...c, specialty: event.target.value }))} placeholder="Косметолог" />
+              </label>
+              <label className="block">
+                <span className="mb-1 block text-xs font-bold uppercase text-[#64748B]">Клиентов одновременно</span>
+                <input
+                  className="neu-input w-full"
+                  inputMode="numeric"
+                  value={form.capacity}
+                  onChange={(event) => setForm((c) => ({ ...c, capacity: event.target.value }))}
+                />
+                {/*
+                  Единица — обычный приём: второй клиент в тот же интервал будет
+                  отклонён. Больше единицы имеет смысл там, где мастер и правда
+                  ведёт нескольких: одному нанесена краска и он выдерживает,
+                  второму в это время делают укладку.
+                */}
+                <span className="mt-1 block text-xs font-semibold text-[#64748B]">
+                  1 — приём один на один. Больше — столько записей мастер может вести параллельно.
+                </span>
               </label>
               <label className="block">
                 <span className="mb-1 block text-xs font-bold uppercase text-[#64748B]">Порядок в списке</span>
