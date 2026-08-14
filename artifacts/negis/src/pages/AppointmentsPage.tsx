@@ -21,6 +21,8 @@ import { apiUrl, crmFetch } from "@/lib/api";
 import { isRealWorkspace, readWorkspaceId as readCurrentWorkspaceId, useDemoCollection, workspaceScopedKey } from "@/lib/demoStorage";
 import { formatPhone, toTelHref, toWhatsappHref } from "@/lib/phone";
 import { clinicToday, dayKeyInZone, isOnClinicDay } from "@/lib/clinicDay";
+import { useAuth } from "@/contexts/AuthContext";
+import { capitalize, termsFor, type Terms } from "../../../../lib/vertical/terms";
 
 type AppointmentStatus = "scheduled" | "confirmed" | "arrived" | "no_show" | "cancelled";
 type CalendarView = "day" | "week" | "list";
@@ -237,7 +239,7 @@ function previousDateKey(dateKey: string): string {
  * Строка «График не задан» обязательна: это единственное место, где продукт
  * признаёт, что для этого врача правило не работает вовсе.
  */
-function describeDoctorDay(shifts: DoctorShift[], doctorId: string, dateKey: string): string {
+function describeDoctorDay(shifts: DoctorShift[], doctorId: string, dateKey: string, terms: Terms): string {
   if (!doctorId || !dateKey) return "";
   const [year, month, day] = dateKey.split("-").map(Number);
   if (!year || !month || !day) return "";
@@ -262,8 +264,8 @@ function describeDoctorDay(shifts: DoctorShift[], doctorId: string, dateKey: str
     .map((shift) => `с вечера до ${formatShiftMinute(shift.endMinute as number)}`);
 
   const parts = [...intervals, ...overnight];
-  if (parts.length === 0) return `${WEEKDAY_SHORT[isoWeekday]}: выходной (время клиники)`;
-  return `${WEEKDAY_SHORT[isoWeekday]}: ${parts.join(", ")} (время клиники)`;
+  if (parts.length === 0) return `${WEEKDAY_SHORT[isoWeekday]}: выходной (время ${terms.orgGenitive})`;
+  return `${WEEKDAY_SHORT[isoWeekday]}: ${parts.join(", ")} (время ${terms.orgGenitive})`;
 }
 const activeStatuses: AppointmentStatus[] = ["scheduled", "confirmed", "arrived"];
 const statusOptions: AppointmentStatus[] = ["scheduled", "confirmed", "arrived", "no_show", "cancelled"];
@@ -602,19 +604,19 @@ function scheduleRefusalFromBody(body: unknown): OutsideScheduleError | null {
   });
 }
 
-function describeSchedule(error: OutsideScheduleError): string {
-  const who = error.schedule.doctorName || "Врач";
+function describeSchedule(error: OutsideScheduleError, terms: Terms): string {
+  const who = error.schedule.doctorName || capitalize(terms.specialist);
   const when = [error.schedule.weekdayLabel, error.schedule.localTime].filter(Boolean).join(", ");
   const hours = error.schedule.intervals.length > 0
-    ? `Приём: ${error.schedule.intervals.join(", ")}.`
-    : "В этот день приёма нет.";
-  return `${who} не работает в это время${when ? ` (${when}, время клиники)` : ""}. ${hours} Записать всё равно?`;
+    ? `Часы ${terms.dutyGenitive}: ${error.schedule.intervals.join(", ")}.`
+    : `В этот день ${terms.dutyGenitive} нет.`;
+  return `${who} не работает в это время${when ? ` (${when}, время ${terms.orgGenitive})` : ""}. ${hours} Записать всё равно?`;
 }
 
-function describeConflict(error: SlotTakenError): string {
+function describeConflict(error: SlotTakenError, terms: Terms): string {
   const at = error.conflict.startsAt ? timeKeyFromStartsAt(error.conflict.startsAt) : "";
-  const who = error.conflict.clientName || "другой пациент";
-  return `У врача уже есть запись на это время: ${who}${at ? `, ${at}` : ""}. Сохранить всё равно?`;
+  const who = error.conflict.clientName || `другой ${terms.customer}`;
+  return `У ${terms.specialistGenitive} уже есть запись на это время: ${who}${at ? `, ${at}` : ""}. Сохранить всё равно?`;
 }
 
 function appointmentInterval(appointment: Appointment) {
@@ -718,6 +720,8 @@ function AppointmentCard({
   onEdit: (appointment: Appointment) => void;
   onStatus: (appointment: Appointment, status: AppointmentStatus) => void;
 }) {
+  const { vertical } = useAuth();
+  const terms = termsFor(vertical);
   const startTime = timeKeyFromStartsAt(appointment.startsAt);
   const whatsapp = appointment.whatsapp || appointment.phone;
 
@@ -742,7 +746,7 @@ function AppointmentCard({
 
       <div className="mt-4 grid grid-cols-2 gap-3">
         <Detail label="Услуга">{appointment.service}</Detail>
-        <Detail label="Врач">{appointment.doctor}</Detail>
+        <Detail label={capitalize(terms.specialist)}>{appointment.doctor}</Detail>
         <Detail label="Длительность">{appointment.durationMinutes} мин</Detail>
         <Detail label="Источник">{appointment.source || "Ресепшн"}</Detail>
       </div>
@@ -769,6 +773,8 @@ function AppointmentCard({
 }
 
 export function AppointmentsPage() {
+  const { vertical } = useAuth();
+  const terms = termsFor(vertical);
   const [selectedDate, setSelectedDate] = useState(todayKeyAtLoad);
   const [view, setView] = useState<CalendarView>("day");
   const [doctorFilter, setDoctorFilter] = useState("all");
@@ -1159,7 +1165,7 @@ export function AppointmentsPage() {
     // секунду назад с другого устройства.
     const localConflict = findConflict(appointment);
     if (localConflict && !allowConflict) {
-      setConflictMessage(`У врача уже есть запись на это время: ${localConflict.client}, ${timeKeyFromStartsAt(localConflict.startsAt)}. Сохранить всё равно?`);
+      setConflictMessage(`У ${terms.specialistGenitive} уже есть запись на это время: ${localConflict.client}, ${timeKeyFromStartsAt(localConflict.startsAt)}. Сохранить всё равно?`);
       return;
     }
 
@@ -1177,11 +1183,11 @@ export function AppointmentsPage() {
           setItems((current) => current.map((item) => (item.id === editingId ? previous : item)));
         }
         if (error instanceof SlotTakenError) {
-          setConflictMessage(describeConflict(error));
+          setConflictMessage(describeConflict(error, terms));
           return;
         }
         if (error instanceof OutsideScheduleError) {
-          setScheduleMessage(describeSchedule(error));
+          setScheduleMessage(describeSchedule(error, terms));
           return;
         }
         // Та же честность, что и у статуса: отказ виден отказом, строка
@@ -1196,11 +1202,11 @@ export function AppointmentsPage() {
         toast.success("Запись создана");
       } catch (error) {
         if (error instanceof SlotTakenError) {
-          setConflictMessage(describeConflict(error));
+          setConflictMessage(describeConflict(error, terms));
           return;
         }
         if (error instanceof OutsideScheduleError) {
-          setScheduleMessage(describeSchedule(error));
+          setScheduleMessage(describeSchedule(error, terms));
           return;
         }
         console.warn("appointments: create refused", error instanceof Error ? error.message : error);
@@ -1241,7 +1247,7 @@ export function AppointmentsPage() {
             <ul className="mt-2 space-y-1 text-sm font-semibold text-amber-900">
               {dayBuckets.outside.map((appointment) => (
                 <li key={appointment.id}>
-                  {timeKeyFromStartsAt(appointment.startsAt)} · {appointment.client} · {appointment.doctor || "без врача"}
+                  {timeKeyFromStartsAt(appointment.startsAt)} · {appointment.client} · {appointment.doctor || `без ${terms.specialistGenitive}`}
                 </li>
               ))}
             </ul>
@@ -1342,18 +1348,18 @@ export function AppointmentsPage() {
       */}
       {clinicTimeZone && deviceTimeZone && clinicTimeZone !== deviceTimeZone ? (
         <div className="mb-4 rounded-2xl bg-amber-50 p-4 text-sm font-semibold text-amber-800">
-          Часовой пояс устройства ({deviceTimeZone}) отличается от часового пояса клиники ({clinicTimeZone}).
-          Время на экране может отличаться от времени клиники.
+          Часовой пояс устройства ({deviceTimeZone}) отличается от часового пояса {terms.orgGenitive} ({clinicTimeZone}).
+          Время на экране может отличаться от времени {terms.orgGenitive}.
         </div>
       ) : null}
       {!clinicTimeZone && scheduleReadable ? (
         <div className="mb-4 rounded-2xl bg-slate-100 p-4 text-sm font-semibold" style={{ color: "var(--negis-muted)" }}>
-          Часовой пояс клиники не задан — график врачей при записи не применяется.
+          Часовой пояс {terms.orgGenitive} не задан — график {terms.specialistGenitivePlural} при записи не применяется.
         </div>
       ) : null}
       {!scheduleReadable ? (
         <div className="mb-4 rounded-2xl bg-amber-50 p-4 text-sm font-semibold text-amber-800">
-          Не удалось прочитать график врачей. Это не значит, что его нет: подсказки под временем могут быть неполными,
+          Не удалось прочитать график {terms.specialistGenitivePlural}. Это не значит, что его нет: подсказки под временем могут быть неполными,
           а сервер всё равно проверит запись по своему графику.
         </div>
       ) : null}
@@ -1424,8 +1430,8 @@ export function AppointmentsPage() {
 
         <section className="neu-card">
           <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-[1fr_1fr_1fr_1.5fr]">
-            <SelectField label="Все врачи" value={doctorFilter} onChange={setDoctorFilter}>
-              <option value="all">Все врачи</option>
+            <SelectField label={`Все ${terms.specialistPlural}`} value={doctorFilter} onChange={setDoctorFilter}>
+              <option value="all">Все {terms.specialistPlural}</option>
               {doctors.map((doctor) => <option key={doctor} value={doctor}>{doctor}</option>)}
             </SelectField>
             <SelectField label="Статус" value={statusFilter} onChange={setStatusFilter}>
@@ -1552,7 +1558,7 @@ export function AppointmentsPage() {
               {activeDoctors.length > 0 ? (
                 <div>
                   <SelectField
-                    label="Врач"
+                    label={capitalize(terms.specialist)}
                     value={form.doctorId || OTHER_SERVICE_OPTION}
                     onChange={(value) => {
                       if (value === OTHER_SERVICE_OPTION) {
@@ -1577,16 +1583,16 @@ export function AppointmentsPage() {
                         завели. Без этого варианта поле рисовалось бы пустым, а
                         один случайный клик переписал бы и связь, и имя. */}
                     {form.doctorId && !activeDoctors.some((doctor) => doctor.id === form.doctorId) ? (
-                      <option value={form.doctorId}>{form.doctor || "Врач скрыт"}</option>
+                      <option value={form.doctorId}>{form.doctor || `${capitalize(terms.specialist)} скрыт`}</option>
                     ) : null}
-                    <option value={OTHER_SERVICE_OPTION}>Другой врач…</option>
+                    <option value={OTHER_SERVICE_OPTION}>Другой {terms.specialist}…</option>
                   </SelectField>
                   {/* Имя видно всегда: в записи хранится снимок на момент
                       визита, и переименование врача не меняет того, что
                       записано в карточке. */}
                   <div className="mt-2">
                     <TextField
-                      label="Имя врача в записи"
+                      label={`Имя ${terms.specialistGenitive} в записи`}
                       value={form.doctor}
                       onChange={(doctor) => setForm((current) => ({ ...current, doctor }))}
                     />
@@ -1594,7 +1600,7 @@ export function AppointmentsPage() {
                 </div>
               ) : (
                 <TextField
-                  label="Врач"
+                  label={capitalize(terms.specialist)}
                   value={form.doctor}
                   onChange={(doctor) => setForm((current) => ({ ...current, doctor, doctorId: "" }))}
                 />
@@ -1606,7 +1612,7 @@ export function AppointmentsPage() {
                     врача правило не работает вовсе. */}
                 {form.doctorId ? (
                   <p className="mt-1 text-[11px] font-semibold" style={{ color: "var(--negis-muted)" }}>
-                    {describeDoctorDay(shifts, form.doctorId, form.date)}
+                    {describeDoctorDay(shifts, form.doctorId, form.date, terms)}
                   </p>
                 ) : null}
               </div>

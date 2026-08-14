@@ -510,8 +510,11 @@ test("BC15 the server is the authority, and the browser is only a fast pre-filte
     submit.includes("await createAppointment(appointment, allowConflict"),
     "creating must await the server: an optimistic create cannot ask the operator anything",
   );
+  // Как и выше: скобка не закрыта намеренно, аргументы describeConflict — не
+  // предмет этого пина (словарь ниши добавил terms, и точный литерал сломался
+  // бы снова на любой следующей правке сигнатуры).
   assert.ok(
-    submit.includes("setConflictMessage(describeConflict(error))") && submit.split("setConflictMessage(describeConflict(error))").length === 3,
+    submit.includes("setConflictMessage(describeConflict(error") && submit.split("setConflictMessage(describeConflict(error").length === 3,
     "both the create and the edit path must reopen the same decision in the modal",
   );
 });

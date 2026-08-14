@@ -45,6 +45,7 @@ import {
   type StaffRole,
 } from "@/lib/permissions";
 import { KZ_META_CITY_OPTIONS, getKzMetaCityOption, type MetaCitySearchCandidate } from "../../../../lib/meta/cities";
+import { capitalize, termsFor } from "../../../../lib/vertical/terms";
 
 type StaffInvitation = {
   id: string;
@@ -635,7 +636,12 @@ function permissionSummary(permissions: CrmPermission[]) {
 
 export default function AdminCenter() {
   const [, setLocation] = useLocation();
-  const { clinicId, user } = useAuth();
+  const { clinicId, user, vertical } = useAuth();
+  // Подпись вкладки исполнителей зависит от ниши: у клиники «Врачи», у салона
+  // «Мастера». Ключ вкладки остаётся doctors — переименовывать его значило бы
+  // трогать реестры, а не слово на кнопке.
+  const tabLabel = (tab: { id: AdminTab; label: string }) =>
+    tab.id === "doctors" ? capitalize(termsFor(vertical).specialistPlural) : tab.label;
   const workspaceId = clinicId || readWorkspaceId();
   const [activeTab, setActiveTab] = useState<AdminTab>("overview");
   // Проба маршрута платформы. Не владелец платформы получает 404 и ссылки не
@@ -2356,24 +2362,24 @@ export default function AdminCenter() {
           <label className="mb-2 block text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">Раздел админки</label>
           <select className="neu-input w-full" value={activeTab} onChange={(event) => setActiveTab(event.target.value as AdminTab)}>
             {tabs.map((tab) => (
-              <option key={tab.id} value={tab.id}>{tab.label}</option>
+              <option key={tab.id} value={tab.id}>{tabLabel(tab)}</option>
             ))}
           </select>
         </div>
 
         <nav className="hidden overflow-x-auto md:block" aria-label="Admin sections">
           <div className="inline-flex min-w-max gap-2 rounded-[28px] border border-white/70 bg-white/55 p-2 shadow-[8px_10px_28px_rgba(116,135,154,0.12)]">
-            {tabs.map(({ id, label, icon: Icon }) => (
+            {tabs.map((tab) => (
               <button
-                key={id}
+                key={tab.id}
                 type="button"
                 className={`flex min-h-11 items-center gap-2 rounded-2xl px-4 text-sm font-bold transition ${
-                  activeTab === id ? "bg-[#0D9488] text-white shadow-[0_8px_20px_rgba(13,148,136,0.22)]" : "text-[#64748B] hover:bg-white/80"
+                  activeTab === tab.id ? "bg-[#0D9488] text-white shadow-[0_8px_20px_rgba(13,148,136,0.22)]" : "text-[#64748B] hover:bg-white/80"
                 }`}
-                onClick={() => setActiveTab(id)}
+                onClick={() => setActiveTab(tab.id)}
               >
-                <Icon size={16} />
-                {label}
+                <tab.icon size={16} />
+                {tabLabel(tab)}
               </button>
             ))}
           </div>

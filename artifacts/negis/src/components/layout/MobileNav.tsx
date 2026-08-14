@@ -22,6 +22,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
+import { capitalize, termsFor } from "../../../../../lib/vertical/terms";
 
 type MobileNavItem = {
   href: string;
@@ -51,6 +52,10 @@ const drawerItems: MobileNavItem[] = [
   { href: "/ads-automation", label: "Реклама", icon: Rocket, permission: "ads" },
   { href: "/ads-automation/history", label: "История запусков", icon: Megaphone, permission: "ads" },
   { href: "/services", label: "Услуги", icon: Tag, permission: "booking" },
+  // Подпись зависит от ниши и подставляется при отрисовке: у клиники «Врачи и
+  // график», у салона «Мастера и график». Право то же, что и у страницы, —
+  // справочники, а не админ-центр.
+  { href: "/staff-schedule", label: "Специалисты и график", icon: Users, permission: "directory" },
   { href: "/content-studio", label: "Контент", icon: Clapperboard, permission: "ads" },
   { href: "/marketplace", label: "Маркет", icon: Store, permission: "marketplace" },
   { href: "/admin", label: "Настройки клиники", icon: Settings, permission: "admin" },
@@ -63,7 +68,8 @@ function isActive(location: string, href: string) {
 export function MobileNav() {
   const [open, setOpen] = useState(false);
   const [location, setLocation] = useLocation();
-  const { signOut, userRole, rolePermissions } = useAuth();
+  const { signOut, userRole, rolePermissions, vertical } = useAuth();
+  const terms = termsFor(vertical);
 
   const canUse = (item: MobileNavItem) =>
     userRole === "owner" || userRole === "manager" || userRole === "admin" || Boolean(rolePermissions[item.permission]);
@@ -87,20 +93,29 @@ export function MobileNav() {
             </div>
 
             <div className="grid grid-cols-2 gap-2">
-              {visibleDrawer.map(({ href, label, icon: Icon }) => (
-                <button
-                  key={href}
-                  type="button"
-                  className="mobile-nav-drawer-item"
-                  onClick={() => {
-                    setOpen(false);
-                    setLocation(href);
-                  }}
-                >
-                  <Icon size={18} />
-                  <span>{label}</span>
-                </button>
-              ))}
+              {visibleDrawer.map(({ href, label: staticLabel, icon: Icon }) => {
+                // Две подписи зависят от ниши; остальные нейтральны и живут
+                // статикой в списке выше.
+                const label = href === "/staff-schedule"
+                  ? `${capitalize(terms.specialistPlural)} и график`
+                  : href === "/admin"
+                    ? `Настройки ${terms.orgGenitive}`
+                    : staticLabel;
+                return (
+                  <button
+                    key={href}
+                    type="button"
+                    className="mobile-nav-drawer-item"
+                    onClick={() => {
+                      setOpen(false);
+                      setLocation(href);
+                    }}
+                  >
+                    <Icon size={18} />
+                    <span>{label}</span>
+                  </button>
+                );
+              })}
             </div>
 
             <button

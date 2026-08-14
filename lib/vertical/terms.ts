@@ -50,10 +50,18 @@ export type Terms = {
   /** Само заведение. */
   org: string;
   orgGenitive: string;
+  /** «В клинике» или «в салоне». */
+  orgPrepositional: string;
+  /** Чем занят график, в родительном падеже: часы «приёма» или «работы». */
+  dutyGenitive: string;
   /** Тот, кто оказывает услугу. */
   specialist: string;
   specialistPlural: string;
   specialistGenitive: string;
+  /** «Запись к этому …» — врачу или мастеру. */
+  specialistDative: string;
+  /** «Справочник …» — врачей или мастеров. */
+  specialistGenitivePlural: string;
   /** Тот, кто её получает. */
   customer: string;
   customerPlural: string;
@@ -70,9 +78,13 @@ const TERMS: Readonly<Record<Vertical, Terms>> = {
   clinic: {
     org: "клиника",
     orgGenitive: "клиники",
+    orgPrepositional: "клинике",
+    dutyGenitive: "приёма",
     specialist: "врач",
     specialistPlural: "врачи",
     specialistGenitive: "врача",
+    specialistDative: "врачу",
+    specialistGenitivePlural: "врачей",
     customer: "пациент",
     customerPlural: "пациенты",
     visit: "приём",
@@ -83,9 +95,13 @@ const TERMS: Readonly<Record<Vertical, Terms>> = {
   beauty: {
     org: "салон",
     orgGenitive: "салона",
+    orgPrepositional: "салоне",
+    dutyGenitive: "работы",
     specialist: "мастер",
     specialistPlural: "мастера",
     specialistGenitive: "мастера",
+    specialistDative: "мастеру",
+    specialistGenitivePlural: "мастеров",
     // «Клиент», а не «гость»: продукт уже везде говорит «клиенты», и вводить
     // второе слово для той же сущности значит рассинхронизировать экраны.
     customer: "клиент",

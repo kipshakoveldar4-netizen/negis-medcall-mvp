@@ -164,6 +164,52 @@ test("VT9 право на справочники отделено от прав�
   }
 });
 
+test("VT11 мобильное меню ведёт к справочнику и говорит словами ниши", async () => {
+  const mobileNav = await codeOf(path.join(repoRoot, "artifacts", "negis", "src", "components", "layout", "MobileNav.tsx"));
+
+  // Страница существовала, но с телефона до неё было не добраться: пункт жил
+  // только в боковом меню, которое на мобильной вёрстке скрыто целиком.
+  assert.ok(/href: "\/staff-schedule"[\s\S]{0,120}permission: "directory"/.test(mobileNav), "пункт есть и закрыт правом справочников");
+  assert.ok(/href === "\/staff-schedule"[\s\S]{0,120}terms\.specialistPlural/.test(mobileNav), "подпись — из словаря вертикали");
+  // Пин держит не только вычисление, но и рендер: мутант, вернувший в <span>
+  // статическую подпись или отфильтровавший пункт из ящика, проходил бы два
+  // пина выше, не показывая салону ничего.
+  assert.ok(/<span>\{label\}<\/span>/.test(mobileNav), "вычисленная подпись действительно рендерится");
+  assert.ok(/const visibleDrawer = drawerItems\.filter\(canUse\);/.test(mobileNav), "ящик не фильтруется ничем, кроме прав");
+});
+
+test("VT12 экран справочника не говорит «врач» жёстко", async () => {
+  const editor = await codeOf(path.join(repoRoot, "artifacts", "negis", "src", "components", "admin", "DoctorSchedule.tsx"));
+
+  // Салон видел «Врачи», «Укажите имя врача», «Врач обновлён» — каждое слово
+  // было зашито строкой. После перевода на словарь ни одной формы слова «врач»
+  // в коде не остаётся: они существуют только в lib/vertical/terms.
+  // Регистронезависимо: «ВРАЧИ» капсом проскочил бы мимо /[Вв]рач/.
+  assert.ok(!/врач/i.test(editor), "жёстких «врачей» в коде экрана нет");
+  assert.ok(/termsFor\(vertical\)/.test(editor), "словарь берётся по нише пространства");
+  assert.ok(/detailTextFor\(terms\)/.test(editor), "переводы отказов сервера тоже по нише");
+
+  const admin = await codeOf(path.join(repoRoot, "artifacts", "negis", "src", "pages", "AdminCenter.tsx"));
+  assert.ok(/tab\.id === "doctors"[\s\S]{0,120}specialistPlural/.test(admin), "вкладка админ-центра подписана по нише");
+  // Определение хелпера — не доказательство: мутант, вернувший {tab.label} в
+  // рендер, оставил бы tabLabel мёртвым кодом (noUnusedLocals выключен) и
+  // прошёл бы пин выше. Держим обе точки вызова.
+  assert.ok(/<option[^>]*>\{tabLabel\(tab\)\}<\/option>/.test(admin), "мобильный селект зовёт tabLabel");
+  assert.ok(/\{tabLabel\(tab\)\}\s*<\/button>/.test(admin), "десктопные вкладки зовут tabLabel");
+});
+
+test("VT13 форма записи говорит словами ниши", async () => {
+  const appointments = await codeOf(path.join(repoRoot, "artifacts", "negis", "src", "pages", "AppointmentsPage.tsx"));
+
+  // Экран справочника обещает салону поле «Мастер» — обещание держит форма
+  // записи: поле, фильтр, отказы конфликтов и подсказка графика берут слова из
+  // словаря, а не из зашитой строки.
+  assert.ok(!/врач/i.test(appointments), "жёстких «врачей» в коде формы записи нет");
+  assert.ok(/termsFor\(vertical\)/.test(appointments), "словарь берётся по нише пространства");
+  assert.ok(/describeConflict\(error, terms\)/.test(appointments), "отказ о занятом времени — по нише");
+  assert.ok(/describeSchedule\(error, terms\)/.test(appointments), "отказ о графике — по нише");
+});
+
 test("VT10 страница справочников доступна без админ-центра", async () => {
   const app = await codeOf(path.join(repoRoot, "artifacts", "negis", "src", "App.tsx"));
   const sidebar = await codeOf(path.join(repoRoot, "artifacts", "negis", "src", "components", "layout", "Sidebar.tsx"));

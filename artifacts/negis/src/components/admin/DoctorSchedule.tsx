@@ -4,8 +4,9 @@ import { toast } from "sonner";
 import { useAuth } from "@/contexts/AuthContext";
 import { crmErrorMessage, crmFetch } from "@/lib/api";
 import { isRealWorkspace, readWorkspaceId } from "@/lib/demoStorage";
+import { capitalize, termsFor, type Terms } from "../../../../../lib/vertical/terms";
 
-// Справочник врачей и их график.
+// Справочник исполнителей — врачей или мастеров — и их график.
 //
 // Отдельный компонент, а не шестьсот строк внутрь AdminCenter: так уже сделан
 // раздел WhatsApp, и вкладка остаётся одной строкой в разметке.
@@ -126,21 +127,28 @@ function timeToMinute(value: string): number | null {
   return hours * 60 + minutes;
 }
 
-/** Детали сервера по-русски. Оператор не должен читать `weekday must be…`. */
-const DETAIL_TEXT: Record<string, string> = {
-  "fullName is required": "Укажите имя врача.",
-  "fullName must be unique within the workspace": "Врач с таким именем уже есть.",
-  "doctorId is required": "Сначала выберите врача.",
-  "either weekday or onDate is required, not both": "Строка графика — либо день недели, либо дата.",
-  "a day off must not carry working hours": "У выходного не может быть часов приёма.",
-  "startMinute and endMinute are required for a working row": "Укажите начало и конец приёма.",
-  "endMinute must be after startMinute and no more than 24 hours later":
-    "Конец приёма должен быть позже начала и не длиннее суток.",
-  "onDateEnd must not be earlier than onDate": "Конец периода не может быть раньше начала.",
-};
+/**
+ * Детали сервера по-русски. Оператор не должен читать `weekday must be…`.
+ *
+ * Функция от словаря ниши, а не константа: сервер говорит «врач» для любой
+ * ниши, и перевод — единственное место, где салон услышит «мастер».
+ */
+function detailTextFor(terms: Terms): Record<string, string> {
+  return {
+    "fullName is required": `Укажите имя ${terms.specialistGenitive}.`,
+    "fullName must be unique within the workspace": `${capitalize(terms.specialist)} с таким именем уже есть.`,
+    "doctorId is required": `Сначала выберите ${terms.specialistGenitive}.`,
+    "either weekday or onDate is required, not both": "Строка графика — либо день недели, либо дата.",
+    "a day off must not carry working hours": `У выходного не может быть часов ${terms.dutyGenitive}.`,
+    "startMinute and endMinute are required for a working row": `Укажите начало и конец ${terms.dutyGenitive}.`,
+    "endMinute must be after startMinute and no more than 24 hours later":
+      `Конец ${terms.dutyGenitive} должен быть позже начала и не длиннее суток.`,
+    "onDateEnd must not be earlier than onDate": "Конец периода не может быть раньше начала.",
+  };
+}
 
-function refusalText(status: number, error: string, details: string[]): string {
-  const translated = details.map((detail) => DETAIL_TEXT[detail]).filter(Boolean);
+function refusalText(status: number, error: string, details: string[], detailText: Record<string, string>): string {
+  const translated = details.map((detail) => detailText[detail]).filter(Boolean);
   if (translated.length > 0) return translated.join(" ");
   if (error && /[а-яё]/i.test(error)) return error;
   return crmErrorMessage(status);
@@ -165,7 +173,9 @@ async function readEnvelope(response: Response): Promise<Envelope | null> {
 }
 
 export function DoctorSchedule() {
-  const { userRole, rolePermissions } = useAuth();
+  const { userRole, rolePermissions, vertical } = useAuth();
+  const terms = termsFor(vertical);
+  const detailText = useMemo(() => detailTextFor(terms), [terms]);
   const [doctors, setDoctors] = useState<ClinicDoctor[]>([]);
   const [shifts, setShifts] = useState<Shift[]>([]);
   const [timeZone, setTimeZone] = useState("");
@@ -215,7 +225,7 @@ export function DoctorSchedule() {
         // «врачей нет» — разные ответы, и второй заставил бы завести всех
         // заново поверх существующих.
         console.warn("[doctors] read failed", doctorsResponse.status, doctorsBody?.error);
-        setFailureText(refusalText(doctorsResponse.status, readText(doctorsBody?.error), doctorsBody?.details || []));
+        setFailureText(refusalText(doctorsResponse.status, readText(doctorsBody?.error), doctorsBody?.details || [], detailText));
         setScreen("failed");
         return;
       }
@@ -272,7 +282,7 @@ export function DoctorSchedule() {
       const body = await readEnvelope(response);
       if (!response.ok || body?.success !== true) {
         console.warn("[doctors] write failed", path, method, response.status, body?.error, (body?.details || []).join("; "));
-        toast.error(refusalText(response.status, readText(body?.error), body?.details || []));
+        toast.error(refusalText(response.status, readText(body?.error), body?.details || [], detailText));
         return false;
       }
       return true;
@@ -286,7 +296,7 @@ export function DoctorSchedule() {
   const submitDoctor = async () => {
     const fullName = form.fullName.trim();
     if (!fullName) {
-      toast.error("Укажите имя врача");
+      toast.error(`Укажите имя ${terms.specialistGenitive}`);
       return;
     }
     setSaving(true);
@@ -303,7 +313,7 @@ export function DoctorSchedule() {
         : await write("/api/crm/clinic-doctors", "POST", fields);
       if (!ok) return;
       setFormOpen(false);
-      toast.success(editingId ? "Врач обновлён" : "Врач добавлен");
+      toast.success(`${capitalize(terms.specialist)} ${editingId ? "обновлён" : "добавлен"}`);
       await load({ quiet: true });
     } finally {
       setSaving(false);
@@ -428,7 +438,7 @@ export function DoctorSchedule() {
     const ok = await write("/api/crm/admin-settings", "POST", { key: "clinic_schedule", value: { timeZone: zone } });
     if (!ok) return;
     setTimeZone(zone);
-    toast.success("Часовой пояс клиники сохранён");
+    toast.success(`Часовой пояс ${terms.orgGenitive} сохранён`);
   };
 
   const resolvedSummary = useMemo(() => {
@@ -439,19 +449,21 @@ export function DoctorSchedule() {
     // «Строк нет вовсе» и «все дни отмечены нерабочими» — разные состояния, и
     // второе правило как раз ПРИМЕНЯЕТ, отказывая всю неделю. Прежняя сводка
     // печатала для него «ничем не ограничена» — прямо наоборот.
-    if (mine.length === 0) return "График не задан — запись к этому врачу ничем не ограничена.";
+    if (mine.length === 0) return `График не задан — запись к этому ${terms.specialistDative} ничем не ограничена.`;
     if (working.length === 0) return "Все дни отмечены нерабочими: запись будет предупреждать в любой день.";
-    if (working.length === 7) return "Врач принимает все дни недели.";
-    return `Врач принимает: ${working.join(", ")}. В остальные дни запись будет предупреждать.`;
-  }, [mine.length, selected, weeklyByDay]);
+    if (working.length === 7) return `${capitalize(terms.specialist)} принимает все дни недели.`;
+    return `${capitalize(terms.specialist)} принимает: ${working.join(", ")}. В остальные дни запись будет предупреждать.`;
+    // terms в зависимостях обязателен: без него смена ниши на лету оставляла
+    // бы сводку на словаре прежней ниши, пока остальной экран уже переключился.
+  }, [mine.length, selected, terms, weeklyByDay]);
 
   return (
     <div className="grid gap-5 xl:grid-cols-[minmax(280px,360px)_minmax(0,1fr)]">
       <section className="neu-card">
         <div className="mb-4 flex items-center justify-between gap-3">
           <div>
-            <h2 className="text-lg font-black text-[#0F172A]">Врачи</h2>
-            <p className="text-sm text-[#64748B]">Кто принимает в клинике. Имя отсюда подставляется в запись.</p>
+            <h2 className="text-lg font-black text-[#0F172A]">{capitalize(terms.specialistPlural)}</h2>
+            <p className="text-sm text-[#64748B]">Кто принимает в {terms.orgPrepositional}. Имя отсюда подставляется в запись.</p>
           </div>
           {canManage && screen === "ready" ? (
             <button
@@ -474,7 +486,7 @@ export function DoctorSchedule() {
 
         {screen === "failed" ? (
           <div className="rounded-2xl bg-rose-50 p-4 text-sm font-semibold text-rose-900" aria-live="polite">
-            Не удалось загрузить справочник врачей. Это не значит, что их нет.
+            Не удалось загрузить справочник {terms.specialistGenitivePlural}. Это не значит, что их нет.
             <p className="mt-1 font-normal">{failureText}</p>
             <button type="button" className="neu-btn mt-3 px-3 py-2 text-xs" onClick={() => void load()}>
               <RefreshCw size={13} />
@@ -485,15 +497,15 @@ export function DoctorSchedule() {
 
         {screen === "unavailable" ? (
           <p className="rounded-2xl bg-slate-100 p-4 text-sm font-semibold text-[#64748B]">
-            Справочник врачей ещё не включён для этой клиники. Поле «Врач» в записи работает как раньше — текстом.
+            Справочник {terms.specialistGenitivePlural} ещё не включён. Поле «{capitalize(terms.specialist)}» в записи работает как раньше — текстом.
           </p>
         ) : null}
 
         {screen === "ready" && doctors.length === 0 ? (
           <p className="text-sm font-semibold text-[#64748B]">
             {canManage
-              ? "Врачей пока нет. Добавьте первого — он появится в форме записи."
-              : "Врачей пока нет. Список заполняет администратор клиники."}
+              ? `${capitalize(terms.specialistGenitivePlural)} пока нет. Добавьте первого — он появится в форме записи.`
+              : `${capitalize(terms.specialistGenitivePlural)} пока нет. Список заполняет администратор ${terms.orgGenitive}.`}
           </p>
         ) : null}
 
@@ -542,14 +554,14 @@ export function DoctorSchedule() {
 
       <section className="neu-card">
         <div className="mb-4">
-          <h2 className="text-lg font-black text-[#0F172A]">График приёма</h2>
+          <h2 className="text-lg font-black text-[#0F172A]">График {terms.dutyGenitive}</h2>
           <p className="text-sm text-[#64748B]">
-            Часы задаются во времени клиники. Пока часовой пояс не выбран, график при записи не применяется.
+            Часы задаются во времени {terms.orgGenitive}. Пока часовой пояс не выбран, график при записи не применяется.
           </p>
         </div>
 
         <label className="mb-5 block">
-          <span className="mb-2 block text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">Часовой пояс клиники</span>
+          <span className="mb-2 block text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">Часовой пояс {terms.orgGenitive}</span>
           {canSetTimeZone ? (
             <select className="neu-input w-full" value={timeZone} onChange={(event) => void saveTimeZone(event.target.value)}>
               <option value="">Не выбран — график не применяется</option>
@@ -565,7 +577,7 @@ export function DoctorSchedule() {
         </label>
 
         {screen !== "ready" || !selected ? (
-          <p className="text-sm font-semibold text-[#64748B]">Выберите врача слева, чтобы задать его график.</p>
+          <p className="text-sm font-semibold text-[#64748B]">Выберите {terms.specialistGenitive} слева, чтобы задать его график.</p>
         ) : (
           <div className="grid gap-4">
             <p className="rounded-2xl bg-[#F1F5F9] p-3 text-sm font-semibold text-[#334155]">{resolvedSummary}</p>
@@ -711,7 +723,7 @@ export function DoctorSchedule() {
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(15,23,42,0.35)" }} onClick={() => setFormOpen(false)}>
           <div className="neu-card w-full max-w-md bg-white p-5" onClick={(event) => event.stopPropagation()}>
             <div className="flex items-center justify-between gap-3">
-              <h3 className="text-base font-black text-[#0F172A]">{editingId ? "Изменить врача" : "Новый врач"}</h3>
+              <h3 className="text-base font-black text-[#0F172A]">{editingId ? `Изменить ${terms.specialistGenitive}` : `Новый ${terms.specialist}`}</h3>
               <button type="button" className="neu-btn px-3 py-2" onClick={() => setFormOpen(false)} aria-label="Закрыть">
                 <X size={15} />
               </button>
@@ -740,7 +752,7 @@ export function DoctorSchedule() {
                   второму в это время делают укладку.
                 */}
                 <span className="mt-1 block text-xs font-semibold text-[#64748B]">
-                  1 — приём один на один. Больше — столько записей мастер может вести параллельно.
+                  1 — {terms.visit} один на один. Больше — столько записей {terms.specialist} может вести параллельно.
                 </span>
               </label>
               <label className="block">
