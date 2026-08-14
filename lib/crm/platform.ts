@@ -152,9 +152,16 @@ async function handleOverview(res: VercelResponse) {
   // Счётчики всех клиник считаются одной волной, а не по клинике за раз.
   // Прежний цикл ждал три запроса на каждую клинику последовательно: при
   // пятидесяти клиниках это пятьдесят волн, и панель открывалась минутами.
-  const known = workspaces.filter((workspace) => UUID_PATTERN.test(readString(workspace.id)));
-  const counts = await Promise.all(
-    known.map(async (workspace) => {
+  type ClinicCounts = {
+    id: string;
+    staffCount: number | null;
+    leadCount: number | null;
+    appointmentCount: number | null;
+  };
+
+  const known: JsonRecord[] = workspaces.filter((workspace: JsonRecord) => UUID_PATTERN.test(readString(workspace.id)));
+  const counts: ClinicCounts[] = await Promise.all(
+    known.map(async (workspace: JsonRecord): Promise<ClinicCounts> => {
       const id = readString(workspace.id);
       const [staffCount, leadCount, appointmentCount] = await Promise.all([
         countRows(supabase, "staff_users", id),
@@ -164,7 +171,7 @@ async function handleOverview(res: VercelResponse) {
       return { id, staffCount, leadCount, appointmentCount };
     }),
   );
-  const countsById = new Map(counts.map((entry) => [entry.id, entry]));
+  const countsById = new Map<string, ClinicCounts>(counts.map((entry: ClinicCounts) => [entry.id, entry]));
 
   const clinics: ClinicRow[] = [];
   for (const workspace of known) {
@@ -172,7 +179,7 @@ async function handleOverview(res: VercelResponse) {
     const subscription = subscriptions.get(id) || {};
     const priceMinor = readInteger(subscription.price_minor);
     const billingPeriod = readString(subscription.billing_period) || "monthly";
-    const counted = countsById.get(id) || { staffCount: null, leadCount: null, appointmentCount: null };
+    const counted: ClinicCounts = countsById.get(id) || { id, staffCount: null, leadCount: null, appointmentCount: null };
 
     clinics.push({
       id,
