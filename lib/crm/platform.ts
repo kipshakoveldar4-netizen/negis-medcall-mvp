@@ -304,7 +304,14 @@ async function handleSubscriptions(req: VercelRequest, res: VercelResponse) {
   // недосмотру.
   const rawPrice = body.priceMinor ?? body.price_minor;
   const priceNumber = typeof rawPrice === "number" ? rawPrice : Number(readString(rawPrice));
-  if (rawPrice === undefined || rawPrice === null || readString(rawPrice) === "" || !Number.isFinite(priceNumber)) {
+  // Пустоту проверяем ТОЛЬКО у строки. Прежняя проверка звала readString на
+  // любом значении, а он возвращает пустую строку для всего, что не строка, —
+  // то есть ЧИСЛОВАЯ цена не проходила никогда, и панель отвечала «Нужна цена»
+  // на запрос, в котором цена есть. Найдено на проде первым же настоящим
+  // назначением тарифа; собственная проверка PB2 дефект закрепляла, потому что
+  // пинила формулировку строки, а не поведение обработчика.
+  const emptyString = typeof rawPrice === "string" && rawPrice.trim() === "";
+  if (rawPrice === undefined || rawPrice === null || emptyString || !Number.isFinite(priceNumber)) {
     return sendJson(res, 400, {
       success: false,
       error: "Нужна цена",

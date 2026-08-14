@@ -54,7 +54,11 @@ test("PB2 пустая цена — отказ, а не ноль", async () => {
   const panel = await codeOf(panelPath);
 
   assert.ok(/code: "price_required"/.test(handler), "сервер отказывает без цены");
-  assert.ok(/readString\(rawPrice\) === ""/.test(handler), "и пустую строку отличает от нуля");
+  // Пустота проверяется только у СТРОКИ. Прежний пин закреплял вызов
+  // readString на любом значении — а он возвращает "" для чисел, то есть
+  // числовая цена не проходила никогда. Пин охранял собственную формулировку.
+  assert.ok(/typeof rawPrice === "string" && rawPrice\.trim\(\) === ""/.test(handler), "пустота — свойство строки, а не числа");
+  assert.ok(!/readString\(rawPrice\) === ""/.test(handler), "старая проверка, глотавшая числа, не возвращается");
   assert.ok(/if \(!typed\)/.test(panel), "экран тоже не отправляет пустое поле");
 });
 
