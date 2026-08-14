@@ -48,8 +48,10 @@
     "test:platform-billing": "tsx --test ./src/medina-platform-billing.test.ts",
     "test:installable-app": "tsx --test ./src/medina-installable-app.test.ts",
     "test:vertical": "tsx --test ./src/medina-vertical.test.ts",
+    "test:provision": "tsx --test ./src/medina-provision.test.ts",
     "build:icons": "tsx ./src/build-app-icons.ts",
-    "seed:clinic": "tsx ./src/seed-clinic.ts"
+    "seed:clinic": "tsx ./src/seed-clinic.ts",
+    "provision:workspace": "tsx ./src/provision-workspace.ts"
   },
   "devDependencies": {
     "@types/node": "catalog:",
