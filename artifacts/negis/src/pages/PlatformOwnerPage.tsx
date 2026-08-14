@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Loader2 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -144,16 +144,36 @@ export default function PlatformOwnerPage() {
           currency: "KZT",
         }),
       });
-      if (!response.ok) throw new Error(String(response.status));
+      const body = await response.json().catch(() => null);
+      if (!response.ok) {
+        // Сервер называет причину — «нет таблицы», «нет цены», «отказ отмены
+        // прежней подписки». Прятать её за общим «не удалось» значит отправить
+        // владельца гадать, хотя ответ уже пришёл.
+        const reason = [body?.error, ...(Array.isArray(body?.details) ? body.details : [])]
+          .filter(Boolean)
+          .join(" ");
+        toast.error(reason || "Не удалось сохранить подписку");
+        return;
+      }
       toast.success("Подписка сохранена");
       setEditing("");
       await load();
     } catch {
-      toast.error("Не удалось сохранить подписку");
+      toast.error("Сеть не ответила — подписка не сохранена");
     } finally {
       setSaving(false);
     }
   }
+
+  const editingClinic = clinics.find((clinic) => clinic.id === editing) || null;
+  const formRef = useRef<HTMLElement | null>(null);
+
+  // Форма живёт под таблицей, и на длинном списке «Назначить» её просто не
+  // видно: нажал — ничего не произошло. Прокрутка к форме и имя клиники в её
+  // заголовке снимают оба вопроса: куда смотреть и кому назначаю.
+  useEffect(() => {
+    if (editing) formRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }, [editing]);
 
   if (state === "loading") {
     return (
@@ -211,11 +231,40 @@ export default function PlatformOwnerPage() {
         {clinics.length === 0 ? (
           <p className="mt-3 text-sm font-semibold text-[#64748B]">Клиник пока нет.</p>
         ) : (
-          <div className="mt-3 overflow-x-auto">
+          <>
+          {/*
+            Узкий экран: карточки вместо таблицы. Таблица на телефоне требует
+            горизонтальной прокрутки, и кнопка «Назначить» уезжает за край —
+            панель выглядела неадаптированной, потому что ею и была.
+          */}
+          <div className="mt-3 space-y-3 md:hidden">
+            {clinics.map((clinic) => (
+              <article key={clinic.id} className="neu-card p-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="truncate font-black text-[#0F172A]">{clinic.name}</p>
+                    <p className="truncate text-xs font-semibold text-[#64748B]">{clinic.ownerEmail || "почта не указана"}</p>
+                    <p className="text-xs font-semibold text-[#94A3B8]">создана {clinic.createdAt.slice(0, 10) || "—"}</p>
+                  </div>
+                  <button type="button" className="neu-btn shrink-0 text-sm" onClick={() => startEditing(clinic)}>
+                    {clinic.plan ? "Изменить" : "Назначить"}
+                  </button>
+                </div>
+                <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs font-semibold text-[#475569]">
+                  <span>{clinic.plan ? `${PLANS[clinic.plan as PlanKey]?.title || clinic.plan} · ${formatMinor(clinic.monthlyMinor, clinic.currency)}` : "нет подписки"}</span>
+                  <span>сотрудники: {clinic.staffCount ?? "—"}</span>
+                  <span>заявки: {clinic.leadCount ?? "—"}</span>
+                  <span>записи: {clinic.appointmentCount ?? "—"}</span>
+                </div>
+              </article>
+            ))}
+          </div>
+          <div className="mt-3 hidden overflow-x-auto md:block">
             <table className="w-full min-w-[880px] border-separate border-spacing-y-2 text-sm">
               <thead>
                 <tr className="text-left text-xs font-black uppercase tracking-[0.1em] text-[#94A3B8]">
                   <th className="px-4 py-2">Клиника</th>
+                  <th className="px-4 py-2">Создана</th>
                   <th className="px-4 py-2">Тариф</th>
                   <th className="px-4 py-2">В месяц</th>
                   <th className="px-4 py-2">Сотрудники</th>
@@ -231,6 +280,7 @@ export default function PlatformOwnerPage() {
                       <p className="font-black text-[#0F172A]">{clinic.name}</p>
                       <p className="text-xs font-semibold text-[#64748B]">{clinic.ownerEmail || "почта не указана"}</p>
                     </td>
+                    <td className="px-4 py-3 text-xs font-semibold text-[#64748B]">{clinic.createdAt.slice(0, 10) || "—"}</td>
                     <td className="px-4 py-3 font-semibold text-[#334155]">
                       {clinic.plan ? PLANS[clinic.plan as PlanKey]?.title || clinic.plan : "нет подписки"}
                     </td>
@@ -250,12 +300,20 @@ export default function PlatformOwnerPage() {
               </tbody>
             </table>
           </div>
+          </>
         )}
       </section>
 
       {editing ? (
-        <section className="mt-6 neu-card p-5">
-          <h3 className="text-base font-black text-[#0F172A]">Подписка клиники</h3>
+        <section ref={formRef} className="mt-6 neu-card p-5">
+          <h3 className="text-base font-black text-[#0F172A]">
+            Подписка клиники{editingClinic ? ` — ${editingClinic.name}` : ""}
+          </h3>
+          {editingClinic ? (
+            <p className="mt-1 text-xs font-semibold text-[#64748B]">
+              {editingClinic.ownerEmail || "почта не указана"} · создана {editingClinic.createdAt.slice(0, 10) || "—"}
+            </p>
+          ) : null}
           <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
             <label className="text-sm font-semibold text-[#334155]">
               Тариф

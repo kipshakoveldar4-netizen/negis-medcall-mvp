@@ -272,7 +272,12 @@ async function handleSubscriptions(req: VercelRequest, res: VercelResponse) {
       .select("*")
       .maybeSingle();
     if (error) {
-      return sendJson(res, 502, { success: false, error: "Не удалось изменить подписку", code: "unavailable" });
+      return sendJson(res, 502, {
+        success: false,
+        error: "Не удалось изменить подписку",
+        code: "unavailable",
+        details: [error.message],
+      });
     }
     if (!data) {
       return sendJson(res, 404, { success: false, error: "Действующей подписки нет", code: "not_found" });
@@ -338,7 +343,7 @@ async function handleSubscriptions(req: VercelRequest, res: VercelResponse) {
       success: false,
       error: "Не удалось закрыть прежнюю подписку",
       code: "unavailable",
-      details: ["Новая подписка не создана: у клиники осталась прежняя."],
+      details: ["Новая подписка не создана: у клиники осталась прежняя.", cancelError.message],
     });
   }
 
@@ -358,7 +363,12 @@ async function handleSubscriptions(req: VercelRequest, res: VercelResponse) {
     .maybeSingle();
 
   if (error) {
-    return sendJson(res, 502, { success: false, error: "Не удалось создать подписку", code: "unavailable" });
+    return sendJson(res, 502, {
+      success: false,
+      error: "Не удалось создать подписку",
+      code: "unavailable",
+      details: [error.message],
+    });
   }
 
   return sendJson(res, 201, { success: true, data: { item: asRecord(data) } });
