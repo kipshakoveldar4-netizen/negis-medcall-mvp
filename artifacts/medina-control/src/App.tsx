@@ -3,15 +3,18 @@ import type { Session } from "@supabase/supabase-js";
 import { supabase } from "./lib/supabase";
 import { Login } from "./screens/Login";
 import { Overview } from "./screens/Overview";
+import { ClinicCard } from "./screens/ClinicCard";
 
 // Medina Control — портал владельца платформы.
 //
-// В меню только то, что работает. Разделы «Сигналы» и «Рекомендации» появятся
-// здесь, когда будут написаны, — пунктов-обещаний в этом продукте не вешают.
+// В меню только то, что работает; пунктов-обещаний в этом продукте не вешают.
+// Карточка клиники открывается из таблицы обзора, а не отдельным пунктом:
+// список клиник уже есть на обзоре, и второй список рядом был бы его копией.
 
 export default function App() {
   const [session, setSession] = useState<Session | null>(null);
   const [ready, setReady] = useState(false);
+  const [clinicId, setClinicId] = useState("");
 
   useEffect(() => {
     void supabase.auth.getSession().then(({ data }) => {
@@ -32,13 +35,17 @@ export default function App() {
       <aside className="side">
         <div className="brand">Medina <span>Control</span></div>
         <div className="brand-sub">портал платформы</div>
-        <button type="button" className="nav-item on">Обзор</button>
+        <button type="button" className={`nav-item ${clinicId ? "" : "on"}`} onClick={() => setClinicId("")}>Обзор</button>
         <div className="spacer" />
         <div className="who">{session.user.email}</div>
         <button type="button" className="signout" onClick={() => void supabase.auth.signOut()}>Выйти</button>
       </aside>
       <main className="main">
-        <Overview />
+        {clinicId ? (
+          <ClinicCard workspaceId={clinicId} onBack={() => setClinicId("")} />
+        ) : (
+          <Overview onOpenClinic={setClinicId} />
+        )}
       </main>
     </div>
   );

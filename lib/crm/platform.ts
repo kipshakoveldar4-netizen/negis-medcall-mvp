@@ -1,5 +1,7 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { getSupabaseServerClient } from "../supabase/server";
+import { computeClinicSignals, type ClinicFacts } from "./clinic-signals";
+import { readVertical, VERTICAL_SETTINGS_KEY } from "../vertical/terms";
 
 // Панель владельца платформы: подключённые клиники и выручка.
 //
@@ -420,8 +422,265 @@ export async function handleWorkspaceSubscription(
   return sendJson(res, 200, { success: true, data: { subscription: data ? asRecord(data) : null } });
 }
 
+/**
+ * Счётчик строк за интервал [fromIso, toIso) — тем же head-способом, что и
+ * countRows: карточка знает, СКОЛЬКО заявок завели на этой неделе, и не видит,
+ * каких.
+ */
+async function countRowsInRange(
+  supabase: ReturnType<typeof getSupabaseServerClient>,
+  table: string,
+  workspaceId: string,
+  fromIso: string,
+  toIso: string,
+): Promise<number | null> {
+  if (!supabase) return null;
+  try {
+    const { count, error } = await supabase
+      .from(table)
+      .select("id", { count: "exact", head: true })
+      .eq("workspace_id", workspaceId)
+      .gte("created_at", fromIso)
+      .lt("created_at", toIso);
+    if (error) return null;
+    return typeof count === "number" ? count : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Карточка одной клиники: активность по неделям, статус модулей и сигналы.
+ *
+ * Те же два ограничения, что и у обзора: доступ решает список владельцев
+ * платформы в маршрутизаторе, а наружу уезжают только счётчики и настройки
+ * уровня «часовой пояс задан» — ни одной строки пациента, записи или заявки.
+ *
+ * Сами правила сигналов — в lib/crm/clinic-signals.ts, чистой функцией: здесь
+ * только честный сбор фактов, где null означает «не смог посчитать», и сигнал
+ * по такому факту не строится вовсе.
+ */
+async function handleClinicCard(req: VercelRequest, res: VercelResponse) {
+  const supabase = getSupabaseServerClient();
+  if (!supabase) {
+    return sendJson(res, 503, {
+      success: false,
+      error: "Хранилище не настроено",
+      code: "storage_not_configured",
+    });
+  }
+
+  const workspaceId = readString(
+    Array.isArray(req.query.workspaceId) ? req.query.workspaceId[0] : req.query.workspaceId,
+  );
+  if (!UUID_PATTERN.test(workspaceId)) {
+    return sendJson(res, 400, {
+      success: false,
+      error: "Нужна клиника",
+      code: "workspace_required",
+      details: ["Передайте workspaceId существующей клиники."],
+    });
+  }
+
+  const { data: workspaceRow, error: workspaceError } = await supabase
+    .from("workspaces")
+    .select("id, name, owner_email, created_at")
+    .eq("id", workspaceId)
+    .maybeSingle();
+  if (workspaceError) {
+    return sendJson(res, 502, {
+      success: false,
+      error: "Не удалось прочитать клинику",
+      code: "workspace_unavailable",
+    });
+  }
+  if (!workspaceRow) {
+    return sendJson(res, 404, { success: false, error: "Клиники нет", code: "not_found" });
+  }
+  const workspace = asRecord(workspaceRow);
+
+  // Настройки — двумя ключами одним запросом: ниша и часовой пояс. Отказ
+  // чтения здесь — отказ всей карточки: на этих двух значениях стоят и слова
+  // ниши, и сигнал о часовом поясе, и молча подменить их дефолтом значило бы
+  // построить предупреждение на сбое чтения.
+  const { data: settingRows, error: settingsError } = await supabase
+    .from("workspace_settings")
+    .select("key, value")
+    .eq("workspace_id", workspaceId)
+    .in("key", [VERTICAL_SETTINGS_KEY, "clinic_schedule"]);
+  if (settingsError) {
+    return sendJson(res, 502, {
+      success: false,
+      error: "Не удалось прочитать настройки клиники",
+      code: "settings_unavailable",
+    });
+  }
+  let vertical = readVertical(undefined);
+  let timeZone = "";
+  for (const row of (settingRows || []).map(asRecord)) {
+    const value = asRecord(row.value);
+    if (readString(row.key) === VERTICAL_SETTINGS_KEY) vertical = readVertical(value.vertical);
+    if (readString(row.key) === "clinic_schedule") timeZone = readString(value.timeZone);
+  }
+
+  // Отказ чтения — не «подписки нет»: тот же принцип, что у
+  // handleWorkspaceSubscription выше. Иначе транзиентный сбой рисовал бы
+  // платящей клинике «тариф не назначен», и владелец шёл бы переназначать.
+  const { data: subscriptionRow, error: subscriptionError } = await supabase
+    .from("platform_subscriptions")
+    .select("plan, status, price_minor, currency, billing_period")
+    .eq("workspace_id", workspaceId)
+    .eq("status", "active")
+    .maybeSingle();
+  if (subscriptionError) {
+    return sendJson(res, 502, {
+      success: false,
+      error: "Не удалось прочитать тариф клиники",
+      code: "subscription_unavailable",
+    });
+  }
+  const subscription = asRecord(subscriptionRow);
+
+  // Недельные корзины: четыре интервала по семь дней, самый свежий — первым.
+  // Считается по created_at — «сколько завели», то есть пользуется ли клиника
+  // продуктом, а не сколько визитов назначено на будущее.
+  const now = Date.now();
+  const DAY = 24 * 60 * 60 * 1000;
+  const weekRanges = [0, 1, 2, 3].map((index) => ({
+    from: new Date(now - (index + 1) * 7 * DAY).toISOString(),
+    to: new Date(now - index * 7 * DAY).toISOString(),
+  }));
+
+  // Исполнители считаются пересечением: сколько АКТИВНЫХ врачей и у скольких
+  // ИЗ НИХ есть график. Дистинкт по всем строкам смен считал бы архивных —
+  // архивирование не удаляет их графики, DELETE у платформы нет вовсе, — и
+  // «график заполнен у всех» загорался бы у клиники, где единственный активный
+  // врач графика не имеет. Заодно ни одной строки смен не выгружается: только
+  // head-счётчики на каждого активного врача, и кап PostgREST в тысячу строк
+  // сюда не дотягивается.
+  const activeDoctorIds = await (async (): Promise<string[] | null> => {
+    try {
+      const { data, error } = await supabase
+        .from("clinic_doctors")
+        .select("id")
+        .eq("workspace_id", workspaceId)
+        .eq("is_active", true);
+      if (error || !Array.isArray(data)) return null;
+      return data.map((row) => readString(asRecord(row).id)).filter(Boolean);
+    } catch {
+      return null;
+    }
+  })();
+
+  const [
+    staffCount,
+    scheduledFlags,
+    servicesCount,
+    wazzupCount,
+    cloudNumbersCount,
+    clientsCount,
+    weeklyLeads,
+    weeklyAppointments,
+  ] = await Promise.all([
+    countRows(supabase, "staff_users", workspaceId),
+    activeDoctorIds === null
+      ? Promise.resolve(null)
+      : Promise.all(
+          activeDoctorIds.map(async (doctorId): Promise<boolean | null> => {
+            try {
+              const { count, error } = await supabase
+                .from("clinic_doctor_shifts")
+                .select("id", { count: "exact", head: true })
+                .eq("workspace_id", workspaceId)
+                .eq("doctor_id", doctorId);
+              if (error || typeof count !== "number") return null;
+              return count > 0;
+            } catch {
+              return null;
+            }
+          }),
+        ),
+    countRows(supabase, "clinic_services", workspaceId),
+    countRows(supabase, "wazzup_channels", workspaceId),
+    countRows(supabase, "whatsapp_cloud_numbers", workspaceId),
+    countRows(supabase, "clients", workspaceId),
+    Promise.all(weekRanges.map((range) => countRowsInRange(supabase, "leads", workspaceId, range.from, range.to))),
+    Promise.all(weekRanges.map((range) => countRowsInRange(supabase, "appointments", workspaceId, range.from, range.to))),
+  ]);
+
+  const doctorsCount = activeDoctorIds === null ? null : activeDoctorIds.length;
+  // Один непосчитанный врач делает непосчитанным весь факт: сказать «у всех
+  // есть график», не сумев проверить одного, значило бы построить вывод на сбое.
+  const doctorsWithSchedule =
+    scheduledFlags === null || scheduledFlags.some((flag) => flag === null)
+      ? null
+      : scheduledFlags.filter(Boolean).length;
+
+  // Два канала WhatsApp — одна суть: «клинике есть куда писать». Сумма честна
+  // только когда она положительна («хотя бы столько подключено») или когда ОБА
+  // счётчика реально нули. Ноль рядом со сбоем чтения — не ноль: канал мог
+  // жить в непрочитанной таблице.
+  const whatsappSum = (wazzupCount ?? 0) + (cloudNumbersCount ?? 0);
+  const whatsappChannels =
+    whatsappSum > 0 ? whatsappSum : wazzupCount === null || cloudNumbersCount === null ? null : 0;
+
+  const facts: ClinicFacts = {
+    subscriptionStatus: readString(subscription.status),
+    timeZoneSet: Boolean(timeZone),
+    doctors: doctorsCount,
+    doctorsWithSchedule,
+    services: servicesCount,
+    whatsappChannels,
+    leads7d: weeklyLeads[0],
+    appointments7d: weeklyAppointments[0],
+  };
+
+  const priceMinor = readInteger(subscription.price_minor);
+  const billingPeriod = readString(subscription.billing_period) || "monthly";
+
+  return sendJson(res, 200, {
+    success: true,
+    data: {
+      clinic: {
+        id: workspaceId,
+        name: readString(workspace.name),
+        ownerEmail: readString(workspace.owner_email),
+        createdAt: readString(workspace.created_at),
+        vertical,
+        timeZone,
+        plan: readString(subscription.plan),
+        subscriptionStatus: readString(subscription.status),
+        monthlyMinor: subscription.plan ? monthlyMinor(priceMinor, billingPeriod) : 0,
+        currency: readString(subscription.currency) || "KZT",
+        billingPeriod,
+      },
+      counts: {
+        staff: staffCount,
+        doctors: doctorsCount,
+        doctorsWithSchedule,
+        services: servicesCount,
+        whatsappChannels,
+        clients: clientsCount,
+      },
+      // Самая свежая неделя — первой; from/to отдаются, чтобы портал подписал
+      // корзины настоящими датами, а не пересчитывал их вторым способом.
+      weekly: weekRanges.map((range, index) => ({
+        from: range.from,
+        to: range.to,
+        leads: weeklyLeads[index],
+        appointments: weeklyAppointments[index],
+      })),
+      signals: computeClinicSignals(facts),
+    },
+  });
+}
+
 export async function handlePlatformOverview(_req: VercelRequest, res: VercelResponse) {
   return handleOverview(res);
+}
+
+export async function handlePlatformClinic(req: VercelRequest, res: VercelResponse) {
+  return handleClinicCard(req, res);
 }
 
 export async function handlePlatformSubscriptions(req: VercelRequest, res: VercelResponse) {

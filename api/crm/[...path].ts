@@ -34,7 +34,7 @@ import {
 } from "../../lib/auth/server";
 import { PlatformAuthError, requirePlatformOwner } from "../../lib/auth/platform";
 import { applyControlCors } from "../../lib/auth/cors";
-import { handlePlatformOverview, handlePlatformSubscriptions, handleWorkspaceSubscription } from "../../lib/crm/platform";
+import { handlePlatformClinic, handlePlatformOverview, handlePlatformSubscriptions, handleWorkspaceSubscription } from "../../lib/crm/platform";
 
 // Security-2B — deny-by-default tenant authorization for /api/crm/*.
 //
@@ -183,6 +183,8 @@ async function dispatch(
       return handlePlatformOverview(req, res);
     case "platform-subscriptions":
       return handlePlatformSubscriptions(req, res);
+    case "platform-clinic":
+      return handlePlatformClinic(req, res);
     case "staff-invitations":
       return handleStaffInvitations(req, res);
     case "staff-invitations/accept":
@@ -258,6 +260,36 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   const method = (req.method || "GET").toUpperCase();
   const isDisabledMethod = Boolean(route.authorization.disabledMethods?.includes(method));
+
+  // Платформенные маршруты гейтятся ДО проверки метода. Обратный порядок
+  // выдавал оракул существования: POST на платформенный путь отвечал 405, на
+  // несуществующий — 404, и панель со списком всех клиник была различима без
+  // единого токена. По той же причине ниже любой авторизационный отказ на
+  // платформенном маршруте превращается в тот же 404, что у неизвестного пути.
+  if (route.authorization.kind === "platform") {
+    try {
+      await requirePlatformOwner(req);
+      if (!route.authorization.methods.includes(method)) {
+        return methodNotAllowed(res);
+      }
+      try {
+        await ensureParsedBody(req);
+      } catch {
+        return sendJson(res, 400, {
+          success: false,
+          error: "Invalid request body",
+          code: "invalid_request_body",
+        });
+      }
+      return await dispatch(route.key, route.resource, segments, req, res);
+    } catch (error) {
+      if (error instanceof PlatformAuthError || error instanceof WorkspaceAdminAuthError) {
+        return notFound(res);
+      }
+      throw error;
+    }
+  }
+
   if (!isDisabledMethod && !route.authorization.methods.includes(method)) {
     return methodNotAllowed(res);
   }
@@ -273,15 +305,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   try {
-    if (route.authorization.kind === "platform") {
-      // Владелец ПЛАТФОРМЫ, а не клиники. attachWorkspaceContext здесь не
-      // вызывается сознательно: у запроса нет и не может быть арендатора, и
-      // подставить сюда чей-то workspaceId значило бы выдать одну из клиник за
-      // «свою» для запроса, который читает их все.
-      await requirePlatformOwner(req);
-      return await dispatch(route.key, route.resource, segments, req, res);
-    }
-
     if (route.authorization.kind === "internal_hmac") {
       // The handler performs its own HMAC verification; a browser JWT can never
       // satisfy it, and this branch never builds a workspace context.

@@ -121,6 +121,96 @@ test("MC7 меню портала не обещает ненаписанного
   assert.ok(!app.includes("Сигналы") && !app.includes("Рекомендации"), "разделы появятся вместе с кодом, не раньше");
 });
 
+type SignalsModule = {
+  computeClinicSignals: (facts: {
+    subscriptionStatus: string;
+    timeZoneSet: boolean;
+    doctors: number | null;
+    doctorsWithSchedule: number | null;
+    services: number | null;
+    whatsappChannels: number | null;
+    leads7d: number | null;
+    appointments7d: number | null;
+  }) => Array<{ key: string; level: "ok" | "warn"; data: Record<string, number> }>;
+};
+
+const { computeClinicSignals } = (await import(
+  pathToFileURL(path.join(repoRoot, "lib", "crm", "clinic-signals.ts")).href
+)) as SignalsModule;
+
+const HEALTHY = {
+  subscriptionStatus: "active",
+  timeZoneSet: true,
+  doctors: 2,
+  doctorsWithSchedule: 2,
+  services: 5,
+  whatsappChannels: 1,
+  leads7d: 3,
+  appointments7d: 4,
+};
+
+test("MC10 сигнал не строится на сбое чтения", () => {
+  // null — «не смог посчитать». Предупреждение, построенное на сбое, отправило
+  // бы владельца чинить клинику, у которой всё в порядке.
+  const signals = computeClinicSignals({
+    subscriptionStatus: "active",
+    timeZoneSet: true,
+    doctors: null,
+    doctorsWithSchedule: null,
+    services: null,
+    whatsappChannels: null,
+    leads7d: null,
+    appointments7d: null,
+  });
+  assert.deepEqual(signals, [], "по нечитаемым фактам — ни предупреждений, ни успокоений");
+});
+
+test("MC11 ноль за неделю — предупреждение, поток — спокойный сигнал", () => {
+  const quiet = computeClinicSignals({ ...HEALTHY, appointments7d: 0, leads7d: 0 });
+  assert.ok(quiet.some((signal) => signal.key === "no_appointments_7d" && signal.level === "warn"));
+  assert.ok(quiet.some((signal) => signal.key === "no_leads_7d" && signal.level === "warn"));
+
+  const flowing = computeClinicSignals(HEALTHY);
+  assert.ok(flowing.every((signal) => signal.level === "ok"), "у здоровой клиники нет предупреждений");
+  assert.ok(flowing.some((signal) => signal.key === "appointments_flowing" && signal.data.count === 4));
+});
+
+test("MC12 график: неполный — предупреждение с числами, пустой справочник — свой сигнал", () => {
+  const partial = computeClinicSignals({ ...HEALTHY, doctors: 3, doctorsWithSchedule: 1 });
+  const incomplete = partial.find((signal) => signal.key === "schedule_incomplete");
+  assert.ok(incomplete && incomplete.level === "warn");
+  assert.deepEqual(incomplete?.data, { have: 1, total: 3 });
+
+  const empty = computeClinicSignals({ ...HEALTHY, doctors: 0, doctorsWithSchedule: 0 });
+  assert.ok(empty.some((signal) => signal.key === "no_specialists" && signal.level === "warn"));
+  assert.ok(!empty.some((signal) => signal.key === "schedule_incomplete"), "про график пустого справочника сигнала нет");
+
+  // Предупреждения стоят раньше спокойных сигналов: карточку открывают ради них.
+  const mixed = computeClinicSignals({ ...HEALTHY, whatsappChannels: 0 });
+  const firstOkIndex = mixed.findIndex((signal) => signal.level === "ok");
+  const lastWarnIndex = mixed.map((signal) => signal.level).lastIndexOf("warn");
+  assert.ok(firstOkIndex === -1 || lastWarnIndex < firstOkIndex, "warn раньше ok");
+});
+
+test("MC13 карточка клиники зарегистрирована как платформенный маршрут и отдаёт только счётчики", async () => {
+  const registry = await readFile(path.join(repoRoot, "lib", "crm", "authorization.ts"), "utf8");
+  assert.ok(/"platform-clinic": \{ kind: "platform", methods: \["GET"\] \}/.test(registry), "kind platform, только GET");
+
+  const router = await readFile(path.join(repoRoot, "api", "crm", "[...path].ts"), "utf8");
+  assert.ok(/case "platform-clinic":\s*return handlePlatformClinic\(req, res\);/.test(router), "роутер диспатчит карточку");
+
+  const handler = await readFile(path.join(repoRoot, "lib", "crm", "platform.ts"), "utf8");
+  const card = handler.slice(handler.indexOf("async function handleClinicCard"), handler.indexOf("export async function handlePlatformOverview"));
+  assert.ok(card.length > 0, "обработчик на месте");
+  // Наружу — счётчики и настройки, ни одной строки пациента: в выборках
+  // карточки нет ни телефона, ни имени клиента, ни свободного select(*).
+  assert.ok(!/select\("\*"\)/.test(card), "нет select(*)");
+  for (const column of ["full_name", "client_name", "phone", "client_phone", "notes"]) {
+    assert.ok(!card.includes(`"${column}"`), `колонка ${column} не выбирается`);
+  }
+  assert.ok(/head: true/.test(card), "счётчики считаются head-запросами");
+});
+
 test("MC9 vercel.json портала называет фреймворк и папку сборки", async () => {
   // Первый деплой упал дважды: сначала настройки импорта собирали чужое
   // приложение, потом слетевший пресет искал папку public. Конфиг в
@@ -130,6 +220,25 @@ test("MC9 vercel.json портала называет фреймворк и па
   ) as Record<string, unknown>;
   assert.equal(config.framework, "vite");
   assert.equal(config.outputDirectory, "dist");
+});
+
+test("MC14 платформенный маршрут не выдаёт себя ни методом, ни статусом", async () => {
+  const router = await readFile(path.join(repoRoot, "api", "crm", "[...path].ts"), "utf8");
+  const platformBranch = router.slice(
+    router.indexOf('route.authorization.kind === "platform"'),
+    router.indexOf("if (!isDisabledMethod"),
+  );
+  // POST на платформенный путь отвечал 405, на несуществующий — 404: оракул
+  // существования панели без единого токена. Гейт обязан стоять до проверки
+  // метода, а любой авторизационный отказ — превращаться в тот же 404.
+  const gateAt = platformBranch.indexOf("requirePlatformOwner(req)");
+  const methodCheckAt = platformBranch.indexOf("methodNotAllowed(res)");
+  assert.ok(gateAt > 0 && methodCheckAt > 0, "гейт и проверка метода в платформенной ветке");
+  assert.ok(gateAt < methodCheckAt, "сначала владелец платформы, потом 405");
+  assert.ok(
+    /error instanceof PlatformAuthError \|\| error instanceof WorkspaceAdminAuthError[\s\S]{0,80}notFound\(res\)/.test(platformBranch),
+    "отказ авторизации на платформенном маршруте — тот же 404, что у неизвестного пути",
+  );
 });
 
 test("MC8 маршруты платформы по-прежнему за requirePlatformOwner", async () => {

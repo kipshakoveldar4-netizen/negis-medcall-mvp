@@ -33,7 +33,7 @@ type Totals = {
   monthlyRevenueMinor: number;
 };
 
-export function Overview() {
+export function Overview({ onOpenClinic }: { onOpenClinic: (id: string) => void }) {
   const [clinics, setClinics] = useState<Clinic[]>([]);
   const [totals, setTotals] = useState<Totals | null>(null);
   const [state, setState] = useState<"loading" | "ready" | "forbidden" | "error">("loading");
@@ -139,12 +139,13 @@ export function Overview() {
   }
 
   if (state === "forbidden") {
-    // Сервер ответил 404: этот аккаунт — не владелец платформы. Портал не
-    // рассказывает, что список существует и кто в нём.
+    // Сервер ответил 404: этот аккаунт — не владелец платформы, либо сессия
+    // истекла — платформенные маршруты отвечают одинаково на оба случая,
+    // чтобы не выдавать существования панели. Портал не рассказывает больше.
     return (
       <>
         <h1 className="page-title">Страница не найдена</h1>
-        <p className="page-sub">Такой страницы нет.</p>
+        <p className="page-sub">Такой страницы нет. Если вы владелец платформы — выйдите и войдите снова.</p>
       </>
     );
   }
@@ -207,7 +208,10 @@ export function Overview() {
                 {clinics.map((clinic) => (
                   <tr key={clinic.id}>
                     <td>
-                      <div className="cell-main">{clinic.name}</div>
+                      {/* Имя ведёт в карточку клиники: активность, модули, сигналы. */}
+                      <button type="button" className="linklike cell-main" onClick={() => onOpenClinic(clinic.id)}>
+                        {clinic.name}
+                      </button>
                       <div className="cell-sub">{clinic.ownerEmail || "почта не указана"}</div>
                     </td>
                     <td className="num">{clinic.createdAt.slice(0, 10) || "—"}</td>

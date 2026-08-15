@@ -180,6 +180,9 @@ export const CRM_ROUTE_AUTHORIZATION: Readonly<Record<string, RouteAuthorization
 
   "platform-overview": { kind: "platform", methods: ["GET"] },
   "platform-subscriptions": { kind: "platform", methods: ["GET", "POST", "PATCH"] },
+  // Карточка одной клиники: активность по неделям, статус модулей, сигналы.
+  // Только чтение и только счётчики — ни одной строки пациента наружу.
+  "platform-clinic": { kind: "platform", methods: ["GET"] },
 
   // Diagnostics were previously unauthenticated and enumerated which secrets are
   // configured. They are now administrator-only and the payload is coarse.
