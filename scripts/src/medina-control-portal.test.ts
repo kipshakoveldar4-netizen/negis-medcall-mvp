@@ -121,6 +121,17 @@ test("MC7 меню портала не обещает ненаписанного
   assert.ok(!app.includes("Сигналы") && !app.includes("Рекомендации"), "разделы появятся вместе с кодом, не раньше");
 });
 
+test("MC9 vercel.json портала называет фреймворк и папку сборки", async () => {
+  // Первый деплой упал дважды: сначала настройки импорта собирали чужое
+  // приложение, потом слетевший пресет искал папку public. Конфиг в
+  // репозитории переживает любые клики в панели Vercel.
+  const config = JSON.parse(
+    await readFile(path.join(repoRoot, "artifacts", "medina-control", "vercel.json"), "utf8"),
+  ) as Record<string, unknown>;
+  assert.equal(config.framework, "vite");
+  assert.equal(config.outputDirectory, "dist");
+});
+
 test("MC8 маршруты платформы по-прежнему за requirePlatformOwner", async () => {
   const router = await readFile(path.join(repoRoot, "api", "crm", "[...path].ts"), "utf8");
   // CORS открыл дорогу браузеру портала, но не ослабил авторизацию: платформенная
