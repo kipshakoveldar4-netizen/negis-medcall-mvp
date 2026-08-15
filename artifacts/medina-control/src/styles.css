@@ -1,0 +1,103 @@
+/* Medina Control — свой компактный стиль, без дизайн-системы CRM.
+   Портал — инструмент одного человека: плотнее, тише, без стеклянных эффектов. */
+
+:root {
+  --ground: #F4F7F6;
+  --surface: #FFFFFF;
+  --surface-2: #EBF1EF;
+  --ink: #10231F;
+  --ink-2: #53655F;
+  --ink-3: #83948E;
+  --accent: #0D9488;
+  --accent-ink: #0A6E66;
+  --accent-soft: #D9EFEB;
+  --danger: #B4232A;
+  --danger-soft: #FBE7E8;
+  --line: #DBE5E2;
+  --side: #0E1B18;
+  --side-ink: #C7D8D3;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--ground);
+  color: var(--ink);
+  font: 15px/1.55 "Segoe UI", -apple-system, "Helvetica Neue", Arial, sans-serif;
+}
+
+button { font: inherit; cursor: pointer; }
+input, select { font: inherit; }
+
+.shell { display: grid; grid-template-columns: 216px minmax(0, 1fr); min-height: 100vh; }
+
+.side { background: var(--side); color: var(--side-ink); padding: 22px 16px; display: flex; flex-direction: column; gap: 4px; }
+.side .brand { font-size: 17px; font-weight: 800; color: #FFFFFF; }
+.side .brand span { color: #2FC4B5; }
+.side .brand-sub { font-size: 11px; opacity: 0.55; margin-bottom: 18px; }
+.side .nav-item { padding: 9px 12px; border-radius: 9px; font-size: 14px; border: 0; background: transparent; color: inherit; text-align: left; }
+.side .nav-item.on { background: rgba(47, 196, 181, 0.16); color: #7FE7DC; font-weight: 700; }
+.side .spacer { flex: 1; }
+.side .who { font-size: 12px; opacity: 0.7; overflow: hidden; text-overflow: ellipsis; }
+.side .signout { margin-top: 8px; background: rgba(255, 255, 255, 0.07); color: var(--side-ink); border: 0; border-radius: 9px; padding: 8px 12px; font-size: 13px; }
+
+.main { padding: 28px 32px 64px; min-width: 0; }
+.page-title { font-size: 22px; font-weight: 800; margin: 0 0 4px; }
+.page-sub { color: var(--ink-2); font-size: 14px; margin: 0 0 22px; }
+
+.metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin-bottom: 26px; }
+.metric { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
+.metric .l { font-size: 10.5px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-3); }
+.metric .v { font-size: 24px; font-weight: 800; font-variant-numeric: tabular-nums; margin-top: 4px; }
+.metric .h { font-size: 11.5px; color: var(--ink-3); margin-top: 3px; }
+
+.panel { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+.panel-title { font-size: 15px; font-weight: 800; padding: 14px 18px 0; }
+
+.tablewrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 14px; min-width: 760px; }
+th { text-align: left; font-size: 10.5px; font-weight: 700; letter-spacing: 0.09em; text-transform: uppercase; color: var(--ink-3); padding: 12px 18px 8px; border-bottom: 2px solid var(--line); white-space: nowrap; }
+td { padding: 12px 18px; border-bottom: 1px solid var(--line); vertical-align: top; }
+tr:last-child td { border-bottom: 0; }
+.num { font-variant-numeric: tabular-nums; }
+.cell-main { font-weight: 700; }
+.cell-sub { font-size: 12px; color: var(--ink-2); }
+.muted { color: var(--ink-3); }
+
+.btn { border: 1px solid var(--line); background: var(--surface); color: var(--ink); border-radius: 9px; padding: 7px 14px; font-size: 13.5px; font-weight: 600; }
+.btn:hover { background: var(--surface-2); }
+.btn-primary { border: 0; background: var(--accent); color: #FFFFFF; border-radius: 9px; padding: 8px 16px; font-size: 13.5px; font-weight: 700; }
+.btn-primary:disabled { opacity: 0.6; cursor: default; }
+.btn:focus-visible, .btn-primary:focus-visible, .nav-item:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.editor { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 18px; margin-top: 16px; }
+.editor h3 { margin: 0 0 2px; font-size: 15px; }
+.editor .sub { font-size: 12.5px; color: var(--ink-2); margin: 0 0 14px; }
+.editor .fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; align-items: end; }
+.field label { display: block; font-size: 12px; font-weight: 700; color: var(--ink-2); margin-bottom: 5px; }
+.field input, .field select { width: 100%; border: 1px solid var(--line); border-radius: 9px; padding: 8px 11px; background: var(--surface); color: var(--ink); }
+.field input:focus, .field select:focus { outline: 2px solid var(--accent); outline-offset: 0; border-color: var(--accent); }
+.editor .hint { font-size: 12.5px; color: var(--ink-3); margin: 12px 0 0; }
+.editor .actions { display: flex; gap: 8px; }
+
+.notice { border-radius: 10px; padding: 12px 16px; font-size: 14px; margin: 10px 0; }
+.notice.error { background: var(--danger-soft); color: var(--danger); font-weight: 600; }
+.notice.ok { background: var(--accent-soft); color: var(--accent-ink); font-weight: 600; }
+
+/* Вход */
+.login { min-height: 100vh; display: grid; place-items: center; padding: 24px; background: var(--side); }
+.login-card { width: 100%; max-width: 360px; background: var(--surface); border-radius: 14px; padding: 28px; }
+.login-card h1 { font-size: 19px; margin: 0 0 2px; }
+.login-card h1 span { color: var(--accent); }
+.login-card p { font-size: 13px; color: var(--ink-2); margin: 0 0 18px; }
+.login-card .field { margin-bottom: 12px; }
+.login-card .btn-primary { width: 100%; padding: 10px; margin-top: 4px; }
+
+@media (max-width: 720px) {
+  .shell { grid-template-columns: 1fr; }
+  .side { flex-direction: row; flex-wrap: wrap; align-items: center; padding: 14px 16px; }
+  .side .brand-sub { display: none; }
+  .side .spacer { flex: 1 1 auto; }
+  .main { padding: 20px 16px 48px; }
+}

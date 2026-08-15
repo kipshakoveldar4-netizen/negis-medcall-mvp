@@ -33,6 +33,7 @@ import {
   WorkspaceAdminAuthError,
 } from "../../lib/auth/server";
 import { PlatformAuthError, requirePlatformOwner } from "../../lib/auth/platform";
+import { applyControlCors } from "../../lib/auth/cors";
 import { handlePlatformOverview, handlePlatformSubscriptions, handleWorkspaceSubscription } from "../../lib/crm/platform";
 
 // Security-2B — deny-by-default tenant authorization for /api/crm/*.
@@ -237,6 +238,13 @@ async function dispatch(
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
+  // Портал Medina Control живёт на другом домене; его источники перечислены в
+  // переменной окружения, пустой список оставляет поведение прежним. Preflight
+  // завершается до авторизации: предзапрос браузера токена не несёт.
+  if (applyControlCors(req, res) === "preflight") {
+    return res.status(204).end();
+  }
+
   const rawSegments = readPathSegments(req);
   const segments = normalizeCrmSegments(rawSegments);
   if (!segments) {
