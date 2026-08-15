@@ -71,6 +71,23 @@ export type PlatformOwnerContext = {
   email: string;
 };
 
+// Проверенный владелец платформы едет с запросом тем же приёмом, что и
+// контекст рабочего пространства: роутер проверяет один раз и прикладывает,
+// обработчики читают. Повторная проверка в обработчике была бы вторым
+// обращением к Supabase Auth на тот же запрос.
+
+const PLATFORM_OWNER_KEY = Symbol("medinaPlatformOwner");
+
+type CarrierRequest = VercelRequest & { [PLATFORM_OWNER_KEY]?: PlatformOwnerContext };
+
+export function attachPlatformOwner(req: VercelRequest, context: PlatformOwnerContext): void {
+  (req as CarrierRequest)[PLATFORM_OWNER_KEY] = context;
+}
+
+export function readPlatformOwner(req: VercelRequest): PlatformOwnerContext | null {
+  return (req as CarrierRequest)[PLATFORM_OWNER_KEY] ?? null;
+}
+
 /**
  * Пропускает только владельца платформы.
  *

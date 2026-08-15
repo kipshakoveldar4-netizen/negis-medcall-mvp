@@ -32,7 +32,8 @@ import {
   requireWorkspaceAccess,
   WorkspaceAdminAuthError,
 } from "../../lib/auth/server";
-import { PlatformAuthError, requirePlatformOwner } from "../../lib/auth/platform";
+import { attachPlatformOwner, PlatformAuthError, requirePlatformOwner } from "../../lib/auth/platform";
+import { handlePlatformRecommendations, handleWorkspaceRecommendations } from "../../lib/crm/recommendations";
 import { applyControlCors } from "../../lib/auth/cors";
 import { handlePlatformClinic, handlePlatformOverview, handlePlatformSubscriptions, handleWorkspaceSubscription } from "../../lib/crm/platform";
 
@@ -185,6 +186,13 @@ async function dispatch(
       return handlePlatformSubscriptions(req, res);
     case "platform-clinic":
       return handlePlatformClinic(req, res);
+    case "platform-recommendations":
+      return handlePlatformRecommendations(req, res);
+    case "recommendations": {
+      // Арендатор — из проверенного контекста, как у subscription.
+      const context = readWorkspaceContext(req);
+      return handleWorkspaceRecommendations(context ? context.workspaceId : "", req, res);
+    }
     case "staff-invitations":
       return handleStaffInvitations(req, res);
     case "staff-invitations/accept":
@@ -268,7 +276,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   // платформенном маршруте превращается в тот же 404, что у неизвестного пути.
   if (route.authorization.kind === "platform") {
     try {
-      await requirePlatformOwner(req);
+      attachPlatformOwner(req, await requirePlatformOwner(req));
       if (!route.authorization.methods.includes(method)) {
         return methodNotAllowed(res);
       }

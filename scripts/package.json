@@ -51,6 +51,7 @@
     "test:provision": "tsx --test ./src/medina-provision.test.ts",
     "test:mobile-overlays": "tsx --test ./src/medina-mobile-overlays.test.ts",
     "test:control-portal": "tsx --test ./src/medina-control-portal.test.ts",
+    "test:recommendations": "tsx --test ./src/medina-recommendations.test.ts",
     "build:icons": "tsx ./src/build-app-icons.ts",
     "seed:clinic": "tsx ./src/seed-clinic.ts",
     "provision:workspace": "tsx ./src/provision-workspace.ts"

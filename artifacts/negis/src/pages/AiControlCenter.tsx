@@ -20,6 +20,7 @@ import {
 } from "lucide-react";
 import { PageLayout } from "@/components/layout/PageLayout";
 import { MetricCard } from "@/components/ui/metric-card";
+import { PlatformRecommendations } from "@/components/crm/PlatformRecommendations";
 import { WorkQueue } from "@/components/dashboard/work-queue";
 import { RecentRecords } from "@/components/dashboard/recent-records";
 import { DistributionPanel } from "@/components/dashboard/distribution-panel";
@@ -652,6 +653,11 @@ export default function AiControlCenter() {
             Заявки, записи, продажи, реклама и состояние систем — реальные данные текущей клиники.
           </p>
         </header>
+
+        {/* Советы владельца платформы: карточки видят владелец, админ и
+            управляющий; при неприменённой миграции или любом сбое секция
+            просто отсутствует. */}
+        <PlatformRecommendations />
 
         {/* Commercial-2: onboarding entry card (dismissible; never marks setup done) */}
         {showOnboardingHint ? (

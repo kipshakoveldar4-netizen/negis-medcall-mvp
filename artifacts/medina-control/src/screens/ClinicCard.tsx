@@ -78,6 +78,36 @@ function signalText(signal: Signal, vertical: ReturnType<typeof readVertical>): 
   }
 }
 
+type Recommendation = {
+  id: string;
+  title: string;
+  body: string;
+  actionPath: string;
+  signalKey: string;
+  status: string;
+  createdAt: string;
+  readAt: string;
+  resolvedAt: string;
+};
+
+/** Куда логично вести кнопку совета, родившегося из сигнала. */
+const SIGNAL_ACTIONS: Record<string, string> = {
+  no_appointments_7d: "/appointments",
+  no_leads_7d: "/ads-automation",
+  timezone_missing: "/staff-schedule",
+  no_specialists: "/staff-schedule",
+  schedule_incomplete: "/staff-schedule",
+  no_services: "/services",
+  whatsapp_disconnected: "/marketplace",
+};
+
+const RECO_STATUS: Record<string, { label: string; cls: string }> = {
+  sent: { label: "отправлена", cls: "off" },
+  read: { label: "прочитана", cls: "unknown" },
+  done: { label: "сделана", cls: "on" },
+  dismissed: { label: "скрыта", cls: "off" },
+};
+
 function numberOrDash(value: number | null): string {
   return value === null ? "—" : String(value);
 }
@@ -96,6 +126,78 @@ function chipState(value: number | null): "on" | "off" | "unknown" {
 export function ClinicCard({ workspaceId, onBack }: { workspaceId: string; onBack: () => void }) {
   const [card, setCard] = useState<Card | null>(null);
   const [state, setState] = useState<"loading" | "ready" | "error">("loading");
+  // null — читаем; error — отказ чтения (не «советов нет»); иначе — данные.
+  const [recos, setRecos] = useState<{ items: Recommendation[]; available: boolean } | { error: true } | null>(null);
+  const [composer, setComposer] = useState<{ open: boolean; title: string; body: string; actionPath: string; signalKey: string }>(
+    { open: false, title: "", body: "", actionPath: "", signalKey: "" },
+  );
+  const [sending, setSending] = useState(false);
+  const [recoFlash, setRecoFlash] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
+
+  async function loadRecommendations() {
+    try {
+      const response = await controlFetch(`/api/crm/platform-recommendations?workspaceId=${encodeURIComponent(workspaceId)}`);
+      const body = await response.json().catch(() => null);
+      if (!response.ok || !body?.data) {
+        // Отказ чтения — своё состояние: вечное «Читаю…» при недоданном
+        // гранте на таблицу выглядело бы как зависание без причины.
+        setRecos({ error: true });
+        return;
+      }
+      setRecos({
+        items: Array.isArray(body.data.items) ? (body.data.items as Recommendation[]) : [],
+        available: body.data.available !== false,
+      });
+    } catch {
+      setRecos({ error: true });
+    }
+  }
+
+  function openComposer(prefill: { title: string; body: string; signalKey: string }) {
+    setRecoFlash(null);
+    setComposer({
+      open: true,
+      title: prefill.title,
+      body: prefill.body,
+      actionPath: SIGNAL_ACTIONS[prefill.signalKey] || "",
+      signalKey: prefill.signalKey,
+    });
+  }
+
+  async function sendRecommendation() {
+    if (!composer.title.trim() || !composer.body.trim()) {
+      setRecoFlash({ kind: "error", text: "Нужны заголовок и текст — пустая рекомендация не несёт совета." });
+      return;
+    }
+    setSending(true);
+    setRecoFlash(null);
+    try {
+      const response = await controlFetch("/api/crm/platform-recommendations", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          workspaceId,
+          title: composer.title.trim(),
+          body: composer.body.trim(),
+          actionPath: composer.actionPath,
+          signalKey: composer.signalKey,
+        }),
+      });
+      const body = await response.json().catch(() => null);
+      if (!response.ok) {
+        const reason = [body?.error, ...(Array.isArray(body?.details) ? body.details : [])].filter(Boolean).join(" ");
+        setRecoFlash({ kind: "error", text: reason || "Не удалось отправить рекомендацию" });
+        return;
+      }
+      setRecoFlash({ kind: "ok", text: "Рекомендация отправлена — владелец клиники увидит её в CRM." });
+      setComposer({ open: false, title: "", body: "", actionPath: "", signalKey: "" });
+      await loadRecommendations();
+    } catch {
+      setRecoFlash({ kind: "error", text: "Сеть не ответила — рекомендация не отправлена." });
+    } finally {
+      setSending(false);
+    }
+  }
   // Смена экрана роняет фокус в body: нажатая кнопка размонтировалась вместе
   // со списком. Клавиатура и скринридер продолжают с заголовка карточки.
   const titleRef = useRef<HTMLHeadingElement | null>(null);
@@ -117,6 +219,7 @@ export function ClinicCard({ workspaceId, onBack }: { workspaceId: string; onBac
         }
         setCard(body.data as Card);
         setState("ready");
+        void loadRecommendations();
       } catch {
         if (!cancelled) setState("error");
       }
@@ -124,6 +227,7 @@ export function ClinicCard({ workspaceId, onBack }: { workspaceId: string; onBac
     return () => {
       cancelled = true;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceId]);
 
   if (state === "loading") return <p className="muted" role="status">Читаю карточку клиники…</p>;
@@ -184,6 +288,97 @@ export function ClinicCard({ workspaceId, onBack }: { workspaceId: string; onBac
                 <span>
                   <b>{text.title}</b>
                   {text.why ? <span className="why">{text.why}</span> : null}
+                </span>
+                {signal.level === "warn" ? (
+                  <button
+                    type="button"
+                    className="btn reco-btn"
+                    onClick={() => openComposer({ title: text.title, body: text.why, signalKey: signal.key })}
+                  >
+                    Рекомендовать
+                  </button>
+                ) : null}
+              </div>
+            );
+          })
+        )}
+      </section>
+
+      <section className="panel" style={{ padding: "16px 18px", marginBottom: 16 }}>
+        <div className="reco-head">
+          <h2 className="section-title" style={{ margin: 0 }}>Рекомендации клинике</h2>
+          <button type="button" className="btn" onClick={() => openComposer({ title: "", body: "", signalKey: "" })}>
+            Написать рекомендацию
+          </button>
+        </div>
+        {recoFlash ? <div className={`notice ${recoFlash.kind}`}>{recoFlash.text}</div> : null}
+
+        {composer.open ? (
+          <div className="composer">
+            <div className="field">
+              <label htmlFor="reco-title">Заголовок</label>
+              <input id="reco-title" value={composer.title} onChange={(event) => setComposer((c) => ({ ...c, title: event.target.value }))} />
+            </div>
+            <div className="field">
+              <label htmlFor="reco-body">Текст совета</label>
+              <textarea id="reco-body" rows={3} value={composer.body} onChange={(event) => setComposer((c) => ({ ...c, body: event.target.value }))} />
+            </div>
+            <div className="composer-row">
+              <div className="field" style={{ flex: 1 }}>
+                <label htmlFor="reco-action">Кнопка ведёт в раздел</label>
+                <select id="reco-action" value={composer.actionPath} onChange={(event) => setComposer((c) => ({ ...c, actionPath: event.target.value }))}>
+                  <option value="">Без кнопки</option>
+                  <option value="/appointments">Записи</option>
+                  <option value="/staff-schedule">{capitalize(terms.specialistPlural)} и график</option>
+                  <option value="/services">Услуги</option>
+                  <option value="/ads-automation">Реклама</option>
+                  <option value="/marketplace">Маркет</option>
+                  <option value="/admin">Настройки</option>
+                </select>
+              </div>
+              <div className="composer-actions">
+                <button type="button" className="btn-primary" disabled={sending} onClick={() => void sendRecommendation()}>
+                  {sending ? "Отправляю…" : "Отправить"}
+                </button>
+                <button type="button" className="btn" onClick={() => setComposer((c) => ({ ...c, open: false }))}>Отмена</button>
+              </div>
+            </div>
+            <p className="muted" style={{ fontSize: 12.5, margin: "8px 0 0" }}>
+              Совет появится у владельца клиники в CRM карточкой с этой кнопкой. Вы увидите здесь, прочитан ли он и сделан ли.
+            </p>
+          </div>
+        ) : null}
+
+        {recos === null ? (
+          <p className="muted" role="status">Читаю рекомендации…</p>
+        ) : "error" in recos ? (
+          <div className="notice error">
+            Не удалось прочитать рекомендации. Это отказ чтения, а не «советов нет».{" "}
+            <button type="button" className="btn" onClick={() => { setRecos(null); void loadRecommendations(); }}>Повторить</button>
+          </div>
+        ) : !recos.available ? (
+          <p className="muted">
+            Таблица рекомендаций ещё не применена — выполните migrations/037_platform_recommendations.sql в SQL-редакторе Supabase,
+            и раздел заработает без передеплоя.
+          </p>
+        ) : recos.items.length === 0 ? (
+          <p className="muted">Этой клинике ещё ничего не советовали.</p>
+        ) : (
+          recos.items.map((reco) => {
+            const status = RECO_STATUS[reco.status] || { label: reco.status, cls: "off" };
+            // Дата — по статусу: «прочитана, но неделю не сделана» видно из
+            // разницы между отправкой и датой у чипа.
+            const statusDate =
+              reco.status === "read" ? reco.readAt : reco.status === "done" || reco.status === "dismissed" ? reco.resolvedAt : "";
+            return (
+              <div key={reco.id} className="reco-row">
+                <span className="reco-main">
+                  <b>{reco.title}</b>
+                  <span className="why">{reco.body}</span>
+                </span>
+                <span className="reco-meta">
+                  <span className={`chip ${status.cls}`}>{status.label}{statusDate ? ` ${statusDate.slice(0, 10)}` : ""}</span>
+                  <span className="reco-date">отправлена {reco.createdAt.slice(0, 10)}</span>
                 </span>
               </div>
             );

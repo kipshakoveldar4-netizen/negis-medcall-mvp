@@ -183,6 +183,12 @@ export const CRM_ROUTE_AUTHORIZATION: Readonly<Record<string, RouteAuthorization
   // Карточка одной клиники: активность по неделям, статус модулей, сигналы.
   // Только чтение и только счётчики — ни одной строки пациента наружу.
   "platform-clinic": { kind: "platform", methods: ["GET"] },
+  // Советы платформы клиникам: платформа пишет и читает все, клиника — только
+  // свои и только статусы. Единственная запись платформы в сторону клиник.
+  "platform-recommendations": { kind: "platform", methods: ["GET", "POST"] },
+  // Управляющий в списке намеренно: советы касаются прайса, графика и рекламы,
+  // а это его ежедневная работа — совет без права его выполнить бесполезен.
+  recommendations: { kind: "browser", methods: ["GET", "PATCH"], roles: ["owner", "admin", "manager"] },
 
   // Diagnostics were previously unauthenticated and enumerated which secrets are
   // configured. They are now administrator-only and the payload is coarse.
