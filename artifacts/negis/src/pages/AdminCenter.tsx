@@ -644,26 +644,7 @@ export default function AdminCenter() {
     tab.id === "doctors" ? capitalize(termsFor(vertical).specialistPlural) : tab.label;
   const workspaceId = clinicId || readWorkspaceId();
   const [activeTab, setActiveTab] = useState<AdminTab>("overview");
-  // Проба маршрута платформы. Не владелец платформы получает 404 и ссылки не
-  // видит; владелец видит. Одна проба на открытие админ-центра, не на каждый
-  // экран продукта.
-  const [platformPanelAvailable, setPlatformPanelAvailable] = useState(false);
   const [clinic, setClinic] = useState<ClinicSettings>(() => readStored("negis_clinic_settings", clinicDefaults));
-
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      try {
-        const response = await crmFetch("/api/crm/platform-overview");
-        if (!cancelled) setPlatformPanelAvailable(response.ok);
-      } catch {
-        if (!cancelled) setPlatformPanelAvailable(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
   // Commercial-3B: the team is whatever the server says it is. This list used
   // to be seeded from localStorage demo data and written back there, so an
   // administrator saw people who were not members and suspended people who
@@ -2247,20 +2228,9 @@ export default function AdminCenter() {
           <div className="border-t border-slate-700 p-5">
             <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-teal-300">Панель платформы · Medina OS</p>
             <h2 className="mt-1 text-lg font-semibold">Внутренняя диагностика платформы</h2>
-            {/*
-              Ссылка на панель владельца платформы появляется только после
-              успешной пробы серверного маршрута. Показывать её всем нельзя:
-              владелец клиники узнал бы, что в продукте есть экран со списком
-              всех клиник, — а существование панели тоже сведения. Не владелец
-              платформы пробу не проходит и ссылки не видит.
-            */}
-            {platformPanelAvailable ? (
-              <Link href="/platform">
-                <div className="neu-btn mt-3 inline-flex items-center gap-2 px-4 py-2 text-sm">
-                  Открыть панель платформы
-                </div>
-              </Link>
-            ) : null}
+            {/* Панель владельца платформы живёт в отдельном портале Medina
+                Control; из продукта клиник на неё не ведёт ничего — само
+                существование экрана со списком всех клиник тоже сведения. */}
             <p className="mt-1 max-w-3xl text-sm text-slate-300">
               Раздел для команды Medina Platform. Секреты, токены и service role key здесь не отображаются.
             </p>

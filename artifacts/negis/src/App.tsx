@@ -42,7 +42,6 @@ const DemoCalls = lazy(() => import("@/pages/DemoCrmModules").then(m => ({ defau
 const DemoChat = lazy(() => import("@/pages/DemoCrmModules").then(m => ({ default: m.DemoChat })));
 const MarketplacePage = lazy(() => import("@/pages/MarketplacePage"));
 const DirectoryPage = lazy(() => import("@/pages/DirectoryPage"));
-const PlatformOwnerPage = lazy(() => import("@/pages/PlatformOwnerPage"));
 
 
 const DemoTasks = lazy(() => import("@/pages/DemoCrmModules").then(m => ({ default: m.DemoTasks })));
@@ -262,14 +261,9 @@ function Router() {
       <Route path="/tasks" component={() => <ProtectedPage component={DemoTasks} permission="tasks" />} />
       <Route path="/chat" component={() => <ProtectedPage component={DemoChat} permission="chat" />} />
       <Route path="/marketplace" component={MarketRoute} />
-      {/*
-        Панель платформы намеренно НЕ обёрнута в ProtectedPage: тот решает
-        доступ по роли в клинике, а роль в клинике к платформе отношения не
-        имеет. Единственный настоящий гейт стоит на сервере — список
-        идентификаторов в переменной окружения. Экран показывает «страницы нет»,
-        когда сервер отвечает 404, и это и есть отказ.
-      */}
-      <Route path="/platform" component={PlatformOwnerPage} />
+      {/* Панель платформы выехала из CRM в отдельный портал Medina Control
+          (artifacts/medina-control): в продукте клиник её кода больше нет,
+          бывший адрес /platform падает в общий 404 ниже. */}
       <Route path="/market" component={MarketRoute} />
       <Route path="/admin" component={() => <ProtectedPage component={AdminCenter} permission="admin" />} />
       <Route path="/ads-automation/history" component={AdsAutomationRoute} />

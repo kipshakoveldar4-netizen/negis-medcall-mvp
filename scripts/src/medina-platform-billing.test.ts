@@ -26,7 +26,9 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const handlerPath = path.join(repoRoot, "lib", "crm", "platform.ts");
-const panelPath = path.join(repoRoot, "artifacts", "negis", "src", "pages", "PlatformOwnerPage.tsx");
+// Экран переехал из CRM в портал Medina Control; логика перенесена дословно,
+// и пины продолжают охранять её на новом месте.
+const panelPath = path.join(repoRoot, "artifacts", "medina-control", "src", "screens", "Overview.tsx");
 const plansPath = path.join(repoRoot, "lib", "billing", "plans.ts");
 
 async function codeOf(file: string): Promise<string> {
