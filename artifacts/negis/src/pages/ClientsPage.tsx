@@ -633,7 +633,7 @@ export default function ClientsPage() {
 
       {/* Add / edit modal */}
       {formOpen ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(15,23,42,0.35)" }} onClick={() => setFormOpen(false)}>
+        <div className="fixed inset-0 z-[80] flex items-center justify-center p-4" style={{ background: "rgba(15,23,42,0.35)" }} onClick={() => setFormOpen(false)}>
           <div className="negis-glass w-full max-w-lg max-h-[90vh] overflow-y-auto p-5 sm:p-6" style={{ background: "var(--negis-surface)" }} onClick={(event) => event.stopPropagation()}>
             <div className="flex items-center justify-between gap-3">
               <h2 className="text-lg font-black" style={{ color: "var(--negis-text)" }}>{editingId ? "Изменить клиента" : "Новый клиент"}</h2>
@@ -689,7 +689,7 @@ export default function ClientsPage() {
 
       {/* Detail modal */}
       {detailClient ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(15,23,42,0.35)" }} onClick={() => setDetailId(null)}>
+        <div className="fixed inset-0 z-[80] flex items-center justify-center p-4" style={{ background: "rgba(15,23,42,0.35)" }} onClick={() => setDetailId(null)}>
           <div className="negis-glass w-full max-w-xl max-h-[90vh] overflow-y-auto p-5 sm:p-6" style={{ background: "var(--negis-surface)" }} onClick={(event) => event.stopPropagation()}>
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">

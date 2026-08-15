@@ -720,8 +720,11 @@ export function DoctorSchedule() {
       </section>
 
       {formOpen ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(15,23,42,0.35)" }} onClick={() => setFormOpen(false)}>
-          <div className="neu-card w-full max-w-md bg-white p-5" onClick={(event) => event.stopPropagation()}>
+        <div className="fixed inset-0 z-[80] flex items-center justify-center p-4" style={{ background: "rgba(15,23,42,0.35)" }} onClick={() => setFormOpen(false)}>
+          {/* max-h + overflow обязательны: без них на iPhone SE карточка выше
+              экрана, а прокрутить нечем — ни заголовок, ни «Сохранить» не
+              достать. Тот же приём, что у остальных модалок продукта. */}
+          <div className="neu-card max-h-[90vh] w-full max-w-md overflow-y-auto bg-white p-5" onClick={(event) => event.stopPropagation()}>
             <div className="flex items-center justify-between gap-3">
               <h3 className="text-base font-black text-[#0F172A]">{editingId ? `Изменить ${terms.specialistGenitive}` : `Новый ${terms.specialist}`}</h3>
               <button type="button" className="neu-btn px-3 py-2" onClick={() => setFormOpen(false)} aria-label="Закрыть">

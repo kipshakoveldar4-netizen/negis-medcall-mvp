@@ -53,6 +53,7 @@
     "test:installable-app": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:installable-app",
     "test:vertical": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:vertical",
     "test:provision": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:provision",
+    "test:mobile-overlays": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:mobile-overlays",
     "build:icons": "node scripts/run-pnpm.cjs --filter @workspace/scripts run build:icons",
     "seed:clinic": "node scripts/run-pnpm.cjs --filter @workspace/scripts run seed:clinic",
     "provision:workspace": "node scripts/run-pnpm.cjs --filter @workspace/scripts run provision:workspace"

@@ -669,6 +669,18 @@
       font-size: 16px;
     }
 
+    /* iOS Safari зумит страницу при фокусе поля с font-size < 16px и оставляет
+       её зумленной с горизонтальной прокруткой. Правило для .neu-input выше
+       закрывает классовые поля, но Реклама и Контент задают шрифт инлайновым
+       style, который класс не перекроет, — отсюда !important: это единственный
+       способ выиграть у инлайнового стиля. Внутри .negis-main, чтобы не трогать
+       лендинг и служебные страницы. */
+    .negis-main input:not([type="checkbox"]):not([type="radio"]),
+    .negis-main select,
+    .negis-main textarea {
+      font-size: 16px !important;
+    }
+
     .soft-modal {
       left: 12px !important;
       right: 12px !important;

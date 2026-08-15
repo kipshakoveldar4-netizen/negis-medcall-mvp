@@ -627,7 +627,7 @@ export default function ServicesPage() {
       </div>
 
       {formOpen ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(15,23,42,0.35)" }} onClick={() => setFormOpen(false)}>
+        <div className="fixed inset-0 z-[80] flex items-center justify-center p-4" style={{ background: "rgba(15,23,42,0.35)" }} onClick={() => setFormOpen(false)}>
           <div
             className="negis-glass w-full max-w-lg max-h-[90vh] overflow-y-auto p-5 sm:p-6"
             style={{ background: "var(--negis-surface)" }}
@@ -720,7 +720,7 @@ export default function ServicesPage() {
       ) : null}
 
       {confirmHideId ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(15,23,42,0.35)" }} onClick={() => setConfirmHideId("")}>
+        <div className="fixed inset-0 z-[80] flex items-center justify-center p-4" style={{ background: "rgba(15,23,42,0.35)" }} onClick={() => setConfirmHideId("")}>
           <div
             className="negis-glass w-full max-w-md p-5 sm:p-6"
             style={{ background: "var(--negis-surface)" }}
