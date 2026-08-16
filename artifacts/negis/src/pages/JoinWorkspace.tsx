@@ -20,6 +20,25 @@ export default function JoinWorkspace() {
   const [email, setEmail] = useState("");
   const [message, setMessage] = useState("");
   const [fullName, setFullName] = useState("");
+  const [recoveryEmail, setRecoveryEmail] = useState("");
+  const [recoverySending, setRecoverySending] = useState(false);
+  const [recoverySent, setRecoverySent] = useState(false);
+
+  const sendRecovery = async () => {
+    if (recoverySending || !recoveryEmail.trim()) return;
+    setRecoverySending(true);
+    try {
+      await supabase.auth.resetPasswordForEmail(recoveryEmail.trim(), {
+        redirectTo: `${window.location.origin}/reset-password`,
+      });
+      setRecoverySent(true);
+    } catch {
+      // Один ответ на любой исход: существование аккаунта — не для угадывания.
+      setRecoverySent(true);
+    } finally {
+      setRecoverySending(false);
+    }
+  };
 
   // Read once from the fragment, then take it out of the address bar. A
   // fragment never reaches the server, a Referer header or an access log, and
@@ -122,10 +141,37 @@ export default function JoinWorkspace() {
         {phase === "needs-auth" && (
           <div className="mt-4 grid gap-3">
             <p className="text-sm text-[#64748B]">
-              Войдите под тем адресом, на который пришло приглашение. После входа вернитесь по этой же ссылке.
+              Войдите под тем адресом, на который выписано приглашение, и откройте эту ссылку ещё раз.
             </p>
+            {/* Приглашённый владелец нового салона часто ещё БЕЗ пароля: его
+                аккаунт мог существовать до приглашения, и письма с паролем не
+                было. Восстановление — прямо здесь, а не квест по лендингу. */}
+            <p className="text-sm text-[#64748B]">
+              Нет пароля или забыли его? Введите почту — придёт письмо, по которому вы зададите пароль.
+            </p>
+            <input
+              className="neu-input"
+              type="email"
+              placeholder="Почта из приглашения"
+              value={recoveryEmail}
+              onChange={(event) => setRecoveryEmail(event.target.value)}
+            />
+            {recoverySent ? (
+              <p className="rounded-2xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-800">
+                Если у этой почты есть аккаунт — письмо уже в пути. Задайте пароль и откройте ссылку приглашения снова.
+              </p>
+            ) : (
+              <button
+                type="button"
+                className="neu-btn w-full justify-center"
+                disabled={recoverySending}
+                onClick={() => void sendRecovery()}
+              >
+                {recoverySending ? "Отправляем письмо…" : "Выслать письмо для пароля"}
+              </button>
+            )}
             <button type="button" className="neu-btn-primary w-full justify-center" onClick={() => setLocation("/login")}>
-              Перейти ко входу
+              У меня есть пароль — войти
             </button>
           </div>
         )}

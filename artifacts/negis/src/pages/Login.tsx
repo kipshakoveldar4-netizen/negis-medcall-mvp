@@ -75,6 +75,32 @@ export default function Login() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
+  // «Забыли пароль» прямо на входе. Приглашённый владелец, чей аккаунт
+  // существовал без пароля, упирался здесь в «Invalid login credentials» и
+  // тупик: восстановление жило только в модале лендинга, о котором со
+  // страницы входа не догадаться.
+  const [resetSending, setResetSending] = useState(false);
+  const [resetSent, setResetSent] = useState(false);
+
+  const sendPasswordReset = async () => {
+    if (resetSending) return;
+    if (!email.trim()) {
+      toast.error("Введите почту выше — на неё придёт письмо для пароля.");
+      return;
+    }
+    setResetSending(true);
+    try {
+      await supabase.auth.resetPasswordForEmail(email.trim(), {
+        redirectTo: `${window.location.origin}/reset-password`,
+      });
+      // Один ответ на любой исход: существование аккаунта — не для угадывания.
+      setResetSent(true);
+    } catch {
+      setResetSent(true);
+    } finally {
+      setResetSending(false);
+    }
+  };
 
   const submit = async () => {
     const normalizedEmail = email.trim().toLowerCase();
@@ -150,9 +176,9 @@ export default function Login() {
                   <ShieldCheck size={14} />
                   Staff access
                 </div>
-                <h1 className="max-w-md text-3xl font-semibold leading-tight">Medina OS для сотрудников клиники</h1>
+                <h1 className="max-w-md text-3xl font-semibold leading-tight">Medina OS для команды</h1>
                 <p className="mt-4 max-w-md text-sm leading-6 text-white/70">
-                  Войдите по email и временному паролю, который выдал администратор. После входа откроется рабочий dashboard.
+                  Войдите своей почтой и паролем. Если пароля ещё нет или он забыт — восстановите его по почте прямо отсюда.
                 </p>
               </div>
               <p className="text-xs text-white/50">Без настроек Supabase вход работает без подключения к базе.</p>
@@ -164,9 +190,9 @@ export default function Login() {
               <Link href="/">
                 <span className="text-xs font-semibold uppercase tracking-[0.08em]" style={{ color: "var(--negis-primary)" }}>Medina OS</span>
               </Link>
-              <h2 className="mt-5 text-2xl font-black text-[#0F172A]">Вход сотрудника</h2>
+              <h2 className="mt-5 text-2xl font-black text-[#0F172A]">Вход</h2>
               <p className="mt-2 text-sm leading-6 text-[#64748B]">
-                Используйте email и временный пароль из карточки, которую показал администратор.
+                Почта и пароль. Нет пароля или забыли — «Забыли пароль?» вышлет письмо, по которому вы зададите новый.
               </p>
             </div>
 
@@ -203,13 +229,17 @@ export default function Login() {
                 {loading ? "Проверяем..." : "Войти"}
               </button>
 
-              <div className="rounded-2xl bg-[#F8FAFC] p-4 text-sm leading-6 text-[#64748B]">
-                <div className="mb-1 flex items-center gap-2 font-bold text-[#0F172A]">
+              {resetSent ? (
+                <p className="rounded-2xl bg-[#ECFDF5] p-4 text-sm leading-6 text-emerald-800">
+                  Если у этой почты есть аккаунт — письмо уже в пути. Откройте его и задайте пароль, затем вернитесь и войдите.
+                  Пришли по ссылке-приглашению? После входа откройте её ещё раз.
+                </p>
+              ) : (
+                <button type="button" className="neu-btn w-full justify-center" onClick={() => void sendPasswordReset()} disabled={resetSending}>
                   <KeyRound size={15} />
-                  Временный пароль
-                </div>
-                После первого production-входа администратор может сбросить пароль в Supabase Auth. Сейчас MVP хранит только флаги, сам пароль в базе не сохраняется.
-              </div>
+                  {resetSending ? "Отправляем письмо…" : "Забыли пароль?"}
+                </button>
+              )}
             </div>
           </div>
         </section>
