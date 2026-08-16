@@ -1372,14 +1372,10 @@ export default function AdminCenter() {
   }
 
   function renderOverview() {
-    const crmRecords = ["negis_demo_clients", "negis_demo_leads", "negis_demo_appointments", "negis_demo_tasks"].reduce(
-      (sum, key) => sum + localStorageCount(key),
-      0,
-    );
-    const today = new Date().toISOString().slice(0, 10);
-    const todayAppointments = readStored<Array<{ startsAt?: string; time?: string }>>("negis_demo_appointments", []).filter((item) =>
-      String(item.startsAt || item.time || "").startsWith(today),
-    ).length;
+    // Плитки «CRM записей» и «Сегодня записей» удалены: они считали
+    // demo-localStorage, в который реальная клиника не пишет, и показывали
+    // владельцу нули при живой работе. Ложная цифра хуже отсутствующей —
+    // настоящие счётчики уже есть на Главной и в Аналитике.
     const connected = integrationCards.filter((card) => ["configured", "connected", "demo"].includes(card.status)).length;
 
     return (
@@ -1404,10 +1400,8 @@ export default function AdminCenter() {
                 Открыть checklist
               </button>
             </div>
-            <div className="grid gap-3 sm:grid-cols-3">
-              <StatusTile title="Сегодня записей" value={String(todayAppointments)} />
-              <StatusTile title="CRM записей" value={String(crmRecords)} />
-              <StatusTile title="AI modules" value={`${aiProviders.filter((item) => item.enabled).length}/${aiProviders.length}`} />
+            <div className="grid gap-3 sm:grid-cols-1">
+              <StatusTile title="AI-модули" value={`${aiProviders.filter((item) => item.enabled).length}/${aiProviders.length}`} />
             </div>
           </section>
           <section className="neu-card">
@@ -1607,27 +1601,33 @@ export default function AdminCenter() {
         <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <h2 className="text-lg font-black text-[#0F172A]">Настройки клиники</h2>
-            <p className="text-sm text-[#64748B]">Локальный fallback: negis_clinic_settings. При Supabase сохраняется в workspace_settings.</p>
+            <p className="text-sm text-[#64748B]">Название, контакты и тексты — используются в рекламе и сообщениях.</p>
           </div>
           <button type="button" className="neu-btn-primary w-full sm:w-auto" disabled={loading.clinic} onClick={saveClinicSettings}>
             {loading.clinic ? <Loader2 className="animate-spin" size={16} /> : <Save size={16} />}
             Сохранить
           </button>
         </div>
+        {/* Подписи — по-русски, а не именами переменных. Поля timezone здесь
+            больше нет: расписание читает только clinic_schedule, который
+            задаётся закрытым списком на вкладке исполнителей, — свободный
+            текст тут молча не менял ничего. */}
         <div className="grid gap-4 md:grid-cols-2">
-          <Field label="clinicName" value={clinic.clinicName} onChange={(value) => update("clinicName", value)} />
-          <Field label="city" value={clinic.city} onChange={(value) => update("city", value)} />
-          <Field label="phone" value={clinic.phone} onChange={(value) => update("phone", value)} />
-          <Field label="whatsapp" value={clinic.whatsapp} onChange={(value) => update("whatsapp", value)} />
-          <Field label="address" value={clinic.address} onChange={(value) => update("address", value)} />
-          <Field label="defaultServices" value={clinic.defaultServices} onChange={(value) => update("defaultServices", value)} />
-          <Field label="brandTone" value={clinic.brandTone} onChange={(value) => update("brandTone", value)} />
-          <Field label="timezone" value={clinic.timezone} onChange={(value) => update("timezone", value)} />
+          <Field label="Название" value={clinic.clinicName} onChange={(value) => update("clinicName", value)} />
+          <Field label="Город" value={clinic.city} onChange={(value) => update("city", value)} />
+          <Field label="Телефон" value={clinic.phone} onChange={(value) => update("phone", value)} />
+          <Field label="WhatsApp" value={clinic.whatsapp} onChange={(value) => update("whatsapp", value)} />
+          <Field label="Адрес" value={clinic.address} onChange={(value) => update("address", value)} />
+          <Field label="Основные услуги" value={clinic.defaultServices} onChange={(value) => update("defaultServices", value)} />
+          <Field label="Тон бренда" value={clinic.brandTone} onChange={(value) => update("brandTone", value)} />
           <div className="md:col-span-2">
-            <label className="mb-2 block text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">legalDisclaimer</label>
+            <label className="mb-2 block text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">Юридическая оговорка</label>
             <textarea className="neu-input min-h-28" value={clinic.legalDisclaimer} onChange={(event) => update("legalDisclaimer", event.target.value)} />
           </div>
         </div>
+        <p className="mt-3 text-xs font-semibold text-[#94A3B8]">
+          Часовой пояс расписания задаётся на вкладке «{capitalize(termsFor(vertical).specialistPlural)}» — там, где живёт график.
+        </p>
       </section>
     );
   }

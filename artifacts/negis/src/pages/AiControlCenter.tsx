@@ -25,6 +25,9 @@ import { WorkQueue } from "@/components/dashboard/work-queue";
 import { RecentRecords } from "@/components/dashboard/recent-records";
 import { DistributionPanel } from "@/components/dashboard/distribution-panel";
 import { apiUrl, crmFetch } from "@/lib/api";
+import { toast } from "sonner";
+import { useAuth } from "@/contexts/AuthContext";
+import { capitalize, termsFor } from "../../../../lib/vertical/terms";
 import { clinicToday, isOnClinicDay } from "@/lib/clinicDay";
 import {
   buildLeadSourceDistribution,
@@ -197,7 +200,15 @@ const priorityMeta: Record<Priority, { label: string; tone: Tone }> = {
 
 type Recommendation = { title: string; priority: Priority; explanation: string; action: string; openHref?: string };
 
-function AIActionCard({ title, priority, explanation, action, openHref }: Recommendation) {
+function AIActionCard({
+  title,
+  priority,
+  explanation,
+  action,
+  openHref,
+  onCreateTask,
+  creatingTask,
+}: Recommendation & { onCreateTask: () => void; creatingTask: boolean }) {
   const meta = priorityMeta[priority];
   return (
     <div className="negis-glass flex flex-col gap-3 p-5">
@@ -227,11 +238,11 @@ function AIActionCard({ title, priority, explanation, action, openHref }: Recomm
         ) : (
           <button type="button" className="neu-btn justify-center px-4 py-2 text-xs opacity-60" disabled>Открыть</button>
         )}
-        <button type="button" className="neu-btn justify-center px-4 py-2 text-xs opacity-60" disabled title="Появится после подключения задач">
-          Создать задачу
-        </button>
-        <button type="button" className="neu-btn justify-center px-4 py-2 text-xs opacity-60" disabled title="Появится на следующем этапе">
-          Подробнее
+        {/* Задачи давно подключены: рекомендация превращается в поручение
+            одним нажатием, а не остаётся личным делом владельца. Мёртвой
+            кнопки «Подробнее» больше нет — обещаний тут не вешают. */}
+        <button type="button" className="neu-btn justify-center px-4 py-2 text-xs" disabled={creatingTask} onClick={onCreateTask}>
+          {creatingTask ? "Создаю…" : "Создать задачу"}
         </button>
       </div>
     </div>
@@ -293,7 +304,38 @@ const chipStyle: CSSProperties = { borderRadius: 999, padding: "4px 12px", fontS
 const ONBOARDING_HINT_KEY = "negis_onboarding_hint_dismissed";
 
 export default function AiControlCenter() {
+  const { vertical } = useAuth();
+  const terms = termsFor(vertical);
   const todayLabel = new Date().toLocaleDateString("ru-RU", { day: "numeric", month: "long" });
+  // Задача из рекомендации: карточка «Требует внимания» становится поручением.
+  const [creatingTaskFor, setCreatingTaskFor] = useState("");
+  const createTaskFromRecommendation = async (rec: Recommendation) => {
+    if (creatingTaskFor) return;
+    setCreatingTaskFor(rec.title);
+    try {
+      const response = await crmFetch("/api/crm/tasks", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          workspaceId: readWorkspaceId(),
+          title: rec.action || rec.title,
+          status: "new",
+          priority: rec.priority === "high" ? "high" : "medium",
+        }),
+      });
+      const body = (await response.json().catch(() => null)) as { success?: boolean; mode?: string } | null;
+      // 200 mode:"demo" — сервер ничего не записал: честный отказ, не успех.
+      if (!response.ok || body?.success !== true || body.mode !== "supabase") {
+        throw new Error(String(response.status));
+      }
+      toast.success("Задача создана — она в разделе задач на карточках заявок и клиентов");
+    } catch (error) {
+      console.warn("[control-center] task create refused", error instanceof Error ? error.message : error);
+      toast.error("Не удалось создать задачу. Попробуйте позже.");
+    } finally {
+      setCreatingTaskFor("");
+    }
+  };
   // Commercial-2: dismissible onboarding reminder. Dismissal only hides this
   // card — step completion is derived from real data on /onboarding.
   const [showOnboardingHint, setShowOnboardingHint] = useState(
@@ -498,7 +540,7 @@ export default function AiControlCenter() {
       ...crmMetric(appointmentsState, crmCounts.appointmentsToday, "По календарю записей на сегодня."),
     },
     {
-      label: "Пациенты для повторного визита",
+      label: `${capitalize(terms.customerPlural)} для повторного визита`,
       icon: RefreshCw,
       tone: "ai",
       ...crmMetric(clientsState, crmCounts.repeatClients, "Статус «повторный визит» или нет визита более 90 дней — операционная подсказка."),
@@ -650,7 +692,7 @@ export default function AiControlCenter() {
           </div>
           <h1 className="text-2xl font-semibold leading-tight" style={{ color: "var(--negis-text)" }}>Операционный обзор</h1>
           <p className="max-w-3xl text-sm leading-relaxed" style={{ color: "var(--negis-muted)" }}>
-            Заявки, записи, продажи, реклама и состояние систем — реальные данные текущей клиники.
+            Заявки, записи, продажи, реклама и состояние систем — реальные данные {terms.orgGenitive}.
           </p>
         </header>
 
@@ -679,7 +721,7 @@ export default function AiControlCenter() {
 
         {/* 2. Today metrics */}
         <section>
-          <SectionTitle hint="Заявки, клиенты, записи, продажи и реклама — реальные данные текущей клиники.">Сегодня в клинике</SectionTitle>
+          <SectionTitle hint={`Заявки, клиенты, записи, продажи и реклама — реальные данные ${terms.orgGenitive}.`}>Сегодня в {terms.orgPrepositional}</SectionTitle>
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
             {metrics.map((metric) => (
               <MetricCard
@@ -703,7 +745,12 @@ export default function AiControlCenter() {
           ) : recommendations.length > 0 ? (
             <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
               {recommendations.map((rec) => (
-                <AIActionCard key={rec.title} {...rec} />
+                <AIActionCard
+                  key={rec.title}
+                  {...rec}
+                  onCreateTask={() => void createTaskFromRecommendation(rec)}
+                  creatingTask={creatingTaskFor === rec.title}
+                />
               ))}
             </div>
           ) : (

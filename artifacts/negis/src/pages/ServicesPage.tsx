@@ -6,6 +6,7 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { useAuth } from "@/contexts/AuthContext";
 import { crmErrorMessage, crmFetch } from "@/lib/api";
 import { isRealWorkspace, readDemoStorage, readWorkspaceId, workspaceScopedKey, writeDemoStorage } from "@/lib/demoStorage";
+import { capitalize, termsFor } from "../../../../lib/vertical/terms";
 
 // Справочник услуг клиники — прайс, который клиника может править сама.
 //
@@ -179,7 +180,8 @@ async function readEnvelope(response: Response): Promise<ApiEnvelope | null> {
 }
 
 export default function ServicesPage() {
-  const { userRole, rolePermissions } = useAuth();
+  const { userRole, rolePermissions, vertical } = useAuth();
+  const terms = termsFor(vertical);
   const [services, setServices] = useState<ClinicService[]>([]);
   const [screen, setScreen] = useState<ScreenState>("loading");
   const [failureText, setFailureText] = useState("");
@@ -422,13 +424,13 @@ export default function ServicesPage() {
           <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
             <div>
               <p className="text-xs font-black uppercase tracking-[0.18em]" style={{ color: "var(--negis-primary)" }}>
-                Negis OS · Клиника
+                Negis OS · {capitalize(terms.org)}
               </p>
               <h1 className="mt-2 text-3xl font-black sm:text-4xl" style={{ color: "var(--negis-text)" }}>
                 Услуги
               </h1>
               <p className="mt-3 max-w-3xl text-sm leading-relaxed" style={{ color: "var(--negis-muted)" }}>
-                Прайс клиники: названия, цены и длительность. Услуги отсюда подставляются в запись и в продажу.
+                Прайс {terms.orgGenitive}: названия, цены и длительность. Услуги отсюда подставляются в запись и в продажу.
               </p>
             </div>
             {canManage && showList ? (
@@ -530,7 +532,7 @@ export default function ServicesPage() {
             description={
               canManage
                 ? "Когда вы добавите услуги клиники, они появятся здесь и в форме записи."
-                : "Прайс заполняет администратор клиники. Когда услуги добавят, они появятся здесь и в форме записи."
+                : `Прайс заполняет администратор ${terms.orgGenitive}. Когда услуги добавят, они появятся здесь и в форме записи.`
             }
             action={
               canManage ? (
