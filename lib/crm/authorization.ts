@@ -183,6 +183,8 @@ export const CRM_ROUTE_AUTHORIZATION: Readonly<Record<string, RouteAuthorization
   // Карточка одной клиники: активность по неделям, статус модулей, сигналы.
   // Только чтение и только счётчики — ни одной строки пациента наружу.
   "platform-clinic": { kind: "platform", methods: ["GET"] },
+  // Подключение клиники: пространство + настройки + приглашение владельца.
+  "platform-onboarding": { kind: "platform", methods: ["POST"] },
   // Советы платформы клиникам: платформа пишет и читает все, клиника — только
   // свои и только статусы. Единственная запись платформы в сторону клиник.
   "platform-recommendations": { kind: "platform", methods: ["GET", "POST"] },

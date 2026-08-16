@@ -665,7 +665,20 @@ test("I28 nothing creates a workspace without a verified owner", async () => {
     }
   };
   for (const root of roots) await walk(root);
-  assert.deepEqual(offenders, [], "these files can create a tenant outside an enrollment flow");
+  // Единственное разрешённое место — подключение клиники с портала. Оно НЕ
+  // нарушает правило «пространство пишется вместе с проверенным владельцем»:
+  // членство владельца создаёт ровно этот же файл приглашений при погашении
+  // токена, привязанного к почте, а сам вызов стоит за requirePlatformOwner.
+  // Ниже пины держат оба условия — исчезнет любое, и допуск теряет силу.
+  const allowed = [path.join("lib", "crm", "platform-onboarding.ts")];
+  assert.deepEqual(offenders, allowed, "these files can create a tenant outside an enrollment flow");
+
+  const onboarding = await readFile(path.join(repoRoot, "lib", "crm", "platform-onboarding.ts"), "utf8");
+  assert.ok(/createInvitationToken\(\)/.test(onboarding) && /role: "owner"/.test(onboarding),
+    "владелец входит через приглашение, а не вписывается строкой");
+  const registry = await readFile(path.join(repoRoot, "lib", "crm", "authorization.ts"), "utf8");
+  assert.ok(/"platform-onboarding": \{ kind: "platform"/.test(registry),
+    "и создать пространство может только владелец платформы");
 });
 
 test("I29 the landing page offers only flows that exist", async () => {

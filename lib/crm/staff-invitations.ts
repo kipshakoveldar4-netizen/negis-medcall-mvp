@@ -186,7 +186,7 @@ function publicInvitation(row: InvitationRow) {
  * including "user already registered", which is a normal case for someone who
  * already has an account — must not leave a half-created invitation behind.
  */
-async function sendSupabaseInviteEmail(email: string, redirectTo: string): Promise<{ sent: boolean; reason?: string }> {
+export async function sendSupabaseInviteEmail(email: string, redirectTo: string): Promise<{ sent: boolean; reason?: string }> {
   // Typed structurally rather than through the global Response: the serverless
   // build compiles this file without the DOM lib, where `Response` has neither
   // `ok` nor `status`. lib/content-studio does the same for its Telegram call.
@@ -221,7 +221,7 @@ async function sendSupabaseInviteEmail(email: string, redirectTo: string): Promi
  * part of what a proxy or an analytics script sees. The page reads it once and
  * removes it from the address bar before anything else runs.
  */
-function acceptUrl(req: VercelRequest, token: string): string {
+export function acceptUrl(req: VercelRequest, token: string): string {
   const host = String(req.headers["x-forwarded-host"] || req.headers.host || "").split(",")[0].trim();
   const proto = String(req.headers["x-forwarded-proto"] || "https").split(",")[0].trim();
   const fragment = `/join#token=${encodeURIComponent(token)}`;

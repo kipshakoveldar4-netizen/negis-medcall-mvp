@@ -32,20 +32,30 @@ export function Login() {
 
   return (
     <div className="login">
-      <form className="login-card" onSubmit={(event) => void signIn(event)}>
-        <h1>Medina <span>Control</span></h1>
-        <p>Портал платформы. Вход только для владельца.</p>
-        <div className="field">
-          <label htmlFor="email">Почта</label>
-          <input id="email" type="email" autoComplete="username" value={email} onChange={(event) => setEmail(event.target.value)} />
-        </div>
-        <div className="field">
-          <label htmlFor="password">Пароль</label>
-          <input id="password" type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} />
-        </div>
-        {error ? <div className="notice error">{error}</div> : null}
-        <button type="submit" className="btn-primary" disabled={busy}>{busy ? "Проверяю…" : "Войти"}</button>
-      </form>
+      <aside className="login-brand">
+        <div className="mark">Medina <span>Control</span></div>
+        <p className="tagline">
+          Портал платформы Medina OS: подключённые клиники и салоны, подписки и выручка,
+          сигналы здоровья и рекомендации.
+        </p>
+        <div className="foot">Medina OS · внутренний инструмент платформы</div>
+      </aside>
+      <div className="login-form-side">
+        <form className="login-card" onSubmit={(event) => void signIn(event)}>
+          <h1>Вход в портал</h1>
+          <p>Только для владельца платформы.</p>
+          <div className="field">
+            <label htmlFor="email">Почта</label>
+            <input id="email" type="email" autoComplete="username" value={email} onChange={(event) => setEmail(event.target.value)} />
+          </div>
+          <div className="field">
+            <label htmlFor="password">Пароль</label>
+            <input id="password" type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} />
+          </div>
+          {error ? <div className="notice error" role="alert">{error}</div> : null}
+          <button type="submit" className="btn-primary" disabled={busy}>{busy ? "Проверяю…" : "Войти"}</button>
+        </form>
+      </div>
     </div>
   );
 }

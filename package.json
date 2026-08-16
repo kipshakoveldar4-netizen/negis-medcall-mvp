@@ -55,6 +55,7 @@
     "test:provision": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:provision",
     "test:mobile-overlays": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:mobile-overlays",
     "test:control-portal": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:control-portal",
+    "test:onboarding-portal": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:onboarding-portal",
     "test:recommendations": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:recommendations",
     "build:icons": "node scripts/run-pnpm.cjs --filter @workspace/scripts run build:icons",
     "seed:clinic": "node scripts/run-pnpm.cjs --filter @workspace/scripts run seed:clinic",

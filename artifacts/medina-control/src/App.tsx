@@ -4,6 +4,7 @@ import { supabase } from "./lib/supabase";
 import { Login } from "./screens/Login";
 import { Overview } from "./screens/Overview";
 import { ClinicCard } from "./screens/ClinicCard";
+import { Onboarding } from "./screens/Onboarding";
 
 // Medina Control — портал владельца платформы.
 //
@@ -15,6 +16,7 @@ export default function App() {
   const [session, setSession] = useState<Session | null>(null);
   const [ready, setReady] = useState(false);
   const [clinicId, setClinicId] = useState("");
+  const [screen, setScreen] = useState<"overview" | "onboard">("overview");
 
   useEffect(() => {
     void supabase.auth.getSession().then(({ data }) => {
@@ -35,7 +37,26 @@ export default function App() {
       <aside className="side">
         <div className="brand">Medina <span>Control</span></div>
         <div className="brand-sub">портал платформы</div>
-        <button type="button" className={`nav-item ${clinicId ? "" : "on"}`} onClick={() => setClinicId("")}>Обзор</button>
+        <button
+          type="button"
+          className={`nav-item ${!clinicId && screen === "overview" ? "on" : ""}`}
+          onClick={() => {
+            setClinicId("");
+            setScreen("overview");
+          }}
+        >
+          Обзор
+        </button>
+        <button
+          type="button"
+          className={`nav-item ${!clinicId && screen === "onboard" ? "on" : ""}`}
+          onClick={() => {
+            setClinicId("");
+            setScreen("onboard");
+          }}
+        >
+          Подключить клинику
+        </button>
         <div className="spacer" />
         <div className="who">{session.user.email}</div>
         <button type="button" className="signout" onClick={() => void supabase.auth.signOut()}>Выйти</button>
@@ -43,6 +64,8 @@ export default function App() {
       <main className="main">
         {clinicId ? (
           <ClinicCard workspaceId={clinicId} onBack={() => setClinicId("")} />
+        ) : screen === "onboard" ? (
+          <Onboarding onDone={() => setScreen("overview")} />
         ) : (
           <Overview onOpenClinic={setClinicId} />
         )}

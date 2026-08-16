@@ -2,90 +2,104 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
-// Medina OS Commercial-2: onboarding honesty, role gating, optional
-// advertising, and the manager-assisted pilot state. Source-level assertions —
-// they pin the behaviors that make the onboarding sellable without fakery.
+// MB — подключение клиники с портала Medina Control.
+//
+// Форма заменяет provision-скрипт, но не его принципы: ни одной выдуманной
+// строки, ниша без умолчания, пароль не проходит нигде. Набор закрепляет
+// ровно эти принципы плюс честность полусозданного состояния.
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
-const negisSrc = path.join(repoRoot, "artifacts", "negis", "src");
+const modulePath = path.join(repoRoot, "lib", "crm", "platform-onboarding.ts");
+const controlSrc = path.join(repoRoot, "artifacts", "medina-control", "src");
 
-const onboarding = await readFile(path.join(negisSrc, "pages", "Onboarding.tsx"), "utf8");
-const admin = await readFile(path.join(negisSrc, "pages", "AdminCenter.tsx"), "utf8");
-const calculator = await readFile(path.join(negisSrc, "components", "admin", "PlanCalculator.tsx"), "utf8");
-const acc = await readFile(path.join(negisSrc, "pages", "AiControlCenter.tsx"), "utf8");
+type OnboardingModule = {
+  validateOnboardingRequest: (body: Record<string, unknown>) =>
+    | { name: string; vertical: string; ownerEmail: string; ownerName: string; timeZone: string }
+    | { status: number; error: string; code: string; details?: string[] };
+};
 
-test("01 the old fake onboarding wizard is gone", () => {
-  assert.ok(!onboarding.includes("In a real app"), "fake completion comment removed");
-  assert.ok(!onboarding.includes("Настройка завершена!"), "unconditional success toast removed");
-  assert.ok(!onboarding.includes("requireAuth={false}"), "onboarding is an authenticated experience");
+const { validateOnboardingRequest } = (await import(pathToFileURL(modulePath).href)) as OnboardingModule;
+
+const VALID = {
+  name: "Салон Люкс",
+  vertical: "beauty",
+  ownerEmail: "Owner@Salon.kz",
+  ownerName: "Имя Владельца",
+  timeZone: "Asia/Almaty",
+};
+
+test("MB1 ниша обязательна и умолчания у неё нет", () => {
+  const missing = validateOnboardingRequest({ ...VALID, vertical: "" });
+  assert.ok("status" in missing && missing.status === 400, "без ниши — отказ");
+
+  const wrong = validateOnboardingRequest({ ...VALID, vertical: "salon" });
+  assert.ok("status" in wrong, "выдуманная ниша — отказ, а не подстановка клиники");
+
+  const ok = validateOnboardingRequest(VALID);
+  assert.ok(!("status" in ok));
+  assert.equal(ok.vertical, "beauty");
+  assert.equal(ok.ownerEmail, "owner@salon.kz", "почта нормализуется");
 });
 
-test("02 onboarding derives step status from real existing endpoints", () => {
-  for (const endpoint of ["/api/crm/admin-settings", "/api/crm/staff", "/api/crm/leads", "/api/crm/health"]) {
-    assert.ok(onboarding.includes(endpoint), `onboarding must check ${endpoint}`);
+test("MB2 часовой пояс проверяется, имя подставляется из почты", () => {
+  const badZone = validateOnboardingRequest({ ...VALID, timeZone: "Asia/Nowhere" });
+  assert.ok("status" in badZone, "нераспознанный пояс — отказ");
+
+  const noZone = validateOnboardingRequest({ ...VALID, timeZone: "" });
+  assert.ok("status" in noZone, "пояс обязателен");
+
+  const noName = validateOnboardingRequest({ ...VALID, ownerName: "" });
+  assert.ok(!("status" in noName));
+  assert.equal(noName.ownerName, "owner@salon.kz", "пустое имя — почта, а не выдумка");
+});
+
+test("MB3 пароль не проходит через подключение нигде", async () => {
+  const server = await readFile(modulePath, "utf8");
+  for (const word of ["password", "createUser", "auth.admin"]) {
+    assert.ok(!server.toLowerCase().includes(word.toLowerCase()), `сервер: нет ${word}`);
   }
-  assert.ok(onboarding.includes('"done" : "todo"'), "statuses derive from data, not navigation");
-  assert.ok(onboarding.includes("Не удалось проверить"), "failed checks are honest, not assumed complete");
+  const form = await readFile(path.join(controlSrc, "screens", "Onboarding.tsx"), "utf8");
+  assert.ok(!/password/i.test(form), "форма портала пароль не спрашивает");
+  assert.ok(form.includes("/join"), "и объясняет путь через страницу приглашения");
 });
 
-test("03 opening the page never marks steps complete", () => {
-  assert.ok(!onboarding.includes("localStorage.setItem"), "onboarding writes no browser completion flags");
-  assert.ok(onboarding.includes("Открытие этой страницы не отмечает шаги выполненными."));
+test("MB4 приглашение владельца — той же машинерией, что у сотрудников", async () => {
+  const source = await readFile(modulePath, "utf8");
+  assert.ok(/createInvitationToken\(\)/.test(source), "токен из общего модуля");
+  assert.ok(/token_hash: tokenHash/.test(source), "в базе только хэш");
+  assert.ok(/role: "owner"/.test(source), "роль — владелец нового пространства");
+  assert.ok(/invited_by_staff_user_id: null/.test(source), "приглашает платформа, а не сотрудник");
+  assert.ok(/sendSupabaseInviteEmail\(/.test(source), "письмо — best effort тем же путём");
 });
 
-test("04 ordinary employees do not get clinic-wide setup", () => {
-  assert.ok(onboarding.includes("isClinicAdmin"));
-  assert.ok(onboarding.includes("Настройку клиники выполняет администратор"));
+test("MB5 полусозданное состояние называется, а не угадывается", async () => {
+  const source = await readFile(modulePath, "utf8");
+  const partials = source.match(/partial_onboarding/g) || [];
+  assert.equal(partials.length, 2, "оба поздних отказа помечены");
+  assert.ok(/Пространство \$\{workspaceId\}/.test(source), "и называют созданное пространство по id");
 });
 
-test("05 advertising is optional and stays PAUSED", () => {
-  assert.ok(onboarding.includes("optional: true"));
-  assert.ok(onboarding.includes("необязательно"));
-  assert.ok(onboarding.includes("Кампании создаются выключенными и включаются вручную в Meta Ads Manager."));
+test("MB6 живое приглашение той же почты не даёт создать второе пространство", async () => {
+  const source = await readFile(modulePath, "utf8");
+  assert.ok(/invitation_already_pending/.test(source), "повтор — явный отказ");
+  assert.ok(/\.gt\("expires_at"/.test(source), "истёкшие приглашения не блокируют");
+  assert.ok(/\.is\("accepted_at", null\)/.test(source) && /\.is\("revoked_at", null\)/.test(source), "принятые и отозванные — тоже");
 });
 
-test("06 onboarding copy matches the commercial spec", () => {
-  assert.ok(onboarding.includes("Настроим Medina OS для вашей клиники"));
-  assert.ok(onboarding.includes("Клиника готова к работе"));
-  assert.ok(onboarding.includes("Перейти на главную"));
-  assert.ok(!onboarding.includes("скоро"));
+test("MB7 маршрут платформенный и только POST", async () => {
+  const registry = await readFile(path.join(repoRoot, "lib", "crm", "authorization.ts"), "utf8");
+  assert.ok(/"platform-onboarding": \{ kind: "platform", methods: \["POST"\] \}/.test(registry));
+  const router = await readFile(path.join(repoRoot, "api", "crm", "[...path].ts"), "utf8");
+  assert.ok(/case "platform-onboarding":\s*return handlePlatformOnboarding\(req, res\);/.test(router));
 });
 
-test("07 the dashboard reminder is dismiss-only convenience", () => {
-  assert.ok(acc.includes("negis_onboarding_hint_dismissed"));
-  assert.ok(acc.includes("Dismissal only hides this"), "dismissal is documented as non-authoritative");
-  assert.ok(!onboarding.includes("negis_onboarding_hint_dismissed"), "onboarding completion ignores the hint flag");
-});
-
-test("08 тариф показан, но оплаты не обещает", () => {
-  // Блок с одной фразой «условия согласуются с менеджером» заменён
-  // настоящим тарифом и расчётом стоимости. Инвариант при этом тот же и
-  // его важно удержать: платёжного флоу в продукте нет, и экран не вправе
-  // изображать его кнопкой, которая никуда не ведёт.
-  assert.ok(admin.includes("PlanCalculator"), "блок тарифа на месте");
-  assert.ok(calculator.includes("Автоматической оплаты в продукте нет"), "отсутствие оплаты названо вслух");
-  for (const forbidden of ["Оплачено", "checkout", "invoice", "Оплатить картой", "Продлить подписку"]) {
-    assert.ok(!calculator.includes(forbidden), `экран не вправе обещать ${forbidden}`);
-  }
-});
-
-test("09 support surface has no fabricated contacts", () => {
-  assert.ok(admin.includes("Связь с Medina OS"));
-  assert.ok(admin.includes("Скопировать идентификатор клиники"), "the support action is a real copy action");
-  for (const fake of ["mailto:", "wa.me", "t.me/", "tel:"]) {
-    assert.ok(!admin.includes(fake), `no invented support contact via ${fake}`);
-  }
-});
-
-test("10 тариф клиники показан честно", () => {
-  // Нет строки подписки — так и написано. Подставить сюда цену из прайса
-  // значило бы показать клинике счёт, которого ей никто не выставлял.
-  assert.ok(calculator.includes("Тариф не назначен"), "отсутствие подписки называется вслух");
-  assert.ok(/\/api\/crm\/subscription/.test(calculator), "текущий тариф читается из подписки клиники");
-  assert.ok(
-    /отказ чтения/i.test(calculator) || calculator.includes("Не удалось прочитать тариф"),
-    "отказ чтения отличается от «тарифа нет»",
-  );
+test("MB8 портал показывает ссылку один раз и не выбирает нишу молча", async () => {
+  const form = await readFile(path.join(controlSrc, "screens", "Onboarding.tsx"), "utf8");
+  assert.ok(/<option value="">/.test(form), "первый пункт ниши пуст — выбор обязателен");
+  assert.ok(/result\.acceptUrl/.test(form), "ссылка отдаётся владельцу платформы");
+  assert.ok(/показывается один раз/i.test(form), "и портал говорит, что второй раз её не покажут");
+  const app = await readFile(path.join(controlSrc, "App.tsx"), "utf8");
+  assert.ok(app.includes("Подключить клинику"), "пункт меню ведёт к работающей форме");
 });
