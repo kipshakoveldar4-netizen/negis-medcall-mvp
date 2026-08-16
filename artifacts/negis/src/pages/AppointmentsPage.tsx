@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useLocation } from "wouter";
 import {
   CalendarCheck,
   CheckCircle2,
@@ -23,6 +24,7 @@ import { formatPhone, toTelHref, toWhatsappHref } from "@/lib/phone";
 import { clinicToday, dayKeyInZone, isOnClinicDay } from "@/lib/clinicDay";
 import { useAuth } from "@/contexts/AuthContext";
 import { capitalize, termsFor, type Terms } from "../../../../lib/vertical/terms";
+import { leadStageDefinitionFromUnknown } from "@/lib/leadPipeline";
 
 type AppointmentStatus = "scheduled" | "confirmed" | "arrived" | "no_show" | "cancelled";
 type CalendarView = "day" | "week" | "list";
@@ -69,6 +71,7 @@ type ApiResponse =
   | { success: false; error: string; details?: string[] };
 
 const APPOINTMENT_PREFILL_KEY = "negis_appointment_prefill";
+const DEAL_PREFILL_KEY = "negis_deal_prefill";
 
 /** Строка справочника услуг — ровно те поля, которые нужны форме записи. */
 type CatalogService = {
@@ -281,6 +284,21 @@ const statusButtonLabels: Array<{ status: AppointmentStatus; label: string }> = 
   { status: "no_show", label: "Не пришёл" },
   { status: "cancelled", label: "Отменить" },
 ];
+
+/**
+ * Какие переходы осмысленны из каждого статуса.
+ *
+ * Прежде каждая карточка носила все четыре кнопки: день с восемью записями —
+ * сорок восемь кнопок, и «Подтвердить» на уже пришедшем визите. «Не пришёл»
+ * остаётся обратимым в «Пришёл» — клиент, опоздавший на полчаса, случается.
+ */
+const allowedStatusMoves: Record<AppointmentStatus, AppointmentStatus[]> = {
+  scheduled: ["confirmed", "arrived", "no_show", "cancelled"],
+  confirmed: ["arrived", "no_show", "cancelled"],
+  arrived: [],
+  no_show: ["arrived"],
+  cancelled: [],
+};
 
 const todayKeyAtLoad = toDateKey(new Date());
 
@@ -715,15 +733,18 @@ function AppointmentCard({
   appointment,
   onEdit,
   onStatus,
+  onSale,
 }: {
   appointment: Appointment;
   onEdit: (appointment: Appointment) => void;
   onStatus: (appointment: Appointment, status: AppointmentStatus) => void;
+  onSale: (appointment: Appointment) => void;
 }) {
   const { vertical } = useAuth();
   const terms = termsFor(vertical);
   const startTime = timeKeyFromStartsAt(appointment.startsAt);
   const whatsapp = appointment.whatsapp || appointment.phone;
+  const moves = allowedStatusMoves[appointment.status] || [];
 
   return (
     <article
@@ -754,11 +775,20 @@ function AppointmentCard({
       {appointment.notes ? <p className="mt-3 rounded-xl bg-[#F8FAFC] px-3 py-2 text-sm text-[#64748B]">{appointment.notes}</p> : null}
 
       <div className="mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-3" onClick={(event) => event.stopPropagation()}>
-        {statusButtonLabels.map(({ status, label }) => (
-          <button key={status} type="button" className="neu-btn px-3 py-2 text-xs" onClick={() => onStatus(appointment, status)}>
-            {label}
+        {statusButtonLabels
+          .filter(({ status }) => moves.includes(status))
+          .map(({ status, label }) => (
+            <button key={status} type="button" className="neu-btn px-3 py-2 text-xs" onClick={() => onStatus(appointment, status)}>
+              {label}
+            </button>
+          ))}
+        {/* Пришёл — значит платит: продажа стартует с записи, а не с чистой
+            формы, где клиента и запись пришлось бы выбирать заново. */}
+        {appointment.status === "arrived" ? (
+          <button type="button" className="neu-btn-primary px-3 py-2 text-xs" onClick={() => onSale(appointment)}>
+            Оформить продажу
           </button>
-        ))}
+        ) : null}
         <a className="neu-btn px-3 py-2 text-xs" href={toWhatsappHref(whatsapp, `Здравствуйте, ${appointment.client}! Напоминаем о записи ${startTime}.`)} target="_blank" rel="noreferrer">
           <MessageCircle size={14} />
           WhatsApp
@@ -775,6 +805,10 @@ function AppointmentCard({
 export function AppointmentsPage() {
   const { vertical } = useAuth();
   const terms = termsFor(vertical);
+  const [, setLocation] = useLocation();
+  // Заявка, из которой пришла эта запись: после успешного создания она сама
+  // переводится в «Записана», и регистратор не ищет её руками.
+  const prefillLeadRef = useRef("");
   const [selectedDate, setSelectedDate] = useState(todayKeyAtLoad);
   const [view, setView] = useState<CalendarView>("day");
   const [doctorFilter, setDoctorFilter] = useState("all");
@@ -784,6 +818,15 @@ export function AppointmentsPage() {
   const [modalOpen, setModalOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState<AppointmentForm>(() => defaultForm(todayKeyAtLoad));
+
+  // Ref заявки живёт только в той сессии модалки, которую открыл префилл:
+  // модалка, закрытая без сохранения, обязана разрядить его — иначе следующая
+  // созданная запись, про совсем другого клиента, перевела бы ЧУЖУЮ заявку в
+  // «Записана». На монтировании модалка закрыта и ref пуст — стирать нечего;
+  // префилл заряжает ref и открывает модалку строго после этого эффекта.
+  useEffect(() => {
+    if (!modalOpen) prefillLeadRef.current = "";
+  }, [modalOpen]);
   const [conflictMessage, setConflictMessage] = useState("");
   // Создание теперь ждёт сервер, а модалка остаётся открытой всё это время.
   // Без этого второй клик по «Создать запись» или «Сохранить всё равно»
@@ -916,6 +959,7 @@ export function AppointmentsPage() {
         source: readString(prefill.source) || "CRM",
       };
       setForm(nextForm);
+      prefillLeadRef.current = readString(prefill.leadId);
       setEditingId(null);
       setModalOpen(true);
       window.localStorage.removeItem(prefillKey);
@@ -923,6 +967,60 @@ export function AppointmentsPage() {
       window.localStorage.removeItem(prefillKey);
     }
   }, [selectedDate]);
+
+  /**
+   * Заявка → «Записана» после успешно созданной записи.
+   *
+   * Стадия берётся из настроенного пайплайна клиники (semanticGroup booked);
+   * если структурных стадий нет — канонический статус booked, тот же, что
+   * ставит рука регистратора. Отказ не трогает созданную запись: заявка
+   * остаётся как была, и об этом говорится вслух.
+   */
+  const markLeadBooked = async (leadId: string) => {
+    // Демо-пространство живёт в localStorage чужой страницы: PATCH к серверу
+    // ответил бы 200 mode:"demo", ничего не изменив, и тост солгал бы. Фича
+    // работает там, где работают настоящие заявки — в реальной клинике.
+    if (!isRealWorkspace()) return;
+    try {
+      let status = "booked";
+      let stageId = "";
+      try {
+        const response = await crmFetch(`/api/crm/lead-stages?workspaceId=${encodeURIComponent(readCurrentWorkspaceId())}`);
+        const body = (await response.json()) as { success?: boolean; data?: Record<string, unknown> };
+        const rawStages = body?.data?.stages;
+        const stages = (Array.isArray(rawStages) ? rawStages : [])
+          .map((item) => leadStageDefinitionFromUnknown(item))
+          .filter((item): item is NonNullable<typeof item> => item !== null);
+        const booked = stages
+          .filter((stage) => stage.semanticGroup === "booked" && stage.isActive)
+          .sort((a, b) => a.sortOrder - b.sortOrder)[0];
+        if (booked) {
+          status = booked.stageKey;
+          if (/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(booked.id)) stageId = booked.id;
+        }
+      } catch {
+        // Пайплайн не прочитался — канонический booked всё равно честен.
+      }
+      const response = await crmFetch("/api/crm/leads", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: leadId,
+          workspaceId: readCurrentWorkspaceId(),
+          status,
+          ...(stageId ? { stageId } : {}),
+        }),
+      });
+      const body = (await response.json().catch(() => null)) as { success?: boolean; mode?: string } | null;
+      // 200 с mode:"demo" — это «сервер ничего не записал»: тот же порог, что
+      // у создания записи строкой выше.
+      if (!response.ok || body?.success !== true || body.mode !== "supabase") throw new Error(String(response.status));
+      toast.success("Заявка переведена в «Записана»");
+    } catch (error) {
+      console.warn("appointments: lead stage update refused", error instanceof Error ? error.message : error);
+      toast.error("Запись создана, но заявка не переведена в «Записана» — переключите стадию вручную.");
+    }
+  };
 
   const filteredItems = useMemo(() => {
     const query = search.trim().toLowerCase();
@@ -1102,6 +1200,28 @@ export function AppointmentsPage() {
     setItems((current) => [saved ? appointmentFromApi(saved) : appointment, ...current]);
   };
 
+  /**
+   * «Оформить продажу» с карточки записи.
+   *
+   * На записи уже есть клиент, услуга и связь со справочником — продажа
+   * стартует с ними, а не с чистой формы, где всё это выбиралось заново из
+   * селектов со всей базой. serviceId позволит форме продаж подставить цену
+   * из прайса тем же путём, что и ручной выбор услуги.
+   */
+  const startSaleFromAppointment = (appointment: Appointment) => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(
+      workspaceScopedKey(DEAL_PREFILL_KEY),
+      JSON.stringify({
+        title: appointment.service,
+        clientId: appointment.clientId || "",
+        appointmentId: appointment.id,
+        serviceId: appointment.serviceId || "",
+      }),
+    );
+    setLocation("/sales");
+  };
+
   const updateAppointmentStatus = async (appointment: Appointment, status: AppointmentStatus) => {
     const updated = { ...appointment, status };
     setItems((current) => current.map((item) => (item.id === appointment.id ? updated : item)));
@@ -1200,6 +1320,11 @@ export function AppointmentsPage() {
       try {
         await createAppointment(appointment, allowConflict, allowOutsideSchedule);
         toast.success("Запись создана");
+        if (prefillLeadRef.current) {
+          const bookedLeadId = prefillLeadRef.current;
+          prefillLeadRef.current = "";
+          void markLeadBooked(bookedLeadId);
+        }
       } catch (error) {
         if (error instanceof SlotTakenError) {
           setConflictMessage(describeConflict(error, terms));
@@ -1253,31 +1378,59 @@ export function AppointmentsPage() {
             </ul>
           </div>
         ) : null}
-        {slots.map((slot) => {
-          const slotAppointments = dayBuckets.buckets.get(slot) || [];
-          return (
-            <div key={slot} className="grid gap-3 rounded-2xl bg-[#F8FAFC] p-3 md:grid-cols-[84px_minmax(0,1fr)]">
-              <div className="flex items-center justify-between gap-3 md:block">
-                <p className="text-base font-black text-[#0F172A]">{slot}</p>
-                <button type="button" className="neu-btn px-3 py-2 text-xs md:mt-3" onClick={() => openCreate(selectedDate, slot)}>
-                  <Plus size={14} />
-                  Записать
-                </button>
-              </div>
-              <div className="space-y-3">
-                {slotAppointments.length > 0 ? (
-                  slotAppointments.map((appointment) => (
-                    <AppointmentCard key={appointment.id} appointment={appointment} onEdit={openEdit} onStatus={updateAppointmentStatus} />
-                  ))
-                ) : (
-                  <button type="button" className="w-full rounded-2xl border border-dashed border-[#CBD5E1] bg-white/70 px-4 py-4 text-left text-sm font-semibold text-[#64748B]" onClick={() => openCreate(selectedDate, slot)}>
-                    Свободно: + записать клиента на {slot}
+        {/*
+          Подряд идущие пустые получасовки складываются в одну строку: день
+          салона с четырьмя записями был простынёй из двадцати одного блока
+          «Свободно», и запись на вечер жила за целым экраном скролла.
+        */}
+        {slots
+          .reduce<Array<{ kind: "busy"; slot: string; appointments: Appointment[] } | { kind: "free"; first: string; last: string }>>(
+            (segments, slot) => {
+              const busy = dayBuckets.buckets.get(slot) || [];
+              if (busy.length > 0) {
+                segments.push({ kind: "busy", slot, appointments: busy });
+                return segments;
+              }
+              const previous = segments[segments.length - 1];
+              if (previous && previous.kind === "free") previous.last = slot;
+              else segments.push({ kind: "free", first: slot, last: slot });
+              return segments;
+            },
+            [],
+          )
+          .map((segment) =>
+            segment.kind === "busy" ? (
+              <div key={segment.slot} className="grid gap-3 rounded-2xl bg-[#F8FAFC] p-3 md:grid-cols-[84px_minmax(0,1fr)]">
+                <div className="flex items-center justify-between gap-3 md:block">
+                  <p className="text-base font-black text-[#0F172A]">{segment.slot}</p>
+                  <button type="button" className="neu-btn px-3 py-2 text-xs md:mt-3" onClick={() => openCreate(selectedDate, segment.slot)}>
+                    <Plus size={14} />
+                    Записать
                   </button>
-                )}
+                </div>
+                <div className="space-y-3">
+                  {segment.appointments.map((appointment) => (
+                    <AppointmentCard key={appointment.id} appointment={appointment} onEdit={openEdit} onStatus={updateAppointmentStatus} onSale={startSaleFromAppointment} />
+                  ))}
+                </div>
               </div>
-            </div>
-          );
-        })}
+            ) : (
+              <button
+                key={`free-${segment.first}`}
+                type="button"
+                className="flex w-full items-center justify-between gap-3 rounded-2xl border border-dashed border-[#CBD5E1] bg-white/70 px-4 py-3 text-left text-sm font-semibold text-[#64748B]"
+                onClick={() => openCreate(selectedDate, segment.first)}
+              >
+                <span>Свободно {segment.first === segment.last ? segment.first : `${segment.first} – ${segment.last}`}</span>
+                {/* Время в кнопке: диапазон схлопнут, и без него было бы
+                    непонятно, на какую получасовку откроется форма. */}
+                <span className="inline-flex items-center gap-1 whitespace-nowrap font-bold text-[#0D9488]">
+                  <Plus size={14} />
+                  Записать на {segment.first}
+                </span>
+              </button>
+            ),
+          )}
       </div>
     </section>
   );
@@ -1331,7 +1484,7 @@ export function AppointmentsPage() {
       </div>
       <div className="space-y-3">
         {weekAppointments.map((appointment) => (
-          <AppointmentCard key={appointment.id} appointment={appointment} onEdit={openEdit} onStatus={updateAppointmentStatus} />
+          <AppointmentCard key={appointment.id} appointment={appointment} onEdit={openEdit} onStatus={updateAppointmentStatus} onSale={startSaleFromAppointment} />
         ))}
         {weekAppointments.length === 0 ? <p className="rounded-2xl bg-[#F8FAFC] p-4 text-sm text-[#64748B]">Записей по выбранным фильтрам нет.</p> : null}
       </div>

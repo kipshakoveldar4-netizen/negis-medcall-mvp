@@ -206,8 +206,29 @@ function saveAppointmentPrefill(lead: Lead) {
       source: lead.source,
       service: lead.campaign,
       notes: lead.campaign ? `Заявка из кампании «${lead.campaign}»` : "Заявка из CRM",
+      // Запись, созданная из заявки, сама переводит заявку в «Записана»:
+      // без этого регистратор искал и переключал стадию руками после каждой
+      // конвертации, либо счётчик «Новые» начинал врать.
+      leadId: lead.id,
     }),
   );
+}
+
+/**
+ * «Открыть клиента» ведёт на карточку, а не на общий список.
+ *
+ * Тот же механизм передачи, что у префиллов записи и продажи: ключ на
+ * пространство, потребитель читает его при монтировании и сразу удаляет.
+ */
+const CLIENT_OPEN_KEY = "negis_client_open";
+
+function rememberOpenClient(clientId: string | undefined) {
+  if (typeof window === "undefined" || !clientId) return;
+  try {
+    window.localStorage.setItem(workspaceScopedKey(CLIENT_OPEN_KEY), clientId);
+  } catch {
+    // Хранилище закрыто — переход остаётся, откроется общий список.
+  }
 }
 
 function saveDealPrefill(lead: Lead) {
@@ -1147,9 +1168,9 @@ export default function LeadsPage() {
                       Записать
                     </Link>
                     {lead.clientId ? (
-                      <Link href="/clients" className="neu-btn justify-center">
+                      <Link href="/clients" className="neu-btn justify-center" onClick={() => rememberOpenClient(lead.clientId)}>
                         <Users size={16} />
-                        Открыть клиентов
+                        Открыть клиента
                       </Link>
                     ) : (
                       <button
@@ -1320,9 +1341,9 @@ export default function LeadsPage() {
               {detailLead.clientId ? (
                 <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                   <p className="text-sm font-bold" style={{ color: "var(--negis-text)" }}>Клиент уже создан</p>
-                  <Link href="/clients" className="neu-btn justify-center px-4 py-2 text-xs">
+                  <Link href="/clients" className="neu-btn justify-center px-4 py-2 text-xs" onClick={() => rememberOpenClient(detailLead.clientId)}>
                     <Users size={15} />
-                    Открыть клиентов
+                    Открыть клиента
                   </Link>
                 </div>
               ) : (

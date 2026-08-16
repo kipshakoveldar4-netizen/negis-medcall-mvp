@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { Link } from "wouter";
 import {
   BadgeDollarSign,
@@ -99,6 +99,7 @@ const AI_RECOMMENDATION_PLACEHOLDER = "AI-рекомендация по клие
 const HISTORY_EMPTY_MESSAGE = "История появится после новых заявок, записей и звонков.";
 const CLIENTS_UI_MODE_KEY = "negis_clients_ui_mode";
 const APPOINTMENT_PREFILL_KEY = "negis_appointment_prefill";
+const CLIENT_OPEN_KEY = "negis_client_open";
 const DEAL_PREFILL_KEY = "negis_deal_prefill";
 
 const inputStyle: CSSProperties = {
@@ -272,6 +273,39 @@ export default function ClientsPage() {
   const [detailId, setDetailId] = useState<string | null>(null);
   const [related, setRelated] = useState<{ leads: RelatedLead[]; appointments: RelatedAppointment[]; calls: RelatedCall[] } | null>(null);
   const [relatedLoading, setRelatedLoading] = useState(false);
+
+  // «Открыть клиента» с других экранов: ключ читается один раз, карточка
+  // открывается, как только клиент оказался в загруженном списке. Раньше
+  // переход вёл на общий список, и регистратор заново искал имя в поиске.
+  const pendingOpenRef = useRef<string>("");
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const key = workspaceScopedKey(CLIENT_OPEN_KEY);
+      const wanted = window.localStorage.getItem(key) || "";
+      if (wanted) {
+        pendingOpenRef.current = wanted;
+        window.localStorage.removeItem(key);
+      }
+    } catch {
+      // Хранилище закрыто — останется общий список, как и было.
+    }
+  }, []);
+  useEffect(() => {
+    const wanted = pendingOpenRef.current;
+    if (!wanted) return;
+    if (items.some((client) => client.id === wanted)) {
+      pendingOpenRef.current = "";
+      setDetailId(wanted);
+      return;
+    }
+    // Список загружен, а клиента в нём нет — молчать нельзя: заряд снимается,
+    // и оператору говорится, почему карточка не открылась.
+    if (loaded) {
+      pendingOpenRef.current = "";
+      toast.error("Карточка клиента не нашлась — возможно, клиент удалён.");
+    }
+  }, [items, loaded]);
 
   const setMode = (admin: boolean) => {
     setIsAdminMode(admin);

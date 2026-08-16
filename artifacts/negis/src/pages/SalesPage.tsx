@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
+import { Link } from "wouter";
 import {
   BadgeDollarSign,
   CheckCircle2,
@@ -51,7 +52,7 @@ type LeadOption = {
   clientId?: string;
   metaCampaignLaunchId?: string;
 };
-type AppointmentOption = { id: string; client: string; service: string; startsAt?: string };
+type AppointmentOption = { id: string; client: string; service: string; startsAt?: string; clientId?: string };
 type CampaignOption = { id: string; name: string; label: string };
 
 /** Строка справочника услуг, в объёме, который нужен карточке продажи. */
@@ -79,6 +80,7 @@ type DealForm = {
 };
 
 const DEAL_PREFILL_KEY = "negis_deal_prefill";
+const CLIENT_OPEN_KEY = "negis_client_open";
 const SALES_UI_MODE_KEY = "negis_sales_ui_mode";
 const dealsSeed: Deal[] = [];
 
@@ -285,6 +287,7 @@ function appointmentOption(value: unknown): AppointmentOption | null {
     client: str(record.client) || str(record.clientName) || str(record.client_name) || "Клиент",
     service: str(record.service) || "Услуга не указана",
     startsAt: str(record.startsAt) || str(record.starts_at) || str(record.time) || undefined,
+    clientId: str(record.clientId) || str(record.client_id) || undefined,
   };
 }
 
@@ -442,6 +445,9 @@ export default function SalesPage() {
         clientId: str(prefill.clientId) || str(prefill.client_id),
         leadId: str(prefill.leadId) || str(prefill.lead_id),
         appointmentId: str(prefill.appointmentId) || str(prefill.appointment_id),
+        // Запись передаёт услугу справочника: цена подставится, когда прайс
+        // догрузится — тем же правилом, что и ручной выбор услуги.
+        serviceId: str(prefill.serviceId) || str(prefill.service_id),
         metaCampaignLaunchId: str(prefill.metaCampaignLaunchId) || str(prefill.meta_campaign_launch_id),
       });
       setFormOpen(true);
@@ -451,6 +457,32 @@ export default function SalesPage() {
       window.localStorage.removeItem(prefillKey);
     }
   }, []);
+
+  // Цена из прайса для услуги, пришедшей префиллом: справочник загружается
+  // позже префилла, поэтому подстановка ждёт его отдельным эффектом и не
+  // трогает сумму, если оператор уже что-то ввёл.
+  useEffect(() => {
+    if (!formOpen || editingId || !form.serviceId || form.amountTenge.trim()) return;
+    const service = references.services.find((item) => item.id === form.serviceId);
+    if (service && service.basePriceMinor !== null) {
+      setForm((current) =>
+        current.amountTenge.trim() ? current : { ...current, amountTenge: amountMinorToTengeInput(service.basePriceMinor as number) },
+      );
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [references.services, form.serviceId, formOpen]);
+
+  // Видимый список записей считается один раз и им же кормится fallback:
+  // если посчитать их от разных списков, выбранная запись чужого клиента
+  // отфильтруется молча — селект покажет «Не выбрана», а стейт сохранит
+  // невидимую связь в сделку.
+  const visibleAppointments = useMemo(
+    () =>
+      references.appointments.filter(
+        (appointment) => !form.clientId || !appointment.clientId || appointment.clientId === form.clientId,
+      ),
+    [references.appointments, form.clientId],
+  );
 
   const clientNames = useMemo(() => new Map(references.clients.map((item) => [item.id, item.name])), [references.clients]);
   const leadNames = useMemo(() => new Map(references.leads.map((item) => [item.id, item.name])), [references.leads]);
@@ -798,7 +830,30 @@ export default function SalesPage() {
                 <div className="mt-4 grid min-w-0 gap-3 sm:grid-cols-2">
                   <DealFact label={deal.status === "paid" ? "Оплачена" : "Создана"}>{formatDateTime(deal.status === "paid" ? deal.paidAt || deal.createdAt : deal.createdAt)}</DealFact>
                   <DealFact label="Способ оплаты">{paymentMethodLabel(deal.paymentMethod)}</DealFact>
-                  <DealFact label="Клиент">{deal.clientId ? clientNames.get(deal.clientId) || "Клиент связан" : "Не выбран"}</DealFact>
+                  <DealFact label="Клиент">
+                    {deal.clientId ? (
+                      /* Имя ведёт на карточку клиента — тем же ключом, что и
+                         «Открыть клиента» из заявок. */
+                      <Link
+                        href="/clients"
+                        className="font-bold"
+                        style={{ color: "var(--negis-primary)" }}
+                        onClick={() => {
+                          try {
+                            if (typeof window !== "undefined" && deal.clientId) {
+                              window.localStorage.setItem(workspaceScopedKey(CLIENT_OPEN_KEY), deal.clientId);
+                            }
+                          } catch {
+                            // Хранилище закрыто — переход остаётся, откроется список.
+                          }
+                        }}
+                      >
+                        {clientNames.get(deal.clientId) || "Клиент связан"}
+                      </Link>
+                    ) : (
+                      "Не выбран"
+                    )}
+                  </DealFact>
                   <DealFact label="Заявка">{deal.leadId ? leadNames.get(deal.leadId) || "Заявка связана" : "Не выбрана"}</DealFact>
                   <DealFact label="Запись">{deal.appointmentId ? appointmentLabels.get(deal.appointmentId) || "Запись связана" : "Не выбрана"}</DealFact>
                   <DealFact label="Рекламная кампания">{deal.metaCampaignLaunchId ? campaignNames.get(deal.metaCampaignLaunchId) || "Рекламная кампания связана" : "Не связана"}</DealFact>
@@ -928,8 +983,13 @@ export default function SalesPage() {
                   <span className="mb-1 block text-xs font-black uppercase tracking-[0.05em]" style={{ color: "var(--negis-muted)" }}>Запись</span>
                   <select data-testid="deal-appointment-select" style={inputStyle} value={form.appointmentId} onChange={(event) => setForm((current) => ({ ...current, appointmentId: event.target.value }))}>
                     <option value="">Не выбрана</option>
-                    {fallbackOption(form.appointmentId, references.appointments, "Связанная запись")}
-                    {references.appointments.map((appointment) => <option key={appointment.id} value={appointment.id}>{appointment.service} · {appointment.client}{appointment.startsAt ? ` · ${formatDateTime(appointment.startsAt)}` : ""}</option>)}
+                    {/* Выбран клиент — список сужается до его записей: селект со
+                        всеми записями клиники заставлял искать нужную глазами.
+                        Записи без связи с карточкой остаются видны всегда, а
+                        выбранная, но отфильтрованная — остаётся честной опцией
+                        через fallback от ТОГО ЖЕ видимого списка. */}
+                    {fallbackOption(form.appointmentId, visibleAppointments, "Связанная запись")}
+                    {visibleAppointments.map((appointment) => <option key={appointment.id} value={appointment.id}>{appointment.service} · {appointment.client}{appointment.startsAt ? ` · ${formatDateTime(appointment.startsAt)}` : ""}</option>)}
                   </select>
                 </label>
                 <label className="block">
