@@ -320,7 +320,11 @@ async function loadHandler(file: string, options: HandlerOptions = {}) {
       const ok = options.authOk !== false;
       return { ok, status: ok ? 200 : 401, text: async () => (ok ? JSON.stringify({ id: USER_A, email: "a@example.test" }) : "{}") };
     }
-    if (url.includes("openai.com")) calls.openai += 1;
+    // «Тратой» считается вызов ЛЮБОГО платного провайдера. Пока в счётчик
+    // попадал только openai.com, вызов Anthropic от неавторизованного гостя
+    // уезжал в calls.agent, по которому проверок нет, — и пины «анонимный
+    // вызов ничего не тратит» проходили бы при открытом кране.
+    if (url.includes("openai.com") || url.includes("anthropic.com")) calls.openai += 1;
     else if (url.includes("api.telegram.org")) calls.telegram += 1;
     else calls.agent += 1;
     return { ok: true, status: 200, text: async () => JSON.stringify({ success: true, data: {} }), json: async () => ({ success: true, data: {} }) };

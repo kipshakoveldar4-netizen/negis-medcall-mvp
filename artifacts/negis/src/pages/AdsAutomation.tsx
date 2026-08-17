@@ -2458,7 +2458,13 @@ export default function AdsAutomation() {
     setImproved(null);
       setLaunchTimestamp("");
       goToStep(5, { skipGuard: true });
-      toast.success(body.data.generatedBy === "openai" ? "ИИ заполнил рекламу" : "Образец пакета готов");
+      // Любая живая модель — это «ИИ заполнил»: сравнение с одним «openai»
+      // объявляло настоящую генерацию Claude образцом заготовки.
+      toast.success(
+        body.data.generatedBy === "openai" || body.data.generatedBy === "anthropic"
+          ? "ИИ заполнил рекламу"
+          : "Образец пакета готов",
+      );
       if (body.warning) setNotice(body.warning);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Не удалось подготовить рекламу.";

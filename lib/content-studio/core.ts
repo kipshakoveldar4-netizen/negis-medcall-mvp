@@ -387,10 +387,15 @@ export async function generateOpenAIJson<TData>(input: {
   normalize: (value: unknown) => TData;
 }): Promise<{ mode: ContentStudioMode; data: TData }> {
   if (!resolveTextProvider(process.env)) {
+    // Названный в AI_TEXT_PROVIDER провайдер без ключа — ошибка настройки, а
+    // не «ключей нет»: молчаливый скат в заготовку прятал бы опечатку.
+    if (process.env.AI_TEXT_PROVIDER?.trim()) {
+      throw new Error(`Провайдер ${process.env.AI_TEXT_PROVIDER.trim()} выбран в AI_TEXT_PROVIDER, но его ключ не задан.`);
+    }
     return { mode: "demo", data: input.fallback };
   }
 
-  const result = await generateText({ system: input.system, user: input.user, json: true, maxTokens: 4096 });
+  const result = await generateText({ system: input.system, user: input.user, purpose: "content", json: true, maxTokens: 4096 });
   if (!result.ok) {
     throw new Error(result.reason);
   }

@@ -1,5 +1,6 @@
 import { checkMetaCompliance, type MetaComplianceResult, type MetaComplianceStatus } from "./compliance";
 import { DEFAULT_VERTICAL, type Vertical } from "../vertical/terms";
+import { isRealProvider } from "../ai/text-provider";
 
 // Платформа чинит текст, а не запирает дверь.
 //
@@ -388,7 +389,11 @@ export async function improveAdText(input: {
 
     // Ключа нет — генератор отвечает demo (а «mock» и «telegram» моделью не
     // являются тем более). Выдавать это за работу модели нельзя.
-    if (generated.mode !== "openai") {
+    //
+    // Проверяется ПРИНАДЛЕЖНОСТЬ множеству живых провайдеров, а не равенство
+    // «openai»: с появлением Claude равенство выбрасывало настоящий, уже
+    // оплаченный ответ модели и сообщало оператору «ИИ-провайдер не подключён».
+    if (!isRealProvider(generated.mode)) {
       return finish("rules", [originalCandidate, rulesCandidate()], "");
     }
 
