@@ -25,7 +25,7 @@ const TIME_ZONES = [
 type Result = {
   workspaceId: string;
   name: string;
-  vertical: string;
+  vertical?: string;
   ownerEmail: string;
   acceptUrl: string;
   emailSent: boolean;
@@ -48,6 +48,9 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
   const [timeZone, setTimeZone] = useState("Asia/Almaty");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string[]>([]);
+  // Живое приглашение — не тупик: 409 приносит id пространства, и той же
+  // формой выписывается новая ссылка (старая отзывается сервером).
+  const [reissueWorkspaceId, setReissueWorkspaceId] = useState("");
   const [result, setResult] = useState<Result | null>(null);
   const [copied, setCopied] = useState(false);
   const titleRef = useRef<HTMLHeadingElement | null>(null);
@@ -64,15 +67,46 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
         body: JSON.stringify({ name, vertical, ownerEmail, ownerName, timeZone }),
       });
       const body = await response.json().catch(() => null);
-      if (!response.ok || !body?.data) {
+      if (!response.ok || body?.success !== true) {
         const reasons = [body?.error, ...(Array.isArray(body?.details) ? body.details : [])].filter(Boolean);
         setError(reasons.length > 0 ? reasons : ["Не удалось подключить клинику. Попробуйте ещё раз."]);
+        setReissueWorkspaceId(
+          body?.code === "invitation_already_pending" && typeof body?.data?.existingWorkspaceId === "string"
+            ? body.data.existingWorkspaceId
+            : "",
+        );
         return;
       }
       setResult(body.data as Result);
       titleRef.current?.focus();
     } catch {
       setError(["Сеть не ответила — клиника не подключена."]);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function reissue() {
+    if (busy || !reissueWorkspaceId) return;
+    setBusy(true);
+    setError([]);
+    try {
+      const response = await controlFetch("/api/crm/platform-invitation-reissue", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ workspaceId: reissueWorkspaceId }),
+      });
+      const body = await response.json().catch(() => null);
+      if (!response.ok || body?.success !== true) {
+        const reasons = [body?.error, ...(Array.isArray(body?.details) ? body.details : [])].filter(Boolean);
+        setError(reasons.length > 0 ? reasons : ["Перевыпустить не удалось. Попробуйте ещё раз."]);
+        return;
+      }
+      setReissueWorkspaceId("");
+      setResult(body.data as Result);
+      titleRef.current?.focus();
+    } catch {
+      setError(["Сеть не ответила — приглашение не перевыпущено."]);
     } finally {
       setBusy(false);
     }
@@ -92,9 +126,9 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
   if (result) {
     return (
       <>
-        <h1 ref={titleRef} tabIndex={-1} className="page-title">Клиника подключена</h1>
+        <h1 ref={titleRef} tabIndex={-1} className="page-title">{result.vertical ? "Клиника подключена" : "Приглашение перевыпущено"}</h1>
         <p className="page-sub">
-          «{result.name}» · {result.vertical === "beauty" ? "салон красоты" : "клиника"} · {result.ownerEmail}
+          «{result.name}» · {result.vertical === "beauty" ? "салон красоты" : result.vertical === "clinic" ? "клиника" : "прежняя ссылка отозвана"} · {result.ownerEmail}
         </p>
 
         <div className="panel" style={{ padding: "18px 20px", maxWidth: 720 }}>
@@ -184,6 +218,13 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
               {error.map((line) => (
                 <div key={line}>{line}</div>
               ))}
+              {reissueWorkspaceId ? (
+                <div style={{ marginTop: 10 }}>
+                  <button type="button" className="btn" disabled={busy} onClick={() => void reissue()}>
+                    {busy ? "Выписываю…" : "Перевыпустить приглашение"}
+                  </button>
+                </div>
+              ) : null}
             </div>
           ) : null}
           <div className="actions" style={{ marginTop: 16 }}>

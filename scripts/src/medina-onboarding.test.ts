@@ -95,6 +95,30 @@ test("MB7 маршрут платформенный и только POST", async
   assert.ok(/case "platform-onboarding":\s*return handlePlatformOnboarding\(req, res\);/.test(router));
 });
 
+test("MB9 живое приглашение — не тупик: перевыпуск отзывает старое и выписывает новое", async () => {
+  const source = await readFile(modulePath, "utf8");
+  const reissue = source.slice(
+    source.indexOf("export async function handlePlatformInvitationReissue"),
+    source.indexOf("export async function handlePlatformOnboarding"),
+  );
+  assert.ok(reissue.length > 0, "обработчик перевыпуска существует");
+  // Сначала отзыв, потом новая ссылка: два живых токена на одну почту — это
+  // два пути в одно пространство, и потерянный никто бы не отозвал.
+  assert.ok(
+    reissue.indexOf("revoked_at: now") < reissue.indexOf("createInvitationToken()"),
+    "старые приглашения отзываются до выписки нового",
+  );
+  assert.ok(/owner_already_member/.test(reissue), "принявшего владельца не приглашают второй раз");
+
+  const registry = await readFile(path.join(repoRoot, "lib", "crm", "authorization.ts"), "utf8");
+  assert.ok(/"platform-invitation-reissue": \{ kind: "platform", methods: \["POST"\] \}/.test(registry));
+  const router = await readFile(path.join(repoRoot, "api", "crm", "[...path].ts"), "utf8");
+  assert.ok(/case "platform-invitation-reissue":\s*return handlePlatformInvitationReissue\(req, res\);/.test(router));
+
+  const form = await readFile(path.join(controlSrc, "screens", "Onboarding.tsx"), "utf8");
+  assert.ok(/invitation_already_pending/.test(form) && /Перевыпустить приглашение/.test(form), "409 формы предлагает перевыпуск на месте");
+});
+
 test("MB8 портал показывает ссылку один раз и не выбирает нишу молча", async () => {
   const form = await readFile(path.join(controlSrc, "screens", "Onboarding.tsx"), "utf8");
   assert.ok(/<option value="">/.test(form), "первый пункт ниши пуст — выбор обязателен");

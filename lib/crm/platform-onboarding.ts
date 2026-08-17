@@ -75,6 +75,121 @@ export function validateOnboardingRequest(body: JsonRecord): OnboardingRequest |
   return { name, vertical: vertical as Vertical, ownerEmail, ownerName: ownerName || ownerEmail, timeZone };
 }
 
+/**
+ * POST /api/crm/platform-invitation-reissue — новое приглашение владельца
+ * СУЩЕСТВУЮЩЕГО пространства. Ссылка теряется, мессенджер портит фрагмент,
+ * семь дней истекают — без перевыпуска живое приглашение было тупиком:
+ * с портала его было не заменить, а повторная форма создавала вторую клинику.
+ *
+ * Прежние непогашенные приглашения владельца отзываются в тот же ход: два
+ * живых токена на одну почту — это два пути в одно пространство, и след
+ * от потерянного никто бы не отозвал.
+ */
+export async function handlePlatformInvitationReissue(req: VercelRequest, res: VercelResponse) {
+  const supabase = getSupabaseServerClient();
+  if (!supabase) {
+    return sendJson(res, 503, { success: false, error: "Хранилище не настроено", code: "storage_not_configured" });
+  }
+
+  const body = asRecord(req.body);
+  const workspaceId = readString(body.workspaceId);
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(workspaceId)) {
+    return sendJson(res, 400, { success: false, error: "Нужна клиника", code: "workspace_required" });
+  }
+
+  const { data: workspaceRow, error: workspaceError } = await supabase
+    .from("workspaces")
+    .select("id, name, owner_email")
+    .eq("id", workspaceId)
+    .maybeSingle();
+  if (workspaceError) {
+    return sendJson(res, 502, { success: false, error: "Не удалось прочитать клинику", code: "unavailable" });
+  }
+  if (!workspaceRow) {
+    return sendJson(res, 404, { success: false, error: "Клиники нет", code: "not_found" });
+  }
+  const workspace = asRecord(workspaceRow);
+  const ownerEmail = normalizeEmail(workspace.owner_email);
+  if (!ownerEmail) {
+    return sendJson(res, 409, {
+      success: false,
+      error: "У пространства не записана почта владельца",
+      code: "owner_email_missing",
+    });
+  }
+
+  // Владелец уже внутри? Тогда приглашение не нужно и только запутает.
+  const { data: existingMember } = await supabase
+    .from("staff_users")
+    .select("id")
+    .eq("workspace_id", workspaceId)
+    .eq("role", "owner")
+    .maybeSingle();
+  if (existingMember) {
+    return sendJson(res, 409, {
+      success: false,
+      error: "Владелец уже принял приглашение",
+      code: "owner_already_member",
+      details: ["Пространство живое: приглашать владельца второй раз не нужно."],
+    });
+  }
+
+  const now = new Date().toISOString();
+  const { error: revokeError } = await supabase
+    .from("staff_invitations")
+    .update({ revoked_at: now })
+    .eq("workspace_id", workspaceId)
+    .eq("role", "owner")
+    .is("accepted_at", null)
+    .is("revoked_at", null);
+  if (revokeError) {
+    return sendJson(res, 502, {
+      success: false,
+      error: "Не удалось отозвать прежнее приглашение",
+      code: "unavailable",
+      details: ["Новое не выписано: старая ссылка осталась единственной действующей."],
+    });
+  }
+
+  const { token, tokenHash } = createInvitationToken();
+  const { data: invitationRow, error: invitationError } = await supabase
+    .from("staff_invitations")
+    .insert({
+      workspace_id: workspaceId,
+      email: ownerEmail,
+      role: "owner",
+      token_hash: tokenHash,
+      expires_at: expiryFromNow(),
+      invited_by_staff_user_id: null,
+    })
+    .select("id, expires_at")
+    .single();
+  if (invitationError || !invitationRow) {
+    return sendJson(res, 502, {
+      success: false,
+      error: "Прежнее приглашение отозвано, а новое не выписалось",
+      code: "unavailable",
+      details: ["Действующих ссылок у владельца сейчас нет — повторите перевыпуск."],
+    });
+  }
+
+  const link = acceptUrl(req, token);
+  const email = await sendSupabaseInviteEmail(ownerEmail, link);
+
+  return sendJson(res, 201, {
+    success: true,
+    data: {
+      workspaceId,
+      name: readString(workspace.name),
+      ownerEmail,
+      invitationExpiresAt: readString(asRecord(invitationRow).expires_at),
+      acceptUrl: link,
+      emailSent: email.sent,
+      ...(email.reason ? { emailStatus: email.reason } : {}),
+    },
+  });
+}
+
 /** POST /api/crm/platform-onboarding — за requirePlatformOwner в маршрутизаторе. */
 export async function handlePlatformOnboarding(req: VercelRequest, res: VercelResponse) {
   const supabase = getSupabaseServerClient();
@@ -121,6 +236,9 @@ export async function handlePlatformOnboarding(req: VercelRequest, res: VercelRe
         `Владельцу уже отправлено приглашение${existingWorkspace ? ` в «${readString(asRecord(existingWorkspace).name)}»` : ""}, и оно ещё действует.`,
         "Второе пространство для той же почты создаётся только после того, как первое приглашение принято или истекло.",
       ],
+      // Форма предлагает перевыпуск: ссылка теряется, мессенджер её портит,
+      // семь дней истекают — и без этого поля живое приглашение было тупиком.
+      data: { existingWorkspaceId },
     });
   }
 
