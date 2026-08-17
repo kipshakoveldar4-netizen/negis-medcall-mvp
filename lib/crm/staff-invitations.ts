@@ -68,6 +68,15 @@ export function normalizeEmail(value: unknown): string {
   return typeof value === "string" ? value.trim().toLowerCase() : "";
 }
 
+/**
+ * Почта в ilike — значение, а не шаблон. Неэкранированный «_» в адресе значит
+ * «любой один символ»: ivan_petrov@ матчил бы ivan.petrov@ другой клиники, и
+ * 409 приносил бы чужой existingWorkspaceId прямо под кнопку перевыпуска.
+ */
+export function escapeLikePattern(value: string): string {
+  return value.replace(/[\\%_]/g, (ch) => `\\${ch}`);
+}
+
 function isEmail(value: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
 }

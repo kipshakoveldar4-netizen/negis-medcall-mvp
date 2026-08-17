@@ -670,20 +670,35 @@ test("I28 nothing creates a workspace without a verified owner", async () => {
     }
   };
   for (const root of roots) await walk(root);
-  // Единственное разрешённое место — подключение клиники с портала. Оно НЕ
-  // нарушает правило «пространство пишется вместе с проверенным владельцем»:
-  // членство владельца создаёт ровно этот же файл приглашений при погашении
-  // токена, привязанного к почте, а сам вызов стоит за requirePlatformOwner.
-  // Ниже пины держат оба условия — исчезнет любое, и допуск теряет силу.
-  const allowed = [path.join("lib", "crm", "platform-onboarding.ts")];
-  assert.deepEqual(offenders, allowed, "these files can create a tenant outside an enrollment flow");
+  // Разрешены ровно два места — оба пути подключения клиники с портала, оба
+  // за requirePlatformOwner, и правило «пространство пишется вместе с
+  // проверенным владельцем» держат по-разному: инвайт-путь выписывает
+  // owner-приглашение (членство создаст погашение токена, привязанного к
+  // почте), парольный путь создаёт auth-аккаунт ДО пространства и вписывает
+  // членство с auth_user_id этого аккаунта в том же проходе (2026-08-17,
+  // явное решение владельца платформы: подключение без письма). Ниже пины
+  // держат условия допуска — исчезнет любое, и допуск теряет силу.
+  const allowed = [
+    path.join("lib", "crm", "platform-onboarding-credentials.ts"),
+    path.join("lib", "crm", "platform-onboarding.ts"),
+  ];
+  assert.deepEqual(offenders.sort(), allowed, "these files can create a tenant outside an enrollment flow");
 
   const onboarding = await readFile(path.join(repoRoot, "lib", "crm", "platform-onboarding.ts"), "utf8");
   assert.ok(/createInvitationToken\(\)/.test(onboarding) && /role: "owner"/.test(onboarding),
     "владелец входит через приглашение, а не вписывается строкой");
+  const creds = await readFile(path.join(repoRoot, "lib", "crm", "platform-onboarding-credentials.ts"), "utf8");
+  assert.ok(
+    creds.indexOf("supabase.auth.admin.createUser(") < creds.indexOf('from("workspaces")') &&
+      /auth_user_id: authUserId/.test(creds),
+    "парольный путь: сначала проверенная личность, потом пространство, членство — с её auth_user_id",
+  );
   const registry = await readFile(path.join(repoRoot, "lib", "crm", "authorization.ts"), "utf8");
-  assert.ok(/"platform-onboarding": \{ kind: "platform"/.test(registry),
-    "и создать пространство может только владелец платформы");
+  assert.ok(
+    /"platform-onboarding": \{ kind: "platform"/.test(registry) &&
+      /"platform-onboarding-credentials": \{ kind: "platform"/.test(registry),
+    "и создать пространство может только владелец платформы",
+  );
 });
 
 test("I29 the landing page offers only flows that exist", async () => {

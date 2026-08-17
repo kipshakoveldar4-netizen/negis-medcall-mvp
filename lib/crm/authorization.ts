@@ -186,6 +186,9 @@ export const CRM_ROUTE_AUTHORIZATION: Readonly<Record<string, RouteAuthorization
   "platform-clinic": { kind: "platform", methods: ["GET"] },
   // Подключение клиники: пространство + настройки + приглашение владельца.
   "platform-onboarding": { kind: "platform", methods: ["POST"] },
+  // Упрощённое подключение: владелец платформы задаёт почту и пароль, письмо
+  // не отправляется. Единственный маршрут, через который проходит пароль.
+  "platform-onboarding-credentials": { kind: "platform", methods: ["POST"] },
   // Перевыпуск приглашения владельца существующего пространства: старое
   // отзывается, новое возвращается ссылкой. Без этого потерянная ссылка
   // была тупиком.

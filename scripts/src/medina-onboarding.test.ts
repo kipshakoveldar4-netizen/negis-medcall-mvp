@@ -12,6 +12,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const modulePath = path.join(repoRoot, "lib", "crm", "platform-onboarding.ts");
+const credsPath = path.join(repoRoot, "lib", "crm", "platform-onboarding-credentials.ts");
 const controlSrc = path.join(repoRoot, "artifacts", "medina-control", "src");
 
 type OnboardingModule = {
@@ -55,14 +56,98 @@ test("MB2 часовой пояс проверяется, имя подстав�
   assert.equal(noName.ownerName, "owner@salon.kz", "пустое имя — почта, а не выдумка");
 });
 
-test("MB3 пароль не проходит через подключение нигде", async () => {
+test("MB3 инвайт-путь паролей не видит, парольный путь заперт в своём модуле", async () => {
+  // Раньше пароль не проходил через подключение нигде. С появлением
+  // упрощённого пути (владелец платформы задаёт логин и пароль сам — его
+  // явное решение от 2026-08-17) правило сузилось, но не исчезло: инвайт-путь
+  // остаётся слепым к паролям, а парольный живёт в единственном модуле,
+  // и его собственные инварианты закрепляет MB10.
   const server = await readFile(modulePath, "utf8");
   for (const word of ["password", "createUser", "auth.admin"]) {
-    assert.ok(!server.toLowerCase().includes(word.toLowerCase()), `сервер: нет ${word}`);
+    assert.ok(!server.toLowerCase().includes(word.toLowerCase()), `инвайт-сервер: нет ${word}`);
   }
   const form = await readFile(path.join(controlSrc, "screens", "Onboarding.tsx"), "utf8");
-  assert.ok(!/password/i.test(form), "форма портала пароль не спрашивает");
-  assert.ok(form.includes("/join"), "и объясняет путь через страницу приглашения");
+  assert.ok(form.includes("/join"), "форма объясняет путь через страницу приглашения");
+  assert.ok(
+    /body: JSON\.stringify\(\{ name, vertical, ownerEmail, ownerName, timeZone \}\),/.test(form),
+    "инвайт-POST собирается без поля password, даже если оно заполнено",
+  );
+  assert.ok(form.includes("platform-onboarding-credentials"), "парольный режим зовёт свой отдельный маршрут");
+});
+
+test("MB10 парольный путь: без письма, пароль не сохраняется и не возвращается", async () => {
+  // Все проверки — по коду без комментариев: пин, который удовлетворяется
+  // строкой из шапки-комментария, вакуумный (урок этого репо — VT12).
+  const creds = (await readFile(credsPath, "utf8"))
+    .replace(/(^|\s)\/\/[^\n]*/g, "$1")
+    .replace(/\/\*[\s\S]*?\*\//g, " ");
+  assert.ok(creds.includes("supabase.auth.admin.createUser("), "аккаунт создаёт Supabase — пароль уходит только туда, в хэш");
+  assert.ok(/email_confirm: true,/.test(creds), "подтверждающее письмо не отправляется — в этом смысл пути");
+  // Ни в одну таблицу пароль не пишется: в insert-литералах слово password
+  // допустимо только как имя флага password_reset_required.
+  const inserts = creds.match(/\.insert\((\{[\s\S]*?\}|\[[\s\S]*?\])\)/g) || [];
+  assert.ok(inserts.length >= 3, "все три insert найдены");
+  for (const literal of inserts) {
+    assert.ok(!/password(?!_reset_required)/i.test(literal), "insert без пароля");
+  }
+  // Каждый insert — литерал на месте: insert(переменная) регекс бы не увидел.
+  assert.equal((creds.match(/\.insert\(/g) || []).length, inserts.length, "инсертов через переменную нет");
+  // Обходных путей пароля наружу нет: модуль не апдейтит, не логирует и
+  // отвечает только через локальный sendJson.
+  assert.ok(!/\.update\(|\.upsert\(/.test(creds), "модуль только вставляет");
+  assert.ok(!/console\./.test(creds), "модуль ничего не логирует");
+  assert.equal((creds.match(/res\.status\(/g) || []).length, 1, "единственный выход наружу — sendJson");
+  // И ни в один ответ пароль не попадает — даже в детали ошибок.
+  for (const literal of creds.match(/sendJson\(res,[\s\S]*?\}\);/g) || []) {
+    assert.ok(!/password/i.test(literal), "ответ без пароля");
+  }
+  assert.ok(
+    creds.indexOf("supabase.auth.admin.createUser(") < creds.indexOf('from("workspaces")'),
+    "аккаунт создаётся первым: отказ «почта занята» не оставляет мусора",
+  );
+  assert.ok(/email_already_registered/.test(creds), "занятая почта — явный отказ: пароль чужому аккаунту не задаётся");
+  assert.ok(/password_reset_required: true/.test(creds), "пароль задал не владелец — флаг честный");
+  assert.ok(/role: "owner"/.test(creds) && /auth_user_id: authUserId/.test(creds), "владелец привязан входом с первой секунды");
+  // Почта в дедуп-проверках — значение, не LIKE-шаблон: «_» без экранирования
+  // матчил бы чужую почту, и 409 принёс бы чужой existingWorkspaceId.
+  assert.equal((creds.match(/\.ilike\(/g) || []).length, (creds.match(/\.ilike\("[^"]+", escapeLikePattern\(/g) || []).length, "каждый ilike экранирован");
+});
+
+test("MB11 парольный маршрут платформенный, только POST, правила формы общие", async () => {
+  const registry = await readFile(path.join(repoRoot, "lib", "crm", "authorization.ts"), "utf8");
+  assert.ok(/"platform-onboarding-credentials": \{ kind: "platform", methods: \["POST"\] \}/.test(registry));
+  const router = await readFile(path.join(repoRoot, "api", "crm", "[...path].ts"), "utf8");
+  assert.ok(/case "platform-onboarding-credentials":\s*return handlePlatformOnboardingCredentials\(req, res\);/.test(router));
+  const creds = await readFile(credsPath, "utf8");
+  assert.ok(/validateOnboardingRequest\(/.test(creds), "ниша без умолчания, пояс и почта — теми же правилами, что у инвайта");
+  assert.ok(/invitation_already_pending/.test(creds), "живое приглашение той же почты блокирует и парольный путь");
+});
+
+type CredsModule = { validateOwnerPassword: (value: unknown) => string[] };
+const { validateOwnerPassword } = (await import(pathToFileURL(credsPath).href)) as CredsModule;
+
+test("MB12 правила пароля: 8 символов — 72 байта, не из одних пробелов", () => {
+  assert.ok(validateOwnerPassword("Ab3defg").length > 0, "короче 8 — отказ");
+  assert.equal(validateOwnerPassword("Ab3defgh").length, 0, "8 символов проходят");
+  assert.equal(validateOwnerPassword("x".repeat(72)).length, 0, "72 байта проходят");
+  assert.ok(validateOwnerPassword("x".repeat(73)).length > 0, "длиннее 72 байт — отказ: bcrypt молча обрезал бы");
+  // Предел меряется байтами: 37 кириллических букв — это 74 байта UTF-8.
+  assert.ok(validateOwnerPassword("я".repeat(37)).length > 0, "кириллица считается за два байта");
+  assert.equal(validateOwnerPassword("я".repeat(36)).length, 0, "36 кириллических букв (72 байта) проходят");
+  assert.ok(validateOwnerPassword("        ").length > 0, "восемь пробелов — не пароль");
+  // Хвостовой пробел невидим на экране и теряется при передаче: владелец
+  // получил бы «Invalid login credentials» без шанса понять почему.
+  assert.ok(validateOwnerPassword("Secret123 ").length > 0, "хвостовой пробел — отказ");
+  assert.ok(validateOwnerPassword(" Secret123").length > 0, "ведущий пробел — отказ");
+  assert.ok(validateOwnerPassword(undefined).length > 0, "отсутствие пароля — отказ");
+});
+
+test("MB13 портал: парольный режим по умолчанию, пароль показывается один раз", async () => {
+  const form = await readFile(path.join(controlSrc, "screens", "Onboarding.tsx"), "utf8");
+  assert.ok(/useState<Mode>\("credentials"\)/.test(form), "упрощённый путь — умолчание: его и просили");
+  assert.ok(/email_already_registered/.test(form) && /Переключить на приглашение/.test(form), "занятая почта ведёт в инвайт-режим кнопкой");
+  assert.ok(/setShownPassword\(password\)/.test(form) && /setPassword\(""\)/.test(form), "пароль переезжает на экран результата и очищается в форме");
+  assert.ok(/generatePassword/.test(form), "пароль можно сгенерировать, а не выдумывать на ходу");
 });
 
 test("MB4 приглашение владельца — той же машинерией, что у сотрудников", async () => {

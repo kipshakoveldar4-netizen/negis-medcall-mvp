@@ -1,7 +1,7 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { getSupabaseServerClient } from "../supabase/server";
 import { VERTICAL_SETTINGS_KEY, isVertical, type Vertical } from "../vertical/terms";
-import { acceptUrl, createInvitationToken, expiryFromNow, normalizeEmail, sendSupabaseInviteEmail } from "./staff-invitations";
+import { acceptUrl, createInvitationToken, escapeLikePattern, expiryFromNow, normalizeEmail, sendSupabaseInviteEmail } from "./staff-invitations";
 
 // Подключение клиники с портала Medina Control.
 //
@@ -217,7 +217,7 @@ export async function handlePlatformOnboarding(req: VercelRequest, res: VercelRe
     .from("staff_invitations")
     .select("workspace_id, expires_at, accepted_at, revoked_at")
     .eq("role", "owner")
-    .ilike("email", validated.ownerEmail)
+    .ilike("email", escapeLikePattern(validated.ownerEmail))
     .is("accepted_at", null)
     .is("revoked_at", null)
     .gt("expires_at", new Date().toISOString());

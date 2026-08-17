@@ -37,6 +37,7 @@ import { handlePlatformRecommendations, handleWorkspaceRecommendations } from ".
 import { applyControlCors } from "../../lib/auth/cors";
 import { handlePlatformClinic, handlePlatformOverview, handlePlatformSubscriptions, handleWorkspaceSubscription } from "../../lib/crm/platform";
 import { handlePlatformInvitationReissue, handlePlatformOnboarding } from "../../lib/crm/platform-onboarding";
+import { handlePlatformOnboardingCredentials } from "../../lib/crm/platform-onboarding-credentials";
 
 // Security-2B — deny-by-default tenant authorization for /api/crm/*.
 //
@@ -189,6 +190,8 @@ async function dispatch(
       return handlePlatformClinic(req, res);
     case "platform-onboarding":
       return handlePlatformOnboarding(req, res);
+    case "platform-onboarding-credentials":
+      return handlePlatformOnboardingCredentials(req, res);
     case "platform-invitation-reissue":
       return handlePlatformInvitationReissue(req, res);
     case "platform-recommendations":
