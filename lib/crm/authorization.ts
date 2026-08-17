@@ -181,7 +181,8 @@ export const CRM_ROUTE_AUTHORIZATION: Readonly<Record<string, RouteAuthorization
   "platform-overview": { kind: "platform", methods: ["GET"] },
   "platform-subscriptions": { kind: "platform", methods: ["GET", "POST", "PATCH"] },
   // Карточка одной клиники: активность по неделям, статус модулей, сигналы.
-  // Только чтение и только счётчики — ни одной строки пациента наружу.
+  // Только чтение: счётчики плюс administrativa доступа — email/роль/статус
+  // сотрудников и приглашения владельца. Строк пациентов наружу нет.
   "platform-clinic": { kind: "platform", methods: ["GET"] },
   // Подключение клиники: пространство + настройки + приглашение владельца.
   "platform-onboarding": { kind: "platform", methods: ["POST"] },

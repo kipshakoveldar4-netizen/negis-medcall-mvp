@@ -13,8 +13,36 @@ import { capitalize, termsFor, readVertical } from "../../../../lib/vertical/ter
 
 type Weekly = { from: string; to: string; leads: number | null; appointments: number | null };
 type Signal = { key: string; level: "ok" | "warn"; data: Record<string, number> };
+type AccessStaff = { email: string; role: string; status: string; linked: boolean };
+type AccessInvitation = { email: string; status: string; createdAt: string; expiresAt: string };
+
+// Слова — те же, что клиника видит у себя в «Настройки → Сотрудники»
+// (roleLabels в artifacts/negis/src/lib/permissions.ts): владелец платформы и
+// владелец клиники должны называть одну роль одним словом. Синхронность
+// закрепляет MC16; выдуманных ролей здесь нет — только каталог продукта.
+const ROLE_LABELS: Record<string, string> = {
+  owner: "Владелец",
+  admin: "Администратор",
+  receptionist: "Ресепшн",
+  marketer: "Маркетолог",
+  doctor: "Врач",
+  manager: "Менеджер",
+};
+
+const INVITATION_LABELS: Record<string, { label: string; cls: string }> = {
+  pending: { label: "ждёт принятия", cls: "off" },
+  accepted: { label: "принято", cls: "on" },
+  expired: { label: "истекло", cls: "off" },
+  revoked: { label: "отозвано", cls: "off" },
+};
+
+const STAFF_STATUS_LABELS: Record<string, { label: string; cls: string }> = {
+  active: { label: "активен", cls: "on" },
+  inactive: { label: "отключён", cls: "off" },
+};
 
 type Card = {
+  access?: { staff: AccessStaff[] | null; ownerInvitations: AccessInvitation[] | null };
   clinic: {
     id: string;
     name: string;
@@ -133,6 +161,12 @@ export function ClinicCard({ workspaceId, onBack }: { workspaceId: string; onBac
   );
   const [sending, setSending] = useState(false);
   const [recoFlash, setRecoFlash] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
+  // Ссылка перевыпуска живёт в состоянии, а не в данных карточки: в базе
+  // только хэш, второй раз её никто не покажет.
+  const [reissueBusy, setReissueBusy] = useState(false);
+  const [reissueLink, setReissueLink] = useState("");
+  const [reissueError, setReissueError] = useState("");
+  const [reissueCopied, setReissueCopied] = useState(false);
 
   async function loadRecommendations() {
     try {
@@ -198,6 +232,71 @@ export function ClinicCard({ workspaceId, onBack }: { workspaceId: string; onBac
       setSending(false);
     }
   }
+
+  async function reissueInvitation() {
+    if (reissueBusy) return;
+    setReissueBusy(true);
+    setReissueError("");
+    try {
+      const response = await controlFetch("/api/crm/platform-invitation-reissue", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ workspaceId }),
+      });
+      const body = await response.json().catch(() => null);
+      if (!response.ok || body?.success !== true || typeof body?.data?.acceptUrl !== "string") {
+        // Показанная ранее ссылка убирается ПО КОДУ, а не по факту ошибки:
+        // reissue_incomplete — сервер отозвал прежние приглашения, а новое не
+        // выписал; owner_already_member — приглашение потеряло смысл. При
+        // сетевом сбое или отказе на шаге revoke старая ссылка остаётся
+        // единственной действующей, и стирать её с экрана было бы враньём.
+        const code = typeof body?.code === "string" ? body.code : "";
+        if (code === "reissue_incomplete" || code === "owner_already_member") {
+          setReissueLink("");
+          setReissueCopied(false);
+          try {
+            const fresh = await fetchCard();
+            if (fresh) setCard(fresh);
+          } catch {
+            // Карточка обновится при следующем открытии.
+          }
+        }
+        const reason = [body?.error, ...(Array.isArray(body?.details) ? body.details : [])].filter(Boolean).join(" ");
+        setReissueError(reason || "Перевыпустить не удалось. Попробуйте ещё раз.");
+        return;
+      }
+      setReissueCopied(false);
+      setReissueLink(body.data.acceptUrl);
+      // Список приглашений обновляется с сервера: старое стало «отозвано»,
+      // новое «ждёт принятия». Сбой обновления ссылку не трогает.
+      try {
+        const fresh = await fetchCard();
+        if (fresh) setCard(fresh);
+      } catch {
+        // Карточка обновится при следующем открытии.
+      }
+    } catch {
+      setReissueError("Сеть не ответила — приглашение не перевыпущено.");
+    } finally {
+      setReissueBusy(false);
+    }
+  }
+
+  // Таймер «Скопировано» один: повторный клик перезапускает его, а не
+  // наслаивает второй, который погасил бы свежую подпись раньше времени.
+  const copiedTimerRef = useRef<number | null>(null);
+
+  async function copyReissueLink() {
+    if (!reissueLink) return;
+    try {
+      await navigator.clipboard.writeText(reissueLink);
+      setReissueCopied(true);
+      if (copiedTimerRef.current !== null) window.clearTimeout(copiedTimerRef.current);
+      copiedTimerRef.current = window.setTimeout(() => setReissueCopied(false), 2500);
+    } catch {
+      // Буфер недоступен — ссылка выделяется и копируется руками.
+    }
+  }
   // Смена экрана роняет фокус в body: нажатая кнопка размонтировалась вместе
   // со списком. Клавиатура и скринридер продолжают с заголовка карточки.
   const titleRef = useRef<HTMLHeadingElement | null>(null);
@@ -205,19 +304,30 @@ export function ClinicCard({ workspaceId, onBack }: { workspaceId: string; onBac
     if (state === "ready") titleRef.current?.focus();
   }, [state]);
 
+  async function fetchCard(): Promise<Card | null> {
+    const response = await controlFetch(`/api/crm/platform-clinic?workspaceId=${encodeURIComponent(workspaceId)}`);
+    const body = await response.json().catch(() => null);
+    if (!response.ok || !body?.data) return null;
+    return body.data as Card;
+  }
+
   useEffect(() => {
     let cancelled = false;
     setState("loading");
+    // Состояние перевыпуска принадлежит клинике: owner-ссылка одной не имеет
+    // права пережить переход к другой, даже если компонент не размонтируется.
+    setReissueLink("");
+    setReissueError("");
+    setReissueCopied(false);
     void (async () => {
       try {
-        const response = await controlFetch(`/api/crm/platform-clinic?workspaceId=${encodeURIComponent(workspaceId)}`);
-        const body = await response.json().catch(() => null);
+        const data = await fetchCard();
         if (cancelled) return;
-        if (!response.ok || !body?.data) {
+        if (!data) {
           setState("error");
           return;
         }
-        setCard(body.data as Card);
+        setCard(data);
         setState("ready");
         void loadRecommendations();
       } catch {
@@ -229,6 +339,13 @@ export function ClinicCard({ workspaceId, onBack }: { workspaceId: string; onBac
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceId]);
+
+  // Появление одноразовой ссылки — событие: фокус переносится на её блок,
+  // иначе скринридер после нажатия кнопки слышит тишину.
+  const reissueBlockRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (reissueLink) reissueBlockRef.current?.focus();
+  }, [reissueLink]);
 
   if (state === "loading") return <p className="muted" role="status">Читаю карточку клиники…</p>;
   if (state === "error" || !card) {
@@ -246,6 +363,16 @@ export function ClinicCard({ workspaceId, onBack }: { workspaceId: string; onBac
   const terms = termsFor(vertical);
   const planTitle = card.clinic.plan ? PLANS[card.clinic.plan as PlanKey]?.title || card.clinic.plan : "нет подписки";
   const warns = card.signals.filter((signal) => signal.level === "warn");
+
+  // Кнопка перевыпуска прячется, когда строка владельца уже есть: сервер в
+  // этом случае откажет (owner_already_member), и кнопка обещала бы
+  // невозможное. Условие зеркалит серверную проверку: staff_users с ролью
+  // owner — независимо от привязки входа.
+  const accessStaff = card.access ? card.access.staff : null;
+  const accessInvitations = card.access ? card.access.ownerInvitations : null;
+  const ownerRow = Array.isArray(accessStaff) ? accessStaff.find((person) => person.role === "owner") : undefined;
+  const ownerInside = Boolean(ownerRow);
+  const hasPendingInvitation = Array.isArray(accessInvitations) && accessInvitations.some((invitation) => invitation.status === "pending");
 
   // Высота столбиков — от максимума по обеим сериям, чтобы недели сравнивались
   // друг с другом честно. Нет данных — нет столбика, есть прочерк.
@@ -302,6 +429,103 @@ export function ClinicCard({ workspaceId, onBack }: { workspaceId: string; onBac
             );
           })
         )}
+      </section>
+
+      <section className="panel" style={{ padding: "16px 18px", marginBottom: 16 }}>
+        <h2 className="section-title">Доступ</h2>
+        {!card.access ? (
+          <p className="muted">Данные о доступе не пришли — API старше портала, раздел появится после деплоя.</p>
+        ) : (
+          <>
+            {accessStaff === null ? (
+              <p className="muted">Список сотрудников прочитать не удалось. Это отказ чтения, а не «никого нет».</p>
+            ) : accessStaff.length === 0 ? (
+              // Причина пустоты не выдумывается: про приглашение говорим
+              // только когда pending-приглашение действительно видно.
+              <p className="muted">Внутри пока никого{hasPendingInvitation ? " — приглашение владельца ещё не принято" : ""}.</p>
+            ) : (
+              accessStaff.map((person, index) => {
+                const staffStatus = STAFF_STATUS_LABELS[person.status] || { label: person.status || "статус не записан", cls: "unknown" };
+                return (
+                  <div key={`${person.email}-${index}`} className="reco-row">
+                    <span className="reco-main">
+                      <b>{person.email || "почта не записана"}</b>
+                      <span className="why">{ROLE_LABELS[person.role] || person.role}</span>
+                    </span>
+                    <span className="reco-meta">
+                      <span className={`chip ${staffStatus.cls}`}>{staffStatus.label}</span>
+                      {/* Строка без auth_user_id — легаси или заведённая руками:
+                          сама она не привяжется, приглашение на эту почту сервер
+                          отклонит (already_member). «Ещё» здесь не обещается. */}
+                      <span className={`chip ${person.linked ? "on" : "off"}`}>{person.linked ? "вход привязан" : "вход не привязан"}</span>
+                    </span>
+                  </div>
+                );
+              })
+            )}
+
+            <h3 className="section-title" style={{ marginTop: 18 }}>Приглашение владельца</h3>
+            {accessInvitations === null ? (
+              <p className="muted">Историю приглашений прочитать не удалось.</p>
+            ) : accessInvitations.length === 0 ? (
+              // Причина пустого списка отсюда не видна (пространство до
+              // портала или сбой на выписке) — и не утверждается.
+              <p className="muted">Приглашений владельцу в базе нет.</p>
+            ) : (
+              accessInvitations.map((invitation, index) => {
+                const label = INVITATION_LABELS[invitation.status] || { label: invitation.status, cls: "off" };
+                return (
+                  <div key={`${invitation.createdAt}-${index}`} className="reco-row">
+                    <span className="reco-main">
+                      <b>{invitation.email}</b>
+                      <span className="why">
+                        выписано {invitation.createdAt.slice(0, 10)}
+                        {invitation.status === "pending" ? ` · действует до ${invitation.expiresAt.slice(0, 10)}` : ""}
+                      </span>
+                    </span>
+                    <span className="reco-meta">
+                      <span className={`chip ${label.cls}`}>{label.label}</span>
+                    </span>
+                  </div>
+                );
+              })
+            )}
+
+            {ownerInside ? (
+              <p className="muted" style={{ fontSize: 12.5, marginTop: 10 }}>
+                {ownerRow?.linked
+                  ? "Владелец внутри — новое приглашение не нужно."
+                  : "Строка владельца заведена, но вход не привязан. Новое приглашение сервер не выпишет: владелец уже числится сотрудником."}
+              </p>
+            ) : (
+              <div style={{ marginTop: 12 }}>
+                <button type="button" className="btn" disabled={reissueBusy} onClick={() => void reissueInvitation()}>
+                  {reissueBusy ? "Выписываю…" : "Перевыпустить приглашение"}
+                </button>
+              </div>
+            )}
+            {reissueError ? (
+              <div className="notice error" role="alert" style={{ marginTop: 10 }}>{reissueError}</div>
+            ) : null}
+            {reissueLink ? (
+              <div className="result-block" ref={reissueBlockRef} tabIndex={-1}>
+                <div className="label">Новая ссылка приглашения</div>
+                <div className="result-link">
+                  <code>{reissueLink}</code>
+                  <button type="button" className="btn-primary" onClick={() => void copyReissueLink()}>
+                    {reissueCopied ? "Скопировано" : "Скопировать"}
+                  </button>
+                </div>
+                <p className="muted" style={{ fontSize: 12.5, margin: "10px 0 0" }}>
+                  Прежние ссылки отозваны. Действует 7 дней, показывается один раз — передайте владельцу сами: WhatsApp, почта, любой канал.
+                </p>
+              </div>
+            ) : null}
+          </>
+        )}
+        <p className="muted" style={{ fontSize: 12.5, margin: "12px 0 0" }}>
+          Сотрудников приглашает владелец сам из кабинета: «Настройки → Сотрудники». С портала приглашается только владелец.
+        </p>
       </section>
 
       <section className="panel" style={{ padding: "16px 18px", marginBottom: 16 }}>

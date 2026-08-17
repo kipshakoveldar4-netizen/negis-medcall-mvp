@@ -165,10 +165,13 @@ export async function handlePlatformInvitationReissue(req: VercelRequest, res: V
     .select("id, expires_at")
     .single();
   if (invitationError || !invitationRow) {
+    // Код отличается от отказа на шаге revoke намеренно: там старая ссылка
+    // осталась единственной действующей, здесь действующих нет вовсе — клиент
+    // по этому коду убирает с экрана показанную ранее ссылку.
     return sendJson(res, 502, {
       success: false,
       error: "Прежнее приглашение отозвано, а новое не выписалось",
-      code: "unavailable",
+      code: "reissue_incomplete",
       details: ["Действующих ссылок у владельца сейчас нет — повторите перевыпуск."],
     });
   }

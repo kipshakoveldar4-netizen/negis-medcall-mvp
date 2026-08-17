@@ -241,6 +241,64 @@ test("MC14 платформенный маршрут не выдаёт себя 
   );
 });
 
+test("MC15 карточка собирает доступ: сотрудники, приглашение владельца и перевыпуск на месте", async () => {
+  const handler = await readFile(path.join(repoRoot, "lib", "crm", "platform.ts"), "utf8");
+  const card = handler.slice(handler.indexOf("async function handleClinicCard"), handler.indexOf("export async function handlePlatformOverview"));
+  assert.ok(/access: \{ staff: staffRows, ownerInvitations: invitationRows \}/.test(card), "доступ в ответе карточки");
+  // Сбой чтения — null, не пустой список: «не смог прочитать» не имеет права
+  // выглядеть как «в клинике никого нет». Колонки пациентов в этих выборках
+  // запрещает MC13 — блок доступа лежит внутри того же среза.
+  const staffBlock = card.slice(card.indexOf('from("staff_users")'), card.indexOf('from("staff_invitations")'));
+  assert.ok(/if \(error \|\| !Array\.isArray\(data\)\) return null;/.test(staffBlock), "отказ чтения сотрудников — null");
+  const invitationBlock = card.slice(card.indexOf('from("staff_invitations")'));
+  assert.ok(/if \(error \|\| !Array\.isArray\(data\)\) return null;/.test(invitationBlock), "отказ чтения приглашений — null");
+  assert.ok(/\.eq\("role", "owner"\)/.test(invitationBlock), "карточке видны только приглашения владельца");
+
+  const screen = await readFile(path.join(controlSrc, "screens", "ClinicCard.tsx"), "utf8");
+  assert.ok(screen.includes("platform-invitation-reissue"), "перевыпуск доступен прямо с карточки");
+  assert.ok(screen.includes("Перевыпустить приглашение"), "кнопка называет действие");
+  assert.ok(/ownerInside \?/.test(screen), "принявшему владельцу кнопку не обещают — сервер бы отказал");
+  assert.ok(
+    /accessStaff === null \?/.test(screen) && /accessStaff\.length === 0 \?/.test(screen),
+    "null и пустой список сотрудников — разные состояния на экране",
+  );
+
+  // Показанная ссылка живёт ровно до момента, когда сервер сообщил, что она
+  // мертва. Стирать по факту любой ошибки нельзя: при отказе на шаге revoke
+  // старая ссылка остаётся единственной действующей — поэтому у отказа на
+  // шаге insert собственный код, и клиент реагирует именно на коды.
+  const onboardingModule = await readFile(path.join(repoRoot, "lib", "crm", "platform-onboarding.ts"), "utf8");
+  assert.ok(/code: "reissue_incomplete"/.test(onboardingModule), "отказ после отзыва старых приглашений отличим кодом");
+  assert.ok(
+    /code === "reissue_incomplete" \|\| code === "owner_already_member"/.test(screen),
+    "карточка убирает мёртвую ссылку по кодам сервера, а не по факту ошибки",
+  );
+});
+
+test("MC16 роль на портале называется тем же словом, что в кабинете клиники", async () => {
+  // Каталог ролей один (permissions.ts), и слова к нему должны быть одни:
+  // владелец платформы и владелец клиники, называющие одну роль по-разному, —
+  // это та самая путаница с назначением сотрудников.
+  function parseLabels(source: string, marker: string): Record<string, string> {
+    const start = source.indexOf(marker);
+    assert.ok(start >= 0, `блок ${marker} существует`);
+    const block = source.slice(start, source.indexOf("}", start));
+    const labels: Record<string, string> = {};
+    for (const match of block.matchAll(/(\w+): "([^"]+)"/g)) labels[match[1]] = match[2];
+    return labels;
+  }
+  const cabinet = parseLabels(
+    await readFile(path.join(repoRoot, "artifacts", "negis", "src", "lib", "permissions.ts"), "utf8"),
+    "export const roleLabels",
+  );
+  const portal = parseLabels(
+    await readFile(path.join(controlSrc, "screens", "ClinicCard.tsx"), "utf8"),
+    "const ROLE_LABELS",
+  );
+  assert.ok(Object.keys(cabinet).length >= 6, "словарь кабинета прочитан");
+  assert.deepEqual(portal, cabinet, "одна роль — одно слово на обеих поверхностях");
+});
+
 test("MC8 маршруты платформы по-прежнему за requirePlatformOwner", async () => {
   const router = await readFile(path.join(repoRoot, "api", "crm", "[...path].ts"), "utf8");
   // CORS открыл дорогу браузеру портала, но не ослабил авторизацию: платформенная

@@ -1,6 +1,7 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { getSupabaseServerClient } from "../supabase/server";
 import { computeClinicSignals, type ClinicFacts } from "./clinic-signals";
+import { invitationStatus } from "./staff-invitations";
 import { readVertical, VERTICAL_SETTINGS_KEY } from "../vertical/terms";
 
 // Панель владельца платформы: подключённые клиники и выручка.
@@ -638,9 +639,67 @@ async function handleClinicCard(req: VercelRequest, res: VercelResponse) {
   const priceMinor = readInteger(subscription.price_minor);
   const billingPeriod = readString(subscription.billing_period) || "monthly";
 
+  // Доступ: кто уже внутри и что с приглашением владельца. Раньше это жило
+  // в трёх местах — карточка собирает в одно. Сотрудники — email, роль и
+  // статус: административные данные, без имён и без строк пациентов; сбой
+  // чтения отдаётся null-ом и не притворяется «никого нет».
+  const [staffRows, invitationRows] = await Promise.all([
+    (async (): Promise<Array<{ email: string; role: string; status: string; linked: boolean }> | null> => {
+      try {
+        const { data, error } = await supabase
+          .from("staff_users")
+          .select("email, role, status, auth_user_id")
+          .eq("workspace_id", workspaceId)
+          .order("created_at", { ascending: true });
+        if (error || !Array.isArray(data)) return null;
+        return data.map((row) => {
+          const record = asRecord(row);
+          return {
+            email: readString(record.email),
+            role: readString(record.role),
+            status: readString(record.status),
+            linked: Boolean(readString(record.auth_user_id)),
+          };
+        });
+      } catch {
+        return null;
+      }
+    })(),
+    (async (): Promise<Array<{ email: string; status: string; createdAt: string; expiresAt: string }> | null> => {
+      try {
+        const { data, error } = await supabase
+          .from("staff_invitations")
+          .select("email, role, accepted_at, revoked_at, expires_at, created_at")
+          .eq("workspace_id", workspaceId)
+          .eq("role", "owner")
+          .order("created_at", { ascending: false });
+        if (error || !Array.isArray(data)) return null;
+        return data.map((row) => {
+          const record = asRecord(row);
+          // Статус — общей функцией: правила accepted → revoked → expired →
+          // pending живут в одном месте, а не расползаются копиями.
+          const status = invitationStatus({
+            accepted_at: readString(record.accepted_at) || null,
+            revoked_at: readString(record.revoked_at) || null,
+            expires_at: readString(record.expires_at),
+          });
+          return {
+            email: readString(record.email),
+            status,
+            createdAt: readString(record.created_at),
+            expiresAt: readString(record.expires_at),
+          };
+        });
+      } catch {
+        return null;
+      }
+    })(),
+  ]);
+
   return sendJson(res, 200, {
     success: true,
     data: {
+      access: { staff: staffRows, ownerInvitations: invitationRows },
       clinic: {
         id: workspaceId,
         name: readString(workspace.name),
