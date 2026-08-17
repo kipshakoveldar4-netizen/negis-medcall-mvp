@@ -40,16 +40,20 @@ export default function JoinWorkspace() {
     }
   };
 
-  // Read once from the fragment, then take it out of the address bar. A
-  // fragment never reaches the server, a Referer header or an access log, and
-  // removing it here keeps it out of browser history and out of anything that
-  // reads location later. The value lives only in this component's memory.
+  // Read once — from the query или из старого фрагмента — и сразу убрать из
+  // адресной строки. Query выбран основным сознательно: WhatsApp и другие
+  // мессенджеры отбрасывают часть ссылки после «#» при открытии во встроенном
+  // браузере, и первая же настоящая передача салона сломалась ровно на этом.
+  // Токен одноразовый, привязан к почте и хранится хэшем — сам по себе он не
+  // открывает ничего. Значение живёт только в памяти этого компонента.
   const token = useMemo(() => {
     if (typeof window === "undefined") return "";
-    const raw = window.location.hash.startsWith("#") ? window.location.hash.slice(1) : "";
-    const captured = new URLSearchParams(raw).get("token")?.trim() || "";
+    const fromQuery = new URLSearchParams(window.location.search).get("token")?.trim() || "";
+    const rawHash = window.location.hash.startsWith("#") ? window.location.hash.slice(1) : "";
+    const fromHash = new URLSearchParams(rawHash).get("token")?.trim() || "";
+    const captured = fromQuery || fromHash;
     if (captured) {
-      window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
+      window.history.replaceState(null, "", window.location.pathname);
     }
     return captured;
   }, []);

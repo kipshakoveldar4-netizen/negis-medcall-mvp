@@ -216,17 +216,25 @@ export async function sendSupabaseInviteEmail(email: string, redirectTo: string)
 /**
  * The redemption link.
  *
- * The token travels in the fragment, not the query. A fragment is never sent to
- * the server, never appears in an access log or a Referer header, and is not
- * part of what a proxy or an analytics script sees. The page reads it once and
- * removes it from the address bar before anything else runs.
+ * The token travels in the QUERY, deliberately. The first design put it in a
+ * fragment so it never reached logs or Referer headers — and the first real
+ * salon handover broke on it: WhatsApp's in-app browser drops everything after
+ * «#» when opening a tapped link, and приглашения доставляются именно через
+ * мессенджеры. A link that dies in its primary delivery channel protects
+ * nothing.
+ *
+ * What makes the query acceptable: the token is single-use, expires in seven
+ * days, the database stores only its hash, and redemption requires a signed-in
+ * session on the invited address — a token alone, fished out of a log, opens
+ * nothing. The page still strips it from the address bar on first read, and
+ * still accepts the old fragment form for links already sent.
  */
 export function acceptUrl(req: VercelRequest, token: string): string {
   const host = String(req.headers["x-forwarded-host"] || req.headers.host || "").split(",")[0].trim();
   const proto = String(req.headers["x-forwarded-proto"] || "https").split(",")[0].trim();
-  const fragment = `/join#token=${encodeURIComponent(token)}`;
-  if (!host) return fragment;
-  return `${proto}://${host}${fragment}`;
+  const path = `/join?token=${encodeURIComponent(token)}`;
+  if (!host) return path;
+  return `${proto}://${host}${path}`;
 }
 
 /**

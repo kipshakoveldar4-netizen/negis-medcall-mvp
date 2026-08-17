@@ -554,15 +554,20 @@ test("I22 the invitation routes are reachable only as registered", async () => {
 
 /* ── Link hygiene and the browser half ──────────────────────── */
 
-test("I23 the token travels in a fragment and leaves the address bar", async () => {
+test("I23 the token travels in the query, survives messengers, and leaves the address bar", async () => {
+  // Первая версия прятала токен во фрагмент ради чистоты логов — и первая же
+  // настоящая передача салона сломалась: WhatsApp отбрасывает часть ссылки
+  // после «#» при открытии во встроенном браузере. Query выбран сознательно:
+  // токен одноразовый, привязан к почте и хранится хэшем — выуженный из лога,
+  // он не открывает ничего. Старые фрагментные ссылки продолжают работать.
   const server = await readFile(modulePath, "utf8");
   const link = server.slice(server.indexOf("function acceptUrl"), server.indexOf("function auditInvitation"));
-  assert.ok(link.includes("/join#token="), "a query string would reach logs, Referer headers and history");
-  assert.ok(!link.includes("/join?token="));
+  assert.ok(link.includes("/join?token="), "ссылка обязана переживать мессенджеры");
+  assert.ok(!link.includes("/join#token="), "фрагментная форма больше не выписывается");
 
   const page = await readFile(path.join(negisSrc, "pages", "JoinWorkspace.tsx"), "utf8");
-  assert.ok(page.includes("location.hash"), "the page reads the fragment");
-  assert.ok(!page.includes('location.search).get("token")'), "and not the query");
+  assert.ok(page.includes('window.location.search).get("token")'), "страница читает query");
+  assert.ok(page.includes("location.hash"), "и старый фрагмент — уже отправленные ссылки живы");
   assert.ok(page.includes("history.replaceState"), "and removes it from the address bar once captured");
   assert.ok(
     page.indexOf("history.replaceState") < page.indexOf("return captured"),
