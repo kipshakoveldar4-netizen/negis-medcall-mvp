@@ -116,17 +116,53 @@ export async function handlePlatformOnboardingCredentials(req: VercelRequest, re
   }
 
   // Аккаунт — первым: отказ «почта занята» не должен оставлять мусора.
-  const { data: created, error: createError } = await supabase.auth.admin.createUser({
-    email: validated.ownerEmail,
-    password,
-    email_confirm: true,
-    user_metadata: { full_name: validated.ownerName },
-  });
-  if (createError || !created?.user) {
-    const message = createError ? String(createError.message || "") : "";
-    const emailTaken =
-      (createError && "code" in createError && (createError as { code?: string }).code === "email_exists") ||
-      /already been registered|already registered|email_exists/i.test(message);
+  //
+  // Прямым вызовом Admin API, а не через клиент: supabase-js 2.105 больше не
+  // возит GoTrue-админку (auth.admin исчез и из типов, и из рантайма — сборка
+  // Vercel это поймала, локальный инкрементальный tsc проглядел). Паттерн тот
+  // же, что у sendSupabaseInviteEmail; ответ провайдера наружу не уходит —
+  // из него читаются только id и код ошибки.
+  type AdminCreateResponse = { ok: boolean; status: number; json(): Promise<unknown> };
+  const supabaseUrl = process.env.SUPABASE_URL?.trim().replace(/\/+$/, "");
+  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim();
+  if (!supabaseUrl || !serviceRoleKey) {
+    return sendJson(res, 503, { success: false, error: "Хранилище не настроено", code: "storage_not_configured" });
+  }
+  let createdResponse: AdminCreateResponse;
+  try {
+    createdResponse = (await fetch(`${supabaseUrl}/auth/v1/admin/users`, {
+      method: "POST",
+      headers: {
+        apikey: serviceRoleKey,
+        Authorization: `Bearer ${serviceRoleKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        email: validated.ownerEmail,
+        password,
+        email_confirm: true,
+        user_metadata: { full_name: validated.ownerName },
+      }),
+    })) as unknown as AdminCreateResponse;
+  } catch {
+    return sendJson(res, 502, { success: false, error: "Не удалось создать аккаунт владельца", code: "unavailable" });
+  }
+  if (!createdResponse.ok) {
+    const errorBody = asRecord(await createdResponse.json().catch(() => null));
+    const errorCode = readString(errorBody.error_code).toLowerCase();
+    const errorMessage = readString(errorBody.msg) || readString(errorBody.message) || readString(errorBody.error_description);
+    const emailTaken = errorCode === "email_exists" || /already (been )?registered/i.test(errorMessage);
+    if (!emailTaken && createdResponse.status === 422) {
+      // Наша проверка длиннее правил Supabase по умолчанию, но проект может
+      // нести свою политику пароля — отказ называется своими словами, тело
+      // провайдера наружу не пересказывается.
+      return sendJson(res, 400, {
+        success: false,
+        error: "Supabase отклонил такой пароль",
+        code: "password_rejected",
+        details: ["Задайте другой пароль — длиннее или с другими символами."],
+      });
+    }
     if (emailTaken) {
       // Занятая почта бывает и следом НАШЕГО прерванного прохода: аккаунт
       // создан, пространство есть, а владелец к нему не привязан. Совет
@@ -171,7 +207,18 @@ export async function handlePlatformOnboardingCredentials(req: VercelRequest, re
     }
     return sendJson(res, 502, { success: false, error: "Не удалось создать аккаунт владельца", code: "unavailable" });
   }
-  const authUserId = created.user.id;
+  const createdUser = asRecord(await createdResponse.json().catch(() => null));
+  const authUserId = readString(createdUser.id);
+  if (!authUserId) {
+    // 2xx без читаемого id: аккаунт создан, а привязать его не к чему.
+    // Повтор формы честно откажет «почта занята» — оттуда путь через
+    // приглашение, тупика нет.
+    return sendJson(res, 502, {
+      success: false,
+      error: "Аккаунт создан, но ответ Supabase не прочитан",
+      code: "unavailable",
+    });
+  }
 
   const { data: workspaceRow, error: workspaceError } = await supabase
     .from("workspaces")

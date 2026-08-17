@@ -689,7 +689,7 @@ test("I28 nothing creates a workspace without a verified owner", async () => {
     "владелец входит через приглашение, а не вписывается строкой");
   const creds = await readFile(path.join(repoRoot, "lib", "crm", "platform-onboarding-credentials.ts"), "utf8");
   assert.ok(
-    creds.indexOf("supabase.auth.admin.createUser(") < creds.indexOf('from("workspaces")') &&
+    creds.indexOf("/auth/v1/admin/users") < creds.indexOf('from("workspaces")') &&
       /auth_user_id: authUserId/.test(creds),
     "парольный путь: сначала проверенная личность, потом пространство, членство — с её auth_user_id",
   );

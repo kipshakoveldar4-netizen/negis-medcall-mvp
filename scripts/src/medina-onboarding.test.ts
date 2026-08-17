@@ -81,7 +81,10 @@ test("MB10 парольный путь: без письма, пароль не �
   const creds = (await readFile(credsPath, "utf8"))
     .replace(/(^|\s)\/\/[^\n]*/g, "$1")
     .replace(/\/\*[\s\S]*?\*\//g, " ");
-  assert.ok(creds.includes("supabase.auth.admin.createUser("), "аккаунт создаёт Supabase — пароль уходит только туда, в хэш");
+  // Прямой вызов Admin API: supabase-js 2.105 больше не возит auth.admin —
+  // клиентский вызов упал бы и в типах (сборка Vercel это поймала), и в
+  // рантайме.
+  assert.ok(creds.includes("/auth/v1/admin/users"), "аккаунт создаёт GoTrue Admin API — пароль уходит только туда, в хэш");
   assert.ok(/email_confirm: true,/.test(creds), "подтверждающее письмо не отправляется — в этом смысл пути");
   // Ни в одну таблицу пароль не пишется: в insert-литералах слово password
   // допустимо только как имя флага password_reset_required.
@@ -98,11 +101,12 @@ test("MB10 парольный путь: без письма, пароль не �
   assert.ok(!/console\./.test(creds), "модуль ничего не логирует");
   assert.equal((creds.match(/res\.status\(/g) || []).length, 1, "единственный выход наружу — sendJson");
   // И ни в один ответ пароль не попадает — даже в детали ошибок.
+  // password_rejected — имя кода отказа, не значение: единственное исключение.
   for (const literal of creds.match(/sendJson\(res,[\s\S]*?\}\);/g) || []) {
-    assert.ok(!/password/i.test(literal), "ответ без пароля");
+    assert.ok(!/password/i.test(literal.replace(/password_rejected/g, "")), "ответ без пароля");
   }
   assert.ok(
-    creds.indexOf("supabase.auth.admin.createUser(") < creds.indexOf('from("workspaces")'),
+    creds.indexOf("/auth/v1/admin/users") < creds.indexOf('from("workspaces")'),
     "аккаунт создаётся первым: отказ «почта занята» не оставляет мусора",
   );
   assert.ok(/email_already_registered/.test(creds), "занятая почта — явный отказ: пароль чужому аккаунту не задаётся");
