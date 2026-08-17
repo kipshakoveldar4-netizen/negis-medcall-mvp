@@ -17,6 +17,15 @@ const schema = z.object({
 type Values = z.infer<typeof schema>;
 type PageState = 'loading' | 'form' | 'success' | 'expired';
 
+/** Пришли сюда с /join за паролем? Тогда и возвращаться надо к приглашению. */
+function hasPendingInvite(): boolean {
+  try {
+    return Boolean(window.sessionStorage.getItem('negis_pending_invite')?.trim());
+  } catch {
+    return false;
+  }
+}
+
 export default function ResetPassword() {
   const [, setLocation] = useLocation();
   const [pageState, setPageState] = useState<PageState>('loading');
@@ -72,7 +81,11 @@ export default function ResetPassword() {
     }
 
     setPageState('success');
-    setTimeout(() => setLocation('/'), 3000);
+    // Раньше уводило на '/' — маркетинговый лендинг, где кнопка «Войти» при
+    // живой сессии без клиники зациклена. Приглашённый (у него отложен токен)
+    // возвращается прямо к приглашению, остальные — на страницу входа, как и
+    // обещает текст.
+    setTimeout(() => setLocation(hasPendingInvite() ? '/join' : '/login'), 3000);
   };
 
   /* ── Styles ── */
@@ -231,11 +244,11 @@ export default function ResetPassword() {
                 Пароль обновлён
               </p>
               <p style={{ fontSize: 13, color: '#64748B', margin: 0, lineHeight: 1.5 }}>
-                Перенаправляем на страницу входа...
+                {hasPendingInvite() ? 'Возвращаемся к приглашению...' : 'Перенаправляем на страницу входа...'}
               </p>
             </div>
             <button
-              onClick={() => setLocation('/')}
+              onClick={() => setLocation(hasPendingInvite() ? '/join' : '/login')}
               style={{
                 background: '#1E325C', color: 'white', border: 'none',
                 borderRadius: 12, fontWeight: 500, fontSize: 14,
@@ -269,7 +282,7 @@ export default function ResetPassword() {
               </p>
             </div>
             <button
-              onClick={() => setLocation('/')}
+              onClick={() => setLocation('/login')}
               style={{
                 background: '#1E325C', color: 'white', border: 'none',
                 borderRadius: 12, fontWeight: 500, fontSize: 14,
@@ -277,7 +290,7 @@ export default function ResetPassword() {
                 fontFamily: "'Inter', sans-serif",
               }}
             >
-              Вернуться на главную
+              Ко входу — там можно запросить письмо снова
             </button>
           </div>
         )}

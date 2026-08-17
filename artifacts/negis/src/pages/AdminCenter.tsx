@@ -33,10 +33,11 @@ import { MetricCard } from "@/components/ui/metric-card";
 import { WhatsAppChannels } from "@/components/admin/WhatsAppChannels";
 import { DoctorSchedule } from "@/components/admin/DoctorSchedule";
 import { useAuth } from "@/contexts/AuthContext";
-import { apiUrl, crmFetch } from "@/lib/api";
+import { apiUrl, crmFetch, CrmApiError, crmErrorMessage } from "@/lib/api";
 import { readWorkspaceId, workspaceScopedKey } from "@/lib/demoStorage";
 import { getSupabaseAccessToken } from "@/lib/serverAuth";
 import {
+  canAssignRole,
   permissionLabels,
   permissionsForRole,
   roleLabels,
@@ -93,7 +94,31 @@ type AdminAuthContextData = {
 type ServerAdminAuthState = {
   status: "checking" | "confirmed" | "reauth" | "forbidden" | "unavailable";
   role?: "owner" | "admin";
+  // Своя строка в таблице: на ней не показываются «Пауза» и смена роли —
+  // сервер такие запросы всё равно отклоняет (self-promotion, last owner).
+  staffUserId?: string;
 };
+
+/**
+ * Английский body.error сервера посреди русского интерфейса — диагностика на
+ * языке, которого продукт нигде больше не показывает. Коды переводятся здесь,
+ * остальное отдаётся общему словарю статусов.
+ */
+const STAFF_ERROR_TEXTS: Record<string, string> = {
+  invitation_already_pending: "Приглашение этой почте уже выслано. Перевыпустите ссылку кнопкой в списке ниже.",
+  already_member: "Этот человек уже в команде. Роль меняется в таблице сотрудников.",
+  permission_denied: "Недостаточно прав: назначать можно только роли ниже вашей, и не себе.",
+  invalid_role: "Такой роли нет — выберите из списка.",
+  last_owner_protected: "Это единственный владелец клиники: без него в кабинет никто не войдёт. Сначала назначьте второго.",
+  invalid_invitation: "Приглашение не найдено или уже недействительно.",
+};
+
+function staffErrorText(error: unknown, fallback: string): string {
+  if (error instanceof CrmApiError) {
+    return STAFF_ERROR_TEXTS[error.code] || crmErrorMessage(error);
+  }
+  return fallback;
+}
 
 type ProviderPresence = {
   status: Status;
@@ -502,7 +527,12 @@ async function crmRequest<T>(path: string, init?: globalThis.RequestInit): Promi
   const response = await crmFetch(path, init);
   const body = await safeJson<T>(response);
   if (!response.ok || body.success === false) {
-    throw new Error(body.error || body.details?.join(", ") || `HTTP ${response.status}`);
+    // CrmApiError, а не голый Error: код отказа — единственное, по чему экран
+    // может сказать «отзовите приглашение в списке ниже» вместо «не удалось».
+    // Сообщение остаётся прежним, поэтому вызывающие, печатающие error.message,
+    // ничего не теряют.
+    const code = typeof (body as { code?: unknown }).code === "string" ? (body as { code: string }).code : "request_failed";
+    throw new CrmApiError(response.status, code, body.error || body.details?.join(", ") || `HTTP ${response.status}`);
   }
   return body;
 }
@@ -677,7 +707,7 @@ export default function AdminCenter() {
   // and redeems the token. Nothing here mints a password or a membership.
   const [inviteForm, setInviteForm] = useState({ email: "", role: "receptionist" as StaffRole });
   const [invitations, setInvitations] = useState<StaffInvitation[]>([]);
-  const [issuedInvite, setIssuedInvite] = useState<{ email: string; acceptUrl: string; emailSent: boolean } | null>(null);
+  const [issuedInvite, setIssuedInvite] = useState<{ email: string; acceptUrl: string; emailSent: boolean; emailStatus?: string } | null>(null);
 
   const readiness = useMemo(() => {
     const total = releaseChecks.length || 1;
@@ -730,7 +760,7 @@ export default function AdminCenter() {
         return;
       }
 
-      setServerAdminAuth({ status: "confirmed", role: body.data.role });
+      setServerAdminAuth({ status: "confirmed", role: body.data.role, staffUserId: body.data.staffUserId });
     } catch {
       setServerAdminAuth({ status: "unavailable" });
     }
@@ -1179,7 +1209,7 @@ export default function AdminCenter() {
 
     setBusy("staff", true);
     try {
-      const body = await crmRequest<{ invitation?: StaffInvitation; acceptUrl?: string; emailSent?: boolean }>(
+      const body = await crmRequest<{ invitation?: StaffInvitation; acceptUrl?: string; emailSent?: boolean; emailStatus?: string }>(
         `/api/crm/staff-invitations?workspaceId=${encodeURIComponent(workspaceId)}`,
         {
           method: "POST",
@@ -1191,6 +1221,7 @@ export default function AdminCenter() {
         email,
         acceptUrl: body.data?.acceptUrl || "",
         emailSent: Boolean(body.data?.emailSent),
+        emailStatus: body.data?.emailStatus || "",
       });
       setInviteForm({ email: "", role: "receptionist" });
       await loadInvitations();
@@ -1198,7 +1229,7 @@ export default function AdminCenter() {
     } catch (error) {
       // No local fallback: an invitation that only exists in this browser would
       // be a person who believes they have access and does not.
-      toast.error(error instanceof Error ? error.message : "Не удалось создать приглашение");
+      toast.error(staffErrorText(error, "Не удалось создать приглашение"));
     } finally {
       setBusy("staff", false);
     }
@@ -1214,7 +1245,47 @@ export default function AdminCenter() {
       await loadInvitations();
       toast.success("Приглашение отозвано");
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Не удалось отозвать приглашение");
+      toast.error(staffErrorText(error, "Не удалось отозвать приглашение"));
+    }
+  }
+
+  /**
+   * Перевыпуск ссылки сотруднику: отзыв старой + новая одним действием.
+   *
+   * Ссылка показывается один раз (в базе только хэш), а доставка идёт через
+   * мессенджеры, где она теряется. Без этого владелец салона упирался в
+   * «приглашение уже выслано» и не имел выхода: отзывать он должен был руками,
+   * не понимая связи.
+   */
+  async function reissueInvitation(invitation: StaffInvitation) {
+    setBusy("staff", true);
+    try {
+      await crmRequest(`/api/crm/staff-invitations?workspaceId=${encodeURIComponent(workspaceId)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: invitation.id }),
+      });
+      const body = await crmRequest<{ acceptUrl?: string; emailSent?: boolean; emailStatus?: string }>(
+        `/api/crm/staff-invitations?workspaceId=${encodeURIComponent(workspaceId)}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email: invitation.email, role: invitation.role }),
+        },
+      );
+      setIssuedInvite({
+        email: invitation.email,
+        acceptUrl: body.data?.acceptUrl || "",
+        emailSent: Boolean(body.data?.emailSent),
+        emailStatus: body.data?.emailStatus || "",
+      });
+      await loadInvitations();
+      toast.success("Ссылка перевыпущена — прежняя больше не работает");
+    } catch (error) {
+      // Отзыв мог пройти, а выписка — нет: обещать «старая ещё работает» нельзя.
+      toast.error(staffErrorText(error, "Не удалось перевыпустить приглашение. Проверьте список ниже."));
+    } finally {
+      setBusy("staff", false);
     }
   }
 
@@ -1243,7 +1314,29 @@ export default function AdminCenter() {
     } catch (error) {
       // No local edit on failure: the previous behaviour changed the row in
       // this browser only, so a suspended colleague kept working.
-      toast.error(error instanceof Error ? error.message : "Не удалось изменить статус");
+      toast.error(staffErrorText(error, "Не удалось изменить статус"));
+    }
+  }
+
+  /**
+   * Смена роли принятого сотрудника.
+   *
+   * Сервер это умел с самого начала (staffPatchRejection валидирует роль,
+   * запрещает самоповышение и выдачу роли не ниже своей), но ни один экран не
+   * вызывал — повысить регистратора до менеджера владелец салона не мог
+   * никак: обходной путь «пригласить заново» закрыт проверкой already_member.
+   */
+  async function updateStaffRole(id: string, role: StaffRole) {
+    try {
+      await crmRequest(`/api/crm/staff?workspaceId=${encodeURIComponent(workspaceId)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id, role }),
+      });
+      await loadStaff();
+      toast.success(`Роль изменена: ${roleLabels[role]}`);
+    } catch (error) {
+      toast.error(staffErrorText(error, "Не удалось изменить роль"));
     }
   }
 
@@ -1427,15 +1520,25 @@ export default function AdminCenter() {
   }
 
   function renderStaff() {
+    const actorRole: StaffRole = serverAdminAuth.role || "admin";
+    const actorStaffUserId = serverAdminAuth.staffUserId || "";
+    // Роли ниже своей — те, что сервер примет; owner недоступен никому.
+    const assignableRoles = staffRoles.filter((role) => canAssignRole(actorRole, role));
+    const statusText = (status: string) => (status === "active" ? "работает" : status === "paused" ? "на паузе" : status);
+    // Своя строка и строка владельца (для админа) не редактируются: сервер
+    // такие запросы отклоняет, и кнопка обещала бы невозможное.
+    const canEdit = (member: StaffMember) =>
+      member.id !== actorStaffUserId && (member.role !== "owner" || actorRole === "owner");
+
     return (
       <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(320px,420px)]">
         <section className="neu-card">
           <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
             <div>
               <h2 className="text-lg font-black text-[#0F172A]">Сотрудники</h2>
-              <p className="text-sm text-[#64748B]">Доступы выдаются по ролям. Пароль показывается только сразу после создания.</p>
+              <p className="text-sm text-[#64748B]">Доступы выдаются по ролям. Каждый входит со своим паролем — пароли за сотрудников не создаются.</p>
             </div>
-            <span className="rounded-full bg-[#E0F2FE] px-3 py-1 text-xs font-bold text-[#0369A1]">{staff.length} профиля</span>
+            <span className="rounded-full bg-[#E0F2FE] px-3 py-1 text-xs font-bold text-[#0369A1]">Профилей: {staff.length}</span>
           </div>
           <div className="grid gap-3 md:hidden">
             {staff.map((member) => (
@@ -1446,15 +1549,34 @@ export default function AdminCenter() {
                     <p className="mt-1 text-sm text-[#64748B]">{member.email}</p>
                     <p className="mt-1 text-xs text-[#64748B]">{roleLabels[member.role]}</p>
                   </div>
-                  <StatusPill status={member.status === "active" ? "configured" : "partial"} label={member.status} />
+                  <StatusPill status={member.status === "active" ? "configured" : "partial"} label={statusText(member.status)} />
                 </div>
-                <button
-                  type="button"
-                  className="neu-btn mt-4 w-full justify-center"
-                  onClick={() => updateStaffStatus(member.id, member.status === "active" ? "paused" : "active")}
-                >
-                  {member.status === "active" ? "Поставить на паузу" : "Активировать"}
-                </button>
+                {canEdit(member) ? (
+                  <>
+                    {assignableRoles.length > 0 ? (
+                      <select
+                        className="neu-input mt-3 w-full"
+                        value={assignableRoles.includes(member.role) ? member.role : ""}
+                        onChange={(event) => updateStaffRole(member.id, event.target.value as StaffRole)}
+                        aria-label={`Роль: ${member.name}`}
+                      >
+                        {!assignableRoles.includes(member.role) ? <option value="">{roleLabels[member.role]}</option> : null}
+                        {assignableRoles.map((role) => (
+                          <option key={role} value={role}>{roleLabels[role]}</option>
+                        ))}
+                      </select>
+                    ) : null}
+                    <button
+                      type="button"
+                      className="neu-btn mt-3 w-full justify-center"
+                      onClick={() => updateStaffStatus(member.id, member.status === "active" ? "paused" : "active")}
+                    >
+                      {member.status === "active" ? "Поставить на паузу" : "Активировать"}
+                    </button>
+                  </>
+                ) : (
+                  <p className="mt-3 text-xs text-[#94A3B8]">{member.id === actorStaffUserId ? "Это вы" : "Строку владельца меняет только владелец"}</p>
+                )}
               </article>
             ))}
           </div>
@@ -1474,16 +1596,36 @@ export default function AdminCenter() {
                   <tr key={member.id} className="border-t border-[#E2E8F0]">
                     <td className="px-3 py-4 font-semibold text-[#0F172A]">{member.name}</td>
                     <td className="px-3 py-4 text-[#64748B]">{member.email}</td>
-                    <td className="px-3 py-4 text-[#334155]">{roleLabels[member.role]}</td>
-                    <td className="px-3 py-4"><StatusPill status={member.status === "active" ? "configured" : "partial"} label={member.status} /></td>
+                    <td className="px-3 py-4 text-[#334155]">
+                      {canEdit(member) && assignableRoles.length > 0 ? (
+                        <select
+                          className="neu-input px-2 py-1 text-xs"
+                          value={assignableRoles.includes(member.role) ? member.role : ""}
+                          onChange={(event) => updateStaffRole(member.id, event.target.value as StaffRole)}
+                          aria-label={`Роль: ${member.name}`}
+                        >
+                          {!assignableRoles.includes(member.role) ? <option value="">{roleLabels[member.role]}</option> : null}
+                          {assignableRoles.map((role) => (
+                            <option key={role} value={role}>{roleLabels[role]}</option>
+                          ))}
+                        </select>
+                      ) : (
+                        roleLabels[member.role]
+                      )}
+                    </td>
+                    <td className="px-3 py-4"><StatusPill status={member.status === "active" ? "configured" : "partial"} label={statusText(member.status)} /></td>
                     <td className="px-3 py-4">
-                      <button
-                        type="button"
-                        className="neu-btn px-3 py-1.5 text-xs"
-                        onClick={() => updateStaffStatus(member.id, member.status === "active" ? "paused" : "active")}
-                      >
-                        {member.status === "active" ? "Пауза" : "Активировать"}
-                      </button>
+                      {canEdit(member) ? (
+                        <button
+                          type="button"
+                          className="neu-btn px-3 py-1.5 text-xs"
+                          onClick={() => updateStaffStatus(member.id, member.status === "active" ? "paused" : "active")}
+                        >
+                          {member.status === "active" ? "Пауза" : "Активировать"}
+                        </button>
+                      ) : (
+                        <span className="text-xs text-[#94A3B8]">{member.id === actorStaffUserId ? "это вы" : "только владелец"}</span>
+                      )}
                     </td>
                   </tr>
                 ))}
@@ -1495,7 +1637,8 @@ export default function AdminCenter() {
         <section className="neu-card">
           <h2 className="text-lg font-black text-[#0F172A]">Пригласить сотрудника</h2>
           <p className="mt-1 text-sm text-[#64748B]">
-            Сотрудник получает письмо, задаёт свой пароль в Supabase Auth и принимает приглашение. Пароли за него не создаются.
+            Сотрудник получает письмо, задаёт свой пароль и принимает приглашение. Ссылка одноразовая и действует 7 дней;
+            если она потеряется — перевыпустите её в списке ниже.
           </p>
           <div className="mt-4 grid gap-3">
             <input
@@ -1505,13 +1648,15 @@ export default function AdminCenter() {
               value={inviteForm.email}
               onChange={(event) => setInviteForm({ ...inviteForm, email: event.target.value })}
             />
+            {/* Роли выше своей сервер отклонит: админ, выбравший «Администратор»,
+                всегда получал 403 без объяснения, какая роль допустима. */}
             <select
               className="neu-input"
               value={inviteForm.role}
               onChange={(event) => setInviteForm({ ...inviteForm, role: event.target.value as StaffRole })}
             >
               {staffRoles
-                .filter((role) => role !== "owner")
+                .filter((role) => canAssignRole(serverAdminAuth.role || "admin", role))
                 .map((role) => (
                   <option key={role} value={role}>{roleLabels[role]}</option>
                 ))}
@@ -1528,7 +1673,9 @@ export default function AdminCenter() {
               <p className="mt-1">
                 {issuedInvite.emailSent
                   ? "Письмо отправлено. Ссылка ниже — на случай, если оно не дошло."
-                  : "Письмо отправить не удалось. Передайте ссылку сотруднику лично."}
+                  : issuedInvite.emailStatus === "already_registered"
+                    ? "У сотрудника уже есть аккаунт — письмо-приглашение таким не отправляется. Передайте ссылку: он войдёт со своим паролем и примет её."
+                    : "Письмо отправить не удалось. Передайте ссылку сотруднику лично."}
               </p>
               <p className="mt-2 break-all font-mono text-xs text-emerald-900">{issuedInvite.acceptUrl}</p>
               <button type="button" className="neu-btn mt-3 w-full justify-center bg-white/80" onClick={copyInviteLink}>
@@ -1547,18 +1694,53 @@ export default function AdminCenter() {
                 {invitations
                   .filter((invitation) => invitation.status === "pending")
                   .map((invitation) => (
-                    <li key={invitation.id} className="flex items-center justify-between gap-3 rounded-2xl border border-[#E2E8F0] bg-white/70 px-3 py-2">
+                    <li key={invitation.id} className="grid gap-2 rounded-2xl border border-[#E2E8F0] bg-white/70 px-3 py-2">
                       <div className="min-w-0">
                         <p className="truncate text-sm font-semibold text-[#0F172A]">{invitation.email}</p>
-                        <p className="text-xs text-[#64748B]">{roleLabels[invitation.role as StaffRole] || invitation.role}</p>
+                        <p className="text-xs text-[#64748B]">
+                          {roleLabels[invitation.role as StaffRole] || invitation.role}
+                          {invitation.expiresAt ? ` · действует до ${invitation.expiresAt.slice(0, 10)}` : ""}
+                        </p>
                       </div>
-                      <button type="button" className="neu-btn px-3 py-1.5 text-xs" onClick={() => revokeInvitation(invitation.id)}>
-                        Отозвать
-                      </button>
+                      <div className="flex gap-2">
+                        <button
+                          type="button"
+                          className="neu-btn px-3 py-1.5 text-xs"
+                          disabled={loading.staff}
+                          onClick={() => reissueInvitation(invitation)}
+                        >
+                          Перевыпустить ссылку
+                        </button>
+                        <button type="button" className="neu-btn px-3 py-1.5 text-xs" onClick={() => revokeInvitation(invitation.id)}>
+                          Отозвать
+                        </button>
+                      </div>
                     </li>
                   ))}
               </ul>
             )}
+
+            {/* Завершённые приглашения: без них принятие сотрудника было видно
+                только косвенно, а истёкшее — не видно вовсе. */}
+            {invitations.filter((invitation) => invitation.status !== "pending").length > 0 ? (
+              <div className="mt-4">
+                <h3 className="text-sm font-black uppercase tracking-[0.12em] text-[#94A3B8]">История</h3>
+                <ul className="mt-2 grid gap-1.5">
+                  {invitations
+                    .filter((invitation) => invitation.status !== "pending")
+                    .slice(0, 5)
+                    .map((invitation) => (
+                      <li key={invitation.id} className="flex items-center justify-between gap-3 text-xs text-[#64748B]">
+                        <span className="truncate">{invitation.email}</span>
+                        <span className="whitespace-nowrap">
+                          {invitation.status === "accepted" ? "принято" : invitation.status === "expired" ? "истекло" : "отозвано"}
+                          {invitation.createdAt ? ` · ${invitation.createdAt.slice(0, 10)}` : ""}
+                        </span>
+                      </li>
+                    ))}
+                </ul>
+              </div>
+            ) : null}
           </div>
         </section>
       </div>

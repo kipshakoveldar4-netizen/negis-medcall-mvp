@@ -71,7 +71,10 @@ export default function Landing() {
   }, [modalState]);
 
   const openModal = () => {
-    if (session) { setLocation(roleRoute(userRole)); return; }
+    // Условие — применённое членство, а не голая сессия: у вошедшего без
+    // клиники roleRoute вёл на защищённый маршрут, тот отбрасывал обратно
+    // сюда, и кнопка «Войти» становилась бесконечным пинг-понгом без выхода.
+    if (session && clinicId) { setLocation(roleRoute(userRole)); return; }
     setError(''); setSuccessMsg('');
     loginForm.reset();
     setModalState('choice');

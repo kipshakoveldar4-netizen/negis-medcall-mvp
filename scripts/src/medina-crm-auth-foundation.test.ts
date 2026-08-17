@@ -405,6 +405,33 @@ test("24 the bootstrap requires authentication", async () => {
   });
 });
 
+test("24b the bootstrap answers about the workspace it was asked about", async () => {
+  // Раньше role/staffUserId заполнялись ТОЛЬКО при одном членстве, а владелец
+  // двух салонов получал null — экраны, спрашивающие «кто я здесь», считали
+  // его рядовым админом. Параметр выбирает из УЖЕ проверенных членств и
+  // доступа не расширяет: это единственная причина, по которой ему можно
+  // верить.
+  const source = await readFile(path.join(repoRoot, "lib", "crm", "server.ts"), "utf8");
+  const handler = source.slice(
+    source.indexOf("export async function handleCrmAuthContext"),
+    source.indexOf("export async function handleCrmResource"),
+  );
+  assert.ok(handler.length > 0, "обработчик на месте");
+  assert.ok(
+    /safeMemberships\.find\(\(membership\) => membership\.workspaceId === requestedWorkspaceId\)/.test(handler),
+    "запрошенная клиника ищется среди своих членств",
+  );
+  assert.ok(
+    /\(safeMemberships\.length === 1 \? safeMemberships\[0\] : null\)/.test(handler),
+    "единственное членство по-прежнему выбирается само",
+  );
+  assert.ok(/isWorkspaceAdminRole\(selected\.role\)/.test(handler), "isAdmin считает сервер по каталогу ролей");
+  assert.ok(
+    /requiresWorkspaceSelection: safeMemberships\.length > 1 && !selected/.test(handler),
+    "выбор всё ещё требуется, когда клиника не названа",
+  );
+});
+
 // ---------------------------------------------------------------------------
 // Role ranking and owner protection
 // ---------------------------------------------------------------------------

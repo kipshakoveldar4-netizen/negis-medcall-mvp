@@ -2,6 +2,28 @@ export const staffRoles = ["owner", "admin", "receptionist", "marketer", "doctor
 
 export type StaffRole = (typeof staffRoles)[number];
 
+/**
+ * Ранг ролей — копия серверного (lib/auth/permissions.ts): экран показывает
+ * ровно те роли, которые сервер примет. Раньше админ, выбравший
+ * «Администратор», всегда получал 403 без объяснения, какая роль допустима.
+ * Значения обязаны совпадать с серверными — расхождение вернёт это же 403;
+ * сервер остаётся единственным, кто решает.
+ */
+const roleRank: Record<StaffRole, number> = {
+  owner: 100,
+  admin: 80,
+  manager: 60,
+  marketer: 40,
+  doctor: 40,
+  receptionist: 20,
+};
+
+/** Роль строго ниже своей; owner не выдаётся никому и никогда. */
+export function canAssignRole(actorRole: StaffRole, targetRole: StaffRole): boolean {
+  if (targetRole === "owner") return false;
+  return roleRank[actorRole] > roleRank[targetRole];
+}
+
 export const crmPermissions = [
   "view_clients",
   "manage_clients",

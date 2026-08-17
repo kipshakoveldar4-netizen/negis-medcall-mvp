@@ -702,6 +702,85 @@ test("I28 nothing creates a workspace without a verified owner", async () => {
   );
 });
 
+test("I30 приглашённый не попадает в петлю: токен переживает поход за паролем, вход не разлогинивает", async () => {
+  const join = await readFile(path.join(negisSrc, "pages", "JoinWorkspace.tsx"), "utf8");
+  // Токен живёт в памяти компонента и стёрт из адресной строки: уходя за
+  // паролем, вернуться человек мог только по исходному сообщению.
+  assert.ok(/export const PENDING_INVITE_KEY/.test(join), "отложенный токен — общий ключ, а не строка в двух местах");
+  assert.ok(/sessionStorage/.test(join) && !/localStorage\.setItem\(PENDING_INVITE_KEY/.test(join),
+    "одноразовый токен умирает вместе с вкладкой");
+  assert.ok(/stashToken\(\); setLocation\("\/login"\)/.test(join), "перед уходом на вход токен откладывается");
+  assert.ok(/Это не я — войти под другой почтой/.test(join), "вошедший не той почтой выходит на месте");
+  assert.ok(/clearStashedToken\(\)/.test(join), "после принятия отложенный токен стирается");
+  // Клиентская навигация не перечитывает членства: новичка выбрасывало с
+  // /dashboard на маркетинговый лендинг.
+  assert.ok(/window\.location\.assign\(/.test(join), "после принятия — полная навигация, а не SPA-переход");
+
+  const login = await readFile(path.join(negisSrc, "pages", "Login.tsx"), "utf8");
+  assert.ok(/PENDING_INVITE_KEY/.test(login), "вход знает про отложенное приглашение");
+  assert.ok(
+    login.indexOf("if (pendingInvite)") < login.indexOf("await supabase.auth.signOut()"),
+    "приглашённого возвращают к приглашению, а не разлогинивают",
+  );
+  assert.ok(/Сервис авторизации не ответил/.test(login), "сбой чтения контекста — не диагноз «не связан с клиникой»");
+
+  const reset = await readFile(path.join(negisSrc, "pages", "ResetPassword.tsx"), "utf8");
+  assert.ok(!/setLocation\('\/'\)/.test(reset), "после смены пароля не уводим на лендинг-ловушку");
+  assert.ok(/hasPendingInvite\(\) \? '\/join' : '\/login'/.test(reset), "приглашённый возвращается к приглашению");
+
+  const landing = await readFile(path.join(negisSrc, "pages", "Landing.tsx"), "utf8");
+  assert.ok(/if \(session && clinicId\)/.test(landing), "кнопка «Войти» не зациклена на сессии без клиники");
+});
+
+test("I31 вкладка «Сотрудники»: перевыпуск, смена роли, русские отказы и защита последнего владельца", async () => {
+  const admin = await readFile(path.join(negisSrc, "pages", "AdminCenter.tsx"), "utf8");
+  assert.ok(/Перевыпустить ссылку/.test(admin), "потерянная ссылка сотрудника — не тупик");
+  assert.ok(/updateStaffRole/.test(admin), "роль принятого сотрудника меняется из кабинета");
+  assert.ok(/canAssignRole\(serverAdminAuth\.role \|\| "admin", role\)/.test(admin), "предлагаются только роли, которые сервер примет");
+  // Судим только обработчики вкладки: диагностические вкладки печатают
+  // технические сообщения намеренно.
+  const staffHandlers = admin.slice(admin.indexOf("async function sendInvitation"), admin.indexOf("async function saveAiProvider"));
+  assert.ok(/staffErrorText\(error/.test(staffHandlers), "коды отказов переводятся на русский");
+  assert.ok(!/toast\.error\(error instanceof Error \? error\.message/.test(staffHandlers),
+    "английский body.error не выводится в русский интерфейс");
+  // Перевод по коду достижим только если запрос бросает ошибку С КОДОМ:
+  // голый Error делал бы весь словарь мёртвым, а отказ по политике —
+  // неотличимым от сетевого сбоя.
+  assert.ok(
+    /throw new CrmApiError\(response\.status, code,/.test(admin),
+    "локальный crmRequest бросает CrmApiError с кодом сервера",
+  );
+  // Роль актора приходит с сервера: при её отсутствии фильтр ролей считал
+  // владельца админом и прятал «Администратор» у всех.
+  assert.ok(/isAdmin: selected \? isWorkspaceAdminRole\(selected\.role\) : false/.test(
+    await readFile(path.join(repoRoot, "lib", "crm", "server.ts"), "utf8"),
+  ), "auth-context отдаёт isAdmin, на который смотрит экран настроек");
+  assert.ok(/member\.id !== actorStaffUserId/.test(admin), "свою строку не приостановить — сервер откажет");
+
+  // «Пауза» отбирает доступ так же, как inactive: единственный владелец мог
+  // одним кликом закрыть себе кабинет, и вернуть его мог только портал.
+  const server = await readFile(path.join(repoRoot, "lib", "crm", "server.ts"), "utf8");
+  assert.ok(
+    /const deactivating = Boolean\(nextStatus\) && nextStatus !== "active";/.test(server),
+    "последний владелец защищён от любой деактивации, не только от «inactive»",
+  );
+  // Идентичность членства не редактируется: PATCH оставался открытой дверью,
+  // ради закрытия которой отключали POST /api/crm/staff.
+  // Комментарии — не поведение: слова «auth_user_id» и «email» стоят в
+  // объяснении запрета, судить надо код.
+  const staffPatch = server
+    .slice(server.indexOf('if (resource === "staff")'), server.indexOf('if (resource === "content-videos")'))
+    .replace(/(^|\s)\/\/[^\n]*/g, "$1");
+  assert.ok(!/auth_user_id/.test(staffPatch) && !/setText\("email"/.test(staffPatch),
+    "PATCH staff не принимает auth_user_id и email из браузера");
+
+  // Истёкшее приглашение занимало частичный уникальный индекс и молча
+  // блокировало повторное — а в списке его не было видно.
+  const invitations = await readFile(modulePath, "utf8");
+  assert.ok(/\.lte\("expires_at", new Date\(\)\.toISOString\(\)\)/.test(invitations), "истёкшие приглашения гасятся перед новой выпиской");
+  assert.ok(/ilike\("email", escapeLikePattern\(validated\.email\)\)/.test(invitations), "почта в проверке членства — значение, не LIKE-шаблон");
+});
+
 test("I29 the landing page offers only flows that exist", async () => {
   const raw = await readFile(path.join(negisSrc, "pages", "Landing.tsx"), "utf8");
   // Read the code, not the comments explaining what was removed. The page route

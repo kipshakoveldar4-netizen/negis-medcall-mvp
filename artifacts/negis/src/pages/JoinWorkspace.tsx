@@ -14,6 +14,18 @@ import { WORKSPACE_SELECTOR_KEY } from "@/lib/demoStorage";
 
 type Phase = "checking" | "needs-auth" | "ready" | "joining" | "joined" | "error";
 
+/**
+ * Токен приглашения, отложенный на время похода за паролем.
+ *
+ * Уходя на /login или /reset-password, приглашённый терял токен: он живёт
+ * только в памяти этого компонента и стёрт из адресной строки. Вернуться можно
+ * было лишь через исходное сообщение в мессенджере — а страница входа вдобавок
+ * разлогинивала его с «Аккаунт не связан с клиникой», потому что членство
+ * появляется ТОЛЬКО после принятия. sessionStorage (не localStorage) — ключ
+ * умирает вместе с вкладкой, как и должен одноразовый токен.
+ */
+export const PENDING_INVITE_KEY = "negis_pending_invite";
+
 export default function JoinWorkspace() {
   const [, setLocation] = useLocation();
   const [phase, setPhase] = useState<Phase>("checking");
@@ -51,12 +63,37 @@ export default function JoinWorkspace() {
     const fromQuery = new URLSearchParams(window.location.search).get("token")?.trim() || "";
     const rawHash = window.location.hash.startsWith("#") ? window.location.hash.slice(1) : "";
     const fromHash = new URLSearchParams(rawHash).get("token")?.trim() || "";
-    const captured = fromQuery || fromHash;
-    if (captured) {
+    // Отложенный токен — возврат из похода за паролем: адресная строка уже
+    // чистая, а приглашение ещё не принято.
+    let stashed = "";
+    try {
+      stashed = window.sessionStorage.getItem(PENDING_INVITE_KEY)?.trim() || "";
+    } catch {
+      // Приватный режим без хранилища — работаем только с адресной строкой.
+    }
+    const captured = fromQuery || fromHash || stashed;
+    if (fromQuery || fromHash) {
       window.history.replaceState(null, "", window.location.pathname);
     }
     return captured;
   }, []);
+
+  /** Уходя за паролем, откладываем токен: вернуться по ссылке уже нельзя. */
+  function stashToken() {
+    try {
+      if (token) window.sessionStorage.setItem(PENDING_INVITE_KEY, token);
+    } catch {
+      // Нет хранилища — пусть возвращается по исходной ссылке.
+    }
+  }
+
+  function clearStashedToken() {
+    try {
+      window.sessionStorage.removeItem(PENDING_INVITE_KEY);
+    } catch {
+      // Нечего чистить.
+    }
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -115,8 +152,15 @@ export default function JoinWorkspace() {
         // writing it here only saves the new member a workspace choice.
         window.localStorage.setItem(WORKSPACE_SELECTOR_KEY, workspaceId);
       }
+      clearStashedToken();
       setPhase("joined");
-      setTimeout(() => setLocation("/dashboard"), 1400);
+      // Полная навигация, а не SPA-переход: членство появилось секунду назад,
+      // AuthContext о нём не знает, и клиентский роутер вышвыривал новичка с
+      // /dashboard на маркетинговый лендинг. Перезагрузка перечитывает
+      // членства с сервера — человек попадает в свой кабинет.
+      setTimeout(() => {
+        window.location.assign(`${window.location.origin}${import.meta.env.BASE_URL || "/"}dashboard`.replace(/\/{2,}dashboard$/, "/dashboard"));
+      }, 1400);
     } catch (error) {
       setPhase("error");
       if (error instanceof CrmApiError) {
@@ -169,12 +213,18 @@ export default function JoinWorkspace() {
                 type="button"
                 className="neu-btn w-full justify-center"
                 disabled={recoverySending}
-                onClick={() => void sendRecovery()}
+                onClick={() => { stashToken(); void sendRecovery(); }}
               >
                 {recoverySending ? "Отправляем письмо…" : "Выслать письмо для пароля"}
               </button>
             )}
-            <button type="button" className="neu-btn-primary w-full justify-center" onClick={() => setLocation("/login")}>
+            {/* Токен откладывается перед уходом: со страницы входа сюда не
+                вернуться — ссылка уже стёрта из адресной строки. */}
+            <button
+              type="button"
+              className="neu-btn-primary w-full justify-center"
+              onClick={() => { stashToken(); setLocation("/login"); }}
+            >
               У меня есть пароль — войти
             </button>
           </div>
@@ -201,6 +251,17 @@ export default function JoinWorkspace() {
               {phase === "joining" ? <Loader2 className="animate-spin" size={16} /> : null}
               Принять приглашение
             </button>
+            {/* Вошли не с той почтой — выход прямо здесь: подписка на
+                onAuthStateChange вернёт страницу в needs-auth, токен уцелеет,
+                и открывать ссылку заново не нужно. */}
+            <button
+              type="button"
+              className="neu-btn w-full justify-center"
+              disabled={phase === "joining"}
+              onClick={() => { stashToken(); void supabase.auth.signOut(); }}
+            >
+              Это не я — войти под другой почтой
+            </button>
           </div>
         )}
 
@@ -213,7 +274,16 @@ export default function JoinWorkspace() {
         {phase === "error" && (
           <div className="mt-4 grid gap-3">
             <p className="rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800">{message}</p>
-            <button type="button" className="neu-btn w-full justify-center" onClick={() => setLocation("/login")}>
+            {email ? (
+              <button
+                type="button"
+                className="neu-btn w-full justify-center"
+                onClick={() => { stashToken(); void supabase.auth.signOut(); }}
+              >
+                Войти под другой почтой
+              </button>
+            ) : null}
+            <button type="button" className="neu-btn w-full justify-center" onClick={() => { stashToken(); setLocation("/login"); }}>
               Ко входу
             </button>
           </div>

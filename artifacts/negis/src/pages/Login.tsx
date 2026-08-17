@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import { apiUrl, crmFetch } from "@/lib/api";
 import { hasSupabaseFrontendEnv, supabase } from "@/lib/supabase";
 import { isStaffRole, roleLabels } from "@/lib/permissions";
+import { PENDING_INVITE_KEY } from "@/pages/JoinWorkspace";
 
 type StaffUser = {
   id?: string;
@@ -140,14 +141,38 @@ export default function Login() {
       // Security-2B: the staff lookup by email is gone — it answered for any
       // address in any workspace. Membership now comes from the verified session
       // via /api/crm/auth-context, which AuthContext resolves on the next render.
-      const context = await crmFetch("/api/crm/auth-context")
-        .then((res) => (res.ok ? res.json() as Promise<{ success?: boolean; data?: { memberships?: unknown[] } }> : null))
-        .catch(() => null);
+      const contextResponse = await crmFetch("/api/crm/auth-context").catch(() => null);
+      const context = contextResponse?.ok
+        ? await (contextResponse.json() as Promise<{ success?: boolean; data?: { memberships?: unknown[] } }>).catch(() => null)
+        : null;
       const memberships = Array.isArray(context?.data?.memberships) ? context!.data!.memberships! : [];
 
+      // Сеть моргнула или сервис недоступен — это НЕ «аккаунт не связан с
+      // клиникой»: прежний код выбрасывал из сессии по любому сбою чтения и
+      // ставил ложный диагноз.
+      if (!contextResponse || (!contextResponse.ok && contextResponse.status >= 500)) {
+        throw new Error("Сервис авторизации не ответил. Попробуйте войти ещё раз через минуту.");
+      }
+
       if (context?.success !== true || memberships.length === 0) {
+        // Приглашённый входит ИМЕННО без членства: оно появляется только при
+        // принятии приглашения, для которого нужна живая сессия. Разлогин здесь
+        // замыкал круг — /join → «войти» → вход → разлогин → /join.
+        let pendingInvite = "";
+        try {
+          pendingInvite = window.sessionStorage.getItem(PENDING_INVITE_KEY)?.trim() || "";
+        } catch {
+          // Нет хранилища — обычная ветка ниже.
+        }
+        if (pendingInvite) {
+          toast.success("Вход выполнен — возвращаемся к приглашению");
+          setLocation("/join");
+          return;
+        }
         await supabase.auth.signOut();
-        throw new Error("Аккаунт не связан с клиникой. Обратитесь к администратору Medina OS.");
+        throw new Error(
+          "Аккаунт не привязан к клинике. Если вам присылали ссылку-приглашение — откройте её ещё раз; если нет — попросите администратора клиники выслать приглашение.",
+        );
       }
 
       toast.success("Вход выполнен");

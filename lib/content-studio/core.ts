@@ -1,3 +1,5 @@
+import { extractJsonObject, generateText, resolveTextProvider } from "../ai/text-provider";
+
 export type ContentStudioStatus = "idea" | "script_ready" | "avatar_ready" | "telegram_ready";
 
 export type ContentStudioVideo = {
@@ -35,7 +37,7 @@ export type PromptPackage = {
   format?: "photo" | "video";
 };
 
-export type ContentStudioMode = "demo" | "openai" | "telegram" | "mock";
+export type ContentStudioMode = "demo" | "openai" | "anthropic" | "telegram" | "mock";
 
 // Phase 1 content package: everything a clinic needs for one creative —
 // short-form video script, ad text, prompts, and the WhatsApp opener.
@@ -369,60 +371,40 @@ export function normalizePromptPackage(value: unknown, fallback: PromptPackage):
   };
 }
 
+/**
+ * Текстовый пакет от модели.
+ *
+ * Имя сохранено ради вызывающих, но провайдер здесь больше не один: выбор
+ * между Claude и OpenAI живёт в lib/ai/text-provider.ts и объявляется
+ * переменными окружения. Контракт прежний: без ключей — demo-заготовка,
+ * отказ провайдера — исключение с причиной, а mode называет того, кто
+ * действительно написал текст.
+ */
 export async function generateOpenAIJson<TData>(input: {
   system: string;
   user: unknown;
   fallback: TData;
   normalize: (value: unknown) => TData;
 }): Promise<{ mode: ContentStudioMode; data: TData }> {
-  const apiKey = process.env.OPENAI_API_KEY?.trim();
-
-  if (!apiKey) {
+  if (!resolveTextProvider(process.env)) {
     return { mode: "demo", data: input.fallback };
   }
 
-  const safeFetch = fetch as unknown as ContentStudioFetch;
-  const response = await safeFetch("https://api.openai.com/v1/responses", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: process.env.OPENAI_MODEL || "gpt-4.1-mini",
-      input: [
-        {
-          role: "system",
-          content: input.system,
-        },
-        {
-          role: "user",
-          content: JSON.stringify(input.user),
-        },
-      ],
-      text: {
-        format: {
-          type: "json_object",
-        },
-      },
-    }),
-  });
-
-  const body = await readJsonBody(response);
-
-  if (!response.ok) {
-    const rawDetails = body.raw ? `: ${body.raw.slice(0, 240)}` : "";
-    throw new Error(body.error?.message || `OpenAI request failed: HTTP ${response.status}${rawDetails}`);
+  const result = await generateText({ system: input.system, user: input.user, json: true, maxTokens: 4096 });
+  if (!result.ok) {
+    throw new Error(result.reason);
   }
 
-  const outputText = extractOutputText(body);
-  if (!outputText) {
-    throw new Error("OpenAI response is empty");
+  // Модель могла обрамить объект пояснением: у Anthropic нет режима «отвечай
+  // JSON-ом», и один абзац вежливости не должен стоить всего ответа.
+  const json = extractJsonObject(result.text);
+  if (!json) {
+    throw new Error(`${result.provider}: ответ без JSON-объекта`);
   }
 
   return {
-    mode: "openai",
-    data: input.normalize(JSON.parse(outputText)),
+    mode: result.provider,
+    data: input.normalize(JSON.parse(json)),
   };
 }
 

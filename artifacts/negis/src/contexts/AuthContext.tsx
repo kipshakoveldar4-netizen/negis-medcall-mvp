@@ -770,7 +770,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     // not chosen yet. Telling them to call their administrator sent them to
     // someone who could not have helped.
     if (membershipsRef.current.length > 1) return;
-    toast.error('Аккаунт не связан с клиникой. Обратитесь к администратору клиники.');
+    // На /join членств ещё нет ПО ЗАМЫСЛУ: человек держит валидное приглашение
+    // и как раз собирается его принять. Пугать его тревогой на этом шаге —
+    // повод для звонка администратору на пустом месте.
+    if (typeof window !== 'undefined') {
+      const path = window.location.pathname || '';
+      let pendingInvite = '';
+      try {
+        pendingInvite = window.sessionStorage.getItem('negis_pending_invite')?.trim() || '';
+      } catch {
+        // Нет хранилища — судим только по адресу.
+      }
+      if (path.includes('/join') || pendingInvite) return;
+    }
+    toast.error(
+      'Аккаунт не привязан к клинике. Если вам присылали ссылку-приглашение — откройте её ещё раз; если нет — попросите администратора клиники выслать приглашение.',
+    );
   };
 
   /* ── 5. Sign out ──────────────────────────────────────── */

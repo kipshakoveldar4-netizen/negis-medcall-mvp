@@ -1,5 +1,6 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import { canAssignRole, isStaffRole } from "../auth/permissions";
+import { canAssignRole, isStaffRole, isWorkspaceAdminRole } from "../auth/permissions";
+import { extractJsonObject, generateText, resolveTextProvider } from "../ai/text-provider";
 import { normalizePhone } from "./phone";
 import {
   listAuthContextMemberships,
@@ -582,16 +583,16 @@ function buildPatchRow(resource: CrmResource, body: JsonRecord): JsonRecord {
   }
 
   if (resource === "staff") {
+    // Идентичность членства (auth_user_id, email) через PATCH не меняется:
+    // POST /api/crm/staff отключён именно потому, что auth_user_id из браузера
+    // был путём эскалации, а PATCH оставлял ту же дверь — админ с manage_staff
+    // мог перепривязать чужую строку к своему аккаунту. Кто есть кто, решает
+    // только принятие приглашения: почта → токен → сессия на этой почте.
+    // Дата входа и флаги пароля тоже принадлежат этому потоку, не редактору.
     setText("full_name", ["name", "full_name", "fullName"]);
-    setText("email", ["email"]);
     setText("phone", ["phone"]);
     setText("role", ["role"]);
     setText("status", ["status"]);
-    setText("auth_user_id", ["authUserId", "auth_user_id"]);
-    setRaw("temporary_password_set", ["temporaryPasswordSet", "temporary_password_set"]);
-    setDate("invited_at", ["invitedAt", "invited_at"]);
-    setDate("last_login_at", ["lastLoginAt", "last_login_at"]);
-    setRaw("password_reset_required", ["passwordResetRequired", "password_reset_required"]);
     row.updated_at = new Date().toISOString();
   }
 
@@ -4210,7 +4211,13 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
       // to a dedicated ownership-transfer path, not to a field update.
       if (targetRole === "owner") {
         const demoting = Boolean(requestedRole) && requestedRole !== "owner";
-        const deactivating = readString(patchBody.status).toLowerCase() === "inactive";
+        // Любой статус кроме active — деактивация. Прежняя проверка знала
+        // только "inactive", а кабинет шлёт "paused": единственный владелец
+        // одним кликом «Пауза» терял доступ ко всей клинике (членства
+        // отбираются по status === "active"), и вернуть его мог только
+        // владелец платформы перевыпуском приглашения.
+        const nextStatus = readString(patchBody.status).toLowerCase();
+        const deactivating = Boolean(nextStatus) && nextStatus !== "active";
         if (demoting || deactivating) {
           const { count, error: countError } = await supabase
             .from("staff_users")
@@ -6093,90 +6100,47 @@ async function parseCrmFetchJson(response: CrmFetchResponse): Promise<JsonRecord
   }
 }
 
-type OpenAiContentItem = {
-  text: string;
-  value: string;
-};
+/**
+ * Пакет Meta Ads от модели.
+ *
+ * Провайдер выбирается в lib/ai/text-provider.ts: заведённый ключ Anthropic
+ * переводит тексты объявлений на Claude, снятый — возвращает OpenAI. Ответ
+ * провайдера здесь не является истиной: он накладывается на безопасный
+ * fallback, и всё, чего модель не написала, остаётся проверенной заготовкой.
+ */
+async function tryAiAdsFill(
+  body: JsonRecord,
+  fallback: JsonRecord,
+): Promise<{ data: JsonRecord | null; provider: string | null; warning?: string }> {
+  if (!resolveTextProvider(process.env)) return { data: null, provider: null };
 
-function normalizeOpenAiContentItems(value: unknown): OpenAiContentItem[] {
-  if (!Array.isArray(value)) return [];
-
-  return value.map((item) => {
-    const record = asRecord(item);
-    return {
-      text: firstString(record.text),
-      value: firstString(record.value),
-    };
+  const result = await generateText({
+    system:
+      "Ты senior performance marketer для медицинской CRM. Верни только JSON без markdown. Пиши по-русски. Не используй обещания результата, диагнозы, давление на внешность, до/после гарантировано.",
+    user: {
+      task: "Заполни безопасный пакет Meta Ads для сотрудника клиники.",
+      expectedKeys: Object.keys(fallback),
+      input: sanitizeLaunchPayload(body),
+      fallback,
+    },
+    json: true,
+    temperature: 0.35,
+    maxTokens: 2048,
   });
-}
 
-function extractOpenAiText(data: JsonRecord): string {
-  const choices = Array.isArray(data.choices) ? data.choices : [];
-  const firstChoice = asRecord(choices[0]);
-  const message = asRecord(firstChoice.message);
-  const content = message.content;
-  if (typeof content === "string") return content;
-
-  const output = Array.isArray(data.output) ? data.output : [];
-  for (const item of output) {
-    const contentItems = normalizeOpenAiContentItems(asRecord(item).content);
-    for (const contentItem of contentItems) {
-      const text = firstString(contentItem.text, contentItem.value);
-      if (text) return text;
-    }
+  if (!result.ok) {
+    return { data: null, provider: result.provider, warning: `${result.reason}, использован demo fallback` };
   }
 
-  return "";
-}
-
-async function tryOpenAiAdsFill(body: JsonRecord, fallback: JsonRecord): Promise<{ data: JsonRecord | null; warning?: string }> {
-  const apiKey = process.env.OPENAI_API_KEY?.trim();
-  if (!apiKey) return { data: null };
+  const json = extractJsonObject(result.text);
+  if (!json) {
+    return { data: null, provider: result.provider, warning: `${result.provider} вернул ответ без JSON, использован demo fallback` };
+  }
 
   try {
-    const safeFetch = fetch as unknown as CrmFetch;
-    const response = await safeFetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model: process.env.OPENAI_ADS_MODEL?.trim() || process.env.OPENAI_MODEL?.trim() || "gpt-4o-mini",
-        temperature: 0.35,
-        messages: [
-          {
-            role: "system",
-            content:
-              "Ты senior performance marketer для медицинской CRM. Верни только JSON без markdown. Пиши по-русски. Не используй обещания результата, диагнозы, давление на внешность, до/после гарантировано.",
-          },
-          {
-            role: "user",
-            content: JSON.stringify({
-              task: "Заполни безопасный пакет Meta Ads для сотрудника клиники.",
-              expectedKeys: Object.keys(fallback),
-              input: sanitizeLaunchPayload(body),
-              fallback,
-            }),
-          },
-        ],
-      }),
-    });
-
-    const responseBody = await parseCrmFetchJson(response);
-    if (!response.ok) {
-      return {
-        data: null,
-        warning: `OpenAI не ответил успешно: ${firstString(asRecord(responseBody.error).message, responseBody.raw, `HTTP ${response.status}`)}`,
-      };
-    }
-
-    const text = extractOpenAiText(responseBody);
-    if (!text) return { data: null, warning: "OpenAI вернул пустой ответ, использован demo fallback" };
-
-    const parsed = JSON.parse(text) as unknown;
-    const aiData = asRecord(parsed);
+    const aiData = asRecord(JSON.parse(json) as unknown);
     return {
+      provider: result.provider,
       data: {
         ...fallback,
         ...aiData,
@@ -6189,7 +6153,8 @@ async function tryOpenAiAdsFill(body: JsonRecord, fallback: JsonRecord): Promise
   } catch (error) {
     return {
       data: null,
-      warning: error instanceof Error ? `OpenAI fallback: ${error.message}` : "OpenAI fallback: неизвестная ошибка",
+      provider: result.provider,
+      warning: error instanceof Error ? `${result.provider}: ответ не разобрался (${error.message})` : "ответ не разобрался",
     };
   }
 }
@@ -6211,8 +6176,8 @@ export async function handleAdsAiFill(req: VercelRequest, res: VercelResponse) {
   }
 
   const fallback = buildAdsAiFallback(body);
-  const openAi = await tryOpenAiAdsFill(body, fallback);
-  const aiPackage = openAi.data || fallback;
+  const ai = await tryAiAdsFill(body, fallback);
+  const aiPackage = ai.data || fallback;
 
   return sendJson(
     res,
@@ -6221,9 +6186,10 @@ export async function handleAdsAiFill(req: VercelRequest, res: VercelResponse) {
       "demo",
       {
         ...aiPackage,
-        generatedBy: openAi.data ? "openai" : "demo",
+        // Кто на самом деле написал текст: заготовка, Claude или OpenAI.
+        generatedBy: ai.data ? ai.provider : "demo",
       },
-      openAi.warning || (!openAi.data && process.env.OPENAI_API_KEY ? "OpenAI недоступен, использован demo fallback" : undefined),
+      ai.warning,
     ),
   );
 }
@@ -8746,6 +8712,16 @@ export async function handleCrmAuthContext(req: VercelRequest, res: VercelRespon
       status: "active",
     }));
 
+    // Запрошенная клиника выбирается ИЗ УЖЕ ПРОВЕРЕННЫХ членств: параметр не
+    // расширяет доступ ни на строку, он лишь говорит, о какой из своих клиник
+    // спрашивают. Без него владелец двух салонов получал role: null, и экраны,
+    // спрашивающие «кто я здесь», считали его рядовым админом — «Настройки»
+    // теряли и роль, и staffUserId, на которых держатся ограничения таблицы.
+    const requestedWorkspaceId = readQueryString(req.query.workspaceId);
+    const selected =
+      safeMemberships.find((membership) => membership.workspaceId === requestedWorkspaceId) ||
+      (safeMemberships.length === 1 ? safeMemberships[0] : null);
+
     return sendJson(
       res,
       200,
@@ -8753,11 +8729,14 @@ export async function handleCrmAuthContext(req: VercelRequest, res: VercelRespon
         memberships: safeMemberships,
         // With exactly one membership the server may select it; with several the
         // client must choose, so no workspace is implied here.
-        workspaceId: safeMemberships.length === 1 ? safeMemberships[0].workspaceId : null,
-        role: safeMemberships.length === 1 ? safeMemberships[0].role : null,
-        staffUserId: safeMemberships.length === 1 ? safeMemberships[0].staffUserId : null,
-        permissions: safeMemberships.length === 1 ? safeMemberships[0].permissions : [],
-        requiresWorkspaceSelection: safeMemberships.length > 1,
+        workspaceId: selected ? selected.workspaceId : null,
+        role: selected ? selected.role : null,
+        staffUserId: selected ? selected.staffUserId : null,
+        permissions: selected ? selected.permissions : [],
+        // Роль администратора считает сервер, а не браузер: список ролей с
+        // правом администрирования живёт в каталоге разрешений.
+        isAdmin: selected ? isWorkspaceAdminRole(selected.role) : false,
+        requiresWorkspaceSelection: safeMemberships.length > 1 && !selected,
       }),
     );
   } catch (error) {
