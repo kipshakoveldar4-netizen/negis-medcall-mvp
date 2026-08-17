@@ -29,6 +29,15 @@ const TIME_ZONES = [
 
 type Mode = "credentials" | "invite";
 
+// Коды, при которых сервер вернул existingWorkspaceId и перевыпуск приглашения
+// в это пространство — правильное следующее действие.
+const REISSUE_CODES = new Set([
+  "invitation_already_pending",
+  "email_already_registered",
+  "partial_onboarding",
+  "partial_credentials_onboarding",
+]);
+
 type Result = {
   workspaceId: string;
   name: string;
@@ -81,6 +90,8 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
   const [reissueWorkspaceId, setReissueWorkspaceId] = useState("");
   // Занятая почта в парольном режиме — подсказка переключиться на приглашение.
   const [offerInvite, setOfferInvite] = useState(false);
+  // У почты уже есть клиника: вторая создаётся только по явной кнопке.
+  const [confirmDuplicate, setConfirmDuplicate] = useState(false);
   const [result, setResult] = useState<Result | null>(null);
   const [credsResult, setCredsResult] = useState<CredsResult | null>(null);
   // Пароль на экране результата — из локального состояния, сервер его не
@@ -98,20 +109,33 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
   /** Смена режима гасит ошибки прежнего: их советы и кнопки — про другой путь. */
   function switchMode(next: Mode) {
     setMode(next);
+    clearOutcome();
+  }
+
+  /** Правка ключевых полей делает прежний отказ и его кнопки неактуальными:
+      залипшая кнопка перевыпуска после исправления опечатки в почте била бы
+      по чужому подключению. */
+  function clearOutcome() {
     setError([]);
     setOfferInvite(false);
     setReissueWorkspaceId("");
+    setConfirmDuplicate(false);
   }
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
+    await performSubmit(false);
+  }
+
+  /**
+   * confirmAdditional — явное «да, создать вторую клинику этой почте»: без
+   * флага сервер отказывает (owner_already_has_workspace), чтобы дубли не
+   * рождались из повторов формы.
+   */
+  async function performSubmit(confirmAdditional: boolean) {
     if (busy) return;
     setBusy(true);
-    setError([]);
-    setOfferInvite(false);
-    // Иначе после сетевой ошибки под ней висела бы кнопка перевыпуска
-    // ПРЕЖНЕЙ почты — и била бы по чужому подключению.
-    setReissueWorkspaceId("");
+    clearOutcome();
     try {
       if (mode === "credentials") {
         const response = await controlFetch("/api/crm/platform-onboarding-credentials", {
@@ -123,11 +147,12 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
         if (!response.ok || body?.success !== true) {
           const reasons = [body?.error, ...(Array.isArray(body?.details) ? body.details : [])].filter(Boolean);
           setError(reasons.length > 0 ? reasons : ["Не удалось подключить клинику. Попробуйте ещё раз."]);
-          // existingWorkspaceId приходит и с занятой почтой: это след нашего
-          // прерванного прохода, и чинится он перевыпуском, а не вторым
-          // пространством через инвайт-режим.
+          // existingWorkspaceId приходит с занятой почтой, живым приглашением,
+          // частичными отказами и почтой, уже владеющей клиникой: в парольном
+          // режиме всё это чинится перевыпуском в УЖЕ созданное пространство,
+          // а не вторым пространством.
           const existingWorkspaceId =
-            (body?.code === "invitation_already_pending" || body?.code === "email_already_registered") &&
+            (REISSUE_CODES.has(body?.code) || body?.code === "owner_already_has_workspace") &&
             typeof body?.data?.existingWorkspaceId === "string"
               ? body.data.existingWorkspaceId
               : "";
@@ -145,22 +170,25 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         // Пароль в инвайт-путь не уходит даже заполненным полем.
-        body: JSON.stringify({ name, vertical, ownerEmail, ownerName, timeZone }),
+        body: JSON.stringify({ name, vertical, ownerEmail, ownerName, timeZone, ...(confirmAdditional ? { confirmAdditionalWorkspace: true } : {}) }),
       });
       const body = await response.json().catch(() => null);
       if (!response.ok || body?.success !== true) {
         const reasons = [body?.error, ...(Array.isArray(body?.details) ? body.details : [])].filter(Boolean);
         setError(reasons.length > 0 ? reasons : ["Не удалось подключить клинику. Попробуйте ещё раз."]);
         setReissueWorkspaceId(
-          body?.code === "invitation_already_pending" && typeof body?.data?.existingWorkspaceId === "string"
+          REISSUE_CODES.has(body?.code) && typeof body?.data?.existingWorkspaceId === "string"
             ? body.data.existingWorkspaceId
             : "",
         );
+        setConfirmDuplicate(body?.code === "owner_already_has_workspace");
         return;
       }
       setResult(body.data as Result);
     } catch {
-      setError(["Сеть не ответила — клиника не подключена."]);
+      // Сервер мог успеть закоммитить до обрыва сети — утверждать «не
+      // подключена» отсюда нельзя.
+      setError(["Сеть не ответила — неизвестно, успело ли подключение. Проверьте список клиник на «Обзоре» перед повтором."]);
     } finally {
       setBusy(false);
     }
@@ -180,12 +208,15 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
       if (!response.ok || body?.success !== true) {
         const reasons = [body?.error, ...(Array.isArray(body?.details) ? body.details : [])].filter(Boolean);
         setError(reasons.length > 0 ? reasons : ["Перевыпустить не удалось. Попробуйте ещё раз."]);
+        // «Владелец уже принял» и «клиники нет» делают кнопку бессмысленной:
+        // оставить её значило бы показывать отказ по кругу.
+        if (body?.code === "owner_already_member" || body?.code === "not_found") setReissueWorkspaceId("");
         return;
       }
       setReissueWorkspaceId("");
       setResult(body.data as Result);
     } catch {
-      setError(["Сеть не ответила — приглашение не перевыпущено."]);
+      setError(["Сеть не ответила — неизвестно, перевыпустилось ли приглашение. Проверьте карточку клиники перед повтором."]);
     } finally {
       setBusy(false);
     }
@@ -270,7 +301,9 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
       <>
         <h1 ref={titleRef} tabIndex={-1} className="page-title">{result.vertical ? "Клиника подключена" : "Приглашение перевыпущено"}</h1>
         <p className="page-sub">
-          «{result.name}» · {result.vertical === "beauty" ? "салон красоты" : result.vertical === "clinic" ? "клиника" : "прежняя ссылка отозвана"} · {result.ownerEmail}
+          {/* Без vertical (перевыпуск) — нейтральное «новая ссылка»: прежней
+              могло и не быть, если приглашение падало на выписке. */}
+          «{result.name}» · {result.vertical === "beauty" ? "салон красоты" : result.vertical === "clinic" ? "клиника" : "новая ссылка приглашения"} · {result.ownerEmail}
         </p>
 
         <div className="panel" style={{ padding: "18px 20px", maxWidth: 720 }}>
@@ -354,7 +387,16 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
             </div>
             <div className="field">
               <label htmlFor="ob-email">Почта владельца{mode === "credentials" ? " (логин)" : ""}</label>
-              <input id="ob-email" type="email" value={ownerEmail} onChange={(event) => setOwnerEmail(event.target.value)} placeholder="owner@salon.kz" />
+              <input
+                id="ob-email"
+                type="email"
+                value={ownerEmail}
+                onChange={(event) => {
+                  setOwnerEmail(event.target.value);
+                  clearOutcome();
+                }}
+                placeholder="owner@salon.kz"
+              />
             </div>
             <div className="field">
               <label htmlFor="ob-owner">Имя владельца</label>
@@ -396,6 +438,13 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
                 <div style={{ marginTop: 10 }}>
                   <button type="button" className="btn" onClick={() => switchMode("invite")}>
                     Переключить на приглашение
+                  </button>
+                </div>
+              ) : null}
+              {confirmDuplicate ? (
+                <div style={{ marginTop: 10 }}>
+                  <button type="button" className="btn" disabled={busy} onClick={() => void performSubmit(true)}>
+                    {busy ? "Подключаю…" : "Да, создать вторую клинику этой почте"}
                   </button>
                 </div>
               ) : null}

@@ -688,8 +688,9 @@ test("I28 nothing creates a workspace without a verified owner", async () => {
   assert.ok(/createInvitationToken\(\)/.test(onboarding) && /role: "owner"/.test(onboarding),
     "владелец входит через приглашение, а не вписывается строкой");
   const creds = await readFile(path.join(repoRoot, "lib", "crm", "platform-onboarding-credentials.ts"), "utf8");
+  // Якорь — insert пространства: read-only выборки имён для 409 стоят раньше.
   assert.ok(
-    creds.indexOf("/auth/v1/admin/users") < creds.indexOf('from("workspaces")') &&
+    creds.indexOf("/auth/v1/admin/users") < creds.indexOf(".insert({ name: validated.name") &&
       /auth_user_id: authUserId/.test(creds),
     "парольный путь: сначала проверенная личность, потом пространство, членство — с её auth_user_id",
   );

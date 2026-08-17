@@ -14,7 +14,26 @@ import { capitalize, termsFor, readVertical } from "../../../../lib/vertical/ter
 type Weekly = { from: string; to: string; leads: number | null; appointments: number | null };
 type Signal = { key: string; level: "ok" | "warn"; data: Record<string, number> };
 type AccessStaff = { email: string; role: string; status: string; linked: boolean };
-type AccessInvitation = { email: string; status: string; createdAt: string; expiresAt: string };
+type AccessInvitation = { email: string; role: string; status: string; createdAt: string; expiresAt: string };
+
+/** История приглашений: живые все; завершённые — свежайшее ПО КАЖДОЙ почте
+    (не просто последние по дате: иначе истёкшее приглашение администратора,
+    ради диагностики которого раздел существует, вытеснялось бы тремя чужими),
+    максимум пять. */
+function visibleInvitations(invitations: AccessInvitation[]): { shown: AccessInvitation[]; hidden: number } {
+  const pending = invitations.filter((invitation) => invitation.status === "pending");
+  const finished = invitations.filter((invitation) => invitation.status !== "pending");
+  const seenEmails = new Set<string>();
+  const latestPerEmail: AccessInvitation[] = [];
+  for (const invitation of finished) {
+    const key = invitation.email.toLowerCase();
+    if (seenEmails.has(key)) continue;
+    seenEmails.add(key);
+    latestPerEmail.push(invitation);
+  }
+  const shownFinished = latestPerEmail.slice(0, 5);
+  return { shown: [...pending, ...shownFinished], hidden: finished.length - shownFinished.length };
+}
 
 // Слова — те же, что клиника видит у себя в «Настройки → Сотрудники»
 // (roleLabels в artifacts/negis/src/lib/permissions.ts): владелец платформы и
@@ -42,7 +61,14 @@ const STAFF_STATUS_LABELS: Record<string, { label: string; cls: string }> = {
 };
 
 type Card = {
-  access?: { staff: AccessStaff[] | null; ownerInvitations: AccessInvitation[] | null };
+  access?: {
+    staff: AccessStaff[] | null;
+    ownerInvitations: AccessInvitation[] | null;
+    staffInvitations?: AccessInvitation[] | null;
+    // null — не смог прочитать; lastAt: "" — прочитал, входов не было;
+    // accountMissing — Auth ответил 404: аккаунт удалён, вход невозможен.
+    ownerSignIn?: { lastAt: string; accountMissing?: boolean } | null;
+  };
   clinic: {
     id: string;
     name: string;
@@ -370,9 +396,16 @@ export function ClinicCard({ workspaceId, onBack }: { workspaceId: string; onBac
   // owner — независимо от привязки входа.
   const accessStaff = card.access ? card.access.staff : null;
   const accessInvitations = card.access ? card.access.ownerInvitations : null;
+  const accessStaffInvitations = card.access ? card.access.staffInvitations ?? null : null;
+  const ownerSignIn = card.access ? card.access.ownerSignIn ?? null : null;
   const ownerRow = Array.isArray(accessStaff) ? accessStaff.find((person) => person.role === "owner") : undefined;
   const ownerInside = Boolean(ownerRow);
   const hasPendingInvitation = Array.isArray(accessInvitations) && accessInvitations.some((invitation) => invitation.status === "pending");
+  // Истёкшее приглашение при пустом штате — самый требующий действия случай:
+  // причина пустоты называется именно тогда, когда нужен перевыпуск.
+  const latestExpired = Array.isArray(accessInvitations)
+    ? accessInvitations.find((invitation) => invitation.status === "expired")
+    : undefined;
 
   // Высота столбиков — от максимума по обеим сериям, чтобы недели сравнивались
   // друг с другом честно. Нет данных — нет столбика, есть прочерк.
@@ -441,8 +474,16 @@ export function ClinicCard({ workspaceId, onBack }: { workspaceId: string; onBac
               <p className="muted">Список сотрудников прочитать не удалось. Это отказ чтения, а не «никого нет».</p>
             ) : accessStaff.length === 0 ? (
               // Причина пустоты не выдумывается: про приглашение говорим
-              // только когда pending-приглашение действительно видно.
-              <p className="muted">Внутри пока никого{hasPendingInvitation ? " — приглашение владельца ещё не принято" : ""}.</p>
+              // только когда его состояние действительно видно.
+              <p className="muted">
+                Внутри пока никого
+                {hasPendingInvitation
+                  ? " — приглашение владельца ещё не принято"
+                  : latestExpired
+                    ? ` — приглашение владельца истекло ${latestExpired.expiresAt.slice(0, 10)}, перевыпустите его кнопкой ниже`
+                    : ""}
+                .
+              </p>
             ) : (
               accessStaff.map((person, index) => {
                 const staffStatus = STAFF_STATUS_LABELS[person.status] || { label: person.status || "статус не записан", cls: "unknown" };
@@ -458,11 +499,59 @@ export function ClinicCard({ workspaceId, onBack }: { workspaceId: string; onBac
                           сама она не привяжется, приглашение на эту почту сервер
                           отклонит (already_member). «Ещё» здесь не обещается. */}
                       <span className={`chip ${person.linked ? "on" : "off"}`}>{person.linked ? "вход привязан" : "вход не привязан"}</span>
+                      {/* «Вход привязан» ≠ «работал»: при парольном подключении
+                          привязка есть с первой секунды. Отвечает Auth-журнал. */}
+                      {person.role === "owner" && ownerSignIn ? (
+                        <span className={`chip ${ownerSignIn.lastAt ? "on" : "off"}`}>
+                          {ownerSignIn.accountMissing
+                            ? "аккаунт входа удалён"
+                            : ownerSignIn.lastAt
+                              ? `входил ${ownerSignIn.lastAt.slice(0, 10)}`
+                              : "ещё не входил"}
+                        </span>
+                      ) : null}
                     </span>
                   </div>
                 );
               })
             )}
+
+            {/* Приглашения сотрудников: без них поддержка не могла ответить на
+                «пригласила администратора, она не может войти». Отказ чтения
+                не маскируется под «приглашений нет». */}
+            {accessStaffInvitations === null && card.access ? (
+              <p className="muted" style={{ marginTop: 12 }}>Приглашения сотрудников прочитать не удалось.</p>
+            ) : null}
+            {accessStaffInvitations !== null && accessStaffInvitations.length > 0 ? (
+              <>
+                <h3 className="section-title" style={{ marginTop: 18 }}>Приглашения сотрудников</h3>
+                {(() => {
+                  const { shown, hidden } = visibleInvitations(accessStaffInvitations);
+                  return (
+                    <>
+                      {shown.map((invitation, index) => {
+                        const label = INVITATION_LABELS[invitation.status] || { label: invitation.status, cls: "off" };
+                        return (
+                          <div key={`${invitation.createdAt}-${index}`} className="reco-row">
+                            <span className="reco-main">
+                              <b>{invitation.email}</b>
+                              <span className="why">
+                                {ROLE_LABELS[invitation.role] || invitation.role} · выписано {invitation.createdAt.slice(0, 10)}
+                                {invitation.status === "pending" ? ` · действует до ${invitation.expiresAt.slice(0, 10)}` : ""}
+                              </span>
+                            </span>
+                            <span className="reco-meta">
+                              <span className={`chip ${label.cls}`}>{label.label}</span>
+                            </span>
+                          </div>
+                        );
+                      })}
+                      {hidden > 0 ? <p className="muted" style={{ fontSize: 12.5 }}>Ещё {hidden} завершённых не показаны.</p> : null}
+                    </>
+                  );
+                })()}
+              </>
+            ) : null}
 
             <h3 className="section-title" style={{ marginTop: 18 }}>Приглашение владельца</h3>
             {accessInvitations === null ? (
@@ -472,23 +561,31 @@ export function ClinicCard({ workspaceId, onBack }: { workspaceId: string; onBac
               // портала или сбой на выписке) — и не утверждается.
               <p className="muted">Приглашений владельцу в базе нет.</p>
             ) : (
-              accessInvitations.map((invitation, index) => {
-                const label = INVITATION_LABELS[invitation.status] || { label: invitation.status, cls: "off" };
+              (() => {
+                const { shown, hidden } = visibleInvitations(accessInvitations);
                 return (
-                  <div key={`${invitation.createdAt}-${index}`} className="reco-row">
-                    <span className="reco-main">
-                      <b>{invitation.email}</b>
-                      <span className="why">
-                        выписано {invitation.createdAt.slice(0, 10)}
-                        {invitation.status === "pending" ? ` · действует до ${invitation.expiresAt.slice(0, 10)}` : ""}
-                      </span>
-                    </span>
-                    <span className="reco-meta">
-                      <span className={`chip ${label.cls}`}>{label.label}</span>
-                    </span>
-                  </div>
+                  <>
+                    {shown.map((invitation, index) => {
+                      const label = INVITATION_LABELS[invitation.status] || { label: invitation.status, cls: "off" };
+                      return (
+                        <div key={`${invitation.createdAt}-${index}`} className="reco-row">
+                          <span className="reco-main">
+                            <b>{invitation.email}</b>
+                            <span className="why">
+                              выписано {invitation.createdAt.slice(0, 10)}
+                              {invitation.status === "pending" ? ` · действует до ${invitation.expiresAt.slice(0, 10)}` : ""}
+                            </span>
+                          </span>
+                          <span className="reco-meta">
+                            <span className={`chip ${label.cls}`}>{label.label}</span>
+                          </span>
+                        </div>
+                      );
+                    })}
+                    {hidden > 0 ? <p className="muted" style={{ fontSize: 12.5 }}>Ещё {hidden} завершённых не показаны.</p> : null}
+                  </>
                 );
-              })
+              })()
             )}
 
             {ownerInside ? (

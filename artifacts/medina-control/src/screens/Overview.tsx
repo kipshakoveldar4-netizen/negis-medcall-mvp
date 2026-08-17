@@ -22,7 +22,17 @@ type Clinic = {
   staffCount: number | null;
   leadCount: number | null;
   appointmentCount: number | null;
+  ownerAccess: { state: "inside" | "pending" | "accepted_no_member" | "expired" | "none"; expiresAt: string } | null;
 };
+
+/** Чип застрявшего онбординга: показывается только когда владелец НЕ внутри. */
+function ownerAccessLabel(access: Clinic["ownerAccess"]): string {
+  if (!access || access.state === "inside") return "";
+  if (access.state === "pending") return `владелец не принял${access.expiresAt ? ` · до ${access.expiresAt.slice(0, 10)}` : ""}`;
+  if (access.state === "expired") return `приглашение истекло${access.expiresAt ? ` ${access.expiresAt.slice(0, 10)}` : ""}`;
+  if (access.state === "accepted_no_member") return "принято, но владелец не внутри — откройте карточку";
+  return "владелец не приглашён";
+}
 
 type Totals = {
   clinics: number;
@@ -213,6 +223,11 @@ export function Overview({ onOpenClinic }: { onOpenClinic: (id: string) => void 
                         {clinic.name}
                       </button>
                       <div className="cell-sub">{clinic.ownerEmail || "почта не указана"}</div>
+                      {ownerAccessLabel(clinic.ownerAccess) ? (
+                        <div style={{ marginTop: 4 }}>
+                          <span className="chip off">{ownerAccessLabel(clinic.ownerAccess)}</span>
+                        </div>
+                      ) : null}
                     </td>
                     <td className="num">{clinic.createdAt.slice(0, 10) || "—"}</td>
                     <td>{clinic.plan ? PLANS[clinic.plan as PlanKey]?.title || clinic.plan : <span className="muted">нет подписки</span>}</td>

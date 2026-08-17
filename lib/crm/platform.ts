@@ -73,6 +73,10 @@ type ClinicRow = {
   leadCount: number | null;
   appointmentCount: number | null;
   lastActivityAt: string;
+  // Состояние владельца: inside | pending | accepted_no_member | expired |
+  // none; null — не смог прочитать (и это не «none»). Застрявший онбординг
+  // должен быть виден со списка, а не после обхода карточек по одной.
+  ownerAccess: { state: "inside" | "pending" | "accepted_no_member" | "expired" | "none"; expiresAt: string } | null;
 };
 
 /**
@@ -176,6 +180,67 @@ async function handleOverview(res: VercelResponse) {
   );
   const countsById = new Map<string, ClinicCounts>(counts.map((entry: ClinicCounts) => [entry.id, entry]));
 
+  // Владельцы и их приглашения — двумя запросами на весь список, не по
+  // клинике за раз. Сбой чтения даёт null («не смог посчитать»), не «none».
+  // Отозванные приглашения отфильтрованы: только они копятся неограниченно
+  // (каждый перевыпуск добавляет строку), а PostgREST молча режет выборку на
+  // тысяче строк — и клиники из отброшенного хвоста получали бы ложный чип.
+  const [ownerRowsResult, ownerInvitationsResult] = await Promise.all([
+    supabase.from("staff_users").select("workspace_id").eq("role", "owner").order("created_at", { ascending: false }),
+    supabase
+      .from("staff_invitations")
+      .select("workspace_id, accepted_at, revoked_at, expires_at")
+      .eq("role", "owner")
+      .is("revoked_at", null)
+      .order("created_at", { ascending: false }),
+  ]);
+  const ownersReadable = !ownerRowsResult.error && Array.isArray(ownerRowsResult.data);
+  const invitationsReadable = !ownerInvitationsResult.error && Array.isArray(ownerInvitationsResult.data);
+  const ownersInside = new Set<string>();
+  if (ownersReadable) {
+    for (const row of ownerRowsResult.data || []) {
+      const key = readString(asRecord(row).workspace_id);
+      if (key) ownersInside.add(key);
+    }
+  }
+  const invitationsByWorkspace = new Map<string, Array<{ status: string; expiresAt: string }>>();
+  if (invitationsReadable) {
+    for (const row of ownerInvitationsResult.data || []) {
+      const record = asRecord(row);
+      const key = readString(record.workspace_id);
+      if (!key) continue;
+      const list = invitationsByWorkspace.get(key) || [];
+      list.push({
+        status: invitationStatus({
+          accepted_at: readString(record.accepted_at) || null,
+          revoked_at: readString(record.revoked_at) || null,
+          expires_at: readString(record.expires_at),
+        }),
+        expiresAt: readString(record.expires_at),
+      });
+      invitationsByWorkspace.set(key, list);
+    }
+  }
+  function ownerAccessFor(id: string): ClinicRow["ownerAccess"] {
+    if (!ownersReadable || !invitationsReadable) return null;
+    if (ownersInside.has(id)) return { state: "inside", expiresAt: "" };
+    const invitations = invitationsByWorkspace.get(id) || [];
+    const pending = invitations.filter((invitation) => invitation.status === "pending");
+    if (pending.length > 0) {
+      return { state: "pending", expiresAt: pending.map((invitation) => invitation.expiresAt).sort().pop() || "" };
+    }
+    // «Принято, но владельца внутри нет» — сломанное состояние, а не «не
+    // приглашён»: приглашение погашено, membership не появился/удалён.
+    if (invitations.some((invitation) => invitation.status === "accepted")) {
+      return { state: "accepted_no_member", expiresAt: "" };
+    }
+    const expired = invitations.filter((invitation) => invitation.status === "expired");
+    if (expired.length > 0) {
+      return { state: "expired", expiresAt: expired.map((invitation) => invitation.expiresAt).sort().pop() || "" };
+    }
+    return { state: "none", expiresAt: "" };
+  }
+
   const clinics: ClinicRow[] = [];
   for (const workspace of known) {
     const id = readString(workspace.id);
@@ -199,6 +264,7 @@ async function handleOverview(res: VercelResponse) {
       leadCount: counted.leadCount,
       appointmentCount: counted.appointmentCount,
       lastActivityAt: readString(subscription.started_at),
+      ownerAccess: ownerAccessFor(id),
     });
   }
 
@@ -639,12 +705,14 @@ async function handleClinicCard(req: VercelRequest, res: VercelResponse) {
   const priceMinor = readInteger(subscription.price_minor);
   const billingPeriod = readString(subscription.billing_period) || "monthly";
 
-  // Доступ: кто уже внутри и что с приглашением владельца. Раньше это жило
-  // в трёх местах — карточка собирает в одно. Сотрудники — email, роль и
-  // статус: административные данные, без имён и без строк пациентов; сбой
-  // чтения отдаётся null-ом и не притворяется «никого нет».
-  const [staffRows, invitationRows] = await Promise.all([
-    (async (): Promise<Array<{ email: string; role: string; status: string; linked: boolean }> | null> => {
+  // Доступ: кто уже внутри и что с приглашениями — владельца и сотрудников.
+  // Раньше это жило в трёх местах — карточка собирает в одно; без приглашений
+  // сотрудников поддержка не могла диагностировать «пригласила администратора,
+  // она не может войти». Всё — административные данные: email, роль, статус,
+  // даты; без имён и без строк пациентов; сбой чтения отдаётся null-ом и не
+  // притворяется «никого нет».
+  const [staffRowsRaw, invitationRows] = await Promise.all([
+    (async (): Promise<Array<{ email: string; role: string; status: string; linked: boolean; authUserId: string }> | null> => {
       try {
         const { data, error } = await supabase
           .from("staff_users")
@@ -659,19 +727,19 @@ async function handleClinicCard(req: VercelRequest, res: VercelResponse) {
             role: readString(record.role),
             status: readString(record.status),
             linked: Boolean(readString(record.auth_user_id)),
+            authUserId: readString(record.auth_user_id),
           };
         });
       } catch {
         return null;
       }
     })(),
-    (async (): Promise<Array<{ email: string; status: string; createdAt: string; expiresAt: string }> | null> => {
+    (async (): Promise<Array<{ email: string; role: string; status: string; createdAt: string; expiresAt: string }> | null> => {
       try {
         const { data, error } = await supabase
           .from("staff_invitations")
           .select("email, role, accepted_at, revoked_at, expires_at, created_at")
           .eq("workspace_id", workspaceId)
-          .eq("role", "owner")
           .order("created_at", { ascending: false });
         if (error || !Array.isArray(data)) return null;
         return data.map((row) => {
@@ -685,6 +753,7 @@ async function handleClinicCard(req: VercelRequest, res: VercelResponse) {
           });
           return {
             email: readString(record.email),
+            role: readString(record.role),
             status,
             createdAt: readString(record.created_at),
             expiresAt: readString(record.expires_at),
@@ -696,10 +765,49 @@ async function handleClinicCard(req: VercelRequest, res: VercelResponse) {
     })(),
   ]);
 
+  // «Вход привязан» не отвечает на вопрос «принял ли владелец работу»:
+  // парольное подключение привязывает вход с первой секунды. Одна строка
+  // administrativa из Auth Admin API — и только по владельцу. null — «не смог
+  // прочитать»; lastAt: "" — прочитал, входов не было.
+  let ownerSignIn: { lastAt: string; accountMissing?: boolean } | null = null;
+  const ownerStaffRow = Array.isArray(staffRowsRaw)
+    ? staffRowsRaw.find((person) => person.role === "owner" && person.authUserId)
+    : undefined;
+  if (ownerStaffRow) {
+    const supabaseUrl = process.env.SUPABASE_URL?.trim().replace(/\/+$/, "");
+    const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim();
+    if (supabaseUrl && serviceRoleKey) {
+      try {
+        type AdminUserResponse = { ok: boolean; status: number; json(): Promise<unknown> };
+        const response = (await fetch(`${supabaseUrl}/auth/v1/admin/users/${encodeURIComponent(ownerStaffRow.authUserId)}`, {
+          headers: { apikey: serviceRoleKey, Authorization: `Bearer ${serviceRoleKey}` },
+        })) as unknown as AdminUserResponse;
+        if (response.ok) {
+          const body = asRecord(await response.json().catch(() => null));
+          ownerSignIn = { lastAt: readString(body.last_sign_in_at) };
+        } else if (response.status === 404) {
+          // 404 — не сбой чтения, а определённый ответ: аккаунт удалён из
+          // Auth, вход владельца невозможен, хотя «вход привязан» горит.
+          ownerSignIn = { lastAt: "", accountMissing: true };
+        }
+      } catch {
+        // Не прочитали — остаётся null: «не знаю», не «не входил».
+      }
+    }
+  }
+
+  // Внутренний auth_user_id наружу не уезжает — он был нужен только для
+  // запроса выше.
+  const staffRows = Array.isArray(staffRowsRaw)
+    ? staffRowsRaw.map(({ authUserId: _authUserId, ...rest }) => rest)
+    : staffRowsRaw;
+  const ownerInvitations = invitationRows === null ? null : invitationRows.filter((invitation) => invitation.role === "owner");
+  const staffInvitations = invitationRows === null ? null : invitationRows.filter((invitation) => invitation.role !== "owner");
+
   return sendJson(res, 200, {
     success: true,
     data: {
-      access: { staff: staffRows, ownerInvitations: invitationRows },
+      access: { staff: staffRows, ownerInvitations, staffInvitations, ownerSignIn },
       clinic: {
         id: workspaceId,
         name: readString(workspace.name),

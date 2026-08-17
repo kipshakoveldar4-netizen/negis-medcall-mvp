@@ -69,10 +69,45 @@ test("MB3 инвайт-путь паролей не видит, парольны
   const form = await readFile(path.join(controlSrc, "screens", "Onboarding.tsx"), "utf8");
   assert.ok(form.includes("/join"), "форма объясняет путь через страницу приглашения");
   assert.ok(
-    /body: JSON\.stringify\(\{ name, vertical, ownerEmail, ownerName, timeZone \}\),/.test(form),
+    /body: JSON\.stringify\(\{ name, vertical, ownerEmail, ownerName, timeZone, \.\.\.\(confirmAdditional \? \{ confirmAdditionalWorkspace: true \} : \{\}\) \}\),/.test(form),
     "инвайт-POST собирается без поля password, даже если оно заполнено",
   );
   assert.ok(form.includes("platform-onboarding-credentials"), "парольный режим зовёт свой отдельный маршрут");
+});
+
+test("MB14 вторая клиника той же почте — только по явному подтверждению, частичные отказы ведут в перевыпуск", async () => {
+  // Молчаливый дубль был главным источником путаницы: повтор формы после
+  // истёкшего приглашения или парольного подключения создавал вторую клинику.
+  const source = await readFile(modulePath, "utf8");
+  assert.ok(/owner_already_has_workspace/.test(source), "у почты с клиникой — отказ, не дубль");
+  assert.ok(/confirmAdditionalWorkspace !== true/.test(source), "явный флаг пропускает легитимные два салона");
+  assert.ok(/escapeLikePattern\(validated\.ownerEmail\)/.test(source), "почта в проверках — значение, не LIKE-шаблон");
+  const partials = source.match(/data: \{ existingWorkspaceId: workspaceId \}/g) || [];
+  assert.ok(partials.length >= 2, "оба частичных отказа несут id для кнопки перевыпуска");
+  assert.ok(!/этой же формой/.test(source), "совет «повторите этой же формой» изгнан: он создавал дубль");
+
+  const creds = await readFile(credsPath, "utf8");
+  assert.ok((creds.match(/data: \{ existingWorkspaceId: workspaceId \}/g) || []).length >= 2, "парольные частичные отказы тоже несут id");
+
+  const form = await readFile(path.join(controlSrc, "screens", "Onboarding.tsx"), "utf8");
+  assert.ok(/Да, создать вторую клинику/.test(form), "подтверждение дубля — явная кнопка");
+  assert.ok(/partial_onboarding/.test(form) && /partial_credentials_onboarding/.test(form), "кнопка перевыпуска знает частичные коды");
+  // Якорь — сам onChange поля почты: пин, который удовлетворяется любым
+  // упоминанием clearOutcome, вакуумный.
+  assert.ok(
+    /setOwnerEmail\(event\.target\.value\);\s*clearOutcome\(\);/.test(form),
+    "правка почты гасит прежний отказ и его кнопки",
+  );
+
+  // Парольный путь закрыт тем же guard-ом ДО createUser: без него повтор
+  // подключения после истёкшего приглашения без Auth-аккаунта молча создавал
+  // вторую клинику — ровно в режиме по умолчанию.
+  const credsSource = await readFile(credsPath, "utf8");
+  assert.ok(/owner_already_has_workspace/.test(credsSource), "парольный путь: у почты с клиникой — отказ с перевыпуском");
+  assert.ok(
+    credsSource.indexOf("owner_already_has_workspace") < credsSource.indexOf("/auth/v1/admin/users"),
+    "проверка владения стоит до создания аккаунта",
+  );
 });
 
 test("MB10 парольный путь: без письма, пароль не сохраняется и не возвращается", async () => {
@@ -105,9 +140,11 @@ test("MB10 парольный путь: без письма, пароль не �
   for (const literal of creds.match(/sendJson\(res,[\s\S]*?\}\);/g) || []) {
     assert.ok(!/password/i.test(literal.replace(/password_rejected/g, "")), "ответ без пароля");
   }
+  // Якорь — сам insert пространства: read-only выборки (имя клиники для 409)
+  // стоят раньше createUser и мусора не оставляют.
   assert.ok(
-    creds.indexOf("/auth/v1/admin/users") < creds.indexOf('from("workspaces")'),
-    "аккаунт создаётся первым: отказ «почта занята» не оставляет мусора",
+    creds.indexOf("/auth/v1/admin/users") < creds.indexOf(".insert({ name: validated.name"),
+    "аккаунт создаётся раньше insert пространства: отказ «почта занята» не оставляет мусора",
   );
   assert.ok(/email_already_registered/.test(creds), "занятая почта — явный отказ: пароль чужому аккаунту не задаётся");
   assert.ok(/password_reset_required: true/.test(creds), "пароль задал не владелец — флаг честный");

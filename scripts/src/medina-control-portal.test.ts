@@ -244,7 +244,10 @@ test("MC14 платформенный маршрут не выдаёт себя 
 test("MC15 карточка собирает доступ: сотрудники, приглашение владельца и перевыпуск на месте", async () => {
   const handler = await readFile(path.join(repoRoot, "lib", "crm", "platform.ts"), "utf8");
   const card = handler.slice(handler.indexOf("async function handleClinicCard"), handler.indexOf("export async function handlePlatformOverview"));
-  assert.ok(/access: \{ staff: staffRows, ownerInvitations: invitationRows \}/.test(card), "доступ в ответе карточки");
+  assert.ok(
+    /access: \{ staff: staffRows, ownerInvitations, staffInvitations, ownerSignIn \}/.test(card),
+    "доступ в ответе карточки: сотрудники, оба списка приглашений и вход владельца",
+  );
   // Сбой чтения — null, не пустой список: «не смог прочитать» не имеет права
   // выглядеть как «в клинике никого нет». Колонки пациентов в этих выборках
   // запрещает MC13 — блок доступа лежит внутри того же среза.
@@ -252,7 +255,17 @@ test("MC15 карточка собирает доступ: сотрудники,
   assert.ok(/if \(error \|\| !Array\.isArray\(data\)\) return null;/.test(staffBlock), "отказ чтения сотрудников — null");
   const invitationBlock = card.slice(card.indexOf('from("staff_invitations")'));
   assert.ok(/if \(error \|\| !Array\.isArray\(data\)\) return null;/.test(invitationBlock), "отказ чтения приглашений — null");
-  assert.ok(/\.eq\("role", "owner"\)/.test(invitationBlock), "карточке видны только приглашения владельца");
+  // Приглашения читаются все и делятся на владельца/сотрудников: без второго
+  // списка поддержка не видела «пригласила администратора, она не может войти».
+  assert.ok(
+    /invitationRows\.filter\(\(invitation\) => invitation\.role === "owner"\)/.test(card) &&
+      /invitationRows\.filter\(\(invitation\) => invitation\.role !== "owner"\)/.test(card),
+    "сплит по роли выполняется на сервере",
+  );
+  // Внутренний auth_user_id использовался только для запроса к Auth и наружу
+  // не уезжает; из журнала входов читается ровно last_sign_in_at.
+  assert.ok(/const staffRows = Array\.isArray\(staffRowsRaw\)/.test(card) && /\.\.\.rest \}\) => rest\)/.test(card), "auth_user_id срезан из ответа");
+  assert.ok(/last_sign_in_at/.test(card) && /ownerSignIn = \{ lastAt:/.test(card), "вход владельца — из Auth-журнала, null при сбое");
 
   const screen = await readFile(path.join(controlSrc, "screens", "ClinicCard.tsx"), "utf8");
   assert.ok(screen.includes("platform-invitation-reissue"), "перевыпуск доступен прямо с карточки");
@@ -297,6 +310,19 @@ test("MC16 роль на портале называется тем же сло�
   );
   assert.ok(Object.keys(cabinet).length >= 6, "словарь кабинета прочитан");
   assert.deepEqual(portal, cabinet, "одна роль — одно слово на обеих поверхностях");
+});
+
+test("MC17 обзор показывает застрявший онбординг и не выдумывает его при сбое чтения", async () => {
+  const handler = await readFile(path.join(repoRoot, "lib", "crm", "platform.ts"), "utf8");
+  const overview = handler.slice(handler.indexOf("async function handleOverview"), handler.indexOf("async function handleSubscriptions"));
+  assert.ok(/ownerAccess: ownerAccessFor\(id\)/.test(overview), "состояние владельца — в каждой строке клиники");
+  // Сбой чтения — null («не смог посчитать»), а не «none»: чип «владелец не
+  // приглашён», построенный на сбое, отправил бы оператора чинить здоровую
+  // клинику.
+  assert.ok(/if \(!ownersReadable \|\| !invitationsReadable\) return null;/.test(overview), "сбой чтения — null, не вердикт");
+  const screen = await readFile(path.join(controlSrc, "screens", "Overview.tsx"), "utf8");
+  assert.ok(/владелец не принял/.test(screen) && /приглашение истекло/.test(screen), "чип называет состояние словами и сроком");
+  assert.ok(/state === "inside"\) return ""/.test(screen), "у клиники с владельцем внутри чипа нет — шум не рисуется");
 });
 
 test("MC8 маршруты платформы по-прежнему за requirePlatformOwner", async () => {

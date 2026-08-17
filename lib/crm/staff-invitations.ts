@@ -295,16 +295,32 @@ export async function handleStaffInvitations(req: VercelRequest, res: VercelResp
 
     // Someone who is already on the team does not need an invitation, and
     // saying so plainly avoids a second membership row for the same person.
+    // The address is a VALUE, not a LIKE pattern: an unescaped "_" matched a
+    // colleague's address one character apart and refused a legitimate invite.
     const { data: existing, error: existingError } = await supabase
       .from("staff_users")
       .select("id")
       .eq("workspace_id", context.workspaceId)
-      .ilike("email", validated.email)
+      .ilike("email", escapeLikePattern(validated.email))
       .maybeSingle();
     if (existingError) return serviceUnavailable(res);
     if (existing) {
       return sendJson(res, 409, { success: false, error: "This address is already a member", code: "already_member" });
     }
+
+    // An EXPIRED invitation still occupies the partial unique index (its
+    // predicate has no expires_at), which used to dead-end re-inviting: the
+    // stale row is invisible in the UI, yet the insert below answered 409.
+    // Revoking it here keeps the index honest and the retry natural.
+    const { error: expireError } = await supabase
+      .from("staff_invitations")
+      .update({ revoked_at: new Date().toISOString() })
+      .eq("workspace_id", context.workspaceId)
+      .ilike("email", escapeLikePattern(validated.email))
+      .is("accepted_at", null)
+      .is("revoked_at", null)
+      .lte("expires_at", new Date().toISOString());
+    if (expireError) return serviceUnavailable(res);
 
     const { token, tokenHash } = createInvitationToken();
     const { data, error } = await supabase

@@ -106,13 +106,54 @@ export async function handlePlatformOnboardingCredentials(req: VercelRequest, re
     return sendJson(res, 502, { success: false, error: "Не удалось проверить существующие приглашения", code: "unavailable" });
   }
   if (Array.isArray(pendingRows) && pendingRows.length > 0) {
+    const existingWorkspaceId = readString(asRecord(pendingRows[0]).workspace_id);
+    // Имя клиники — до кнопки перевыпуска: отзыв старой ссылки необратим, и
+    // жать его вслепую, не зная, к какой клинике относится, нельзя.
+    const { data: existingWorkspace } = await supabase
+      .from("workspaces")
+      .select("name")
+      .eq("id", existingWorkspaceId)
+      .maybeSingle();
+    const existingName = readString(asRecord(existingWorkspace).name);
     return sendJson(res, 409, {
       success: false,
       error: "Эта почта уже подключается",
       code: "invitation_already_pending",
-      details: ["Владельцу уже выписано живое приглашение. Перевыпустите его или дождитесь истечения — второе пространство для той же почты не создаётся."],
-      data: { existingWorkspaceId: readString(asRecord(pendingRows[0]).workspace_id) },
+      details: [
+        `Владельцу уже выписано живое приглашение${existingName ? ` в «${existingName}»` : ""}. Перевыпустите его кнопкой ниже — второе пространство для той же почты не создаётся.`,
+      ],
+      data: { existingWorkspaceId },
     });
+  }
+
+  // У почты уже есть клиника? Проверка стоит ДО createUser: без неё повтор
+  // подключения после истёкшего приглашения, чьё письмо не ушло (Auth-аккаунта
+  // нет), молча создавал вторую клинику — createUser проходил, и insert ниже
+  // не спрашивал ничего. Парольному пути подтверждение «второй точки» не
+  // положено: у владельца второй точки уже есть аккаунт, и такой заход честно
+  // упрётся в email_exists с советом про инвайт-режим.
+  {
+    const { data: ownedRows, error: ownedError } = await supabase
+      .from("workspaces")
+      .select("id, name")
+      .ilike("owner_email", escapeLikePattern(validated.ownerEmail));
+    if (ownedError) {
+      return sendJson(res, 502, { success: false, error: "Не удалось проверить существующие клиники", code: "unavailable" });
+    }
+    if (Array.isArray(ownedRows) && ownedRows.length > 0) {
+      const ownedNames = ownedRows.map((row) => readString(asRecord(row).name)).filter(Boolean);
+      return sendJson(res, 409, {
+        success: false,
+        error: "У этой почты уже есть клиника",
+        code: "owner_already_has_workspace",
+        details: [
+          `За почтой уже числится: ${ownedNames.map((name) => `«${name}»`).join(", ")}.`,
+          "Если владелец не может войти — перевыпустите приглашение кнопкой ниже: при выписке Supabase создаёт аккаунт и шлёт письмо, а ссылку можно передать и вручную.",
+          "Если владельцу нужна вторая точка — подключите её через «Ссылку-приглашение».",
+        ],
+        data: { existingWorkspaceId: readString(asRecord(ownedRows[0]).id) },
+      });
+    }
   }
 
   // Аккаунт — первым: отказ «почта занята» не должен оставлять мусора.
@@ -171,8 +212,9 @@ export async function handlePlatformOnboardingCredentials(req: VercelRequest, re
       // предлагает перевыпуск приглашения именно в него.
       const { data: candidateRows } = await supabase
         .from("workspaces")
-        .select("id")
+        .select("id, name")
         .ilike("owner_email", escapeLikePattern(validated.ownerEmail));
+      const assembledNames: string[] = [];
       for (const row of Array.isArray(candidateRows) ? candidateRows : []) {
         const candidateId = readString(asRecord(row).id);
         if (!candidateId) continue;
@@ -194,6 +236,21 @@ export async function handlePlatformOnboardingCredentials(req: VercelRequest, re
             data: { existingWorkspaceId: candidateId },
           });
         }
+        assembledNames.push(readString(asRecord(row).name) || candidateId);
+      }
+      if (assembledNames.length > 0) {
+        // Типовой случай — прошлое подключение состоялось, а оператор об этом
+        // не знает (ответ потерялся). Отправить его «через приглашение» значило
+        // бы молча создать вторую клинику.
+        return sendJson(res, 409, {
+          success: false,
+          error: "Эта почта уже владеет клиникой",
+          code: "email_already_registered",
+          details: [
+            `За почтой уже числится: ${assembledNames.map((name) => `«${name}»`).join(", ")}. Возможно, подключение уже состоялось — проверьте карточку клиники.`,
+            "Если владельцу нужна вторая точка — подключите её через «Ссылку-приглашение»: форма попросит подтвердить создание второй клиники.",
+          ],
+        });
       }
       return sendJson(res, 409, {
         success: false,
@@ -252,8 +309,9 @@ export async function handlePlatformOnboardingCredentials(req: VercelRequest, re
       details: [
         `Пространство ${workspaceId} и аккаунт владельца уже существуют — не создавайте второе.`,
         "Не записаны ниша и часовой пояс; membership владельца тоже не создан.",
-        "Вход владельцу вернёт перевыпуск приглашения на карточке этой клиники; ниша и часовой пояс останутся незаполненными.",
+        "Вход владельцу вернёт перевыпуск приглашения кнопкой ниже; ниша и часовой пояс останутся незаполненными.",
       ],
+      data: { existingWorkspaceId: workspaceId },
     });
   }
 
@@ -279,8 +337,9 @@ export async function handlePlatformOnboardingCredentials(req: VercelRequest, re
       code: "partial_credentials_onboarding",
       details: [
         `Пространство ${workspaceId} с нишей и поясом уже существует — не создавайте второе.`,
-        "Вход владельца скажет «аккаунт не связан с клиникой». Повторите привязку позже или подключите почту через перевыпуск приглашения этого пространства.",
+        "Вход владельца сказал бы «аккаунт не связан с клиникой». Перевыпустите приглашение кнопкой ниже — владелец войдёт со своим паролем и примет его.",
       ],
+      data: { existingWorkspaceId: workspaceId },
     });
   }
 

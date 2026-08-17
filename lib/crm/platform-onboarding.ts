@@ -200,7 +200,8 @@ export async function handlePlatformOnboarding(req: VercelRequest, res: VercelRe
     return sendJson(res, 503, { success: false, error: "Хранилище не настроено", code: "storage_not_configured" });
   }
 
-  const validated = validateOnboardingRequest(asRecord(req.body));
+  const body = asRecord(req.body);
+  const validated = validateOnboardingRequest(body);
   if ("status" in validated) {
     return sendJson(res, validated.status, {
       success: false,
@@ -245,6 +246,35 @@ export async function handlePlatformOnboarding(req: VercelRequest, res: VercelRe
     });
   }
 
+  // У этой почты уже есть клиника? Молчаливый дубль был главным источником
+  // путаницы: повтор формы после истёкшего приглашения, после потерянного
+  // ответа сети или после парольного подключения создавал вторую клинику
+  // без единого слова. Легитимный кейс «одна почта — два салона» остаётся:
+  // явный флаг подтверждения пропускает мимо проверки.
+  if (body.confirmAdditionalWorkspace !== true) {
+    const { data: ownedRows, error: ownedError } = await supabase
+      .from("workspaces")
+      .select("id, name")
+      .ilike("owner_email", escapeLikePattern(validated.ownerEmail));
+    if (ownedError) {
+      return sendJson(res, 502, { success: false, error: "Не удалось проверить существующие клиники", code: "unavailable" });
+    }
+    if (Array.isArray(ownedRows) && ownedRows.length > 0) {
+      const names = ownedRows.map((row) => readString(asRecord(row).name)).filter(Boolean);
+      return sendJson(res, 409, {
+        success: false,
+        error: "У этой почты уже есть клиника",
+        code: "owner_already_has_workspace",
+        details: [
+          `За почтой уже числится: ${names.map((name) => `«${name}»`).join(", ")}.`,
+          "Если вы ждали это подключение — возможно, оно уже состоялось: проверьте карточку клиники, приглашение перевыпускается оттуда.",
+          "Если владельцу нужна вторая точка — подтвердите создание кнопкой ниже.",
+        ],
+        data: { existingWorkspaceId: readString(asRecord(ownedRows[0]).id) },
+      });
+    }
+  }
+
   const { data: workspaceRow, error: workspaceError } = await supabase
     .from("workspaces")
     .insert({ name: validated.name, owner_email: validated.ownerEmail })
@@ -269,7 +299,10 @@ export async function handlePlatformOnboarding(req: VercelRequest, res: VercelRe
       details: [
         `Пространство ${workspaceId} уже существует — не создавайте второе.`,
         "Не записаны ниша и часовой пояс; приглашение владельцу не отправлялось.",
+        "Приглашение в это пространство выписывается кнопкой ниже; ниша и часовой пояс останутся незаполненными.",
       ],
+      // Кнопка перевыпуска работает по id — без него совет был невыполним.
+      data: { existingWorkspaceId: workspaceId },
     });
   }
 
@@ -288,14 +321,18 @@ export async function handlePlatformOnboarding(req: VercelRequest, res: VercelRe
     .select("id, expires_at")
     .single();
   if (invitationError || !invitationRow) {
+    // Прежний совет «отправьте эту же форму ещё раз» создавал ровно тот дубль,
+    // от которого предостерегала строка выше: форма всегда начинает с insert
+    // нового пространства. Правильный инструмент — перевыпуск по id.
     return sendJson(res, 502, {
       success: false,
       error: "Пространство создано, но приглашение не выписалось",
       code: "partial_onboarding",
       details: [
         `Пространство ${workspaceId} с нишей и поясом уже существует — не создавайте второе.`,
-        "Отправьте приглашение повторно этой же формой: живого приглашения у почты нет, защита от дублей пропустит.",
+        "Перевыпустите приглашение кнопкой ниже — оно уйдёт в уже созданное пространство.",
       ],
+      data: { existingWorkspaceId: workspaceId },
     });
   }
 
