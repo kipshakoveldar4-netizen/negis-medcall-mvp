@@ -111,7 +111,21 @@ const STAFF_ERROR_TEXTS: Record<string, string> = {
   invalid_role: "Такой роли нет — выберите из списка.",
   last_owner_protected: "Это единственный владелец клиники: без него в кабинет никто не войдёт. Сначала назначьте второго.",
   invalid_invitation: "Приглашение не найдено или уже недействительно.",
+  email_already_registered:
+    "У этой почты уже есть аккаунт — задать ему пароль отсюда нельзя. Пригласите этого человека ссылкой: он войдёт со своим паролем.",
+  invalid_staff_credentials: "Проверьте почту, роль и пароль: пароль от 8 символов, без пробелов по краям.",
+  password_rejected: "Такой пароль не принят — задайте длиннее или с другими символами.",
+  partial_staff_credentials:
+    "Аккаунт создан, а доступ к клинике — нет. Пригласите этого человека ссылкой: он войдёт с заданным паролем.",
 };
+
+/** Пароль для передачи голосом: без 0/O/1/l/I, которые путают на слух и на бумаге. */
+function generateStaffPassword(): string {
+  const alphabet = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789";
+  const bytes = new Uint32Array(12);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (n) => alphabet[n % alphabet.length]).join("");
+}
 
 function staffErrorText(error: unknown, fallback: string): string {
   if (error instanceof CrmApiError) {
@@ -708,6 +722,13 @@ export default function AdminCenter() {
   const [inviteForm, setInviteForm] = useState({ email: "", role: "receptionist" as StaffRole });
   const [invitations, setInvitations] = useState<StaffInvitation[]>([]);
   const [issuedInvite, setIssuedInvite] = useState<{ email: string; acceptUrl: string; emailSent: boolean; emailStatus?: string } | null>(null);
+  // Два пути зачисления. Умолчание — пароль: письма-приглашения до клиник
+  // доходят плохо, и сотрудник неделями оставался без входа.
+  const [staffMode, setStaffMode] = useState<"password" | "invite">("password");
+  const [staffPassword, setStaffPassword] = useState("");
+  const [staffFullName, setStaffFullName] = useState("");
+  // Пароль живёт здесь и нигде больше: сервер его не возвращает.
+  const [createdStaff, setCreatedStaff] = useState<{ email: string; password: string } | null>(null);
 
   const readiness = useMemo(() => {
     const total = releaseChecks.length || 1;
@@ -1235,6 +1256,48 @@ export default function AdminCenter() {
     }
   }
 
+  /**
+   * Заведение сотрудника с паролем — когда письмо-приглашение не доходит.
+   *
+   * Пароль уходит одним запросом и остаётся в состоянии экрана, чтобы
+   * администратор успел его передать: сервер пароль не возвращает и не хранит.
+   */
+  async function createStaffWithPassword() {
+    const email = inviteForm.email.trim().toLowerCase();
+    if (!email || !staffPassword) {
+      toast.error("Нужны почта и пароль сотрудника");
+      return;
+    }
+    setBusy("staff", true);
+    try {
+      await crmRequest(`/api/crm/staff-credentials?workspaceId=${encodeURIComponent(workspaceId)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, role: inviteForm.role, fullName: staffFullName.trim(), password: staffPassword }),
+      });
+      setCreatedStaff({ email, password: staffPassword });
+      setStaffPassword("");
+      setStaffFullName("");
+      setInviteForm({ email: "", role: "receptionist" });
+      await Promise.all([loadStaff(), loadInvitations()]);
+      toast.success("Сотрудник добавлен — передайте ему логин и пароль");
+    } catch (error) {
+      toast.error(staffErrorText(error, "Не удалось добавить сотрудника"));
+    } finally {
+      setBusy("staff", false);
+    }
+  }
+
+  async function copyStaffCredentials() {
+    if (!createdStaff) return;
+    try {
+      await navigator.clipboard.writeText(`Логин: ${createdStaff.email}\nПароль: ${createdStaff.password}`);
+      toast.success("Скопировано");
+    } catch {
+      // Буфер недоступен — данные на экране, их можно переписать руками.
+    }
+  }
+
   async function revokeInvitation(id: string) {
     try {
       await crmRequest(`/api/crm/staff-invitations?workspaceId=${encodeURIComponent(workspaceId)}`, {
@@ -1635,10 +1698,36 @@ export default function AdminCenter() {
         </section>
 
         <section className="neu-card">
-          <h2 className="text-lg font-black text-[#0F172A]">Пригласить сотрудника</h2>
-          <p className="mt-1 text-sm text-[#64748B]">
-            Сотрудник получает письмо, задаёт свой пароль и принимает приглашение. Ссылка одноразовая и действует 7 дней;
-            если она потеряется — перевыпустите её в списке ниже.
+          <h2 className="text-lg font-black text-[#0F172A]">Добавить сотрудника</h2>
+          {/* «Логин и пароль» — режим по умолчанию: письма-приглашения до клиник
+              доходят плохо, и сотрудник неделями не мог войти. Приглашение
+              осталось вторым способом — оно единственное для почты, у которой
+              уже есть аккаунт. */}
+          <div className="mt-3 flex gap-2">
+            {/* Переключение режима НЕ стирает показанные данные: пароль и
+                ссылка существуют в одном экземпляре, и случайный клик по
+                соседней кнопке уничтожал единственную копию. */}
+            <button
+              type="button"
+              className={staffMode === "password" ? "neu-btn-primary flex-1 justify-center" : "neu-btn flex-1 justify-center"}
+              aria-pressed={staffMode === "password"}
+              onClick={() => setStaffMode("password")}
+            >
+              Логин и пароль
+            </button>
+            <button
+              type="button"
+              className={staffMode === "invite" ? "neu-btn-primary flex-1 justify-center" : "neu-btn flex-1 justify-center"}
+              aria-pressed={staffMode === "invite"}
+              onClick={() => setStaffMode("invite")}
+            >
+              Ссылка-приглашение
+            </button>
+          </div>
+          <p className="mt-2 text-sm text-[#64748B]">
+            {staffMode === "password"
+              ? "Вы задаёте пароль и передаёте его сотруднику лично. Письмо не отправляется, вход работает сразу. Не подойдёт, если у этой почты уже есть аккаунт."
+              : "Сотрудник получает письмо, задаёт свой пароль и принимает приглашение. Ссылка одноразовая и действует 7 дней; если она потеряется — перевыпустите её в списке ниже."}
           </p>
           <div className="mt-4 grid gap-3">
             <input
@@ -1648,6 +1737,14 @@ export default function AdminCenter() {
               value={inviteForm.email}
               onChange={(event) => setInviteForm({ ...inviteForm, email: event.target.value })}
             />
+            {staffMode === "password" ? (
+              <input
+                className="neu-input"
+                placeholder="Имя сотрудника"
+                value={staffFullName}
+                onChange={(event) => setStaffFullName(event.target.value)}
+              />
+            ) : null}
             {/* Роли выше своей сервер отклонит: админ, выбравший «Администратор»,
                 всегда получал 403 без объяснения, какая роль допустима. */}
             <select
@@ -1661,11 +1758,59 @@ export default function AdminCenter() {
                   <option key={role} value={role}>{roleLabels[role]}</option>
                 ))}
             </select>
-            <button type="button" className="neu-btn-primary w-full justify-center" disabled={loading.staff} onClick={sendInvitation}>
-              {loading.staff ? <Loader2 className="animate-spin" size={16} /> : <UserPlus size={16} />}
-              Отправить приглашение
-            </button>
+            {staffMode === "password" ? (
+              <>
+                <div className="flex gap-2">
+                  {/* Поле видимое намеренно: это не свой секрет, а данные,
+                      которые администратор сейчас передаст дальше. */}
+                  <input
+                    className="neu-input flex-1"
+                    placeholder="Пароль: 8–72 символа"
+                    autoComplete="off"
+                    value={staffPassword}
+                    onChange={(event) => setStaffPassword(event.target.value)}
+                  />
+                  <button type="button" className="neu-btn" onClick={() => setStaffPassword(generateStaffPassword())}>
+                    Сгенерировать
+                  </button>
+                </div>
+                <button
+                  type="button"
+                  className="neu-btn-primary w-full justify-center"
+                  disabled={loading.staff}
+                  onClick={createStaffWithPassword}
+                >
+                  {loading.staff ? <Loader2 className="animate-spin" size={16} /> : <UserPlus size={16} />}
+                  Добавить сотрудника
+                </button>
+              </>
+            ) : (
+              <button type="button" className="neu-btn-primary w-full justify-center" disabled={loading.staff} onClick={sendInvitation}>
+                {loading.staff ? <Loader2 className="animate-spin" size={16} /> : <UserPlus size={16} />}
+                Отправить приглашение
+              </button>
+            )}
           </div>
+
+          {createdStaff && (
+            <div className="mt-4 rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-800">
+              <p className="font-bold">Сотрудник добавлен: {createdStaff.email}</p>
+              <p className="mt-1">
+                Передайте эти данные лично. Пароль показывается один раз — потом его нельзя посмотреть, только задать
+                новый через «Забыли пароль?» на странице входа.
+              </p>
+              <p className="mt-2 font-mono text-xs text-emerald-900">Логин: {createdStaff.email}</p>
+              <p className="font-mono text-xs text-emerald-900">Пароль: {createdStaff.password}</p>
+              <button
+                type="button"
+                className="neu-btn mt-3 w-full justify-center bg-white/80"
+                onClick={() => void copyStaffCredentials()}
+              >
+                <Copy size={15} />
+                Скопировать логин и пароль
+              </button>
+            </div>
+          )}
 
           {issuedInvite && (
             <div className="mt-4 rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-800">
@@ -1678,6 +1823,17 @@ export default function AdminCenter() {
                     : "Письмо отправить не удалось. Передайте ссылку сотруднику лично."}
               </p>
               <p className="mt-2 break-all font-mono text-xs text-emerald-900">{issuedInvite.acceptUrl}</p>
+              {/* Письмо шлёт Supabase, и его ссылка ведёт на адрес из Site URL
+                  проекта. Если там остался localhost, письмо приведёт в
+                  никуда — а ссылка выше правильная всегда: она собрана нашим
+                  сервером из адреса, по которому вы работаете. Подсказка нужна
+                  только там, где письмо реально отправляли. */}
+              {issuedInvite.emailSent ? (
+                <p className="mt-2 text-xs text-emerald-900/80">
+                  Если письмо открывает «localhost» — в Supabase не настроен адрес сайта. Передайте ссылку выше вручную,
+                  она рабочая, или заведите сотрудника через «Логин и пароль».
+                </p>
+              ) : null}
               <button type="button" className="neu-btn mt-3 w-full justify-center bg-white/80" onClick={copyInviteLink}>
                 <Copy size={15} />
                 Скопировать ссылку
@@ -1687,6 +1843,11 @@ export default function AdminCenter() {
 
           <div className="mt-6">
             <h3 className="text-sm font-black uppercase tracking-[0.12em] text-[#94A3B8]">Ожидают принятия</h3>
+            {/* Иначе владелец ищет в этом списке сотрудника, заведённого
+                паролем, и решает, что тот не сохранился. */}
+            <p className="mt-1 text-xs text-[#94A3B8]">
+              Здесь только приглашения. Сотрудники, заведённые логином и паролем, сразу в таблице слева.
+            </p>
             {invitations.filter((invitation) => invitation.status === "pending").length === 0 ? (
               <p className="mt-2 text-sm text-[#64748B]">Активных приглашений нет.</p>
             ) : (

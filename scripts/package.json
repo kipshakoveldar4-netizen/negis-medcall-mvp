@@ -53,6 +53,7 @@
     "test:control-portal": "tsx --test ./src/medina-control-portal.test.ts",
     "test:onboarding-portal": "tsx --test ./src/medina-onboarding.test.ts",
     "test:text-provider": "tsx --test ./src/medina-text-provider.test.ts",
+    "test:staff-credentials": "tsx --test ./src/medina-staff-credentials.test.ts",
     "test:frontdesk": "tsx --test ./src/medina-frontdesk.test.ts",
     "test:recommendations": "tsx --test ./src/medina-recommendations.test.ts",
     "build:icons": "tsx ./src/build-app-icons.ts",

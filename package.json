@@ -57,6 +57,7 @@
     "test:control-portal": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:control-portal",
     "test:onboarding-portal": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:onboarding-portal",
     "test:text-provider": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:text-provider",
+    "test:staff-credentials": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:staff-credentials",
     "test:frontdesk": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:frontdesk",
     "test:recommendations": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:recommendations",
     "build:icons": "node scripts/run-pnpm.cjs --filter @workspace/scripts run build:icons",

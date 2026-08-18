@@ -596,8 +596,24 @@ test("I25 the Admin Center no longer invents passwords or fakes a local save", a
 
   assert.ok(!admin.includes("temporaryPassword"), "no temporary password is generated for a colleague");
   assert.ok(!admin.includes("defaultTemporaryPassword("));
-  assert.ok(!/Сотрудник сохранен локально|Сотрудник добавлен/.test(admin), "no claim of success the server did not make");
+  assert.ok(!/Сотрудник сохранен локально/.test(admin), "no claim of a save the server did not make");
   assert.ok(!admin.includes('writeStored("negis_demo_staff"'), "a staff member is never persisted to localStorage");
+
+  // «Сотрудник добавлен» снова разрешено — но только как пересказ ответа
+  // сервера. Раньше эта строка печаталась после локальной записи и была
+  // ложью; теперь она стоит ПОСЛЕ ответа /api/crm/staff-credentials, который
+  // создаёт аккаунт и членство (2026-08-18: письма-приглашения не доходят,
+  // и администратор задаёт пароль сам).
+  const creation = admin.slice(
+    admin.indexOf("async function createStaffWithPassword"),
+    admin.indexOf("async function copyStaffCredentials"),
+  );
+  assert.ok(creation.length > 0, "the password path exists");
+  assert.ok(
+    creation.indexOf("staff-credentials") < creation.indexOf("toast.success"),
+    "success is announced only after the server answered",
+  );
+  assert.ok(!/writeStored\(/.test(creation), "and nothing about the new member is kept in this browser");
 
   assert.ok(admin.includes("sendInvitation") && admin.includes("revokeInvitation"), "invite and revoke are wired");
   assert.ok(admin.includes("acceptUrl"), "the link is shown once so it can be passed on by hand");

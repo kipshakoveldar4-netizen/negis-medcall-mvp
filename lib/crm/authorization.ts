@@ -214,6 +214,16 @@ export const CRM_ROUTE_AUTHORIZATION: Readonly<Record<string, RouteAuthorization
     permissions: { GET: "manage_staff", POST: "manage_staff", PATCH: "manage_staff" },
   },
 
+  // Второй путь зачисления: администратор задаёт сотруднику пароль сам, когда
+  // письмо-приглашение не доходит. Отличие от отключённого staff POST —
+  // auth_user_id приходит от Admin API, а не из тела запроса; роль по-прежнему
+  // строго ниже своей, а занятая почта отказывает вместо захвата аккаунта.
+  "staff-credentials": {
+    kind: "browser",
+    methods: ["POST"],
+    permissions: { POST: "manage_staff" },
+  },
+
   // Advertising actions touch the live Meta account.
   "meta-launch": { kind: "browser", methods: ["POST"], permissions: { POST: "manage_marketing" } },
   "meta-status": { kind: "browser", methods: ["GET"], permissions: { GET: "view_marketing" } },

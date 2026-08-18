@@ -25,6 +25,7 @@ import {
 } from "../../lib/crm/server";
 import { normalizeCrmSegments, resolveCrmRoute } from "../../lib/crm/authorization";
 import { handleStaffInvitationAccept, handleStaffInvitations } from "../../lib/crm/staff-invitations";
+import { handleStaffCredentials } from "../../lib/crm/staff-credentials";
 import { handleWhatsAppChannels } from "../../lib/crm/whatsapp-channels";
 import { handleCrmChangeLog } from "../../lib/crm/change-log";
 import {
@@ -203,6 +204,8 @@ async function dispatch(
     }
     case "staff-invitations":
       return handleStaffInvitations(req, res);
+    case "staff-credentials":
+      return handleStaffCredentials(req, res);
     case "staff-invitations/accept":
       return handleStaffInvitationAccept(req, res);
     case "health":
