@@ -2,7 +2,7 @@ import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { getSupabaseServerClient } from "../supabase/server";
 import { canAssignRole, isStaffRole, type StaffRole } from "../auth/permissions";
 import { readWorkspaceContext } from "./server";
-import { escapeLikePattern, normalizeEmail } from "./staff-invitations";
+import { acceptUrl, createInvitationToken, escapeLikePattern, expiryFromNow, normalizeEmail } from "./staff-invitations";
 import { validateOwnerPassword } from "./platform-onboarding-credentials";
 
 // Заведение сотрудника с паролем — второй путь зачисления в команду.
@@ -63,6 +63,47 @@ function sendJson(res: VercelResponse, status: number, body: JsonRecord) {
  */
 function auditRefusal(code: string, workspaceId: string, actorStaffUserId: string) {
   console.log(`[staff-credentials] refused reason=${code} workspace=${workspaceId} by=${actorStaffUserId}`);
+}
+
+/**
+ * Приглашение вместо тупика.
+ *
+ * Зовётся, когда пароль задать нельзя (аккаунт уже существует). Прежние живые
+ * приглашения этой почты отзываются: два действующих токена на один адрес —
+ * это два пути в клинику, и потерянный никто бы не закрыл. Ошибки здесь не
+ * прерывают ответ: главное сообщение — «пароль задать нельзя», а ссылка лишь
+ * помогает; её отсутствие честно означает пустой acceptUrl.
+ */
+async function issueInvitationFor(
+  supabase: ReturnType<typeof getSupabaseServerClient>,
+  req: VercelRequest,
+  context: { workspaceId: string; staffUserId: string },
+  validated: StaffCredentialsRequest,
+): Promise<{ acceptUrl: string }> {
+  if (!supabase) return { acceptUrl: "" };
+  try {
+    await supabase
+      .from("staff_invitations")
+      .update({ revoked_at: new Date().toISOString() })
+      .eq("workspace_id", context.workspaceId)
+      .ilike("email", escapeLikePattern(validated.email))
+      .is("accepted_at", null)
+      .is("revoked_at", null);
+
+    const { token, tokenHash } = createInvitationToken();
+    const { error } = await supabase.from("staff_invitations").insert({
+      workspace_id: context.workspaceId,
+      email: validated.email,
+      role: validated.role,
+      token_hash: tokenHash,
+      expires_at: expiryFromNow(),
+      invited_by_staff_user_id: context.staffUserId,
+    });
+    if (error) return { acceptUrl: "" };
+    return { acceptUrl: acceptUrl(req, token) };
+  } catch {
+    return { acceptUrl: "" };
+  }
 }
 
 export type StaffCredentialsRejection = { status: number; error: string; code: string; details?: string[] };
@@ -218,15 +259,24 @@ export async function handleStaffCredentials(req: VercelRequest, res: VercelResp
     const emailTaken = errorCode === "email_exists" || /already (been )?registered/i.test(message);
     if (emailTaken) {
       auditRefusal("email_already_registered", context.workspaceId, context.staffUserId);
+      // Отказ здесь — не тупик, а развилка, и вторая её ветка выписывается
+      // сразу. Аккаунт может существовать по двум причинам: человек
+      // регистрировался раньше, либо наш же предыдущий заход оборвался после
+      // создания аккаунта. В обоих случаях путь один — приглашение: человек
+      // входит своим паролем и САМ соглашается стать сотрудником. Ссылка
+      // возвращается администратору готовой, потому что письма не доходят.
+      const invitation = await issueInvitationFor(supabase, req, context, validated);
       return sendJson(res, 409, {
         success: false,
         error: "У этой почты уже есть аккаунт",
         code: "email_already_registered",
         details: [
           "Пароль существующему аккаунту отсюда не задаётся — это был бы захват чужого входа.",
-          "Если вы только что заводили этого человека и получили ошибку — аккаунт уже создан: он войдёт с тем паролем, который вы задали.",
-          "Если аккаунт был у него раньше — пригласите ссылкой: он войдёт со своим паролем и примет приглашение.",
+          invitation.acceptUrl
+            ? "Мы выписали приглашение: передайте ссылку ниже. Человек войдёт своим паролем (если аккаунт создали вы — тем, что вы задали) и станет сотрудником."
+            : "Пригласите этого человека ссылкой на вкладке «Ссылка-приглашение».",
         ],
+        ...(invitation.acceptUrl ? { data: { acceptUrl: invitation.acceptUrl, email: validated.email, role: validated.role } } : {}),
       });
     }
     if (created.status === 422) {

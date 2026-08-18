@@ -1270,11 +1270,24 @@ export default function AdminCenter() {
     }
     setBusy("staff", true);
     try {
-      await crmRequest(`/api/crm/staff-credentials?workspaceId=${encodeURIComponent(workspaceId)}`, {
+      const response = await crmFetch(`/api/crm/staff-credentials?workspaceId=${encodeURIComponent(workspaceId)}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email, role: inviteForm.role, fullName: staffFullName.trim(), password: staffPassword }),
       });
+      const responseBody = await safeJson<{ acceptUrl?: string; staff?: unknown }>(response);
+      if (!response.ok || responseBody.success === false) {
+        // Занятая почта — не тупик: сервер уже выписал приглашение, и ссылка
+        // приходит вместе с отказом. Показываем её тем же блоком, что и у
+        // обычного приглашения, — передать её можно прямо сейчас.
+        if (responseBody.data?.acceptUrl) {
+          setIssuedInvite({ email, acceptUrl: responseBody.data.acceptUrl, emailSent: false, emailStatus: "already_registered" });
+          setStaffMode("invite");
+          await loadInvitations();
+        }
+        const code = typeof (responseBody as { code?: unknown }).code === "string" ? (responseBody as { code: string }).code : "request_failed";
+        throw new CrmApiError(response.status, code, responseBody.error || `HTTP ${response.status}`);
+      }
       setCreatedStaff({ email, password: staffPassword });
       setStaffPassword("");
       setStaffFullName("");

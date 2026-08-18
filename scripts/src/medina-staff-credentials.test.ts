@@ -93,10 +93,10 @@ test("SC4 чужой аккаунт не захватывается, а член
   // Занятая почта — отказ. Задавать пароль существующему аккаунту нельзя:
   // это был бы захват чужого входа, а не заведение сотрудника.
   assert.ok(/email_already_registered/.test(source));
-  assert.ok(/пригласите ссылкой/i.test(source), "и называет работающий путь");
+  assert.ok(/приглашени/i.test(source), "и называет работающий путь — приглашение");
   // Повтор после сбоя на нашей же стороне — не «чужой аккаунт»: отказ обязан
   // сказать, что пароль, заданный минуту назад, уже работает.
-  assert.ok(/он войдёт с тем паролем, который вы задали/.test(source), "и различает свой прерванный проход");
+  assert.ok(/если аккаунт создали вы — тем, что вы задали/.test(source), "и различает свой прерванный проход");
 
   // auth_user_id приходит ОТ Admin API, а не из тела запроса — именно из-за
   // обратного когда-то отключили POST /api/crm/staff.
@@ -109,11 +109,14 @@ test("SC4 чужой аккаунт не захватывается, а член
   // платформу, а не на свою клинику.
   assert.ok(/readWorkspaceContext\(req\)/.test(source));
   assert.ok(/workspace_id: context\.workspaceId/.test(source));
-  assert.equal(
-    (source.match(/\.eq\("workspace_id", context\.workspaceId\)/g) || []).length,
-    3,
-    "выборка дубликата, отзыв приглашений и привязка строки — все ограничены своей клиникой",
-  );
+  // Каждое обращение к таблицам ограничено своей клиникой — либо фильтром
+  // (чтение и обновление), либо полем в записи (вставка). Счётчик сверяется с
+  // числом обращений: новый запрос мимо клиники уронит пин, а не проскочит.
+  const tableCalls = (source.match(/\.from\("staff_(users|invitations)"\)/g) || []).length;
+  const scopedByFilter = (source.match(/\.eq\("workspace_id", context\.workspaceId\)/g) || []).length;
+  const scopedByColumn = (source.match(/workspace_id: context\.workspaceId,/g) || []).length;
+  assert.equal(scopedByFilter + scopedByColumn, tableCalls, "ни одного запроса мимо своей клиники");
+  assert.ok(tableCalls >= 5, "путь ходит в обе таблицы");
   assert.ok(!/body\.workspaceId/.test(source), "клиника не берётся из запроса");
 
   // Роль актора — тоже из контекста: подстановка «owner» или значения из тела
@@ -173,6 +176,25 @@ test("SC4b единственное обращение к Auth — создан�
   // Отказы оставляют след с причиной — иначе жалобу «не могу завести
   // сотрудника» нечем расследовать.
   assert.ok((source.match(/auditRefusal\(/g) || []).length >= 4, "каждый класс отказа попадает в журнал");
+});
+
+test("SC4d занятая почта отдаёт готовую ссылку-приглашение, а не тупик", async () => {
+  // Аккаунт может существовать и потому, что наш собственный заход оборвался
+  // после его создания: тогда человек уже есть в Auth, а сотрудником не стал,
+  // и вход показывает «аккаунт не привязан к клинике». Приглашение — путь,
+  // где человек соглашается сам, и ссылка нужна сразу: письма не доходят.
+  const source = (await readFile(modulePath, "utf8")).replace(/(^|\s)\/\/[^\n]*/g, "$1");
+  assert.ok(/issueInvitationFor\(supabase, req, context, validated\)/.test(source), "отказ выписывает приглашение");
+  assert.ok(/data: \{ acceptUrl: invitation\.acceptUrl/.test(source), "и возвращает ссылку администратору");
+  // Два живых токена на одну почту — два пути в клинику: прежние отзываются.
+  const helper = source.slice(source.indexOf("async function issueInvitationFor"), source.indexOf("export type StaffCredentialsRejection"));
+  assert.ok(helper.indexOf("revoked_at") < helper.indexOf("createInvitationToken()"), "прежние приглашения гасятся до выписки нового");
+  assert.ok(/invited_by_staff_user_id: context\.staffUserId/.test(helper), "в приглашении видно, кто его выписал");
+  assert.ok(/token_hash: tokenHash/.test(helper), "в базе только хэш токена");
+
+  const admin = await readFile(path.join(repoRoot, "artifacts", "negis", "src", "pages", "AdminCenter.tsx"), "utf8");
+  assert.ok(/responseBody\.data\?\.acceptUrl/.test(admin), "экран читает ссылку из отказа");
+  assert.ok(/setStaffMode\("invite"\)/.test(admin), "и показывает её в режиме приглашения");
 });
 
 test("SC5 маршрут закрыт правом manage_staff и только POST", async () => {
