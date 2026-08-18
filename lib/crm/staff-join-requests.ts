@@ -62,6 +62,27 @@ function serviceUnavailable(res: VercelResponse) {
 }
 
 /**
+ * Таблиц ещё нет — миграция 038 не применена. Это отдельный ответ, а не общий
+ * сбой: между выкладкой кода и применением миграции проходит время, и экран
+ * должен сказать правду, а не советовать обновить страницу.
+ */
+function isMissingTable(error: unknown): boolean {
+  const record = asRecord(error);
+  const code = typeof record.code === "string" ? record.code : "";
+  const message = typeof record.message === "string" ? record.message.toLowerCase() : "";
+  return code === "42P01" || code === "PGRST205" || message.includes("does not exist") || message.includes("schema cache");
+}
+
+function notProvisioned(res: VercelResponse) {
+  return sendJson(res, 503, {
+    success: false,
+    error: "Заявки по коду ещё не активированы",
+    code: "not_provisioned",
+    details: ["Примените migrations/038_staff_join_requests.sql в SQL Editor — после этого код клиники и очередь заявок заработают."],
+  });
+}
+
+/**
  * Журнал по образцу auditInvitation: только идентификаторы и исход. Ни кода, ни
  * почты, ни телефона, ни текста сообщения — строка лога с кодом клиники это
  * розданная входная дверь.
@@ -117,7 +138,7 @@ async function listOwnRequests(supabase: SupabaseClient, user: { id: string }, r
     .order("created_at", { ascending: false })
     .limit(20);
 
-  if (error) return serviceUnavailable(res);
+  if (error) return isMissingTable(error) ? notProvisioned(res) : serviceUnavailable(res);
 
   const requests = (data ?? []).map((row) => {
     const record = row as JsonRecord & { workspaces?: { name?: string } | { name?: string }[] | null };
@@ -181,7 +202,7 @@ async function submitRequest(supabase: SupabaseClient, user: { id: string; email
     .select("id", { count: "exact", head: true })
     .eq("auth_user_id", user.id)
     .gte("created_at", windowStart);
-  if (missError) return serviceUnavailable(res);
+  if (missError) return isMissingTable(missError) ? notProvisioned(res) : serviceUnavailable(res);
   if ((misses ?? 0) >= CODE_MISS_LIMIT) {
     audit("code_throttled", { user: user.id });
     return sendJson(res, 429, {
@@ -196,7 +217,7 @@ async function submitRequest(supabase: SupabaseClient, user: { id: string; email
     .eq("code", code)
     .is("revoked_at", null)
     .maybeSingle();
-  if (codeError) return serviceUnavailable(res);
+  if (codeError) return isMissingTable(codeError) ? notProvisioned(res) : serviceUnavailable(res);
 
   if (!codeRow) {
     await supabase.from("staff_join_code_attempts").insert({ auth_user_id: user.id });
@@ -361,6 +382,7 @@ async function listWorkspaceRequests(supabase: SupabaseClient, workspaceId: stri
     .order("created_at", { ascending: false })
     .limit(MAX_PENDING_PER_WORKSPACE + 10);
   if (pending.error) {
+    if (isMissingTable(pending.error)) return notProvisioned(res);
     // Честный отказ чтения: пустой список означал бы «заявок нет», а это не то
     // же самое, что «прочитать не удалось».
     return serviceUnavailable(res);
@@ -634,7 +656,7 @@ export async function handleJoinCode(req: VercelRequest, res: VercelResponse) {
       .eq("workspace_id", context.workspaceId)
       .is("revoked_at", null)
       .maybeSingle();
-    if (error) return serviceUnavailable(res);
+    if (error) return isMissingTable(error) ? notProvisioned(res) : serviceUnavailable(res);
     // Кода нет — так и говорим. Чтение, порождающее запись, здесь недопустимо:
     // код, который существует, но которого владелец не видел, — это живая
     // входная дверь, за которой никто не следит.
@@ -654,7 +676,7 @@ export async function handleJoinCode(req: VercelRequest, res: VercelResponse) {
     .eq("workspace_id", context.workspaceId)
     .is("revoked_at", null)
     .maybeSingle();
-  if (liveError) return serviceUnavailable(res);
+  if (liveError) return isMissingTable(liveError) ? notProvisioned(res) : serviceUnavailable(res);
 
   // ЗАМЕНА кода — только владелец: она мгновенно ломает код у всех, кому его
   // диктовали. Проверка идёт по ИСТОРИИ, а не по живой строке: если ротация
@@ -667,7 +689,7 @@ export async function handleJoinCode(req: VercelRequest, res: VercelResponse) {
     .from("workspace_join_codes")
     .select("id", { count: "exact", head: true })
     .eq("workspace_id", context.workspaceId);
-  if (historyError) return serviceUnavailable(res);
+  if (historyError) return isMissingTable(historyError) ? notProvisioned(res) : serviceUnavailable(res);
   if ((everIssued ?? 0) > 0) {
     try {
       requireWorkspaceRole(context, ["owner"]);

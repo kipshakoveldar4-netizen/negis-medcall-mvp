@@ -161,6 +161,7 @@ const STAFF_ERROR_TEXTS: Record<string, string> = {
   staff_email_taken:
     "В клинике уже есть сотрудник с такой почтой. Заявитель назвал этот адрес сам, и подтверждения ему нет — зачислите его ссылкой-приглашением: она и доказывает, что почта его.",
   join_code_owner_only: "Сменить код клиники может только владелец.",
+  not_provisioned: "Заявки по коду ещё не активированы: владелец платформы применяет обновление базы. Пока зачисляйте сотрудников паролем или приглашением.",
   join_queue_full: "Очередь заявок переполнена — разберите её и попробуйте снова.",
   role_required: "Выберите роль — без неё нельзя одобрить.",
   account_shared_with_other_clinic:
@@ -788,6 +789,9 @@ export default function AdminCenter() {
   type ReadState<T> = { state: "loading" } | { state: "failed" } | { state: "denied" } | { state: "ready"; value: T };
   const [joinRequests, setJoinRequests] = useState<ReadState<JoinRequestRow[]>>({ state: "loading" });
   const [joinCode, setJoinCode] = useState<ReadState<string | null>>({ state: "loading" });
+  // Миграция 038 может быть ещё не применена: между выкладкой и её применением
+  // раздел существует, а таблиц нет — и это не сбой чтения.
+  const [joinNotProvisioned, setJoinNotProvisioned] = useState(false);
   const [decidingRequestId, setDecidingRequestId] = useState<string | null>(null);
   const [decisionRole, setDecisionRole] = useState<StaffRole | "">("");
   // Пачка: столбец почт и одна роль на всех. Пароли живут только здесь — их
@@ -1307,6 +1311,7 @@ export default function AdminCenter() {
       );
       setJoinRequests({ state: "ready", value: body.data?.requests || [] });
     } catch (error) {
+      if (error instanceof CrmApiError && error.code === "not_provisioned") setJoinNotProvisioned(true);
       setJoinRequests({ state: error instanceof CrmApiError && error.status === 403 ? "denied" : "failed" });
     }
   }
@@ -1318,6 +1323,7 @@ export default function AdminCenter() {
       );
       setJoinCode({ state: "ready", value: body.data?.code ?? null });
     } catch (error) {
+      if (error instanceof CrmApiError && error.code === "not_provisioned") setJoinNotProvisioned(true);
       setJoinCode({ state: error instanceof CrmApiError && error.status === 403 ? "denied" : "failed" });
     }
   }
@@ -2087,7 +2093,13 @@ export default function AdminCenter() {
             Диктуйте код только своим людям. По коду нельзя войти — по нему можно только попроситься, а пускаете вы.
           </p>
           {joinCode.state === "loading" && <p className="mt-3 text-sm text-[#94A3B8]">Загружаем…</p>}
-          {joinCode.state === "failed" && <p className="mt-3 text-sm text-[#94A3B8]">Не удалось прочитать код — обновите страницу.</p>}
+          {joinCode.state === "failed" && (
+            <p className="mt-3 text-sm text-[#94A3B8]">
+              {joinNotProvisioned
+                ? "Заявки по коду ещё не активированы — владелец платформы применяет обновление базы."
+                : "Не удалось прочитать код — обновите страницу."}
+            </p>
+          )}
           {/* 403 — это не сбой: обновление страницы не поможет никогда. */}
           {joinCode.state === "denied" && (
             <p className="mt-3 text-sm text-[#94A3B8]">Код клиники видят владелец и администратор. Попросите их продиктовать его.</p>
@@ -2136,7 +2148,13 @@ export default function AdminCenter() {
             )}
           </h2>
           {joinRequests.state === "loading" && <p className="mt-3 text-sm text-[#94A3B8]">Загружаем…</p>}
-          {joinRequests.state === "failed" && <p className="mt-3 text-sm text-[#94A3B8]">Не удалось прочитать заявки — обновите страницу.</p>}
+          {joinRequests.state === "failed" && (
+            <p className="mt-3 text-sm text-[#94A3B8]">
+              {joinNotProvisioned
+                ? "Раздел заработает, как только владелец платформы применит обновление базы. Пока зачисляйте сотрудников паролем или приглашением."
+                : "Не удалось прочитать заявки — обновите страницу."}
+            </p>
+          )}
           {joinRequests.state === "denied" && (
             <p className="mt-3 text-sm text-[#94A3B8]">Заявки разбирают владелец и администратор клиники.</p>
           )}
