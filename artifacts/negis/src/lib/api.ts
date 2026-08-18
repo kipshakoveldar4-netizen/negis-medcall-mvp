@@ -108,7 +108,13 @@ type CachedGet = { at: number; status: number; body: string; contentType: string
 const getCache = new Map<string, CachedGet>();
 
 /** Reference rows a clinic edits perhaps monthly — the funnel's own skeleton. */
-const REFERENCE_TTL_MS = 5 * 60_000;
+// Справочники: минута, а не пять. Пять держались доводом «клиника правит прайс
+// примерно так же редко, как стадии» — и он верен ровно до дня, когда прайс
+// заводят целиком: салон «Medi» залил 116 услуг и 11 мастеров разом, и у
+// каждого, кто в этот момент держал вкладку открытой, форма записи пять минут
+// предлагала пустой список. Минута оставляет возврат назад мгновенным и
+// перестаёт скрывать заполнение справочника от смены, которая уже работает.
+const REFERENCE_TTL_MS = 60_000;
 /** Everything else: long enough to make going back instant, short enough that
  *  a lead filed on another device shows up on the next visit. */
 const LIST_TTL_MS = 10_000;
@@ -152,11 +158,22 @@ function ttlFor(path: string): number {
 }
 
 /**
+ * Поколение кэша.
+ *
+ * Очистка не догоняла запросы, УЖЕ ушедшие в сеть: GET, стартовавший до
+ * записи, спокойно клал свой дорабочий ответ в только что очищенный кэш —
+ * и следующие пять минут экран показывал состояние «до». Ответ кэшируется
+ * только если его запрос начался после последней очистки.
+ */
+let cacheEpoch = 0;
+
+/**
  * Drops every cached answer. Called on sign-out and when the operator switches
  * clinic, so nothing from the previous session or tenant can be painted.
  */
 export function clearCrmCache(): void {
   getCache.clear();
+  cacheEpoch += 1;
 }
 
 /**
@@ -202,6 +219,7 @@ export async function crmFetch(path: string, init: CrmFetchInit = {}): Promise<R
     return pending.then((response) => response.clone());
   }
 
+  const startedAtEpoch = cacheEpoch;
   const request = fetch(apiUrl(path), { ...rest, headers: mergedHeaders });
   inflightGets.set(dedupeKey, request);
   request
@@ -209,6 +227,10 @@ export async function crmFetch(path: string, init: CrmFetchInit = {}): Promise<R
       // Only a confirmed answer is worth keeping. A 401 or a 502 cached for ten
       // seconds would turn one bad moment into a stuck screen.
       if (!cacheable || !response.ok) return;
+      // Между стартом этого запроса и его ответом что-то записали: ответ
+      // описывает состояние ДО записи, и класть его в кэш — значит показывать
+      // устаревшее ещё целый TTL.
+      if (startedAtEpoch !== cacheEpoch) return;
       const body = await response.clone().text();
       getCache.set(dedupeKey, {
         at: Date.now(),

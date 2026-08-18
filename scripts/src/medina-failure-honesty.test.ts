@@ -329,6 +329,22 @@ test("F14 патч, в котором сервер не понял ни одно
   assert.ok(/if \(offered\.length > 0\)/.test(block), "пустой запрос по-прежнему ничего не меняет и не ругается");
 });
 
+test("F15 кэш не переживает запись и не прячет заполненный справочник", async () => {
+  const api = await readFile(path.join(negisSrc, "lib", "api.ts"), "utf8");
+
+  // Ответ запроса, стартовавшего ДО записи, описывает состояние «до». Раньше
+  // он спокойно ложился в только что очищенный кэш и жил там весь TTL.
+  assert.ok(/let cacheEpoch = 0;/.test(api), "у кэша есть поколение");
+  assert.ok(/cacheEpoch \+= 1;/.test(api), "запись двигает поколение");
+  assert.ok(/if \(startedAtEpoch !== cacheEpoch\) return;/.test(api), "ответ из прошлого поколения не кэшируется");
+
+  // Справочники: минута. Пять минут прятали от смены только что заведённый
+  // прайс — салон заливает его разом, а не по одной услуге.
+  const ttl = api.match(/const REFERENCE_TTL_MS = ([^;]+);/);
+  assert.ok(ttl, "TTL справочников объявлен");
+  assert.equal(ttl?.[1].trim(), "60_000", "справочники обновляются в пределах минуты");
+});
+
 test("F9 a refused production read reaches the operator instead of an empty clinic", async () => {
   const source = await readFile(path.join(negisSrc, "lib", "demoStorage.ts"), "utf8");
   const hook = source.slice(source.indexOf("export function useDemoCollection"));
