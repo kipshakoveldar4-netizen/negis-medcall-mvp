@@ -230,6 +230,28 @@ export const CRM_ROUTE_AUTHORIZATION: Readonly<Record<string, RouteAuthorization
     permissions: { POST: "manage_staff", PATCH: "manage_staff" },
   },
 
+  // Третий путь зачисления: человек просится сам по коду клиники, клиника
+  // подтверждает. Виды здесь РАЗНЫЕ, и в этом весь смысл разделения.
+  //
+  // «join-request» — bootstrap: у заявителя ноль членств по определению, и
+  // браузерная ветка отказала бы ему раньше обработчика. «staff-join-requests»
+  // — обычный браузерный маршрут клиники за правом manage_staff, как и два
+  // соседних пути зачисления. Имена намеренно не отличаются одной буквой s:
+  // опечатка стоила бы подмены вида с bootstrap на browser.
+  "join-request": { kind: "bootstrap", methods: ["GET", "POST"] },
+  "staff-join-requests": {
+    kind: "browser",
+    methods: ["GET", "PATCH"],
+    permissions: { GET: "manage_staff", PATCH: "manage_staff" },
+  },
+  // Код клиники показывает тот, кто ведёт сотрудников; ЗАМЕНУ живого кода
+  // обработчик разрешает только владельцу — реестр per-method ролей не умеет.
+  "join-code": {
+    kind: "browser",
+    methods: ["GET", "POST"],
+    permissions: { GET: "manage_staff", POST: "manage_staff" },
+  },
+
   // Advertising actions touch the live Meta account.
   "meta-launch": { kind: "browser", methods: ["POST"], permissions: { POST: "manage_marketing" } },
   "meta-status": { kind: "browser", methods: ["GET"], permissions: { GET: "view_marketing" } },

@@ -534,10 +534,13 @@ export async function handleStaffCredentials(req: VercelRequest, res: VercelResp
 
   const authUserId = readString(asRecord(await created.json().catch(() => null)).id);
   if (!authUserId) {
+    // Свой код, а не общий "unavailable": по нему экран отличает «аккаунт
+    // создан» от «не создан», и в пачке это решает судьбу пароля — он
+    // единственный способ этому человеку войти и принять приглашение.
     return sendJson(res, 502, {
       success: false,
       error: "Аккаунт создан, но ответ Supabase не прочитан",
-      code: "unavailable",
+      code: "staff_credentials_unreadable",
       details: ["Повторная попытка ответит «почта занята» — тогда пригласите сотрудника ссылкой."],
     });
   }

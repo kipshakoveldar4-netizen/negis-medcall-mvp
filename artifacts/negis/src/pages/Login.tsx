@@ -169,9 +169,25 @@ export default function Login() {
           setLocation("/join");
           return;
         }
+
+        // Заявитель по коду клиники — тот же случай: членство появится, когда
+        // админ одобрит заявку, а до тех пор его нет ПО ЗАМЫСЛУ. Разлогин здесь
+        // не только ставил ложный диагноз «всё сломалось», но и убивал сессию,
+        // без которой человек не мог посмотреть статус своей заявки.
+        // Проверка стоит ДО signOut намеренно — маршрут заявок требует JWT.
+        const joinResponse = await crmFetch("/api/crm/join-request").catch(() => null);
+        const joinBody = joinResponse?.ok
+          ? await (joinResponse.json() as Promise<{ data?: { requests?: { status?: string }[] } }>).catch(() => null)
+          : null;
+        const requests = Array.isArray(joinBody?.data?.requests) ? joinBody!.data!.requests! : [];
+        if (requests.some((request) => request.status === "pending" || request.status === "rejected")) {
+          setLocation("/join-request");
+          return;
+        }
+
         await supabase.auth.signOut();
         throw new Error(
-          "Аккаунт не привязан к клинике. Если вам присылали ссылку-приглашение — откройте её ещё раз; если нет — попросите администратора клиники выслать приглашение.",
+          "Аккаунт не привязан к клинике. Если вам присылали ссылку-приглашение — откройте её ещё раз. Если у вас есть код клиники — подайте заявку на странице «Есть код клиники?». Иначе попросите администратора клиники выслать приглашение.",
         );
       }
 
@@ -265,6 +281,12 @@ export default function Login() {
                   {resetSending ? "Отправляем письмо…" : "Забыли пароль?"}
                 </button>
               )}
+
+              {/* Третья дверь. Клиники в списке не показываются — их называет
+                  код, который сотруднику продиктовали свои же. */}
+              <button type="button" className="neu-btn w-full justify-center" onClick={() => setLocation("/join-request")}>
+                Есть код клиники? Подать заявку
+              </button>
             </div>
           </div>
         </section>

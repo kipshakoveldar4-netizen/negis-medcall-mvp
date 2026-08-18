@@ -194,8 +194,19 @@ test("VT12 экран справочника не говорит «врач» ж
   // Определение хелпера — не доказательство: мутант, вернувший {tab.label} в
   // рендер, оставил бы tabLabel мёртвым кодом (noUnusedLocals выключен) и
   // прошёл бы пин выше. Держим обе точки вызова.
-  assert.ok(/<option[^>]*>\{tabLabel\(tab\)\}<\/option>/.test(admin), "мобильный селект зовёт tabLabel");
-  assert.ok(/\{tabLabel\(tab\)\}\s*<\/button>/.test(admin), "десктопные вкладки зовут tabLabel");
+  // Якорь на блоках, а не на соседстве символов: рядом с подписью появился
+  // счётчик ждущих заявок, и пин, требовавший `{tabLabel(tab)}</option>`
+  // впритык, упал бы на любом таком добавлении, ничего не защитив.
+  // Конец блока ищется ОТ его начала: в файле есть селекты ролей выше, и
+  // первый в файле </option> закрывал бы чужой элемент — срез выходил пустым.
+  const optionStart = admin.indexOf("<option key={tab.id}");
+  const optionBlock = admin.slice(optionStart, admin.indexOf("</option>", optionStart));
+  const navBlock = admin.slice(admin.indexOf("<nav className=\"hidden overflow-x-auto md:block\""), admin.indexOf("</nav>"));
+  assert.ok(/tabLabel\(tab\)/.test(optionBlock), "мобильный селект зовёт tabLabel");
+  assert.ok(/tabLabel\(tab\)/.test(navBlock), "десктопные вкладки зовут tabLabel");
+  // Мутант, вернувший сырую подпись в рендер, оставил бы tabLabel мёртвым
+  // кодом (noUnusedLocals выключен) и прошёл бы пины выше.
+  assert.ok(!/\{tab\.label\}/.test(admin), "сырая подпись вкладки не рисуется нигде");
 });
 
 test("VT13 форма записи говорит словами ниши", async () => {

@@ -26,6 +26,7 @@ import {
 import { normalizeCrmSegments, resolveCrmRoute } from "../../lib/crm/authorization";
 import { handleStaffInvitationAccept, handleStaffInvitations } from "../../lib/crm/staff-invitations";
 import { handleStaffCredentials } from "../../lib/crm/staff-credentials";
+import { handleJoinCode, handleJoinRequest, handleStaffJoinRequests } from "../../lib/crm/staff-join-requests";
 import { handlePlatformWhatsappNumber } from "../../lib/crm/platform-whatsapp";
 import { handleWhatsAppChannels } from "../../lib/crm/whatsapp-channels";
 import { handleCrmChangeLog } from "../../lib/crm/change-log";
@@ -209,6 +210,12 @@ async function dispatch(
       return handleStaffInvitations(req, res);
     case "staff-credentials":
       return handleStaffCredentials(req, res);
+    case "join-request":
+      return handleJoinRequest(req, res);
+    case "staff-join-requests":
+      return handleStaffJoinRequests(req, res);
+    case "join-code":
+      return handleJoinCode(req, res);
     case "staff-invitations/accept":
       return handleStaffInvitationAccept(req, res);
     case "health":

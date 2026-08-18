@@ -34,6 +34,7 @@ import { WhatsAppChannels } from "@/components/admin/WhatsAppChannels";
 import { DoctorSchedule } from "@/components/admin/DoctorSchedule";
 import { useAuth } from "@/contexts/AuthContext";
 import { apiUrl, crmFetch, CrmApiError, crmErrorMessage } from "@/lib/api";
+import { formatJoinCode } from "../../../../lib/crm/join-codes";
 import { readWorkspaceId, workspaceScopedKey } from "@/lib/demoStorage";
 import { getSupabaseAccessToken } from "@/lib/serverAuth";
 import {
@@ -55,6 +56,34 @@ type StaffInvitation = {
   status: "pending" | "accepted" | "revoked" | "expired";
   expiresAt: string;
   createdAt: string;
+};
+
+/** Заявка на вступление: человек пришёл по коду клиники и ждёт решения. */
+type JoinRequestRow = {
+  id: string;
+  status: "pending" | "approved" | "rejected";
+  email: string;
+  fullName: string;
+  phone: string;
+  positionNote: string;
+  createdAt: string;
+  decidedAt: string | null;
+  decisionNote: string;
+  grantedRole: string | null;
+  /** Пришла по коду, который потом отозвали: «код утёк — отклоняю всё старое». */
+  viaRevokedCode?: boolean;
+};
+
+/**
+ * Строка результата пачки. kind различает три исхода, и «занята» — не ошибка:
+ * у человека уже есть аккаунт, ему выписывается приглашение.
+ */
+type BatchStaffResult = {
+  email: string;
+  kind: "created" | "invited" | "failed";
+  password?: string;
+  acceptUrl?: string;
+  error?: string;
 };
 
 type AdminTab =
@@ -115,6 +144,8 @@ const STAFF_ERROR_TEXTS: Record<string, string> = {
     "У этой почты уже есть аккаунт — задать ему пароль отсюда нельзя. Пригласите этого человека ссылкой: он войдёт со своим паролем.",
   invalid_staff_credentials: "Проверьте почту, роль и пароль: пароль от 8 символов, без пробелов по краям.",
   password_rejected: "Такой пароль не принят — задайте длиннее или с другими символами.",
+  staff_credentials_unreadable:
+    "Аккаунт создан, но подтверждение не прочитано. Пароль ниже действует — передайте его и пригласите человека ссылкой.",
   partial_staff_credentials:
     "Аккаунт создан, а доступ к клинике — нет. Пригласите этого человека ссылкой: он войдёт с заданным паролем.",
   staff_not_found: "Такого сотрудника нет в вашей клинике — обновите страницу.",
@@ -124,6 +155,14 @@ const STAFF_ERROR_TEXTS: Record<string, string> = {
     "Аккаунт входа этого сотрудника удалён из системы. Заведите ему вход заново через «Логин и пароль».",
   staff_user_required: "Не удалось понять, какому сотруднику менять пароль — обновите страницу.",
   staff_paused: "Сотрудник на паузе — сначала «Активировать», иначе новый пароль не пустит его в кабинет.",
+  join_request_not_found: "Заявку уже обработали — возможно, коллега. Список обновлён.",
+  join_request_stuck:
+    "Заявка отмечена одобренной, но сотрудник не создан. Сообщите владельцу платформы — строку нужно поправить руками.",
+  staff_email_taken:
+    "В клинике уже есть сотрудник с такой почтой. Заявитель назвал этот адрес сам, и подтверждения ему нет — зачислите его ссылкой-приглашением: она и доказывает, что почта его.",
+  join_code_owner_only: "Сменить код клиники может только владелец.",
+  join_queue_full: "Очередь заявок переполнена — разберите её и попробуйте снова.",
+  role_required: "Выберите роль — без неё нельзя одобрить.",
   account_shared_with_other_clinic:
     "Этим логином человек заходит и в другую клинику, поэтому пароль отсюда не меняется — он открыл бы и её. Пусть задаст пароль сам через «Забыли пароль?».",
 };
@@ -740,6 +779,30 @@ export default function AdminCenter() {
   // различает заведение и смену — «Сотрудник добавлен» при смене пароля было
   // бы неправдой.
   const [createdStaff, setCreatedStaff] = useState<{ email: string; password: string; kind: "created" | "reset" } | null>(null);
+  // Третий путь: человек просится сам по коду клиники. null — «прочитать не
+  // удалось», это не то же самое, что «заявок нет».
+  // Три разных состояния, и они не должны сливаться: "loading" — ещё не
+  // читали (иначе экран обвиняет сеть, пока сам грузится), "failed" —
+  // прочитать не удалось, "denied" — нет права (обновление страницы не
+  // поможет никогда, а именно это советовал прежний текст управляющей).
+  type ReadState<T> = { state: "loading" } | { state: "failed" } | { state: "denied" } | { state: "ready"; value: T };
+  const [joinRequests, setJoinRequests] = useState<ReadState<JoinRequestRow[]>>({ state: "loading" });
+  const [joinCode, setJoinCode] = useState<ReadState<string | null>>({ state: "loading" });
+  const [decidingRequestId, setDecidingRequestId] = useState<string | null>(null);
+  const [decisionRole, setDecisionRole] = useState<StaffRole | "">("");
+  // Пачка: столбец почт и одна роль на всех. Пароли живут только здесь — их
+  // показывают один раз и раздают из рук в руки.
+  const [batchOpen, setBatchOpen] = useState(false);
+  const [batchEmails, setBatchEmails] = useState("");
+  const [batchRole, setBatchRole] = useState<StaffRole>("receptionist");
+  const [batchResults, setBatchResults] = useState<BatchStaffResult[] | null>(null);
+
+  // Ждущие решения. null («прочитать не удалось») даёт пустой список: рисовать
+  // счётчик по неизвестности значило бы обещать, что заявок нет.
+  const pendingJoinRequests = useMemo(
+    () => (joinRequests.state === "ready" ? joinRequests.value.filter((request) => request.status === "pending") : []),
+    [joinRequests],
+  );
 
   const readiness = useMemo(() => {
     const total = releaseChecks.length || 1;
@@ -1217,8 +1280,232 @@ export default function AdminCenter() {
     if (activeTab !== "staff") return;
     void loadStaff();
     void loadInvitations();
+    void loadJoinRequests();
+    void loadJoinCode();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab, workspaceId]);
+
+  // Счётчик ждущих нужен и ЗА пределами вкладки: писем в этом продукте нет, и
+  // без пилюли на кнопке админ узнаёт о заявке случайно, раз в неделю.
+  useEffect(() => {
+    if (serverAdminAuth.status !== "confirmed") return;
+    void loadJoinRequests();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [serverAdminAuth.status, workspaceId]);
+
+  // Ссылка с других экранов должна открывать нужную вкладку, а не «Обзор».
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const requested = new URLSearchParams(window.location.search).get("tab");
+    if (requested && tabs.some((tab) => tab.id === requested)) setActiveTab(requested as AdminTab);
+  }, []);
+
+  async function loadJoinRequests() {
+    try {
+      const body = await crmRequest<{ requests?: JoinRequestRow[] }>(
+        `/api/crm/staff-join-requests?workspaceId=${encodeURIComponent(workspaceId)}`,
+      );
+      setJoinRequests({ state: "ready", value: body.data?.requests || [] });
+    } catch (error) {
+      setJoinRequests({ state: error instanceof CrmApiError && error.status === 403 ? "denied" : "failed" });
+    }
+  }
+
+  async function loadJoinCode() {
+    try {
+      const body = await crmRequest<{ code?: string | null }>(
+        `/api/crm/join-code?workspaceId=${encodeURIComponent(workspaceId)}`,
+      );
+      setJoinCode({ state: "ready", value: body.data?.code ?? null });
+    } catch (error) {
+      setJoinCode({ state: error instanceof CrmApiError && error.status === 403 ? "denied" : "failed" });
+    }
+  }
+
+  /**
+   * Выпуск и смена кода. Смена — намеренно с подтверждением: она мгновенно
+   * ломает код у всех, кому его уже продиктовали.
+   */
+  async function issueJoinCode() {
+    const currentCode = joinCode.state === "ready" ? joinCode.value : null;
+    if (currentCode) {
+      const confirmed = window.confirm(
+        "Сменить код клиники?\n\nСтарый перестанет работать сразу, и всем, кому вы его называли, придётся сообщить новый. Уже поданные заявки и работающие сотрудники не пострадают.",
+      );
+      if (!confirmed) return;
+    }
+    setBusy("joinCode", true);
+    try {
+      const body = await crmRequest<{ code?: string; concurrent?: boolean }>(`/api/crm/join-code?workspaceId=${encodeURIComponent(workspaceId)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      setJoinCode({ state: "ready", value: body.data?.code ?? null });
+      toast.success(body.data?.concurrent
+        ? "Код уже сменили в другой вкладке — на экране действующий"
+        : currentCode ? "Код сменён" : "Код выпущен");
+    } catch (error) {
+      toast.error(staffErrorText(error, "Не удалось выпустить код"));
+    } finally {
+      setBusy("joinCode", false);
+    }
+  }
+
+  async function decideJoinRequest(request: JoinRequestRow, decision: "approve" | "reject") {
+    if (decision === "approve" && !decisionRole) {
+      toast.error("Выберите роль — без неё нельзя одобрить.");
+      return;
+    }
+    if (decision === "reject") {
+      const confirmed = window.confirm(`Отклонить заявку от ${request.fullName || request.email}?
+
+Человек увидит отказ и сможет подать заново через сутки.`);
+      if (!confirmed) return;
+    }
+    setBusy("staff", true);
+    try {
+      const body = await crmRequest<{ outcome?: string; alreadyMember?: boolean }>(
+        `/api/crm/staff-join-requests?workspaceId=${encodeURIComponent(workspaceId)}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id: request.id, decision, ...(decision === "approve" ? { role: decisionRole } : {}) }),
+        },
+      );
+      const who = request.fullName || request.email;
+      if (decision === "reject") {
+        toast.success("Заявка отклонена. Человек увидит отказ и сможет подать заново.");
+      } else if (body.data?.outcome === "already") {
+        // Сервер роль НЕ переписал: тихое повышение или понижение хуже отказа.
+        // Тост обязан сказать правду, иначе админ уверен, что выдал другую.
+        toast.success(`${who} уже в команде — заявка закрыта. Роль осталась прежней: меняйте её в таблице слева.`);
+      } else if (body.data?.outcome === "revived") {
+        toast.success(`${who} снова в команде — роль «${roleLabels[decisionRole as StaffRole]}». Он войдёт своей почтой и паролем.`);
+      } else {
+        toast.success(`${who} в команде — роль «${roleLabels[decisionRole as StaffRole]}». Он войдёт своей почтой и паролем.`);
+      }
+      setDecidingRequestId(null);
+      setDecisionRole("");
+      await Promise.all([loadJoinRequests(), loadStaff(), loadInvitations()]);
+    } catch (error) {
+      toast.error(staffErrorText(error, "Не удалось обработать заявку"));
+      // Обновить список обязательно: чаще всего отказ означает, что заявку уже
+      // решил коллега, а карточка с кнопками так и висела бы на экране.
+      await loadJoinRequests();
+    } finally {
+      setBusy("staff", false);
+    }
+  }
+
+  /**
+   * Пачка логинов и паролей.
+   *
+   * Сервер намеренно НЕ получает списка: каждая строка идёт отдельным запросом
+   * тем же маршрутом, что и одиночное заведение. Так пачка не заводит второй
+   * набор проверок, каждая строка получает честный исход (заведён / почта
+   * занята — выписано приглашение / отказ), и частичный провал не выглядит как
+   * общий. Последовательно, а не пачкой параллельных: двадцать одновременных
+   * созданий аккаунтов — это то, за что Supabase отвечает 429.
+   */
+  async function createStaffBatch() {
+    // Каждая строка — «почта» или «почта, Имя». Имя нужно, потому что сервер
+    // ДОСТРАИВАЕТ уже заведённую вручную строку и переписывает в ней full_name:
+    // без имени «Айгуль Ботанова» превратилась бы в «aigul» — и в карточке
+    // лида, и в задачах.
+    const rows = batchEmails
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => {
+        const [rawEmail, ...rest] = line.split(/[,;	]/);
+        const email = (rawEmail || "").trim().toLowerCase();
+        return { email, fullName: rest.join(",").trim() };
+      })
+      .filter((row) => row.email.includes("@"));
+    const unique = rows.filter((row, index) => rows.findIndex((other) => other.email === row.email) === index);
+
+    if (unique.length === 0) {
+      toast.error("Вставьте список почт — по одной в строке");
+      return;
+    }
+    if (unique.length > 30) {
+      toast.error("За раз — не больше 30 человек: пароли нужно успеть раздать");
+      return;
+    }
+    // Пароли прошлой пачки на экране — единственная их копия.
+    if ((batchResults ?? []).some((row) => row.kind === "created")) {
+      const confirmed = window.confirm(
+        "На экране остались логины и пароли прошлой пачки. Начать новую? Старый список исчезнет — если вы его ещё не раздали, сначала скопируйте.",
+      );
+      if (!confirmed) return;
+    }
+
+    setBusy("staffBatch", true);
+    setBatchResults([]);
+    const results: BatchStaffResult[] = [];
+    try {
+      for (const row of unique) {
+        const password = generateStaffPassword();
+        try {
+          const response = await crmFetch(`/api/crm/staff-credentials?workspaceId=${encodeURIComponent(workspaceId)}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ email: row.email, role: batchRole, fullName: row.fullName || row.email.split("@")[0], password }),
+          });
+          const body = await safeJson<{ acceptUrl?: string }>(response);
+          const code = typeof (body as { code?: unknown }).code === "string" ? (body as { code: string }).code : "request_failed";
+          if (response.ok && body.success !== false) {
+            results.push({ email: row.email, kind: "created", password });
+          } else if (body.data?.acceptUrl) {
+            // Занятая почта — не тупик: сервер выписал приглашение.
+            results.push({ email: row.email, kind: "invited", acceptUrl: body.data.acceptUrl });
+          } else {
+            // Аккаунт СОЗДАН, а членство нет: пароль всё ещё действует, и он
+            // единственный способ этому человеку войти и принять приглашение.
+            // Выбросить его здесь значило бы запереть аккаунт навсегда.
+            const accountExists = code === "partial_staff_credentials" || code === "staff_credentials_unreadable";
+            results.push({
+              email: row.email,
+              kind: "failed",
+              ...(accountExists ? { password } : {}),
+              error: staffErrorText(new CrmApiError(response.status, code, body.error || ""), "Отказ"),
+            });
+          }
+        } catch (error) {
+          results.push({ email: row.email, kind: "failed", error: staffErrorText(error, "Отказ") });
+        }
+        setBatchResults([...results]);
+      }
+      const created = results.filter((row) => row.kind === "created").length;
+      const invited = results.filter((row) => row.kind === "invited").length;
+      const failed = results.filter((row) => row.kind === "failed").length;
+      const summary = `Готово: заведено ${created}, приглашений ${invited}, отказов ${failed}`;
+      if (failed === 0) {
+        toast.success(summary);
+        // Поле чистится только когда чистить нечего: иначе администратору
+        // пришлось бы собирать заново те адреса, что не прошли.
+        setBatchEmails("");
+      } else {
+        toast.warning(`${summary}. Список оставлен в поле — уберите прошедших и повторите.`);
+      }
+      await Promise.all([loadStaff(), loadInvitations()]);
+    } finally {
+      setBusy("staffBatch", false);
+    }
+  }
+
+  async function copyBatchCredentials() {
+    const rows = (batchResults ?? []).filter((row) => row.kind === "created" && row.password);
+    if (rows.length === 0) return;
+    try {
+      await navigator.clipboard.writeText(rows.map((row) => `${row.email} — ${row.password}`).join("\n"));
+      toast.success("Скопировано");
+    } catch {
+      // Буфер недоступен — таблица на экране, её можно переписать руками.
+      toast.error("Буфер недоступен — перепишите с экрана");
+    }
+  }
 
   async function loadInvitations() {
     try {
@@ -1596,6 +1883,23 @@ export default function AdminCenter() {
       <div className="space-y-5">
         {/* Commercial-1: платформенная готовность живёт во внутреннем разделе
             диагностики; клиника видит только состояние интеграций и команду. */}
+        {/* Писем в этом продукте нет, поэтому о заявке админ узнаёт только с
+            экрана. «Обзор» — вкладка, на которую он попадает, открыв настройки:
+            плашка здесь и есть уведомление. */}
+        {pendingJoinRequests.length > 0 && (
+          <button
+            type="button"
+            className="flex w-full items-center justify-between gap-3 rounded-2xl border border-[#FECACA] bg-[#FEF2F2] px-4 py-3 text-left"
+            onClick={() => setActiveTab("staff")}
+          >
+            <span className="text-sm font-semibold text-[#B91C1C]">
+              {pendingJoinRequests.length === 1
+                ? "1 человек просит доступ в клинику"
+                : `${pendingJoinRequests.length} человека просят доступ в клинику`}
+            </span>
+            <span className="text-sm font-semibold text-[#B91C1C] underline">Посмотреть заявки</span>
+          </button>
+        )}
         <div className="grid gap-4 sm:grid-cols-2">
           <MetricCard label="Состояние интеграций" value={`${connected}/${integrationCards.length}`} icon={Database} tone="info" />
           <MetricCard label="Сотрудники" value={staff.length} icon={Users} tone="primary" />
@@ -1775,8 +2079,139 @@ export default function AdminCenter() {
           </div>
         </section>
 
+        {/* Код клиники стоит первым: по нему приходят люди, и владелец должен
+            видеть его, а не искать. */}
+        <section className="neu-card">
+          <h2 className="text-lg font-black text-[#0F172A]">Код клиники</h2>
+          <p className="mt-2 text-sm text-[#64748B]">
+            Диктуйте код только своим людям. По коду нельзя войти — по нему можно только попроситься, а пускаете вы.
+          </p>
+          {joinCode.state === "loading" && <p className="mt-3 text-sm text-[#94A3B8]">Загружаем…</p>}
+          {joinCode.state === "failed" && <p className="mt-3 text-sm text-[#94A3B8]">Не удалось прочитать код — обновите страницу.</p>}
+          {/* 403 — это не сбой: обновление страницы не поможет никогда. */}
+          {joinCode.state === "denied" && (
+            <p className="mt-3 text-sm text-[#94A3B8]">Код клиники видят владелец и администратор. Попросите их продиктовать его.</p>
+          )}
+          {joinCode.state === "ready" && joinCode.value === null && (
+            <button type="button" className="neu-btn-primary mt-4" disabled={loading.joinCode} onClick={() => void issueJoinCode()}>
+              {loading.joinCode ? "Выпускаем…" : "Выпустить код"}
+            </button>
+          )}
+          {joinCode.state === "ready" && joinCode.value !== null && (
+            <>
+              <p className="mt-4 font-mono text-2xl font-black tracking-[0.08em] text-[#0F172A]">{formatJoinCode(joinCode.value)}</p>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  className="neu-btn"
+                  onClick={() => {
+                    void navigator.clipboard.writeText(formatJoinCode(joinCode.value as string)).then(
+                      () => toast.success("Скопировано"),
+                      () => toast.error("Буфер недоступен — перепишите с экрана"),
+                    );
+                  }}
+                >
+                  Скопировать
+                </button>
+                {/* Смена — право владельца, и фронт его знает: показывать
+                    кнопку админу значит вести его к отказу после страшного
+                    подтверждения. */}
+                {serverAdminAuth.role === "owner" && (
+                  <button type="button" className="neu-btn" disabled={loading.joinCode} onClick={() => void issueJoinCode()}>
+                    Сменить код
+                  </button>
+                )}
+              </div>
+            </>
+          )}
+        </section>
+
+        {/* Входящая очередь — над формой заведения: она требует решения, а не
+            повторяет уже принятые. */}
+        <section className="neu-card">
+          <h2 className="text-lg font-black text-[#0F172A]">
+            Заявки на вступление
+            {pendingJoinRequests.length > 0 && (
+              <span className="ml-2 rounded-full bg-[#DC2626] px-2 py-0.5 text-xs font-bold text-white">{pendingJoinRequests.length}</span>
+            )}
+          </h2>
+          {joinRequests.state === "loading" && <p className="mt-3 text-sm text-[#94A3B8]">Загружаем…</p>}
+          {joinRequests.state === "failed" && <p className="mt-3 text-sm text-[#94A3B8]">Не удалось прочитать заявки — обновите страницу.</p>}
+          {joinRequests.state === "denied" && (
+            <p className="mt-3 text-sm text-[#94A3B8]">Заявки разбирают владелец и администратор клиники.</p>
+          )}
+          {joinRequests.state === "ready" && pendingJoinRequests.length === 0 && (
+            <p className="mt-3 text-sm text-[#64748B]">Заявок нет. Продиктуйте код клиники тем, кого ждёте — он в карточке выше.</p>
+          )}
+          {joinRequests.state === "ready" && pendingJoinRequests.length > 0 && (
+            <div className="mt-3 space-y-3">
+              {pendingJoinRequests.map((request) => (
+                <article key={request.id} className="rounded-xl border border-[#E2E8F0] p-4">
+                  <p className="font-semibold text-[#0F172A]">{request.fullName || request.email}</p>
+                  <p className="text-xs text-[#64748B]">{request.email}</p>
+                  {request.phone && <p className="text-xs text-[#64748B]">{request.phone}</p>}
+                  {request.positionNote && <p className="mt-1 text-xs italic text-[#475569]">{request.positionNote}</p>}
+                  {/* Пришёл по коду, который уже отозвали, — самый частый повод
+                      отклонить: код меняют как раз потому, что он утёк. */}
+                  {request.viaRevokedCode && (
+                    <p className="mt-2 rounded-lg bg-[#FEF2F2] px-2 py-1 text-xs font-semibold text-[#B91C1C]">
+                      Пришёл по отозванному коду
+                    </p>
+                  )}
+                  {decidingRequestId === request.id ? (
+                    <div className="mt-3 space-y-2">
+                      {/* Без значения по умолчанию: предзаполненная роль
+                          нажимается «Одобрить» не глядя. */}
+                      <select
+                        className="neu-input text-sm"
+                        value={decisionRole}
+                        onChange={(event) => setDecisionRole(event.target.value as StaffRole)}
+                        aria-label="Роль сотрудника"
+                      >
+                        <option value="">Выберите роль</option>
+                        {assignableRoles.map((role) => (
+                          <option key={role} value={role}>{roleLabels[role]}</option>
+                        ))}
+                      </select>
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          className="neu-btn-primary"
+                          disabled={!decisionRole || loading.staff}
+                          onClick={() => void decideJoinRequest(request, "approve")}
+                        >
+                          Подтвердить
+                        </button>
+                        <button type="button" className="neu-btn" onClick={() => { setDecidingRequestId(null); setDecisionRole(""); }}>
+                          Отмена
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        className="neu-btn-primary"
+                        onClick={() => { setDecidingRequestId(request.id); setDecisionRole(""); }}
+                      >
+                        Одобрить
+                      </button>
+                      <button type="button" className="neu-btn" disabled={loading.staff} onClick={() => void decideJoinRequest(request, "reject")}>
+                        Отклонить
+                      </button>
+                    </div>
+                  )}
+                </article>
+              ))}
+            </div>
+          )}
+        </section>
+
         <section className="neu-card">
           <h2 className="text-lg font-black text-[#0F172A]">Добавить сотрудника</h2>
+          <p className="mt-2 text-xs text-[#64748B]">
+            Вы зовёте человека — здесь. Человек попросился сам по коду — в «Заявках на вступление» выше.
+          </p>
           {/* «Логин и пароль» — режим по умолчанию: письма-приглашения до клиник
               доходят плохо, и сотрудник неделями не мог войти. Приглашение
               осталось вторым способом — оно единственное для почты, у которой
@@ -1889,6 +2324,79 @@ export default function AdminCenter() {
               </button>
             </div>
           )}
+
+          {/* Пачка. Открывается по ссылке, а не занимает экран: обычный случай —
+              один человек, а пачка нужна на открытии салона. */}
+          <div className="mt-4 border-t border-[#E2E8F0] pt-4">
+            <button type="button" className="text-sm font-semibold underline" style={{ color: "var(--negis-primary)" }} onClick={() => {
+                setBatchOpen((open) => {
+                  // Закрыли панель — пароли с экрана уходят: подпись обещает
+                  // «второй раз не покажутся», и она должна быть правдой.
+                  if (open) setBatchResults(null);
+                  return !open;
+                });
+              }}>
+              {batchOpen ? "Скрыть добавление пачкой" : "Добавить сразу нескольких"}
+            </button>
+
+            {batchOpen && (
+              <div className="mt-3 space-y-3">
+                <p className="text-xs text-[#64748B]">
+                  По одной строке на человека: «почта» или «почта, Имя». Имя стоит указать, если сотрудник уже заведён в
+                  списке, — иначе оно заменится на начало почты. Роль одна на всех, поменять её каждому можно потом в
+                  таблице слева. Пароли сгенерируются сами и покажутся один раз.
+                </p>
+                <textarea
+                  className="neu-input min-h-[120px] font-mono text-xs"
+                  placeholder={"aigul@medi.kz\ndana@medi.kz\nsaule@medi.kz"}
+                  value={batchEmails}
+                  onChange={(event) => setBatchEmails(event.target.value)}
+                />
+                <select
+                  className="neu-input text-sm"
+                  value={batchRole}
+                  onChange={(event) => setBatchRole(event.target.value as StaffRole)}
+                  aria-label="Роль для всех из списка"
+                >
+                  {assignableRoles.map((role) => (
+                    <option key={role} value={role}>{roleLabels[role]}</option>
+                  ))}
+                </select>
+                <button type="button" className="neu-btn-primary w-full justify-center" disabled={loading.staffBatch} onClick={() => void createStaffBatch()}>
+                  {loading.staffBatch ? "Заводим…" : "Завести всех"}
+                </button>
+
+                {batchResults && batchResults.length > 0 && (
+                  <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-800">
+                    <p className="font-bold">Логины и пароли</p>
+                    <p className="mt-1 text-xs">Раздайте их лично. Второй раз пароли не покажутся.</p>
+                    <div className="mt-3 space-y-1 font-mono text-xs text-emerald-900">
+                      {batchResults.map((row) => (
+                        <p key={row.email}>
+                          {row.email}
+                          {row.kind === "created" && ` — ${row.password}`}
+                          {row.kind === "invited" && " — почта занята, выписано приглашение"}
+                          {row.kind === "failed" && ` — ${row.error}`}
+                        </p>
+                      ))}
+                    </div>
+                    {batchResults.some((row) => row.kind === "created") && (
+                      <button type="button" className="neu-btn mt-3 w-full justify-center bg-white/80" onClick={() => void copyBatchCredentials()}>
+                        <Copy size={15} />
+                        Скопировать список
+                      </button>
+                    )}
+                    {batchResults.some((row) => row.kind === "invited") && (
+                      <p className="mt-2 text-xs">
+                        Занятой почте пароль не задаётся — это был бы захват чужого аккаунта. Такие сотрудники получают
+                        приглашение: ссылки на них — в списке «Ожидают принятия» ниже.
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
 
           {issuedInvite && (
             <div className="mt-4 rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-800">
@@ -2753,7 +3261,12 @@ export default function AdminCenter() {
           <label className="mb-2 block text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">Раздел админки</label>
           <select className="neu-input w-full" value={activeTab} onChange={(event) => setActiveTab(event.target.value as AdminTab)}>
             {tabs.map((tab) => (
-              <option key={tab.id} value={tab.id}>{tabLabel(tab)}</option>
+              <option key={tab.id} value={tab.id}>
+                {/* Счётчик и в мобильном селекте: иначе на телефоне его не
+                    видно вовсе, а именно с телефона смотрят чаще. */}
+                {tabLabel(tab)}
+                {tab.id === "staff" && pendingJoinRequests.length > 0 ? ` (${pendingJoinRequests.length})` : ""}
+              </option>
             ))}
           </select>
         </div>
@@ -2771,6 +3284,9 @@ export default function AdminCenter() {
               >
                 <tab.icon size={16} />
                 {tabLabel(tab)}
+                {tab.id === "staff" && pendingJoinRequests.length > 0 && (
+                  <span className="rounded-full bg-[#DC2626] px-1.5 text-[11px] font-bold text-white">{pendingJoinRequests.length}</span>
+                )}
               </button>
             ))}
           </div>
