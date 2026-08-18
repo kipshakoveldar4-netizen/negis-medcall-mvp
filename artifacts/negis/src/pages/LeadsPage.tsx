@@ -587,7 +587,7 @@ function leadPatchToApi(patch: Partial<Lead>): Record<string, unknown> {
 
 export default function LeadsPage() {
   const { rolePermissions } = useAuth();
-  const { items, loaded, addItem, updateItem } = useDemoCollection<Lead>("negis_demo_leads", leadsSeed, {
+  const { items, loaded, loadError, addItem, updateItem } = useDemoCollection<Lead>("negis_demo_leads", leadsSeed, {
     endpoint: "/api/crm/leads",
     listKey: "leads",
     itemKey: "item",
@@ -1082,6 +1082,19 @@ export default function LeadsPage() {
             <Loader2 className="animate-spin" size={22} style={{ color: "var(--negis-primary)" }} />
             <p className="text-sm font-bold" style={{ color: "var(--negis-muted)" }}>Загружаем данные…</p>
           </section>
+        ) : loadError ? (
+          // Сбой чтения — не пустая база. Пустой экран здесь заставлял бы
+          // заводить заявки заново поверх уже существующих.
+          <EmptyState
+            icon={Inbox}
+            title="Не удалось загрузить заявки"
+            description="Это сбой связи, а не пустой список: заявки на месте. Не заводите их заново — обновите страницу."
+            action={
+              <button type="button" className="neu-btn-primary justify-center" onClick={() => window.location.reload()}>
+                Обновить страницу
+              </button>
+            }
+          />
         ) : items.length === 0 ? (
           <EmptyState
             icon={Inbox}

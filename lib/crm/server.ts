@@ -4272,6 +4272,20 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
     }
 
     if (Object.keys(row).length === 0) {
+      // Пустой патч и НЕПОНЯТЫЙ патч — разные вещи, и раньше оба отвечали
+      // «сохранено». Пустой («updates: {}») честно ничего не меняет: иначе
+      // updated_at двигался бы на каждом открытии карточки. А вот патч, где
+      // поля присланы, но ни одно не принято, — это молчаливая потеря: браузер
+      // оставлял оптимистичное значение на экране, сотрудник видел «сохранено»,
+      // а в базе не менялось ничего.
+      const offered = Object.keys(patchBody).filter((key) => key !== "id" && key !== "workspaceId" && key !== "updates");
+      if (offered.length > 0) {
+        return sendJson(res, 400, {
+          ...errorBody("PATCH failed", ["Ни одно из присланных полей не принимается этим разделом"]),
+          resource,
+          code: "no_patchable_fields",
+        });
+      }
       return sendJson(res, 200, success("supabase", { [resource === "content-videos" ? "video" : "item"]: demoItem, item: demoItem }));
     }
 

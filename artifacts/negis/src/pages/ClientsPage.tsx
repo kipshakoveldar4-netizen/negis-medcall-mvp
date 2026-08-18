@@ -232,7 +232,7 @@ const emptyForm: ClientForm = { name: "", phone: "", whatsapp: "", source: "", s
 
 export default function ClientsPage() {
   const { rolePermissions } = useAuth();
-  const { items, loaded, addItem, updateItem } = useDemoCollection<Client>("negis_demo_clients", clientsSeed, {
+  const { items, loaded, loadError, addItem, updateItem } = useDemoCollection<Client>("negis_demo_clients", clientsSeed, {
     endpoint: "/api/crm/clients",
     listKey: "clients",
     itemKey: "item",
@@ -576,6 +576,23 @@ export default function ClientsPage() {
           <section className="negis-glass flex min-h-40 flex-col items-center justify-center gap-3 p-8 text-center" aria-live="polite">
             <Loader2 className="animate-spin" size={22} style={{ color: "var(--negis-primary)" }} />
             <p className="text-sm font-bold" style={{ color: "var(--negis-muted)" }}>Загружаем данные…</p>
+          </section>
+        ) : loadError ? (
+          // «Пусто» и «не смогли прочитать» — разные вещи. Пустой список на
+          // сбое чтения выглядит как стёртая база, и сотрудник заводит клиентов
+          // заново поверх существующих: уникальности по телефону нет, дубли
+          // остаются навсегда.
+          <section className="negis-glass-hero flex flex-col items-center gap-3 p-8 text-center">
+            <div className="flex h-14 w-14 items-center justify-center rounded-2xl" style={{ background: "var(--negis-danger-soft, #FEE2E2)", color: "var(--negis-danger, #B91C1C)" }}>
+              <Users size={24} />
+            </div>
+            <h2 className="text-xl font-black" style={{ color: "var(--negis-text)" }}>Не удалось загрузить клиентов</h2>
+            <p className="max-w-md text-sm font-semibold leading-relaxed" style={{ color: "var(--negis-muted)" }}>
+              Это сбой связи, а не пустая база: клиенты на месте. Не заводите их заново — обновите страницу.
+            </p>
+            <button type="button" className="neu-btn-primary justify-center" onClick={() => window.location.reload()}>
+              Обновить страницу
+            </button>
           </section>
         ) : items.length === 0 ? (
           <section className="negis-glass-hero flex flex-col items-center gap-3 p-8 text-center">

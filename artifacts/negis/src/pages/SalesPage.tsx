@@ -381,7 +381,7 @@ function DealFact({ label, children }: { label: string; children: ReactNode }) {
 }
 
 export default function SalesPage() {
-  const { items, loaded, addItem, updateItem } = useDemoCollection<Deal>("negis_demo_deals", dealsSeed, {
+  const { items, loaded, loadError, addItem, updateItem } = useDemoCollection<Deal>("negis_demo_deals", dealsSeed, {
     endpoint: "/api/crm/deals",
     listKey: "deals",
     itemKey: "item",
@@ -806,6 +806,21 @@ export default function SalesPage() {
           <section className="negis-glass flex min-h-40 flex-col items-center justify-center gap-3 p-8 text-center" aria-live="polite">
             <Loader2 className="animate-spin" size={22} style={{ color: "var(--negis-primary)" }} />
             <p className="text-sm font-bold" style={{ color: "var(--negis-muted)" }}>Загружаем данные…</p>
+          </section>
+        ) : loadError ? (
+          // Пустая выручка на сбое чтения — самая дорогая ложь этого экрана:
+          // по ней принимают решения и заводят оплаты заново.
+          <section className="negis-glass-hero flex flex-col items-center gap-3 p-8 text-center">
+            <div className="flex h-14 w-14 items-center justify-center rounded-2xl" style={{ background: "var(--negis-danger-soft, #FEE2E2)", color: "var(--negis-danger, #B91C1C)" }}>
+              <ReceiptText size={24} />
+            </div>
+            <h2 className="text-xl font-black" style={{ color: "var(--negis-text)" }}>Не удалось загрузить продажи</h2>
+            <p className="max-w-md text-sm font-semibold leading-relaxed" style={{ color: "var(--negis-muted)" }}>
+              Это сбой связи, а не нулевая выручка: продажи на месте. Не заводите их заново — обновите страницу.
+            </p>
+            <button type="button" className="neu-btn-primary justify-center" onClick={() => window.location.reload()}>
+              Обновить страницу
+            </button>
           </section>
         ) : items.length === 0 ? (
           <section className="negis-glass-hero flex flex-col items-center gap-3 p-8 text-center">

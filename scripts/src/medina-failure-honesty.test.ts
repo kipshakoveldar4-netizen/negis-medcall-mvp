@@ -295,6 +295,40 @@ test("F12 отказ сохранения не уносит с собой наб
   }
 });
 
+test("F13 сбой чтения не рисуется как пустая база", async () => {
+  // Пустой экран на отказе чтения выглядит как стёртая база: сотрудник
+  // заводит клиентов и заявки заново, а уникальности по телефону нет —
+  // дубли остаются навсегда. Экран обязан различать «пусто» и «не смогли».
+  for (const [page, title] of [
+    ["ClientsPage.tsx", "Не удалось загрузить клиентов"],
+    ["LeadsPage.tsx", "Не удалось загрузить заявки"],
+    ["SalesPage.tsx", "Не удалось загрузить продажи"],
+  ] as const) {
+    const source = await readFile(path.join(negisSrc, "pages", page), "utf8");
+    assert.ok(/const \{ items, loaded, loadError/.test(source), `${page}: экран берёт признак отказа у хука`);
+    assert.ok(source.includes(title), `${page}: отказ называется своими словами`);
+    assert.ok(/Не заводите их заново/.test(source), `${page}: и прямо говорит не дублировать`);
+    // Ветка отказа проверяется РАНЬШЕ пустого списка — иначе её не увидят.
+    assert.ok(
+      source.indexOf(") : loadError ? (") < source.indexOf("items.length === 0 ?"),
+      `${page}: отказ проверяется до пустого состояния`,
+    );
+  }
+});
+
+test("F14 патч, в котором сервер не понял ни одного поля, не выдаётся за сохранение", async () => {
+  const source = await readFile(path.join(repoRoot, "lib", "crm", "server.ts"), "utf8");
+  const patch = source.slice(source.indexOf("if (Object.keys(row).length === 0) {"));
+  const block = patch.slice(0, patch.indexOf("// «Было» приходится читать отдельно"));
+  // Присланные, но не принятые поля — молчаливая потеря: браузер оставлял
+  // оптимистичное значение, сотрудник видел «сохранено», база не менялась.
+  assert.ok(/code: "no_patchable_fields"/.test(block), "непонятый патч отвечает отказом");
+  assert.ok(/const offered = Object\.keys\(patchBody\)/.test(block), "решение принимается по тому, что реально прислали");
+  // Пустой патч так и остаётся успехом: иначе updated_at двигался бы на
+  // каждом открытии карточки (пин CS4 держит это с другой стороны).
+  assert.ok(/if \(offered\.length > 0\)/.test(block), "пустой запрос по-прежнему ничего не меняет и не ругается");
+});
+
 test("F9 a refused production read reaches the operator instead of an empty clinic", async () => {
   const source = await readFile(path.join(negisSrc, "lib", "demoStorage.ts"), "utf8");
   const hook = source.slice(source.indexOf("export function useDemoCollection"));
