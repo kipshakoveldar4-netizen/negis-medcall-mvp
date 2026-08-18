@@ -1,11 +1,10 @@
 import { useState } from 'react';
 import { Link, useLocation } from 'wouter';
-import { BadgeDollarSign, BarChart2, Building2, CalendarDays, Clapperboard, Inbox, LayoutDashboard, Rocket, Settings, Store, Tag, Users, LogOut, X, KeyRound, User, type LucideIcon } from 'lucide-react';
+import { BadgeDollarSign, BarChart2, Building2, CalendarDays, Clapperboard, Inbox, LayoutDashboard, Rocket, Settings, Store, Tag, Users, LogOut, type LucideIcon } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
 import { isRealWorkspace } from '@/lib/demoStorage';
 import { capitalize, termsFor } from '../../../../../lib/vertical/terms';
-import { supabase } from '@/lib/supabase';
-import { toast } from 'sonner';
+import { ProfileDialog } from './ProfileDialog';
 
 // Medina OS information architecture (UI-1). Groups map only to routes that
 // exist; role arrays are unchanged from the previous IA. The former disabled
@@ -75,9 +74,6 @@ export function Sidebar() {
   const noClinicSelected = !isRealWorkspace();
   const terms = termsFor(vertical);
   const [showProfile, setShowProfile] = useState(false);
-  const [fullName, setFullName] = useState(user?.user_metadata?.full_name ?? '');
-  const [newPassword, setNewPassword] = useState('');
-  const [saving, setSaving] = useState(false);
 
   const canUse = (item: NavItem) =>
     !userRole || userRole === 'owner' || userRole === 'manager' || userRole === 'admin' || item.roles.includes(userRole);
@@ -88,30 +84,7 @@ export function Sidebar() {
   const initials = (user?.user_metadata?.full_name ?? user?.email ?? 'U')
     .split(' ').map((w: string) => w[0]).join('').slice(0, 2).toUpperCase();
 
-  const openProfile = () => {
-    setFullName(user?.user_metadata?.full_name ?? '');
-    setNewPassword('');
-    setShowProfile(true);
-  };
-
-  const saveProfile = async () => {
-    if (!fullName.trim()) { toast.error('Введите имя'); return; }
-    if (newPassword && newPassword.length < 6) { toast.error('Пароль: минимум 6 символов'); return; }
-    setSaving(true);
-    try {
-      const updates: { data?: { full_name: string }; password?: string } = {
-        data: { full_name: fullName.trim() },
-      };
-      if (newPassword) updates.password = newPassword;
-      const { error } = await supabase.auth.updateUser(updates);
-      if (error) throw error;
-      toast.success('Профиль сохранён');
-      setShowProfile(false);
-      setNewPassword('');
-    } catch (e: any) {
-      toast.error(e.message || 'Ошибка сохранения');
-    } finally { setSaving(false); }
-  };
+  const openProfile = () => setShowProfile(true);
 
   return (
     <>
@@ -215,81 +188,7 @@ export function Sidebar() {
         </div>
       </aside>
 
-      {/* Profile Modal */}
-      {showProfile && (
-        <div
-          className="fixed inset-0 z-[80] flex items-center justify-center p-4"
-          style={{ background: 'rgba(17, 24, 39, 0.4)' }}
-          onClick={e => { if (e.target === e.currentTarget) setShowProfile(false); }}
-        >
-          <div role="dialog" aria-modal="true" aria-label="Профиль сотрудника" className="w-full max-w-[360px] rounded-xl border bg-white p-7" style={{ borderColor: 'var(--negis-border)', boxShadow: '0 20px 45px rgba(17, 24, 39, 0.18)' }}>
-            <div className="mb-6 flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                <div aria-hidden className="flex h-10 w-10 items-center justify-center rounded-lg text-[13px] font-semibold" style={{ background: 'var(--negis-primary-soft)', color: 'var(--negis-primary)' }}>
-                  {initials}
-                </div>
-                <div>
-                  <div className="text-sm font-semibold" style={{ color: 'var(--negis-text)' }}>
-                    {user?.user_metadata?.full_name || 'Профиль'}
-                  </div>
-                  <div className="mt-0.5 text-xs" style={{ color: 'var(--negis-muted)' }}>
-                    {user?.email}
-                  </div>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => setShowProfile(false)}
-                aria-label="Закрыть профиль"
-                className="neu-icon-btn"
-                style={{ height: 32, width: 32 }}
-              >
-                <X size={15} aria-hidden />
-              </button>
-            </div>
-
-            <div className="space-y-4">
-              <div>
-                <label htmlFor="profile-full-name" className="mb-1.5 block text-[11px] font-medium" style={{ color: 'var(--negis-muted)' }}>
-                  <User size={11} aria-hidden style={{ display: 'inline', marginRight: 5 }} />
-                  ИМЯ
-                </label>
-                <input
-                  id="profile-full-name"
-                  className="neu-input"
-                  placeholder="Ваше имя"
-                  value={fullName}
-                  onChange={e => setFullName(e.target.value)}
-                />
-              </div>
-
-              <div>
-                <label htmlFor="profile-new-password" className="mb-1.5 block text-[11px] font-medium" style={{ color: 'var(--negis-muted)' }}>
-                  <KeyRound size={11} aria-hidden style={{ display: 'inline', marginRight: 5 }} />
-                  НОВЫЙ ПАРОЛЬ
-                </label>
-                <input
-                  id="profile-new-password"
-                  type="password"
-                  className="neu-input"
-                  placeholder="Оставьте пустым, чтобы не менять"
-                  value={newPassword}
-                  onChange={e => setNewPassword(e.target.value)}
-                />
-              </div>
-            </div>
-
-            <div className="mt-6 flex gap-3">
-              <button type="button" className="neu-btn flex-1" onClick={() => setShowProfile(false)}>
-                Отмена
-              </button>
-              <button type="button" className="neu-btn-primary flex-1" disabled={saving} onClick={saveProfile}>
-                {saving ? 'Сохраняем…' : 'Сохранить'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {showProfile && <ProfileDialog onClose={() => setShowProfile(false)} />}
     </>
   );
 }

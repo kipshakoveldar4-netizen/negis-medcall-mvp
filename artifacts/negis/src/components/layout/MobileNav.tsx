@@ -23,6 +23,7 @@ import {
 } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { capitalize, termsFor } from "../../../../../lib/vertical/terms";
+import { ProfileDialog } from "./ProfileDialog";
 
 type MobileNavItem = {
   href: string;
@@ -67,6 +68,7 @@ function isActive(location: string, href: string) {
 
 export function MobileNav() {
   const [open, setOpen] = useState(false);
+  const [showProfile, setShowProfile] = useState(false);
   const [location, setLocation] = useLocation();
   const { signOut, userRole, rolePermissions, vertical } = useAuth();
   const terms = termsFor(vertical);
@@ -118,6 +120,22 @@ export function MobileNav() {
               })}
             </div>
 
+            {/* Профиль жил только в боковом меню, а оно скрыто классом
+                `hidden md:block`: сменить себе пароль с телефона было нельзя, а
+                салон работает с телефонов. Пункт стоит вне списка разделов —
+                он не маршрут, а диалог, и доступен любой роли. */}
+            <button
+              type="button"
+              className="mobile-nav-drawer-item mt-2 w-full"
+              onClick={() => {
+                setOpen(false);
+                setShowProfile(true);
+              }}
+            >
+              <User size={18} />
+              <span>Профиль и пароль</span>
+            </button>
+
             <button
               type="button"
               className="mobile-nav-logout"
@@ -132,6 +150,8 @@ export function MobileNav() {
           </section>
         </div>
       )}
+
+      {showProfile && <ProfileDialog onClose={() => setShowProfile(false)} />}
 
       <nav className="mobile-bottom-nav md:hidden" aria-label="Основная мобильная навигация">
         {visiblePrimary.map(({ href, label, icon: Icon }) => {

@@ -324,3 +324,134 @@ test("SC6 экран предлагает пароль первым и пока�
   // Роли выше своей не предлагаются: сервер их отклонит.
   assert.ok(/canAssignRole\(serverAdminAuth\.role \|\| "admin", role\)/.test(admin));
 });
+
+// ── Смена пароля самим сотрудником ──────────────────────────────────────────
+//
+// Владелец попросил: «после пароли в настройках могут поменять сами же
+// сотрудники». Форма профиля для этого уже была, но с двумя дырами: правила
+// пароля в ней были свои (шесть символов против восьми на сервере), а сама она
+// жила в боковом меню, скрытом на телефоне классом `hidden md:block`, — то есть
+// в салоне, где работают с телефонов, сменить пароль было нельзя вообще.
+
+/** Пины должны цепляться за код, а не за прозу: комментарии вырезаем. */
+function stripComments(source: string): string {
+  return source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^[ \t]*\/\/.*$/gm, "");
+}
+
+const profileDialogPath = path.join(
+  repoRoot, "artifacts", "negis", "src", "components", "layout", "ProfileDialog.tsx",
+);
+
+test("SC8 правила пароля одни на сервер и на кабинет", async () => {
+  const rules = (await import(
+    pathToFileURL(path.join(repoRoot, "lib", "auth", "password-rules.ts")).href
+  )) as { validatePasswordRules: (value: unknown) => string[] };
+
+  assert.equal(rules.validatePasswordRules("Xk7mPq2wRt").length, 0, "нормальный пароль проходит");
+  assert.ok(rules.validatePasswordRules("Xk7mPq2").length > 0, "семь символов — отказ, а кабинет пускал шесть");
+  assert.ok(rules.validatePasswordRules(`${"а".repeat(37)}`).length > 0, "37 кириллических букв — это 74 байта, bcrypt обрежет");
+  assert.ok(rules.validatePasswordRules("Xk7mPq2wRt ").length > 0, "хвостовой пробел теряется при передаче");
+  assert.ok(rules.validatePasswordRules(123).length > 0, "не строка — не пароль");
+
+  // Сервер обязан делегировать, иначе числа разъедутся снова.
+  const onboarding = stripComments(await readFile(
+    path.join(repoRoot, "lib", "crm", "platform-onboarding-credentials.ts"), "utf8",
+  ));
+  assert.ok(/validatePasswordRules/.test(onboarding), "validateOwnerPassword зовёт общие правила");
+  assert.ok(!/password\.length < 8/.test(onboarding), "своей копии минимума на сервере не осталось");
+
+  const dialog = stripComments(await readFile(profileDialogPath, "utf8"));
+  assert.ok(/validatePasswordRules/.test(dialog), "кабинет судит по тем же правилам");
+  assert.ok(!/length < 6/.test(dialog), "шестизначный минимум в кабинете не воскресает");
+});
+
+test("SC9 свой пароль меняют, предъявив текущий, и рабочую сессию это не трогает", async () => {
+  const dialog = stripComments(await readFile(profileDialogPath, "utf8"));
+
+  // Порядок обязателен: сначала проверка текущего пароля, потом запись нового.
+  const checkAt = dialog.indexOf("await verifyCurrentPassword(");
+  const updateAt = dialog.indexOf("supabase.auth.updateUser");
+  assert.ok(checkAt > 0, "текущий пароль проверяется");
+  assert.ok(updateAt > checkAt, "проверка идёт ДО записи нового пароля");
+  assert.ok(/if \(!currentPassword\)/.test(dialog), "без текущего пароля смена не начинается");
+  assert.ok(/newPassword !== repeatPassword/.test(dialog), "опечатка в новом пароле — потерянный доступ, поэтому повтор");
+
+  // Намерение сменить пароль определяют ТОЛЬКО поля нового пароля: пока в счёт
+  // шло и поле «текущий», менеджер паролей подставлял его сам, и человек,
+  // менявший одно лишь имя, упирался в претензию к нетронутому полю.
+  assert.ok(
+    /const wantsPasswordChange = newPassword\.length > 0 \|\| repeatPassword\.length > 0;/.test(dialog),
+    "заполненный «текущий пароль» сам по себе не превращает сохранение имени в смену пароля",
+  );
+
+  // Проверка не трогает основной клиент: удачный вход подменил бы сессию и
+  // перечитал членства — человека с двумя клиниками выбросило бы в выбор
+  // клиники посреди диалога.
+  assert.ok(!/supabase\.auth\.signInWithPassword/.test(dialog), "основной клиент паролем не логинится");
+  assert.ok(!/createClient\(/.test(dialog), "второго клиента Supabase диалог не создаёт");
+
+  const client = stripComments(await readFile(
+    path.join(repoRoot, "artifacts", "negis", "src", "lib", "supabase.ts"), "utf8",
+  ));
+  // Три исхода, а не два: сеть и 429 не имеют права выглядеть как «пароль неверный».
+  assert.ok(/PasswordCheck = 'ok' \| 'wrong' \| 'unavailable'/.test(client), "у проверки три исхода");
+  assert.ok(/scope=local/.test(client), "сессию проверки гасят локально");
+  assert.ok(!/scope=global/.test(client), "глобальный выход завершил бы и рабочую сессию");
+  assert.ok(/if \(check === 'unavailable'\)/.test(dialog), "недоступность проверки — отдельный ответ человеку");
+
+  // Закрыть диалог во время записи нельзя: человек уходил уверенным, что
+  // отменил, а пароль тем временем менялся.
+  assert.ok(/if \(saving\) return;/.test(dialog), "«Отмена» и подложка заблокированы на время записи");
+});
+
+test("SC10 под имперсонацией и без своей сессии диалог не пишет НИЧЕГО", async () => {
+  const dialog = stripComments(await readFile(profileDialogPath, "utf8"));
+
+  // Сессия имперсонации принадлежит ВЛАДЕЛЬЦУ клиники: её выдаёт магической
+  // ссылкой /api/impersonation/session. И пароль, и user_metadata.full_name —
+  // поля одного и того же ГЛОБАЛЬНОГО аккаунта, поэтому запрет обязан стоять на
+  // всей записи. Ревью поймало, что он стоял только на ветке пароля: сотрудник
+  // платформы переименовывал владельца во всех его клиниках, и выглядело это
+  // как действие самого владельца.
+  assert.ok(
+    /const canEditAccount = Boolean\(session\?\.user\?\.id\) && !isImpersonation && !isDemoMode/.test(dialog),
+    "право писать в аккаунт — только своя настоящая сессия",
+  );
+  assert.ok(/if \(!canEditAccount\) \{ toast\.error\(blockedReason\); return; \}/.test(dialog),
+    "запрет стоит первым в пути сохранения, до всякой ветки про пароль");
+  const guardAt = dialog.indexOf("if (!canEditAccount)");
+  const nameWriteAt = dialog.indexOf("data: { full_name: name }");
+  assert.ok(guardAt > 0 && nameWriteAt > guardAt, "запись имени идёт ПОСЛЕ запрета, а не мимо него");
+
+  // Экраны восстановления — второй путь к тому же аккаунту. Форма нового пароля
+  // не имеет права открываться по одной лишь живой сессии.
+  const reset = stripComments(await readFile(
+    path.join(repoRoot, "artifacts", "negis", "src", "pages", "ResetPassword.tsx"), "utf8",
+  ));
+  assert.ok(/arrivedByRecoveryLink/.test(reset), "форма открывается по приходу со ссылки восстановления");
+  assert.ok(!/getSession\(\)\.then/.test(reset), "живой сессии самой по себе для смены пароля мало");
+  assert.ok(/validatePasswordRules/.test(reset), "и правила пароля там общие, а не своя копия");
+});
+
+test("SC11 профиль открывается и с телефона", async () => {
+  const mobile = stripComments(await readFile(
+    path.join(repoRoot, "artifacts", "negis", "src", "components", "layout", "MobileNav.tsx"), "utf8",
+  ));
+  assert.ok(/import \{ ProfileDialog \}/.test(mobile), "мобильное меню знает диалог профиля");
+  assert.ok(/showProfile && <ProfileDialog/.test(mobile), "и показывает его");
+  assert.ok(/setShowProfile\(true\)/.test(mobile), "в ящике есть пункт, который его открывает");
+
+  // Боковое меню — вторая поверхность того же диалога, своей копии формы там
+  // больше нет: две копии разъехались бы правилами, как разъехались числа.
+  const sidebar = stripComments(await readFile(
+    path.join(repoRoot, "artifacts", "negis", "src", "components", "layout", "Sidebar.tsx"), "utf8",
+  ));
+  assert.ok(/showProfile && <ProfileDialog/.test(sidebar), "боковое меню зовёт тот же диалог");
+  assert.ok(!/auth\.updateUser/.test(sidebar), "своей формы смены пароля в сайдбаре не осталось");
+
+  // Именно это и было сломано: сайдбар на телефоне не отрисовывается.
+  const layout = await readFile(
+    path.join(repoRoot, "artifacts", "negis", "src", "components", "layout", "PageLayout.tsx"), "utf8",
+  );
+  assert.ok(/hidden md:block[\s\S]{0,80}<Sidebar \/>/.test(layout), "сайдбар по-прежнему скрыт на узких экранах");
+});

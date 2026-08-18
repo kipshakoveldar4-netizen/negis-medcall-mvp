@@ -265,10 +265,27 @@ test("W8 a user with several memberships is no longer told their account is unli
   const fn = source.slice(source.indexOf("const applyNoWorkspaceAccess"));
   const body = fn.slice(0, fn.indexOf("\n  };"));
 
-  const guardAt = body.indexOf("membershipsRef.current.length > 1");
-  const toastAt = body.indexOf("Аккаунт не связан с клиникой");
-  assert.ok(guardAt > 0, "the multi-membership case must be recognised");
+  // Пин цеплялся за точный текст тоста, а текст переписали в 0ca30d8 («не
+  // привязан к клинике» вместо «не связан с клиникой»). indexOf вернул −1,
+  // assert падал — и красный тест уехал в main, потому что общего прогона сюит
+  // в проекте не было вовсе. Теперь он есть: `pnpm run test:suites`.
+  //
+  // Заодно пин был слабым: он проверял ПОРЯДОК двух строк, а инвариант в том,
+  // что защита ВОЗВРАЩАЕТ управление. Удаление слова `return` оставляло
+  // валидный JS `if (…);` и зелёный тест, а человек с двумя клиниками снова
+  // получал «обратитесь к администратору». Комментирование защиты тоже
+  // проходило: исходник не очищался от комментариев.
+  const code = body.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^[ \t]*\/\/.*$/gm, "");
+  const guardAt = code.indexOf("membershipsRef.current.length > 1");
+  const toastAt = code.indexOf("toast.error(");
+  assert.ok(guardAt > 0, "the multi-membership case must be recognised in live code");
+  assert.ok(toastAt > 0, "the misleading message must still be found by this pin");
   assert.ok(toastAt > guardAt, "and must return before the misleading message");
+  assert.ok(
+    /if \(membershipsRef\.current\.length > 1\) return;/.test(code),
+    "защита обязана возвращать управление, а не просто упоминать условие",
+  );
+  assert.ok(/администратора клиники/.test(body), "сообщение по-прежнему объясняет, к кому идти");
 });
 
 // ===========================================================================

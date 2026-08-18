@@ -1,13 +1,22 @@
 import { useState, useEffect } from 'react';
 import { useLocation } from 'wouter';
-import { supabase } from '@/lib/supabase';
+import { arrivedByRecoveryLink, supabase } from '@/lib/supabase';
+import { validatePasswordRules } from '../../../../lib/auth/password-rules';
 import { z } from 'zod';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { Check, Eye, EyeOff } from 'lucide-react';
 
 const schema = z.object({
-  password: z.string().min(8, 'Минимум 8 символов'),
+  // Правила — общие с сервером (lib/auth/password-rules.ts). Своя копия здесь
+  // держала только минимум: пароль с хвостовым пробелом проходил, сохранялся
+  // вместе с пробелом, а при передаче голосом пробел терялся — и человек
+  // упирался в «Invalid login credentials», неотличимое от «пароль неверный».
+  password: z.string().superRefine((value, ctx) => {
+    for (const problem of validatePasswordRules(value)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: problem });
+    }
+  }),
   confirm: z.string().min(1, 'Подтвердите пароль'),
 }).refine(d => d.password === d.confirm, {
   message: 'Пароли не совпадают',
@@ -45,13 +54,13 @@ export default function ResetPassword() {
       }
     });
 
-    /* In case the event already fired before the listener attached,
-       also check the current session */
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      if (session) {
-        setPageState(prev => prev === 'loading' ? 'form' : prev);
-      }
-    });
+    /* Событие могло подняться до подписки — тогда решает признак, снятый при
+       загрузке модуля. Живой сессии САМОЙ ПО СЕБЕ мало и быть не должно: под
+       имперсонацией это сессия владельца клиники, и форма отдавала бы смену
+       его пароля любому, кто наберёт адрес. */
+    if (arrivedByRecoveryLink) {
+      setPageState(prev => prev === 'loading' ? 'form' : prev);
+    }
 
     /* If no recovery event arrives within 4 seconds, assume link is expired */
     const timer = setTimeout(() => {

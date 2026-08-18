@@ -435,7 +435,25 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   const tryApplySupabaseStaffUser = async (supabaseUser: User): Promise<boolean> => {
-    const { memberships } = await fetchAuthContext();
+    const { memberships, status } = await fetchAuthContext();
+
+    // «Прочитать не удалось» — не то же самое, что «членств нет». Разница стала
+    // видна, когда смену пароля вынесли в кабинет: updateUser поднимает
+    // USER_UPDATED, подписчик тут же перечитывает контекст, и одного моргнувшего
+    // Wi-Fi хватало, чтобы обнулить роль и права и объявить человеку «Аккаунт не
+    // привязан к клинике» — сразу после того, как его пароль успешно сменился.
+    const readFailed = memberships.length === 0 && (status === 0 || status >= 500);
+    if (readFailed) {
+      toast.error(
+        membershipsRef.current.length > 0
+          ? 'Сервис авторизации не ответил — обновите страницу, доступ не изменился.'
+          : 'Сервис авторизации не ответил. Обновите страницу или войдите ещё раз.',
+      );
+      // Права и выбранная клиника остаются как были: неудачное чтение никого не
+      // повышает и никого не должно понижать.
+      return true;
+    }
+
     membershipsRef.current = memberships;
     if (memberships.length === 0) {
       setAvailableWorkspaces([]);

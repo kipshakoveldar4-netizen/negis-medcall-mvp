@@ -83,6 +83,11 @@
   --negis-success:       #059669;
   --negis-warning:       #D97706;
   --negis-error:         #DC2626;
+  /* Опасное действие: имена были в разметке (ClientsPage), а объявлений не
+     было — токен молча падал в литерал, дописанный рядом, и экран уезжал на
+     полтона. Вскрылось, когда сюиты собрали в один прогон. */
+  --negis-danger:        #B91C1C;
+  --negis-danger-soft:   #FEE2E2;
   --negis-text:          #111827;
   --negis-muted:         #6B7280;
   --negis-accent:        var(--negis-mint-ink);

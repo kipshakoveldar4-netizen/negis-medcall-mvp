@@ -1,4 +1,5 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
+import { validatePasswordRules } from "../auth/password-rules";
 import { getSupabaseServerClient } from "../supabase/server";
 import { VERTICAL_SETTINGS_KEY } from "../vertical/terms";
 import { validateOnboardingRequest } from "./platform-onboarding";
@@ -45,21 +46,12 @@ function sendJson(res: VercelResponse, status: number, body: JsonRecord) {
 
 /**
  * Правила пароля решаются без базы, поэтому отдельной функцией — как
- * validateOnboardingRequest. 8 символов — наш минимум; 72 БАЙТА — предел
- * bcrypt, которым Supabase хэширует: более длинный молча обрезался бы, и
- * байт, а не символов — кириллическая буква занимает два.
+ * validateOnboardingRequest. Сами правила живут в lib/auth/password-rules.ts:
+ * их читает и форма профиля в кабинете, где сотрудник меняет пароль себе. Пока
+ * правила были записаны здесь, кабинет требовал шесть символов вместо восьми.
  */
 export function validateOwnerPassword(value: unknown): string[] {
-  const password = typeof value === "string" ? value : "";
-  const details: string[] = [];
-  if (password.length < 8) details.push("Пароль — не короче 8 символов.");
-  if (Buffer.byteLength(password, "utf8") > 72) details.push("Пароль слишком длинный: до 72 байт, кириллическая буква считается за две.");
-  if (password.trim().length === 0 && password.length > 0) details.push("Пароль из одних пробелов не защищает.");
-  // Хвостовой пробел от вставки из чата невидим на экране результата, а при
-  // передаче голосом или с бумажки теряется гарантированно — владелец упрётся
-  // в «Invalid login credentials», неотличимо от «пароль неверный».
-  else if (password !== password.trim()) details.push("Пароль начинается или кончается пробелом — уберите его: при передаче он потеряется.");
-  return details;
+  return validatePasswordRules(value);
 }
 
 /** /login на том же хосте, что принял запрос, — как acceptUrl у инвайт-пути. */
