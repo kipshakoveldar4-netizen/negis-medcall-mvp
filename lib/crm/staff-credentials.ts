@@ -1,6 +1,7 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { getSupabaseServerClient } from "../supabase/server";
 import { canAssignRole, isStaffRole, type StaffRole } from "../auth/permissions";
+import { emailFromLogin, isLoginShape, isSyntheticEmail, loginFromEmail, loginWithSuffix, normalizeLogin } from "../auth/staff-logins";
 import { platformOwnerIds } from "../auth/platform";
 import { readWorkspaceContext } from "./server";
 import { acceptUrl, createInvitationToken, escapeLikePattern, expiryFromNow, normalizeEmail } from "./staff-invitations";
@@ -115,6 +116,8 @@ export type StaffCredentialsRequest = {
   email: string;
   role: StaffRole;
   fullName: string;
+  /** Задан, если вход по логину: тогда email — синтетический адрес. */
+  login?: string;
 };
 
 /**
@@ -128,12 +131,31 @@ export function validateStaffCredentialsRequest(
   body: JsonRecord,
   actorRole: string,
 ): StaffCredentialsRequest | StaffCredentialsRejection {
-  const email = normalizeEmail(body.email);
   const role = readString(body.role);
   const fullName = readString(body.fullName ?? body.full_name ?? body.name);
 
+  // Вход бывает двух видов, и это осознанно: почта — когда она у человека есть
+  // и он ей владеет; логин — когда почты нет или она «морока» (слова владельца).
+  // Логин превращается в синтетический адрес @staff.negis.local, недоставляемый
+  // по построению: письма туда не уходят никому и никогда.
+  const rawLogin = readString(body.login);
+  const usesLogin = Boolean(rawLogin) && !rawLogin.includes("@");
+  const login = usesLogin ? normalizeLogin(rawLogin) : "";
+  const email = usesLogin ? emailFromLogin(login) : normalizeEmail(body.email ?? rawLogin);
+
   const details: string[] = [];
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) details.push("Почта сотрудника не похожа на адрес.");
+  if (usesLogin) {
+    if (!isLoginShape(login)) {
+      details.push("Логин: латиница, цифры, точка или дефис, от 3 до 32 знаков — например aigul.botanova.");
+    }
+  } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    details.push("Укажите почту сотрудника или логин без «собаки».");
+  } else if (isSyntheticEmail(email)) {
+    // Служебный домен выдаёт система. Если разрешить называть такой адрес
+    // руками, посторонний занял бы чужой логин — а дальше сработала бы ветка
+    // «почта занята», и администратору выписали бы приглашение на ЧУЖОЙ вход.
+    details.push("Адреса на служебном домене выдаёт система — укажите логин без «собаки» или настоящую почту.");
+  }
   if (!isStaffRole(role)) {
     details.push("Роль обязательна и должна быть из списка.");
   } else if (!isStaffRole(actorRole) || !canAssignRole(actorRole, role)) {
@@ -151,7 +173,12 @@ export function validateStaffCredentialsRequest(
     return { status: 400, error: "Форма заполнена не до конца", code: "invalid_staff_credentials", details };
   }
 
-  return { email, role: role as StaffRole, fullName: fullName || email };
+  return {
+    email,
+    role: role as StaffRole,
+    fullName: fullName || (usesLogin ? login : email),
+    ...(usesLogin ? { login } : {}),
+  };
 }
 
 /**
@@ -257,7 +284,7 @@ export async function handleStaffPasswordReset(req: VercelRequest, res: VercelRe
       success: false,
       error: "У сотрудника ещё нет входа",
       code: "staff_not_linked",
-      details: ["Заведите ему вход на вкладке «Логин и пароль» — существующая строка достроится, второй профиль не появится."],
+      details: ["Заведите ему вход на вкладке «Логин и пароль», указав ЕГО ПОЧТУ (не логин) — тогда существующая строка достроится, второй профиль не появится."],
     });
   }
 
@@ -413,14 +440,6 @@ export async function handleStaffCredentials(req: VercelRequest, res: VercelResp
   // косвенно (already_member и «почта занята»), а косвенная гарантия исчезает
   // молча при первом же послаблении дедупа. У PATCH staff такая проверка
   // написана явно (staffPatchRejection) — здесь тоже.
-  if (context.email && normalizeEmail(context.email) === normalizeEmail(body.email)) {
-    return sendJson(res, 403, {
-      success: false,
-      error: "Себе завести доступ нельзя",
-      code: "permission_denied",
-      details: ["Это ваша собственная почта: роль себе не выдают, пароль себе меняют через «Забыли пароль?»."],
-    });
-  }
   const validated = validateStaffCredentialsRequest(body, context.role);
   if ("status" in validated) {
     auditRefusal(validated.code, context.workspaceId, context.staffUserId);
@@ -431,16 +450,45 @@ export async function handleStaffCredentials(req: VercelRequest, res: VercelResp
       ...(validated.details ? { details: validated.details } : {}),
     });
   }
+  // Себе — нельзя, и это сказано словами. Сравнение с ИТОГОВЫМ адресом, а не с
+  // сырым body.email: на пути логина body.email пуст, и проверка молчала бы —
+  // осталась бы только косвенная (already_member), а косвенная гарантия
+  // исчезает при первом же послаблении дедупа.
+  if (context.email && normalizeEmail(context.email) === normalizeEmail(validated.email)) {
+    return sendJson(res, 403, {
+      success: false,
+      error: "Себе завести доступ нельзя",
+      code: "permission_denied",
+      details: ["Это ваш собственный вход: роль себе не выдают, а пароль себе меняют в профиле."],
+    });
+  }
+
   const password = String(body.password);
 
-  // Уже в команде — второй строки быть не должно. Почта здесь значение, а не
-  // LIKE-шаблон: «_» иначе совпал бы с адресом коллеги на один символ.
-  const { data: existing, error: existingError } = await supabase
-    .from("staff_users")
-    .select("id, auth_user_id")
-    .eq("workspace_id", context.workspaceId)
-    .ilike("email", escapeLikePattern(validated.email))
-    .maybeSingle();
+  // Поиск существующей строки идёт ТОЛЬКО по настоящей почте.
+  //
+  // Для логина такой поиск вреден по двум причинам, и обе поймало ревью. Первая:
+  // ключом был бы БАЗОВЫЙ служебный адрес, а аккаунт создаётся с хвостом, если
+  // база занята, — повторная отправка не нашла бы строку и завела бы второго
+  // сотрудника. Вторая: две разные женщины по имени «Дана Ким» в одной клинике
+  // дают один и тот же выведенный логин, и вторая получала бы «этот человек уже
+  // в команде, меняйте роль» — про совершенно другого человека. Столкновение
+  // логинов разрешается ниже, хвостом, и это единственное место, где оно
+  // разрешается.
+  //
+  // Достройка непривязанной строки (сотрудник из seed или заведённый руками)
+  // осталась за почтовым путём: там администратор называет ЕГО адрес, и строка
+  // находится. Отказ staff_not_linked об этом и говорит прямым текстом.
+  const { data: existing, error: existingError } = validated.login
+    ? { data: null, error: null }
+    : await supabase
+        .from("staff_users")
+        .select("id, auth_user_id")
+        .eq("workspace_id", context.workspaceId)
+        // Почта здесь значение, а не LIKE-шаблон: «_» иначе совпал бы с
+        // адресом коллеги на один символ.
+        .ilike("email", escapeLikePattern(validated.email))
+        .maybeSingle();
   if (existingError) {
     return sendJson(res, 503, { success: false, error: "Хранилище не ответило", code: "unavailable" });
   }
@@ -473,33 +521,89 @@ export async function handleStaffCredentials(req: VercelRequest, res: VercelResp
   // Прямой вызов Admin API: supabase-js 2.105 не возит auth.admin ни в типах,
   // ни в рантайме (сборка Vercel поймала это на платформенном пути).
   type AdminCreateResponse = { ok: boolean; status: number; json(): Promise<unknown> };
-  let created: AdminCreateResponse;
-  try {
-    created = (await fetch(`${supabaseUrl}/auth/v1/admin/users`, {
-      method: "POST",
-      headers: {
-        apikey: serviceRoleKey,
-        Authorization: `Bearer ${serviceRoleKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        email: validated.email,
-        password,
-        // Письмо не отправляется вовсе — в этом смысл пути.
-        email_confirm: true,
-        user_metadata: { full_name: validated.fullName },
-      }),
-    })) as unknown as AdminCreateResponse;
-  } catch {
-    return sendJson(res, 502, { success: false, error: "Не удалось создать аккаунт сотрудника", code: "unavailable" });
+
+  // Захватываем значение до объявления функции: сужение типа внутрь
+  // hoisted-функции TypeScript не переносит.
+  const accountFullName = validated.fullName;
+
+  async function createAuthAccount(email: string): Promise<AdminCreateResponse | null> {
+    try {
+      return (await fetch(`${supabaseUrl}/auth/v1/admin/users`, {
+        method: "POST",
+        headers: {
+          apikey: serviceRoleKey as string,
+          Authorization: `Bearer ${serviceRoleKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          email,
+          password,
+          // Письмо не отправляется вовсе — в этом смысл пути.
+          email_confirm: true,
+          user_metadata: { full_name: accountFullName },
+        }),
+      })) as unknown as AdminCreateResponse;
+    } catch {
+      return null;
+    }
   }
 
-  if (!created.ok) {
-    const errorBody = asRecord(await created.json().catch(() => null));
+  /**
+   * Тело ответа читается РОВНО ОДИН РАЗ: повторный .json() на том же ответе
+   * вернёт пустоту, и «почта занята» превратилось бы в «непонятный сбой».
+   */
+  async function readFailure(response: AdminCreateResponse): Promise<{ taken: boolean; status: number }> {
+    const errorBody = asRecord(await response.json().catch(() => null));
     const errorCode = readString(errorBody.error_code).toLowerCase();
     const message = readString(errorBody.msg) || readString(errorBody.message) || readString(errorBody.error_description);
-    const emailTaken = errorCode === "email_exists" || /already (been )?registered/i.test(message);
-    if (emailTaken) {
+    return {
+      taken: errorCode === "email_exists" || /already (been )?registered/i.test(message),
+      status: response.status,
+    };
+  }
+
+  // Логины глобальны на всю платформу, и два салона законно хотят «aigul».
+  // Занятость логина — не отказ, а повод взять следующий: aigul.k7, aigul.m3.
+  // Администратор увидит ВЫДАННЫЙ логин в таблице с паролем и продиктует именно
+  // его.
+  //
+  // Для почты так делать НЕЛЬЗЯ, и это главная граница этого пути: чужой адрес
+  // не «занят», он ЧУЖОЙ, и там выписывается приглашение — человек входит своим
+  // паролем и сам соглашается стать сотрудником. Если бы приглашение
+  // выписывалось и для занятого ЛОГИНА, оно ушло бы на служебный адрес чужого
+  // сотрудника из другой клиники, а принять его смог бы именно он: проверка
+  // приглашения сверяет адрес сессии, и он совпал бы.
+  const LOGIN_ATTEMPTS = 8;
+  let issuedEmail = validated.email;
+  let created: AdminCreateResponse | null = null;
+  let failure: { taken: boolean; status: number } | null = null;
+  const maxAttempts = validated.login ? LOGIN_ATTEMPTS : 1;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    issuedEmail = validated.login ? emailFromLogin(loginWithSuffix(validated.login, attempt)) : validated.email;
+    const response = await createAuthAccount(issuedEmail);
+    if (!response) {
+      return sendJson(res, 502, { success: false, error: "Не удалось создать аккаунт сотрудника", code: "unavailable" });
+    }
+    if (response.ok) { created = response; break; }
+    failure = await readFailure(response);
+    // Занят — следующая попытка. Любой другой отказ повторять бессмысленно.
+    if (!validated.login || !failure.taken) break;
+  }
+
+  if (!created && validated.login && failure?.taken) {
+    // Восемь занятых подряд — это уже не «занято», а что-то другое; молча
+    // придумывать девятый вариант нельзя: логин печатают на бумажке.
+    return sendJson(res, 409, {
+      success: false,
+      error: "Свободный логин не подобрался",
+      code: "login_unavailable",
+      details: ["Этот логин занят вместе с ближайшими вариантами. Задайте другой — например с инициалом: aigul.b."],
+    });
+  }
+
+  if (!created) {
+    if (failure?.taken) {
       auditRefusal("email_already_registered", context.workspaceId, context.staffUserId);
       // Отказ здесь — не тупик, а развилка, и вторая её ветка выписывается
       // сразу. Аккаунт может существовать по двум причинам: человек
@@ -521,7 +625,7 @@ export async function handleStaffCredentials(req: VercelRequest, res: VercelResp
         ...(invitation.acceptUrl ? { data: { acceptUrl: invitation.acceptUrl, email: validated.email, role: validated.role } } : {}),
       });
     }
-    if (created.status === 422) {
+    if (failure?.status === 422) {
       return sendJson(res, 400, {
         success: false,
         error: "Supabase отклонил такой пароль",
@@ -541,7 +645,11 @@ export async function handleStaffCredentials(req: VercelRequest, res: VercelResp
       success: false,
       error: "Аккаунт создан, но ответ Supabase не прочитан",
       code: "staff_credentials_unreadable",
-      details: ["Повторная попытка ответит «почта занята» — тогда пригласите сотрудника ссылкой."],
+      details: ["Повторная попытка ответит «занято» — раздайте показанный логин и пароль, они действуют."],
+      // Логин обязан вернуться даже в отказе: пароль уже применён к ЭТОМУ
+      // адресу, а у входа по логину нет письма-восстановления. Без этого поля
+      // экран печатал бы базовый логин, а аккаунт был бы с хвостом.
+      data: { login: loginFromEmail(issuedEmail), email: issuedEmail },
     });
   }
 
@@ -553,7 +661,7 @@ export async function handleStaffCredentials(req: VercelRequest, res: VercelResp
     .from("staff_invitations")
     .update({ revoked_at: new Date().toISOString() })
     .eq("workspace_id", context.workspaceId)
-    .ilike("email", escapeLikePattern(validated.email))
+    .ilike("email", escapeLikePattern(issuedEmail))
     .is("accepted_at", null)
     .is("revoked_at", null);
   if (revokeError) {
@@ -561,8 +669,9 @@ export async function handleStaffCredentials(req: VercelRequest, res: VercelResp
       success: false,
       error: "Аккаунт создан, но прежние приглашения не отозвались",
       code: "partial_staff_credentials",
+      data: { login: loginFromEmail(issuedEmail), email: issuedEmail },
       details: [
-        `Аккаунт ${validated.email} существует, доступа к клинике у него пока нет.`,
+        `Аккаунт ${issuedEmail} существует, доступа к клинике у него пока нет.`,
         "Отзовите приглашение этой почты в списке ниже и повторите — иначе останутся два пути входа.",
       ],
     });
@@ -595,8 +704,9 @@ export async function handleStaffCredentials(req: VercelRequest, res: VercelResp
         success: false,
         error: "Аккаунт создан, но вход сотруднику не привязан",
         code: "partial_staff_credentials",
+        data: { login: loginFromEmail(issuedEmail), email: issuedEmail },
         details: [
-          `Аккаунт ${validated.email} существует, а строка сотрудника осталась без входа.`,
+          `Аккаунт ${issuedEmail} существует, а строка сотрудника осталась без входа.`,
           "Повторная отправка ответит «почта занята». Обратитесь в поддержку платформы: строку нужно привязать вручную.",
         ],
       });
@@ -608,7 +718,7 @@ export async function handleStaffCredentials(req: VercelRequest, res: VercelResp
     return sendJson(res, 200, {
       success: true,
       mode: "supabase",
-      data: { staff: asRecord(linkedRow), email: validated.email, role: validated.role, linkedExisting: true },
+      data: { staff: asRecord(linkedRow), email: issuedEmail, login: loginFromEmail(issuedEmail), role: validated.role, linkedExisting: true },
     });
   }
 
@@ -616,7 +726,7 @@ export async function handleStaffCredentials(req: VercelRequest, res: VercelResp
     .from("staff_users")
     .insert({
       workspace_id: context.workspaceId,
-      email: validated.email,
+      email: issuedEmail,
       full_name: validated.fullName,
       role: validated.role,
       status: "active",
@@ -639,8 +749,9 @@ export async function handleStaffCredentials(req: VercelRequest, res: VercelResp
       success: false,
       error: "Аккаунт создан, но сотрудник не добавлен",
       code: "partial_staff_credentials",
+      data: { login: loginFromEmail(issuedEmail), email: issuedEmail },
       details: [
-        `Аккаунт ${validated.email} уже существует, но доступа к клинике у него нет.`,
+        `Аккаунт ${issuedEmail} уже существует, но доступа к клинике у него нет.`,
         "Повторная отправка ответит «почта занята» — пригласите этого человека ссылкой, он войдёт с заданным паролем.",
       ],
     });
@@ -659,7 +770,10 @@ export async function handleStaffCredentials(req: VercelRequest, res: VercelResp
     mode: "supabase",
     data: {
       staff: asRecord(staffRow),
-      email: validated.email,
+      email: issuedEmail,
+      // Экран обязан печатать ВЫДАННЫЙ логин, а не отправленный: при
+      // столкновении он получил хвост, и админ раздал бы неверный.
+      login: loginFromEmail(issuedEmail),
       role: validated.role,
     },
   });

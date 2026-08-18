@@ -4,6 +4,7 @@ import { KeyRound, LogIn, ShieldCheck } from "lucide-react";
 import { toast } from "sonner";
 import { apiUrl, crmFetch } from "@/lib/api";
 import { hasSupabaseFrontendEnv, supabase } from "@/lib/supabase";
+import { isSyntheticEmail, loginOrEmailToAuthEmail } from "../../../../lib/auth/staff-logins";
 import { isStaffRole, roleLabels } from "@/lib/permissions";
 import { PENDING_INVITE_KEY } from "@/pages/JoinWorkspace";
 
@@ -86,7 +87,19 @@ export default function Login() {
   const sendPasswordReset = async () => {
     if (resetSending) return;
     if (!email.trim()) {
-      toast.error("Введите почту выше — на неё придёт письмо для пароля.");
+      toast.error("Введите логин или почту выше.");
+      return;
+    }
+    // У логина почты нет по построению: письмо ушло бы в служебный домен, то
+    // есть никуда, а плашка «письмо уже в пути» стала бы прямой ложью. В сеть
+    // не идём вовсе — сразу говорим, что делать.
+    // Служебный адрес «собаку» содержит, поэтому проверять надо ЕГО, а не
+    // наличие «@»: человек, увидевший свой полный адрес где-то в переписке,
+    // иначе получал бы «письмо уже в пути» и ждал бы его вечно.
+    if (!email.includes("@") || isSyntheticEmail(email)) {
+      toast.error(
+        "У логина нет почты, письмом пароль не восстановить. Попросите администратора клиники: «Настройки» → «Сотрудники» → «Новый пароль». Он передаст его лично.",
+      );
       return;
     }
     setResetSending(true);
@@ -104,9 +117,13 @@ export default function Login() {
   };
 
   const submit = async () => {
-    const normalizedEmail = email.trim().toLowerCase();
+    // Одно поле на два вида входа: с «@» — почта, без — логин, который
+    // превращается в служебный адрес ТЕМ ЖЕ модулем, что применил сервер при
+    // заведении. Две копии транслитерации дали бы «неверный логин или пароль»,
+    // неотличимое от неверного пароля.
+    const normalizedEmail = loginOrEmailToAuthEmail(email);
     if (!normalizedEmail || !password) {
-      toast.error("Введите email и пароль");
+      toast.error("Введите логин или почту и пароль");
       return;
     }
 
@@ -116,7 +133,7 @@ export default function Login() {
         saveStaffSession(
           {
             id: "demo-staff-user",
-            name: normalizedEmail,
+            name: email.trim() || normalizedEmail,
             email: normalizedEmail,
             role: "admin",
             status: "active",
@@ -219,7 +236,7 @@ export default function Login() {
                 </div>
                 <h1 className="max-w-md text-3xl font-semibold leading-tight">Medina OS для команды</h1>
                 <p className="mt-4 max-w-md text-sm leading-6 text-white/70">
-                  Войдите своей почтой и паролем. Если пароля ещё нет или он забыт — восстановите его по почте прямо отсюда.
+                  Войдите логином, который выдал администратор, или своей почтой. Забыли пароль от почты — восстановите прямо отсюда; у логина пароль задаёт администратор.
                 </p>
               </div>
               <p className="text-xs text-white/50">Без настроек Supabase вход работает без подключения к базе.</p>
@@ -233,20 +250,27 @@ export default function Login() {
               </Link>
               <h2 className="mt-5 text-2xl font-black text-[#0F172A]">Вход</h2>
               <p className="mt-2 text-sm leading-6 text-[#64748B]">
-                Почта и пароль. Нет пароля или забыли — «Забыли пароль?» вышлет письмо, по которому вы зададите новый.
+                Логин (например aigul.botanova) или почта — что вам выдали. Забыли пароль: у почты письмо придёт по кнопке ниже, у логина новый задаёт администратор клиники.
               </p>
             </div>
 
             <div className="space-y-4">
               <label className="block">
-                <span className="mb-2 block text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">Email</span>
+                <span className="mb-2 block text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">Логин или почта</span>
+                {/* type="text", а не "email": браузер отверг бы «aigul» своей
+                    проверкой ещё до отправки, и вся ветка входа по логину была
+                    бы мертва. autoCapitalize и autoCorrect выключены — иначе
+                    iOS превратит «aigul» в «Aigul». */}
                 <input
                   className="neu-input w-full"
-                  type="email"
+                  type="text"
+                  autoComplete="username"
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
                   value={email}
                   onChange={(event) => setEmail(event.target.value)}
-                  placeholder="employee@clinic.kz"
-                  autoComplete="email"
+                  placeholder="aigul.botanova или employee@clinic.kz"
                 />
               </label>
 

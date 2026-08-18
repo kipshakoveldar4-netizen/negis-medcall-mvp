@@ -2,7 +2,8 @@ import { useEffect, useState } from "react";
 import { History, Loader2 } from "lucide-react";
 import { crmFetch } from "@/lib/api";
 import { readWorkspaceId } from "@/lib/demoStorage";
-import { roleLabels } from "@/lib/permissions";
+import { staffRoleLabels } from "../../../../../lib/vertical/terms";
+import { useAuth } from "@/contexts/AuthContext";
 import type { StaffRole } from "@/lib/permissions";
 
 // История изменений одной записи.
@@ -75,11 +76,12 @@ function timeOfDay(iso: string | null): string {
   return at.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
 }
 
-function actorLine(event: JournalEvent): string {
+function actorLine(event: JournalEvent, roleTitles: Record<string, string>): string {
   const kind = ACTOR_KIND_LABEL[event.actorKind ?? "manual"] ?? "";
   if (kind) return kind;
-  const role = event.actorRole && event.actorRole in roleLabels
-    ? roleLabels[event.actorRole as StaffRole]
+  // Подпись роли — словом ниши: в салоне «Мастер», а не «Врач».
+  const role = event.actorRole && event.actorRole in roleTitles
+    ? roleTitles[event.actorRole as StaffRole]
     : event.actorRole;
   // Имя — снимок на момент события. Если его нет, роль всё равно говорит
   // больше, чем пустая строка.
@@ -123,6 +125,8 @@ export function ChangeLogPanel({
 }) {
   const [state, setState] = useState<LoadState>("loading");
   const [events, setEvents] = useState<JournalEvent[]>([]);
+  const { vertical } = useAuth();
+  const roleTitles = staffRoleLabels(vertical);
 
   useEffect(() => {
     if (!entityId) return;
@@ -213,7 +217,7 @@ export function ChangeLogPanel({
                     </span>
                     <div className="min-w-0">
                       <p className="text-xs font-semibold" style={{ color: "var(--negis-ink-strong)" }}>
-                        {actorLine(event)}
+                        {actorLine(event, roleTitles)}
                       </p>
                       {event.changes.length === 0 ? (
                         <p className="text-xs" style={{ color: "var(--negis-muted-2)" }}>

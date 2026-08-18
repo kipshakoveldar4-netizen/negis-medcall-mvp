@@ -3,6 +3,8 @@ import { useLocation } from "wouter";
 import { Loader2, ShieldCheck } from "lucide-react";
 import { crmFetch, crmJson, crmErrorMessage, CrmApiError } from "@/lib/api";
 import { supabase, hasSupabaseFrontendEnv } from "@/lib/supabase";
+import { toast } from "sonner";
+import { isSyntheticEmail } from "../../../../lib/auth/staff-logins";
 import { WORKSPACE_SELECTOR_KEY } from "@/lib/demoStorage";
 
 // Commercial-3B — the invited person's half of enrollment.
@@ -38,6 +40,12 @@ export default function JoinWorkspace() {
 
   const sendRecovery = async () => {
     if (recoverySending || !recoveryEmail.trim()) return;
+    // У входа по логину почты нет: письмо ушло бы в домен без MX, а человек
+    // ждал бы его вместо того, чтобы попросить пароль у администратора.
+    if (isSyntheticEmail(recoveryEmail.trim())) {
+      toast.error("У логина нет почты — новый пароль задаёт администратор клиники.");
+      return;
+    }
     setRecoverySending(true);
     try {
       await supabase.auth.resetPasswordForEmail(recoveryEmail.trim(), {

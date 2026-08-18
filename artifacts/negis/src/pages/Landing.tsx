@@ -2,13 +2,16 @@ import { useState, useEffect, useRef } from 'react';
 import { useLocation } from 'wouter';
 import { ArrowRight } from 'lucide-react';
 import { supabase } from '@/lib/supabase';
+import { isSyntheticEmail, loginOrEmailToAuthEmail } from '../../../../lib/auth/staff-logins';
 import { useAuth } from '@/contexts/AuthContext';
 import { z } from 'zod';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 
 const loginSchema = z.object({
-  email: z.string().email('Неверный формат email'),
+  // Логин или почта: z.string().email() отвергал бы «aigul.botanova» ещё до
+  // отправки, и весь вход по логину был бы мёртв на этой странице.
+  email: z.string().min(3, 'Введите логин или почту'),
   password: z.string().min(6, 'Минимум 6 символов'),
 });
 
@@ -95,8 +98,10 @@ export default function Landing() {
   const handleLogin = async (data: LoginValues) => {
     setIsLoading(true); setError('');
     try {
+      // Тем же преобразованием, что применил сервер при заведении: две копии
+      // разошлись бы, и человек получил бы «неверный логин или пароль».
       const { error } = await supabase.auth.signInWithPassword({
-        email: data.email, password: data.password,
+        email: loginOrEmailToAuthEmail(data.email), password: data.password,
       });
       if (error) throw error;
       // Security-1A: the post-login role lookup used to read `user_roles`,
@@ -117,6 +122,13 @@ export default function Landing() {
       // Security-2D: /api/auth/reset-password does not exist and never did, so
       // this always failed. Supabase Auth already owns the recovery link that
       // handleNewPassword below consumes — ask it directly.
+      // У входа по логину почты нет: письмо ушло бы в домен без MX, а плашка
+      // «ссылка отправлена» стала бы ложью человеку, которому надо к
+      // администратору.
+      if (!data.email.includes('@') || isSyntheticEmail(data.email)) {
+        setError('У логина нет почты — письмом пароль не восстановить. Попросите администратора клиники задать вам новый: «Настройки» → «Сотрудники» → «Новый пароль».');
+        return;
+      }
       const { error } = await supabase.auth.resetPasswordForEmail(data.email, {
         redirectTo: `${window.location.origin}/reset-password`,
       });
@@ -537,7 +549,8 @@ export default function Landing() {
             {modalState === 'login' && (
               <form onSubmit={loginForm.handleSubmit(handleLogin)} style={{ display: 'flex', flexDirection: 'column', gap: 13 }}>
                 <div>
-                  <input type="email" placeholder="Email" style={IS} data-testid="input-email"
+                  <input type="text" autoComplete="username" autoCapitalize="none" autoCorrect="off"
+                    spellCheck={false} placeholder="Логин или почта" style={IS} data-testid="input-email"
                     {...loginForm.register('email')} onFocus={onFocus} onBlur={onBlur} />
                   {loginForm.formState.errors.email && (
                     <p style={{ color: '#DC2626', fontSize: 12, marginTop: 4, paddingLeft: 2 }}>

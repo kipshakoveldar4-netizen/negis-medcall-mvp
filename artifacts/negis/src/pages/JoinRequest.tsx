@@ -5,6 +5,7 @@ import { supabase } from "@/lib/supabase";
 import { crmFetch } from "@/lib/api";
 import { formatJoinCode, isJoinCodeShape, normalizeJoinCode } from "../../../../lib/crm/join-codes";
 import { validatePasswordRules } from "../../../../lib/auth/password-rules";
+import { isSyntheticEmail } from "../../../../lib/auth/staff-logins";
 
 // Экран сотрудника, который просится в клинику сам.
 //
@@ -116,6 +117,19 @@ export default function JoinRequest() {
   async function authenticate() {
     const normalizedEmail = email.trim().toLowerCase();
     if (!normalizedEmail) { toast.error("Укажите почту"); return; }
+    // Служебный домен выдаёт система. Без этой отсечки посторонний
+    // регистрировал бы «aigul@staff.negis.online» раньше клиники и занимал
+    // чужой логин: заявку у него отобьют, а аккаунт останется навсегда.
+    //
+    // Честно про границу: это НЕ настоящая защита — anon-ключ лежит в бандле, и
+    // запрос можно послать в GoTrue напрямую. Настоящая граница — правило на
+    // стороне Supabase (hook before-user-created или запрет самозаписи), и её
+    // ставит владелец платформы. Здесь закрыт обычный путь и назван служебный
+    // домен, чтобы человек не занял логин по незнанию.
+    if (isSyntheticEmail(normalizedEmail)) {
+      toast.error("Адреса на служебном домене выдаёт клиника. Войдите выданным логином — заявка по коду для него не нужна.");
+      return;
+    }
     if (mode === "signup") {
       // Те же правила, что у сервера: свой минимум пропускал пароль с краевым
       // пробелом, и назавтра человек упирался в «Invalid login credentials».

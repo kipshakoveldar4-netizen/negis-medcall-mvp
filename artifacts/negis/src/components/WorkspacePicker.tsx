@@ -1,5 +1,6 @@
 import { useAuth } from '@/contexts/AuthContext';
-import { isStaffRole, roleLabels } from '@/lib/permissions';
+import { isStaffRole } from '@/lib/permissions';
+import { staffRoleLabels } from '../../../../lib/vertical/terms';
 
 /**
  * Selection-1: the choice /api/crm/auth-context has been asking for.
@@ -52,7 +53,7 @@ export function WorkspacePicker() {
                     {workspace.name || 'Клиника без названия'}
                   </span>
                   <span className="block truncate text-xs opacity-60">
-                    {isStaffRole(workspace.role) ? roleLabels[workspace.role] : workspace.role}
+                    {isStaffRole(workspace.role) ? staffRoleLabels(workspace.vertical)[workspace.role] : workspace.role}
                   </span>
                 </span>
               </button>

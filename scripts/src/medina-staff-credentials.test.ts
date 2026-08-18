@@ -190,11 +190,17 @@ test("SC4b единственное обращение к Auth — создан�
   assert.ok(!/method: "DELETE"/.test(source), "аккаунты отсюда не удаляются");
   assert.ok(!/generate_link|\/auth\/v1\/recover/.test(source), "и ссылки за человека не выписываются");
 
-  // «Себе нельзя» — словами, а не косвенно через дедуп.
+  // «Себе нельзя» — словами, а не косвенно через дедуп. Сравнение с ИТОГОВЫМ
+  // адресом, а не с сырым body.email: на пути логина body.email пуст, и
+  // проверка молчала бы — осталась бы только косвенная (already_member),
+  // которая исчезает при первом же послаблении дедупа.
   assert.ok(
-    /normalizeEmail\(context\.email\) === normalizeEmail\(body\.email\)/.test(source),
-    "своя почта отбивается явной проверкой",
+    /normalizeEmail\(context\.email\) === normalizeEmail\(validated\.email\)/.test(source),
+    "свой вход отбивается явной проверкой по итоговому адресу",
   );
+  const selfCheckAt = source.indexOf("normalizeEmail(context.email) === normalizeEmail(validated.email)");
+  const validateAt = source.indexOf("const validated = validateStaffCredentialsRequest");
+  assert.ok(validateAt > 0 && selfCheckAt > validateAt, "и стоит после валидации, где адрес уже известен");
 
   // Непогашенное приглашение — второй путь в ту же клинику: молчать о сбое
   // отзыва нельзя.
@@ -309,7 +315,12 @@ test("SC6 экран предлагает пароль первым и пока�
   const admin = await readFile(path.join(repoRoot, "artifacts", "negis", "src", "pages", "AdminCenter.tsx"), "utf8");
   assert.ok(/useState<"password" \| "invite">\("password"\)/.test(admin), "умолчание — пароль: письма не доходят");
   assert.ok(/staff-credentials/.test(admin), "экран зовёт новый маршрут");
-  assert.ok(/setCreatedStaff\(\{ email, password: staffPassword, kind: "created" \}\)/.test(admin), "пароль показывается из состояния экрана");
+  // Пароль по-прежнему берётся ТОЛЬКО из состояния экрана: сервер его не
+  // возвращает и не хранит. А вот адрес теперь приезжает с сервера — при входе
+  // по логину он мог получить хвост из-за столкновения, и печать отправленного
+  // значения выдала бы человеку логин, которым нельзя войти.
+  assert.ok(/setCreatedStaff\(\{ email: issued, password: staffPassword, kind: "created" \}\)/.test(admin), "пароль из состояния экрана, адрес — из ответа сервера");
+  assert.ok(/const issued = responseBody\.data\?\.login \|\| responseBody\.data\?\.email/.test(admin), "показывается выданный логин");
   assert.ok(/setStaffPassword\(""\)/.test(admin), "и стирается из формы сразу после отправки");
   assert.ok(/generateStaffPassword/.test(admin), "пароль можно сгенерировать, а не выдумывать");
   assert.ok(/показывается один раз/.test(admin), "экран честно говорит, что второй раз пароль не покажут");

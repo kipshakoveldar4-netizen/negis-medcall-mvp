@@ -5,6 +5,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import { isRealWorkspace } from '@/lib/demoStorage';
 import { capitalize, termsFor } from '../../../../../lib/vertical/terms';
 import { ProfileDialog } from './ProfileDialog';
+import { loginFromEmail } from '../../../../../lib/auth/staff-logins';
 
 // Medina OS information architecture (UI-1). Groups map only to routes that
 // exist; role arrays are unchanged from the previous IA. The former disabled
@@ -159,7 +160,7 @@ export function Sidebar() {
           </button>
           <button type="button" onClick={openProfile} className="min-w-0 flex-1 text-left">
             <p className="truncate text-sm font-semibold" style={{ color: 'var(--negis-dark-text)' }}>{user?.user_metadata?.full_name || 'Профиль'}</p>
-            <p className="truncate text-xs" style={{ color: 'var(--negis-dark-muted)' }}>{user?.email || 'вход не выполнен'}</p>
+            <p className="truncate text-xs" style={{ color: 'var(--negis-dark-muted)' }}>{loginFromEmail(user?.email) || 'вход не выполнен'}</p>
           </button>
           {availableWorkspaces.length > 1 && (
             // Selection-1: without this the first choice was permanent — the

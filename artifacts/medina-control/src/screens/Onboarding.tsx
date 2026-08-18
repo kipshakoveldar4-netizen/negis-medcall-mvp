@@ -248,7 +248,7 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
       <>
         <h1 ref={titleRef} tabIndex={-1} className="page-title">Клиника подключена — вход по логину и паролю</h1>
         <p className="page-sub">
-          «{credsResult.name}» · {credsResult.vertical === "beauty" ? "салон красоты" : "клиника"} · {credsResult.ownerEmail}
+          «{credsResult.name}» · {credsResult.vertical === "beauty" ? "салон красоты" : credsResult.vertical === "dental" ? "стоматология" : "клиника"} · {credsResult.ownerEmail}
         </p>
 
         <div className="panel" style={{ padding: "18px 20px", maxWidth: 720 }}>
@@ -303,7 +303,7 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
         <p className="page-sub">
           {/* Без vertical (перевыпуск) — нейтральное «новая ссылка»: прежней
               могло и не быть, если приглашение падало на выписке. */}
-          «{result.name}» · {result.vertical === "beauty" ? "салон красоты" : result.vertical === "clinic" ? "клиника" : "новая ссылка приглашения"} · {result.ownerEmail}
+          «{result.name}» · {result.vertical === "beauty" ? "салон красоты" : result.vertical === "dental" ? "стоматология" : result.vertical === "clinic" ? "клиника" : "новая ссылка приглашения"} · {result.ownerEmail}
         </p>
 
         <div className="panel" style={{ padding: "18px 20px", maxWidth: 720 }}>
@@ -382,6 +382,7 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
               <select id="ob-vertical" value={vertical} onChange={(event) => setVertical(event.target.value)}>
                 <option value="">— выберите —</option>
                 <option value="beauty">Салон красоты</option>
+                <option value="dental">Стоматология</option>
                 <option value="clinic">Медицинская клиника</option>
               </select>
             </div>

@@ -4,6 +4,7 @@ import { toast } from 'sonner';
 import { useAuth } from '@/contexts/AuthContext';
 import { supabase, verifyCurrentPassword } from '@/lib/supabase';
 import { PASSWORD_RULE_HINT, validatePasswordRules } from '../../../../../lib/auth/password-rules';
+import { isSyntheticEmail, loginFromEmail } from '../../../../../lib/auth/staff-logins';
 
 // Личный кабинет сотрудника: имя и свой пароль. Живёт отдельным файлом, потому
 // что открывается с двух поверхностей — из бокового меню и из мобильного ящика.
@@ -64,6 +65,10 @@ export function ProfileDialog({ onClose }: ProfileDialogProps) {
   const [saving, setSaving] = useState(false);
 
   const email = user?.email ?? '';
+  // У входа по логину почты нет: показывать служебный адрес нельзя (человек
+  // решит, что это его почта), и обещать восстановление письмом — тоже.
+  const displayLogin = loginFromEmail(email);
+  const withoutMailbox = isSyntheticEmail(email);
   const initials = (user?.user_metadata?.full_name ?? email ?? 'U')
     .split(' ').map((word: string) => word[0]).join('').slice(0, 2).toUpperCase();
 
@@ -166,7 +171,7 @@ export function ProfileDialog({ onClose }: ProfileDialogProps) {
               <div className="text-sm font-semibold" style={{ color: 'var(--negis-text)' }}>
                 {user?.user_metadata?.full_name || 'Профиль'}
               </div>
-              <div className="mt-0.5 text-xs" style={{ color: 'var(--negis-muted)' }}>{email}</div>
+              <div className="mt-0.5 text-xs" style={{ color: 'var(--negis-muted)' }}>{displayLogin}</div>
             </div>
           </div>
           <button type="button" onClick={close} disabled={saving} aria-label="Закрыть профиль" className="neu-icon-btn" style={{ height: 32, width: 32 }}>
@@ -236,6 +241,11 @@ export function ProfileDialog({ onClose }: ProfileDialogProps) {
                       onChange={event => setNewPassword(event.target.value)}
                     />
                     <p className="mt-1 text-[11px]" style={{ color: 'var(--negis-muted)' }}>{PASSWORD_RULE_HINT}</p>
+                    {withoutMailbox && (
+                      <p className="mt-1 text-[11px]" style={{ color: '#B91C1C' }}>
+                        У вашего входа нет почты: забытый пароль письмом не вернуть — новый задаст администратор клиники.
+                      </p>
+                    )}
                   </div>
                   <div>
                     <label htmlFor="profile-repeat-password" className="mb-1.5 block text-[11px]" style={{ color: 'var(--negis-muted)' }}>

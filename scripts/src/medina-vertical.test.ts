@@ -29,8 +29,8 @@ const authContextPath = path.join(repoRoot, "artifacts", "negis", "src", "contex
 const switchPath = path.join(repoRoot, "artifacts", "negis", "src", "components", "admin", "VerticalSwitch.tsx");
 
 type TermsModule = {
-  readVertical: (value: unknown) => "clinic" | "beauty";
-  termsFor: (vertical: "clinic" | "beauty") => Record<string, string>;
+  readVertical: (value: unknown) => string;
+  termsFor: (vertical: string) => Record<string, string>;
   DEFAULT_VERTICAL: string;
   VERTICAL_SETTINGS_KEY: string;
   VERTICALS: readonly string[];
@@ -230,4 +230,64 @@ test("VT10 страница справочников доступна без а�
   assert.ok(/'\/staff-schedule'[\s\S]{0,120}'receptionist'/.test(sidebar), "пункт меню виден регистратору");
   // Подпись пункта зависит от ниши: у клиники врачи, у салона мастера.
   assert.ok(/href === '\/staff-schedule'[\s\S]{0,120}terms\.specialistPlural/.test(sidebar), "подпись — из словаря вертикали");
+});
+
+test("VT14 подпись роли говорит словом ниши: в салоне мастер, а не врач", async () => {
+  const terms = (await import(
+    pathToFileURL(path.join(repoRoot, "lib", "vertical", "terms.ts")).href
+  )) as { staffRoleLabels: (vertical: string) => Record<string, string> };
+
+  // Владелец салона: «нет должности мастеров». Роль в базе называется doctor и
+  // переименованию не подлежит — на неё завязаны таблицы и ключи ресурсов, — а
+  // подпись на экране обязана меняться вместе с нишей.
+  assert.equal(terms.staffRoleLabels("clinic").doctor, "Врач");
+  assert.equal(terms.staffRoleLabels("beauty").doctor, "Мастер");
+  // Регистратор остаётся «Ресепшн» в обеих нишах: в салоне его зовут
+  // администратором, но роль admin уже подписана «Администратор», и две
+  // одинаковые подписи в одном селекте — это выбор наугад.
+  assert.equal(terms.staffRoleLabels("beauty").receptionist, terms.staffRoleLabels("clinic").receptionist);
+  assert.equal(terms.staffRoleLabels("beauty").admin, "Администратор");
+
+  // Экраны берут подписи из словаря, а не из статической таблицы.
+  const admin = await codeOf(path.join(repoRoot, "artifacts", "negis", "src", "pages", "AdminCenter.tsx"));
+  assert.ok(/staffRoleLabels\(vertical\)/.test(admin), "админ-центр берёт подписи по нише");
+  assert.ok(!/roleLabels\[/.test(admin), "статической таблицы ролей на экране не осталось");
+
+  const picker = await codeOf(path.join(repoRoot, "artifacts", "negis", "src", "components", "WorkspacePicker.tsx"));
+  assert.ok(/staffRoleLabels\(workspace\.vertical\)/.test(picker), "в выборе клиники — ниша этой клиники");
+
+  const journal = await codeOf(path.join(repoRoot, "artifacts", "negis", "src", "components", "crm", "change-log-panel.tsx"));
+  assert.ok(/staffRoleLabels\(vertical\)/.test(journal), "в журнале тоже");
+});
+
+test("VT15 стоматология — третья ниша: свои слова, медицинские правила", async () => {
+  // Просьба владельца: «нужно ещё нишу добавить стоматологии, чтобы у нас было
+  // уже клиники, салоны и стоматологии».
+  assert.ok(terms.VERTICALS.includes("dental"), "ниша объявлена");
+  const dental = terms.termsFor("dental");
+  const clinic = terms.termsFor("clinic");
+  assert.deepEqual(Object.keys(dental).sort(), Object.keys(clinic).sort(), "набор ключей тот же");
+  for (const key of Object.keys(dental)) assert.ok(dental[key], `стоматология: ${key} не пустой`);
+
+  assert.equal(dental.specialist, "стоматолог");
+  assert.equal(dental.org, "стоматология");
+  // Пациент остаётся пациентом: это медицина, а не салон.
+  assert.equal(dental.customer, clinic.customer);
+  assert.equal(dental.visit, clinic.visit);
+
+  // Подпись роли тоже говорит словом ниши.
+  const labels = (terms as unknown as { staffRoleLabels: (v: string) => Record<string, string> }).staffRoleLabels("dental");
+  assert.equal(labels.doctor, "Стоматолог");
+
+  // Реклама: ветки в lib/meta сравнивают с "beauty", поэтому стоматология идёт
+  // по СТРОГОЙ медицинской ветке — как клиника. Проверяем это на дисклеймере:
+  // он обязан быть медицинским, а не салонным.
+  const compliance = await readFile(path.join(repoRoot, "lib", "meta", "compliance.ts"), "utf8");
+  assert.ok(/dental: "Результаты индивидуальны/.test(compliance), "оговорка стоматологии — медицинская");
+
+  // Экраны, где ниша перечисляется руками, знают про третью.
+  const control = await readFile(path.join(repoRoot, "artifacts", "medina-control", "src", "screens", "Onboarding.tsx"), "utf8");
+  assert.ok(/<option value="dental">Стоматология<\/option>/.test(control), "портал предлагает стоматологию");
+  const switcher = await readFile(path.join(repoRoot, "artifacts", "negis", "src", "components", "admin", "VerticalSwitch.tsx"), "utf8");
+  assert.ok(/title: "Стоматология"/.test(switcher), "переключатель ниши подписан");
 });

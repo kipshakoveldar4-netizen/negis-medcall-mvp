@@ -1,5 +1,6 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { canAssignRole, isStaffRole } from "../auth/permissions";
+import { isSyntheticEmail } from "../auth/staff-logins";
 import { requireAuthenticatedUser, requireWorkspaceRole, WorkspaceAdminAuthError } from "../auth/server";
 import { getSupabaseServerClient } from "../supabase/server";
 import { generateJoinCode, isJoinCodeShape, normalizeJoinCode } from "./join-codes";
@@ -178,6 +179,17 @@ async function submitRequest(supabase: SupabaseClient, user: { id: string; email
     return sendJson(res, 400, {
       success: false, error: "Validation error", code: "validation_error",
       details: ["Укажите имя и код клиники — без них заявку не отправить."],
+    });
+  }
+  // Служебный домен выдаёт система, и самозапись — единственное место, где
+  // человек приносит адрес с улицы. Пусти сюда служебный адрес — посторонний
+  // занял бы логин раньше клиники и пришёл бы в очередь заявок с адресом,
+  // который выглядит выданным платформой.
+  if (isSyntheticEmail(user.email)) {
+    audit("synthetic_email_refused", { user: user.id });
+    return sendJson(res, 403, {
+      success: false, error: "Служебный адрес", code: "synthetic_email_refused",
+      details: ["Этот аккаунт заведён клиникой. Войдите своим логином — заявка по коду для него не нужна."],
     });
   }
   if (!isJoinCodeShape(code)) {

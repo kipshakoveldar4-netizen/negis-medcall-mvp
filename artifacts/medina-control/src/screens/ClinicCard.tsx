@@ -460,7 +460,7 @@ export function ClinicCard({ workspaceId, onBack }: { workspaceId: string; onBac
       <button type="button" className="btn" onClick={onBack}>← Обзор</button>
       <h1 ref={titleRef} tabIndex={-1} className="page-title" style={{ marginTop: 14 }}>{card.clinic.name}</h1>
       <p className="page-sub">
-        {vertical === "beauty" ? "салон красоты" : "клиника"} · {card.clinic.ownerEmail || "почта не указана"} ·{" "}
+        {vertical === "beauty" ? "салон красоты" : vertical === "dental" ? "стоматология" : "клиника"} · {card.clinic.ownerEmail || "почта не указана"} ·{" "}
         {card.clinic.plan
           ? `${planTitle} · ${formatMinor(card.clinic.monthlyMinor, card.clinic.currency)}/мес`
           : "подписка не назначена"}

@@ -17,9 +17,9 @@
 // ради слова на кнопке, а путаницу «в базе doctor, на экране мастер» снимает
 // один этот файл: он единственное место, где перевод существует.
 
-export type Vertical = "clinic" | "beauty";
+export type Vertical = "clinic" | "beauty" | "dental";
 
-export const VERTICALS: readonly Vertical[] = ["clinic", "beauty"];
+export const VERTICALS: readonly Vertical[] = ["clinic", "beauty", "dental"];
 
 export const DEFAULT_VERTICAL: Vertical = "clinic";
 
@@ -92,6 +92,29 @@ const TERMS: Readonly<Record<Vertical, Terms>> = {
     serviceList: "услуги клиники",
     frontDesk: "регистратор",
   },
+  // Стоматология — третья ниша (просьба владельца). От клиники её отличают
+  // слова, а не правила: пациент остаётся пациентом, приём приёмом, а вот
+  // специалист — стоматолог, и справочник называется «услуги стоматологии».
+  // Медицинские ограничения рекламы к ней применяются те же, что к клинике:
+  // ветки в lib/meta/* сравнивают с "beauty", поэтому стоматология идёт по
+  // строгой, медицинской ветке — это правильно и проверено пином.
+  dental: {
+    org: "стоматология",
+    orgGenitive: "стоматологии",
+    orgPrepositional: "стоматологии",
+    dutyGenitive: "приёма",
+    specialist: "стоматолог",
+    specialistPlural: "стоматологи",
+    specialistGenitive: "стоматолога",
+    specialistDative: "стоматологу",
+    specialistGenitivePlural: "стоматологов",
+    customer: "пациент",
+    customerPlural: "пациенты",
+    visit: "приём",
+    visitPlural: "приёмы",
+    serviceList: "услуги стоматологии",
+    frontDesk: "администратор",
+  },
   beauty: {
     org: "салон",
     orgGenitive: "салона",
@@ -120,4 +143,29 @@ export function termsFor(vertical: Vertical): Terms {
 /** С заглавной — для заголовков. Отдельной функцией, чтобы не плодить пары. */
 export function capitalize(value: string): string {
   return value ? value[0].toUpperCase() + value.slice(1) : value;
+}
+
+/**
+ * Подписи ролей зависят от ниши.
+ *
+ * Владелец салона: «нет должности мастеров». Роль в базе называется `doctor` и
+ * переименованию не подлежит — на неё завязаны таблицы, ключи ресурсов и
+ * значения в staff_users. А вот подпись на экране обязана говорить словом ниши:
+ * в клинике «Врач», в салоне «Мастер». Ровно так же уже устроен пункт меню
+ * «Специалисты и график».
+ *
+ * `receptionist` намеренно остаётся «Ресепшн» в обеих нишах: в салоне этого
+ * человека зовут администратором, но роль `admin` уже подписана «Администратор»,
+ * и две одинаковые подписи в одном селекте — это выбор наугад.
+ */
+export function staffRoleLabels(vertical: Vertical): Record<string, string> {
+  const terms = termsFor(vertical);
+  return {
+    owner: "Владелец",
+    admin: "Администратор",
+    receptionist: "Ресепшн",
+    marketer: "Маркетолог",
+    doctor: capitalize(terms.specialist),
+    manager: "Менеджер",
+  };
 }

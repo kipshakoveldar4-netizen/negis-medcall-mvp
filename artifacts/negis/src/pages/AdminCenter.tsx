@@ -35,19 +35,19 @@ import { DoctorSchedule } from "@/components/admin/DoctorSchedule";
 import { useAuth } from "@/contexts/AuthContext";
 import { apiUrl, crmFetch, CrmApiError, crmErrorMessage } from "@/lib/api";
 import { formatJoinCode } from "../../../../lib/crm/join-codes";
+import { loginFromEmail, loginFromFullName, normalizeLogin } from "../../../../lib/auth/staff-logins";
 import { readWorkspaceId, workspaceScopedKey } from "@/lib/demoStorage";
 import { getSupabaseAccessToken } from "@/lib/serverAuth";
 import {
   canAssignRole,
   permissionLabels,
   permissionsForRole,
-  roleLabels,
   staffRoles,
   type CrmPermission,
   type StaffRole,
 } from "@/lib/permissions";
 import { KZ_META_CITY_OPTIONS, getKzMetaCityOption, type MetaCitySearchCandidate } from "../../../../lib/meta/cities";
-import { capitalize, termsFor } from "../../../../lib/vertical/terms";
+import { capitalize, staffRoleLabels, termsFor } from "../../../../lib/vertical/terms";
 
 type StaffInvitation = {
   id: string;
@@ -79,7 +79,10 @@ type JoinRequestRow = {
  * у человека уже есть аккаунт, ему выписывается приглашение.
  */
 type BatchStaffResult = {
-  email: string;
+  /** Что вставил администратор: имя или почта. По нему он узнаёт человека. */
+  source: string;
+  /** Что реально выдал СЕРВЕР: при столкновении логин получил хвост. */
+  login: string;
   kind: "created" | "invited" | "failed";
   password?: string;
   acceptUrl?: string;
@@ -161,6 +164,8 @@ const STAFF_ERROR_TEXTS: Record<string, string> = {
   staff_email_taken:
     "В клинике уже есть сотрудник с такой почтой. Заявитель назвал этот адрес сам, и подтверждения ему нет — зачислите его ссылкой-приглашением: она и доказывает, что почта его.",
   join_code_owner_only: "Сменить код клиники может только владелец.",
+  login_unavailable: "Такой логин занят вместе с ближайшими вариантами. Задайте другой — например с инициалом: aigul.b.",
+  synthetic_email_refused: "Адреса на служебном домене выдаёт система — укажите логин без «собаки» или настоящую почту.",
   not_provisioned: "Заявки по коду ещё не активированы: владелец платформы применяет обновление базы. Пока зачисляйте сотрудников паролем или приглашением.",
   join_queue_full: "Очередь заявок переполнена — разберите её и попробуйте снова.",
   role_required: "Выберите роль — без неё нельзя одобрить.",
@@ -736,6 +741,9 @@ export default function AdminCenter() {
   const tabLabel = (tab: { id: AdminTab; label: string }) =>
     tab.id === "doctors" ? capitalize(termsFor(vertical).specialistPlural) : tab.label;
   const workspaceId = clinicId || readWorkspaceId();
+  // «Врач» в клинике и «Мастер» в салоне: роль в базе одна, слово на экране —
+  // из словаря ниши. Владелец салона: «нет должности мастеров».
+  const roleTitles = staffRoleLabels(vertical);
   const [activeTab, setActiveTab] = useState<AdminTab>("overview");
   const [clinic, setClinic] = useState<ClinicSettings>(() => readStored("negis_clinic_settings", clinicDefaults));
   // Commercial-3B: the team is whatever the server says it is. This list used
@@ -1387,9 +1395,9 @@ export default function AdminCenter() {
         // Тост обязан сказать правду, иначе админ уверен, что выдал другую.
         toast.success(`${who} уже в команде — заявка закрыта. Роль осталась прежней: меняйте её в таблице слева.`);
       } else if (body.data?.outcome === "revived") {
-        toast.success(`${who} снова в команде — роль «${roleLabels[decisionRole as StaffRole]}». Он войдёт своей почтой и паролем.`);
+        toast.success(`${who} снова в команде — роль «${roleTitles[decisionRole as StaffRole]}». Он войдёт своей почтой и паролем.`);
       } else {
-        toast.success(`${who} в команде — роль «${roleLabels[decisionRole as StaffRole]}». Он войдёт своей почтой и паролем.`);
+        toast.success(`${who} в команде — роль «${roleTitles[decisionRole as StaffRole]}». Он войдёт своей почтой и паролем.`);
       }
       setDecidingRequestId(null);
       setDecisionRole("");
@@ -1415,31 +1423,49 @@ export default function AdminCenter() {
    * созданий аккаунтов — это то, за что Supabase отвечает 429.
    */
   async function createStaffBatch() {
-    // Каждая строка — «почта» или «почта, Имя». Имя нужно, потому что сервер
-    // ДОСТРАИВАЕТ уже заведённую вручную строку и переписывает в ней full_name:
-    // без имени «Айгуль Ботанова» превратилась бы в «aigul» — и в карточке
-    // лида, и в задачах.
+    // Строка на человека, четыре допустимых формы:
+    //   «Айгуль Ботанова»            — логин сделаем из имени
+    //   «Айгуль Ботанова, aigul»     — логин задан явно
+    //   «aigul@mail.ru»              — настоящая почта
+    //   «aigul@mail.ru, Айгуль»      — почта и имя
     const rows = batchEmails
       .split(/\r?\n/)
       .map((line) => line.trim())
       .filter(Boolean)
       .map((line) => {
-        const [rawEmail, ...rest] = line.split(/[,;	]/);
-        const email = (rawEmail || "").trim().toLowerCase();
-        return { email, fullName: rest.join(",").trim() };
+        const parts = line.split(/[,;	]/).map((part) => part.trim()).filter(Boolean);
+        const emailPart = parts.find((part) => part.includes("@")) || "";
+        const rest = parts.filter((part) => part !== emailPart);
+        if (emailPart) {
+          return { source: line, email: emailPart.toLowerCase(), login: "", fullName: rest.join(" ") };
+        }
+        // Без «@» первая часть — имя, вторая (если есть) — желаемый логин.
+        const fullName = parts[0] || "";
+        // Второй кусок — ЖЕЛАЕМЫЙ ЛОГИН, его нормализуют, а не транслитерируют
+        // как имя: иначе «Дана Ким, dana.k» завела бы «danak».
+        const login = parts[1] ? normalizeLogin(parts[1]) : loginFromFullName(fullName);
+        return { source: line, email: "", login, fullName };
       })
-      .filter((row) => row.email.includes("@"));
-    const unique = rows.filter((row, index) => rows.findIndex((other) => other.email === row.email) === index);
+      .filter((row) => row.email || row.login);
+
+    // Дедуп ТОЛЬКО по почте: один адрес — точно один человек. Одинаковые ИМЕНА
+    // — обычное дело, и две «Дана Ким» это две разные женщины; выбросить вторую
+    // значило бы раздать девятнадцать паролей вместо двадцати и узнать об этом
+    // в смену. Столкновение логинов разрешает сервер хвостом.
+    const unique = rows.filter((row, index) => {
+      if (!row.email) return true;
+      return rows.findIndex((other) => other.email === row.email) === index;
+    });
+    const dropped = rows.length - unique.length;
 
     if (unique.length === 0) {
-      toast.error("Вставьте список почт — по одной в строке");
+      toast.error("Вставьте имена или почты — по одному человеку в строке");
       return;
     }
     if (unique.length > 30) {
       toast.error("За раз — не больше 30 человек: пароли нужно успеть раздать");
       return;
     }
-    // Пароли прошлой пачки на экране — единственная их копия.
     if ((batchResults ?? []).some((row) => row.kind === "created")) {
       const confirmed = window.confirm(
         "На экране остались логины и пароли прошлой пачки. Начать новую? Старый список исчезнет — если вы его ещё не раздали, сначала скопируйте.",
@@ -1453,44 +1479,47 @@ export default function AdminCenter() {
     try {
       for (const row of unique) {
         const password = generateStaffPassword();
+        const payload = row.email
+          ? { email: row.email, role: batchRole, fullName: row.fullName || row.email.split("@")[0], password }
+          : { login: row.login, role: batchRole, fullName: row.fullName || row.login, password };
         try {
           const response = await crmFetch(`/api/crm/staff-credentials?workspaceId=${encodeURIComponent(workspaceId)}`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ email: row.email, role: batchRole, fullName: row.fullName || row.email.split("@")[0], password }),
+            body: JSON.stringify(payload),
           });
-          const body = await safeJson<{ acceptUrl?: string }>(response);
+          const body = await safeJson<{ acceptUrl?: string; login?: string }>(response);
           const code = typeof (body as { code?: unknown }).code === "string" ? (body as { code: string }).code : "request_failed";
           if (response.ok && body.success !== false) {
-            results.push({ email: row.email, kind: "created", password });
+            // Печатаем то, что ВЫДАЛ сервер: при столкновении логин получил
+            // хвост, и «aigul» на бумажке никуда бы не пустил.
+            results.push({ source: row.source, login: body.data?.login || row.login || row.email, kind: "created", password });
           } else if (body.data?.acceptUrl) {
-            // Занятая почта — не тупик: сервер выписал приглашение.
-            results.push({ email: row.email, kind: "invited", acceptUrl: body.data.acceptUrl });
+            results.push({ source: row.source, login: row.email, kind: "invited", acceptUrl: body.data.acceptUrl });
           } else {
             // Аккаунт СОЗДАН, а членство нет: пароль всё ещё действует, и он
-            // единственный способ этому человеку войти и принять приглашение.
-            // Выбросить его здесь значило бы запереть аккаунт навсегда.
+            // единственный способ этому человеку войти. Для логина это тем
+            // важнее — письма-восстановления у него нет вовсе.
             const accountExists = code === "partial_staff_credentials" || code === "staff_credentials_unreadable";
             results.push({
-              email: row.email,
+              source: row.source,
+              login: body.data?.login || row.login || row.email,
               kind: "failed",
               ...(accountExists ? { password } : {}),
               error: staffErrorText(new CrmApiError(response.status, code, body.error || ""), "Отказ"),
             });
           }
         } catch (error) {
-          results.push({ email: row.email, kind: "failed", error: staffErrorText(error, "Отказ") });
+          results.push({ source: row.source, login: row.login || row.email, kind: "failed", error: staffErrorText(error, "Отказ") });
         }
         setBatchResults([...results]);
       }
       const created = results.filter((row) => row.kind === "created").length;
       const invited = results.filter((row) => row.kind === "invited").length;
       const failed = results.filter((row) => row.kind === "failed").length;
-      const summary = `Готово: заведено ${created}, приглашений ${invited}, отказов ${failed}`;
+      const summary = `Готово: заведено ${created}, приглашений ${invited}, отказов ${failed}${dropped > 0 ? `, повторов почты пропущено ${dropped}` : ""}`;
       if (failed === 0) {
         toast.success(summary);
-        // Поле чистится только когда чистить нечего: иначе администратору
-        // пришлось бы собирать заново те адреса, что не прошли.
         setBatchEmails("");
       } else {
         toast.warning(`${summary}. Список оставлен в поле — уберите прошедших и повторите.`);
@@ -1505,7 +1534,11 @@ export default function AdminCenter() {
     const rows = (batchResults ?? []).filter((row) => row.kind === "created" && row.password);
     if (rows.length === 0) return;
     try {
-      await navigator.clipboard.writeText(rows.map((row) => `${row.email} — ${row.password}`).join("\n"));
+      // С именем: раздают это по одному человеку в мессенджере, и без имени
+      // администратор не знает, кому какой пароль.
+      await navigator.clipboard.writeText(
+        rows.map((row) => `${row.source} — логин ${row.login}, пароль ${row.password}`).join("\n"),
+      );
       toast.success("Скопировано");
     } catch {
       // Буфер недоступен — таблица на экране, её можно переписать руками.
@@ -1567,32 +1600,45 @@ export default function AdminCenter() {
    * администратор успел его передать: сервер пароль не возвращает и не хранит.
    */
   async function createStaffWithPassword() {
-    const email = inviteForm.email.trim().toLowerCase();
-    if (!email || !staffPassword) {
-      toast.error("Нужны почта и пароль сотрудника");
+    const entered = inviteForm.email.trim();
+    if (!entered || !staffPassword) {
+      toast.error("Нужны логин (или почта) и пароль сотрудника");
       return;
     }
+    // С «@» — настоящая почта; без — логин. Сервер сам сделает служебный адрес
+    // и вернёт ВЫДАННЫЙ логин: при столкновении он получит короткий хвост.
+    const usesLogin = !entered.includes("@");
+    const payload = usesLogin
+      // Введённое БЕЗ «@» — это логин, а не имя: normalizeLogin сохраняет точку
+      // и приводит дефис к точке, тогда как loginFromFullName точку выбрасывает
+      // (он для имён). Админ, набравший «aigul.b», получал бы «aigulb» и
+      // диктовал сотруднице логин, которого нет.
+      ? { login: normalizeLogin(entered) || loginFromFullName(entered), role: inviteForm.role, fullName: staffFullName.trim() || entered, password: staffPassword }
+      : { email: entered.toLowerCase(), role: inviteForm.role, fullName: staffFullName.trim(), password: staffPassword };
+
     setBusy("staff", true);
     try {
       const response = await crmFetch(`/api/crm/staff-credentials?workspaceId=${encodeURIComponent(workspaceId)}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, role: inviteForm.role, fullName: staffFullName.trim(), password: staffPassword }),
+        body: JSON.stringify(payload),
       });
-      const responseBody = await safeJson<{ acceptUrl?: string; staff?: unknown }>(response);
+      const responseBody = await safeJson<{ acceptUrl?: string; staff?: unknown; login?: string; email?: string }>(response);
       if (!response.ok || responseBody.success === false) {
         // Занятая почта — не тупик: сервер уже выписал приглашение, и ссылка
         // приходит вместе с отказом. Показываем её тем же блоком, что и у
         // обычного приглашения, — передать её можно прямо сейчас.
         if (responseBody.data?.acceptUrl) {
-          setIssuedInvite({ email, acceptUrl: responseBody.data.acceptUrl, emailSent: false, emailStatus: "already_registered" });
+          setIssuedInvite({ email: entered.toLowerCase(), acceptUrl: responseBody.data.acceptUrl, emailSent: false, emailStatus: "already_registered" });
           setStaffMode("invite");
           await loadInvitations();
         }
         const code = typeof (responseBody as { code?: unknown }).code === "string" ? (responseBody as { code: string }).code : "request_failed";
         throw new CrmApiError(response.status, code, responseBody.error || `HTTP ${response.status}`);
       }
-      setCreatedStaff({ email, password: staffPassword, kind: "created" });
+      // Показываем то, что выдал СЕРВЕР, а не то, что отправили.
+      const issued = responseBody.data?.login || responseBody.data?.email || entered;
+      setCreatedStaff({ email: issued, password: staffPassword, kind: "created" });
       setStaffPassword("");
       setStaffFullName("");
       setInviteForm({ email: "", role: "receptionist" });
@@ -1633,7 +1679,18 @@ export default function AdminCenter() {
       setStaffMode("password");
       toast.success("Пароль задан — передайте его сотруднику");
     } catch (error) {
-      toast.error(staffErrorText(error, "Не удалось задать пароль"));
+      // Обрыв связи не означает, что пароль НЕ применён: Supabase мог успеть
+      // его записать, и тогда старый уже не работает, а нового не знает никто.
+      // У входа по логину письма-подстраховки нет, поэтому пароль остаётся на
+      // экране с честной оговоркой, а не выбрасывается вместе с ошибкой.
+      const networkFailure = !(error instanceof CrmApiError);
+      if (networkFailure) {
+        setCreatedStaff({ email: member.email, password, kind: "reset" });
+        setStaffMode("password");
+        toast.warning("Ответ не получен — пароль мог уже примениться. Он показан ниже: передайте его и проверьте вход.");
+      } else {
+        toast.error(staffErrorText(error, "Не удалось задать пароль"));
+      }
     } finally {
       setBusy("staff", false);
     }
@@ -1642,7 +1699,7 @@ export default function AdminCenter() {
   async function copyStaffCredentials() {
     if (!createdStaff) return;
     try {
-      await navigator.clipboard.writeText(`Логин: ${createdStaff.email}\nПароль: ${createdStaff.password}`);
+      await navigator.clipboard.writeText(`Логин: ${loginFromEmail(createdStaff.email)}\nПароль: ${createdStaff.password}`);
       toast.success("Скопировано");
     } catch {
       // Буфер недоступен — данные на экране, их можно переписать руками.
@@ -1748,7 +1805,7 @@ export default function AdminCenter() {
         body: JSON.stringify({ id, role }),
       });
       await loadStaff();
-      toast.success(`Роль изменена: ${roleLabels[role]}`);
+      toast.success(`Роль изменена: ${roleTitles[role]}`);
     } catch (error) {
       toast.error(staffErrorText(error, "Не удалось изменить роль"));
     }
@@ -1977,8 +2034,8 @@ export default function AdminCenter() {
                 <div className="flex items-start justify-between gap-3">
                   <div>
                     <h3 className="font-bold text-[#0F172A]">{member.name}</h3>
-                    <p className="mt-1 text-sm text-[#64748B]">{member.email}</p>
-                    <p className="mt-1 text-xs text-[#64748B]">{roleLabels[member.role]}</p>
+                    <p className="mt-1 text-sm text-[#64748B]">{loginFromEmail(member.email)}</p>
+                    <p className="mt-1 text-xs text-[#64748B]">{roleTitles[member.role]}</p>
                   </div>
                   <StatusPill status={member.status === "active" ? "configured" : "partial"} label={statusText(member.status)} />
                 </div>
@@ -1991,9 +2048,9 @@ export default function AdminCenter() {
                         onChange={(event) => updateStaffRole(member.id, event.target.value as StaffRole)}
                         aria-label={`Роль: ${member.name}`}
                       >
-                        {!assignableRoles.includes(member.role) ? <option value="">{roleLabels[member.role]}</option> : null}
+                        {!assignableRoles.includes(member.role) ? <option value="">{roleTitles[member.role]}</option> : null}
                         {assignableRoles.map((role) => (
-                          <option key={role} value={role}>{roleLabels[role]}</option>
+                          <option key={role} value={role}>{roleTitles[role]}</option>
                         ))}
                       </select>
                     ) : null}
@@ -2024,7 +2081,7 @@ export default function AdminCenter() {
               <thead className="text-xs uppercase tracking-[0.12em] text-[#94A3B8]">
                 <tr>
                   <th className="px-3 py-3">Имя</th>
-                  <th className="px-3 py-3">Email</th>
+                  <th className="px-3 py-3">Логин / почта</th>
                   <th className="px-3 py-3">Роль</th>
                   <th className="px-3 py-3">Статус</th>
                   <th className="px-3 py-3">Действие</th>
@@ -2034,7 +2091,7 @@ export default function AdminCenter() {
                 {staff.map((member) => (
                   <tr key={member.id} className="border-t border-[#E2E8F0]">
                     <td className="px-3 py-4 font-semibold text-[#0F172A]">{member.name}</td>
-                    <td className="px-3 py-4 text-[#64748B]">{member.email}</td>
+                    <td className="px-3 py-4 text-[#64748B]">{loginFromEmail(member.email)}</td>
                     <td className="px-3 py-4 text-[#334155]">
                       {canEdit(member) && assignableRoles.length > 0 ? (
                         <select
@@ -2043,13 +2100,13 @@ export default function AdminCenter() {
                           onChange={(event) => updateStaffRole(member.id, event.target.value as StaffRole)}
                           aria-label={`Роль: ${member.name}`}
                         >
-                          {!assignableRoles.includes(member.role) ? <option value="">{roleLabels[member.role]}</option> : null}
+                          {!assignableRoles.includes(member.role) ? <option value="">{roleTitles[member.role]}</option> : null}
                           {assignableRoles.map((role) => (
-                            <option key={role} value={role}>{roleLabels[role]}</option>
+                            <option key={role} value={role}>{roleTitles[role]}</option>
                           ))}
                         </select>
                       ) : (
-                        roleLabels[member.role]
+                        roleTitles[member.role]
                       )}
                     </td>
                     <td className="px-3 py-4"><StatusPill status={member.status === "active" ? "configured" : "partial"} label={statusText(member.status)} /></td>
@@ -2188,7 +2245,7 @@ export default function AdminCenter() {
                       >
                         <option value="">Выберите роль</option>
                         {assignableRoles.map((role) => (
-                          <option key={role} value={role}>{roleLabels[role]}</option>
+                          <option key={role} value={role}>{roleTitles[role]}</option>
                         ))}
                       </select>
                       <div className="flex flex-wrap gap-2">
@@ -2257,14 +2314,17 @@ export default function AdminCenter() {
           </div>
           <p className="mt-2 text-sm text-[#64748B]">
             {staffMode === "password"
-              ? "Вы задаёте пароль и передаёте его сотруднику лично. Письмо не отправляется, вход работает сразу. Не подойдёт, если у этой почты уже есть аккаунт."
+              ? "Вы задаёте логин и пароль и передаёте их сотруднику лично. Почта не нужна: впишите логин латиницей или имя — мы сделаем логин сами. Письмо не отправляется, вход работает сразу."
               : "Сотрудник получает письмо, задаёт свой пароль и принимает приглашение. Ссылка одноразовая и действует 7 дней; если она потеряется — перевыпустите её в списке ниже."}
           </p>
           <div className="mt-4 grid gap-3">
             <input
               className="neu-input"
-              type="email"
-              placeholder="Email"
+              type={staffMode === "invite" ? "email" : "text"}
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
+              placeholder={staffMode === "invite" ? "Почта сотрудника" : "Логин (aigul.botanova) или почта"}
               value={inviteForm.email}
               onChange={(event) => setInviteForm({ ...inviteForm, email: event.target.value })}
             />
@@ -2286,7 +2346,7 @@ export default function AdminCenter() {
               {staffRoles
                 .filter((role) => canAssignRole(serverAdminAuth.role || "admin", role))
                 .map((role) => (
-                  <option key={role} value={role}>{roleLabels[role]}</option>
+                  <option key={role} value={role}>{roleTitles[role]}</option>
                 ))}
             </select>
             {staffMode === "password" ? (
@@ -2325,12 +2385,12 @@ export default function AdminCenter() {
 
           {createdStaff && (
             <div className="mt-4 rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-800">
-              <p className="font-bold">{createdStaff.kind === "reset" ? "Новый пароль для" : "Сотрудник добавлен:"} {createdStaff.email}</p>
+              <p className="font-bold">{createdStaff.kind === "reset" ? "Новый пароль для" : "Сотрудник добавлен:"} {loginFromEmail(createdStaff.email)}</p>
               <p className="mt-1">
                 Передайте эти данные лично. Пароль показывается один раз — потом его нельзя посмотреть, только задать
                 новый через «Забыли пароль?» на странице входа.
               </p>
-              <p className="mt-2 font-mono text-xs text-emerald-900">Логин: {createdStaff.email}</p>
+              <p className="mt-2 font-mono text-xs text-emerald-900">Логин: {loginFromEmail(createdStaff.email)}</p>
               <p className="font-mono text-xs text-emerald-900">Пароль: {createdStaff.password}</p>
               <button
                 type="button"
@@ -2360,9 +2420,16 @@ export default function AdminCenter() {
             {batchOpen && (
               <div className="mt-3 space-y-3">
                 <p className="text-xs text-[#64748B]">
-                  По одной строке на человека: «почта» или «почта, Имя». Имя стоит указать, если сотрудник уже заведён в
-                  списке, — иначе оно заменится на начало почты. Роль одна на всех, поменять её каждому можно потом в
-                  таблице слева. Пароли сгенерируются сами и покажутся один раз.
+                  По одной строке на человека — почта НЕ нужна: вставьте имена, логин сделаем сами латиницей и
+                  покажем его. Раздавайте именно показанный логин: если такой уже занят, мы добавим к нему короткий
+                  хвост. Можно и «Имя, желаемый.логин», и «почта», и «почта, Имя». Роль одна на всех, поменять её
+                  каждому можно потом в таблице слева. Пароли сгенерируются сами и покажутся один раз.
+                </p>
+                {/* Про восстановление надо сказать здесь, а не после того, как
+                    человек потеряет пароль: у логина почты нет, и письмо ему
+                    не придёт никогда. */}
+                <p className="text-xs text-[#B91C1C]">
+                  У логина нет почты: забытый пароль восстанавливается только кнопкой «Новый пароль» в таблице слева.
                 </p>
                 <textarea
                   className="neu-input min-h-[120px] font-mono text-xs"
@@ -2377,7 +2444,7 @@ export default function AdminCenter() {
                   aria-label="Роль для всех из списка"
                 >
                   {assignableRoles.map((role) => (
-                    <option key={role} value={role}>{roleLabels[role]}</option>
+                    <option key={role} value={role}>{roleTitles[role]}</option>
                   ))}
                 </select>
                 <button type="button" className="neu-btn-primary w-full justify-center" disabled={loading.staffBatch} onClick={() => void createStaffBatch()}>
@@ -2388,14 +2455,18 @@ export default function AdminCenter() {
                   <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-800">
                     <p className="font-bold">Логины и пароли</p>
                     <p className="mt-1 text-xs">Раздайте их лично. Второй раз пароли не покажутся.</p>
-                    <div className="mt-3 space-y-1 font-mono text-xs text-emerald-900">
+                    <div className="mt-3 space-y-2 text-xs text-emerald-900">
                       {batchResults.map((row) => (
-                        <p key={row.email}>
-                          {row.email}
-                          {row.kind === "created" && ` — ${row.password}`}
-                          {row.kind === "invited" && " — почта занята, выписано приглашение"}
-                          {row.kind === "failed" && ` — ${row.error}`}
-                        </p>
+                        <div key={row.source}>
+                          <p className="font-semibold">{row.source}</p>
+                          <p className="font-mono">
+                            {row.kind === "created" && `логин ${row.login} · пароль ${row.password}`}
+                            {row.kind === "invited" && `${row.login} — почта занята, выписано приглашение`}
+                            {row.kind === "failed" && (row.password
+                              ? `логин ${row.login} · пароль ${row.password} — ${row.error}`
+                              : row.error)}
+                          </p>
+                        </div>
                       ))}
                     </div>
                     {batchResults.some((row) => row.kind === "created") && (
@@ -2463,7 +2534,7 @@ export default function AdminCenter() {
                       <div className="min-w-0">
                         <p className="truncate text-sm font-semibold text-[#0F172A]">{invitation.email}</p>
                         <p className="text-xs text-[#64748B]">
-                          {roleLabels[invitation.role as StaffRole] || invitation.role}
+                          {roleTitles[invitation.role as StaffRole] || invitation.role}
                           {invitation.expiresAt ? ` · действует до ${invitation.expiresAt.slice(0, 10)}` : ""}
                         </p>
                       </div>
@@ -2521,7 +2592,7 @@ export default function AdminCenter() {
             <section key={role} className="neu-card">
               <div className="mb-4 flex items-start justify-between gap-3">
                 <div>
-                  <h2 className="text-lg font-black text-[#0F172A]">{roleLabels[role]}</h2>
+                  <h2 className="text-lg font-black text-[#0F172A]">{roleTitles[role]}</h2>
                   <p className="mt-1 text-sm text-[#64748B]">{permissions.length} прав доступа</p>
                 </div>
                 <ShieldCheck className="text-[#0D9488]" size={22} />
@@ -3157,7 +3228,7 @@ export default function AdminCenter() {
             <p className="text-xs font-bold uppercase tracking-[0.18em] text-[#64748B]">Администрирование</p>
             <h1 className="mt-2 text-2xl font-semibold text-[#0F172A]">Настройки клиники</h1>
             <p className="mt-2 max-w-3xl text-sm text-[#64748B]">
-              Клиника: {workspaceId}. Владелец: {user?.email || "demo user"}.
+              Клиника: {workspaceId}. Владелец: {loginFromEmail(user?.email) || "demo user"}.
             </p>
           </div>
           <button type="button" className="neu-btn w-full justify-center xl:w-auto" onClick={() => setLocation("/ai-control-center")}>

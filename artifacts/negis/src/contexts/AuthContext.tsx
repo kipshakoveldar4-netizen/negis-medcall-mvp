@@ -97,7 +97,7 @@ interface AuthContextType {
   signOut: () => Promise<void>;
 }
 
-export type WorkspaceChoice = { id: string; name: string; role: string };
+export type WorkspaceChoice = { id: string; name: string; role: string; vertical: Vertical };
 
 /* ── Constants ────────────────────────────────────────────── */
 const IMP_KEY     = 'negis_impersonation';
@@ -403,6 +403,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       id: entry.workspaceId,
       name: entry.workspaceName,
       role: entry.role,
+      // Ниша нужна прямо здесь: в списке клиник у одной роли разные подписи —
+      // «Врач» в клинике и «Мастер» в салоне.
+      vertical: entry.vertical,
     }));
 
   const rememberSelector = (workspaceId: string | null) => {

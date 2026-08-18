@@ -1,6 +1,7 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { canAssignRole, isStaffRole, type StaffRole } from "../auth/permissions";
+import { isSyntheticEmail } from "../auth/staff-logins";
 import { requireAuthenticatedUser, WorkspaceAdminAuthError } from "../auth/server";
 import { getSupabaseServerClient } from "../supabase/server";
 import { readWorkspaceContext } from "./server";
@@ -105,6 +106,10 @@ export function validateInvitationRequest(input: {
   const details: string[] = [];
   if (!email) details.push("email is required");
   else if (!isEmail(email)) details.push("email must be valid");
+  // Приглашение доказывает владение ПОЧТОЙ. На служебный адрес доказывать
+  // нечего: письмо туда не уйдёт, а принять ссылку смог бы владелец такого
+  // логина — сотрудник другой клиники.
+  else if (isSyntheticEmail(email)) details.push("служебный адрес нельзя приглашать: у такого входа нет почты");
   if (!role) details.push("role is required");
 
   if (details.length > 0) {
