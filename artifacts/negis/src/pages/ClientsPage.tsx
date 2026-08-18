@@ -270,6 +270,9 @@ export default function ClientsPage() {
   const [formOpen, setFormOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState<ClientForm>(emptyForm);
+  // Пока идёт запись — кнопка занята: двойной клик по «Добавить клиента»
+  // создавал бы второго клиента с теми же данными.
+  const [saving, setSaving] = useState(false);
   const [detailId, setDetailId] = useState<string | null>(null);
   const [related, setRelated] = useState<{ leads: RelatedLead[]; appointments: RelatedAppointment[]; calls: RelatedCall[] } | null>(null);
   const [relatedLoading, setRelatedLoading] = useState(false);
@@ -446,26 +449,37 @@ export default function ClientsPage() {
       // lastVisit is written only when set — an empty date input never wipes a stored visit.
       ...(form.lastVisit ? { lastVisit: new Date(`${form.lastVisit}T12:00:00`).toISOString() } : {}),
     };
-    if (editingId) {
-      updateItem(editingId, patch);
-      toast.success("Клиент обновлён");
-    } else {
-      addItem({
-        id: `client-${Date.now()}`,
-        name,
-        phone: patch.phone || "",
-        whatsapp: patch.whatsapp || "",
-        source: patch.source || "",
-        status: patch.status || "new",
-        comment: patch.comment,
-        lastVisit: patch.lastVisit,
-        createdAt: new Date().toISOString(),
-      });
-      toast.success("Клиент добавлен");
-    }
-    setFormOpen(false);
-    setEditingId(null);
-    setForm(emptyForm);
+    // Форма закрывается ТОЛЬКО после подтверждения сервера. Раньше она
+    // закрывалась сразу: список потом откатывался с честным «не удалось
+    // сохранить», но набранное сотрудником уже было стёрто, и карточку
+    // приходилось заполнять заново.
+    setSaving(true);
+    void (async () => {
+      try {
+        const saved = editingId
+          ? await updateItem(editingId, patch)
+          : await addItem({
+              id: `client-${Date.now()}`,
+              name,
+              phone: patch.phone || "",
+              whatsapp: patch.whatsapp || "",
+              source: patch.source || "",
+              status: patch.status || "new",
+              comment: patch.comment,
+              lastVisit: patch.lastVisit,
+              createdAt: new Date().toISOString(),
+            });
+        // Об отказе уже сказал откат списка — второй раз не повторяем, но
+        // форму оставляем открытой с набранным текстом.
+        if (!saved) return;
+        toast.success(editingId ? "Клиент обновлён" : "Клиент добавлен");
+        setFormOpen(false);
+        setEditingId(null);
+        setForm(emptyForm);
+      } finally {
+        setSaving(false);
+      }
+    })();
   }
 
   function changeStatus(client: Client, status: ClientStatusKey) {
@@ -713,8 +727,8 @@ export default function ClientsPage() {
             </div>
             <div className="mt-5 flex flex-col gap-2 sm:flex-row sm:justify-end">
               <button type="button" className="neu-btn justify-center" onClick={() => setFormOpen(false)}>Отмена</button>
-              <button type="button" className="neu-btn-primary justify-center" onClick={submitForm}>
-                {editingId ? "Сохранить" : "Добавить клиента"}
+              <button type="button" className="neu-btn-primary justify-center" disabled={saving} onClick={submitForm}>
+                {saving ? "Сохраняю…" : editingId ? "Сохранить" : "Добавить клиента"}
               </button>
             </div>
           </div>

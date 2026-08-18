@@ -322,12 +322,22 @@ export function useDemoCollection<TItem extends { id: string }>(
     });
   };
 
-  const addItem = (item: TItem) => {
+  /**
+   * Возвращает, СОХРАНИЛ ли сервер запись.
+   *
+   * Раньше это был fire-and-forget: строка появлялась на экране, форма
+   * закрывалась, а отказ приходил секундой позже — список откатывался, но
+   * введённое сотрудником уже было стёрто вместе с формой, и набирать всё
+   * приходилось заново. Экран, который дождётся ответа, может оставить форму
+   * открытой. Прежние вызывающие без await продолжают работать как раньше.
+   */
+  const addItem = (item: TItem): Promise<boolean> => {
     setStoredItems((current) => [item, ...current]);
 
-    if (!endpoint) return;
+    // Демо-режим: localStorage и есть запись, отказу неоткуда взяться.
+    if (!endpoint) return Promise.resolve(true);
 
-    void (async () => {
+    return (async () => {
       try {
         const workspaceId = readWorkspaceId();
         const payload = {
@@ -342,32 +352,35 @@ export function useDemoCollection<TItem extends { id: string }>(
         const body = await safeJson<Record<string, unknown>>(response);
         if (!response.ok || body?.success !== true || body.mode !== "supabase") {
           revertWrite((current) => current.filter((entry) => entry.id !== item.id));
-          return;
+          return false;
         }
 
         const rawItem = body.data[itemKey];
-        if (!rawItem) return;
+        if (!rawItem) return true;
 
         const savedItem = fromApi ? fromApi(rawItem) : (rawItem as TItem);
         setStoredItems((current) => current.map((currentItem) => (currentItem.id === item.id ? savedItem : currentItem)));
+        return true;
       } catch {
         revertWrite((current) => current.filter((entry) => entry.id !== item.id));
+        return false;
       }
     })();
   };
 
-  const updateItem = (id: string, patch: Partial<TItem>) => {
+  /** Возвращает, ПРИНЯЛ ли сервер правку — см. addItem. */
+  const updateItem = (id: string, patch: Partial<TItem>): Promise<boolean> => {
     // Captured from this render rather than from inside the updater, so the
     // rollback does not depend on when React runs it.
     const previous = items.find((entry) => entry.id === id);
     setStoredItems((current) => current.map((item) => (item.id === id ? { ...item, ...patch } : item)));
 
-    if (!endpoint) return;
+    if (!endpoint) return Promise.resolve(true);
 
     const restore = (current: TItem[]): TItem[] =>
       previous ? current.map((entry) => (entry.id === id ? previous : entry)) : current;
 
-    void (async () => {
+    return (async () => {
       try {
         const workspaceId = readWorkspaceId();
         const response = await crmFetch(endpoint, {
@@ -384,9 +397,12 @@ export function useDemoCollection<TItem extends { id: string }>(
         // identical to an accepted one.
         if (!response.ok || body?.success !== true || body.mode !== "supabase") {
           revertWrite(restore);
+          return false;
         }
+        return true;
       } catch {
         revertWrite(restore);
+        return false;
       }
     })();
   };

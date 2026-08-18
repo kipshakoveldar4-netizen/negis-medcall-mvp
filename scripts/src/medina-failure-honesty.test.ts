@@ -265,6 +265,36 @@ test("F8 the browser puts back a row the server refused", async () => {
   assert.ok(update.includes("const response = await crmFetch("), "the update must read the response at all");
 });
 
+test("F12 отказ сохранения не уносит с собой набранное сотрудником", async () => {
+  // Список откатывался честно, но форма закрывалась ДО ответа: карточка
+  // клиента, заявка со слов звонящего и сумма продажи стирались вместе с ней,
+  // и набирать всё приходилось заново. Салон наполняет данные вручную — это
+  // и есть «данные слетают».
+  const storage = await readFile(path.join(negisSrc, "lib", "demoStorage.ts"), "utf8");
+  assert.ok(/const addItem = \(item: TItem\): Promise<boolean>/.test(storage), "запись отвечает, сохранилась ли она");
+  assert.ok(/const updateItem = \(id: string, patch: Partial<TItem>\): Promise<boolean>/.test(storage), "правка тоже");
+  // Демо-режим не умеет отказывать: там localStorage и есть запись.
+  assert.equal((storage.match(/return Promise\.resolve\(true\);/g) || []).length, 2, "без endpoint обе операции успешны");
+
+  for (const [page, marker] of [
+    ["ClientsPage.tsx", "Клиент добавлен"],
+    ["LeadsPage.tsx", "Заявка добавлена"],
+    ["SalesPage.tsx", "Продажа добавлена"],
+  ] as const) {
+    const source = await readFile(path.join(negisSrc, "pages", page), "utf8");
+    const submit = source.slice(source.indexOf("function submitForm"), source.indexOf("function submitForm") + 3000);
+    assert.ok(/const saved = editingId/.test(submit), `${page}: форма ждёт ответ сервера`);
+    assert.ok(/if \(!saved\) return;/.test(submit), `${page}: при отказе форма остаётся открытой`);
+    assert.ok(
+      submit.indexOf("if (!saved) return;") < submit.indexOf("setFormOpen(false)"),
+      `${page}: форма закрывается только после подтверждения`,
+    );
+    assert.ok(submit.includes(marker), `${page}: успех по-прежнему называется словами`);
+    // Двойной клик заводил второй такой же record.
+    assert.ok(/disabled=\{saving\}/.test(source), `${page}: кнопка занята на время записи`);
+  }
+});
+
 test("F9 a refused production read reaches the operator instead of an empty clinic", async () => {
   const source = await readFile(path.join(negisSrc, "lib", "demoStorage.ts"), "utf8");
   const hook = source.slice(source.indexOf("export function useDemoCollection"));

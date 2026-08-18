@@ -609,6 +609,8 @@ export default function LeadsPage() {
   const [formOpen, setFormOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState<LeadForm>(emptyForm);
+  // Занятая кнопка на время записи: двойной клик заводил вторую заявку.
+  const [saving, setSaving] = useState(false);
   const [detailId, setDetailId] = useState<string | null>(null);
   const [convertingId, setConvertingId] = useState<string | null>(null);
   // Admin-only diagnostics: whether the conversion matched an existing client (per lead).
@@ -800,16 +802,23 @@ export default function LeadsPage() {
       // colleague, and the server turns it into null.
       responsibleUserId: form.responsibleUserId,
     };
-    if (editingId) {
-      updateItem(editingId, patch);
-      toast.success("Заявка обновлена");
-    } else {
-      addItem({ id: `lead-${Date.now()}`, createdAt: new Date().toISOString(), ...patch });
-      toast.success("Заявка добавлена");
-    }
-    setFormOpen(false);
-    setEditingId(null);
-    setForm(emptyForm);
+    // Форма закрывается только после подтверждения сервера: иначе отказ
+    // уносил вместе с собой всё, что оператор набрал со слов звонящего.
+    setSaving(true);
+    void (async () => {
+      try {
+        const saved = editingId
+          ? await updateItem(editingId, patch)
+          : await addItem({ id: `lead-${Date.now()}`, createdAt: new Date().toISOString(), ...patch });
+        if (!saved) return;
+        toast.success(editingId ? "Заявка обновлена" : "Заявка добавлена");
+        setFormOpen(false);
+        setEditingId(null);
+        setForm(emptyForm);
+      } finally {
+        setSaving(false);
+      }
+    })();
   }
 
   function changeStatus(lead: Lead, stage: LeadStageDefinition) {
@@ -1302,8 +1311,8 @@ export default function LeadsPage() {
             </div>
             <div className="mt-5 flex flex-col gap-2 sm:flex-row sm:justify-end">
               <button type="button" className="neu-btn justify-center" onClick={() => setFormOpen(false)}>Отмена</button>
-              <button type="button" className="neu-btn-primary justify-center" onClick={submitForm}>
-                {editingId ? "Сохранить" : "Добавить заявку"}
+              <button type="button" className="neu-btn-primary justify-center" disabled={saving} onClick={submitForm}>
+                {saving ? "Сохраняю…" : editingId ? "Сохранить" : "Добавить заявку"}
               </button>
             </div>
           </div>

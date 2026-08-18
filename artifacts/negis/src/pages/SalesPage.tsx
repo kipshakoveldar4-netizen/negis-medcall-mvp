@@ -398,6 +398,8 @@ export default function SalesPage() {
   const [formOpen, setFormOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState<DealForm>(() => emptyForm());
+  // Двойной клик по «Добавить продажу» заводил вторую оплату на ту же сумму.
+  const [saving, setSaving] = useState(false);
   const [isAdminMode, setIsAdminMode] = useState(() => typeof window !== "undefined" && window.localStorage.getItem(SALES_UI_MODE_KEY) === "admin");
 
   useEffect(() => {
@@ -647,16 +649,27 @@ export default function SalesPage() {
       updatedAt: now,
     };
 
-    if (editingId) {
-      updateItem(editingId, nextDeal);
-      toast.success("Продажа обновлена");
-    } else {
-      addItem(nextDeal);
-      toast.success(form.status === "paid" ? "Оплаченная продажа добавлена" : "Продажа добавлена");
-    }
-    setFormOpen(false);
-    setEditingId(null);
-    setForm(emptyForm());
+    // Деньги — то место, где «сохранилось или нет» должно быть известно точно:
+    // форма ждёт ответ сервера и при отказе остаётся с набранной суммой.
+    setSaving(true);
+    void (async () => {
+      try {
+        const saved = editingId ? await updateItem(editingId, nextDeal) : await addItem(nextDeal);
+        if (!saved) return;
+        toast.success(
+          editingId
+            ? "Продажа обновлена"
+            : form.status === "paid"
+              ? "Оплаченная продажа добавлена"
+              : "Продажа добавлена",
+        );
+        setFormOpen(false);
+        setEditingId(null);
+        setForm(emptyForm());
+      } finally {
+        setSaving(false);
+      }
+    })();
   }
 
   const fallbackOption = (value: string, options: Array<{ id: string }>, label: string) =>
@@ -1010,8 +1023,8 @@ export default function SalesPage() {
 
             <div className="mt-5 flex flex-col gap-2 sm:flex-row sm:justify-end">
               <button type="button" className="neu-btn justify-center" onClick={() => setFormOpen(false)}>Отмена</button>
-              <button type="button" className="neu-btn-primary justify-center" onClick={submitForm}>
-                {editingId ? "Сохранить" : "Добавить продажу"}
+              <button type="button" className="neu-btn-primary justify-center" disabled={saving} onClick={submitForm}>
+                {saving ? "Сохраняю…" : editingId ? "Сохранить" : "Добавить продажу"}
               </button>
             </div>
           </div>
