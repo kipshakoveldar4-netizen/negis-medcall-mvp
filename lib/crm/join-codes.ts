@@ -36,10 +36,10 @@ const TRANSLIT: Record<string, string> = {
 export function joinCodePrefix(workspaceName: unknown): string {
   const source = typeof workspaceName === "string" ? workspaceName : "";
   let out = "";
-  for (const char of source.toUpperCase()) {
-    const mapped = TRANSLIT[char] ?? char;
+  const upper = source.toUpperCase();
+  for (let i = 0; i < upper.length && out.length < PREFIX_LENGTH; i += 1) {
+    const mapped = TRANSLIT[upper[i]] ?? upper[i];
     if (/^[A-Z]$/.test(mapped)) out += mapped;
-    if (out.length >= PREFIX_LENGTH) break;
   }
   return out.length === PREFIX_LENGTH ? out : FALLBACK_PREFIX;
 }
@@ -56,14 +56,17 @@ export function joinCodePrefix(workspaceName: unknown): string {
 function secretPart(): string {
   const size = CODE_ALPHABET.length;
   const limit = 256 - (256 % size);
+  // Индексный обход, а не for..of по Uint8Array: этот модуль читают и наш
+  // серверный бандл, и Vite, а перебор типизированного массива через итератор
+  // требует downlevelIteration в сборках со старым target.
   let out = "";
   while (out.length < SECRET_LENGTH) {
     const chunk = new Uint8Array(SECRET_LENGTH);
     globalThis.crypto.getRandomValues(chunk);
-    for (const byte of chunk) {
+    for (let i = 0; i < chunk.length && out.length < SECRET_LENGTH; i += 1) {
+      const byte = chunk[i];
       if (byte >= limit) continue;
       out += CODE_ALPHABET[byte % size];
-      if (out.length === SECRET_LENGTH) break;
     }
   }
   return out;
