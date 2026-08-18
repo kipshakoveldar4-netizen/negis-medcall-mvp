@@ -1001,7 +1001,7 @@ export function AppointmentsPage() {
       } catch {
         // Пайплайн не прочитался — канонический booked всё равно честен.
       }
-      const response = await crmFetch("/api/crm/leads", {
+      const response = await crmFetch(`/api/crm/leads?workspaceId=${encodeURIComponent(readCurrentWorkspaceId())}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1126,15 +1126,34 @@ export function AppointmentsPage() {
     setModalOpen(true);
   };
 
-  const patchAppointment = async (appointment: Appointment, allowConflict = false, allowOutsideSchedule = false) => {
-    const response = await crmFetch("/api/crm/appointments", {
+  /**
+   * fields — какие поля записи отправлять.
+   *
+   * По умолчанию уходит вся карточка: так работает форма, где оператор видел
+   * и правил всё сразу. Но клик по статусу («Пришёл», «Подтверждена») правит
+   * ОДНО поле, а слал тоже всю карточку — значениями из вкладки, открытой,
+   * может быть, полчаса назад. Если за это время коллега переставил время или
+   * сменил услугу, его правка молча возвращалась к старой. Точечные действия
+   * теперь называют свои поля.
+   */
+  const patchAppointment = async (
+    appointment: Appointment,
+    allowConflict = false,
+    allowOutsideSchedule = false,
+    fields?: Array<keyof ReturnType<typeof appointmentToApi>>,
+  ) => {
+    const full = appointmentToApi(appointment);
+    const updates = fields
+      ? Object.fromEntries(fields.filter((key) => key in full).map((key) => [key, full[key]]))
+      : full;
+    const response = await crmFetch(`/api/crm/appointments?workspaceId=${encodeURIComponent(readCurrentWorkspaceId())}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         id: appointment.id,
         workspaceId: readCurrentWorkspaceId(),
         updates: {
-          ...appointmentToApi(appointment),
+          ...updates,
           ...(allowConflict ? { allowConflict: true } : {}),
           // Отдельный флаг: «Сохранить всё равно» снимает проверку пересечений
           // целиком, и один клик не имеет права снимать заодно график врача.
@@ -1149,13 +1168,12 @@ export function AppointmentsPage() {
     const outside = scheduleRefusalFromBody(body);
     if (outside) throw outside;
 
-    if (!response.ok || body?.success !== true) {
+    // Порог тот же, что у создания: ответ «demo» означает, что записи в базе
+    // нет. Прежний код принимал его за успех и обещал «сохранено локально» —
+    // локально при этом тоже ничего не сохранялось.
+    if (!response.ok || body?.success !== true || body.mode !== "supabase") {
       const details = body?.success === false ? body.details?.join(", ") : "";
       throw new Error(details || (body?.success === false ? body.error : "Не удалось обновить запись на сервере"));
-    }
-
-    if (body.mode !== "supabase" && body.warning) {
-      toast.info("Сервер недоступен, изменение сохранено локально");
     }
   };
 
@@ -1174,7 +1192,7 @@ export function AppointmentsPage() {
       return;
     }
 
-    const response = await crmFetch("/api/crm/appointments", {
+    const response = await crmFetch(`/api/crm/appointments?workspaceId=${encodeURIComponent(readCurrentWorkspaceId())}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -1227,7 +1245,8 @@ export function AppointmentsPage() {
     setItems((current) => current.map((item) => (item.id === appointment.id ? updated : item)));
 
     try {
-      await patchAppointment(updated);
+      // Только статус: остальные поля этой карточки мог изменить коллега.
+      await patchAppointment(updated, false, false, ["status"]);
       toast.success(`Статус: ${getAppointmentStatusLabel(status)}`);
     } catch (error) {
       // Отказ сервера — откат, а не фантомный статус до перезагрузки. Прежний

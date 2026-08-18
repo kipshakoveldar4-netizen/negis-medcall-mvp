@@ -313,7 +313,7 @@ export default function AiControlCenter() {
     if (creatingTaskFor) return;
     setCreatingTaskFor(rec.title);
     try {
-      const response = await crmFetch("/api/crm/tasks", {
+      const response = await crmFetch(`/api/crm/tasks?workspaceId=${encodeURIComponent(readWorkspaceId())}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

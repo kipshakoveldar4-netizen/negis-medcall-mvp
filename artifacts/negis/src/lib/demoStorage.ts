@@ -344,7 +344,12 @@ export function useDemoCollection<TItem extends { id: string }>(
           ...(toApi ? toApi(item) : item),
           workspaceId,
         };
-        const response = await crmFetch(endpoint, {
+        // Клиника называется В АДРЕСЕ: сервер читает селектор только оттуда
+        // (тело — это данные, а не «кем я действую»). Без него сотрудник с
+        // двумя клиниками получал отказ «нужно выбрать клинику» на КАЖДУЮ
+        // запись, хотя список читался нормально — тот же запрос уже слал
+        // workspaceId в query.
+        const response = await crmFetch(`${endpoint}?workspaceId=${encodeURIComponent(workspaceId)}`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
@@ -383,7 +388,8 @@ export function useDemoCollection<TItem extends { id: string }>(
     return (async () => {
       try {
         const workspaceId = readWorkspaceId();
-        const response = await crmFetch(endpoint, {
+        // Тот же селектор в адресе, что и у чтения — см. addItem.
+        const response = await crmFetch(`${endpoint}?workspaceId=${encodeURIComponent(workspaceId)}`, {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({

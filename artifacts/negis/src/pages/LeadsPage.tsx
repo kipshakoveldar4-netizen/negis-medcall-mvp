@@ -885,7 +885,7 @@ export default function LeadsPage() {
       let persistedOnServer = false;
       try {
         const workspaceId = readWorkspaceId();
-        const response = await crmFetch("/api/crm/clients", {
+        const response = await crmFetch(`/api/crm/clients?workspaceId=${encodeURIComponent(readWorkspaceId())}`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
