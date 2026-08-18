@@ -140,7 +140,7 @@ async function listOwnRequests(supabase: SupabaseClient, user: { id: string }, r
 
   if (error) return isMissingTable(error) ? notProvisioned(res) : serviceUnavailable(res);
 
-  const requests = (data ?? []).map((row) => {
+  const requests = (data ?? []).map((row: unknown) => {
     const record = row as JsonRecord & { workspaces?: { name?: string } | { name?: string }[] | null };
     const joined = Array.isArray(record.workspaces) ? record.workspaces[0] : record.workspaces;
     return {
@@ -397,7 +397,7 @@ async function listWorkspaceRequests(supabase: SupabaseClient, workspaceId: stri
     .limit(30);
   if (decided.error) return serviceUnavailable(res);
 
-  const requests = [...(pending.data ?? []), ...(decided.data ?? [])].map((row) => {
+  const requests = [...(pending.data ?? []), ...(decided.data ?? [])].map((row: unknown) => {
     const record = row as JsonRecord & { workspace_join_codes?: { revoked_at?: string | null } | { revoked_at?: string | null }[] | null };
     const joinCode = Array.isArray(record.workspace_join_codes) ? record.workspace_join_codes[0] : record.workspace_join_codes;
     return {
