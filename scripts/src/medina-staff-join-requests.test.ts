@@ -202,8 +202,20 @@ test("J9 миграция 038 по правилу паритета, и прим�
   // человека со старой бумажкой в чужую очередь.
   assert.ok(/workspace_join_codes_code_key\s+on public\.workspace_join_codes\(code\);/.test(migration));
   assert.ok(/workspace_join_codes_live_idx[\s\S]*where revoked_at is null/.test(migration));
-  // Владельца не выдаёт даже ошибка в обработчике.
-  assert.ok(/granted_role in \('admin'/.test(migration) && !/granted_role in \([^)]*'owner'/.test(migration));
+  // Список ролей в базе и каталог в коде не должны разъехаться: роль, которую
+  // canAssignRole пропустит, а constraint отвергнет, дала бы 500 вместо
+  // понятного отказа. Владельца нет в списке НАМЕРЕННО — база отказывает в том
+  // же, в чём отказывает canAssignRole.
+  const { staffRoles } = (await import(
+    pathToFileURL(path.join(repoRoot, "lib", "auth", "permissions.ts")).href
+  )) as { staffRoles: readonly string[] };
+  const constrained = (migration.match(/granted_role in \(([^)]*)\)/) ?? [])[1] ?? "";
+  const allowed = constrained.split(",").map((part) => part.trim().replace(/'/g, "")).filter(Boolean);
+  assert.deepEqual(
+    [...allowed].sort(),
+    staffRoles.filter((role) => role !== "owner").slice().sort(),
+    "ограничение базы перечисляет ровно каталог ролей без владельца",
+  );
 });
 
 test("J10 экран заявителя не ходит в таблицы и говорит по-русски", async () => {

@@ -81,7 +81,7 @@ create table if not exists public.staff_join_requests (
   -- 'owner' отсутствует НАМЕРЕННО: база отказывает в том же, в чём отказывает
   -- canAssignRole, и ошибка в обработчике не сможет выдать владельца.
   constraint staff_join_requests_role_check
-    check (granted_role is null or granted_role in ('admin', 'manager', 'receptionist', 'marketer', 'doctor', 'agent', 'booking_agent')),
+    check (granted_role is null or granted_role in ('admin', 'manager', 'receptionist', 'marketer', 'doctor')),
   -- «Одобрено без роли» и «решено без времени» становятся непредставимыми.
   constraint staff_join_requests_decision_check check (
     (status = 'pending'  and decided_at is null     and granted_role is null) or
