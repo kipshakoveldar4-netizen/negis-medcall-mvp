@@ -325,6 +325,30 @@ test("MC17 обзор показывает застрявший онбордин
   assert.ok(/state === "inside"\) return ""/.test(screen), "у клиники с владельцем внутри чипа нет — шум не рисуется");
 });
 
+test("MC18 номер WhatsApp привязывается с портала, чужой не уводится", async () => {
+  const registry = await readFile(path.join(repoRoot, "lib", "crm", "authorization.ts"), "utf8");
+  assert.ok(/"platform-whatsapp-number": \{ kind: "platform", methods: \["POST"\] \}/.test(registry), "kind platform, только POST");
+  const router = await readFile(path.join(repoRoot, "api", "crm", "[...path].ts"), "utf8");
+  assert.ok(/case "platform-whatsapp-number":\s*return handlePlatformWhatsappNumber\(req, res\);/.test(router));
+
+  const source = (await readFile(path.join(repoRoot, "lib", "crm", "platform-whatsapp.ts"), "utf8"))
+    .replace(/(^|\s)\/\/[^\n]*/g, "$1");
+  // Один номер принимает сообщения в одну клинику: перенос молча увёл бы
+  // чужие заявки, и никто бы не понял, куда они делись.
+  assert.ok(/code: "phone_number_taken"/.test(source), "занятый номер — отказ, а не перенос");
+  assert.ok(!/\.update\(\{ workspace_id/.test(source), "владелец номера не переписывается");
+  // Идентификатор — не телефон: «+7 701…» вебхук не найдёт никогда.
+  assert.ok(/\/\^\\d\{6,32\}\$\//.test(source), "проверка формата phone_number_id");
+  // Токенов Meta здесь нет и быть не должно: они живут в переменных окружения.
+  assert.ok(!/WHATSAPP_APP_SECRET|WHATSAPP_VERIFY_TOKEN|access_token/i.test(source), "секреты сюда не попадают");
+  // Отсутствие таблицы — «не активировано», а не «номер занят».
+  assert.ok(/code: "not_provisioned"/.test(source), "непримененная миграция называется своим словом");
+
+  const screen = await readFile(path.join(controlSrc, "screens", "ClinicCard.tsx"), "utf8");
+  assert.ok(screen.includes("platform-whatsapp-number"), "карточка зовёт маршрут");
+  assert.ok(/phone_number_id/.test(screen), "и объясняет, что именно вводить");
+});
+
 test("MC8 маршруты платформы по-прежнему за requirePlatformOwner", async () => {
   const router = await readFile(path.join(repoRoot, "api", "crm", "[...path].ts"), "utf8");
   // CORS открыл дорогу браузеру портала, но не ослабил авторизацию: платформенная

@@ -26,6 +26,7 @@ import {
 import { normalizeCrmSegments, resolveCrmRoute } from "../../lib/crm/authorization";
 import { handleStaffInvitationAccept, handleStaffInvitations } from "../../lib/crm/staff-invitations";
 import { handleStaffCredentials } from "../../lib/crm/staff-credentials";
+import { handlePlatformWhatsappNumber } from "../../lib/crm/platform-whatsapp";
 import { handleWhatsAppChannels } from "../../lib/crm/whatsapp-channels";
 import { handleCrmChangeLog } from "../../lib/crm/change-log";
 import {
@@ -193,6 +194,8 @@ async function dispatch(
       return handlePlatformOnboarding(req, res);
     case "platform-onboarding-credentials":
       return handlePlatformOnboardingCredentials(req, res);
+    case "platform-whatsapp-number":
+      return handlePlatformWhatsappNumber(req, res);
     case "platform-invitation-reissue":
       return handlePlatformInvitationReissue(req, res);
     case "platform-recommendations":

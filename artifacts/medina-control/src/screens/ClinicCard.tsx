@@ -308,6 +308,49 @@ export function ClinicCard({ workspaceId, onBack }: { workspaceId: string; onBac
     }
   }
 
+  // Привязка номера WhatsApp: заявки клиники приходят на её номер, и до сих
+  // пор эта строка заводилась руками в SQL Editor.
+  const [numberInput, setNumberInput] = useState("");
+  const [numberBusy, setNumberBusy] = useState(false);
+  const [numberFlash, setNumberFlash] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
+
+  async function linkWhatsappNumber() {
+    if (numberBusy || !numberInput.trim()) return;
+    setNumberBusy(true);
+    setNumberFlash(null);
+    try {
+      const response = await controlFetch("/api/crm/platform-whatsapp-number", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ workspaceId, phoneNumberId: numberInput.trim() }),
+      });
+      const body = await response.json().catch(() => null);
+      if (!response.ok || body?.success !== true) {
+        const reason = [body?.error, ...(Array.isArray(body?.details) ? body.details : [])].filter(Boolean).join(" ");
+        setNumberFlash({ kind: "error", text: reason || "Не удалось привязать номер" });
+        return;
+      }
+      setNumberInput("");
+      setNumberFlash({
+        kind: "ok",
+        text: body.data?.alreadyLinked
+          ? "Номер уже был за этой клиникой — приём включён."
+          : "Номер привязан: заявки с него будут приходить этой клинике.",
+      });
+      // Счётчик «WhatsApp» в чипах читается с сервера — перечитываем карточку.
+      try {
+        const fresh = await fetchCard();
+        if (fresh) setCard(fresh);
+      } catch {
+        // Обновится при следующем открытии.
+      }
+    } catch {
+      setNumberFlash({ kind: "error", text: "Сеть не ответила — неизвестно, привязался ли номер. Проверьте чип «WhatsApp» ниже." });
+    } finally {
+      setNumberBusy(false);
+    }
+  }
+
   // Таймер «Скопировано» один: повторный клик перезапускает его, а не
   // наслаивает второй, который погасил бы свежую подпись раньше времени.
   const copiedTimerRef = useRef<number | null>(null);
@@ -622,6 +665,44 @@ export function ClinicCard({ workspaceId, onBack }: { workspaceId: string; onBac
         )}
         <p className="muted" style={{ fontSize: 12.5, margin: "12px 0 0" }}>
           Сотрудников приглашает владелец сам из кабинета: «Настройки → Сотрудники». С портала приглашается только владелец.
+        </p>
+      </section>
+
+      <section className="panel" style={{ padding: "16px 18px", marginBottom: 16 }}>
+        <h2 className="section-title">
+          WhatsApp{card.counts.whatsappChannels === null
+            ? " · не смог прочитать"
+            : card.counts.whatsappChannels > 0
+              ? ` · подключён (${card.counts.whatsappChannels})`
+              : " · не подключён"}
+        </h2>
+        <p className="muted" style={{ fontSize: 12.5, margin: "0 0 10px" }}>
+          Заявки из WhatsApp попадают в CRM клиники по её номеру. Нужен <b>phone_number_id</b> из Meta → WhatsApp →
+          API Setup — длинное число, а не сам телефон. Сначала номер должен быть привязан к WABA и подписан на
+          поле <b>messages</b> в настройках вебхука.
+        </p>
+        <div className="field" style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <label htmlFor="wa-number" className="sr-only" style={{ position: "absolute", width: 1, height: 1, overflow: "hidden", clip: "rect(0 0 0 0)" }}>
+            Идентификатор номера WhatsApp
+          </label>
+          <input
+            id="wa-number"
+            inputMode="numeric"
+            placeholder="phone_number_id, например 123456789012345"
+            value={numberInput}
+            onChange={(event) => setNumberInput(event.target.value)}
+            style={{ flex: 1, minWidth: 0 }}
+          />
+          <button type="button" className="btn-primary" disabled={numberBusy} onClick={() => void linkWhatsappNumber()} style={{ whiteSpace: "nowrap" }}>
+            {numberBusy ? "Привязываю…" : "Привязать номер"}
+          </button>
+        </div>
+        {numberFlash ? (
+          <div className={`notice ${numberFlash.kind}`} style={{ marginTop: 10 }}>{numberFlash.text}</div>
+        ) : null}
+        <p className="muted" style={{ fontSize: 12.5, margin: "10px 0 0" }}>
+          Один номер принимает сообщения в одну клинику: занятый номер сюда не переносится — его сначала отвязывают там,
+          где он сейчас. Токены Meta живут в переменных окружения и здесь не нужны.
         </p>
       </section>
 

@@ -189,6 +189,9 @@ export const CRM_ROUTE_AUTHORIZATION: Readonly<Record<string, RouteAuthorization
   // Упрощённое подключение: владелец платформы задаёт почту и пароль, письмо
   // не отправляется. Единственный маршрут, через который проходит пароль.
   "platform-onboarding-credentials": { kind: "platform", methods: ["POST"] },
+  // Привязка номера WhatsApp Cloud к клинике: phone_number_id — публичный
+  // идентификатор из Meta, а вот решение «чьи это заявки» платформенное.
+  "platform-whatsapp-number": { kind: "platform", methods: ["POST"] },
   // Перевыпуск приглашения владельца существующего пространства: старое
   // отзывается, новое возвращается ссылкой. Без этого потерянная ссылка
   // была тупиком.
