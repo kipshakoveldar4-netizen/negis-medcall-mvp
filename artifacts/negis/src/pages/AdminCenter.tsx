@@ -117,6 +117,15 @@ const STAFF_ERROR_TEXTS: Record<string, string> = {
   password_rejected: "Такой пароль не принят — задайте длиннее или с другими символами.",
   partial_staff_credentials:
     "Аккаунт создан, а доступ к клинике — нет. Пригласите этого человека ссылкой: он войдёт с заданным паролем.",
+  staff_not_found: "Такого сотрудника нет в вашей клинике — обновите страницу.",
+  staff_not_linked:
+    "У сотрудника ещё нет входа. Заведите ему логин и пароль в карточке слева — существующая строка достроится.",
+  auth_account_missing:
+    "Аккаунт входа этого сотрудника удалён из системы. Заведите ему вход заново через «Логин и пароль».",
+  staff_user_required: "Не удалось понять, какому сотруднику менять пароль — обновите страницу.",
+  staff_paused: "Сотрудник на паузе — сначала «Активировать», иначе новый пароль не пустит его в кабинет.",
+  account_shared_with_other_clinic:
+    "Этим логином человек заходит и в другую клинику, поэтому пароль отсюда не меняется — он открыл бы и её. Пусть задаст пароль сам через «Забыли пароль?».",
 };
 
 /** Пароль для передачи голосом: без 0/O/1/l/I, которые путают на слух и на бумаге. */
@@ -727,8 +736,10 @@ export default function AdminCenter() {
   const [staffMode, setStaffMode] = useState<"password" | "invite">("password");
   const [staffPassword, setStaffPassword] = useState("");
   const [staffFullName, setStaffFullName] = useState("");
-  // Пароль живёт здесь и нигде больше: сервер его не возвращает.
-  const [createdStaff, setCreatedStaff] = useState<{ email: string; password: string } | null>(null);
+  // Пароль живёт здесь и нигде больше: сервер его не возвращает. kind
+  // различает заведение и смену — «Сотрудник добавлен» при смене пароля было
+  // бы неправдой.
+  const [createdStaff, setCreatedStaff] = useState<{ email: string; password: string; kind: "created" | "reset" } | null>(null);
 
   const readiness = useMemo(() => {
     const total = releaseChecks.length || 1;
@@ -1288,7 +1299,7 @@ export default function AdminCenter() {
         const code = typeof (responseBody as { code?: unknown }).code === "string" ? (responseBody as { code: string }).code : "request_failed";
         throw new CrmApiError(response.status, code, responseBody.error || `HTTP ${response.status}`);
       }
-      setCreatedStaff({ email, password: staffPassword });
+      setCreatedStaff({ email, password: staffPassword, kind: "created" });
       setStaffPassword("");
       setStaffFullName("");
       setInviteForm({ email: "", role: "receptionist" });
@@ -1296,6 +1307,40 @@ export default function AdminCenter() {
       toast.success("Сотрудник добавлен — передайте ему логин и пароль");
     } catch (error) {
       toast.error(staffErrorText(error, "Не удалось добавить сотрудника"));
+    } finally {
+      setBusy("staff", false);
+    }
+  }
+
+  /**
+   * Новый пароль сотруднику, который уже в команде.
+   *
+   * Забытый пароль иначе чинится только письмом «Забыли пароль?» — тем самым
+   * каналом, который до клиник не доходит. Пароль показывается один раз тем же
+   * блоком, что и при заведении: сервер его не возвращает и не хранит.
+   */
+  async function resetStaffPassword(member: StaffMember) {
+    // Подтверждение обязательно: смена мгновенно ломает пароль, которым
+    // сотрудник пользуется прямо сейчас. Случайный клик по соседней кнопке
+    // (на телефоне они рядом) выкинул бы человека из системы посреди смены.
+    const confirmed = window.confirm(
+      `Задать новый пароль для ${member.name || member.email}?\n\nСтарый перестанет работать сразу. Новый покажется один раз — передайте его лично.`,
+    );
+    if (!confirmed) return;
+
+    const password = generateStaffPassword();
+    setBusy("staff", true);
+    try {
+      await crmRequest(`/api/crm/staff-credentials?workspaceId=${encodeURIComponent(workspaceId)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ staffUserId: member.id, password }),
+      });
+      setCreatedStaff({ email: member.email, password, kind: "reset" });
+      setStaffMode("password");
+      toast.success("Пароль задан — передайте его сотруднику");
+    } catch (error) {
+      toast.error(staffErrorText(error, "Не удалось задать пароль"));
     } finally {
       setBusy("staff", false);
     }
@@ -1649,6 +1694,14 @@ export default function AdminCenter() {
                     >
                       {member.status === "active" ? "Поставить на паузу" : "Активировать"}
                     </button>
+                    <button
+                      type="button"
+                      className="neu-btn mt-2 w-full justify-center"
+                      disabled={loading.staff}
+                      onClick={() => resetStaffPassword(member)}
+                    >
+                      Новый пароль
+                    </button>
                   </>
                 ) : (
                   <p className="mt-3 text-xs text-[#94A3B8]">{member.id === actorStaffUserId ? "Это вы" : "Строку владельца меняет только владелец"}</p>
@@ -1692,13 +1745,25 @@ export default function AdminCenter() {
                     <td className="px-3 py-4"><StatusPill status={member.status === "active" ? "configured" : "partial"} label={statusText(member.status)} /></td>
                     <td className="px-3 py-4">
                       {canEdit(member) ? (
-                        <button
-                          type="button"
-                          className="neu-btn px-3 py-1.5 text-xs"
-                          onClick={() => updateStaffStatus(member.id, member.status === "active" ? "paused" : "active")}
-                        >
-                          {member.status === "active" ? "Пауза" : "Активировать"}
-                        </button>
+                        <div className="flex flex-wrap gap-2">
+                          <button
+                            type="button"
+                            className="neu-btn px-3 py-1.5 text-xs"
+                            onClick={() => updateStaffStatus(member.id, member.status === "active" ? "paused" : "active")}
+                          >
+                            {member.status === "active" ? "Пауза" : "Активировать"}
+                          </button>
+                          {/* Забытый пароль иначе чинится только письмом, а письма
+                              до клиник не доходят. */}
+                          <button
+                            type="button"
+                            className="neu-btn px-3 py-1.5 text-xs"
+                            disabled={loading.staff}
+                            onClick={() => resetStaffPassword(member)}
+                          >
+                            Новый пароль
+                          </button>
+                        </div>
                       ) : (
                         <span className="text-xs text-[#94A3B8]">{member.id === actorStaffUserId ? "это вы" : "только владелец"}</span>
                       )}
@@ -1807,7 +1872,7 @@ export default function AdminCenter() {
 
           {createdStaff && (
             <div className="mt-4 rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-800">
-              <p className="font-bold">Сотрудник добавлен: {createdStaff.email}</p>
+              <p className="font-bold">{createdStaff.kind === "reset" ? "Новый пароль для" : "Сотрудник добавлен:"} {createdStaff.email}</p>
               <p className="mt-1">
                 Передайте эти данные лично. Пароль показывается один раз — потом его нельзя посмотреть, только задать
                 новый через «Забыли пароль?» на странице входа.

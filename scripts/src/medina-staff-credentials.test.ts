@@ -115,7 +115,14 @@ test("SC4 чужой аккаунт не захватывается, а член
   const tableCalls = (source.match(/\.from\("staff_(users|invitations)"\)/g) || []).length;
   const scopedByFilter = (source.match(/\.eq\("workspace_id", context\.workspaceId\)/g) || []).length;
   const scopedByColumn = (source.match(/workspace_id: context\.workspaceId,/g) || []).length;
-  assert.equal(scopedByFilter + scopedByColumn, tableCalls, "ни одного запроса мимо своей клиники");
+  // Ровно ОДИН запрос смотрит за пределы своей клиники, и это не дыра, а
+  // граница: смена пароля обязана узнать, не работает ли этот аккаунт где-то
+  // ещё (иначе пароль от чужой клиники уходит вместе с ним). Он читает только
+  // id членства — ни одной строки чужой клиники наружу не попадает.
+  const crossClinicProbes = source.match(/\.neq\("workspace_id", context\.workspaceId\)/g) || [];
+  assert.equal(crossClinicProbes.length, 1, "за пределы клиники смотрит ровно один запрос");
+  assert.ok(/\.select\("id"\)\s*\.eq\("auth_user_id", targetAuthUserId\)\s*\.neq\("workspace_id"/.test(source), "и берёт только id членства");
+  assert.equal(scopedByFilter + scopedByColumn + crossClinicProbes.length, tableCalls, "ни одного запроса мимо своей клиники");
   assert.ok(tableCalls >= 5, "путь ходит в обе таблицы");
   assert.ok(!/body\.workspaceId/.test(source), "клиника не берётся из запроса");
 
@@ -155,12 +162,32 @@ test("SC4c сотрудник без привязанного входа дос�
 test("SC4b единственное обращение к Auth — создание, и себе завести нельзя", async () => {
   const source = (await readFile(modulePath, "utf8")).replace(/(^|\s)\/\/[^\n]*/g, "$1");
 
-  // Пин на ОТСУТСТВИЕ: захват чужого входа требовал бы кода, умеющего писать
-  // пароль существующему пользователю. Наличие строки email_already_registered
-  // такой код рядом переживёт — а этот пин нет.
-  assert.equal((source.match(/\/auth\/v1\/admin\/users/g) || []).length, 1, "ровно одно обращение к Admin API");
-  assert.equal((source.match(/\/auth\/v1\/admin\/users\/\$\{/g) || []).length, 0, "и оно не адресует конкретного пользователя");
-  assert.ok(!/method: "(PUT|PATCH|DELETE)"/.test(source), "пароль существующему аккаунту не переписывается");
+  // Пин на ОТСУТСТВИЕ. Прежняя редакция запрещала ЛЮБУЮ адресацию
+  // пользователя и любой PUT: тогда законного случая писать пароль
+  // существующему аккаунту не было вовсе, и запрет ловил захват чужого входа
+  // одной строкой.
+  //
+  // Теперь такой случай появился — «задать новый пароль своему сотруднику»
+  // (забытый пароль иначе чинится только письмом, а письма не доходят), и
+  // запрет пришлось сузить, а не снять. Разница между законным и захватом —
+  // ОТКУДА берётся адрес: захват требует идентификатора аккаунта из запроса,
+  // законный путь читает его из строки staff_users своей клиники. Пины ниже
+  // держат именно это.
+  assert.equal((source.match(/\/auth\/v1\/admin\/users/g) || []).length, 2, "к Admin API ходят ровно дважды: создать и сменить пароль");
+  const addressed = source.match(/\/auth\/v1\/admin\/users\/\$\{[^}]+\}/g) || [];
+  assert.equal(addressed.length, 1, "конкретный пользователь адресуется ровно в одном месте");
+  assert.equal(addressed[0], "/auth/v1/admin/users/${encodeURIComponent(targetAuthUserId)}", "и только идентификатором из строки сотрудника");
+  // targetAuthUserId читается ИЗ БАЗЫ по своей клинике, а не из тела.
+  assert.ok(
+    /const targetAuthUserId = readString\(target\.auth_user_id\);/.test(source),
+    "идентификатор аккаунта приходит из строки сотрудника",
+  );
+  assert.ok(
+    /\.eq\("id", staffUserId\)\s*\.eq\("workspace_id", context\.workspaceId\)/.test(source),
+    "строка сотрудника отбирается по своей клинике",
+  );
+  assert.ok(!/body\.authUserId|body\.auth_user_id/.test(source), "идентификатор аккаунта не принимается из запроса");
+  assert.ok(!/method: "DELETE"/.test(source), "аккаунты отсюда не удаляются");
   assert.ok(!/generate_link|\/auth\/v1\/recover/.test(source), "и ссылки за человека не выписываются");
 
   // «Себе нельзя» — словами, а не косвенно через дедуп.
@@ -197,11 +224,79 @@ test("SC4d занятая почта отдаёт готовую ссылку-п
   assert.ok(/setStaffMode\("invite"\)/.test(admin), "и показывает её в режиме приглашения");
 });
 
-test("SC5 маршрут закрыт правом manage_staff и только POST", async () => {
-  const registry = await readFile(path.join(repoRoot, "lib", "crm", "authorization.ts"), "utf8");
+test("SC7 смена пароля: только своему сотруднику, ниже своей роли, и никогда себе", async () => {
+  const source = (await readFile(modulePath, "utf8")).replace(/(^|\s)\/\/[^\n]*/g, "$1").replace(/\/\*[\s\S]*?\*\//g, " ");
+  const reset = source.slice(source.indexOf("export async function handleStaffPasswordReset"), source.indexOf("export async function handleStaffCredentials"));
+  assert.ok(reset.length > 0, "обработчик смены пароля существует");
+
+  // Себе — отказ: свой пароль обязан знать только его владелец, и путь для
+  // этого один — «Забыли пароль?».
+  assert.ok(/staffUserId === context\.staffUserId/.test(reset), "своя строка отбивается явной проверкой");
+  assert.ok(/Забыли пароль/.test(reset), "и отказ называет работающий путь");
+
+  // Роль цели строго ниже своей; владелец недоступен никому — его пароль
+  // последний ключ от клиники.
+  assert.ok(/canAssignRole\(context\.role, targetRole\)/.test(reset), "роль цели сравнивается с ролью актора");
+
+  // Цель — член ЭТОЙ клиники: чужая строка не найдётся фильтром, и ответ на
+  // чужой идентификатор неотличим от ответа на несуществующий.
+  assert.ok(/\.eq\("workspace_id", context\.workspaceId\)/.test(reset), "строка отбирается по своей клинике");
+  assert.ok(/code: "staff_not_found"/.test(reset), "чужой и несуществующий сотрудник отвечают одинаково");
+
+  // Непривязанному входу менять нечего — это отдельный внятный отказ, а не 502.
+  assert.ok(/code: "staff_not_linked"/.test(reset), "сотрудник без входа получает свой отказ");
+
+  // ГЛАВНАЯ ГРАНИЦА: проверки выше закрывают СТРОКУ, а пароль пишется в
+  // АККАУНТ, общий на всю платформу. Клиника B, законно зачислившая владельца
+  // клиники A рядовым мастером, иначе получала бы вход в клинику A целиком.
+  assert.ok(/code: "account_shared_with_other_clinic"/.test(reset), "аккаунт, работающий в другой клинике, не трогается");
   assert.ok(
-    /"staff-credentials": \{\s*kind: "browser",\s*methods: \["POST"\],\s*permissions: \{ POST: "manage_staff" \},/.test(registry),
-    "browser-маршрут, один метод, право управления сотрудниками",
+    /\.eq\("auth_user_id", targetAuthUserId\)\s*\.neq\("workspace_id", context\.workspaceId\)/.test(reset),
+    "чужие членства этого аккаунта ищутся явным запросом",
+  );
+  assert.ok(
+    reset.indexOf('.neq("workspace_id", context.workspaceId)') < reset.indexOf("/auth/v1/admin/users/"),
+    "и проверка стоит ДО записи пароля",
+  );
+  assert.ok(/platformOwnerIds\(\)\.includes\(targetAuthUserId\)/.test(reset), "владельцу платформы пароль отсюда не меняется");
+
+  // Пауза: членства отбираются по status active, поэтому «пароль задан» без
+  // активации обещал бы вход, которого не будет, и убивал бы прежний пароль.
+  assert.ok(/code: "staff_paused"/.test(reset), "сотруднику на паузе пароль не меняется молча");
+  assert.ok(/select\("id, role, status, auth_user_id, full_name"\)/.test(reset), "статус читается вместе со строкой");
+
+  // Пароль не оседает нигде: в ответе его нет, в журнале его нет, в таблицу
+  // пишется только честный флаг «пароль задал не сотрудник».
+  const responses = reset.match(/sendJson\(res,[\s\S]*?\}\);/g) || [];
+  for (const literal of responses) {
+    assert.ok(!/password/i.test(literal.replace(/password_rejected|invalid_staff_credentials/g, "")), "ответ без пароля");
+  }
+  assert.ok(/password_reset_required: true/.test(reset), "флаг «пароль задал не сотрудник» ставится");
+  assert.ok(/\[staff-credentials\] reset workspace=/.test(reset), "смена оставляет след с актором и сотрудником");
+
+  const admin = await readFile(path.join(repoRoot, "artifacts", "negis", "src", "pages", "AdminCenter.tsx"), "utf8");
+  assert.ok(/method: "PATCH"/.test(admin) && /staffUserId: member\.id/.test(admin), "экран называет строку сотрудника, а не аккаунт");
+  assert.ok(/kind: "reset"/.test(admin), "результат отличает смену пароля от заведения");
+  // Смена ломает работающий пароль мгновенно: случайный клик по соседней
+  // кнопке выкинул бы человека из системы посреди смены.
+  const resetHandler = admin.slice(admin.indexOf("async function resetStaffPassword"), admin.indexOf("async function copyStaffCredentials"));
+  assert.ok(/window\.confirm\(/.test(resetHandler), "смена пароля требует подтверждения");
+  assert.ok(
+    resetHandler.indexOf("window.confirm(") < resetHandler.indexOf("generateStaffPassword()"),
+    "и подтверждение спрашивается до запроса, а не после",
+  );
+  assert.ok(/staff_not_linked/.test(admin) && /auth_account_missing/.test(admin), "новые отказы переведены на русский");
+});
+
+test("SC5 маршрут закрыт правом manage_staff: POST заводит, PATCH меняет пароль", async () => {
+  const registry = await readFile(path.join(repoRoot, "lib", "crm", "authorization.ts"), "utf8");
+  // PATCH добавлен осознанно: смена пароля — та же ответственность (кто
+  // получает доступ к клинике), поэтому то же право, тот же ресурс, тот же
+  // модуль. Разводить это по двум маршрутам значило бы дать двум близнецам
+  // разные замки.
+  assert.ok(
+    /"staff-credentials": \{\s*kind: "browser",\s*methods: \["POST", "PATCH"\],\s*permissions: \{ POST: "manage_staff", PATCH: "manage_staff" \},/.test(registry),
+    "browser-маршрут, оба глагола за manage_staff",
   );
   // Отключение staff POST остаётся в силе: новый путь не воскрешает его.
   assert.ok(/disabledMethods: \["POST"\]/.test(registry), "POST /api/crm/staff по-прежнему отключён");
@@ -214,7 +309,7 @@ test("SC6 экран предлагает пароль первым и пока�
   const admin = await readFile(path.join(repoRoot, "artifacts", "negis", "src", "pages", "AdminCenter.tsx"), "utf8");
   assert.ok(/useState<"password" \| "invite">\("password"\)/.test(admin), "умолчание — пароль: письма не доходят");
   assert.ok(/staff-credentials/.test(admin), "экран зовёт новый маршрут");
-  assert.ok(/setCreatedStaff\(\{ email, password: staffPassword \}\)/.test(admin), "пароль показывается из состояния экрана");
+  assert.ok(/setCreatedStaff\(\{ email, password: staffPassword, kind: "created" \}\)/.test(admin), "пароль показывается из состояния экрана");
   assert.ok(/setStaffPassword\(""\)/.test(admin), "и стирается из формы сразу после отправки");
   assert.ok(/generateStaffPassword/.test(admin), "пароль можно сгенерировать, а не выдумывать");
   assert.ok(/показывается один раз/.test(admin), "экран честно говорит, что второй раз пароль не покажут");

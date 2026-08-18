@@ -221,10 +221,13 @@ export const CRM_ROUTE_AUTHORIZATION: Readonly<Record<string, RouteAuthorization
   // письмо-приглашение не доходит. Отличие от отключённого staff POST —
   // auth_user_id приходит от Admin API, а не из тела запроса; роль по-прежнему
   // строго ниже своей, а занятая почта отказывает вместо захвата аккаунта.
+  // POST — завести сотрудника с паролем; PATCH — задать новый пароль тому, кто
+  // уже в команде (забытый пароль иначе чинится только письмом, а письма до
+  // клиник не доходят). Оба глагола за одним правом: это одна ответственность.
   "staff-credentials": {
     kind: "browser",
-    methods: ["POST"],
-    permissions: { POST: "manage_staff" },
+    methods: ["POST", "PATCH"],
+    permissions: { POST: "manage_staff", PATCH: "manage_staff" },
   },
 
   // Advertising actions touch the live Meta account.
