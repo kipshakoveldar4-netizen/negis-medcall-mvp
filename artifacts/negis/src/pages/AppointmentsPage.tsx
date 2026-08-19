@@ -1687,10 +1687,15 @@ export function AppointmentsPage() {
 
         <section className="neu-card">
           <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-[1fr_1fr_1fr_1.5fr]">
-            <SelectField label={`Все ${terms.specialistPlural}`} value={doctorFilter} onChange={setDoctorFilter}>
-              <option value="all">Все {terms.specialistPlural}</option>
-              {doctors.map((doctor) => <option key={doctor} value={doctor}>{doctor}</option>)}
-            </SelectField>
+            {/* Мастеру фильтр по специалисту не показывается: сервер отдаёт
+                ему только его собственные записи, и список из одного имени
+                выглядел бы поломкой, а не фильтром. */}
+            {userRole !== "doctor" ? (
+              <SelectField label={`Все ${terms.specialistPlural}`} value={doctorFilter} onChange={setDoctorFilter}>
+                <option value="all">Все {terms.specialistPlural}</option>
+                {doctors.map((doctor) => <option key={doctor} value={doctor}>{doctor}</option>)}
+              </SelectField>
+            ) : null}
             <SelectField label="Статус" value={statusFilter} onChange={setStatusFilter}>
               <option value="all">Все статусы</option>
               {statusOptions.map((status) => <option key={status} value={status}>{getAppointmentStatusLabel(status)}</option>)}
@@ -1817,7 +1822,11 @@ export function AppointmentsPage() {
                 у услуги. Пока справочник пуст или не включён, поле выглядит и
                 работает как обычный текстовый ввод.
               */}
-              {activeDoctors.length > 0 ? (
+              {/* Мастер записывает только к себе, и решает это сервер: он
+                  подставляет запись на того, кто её создаёт, а просьбу
+                  записать к коллеге отклоняет вслух. Показывать здесь выбор
+                  значило бы предлагать действие, которое кончится отказом. */}
+              {userRole === "doctor" ? null : activeDoctors.length > 0 ? (
                 <div>
                   <SelectField
                     label={capitalize(terms.specialist)}

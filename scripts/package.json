@@ -57,6 +57,7 @@
     "test:staff-credentials": "tsx --test ./src/medina-staff-credentials.test.ts",
     "test:staff-logins": "tsx --test ./src/medina-staff-logins.test.ts",
     "test:contact-privacy": "tsx --test ./src/medina-contact-privacy.test.ts",
+    "test:own-work": "tsx --test ./src/medina-own-work.test.ts",
     "test:join-requests": "tsx --test ./src/medina-staff-join-requests.test.ts",
     "test:frontdesk": "tsx --test ./src/medina-frontdesk.test.ts",
     "test:recommendations": "tsx --test ./src/medina-recommendations.test.ts",

@@ -1,6 +1,7 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { getSupabaseServerClient } from "../supabase/server";
-import { readWorkspaceContext } from "./server";
+import { readOwnWorkIdentity, readWorkspaceContext } from "./server";
+import { isEmptyIdentity, rowBelongsTo, seesOnlyOwnWork } from "./own-work";
 import { CHANGE_JOURNAL_INTERNALS, type ChangeEntry, type ChangeEntityType } from "./change-journal";
 import { hidesClientContacts } from "./contact-privacy";
 
@@ -59,6 +60,37 @@ const HISTORY_LIMIT = 100;
 /** Поля журнала, которые являются контактом клиента. */
 const CONTACT_FIELD_NAMES = new Set(["client_phone", "phone", "whatsapp", "email", "client_whatsapp"]);
 
+/**
+ * Своя ли это запись. Отдельным чтением, потому что журнал живёт в своей
+ * таблице и о самой записи не знает ничего.
+ *
+ * Отказ чтения означает «не подтверждено», а не «разрешено»: расширять доступ
+ * из-за сбоя базы — ровно тот способ, которым тихо открываются двери.
+ */
+async function appointmentBelongsToActor(
+  supabase: NonNullable<ReturnType<typeof getSupabaseServerClient>>,
+  workspaceId: string,
+  staffUserId: string,
+  appointmentId: string,
+): Promise<boolean> {
+  try {
+    const identity = await readOwnWorkIdentity(supabase, workspaceId, staffUserId);
+    if (isEmptyIdentity(identity)) return false;
+    const { data, error } = await supabase
+      .from("appointments")
+      .select("doctor_id, doctor_name")
+      .eq("workspace_id", workspaceId)
+      .eq("id", appointmentId)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) return false;
+    return rowBelongsTo(data as Record<string, unknown>, identity);
+  } catch (error) {
+    console.warn("change-log: ownership check failed", error instanceof Error ? error.message : error);
+    return false;
+  }
+}
+
 export async function handleCrmChangeLog(req: VercelRequest, res: VercelResponse) {
   if (req.method !== "GET") {
     return sendJson(res, 405, { success: false, error: "Method not allowed" });
@@ -89,6 +121,24 @@ export async function handleCrmChangeLog(req: VercelRequest, res: VercelResponse
   const supabase = getSupabaseServerClient();
   if (!supabase || !isUuid(workspaceId)) {
     return sendJson(res, 200, { success: true, mode: "demo", events: [] });
+  }
+
+  // Журнал не шире самой записи.
+  //
+  // Список записей мастеру сужен, но история открывается ПО ИДЕНТИФИКАТОРУ, а
+  // идентификатор чужой записи достать нетрудно — из задачи со связью, из
+  // старой вкладки, из прежнего экспорта. Без этой проверки журнал остаётся
+  // полноценным чтением чужой работы: услуга, время, статус и мастер лежат в
+  // нём значениями, как есть.
+  //
+  // Ответ — пустая история, а не отказ: отказ подтвердил бы, что запись
+  // существует, и это уже сведение о чужом клиенте.
+  if (entityType === "appointment" && seesOnlyOwnWork(context.role)) {
+    const mine = await appointmentBelongsToActor(supabase, workspaceId, readString(context.staffUserId), entityId);
+    if (!mine) {
+      console.warn("change-log: appointment history outside the acting specialist's own work; answering empty");
+      return sendJson(res, 200, { success: true, mode: "supabase", events: [] });
+    }
   }
 
   try {

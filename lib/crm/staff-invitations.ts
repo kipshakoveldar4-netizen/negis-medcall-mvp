@@ -70,12 +70,18 @@ export function normalizeEmail(value: unknown): string {
 }
 
 /**
- * Почта в ilike — значение, а не шаблон. Неэкранированный «_» в адресе значит
- * «любой один символ»: ivan_petrov@ матчил бы ivan.petrov@ другой клиники, и
- * 409 приносил бы чужой existingWorkspaceId прямо под кнопку перевыпуска.
+ * Значение в ilike — значение, а не шаблон. Неэкранированный «_» в адресе
+ * значит «любой один символ»: ivan_petrov@ матчил бы ivan.petrov@ другой
+ * клиники, и 409 приносил бы чужой existingWorkspaceId прямо под кнопку
+ * перевыпуска.
+ *
+ * Звёздочка здесь по той же причине, и она опаснее: PostgREST принимает «*»
+ * как синоним «%» в СВОЁМ синтаксисе, ещё до Postgres. Имя специалиста «А*»
+ * (а в салонах в ФИО попадают и звёздочки, и разряды) превратило бы фильтр
+ * «покажи мои записи» в «покажи все записи мастеров на А».
  */
 export function escapeLikePattern(value: string): string {
-  return value.replace(/[\\%_]/g, (ch) => `\\${ch}`);
+  return value.replace(/[\\%_*]/g, (ch) => `\\${ch}`);
 }
 
 function isEmail(value: string): boolean {

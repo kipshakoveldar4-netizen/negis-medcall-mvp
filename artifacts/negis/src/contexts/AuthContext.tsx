@@ -126,7 +126,12 @@ const SYSTEM_ROLE_PERMISSIONS: Partial<Record<UserRole, RolePermissions>> = {
   manager: ALL_PERMISSIONS,
   admin: ALL_PERMISSIONS,
   marketer: { dashboard: true, marketplace: true, ads: true, reports: true, tasks: true, chat: true },
-  doctor: { dashboard: true, booking: true, crm: true, chat: true, tasks: true },
+  // crm СНЯТО. Право открывало /clients, /leads и /sales — три экрана со
+  // списками клиентов клиники целиком, при том что серверные маршруты роли
+  // отвечают 403, а правило «мастер видит только свою работу» им противоречит.
+  // Таблица сейчас не используется — и именно поэтому строку легко было бы
+  // однажды подключить, не заметив, что она открывает.
+  doctor: { dashboard: true, booking: true, crm: false, chat: true, tasks: true },
   agent: { dashboard: true, booking: true, crm: true, tasks: true, chat: true },
   booking_agent: { dashboard: true, booking: true, chat: true },
   receptionist: { dashboard: true, booking: true, reception: true, crm: true, chat: true },

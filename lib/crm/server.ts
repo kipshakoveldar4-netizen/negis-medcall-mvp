@@ -3,6 +3,8 @@ import { canAssignRole, isStaffRole, isWorkspaceAdminRole } from "../auth/permis
 import { extractJsonObject, generateText, resolveTextProvider } from "../ai/text-provider";
 import { normalizePhone } from "./phone";
 import { hidesClientContacts, redactContacts, redactContactsList, stripContactWrites } from "./contact-privacy";
+import { isEmptyIdentity, rowBelongsTo, rowTargetsOnlySelf, seesOnlyOwnWork, type OwnWorkIdentity } from "./own-work";
+import { escapeLikePattern } from "./staff-invitations";
 import {
   listAuthContextMemberships,
   requireWorkspaceAdmin,
@@ -2511,9 +2513,9 @@ async function buildLeadReferenceRow(
  * a gap nobody saw.
  */
 export class AppointmentConflictError extends Error {
-  readonly conflict: { id: string; startsAt: string; clientName: string; doctorName: string };
+  readonly conflict: { id: string; startsAt: string; clientName: string; doctorName: string; doctorId?: string };
 
-  constructor(conflict: { id: string; startsAt: string; clientName: string; doctorName: string }) {
+  constructor(conflict: { id: string; startsAt: string; clientName: string; doctorName: string; doctorId?: string }) {
     super("Appointment conflict");
     this.name = "AppointmentConflictError";
     this.conflict = conflict;
@@ -2611,6 +2613,8 @@ async function assertNoAppointmentConflict(
     startsAt: string;
     durationMinutes: number;
     status: string;
+    /** Кто спрашивает, если это роль «только своя работа». */
+    ownWork?: OwnWorkIdentity | null;
   },
 ): Promise<void> {
   if (!candidate.doctorName || !candidate.startsAt) return;
@@ -2629,7 +2633,7 @@ async function assertNoAppointmentConflict(
     .gte("starts_at", new Date(start - CONFLICT_LOOKBACK_MS).toISOString())
     .lt("starts_at", new Date(end).toISOString());
 
-  let { data, error } = await readSlot("id, client_name, doctor_name, starts_at, duration_minutes, status");
+  let { data, error } = await readSlot("id, client_name, doctor_id, doctor_name, starts_at, duration_minutes, status");
 
   // Защита от двойной записи не имеет права выключаться из-за длительности.
   //
@@ -2640,7 +2644,7 @@ async function assertNoAppointmentConflict(
   // арифметика в отсутствие колонки — шестьдесят минут.
   if (error && isMissingAnyColumn(error)) {
     console.warn("appointments: conflict check runs without duration_minutes; assuming", DEFAULT_APPOINTMENT_MINUTES, "minutes");
-    ({ data, error } = await readSlot("id, client_name, doctor_name, starts_at, status"));
+    ({ data, error } = await readSlot("id, client_name, doctor_id, doctor_name, starts_at, status"));
   }
 
   // A check that cannot run must not become a check that passed. But it must
@@ -2658,7 +2662,7 @@ async function assertNoAppointmentConflict(
   // для мастера — нет: он ведёт двух клиентов параллельно постоянно, и обойти
   // отказ можно было только кнопкой, снимающей проверку целиком. Салон,
   // привыкший её жать, терял защиту и от настоящей двойной записи.
-  const overlapping: Array<{ id: string; startsAt: string; clientName: string; doctorName: string }> = [];
+  const overlapping: Array<{ id: string; startsAt: string; clientName: string; doctorName: string; doctorId: string }> = [];
 
   for (const raw of Array.isArray(data) ? data : []) {
     const row = asRecord(raw);
@@ -2679,6 +2683,7 @@ async function assertNoAppointmentConflict(
         startsAt: readString(row.starts_at),
         clientName: readString(row.client_name),
         doctorName: readString(row.doctor_name),
+        doctorId: readString(row.doctor_id),
       });
     }
   }
@@ -2692,7 +2697,17 @@ async function assertNoAppointmentConflict(
   // Кандидат занимает одно место, поэтому сравнение с «ёмкость минус один».
   if (overlapping.length < capacity) return;
 
-  throw new AppointmentConflictError(overlapping[0]);
+  // Пояс поверх подтяжек. Мастер записывает только к себе — гейты на создании
+  // и правке это обеспечивают, — поэтому пересечение у него всегда со своей же
+  // записью. Но отказ, называющий пациента, обязан оставаться безопасным и
+  // тогда, когда какой-то путь эти гейты обойдёт: сравнение идёт по имени, а
+  // у двух однофамильцев записи попадают в проверку друг друга.
+  const conflict = overlapping[0];
+  if (candidate.ownWork && !rowTargetsOnlySelf({ doctor_id: conflict.doctorId, doctor_name: conflict.doctorName }, candidate.ownWork)) {
+    throw new AppointmentConflictError({ ...conflict, clientName: "" });
+  }
+
+  throw new AppointmentConflictError(conflict);
 }
 
 /** The caller states plainly that it means to overbook. Absence is not consent. */
@@ -2765,6 +2780,180 @@ const WEEKDAY_LABELS = ["", "понедельник", "вторник", "сре�
  * возвращает null, а не пятьсот вторую: Intl бросает RangeError, и уронить на
  * этом создание записи было бы худшим из возможных ответов.
  */
+/**
+ * Кто такой этот сотрудник с точки зрения записи.
+ *
+ * Два источника, и оба нужны. Карточка справочника даёт ССЫЛКУ — по ней
+ * находятся записи, созданные после 033 с выбором врача из списка. Учётная
+ * запись даёт ИМЯ — по нему находится всё, что было записано свободным
+ * текстом, то есть вся накопленная история: 033 намеренно не заполняла
+ * doctor_id задним числом.
+ *
+ * Отказ любого из двух чтений не отменяет второе: справочника может не быть
+ * вовсе (033 не применена), и тогда мастер обязан видеть свою работу по имени,
+ * а не пустой календарь.
+ */
+export async function readOwnWorkIdentity(
+  supabase: CrmSupabaseClient,
+  workspaceId: string,
+  staffUserId: string,
+): Promise<OwnWorkIdentity> {
+  const identity: OwnWorkIdentity = { doctorId: "", names: [] };
+  if (!isUuid(staffUserId)) return identity;
+
+  const addName = (value: unknown) => {
+    const name = readString(value).trim();
+    if (name && !identity.names.some((known) => known.toLowerCase() === name.toLowerCase())) identity.names.push(name);
+  };
+
+  try {
+    const { data, error } = await supabase
+      .from("clinic_doctors")
+      .select("id, full_name")
+      .eq("workspace_id", workspaceId)
+      .eq("staff_user_id", staffUserId)
+      .maybeSingle();
+    if (error) {
+      // Справочника может не быть (033), и это не повод отнимать у мастера
+      // его собственные записи: имя из учётной записи ниже их найдёт.
+      if (!isMissingDirectoryTable(error)) throw new Error(error.message);
+      console.warn("appointments: doctor directory is unavailable; own-work filter falls back to the name");
+    } else if (data) {
+      const row = asRecord(data);
+      identity.doctorId = readString(row.id);
+      addName(row.full_name);
+    }
+  } catch (error) {
+    // Отказ чтения не имеет права РАСШИРИТЬ выдачу: личность остаётся такой,
+    // какой её удалось собрать, и сужение продолжает действовать. Но и молчать
+    // о нём нельзя — см. readFailed.
+    identity.readFailed = true;
+    console.warn("appointments: own-work identity read failed", error instanceof Error ? error.message : error);
+  }
+
+  try {
+    const { data, error } = await supabase
+      .from("staff_users")
+      .select("full_name")
+      .eq("workspace_id", workspaceId)
+      .eq("id", staffUserId)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (data) addName(asRecord(data).full_name);
+  } catch (error) {
+    identity.readFailed = true;
+    console.warn("appointments: own-work staff name read failed", error instanceof Error ? error.message : error);
+  }
+
+  // Третий источник — имена, под которыми записи УЖЕ связаны с этой карточкой.
+  //
+  // Карточку справочника переименовывают: вышла замуж, поправили опечатку,
+  // добавили отчество. В записи лежит СНИМОК имени на момент визита, и без
+  // этого чтения переименование молча отнимало бы у мастера всю прошлую
+  // работу: в списке её нет, на правку — «Запись не найдена».
+  if (identity.doctorId) {
+    try {
+      const { data, error } = await supabase
+        .from("appointments")
+        .select("doctor_name")
+        .eq("workspace_id", workspaceId)
+        .eq("doctor_id", identity.doctorId)
+        .limit(OWN_WORK_NAME_SCAN_LIMIT);
+      if (error) {
+        // Колонки связи может не быть (033) — тогда прежних имён неоткуда
+        // взять, и это не сбой, а известное состояние.
+        if (!isMissingAnyColumn(error) && !isMissingDirectoryTable(error)) throw new Error(error.message);
+      } else {
+        for (const raw of Array.isArray(data) ? data : []) addName(asRecord(raw).doctor_name);
+      }
+    } catch (error) {
+      identity.readFailed = true;
+      console.warn("appointments: own-work historical names read failed", error instanceof Error ? error.message : error);
+    }
+  }
+
+  return identity;
+}
+
+/**
+ * Сколько связанных записей просматривать ради прежних имён карточки. Имён у
+ * человека единицы, а строк могут быть тысячи: читается ровно столько, чтобы
+ * переименование не потеряло историю, и не столько, чтобы это стоило заметно.
+ */
+const OWN_WORK_NAME_SCAN_LIMIT = 200;
+
+/**
+ * Записи одного мастера — двумя запросами, а не одним «или».
+ *
+ * PostgREST умеет `or=(doctor_id.eq.X,doctor_name.eq.Y)`, но значение там
+ * склеивается в строку фильтра, и имя с запятой или скобкой — «Иванова, А.» —
+ * эту строку ПЕРЕПИШЕТ. Фильтр видимости, который можно сломать данными,
+ * фильтром видимости не является, поэтому здесь два отдельных чтения и
+ * склейка в коде: сломать нечего.
+ *
+ * Строки объединяются по id и сортируются тем же порядком, что и обычный
+ * список, — иначе мастер получил бы свой календарь в другом порядке, чем все
+ * остальные, и решил бы, что это разные экраны.
+ */
+async function readOwnAppointments(
+  supabase: CrmSupabaseClient,
+  workspaceId: string,
+  staffUserId: string,
+  buildQuery: () => PromiseLike<{ data: unknown; error: unknown }> & {
+    eq: (column: string, value: unknown) => PromiseLike<{ data: unknown; error: unknown }>;
+    ilike: (column: string, value: string) => PromiseLike<{ data: unknown; error: unknown }>;
+  },
+): Promise<{ data: unknown; error: unknown }> {
+  const identity = await readOwnWorkIdentity(supabase, workspaceId, staffUserId);
+
+  // Ни ссылки, ни имени — показывать нечего. Пустой список безопаснее любого
+  // «на всякий случай покажем всё»: последнее и есть та самая утечка.
+  if (isEmptyIdentity(identity)) {
+    // «Не с кем связать» и «не смогли выяснить» — разные ответы. Первый честно
+    // пуст. Второй обязан быть отказом: пустой календарь после сбоя чтения
+    // выглядит как свободный день, и мастер уходит домой.
+    if (identity.readFailed) {
+      console.warn("appointments: own-work identity is unknown after a failed read; refusing instead of answering empty");
+      return { data: null, error: { message: "own-work identity is unavailable" } };
+    }
+    console.warn("appointments: staff member is not linked to any specialist card; answering with no appointments");
+    return { data: [], error: null };
+  }
+
+  const reads: Array<PromiseLike<{ data: unknown; error: unknown }>> = [];
+  if (identity.doctorId) reads.push(buildQuery().eq("doctor_id", identity.doctorId));
+  for (const name of identity.names) reads.push(buildQuery().ilike("doctor_name", escapeLikePattern(name)));
+
+  const results = await Promise.all(reads);
+  const merged = new Map<string, Record<string, unknown>>();
+  for (const result of results) {
+    if (result.error) {
+      // Отсутствующая колонка связи (033 не применена) — не отказ экрана:
+      // остаётся чтение по имени, которое и находит всю историю.
+      if (isMissingAnyColumn(result.error as { code?: unknown; message?: unknown })) {
+        console.warn("appointments: own-work filter runs without doctor_id; the name is the only key");
+        continue;
+      }
+      return { data: null, error: result.error };
+    }
+    for (const raw of Array.isArray(result.data) ? result.data : []) {
+      const row = asRecord(raw);
+      const id = readString(row.id);
+      if (id) merged.set(id, row);
+    }
+  }
+
+  const rows = [...merged.values()];
+  const column = configs.appointments.sortableColumn;
+  const ascending = configs.appointments.sortableAscending ?? false;
+  rows.sort((left, right) => {
+    const a = readString(left[column]);
+    const b = readString(right[column]);
+    return ascending ? a.localeCompare(b) : b.localeCompare(a);
+  });
+  return { data: rows, error: null };
+}
+
 async function readClinicScheduleTimeZone(
   supabase: CrmSupabaseClient,
   workspaceId: string,
@@ -3808,12 +3997,13 @@ async function listItems(resource: CrmResource, req: VercelRequest, res: VercelR
       }
     }
 
-    let query = supabase
+    const buildQuery = () => supabase
       .from(config.table)
       .select(config.selectColumns ?? "*")
-      .order(config.sortableColumn, { ascending: config.sortableAscending ?? false });
+      .order(config.sortableColumn, { ascending: config.sortableAscending ?? false })
+      .eq("workspace_id", workspaceId);
 
-    query = query.eq("workspace_id", workspaceId);
+    let query = buildQuery();
 
     // Задачи спрашивают узко: что открыто у меня, что просрочено, что висит на
     // этой заявке. Отдать весь workspace и отфильтровать в браузере — это тот
@@ -3823,7 +4013,17 @@ async function listItems(resource: CrmResource, req: VercelRequest, res: VercelR
     for (const [column, value] of equalities) query = query.eq(column, value);
     if (dueBefore) query = query.lt("due_at", dueBefore);
 
-    let { data, error } = await query;
+    // Мастеру — его записи, и решает это сервер.
+    //
+    // Экранный фильтр здесь не годится в принципе: строки всё равно уехали бы
+    // в браузер, и любой, кто откроет консоль, прочитал бы расписание всей
+    // клиники. Сужение стоит ДО чтения и опирается только на проверенный
+    // контекст — ни одно поле запроса на него не влияет.
+    const context = readWorkspaceContext(req);
+    const ownWorkOnly = resource === "appointments" && seesOnlyOwnWork(context?.role);
+    let { data, error } = ownWorkOnly
+      ? await readOwnAppointments(supabase, workspaceId, readString(context?.staffUserId), buildQuery)
+      : await query;
 
     // Пока 031 не применена, колонок связи в таблице нет, и фильтр по ним
     // PostgREST отвергает. Ответить отказом значило бы показать «не удалось
@@ -3862,7 +4062,7 @@ async function listItems(resource: CrmResource, req: VercelRequest, res: VercelR
     }
 
     if (error) {
-      throw new Error(error.message);
+      throw new Error(readString((error as { message?: unknown }).message) || "list query failed");
     }
 
     // Контакты срезаются НА ВЫХОДЕ и по роли из проверенного контекста.
@@ -4071,6 +4271,39 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
   }
 
   try {
+    // Мастер записывает клиента к СЕБЕ.
+    //
+    // Пустое поле заполняется его именем — это удобство, а не подмена: он и
+    // так не выбирает исполнителя. А вот названный коллега — отказ, и вслух:
+    // молча переписать чужую запись на себя значило бы соврать о том, что
+    // сохранено, ровно так же, как это делала правка без ответа о потере.
+    let actorOwnWork: OwnWorkIdentity | null = null;
+    if (resource === "appointments" && seesOnlyOwnWork(readWorkspaceContext(req)?.role)) {
+      const identity = await readOwnWorkIdentity(supabase, workspaceId, readString(readWorkspaceContext(req)?.staffUserId));
+      actorOwnWork = identity;
+      if (isEmptyIdentity(identity)) {
+        console.warn("appointments: staff member is not linked to any specialist card; creation refused");
+        return sendJson(res, 403, errorBody("Ваша учётная запись не связана с карточкой специалиста", [
+          "the acting staff member has no specialist card and no name to book under",
+        ]));
+      }
+      const named = firstString(body.doctor, body.doctorName, body.doctor_name);
+      const namedId = firstString(body.doctorId, body.doctor_id);
+      // Строгая цель: названы обе половины — обе обязаны быть моими. Слабая
+      // проверка пропускала «моё имя + карточка коллеги»: запись уезжала в
+      // чужой календарь по ссылке, оставаясь моей на вид.
+      const asksForSomeoneElse = (named || namedId)
+        && !rowTargetsOnlySelf({ doctor_id: namedId, doctor_name: named }, identity);
+      if (asksForSomeoneElse) {
+        return sendJson(res, 403, errorBody("Записывать можно только к себе", [
+          "an own-work role can only book its own appointments",
+        ]));
+      }
+      body.doctor = identity.names[0] ?? named;
+      body.doctorName = body.doctor;
+      if (identity.doctorId) body.doctorId = identity.doctorId;
+    }
+
     const row = stripContactWrites(config.toRow(body, workspaceId), readWorkspaceContext(req)?.role);
     if (resource === "leads") {
       Object.assign(row, await buildLeadReferenceRow(supabase, workspaceId, body));
@@ -4113,6 +4346,7 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
           startsAt: readString(row.starts_at),
           durationMinutes: appointmentMinutes(row.duration_minutes),
           status: readString(row.status),
+          ownWork: actorOwnWork,
         });
       }
       // После проверки пересечений: если время занято И вне графика, оператор
@@ -4484,6 +4718,41 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
     // оказалось бы изменившимся, и оба гейта сработали бы на ровном месте.
     const beforeIsReadable = Object.keys(before).length > 0;
 
+    // Чужую запись мастер не правит — и не читает.
+    //
+    // Без этого гейта сужение списка не стоило бы ничего: PATCH по угаданному
+    // или подсмотренному идентификатору возвращает ВСЮ строку в эхе ответа,
+    // то есть остаётся полноценным чтением. Ответ — «не найдена», а не «нет
+    // прав»: отказ по правам подтвердил бы, что запись существует, и это уже
+    // сведение о чужом клиенте.
+    let actorOwnWork: OwnWorkIdentity | null = null;
+    if (resource === "appointments" && seesOnlyOwnWork(readWorkspaceContext(req)?.role)) {
+      const identity = await readOwnWorkIdentity(supabase, workspaceId, readString(readWorkspaceContext(req)?.staffUserId));
+      actorOwnWork = identity;
+      // Нечитаемое «было» тоже отказ: разрешить правку строки, которую не
+      // удалось проверить, значит оставить дыру ровно на случай сбоя чтения.
+      if (!beforeIsReadable || !rowBelongsTo(before, identity)) {
+        console.warn("appointments: patch of another specialist's appointment refused");
+        return sendJson(res, 404, errorBody("Запись не найдена", ["appointment is outside the acting specialist's own work"]));
+      }
+      // Переписать запись на коллегу — тот же выход за свои: строка ушла бы из
+      // видимости мастера в чужую, и отменить это он бы уже не смог.
+      // Строгая проверка цели, а не «принадлежит». Слияние с «было» здесь
+      // обязательно: правка шлёт одно поле, а решает ПАРА. И проверка обязана
+      // требовать обе половины сразу — иначе смена только имени проходит на
+      // совпадении оставшейся ссылки, и наоборот.
+      const targetsSomeoneElse = ("doctor_id" in row || "doctor_name" in row)
+        && !rowTargetsOnlySelf(
+          { doctor_id: row.doctor_id ?? before.doctor_id, doctor_name: row.doctor_name ?? before.doctor_name },
+          identity,
+        );
+      if (targetsSomeoneElse) {
+        return sendJson(res, 403, errorBody("Запись можно оставить только на себя", [
+          "an own-work role cannot reassign an appointment",
+        ]));
+      }
+    }
+
     if (patchedEntity === "task" && typeof row.status === "string") {
       // Время закрытия двигает ПЕРЕХОД, а не присутствие ключа в теле. Форма
       // редактирования шлёт объект целиком, включая неизменившийся статус, —
@@ -4534,7 +4803,10 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
         && !occupiesSlot(readString(before.status));
 
       if (beforeIsReadable && (moved || revived)) {
-        await assertNoAppointmentConflict(supabase, workspaceId, { id, ...merged });
+        // ownWork передаётся и здесь. Без него отказ «слот занят» называл
+        // пациента чужой записи — то есть оставался способом вычитать день
+        // коллеги перебором времени, ничего при этом не записав.
+        await assertNoAppointmentConflict(supabase, workspaceId, { id, ...merged, ownWork: actorOwnWork });
       }
     }
 
