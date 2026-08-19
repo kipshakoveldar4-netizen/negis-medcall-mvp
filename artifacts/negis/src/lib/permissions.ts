@@ -114,7 +114,10 @@ const rolePermissions: Record<StaffRole, CrmPermission[]> = {
     "view_reports",
   ],
   doctor: [
-    "view_clients",
+    // view_clients СНЯТО намеренно и синхронно с серверным каталогом
+    // (lib/auth/permissions.ts): мастер не видит контактов клиентов. Эта копия
+    // управляет только видимостью экранов — власть у сервера, — но
+    // расхождение показало бы мастеру раздел «Клиенты», который ответит 403.
     "view_appointments",
     "manage_appointments",
     "view_tasks",

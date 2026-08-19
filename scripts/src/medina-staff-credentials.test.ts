@@ -112,7 +112,10 @@ test("SC4 чужой аккаунт не захватывается, а член
   // Каждое обращение к таблицам ограничено своей клиникой — либо фильтром
   // (чтение и обновление), либо полем в записи (вставка). Счётчик сверяется с
   // числом обращений: новый запрос мимо клиники уронит пин, а не проскочит.
-  const tableCalls = (source.match(/\.from\("staff_(users|invitations)"\)/g) || []).length;
+  // clinic_doctors в счёте наравне со staff_*: привязка карточки мастера к
+  // учётке — такое же обращение к данным клиники, и правило «каждый запрос
+  // ограничен своей клиникой» на неё распространяется тем же образом.
+  const tableCalls = (source.match(/\.from\("(staff_users|staff_invitations|clinic_doctors)"\)/g) || []).length;
   const scopedByFilter = (source.match(/\.eq\("workspace_id", context\.workspaceId\)/g) || []).length;
   const scopedByColumn = (source.match(/workspace_id: context\.workspaceId,/g) || []).length;
   // Ровно ОДИН запрос смотрит за пределы своей клиники, и это не дыра, а

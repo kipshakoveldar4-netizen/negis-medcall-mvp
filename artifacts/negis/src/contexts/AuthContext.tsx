@@ -6,7 +6,7 @@ import { useLocation } from 'wouter';
 import { toast } from 'sonner';
 import { apiUrl, clearCrmCache, crmFetch } from '@/lib/api';
 import { getSupabaseAccessToken } from '@/lib/serverAuth';
-import { WORKSPACE_SELECTOR_KEY } from '@/lib/demoStorage';
+import { clearListReadCache, WORKSPACE_SELECTOR_KEY } from '@/lib/demoStorage';
 import { isStaffRole, permissionsForRole, type StaffRole } from '@/lib/permissions';
 
 /* ── Types ────────────────────────────────────────────────── */
@@ -813,6 +813,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const signOut = async () => {
     // Nothing the previous account read may survive into the next one.
     clearCrmCache();
+    // Второй кэш — списков экранов. Он жил в памяти модуля с ключом
+    // «эндпоинт + клиника», без пользователя, и на общей машине ресепшена
+    // мастер, вошедший следом, первую минуту видел строки регистратора вместе
+    // с телефонами — до того как придёт срезанный ответ сервера.
+    clearListReadCache();
     if (isDemoMode) {
       clearDemoStorage();
       clearStaffStorage();

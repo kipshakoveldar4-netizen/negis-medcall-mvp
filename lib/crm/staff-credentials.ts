@@ -757,6 +757,47 @@ export async function handleStaffCredentials(req: VercelRequest, res: VercelResp
     });
   }
 
+  // Карточка мастера прикрепляется к учётке автоматически.
+  //
+  // Владелец: «уже имеющиеся данные мастеров и его услуги с ценами должны
+  // автоматически прикрепиться к логину и паролю». Справочник заполняют раньше
+  // логинов — мастера с услугами и ценами уже заведены, — и без связи вход
+  // ничего про своего мастера не знает.
+  //
+  // Три условия сразу, и каждое закрывает свой промах:
+  //   — имя совпадает точно (после trim и регистра): угадывать «похожие» имена
+  //     нельзя, иначе чужой график и чужие услуги достанутся не тому человеку;
+  //   — карточка ещё ни к кому не привязана (`staff_user_id is null`), иначе
+  //     мы отобрали бы её у коллеги;
+  //   — активна: у архивной карточки имя могло освободиться, и уникальный
+  //     индекс справочника считает только активные.
+  // Провал привязки НЕ отменяет заведения: вход важнее связи, а связь
+  // администратор доделает руками в справочнике.
+  let linkedDoctor: { id: string; fullName: string } | null = null;
+  const { data: doctorRow } = await supabase
+    .from("clinic_doctors")
+    .select("id, full_name")
+    .eq("workspace_id", context.workspaceId)
+    .eq("is_active", true)
+    .is("staff_user_id", null)
+    .ilike("full_name", escapeLikePattern(validated.fullName.trim()))
+    .maybeSingle();
+  if (doctorRow) {
+    const { data: linked } = await supabase
+      .from("clinic_doctors")
+      .update({ staff_user_id: readString(asRecord(staffRow).id), updated_at: new Date().toISOString() })
+      .eq("id", (doctorRow as { id: string }).id)
+      .eq("workspace_id", context.workspaceId)
+      // Гонка: карточку могли привязать между чтением и записью.
+      .is("staff_user_id", null)
+      .select("id, full_name")
+      .maybeSingle();
+    if (linked) {
+      linkedDoctor = { id: String((linked as { id: string }).id), fullName: String((linked as { full_name: string }).full_name) };
+      console.log(`[staff-credentials] doctor-linked workspace=${context.workspaceId} doctor=${linkedDoctor.id} staff=${readString(asRecord(staffRow).id)}`);
+    }
+  }
+
   // В журнал — кто кого и с какой ролью. Идентификатор заведённого нужен,
   // чтобы по следу можно было сказать КОГО завели; почты и пароля в записи
   // нет и быть не может (то же правило, что у auditInvitation).
@@ -775,6 +816,10 @@ export async function handleStaffCredentials(req: VercelRequest, res: VercelResp
       // столкновении он получил хвост, и админ раздал бы неверный.
       login: loginFromEmail(issuedEmail),
       role: validated.role,
+      // Экран скажет вслух, что карточка мастера прикрепилась: молчаливая
+      // привязка выглядит как её отсутствие, и администратор полез бы делать
+      // её руками.
+      ...(linkedDoctor ? { linkedDoctor } : {}),
     },
   });
 }

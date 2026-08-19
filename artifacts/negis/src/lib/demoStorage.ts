@@ -144,6 +144,17 @@ async function safeJson<TData>(response: globalThis.Response): Promise<ApiRespon
  */
 type CachedList = { rows: unknown[]; at: number };
 const listReadCache = new Map<string, CachedList>();
+
+/**
+ * Кэш переживал ВЫХОД из аккаунта: ключ — эндпоинт и клиника, без пользователя,
+ * и на общей машине ресепшена мастер, вошедший после регистратора, первую
+ * минуту видел её данные — с телефонами, до того как придёт срезанный ответ
+ * сервера. Комментарий в signOut обещает «ничего от прежнего аккаунта не
+ * переживёт вход следующего»; вот исключение, и его надо гасить руками.
+ */
+export function clearListReadCache(): void {
+  listReadCache.clear();
+}
 const LIST_READ_TTL_MS = 60_000;
 
 function listCacheKey(endpoint: string, workspaceId: string): string {

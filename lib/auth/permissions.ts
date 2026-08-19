@@ -107,7 +107,12 @@ const rolePermissions: Record<StaffRole, CrmPermission[]> = {
     "view_reports",
   ],
   doctor: [
-    "view_clients",
+    // view_clients СНЯТО намеренно. Владелец: «мастера не должны видеть
+    // контактные данные клиентов, только имя и время записи». Это право
+    // открывало сразу три двери: список клиентов целиком, обратный поиск
+    // «номер → карточка» и сделки (они посажены на то же право). Записи
+    // мастеру нужны по работе и остаются — из них контакты срезаются слоем
+    // lib/crm/contact-privacy.ts.
     "view_appointments",
     "manage_appointments",
     "view_tasks",

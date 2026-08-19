@@ -803,7 +803,7 @@ function AppointmentCard({
 }
 
 export function AppointmentsPage() {
-  const { vertical } = useAuth();
+  const { vertical, userRole } = useAuth();
   const terms = termsFor(vertical);
   const [, setLocation] = useLocation();
   // Заявка, из которой пришла эта запись: после успешного создания она сама
@@ -1277,7 +1277,12 @@ export function AppointmentsPage() {
       return;
     }
 
-    if (!form.phone.trim()) {
+    // Мастеру телефон не показывают вовсе (сервер срезает контакты), поэтому
+    // требовать его от него — тупик: поле пустое не по невнимательности, а по
+    // замыслу, и «Сохранить» не срабатывало бы никогда. Регистратор и владелец
+    // телефон видят, и для них требование остаётся.
+    const contactsHidden = userRole === "doctor";
+    if (!contactsHidden && !form.phone.trim()) {
       toast.error("Укажите телефон клиента");
       return;
     }
@@ -1661,7 +1666,12 @@ export function AppointmentsPage() {
                   </p>
                 ) : null}
               </div>
+              {/* Мастеру поле не показывается: сервер контакты срезает, и
+                  пустое поле «Телефон» выглядело бы как потерянные данные, а
+                  введённый в него номер всё равно не сохранился бы. */}
+              {userRole !== "doctor" && (
               <TextField label="Телефон" value={form.phone} onChange={(phone) => setForm((current) => ({ ...current, phone, clientId: "" }))} placeholder="+7..." />
+              )}
               <TextField label="WhatsApp" value={form.whatsapp} onChange={(whatsapp) => setForm((current) => ({ ...current, whatsapp }))} placeholder="+7..." />
               {/*
                 Услуга выбирается из справочника, но свободный ввод остаётся:

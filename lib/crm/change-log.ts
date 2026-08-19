@@ -2,6 +2,7 @@ import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { getSupabaseServerClient } from "../supabase/server";
 import { readWorkspaceContext } from "./server";
 import { CHANGE_JOURNAL_INTERNALS, type ChangeEntry, type ChangeEntityType } from "./change-journal";
+import { hidesClientContacts } from "./contact-privacy";
 
 // The change journal, HTTP half: one record's history, newest first.
 //
@@ -55,6 +56,9 @@ const HISTORY_LIMIT = 100;
  * router cannot express that, because it holds a single permission per method,
  * so the second half of the gate lives here.
  */
+/** Поля журнала, которые являются контактом клиента. */
+const CONTACT_FIELD_NAMES = new Set(["client_phone", "phone", "whatsapp", "email", "client_whatsapp"]);
+
 export async function handleCrmChangeLog(req: VercelRequest, res: VercelResponse) {
   if (req.method !== "GET") {
     return sendJson(res, 405, { success: false, error: "Method not allowed" });
@@ -102,7 +106,15 @@ export async function handleCrmChangeLog(req: VercelRequest, res: VercelResponse
     const events: JournalEvent[] = (Array.isArray(data) ? data : []).map((raw) => {
       const row = asRecord(raw);
       const metadata = asRecord(row.metadata);
-      const changes = Array.isArray(metadata.changes) ? (metadata.changes as ChangeEntry[]) : [];
+      const allChanges = Array.isArray(metadata.changes) ? (metadata.changes as ChangeEntry[]) : [];
+      // Журнал — шестой путь к контакту, и самый незаметный: телефон лежит там
+      // «маской», то есть последними четырьмя цифрами, а перебрать записи
+      // своего же расписания мастер может по их id. Четыре цифры — это всё
+      // ещё контакт, поэтому роли без контактов такие строки не отдаются
+      // вовсе, а не в урезанном виде.
+      const changes = hidesClientContacts(context.role)
+        ? allChanges.filter((change) => !CONTACT_FIELD_NAMES.has(String(asRecord(change).field)))
+        : allChanges;
       return {
         id: readString(row.id),
         action: readString(row.action),

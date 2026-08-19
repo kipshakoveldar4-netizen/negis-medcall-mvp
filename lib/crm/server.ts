@@ -2,6 +2,7 @@ import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { canAssignRole, isStaffRole, isWorkspaceAdminRole } from "../auth/permissions";
 import { extractJsonObject, generateText, resolveTextProvider } from "../ai/text-provider";
 import { normalizePhone } from "./phone";
+import { hidesClientContacts, redactContacts, redactContactsList, stripContactWrites } from "./contact-privacy";
 import {
   listAuthContextMemberships,
   requireWorkspaceAdmin,
@@ -344,6 +345,13 @@ function stripServerOwnedColumns(row: JsonRecord): JsonRecord {
     if (SERVER_OWNED_COLUMNS.has(column)) delete row[column];
   }
   return row;
+}
+
+/** Есть ли в теле поля-контакты — то, что роль без контактов присылать не должна. */
+function hasContactFields(body: JsonRecord): boolean {
+  return ["phone", "client_phone", "clientPhone", "whatsapp", "client_whatsapp", "email"].some(
+    (field) => field in body && readString(body[field]) !== "",
+  );
 }
 
 function buildPatchRow(resource: CrmResource, body: JsonRecord): JsonRecord {
@@ -3601,7 +3609,7 @@ async function listItems(resource: CrmResource, req: VercelRequest, res: VercelR
       const phone = readQueryString(req.query.phone);
       if (phone) {
         const rows = await findClientsByPhone(supabase, workspaceId, phone);
-        const matches = rows.map((row) => config.fromRow(row));
+        const matches = redactContactsList(rows.map((row) => config.fromRow(row)), readWorkspaceContext(req)?.role);
         return sendJson(res, 200, success("supabase", { [config.listKey]: matches, items: matches }));
       }
     }
@@ -3719,7 +3727,14 @@ async function listItems(resource: CrmResource, req: VercelRequest, res: VercelR
       throw new Error(error.message);
     }
 
-    const items = (Array.isArray(data) ? data : []).map((row) => config.fromRow(asRecord(row)));
+    // Контакты срезаются НА ВЫХОДЕ и по роли из проверенного контекста.
+    // Мастеру остаются имя, услуга, время и статус — то, ради чего он смотрит
+    // расписание, — а телефон и WhatsApp не уезжают даже в теле ответа: скрыть
+    // их только на экране значило бы отдать их всякому, кто откроет консоль.
+    const items = redactContactsList(
+      (Array.isArray(data) ? data : []).map((row) => config.fromRow(asRecord(row))),
+      readWorkspaceContext(req)?.role,
+    );
     // Пояс клиники едет пассажиром списка записей ровно по той же причине, по
     // которой он едет с графиком: маршрут настроек доступен только владельцу и
     // администратору, и любой другой экран, спросив его напрямую, получил бы
@@ -3907,8 +3922,18 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
     );
   }
 
+  // Записать контакт тоже нельзя: правка вслепую поверх того, чего человек не
+  // видит, хуже чтения — она молча затирает телефон, по которому клинике
+  // звонить. Отказ ЯВНЫЙ: молча выбросить поле значило бы сказать «сохранено»
+  // человеку, чей ввод исчез.
+  if (hidesClientContacts(readWorkspaceContext(req)?.role) && hasContactFields(body)) {
+    return sendJson(res, 403, errorBody("Контакты клиента недоступны вашей роли", [
+      "Телефон и почту клиента заполняет ресепшн — вам эти поля не показываются.",
+    ]));
+  }
+
   try {
-    const row = config.toRow(body, workspaceId);
+    const row = stripContactWrites(config.toRow(body, workspaceId), readWorkspaceContext(req)?.role);
     if (resource === "leads") {
       Object.assign(row, await buildLeadReferenceRow(supabase, workspaceId, body));
     }
@@ -4016,7 +4041,9 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
       throw new Error(error.message);
     }
 
-    const item = config.fromRow(asRecord(data));
+    // Эхо мутации — четвёртый путь к телефону: PATCH возвращает ВСЮ строку,
+    // даже если тело несло один статус. Срез обязателен и здесь.
+    const item = redactContacts(config.fromRow(asRecord(data)), readWorkspaceContext(req)?.role);
 
     // Журнал пишется ПОСЛЕ доменной записи и только на успехе. Порядок здесь
     // не стилистический: тесты изоляции ищут первую вставку в журнале запросов
@@ -4236,7 +4263,12 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
       }
     }
 
-    const row = buildPatchRow(resource, patchBody);
+    if (hidesClientContacts(readWorkspaceContext(req)?.role) && hasContactFields(patchBody)) {
+      return sendJson(res, 403, errorBody("Контакты клиента недоступны вашей роли", [
+        "Телефон и почту клиента правит ресепшн — вам эти поля не показываются.",
+      ]));
+    }
+    const row = stripContactWrites(buildPatchRow(resource, patchBody), readWorkspaceContext(req)?.role);
     if (resource === "leads") {
       Object.assign(row, await buildLeadReferenceRow(supabase, workspaceId, patchBody));
     }
@@ -4445,7 +4477,7 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
       throw new Error(error.message);
     }
 
-    const item = config.fromRow(asRecord(data));
+    const item = redactContacts(config.fromRow(asRecord(data)), readWorkspaceContext(req)?.role);
 
     if (patchedEntity) {
       // Сравнивается с `row`, а не с сохранённой строкой: в `row` лежит ровно
