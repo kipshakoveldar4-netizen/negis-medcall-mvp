@@ -580,6 +580,51 @@ class SlotTakenError extends Error {
   }
 }
 
+/**
+ * Отказ сервера с ПРИЧИНОЙ.
+ *
+ * Мастер салона прислал скриншот: «Не удалось создать запись. Проверьте
+ * расписание перед повтором» — наш общий текст на любой отказ, кроме занятого
+ * слота и нерабочего времени. Настоящая причина при этом приходила в ответе, а
+ * экран выбрасывал её в console.warn, которого на телефоне не видно. Человек
+ * оставался с советом, не имеющим отношения к делу.
+ */
+class ServerRefusalError extends Error {
+  readonly code: string;
+  readonly details: string[];
+
+  constructor(code: string, message: string, details: string[]) {
+    super(message);
+    this.name = "ServerRefusalError";
+    this.code = code;
+    this.details = details;
+  }
+}
+
+/** Коды сервера, у которых есть человеческий русский текст. */
+const APPOINTMENT_ERROR_TEXTS: Record<string, string> = {
+  workspace_access_denied: "Нет доступа к этой клинике. Выйдите и войдите заново.",
+  authentication_required: "Сессия истекла — войдите заново.",
+  storage_not_configured: "Сервис временно недоступен. Попробуйте через минуту.",
+  unavailable: "База не ответила. Попробуйте ещё раз через минуту.",
+  validation_error: "Проверьте поля формы: что-то заполнено не так.",
+  permission_denied: "Вашей роли это действие недоступно.",
+};
+
+function refusalText(error: unknown): string {
+  if (error instanceof ServerRefusalError) {
+    const known = APPOINTMENT_ERROR_TEXTS[error.code];
+    if (known) return known;
+    // Детали сервера бывают техническими, но они КОНКРЕТНЫ — лучше показать их,
+    // чем совет невпопад.
+    const detail = error.details.filter(Boolean).join(", ") || error.message;
+    return detail ? `Не удалось создать запись: ${detail}` : "Не удалось создать запись.";
+  }
+  // Сюда попадает и обрыв связи, брошенный до ответа, когда вставка уже могла
+  // пройти, — поэтому не утверждаем, что на сервере ничего не осталось.
+  return "Не удалось создать запись — связь оборвалась. Обновите список перед повтором: запись могла сохраниться.";
+}
+
 function conflictFromBody(body: unknown): SlotTakenError | null {
   const record = asRecord(body);
   if (readString(record.code) !== "appointment_conflict") return null;
@@ -1210,8 +1255,12 @@ export function AppointmentsPage() {
     if (outside) throw outside;
 
     if (!response.ok || body?.success !== true || body.mode !== "supabase") {
-      const details = body?.success === false ? body.details?.join(", ") : "";
-      throw new Error(details || (body?.success === false ? body.error : "Не удалось создать запись на сервере"));
+      const record = asRecord(body);
+      throw new ServerRefusalError(
+        readString(record.code),
+        readString(record.error) || "Не удалось создать запись на сервере",
+        Array.isArray(record.details) ? record.details.map((item) => readString(item)) : [],
+      );
     }
 
     const saved = body.data?.item;
@@ -1337,7 +1386,7 @@ export function AppointmentsPage() {
         // Та же честность, что и у статуса: отказ виден отказом, строка
         // возвращается к серверной правде, детали — в консоль оператора.
         console.warn("appointments: patch refused", error instanceof Error ? error.message : error);
-        toast.error("Не удалось сохранить запись. Изменение отменено.");
+        toast.error(refusalText(error).replace("создать запись", "сохранить запись"));
         return;
       }
     } else {
@@ -1359,9 +1408,7 @@ export function AppointmentsPage() {
           return;
         }
         console.warn("appointments: create refused", error instanceof Error ? error.message : error);
-        // Не утверждаем, что на сервере ничего не осталось: сюда попадает и
-        // обрыв связи, брошенный до ответа, когда вставка уже могла пройти.
-        toast.error("Не удалось создать запись. Проверьте расписание перед повтором.");
+        toast.error(refusalText(error));
         return;
       }
     }
