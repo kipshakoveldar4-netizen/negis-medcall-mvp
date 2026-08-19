@@ -2621,13 +2621,27 @@ async function assertNoAppointmentConflict(
   if (!Number.isFinite(start)) return;
   const end = start + candidate.durationMinutes * 60_000;
 
-  const { data, error } = await supabase
+  const readSlot = (columns: string) => supabase
     .from("appointments")
-    .select("id, client_name, doctor_name, starts_at, duration_minutes, status")
+    .select(columns)
     .eq("workspace_id", workspaceId)
     .eq("doctor_name", candidate.doctorName)
     .gte("starts_at", new Date(start - CONFLICT_LOOKBACK_MS).toISOString())
     .lt("starts_at", new Date(end).toISOString());
+
+  let { data, error } = await readSlot("id, client_name, doctor_name, starts_at, duration_minutes, status");
+
+  // Защита от двойной записи не имеет права выключаться из-за длительности.
+  //
+  // На базе без 012 этот select падал целиком, и салон терял ЕДИНСТВЕННУЮ
+  // серверную проверку занятого времени — молча, одной строкой в логе. Между
+  // «не знаю, сколько длится соседний визит» и «не проверяю вовсе» правильный
+  // ответ первый: длительность берётся та же, которой её и так считает вся
+  // арифметика в отсутствие колонки — шестьдесят минут.
+  if (error && isMissingAnyColumn(error)) {
+    console.warn("appointments: conflict check runs without duration_minutes; assuming", DEFAULT_APPOINTMENT_MINUTES, "minutes");
+    ({ data, error } = await readSlot("id, client_name, doctor_name, starts_at, status"));
+  }
 
   // A check that cannot run must not become a check that passed. But it must
   // not block the clinic either: the refusal below is advisory, so an
@@ -3450,6 +3464,9 @@ const MISSING_COLUMN_CODES = new Set([UNDEFINED_COLUMN, "PGRST204"]);
 
 function isMissingAnyColumn(error: { code?: unknown; message?: unknown } | null): boolean {
   if (!error) return false;
+  // «Нет таблицы» приходит той же фразой про кэш схемы. Снимать по ней колонки —
+  // значит трижды повторить обречённую запись и назвать в логе невиновную миграцию.
+  if (isMissingTable(error)) return false;
   if (MISSING_COLUMN_CODES.has(readString(error.code))) return true;
   const message = readString(error.message).toLowerCase();
   return message.includes("does not exist") || message.includes("schema cache");
@@ -3464,6 +3481,13 @@ function isMissingAnyColumn(error: { code?: unknown; message?: unknown } | null)
  * сломала бы то, что до неё работало.
  */
 const LINK_COLUMNS_BY_MIGRATION: ReadonlyArray<readonly [string, readonly string[]]> = [
+  // 012 добавила записи длительность, WhatsApp и источник. На боевой базе её не
+  // применили, и это стоило салону рабочего дня: связи 032/033 код обходил, а
+  // duration_minutes уходил в INSERT всегда — PostgREST отвечал «Could not find
+  // the 'duration_minutes' column», и мастер получал «Сбой на стороне сервиса»
+  // на каждой попытке записать клиента. Настоящее лечение — миграция 039,
+  // но код обязан пережить отставшую базу: запись важнее длительности.
+  ["012", ["duration_minutes", "whatsapp", "source"]],
   ["032", ["service_id"]],
   ["033", ["doctor_id"]],
 ];
@@ -3499,6 +3523,120 @@ function rowWithoutLinkColumns(row: JsonRecord, columns: readonly string[]): { r
     stripped[key] = value;
   }
   return { row: stripped, dropped };
+}
+
+/**
+ * Повтор записи без колонок, которых в базе ещё нет.
+ *
+ * Одной попытки не хватает, и это не теория: и Postgres, и PostgREST называют
+ * в отказе ОДНУ недостающую колонку за раз. Боевая база отстала на 012, первый
+ * отказ назвал duration_minutes, и единственный повтор снимал только её — потом
+ * приходил отказ про следующую, повторять было уже нечем, и мастер видел «Сбой
+ * на стороне сервиса» на каждой попытке записать клиента.
+ *
+ * Потолок считается по КОЛОНКАМ, а не по миграциям. Считать по миграциям —
+ * ошибка на ровном месте: 012 добавила сразу три колонки, и на базе без 012 и
+ * без 033 понадобилось бы четыре захода при потолке в три. Строка записи несёт
+ * все пять всегда (форма шлёт serviceId и doctorId безусловно, пустые уезжают
+ * как null), так что это не теоретический край, а обычная база, куда миграции
+ * вставили не все за раз.
+ *
+ * Ещё один заход сверх числа колонок — на устаревший кэш схемы: см. ниже.
+ *
+ * Выход и по «строка не изменилась»: если снимать больше нечего, следующий
+ * запрос был бы дословным повтором предыдущего и вернул бы тот же отказ.
+ *
+ * Возвращается и последняя опробованная строка: вызывающему нужно знать, что
+ * от его записи осталось. Успех, в котором не сохранилось ничего из присланного,
+ * успехом не является.
+ */
+async function retryWithoutMissingColumns(
+  resource: string,
+  row: JsonRecord,
+  verb: "creating" | "saving",
+  initial: { data: unknown; error: unknown },
+  run: (candidate: JsonRecord) => PromiseLike<{ data: unknown; error: unknown }>,
+): Promise<{ data: unknown; error: unknown; row: JsonRecord; dropped: string[] }> {
+  let result = initial;
+  let candidate = row;
+  const dropped: string[] = [];
+
+  // Кэш схемы PostgREST отстаёт от базы на секунды после ALTER TABLE. В это
+  // окно уже СУЩЕСТВУЮЩАЯ колонка отвечает тем же PGRST204, что и никогда не
+  // созданная, — и снять её значило бы молча потерять то, что оператор ввёл
+  // руками. Различить их по тексту нельзя, поэтому дословный повтор идёт
+  // первым: если кэш успел перечитаться, запись пройдёт целой. Окно этим не
+  // закрывается полностью (перечитывание асинхронное), но самый частый его
+  // случай — минуты сразу после применения миграции — закрывается.
+  if (isStaleSchemaCache(result.error)) {
+    result = await run(candidate);
+  }
+
+  for (let attempt = 0; attempt < ALL_LINK_COLUMNS.length; attempt += 1) {
+    const error = result.error as { code?: unknown; message?: unknown } | null;
+    if (!isMissingAnyColumn(error)) break;
+    const fallback = rowWithoutLinkColumns(candidate, missingColumnsFromError(error));
+    if (Object.keys(fallback.row).length === Object.keys(candidate).length) break;
+    warnDroppedLinkColumns(resource, fallback.dropped, verb);
+    dropped.push(...fallback.dropped);
+    candidate = fallback.row;
+    result = await run(candidate);
+  }
+  return { ...result, row: candidate, dropped };
+}
+
+/**
+ * Отказ PostgREST про кэш схемы — единственная форма, где колонка может существовать.
+ *
+ * Отсутствующая ТАБЛИЦА приходит той же фразой про кэш схемы (PGRST205), но это
+ * другая беда и другое лечение. Без этой оговорки лог первой строкой обвинял бы
+ * миграцию 012 в том, чего она не делала, и владелец шёл бы применять не ту.
+ */
+function isStaleSchemaCache(error: unknown): boolean {
+  const record = error as { code?: unknown; message?: unknown } | null;
+  if (!record) return false;
+  if (isMissingTable(record)) return false;
+  return readString(record.code) === "PGRST204"
+    || readString(record.message).toLowerCase().includes("schema cache");
+}
+
+/** «Нет таблицы» в обеих формах: код PostgREST и текст, которым он это называет. */
+function isMissingTable(error: { code?: unknown; message?: unknown } | null): boolean {
+  if (!error) return false;
+  if (readString(error.code) === "PGRST205" || readString(error.code) === "42P01") return true;
+  return /could not find the table/i.test(readString(error.message));
+}
+
+/**
+ * Названия несохранённых полей по-русски. Список колонок в ответе читает не
+ * разработчик, а мастер за телефоном: duration_minutes ему не говорит ничего.
+ */
+const UNSAVED_FIELD_LABELS: Record<string, string> = {
+  duration_minutes: "длительность",
+  whatsapp: "WhatsApp",
+  source: "источник",
+  service_id: "услуга из справочника",
+  doctor_id: "врач из справочника",
+  lead_id: "связь с заявкой",
+  client_id: "связь с клиентом",
+  appointment_id: "связь с записью",
+  completed_at: "время закрытия",
+  created_by_staff_user_id: "автор",
+  created_by_kind: "вид автора",
+};
+
+function unsavedFieldsFor(columns: readonly string[]): string[] {
+  return Array.from(new Set(columns)).map((column) => UNSAVED_FIELD_LABELS[column] ?? column);
+}
+
+/**
+ * Служебные колонки, которые пишутся сами. Строка, где не осталось ничего
+ * другого, — это не сохранённая правка, а сдвинутая метка времени.
+ */
+const BOOKKEEPING_COLUMNS: readonly string[] = ["id", "workspace_id", "updated_at", "created_at"];
+
+function hasOnlyBookkeeping(row: JsonRecord): boolean {
+  return Object.keys(row).every((key) => BOOKKEEPING_COLUMNS.includes(key));
 }
 
 /** Одна строка лога на миграцию, и только на ту, чью колонку сняли. */
@@ -3994,6 +4132,11 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
 
     let { data, error } = await runInsert(row);
 
+    // Что из присланного НЕ доехало до базы. Пустой список — обычный день;
+    // непустой означает, что человеку показали не то, что сохранено, и это
+    // обязано доехать до экрана, а не остаться в логе Vercel.
+    const unsaved: string[] = [];
+
     // Пока 031 не применена, колонок связи и авторства в базе нет. Отказать
     // в создании задачи целиком — хуже, чем создать её без связи: до этой
     // ветки задачи создавались, и окно между деплоем и миграцией не повод
@@ -4004,16 +4147,18 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
         `tasks: columns from migration 031 are not present yet (${fallback.dropped.join(", ") || "none set"}); `
           + "creating without them",
       );
+      unsaved.push(...fallback.dropped);
       ({ data, error } = await runInsert(fallback.row));
     }
 
     // Та же логика для 032: запись и продажа создавались до этой ветки и
     // обязаны создаваться в окне между деплоем и миграцией. Теряется только
     // связь с услугой — и оператор узнаёт из лога, какой именно.
-    if (error && (resource === "appointments" || resource === "deals") && isMissingAnyColumn(error)) {
-      const fallback = rowWithoutLinkColumns(row, missingColumnsFromError(error));
-      warnDroppedLinkColumns(resource, fallback.dropped, "creating");
-      ({ data, error } = await runInsert(fallback.row));
+    if (error && (resource === "appointments" || resource === "deals")) {
+      const retried = await retryWithoutMissingColumns(resource, row, "creating", { data, error }, runInsert);
+      data = retried.data as typeof data;
+      error = retried.error as typeof error;
+      unsaved.push(...retried.dropped);
     }
 
     if (error) {
@@ -4094,7 +4239,11 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
       }
     }
 
-    return sendJson(res, 201, success("supabase", { [resource === "content-videos" ? "video" : "item"]: item, item }));
+    return sendJson(res, 201, success("supabase", {
+      [resource === "content-videos" ? "video" : "item"]: item,
+      item,
+      ...(unsaved.length > 0 ? { unsaved: unsavedFieldsFor(unsaved) } : {}),
+    }));
   } catch (error) {
     if (error instanceof AppointmentConflictError) {
       return sendJson(res, 409, {
@@ -4440,19 +4589,47 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
 
     let { data, error } = await runUpdate(row);
 
+    // См. тот же разбор на создании: что из присланного не доехало до базы.
+    const unsaved: string[] = [];
+    // Строка, которая ДЕЙСТВИТЕЛЬНО ушла в базу. Журнал изменений обязан
+    // считаться от неё: запись в ленте о связи, которой в базе нет, — это
+    // ложь в единственном месте продукта, отвечающем на «кто и что менял».
+    let savedRow = row;
+
     if (error && resource === "tasks" && isMissingAnyColumn(error)) {
       const fallback = taskRowWithout031(row);
       console.warn(
         `tasks: columns from migration 031 are not present yet (${fallback.dropped.join(", ") || "none set"}); `
           + "saving without them",
       );
+      unsaved.push(...fallback.dropped);
+      savedRow = fallback.row;
       ({ data, error } = await runUpdate(fallback.row));
     }
 
-    if (error && (resource === "appointments" || resource === "deals") && isMissingAnyColumn(error)) {
-      const fallback = rowWithoutLinkColumns(row, missingColumnsFromError(error));
-      warnDroppedLinkColumns(resource, fallback.dropped, "saving");
-      ({ data, error } = await runUpdate(fallback.row));
+    if (error && (resource === "appointments" || resource === "deals")) {
+      const retried = await retryWithoutMissingColumns(resource, row, "saving", { data, error }, runUpdate);
+      data = retried.data as typeof data;
+      error = retried.error as typeof error;
+      unsaved.push(...retried.dropped);
+      savedRow = retried.row;
+    }
+
+    // Правка, от которой после снятия колонок осталась одна метка времени,
+    // сохранена не была. Ответить на неё «200, сохранено» — это тот самый
+    // тихий отказ, ради которого выше стоит гейт no_patchable_fields:
+    // сотрудник видит на экране своё значение, а в базе его нет. Разница
+    // только в причине — не «поле не принимается разделом», а «колонки ещё
+    // нет в базе», — и она не даёт права соврать.
+    //
+    // Ветка общая для задач и записей намеренно: отказ у них один и тот же, и
+    // отвечать на него противоположно в двух местах одной функции — это не
+    // решение, а недосмотр.
+    if (!error && unsaved.length > 0 && !hasOnlyBookkeeping(row) && hasOnlyBookkeeping(savedRow)) {
+      console.warn(`${resource}: patch dropped every stored field (${unsaved.join(", ")}); answering with a refusal`);
+      return sendJson(res, 502, errorBody("Не удалось сохранить правку", [
+        `columns are missing in the database: ${unsaved.join(", ")}`,
+      ]));
     }
 
     if (error) {
@@ -4489,12 +4666,16 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
         entity: patchedEntity,
         entityId: id,
         action: "updated",
-        changes: diffForJournal(patchedEntity, before, row),
+        changes: diffForJournal(patchedEntity, before, savedRow),
         ...journalActor(req),
       });
     }
 
-    return sendJson(res, 200, success("supabase", { [resource === "content-videos" ? "video" : "item"]: item, item }));
+    return sendJson(res, 200, success("supabase", {
+      [resource === "content-videos" ? "video" : "item"]: item,
+      item,
+      ...(unsaved.length > 0 ? { unsaved: unsavedFieldsFor(unsaved) } : {}),
+    }));
   } catch (error) {
     if (error instanceof AppointmentConflictError) {
       return sendJson(res, 409, {

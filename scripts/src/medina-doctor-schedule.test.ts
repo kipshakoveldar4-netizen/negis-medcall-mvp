@@ -364,8 +364,15 @@ test("DS6 запись создаётся и до применения мигр�
 
   assert.equal(res.statusCode, 201, JSON.stringify(res.body));
   const inserts = log.filter((entry) => entry.table === "appointments" && entry.op === "insert");
-  assert.equal(inserts.length, 2, "одна попытка отвергается, вторая идёт без колонки");
-  assert.equal((inserts[1].filters.__row as Record<string, unknown>).doctor_id, undefined);
+  // Заходов три, и это осознанно. Отказ PostgREST про кэш схемы (PGRST204) не
+  // отличим от «колонки нет вовсе», а кэш отстаёт от базы на секунды после
+  // ALTER TABLE. Поэтому вторая попытка — ДОСЛОВНАЯ: если колонка уже
+  // появилась, связь сохраняется целой, а не срезается молча. И только третья
+  // идёт без колонки. Ожидание «ровно две» здесь стояло до того, как это окно
+  // разобрали, — см. набор test:column-lag, CL9.
+  assert.equal(inserts.length, 3, "отказ, дословный повтор на случай устаревшего кэша, и заход без колонки");
+  assert.equal((inserts[1].filters.__row as Record<string, unknown>).doctor_id, DOCTOR_ID, "повтор идёт целым");
+  assert.equal((inserts[2].filters.__row as Record<string, unknown>).doctor_id, undefined);
   assert.ok(warned.some((line) => line.includes("033") && line.includes("doctor_id")));
   // Снимается ровно та колонка, которой нет, и называется её миграция. Снимать
   // разом все связи значило бы терять связь с услугой в окне, когда не хватает

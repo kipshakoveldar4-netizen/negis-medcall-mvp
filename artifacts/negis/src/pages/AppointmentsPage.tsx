@@ -1181,6 +1181,23 @@ export function AppointmentsPage() {
    * сменил услугу, его правка молча возвращалась к старой. Точечные действия
    * теперь называют свои поля.
    */
+  /**
+   * Поля, которые сервер сохранить не смог. Пустой список — обычный день.
+   *
+   * Читается из ответа, а не выводится на клиенте: единственный, кто знает,
+   * что именно приняла база, — это сервер, который туда писал.
+   */
+  const unsavedFromBody = (body: unknown): string[] => {
+    const data = asRecord(asRecord(body).data);
+    return Array.isArray(data.unsaved) ? data.unsaved.map((item) => readString(item)).filter(Boolean) : [];
+  };
+
+  /** Один и тот же текст на создании и на правке — потеря выглядит одинаково. */
+  const warnAboutUnsaved = (unsaved: string[]) => {
+    if (unsaved.length === 0) return;
+    toast.error(`Сохранено не полностью: ${unsaved.join(", ")} — база клиники ещё не обновлена`);
+  };
+
   const patchAppointment = async (
     appointment: Appointment,
     allowConflict = false,
@@ -1220,6 +1237,15 @@ export function AppointmentsPage() {
       const details = body?.success === false ? body.details?.join(", ") : "";
       throw new Error(details || (body?.success === false ? body.error : "Не удалось обновить запись на сервере"));
     }
+
+    // Сервер называет поля, которые до базы не доехали (база клиники отстала
+    // от кода на миграцию). Раньше об этом знал только лог Vercel, а на экране
+    // оставалось оптимистичное значение — то есть сотрудник видел свои 90
+    // минут, которых в базе нет. Возвращаем и список, и сохранённую строку.
+    return {
+      unsaved: unsavedFromBody(body),
+      saved: body?.data?.item ? appointmentFromApi(body.data.item) : null,
+    };
   };
 
   /**
@@ -1265,6 +1291,7 @@ export function AppointmentsPage() {
 
     const saved = body.data?.item;
     setItems((current) => [saved ? appointmentFromApi(saved) : appointment, ...current]);
+    warnAboutUnsaved(unsavedFromBody(body));
   };
 
   /**
@@ -1295,8 +1322,9 @@ export function AppointmentsPage() {
 
     try {
       // Только статус: остальные поля этой карточки мог изменить коллега.
-      await patchAppointment(updated, false, false, ["status"]);
-      toast.success(`Статус: ${getAppointmentStatusLabel(status)}`);
+      const { unsaved } = await patchAppointment(updated, false, false, ["status"]);
+      if (unsaved.length > 0) warnAboutUnsaved(unsaved);
+      else toast.success(`Статус: ${getAppointmentStatusLabel(status)}`);
     } catch (error) {
       // Отказ сервера — откат, а не фантомный статус до перезагрузки. Прежний
       // текст обещал сохранение на этом устройстве, которого в рабочей клинике
@@ -1369,8 +1397,13 @@ export function AppointmentsPage() {
       const previous = items.find((item) => item.id === editingId);
       setItems((current) => current.map((item) => (item.id === editingId ? appointment : item)));
       try {
-        await patchAppointment(appointment, allowConflict, allowOutsideSchedule);
-        toast.success("Запись обновлена");
+        const { unsaved, saved } = await patchAppointment(appointment, allowConflict, allowOutsideSchedule);
+        // Строка на экране — серверная, а не введённая: иначе несохранённые
+        // поля продолжали бы показываться сохранёнными до перезагрузки, и
+        // коллега на своём устройстве видел бы другую длительность визита.
+        if (saved) setItems((current) => current.map((item) => (item.id === editingId ? saved : item)));
+        if (unsaved.length > 0) warnAboutUnsaved(unsaved);
+        else toast.success("Запись обновлена");
       } catch (error) {
         if (previous) {
           setItems((current) => current.map((item) => (item.id === editingId ? previous : item)));
