@@ -40,6 +40,8 @@ type Props = {
   /** Минута «сейчас» в поясе клиники, если показан сегодняшний день. */
   nowMinute: number | null;
   onOpen: (id: string) => void;
+  /** Клик по пустому месту: сюда и хотят записать клиента. */
+  onCreate: (input: { doctorId: string; doctorName: string; time: string }) => void;
   specialistPlural: string;
 };
 
@@ -74,6 +76,7 @@ export function MasterDayGrid({
   appointments,
   nowMinute,
   onOpen,
+  onCreate,
   specialistPlural,
 }: Props) {
   const columns = useMemo(() => {
@@ -174,7 +177,30 @@ export function MasterDayGrid({
                 </span>
               </div>
 
-              <div className="relative" style={{ height, background: "var(--negis-surface)" }}>
+              {/*
+                Пустое место в колонке — это кнопка «записать сюда».
+                Календарь, в который нельзя писать, заставляет держать в голове
+                два экрана: здесь смотрю, там завожу. Клик даёт мастера и время
+                сразу, с округлением до получаса — салон записывает на ровные
+                полчаса, и минута 14:37 никому не нужна.
+              */}
+              <div
+                className="relative"
+                style={{ height, background: "var(--negis-surface)" }}
+                onClick={(event) => {
+                  const target = event.target as HTMLElement;
+                  // Клик по самой записи открывает её, а не заводит новую.
+                  if (target.closest("[data-appointment]")) return;
+                  const box = event.currentTarget.getBoundingClientRect();
+                  const minute = dayStart + Math.floor((event.clientY - box.top) / MINUTE / 30) * 30;
+                  if (minute < dayStart || minute >= dayEnd) return;
+                  onCreate({
+                    doctorId: column.doctor.id,
+                    doctorName: column.doctor.id ? column.doctor.fullName : "",
+                    time: formatMinute(minute),
+                  });
+                }}
+              >
                 {/* Нерабочее время закрашено: пустая белая клетка и «мастер не
                     принимает» на экране выглядят одинаково, а значат разное. */}
                 {column.intervals.length > 0 ? (
@@ -215,6 +241,7 @@ export function MasterDayGrid({
                     <button
                       key={entry.item.id}
                       type="button"
+                      data-appointment
                       onClick={() => onOpen(entry.item.id)}
                       className="absolute overflow-hidden rounded-lg px-1.5 py-1 text-left"
                       style={{

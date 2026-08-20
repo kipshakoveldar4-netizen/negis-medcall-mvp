@@ -1905,6 +1905,14 @@ export function AppointmentsPage() {
               const appointment = items.find((entry) => entry.id === id);
               if (appointment) openEdit(appointment);
             }}
+            onCreate={({ doctorId, doctorName, time }) => {
+              openCreate(selectedDate, time);
+              // Мастер известен точнее, чем через фильтр: ткнули в его колонку.
+              // Подставляется ПОСЛЕ openCreate — тот собирает форму заново.
+              if (doctorId || doctorName) {
+                setForm((current) => ({ ...current, doctorId, doctor: doctorName }));
+              }
+            }}
             specialistPlural={terms.specialistPlural}
           />
         ) : null}

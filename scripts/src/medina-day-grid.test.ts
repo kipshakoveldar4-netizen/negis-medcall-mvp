@@ -170,3 +170,20 @@ test("DG15 колонки — карточки справочника, а зап
   assert.ok(/Без карточки/.test(source), "для записей со свободным именем есть своя колонка");
   assert.ok(/Вне сетки/.test(source), "а для нечитаемого времени — отдельный список");
 });
+
+test("DG16 в календарь можно писать: пустое место — это «записать сюда»", async () => {
+  // Календарь, в который нельзя писать, заставляет держать в голове два
+  // экрана: здесь смотрю, там завожу. Клик по пустому месту отдаёт мастера
+  // колонки и время с округлением до получаса.
+  const source = await readFile(
+    path.join(repoRoot, "artifacts", "negis", "src", "components", "crm", "master-day-grid.tsx"),
+    "utf8",
+  );
+  assert.ok(/onCreate: \(input: \{ doctorId: string; doctorName: string; time: string \}\) => void/.test(source));
+  assert.ok(/Math\.floor\(\(event\.clientY - box\.top\) \/ MINUTE \/ 30\) \* 30/.test(source), "время округляется до получаса");
+  assert.ok(/target\.closest\("\[data-appointment\]"\)\) return;/.test(source), "клик по самой записи открывает её, а не заводит новую");
+
+  const page = await readFile(path.join(repoRoot, "artifacts", "negis", "src", "pages", "AppointmentsPage.tsx"), "utf8");
+  assert.ok(/onCreate=\{\(\{ doctorId, doctorName, time \}\)/.test(page), "экран принимает клик");
+  assert.ok(/openCreate\(selectedDate, time\)/.test(page), "и открывает форму на выбранный день и час");
+});
