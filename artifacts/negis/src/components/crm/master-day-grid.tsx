@@ -118,6 +118,16 @@ export function MasterDayGrid({
     return list;
   }, [dayEnd, dayStart]);
 
+  // Получасовые линии без подписей. Салон записывает на «в половине третьего»
+  // чаще, чем на ровный час, и по часовой сетке такой блок не с чем сверить
+  // глазом: он просто висит между линиями. Подписи у них нет намеренно —
+  // цифры каждые полчаса на телефоне превращают шкалу в кашу.
+  const halfHours = useMemo(() => {
+    const list: number[] = [];
+    for (let minute = dayStart + 30; minute < dayEnd; minute += 60) list.push(minute);
+    return list;
+  }, [dayEnd, dayStart]);
+
   const height = (dayEnd - dayStart) * MINUTE;
   const unreadable = placedColumns.flatMap((column) => column.unreadable);
 
@@ -188,6 +198,13 @@ export function MasterDayGrid({
                     key={minute}
                     className="absolute inset-x-0 border-t"
                     style={{ top: (minute - dayStart) * MINUTE, borderColor: "var(--negis-border)" }}
+                  />
+                ))}
+                {halfHours.map((minute) => (
+                  <div
+                    key={`half-${minute}`}
+                    className="absolute inset-x-0 border-t"
+                    style={{ top: (minute - dayStart) * MINUTE, borderColor: "var(--negis-border)", opacity: 0.45 }}
                   />
                 ))}
 

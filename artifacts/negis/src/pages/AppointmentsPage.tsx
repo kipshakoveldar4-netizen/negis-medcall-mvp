@@ -1818,6 +1818,17 @@ export function AppointmentsPage() {
                   </button>
                 </div>
                 <input className="neu-input w-full lg:w-auto" type="date" value={selectedDate} onChange={(event) => setSelectedDate(event.target.value || selectedDate)} />
+                {/* «Сегодня» — не украшение: уйдя на неделю вперёд, вернуться
+                    к текущему дню иначе можно только вспомнив число. День
+                    берётся в поясе КЛИНИКИ, а не телефона. */}
+                <button
+                  type="button"
+                  className={`neu-btn px-3 py-2 text-sm ${selectedDate === todayKey ? "text-[#0D9488]" : ""}`}
+                  onClick={() => setSelectedDate(todayKey)}
+                  disabled={selectedDate === todayKey}
+                >
+                  Сегодня
+                </button>
               </div>
               <div className={`grid ${seesWholeClinic ? "grid-cols-4" : "grid-cols-3"} gap-2 sm:max-w-md`}>
                 {((seesWholeClinic ? ["grid", "day", "week", "list"] : ["day", "week", "list"]) as CalendarView[]).map((mode) => (
