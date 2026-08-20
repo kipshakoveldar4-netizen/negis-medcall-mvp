@@ -636,15 +636,21 @@ test("DS18 строка графика — либо день недели, ли�
   assert.equal(neither.res.statusCode, 400, JSON.stringify(neither.res.body));
 });
 
-test("DS19 выходной без часов, рабочая строка с обоими концами", async () => {
+test("DS19 выходной без часов, закрытое окно с часами, рабочая строка с обоими концами", async () => {
   const call = await loadRouter({ rows: { clinic_doctors: [activeDoctor] } });
 
-  const dayOffWithHours = await call({
+  // Пин обновлён осознанно. Раньше строка «не работает» с часами отвергалась:
+  // считалось, что она одновременно говорит «не работает» и «с девяти».
+  // Владелец салона попросил обратное — «если мастер отдыхает, закрыть окно
+  // или целый день», — и 040 сделала эту форму законной: часы у нерабочей
+  // строки читаются как ЗАКРЫТОЕ ОКНО и вычитаются из смены (test:master-prices,
+  // MP10–MP14). Выходной на весь день остался строкой без часов.
+  const closedWindow = await call({
     resource: "doctor-schedule",
     method: "POST",
     body: { doctorId: DOCTOR_ID, weekday: 3, isWorking: false, startMinute: 540, endMinute: 840 },
   });
-  assert.equal(dayOffWithHours.res.statusCode, 400, "строка не может одновременно говорить «не работает» и «с девяти»");
+  assert.equal(closedWindow.res.statusCode, 201, JSON.stringify(closedWindow.res.body));
 
   const workingWithoutHours = await call({
     resource: "doctor-schedule",

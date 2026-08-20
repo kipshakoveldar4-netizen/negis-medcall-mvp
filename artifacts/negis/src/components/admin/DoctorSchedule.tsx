@@ -40,6 +40,15 @@ type Shift = {
 
 type ScreenState = "loading" | "ready" | "failed" | "unavailable";
 
+/**
+ * Что заводим на дату. Булев флаг «работает» третье состояние выразить не мог:
+ * закрытое окно нерабочее, но с часами — ровно теми, которые сервер вычтет из
+ * смены.
+ */
+type ExceptionKind = "off" | "window" | "hours";
+
+type ExceptionDraft = { from: string; to: string; note: string; kind: ExceptionKind; start: string; end: string };
+
 /** Общепринятые русские сокращения. label.slice(0, 2) давал «По», «Че», «Пя». */
 const WEEKDAY_SHORT: Record<number, string> = { 1: "Пн", 2: "Вт", 3: "Ср", 4: "Чт", 5: "Пт", 6: "Сб", 7: "Вс" };
 
@@ -128,6 +137,25 @@ function timeToMinute(value: string): number | null {
 }
 
 /**
+ * Закрытое окно — нерабочая строка С часами.
+ *
+ * На сервере выходной и окно — одна и та же нерабочая строка, и различают их
+ * только часы. Без этой проверки окно на два часа читалось бы на экране как
+ * выходной на весь день, хотя вычитается из смены именно оно.
+ */
+function isClosedWindow(shift: Shift): boolean {
+  return !shift.isWorking && shift.startMinute !== null && shift.endMinute !== null;
+}
+
+/** Подпись строки: показывает то, что в ней лежит, и ничего сверх того. */
+function shiftStateText(shift: Shift): string {
+  const hours = `${minuteToTime(shift.startMinute)}–${minuteToTime(shift.endMinute)}`;
+  if (isClosedWindow(shift)) return `Закрыто ${hours}`;
+  if (!shift.isWorking) return "Выходной";
+  return hours;
+}
+
+/**
  * Детали сервера по-русски. Оператор не должен читать `weekday must be…`.
  *
  * Функция от словаря ниши, а не константа: сервер говорит «врач» для любой
@@ -139,8 +167,16 @@ function detailTextFor(terms: Terms): Record<string, string> {
     "fullName must be unique within the workspace": `${capitalize(terms.specialist)} с таким именем уже есть.`,
     "doctorId is required": `Сначала выберите ${terms.specialistGenitive}.`,
     "either weekday or onDate is required, not both": "Строка графика — либо день недели, либо дата.",
-    "a day off must not carry working hours": `У выходного не может быть часов ${terms.dutyGenitive}.`,
+    // Прежний перевод «у выходного не может быть часов» объяснял отказ,
+    // которого больше нет: нерабочая строка с часами — это закрытое окно.
     "startMinute and endMinute are required for a working row": `Укажите начало и конец ${terms.dutyGenitive}.`,
+    "startMinute and endMinute are required for a closed window": "Укажите, с какого и по какое время закрыто.",
+    "startMinute and endMinute must be numbers": "Время указывается как 09:00.",
+    "startMinute and endMinute must be integers": "Время указывается как 09:00.",
+    "startMinute must be between 0 and 1439": "Начало должно попадать в сутки: от 00:00 до 23:59.",
+    "weekday must be an integer between 1 (Monday) and 7 (Sunday)": "День недели выбран неверно.",
+    "onDate must be a valid date": "Дата указана неверно.",
+    "onDateEnd must be a valid date": "Дата окончания указана неверно.",
     "endMinute must be after startMinute and no more than 24 hours later":
       `Конец ${terms.dutyGenitive} должен быть позже начала и не длиннее суток.`,
     "onDateEnd must not be earlier than onDate": "Конец периода не может быть раньше начала.",
@@ -186,7 +222,10 @@ export function DoctorSchedule() {
   const [editingId, setEditingId] = useState("");
   const [form, setForm] = useState({ fullName: "", specialty: "", capacity: "1", sortOrder: "0", isActive: true });
   const [saving, setSaving] = useState(false);
-  const [exception, setException] = useState({ from: "", to: "", note: "", working: false, start: "09:00", end: "18:00" });
+  const [exception, setException] = useState<ExceptionDraft>({ from: "", to: "", note: "", kind: "off", start: "09:00", end: "18:00" });
+  // weekday === 0 — форма окна закрыта: ноль не бывает днём недели по ISO, и
+  // отдельный флаг «открыта» тут ничего бы не добавил.
+  const [weekdayWindow, setWeekdayWindow] = useState({ weekday: 0, start: "13:00", end: "14:00", note: "" });
 
   const generation = useRef(0);
 
@@ -347,7 +386,10 @@ export function DoctorSchedule() {
     // Строк на один день может оказаться несколько: правится КАЖДАЯ. Прежняя
     // версия трогала первую, рапортовала успех — и правило продолжало читать
     // вторую, то есть экран показывал одно, а сервер судил по другому.
-    const existing = weeklyByDay.get(iso) ?? [];
+    // Закрытые окна этого дня — отдельные строки, и правка часов смены их не
+    // касается: PATCH превратил бы окно во вторую рабочую строку, и день
+    // остался бы разом и без окна, и с дублем смены.
+    const existing = (weeklyByDay.get(iso) ?? []).filter((row) => !isClosedWindow(row));
     const payload = { doctorId: selectedId, weekday: iso, isWorking: true, startMinute, endMinute: normalizedEnd };
     let ok = true;
     if (existing.length === 0) {
@@ -364,7 +406,7 @@ export function DoctorSchedule() {
 
   const setDayOff = async (iso: number) => {
     if (!selectedId) return;
-    const existing = weeklyByDay.get(iso) ?? [];
+    const existing = (weeklyByDay.get(iso) ?? []).filter((row) => !isClosedWindow(row));
     const payload = { doctorId: selectedId, weekday: iso, isWorking: false, startMinute: null, endMinute: null };
     let ok = true;
     if (existing.length === 0) {
@@ -379,6 +421,35 @@ export function DoctorSchedule() {
     await load({ quiet: true });
   };
 
+  /**
+   * Окно внутри дня недели: нерабочая строка С часами, которую сервер вычтет
+   * из смены.
+   *
+   * Всегда POST и никогда PATCH: окон в одном дне бывает несколько — обед и
+   * отъезд не одно и то же, — и правка первой строки съела бы вторую.
+   */
+  const closeWeekdayWindow = async (iso: number) => {
+    if (!selectedId) return;
+    const startMinute = timeToMinute(weekdayWindow.start);
+    const endMinute = timeToMinute(weekdayWindow.end);
+    if (startMinute === null || endMinute === null) {
+      toast.error("Время указывается как 09:00");
+      return;
+    }
+    const ok = await write("/api/crm/doctor-schedule", "POST", {
+      doctorId: selectedId,
+      weekday: iso,
+      isWorking: false,
+      startMinute,
+      endMinute: endMinute <= startMinute ? endMinute + 1440 : endMinute,
+      note: weekdayWindow.note.trim(),
+    });
+    if (!ok) return;
+    setWeekdayWindow({ weekday: 0, start: "13:00", end: "14:00", note: "" });
+    toast.success("Окно закрыто");
+    await load({ quiet: true });
+  };
+
   const addException = async () => {
     if (!selectedId) return;
     if (!exception.from) {
@@ -389,10 +460,12 @@ export function DoctorSchedule() {
       doctorId: selectedId,
       onDate: exception.from,
       onDateEnd: exception.to || exception.from,
-      isWorking: exception.working,
+      isWorking: exception.kind === "hours",
       note: exception.note.trim(),
     };
-    if (exception.working) {
+    // Часы едут и у особых часов, и у закрытого окна: у второго они — ровно то,
+    // что сервер вычтет из смены. Без часов строка стала бы выходным на день.
+    if (exception.kind !== "off") {
       const start = timeToMinute(exception.start);
       const end = timeToMinute(exception.end);
       if (start === null || end === null) {
@@ -400,12 +473,25 @@ export function DoctorSchedule() {
         return;
       }
       payload.startMinute = start;
-      payload.endMinute = end <= start ? end + 1440 : end;
+      if (exception.kind === "window") {
+        // Закрытое окно за полночь не заворачивается. Смена — может: ночной
+        // приём существует. А «закрыто с 13:00 по 13:00», превращённое в
+        // 13:00–13:00 следующих суток, тихо отрезало бы весь остаток дня, и
+        // строка в списке при этом читалась бы как безобидная.
+        if (end <= start) {
+          toast.error("Конец окна должен быть позже начала");
+          return;
+        }
+        payload.endMinute = end;
+      } else {
+        payload.endMinute = end <= start ? end + 1440 : end;
+      }
     }
     const ok = await write("/api/crm/doctor-schedule", "POST", payload);
     if (!ok) return;
-    setException({ from: "", to: "", note: "", working: false, start: "09:00", end: "18:00" });
-    toast.success("Исключение добавлено");
+    const kind = exception.kind;
+    setException({ from: "", to: "", note: "", kind: "off", start: "09:00", end: "18:00" });
+    toast.success(kind === "window" ? "Окно закрыто" : kind === "hours" ? "Особые часы сохранены" : "День закрыт");
     await load({ quiet: true });
   };
 
@@ -586,6 +672,10 @@ export function DoctorSchedule() {
               {WEEKDAYS.map((day) => {
                 const rows = weeklyByDay.get(day.iso) ?? [];
                 const working = rows.find((shift) => shift.isWorking) ?? null;
+                // Окна — отдельные строки того же дня: смена остаётся рабочей,
+                // а эти часы сервер из неё вычитает.
+                const windows = rows.filter(isClosedWindow);
+                const draftOpen = weekdayWindow.weekday === day.iso;
                 return (
                   <div key={day.iso} className="flex flex-wrap items-center gap-2 rounded-2xl border border-[#E2E8F0] bg-white/70 p-3">
                     <span className="w-32 text-sm font-bold text-[#0F172A]">{day.label}</span>
@@ -617,9 +707,18 @@ export function DoctorSchedule() {
                           <span className="text-xs font-semibold text-[#0369A1]">следующий день</span>
                         ) : null}
                         {canManage ? (
-                          <button type="button" className="neu-btn px-3 py-1.5 text-xs" onClick={() => void setDayOff(day.iso)}>
-                            Не работает
-                          </button>
+                          <>
+                            <button
+                              type="button"
+                              className="neu-btn px-3 py-1.5 text-xs"
+                              onClick={() => setWeekdayWindow({ weekday: day.iso, start: "13:00", end: "14:00", note: "" })}
+                            >
+                              Закрыть окно
+                            </button>
+                            <button type="button" className="neu-btn px-3 py-1.5 text-xs" onClick={() => void setDayOff(day.iso)}>
+                              Закрыть день
+                            </button>
+                          </>
                         ) : null}
                       </>
                     ) : (
@@ -638,13 +737,69 @@ export function DoctorSchedule() {
                         ) : null}
                       </>
                     )}
+                    {windows.length > 0 ? (
+                      <div className="basis-full text-xs font-semibold text-[#B45309]">
+                        {windows.map((shift) => (
+                          <span key={shift.id} className="mr-3 inline-block">
+                            {shiftStateText(shift)}
+                            {shift.note ? ` · ${shift.note}` : ""}
+                          </span>
+                        ))}
+                      </div>
+                    ) : null}
+                    {canManage && draftOpen ? (
+                      <div className="basis-full mt-1 flex flex-wrap items-end gap-2 border-t border-[#E2E8F0] pt-2">
+                        <label className="block">
+                          <span className="mb-1 block text-xs font-bold uppercase text-[#64748B]">Закрыто с</span>
+                          <input
+                            className="neu-input w-28"
+                            type="time"
+                            step={300}
+                            value={weekdayWindow.start}
+                            onChange={(event) => setWeekdayWindow((c) => ({ ...c, start: event.target.value }))}
+                          />
+                        </label>
+                        <label className="block">
+                          <span className="mb-1 block text-xs font-bold uppercase text-[#64748B]">по</span>
+                          <input
+                            className="neu-input w-28"
+                            type="time"
+                            step={300}
+                            value={weekdayWindow.end}
+                            onChange={(event) => setWeekdayWindow((c) => ({ ...c, end: event.target.value }))}
+                          />
+                        </label>
+                        <label className="block min-w-[160px] flex-1">
+                          <span className="mb-1 block text-xs font-bold uppercase text-[#64748B]">Причина</span>
+                          <input
+                            className="neu-input w-full"
+                            value={weekdayWindow.note}
+                            onChange={(event) => setWeekdayWindow((c) => ({ ...c, note: event.target.value }))}
+                            placeholder="Обед, планёрка…"
+                          />
+                        </label>
+                        <button type="button" className="neu-btn-primary px-4 py-2 text-xs" onClick={() => void closeWeekdayWindow(day.iso)}>
+                          Закрыть окно
+                        </button>
+                        <button
+                          type="button"
+                          className="neu-btn px-3 py-2 text-xs"
+                          onClick={() => setWeekdayWindow((c) => ({ ...c, weekday: 0 }))}
+                        >
+                          Отмена
+                        </button>
+                        <p className="w-full text-xs text-[#64748B]">
+                          Эти часы вычитаются из смены дня: остальное время остаётся рабочим.
+                        </p>
+                      </div>
+                    ) : null}
                   </div>
                 );
               })}
             </div>
 
             <div>
-              <h3 className="mb-2 text-sm font-black text-[#0F172A]">Исключения: отпуск, выходной, особые часы</h3>
+              <h3 className="mb-2 text-sm font-black text-[#0F172A]">Исключения: отпуск, выходной, закрытое окно, особые часы</h3>
               <p className="mb-2 text-xs text-[#64748B]">
                 Исключение можно перенести на другую дату, но удалить его в этой версии нельзя — у строк графика ещё нет
                 архивирования.
@@ -659,10 +814,11 @@ export function DoctorSchedule() {
                         {shift.onDate}
                         {shift.onDateEnd && shift.onDateEnd !== shift.onDate ? ` — ${shift.onDateEnd}` : ""}
                       </span>
-                      <span className="text-[#64748B]">
-                        {shift.isWorking
-                          ? `${minuteToTime(shift.startMinute)}–${minuteToTime(shift.endMinute)}`
-                          : "не работает"}
+                      {/* Общее «не работает» стирало разницу: у выходного
+                          закрыт весь день, у окна — только его часы, а запись
+                          вокруг них проходит. */}
+                      <span className={isClosedWindow(shift) ? "font-semibold text-[#B45309]" : "text-[#64748B]"}>
+                        {shiftStateText(shift)}
                       </span>
                       {shift.note ? <span className="text-[#64748B]">· {shift.note}</span> : null}
                       {canManage ? (
@@ -695,14 +851,30 @@ export function DoctorSchedule() {
                     <span className="mb-1 block text-xs font-bold uppercase text-[#64748B]">По</span>
                     <input className="neu-input w-40" type="date" value={exception.to} onChange={(event) => setException((c) => ({ ...c, to: event.target.value }))} />
                   </label>
-                  <label className="flex items-center gap-2 text-sm font-semibold text-[#334155]">
-                    <input type="checkbox" checked={exception.working} onChange={(event) => setException((c) => ({ ...c, working: event.target.checked }))} />
-                    Особые часы
+                  <label className="block">
+                    <span className="mb-1 block text-xs font-bold uppercase text-[#64748B]">Что делаем</span>
+                    <select
+                      className="neu-input w-56"
+                      value={exception.kind}
+                      onChange={(event) => setException((c) => ({ ...c, kind: event.target.value as ExceptionKind }))}
+                    >
+                      <option value="off">Закрыть день целиком</option>
+                      <option value="window">Закрыть окно внутри дня</option>
+                      <option value="hours">Особые часы</option>
+                    </select>
                   </label>
-                  {exception.working ? (
+                  {exception.kind !== "off" ? (
                     <>
-                      <input className="neu-input w-28" type="time" step={300} value={exception.start} onChange={(event) => setException((c) => ({ ...c, start: event.target.value }))} />
-                      <input className="neu-input w-28" type="time" step={300} value={exception.end} onChange={(event) => setException((c) => ({ ...c, end: event.target.value }))} />
+                      <label className="block">
+                        <span className="mb-1 block text-xs font-bold uppercase text-[#64748B]">
+                          {exception.kind === "window" ? "Закрыто с" : "Часы с"}
+                        </span>
+                        <input className="neu-input w-28" type="time" step={300} value={exception.start} onChange={(event) => setException((c) => ({ ...c, start: event.target.value }))} />
+                      </label>
+                      <label className="block">
+                        <span className="mb-1 block text-xs font-bold uppercase text-[#64748B]">по</span>
+                        <input className="neu-input w-28" type="time" step={300} value={exception.end} onChange={(event) => setException((c) => ({ ...c, end: event.target.value }))} />
+                      </label>
                     </>
                   ) : null}
                   <label className="block flex-1 min-w-[180px]">
@@ -710,8 +882,15 @@ export function DoctorSchedule() {
                     <input className="neu-input w-full" value={exception.note} onChange={(event) => setException((c) => ({ ...c, note: event.target.value }))} placeholder="Отпуск, конференция…" />
                   </label>
                   <button type="button" className="neu-btn-primary px-4 py-2 text-sm" onClick={() => void addException()}>
-                    Добавить
+                    {exception.kind === "window" ? "Закрыть окно" : exception.kind === "off" ? "Закрыть день" : "Сохранить особые часы"}
                   </button>
+                  {exception.kind === "window" ? (
+                    <p className="w-full text-xs text-[#64748B]">
+                      Строка на дату замещает недельный образец целиком. Чтобы в этот день работали остальные часы,
+                      добавьте на ту же дату «Особые часы» — окно вычтется из них. Одно окно без часов закроет день
+                      полностью, но с указанной причиной.
+                    </p>
+                  ) : null}
                 </div>
               ) : null}
             </div>

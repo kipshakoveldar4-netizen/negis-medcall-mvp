@@ -85,22 +85,32 @@ type CatalogService = {
 /**
  * Справочник услуг для формы записи.
  *
+ * doctorId сужает прайс до услуг ЭТОГО мастера плюс общих услуг клиники.
+ * Кто хозяин услуги, знает сервер, поэтому сужает он, а не клиентский фильтр:
+ * иначе экран решал бы за прайс, чего в нём нет.
+ *
  * Отказ здесь — не ошибка экрана: у роли может не быть права на чтение
  * каталога, а до применения миграции 032 его вовсе нет. В обоих случаях
  * правильный ответ один — пустой список, и поле «Услуга» остаётся тем же
  * текстовым вводом, что и раньше.
+ *
+ * Но наружу уходит ещё и признак «ответ получен»: пустой прайс мастера и
+ * несостоявшийся запрос выглядят одинаково, а значат противоположное. Во
+ * втором случае сужать список нельзя — экран соврал бы, что у мастера нет
+ * услуг, и увёл бы у оператора уже сделанный выбор.
  */
-async function loadCatalogServices(): Promise<CatalogService[]> {
-  if (!isRealWorkspace()) return [];
+async function loadCatalogServices(doctorId = ""): Promise<{ services: CatalogService[]; ok: boolean }> {
+  if (!isRealWorkspace()) return { services: [], ok: false };
   try {
     const workspaceId = readCurrentWorkspaceId();
-    const response = await crmFetch(`/api/crm/clinic-services?workspaceId=${encodeURIComponent(workspaceId)}`);
+    const scope = doctorId ? `&doctorId=${encodeURIComponent(doctorId)}` : "";
+    const response = await crmFetch(`/api/crm/clinic-services?workspaceId=${encodeURIComponent(workspaceId)}${scope}`);
     const text = await response.text();
     const body = text ? (JSON.parse(text) as { success?: boolean; mode?: string; data?: Record<string, unknown> }) : null;
-    if (!response.ok || body?.success !== true || body.mode !== "supabase") return [];
+    if (!response.ok || body?.success !== true || body.mode !== "supabase") return { services: [], ok: false };
     const raw = body.data?.services ?? body.data?.items;
     const list = Array.isArray(raw) ? raw : [];
-    return list
+    const services = list
       .map((item) => {
         const record = asRecord(item);
         const duration = record.durationMinutes ?? record.duration_minutes;
@@ -116,8 +126,9 @@ async function loadCatalogServices(): Promise<CatalogService[]> {
         };
       })
       .filter((service) => service.id && service.name);
+    return { services, ok: true };
   } catch {
-    return [];
+    return { services: [], ok: false };
   }
 }
 
@@ -880,6 +891,16 @@ export function AppointmentsPage() {
   const [saving, setSaving] = useState(false);
 
   const [catalog, setCatalog] = useState<CatalogService[]>([]);
+  // Прайс, суженный под выбранного в форме мастера. Отдельное состояние, а не
+  // замена catalog: тот питает фильтр списка записей, и сужать его под форму
+  // значило бы прятать из фильтра услуги, которые в записях уже стоят.
+  const [doctorCatalog, setDoctorCatalog] = useState<{ doctorId: string; services: CatalogService[]; canPrune: boolean } | null>(null);
+  // Подпись под полем «Услуга»: почему выбор сбросился или почему прайс не сузился.
+  const [serviceScopeNotice, setServiceScopeNotice] = useState("");
+  // Мастер, под которого прайс уже сужен в ЭТОЙ сессии модалки. Отличает смену
+  // мастера оператором от первого открытия карточки: на открытии снимать связь
+  // с услугой нельзя — это молча переписало бы уже сохранённую запись.
+  const scopedDoctorRef = useRef<string | null>(null);
   const [directory, setDirectory] = useState<{ items: DirectoryDoctor[]; available: boolean }>({ items: [], available: false });
   const [shifts, setShifts] = useState<DoctorShift[]>([]);
   const [clinicTimeZone, setClinicTimeZone] = useState("");
@@ -919,8 +940,11 @@ export function AppointmentsPage() {
 
   useEffect(() => {
     let cancelled = false;
-    void loadCatalogServices().then((list) => {
-      if (!cancelled) setCatalog(list);
+    // Весь прайс клиники: он питает фильтр списка записей, поэтому под
+    // выбранного в форме мастера не сужается — иначе из фильтра пропали бы
+    // услуги, которые в записях уже есть.
+    void loadCatalogServices().then((result) => {
+      if (!cancelled) setCatalog(result.services);
     });
     void loadDirectory("/api/crm/clinic-doctors", "doctors", "directoryAvailable", directoryDoctorFromApi).then((result) => {
       if (!cancelled) setDirectory(result);
@@ -937,6 +961,99 @@ export function AppointmentsPage() {
       cancelled = true;
     };
   }, []);
+
+  /**
+   * Прайс сужается под выбранного мастера.
+   *
+   * Список перезапрашивается с doctorId, а не фильтруется здесь: у услуги есть
+   * хозяин, и какая из них общая, а какая чужая, знает только сервер. Мастер не
+   * выбран — поведение прежнее, весь прайс клиники.
+   */
+  useEffect(() => {
+    if (!modalOpen) {
+      // Закрытая модалка стирает память о мастере: следующее открытие снова
+      // считается первым, и выбор услуги на нём не трогается.
+      scopedDoctorRef.current = null;
+      setServiceScopeNotice("");
+      return;
+    }
+
+    const doctorId = form.doctorId;
+    // null — прайс в этой сессии модалки ещё не сужали, значит это открытие
+    // карточки, а не смена мастера оператором.
+    const previous = scopedDoctorRef.current;
+    const changedByOperator = previous !== null && previous !== doctorId;
+
+    if (!doctorId) {
+      scopedDoctorRef.current = "";
+      setDoctorCatalog(null);
+      setServiceScopeNotice("");
+      return;
+    }
+
+    let cancelled = false;
+    void loadCatalogServices(doctorId).then((result) => {
+      // Ответ про прошлого мастера, пришедший вторым, переписал бы список уже
+      // выбранного: эффект гасит собственные догоняющие ответы.
+      if (cancelled) return;
+      if (!result.ok) {
+        // Отказ и «услуг нет» на экране неразличимы, поэтому сужения не будет:
+        // остаётся весь прайс, а причина говорится вслух.
+        setDoctorCatalog(null);
+        setServiceScopeNotice("Не удалось загрузить прайс мастера — показан весь прайс клиники");
+        return;
+      }
+      // Отметка ставится только на применённом списке: пока сужение не
+      // доехало, следующий запуск обязан считать мастера всё ещё прежним.
+      scopedDoctorRef.current = doctorId;
+      setDoctorCatalog({ doctorId, services: result.services, canPrune: changedByOperator });
+      setServiceScopeNotice("");
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [modalOpen, form.doctorId]);
+
+  // Закрыли модалку — забыли всё, что знали про прайс мастера.
+  //
+  // Иначе следующее открытие начинается с чужим сужением и с уже взведённым
+  // canPrune: карточка сохранённой записи, открытая на правку, молча теряла
+  // связь с услугой — «сброс вслух» срабатывал там, где оператор ничего не
+  // менял. Ссылка scopedDoctorRef обнуляется вместе с состоянием, иначе она
+  // соврёт следующему запуску, что мастера уже применяли.
+  useEffect(() => {
+    if (modalOpen) return;
+    setDoctorCatalog(null);
+    setServiceScopeNotice("");
+    scopedDoctorRef.current = "";
+  }, [modalOpen]);
+
+  /**
+   * Услуга, выбранная под прошлого мастера, могла не пережить сужение прайса.
+   *
+   * Пустое поле без объяснения оператор прочитал бы как сбой экрана, поэтому
+   * связь снимается вслух — подписью под полем. Сверка идёт с ПОЛНЫМ ответом
+   * сервера, а не с активными строками: услуга этого же мастера, уехавшая в
+   * архив, связи не теряет — её показывает отдельный вариант списка.
+   */
+  useEffect(() => {
+    if (!doctorCatalog || !doctorCatalog.canPrune) return;
+    if (doctorCatalog.doctorId !== form.doctorId) return;
+    if (!form.serviceId) return;
+    if (doctorCatalog.services.some((service) => service.id === form.serviceId)) {
+      setServiceScopeNotice("");
+      return;
+    }
+    setServiceScopeNotice(
+      form.service
+        ? `Услуга «${form.service}» не входит в прайс выбранного ${terms.specialistGenitive} — выберите услугу заново`
+        : `Прежняя услуга не входит в прайс выбранного ${terms.specialistGenitive} — выберите услугу заново`,
+    );
+    // Снимается ровно связь со справочником. Снимок названия остаётся: его
+    // правят руками, и стереть правку из-за смены мастера — потерять данные,
+    // а название названо в подписи, так что оператор видит, что было.
+    setForm((current) => ({ ...current, serviceId: "" }));
+  }, [doctorCatalog, form.doctorId, form.service, form.serviceId, terms.specialistGenitive]);
 
   /** Активные врачи в порядке справочника — то, из чего выбирают в форме. */
   const activeDoctors = useMemo(
@@ -973,11 +1090,35 @@ export function AppointmentsPage() {
     [catalog, items],
   );
 
+  /**
+   * Прайс, из которого выбирает форма: у выбранного мастера — его услуги плюс
+   * общие услуги клиники, пока мастер не выбран — весь прайс, как и раньше.
+   * Пока сужение едет с сервера, показывается прежний полный список: пустой
+   * на эти доли секунды читался бы как «услуг нет».
+   */
+  const formCatalog = useMemo(
+    () => (doctorCatalog && doctorCatalog.doctorId === form.doctorId ? doctorCatalog.services : catalog),
+    [catalog, doctorCatalog, form.doctorId],
+  );
+
   /** Активные услуги в порядке справочника — то, из чего выбирают в форме. */
   const activeCatalog = useMemo(
-    () => catalog.filter((service) => service.isActive).sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name, "ru")),
-    [catalog],
+    () => formCatalog.filter((service) => service.isActive).sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name, "ru")),
+    [formCatalog],
   );
+
+  // Сужение до нуля тоже надо сказать словами: поле «Услуга» само собой
+  // превратилось бы в текстовый ввод, и оператор решил бы, что справочник
+  // сломался.
+  const serviceScopeText = serviceScopeNotice
+    || (doctorCatalog && doctorCatalog.doctorId === form.doctorId && activeCatalog.length === 0
+      ? `В прайсе выбранного ${terms.specialistGenitive} нет услуг — впишите название вручную`
+      : "");
+  const serviceScopeHint = serviceScopeText ? (
+    <p className="mt-1 text-[11px] font-semibold text-amber-700" data-testid="appointment-service-scope">
+      {serviceScopeText}
+    </p>
+  ) : null;
   const slots = useMemo(() => generateSlots(), []);
 
   const weekStart = useMemo(() => startOfWeekKey(selectedDate), [selectedDate]);
@@ -1770,6 +1911,9 @@ export function AppointmentsPage() {
                     label="Услуга"
                     value={form.serviceId || OTHER_SERVICE_OPTION}
                     onChange={(value) => {
+                      // Оператор выбрал услугу сам — подпись про снятую связь
+                      // больше ничего не объясняет.
+                      setServiceScopeNotice("");
                       if (value === OTHER_SERVICE_OPTION) {
                         setForm((current) => ({ ...current, serviceId: "" }));
                         return;
@@ -1801,6 +1945,7 @@ export function AppointmentsPage() {
                     ) : null}
                     <option value={OTHER_SERVICE_OPTION}>Другая услуга…</option>
                   </SelectField>
+                  {serviceScopeHint}
                   {/* Название видно всегда: связь ссылается на строку каталога,
                       а в записи хранится снимок на момент визита, и переименование
                       услуги не должно менять того, что записано в карточке. */}
@@ -1813,7 +1958,10 @@ export function AppointmentsPage() {
                   </div>
                 </div>
               ) : (
-                <TextField label="Услуга" value={form.service} onChange={(service) => setForm((current) => ({ ...current, service, serviceId: "" }))} />
+                <div>
+                  <TextField label="Услуга" value={form.service} onChange={(service) => setForm((current) => ({ ...current, service, serviceId: "" }))} />
+                  {serviceScopeHint}
+                </div>
               )}
               {/*
                 Раньше это был закрытый список из четырёх выдуманных имён:

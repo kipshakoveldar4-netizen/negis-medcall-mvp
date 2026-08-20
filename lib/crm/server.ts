@@ -908,15 +908,22 @@ function doctorShiftDetails(body: JsonRecord, options: { partial?: boolean } = {
   const start = readNullableNumber(rawStart);
   const end = readNullableNumber(rawEnd);
 
-  if (!isWorking) {
-    // Выходной — это пустые часы. Часы у выходного означали бы строку, которая
-    // одновременно говорит «не работает» и «работает с девяти».
-    if (start !== null || end !== null) details.push("a day off must not carry working hours");
+  // Нерабочая строка БЕЗ часов — выходной на весь день. Нерабочая строка С
+  // часами — закрытое окно: «уехала с 14 до 16». Раньше второе запрещалось, и
+  // обеденный перерыв приходилось изображать разрывом смены — то есть удалять
+  // рабочую строку и заводить две. Часы у обеих строк проверяются одинаково:
+  // окно, у которого конец раньше начала, так же бессмысленно, как смена.
+  const closedWindow = !isWorking && (start !== null || end !== null || isUnreadableNumber(rawStart) || isUnreadableNumber(rawEnd));
+
+  if (!isWorking && !closedWindow) {
+    // Выходной на весь день — часов нет, и проверять нечего.
   } else {
     if (isUnreadableNumber(rawStart) || isUnreadableNumber(rawEnd)) {
       details.push("startMinute and endMinute must be numbers");
     } else if (start === null || end === null) {
-      details.push("startMinute and endMinute are required for a working row");
+      details.push(closedWindow
+        ? "startMinute and endMinute are required for a closed window"
+        : "startMinute and endMinute are required for a working row");
     } else if (!Number.isInteger(start) || !Number.isInteger(end)) {
       details.push("startMinute and endMinute must be integers");
     } else if (start < 0 || start >= MINUTES_IN_DAY) {
@@ -1166,6 +1173,8 @@ function makeClinicService(body: JsonRecord): JsonRecord {
     description: readString(body.description),
     sortOrder: readNumber(body.sortOrder ?? body.sort_order) ?? 0,
     isActive: hasAnyKey(body, ["isActive", "is_active"]) ? readBoolean(body.isActive ?? body.is_active) : true,
+    // Чей это прайс. Пусто — общая услуга клиники, видимая у всех мастеров.
+    doctorId: firstString(body.doctorId, body.doctor_id),
     createdAt: firstString(body.createdAt, body.created_at),
     updatedAt: firstString(body.updatedAt, body.updated_at),
   };
@@ -3070,23 +3079,87 @@ function intervalsForDate(input: {
     return Boolean(from) && from <= input.localDate && input.localDate <= to;
   });
 
-  const source = covering.length > 0
-    ? covering
-    : input.weekly.filter((row) => readNullableNumber(row.weekday) === input.isoWeekday);
+  // Строка дня и строка-окно — разные вещи, и путать их нельзя.
+  //
+  // Исключение на дату замещает недельный образец: «в эту субботу работаем с
+  // 10 до 15» отменяет обычные часы. Но ЗАКРЫТОЕ ОКНО ничего не замещает — оно
+  // вырезается. Пока это различие не проводилось, «закрыть окно 14:00–16:00 на
+  // 25 августа» закрывало мастеру весь день: одна строка на дату вытесняла
+  // недельную смену, а сама рабочих часов не несла.
+  const definesDay = (row: ShiftRow) =>
+    readBoolean(row.is_working) || readNullableNumber(row.start_minute) === null;
+
+  const datedBase = covering.filter(definesDay);
+  const datedWindows = covering.filter((row) => !definesDay(row));
+  const weeklyForDay = input.weekly.filter((row) => readNullableNumber(row.weekday) === input.isoWeekday);
+
+  // День описывает дата, если она вообще что-то о нём говорит; иначе неделя.
+  // Окна с даты действуют всегда — их и завели на эту дату. Окна недели
+  // применяются только к недельному дню: у дня с особыми часами свой распорядок,
+  // и обеденный перерыв обычного дня к нему не относится.
+  const baseRows = datedBase.length > 0 ? datedBase : weeklyForDay.filter(definesDay);
+  const windowRows = datedBase.length > 0
+    ? datedWindows
+    : [...datedWindows, ...weeklyForDay.filter((row) => !definesDay(row))];
+
+  const source = [...baseRows, ...windowRows];
 
   if (source.length === 0) return { intervals: [], explicitDayOff: false, hasRule: false };
 
-  const explicitDayOff = source.every((row) => !readBoolean(row.is_working));
-  const intervals: Array<[number, number]> = [];
+  // Весь день закрыт — это строка «не работает» БЕЗ часов, и одной такой
+  // строки достаточно: «сегодня выходной» сильнее соседней записи «работает с
+  // девяти», иначе выходной, добавленный к недельному образцу, не делал бы
+  // ничего и молчал бы об этом. Строка «не работает с 14 до 16» — не выходной,
+  // а окно: у неё есть часы, и она лишь вырезается из смены.
+  const explicitDayOff = source.some(
+    (row) => !readBoolean(row.is_working) && readNullableNumber(row.start_minute) === null,
+  );
+  if (explicitDayOff) return { intervals: [], explicitDayOff: true, hasRule: true };
+
+  const working: Array<[number, number]> = [];
+  const closed: Array<[number, number]> = [];
   for (const row of source) {
-    if (!readBoolean(row.is_working)) continue;
     const start = readNullableNumber(row.start_minute);
     const end = readNullableNumber(row.end_minute);
     if (start === null || end === null) continue;
-    intervals.push([start, end]);
+    (readBoolean(row.is_working) ? working : closed).push([start, end]);
   }
 
-  return { intervals, explicitDayOff, hasRule: true };
+  return { intervals: subtractClosed(working, closed), explicitDayOff, hasRule: true };
+}
+
+/**
+ * Рабочие часы минус закрытые окна.
+ *
+ * «Мастер отдыхает» бывает двух видов, и путать их нельзя: целый день (строка
+ * без часов) и окно внутри дня (строка с часами). Окно вырезается из смены, а
+ * не отменяет её: смена 09:00–21:00 с закрытым 14:00–16:00 — это два приёмных
+ * интервала, и запись на 15:00 отвергается, а на 17:00 проходит.
+ *
+ * Вырезание идёт по каждому рабочему интервалу отдельно и накопительно: два
+ * окна в одном дне режут смену на три куска. Пустой результат — законный
+ * ответ: окно, накрывшее смену целиком, закрывает день так же, как строка без
+ * часов, — с той разницей, что причина у него своя.
+ */
+function subtractClosed(
+  working: ReadonlyArray<[number, number]>,
+  closed: ReadonlyArray<[number, number]>,
+): Array<[number, number]> {
+  if (closed.length === 0) return [...working];
+  let pieces: Array<[number, number]> = [...working];
+  for (const [closedStart, closedEnd] of closed) {
+    const next: Array<[number, number]> = [];
+    for (const [start, end] of pieces) {
+      if (closedEnd <= start || closedStart >= end) {
+        next.push([start, end]);
+        continue;
+      }
+      if (closedStart > start) next.push([start, Math.min(closedStart, end)]);
+      if (closedEnd < end) next.push([Math.max(closedEnd, start), end]);
+    }
+    pieces = next;
+  }
+  return pieces;
 }
 
 /**
@@ -3368,11 +3441,55 @@ async function buildDealReferenceRow(
  * смоук-набор сверяет вызов той по точной строке, и смена сигнатуры уронила бы
  * проверку, которая к услугам отношения не имеет.
  */
+/**
+ * Хозяин строки прайса.
+ *
+ * У салона прайс не общий: у Айданы глубокое бикини стоит одно, у Аружан —
+ * другое. Поэтому услуга принадлежит мастеру, и ссылка проверяется тем же
+ * способом, что и все прочие в этом файле: идентификатор ищется ВНУТРИ
+ * клиники, чужая карточка отвергается до записи, пустая строка снимает
+ * владельца и делает услугу общей.
+ */
+async function buildServiceOwnerRow(
+  supabase: CrmSupabaseClient,
+  workspaceId: string,
+  body: JsonRecord,
+): Promise<JsonRecord> {
+  const row: JsonRecord = {};
+  if (!hasAnyKey(body, ["doctorId", "doctor_id"])) return row;
+
+  // Число, массив или объект вместо идентификатора — это ошибка вызывающего, а
+  // не «сделать услугу общей». Молчаливое приведение к пустой строке снимало бы
+  // хозяина и отвечало «сохранено»: прайс мастера расползался бы по клинике от
+  // одного непреобразованного значения из селекта.
+  const raw = body.doctorId ?? body.doctor_id;
+  if (typeof raw !== "string" && raw !== null && raw !== undefined) {
+    throw new CrmReferenceValidationError(["doctorId must be a valid id"]);
+  }
+
+  const doctorId = firstString(body.doctorId, body.doctor_id);
+  if (!doctorId) {
+    row.doctor_id = null;
+    return row;
+  }
+
+  const doctor = await readWorkspaceReference({
+    supabase,
+    workspaceId,
+    table: "clinic_doctors",
+    id: doctorId,
+    select: "id",
+    fieldName: "doctorId",
+  });
+  row.doctor_id = doctor.id;
+  return row;
+}
+
 async function buildServiceLinkRow(
   supabase: CrmSupabaseClient,
   workspaceId: string,
   body: JsonRecord,
-  options: { requireActive: boolean; prefillDuration: boolean },
+  options: { requireActive: boolean; prefillDuration: boolean; doctorId?: string },
 ): Promise<JsonRecord> {
   const row: JsonRecord = {};
   if (!hasAnyKey(body, ["serviceId", "service_id"])) return row;
@@ -3393,12 +3510,23 @@ async function buildServiceLinkRow(
     workspaceId,
     table: "clinic_services",
     id: serviceId,
-    select: "id,name,duration_minutes,is_active",
+    select: "id,name,duration_minutes,is_active,doctor_id",
     fieldName: "serviceId",
   });
 
   if (options.requireActive && !readBoolean(service.is_active)) {
     throw new CrmReferenceValidationError(["serviceId must be an active service"]);
+  }
+
+  // Услуга принадлежит мастеру — и записи к ДРУГОМУ мастеру не годится.
+  //
+  // Без этой проверки к Айдане можно записать по прайсу Аружан: то же название,
+  // другая цена, и она уедет в чек клиента. Общая услуга клиники (хозяина нет)
+  // подходит всем — на то она и общая.
+  const serviceOwner = readString(service.doctor_id);
+  const bookedDoctor = firstString(options.doctorId, body.doctorId, body.doctor_id);
+  if (serviceOwner && bookedDoctor && serviceOwner !== bookedDoctor) {
+    throw new CrmReferenceValidationError(["serviceId belongs to another specialist"]);
   }
 
   row.service_id = service.id;
@@ -3984,6 +4112,42 @@ async function listItems(resource: CrmResource, req: VercelRequest, res: VercelR
       }
     }
 
+    // Прайс одного мастера: его услуги ПЛЮС общие услуги клиники — ровно то,
+    // что форма записи должна показать, когда мастера уже выбрали. Условие
+    // здесь одно на два значения, поэтому это единственное место в файле, где
+    // фильтр собирается строкой PostgREST; безопасно оно ровно потому, что
+    // значение — проверенный uuid, а не свободный текст (см. own-work: там
+    // фильтровать приходится по ИМЕНИ, и строку собирать нельзя).
+    let servicesForDoctor = "";
+    // Мастер без карточки справочника: своего прайса нет, остаются только общие.
+    let servicesCommonOnly = false;
+    if (resource === "clinic-services") {
+      const doctorId = readQueryString(req.query.doctorId ?? req.query.doctor_id);
+      if (doctorId) {
+        if (!isUuid(doctorId)) {
+          return sendJson(res, 400, errorBody("Validation error", ["doctorId must be a valid id"]));
+        }
+        servicesForDoctor = doctorId;
+      }
+
+      // Мастеру — его прайс, и решает это сервер, а не параметр запроса.
+      //
+      // Цена коллеги мастеру не показывается по той же причине, по которой ему
+      // не показываются чужие записи: это чужая работа. Общие услуги клиники
+      // остаются видимыми — их и делают все.
+      const actor = readWorkspaceContext(req);
+      if (seesOnlyOwnWork(actor?.role)) {
+        const identity = await readOwnWorkIdentity(supabase, workspaceId, readString(actor?.staffUserId));
+        if (identity.readFailed && !identity.doctorId) {
+          console.warn("clinic-services: own-work identity is unknown after a failed read; refusing");
+          return sendJson(res, 502, errorBody("Не удалось прочитать справочник", ["own-work identity is unavailable"]));
+        }
+        // Карточки в справочнике нет — своего прайса тоже нет. Остаются общие.
+        servicesForDoctor = identity.doctorId || "";
+        servicesCommonOnly = !servicesForDoctor;
+      }
+    }
+
     // Редактор графика спрашивает узко — по одному врачу; форма записи читает
     // весь (небольшой) набор. Сужение того же авторизованного чтения, как у
     // задач: тот же маршрут, то же право, тот же скоуп.
@@ -4012,6 +4176,8 @@ async function listItems(resource: CrmResource, req: VercelRequest, res: VercelR
     // как у clients?phone: тот же маршрут, то же право, тот же скоуп.
     for (const [column, value] of equalities) query = query.eq(column, value);
     if (dueBefore) query = query.lt("due_at", dueBefore);
+    if (servicesForDoctor) query = query.or(`doctor_id.eq.${servicesForDoctor},doctor_id.is.null`);
+    if (servicesCommonOnly) query = query.is("doctor_id", null);
 
     // Мастеру — его записи, и решает это сервер.
     //
@@ -4322,6 +4488,9 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
       if (isUuid(author.actorStaffUserId)) row.created_by_staff_user_id = author.actorStaffUserId;
       row.created_by_kind = author.actorKind;
       if (readString(row.status) === "done") row.completed_at = new Date().toISOString();
+    }
+    if (resource === "clinic-services") {
+      Object.assign(row, await buildServiceOwnerRow(supabase, workspaceId, body));
     }
     if (resource === "clinic-doctors") {
       Object.assign(row, await buildDoctorStaffLinkRow(supabase, workspaceId, body));
@@ -4651,6 +4820,20 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
         "Телефон и почту клиента правит ресепшн — вам эти поля не показываются.",
       ]));
     }
+    // «Было» читается ДО построителей ссылок: проверка «услуга принадлежит
+    // этому мастеру» на правке иначе не знает мастера — тело правки часто несёт
+    // только услугу. Чтение ни от чего выше не зависит, поэтому перенос
+    // безопасен, а порядок стал честнее: сначала узнаём, что есть, потом решаем.
+    const patchedEntity = journaledEntityFor(resource);
+    const before = patchedEntity
+      ? await readRowBeforeChange(supabase, config.table, workspaceId, id)
+      : {};
+
+    // Пред-чтение возвращает пустой объект и тогда, когда прочитать строку не
+    // удалось. Судить по нему «поменялось ли время» нельзя: любое поле
+    // оказалось бы изменившимся, и оба гейта сработали бы на ровном месте.
+    const beforeIsReadable = Object.keys(before).length > 0;
+
     const row = stripContactWrites(buildPatchRow(resource, patchBody), readWorkspaceContext(req)?.role);
     if (resource === "leads") {
       Object.assign(row, await buildLeadReferenceRow(supabase, workspaceId, patchBody));
@@ -4674,6 +4857,9 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
         row.assignee_user_id = null;
       }
     }
+    if (resource === "clinic-services") {
+      Object.assign(row, await buildServiceOwnerRow(supabase, workspaceId, patchBody));
+    }
     if (resource === "clinic-doctors") {
       Object.assign(row, await buildDoctorStaffLinkRow(supabase, workspaceId, patchBody));
     }
@@ -4682,7 +4868,12 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
     }
     if (resource === "appointments") {
       Object.assign(row, await buildAppointmentReferenceRow(supabase, workspaceId, patchBody));
-      Object.assign(row, await buildServiceLinkRow(supabase, workspaceId, patchBody, { requireActive: false, prefillDuration: false }));
+      Object.assign(row, await buildServiceLinkRow(supabase, workspaceId, patchBody, {
+        requireActive: false,
+        prefillDuration: false,
+        // Мастера правка часто не присылает — тогда он тот же, что в записи.
+        doctorId: firstString(patchBody.doctorId, patchBody.doctor_id) || readString(before.doctor_id),
+      }));
       Object.assign(row, await buildDoctorLinkRow(supabase, workspaceId, patchBody, { requireActive: false }));
     }
 
@@ -4703,20 +4894,6 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
       }
       return sendJson(res, 200, success("supabase", { [resource === "content-videos" ? "video" : "item"]: demoItem, item: demoItem }));
     }
-
-    // «Было» приходится читать отдельно: PostgREST возвращает строку после
-    // записи, а не до, и полного пред-чтения в этом проекте не было нигде.
-    // Один лишний запрос — и только на журналируемых ресурсах, и только на
-    // записи, которая и так редка по сравнению с чтением.
-    const patchedEntity = journaledEntityFor(resource);
-    const before = patchedEntity
-      ? await readRowBeforeChange(supabase, config.table, workspaceId, id)
-      : {};
-
-    // Пред-чтение возвращает пустой объект и тогда, когда прочитать строку не
-    // удалось. Судить по нему «поменялось ли время» нельзя: любое поле
-    // оказалось бы изменившимся, и оба гейта сработали бы на ровном месте.
-    const beforeIsReadable = Object.keys(before).length > 0;
 
     // Чужую запись мастер не правит — и не читает.
     //

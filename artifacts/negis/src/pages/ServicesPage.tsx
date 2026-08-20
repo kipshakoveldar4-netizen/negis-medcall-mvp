@@ -31,11 +31,34 @@ type ClinicService = {
   description: string;
   sortOrder: number;
   isActive: boolean;
+  /** Чей это прайс. Пусто — общая услуга: её делают все. */
+  doctorId: string;
 };
+
+/**
+ * Мастер из справочника — ровно столько, сколько нужно прайсу.
+ *
+ * Специальность здесь не украшение: в салоне две Дильназ, найл-стилист и
+ * визажист, и по одному имени в списке выбрать нужную нельзя.
+ */
+type DirectoryDoctor = {
+  id: string;
+  fullName: string;
+  specialty: string;
+  sortOrder: number;
+  isActive: boolean;
+};
+
+/**
+ * Значение фильтра «только общие услуги». Столкнуться с идентификатором
+ * мастера оно не может: там uuid.
+ */
+const COMMON_FILTER = "common";
 
 type ServiceForm = {
   name: string;
   category: string;
+  doctorId: string;
   priceTenge: string;
   durationMinutes: string;
   sortOrder: string;
@@ -48,6 +71,7 @@ type ScreenState = "loading" | "ready" | "failed" | "unavailable";
 const emptyForm: ServiceForm = {
   name: "",
   category: "",
+  doctorId: "",
   priceTenge: "",
   durationMinutes: "",
   sortOrder: "0",
@@ -98,7 +122,35 @@ function serviceFromApi(record: Record<string, unknown>): ClinicService {
       record.isActive === undefined && record.is_active === undefined
         ? true
         : Boolean(record.isActive ?? record.is_active),
+    doctorId: readText(record.doctorId) || readText(record.doctor_id),
   };
+}
+
+function doctorFromApi(record: Record<string, unknown>): DirectoryDoctor {
+  return {
+    id: readText(record.id),
+    fullName: readText(record.fullName) || readText(record.full_name),
+    specialty: readText(record.specialty),
+    sortOrder: readNumberOrNull(record.sortOrder ?? record.sort_order) ?? 0,
+    isActive:
+      record.isActive === undefined && record.is_active === undefined
+        ? true
+        : Boolean(record.isActive ?? record.is_active),
+  };
+}
+
+function sortDoctors(items: DirectoryDoctor[]): DirectoryDoctor[] {
+  // Тот же порядок, что в справочнике и в форме записи: иначе один и тот же
+  // список мастеров выглядел бы на двух экранах по-разному.
+  return [...items].sort((a, b) => a.sortOrder - b.sortOrder || a.fullName.localeCompare(b.fullName, "ru"));
+}
+
+/** Имя со специальностью — единственный способ различить двух тёзок. */
+function doctorOptionLabel(doctor: DirectoryDoctor): string {
+  const base = doctor.specialty ? `${doctor.fullName} — ${doctor.specialty}` : doctor.fullName;
+  // Архивный мастер попадает в список только у своей же услуги, и он обязан
+  // быть подписан: иначе он неотличим от работающего.
+  return doctor.isActive ? base : `${base} · скрыт`;
 }
 
 /**
@@ -151,6 +203,8 @@ const DETAIL_TEXT: Record<string, string> = {
   "name must be unique within the workspace": "Услуга с таким названием уже есть.",
   "basePriceMinor must be an integer >= 0": "Цена должна быть целым неотрицательным числом.",
   "durationMinutes must be between 1 and 600": "Длительность должна быть от 1 до 600 минут.",
+  "doctorId must be a valid id": "Выберите мастера из списка.",
+  "doctorId does not belong to this workspace": "Такого мастера нет в справочнике.",
 };
 
 function refusalText(status: number, error: string, details: string[]): string {
@@ -179,14 +233,43 @@ async function readEnvelope(response: Response): Promise<ApiEnvelope | null> {
   }
 }
 
+/**
+ * Справочник мастеров читается рядом с прайсом и НИКОГДА его не роняет.
+ *
+ * Прайс — главное на этом экране, разбивка по мастерам — надстройка. Если
+ * справочника нет (миграция 033 не применена) или чтение отказало, экран
+ * обязан работать как раньше: услуги те же, просто без хозяина. Показать
+ * вместо этого ошибку значило бы спрятать успешно прочитанные цены из-за
+ * неудачи соседнего запроса.
+ */
+async function readDoctorsDirectory(): Promise<DirectoryDoctor[]> {
+  try {
+    const workspaceId = readWorkspaceId();
+    const response = await crmFetch(`/api/crm/clinic-doctors?workspaceId=${encodeURIComponent(workspaceId)}`);
+    const body = await readEnvelope(response);
+    if (!response.ok || body?.success !== true) {
+      console.warn("[services] doctors read failed", response.status, body?.error);
+      return [];
+    }
+    if (body.data?.directoryAvailable === false) return [];
+    const raw = body.data?.doctors ?? body.data?.items;
+    return sortDoctors((Array.isArray(raw) ? raw : []).map((item) => doctorFromApi(item as Record<string, unknown>)));
+  } catch (error) {
+    console.warn("[services] doctors read threw", error);
+    return [];
+  }
+}
+
 export default function ServicesPage() {
   const { userRole, rolePermissions, vertical } = useAuth();
   const terms = termsFor(vertical);
   const [services, setServices] = useState<ClinicService[]>([]);
   const [screen, setScreen] = useState<ScreenState>("loading");
   const [failureText, setFailureText] = useState("");
+  const [doctors, setDoctors] = useState<DirectoryDoctor[]>([]);
   const [search, setSearch] = useState("");
   const [category, setCategory] = useState("");
+  const [doctorFilter, setDoctorFilter] = useState("");
   const [showHidden, setShowHidden] = useState(false);
   const [formOpen, setFormOpen] = useState(false);
   const [editingId, setEditingId] = useState("");
@@ -220,15 +303,24 @@ export default function ServicesPage() {
       const stored = readDemoStorage<ClinicService[]>(workspaceScopedKey(DEMO_KEY), []);
       if (generation.current !== current) return;
       setServices(sortServices(stored.map((item) => serviceFromApi(item as unknown as Record<string, unknown>))));
+      // Справочник мастеров живёт в базе клиники, а не в этом браузере: без
+      // выбранной клиники разбивать прайс не по чему.
+      setDoctors([]);
       setScreen("ready");
       return;
     }
 
     try {
       const workspaceId = readWorkspaceId();
-      const response = await crmFetch(`/api/crm/clinic-services?workspaceId=${encodeURIComponent(workspaceId)}`);
+      // Справочник едет рядом с прайсом, а не после него: он нужен тому же
+      // экрану, и последовательное чтение удвоило бы ожидание на пустом месте.
+      const [response, directory] = await Promise.all([
+        crmFetch(`/api/crm/clinic-services?workspaceId=${encodeURIComponent(workspaceId)}`),
+        readDoctorsDirectory(),
+      ]);
       const body = await readEnvelope(response);
       if (generation.current !== current) return;
+      setDoctors(directory);
 
       if (!response.ok || body?.success !== true) {
         // Пустой список здесь был бы неправдой: «не удалось прочитать» и «услуг
@@ -292,6 +384,7 @@ export default function ServicesPage() {
     setForm({
       name: service.name,
       category: service.category,
+      doctorId: service.doctorId,
       priceTenge: priceInputFromMinor(service.basePriceMinor),
       durationMinutes: service.durationMinutes === null ? "" : String(service.durationMinutes),
       sortOrder: String(service.sortOrder),
@@ -329,8 +422,16 @@ export default function ServicesPage() {
       return;
     }
 
+    // Одинаковое название у РАЗНЫХ мастеров — норма, а не дубль: «Коррекция
+    // бровей» есть у четверых, и стоит она у каждого своё. Проверка без учёта
+    // хозяина запрещала бы завести прайс второму мастеру — ровно то, ради чего
+    // экран и переделывался. Сторож в базе теперь тоже уникален по паре
+    // (мастер, название), см. миграцию 040.
     const duplicate = services.some(
-      (service) => service.id !== editingId && service.isActive && service.name.trim().toLowerCase() === name.toLowerCase(),
+      (service) => service.id !== editingId
+        && service.isActive
+        && (service.doctorId || "") === (form.doctorId || "")
+        && service.name.trim().toLowerCase() === name.toLowerCase(),
     );
     if (duplicate) {
       // Клиентская проверка — удобство; настоящий сторож живёт в уникальном
@@ -354,6 +455,9 @@ export default function ServicesPage() {
     const fields = {
       name,
       category: form.category.trim(),
+      // Пустая строка — осознанный ответ «услуга общая», а не «поле не
+      // трогали»: сервер снимает ссылку именно по ней.
+      doctorId: form.doctorId,
       basePriceMinor: priceMinor,
       durationMinutes: duration,
       sortOrder: readNumberOrNull(form.sortOrder) ?? 0,
@@ -402,19 +506,91 @@ export default function ServicesPage() {
     [services],
   );
 
+  /** Из кого выбирают: архивный мастер новых услуг не получает. */
+  const activeDoctors = useMemo(() => doctors.filter((doctor) => doctor.isActive), [doctors]);
+
+  const doctorById = useMemo(() => new Map(doctors.map((doctor) => [doctor.id, doctor])), [doctors]);
+
+  /**
+   * Разбивка по мастерам появляется, только когда справочник прочитан.
+   *
+   * Иначе колонка написала бы «Общая» напротив каждой услуги — включая те, у
+   * которых хозяин есть, просто назвать его нечем. Отсутствие колонки честнее
+   * подписи, которая раздаёт всей клинике чужую работу.
+   */
+  const showDoctorGrouping = doctors.length > 0;
+
+  /**
+   * Список для формы: активные мастера плюс нынешний хозяин услуги, даже если
+   * его карточку уже скрыли. Без него селект показал бы первый пункт («общая»),
+   * и сохранение без единой правки молча отобрало бы услугу у мастера.
+   */
+  const formDoctorOptions = useMemo(() => {
+    if (!form.doctorId || activeDoctors.some((doctor) => doctor.id === form.doctorId)) return activeDoctors;
+    const owner = doctorById.get(form.doctorId);
+    return owner ? [...activeDoctors, owner] : activeDoctors;
+  }, [activeDoctors, doctorById, form.doctorId]);
+
+  /**
+   * Хозяин есть, а в справочнике его нет. Без отдельного пункта селект показал
+   * бы «Общая услуга», хотя отправит прежнего мастера, — то есть соврал бы про
+   * то, что сохранит.
+   */
+  const formOwnerMissing = Boolean(form.doctorId) && !doctorById.has(form.doctorId);
+
+  /** Колонка мастера появляется только тогда, когда её есть чем заполнить. */
+  const columns = useMemo(
+    () => [
+      "Название услуги",
+      "Категория",
+      ...(showDoctorGrouping ? [capitalize(terms.specialist)] : []),
+      "Цена",
+      "Длительность",
+      "Порядок",
+      "",
+    ],
+    [showDoctorGrouping, terms.specialist],
+  );
+
+  /**
+   * Чей прайс. Пустой doctorId — общая услуга клиники.
+   *
+   * Мастер, которого в справочнике нет, — это НЕ «Общая»: назвать так чужую
+   * услугу значило бы приписать её всем. Специальность стоит и здесь, потому
+   * что двух тёзок в таблице иначе не различить.
+   */
+  const renderOwner = (service: ClinicService) => {
+    if (!service.doctorId) return <span>Общая</span>;
+    const doctor = doctorById.get(service.doctorId);
+    if (!doctor) return <span>Не из справочника</span>;
+    return (
+      <span>
+        <span style={{ color: "var(--negis-text)" }}>{doctor.fullName}</span>
+        {doctor.specialty ? <span className="mt-1 block text-xs">{doctor.specialty}</span> : null}
+      </span>
+    );
+  };
+
   const visible = useMemo(() => {
     const needle = search.trim().toLowerCase();
     return services.filter((service) => {
       if (!showHidden && !service.isActive) return false;
       if (category && service.category !== category) return false;
+      // Прайс мастера — его услуги ПЛЮС общие: общее делают все, и спрятать
+      // его при выборе мастера значило бы показать неполный прайс. Ровно так
+      // же сужает выборку сервер по ?doctorId.
+      if (doctorFilter === COMMON_FILTER && service.doctorId) return false;
+      if (doctorFilter && doctorFilter !== COMMON_FILTER && service.doctorId && service.doctorId !== doctorFilter) {
+        return false;
+      }
       if (needle && !service.name.toLowerCase().includes(needle) && !service.category.toLowerCase().includes(needle)) {
         return false;
       }
       return true;
     });
-  }, [category, search, services, showHidden]);
+  }, [category, doctorFilter, search, services, showHidden]);
 
-  const filtersActive = Boolean(search.trim() || category || showHidden);
+  const filtersActive = Boolean(search.trim() || category || doctorFilter || showHidden);
   const showList = screen === "ready";
 
   return (
@@ -478,6 +654,25 @@ export default function ServicesPage() {
                   ))}
                 </select>
               </label>
+              {showDoctorGrouping ? (
+                <label className="lg:w-64">
+                  <span className="sr-only">{capitalize(terms.specialist)}</span>
+                  <select
+                    style={inputStyle}
+                    value={doctorFilter}
+                    onChange={(event) => setDoctorFilter(event.target.value)}
+                    aria-label={capitalize(terms.specialist)}
+                  >
+                    <option value="">Все {terms.specialistPlural}</option>
+                    <option value={COMMON_FILTER}>Общие услуги {terms.orgGenitive}</option>
+                    {activeDoctors.map((doctor) => (
+                      <option key={doctor.id} value={doctor.id}>
+                        {doctorOptionLabel(doctor)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ) : null}
               <button
                 type="button"
                 className="neu-btn justify-center"
@@ -488,6 +683,11 @@ export default function ServicesPage() {
                 {showHidden ? "Скрытые показаны" : "Показать скрытые"}
               </button>
             </div>
+            {doctorFilter && doctorFilter !== COMMON_FILTER ? (
+              <p className="mt-3 text-xs font-semibold" style={{ color: "var(--negis-muted)" }}>
+                Прайс {terms.specialistGenitive} — его собственные услуги и общие услуги {terms.orgGenitive}: их делают все.
+              </p>
+            ) : null}
           </section>
         ) : null}
 
@@ -557,6 +757,7 @@ export default function ServicesPage() {
                 onClick={() => {
                   setSearch("");
                   setCategory("");
+                  setDoctorFilter("");
                   setShowHidden(false);
                 }}
               >
@@ -568,10 +769,10 @@ export default function ServicesPage() {
 
         {showList && visible.length > 0 ? (
           <section className="negis-glass overflow-x-auto p-2 sm:p-3">
-            <table className="w-full min-w-[720px] border-collapse text-left text-sm">
+            <table className="w-full min-w-[820px] border-collapse text-left text-sm">
               <thead>
                 <tr>
-                  {["Название услуги", "Категория", "Цена", "Длительность", "Порядок", ""].map((title, index) => (
+                  {columns.map((title, index) => (
                     <th
                       key={title || `actions-${index}`}
                       className="px-3 py-2 text-xs font-black uppercase tracking-[0.05em]"
@@ -599,6 +800,9 @@ export default function ServicesPage() {
                       ) : null}
                     </td>
                     <td className="px-3 py-3 font-semibold" style={{ color: "var(--negis-muted)" }}>{service.category || "—"}</td>
+                    {showDoctorGrouping ? (
+                      <td className="px-3 py-3 font-semibold" style={{ color: "var(--negis-muted)" }}>{renderOwner(service)}</td>
+                    ) : null}
                     <td className="px-3 py-3 font-black" style={{ color: "var(--negis-text)" }}>{formatPrice(service.basePriceMinor)}</td>
                     <td className="px-3 py-3 font-semibold" style={{ color: "var(--negis-muted)" }}>{formatDuration(service.durationMinutes)}</td>
                     <td className="px-3 py-3 font-semibold" style={{ color: "var(--negis-muted)" }}>{service.sortOrder}</td>
@@ -668,6 +872,25 @@ export default function ServicesPage() {
                   ))}
                 </datalist>
               </label>
+              {showDoctorGrouping ? (
+                <label className="block">
+                  <span style={labelStyle}>{capitalize(terms.specialist)}</span>
+                  <select
+                    style={inputStyle}
+                    value={form.doctorId}
+                    onChange={(event) => setForm((current) => ({ ...current, doctorId: event.target.value }))}
+                    aria-label={capitalize(terms.specialist)}
+                  >
+                    <option value="">Общая услуга {terms.orgGenitive}</option>
+                    {formOwnerMissing ? <option value={form.doctorId}>Не из справочника</option> : null}
+                    {formDoctorOptions.map((doctor) => (
+                      <option key={doctor.id} value={doctor.id}>
+                        {doctorOptionLabel(doctor)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ) : null}
               <div className="grid gap-3 sm:grid-cols-2">
                 <label className="block">
                   <span style={labelStyle}>Цена, ₸</span>
