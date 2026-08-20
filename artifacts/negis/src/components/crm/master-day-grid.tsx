@@ -33,6 +33,7 @@ type Props = {
   shifts: readonly GridShift[];
   appointments: readonly (GridAppointment & {
     client: string;
+    phone: string;
     service: string;
     status: string;
     notes: string;
@@ -42,6 +43,14 @@ type Props = {
   onOpen: (id: string) => void;
   /** Клик по пустому месту: сюда и хотят записать клиента. */
   onCreate: (input: { doctorId: string; doctorName: string; time: string }) => void;
+  /**
+   * Быстрый статус прямо с блока: пришёл / не пришёл / отмена.
+   *
+   * Самая частая операция дня. Заставлять ради неё открывать карточку — это
+   * три лишних касания на каждый визит; у списка кнопки статуса уже есть, и
+   * календарь не должен быть беднее списка.
+   */
+  onQuickStatus: (id: string, status: "arrived" | "no_show" | "cancelled") => void;
   specialistPlural: string;
 };
 
@@ -77,6 +86,7 @@ export function MasterDayGrid({
   nowMinute,
   onOpen,
   onCreate,
+  onQuickStatus,
   specialistPlural,
 }: Props) {
   const columns = useMemo(() => {
@@ -237,13 +247,23 @@ export function MasterDayGrid({
                 {column.placed.map((entry) => {
                   const tone = toneFor(entry.item.status);
                   const width = 100 / entry.lanes;
+                  // Точки статуса — только на живой записи: закрытой, отменённой
+                  // и «не пришёл» менять уже нечего одним касанием.
+                  const quickable = entry.item.status === "scheduled" || entry.item.status === "confirmed";
                   return (
-                    <button
+                    <div
                       key={entry.item.id}
-                      type="button"
                       data-appointment
+                      role="button"
+                      tabIndex={0}
                       onClick={() => onOpen(entry.item.id)}
-                      className="absolute overflow-hidden rounded-lg px-1.5 py-1 text-left"
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" || event.key === " ") {
+                          event.preventDefault();
+                          onOpen(entry.item.id);
+                        }
+                      }}
+                      className="absolute cursor-pointer overflow-hidden rounded-lg px-1.5 py-1 text-left"
                       style={{
                         top: (entry.startMinute - dayStart) * MINUTE,
                         height: Math.max((entry.endMinute - entry.startMinute) * MINUTE - 2, 18),
@@ -257,10 +277,54 @@ export function MasterDayGrid({
                     >
                       <span className="block text-[11px] font-black tabular-nums">{formatMinute(entry.startMinute)}</span>
                       <span className="block truncate text-[12px] font-black">{entry.item.client || "Без имени"}</span>
+                      {/* Телефон на блоке: позвонить, не открывая карточку.
+                          Календарь видят владелец и админ; мастеру этот экран
+                          не показывается, а его собственные данные сервер и
+                          так отдаёт без контактов. */}
+                      {entry.item.phone ? (
+                        <span className="block truncate text-[10px] font-bold tabular-nums opacity-80">{entry.item.phone}</span>
+                      ) : null}
                       {entry.item.service ? (
                         <span className="block truncate text-[11px] font-semibold opacity-80">{entry.item.service}</span>
                       ) : null}
-                    </button>
+                      {quickable ? (
+                        <span
+                          className="absolute right-0.5 top-0.5 flex gap-0.5"
+                          onClick={(event) => event.stopPropagation()}
+                        >
+                          <button
+                            type="button"
+                            aria-label="Клиент пришёл"
+                            title="Пришёл"
+                            onClick={() => onQuickStatus(entry.item.id, "arrived")}
+                            className="flex h-4 w-4 items-center justify-center rounded-full text-[9px] font-black text-white"
+                            style={{ background: "#0ea5e9" }}
+                          >
+                            ✓
+                          </button>
+                          <button
+                            type="button"
+                            aria-label="Клиент не пришёл"
+                            title="Не пришёл"
+                            onClick={() => onQuickStatus(entry.item.id, "no_show")}
+                            className="flex h-4 w-4 items-center justify-center rounded-full text-[9px] font-black text-white"
+                            style={{ background: "#f97316" }}
+                          >
+                            !
+                          </button>
+                          <button
+                            type="button"
+                            aria-label="Отменить запись"
+                            title="Отменить"
+                            onClick={() => onQuickStatus(entry.item.id, "cancelled")}
+                            className="flex h-4 w-4 items-center justify-center rounded-full text-[9px] font-black text-white"
+                            style={{ background: "#94a3b8" }}
+                          >
+                            ×
+                          </button>
+                        </span>
+                      ) : null}
+                    </div>
                   );
                 })}
 

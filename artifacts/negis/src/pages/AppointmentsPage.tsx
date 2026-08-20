@@ -1817,7 +1817,15 @@ export function AppointmentsPage() {
                     <ChevronRight size={18} />
                   </button>
                 </div>
+                {/* Стрелки по дням: листать календарь — движение чаще, чем
+                    прыжок на произвольную дату через поле. */}
+                <button type="button" className="neu-btn px-3 py-2 text-sm" aria-label="Предыдущий день" onClick={() => setSelectedDate(addDaysKey(selectedDate, -1))}>
+                  ‹
+                </button>
                 <input className="neu-input w-full lg:w-auto" type="date" value={selectedDate} onChange={(event) => setSelectedDate(event.target.value || selectedDate)} />
+                <button type="button" className="neu-btn px-3 py-2 text-sm" aria-label="Следующий день" onClick={() => setSelectedDate(addDaysKey(selectedDate, 1))}>
+                  ›
+                </button>
                 {/* «Сегодня» — не украшение: уйдя на неделю вперёд, вернуться
                     к текущему дню иначе можно только вспомнив число. День
                     берётся в поясе КЛИНИКИ, а не телефона. */}
@@ -1889,7 +1897,13 @@ export function AppointmentsPage() {
             dateKey={selectedDate}
             isoWeekday={isoWeekdayOf(selectedDate)}
             timeZone={clinicTimeZone}
-            doctors={activeDoctors.map((doctor) => ({ id: doctor.id, fullName: doctor.fullName, specialty: doctor.specialty }))}
+            // Фильтр «Все мастера» сужает и колонки: одна колонка крупно —
+            // это и есть режим «посмотреть день одного мастера». Записи он
+            // уже сужает через filteredItems, колонки должны совпадать.
+            doctors={(doctorFilter === "all"
+              ? activeDoctors
+              : activeDoctors.filter((doctor) => doctor.fullName === doctorFilter)
+            ).map((doctor) => ({ id: doctor.id, fullName: doctor.fullName, specialty: doctor.specialty }))}
             shifts={shifts.map((shift) => ({
               doctorId: shift.doctorId,
               weekday: shift.weekday,
@@ -1904,6 +1918,13 @@ export function AppointmentsPage() {
             onOpen={(id) => {
               const appointment = items.find((entry) => entry.id === id);
               if (appointment) openEdit(appointment);
+            }}
+            onQuickStatus={(id, status) => {
+              // Та же операция, что кнопки статуса в списке: оптимистичная
+              // смена, откат и честный тост при отказе сервера — всё уже
+              // внутри updateAppointmentStatus.
+              const appointment = items.find((entry) => entry.id === id);
+              if (appointment) void updateAppointmentStatus(appointment, status);
             }}
             onCreate={({ doctorId, doctorName, time }) => {
               openCreate(selectedDate, time);

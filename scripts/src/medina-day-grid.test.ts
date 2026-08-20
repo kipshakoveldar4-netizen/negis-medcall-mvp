@@ -187,3 +187,24 @@ test("DG16 в календарь можно писать: пустое мест�
   assert.ok(/onCreate=\{\(\{ doctorId, doctorName, time \}\)/.test(page), "экран принимает клик");
   assert.ok(/openCreate\(selectedDate, time\)/.test(page), "и открывает форму на выбранный день и час");
 });
+
+test("DG17 быстрые статусы на блоке не подменяют открытие карточки", async () => {
+  // Три точки — пришёл, не пришёл, отмена — самая частая операция дня.
+  // Клик по ним не должен проваливаться в открытие карточки, а сами точки
+  // показываются только на живой записи: закрытой менять нечего.
+  const source = await readFile(
+    path.join(repoRoot, "artifacts", "negis", "src", "components", "crm", "master-day-grid.tsx"),
+    "utf8",
+  );
+  assert.ok(/onQuickStatus: \(id: string, status: "arrived" \| "no_show" \| "cancelled"\) => void/.test(source));
+  assert.ok(/onClick=\{\(event\) => event\.stopPropagation\(\)\}/.test(source), "клик по точкам не открывает карточку");
+  assert.ok(
+    /const quickable = entry\.item\.status === "scheduled" \|\| entry\.item\.status === "confirmed";/.test(source),
+    "точки только на живой записи",
+  );
+  assert.ok(/entry\.item\.phone \?/.test(source), "телефон на блоке — позвонить, не открывая карточку");
+
+  const page = await readFile(path.join(repoRoot, "artifacts", "negis", "src", "pages", "AppointmentsPage.tsx"), "utf8");
+  assert.ok(/void updateAppointmentStatus\(appointment, status\)/.test(page), "статус идёт тем же путём, что кнопки списка");
+  assert.ok(/addDaysKey\(selectedDate, -1\)/.test(page) && /addDaysKey\(selectedDate, 1\)/.test(page), "стрелки по дням");
+});
