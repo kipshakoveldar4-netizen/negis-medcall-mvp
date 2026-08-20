@@ -23,11 +23,13 @@ import { isRealWorkspace, readWorkspaceId as readCurrentWorkspaceId, useDemoColl
 import { formatPhone, toTelHref, toWhatsappHref } from "@/lib/phone";
 import { clinicToday, dayKeyInZone, isOnClinicDay } from "@/lib/clinicDay";
 import { useAuth } from "@/contexts/AuthContext";
+import { MasterDayGrid } from "@/components/crm/master-day-grid";
+import { minuteOfClinicDay } from "@/lib/dayGrid";
 import { capitalize, termsFor, type Terms } from "../../../../lib/vertical/terms";
 import { leadStageDefinitionFromUnknown } from "@/lib/leadPipeline";
 
 type AppointmentStatus = "scheduled" | "confirmed" | "arrived" | "no_show" | "cancelled";
-type CalendarView = "day" | "week" | "list";
+type CalendarView = "grid" | "day" | "week" | "list";
 
 type Appointment = {
   id: string;
@@ -285,6 +287,7 @@ const activeStatuses: AppointmentStatus[] = ["scheduled", "confirmed", "arrived"
 const statusOptions: AppointmentStatus[] = ["scheduled", "confirmed", "arrived", "no_show", "cancelled"];
 const viewLabels: Record<CalendarView, string> = {
   day: "День",
+  grid: "Календарь",
   week: "Неделя",
   list: "Список",
 };
@@ -404,6 +407,20 @@ function dateKeyFromStartsAt(startsAt: string): string {
   const date = new Date(startsAt);
   if (Number.isNaN(date.getTime())) return todayKeyAtLoad;
   return toDateKey(date);
+}
+
+/**
+ * Номер дня недели по ISO: 1 — понедельник, 7 — воскресенье.
+ *
+ * Дата берётся как календарный день, а не как мгновение: «2026-08-20» —
+ * это день, и переводить его между поясами нельзя, иначе колонка графика
+ * съедет на соседние сутки у оператора в другом поясе.
+ */
+function isoWeekdayOf(dateKey: string): number {
+  const [year, month, day] = dateKey.split("-").map(Number);
+  if (!year || !month || !day) return 1;
+  const weekday = new Date(Date.UTC(year, month - 1, day)).getUTCDay();
+  return weekday === 0 ? 7 : weekday;
 }
 
 function timeKeyFromStartsAt(startsAt: string): string {
@@ -866,6 +883,9 @@ export function AppointmentsPage() {
   // переводится в «Записана», и регистратор не ищет её руками.
   const prefillLeadRef = useRef("");
   const [selectedDate, setSelectedDate] = useState(todayKeyAtLoad);
+  // Общая картина дня — владельцу и администратору. Ресепшн работает в
+  // прежних видах: ему ничего не отнимаем, но и новый экран не навязываем.
+  const seesWholeClinic = userRole === "owner" || userRole === "admin";
   const [view, setView] = useState<CalendarView>("day");
   const [doctorFilter, setDoctorFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
@@ -1799,8 +1819,8 @@ export function AppointmentsPage() {
                 </div>
                 <input className="neu-input w-full lg:w-auto" type="date" value={selectedDate} onChange={(event) => setSelectedDate(event.target.value || selectedDate)} />
               </div>
-              <div className="grid grid-cols-3 gap-2 sm:max-w-md">
-                {(["day", "week", "list"] as CalendarView[]).map((mode) => (
+              <div className={`grid ${seesWholeClinic ? "grid-cols-4" : "grid-cols-3"} gap-2 sm:max-w-md`}>
+                {((seesWholeClinic ? ["grid", "day", "week", "list"] : ["day", "week", "list"]) as CalendarView[]).map((mode) => (
                   <button key={mode} type="button" className={`neu-btn px-3 py-2 text-sm ${view === mode ? "text-[#0D9488]" : ""}`} onClick={() => setView(mode)}>
                     {viewLabels[mode]}
                   </button>
@@ -1853,6 +1873,30 @@ export function AppointmentsPage() {
           </div>
         </section>
 
+        {view === "grid" && seesWholeClinic ? (
+          <MasterDayGrid
+            dateKey={selectedDate}
+            isoWeekday={isoWeekdayOf(selectedDate)}
+            timeZone={clinicTimeZone}
+            doctors={activeDoctors.map((doctor) => ({ id: doctor.id, fullName: doctor.fullName, specialty: doctor.specialty }))}
+            shifts={shifts.map((shift) => ({
+              doctorId: shift.doctorId,
+              weekday: shift.weekday,
+              onDate: shift.onDate,
+              onDateEnd: shift.onDateEnd,
+              isWorking: shift.isWorking,
+              startMinute: shift.startMinute,
+              endMinute: shift.endMinute,
+            }))}
+            appointments={dayAppointments}
+            nowMinute={selectedDate === todayKey ? minuteOfClinicDay(new Date().toISOString(), clinicTimeZone) : null}
+            onOpen={(id) => {
+              const appointment = items.find((entry) => entry.id === id);
+              if (appointment) openEdit(appointment);
+            }}
+            specialistPlural={terms.specialistPlural}
+          />
+        ) : null}
         {view === "day" ? renderDay() : null}
         {view === "week" ? renderWeek() : null}
         {view === "list" ? renderList() : null}
