@@ -60,6 +60,29 @@ export function hidesClientContacts(role: unknown): boolean {
 }
 
 /**
+ * Своего клиента мастер видит целиком, чужого — без телефона.
+ *
+ * Владелец уточнил правило: «мастера могут записывать своих клиентов и видеть
+ * их номера, но в записях, которые заводят админы, номера им не видно».
+ * Значит решает не только роль смотрящего, но и АВТОР строки: номер, который
+ * мастер вписал сам, прятать от него бессмысленно, а телефон клиента клиники
+ * остаётся у тех, кто отвечает за звонки.
+ *
+ * Автор неизвестен — прячем. Вся история до 043 без автора, и трактовать
+ * «не знаю» как «свой» значило бы открыть телефоны всей накопленной базы.
+ */
+export function keepsContactsForOwnRecord(
+  role: unknown,
+  createdByStaffUserId: unknown,
+  actorStaffUserId: unknown,
+): boolean {
+  if (!hidesClientContacts(role)) return true;
+  const author = typeof createdByStaffUserId === "string" ? createdByStaffUserId : "";
+  const actor = typeof actorStaffUserId === "string" ? actorStaffUserId : "";
+  return Boolean(author) && author === actor;
+}
+
+/**
  * Маскирует то, что является КОНТАКТОМ, и не трогает то, что им не является.
  *
  * Первая версия считала номером любую цепочку от семи символов с пробелами и
@@ -92,8 +115,16 @@ export function maskContactsInText(value: string): string {
  * входной значило бы испортить строку, которую вызывающий может использовать
  * дальше (например, для журнала).
  */
-export function redactContacts<T extends Record<string, unknown>>(item: T, role: unknown): T {
+export function redactContacts<T extends Record<string, unknown>>(
+  item: T,
+  role: unknown,
+  actorStaffUserId?: unknown,
+): T {
   if (!hidesClientContacts(role)) return item;
+  // Запись, которую завёл сам мастер, остаётся при своём телефоне.
+  if (keepsContactsForOwnRecord(role, item.createdByStaffUserId ?? item.created_by_staff_user_id, actorStaffUserId)) {
+    return item;
+  }
   const out: Record<string, unknown> = { ...item };
 
   for (const field of CONTACT_FIELDS) {
@@ -110,9 +141,13 @@ export function redactContacts<T extends Record<string, unknown>>(item: T, role:
 }
 
 /** То же для списка. */
-export function redactContactsList<T extends Record<string, unknown>>(items: T[], role: unknown): T[] {
+export function redactContactsList<T extends Record<string, unknown>>(
+  items: T[],
+  role: unknown,
+  actorStaffUserId?: unknown,
+): T[] {
   if (!hidesClientContacts(role)) return items;
-  return items.map((item) => redactContacts(item, role));
+  return items.map((item) => redactContacts(item, role, actorStaffUserId));
 }
 
 /**

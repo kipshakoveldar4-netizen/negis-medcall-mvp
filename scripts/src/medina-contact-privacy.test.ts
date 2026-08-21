@@ -129,8 +129,16 @@ test("CP5 срез стоит во ВСЕХ ветках ответа, а не �
   // эхо PATCH и запись. Скрыть телефон только на экране значило бы отдать его
   // всякому, кто откроет консоль браузера.
   assert.ok(/redactContactsList\(\s*\(Array\.isArray\(data\)/.test(server), "список записей срезается");
-  assert.ok(/redactContactsList\(rows\.map\(/.test(server), "обратный поиск по номеру срезается");
-  assert.equal((server.match(/redactContacts\(config\.fromRow/g) ?? []).length, 2, "эхо POST и PATCH срезаются оба");
+  assert.ok(/redactContactsList\(\s*rows\.map\(/.test(server), "обратный поиск по номеру срезается");
+  assert.equal((server.match(/redactContacts\(\s*config\.fromRow/g) ?? []).length, 2, "эхо POST и PATCH срезаются оба");
+  // Каждый срез знает и КТО СМОТРИТ: с 043 телефон в своей записи мастеру
+  // виден, а в чужой — нет, и без идентификатора смотрящего это не решить.
+  assert.equal(
+    (server.match(/staffUserId,/g) ?? []).length >= 4,
+    true,
+    "все четыре точки среза получают смотрящего",
+  );
+
   assert.equal((server.match(/stripContactWrites\(/g) ?? []).length, 2, "запись контактов закрыта на создании и на правке");
 
   // Роль берётся из ПРОВЕРЕННОГО контекста, а не из запроса: иначе любой
@@ -198,4 +206,74 @@ test("CP9 кэш списков не переживает смену польз�
   const signOutBody = auth.slice(signOutAt, signOutAt + 900);
   assert.ok(/clearListReadCache\(\)/.test(signOutBody), "и очищается при выходе");
   assert.ok(/clearCrmCache\(\)/.test(signOutBody), "рядом с общим кэшем запросов");
+});
+
+/* ── Свой клиент против клиента клиники (правило владельца от 21.08.2026) ── */
+
+test("CP10 телефон в записи, которую завёл сам мастер, ему виден", async () => {
+  // «Мастера могут записывать своих клиентов и видеть их номера». Прятать от
+  // мастера номер, который он же и вписал, — это не приватность, а помеха.
+  const privacy = (await import(
+    pathToFileURL(path.join(repoRoot, "lib", "crm", "contact-privacy.ts")).href
+  )) as {
+    redactContacts: (item: Record<string, unknown>, role: unknown, actor?: unknown) => Record<string, unknown>;
+  };
+  const mine = privacy.redactContacts(
+    { client: "Мария", phone: "+7 701 245 18 44", createdByStaffUserId: "staff-1" },
+    "doctor",
+    "staff-1",
+  );
+  assert.equal(mine.phone, "+7 701 245 18 44");
+});
+
+test("CP11 телефон в записи, которую завёл админ, мастеру не виден", async () => {
+  const privacy = (await import(
+    pathToFileURL(path.join(repoRoot, "lib", "crm", "contact-privacy.ts")).href
+  )) as {
+    redactContacts: (item: Record<string, unknown>, role: unknown, actor?: unknown) => Record<string, unknown>;
+  };
+  const theirs = privacy.redactContacts(
+    { client: "Мария", phone: "+7 701 245 18 44", createdByStaffUserId: "staff-admin" },
+    "doctor",
+    "staff-1",
+  );
+  assert.ok(!("phone" in theirs), "номер чужой записи остался у мастера");
+  assert.equal(theirs.client, "Мария", "имя и время мастеру по-прежнему нужны");
+});
+
+test("CP12 запись без автора — как чужая: истории до 043 телефоны не открываем", async () => {
+  const privacy = (await import(
+    pathToFileURL(path.join(repoRoot, "lib", "crm", "contact-privacy.ts")).href
+  )) as {
+    redactContacts: (item: Record<string, unknown>, role: unknown, actor?: unknown) => Record<string, unknown>;
+  };
+  const legacy = privacy.redactContacts({ client: "Мария", phone: "+7 701 245 18 44" }, "doctor", "staff-1");
+  assert.ok(!("phone" in legacy), "«не знаю автора» трактуется как «не свой»");
+});
+
+test("CP13 владелец и админ видят номера всегда", async () => {
+  const privacy = (await import(
+    pathToFileURL(path.join(repoRoot, "lib", "crm", "contact-privacy.ts")).href
+  )) as {
+    redactContacts: (item: Record<string, unknown>, role: unknown, actor?: unknown) => Record<string, unknown>;
+  };
+  for (const role of ["owner", "admin", "receptionist"]) {
+    const item = privacy.redactContacts(
+      { client: "Мария", phone: "+7 701 245 18 44", createdByStaffUserId: "staff-admin" },
+      role,
+      "staff-9",
+    );
+    assert.equal(item.phone, "+7 701 245 18 44", role);
+  }
+});
+
+test("CP14 автор записи ставится из проверенного контекста, а не из тела", async () => {
+  // Иначе вызывающий переписал бы правило видимости телефона за нас: прислал
+  // чужой идентификатор автора — и получил доступ к номеру чужого клиента.
+  const source = await readFile(path.join(repoRoot, "lib", "crm", "server.ts"), "utf8");
+  const anchor = "row.created_by_staff_user_id = actorStaffUserId";
+  assert.ok(source.includes(anchor), "автор проставляется сервером");
+  const before = source.slice(Math.max(0, source.indexOf(anchor) - 220), source.indexOf(anchor));
+  assert.ok(before.includes("readWorkspaceContext(req)?.staffUserId"), "и берётся из контекста запроса");
+  assert.ok(!before.includes("body."), "а не из тела запроса");
 });

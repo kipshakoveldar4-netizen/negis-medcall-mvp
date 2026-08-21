@@ -1323,6 +1323,8 @@ function makeAppointment(body: JsonRecord): JsonRecord {
     notes: readString(body.notes),
     durationMinutes: readNumber(body.durationMinutes ?? body.duration_minutes) ?? 60,
     duration_minutes: readNumber(body.durationMinutes ?? body.duration_minutes) ?? 60,
+    // Кто завёл запись: от этого зависит, видит ли мастер телефон клиента.
+    createdByStaffUserId: firstString(body.createdByStaffUserId, body.created_by_staff_user_id),
     source: readString(body.source),
     clientId: firstString(body.clientId, body.client_id),
     // Ссылка на услугу обязана возвращаться наружу, а не только записываться.
@@ -4064,7 +4066,11 @@ async function listItems(resource: CrmResource, req: VercelRequest, res: VercelR
       const phone = readQueryString(req.query.phone);
       if (phone) {
         const rows = await findClientsByPhone(supabase, workspaceId, phone);
-        const matches = redactContactsList(rows.map((row) => config.fromRow(row)), readWorkspaceContext(req)?.role);
+        const matches = redactContactsList(
+          rows.map((row) => config.fromRow(row)),
+          readWorkspaceContext(req)?.role,
+          readWorkspaceContext(req)?.staffUserId,
+        );
         return sendJson(res, 200, success("supabase", { [config.listKey]: matches, items: matches }));
       }
     }
@@ -4238,6 +4244,7 @@ async function listItems(resource: CrmResource, req: VercelRequest, res: VercelR
     const items = redactContactsList(
       (Array.isArray(data) ? data : []).map((row) => config.fromRow(asRecord(row))),
       readWorkspaceContext(req)?.role,
+      readWorkspaceContext(req)?.staffUserId,
     );
     // Пояс клиники едет пассажиром списка записей ровно по той же причине, по
     // которой он едет с графиком: маршрут настроек доступен только владельцу и
@@ -4471,6 +4478,12 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
     }
 
     const row = stripContactWrites(config.toRow(body, workspaceId), readWorkspaceContext(req)?.role);
+    // Автор записи — из проверенного контекста, никогда из тела: иначе правило
+    // видимости телефона переписывалось бы самим вызывающим.
+    if (resource === "appointments") {
+      const actorStaffUserId = readString(readWorkspaceContext(req)?.staffUserId);
+      if (isUuid(actorStaffUserId)) row.created_by_staff_user_id = actorStaffUserId;
+    }
     if (resource === "leads") {
       Object.assign(row, await buildLeadReferenceRow(supabase, workspaceId, body));
     }
@@ -4591,7 +4604,11 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
 
     // Эхо мутации — четвёртый путь к телефону: PATCH возвращает ВСЮ строку,
     // даже если тело несло один статус. Срез обязателен и здесь.
-    const item = redactContacts(config.fromRow(asRecord(data)), readWorkspaceContext(req)?.role);
+    const item = redactContacts(
+      config.fromRow(asRecord(data)),
+      readWorkspaceContext(req)?.role,
+      readWorkspaceContext(req)?.staffUserId,
+    );
 
     // Журнал пишется ПОСЛЕ доменной записи и только на успехе. Порядок здесь
     // не стилистический: тесты изоляции ищут первую вставку в журнале запросов
@@ -5103,7 +5120,11 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
       throw new Error(error.message);
     }
 
-    const item = redactContacts(config.fromRow(asRecord(data)), readWorkspaceContext(req)?.role);
+    const item = redactContacts(
+      config.fromRow(asRecord(data)),
+      readWorkspaceContext(req)?.role,
+      readWorkspaceContext(req)?.staffUserId,
+    );
 
     if (patchedEntity) {
       // Сравнивается с `row`, а не с сохранённой строкой: в `row` лежит ровно
