@@ -447,3 +447,13 @@ test("CL19 создание называет потерю тем же спосо
   const unsaved = (res.body.data as Record<string, unknown>).unsaved;
   assert.deepEqual(unsaved, ["WhatsApp"], `ответ молчит о потере: ${JSON.stringify(res.body)}`);
 });
+
+test("CL20 отставшая база без колонки автора не блокирует запись клиента", async () => {
+  // Регрессия 21.08.2026: колонка автора уехала в INSERT раньше миграции 043,
+  // и администратор салона получил «Сбой на стороне сервиса» на каждой
+  // попытке записать клиента. Каталог обходов обязан знать про неё.
+  const { res, writes } = await callRouter({ missing: ["created_by_staff_user_id"], body: booking() });
+  assert.equal(res.statusCode, 201, JSON.stringify(res.body));
+  assert.equal(writes.length, 1, "запись создана");
+  assert.ok(!("created_by_staff_user_id" in writes[0].row), "недостающая колонка снята");
+});
