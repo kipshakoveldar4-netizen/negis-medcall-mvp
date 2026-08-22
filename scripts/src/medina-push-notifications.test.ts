@@ -1,0 +1,235 @@
+import assert from "node:assert/strict";
+import { createECDH, generateKeyPairSync, verify } from "node:crypto";
+import path from "node:path";
+import test from "node:test";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+// Модули из lib/ грузятся по адресу, как в соседних наборах: у пакета scripts
+// нет пути внутрь lib, и статический импорт туда не разрешается.
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
+const load = async (file: string) => import(pathToFileURL(path.join(repoRoot, "lib", "crm", file)).href);
+
+type Keys = { publicKey: string; privateKey: string; subject: string };
+type Device = { endpoint: string; p256dh: string; auth: string };
+type Snapshot = { doctorId: string; doctorName: string; client: string; service: string; startsAt: string };
+
+const push = (await load("web-push.ts")) as {
+  buildVapidAuthorization: (endpoint: string, keys: Keys, nowSeconds: number) => string;
+  classifyPushStatus: (status: number) => string;
+  encryptPushPayload: (payload: string, subscription: Device) => Buffer;
+  readVapidKeys: (env: NodeJS.ProcessEnv) => Keys | null;
+};
+const rules = (await load("staff-notifications.ts")) as {
+  notificationFor: (input: {
+    event: "created" | "cancelled";
+    appointment: Snapshot;
+    timeZone: string;
+    clientNameVisible?: boolean;
+  }) => { title: string; text: string; url: string; tag: string } | null;
+  resolveRecipient: (input: {
+    appointment: Snapshot;
+    doctors: readonly { id: string; fullName: string; staffUserId: string }[];
+    actorStaffUserId: string;
+    nowMs: number;
+  }) => { staffUserId: string } | { skipped: string };
+};
+
+const { buildVapidAuthorization, classifyPushStatus, encryptPushPayload, readVapidKeys } = push;
+const { notificationFor, resolveRecipient } = rules;
+
+// Пуш сотрудникам: криптография и правило адресации.
+//
+// Проверять это наблюдением нельзя. Уведомление, которое не дошло, ничем не
+// отличается от уведомления, которое не отправляли, а сообщение с неверной
+// подписью push-сервис отклоняет молча — 401 без тела. Поэтому обе половины
+// написаны так, чтобы их можно было предъявить тесту целиком.
+
+function makeVapidKeys() {
+  const { publicKey, privateKey } = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+  const raw = publicKey.export({ type: "spki", format: "der" }).subarray(-65);
+  return {
+    keys: {
+      publicKey: raw.toString("base64url"),
+      privateKey: privateKey.export({ type: "pkcs8", format: "der" }).toString("base64"),
+      subject: "mailto:owner@example.kz",
+    },
+    publicKeyObject: publicKey,
+  };
+}
+
+function makeDeviceKeys() {
+  const ecdh = createECDH("prime256v1");
+  ecdh.generateKeys();
+  return {
+    endpoint: "https://fcm.googleapis.com/fcm/send/abcdefghijklmnop",
+    p256dh: ecdh.getPublicKey().toString("base64url"),
+    auth: Buffer.alloc(16, 7).toString("base64url"),
+  };
+}
+
+test("PN1 подпись VAPID проверяется ключом и не в формате DER", () => {
+  const { keys, publicKeyObject } = makeVapidKeys();
+  const header = buildVapidAuthorization("https://fcm.googleapis.com/fcm/send/xyz", keys, 1_700_000_000);
+
+  const token = header.slice("vapid t=".length, header.indexOf(", k="));
+  const [encodedHeader, encodedBody, encodedSignature] = token.split(".");
+  const signature = Buffer.from(encodedSignature, "base64url");
+
+  // 64 байта — это r||s. DER длиннее и переменной длины: именно на этом
+  // push-сервисы отвечают 401, не объясняя причины.
+  assert.equal(signature.length, 64, "подпись обязана быть r||s, а не DER");
+  assert.ok(
+    verify(
+      "sha256",
+      Buffer.from(`${encodedHeader}.${encodedBody}`),
+      { key: publicKeyObject, dsaEncoding: "ieee-p1363" },
+      signature,
+    ),
+    "подпись не проверяется собственным публичным ключом",
+  );
+
+  const body = JSON.parse(Buffer.from(encodedBody, "base64url").toString("utf8"));
+  // aud — ОРИГИН, а не полный URL: на полный URL FCM отвечает отказом.
+  assert.equal(body.aud, "https://fcm.googleapis.com");
+  assert.equal(body.sub, "mailto:owner@example.kz");
+  assert.equal(body.exp, 1_700_000_000 + 12 * 60 * 60);
+  assert.equal(JSON.parse(Buffer.from(encodedHeader, "base64url").toString("utf8")).alg, "ES256");
+  assert.ok(header.includes(`, k=${keys.publicKey}`), "публичный ключ уходит в заголовке");
+});
+
+test("PN2 тело зашифровано по формату aes128gcm и соль не повторяется", () => {
+  const device = makeDeviceKeys();
+  const first = encryptPushPayload(JSON.stringify({ title: "Новая запись" }), device);
+  const second = encryptPushPayload(JSON.stringify({ title: "Новая запись" }), device);
+
+  // salt(16) + rs(4) + idlen(1) + ключ(65) + шифротекст с тегом(≥17)
+  assert.ok(first.length > 16 + 4 + 1 + 65 + 17, "тело короче обязательного заголовка");
+  assert.equal(first.readUInt32BE(16), 4096, "размер записи");
+  assert.equal(first[20], 65, "длина публичного ключа отправителя");
+  assert.equal(first[21], 4, "несжатая точка P-256 начинается с 0x04");
+  assert.notEqual(
+    first.subarray(0, 16).toString("hex"),
+    second.subarray(0, 16).toString("hex"),
+    "соль обязана быть разной",
+  );
+  assert.notEqual(
+    first.subarray(21, 86).toString("hex"),
+    second.subarray(21, 86).toString("hex"),
+    "эфемерный ключ обязан быть разным: повтор раскрывает переписку",
+  );
+});
+
+test("PN3 чужие ключи не принимаются молча", () => {
+  const device = makeDeviceKeys();
+  assert.throws(() => encryptPushPayload("{}", { ...device, p256dh: "AAAA" }), /p256dh/);
+  assert.throws(() => encryptPushPayload("{}", { ...device, auth: "AAAA" }), /auth/);
+});
+
+test("PN4 класс исхода решает судьбу строки в базе", () => {
+  assert.equal(classifyPushStatus(201), "delivered");
+  assert.equal(classifyPushStatus(200), "delivered");
+  assert.equal(classifyPushStatus(404), "gone");
+  assert.equal(classifyPushStatus(410), "gone");
+  // Перегрузка чужого сервиса не должна отписывать мастеров.
+  assert.equal(classifyPushStatus(429), "retry");
+  assert.equal(classifyPushStatus(503), "retry");
+  assert.equal(classifyPushStatus(401), "rejected");
+  assert.equal(classifyPushStatus(403), "rejected");
+});
+
+test("PN5 без субъекта VAPID отправка не собирается вовсе", () => {
+  const base = { NEGIS_VAPID_PUBLIC_KEY: "pub", NEGIS_VAPID_PRIVATE_KEY: "priv" } as NodeJS.ProcessEnv;
+  assert.equal(readVapidKeys({ ...base }), null, "субъекта нет — ключей нет");
+  assert.equal(readVapidKeys({ ...base, NEGIS_VAPID_SUBJECT: "owner@example.kz" }), null, "без схемы не годится");
+  assert.ok(readVapidKeys({ ...base, NEGIS_VAPID_SUBJECT: "mailto:owner@example.kz" }));
+  assert.equal(readVapidKeys({ NEGIS_VAPID_SUBJECT: "mailto:a@b.kz" }), null, "без ключей отправки нет");
+});
+
+const DOCTORS = [
+  { id: "d1", fullName: "Дильназ", staffUserId: "u1" },
+  { id: "d2", fullName: "Дильназ", staffUserId: "u2" },
+  { id: "d3", fullName: "Сабина Жумалина", staffUserId: "u3" },
+  { id: "d4", fullName: "Аружан", staffUserId: "" },
+];
+const NOW = Date.parse("2026-08-22T09:00:00.000Z");
+const FUTURE = "2026-08-23T05:00:00.000Z";
+
+function decide(
+  appointment: Partial<Snapshot>,
+  actor = "admin",
+) {
+  return resolveRecipient({
+    appointment: { doctorId: "", doctorName: "", client: "Гость", service: "Маникюр", startsAt: FUTURE, ...appointment },
+    doctors: DOCTORS,
+    actorStaffUserId: actor,
+    nowMs: NOW,
+  });
+}
+
+test("PN6 адресат берётся по карточке мастера", () => {
+  assert.deepEqual(decide({ doctorId: "d3" }), { staffUserId: "u3" });
+});
+
+test("PN7 две Дильназ — не отправляем никому", () => {
+  // Уведомление о клиенте одной, ушедшее другой, — это утечка, а не неудобство.
+  assert.deepEqual(decide({ doctorName: "Дильназ" }), { skipped: "имя неоднозначно" });
+  assert.deepEqual(decide({ doctorName: " сабина жумалина " }), { staffUserId: "u3" });
+});
+
+test("PN8 мастер без входа виден причиной, а не тишиной", () => {
+  assert.deepEqual(decide({ doctorId: "d4" }), { skipped: "мастер не связан с учётной записью" });
+  assert.deepEqual(decide({ doctorName: "Аружан" }), { skipped: "мастер не связан с учётной записью" });
+});
+
+test("PN9 себе не пишем и о прошлом не пишем", () => {
+  assert.deepEqual(decide({ doctorId: "d3" }, "u3"), { skipped: "сам себе" });
+  assert.deepEqual(decide({ doctorId: "d3", startsAt: "2026-08-22T08:00:00.000Z" }), { skipped: "визит уже прошёл" });
+  assert.deepEqual(decide({ doctorId: "d3", startsAt: "не дата" }), { skipped: "время визита не разобрано" });
+});
+
+test("PN10 пустой мастер и неизвестная карточка названы своими причинами", () => {
+  assert.deepEqual(decide({}), { skipped: "мастер не указан" });
+  assert.deepEqual(decide({ doctorId: "нет такой" }), { skipped: "карточка мастера не найдена" });
+  assert.deepEqual(decide({ doctorName: "Кто-то" }), { skipped: "мастер не найден по имени" });
+});
+
+test("PN11 в тексте нет телефона — даже если его вписали в услугу", () => {
+  const notification = notificationFor({
+    event: "created",
+    appointment: {
+      doctorId: "d3",
+      doctorName: "Сабина",
+      client: "Айгерим",
+      service: "Маникюр, перезвонить +7 777 123 45 67",
+      startsAt: FUTURE,
+    },
+    timeZone: "Asia/Almaty",
+  });
+  assert.ok(notification);
+  assert.ok(!/\+7\s?7\d/.test(notification.text), `номер утёк на экран блокировки: ${notification.text}`);
+  assert.equal(notification.title, "Новая запись");
+  assert.ok(notification.text.includes("Айгерим"));
+  assert.ok(notification.url.startsWith("/appointments?date=2026-08-23"));
+});
+
+test("PN12 отмена называется отменой, а имя клиента можно выключить", () => {
+  const appointment = { doctorId: "d3", doctorName: "Сабина", client: "Айгерим", service: "Педикюр", startsAt: FUTURE };
+  const cancelled = notificationFor({ event: "cancelled", appointment, timeZone: "Asia/Almaty" });
+  assert.equal(cancelled?.title, "Запись отменена");
+  assert.notEqual(cancelled?.tag, notificationFor({ event: "created", appointment, timeZone: "Asia/Almaty" })?.tag);
+
+  const anonymous = notificationFor({ event: "created", appointment, timeZone: "Asia/Almaty", clientNameVisible: false });
+  assert.ok(!anonymous?.text.includes("Айгерим"), "имя обязано исчезать по флагу, а не переписыванием");
+  assert.ok(anonymous?.text.includes("Педикюр"));
+});
+
+test("PN13 нечитаемое время не превращается в бессмысленное уведомление", () => {
+  assert.equal(
+    notificationFor({
+      event: "created",
+      appointment: { doctorId: "d3", doctorName: "", client: "Гость", service: "", startsAt: "не дата" },
+      timeZone: "Asia/Almaty",
+    }),
+    null,
+  );
+});
