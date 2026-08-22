@@ -116,6 +116,15 @@ const ALL_PERMISSIONS: RolePermissions = {
   chat: true,
   marketplace: true,
   admin: true,
+  // Справочник исполнителей и график. Ключа здесь не было, а маршрут
+  // /staff-schedule спрашивает именно его — и роль admin (директор) получала
+  // отказ на странице, ссылка на которую стоит у неё в меню. Не заметили
+  // потому, что владелец и управляющий проходят гейт по роли, минуя таблицу,
+  // а директор — единственный, кто ходит через неё.
+  //
+  // Ключ пропал молча: RolePermissions — это Record<string, boolean>, и
+  // отсутствующий ключ для типов неотличим от false.
+  directory: true,
   reports: true,
   ads: true,
   settings: true,

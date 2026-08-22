@@ -66,7 +66,8 @@
     "test:recommendations": "tsx --test ./src/medina-recommendations.test.ts",
     "build:icons": "tsx ./src/build-app-icons.ts",
     "seed:clinic": "tsx ./src/seed-clinic.ts",
-    "provision:workspace": "tsx ./src/provision-workspace.ts"
+    "provision:workspace": "tsx ./src/provision-workspace.ts",
+    "test:route-permissions": "tsx --test ./src/medina-route-permissions.test.ts"
   },
   "devDependencies": {
     "@types/node": "catalog:",
