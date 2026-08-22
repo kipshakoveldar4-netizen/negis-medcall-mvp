@@ -38,6 +38,9 @@ const NAV_GROUPS: NavGroup[] = [
       // Регистратор (в салоне — администратор) правит исполнителей и смены сам:
       // право manage_directory даёт ему эту страницу, не открывая админ-центр.
       { href: '/staff-schedule', icon: CalendarDays, label: 'Специалисты и график', roles: ['owner', 'manager', 'receptionist'] },
+      // «Кто чей клиент». Единственный пункт, который видит и мастер, и
+      // администратор: у мастера это его собственная база без номеров.
+      { href: '/client-base', icon: Users, label: 'База клиентов', roles: ['owner', 'manager', 'receptionist', 'agent', 'doctor', 'booking_agent'] },
     ],
   },
   {

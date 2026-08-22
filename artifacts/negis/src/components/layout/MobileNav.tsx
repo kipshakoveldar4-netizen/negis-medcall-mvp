@@ -57,6 +57,10 @@ const drawerItems: MobileNavItem[] = [
   // график», у салона «Мастера и график». Право то же, что и у страницы, —
   // справочники, а не админ-центр.
   { href: "/staff-schedule", label: "Специалисты и график", icon: Users, permission: "directory" },
+  // База клиентов по мастерам. Право booking: мастера работают с телефона, и
+  // без пункта в мобильном ящике страница для них существовала бы только по
+  // прямому адресу. Свою часть базы и срез номеров обеспечивает сервер.
+  { href: "/client-base", label: "База клиентов", icon: Users, permission: "booking" },
   { href: "/content-studio", label: "Контент", icon: Clapperboard, permission: "ads" },
   { href: "/marketplace", label: "Маркет", icon: Store, permission: "marketplace" },
   { href: "/admin", label: "Настройки клиники", icon: Settings, permission: "admin" },

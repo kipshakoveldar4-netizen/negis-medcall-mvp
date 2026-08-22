@@ -69,7 +69,8 @@
     "provision:workspace": "tsx ./src/provision-workspace.ts",
     "test:route-permissions": "tsx --test ./src/medina-route-permissions.test.ts",
     "test:push": "tsx --test ./src/medina-push-notifications.test.ts",
-    "vapid:keys": "tsx ./src/generate-vapid-keys.ts"
+    "vapid:keys": "tsx ./src/generate-vapid-keys.ts",
+    "test:my-clients": "tsx --test ./src/medina-my-clients.test.ts"
   },
   "devDependencies": {
     "@types/node": "catalog:",

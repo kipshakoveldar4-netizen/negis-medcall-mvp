@@ -285,6 +285,11 @@ export const CRM_ROUTE_AUTHORIZATION: Readonly<Record<string, RouteAuthorization
   // with 403 — see lib/crm/change-log.ts.
   "change-log": { kind: "browser", methods: ["GET"] },
 
+  // База клиентов по мастерам. Права проверяются внутри обработчика, потому что
+  // их два разных: мастер видит свою часть без номеров по view_appointments,
+  // администратор — базу всей клиники по view_clients.
+  "my-clients": { kind: "browser", methods: ["GET"] },
+
   // Worker route: HMAC only. A browser JWT must never satisfy it.
   "meta-insights-background-cycle": { kind: "internal_hmac", methods: ["POST"] },
 };

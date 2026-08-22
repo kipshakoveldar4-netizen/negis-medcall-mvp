@@ -30,6 +30,7 @@ import { handleJoinCode, handleJoinRequest, handleStaffJoinRequests } from "../.
 import { handlePlatformWhatsappNumber } from "../../lib/crm/platform-whatsapp";
 import { handleWhatsAppChannels } from "../../lib/crm/whatsapp-channels";
 import { handleCrmChangeLog } from "../../lib/crm/change-log";
+import { handleMyClients } from "../../lib/crm/my-clients";
 import {
   requireAuthenticatedUser,
   requireWorkspaceAccess,
@@ -250,6 +251,8 @@ async function dispatch(
       return handleAdsAiFill(req, res);
     case "change-log":
       return handleCrmChangeLog(req, res);
+    case "my-clients":
+      return handleMyClients(req, res);
     case "whatsapp-channels":
       return handleWhatsAppChannels(req, res);
     case "video-jobs":

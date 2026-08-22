@@ -23,6 +23,7 @@ const Login = lazy(() => import("@/pages/Login"));
 const Onboarding = lazy(() => import("@/pages/Onboarding"));
 const JoinWorkspace = lazy(() => import("@/pages/JoinWorkspace"));
 const JoinRequest = lazy(() => import("@/pages/JoinRequest"));
+const ClientBasePage = lazy(() => import("@/pages/ClientBasePage"));
 const Dashboard = lazy(() => import("@/pages/Dashboard"));
 const AiControlCenter = lazy(() => import("@/pages/AiControlCenter"));
 // Security-1A: /agent, /ads and /ads/callback were removed from the router.
@@ -259,6 +260,12 @@ function Router() {
         администратора салона права manage_directory достаточно, а весь
         админ-центр с ключами интеграций ему по-прежнему закрыт.
       */}
+      {/*
+        База клиентов по мастерам. Право booking, а не crm: мастер должен сюда
+        попадать, а crm ему закрыт намеренно — оно открывает списки всей клиники.
+        Сужение до своей части и срез номеров делает сервер.
+      */}
+      <Route path="/client-base" component={() => <ProtectedPage component={ClientBasePage} permission="booking" />} />
       <Route path="/staff-schedule" component={() => <ProtectedPage component={DirectoryPage} permission="directory" />} />
       <Route path="/leads" component={() => <ProtectedPage component={LeadsPage} permission="crm" />} />
       <Route path="/clients" component={() => <ProtectedPage component={ClientsPage} permission="crm" />} />
