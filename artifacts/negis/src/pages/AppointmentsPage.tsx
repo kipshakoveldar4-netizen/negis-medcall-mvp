@@ -1083,7 +1083,7 @@ export function AppointmentsPage() {
     [directory.items],
   );
 
-  const { items, addItem, setItems } = useDemoCollection<Appointment>("negis_demo_appointments", appointmentsSeed, {
+  const { items, loaded, loadError, addItem, setItems } = useDemoCollection<Appointment>("negis_demo_appointments", appointmentsSeed, {
     endpoint: "/api/crm/appointments",
     listKey: "appointments",
     toApi: appointmentToApi,
@@ -1858,6 +1858,10 @@ export function AppointmentsPage() {
                     WhatsApp
                   </a>
                 </div>
+              ) : !loaded || loadError ? (
+                // «Ближайших записей нет» на отказе чтения — та же ложь, что и
+                // пустая сетка, только в самом читаемом месте экрана.
+                <p className="mt-3 text-sm font-semibold text-[#94A3B8]">{loadError ? "Не загрузилось — не значит «нет»" : "Загружаем…"}</p>
               ) : (
                 <p className="mt-3 text-sm text-[#94A3B8]">Ближайших активных записей нет</p>
               )}
@@ -1892,7 +1896,35 @@ export function AppointmentsPage() {
           </div>
         </section>
 
-        {view === "grid" && seesWholeClinic ? (
+        {/*
+          Сбой чтения — не пустой день, и путать их здесь дороже всего в
+          продукте: по этому экрану отпускают мастера домой и говорят
+          пришедшему «свободно, заходите». Пустая сетка и «0 записей»
+          выглядят как свободный день, а тост про ошибку живёт четыре
+          секунды и исчезает, пока телефон в кармане.
+        */}
+        {loadError ? (
+          <section className="negis-glass p-4" style={{ borderLeft: "4px solid #dc2626" }} aria-live="assertive">
+            <p className="text-sm font-black" style={{ color: "#b91c1c" }}>
+              Не удалось загрузить записи
+            </p>
+            <p className="mt-1 text-sm font-semibold" style={{ color: "var(--negis-muted)" }}>
+              Это сбой связи, а не свободный день: записи на месте. Не записывайте клиентов поверх —
+              обновите страницу.
+            </p>
+            <button type="button" className="neu-btn-primary mt-3 justify-center" onClick={() => window.location.reload()}>
+              Обновить страницу
+            </button>
+          </section>
+        ) : null}
+
+        {!loaded ? (
+          <section className="negis-glass flex min-h-40 items-center justify-center p-8" aria-live="polite">
+            <p className="text-sm font-bold" style={{ color: "var(--negis-muted)" }}>Загружаем записи…</p>
+          </section>
+        ) : null}
+
+        {loaded && !loadError && view === "grid" && seesWholeClinic ? (
           <MasterDayGrid
             dateKey={selectedDate}
             isoWeekday={isoWeekdayOf(selectedDate)}
@@ -1937,9 +1969,9 @@ export function AppointmentsPage() {
             specialistPlural={terms.specialistPlural}
           />
         ) : null}
-        {view === "day" ? renderDay() : null}
-        {view === "week" ? renderWeek() : null}
-        {view === "list" ? renderList() : null}
+        {loaded && !loadError && view === "day" ? renderDay() : null}
+        {loaded && !loadError && view === "week" ? renderWeek() : null}
+        {loaded && !loadError && view === "list" ? renderList() : null}
       </div>
 
       {modalOpen ? (

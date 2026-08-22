@@ -472,3 +472,24 @@ test("F10 a refused client creation does not report success, and leaves the lead
       "against a client that does not exist is the damage that outlives the wrong toast",
   );
 });
+
+test("F14 экран записей тоже различает «пусто» и «не смогли»", async () => {
+  // Самая дорогая из шести критических находок аудита: по этому экрану
+  // отпускают мастера домой и говорят пришедшему «свободно, заходите».
+  // Пустая сетка на отказе чтения выглядела свободным днём, а единственным
+  // признаком был тост, живущий четыре секунды.
+  //
+  // Проверка списком экранов (F13) этого не поймала: там перечислены три
+  // страницы, и самая рабочая в список не попала. Поэтому проверка отдельная.
+  const source = await readFile(path.join(negisSrc, "pages", "AppointmentsPage.tsx"), "utf8");
+  assert.ok(/const \{ items, loaded, loadError/.test(source), "экран берёт признак отказа у хука");
+  assert.ok(source.includes("Не удалось загрузить записи"), "отказ называется своими словами");
+  assert.ok(/Это сбой связи, а не свободный день/.test(source), "и прямо говорит, что день не свободен");
+  // Ни один вид не рисуется поверх отказа: пустая сетка и есть та самая ложь.
+  for (const view of ["grid", "day", "week", "list"]) {
+    assert.ok(
+      source.includes(`loaded && !loadError && view === "${view}"`),
+      `вид ${view} не рисуется, пока список не прочитан`,
+    );
+  }
+});
