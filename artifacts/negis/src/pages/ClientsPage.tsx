@@ -387,9 +387,91 @@ export default function ClientsPage() {
     { id: "no_visit", label: "Без визита" },
   ];
 
+  /**
+   * Фильтр «чей клиент».
+   *
+   * Владелец: «выбрать мастера — и выходит его база клиентов». Связи лежат в
+   * client_masters с переноса базы, но список клиентов их не знает: он читает
+   * таблицу clients, где мастера нет вовсе.
+   *
+   * Поэтому база мастера спрашивается у сервера отдельно и применяется как сито
+   * к уже загруженному списку. Так фильтр не трогает ни одно правило доступа:
+   * что мастеру видно, решает тот же маршрут, что и на странице «База клиентов».
+   */
+  const [doctorOptions, setDoctorOptions] = useState<Array<{ id: string; fullName: string; specialty: string }>>([]);
+  const [doctorFilter, setDoctorFilter] = useState("all");
+  const [doctorClientIds, setDoctorClientIds] = useState<Set<string> | null>(null);
+  const [doctorBaseState, setDoctorBaseState] = useState<{ loading: boolean; error: string; truncated: boolean }>({
+    loading: false,
+    error: "",
+    truncated: false,
+  });
+
+  useEffect(() => {
+    const workspaceId = readWorkspaceId();
+    if (!isRealWorkspace(workspaceId)) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const response = await crmFetch(`/api/crm/clinic-doctors?workspaceId=${encodeURIComponent(workspaceId)}`);
+        const payload = (await response.json()) as { items?: Array<{ id: string; fullName: string; specialty: string; isActive?: boolean }> };
+        if (!cancelled) setDoctorOptions((payload.items ?? []).filter((doctor) => doctor.isActive !== false));
+      } catch {
+        // Справочник не прочитался — выпадающего списка просто не будет.
+        // Список клиентов при этом работает целиком, как раньше.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (doctorFilter === "all") {
+      setDoctorClientIds(null);
+      setDoctorBaseState({ loading: false, error: "", truncated: false });
+      return;
+    }
+    const workspaceId = readWorkspaceId();
+    if (!isRealWorkspace(workspaceId)) return;
+    let cancelled = false;
+    setDoctorBaseState({ loading: true, error: "", truncated: false });
+    void (async () => {
+      try {
+        const query = new URLSearchParams({ workspaceId, doctorId: doctorFilter });
+        const response = await crmFetch(`/api/crm/my-clients?${query.toString()}`);
+        const payload = (await response.json()) as {
+          success?: boolean;
+          items?: Array<{ clientId?: string; id?: string }>;
+          truncated?: boolean;
+          error?: string;
+        };
+        if (!response.ok || !payload.success) throw new Error(payload.error || "Не удалось прочитать базу мастера");
+        if (cancelled) return;
+        setDoctorClientIds(new Set((payload.items ?? []).map((item) => item.clientId || item.id || "").filter(Boolean)));
+        setDoctorBaseState({ loading: false, error: "", truncated: Boolean(payload.truncated) });
+      } catch (error) {
+        if (cancelled) return;
+        // Пустой список здесь читался бы как «у этого мастера нет клиентов» —
+        // самый обидный вид неправды: по нему решают, кому отдать нового клиента.
+        setDoctorClientIds(new Set());
+        setDoctorBaseState({
+          loading: false,
+          error: error instanceof Error ? error.message : "Не удалось прочитать базу мастера",
+          truncated: false,
+        });
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [doctorFilter]);
+
   const visibleClients = useMemo(() => {
     const query = search.trim().toLowerCase();
     return items.filter((client) => {
+      // Сито «чей клиент» стоит первым: оно самое узкое.
+      if (doctorClientIds && !doctorClientIds.has(client.id)) return false;
       if (filter === "no_visit") {
         if ((client.lastVisit || "").trim()) return false;
       } else if (filter !== "all" && normalizeClientStatus(client.status) !== filter) {
@@ -398,7 +480,7 @@ export default function ClientsPage() {
       if (!query) return true;
       return [client.name, client.phone, client.whatsapp, client.source, client.comment].some((field) => (field || "").toLowerCase().includes(query));
     });
-  }, [items, filter, search]);
+  }, [items, filter, search, doctorClientIds]);
 
   const detailClient = detailId ? items.find((client) => client.id === detailId) || null : null;
   const detailRelated = useMemo(() => {
@@ -569,6 +651,42 @@ export default function ClientsPage() {
               onChange={(event) => setSearch(event.target.value)}
             />
           </label>
+
+          {doctorOptions.length > 0 ? (
+            <div className="mt-3 flex flex-wrap items-center gap-3">
+              <label className="flex items-center gap-2 text-sm font-bold" style={{ color: "var(--negis-muted)" }}>
+                Мастер
+                <select style={inputStyle} value={doctorFilter} onChange={(event) => setDoctorFilter(event.target.value)}>
+                  <option value="all">Все клиенты салона</option>
+                  {doctorOptions.map((doctor) => (
+                    <option key={doctor.id} value={doctor.id}>
+                      {doctor.fullName}
+                      {doctor.specialty ? ` · ${doctor.specialty}` : ""}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {doctorBaseState.loading ? (
+                <span className="text-sm font-bold" style={{ color: "var(--negis-muted)" }}>Читаем базу мастера…</span>
+              ) : null}
+              {doctorFilter !== "all" && !doctorBaseState.loading && !doctorBaseState.error ? (
+                <span className="text-sm font-black" style={{ color: "var(--negis-text)" }}>
+                  {visibleClients.length} клиентов этого мастера
+                </span>
+              ) : null}
+            </div>
+          ) : null}
+
+          {doctorBaseState.error ? (
+            <p className="mt-2 text-sm font-black" style={{ color: "#b91c1c" }}>
+              Не удалось прочитать базу мастера. Это сбой связи, а не пустая база — не раздавайте клиентов заново.
+            </p>
+          ) : null}
+          {doctorBaseState.truncated ? (
+            <p className="mt-2 text-xs font-black" style={{ color: "#b45309" }}>
+              База мастера показана не целиком: часть клиентов не попала в выборку.
+            </p>
+          ) : null}
         </section>
 
         {/* Loading (production waits for the first Supabase response) / list / empty state */}
