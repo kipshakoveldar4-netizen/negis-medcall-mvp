@@ -144,7 +144,14 @@ export async function sendWebPush(
   nowSeconds: number,
 ): Promise<PushResult> {
   const body = encryptPushPayload(payload, subscription);
-  const response = await fetch(subscription.endpoint, {
+  // Тип ответа берём свой, а не глобальный Response.
+  //
+  // Vercel собирает серверный код в другом наборе типов, чем локальная проверка:
+  // там глобальный Response — это ответ HTTP-сервера, а не ответ fetch, и у него
+  // нет поля status. Локально сборка зелёная, деплой красный — уже третий раз в
+  // этом проекте. Своя минимальная форма убирает зависимость от того, какой
+  // Response окажется в области видимости.
+  const response = (await fetch(subscription.endpoint, {
     method: "POST",
     headers: {
       Authorization: buildVapidAuthorization(subscription.endpoint, keys, nowSeconds),
@@ -155,7 +162,7 @@ export async function sendWebPush(
     },
     body: new Uint8Array(body),
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-  });
+  })) as { status: number };
   // Тело ответа не читается и не логируется: там нет ничего полезного, а вот
   // эндпойнт устройства в лог попасть не должен.
   return { outcome: classifyPushStatus(response.status), status: response.status };
