@@ -290,6 +290,11 @@ export const CRM_ROUTE_AUTHORIZATION: Readonly<Record<string, RouteAuthorization
   // администратор — базу всей клиники по view_clients.
   "my-clients": { kind: "browser", methods: ["GET"] },
 
+  // Устройства сотрудника для пуш-уведомлений. Права роли здесь ни при чём:
+  // человек управляет только СВОИМИ устройствами, и обработчик сужает выборку
+  // его staff_user_id. DELETE не принимается — отписка это метка времени.
+  "push-subscriptions": { kind: "browser", methods: ["GET", "POST", "PATCH"] },
+
   // Worker route: HMAC only. A browser JWT must never satisfy it.
   "meta-insights-background-cycle": { kind: "internal_hmac", methods: ["POST"] },
 };

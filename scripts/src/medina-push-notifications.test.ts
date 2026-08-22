@@ -233,3 +233,77 @@ test("PN13 нечитаемое время не превращается в бе
     null,
   );
 });
+
+// ── Вторая половина: подписка, крючки и экран ──────────────────────────────
+
+import { readFile } from "node:fs/promises";
+
+async function source(...parts: string[]): Promise<string> {
+  return readFile(path.join(repoRoot, ...parts), "utf8");
+}
+
+test("PN14 подписка объявлена в реестре и не принимает удаление", async () => {
+  const registry = await source("lib", "crm", "authorization.ts");
+  const router = await source("api", "crm", "[...path].ts");
+  assert.match(registry, /"push-subscriptions": \{ kind: "browser", methods: \["GET", "POST", "PATCH"\] \}/);
+  assert.ok(!/"push-subscriptions"[\s\S]{0,80}DELETE/.test(registry), "отписка — метка времени, а не удаление строки");
+  assert.ok(router.includes('case "push-subscriptions":'), "маршрут раздаётся из общего catch-all");
+});
+
+test("PN15 устройство принадлежит сотруднику, а не сессии кабинета", async () => {
+  const handler = await source("lib", "crm", "push-subscriptions.ts");
+  // Владелец платформы, зашедший в клинику имперсонацией, не имеет строки
+  // staff_users: подписать его телефон именем сотрудника клиники нельзя.
+  assert.match(handler, /!isUuid\(staffUserId\)[\s\S]{0,120}staff_session_required/);
+  // Отписать можно только СВОЁ устройство: сужение и по клинике, и по человеку.
+  assert.match(handler, /\.update\(\{ revoked_at[\s\S]{0,220}\.eq\("staff_user_id", staffUserId\)/);
+  // Ключи устройства наружу не отдаются — это полномочие отправки, не сведения.
+  assert.ok(!/select\("[^"]*p256dh[^"]*"\)[\s\S]{0,400}devices/.test(handler), "ключи не уходят в ответ списка");
+  assert.match(handler, /endpointTail: readString\(record\.endpoint\)\.slice\(-12\)/);
+});
+
+test("PN16 уведомление — побочное действие: после журнала, до ответа, без влияния на запись", async () => {
+  const server = await source("lib", "crm", "server.ts");
+  const handler = await source("lib", "crm", "push-subscriptions.ts");
+
+  // Создание уведомляет сохранённой строкой.
+  assert.match(server, /event: "created",\s*appointment: appointmentSnapshotFrom\(data\)/);
+  // Отмена — только на ПЕРЕХОДЕ статуса, иначе правка комментария у отменённой
+  // записи слала бы «запись отменена» заново.
+  assert.match(server, /wasStatus !== nowStatus && \(nowStatus === "cancelled" \|\| nowStatus === "no_show"\)/);
+  // Адресат отмены — из ДО-состояния: патч может сменить мастера и статус разом.
+  assert.match(server, /event: "cancelled",\s*appointment: appointmentSnapshotFrom\(before\)/);
+  // Контракт «никогда не бросает»: иначе сохранённая запись ответила бы ошибкой.
+  assert.match(handler, /export async function notifyAppointmentEvent[\s\S]{0,400}try \{/);
+  assert.match(handler, /\} catch \{[\s\S]{0,160}push: отправка не удалась/);
+});
+
+test("PN17 service worker умеет показать уведомление и открыть нужный день", async () => {
+  const worker = await source("artifacts", "negis", "public", "sw.js");
+  assert.match(worker, /addEventListener\("push"/);
+  assert.match(worker, /addEventListener\("notificationclick"/);
+  // Сообщение без тела приходит от самого push-сервиса при проверке канала:
+  // падать на нём нельзя.
+  assert.match(worker, /event\.data \? event\.data\.json\(\) : \{\}/);
+  // Уже открытое приложение переиспользуется, а не открывается вторым окном.
+  assert.match(worker, /matchAll\(\{ type: "window"[\s\S]{0,500}focus\(\)/);
+  // Обработчики оболочки не тронуты.
+  for (const existing of ['addEventListener("install"', 'addEventListener("activate"', 'addEventListener("fetch"']) {
+    assert.ok(worker.includes(existing), `${existing} должен остаться на месте`);
+  }
+});
+
+test("PN18 экран называет каждую причину тишины своими словами", async () => {
+  const lib = await source("artifacts", "negis", "src", "lib", "push.ts");
+  const screen = await source("artifacts", "negis", "src", "components", "layout", "PushSettings.tsx");
+
+  // Айфон в браузере — самый частый случай молчаливого пуша в салоне.
+  assert.ok(lib.includes("экран «Домой»"), "айфону объясняем установку, а не «не поддерживается»");
+  assert.match(lib, /case "denied":/);
+  assert.match(lib, /if \(isIos\(\) && !isStandalone\(\)\) return "ios-needs-install"/);
+
+  assert.ok(screen.includes("нужна миграция 044"), "невключённая миграция названа номером");
+  assert.ok(screen.includes("ещё не настроены владельцем"), "отсутствие ключей названо прямо");
+  // Под имперсонацией и в демо ничего не пишем.
+  assert.match(screen, /const readOnly = isImpersonation \|\| isDemoMode \|\| !clinicId/);
+});

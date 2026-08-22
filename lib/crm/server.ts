@@ -26,6 +26,7 @@ import {
   type MetaLaunchPayloadOptions,
 } from "./meta-launch-payload";
 import { evaluateMetaInsightsCompleteness } from "../meta/insightsCompleteness";
+import { notifyAppointmentEvent } from "./push-subscriptions";
 import { getSupabaseServerClient } from "../supabase/server";
 import {
   diffForJournal,
@@ -2965,7 +2966,25 @@ async function readOwnAppointments(
   return { data: rows, error: null };
 }
 
-async function readClinicScheduleTimeZone(
+/** Снимок записи для уведомления: ровно те поля, из которых можно решить, кому писать. */
+function appointmentSnapshotFrom(row: unknown): {
+  doctorId: string;
+  doctorName: string;
+  client: string;
+  service: string;
+  startsAt: string;
+} {
+  const record = asRecord(row);
+  return {
+    doctorId: readString(record.doctor_id),
+    doctorName: readString(record.doctor_name),
+    client: readString(record.client_name) || readString(record.client),
+    service: readString(record.service),
+    startsAt: readString(record.starts_at),
+  };
+}
+
+export async function readClinicScheduleTimeZone(
   supabase: CrmSupabaseClient,
   workspaceId: string,
 ): Promise<string | null> {
@@ -4664,6 +4683,21 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
       }
     }
 
+    // Уведомление мастеру — последним побочным действием, ровно как журнал:
+    // сначала домен, потом побочное, и только на успехе. Функция не бросает и
+    // ответ не меняет: запись, которая сохранилась, обязана считаться
+    // сохранённой, даже если push-сервис лежит.
+    if (resource === "appointments") {
+      await notifyAppointmentEvent({
+        supabase,
+        workspaceId,
+        event: "created",
+        appointment: appointmentSnapshotFrom(data),
+        actorStaffUserId: readString(readWorkspaceContext(req)?.staffUserId),
+        timeZone: (await readClinicScheduleTimeZone(supabase, workspaceId)) || "",
+      });
+    }
+
     return sendJson(res, 201, success("supabase", {
       [resource === "content-videos" ? "video" : "item"]: item,
       item,
@@ -5144,6 +5178,25 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
         changes: diffForJournal(patchedEntity, before, savedRow),
         ...journalActor(req),
       });
+    }
+
+    // Отмена уведомляется на ПЕРЕХОДЕ статуса, а не на каждом сохранении:
+    // иначе правка комментария у отменённой записи слала бы «запись отменена»
+    // заново. Адресат берётся из ДО-состояния: патч может одновременно сменить
+    // мастера и статус, и знать об отмене должен тот, у кого визит был.
+    if (resource === "appointments") {
+      const wasStatus = readString(asRecord(before).status);
+      const nowStatus = readString(asRecord(savedRow).status);
+      if (wasStatus !== nowStatus && (nowStatus === "cancelled" || nowStatus === "no_show")) {
+        await notifyAppointmentEvent({
+          supabase,
+          workspaceId,
+          event: "cancelled",
+          appointment: appointmentSnapshotFrom(before),
+          actorStaffUserId: readString(readWorkspaceContext(req)?.staffUserId),
+          timeZone: (await readClinicScheduleTimeZone(supabase, workspaceId)) || "",
+        });
+      }
     }
 
     return sendJson(res, 200, success("supabase", {

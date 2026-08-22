@@ -111,3 +111,51 @@ self.addEventListener("fetch", (event) => {
     );
   }
 });
+
+// ── Пуш-уведомления сотрудникам ────────────────────────────────────────────
+//
+// Два обработчика, без которых подписка бессмысленна: браузер доставит
+// сообщение, но показывать его некому.
+
+self.addEventListener("push", (event) => {
+  // Тело всегда наше и всегда JSON, но проверяем: сообщение без тела приходит
+  // от самого push-сервиса при проверке канала, и падать на нём нельзя.
+  let payload = {};
+  try {
+    payload = event.data ? event.data.json() : {};
+  } catch (error) {
+    payload = {};
+  }
+
+  const title = payload.title || "Медина";
+  const options = {
+    body: payload.text || "",
+    icon: "/icon-192.png",
+    badge: "/icon-192.png",
+    // tag склеивает повторы об одном событии: два уведомления об одной отмене
+    // не нужны.
+    tag: payload.tag || "negis",
+    data: { url: payload.url || "/appointments" },
+    // Вибрация короткая: мастер работает руками, телефон часто в кармане.
+    vibrate: [80, 40, 80],
+  };
+  event.waitUntil(self.registration.showNotification(title, options));
+});
+
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const target = (event.notification.data && event.notification.data.url) || "/appointments";
+  event.waitUntil(
+    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((windows) => {
+      // Уже открытое приложение переиспользуем: второе окно поверх первого —
+      // это два разных состояния одного календаря.
+      for (const client of windows) {
+        if ("focus" in client) {
+          client.navigate(target);
+          return client.focus();
+        }
+      }
+      return self.clients.openWindow(target);
+    }),
+  );
+});

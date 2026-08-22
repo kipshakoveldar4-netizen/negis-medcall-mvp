@@ -4,6 +4,7 @@ import { toast } from 'sonner';
 import { useAuth } from '@/contexts/AuthContext';
 import { supabase, verifyCurrentPassword } from '@/lib/supabase';
 import { PASSWORD_RULE_HINT, validatePasswordRules } from '../../../../../lib/auth/password-rules';
+import { PushSettings } from './PushSettings';
 import { isSyntheticEmail, loginFromEmail } from '../../../../../lib/auth/staff-logins';
 
 // Личный кабинет сотрудника: имя и свой пароль. Живёт отдельным файлом, потому
@@ -204,6 +205,10 @@ export function ProfileDialog({ onClose }: ProfileDialogProps) {
                 Так вас видите вы. В списке сотрудников имя меняет администратор клиники.
               </p>
             </div>
+
+            {/* Уведомления живут здесь же: диалог открывается и из бокового
+                меню, и из мобильного ящика, а мастера работают с телефона. */}
+            <PushSettings />
 
             <div className="border-t pt-4" style={{ borderColor: 'var(--negis-border)' }}>
               <div className="mb-3 flex items-center gap-2">
