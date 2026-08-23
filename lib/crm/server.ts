@@ -240,6 +240,22 @@ const SERVICE_DURATION_MAX = 600;
 const SERVICE_PRICE_MAX_MINOR = 10_000_000_000;
 
 /**
+ * Колонка цены записи для insert/patch.
+ *
+ * Пустой объект — «цену не называли»: ключ не попадает в строку, и база
+ * оставляет null. Явный null возвращает ТОЛЬКО patch-очистка. Потолок тот же,
+ * что у прайса услуг: bigint переваривает больше, но число за пределом — это
+ * опечатка, и честнее не сохранить её, чем записать долг в сто миллионов.
+ */
+function appointmentPriceColumn(body: JsonRecord): { price_minor?: number | null } {
+  if (!("priceMinor" in body) && !("price_minor" in body)) return {};
+  const raw = readNullableNumber(body.priceMinor ?? body.price_minor);
+  if (raw === null) return { price_minor: null };
+  if (!Number.isFinite(raw) || raw < 0 || raw > SERVICE_PRICE_MAX_MINOR) return { price_minor: null };
+  return { price_minor: Math.round(raw) };
+}
+
+/**
  * «Прислали, но прочитать не смогли» — не то же самое, что «не прислали».
  *
  * readNullableNumber возвращает null и на пустоту, и на мусор, а проверки ниже
@@ -553,6 +569,11 @@ function buildPatchRow(resource: CrmResource, body: JsonRecord): JsonRecord {
     setText("doctor_name", ["doctor", "doctor_name", "doctorName"]);
     setDate("starts_at", ["starts_at", "startsAt"]);
     setRaw("duration_minutes", ["duration_minutes", "durationMinutes"]);
+    // Цена правится и чистится: пустая строка формы приходит null и честно
+    // снимает цену («не называлась»), названная — перезаписывает снимок.
+    if (hasAnyKey(body, ["priceMinor", "price_minor"])) {
+      Object.assign(row, appointmentPriceColumn(body));
+    }
     setText("status", ["status"]);
     setText("notes", ["notes", "time"]);
     setText("source", ["source"]);
@@ -1324,6 +1345,9 @@ function makeAppointment(body: JsonRecord): JsonRecord {
     notes: readString(body.notes),
     durationMinutes: readNumber(body.durationMinutes ?? body.duration_minutes) ?? 60,
     duration_minutes: readNumber(body.durationMinutes ?? body.duration_minutes) ?? 60,
+    // Цена записи: null — «цена не называлась», не ноль. readNumber здесь
+    // нельзя: readNumber(null) === 0, и пустая цена стала бы «бесплатно».
+    priceMinor: readNullableNumber(body.priceMinor ?? body.price_minor),
     // Кто завёл запись: от этого зависит, видит ли мастер телефон клиента.
     createdByStaffUserId: firstString(body.createdByStaffUserId, body.created_by_staff_user_id),
     source: readString(body.source),
@@ -1859,6 +1883,13 @@ const configs: Record<CrmResource, ResourceConfig> = {
       doctor_name: firstString(body.doctor, body.doctor_name, body.doctorName) || null,
       starts_at: maybeDate(body.starts_at ?? body.startsAt),
       duration_minutes: appointmentMinutes(body.durationMinutes ?? body.duration_minutes),
+      // Цена — снимок договорённости, в тиынах. Ключ появляется в insert
+      // ТОЛЬКО с названной ценой: readNumber(null) вернул бы 0, и каждая
+      // запись без цены стала бы «бесплатной» — ревью поймало ровно это.
+      // Отсутствие ключа заодно не будит PGRST204-повторы, пока миграция 045
+      // не применена. Потолок и отрицательное режутся тем же правилом, что и
+      // цена услуги: за пределами — «цены нет», а не 502 от базы.
+      ...appointmentPriceColumn(body),
       status: readString(body.status) || "scheduled",
       notes: firstString(body.notes, body.time) || null,
       source: readString(body.source) || null,
@@ -1877,6 +1908,7 @@ const configs: Record<CrmResource, ResourceConfig> = {
         status: row.status,
         notes: row.notes,
         durationMinutes: row.duration_minutes,
+        priceMinor: row.price_minor,
         source: row.source,
         client_id: row.client_id,
         service_id: row.service_id,
@@ -3831,6 +3863,7 @@ const LINK_COLUMNS_BY_MIGRATION: ReadonlyArray<readonly [string, readonly string
   // ошибкой, что и в случае с 012. Каталог обязан пополняться ВМЕСТЕ с
   // колонкой, а не после того, как это заметит администратор салона.
   ["043", ["created_by_staff_user_id"]],
+  ["045", ["price_minor"]],
   ["032", ["service_id"]],
   ["033", ["doctor_id"]],
 ];
@@ -3956,6 +3989,7 @@ function isMissingTable(error: { code?: unknown; message?: unknown } | null): bo
  */
 const UNSAVED_FIELD_LABELS: Record<string, string> = {
   duration_minutes: "длительность",
+  price_minor: "цена",
   whatsapp: "WhatsApp",
   source: "источник",
   service_id: "услуга из справочника",

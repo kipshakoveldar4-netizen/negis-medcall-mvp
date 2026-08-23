@@ -450,6 +450,13 @@ export default function SalesPage() {
         // Запись передаёт услугу справочника: цена подставится, когда прайс
         // догрузится — тем же правилом, что и ручной выбор услуги.
         serviceId: str(prefill.serviceId) || str(prefill.service_id),
+        // Согласованная цена записи: если она есть, прайс её не перебивает —
+        // эффект подстановки из справочника не трогает заполненную сумму.
+        amountTenge: (() => {
+          const raw = prefill.priceMinor ?? prefill.price_minor;
+          const minor = typeof raw === "number" && Number.isFinite(raw) && raw >= 0 ? raw : null;
+          return minor === null ? "" : String(Math.round(minor / 100));
+        })(),
         metaCampaignLaunchId: str(prefill.metaCampaignLaunchId) || str(prefill.meta_campaign_launch_id),
       });
       setFormOpen(true);

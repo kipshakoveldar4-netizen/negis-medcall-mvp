@@ -46,6 +46,8 @@ type Appointment = {
   doctorId: string;
   startsAt: string;
   durationMinutes: number;
+  /** Цена записи в тиынах; null — «цена не называлась», не ноль. */
+  priceMinor: number | null;
   status: AppointmentStatus;
   notes: string;
   source: string;
@@ -63,6 +65,8 @@ type AppointmentForm = {
   date: string;
   time: string;
   durationMinutes: number;
+  /** Цена в ТЕНГЕ, строкой из поля ввода; пустая — «цена не называлась». */
+  priceTenge: string;
   status: AppointmentStatus;
   notes: string;
   source: string;
@@ -80,6 +84,8 @@ type CatalogService = {
   id: string;
   name: string;
   durationMinutes: number | null;
+  /** Цена из прайса в тиынах — чтобы список услуг читался как у запись.кз. */
+  basePriceMinor: number | null;
   sortOrder: number;
   isActive: boolean;
 };
@@ -116,10 +122,13 @@ async function loadCatalogServices(doctorId = ""): Promise<{ services: CatalogSe
       .map((item) => {
         const record = asRecord(item);
         const duration = record.durationMinutes ?? record.duration_minutes;
+        const price = record.basePriceMinor ?? record.base_price_minor;
         return {
           id: readString(record.id),
           name: readString(record.name),
           durationMinutes: duration === null || duration === undefined || duration === "" ? null : readNumber(duration, 0) || null,
+          // 0 — осознанное «бесплатно» из прайса, его нельзя ронять в null.
+          basePriceMinor: price === null || price === undefined || price === "" ? null : readNumber(price, 0),
           sortOrder: readNumber(record.sortOrder ?? record.sort_order, 0),
           isActive:
             record.isActive === undefined && record.is_active === undefined
@@ -371,6 +380,7 @@ function makeSeedAppointment(
     doctorId: "",
     startsAt: toStartsAt(date, time),
     durationMinutes: 60,
+    priceMinor: null,
     status,
     notes,
     source,
@@ -492,6 +502,7 @@ function appointmentFromApi(value: unknown): Appointment {
     doctorId: readString(record.doctorId) || readString(record.doctor_id),
     startsAt,
     durationMinutes: readNumber(record.durationMinutes ?? record.duration_minutes, 60),
+    priceMinor: (() => { const raw = record.priceMinor ?? record.price_minor; return raw === null || raw === undefined || raw === "" ? null : readNumber(raw, 0); })(),
     status: normalizeStatus(readString(record.status)),
     notes: readString(record.notes),
     source: readString(record.source),
@@ -518,6 +529,8 @@ function appointmentToApi(appointment: Appointment): Record<string, unknown> {
     starts_at: appointment.startsAt,
     startsAt: appointment.startsAt,
     duration_minutes: appointment.durationMinutes,
+    priceMinor: appointment.priceMinor,
+    price_minor: appointment.priceMinor,
     durationMinutes: appointment.durationMinutes,
     status: appointment.status,
     notes: appointment.notes,
@@ -551,6 +564,7 @@ function defaultForm(date: string, time = "09:00"): AppointmentForm {
     date,
     time,
     durationMinutes: 60,
+    priceTenge: "",
     status: "scheduled",
     notes: "",
     source: "Ресепшн",
@@ -570,6 +584,7 @@ function formFromAppointment(appointment: Appointment): AppointmentForm {
     date: dateKeyFromStartsAt(appointment.startsAt),
     time: timeKeyFromStartsAt(appointment.startsAt),
     durationMinutes: appointment.durationMinutes,
+    priceTenge: appointment.priceMinor === null || appointment.priceMinor === undefined ? "" : String(Math.round(appointment.priceMinor / 100)),
     status: appointment.status,
     notes: appointment.notes,
     source: appointment.source || "Ресепшн",
@@ -588,7 +603,15 @@ function appointmentFromForm(form: AppointmentForm, existingId?: string): Appoin
     doctor: form.doctor.trim(),
     doctorId: form.doctorId || "",
     startsAt: toStartsAt(form.date, form.time),
-    durationMinutes: form.durationMinutes,
+    // Цена уходит в тиынах; пустое поле, нечисло и минус — null, «цена не
+    // называлась». Тот же вердикт даёт сервер: два слоя не должны кодировать
+    // один ввод по-разному.
+    priceMinor: (() => {
+      const raw = Number(form.priceTenge);
+      if (form.priceTenge.trim() === "" || !Number.isFinite(raw) || raw < 0) return null;
+      return Math.round(raw) * 100;
+    })(),
+    durationMinutes: Math.max(1, Math.min(600, form.durationMinutes || 60)),
     status: form.status,
     notes: form.notes.trim(),
     source: form.source.trim(),
@@ -886,8 +909,18 @@ export function AppointmentsPage() {
   const [selectedDate, setSelectedDate] = useState(todayKeyAtLoad);
   // Общая картина дня — владельцу и администратору. Ресепшн работает в
   // прежних видах: ему ничего не отнимаем, но и новый экран не навязываем.
-  const seesWholeClinic = userRole === "owner" || userRole === "admin";
-  const [view, setView] = useState<CalendarView>("day");
+  // Ресепшн и управляющий читают все записи клиники тем же правом, что и
+  // владелец, — сервер не сужает их до «своих». Закрывать им сетку значило
+  // бы прятать то, что список и так показывает, только в неудобном виде.
+  const seesWholeClinic =
+    userRole === "owner" || userRole === "admin" || userRole === "manager" || userRole === "receptionist";
+  // Роли с полным чтением клиники попадают сразу в сетку по мастерам:
+  // «нажал кнопку — и в календаре». Мастеру сетка недоступна, ему день.
+  const [view, setView] = useState<CalendarView>(() =>
+    userRole === "owner" || userRole === "admin" || userRole === "manager" || userRole === "receptionist"
+      ? "grid"
+      : "day",
+  );
   const [doctorFilter, setDoctorFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
   const [serviceFilter, setServiceFilter] = useState("all");
@@ -895,6 +928,7 @@ export function AppointmentsPage() {
   const [modalOpen, setModalOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState<AppointmentForm>(() => defaultForm(todayKeyAtLoad));
+
 
   // Ref заявки живёт только в той сессии модалки, которую открыл префилл:
   // модалка, закрытая без сохранения, обязана разрядить его — иначе следующая
@@ -923,6 +957,20 @@ export function AppointmentsPage() {
   // с услугой нельзя — это молча переписало бы уже сохранённую запись.
   const scopedDoctorRef = useRef<string | null>(null);
   const [directory, setDirectory] = useState<{ items: DirectoryDoctor[]; available: boolean }>({ items: [], available: false });
+
+  // Сетка без единой карточки мастера — заглушка «Справочник пуст», хотя
+  // записи дня существуют (свободным вводом имён). Пока справочник пуст,
+  // честнее открыть день. Эффект не спорит с человеком: выбранный руками
+  // вид не трогается, переключение происходит один раз на загрузке.
+  const emptyDirectoryHandled = useRef(false);
+  useEffect(() => {
+    if (emptyDirectoryHandled.current) return;
+    if (!directory.available) return;
+    emptyDirectoryHandled.current = true;
+    if (directory.items.filter((doctor) => doctor.isActive).length === 0) {
+      setView((current) => (current === "grid" ? "day" : current));
+    }
+  }, [directory]);
   const [shifts, setShifts] = useState<DoctorShift[]>([]);
   const [clinicTimeZone, setClinicTimeZone] = useState("");
   // Прочитать график не удалось — это НЕ то же самое, что «пояс не задан».
@@ -1073,7 +1121,7 @@ export function AppointmentsPage() {
     // Снимается ровно связь со справочником. Снимок названия остаётся: его
     // правят руками, и стереть правку из-за смены мастера — потерять данные,
     // а название названо в подписи, так что оператор видит, что было.
-    setForm((current) => ({ ...current, serviceId: "" }));
+    setForm((current) => ({ ...current, serviceId: "", priceTenge: "" }));
   }, [doctorCatalog, form.doctorId, form.service, form.serviceId, terms.specialistGenitive]);
 
   /** Активные врачи в порядке справочника — то, из чего выбирают в форме. */
@@ -1565,6 +1613,9 @@ export function AppointmentsPage() {
         clientId: appointment.clientId || "",
         appointmentId: appointment.id,
         serviceId: appointment.serviceId || "",
+        // Согласованная цена записи главнее прайса: скидку обещали клиенту,
+        // и продажа обязана её увидеть, а не выставить полный ценник.
+        priceMinor: appointment.priceMinor,
       }),
     );
     setLocation("/sales");
@@ -2191,69 +2242,10 @@ export function AppointmentsPage() {
               )}
               <TextField label="WhatsApp" value={form.whatsapp} onChange={(whatsapp) => setForm((current) => ({ ...current, whatsapp }))} placeholder="+7..." />
               {/*
-                Услуга выбирается из справочника, но свободный ввод остаётся:
-                регистратор за стойкой не должен упираться в отсутствующую
-                строку каталога. Пока каталог пуст — а до применения миграции
-                032 он пуст всегда — поле выглядит ровно как раньше.
+                Мастер стоит ПЕРВЫМ — как в запись.кз: сначала «к кому», потом
+                «на что». Выбор мастера сужает прайс до его услуг плюс общих,
+                и перебирать все сто двадцать девять строк больше не нужно.
               */}
-              {activeCatalog.length > 0 ? (
-                <div>
-                  <SelectField
-                    label="Услуга"
-                    value={form.serviceId || OTHER_SERVICE_OPTION}
-                    onChange={(value) => {
-                      // Оператор выбрал услугу сам — подпись про снятую связь
-                      // больше ничего не объясняет.
-                      setServiceScopeNotice("");
-                      if (value === OTHER_SERVICE_OPTION) {
-                        setForm((current) => ({ ...current, serviceId: "" }));
-                        return;
-                      }
-                      const service = activeCatalog.find((item) => item.id === value);
-                      if (!service) return;
-                      // Снимок названия ставит форма, а не сервер: оба пишущих
-                      // пути шлют объект целиком, и серверная перезапись
-                      // затирала бы поправленный вручную текст на каждом
-                      // сохранении, а не только при смене услуги.
-                      setForm((current) => ({
-                        ...current,
-                        serviceId: service.id,
-                        service: service.name,
-                        durationMinutes: service.durationMinutes ?? current.durationMinutes,
-                      }));
-                    }}
-                  >
-                    {activeCatalog.map((service) => (
-                      <option key={service.id} value={service.id}>{service.name}</option>
-                    ))}
-                    {/* Услуга записи могла уехать в архив после того, как её
-                        записали. Без этого варианта список не содержал бы
-                        выбранного значения: поле рисовалось бы пустым, а один
-                        случайный клик по нему переписал бы и связь, и снимок
-                        названия на другую услугу. */}
-                    {form.serviceId && !activeCatalog.some((service) => service.id === form.serviceId) ? (
-                      <option value={form.serviceId}>{form.service || "Услуга скрыта"}</option>
-                    ) : null}
-                    <option value={OTHER_SERVICE_OPTION}>Другая услуга…</option>
-                  </SelectField>
-                  {serviceScopeHint}
-                  {/* Название видно всегда: связь ссылается на строку каталога,
-                      а в записи хранится снимок на момент визита, и переименование
-                      услуги не должно менять того, что записано в карточке. */}
-                  <div className="mt-2">
-                    <TextField
-                      label="Название услуги в записи"
-                      value={form.service}
-                      onChange={(service) => setForm((current) => ({ ...current, service }))}
-                    />
-                  </div>
-                </div>
-              ) : (
-                <div>
-                  <TextField label="Услуга" value={form.service} onChange={(service) => setForm((current) => ({ ...current, service, serviceId: "" }))} />
-                  {serviceScopeHint}
-                </div>
-              )}
               {/*
                 Раньше это был закрытый список из четырёх выдуманных имён:
                 нового врача через форму записи ввести было нельзя вообще.
@@ -2315,6 +2307,79 @@ export function AppointmentsPage() {
                   onChange={(doctor) => setForm((current) => ({ ...current, doctor, doctorId: "" }))}
                 />
               )}
+              {/*
+                Услуга выбирается из справочника, но свободный ввод остаётся:
+                регистратор за стойкой не должен упираться в отсутствующую
+                строку каталога. Пока каталог пуст — а до применения миграции
+                032 он пуст всегда — поле выглядит ровно как раньше.
+              */}
+              {activeCatalog.length > 0 ? (
+                <div>
+                  <SelectField
+                    label="Услуга"
+                    value={form.serviceId || OTHER_SERVICE_OPTION}
+                    onChange={(value) => {
+                      // Оператор выбрал услугу сам — подпись про снятую связь
+                      // больше ничего не объясняет.
+                      setServiceScopeNotice("");
+                      if (value === OTHER_SERVICE_OPTION) {
+                        // Цена принадлежала снятой услуге: оставить её значило
+                        // бы продать «другую услугу» по чужому прайсу.
+                        setForm((current) => ({ ...current, serviceId: "", priceTenge: "" }));
+                        return;
+                      }
+                      const service = activeCatalog.find((item) => item.id === value);
+                      if (!service) return;
+                      // Снимок названия ставит форма, а не сервер: оба пишущих
+                      // пути шлют объект целиком, и серверная перезапись
+                      // затирала бы поправленный вручную текст на каждом
+                      // сохранении, а не только при смене услуги.
+                      setForm((current) => ({
+                        ...current,
+                        serviceId: service.id,
+                        service: service.name,
+                        durationMinutes: service.durationMinutes ?? current.durationMinutes,
+                        // Цена из прайса — подсказка, не приговор: поле ниже
+                        // остаётся редактируемым, скидку вписывают поверх.
+                        priceTenge: service.basePriceMinor === null ? current.priceTenge : String(Math.round(service.basePriceMinor / 100)),
+                      }));
+                    }}
+                  >
+                    {activeCatalog.map((service) => {
+                      const price = service.basePriceMinor === null ? "" : ` — ${Math.round(service.basePriceMinor / 100).toLocaleString("ru-RU")} ₸`;
+                      const length = service.durationMinutes ? ` · ${service.durationMinutes} мин` : "";
+                      return (
+                        <option key={service.id} value={service.id}>{`${service.name}${price}${length}`}</option>
+                      );
+                    })}
+                    {/* Услуга записи могла уехать в архив после того, как её
+                        записали. Без этого варианта список не содержал бы
+                        выбранного значения: поле рисовалось бы пустым, а один
+                        случайный клик по нему переписал бы и связь, и снимок
+                        названия на другую услугу. */}
+                    {form.serviceId && !activeCatalog.some((service) => service.id === form.serviceId) ? (
+                      <option value={form.serviceId}>{form.service || "Услуга скрыта"}</option>
+                    ) : null}
+                    <option value={OTHER_SERVICE_OPTION}>Другая услуга…</option>
+                  </SelectField>
+                  {serviceScopeHint}
+                  {/* Название видно всегда: связь ссылается на строку каталога,
+                      а в записи хранится снимок на момент визита, и переименование
+                      услуги не должно менять того, что записано в карточке. */}
+                  <div className="mt-2">
+                    <TextField
+                      label="Название услуги в записи"
+                      value={form.service}
+                      onChange={(service) => setForm((current) => ({ ...current, service }))}
+                    />
+                  </div>
+                </div>
+              ) : (
+                <div>
+                  <TextField label="Услуга" value={form.service} onChange={(service) => setForm((current) => ({ ...current, service, serviceId: "" }))} />
+                  {serviceScopeHint}
+                </div>
+              )}
               <TextField label="Дата" type="date" value={form.date} onChange={(date) => setForm((current) => ({ ...current, date }))} />
               <div>
                 <TextField label="Время начала" type="time" value={form.time} onChange={(time) => setForm((current) => ({ ...current, time }))} />
@@ -2373,15 +2438,66 @@ export function AppointmentsPage() {
                   )}
                 </div>
               ) : null}
-              <SelectField label="Длительность" value={String(form.durationMinutes)} onChange={(durationMinutes) => setForm((current) => ({ ...current, durationMinutes: Number(durationMinutes) }))}>
-                {/* Длительность услуги может не совпасть с четырьмя жёсткими
-                    значениями — семидесятипятиминутная процедура выбрала бы
-                    отсутствующий вариант и поле осталось бы пустым. */}
-                {Array.from(new Set([30, 45, 60, 90, form.durationMinutes]))
-                  .filter((duration) => Number.isFinite(duration) && duration > 0)
-                  .sort((a, b) => a - b)
-                  .map((duration) => <option key={duration} value={duration}>{duration} минут</option>)}
-              </SelectField>
+              <div>
+                <span className="mb-2 block text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">Длительность, минут</span>
+                {/* Свободное число, а не четыре варианта: воск идёт 5 минут,
+                    VIP-комплекс — 2 часа, и оба должны выражаться честно.
+                    От длительности зависят свободные слоты и проверка
+                    пересечений — врать ей нельзя. */}
+                {/* Кламп — на потере фокуса и при отправке, НЕ на каждом
+                    нажатии: покстрочный кламп превращал «45» в 55 («4» → 5,
+                    затем дописанная «5»). Пределы 1..600 — как у каталога
+                    услуг: услуга на 47 минут легальна и не должна блокировать
+                    отправку формы. */}
+                <input
+                  className="neu-input w-full"
+                  type="number"
+                  min={1}
+                  max={600}
+                  step={1}
+                  value={form.durationMinutes || ""}
+                  onChange={(event) => {
+                    const minutes = Math.round(Number(event.target.value) || 0);
+                    setForm((current) => ({ ...current, durationMinutes: minutes }));
+                  }}
+                  onBlur={() => {
+                    setForm((current) => ({
+                      ...current,
+                      durationMinutes: Math.max(1, Math.min(600, current.durationMinutes || 60)),
+                    }));
+                  }}
+                />
+                <div className="mt-1.5 flex flex-wrap gap-1.5">
+                  {[15, 30, 60, 90, 120].map((minutes) => (
+                    <button
+                      key={minutes}
+                      type="button"
+                      className="rounded-lg px-2 py-1 text-xs font-black tabular-nums"
+                      style={form.durationMinutes === minutes
+                        ? { background: "var(--negis-primary)", color: "#fff" }
+                        : { background: "var(--negis-border)", color: "var(--negis-text)" }}
+                      onClick={() => setForm((current) => ({ ...current, durationMinutes: minutes }))}
+                    >
+                      {minutes}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <span className="mb-2 block text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">Цена, ₸</span>
+                {/* Снимок договорённости: прайс подставляет, рука правит.
+                    Пусто — «цена не называлась», и это отличается от нуля. */}
+                <input
+                  className="neu-input w-full"
+                  type="number"
+                  min={0}
+                  max={100000000}
+                  step={1}
+                  placeholder="Из прайса или своя"
+                  value={form.priceTenge}
+                  onChange={(event) => setForm((current) => ({ ...current, priceTenge: event.target.value }))}
+                />
+              </div>
               <SelectField label="Статус" value={form.status} onChange={(status) => setForm((current) => ({ ...current, status: normalizeStatus(status) }))}>
                 {statusOptions.map((status) => <option key={status} value={status}>{getAppointmentStatusLabel(status)}</option>)}
               </SelectField>

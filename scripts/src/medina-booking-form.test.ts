@@ -1,0 +1,137 @@
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+import test from "node:test";
+import { fileURLToPath } from "node:url";
+
+// Форма записи по образцу запись.кз: мастер первым, его услуги с ценами,
+// цена записи как снимок договорённости, длительность любым числом минут.
+//
+// Первая версия этих пинов была вакуумной — противник показал, что все семь
+// проходят при трёх критичных дефектах. Теперь каждый пин держит гарантию,
+// падение которой было реальной находкой ревью.
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+const repoRoot = path.resolve(here, "..", "..");
+
+async function read(...parts: string[]): Promise<string> {
+  return readFile(path.join(repoRoot, ...parts), "utf8");
+}
+
+test("BF1 мастер стоит в форме раньше услуги — по самим полям, не по комментариям", async () => {
+  const page = await read("artifacts", "negis", "src", "pages", "AppointmentsPage.tsx");
+  // Ищем сами поля: селект специалиста ставит doctorId и имя, селект услуги —
+  // serviceId. Комментарии можно переставить, не двигая JSX; поля — нельзя.
+  const doctorSelectAt = page.indexOf("setForm((current) => ({ ...current, doctorId: doctor.id, doctor: doctor.fullName }))");
+  const serviceSelectAt = page.indexOf('value={form.serviceId || OTHER_SERVICE_OPTION}');
+  assert.ok(doctorSelectAt > 0 && serviceSelectAt > 0, "оба селекта существуют");
+  assert.ok(doctorSelectAt < serviceSelectAt, "сначала «к кому», потом «на что» — как в запись.кз");
+});
+
+test("BF2 услуга в списке читается с ценой и длительностью, ноль остаётся нулём", async () => {
+  const page = await read("artifacts", "negis", "src", "pages", "AppointmentsPage.tsx");
+  assert.match(page, /Math\.round\(service\.basePriceMinor \/ 100\)\.toLocaleString\("ru-RU"\)/);
+  assert.match(page, /` · \$\{service\.durationMinutes\} мин`/);
+  // «Бесплатная консультация» с ценой 0 — осознанный ноль, а не отсутствие
+  // цены: readNumber(price, 0) || null ронял его в null.
+  assert.ok(
+    !page.includes('readNumber(price, 0) || null'),
+    "ноль из прайса нельзя превращать в «цена не указана»",
+  );
+});
+
+test("BF3 пустая цена — null на ОБОИХ слоях, и никакой слой не выдумывает ноль", async () => {
+  const page = await read("artifacts", "negis", "src", "pages", "AppointmentsPage.tsx");
+  const server = await read("lib", "crm", "server.ts");
+
+  // Клиент: пустая строка, нечисло и минус — null.
+  assert.match(page, /form\.priceTenge\.trim\(\) === "" \|\| !Number\.isFinite\(raw\) \|\| raw < 0\) return null/);
+
+  // Сервер: ключ price_minor попадает в insert только с названной ценой.
+  // readNumber(null) === 0 — ровно так пустая цена становилась «бесплатно».
+  assert.match(server, /function appointmentPriceColumn\(body: JsonRecord\)/);
+  assert.match(server, /if \(!\("priceMinor" in body\) && !\("price_minor" in body\)\) return \{\};/);
+  assert.match(server, /const raw = readNullableNumber\(body\.priceMinor \?\? body\.price_minor\);/);
+  assert.ok(
+    !/price_minor: readNumber\(/.test(server),
+    "readNumber для цены запрещён: он превращает null в 0",
+  );
+  // Потолок — тот же, что у прайса: за пределом «цены нет», а не 502 от базы.
+  assert.match(server, /raw > SERVICE_PRICE_MAX_MINOR\) return \{ price_minor: null \};/);
+});
+
+test("BF4 длительность — любое число минут каталога, и ввод не искажается", async () => {
+  const page = await read("artifacts", "negis", "src", "pages", "AppointmentsPage.tsx");
+  // Пределы 1..600 совпадают с каталогом услуг: услуга на 47 минут легальна
+  // и не должна блокировать отправку формы нативной валидацией.
+  assert.match(page, /min=\{1\}\s+max=\{600\}\s+step=\{1\}/);
+  assert.ok(!page.includes('<SelectField label="Длительность"'), "закрытый список длительностей ушёл");
+  // Кламп — на blur, не на каждом нажатии: покстрочный кламп превращал «45»
+  // в 55 («4» клампится в 5, потом дописывается «5»).
+  assert.match(page, /onBlur=\{\(\) => \{[\s\S]{0,220}Math\.max\(1, Math\.min\(600/);
+  // И при отправке — сервер не должен получать 0 от стёртого поля.
+  assert.match(page, /durationMinutes: Math\.max\(1, Math\.min\(600, form\.durationMinutes \|\| 60\)\)/);
+});
+
+test("BF5 правка записи сохраняет цену — PATCH умеет её писать и чистить", async () => {
+  const server = await read("lib", "crm", "server.ts");
+  // Ревью: buildPatchRow не знал price_minor — «Сохранить» отвечал успехом,
+  // а цена в базе не менялась и на экране откатывалась эхом.
+  const patchBranch = server.slice(
+    server.indexOf('setRaw("duration_minutes"'),
+    server.indexOf('setRaw("duration_minutes"') + 700,
+  );
+  assert.ok(
+    patchBranch.includes('hasAnyKey(body, ["priceMinor", "price_minor"])'),
+    "PATCH принимает цену",
+  );
+  assert.ok(patchBranch.includes("appointmentPriceColumn(body)"), "тем же правилом, что и создание");
+  // Чтение наружу — иначе первый же клик «Пришёл» затёр бы цену.
+  assert.match(server, /priceMinor: row\.price_minor/);
+  // Деградация и русское имя в списке несохранённого.
+  assert.match(server, /\["045", \["price_minor"\]\]/);
+  assert.match(server, /price_minor: "цена"/);
+});
+
+test("BF6 миграция 045: bigint, как у прайса, и безопасна к повтору", async () => {
+  const migration = await read("migrations", "045_appointment_price.sql");
+  // integer кончается на 21,5 млн тенге — дорогая процедура падала бы 502.
+  assert.match(migration, /add column if not exists price_minor bigint/);
+  assert.match(migration, /check \(price_minor is null or price_minor >= 0\)/);
+  assert.match(migration, /notify pgrst, 'reload schema';/);
+});
+
+test("BF7 главный экран ведёт в календарь, и сетку видят все, кто читает всю клинику", async () => {
+  const dashboard = await read("artifacts", "negis", "src", "pages", "AiControlCenter.tsx");
+  assert.ok(dashboard.includes("Открыть календарь"), "кнопка существует");
+  assert.match(dashboard, /rolePermissions\.booking \?/, "кнопка гейтится правом, а не ролью");
+  assert.ok(!dashboard.includes("Сетка дня,"), "текст не обещает мастеру вид, которого у него нет");
+
+  const page = await read("artifacts", "negis", "src", "pages", "AppointmentsPage.tsx");
+  // Ресепшн и управляющий читают все записи клиники тем же правом — сетка им
+  // открыта, а не только owner/admin.
+  assert.match(page, /const seesWholeClinic =\s*\n?\s*userRole === "owner" \|\| userRole === "admin" \|\| userRole === "manager" \|\| userRole === "receptionist"/);
+  assert.match(page, /useState<CalendarView>\(\(\) =>[\s\S]{0,220}"grid"[\s\S]{0,40}"day"/);
+});
+
+test("BF8 пустой справочник уводит в день, а не в заглушку «Справочник пуст»", async () => {
+  const page = await read("artifacts", "negis", "src", "pages", "AppointmentsPage.tsx");
+  assert.match(page, /if \(!directory\.available\) return;/);
+  assert.match(page, /setView\(\(current\) => \(current === "grid" \? "day" : current\)\)/);
+  // Один раз на загрузке: эффект не спорит с человеком, выбравшим вид руками.
+  assert.match(page, /emptyDirectoryHandled\.current = true;/);
+});
+
+test("BF9 сброс услуги уносит её цену, а согласованная цена доезжает до продажи", async () => {
+  const page = await read("artifacts", "negis", "src", "pages", "AppointmentsPage.tsx");
+  const sales = await read("artifacts", "negis", "src", "pages", "SalesPage.tsx");
+
+  // «Другая услуга…» и смена мастера снимают цену вместе с услугой: продать
+  // «другую услугу» по чужому прайсу — находка ревью.
+  assert.match(page, /serviceId: "", priceTenge: "" \}\)\);\s*\n\s*return;/);
+  assert.match(page, /setForm\(\(current\) => \(\{ \.\.\.current, serviceId: "", priceTenge: "" \}\)\);/);
+
+  // Продажа видит согласованную цену записи, а не полный прайс.
+  assert.match(page, /priceMinor: appointment\.priceMinor,/);
+  assert.match(sales, /prefill\.priceMinor \?\? prefill\.price_minor/);
+});

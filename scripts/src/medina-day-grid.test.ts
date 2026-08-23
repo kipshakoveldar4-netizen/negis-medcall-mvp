@@ -161,12 +161,17 @@ test("DG13 сетка растягивается под ранние и позд
   assert.deepEqual(grid.gridBounds([8 * 60 + 40, 22 * 60 + 10], []), [480, 1380], "и округляется до часа");
 });
 
-test("DG14 общий календарь показывается владельцу и администратору, а мастеру — нет", async () => {
+test("DG14 общий календарь видят роли с полным чтением клиники, а мастер — нет", async () => {
+  // Ревью расширило сетку на ресепшн и управляющего: сервер отдаёт им все
+  // записи клиники тем же правом view_appointments, без сужения до «своих».
+  // Единственная роль, которой сетка закрыта, — doctor: его список сервер
+  // режет до собственной работы, и сетка всей клиники была бы обходом.
   const page = await readFile(path.join(repoRoot, "artifacts", "negis", "src", "pages", "AppointmentsPage.tsx"), "utf8");
-  assert.ok(
-    /const seesWholeClinic = userRole === "owner" \|\| userRole === "admin";/.test(page),
-    "право видеть весь день названо явно",
-  );
+  const declaration = page.slice(page.indexOf("const seesWholeClinic ="), page.indexOf("const seesWholeClinic =") + 260);
+  for (const role of ['"owner"', '"admin"', '"manager"', '"receptionist"']) {
+    assert.ok(declaration.includes(`userRole === ${role}`), `роль ${role} читает всю клинику`);
+  }
+  assert.ok(!declaration.includes('"doctor"'), "мастеру сетка всей клиники закрыта");
   assert.ok(/view === "grid" && seesWholeClinic/.test(page), "и проверяется на самом виде, а не только на кнопке");
 });
 

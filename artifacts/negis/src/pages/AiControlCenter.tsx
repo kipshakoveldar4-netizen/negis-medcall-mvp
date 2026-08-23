@@ -4,6 +4,7 @@ import {
   ArrowRight,
   Bot,
   CalendarCheck,
+  CalendarDays,
   CheckCircle2,
   Circle,
   Clapperboard,
@@ -304,7 +305,7 @@ const chipStyle: CSSProperties = { borderRadius: 999, padding: "4px 12px", fontS
 const ONBOARDING_HINT_KEY = "negis_onboarding_hint_dismissed";
 
 export default function AiControlCenter() {
-  const { vertical } = useAuth();
+  const { vertical, rolePermissions } = useAuth();
   const terms = termsFor(vertical);
   const todayLabel = new Date().toLocaleDateString("ru-RU", { day: "numeric", month: "long" });
   // Задача из рекомендации: карточка «Требует внимания» становится поручением.
@@ -695,6 +696,23 @@ export default function AiControlCenter() {
             Заявки, записи, продажи, реклама и состояние систем — реальные данные {terms.orgGenitive}.
           </p>
         </header>
+
+        {/* Календарь — в одно нажатие с главного экрана: журнал записей и
+            есть рабочий стол салона, дашборд лишь прихожая перед ним. */}
+        {rolePermissions.booking ? (
+          <section className="neu flex flex-wrap items-center justify-between gap-3 p-4" aria-label="Календарь записей">
+            <p className="min-w-0 text-sm" style={{ color: "var(--negis-muted)" }}>
+              <span className="font-semibold" style={{ color: "var(--negis-text)" }}>Календарь записей.</span>{" "}
+              Свободное время, запись в два касания и день целиком.
+            </p>
+            <Link href="/appointments">
+              <span className="neu-btn-primary inline-flex cursor-pointer items-center gap-2 text-sm">
+                <CalendarDays size={16} />
+                Открыть календарь
+              </span>
+            </Link>
+          </section>
+        ) : null}
 
         {/* Советы владельца платформы: карточки видят владелец, админ и
             управляющий; при неприменённой миграции или любом сбое секция
