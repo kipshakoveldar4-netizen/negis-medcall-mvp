@@ -294,6 +294,45 @@ export default function ServicesPage() {
 
   const demoMode = !isRealWorkspace();
 
+  /**
+   * Мастер вписывает длительность своих услуг сам — владелец попросил ровно
+   * это. Черновики отдельно от списка: ввод не должен дёргать таблицу, а
+   * сохранение идёт тем же PATCH, где сервер сам проверяет «своя ли услуга».
+   */
+  const canEditOwnDuration = userRole === "doctor";
+  const [durationDrafts, setDurationDrafts] = useState<Record<string, string>>({});
+  const [durationSaving, setDurationSaving] = useState<string>("");
+
+  const saveOwnDuration = async (service: ClinicService) => {
+    const draft = (durationDrafts[service.id] ?? "").trim();
+    const minutes = Number(draft);
+    if (!draft || !Number.isFinite(minutes) || minutes < 1 || minutes > 600) {
+      toast.error("Длительность — число от 1 до 600 минут");
+      return;
+    }
+    setDurationSaving(service.id);
+    try {
+      const response = await crmFetch(`/api/crm/clinic-services?workspaceId=${encodeURIComponent(readWorkspaceId())}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: service.id,
+          workspaceId: readWorkspaceId(),
+          updates: { durationMinutes: Math.round(minutes) },
+        }),
+      });
+      const body = (await response.json()) as { success?: boolean; error?: string };
+      if (!response.ok || !body.success) throw new Error(body.error || "Не удалось сохранить длительность");
+      toast.success(`Длительность «${service.name}» — ${Math.round(minutes)} мин`);
+      setDurationDrafts((current) => ({ ...current, [service.id]: "" }));
+      await load({ quiet: true });
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Не удалось сохранить длительность");
+    } finally {
+      setDurationSaving("");
+    }
+  };
+
   const load = async (options: { quiet?: boolean } = {}) => {
     const current = generation.current + 1;
     generation.current = current;
@@ -606,7 +645,9 @@ export default function ServicesPage() {
                 Услуги
               </h1>
               <p className="mt-3 max-w-3xl text-sm leading-relaxed" style={{ color: "var(--negis-muted)" }}>
-                Прайс {terms.orgGenitive}: названия, цены и длительность. Услуги отсюда подставляются в запись и в продажу.
+                {canEditOwnDuration
+                  ? `Ваши услуги. Длительность вписываете вы сами — по ней считается свободное время. Цены и названия меняет администратор.`
+                  : `Прайс ${terms.orgGenitive}: названия, цены и длительность. Услуги отсюда подставляются в запись и в продажу.`}
               </p>
             </div>
             {canManage && showList ? (
@@ -804,7 +845,36 @@ export default function ServicesPage() {
                       <td className="px-3 py-3 font-semibold" style={{ color: "var(--negis-muted)" }}>{renderOwner(service)}</td>
                     ) : null}
                     <td className="px-3 py-3 font-black" style={{ color: "var(--negis-text)" }}>{formatPrice(service.basePriceMinor)}</td>
-                    <td className="px-3 py-3 font-semibold" style={{ color: "var(--negis-muted)" }}>{formatDuration(service.durationMinutes)}</td>
+                    <td className="px-3 py-3 font-semibold" style={{ color: "var(--negis-muted)" }}>
+                      {canEditOwnDuration ? (
+                        <span className="flex items-center gap-1.5">
+                          <input
+                            className="neu-input w-20 px-2 py-1.5 text-sm tabular-nums"
+                            type="number"
+                            min={1}
+                            max={600}
+                            placeholder={service.durationMinutes === null ? "60" : String(service.durationMinutes)}
+                            value={durationDrafts[service.id] ?? ""}
+                            onChange={(event) =>
+                              setDurationDrafts((current) => ({ ...current, [service.id]: event.target.value }))
+                            }
+                            aria-label={`Длительность услуги ${service.name}, минут`}
+                          />
+                          {(durationDrafts[service.id] ?? "").trim() ? (
+                            <button
+                              type="button"
+                              className="neu-btn px-2.5 py-1.5 text-xs"
+                              disabled={durationSaving === service.id}
+                              onClick={() => void saveOwnDuration(service)}
+                            >
+                              {durationSaving === service.id ? "…" : "Сохранить"}
+                            </button>
+                          ) : null}
+                        </span>
+                      ) : (
+                        formatDuration(service.durationMinutes)
+                      )}
+                    </td>
                     <td className="px-3 py-3 font-semibold" style={{ color: "var(--negis-muted)" }}>{service.sortOrder}</td>
                     <td className="px-3 py-3">
                       {canManage ? (

@@ -80,7 +80,12 @@ export const CRM_RESOURCE_AUTHORIZATION: Readonly<Record<string, RouteAuthorizat
   "clinic-services": {
     kind: "browser",
     methods: ["GET", "POST", "PATCH"],
-    permissions: { GET: "view_appointments", POST: "manage_directory", PATCH: "manage_directory" },
+    // PATCH пропускается тем же правом, что и чтение, но это НЕ право на прайс:
+    // обработчик пускает без manage_directory только роль мастера, только к его
+    // собственной услуге и только к полю длительности. Владелец: «длительность
+    // пусть вписывают сами» — сколько идёт процедура, мастер знает лучше всех,
+    // а цены и названия остаются за администратором.
+    permissions: { GET: "view_appointments", POST: "manage_directory", PATCH: "view_appointments" },
   },
   // Справочник врачей и график — тот же раскол, что у услуг, и по той же
   // причине: форма записи без списка врачей и без их часов бесполезна, а

@@ -225,12 +225,16 @@ test("BC2 the refusal names the slot, so the operator can decide rather than gue
   assert.match(String(res.body.error), /[А-Яа-я]/, "the message the operator sees stays in Russian");
 });
 
-test("BC3 an explicit override still books — a clinic may overbook on purpose", async () => {
+test("BC3 даже явный флаг обхода больше не пропускает: владелец закрыл двойную запись", async () => {
+  // Раньше allowConflict был осознанной перезаписью с журналом. Владелец
+  // отменил: «если запись есть на это время — уже не могли сделать». Флаг из
+  // тела теперь мёртв, и это проверяется именно присланным true: молча
+  // ожившая ветка сняла бы запрет без единого красного теста.
   const call = await loadRouter({ appointments: [occupiedRow()] });
   const { res, log } = await call({ body: booking({ allowConflict: true }) });
 
-  assert.equal(res.statusCode, 201, JSON.stringify(res.body));
-  assert.equal(writes(log).length, 1, "the deliberate double booking is saved");
+  assert.equal(res.statusCode, 409, JSON.stringify(res.body));
+  assert.equal(writes(log).length, 0, "занятый слот не перезаписывается никаким флагом");
 });
 
 test("BC4 absence of an override is not consent", async () => {
@@ -457,39 +461,40 @@ test("BC21 an appointment does not conflict with itself because of letter case",
   assert.notEqual(res.statusCode, 409, "the row must recognise itself whatever case the id arrived in");
 });
 
-test("BC22 a deliberate overbooking leaves a trace someone can find later", async () => {
-  // «The override becomes a decision someone made» is the whole justification
-  // for allowing it. A decision with no record is not one: the owner could not
-  // tell a deliberate double booking from an ordinary one, nor who authorised
-  // it, nor how many there were.
+test("BC22 обход мёртв целиком: ни записи, ни строки overbooked в журнале", async () => {
+  // Прежний BC22 требовал след от сознательной перезаписи. Перезаписи больше
+  // нет — и след не должен рождаться: строка overbooked в журнале при
+  // отказанной записи означала бы, что кусок старой ветки ожил.
   const call = await loadRouter({ appointments: [occupiedRow()] });
   const { res, log } = await call({ body: booking({ allowConflict: true }) });
 
-  assert.equal(res.statusCode, 201, JSON.stringify(res.body));
+  assert.equal(res.statusCode, 409, JSON.stringify(res.body));
   const journalRows = log
     .filter((e) => e.table === "audit_logs" && e.op === "insert")
     .map((e) => e.filters.__row as Record<string, unknown>);
-
   assert.ok(
-    journalRows.some((row) => row.action === "overbooked"),
-    `the override must be journaled; entries were: ${journalRows.map((r) => r.action).join(", ") || "none"}`,
+    !journalRows.some((row) => row.action === "overbooked"),
+    "отказ не оставляет строку о «сознательной перезаписи», которой не было",
   );
-  const overbooked = journalRows.find((row) => row.action === "overbooked");
-  assert.equal(overbooked?.entity_type, "appointment");
-  assert.equal(overbooked?.workspace_id, WORKSPACE_A);
-  assert.ok(overbooked?.actor_staff_user_id, "and it names who decided");
 });
 
 /* ── Source pins ── */
 
 test("BC15 the server is the authority, and the browser is only a fast pre-filter", async () => {
   const server = await readFile(serverPath, "utf8");
-  for (const wiring of [
-    "if (!allowsAppointmentConflict(body)) {",
-    "if (patchedEntity === \"appointment\" && !allowsAppointmentConflict(patchBody)) {",
-  ]) {
-    assert.ok(server.includes(wiring), `both write paths must run the check: ${wiring}`);
-  }
+  // Проверка безусловна на обоих пишущих путях: у неё больше нет выключателя.
+  assert.ok(
+    server.includes("await assertNoAppointmentConflict(supabase, workspaceId, {"),
+    "create path runs the check",
+  );
+  assert.ok(
+    server.includes('if (patchedEntity === "appointment") {'),
+    "patch path runs the check unconditionally",
+  );
+  assert.ok(
+    !server.includes("allowsAppointmentConflict("),
+    "флага обхода не существует: молча оживить его нельзя",
+  );
   assert.ok(
     server.includes('code: "appointment_conflict"'),
     "the refusal carries a code the browser can act on, not just a message",
@@ -519,24 +524,15 @@ test("BC15 the server is the authority, and the browser is only a fast pre-filte
   );
 });
 
-test("BC16 the override is sent only when the operator chose it", async () => {
+test("BC16 кнопки «Сохранить всё равно» при занятом времени не существует", async () => {
   const page = await readFile(pagePath, "utf8");
-
-  // «Сохранить всё равно» is the only thing that passes true, and the flag is
-  // omitted entirely otherwise — a body that always carried allowConflict:false
-  // would be harmless, but one that always carried true would silently delete
-  // the whole guarantee.
+  // Кнопка была единственным местом, где оператор давал обход. Вместе с
+  // серверной веткой ушла и она; баннер остаётся и говорит, что делать.
   assert.ok(
-    page.includes("onClick={() => void submitForm(true)}"),
-    "the override button is the single caller that grants permission",
+    !page.includes("onClick={() => void submitForm(true)}"),
+    "обход из формы отправить нечем",
   );
-  for (const sender of ["allowConflict ? { allowConflict: true } : {}"]) {
-    assert.ok(page.includes(sender), `the flag must be conditional: ${sender}`);
-  }
-  assert.ok(
-    !/allowConflict:\s*true\s*,?\s*\n/.test(page.replace(/allowConflict \? \{ allowConflict: true \} : \{\}/g, "")),
-    "nothing may hard-code the override",
-  );
+  assert.ok(page.includes("Выберите другое время"), "отказ говорит, что делать дальше");
 });
 
 // —— Ёмкость мастера ————————————————————————————————————————————————————

@@ -34,7 +34,9 @@ const NAV_GROUPS: NavGroup[] = [
       { href: '/sales', icon: BadgeDollarSign, label: 'Продажи', roles: ['owner', 'manager', 'agent'] },
       // Услуги стоят в «Операциях», а не в «Управлении»: право на чтение здесь
       // то же, что у записей, и справочник открывают в момент записи пациента.
-      { href: '/services', icon: Tag, label: 'Услуги', roles: ['owner', 'manager', 'agent', 'booking_agent'] },
+      // Мастер (doctor) тоже: он вписывает длительность своих услуг сам,
+      // сервер сужает и список, и право правки до его собственного прайса.
+      { href: '/services', icon: Tag, label: 'Услуги', roles: ['owner', 'manager', 'agent', 'booking_agent', 'doctor'] },
       // Регистратор (в салоне — администратор) правит исполнителей и смены сам:
       // право manage_directory даёт ему эту страницу, не открывая админ-центр.
       { href: '/staff-schedule', icon: CalendarDays, label: 'Специалисты и график', roles: ['owner', 'manager', 'receptionist'] },

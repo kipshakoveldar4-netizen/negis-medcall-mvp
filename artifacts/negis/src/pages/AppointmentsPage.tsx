@@ -731,7 +731,7 @@ function describeSchedule(error: OutsideScheduleError, terms: Terms): string {
 function describeConflict(error: SlotTakenError, terms: Terms): string {
   const at = error.conflict.startsAt ? timeKeyFromStartsAt(error.conflict.startsAt) : "";
   const who = error.conflict.clientName || `другой ${terms.customer}`;
-  return `У ${terms.specialistGenitive} уже есть запись на это время: ${who}${at ? `, ${at}` : ""}. Сохранить всё равно?`;
+  return `У ${terms.specialistGenitive} уже есть запись на это время: ${who}${at ? `, ${at}` : ""}. Выберите другое время или другого ${terms.specialistGenitive}.`;
 }
 
 function appointmentInterval(appointment: Appointment) {
@@ -1691,7 +1691,7 @@ export function AppointmentsPage() {
     // секунду назад с другого устройства.
     const localConflict = findConflict(appointment);
     if (localConflict && !allowConflict) {
-      setConflictMessage(`У ${terms.specialistGenitive} уже есть запись на это время: ${localConflict.client}, ${timeKeyFromStartsAt(localConflict.startsAt)}. Сохранить всё равно?`);
+      setConflictMessage(`У ${terms.specialistGenitive} уже есть запись на это время: ${localConflict.client}, ${timeKeyFromStartsAt(localConflict.startsAt)}. Выберите другое время.`);
       return;
     }
 
@@ -2522,9 +2522,9 @@ export function AppointmentsPage() {
 
             <div className="mt-6 flex flex-col gap-2 sm:flex-row sm:justify-end">
               <button type="button" className="neu-btn px-5 py-2.5 text-sm" onClick={() => setModalOpen(false)} disabled={saving}>Отмена</button>
-              {conflictMessage ? (
-                <button type="button" className="neu-btn px-5 py-2.5 text-sm text-amber-700" onClick={() => void submitForm(true)} disabled={saving}>Сохранить всё равно</button>
-              ) : null}
+              {/* Кнопки «Сохранить всё равно» при занятом времени больше нет:
+                  владелец закрыл двойную запись, и сервер флаг обхода тоже не
+                  читает. Баннер выше объясняет, что делать. */}
               {/* Только обход графика. Прежняя версия передавала сюда
                   Boolean(conflictMessage), и один клик снимал заодно проверку
                   пересечений — ровно то, ради чего флаги и разделены. */}

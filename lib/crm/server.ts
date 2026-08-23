@@ -2755,9 +2755,8 @@ async function assertNoAppointmentConflict(
 }
 
 /** The caller states plainly that it means to overbook. Absence is not consent. */
-function allowsAppointmentConflict(body: JsonRecord): boolean {
-  return body.allowConflict === true || body.allow_conflict === true;
-}
+// allowsAppointmentConflict удалён: занятость перестала обходиться флагом.
+// История сознательных перезаписей осталась в журнале строками overbooked.
 
 /**
  * Отказ «врач не работает в это время».
@@ -4577,18 +4576,21 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
       // который будет записан.
       Object.assign(row, await buildServiceLinkRow(supabase, workspaceId, body, { requireActive: true, prefillDuration: true }));
       Object.assign(row, await buildDoctorLinkRow(supabase, workspaceId, body, { requireActive: true }));
-      if (!allowsAppointmentConflict(body)) {
-        await assertNoAppointmentConflict(supabase, workspaceId, {
-          // Ссылка нужна, чтобы найти ёмкость: имя работает как ключ проверки,
-          // но у справочника ключ — идентификатор, и по нему поиск точнее.
-          doctorId: readString(row.doctor_id),
-          doctorName: readString(row.doctor_name),
-          startsAt: readString(row.starts_at),
-          durationMinutes: appointmentMinutes(row.duration_minutes),
-          status: readString(row.status),
-          ownWork: actorOwnWork,
-        });
-      }
+      // Занятое время выбранного мастера — жёсткий запрет, без обхода.
+      // Флаг allowConflict больше не читается: владелец закрыл двойную
+      // запись сознательно («если запись есть на это время — уже не могли
+      // сделать»), и кнопка «Сохранить всё равно» ушла вместе с ним. Гейт
+      // «вне графика» ниже остался отдельным — он про другое.
+      await assertNoAppointmentConflict(supabase, workspaceId, {
+        // Ссылка нужна, чтобы найти ёмкость: имя работает как ключ проверки,
+        // но у справочника ключ — идентификатор, и по нему поиск точнее.
+        doctorId: readString(row.doctor_id),
+        doctorName: readString(row.doctor_name),
+        startsAt: readString(row.starts_at),
+        durationMinutes: appointmentMinutes(row.duration_minutes),
+        status: readString(row.status),
+        ownWork: actorOwnWork,
+      });
       // После проверки пересечений: если время занято И вне графика, оператор
       // сначала получает знакомый ему отказ про занятый слот.
       if (!allowsOutsideSchedule(body)) {
@@ -4686,21 +4688,6 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
         ...journalActor(req),
       });
 
-      // Обоснование гейта — «перезапись стала решением, которое кто-то принял».
-      // Решение без следа таковым не является: владелец не смог бы ни отличить
-      // сознательную перезапись от рядовой брони, ни узнать, кто её
-      // санкционировал. Отдельная строка журнала — и есть этот след.
-      if (resource === "appointments" && allowsAppointmentConflict(body)) {
-        await recordCrmChange({
-          supabase,
-          workspaceId,
-          entity: "appointment",
-          entityId: readString(stored.id),
-          action: "overbooked",
-          changes: [],
-          ...journalActor(req),
-        });
-      }
       if (resource === "appointments" && allowsOutsideSchedule(body)) {
         // Тот же след, что и у сознательного овербукинга: запись вне часов
         // приёма, которую нельзя потом найти, — это и есть то, ради чего
@@ -4925,6 +4912,48 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
     const beforeIsReadable = Object.keys(before).length > 0;
 
     const row = stripContactWrites(buildPatchRow(resource, patchBody), readWorkspaceContext(req)?.role);
+
+    // Прайс без права manage_directory: пускается только мастер, только к
+    // собственной услуге и только к длительности. Сколько идёт процедура,
+    // мастер знает лучше всех; цены и названия остаются за администратором.
+    // Сужение здесь, а не в реестре: реестр не видит ни строки, ни полей.
+    if (resource === "clinic-services") {
+      const actor = readWorkspaceContext(req);
+      if (!actor?.permissions.includes("manage_directory")) {
+        if (!seesOnlyOwnWork(actor?.role)) {
+          return sendJson(res, 403, errorBody("Forbidden", ["price list is managed by the clinic"]));
+        }
+        const extraKeys = Object.keys(row).filter((key) => key !== "duration_minutes" && key !== "updated_at");
+        if (extraKeys.length > 0) {
+          return sendJson(res, 403, errorBody("Мастеру доступна только длительность", [
+            "Цены и названия услуг меняет администратор.",
+          ]));
+        }
+        const identity = await readOwnWorkIdentity(supabase, workspaceId, readString(actor?.staffUserId));
+        if (identity.readFailed || !identity.doctorId) {
+          return sendJson(res, 403, errorBody("Ваша карточка не найдена", [
+            "Попросите администратора связать карточку с учётной записью.",
+          ]));
+        }
+        const { data: serviceRow, error: serviceError } = await supabase
+          .from("clinic_services")
+          .select("doctor_id")
+          .eq("workspace_id", workspaceId)
+          .eq("id", id)
+          .maybeSingle();
+        if (serviceError || !serviceRow) {
+          return sendJson(res, 404, errorBody("Услуга не найдена", []));
+        }
+        if (readString(asRecord(serviceRow).doctor_id) !== identity.doctorId) {
+          // Чужая и общая услуга закрыты одинаково: длительность общей услуги
+          // меняет расписание всем мастерам сразу — это решение клиники.
+          return sendJson(res, 403, errorBody("Это не ваша услуга", [
+            "Мастер меняет длительность только собственных услуг.",
+          ]));
+        }
+      }
+    }
+
     if (resource === "leads") {
       Object.assign(row, await buildLeadReferenceRow(supabase, workspaceId, patchBody));
     }
@@ -5033,7 +5062,7 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
       else if (!isDone && wasDone) row.completed_at = null;
     }
 
-    if (patchedEntity === "appointment" && !allowsAppointmentConflict(patchBody)) {
+    if (patchedEntity === "appointment") {
       // Проверять надо по СЛИЯНИЮ: патч может нести только новое время, только
       // нового врача или только статус, а занимает слот их сочетание. `before`
       // уже прочитан для журнала — второго запроса это не стоит.

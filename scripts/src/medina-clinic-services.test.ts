@@ -693,3 +693,37 @@ test("CS17 журнал знает колонки услуги и не дубл�
   const appointmentFields = journal.slice(journal.indexOf("const APPOINTMENT_FIELDS"), journal.indexOf("const TASK_FIELDS"));
   assert.ok(!appointmentFields.includes("service_id"), "uuid связи не место в ленте истории");
 });
+
+test("CS12 мастер вписывает длительность своей услуги — и только её", async () => {
+  // Владелец: «длительность пусть вписывают сами». Право manage_directory
+  // мастеру не выдаётся — обработчик пускает его по трём сужениям сразу:
+  // роль, принадлежность услуги, единственное поле. Каждое проверяется
+  // отдельно, потому что каждое ломается отдельно.
+  const DOCTOR_CARD = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+  const myCard = { id: DOCTOR_CARD, workspace_id: WORKSPACE_A, staff_user_id: STAFF_A, full_name: "Айгерим", is_active: true };
+  const mine = { ...activeService, doctor_id: DOCTOR_CARD };
+  const doctor = await loadRouter({
+    role: "doctor",
+    rows: { clinic_services: [mine], clinic_doctors: [myCard] },
+  });
+
+  // Своя услуга, только длительность — проходит.
+  const allowed = await doctor({ method: "PATCH", body: { id: SERVICE_ID, updates: { durationMinutes: 45 } } });
+  assert.equal(allowed.res.statusCode, 200, JSON.stringify(allowed.res.body));
+
+  // Длительность плюс цена — отказ целиком, а не молчаливое сужение.
+  const priced = await doctor({
+    method: "PATCH",
+    body: { id: SERVICE_ID, updates: { durationMinutes: 45, basePriceMinor: 100 } },
+  });
+  assert.equal(priced.res.statusCode, 403, "цены остаются за администратором");
+
+  // Чужая услуга — отказ, даже если поле то же.
+  const foreign = { ...activeService, doctor_id: "00000000-0000-4000-8000-00000000dddd" };
+  const stranger = await loadRouter({
+    role: "doctor",
+    rows: { clinic_services: [foreign], clinic_doctors: [myCard] },
+  });
+  const refused = await stranger({ method: "PATCH", body: { id: SERVICE_ID, updates: { durationMinutes: 45 } } });
+  assert.equal(refused.res.statusCode, 403, "чужая длительность закрыта");
+});
