@@ -24,12 +24,12 @@ import { formatPhone, toTelHref, toWhatsappHref } from "@/lib/phone";
 import { clinicToday, dayKeyInZone, isOnClinicDay } from "@/lib/clinicDay";
 import { useAuth } from "@/contexts/AuthContext";
 import { MasterDayGrid } from "@/components/crm/master-day-grid";
-import { minuteOfClinicDay } from "@/lib/dayGrid";
+import { formatSlot, freeSlots, groupSlots, minuteOfClinicDay, workingIntervals } from "@/lib/dayGrid";
 import { capitalize, termsFor, type Terms } from "../../../../lib/vertical/terms";
 import { leadStageDefinitionFromUnknown } from "@/lib/leadPipeline";
 
 type AppointmentStatus = "scheduled" | "confirmed" | "arrived" | "no_show" | "cancelled";
-type CalendarView = "grid" | "day" | "week" | "list";
+type CalendarView = "grid" | "day" | "week" | "month" | "list";
 
 type Appointment = {
   id: string;
@@ -289,6 +289,7 @@ const viewLabels: Record<CalendarView, string> = {
   day: "День",
   grid: "Календарь",
   week: "Неделя",
+  month: "Месяц",
   list: "Список",
 };
 
@@ -1306,6 +1307,98 @@ export function AppointmentsPage() {
       .sort((a, b) => new Date(a.startsAt).getTime() - new Date(b.startsAt).getTime())[0];
   }, [items]);
 
+  /**
+   * Свободное время под форму — как шаг «выберите время» в запись.кз.
+   *
+   * Всё считается по часам САЛОНА: и день записи (isOnDay), и минуты
+   * (minuteOfClinicDay). Ревью поймало смешение «день по устройству, минута по
+   * салону» — тот же класс бага, который в этом файле уже чинили для карточки
+   * «Сегодня записей» (см. комментарий к isOnDay).
+   *
+   * Клик по слоту пишет время в form.time, а сохранение читает его по часам
+   * устройства — поэтому при несовпадении поясов секция прячется с объяснением:
+   * показывать «свободно 16:00», записывая на 18:00, хуже, чем не показывать.
+   *
+   * Правит по-прежнему сервер: он ответит 409 на пересечение, даже если сетка
+   * устарела за время раздумий.
+   */
+  const formSlots = useMemo(() => {
+    if (!form.date) return null;
+    const [year, month, day] = form.date.split("-").map(Number);
+    if (!year || !month || !day) return null;
+
+    // Мастеру селект специалиста не показывается — сервер и так запишет
+    // клиента к нему. Его карточку узнаём по его же записям: чужих в items у
+    // него не бывает, сервер сузил список до его работы.
+    const ownDoctorId = userRole === "doctor" && !form.doctorId
+      ? items.find((appointment) => appointment.doctorId)?.doctorId ?? ""
+      : "";
+    const doctorId = form.doctorId || ownDoctorId;
+    if (!doctorId && userRole !== "doctor") return null;
+
+    if (clinicTimeZone && deviceTimeZone && clinicTimeZone !== deviceTimeZone) {
+      return { groups: [] as ReturnType<typeof groupSlots>, reason: "другой пояс" as const };
+    }
+
+    const isoWeekday = new Date(Date.UTC(year, month - 1, day)).getUTCDay() || 7;
+    const gridShifts = shifts.map((shift) => ({
+      doctorId: shift.doctorId,
+      weekday: shift.weekday,
+      onDate: shift.onDate,
+      onDateEnd: shift.onDateEnd,
+      isWorking: shift.isWorking,
+      startMinute: shift.startMinute,
+      endMinute: shift.endMinute,
+    }));
+
+    // «График описывает ЭТОТ день», а не «у мастера есть хоть одна строка»:
+    // единственная строка-отпуск на сентябрь не должна закрывать весь август.
+    const mine = gridShifts.filter((shift) => shift.doctorId === doctorId);
+    const definesThisDay = mine.some((shift) => {
+      const from = shift.onDate;
+      const to = shift.onDateEnd || from;
+      if (from && from <= form.date && form.date <= to) return true;
+      return shift.weekday === isoWeekday;
+    });
+    const intervals = definesThisDay
+      ? workingIntervals(gridShifts, doctorId, form.date, isoWeekday)
+      : ([[9 * 60, 21 * 60]] as Array<[number, number]>);
+
+    const busy = items
+      .filter((appointment) => {
+        if (appointment.id === editingId) return false;
+        if (!activeStatuses.includes(appointment.status)) return false;
+        if (!isOnDay(appointment, form.date, clinicTimeZone)) return false;
+        if (doctorId && appointment.doctorId) return appointment.doctorId === doctorId;
+        if (!doctorId) return true;
+        const name = (appointment.doctor || "").trim().toLowerCase();
+        const card = activeDoctors.find((entry) => entry.id === doctorId);
+        return Boolean(name) && name === (card?.fullName || "").trim().toLowerCase();
+      })
+      .map((appointment) => {
+        const startMinute = minuteOfClinicDay(appointment.startsAt, clinicTimeZone);
+        if (startMinute === null) return null;
+        return [startMinute, startMinute + (appointment.durationMinutes || 60)] as [number, number];
+      })
+      .filter((interval): interval is [number, number] => interval !== null);
+
+    const nowMinute = form.date === todayKey ? minuteOfClinicDay(new Date().toISOString(), clinicTimeZone) : null;
+    const slots = freeSlots({ intervals, busy, durationMinutes: form.durationMinutes, nowMinute });
+
+    // Пустота пустоте рознь: «всё занято» — только когда виновата занятость.
+    let reason: "закрыт" | "занято" | "день кончился" | "не помещается" | null = null;
+    if (slots.length === 0) {
+      if (definesThisDay && intervals.length === 0) reason = "закрыт";
+      else if (
+        nowMinute !== null &&
+        freeSlots({ intervals, busy, durationMinutes: form.durationMinutes, nowMinute: null }).length > 0
+      ) reason = "день кончился";
+      else if (busy.length === 0) reason = "не помещается";
+      else reason = "занято";
+    }
+    return { groups: groupSlots(slots), reason };
+  }, [form.date, form.doctorId, form.durationMinutes, shifts, items, editingId, activeDoctors, clinicTimeZone, deviceTimeZone, todayKey, userRole]);
+
   const openCreate = (date = selectedDate, time = "09:00") => {
     setEditingId(null);
     setConflictMessage("");
@@ -1838,8 +1931,8 @@ export function AppointmentsPage() {
                   Сегодня
                 </button>
               </div>
-              <div className={`grid ${seesWholeClinic ? "grid-cols-4" : "grid-cols-3"} gap-2 sm:max-w-md`}>
-                {((seesWholeClinic ? ["grid", "day", "week", "list"] : ["day", "week", "list"]) as CalendarView[]).map((mode) => (
+              <div className={`grid ${seesWholeClinic ? "grid-cols-5" : "grid-cols-4"} gap-2 sm:max-w-md`}>
+                {((seesWholeClinic ? ["grid", "day", "week", "month", "list"] : ["day", "week", "month", "list"]) as CalendarView[]).map((mode) => (
                   <button key={mode} type="button" className={`neu-btn px-3 py-2 text-sm ${view === mode ? "text-[#0D9488]" : ""}`} onClick={() => setView(mode)}>
                     {viewLabels[mode]}
                   </button>
@@ -1969,6 +2062,88 @@ export function AppointmentsPage() {
             specialistPlural={terms.specialistPlural}
           />
         ) : null}
+        {loaded && !loadError && view === "month" ? (
+          <section className="neu-card">
+            {(() => {
+              const [year, month] = selectedDate.split("-").map(Number);
+              if (!year || !month) return null;
+              const first = new Date(Date.UTC(year, month - 1, 1));
+              const firstWeekday = first.getUTCDay() || 7;
+              const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
+              const monthLabel = first.toLocaleDateString("ru-RU", { month: "long", year: "numeric", timeZone: "UTC" });
+
+              // Счётчик обязан совпадать с тем, что покажет клик по клетке:
+              // тот же список (filteredItems — фильтры статуса и мастера уже
+              // применены; отдельного среза по «живым» статусам нет, иначе
+              // фильтр «Отменено» рисовал бы пустой месяц) и тот же календарь
+              // — день по часам САЛОНА, не устройства. Нечитаемая дата — это
+              // «не знаю», а не «сегодня».
+              const countByDay = new Map<string, number>();
+              for (const appointment of filteredItems) {
+                const instant = Date.parse(appointment.startsAt);
+                if (!Number.isFinite(instant)) continue;
+                const key = dayKeyInZone(instant, clinicTimeZone);
+                if (key.startsWith(`${year}-${String(month).padStart(2, "0")}`)) {
+                  countByDay.set(key, (countByDay.get(key) ?? 0) + 1);
+                }
+              }
+
+              const cells: Array<{ key: string; day: number } | null> = [];
+              for (let blank = 1; blank < firstWeekday; blank += 1) cells.push(null);
+              for (let day = 1; day <= daysInMonth; day += 1) {
+                cells.push({ key: `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`, day });
+              }
+
+              const shiftMonth = (delta: number) => {
+                const target = new Date(Date.UTC(year, month - 1 + delta, 1));
+                setSelectedDate(`${target.getUTCFullYear()}-${String(target.getUTCMonth() + 1).padStart(2, "0")}-01`);
+              };
+
+              return (
+                <div>
+                  <div className="mb-3 flex items-center justify-between">
+                    <button type="button" className="neu-btn px-3 py-2 text-sm" aria-label="Предыдущий месяц" onClick={() => shiftMonth(-1)}>‹</button>
+                    <p className="text-base font-black capitalize text-[#0F172A]">{monthLabel}</p>
+                    <button type="button" className="neu-btn px-3 py-2 text-sm" aria-label="Следующий месяц" onClick={() => shiftMonth(1)}>›</button>
+                  </div>
+                  <div className="grid grid-cols-7 gap-1 text-center">
+                    {["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"].map((weekday) => (
+                      <span key={weekday} className="py-1 text-[11px] font-black uppercase tracking-[0.1em] text-[#94A3B8]">{weekday}</span>
+                    ))}
+                    {cells.map((cell, index) =>
+                      cell === null ? (
+                        <span key={`blank-${index}`} />
+                      ) : (
+                        <button
+                          key={cell.key}
+                          type="button"
+                          className="flex min-h-16 flex-col items-center justify-start rounded-xl p-1.5"
+                          style={{
+                            background: cell.key === todayKey ? "rgba(13,148,136,0.10)" : "var(--negis-surface, #F8FAFC)",
+                            outline: cell.key === selectedDate ? "2px solid var(--negis-primary)" : "none",
+                          }}
+                          onClick={() => {
+                            setSelectedDate(cell.key);
+                            // День открывается тем видом, который у роли главный.
+                            setView(seesWholeClinic ? "grid" : "day");
+                          }}
+                        >
+                          <span className="text-sm font-black tabular-nums text-[#0F172A]">{cell.day}</span>
+                          {countByDay.get(cell.key) ? (
+                            <span className="mt-1 rounded-full px-1.5 py-0.5 text-[10px] font-black text-white" style={{ background: "var(--negis-primary)" }}>
+                              {countByDay.get(cell.key)}
+                            </span>
+                          ) : null}
+                        </button>
+                      ),
+                    )}
+                  </div>
+                </div>
+              );
+            })()}
+          </section>
+        ) : null}
+
         {loaded && !loadError && view === "day" ? renderDay() : null}
         {loaded && !loadError && view === "week" ? renderWeek() : null}
         {loaded && !loadError && view === "list" ? renderList() : null}
@@ -2151,6 +2326,53 @@ export function AppointmentsPage() {
                   </p>
                 ) : null}
               </div>
+
+              {/* Свободное время — как в запись.кз: нажал и время встало. */}
+              {formSlots ? (
+                <div className="md:col-span-2">
+                  <span className="mb-2 block text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">Свободное время</span>
+                  {formSlots.reason ? (
+                    <p className="text-sm font-semibold" style={{ color: "var(--negis-muted)" }}>
+                      {formSlots.reason === "закрыт"
+                        ? "День закрыт: выходной или закрытое окно. Время можно вписать вручную — сервер предупредит."
+                        : formSlots.reason === "день кончился"
+                          ? "Рабочий день уже закончился — на сегодня времени не осталось. Выберите другую дату."
+                          : formSlots.reason === "не помещается"
+                            ? "Услуга такой длительности не помещается в рабочее окно этого дня."
+                            : formSlots.reason === "другой пояс"
+                              ? "Подсказка времени скрыта: часы устройства не совпадают с часами салона, и подставленное время встало бы неверно."
+                              : "Свободного времени не осталось — всё занято записями."}
+                    </p>
+                  ) : (
+                    <div className="space-y-2">
+                      {formSlots.groups.map((group) => (
+                        <div key={group.label} className="flex flex-wrap items-center gap-1.5">
+                          <span className="w-14 flex-none text-[11px] font-black uppercase tracking-[0.1em]" style={{ color: "var(--negis-muted)" }}>
+                            {group.label}
+                          </span>
+                          {group.slots.map((slot) => {
+                            const value = formatSlot(slot);
+                            const selected = form.time === value;
+                            return (
+                              <button
+                                key={slot}
+                                type="button"
+                                className="rounded-lg px-2.5 py-1.5 text-sm font-black tabular-nums"
+                                style={selected
+                                  ? { background: "var(--negis-primary)", color: "#fff" }
+                                  : { background: "var(--negis-border)", color: "var(--negis-text)" }}
+                                onClick={() => setForm((current) => ({ ...current, time: value }))}
+                              >
+                                {value}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ) : null}
               <SelectField label="Длительность" value={String(form.durationMinutes)} onChange={(durationMinutes) => setForm((current) => ({ ...current, durationMinutes: Number(durationMinutes) }))}>
                 {/* Длительность услуги может не совпасть с четырьмя жёсткими
                     значениями — семидесятипятиминутная процедура выбрала бы

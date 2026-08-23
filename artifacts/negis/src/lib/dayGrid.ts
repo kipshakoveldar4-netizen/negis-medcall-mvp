@@ -209,3 +209,57 @@ export function gridBounds(
   // 08:40, оставляла бы первую подпись висеть над пустотой.
   return [Math.floor(min / 60) * 60, Math.ceil(max / 60) * 60];
 }
+
+/**
+ * Свободное время мастера — сердце записи как в запись.кз.
+ *
+ * Там администратор не держит расписание в голове: выбрал услугу и мастера —
+ * система сама показала, куда можно. Слот свободен, если услуга ЦЕЛИКОМ
+ * помещается в рабочее окно и не задевает ни одной живой записи.
+ *
+ * Шаг сетки 30 минут — как у запись.кз. Услуга длиной 90 минут займёт три
+ * шага, и слот «11:30» исчезнет, если в 12:00 кто-то стоит: предлагать время,
+ * в которое услуга не влезает, значит продавать место, которого нет.
+ */
+export function freeSlots(input: {
+  /** Рабочие куски дня в минутах: из workingIntervals или дефолтное окно. */
+  intervals: ReadonlyArray<readonly [number, number]>;
+  /** Занятость: живые записи мастера в этот день, [начало, конец). */
+  busy: ReadonlyArray<readonly [number, number]>;
+  durationMinutes: number;
+  /** Сегодняшним днём прошедшее время не предлагается. Null — день не сегодня. */
+  nowMinute: number | null;
+  stepMinutes?: number;
+}): number[] {
+  const step = input.stepMinutes && input.stepMinutes > 0 ? input.stepMinutes : 30;
+  const duration = Number.isFinite(input.durationMinutes) && input.durationMinutes > 0 ? input.durationMinutes : 60;
+  const slots: number[] = [];
+
+  for (const [start, end] of input.intervals) {
+    // Первый слот — на границе шага, не раньше начала окна.
+    let cursor = Math.ceil(start / step) * step;
+    for (; cursor + duration <= end; cursor += step) {
+      if (input.nowMinute !== null && cursor <= input.nowMinute) continue;
+      const cursorEnd = cursor + duration;
+      const taken = input.busy.some(([busyStart, busyEnd]) => cursor < busyEnd && busyStart < cursorEnd);
+      if (!taken) slots.push(cursor);
+    }
+  }
+  return [...new Set(slots)].sort((a, b) => a - b);
+}
+
+/** Группы как у запись.кз: Утро до 12:00, День до 18:00, Вечер после. */
+export function groupSlots(slots: readonly number[]): Array<{ label: string; slots: number[] }> {
+  const morning = slots.filter((slot) => slot < 12 * 60);
+  const day = slots.filter((slot) => slot >= 12 * 60 && slot < 18 * 60);
+  const evening = slots.filter((slot) => slot >= 18 * 60);
+  return [
+    { label: "Утро", slots: [...morning] },
+    { label: "День", slots: [...day] },
+    { label: "Вечер", slots: [...evening] },
+  ].filter((group) => group.slots.length > 0);
+}
+
+export function formatSlot(minute: number): string {
+  return `${String(Math.floor(minute / 60)).padStart(2, "0")}:${String(minute % 60).padStart(2, "0")}`;
+}

@@ -31,6 +31,14 @@ type GridModule = {
   placeColumn: (items: readonly Visit[], timeZone: string) => { placed: Placed[]; unreadable: Visit[] };
   workingIntervals: (shifts: readonly Shift[], doctorId: string, dateKey: string, isoWeekday: number) => Array<[number, number]>;
   gridBounds: (starts: readonly number[], intervals: readonly (readonly [number, number])[]) => [number, number];
+  freeSlots: (input: {
+    intervals: ReadonlyArray<readonly [number, number]>;
+    busy: ReadonlyArray<readonly [number, number]>;
+    durationMinutes: number;
+    nowMinute: number | null;
+    stepMinutes?: number;
+  }) => number[];
+  groupSlots: (slots: readonly number[]) => Array<{ label: string; slots: number[] }>;
 };
 const grid: GridModule = (await import(pathToFileURL(gridPath).href)) as GridModule;
 
@@ -207,4 +215,111 @@ test("DG17 быстрые статусы на блоке не подменяют
   const page = await readFile(path.join(repoRoot, "artifacts", "negis", "src", "pages", "AppointmentsPage.tsx"), "utf8");
   assert.ok(/void updateAppointmentStatus\(appointment, status\)/.test(page), "статус идёт тем же путём, что кнопки списка");
   assert.ok(/addDaysKey\(selectedDate, -1\)/.test(page) && /addDaysKey\(selectedDate, 1\)/.test(page), "стрелки по дням");
+});
+
+// ── Свободные слоты: сердце записи как в запись.кз ─────────────────────────
+
+test("FS1 слот свободен, только если услуга помещается целиком", () => {
+  // Окно 10:00–13:00, услуга 90 минут: последний честный слот — 11:30.
+  const slots = grid.freeSlots({ intervals: [[600, 780]], busy: [], durationMinutes: 90, nowMinute: null });
+  assert.deepEqual(slots, [600, 630, 660, 690]);
+});
+
+test("FS2 занятая запись выбивает все слоты, которые её задевают", () => {
+  // Запись 12:00–13:00. Услуга 60 минут: слоты 11:30 и 12:30 исчезают тоже —
+  // услуга, начатая в 11:30, наехала бы на клиента в 12:00.
+  const slots = grid.freeSlots({ intervals: [[600, 840]], busy: [[720, 780]], durationMinutes: 60, nowMinute: null });
+  assert.deepEqual(slots, [600, 630, 660, 780]);
+});
+
+test("FS3 сегодня прошедшее время не предлагается", () => {
+  const slots = grid.freeSlots({ intervals: [[600, 720]], busy: [], durationMinutes: 30, nowMinute: 630 });
+  assert.deepEqual(slots, [660, 690], "10:00 и 10:30 уже прошли — их нет");
+});
+
+test("FS4 окно, начатое не на границе шага, даёт слоты по сетке", () => {
+  // Смена с 10:15: первый слот — 10:30, а не 10:15 и не 10:00.
+  const slots = grid.freeSlots({ intervals: [[615, 720]], busy: [], durationMinutes: 30, nowMinute: null });
+  assert.deepEqual(slots, [630, 660, 690]);
+});
+
+test("FS5 закрытое окно посреди дня режет слоты с обеих сторон", () => {
+  // Рабочие куски 10:00–12:00 и 14:00–16:00 (обед закрыт). Услуга 60 минут.
+  const slots = grid.freeSlots({
+    intervals: [[600, 720], [840, 960]],
+    busy: [],
+    durationMinutes: 60,
+    nowMinute: null,
+  });
+  assert.deepEqual(slots, [600, 630, 660, 840, 870, 900]);
+});
+
+test("FS6 группировка как у запись.кз: утро, день, вечер", () => {
+  const groups = grid.groupSlots([600, 660, 750, 1080, 1140]);
+  assert.deepEqual(
+    groups.map((group) => `${group.label}:${group.slots.length}`),
+    ["Утро:2", "День:1", "Вечер:2"],
+  );
+  assert.deepEqual(grid.groupSlots([]), [], "пустой список не рисует пустых групп");
+});
+
+test("FS7 нулевая и бессмысленная длительность не роняют расчёт", () => {
+  assert.deepEqual(
+    grid.freeSlots({ intervals: [[600, 690]], busy: [], durationMinutes: 0, nowMinute: null }),
+    [600, 630],
+    "нулевая длительность считается часом",
+  );
+  assert.deepEqual(grid.freeSlots({ intervals: [], busy: [], durationMinutes: 60, nowMinute: null }), []);
+});
+
+test("FS8 форма записей действительно пользуется движком слотов", async () => {
+  // Слоты, посчитанные где-то сбоку и никуда не подключённые, — это то, что
+  // сверка со спецификацией уже находила: код есть, пользователю недоступен.
+  const page = await readFile(path.join(repoRoot, "artifacts", "negis", "src", "pages", "AppointmentsPage.tsx"), "utf8");
+  assert.match(page, /freeSlots\(\{/, "форма считает слоты движком, а не своей копией");
+  assert.match(page, /groupSlots\(slots\)/, "группировка утро/день/вечер — как в запись.кз");
+  assert.ok(page.includes("Свободное время"), "секция названа на экране");
+  // Правка не считает саму себя занятостью — иначе перенос записи показывал
+  // бы её старое время занятым.
+  assert.match(page, /appointment\.id === editingId\) return false/);
+  // График не задан — слоты по обычному дню, а не молчаливое исчезновение.
+  assert.match(page, /\[\[9 \* 60, 21 \* 60\]\]/);
+  // Месячный вид существует и открывает день по клику.
+  assert.match(page, /"month"/);
+  assert.ok(page.includes('month: "Месяц"'), "переключатель называет месяц");
+});
+
+test("FS9 ревью-находки закрыты и не вернутся", async () => {
+  const page = await readFile(path.join(repoRoot, "artifacts", "negis", "src", "pages", "AppointmentsPage.tsx"), "utf8");
+
+  // День записи — по часам САЛОНА, обеими половинами расчёта: занятость через
+  // isOnDay, месяц через dayKeyInZone. Смешение «день по устройству, минута по
+  // салону» здесь уже ловили дважды.
+  assert.match(page, /!isOnDay\(appointment, form\.date, clinicTimeZone\)\) return false/);
+  const monthBlock = page.slice(page.indexOf("const countByDay"), page.indexOf("const cells:"));
+  assert.ok(monthBlock.includes("dayKeyInZone(instant, clinicTimeZone)"), "месяц раскладывает дни по поясу салона");
+  assert.ok(!monthBlock.includes("dateKeyFromStartsAt"), "день устройства в месяц не возвращается");
+  assert.ok(monthBlock.includes("Number.isFinite(instant)"), "нечитаемая дата — «не знаю», а не «сегодня»");
+  assert.ok(!monthBlock.includes("activeStatuses"), "фильтр «Отменено» не должен рисовать пустой месяц");
+
+  // При несовпадении поясов подсказка прячется с объяснением, а не врёт.
+  assert.match(page, /clinicTimeZone !== deviceTimeZone[\s\S]{0,120}другой пояс/);
+  assert.ok(page.includes("часы устройства не совпадают с часами салона"), "причина названа человеку");
+
+  // Пустота пустоте рознь: четыре причины, а не одно «всё занято».
+  for (const phrase of [
+    "Рабочий день уже закончился",
+    "не помещается в рабочее окно",
+    "всё занято записями",
+    "День закрыт: выходной или закрытое окно",
+  ]) {
+    assert.ok(page.includes(phrase), `причина «${phrase}» названа своими словами`);
+  }
+
+  // Одна строка-отпуск на сентябрь не закрывает весь август: «график описывает
+  // ЭТОТ день» проверяется по покрытию даты, а не по наличию любой строки.
+  assert.match(page, /const definesThisDay = mine\.some/);
+
+  // Мастер без селекта специалиста получает слоты через собственную карточку.
+  assert.match(page, /userRole === "doctor" && !form\.doctorId/);
 });
