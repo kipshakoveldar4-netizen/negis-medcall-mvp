@@ -450,6 +450,90 @@ export function DoctorSchedule() {
     await load({ quiet: true });
   };
 
+  /**
+   * Ритм на период — «2/2» и «5/2» из запись.кз.
+   *
+   * Недельный шаблон ритм «два через два» выразить не может в принципе: цикл
+   * ритма — четыре дня, а неделя — семь, и рабочие дни каждую неделю падают на
+   * разные даты. Поэтому ритм раскладывается в ДАТИРОВАННЫЕ блоки: рабочий
+   * блок — строка с часами на диапазон дат, выходной — строка «закрыто» на
+   * следующий диапазон. Датированные строки и так главнее недельного шаблона.
+   *
+   * Выходные пишутся явно, а не «просто не пишем рабочих строк»: день, не
+   * покрытый ничем, у мастера без недельного шаблона читается как «график не
+   * задан — запись не ограничена», и ритм 2/2 молча превратился бы в «всегда
+   * можно».
+   */
+  const [rhythm, setRhythm] = useState({ work: 2, off: 2, start: "", weeks: 4, from: "09:00", to: "21:00" });
+  const [rhythmSaving, setRhythmSaving] = useState(false);
+
+  const fillRhythm = async () => {
+    if (!selectedId) return;
+    if (!rhythm.start) {
+      toast.error("Укажите, с какой даты начинается ритм");
+      return;
+    }
+    const startMinute = timeToMinute(rhythm.from);
+    const endMinute = timeToMinute(rhythm.to);
+    if (startMinute === null || endMinute === null || endMinute <= startMinute) {
+      toast.error("Часы ритма указываются как 09:00–21:00");
+      return;
+    }
+    const work = Math.max(1, Math.min(6, Math.round(rhythm.work)));
+    const off = Math.max(1, Math.min(6, Math.round(rhythm.off)));
+    const totalDays = Math.max(7, Math.min(70, Math.round(rhythm.weeks) * 7));
+
+    const addDays = (key: string, days: number) => {
+      const [year, month, day] = key.split("-").map(Number);
+      const date = new Date(Date.UTC(year, month - 1, day + days));
+      return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}-${String(date.getUTCDate()).padStart(2, "0")}`;
+    };
+
+    // Блоки: [рабочие × work, закрытые × off] до конца периода.
+    const blocks: Array<{ from: string; to: string; working: boolean }> = [];
+    let cursor = 0;
+    while (cursor < totalDays) {
+      const workEnd = Math.min(cursor + work, totalDays);
+      blocks.push({ from: addDays(rhythm.start, cursor), to: addDays(rhythm.start, workEnd - 1), working: true });
+      cursor = workEnd;
+      if (cursor >= totalDays) break;
+      const offEnd = Math.min(cursor + off, totalDays);
+      blocks.push({ from: addDays(rhythm.start, cursor), to: addDays(rhythm.start, offEnd - 1), working: false });
+      cursor = offEnd;
+    }
+
+    setRhythmSaving(true);
+    let written = 0;
+    try {
+      for (const block of blocks) {
+        const payload: Record<string, unknown> = {
+          doctorId: selectedId,
+          onDate: block.from,
+          onDateEnd: block.to,
+          isWorking: block.working,
+          note: `ритм ${work}/${off}`,
+        };
+        if (block.working) {
+          payload.startMinute = startMinute;
+          payload.endMinute = endMinute;
+        }
+        const ok = await write("/api/crm/doctor-schedule", "POST", payload);
+        if (!ok) {
+          // Останавливаемся честно: половина записанного ритма видна в списке
+          // исключений, и её можно перенести или продолжить, а не гадать.
+          toast.error(`Записано ${written} из ${blocks.length} блоков — дальше сервер отказал`);
+          return;
+        }
+        written += 1;
+      }
+      toast.success(`Ритм ${work}/${off} записан: ${blocks.length} блоков на ${Math.round(totalDays / 7)} нед.`);
+      setRhythm((current) => ({ ...current, start: "" }));
+      await load({ quiet: true });
+    } finally {
+      setRhythmSaving(false);
+    }
+  };
+
   const addException = async () => {
     if (!selectedId) return;
     if (!exception.from) {
@@ -799,7 +883,65 @@ export function DoctorSchedule() {
             </div>
 
             <div>
-              <h3 className="mb-2 text-sm font-black text-[#0F172A]">Исключения: отпуск, выходной, закрытое окно, особые часы</h3>
+              {/* Ритм — до исключений: сначала заполняют период, потом
+                  правят его точечно. Порядок чтения совпадает с порядком дел. */}
+              <h3 className="mb-2 text-sm font-black text-[#0F172A]">Ритм на период: 2/2, 5/2 или свой</h3>
+              <p className="mb-3 text-xs font-semibold text-[#64748B]">
+                Заполняет график датированными блоками: рабочие дни с часами, выходные закрыты.
+                Недельный шаблон ритм «два через два» выразить не может — цикл не кратен неделе.
+              </p>
+              <div className="mb-2 flex flex-wrap items-center gap-2">
+                {[
+                  { work: 2, off: 2, label: "2/2" },
+                  { work: 5, off: 2, label: "5/2" },
+                  { work: 3, off: 1, label: "3/1" },
+                ].map((preset) => (
+                  <button
+                    key={preset.label}
+                    type="button"
+                    className="neu-btn px-3 py-1.5 text-sm"
+                    style={rhythm.work === preset.work && rhythm.off === preset.off ? { color: "#0D9488", fontWeight: 800 } : undefined}
+                    onClick={() => setRhythm((current) => ({ ...current, work: preset.work, off: preset.off }))}
+                  >
+                    {preset.label}
+                  </button>
+                ))}
+                <label className="flex items-center gap-1 text-xs font-bold text-[#64748B]">
+                  работает
+                  <input className="neu-input w-14 px-2 py-1.5 text-sm" type="number" min={1} max={6} value={rhythm.work}
+                    onChange={(event) => setRhythm((current) => ({ ...current, work: Number(event.target.value) || 1 }))} />
+                  через
+                  <input className="neu-input w-14 px-2 py-1.5 text-sm" type="number" min={1} max={6} value={rhythm.off}
+                    onChange={(event) => setRhythm((current) => ({ ...current, off: Number(event.target.value) || 1 }))} />
+                </label>
+              </div>
+              <div className="mb-3 flex flex-wrap items-center gap-2">
+                <label className="flex items-center gap-1 text-xs font-bold text-[#64748B]">
+                  с
+                  <input className="neu-input px-2 py-1.5 text-sm" type="date" value={rhythm.start}
+                    onChange={(event) => setRhythm((current) => ({ ...current, start: event.target.value }))} />
+                </label>
+                <label className="flex items-center gap-1 text-xs font-bold text-[#64748B]">
+                  недель
+                  <select className="neu-input px-2 py-1.5 text-sm" value={rhythm.weeks}
+                    onChange={(event) => setRhythm((current) => ({ ...current, weeks: Number(event.target.value) }))}>
+                    {[2, 4, 6, 8].map((weeks) => <option key={weeks} value={weeks}>{weeks}</option>)}
+                  </select>
+                </label>
+                <label className="flex items-center gap-1 text-xs font-bold text-[#64748B]">
+                  часы
+                  <input className="neu-input w-24 px-2 py-1.5 text-sm" value={rhythm.from} placeholder="09:00"
+                    onChange={(event) => setRhythm((current) => ({ ...current, from: event.target.value }))} />
+                  –
+                  <input className="neu-input w-24 px-2 py-1.5 text-sm" value={rhythm.to} placeholder="21:00"
+                    onChange={(event) => setRhythm((current) => ({ ...current, to: event.target.value }))} />
+                </label>
+                <button type="button" className="neu-btn-primary px-4 py-2 text-sm" disabled={rhythmSaving} onClick={() => void fillRhythm()}>
+                  {rhythmSaving ? "Заполняем…" : "Заполнить график"}
+                </button>
+              </div>
+
+              <h3 className="mb-2 mt-5 text-sm font-black text-[#0F172A]">Исключения: отпуск, выходной, закрытое окно, особые часы</h3>
               <p className="mb-2 text-xs text-[#64748B]">
                 Исключение можно перенести на другую дату, но удалить его в этой версии нельзя — у строк графика ещё нет
                 архивирования.

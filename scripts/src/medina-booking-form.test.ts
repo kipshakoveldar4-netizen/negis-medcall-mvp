@@ -135,3 +135,30 @@ test("BF9 сброс услуги уносит её цену, а согласо�
   assert.match(page, /priceMinor: appointment\.priceMinor,/);
   assert.match(sales, /prefill\.priceMinor \?\? prefill\.price_minor/);
 });
+
+test("BF10 архив клиента в форме: история ищется по карточке, телефону и имени", async () => {
+  const page = await read("artifacts", "negis", "src", "pages", "AppointmentsPage.tsx");
+  // Просьба владельца дословно: «сбоку, когда записываешь, должен быть архив».
+  assert.ok(page.includes("Архив клиента"), "панель существует и названа по-хозяйски");
+  // Порядок ключей поиска: карточка сильнее телефона, телефон сильнее имени.
+  const memo = page.slice(page.indexOf("const visitHistory"), page.indexOf("const openCreate"));
+  assert.ok(memo.indexOf("appointment.clientId === form.clientId") < memo.indexOf("appointmentPhone === phoneKey"));
+  assert.ok(memo.indexOf("appointmentPhone === phoneKey") < memo.indexOf("appointment.client.trim().toLowerCase() === nameKey"));
+  // Правка не показывает саму себя как «прошлый визит».
+  assert.match(memo, /editingId && appointment\.id === editingId\) return false/);
+  // Телефон сравнивается последними десятью цифрами: +7 и 8 — один человек.
+  assert.ok(memo.includes('.slice(-10)'), "телефон сравнивается последними десятью цифрами: +7 и 8 — один человек");
+});
+
+test("BF11 ритм 2/2: выходные пишутся явно, отказ сервера останавливает запись честно", async () => {
+  const schedule = await read("artifacts", "negis", "src", "components", "admin", "DoctorSchedule.tsx");
+  // Выходной блок — строка «закрыто», а не отсутствие строки: день, не
+  // покрытый ничем, у мастера без недельного шаблона читается как «запись не
+  // ограничена», и ритм молча превратился бы в «всегда можно».
+  assert.match(schedule, /blocks\.push\(\{ from: [\s\S]{0,80}working: false \}\)/);
+  // Рабочий блок несёт часы, выходной — нет.
+  assert.match(schedule, /if \(block\.working\) \{\s*payload\.startMinute = startMinute;/);
+  // Отказ на середине не притворяется успехом и называет счёт.
+  assert.ok(schedule.includes("Записано ${written} из ${blocks.length} блоков"), "частичная запись названа вслух");
+  assert.ok(schedule.includes("Ритм на период: 2/2, 5/2 или свой"), "секция видна в графике");
+});

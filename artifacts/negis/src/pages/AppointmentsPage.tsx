@@ -549,6 +549,13 @@ async function safeJson(response: globalThis.Response): Promise<ApiResponse | nu
   }
 }
 
+/** «24.08» — коротко: год в архиве почти всегда текущий, а место в строке дорого. */
+function formatVisitDay(startsAt: string): string {
+  const parsed = new Date(startsAt);
+  if (Number.isNaN(parsed.getTime())) return "—";
+  return parsed.toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit" });
+}
+
 function defaultForm(date: string, time = "09:00"): AppointmentForm {
   return {
     clientId: "",
@@ -1446,6 +1453,33 @@ export function AppointmentsPage() {
     }
     return { groups: groupSlots(slots), reason };
   }, [form.date, form.doctorId, form.durationMinutes, shifts, items, editingId, activeDoctors, clinicTimeZone, deviceTimeZone, todayKey, userRole]);
+
+  /**
+   * Архив клиента — просьба владельца дословно: «сбоку, когда записываешь,
+   * должен быть архив: видно, кого числа какая услуга была, во сколько и к
+   * какому мастеру». То же самое — «история посещений» в запись.кз.
+   *
+   * Ищется по связанной карточке, затем по телефону (последние десять цифр),
+   * затем по точному имени. Источник — уже загруженный список записей: у
+   * администратора это весь салон, у мастера сервер его сузил до собственной
+   * работы — значит и архив мастера честно показывает только его визиты.
+   */
+  const visitHistory = useMemo(() => {
+    const digitsOf = (value: string) => (value || "").replace(/\D/g, "").slice(-10);
+    const phoneKey = digitsOf(form.phone) || digitsOf(form.whatsapp);
+    const nameKey = form.client.trim().toLowerCase();
+    if (!form.clientId && phoneKey.length < 10 && nameKey.length < 2) return [];
+    return items
+      .filter((appointment) => {
+        if (editingId && appointment.id === editingId) return false;
+        if (form.clientId && appointment.clientId) return appointment.clientId === form.clientId;
+        const appointmentPhone = digitsOf(appointment.phone) || digitsOf(appointment.whatsapp);
+        if (phoneKey.length >= 10 && appointmentPhone) return appointmentPhone === phoneKey;
+        return nameKey.length >= 2 && appointment.client.trim().toLowerCase() === nameKey;
+      })
+      .sort((left, right) => (right.startsAt || "").localeCompare(left.startsAt || ""))
+      .slice(0, 8);
+  }, [items, form.clientId, form.phone, form.whatsapp, form.client, editingId]);
 
   const openCreate = (date = selectedDate, time = "09:00") => {
     setEditingId(null);
@@ -2502,6 +2536,27 @@ export function AppointmentsPage() {
                 {statusOptions.map((status) => <option key={status} value={status}>{getAppointmentStatusLabel(status)}</option>)}
               </SelectField>
               <TextField label="Источник" value={form.source} onChange={(source) => setForm((current) => ({ ...current, source }))} />
+              {visitHistory.length > 0 ? (
+                <div className="md:col-span-2 rounded-2xl p-3" style={{ background: "var(--negis-border)" }}>
+                  <p className="text-xs font-black uppercase tracking-[0.12em]" style={{ color: "var(--negis-muted)" }}>
+                    Архив клиента · {visitHistory.length === 8 ? "последние 8 визитов" : `${visitHistory.length} ${visitHistory.length === 1 ? "визит" : visitHistory.length < 5 ? "визита" : "визитов"}`}
+                  </p>
+                  <div className="mt-2 space-y-1">
+                    {visitHistory.map((visit) => (
+                      <p key={visit.id} className="text-sm font-semibold" style={{ color: "var(--negis-text)" }}>
+                        <span className="tabular-nums">{formatVisitDay(visit.startsAt)} · {timeKeyFromStartsAt(visit.startsAt)}</span>
+                        {visit.service ? ` · ${visit.service}` : ""}
+                        {visit.doctor ? ` · ${visit.doctor}` : ""}
+                        <span style={{ color: "var(--negis-muted)" }}> · {getAppointmentStatusLabel(visit.status)}</span>
+                        {visit.priceMinor !== null ? (
+                          <span className="tabular-nums"> · {Math.round(visit.priceMinor / 100).toLocaleString("ru-RU")} ₸</span>
+                        ) : null}
+                      </p>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+
               <label className="block md:col-span-2">
                 <span className="mb-2 block text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">Комментарий</span>
                 <textarea className="neu-input min-h-28 w-full resize-y" value={form.notes} onChange={(event) => setForm((current) => ({ ...current, notes: event.target.value }))} />
