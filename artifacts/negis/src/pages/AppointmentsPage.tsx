@@ -959,6 +959,12 @@ export function AppointmentsPage() {
   const [doctorCatalog, setDoctorCatalog] = useState<{ doctorId: string; services: CatalogService[]; canPrune: boolean } | null>(null);
   // Подпись под полем «Услуга»: почему выбор сбросился или почему прайс не сузился.
   const [serviceScopeNotice, setServiceScopeNotice] = useState("");
+  /**
+   * Поиск по услугам в форме — просьба владельца: «чтобы не перебирать и так
+   * большой список». Пустой запрос — прежний выпадающий список; с запросом
+   * вместо него результаты кнопками, до двенадцати: больше — сужайте запрос.
+   */
+  const [serviceSearch, setServiceSearch] = useState("");
   // Мастер, под которого прайс уже сужен в ЭТОЙ сессии модалки. Отличает смену
   // мастера оператором от первого открытия карточки: на открытии снимать связь
   // с услугой нельзя — это молча переписало бы уже сохранённую запись.
@@ -1377,6 +1383,14 @@ export function AppointmentsPage() {
    * Правит по-прежнему сервер: он ответит 409 на пересечение, даже если сетка
    * устарела за время раздумий.
    */
+  const serviceMatches = useMemo(() => {
+    const needle = serviceSearch.trim().toLowerCase();
+    if (!needle) return [];
+    return activeCatalog
+      .filter((service) => service.name.toLowerCase().includes(needle))
+      .slice(0, 12);
+  }, [activeCatalog, serviceSearch]);
+
   const formSlots = useMemo(() => {
     if (!form.date) return null;
     const [year, month, day] = form.date.split("-").map(Number);
@@ -1493,6 +1507,7 @@ export function AppointmentsPage() {
       ...defaultForm(date, time),
       ...(doctorFilter !== "all" ? { doctor: doctorFilter, doctorId: preselected?.id ?? "" } : {}),
     });
+    setServiceSearch("");
     setModalOpen(true);
   };
 
@@ -2349,6 +2364,52 @@ export function AppointmentsPage() {
               */}
               {activeCatalog.length > 0 ? (
                 <div>
+                  <label className="mb-2 block">
+                    <span className="mb-2 block text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">Поиск услуги</span>
+                    <input
+                      className="neu-input w-full"
+                      type="search"
+                      placeholder="Начните вводить: маникюр, стрижка…"
+                      value={serviceSearch}
+                      onChange={(event) => setServiceSearch(event.target.value)}
+                    />
+                  </label>
+                  {serviceSearch.trim() ? (
+                    <div className="mb-2 space-y-1">
+                      {serviceMatches.length === 0 ? (
+                        <p className="text-sm font-semibold" style={{ color: "var(--negis-muted)" }}>
+                          Ничего не нашлось — проверьте написание или выберите из списка ниже.
+                        </p>
+                      ) : (
+                        serviceMatches.map((service) => {
+                          const price = service.basePriceMinor === null ? "" : ` — ${Math.round(service.basePriceMinor / 100).toLocaleString("ru-RU")} ₸`;
+                          const length = service.durationMinutes ? ` · ${service.durationMinutes} мин` : "";
+                          return (
+                            <button
+                              key={service.id}
+                              type="button"
+                              className="block w-full rounded-xl px-3 py-2 text-left text-sm font-black"
+                              style={{ background: "var(--negis-border)", color: "var(--negis-text)" }}
+                              onClick={() => {
+                                setServiceScopeNotice("");
+                                setServiceSearch("");
+                                setForm((current) => ({
+                                  ...current,
+                                  serviceId: service.id,
+                                  service: service.name,
+                                  durationMinutes: service.durationMinutes ?? current.durationMinutes,
+                                  priceTenge: service.basePriceMinor === null ? "" : String(Math.round(service.basePriceMinor / 100)),
+                                }));
+                              }}
+                            >
+                              {service.name}
+                              <span className="font-semibold" style={{ color: "var(--negis-muted)" }}>{price}{length}</span>
+                            </button>
+                          );
+                        })
+                      )}
+                    </div>
+                  ) : null}
                   <SelectField
                     label="Услуга"
                     value={form.serviceId || OTHER_SERVICE_OPTION}

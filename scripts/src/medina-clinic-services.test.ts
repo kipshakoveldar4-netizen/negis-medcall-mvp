@@ -727,3 +727,36 @@ test("CS12 мастер вписывает длительность своей �
   const refused = await stranger({ method: "PATCH", body: { id: SERVICE_ID, updates: { durationMinutes: 45 } } });
   assert.equal(refused.res.statusCode, 403, "чужая длительность закрыта");
 });
+
+test("CS13 условия оплаты мастера: правит только админ, список мастеру их не отдаёт", async () => {
+  const DOCTOR_CARD2 = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+  const card = {
+    id: DOCTOR_CARD2, workspace_id: WORKSPACE_A, staff_user_id: STAFF_A,
+    full_name: "Айгерим", is_active: true, salary_fixed_minor: 20000000, salary_percent: 40,
+  };
+
+  // Мастеру список справочника нужен для формы — но зарплатные поля срезаны:
+  // чужие условия оплаты не читаются через плечо с его телефона.
+  const doctor = await loadRouter({ role: "doctor", rows: { clinic_doctors: [card] } });
+  const listed = await doctor({ resource: "clinic-doctors", method: "GET" });
+  assert.equal(listed.res.statusCode, 200, JSON.stringify(listed.res.body));
+  const doctors = (listed.res.body as { data?: { doctors?: Array<Record<string, unknown>> } }).data?.doctors ?? [];
+  assert.ok(doctors.length > 0, "список не пуст");
+  for (const row of doctors) {
+    assert.ok(!("salaryFixedMinor" in row), "фикс не уходит мастеру");
+    assert.ok(!("salaryPercent" in row), "процент не уходит мастеру");
+  }
+
+  // PATCH карточки мастеру закрыт реестром целиком — заодно и зарплата.
+  const refused = await doctor({ resource: "clinic-doctors", method: "PATCH", body: { id: DOCTOR_CARD2, updates: { salaryPercent: 90 } } });
+  assert.equal(refused.res.statusCode, 403, "мастер не назначает себе процент");
+
+  // Админ клиники правит: значения проходят и возвращаются.
+  const manager = await loadRouter({ role: "manager", rows: { clinic_doctors: [card] } });
+  const allowed = await manager({ resource: "clinic-doctors", method: "PATCH", body: { id: DOCTOR_CARD2, updates: { salaryPercent: 45, salaryFixedMinor: 15000000 } } });
+  assert.equal(allowed.res.statusCode, 200, JSON.stringify(allowed.res.body));
+
+  // Мусор отклоняется валидацией, а не 502 от CHECK базы.
+  const junk = await manager({ resource: "clinic-doctors", method: "PATCH", body: { id: DOCTOR_CARD2, updates: { salaryPercent: 146 } } });
+  assert.equal(junk.res.statusCode, 400, JSON.stringify(junk.res.body));
+});

@@ -247,6 +247,47 @@ const SERVICE_PRICE_MAX_MINOR = 10_000_000_000;
  * что у прайса услуг: bigint переваривает больше, но число за пределом — это
  * опечатка, и честнее не сохранить её, чем записать долг в сто миллионов.
  */
+
+/**
+ * Чужие условия оплаты — не дело мастера. Список справочника читают все, у
+ * кого есть запись (мастеру он нужен для формы), поэтому зарплатные поля
+ * срезаются ролям «только своя работа» целиком — включая собственные: свою
+ * схему мастеру сообщает владелец, а не список, который видно через плечо.
+ */
+function stripDoctorSalaries(items: JsonRecord[], role: unknown): JsonRecord[] {
+  if (!seesOnlyOwnWork(role)) return items;
+  return items.map((item) => {
+    const { salaryFixedMinor: _fixed, salaryPercent: _percent, ...rest } = item;
+    return rest;
+  });
+}
+
+/**
+ * Колонки условий оплаты мастера — фикс в месяц (тиыны) и целый процент.
+ *
+ * Ключ попадает в строку только если поле прислано: до применения 046 колонок
+ * нет, и безусловная запись будила бы PGRST204-повторы на каждом сохранении
+ * карточки. Мусор и выход за пределы — validation error, а не 502 от CHECK.
+ */
+function doctorSalaryColumns(body: JsonRecord): { salary_fixed_minor?: number | null; salary_percent?: number | null } {
+  const out: { salary_fixed_minor?: number | null; salary_percent?: number | null } = {};
+  if (hasAnyKey(body, ["salaryFixedMinor", "salary_fixed_minor"])) {
+    const raw = readNullableNumber(body.salaryFixedMinor ?? body.salary_fixed_minor);
+    if (raw !== null && (!Number.isFinite(raw) || raw < 0 || raw > SERVICE_PRICE_MAX_MINOR)) {
+      throw new CrmReferenceValidationError(["salaryFixedMinor must be an integer >= 0"]);
+    }
+    out.salary_fixed_minor = raw === null ? null : Math.round(raw);
+  }
+  if (hasAnyKey(body, ["salaryPercent", "salary_percent"])) {
+    const raw = readNullableNumber(body.salaryPercent ?? body.salary_percent);
+    if (raw !== null && (!Number.isInteger(raw) || raw < 0 || raw > 100)) {
+      throw new CrmReferenceValidationError(["salaryPercent must be an integer between 0 and 100"]);
+    }
+    out.salary_percent = raw;
+  }
+  return out;
+}
+
 function appointmentPriceColumn(body: JsonRecord): { price_minor?: number | null } {
   if (!("priceMinor" in body) && !("price_minor" in body)) return {};
   const raw = readNullableNumber(body.priceMinor ?? body.price_minor);
@@ -492,6 +533,9 @@ function buildPatchRow(resource: CrmResource, body: JsonRecord): JsonRecord {
       row.full_name = fullName;
     }
     setText("specialty", ["specialty"]);
+    // Условия оплаты правит только manage_directory: PATCH этого ресурса в
+    // реестре не открывался никому другому.
+    Object.assign(row, doctorSalaryColumns(body));
     // Ёмкость: сколько клиентов мастер ведёт одновременно. Ниже единицы не
     // бывает, выше двенадцати — опечатка, а не настройка.
     if (body.capacity !== undefined || body.capacity_value !== undefined) {
@@ -1218,6 +1262,9 @@ function makeClinicDoctor(body: JsonRecord): JsonRecord {
     specialty: readString(body.specialty),
     capacity: Number(body.capacity) || 1,
     staffUserId: firstString(body.staffUserId, body.staff_user_id),
+    // Условия оплаты. Список справочника мастеру их срезает отдельным слоем.
+    salaryFixedMinor: readNullableNumber(body.salaryFixedMinor ?? body.salary_fixed_minor),
+    salaryPercent: readNullableNumber(body.salaryPercent ?? body.salary_percent),
     sortOrder: readNumber(body.sortOrder ?? body.sort_order) ?? 0,
     isActive: hasAnyKey(body, ["isActive", "is_active"]) ? readBoolean(body.isActive ?? body.is_active) : true,
     createdAt: firstString(body.createdAt, body.created_at),
@@ -1786,6 +1833,7 @@ const configs: Record<CrmResource, ResourceConfig> = {
       workspace_id: workspaceId,
       full_name: firstString(body.fullName, body.full_name, body.name),
       specialty: readString(body.specialty) || null,
+      ...doctorSalaryColumns(body),
       capacity: Math.min(Math.max(Math.trunc(Number(body.capacity) || 1), 1), 12),
       sort_order: readNumber(body.sortOrder ?? body.sort_order) ?? 0,
       is_active: hasAnyKey(body, ["isActive", "is_active"]) ? readBoolean(body.isActive ?? body.is_active) : true,
@@ -3863,6 +3911,7 @@ const LINK_COLUMNS_BY_MIGRATION: ReadonlyArray<readonly [string, readonly string
   // колонкой, а не после того, как это заметит администратор салона.
   ["043", ["created_by_staff_user_id"]],
   ["045", ["price_minor"]],
+  ["046", ["salary_fixed_minor", "salary_percent"]],
   ["032", ["service_id"]],
   ["033", ["doctor_id"]],
 ];
@@ -3989,6 +4038,8 @@ function isMissingTable(error: { code?: unknown; message?: unknown } | null): bo
 const UNSAVED_FIELD_LABELS: Record<string, string> = {
   duration_minutes: "длительность",
   price_minor: "цена",
+  salary_fixed_minor: "фикс оплаты",
+  salary_percent: "процент оплаты",
   whatsapp: "WhatsApp",
   source: "источник",
   service_id: "услуга из справочника",
@@ -4123,10 +4174,13 @@ async function listItems(resource: CrmResource, req: VercelRequest, res: VercelR
       const phone = readQueryString(req.query.phone);
       if (phone) {
         const rows = await findClientsByPhone(supabase, workspaceId, phone);
-        const matches = redactContactsList(
-          rows.map((row) => config.fromRow(row)),
+        const matches = stripDoctorSalaries(
+          redactContactsList(
+            rows.map((row) => config.fromRow(row)),
+            readWorkspaceContext(req)?.role,
+            readWorkspaceContext(req)?.staffUserId,
+          ),
           readWorkspaceContext(req)?.role,
-          readWorkspaceContext(req)?.staffUserId,
         );
         return sendJson(res, 200, success("supabase", { [config.listKey]: matches, items: matches }));
       }
@@ -4298,10 +4352,13 @@ async function listItems(resource: CrmResource, req: VercelRequest, res: VercelR
     // Мастеру остаются имя, услуга, время и статус — то, ради чего он смотрит
     // расписание, — а телефон и WhatsApp не уезжают даже в теле ответа: скрыть
     // их только на экране значило бы отдать их всякому, кто откроет консоль.
-    const items = redactContactsList(
-      (Array.isArray(data) ? data : []).map((row) => config.fromRow(asRecord(row))),
+    const items = stripDoctorSalaries(
+      redactContactsList(
+        (Array.isArray(data) ? data : []).map((row) => config.fromRow(asRecord(row))),
+        readWorkspaceContext(req)?.role,
+        readWorkspaceContext(req)?.staffUserId,
+      ),
       readWorkspaceContext(req)?.role,
-      readWorkspaceContext(req)?.staffUserId,
     );
     // Пояс клиники едет пассажиром списка записей ровно по той же причине, по
     // которой он едет с графиком: маршрут настроек доступен только владельцу и

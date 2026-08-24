@@ -22,6 +22,8 @@ type ClinicDoctor = {
   specialty: string;
   /** Сколько клиентов ведёт одновременно. Единица — обычный приём. */
   capacity: number;
+  salaryFixedMinor?: number | null;
+  salaryPercent?: number | null;
   sortOrder: number;
   isActive: boolean;
 };
@@ -95,6 +97,8 @@ function doctorFromApi(record: Record<string, unknown>): ClinicDoctor {
     fullName: readText(record.fullName) || readText(record.full_name),
     specialty: readText(record.specialty),
     capacity: Number(record.capacity) || 1,
+    salaryFixedMinor: record.salaryFixedMinor === null || record.salaryFixedMinor === undefined || record.salaryFixedMinor === "" ? null : Number(record.salaryFixedMinor),
+    salaryPercent: record.salaryPercent === null || record.salaryPercent === undefined || record.salaryPercent === "" ? null : Number(record.salaryPercent),
     sortOrder: readNullableInt(record.sortOrder ?? record.sort_order) ?? 0,
     isActive:
       record.isActive === undefined && record.is_active === undefined
@@ -220,7 +224,7 @@ export function DoctorSchedule() {
   const [selectedId, setSelectedId] = useState("");
   const [formOpen, setFormOpen] = useState(false);
   const [editingId, setEditingId] = useState("");
-  const [form, setForm] = useState({ fullName: "", specialty: "", capacity: "1", sortOrder: "0", isActive: true });
+  const [form, setForm] = useState({ fullName: "", specialty: "", capacity: "1", sortOrder: "0", isActive: true, salaryFixedTenge: "", salaryPercent: "" });
   const [saving, setSaving] = useState(false);
   const [exception, setException] = useState<ExceptionDraft>({ from: "", to: "", note: "", kind: "off", start: "09:00", end: "18:00" });
   // weekday === 0 — форма окна закрыта: ноль не бывает днём недели по ISO, и
@@ -340,12 +344,17 @@ export function DoctorSchedule() {
     }
     setSaving(true);
     try {
+      // Оплата: пустое поле — null, «условия не заданы»; это не ноль.
+      const salaryFixed = form.salaryFixedTenge.trim();
+      const salaryPercent = form.salaryPercent.trim();
       const fields = {
         fullName,
         specialty: form.specialty.trim(),
         capacity: readNullableInt(form.capacity) ?? 1,
         sortOrder: readNullableInt(form.sortOrder) ?? 0,
         isActive: form.isActive,
+        salaryFixedMinor: salaryFixed === "" ? null : Math.max(0, Math.round(Number(salaryFixed) || 0)) * 100,
+        salaryPercent: salaryPercent === "" ? null : Math.min(100, Math.max(0, Math.round(Number(salaryPercent) || 0))),
       };
       const ok = editingId
         ? await write("/api/crm/clinic-doctors", "PATCH", { id: editingId, ...fields })
@@ -641,7 +650,7 @@ export function DoctorSchedule() {
               className="neu-btn px-3 py-2"
               onClick={() => {
                 setEditingId("");
-                setForm({ fullName: "", specialty: "", capacity: "1", sortOrder: "0", isActive: true });
+                setForm({ fullName: "", specialty: "", capacity: "1", sortOrder: "0", isActive: true, salaryFixedTenge: "", salaryPercent: "" });
                 setFormOpen(true);
               }}
             >
@@ -709,6 +718,8 @@ export function DoctorSchedule() {
                         capacity: String(doctor.capacity),
                         sortOrder: String(doctor.sortOrder),
                         isActive: doctor.isActive,
+                        salaryFixedTenge: doctor.salaryFixedMinor === null || doctor.salaryFixedMinor === undefined ? "" : String(Math.round(doctor.salaryFixedMinor / 100)),
+                        salaryPercent: doctor.salaryPercent === null || doctor.salaryPercent === undefined ? "" : String(doctor.salaryPercent),
                       });
                       setFormOpen(true);
                     }}
@@ -1061,6 +1072,23 @@ export function DoctorSchedule() {
                 <span className="mb-1 block text-xs font-bold uppercase text-[#64748B]">Специальность</span>
                 <input className="neu-input w-full" value={form.specialty} onChange={(event) => setForm((c) => ({ ...c, specialty: event.target.value }))} placeholder="Косметолог" />
               </label>
+              <div className="grid grid-cols-2 gap-2">
+                <label className="block">
+                  <span className="mb-1.5 block text-[11px] font-bold text-[#64748B]">Фикс в месяц, ₸</span>
+                  {/* Оплата мастера: фикс и процент, на усмотрение админа.
+                      Пусто — «условия не заданы»: статистика честно не считает
+                      зарплату, а не выдумывает нули. */}
+                  <input className="neu-input w-full" type="number" min={0} step={1000} placeholder="Не задан"
+                    value={form.salaryFixedTenge}
+                    onChange={(event) => setForm((current) => ({ ...current, salaryFixedTenge: event.target.value }))} />
+                </label>
+                <label className="block">
+                  <span className="mb-1.5 block text-[11px] font-bold text-[#64748B]">Процент от услуг, %</span>
+                  <input className="neu-input w-full" type="number" min={0} max={100} step={1} placeholder="Не задан"
+                    value={form.salaryPercent}
+                    onChange={(event) => setForm((current) => ({ ...current, salaryPercent: event.target.value }))} />
+                </label>
+              </div>
               <label className="block">
                 <span className="mb-1 block text-xs font-bold uppercase text-[#64748B]">Клиентов одновременно</span>
                 <input

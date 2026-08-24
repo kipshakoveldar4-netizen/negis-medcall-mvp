@@ -31,6 +31,9 @@ interface Stats {
     scheduledMinutes: number | null;
     loadPercent: number | null;
     pricedMinor: number;
+    salaryPercent: number | null;
+    salaryPercentMinor: number | null;
+    salaryFixedMonthlyMinor: number | null;
   }>;
   services: Array<{ name: string; count: number; pricedMinor: number }>;
   clients: { withCard: number; newClients: number; returning: number; withoutCard: number };
@@ -196,6 +199,7 @@ export default function StatsPage() {
                     <th className="px-2 py-2">Занято</th>
                     <th className="px-2 py-2">Загрузка</th>
                     <th className="px-2 py-2">По ценам записей</th>
+                    <th className="px-2 py-2">Зарплата</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -208,6 +212,19 @@ export default function StatsPage() {
                         {master.loadPercent === null ? "график не задан" : `${master.loadPercent}%`}
                       </td>
                       <td className="px-2 py-2 font-semibold tabular-nums text-[#475569]">{tenge(master.pricedMinor)}</td>
+                      <td className="px-2 py-2 font-semibold tabular-nums text-[#475569]">
+                        {/* Процентная часть — за период; фикс — в месяц,
+                            справочно: делить его на дни значило бы выдумывать
+                            метрику. Условия не заданы — так и написано. */}
+                        {master.salaryPercentMinor === null && master.salaryFixedMonthlyMinor === null
+                          ? "условия не заданы"
+                          : [
+                              master.salaryPercentMinor !== null && master.salaryPercent !== null
+                                ? `${master.salaryPercent}% → ${tenge(master.salaryPercentMinor)}`
+                                : "",
+                              master.salaryFixedMonthlyMinor !== null ? `фикс ${tenge(master.salaryFixedMonthlyMinor)}/мес` : "",
+                            ].filter(Boolean).join(" · ")}
+                      </td>
                     </tr>
                   ))}
                 </tbody>

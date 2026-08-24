@@ -162,3 +162,18 @@ test("BF11 ритм 2/2: выходные пишутся явно, отказ с
   assert.ok(schedule.includes("Записано ${written} из ${blocks.length} блоков"), "частичная запись названа вслух");
   assert.ok(schedule.includes("Ритм на период: 2/2, 5/2 или свой"), "секция видна в графике");
 });
+
+test("BF12 поиск по услугам в форме: та же подстановка, что и у селекта", async () => {
+  const page = await read("artifacts", "negis", "src", "pages", "AppointmentsPage.tsx");
+  assert.ok(page.includes("Поиск услуги"), "поле поиска существует");
+  // Результаты ограничены и это видно по коду: длинный список — не подсказка.
+  assert.match(page, /\.slice\(0, 12\)/);
+  // Выбор из результатов заполняет ровно те же поля, что селект: связь, имя,
+  // длительность и цену — расхождение путей дало бы записи без цены.
+  const searchBlock = page.slice(page.indexOf("serviceMatches.map"), page.indexOf("serviceMatches.map") + 1600);
+  for (const field of ["serviceId: service.id", "service: service.name", "durationMinutes: service.durationMinutes", "priceTenge: service.basePriceMinor"]) {
+    assert.ok(searchBlock.includes(field), `подстановка поля: ${field}`);
+  }
+  // Поиск сбрасывается при открытии формы: вчерашний запрос не прячет список.
+  assert.match(page, /setServiceSearch\(""\);\s*\n\s*setModalOpen\(true\)/);
+});

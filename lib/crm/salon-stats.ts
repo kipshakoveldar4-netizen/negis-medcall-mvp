@@ -81,6 +81,13 @@ export interface SalonStats {
     /** Занятость в процентах от графика; null — считать не от чего. */
     loadPercent: number | null;
     pricedMinor: number;
+    /** Процент мастера; null — условия не заданы. */
+    salaryPercent: number | null;
+    /** Процентная часть зарплаты за период: percent × (по ценам записей). */
+    salaryPercentMinor: number | null;
+    /** Фикс В МЕСЯЦ — справочно: период произвольный, и делить фикс на дни
+        значило бы выдумывать метрику. */
+    salaryFixedMonthlyMinor: number | null;
   }>;
   services: Array<{ name: string; count: number; pricedMinor: number }>;
   clients: {
@@ -105,6 +112,8 @@ export function computeSalonStats(input: {
   /** Рабочие минуты периода по мастерам; отсутствие ключа — графика нет. */
   scheduledMinutesByDoctor: ReadonlyMap<string, number>;
   doctorNames: ReadonlyMap<string, string>;
+  /** Условия оплаты по карточкам; отсутствие ключа — условия не заданы. */
+  salaryByDoctor?: ReadonlyMap<string, { fixedMinor: number | null; percent: number | null }>;
   truncated: boolean;
 }): SalonStats {
   const byStatus: Record<string, number> = {};
@@ -177,6 +186,7 @@ export function computeSalonStats(input: {
     .map(([key, entry]) => {
       const doctorId = key.startsWith("name:") ? "" : key;
       const scheduled = doctorId ? input.scheduledMinutesByDoctor.get(doctorId) ?? null : null;
+      const salary = doctorId ? input.salaryByDoctor?.get(doctorId) ?? null : null;
       return {
         doctorId,
         name: entry.name || "Без имени",
@@ -187,6 +197,13 @@ export function computeSalonStats(input: {
         // без знаменателя честнее выдуманной сотни.
         loadPercent: scheduled && scheduled > 0 ? Math.round((entry.busyMinutes / scheduled) * 100) : null,
         pricedMinor: entry.pricedMinor,
+        salaryPercent: salary?.percent ?? null,
+        // Процентная часть — от цен ЕГО пришедших записей за период. Условия
+        // не заданы — null, а не ноль: «не считали» отличается от «ноль».
+        salaryPercentMinor: salary?.percent === null || salary?.percent === undefined
+          ? null
+          : Math.round((entry.pricedMinor * salary.percent) / 100),
+        salaryFixedMonthlyMinor: salary?.fixedMinor ?? null,
       };
     })
     .sort((left, right) => right.appointments - left.appointments);
@@ -333,14 +350,31 @@ export async function handleSalonStats(req: VercelRequest, res: VercelResponse) 
   }
 
   // График мастеров: рабочие минуты за период.
-  const doctorsRead = await supabase
+  const doctorsFull = await supabase
     .from("clinic_doctors")
-    .select("id, full_name")
+    .select("id, full_name, salary_fixed_minor, salary_percent")
     .eq("workspace_id", workspaceId);
+  let doctorRows: unknown[] = Array.isArray(doctorsFull.data) ? doctorsFull.data : [];
+  if (doctorsFull.error) {
+    // До применения 046 зарплатных колонок нет — читаем без них, статистика
+    // честно не считает зарплату вместо 502.
+    const bare = await supabase.from("clinic_doctors").select("id, full_name").eq("workspace_id", workspaceId);
+    doctorRows = Array.isArray(bare.data) ? bare.data : [];
+  }
   const doctorNames = new Map<string, string>();
-  for (const row of Array.isArray(doctorsRead.data) ? doctorsRead.data : []) {
+  const salaryByDoctor = new Map<string, { fixedMinor: number | null; percent: number | null }>();
+  for (const row of doctorRows) {
     const record = row as Record<string, unknown>;
-    doctorNames.set(readString(record.id), readString(record.full_name));
+    const id = readString(record.id);
+    doctorNames.set(id, readString(record.full_name));
+    const fixed = record.salary_fixed_minor;
+    const percent = record.salary_percent;
+    if (fixed !== undefined || percent !== undefined) {
+      salaryByDoctor.set(id, {
+        fixedMinor: fixed === null || fixed === undefined ? null : readNumberOr(fixed, 0),
+        percent: percent === null || percent === undefined ? null : readNumberOr(percent, 0),
+      });
+    }
   }
 
   const shiftsRead = await supabase
@@ -379,6 +413,7 @@ export async function handleSalonStats(req: VercelRequest, res: VercelResponse) 
     clientsSeenBefore,
     scheduledMinutesByDoctor,
     doctorNames,
+    salaryByDoctor,
     truncated,
   });
 

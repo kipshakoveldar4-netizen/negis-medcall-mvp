@@ -300,6 +300,9 @@ export default function ServicesPage() {
    * сохранение идёт тем же PATCH, где сервер сам проверяет «своя ли услуга».
    */
   const canEditOwnDuration = userRole === "doctor";
+  // Владелец: «длительность могли менять как мастера, так и админы». Инлайн
+  // открыт обоим; сервер по-прежнему решает сам, кому какая строка доступна.
+  const canEditDurationInline = canEditOwnDuration || canManage;
   const [durationDrafts, setDurationDrafts] = useState<Record<string, string>>({});
   const [durationSaving, setDurationSaving] = useState<string>("");
 
@@ -846,7 +849,7 @@ export default function ServicesPage() {
                     ) : null}
                     <td className="px-3 py-3 font-black" style={{ color: "var(--negis-text)" }}>{formatPrice(service.basePriceMinor)}</td>
                     <td className="px-3 py-3 font-semibold" style={{ color: "var(--negis-muted)" }}>
-                      {canEditOwnDuration ? (
+                      {canEditDurationInline ? (
                         <span className="flex items-center gap-1.5">
                           <input
                             className="neu-input w-20 px-2 py-1.5 text-sm tabular-nums"

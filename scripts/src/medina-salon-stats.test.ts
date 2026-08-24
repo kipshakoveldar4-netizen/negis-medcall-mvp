@@ -136,3 +136,29 @@ test("SS9 период: включительно, не длиннее 92 дне�
   assert.equal(stats.daysBetween("не дата", "2026-08-01").length, 0);
   assert.equal(stats.daysBetween("2026-01-01", "2026-12-31").length, 92, "потолок — квартал с запасом");
 });
+
+test("SS10 зарплата: процентная часть от цен записей, незаданные условия — null", () => {
+  const result = compute(
+    [visit({ priceMinor: 1000000 }), visit({ priceMinor: 500000, clientId: "c2" })],
+    [],
+    { salaryByDoctor: new Map([["d1", { fixedMinor: 20000000, percent: 40 }]]) },
+  );
+  const master = result.masters[0];
+  assert.equal(master.salaryPercent, 40);
+  // 40% от 15 000 ₸ по ценам пришедших записей.
+  assert.equal(master.salaryPercentMinor, 600000);
+  assert.equal(master.salaryFixedMonthlyMinor, 20000000, "фикс — в месяц, справочно");
+
+  const bare = compute([visit()]).masters[0];
+  assert.equal(bare.salaryPercentMinor, null, "«условия не заданы» отличается от нуля");
+  assert.equal(bare.salaryFixedMonthlyMinor, null);
+});
+
+test("SS11 отменённые записи не кормят процент мастера", () => {
+  const result = compute(
+    [visit({ priceMinor: 1000000, status: "cancelled" })],
+    [],
+    { salaryByDoctor: new Map([["d1", { fixedMinor: null, percent: 50 }]]) },
+  );
+  assert.equal(result.masters[0].salaryPercentMinor, 0, "отменённый визит не заработал ничего");
+});
