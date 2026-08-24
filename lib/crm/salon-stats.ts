@@ -286,7 +286,7 @@ export async function handleSalonStats(req: VercelRequest, res: VercelResponse) 
     appointmentRows = retry.data as unknown[] | null;
   }
 
-  const appointments: StatsAppointmentRow[] = (Array.isArray(appointmentRows) ? appointmentRows : []).map((row) => {
+  const appointments: StatsAppointmentRow[] = (Array.isArray(appointmentRows) ? appointmentRows : []).map((row: unknown) => {
     const record = row as Record<string, unknown>;
     const rawPrice = record.price_minor;
     return {
@@ -308,7 +308,7 @@ export async function handleSalonStats(req: VercelRequest, res: VercelResponse) 
     .gte("created_at", fromInstant)
     .lte("created_at", toInstant)
     .limit(STATS_ROWS_LIMIT);
-  const deals: StatsDealRow[] = (Array.isArray(dealsRead.data) ? dealsRead.data : []).map((row) => {
+  const deals: StatsDealRow[] = (Array.isArray(dealsRead.data) ? dealsRead.data : []).map((row: unknown) => {
     const record = row as Record<string, unknown>;
     return { status: readString(record.status), amountMinor: readNumberOr(record.amount_minor, 0) };
   });
