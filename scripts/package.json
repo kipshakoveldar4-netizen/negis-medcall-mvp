@@ -71,7 +71,8 @@
     "test:push": "tsx --test ./src/medina-push-notifications.test.ts",
     "vapid:keys": "tsx ./src/generate-vapid-keys.ts",
     "test:my-clients": "tsx --test ./src/medina-my-clients.test.ts",
-    "test:booking-form": "tsx --test ./src/medina-booking-form.test.ts"
+    "test:booking-form": "tsx --test ./src/medina-booking-form.test.ts",
+    "test:salon-stats": "tsx --test ./src/medina-salon-stats.test.ts"
   },
   "devDependencies": {
     "@types/node": "catalog:",

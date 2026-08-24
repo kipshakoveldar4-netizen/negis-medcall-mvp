@@ -24,6 +24,7 @@ const Onboarding = lazy(() => import("@/pages/Onboarding"));
 const JoinWorkspace = lazy(() => import("@/pages/JoinWorkspace"));
 const JoinRequest = lazy(() => import("@/pages/JoinRequest"));
 const ClientBasePage = lazy(() => import("@/pages/ClientBasePage"));
+const StatsPage = lazy(() => import("@/pages/StatsPage"));
 const Dashboard = lazy(() => import("@/pages/Dashboard"));
 const AiControlCenter = lazy(() => import("@/pages/AiControlCenter"));
 // Security-1A: /agent, /ads and /ads/callback were removed from the router.
@@ -283,9 +284,9 @@ function Router() {
       <Route path="/advertising">
         <Redirect to="/ads-automation" />
       </Route>
-      <Route path="/reports">
-        <Redirect to="/dashboard" />
-      </Route>
+      {/* Статистика владельца: выручка, загрузка, услуги. Право reports —
+          view_reports у owner/admin/manager/marketer. */}
+      <Route path="/reports" component={() => <ProtectedPage component={StatsPage} permission="reports" />} />
       <Route path="/profile" component={() => <ProtectedPage component={() => <DemoPlaceholder title="Профиль" />} permission="dashboard" />} />
       {/* AI Target is no longer a standalone module: its functionality lives inside
           Ads Automation ("ИИ заполнит"). Old links land on /ads-automation. */}

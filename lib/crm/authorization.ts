@@ -300,6 +300,9 @@ export const CRM_ROUTE_AUTHORIZATION: Readonly<Record<string, RouteAuthorization
   // его staff_user_id. DELETE не принимается — отписка это метка времени.
   "push-subscriptions": { kind: "browser", methods: ["GET", "POST", "PATCH"] },
 
+  // Статистика владельца: только чтение, только с правом отчётов.
+  "salon-stats": { kind: "browser", methods: ["GET"], permissions: { GET: "view_reports" } },
+
   // Worker route: HMAC only. A browser JWT must never satisfy it.
   "meta-insights-background-cycle": { kind: "internal_hmac", methods: ["POST"] },
 };

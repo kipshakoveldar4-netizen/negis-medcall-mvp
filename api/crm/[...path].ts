@@ -32,6 +32,7 @@ import { handleWhatsAppChannels } from "../../lib/crm/whatsapp-channels";
 import { handleCrmChangeLog } from "../../lib/crm/change-log";
 import { handleMyClients } from "../../lib/crm/my-clients";
 import { handlePushSubscriptions } from "../../lib/crm/push-subscriptions";
+import { handleSalonStats } from "../../lib/crm/salon-stats";
 import {
   requireAuthenticatedUser,
   requireWorkspaceAccess,
@@ -256,6 +257,8 @@ async function dispatch(
       return handleMyClients(req, res);
     case "push-subscriptions":
       return handlePushSubscriptions(req, res);
+    case "salon-stats":
+      return handleSalonStats(req, res);
     case "whatsapp-channels":
       return handleWhatsAppChannels(req, res);
     case "video-jobs":

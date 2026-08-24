@@ -48,6 +48,8 @@ const NAV_GROUPS: NavGroup[] = [
   {
     title: 'Рост',
     items: [
+      // Статистика — раздел из кабинета запись.кз: выручка, загрузка, услуги.
+      { href: '/reports', icon: BarChart2, label: 'Статистика', roles: ['owner', 'manager'] },
       { href: '/ads-automation', icon: Rocket, label: 'Реклама', roles: ['owner', 'manager'] },
       { href: '/content-studio', icon: Clapperboard, label: 'Контент', roles: ['owner', 'manager'] },
       // Маркет был недостижим: маршрут объявлен, а ссылки на него не было ни в
