@@ -1,4 +1,5 @@
 import React from 'react';
+import { PushSync } from "@/components/layout/PushSettings";
 import { Topbar } from './Topbar';
 import { MobileNav } from './MobileNav';
 import { Sidebar } from './Sidebar';
@@ -16,6 +17,7 @@ export function PageLayout({ children, requireAuth = true }: PageLayoutProps) {
   if (isLoading) {
     return (
       <div className="flex min-h-screen items-center justify-center" style={{ background: 'var(--negis-bg)' }}>
+      <PushSync />
         <div className="text-xs font-medium tracking-[0.14em]" style={{ color: 'var(--negis-muted)' }}>
           ЗАГРУЗКА…
         </div>

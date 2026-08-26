@@ -7,7 +7,7 @@
 import { clinicTimeLabel } from "./reminders";
 import { redactContacts } from "./contact-privacy";
 
-export type StaffNotificationEvent = "created" | "cancelled";
+export type StaffNotificationEvent = "created" | "cancelled" | "rescheduled";
 
 export interface AppointmentSnapshot {
   doctorId: string;
@@ -102,7 +102,7 @@ export function notificationFor(input: {
   const client = clientNameVisible ? appointment.client.trim() : "";
   const service = appointment.service.trim();
 
-  const title = event === "created" ? "Новая запись" : "Запись отменена";
+  const title = event === "created" ? "Новая запись" : event === "rescheduled" ? "Запись перенесена" : "Запись отменена";
   const parts = [when];
   if (client) parts.push(client);
   if (service) parts.push(service);

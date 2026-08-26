@@ -5300,21 +5300,52 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
       });
     }
 
-    // Отмена уведомляется на ПЕРЕХОДЕ статуса, а не на каждом сохранении:
-    // иначе правка комментария у отменённой записи слала бы «запись отменена»
-    // заново. Адресат берётся из ДО-состояния: патч может одновременно сменить
-    // мастера и статус, и знать об отмене должен тот, у кого визит был.
+    // Уведомления мастеру о правке — три случая, и у каждого свой адресат.
+    // Владелец: «чтобы мастерам приходили уведомления о записи, отмене и
+    // каких-либо изменениях».
+    //
+    // 1. Отмена — на ПЕРЕХОДЕ статуса, не на каждом сохранении: иначе правка
+    //    комментария у отменённой записи слала бы «отменена» заново. Адресат —
+    //    из ДО-состояния: знать должен тот, у кого визит был.
+    // 2. Смена мастера — это две новости: прежнему «отменена» (его время
+    //    освободили), новому «новая запись». Одна общая «изменилась» не годится:
+    //    прежний мастер не найдёт запись, которой у него больше нет.
+    // 3. Перенос времени тому же мастеру — «перенесена», со свежим временем.
+    //    Правка заметки или цены пуш не рождает: на экране блокировки ей делать
+    //    нечего, а каждый лишний пуш учит мастера их игнорировать.
     if (resource === "appointments") {
       const wasStatus = readString(asRecord(before).status);
       const nowStatus = readString(asRecord(savedRow).status);
-      if (wasStatus !== nowStatus && (nowStatus === "cancelled" || nowStatus === "no_show")) {
+      const actorStaffUserId = readString(readWorkspaceContext(req)?.staffUserId);
+      const timeZone = (await readClinicScheduleTimeZone(supabase, workspaceId)) || "";
+
+      const beforeSnapshot = appointmentSnapshotFrom(before);
+      const afterSnapshot = appointmentSnapshotFrom(savedRow);
+      const doctorChanged =
+        (beforeSnapshot.doctorId || beforeSnapshot.doctorName.trim().toLowerCase()) !==
+        (afterSnapshot.doctorId || afterSnapshot.doctorName.trim().toLowerCase());
+      const timeChanged = Boolean(beforeSnapshot.startsAt) && beforeSnapshot.startsAt !== afterSnapshot.startsAt;
+      const nowReleased = nowStatus === "cancelled" || nowStatus === "no_show";
+      const stillAlive = !nowReleased && wasStatus !== "cancelled" && wasStatus !== "no_show";
+
+      if (wasStatus !== nowStatus && nowReleased) {
         await notifyAppointmentEvent({
-          supabase,
-          workspaceId,
-          event: "cancelled",
-          appointment: appointmentSnapshotFrom(before),
-          actorStaffUserId: readString(readWorkspaceContext(req)?.staffUserId),
-          timeZone: (await readClinicScheduleTimeZone(supabase, workspaceId)) || "",
+          supabase, workspaceId, event: "cancelled",
+          appointment: beforeSnapshot, actorStaffUserId, timeZone,
+        });
+      } else if (stillAlive && doctorChanged && Object.keys(before).length > 0) {
+        await notifyAppointmentEvent({
+          supabase, workspaceId, event: "cancelled",
+          appointment: beforeSnapshot, actorStaffUserId, timeZone,
+        });
+        await notifyAppointmentEvent({
+          supabase, workspaceId, event: "created",
+          appointment: afterSnapshot, actorStaffUserId, timeZone,
+        });
+      } else if (stillAlive && timeChanged) {
+        await notifyAppointmentEvent({
+          supabase, workspaceId, event: "rescheduled",
+          appointment: afterSnapshot, actorStaffUserId, timeZone,
         });
       }
     }

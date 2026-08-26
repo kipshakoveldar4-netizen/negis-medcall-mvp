@@ -28,6 +28,41 @@ interface DeviceRow {
   gone: boolean;
 }
 
+/**
+ * Самовосстановление подписки — шаг из чертёжа канала, который был отложен.
+ *
+ * Браузер может пересоздать подписку молча (переустановка, чистка данных), и
+ * сервер тогда шлёт в мёртвый адрес: для мастера это выглядит как «уведомления
+ * кончились». При каждой загрузке сверяем подписку устройства с сервером
+ * идемпотентным POST — ключ (workspace, endpoint) делает повтор безвредным.
+ * Ничего не спрашивает и не включает: только чинит то, что уже включали.
+ */
+export function PushSync() {
+  const { clinicId, isImpersonation, isDemoMode } = useAuth();
+  useEffect(() => {
+    if (isImpersonation || isDemoMode || !clinicId) return;
+    if (describePushSupport() !== "ok") return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const subscription = await readThisDeviceSubscription();
+        if (cancelled || !subscription) return;
+        await crmFetch(`/api/crm/push-subscriptions?workspaceId=${encodeURIComponent(clinicId)}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(subscription),
+        });
+      } catch {
+        // Молча: это фоновая сверка, ей нечего сказать человеку.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [clinicId, isImpersonation, isDemoMode]);
+  return null;
+}
+
 export function PushSettings() {
   const { clinicId, isImpersonation, isDemoMode } = useAuth();
   const [support] = useState(() => describePushSupport());

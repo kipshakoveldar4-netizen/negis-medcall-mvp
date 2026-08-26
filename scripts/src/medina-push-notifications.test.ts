@@ -270,9 +270,13 @@ test("PN16 уведомление — побочное действие: пос�
   assert.match(server, /event: "created",\s*appointment: appointmentSnapshotFrom\(data\)/);
   // Отмена — только на ПЕРЕХОДЕ статуса, иначе правка комментария у отменённой
   // записи слала бы «запись отменена» заново.
-  assert.match(server, /wasStatus !== nowStatus && \(nowStatus === "cancelled" \|\| nowStatus === "no_show"\)/);
+  assert.match(server, /const nowReleased = nowStatus === "cancelled" \|\| nowStatus === "no_show"/);
+  assert.match(server, /wasStatus !== nowStatus && nowReleased/);
   // Адресат отмены — из ДО-состояния: патч может сменить мастера и статус разом.
-  assert.match(server, /event: "cancelled",\s*appointment: appointmentSnapshotFrom\(before\)/);
+  // Снимки теперь берутся один раз (beforeSnapshot/afterSnapshot) — адресат
+  // отмены по-прежнему из ДО-состояния.
+  assert.match(server, /const beforeSnapshot = appointmentSnapshotFrom\(before\)/);
+  assert.match(server, /event: "cancelled",\s*\n\s*appointment: beforeSnapshot/);
   // Контракт «никогда не бросает»: иначе сохранённая запись ответила бы ошибкой.
   assert.match(handler, /export async function notifyAppointmentEvent[\s\S]{0,400}try \{/);
   assert.match(handler, /\} catch \{[\s\S]{0,160}push: отправка не удалась/);
@@ -306,4 +310,39 @@ test("PN18 экран называет каждую причину тишины 
   assert.ok(screen.includes("ещё не настроены владельцем"), "отсутствие ключей названо прямо");
   // Под имперсонацией и в демо ничего не пишем.
   assert.match(screen, /const readOnly = isImpersonation \|\| isDemoMode \|\| !clinicId/);
+});
+
+test("PN19 изменения записи: перенос, смена мастера и лишние пуши", async () => {
+  const server = await source("lib", "crm", "server.ts");
+  const rules = await source("lib", "crm", "staff-notifications.ts");
+
+  // «Перенесена» — отдельное событие со своим заголовком.
+  assert.ok(rules.includes('"rescheduled"'), "событие переноса существует");
+  assert.ok(rules.includes('"Запись перенесена"'), "и называется по-русски");
+
+  // Смена мастера — ДВЕ новости: прежнему «отменена» (по ДО-состоянию),
+  // новому «новая» (по ПОСЛЕ-состоянию). Одна общая «изменилась» оставила бы
+  // прежнего мастера искать запись, которой у него больше нет.
+  const patchBlock = server.slice(server.indexOf("const doctorChanged ="), server.indexOf("const doctorChanged =") + 1800);
+  assert.ok(patchBlock.includes('event: "cancelled",\n          appointment: beforeSnapshot'), "прежнему — отмена");
+  assert.ok(patchBlock.includes('event: "created",\n          appointment: afterSnapshot'), "новому — новая запись");
+  assert.ok(patchBlock.includes('event: "rescheduled",\n          appointment: afterSnapshot'), "перенос — со свежим временем");
+
+  // Правка заметки или цены пуш не рождает: сравниваются мастер, время и
+  // статус, а не «что-нибудь изменилось».
+  assert.match(server, /const timeChanged = Boolean\(beforeSnapshot\.startsAt\) && beforeSnapshot\.startsAt !== afterSnapshot\.startsAt/);
+  // Смена мастера без читаемого «до» не шлёт отмену в пустоту.
+  assert.match(server, /doctorChanged && Object\.keys\(before\)\.length > 0/);
+});
+
+test("PN20 подписка чинит сама себя при загрузке приложения", async () => {
+  const settings = await source("artifacts", "negis", "src", "components", "layout", "PushSettings.tsx");
+  const layout = await source("artifacts", "negis", "src", "components", "layout", "PageLayout.tsx");
+
+  assert.ok(settings.includes("export function PushSync()"), "компонент существует");
+  // Только чинит уже включённое: разрешений не спрашивает и не подписывает.
+  assert.ok(!settings.slice(settings.indexOf("export function PushSync()"), settings.indexOf("export function PushSettings()")).includes("subscribeThisDevice"),
+    "PushSync не включает уведомления сам");
+  assert.match(settings, /if \(isImpersonation \|\| isDemoMode \|\| !clinicId\) return;/);
+  assert.ok(layout.includes("<PushSync />"), "смонтирован в каркасе страниц");
 });
