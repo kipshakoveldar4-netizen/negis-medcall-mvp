@@ -1923,7 +1923,26 @@ export function AppointmentsPage() {
                   <p className="truncate text-xs text-[#64748B]">{appointment.service}</p>
                 </button>
               ))}
-              {dayItems.length === 0 ? <p className="rounded-xl bg-[#F8FAFC] px-3 py-3 text-sm text-[#94A3B8]">Свободный день</p> : null}
+              {dayItems.length === 0 ? (
+                <div className="rounded-xl bg-[#F8FAFC] px-3 py-3">
+                  <p className="text-sm text-[#94A3B8]">Свободный день</p>
+                  {/* «Открыла — пусто» мастер читает как «мои записи пропали»,
+                      хотя запись есть — завтра. Ближайшая называется прямо
+                      здесь, с переходом на её день: живой случай Айданы и
+                      Дильназ — обе «не видели свои записи», у обеих ближайшая
+                      стояла назавтра. */}
+                  {nextAppointment ? (
+                    <button
+                      type="button"
+                      className="mt-1 text-sm font-black"
+                      style={{ color: "var(--negis-primary)" }}
+                      onClick={() => setSelectedDate(dateKeyFromStartsAt(nextAppointment.startsAt))}
+                    >
+                      Ближайшая запись — {formatVisitDay(nextAppointment.startsAt)} в {timeKeyFromStartsAt(nextAppointment.startsAt)} · открыть
+                    </button>
+                  ) : null}
+                </div>
+              ) : null}
             </div>
           </article>
         );

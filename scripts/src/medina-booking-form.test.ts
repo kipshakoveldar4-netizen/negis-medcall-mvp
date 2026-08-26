@@ -177,3 +177,11 @@ test("BF12 поиск по услугам в форме: та же подста�
   // Поиск сбрасывается при открытии формы: вчерашний запрос не прячет список.
   assert.match(page, /setServiceSearch\(""\);\s*\n\s*setModalOpen\(true\)/);
 });
+
+test("BF13 пустой день мастера называет ближайшую запись, а не молчит", async () => {
+  const page = await read("artifacts", "negis", "src", "pages", "AppointmentsPage.tsx");
+  // «Открыла — пусто» читается как «мои записи пропали»: живой случай Айданы
+  // и Дильназ, у обеих ближайшая запись стояла назавтра.
+  assert.ok(page.includes("Ближайшая запись —"), "ссылка на ближайшую существует");
+  assert.match(page, /setSelectedDate\(dateKeyFromStartsAt\(nextAppointment\.startsAt\)\)/, "и открывает её день");
+});
