@@ -50,7 +50,7 @@ const primaryItems: MobileNavItem[] = [
 const drawerItems: MobileNavItem[] = [
   { href: "/ai-control-center", label: "Главная", icon: LayoutDashboard, permission: "dashboard" },
   { href: "/dashboard", label: "Аналитика", icon: BarChart2, permission: "dashboard" },
-  { href: "/ads-automation", label: "Реклама", icon: Rocket, permission: "ads" },
+  { href: "/ads", label: "Рекламный агент", icon: Rocket, permission: "ads" },
   { href: "/ads-automation/history", label: "История запусков", icon: Megaphone, permission: "ads" },
   { href: "/services", label: "Услуги", icon: Tag, permission: "booking" },
   // Подпись зависит от ниши и подставляется при отрисовке: у клиники «Врачи и
@@ -67,7 +67,7 @@ const drawerItems: MobileNavItem[] = [
 ];
 
 function isActive(location: string, href: string) {
-  return location === href || location.startsWith(`${href}/`) || (href === "/appointments" && location === "/booking");
+  return location === href || location.startsWith(`${href}/`) || (href === "/appointments" && location === "/booking") || (href === "/ads" && location.startsWith("/ads-automation"));
 }
 
 export function MobileNav() {

@@ -79,6 +79,7 @@ Negis OS соединяет весь операционный цикл клин�
 - `/leads` — Заявки
 - `/crm` — CRM / карточки клиентов
 - `/appointments` — Записи
+- `/ads` — Рекламный агент: сводка и вход в рекламные сценарии
 - `/ads-automation` — Реклама (автозапуск)
 - `/ads-automation/history` — История запусков
 - `/content-studio` — Контент (AI Контент-студия)
@@ -98,7 +99,7 @@ Negis OS соединяет весь операционный цикл клин�
 - `/admin/logs` — Логи
 - `/admin/settings` — Настройки платформы
 
-> Current state: `/dashboard`, `/ads-automation`, `/ads-automation/history`, `/content-studio`,
+> Current state: `/dashboard`, `/ads`, `/ads-automation`, `/ads-automation/history`, `/content-studio`,
 > `/admin` exist and work. The `/admin/*` sub-routes and `/ai-control-center`, `/analytics`,
 > `/crm`, `/settings` are the target IA — to be built in later design tasks, not now.
 

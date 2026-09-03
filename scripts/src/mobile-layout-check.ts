@@ -128,12 +128,31 @@ async function checkSalesMobileSource() {
   console.log("/sales controls: mobile-safe source markers ok");
 }
 
+async function checkAdvertisingHubMobileSource() {
+  const hubPath = join(repoRoot, "artifacts", "negis", "src", "pages", "AdvertisingHub.tsx");
+  const source = await readFile(hubPath, "utf8");
+  for (const marker of [
+    "grid grid-cols-2 gap-3 lg:grid-cols-4",
+    "grid grid-cols-1 gap-3 md:grid-cols-3",
+    "flex flex-col gap-4 sm:flex-row",
+    "flex flex-col gap-3 p-4 sm:flex-row",
+    "break-words",
+  ]) {
+    if (!source.includes(marker)) {
+      throw new Error(`Advertising hub mobile marker missing: ${marker}`);
+    }
+  }
+
+  console.log("/ads: mobile-safe source markers ok");
+}
+
 async function main() {
   console.log(`Mobile layout smoke at ${baseUrl}`);
   await checkManifest();
   await checkResponsiveCss();
   await checkLeadsPipelineMobileSource();
   await checkSalesMobileSource();
+  await checkAdvertisingHubMobileSource();
   for (const route of routes) {
     await checkRoute(route);
   }

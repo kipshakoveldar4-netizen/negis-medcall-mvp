@@ -146,11 +146,19 @@ test("14 Ads Automation and its PAUSED safety are untouched", async () => {
   assert.ok(app.includes('path="/ads-automation"') && app.includes('path="/ads-automation/history"'));
 });
 
-test("15 the legacy ad cabinet is gone and its links redirect to the supported module", async () => {
+test("15 the legacy ad cabinet is gone and /ads is a supported server-API hub", async () => {
   assert.equal(await exists(path.join(negisSrc, "pages", "Ads.tsx")), false);
   assert.equal(await exists(path.join(negisSrc, "pages", "AdsCallback.tsx")), false);
-  assert.ok(!app.includes('path="/ads"'), "legacy /ads route removed");
-  assert.ok(app.includes('path="/advertising"') && app.includes('<Redirect to="/ads-automation" />'));
+  assert.ok(app.includes('path="/ads"') && app.includes("AdvertisingHub"), "supported /ads hub registered");
+  assert.ok(app.includes('path="/advertising"') && app.includes('<Redirect to="/ads" />'));
+
+  const hub = await readFile(path.join(negisSrc, "pages", "AdvertisingHub.tsx"), "utf8");
+  assert.ok(hub.includes("crmFetch") && hub.includes("/api/crm/meta-launches"), "hub reads the supported server API");
+  assert.ok(hub.includes("isRealWorkspace") && hub.includes('body.mode !== "supabase"'), "production data cannot fall back to demo rows");
+  assert.ok(!hub.includes('from "@/lib/supabase"') && !hub.includes(".from("), "hub never queries Supabase directly");
+  for (const table of ["ad_accounts", "ad_reports", "platform_configs"]) {
+    assert.ok(!hub.includes(table), `hub must not restore legacy table ${table}`);
+  }
 });
 
 test("16 the Meta Pixel stays disabled without a supported configuration source", () => {

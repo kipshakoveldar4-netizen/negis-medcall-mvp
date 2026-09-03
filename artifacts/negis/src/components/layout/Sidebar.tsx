@@ -50,7 +50,7 @@ const NAV_GROUPS: NavGroup[] = [
     items: [
       // Статистика — раздел из кабинета запись.кз: выручка, загрузка, услуги.
       { href: '/reports', icon: BarChart2, label: 'Статистика', roles: ['owner', 'manager'] },
-      { href: '/ads-automation', icon: Rocket, label: 'Реклама', roles: ['owner', 'manager'] },
+      { href: '/ads', icon: Rocket, label: 'Рекламный агент', roles: ['owner', 'manager'] },
       { href: '/content-studio', icon: Clapperboard, label: 'Контент', roles: ['owner', 'manager'] },
       // Маркет был недостижим: маршрут объявлен, а ссылки на него не было ни в
       // боковом меню, ни в мобильном — страница открывалась только вводом
@@ -131,7 +131,7 @@ export function Sidebar() {
                   const label = href === '/staff-schedule'
                     ? `${capitalize(terms.specialistPlural)} и график`
                     : staticLabel;
-                  const active = location === href || location.startsWith(href + '/');
+                  const active = location === href || location.startsWith(href + '/') || (href === '/ads' && location.startsWith('/ads-automation'));
                   return (
                     <Link key={href} href={href}>
                       <div

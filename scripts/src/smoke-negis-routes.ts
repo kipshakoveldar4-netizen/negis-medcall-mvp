@@ -3277,7 +3277,7 @@ async function checkLayoutFoundation() {
   // explicit UI-1 scope; /ai-control-center is now labeled "Главная" and
   // /clients is labeled "Клиенты".
   const sidebar = await readFile(path.join(layoutDir, "Sidebar.tsx"), "utf8");
-  for (const marker of ["Главная", "Заявки", "Клиенты", "Записи", "Продажи", "Реклама", "Контент", "Аналитика", "Настройки"]) {
+  for (const marker of ["Главная", "Заявки", "Клиенты", "Записи", "Продажи", "Рекламный агент", "Контент", "Аналитика", "Настройки"]) {
     if (!sidebar.includes(marker)) {
       throw new Error(`Sidebar is missing IA item "${marker}"`);
     }
@@ -3415,6 +3415,58 @@ async function checkNavigationCleanup() {
   }
 
   console.log("Navigation cleanup checks: ok");
+}
+
+async function checkAdvertisingHubSource() {
+  const pagesDir = path.join(repoRoot, "artifacts", "negis", "src", "pages");
+  const app = await readFile(path.join(pagesDir, "..", "App.tsx"), "utf8");
+  const hub = await readFile(path.join(pagesDir, "AdvertisingHub.tsx"), "utf8");
+  const sidebar = await readFile(path.join(pagesDir, "..", "components", "layout", "Sidebar.tsx"), "utf8");
+  const mobileNav = await readFile(path.join(pagesDir, "..", "components", "layout", "MobileNav.tsx"), "utf8");
+  const topbar = await readFile(path.join(pagesDir, "..", "components", "layout", "Topbar.tsx"), "utf8");
+
+  for (const marker of [
+    'const AdvertisingHub = lazy(() => import("@/pages/AdvertisingHub"))',
+    '<Route path="/ads" component={AdvertisingHubRoute} />',
+    "'/ads': 'ads'",
+    '<Redirect to="/ads" />',
+  ]) {
+    if (!app.includes(marker)) throw new Error(`Advertising hub route is missing ${marker}`);
+  }
+
+  for (const [name, source] of [["Sidebar", sidebar], ["MobileNav", mobileNav], ["Topbar", topbar]] as const) {
+    if (!source.includes("/ads") || !source.includes("Рекламный агент")) {
+      throw new Error(`${name} must expose the supported advertising hub`);
+    }
+  }
+
+  for (const marker of [
+    "Рекламный агент",
+    "/api/crm/meta-launches",
+    "isRealWorkspace",
+    'body.mode !== "supabase"',
+    "negis_ads_launch_history_",
+    "Создано выключенными",
+    "Требуют внимания",
+    "Плановый бюджет не является фактическим расходом Meta.",
+    'href: "/ads-automation"',
+    'href: "/content-studio"',
+    'href: "/ads-automation/history"',
+  ]) {
+    if (!hub.includes(marker)) throw new Error(`AdvertisingHub is missing ${marker}`);
+  }
+
+  if (hub.includes('method: "POST"')) {
+    throw new Error("AdvertisingHub must remain read-only and must not launch campaigns");
+  }
+  if (hub.includes("meta-insights")) {
+    throw new Error("AdvertisingHub must not fetch admin-only Meta Insights");
+  }
+  for (const legacyTable of ["ad_accounts", "ad_reports", "platform_configs"]) {
+    if (hub.includes(legacyTable)) throw new Error(`AdvertisingHub must not use legacy table ${legacyTable}`);
+  }
+
+  console.log("Advertising hub source checks: ok");
 }
 
 async function checkNoNewApiFiles() {
@@ -3744,6 +3796,7 @@ async function main() {
   await checkCrmVideoJobsModule();
   await checkVideoWorkerPackage();
   await checkNavigationCleanup();
+  await checkAdvertisingHubSource();
   await checkLayoutFoundation();
   await checkThemeFoundation();
   await checkContentStudioPhaseOne();

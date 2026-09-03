@@ -27,12 +27,10 @@ const ClientBasePage = lazy(() => import("@/pages/ClientBasePage"));
 const StatsPage = lazy(() => import("@/pages/StatsPage"));
 const Dashboard = lazy(() => import("@/pages/Dashboard"));
 const AiControlCenter = lazy(() => import("@/pages/AiControlCenter"));
-// Security-1A: /agent, /ads and /ads/callback were removed from the router.
-// Their pages query legacy tables that do not exist in the production Supabase
-// project (agents, bookings, shifts, ad_accounts, ad_reports, platform_configs,
-// clinics), so every request failed. Shift tracking and the legacy ad cabinet
-// are out of the first commercial release; /ads-automation is the supported
-// advertising module. Direct URLs now fall through to the not-found route.
+// Security-1A removed the legacy ad cabinet that queried tables absent from the
+// production schema. /ads is now a small hub over the supported advertising
+// resources; the launch implementation remains isolated in AdsAutomation.
+const AdvertisingHub = lazy(() => import("@/pages/AdvertisingHub"));
 const AdsAutomation = lazy(() => import("@/pages/AdsAutomation"));
 const AppointmentsPage = lazy(() => import("@/pages/AppointmentsPage").then(m => ({ default: m.AppointmentsPage })));
 const ContentStudio = lazy(() => import("@/pages/ContentStudio"));
@@ -71,6 +69,7 @@ const PREFETCH_ROUTES: Array<() => Promise<unknown>> = [
   () => import("@/pages/SalesPage"),
   () => import("@/pages/AdminCenter"),
   () => import("@/pages/DemoCrmModules"),
+  () => import("@/pages/AdvertisingHub"),
   // The two heaviest chunks benefit the most: AdsAutomation alone is ~34KB
   // gzip, which used to sit inside the first transition to /ads-automation.
   () => import("@/pages/AdsAutomation"),
@@ -123,6 +122,7 @@ const ROUTE_PERMISSIONS: Record<string, string> = {
   '/marketplace': 'marketplace',
   '/market': 'marketplace',
   '/admin': 'admin',
+  '/ads': 'ads',
   '/ads-automation': 'ads',
   '/reports': 'ads',
   '/profile': 'dashboard',
@@ -221,6 +221,7 @@ function ProtectedPage({
  */
 const AppointmentsRoute = () => <ProtectedPage component={AppointmentsPage} permission="booking" />;
 const MarketRoute = () => <ProtectedPage component={MarketplacePage} permission="marketplace" />;
+const AdvertisingHubRoute = () => <ProtectedPage component={AdvertisingHub} permission="ads" />;
 const AdsAutomationRoute = () => <ProtectedPage component={AdsAutomation} permission="ads" />;
 const ContentStudioRoute = () => <ProtectedPage component={ContentStudio} permission="ads" />;
 
@@ -278,11 +279,12 @@ function Router() {
           бывший адрес /platform падает в общий 404 ниже. */}
       <Route path="/market" component={MarketRoute} />
       <Route path="/admin" component={() => <ProtectedPage component={AdminCenter} permission="admin" />} />
+      <Route path="/ads" component={AdvertisingHubRoute} />
       <Route path="/ads-automation/history" component={AdsAutomationRoute} />
       <Route path="/ads-automation" component={AdsAutomationRoute} />
       {/* Legacy ad cabinet links keep working by pointing at the supported module. */}
       <Route path="/advertising">
-        <Redirect to="/ads-automation" />
+        <Redirect to="/ads" />
       </Route>
       {/* Статистика владельца: выручка, загрузка, услуги. Право reports —
           view_reports у owner/admin/manager/marketer. */}
