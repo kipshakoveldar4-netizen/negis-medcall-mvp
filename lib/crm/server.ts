@@ -69,6 +69,7 @@ import {
   type MetaInsightsSafeErrorCode,
   type NormalizedMetaInsightRow,
 } from "../meta/insights";
+import { validateTikTokAdsConnection } from "../tiktok/diagnostics";
 
 export type CrmResource =
   | "clients"
@@ -7562,6 +7563,18 @@ export async function handleMetaValidate(req: VercelRequest, res: VercelResponse
   }
 }
 
+export async function handleTikTokValidate(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== "POST") {
+    return sendJson(res, 405, errorBody("Method not allowed", ["Use POST"]));
+  }
+
+  // This check is deliberately read-only. Authorization is resolved by the
+  // CRM catch-all before dispatch; only safe account metadata leaves the
+  // server, and no campaign/ad group/ad endpoint is called here.
+  const diagnostic = await validateTikTokAdsConnection();
+  return sendJson(res, 200, success("supabase", { ...diagnostic }));
+}
+
 export async function handleMetaStatus(req: VercelRequest, res: VercelResponse) {
   if (req.method !== "GET") {
     return sendJson(res, 405, errorBody("Method not allowed", ["Use GET"]));
@@ -8069,6 +8082,7 @@ export async function handleCrmHealth(req: VercelRequest, res: VercelResponse) {
     elevenlabs: envStatus(["ELEVENLABS_API_KEY", "ELEVENLABS_VOICE_ID"]),
     heygen: singleEnvStatus("HEYGEN_API_KEY"),
     tapnow: singleEnvStatus("TAPNOW_API_KEY"),
+    tiktok: envStatus(["TIKTOK_ACCESS_TOKEN", "TIKTOK_ADVERTISER_ID"]),
     meta: envStatus([
       "META_BUSINESS_ID",
       "META_APP_ID",

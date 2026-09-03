@@ -61,7 +61,9 @@
 ### Этап C — TikTok foundation
 
 - Проверить доступный TikTok Marketing API, scopes и тип advertiser account.
-- Создать серверный клиент и безопасную диагностику credentials.
+- Серверная read-only диагностика credentials и advertiser access добавлена:
+  endpoint проверяет конкретный рекламный аккаунт через TikTok API, доступен
+  только подтверждённым owner/admin и никогда не возвращает токен или полный ID.
 - Общий версионированный campaign brief уже добавлен: Content Studio пишет один
   контракт, старые payload поддерживаются, а Meta/TikTok разделены явно.
 - Добавить TikTok-specific mapper после проверки credentials и advertiser access.

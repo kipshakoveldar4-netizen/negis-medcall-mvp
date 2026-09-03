@@ -262,6 +262,10 @@ export const CRM_ROUTE_AUTHORIZATION: Readonly<Record<string, RouteAuthorization
   "meta-status": { kind: "browser", methods: ["GET"], permissions: { GET: "view_marketing" } },
   "meta-validate": { kind: "browser", methods: ["GET", "POST"], permissions: { GET: "view_marketing", POST: "manage_marketing" } },
   "meta-city-key": { kind: "browser", methods: ["GET", "POST"], permissions: { GET: "view_marketing", POST: "view_marketing" } },
+  // TikTok foundation is diagnostics-only. It reads safe advertiser metadata
+  // and stays owner/admin protected until a separate disabled-first launch
+  // adapter, audit model and permissions policy are approved.
+  "tiktok-validate": { kind: "browser", methods: ["POST"], roles: WORKSPACE_ADMIN },
   "ads-ai-fill": { kind: "browser", methods: ["POST"], permissions: { POST: "manage_marketing" } },
   "ad-creative-upload": { kind: "browser", methods: ["POST"], permissions: { POST: "manage_marketing" } },
   "ad-creative-meta-upload": { kind: "browser", methods: ["POST"], permissions: { POST: "manage_marketing" } },

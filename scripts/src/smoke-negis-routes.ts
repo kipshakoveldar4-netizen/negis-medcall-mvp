@@ -3496,6 +3496,75 @@ async function checkAdvertisingHubSource() {
   console.log("Advertising hub source checks: ok");
 }
 
+async function checkTikTokAdsDiagnosticsFoundation() {
+  const helper = await readFile(path.join(repoRoot, "lib", "tiktok", "diagnostics.ts"), "utf8");
+  const server = await readFile(path.join(repoRoot, "lib", "crm", "server.ts"), "utf8");
+  const router = await readFile(path.join(repoRoot, "api", "crm", "[...path].ts"), "utf8");
+  const authorization = await readFile(path.join(repoRoot, "lib", "crm", "authorization.ts"), "utf8");
+  const admin = await readFile(path.join(repoRoot, "artifacts", "negis", "src", "pages", "AdminCenter.tsx"), "utf8");
+  const envExample = await readFile(path.join(repoRoot, ".env.example"), "utf8");
+  const docs = await readFile(path.join(repoRoot, "docs", "TIKTOK-ADS-FOUNDATION.md"), "utf8");
+
+  for (const marker of [
+    "/open_api/v1.3/advertiser/info/",
+    '"Access-Token": config.accessToken',
+    'url.searchParams.set("advertiser_ids", JSON.stringify([config.advertiserId]))',
+    '"advertiser_id"',
+    '"name"',
+    '"currency"',
+    '"timezone"',
+    'readOnly: true',
+    'launchEnabled: false',
+    'maskAdvertiserId',
+    'errorCode: TikTokDiagnosticErrorCode',
+  ]) {
+    if (!helper.includes(marker)) throw new Error(`TikTok diagnostics helper is missing ${marker}`);
+  }
+  for (const forbidden of ["/campaign/create/", "/adgroup/create/", "/ad/create/", "console.log", "console.error", "request_id"]) {
+    if (helper.includes(forbidden)) throw new Error(`TikTok diagnostics helper must not contain ${forbidden}`);
+  }
+
+  if (!server.includes("handleTikTokValidate") || !server.includes('tiktok: envStatus(["TIKTOK_ACCESS_TOKEN", "TIKTOK_ADVERTISER_ID"])')) {
+    throw new Error("CRM server must expose safe TikTok diagnostics and coarse env health");
+  }
+  if (!router.includes('case "tiktok-validate":') || !router.includes("handleTikTokValidate")) {
+    throw new Error("CRM catch-all must route TikTok diagnostics without a new API file");
+  }
+  const authLine = authorization.split("\n").find((line) => line.includes('"tiktok-validate"')) || "";
+  if (!authLine.includes('methods: ["POST"]') || !authLine.includes("roles: WORKSPACE_ADMIN")) {
+    throw new Error("TikTok diagnostics must remain POST-only and owner/admin protected");
+  }
+
+  for (const marker of [
+    "TikTok Ads",
+    "/api/crm/tiktok-validate?workspaceId=",
+    'serverAdminAuth.status !== "confirmed"',
+    "Проверка только читает данные рекламного аккаунта",
+    "Запуск TikTok-рекламы не включён",
+    'data-testid={`integration-${card.key}`}',
+  ]) {
+    if (!admin.includes(marker)) throw new Error(`Admin Center TikTok diagnostics is missing ${marker}`);
+  }
+  for (const forbidden of ["process.env.TIKTOK", "import.meta.env.TIKTOK", "TIKTOK_APP_SECRET", "TIKTOK_ACCESS_TOKEN"]) {
+    if (admin.includes(forbidden)) throw new Error(`Admin Center must not read TikTok server secret marker ${forbidden}`);
+  }
+
+  for (const marker of ["TIKTOK_ACCESS_TOKEN=", "TIKTOK_ADVERTISER_ID=", "TIKTOK_APP_ID=", "TIKTOK_APP_SECRET="]) {
+    if (!envExample.includes(marker)) throw new Error(`.env.example is missing ${marker}`);
+  }
+  for (const marker of [
+    "подтверждённым на сервере",
+    "401",
+    "403",
+    "advertiser ID не возвращается",
+    "Что намеренно не реализовано",
+  ]) {
+    if (!docs.includes(marker)) throw new Error(`TikTok foundation docs are missing ${marker}`);
+  }
+
+  console.log("TikTok Ads diagnostics foundation checks: ok");
+}
+
 async function checkNoNewApiFiles() {
   // New CRM endpoints must live inside the existing catch-all, not new api files.
   const crmFiles = (await readdir(path.join(repoRoot, "api", "crm"))).sort();
@@ -3824,6 +3893,7 @@ async function main() {
   await checkVideoWorkerPackage();
   await checkNavigationCleanup();
   await checkAdvertisingHubSource();
+  await checkTikTokAdsDiagnosticsFoundation();
   await checkLayoutFoundation();
   await checkThemeFoundation();
   await checkContentStudioPhaseOne();
@@ -3874,6 +3944,9 @@ async function main() {
   // proves the door is shut, and says so, but never exercises the contract
   // behind it — that is test:whatsapp-channels' job.
   await assertCrmAuthBoundary("/api/crm/whatsapp-channels");
+  await assertCrmAuthBoundary("/api/crm/tiktok-validate?workspaceId=9eb6f100-bb6a-4f99-9719-e85c34513a03", {
+    method: "POST",
+  });
   const crmHealth = await checkJsonEndpoint("/api/crm/health");
   // Security-2B: the route is refused before any business branch runs. Its
   // invariants are covered by the handler-level suites, which run without a

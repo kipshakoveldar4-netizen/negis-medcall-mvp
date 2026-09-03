@@ -52,6 +52,8 @@ Studio, а Ads Automation получает один и тот же набор п
 
 ## Следующий этап
 
-Следующий безопасный слой — отдельная серверная диагностика TikTok credentials
-и advertiser access, после чего можно добавить чистый TikTok mapper и dry-run.
-До успешной диагностики интерфейс не должен обещать реальный запуск в TikTok.
+Серверная диагностика TikTok credentials и advertiser access теперь доступна
+в Admin Center. Она выполняет только чтение данных аккаунта и не создаёт
+campaign, ad group или ad. Следующий безопасный слой — отдельный TikTok mapper
+и dry-run с disabled-first политикой. До их реализации интерфейс не должен
+обещать реальный запуск в TikTok.

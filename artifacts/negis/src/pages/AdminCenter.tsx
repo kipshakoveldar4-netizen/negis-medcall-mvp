@@ -17,6 +17,7 @@ import {
   Loader2,
   Megaphone,
   MessageCircle,
+  Music2,
   RefreshCw,
   Rocket,
   Save,
@@ -217,6 +218,30 @@ type SafeMetaSummary = {
   };
   hasAccessToken: boolean;
   hasAppSecret: boolean;
+};
+
+type TikTokAdsDiagnostic = {
+  configured: boolean;
+  connected: boolean;
+  readOnly: true;
+  launchEnabled: false;
+  advertiserIdConfigured: boolean;
+  hasAccessToken: boolean;
+  hasAppId: boolean;
+  hasAppSecret: boolean;
+  oauthReady: boolean;
+  checkedAt: string;
+  advertiser?: {
+    maskedId: string;
+    name: string;
+    currency: string;
+    timezone: string;
+    status: string;
+    accountType: string;
+  };
+  errorCode?: string;
+  message?: string;
+  hint?: string;
 };
 
 type MetaCityKeyResult = {
@@ -1054,6 +1079,85 @@ export default function AdminCenter() {
     }
   }
 
+  async function checkTikTokAds() {
+    if (serverAdminAuth.status !== "confirmed") {
+      setIntegrationCards((cards) =>
+        cards.map((card) =>
+          card.key === "tiktok"
+            ? {
+                ...card,
+                status: "error",
+                details: "Админ-доступ не подтверждён",
+                hint: "Войдите заново как владелец или администратор рабочего пространства.",
+              }
+            : card,
+        ),
+      );
+      toast.warning("Сначала подтвердите админ-доступ");
+      return;
+    }
+
+    setBusy("tiktok", true);
+    try {
+      const body = await adminCrmRequest<TikTokAdsDiagnostic>(
+        `/api/crm/tiktok-validate?workspaceId=${encodeURIComponent(workspaceId)}`,
+        { method: "POST" },
+      );
+      const diagnostic = body.data;
+      if (!diagnostic) throw new Error("TikTok не вернул результат проверки.");
+
+      const account = diagnostic.advertiser;
+      const details = diagnostic.connected && account
+        ? [
+            account.name,
+            account.maskedId ? `ID ${account.maskedId}` : "",
+            account.currency ? `валюта ${account.currency}` : "",
+            account.timezone ? `часовой пояс ${account.timezone}` : "",
+            account.status === "STATUS_ENABLE" ? "аккаунт активен" : "",
+          ].filter(Boolean).join(" · ")
+        : diagnostic.message || "TikTok Ads пока не подключён.";
+      const hint = diagnostic.connected
+        ? "Проверка только читает данные рекламного аккаунта. Запуск TikTok-рекламы не включён."
+        : diagnostic.hint;
+
+      setIntegrationCards((cards) =>
+        cards.map((card) =>
+          card.key === "tiktok"
+            ? {
+                ...card,
+                status: diagnostic.connected ? "connected" : diagnostic.configured ? "error" : "not_configured",
+                details,
+                hint,
+              }
+            : card,
+        ),
+      );
+
+      if (diagnostic.connected) {
+        toast.success("TikTok Ads подключён");
+      } else {
+        toast.warning(diagnostic.message || "TikTok Ads пока не подключён");
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Не удалось проверить TikTok Ads.";
+      setIntegrationCards((cards) =>
+        cards.map((card) =>
+          card.key === "tiktok"
+            ? {
+                ...card,
+                status: "error",
+                details: "Не удалось проверить TikTok Ads",
+                hint: message,
+              }
+            : card,
+        ),
+      );
+      toast.error(message);
+    } finally {
+      setBusy("tiktok", false);
+    }
+  }
+
   async function checkAdCreativesStorage() {
     setBusy("adCreativesStorage", true);
     try {
@@ -1105,7 +1209,7 @@ export default function AdminCenter() {
   async function checkAllIntegrations() {
     const data = await checkCrmHealth();
     if (data) setIntegrationCards(buildIntegrationCards(data));
-    await Promise.allSettled([checkTelegram(), checkTargetingAgent(), checkAdCreativesStorage()]);
+    await Promise.allSettled([checkTelegram(), checkTargetingAgent(), checkAdCreativesStorage(), checkTikTokAds()]);
   }
 
   async function runReleaseAutocheck() {
@@ -2674,11 +2778,13 @@ export default function AdminCenter() {
                   ? checkTelegram
                   : card.key === "targetingAgent"
                     ? checkTargetingAgent
-                    : card.key === "adCreativesStorage"
-                      ? checkAdCreativesStorage
-                    : card.key === "supabase"
-                      ? () => { void checkCrmHealth(); }
-                      : undefined
+                    : card.key === "tiktok"
+                      ? checkTikTokAds
+                      : card.key === "adCreativesStorage"
+                        ? checkAdCreativesStorage
+                        : card.key === "supabase"
+                          ? () => { void checkCrmHealth(); }
+                          : undefined
               }
             />
           ))}
@@ -3479,6 +3585,15 @@ function buildIntegrationCards(health: CrmHealthData | null): IntegrationCard[] 
       icon: Facebook,
       details: providerDetails(health, "meta"),
     },
+    {
+      key: "tiktok",
+      title: "TikTok Ads",
+      description: "Проверка доступа к рекламному аккаунту без запуска кампаний",
+      status: providerStatus(health, "tiktok"),
+      icon: Music2,
+      details: providerDetails(health, "tiktok"),
+      hint: "Доступ проверяется только на чтение. Создание TikTok-рекламы пока не включено.",
+    },
   ];
 }
 
@@ -3544,7 +3659,7 @@ function IntegrationStatusCard({
 }) {
   const Icon = card.icon;
   return (
-    <section className="neu-card">
+    <section className="neu-card" data-testid={`integration-${card.key}`}>
       <div className="mb-4 flex items-start justify-between gap-3">
         <div className="flex min-w-0 items-start gap-3">
           <div className="rounded-2xl bg-[#E0F2FE] p-2 text-[#0369A1]">
