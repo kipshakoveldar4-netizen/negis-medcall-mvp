@@ -21,6 +21,11 @@ import { PageLayout } from "@/components/layout/PageLayout";
 import { apiUrl, crmFetch } from "@/lib/api";
 import { supabase, hasSupabaseFrontendEnv } from "@/lib/supabase";
 import { readWorkspaceId, workspaceScopedKey } from "@/lib/demoStorage";
+import {
+  ADVERTISING_CAMPAIGN_PREFILL_KEY,
+  createAdvertisingCampaignPrefill,
+  type AdvertisingCampaignPrefillInput,
+} from "../../../../lib/advertising/campaignBrief";
 import { checkMetaCompliance } from "../../../../lib/meta/compliance";
 import type { ContentPackage } from "../../../../lib/content-studio/core";
 
@@ -79,6 +84,20 @@ type TelegramResponse = {
 };
 
 const STORAGE_KEY = "negis_content_studio_videos";
+
+type AdsAutomationPrefillInput = Omit<AdvertisingCampaignPrefillInput, "platform">;
+
+function writeAdsAutomationPrefill(input: AdsAutomationPrefillInput) {
+  const prefill = createAdvertisingCampaignPrefill({
+    ...input,
+    platform: "meta",
+    generatedAt: input.generatedAt || new Date().toISOString(),
+  });
+  localStorage.setItem(
+    workspaceScopedKey(ADVERTISING_CAMPAIGN_PREFILL_KEY),
+    JSON.stringify(prefill),
+  );
+}
 
 type PackageBrief = {
   mode: string;
@@ -869,28 +888,27 @@ export default function ContentStudio() {
         // Metadata persistence is best-effort in demo mode.
       }
 
-      localStorage.setItem(
-        workspaceScopedKey("negis_ads_automation_prefill"),
-        JSON.stringify({
-          source: "content_studio_photo",
-          service: packageBrief.service,
-          city: packageBrief.city,
-          offer: photoTexts.offer,
-          audience: packageBrief.audience,
-          adText: `${photoTexts.offer}. ${photoTexts.cta}.`,
-          headline: photoTexts.headline,
-          cta: "LEARN_MORE",
-          format: photoFormat,
-          creativeUrl,
-          creativeType: "image",
+      writeAdsAutomationPrefill({
+        sourceKind: "photo",
+        campaignName: photoTexts.headline,
+        service: packageBrief.service,
+        city: packageBrief.city,
+        offer: photoTexts.offer,
+        audience: packageBrief.audience,
+        primaryText: `${photoTexts.offer}. ${photoTexts.cta}.`,
+        headline: photoTexts.headline,
+        description: photoTexts.offer,
+        cta: "LEARN_MORE",
+        creative: {
+          type: "image",
+          url: creativeUrl,
           fileName,
           mimeType: "image/jpeg",
           fileSize: photoBlob.size,
-          creativeBrief: `Фото-креатив: ${layoutLabel}, формат ${formatLabel}, CTA «${photoTexts.cta}»`,
-          generatedAt: new Date().toISOString(),
-          title: photoTexts.headline,
-        }),
-      );
+          format: photoFormat,
+          brief: `Фото-креатив: ${layoutLabel}, формат ${formatLabel}, CTA «${photoTexts.cta}»`,
+        },
+      });
       toast.success("Фото-креатив передан в AI запуск рекламы");
       setLocation("/ads-automation");
     } finally {
@@ -1135,28 +1153,26 @@ export default function ContentStudio() {
   }, [videoJob, genVideo]);
 
   const useGeneratedInAdsAutomation = (file: GeneratedFile, creativeType: "image" | "video") => {
-    localStorage.setItem(
-      workspaceScopedKey("negis_ads_automation_prefill"),
-      JSON.stringify({
-        source: "content_studio_generated",
-        service: packageBrief.service,
-        city: packageBrief.city,
-        offer: packageBrief.offer,
-        audience: packageBrief.audience,
-        adText: contentPackage?.adPrimaryText || packageBrief.offer,
-        headline: contentPackage?.adHeadline || packageBrief.service,
-        caption: contentPackage?.caption,
-        cta: "LEARN_MORE",
-        format: genFormat,
-        creativeUrl: file.url,
-        creativeType,
+    writeAdsAutomationPrefill({
+      sourceKind: "generated",
+      campaignName: contentPackage?.ideaTitle || packageBrief.service,
+      service: packageBrief.service,
+      city: packageBrief.city,
+      offer: packageBrief.offer,
+      audience: packageBrief.audience,
+      primaryText: contentPackage?.adPrimaryText || packageBrief.offer,
+      headline: contentPackage?.adHeadline || packageBrief.service,
+      description: contentPackage?.caption || packageBrief.offer,
+      cta: "LEARN_MORE",
+      creative: {
+        type: creativeType,
+        url: file.url,
         mimeType: file.mimeType,
         fileSize: file.fileSize,
-        creativeBrief: genPrompt.trim(),
-        generatedAt: new Date().toISOString(),
-        title: contentPackage?.ideaTitle || packageBrief.service,
-      }),
-    );
+        format: genFormat,
+        brief: genPrompt.trim(),
+      },
+    });
     toast.success(creativeType === "image" ? "Изображение передано в AI запуск рекламы" : "Ролик передан в AI запуск рекламы");
     setLocation("/ads-automation");
   };
@@ -1241,25 +1257,24 @@ export default function ContentStudio() {
       toast.error("Сначала сгенерируйте пакет контента");
       return;
     }
-    localStorage.setItem(
-      workspaceScopedKey("negis_ads_automation_prefill"),
-      JSON.stringify({
-        source: "content_studio",
-        service: packageBrief.service,
-        city: packageBrief.city,
-        offer: packageBrief.offer,
-        audience: packageBrief.audience,
-        adText: contentPackage.adPrimaryText,
-        headline: contentPackage.adHeadline,
-        caption: contentPackage.caption,
-        cta: contentPackage.cta,
+    writeAdsAutomationPrefill({
+      sourceKind: "package",
+      sourceId: contentPackageId || undefined,
+      campaignName: contentPackage.ideaTitle,
+      service: packageBrief.service,
+      city: packageBrief.city,
+      offer: packageBrief.offer,
+      audience: packageBrief.audience,
+      primaryText: contentPackage.adPrimaryText,
+      headline: contentPackage.adHeadline,
+      description: contentPackage.caption,
+      cta: contentPackage.cta,
+      creative: {
+        type: "video",
         format: packageBrief.format,
-        creativeBrief: contentPackage.videoPrompt,
-        generatedAt: new Date().toISOString(),
-        contentPackageId: contentPackageId || undefined,
-        title: contentPackage.ideaTitle,
-      }),
-    );
+        brief: contentPackage.videoPrompt,
+      },
+    });
     toast.success("Пакет передан в AI запуск рекламы");
     setLocation("/ads-automation");
   };
@@ -1572,27 +1587,18 @@ export default function ContentStudio() {
   // AI Target is no longer a standalone module: the studio hands content
   // straight to Ads Automation, where "ИИ заполнит" covers targeting.
   const transferToAdsAutomation = () => {
-    localStorage.setItem(
-      workspaceScopedKey("negis_ads_automation_prefill"),
-      JSON.stringify({
-        sourceModule: "content-studio",
-        sourceId: current.id,
-        title: current.title || form.title,
-        campaignName: current.title || form.title,
-        service: current.niche || form.niche,
-        niche: current.niche || form.niche,
-        offer: current.cta || current.goal || form.goal,
-        targetAudience: current.audience || form.audience,
-        audience: current.audience || form.audience,
-        primaryText: current.caption || current.script || current.hook || form.title,
-        caption: current.caption,
-        script: current.script,
-        hook: current.hook,
-        headline: current.hook || current.title || form.title,
-        description: current.cta || current.goal || form.goal,
-        cta: "LEARN_MORE",
-      }),
-    );
+    writeAdsAutomationPrefill({
+      sourceKind: "library",
+      sourceId: current.id,
+      campaignName: current.title || form.title,
+      service: current.niche || form.niche,
+      offer: current.cta || current.goal || form.goal,
+      audience: current.audience || form.audience,
+      primaryText: current.caption || current.script || current.hook || form.title,
+      headline: current.hook || current.title || form.title,
+      description: current.cta || current.goal || form.goal,
+      cta: "LEARN_MORE",
+    });
     toast.success("Контент передан в AI запуск рекламы");
     setLocation("/ads-automation");
   };

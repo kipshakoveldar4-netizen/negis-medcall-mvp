@@ -62,7 +62,9 @@
 
 - Проверить доступный TikTok Marketing API, scopes и тип advertiser account.
 - Создать серверный клиент и безопасную диагностику credentials.
-- Добавить platform-neutral campaign brief и TikTok-specific mapper.
+- Общий версионированный campaign brief уже добавлен: Content Studio пишет один
+  контракт, старые payload поддерживаются, а Meta/TikTok разделены явно.
+- Добавить TikTok-specific mapper после проверки credentials и advertiser access.
 - Реализовать dry-run, upload creative, campaign/ad group/ad и disabled-first
   запуск с аудитом. До этого TikTok не показывается как подключённая платформа.
 

@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "hello": "tsx ./src/hello.ts",
+    "test:advertising-brief": "tsx --test ./src/advertising-campaign-brief.test.ts",
     "test:insights-completeness": "tsx --test ./src/meta-insights-completeness.test.ts",
     "test:meta-insights-worker": "tsx --test ./src/meta-insights-worker.test.ts",
     "test:dashboard": "tsx --test ./src/medina-dashboard.test.ts",

@@ -95,10 +95,10 @@ A generated package (one row per package) contains:
 - Content rows persist via the `content-videos` CRM resource (`content_videos`, migration 010).
 - AI providers: `OPENAI_API_KEY` (text), `ELEVENLABS_*` (voice), `HEYGEN_API_KEY` (avatar video),
   `TAPNOW_API_KEY` (video), `TELEGRAM_*` (review) — demo fallbacks when unset (`docs/AI-PROVIDERS.md`).
-- «Создать рекламу из этого контента» writes `negis_ads_automation_prefill` to localStorage,
-  **but Ads Automation does not read this key yet** — its working prefill paths are
-  «Повторить запуск с этими параметрами» (history) and the persisted brief
-  (`negis_ads_automation_brief`). Wiring the prefill read is the first Phase 1 task.
+- «Создать рекламу из этого контента» writes a versioned campaign brief to the
+  workspace-scoped `negis_ads_automation_prefill` key. Ads Automation consumes
+  it once, restores safe text/creative fields, clears launch confirmations and
+  removes the handoff key. Legacy Content Studio payloads remain supported.
 - Ads Automation already covers: «ИИ заполнит» (`/api/crm/ads-ai-fill`), compliance gate, photo/video
   PAUSED launch, auto thumbnail, history. Large-video optimization pipeline exists (worker on Railway)
   but final large-file testing is blocked by the Supabase Free global upload limit — paused for now.

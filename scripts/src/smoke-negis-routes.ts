@@ -1549,9 +1549,9 @@ async function checkContentStudioPhaseOne() {
     "generate-package",
     "Сгенерировать пакет",
     "Использовать в AI запуске рекламы",
-    'source: "content_studio"',
-    "generatedAt",
-    "contentPackageId",
+    "writeAdsAutomationPrefill({",
+    "generatedAt: input.generatedAt || new Date().toISOString()",
+    "sourceId: contentPackageId || undefined",
     // Слова «демо» на платформе больше нет. Смысл пина тот же и важнее
     // формулировки: экран обязан сказать, что показан образец, а не результат
     // настоящей генерации, когда провайдер не подключён.
@@ -1579,7 +1579,8 @@ async function checkContentStudioPhaseOne() {
   // Ads Automation must consume the studio prefill exactly once, without arming a launch.
   const adsAutomation = await readFile(path.join(repoRoot, "artifacts", "negis", "src", "pages", "AdsAutomation.tsx"), "utf8");
   for (const marker of [
-    'const STUDIO_PREFILL_KEY = "negis_ads_automation_prefill"',
+    "const STUDIO_PREFILL_KEY = ADVERTISING_CAMPAIGN_PREFILL_KEY",
+    'parseAdvertisingCampaignPrefillForPlatform(JSON.parse(raw), "meta")',
     // Selection-2 bound the handoff to the clinic it was made in, so the key is
     // no longer the bare constant. The property this line is here to check —
     // that the prefill is consumed exactly once — is unchanged.
@@ -1589,6 +1590,32 @@ async function checkContentStudioPhaseOne() {
   ]) {
     if (!adsAutomation.includes(marker)) {
       throw new Error(`Ads Automation studio prefill import is missing ${marker}`);
+    }
+  }
+
+  for (const marker of [
+    "writeAdsAutomationPrefill",
+    "createAdvertisingCampaignPrefill",
+    'platform: "meta"',
+    'sourceKind: "photo"',
+    'sourceKind: "generated"',
+    'sourceKind: "package"',
+    'sourceKind: "library"',
+  ]) {
+    if (!studio.includes(marker)) {
+      throw new Error(`Content Studio campaign brief handoff is missing ${marker}`);
+    }
+  }
+
+  const campaignBrief = await readFile(path.join(repoRoot, "lib", "advertising", "campaignBrief.ts"), "utf8");
+  for (const marker of [
+    "ADVERTISING_CAMPAIGN_BRIEF_VERSION",
+    'export type AdvertisingPlatform = "meta" | "tiktok"',
+    "parseAdvertisingCampaignPrefillForPlatform",
+    "legacy Meta handoff",
+  ]) {
+    if (!campaignBrief.includes(marker)) {
+      throw new Error(`Advertising campaign brief foundation is missing ${marker}`);
     }
   }
 
@@ -1622,7 +1649,7 @@ async function checkPhotoCreativeBuilder() {
     "До: исходное фото",
     "После: готовый креатив",
     "Рискованные формулировки",
-    'source: "content_studio_photo"',
+    'sourceKind: "photo"',
     "uploadToSignedUrl",
     "Дисклеймер",
   ]) {
@@ -1633,7 +1660,7 @@ async function checkPhotoCreativeBuilder() {
 
   // Ads Automation must restore the studio image creative from the prefill.
   const adsAutomation = await readFile(path.join(repoRoot, "artifacts", "negis", "src", "pages", "AdsAutomation.tsx"), "utf8");
-  for (const marker of ["firstString(data.creativeUrl", 'fileType: "image"']) {
+  for (const marker of ["firstString(data.creative?.url)", 'fileType: "image"']) {
     if (!adsAutomation.includes(marker)) {
       throw new Error(`Ads Automation prefill must restore image creatives (${marker})`);
     }

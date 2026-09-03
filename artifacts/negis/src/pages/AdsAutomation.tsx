@@ -30,6 +30,10 @@ import { getSupabaseAccessToken } from "@/lib/serverAuth";
 import { hasSupabaseFrontendEnv, supabase } from "@/lib/supabase";
 import { readWorkspaceId, workspaceScopedKey } from "@/lib/demoStorage";
 import { getPlanFeature, normalizePlan, planFeatureBadge, type NegisPlan } from "@/lib/planFeatures";
+import {
+  ADVERTISING_CAMPAIGN_PREFILL_KEY,
+  parseAdvertisingCampaignPrefillForPlatform,
+} from "../../../../lib/advertising/campaignBrief";
 import { KZ_META_CITY_OPTIONS, getKzMetaCityOption } from "../../../../lib/meta/cities";
 
 type ApiResponse<TData = Record<string, unknown>> =
@@ -373,7 +377,7 @@ const VIDEO_OPTIMIZING_LAUNCH_BLOCKED_MESSAGE =
 const VIDEO_OPTIMIZATION_FAILED_MESSAGE = "Не удалось оптимизировать видео. Попробуйте загрузить MP4 меньшего размера или другое видео.";
 const VIDEO_OPTIMIZATION_CONFIG_LOADING_MESSAGE =
   "Настройки оптимизации видео ещё загружаются. Подождите несколько секунд и попробуйте снова.";
-const STUDIO_PREFILL_KEY = "negis_ads_automation_prefill";
+const STUDIO_PREFILL_KEY = ADVERTISING_CAMPAIGN_PREFILL_KEY;
 const STUDIO_PREFILL_NOTICE = "Данные перенесены из AI Контент-студии. Проверьте параметры перед запуском.";
 const VIDEO_OPTIMIZATION_DISABLED_TOO_LARGE_MESSAGE =
   "Автоматическая оптимизация видео скоро будет доступна. Сейчас загрузите видео до 50 МБ или MP4 H.264.";
@@ -1526,11 +1530,12 @@ export default function AdsAutomation() {
       raw = window.localStorage.getItem(workspaceScopedKey(STUDIO_PREFILL_KEY)) || "";
       if (!raw) return;
       window.localStorage.removeItem(workspaceScopedKey(STUDIO_PREFILL_KEY));
-      const data = asRecord(JSON.parse(raw));
+      const data = parseAdvertisingCampaignPrefillForPlatform(JSON.parse(raw), "meta");
+      if (!data) return;
 
-      const service = firstString(data.service, data.niche);
+      const service = firstString(data.service);
       const offer = firstString(data.offer);
-      const audience = firstString(data.audience, data.targetAudience);
+      const audience = firstString(data.audience);
       const cityInput = firstString(data.cityId, data.city);
       const city = cityInput ? getKzMetaCityOption(cityInput) : null;
       setBrief((current) => ({
@@ -1543,16 +1548,16 @@ export default function AdsAutomation() {
           : {}),
       }));
 
-      const adText = firstString(data.adText, data.primaryText, data.caption, data.script);
-      const headline = firstString(data.headline, data.hook, data.title);
+      const adText = firstString(data.primaryText);
+      const headline = firstString(data.headline);
       if (adText || headline) {
         const knownCtas = ["LEARN_MORE", "CONTACT_US", "CALL_NOW"];
         const ctaRaw = firstString(data.cta).toUpperCase();
         setAiPackage({
-          campaignName: firstString(data.campaignName, data.title) || undefined,
+          campaignName: firstString(data.campaignName) || undefined,
           primaryText: adText || undefined,
           headline: headline || undefined,
-          description: firstString(data.caption, data.offer) || undefined,
+          description: firstString(data.description, data.offer) || undefined,
           cta: knownCtas.includes(ctaRaw) ? ctaRaw : "LEARN_MORE",
           audience: audience || undefined,
           generatedBy: "content-studio",
@@ -1563,13 +1568,13 @@ export default function AdsAutomation() {
 
       // Restore a ready image creative from the studio's photo builder: the URL
       // points at the already-uploaded render in the public ad-creatives bucket.
-      const creativeUrl = firstString(data.creativeUrl, data.imageUrl);
-      if (creativeUrl && firstString(data.creativeType) !== "video") {
+      const creativeUrl = firstString(data.creative?.url);
+      if (creativeUrl && data.creative?.type !== "video") {
         setCreative({
-          fileName: firstString(data.fileName) || "studio-creative.jpg",
+          fileName: firstString(data.creative?.fileName) || "studio-creative.jpg",
           fileType: "image",
-          mimeType: firstString(data.mimeType) || "image/jpeg",
-          fileSize: Number(data.fileSize) || 0,
+          mimeType: firstString(data.creative?.mimeType) || "image/jpeg",
+          fileSize: data.creative?.fileSize || 0,
           previewUrl: creativeUrl,
           publicUrl: creativeUrl,
           status: "uploaded",
