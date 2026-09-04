@@ -66,9 +66,12 @@
   только подтверждённым owner/admin и никогда не возвращает токен или полный ID.
 - Общий версионированный campaign brief уже добавлен: Content Studio пишет один
   контракт, старые payload поддерживаются, а Meta/TikTok разделены явно.
-- Добавить TikTok-specific mapper после проверки credentials и advertiser access.
-- Реализовать dry-run, upload creative, campaign/ad group/ad и disabled-first
-  запуск с аудитом. До этого TikTok не показывается как подключённая платформа.
+- TikTok-specific mapper и admin-only dry-run добавлены: они собирают отдельные
+  campaign, ad group и ad templates, в каждом явно установлен `DISABLE`.
+- Следующий этап — resolver географии, identity, upload video с получением
+  `video_id`, audit trail и только затем реальный disabled-first запуск.
+- До завершения этих зависимостей TikTok не показывается как платформа, готовая
+  создавать рекламу, даже если доступ к advertiser account подтверждён.
 
 ### Этап D — контент и эксперименты
 

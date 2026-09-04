@@ -684,16 +684,18 @@ test("K3 Meta Insights stays administrator-only", async () => {
   });
 });
 
-test("K3a TikTok advertiser diagnostics stays administrator-only", async () => {
+test("K3a TikTok diagnostics and campaign dry-run stay administrator-only", async () => {
   await withRouter({ memberships: [memberBReception] }, async (ctx) => {
-    const { res, log } = await ctx.call({
-      segments: ["tiktok-validate"],
-      method: "POST",
-      query: { workspaceId: WORKSPACE_B },
-      body: {},
-    });
-    assert.equal(res.statusCode, 403, "TikTok advertiser diagnostics must remain owner/admin only");
-    assert.equal(businessQueries(log).length, 0, "authorization must fail before any provider or CRM work");
+    for (const segment of ["tiktok-validate", "tiktok-dry-run"]) {
+      const { res, log } = await ctx.call({
+        segments: [segment],
+        method: "POST",
+        query: { workspaceId: WORKSPACE_B },
+        body: {},
+      });
+      assert.equal(res.statusCode, 403, `${segment} must remain owner/admin only`);
+      assert.equal(businessQueries(log).length, 0, "authorization must fail before any provider or CRM work");
+    }
   });
 });
 

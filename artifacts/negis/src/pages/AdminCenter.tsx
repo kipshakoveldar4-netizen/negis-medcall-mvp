@@ -244,6 +244,59 @@ type TikTokAdsDiagnostic = {
   hint?: string;
 };
 
+type TikTokDryRunIssue = {
+  code: string;
+  message: string;
+};
+
+type TikTokDryRunResult = {
+  platform: "tiktok";
+  dryRun: true;
+  launchEnabled: false;
+  targetOperationStatus: "DISABLE";
+  readiness: {
+    briefReady: boolean;
+    providerReady: false;
+    blockers: TikTokDryRunIssue[];
+    providerDependencies: TikTokDryRunIssue[];
+  };
+  summary: {
+    campaignName: string;
+    service: string;
+    city: string;
+    creativeType: "video" | "image" | "unknown";
+    placement: "TikTok";
+    objective: string;
+    dailyBudget: string;
+    currency: "KZT" | "USD" | "";
+    destinationConfigured: boolean;
+    scheduleStartTime: string;
+    status: string;
+  };
+  payloadTemplate: {
+    campaign: Record<string, unknown>;
+    adGroup: Record<string, unknown>;
+    ad: Record<string, unknown>;
+  };
+  safety: {
+    providerCallsMade: false;
+    createsCampaign: false;
+    credentialsIncluded: false;
+    rawCreativeUrlIncluded: false;
+  };
+};
+
+type TikTokDryRunForm = {
+  campaignName: string;
+  service: string;
+  city: string;
+  primaryText: string;
+  dailyBudget: string;
+  currency: "KZT" | "USD";
+  destinationUrl: string;
+  scheduleStartTime: string;
+};
+
 type MetaCityKeyResult = {
   city?: string;
   cityId?: string;
@@ -660,6 +713,16 @@ function localIsoDateOffset(days: number): string {
   return `${year}-${month}-${day}`;
 }
 
+function localDateTimeOffset(hours: number): string {
+  const date = new Date(Date.now() + hours * 60 * 60 * 1000);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  const hour = String(date.getHours()).padStart(2, "0");
+  const minute = String(date.getMinutes()).padStart(2, "0");
+  return `${year}-${month}-${day}T${hour}:${minute}`;
+}
+
 function summarizeMetaInsightRows(rows: MetaCampaignInsight[]): MetaInsightsDiagnosticsSummary {
   const spendByCurrency = new Map<string, bigint>();
   let latestFetchedAt: string | null = null;
@@ -788,6 +851,18 @@ export default function AdminCenter() {
   const [health, setHealth] = useState<CrmHealthData | null>(null);
   const [serverAdminAuth, setServerAdminAuth] = useState<ServerAdminAuthState>({ status: "checking" });
   const [integrationCards, setIntegrationCards] = useState<IntegrationCard[]>(() => buildIntegrationCards(null));
+  const [tiktokDryRunForm, setTikTokDryRunForm] = useState<TikTokDryRunForm>(() => ({
+    campaignName: "",
+    service: "",
+    city: clinic.city || "Астана",
+    primaryText: "",
+    dailyBudget: "5000",
+    currency: "KZT",
+    destinationUrl: "",
+    scheduleStartTime: localDateTimeOffset(24),
+  }));
+  const [tiktokDryRun, setTikTokDryRun] = useState<TikTokDryRunResult | null>(null);
+  const [tiktokDryRunMessage, setTikTokDryRunMessage] = useState("");
   const [loading, setLoading] = useState<Record<string, boolean>>({});
   const [metaCityKeyInput, setMetaCityKeyInput] = useState("almaty");
   const [metaCityKeyResult, setMetaCityKeyResult] = useState<MetaCityKeyResult | null>(null);
@@ -1155,6 +1230,65 @@ export default function AdminCenter() {
       toast.error(message);
     } finally {
       setBusy("tiktok", false);
+    }
+  }
+
+  async function buildTikTokDryRun() {
+    if (serverAdminAuth.status !== "confirmed") {
+      setTikTokDryRunMessage("Сначала подтвердите админ-доступ.");
+      toast.warning("Сначала подтвердите админ-доступ");
+      return;
+    }
+
+    setBusy("tiktok-dry-run", true);
+    setTikTokDryRunMessage("");
+    try {
+      const body = await adminCrmRequest<TikTokDryRunResult>(
+        `/api/crm/tiktok-dry-run?workspaceId=${encodeURIComponent(workspaceId)}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            brief: {
+              schemaVersion: 1,
+              platform: "tiktok",
+              sourceModule: "content-studio",
+              sourceKind: "package",
+              campaignName: tiktokDryRunForm.campaignName,
+              service: tiktokDryRunForm.service,
+              city: tiktokDryRunForm.city,
+              primaryText: tiktokDryRunForm.primaryText,
+              creative: {
+                type: "video",
+                brief: "Вертикальный видеокреатив для TikTok",
+              },
+            },
+            dailyBudget: tiktokDryRunForm.dailyBudget,
+            currency: tiktokDryRunForm.currency,
+            destinationUrl: tiktokDryRunForm.destinationUrl,
+            scheduleStartTime: tiktokDryRunForm.scheduleStartTime,
+          }),
+        },
+      );
+      if (!body.data) throw new Error("TikTok dry-run не вернул план кампании.");
+      setTikTokDryRun(body.data);
+      setTikTokDryRunMessage(
+        body.data.readiness.briefReady
+          ? "Бриф собран. Ни один объект в TikTok не создавался."
+          : "План собран, но в брифе остались обязательные поля.",
+      );
+      if (body.data.readiness.briefReady) {
+        toast.success("План TikTok собран без запуска");
+      } else {
+        toast.warning("Заполните обязательные поля TikTok-брифа");
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Не удалось собрать TikTok dry-run.";
+      setTikTokDryRun(null);
+      setTikTokDryRunMessage(message);
+      toast.error(message);
+    } finally {
+      setBusy("tiktok-dry-run", false);
     }
   }
 
@@ -2755,6 +2889,12 @@ export default function AdminCenter() {
   }
 
   function renderIntegrations() {
+    const updateTikTokDryRunField = <Key extends keyof TikTokDryRunForm>(key: Key, value: TikTokDryRunForm[Key]) => {
+      setTikTokDryRunForm((current) => ({ ...current, [key]: value }));
+      setTikTokDryRun(null);
+      setTikTokDryRunMessage("");
+    };
+
     return (
       <div className="space-y-5">
         <div className="neu-card flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -2789,6 +2929,163 @@ export default function AdminCenter() {
             />
           ))}
         </div>
+
+        <section className="neu-card" data-testid="tiktok-campaign-dry-run">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+            <div className="min-w-0">
+              <p className="text-xs font-bold uppercase tracking-[0.12em] text-[#0D9488]">Admin · без запуска</p>
+              <h2 className="mt-1 text-lg font-black text-[#0F172A]">TikTok Ads · план кампании</h2>
+              <p className="mt-1 max-w-3xl text-sm text-[#64748B]">
+                Собирает безопасный шаблон campaign, ad group и ad. Запросы на создание объектов в TikTok не отправляются.
+              </p>
+            </div>
+            <span className="w-fit rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-xs font-black text-amber-700">
+              Только выключенный запуск
+            </span>
+          </div>
+
+          <div className="mt-5 grid gap-4 md:grid-cols-2">
+            <Field
+              label="Название кампании"
+              value={tiktokDryRunForm.campaignName}
+              onChange={(value) => updateTikTokDryRunField("campaignName", value)}
+            />
+            <Field
+              label="Услуга"
+              value={tiktokDryRunForm.service}
+              onChange={(value) => updateTikTokDryRunField("service", value)}
+            />
+            <Field
+              label="Город показа"
+              value={tiktokDryRunForm.city}
+              onChange={(value) => updateTikTokDryRunField("city", value)}
+            />
+            <label className="block">
+              <span className="mb-2 block text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">Бюджет в день</span>
+              <div className="grid grid-cols-[minmax(0,1fr)_92px] gap-2">
+                <input
+                  className="neu-input min-w-0"
+                  inputMode="decimal"
+                  value={tiktokDryRunForm.dailyBudget}
+                  onChange={(event) => updateTikTokDryRunField("dailyBudget", event.target.value)}
+                />
+                <select
+                  className="neu-input min-w-0"
+                  value={tiktokDryRunForm.currency}
+                  onChange={(event) => updateTikTokDryRunField("currency", event.target.value as "KZT" | "USD")}
+                >
+                  <option value="KZT">KZT</option>
+                  <option value="USD">USD</option>
+                </select>
+              </div>
+            </label>
+            <Field
+              label="Ссылка назначения"
+              value={tiktokDryRunForm.destinationUrl}
+              onChange={(value) => updateTikTokDryRunField("destinationUrl", value)}
+            />
+            <label className="block">
+              <span className="mb-2 block text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">Начало по времени аккаунта</span>
+              <input
+                type="datetime-local"
+                className="neu-input w-full"
+                value={tiktokDryRunForm.scheduleStartTime}
+                onChange={(event) => updateTikTokDryRunField("scheduleStartTime", event.target.value)}
+              />
+            </label>
+            <label className="block md:col-span-2">
+              <span className="mb-2 block text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">Текст объявления</span>
+              <textarea
+                className="neu-input min-h-24 w-full resize-y"
+                value={tiktokDryRunForm.primaryText}
+                onChange={(event) => updateTikTokDryRunField("primaryText", event.target.value)}
+              />
+            </label>
+          </div>
+
+          <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:items-center">
+            <button
+              type="button"
+              className="neu-btn-primary w-full justify-center sm:w-auto"
+              disabled={loading["tiktok-dry-run"] || serverAdminAuth.status !== "confirmed"}
+              onClick={() => void buildTikTokDryRun()}
+            >
+              {loading["tiktok-dry-run"] ? <Loader2 className="animate-spin" size={16} /> : <ClipboardCheck size={16} />}
+              Проверить план без запуска
+            </button>
+            <p className="text-xs font-semibold text-[#64748B]">
+              Нужен вертикальный видеокреатив; upload в TikTok будет отдельным следующим этапом.
+            </p>
+          </div>
+
+          {tiktokDryRunMessage ? (
+            <p className="mt-4 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-[#334155]">
+              {tiktokDryRunMessage}
+            </p>
+          ) : null}
+
+          {tiktokDryRun ? (
+            <div className="mt-5 space-y-4" data-testid="tiktok-dry-run-result">
+              <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                <StatusTile title="Бриф" value={tiktokDryRun.readiness.briefReady ? "Готов" : "Нужно заполнить"} />
+                <StatusTile title="Площадка" value={tiktokDryRun.summary.placement} />
+                <StatusTile
+                  title="Бюджет в день"
+                  value={tiktokDryRun.summary.dailyBudget ? `${tiktokDryRun.summary.dailyBudget} ${tiktokDryRun.summary.currency}` : "—"}
+                />
+                <StatusTile title="Статус запуска" value="Выключен" />
+              </div>
+
+              <div className="grid gap-3 lg:grid-cols-2">
+                <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4">
+                  <div className="flex items-start gap-3">
+                    <ShieldCheck className="mt-0.5 shrink-0 text-emerald-700" size={20} />
+                    <div className="min-w-0">
+                      <p className="font-black text-emerald-900">Безопасный dry-run</p>
+                      <p className="mt-1 text-sm text-emerald-800">
+                        Кампания, группа и объявление запланированы со статусом «выключено». TikTok API не вызывался.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4">
+                  <p className="font-black text-amber-900">До реального подключения</p>
+                  {tiktokDryRun.readiness.providerDependencies.length > 0 ? (
+                    <ul className="mt-2 grid gap-1.5 text-sm text-amber-800">
+                      {tiktokDryRun.readiness.providerDependencies.map((item) => (
+                        <li key={item.code} className="break-words">• {item.message}</li>
+                      ))}
+                    </ul>
+                  ) : null}
+                </div>
+              </div>
+
+              {!tiktokDryRun.readiness.briefReady ? (
+                <div className="rounded-2xl border border-red-200 bg-red-50 p-4">
+                  <p className="font-black text-red-900">Заполните бриф</p>
+                  <ul className="mt-2 grid gap-1.5 text-sm text-red-800">
+                    {tiktokDryRun.readiness.blockers
+                      .filter((item) => !tiktokDryRun.readiness.providerDependencies.some((dependency) => dependency.code === item.code))
+                      .map((item) => <li key={item.code} className="break-words">• {item.message}</li>)}
+                  </ul>
+                </div>
+              ) : null}
+
+              <details className="rounded-2xl border border-[#E2E8F0] bg-white/70 p-4">
+                <summary className="cursor-pointer font-bold text-[#334155]">Технический шаблон без ID и секретов</summary>
+                <div className="mt-4 grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-3">
+                  <p className="break-words text-[#64748B]">campaign: <strong className="text-[#0F172A]">{String(tiktokDryRun.payloadTemplate.campaign.operation_status || "—")}</strong></p>
+                  <p className="break-words text-[#64748B]">ad group: <strong className="text-[#0F172A]">{String(tiktokDryRun.payloadTemplate.adGroup.operation_status || "—")}</strong></p>
+                  <p className="break-words text-[#64748B]">ad: <strong className="text-[#0F172A]">{tiktokDryRun.targetOperationStatus}</strong></p>
+                  <p className="break-words text-[#64748B]">objective: <strong className="text-[#0F172A]">{String(tiktokDryRun.payloadTemplate.campaign.objective_type || "—")}</strong></p>
+                  <p className="break-words text-[#64748B]">placement: <strong className="text-[#0F172A]">TikTok</strong></p>
+                  <p className="break-words text-[#64748B]">provider calls: <strong className="text-[#0F172A]">нет</strong></p>
+                </div>
+              </details>
+            </div>
+          ) : null}
+        </section>
       </div>
     );
   }

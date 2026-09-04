@@ -69,7 +69,8 @@ import {
   type MetaInsightsSafeErrorCode,
   type NormalizedMetaInsightRow,
 } from "../meta/insights";
-import { validateTikTokAdsConnection } from "../tiktok/diagnostics";
+import { getTikTokAdsConfig, validateTikTokAdsConnection } from "../tiktok/diagnostics";
+import { buildTikTokCampaignDryRun } from "../tiktok/campaign";
 
 export type CrmResource =
   | "clients"
@@ -7573,6 +7574,25 @@ export async function handleTikTokValidate(req: VercelRequest, res: VercelRespon
   // server, and no campaign/ad group/ad endpoint is called here.
   const diagnostic = await validateTikTokAdsConnection();
   return sendJson(res, 200, success("supabase", { ...diagnostic }));
+}
+
+export async function handleTikTokDryRun(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== "POST") {
+    return sendJson(res, 405, errorBody("Method not allowed", ["Use POST"]));
+  }
+
+  // This is a pure mapping preview. It intentionally performs no TikTok API
+  // call and never reads an advertiser, identity or media identifier into the
+  // response. The future live adapter will resolve those values server-side.
+  const config = getTikTokAdsConfig();
+  const dryRun = buildTikTokCampaignDryRun(asRecord(req.body), {
+    advertiserConfigured: config.configured,
+    identityConfigured: Boolean(readEnvValue("TIKTOK_IDENTITY_ID")),
+    locationIds: [],
+    uploadedVideoIdAvailable: false,
+  });
+
+  return sendJson(res, 200, success("supabase", { ...dryRun }));
 }
 
 export async function handleMetaStatus(req: VercelRequest, res: VercelResponse) {

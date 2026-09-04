@@ -35,10 +35,10 @@ Studio, а Ads Automation получает один и тот же набор п
 принимает только пакет с `platform: "meta"`. Явный TikTok-пакет не может попасть
 в Meta launch через эту границу.
 
-Это только основа будущего адаптера TikTok. Она не означает, что TikTok Ads уже
-подключён, и не создаёт TikTok campaign/ad group/ad. Перед живым подключением
-нужны отдельные server-side credentials, проверка advertiser account, dry-run,
-аудит действий и политика disabled-first.
+TikTok mapper теперь может превратить этот бриф в безопасный dry-run шаблон
+campaign/ad group/ad. Он не создаёт объекты у провайдера: сервер отдельно
+показывает нерешённые зависимости identity, location ID и upload `video_id`.
+Во всех трёх шаблонах явно используется статус `DISABLE`.
 
 ## Гарантии запуска
 
@@ -52,8 +52,7 @@ Studio, а Ads Automation получает один и тот же набор п
 
 ## Следующий этап
 
-Серверная диагностика TikTok credentials и advertiser access теперь доступна
-в Admin Center. Она выполняет только чтение данных аккаунта и не создаёт
-campaign, ad group или ad. Следующий безопасный слой — отдельный TikTok mapper
-и dry-run с disabled-first политикой. До их реализации интерфейс не должен
-обещать реальный запуск в TikTok.
+Серверная диагностика TikTok credentials и advertiser access и отдельный
+admin-only dry-run доступны в Admin Center. Следующий безопасный слой — resolver
+географии, TikTok identity и upload вертикального видео с получением `video_id`.
+До этого интерфейс не обещает реальный запуск в TikTok.

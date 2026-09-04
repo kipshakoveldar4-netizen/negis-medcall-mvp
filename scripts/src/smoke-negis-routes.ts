@@ -3498,6 +3498,7 @@ async function checkAdvertisingHubSource() {
 
 async function checkTikTokAdsDiagnosticsFoundation() {
   const helper = await readFile(path.join(repoRoot, "lib", "tiktok", "diagnostics.ts"), "utf8");
+  const campaignMapper = await readFile(path.join(repoRoot, "lib", "tiktok", "campaign.ts"), "utf8");
   const server = await readFile(path.join(repoRoot, "lib", "crm", "server.ts"), "utf8");
   const router = await readFile(path.join(repoRoot, "api", "crm", "[...path].ts"), "utf8");
   const authorization = await readFile(path.join(repoRoot, "lib", "crm", "authorization.ts"), "utf8");
@@ -3524,15 +3525,43 @@ async function checkTikTokAdsDiagnosticsFoundation() {
     if (helper.includes(forbidden)) throw new Error(`TikTok diagnostics helper must not contain ${forbidden}`);
   }
 
-  if (!server.includes("handleTikTokValidate") || !server.includes('tiktok: envStatus(["TIKTOK_ACCESS_TOKEN", "TIKTOK_ADVERTISER_ID"])')) {
+  for (const marker of [
+    'TIKTOK_DISABLED_OPERATION_STATUS = "DISABLE"',
+    'objective_type: "TRAFFIC"',
+    'budget_optimize_on: false',
+    'placements: ["PLACEMENT_TIKTOK"]',
+    'ad_format: "SINGLE_VIDEO"',
+    "providerCallsMade: false",
+    "createsCampaign: false",
+    "credentialsIncluded: false",
+    "rawCreativeUrlIncluded: false",
+    'providerReady: false',
+    'live_adapter_disabled',
+  ]) {
+    if (!campaignMapper.includes(marker)) throw new Error(`TikTok campaign dry-run mapper is missing ${marker}`);
+  }
+  for (const forbidden of ["fetch(", "console.log", "console.error"]) {
+    if (campaignMapper.includes(forbidden)) throw new Error(`TikTok campaign dry-run must not contain ${forbidden}`);
+  }
+
+  if (!server.includes("handleTikTokValidate") || !server.includes("handleTikTokDryRun") || !server.includes('tiktok: envStatus(["TIKTOK_ACCESS_TOKEN", "TIKTOK_ADVERTISER_ID"])')) {
     throw new Error("CRM server must expose safe TikTok diagnostics and coarse env health");
   }
-  if (!router.includes('case "tiktok-validate":') || !router.includes("handleTikTokValidate")) {
-    throw new Error("CRM catch-all must route TikTok diagnostics without a new API file");
+  if (
+    !router.includes('case "tiktok-validate":') ||
+    !router.includes("handleTikTokValidate") ||
+    !router.includes('case "tiktok-dry-run":') ||
+    !router.includes("handleTikTokDryRun")
+  ) {
+    throw new Error("CRM catch-all must route TikTok diagnostics and dry-run without a new API file");
   }
   const authLine = authorization.split("\n").find((line) => line.includes('"tiktok-validate"')) || "";
   if (!authLine.includes('methods: ["POST"]') || !authLine.includes("roles: WORKSPACE_ADMIN")) {
     throw new Error("TikTok diagnostics must remain POST-only and owner/admin protected");
+  }
+  const dryRunAuthLine = authorization.split("\n").find((line) => line.includes('"tiktok-dry-run"')) || "";
+  if (!dryRunAuthLine.includes('methods: ["POST"]') || !dryRunAuthLine.includes("roles: WORKSPACE_ADMIN")) {
+    throw new Error("TikTok campaign dry-run must remain POST-only and owner/admin protected");
   }
 
   for (const marker of [
@@ -3541,6 +3570,11 @@ async function checkTikTokAdsDiagnosticsFoundation() {
     'serverAdminAuth.status !== "confirmed"',
     "Проверка только читает данные рекламного аккаунта",
     "Запуск TikTok-рекламы не включён",
+    "/api/crm/tiktok-dry-run?workspaceId=",
+    "TikTok Ads · план кампании",
+    "Проверить план без запуска",
+    "Технический шаблон без ID и секретов",
+    "TikTok API не вызывался",
     'data-testid={`integration-${card.key}`}',
   ]) {
     if (!admin.includes(marker)) throw new Error(`Admin Center TikTok diagnostics is missing ${marker}`);
@@ -3946,6 +3980,15 @@ async function main() {
   await assertCrmAuthBoundary("/api/crm/whatsapp-channels");
   await assertCrmAuthBoundary("/api/crm/tiktok-validate?workspaceId=9eb6f100-bb6a-4f99-9719-e85c34513a03", {
     method: "POST",
+  });
+  await assertCrmAuthBoundary("/api/crm/tiktok-dry-run?workspaceId=9eb6f100-bb6a-4f99-9719-e85c34513a03", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      brief: { platform: "tiktok", sourceKind: "package", service: "Консультация" },
+      dailyBudget: "5000",
+      currency: "KZT",
+    }),
   });
   const crmHealth = await checkJsonEndpoint("/api/crm/health");
   // Security-2B: the route is refused before any business branch runs. Its
