@@ -686,7 +686,7 @@ test("K3 Meta Insights stays administrator-only", async () => {
 
 test("K3a TikTok diagnostics and campaign dry-run stay administrator-only", async () => {
   await withRouter({ memberships: [memberBReception] }, async (ctx) => {
-    for (const segment of ["tiktok-validate", "tiktok-dry-run", "tiktok-setup"]) {
+    for (const segment of ["tiktok-validate", "tiktok-dry-run", "tiktok-setup", "tiktok-connection"]) {
       const { res, log } = await ctx.call({
         segments: [segment],
         method: "POST",
@@ -697,6 +697,58 @@ test("K3a TikTok diagnostics and campaign dry-run stay administrator-only", asyn
       assert.equal(businessQueries(log).length, 0, "authorization must fail before any provider or CRM work");
     }
   });
+});
+
+test("K3b TikTok provisioning cannot be spoofed by an owner of a different workspace", async () => {
+  const previous = process.env.TIKTOK_WORKSPACE_ID;
+  process.env.TIKTOK_WORKSPACE_ID = WORKSPACE_B;
+  try {
+    await withRouter({ memberships: [memberA] }, async (ctx) => {
+      for (const segment of ["tiktok-validate", "tiktok-dry-run", "tiktok-setup", "tiktok-connection"]) {
+        const { res, log } = await ctx.call({ segments: [segment], method: "POST",
+          query: { workspaceId: WORKSPACE_A }, body: { confirm: true, city: "Актобе", workspaceId: WORKSPACE_B } });
+        assert.equal(res.statusCode, 403, segment);
+        assert.equal(businessQueries(log).length, 0);
+      }
+      const { res, log } = await ctx.call({ segments: ["tiktok-connection"], query: { workspaceId: WORKSPACE_A } });
+      assert.equal(res.statusCode, 403);
+      assert.equal(businessQueries(log).length, 0);
+    });
+  } finally {
+    if (previous === undefined) delete process.env.TIKTOK_WORKSPACE_ID;
+    else process.env.TIKTOK_WORKSPACE_ID = previous;
+  }
+});
+
+test("K3c TikTok connection GET is workspace-scoped and returns only the safe DTO", async () => {
+  const previous = { workspace: process.env.TIKTOK_WORKSPACE_ID, advertiser: process.env.TIKTOK_ADVERTISER_ID, token: process.env.TIKTOK_ACCESS_TOKEN };
+  process.env.TIKTOK_WORKSPACE_ID = WORKSPACE_A;
+  process.env.TIKTOK_ADVERTISER_ID = "7123456789012345678";
+  process.env.TIKTOK_ACCESS_TOKEN = "private-token";
+  try {
+    await withRouter({ memberships: [memberA], rows: { tiktok_ad_account_connections: [{
+      workspace_id: WORKSPACE_A, advertiser_id: process.env.TIKTOK_ADVERTISER_ID, enabled: true,
+      currency: "KZT", account_timezone: "Asia/Almaty", verified_at: new Date().toISOString(),
+    }] } }, async (ctx) => {
+      const { res, log } = await ctx.call({ segments: ["tiktok-connection"], query: { workspaceId: WORKSPACE_A } });
+      assert.equal(res.statusCode, 200);
+      assert.equal((res.body.data as { state: string }).state, "connected");
+      assert.equal(businessQueries(log)[0]?.filters.workspace_id, WORKSPACE_A);
+      assert.doesNotMatch(JSON.stringify(res.body), /7123456789012345678|private-token|access_token/);
+      for (const method of ["GET", "POST"]) {
+        const noToken = await ctx.call({ segments: ["tiktok-connection"], method, token: null,
+          query: { workspaceId: WORKSPACE_A }, body: { confirm: true } });
+        assert.equal(noToken.res.statusCode, 401);
+      }
+    });
+    await withRouter({ authOk: false }, async (ctx) => {
+      assert.equal((await ctx.call({ segments: ["tiktok-connection"] })).res.statusCode, 401);
+    });
+  } finally {
+    for (const [key, value] of Object.entries({ TIKTOK_WORKSPACE_ID: previous.workspace, TIKTOK_ADVERTISER_ID: previous.advertiser, TIKTOK_ACCESS_TOKEN: previous.token })) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  }
 });
 
 test("K4 configuration resources remain administrator-only", async () => {

@@ -3497,6 +3497,8 @@ async function checkAdvertisingHubSource() {
 }
 
 async function checkTikTokAdsDiagnosticsFoundation() {
+  const connections = await readFile(path.join(repoRoot, "lib", "tiktok", "connections.ts"), "utf8");
+  const connectionUi = await readFile(path.join(repoRoot, "artifacts", "negis", "src", "components", "admin", "TikTokConnection.tsx"), "utf8");
   const helper = await readFile(path.join(repoRoot, "lib", "tiktok", "diagnostics.ts"), "utf8");
   const campaignMapper = await readFile(path.join(repoRoot, "lib", "tiktok", "campaign.ts"), "utf8");
   const setup = await readFile(path.join(repoRoot, "lib", "tiktok", "setup.ts"), "utf8");
@@ -3546,7 +3548,7 @@ async function checkTikTokAdsDiagnosticsFoundation() {
     if (campaignMapper.includes(forbidden)) throw new Error(`TikTok campaign dry-run must not contain ${forbidden}`);
   }
 
-  if (!server.includes("handleTikTokValidate") || !server.includes("handleTikTokDryRun") || !server.includes('tiktok: envStatus(["TIKTOK_ACCESS_TOKEN", "TIKTOK_ADVERTISER_ID"])')) {
+  if (!server.includes("handleTikTokValidate") || !server.includes("handleTikTokDryRun") || !server.includes('tiktok: envStatus(["TIKTOK_ACCESS_TOKEN", "TIKTOK_ADVERTISER_ID", "TIKTOK_WORKSPACE_ID"])')) {
     throw new Error("CRM server must expose safe TikTok diagnostics and coarse env health");
   }
   if (
@@ -3566,6 +3568,17 @@ async function checkTikTokAdsDiagnosticsFoundation() {
     throw new Error("TikTok campaign dry-run must remain POST-only and owner/admin protected");
   }
   const setupAuthLine = authorization.split("\n").find((line) => line.includes('"tiktok-setup"')) || "";
+  const connectionAuthLine = authorization.split("\n").find((line) => line.includes('"tiktok-connection"')) || "";
+  if (!connectionAuthLine.includes("roles: WORKSPACE_ADMIN") || !router.includes('case "tiktok-connection":')
+    || !connections.includes("requireTikTokProvisionedWorkspace") || !connections.includes("TIKTOK_WORKSPACE_ID")
+    || !connections.includes('onConflict: "workspace_id,advertiser_id"')
+    || !server.includes('connection.state === "connected"')) {
+    throw new Error("TikTok provider access must require both admin auth and a server-provisioned workspace binding");
+  }
+  if (!connectionUi.includes("Подключить аккаунт к клинике") || !connectionUi.includes("current.signal.aborted")
+    || connectionUi.includes("localStorage") || !admin.includes("/api/crm/tiktok-connection?workspaceId=")) {
+    throw new Error("TikTok workspace connection must use safe server state, not browser storage");
+  }
   if (!setupAuthLine.includes("roles: WORKSPACE_ADMIN") || !router.includes('case "tiktok-setup":')) {
     throw new Error("TikTok setup must be protected by the existing CRM catch-all");
   }
@@ -3595,7 +3608,7 @@ async function checkTikTokAdsDiagnosticsFoundation() {
     if (admin.includes(forbidden)) throw new Error(`Admin Center must not read TikTok server secret marker ${forbidden}`);
   }
 
-  for (const marker of ["TIKTOK_ACCESS_TOKEN=", "TIKTOK_ADVERTISER_ID=", "TIKTOK_APP_ID=", "TIKTOK_APP_SECRET="]) {
+  for (const marker of ["TIKTOK_ACCESS_TOKEN=", "TIKTOK_ADVERTISER_ID=", "TIKTOK_WORKSPACE_ID=", "TIKTOK_APP_ID=", "TIKTOK_APP_SECRET="]) {
     if (!envExample.includes(marker)) throw new Error(`.env.example is missing ${marker}`);
   }
   for (const marker of [
@@ -4006,6 +4019,10 @@ async function main() {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ city: "Актобе" }),
   });
   const crmHealth = await checkJsonEndpoint("/api/crm/health");
+  await assertCrmAuthBoundary("/api/crm/tiktok-connection?workspaceId=9eb6f100-bb6a-4f99-9719-e85c34513a03", { method: "GET" });
+  await assertCrmAuthBoundary("/api/crm/tiktok-connection?workspaceId=9eb6f100-bb6a-4f99-9719-e85c34513a03", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirm: true }),
+  });
   // Security-2B: the route is refused before any business branch runs. Its
   // invariants are covered by the handler-level suites, which run without a
   // deployment; the NOT CHECKED summary at the end of the run lists what this

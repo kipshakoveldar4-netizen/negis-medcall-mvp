@@ -24,6 +24,7 @@ export type TikTokFetch = (
     method?: string;
     headers?: Record<string, string>;
     signal?: unknown;
+    redirect?: "error";
   },
 ) => Promise<TikTokFetchResponse>;
 
@@ -230,6 +231,7 @@ export async function validateTikTokAdsConnection(
   }, timeoutMs);
 
   let response: TikTokFetchResponse;
+  let rawText: string;
   try {
     response = await safeFetch(url.toString(), {
       method: "GET",
@@ -238,14 +240,15 @@ export async function validateTikTokAdsConnection(
         "Access-Token": config.accessToken,
       },
       signal: controller.signal,
+      redirect: "error",
     });
+    rawText = await response.text();
   } catch {
     return safeFailure(config, checkedAt, timedOut ? "timeout" : "upstream_unavailable");
   } finally {
     clearTimeout(timeout);
   }
 
-  const rawText = await response.text().catch(() => "");
   if (!rawText.trim()) {
     return safeFailure(config, checkedAt, response.ok ? "invalid_response" : classifyTikTokFailure(response.status, ""));
   }

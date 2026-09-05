@@ -267,6 +267,7 @@ export const CRM_ROUTE_AUTHORIZATION: Readonly<Record<string, RouteAuthorization
   // all stay owner/admin protected until the live adapter and audit model are
   // approved.
   "tiktok-validate": { kind: "browser", methods: ["POST"], roles: WORKSPACE_ADMIN },
+  "tiktok-connection": { kind: "browser", methods: ["GET", "POST"], roles: WORKSPACE_ADMIN },
   "tiktok-dry-run": { kind: "browser", methods: ["POST"], roles: WORKSPACE_ADMIN },
   "tiktok-setup": { kind: "browser", methods: ["POST"], roles: WORKSPACE_ADMIN },
   "ads-ai-fill": { kind: "browser", methods: ["POST"], permissions: { POST: "manage_marketing" } },

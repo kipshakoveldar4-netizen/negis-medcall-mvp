@@ -37,6 +37,7 @@ type FetchCall = {
     method?: string;
     headers?: Record<string, string>;
     signal?: unknown;
+    redirect?: "error";
   };
 };
 
@@ -51,11 +52,29 @@ type DiagnosticsModule = {
       text: () => Promise<string>;
     }>;
     now?: () => Date;
+    timeoutMs?: number;
   }): Promise<Diagnostic>;
 };
 
 const diagnostics = ((imported as { default?: unknown }).default ?? imported) as DiagnosticsModule;
 const NOW = new Date("2026-09-03T10:00:00.000Z");
+
+test("advertiser verification forbids redirects and applies timeout to the response body", async () => {
+  const result = await diagnostics.validateTikTokAdsConnection({
+    env: { TIKTOK_ACCESS_TOKEN: "private-token", TIKTOK_ADVERTISER_ID: "7123456789012345678" },
+    timeoutMs: 1000,
+    fetchImpl: async (_url, init) => {
+      assert.equal(init?.redirect, "error");
+      const signal = init?.signal as AbortSignal;
+      return { ok: true, status: 200, text: () => new Promise<string>((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(new Error("private upstream error")), { once: true });
+      }) };
+    },
+  });
+  assert.equal(result.connected, false);
+  assert.equal(result.errorCode, "timeout");
+  assert.doesNotMatch(JSON.stringify(result), /private-token|private upstream error/);
+});
 const ACCESS_TOKEN = "test-access-token-never-returned";
 const ADVERTISER_ID = "7123456789012345678";
 const env = {

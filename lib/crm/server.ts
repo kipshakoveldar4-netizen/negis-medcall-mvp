@@ -69,9 +69,10 @@ import {
   type MetaInsightsSafeErrorCode,
   type NormalizedMetaInsightRow,
 } from "../meta/insights";
-import { getTikTokAdsConfig, validateTikTokAdsConnection } from "../tiktok/diagnostics";
+import { validateTikTokAdsConnection } from "../tiktok/diagnostics";
 import { buildTikTokCampaignDryRun } from "../tiktok/campaign";
 import { readTikTokVerifiedSetup, verifyTikTokSetup } from "../tiktok/setup";
+import { connectTikTokAccount, readTikTokConnection, requireTikTokProvisionedWorkspace, TikTokConnectionError } from "../tiktok/connections";
 
 export type CrmResource =
   | "clients"
@@ -7573,8 +7574,31 @@ export async function handleTikTokValidate(req: VercelRequest, res: VercelRespon
   // This check is deliberately read-only. Authorization is resolved by the
   // CRM catch-all before dispatch; only safe account metadata leaves the
   // server, and no campaign/ad group/ad endpoint is called here.
-  const diagnostic = await validateTikTokAdsConnection();
-  return sendJson(res, 200, success("supabase", { ...diagnostic }));
+  res.setHeader("Cache-Control", "no-store");
+  try {
+    requireTikTokProvisionedWorkspace(readWorkspaceId(req, {}));
+    const diagnostic = await validateTikTokAdsConnection();
+    return sendJson(res, 200, success("supabase", { ...diagnostic }));
+  } catch (error) { return sendTikTokConnectionError(res, error); }
+}
+
+function sendTikTokConnectionError(res: VercelResponse, error: unknown) {
+  const safe = error instanceof TikTokConnectionError ? error
+    : new TikTokConnectionError(503, "connection_unavailable", "Не удалось проверить подключение TikTok. Повторите позже.");
+  return sendJson(res, safe.status, { ...errorBody(safe.message, []), code: safe.code });
+}
+
+export async function handleTikTokConnection(req: VercelRequest, res: VercelResponse) {
+  res.setHeader("Cache-Control", "no-store");
+  if (req.method !== "GET" && req.method !== "POST") return sendJson(res, 405, errorBody("Method not allowed", ["Use GET or POST"]));
+  const workspaceId = readWorkspaceId(req, {});
+  if (req.method === "POST" && asRecord(req.body).confirm !== true) {
+    return sendJson(res, 400, errorBody("Validation error", ["Подтвердите подключение аккаунта к клинике."]));
+  }
+  try {
+    const summary = req.method === "POST" ? await connectTikTokAccount(workspaceId) : await readTikTokConnection(workspaceId);
+    return sendJson(res, 200, success("supabase", { ...summary }));
+  } catch (error) { return sendTikTokConnectionError(res, error); }
 }
 
 export async function handleTikTokDryRun(req: VercelRequest, res: VercelResponse) {
@@ -7585,17 +7609,20 @@ export async function handleTikTokDryRun(req: VercelRequest, res: VercelResponse
   // This is a pure mapping preview. It intentionally performs no TikTok API
   // call and never reads an advertiser, identity or media identifier into the
   // response. The future live adapter will resolve those values server-side.
-  const config = getTikTokAdsConfig();
   const body = asRecord(req.body);
   const brief = Object.keys(asRecord(body.brief)).length ? asRecord(body.brief) : body;
-  const verified = readTikTokVerifiedSetup(readWorkspaceId(req, body), readString(brief.city));
-  const dryRun = buildTikTokCampaignDryRun(asRecord(req.body), {
-    advertiserConfigured: config.configured,
-    ...verified,
-    uploadedVideoIdAvailable: false,
-  });
-
-  return sendJson(res, 200, success("supabase", { ...dryRun }));
+  res.setHeader("Cache-Control", "no-store");
+  try {
+    const connection = await readTikTokConnection(readWorkspaceId(req, body));
+    const verified = connection.state === "connected"
+      ? readTikTokVerifiedSetup(readWorkspaceId(req, body), readString(brief.city)) : {};
+    const dryRun = buildTikTokCampaignDryRun(body, {
+      advertiserConfigured: connection.state === "connected",
+      ...verified,
+      uploadedVideoIdAvailable: false,
+    });
+    return sendJson(res, 200, success("supabase", { ...dryRun }));
+  } catch (error) { return sendTikTokConnectionError(res, error); }
 }
 
 export async function handleTikTokSetup(req: VercelRequest, res: VercelResponse) {
@@ -7608,11 +7635,13 @@ export async function handleTikTokSetup(req: VercelRequest, res: VercelResponse)
   const workspaceId = readWorkspaceId(req, body);
   res.setHeader("Cache-Control", "no-store");
   try {
+    const connection = await readTikTokConnection(workspaceId);
+    if (connection.state !== "connected") {
+      throw new TikTokConnectionError(409, "connection_required", "Сначала подключите и проверьте аккаунт TikTok для этой клиники.");
+    }
     const summary = await verifyTikTokSetup(workspaceId, city);
     return sendJson(res, 200, success("supabase", { ...summary }));
-  } catch {
-    return sendJson(res, 503, errorBody("TikTok check unavailable", ["Не удалось проверить TikTok. Повторите позже."]));
-  }
+  } catch (error) { return sendTikTokConnectionError(res, error); }
 }
 
 export async function handleMetaStatus(req: VercelRequest, res: VercelResponse) {
@@ -8122,7 +8151,7 @@ export async function handleCrmHealth(req: VercelRequest, res: VercelResponse) {
     elevenlabs: envStatus(["ELEVENLABS_API_KEY", "ELEVENLABS_VOICE_ID"]),
     heygen: singleEnvStatus("HEYGEN_API_KEY"),
     tapnow: singleEnvStatus("TAPNOW_API_KEY"),
-    tiktok: envStatus(["TIKTOK_ACCESS_TOKEN", "TIKTOK_ADVERTISER_ID"]),
+    tiktok: envStatus(["TIKTOK_ACCESS_TOKEN", "TIKTOK_ADVERTISER_ID", "TIKTOK_WORKSPACE_ID"]),
     meta: envStatus([
       "META_BUSINESS_ID",
       "META_APP_ID",

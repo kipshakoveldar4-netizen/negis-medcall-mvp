@@ -3,6 +3,8 @@ import { Link, useLocation } from "wouter";
 import { PlanCalculator } from "@/components/admin/PlanCalculator";
 import { VerticalSwitch } from "@/components/admin/VerticalSwitch";
 import { TikTokSetupCheck } from "@/components/admin/TikTokSetupCheck";
+import { TikTokConnection } from "@/components/admin/TikTokConnection";
+import type { TikTokConnectionSummary } from "../../../../lib/tiktok/connections";
 import type { TikTokSetupSummary } from "../../../../lib/tiktok/setup";
 import {
   AlertTriangle,
@@ -3005,6 +3007,21 @@ export default function AdminCenter() {
               />
             </label>
           </div>
+
+          <TikTokConnection
+            key={`connection:${workspaceId}:${serverAdminAuth.status}`}
+            enabled={serverAdminAuth.status === "confirmed"}
+            request={async (save, signal) => {
+              const response = await adminCrmRequest<TikTokConnectionSummary>(
+                `/api/crm/tiktok-connection?workspaceId=${encodeURIComponent(workspaceId)}`,
+                { method: save ? "POST" : "GET", signal,
+                  ...(save ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirm: true }) } : {}) },
+              );
+              if (!response.data) throw new Error("Не удалось проверить подключение TikTok.");
+              return response.data;
+            }}
+            onChanged={() => { setTikTokDryRun(null); setTikTokDryRunMessage(""); }}
+          />
 
           <TikTokSetupCheck
             key={`${workspaceId}:${tiktokDryRunForm.city}:${serverAdminAuth.status}`}

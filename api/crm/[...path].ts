@@ -18,6 +18,7 @@ import {
   handleMetaValidate,
   handleStorageHealth,
   handleTikTokDryRun,
+  handleTikTokConnection,
   handleTikTokSetup,
   handleTikTokValidate,
   handleVideoJobs,
@@ -238,6 +239,8 @@ async function dispatch(
       return handleMetaCityKey(req, res);
     case "tiktok-validate":
       return handleTikTokValidate(req, res);
+    case "tiktok-connection":
+      return handleTikTokConnection(req, res);
     case "tiktok-dry-run":
       return handleTikTokDryRun(req, res);
     case "tiktok-setup":
