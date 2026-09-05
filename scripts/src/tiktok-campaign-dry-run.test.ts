@@ -49,6 +49,7 @@ type CampaignModule = {
     context?: {
       advertiserConfigured?: boolean;
       identityConfigured?: boolean;
+      identityType?: "CUSTOMIZED_USER" | "TT_USER" | "BC_AUTH_TT";
       locationIds?: readonly string[];
       uploadedVideoIdAvailable?: boolean;
     },
@@ -197,4 +198,21 @@ test("exports official v1.3 create paths but contains no network implementation"
   const source = await readFile(modulePath, "utf8");
   assert.doesNotMatch(source, /\bfetch\s*\(/);
   assert.doesNotMatch(source, /console\.(?:log|error)/);
+});
+
+test("uses only server-verified setup context and preserves the identity type", () => {
+  const forged = { ...validInput(), identityConfigured: true, locationIds: ["999999"] };
+  const unverified = campaign.buildTikTokCampaignDryRun(forged);
+  assert.ok(unverified.readiness.blockers.some((item) => item.code === "identity_not_configured"));
+  assert.ok(unverified.readiness.blockers.some((item) => item.code === "location_not_resolved"));
+  for (const identityType of ["TT_USER", "BC_AUTH_TT"] as const) {
+    const verified = campaign.buildTikTokCampaignDryRun(validInput(), {
+      identityConfigured: true, identityType, locationIds: ["123456"],
+    });
+    assert.equal(creativeFrom(verified).identity_type, identityType);
+    assert.equal(verified.payloadTemplate.campaign.operation_status, "DISABLE");
+    assert.equal(verified.launchEnabled, false);
+    assert.equal("identity_authorized_bc_id" in creativeFrom(verified), identityType === "BC_AUTH_TT");
+    assert.equal(JSON.stringify(verified).includes("123456"), false);
+  }
 });

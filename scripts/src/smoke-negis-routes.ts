@@ -3499,6 +3499,8 @@ async function checkAdvertisingHubSource() {
 async function checkTikTokAdsDiagnosticsFoundation() {
   const helper = await readFile(path.join(repoRoot, "lib", "tiktok", "diagnostics.ts"), "utf8");
   const campaignMapper = await readFile(path.join(repoRoot, "lib", "tiktok", "campaign.ts"), "utf8");
+  const setup = await readFile(path.join(repoRoot, "lib", "tiktok", "setup.ts"), "utf8");
+  const setupUi = await readFile(path.join(repoRoot, "artifacts", "negis", "src", "components", "admin", "TikTokSetupCheck.tsx"), "utf8");
   const server = await readFile(path.join(repoRoot, "lib", "crm", "server.ts"), "utf8");
   const router = await readFile(path.join(repoRoot, "api", "crm", "[...path].ts"), "utf8");
   const authorization = await readFile(path.join(repoRoot, "lib", "crm", "authorization.ts"), "utf8");
@@ -3562,6 +3564,16 @@ async function checkTikTokAdsDiagnosticsFoundation() {
   const dryRunAuthLine = authorization.split("\n").find((line) => line.includes('"tiktok-dry-run"')) || "";
   if (!dryRunAuthLine.includes('methods: ["POST"]') || !dryRunAuthLine.includes("roles: WORKSPACE_ADMIN")) {
     throw new Error("TikTok campaign dry-run must remain POST-only and owner/admin protected");
+  }
+  const setupAuthLine = authorization.split("\n").find((line) => line.includes('"tiktok-setup"')) || "";
+  if (!setupAuthLine.includes("roles: WORKSPACE_ADMIN") || !router.includes('case "tiktok-setup":')) {
+    throw new Error("TikTok setup must be protected by the existing CRM catch-all");
+  }
+  if (!server.includes("readTikTokVerifiedSetup(readWorkspaceId(req, body)") || !setup.includes("selectTikTokCity")) {
+    throw new Error("TikTok dry-run must consume server-verified, workspace-scoped evidence");
+  }
+  if (!setupUi.includes("Проверить город и профиль") || !setupUi.includes("controller.signal.aborted")) {
+    throw new Error("TikTok setup UI must handle checks and stale responses");
   }
 
   for (const marker of [
@@ -3989,6 +4001,9 @@ async function main() {
       dailyBudget: "5000",
       currency: "KZT",
     }),
+  });
+  await assertCrmAuthBoundary("/api/crm/tiktok-setup?workspaceId=9eb6f100-bb6a-4f99-9719-e85c34513a03", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ city: "Актобе" }),
   });
   const crmHealth = await checkJsonEndpoint("/api/crm/health");
   // Security-2B: the route is refused before any business branch runs. Its

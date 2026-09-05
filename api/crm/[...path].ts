@@ -18,6 +18,7 @@ import {
   handleMetaValidate,
   handleStorageHealth,
   handleTikTokDryRun,
+  handleTikTokSetup,
   handleTikTokValidate,
   handleVideoJobs,
   handleVideoProcessingJobs,
@@ -239,6 +240,8 @@ async function dispatch(
       return handleTikTokValidate(req, res);
     case "tiktok-dry-run":
       return handleTikTokDryRun(req, res);
+    case "tiktok-setup":
+      return handleTikTokSetup(req, res);
     case "meta-insights-sync":
       return handleMetaInsightsSync(req, res);
     case "meta-insights-background-cycle":

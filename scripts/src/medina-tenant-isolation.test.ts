@@ -686,7 +686,7 @@ test("K3 Meta Insights stays administrator-only", async () => {
 
 test("K3a TikTok diagnostics and campaign dry-run stay administrator-only", async () => {
   await withRouter({ memberships: [memberBReception] }, async (ctx) => {
-    for (const segment of ["tiktok-validate", "tiktok-dry-run"]) {
+    for (const segment of ["tiktok-validate", "tiktok-dry-run", "tiktok-setup"]) {
       const { res, log } = await ctx.call({
         segments: [segment],
         method: "POST",

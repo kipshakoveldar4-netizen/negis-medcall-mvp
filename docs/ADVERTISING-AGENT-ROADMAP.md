@@ -68,8 +68,10 @@
   контракт, старые payload поддерживаются, а Meta/TikTok разделены явно.
 - TikTok-specific mapper и admin-only dry-run добавлены: они собирают отдельные
   campaign, ad group и ad templates, в каждом явно установлен `DISABLE`.
-- Следующий этап — resolver географии, identity, upload video с получением
-  `video_id`, audit trail и только затем реальный disabled-first запуск.
+- Проверка города и настроенного профиля добавлена: сервер проверяет точный
+  доступный TikTok CITY и identity, сохраняет короткое подтверждение для dry-run.
+- Следующий этап — upload video с получением `video_id`, постоянное подключение
+  рекламодателя к workspace, audit trail и реальный disabled-first запуск.
 - До завершения этих зависимостей TikTok не показывается как платформа, готовая
   создавать рекламу, даже если доступ к advertiser account подтверждён.
 

@@ -71,6 +71,7 @@ import {
 } from "../meta/insights";
 import { getTikTokAdsConfig, validateTikTokAdsConnection } from "../tiktok/diagnostics";
 import { buildTikTokCampaignDryRun } from "../tiktok/campaign";
+import { readTikTokVerifiedSetup, verifyTikTokSetup } from "../tiktok/setup";
 
 export type CrmResource =
   | "clients"
@@ -7585,14 +7586,33 @@ export async function handleTikTokDryRun(req: VercelRequest, res: VercelResponse
   // call and never reads an advertiser, identity or media identifier into the
   // response. The future live adapter will resolve those values server-side.
   const config = getTikTokAdsConfig();
+  const body = asRecord(req.body);
+  const brief = Object.keys(asRecord(body.brief)).length ? asRecord(body.brief) : body;
+  const verified = readTikTokVerifiedSetup(readWorkspaceId(req, body), readString(brief.city));
   const dryRun = buildTikTokCampaignDryRun(asRecord(req.body), {
     advertiserConfigured: config.configured,
-    identityConfigured: Boolean(readEnvValue("TIKTOK_IDENTITY_ID")),
-    locationIds: [],
+    ...verified,
     uploadedVideoIdAvailable: false,
   });
 
   return sendJson(res, 200, success("supabase", { ...dryRun }));
+}
+
+export async function handleTikTokSetup(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== "POST") return sendJson(res, 405, errorBody("Method not allowed", ["Use POST"]));
+  const body = asRecord(req.body);
+  const city = typeof body.city === "string" ? body.city.trim() : "";
+  if (!/^[\p{L}\p{M} .'-]{2,100}$/u.test(city)) {
+    return sendJson(res, 400, errorBody("Validation error", ["Укажите название города (2–100 символов)."]));
+  }
+  const workspaceId = readWorkspaceId(req, body);
+  res.setHeader("Cache-Control", "no-store");
+  try {
+    const summary = await verifyTikTokSetup(workspaceId, city);
+    return sendJson(res, 200, success("supabase", { ...summary }));
+  } catch {
+    return sendJson(res, 503, errorBody("TikTok check unavailable", ["Не удалось проверить TikTok. Повторите позже."]));
+  }
 }
 
 export async function handleMetaStatus(req: VercelRequest, res: VercelResponse) {

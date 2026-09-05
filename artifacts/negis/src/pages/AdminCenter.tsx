@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, useLocation } from "wouter";
 import { PlanCalculator } from "@/components/admin/PlanCalculator";
 import { VerticalSwitch } from "@/components/admin/VerticalSwitch";
+import { TikTokSetupCheck } from "@/components/admin/TikTokSetupCheck";
+import type { TikTokSetupSummary } from "../../../../lib/tiktok/setup";
 import {
   AlertTriangle,
   Bot,
@@ -689,6 +691,7 @@ async function adminCrmRequest<T>(
     method?: string;
     headers?: Record<string, string>;
     body?: string;
+    signal?: AbortSignal;
   },
 ): Promise<ApiResponse<T>> {
   // The session is checked up front so the operator gets this message rather
@@ -3002,6 +3005,22 @@ export default function AdminCenter() {
               />
             </label>
           </div>
+
+          <TikTokSetupCheck
+            key={`${workspaceId}:${tiktokDryRunForm.city}:${serverAdminAuth.status}`}
+            enabled={serverAdminAuth.status === "confirmed"}
+            city={tiktokDryRunForm.city}
+            check={async (signal) => {
+              const response = await adminCrmRequest<TikTokSetupSummary>(
+                `/api/crm/tiktok-setup?workspaceId=${encodeURIComponent(workspaceId)}`,
+                { method: "POST", headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ city: tiktokDryRunForm.city }), signal },
+              );
+              if (!response.data) throw new Error("TikTok verification unavailable");
+              return response.data;
+            }}
+            onChecked={() => { setTikTokDryRun(null); setTikTokDryRunMessage(""); }}
+          />
 
           <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:items-center">
             <button

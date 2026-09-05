@@ -1,4 +1,5 @@
 import { URL } from "node:url";
+import type { TikTokIdentityType } from "./setup";
 import {
   parseAdvertisingCampaignPrefill,
   type AdvertisingCampaignPrefill,
@@ -36,6 +37,7 @@ export type TikTokDryRunIssue = {
 export type TikTokCampaignDryRunContext = {
   advertiserConfigured?: boolean;
   identityConfigured?: boolean;
+  identityType?: TikTokIdentityType;
   locationIds?: readonly string[];
   uploadedVideoIdAvailable?: boolean;
 };
@@ -193,7 +195,7 @@ export function buildTikTokCampaignDryRun(
     providerDependencies.push(issue("advertiser_not_configured", "Рекламный аккаунт TikTok ещё не подтверждён сервером."));
   }
   if (!context.identityConfigured) {
-    providerDependencies.push(issue("identity_not_configured", "Нужно подключить TikTok identity для объявления."));
+    providerDependencies.push(issue("identity_not_configured", "Подтвердите рекламный профиль TikTok перед проверкой плана."));
   }
   if (locationIds.length === 0) {
     providerDependencies.push(issue("location_not_resolved", `Нужно получить TikTok location ID для города ${city || "показа"}.`));
@@ -235,7 +237,8 @@ export function buildTikTokCampaignDryRun(
         {
           ad_name: campaignName ? `${campaignName} · объявление` : "__AD_NAME_REQUIRED__",
           ad_format: "SINGLE_VIDEO",
-          identity_type: "CUSTOMIZED_USER",
+          identity_type: context.identityType || "CUSTOMIZED_USER",
+          ...(context.identityType === "BC_AUTH_TT" && context.identityConfigured ? { identity_authorized_bc_id: "__SERVER_BUSINESS_CENTER_ID__" } : {}),
           ...(context.identityConfigured ? { identity_id: "__SERVER_IDENTITY_ID__" } : {}),
           ...(context.uploadedVideoIdAvailable ? { video_id: "__UPLOADED_TIKTOK_VIDEO_ID__" } : {}),
           ad_text: adText || "__AD_TEXT_REQUIRED__",

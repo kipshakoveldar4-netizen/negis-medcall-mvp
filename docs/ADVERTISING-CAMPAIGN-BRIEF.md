@@ -53,6 +53,8 @@ campaign/ad group/ad. Он не создаёт объекты у провайд�
 ## Следующий этап
 
 Серверная диагностика TikTok credentials и advertiser access и отдельный
-admin-only dry-run доступны в Admin Center. Следующий безопасный слой — resolver
-географии, TikTok identity и upload вертикального видео с получением `video_id`.
+admin-only dry-run доступны в Admin Center. Проверка географии и настроенного
+TikTok identity добавлена отдельно; dry-run использует краткосрочное серверное
+подтверждение для выбранной клиники и города. Следующий слой — upload
+вертикального видео с получением `video_id` и привязка advertiser к workspace.
 До этого интерфейс не обещает реальный запуск в TikTok.

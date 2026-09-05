@@ -264,10 +264,11 @@ export const CRM_ROUTE_AUTHORIZATION: Readonly<Record<string, RouteAuthorization
   "meta-city-key": { kind: "browser", methods: ["GET", "POST"], permissions: { GET: "view_marketing", POST: "view_marketing" } },
   // TikTok foundation reads safe advertiser metadata and can build a pure
   // disabled-first payload template. Neither route creates provider objects;
-  // both stay owner/admin protected until the live adapter and audit model are
+  // all stay owner/admin protected until the live adapter and audit model are
   // approved.
   "tiktok-validate": { kind: "browser", methods: ["POST"], roles: WORKSPACE_ADMIN },
   "tiktok-dry-run": { kind: "browser", methods: ["POST"], roles: WORKSPACE_ADMIN },
+  "tiktok-setup": { kind: "browser", methods: ["POST"], roles: WORKSPACE_ADMIN },
   "ads-ai-fill": { kind: "browser", methods: ["POST"], permissions: { POST: "manage_marketing" } },
   "ad-creative-upload": { kind: "browser", methods: ["POST"], permissions: { POST: "manage_marketing" } },
   "ad-creative-meta-upload": { kind: "browser", methods: ["POST"], permissions: { POST: "manage_marketing" } },
