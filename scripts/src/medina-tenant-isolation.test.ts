@@ -686,7 +686,7 @@ test("K3 Meta Insights stays administrator-only", async () => {
 
 test("K3a TikTok diagnostics and campaign dry-run stay administrator-only", async () => {
   await withRouter({ memberships: [memberBReception] }, async (ctx) => {
-    for (const segment of ["tiktok-validate", "tiktok-dry-run", "tiktok-setup", "tiktok-connection"]) {
+    for (const segment of ["tiktok-validate", "tiktok-dry-run", "tiktok-setup", "tiktok-connection", "tiktok-videos"]) {
       const { res, log } = await ctx.call({
         segments: [segment],
         method: "POST",
@@ -704,7 +704,7 @@ test("K3b TikTok provisioning cannot be spoofed by an owner of a different works
   process.env.TIKTOK_WORKSPACE_ID = WORKSPACE_B;
   try {
     await withRouter({ memberships: [memberA] }, async (ctx) => {
-      for (const segment of ["tiktok-validate", "tiktok-dry-run", "tiktok-setup", "tiktok-connection"]) {
+      for (const segment of ["tiktok-validate", "tiktok-dry-run", "tiktok-setup", "tiktok-connection", "tiktok-videos"]) {
         const { res, log } = await ctx.call({ segments: [segment], method: "POST",
           query: { workspaceId: WORKSPACE_A }, body: { confirm: true, city: "Актобе", workspaceId: WORKSPACE_B } });
         assert.equal(res.statusCode, 403, segment);
@@ -748,6 +748,60 @@ test("K3c TikTok connection GET is workspace-scoped and returns only the safe DT
     for (const [key, value] of Object.entries({ TIKTOK_WORKSPACE_ID: previous.workspace, TIKTOK_ADVERTISER_ID: previous.advertiser, TIKTOK_ACCESS_TOKEN: previous.token })) {
       if (value === undefined) delete process.env[key]; else process.env[key] = value;
     }
+  }
+});
+
+test("K3d TikTok video library requires verified owner/admin for GET and POST", async () => {
+  for (const method of ["GET", "POST"]) {
+    await withRouter({}, async (ctx) => {
+      assert.equal((await ctx.call({ segments: ["tiktok-videos"], method, token: null,
+        query: { workspaceId: WORKSPACE_A }, body: { confirm: true } })).res.statusCode, 401);
+    });
+    await withRouter({ authOk: false }, async (ctx) => {
+      assert.equal((await ctx.call({ segments: ["tiktok-videos"], method,
+        query: { workspaceId: WORKSPACE_A }, body: { confirm: true } })).res.statusCode, 401);
+    });
+    await withRouter({ memberships: [memberBReception] }, async (ctx) => {
+      assert.equal((await ctx.call({ segments: ["tiktok-videos"], method,
+        query: { workspaceId: WORKSPACE_B }, body: { confirm: true } })).res.statusCode, 403);
+    });
+  }
+});
+
+test("K3e TikTok video GET returns safe workspace evidence and POST stays off by default", async () => {
+  const settings = { TIKTOK_WORKSPACE_ID: WORKSPACE_A, TIKTOK_ADVERTISER_ID: "7123456789012345678",
+    TIKTOK_ACCESS_TOKEN: "private-provider-token", TIKTOK_VIDEO_UPLOAD_ENABLED: "false" };
+  const previous = Object.fromEntries(Object.keys(settings).map(key => [key, process.env[key]]));
+  Object.assign(process.env, settings);
+  const revision = new Date().toISOString();
+  try {
+    await withRouter({ memberships: [memberA], rows: {
+      tiktok_ad_account_connections: [{ workspace_id: WORKSPACE_A, advertiser_id: settings.TIKTOK_ADVERTISER_ID,
+        enabled: true, currency: "KZT", account_timezone: "Asia/Almaty", verified_at: revision }],
+      ad_creative_assets: [{ id: WORKSPACE_B, workspace_id: WORKSPACE_A, file_name: "Ролик.mp4", file_type: "video",
+        mime_type: "video/mp4", file_size: 1000, storage_bucket: "ad-creatives", storage_path: `${WORKSPACE_A}/video.mp4`,
+        status: "ready", updated_at: revision, public_url: "https://private.example/never-return" }],
+      tiktok_video_uploads: [{ id: WORKSPACE_A, workspace_id: WORKSPACE_A, advertiser_id: settings.TIKTOK_ADVERTISER_ID,
+        asset_id: WORKSPACE_B, asset_revision: revision, status: "uploaded", video_id: "v070private", attempt: 1,
+        started_at: revision, finished_at: revision }],
+    } }, async (ctx) => {
+      const library = await ctx.call({ segments: ["tiktok-videos"], query: { workspaceId: WORKSPACE_A } });
+      assert.equal(library.res.statusCode, 200);
+      assert.equal((library.res.body.data as { enabled: boolean }).enabled, false);
+      const evidence = await ctx.call({ segments: ["tiktok-videos"], query: { workspaceId: WORKSPACE_A, assetId: WORKSPACE_B } });
+      assert.equal(evidence.res.statusCode, 200);
+      assert.equal((evidence.res.body.data as { videoIdAvailable: boolean }).videoIdAvailable, true);
+      for (const result of [library, evidence]) {
+        assert.doesNotMatch(JSON.stringify(result.res.body), /v070private|private-provider-token|7123456789012345678|https:|storage_path/);
+        for (const query of businessQueries(result.log)) assert.equal(query.filters.workspace_id, WORKSPACE_A);
+      }
+      const blocked = await ctx.call({ segments: ["tiktok-videos"], method: "POST", query: { workspaceId: WORKSPACE_A },
+        body: { confirm: true, assetId: WORKSPACE_B, video_id: "forged", publicUrl: "https://untrusted.example" } });
+      assert.equal(blocked.res.statusCode, 409);
+      assert.equal(blocked.res.body.code, "upload_disabled");
+    });
+  } finally {
+    for (const [key, value] of Object.entries(previous)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
   }
 });
 

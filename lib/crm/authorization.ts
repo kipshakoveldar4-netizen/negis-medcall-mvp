@@ -270,6 +270,7 @@ export const CRM_ROUTE_AUTHORIZATION: Readonly<Record<string, RouteAuthorization
   "tiktok-connection": { kind: "browser", methods: ["GET", "POST"], roles: WORKSPACE_ADMIN },
   "tiktok-dry-run": { kind: "browser", methods: ["POST"], roles: WORKSPACE_ADMIN },
   "tiktok-setup": { kind: "browser", methods: ["POST"], roles: WORKSPACE_ADMIN },
+  "tiktok-videos": { kind: "browser", methods: ["GET", "POST"], roles: WORKSPACE_ADMIN },
   "ads-ai-fill": { kind: "browser", methods: ["POST"], permissions: { POST: "manage_marketing" } },
   "ad-creative-upload": { kind: "browser", methods: ["POST"], permissions: { POST: "manage_marketing" } },
   "ad-creative-meta-upload": { kind: "browser", methods: ["POST"], permissions: { POST: "manage_marketing" } },

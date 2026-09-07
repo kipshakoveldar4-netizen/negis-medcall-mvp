@@ -3497,6 +3497,16 @@ async function checkAdvertisingHubSource() {
 }
 
 async function checkTikTokAdsDiagnosticsFoundation() {
+  const video = await readFile(path.join(repoRoot, "lib/tiktok/videoUpload.ts"), "utf8");
+  const videoAssets = await readFile(path.join(repoRoot, "lib/tiktok/videoAssets.ts"), "utf8");
+  const videoUi = await readFile(path.join(repoRoot, "artifacts/negis/src/components/admin/TikTokVideoUpload.tsx"), "utf8");
+  for (const marker of ["UPLOAD_BY_URL", "/file/video/ad/upload/", 'redirect: "error"', "TIKTOK_VIDEO_UPLOAD_ENABLED"]) {
+    if (!video.includes(marker)) throw new Error(`TikTok video upload guard missing: ${marker}`);
+  }
+  if (!videoAssets.includes('status: "uploading"') || !videoAssets.includes("requireTikTokProvisionedWorkspace")
+    || !videoAssets.includes("source_fingerprint") || !videoUi.includes("Подтверждаю передачу") || videoUi.includes("localStorage")) {
+    throw new Error("TikTok upload must use protected server receipts and explicit confirmation");
+  }
   const connections = await readFile(path.join(repoRoot, "lib", "tiktok", "connections.ts"), "utf8");
   const connectionUi = await readFile(path.join(repoRoot, "artifacts", "negis", "src", "components", "admin", "TikTokConnection.tsx"), "utf8");
   const helper = await readFile(path.join(repoRoot, "lib", "tiktok", "diagnostics.ts"), "utf8");
@@ -3506,6 +3516,9 @@ async function checkTikTokAdsDiagnosticsFoundation() {
   const server = await readFile(path.join(repoRoot, "lib", "crm", "server.ts"), "utf8");
   const router = await readFile(path.join(repoRoot, "api", "crm", "[...path].ts"), "utf8");
   const authorization = await readFile(path.join(repoRoot, "lib", "crm", "authorization.ts"), "utf8");
+  if (!router.includes('case "tiktok-videos":') || !authorization.includes('"tiktok-videos": { kind: "browser", methods: ["GET", "POST"], roles: WORKSPACE_ADMIN }')) {
+    throw new Error("TikTok video must stay inside the admin-protected catch-all");
+  }
   const admin = await readFile(path.join(repoRoot, "artifacts", "negis", "src", "pages", "AdminCenter.tsx"), "utf8");
   const envExample = await readFile(path.join(repoRoot, ".env.example"), "utf8");
   const docs = await readFile(path.join(repoRoot, "docs", "TIKTOK-ADS-FOUNDATION.md"), "utf8");
@@ -4020,6 +4033,10 @@ async function main() {
   });
   const crmHealth = await checkJsonEndpoint("/api/crm/health");
   await assertCrmAuthBoundary("/api/crm/tiktok-connection?workspaceId=9eb6f100-bb6a-4f99-9719-e85c34513a03", { method: "GET" });
+  await assertCrmAuthBoundary("/api/crm/tiktok-videos?workspaceId=9eb6f100-bb6a-4f99-9719-e85c34513a03", { method: "GET" });
+  await assertCrmAuthBoundary("/api/crm/tiktok-videos?workspaceId=9eb6f100-bb6a-4f99-9719-e85c34513a03", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirm: true }),
+  });
   await assertCrmAuthBoundary("/api/crm/tiktok-connection?workspaceId=9eb6f100-bb6a-4f99-9719-e85c34513a03", {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirm: true }),
   });

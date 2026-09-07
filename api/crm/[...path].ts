@@ -37,6 +37,7 @@ import { handleCrmChangeLog } from "../../lib/crm/change-log";
 import { handleMyClients } from "../../lib/crm/my-clients";
 import { handlePushSubscriptions } from "../../lib/crm/push-subscriptions";
 import { handleSalonStats } from "../../lib/crm/salon-stats";
+import { handleTikTokVideos } from "../../lib/crm/tiktok-videos";
 import {
   requireAuthenticatedUser,
   requireWorkspaceAccess,
@@ -245,6 +246,8 @@ async function dispatch(
       return handleTikTokDryRun(req, res);
     case "tiktok-setup":
       return handleTikTokSetup(req, res);
+    case "tiktok-videos":
+      return handleTikTokVideos(req, res);
     case "meta-insights-sync":
       return handleMetaInsightsSync(req, res);
     case "meta-insights-background-cycle":

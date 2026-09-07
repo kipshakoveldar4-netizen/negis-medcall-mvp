@@ -4,6 +4,8 @@ import { PlanCalculator } from "@/components/admin/PlanCalculator";
 import { VerticalSwitch } from "@/components/admin/VerticalSwitch";
 import { TikTokSetupCheck } from "@/components/admin/TikTokSetupCheck";
 import { TikTokConnection } from "@/components/admin/TikTokConnection";
+import { TikTokVideoUpload } from "@/components/admin/TikTokVideoUpload";
+import type { TikTokVideoList, TikTokVideoSummary } from "../../../../lib/tiktok/videoAssets";
 import type { TikTokConnectionSummary } from "../../../../lib/tiktok/connections";
 import type { TikTokSetupSummary } from "../../../../lib/tiktok/setup";
 import {
@@ -868,6 +870,7 @@ export default function AdminCenter() {
   }));
   const [tiktokDryRun, setTikTokDryRun] = useState<TikTokDryRunResult | null>(null);
   const [tiktokDryRunMessage, setTikTokDryRunMessage] = useState("");
+  const [tiktokVideoSelection, setTikTokVideoSelection] = useState<{ workspaceId: string; assetId: string } | null>(null);
   const [loading, setLoading] = useState<Record<string, boolean>>({});
   const [metaCityKeyInput, setMetaCityKeyInput] = useState("almaty");
   const [metaCityKeyResult, setMetaCityKeyResult] = useState<MetaCityKeyResult | null>(null);
@@ -1272,6 +1275,7 @@ export default function AdminCenter() {
             currency: tiktokDryRunForm.currency,
             destinationUrl: tiktokDryRunForm.destinationUrl,
             scheduleStartTime: tiktokDryRunForm.scheduleStartTime,
+            videoAssetId: tiktokVideoSelection?.workspaceId === workspaceId ? tiktokVideoSelection.assetId : undefined,
           }),
         },
       );
@@ -3023,6 +3027,25 @@ export default function AdminCenter() {
             onChanged={() => { setTikTokDryRun(null); setTikTokDryRunMessage(""); }}
           />
 
+          <TikTokVideoUpload
+            key={`video:${workspaceId}:${serverAdminAuth.status}`}
+            enabled={serverAdminAuth.status === "confirmed"}
+            list={async (signal) => {
+              const response = await adminCrmRequest<TikTokVideoList>(
+                `/api/crm/tiktok-videos?workspaceId=${encodeURIComponent(workspaceId)}`, { signal });
+              if (!response.data) throw new Error("Не удалось прочитать видео клиники.");
+              return response.data;
+            }}
+            request={async (assetId, transfer, retry, signal) => {
+              const response = await adminCrmRequest<TikTokVideoSummary>(
+                `/api/crm/tiktok-videos?workspaceId=${encodeURIComponent(workspaceId)}${transfer ? "" : `&assetId=${encodeURIComponent(assetId)}`}`,
+                transfer ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ assetId, confirm: true, retry }), signal } : { signal });
+              if (!response.data) throw new Error("Не удалось проверить передачу видео.");
+              return response.data;
+            }}
+            onSelected={(assetId) => { setTikTokVideoSelection({ workspaceId, assetId }); setTikTokDryRun(null); setTikTokDryRunMessage(""); }}
+          />
+
           <TikTokSetupCheck
             key={`${workspaceId}:${tiktokDryRunForm.city}:${serverAdminAuth.status}`}
             enabled={serverAdminAuth.status === "confirmed"}
@@ -3050,7 +3073,7 @@ export default function AdminCenter() {
               Проверить план без запуска
             </button>
             <p className="text-xs font-semibold text-[#64748B]">
-              Нужен вертикальный видеокреатив; upload в TikTok будет отдельным следующим этапом.
+              Переданный ролик учитывается в плане. Создание рекламной кампании остаётся отключённым.
             </p>
           </div>
 

@@ -239,6 +239,79 @@ Dry-run остаётся без provider calls: проверяет привяз�
 SQL-ограничения необходимо дополнительно проверить после применения миграции;
 локальные source checks не являются production DB gate.
 
-Следующие этапы: хранение нескольких OAuth-подключений, video upload с `video_id`,
-audit trail и disabled-first live adapter. Ни Meta launch, ни ACTIVE gating,
-ни реальные TikTok create/upload endpoints этот шаг не меняет.
+Этап привязки не менял Meta launch или ACTIVE gating. Следующий этап передачи
+видео описан ниже; создание рекламных кампаний по-прежнему не включено.
+
+## Передача видео в рекламную библиотеку TikTok
+
+Реализован отдельный opt-in upload, а не запуск рекламы. Требуются миграции
+047 и `048_tiktok_video_uploads.sql`, серверная привязка workspace, действующий
+owner/admin Bearer и `TIKTOK_VIDEO_UPLOAD_ENABLED=true`. По умолчанию флаг false.
+Наличие миграций в git не означает их применение в production.
+
+В Admin Center → Интеграции → TikTok выбирается один из последних 40 роликов
+своей клиники. GET `/api/crm/tiktok-videos?workspaceId=<uuid>` возвращает только
+названия/внутренние asset UUID и причины недоступности. GET с `assetId` читает
+журнал без provider call. POST с `{assetId,confirm:true}` передаёт выбранный ролик
+в TikTok после явного подтверждения. Для известного отказа возможен отдельный
+POST с `retry:true`, максимум три попытки на версию файла. Ни один ответ не
+содержит `video_id`, public URL, advertiser ID, токен или сырой provider response.
+
+### Проверка и передача файла
+
+- Поддерживаются готовые публичные MP4/MOV до 10 MiB. Больший файл нужно уменьшить;
+  существующий worker не перенастраивается и не гарантирует выход меньше 10 MiB.
+  Это ограниченный URL-upload этап, не multipart/resumable pipeline для больших видео.
+- Сервер читает `ad_creative_assets` с обязательным workspace-фильтром. URL из body
+  или редактируемого `public_url` не используется. Адрес собирается из серверного
+  `SUPABASE_URL` и собственного workspace storage path; только `ad-creatives`,
+  включая `optimized/<workspace>/...`. Private raw bucket, traversal, внешние
+  домены и redirects запрещены. Этот этап поддерживает стандартный `*.supabase.co`.
+- HEAD без credentials проверяет реальный Content-Type, Content-Length и сильный
+  ETag. Размер из таблицы сам по себе не разрешает передачу. Отпечаток path/ETag/
+  размера/типа хранится вместо URL. Таймаут HEAD 5 секунд.
+- Каждая подтверждённая передача заново читает доступ к advertiser у TikTok;
+  сохранённое 24-часовое подтверждение не заменяет эту проверку.
+- POST `/open_api/v1.3/file/video/ad/upload/` использует JSON `UPLOAD_BY_URL`,
+  `video_url` и уникальное имя из UUID записи передачи. Access-Token отправляется
+  только на фиксированный TikTok host. SmartFix/pre-review отключены явно.
+  Таймаут 12 секунд включает чтение body. В существующей CRM функции Vercel
+  выставлен предел 60 секунд; новая serverless function не добавляется.
+
+Основание: [TikTok Business API: Upload a video](https://business-api.tiktok.com/portal/docs?id=1737587322856449).
+Документация рекомендует URL-upload для файлов до 10 МБ. Ответ может содержать
+только video_id: метаданные появляются позже. Поэтому «Видео передано в TikTok»
+не означает прохождение модерации или готовность рекламы к показу. Проверка
+processing/displayability будет отдельным этапом.
+
+### Журнал и защита от повторов
+
+Таблица `tiktok_video_uploads` закрыта для anon/authenticated, RLS включён.
+Только сервер хранит workspace, advertiser, asset, отпечаток, версию, время,
+число попыток, безопасный error_code и полученный video_id. Meta video_id и
+изменяемая metadata файла не используются для этих данных.
+
+Перед provider POST вставляется уникальная запись по workspace/advertiser/asset/
+fingerprint. Одновременные клики не получают два разрешения на upload. Повтор
+известного отказа использует compare-and-swap по status и attempt. При таймауте,
+потере связи, невалидном success body или ошибке сохранения статус `unknown`
+блокирует автоматический повтор. Зависший `uploading` через две минуты показывается
+как unknown, а не переисполняется. Проверка библиотеки и согласование неопределённого
+результата пока выполняются оператором; кнопки «повторить всё равно» нет.
+
+Dry-run может принять `videoAssetId`, но подтверждает его только по серверной
+записи этой клиники, advertiser и текущей версии файла. При изменении metadata
+повторный HEAD может подтвердить прежний fingerprint без повторного provider upload.
+Сам dry-run не вызывает TikTok; показывает лишь placeholder вместо video_id.
+`providerReady=false`, `launchEnabled=false`, `DISABLE` и live-adapter blocker остаются.
+
+### Проверки и production gate
+
+`pnpm run test:tiktok-video-upload` исполняет provider/service тесты: MP4/MOV,
+проверку actual size, чужие пути, запрет redirects, таймаут body, безопасные ответы,
+одновременные клики, ограниченные retry, потерю persistence и устаревшую версию.
+Tenant-isolation тестирует реальный router с подменённой авторизацией. SQL/RLS
+проверки локально структурные: они не доказывают применение миграции или работу
+Postgres CAS в production. Необходимо применить 048, проверить права и duplicate
+claim в БД, затем вручную передать один согласованный небольшой ролик. Во время
+разработки реальные файлы в TikTok не передавались, production флаг не включался.

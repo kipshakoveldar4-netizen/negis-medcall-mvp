@@ -4,7 +4,8 @@
   "buildCommand": "pnpm --filter @workspace/negis run build",
   "outputDirectory": "artifacts/negis/dist/public",
   "functions": {
-    "api/content-studio/*.ts": { "maxDuration": 60 }
+    "api/content-studio/*.ts": { "maxDuration": 60 },
+    "api/crm/*.ts": { "maxDuration": 60 }
   },
   "routes": [
     {

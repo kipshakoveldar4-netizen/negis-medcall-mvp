@@ -153,6 +153,10 @@ async function main() {
   await checkLeadsPipelineMobileSource();
   await checkSalesMobileSource();
   await checkAdvertisingHubMobileSource();
+  const tikTokVideo = await readFile(join(repoRoot, "artifacts/negis/src/components/admin/TikTokVideoUpload.tsx"), "utf8");
+  for (const marker of ["min-w-0 max-w-full", "break-words", "flex-col gap-2 sm:flex-row", "min-h-11", "Подтверждаю передачу"]) {
+    if (!tikTokVideo.includes(marker)) throw new Error(`TikTok video mobile marker missing: ${marker}`);
+  }
   for (const route of routes) {
     await checkRoute(route);
   }

@@ -73,6 +73,7 @@ import { validateTikTokAdsConnection } from "../tiktok/diagnostics";
 import { buildTikTokCampaignDryRun } from "../tiktok/campaign";
 import { readTikTokVerifiedSetup, verifyTikTokSetup } from "../tiktok/setup";
 import { connectTikTokAccount, readTikTokConnection, requireTikTokProvisionedWorkspace, TikTokConnectionError } from "../tiktok/connections";
+import { tikTokVideos } from "../tiktok/videoAssets";
 
 export type CrmResource =
   | "clients"
@@ -7619,7 +7620,8 @@ export async function handleTikTokDryRun(req: VercelRequest, res: VercelResponse
     const dryRun = buildTikTokCampaignDryRun(body, {
       advertiserConfigured: connection.state === "connected",
       ...verified,
-      uploadedVideoIdAvailable: false,
+      uploadedVideoIdAvailable: connection.state === "connected" && typeof body.videoAssetId === "string" && Boolean(body.videoAssetId)
+        ? (await tikTokVideos.read(readWorkspaceId(req, body), body.videoAssetId)).videoIdAvailable : false,
     });
     return sendJson(res, 200, success("supabase", { ...dryRun }));
   } catch (error) { return sendTikTokConnectionError(res, error); }
