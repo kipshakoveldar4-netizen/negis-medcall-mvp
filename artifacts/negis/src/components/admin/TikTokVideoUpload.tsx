@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from "react";
-import { Loader2, RefreshCw, Upload } from "lucide-react";
+import { CheckCircle2, Loader2, RefreshCw, Upload } from "lucide-react";
 import type { TikTokVideoList, TikTokVideoSummary } from "../../../../../lib/tiktok/videoAssets";
 
+export type TikTokVideoRequestAction = "read" | "transfer" | "check_readiness";
 type Props = {
   enabled: boolean;
   list: (signal: AbortSignal) => Promise<TikTokVideoList>;
-  request: (assetId: string, transfer: boolean, retry: boolean, signal: AbortSignal) => Promise<TikTokVideoSummary>;
+  request: (assetId: string, action: TikTokVideoRequestAction, retry: boolean, signal: AbortSignal) => Promise<TikTokVideoSummary>;
   onSelected: (assetId: string) => void;
 };
 export function TikTokVideoUpload({ enabled, list, request, onSelected }: Props) {
@@ -36,13 +37,13 @@ export function TikTokVideoUpload({ enabled, list, request, onSelected }: Props)
       if (!current.signal.aborted) setMessage(error instanceof Error ? error.message : "Не удалось прочитать видео клиники.");
     } finally { if (!current.signal.aborted) setBusy(false); }
   }
-  async function load(assetId: string, transfer = false) {
+  async function load(assetId: string, action: TikTokVideoRequestAction = "read") {
     if (!enabled || !assetId) return;
-    const retry = summary?.canRetry === true;
+    const retry = action === "transfer" && summary?.canRetry === true;
     const current = begin();
     setSummary(null);
     try {
-      const data = await callbacks.current.request(assetId, transfer, retry, current.signal);
+      const data = await callbacks.current.request(assetId, action, retry, current.signal);
       if (current.signal.aborted) return;
       setSummary(data); callbacks.current.onSelected(assetId);
     } catch (error) {
@@ -58,6 +59,7 @@ export function TikTokVideoUpload({ enabled, list, request, onSelected }: Props)
   }, [enabled]);
   const asset = library?.assets.find((item) => item.id === selected);
   const canTransfer = library?.enabled && !asset?.issue && (summary?.status === "not_uploaded" || summary?.canRetry);
+  const canCheckReadiness = summary?.status === "uploaded" && summary.videoIdAvailable;
   return (
     <div className="my-5 min-w-0 border-y border-[#E2E8F0] py-4" data-testid="tiktok-video-upload">
       <h3 className="text-sm font-bold text-[#0F172A]">Видео для TikTok</h3>
@@ -82,7 +84,7 @@ export function TikTokVideoUpload({ enabled, list, request, onSelected }: Props)
           <div className="mt-3 min-w-0 break-words text-sm" aria-live="polite">
             {busy ? <p className="text-[#64748B]">Проверяем видео и статус передачи…</p> : null}
             {message ? <p role="alert" className="text-amber-800">{message}</p> : null}
-            {summary ? <p className={summary.status === "uploaded" ? "text-emerald-800" : "text-[#64748B]"}>{summary.message}</p> : null}
+            {summary ? <p className={summary.readyForAd ? "text-emerald-800" : summary.readinessStatus === "not_displayable" ? "text-amber-800" : "text-[#64748B]"}>{summary.message}</p> : null}
           </div>
           {canTransfer ? <label className="mt-3 flex items-start gap-2 text-sm text-[#475569]">
             <input type="checkbox" className="mt-1 shrink-0" checked={confirmed} disabled={busy} onChange={(event) => setConfirmed(event.target.checked)} />
@@ -90,10 +92,14 @@ export function TikTokVideoUpload({ enabled, list, request, onSelected }: Props)
           </label> : null}
           <div className="mt-3 flex min-w-0 flex-col gap-2 sm:flex-row">
             <button type="button" className="neu-btn flex min-h-11 w-full items-center justify-center gap-2 disabled:opacity-50 sm:w-auto"
-              disabled={busy || !confirmed || !canTransfer} onClick={() => void load(selected, true)}>
+              disabled={busy || !confirmed || !canTransfer} onClick={() => void load(selected, "transfer")}>
               {busy ? <Loader2 size={16} className="shrink-0 animate-spin" /> : <Upload size={16} className="shrink-0" />}
               {summary?.canRetry ? "Повторить передачу" : "Передать видео в TikTok"}
             </button>
+            {canCheckReadiness ? <button type="button" className="neu-btn flex min-h-11 w-full items-center justify-center gap-2 sm:w-auto"
+              disabled={busy} onClick={() => void load(selected, "check_readiness")}>
+              <CheckCircle2 size={16} className="shrink-0" />Проверить готовность в TikTok
+            </button> : null}
             <button type="button" className="neu-btn flex min-h-11 w-full items-center justify-center gap-2 sm:w-auto"
               disabled={busy} onClick={() => selected ? void load(selected) : void refreshLibrary()}>
               <RefreshCw size={16} className="shrink-0" />Обновить статус
@@ -101,7 +107,7 @@ export function TikTokVideoUpload({ enabled, list, request, onSelected }: Props)
             {selected ? <button type="button" className="neu-btn flex min-h-11 w-full items-center justify-center gap-2 sm:w-auto"
               disabled={busy} onClick={() => void refreshLibrary()}><RefreshCw size={16} className="shrink-0" />Обновить библиотеку</button> : null}
           </div>
-          <p className="mt-2 text-xs text-[#64748B]">Кампания не создаётся. Расход бюджета не включён.</p>
+          <p className="mt-2 text-xs text-[#64748B]">Проверка не загружает видео повторно. Кампания не создаётся, расход бюджета не включён.</p>
         </>
       )}
     </div>

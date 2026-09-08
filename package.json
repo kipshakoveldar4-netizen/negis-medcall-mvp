@@ -18,6 +18,7 @@
     "test:tiktok-setup": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:tiktok-setup",
     "test:tiktok-connections": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:tiktok-connections",
     "test:tiktok-video-upload": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:tiktok-video-upload",
+    "test:tiktok-video-readiness": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:tiktok-video-readiness",
     "test:insights-completeness": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:insights-completeness",
     "test:meta-insights-worker": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:meta-insights-worker",
     "test:dashboard": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:dashboard",

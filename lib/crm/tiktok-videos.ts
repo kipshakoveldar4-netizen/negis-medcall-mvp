@@ -16,6 +16,13 @@ export async function handleTikTokVideos(req: VercelRequest, res: VercelResponse
       return res.status(200).json({ success: true, mode: "supabase", data });
     }
     if (req.method !== "POST") return res.status(405).json({ success: false, error: "Method not allowed", details: ["Use GET or POST"] });
+    if (body.action === "check_readiness") {
+      const data = await tikTokVideos.checkReadiness(context.workspaceId, assetId);
+      return res.status(200).json({ success: true, mode: "supabase", data });
+    }
+    if (body.action !== undefined && body.action !== "transfer") {
+      return res.status(400).json({ success: false, error: "Неизвестное действие с TikTok-видео.", details: [] });
+    }
     if (body.confirm !== true) return res.status(400).json({ success: false, error: "Подтвердите передачу выбранного видео в TikTok.", details: [] });
     const data = await tikTokVideos.transfer(context.workspaceId, assetId, body.retry === true);
     return res.status(200).json({ success: true, mode: "supabase", data });

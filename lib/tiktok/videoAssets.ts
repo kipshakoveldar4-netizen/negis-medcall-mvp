@@ -2,16 +2,24 @@ import { randomUUID } from "node:crypto";
 import { getSupabaseServerClient } from "../supabase/server";
 import { readTikTokConnection, requireTikTokProvisionedWorkspace, TikTokConnectionError } from "./connections";
 import { getTikTokAdsConfig, validateTikTokAdsConnection } from "./diagnostics";
+import { checkTikTokVideoReadiness, TikTokVideoReadinessError,
+  type TikTokVideoReadinessResult } from "./videoReadiness";
 import { prepareTikTokVideo, uploadTikTokVideo, videoAssetIssue, TikTokVideoError,
   type PreparedTikTokVideo, type TikTokVideoAsset, type TikTokVideoEnv } from "./videoUpload";
 
 type UploadStatus = "uploading" | "uploaded" | "failed" | "unknown";
+export type TikTokVideoReadinessStatus = "not_checked" | "processing" | "ready" | "not_displayable" | "unknown";
 export type TikTokVideoReceipt = {
   id: string; workspace_id: string; advertiser_id: string; asset_id: string; source_fingerprint: string;
   asset_revision: string; status: UploadStatus; video_id: string | null; error_code: string | null;
-  attempt: number; started_at: string; finished_at: string | null;
+  attempt: number; started_at: string; finished_at: string | null; readiness_status: TikTokVideoReadinessStatus;
+  displayable: boolean | null; tiktok_placement_allowed: boolean | null; readiness_checked_at: string | null;
+  readiness_error_code: "provider_rejected" | "check_unknown" | "connection_revoked" | null;
 };
-export type TikTokVideoSummary = { assetId: string; status: UploadStatus | "not_uploaded"; message: string; canRetry: boolean; videoIdAvailable: boolean };
+export type TikTokVideoSummary = {
+  assetId: string; status: UploadStatus | "not_uploaded"; readinessStatus: TikTokVideoReadinessStatus;
+  message: string; canRetry: boolean; videoIdAvailable: boolean; readyForAd: boolean; checkedAt: string | null;
+};
 export type TikTokVideoList = { enabled: boolean; launchEnabled: false; assets: { id: string; fileName: string; issue: string | null }[] };
 export type TikTokVideoStore = {
   assets(workspaceId: string): Promise<TikTokVideoAsset[]>;
@@ -19,11 +27,12 @@ export type TikTokVideoStore = {
   latest(workspaceId: string, advertiserId: string, assetId: string): Promise<TikTokVideoReceipt | null>;
   claim(row: TikTokVideoReceipt, retry: boolean): Promise<{ claimed: boolean; row: TikTokVideoReceipt }>;
   finish(row: TikTokVideoReceipt): Promise<void>;
+  saveReadiness(row: TikTokVideoReceipt): Promise<TikTokVideoReceipt>;
 };
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const storageError = () => new TikTokVideoError("persistence_failed", "Не удалось проверить журнал передачи видео. Проверьте миграцию 048 и доступ к базе.", false, 503);
+const storageError = () => new TikTokVideoError("persistence_failed", "Не удалось проверить журнал TikTok-видео. Проверьте миграции 048–049 и доступ к базе.", false, 503);
 const assetFields = "id,workspace_id,file_name,file_type,mime_type,file_size,storage_bucket,storage_path,status,updated_at";
-const receiptFields = "id,workspace_id,advertiser_id,asset_id,source_fingerprint,asset_revision,status,video_id,error_code,attempt,started_at,finished_at";
+const receiptFields = "id,workspace_id,advertiser_id,asset_id,source_fingerprint,asset_revision,status,video_id,error_code,attempt,started_at,finished_at,readiness_status,displayable,tiktok_placement_allowed,readiness_checked_at,readiness_error_code";
 
 function serverStore(): TikTokVideoStore {
   const client = getSupabaseServerClient();
@@ -67,6 +76,8 @@ function serverStore(): TikTokVideoStore {
         const { data, error: retryError } = await client.from("tiktok_video_uploads").update({
           status: "uploading", attempt: current.attempt + 1, started_at: row.started_at, finished_at: null,
           error_code: null, asset_revision: row.asset_revision, updated_at: row.started_at,
+          readiness_status: "not_checked", displayable: null, tiktok_placement_allowed: null,
+          readiness_checked_at: null, readiness_error_code: null,
         }).eq("workspace_id", row.workspace_id).eq("id", current.id).eq("status", "failed")
           .eq("attempt", current.attempt).select(receiptFields).maybeSingle();
         if (retryError) throw storageError();
@@ -81,6 +92,20 @@ function serverStore(): TikTokVideoStore {
         .eq("workspace_id", row.workspace_id).eq("id", row.id).eq("status", "uploading").eq("attempt", row.attempt).select("id").maybeSingle();
       if (error || !data) throw storageError();
     },
+    async saveReadiness(row) {
+      const { data, error } = await client.from("tiktok_video_uploads").update({
+        readiness_status: row.readiness_status,
+        displayable: row.displayable,
+        tiktok_placement_allowed: row.tiktok_placement_allowed,
+        readiness_checked_at: row.readiness_checked_at,
+        readiness_error_code: row.readiness_error_code,
+        updated_at: row.readiness_checked_at,
+      }).eq("workspace_id", row.workspace_id).eq("id", row.id).eq("status", "uploaded")
+        .eq("asset_revision", row.asset_revision).eq("video_id", row.video_id)
+        .select(receiptFields).maybeSingle();
+      if (error || !data) throw storageError();
+      return data as TikTokVideoReceipt;
+    },
   };
 }
 
@@ -90,6 +115,7 @@ type Options = {
   verify?: () => Promise<boolean>;
   prepare?: (asset: TikTokVideoAsset, workspaceId: string) => Promise<PreparedTikTokVideo>;
   upload?: (prepared: PreparedTikTokVideo, receiptId: string) => Promise<string>;
+  check?: (videoId: string) => Promise<TikTokVideoReadinessResult>;
 };
 export function createTikTokVideoService(options: Options = {}) {
   const env = () => options.env ?? process.env;
@@ -111,15 +137,26 @@ export function createTikTokVideoService(options: Options = {}) {
   function summary(asset: TikTokVideoAsset, receipt: TikTokVideoReceipt | null): TikTokVideoSummary {
     const matches = receipt && (receipt.asset_revision === asset.updated_at || receipt.status !== "uploaded");
     const status = !matches ? "not_uploaded" : receipt.status === "uploading" && now() - Date.parse(receipt.started_at) > 120_000 ? "unknown" : receipt.status;
-    const copy = {
+    const readinessStatus = status === "uploaded" ? receipt?.readiness_status ?? "not_checked" : "not_checked";
+    const uploadCopy = {
       not_uploaded: "Видео ещё не передано в TikTok.",
       uploading: "Видео передаётся. Обновите статус через минуту; повторная передача заблокирована.",
-      uploaded: "Видео передано в TikTok. Это не подтверждение модерации или готовности рекламы к показу.",
       failed: "TikTok отклонил передачу. Проверьте формат и доступ к аккаунту перед повторной попыткой.",
       unknown: "Результат передачи неизвестен. Не отправляем повторно: проверьте библиотеку TikTok Ads.",
     };
-    return { assetId: asset.id, status, message: copy[status], canRetry: status === "failed" && (receipt?.attempt ?? 3) < 3,
-      videoIdAvailable: status === "uploaded" && Boolean(receipt?.video_id) && !videoAssetIssue(asset, asset.workspace_id) };
+    const readinessCopy: Record<TikTokVideoReadinessStatus, string> = {
+      not_checked: "Видео передано в TikTok. Проверьте, завершилась ли обработка ролика.",
+      processing: "TikTok ещё обрабатывает видео. Проверьте готовность позже.",
+      ready: "Видео готово для объявления в TikTok.",
+      not_displayable: "TikTok не разрешил использовать это видео в рекламе. Проверьте ролик в библиотеке TikTok Ads.",
+      unknown: "Не удалось подтвердить готовность видео. Повторная загрузка не выполнялась.",
+    };
+    return { assetId: asset.id, status, readinessStatus,
+      message: status === "uploaded" ? readinessCopy[readinessStatus] : uploadCopy[status],
+      canRetry: status === "failed" && (receipt?.attempt ?? 3) < 3,
+      videoIdAvailable: status === "uploaded" && Boolean(receipt?.video_id) && !videoAssetIssue(asset, asset.workspace_id),
+      readyForAd: status === "uploaded" && readinessStatus === "ready",
+      checkedAt: status === "uploaded" ? receipt?.readiness_checked_at ?? null : null };
   }
   async function list(workspaceId: string): Promise<TikTokVideoList> {
     await authorize(workspaceId);
@@ -148,7 +185,9 @@ export function createTikTokVideoService(options: Options = {}) {
     const prepared = await (options.prepare ?? ((video, workspace) => prepareTikTokVideo(video, workspace, { env: env() })))(asset, workspaceId);
     const claim = await repository.claim({ id: randomUUID(), workspace_id: workspaceId, advertiser_id: getTikTokAdsConfig(env()).advertiserId,
       asset_id: assetId, source_fingerprint: prepared.fingerprint, asset_revision: asset.updated_at, status: "uploading",
-      video_id: null, error_code: null, attempt: 1, started_at: new Date(now()).toISOString(), finished_at: null }, retry);
+      video_id: null, error_code: null, attempt: 1, started_at: new Date(now()).toISOString(), finished_at: null,
+      readiness_status: "not_checked", displayable: null, tiktok_placement_allowed: null,
+      readiness_checked_at: null, readiness_error_code: null }, retry);
     if (!claim.claimed) return summary(asset, claim.row);
     let final = claim.row;
     let providerStarted = false;
@@ -172,6 +211,36 @@ export function createTikTokVideoService(options: Options = {}) {
     }
     return summary(asset, final);
   }
-  return { list, read, transfer };
+  async function checkReadiness(workspaceId: string, assetId: string) {
+    await authorize(workspaceId);
+    const repository = store();
+    const asset = await getAsset(workspaceId, assetId, repository);
+    const receipt = await repository.latest(workspaceId, getTikTokAdsConfig(env()).advertiserId, assetId);
+    if (!receipt || receipt.status !== "uploaded" || !receipt.video_id || receipt.asset_revision !== asset.updated_at
+      || videoAssetIssue(asset, workspaceId)) {
+      throw new TikTokVideoError("video_not_uploaded", "Сначала передайте актуальную версию видео в TikTok.", false, 409);
+    }
+
+    const checkedAt = new Date(now()).toISOString();
+    let final: TikTokVideoReceipt;
+    try {
+      // A readiness result is trusted only after fresh provider access succeeds.
+      if (!await (options.verify ?? (async () => (await validateTikTokAdsConnection({ env: env() })).connected))()) {
+        final = { ...receipt, readiness_status: "unknown", displayable: null, tiktok_placement_allowed: null,
+          readiness_checked_at: checkedAt, readiness_error_code: "connection_revoked" };
+      } else {
+        await authorize(workspaceId);
+        const result = await (options.check ?? ((id) => checkTikTokVideoReadiness(id, { env: env() })))(receipt.video_id);
+        final = { ...receipt, readiness_status: result.state, displayable: result.displayable,
+          tiktok_placement_allowed: result.tiktokPlacementAllowed, readiness_checked_at: checkedAt, readiness_error_code: null };
+      }
+    } catch (error) {
+      final = { ...receipt, readiness_status: "unknown", displayable: null, tiktok_placement_allowed: null,
+        readiness_checked_at: checkedAt,
+        readiness_error_code: error instanceof TikTokVideoReadinessError && !error.uncertain ? "provider_rejected" : "check_unknown" };
+    }
+    return summary(asset, await repository.saveReadiness(final));
+  }
+  return { list, read, transfer, checkReadiness };
 }
 export const tikTokVideos = createTikTokVideoService();

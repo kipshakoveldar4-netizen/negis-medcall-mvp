@@ -3036,10 +3036,12 @@ export default function AdminCenter() {
               if (!response.data) throw new Error("Не удалось прочитать видео клиники.");
               return response.data;
             }}
-            request={async (assetId, transfer, retry, signal) => {
+            request={async (assetId, action, retry, signal) => {
+              const readOnly = action === "read";
               const response = await adminCrmRequest<TikTokVideoSummary>(
-                `/api/crm/tiktok-videos?workspaceId=${encodeURIComponent(workspaceId)}${transfer ? "" : `&assetId=${encodeURIComponent(assetId)}`}`,
-                transfer ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ assetId, confirm: true, retry }), signal } : { signal });
+                `/api/crm/tiktok-videos?workspaceId=${encodeURIComponent(workspaceId)}${readOnly ? `&assetId=${encodeURIComponent(assetId)}` : ""}`,
+                readOnly ? { signal } : { method: "POST", headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ assetId, action, confirm: action === "transfer", retry }), signal });
               if (!response.data) throw new Error("Не удалось проверить передачу видео.");
               return response.data;
             }}
