@@ -8,6 +8,7 @@
     "test:advertising-brief": "tsx --test ./src/advertising-campaign-brief.test.ts",
     "test:tiktok-ads-diagnostics": "tsx --test ./src/tiktok-ads-diagnostics.test.ts",
     "test:tiktok-campaign-dry-run": "tsx --test ./src/tiktok-campaign-dry-run.test.ts",
+    "test:tiktok-disabled-launch": "tsx --test ./src/tiktok-disabled-launch.test.ts",
     "test:tiktok-setup": "tsx --test ./src/tiktok-setup.test.ts",
     "test:tiktok-connections": "tsx --test ./src/tiktok-connections.test.ts",
     "test:tiktok-video-upload": "tsx --test ./src/tiktok-video-upload.test.ts ./src/tiktok-video-readiness.test.ts",

@@ -7614,14 +7614,19 @@ export async function handleTikTokDryRun(req: VercelRequest, res: VercelResponse
   const brief = Object.keys(asRecord(body.brief)).length ? asRecord(body.brief) : body;
   res.setHeader("Cache-Control", "no-store");
   try {
-    const connection = await readTikTokConnection(readWorkspaceId(req, body));
+    const workspaceId = readWorkspaceId(req, body);
+    const connection = await readTikTokConnection(workspaceId);
     const verified = connection.state === "connected"
-      ? readTikTokVerifiedSetup(readWorkspaceId(req, body), readString(brief.city)) : {};
+      ? readTikTokVerifiedSetup(workspaceId, readString(brief.city)) : {};
+    const video = connection.state === "connected" && typeof body.videoAssetId === "string" && body.videoAssetId
+      ? await tikTokVideos.read(workspaceId, body.videoAssetId)
+      : null;
     const dryRun = buildTikTokCampaignDryRun(body, {
       advertiserConfigured: connection.state === "connected",
       ...verified,
-      uploadedVideoIdAvailable: connection.state === "connected" && typeof body.videoAssetId === "string" && Boolean(body.videoAssetId)
-        ? (await tikTokVideos.read(readWorkspaceId(req, body), body.videoAssetId)).videoIdAvailable : false,
+      uploadedVideoIdAvailable: video?.videoIdAvailable ?? false,
+      videoReadyForAd: video?.readyForAd ?? false,
+      launchFeatureEnabled: process.env.TIKTOK_DISABLED_LAUNCH_ENABLED === "true",
     });
     return sendJson(res, 200, success("supabase", { ...dryRun }));
   } catch (error) { return sendTikTokConnectionError(res, error); }

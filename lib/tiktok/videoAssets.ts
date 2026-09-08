@@ -20,6 +20,10 @@ export type TikTokVideoSummary = {
   assetId: string; status: UploadStatus | "not_uploaded"; readinessStatus: TikTokVideoReadinessStatus;
   message: string; canRetry: boolean; videoIdAvailable: boolean; readyForAd: boolean; checkedAt: string | null;
 };
+export type TikTokReadyVideoForLaunch = {
+  receiptId: string;
+  videoId: string;
+};
 export type TikTokVideoList = { enabled: boolean; launchEnabled: false; assets: { id: string; fileName: string; issue: string | null }[] };
 export type TikTokVideoStore = {
   assets(workspaceId: string): Promise<TikTokVideoAsset[]>;
@@ -241,6 +245,43 @@ export function createTikTokVideoService(options: Options = {}) {
     }
     return summary(asset, await repository.saveReadiness(final));
   }
-  return { list, read, transfer, checkReadiness };
+  /**
+   * Server-only resolver for the live adapter. The public video endpoints keep
+   * returning booleans; the provider video_id leaves this module only for the
+   * next server-side TikTok request.
+   */
+  async function resolveReadyForLaunch(
+    workspaceId: string,
+    assetId: string,
+  ): Promise<TikTokReadyVideoForLaunch> {
+    await authorize(workspaceId);
+    const repository = store();
+    const asset = await getAsset(workspaceId, assetId, repository);
+    const receipt = await repository.latest(
+      workspaceId,
+      getTikTokAdsConfig(env()).advertiserId,
+      assetId,
+    );
+    if (
+      !receipt ||
+      receipt.status !== "uploaded" ||
+      !receipt.video_id ||
+      receipt.asset_revision !== asset.updated_at ||
+      receipt.readiness_status !== "ready" ||
+      receipt.displayable !== true ||
+      receipt.tiktok_placement_allowed !== true ||
+      videoAssetIssue(asset, workspaceId)
+    ) {
+      throw new TikTokVideoError(
+        "video_not_ready",
+        "Дождитесь обработки видео и подтвердите его готовность в TikTok.",
+        false,
+        409,
+      );
+    }
+    return { receiptId: receipt.id, videoId: receipt.video_id };
+  }
+
+  return { list, read, transfer, checkReadiness, resolveReadyForLaunch };
 }
 export const tikTokVideos = createTikTokVideoService();

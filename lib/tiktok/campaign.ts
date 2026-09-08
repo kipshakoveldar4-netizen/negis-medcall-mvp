@@ -10,7 +10,7 @@ export const TIKTOK_ADGROUP_CREATE_ENDPOINT = "/open_api/v1.3/adgroup/create/";
 export const TIKTOK_AD_CREATE_ENDPOINT = "/open_api/v1.3/ad/create/";
 export const TIKTOK_DISABLED_OPERATION_STATUS = "DISABLE" as const;
 
-type TikTokCurrency = "KZT" | "USD";
+export type TikTokCurrency = "KZT" | "USD";
 
 export type TikTokDryRunBlockerCode =
   | "invalid_brief"
@@ -27,6 +27,8 @@ export type TikTokDryRunBlockerCode =
   | "identity_not_configured"
   | "location_not_resolved"
   | "video_upload_required"
+  | "video_not_ready"
+  | "identity_type_unsupported"
   | "live_adapter_disabled";
 
 export type TikTokDryRunIssue = {
@@ -40,16 +42,18 @@ export type TikTokCampaignDryRunContext = {
   identityType?: TikTokIdentityType;
   locationIds?: readonly string[];
   uploadedVideoIdAvailable?: boolean;
+  videoReadyForAd?: boolean;
+  launchFeatureEnabled?: boolean;
 };
 
 export type TikTokCampaignDryRun = {
   platform: "tiktok";
   dryRun: true;
-  launchEnabled: false;
+  launchEnabled: boolean;
   targetOperationStatus: typeof TIKTOK_DISABLED_OPERATION_STATUS;
   readiness: {
     briefReady: boolean;
-    providerReady: false;
+    providerReady: boolean;
     blockers: TikTokDryRunIssue[];
     providerDependencies: TikTokDryRunIssue[];
   };
@@ -83,7 +87,35 @@ type ParsedBudget = {
   currency: TikTokCurrency;
   decimal: string;
   amount: number;
+  minor: string;
 };
+
+export type TikTokDisabledLaunchIdentifiers = {
+  advertiserId: string;
+  identityId: string;
+  locationIds: readonly string[];
+  videoId: string;
+  idempotencyKey: string;
+};
+
+export type TikTokDisabledLaunchPayloads = {
+  campaignName: string;
+  service: string;
+  city: string;
+  destinationUrl: string;
+  dailyBudgetMinor: string;
+  currency: TikTokCurrency;
+  campaign: Record<string, unknown>;
+  adGroup: Record<string, unknown>;
+  ad: Record<string, unknown>;
+};
+
+export class TikTokCampaignValidationError extends Error {
+  constructor(public readonly issues: TikTokDryRunIssue[]) {
+    super(issues[0]?.message || "Проверьте параметры TikTok-кампании.");
+    this.name = "TikTokCampaignValidationError";
+  }
+}
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -122,7 +154,7 @@ function parseDailyBudget(value: unknown, rawCurrency: unknown): ParsedBudget | 
   if (minor <= 0n || minor > 10_000_000_000n) return null;
 
   const decimal = `${whole.toString()}.${fraction.toString().padStart(2, "0")}`;
-  return { currency, decimal, amount: Number(decimal) };
+  return { currency, decimal, amount: Number(decimal), minor: minor.toString() };
 }
 
 function isSafeDestination(value: string): boolean {
@@ -196,14 +228,23 @@ export function buildTikTokCampaignDryRun(
   }
   if (!context.identityConfigured) {
     providerDependencies.push(issue("identity_not_configured", "Подтвердите рекламный профиль TikTok перед проверкой плана."));
+  } else if (context.identityType !== "CUSTOMIZED_USER") {
+    providerDependencies.push(issue(
+      "identity_type_unsupported",
+      "Для первого запуска с загруженным видео нужен профиль TikTok типа CUSTOMIZED_USER.",
+    ));
   }
   if (locationIds.length === 0) {
     providerDependencies.push(issue("location_not_resolved", `Нужно получить TikTok location ID для города ${city || "показа"}.`));
   }
   if (!context.uploadedVideoIdAvailable) {
     providerDependencies.push(issue("video_upload_required", "Нужно загрузить видео в TikTok и получить video_id."));
+  } else if (!(context.videoReadyForAd ?? context.uploadedVideoIdAvailable)) {
+    providerDependencies.push(issue("video_not_ready", "Дождитесь обработки видео и подтвердите его готовность в TikTok."));
   }
-  providerDependencies.push(issue("live_adapter_disabled", "Создание TikTok-рекламы ещё не включено."));
+  if (!context.launchFeatureEnabled) {
+    providerDependencies.push(issue("live_adapter_disabled", "Создание TikTok-рекламы ещё не включено оператором."));
+  }
 
   const disabledStatus = TIKTOK_DISABLED_OPERATION_STATUS;
   const safeAdvertiserId = "__SERVER_ADVERTISER_ID__";
@@ -213,6 +254,7 @@ export function buildTikTokCampaignDryRun(
       campaign_name: campaignName || "__CAMPAIGN_NAME_REQUIRED__",
       objective_type: "TRAFFIC",
       budget_optimize_on: false,
+      request_id: "__IDEMPOTENCY_KEY__",
       operation_status: disabledStatus,
     },
     adGroup: {
@@ -220,14 +262,17 @@ export function buildTikTokCampaignDryRun(
       campaign_id: "__CREATED_CAMPAIGN_ID__",
       adgroup_name: campaignName ? `${campaignName} · группа` : "__ADGROUP_NAME_REQUIRED__",
       promotion_type: "WEBSITE",
+      placement_type: "PLACEMENT_TYPE_NORMAL",
       placements: ["PLACEMENT_TIKTOK"],
       billing_event: "CPC",
       optimization_goal: "CLICK",
+      bid_type: "BID_TYPE_NO_BID",
       ...(budget ? { budget: budget.amount, budget_mode: "BUDGET_MODE_DAY" } : {}),
       pacing: "PACING_MODE_SMOOTH",
-      schedule_type: "SCHEDULE_START_END",
+      schedule_type: "SCHEDULE_FROM_NOW",
       ...(scheduleStartTime ? { schedule_start_time: scheduleStartTime } : {}),
       ...(locationIds.length > 0 ? { location_ids: locationIds.map(() => "__SERVER_LOCATION_ID__") } : {}),
+      request_id: "__IDEMPOTENCY_KEY__",
       operation_status: disabledStatus,
     },
     ad: {
@@ -253,11 +298,11 @@ export function buildTikTokCampaignDryRun(
   return {
     platform: "tiktok",
     dryRun: true,
-    launchEnabled: false,
+    launchEnabled: context.launchFeatureEnabled === true,
     targetOperationStatus: disabledStatus,
     readiness: {
       briefReady: validationBlockers.length === 0,
-      providerReady: false,
+      providerReady: providerDependencies.length === 0,
       blockers: [...validationBlockers, ...providerDependencies],
       providerDependencies,
     },
@@ -280,6 +325,121 @@ export function buildTikTokCampaignDryRun(
       createsCampaign: false,
       credentialsIncluded: false,
       rawCreativeUrlIncluded: false,
+    },
+  };
+}
+
+function requireProviderIdentifier(value: string, label: string, pattern: RegExp): string {
+  if (!pattern.test(value)) {
+    throw new TikTokCampaignValidationError([
+      issue("invalid_brief", `Сервер не подтвердил ${label} TikTok.`),
+    ]);
+  }
+  return value;
+}
+
+/**
+ * Builds the exact server-only payloads used by the live adapter. This function
+ * stays pure: it does not read env, access the database or call TikTok. The same
+ * validation and payload shape therefore drive dry-run and the real DISABLE
+ * flow without ever placing credentials or provider IDs in the browser preview.
+ */
+export function buildTikTokDisabledLaunchPayloads(
+  value: unknown,
+  identifiers: TikTokDisabledLaunchIdentifiers,
+): TikTokDisabledLaunchPayloads {
+  const locationIds = readLocationIds(identifiers.locationIds);
+  const preview = buildTikTokCampaignDryRun(value, {
+    advertiserConfigured: true,
+    identityConfigured: true,
+    identityType: "CUSTOMIZED_USER",
+    locationIds,
+    uploadedVideoIdAvailable: true,
+    videoReadyForAd: true,
+    launchFeatureEnabled: true,
+  });
+  if (preview.readiness.blockers.length > 0) {
+    throw new TikTokCampaignValidationError(preview.readiness.blockers);
+  }
+
+  const record = asRecord(value);
+  const brief = parseBrief(record);
+  const campaignName = readString(brief?.campaignName, 128);
+  const service = readString(brief?.service, 160);
+  const city = readString(brief?.city, 100);
+  const adText = readString(brief?.primaryText, 2000);
+  const destinationUrl = readString(record.destinationUrl, 2048);
+  const scheduleStartTime = normalizeSchedule(record.scheduleStartTime);
+  const budget = parseDailyBudget(record.dailyBudget, record.currency);
+  if (!brief || !budget || !destinationUrl || !scheduleStartTime) {
+    throw new TikTokCampaignValidationError([
+      issue("invalid_brief", "Проверьте параметры TikTok-кампании."),
+    ]);
+  }
+
+  const advertiserId = requireProviderIdentifier(identifiers.advertiserId, "рекламный аккаунт", /^\d{5,32}$/);
+  const identityId = requireProviderIdentifier(identifiers.identityId, "рекламный профиль", /^[\w-]{1,128}$/);
+  const videoId = requireProviderIdentifier(identifiers.videoId, "готовое видео", /^[a-zA-Z0-9_-]{1,128}$/);
+  const idempotencyKey = requireProviderIdentifier(
+    identifiers.idempotencyKey,
+    "ключ безопасного запуска",
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+  );
+  if (locationIds.length === 0) {
+    throw new TikTokCampaignValidationError([
+      issue("location_not_resolved", "TikTok не подтвердил город показа."),
+    ]);
+  }
+
+  const operationStatus = TIKTOK_DISABLED_OPERATION_STATUS;
+  return {
+    campaignName,
+    service,
+    city,
+    destinationUrl,
+    dailyBudgetMinor: budget.minor,
+    currency: budget.currency,
+    campaign: {
+      advertiser_id: advertiserId,
+      campaign_name: campaignName,
+      objective_type: "TRAFFIC",
+      budget_optimize_on: false,
+      request_id: idempotencyKey,
+      operation_status: operationStatus,
+    },
+    adGroup: {
+      advertiser_id: advertiserId,
+      campaign_id: "__CREATED_CAMPAIGN_ID__",
+      adgroup_name: `${campaignName} · группа`,
+      promotion_type: "WEBSITE",
+      placement_type: "PLACEMENT_TYPE_NORMAL",
+      placements: ["PLACEMENT_TIKTOK"],
+      location_ids: locationIds,
+      billing_event: "CPC",
+      optimization_goal: "CLICK",
+      bid_type: "BID_TYPE_NO_BID",
+      budget: budget.amount,
+      budget_mode: "BUDGET_MODE_DAY",
+      pacing: "PACING_MODE_SMOOTH",
+      schedule_type: "SCHEDULE_FROM_NOW",
+      schedule_start_time: scheduleStartTime,
+      request_id: idempotencyKey,
+      operation_status: operationStatus,
+    },
+    ad: {
+      advertiser_id: advertiserId,
+      adgroup_id: "__CREATED_ADGROUP_ID__",
+      creatives: [{
+        ad_name: `${campaignName} · объявление`,
+        ad_format: "SINGLE_VIDEO",
+        identity_type: "CUSTOMIZED_USER",
+        identity_id: identityId,
+        video_id: videoId,
+        ad_text: adText,
+        landing_page_url: destinationUrl,
+        call_to_action: "LEARN_MORE",
+        operation_status: operationStatus,
+      }],
     },
   };
 }

@@ -258,11 +258,11 @@ type TikTokDryRunIssue = {
 type TikTokDryRunResult = {
   platform: "tiktok";
   dryRun: true;
-  launchEnabled: false;
+  launchEnabled: boolean;
   targetOperationStatus: "DISABLE";
   readiness: {
     briefReady: boolean;
-    providerReady: false;
+    providerReady: boolean;
     blockers: TikTokDryRunIssue[];
     providerDependencies: TikTokDryRunIssue[];
   };
@@ -290,6 +290,25 @@ type TikTokDryRunResult = {
     credentialsIncluded: false;
     rawCreativeUrlIncluded: false;
   };
+};
+
+type TikTokDisabledLaunchResult = {
+  platform: "tiktok";
+  targetOperationStatus: "DISABLE";
+  status: "creating" | "campaign_created" | "adgroup_created" | "created_disabled" | "failed" | "unknown";
+  message: string;
+  campaignName: string;
+  city: string;
+  dailyBudgetMinor: string;
+  currency: string;
+  providerObjects: {
+    campaignCreated: boolean;
+    adGroupCreated: boolean;
+    adCreated: boolean;
+  };
+  automaticRetryAllowed: false;
+  startedAt: string;
+  finishedAt: string | null;
 };
 
 type TikTokDryRunForm = {
@@ -871,6 +890,10 @@ export default function AdminCenter() {
   const [tiktokDryRun, setTikTokDryRun] = useState<TikTokDryRunResult | null>(null);
   const [tiktokDryRunMessage, setTikTokDryRunMessage] = useState("");
   const [tiktokVideoSelection, setTikTokVideoSelection] = useState<{ workspaceId: string; assetId: string } | null>(null);
+  const [tiktokLaunchConfirmation, setTikTokLaunchConfirmation] = useState("");
+  const [tiktokLaunchRequestKey, setTikTokLaunchRequestKey] = useState("");
+  const [tiktokLaunchResult, setTikTokLaunchResult] = useState<TikTokDisabledLaunchResult | null>(null);
+  const [tiktokLaunchMessage, setTikTokLaunchMessage] = useState("");
   const [loading, setLoading] = useState<Record<string, boolean>>({});
   const [metaCityKeyInput, setMetaCityKeyInput] = useState("almaty");
   const [metaCityKeyResult, setMetaCityKeyResult] = useState<MetaCityKeyResult | null>(null);
@@ -984,6 +1007,17 @@ export default function AdminCenter() {
   useEffect(() => {
     void checkServerAdminAccess();
   }, [workspaceId]);
+
+  useEffect(() => {
+    if (serverAdminAuth.status === "confirmed") return;
+    setTikTokDryRun(null);
+    setTikTokDryRunMessage("");
+    setTikTokVideoSelection(null);
+    setTikTokLaunchConfirmation("");
+    setTikTokLaunchRequestKey("");
+    setTikTokLaunchResult(null);
+    setTikTokLaunchMessage("");
+  }, [serverAdminAuth.status, workspaceId]);
 
   function isEligibleInsightsLaunch(launch: MetaInsightsLaunchOption): boolean {
     const status = launch.status.trim().toLowerCase();
@@ -1241,6 +1275,32 @@ export default function AdminCenter() {
     }
   }
 
+  function buildTikTokRequestPayload() {
+    return {
+      brief: {
+        schemaVersion: 1,
+        platform: "tiktok",
+        sourceModule: "content-studio",
+        sourceKind: "package",
+        campaignName: tiktokDryRunForm.campaignName,
+        service: tiktokDryRunForm.service,
+        city: tiktokDryRunForm.city,
+        primaryText: tiktokDryRunForm.primaryText,
+        creative: {
+          type: "video",
+          brief: "Вертикальный видеокреатив для TikTok",
+        },
+      },
+      dailyBudget: tiktokDryRunForm.dailyBudget,
+      currency: tiktokDryRunForm.currency,
+      destinationUrl: tiktokDryRunForm.destinationUrl,
+      scheduleStartTime: tiktokDryRunForm.scheduleStartTime,
+      videoAssetId: tiktokVideoSelection?.workspaceId === workspaceId
+        ? tiktokVideoSelection.assetId
+        : undefined,
+    };
+  }
+
   async function buildTikTokDryRun() {
     if (serverAdminAuth.status !== "confirmed") {
       setTikTokDryRunMessage("Сначала подтвердите админ-доступ.");
@@ -1250,40 +1310,26 @@ export default function AdminCenter() {
 
     setBusy("tiktok-dry-run", true);
     setTikTokDryRunMessage("");
+    setTikTokLaunchResult(null);
+    setTikTokLaunchMessage("");
+    setTikTokLaunchConfirmation("");
+    setTikTokLaunchRequestKey("");
     try {
       const body = await adminCrmRequest<TikTokDryRunResult>(
         `/api/crm/tiktok-dry-run?workspaceId=${encodeURIComponent(workspaceId)}`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            brief: {
-              schemaVersion: 1,
-              platform: "tiktok",
-              sourceModule: "content-studio",
-              sourceKind: "package",
-              campaignName: tiktokDryRunForm.campaignName,
-              service: tiktokDryRunForm.service,
-              city: tiktokDryRunForm.city,
-              primaryText: tiktokDryRunForm.primaryText,
-              creative: {
-                type: "video",
-                brief: "Вертикальный видеокреатив для TikTok",
-              },
-            },
-            dailyBudget: tiktokDryRunForm.dailyBudget,
-            currency: tiktokDryRunForm.currency,
-            destinationUrl: tiktokDryRunForm.destinationUrl,
-            scheduleStartTime: tiktokDryRunForm.scheduleStartTime,
-            videoAssetId: tiktokVideoSelection?.workspaceId === workspaceId ? tiktokVideoSelection.assetId : undefined,
-          }),
+          body: JSON.stringify(buildTikTokRequestPayload()),
         },
       );
       if (!body.data) throw new Error("TikTok dry-run не вернул план кампании.");
       setTikTokDryRun(body.data);
       setTikTokDryRunMessage(
-        body.data.readiness.briefReady
-          ? "Бриф собран. Ни один объект в TikTok не создавался."
+        body.data.readiness.briefReady && body.data.readiness.providerReady
+          ? "План и серверные проверки готовы. На этом шаге ни один объект в TikTok не создавался."
+          : body.data.readiness.briefReady
+            ? "Бриф собран. Ни один объект в TikTok не создавался."
           : "План собран, но в брифе остались обязательные поля.",
       );
       if (body.data.readiness.briefReady) {
@@ -1298,6 +1344,55 @@ export default function AdminCenter() {
       toast.error(message);
     } finally {
       setBusy("tiktok-dry-run", false);
+    }
+  }
+
+  async function launchTikTokDisabled() {
+    if (serverAdminAuth.status !== "confirmed") {
+      setTikTokLaunchMessage("Сначала подтвердите админ-доступ.");
+      return;
+    }
+    if (!tiktokDryRun?.launchEnabled || !tiktokDryRun.readiness.briefReady || !tiktokDryRun.readiness.providerReady) {
+      setTikTokLaunchMessage("Сначала завершите все проверки плана TikTok.");
+      return;
+    }
+    if (tiktokLaunchConfirmation.trim() !== "СОЗДАТЬ") {
+      setTikTokLaunchMessage("Введите «СОЗДАТЬ», чтобы подтвердить выключенный запуск.");
+      return;
+    }
+
+    const requestKey = tiktokLaunchRequestKey || globalThis.crypto.randomUUID();
+    if (!tiktokLaunchRequestKey) setTikTokLaunchRequestKey(requestKey);
+    setBusy("tiktok-launch", true);
+    setTikTokLaunchMessage("");
+    try {
+      const body = await adminCrmRequest<TikTokDisabledLaunchResult>(
+        `/api/crm/tiktok-launch?workspaceId=${encodeURIComponent(workspaceId)}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            ...buildTikTokRequestPayload(),
+            idempotencyKey: requestKey,
+            confirm: true,
+            confirmationPhrase: tiktokLaunchConfirmation.trim(),
+          }),
+        },
+      );
+      if (!body.data) throw new Error("TikTok не вернул итог безопасного запуска.");
+      setTikTokLaunchResult(body.data);
+      setTikTokLaunchMessage(body.data.message);
+      if (body.data.status === "created_disabled") {
+        toast.success("Реклама создана в TikTok выключенной");
+      } else {
+        toast.warning(body.data.message);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Не удалось безопасно создать рекламу в TikTok.";
+      setTikTokLaunchMessage(message);
+      toast.error(message);
+    } finally {
+      setBusy("tiktok-launch", false);
     }
   }
 
@@ -2898,10 +2993,17 @@ export default function AdminCenter() {
   }
 
   function renderIntegrations() {
-    const updateTikTokDryRunField = <Key extends keyof TikTokDryRunForm>(key: Key, value: TikTokDryRunForm[Key]) => {
-      setTikTokDryRunForm((current) => ({ ...current, [key]: value }));
+    const resetTikTokPreparedLaunch = () => {
       setTikTokDryRun(null);
       setTikTokDryRunMessage("");
+      setTikTokLaunchResult(null);
+      setTikTokLaunchMessage("");
+      setTikTokLaunchConfirmation("");
+      setTikTokLaunchRequestKey("");
+    };
+    const updateTikTokDryRunField = <Key extends keyof TikTokDryRunForm>(key: Key, value: TikTokDryRunForm[Key]) => {
+      setTikTokDryRunForm((current) => ({ ...current, [key]: value }));
+      resetTikTokPreparedLaunch();
     };
 
     return (
@@ -3024,7 +3126,7 @@ export default function AdminCenter() {
               if (!response.data) throw new Error("Не удалось проверить подключение TikTok.");
               return response.data;
             }}
-            onChanged={() => { setTikTokDryRun(null); setTikTokDryRunMessage(""); }}
+            onChanged={resetTikTokPreparedLaunch}
           />
 
           <TikTokVideoUpload
@@ -3045,7 +3147,10 @@ export default function AdminCenter() {
               if (!response.data) throw new Error("Не удалось проверить передачу видео.");
               return response.data;
             }}
-            onSelected={(assetId) => { setTikTokVideoSelection({ workspaceId, assetId }); setTikTokDryRun(null); setTikTokDryRunMessage(""); }}
+            onSelected={(assetId) => {
+              setTikTokVideoSelection({ workspaceId, assetId });
+              resetTikTokPreparedLaunch();
+            }}
           />
 
           <TikTokSetupCheck
@@ -3061,7 +3166,7 @@ export default function AdminCenter() {
               if (!response.data) throw new Error("TikTok verification unavailable");
               return response.data;
             }}
-            onChecked={() => { setTikTokDryRun(null); setTikTokDryRunMessage(""); }}
+            onChecked={resetTikTokPreparedLaunch}
           />
 
           <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:items-center">
@@ -3075,7 +3180,7 @@ export default function AdminCenter() {
               Проверить план без запуска
             </button>
             <p className="text-xs font-semibold text-[#64748B]">
-              Переданный ролик учитывается в плане. Создание рекламной кампании остаётся отключённым.
+              Проверка плана ничего не создаёт. Реальный выключенный запуск доступен только отдельным подтверждением.
             </p>
           </div>
 
@@ -3111,14 +3216,20 @@ export default function AdminCenter() {
                 </div>
 
                 <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4">
-                  <p className="font-black text-amber-900">До реального подключения</p>
+                  <p className="font-black text-amber-900">
+                    {tiktokDryRun.readiness.providerReady ? "Проверки площадки пройдены" : "До реального подключения"}
+                  </p>
                   {tiktokDryRun.readiness.providerDependencies.length > 0 ? (
                     <ul className="mt-2 grid gap-1.5 text-sm text-amber-800">
                       {tiktokDryRun.readiness.providerDependencies.map((item) => (
                         <li key={item.code} className="break-words">• {item.message}</li>
                       ))}
                     </ul>
-                  ) : null}
+                  ) : (
+                    <p className="mt-2 text-sm text-amber-800">
+                      Аккаунт, город, профиль и готовое видео подтверждены сервером.
+                    </p>
+                  )}
                 </div>
               </div>
 
@@ -3144,6 +3255,87 @@ export default function AdminCenter() {
                   <p className="break-words text-[#64748B]">provider calls: <strong className="text-[#0F172A]">нет</strong></p>
                 </div>
               </details>
+
+              <div className="border-t border-[#E2E8F0] pt-5" data-testid="tiktok-disabled-launch">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                  <div className="min-w-0">
+                    <p className="text-xs font-bold uppercase tracking-[0.12em] text-[#0D9488]">Безопасный запуск</p>
+                    <h3 className="mt-1 text-base font-black text-[#0F172A]">Создать рекламу в TikTok выключенной</h3>
+                    <p className="mt-1 max-w-3xl text-sm text-[#64748B]">
+                      Система последовательно создаст кампанию, группу и объявление. Все три объекта останутся выключенными до ручной проверки в TikTok Ads Manager.
+                    </p>
+                  </div>
+                  <span className="w-fit shrink-0 rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-black text-slate-700">
+                    Только DISABLE
+                  </span>
+                </div>
+
+                {!tiktokDryRun.launchEnabled ? (
+                  <p className="mt-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-amber-900">
+                    Реальный TikTok-запуск закрыт серверным флагом. Сначала применяется миграция журнала и проводится отдельный production canary.
+                  </p>
+                ) : !tiktokDryRun.readiness.providerReady ? (
+                  <p className="mt-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-amber-900">
+                    Завершите серверные проверки аккаунта, города, профиля и видео.
+                  </p>
+                ) : (
+                  <p className="mt-4 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-semibold text-emerald-900">
+                    Всё готово к созданию выключенной рекламы. Включение и расход бюджета этим действием невозможны.
+                  </p>
+                )}
+
+                <div className="mt-4 grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
+                  <label className="block min-w-0">
+                    <span className="mb-2 block text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">
+                      Для подтверждения введите СОЗДАТЬ
+                    </span>
+                    <input
+                      className="neu-input w-full min-w-0"
+                      value={tiktokLaunchConfirmation}
+                      onChange={(event) => {
+                        setTikTokLaunchConfirmation(event.target.value);
+                        setTikTokLaunchMessage("");
+                      }}
+                      disabled={!tiktokDryRun.launchEnabled || !tiktokDryRun.readiness.providerReady || Boolean(tiktokLaunchResult)}
+                      autoComplete="off"
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    className="neu-btn-primary w-full justify-center lg:w-auto"
+                    onClick={() => void launchTikTokDisabled()}
+                    disabled={
+                      loading["tiktok-launch"] ||
+                      !tiktokDryRun.launchEnabled ||
+                      !tiktokDryRun.readiness.briefReady ||
+                      !tiktokDryRun.readiness.providerReady ||
+                      tiktokLaunchConfirmation.trim() !== "СОЗДАТЬ" ||
+                      Boolean(tiktokLaunchResult)
+                    }
+                  >
+                    {loading["tiktok-launch"] ? <Loader2 className="animate-spin" size={16} /> : <Rocket size={16} />}
+                    Создать выключенной
+                  </button>
+                </div>
+                <p className="mt-2 text-xs font-semibold text-[#64748B]">
+                  ACTIVE-запуск недоступен. При неопределённом ответе повтор блокируется, чтобы не создать дубликат.
+                </p>
+
+                {tiktokLaunchMessage ? (
+                  <p className="mt-4 break-words rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-semibold text-[#334155]">
+                    {tiktokLaunchMessage}
+                  </p>
+                ) : null}
+
+                {tiktokLaunchResult ? (
+                  <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4" data-testid="tiktok-disabled-launch-result">
+                    <StatusTile title="Итог" value={tiktokLaunchResult.status === "created_disabled" ? "Создана выключенной" : "Требует проверки"} />
+                    <StatusTile title="Кампания" value={tiktokLaunchResult.providerObjects.campaignCreated ? "Создана" : "Не подтверждена"} />
+                    <StatusTile title="Группа" value={tiktokLaunchResult.providerObjects.adGroupCreated ? "Создана" : "Не подтверждена"} />
+                    <StatusTile title="Объявление" value={tiktokLaunchResult.providerObjects.adCreated ? "Создано" : "Не подтверждено"} />
+                  </div>
+                ) : null}
+              </div>
             </div>
           ) : null}
         </section>

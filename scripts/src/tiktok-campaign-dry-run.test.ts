@@ -11,11 +11,11 @@ const imported = await import(`${pathToFileURL(modulePath).href}?test=${Date.now
 type DryRun = {
   platform: "tiktok";
   dryRun: true;
-  launchEnabled: false;
+  launchEnabled: boolean;
   targetOperationStatus: "DISABLE";
   readiness: {
     briefReady: boolean;
-    providerReady: false;
+    providerReady: boolean;
     blockers: Array<{ code: string; message: string }>;
     providerDependencies: Array<{ code: string; message: string }>;
   };
@@ -52,6 +52,8 @@ type CampaignModule = {
       identityType?: "CUSTOMIZED_USER" | "TT_USER" | "BC_AUTH_TT";
       locationIds?: readonly string[];
       uploadedVideoIdAvailable?: boolean;
+      videoReadyForAd?: boolean;
+      launchFeatureEnabled?: boolean;
     },
   ): DryRun;
 };
@@ -93,6 +95,7 @@ test("builds a disabled-first campaign, ad group and ad template without provide
   const result = campaign.buildTikTokCampaignDryRun(validInput(), {
     advertiserConfigured: true,
     identityConfigured: true,
+    identityType: "CUSTOMIZED_USER",
     locationIds: ["123456789"],
     uploadedVideoIdAvailable: true,
   });
@@ -110,6 +113,7 @@ test("builds a disabled-first campaign, ad group and ad template without provide
   assert.equal(result.payloadTemplate.campaign.budget_optimize_on, false);
   assert.equal(result.payloadTemplate.adGroup.operation_status, "DISABLE");
   assert.deepEqual(result.payloadTemplate.adGroup.placements, ["PLACEMENT_TIKTOK"]);
+  assert.equal(result.payloadTemplate.adGroup.schedule_type, "SCHEDULE_FROM_NOW");
   assert.equal(result.payloadTemplate.adGroup.budget_mode, "BUDGET_MODE_DAY");
   assert.equal(result.payloadTemplate.adGroup.budget, 5000.5);
   assert.equal(creativeFrom(result).operation_status, "DISABLE");
@@ -127,6 +131,7 @@ test("keeps credentials and raw creative URLs out of the browser-safe template",
   const result = campaign.buildTikTokCampaignDryRun(validInput(), {
     advertiserConfigured: true,
     identityConfigured: true,
+    identityType: "CUSTOMIZED_USER",
     locationIds: ["123456789"],
     uploadedVideoIdAvailable: true,
   });

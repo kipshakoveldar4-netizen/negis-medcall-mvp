@@ -3511,6 +3511,9 @@ async function checkTikTokAdsDiagnosticsFoundation() {
   const connectionUi = await readFile(path.join(repoRoot, "artifacts", "negis", "src", "components", "admin", "TikTokConnection.tsx"), "utf8");
   const helper = await readFile(path.join(repoRoot, "lib", "tiktok", "diagnostics.ts"), "utf8");
   const campaignMapper = await readFile(path.join(repoRoot, "lib", "tiktok", "campaign.ts"), "utf8");
+  const launchService = await readFile(path.join(repoRoot, "lib", "tiktok", "launch.ts"), "utf8");
+  const launchHandler = await readFile(path.join(repoRoot, "lib", "crm", "tiktok-launch.ts"), "utf8");
+  const launchMigration = await readFile(path.join(repoRoot, "migrations", "050_tiktok_disabled_campaign_launches.sql"), "utf8");
   const setup = await readFile(path.join(repoRoot, "lib", "tiktok", "setup.ts"), "utf8");
   const setupUi = await readFile(path.join(repoRoot, "artifacts", "negis", "src", "components", "admin", "TikTokSetupCheck.tsx"), "utf8");
   const server = await readFile(path.join(repoRoot, "lib", "crm", "server.ts"), "utf8");
@@ -3552,7 +3555,9 @@ async function checkTikTokAdsDiagnosticsFoundation() {
     "createsCampaign: false",
     "credentialsIncluded: false",
     "rawCreativeUrlIncluded: false",
-    'providerReady: false',
+    "providerReady: providerDependencies.length === 0",
+    "launchEnabled: context.launchFeatureEnabled === true",
+    'schedule_type: "SCHEDULE_FROM_NOW"',
     'live_adapter_disabled',
   ]) {
     if (!campaignMapper.includes(marker)) throw new Error(`TikTok campaign dry-run mapper is missing ${marker}`);
@@ -3568,9 +3573,11 @@ async function checkTikTokAdsDiagnosticsFoundation() {
     !router.includes('case "tiktok-validate":') ||
     !router.includes("handleTikTokValidate") ||
     !router.includes('case "tiktok-dry-run":') ||
-    !router.includes("handleTikTokDryRun")
+    !router.includes("handleTikTokDryRun") ||
+    !router.includes('case "tiktok-launch":') ||
+    !router.includes("handleTikTokLaunch")
   ) {
-    throw new Error("CRM catch-all must route TikTok diagnostics and dry-run without a new API file");
+    throw new Error("CRM catch-all must route TikTok diagnostics, dry-run and disabled launch without a new API file");
   }
   const authLine = authorization.split("\n").find((line) => line.includes('"tiktok-validate"')) || "";
   if (!authLine.includes('methods: ["POST"]') || !authLine.includes("roles: WORKSPACE_ADMIN")) {
@@ -3579,6 +3586,10 @@ async function checkTikTokAdsDiagnosticsFoundation() {
   const dryRunAuthLine = authorization.split("\n").find((line) => line.includes('"tiktok-dry-run"')) || "";
   if (!dryRunAuthLine.includes('methods: ["POST"]') || !dryRunAuthLine.includes("roles: WORKSPACE_ADMIN")) {
     throw new Error("TikTok campaign dry-run must remain POST-only and owner/admin protected");
+  }
+  const launchAuthLine = authorization.split("\n").find((line) => line.includes('"tiktok-launch"')) || "";
+  if (!launchAuthLine.includes('methods: ["POST"]') || !launchAuthLine.includes("roles: WORKSPACE_ADMIN")) {
+    throw new Error("TikTok disabled launch must remain POST-only and owner/admin protected");
   }
   const setupAuthLine = authorization.split("\n").find((line) => line.includes('"tiktok-setup"')) || "";
   const connectionAuthLine = authorization.split("\n").find((line) => line.includes('"tiktok-connection"')) || "";
@@ -3595,7 +3606,7 @@ async function checkTikTokAdsDiagnosticsFoundation() {
   if (!setupAuthLine.includes("roles: WORKSPACE_ADMIN") || !router.includes('case "tiktok-setup":')) {
     throw new Error("TikTok setup must be protected by the existing CRM catch-all");
   }
-  if (!server.includes("readTikTokVerifiedSetup(readWorkspaceId(req, body)") || !setup.includes("selectTikTokCity")) {
+  if (!server.includes("readTikTokVerifiedSetup(workspaceId") || !setup.includes("selectTikTokCity")) {
     throw new Error("TikTok dry-run must consume server-verified, workspace-scoped evidence");
   }
   if (!setupUi.includes("Проверить город и профиль") || !setupUi.includes("controller.signal.aborted")) {
@@ -3613,6 +3624,10 @@ async function checkTikTokAdsDiagnosticsFoundation() {
     "Проверить план без запуска",
     "Технический шаблон без ID и секретов",
     "TikTok API не вызывался",
+    "/api/crm/tiktok-launch?workspaceId=",
+    "Создать рекламу в TikTok выключенной",
+    "Только DISABLE",
+    "ACTIVE-запуск недоступен",
     'data-testid={`integration-${card.key}`}',
   ]) {
     if (!admin.includes(marker)) throw new Error(`Admin Center TikTok diagnostics is missing ${marker}`);
@@ -3621,8 +3636,37 @@ async function checkTikTokAdsDiagnosticsFoundation() {
     if (admin.includes(forbidden)) throw new Error(`Admin Center must not read TikTok server secret marker ${forbidden}`);
   }
 
-  for (const marker of ["TIKTOK_ACCESS_TOKEN=", "TIKTOK_ADVERTISER_ID=", "TIKTOK_WORKSPACE_ID=", "TIKTOK_APP_ID=", "TIKTOK_APP_SECRET="]) {
+  for (const marker of ["TIKTOK_ACCESS_TOKEN=", "TIKTOK_ADVERTISER_ID=", "TIKTOK_WORKSPACE_ID=", "TIKTOK_DISABLED_LAUNCH_ENABLED=false", "TIKTOK_APP_ID=", "TIKTOK_APP_SECRET="]) {
     if (!envExample.includes(marker)) throw new Error(`.env.example is missing ${marker}`);
+  }
+  for (const marker of [
+    'TIKTOK_DISABLED_LAUNCH_ENABLED !== "true"',
+    "repository.claim(baseRow)",
+    "const campaignId = await createObject(",
+    "const adGroupId = await createObject(",
+    "const adId = await createObject(",
+    "automaticRetryAllowed: false",
+    "destination_fingerprint",
+  ]) {
+    if (!launchService.includes(marker)) throw new Error(`TikTok disabled launch service is missing ${marker}`);
+  }
+  if (!launchHandler.includes("readWorkspaceContext(req)") || !launchHandler.includes('mode: "supabase"')) {
+    throw new Error("TikTok launch handler must use the verified workspace context without demo fallback");
+  }
+  if (/operation_status:\s*["'](?:ENABLE|ACTIVE)["']/.test(launchService)) {
+    throw new Error("TikTok launch service must not create enabled provider objects");
+  }
+  for (const marker of [
+    "unique (workspace_id, idempotency_key)",
+    "operation_status = 'DISABLE'",
+    "enable row level security",
+    "from public, anon, authenticated",
+    "to service_role",
+  ]) {
+    if (!launchMigration.includes(marker)) throw new Error(`TikTok launch migration is missing ${marker}`);
+  }
+  if (/destination_url\s+text|access_token\s+text|raw_(?:payload|response)\s+json|create policy/i.test(launchMigration)) {
+    throw new Error("TikTok launch receipts must not store secrets, URLs or raw provider data");
   }
   for (const marker of [
     "подтверждённым на сервере",
@@ -3630,6 +3674,9 @@ async function checkTikTokAdsDiagnosticsFoundation() {
     "403",
     "advertiser ID не возвращается",
     "Что намеренно не реализовано",
+    "050_tiktok_disabled_campaign_launches.sql",
+    "Первый disabled-only запуск кампании",
+    "Production canary в рамках разработки намеренно не выполнялся",
   ]) {
     if (!docs.includes(marker)) throw new Error(`TikTok foundation docs are missing ${marker}`);
   }
@@ -4027,6 +4074,11 @@ async function main() {
       dailyBudget: "5000",
       currency: "KZT",
     }),
+  });
+  await assertCrmAuthBoundary("/api/crm/tiktok-launch?workspaceId=9eb6f100-bb6a-4f99-9719-e85c34513a03", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ confirm: true, confirmationPhrase: "СОЗДАТЬ" }),
   });
   await assertCrmAuthBoundary("/api/crm/tiktok-setup?workspaceId=9eb6f100-bb6a-4f99-9719-e85c34513a03", {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ city: "Актобе" }),

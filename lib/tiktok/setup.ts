@@ -171,11 +171,13 @@ export function createTikTokSetupVerifier(options: Options = {}) {
     const entry = cache.get(key(workspaceId, city));
     return entry && entry.expiresAt > now() ? structuredClone(entry.context) : structuredClone(EMPTY_CONTEXT);
   }
-  async function verify(workspaceId: string, city: string): Promise<TikTokSetupSummary> {
+  async function verify(workspaceId: string, city: string, forceProvider = false): Promise<TikTokSetupSummary> {
     if (!/^[0-9a-f-]{36}$/i.test(workspaceId) || !/^[\p{L}\p{M} .'-]{2,100}$/u.test(city.trim())) throw new SetupFailure("invalid_config");
     const cacheKey = key(workspaceId, city);
     const cached = cache.get(cacheKey);
-    if (cached && cached.expiresAt > now()) return { ...structuredClone(cached.summary), source: "cache" };
+    if (!forceProvider && cached && cached.expiresAt > now()) {
+      return { ...structuredClone(cached.summary), source: "cache" };
+    }
     const pending = inFlight.get(cacheKey);
     if (pending) return structuredClone(await pending);
     if (inFlight.size >= 100) throw new SetupFailure("rate_limited");

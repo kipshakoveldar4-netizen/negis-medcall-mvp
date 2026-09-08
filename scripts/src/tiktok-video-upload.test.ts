@@ -194,7 +194,7 @@ test("migration protects receipts; UI never sends media URL/ID; launch behavior 
   for (const marker of ["Подтверждаю передачу", "!enabled", "current.signal.aborted", "canRetry"]) assert.ok(ui.includes(marker), marker);
   assert.doesNotMatch(ui, /localStorage|publicUrl|video_url|video_id|TIKTOK_ACCESS_TOKEN/);
   const server = await readFile(path.join(root, "lib/crm/server.ts"), "utf8");
-  assert.ok(server.includes("await tikTokVideos.read(readWorkspaceId(req, body), body.videoAssetId)"));
+  assert.ok(server.includes("await tikTokVideos.read(workspaceId, body.videoAssetId)"));
   const mapper = await readFile(path.join(root, "lib/tiktok/campaign.ts"), "utf8");
   assert.ok(mapper.includes("live_adapter_disabled")); assert.doesNotMatch(mapper, /operation_status: "ENABLE"/);
 });
