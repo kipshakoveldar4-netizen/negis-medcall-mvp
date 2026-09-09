@@ -76,6 +76,7 @@ type LeadDestination = "whatsapp" | "instagram_profile" | "website" | "lead_form
 
 type Brief = {
   service: string;
+  targetPatients?: string;
   city: string;
   cityId: string;
   cityLabelRu: string;
@@ -379,6 +380,7 @@ const VIDEO_OPTIMIZATION_CONFIG_LOADING_MESSAGE =
   "Настройки оптимизации видео ещё загружаются. Подождите несколько секунд и попробуйте снова.";
 const STUDIO_PREFILL_KEY = ADVERTISING_CAMPAIGN_PREFILL_KEY;
 const STUDIO_PREFILL_NOTICE = "Данные перенесены из AI Контент-студии. Проверьте параметры перед запуском.";
+const ADVERTISING_HUB_PREFILL_NOTICE = "Цель кампании перенесена из рекламного центра. Проверьте бриф и креатив перед запуском.";
 const VIDEO_OPTIMIZATION_DISABLED_TOO_LARGE_MESSAGE =
   "Автоматическая оптимизация видео скоро будет доступна. Сейчас загрузите видео до 50 МБ или MP4 H.264.";
 const VIDEO_NEEDS_OPTIMIZATION_MESSAGE = "Видео большое. Для запуска рекламы его нужно оптимизировать.";
@@ -1538,11 +1540,22 @@ export default function AdsAutomation() {
       const audience = firstString(data.audience);
       const cityInput = firstString(data.cityId, data.city);
       const city = cityInput ? getKzMetaCityOption(cityInput) : null;
+      const importedDailyBudget = data.budgetCurrency === "USD" && data.dailyBudget && data.dailyBudget > 0
+        ? String(data.dailyBudget)
+        : "";
+      const importedDurationDays = data.durationDays && data.durationDays > 0
+        ? String(data.durationDays)
+        : "";
       setBrief((current) => ({
         ...current,
         service: service || current.service,
+        targetPatients: data.targetPatients && data.targetPatients > 0
+          ? String(data.targetPatients)
+          : current.targetPatients,
         offer: offer || current.offer,
         knownAudience: audience || current.knownAudience,
+        dailyBudget: importedDailyBudget || current.dailyBudget,
+        days: importedDurationDays || current.days,
         ...(city && city.id
           ? { city: city.labelRu, cityId: city.id, cityLabelRu: city.labelRu, cityCanonicalName: city.canonicalName }
           : {}),
@@ -1560,7 +1573,7 @@ export default function AdsAutomation() {
           description: firstString(data.description, data.offer) || undefined,
           cta: knownCtas.includes(ctaRaw) ? ctaRaw : "LEARN_MORE",
           audience: audience || undefined,
-          generatedBy: "content-studio",
+          generatedBy: data.sourceModule,
         });
         setCompliance(null);
     setImproved(null);
@@ -1587,8 +1600,20 @@ export default function AdsAutomation() {
       setActiveConfirmation("");
       setLaunchResult(null);
       setLastDryRunResult(null);
-      setNotice(STUDIO_PREFILL_NOTICE);
-      toast.success("Данные из AI Контент-студии загружены");
+      if (data.sourceModule === "advertising-hub") {
+        const goalParts = [
+          data.targetPatients ? `${data.targetPatients} пациентов` : "",
+          data.durationDays ? `${data.durationDays} дней` : "",
+          data.maxBudget && data.budgetCurrency
+            ? `лимит ${data.maxBudget.toLocaleString("ru-RU", { maximumFractionDigits: 2 })} ${data.budgetCurrency}`
+            : "",
+        ].filter(Boolean);
+        setNotice(`${ADVERTISING_HUB_PREFILL_NOTICE}${goalParts.length > 0 ? ` Цель: ${goalParts.join(" · ")}. Это ориентир, не прогноз.` : ""}`);
+        toast.success("Цель рекламной кампании загружена");
+      } else {
+        setNotice(STUDIO_PREFILL_NOTICE);
+        toast.success("Данные из AI Контент-студии загружены");
+      }
     } catch {
       // A broken payload must never break the wizard; the key is already consumed.
     }
@@ -4783,6 +4808,7 @@ export default function AdsAutomation() {
   const summaryRows = [
     ["Клиника", clinicName],
     ["Услуга", brief.service],
+    ["Цель по пациентам", brief.targetPatients ? `${brief.targetPatients} за ${brief.days || "—"} дней` : "Не указана"],
     ["Город", selectedCity.labelRu || brief.city],
     ["Площадка", "Instagram"],
     ["Бюджет в день", `${brief.dailyBudget || 0} USD`],

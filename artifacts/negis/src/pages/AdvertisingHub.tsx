@@ -1,7 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
-import { Link } from "wouter";
+import { type FormEvent, useEffect, useMemo, useState } from "react";
+import { Link, useLocation } from "wouter";
 import {
   AlertTriangle,
+  ArrowRight,
+  Bot,
   CheckCircle2,
   Clapperboard,
   Clock3,
@@ -10,13 +12,19 @@ import {
   Megaphone,
   RefreshCw,
   Rocket,
+  Target,
 } from "lucide-react";
 import { PageLayout } from "@/components/layout/PageLayout";
 import { PageHeader } from "@/components/ui/page-header";
 import { MetricCard } from "@/components/ui/metric-card";
 import { useAuth } from "@/contexts/AuthContext";
 import { crmFetch } from "@/lib/api";
-import { isRealWorkspace, readDemoStorage, readWorkspaceId } from "@/lib/demoStorage";
+import { isRealWorkspace, readDemoStorage, readWorkspaceId, workspaceScopedKey } from "@/lib/demoStorage";
+import {
+  ADVERTISING_CAMPAIGN_PREFILL_KEY,
+  createAdvertisingCampaignPrefill,
+} from "../../../../lib/advertising/campaignBrief";
+import { KZ_META_CITY_OPTIONS } from "../../../../lib/meta/cities";
 
 type LoadState = "loading" | "ready" | "error";
 type LaunchState = "paused" | "active" | "failed" | "dry_run" | "video_processing" | "unknown";
@@ -40,6 +48,22 @@ type LaunchesResponse = {
     launches?: unknown;
     items?: unknown;
   };
+};
+
+type CampaignGoalForm = {
+  service: string;
+  cityId: string;
+  targetPatients: string;
+  durationDays: string;
+  maxBudget: string;
+};
+
+const defaultCampaignGoal: CampaignGoalForm = {
+  service: "",
+  cityId: "astana",
+  targetPatients: "",
+  durationDays: "14",
+  maxBudget: "",
 };
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -138,12 +162,71 @@ function localHistoryKey(workspaceId: string): string {
 }
 
 export default function AdvertisingHub() {
+  const [, setLocation] = useLocation();
   const { clinicId } = useAuth();
   const workspaceId = clinicId || readWorkspaceId();
   const productionWorkspace = isRealWorkspace(workspaceId);
   const [launches, setLaunches] = useState<AdvertisingLaunch[]>([]);
   const [loadState, setLoadState] = useState<LoadState>("loading");
   const [reloadKey, setReloadKey] = useState(0);
+  const [campaignGoal, setCampaignGoal] = useState<CampaignGoalForm>(defaultCampaignGoal);
+  const [campaignGoalError, setCampaignGoalError] = useState("");
+
+  const goalPlan = useMemo(() => {
+    const targetPatients = Number(campaignGoal.targetPatients);
+    const durationDays = Number(campaignGoal.durationDays);
+    const maxBudget = Number(campaignGoal.maxBudget);
+    const ready = Boolean(campaignGoal.service.trim())
+      && Number.isInteger(targetPatients)
+      && targetPatients > 0
+      && Number.isInteger(durationDays)
+      && durationDays > 0
+      && durationDays <= 90
+      && Number.isFinite(maxBudget)
+      && maxBudget > 0;
+    const dailyBudget = ready ? Math.round((maxBudget / durationDays) * 100) / 100 : null;
+
+    return { ready, targetPatients, durationDays, maxBudget, dailyBudget };
+  }, [campaignGoal]);
+
+  function updateCampaignGoal(field: keyof CampaignGoalForm, value: string) {
+    setCampaignGoal((current) => ({ ...current, [field]: value }));
+    if (campaignGoalError) setCampaignGoalError("");
+  }
+
+  function prepareCampaign(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!goalPlan.ready || goalPlan.dailyBudget === null) {
+      setCampaignGoalError("Укажите услугу, число пациентов, период до 90 дней и максимальный бюджет.");
+      return;
+    }
+
+    const city = KZ_META_CITY_OPTIONS.find((option) => option.id === campaignGoal.cityId) || KZ_META_CITY_OPTIONS[0];
+    try {
+      const prefill = createAdvertisingCampaignPrefill({
+        platform: "meta",
+        sourceModule: "advertising-hub",
+        sourceKind: "goal",
+        campaignName: `${campaignGoal.service.trim()} · ${city.labelRu}`,
+        service: campaignGoal.service.trim(),
+        city: city.labelRu,
+        cityId: city.id,
+        targetPatients: goalPlan.targetPatients,
+        durationDays: goalPlan.durationDays,
+        maxBudget: goalPlan.maxBudget,
+        dailyBudget: goalPlan.dailyBudget,
+        budgetCurrency: "USD",
+        generatedAt: new Date().toISOString(),
+      });
+      window.localStorage.setItem(
+        workspaceScopedKey(ADVERTISING_CAMPAIGN_PREFILL_KEY),
+        JSON.stringify(prefill),
+      );
+      setLocation("/ads-automation");
+    } catch {
+      setCampaignGoalError("Не удалось подготовить бриф. Проверьте введённые данные и повторите.");
+    }
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -245,6 +328,116 @@ export default function AdvertisingHub() {
             </Link>
           )}
         />
+
+        <section className="negis-glass overflow-hidden p-5 sm:p-6" aria-labelledby="campaign-goal-title">
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+            <div className="flex min-w-0 items-start gap-3">
+              <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg" style={{ background: "var(--negis-primary-soft)", color: "var(--negis-primary)" }}>
+                <Target size={19} />
+              </span>
+              <div className="min-w-0">
+                <p className="text-xs font-semibold uppercase" style={{ color: "var(--negis-primary)", letterSpacing: 0 }}>Цель клиники</p>
+                <h2 id="campaign-goal-title" className="mt-1 text-lg font-semibold" style={{ color: "var(--negis-text)" }}>Что должна дать реклама</h2>
+                <p className="mt-1 max-w-2xl text-sm leading-relaxed" style={{ color: "var(--negis-muted)" }}>
+                  Назовите ключевые ограничения. Рекламный мастер подготовит бриф и оставит запуск выключенным до вашей проверки.
+                </p>
+              </div>
+            </div>
+            <div className="flex shrink-0 items-center gap-1 rounded-lg border p-1" style={{ borderColor: "var(--negis-border)", background: "var(--negis-surface)" }} aria-label="Рекламная площадка">
+              <button type="button" className="min-h-9 rounded-md px-3 text-sm font-semibold" style={{ background: "var(--negis-primary)", color: "white" }} aria-pressed="true">
+                Meta
+              </button>
+              <button type="button" className="min-h-9 rounded-md px-3 text-sm font-semibold opacity-60" style={{ color: "var(--negis-muted)" }} disabled title="Клиентский запуск TikTok готовится">
+                TikTok · скоро
+              </button>
+            </div>
+          </div>
+
+          <form className="mt-5" onSubmit={prepareCampaign}>
+            <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
+              <label className="min-w-0 sm:col-span-2 xl:col-span-1">
+                <span className="mb-1.5 block text-sm font-semibold" style={{ color: "var(--negis-text)" }}>Услуга</span>
+                <input
+                  className="neu-input min-h-11 w-full"
+                  value={campaignGoal.service}
+                  onChange={(event) => updateCampaignGoal("service", event.target.value)}
+                  placeholder="Например, консультация"
+                  autoComplete="off"
+                />
+              </label>
+              <label className="min-w-0">
+                <span className="mb-1.5 block text-sm font-semibold" style={{ color: "var(--negis-text)" }}>Город показа</span>
+                <select
+                  className="neu-input min-h-11 w-full"
+                  value={campaignGoal.cityId}
+                  onChange={(event) => updateCampaignGoal("cityId", event.target.value)}
+                >
+                  {KZ_META_CITY_OPTIONS.map((city) => <option key={city.id} value={city.id}>{city.labelRu}</option>)}
+                </select>
+              </label>
+              <label className="min-w-0">
+                <span className="mb-1.5 block text-sm font-semibold" style={{ color: "var(--negis-text)" }}>Нужно пациентов</span>
+                <input
+                  className="neu-input min-h-11 w-full"
+                  type="number"
+                  inputMode="numeric"
+                  min="1"
+                  step="1"
+                  value={campaignGoal.targetPatients}
+                  onChange={(event) => updateCampaignGoal("targetPatients", event.target.value)}
+                  placeholder="20"
+                />
+              </label>
+              <label className="min-w-0">
+                <span className="mb-1.5 block text-sm font-semibold" style={{ color: "var(--negis-text)" }}>Период, дней</span>
+                <input
+                  className="neu-input min-h-11 w-full"
+                  type="number"
+                  inputMode="numeric"
+                  min="1"
+                  max="90"
+                  step="1"
+                  value={campaignGoal.durationDays}
+                  onChange={(event) => updateCampaignGoal("durationDays", event.target.value)}
+                />
+              </label>
+              <label className="min-w-0">
+                <span className="mb-1.5 block text-sm font-semibold" style={{ color: "var(--negis-text)" }}>Максимальный бюджет, USD</span>
+                <input
+                  className="neu-input min-h-11 w-full"
+                  type="number"
+                  inputMode="decimal"
+                  min="1"
+                  step="0.01"
+                  value={campaignGoal.maxBudget}
+                  onChange={(event) => updateCampaignGoal("maxBudget", event.target.value)}
+                  placeholder="280"
+                />
+              </label>
+            </div>
+
+            <div className="mt-5 flex flex-col gap-4 border-t pt-4 sm:flex-row sm:items-center sm:justify-between" style={{ borderColor: "var(--negis-border)" }}>
+              <div className="min-w-0">
+                {goalPlan.dailyBudget !== null ? (
+                  <p className="text-sm font-semibold" style={{ color: "var(--negis-text)" }}>
+                    Дневной лимит в мастере: {goalPlan.dailyBudget.toLocaleString("ru-RU", { maximumFractionDigits: 2 })} USD
+                  </p>
+                ) : (
+                  <p className="text-sm font-semibold" style={{ color: "var(--negis-text)" }}>Заполните цель кампании</p>
+                )}
+                <p className="mt-1 text-xs leading-relaxed" style={{ color: "var(--negis-muted)" }}>
+                  Цель по пациентам является ориентиром, а не прогнозом или гарантией результата.
+                </p>
+                {campaignGoalError ? <p className="mt-2 text-sm font-semibold text-red-700" role="alert">{campaignGoalError}</p> : null}
+              </div>
+              <button type="submit" className="neu-btn-primary inline-flex min-h-11 shrink-0 items-center justify-center gap-2 px-5 text-sm">
+                <Bot size={17} />
+                Подготовить бриф
+                <ArrowRight size={16} />
+              </button>
+            </div>
+          </form>
+        </section>
 
         <section aria-labelledby="advertising-summary-title">
           <div className="mb-3 flex items-end justify-between gap-3">

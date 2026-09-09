@@ -22,8 +22,8 @@ type Platform = "meta" | "tiktok";
 type Prefill = {
   schemaVersion: 1;
   platform: Platform;
-  sourceModule: "content-studio";
-  sourceKind: "photo" | "generated" | "package" | "library";
+  sourceModule: "content-studio" | "advertising-hub";
+  sourceKind: "photo" | "generated" | "package" | "library" | "goal";
   sourceId?: string;
   campaignName?: string;
   service?: string;
@@ -34,6 +34,11 @@ type Prefill = {
   headline?: string;
   description?: string;
   cta?: string;
+  targetPatients?: number;
+  durationDays?: number;
+  maxBudget?: number;
+  dailyBudget?: number;
+  budgetCurrency?: "USD" | "KZT";
   creative?: {
     type: "image" | "video";
     url?: string;
@@ -140,6 +145,32 @@ test("normalizes legacy library aliases without inventing a creative", () => {
   assert.equal(prefill.service, "Дерматология");
   assert.equal(prefill.primaryText, "Сценарий ролика");
   assert.equal(prefill.creative, undefined);
+});
+
+test("keeps an owner goal handoff explicit without inventing performance", () => {
+  const prefill = campaignBrief.createAdvertisingCampaignPrefill({
+    platform: "meta",
+    sourceModule: "advertising-hub",
+    sourceKind: "goal",
+    campaignName: "Консультация · Астана",
+    service: "Консультация",
+    city: "Астана",
+    targetPatients: 20,
+    durationDays: 14,
+    maxBudget: 280,
+    dailyBudget: 20,
+    budgetCurrency: "USD",
+  });
+
+  assert.equal(prefill.sourceModule, "advertising-hub");
+  assert.equal(prefill.sourceKind, "goal");
+  assert.equal(prefill.targetPatients, 20);
+  assert.equal(prefill.durationDays, 14);
+  assert.equal(prefill.maxBudget, 280);
+  assert.equal(prefill.dailyBudget, 20);
+  assert.equal(prefill.budgetCurrency, "USD");
+  assert.equal("expectedPatients" in prefill, false);
+  assert.equal("forecast" in prefill, false);
 });
 
 test("keeps TikTok drafts isolated from the working Meta launcher", () => {

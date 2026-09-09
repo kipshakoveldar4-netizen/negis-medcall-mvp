@@ -3469,6 +3469,16 @@ async function checkAdvertisingHubSource() {
 
   for (const marker of [
     "Рекламный агент",
+    "Что должна дать реклама",
+    "Нужно пациентов",
+    "Период, дней",
+    "Максимальный бюджет, USD",
+    "Подготовить бриф",
+    "createAdvertisingCampaignPrefill",
+    'sourceModule: "advertising-hub"',
+    'sourceKind: "goal"',
+    "Цель по пациентам является ориентиром, а не прогнозом или гарантией результата.",
+    "TikTok · скоро",
     "/api/crm/meta-launches",
     "isRealWorkspace",
     'body.mode !== "supabase"',
@@ -3481,6 +3491,16 @@ async function checkAdvertisingHubSource() {
     'href: "/ads-automation/history"',
   ]) {
     if (!hub.includes(marker)) throw new Error(`AdvertisingHub is missing ${marker}`);
+  }
+
+  const adsAutomation = await readFile(path.join(pagesDir, "AdsAutomation.tsx"), "utf8");
+  for (const marker of [
+    "ADVERTISING_HUB_PREFILL_NOTICE",
+    "data.targetPatients",
+    '["Цель по пациентам", brief.targetPatients',
+    "Это ориентир, не прогноз.",
+  ]) {
+    if (!adsAutomation.includes(marker)) throw new Error(`AdsAutomation goal handoff is missing ${marker}`);
   }
 
   if (hub.includes('method: "POST"')) {

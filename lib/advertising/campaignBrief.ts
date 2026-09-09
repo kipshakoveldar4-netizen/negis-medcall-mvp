@@ -3,11 +3,16 @@ export const ADVERTISING_CAMPAIGN_BRIEF_VERSION = 1 as const;
 
 export type AdvertisingPlatform = "meta" | "tiktok";
 export type AdvertisingCreativeType = "image" | "video";
+export type AdvertisingBriefSourceModule =
+  | "content-studio"
+  | "advertising-hub";
+export type AdvertisingBudgetCurrency = "USD" | "KZT";
 export type AdvertisingBriefSourceKind =
   | "photo"
   | "generated"
   | "package"
-  | "library";
+  | "library"
+  | "goal";
 
 export type AdvertisingCampaignCreative = {
   type: AdvertisingCreativeType;
@@ -22,7 +27,7 @@ export type AdvertisingCampaignCreative = {
 export type AdvertisingCampaignPrefill = {
   schemaVersion: typeof ADVERTISING_CAMPAIGN_BRIEF_VERSION;
   platform: AdvertisingPlatform;
-  sourceModule: "content-studio";
+  sourceModule: AdvertisingBriefSourceModule;
   sourceKind: AdvertisingBriefSourceKind;
   sourceId?: string;
   campaignName?: string;
@@ -35,6 +40,11 @@ export type AdvertisingCampaignPrefill = {
   headline?: string;
   description?: string;
   cta?: string;
+  targetPatients?: number;
+  durationDays?: number;
+  maxBudget?: number;
+  dailyBudget?: number;
+  budgetCurrency?: AdvertisingBudgetCurrency;
   creative?: AdvertisingCampaignCreative;
   generatedAt?: string;
 };
@@ -42,7 +52,9 @@ export type AdvertisingCampaignPrefill = {
 export type AdvertisingCampaignPrefillInput = Omit<
   AdvertisingCampaignPrefill,
   "schemaVersion" | "sourceModule"
->;
+> & {
+  sourceModule?: AdvertisingBriefSourceModule;
+};
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -63,6 +75,12 @@ function optionalNonNegativeInteger(value: unknown): number | undefined {
   return Math.floor(value);
 }
 
+function optionalPositiveNumber(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0)
+    return undefined;
+  return value;
+}
+
 function normalizePlatform(value: unknown): AdvertisingPlatform | null {
   if (value === undefined || value === null || value === "") return "meta";
   return value === "meta" || value === "tiktok" ? value : null;
@@ -76,7 +94,19 @@ function normalizeSourceKind(
   if (raw === "generated" || raw === "content_studio_generated")
     return "generated";
   if (raw === "library") return "library";
+  if (raw === "goal" || raw === "advertising_hub_goal") return "goal";
   return "package";
+}
+
+function normalizeSourceModule(value: unknown): AdvertisingBriefSourceModule {
+  return value === "advertising-hub" ? "advertising-hub" : "content-studio";
+}
+
+function normalizeBudgetCurrency(
+  value: unknown,
+): AdvertisingBudgetCurrency | undefined {
+  const currency = firstString(value)?.toUpperCase();
+  return currency === "USD" || currency === "KZT" ? currency : undefined;
 }
 
 function normalizeCreative(
@@ -123,6 +153,8 @@ function hasCampaignContent(prefill: AdvertisingCampaignPrefill): boolean {
     prefill.audience ||
     prefill.primaryText ||
     prefill.headline ||
+    prefill.targetPatients ||
+    prefill.maxBudget ||
     prefill.creative,
   );
 }
@@ -151,7 +183,7 @@ export function parseAdvertisingCampaignPrefill(
   const prefill: AdvertisingCampaignPrefill = {
     schemaVersion: ADVERTISING_CAMPAIGN_BRIEF_VERSION,
     platform,
-    sourceModule: "content-studio",
+    sourceModule: normalizeSourceModule(record.sourceModule),
     sourceKind: normalizeSourceKind(record),
     sourceId: firstString(record.sourceId, record.contentPackageId),
     campaignName: firstString(record.campaignName, record.title),
@@ -169,6 +201,11 @@ export function parseAdvertisingCampaignPrefill(
     headline: firstString(record.headline, record.hook, record.title),
     description: firstString(record.description, record.caption, record.offer),
     cta: firstString(record.cta),
+    targetPatients: optionalNonNegativeInteger(record.targetPatients),
+    durationDays: optionalNonNegativeInteger(record.durationDays),
+    maxBudget: optionalPositiveNumber(record.maxBudget),
+    dailyBudget: optionalPositiveNumber(record.dailyBudget),
+    budgetCurrency: normalizeBudgetCurrency(record.budgetCurrency),
     generatedAt: firstString(record.generatedAt),
     ...(creative ? { creative } : {}),
   };
@@ -190,7 +227,7 @@ export function createAdvertisingCampaignPrefill(
   const parsed = parseAdvertisingCampaignPrefill({
     ...input,
     schemaVersion: ADVERTISING_CAMPAIGN_BRIEF_VERSION,
-    sourceModule: "content-studio",
+    sourceModule: input.sourceModule || "content-studio",
   });
 
   if (!parsed) {
