@@ -1419,6 +1419,16 @@ export function AppointmentsPage() {
       .slice(0, 12);
   }, [activeCatalog, serviceSearch]);
 
+  // В одном поиске оператор часто вводит не услугу, а имя мастера. Вместо
+  // ложного «ничего не найдено» предлагаем выбрать мастера и открыть его прайс.
+  const serviceSearchDoctorMatches = useMemo(() => {
+    const needle = serviceSearch.trim().toLocaleLowerCase("ru");
+    if (!needle) return [];
+    return activeDoctors
+      .filter((doctor) => `${doctor.fullName} ${doctor.specialty}`.toLocaleLowerCase("ru").includes(needle))
+      .slice(0, 5);
+  }, [activeDoctors, serviceSearch]);
+
   const formSlots = useMemo(() => {
     if (!form.date) return null;
     const [year, month, day] = form.date.split("-").map(Number);
@@ -2466,12 +2476,30 @@ export function AppointmentsPage() {
                   </label>
                   {serviceSearch.trim() ? (
                     <div className="mb-2 space-y-1">
-                      {serviceMatches.length === 0 ? (
+                      {serviceSearchDoctorMatches.map((doctor) => (
+                        <button
+                          key={`doctor-${doctor.id}`}
+                          type="button"
+                          className="block w-full rounded-xl px-3 py-2 text-left text-sm font-black"
+                          style={{ background: "var(--negis-border)", color: "var(--negis-text)" }}
+                          onClick={() => {
+                            setServiceSearch("");
+                            setDoctorSearch("");
+                            setForm((current) => ({ ...current, doctorId: doctor.id, doctor: doctor.fullName }));
+                          }}
+                        >
+                          {doctor.fullName} — показать услуги
+                          {doctor.specialty ? (
+                            <span className="block text-xs font-semibold" style={{ color: "var(--negis-muted)" }}>{doctor.specialty}</span>
+                          ) : null}
+                        </button>
+                      ))}
+                      {serviceMatches.length === 0 && serviceSearchDoctorMatches.length === 0 ? (
                         <p className="text-sm font-semibold" style={{ color: "var(--negis-muted)" }}>
-                          Ничего не нашлось — проверьте написание или выберите из списка ниже.
+                          Не нашлось ни услуги, ни мастера — проверьте написание или выберите из списка ниже.
                         </p>
-                      ) : (
-                        serviceMatches.map((service) => {
+                      ) : null}
+                      {serviceMatches.map((service) => {
                           const price = service.basePriceMinor === null ? "" : ` — ${Math.round(service.basePriceMinor / 100).toLocaleString("ru-RU")} ₸`;
                           const length = service.durationMinutes ? ` · ${service.durationMinutes} мин` : "";
                           return (
@@ -2496,8 +2524,7 @@ export function AppointmentsPage() {
                               <span className="font-semibold" style={{ color: "var(--negis-muted)" }}>{price}{length}</span>
                             </button>
                           );
-                        })
-                      )}
+                        })}
                     </div>
                   ) : null}
                   <SelectField
