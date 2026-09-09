@@ -52,6 +52,7 @@ type Prefill = {
 
 type BriefModule = {
   ADVERTISING_CAMPAIGN_PREFILL_KEY: string;
+  ADVERTISING_CONTENT_STUDIO_PREFILL_KEY: string;
   ADVERTISING_CAMPAIGN_BRIEF_VERSION: 1;
   createAdvertisingCampaignPrefill(input: Record<string, unknown>): Prefill;
   parseAdvertisingCampaignPrefill(value: unknown): Prefill | null;
@@ -232,6 +233,10 @@ test("exports the workspace-scoped handoff key without storing platform credenti
   assert.equal(
     campaignBrief.ADVERTISING_CAMPAIGN_PREFILL_KEY,
     "negis_ads_automation_prefill",
+  );
+  assert.equal(
+    campaignBrief.ADVERTISING_CONTENT_STUDIO_PREFILL_KEY,
+    "negis_content_studio_goal_prefill",
   );
   assert.equal(campaignBrief.ADVERTISING_CAMPAIGN_BRIEF_VERSION, 1);
   const moduleSource = JSON.stringify(Object.keys(importedBrief));

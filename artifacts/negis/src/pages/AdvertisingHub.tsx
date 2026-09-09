@@ -13,6 +13,7 @@ import {
   RefreshCw,
   Rocket,
   Target,
+  Upload,
 } from "lucide-react";
 import { PageLayout } from "@/components/layout/PageLayout";
 import { PageHeader } from "@/components/ui/page-header";
@@ -22,6 +23,7 @@ import { crmFetch } from "@/lib/api";
 import { isRealWorkspace, readDemoStorage, readWorkspaceId, workspaceScopedKey } from "@/lib/demoStorage";
 import {
   ADVERTISING_CAMPAIGN_PREFILL_KEY,
+  ADVERTISING_CONTENT_STUDIO_PREFILL_KEY,
   createAdvertisingCampaignPrefill,
 } from "../../../../lib/advertising/campaignBrief";
 import { KZ_META_CITY_OPTIONS } from "../../../../lib/meta/cities";
@@ -57,6 +59,8 @@ type CampaignGoalForm = {
   durationDays: string;
   maxBudget: string;
 };
+
+type CampaignGoalDestination = "/ads-automation" | "/content-studio";
 
 const defaultCampaignGoal: CampaignGoalForm = {
   service: "",
@@ -194,8 +198,7 @@ export default function AdvertisingHub() {
     if (campaignGoalError) setCampaignGoalError("");
   }
 
-  function prepareCampaign(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  function prepareCampaign(destination: CampaignGoalDestination) {
     if (!goalPlan.ready || goalPlan.dailyBudget === null) {
       setCampaignGoalError("Укажите услугу, число пациентов, период до 90 дней и максимальный бюджет.");
       return;
@@ -219,13 +222,22 @@ export default function AdvertisingHub() {
         generatedAt: new Date().toISOString(),
       });
       window.localStorage.setItem(
-        workspaceScopedKey(ADVERTISING_CAMPAIGN_PREFILL_KEY),
+        workspaceScopedKey(
+          destination === "/content-studio"
+            ? ADVERTISING_CONTENT_STUDIO_PREFILL_KEY
+            : ADVERTISING_CAMPAIGN_PREFILL_KEY,
+        ),
         JSON.stringify(prefill),
       );
-      setLocation("/ads-automation");
+      setLocation(destination);
     } catch {
       setCampaignGoalError("Не удалось подготовить бриф. Проверьте введённые данные и повторите.");
     }
+  }
+
+  function submitCampaignGoal(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    prepareCampaign("/ads-automation");
   }
 
   useEffect(() => {
@@ -353,7 +365,7 @@ export default function AdvertisingHub() {
             </div>
           </div>
 
-          <form className="mt-5" onSubmit={prepareCampaign}>
+          <form className="mt-5" onSubmit={submitCampaignGoal}>
             <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
               <label className="min-w-0 sm:col-span-2 xl:col-span-1">
                 <span className="mb-1.5 block text-sm font-semibold" style={{ color: "var(--negis-text)" }}>Услуга</span>
@@ -430,11 +442,21 @@ export default function AdvertisingHub() {
                 </p>
                 {campaignGoalError ? <p className="mt-2 text-sm font-semibold text-red-700" role="alert">{campaignGoalError}</p> : null}
               </div>
-              <button type="submit" className="neu-btn-primary inline-flex min-h-11 shrink-0 items-center justify-center gap-2 px-5 text-sm">
-                <Bot size={17} />
-                Подготовить бриф
-                <ArrowRight size={16} />
-              </button>
+              <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
+                <button
+                  type="button"
+                  className="neu-btn-primary inline-flex min-h-11 items-center justify-center gap-2 px-5 text-sm"
+                  onClick={() => prepareCampaign("/content-studio")}
+                >
+                  <Bot size={17} />
+                  Создать креатив с ИИ
+                  <ArrowRight size={16} />
+                </button>
+                <button type="submit" className="neu-btn inline-flex min-h-11 items-center justify-center gap-2 px-5 text-sm">
+                  <Upload size={16} />
+                  У меня есть креатив
+                </button>
+              </div>
             </div>
           </form>
         </section>

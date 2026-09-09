@@ -137,6 +137,7 @@ async function checkAdvertisingHubMobileSource() {
     "grid gap-4 sm:grid-cols-2 xl:grid-cols-5",
     "flex flex-col gap-4 sm:flex-row",
     "flex flex-col gap-4 border-t pt-4 sm:flex-row",
+    "flex w-full flex-col gap-2 sm:w-auto sm:flex-row",
     "flex flex-col gap-3 p-4 sm:flex-row",
     "min-h-11 w-full",
     "break-words",

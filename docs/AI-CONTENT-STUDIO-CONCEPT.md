@@ -99,6 +99,10 @@ A generated package (one row per package) contains:
   workspace-scoped `negis_ads_automation_prefill` key. Ads Automation consumes
   it once, restores safe text/creative fields, clears launch confirmations and
   removes the handoff key. Legacy Content Studio payloads remain supported.
+- `/ads` can hand an owner goal to the studio through the separate
+  workspace-scoped `negis_content_studio_goal_prefill` key. The studio consumes
+  it once, prefills service/city and carries patient, duration and budget context
+  back into the Ads Automation brief. It never starts generation automatically.
 - Ads Automation already covers: «ИИ заполнит» (`/api/crm/ads-ai-fill`), compliance gate, photo/video
   PAUSED launch, auto thumbnail, history. Large-video optimization pipeline exists (worker on Railway)
   but final large-file testing is blocked by the Supabase Free global upload limit — paused for now.

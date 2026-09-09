@@ -1,4 +1,6 @@
 export const ADVERTISING_CAMPAIGN_PREFILL_KEY = "negis_ads_automation_prefill";
+export const ADVERTISING_CONTENT_STUDIO_PREFILL_KEY =
+  "negis_content_studio_goal_prefill";
 export const ADVERTISING_CAMPAIGN_BRIEF_VERSION = 1 as const;
 
 export type AdvertisingPlatform = "meta" | "tiktok";

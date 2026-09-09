@@ -23,7 +23,9 @@ import { supabase, hasSupabaseFrontendEnv } from "@/lib/supabase";
 import { readWorkspaceId, workspaceScopedKey } from "@/lib/demoStorage";
 import {
   ADVERTISING_CAMPAIGN_PREFILL_KEY,
+  ADVERTISING_CONTENT_STUDIO_PREFILL_KEY,
   createAdvertisingCampaignPrefill,
+  parseAdvertisingCampaignPrefillForPlatform,
   type AdvertisingCampaignPrefillInput,
 } from "../../../../lib/advertising/campaignBrief";
 import { checkMetaCompliance } from "../../../../lib/meta/compliance";
@@ -86,6 +88,10 @@ type TelegramResponse = {
 const STORAGE_KEY = "negis_content_studio_videos";
 
 type AdsAutomationPrefillInput = Omit<AdvertisingCampaignPrefillInput, "platform">;
+type AdvertisingGoalContext = Pick<
+  AdvertisingCampaignPrefillInput,
+  "targetPatients" | "durationDays" | "maxBudget" | "dailyBudget" | "budgetCurrency"
+>;
 
 function writeAdsAutomationPrefill(input: AdsAutomationPrefillInput) {
   const prefill = createAdvertisingCampaignPrefill({
@@ -663,6 +669,7 @@ export default function ContentStudio() {
   const [loading, setLoading] = useState<"video" | "script" | "avatar" | "tapnow" | "telegram" | "telegram-test" | "package" | null>(null);
   const [notice, setNotice] = useState("");
   const [packageBrief, setPackageBrief] = useState<PackageBrief>(defaultPackageBrief);
+  const [advertisingGoalContext, setAdvertisingGoalContext] = useState<AdvertisingGoalContext>({});
   const [contentPackage, setContentPackage] = useState<ContentPackage | null>(null);
   const [packageGenerationMode, setPackageGenerationMode] = useState("");
   const [contentPackageId, setContentPackageId] = useState("");
@@ -685,6 +692,57 @@ export default function ContentStudio() {
   const [genImage, setGenImage] = useState<GeneratedFile | null>(null);
   const [genVideo, setGenVideo] = useState<GeneratedFile | null>(null);
   const [videoJob, setVideoJob] = useState<VideoJobState | null>(null);
+
+  const writeContentToAdsAutomation = (input: AdsAutomationPrefillInput) =>
+    writeAdsAutomationPrefill({ ...advertisingGoalContext, ...input });
+
+  useEffect(() => {
+    const key = workspaceScopedKey(ADVERTISING_CONTENT_STUDIO_PREFILL_KEY);
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return;
+
+    window.localStorage.removeItem(key);
+    try {
+      const incoming = parseAdvertisingCampaignPrefillForPlatform(JSON.parse(raw), "meta");
+      if (!incoming || incoming.sourceModule !== "advertising-hub") return;
+
+      const context: AdvertisingGoalContext = {
+        targetPatients: incoming.targetPatients,
+        durationDays: incoming.durationDays,
+        maxBudget: incoming.maxBudget,
+        dailyBudget: incoming.dailyBudget,
+        budgetCurrency: incoming.budgetCurrency,
+      };
+      setAdvertisingGoalContext(context);
+
+      const goalDetails = [
+        incoming.targetPatients ? `${incoming.targetPatients} пациентов` : "",
+        incoming.durationDays ? `${incoming.durationDays} дней` : "",
+        incoming.maxBudget && incoming.budgetCurrency
+          ? `лимит ${incoming.maxBudget.toLocaleString("ru-RU", { maximumFractionDigits: 2 })} ${incoming.budgetCurrency}`
+          : "",
+      ].filter(Boolean);
+      const goalNote = goalDetails.length > 0
+        ? `Контекст рекламной цели: ${goalDetails.join(" · ")}. Не обещать достижение цели.`
+        : "";
+
+      setPackageBrief((current) => ({
+        ...current,
+        mode: "ads",
+        format: "reels",
+        service: incoming.service || current.service,
+        city: incoming.city || current.city,
+        offer: incoming.offer || "",
+        audience: incoming.audience || "",
+        goal: "leads",
+        materialNotes: goalNote,
+      }));
+      setNotice(`Цель рекламы перенесена из рекламного центра${goalDetails.length > 0 ? `: ${goalDetails.join(" · ")}` : ""}. Дополните оффер и аудиторию. Генерация начнётся только после вашего нажатия.`);
+      toast.success("Цель рекламы загружена");
+    } catch {
+      // Invalid local handoff is consumed and never allowed to break the studio.
+    }
+  }, []);
 
   const updatePhotoTexts = (key: keyof PhotoCreativeTexts, value: string) =>
     setPhotoTexts((current) => ({ ...current, [key]: value }));
@@ -888,7 +946,7 @@ export default function ContentStudio() {
         // Metadata persistence is best-effort in demo mode.
       }
 
-      writeAdsAutomationPrefill({
+      writeContentToAdsAutomation({
         sourceKind: "photo",
         campaignName: photoTexts.headline,
         service: packageBrief.service,
@@ -1153,7 +1211,7 @@ export default function ContentStudio() {
   }, [videoJob, genVideo]);
 
   const useGeneratedInAdsAutomation = (file: GeneratedFile, creativeType: "image" | "video") => {
-    writeAdsAutomationPrefill({
+    writeContentToAdsAutomation({
       sourceKind: "generated",
       campaignName: contentPackage?.ideaTitle || packageBrief.service,
       service: packageBrief.service,
@@ -1257,7 +1315,7 @@ export default function ContentStudio() {
       toast.error("Сначала сгенерируйте пакет контента");
       return;
     }
-    writeAdsAutomationPrefill({
+    writeContentToAdsAutomation({
       sourceKind: "package",
       sourceId: contentPackageId || undefined,
       campaignName: contentPackage.ideaTitle,
@@ -1587,13 +1645,23 @@ export default function ContentStudio() {
   // AI Target is no longer a standalone module: the studio hands content
   // straight to Ads Automation, where "ИИ заполнит" covers targeting.
   const transferToAdsAutomation = () => {
-    writeAdsAutomationPrefill({
+    const hasAdvertisingGoalContext = advertisingGoalContext.targetPatients !== undefined;
+    writeContentToAdsAutomation({
       sourceKind: "library",
       sourceId: current.id,
-      campaignName: current.title || form.title,
-      service: current.niche || form.niche,
-      offer: current.cta || current.goal || form.goal,
-      audience: current.audience || form.audience,
+      campaignName: hasAdvertisingGoalContext
+        ? packageBrief.service || current.title || form.title
+        : current.title || form.title,
+      service: hasAdvertisingGoalContext
+        ? packageBrief.service
+        : current.niche || form.niche,
+      city: hasAdvertisingGoalContext ? packageBrief.city : undefined,
+      offer: hasAdvertisingGoalContext
+        ? packageBrief.offer
+        : current.cta || current.goal || form.goal,
+      audience: hasAdvertisingGoalContext
+        ? packageBrief.audience
+        : current.audience || form.audience,
       primaryText: current.caption || current.script || current.hook || form.title,
       headline: current.hook || current.title || form.title,
       description: current.cta || current.goal || form.goal,
