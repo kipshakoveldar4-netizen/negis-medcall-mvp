@@ -965,6 +965,9 @@ export function AppointmentsPage() {
    * вместо него результаты кнопками, до двенадцати: больше — сужайте запрос.
    */
   const [serviceSearch, setServiceSearch] = useState("");
+  // Поиск специалиста отделён от поиска услуги: имя мастера не является
+  // услугой и прежде неизбежно давало «ничего не нашлось» в соседнем поле.
+  const [doctorSearch, setDoctorSearch] = useState("");
   // Мастер, под которого прайс уже сужен в ЭТОЙ сессии модалки. Отличает смену
   // мастера оператором от первого открытия карточки: на открытии снимать связь
   // с услугой нельзя — это молча переписало бы уже сохранённую запись.
@@ -1043,6 +1046,23 @@ export function AppointmentsPage() {
       cancelled = true;
     };
   }, []);
+
+  // Справочники могли измениться, пока страница записи оставалась открытой
+  // (например, администратор добавил нового мастера в другой вкладке). Каждое
+  // открытие формы перечитывает мастеров и прайс, не требуя перезагрузки CRM.
+  useEffect(() => {
+    if (!modalOpen) return;
+    let cancelled = false;
+    void loadCatalogServices().then((result) => {
+      if (!cancelled && result.ok) setCatalog(result.services);
+    });
+    void loadDirectory("/api/crm/clinic-doctors", "doctors", "directoryAvailable", directoryDoctorFromApi).then((result) => {
+      if (!cancelled) setDirectory(result);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [modalOpen]);
 
   /**
    * Прайс сужается под выбранного мастера.
@@ -1144,6 +1164,14 @@ export function AppointmentsPage() {
       .sort((a, b) => a.sortOrder - b.sortOrder || a.fullName.localeCompare(b.fullName, "ru")),
     [directory.items],
   );
+
+  const doctorMatches = useMemo(() => {
+    const needle = doctorSearch.trim().toLocaleLowerCase("ru");
+    if (!needle) return [];
+    return activeDoctors
+      .filter((doctor) => `${doctor.fullName} ${doctor.specialty}`.toLocaleLowerCase("ru").includes(needle))
+      .slice(0, 8);
+  }, [activeDoctors, doctorSearch]);
 
   const { items, loaded, loadError, addItem, setItems } = useDemoCollection<Appointment>("negis_demo_appointments", appointmentsSeed, {
     endpoint: "/api/crm/appointments",
@@ -1508,6 +1536,7 @@ export function AppointmentsPage() {
       ...(doctorFilter !== "all" ? { doctor: doctorFilter, doctorId: preselected?.id ?? "" } : {}),
     });
     setServiceSearch("");
+    setDoctorSearch("");
     setModalOpen(true);
   };
 
@@ -1519,6 +1548,8 @@ export function AppointmentsPage() {
     setEditingId(appointment.id);
     setConflictMessage("");
     setForm(formFromAppointment(appointment));
+    setDoctorSearch("");
+    setServiceSearch("");
     setModalOpen(true);
   };
 
@@ -2327,6 +2358,45 @@ export function AppointmentsPage() {
                   значило бы предлагать действие, которое кончится отказом. */}
               {userRole === "doctor" ? null : activeDoctors.length > 0 ? (
                 <div>
+                  <label className="mb-2 block">
+                    <span className="mb-2 block text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">
+                      Поиск {terms.specialistGenitive}
+                    </span>
+                    <input
+                      className="neu-input w-full"
+                      type="search"
+                      placeholder={`Начните вводить имя ${terms.specialistGenitive}`}
+                      value={doctorSearch}
+                      onChange={(event) => setDoctorSearch(event.target.value)}
+                    />
+                  </label>
+                  {doctorSearch.trim() ? (
+                    <div className="mb-2 space-y-1" data-testid="appointment-doctor-search-results">
+                      {doctorMatches.length === 0 ? (
+                        <p className="text-sm font-semibold" style={{ color: "var(--negis-muted)" }}>
+                          Такой {terms.specialist} не найден — проверьте имя или выберите из списка.
+                        </p>
+                      ) : (
+                        doctorMatches.map((doctor) => (
+                          <button
+                            key={doctor.id}
+                            type="button"
+                            className="block w-full rounded-xl px-3 py-2 text-left text-sm font-black"
+                            style={{ background: "var(--negis-border)", color: "var(--negis-text)" }}
+                            onClick={() => {
+                              setDoctorSearch("");
+                              setForm((current) => ({ ...current, doctorId: doctor.id, doctor: doctor.fullName }));
+                            }}
+                          >
+                            {doctor.fullName}
+                            {doctor.specialty ? (
+                              <span className="font-semibold" style={{ color: "var(--negis-muted)" }}> — {doctor.specialty}</span>
+                            ) : null}
+                          </button>
+                        ))
+                      )}
+                    </div>
+                  ) : null}
                   <SelectField
                     label={capitalize(terms.specialist)}
                     value={form.doctorId || OTHER_SERVICE_OPTION}
@@ -2341,6 +2411,7 @@ export function AppointmentsPage() {
                       // пути шлют объект целиком, и серверная перезапись
                       // затирала бы поправленное вручную имя на каждом
                       // сохранении.
+                      setDoctorSearch("");
                       setForm((current) => ({ ...current, doctorId: doctor.id, doctor: doctor.fullName }));
                     }}
                   >
