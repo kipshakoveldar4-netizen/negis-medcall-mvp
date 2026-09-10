@@ -1412,12 +1412,22 @@ export function AppointmentsPage() {
    * устарела за время раздумий.
    */
   const serviceMatches = useMemo(() => {
-    const needle = serviceSearch.trim().toLowerCase();
+    const needle = serviceSearch.trim().toLocaleLowerCase("ru");
     if (!needle) return [];
+
+    // Имя уже выбранного мастера означает «покажи его прайс». У Дианы имя
+    // случайно входило в названия услуг, поэтому это выглядело рабочим; у
+    // Лауры названия общие и старый поиск показывал только кнопку мастера.
+    const selectedDoctor = activeDoctors.find((doctor) => doctor.id === form.doctorId);
+    const selectedDoctorLabel = `${selectedDoctor?.fullName || form.doctor} ${selectedDoctor?.specialty || ""}`
+      .trim()
+      .toLocaleLowerCase("ru");
+    if (selectedDoctorLabel.includes(needle)) return activeCatalog.slice(0, 12);
+
     return activeCatalog
-      .filter((service) => service.name.toLowerCase().includes(needle))
+      .filter((service) => service.name.toLocaleLowerCase("ru").includes(needle))
       .slice(0, 12);
-  }, [activeCatalog, serviceSearch]);
+  }, [activeCatalog, activeDoctors, form.doctor, form.doctorId, serviceSearch]);
 
   // В одном поиске оператор часто вводит не услугу, а имя мастера. Вместо
   // ложного «ничего не найдено» предлагаем выбрать мастера и открыть его прайс.
@@ -1425,9 +1435,10 @@ export function AppointmentsPage() {
     const needle = serviceSearch.trim().toLocaleLowerCase("ru");
     if (!needle) return [];
     return activeDoctors
+      .filter((doctor) => doctor.id !== form.doctorId)
       .filter((doctor) => `${doctor.fullName} ${doctor.specialty}`.toLocaleLowerCase("ru").includes(needle))
       .slice(0, 5);
-  }, [activeDoctors, serviceSearch]);
+  }, [activeDoctors, form.doctorId, serviceSearch]);
 
   const formSlots = useMemo(() => {
     if (!form.date) return null;
