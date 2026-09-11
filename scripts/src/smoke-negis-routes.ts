@@ -1677,6 +1677,22 @@ async function checkPhotoCreativeBuilder() {
   console.log("Photo creative builder checks: ok");
 }
 
+async function checkAppointmentsPageSource() {
+  const source = await readFile(path.join(repoRoot, "artifacts", "negis", "src", "pages", "AppointmentsPage.tsx"), "utf8");
+
+  if (!source.includes("doctorId: readString(record.doctorId) || readString(record.doctor_id)")) {
+    throw new Error("AppointmentsPage must retain service ownership from the clinic-services response");
+  }
+  if (!source.includes(".filter((service) => service.doctorId === form.doctorId)")) {
+    throw new Error("AppointmentsPage master-name search must exclude common and other-master services");
+  }
+  if (!source.includes("Лаура") || !source.includes("личный прайс")) {
+    throw new Error("AppointmentsPage must explain the selected-master price-list behavior");
+  }
+
+  console.log("AppointmentsPage master service search checks: ok");
+}
+
 async function checkLeadsPageSource() {
   const source = await readFile(path.join(repoRoot, "artifacts", "negis", "src", "pages", "LeadsPage.tsx"), "utf8");
   for (const marker of [
@@ -4049,6 +4065,7 @@ async function main() {
   await checkThemeFoundation();
   await checkContentStudioPhaseOne();
   await checkPhotoCreativeBuilder();
+  await checkAppointmentsPageSource();
   await checkLeadsPageSource();
   await checkClientsPageSource();
   await checkSalesPageSource();

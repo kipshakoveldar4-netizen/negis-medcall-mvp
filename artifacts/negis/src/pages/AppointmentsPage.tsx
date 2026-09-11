@@ -83,6 +83,8 @@ const DEAL_PREFILL_KEY = "negis_deal_prefill";
 type CatalogService = {
   id: string;
   name: string;
+  /** Пусто у общей услуги салона; иначе это личный прайс мастера. */
+  doctorId: string;
   durationMinutes: number | null;
   /** Цена из прайса в тиынах — чтобы список услуг читался как у запись.кз. */
   basePriceMinor: number | null;
@@ -126,6 +128,7 @@ async function loadCatalogServices(doctorId = ""): Promise<{ services: CatalogSe
         return {
           id: readString(record.id),
           name: readString(record.name),
+          doctorId: readString(record.doctorId) || readString(record.doctor_id),
           durationMinutes: duration === null || duration === undefined || duration === "" ? null : readNumber(duration, 0) || null,
           // 0 — осознанное «бесплатно» из прайса, его нельзя ронять в null.
           basePriceMinor: price === null || price === undefined || price === "" ? null : readNumber(price, 0),
@@ -1422,7 +1425,15 @@ export function AppointmentsPage() {
     const selectedDoctorLabel = `${selectedDoctor?.fullName || form.doctor} ${selectedDoctor?.specialty || ""}`
       .trim()
       .toLocaleLowerCase("ru");
-    if (selectedDoctorLabel.includes(needle)) return activeCatalog.slice(0, 12);
+    if (selectedDoctorLabel.includes(needle)) {
+      // Запрос по имени мастера означает именно его личный прайс. Сервер
+      // намеренно добавляет к ответу общие услуги салона, но подмешивать их
+      // сюда нельзя: «Лаура» должна показывать услуги Лауры, а не первые
+      // строки общего каталога с тем же sort_order.
+      return activeCatalog
+        .filter((service) => service.doctorId === form.doctorId)
+        .slice(0, 20);
+    }
 
     return activeCatalog
       .filter((service) => service.name.toLocaleLowerCase("ru").includes(needle))
