@@ -134,6 +134,7 @@ async function checkAdvertisingHubMobileSource() {
   for (const marker of [
     "grid grid-cols-2 gap-3 lg:grid-cols-4",
     "grid grid-cols-1 gap-3 md:grid-cols-3",
+    "grid grid-cols-2 gap-3 xl:grid-cols-4",
     "grid gap-4 sm:grid-cols-2 xl:grid-cols-5",
     "flex flex-col gap-4 sm:flex-row",
     "flex flex-col gap-4 border-t pt-4 sm:flex-row",
@@ -141,6 +142,7 @@ async function checkAdvertisingHubMobileSource() {
     "flex flex-col gap-3 p-4 sm:flex-row",
     "min-h-11 w-full",
     "break-words",
+    "flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between",
   ]) {
     if (!source.includes(marker)) {
       throw new Error(`Advertising hub mobile marker missing: ${marker}`);

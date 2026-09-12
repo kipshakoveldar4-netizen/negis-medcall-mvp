@@ -3,6 +3,7 @@ import { Link, useLocation } from "wouter";
 import {
   AlertTriangle,
   ArrowRight,
+  BarChart3,
   Bot,
   CheckCircle2,
   Clapperboard,
@@ -10,10 +11,12 @@ import {
   FlaskConical,
   History,
   Megaphone,
+  MousePointerClick,
   RefreshCw,
   Rocket,
   Target,
   Upload,
+  WalletCards,
 } from "lucide-react";
 import { PageLayout } from "@/components/layout/PageLayout";
 import { PageHeader } from "@/components/ui/page-header";
@@ -21,6 +24,7 @@ import { MetricCard } from "@/components/ui/metric-card";
 import { useAuth } from "@/contexts/AuthContext";
 import { crmFetch } from "@/lib/api";
 import { isRealWorkspace, readDemoStorage, readWorkspaceId, workspaceScopedKey } from "@/lib/demoStorage";
+import { getSupabaseAccessToken } from "@/lib/serverAuth";
 import {
   ADVERTISING_CAMPAIGN_PREFILL_KEY,
   ADVERTISING_CONTENT_STUDIO_PREFILL_KEY,
@@ -30,6 +34,8 @@ import { KZ_META_CITY_OPTIONS } from "../../../../lib/meta/cities";
 
 type LoadState = "loading" | "ready" | "error";
 type LaunchState = "paused" | "active" | "failed" | "dry_run" | "video_processing" | "unknown";
+type InsightsAccess = "idle" | "checking" | "ready" | "required" | "forbidden" | "error";
+type InsightsAvailability = "available" | "not_synced" | "empty" | "running" | "failed" | "unavailable";
 
 type AdvertisingLaunch = {
   id: string;
@@ -50,6 +56,55 @@ type LaunchesResponse = {
     launches?: unknown;
     items?: unknown;
   };
+};
+
+type ApiEnvelope<T> = {
+  success?: boolean;
+  mode?: string;
+  data?: T;
+  error?: string;
+  details?: string[];
+};
+
+type ServerAdminAuthContext = {
+  workspaceId?: string;
+  role?: string;
+  isAdmin?: boolean;
+};
+
+type MetaInsightsHistorySummary = {
+  metaCampaignLaunchId: string;
+  availability: InsightsAvailability;
+  coveredDateStart: string | null;
+  coveredDateStop: string | null;
+  latestFetchedAt: string | null;
+  rowCount: number;
+  spendByCurrency: Array<{
+    currency: string;
+    currencyExponent: number;
+    spendMinor: string;
+  }>;
+  impressions: string;
+  clicks: string;
+  inlineLinkClicks: string;
+  metaLeads: string | null;
+};
+
+type AdvertisingInsightsAggregate = {
+  campaignsWithData: number;
+  spendByCurrency: Array<{
+    currency: string;
+    currencyExponent: number;
+    spendMinor: bigint;
+  }>;
+  impressions: bigint;
+  clicks: bigint;
+  inlineLinkClicks: bigint;
+  metaLeads: bigint;
+  hasMetaLeads: boolean;
+  coveredDateStart: string | null;
+  coveredDateStop: string | null;
+  latestFetchedAt: string | null;
 };
 
 type CampaignGoalForm = {
@@ -82,6 +137,121 @@ function readNullableNumber(value: unknown): number | null {
   if (value === null || value === undefined || value === "") return null;
   const number = typeof value === "number" ? value : Number(value);
   return Number.isFinite(number) ? number : null;
+}
+
+async function readJson<T>(response: Response): Promise<ApiEnvelope<T>> {
+  const text = await response.text();
+  if (!text.trim()) return {};
+  try {
+    return JSON.parse(text) as ApiEnvelope<T>;
+  } catch {
+    return {};
+  }
+}
+
+function readNonNegativeBigInt(value: string | null | undefined): bigint {
+  const normalized = (value || "").trim();
+  if (!/^\d+$/.test(normalized)) return 0n;
+  try {
+    return BigInt(normalized);
+  } catch {
+    return 0n;
+  }
+}
+
+function formatCount(value: bigint): string {
+  return new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 }).format(value);
+}
+
+function formatMinorAmount(value: bigint, currencyExponent: number, currency: string): string {
+  if (!Number.isInteger(currencyExponent) || currencyExponent < 0 || currencyExponent > 6) return "Нет данных";
+  const divisor = 10n ** BigInt(currencyExponent);
+  const whole = value / divisor;
+  const fraction = currencyExponent > 0
+    ? (value % divisor).toString().padStart(currencyExponent, "0").replace(/0+$/, "")
+    : "";
+  const amount = `${new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 }).format(whole)}${fraction ? `,${fraction}` : ""}`;
+  return `${amount} ${currency}`;
+}
+
+function formatInsightsDateRange(dateStart: string | null, dateStop: string | null): string {
+  if (!dateStart || !dateStop) return "Период не указан";
+  const start = new Date(`${dateStart}T00:00:00`);
+  const stop = new Date(`${dateStop}T00:00:00`);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(stop.getTime())) return "Период не указан";
+  const formatter = new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "short", year: "numeric" });
+  return dateStart === dateStop ? formatter.format(start) : `${formatter.format(start)} - ${formatter.format(stop)}`;
+}
+
+function formatInsightsUpdate(value: string | null): string {
+  if (!value) return "Время обновления не указано";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Время обновления не указано";
+  return `Обновлено ${new Intl.DateTimeFormat("ru-RU", {
+    day: "numeric",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date)}`;
+}
+
+function aggregateAdvertisingInsights(summaries: MetaInsightsHistorySummary[]): AdvertisingInsightsAggregate {
+  const available = summaries.filter((summary) => summary.availability === "available" && summary.rowCount > 0);
+  const spend = new Map<string, { currency: string; currencyExponent: number; spendMinor: bigint }>();
+  let impressions = 0n;
+  let clicks = 0n;
+  let inlineLinkClicks = 0n;
+  let metaLeads = 0n;
+  let hasMetaLeads = false;
+  let coveredDateStart: string | null = null;
+  let coveredDateStop: string | null = null;
+  let latestFetchedAt: string | null = null;
+  let latestFetchedTime = Number.NEGATIVE_INFINITY;
+
+  for (const summary of available) {
+    impressions += readNonNegativeBigInt(summary.impressions);
+    clicks += readNonNegativeBigInt(summary.clicks);
+    inlineLinkClicks += readNonNegativeBigInt(summary.inlineLinkClicks);
+    if (summary.metaLeads !== null) {
+      metaLeads += readNonNegativeBigInt(summary.metaLeads);
+      hasMetaLeads = true;
+    }
+    if (summary.coveredDateStart && (!coveredDateStart || summary.coveredDateStart < coveredDateStart)) {
+      coveredDateStart = summary.coveredDateStart;
+    }
+    if (summary.coveredDateStop && (!coveredDateStop || summary.coveredDateStop > coveredDateStop)) {
+      coveredDateStop = summary.coveredDateStop;
+    }
+    const fetchedTime = Date.parse(summary.latestFetchedAt || "");
+    if (Number.isFinite(fetchedTime) && fetchedTime > latestFetchedTime) {
+      latestFetchedTime = fetchedTime;
+      latestFetchedAt = summary.latestFetchedAt;
+    }
+    for (const item of summary.spendByCurrency) {
+      const currency = item.currency.trim().toUpperCase();
+      if (!currency || !Number.isInteger(item.currencyExponent)) continue;
+      const key = `${currency}:${item.currencyExponent}`;
+      const current = spend.get(key);
+      spend.set(key, {
+        currency,
+        currencyExponent: item.currencyExponent,
+        spendMinor: (current?.spendMinor || 0n) + readNonNegativeBigInt(item.spendMinor),
+      });
+    }
+  }
+
+  return {
+    campaignsWithData: available.length,
+    spendByCurrency: [...spend.values()].sort((left, right) => left.currency.localeCompare(right.currency)),
+    impressions,
+    clicks,
+    inlineLinkClicks,
+    metaLeads,
+    hasMetaLeads,
+    coveredDateStart,
+    coveredDateStop,
+    latestFetchedAt,
+  };
 }
 
 function normalizeLaunch(value: unknown): AdvertisingLaunch {
@@ -173,6 +343,9 @@ export default function AdvertisingHub() {
   const [launches, setLaunches] = useState<AdvertisingLaunch[]>([]);
   const [loadState, setLoadState] = useState<LoadState>("loading");
   const [reloadKey, setReloadKey] = useState(0);
+  const [insightsAccess, setInsightsAccess] = useState<InsightsAccess>("idle");
+  const [insightsSummaries, setInsightsSummaries] = useState<MetaInsightsHistorySummary[]>([]);
+  const [insightsMessage, setInsightsMessage] = useState("");
   const [campaignGoal, setCampaignGoal] = useState<CampaignGoalForm>(defaultCampaignGoal);
   const [campaignGoalError, setCampaignGoalError] = useState("");
 
@@ -291,6 +464,92 @@ export default function AdvertisingHub() {
     };
   }, [productionWorkspace, reloadKey, workspaceId]);
 
+  useEffect(() => {
+    let cancelled = false;
+    setInsightsSummaries([]);
+    setInsightsMessage("");
+
+    if (!productionWorkspace) {
+      setInsightsAccess("idle");
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    setInsightsAccess("checking");
+    void (async () => {
+      try {
+        const accessToken = await getSupabaseAccessToken();
+        if (cancelled) return;
+        if (!accessToken) {
+          setInsightsAccess("required");
+          setInsightsMessage("Войдите как владелец клиники, чтобы увидеть результаты рекламы.");
+          return;
+        }
+
+        const authResponse = await crmFetch(
+          `/api/crm/auth-context?workspaceId=${encodeURIComponent(workspaceId)}`,
+          { accessToken },
+        );
+        const authBody = await readJson<ServerAdminAuthContext>(authResponse);
+        if (cancelled) return;
+        if (authResponse.status === 401) {
+          setInsightsAccess("required");
+          setInsightsMessage("Сессия истекла. Войдите снова, чтобы увидеть результаты рекламы.");
+          return;
+        }
+        if (authResponse.status === 403) {
+          setInsightsAccess("forbidden");
+          setInsightsMessage("Результаты расходов доступны владельцу клиники.");
+          return;
+        }
+        if (!authResponse.ok) throw new Error("auth_unavailable");
+        if (
+          authBody.success !== true
+          || authBody.mode !== "supabase"
+          || authBody.data?.isAdmin !== true
+          || authBody.data.workspaceId !== workspaceId
+        ) {
+          setInsightsAccess("forbidden");
+          setInsightsMessage("Результаты расходов доступны владельцу клиники.");
+          return;
+        }
+
+        const insightsResponse = await crmFetch(
+          `/api/crm/meta-insights-history?workspaceId=${encodeURIComponent(workspaceId)}`,
+          { accessToken },
+        );
+        const insightsBody = await readJson<{ summaries?: MetaInsightsHistorySummary[] }>(insightsResponse);
+        if (cancelled) return;
+        if (insightsResponse.status === 401) {
+          setInsightsAccess("required");
+          setInsightsMessage("Сессия истекла. Войдите снова, чтобы увидеть результаты рекламы.");
+          return;
+        }
+        if (insightsResponse.status === 403) {
+          setInsightsAccess("forbidden");
+          setInsightsMessage("Результаты расходов доступны владельцу клиники.");
+          return;
+        }
+        if (!insightsResponse.ok || insightsBody.success !== true || insightsBody.mode !== "supabase") {
+          throw new Error("insights_unavailable");
+        }
+
+        setInsightsSummaries(Array.isArray(insightsBody.data?.summaries) ? insightsBody.data.summaries : []);
+        setInsightsAccess("ready");
+      } catch {
+        if (!cancelled) {
+          setInsightsAccess("error");
+          setInsightsMessage("Не удалось обновить результаты рекламы. Попробуйте позже.");
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [productionWorkspace, reloadKey, workspaceId]);
+
   const summary = useMemo(() => {
     const states = launches.map(launchState);
     return {
@@ -301,6 +560,24 @@ export default function AdvertisingHub() {
       processing: states.filter((state) => state === "video_processing").length,
     };
   }, [launches]);
+
+  const insights = useMemo(() => aggregateAdvertisingInsights(insightsSummaries), [insightsSummaries]);
+
+  const insightsStates = useMemo(() => ({
+    available: insightsSummaries.filter((summary) => summary.availability === "available").length,
+    empty: insightsSummaries.filter((summary) => summary.availability === "empty").length,
+    running: insightsSummaries.filter((summary) => summary.availability === "running").length,
+    failed: insightsSummaries.filter((summary) => summary.availability === "failed").length,
+    notSynced: insightsSummaries.filter((summary) => summary.availability === "not_synced").length,
+  }), [insightsSummaries]);
+
+  const insightsEmptyMessage = useMemo(() => {
+    if (insightsStates.running > 0) return "Meta обновляет данные. Результаты появятся после завершения синхронизации.";
+    if (insightsStates.empty > 0) return "Meta не вернула данные за выбранный период. Это нормально для выключенных или не откручивавшихся кампаний.";
+    if (insightsStates.failed > 0) return "Не удалось обновить данные Meta. Подробности доступны владельцу в истории запусков.";
+    if (insightsStates.notSynced > 0) return "Результаты ещё не синхронизированы. Кампания и её плановый бюджет уже сохранены.";
+    return "Фактические результаты появятся после первого рекламного показа.";
+  }, [insightsStates]);
 
   const attention = useMemo(() => {
     if (loadState === "loading") {
@@ -483,6 +760,100 @@ export default function AdvertisingHub() {
             <MetricCard label="Требуют внимания" value={metricValue(summary.failed)} icon={AlertTriangle} tone={summary.failed > 0 ? "error" : "muted"} loading={loadState === "loading"} />
             <MetricCard label="Проверок без запуска" value={metricValue(summary.dryRuns)} icon={FlaskConical} tone="muted" loading={loadState === "loading"} />
           </div>
+        </section>
+
+        <section aria-labelledby="advertising-results-title">
+          <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+            <div className="min-w-0">
+              <p className="text-xs font-semibold uppercase" style={{ color: "var(--negis-primary)", letterSpacing: 0 }}>Отчёт владельца</p>
+              <h2 id="advertising-results-title" className="mt-1 text-lg font-semibold" style={{ color: "var(--negis-text)" }}>Результаты рекламы</h2>
+              <p className="mt-1 max-w-2xl text-sm leading-relaxed" style={{ color: "var(--negis-muted)" }}>
+                Только фактические данные Meta по последним синхронизированным кампаниям.
+              </p>
+            </div>
+            <Link href="/ads-automation/history">
+              <span className="cursor-pointer text-sm font-semibold" style={{ color: "var(--negis-primary)" }}>Подробнее по кампаниям</span>
+            </Link>
+          </div>
+
+          {insightsAccess === "checking" ? (
+            <div className="negis-glass p-5 text-sm font-medium" style={{ color: "var(--negis-muted)" }}>Загружаем фактические результаты…</div>
+          ) : insightsAccess === "ready" && insights.campaignsWithData > 0 ? (
+            <>
+              <div className="grid grid-cols-2 gap-3 xl:grid-cols-4">
+                <MetricCard
+                  label="Фактический расход Meta"
+                  value={insights.spendByCurrency.length === 1
+                    ? formatMinorAmount(
+                        insights.spendByCurrency[0].spendMinor,
+                        insights.spendByCurrency[0].currencyExponent,
+                        insights.spendByCurrency[0].currency,
+                      )
+                    : insights.spendByCurrency.length > 1
+                      ? "По валютам"
+                      : "Нет данных"}
+                  icon={WalletCards}
+                  tone="primary"
+                  delta={insights.spendByCurrency.length > 1
+                    ? insights.spendByCurrency
+                        .map((item) => formatMinorAmount(item.spendMinor, item.currencyExponent, item.currency))
+                        .join(" · ")
+                    : `Кампаний с данными: ${insights.campaignsWithData}`}
+                />
+                <MetricCard label="Показы" value={formatCount(insights.impressions)} icon={BarChart3} tone="info" />
+                <MetricCard
+                  label="Клики"
+                  value={formatCount(insights.clicks)}
+                  icon={MousePointerClick}
+                  tone="secondary"
+                  delta={`По ссылке: ${formatCount(insights.inlineLinkClicks)}`}
+                />
+                <MetricCard
+                  label="Лиды по данным Meta"
+                  value={insights.hasMetaLeads ? formatCount(insights.metaLeads) : "Нет данных"}
+                  icon={Target}
+                  tone="success"
+                />
+              </div>
+              <div className="mt-3 flex flex-col gap-2 border-l-4 px-4 py-3 sm:flex-row sm:items-center sm:justify-between" style={{ borderColor: "var(--negis-primary)", background: "var(--negis-primary-soft)" }}>
+                <div className="min-w-0">
+                  <p className="text-sm font-semibold" style={{ color: "var(--negis-text)" }}>
+                    {formatInsightsDateRange(insights.coveredDateStart, insights.coveredDateStop)}
+                  </p>
+                  <p className="mt-1 text-xs leading-relaxed" style={{ color: "var(--negis-muted)" }}>
+                    Фактический расход Meta показан отдельно от планового бюджета. Лиды Meta не равны заявкам CRM. Это ещё не оценка эффективности рекламы.
+                  </p>
+                </div>
+                <span className="shrink-0 text-xs font-semibold" style={{ color: "var(--negis-muted)" }}>{formatInsightsUpdate(insights.latestFetchedAt)}</span>
+              </div>
+            </>
+          ) : (
+            <div className="negis-glass flex flex-col gap-3 p-5 sm:flex-row sm:items-center sm:justify-between">
+              <div className="min-w-0">
+                <p className="text-sm font-semibold" style={{ color: "var(--negis-text)" }}>
+                  {insightsAccess === "ready"
+                    ? "Фактических данных пока нет"
+                    : insightsAccess === "idle"
+                      ? "Фактические данные ещё не подключены"
+                      : insightsAccess === "error"
+                        ? "Не удалось обновить результаты"
+                        : "Результаты доступны владельцу"}
+                </p>
+                <p className="mt-1 text-sm leading-relaxed" style={{ color: "var(--negis-muted)" }}>
+                  {insightsAccess === "ready"
+                    ? insightsEmptyMessage
+                    : insightsAccess === "idle"
+                      ? "В рабочем пространстве данные появятся после синхронизации Meta."
+                      : insightsMessage}
+                </p>
+              </div>
+              {insightsAccess === "ready" ? (
+                <Link href="/ads-automation/history">
+                  <span className="neu-btn inline-flex cursor-pointer items-center justify-center whitespace-nowrap text-sm">Открыть историю</span>
+                </Link>
+              ) : null}
+            </div>
+          )}
         </section>
 
         <section className="negis-glass p-5" aria-labelledby="advertising-attention-title">

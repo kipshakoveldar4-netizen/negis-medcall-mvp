@@ -3514,6 +3514,20 @@ async function checkAdvertisingHubSource() {
     "Создано выключенными",
     "Требуют внимания",
     "Плановый бюджет не является фактическим расходом Meta.",
+    "Результаты рекламы",
+    "Фактический расход Meta",
+    "Лиды по данным Meta",
+    "Лиды Meta не равны заявкам CRM.",
+    "Это ещё не оценка эффективности рекламы.",
+    "Meta не вернула данные за выбранный период.",
+    "aggregateAdvertisingInsights",
+    "readNonNegativeBigInt",
+    "spendByCurrency",
+    "getSupabaseAccessToken",
+    "/api/crm/auth-context?workspaceId=",
+    "authBody.data?.isAdmin !== true",
+    "/api/crm/meta-insights-history?workspaceId=",
+    "Результаты расходов доступны владельцу клиники.",
     'href: "/ads-automation"',
     'href: "/content-studio"',
     'href: "/ads-automation/history"',
@@ -3534,8 +3548,19 @@ async function checkAdvertisingHubSource() {
   if (hub.includes('method: "POST"')) {
     throw new Error("AdvertisingHub must remain read-only and must not launch campaigns");
   }
-  if (hub.includes("meta-insights")) {
-    throw new Error("AdvertisingHub must not fetch admin-only Meta Insights");
+  const authCheck = hub.indexOf("authBody.data?.isAdmin !== true");
+  const insightsRequest = hub.indexOf("/api/crm/meta-insights-history?workspaceId=");
+  if (authCheck < 0 || insightsRequest < 0 || insightsRequest < authCheck) {
+    throw new Error("AdvertisingHub must confirm server owner/admin access before requesting Meta Insights");
+  }
+  if (!hub.includes('if (!productionWorkspace) {') || hub.indexOf("getSupabaseAccessToken()") < hub.indexOf('if (!productionWorkspace) {')) {
+    throw new Error("AdvertisingHub must not request Insights for a local/demo workspace");
+  }
+  if (/\b(?:CPL|ROI|ROMI)\b/.test(hub)) {
+    throw new Error("AdvertisingHub must not calculate advertising coefficients");
+  }
+  if (hub.includes("insightsSummaries, JSON.stringify") || hub.includes("historyInsightsByLaunch, JSON.stringify")) {
+    throw new Error("AdvertisingHub must not persist Meta Insights in localStorage");
   }
   for (const legacyTable of ["ad_accounts", "ad_reports", "platform_configs"]) {
     if (hub.includes(legacyTable)) throw new Error(`AdvertisingHub must not use legacy table ${legacyTable}`);
