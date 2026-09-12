@@ -107,6 +107,28 @@ type AdvertisingInsightsAggregate = {
   latestFetchedAt: string | null;
 };
 
+type CrmAdvertisingOutcomes = {
+  attributedLeads: number;
+  unattributedLeads: number;
+  paidAttributedDeals: number;
+  paidUnattributedDeals: number;
+  pendingDeals: number;
+  attributedRevenueByCurrency: Array<{
+    currency: string;
+    currencyExponent: number;
+    amountMinor: bigint;
+  }>;
+};
+
+const EMPTY_CRM_ADVERTISING_OUTCOMES: CrmAdvertisingOutcomes = {
+  attributedLeads: 0,
+  unattributedLeads: 0,
+  paidAttributedDeals: 0,
+  paidUnattributedDeals: 0,
+  pendingDeals: 0,
+  attributedRevenueByCurrency: [],
+};
+
 type CampaignGoalForm = {
   service: string;
   cityId: string;
@@ -149,14 +171,80 @@ async function readJson<T>(response: Response): Promise<ApiEnvelope<T>> {
   }
 }
 
-function readNonNegativeBigInt(value: string | null | undefined): bigint {
-  const normalized = (value || "").trim();
+function readNonNegativeBigInt(value: unknown): bigint {
+  if (typeof value === "bigint") return value >= 0n ? value : 0n;
+  if (typeof value === "number") {
+    return Number.isSafeInteger(value) && value >= 0 ? BigInt(value) : 0n;
+  }
+  const normalized = typeof value === "string" ? value.trim() : "";
   if (!/^\d+$/.test(normalized)) return 0n;
   try {
     return BigInt(normalized);
   } catch {
     return 0n;
   }
+}
+
+function hasCampaignAttribution(row: Record<string, unknown>): boolean {
+  return Boolean(readString(row.metaCampaignLaunchId ?? row.meta_campaign_launch_id));
+}
+
+async function loadSupabaseCollection(
+  workspaceId: string,
+  resource: "leads" | "deals",
+  accessToken: string,
+): Promise<Record<string, unknown>[]> {
+  const response = await crmFetch(
+    `/api/crm/${resource}?workspaceId=${encodeURIComponent(workspaceId)}`,
+    { accessToken },
+  );
+  const body = await readJson<Record<string, unknown>>(response);
+  if (!response.ok || body.success !== true || body.mode !== "supabase") {
+    throw new Error(`${resource}_unavailable`);
+  }
+  const items = body.data?.[resource];
+  return Array.isArray(items) ? items.map(asRecord) : [];
+}
+
+function aggregateCrmAdvertisingOutcomes(
+  leads: Record<string, unknown>[],
+  deals: Record<string, unknown>[],
+): CrmAdvertisingOutcomes {
+  const revenue = new Map<string, { currency: string; currencyExponent: number; amountMinor: bigint }>();
+  let paidAttributedDeals = 0;
+  let paidUnattributedDeals = 0;
+  let pendingDeals = 0;
+
+  for (const deal of deals) {
+    const status = readString(deal.status).toLowerCase();
+    const attributed = hasCampaignAttribution(deal);
+    if (status === "pending") pendingDeals += 1;
+    if (status !== "paid") continue;
+    if (!attributed) {
+      paidUnattributedDeals += 1;
+      continue;
+    }
+
+    paidAttributedDeals += 1;
+    const currency = readString(deal.currency).toUpperCase() || "KZT";
+    const currencyExponent = 2;
+    const key = `${currency}:${currencyExponent}`;
+    const current = revenue.get(key);
+    revenue.set(key, {
+      currency,
+      currencyExponent,
+      amountMinor: (current?.amountMinor || 0n) + readNonNegativeBigInt(deal.amountMinor ?? deal.amount_minor),
+    });
+  }
+
+  return {
+    attributedLeads: leads.filter(hasCampaignAttribution).length,
+    unattributedLeads: leads.filter((lead) => !hasCampaignAttribution(lead)).length,
+    paidAttributedDeals,
+    paidUnattributedDeals,
+    pendingDeals,
+    attributedRevenueByCurrency: [...revenue.values()].sort((left, right) => left.currency.localeCompare(right.currency)),
+  };
 }
 
 function formatCount(value: bigint): string {
@@ -172,6 +260,11 @@ function formatMinorAmount(value: bigint, currencyExponent: number, currency: st
     : "";
   const amount = `${new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 }).format(whole)}${fraction ? `,${fraction}` : ""}`;
   return `${amount} ${currency}`;
+}
+
+function formatCrmRevenueAmount(value: bigint, currencyExponent: number, currency: string): string {
+  const formatted = formatMinorAmount(value, currencyExponent, currency);
+  return currency === "KZT" ? formatted.replace(/ KZT$/, " ₸") : formatted;
 }
 
 function formatInsightsDateRange(dateStart: string | null, dateStop: string | null): string {
@@ -346,6 +439,9 @@ export default function AdvertisingHub() {
   const [insightsAccess, setInsightsAccess] = useState<InsightsAccess>("idle");
   const [insightsSummaries, setInsightsSummaries] = useState<MetaInsightsHistorySummary[]>([]);
   const [insightsMessage, setInsightsMessage] = useState("");
+  const [crmOutcomesAccess, setCrmOutcomesAccess] = useState<InsightsAccess>("idle");
+  const [crmOutcomes, setCrmOutcomes] = useState<CrmAdvertisingOutcomes>(EMPTY_CRM_ADVERTISING_OUTCOMES);
+  const [crmOutcomesMessage, setCrmOutcomesMessage] = useState("");
   const [campaignGoal, setCampaignGoal] = useState<CampaignGoalForm>(defaultCampaignGoal);
   const [campaignGoalError, setCampaignGoalError] = useState("");
 
@@ -466,6 +562,77 @@ export default function AdvertisingHub() {
 
   useEffect(() => {
     let cancelled = false;
+    setCrmOutcomes(EMPTY_CRM_ADVERTISING_OUTCOMES);
+    setCrmOutcomesMessage("");
+
+    if (!productionWorkspace) {
+      setCrmOutcomesAccess("idle");
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    setCrmOutcomesAccess("checking");
+    void (async () => {
+      try {
+        const accessToken = await getSupabaseAccessToken();
+        if (cancelled) return;
+        if (!accessToken) {
+          setCrmOutcomesAccess("required");
+          setCrmOutcomesMessage("Войдите как владелец клиники, чтобы увидеть результат в CRM.");
+          return;
+        }
+
+        const authResponse = await crmFetch(
+          `/api/crm/auth-context?workspaceId=${encodeURIComponent(workspaceId)}`,
+          { accessToken },
+        );
+        const authBody = await readJson<ServerAdminAuthContext>(authResponse);
+        if (cancelled) return;
+        if (authResponse.status === 401) {
+          setCrmOutcomesAccess("required");
+          setCrmOutcomesMessage("Сессия истекла. Войдите снова, чтобы увидеть результат в CRM.");
+          return;
+        }
+        if (authResponse.status === 403) {
+          setCrmOutcomesAccess("forbidden");
+          setCrmOutcomesMessage("Результат рекламы в CRM доступен владельцу клиники.");
+          return;
+        }
+        if (!authResponse.ok) throw new Error("auth_unavailable");
+        if (
+          authBody.success !== true
+          || authBody.mode !== "supabase"
+          || authBody.data?.isAdmin !== true
+          || authBody.data.workspaceId !== workspaceId
+        ) {
+          setCrmOutcomesAccess("forbidden");
+          setCrmOutcomesMessage("Результат рекламы в CRM доступен владельцу клиники.");
+          return;
+        }
+
+        const [leads, deals] = await Promise.all([
+          loadSupabaseCollection(workspaceId, "leads", accessToken),
+          loadSupabaseCollection(workspaceId, "deals", accessToken),
+        ]);
+        if (cancelled) return;
+        setCrmOutcomes(aggregateCrmAdvertisingOutcomes(leads, deals));
+        setCrmOutcomesAccess("ready");
+      } catch {
+        if (!cancelled) {
+          setCrmOutcomesAccess("error");
+          setCrmOutcomesMessage("Не удалось обновить связанные заявки и продажи. Попробуйте позже.");
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [productionWorkspace, reloadKey, workspaceId]);
+
+  useEffect(() => {
+    let cancelled = false;
     setInsightsSummaries([]);
     setInsightsMessage("");
 
@@ -578,6 +745,20 @@ export default function AdvertisingHub() {
     if (insightsStates.notSynced > 0) return "Результаты ещё не синхронизированы. Кампания и её плановый бюджет уже сохранены.";
     return "Фактические результаты появятся после первого рекламного показа.";
   }, [insightsStates]);
+
+  const crmRevenueValue = crmOutcomes.attributedRevenueByCurrency.length === 0
+    ? "0 ₸"
+    : crmOutcomes.attributedRevenueByCurrency.length === 1
+      ? formatCrmRevenueAmount(
+          crmOutcomes.attributedRevenueByCurrency[0].amountMinor,
+          crmOutcomes.attributedRevenueByCurrency[0].currencyExponent,
+          crmOutcomes.attributedRevenueByCurrency[0].currency,
+        )
+      : "По валютам";
+
+  const crmRevenueByCurrency = crmOutcomes.attributedRevenueByCurrency
+    .map((item) => formatCrmRevenueAmount(item.amountMinor, item.currencyExponent, item.currency))
+    .join(" · ");
 
   const attention = useMemo(() => {
     if (loadState === "loading") {
@@ -852,6 +1033,71 @@ export default function AdvertisingHub() {
                   <span className="neu-btn inline-flex cursor-pointer items-center justify-center whitespace-nowrap text-sm">Открыть историю</span>
                 </Link>
               ) : null}
+            </div>
+          )}
+        </section>
+
+        <section aria-labelledby="advertising-crm-results-title">
+          <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+            <div className="min-w-0">
+              <p className="text-xs font-semibold uppercase" style={{ color: "var(--negis-primary)", letterSpacing: 0 }}>Связь с CRM</p>
+              <h2 id="advertising-crm-results-title" className="mt-1 text-lg font-semibold" style={{ color: "var(--negis-text)" }}>Результат в CRM</h2>
+              <p className="mt-1 max-w-2xl text-sm leading-relaxed" style={{ color: "var(--negis-muted)" }}>
+                Только заявки и оплаченные продажи, которые вручную связаны с рекламными кампаниями.
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-3 text-sm font-semibold">
+              <Link href="/leads"><span className="cursor-pointer" style={{ color: "var(--negis-primary)" }}>Открыть заявки</span></Link>
+              <Link href="/sales"><span className="cursor-pointer" style={{ color: "var(--negis-primary)" }}>Открыть продажи</span></Link>
+            </div>
+          </div>
+
+          {crmOutcomesAccess === "checking" ? (
+            <div className="negis-glass p-5 text-sm font-medium" style={{ color: "var(--negis-muted)" }}>Загружаем связанные заявки и продажи…</div>
+          ) : crmOutcomesAccess === "ready" ? (
+            <>
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                <MetricCard
+                  label="Заявки с рекламой"
+                  value={crmOutcomes.attributedLeads}
+                  icon={Target}
+                  tone="info"
+                  delta={`Без связи: ${crmOutcomes.unattributedLeads}`}
+                />
+                <MetricCard
+                  label="Оплаченные продажи с рекламой"
+                  value={crmOutcomes.paidAttributedDeals}
+                  icon={CheckCircle2}
+                  tone="success"
+                  delta={`Оплачены без связи: ${crmOutcomes.paidUnattributedDeals}`}
+                />
+                <MetricCard
+                  label="Связанная выручка CRM"
+                  value={crmRevenueValue}
+                  icon={WalletCards}
+                  tone="primary"
+                  delta={crmRevenueByCurrency || `Ожидают оплаты в CRM: ${crmOutcomes.pendingDeals}`}
+                />
+              </div>
+              <div className="mt-3 flex flex-col gap-3 border-l-4 px-4 py-3 sm:flex-row sm:items-center sm:justify-between" style={{ borderColor: "var(--negis-primary)", background: "var(--negis-primary-soft)" }}>
+                <p className="min-w-0 text-xs leading-relaxed" style={{ color: "var(--negis-muted)" }}>
+                  Связи с рекламой устанавливаются вручную. Выручка CRM показана отдельно от расходов Meta и не доказывает результат рекламы.
+                </p>
+                {crmOutcomes.unattributedLeads > 0 ? (
+                  <Link href="/leads"><span className="neu-btn inline-flex min-h-10 shrink-0 cursor-pointer items-center justify-center whitespace-nowrap text-sm">Связать заявки</span></Link>
+                ) : crmOutcomes.paidUnattributedDeals > 0 ? (
+                  <Link href="/sales"><span className="neu-btn inline-flex min-h-10 shrink-0 cursor-pointer items-center justify-center whitespace-nowrap text-sm">Связать продажи</span></Link>
+                ) : null}
+              </div>
+            </>
+          ) : (
+            <div className="negis-glass p-5">
+              <p className="text-sm font-semibold" style={{ color: "var(--negis-text)" }}>
+                {crmOutcomesAccess === "idle" ? "Результат CRM доступен в рабочем пространстве" : "Не удалось показать результат CRM"}
+              </p>
+              <p className="mt-1 text-sm leading-relaxed" style={{ color: "var(--negis-muted)" }}>
+                {crmOutcomesAccess === "idle" ? "В демо-режиме фактические заявки и продажи не подменяются тестовыми данными." : crmOutcomesMessage}
+              </p>
             </div>
           )}
         </section>

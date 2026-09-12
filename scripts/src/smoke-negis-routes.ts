@@ -3523,6 +3523,17 @@ async function checkAdvertisingHubSource() {
     "aggregateAdvertisingInsights",
     "readNonNegativeBigInt",
     "spendByCurrency",
+    "Результат в CRM",
+    "Заявки с рекламой",
+    "Оплаченные продажи с рекламой",
+    "Связанная выручка CRM",
+    "Связи с рекламой устанавливаются вручную.",
+    "Выручка CRM показана отдельно от расходов Meta",
+    "aggregateCrmAdvertisingOutcomes",
+    "hasCampaignAttribution",
+    'resource: "leads" | "deals"',
+    "/api/crm/${resource}?workspaceId=",
+    'if (status !== "paid") continue;',
     "getSupabaseAccessToken",
     "/api/crm/auth-context?workspaceId=",
     "authBody.data?.isAdmin !== true",
@@ -3553,6 +3564,10 @@ async function checkAdvertisingHubSource() {
   if (authCheck < 0 || insightsRequest < 0 || insightsRequest < authCheck) {
     throw new Error("AdvertisingHub must confirm server owner/admin access before requesting Meta Insights");
   }
+  const crmCollectionsRequest = hub.indexOf("const [leads, deals] = await Promise.all([");
+  if (authCheck < 0 || crmCollectionsRequest < authCheck) {
+    throw new Error("AdvertisingHub must confirm server owner/admin access before requesting CRM outcomes");
+  }
   if (!hub.includes('if (!productionWorkspace) {') || hub.indexOf("getSupabaseAccessToken()") < hub.indexOf('if (!productionWorkspace) {')) {
     throw new Error("AdvertisingHub must not request Insights for a local/demo workspace");
   }
@@ -3561,6 +3576,9 @@ async function checkAdvertisingHubSource() {
   }
   if (hub.includes("insightsSummaries, JSON.stringify") || hub.includes("historyInsightsByLaunch, JSON.stringify")) {
     throw new Error("AdvertisingHub must not persist Meta Insights in localStorage");
+  }
+  if (hub.includes("crmOutcomes, JSON.stringify")) {
+    throw new Error("AdvertisingHub must not persist CRM advertising outcomes in localStorage");
   }
   for (const legacyTable of ["ad_accounts", "ad_reports", "platform_configs"]) {
     if (hub.includes(legacyTable)) throw new Error(`AdvertisingHub must not use legacy table ${legacyTable}`);
