@@ -30,6 +30,7 @@ import {
   ADVERTISING_CONTENT_STUDIO_PREFILL_KEY,
   createAdvertisingCampaignPrefill,
 } from "../../../../lib/advertising/campaignBrief";
+import { buildAdvertisingAssistantBrief } from "../../../../lib/advertising/assistant";
 import { KZ_META_CITY_OPTIONS } from "../../../../lib/meta/cities";
 
 type LoadState = "loading" | "ready" | "error";
@@ -760,26 +761,30 @@ export default function AdvertisingHub() {
     .map((item) => formatCrmRevenueAmount(item.amountMinor, item.currencyExponent, item.currency))
     .join(" · ");
 
-  const attention = useMemo(() => {
-    if (loadState === "loading") {
-      return { icon: Clock3, title: "Проверяем рекламные запуски", text: "Собираем последние статусы кампаний.", href: "/ads-automation/history", action: "Открыть историю" };
-    }
-    if (loadState === "error") {
-      return { icon: AlertTriangle, title: "Не удалось обновить историю", text: "Повторите проверку. Новую рекламу можно подготовить отдельно.", href: "", action: "Повторить" };
-    }
-    if (summary.failed > 0) {
-      return { icon: AlertTriangle, title: "Есть запуски, требующие внимания", text: `Неудачных запусков: ${summary.failed}. Причина и следующий шаг указаны в истории.`, href: "/ads-automation/history", action: "Проверить историю" };
-    }
-    if (summary.processing > 0) {
-      return { icon: Clock3, title: "Meta обрабатывает видео", text: `Видео в обработке: ${summary.processing}. Это может занять несколько минут.`, href: "/ads-automation/history", action: "Проверить статус" };
-    }
-    if (summary.created === 0) {
-      return { icon: Rocket, title: "Подготовьте первый рекламный запуск", text: "Добавьте креатив и ключевые параметры. Кампания будет создана выключенной.", href: "/ads-automation", action: "Создать рекламу" };
-    }
-    return { icon: CheckCircle2, title: "Рекламные запуски подготовлены", text: `Создано кампаний: ${summary.created}. Выключенных: ${summary.paused}.`, href: "/ads-automation/history", action: "Открыть историю" };
-  }, [loadState, summary]);
+  const assistant = useMemo(() => buildAdvertisingAssistantBrief({
+    launchLoadState: loadState,
+    createdLaunches: summary.created,
+    failedLaunches: summary.failed,
+    processingLaunches: summary.processing,
+    insightsAccess,
+    campaignsWithInsights: insights.campaignsWithData,
+    insightsEmpty: insightsStates.empty,
+    insightsRunning: insightsStates.running,
+    insightsNotSynced: insightsStates.notSynced,
+    crmAccess: crmOutcomesAccess,
+    unattributedLeads: crmOutcomes.unattributedLeads,
+    paidUnattributedDeals: crmOutcomes.paidUnattributedDeals,
+  }), [crmOutcomes, crmOutcomesAccess, insights.campaignsWithData, insightsAccess, insightsStates, loadState, summary]);
 
-  const AttentionIcon = attention.icon;
+  const AssistantIcon = assistant.tone === "error"
+    ? AlertTriangle
+    : assistant.reason === "loading" || assistant.reason === "checking_results" || assistant.reason === "insights_syncing" || assistant.reason === "video_processing"
+      ? Clock3
+      : assistant.tone === "success"
+        ? CheckCircle2
+        : assistant.reason === "first_campaign"
+          ? Rocket
+          : Bot;
   const metricValue = (value: number) => (loadState === "ready" ? value : undefined);
 
   return (
@@ -1102,26 +1107,27 @@ export default function AdvertisingHub() {
           )}
         </section>
 
-        <section className="negis-glass p-5" aria-labelledby="advertising-attention-title">
+        <section className="negis-glass p-5" aria-labelledby="advertising-assistant-title" aria-live="polite">
           <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
             <div className="flex min-w-0 items-start gap-3">
               <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg" style={{ background: "var(--negis-primary-soft)", color: "var(--negis-primary)" }}>
-                <AttentionIcon size={19} />
+                <AssistantIcon size={19} />
               </span>
               <div className="min-w-0">
-                <h2 id="advertising-attention-title" className="text-base font-semibold" style={{ color: "var(--negis-text)" }}>{attention.title}</h2>
-                <p className="mt-1 text-sm leading-relaxed" style={{ color: "var(--negis-muted)" }}>{attention.text}</p>
+                <p className="text-xs font-semibold uppercase" style={{ color: "var(--negis-primary)", letterSpacing: 0 }}>Рекламный помощник</p>
+                <h2 id="advertising-assistant-title" className="mt-1 text-base font-semibold" style={{ color: "var(--negis-text)" }}>{assistant.title}</h2>
+                <p className="mt-1 text-sm leading-relaxed" style={{ color: "var(--negis-muted)" }}>{assistant.text}</p>
               </div>
             </div>
-            {attention.href ? (
-              <Link href={attention.href}>
-                <span className="neu-btn inline-flex cursor-pointer items-center justify-center whitespace-nowrap text-sm">{attention.action}</span>
+            {assistant.href && assistant.actionLabel ? (
+              <Link href={assistant.href}>
+                <span className="neu-btn inline-flex min-h-10 cursor-pointer items-center justify-center whitespace-nowrap text-sm">{assistant.actionLabel}</span>
               </Link>
-            ) : (
+            ) : assistant.actionLabel ? (
               <button type="button" className="neu-btn justify-center whitespace-nowrap text-sm" onClick={() => setReloadKey((value) => value + 1)}>
-                {attention.action}
+                {assistant.actionLabel}
               </button>
-            )}
+            ) : null}
           </div>
         </section>
 

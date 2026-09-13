@@ -3472,6 +3472,7 @@ async function checkAdvertisingHubSource() {
   const pagesDir = path.join(repoRoot, "artifacts", "negis", "src", "pages");
   const app = await readFile(path.join(pagesDir, "..", "App.tsx"), "utf8");
   const hub = await readFile(path.join(pagesDir, "AdvertisingHub.tsx"), "utf8");
+  const assistant = await readFile(path.join(repoRoot, "lib", "advertising", "assistant.ts"), "utf8");
   const sidebar = await readFile(path.join(pagesDir, "..", "components", "layout", "Sidebar.tsx"), "utf8");
   const mobileNav = await readFile(path.join(pagesDir, "..", "components", "layout", "MobileNav.tsx"), "utf8");
   const topbar = await readFile(path.join(pagesDir, "..", "components", "layout", "Topbar.tsx"), "utf8");
@@ -3530,6 +3531,8 @@ async function checkAdvertisingHubSource() {
     "Связи с рекламой устанавливаются вручную.",
     "Выручка CRM показана отдельно от расходов Meta",
     "aggregateCrmAdvertisingOutcomes",
+    "buildAdvertisingAssistantBrief",
+    "Рекламный помощник",
     "hasCampaignAttribution",
     'resource: "leads" | "deals"',
     "/api/crm/${resource}?workspaceId=",
@@ -3558,6 +3561,20 @@ async function checkAdvertisingHubSource() {
 
   if (hub.includes('method: "POST"')) {
     throw new Error("AdvertisingHub must remain read-only and must not launch campaigns");
+  }
+  for (const marker of [
+    "buildAdvertisingAssistantBrief",
+    'reason: "launch_failed"',
+    'reason: "video_processing"',
+    'reason: "insights_not_synced"',
+    'reason: "link_paid_sales"',
+    'reason: "link_leads"',
+    "It never launches, pauses or edits an advertising campaign.",
+  ]) {
+    if (!assistant.includes(marker)) throw new Error(`Advertising assistant is missing ${marker}`);
+  }
+  if (/\b(?:CPL|ROI|ROMI)\b/.test(assistant) || assistant.includes('method: "POST"')) {
+    throw new Error("Advertising assistant must explain facts without coefficients or write actions");
   }
   const authCheck = hub.indexOf("authBody.data?.isAdmin !== true");
   const insightsRequest = hub.indexOf("/api/crm/meta-insights-history?workspaceId=");
