@@ -106,6 +106,12 @@ A generated package (one row per package) contains:
   the existing package request, so selection does not trigger another paid AI
   call. Legacy model responses without `adVariants` are completed
   deterministically and keep their original primary text as the first option.
+- Handing a package to Ads Automation records a versioned approval snapshot:
+  package id when available, variant id/label, approval time and the selected
+  headline/body/description. The safe snapshot is persisted in the existing
+  content row and launch payload, without a schema change. Ads Automation marks
+  whether the launch copy still matches it; edited copy is never silently called
+  the approved version and must pass the normal compliance check again.
 - Generated photo and video handoffs preserve the creative asset id, stored
   filename and public media metadata. Ads Automation restores both media types.
   When a generated video has no cover yet, the browser captures a frame from

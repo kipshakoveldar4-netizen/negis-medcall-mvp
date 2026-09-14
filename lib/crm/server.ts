@@ -1,6 +1,7 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { canAssignRole, isStaffRole, isWorkspaceAdminRole } from "../auth/permissions";
 import { extractJsonObject, generateText, resolveTextProvider } from "../ai/text-provider";
+import { normalizeAdvertisingContentApproval } from "../advertising/campaignBrief";
 import { normalizePhone } from "./phone";
 import { hidesClientContacts, redactContacts, redactContactsList, stripContactWrites } from "./contact-privacy";
 import { isEmptyIdentity, rowBelongsTo, rowTargetsOnlySelf, seesOnlyOwnWork, type OwnWorkIdentity } from "./own-work";
@@ -696,7 +697,21 @@ function buildPatchRow(resource: CrmResource, body: JsonRecord): JsonRecord {
     setText("avatar_prompt", ["avatarPrompt", "avatar_prompt"]);
     setText("tapnow_prompt", ["tapnowPrompt", "tapnow_prompt"]);
     setText("status", ["status"]);
-    row.raw_payload = body;
+    // Ordinary status/script edits live in typed columns and must not erase a
+    // previously approved package snapshot. Replace raw_payload only when the
+    // caller intentionally sends package/provenance metadata.
+    if (
+      hasAnyKey(body, [
+        "packageBrief",
+        "packageData",
+        "contentApproval",
+        "approvalStatus",
+        "contentVersion",
+        "photoCreative",
+      ])
+    ) {
+      row.raw_payload = body;
+    }
     row.updated_at = new Date().toISOString();
   }
 
@@ -1542,6 +1557,10 @@ function makeStaffUser(body: JsonRecord): JsonRecord {
 }
 
 function makeContentVideo(body: JsonRecord): JsonRecord {
+  const rawPayload = asRecord(body.rawPayload ?? body.raw_payload);
+  const contentApproval = normalizeAdvertisingContentApproval(
+    body.contentApproval ?? rawPayload.contentApproval,
+  );
   return {
     id: readString(body.id) || nextDemoId("content"),
     title: readString(body.title),
@@ -1558,6 +1577,7 @@ function makeContentVideo(body: JsonRecord): JsonRecord {
     hashtags: readJsonArray(body.hashtags),
     avatarPrompt: firstString(body.avatarPrompt, body.avatar_prompt),
     tapnowPrompt: firstString(body.tapnowPrompt, body.tapnow_prompt),
+    ...(contentApproval ? { contentApproval } : {}),
     status: readString(body.status) || "idea",
     createdAt: firstString(body.createdAt, body.created_at, new Date().toISOString()),
   };
@@ -2135,6 +2155,7 @@ const configs: Record<CrmResource, ResourceConfig> = {
         hashtags: row.hashtags,
         avatarPrompt: row.avatar_prompt,
         tapnowPrompt: row.tapnow_prompt,
+        rawPayload: row.raw_payload,
         status: row.status,
         createdAt: row.created_at,
       }),

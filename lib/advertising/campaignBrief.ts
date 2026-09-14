@@ -2,6 +2,7 @@ export const ADVERTISING_CAMPAIGN_PREFILL_KEY = "negis_ads_automation_prefill";
 export const ADVERTISING_CONTENT_STUDIO_PREFILL_KEY =
   "negis_content_studio_goal_prefill";
 export const ADVERTISING_CAMPAIGN_BRIEF_VERSION = 1 as const;
+export const ADVERTISING_CONTENT_APPROVAL_VERSION = 1 as const;
 
 export type AdvertisingPlatform = "meta" | "tiktok";
 export type AdvertisingCreativeType = "image" | "video";
@@ -29,6 +30,22 @@ export type AdvertisingCampaignCreative = {
   brief?: string;
 };
 
+export type AdvertisingApprovedCopy = {
+  primaryText: string;
+  headline: string;
+  description: string;
+};
+
+export type AdvertisingContentApproval = {
+  packageId?: string;
+  variantId: string;
+  variantLabel?: string;
+  variantAngle?: string;
+  version: typeof ADVERTISING_CONTENT_APPROVAL_VERSION;
+  approvedAt: string;
+  approvedCopy: AdvertisingApprovedCopy;
+};
+
 export type AdvertisingCampaignPrefill = {
   schemaVersion: typeof ADVERTISING_CAMPAIGN_BRIEF_VERSION;
   platform: AdvertisingPlatform;
@@ -51,6 +68,7 @@ export type AdvertisingCampaignPrefill = {
   dailyBudget?: number;
   budgetCurrency?: AdvertisingBudgetCurrency;
   creative?: AdvertisingCampaignCreative;
+  contentApproval?: AdvertisingContentApproval;
   generatedAt?: string;
 };
 
@@ -159,6 +177,49 @@ function normalizeCreative(
   };
 }
 
+export function normalizeAdvertisingContentApproval(
+  value: unknown,
+): AdvertisingContentApproval | undefined {
+  const record = asRecord(value);
+  const approvedCopy = asRecord(record.approvedCopy);
+  const variantId = firstString(record.variantId);
+  const approvedAt = firstString(record.approvedAt);
+  const primaryText = firstString(approvedCopy.primaryText);
+  const headline = firstString(approvedCopy.headline);
+  const description = firstString(approvedCopy.description) || "";
+  const version = optionalNonNegativeInteger(record.version);
+
+  if (
+    !variantId ||
+    !approvedAt ||
+    !primaryText ||
+    !headline ||
+    version !== ADVERTISING_CONTENT_APPROVAL_VERSION
+  )
+    return undefined;
+
+  return {
+    packageId: firstString(record.packageId),
+    variantId,
+    variantLabel: firstString(record.variantLabel),
+    variantAngle: firstString(record.variantAngle),
+    version: ADVERTISING_CONTENT_APPROVAL_VERSION,
+    approvedAt,
+    approvedCopy: { primaryText, headline, description },
+  };
+}
+
+export function contentApprovalMatchesCopy(
+  approval: AdvertisingContentApproval,
+  copy: Partial<AdvertisingApprovedCopy>,
+): boolean {
+  return (
+    approval.approvedCopy.primaryText === (copy.primaryText || "").trim() &&
+    approval.approvedCopy.headline === (copy.headline || "").trim() &&
+    approval.approvedCopy.description === (copy.description || "").trim()
+  );
+}
+
 function hasCampaignContent(prefill: AdvertisingCampaignPrefill): boolean {
   return Boolean(
     prefill.campaignName ||
@@ -194,6 +255,9 @@ export function parseAdvertisingCampaignPrefill(
   if (!platform) return null;
 
   const creative = normalizeCreative(record);
+  const contentApproval = normalizeAdvertisingContentApproval(
+    record.contentApproval,
+  );
   const prefill: AdvertisingCampaignPrefill = {
     schemaVersion: ADVERTISING_CAMPAIGN_BRIEF_VERSION,
     platform,
@@ -222,6 +286,7 @@ export function parseAdvertisingCampaignPrefill(
     budgetCurrency: normalizeBudgetCurrency(record.budgetCurrency),
     generatedAt: firstString(record.generatedAt),
     ...(creative ? { creative } : {}),
+    ...(contentApproval ? { contentApproval } : {}),
   };
 
   return hasCampaignContent(prefill) ? prefill : null;

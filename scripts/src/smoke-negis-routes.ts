@@ -1595,6 +1595,10 @@ async function checkContentStudioPhaseOne() {
     "primaryText: selectedAdVariant.primaryText",
     "headline: selectedAdVariant.headline",
     "description: selectedAdVariant.description",
+    "createContentApproval",
+    'approvalStatus: "approved_for_ads"',
+    "selectedAdVariantId: approval.variantId",
+    "При передаче система зафиксирует выбранный вариант и его версию.",
     "onClick={() => setSelectedAdVariantId(variant.id)}",
     "Выбранный текст нельзя передавать в рекламу.",
   ]) {
@@ -1613,6 +1617,9 @@ async function checkContentStudioPhaseOne() {
     // that the prefill is consumed exactly once — is unchanged.
     "window.localStorage.removeItem(workspaceScopedKey(STUDIO_PREFILL_KEY))",
     "Данные перенесены из AI Контент-студии. Проверьте параметры перед запуском.",
+    "setContentApproval(data.contentApproval || null)",
+    "copyMatchesLaunch",
+    "Вариант из Контент-студии",
     'setActiveConfirmation("");',
   ]) {
     if (!adsAutomation.includes(marker)) {
@@ -1645,6 +1652,9 @@ async function checkContentStudioPhaseOne() {
   const campaignBrief = await readFile(path.join(repoRoot, "lib", "advertising", "campaignBrief.ts"), "utf8");
   for (const marker of [
     "ADVERTISING_CAMPAIGN_BRIEF_VERSION",
+    "ADVERTISING_CONTENT_APPROVAL_VERSION",
+    "normalizeAdvertisingContentApproval",
+    "contentApprovalMatchesCopy",
     'export type AdvertisingPlatform = "meta" | "tiktok"',
     "parseAdvertisingCampaignPrefillForPlatform",
     "legacy Meta handoff",

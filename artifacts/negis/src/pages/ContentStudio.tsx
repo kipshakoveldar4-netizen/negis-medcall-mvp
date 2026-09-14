@@ -24,12 +24,14 @@ import { readWorkspaceId, workspaceScopedKey } from "@/lib/demoStorage";
 import {
   ADVERTISING_CAMPAIGN_PREFILL_KEY,
   ADVERTISING_CONTENT_STUDIO_PREFILL_KEY,
+  ADVERTISING_CONTENT_APPROVAL_VERSION,
   createAdvertisingCampaignPrefill,
   parseAdvertisingCampaignPrefillForPlatform,
+  type AdvertisingContentApproval,
   type AdvertisingCampaignPrefillInput,
 } from "../../../../lib/advertising/campaignBrief";
 import { checkMetaCompliance } from "../../../../lib/meta/compliance";
-import type { ContentPackage } from "../../../../lib/content-studio/core";
+import type { ContentAdVariant, ContentPackage } from "../../../../lib/content-studio/core";
 
 type ContentVideoStatus = "idea" | "script_ready" | "avatar_ready" | "telegram_ready";
 
@@ -49,6 +51,7 @@ type ContentVideo = {
   hashtags?: string[];
   avatarPrompt?: string;
   tapnowPrompt?: string;
+  contentApproval?: AdvertisingContentApproval;
   status: ContentVideoStatus;
   createdAt: string;
 };
@@ -84,6 +87,25 @@ type TelegramResponse = {
   test?: boolean;
   parts?: number;
 };
+
+function createContentApproval(
+  packageId: string,
+  variant: ContentAdVariant,
+): AdvertisingContentApproval {
+  return {
+    ...(packageId ? { packageId } : {}),
+    variantId: variant.id,
+    variantLabel: variant.label,
+    variantAngle: variant.angle,
+    version: ADVERTISING_CONTENT_APPROVAL_VERSION,
+    approvedAt: new Date().toISOString(),
+    approvedCopy: {
+      primaryText: variant.primaryText,
+      headline: variant.headline,
+      description: variant.description,
+    },
+  };
+}
 
 const STORAGE_KEY = "negis_content_studio_videos";
 
@@ -1235,13 +1257,58 @@ export default function ContentStudio() {
     });
   }, [videoJob, genVideo]);
 
-  const useGeneratedInAdsAutomation = (file: GeneratedFile, creativeType: "image" | "video") => {
+  async function persistSelectedContentApproval(
+    approval: AdvertisingContentApproval,
+  ): Promise<boolean> {
+    if (!contentPackageId || !contentPackage) return false;
+
+    try {
+      const response = await crmFetch("/api/crm/content-videos", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: contentPackageId,
+          title: contentPackage.ideaTitle,
+          niche: packageBrief.service,
+          goal: packageBrief.goal,
+          duration: "30-45 seconds",
+          style: packageBrief.tone,
+          audience: packageBrief.audience,
+          hook: contentPackage.hook,
+          script: contentPackage.script,
+          voiceover: contentPackage.voiceover,
+          cta: contentPackage.cta,
+          caption: contentPackage.caption,
+          status: "script_ready",
+          packageBrief,
+          packageData: contentPackage,
+          selectedAdVariantId: approval.variantId,
+          contentApproval: approval,
+          approvalStatus: "approved_for_ads",
+          contentVersion: approval.version,
+        }),
+      });
+      const body = await safeJson<unknown>(response);
+      return response.ok && body?.success === true;
+    } catch {
+      return false;
+    }
+  }
+
+  const useGeneratedInAdsAutomation = async (file: GeneratedFile, creativeType: "image" | "video") => {
     if (packageCompliance?.status === "blocked") {
       toast.error("Выбранный текст нельзя передавать в рекламу. Выберите безопасный вариант.");
       return;
     }
+    const contentApproval = selectedAdVariant
+      ? createContentApproval(contentPackageId, selectedAdVariant)
+      : undefined;
+    const approvalPersisted = contentApproval
+      ? await persistSelectedContentApproval(contentApproval)
+      : false;
     writeContentToAdsAutomation({
       sourceKind: "generated",
+      sourceId: contentPackageId || undefined,
       campaignName: contentPackage?.ideaTitle || packageBrief.service,
       service: packageBrief.service,
       city: packageBrief.city,
@@ -1251,6 +1318,7 @@ export default function ContentStudio() {
       headline: selectedAdVariant?.headline || contentPackage?.adHeadline || packageBrief.service,
       description: selectedAdVariant?.description || contentPackage?.caption || packageBrief.offer,
       cta: "LEARN_MORE",
+      contentApproval,
       creative: {
         type: creativeType,
         assetId: file.assetId,
@@ -1264,7 +1332,11 @@ export default function ContentStudio() {
         brief: genPrompt.trim(),
       },
     });
-    toast.success(creativeType === "image" ? "Изображение передано в AI запуск рекламы" : "Ролик передан в AI запуск рекламы");
+    if (contentApproval && contentPackageId && !approvalPersisted) {
+      toast.warning("Креатив передан, но отметка согласования не сохранилась в библиотеке контента");
+    } else {
+      toast.success(creativeType === "image" ? "Изображение передано в AI запуск рекламы" : "Ролик передан в AI запуск рекламы");
+    }
     setLocation("/ads-automation");
   };
 
@@ -1345,6 +1417,8 @@ export default function ContentStudio() {
             status: "script_ready",
             packageBrief,
             packageData: body.data,
+            approvalStatus: "draft",
+            contentVersion: ADVERTISING_CONTENT_APPROVAL_VERSION,
           }),
         });
         const saveBody = await safeJson<{ video?: { id?: string }; item?: { id?: string } }>(saveResponse);
@@ -1364,7 +1438,7 @@ export default function ContentStudio() {
     }
   };
 
-  const useInAdsAutomation = () => {
+  const useInAdsAutomation = async () => {
     if (!contentPackage) {
       toast.error("Сначала сгенерируйте пакет контента");
       return;
@@ -1377,6 +1451,8 @@ export default function ContentStudio() {
       toast.error("Выбранный текст нельзя передавать в рекламу. Выберите безопасный вариант.");
       return;
     }
+    const contentApproval = createContentApproval(contentPackageId, selectedAdVariant);
+    const approvalPersisted = await persistSelectedContentApproval(contentApproval);
     writeContentToAdsAutomation({
       sourceKind: "package",
       sourceId: contentPackageId || undefined,
@@ -1389,13 +1465,18 @@ export default function ContentStudio() {
       headline: selectedAdVariant.headline,
       description: selectedAdVariant.description,
       cta: selectedAdVariant.cta,
+      contentApproval,
       creative: {
         type: "video",
         format: packageBrief.format,
         brief: contentPackage.videoPrompt,
       },
     });
-    toast.success("Пакет передан в AI запуск рекламы");
+    if (contentPackageId && !approvalPersisted) {
+      toast.warning("Пакет передан, но отметка согласования не сохранилась в библиотеке контента");
+    } else {
+      toast.success("Выбранный вариант согласован и передан в AI запуск рекламы");
+    }
     setLocation("/ads-automation");
   };
 
@@ -1947,7 +2028,7 @@ export default function ContentStudio() {
                   <p className="text-xs font-bold uppercase text-[#64748B]">Выбран для рекламы</p>
                   <p className="mt-1 text-sm font-black text-[#0B1220]">{selectedAdVariant?.label}</p>
                   <p className="mt-1 text-sm text-[#475569]">
-                    Заголовок, основной текст и описание будут перенесены в Ads Automation. Запуск останется выключенным до ручной проверки.
+                    Заголовок, основной текст и описание будут перенесены в Ads Automation. При передаче система зафиксирует выбранный вариант и его версию. Запуск останется выключенным до ручной проверки.
                   </p>
                 </div>
               </div>
@@ -2512,6 +2593,11 @@ export default function ContentStudio() {
                       >
                         <span className="font-bold text-[#0B1220]">{video.title}</span>
                         <span className="mt-1 block text-xs text-[#64748B]">{statusLabels[video.status]}</span>
+                        {video.contentApproval ? (
+                          <span className="mt-1 block text-xs font-bold text-emerald-700">
+                            Согласовано для рекламы · {video.contentApproval.variantLabel || "выбранный вариант"}
+                          </span>
+                        ) : null}
                       </button>
                     ))
                   )}

@@ -19,6 +19,19 @@ const importedBrief = await import(
 );
 
 type Platform = "meta" | "tiktok";
+type ContentApproval = {
+  packageId?: string;
+  variantId: string;
+  variantLabel?: string;
+  variantAngle?: string;
+  version: 1;
+  approvedAt: string;
+  approvedCopy: {
+    primaryText: string;
+    headline: string;
+    description: string;
+  };
+};
 type Prefill = {
   schemaVersion: 1;
   platform: Platform;
@@ -51,13 +64,17 @@ type Prefill = {
     format?: string;
     brief?: string;
   };
+  contentApproval?: ContentApproval;
 };
 
 type BriefModule = {
   ADVERTISING_CAMPAIGN_PREFILL_KEY: string;
   ADVERTISING_CONTENT_STUDIO_PREFILL_KEY: string;
   ADVERTISING_CAMPAIGN_BRIEF_VERSION: 1;
+  ADVERTISING_CONTENT_APPROVAL_VERSION: 1;
   createAdvertisingCampaignPrefill(input: Record<string, unknown>): Prefill;
+  normalizeAdvertisingContentApproval(value: unknown): ContentApproval | undefined;
+  contentApprovalMatchesCopy(approval: ContentApproval, copy: Record<string, string>): boolean;
   parseAdvertisingCampaignPrefill(value: unknown): Prefill | null;
   parseAdvertisingCampaignPrefillForPlatform(
     value: unknown,
@@ -232,6 +249,45 @@ test("preserves generated video asset and cover metadata for the Meta handoff", 
   });
 });
 
+test("preserves an approved content variant and detects later copy changes", () => {
+  const approval: ContentApproval = {
+    packageId: "5d466256-5de8-4c13-bcf0-84072668e5d7",
+    variantId: "expert",
+    variantLabel: "Экспертное объяснение",
+    variantAngle: "Объясняет первый визит",
+    version: 1,
+    approvedAt: "2026-09-14T09:00:00.000Z",
+    approvedCopy: {
+      primaryText: "Врач ответит на вопросы на консультации.",
+      headline: "Консультация со специалистом",
+      description: "Понятный первый шаг",
+    },
+  };
+  const prefill = campaignBrief.createAdvertisingCampaignPrefill({
+    platform: "meta",
+    sourceKind: "package",
+    service: "Консультация",
+    primaryText: approval.approvedCopy.primaryText,
+    headline: approval.approvedCopy.headline,
+    contentApproval: approval,
+  });
+
+  assert.deepEqual(prefill.contentApproval, approval);
+  assert.equal(campaignBrief.contentApprovalMatchesCopy(approval, approval.approvedCopy), true);
+  assert.equal(
+    campaignBrief.contentApprovalMatchesCopy(approval, {
+      ...approval.approvedCopy,
+      headline: "Другой заголовок",
+    }),
+    false,
+  );
+  assert.equal(
+    campaignBrief.normalizeAdvertisingContentApproval({ ...approval, version: 2 }),
+    undefined,
+    "unknown approval versions must fail closed",
+  );
+});
+
 test("rejects unsupported versions, unknown platforms and empty payloads", () => {
   assert.equal(
     campaignBrief.parseAdvertisingCampaignPrefill({
@@ -271,6 +327,7 @@ test("exports the workspace-scoped handoff key without storing platform credenti
     "negis_content_studio_goal_prefill",
   );
   assert.equal(campaignBrief.ADVERTISING_CAMPAIGN_BRIEF_VERSION, 1);
+  assert.equal(campaignBrief.ADVERTISING_CONTENT_APPROVAL_VERSION, 1);
   const moduleSource = JSON.stringify(Object.keys(importedBrief));
   assert.doesNotMatch(moduleSource, /token|secret|access_key/i);
 });

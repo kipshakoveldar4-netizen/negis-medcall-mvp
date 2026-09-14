@@ -32,7 +32,10 @@ import { readWorkspaceId, workspaceScopedKey } from "@/lib/demoStorage";
 import { getPlanFeature, normalizePlan, planFeatureBadge, type NegisPlan } from "@/lib/planFeatures";
 import {
   ADVERTISING_CAMPAIGN_PREFILL_KEY,
+  contentApprovalMatchesCopy,
+  normalizeAdvertisingContentApproval,
   parseAdvertisingCampaignPrefillForPlatform,
+  type AdvertisingContentApproval,
 } from "../../../../lib/advertising/campaignBrief";
 import { KZ_META_CITY_OPTIONS, getKzMetaCityOption } from "../../../../lib/meta/cities";
 
@@ -1478,6 +1481,7 @@ export default function AdsAutomation() {
   const [brief, setBrief] = useState<Brief>(() => normalizeBriefCity(readStored(workspaceScopedKey("negis_ads_automation_brief"), defaultBrief)));
   const [creative, setCreative] = useState<CreativeAsset | null>(null);
   const [aiPackage, setAiPackage] = useState<AiPackage | null>(null);
+  const [contentApproval, setContentApproval] = useState<AdvertisingContentApproval | null>(null);
   const [compliance, setCompliance] = useState<ComplianceResult | null>(null);
   const [improved, setImproved] = useState<ImprovedText | null>(null);
   const [confirmations, setConfirmations] = useState<ConfirmationState>(confirmationDefaults);
@@ -1580,6 +1584,7 @@ export default function AdsAutomation() {
         setCompliance(null);
     setImproved(null);
       }
+      setContentApproval(data.contentApproval || null);
 
       // Restore a ready creative from Content Studio. Generated video already
       // lives in the public ad-creatives bucket; its cover is prepared below
@@ -2524,6 +2529,7 @@ export default function AdsAutomation() {
     setVideoJob(null);
     setVideoConfigBlocked(false);
     setAiPackage(null);
+    setContentApproval(null);
     setCompliance(null);
     setImproved(null);
     setLaunchResult(null);
@@ -2659,6 +2665,7 @@ export default function AdsAutomation() {
 
     // Only prefill — never auto-launch: the AI package, safety check, and every
     // confirmation checkbox must be walked through again by the employee.
+    setContentApproval(normalizeAdvertisingContentApproval(payload.contentApproval) || null);
     setAiPackage(null);
     setCompliance(null);
     setImproved(null);
@@ -2692,6 +2699,18 @@ export default function AdsAutomation() {
   function buildLaunchPayload(dryRun: boolean, forcedStatusMode: "PAUSED" | "ACTIVE" = statusMode) {
     // Тот же выбор, что показан в предпросмотре, — см. adTextForLaunch выше.
     const text = adTextForLaunch;
+    const headline = aiPackage?.headline || `${brief.service} в ${selectedCity.labelRu}`;
+    const description = aiPackage?.description || brief.offer;
+    const approvalSnapshot = contentApproval
+      ? {
+          ...contentApproval,
+          copyMatchesLaunch: contentApprovalMatchesCopy(contentApproval, {
+            primaryText: text,
+            headline,
+            description,
+          }),
+        }
+      : undefined;
     const publicCreativeUrl = creative?.publicUrl || "";
     const dryRunPreviewUrl = dryRun ? creative?.previewUrl || "" : "";
     const creativeUrl = publicCreativeUrl || dryRunPreviewUrl;
@@ -2716,9 +2735,10 @@ export default function AdsAutomation() {
       currency: "USD",
       targetAudience: aiPackage?.audience || brief.knownAudience,
       primaryText: text || "",
-      headline: aiPackage?.headline || `${brief.service} в ${selectedCity.labelRu}`,
-      description: aiPackage?.description || brief.offer,
+      headline,
+      description,
       cta: aiPackage?.cta || "LEARN_MORE",
+      contentApproval: approvalSnapshot,
       landingUrl: destinationUrl,
       imageUrl: creative?.fileType === "image" ? creativeUrl : "",
       creativeType: creative?.fileType || "image",
@@ -2977,6 +2997,18 @@ export default function AdsAutomation() {
     const creativePayload = asRecord(metaPayload.creative);
     const adPayload = asRecord(metaPayload.ad);
     const launchPayload = asRecord(result.launch);
+    const historyHeadline = aiPackage?.headline || `${brief.service} в ${selectedCity.labelRu}`;
+    const historyDescription = aiPackage?.description || brief.offer;
+    const historyContentApproval = contentApproval
+      ? {
+          ...contentApproval,
+          copyMatchesLaunch: contentApprovalMatchesCopy(contentApproval, {
+            primaryText: adTextForLaunch,
+            headline: historyHeadline,
+            description: historyDescription,
+          }),
+        }
+      : undefined;
     const resolvedTimestamp = firstString(result.launchTimestamp, metaPayload.launchTimestamp, launchPayload.launchTimestamp);
     const item: LaunchHistoryItem = {
       id: result.launchId || `local-${Date.now()}`,
@@ -3022,6 +3054,7 @@ export default function AdsAutomation() {
         leadDestination: brief.leadDestination,
         launchTimestamp: resolvedTimestamp,
         campaignName: firstString(campaignPayload.name),
+        contentApproval: historyContentApproval,
         adSetName: firstString(adSetPayload.name),
         creativeName: firstString(creativePayload.name),
         adName: firstString(adPayload.name),
@@ -3975,6 +4008,13 @@ export default function AdsAutomation() {
       cityLabel: selectedCity.labelRu,
       adText: previewAdText,
     });
+    const contentApprovalIsCurrent = contentApproval
+      ? contentApprovalMatchesCopy(contentApproval, {
+          primaryText: adTextForLaunch,
+          headline: previewHeadline,
+          description: previewDescription,
+        })
+      : false;
 
     if (!previewGate.isReady) {
       return (
@@ -4067,6 +4107,22 @@ export default function AdsAutomation() {
               ))}
             </div>
 
+            {contentApproval ? (
+              <div className={`rounded-[24px] border p-4 ${contentApprovalIsCurrent ? "border-emerald-200 bg-emerald-50" : "border-amber-200 bg-amber-50"}`}>
+                <p className={`text-xs font-black uppercase tracking-[0.1em] ${contentApprovalIsCurrent ? "text-emerald-800" : "text-amber-800"}`}>
+                  Вариант из Контент-студии
+                </p>
+                <p className={`mt-1 text-base font-black ${contentApprovalIsCurrent ? "text-emerald-950" : "text-amber-950"}`}>
+                  {contentApproval.variantLabel || "Выбранный вариант"} · версия {contentApproval.version}
+                </p>
+                <p className={`mt-1 text-sm font-semibold leading-relaxed ${contentApprovalIsCurrent ? "text-emerald-800" : "text-amber-900"}`}>
+                  {contentApprovalIsCurrent
+                    ? "Текст совпадает с вариантом, согласованным в Контент-студии."
+                    : "Текст изменён после передачи. Перед запуском будет проверена текущая версия объявления."}
+                </p>
+              </div>
+            ) : null}
+
             <div className="rounded-[24px] border border-emerald-200 bg-emerald-50 p-5">
               <div className="flex items-start gap-3">
                 <ShieldCheck className="mt-0.5 text-emerald-700" size={22} />
@@ -4089,6 +4145,9 @@ export default function AdsAutomation() {
                   <p><b>placement config:</b> Instagram / Reels</p>
                   <p><b>destination config:</b> WhatsApp</p>
                   <p><b>launch status target:</b> PAUSED</p>
+                  <p><b>content variant:</b> {contentApproval?.variantId || "-"}</p>
+                  <p><b>content version:</b> {contentApproval?.version || "-"}</p>
+                  <p><b>approved copy unchanged:</b> {contentApproval ? String(contentApprovalIsCurrent) : "-"}</p>
                   <p><b>campaign name:</b> {previewCampaignName}</p>
                   <p><b>adset name:</b> {reportAdSetName || `Instagram, ${selectedCity.labelRu}, ${brief.dailyBudget} USD/day`}</p>
                   <p><b>creative name:</b> {reportCreativeName || previewHeadline}</p>

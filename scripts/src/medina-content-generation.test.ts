@@ -721,3 +721,50 @@ test("GEN33 Ads Automation restores generated video and prepares a cover without
   assert.ok(source.includes('thumbnailSource: "auto_frame"'));
   assert.ok(source.includes("setActiveConfirmation(\"\")"), "handoff must keep launch confirmation cleared");
 });
+
+test("GEN34 selected ad variant approval persists and follows the launch as safe provenance", async () => {
+  const studio = await readFile(studioPage, "utf8");
+  const brief = await readFile(
+    path.join(repoRoot, "lib", "advertising", "campaignBrief.ts"),
+    "utf8",
+  );
+  const ads = await readFile(
+    path.join(repoRoot, "artifacts", "negis", "src", "pages", "AdsAutomation.tsx"),
+    "utf8",
+  );
+  const crm = await readFile(path.join(repoRoot, "lib", "crm", "server.ts"), "utf8");
+
+  for (const marker of [
+    "createContentApproval",
+    'approvalStatus: "approved_for_ads"',
+    "selectedAdVariantId: approval.variantId",
+    "contentApproval,",
+    "Выбранный вариант согласован и передан",
+  ]) {
+    assert.ok(studio.includes(marker), `Content Studio approval marker missing: ${marker}`);
+  }
+  for (const marker of [
+    "ADVERTISING_CONTENT_APPROVAL_VERSION",
+    "normalizeAdvertisingContentApproval",
+    "contentApprovalMatchesCopy",
+    "approvedCopy",
+  ]) {
+    assert.ok(brief.includes(marker), `versioned approval contract missing: ${marker}`);
+  }
+  for (const marker of [
+    "setContentApproval(data.contentApproval || null)",
+    "copyMatchesLaunch",
+    "Вариант из Контент-студии",
+    "Текст изменён после передачи",
+  ]) {
+    assert.ok(ads.includes(marker), `Ads Automation provenance marker missing: ${marker}`);
+  }
+  assert.ok(
+    crm.includes('body.contentApproval ?? rawPayload.contentApproval'),
+    "safe CRM DTO must expose the approved variant without exposing the whole raw payload",
+  );
+  assert.ok(
+    crm.includes('hasAnyKey(body, [') && crm.includes('"contentApproval"'),
+    "ordinary content edits must not erase the stored approval snapshot",
+  );
+});
