@@ -41,10 +41,13 @@ type Prefill = {
   budgetCurrency?: "USD" | "KZT";
   creative?: {
     type: "image" | "video";
+    assetId?: string;
     url?: string;
     fileName?: string;
     mimeType?: string;
     fileSize?: number;
+    thumbnailUrl?: string;
+    thumbnailSource?: string;
     format?: string;
     brief?: string;
   };
@@ -198,6 +201,35 @@ test("keeps TikTok drafts isolated from the working Meta launcher", () => {
     )?.platform,
     "tiktok",
   );
+});
+
+test("preserves generated video asset and cover metadata for the Meta handoff", () => {
+  const prefill = campaignBrief.createAdvertisingCampaignPrefill({
+    platform: "meta",
+    sourceKind: "generated",
+    service: "Консультация",
+    creative: {
+      type: "video",
+      assetId: "6d4c7a93-c66d-4e16-9eb4-fdf430f50b7f",
+      url: "https://cdn.example.test/generated.mp4",
+      fileName: "negis-video.mp4",
+      mimeType: "video/mp4",
+      fileSize: 4096,
+      thumbnailUrl: "https://cdn.example.test/generated-cover.jpg",
+      thumbnailSource: "auto_frame",
+    },
+  });
+
+  assert.deepEqual(prefill.creative, {
+    type: "video",
+    assetId: "6d4c7a93-c66d-4e16-9eb4-fdf430f50b7f",
+    url: "https://cdn.example.test/generated.mp4",
+    fileName: "negis-video.mp4",
+    mimeType: "video/mp4",
+    fileSize: 4096,
+    thumbnailUrl: "https://cdn.example.test/generated-cover.jpg",
+    thumbnailSource: "auto_frame",
+  });
 });
 
 test("rejects unsupported versions, unknown platforms and empty payloads", () => {

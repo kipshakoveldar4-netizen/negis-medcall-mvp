@@ -18,10 +18,13 @@ export type AdvertisingBriefSourceKind =
 
 export type AdvertisingCampaignCreative = {
   type: AdvertisingCreativeType;
+  assetId?: string;
   url?: string;
   fileName?: string;
   mimeType?: string;
   fileSize?: number;
+  thumbnailUrl?: string;
+  thumbnailSource?: string;
   format?: string;
   brief?: string;
 };
@@ -117,20 +120,26 @@ function normalizeCreative(
   const nested = asRecord(record.creative);
   const rawType = firstString(nested.type, record.creativeType)?.toLowerCase();
   const type: AdvertisingCreativeType = rawType === "video" ? "video" : "image";
+  const assetId = firstString(nested.assetId, nested.id, record.assetId);
   const url = firstString(nested.url, record.creativeUrl, record.imageUrl);
   const fileName = firstString(nested.fileName, record.fileName);
   const mimeType = firstString(nested.mimeType, record.mimeType);
   const fileSize = optionalNonNegativeInteger(
     nested.fileSize ?? record.fileSize,
   );
+  const thumbnailUrl = firstString(nested.thumbnailUrl, record.thumbnailUrl);
+  const thumbnailSource = firstString(nested.thumbnailSource, record.thumbnailSource);
   const format = firstString(nested.format, record.format);
   const brief = firstString(nested.brief, record.creativeBrief);
 
   if (
+    !assetId &&
     !url &&
     !fileName &&
     !mimeType &&
     fileSize === undefined &&
+    !thumbnailUrl &&
+    !thumbnailSource &&
     !format &&
     !brief
   )
@@ -138,10 +147,13 @@ function normalizeCreative(
 
   return {
     type,
+    ...(assetId ? { assetId } : {}),
     ...(url ? { url } : {}),
     ...(fileName ? { fileName } : {}),
     ...(mimeType ? { mimeType } : {}),
     ...(fileSize !== undefined ? { fileSize } : {}),
+    ...(thumbnailUrl ? { thumbnailUrl } : {}),
+    ...(thumbnailSource ? { thumbnailSource } : {}),
     ...(format ? { format } : {}),
     ...(brief ? { brief } : {}),
   };

@@ -163,9 +163,13 @@ type GenerationNotice = { tone: "error" | "warning" | "info"; text: string };
 
 type GeneratedFile = {
   url: string;
+  assetId?: string;
+  fileName?: string;
   mimeType: string;
   model: string;
   fileSize: number;
+  thumbnailUrl?: string;
+  thumbnailSource?: string;
 };
 
 type VideoJobState = {
@@ -193,7 +197,15 @@ const VIDEO_POLL_INTERVAL_MS = 12_000;
  */
 const VIDEO_JOB_KEY = "negis_content_studio_video_job";
 
-type StoredVideoJob = VideoJobState & { url?: string; mimeType?: string; fileSize?: number };
+type StoredVideoJob = VideoJobState & {
+  url?: string;
+  assetId?: string;
+  fileName?: string;
+  mimeType?: string;
+  fileSize?: number;
+  thumbnailUrl?: string;
+  thumbnailSource?: string;
+};
 
 function readStoredVideoJob(): StoredVideoJob | null {
   try {
@@ -994,6 +1006,8 @@ export default function ContentStudio() {
       });
       const body = await safeJson<{
         creativeUrl: string;
+        assetId?: string;
+        fileName?: string;
         mimeType: string;
         model: string;
         fileSize: number;
@@ -1009,6 +1023,8 @@ export default function ContentStudio() {
 
       setGenImage({
         url: body.data.creativeUrl,
+        assetId: body.data.assetId,
+        fileName: body.data.fileName,
         mimeType: body.data.mimeType,
         model: body.data.model,
         fileSize: body.data.fileSize,
@@ -1126,6 +1142,8 @@ export default function ContentStudio() {
           progress: number;
           creativeUrl?: string;
           failureReason?: string;
+          assetId?: string;
+          fileName?: string;
           mimeType?: string;
           fileSize?: number;
         }>(response);
@@ -1165,6 +1183,8 @@ export default function ContentStudio() {
           }
           setGenVideo({
             url,
+            assetId: body.data.assetId,
+            fileName: body.data.fileName,
             mimeType: body.data.mimeType || "video/mp4",
             model: "",
             fileSize: body.data.fileSize || 0,
@@ -1206,8 +1226,12 @@ export default function ContentStudio() {
     writeStoredVideoJob({
       ...videoJob,
       url: genVideo?.url,
+      assetId: genVideo?.assetId,
+      fileName: genVideo?.fileName,
       mimeType: genVideo?.mimeType,
       fileSize: genVideo?.fileSize,
+      thumbnailUrl: genVideo?.thumbnailUrl,
+      thumbnailSource: genVideo?.thumbnailSource,
     });
   }, [videoJob, genVideo]);
 
@@ -1229,9 +1253,13 @@ export default function ContentStudio() {
       cta: "LEARN_MORE",
       creative: {
         type: creativeType,
+        assetId: file.assetId,
         url: file.url,
+        fileName: file.fileName,
         mimeType: file.mimeType,
         fileSize: file.fileSize,
+        thumbnailUrl: file.thumbnailUrl,
+        thumbnailSource: file.thumbnailSource,
         format: genFormat,
         brief: genPrompt.trim(),
       },
@@ -1385,9 +1413,13 @@ export default function ContentStudio() {
       if (storedJob.url) {
         setGenVideo({
           url: storedJob.url,
+          assetId: storedJob.assetId,
+          fileName: storedJob.fileName,
           mimeType: storedJob.mimeType || "video/mp4",
           model: "",
           fileSize: storedJob.fileSize || 0,
+          thumbnailUrl: storedJob.thumbnailUrl,
+          thumbnailSource: storedJob.thumbnailSource,
         });
       }
     }

@@ -671,3 +671,53 @@ test("GEN27 опрос рендера не кэшируется браузеро
   // последнем шаге — «ещё рендерится» вместо готовой ссылки.
   assert.ok(guard.includes("/video-generation"), "опрос по таймеру обязан ходить в сеть каждый раз");
 });
+
+test("GEN31 сгенерированный файл возвращает стабильные данные библиотечного asset", async () => {
+  const source = await readFile(apiFile, "utf8");
+  const photoHandler = source.slice(
+    source.indexOf("async function handleGeneratePhoto"),
+    source.indexOf("function jobHandleSecret"),
+  );
+  const videoHandler = source.slice(
+    source.indexOf("async function handleVideoGeneration"),
+    source.indexOf("export default async function handler"),
+  );
+
+  for (const [kind, handler] of [["photo", photoHandler], ["video", videoHandler]] as const) {
+    assert.ok(handler.includes("assetId:"), `${kind} response must return the saved creative id`);
+    assert.ok(handler.includes("fileName,"), `${kind} response must return the stored file name`);
+    assert.ok(handler.includes("creativeUrl: stored.publicUrl"), `${kind} response must return the public creative URL`);
+  }
+});
+
+test("GEN32 Content Studio keeps generated video identity across reload and handoff", async () => {
+  const source = await readFile(studioPage, "utf8");
+  for (const marker of [
+    "assetId: genVideo?.assetId",
+    "fileName: genVideo?.fileName",
+    "assetId: storedJob.assetId",
+    "fileName: storedJob.fileName",
+    "assetId: file.assetId",
+    "fileName: file.fileName",
+  ]) {
+    assert.ok(source.includes(marker), `generated video handoff must retain ${marker}`);
+  }
+});
+
+test("GEN33 Ads Automation restores generated video and prepares a cover without changing launch", async () => {
+  const source = await readFile(
+    path.join(repoRoot, "artifacts", "negis", "src", "pages", "AdsAutomation.tsx"),
+    "utf8",
+  );
+  const importBlock = source.slice(
+    source.indexOf("// Import a package handed off by AI Контент-студия"),
+    source.indexOf("if (isHistoryView) void loadHistory();"),
+  );
+
+  assert.ok(importBlock.includes('const isVideo = data.creative?.type === "video"'));
+  assert.ok(importBlock.includes("id: importedAssetId"));
+  assert.ok(importBlock.includes("prepareImportedVideoThumbnail"));
+  assert.ok(source.includes("captureVideoThumbnail(input.publicUrl)"));
+  assert.ok(source.includes('thumbnailSource: "auto_frame"'));
+  assert.ok(source.includes("setActiveConfirmation(\"\")"), "handoff must keep launch confirmation cleared");
+});

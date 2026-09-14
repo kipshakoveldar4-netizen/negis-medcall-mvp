@@ -972,14 +972,16 @@ function localHistoryKey(workspaceId: string) {
 
 type VideoThumbnailCapture = { blob: Blob; mimeType: string };
 
-function captureVideoThumbnail(file: File): Promise<VideoThumbnailCapture | null> {
+function captureVideoThumbnail(source: File | string): Promise<VideoThumbnailCapture | null> {
   return new Promise((resolve) => {
-    const objectUrl = URL.createObjectURL(file);
+    const usesObjectUrl = source instanceof File;
+    const videoUrl = usesObjectUrl ? URL.createObjectURL(source) : source;
     const video = document.createElement("video");
     video.muted = true;
     video.playsInline = true;
     video.preload = "auto";
-    video.src = objectUrl;
+    if (!usesObjectUrl) video.crossOrigin = "anonymous";
+    video.src = videoUrl;
 
     let finished = false;
     const finish = (result: VideoThumbnailCapture | null) => {
@@ -988,7 +990,7 @@ function captureVideoThumbnail(file: File): Promise<VideoThumbnailCapture | null
       window.clearTimeout(totalTimer);
       video.removeAttribute("src");
       video.load();
-      URL.revokeObjectURL(objectUrl);
+      if (usesObjectUrl) URL.revokeObjectURL(videoUrl);
       resolve(result);
     };
     const totalTimer = window.setTimeout(() => finish(null), 15000);
@@ -1579,21 +1581,38 @@ export default function AdsAutomation() {
     setImproved(null);
       }
 
-      // Restore a ready image creative from the studio's photo builder: the URL
-      // points at the already-uploaded render in the public ad-creatives bucket.
+      // Restore a ready creative from Content Studio. Generated video already
+      // lives in the public ad-creatives bucket; its cover is prepared below
+      // through the same signed-upload path used for manually uploaded video.
       const creativeUrl = firstString(data.creative?.url);
-      if (creativeUrl && data.creative?.type !== "video") {
+      if (creativeUrl) {
+        const isVideo = data.creative?.type === "video";
+        const importedFileName = firstString(data.creative?.fileName) || (isVideo ? "studio-video.mp4" : "studio-creative.jpg");
+        const importedThumbnailUrl = isVideo ? firstString(data.creative?.thumbnailUrl) : "";
+        const importedAssetId = firstString(data.creative?.assetId);
         setCreative({
-          fileName: firstString(data.creative?.fileName) || "studio-creative.jpg",
-          fileType: "image",
-          mimeType: firstString(data.creative?.mimeType) || "image/jpeg",
+          id: importedAssetId || undefined,
+          fileName: importedFileName,
+          fileType: isVideo ? "video" : "image",
+          mimeType: firstString(data.creative?.mimeType) || (isVideo ? "video/mp4" : "image/jpeg"),
           fileSize: data.creative?.fileSize || 0,
           previewUrl: creativeUrl,
           publicUrl: creativeUrl,
+          thumbnailUrl: importedThumbnailUrl || undefined,
+          thumbnailSource: firstString(data.creative?.thumbnailSource) || undefined,
           status: "uploaded",
         });
         setCreativeFile(null);
         setVideoJob(null);
+        setUploadStatus("ready");
+        setLastUploadError("");
+        if (isVideo && !importedThumbnailUrl) {
+          void prepareImportedVideoThumbnail({
+            assetId: importedAssetId,
+            fileName: importedFileName,
+            publicUrl: creativeUrl,
+          });
+        }
       }
 
       // Never pre-arm a launch from an import.
@@ -2101,6 +2120,70 @@ export default function AdsAutomation() {
       return { publicUrl: thumbnailPublicUrl, generatedAt: new Date().toISOString(), mimeType: capture.mimeType };
     } catch {
       return null;
+    }
+  }
+
+  async function prepareImportedVideoThumbnail(input: {
+    assetId: string;
+    fileName: string;
+    publicUrl: string;
+  }) {
+    setLoading("thumbnail");
+    setNotice("Видео из AI Контент-студии загружено. Создаём обложку для Meta.");
+    try {
+      const capture = await captureVideoThumbnail(input.publicUrl);
+      const thumbnail = capture ? await uploadVideoThumbnail(capture, input.fileName) : null;
+      if (!thumbnail) {
+        setNotice(
+          "Видео передано из AI Контент-студии, но обложку не удалось создать автоматически. Загрузите исходный файл заново, чтобы продолжить запуск.",
+        );
+        return;
+      }
+
+      setCreative((current) =>
+        current?.fileType === "video" && current.publicUrl === input.publicUrl
+          ? {
+              ...current,
+              thumbnailUrl: thumbnail.publicUrl,
+              thumbnailGeneratedAt: thumbnail.generatedAt,
+              thumbnailSource: "auto_frame",
+              thumbnailMimeType: thumbnail.mimeType,
+            }
+          : current,
+      );
+
+      if (input.assetId) {
+        try {
+          await crmRequest("/api/crm/ad-creatives", {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              workspaceId,
+              id: input.assetId,
+              metadata: {
+                source: "content-studio",
+                uploadMode: "ai-generated",
+                thumbnailUrl: thumbnail.publicUrl,
+                thumbnailGeneratedAt: thumbnail.generatedAt,
+                thumbnailSource: "auto_frame",
+                thumbnailMimeType: thumbnail.mimeType,
+              },
+            }),
+          });
+        } catch {
+          // The in-memory cover is enough for this launch; metadata persistence
+          // remains best-effort just as it is for a manually regenerated cover.
+        }
+      }
+
+      setNotice("Видео и обложка из AI Контент-студии готовы. Проверьте параметры перед запуском.");
+      toast.success("Видео из Content Studio готово для Meta");
+    } catch {
+      setNotice(
+        "Видео передано из AI Контент-студии, но обложку не удалось создать автоматически. Загрузите исходный файл заново, чтобы продолжить запуск.",
+      );
+    } finally {
+      setLoading((current) => (current === "thumbnail" ? null : current));
     }
   }
 

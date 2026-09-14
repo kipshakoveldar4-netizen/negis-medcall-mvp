@@ -754,9 +754,10 @@ async function handleGeneratePhoto(req: VercelRequest, res: VercelResponse, cont
   // сгенерировать удалось, не удалось сохранить, и оператор должен понимать,
   // что повторное нажатие потратит деньги второй раз.
   try {
+    const fileName = generatedFileName("photo", image.mimeType);
     const stored = await storeGeneratedCreative({
       workspaceId: context.workspaceId,
-      fileName: generatedFileName("photo", image.mimeType),
+      fileName,
       mimeType: image.mimeType,
       buffer: image.buffer,
       metadata: {
@@ -776,6 +777,7 @@ async function handleGeneratePhoto(req: VercelRequest, res: VercelResponse, cont
       data: {
         creativeUrl: stored.publicUrl,
         assetId: typeof stored.asset.id === "string" ? stored.asset.id : "",
+        fileName,
         mimeType: image.mimeType,
         fileSize: image.buffer.length,
         size,
@@ -917,9 +919,10 @@ async function handleVideoGeneration(req: VercelRequest, res: VercelResponse, co
     // раз. Ссылка провайдера живёт час, поэтому повтор опроса в этот час ещё
     // может забрать тот же файл: об этом и говорит подсказка.
     try {
+      const fileName = generatedFileName("video", "video/mp4");
       const stored = await storeGeneratedCreative({
         workspaceId: context.workspaceId,
-        fileName: generatedFileName("video", "video/mp4"),
+        fileName,
         mimeType: "video/mp4",
         buffer,
         metadata: {
@@ -945,6 +948,7 @@ async function handleVideoGeneration(req: VercelRequest, res: VercelResponse, co
           progress: 100,
           creativeUrl: stored.publicUrl,
           assetId: typeof stored.asset.id === "string" ? stored.asset.id : "",
+          fileName,
           fileSize: buffer.length,
           mimeType: "video/mp4",
         },

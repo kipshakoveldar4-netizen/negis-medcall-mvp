@@ -106,6 +106,12 @@ A generated package (one row per package) contains:
   the existing package request, so selection does not trigger another paid AI
   call. Legacy model responses without `adVariants` are completed
   deterministically and keep their original primary text as the first option.
+- Generated photo and video handoffs preserve the creative asset id, stored
+  filename and public media metadata. Ads Automation restores both media types.
+  When a generated video has no cover yet, the browser captures a frame from
+  the already stored public MP4 and uploads that cover through the existing
+  signed-upload flow. A failed cover capture blocks readiness with a clear next
+  step; it never falls through to a Meta launch without a thumbnail.
 - `/ads` can hand an owner goal to the studio through the separate
   workspace-scoped `negis_content_studio_goal_prefill` key. The studio consumes
   it once, prefills service/city and carries patient, duration and budget context
