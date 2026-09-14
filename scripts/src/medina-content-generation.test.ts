@@ -56,6 +56,8 @@ type GenerationModuleShape = {
 };
 
 type CoreModuleShape = {
+  demoContentPackage: (input?: Record<string, unknown>) => Record<string, unknown>;
+  normalizeContentPackage: (value: unknown, fallback: Record<string, unknown>) => Record<string, unknown>;
   normalizeScriptPackage: (value: unknown) => { hashtags: string[] };
 };
 
@@ -111,7 +113,7 @@ const {
   videoGenerationRefusal,
   videoSizeForFormat,
 } = generation;
-const { normalizeScriptPackage } = core;
+const { demoContentPackage, normalizeContentPackage, normalizeScriptPackage } = core;
 
 const FAKE_KEY = "sk-test-not-a-real-key-0000000000";
 const SECRET = "service-role-stand-in";
@@ -396,6 +398,63 @@ test("GEN17 сигнатуры файлов различаются по байт
   assert.equal(sniffImageMimeType(Buffer.from([0xff, 0xd8, 0xff, 0xe0])), "image/jpeg");
   assert.equal(sniffImageMimeType(Buffer.from("RIFF____WEBPVP8 ", "latin1")), "image/webp");
   assert.equal(sniffImageMimeType(Buffer.from("<html>", "latin1")), null);
+});
+
+test("GEN17A один контент-пакет содержит три безопасных рекламных подхода", () => {
+  const contentPackage = demoContentPackage({
+    service: "Консультация косметолога",
+    city: "Астана",
+    offer: "Первичная консультация",
+  });
+  const variants = contentPackage.adVariants as Array<Record<string, unknown>>;
+
+  assert.equal(variants.length, 3, "варианты создаются в том же пакете, без отдельного запроса");
+  assert.deepEqual(variants.map((variant) => variant.id), ["offer", "expert", "trust"]);
+  for (const variant of variants) {
+    for (const field of ["label", "angle", "primaryText", "headline", "description", "cta"]) {
+      assert.ok(typeof variant[field] === "string" && String(variant[field]).trim(), `вариант обязан содержать ${field}`);
+    }
+    const publicText = [variant.primaryText, variant.headline, variant.description].join(" ").toLowerCase();
+    assert.doesNotMatch(publicText, /100%|гарантир|гарантия результата/);
+  }
+});
+
+test("GEN17B старый ответ модели дополняется вариантами и сохраняет его основной текст", () => {
+  const fallback = demoContentPackage({ service: "Лазерная эпиляция", city: "Алматы" });
+  const normalized = normalizeContentPackage(
+    {
+      adPrimaryText: "Основной текст из прежнего ответа модели.",
+      adHeadline: "Прежний заголовок",
+      caption: "Прежнее описание",
+      cta: "Узнать подробнее",
+    },
+    fallback,
+  );
+  const variants = normalized.adVariants as Array<Record<string, unknown>>;
+
+  assert.equal(variants.length, 3);
+  assert.equal(variants[0].primaryText, "Основной текст из прежнего ответа модели.");
+  assert.equal(variants[0].headline, "Прежний заголовок");
+  assert.equal(variants[0].description, "Прежнее описание");
+  assert.equal(variants[0].cta, "Узнать подробнее");
+});
+
+test("GEN17C провайдер не может сломать стабильные идентификаторы выбора", () => {
+  const fallback = demoContentPackage({ service: "Приём врача" });
+  const normalized = normalizeContentPackage(
+    {
+      adVariants: [
+        { id: "same", label: "A", primaryText: "A", headline: "A", description: "A", cta: "A" },
+        { id: "same", label: "B", primaryText: "B", headline: "B", description: "B", cta: "B" },
+        { id: "same", label: "C", primaryText: "C", headline: "C", description: "C", cta: "C" },
+      ],
+    },
+    fallback,
+  );
+  const variants = normalized.adVariants as Array<Record<string, unknown>>;
+
+  assert.deepEqual(variants.map((variant) => variant.id), ["offer", "expert", "trust"]);
+  assert.deepEqual(variants.map((variant) => variant.primaryText), ["A", "B", "C"]);
 });
 
 test("GEN18 три новых маршрута зарегистрированы и требуют права на контент", async () => {

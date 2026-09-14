@@ -1510,6 +1510,7 @@ async function checkContentStudioPhaseOne() {
     "caption",
     "adPrimaryText",
     "adHeadline",
+    "adVariants",
     "cta",
     "photoPrompt",
     "videoPrompt",
@@ -1529,6 +1530,22 @@ async function checkContentStudioPhaseOne() {
     if (text.includes("100%") || text.includes("гарантиру") || text.includes("гарантия результата")) {
       throw new Error(`demo content package field ${field} must not guarantee results`);
     }
+  }
+  const adVariants = Array.isArray(demo.adVariants) ? demo.adVariants : [];
+  if (adVariants.length !== 3) {
+    throw new Error("demo content package must include exactly three ad variants");
+  }
+  const expectedVariantLabels = ["Прямой оффер", "Экспертное объяснение", "Доверие и комфорт"];
+  for (const variant of adVariants) {
+    const record = variant && typeof variant === "object" ? (variant as Record<string, unknown>) : {};
+    for (const field of ["id", "label", "angle", "primaryText", "headline", "description", "cta"]) {
+      if (typeof record[field] !== "string" || !String(record[field]).trim()) {
+        throw new Error(`content ad variant must include ${field}`);
+      }
+    }
+  }
+  if (adVariants.some((variant, index) => (variant as Record<string, unknown>).label !== expectedVariantLabels[index])) {
+    throw new Error("demo content package must keep the three owner-facing advertising approaches");
   }
 
   // Content Studio Phase 1 UI markers.
@@ -1570,6 +1587,16 @@ async function checkContentStudioPhaseOne() {
     "Video prompt",
     "WhatsApp сообщение",
     "Текст объявления Meta",
+    "Варианты объявления",
+    "Выбран для рекламы",
+    "В рекламный мастер попадёт только выбранный текст.",
+    "Без дополнительной генерации",
+    "selectedAdVariant.primaryText",
+    "primaryText: selectedAdVariant.primaryText",
+    "headline: selectedAdVariant.headline",
+    "description: selectedAdVariant.description",
+    "onClick={() => setSelectedAdVariantId(variant.id)}",
+    "Выбранный текст нельзя передавать в рекламу.",
   ]) {
     if (!studio.includes(marker)) {
       throw new Error(`Content Studio Phase 1 is missing "${marker}"`);
@@ -1625,6 +1652,11 @@ async function checkContentStudioPhaseOne() {
     if (!campaignBrief.includes(marker)) {
       throw new Error(`Advertising campaign brief foundation is missing ${marker}`);
     }
+  }
+
+  const contentStudioApi = await readFile(path.join(repoRoot, "api", "content-studio", "[...path].ts"), "utf8");
+  if (!contentStudioApi.includes('"adVariants"') || !contentStudioApi.includes("array of exactly 3 distinct Meta ad variants")) {
+    throw new Error("Content Studio package generation must request three ad variants in one provider call");
   }
 
   console.log("Content Studio Phase 1 checks: ok");
@@ -1683,6 +1715,7 @@ async function checkAppointmentsPageSource() {
   if (!source.includes("doctorId: readString(record.doctorId) || readString(record.doctor_id)")) {
     throw new Error("AppointmentsPage must retain service ownership from the clinic-services response");
   }
+
   if (!source.includes(".filter((service) => service.doctorId === form.doctorId)")) {
     throw new Error("AppointmentsPage master-name search must exclude common and other-master services");
   }

@@ -1,6 +1,6 @@
 # AI Content Studio — Concept
 
-Status: concept (Phase 0). This document defines the product direction; full generation is not implemented yet.
+Status: working MVP. Text packages, photo layouts, image/video generation and the Ads Automation handoff are implemented; advanced experiment analytics remain future work.
 
 ## Product vision
 
@@ -75,6 +75,7 @@ A generated package (one row per package) contains:
 - Video creative prompt (for avatar/video generation, e.g. HeyGen/TapNow)
 - Caption (organic post text with hashtags)
 - Meta ad text (primaryText, headline, description, CTA — matches Ads Automation fields)
+- Three advertising approaches in one package (direct offer, expert explanation, trust/comfort), with one explicit selection for handoff
 - WhatsApp CTA (first message + quick replies)
 - Chatbot / AI phone follow-up script — **later (Phase 4)**
 
@@ -99,6 +100,12 @@ A generated package (one row per package) contains:
   workspace-scoped `negis_ads_automation_prefill` key. Ads Automation consumes
   it once, restores safe text/creative fields, clears launch confirmations and
   removes the handoff key. Legacy Content Studio payloads remain supported.
+- One package now includes three normalized advertising variants. The owner
+  chooses one in the Studio; compliance is evaluated for the selected text and
+  only that variant is handed to Ads Automation. The variants are produced by
+  the existing package request, so selection does not trigger another paid AI
+  call. Legacy model responses without `adVariants` are completed
+  deterministically and keep their original primary text as the first option.
 - `/ads` can hand an owner goal to the studio through the separate
   workspace-scoped `negis_content_studio_goal_prefill` key. The studio consumes
   it once, prefills service/city and carries patient, duration and budget context
@@ -109,11 +116,11 @@ A generated package (one row per package) contains:
 
 ## Implementation phases
 
-- **Phase 1 — text/script/prompt generation.** Full package generation from idea/media/template;
+- **Phase 1 — text/script/prompt generation (implemented).** Full package generation from idea/media/template;
   Ads Automation reads `negis_ads_automation_prefill`; compliance on every package; copy/download for social.
-- **Phase 2 — photo creative builder.** Branded photo creatives from uploaded media + prompts
+- **Phase 2 — photo creative builder (implemented MVP).** Branded photo creatives from uploaded media + prompts
   (templates, overlays, safe wording), saved to `ad-creatives`.
-- **Phase 3 — video creative generation/rendering.** Avatar/TapNow/render pipeline producing ad-ready MP4
+- **Phase 3 — video creative generation/rendering (working foundation).** Provider generation and the existing video preparation pipeline produce ad-ready MP4
   (reuses the video worker/optimization pipeline), thumbnails included.
 - **Phase 4 — WhatsApp/chatbot/AI phone follow-up scripts.** Follow-up flows generated per package;
   handoff to the chatbot and AI phone modules.
@@ -122,6 +129,6 @@ A generated package (one row per package) contains:
 
 ## Non-goals right now
 
-- No new generation backends in Phase 0 (this document + navigation cleanup only).
+- No automatic A/B winner selection or performance claims from creative variants.
 - No changes to Meta payload logic, ACTIVE gating, or the small-video/photo launch flow.
 - Large-video optimization stays paused until the Supabase upload limit is resolved.

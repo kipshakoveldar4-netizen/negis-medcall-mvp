@@ -39,6 +39,16 @@ export type PromptPackage = {
 
 export type ContentStudioMode = "demo" | "openai" | "anthropic" | "telegram" | "mock";
 
+export type ContentAdVariant = {
+  id: string;
+  label: string;
+  angle: string;
+  primaryText: string;
+  headline: string;
+  description: string;
+  cta: string;
+};
+
 // Phase 1 content package: everything a clinic needs for one creative —
 // short-form video script, ad text, prompts, and the WhatsApp opener.
 export type ContentPackage = {
@@ -51,6 +61,7 @@ export type ContentPackage = {
   caption: string;
   adPrimaryText: string;
   adHeadline: string;
+  adVariants: ContentAdVariant[];
   cta: string;
   photoPrompt: string;
   videoPrompt: string;
@@ -87,6 +98,37 @@ export function demoContentPackage(input: ContentPackageBrief = {}): ContentPack
   const materialNotes = briefString(input.materialNotes, "");
 
   const goalCta = goal === "appointment" ? "Записаться на приём" : goal === "awareness" ? "Узнать подробнее" : "Получить консультацию";
+  const adPrimaryText = `${service} в ${city}. Первый шаг — консультация: врач ответит на вопросы и предложит индивидуальный план. ${offer}. Запись в WhatsApp.`;
+  const adHeadline = `${service} в ${city}`;
+  const adVariants: ContentAdVariant[] = [
+    {
+      id: "offer",
+      label: "Прямой оффер",
+      angle: "Сразу объясняет предложение и следующий шаг.",
+      primaryText: adPrimaryText,
+      headline: adHeadline,
+      description: offer,
+      cta: goalCta,
+    },
+    {
+      id: "expert",
+      label: "Экспертное объяснение",
+      angle: "Помогает понять, что будет на первой консультации.",
+      primaryText: `Перед тем как выбрать ${service.toLowerCase()}, важно обсудить ожидания и возможные ограничения с врачом. В клинике в ${city} специалист ответит на вопросы и предложит индивидуальный план. ${offer}. Напишите в WhatsApp, чтобы узнать подробнее.`,
+      headline: `Консультация по услуге «${service}»`,
+      description: "Понятный первый шаг вместе со специалистом",
+      cta: goalCta,
+    },
+    {
+      id: "trust",
+      label: "Доверие и комфорт",
+      angle: "Делает акцент на спокойном знакомстве с клиникой.",
+      primaryText: `Первый визит по направлению «${service}» может быть спокойным и понятным. В ${city} врач выслушает ваши вопросы и расскажет о возможных вариантах после консультации. ${offer}. Администратор поможет подобрать время в WhatsApp.`,
+      headline: "Начните со спокойной консультации",
+      description: `${service}: знакомство с врачом и индивидуальный план`,
+      cta: goalCta,
+    },
+  ];
 
   return {
     ideaTitle: `${service} в ${city}: как проходит приём`,
@@ -113,8 +155,9 @@ export function demoContentPackage(input: ContentPackageBrief = {}): ContentPack
     ],
     voiceover: `Если вы давно думаете про ${service.toLowerCase()}, начните с консультации. Врач осмотрит, ответит на вопросы и предложит план, который подходит именно вам. ${offer}. Напишите нам в WhatsApp — администратор подберёт удобное время.`,
     caption: `${service} в ${city} 🏥\n\nРассказываем, как проходит первый приём: без спешки, с понятными объяснениями и планом действий.\n\n${offer}.\n\nНапишите в WhatsApp — ответим на вопросы и подберём время. Тон: ${tone}.`,
-    adPrimaryText: `${service} в ${city}. Первый шаг — консультация: врач ответит на вопросы и предложит индивидуальный план. ${offer}. Запись в WhatsApp.`,
-    adHeadline: `${service} в ${city}`,
+    adPrimaryText,
+    adHeadline,
+    adVariants,
     cta: goalCta,
     photoPrompt: `Реалистичное фото для медицинской рекламы: современный кабинет клиники, врач-специалист по направлению «${service}», доброжелательная атмосфера, мягкий дневной свет, чистые тона, без текста на изображении, формат ${format}. Без изображений процедур и шприцев крупным планом.${materialNotes ? ` Материалы клиники: ${materialNotes}.` : ""}`,
     videoPrompt: `Короткое вертикальное видео (${format}, 9:16, 30-45 секунд) для клиники: врач рассказывает про «${service}», кадры кабинета и ресепшн, спокойный ${tone} тон, субтитры на русском, финальный кадр с CTA «${goalCta}». Аудитория: ${audience}. Без обещаний результата и без кадров «до/после».`,
@@ -133,10 +176,51 @@ function normalizeStringArray(value: unknown, fallback: string[]): string[] {
   return items.length > 0 ? items : fallback;
 }
 
+function normalizeAdVariants(value: unknown, fallback: ContentAdVariant[]): ContentAdVariant[] {
+  const records = Array.isArray(value) ? value : [];
+  return fallback.map((fallbackVariant, index) => {
+    const candidate = records[index];
+    const record = candidate && typeof candidate === "object" && !Array.isArray(candidate)
+      ? (candidate as Record<string, unknown>)
+      : {};
+    const read = (key: keyof ContentAdVariant) =>
+      typeof record[key] === "string" && (record[key] as string).trim()
+        ? (record[key] as string).trim()
+        : fallbackVariant[key];
+
+    return {
+      // Stable local ids keep selection deterministic even if a provider
+      // repeats or omits ids in its JSON response.
+      id: fallbackVariant.id,
+      label: read("label"),
+      angle: read("angle"),
+      primaryText: read("primaryText"),
+      headline: read("headline"),
+      description: read("description"),
+      cta: read("cta"),
+    };
+  });
+}
+
 export function normalizeContentPackage(value: unknown, fallback: ContentPackage): ContentPackage {
   const record = value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
-  const read = (key: keyof ContentPackage) =>
+  type StringField = Exclude<keyof ContentPackage, "shotList" | "textOnScreen" | "complianceNotes" | "adVariants">;
+  const read = (key: StringField) =>
     typeof record[key] === "string" && (record[key] as string).trim() ? (record[key] as string).trim() : (fallback[key] as string);
+  const adPrimaryText = read("adPrimaryText");
+  const adHeadline = read("adHeadline");
+  const cta = read("cta");
+  const fallbackVariants = fallback.adVariants.map((variant, index) =>
+    index === 0
+      ? {
+          ...variant,
+          primaryText: adPrimaryText,
+          headline: adHeadline,
+          description: read("caption"),
+          cta,
+        }
+      : variant,
+  );
   return {
     ideaTitle: read("ideaTitle"),
     hook: read("hook"),
@@ -145,9 +229,10 @@ export function normalizeContentPackage(value: unknown, fallback: ContentPackage
     textOnScreen: normalizeStringArray(record.textOnScreen, fallback.textOnScreen),
     voiceover: read("voiceover"),
     caption: read("caption"),
-    adPrimaryText: read("adPrimaryText"),
-    adHeadline: read("adHeadline"),
-    cta: read("cta"),
+    adPrimaryText,
+    adHeadline,
+    adVariants: normalizeAdVariants(record.adVariants, fallbackVariants),
+    cta,
     photoPrompt: read("photoPrompt"),
     videoPrompt: read("videoPrompt"),
     whatsappMessage: read("whatsappMessage"),

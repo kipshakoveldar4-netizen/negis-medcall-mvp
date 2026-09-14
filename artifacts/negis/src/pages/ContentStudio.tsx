@@ -671,6 +671,7 @@ export default function ContentStudio() {
   const [packageBrief, setPackageBrief] = useState<PackageBrief>(defaultPackageBrief);
   const [advertisingGoalContext, setAdvertisingGoalContext] = useState<AdvertisingGoalContext>({});
   const [contentPackage, setContentPackage] = useState<ContentPackage | null>(null);
+  const [selectedAdVariantId, setSelectedAdVariantId] = useState("");
   const [packageGenerationMode, setPackageGenerationMode] = useState("");
   const [contentPackageId, setContentPackageId] = useState("");
   const photoFileInputRef = useRef<HTMLInputElement | null>(null);
@@ -1211,6 +1212,10 @@ export default function ContentStudio() {
   }, [videoJob, genVideo]);
 
   const useGeneratedInAdsAutomation = (file: GeneratedFile, creativeType: "image" | "video") => {
+    if (packageCompliance?.status === "blocked") {
+      toast.error("Выбранный текст нельзя передавать в рекламу. Выберите безопасный вариант.");
+      return;
+    }
     writeContentToAdsAutomation({
       sourceKind: "generated",
       campaignName: contentPackage?.ideaTitle || packageBrief.service,
@@ -1218,9 +1223,9 @@ export default function ContentStudio() {
       city: packageBrief.city,
       offer: packageBrief.offer,
       audience: packageBrief.audience,
-      primaryText: contentPackage?.adPrimaryText || packageBrief.offer,
-      headline: contentPackage?.adHeadline || packageBrief.service,
-      description: contentPackage?.caption || packageBrief.offer,
+      primaryText: selectedAdVariant?.primaryText || contentPackage?.adPrimaryText || packageBrief.offer,
+      headline: selectedAdVariant?.headline || contentPackage?.adHeadline || packageBrief.service,
+      description: selectedAdVariant?.description || contentPackage?.caption || packageBrief.offer,
       cta: "LEARN_MORE",
       creative: {
         type: creativeType,
@@ -1238,16 +1243,36 @@ export default function ContentStudio() {
   const updatePackageBrief = (key: keyof PackageBrief, value: string) =>
     setPackageBrief((current) => ({ ...current, [key]: value }));
 
+  const selectedAdVariant = useMemo(
+    () =>
+      contentPackage?.adVariants.find((variant) => variant.id === selectedAdVariantId) ||
+      contentPackage?.adVariants[0] ||
+      null,
+    [contentPackage, selectedAdVariantId],
+  );
+
+  const adVariantCompliance = useMemo(
+    () =>
+      (contentPackage?.adVariants || []).map((variant) =>
+        checkMetaCompliance({
+          headline: variant.headline,
+          text: variant.primaryText,
+          description: variant.description,
+        }),
+      ),
+    [contentPackage],
+  );
+
   const packageCompliance = useMemo(
     () =>
-      contentPackage
+      selectedAdVariant
         ? checkMetaCompliance({
-            headline: contentPackage.adHeadline,
-            text: contentPackage.adPrimaryText,
-            description: contentPackage.caption,
+            headline: selectedAdVariant.headline,
+            text: selectedAdVariant.primaryText,
+            description: selectedAdVariant.description,
           })
         : null,
-    [contentPackage],
+    [selectedAdVariant],
   );
 
   const generatePackage = async () => {
@@ -1264,6 +1289,7 @@ export default function ContentStudio() {
         throw new Error(body?.success === false ? body.error : "Не удалось сгенерировать пакет контента");
       }
       setContentPackage(body.data);
+      setSelectedAdVariantId(body.data.adVariants[0]?.id || "");
       setPackageGenerationMode(body.mode);
       // Готовый photo prompt — это ровно то, что нужно генератору изображения.
       // Заполняем только пустое поле: перезаписать текст, который оператор уже
@@ -1315,6 +1341,14 @@ export default function ContentStudio() {
       toast.error("Сначала сгенерируйте пакет контента");
       return;
     }
+    if (!selectedAdVariant) {
+      toast.error("Сначала выберите вариант объявления");
+      return;
+    }
+    if (packageCompliance?.status === "blocked") {
+      toast.error("Выбранный текст нельзя передавать в рекламу. Выберите безопасный вариант.");
+      return;
+    }
     writeContentToAdsAutomation({
       sourceKind: "package",
       sourceId: contentPackageId || undefined,
@@ -1323,10 +1357,10 @@ export default function ContentStudio() {
       city: packageBrief.city,
       offer: packageBrief.offer,
       audience: packageBrief.audience,
-      primaryText: contentPackage.adPrimaryText,
-      headline: contentPackage.adHeadline,
-      description: contentPackage.caption,
-      cta: contentPackage.cta,
+      primaryText: selectedAdVariant.primaryText,
+      headline: selectedAdVariant.headline,
+      description: selectedAdVariant.description,
+      cta: selectedAdVariant.cta,
       creative: {
         type: "video",
         format: packageBrief.format,
@@ -1819,6 +1853,73 @@ export default function ContentStudio() {
                 <p className="mt-2 text-sm font-semibold text-[#334155]">{contentPackage.hook}</p>
               </div>
 
+              <div className="rounded-2xl border border-[#D7E7E4] bg-[#F7FBFA] p-4 sm:p-5">
+                <div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
+                  <div>
+                    <p className="text-sm font-black text-[#0B1220]">Варианты объявления</p>
+                    <p className="mt-1 text-sm leading-relaxed text-[#64748B]">
+                      Выберите один подход. В рекламный мастер попадёт только выбранный текст.
+                    </p>
+                  </div>
+                  <p className="text-xs font-bold text-[#0D9488]">Без дополнительной генерации</p>
+                </div>
+
+                <div className="mt-4 grid gap-3 xl:grid-cols-3">
+                  {contentPackage.adVariants.map((variant, index) => {
+                    const isSelected = selectedAdVariant?.id === variant.id;
+                    const compliance = adVariantCompliance[index];
+                    const complianceLabel = compliance?.status === "safe"
+                      ? "Формулировки проверены"
+                      : compliance?.status === "blocked"
+                        ? "Нельзя передавать в рекламу"
+                        : "Нужна ручная проверка";
+                    const complianceTone = compliance?.status === "safe"
+                      ? "text-emerald-700"
+                      : compliance?.status === "blocked"
+                        ? "text-rose-700"
+                        : "text-amber-700";
+
+                    return (
+                      <button
+                        key={variant.id}
+                        type="button"
+                        aria-pressed={isSelected}
+                        onClick={() => setSelectedAdVariantId(variant.id)}
+                        className={`min-w-0 rounded-xl border p-4 text-left transition-colors ${
+                          isSelected
+                            ? "border-[#0D9488] bg-white ring-2 ring-[#0D9488]/15"
+                            : "border-[#DDE7E5] bg-white hover:border-[#8BC8BF]"
+                        }`}
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <p className="text-xs font-bold uppercase text-[#64748B]">Вариант {index + 1}</p>
+                            <p className="mt-1 text-sm font-black text-[#0B1220]">{variant.label}</p>
+                          </div>
+                          {isSelected ? (
+                            <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-emerald-50 px-2 py-1 text-[11px] font-black text-emerald-700">
+                              <Check size={12} /> Выбран
+                            </span>
+                          ) : null}
+                        </div>
+                        <p className="mt-2 text-xs leading-relaxed text-[#64748B]">{variant.angle}</p>
+                        <p className="mt-3 text-sm font-black leading-snug text-[#0F172A]">{variant.headline}</p>
+                        <p className="mt-2 line-clamp-4 text-sm leading-relaxed text-[#475569]">{variant.primaryText}</p>
+                        <p className={`mt-3 text-xs font-bold ${complianceTone}`}>{complianceLabel}</p>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <div className="mt-4 rounded-xl border border-[#DDE7E5] bg-white px-4 py-3">
+                  <p className="text-xs font-bold uppercase text-[#64748B]">Выбран для рекламы</p>
+                  <p className="mt-1 text-sm font-black text-[#0B1220]">{selectedAdVariant?.label}</p>
+                  <p className="mt-1 text-sm text-[#475569]">
+                    Заголовок, основной текст и описание будут перенесены в Ads Automation. Запуск останется выключенным до ручной проверки.
+                  </p>
+                </div>
+              </div>
+
               <div className="grid gap-4 xl:grid-cols-2">
                 <PromptBox title="Сценарий Reels/TikTok" value={contentPackage.script} onCopy={() => void copyText(contentPackage.script, "Сценарий")} />
                 <PromptBox title="Shot list" value={contentPackage.shotList.join("\n")} onCopy={() => void copyText(contentPackage.shotList.join("\n"), "Shot list")} />
@@ -1827,8 +1928,8 @@ export default function ContentStudio() {
                 <PromptBox title="Caption для соцсетей" value={contentPackage.caption} onCopy={() => void copyText(contentPackage.caption, "Caption")} />
                 <PromptBox
                   title="Текст объявления Meta"
-                  value={`${contentPackage.adPrimaryText}\n\nЗаголовок: ${contentPackage.adHeadline}\nCTA: ${contentPackage.cta}`}
-                  onCopy={() => void copyText(contentPackage.adPrimaryText, "Текст объявления")}
+                  value={`${selectedAdVariant?.primaryText || contentPackage.adPrimaryText}\n\nЗаголовок: ${selectedAdVariant?.headline || contentPackage.adHeadline}\nCTA: ${selectedAdVariant?.cta || contentPackage.cta}`}
+                  onCopy={() => void copyText(selectedAdVariant?.primaryText || contentPackage.adPrimaryText, "Текст объявления")}
                 />
                 <PromptBox title="Photo prompt" value={contentPackage.photoPrompt} onCopy={() => void copyText(contentPackage.photoPrompt, "Photo prompt")} />
                 <PromptBox title="Video prompt" value={contentPackage.videoPrompt} onCopy={() => void copyText(contentPackage.videoPrompt, "Video prompt")} />

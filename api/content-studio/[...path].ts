@@ -295,6 +295,7 @@ async function handleGeneratePackage(req: VercelRequest, res: VercelResponse, co
           "caption",
           "adPrimaryText",
           "adHeadline",
+          "adVariants",
           "cta",
           "photoPrompt",
           "videoPrompt",
@@ -307,6 +308,8 @@ async function handleGeneratePackage(req: VercelRequest, res: VercelResponse, co
           shotList: "array of 4-6 shot descriptions",
           textOnScreen: "array of 3-5 short on-screen lines",
           adPrimaryText: "Meta ad primary text, 2-4 sentences, no result guarantees",
+          adVariants:
+            "array of exactly 3 distinct Meta ad variants: direct offer, expert explanation, and trust/comfort. Each item has id, label, angle, primaryText, headline, description, cta. Keep every variant medically safe and in Russian",
           complianceNotes: "array of short notes confirming safe medical wording",
         },
         input: payload,
