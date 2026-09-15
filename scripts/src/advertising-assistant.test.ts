@@ -17,6 +17,8 @@ type Input = {
   insightsEmpty: number;
   insightsRunning: number;
   insightsNotSynced: number;
+  creativeTestsComparable?: number;
+  creativeTestsIncomplete?: number;
   crmAccess: "idle" | "checking" | "ready" | "required" | "forbidden" | "error";
   unattributedLeads: number;
   paidUnattributedDeals: number;
@@ -44,6 +46,8 @@ const readyInput: Input = {
   insightsEmpty: 0,
   insightsRunning: 0,
   insightsNotSynced: 0,
+  creativeTestsComparable: 0,
+  creativeTestsIncomplete: 0,
   crmAccess: "ready",
   unattributedLeads: 0,
   paidUnattributedDeals: 0,
@@ -113,6 +117,36 @@ test("unattributed leads get one direct CRM action", () => {
   assert.equal(brief.href, "/leads");
 });
 
+test("an incomplete creative test asks for one comparable period", () => {
+  const brief = assistant.buildAdvertisingAssistantBrief({
+    ...readyInput,
+    creativeTestsIncomplete: 2,
+  });
+  assert.equal(brief.reason, "creative_test_needs_same_period");
+  assert.equal(brief.href, "/admin");
+  assert.match(brief.text, /одинаковые даты/);
+});
+
+test("CRM attribution keeps priority over a comparable creative test", () => {
+  const brief = assistant.buildAdvertisingAssistantBrief({
+    ...readyInput,
+    creativeTestsComparable: 1,
+    unattributedLeads: 2,
+  });
+  assert.equal(brief.reason, "link_leads");
+});
+
+test("a comparable creative test exposes facts without choosing a winner", () => {
+  const brief = assistant.buildAdvertisingAssistantBrief({
+    ...readyInput,
+    creativeTestsComparable: 1,
+  });
+  assert.equal(brief.reason, "creative_test_ready");
+  assert.equal(brief.href, "/ads-automation/history");
+  assert.match(brief.text, /не выбирает победителя/);
+  assert.doesNotMatch(brief.text, /CPL|ROI|ROMI|лучший вариант/i);
+});
+
 test("verified facts produce an honest ready state", () => {
   const brief = assistant.buildAdvertisingAssistantBrief(readyInput);
   assert.equal(brief.reason, "results_ready");
@@ -128,6 +162,8 @@ test("every action stays inside read-only or disabled-first product routes", () 
     { ...readyInput, campaignsWithInsights: 0, insightsNotSynced: 1 },
     { ...readyInput, campaignsWithInsights: 0, paidUnattributedDeals: 1 },
     { ...readyInput, campaignsWithInsights: 0, unattributedLeads: 1 },
+    { ...readyInput, creativeTestsIncomplete: 1 },
+    { ...readyInput, creativeTestsComparable: 1 },
   ];
   const allowed = new Set(["/ads-automation", "/ads-automation/history", "/admin", "/leads", "/sales"]);
   for (const input of variants) {

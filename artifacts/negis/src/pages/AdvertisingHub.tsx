@@ -789,10 +789,12 @@ export default function AdvertisingHub() {
     insightsEmpty: insightsStates.empty,
     insightsRunning: insightsStates.running,
     insightsNotSynced: insightsStates.notSynced,
+    creativeTestsComparable: creativeExperiments.filter((group) => group.reviewState === "same_period").length,
+    creativeTestsIncomplete: creativeExperiments.filter((group) => group.reviewState !== "same_period").length,
     crmAccess: crmOutcomesAccess,
     unattributedLeads: crmOutcomes.unattributedLeads,
     paidUnattributedDeals: crmOutcomes.paidUnattributedDeals,
-  }), [crmOutcomes, crmOutcomesAccess, insights.campaignsWithData, insightsAccess, insightsStates, loadState, summary]);
+  }), [creativeExperiments, crmOutcomes, crmOutcomesAccess, insights.campaignsWithData, insightsAccess, insightsStates, loadState, summary]);
 
   const AssistantIcon = assistant.tone === "error"
     ? AlertTriangle

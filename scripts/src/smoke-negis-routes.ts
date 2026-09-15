@@ -3633,6 +3633,14 @@ async function checkAdvertisingHubSource() {
     throw new Error("Advertising assistant must explain facts without coefficients or write actions");
   }
   for (const marker of [
+    "creative_test_needs_same_period",
+    "creative_test_ready",
+    "Сопоставьте период теста креативов",
+    "Negis не выбирает победителя и не меняет кампании",
+  ]) {
+    if (!assistant.includes(marker)) throw new Error(`Advertising assistant is missing ${marker}`);
+  }
+  for (const marker of [
     "buildCreativeExperimentGroups",
     "approval.copyMatchesLaunch !== true",
     "variants.size < 2",

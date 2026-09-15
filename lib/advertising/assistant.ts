@@ -17,8 +17,10 @@ export type AdvertisingAssistantReason =
   | "insights_syncing"
   | "insights_not_synced"
   | "zero_delivery"
+  | "creative_test_needs_same_period"
   | "link_paid_sales"
   | "link_leads"
+  | "creative_test_ready"
   | "results_ready"
   | "campaigns_prepared";
 
@@ -41,6 +43,8 @@ export type AdvertisingAssistantInput = {
   insightsEmpty: number;
   insightsRunning: number;
   insightsNotSynced: number;
+  creativeTestsComparable?: number;
+  creativeTestsIncomplete?: number;
   crmAccess: AdvertisingAssistantAccess;
   unattributedLeads: number;
   paidUnattributedDeals: number;
@@ -60,6 +64,8 @@ export function buildAdvertisingAssistantBrief(input: AdvertisingAssistantInput)
   const insightsEmpty = safeCount(input.insightsEmpty);
   const insightsRunning = safeCount(input.insightsRunning);
   const insightsNotSynced = safeCount(input.insightsNotSynced);
+  const creativeTestsComparable = safeCount(input.creativeTestsComparable ?? 0);
+  const creativeTestsIncomplete = safeCount(input.creativeTestsIncomplete ?? 0);
   const unattributedLeads = safeCount(input.unattributedLeads);
   const paidUnattributedDeals = safeCount(input.paidUnattributedDeals);
 
@@ -171,6 +177,17 @@ export function buildAdvertisingAssistantBrief(input: AdvertisingAssistantInput)
     };
   }
 
+  if (input.insightsAccess === "ready" && creativeTestsIncomplete > 0) {
+    return {
+      reason: "creative_test_needs_same_period",
+      tone: "warning",
+      title: "Сопоставьте период теста креативов",
+      text: `Наборов с неполными или разными периодами данных: ${creativeTestsIncomplete}. Синхронизируйте варианты за одинаковые даты, прежде чем сравнивать факты.`,
+      actionLabel: "Открыть синхронизацию",
+      href: "/admin",
+    };
+  }
+
   if (input.crmAccess === "ready" && paidUnattributedDeals > 0) {
     return {
       reason: "link_paid_sales",
@@ -190,6 +207,17 @@ export function buildAdvertisingAssistantBrief(input: AdvertisingAssistantInput)
       text: `Заявок без выбранной кампании: ${unattributedLeads}. Это подготовит данные для будущего честного отчёта.`,
       actionLabel: "Открыть заявки",
       href: "/leads",
+    };
+  }
+
+  if (input.insightsAccess === "ready" && creativeTestsComparable > 0) {
+    return {
+      reason: "creative_test_ready",
+      tone: "success",
+      title: "Факты по креативам готовы",
+      text: `Тестов с данными за один период: ${creativeTestsComparable}. Сравните расход, показы и клики. Negis не выбирает победителя и не меняет кампании.`,
+      actionLabel: "Проверить историю",
+      href: "/ads-automation/history",
     };
   }
 
