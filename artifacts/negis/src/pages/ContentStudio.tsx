@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { useLocation } from "wouter";
 import {
   ArrowRight,
@@ -192,6 +192,26 @@ type GeneratedFile = {
   fileSize: number;
   thumbnailUrl?: string;
   thumbnailSource?: string;
+};
+
+type GenerationUsageCounter = {
+  used: number;
+  limit: number | null;
+  remaining: number | null;
+  enabled: boolean;
+};
+
+type GenerationUsageSummary = {
+  trackingAvailable: boolean;
+  subscriptionActive: boolean;
+  plan: "basic" | "standard" | "pro" | null;
+  planTitle: string;
+  periodStart: string;
+  textRequests: number;
+  images: GenerationUsageCounter;
+  videoSeconds: GenerationUsageCounter;
+  videoSecondsPerGeneration: number;
+  warning?: string;
 };
 
 type VideoJobState = {
@@ -574,6 +594,14 @@ function withWorkspace(path: string): string {
   return `${path}${path.includes("?") ? "&" : "?"}workspaceId=${encodeURIComponent(workspaceId)}`;
 }
 
+function paidGenerationHeaders(): Record<string, string> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (typeof globalThis.crypto?.randomUUID === "function") {
+    headers["X-Idempotency-Key"] = globalThis.crypto.randomUUID();
+  }
+  return headers;
+}
+
 function readVideos(): ContentVideo[] {
   try {
     const raw = localStorage.getItem(workspaceScopedKey(STORAGE_KEY));
@@ -727,6 +755,26 @@ export default function ContentStudio() {
   const [genImage, setGenImage] = useState<GeneratedFile | null>(null);
   const [genVideo, setGenVideo] = useState<GeneratedFile | null>(null);
   const [videoJob, setVideoJob] = useState<VideoJobState | null>(null);
+  const [generationUsage, setGenerationUsage] = useState<GenerationUsageSummary | null>(null);
+  const [generationUsageLoading, setGenerationUsageLoading] = useState(true);
+
+  const refreshGenerationUsage = useCallback(async () => {
+    setGenerationUsageLoading(true);
+    try {
+      const response = await crmFetch(withWorkspace("/api/content-studio/usage"));
+      const body = await safeJson<GenerationUsageSummary>(response);
+      if (response.ok && body?.success === true) setGenerationUsage(body.data);
+    } catch {
+      // The paid write still checks its quota server-side. A diagnostic read
+      // must never replace the working studio with an error screen.
+    } finally {
+      setGenerationUsageLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshGenerationUsage();
+  }, [refreshGenerationUsage]);
 
   const writeContentToAdsAutomation = (input: AdsAutomationPrefillInput) =>
     writeAdsAutomationPrefill({ ...advertisingGoalContext, ...input });
@@ -1023,7 +1071,7 @@ export default function ContentStudio() {
     try {
       const response = await crmFetch(withWorkspace("/api/content-studio/generate-photo"), {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: paidGenerationHeaders(),
         body: JSON.stringify({ prompt, format: genFormat }),
       });
       const body = await safeJson<{
@@ -1036,6 +1084,7 @@ export default function ContentStudio() {
       }>(response);
 
       if (!response.ok || body?.success !== true) {
+        void refreshGenerationUsage();
         setGenNotice({
           tone: "error",
           text: generationRefusalText(body, response.status, "Не удалось сгенерировать изображение"),
@@ -1061,6 +1110,7 @@ export default function ContentStudio() {
         });
       }
       toast.success("Изображение сгенерировано");
+      void refreshGenerationUsage();
     } catch (error) {
       setGenNotice({
         tone: "error",
@@ -1091,7 +1141,7 @@ export default function ContentStudio() {
     try {
       const response = await crmFetch(withWorkspace("/api/content-studio/generate-video"), {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: paidGenerationHeaders(),
         body: JSON.stringify({ prompt, format: genFormat }),
       });
       const body = await safeJson<{
@@ -1102,6 +1152,7 @@ export default function ContentStudio() {
       }>(response);
 
       if (!response.ok || body?.success !== true) {
+        void refreshGenerationUsage();
         setVideoJob(null);
         setGenNotice({
           tone: "error",
@@ -1119,6 +1170,7 @@ export default function ContentStudio() {
         progress: body.data.progress,
         formatSubstituted: Boolean(body.data.formatSubstituted),
       });
+      void refreshGenerationUsage();
     } catch (error) {
       setVideoJob(null);
       setGenNotice({
@@ -2130,6 +2182,45 @@ export default function ContentStudio() {
             subtitle="Описание кадра уходит в сервис генерации, а готовый файл сразу попадает в библиотеку креативов — оттуда его берёт AI запуск рекламы."
           />
 
+          <div className="mb-5 border-y border-[#E7ECF3] py-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <p className="text-sm font-black text-[#0B1220]">
+                Лимит креативов{generationUsage?.planTitle ? ` · ${generationUsage.planTitle}` : ""}
+              </p>
+              <button
+                type="button"
+                className="inline-flex items-center gap-1 text-xs font-bold text-[#0D9488]"
+                onClick={() => void refreshGenerationUsage()}
+                disabled={generationUsageLoading}
+              >
+                <RefreshCw size={13} className={generationUsageLoading ? "animate-spin" : ""} />
+                Обновить
+              </button>
+            </div>
+            {generationUsageLoading && !generationUsage ? (
+              <p className="mt-2 text-sm font-semibold text-[#64748B]">Проверяем доступный лимит…</p>
+            ) : generationUsage ? (
+              <div className="mt-2 grid gap-1 text-sm font-semibold text-[#475569] sm:grid-cols-2">
+                <p>
+                  Изображения: {generationUsage.images.used}
+                  {generationUsage.images.limit === null ? "" : ` из ${generationUsage.images.limit}`}
+                </p>
+                <p>
+                  Видео: {generationUsage.videoSeconds.used}
+                  {generationUsage.videoSeconds.limit === null ? " сек." : ` из ${generationUsage.videoSeconds.limit} сек.`}
+                </p>
+                <p className="text-xs text-[#64748B] sm:col-span-2">
+                  Лимит обновляется в начале месяца. Один ролик использует примерно {generationUsage.videoSecondsPerGeneration} сек.
+                </p>
+                {generationUsage.warning ? (
+                  <p className="text-xs text-amber-800 sm:col-span-2">{generationUsage.warning}</p>
+                ) : null}
+              </div>
+            ) : (
+              <p className="mt-2 text-sm font-semibold text-[#64748B]">Лимит проверится перед генерацией.</p>
+            )}
+          </div>
+
           <div className="mb-4">
             <Field
               label="Что должно быть в кадре"
@@ -2183,7 +2274,13 @@ export default function ContentStudio() {
             <button
               type="button"
               className="neu-btn-primary inline-flex items-center gap-2 px-4 py-2.5 text-sm"
-              disabled={genBusy !== null}
+              disabled={
+                genBusy !== null ||
+                Boolean(
+                  generationUsage?.trackingAvailable &&
+                    (!generationUsage.images.enabled || generationUsage.images.remaining === 0),
+                )
+              }
               onClick={() => void generatePhoto()}
             >
               <ImagePlus size={15} />
@@ -2192,7 +2289,17 @@ export default function ContentStudio() {
             <button
               type="button"
               className="neu-btn inline-flex items-center gap-2 px-4 py-2.5 text-sm"
-              disabled={genBusy !== null || videoJob?.status === "queued" || videoJob?.status === "in_progress"}
+              disabled={
+                genBusy !== null ||
+                videoJob?.status === "queued" ||
+                videoJob?.status === "in_progress" ||
+                Boolean(
+                  generationUsage?.trackingAvailable &&
+                    (!generationUsage.videoSeconds.enabled ||
+                      (generationUsage.videoSeconds.remaining !== null &&
+                        generationUsage.videoSeconds.remaining < generationUsage.videoSecondsPerGeneration)),
+                )
+              }
               onClick={() => void generateVideo()}
             >
               <Clapperboard size={15} />

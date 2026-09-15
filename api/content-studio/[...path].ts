@@ -1,4 +1,5 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
+import { randomUUID } from "node:crypto";
 import {
   demoAvatarPrompt,
   demoContentPackage,
@@ -31,6 +32,16 @@ import {
   type GenerationRefusal,
 } from "../../lib/content-studio/generation";
 import { persistContentVideoPatchIfAvailable, storeGeneratedCreative } from "../../lib/crm/server";
+import { resolveTextProvider } from "../../lib/ai/text-provider";
+import {
+  billableVideoSeconds,
+  completeContentGeneration,
+  getContentUsageSummary,
+  reserveContentGeneration,
+  type ContentGenerationErrorCode,
+  type ContentGenerationOperation,
+  type ContentUsageReservation,
+} from "../../lib/content-studio/usage";
 import {
   authorizePrivateRoute,
   normalizeRouteSegment,
@@ -62,6 +73,11 @@ const CONTENT_STUDIO_AUTHORIZATION: Readonly<Record<string, PrivateRouteAuthoriz
     methods: ["GET", "POST"],
     permissions: { GET: "view_ai_content", POST: "manage_ai_content" },
     disabledReason: "Use /api/crm/content-videos",
+  },
+  usage: {
+    kind: "browser",
+    methods: ["GET"],
+    permissions: { GET: "view_ai_content" },
   },
   "generate-package": {
     kind: "browser",
@@ -141,6 +157,96 @@ type TelegramApiBody = {
 function sendJson(res: VercelResponse, status: number, payload: unknown) {
   res.status(status).setHeader("Content-Type", "application/json; charset=utf-8");
   return res.json(payload);
+}
+
+function generationRequestKey(req: VercelRequest): string {
+  const headerValue = req.headers["x-idempotency-key"];
+  const candidate = Array.isArray(headerValue) ? headerValue[0] : headerValue;
+  return typeof candidate === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(candidate.trim())
+    ? candidate.trim()
+    : randomUUID();
+}
+
+function sendUsageRefusal(res: VercelResponse, reservation: ContentUsageReservation) {
+  if (reservation.reason === "subscription_required") {
+    return sendJson(res, 403, {
+      success: false,
+      error: "Генерация файлов не входит в текущий доступ",
+      details: ["Назначьте рабочему пространству активный тариф с генерацией креативов."],
+      code: "generation_subscription_required",
+    });
+  }
+  if (reservation.reason === "duplicate_request") {
+    return sendJson(res, 409, {
+      success: false,
+      error: "Этот запрос генерации уже был принят",
+      details: ["Не запускайте тот же платный запрос повторно. Обновите состояние страницы."],
+      code: "generation_request_duplicate",
+    });
+  }
+  const unit = reservation.kind === "video_seconds" ? "секунд видео" : "изображений";
+  return sendJson(res, 429, {
+    success: false,
+    error: "Лимит генерации на этот месяц исчерпан",
+    details: [
+      reservation.limit === null
+        ? `Доступный лимит ${unit} исчерпан.`
+        : `Использовано ${reservation.used} из ${reservation.limit} ${unit}.`,
+    ],
+    code: "generation_quota_exceeded",
+    usage: {
+      kind: reservation.kind,
+      used: reservation.used,
+      limit: reservation.limit,
+      remaining: reservation.remaining,
+      periodStart: reservation.periodStart,
+    },
+  });
+}
+
+async function reserveTextRequest(
+  context: WorkspaceAccessContext,
+  operation: ContentGenerationOperation,
+): Promise<ContentUsageReservation | null> {
+  const provider = resolveTextProvider(process.env);
+  if (!provider) return null;
+  return reserveContentGeneration({
+    workspaceId: context.workspaceId,
+    staffUserId: context.staffUserId,
+    requestKey: randomUUID(),
+    operation,
+    kind: "text_request",
+    units: 1,
+    provider,
+  });
+}
+
+async function completeTextRequest(
+  context: WorkspaceAccessContext,
+  reservation: ContentUsageReservation | null,
+  status: "succeeded" | "failed" | "unknown",
+  provider?: string,
+) {
+  await completeContentGeneration({
+    workspaceId: context.workspaceId,
+    reservation,
+    status,
+    ...(status === "succeeded" ? {} : { errorCode: "request_unknown" as ContentGenerationErrorCode }),
+    provider,
+  });
+}
+
+function providerFailureAccounting(error: unknown): {
+  status: "failed" | "unknown";
+  errorCode: ContentGenerationErrorCode;
+} {
+  if (error instanceof GenerationProviderError && error.status >= 400 && error.status < 500 && error.status !== 429) {
+    return { status: "failed", errorCode: "provider_rejected" };
+  }
+  if (error instanceof GenerationProviderError && error.status === 429) {
+    return { status: "failed", errorCode: "provider_unavailable" };
+  }
+  return { status: "unknown", errorCode: "request_unknown" };
 }
 
 function readBody(req: VercelRequest): Record<string, unknown> {
@@ -273,8 +379,24 @@ async function sendTelegramMessage(input: {
   };
 }
 
+async function handleUsage(_req: VercelRequest, res: VercelResponse, context: WorkspaceAccessContext) {
+  const summary = await getContentUsageSummary(context.workspaceId);
+  const config = readGenerationConfig();
+  return sendJson(res, 200, {
+    success: true,
+    mode: summary.trackingAvailable ? "tracked" : "compatibility",
+    data: {
+      ...summary,
+      videoSecondsPerGeneration: billableVideoSeconds(config.videoSeconds),
+    },
+  });
+}
+
 async function handleGeneratePackage(req: VercelRequest, res: VercelResponse, context: WorkspaceAccessContext) {
+  let usage: ContentUsageReservation | null = null;
   try {
+    usage = await reserveTextRequest(context, "content_package");
+    if (usage && !usage.allowed) return sendUsageRefusal(res, usage);
     const payload = readBody(req);
     const fallback = demoContentPackage(payload);
     const result = await generateOpenAIJson({
@@ -317,6 +439,7 @@ async function handleGeneratePackage(req: VercelRequest, res: VercelResponse, co
       fallback,
       normalize: (value) => normalizeContentPackage(value, fallback),
     });
+    await completeTextRequest(context, usage, "succeeded", result.mode);
 
     return sendJson(res, 200, {
       success: true,
@@ -324,6 +447,7 @@ async function handleGeneratePackage(req: VercelRequest, res: VercelResponse, co
       data: result.data,
     });
   } catch (error) {
+    await completeTextRequest(context, usage, "unknown");
     return sendJson(res, 500, {
       success: false,
       error: "Generation error",
@@ -342,8 +466,10 @@ async function handleGeneratePackage(req: VercelRequest, res: VercelResponse, co
  * «стало можно запускать».
  */
 async function handleImproveAdText(req: VercelRequest, res: VercelResponse, context: WorkspaceAccessContext) {
-  void context;
+  let usage: ContentUsageReservation | null = null;
   try {
+    usage = await reserveTextRequest(context, "ad_text_improvement");
+    if (usage && !usage.allowed) return sendUsageRefusal(res, usage);
     const payload = readBody(req);
     const result = await improveAdText({
       fields: {
@@ -360,6 +486,7 @@ async function handleImproveAdText(req: VercelRequest, res: VercelResponse, cont
         normalize: (value) => value,
       }),
     });
+    await completeTextRequest(context, usage, "succeeded", result.mode);
 
     if (result.refusal) {
       return sendJson(res, 502, {
@@ -389,6 +516,7 @@ async function handleImproveAdText(req: VercelRequest, res: VercelResponse, cont
       },
     });
   } catch (error) {
+    await completeTextRequest(context, usage, "unknown");
     return sendJson(res, 500, {
       success: false,
       error: "Не удалось переписать текст",
@@ -398,7 +526,10 @@ async function handleImproveAdText(req: VercelRequest, res: VercelResponse, cont
 }
 
 async function handleGenerateScript(req: VercelRequest, res: VercelResponse, context: WorkspaceAccessContext) {
+  let usage: ContentUsageReservation | null = null;
   try {
+    usage = await reserveTextRequest(context, "video_script");
+    if (usage && !usage.allowed) return sendUsageRefusal(res, usage);
     const payload = readBody(req);
     const result = await generateOpenAIJson({
       system: "You are a Russian AI video script strategist. Return valid JSON only. No markdown.",
@@ -415,6 +546,7 @@ async function handleGenerateScript(req: VercelRequest, res: VercelResponse, con
       fallback: demoScriptPackage(),
       normalize: normalizeScriptPackage,
     });
+    await completeTextRequest(context, usage, "succeeded", result.mode);
 
     if (typeof payload.videoId === "string") {
       const patch = {
@@ -435,6 +567,7 @@ async function handleGenerateScript(req: VercelRequest, res: VercelResponse, con
       data: result.data,
     });
   } catch (error) {
+    await completeTextRequest(context, usage, "unknown");
     return sendJson(res, 500, {
       success: false,
       error: "Generation error",
@@ -444,7 +577,10 @@ async function handleGenerateScript(req: VercelRequest, res: VercelResponse, con
 }
 
 async function handleGenerateAvatarPrompt(req: VercelRequest, res: VercelResponse, context: WorkspaceAccessContext) {
+  let usage: ContentUsageReservation | null = null;
   try {
+    usage = await reserveTextRequest(context, "avatar_prompt");
+    if (usage && !usage.allowed) return sendUsageRefusal(res, usage);
     const payload = readBody(req);
     const fallback = demoAvatarPrompt(payload);
     const result = await generateOpenAIJson({
@@ -458,6 +594,7 @@ async function handleGenerateAvatarPrompt(req: VercelRequest, res: VercelRespons
       fallback,
       normalize: (value) => normalizePromptPackage(value, fallback),
     });
+    await completeTextRequest(context, usage, "succeeded", result.mode);
 
     if (typeof payload.videoId === "string") {
       const patch = {
@@ -480,6 +617,7 @@ async function handleGenerateAvatarPrompt(req: VercelRequest, res: VercelRespons
       data: result.data,
     });
   } catch (error) {
+    await completeTextRequest(context, usage, "unknown");
     return sendJson(res, 500, {
       success: false,
       error: "Generation error",
@@ -489,7 +627,10 @@ async function handleGenerateAvatarPrompt(req: VercelRequest, res: VercelRespons
 }
 
 async function handleGenerateTapNowPrompt(req: VercelRequest, res: VercelResponse, context: WorkspaceAccessContext) {
+  let usage: ContentUsageReservation | null = null;
   try {
+    usage = await reserveTextRequest(context, "tapnow_prompt");
+    if (usage && !usage.allowed) return sendUsageRefusal(res, usage);
     const payload = readBody(req);
     const fallback = demoTapNowPrompt(payload);
     const result = await generateOpenAIJson({
@@ -509,6 +650,7 @@ async function handleGenerateTapNowPrompt(req: VercelRequest, res: VercelRespons
       fallback,
       normalize: (value) => normalizePromptPackage(value, fallback),
     });
+    await completeTextRequest(context, usage, "succeeded", result.mode);
 
     if (typeof payload.videoId === "string") {
       const patch = {
@@ -531,6 +673,7 @@ async function handleGenerateTapNowPrompt(req: VercelRequest, res: VercelRespons
       data: result.data,
     });
   } catch (error) {
+    await completeTextRequest(context, usage, "unknown");
     return sendJson(res, 500, {
       success: false,
       error: "Generation error",
@@ -736,6 +879,27 @@ async function handleGeneratePhoto(req: VercelRequest, res: VercelResponse, cont
   }
 
   const size = imageSizeForFormat(payload.format);
+  let usage: ContentUsageReservation;
+  try {
+    usage = await reserveContentGeneration({
+      workspaceId: context.workspaceId,
+      staffUserId: context.staffUserId,
+      requestKey: generationRequestKey(req),
+      operation: "generated_image",
+      kind: "image",
+      units: 1,
+      provider: "openai",
+      model: config.imageModel,
+    });
+  } catch (error) {
+    return sendJson(res, 503, {
+      success: false,
+      error: "Не удалось проверить лимит генерации",
+      details: [error instanceof Error ? error.message : "Учёт генераций временно недоступен."],
+      code: "generation_usage_unavailable",
+    });
+  }
+  if (!usage.allowed) return sendUsageRefusal(res, usage);
 
   let image: Awaited<ReturnType<typeof generateImage>>;
   try {
@@ -746,8 +910,24 @@ async function handleGeneratePhoto(req: VercelRequest, res: VercelResponse, cont
       size,
     });
   } catch (error) {
+    const accounting = providerFailureAccounting(error);
+    await completeContentGeneration({
+      workspaceId: context.workspaceId,
+      reservation: usage,
+      status: accounting.status,
+      errorCode: accounting.errorCode,
+      provider: "openai",
+      model: config.imageModel,
+    });
     return sendProviderFailure(res, error, "Не удалось сгенерировать изображение");
   }
+  await completeContentGeneration({
+    workspaceId: context.workspaceId,
+    reservation: usage,
+    status: "succeeded",
+    provider: "openai",
+    model: image.model,
+  });
 
   // Отдельная попытка — отдельный текст отказа. С этой строки картинка уже
   // сделана и оплачена, и «не удалось сгенерировать» здесь было бы неправдой:
@@ -770,10 +950,11 @@ async function handleGeneratePhoto(req: VercelRequest, res: VercelResponse, cont
       },
     });
 
+    const warnings = [usage.warning, stored.warning].filter((value): value is string => Boolean(value));
     return sendJson(res, 200, {
       success: true,
       mode: "openai",
-      ...(stored.warning ? { warning: stored.warning } : {}),
+      ...(warnings.length > 0 ? { warning: warnings.join(" ") } : {}),
       data: {
         creativeUrl: stored.publicUrl,
         assetId: typeof stored.asset.id === "string" ? stored.asset.id : "",
@@ -830,6 +1011,28 @@ async function handleGenerateVideo(req: VercelRequest, res: VercelResponse, cont
   }
 
   const size = videoSizeForFormat(payload.format);
+  const seconds = billableVideoSeconds(config.videoSeconds);
+  let usage: ContentUsageReservation;
+  try {
+    usage = await reserveContentGeneration({
+      workspaceId: context.workspaceId,
+      staffUserId: context.staffUserId,
+      requestKey: generationRequestKey(req),
+      operation: "generated_video",
+      kind: "video_seconds",
+      units: seconds,
+      provider: "openai",
+      model: config.videoModel,
+    });
+  } catch (error) {
+    return sendJson(res, 503, {
+      success: false,
+      error: "Не удалось проверить лимит генерации",
+      details: [error instanceof Error ? error.message : "Учёт генераций временно недоступен."],
+      code: "generation_usage_unavailable",
+    });
+  }
+  if (!usage.allowed) return sendUsageRefusal(res, usage);
 
   try {
     const job = await createVideoJob({
@@ -838,15 +1041,24 @@ async function handleGenerateVideo(req: VercelRequest, res: VercelResponse, cont
       prompt,
       size,
     });
+    await completeContentGeneration({
+      workspaceId: context.workspaceId,
+      reservation: usage,
+      status: "succeeded",
+      provider: "openai",
+      model: config.videoModel,
+    });
 
     return sendJson(res, 202, {
       success: true,
       mode: "openai",
+      ...(usage.warning ? { warning: usage.warning } : {}),
       data: {
         handle: signVideoJobHandle({ workspaceId: context.workspaceId, jobId: job.id, secret }),
         status: job.status,
         progress: job.progress,
         size,
+        seconds,
         model: config.videoModel,
         // Квадрата у видеомодели нет. Молча снять вертикально и не сказать —
         // значит отдать в Feed кадр, обрезанный не там, где ожидали.
@@ -854,6 +1066,15 @@ async function handleGenerateVideo(req: VercelRequest, res: VercelResponse, cont
       },
     });
   } catch (error) {
+    const accounting = providerFailureAccounting(error);
+    await completeContentGeneration({
+      workspaceId: context.workspaceId,
+      reservation: usage,
+      status: accounting.status,
+      errorCode: accounting.errorCode,
+      provider: "openai",
+      model: config.videoModel,
+    });
     return sendProviderFailure(res, error, "Не удалось запустить генерацию видео");
   }
 }
@@ -981,6 +1202,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (!context) return;
 
   if (resource === "generate-package") return handleGeneratePackage(req, res, context);
+  if (resource === "usage") return handleUsage(req, res, context);
   if (resource === "improve-ad-text") return handleImproveAdText(req, res, context);
   if (resource === "generate-script") return handleGenerateScript(req, res, context);
   if (resource === "generate-avatar-prompt") return handleGenerateAvatarPrompt(req, res, context);
