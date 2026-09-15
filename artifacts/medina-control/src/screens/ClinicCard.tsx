@@ -15,6 +15,18 @@ type Weekly = { from: string; to: string; leads: number | null; appointments: nu
 type Signal = { key: string; level: "ok" | "warn"; data: Record<string, number> };
 type AccessStaff = { email: string; role: string; status: string; linked: boolean };
 type AccessInvitation = { email: string; role: string; status: string; createdAt: string; expiresAt: string };
+type ContentUsageCounter = { used: number; limit: number | null; remaining: number | null; enabled: boolean };
+type ContentUsage = {
+  trackingAvailable: boolean;
+  subscriptionActive: boolean;
+  plan: string | null;
+  planTitle: string;
+  periodStart: string;
+  textRequests: number;
+  images: ContentUsageCounter;
+  videoSeconds: ContentUsageCounter;
+  warning?: string;
+};
 
 /** История приглашений: живые все; завершённые — свежайшее ПО КАЖДОЙ почте
     (не просто последние по дате: иначе истёкшее приглашение администратора,
@@ -90,9 +102,22 @@ type Card = {
     whatsappChannels: number | null;
     clients: number | null;
   };
+  contentUsage?: ContentUsage;
   weekly: Weekly[];
   signals: Signal[];
 };
+
+function usageValue(counter: ContentUsageCounter, suffix = ""): string {
+  const used = `${counter.used.toLocaleString("ru-RU")}${suffix}`;
+  if (counter.limit === null) return used;
+  return `${used} из ${counter.limit.toLocaleString("ru-RU")}${suffix}`;
+}
+
+function usageHint(counter: ContentUsageCounter, unit: string): string {
+  if (!counter.enabled && counter.limit === 0) return "Не входит в текущий тариф";
+  if (counter.remaining === null) return "Учитывается без месячного ограничения";
+  return `Осталось: ${counter.remaining.toLocaleString("ru-RU")} ${unit}`;
+}
 
 function signalText(signal: Signal, vertical: ReturnType<typeof readVertical>): { title: string; why: string } {
   const terms = termsFor(vertical);
@@ -473,6 +498,56 @@ export function ClinicCard({ workspaceId, onBack }: { workspaceId: string; onBac
         <div className="metric"><div className="l">{capitalize(terms.specialistPlural)}</div><div className="v">{numberOrDash(card.counts.doctors)}</div></div>
         <div className="metric"><div className="l">Клиенты</div><div className="v">{numberOrDash(card.counts.clients)}</div></div>
       </div>
+
+      <section className="panel usage-panel" aria-labelledby="content-usage-title">
+        <div className="usage-heading">
+          <div>
+            <h2 id="content-usage-title" className="section-title">Расход AI-контента</h2>
+            <p className="muted">
+              {card.contentUsage?.periodStart
+                ? `Текущий месяц · с ${new Date(`${card.contentUsage.periodStart}T00:00:00Z`).toLocaleDateString("ru-RU", { timeZone: "UTC" })}`
+                : "Текущий месяц"}
+            </p>
+          </div>
+          {card.contentUsage?.planTitle ? <span className="chip on">{card.contentUsage.planTitle}</span> : null}
+        </div>
+
+        {!card.contentUsage || !card.contentUsage.trackingAvailable ? (
+          <div className="notice error" role="status">
+            {card.contentUsage?.warning || "Не удалось проверить расход генераций."}
+          </div>
+        ) : (
+          <div className="usage-list">
+            <div className="usage-row">
+              <div>
+                <b>Текстовые запросы</b>
+                <span>Пакеты, сценарии и рекламные тексты</span>
+              </div>
+              <strong>{card.contentUsage.textRequests.toLocaleString("ru-RU")}</strong>
+              <small>Учёт без месячного ограничения</small>
+            </div>
+            <div className="usage-row">
+              <div>
+                <b>Изображения</b>
+                <span>Генерации через Content Studio</span>
+              </div>
+              <strong>{usageValue(card.contentUsage.images)}</strong>
+              <small>{usageHint(card.contentUsage.images, "изобр.")}</small>
+            </div>
+            <div className="usage-row">
+              <div>
+                <b>Видео</b>
+                <span>Оплачиваемые секунды генерации</span>
+              </div>
+              <strong>{usageValue(card.contentUsage.videoSeconds, " сек.")}</strong>
+              <small>{usageHint(card.contentUsage.videoSeconds, "сек.")}</small>
+            </div>
+          </div>
+        )}
+        <p className="usage-note">
+          Счётчик не хранит prompts, готовый контент, ссылки, ответы провайдера или ключи.
+        </p>
+      </section>
 
       <section className="panel" style={{ padding: "16px 18px", marginBottom: 16 }}>
         {/* «Всё в порядке» имеет право звучать только когда сигналы посчитаны:

@@ -3,6 +3,7 @@ import { getSupabaseServerClient } from "../supabase/server";
 import { computeClinicSignals, type ClinicFacts } from "./clinic-signals";
 import { invitationStatus } from "./staff-invitations";
 import { readVertical, VERTICAL_SETTINGS_KEY } from "../vertical/terms";
+import { getContentUsageSummary } from "../content-studio/usage";
 
 // Панель владельца платформы: подключённые клиники и выручка.
 //
@@ -648,6 +649,7 @@ async function handleClinicCard(req: VercelRequest, res: VercelResponse) {
     clientsCount,
     weeklyLeads,
     weeklyAppointments,
+    contentUsage,
   ] = await Promise.all([
     countRows(supabase, "staff_users", workspaceId),
     activeDoctorIds === null
@@ -673,6 +675,11 @@ async function handleClinicCard(req: VercelRequest, res: VercelResponse) {
     countRows(supabase, "clients", workspaceId),
     Promise.all(weekRanges.map((range) => countRowsInRange(supabase, "leads", workspaceId, range.from, range.to))),
     Promise.all(weekRanges.map((range) => countRowsInRange(supabase, "appointments", workspaceId, range.from, range.to))),
+    // Только агрегаты расхода: prompt, результат генерации, URL и provider
+    // response таблица 051 не хранит вообще. Порталу платформы нужен этот
+    // счётчик, чтобы общий AI-ключ не превращался в незаметный расход одной
+    // клиники за счёт остальных.
+    getContentUsageSummary(workspaceId),
   ]);
 
   const doctorsCount = activeDoctorIds === null ? null : activeDoctorIds.length;
@@ -829,6 +836,7 @@ async function handleClinicCard(req: VercelRequest, res: VercelResponse) {
         whatsappChannels,
         clients: clientsCount,
       },
+      contentUsage,
       // Самая свежая неделя — первой; from/to отдаются, чтобы портал подписал
       // корзины настоящими датами, а не пересчитывал их вторым способом.
       weekly: weekRanges.map((range, index) => ({

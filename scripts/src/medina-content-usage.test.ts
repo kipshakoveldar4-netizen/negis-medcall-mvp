@@ -16,6 +16,8 @@ const usage = await import(pathToFileURL(path.join(repoRoot, "lib", "content-stu
 const migration = await readFile(path.join(repoRoot, "migrations", "051_content_generation_usage.sql"), "utf8");
 const route = await readFile(path.join(repoRoot, "api", "content-studio", "[...path].ts"), "utf8");
 const page = await readFile(path.join(repoRoot, "artifacts", "negis", "src", "pages", "ContentStudio.tsx"), "utf8");
+const platformServer = await readFile(path.join(repoRoot, "lib", "crm", "platform.ts"), "utf8");
+const platformCard = await readFile(path.join(repoRoot, "artifacts", "medina-control", "src", "screens", "ClinicCard.tsx"), "utf8");
 
 test("CU1 media quotas come from the commercial plan, while text is only accounted", () => {
   assert.equal(usage.quotaForPlan("basic", "image"), 0);
@@ -81,4 +83,20 @@ test("CU6 Content Studio shows the plan balance without exposing technical recei
   assert.match(page, /Лимит обновляется в начале месяца/);
   assert.match(page, /\/api\/content-studio\/usage/);
   assert.doesNotMatch(page, /content_generation_usage|usageId|request_key/);
+});
+
+test("CU7 platform owner sees workspace totals without prompts or generation payloads", () => {
+  const clinicHandler = platformServer.slice(
+    platformServer.indexOf("async function handleClinicCard"),
+    platformServer.indexOf("export async function handlePlatformOverview"),
+  );
+  assert.match(clinicHandler, /getContentUsageSummary\(workspaceId\)/);
+  assert.match(clinicHandler, /contentUsage,/);
+  assert.match(platformCard, /Расход AI-контента/);
+  assert.match(platformCard, /Текстовые запросы/);
+  assert.match(platformCard, /Изображения/);
+  assert.match(platformCard, /Оплачиваемые секунды генерации/);
+  assert.match(platformCard, /не хранит prompts, готовый контент, ссылки, ответы провайдера или ключи/);
+  const responseShape = clinicHandler.slice(clinicHandler.lastIndexOf("return sendJson(res, 200"));
+  assert.doesNotMatch(responseShape, /prompt|raw_response|public_url|access_token|service_role_key/i);
 });
