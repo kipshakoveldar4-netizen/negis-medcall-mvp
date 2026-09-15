@@ -4671,6 +4671,15 @@ export default function AdsAutomation() {
             {visibleHistoryItems.map((item, index) => {
               const payload = asRecord(item.payload);
               const metaResponse = asRecord(item.metaResponse);
+              const historyContentApproval = normalizeAdvertisingContentApproval(payload.contentApproval);
+              const historyContentLabel = historyContentApproval?.variantLabel
+                || historyContentApproval?.variantAngle
+                || "Выбранный вариант";
+              const historyContentStatus = historyContentApproval?.copyMatchesLaunch === false
+                ? "Текст изменён перед запуском"
+                : historyContentApproval?.copyMatchesLaunch === true
+                  ? "В запуск ушёл согласованный текст"
+                  : "Вариант выбран в Контент-студии";
               const mode = resolveLaunchMode(item);
               const historyMetaVideoId = firstString(item.metaVideoId, payload.metaVideoId, metaResponse.videoId, metaResponse.metaVideoId);
               const historyVideoUploadMode = firstString(payload.videoUploadMode, metaResponse.videoUploadMode);
@@ -4792,6 +4801,11 @@ export default function AdsAutomation() {
                         </div>
                         <div className="flex flex-wrap items-center gap-2 sm:justify-end">
                           <StatusPill tone={modeBadge.tone}>{modeBadge.label}</StatusPill>
+                          {historyContentApproval ? (
+                            <StatusPill tone={historyContentApproval.copyMatchesLaunch === false ? "amber" : "slate"}>
+                              {historyContentApproval.copyMatchesLaunch === false ? "Текст изменён" : "Вариант согласован"}
+                            </StatusPill>
+                          ) : null}
                           {historyInsightsSummary?.availability === "available" ? <StatusPill tone="slate">Insights доступны</StatusPill> : null}
                           {historyOptimized ? <StatusPill tone="blue">Видео оптимизировано</StatusPill> : null}
                         </div>
@@ -4808,6 +4822,7 @@ export default function AdsAutomation() {
                     <HistoryFact label="Тип креатива" value={creativeTypeLabel} />
                     <HistoryFact label="Бюджет в день" value={budgetPerDay} />
                     <HistoryFact label="Запустил" value={item.launchedBy || "—"} />
+                    {historyContentApproval ? <HistoryFact label="Подход к рекламе" value={historyContentLabel} /> : null}
                     {historyOptimized ? (
                       <HistoryFact
                         label="Оптимизация видео"
@@ -4866,6 +4881,14 @@ export default function AdsAutomation() {
                       </p>
                       {historyVideoWarnings.length ? <p>Предупреждения: {historyVideoWarnings.join(" ")}</p> : null}
                       <p>Следующий шаг: {nextAction}</p>
+                      {historyContentApproval ? (
+                        <div className="mt-2 grid gap-1 border-t pt-2" style={{ borderColor: "var(--negis-border)" }}>
+                          <p className="font-black uppercase tracking-[0.1em]" style={{ color: "var(--negis-muted)" }}>Контент-студия</p>
+                          <p>Рекламный подход: {historyContentLabel}</p>
+                          <p>Версия текста: {historyContentApproval.version}</p>
+                          <p>{historyContentStatus}.</p>
+                        </div>
+                      ) : null}
                       {isAdminMode && historyInsightsAccess === "confirmed" && !historyInsightsMessage ? (
                         <MetaInsightsHistoryDetails summary={historyInsightsSummary} />
                       ) : null}
@@ -4885,6 +4908,9 @@ export default function AdsAutomation() {
                           <p>thumbnail source: {historyThumbnailSource || "-"}</p>
                           <p>файл: {typeof payload.fileName === "string" ? payload.fileName : "-"}</p>
                           <p>MIME: {typeof payload.mimeType === "string" ? payload.mimeType : "-"}</p>
+                          <p>content package: {historyContentApproval?.packageId || "-"}</p>
+                          <p>content variant: {historyContentApproval?.variantId || "-"}</p>
+                          <p>approved copy unchanged: {historyContentApproval?.copyMatchesLaunch == null ? "-" : String(historyContentApproval.copyMatchesLaunch)}</p>
                         </div>
                       ) : null}
                     </div>

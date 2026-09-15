@@ -112,6 +112,10 @@ A generated package (one row per package) contains:
   content row and launch payload, without a schema change. Ads Automation marks
   whether the launch copy still matches it; edited copy is never silently called
   the approved version and must pass the normal compliance check again.
+- Advertising Hub and launch history surface the human-friendly approach label
+  and whether the approved copy changed before launch. Client mode does not show
+  the approved text snapshot or technical IDs; those IDs remain collapsed in
+  admin diagnostics only. This is provenance, not a performance ranking.
 - Generated photo and video handoffs preserve the creative asset id, stored
   filename and public media metadata. Ads Automation restores both media types.
   When a generated video has no cover yet, the browser captures a frame from

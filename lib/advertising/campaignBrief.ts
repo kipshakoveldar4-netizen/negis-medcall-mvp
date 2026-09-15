@@ -44,6 +44,7 @@ export type AdvertisingContentApproval = {
   version: typeof ADVERTISING_CONTENT_APPROVAL_VERSION;
   approvedAt: string;
   approvedCopy: AdvertisingApprovedCopy;
+  copyMatchesLaunch?: boolean;
 };
 
 export type AdvertisingCampaignPrefill = {
@@ -206,6 +207,9 @@ export function normalizeAdvertisingContentApproval(
     version: ADVERTISING_CONTENT_APPROVAL_VERSION,
     approvedAt,
     approvedCopy: { primaryText, headline, description },
+    ...(typeof record.copyMatchesLaunch === "boolean"
+      ? { copyMatchesLaunch: record.copyMatchesLaunch }
+      : {}),
   };
 }
 

@@ -29,6 +29,8 @@ import {
   ADVERTISING_CAMPAIGN_PREFILL_KEY,
   ADVERTISING_CONTENT_STUDIO_PREFILL_KEY,
   createAdvertisingCampaignPrefill,
+  normalizeAdvertisingContentApproval,
+  type AdvertisingContentApproval,
 } from "../../../../lib/advertising/campaignBrief";
 import { buildAdvertisingAssistantBrief } from "../../../../lib/advertising/assistant";
 import { KZ_META_CITY_OPTIONS } from "../../../../lib/meta/cities";
@@ -48,6 +50,7 @@ type AdvertisingLaunch = {
   currency: string;
   lastError: string;
   createdAt: string;
+  contentApproval?: AdvertisingContentApproval;
 };
 
 type LaunchesResponse = {
@@ -350,6 +353,9 @@ function aggregateAdvertisingInsights(summaries: MetaInsightsHistorySummary[]): 
 
 function normalizeLaunch(value: unknown): AdvertisingLaunch {
   const row = asRecord(value);
+  const contentApproval = normalizeAdvertisingContentApproval(
+    asRecord(row.payload).contentApproval,
+  );
   return {
     id: readString(row.id),
     campaignName: readString(row.campaignName ?? row.campaign_name) || "Рекламная кампания",
@@ -360,6 +366,7 @@ function normalizeLaunch(value: unknown): AdvertisingLaunch {
     currency: readString(row.currency) || "USD",
     lastError: readString(row.lastError ?? row.last_error),
     createdAt: readString(row.createdAt ?? row.created_at),
+    ...(contentApproval ? { contentApproval } : {}),
   };
 }
 
@@ -1181,6 +1188,12 @@ export default function AdvertisingHub() {
                       <p className="mt-1 text-xs font-medium" style={{ color: "var(--negis-muted)" }}>
                         {formatLaunchDate(launch.createdAt)} · {formatPlannedBudget(launch.budgetDailyMinor, launch.currency)}
                       </p>
+                      {launch.contentApproval ? (
+                        <p className="mt-1 break-words text-xs font-semibold" style={{ color: launch.contentApproval.copyMatchesLaunch === false ? "var(--negis-warning)" : "var(--negis-primary)" }}>
+                          Контент: {launch.contentApproval.variantLabel || launch.contentApproval.variantAngle || "выбранный вариант"}
+                          {launch.contentApproval.copyMatchesLaunch === false ? " · текст изменён перед запуском" : " · согласованная версия"}
+                        </p>
+                      ) : null}
                     </div>
                     <span className="w-fit shrink-0 rounded-lg px-2.5 py-1 text-xs font-semibold" style={tone}>{launchLabels[state]}</span>
                   </article>

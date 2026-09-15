@@ -31,6 +31,7 @@ type ContentApproval = {
     headline: string;
     description: string;
   };
+  copyMatchesLaunch?: boolean;
 };
 type Prefill = {
   schemaVersion: 1;
@@ -285,6 +286,14 @@ test("preserves an approved content variant and detects later copy changes", () 
     campaignBrief.normalizeAdvertisingContentApproval({ ...approval, version: 2 }),
     undefined,
     "unknown approval versions must fail closed",
+  );
+  assert.equal(
+    campaignBrief.normalizeAdvertisingContentApproval({
+      ...approval,
+      copyMatchesLaunch: false,
+    })?.copyMatchesLaunch,
+    false,
+    "launch history must preserve an explicit copy mismatch",
   );
 });
 

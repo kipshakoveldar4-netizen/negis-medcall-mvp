@@ -1620,6 +1620,9 @@ async function checkContentStudioPhaseOne() {
     "setContentApproval(data.contentApproval || null)",
     "copyMatchesLaunch",
     "Вариант из Контент-студии",
+    "historyContentApproval",
+    "Подход к рекламе",
+    "В запуск ушёл согласованный текст",
     'setActiveConfirmation("");',
   ]) {
     if (!adsAutomation.includes(marker)) {
@@ -3588,6 +3591,9 @@ async function checkAdvertisingHubSource() {
     'href: "/ads-automation"',
     'href: "/content-studio"',
     'href: "/ads-automation/history"',
+    "normalizeAdvertisingContentApproval",
+    "Контент:",
+    "текст изменён перед запуском",
   ]) {
     if (!hub.includes(marker)) throw new Error(`AdvertisingHub is missing ${marker}`);
   }
