@@ -52,7 +52,16 @@ type LeadOption = {
   clientId?: string;
   metaCampaignLaunchId?: string;
 };
-type AppointmentOption = { id: string; client: string; service: string; startsAt?: string; clientId?: string };
+type AppointmentOption = {
+  id: string;
+  client: string;
+  service: string;
+  startsAt?: string;
+  clientId?: string;
+  serviceId?: string;
+  /** Agreed appointment price in KZT minor units; null means it was not set. */
+  priceMinor: number | null;
+};
 type CampaignOption = { id: string; name: string; label: string };
 
 /** Строка справочника услуг, в объёме, который нужен карточке продажи. */
@@ -282,12 +291,15 @@ function appointmentOption(value: unknown): AppointmentOption | null {
   const record = asRecord(value);
   const id = str(record.id);
   if (!id) return null;
+  const rawPrice = record.priceMinor ?? record.price_minor;
   return {
     id,
     client: str(record.client) || str(record.clientName) || str(record.client_name) || "Клиент",
     service: str(record.service) || "Услуга не указана",
     startsAt: str(record.startsAt) || str(record.starts_at) || str(record.time) || undefined,
     clientId: str(record.clientId) || str(record.client_id) || undefined,
+    serviceId: str(record.serviceId) || str(record.service_id) || undefined,
+    priceMinor: rawPrice === null || rawPrice === undefined || rawPrice === "" ? null : Math.max(0, Math.round(numberValue(rawPrice))),
   };
 }
 
@@ -617,6 +629,25 @@ export default function SalesPage() {
       // Existing manual choices always win; lead data fills only blank links.
       clientId: current.clientId || lead?.clientId || "",
       metaCampaignLaunchId: current.metaCampaignLaunchId || lead?.metaCampaignLaunchId || "",
+    }));
+  }
+
+  function handleAppointmentSelection(appointmentId: string) {
+    const appointment = references.appointments.find((item) => item.id === appointmentId);
+    if (!appointment) {
+      setForm((current) => ({ ...current, appointmentId }));
+      return;
+    }
+
+    setForm((current) => ({
+      ...current,
+      appointmentId,
+      clientId: appointment.clientId || current.clientId,
+      serviceId: appointment.serviceId || "",
+      title: appointment.service || current.title,
+      // The agreed price snapshot wins. If it is absent, clearing the field
+      // lets the existing service-price effect fill the current catalog price.
+      amountTenge: appointment.priceMinor === null ? "" : amountMinorToTengeInput(appointment.priceMinor),
     }));
   }
 
@@ -1016,7 +1047,7 @@ export default function SalesPage() {
               <div className="grid gap-3 sm:grid-cols-2">
                 <label className="block">
                   <span className="mb-1 block text-xs font-black uppercase tracking-[0.05em]" style={{ color: "var(--negis-muted)" }}>Запись</span>
-                  <select data-testid="deal-appointment-select" style={inputStyle} value={form.appointmentId} onChange={(event) => setForm((current) => ({ ...current, appointmentId: event.target.value }))}>
+                  <select data-testid="deal-appointment-select" style={inputStyle} value={form.appointmentId} onChange={(event) => handleAppointmentSelection(event.target.value)}>
                     <option value="">Не выбрана</option>
                     {/* Выбран клиент — список сужается до его записей: селект со
                         всеми записями клиники заставлял искать нужную глазами.

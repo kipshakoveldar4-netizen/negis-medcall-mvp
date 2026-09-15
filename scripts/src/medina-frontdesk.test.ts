@@ -65,3 +65,12 @@ test("FD6 выбранный клиент сужает список записе
   );
   assert.ok(/!appointment\.clientId \|\|/.test(sales), "записи без связи с карточкой остаются видны");
 });
+
+test("FD7 выбор записи переносит в продажу клиента, услугу и согласованную цену", () => {
+  const handler = sales.slice(sales.indexOf("function handleAppointmentSelection"), sales.indexOf("function submitForm"));
+  assert.ok(handler.includes("clientId: appointment.clientId"), "продажа получает клиента записи");
+  assert.ok(handler.includes("serviceId: appointment.serviceId"), "продажа получает услугу справочника");
+  assert.ok(handler.includes("appointment.priceMinor === null"), "отсутствие цены не превращается в ноль");
+  assert.ok(handler.includes("amountMinorToTengeInput(appointment.priceMinor)"), "согласованная цена записи становится суммой продажи");
+  assert.ok(/onChange=\{\(event\) => handleAppointmentSelection\(event\.target\.value\)\}/.test(sales));
+});

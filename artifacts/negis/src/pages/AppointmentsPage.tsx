@@ -92,6 +92,14 @@ type CatalogService = {
   isActive: boolean;
 };
 
+/** Existing patient shown by the name typeahead in the booking form. */
+type ClientSearchResult = {
+  id: string;
+  name: string;
+  phone: string;
+  whatsapp: string;
+};
+
 /**
  * Справочник услуг для формы записи.
  *
@@ -512,6 +520,23 @@ function appointmentFromApi(value: unknown): Appointment {
   };
 }
 
+function clientSearchResultFromApi(value: unknown): ClientSearchResult | null {
+  const record = asRecord(value);
+  const id = readString(record.id);
+  const name = readString(record.name) || readString(record.full_name) || readString(record.fullName);
+  if (!id || !name) return null;
+  return {
+    id,
+    name,
+    phone: readString(record.phone),
+    whatsapp: readString(record.whatsapp),
+  };
+}
+
+function isUuidText(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
 function appointmentToApi(appointment: Appointment): Record<string, unknown> {
   return {
     id: appointment.id,
@@ -876,6 +901,9 @@ function AppointmentCard({
         <Detail label="Услуга">{appointment.service}</Detail>
         <Detail label={capitalize(terms.specialist)}>{appointment.doctor}</Detail>
         <Detail label="Длительность">{appointment.durationMinutes} мин</Detail>
+        {appointment.priceMinor !== null ? (
+          <Detail label="Цена"><span className="tabular-nums">{Math.round(appointment.priceMinor / 100).toLocaleString("ru-RU")} ₸</span></Detail>
+        ) : null}
         <Detail label="Источник">{appointment.source || "Ресепшн"}</Detail>
       </div>
 
@@ -938,6 +966,13 @@ export function AppointmentsPage() {
   const [modalOpen, setModalOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState<AppointmentForm>(() => defaultForm(todayKeyAtLoad));
+  const [clientMatches, setClientMatches] = useState<ClientSearchResult[]>([]);
+  const [clientSearchLoading, setClientSearchLoading] = useState(false);
+  const [clientSearchAttempted, setClientSearchAttempted] = useState(false);
+  const [clientSearchFailed, setClientSearchFailed] = useState(false);
+  const [remoteVisitHistory, setRemoteVisitHistory] = useState<Appointment[]>([]);
+  const [visitHistoryLoading, setVisitHistoryLoading] = useState(false);
+  const [visitHistoryFailed, setVisitHistoryFailed] = useState(false);
 
 
   // Ref заявки живёт только в той сессии модалки, которую открыл префилл:
@@ -1102,10 +1137,11 @@ export function AppointmentsPage() {
       // выбранного: эффект гасит собственные догоняющие ответы.
       if (cancelled) return;
       if (!result.ok) {
-        // Отказ и «услуг нет» на экране неразличимы, поэтому сужения не будет:
-        // остаётся весь прайс, а причина говорится вслух.
+        // Keep the last known personal subset. Showing the entire clinic price
+        // after a failed refresh would put colleagues' services under the
+        // selected master, which is worse than an incomplete list.
         setDoctorCatalog(null);
-        setServiceScopeNotice("Не удалось загрузить прайс мастера — показан весь прайс клиники");
+        setServiceScopeNotice("Не удалось обновить прайс мастера — показаны только уже загруженные его услуги");
         return;
       }
       // Отметка ставится только на применённом списке: пока сужение не
@@ -1145,7 +1181,12 @@ export function AppointmentsPage() {
     if (!doctorCatalog || !doctorCatalog.canPrune) return;
     if (doctorCatalog.doctorId !== form.doctorId) return;
     if (!form.serviceId) return;
-    if (doctorCatalog.services.some((service) => service.id === form.serviceId)) {
+    // The scoped endpoint also returns clinic-wide rows for older consumers.
+    // After an operator changes the master, only a row explicitly owned by the
+    // newly selected master may keep the appointment link.
+    if (doctorCatalog.services.some(
+      (service) => service.id === form.serviceId && service.doctorId === form.doctorId,
+    )) {
       setServiceScopeNotice("");
       return;
     }
@@ -1183,6 +1224,115 @@ export function AppointmentsPage() {
     fromApi: appointmentFromApi,
   });
 
+  /**
+   * Search the real patient directory while the receptionist types a name.
+   * A unique exact match is linked automatically; ambiguous names stay as
+   * explicit choices so one patient is never attached to another by accident.
+   */
+  useEffect(() => {
+    const query = form.client.replace(/\s+/g, " ").trim();
+    if (!modalOpen || !isRealWorkspace() || userRole === "doctor" || form.clientId || query.length < 2) {
+      setClientMatches([]);
+      setClientSearchLoading(false);
+      setClientSearchAttempted(false);
+      setClientSearchFailed(false);
+      return;
+    }
+
+    let cancelled = false;
+    setClientSearchLoading(true);
+    setClientSearchAttempted(false);
+    setClientSearchFailed(false);
+
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        try {
+          const workspaceId = readCurrentWorkspaceId();
+          const response = await crmFetch(
+            `/api/crm/clients?workspaceId=${encodeURIComponent(workspaceId)}&search=${encodeURIComponent(query)}`,
+          );
+          const body = await safeJson(response);
+          if (!response.ok || body?.success !== true || body.mode !== "supabase") throw new Error("client search failed");
+          const raw = body.data?.clients ?? body.data?.items;
+          const matches = (Array.isArray(raw) ? raw : [])
+            .map(clientSearchResultFromApi)
+            .filter((item): item is ClientSearchResult => item !== null);
+          if (cancelled) return;
+
+          setClientMatches(matches);
+          setClientSearchAttempted(true);
+          const exact = matches.filter(
+            (client) => client.name.replace(/\s+/g, " ").trim().toLocaleLowerCase("ru") === query.toLocaleLowerCase("ru"),
+          );
+          if (exact.length === 1) {
+            const client = exact[0];
+            setForm((current) => {
+              if (current.clientId || current.client.replace(/\s+/g, " ").trim() !== query) return current;
+              return {
+                ...current,
+                clientId: client.id,
+                client: client.name,
+                phone: client.phone || current.phone,
+                whatsapp: client.whatsapp || client.phone || current.whatsapp,
+              };
+            });
+          }
+        } catch {
+          if (!cancelled) {
+            setClientMatches([]);
+            setClientSearchAttempted(true);
+            setClientSearchFailed(true);
+          }
+        } finally {
+          if (!cancelled) setClientSearchLoading(false);
+        }
+      })();
+    }, 300);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [form.client, form.clientId, modalOpen, userRole]);
+
+  /** Full history comes from the database once a stable patient id is known. */
+  useEffect(() => {
+    if (!modalOpen || !isRealWorkspace() || !isUuidText(form.clientId)) {
+      setRemoteVisitHistory([]);
+      setVisitHistoryLoading(false);
+      setVisitHistoryFailed(false);
+      return;
+    }
+
+    let cancelled = false;
+    setVisitHistoryLoading(true);
+    setVisitHistoryFailed(false);
+    void (async () => {
+      try {
+        const workspaceId = readCurrentWorkspaceId();
+        const response = await crmFetch(
+          `/api/crm/appointments?workspaceId=${encodeURIComponent(workspaceId)}&clientId=${encodeURIComponent(form.clientId)}`,
+        );
+        const body = await safeJson(response);
+        if (!response.ok || body?.success !== true || body.mode !== "supabase") throw new Error("visit history failed");
+        const raw = body.data?.appointments ?? body.data?.items;
+        const history = (Array.isArray(raw) ? raw : []).map(appointmentFromApi);
+        if (!cancelled) setRemoteVisitHistory(history);
+      } catch {
+        if (!cancelled) {
+          setRemoteVisitHistory([]);
+          setVisitHistoryFailed(true);
+        }
+      } finally {
+        if (!cancelled) setVisitHistoryLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [form.clientId, modalOpen]);
+
   // Справочник плюс то, что уже записано. Объединение обязательно: фильтр
   // сравнивает СНИМОК имени на равенство строк, поэтому без исторических
   // написаний старые записи перестали бы находиться.
@@ -1204,15 +1354,26 @@ export function AppointmentsPage() {
   );
 
   /**
-   * Прайс, из которого выбирает форма: у выбранного мастера — его услуги плюс
-   * общие услуги клиники, пока мастер не выбран — весь прайс, как и раньше.
-   * Пока сужение едет с сервера, показывается прежний полный список: пустой
-   * на эти доли секунды читался бы как «услуг нет».
+   * Прайс формы принадлежит выбранному мастеру. Backend also returns common
+   * clinic services for compatibility, but the booking form deliberately does
+   * not assign an unowned row to a person. A service outside the personal list
+   * can still be entered manually together with its agreed price.
    */
-  const formCatalog = useMemo(
-    () => (doctorCatalog && doctorCatalog.doctorId === form.doctorId ? doctorCatalog.services : catalog),
-    [catalog, doctorCatalog, form.doctorId],
-  );
+  const formCatalog = useMemo(() => {
+    const ownDoctorId = userRole === "doctor"
+      ? catalog.find((service) => service.doctorId)?.doctorId || ""
+      : "";
+    const selectedDoctorId = form.doctorId || ownDoctorId;
+
+    // A clinic with a real directory chooses the master first. Until then no
+    // colleague's price appears under the service field.
+    if (!selectedDoctorId && activeDoctors.length > 0) return [];
+
+    const source = doctorCatalog && doctorCatalog.doctorId === selectedDoctorId
+      ? doctorCatalog.services
+      : catalog;
+    return selectedDoctorId ? source.filter((service) => service.doctorId === selectedDoctorId) : source;
+  }, [activeDoctors.length, catalog, doctorCatalog, form.doctorId, userRole]);
 
   /** Активные услуги в порядке справочника — то, из чего выбирают в форме. */
   const activeCatalog = useMemo(
@@ -1220,10 +1381,21 @@ export function AppointmentsPage() {
     [formCatalog],
   );
 
+  // В рабочей клинике прайс начинается с человека, который оказывает услугу.
+  // Свободное имя мастера остаётся допустимым откатом: после того как имя
+  // вписано, услугу и цену можно указать вручную.
+  const mustChooseDoctorBeforeService = userRole !== "doctor"
+    && activeDoctors.length > 0
+    && !form.doctorId
+    && !form.doctor.trim();
+
   // Сужение до нуля тоже надо сказать словами: поле «Услуга» само собой
   // превратилось бы в текстовый ввод, и оператор решил бы, что справочник
   // сломался.
   const serviceScopeText = serviceScopeNotice
+    || (mustChooseDoctorBeforeService
+      ? `Сначала выберите ${terms.specialistGenitive} — появятся его услуги с ценами`
+      : "")
     || (doctorCatalog && doctorCatalog.doctorId === form.doctorId && activeCatalog.length === 0
       ? `В прайсе выбранного ${terms.specialistGenitive} нет услуг — впишите название вручную`
       : "");
@@ -1534,16 +1706,18 @@ export function AppointmentsPage() {
    * какому мастеру». То же самое — «история посещений» в запись.кз.
    *
    * Ищется по связанной карточке, затем по телефону (последние десять цифр),
-   * затем по точному имени. Источник — уже загруженный список записей: у
-   * администратора это весь салон, у мастера сервер его сузил до собственной
-   * работы — значит и архив мастера честно показывает только его визиты.
+   * затем по точному имени. Для связанной карточки сервер отдаёт отдельную
+   * выборку по client_id: история не обрезается общим списком календаря. У
+   * мастера эта выборка всё равно сужена сервером до собственной работы.
    */
   const visitHistory = useMemo(() => {
     const digitsOf = (value: string) => (value || "").replace(/\D/g, "").slice(-10);
     const phoneKey = digitsOf(form.phone) || digitsOf(form.whatsapp);
     const nameKey = form.client.trim().toLowerCase();
     if (!form.clientId && phoneKey.length < 10 && nameKey.length < 2) return [];
-    return items
+    const unique = new Map<string, Appointment>();
+    for (const appointment of [...remoteVisitHistory, ...items]) unique.set(appointment.id, appointment);
+    return [...unique.values()]
       .filter((appointment) => {
         if (editingId && appointment.id === editingId) return false;
         if (form.clientId && appointment.clientId) return appointment.clientId === form.clientId;
@@ -1553,7 +1727,7 @@ export function AppointmentsPage() {
       })
       .sort((left, right) => (right.startsAt || "").localeCompare(left.startsAt || ""))
       .slice(0, 8);
-  }, [items, form.clientId, form.phone, form.whatsapp, form.client, editingId]);
+  }, [items, remoteVisitHistory, form.clientId, form.phone, form.whatsapp, form.client, editingId]);
 
   const openCreate = (date = selectedDate, time = "09:00") => {
     setEditingId(null);
@@ -1569,6 +1743,9 @@ export function AppointmentsPage() {
     });
     setServiceSearch("");
     setDoctorSearch("");
+    setClientMatches([]);
+    setClientSearchAttempted(false);
+    setRemoteVisitHistory([]);
     setModalOpen(true);
   };
 
@@ -1581,6 +1758,9 @@ export function AppointmentsPage() {
     setConflictMessage("");
     setForm(formFromAppointment(appointment));
     setDoctorSearch("");
+    setClientMatches([]);
+    setClientSearchAttempted(false);
+    setRemoteVisitHistory([]);
     setServiceSearch("");
     setModalOpen(true);
   };
@@ -1673,8 +1853,8 @@ export function AppointmentsPage() {
    */
   const createAppointment = async (appointment: Appointment, allowConflict: boolean, allowOutsideSchedule = false) => {
     if (!isRealWorkspace()) {
-      addItem(appointment);
-      return;
+      void addItem(appointment);
+      return { clientCreated: false };
     }
 
     const response = await crmFetch(`/api/crm/appointments?workspaceId=${encodeURIComponent(readCurrentWorkspaceId())}`, {
@@ -1706,6 +1886,7 @@ export function AppointmentsPage() {
     const saved = body.data?.item;
     setItems((current) => [saved ? appointmentFromApi(saved) : appointment, ...current]);
     warnAboutUnsaved(unsavedFromBody(body));
+    return { clientCreated: body.data?.clientCreated === true };
   };
 
   /**
@@ -1841,8 +2022,8 @@ export function AppointmentsPage() {
       }
     } else {
       try {
-        await createAppointment(appointment, allowConflict, allowOutsideSchedule);
-        toast.success("Запись создана");
+        const result = await createAppointment(appointment, allowConflict, allowOutsideSchedule);
+        toast.success(result.clientCreated ? "Запись создана, клиент добавлен в базу" : "Запись создана");
         if (prefillLeadRef.current) {
           const bookedLeadId = prefillLeadRef.current;
           prefillLeadRef.current = "";
@@ -2358,11 +2539,61 @@ export function AppointmentsPage() {
                     иначе сохранила бы визит в карточку Лауры. Ложная связь в
                     медицинской истории хуже потерянной; сигнал оператору —
                     исчезающая строка «Будет привязана…». */}
-                <TextField label="Клиент/имя" value={form.client} onChange={(client) => setForm((current) => ({ ...current, client, clientId: "" }))} placeholder="Имя клиента" />
+                <TextField
+                  label="Клиент/имя"
+                  value={form.client}
+                  onChange={(client) => setForm((current) => ({
+                    ...current, client, clientId: "",
+                    // Once a linked patient's name is replaced, their contact
+                    // must not silently identify the newly typed person.
+                    phone: current.clientId ? "" : current.phone,
+                    whatsapp: current.clientId ? "" : current.whatsapp,
+                  }))}
+                  placeholder="Начните вводить имя"
+                />
                 {form.clientId ? (
                   <p className="mt-1 text-[11px] font-semibold" style={{ color: "var(--negis-primary)" }} data-testid="appointment-client-linked">
-                    Будет привязана к карточке клиента
+                    Клиент найден. История визитов загружается по его карточке.
                   </p>
+                ) : null}
+                {!form.clientId && userRole !== "doctor" && form.client.trim().length >= 2 ? (
+                  <div className="mt-2" data-testid="appointment-client-search-results">
+                    {clientSearchLoading ? (
+                      <p className="text-xs font-semibold" style={{ color: "var(--negis-muted)" }}>Ищем клиента…</p>
+                    ) : clientSearchFailed ? (
+                      <p className="text-xs font-semibold text-amber-700">Не удалось проверить базу клиентов. Повторите поиск.</p>
+                    ) : clientMatches.length > 0 ? (
+                      <div className="space-y-1">
+                        {clientMatches.map((client) => (
+                          <button
+                            key={client.id}
+                            type="button"
+                            className="block w-full rounded-xl px-3 py-2 text-left text-sm font-black"
+                            style={{ background: "var(--negis-border)", color: "var(--negis-text)" }}
+                            onClick={() => {
+                              setForm((current) => ({
+                                ...current,
+                                clientId: client.id,
+                                client: client.name,
+                                phone: client.phone || current.phone,
+                                whatsapp: client.whatsapp || client.phone || current.whatsapp,
+                              }));
+                              setClientMatches([]);
+                            }}
+                          >
+                            {client.name}
+                            {client.phone ? (
+                              <span className="block text-xs font-semibold" style={{ color: "var(--negis-muted)" }}>{formatPhone(client.phone)}</span>
+                            ) : null}
+                          </button>
+                        ))}
+                      </div>
+                    ) : clientSearchAttempted ? (
+                      <p className="text-xs font-semibold" style={{ color: "var(--negis-muted)" }}>
+                        Новый клиент будет добавлен в базу после сохранения записи.
+                      </p>
+                    ) : null}
+                  </div>
                 ) : null}
               </div>
               {/* Мастеру поле не показывается: сервер контакты срезает, и
@@ -2434,7 +2665,14 @@ export function AppointmentsPage() {
                     value={form.doctorId || OTHER_SERVICE_OPTION}
                     onChange={(value) => {
                       if (value === OTHER_SERVICE_OPTION) {
-                        setForm((current) => ({ ...current, doctorId: "" }));
+                        setForm((current) => ({
+                          ...current,
+                          doctorId: "",
+                          doctor: "",
+                          serviceId: "",
+                          service: "",
+                          priceTenge: "",
+                        }));
                         return;
                       }
                       const doctor = activeDoctors.find((item) => item.id === value);
@@ -2484,7 +2722,20 @@ export function AppointmentsPage() {
                 строку каталога. Пока каталог пуст — а до применения миграции
                 032 он пуст всегда — поле выглядит ровно как раньше.
               */}
-              {activeCatalog.length > 0 ? (
+              {mustChooseDoctorBeforeService ? (
+                <div data-testid="appointment-service-waiting-for-doctor">
+                  <label className="block">
+                    <span className="mb-2 block text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">Услуга</span>
+                    <input
+                      className="neu-input w-full cursor-not-allowed opacity-70"
+                      type="text"
+                      disabled
+                      placeholder={`Сначала выберите ${terms.specialistGenitive}`}
+                    />
+                  </label>
+                  {serviceScopeHint}
+                </div>
+              ) : activeCatalog.length > 0 ? (
                 <div>
                   <label className="mb-2 block">
                     <span className="mb-2 block text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">Поиск услуги</span>
@@ -2736,7 +2987,11 @@ export function AppointmentsPage() {
                 {statusOptions.map((status) => <option key={status} value={status}>{getAppointmentStatusLabel(status)}</option>)}
               </SelectField>
               <TextField label="Источник" value={form.source} onChange={(source) => setForm((current) => ({ ...current, source }))} />
-              {visitHistory.length > 0 ? (
+              {visitHistoryLoading ? (
+                <div className="md:col-span-2 rounded-2xl p-3 text-sm font-semibold" style={{ background: "var(--negis-border)", color: "var(--negis-muted)" }}>
+                  Загружаем историю клиента…
+                </div>
+              ) : visitHistory.length > 0 ? (
                 <div className="md:col-span-2 rounded-2xl p-3" style={{ background: "var(--negis-border)" }}>
                   <p className="text-xs font-black uppercase tracking-[0.12em]" style={{ color: "var(--negis-muted)" }}>
                     Архив клиента · {visitHistory.length === 8 ? "последние 8 визитов" : `${visitHistory.length} ${visitHistory.length === 1 ? "визит" : visitHistory.length < 5 ? "визита" : "визитов"}`}
@@ -2754,6 +3009,12 @@ export function AppointmentsPage() {
                       </p>
                     ))}
                   </div>
+                </div>
+              ) : form.clientId ? (
+                <div className="md:col-span-2 rounded-2xl p-3 text-sm font-semibold" style={{ background: "var(--negis-border)", color: "var(--negis-muted)" }}>
+                  {visitHistoryFailed
+                    ? "Не удалось загрузить прошлые визиты. Запись можно сохранить, а историю проверить позже."
+                    : "Прошлых визитов у этого клиента пока нет."}
                 </div>
               ) : null}
 

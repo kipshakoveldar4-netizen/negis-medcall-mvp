@@ -185,3 +185,35 @@ test("BF13 пустой день мастера называет ближайш�
   assert.ok(page.includes("Ближайшая запись —"), "ссылка на ближайшую существует");
   assert.match(page, /setSelectedDate\(dateKeyFromStartsAt\(nextAppointment\.startsAt\)\)/, "и открывает её день");
 });
+
+test("BF14 имя клиента ищется в базе, а выбранная карточка открывает полную историю", async () => {
+  const page = await read("artifacts", "negis", "src", "pages", "AppointmentsPage.tsx");
+  assert.ok(page.includes("/api/crm/clients?workspaceId="), "форма ищет существующего клиента на сервере");
+  assert.ok(page.includes("&search=${encodeURIComponent(query)}"), "имя передаётся как безопасный query parameter");
+  assert.ok(page.includes("Клиент найден. История визитов загружается по его карточке."));
+  assert.ok(page.includes("&clientId=${encodeURIComponent(form.clientId)}"), "история запрашивается по стабильному client_id");
+  assert.ok(page.includes("Загружаем историю клиента…"));
+  assert.ok(page.includes("Прошлых визитов у этого клиента пока нет."));
+});
+
+test("BF15 новый клиент сохраняется вместе с записью и это сказано оператору", async () => {
+  const page = await read("artifacts", "negis", "src", "pages", "AppointmentsPage.tsx");
+  const server = await read("lib", "crm", "server.ts");
+  assert.ok(server.includes("resolveAppointmentClientForCreate"), "серверный write path создаёт или находит карточку");
+  assert.ok(server.includes("appointmentClientResolution.clientId"), "client_id доезжает в appointment insert");
+  assert.ok(page.includes("Новый клиент будет добавлен в базу после сохранения записи."));
+  assert.ok(page.includes("Запись создана, клиент добавлен в базу"));
+});
+
+test("BF16 сначала выбирают мастера, затем видят только его прайс или ручную услугу", async () => {
+  const page = await read("artifacts", "negis", "src", "pages", "AppointmentsPage.tsx");
+  const catalogStart = page.indexOf("const formCatalog");
+  const catalog = page.slice(catalogStart, page.indexOf("const slots", catalogStart));
+  assert.ok(catalog.includes("service.doctorId === selectedDoctorId"), "чужие и общие услуги не попадают в прайс выбранного мастера");
+  assert.ok(page.includes("service.id === form.serviceId && service.doctorId === form.doctorId"), "при смене мастера старая общая или чужая услуга снимается");
+  assert.ok(catalog.includes("mustChooseDoctorBeforeService"), "услуга заблокирована, пока мастер не выбран");
+  assert.ok(page.includes('data-testid="appointment-service-waiting-for-doctor"'));
+  assert.ok(page.includes("Сначала выберите ${terms.specialistGenitive} — появятся его услуги с ценами"));
+  assert.ok(page.includes("Другая услуга…"), "после выбора мастера остаётся ручная услуга");
+  assert.ok(page.includes(">Цена, ₸</span>"), "у ручной услуги остаётся редактируемая цена");
+});

@@ -1,4 +1,5 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
+import { randomUUID } from "node:crypto";
 import { canAssignRole, isStaffRole, isWorkspaceAdminRole } from "../auth/permissions";
 import { extractJsonObject, generateText, resolveTextProvider } from "../ai/text-provider";
 import { normalizeAdvertisingContentApproval } from "../advertising/campaignBrief";
@@ -3020,6 +3021,7 @@ async function readOwnAppointments(
     eq: (column: string, value: unknown) => PromiseLike<{ data: unknown; error: unknown }>;
     ilike: (column: string, value: string) => PromiseLike<{ data: unknown; error: unknown }>;
   },
+  clientId = "",
 ): Promise<{ data: unknown; error: unknown }> {
   const identity = await readOwnWorkIdentity(supabase, workspaceId, staffUserId);
 
@@ -3060,7 +3062,7 @@ async function readOwnAppointments(
     }
   }
 
-  const rows = [...merged.values()];
+  const rows = [...merged.values()].filter((row) => !clientId || readString(row.client_id) === clientId);
   const column = configs.appointments.sortableColumn;
   const ascending = configs.appointments.sortableAscending ?? false;
   rows.sort((left, right) => {
@@ -3878,6 +3880,124 @@ async function findClientsByPhone(
   return found;
 }
 
+/**
+ * Bounded, workspace-scoped patient search for the appointment form.
+ *
+ * The browser used to know only the name typed into the appointment snapshot,
+ * so it could neither select an existing patient nor load their complete visit
+ * history. This remains a narrowing of the authorized clients list: the router
+ * still requires view_clients, and contacts are redacted by the same response
+ * layer as the unfiltered collection.
+ */
+async function findClientsByName(
+  supabase: CrmSupabaseClient,
+  workspaceId: string,
+  rawName: string,
+): Promise<JsonRecord[]> {
+  const name = rawName.replace(/\s+/g, " ").trim();
+  if (name.length < 2) return [];
+
+  const config = configs.clients;
+  const { data, error } = await supabase
+    .from(config.table)
+    .select(config.selectColumns ?? "*")
+    .eq("workspace_id", workspaceId)
+    .ilike("full_name", `%${escapeLikePattern(name)}%`)
+    .order("updated_at", { ascending: false })
+    .limit(CLIENT_NAME_SEARCH_LIMIT);
+
+  if (error) throw new Error(`client search: ${error.message}`);
+  return (Array.isArray(data) ? data : []).map((row) => asRecord(row));
+}
+
+/** Exact-name fallback used only when a specialist cannot see or enter phone. */
+async function findClientsByExactName(
+  supabase: CrmSupabaseClient,
+  workspaceId: string,
+  rawName: string,
+): Promise<JsonRecord[]> {
+  const name = rawName.replace(/\s+/g, " ").trim();
+  if (!name) return [];
+
+  const config = configs.clients;
+  const { data, error } = await supabase
+    .from(config.table)
+    .select(config.selectColumns ?? "*")
+    .eq("workspace_id", workspaceId)
+    .eq("full_name", name)
+    .order("created_at", { ascending: false })
+    .limit(2);
+
+  if (error) throw new Error(`client exact lookup: ${error.message}`);
+  return (Array.isArray(data) ? data : []).map((row) => asRecord(row));
+}
+
+type AppointmentClientResolution = {
+  clientId: string;
+  created: boolean;
+  match: "provided" | "phone" | "name" | "created";
+  createdRow?: JsonRecord;
+};
+
+/**
+ * Every new appointment belongs to a patient card.
+ *
+ * Previously the write path only accepted an already selected clientId. A
+ * manually typed new patient therefore produced a valid appointment with a
+ * permanent name/phone snapshot, but no row in clients. On the next visit the
+ * receptionist could not find that person and the history had no stable key.
+ *
+ * Phone is the strong identity and uses the canonical indexed lookup from
+ * migration 030. A name-only exact match is considered only when no phone is
+ * available (the specialist privacy view); two matching names are deliberately
+ * ambiguous and produce a new card rather than linking the wrong patient.
+ */
+async function resolveAppointmentClientForCreate(
+  supabase: CrmSupabaseClient,
+  workspaceId: string,
+  row: JsonRecord,
+): Promise<AppointmentClientResolution> {
+  const providedId = readString(row.client_id);
+  if (providedId) return { clientId: providedId, created: false, match: "provided" };
+
+  const phoneCandidates = [readString(row.client_phone), readString(row.whatsapp)]
+    .filter(Boolean)
+    .filter((value, index, values) => values.findIndex((candidate) => normalizePhone(candidate) === normalizePhone(value)) === index);
+
+  for (const phone of phoneCandidates) {
+    const matches = await findClientsByPhone(supabase, workspaceId, phone);
+    const matchedId = readString(matches[0]?.id);
+    if (matchedId) return { clientId: matchedId, created: false, match: "phone" };
+  }
+
+  const clientName = readString(row.client_name);
+  if (phoneCandidates.length === 0) {
+    const exactMatches = await findClientsByExactName(supabase, workspaceId, clientName);
+    if (exactMatches.length === 1) {
+      const matchedId = readString(exactMatches[0]?.id);
+      if (matchedId) return { clientId: matchedId, created: false, match: "name" };
+    }
+  }
+
+  const clientId = randomUUID();
+  const createdRow: JsonRecord = {
+    id: clientId,
+    workspace_id: workspaceId,
+    full_name: clientName,
+    phone: readString(row.client_phone) || null,
+    whatsapp: readString(row.whatsapp) || null,
+    source: readString(row.source) || "Запись",
+    status: "new",
+    notes: null,
+    last_visit_at: null,
+    updated_at: new Date().toISOString(),
+  };
+  const { error } = await supabase.from("clients").insert(createdRow);
+  if (error) throw new Error(`appointment client create: ${error.message}`);
+
+  return { clientId, created: true, match: "created", createdRow };
+}
+
 /** Postgres "column does not exist" — the one error the fallback answers to. */
 const UNDEFINED_COLUMN = "42703";
 
@@ -4175,6 +4295,9 @@ const CLIENT_FALLBACK_SCAN_LIMIT = 1000;
  */
 const CLIENT_PHONE_MATCH_LIMIT = 5;
 
+/** Enough choices for a typeahead without turning it into an unbounded export. */
+const CLIENT_NAME_SEARCH_LIMIT = 12;
+
 async function listItems(resource: CrmResource, req: VercelRequest, res: VercelResponse) {
   const config = configs[resource];
   const workspaceId = readWorkspaceId(req, {});
@@ -4200,6 +4323,20 @@ async function listItems(resource: CrmResource, req: VercelRequest, res: VercelR
       const phone = readQueryString(req.query.phone);
       if (phone) {
         const rows = await findClientsByPhone(supabase, workspaceId, phone);
+        const matches = stripDoctorSalaries(
+          redactContactsList(
+            rows.map((row) => config.fromRow(row)),
+            readWorkspaceContext(req)?.role,
+            readWorkspaceContext(req)?.staffUserId,
+          ),
+          readWorkspaceContext(req)?.role,
+        );
+        return sendJson(res, 200, success("supabase", { [config.listKey]: matches, items: matches }));
+      }
+
+      const search = readQueryString(req.query.search);
+      if (search) {
+        const rows = await findClientsByName(supabase, workspaceId, search);
         const matches = stripDoctorSalaries(
           redactContactsList(
             rows.map((row) => config.fromRow(row)),
@@ -4252,6 +4389,21 @@ async function listItems(resource: CrmResource, req: VercelRequest, res: VercelR
         if (!dueBefore) {
           return sendJson(res, 400, errorBody("Validation error", ["dueBefore must be a valid date"]));
         }
+      }
+    }
+
+    // The appointment modal asks for one patient's full visit history after
+    // the patient card is selected. This is a database filter, not a browser
+    // scan, so history remains complete when the clinic grows past the normal
+    // collection response window.
+    let appointmentClientId = "";
+    if (resource === "appointments") {
+      appointmentClientId = readQueryString(req.query.clientId ?? req.query.client_id);
+      if (appointmentClientId) {
+        if (!isUuid(appointmentClientId)) {
+          return sendJson(res, 400, errorBody("Validation error", ["clientId must be a valid id"]));
+        }
+        equalities.push(["client_id", appointmentClientId]);
       }
     }
 
@@ -4331,7 +4483,7 @@ async function listItems(resource: CrmResource, req: VercelRequest, res: VercelR
     const context = readWorkspaceContext(req);
     const ownWorkOnly = resource === "appointments" && seesOnlyOwnWork(context?.role);
     let { data, error } = ownWorkOnly
-      ? await readOwnAppointments(supabase, workspaceId, readString(context?.staffUserId), buildQuery)
+      ? await readOwnAppointments(supabase, workspaceId, readString(context?.staffUserId), buildQuery, appointmentClientId)
       : await query;
 
     // Пока 031 не применена, колонок связи в таблице нет, и фильтр по ним
@@ -4618,6 +4770,7 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
     }
 
     const row = stripContactWrites(config.toRow(body, workspaceId), readWorkspaceContext(req)?.role);
+    let appointmentClientResolution: AppointmentClientResolution | null = null;
     // Автор записи — из проверенного контекста, никогда из тела: иначе правило
     // видимости телефона переписывалось бы самим вызывающим.
     if (resource === "appointments") {
@@ -4684,6 +4837,13 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
           status: readString(row.status),
         });
       }
+
+      // Resolve the patient only after all slot/schedule checks pass. A refused
+      // booking must not leave a surprise client card behind. The appointment
+      // and its patient now share a durable id even when the operator typed a
+      // completely new person instead of selecting an existing card.
+      appointmentClientResolution = await resolveAppointmentClientForCreate(supabase, workspaceId, row);
+      row.client_id = appointmentClientResolution.clientId;
     }
     const runInsert = (candidate: JsonRecord) => (config.upsertConflict
       ? supabase.from(config.table).upsert(candidate, { onConflict: config.upsertConflict }).select(config.selectColumns ?? "*").single()
@@ -4758,6 +4918,18 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
     // без указания таблицы, и строка журнала впереди подменила бы им предмет
     // проверки. А запись на отказанной мутации сломала бы восемь проверок
     // «ни одного запроса к данным», которые и есть доказательство отказа.
+    if (appointmentClientResolution?.created && appointmentClientResolution.createdRow) {
+      await recordCrmChange({
+        supabase,
+        workspaceId,
+        entity: "client",
+        entityId: appointmentClientResolution.clientId,
+        action: "created",
+        changes: diffForJournal("client", {}, appointmentClientResolution.createdRow),
+        ...journalActor(req),
+      });
+    }
+
     const createdEntity = journaledEntityFor(resource);
     if (createdEntity) {
       const stored = asRecord(data);
@@ -4805,6 +4977,13 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
     return sendJson(res, 201, success("supabase", {
       [resource === "content-videos" ? "video" : "item"]: item,
       item,
+      ...(resource === "appointments" && appointmentClientResolution
+        ? {
+            clientLinked: true,
+            clientCreated: appointmentClientResolution.created,
+            clientMatch: appointmentClientResolution.match,
+          }
+        : {}),
       ...(unsaved.length > 0 ? { unsaved: unsavedFieldsFor(unsaved) } : {}),
     }));
   } catch (error) {

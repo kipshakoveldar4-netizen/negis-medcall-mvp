@@ -55,7 +55,15 @@ function spyClient(
       const builder: Record<string, unknown> = {};
       const chain = () => builder;
       const matches = (row: Record<string, unknown>) =>
-        Object.entries(entry.filters).every(([column, value]) => column === "__row" || row[column] === value);
+        Object.entries(entry.filters).every(([column, value]) => {
+          if (column === "__row") return true;
+          if (column.startsWith("__ilike:")) {
+            const field = column.slice("__ilike:".length);
+            const needle = String(value).replace(/^%|%$/g, "").replace(/\\([\\%_*])/g, "$1").toLowerCase();
+            return String(row[field] ?? "").toLowerCase().includes(needle);
+          }
+          return row[column] === value;
+        });
       Object.assign(builder, {
         select: () => chain(),
         insert: (row: unknown) => { entry.op = "insert"; entry.filters.__row = row; return chain(); },
@@ -78,6 +86,7 @@ function spyClient(
           entry.filters[column] = value;
           return chain();
         },
+        ilike(column: string, value: string) { entry.filters[`__ilike:${column}`] = value; return chain(); },
         in(column: string, values: unknown) { entry.filters[column] = values; return chain(); },
         then(resolve: (value: { data: unknown; error: unknown; count?: number }) => void) {
           if (hardFailTables.has(table)) {
@@ -97,7 +106,7 @@ function spyClient(
           // Точечный поиск фильтрует по-настоящему; списочное чтение — нет,
           // как и раньше.
           const tableRows = rows[table] ?? [];
-          const filtered = Object.keys(entry.filters).some((c) => c.endsWith("_normalized"))
+          const filtered = Object.keys(entry.filters).some((c) => c.endsWith("_normalized") || c === "client_id" || c.startsWith("__ilike:"))
             ? tableRows.map((r) => r as Record<string, unknown>).filter(matches)
             : tableRows;
           resolve({ data: filtered, error: null, count: filtered.length });
@@ -269,7 +278,7 @@ test("CLK5 an appointment refuses another clinic's client the same way the lead 
   assert.equal(log.filter((e) => e.op === "insert").length, 0, "nothing is written");
 });
 
-test("CLK6 an appointment saved without a client stays a plain visit", async () => {
+test("CLK6 a new appointment creates and links a patient card", async () => {
   const call = await loadRouter({});
   const { res, log } = await call({
     segments: ["appointments"],
@@ -278,13 +287,40 @@ test("CLK6 an appointment saved without a client stays a plain visit", async () 
   });
 
   assert.equal(res.statusCode, 201, JSON.stringify(res.body));
-  const insert = log.find((e) => e.table === "appointments" && e.op === "insert");
-  assert.ok(insert);
-  assert.ok(
-    !("client_id" in (insert.filters.__row as Record<string, unknown>)),
-    "a body that never mentions clientId must not invent the column",
-  );
-  assert.equal(log.filter((e) => e.table === "clients").length, 0, "and no lookup runs");
+  const clientInsert = log.find((e) => e.table === "clients" && e.op === "insert");
+  const appointmentInsert = log.find((e) => e.table === "appointments" && e.op === "insert");
+  assert.ok(clientInsert, "the typed new patient is persisted in clients");
+  assert.ok(appointmentInsert, "the appointment is still persisted");
+  const clientRow = clientInsert.filters.__row as Record<string, unknown>;
+  const appointmentRow = appointmentInsert.filters.__row as Record<string, unknown>;
+  assert.equal(appointmentRow.client_id, clientRow.id, "the visit and patient card share the generated id");
+  assert.equal(clientRow.full_name, "Лаура Ким");
+  assert.equal(clientRow.phone, "+7 700 801 77 21");
+  assert.equal((res.body.data as Record<string, unknown>).clientCreated, true);
+});
+
+test("CLK6b a returning patient's canonical phone reuses the existing card", async () => {
+  const call = await loadRouter({
+    clients: [{
+      id: CLIENT_ID,
+      workspace_id: WORKSPACE_A,
+      full_name: "Лаура Ким",
+      phone: "+7 700 801 77 21",
+      phone_normalized: "+77008017721",
+      whatsapp_normalized: null,
+    }],
+  });
+  const { res, log } = await call({
+    segments: ["appointments"],
+    method: "POST",
+    body: { client: "Лаура Ким", phone: "8 700 801 77 21" },
+  });
+
+  assert.equal(res.statusCode, 201, JSON.stringify(res.body));
+  assert.equal(log.filter((entry) => entry.table === "clients" && entry.op === "insert").length, 0, "a return visit must not duplicate the patient");
+  const appointmentInsert = log.find((entry) => entry.table === "appointments" && entry.op === "insert");
+  assert.equal((appointmentInsert?.filters.__row as Record<string, unknown>).client_id, CLIENT_ID);
+  assert.equal((res.body.data as Record<string, unknown>).clientCreated, false);
 });
 
 test("CLK7 editing an appointment keeps its client unless the edit says otherwise", async () => {
@@ -494,6 +530,39 @@ test("CLK16 without the phone parameter the list behaves exactly as before", asy
     0,
     "and no lookup runs",
   );
+});
+
+test("CLK16a client name search is bounded and workspace scoped", async () => {
+  const call = await loadRouter({
+    clients: [
+      clientRow({ full_name: "Лаура Ким" }),
+      clientRow({ id: FOREIGN_CLIENT_ID, full_name: "Мария Ким" }),
+    ],
+  });
+  const { res, log } = await call({ segments: ["clients"], query: { search: "лаур" } });
+
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  const found = (res.body.data as { clients: Array<Record<string, unknown>> }).clients;
+  assert.deepEqual(found.map((item) => item.id), [CLIENT_ID]);
+  const lookup = log.find((entry) => entry.table === "clients" && "__ilike:full_name" in entry.filters);
+  assert.ok(lookup, "the name is filtered by PostgREST, not after downloading the clinic");
+  assert.equal(lookup.filters.workspace_id, WORKSPACE_A);
+});
+
+test("CLK16b appointment history is filtered by stable client id", async () => {
+  const call = await loadRouter({
+    appointments: [
+      { id: APPOINTMENT_ID, workspace_id: WORKSPACE_A, client_id: CLIENT_ID, client_name: "Лаура Ким" },
+      { id: "12121212-1212-4212-8212-121212121212", workspace_id: WORKSPACE_A, client_id: FOREIGN_CLIENT_ID, client_name: "Мария Ким" },
+    ],
+  });
+  const { res, log } = await call({ segments: ["appointments"], query: { clientId: CLIENT_ID } });
+
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  const found = (res.body.data as { appointments: Array<Record<string, unknown>> }).appointments;
+  assert.deepEqual(found.map((item) => item.id), [APPOINTMENT_ID]);
+  const lookup = log.find((entry) => entry.table === "appointments" && entry.filters.client_id === CLIENT_ID);
+  assert.ok(lookup, "history is narrowed inside the database query");
 });
 
 test("CLK17 before the migration lands the check still works — it does not silently switch off", async () => {
