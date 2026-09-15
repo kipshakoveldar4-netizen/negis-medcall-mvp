@@ -3519,6 +3519,7 @@ async function checkAdvertisingHubSource() {
   const app = await readFile(path.join(pagesDir, "..", "App.tsx"), "utf8");
   const hub = await readFile(path.join(pagesDir, "AdvertisingHub.tsx"), "utf8");
   const assistant = await readFile(path.join(repoRoot, "lib", "advertising", "assistant.ts"), "utf8");
+  const creativeEvidence = await readFile(path.join(repoRoot, "lib", "advertising", "creativeEvidence.ts"), "utf8");
   const sidebar = await readFile(path.join(pagesDir, "..", "components", "layout", "Sidebar.tsx"), "utf8");
   const mobileNav = await readFile(path.join(pagesDir, "..", "components", "layout", "MobileNav.tsx"), "utf8");
   const topbar = await readFile(path.join(pagesDir, "..", "components", "layout", "Topbar.tsx"), "utf8");
@@ -3594,6 +3595,12 @@ async function checkAdvertisingHubSource() {
     "normalizeAdvertisingContentApproval",
     "Контент:",
     "текст изменён перед запуском",
+    "buildCreativeExperimentGroups",
+    "Тест креативов",
+    "Пока нечего сравнивать",
+    "Negis не выбирает победителя",
+    "Данные за один период",
+    "Лиды Meta не равны заявкам CRM",
   ]) {
     if (!hub.includes(marker)) throw new Error(`AdvertisingHub is missing ${marker}`);
   }
@@ -3624,6 +3631,19 @@ async function checkAdvertisingHubSource() {
   }
   if (/\b(?:CPL|ROI|ROMI)\b/.test(assistant) || assistant.includes('method: "POST"')) {
     throw new Error("Advertising assistant must explain facts without coefficients or write actions");
+  }
+  for (const marker of [
+    "buildCreativeExperimentGroups",
+    "approval.copyMatchesLaunch !== true",
+    "variants.size < 2",
+    'reviewState: samePeriod ? "same_period"',
+    "coveredDateStart",
+    "coveredDateStop",
+  ]) {
+    if (!creativeEvidence.includes(marker)) throw new Error(`Creative evidence helper is missing ${marker}`);
+  }
+  if (/\b(?:fetch|reach|CPL|ROI|ROMI|winner|score)\b/i.test(creativeEvidence) || creativeEvidence.includes("process.env")) {
+    throw new Error("Creative evidence helper must remain pure and must not invent coefficients, reach or winners");
   }
   const authCheck = hub.indexOf("authBody.data?.isAdmin !== true");
   const insightsRequest = hub.indexOf("/api/crm/meta-insights-history?workspaceId=");

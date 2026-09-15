@@ -17,6 +17,15 @@ const briefModulePath = path.join(
 const importedBrief = await import(
   `${pathToFileURL(briefModulePath).href}?test=${Date.now()}`
 );
+const evidenceModulePath = path.join(
+  repoRoot,
+  "lib",
+  "advertising",
+  "creativeEvidence.ts",
+);
+const importedEvidence = await import(
+  `${pathToFileURL(evidenceModulePath).href}?test=${Date.now()}`
+);
 
 type Platform = "meta" | "tiktok";
 type ContentApproval = {
@@ -85,6 +94,19 @@ type BriefModule = {
 
 const campaignBrief = ((importedBrief as { default?: unknown }).default ??
   importedBrief) as BriefModule;
+const creativeEvidence = ((importedEvidence as { default?: unknown }).default ??
+  importedEvidence) as {
+  buildCreativeExperimentGroups(
+    launches: Array<Record<string, unknown>>,
+    summaries: Array<Record<string, unknown>>,
+  ): Array<{
+    packageId: string;
+    reviewState: "same_period" | "partial" | "not_ready";
+    coveredDateStart: string | null;
+    coveredDateStop: string | null;
+    items: Array<{ approval: ContentApproval }>;
+  }>;
+};
 
 test("creates one versioned Meta handoff with nested creative metadata", () => {
   const prefill = campaignBrief.createAdvertisingCampaignPrefill({
@@ -295,6 +317,61 @@ test("preserves an approved content variant and detects later copy changes", () 
     false,
     "launch history must preserve an explicit copy mismatch",
   );
+});
+
+test("groups only unchanged approved variants without inventing a winner", () => {
+  const approval = (variantId: string, variantLabel: string, copyMatchesLaunch = true) => ({
+    packageId: "package-1",
+    variantId,
+    variantLabel,
+    version: 1,
+    approvedAt: "2026-09-15T09:00:00.000Z",
+    approvedCopy: {
+      primaryText: `${variantLabel} body`,
+      headline: `${variantLabel} headline`,
+      description: `${variantLabel} description`,
+    },
+    copyMatchesLaunch,
+  });
+  const launches = [
+    { id: "launch-direct", campaignName: "Direct", createdAt: "2026-09-15T10:00:00.000Z", contentApproval: approval("direct", "Прямой оффер") },
+    { id: "launch-trust", campaignName: "Trust", createdAt: "2026-09-15T11:00:00.000Z", contentApproval: approval("trust", "Доверие") },
+    { id: "launch-edited", campaignName: "Edited", createdAt: "2026-09-15T12:00:00.000Z", contentApproval: approval("expert", "Экспертный", false) },
+  ];
+  const summary = (metaCampaignLaunchId: string) => ({
+    metaCampaignLaunchId,
+    availability: "available",
+    coveredDateStart: "2026-09-10",
+    coveredDateStop: "2026-09-14",
+    latestFetchedAt: "2026-09-15T08:00:00.000Z",
+    rowCount: 5,
+    spendByCurrency: [{ currency: "USD", currencyExponent: 2, spendMinor: "1250" }],
+    impressions: "1000",
+    clicks: "50",
+    inlineLinkClicks: "40",
+    metaLeads: "3",
+  });
+
+  const groups = creativeEvidence.buildCreativeExperimentGroups(
+    launches,
+    [summary("launch-direct"), summary("launch-trust")],
+  );
+
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].reviewState, "same_period");
+  assert.equal(groups[0].coveredDateStart, "2026-09-10");
+  assert.equal(groups[0].items.length, 2, "edited copy must not enter the experiment evidence");
+  assert.deepEqual(
+    groups[0].items.map((item) => item.approval.variantId).sort(),
+    ["direct", "trust"],
+  );
+  assert.doesNotMatch(JSON.stringify(groups), /winner|score|cpl|roi|romi/i);
+
+  const partial = creativeEvidence.buildCreativeExperimentGroups(
+    launches,
+    [summary("launch-direct")],
+  );
+  assert.equal(partial[0].reviewState, "partial");
 });
 
 test("rejects unsupported versions, unknown platforms and empty payloads", () => {

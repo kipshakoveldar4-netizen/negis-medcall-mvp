@@ -33,6 +33,7 @@ import {
   type AdvertisingContentApproval,
 } from "../../../../lib/advertising/campaignBrief";
 import { buildAdvertisingAssistantBrief } from "../../../../lib/advertising/assistant";
+import { buildCreativeExperimentGroups } from "../../../../lib/advertising/creativeEvidence";
 import { KZ_META_CITY_OPTIONS } from "../../../../lib/meta/cities";
 
 type LoadState = "loading" | "ready" | "error";
@@ -738,6 +739,16 @@ export default function AdvertisingHub() {
 
   const insights = useMemo(() => aggregateAdvertisingInsights(insightsSummaries), [insightsSummaries]);
 
+  const creativeExperiments = useMemo(() => buildCreativeExperimentGroups(
+    launches.map((launch) => ({
+      id: launch.id,
+      campaignName: launch.campaignName,
+      createdAt: launch.createdAt,
+      contentApproval: launch.contentApproval,
+    })),
+    insightsSummaries,
+  ), [insightsSummaries, launches]);
+
   const insightsStates = useMemo(() => ({
     available: insightsSummaries.filter((summary) => summary.availability === "available").length,
     empty: insightsSummaries.filter((summary) => summary.availability === "empty").length,
@@ -1048,6 +1059,118 @@ export default function AdvertisingHub() {
             </div>
           )}
         </section>
+
+        {insightsAccess === "ready" ? (
+          <section aria-labelledby="creative-evidence-title">
+            <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+              <div className="min-w-0">
+                <p className="text-xs font-semibold uppercase" style={{ color: "var(--negis-primary)", letterSpacing: 0 }}>Контент и факты</p>
+                <h2 id="creative-evidence-title" className="mt-1 text-lg font-semibold" style={{ color: "var(--negis-text)" }}>Тест креативов</h2>
+                <p className="mt-1 max-w-2xl text-sm leading-relaxed" style={{ color: "var(--negis-muted)" }}>
+                  Факты по согласованным вариантам одного контент-пакета. Negis не выбирает победителя и не меняет кампании автоматически.
+                </p>
+              </div>
+              <Link href="/content-studio">
+                <span className="cursor-pointer text-sm font-semibold" style={{ color: "var(--negis-primary)" }}>Подготовить варианты</span>
+              </Link>
+            </div>
+
+            {creativeExperiments.length === 0 ? (
+              <div className="negis-glass flex flex-col gap-3 p-5 sm:flex-row sm:items-center sm:justify-between">
+                <div className="min-w-0">
+                  <p className="text-sm font-semibold" style={{ color: "var(--negis-text)" }}>Пока нечего сравнивать</p>
+                  <p className="mt-1 text-sm leading-relaxed" style={{ color: "var(--negis-muted)" }}>
+                    Нужны минимум два неизменённых согласованных варианта из одного пакета и синхронизированные данные Meta.
+                  </p>
+                </div>
+                <Link href="/ads-automation/history">
+                  <span className="neu-btn inline-flex min-h-10 shrink-0 cursor-pointer items-center justify-center whitespace-nowrap text-sm">Открыть историю</span>
+                </Link>
+              </div>
+            ) : (
+              <div className="space-y-5">
+                {creativeExperiments.slice(0, 3).map((group) => (
+                  <div key={group.packageId}>
+                    <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                      <h3 className="text-sm font-semibold" style={{ color: "var(--negis-text)" }}>
+                        Один контент-пакет · {group.items.length} варианта
+                      </h3>
+                      <span className="rounded-lg px-2.5 py-1 text-xs font-semibold" style={{ background: group.reviewState === "same_period" ? "var(--negis-primary-soft)" : "#FFFBEB", color: group.reviewState === "same_period" ? "var(--negis-primary)" : "var(--negis-warning)" }}>
+                        {group.reviewState === "same_period" ? "Данные за один период" : group.reviewState === "partial" ? "Данные могут быть неполными" : "Ожидаем данные Meta"}
+                      </span>
+                    </div>
+                    {group.reviewState !== "same_period" ? (
+                      <p className="mb-3 text-xs leading-relaxed" style={{ color: "var(--negis-muted)" }}>
+                        Периоды или доступность данных различаются. Значения нельзя трактовать как честное сравнение вариантов.
+                      </p>
+                    ) : (
+                      <p className="mb-3 text-xs leading-relaxed" style={{ color: "var(--negis-muted)" }}>
+                        Период данных: {formatInsightsDateRange(group.coveredDateStart, group.coveredDateStop)}. Это не оценка эффективности рекламы.
+                      </p>
+                    )}
+                    <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+                      {group.items.map((item) => {
+                        const itemInsights = item.insights;
+                        const hasData = itemInsights?.availability === "available" && itemInsights.rowCount > 0;
+                        const dataMessage = !itemInsights || itemInsights.availability === "not_synced"
+                          ? "Insights ещё не синхронизированы"
+                          : itemInsights.availability === "empty"
+                            ? "Meta не вернула данные за период"
+                            : itemInsights.availability === "running"
+                              ? "Обновление выполняется"
+                              : itemInsights.availability === "failed"
+                                ? "Не удалось обновить Insights"
+                                : itemInsights.availability === "unavailable"
+                                  ? "Insights недоступны для запуска"
+                                  : hasData
+                                    ? "Фактические данные Meta"
+                                    : "Данных Meta пока нет";
+                        return (
+                          <article key={item.metaCampaignLaunchId} className="neu-sm min-w-0 p-4">
+                            <div className="flex items-start gap-3">
+                              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg" style={{ background: "var(--negis-primary-soft)", color: "var(--negis-primary)" }}>
+                                <FlaskConical size={17} />
+                              </span>
+                              <div className="min-w-0">
+                                <p className="break-words text-sm font-semibold" style={{ color: "var(--negis-text)" }}>
+                                  {item.approval.variantLabel || item.approval.variantAngle || "Выбранный вариант"}
+                                </p>
+                                <p className="mt-1 break-words text-xs" style={{ color: "var(--negis-muted)" }}>{item.campaignName}</p>
+                              </div>
+                            </div>
+                            <p className="mt-3 text-xs font-semibold" style={{ color: hasData ? "var(--negis-primary)" : "var(--negis-muted)" }}>{dataMessage}</p>
+                            {hasData && itemInsights ? (
+                              <>
+                                <div className="mt-3 border-t pt-3" style={{ borderColor: "var(--negis-border)" }}>
+                                  <p className="text-xs" style={{ color: "var(--negis-muted)" }}>Фактический расход Meta</p>
+                                  {itemInsights.spendByCurrency.length > 0 ? itemInsights.spendByCurrency.map((spend) => (
+                                    <p key={`${spend.currency}:${spend.currencyExponent}`} className="mt-1 text-sm font-semibold" style={{ color: "var(--negis-text)" }}>
+                                      {formatMinorAmount(readNonNegativeBigInt(spend.spendMinor), spend.currencyExponent, spend.currency)}
+                                    </p>
+                                  )) : <p className="mt-1 text-sm font-semibold" style={{ color: "var(--negis-text)" }}>Нет данных</p>}
+                                </div>
+                                <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 text-xs">
+                                  <div><dt style={{ color: "var(--negis-muted)" }}>Показы</dt><dd className="font-semibold" style={{ color: "var(--negis-text)" }}>{formatCount(readNonNegativeBigInt(itemInsights.impressions))}</dd></div>
+                                  <div><dt style={{ color: "var(--negis-muted)" }}>Клики</dt><dd className="font-semibold" style={{ color: "var(--negis-text)" }}>{formatCount(readNonNegativeBigInt(itemInsights.clicks))}</dd></div>
+                                  <div><dt style={{ color: "var(--negis-muted)" }}>По ссылке</dt><dd className="font-semibold" style={{ color: "var(--negis-text)" }}>{formatCount(readNonNegativeBigInt(itemInsights.inlineLinkClicks))}</dd></div>
+                                  <div><dt style={{ color: "var(--negis-muted)" }}>Лиды Meta</dt><dd className="font-semibold" style={{ color: "var(--negis-text)" }}>{itemInsights.metaLeads === null ? "Нет данных" : formatCount(readNonNegativeBigInt(itemInsights.metaLeads))}</dd></div>
+                                </dl>
+                                <p className="mt-3 text-xs" style={{ color: "var(--negis-muted)" }}>{formatInsightsUpdate(itemInsights.latestFetchedAt)}</p>
+                              </>
+                            ) : null}
+                          </article>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ))}
+                <p className="text-xs leading-relaxed" style={{ color: "var(--negis-muted)" }}>
+                  Расходы по валютам остаются раздельными. Лиды Meta не равны заявкам CRM. Коэффициенты и автоматические выводы не рассчитываются.
+                </p>
+              </div>
+            )}
+          </section>
+        ) : null}
 
         <section aria-labelledby="advertising-crm-results-title">
           <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">

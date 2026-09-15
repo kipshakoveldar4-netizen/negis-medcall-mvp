@@ -116,6 +116,11 @@ A generated package (one row per package) contains:
   and whether the approved copy changed before launch. Client mode does not show
   the approved text snapshot or technical IDs; those IDs remain collapsed in
   admin diagnostics only. This is provenance, not a performance ranking.
+- The owner-facing creative evidence panel groups only unchanged approvals from
+  the same package. It uses the latest launch per variant and labels evidence as
+  same-period only when every variant has daily Meta data for identical dates.
+  Spend currencies remain separate, and no winner, score, CPL, ROI, ROMI or
+  campaign mutation is produced.
 - Generated photo and video handoffs preserve the creative asset id, stored
   filename and public media metadata. Ads Automation restores both media types.
   When a generated video has no cover yet, the browser captures a frame from
