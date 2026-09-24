@@ -16,6 +16,7 @@ const WORKSPACE = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const FOREIGN = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const OPERATOR = "33333333-3333-4333-8333-333333333333";
 const REQUEST = "44444444-4444-4444-8444-444444444444";
+const LEAD = "55555555-5555-4555-8555-555555555555";
 type Row = Record<string, unknown>;
 type Query = {
   table: string;
@@ -59,9 +60,15 @@ test("operator HTTP authorization, DTOs and transitions", async (t) => {
   let log: Query[];
   let rpcCalls: { name: string; args: Row }[];
   let dbFailure = "";
+  let dbFailureTable = "";
+  let rpcData: unknown;
+  let rpcFailure = "";
   function reset() {
     validToken = true;
     dbFailure = "";
+    dbFailureTable = "";
+    rpcFailure = "";
+    rpcData = REQUEST;
     log = [];
     rpcCalls = [];
     process.env.MEDINA_PLATFORM_OWNER_IDS = OTHER;
@@ -92,12 +99,15 @@ test("operator HTTP authorization, DTOs and transitions", async (t) => {
           status: "requested",
           price_per_arrival_minor: 150000,
           currency: "KZT",
+          lead_scope: "assigned",
           clinic_brief: "Описание",
           workspaces: { name: "Клиника" },
           growth_operator_profiles: { display_name: "Оператор" },
           secret: "must-not-return",
         },
       ],
+      leads: [{ id: LEAD, workspace_id: WORKSPACE, full_name: "Тестовая заявка", phone: "fixture-phone", notes: "private-notes" }],
+      growth_operator_lead_assignments: [],
     };
   }
   function client() {
@@ -107,7 +117,7 @@ test("operator HTTP authorization, DTOs and transitions", async (t) => {
         log.push(entry);
         const builder: Row = {};
         const result = (single: boolean) => {
-          if (dbFailure && table !== "staff_users")
+          if (dbFailure && table !== "staff_users" && (!dbFailureTable || dbFailureTable === table))
             return {
               data: null,
               error: { code: dbFailure, message: "sensitive-db-detail" },
@@ -137,6 +147,7 @@ test("operator HTTP authorization, DTOs and transitions", async (t) => {
             return builder;
           },
           limit: () => builder,
+          ilike: () => builder,
           eq: (key: string, value: unknown) => {
             entry.filters[key] = value;
             return builder;
@@ -163,7 +174,7 @@ test("operator HTTP authorization, DTOs and transitions", async (t) => {
       },
       rpc(name: string, args: Row) {
         rpcCalls.push({ name, args });
-        return Promise.resolve({ data: REQUEST, error: null });
+        return Promise.resolve({ data: rpcData, error: rpcFailure ? { code: rpcFailure, message: "private-db-detail" } : null });
       },
     };
   }
@@ -175,6 +186,7 @@ test("operator HTTP authorization, DTOs and transitions", async (t) => {
     body?: Row,
     token: string | null = "test.payload.signature",
     workspace = WORKSPACE,
+    query: Row = {},
   ) {
     const res = {
       statusCode: 0,
@@ -195,7 +207,7 @@ test("operator HTTP authorization, DTOs and transitions", async (t) => {
       {
         method,
         headers: token ? { authorization: `Bearer ${token}` } : {},
-        query: { path: [route], workspaceId: workspace },
+        query: { path: [route], workspaceId: workspace, ...query },
         body,
       },
       res,
@@ -212,6 +224,8 @@ test("operator HTTP authorization, DTOs and transitions", async (t) => {
           "operator-inbox",
           "operator-directory",
           "clinic-operator-requests",
+          "operator-leads",
+          "clinic-operator-leads",
         ]) {
           assert.equal(
             (await call(route, "GET", undefined, null)).statusCode,
@@ -369,6 +383,7 @@ test("operator HTTP authorization, DTOs and transitions", async (t) => {
           clinic_brief: "Описание",
           price_per_arrival_minor: "150000",
           currency: "KZT",
+          lead_scope: "assigned",
           status: "requested",
         });
       },
@@ -391,6 +406,86 @@ test("operator HTTP authorization, DTOs and transitions", async (t) => {
         assert.ok(!log.some((row) => row.op === "insert"));
       },
     );
+    await t.test("clinic chooses either scope, never an unknown or array scope", async () => {
+      for (const scope of ["assigned", "clinic", "all", ["clinic"]]) {
+        reset();
+        const res = await call("clinic-operator-requests", "POST", {
+          operatorId: OPERATOR, clinicBrief: "Описание", pricePerArrivalMinor: "150000", leadScope: scope,
+        });
+        assert.equal(res.statusCode, typeof scope === "string" && scope !== "all" ? 201 : 400);
+        if (res.statusCode === 201) assert.equal(log.find(r => r.op === "insert")?.values?.lead_scope, scope);
+      }
+    });
+    await t.test("operator leads use only verified identity and agreement, never supplied workspace or user", async () => {
+      reset(); tables.staff_users = [];
+      rpcData = [{ id: LEAD, full_name: "Заявка", phone: "fixture-phone", notes: "private-notes", auth_user_id: OTHER }];
+      const res = await call("operator-leads", "GET", { userId: OTHER }, undefined, FOREIGN, { requestId: REQUEST });
+      assert.equal(res.statusCode, 200);
+      assert.deepEqual(rpcCalls, [{ name: "read_growth_operator_leads", args: { p_request_id: REQUEST, p_operator_user_id: USER, p_offset: 0 } }]);
+      assert.equal(log.length, 0);
+      assert.ok(!JSON.stringify(res.body).includes("private-notes"));
+      assert.ok(!JSON.stringify(res.body).includes(OTHER));
+      assert.equal((res.body.data as {items: Row[]}).items[0].name, "Заявка");
+    });
+    await t.test("RPC denial, schema lag, or malformed response never become empty success", async () => {
+      for (const [failure, status] of [["P0001", 403], ["PGRST202", 503], ["500", 503]] as const) {
+        reset(); rpcFailure = failure;
+        const res = await call("operator-leads", "GET", undefined, undefined, WORKSPACE, { requestId: REQUEST });
+        assert.equal(res.statusCode, status);
+        assert.ok(!JSON.stringify(res.body).includes("private-db-detail"));
+      }
+      reset(); rpcData = null;
+      assert.equal((await call("operator-leads", "GET", undefined, undefined, WORKSPACE, { requestId: REQUEST })).statusCode, 503);
+    });
+    await t.test("operator pages are bounded; wrong method, request or offset are refused", async () => {
+      reset(); rpcData = Array.from({length: 21}, (_, i) => ({id: String(i)}));
+      const res = await call("operator-leads", "GET", undefined, undefined, WORKSPACE, { requestId: REQUEST, offset: "20" });
+      assert.equal((res.body.data as {items: Row[]}).items.length, 20);
+      assert.equal((res.body.data as {hasMore: boolean}).hasMore, true);
+      assert.equal(rpcCalls[0].args.p_offset, 20);
+      assert.equal((await call("operator-leads", "PATCH", {})).statusCode, 405);
+      assert.equal((await call("operator-leads")).statusCode, 400);
+      assert.equal((await call("operator-leads", "GET", undefined, undefined, WORKSPACE, { requestId: REQUEST, offset: "-1" })).statusCode, 400);
+    });
+    await t.test("clinic assignment uses verified staff and requires a matching accepted agreement", async () => {
+      reset(); tables.growth_operator_requests[0].status = "accepted";
+      const res = await call("clinic-operator-leads", "PATCH", { leadId: LEAD, assigned: true, staffId: OTHER }, undefined, WORKSPACE, { requestId: REQUEST });
+      assert.equal(res.statusCode, 200);
+      assert.deepEqual(rpcCalls, [{ name: "set_growth_operator_lead_assignment", args: { p_request_id: REQUEST, p_lead_id: LEAD, p_staff_id: "staff", p_assigned: true } }]);
+      assert.equal(log.find(r => r.table === "growth_operator_requests")?.filters.workspace_id, WORKSPACE);
+      for (const state of ["requested", "ended", "declined"]) {
+        reset(); tables.growth_operator_requests[0].status = state;
+        assert.equal((await call("clinic-operator-leads", "PATCH", { leadId: LEAD, assigned: true }, undefined, WORKSPACE, { requestId: REQUEST })).statusCode, 404);
+        assert.equal(rpcCalls.length, 0);
+      }
+    });
+    await t.test("clinic cannot assign foreign requests, and whole-clinic scope has no assignment override", async () => {
+      reset(); tables.growth_operator_requests[0].status = "accepted";
+      tables.growth_operator_requests[0].workspace_id = FOREIGN;
+      assert.equal((await call("clinic-operator-leads", "PATCH", { leadId: LEAD, assigned: true }, undefined, WORKSPACE, { requestId: REQUEST })).statusCode, 404);
+      assert.equal(rpcCalls.length, 0);
+      reset(); tables.growth_operator_requests[0].status = "accepted"; tables.growth_operator_requests[0].lead_scope = "clinic";
+      assert.equal((await call("clinic-operator-leads", "PATCH", { leadId: LEAD, assigned: true }, undefined, WORKSPACE, { requestId: REQUEST })).statusCode, 409);
+      assert.equal(rpcCalls.length, 0);
+    });
+    await t.test("clinic list is scoped, minimal, paged and assignment-read errors are visible", async () => {
+      reset(); tables.growth_operator_requests[0].status = "accepted";
+      tables.leads.push({id: OTHER, workspace_id: FOREIGN});
+      tables.growth_operator_lead_assignments.push({ workspace_id: WORKSPACE, operator_request_id: REQUEST, lead_id: LEAD, assigned: true });
+      const res = await call("clinic-operator-leads", "GET", undefined, undefined, WORKSPACE, { requestId: REQUEST });
+      assert.equal(res.statusCode, 200);
+      const items = (res.body.data as {items: Row[]}).items;
+      assert.equal(items.length, 1); assert.equal(items[0].assigned, true);
+      assert.ok(!JSON.stringify(res.body).includes("private-notes"));
+      assert.equal(log.find(r => r.table === "leads")?.filters.workspace_id, WORKSPACE);
+      assert.deepEqual(log.find(r => r.table === "leads")?.range, [0,20]);
+      dbFailure = "PGRST205"; dbFailureTable = "growth_operator_lead_assignments";
+      const failed = await call("clinic-operator-leads", "GET", undefined, undefined, WORKSPACE, { requestId: REQUEST });
+      assert.equal(failed.statusCode, 503);
+      assert.equal(failed.body.code, "operator_leads_not_provisioned");
+      assert.equal(failed.body.data, undefined);
+      assert.ok(!JSON.stringify(failed.body).includes("sensitive-db-detail"));
+    });
     await t.test(
       "inbox restricted to self even with forged workspace selector",
       async () => {
@@ -573,4 +668,23 @@ test("operator entry, clinic and platform controls stay distinct", async () => {
     /localStorage|launchMeta|meta_campaign_launches|from\("clients"\)|from\("leads"\)/,
   );
   assert.match(backend, /accept_growth_operator_request/);
+});
+
+test("operator contact UI uses explicit agreed scope without storing contacts or enabling CRM writes", async () => {
+  const read = (name: string) => readFile(path.join(root, name), "utf8");
+  const clinic = await read("artifacts/negis/src/components/admin/ClinicOperators.tsx");
+  const requests = await read("artifacts/negis/src/components/operators/OperatorRequests.tsx");
+  const leads = await read("artifacts/negis/src/components/operators/OperatorLeads.tsx");
+  assert.match(clinic, /useState<OperatorLeadScope>\("assigned"\)/);
+  assert.match(clinic, /value="assigned"/);
+  assert.match(clinic, /value="clinic"/);
+  assert.match(requests, /status === "accepted"/);
+  assert.match(requests, /operatorLeadScopeLabels/);
+  assert.match(leads, /clinic-operator-leads/);
+  assert.match(leads, /operator-leads\?requestId/);
+  assert.match(leads, /leadScope === "assigned"/);
+  assert.match(leads, /key=\{`\$\{requestId\}/);
+  assert.match(leads, /window.addEventListener\("focus", refresh\)/);
+  assert.doesNotMatch(leads, /localStorage|sessionStorage|medicalHistory|notes|meta-launch|appointments|responsible_user_id/);
+  assert.match(leads, /Только просмотр/);
 });

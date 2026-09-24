@@ -25,13 +25,16 @@ export async function operatorApi<T>(
   const payload = (await response.json().catch(() => null)) as {
     success?: boolean;
     error?: string;
+    code?: string;
     data?: T;
   } | null;
   if (!response.ok || !payload?.success) {
     throw new Error(
-      payload?.error && response.status !== 401 && response.status !== 403
-        ? payload.error
-        : crmErrorMessage(response.status),
+      payload?.code === "authorization_unavailable"
+        ? "Сервис входа не ответил. Попробуйте обновить данные чуть позже."
+        : payload?.error && response.status !== 401 && response.status !== 403
+          ? payload.error
+          : crmErrorMessage(response.status),
     );
   }
   return payload.data as T;

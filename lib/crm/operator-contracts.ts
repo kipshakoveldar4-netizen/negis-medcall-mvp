@@ -12,6 +12,22 @@ export type OperatorRequest = {
   status: "requested" | "accepted" | "declined" | "ended";
   pricePerArrivalMinor: string | null;
   currency: string;
+  leadScope: OperatorLeadScope;
+};
+
+export type OperatorLeadScope = "assigned" | "clinic";
+export const operatorLeadScopeLabels = {
+  assigned: "Только назначенные заявки",
+  clinic: "Все заявки клиники",
+} as const;
+export type OperatorLead = {
+  id: string;
+  name: string;
+  phone: string;
+  status: string;
+  source: string;
+  createdAt: string;
+  assigned?: boolean;
 };
 
 export type OperatorList<T> = { items: T[]; hasMore: boolean };

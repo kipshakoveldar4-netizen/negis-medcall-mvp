@@ -1,9 +1,11 @@
 import { useState } from "react";
 import { Check, X, RefreshCw, ChevronLeft, ChevronRight } from "lucide-react";
 import { operatorApi, useOperatorList } from "@/lib/operatorApi";
+import { OperatorLeads } from "./OperatorLeads";
 import {
   formatArrivalPrice,
   operatorStatusLabels,
+  operatorLeadScopeLabels,
   type OperatorRequest,
 } from "../../../../../lib/crm/operator-contracts";
 
@@ -14,6 +16,7 @@ export function OperatorRequests({ workspaceId }: { workspaceId?: string }) {
   const list = useOperatorList<OperatorRequest>(path);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [openRequest, setOpenRequest] = useState<string | null>(null);
   async function change(id: string, action: string) {
     if (
       action === "end" &&
@@ -26,6 +29,7 @@ export function OperatorRequests({ workspaceId }: { workspaceId?: string }) {
     setError("");
     try {
       await operatorApi(path, { id, action }, "PATCH");
+      setOpenRequest(null);
       list.refresh();
     } catch (err) {
       setError(
@@ -84,6 +88,9 @@ export function OperatorRequests({ workspaceId }: { workspaceId?: string }) {
             {formatArrivalPrice(item.pricePerArrivalMinor, item.currency)} за
             подтверждённый приход
           </p>
+          <p className="text-sm">
+            Доступ: {operatorLeadScopeLabels[item.leadScope || "assigned"]}
+          </p>
           <div className="flex flex-wrap gap-2">
             {item.status === "requested" && (
               <>
@@ -112,16 +119,40 @@ export function OperatorRequests({ workspaceId }: { workspaceId?: string }) {
               </>
             )}
             {item.status === "accepted" && (
-              <button
-                type="button"
-                className="neu-btn"
-                disabled={busy}
-                onClick={() => void change(item.id, "end")}
-              >
-                Завершить сотрудничество
-              </button>
+              <>
+                <button
+                  type="button"
+                  className="neu-btn"
+                  aria-expanded={openRequest === item.id}
+                  onClick={() =>
+                    setOpenRequest(openRequest === item.id ? null : item.id)
+                  }
+                >
+                  {openRequest === item.id
+                    ? "Скрыть заявки"
+                    : workspaceId && item.leadScope !== "clinic"
+                      ? "Назначить заявки"
+                      : "Открыть заявки"}
+                </button>
+                <button
+                  type="button"
+                  className="neu-btn"
+                  disabled={busy}
+                  onClick={() => void change(item.id, "end")}
+                >
+                  Завершить сотрудничество
+                </button>
+              </>
             )}
           </div>
+          {item.status === "accepted" && openRequest === item.id && (
+            <OperatorLeads
+              key={item.id}
+              requestId={item.id}
+              workspaceId={workspaceId}
+              leadScope={item.leadScope || "assigned"}
+            />
+          )}
         </article>
       ))}
       <div className="flex gap-2">

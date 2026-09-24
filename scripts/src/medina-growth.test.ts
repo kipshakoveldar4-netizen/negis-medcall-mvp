@@ -45,6 +45,8 @@ before(async () => {
   await db.exec(await readFile(path.join(root, "migrations/052_operators_and_partner_ledger.sql"), "utf8"));
   await db.exec(await readFile(path.join(root, "migrations/053_operator_request_lifecycle.sql"), "utf8"));
   await db.exec(await readFile(path.join(root, "migrations/053_operator_request_lifecycle.sql"), "utf8"));
+  await db.exec(await readFile(path.join(root, "migrations/054_operator_lead_access.sql"), "utf8"));
+  await db.exec(await readFile(path.join(root, "migrations/054_operator_lead_access.sql"), "utf8"));
   await db.exec(`
     insert into public.workspaces(id, name) values
       ('${id(1)}', 'Clinic A'), ('${id(2)}', 'Clinic B'), ('${id(3)}', 'Clinic C');
@@ -55,6 +57,10 @@ before(async () => {
       ('${id(104)}','${id(1)}','${id(404)}','desk@example.invalid','Reception','receptionist');
     insert into public.appointments(id,workspace_id,client_name) values
       ('${id(501)}','${id(1)}','Test A'),('${id(502)}','${id(2)}','Test B');
+    insert into public.leads(id,workspace_id,full_name,phone,notes) values
+      ('${id(1101)}','${id(1)}','Lead A','+77000000001','Private notes'),
+      ('${id(1102)}','${id(1)}','Lead B','+77000000002','Private notes'),
+      ('${id(1103)}','${id(2)}','Foreign lead','+77000000003','Private notes');
     insert into public.platform_subscriptions(id,workspace_id,plan,price_minor,currency) values
       ('${id(601)}','${id(1)}','basic',100000,'KZT'),
       ('${id(602)}','${id(2)}','basic',100000,'KZT'),
@@ -182,14 +188,14 @@ test("KZT balance cannot pay a USD withdrawal", async () => {
 });
 
 test("anonymous and authenticated browser roles cannot read or execute growth operations", async () => {
-  const tables = ["growth_operator_profiles", "growth_operator_requests", "growth_operator_arrivals", "growth_partners", "growth_referrals", "platform_subscription_payments", "growth_partner_commissions", "growth_partner_payouts"];
+  const tables = ["growth_operator_profiles", "growth_operator_requests", "growth_operator_arrivals", "growth_partners", "growth_referrals", "platform_subscription_payments", "growth_partner_commissions", "growth_partner_payouts", "growth_operator_lead_assignments"];
   for (const role of ["anon", "authenticated"]) {
     for (const table of tables) {
       const result = await row("select has_table_privilege($1,$2,'SELECT,INSERT,UPDATE,DELETE') as allowed", [role, `public.${table}`]);
       assert.equal(result.allowed, false, `${role}/${table}`);
     }
     const functions = await db.query<{ name: string; allowed: boolean }>("select p.proname as name,has_function_privilege($1,p.oid,'EXECUTE') as allowed from pg_proc p where p.proname like '%growth%'", [role]);
-    assert.equal(functions.rows.length, 7);
+    assert.equal(functions.rows.length, 10);
     assert.ok(functions.rows.every((r) => !r.allowed));
   }
 });
@@ -278,4 +284,101 @@ test("partner totals separate registrations, payments, currencies and payouts", 
   assert.deepEqual(summarizePartnerLedger(["a"], [], []), {registrations:1,paidClinics:0,firstPayments:0,renewals:0,balances:[]});
   assert.throws(() => summarizePartnerLedger([], [{paymentId:"1",workspaceId:"foreign",kind:"first",amountMinor:"1",currency:"KZT"}], []), /referral_scope_mismatch/);
   assert.throws(() => summarizePartnerLedger([], [], [{id:"1",amountMinor:"1",currency:"KZT"}]), /partner_balance_inconsistent/);
+});
+
+async function assign(lead = 1101, assigned = true, staff = 101, request = 801) {
+  return db.query("select public.set_growth_operator_lead_assignment($1,$2,$3,$4)", [id(request), id(lead), id(staff), assigned]);
+}
+async function readLeads(request = 801, user = 201, offset = 0) {
+  return (await db.query<Record<string, unknown>>("select * from public.read_growth_operator_leads($1,$2,$3)", [id(request), id(user), offset])).rows;
+}
+
+test("existing agreements default to assigned-only; approval alone grants no contacts", async () => {
+  assert.equal((await row("select lead_scope from public.growth_operator_requests where id=$1", [id(801)])).lead_scope, "assigned");
+  await rejects(() => readLeads(), /operator_access_denied/);
+  await accept();
+  assert.deepEqual(await readLeads(), []);
+  assert.equal((await row("select count(*)::int n from public.staff_users")).n, 4);
+});
+
+test("assigned-only contacts can be granted and revoked; no notes or patient history", async () => {
+  await accept(); await assign();
+  const rows = await readLeads();
+  assert.deepEqual(rows.map(r => r.id), [id(1101)]);
+  assert.equal(rows[0].phone, "+77000000001");
+  assert.deepEqual(Object.keys(rows[0]).sort(), ["id", "full_name", "phone", "status", "source", "created_at"].sort());
+  await assign(1101, false);
+  assert.deepEqual(await readLeads(), []);
+});
+
+test("full-clinic scope includes new clinic leads but never another clinic", async () => {
+  // Use another approved operator's new agreement in Clinic A, keeping fixtures immutable.
+  await db.exec(`update public.growth_operator_requests set status='declined' where id='${id(803)}'`);
+  await db.exec(`insert into public.growth_operator_requests(id,workspace_id,operator_id,requested_by_staff_user_id,clinic_brief,price_per_arrival_minor,lead_scope)
+    values('${id(805)}','${id(1)}','${id(703)}','${id(101)}','Whole clinic',50000,'clinic')`);
+  await accept(805, 203);
+  assert.deepEqual((await readLeads(805, 203)).map(r => r.id), [id(1101), id(1102)]);
+  await db.exec(`insert into public.leads(id,workspace_id,full_name) values('${id(1104)}','${id(1)}','New lead')`);
+  assert.equal((await readLeads(805, 203)).length, 3);
+  await rejects(() => assign(1101, true, 101, 805), /operator_assignment_unavailable/);
+});
+
+test("scope cannot widen silently; another agreement requires clinic choice and acceptance", async () => {
+  await rejects(() => db.exec(`update public.growth_operator_requests set lead_scope='clinic' where id='${id(801)}'`), /operator_scope_immutable/);
+  await accept();
+  await rejects(() => db.exec(`update public.growth_operator_requests set lead_scope='clinic' where id='${id(801)}'`), /operator_scope_immutable/);
+});
+
+test("lead assignment checks clinic, active manager, appointment-independent access and foreign identity", async () => {
+  await rejects(() => assign(), /operator_assignment_unavailable/);
+  await accept();
+  await rejects(() => assign(1103), /lead_unavailable/);
+  await rejects(() => assign(1101, true, 102), /clinic_manager_required/);
+  await rejects(() => assign(1101, true, 104), /clinic_manager_required/);
+  await assign();
+  await rejects(() => readLeads(801, 203), /operator_access_denied/);
+  await db.exec(`update public.staff_users set status='paused' where id='${id(101)}'`);
+  await rejects(() => assign(), /clinic_manager_required/);
+});
+
+test("ending an agreement or suspending approval closes the next read", async () => {
+  await accept(); await assign();
+  await db.exec(`update public.growth_operator_profiles set status='suspended',accepting_requests=false where id='${id(701)}'`);
+  await rejects(() => readLeads(), /operator_access_denied/);
+  await rejects(() => assign(1102), /approved_operator_required/);
+  await assign(1101, false);
+  await db.exec(`update public.growth_operator_profiles set status='approved' where id='${id(701)}'`);
+  await assign();
+  await db.exec(`update public.growth_operator_requests set status='ended',ended_at=now() where id='${id(801)}'`);
+  await rejects(() => readLeads(), /operator_access_denied/);
+});
+
+test("assignment retries are idempotent and audited without contact data", async () => {
+  await accept(); await assign(); await assign();
+  assert.equal((await row("select count(*)::int n from public.growth_operator_lead_assignments")).n, 1);
+  assert.equal((await row("select count(*)::int n from public.audit_logs where action='operator_lead_assignment'")).n, 1);
+  const event = await row("select metadata from public.audit_logs where action='operator_lead_assignment'");
+  assert.ok(!JSON.stringify(event).includes("+7700"));
+  await assign(1101, false); await assign(1101, false);
+  assert.equal((await row("select count(*)::int n from public.audit_logs where action='operator_lead_assignment'")).n, 2);
+});
+
+test("server-only RPCs enforce scope even without direct assignment table write grants", async () => {
+  await accept();
+  await db.exec("set local role service_role");
+  await assign();
+  assert.equal((await readLeads()).length, 1);
+  await rejects(() => db.exec("update public.growth_operator_lead_assignments set assigned=false"), /permission denied/);
+  await rejects(() => readLeads(801, 201, -1), /invalid_offset/);
+});
+
+test("operator read returns bounded pages with deterministic ordering", async () => {
+  await accept();
+  for (let i = 1200; i < 1222; i++) {
+    await db.query("insert into public.leads(id,workspace_id,full_name) values($1,$2,'Page lead')", [id(i), id(1)]);
+    await assign(i);
+  }
+  const first = await readLeads(); const second = await readLeads(801, 201, 20);
+  assert.equal(first.length, 21); assert.equal(second.length, 2);
+  assert.equal(first[20].id, second[0].id);
 });

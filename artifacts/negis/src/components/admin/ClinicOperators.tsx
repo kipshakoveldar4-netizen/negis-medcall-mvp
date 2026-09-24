@@ -4,6 +4,8 @@ import { operatorApi, useOperatorList } from "@/lib/operatorApi";
 import { OperatorRequests } from "@/components/operators/OperatorRequests";
 import {
   arrivalPriceToMinor,
+  operatorLeadScopeLabels,
+  type OperatorLeadScope,
   type OperatorProfile,
 } from "../../../../../lib/crm/operator-contracts";
 
@@ -14,6 +16,7 @@ export function ClinicOperators({ workspaceId }: { workspaceId: string }) {
   const [selected, setSelected] = useState<OperatorProfile | null>(null);
   const [brief, setBrief] = useState("");
   const [price, setPrice] = useState("");
+  const [leadScope, setLeadScope] = useState<OperatorLeadScope>("assigned");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [revision, setRevision] = useState(0);
@@ -33,6 +36,7 @@ export function ClinicOperators({ workspaceId }: { workspaceId: string }) {
           operatorId: selected.id,
           clinicBrief: brief,
           pricePerArrivalMinor: amount,
+          leadScope,
         },
       );
       setSelected(null);
@@ -57,8 +61,8 @@ export function ClinicOperators({ workspaceId }: { workspaceId: string }) {
           напрямую, вне платформы.
         </p>
         <p className="mt-1 text-sm opacity-70">
-          Принятие предложения не запускает рекламу и не открывает оператору
-          базу пациентов.
+          Оператор увидит заявки в выбранном вами объёме после принятия
+          предложения. Реклама автоматически не запускается.
         </p>
       </header>
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -99,6 +103,7 @@ export function ClinicOperators({ workspaceId }: { workspaceId: string }) {
               disabled={busy}
               onClick={() => {
                 setSelected(item);
+                setLeadScope("assigned");
                 setMessage("");
               }}
             >
@@ -144,6 +149,26 @@ export function ClinicOperators({ workspaceId }: { workspaceId: string }) {
               placeholder="Направление клиники, задачи, контакт для согласования. Без данных пациентов."
             />
           </label>
+          <label className="block text-sm">
+            Доступ к заявкам
+            <select
+              className="neu-input mt-1 w-full"
+              value={leadScope}
+              onChange={(event) =>
+                setLeadScope(event.target.value as OperatorLeadScope)
+              }
+            >
+              <option value="assigned">
+                {operatorLeadScopeLabels.assigned}
+              </option>
+              <option value="clinic">{operatorLeadScopeLabels.clinic}</option>
+            </select>
+          </label>
+          <p className="text-sm opacity-70">
+            {leadScope === "clinic"
+              ? "После принятия оператор увидит имена и телефоны всех заявок клиники, включая новые."
+              : "После принятия вы назначите оператору нужные заявки. Остальные ему недоступны."}
+          </p>
           <label className="block text-sm">
             Цена за подтверждённый приход, ₸
             <input

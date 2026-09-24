@@ -17,7 +17,7 @@ const record = (value: unknown): Row =>
 const str = (value: unknown) => (typeof value === "string" ? value.trim() : "");
 const PROFILE_FIELDS = "id,display_name,status,accepting_requests";
 const REQUEST_FIELDS =
-  "id,clinic_brief,status,price_per_arrival_minor,currency";
+  "id,clinic_brief,status,price_per_arrival_minor,currency,lead_scope";
 
 function json(res: VercelResponse, status: number, data: unknown) {
   res.setHeader("Cache-Control", "no-store");
@@ -37,7 +37,7 @@ function dbError(res: VercelResponse, error: unknown) {
     return fail(
       res,
       503,
-      "Раздел операторов ещё не подключён. Владелец платформы должен применить миграцию 052.",
+      "Раздел операторов ещё не подключён. Владелец платформы должен проверить миграции 052–054.",
       "operators_not_provisioned",
     );
   }
@@ -76,6 +76,7 @@ function request(
     clinicBrief: str(row.clinic_brief),
     status: row.status as OperatorRequest["status"],
     currency: str(row.currency),
+    leadScope: row.lead_scope === "clinic" ? "clinic" : "assigned",
     pricePerArrivalMinor:
       row.price_per_arrival_minor == null
         ? null
@@ -316,8 +317,10 @@ export async function handleClinicOperators(
   if (req.method === "POST") {
     const brief = str(body.clinicBrief);
     const amount = str(body.pricePerArrivalMinor);
+    const leadScope = body.leadScope ?? "assigned";
     if (
       !isUuidValue(body.operatorId) ||
+      (leadScope !== "assigned" && leadScope !== "clinic") ||
       !brief ||
       brief.length > 2000 ||
       !/^\d{1,16}$/.test(amount) ||
@@ -338,6 +341,7 @@ export async function handleClinicOperators(
         clinic_brief: brief,
         price_per_arrival_minor: amount,
         currency: "KZT",
+        lead_scope: leadScope,
         status: "requested",
       })
       .select("id")
