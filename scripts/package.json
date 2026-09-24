@@ -48,6 +48,7 @@
     "test:design-tokens": "tsx --test ./src/medina-design-tokens.test.ts",
     "test:content-generation": "tsx --test ./src/medina-content-generation.test.ts",
     "test:content-usage": "tsx --test ./src/medina-content-usage.test.ts",
+    "test:growth": "tsx --test ./src/medina-growth.test.ts",
     "test:clinic-services": "tsx --test ./src/medina-clinic-services.test.ts",
     "test:doctor-schedule": "tsx --test ./src/medina-doctor-schedule.test.ts",
     "test:clinic-day": "tsx --test ./src/medina-clinic-day.test.ts",
@@ -85,6 +86,7 @@
     "test:salon-stats": "tsx --test ./src/medina-salon-stats.test.ts"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "0.5.8",
     "@types/node": "catalog:",
     "tsx": "catalog:"
   }
