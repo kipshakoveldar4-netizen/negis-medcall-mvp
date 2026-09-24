@@ -43,6 +43,8 @@ before(async () => {
   }
   // Rerunning the additive migration must preserve data and privileges.
   await db.exec(await readFile(path.join(root, "migrations/052_operators_and_partner_ledger.sql"), "utf8"));
+  await db.exec(await readFile(path.join(root, "migrations/053_operator_request_lifecycle.sql"), "utf8"));
+  await db.exec(await readFile(path.join(root, "migrations/053_operator_request_lifecycle.sql"), "utf8"));
   await db.exec(`
     insert into public.workspaces(id, name) values
       ('${id(1)}', 'Clinic A'), ('${id(2)}', 'Clinic B'), ('${id(3)}', 'Clinic C');
@@ -219,6 +221,22 @@ test("one approved operator may accept several clinics; acceptance is idempotent
   await accept(802);
   assert.equal((await row("select count(*)::int as n from public.growth_operator_requests where status='accepted'")).n, 2);
   await rejects(() => db.exec(`update public.growth_operator_requests set price_per_arrival_minor=1 where id='${id(801)}'`), /accepted_terms_immutable/);
+});
+
+test("historical requester deactivation does not freeze an agreement", async () => {
+  await db.exec(`update public.staff_users set status='paused' where id='${id(101)}'`);
+  assert.equal((await accept()).value, id(801));
+  await db.exec(`update public.growth_operator_requests set status='ended',ended_at=now() where id='${id(801)}'`);
+  assert.equal((await row("select status from public.growth_operator_requests where id=$1", [id(801)])).status, "ended");
+  await rejects(() => db.exec(`insert into public.growth_operator_requests(workspace_id,operator_id,requested_by_staff_user_id,clinic_brief)
+    values('${id(1)}','${id(701)}','${id(101)}','New request')`), /clinic_requester_required/);
+});
+
+test("request lifecycle cannot change identity or reopen ended agreements", async () => {
+  await accept();
+  await rejects(() => db.exec(`update public.growth_operator_requests set workspace_id='${id(2)}' where id='${id(801)}'`), /operator_request_identity_immutable/);
+  await db.exec(`update public.growth_operator_requests set status='ended',ended_at=now() where id='${id(801)}'`);
+  await rejects(() => db.exec(`update public.growth_operator_requests set status='accepted',ended_at=null where id='${id(801)}'`), /operator_request_transition_invalid/);
 });
 
 test("requester and appointment must be from the request clinic", async () => {

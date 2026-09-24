@@ -58,6 +58,7 @@
     "test:content-generation": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:content-generation",
     "test:content-usage": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:content-usage",
     "test:growth": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:growth",
+    "test:operators": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:operators",
     "test:clinic-services": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:clinic-services",
     "test:doctor-schedule": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:doctor-schedule",
     "test:clinic-day": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:clinic-day",

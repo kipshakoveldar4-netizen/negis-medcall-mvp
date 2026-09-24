@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useLocation } from "wouter";
 import { PlanCalculator } from "@/components/admin/PlanCalculator";
+import { ClinicOperators } from "@/components/admin/ClinicOperators";
 import { VerticalSwitch } from "@/components/admin/VerticalSwitch";
 import { TikTokSetupCheck } from "@/components/admin/TikTokSetupCheck";
 import { TikTokConnection } from "@/components/admin/TikTokConnection";
@@ -98,6 +99,7 @@ type BatchStaffResult = {
 
 type AdminTab =
   | "overview"
+  | "operators"
   | "staff"
   | "doctors"
   | "roles"
@@ -470,6 +472,7 @@ type ReleaseCheck = {
 const tabs: Array<{ id: AdminTab; label: string; icon: LucideIcon }> = [
   { id: "overview", label: "Обзор", icon: Gauge },
   { id: "staff", label: "Сотрудники", icon: Users },
+  { id: "operators", label: "Операторы", icon: Users },
   { id: "doctors", label: "Врачи", icon: Stethoscope },
   { id: "roles", label: "Роли и доступы", icon: ShieldCheck },
   { id: "clinic", label: "Клиника", icon: Building2 },
@@ -4039,6 +4042,7 @@ export default function AdminCenter() {
 
         {activeTab === "overview" && renderOverview()}
         {activeTab === "staff" && renderStaff()}
+        {activeTab === "operators" && <ClinicOperators key={workspaceId} workspaceId={workspaceId} />}
         {activeTab === "doctors" && <DoctorSchedule />}
         {activeTab === "roles" && renderRoles()}
         {activeTab === "clinic" && renderClinic()}

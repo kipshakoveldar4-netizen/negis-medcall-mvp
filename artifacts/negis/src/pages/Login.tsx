@@ -311,6 +311,9 @@ export default function Login() {
               <button type="button" className="neu-btn w-full justify-center" onClick={() => setLocation("/join-request")}>
                 Есть код клиники? Подать заявку
               </button>
+              <button type="button" className="neu-btn w-full justify-center" onClick={() => setLocation("/operator")}>
+                Кабинет оператора колл-центра
+              </button>
             </div>
           </div>
         </section>

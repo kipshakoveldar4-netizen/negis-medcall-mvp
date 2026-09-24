@@ -31,6 +31,13 @@
 
 * { box-sizing: border-box; }
 
+.operator-list { margin-top: 20px; }
+.operator-row { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; padding: 18px 0; border-bottom: 1px solid var(--line); }
+.operator-description { flex: 1 1 220px; min-width: 0; overflow-wrap: anywhere; }
+.operator-description h2 { font-size: 16px; margin: 0; letter-spacing: 0; }
+.operator-description p { color: var(--ink-2); margin: 4px 0 0; }
+.operator-pagination { display: flex; gap: 10px; margin-top: 20px; }
+
 html { -webkit-text-size-adjust: 100%; }
 
 body {

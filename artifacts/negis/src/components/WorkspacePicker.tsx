@@ -1,4 +1,5 @@
 import { useAuth } from '@/contexts/AuthContext';
+import { useLocation } from 'wouter';
 import { isStaffRole } from '@/lib/permissions';
 import { staffRoleLabels } from '../../../../lib/vertical/terms';
 
@@ -16,11 +17,12 @@ import { staffRoleLabels } from '../../../../lib/vertical/terms';
  * is still authorized on its own.
  */
 export function WorkspacePicker() {
+  const [location] = useLocation();
   const { availableWorkspaces, clinicId, isLoading, isDemoMode, isImpersonation, selectWorkspace, signOut } = useAuth();
 
   const needsChoice =
     !isLoading && !clinicId && !isDemoMode && !isImpersonation && availableWorkspaces.length > 1;
-  if (!needsChoice) return null;
+  if (!needsChoice || location === '/operator') return null;
 
   return (
     <div

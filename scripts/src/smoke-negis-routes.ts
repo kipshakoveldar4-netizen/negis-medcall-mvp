@@ -4237,6 +4237,7 @@ async function main() {
     "/terms",
     "/data-deletion",
     "/login",
+    "/operator",
   ]) {
     await checkHtmlRoute(route);
   }

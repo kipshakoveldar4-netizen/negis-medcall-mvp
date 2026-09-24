@@ -202,7 +202,7 @@ export async function crmFetch(path: string, init: CrmFetchInit = {}): Promise<R
   }
 
   const dedupeKey = `${path}::${token}`;
-  const cacheable = !isUncacheable(path);
+  const cacheable = rest.cache !== "no-store" && !isUncacheable(path);
 
   if (cacheable) {
     const hit = getCache.get(dedupeKey);

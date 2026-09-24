@@ -1,4 +1,5 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
+import { handlePlatformOperators, handleOperatorAccount, handleOperatorInbox, handleClinicOperators } from "../../lib/crm/operators";
 import {
   handleAdCreativeMetaUpload,
   handleAdCreativeSignedUpload,
@@ -186,6 +187,11 @@ async function dispatch(
   res: VercelResponse,
 ) {
   switch (routeKey) {
+    case "platform-operators": return handlePlatformOperators(req, res);
+    case "operator-account": return handleOperatorAccount(req, res);
+    case "operator-inbox": return handleOperatorInbox(req, res);
+    case "operator-directory": return handleClinicOperators(req, res, true);
+    case "clinic-operator-requests": return handleClinicOperators(req, res);
     case "auth-context":
       return handleCrmAuthContext(req, res);
     case "subscription": {

@@ -5,6 +5,7 @@ import { Login } from "./screens/Login";
 import { Overview } from "./screens/Overview";
 import { ClinicCard } from "./screens/ClinicCard";
 import { Onboarding } from "./screens/Onboarding";
+import { Operators } from "./screens/Operators";
 
 // Medina Control — портал владельца платформы.
 //
@@ -16,7 +17,7 @@ export default function App() {
   const [session, setSession] = useState<Session | null>(null);
   const [ready, setReady] = useState(false);
   const [clinicId, setClinicId] = useState("");
-  const [screen, setScreen] = useState<"overview" | "onboard">("overview");
+  const [screen, setScreen] = useState<"overview" | "onboard" | "operators">("overview");
 
   useEffect(() => {
     void supabase.auth.getSession().then(({ data }) => {
@@ -57,6 +58,7 @@ export default function App() {
         >
           Подключить клинику
         </button>
+        <button type="button" className={`nav-item ${!clinicId && screen === "operators" ? "on" : ""}`} onClick={() => { setClinicId(""); setScreen("operators"); }}>Операторы</button>
         <div className="spacer" />
         <div className="who">{session.user.email}</div>
         <button type="button" className="signout" onClick={() => void supabase.auth.signOut()}>Выйти</button>
@@ -64,6 +66,8 @@ export default function App() {
       <main className="main">
         {clinicId ? (
           <ClinicCard workspaceId={clinicId} onBack={() => setClinicId("")} />
+        ) : screen === "operators" ? (
+          <Operators />
         ) : screen === "onboard" ? (
           <Onboarding onDone={() => setScreen("overview")} />
         ) : (

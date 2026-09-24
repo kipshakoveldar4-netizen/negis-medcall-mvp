@@ -816,7 +816,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       } catch {
         // Нет хранилища — судим только по адресу.
       }
-      if (path.includes('/join') || pendingInvite) return;
+      if (path.includes('/join') || path === '/operator' || pendingInvite) return;
     }
     toast.error(
       'Аккаунт не привязан к клинике. Если вам присылали ссылку-приглашение — откройте её ещё раз; если нет — попросите администратора клиники выслать приглашение.',

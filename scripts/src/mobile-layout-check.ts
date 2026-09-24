@@ -33,6 +33,7 @@ const routes = [
   "/terms",
   "/data-deletion",
   "/login",
+  "/operator",
 ];
 
 const viewportWidths = [360, 375, 390, 414, 430, 768, 820, 1024, 1280];

@@ -167,6 +167,11 @@ export const CRM_RESOURCE_AUTHORIZATION: Readonly<Record<string, RouteAuthorizat
 export const CRM_ROUTE_AUTHORIZATION: Readonly<Record<string, RouteAuthorization>> = {
   // Identity bootstrap: any authenticated user, before a workspace is chosen.
   "auth-context": { kind: "bootstrap", methods: ["GET"] },
+  "operator-account": { kind: "bootstrap", methods: ["GET", "POST", "PATCH"] },
+  "operator-inbox": { kind: "bootstrap", methods: ["GET", "PATCH"] },
+  "platform-operators": { kind: "platform", methods: ["GET", "PATCH"] },
+  "operator-directory": { kind: "browser", methods: ["GET"], roles: ["owner", "admin", "manager"] },
+  "clinic-operator-requests": { kind: "browser", methods: ["GET", "POST", "PATCH"], roles: ["owner", "admin", "manager"] },
 
   // Панель владельца платформы: единственный маршрут, читающий поперёк клиник.
   //
