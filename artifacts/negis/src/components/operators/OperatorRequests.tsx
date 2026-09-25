@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Check, X, RefreshCw, ChevronLeft, ChevronRight } from "lucide-react";
 import { operatorApi, useOperatorList } from "@/lib/operatorApi";
 import { OperatorLeads } from "./OperatorLeads";
+import { OperatorServiceCatalog } from "./OperatorServiceCatalog";
 import {
   formatArrivalPrice,
   operatorStatusLabels,
@@ -17,6 +18,7 @@ export function OperatorRequests({ workspaceId }: { workspaceId?: string }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [openRequest, setOpenRequest] = useState<string | null>(null);
+  const [openCatalog, setOpenCatalog] = useState<string | null>(null);
   async function change(id: string, action: string) {
     if (
       action === "end" &&
@@ -30,6 +32,7 @@ export function OperatorRequests({ workspaceId }: { workspaceId?: string }) {
     try {
       await operatorApi(path, { id, action }, "PATCH");
       setOpenRequest(null);
+      setOpenCatalog(null);
       list.refresh();
     } catch (err) {
       setError(
@@ -120,6 +123,18 @@ export function OperatorRequests({ workspaceId }: { workspaceId?: string }) {
             )}
             {item.status === "accepted" && (
               <>
+                {!workspaceId && (
+                  <button
+                    type="button"
+                    className="neu-btn"
+                    aria-expanded={openCatalog === item.id}
+                    onClick={() =>
+                      setOpenCatalog(openCatalog === item.id ? null : item.id)
+                    }
+                  >
+                    {openCatalog === item.id ? "Скрыть прайс" : "Услуги и цены"}
+                  </button>
+                )}
                 <button
                   type="button"
                   className="neu-btn"
@@ -152,6 +167,9 @@ export function OperatorRequests({ workspaceId }: { workspaceId?: string }) {
               workspaceId={workspaceId}
               leadScope={item.leadScope || "assigned"}
             />
+          )}
+          {!workspaceId && item.status === "accepted" && openCatalog === item.id && (
+            <OperatorServiceCatalog key={item.id} requestId={item.id} />
           )}
         </article>
       ))}

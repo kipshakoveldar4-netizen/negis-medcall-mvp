@@ -26,6 +26,7 @@ type Query = {
   values?: Row;
   range?: number[];
   select?: string;
+  or?: string;
 };
 
 test("operator HTTP authorization, DTOs and transitions", async (t) => {
@@ -133,6 +134,11 @@ test("operator HTTP authorization, DTOs and transitions", async (t) => {
             ),
           );
           if (entry.op === "insert") rows = [{ id: OPERATOR, ...entry.values }];
+          if (entry.or) {
+            const match = /^doctor_id\.eq\.([\w-]+),doctor_id\.is\.null$/.exec(entry.or);
+            assert.ok(match, "only expected catalog OR filter is supported");
+            rows = rows.filter((row) => row.doctor_id === match[1] || row.doctor_id === null);
+          }
           if (entry.op === "update")
             rows = rows.map((row) => ({ ...row, ...entry.values }));
           if (entry.range)
@@ -145,6 +151,7 @@ test("operator HTTP authorization, DTOs and transitions", async (t) => {
             return builder;
           },
           order: () => builder,
+          or: (filter: string) => { entry.or = filter; return builder; },
           range: (start: number, end: number) => {
             entry.range = [start, end];
             return builder;
@@ -227,6 +234,7 @@ test("operator HTTP authorization, DTOs and transitions", async (t) => {
         for (const route of [
           "operator-account",
           "operator-inbox",
+          "operator-services",
           "operator-directory",
           "clinic-operator-requests",
           "operator-leads",
@@ -673,6 +681,87 @@ test("operator HTTP authorization, DTOs and transitions", async (t) => {
         );
       },
     );
+    await t.test("operator catalog is tenant scoped, read-only and master specific", async () => {
+      reset();
+      tables.growth_operator_requests[0].status = "accepted";
+      tables.clinic_doctors = [
+        { id: LEAD, workspace_id: WORKSPACE, is_active: true, full_name: "Лаура", specialty: "Ресницы", staff_user_id: "private-staff" },
+        { id: STAGE, workspace_id: FOREIGN, is_active: true, full_name: "Чужой" },
+        { id: OTHER, workspace_id: WORKSPACE, is_active: false, full_name: "Архив" },
+      ];
+      tables.clinic_services = [
+        { id: "own", workspace_id: WORKSPACE, doctor_id: LEAD, is_active: true, name: "Ресницы", base_price_minor: "1200000", duration_minutes: 90, notes: "private-note" },
+        { id: "shared", workspace_id: WORKSPACE, doctor_id: null, is_active: true, name: "Консультация", base_price_minor: "0", duration_minutes: null },
+        { id: "unknown", workspace_id: WORKSPACE, doctor_id: LEAD, is_active: true, name: "Без цены", base_price_minor: null, duration_minutes: 30 },
+        { id: "other-master", workspace_id: WORKSPACE, doctor_id: OTHER, is_active: true },
+        { id: "foreign", workspace_id: FOREIGN, doctor_id: LEAD, is_active: true },
+        { id: "archived", workspace_id: WORKSPACE, doctor_id: LEAD, is_active: false },
+      ];
+      const query = { requestId: REQUEST };
+      const doctors = await call("operator-services", "GET", undefined, undefined, FOREIGN, query);
+      assert.equal(doctors.statusCode, 200);
+      assert.deepEqual(doctors.body.data, { items: [{ id: LEAD, name: "Лаура", specialty: "Ресницы" }], hasMore: false });
+      const services = await call("operator-services", "GET", undefined, undefined, FOREIGN, { ...query, doctorId: LEAD });
+      assert.equal(services.statusCode, 200);
+      assert.deepEqual(services.body.data, { items: [
+        { id: "own", name: "Ресницы", priceMinor: "1200000", currency: "KZT", durationMinutes: 90 },
+        { id: "shared", name: "Консультация", priceMinor: "0", currency: "KZT", durationMinutes: null },
+        { id: "unknown", name: "Без цены", priceMinor: null, currency: "KZT", durationMinutes: 30 },
+      ], hasMore: false });
+      assert.match(log.find((entry) => entry.table === "clinic_services")?.select || "", /base_price_minor::text/);
+      for (const doctorId of [STAGE, OTHER])
+        assert.equal((await call("operator-services", "GET", undefined, undefined, WORKSPACE, { ...query, doctorId })).statusCode, 404);
+      for (const method of ["POST", "PATCH", "DELETE"])
+        assert.equal((await call("operator-services", method, {}, undefined, WORKSPACE, query)).statusCode, 405);
+      assert.ok(log.every((entry) => entry.op === "select"));
+      assert.equal(rpcCalls.length, 0);
+    });
+    await t.test("operator catalog rejects revoked, foreign and invalid requests and fails closed", async () => {
+      for (const status of ["requested", "declined", "ended"]) {
+        reset();
+        tables.growth_operator_requests[0].status = status;
+        assert.equal((await call("operator-services", "GET", undefined, undefined, WORKSPACE, { requestId: REQUEST })).statusCode, 403);
+        assert.ok(!log.some((entry) => entry.table.startsWith("clinic_")));
+      }
+      reset();
+      tables.growth_operator_requests[0].status = "accepted";
+      tables.growth_operator_requests[0].operator_id = OTHER;
+      assert.equal((await call("operator-services", "GET", undefined, undefined, WORKSPACE, { requestId: REQUEST })).statusCode, 403);
+      reset();
+      tables.growth_operator_profiles[0].status = "suspended";
+      assert.equal((await call("operator-services", "GET", undefined, undefined, WORKSPACE, { requestId: REQUEST })).statusCode, 403);
+      reset();
+      for (const query of [{}, { requestId: [REQUEST] }, { requestId: REQUEST, doctorId: "bad" }, { requestId: REQUEST, offset: "-1" }])
+        assert.equal((await call("operator-services", "GET", undefined, undefined, WORKSPACE, query)).statusCode, 400);
+      for (const table of ["growth_operator_profiles", "growth_operator_requests", "clinic_doctors", "clinic_services"]) {
+        reset();
+        tables.growth_operator_requests[0].status = "accepted";
+        tables.clinic_doctors = [{ id: LEAD, workspace_id: WORKSPACE, is_active: true }];
+        dbFailure = "PGRST205";
+        dbFailureTable = table;
+        const response = await call("operator-services", "GET", undefined, undefined, WORKSPACE, { requestId: REQUEST, doctorId: LEAD });
+        assert.equal(response.statusCode, 503);
+        assert.doesNotMatch(JSON.stringify(response.body), /sensitive-db-detail|private/);
+      }
+    });
+    await t.test("operator catalog paginates masters and services without silent truncation", async () => {
+      reset();
+      tables.growth_operator_requests[0].status = "accepted";
+      tables.clinic_doctors = Array.from({ length: 21 }, (_, i) => ({ id: i === 0 ? LEAD : `doctor-${i}`, workspace_id: WORKSPACE, is_active: true, full_name: `Мастер ${i}` }));
+      tables.clinic_services = Array.from({ length: 21 }, (_, i) => ({ id: `service-${i}`, workspace_id: WORKSPACE, doctor_id: LEAD, is_active: true, name: `Услуга ${i}`, base_price_minor: "9007199254740993" }));
+      for (const doctorQuery of [{}, { doctorId: LEAD }]) {
+        const query = { requestId: REQUEST, ...doctorQuery };
+        const first = await call("operator-services", "GET", undefined, undefined, WORKSPACE, query);
+        assert.equal(first.statusCode, 200);
+        assert.equal((first.body.data as { items: Row[] }).items.length, 20);
+        assert.equal((first.body.data as Row).hasMore, true);
+        const last = await call("operator-services", "GET", undefined, undefined, WORKSPACE, { ...query, offset: "20" });
+        assert.equal((last.body.data as { items: Row[] }).items.length, 1);
+        assert.equal((last.body.data as Row).hasMore, false);
+        if ("doctorId" in doctorQuery)
+          assert.equal((last.body.data as { items: Row[] }).items[0].priceMinor, "9007199254740993");
+      }
+    });
   } finally {
     globalThis.fetch = savedFetch;
     supabase.setSupabaseServerClientFactoryForTests(null);
@@ -692,6 +781,24 @@ test("operator agreed KZT prices roundtrip without float arithmetic", async () =
   for (const input of ["", "-1", "1.001", "Infinity", "1e4"])
     assert.equal(arrivalPriceToMinor(input), null);
   assert.match(formatArrivalPrice("150050", "KZT"), /1\s500,50 ₸/);
+});
+
+test("operator catalog UI is read-only, scoped to accepted operator requests and uncached", async () => {
+  const read = (name: string) => readFile(path.join(root, name), "utf8");
+  const ui = await read("artifacts/negis/src/components/operators/OperatorServiceCatalog.tsx");
+  const requests = await read("artifacts/negis/src/components/operators/OperatorRequests.tsx");
+  assert.match(ui, /operator-services\?requestId/);
+  assert.match(ui, /doctorId=/);
+  assert.match(ui, /Услуги и цены/);
+  assert.match(ui, /Цена не указана/);
+  assert.match(ui, /Длительность не указана/);
+  assert.match(ui, /window.addEventListener\("focus", list.refresh\)/);
+  assert.match(ui, /key=\{`\$\{requestId\}:\$\{doctor.id\}`\}/);
+  assert.doesNotMatch(ui, /localStorage|sessionStorage|<input|operatorApi\(|meta-launch/);
+  assert.match(requests, /!workspaceId && item.status === "accepted" && openCatalog === item.id/);
+  const server = await read("lib/crm/operator-services.ts");
+  assert.doesNotMatch(server, /\.insert\(|\.update\(|\.delete\(|\.rpc\(/);
+  assert.match(server, /requireAuthenticatedUser/);
 });
 
 test("operator entry, clinic and platform controls stay distinct", async () => {

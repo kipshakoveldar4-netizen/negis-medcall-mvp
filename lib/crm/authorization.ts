@@ -170,6 +170,7 @@ export const CRM_ROUTE_AUTHORIZATION: Readonly<Record<string, RouteAuthorization
   "operator-account": { kind: "bootstrap", methods: ["GET", "POST", "PATCH"] },
   "operator-inbox": { kind: "bootstrap", methods: ["GET", "PATCH"] },
   "operator-leads": { kind: "bootstrap", methods: ["GET", "PATCH"] },
+  "operator-services": { kind: "bootstrap", methods: ["GET"] },
   "clinic-operator-leads": { kind: "browser", methods: ["GET", "PATCH"], roles: ["owner", "admin", "manager"] },
   "platform-operators": { kind: "platform", methods: ["GET", "PATCH"] },
   "operator-directory": { kind: "browser", methods: ["GET"], roles: ["owner", "admin", "manager"] },
