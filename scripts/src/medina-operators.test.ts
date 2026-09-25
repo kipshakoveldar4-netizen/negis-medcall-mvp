@@ -65,12 +65,14 @@ test("operator HTTP authorization, DTOs and transitions", async (t) => {
   let dbFailureTable = "";
   let rpcData: unknown;
   let rpcFailure = "";
+  let rpcMessage = "private-db-detail";
   let pipelineMissing = false;
   function reset() {
     validToken = true;
     dbFailure = "";
     dbFailureTable = "";
     rpcFailure = "";
+    rpcMessage = "private-db-detail";
     pipelineMissing = false;
     rpcData = REQUEST;
     log = [];
@@ -186,7 +188,7 @@ test("operator HTTP authorization, DTOs and transitions", async (t) => {
         rpcCalls.push({ name, args });
         if (pipelineMissing && name === "read_growth_operator_lead_pipeline")
           return Promise.resolve({data:null,error:{code:"PGRST202",message:"private-db-detail"}});
-        return Promise.resolve({ data: rpcData, error: rpcFailure ? { code: rpcFailure, message: "private-db-detail" } : null });
+        return Promise.resolve({ data: rpcData, error: rpcFailure ? { code: rpcFailure, message: rpcMessage } : null });
       },
     };
   }
@@ -235,6 +237,7 @@ test("operator HTTP authorization, DTOs and transitions", async (t) => {
           "operator-account",
           "operator-inbox",
           "operator-services",
+          "operator-bookings",
           "operator-directory",
           "clinic-operator-requests",
           "operator-leads",
@@ -762,6 +765,42 @@ test("operator HTTP authorization, DTOs and transitions", async (t) => {
           assert.equal((last.body.data as { items: Row[] }).items[0].priceMinor, "9007199254740993");
       }
     });
+    await t.test("operator booking RPC receives verified identity and IDs only, returns a narrow receipt", async () => {
+      reset();
+      rpcData = { timeZone: "Asia/Almaty", private: "must-not-return" };
+      const query = { requestId: REQUEST, leadId: LEAD };
+      const context = await call("operator-bookings", "GET", undefined, undefined, FOREIGN, query);
+      assert.equal(context.statusCode,200);
+      assert.deepEqual(context.body.data,{timeZone:"Asia/Almaty"});
+      const body = {leadId:LEAD,requestKey:STAGE,doctorId:OPERATOR,serviceIds:[OTHER],startsLocal:"2030-01-07T10:00",timeZone:"Asia/Almaty"};
+      rpcData = {id:STAGE,startsAt:"2030-01-07T05:00:00Z",priceMinor:"100000",durationMinutes:60,status:"scheduled",service:"Услуга",doctorName:"Мастер",timeZone:"Asia/Almaty",notes:"must-not-return",clientPhone:"private"};
+      const created = await call("operator-bookings", "POST", body, undefined, FOREIGN, query);
+      assert.equal(created.statusCode,200);
+      assert.equal(rpcCalls.at(-1)?.name,"create_growth_operator_booking");
+      assert.deepEqual(rpcCalls.at(-1)?.args,{p_request_id:REQUEST,p_operator_user_id:USER,p_lead_id:LEAD,p_request_key:STAGE,p_doctor_id:OPERATOR,p_service_ids:[OTHER],p_starts_local:body.startsLocal,p_time_zone:body.timeZone});
+      assert.doesNotMatch(JSON.stringify(created.body),/must-not-return|private|clientPhone/);
+      for (const patch of [{priceMinor:1},{clientId:OTHER},{userId:OTHER},{status:"paid"},{serviceIds:[]},{serviceIds:[OTHER,OTHER]},{startsLocal:"2030-02-31T10:00"}]) {
+        const count = rpcCalls.length;
+        assert.equal((await call("operator-bookings","POST",{...body,...patch},undefined,WORKSPACE,query)).statusCode,400);
+        assert.equal(rpcCalls.length,count);
+      }
+      assert.equal((await call("operator-bookings","POST",body,null,WORKSPACE,query)).statusCode,401);
+      validToken=false;
+      assert.equal((await call("operator-bookings","POST",body,undefined,WORKSPACE,query)).statusCode,401);
+    });
+    await t.test("operator booking schema lag, permissions and conflicts have safe errors without fallback writes", async () => {
+      for (const [code,message,status] of [
+        ["PGRST202","private-db-detail",503], ["P0001","operator_access_denied",403],
+        ["P0001","operator_booking_time_taken",409], ["P0001","operator_booking_outside_schedule",409],
+        ["P0001","operator_booking_price_required",409], ["42P01","private-db-detail",503],
+      ] as const) {
+        reset();rpcFailure=code;rpcMessage=message;
+        const result=await call("operator-bookings","POST",{leadId:LEAD,requestKey:STAGE,doctorId:OPERATOR,serviceIds:[OTHER],startsLocal:"2030-01-07T10:00",timeZone:"Asia/Almaty"},undefined,WORKSPACE,{requestId:REQUEST});
+        assert.equal(result.statusCode,status);
+        assert.doesNotMatch(JSON.stringify(result.body),/private-db-detail/);
+        assert.equal(log.length,0);
+      }
+    });
   } finally {
     globalThis.fetch = savedFetch;
     supabase.setSupabaseServerClientFactoryForTests(null);
@@ -799,6 +838,21 @@ test("operator catalog UI is read-only, scoped to accepted operator requests and
   const server = await read("lib/crm/operator-services.ts");
   assert.doesNotMatch(server, /\.insert\(|\.update\(|\.delete\(|\.rpc\(/);
   assert.match(server, /requireAuthenticatedUser/);
+});
+
+test("operator booking UI submits only catalog IDs, retains retry key and handles access denial", async () => {
+  const ui = await readFile(path.join(root,"artifacts/negis/src/components/operators/OperatorBookingForm.tsx"),"utf8");
+  assert.match(ui,/useState\(\(\) => crypto.randomUUID\(\)\)/);
+  assert.match(ui,/serviceIds: selected.map/);
+  assert.match(ui,/OperatorApiError/);
+  assert.match(ui,/onAccessDenied\(\)/);
+  assert.match(ui,/Дата и время клиники/);
+  assert.match(ui,/Создать запись/);
+  assert.doesNotMatch(ui,/localStorage|sessionStorage|type="number"|clientId:|priceMinor:/);
+  const backend = await readFile(path.join(root,"lib/crm/operator-bookings.ts"),"utf8");
+  assert.match(backend,/requireAuthenticatedUser/);
+  assert.match(backend,/create_growth_operator_booking/);
+  assert.doesNotMatch(backend,/\.insert\(|\.update\(|handleCrmCreate|role: "owner"/);
 });
 
 test("operator entry, clinic and platform controls stay distinct", async () => {

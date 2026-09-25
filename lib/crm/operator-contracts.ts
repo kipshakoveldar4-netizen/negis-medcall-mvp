@@ -34,6 +34,16 @@ export type OperatorLead = {
 
 export type OperatorList<T> = { items: T[]; hasMore: boolean };
 export type OperatorDoctor = { id: string; name: string; specialty: string };
+export type OperatorBooking = {
+  id: string;
+  startsAt: string;
+  service: string;
+  doctorName: string;
+  priceMinor: string;
+  durationMinutes: number;
+  status: string;
+  timeZone: string;
+};
 export type OperatorService = {
   id: string;
   name: string;

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   ChevronLeft,
   ChevronRight,
@@ -7,7 +7,9 @@ import {
   Search,
 } from "lucide-react";
 import { operatorApi, useOperatorList } from "@/lib/operatorApi";
+import { OperatorBookingForm } from "./OperatorBookingForm";
 import {
+  formatArrivalPrice,
   type OperatorLead,
   type OperatorLeadScope,
   type OperatorLeadList,
@@ -67,6 +69,7 @@ export function OperatorLeads({
       <LeadList
         key={`${requestId}:${submittedSearch}:${workspaceId || "operator"}`}
         path={`${base}&search=${encodeURIComponent(submittedSearch)}`}
+        requestId={requestId}
         clinic={Boolean(workspaceId)}
         canAssign={Boolean(workspaceId) && leadScope === "assigned"}
       />
@@ -76,10 +79,12 @@ export function OperatorLeads({
 
 function LeadList({
   path,
+  requestId,
   clinic,
   canAssign,
 }: {
   path: string;
+  requestId: string;
   clinic: boolean;
   canAssign: boolean;
 }) {
@@ -87,7 +92,13 @@ function LeadList({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [bookingLeadId, setBookingLeadId] = useState<string | null>(null);
   const refresh = list.refresh;
+  const bookingAccessDenied = useCallback(() => {
+    setBookingLeadId(null);
+    setError("Доступ к заявке изменился. Список обновлён.");
+    refresh();
+  }, [refresh]);
   useEffect(() => {
     // Revalidate access when returning to the page; never persist patient contacts.
     window.addEventListener("focus", refresh);
@@ -219,6 +230,41 @@ function LeadList({
                   onSave={(stageId) => void changeStage(item, stageId)}
                 />
               )}
+            {!clinic && (
+              <button
+                type="button"
+                className="neu-btn"
+                disabled={busy}
+                aria-expanded={bookingLeadId === item.id}
+                onClick={() =>
+                  setBookingLeadId(bookingLeadId === item.id ? null : item.id)
+                }
+              >
+                {bookingLeadId === item.id
+                  ? "Закрыть запись"
+                  : "Записать пациента"}
+              </button>
+            )}
+            {!clinic && bookingLeadId === item.id && (
+              <OperatorBookingForm
+                key={item.id}
+                requestId={requestId}
+                leadId={item.id}
+                onAccessDenied={bookingAccessDenied}
+                onBooked={(booking) => {
+                  const when = new Intl.DateTimeFormat("ru-RU", {
+                    timeZone: booking.timeZone,
+                    dateStyle: "short",
+                    timeStyle: "short",
+                  }).format(new Date(booking.startsAt));
+                  setNotice(
+                    `Запись сохранена: ${when}, ${booking.doctorName}. ${booking.service}. ${formatArrivalPrice(booking.priceMinor, "KZT")}.`,
+                  );
+                  setBookingLeadId(null);
+                  refresh();
+                }}
+              />
+            )}
           </div>
         ))}
       </div>

@@ -7,7 +7,7 @@ import {
   type OperatorService,
 } from "../../../../../lib/crm/operator-contracts";
 
-function Pagination({
+export function OperatorCatalogPagination({
   previous,
   next,
   offset,
@@ -90,7 +90,7 @@ function Services({
           </li>
         ))}
       </ul>
-      <Pagination {...list} hasMore={!!list.data?.hasMore} />
+      <OperatorCatalogPagination {...list} hasMore={!!list.data?.hasMore} />
     </section>
   );
 }
@@ -151,7 +151,7 @@ export function OperatorServiceCatalog({ requestId }: { requestId: string }) {
           </select>
         </label>
       )}
-      <Pagination {...list} hasMore={!!list.data?.hasMore} />
+      <OperatorCatalogPagination {...list} hasMore={!!list.data?.hasMore} />
       {doctor && (
         <Services
           key={`${requestId}:${doctor.id}`}

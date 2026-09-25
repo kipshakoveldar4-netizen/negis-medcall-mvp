@@ -5,6 +5,15 @@ import {
   type OperatorList,
 } from "../../../../lib/crm/operator-contracts";
 
+export class OperatorApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+  }
+}
+
 export async function operatorApi<T>(
   path: string,
   body?: unknown,
@@ -29,12 +38,13 @@ export async function operatorApi<T>(
     data?: T;
   } | null;
   if (!response.ok || !payload?.success) {
-    throw new Error(
+    throw new OperatorApiError(
       payload?.code === "authorization_unavailable"
         ? "Сервис входа не ответил. Попробуйте обновить данные чуть позже."
         : payload?.error && response.status !== 401 && response.status !== 403
           ? payload.error
           : crmErrorMessage(response.status),
+      response.status,
     );
   }
   return payload.data as T;
