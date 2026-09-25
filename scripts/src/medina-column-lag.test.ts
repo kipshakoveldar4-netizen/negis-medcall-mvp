@@ -42,6 +42,7 @@ type Write = { table: string; op: "insert" | "update"; row: Record<string, unkno
 type Attempts = { writes: number };
 
 type LagState = {
+  table: string;
   /** Колонок нет в базе. Множество живое: кэш схемы умеет «догонять» — см. healAfter. */
   missing: Set<string>;
   /** Отказ, не относящийся к колонкам вовсе (например, нарушение уникальности). */
@@ -78,7 +79,7 @@ function laggingClient(state: LagState, writes: Write[], rows: Record<string, un
           // даёт сам Postgres. Без этого «отставшая база» в наборе была бы
           // вдвое добрее настоящей: проверка пересечений читает
           // duration_minutes явным списком.
-          const named = [...state.missing].find((column) => requested.includes(column));
+          const named = table === state.table && [...state.missing].find((column) => requested.includes(column));
           if (named) {
             resolve({ data: null, error: { code: "42703", message: `column ${table}.${named} does not exist` } });
             return;
@@ -94,7 +95,7 @@ function laggingClient(state: LagState, writes: Write[], rows: Record<string, un
           return;
         }
         // Первая недостающая колонка строки — база называет по одной за раз.
-        const named = Object.keys(written).find((column) => state.missing.has(column));
+        const named = table === state.table && Object.keys(written).find((column) => state.missing.has(column));
         if (named) {
           resolve({
             data: null,
@@ -175,6 +176,7 @@ async function callRouter(options: {
   };
 
   const state: LagState = {
+    table: options.resource ?? "appointments",
     missing: new Set(options.missing ?? []),
     writeError: options.writeError ?? null,
     healAfter: options.healAfter,
@@ -266,8 +268,8 @@ test("CL4 правка записи переживает то же отстав�
 
 test("CL5 боевой случай целиком: нет всех трёх колонок 012 — запись создаётся", async () => {
   // Ровно то состояние, в котором мастер не мог записать ни одного клиента.
-  const { res, writes } = await callRouter({ missing: [...COLUMNS_012], body: booking() });
-  assert.equal(res.statusCode, 201, JSON.stringify(res.body));
+  const { res, writes, warnings } = await callRouter({ missing: [...COLUMNS_012], body: booking() });
+  assert.equal(res.statusCode, 201, JSON.stringify({ body: res.body, warnings }));
   assert.equal(writes.length, 1);
   for (const column of COLUMNS_012) assert.ok(!(column in writes[0].row), `${column} снята`);
   assert.equal(writes[0].row.starts_at, SLOT_START, "время визита сохранено");

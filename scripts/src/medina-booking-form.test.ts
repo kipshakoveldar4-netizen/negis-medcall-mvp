@@ -30,7 +30,7 @@ test("BF1 мастер стоит в форме раньше услуги — п
 
 test("BF2 услуга в списке читается с ценой и длительностью, ноль остаётся нулём", async () => {
   const page = await read("artifacts", "negis", "src", "pages", "AppointmentsPage.tsx");
-  assert.match(page, /Math\.round\(service\.basePriceMinor \/ 100\)\.toLocaleString\("ru-RU"\)/);
+  assert.match(page, /\(service\.basePriceMinor \/ 100\)\.toLocaleString\("ru-RU"\)/);
   assert.match(page, /` · \$\{service\.durationMinutes\} мин`/);
   // «Бесплатная консультация» с ценой 0 — осознанный ноль, а не отсутствие
   // цены: readNumber(price, 0) || null ронял его в null.
@@ -44,8 +44,11 @@ test("BF3 пустая цена — null на ОБОИХ слоях, и ника
   const page = await read("artifacts", "negis", "src", "pages", "AppointmentsPage.tsx");
   const server = await read("lib", "crm", "server.ts");
 
-  // Клиент: пустая строка, нечисло и минус — null.
-  assert.match(page, /form\.priceTenge\.trim\(\) === "" \|\| !Number\.isFinite\(raw\) \|\| raw < 0\) return null/);
+  // Пустая строка остаётся null; неверная цена теперь отклоняется общим валидатором.
+  assert.match(page, /appointmentPriceFromInput\(form\.priceTenge\)/);
+  const services = await read("lib", "crm", "appointment-services.ts");
+  assert.match(services, /if \(!normalized\) return null/);
+  assert.match(services, /items\.every\(\(item\) => item\.priceMinor !== null\)/);
 
   // Сервер: ключ price_minor попадает в insert только с названной ценой.
   // readNumber(null) === 0 — ровно так пустая цена становилась «бесплатно».
@@ -69,8 +72,12 @@ test("BF4 длительность — любое число минут ката
   // Кламп — на blur, не на каждом нажатии: покстрочный кламп превращал «45»
   // в 55 («4» клампится в 5, потом дописывается «5»).
   assert.match(page, /onBlur=\{\(\) => \{[\s\S]{0,220}Math\.max\(1, Math\.min\(600/);
-  // И при отправке — сервер не должен получать 0 от стёртого поля.
-  assert.match(page, /durationMinutes: Math\.max\(1, Math\.min\(600, form\.durationMinutes \|\| 60\)\)/);
+  // При отправке валидируется каждая строка и суммарное время, без усечения суммы.
+  assert.match(page, /normalizeAppointmentServices\(formServiceItems\(form\)\)/);
+  assert.match(page, /durationMinutes: total\.durationMinutes/);
+  const services = await read("lib", "crm", "appointment-services.ts");
+  assert.match(services, /minutes < 1/);
+  assert.match(services, /total\.durationMinutes > 600/);
 });
 
 test("BF5 правка записи сохраняет цену — PATCH умеет её писать и чистить", async () => {
@@ -215,5 +222,5 @@ test("BF16 сначала выбирают мастера, затем видят
   assert.ok(page.includes('data-testid="appointment-service-waiting-for-doctor"'));
   assert.ok(page.includes("Сначала выберите ${terms.specialistGenitive} — появятся его услуги с ценами"));
   assert.ok(page.includes("Другая услуга…"), "после выбора мастера остаётся ручная услуга");
-  assert.ok(page.includes(">Цена, ₸</span>"), "у ручной услуги остаётся редактируемая цена");
+  assert.ok(page.includes('"Цена, ₸"') && page.includes('value={form.priceTenge}'), "у ручной услуги остаётся редактируемая цена");
 });

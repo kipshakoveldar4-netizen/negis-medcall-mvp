@@ -24,6 +24,8 @@ import { formatPhone, toTelHref, toWhatsappHref } from "@/lib/phone";
 import { clinicToday, dayKeyInZone, isOnClinicDay } from "@/lib/clinicDay";
 import { useAuth } from "@/contexts/AuthContext";
 import { MasterDayGrid } from "@/components/crm/master-day-grid";
+import { AppointmentExtraServices } from "@/components/crm/appointment-extra-services";
+import { appointmentPriceFromInput, normalizeAppointmentServices, readAppointmentServices, summarizeAppointmentServices, type AppointmentServiceItem } from "../../../../lib/crm/appointment-services";
 import { formatSlot, freeSlots, groupSlots, minuteOfClinicDay, workingIntervals } from "@/lib/dayGrid";
 import { capitalize, termsFor, type Terms } from "../../../../lib/vertical/terms";
 import { leadStageDefinitionFromUnknown } from "@/lib/leadPipeline";
@@ -41,6 +43,7 @@ type Appointment = {
   service: string;
   /** Ссылка на строку справочника услуг. Пустая — услуга набрана текстом. */
   serviceId: string;
+  serviceItems: AppointmentServiceItem[];
   doctor: string;
   /** Ссылка на строку справочника врачей. Пустая — врач набран текстом. */
   doctorId: string;
@@ -60,6 +63,7 @@ type AppointmentForm = {
   whatsapp: string;
   service: string;
   serviceId: string;
+  additionalServices: AppointmentServiceItem[];
   doctor: string;
   doctorId: string;
   date: string;
@@ -387,6 +391,7 @@ function makeSeedAppointment(
     service,
     // Демо-записи не ссылаются ни на каталог, ни на справочник врачей.
     serviceId: "",
+    serviceItems: [],
     doctor,
     doctorId: "",
     startsAt: toStartsAt(date, time),
@@ -507,6 +512,7 @@ function appointmentFromApi(value: unknown): Appointment {
     whatsapp: readString(record.whatsapp) || phone,
     service: readString(record.service) || "Консультация",
     serviceId: readString(record.serviceId) || readString(record.service_id),
+    serviceItems: readAppointmentServices(record.serviceItems ?? record.service_items),
     // Никакого имени по умолчанию. Запись без врача рисовалась как «д-р Сауле» —
     // именем, которого в базе нет, и оператор не мог отличить её от настоящей.
     doctor: readString(record.doctor) || readString(record.doctor_name) || readString(record.doctorName),
@@ -550,6 +556,7 @@ function appointmentToApi(appointment: Appointment): Record<string, unknown> {
     // Всегда, а не по условию: пустая строка — это осознанная отвязка, и
     // старая запись, которая её пришлёт, запишет null поверх null.
     serviceId: appointment.serviceId || "",
+    ...(appointment.serviceItems?.length ? { serviceItems: appointment.serviceItems } : {}),
     doctor: appointment.doctor,
     doctorName: appointment.doctor,
     // Всегда, как и serviceId: пустая строка — осознанная отвязка.
@@ -592,6 +599,7 @@ function defaultForm(date: string, time = "09:00"): AppointmentForm {
     whatsapp: "",
     service: "Консультация",
     serviceId: "",
+    additionalServices: [],
     // Пусто, а не первый из выдуманных: регистратор, не тронувший поле,
     // заводил настоящий визит на несуществующего врача.
     doctor: "",
@@ -607,46 +615,49 @@ function defaultForm(date: string, time = "09:00"): AppointmentForm {
 }
 
 function formFromAppointment(appointment: Appointment): AppointmentForm {
+  const first = appointment.serviceItems?.[0];
   return {
     clientId: appointment.clientId || "",
     client: appointment.client,
     phone: appointment.phone,
     whatsapp: appointment.whatsapp || appointment.phone,
-    service: appointment.service,
-    serviceId: appointment.serviceId || "",
+    service: first?.name ?? appointment.service,
+    serviceId: first?.serviceId ?? appointment.serviceId ?? "",
+    additionalServices: appointment.serviceItems?.slice(1) ?? [],
     doctor: appointment.doctor,
     doctorId: appointment.doctorId || "",
     date: dateKeyFromStartsAt(appointment.startsAt),
     time: timeKeyFromStartsAt(appointment.startsAt),
-    durationMinutes: appointment.durationMinutes,
-    priceTenge: appointment.priceMinor === null || appointment.priceMinor === undefined ? "" : String(Math.round(appointment.priceMinor / 100)),
+    durationMinutes: first?.durationMinutes ?? appointment.durationMinutes,
+    priceTenge: (first ? first.priceMinor : appointment.priceMinor) == null ? "" : String((first ? first.priceMinor! : appointment.priceMinor!) / 100),
     status: appointment.status,
     notes: appointment.notes,
     source: appointment.source || "Ресепшн",
   };
 }
 
+function formServiceItems(form: AppointmentForm): AppointmentServiceItem[] {
+  return [{ serviceId: form.serviceId, name: form.service.trim(), priceMinor: appointmentPriceFromInput(form.priceTenge), durationMinutes: form.durationMinutes }, ...form.additionalServices];
+}
+
 function appointmentFromForm(form: AppointmentForm, existingId?: string): Appointment {
+  const serviceItems = normalizeAppointmentServices(formServiceItems(form));
+  const total = summarizeAppointmentServices(serviceItems);
   return {
     id: existingId || `appointment-${Date.now()}`,
     clientId: form.clientId || "",
     client: form.client.trim(),
     phone: form.phone.trim(),
     whatsapp: (form.whatsapp || form.phone).trim(),
-    service: form.service.trim(),
-    serviceId: form.serviceId || "",
+    service: total.service,
+    serviceId: total.serviceId,
+    serviceItems,
     doctor: form.doctor.trim(),
     doctorId: form.doctorId || "",
     startsAt: toStartsAt(form.date, form.time),
-    // Цена уходит в тиынах; пустое поле, нечисло и минус — null, «цена не
-    // называлась». Тот же вердикт даёт сервер: два слоя не должны кодировать
-    // один ввод по-разному.
-    priceMinor: (() => {
-      const raw = Number(form.priceTenge);
-      if (form.priceTenge.trim() === "" || !Number.isFinite(raw) || raw < 0) return null;
-      return Math.round(raw) * 100;
-    })(),
-    durationMinutes: Math.max(1, Math.min(600, form.durationMinutes || 60)),
+    // Неизвестная цена хотя бы одной услуги оставляет итог неизвестным.
+    priceMinor: total.priceMinor,
+    durationMinutes: total.durationMinutes,
     status: form.status,
     notes: form.notes.trim(),
     source: form.source.trim(),
@@ -898,7 +909,7 @@ function AppointmentCard({
       </div>
 
       <div className="mt-4 grid grid-cols-2 gap-3">
-        <Detail label="Услуга">{appointment.service}</Detail>
+        <Detail label="Услуги">{appointment.service}</Detail>
         <Detail label={capitalize(terms.specialist)}>{appointment.doctor}</Detail>
         <Detail label="Длительность">{appointment.durationMinutes} мин</Detail>
         {appointment.priceMinor !== null ? (
@@ -966,6 +977,11 @@ export function AppointmentsPage() {
   const [modalOpen, setModalOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState<AppointmentForm>(() => defaultForm(todayKeyAtLoad));
+  const totalDurationMinutes = form.durationMinutes + form.additionalServices.reduce((sum, item) => sum + item.durationMinutes, 0);
+  const totalPriceMinor = useMemo(() => {
+    try { return summarizeAppointmentServices(formServiceItems(form)).priceMinor; }
+    catch { return null; }
+  }, [form]);
   const [clientMatches, setClientMatches] = useState<ClientSearchResult[]>([]);
   const [clientSearchLoading, setClientSearchLoading] = useState(false);
   const [clientSearchAttempted, setClientSearchAttempted] = useState(false);
@@ -1200,6 +1216,14 @@ export function AppointmentsPage() {
     // а название названо в подписи, так что оператор видит, что было.
     setForm((current) => ({ ...current, serviceId: "", priceTenge: "" }));
   }, [doctorCatalog, form.doctorId, form.service, form.serviceId, terms.specialistGenitive]);
+
+  useEffect(() => {
+    if (!doctorCatalog?.canPrune || doctorCatalog.doctorId !== form.doctorId) return;
+    const allowed = form.additionalServices.filter(item => !item.serviceId || doctorCatalog.services.some(service => service.id === item.serviceId && service.doctorId === form.doctorId));
+    if (allowed.length === form.additionalServices.length) return;
+    setForm(current => ({ ...current, additionalServices: allowed }));
+    setServiceScopeNotice("Услуги прежнего мастера убраны из списка. Проверьте услуги выбранного мастера.");
+  }, [doctorCatalog, form.doctorId, form.additionalServices]);
 
   /** Активные врачи в порядке справочника — то, из чего выбирают в форме. */
   const activeDoctors = useMemo(
@@ -1684,7 +1708,7 @@ export function AppointmentsPage() {
       .filter((interval): interval is [number, number] => interval !== null);
 
     const nowMinute = form.date === todayKey ? minuteOfClinicDay(new Date().toISOString(), clinicTimeZone) : null;
-    const slots = freeSlots({ intervals, busy, durationMinutes: form.durationMinutes, nowMinute });
+    const slots = freeSlots({ intervals, busy, durationMinutes: totalDurationMinutes, nowMinute });
 
     // Пустота пустоте рознь: «всё занято» — только когда виновата занятость.
     let reason: "закрыт" | "занято" | "день кончился" | "не помещается" | null = null;
@@ -1692,13 +1716,13 @@ export function AppointmentsPage() {
       if (definesThisDay && intervals.length === 0) reason = "закрыт";
       else if (
         nowMinute !== null &&
-        freeSlots({ intervals, busy, durationMinutes: form.durationMinutes, nowMinute: null }).length > 0
+        freeSlots({ intervals, busy, durationMinutes: totalDurationMinutes, nowMinute: null }).length > 0
       ) reason = "день кончился";
       else if (busy.length === 0) reason = "не помещается";
       else reason = "занято";
     }
     return { groups: groupSlots(slots), reason };
-  }, [form.date, form.doctorId, form.durationMinutes, shifts, items, editingId, activeDoctors, clinicTimeZone, deviceTimeZone, todayKey, userRole]);
+  }, [form.date, form.doctorId, totalDurationMinutes, shifts, items, editingId, activeDoctors, clinicTimeZone, deviceTimeZone, todayKey, userRole]);
 
   /**
    * Архив клиента — просьба владельца дословно: «сбоку, когда записываешь,
@@ -1973,10 +1997,16 @@ export function AppointmentsPage() {
     const resolvedDoctorId = form.doctorId
       || activeDoctors.find((doctor) => doctor.fullName.trim().toLowerCase() === form.doctor.trim().toLowerCase())?.id
       || "";
-    const appointment = appointmentFromForm(
-      { ...form, serviceId: resolvedServiceId, doctorId: resolvedDoctorId },
-      editingId || undefined,
-    );
+    let appointment: Appointment;
+    try {
+      appointment = appointmentFromForm(
+        { ...form, serviceId: resolvedServiceId, doctorId: resolvedDoctorId },
+        editingId || undefined,
+      );
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Проверьте услуги записи.");
+      return;
+    }
 
     // Быстрый локальный префильтр: если конфликт виден в уже загруженном
     // расписании, спрашиваем без обращения к серверу. Авторитет — не здесь:
@@ -2671,6 +2701,7 @@ export function AppointmentsPage() {
                           doctor: "",
                           serviceId: "",
                           service: "",
+                          additionalServices: [],
                           priceTenge: "",
                         }));
                         return;
@@ -2730,6 +2761,7 @@ export function AppointmentsPage() {
                       className="neu-input w-full cursor-not-allowed opacity-70"
                       type="text"
                       disabled
+                      value=""
                       placeholder={`Сначала выберите ${terms.specialistGenitive}`}
                     />
                   </label>
@@ -2773,12 +2805,13 @@ export function AppointmentsPage() {
                         </p>
                       ) : null}
                       {serviceMatches.map((service) => {
-                          const price = service.basePriceMinor === null ? "" : ` — ${Math.round(service.basePriceMinor / 100).toLocaleString("ru-RU")} ₸`;
+                          const price = service.basePriceMinor === null ? "" : ` — ${(service.basePriceMinor / 100).toLocaleString("ru-RU")} ₸`;
                           const length = service.durationMinutes ? ` · ${service.durationMinutes} мин` : "";
                           return (
                             <button
                               key={service.id}
                               type="button"
+                              disabled={form.additionalServices.some(item => item.serviceId === service.id)}
                               className="block w-full rounded-xl px-3 py-2 text-left text-sm font-black"
                               style={{ background: "var(--negis-border)", color: "var(--negis-text)" }}
                               onClick={() => {
@@ -2789,7 +2822,7 @@ export function AppointmentsPage() {
                                   serviceId: service.id,
                                   service: service.name,
                                   durationMinutes: service.durationMinutes ?? current.durationMinutes,
-                                  priceTenge: service.basePriceMinor === null ? "" : String(Math.round(service.basePriceMinor / 100)),
+                                  priceTenge: service.basePriceMinor === null ? "" : String(service.basePriceMinor / 100),
                                 }));
                               }}
                             >
@@ -2826,15 +2859,15 @@ export function AppointmentsPage() {
                         durationMinutes: service.durationMinutes ?? current.durationMinutes,
                         // Цена из прайса — подсказка, не приговор: поле ниже
                         // остаётся редактируемым, скидку вписывают поверх.
-                        priceTenge: service.basePriceMinor === null ? current.priceTenge : String(Math.round(service.basePriceMinor / 100)),
+                        priceTenge: service.basePriceMinor === null ? "" : String(service.basePriceMinor / 100),
                       }));
                     }}
                   >
                     {activeCatalog.map((service) => {
-                      const price = service.basePriceMinor === null ? "" : ` — ${Math.round(service.basePriceMinor / 100).toLocaleString("ru-RU")} ₸`;
+                      const price = service.basePriceMinor === null ? "" : ` — ${(service.basePriceMinor / 100).toLocaleString("ru-RU")} ₸`;
                       const length = service.durationMinutes ? ` · ${service.durationMinutes} мин` : "";
                       return (
-                        <option key={service.id} value={service.id}>{`${service.name}${price}${length}`}</option>
+                        <option key={service.id} value={service.id} disabled={form.additionalServices.some(item => item.serviceId === service.id)}>{`${service.name}${price}${length}`}</option>
                       );
                     })}
                     {/* Услуга записи могла уехать в архив после того, как её
@@ -2924,7 +2957,7 @@ export function AppointmentsPage() {
                 </div>
               ) : null}
               <div>
-                <span className="mb-2 block text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">Длительность, минут</span>
+                <span className="mb-2 block text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">{form.additionalServices.length ? "Первая услуга: длительность, минут" : "Длительность, минут"}</span>
                 {/* Свободное число, а не четыре варианта: воск идёт 5 минут,
                     VIP-комплекс — 2 часа, и оба должны выражаться честно.
                     От длительности зависят свободные слоты и проверка
@@ -2969,7 +3002,7 @@ export function AppointmentsPage() {
                 </div>
               </div>
               <div>
-                <span className="mb-2 block text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">Цена, ₸</span>
+                <span className="mb-2 block text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">{form.additionalServices.length ? "Первая услуга: цена, ₸" : "Цена, ₸"}</span>
                 {/* Снимок договорённости: прайс подставляет, рука правит.
                     Пусто — «цена не называлась», и это отличается от нуля. */}
                 <input
@@ -2977,11 +3010,21 @@ export function AppointmentsPage() {
                   type="number"
                   min={0}
                   max={100000000}
-                  step={1}
+                  step="0.01"
                   placeholder="Из прайса или своя"
                   value={form.priceTenge}
                   onChange={(event) => setForm((current) => ({ ...current, priceTenge: event.target.value }))}
                 />
+              </div>
+              {(!activeDoctors.length || form.doctorId) && <AppointmentExtraServices
+                key={`${editingId || "new"}:${form.doctorId}`}
+                items={form.additionalServices} catalog={activeCatalog} primaryId={form.serviceId}
+                onChange={additionalServices => setForm(current => ({ ...current, additionalServices }))}
+              />}
+              <div className="md:col-span-2 border-t pt-3 flex flex-wrap gap-x-6 gap-y-2 text-sm" aria-label="Итого по записи">
+                <span>Услуг: {1 + form.additionalServices.length}</span>
+                <span>Общее время: {totalDurationMinutes} мин</span>
+                <strong>Итого: {totalPriceMinor === null || !Number.isFinite(totalPriceMinor) ? "цена не указана для всех услуг" : `${(totalPriceMinor / 100).toLocaleString("ru-RU")} ₸`}</strong>
               </div>
               <SelectField label="Статус" value={form.status} onChange={(status) => setForm((current) => ({ ...current, status: normalizeStatus(status) }))}>
                 {statusOptions.map((status) => <option key={status} value={status}>{getAppointmentStatusLabel(status)}</option>)}

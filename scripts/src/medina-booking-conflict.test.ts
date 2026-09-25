@@ -478,6 +478,25 @@ test("BC22 обход мёртв целиком: ни записи, ни стр�
   );
 });
 
+test("BC-MS combined service duration protects the next appointment on create and edit", async () => {
+  const serviceItems = [
+    { serviceId: "", name: "Первая процедура", priceMinor: 500000, durationMinutes: 30 },
+    { serviceId: "", name: "Вторая процедура", priceMinor: 200000, durationMinutes: 30 },
+  ];
+  const next = occupiedRow({ id: "a0000000-0000-4000-8000-000000000009", starts_at: "2026-09-01T10:45:00.000Z" });
+  const call = await loadRouter({ appointments: [next] });
+  const blocked = await call({ body: booking({ durationMinutes: 1, serviceItems }) });
+  assert.equal(blocked.res.statusCode, 409, JSON.stringify(blocked.res.body));
+  assert.equal(writes(blocked.log).length, 0);
+
+  const allowed = await call({ body: booking({ serviceItems: serviceItems.slice(0, 1) }) });
+  assert.equal(allowed.res.statusCode, 201, JSON.stringify(allowed.res.body));
+  const edit = await loadRouter({ appointments: [occupiedRow({ duration_minutes: 30 }), next] });
+  const extended = await edit({ method: "PATCH", body: { id: EXISTING_ID, updates: { serviceItems } } });
+  assert.equal(extended.res.statusCode, 409, JSON.stringify(extended.res.body));
+  assert.equal(writes(extended.log).length, 0);
+});
+
 /* ── Source pins ── */
 
 test("BC15 the server is the authority, and the browser is only a fast pre-filter", async () => {

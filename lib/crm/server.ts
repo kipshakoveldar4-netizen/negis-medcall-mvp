@@ -4,6 +4,7 @@ import { canAssignRole, isStaffRole, isWorkspaceAdminRole } from "../auth/permis
 import { extractJsonObject, generateText, resolveTextProvider } from "../ai/text-provider";
 import { normalizeAdvertisingContentApproval } from "../advertising/campaignBrief";
 import { normalizePhone } from "./phone";
+import { normalizeAppointmentServices, readAppointmentServices, summarizeAppointmentServices } from "./appointment-services";
 import { hidesClientContacts, redactContacts, redactContactsList, stripContactWrites } from "./contact-privacy";
 import { isEmptyIdentity, rowBelongsTo, rowTargetsOnlySelf, seesOnlyOwnWork, type OwnWorkIdentity } from "./own-work";
 import { escapeLikePattern } from "./staff-invitations";
@@ -180,6 +181,14 @@ class CrmReferenceValidationError extends Error {
     this.name = "CrmReferenceValidationError";
     this.details = details;
   }
+}
+
+class AppointmentServicesSchemaError extends Error {}
+
+function appointmentServicesValidationDetails(resource: string, body: JsonRecord): string[] {
+  if (resource !== "appointments" || !hasAnyKey(body, ["serviceItems", "service_items"])) return [];
+  try { normalizeAppointmentServices(body.serviceItems ?? body.service_items); return []; }
+  catch (error) { return [error instanceof Error ? error.message : "Проверьте услуги записи."]; }
 }
 
 function isUuid(value: unknown): value is string {
@@ -1408,6 +1417,7 @@ function makeAppointment(body: JsonRecord): JsonRecord {
     phone,
     whatsapp: firstString(body.whatsapp, phone),
     service: readString(body.service),
+    serviceItems: readAppointmentServices(body.serviceItems ?? body.service_items),
     doctor: firstString(body.doctor, body.doctor_name, body.doctorName),
     status: readString(body.status) || "scheduled",
     notes: readString(body.notes),
@@ -1976,6 +1986,7 @@ const configs: Record<CrmResource, ResourceConfig> = {
         phone: row.client_phone,
         whatsapp: row.whatsapp,
         service: row.service,
+        serviceItems: row.service_items,
         doctor: row.doctor_name,
         startsAt: row.starts_at,
         time: row.starts_at || row.notes,
@@ -2874,6 +2885,9 @@ export class AppointmentOutsideScheduleError extends Error {
  * ровно ту поломку, которую гейт и заведён предотвращать.
  */
 function sameFieldValue(column: string, next: unknown, previous: unknown): boolean {
+  if (column === "duration_minutes") {
+    return appointmentMinutes(next) === appointmentMinutes(previous);
+  }
   if (column.endsWith("_at")) {
     const a = Date.parse(readString(next));
     const b = Date.parse(readString(previous));
@@ -3668,6 +3682,52 @@ async function buildServiceLinkRow(
   }
 
   return row;
+}
+
+async function buildAppointmentServicesRow(
+  supabase: CrmSupabaseClient, workspaceId: string, body: JsonRecord, before: JsonRecord = {},
+): Promise<JsonRecord> {
+  const offered = hasAnyKey(body, ["serviceItems", "service_items"]);
+  const previous = readAppointmentServices(before.service_items);
+  if (!offered) {
+    // An older browser may patch status or time, but cannot silently overwrite a bundle.
+    if (previous.length && [
+      ["service", "service"], ["serviceId", "service_id"], ["service_id", "service_id"],
+      ["priceMinor", "price_minor"], ["price_minor", "price_minor"],
+      ["durationMinutes", "duration_minutes"], ["duration_minutes", "duration_minutes"],
+      ["doctorId", "doctor_id"], ["doctor_id", "doctor_id"],
+    ].some(([key, column]) => key in body && (body[key] ?? "") !== (before[column] ?? ""))) {
+      throw new CrmReferenceValidationError(["Обновите страницу и сохраните полный список услуг записи."]);
+    }
+    return {};
+  }
+  let items;
+  try { items = normalizeAppointmentServices(body.serviceItems ?? body.service_items); }
+  catch (error) { throw new CrmReferenceValidationError([error instanceof Error ? error.message : "Проверьте услуги."]); }
+  // Probe before creating a client. Never save a bundle by silently dropping its list.
+  const probe = await supabase.from("appointments").select("service_items").eq("workspace_id", workspaceId).limit(1);
+  if (probe.error) {
+    if (isMissingAnyColumn(probe.error)) throw new AppointmentServicesSchemaError();
+    throw new Error("appointment services unavailable");
+  }
+  const doctorId = hasAnyKey(body, ["doctorId", "doctor_id"])
+    ? firstString(body.doctorId, body.doctor_id) : readString(before.doctor_id);
+  for (const item of items) {
+    if (!item.serviceId) continue;
+    // Unchanged historical references stay valid even if the catalog entry was deleted.
+    if (doctorId === readString(before.doctor_id) && (
+      previous.some(old => old.serviceId === item.serviceId)
+      || (!previous.length && item.serviceId === readString(before.service_id))
+    )) continue;
+    const service = await readWorkspaceReference({ supabase, workspaceId, table: "clinic_services", id: item.serviceId,
+      select: "id,doctor_id,is_active", fieldName: "serviceItems" });
+    if (!readBoolean(service.is_active)) throw new CrmReferenceValidationError(["Выберите действующие услуги."]);
+    const owner = readString(service.doctor_id);
+    if (owner && owner !== doctorId) throw new CrmReferenceValidationError(["Одна из услуг принадлежит другому мастеру."]);
+  }
+  const total = summarizeAppointmentServices(items);
+  return { service_items: items, service: total.service, service_id: total.serviceId || null,
+    price_minor: total.priceMinor, duration_minutes: total.durationMinutes };
 }
 
 /**
@@ -4707,7 +4767,7 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
 
   const config = configs[resource];
   const body = asRecord(req.body);
-  const details = [...validationDetails(body, config.requiredPost), ...resourceValidationDetails(resource, body)];
+  const details = [...validationDetails(body, config.requiredPost), ...resourceValidationDetails(resource, body), ...appointmentServicesValidationDetails(resource, body)];
 
   if (details.length > 0) {
     return sendJson(res, 400, errorBody("Validation error", details));
@@ -4810,7 +4870,10 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
       // проверка обязана считать слот по ней, а не по догадке в шестьдесят
       // минут. Поменять эти две строки местами — значит проверять не тот слот,
       // который будет записан.
-      Object.assign(row, await buildServiceLinkRow(supabase, workspaceId, body, { requireActive: true, prefillDuration: true }));
+      if (!hasAnyKey(body, ["serviceItems", "service_items"])) {
+        Object.assign(row, await buildServiceLinkRow(supabase, workspaceId, body, { requireActive: true, prefillDuration: true }));
+      }
+      Object.assign(row, await buildAppointmentServicesRow(supabase, workspaceId, body));
       Object.assign(row, await buildDoctorLinkRow(supabase, workspaceId, body, { requireActive: true }));
       // Занятое время выбранного мастера — жёсткий запрет, без обхода.
       // Флаг allowConflict больше не читается: владелец закрыл двойную
@@ -5003,6 +5066,9 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
         schedule: error.schedule,
       });
     }
+    if (error instanceof AppointmentServicesSchemaError) {
+      return sendJson(res, 503, errorBody("Несколько услуг пока не подключены", ["Администратору нужно применить миграцию 055. Запись не сохранена."]));
+    }
     if (error instanceof CrmReferenceValidationError) {
       return sendJson(res, 400, errorBody(error.message, error.details));
     }
@@ -5072,7 +5138,7 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
     });
   }
 
-  const details = validationDetails(patchBody, config.requiredPatch ?? []);
+  const details = [...validationDetails(patchBody, config.requiredPatch ?? []), ...appointmentServicesValidationDetails(resource, patchBody)];
   if (details.length > 0) {
     return sendJson(res, 400, {
       ...errorBody("PATCH failed", details),
@@ -5249,12 +5315,13 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
     }
     if (resource === "appointments") {
       Object.assign(row, await buildAppointmentReferenceRow(supabase, workspaceId, patchBody));
-      Object.assign(row, await buildServiceLinkRow(supabase, workspaceId, patchBody, {
+      if (!hasAnyKey(patchBody, ["serviceItems", "service_items"])) Object.assign(row, await buildServiceLinkRow(supabase, workspaceId, patchBody, {
         requireActive: false,
         prefillDuration: false,
         // Мастера правка часто не присылает — тогда он тот же, что в записи.
         doctorId: firstString(patchBody.doctorId, patchBody.doctor_id) || readString(before.doctor_id),
       }));
+      Object.assign(row, await buildAppointmentServicesRow(supabase, workspaceId, patchBody, before));
       Object.assign(row, await buildDoctorLinkRow(supabase, workspaceId, patchBody, { requireActive: false }));
     }
 
@@ -5576,6 +5643,9 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
         code: "outside_doctor_schedule",
         schedule: error.schedule,
       });
+    }
+    if (error instanceof AppointmentServicesSchemaError) {
+      return sendJson(res, 503, errorBody("Несколько услуг пока не подключены", ["Администратору нужно применить миграцию 055. Запись не сохранена."]));
     }
     if (error instanceof CrmReferenceValidationError) {
       return sendJson(res, 400, errorBody(error.message, error.details));

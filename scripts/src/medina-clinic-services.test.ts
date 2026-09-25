@@ -30,6 +30,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 // Ничего здесь не обращается к production: клиент базы — заглушка.
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
+const { appointmentPriceFromInput, normalizeAppointmentServices, summarizeAppointmentServices } = await import(pathToFileURL(path.join(repoRoot, "lib/crm/appointment-services.ts")).href);
 const routerPath = path.join(repoRoot, "api", "crm", "[...path].ts");
 const serverPath = path.join(repoRoot, "lib", "crm", "server.ts");
 const journalPath = path.join(repoRoot, "lib", "crm", "change-journal.ts");
@@ -107,7 +108,7 @@ function spyClient(
       };
 
       Object.assign(builder, {
-        select: () => chain(),
+        select: (fields: string) => { if (missingColumns.has(fields)) entry.filters.__missing = fields; return chain(); },
         insert: (row: unknown) => {
           entry.op = "insert";
           entry.filters.__row = row;
@@ -255,6 +256,127 @@ const hiddenService = {
   duration_minutes: null,
   is_active: false,
 };
+
+const bundle = [
+  { serviceId: SERVICE_ID, name: "Первая услуга", priceMinor: 500050, durationMinutes: 45 },
+  { serviceId: "", name: "Услуга вручную", priceMinor: 200000, durationMinutes: 30 },
+];
+
+test("MS1 цены суммируются в тиынах, длительности складываются, неизвестная цена не равна нулю", () => {
+  assert.deepEqual(summarizeAppointmentServices(normalizeAppointmentServices(bundle)), {
+    service: "Первая услуга + Услуга вручную", serviceId: "", priceMinor: 700050, durationMinutes: 75,
+  });
+  assert.equal(summarizeAppointmentServices([{...bundle[0], priceMinor: null}, bundle[1]]).priceMinor, null);
+  assert.equal(summarizeAppointmentServices([{...bundle[0], priceMinor: 0}]).priceMinor, 0);
+  assert.equal(appointmentPriceFromInput("5000,50"), 500050);
+  assert.equal(appointmentPriceFromInput(""), null);
+  assert.throws(() => appointmentPriceFromInput("-1"));
+});
+
+test("MS2 мусор, повтор, неполные услуги и слишком длинный визит отклоняются", () => {
+  for (const value of [null, [], [bundle[0], bundle[0]], [{...bundle[0], name: ""}],
+    [{...bundle[0], serviceId: []}], [{...bundle[0], priceMinor: -1}], [{...bundle[0], priceMinor: NaN}],
+    [{...bundle[0], priceMinor: 1.5}], [{...bundle[0], durationMinutes: 0}],
+    [{...bundle[0], durationMinutes: 600}, bundle[1]], Array(21).fill(bundle[1])]) {
+    assert.throws(() => normalizeAppointmentServices(value));
+  }
+});
+
+test("MS3 создание сохраняет весь список и серверный итог, не подставленный клиентом", async () => {
+  const call = await loadRouter({rows: {clinic_services: [activeService]}});
+  const {res,log} = await call({resource: "appointments", method: "POST", body: {
+    client: "Тест", serviceItems: bundle, priceMinor: 1, durationMinutes: 1,
+    service: "Подмена", serviceId: FOREIGN_SERVICE_ID, startsAt: "2026-09-27T09:00:00.000Z",
+  }});
+  assert.equal(res.statusCode, 201, JSON.stringify(res.body));
+  const row = writtenTo(log, "appointments")!;
+  assert.deepEqual(row.service_items, bundle);
+  assert.equal(row.price_minor, 700050); assert.equal(row.duration_minutes, 75);
+  assert.equal(row.service_id, null);
+  const item = (res.body.data as {item: Record<string,unknown>}).item;
+  assert.deepEqual(item.serviceItems, bundle);
+  assert.equal(item.priceMinor, 700050);
+});
+
+test("MS4 услуга чужой клиники или мастера не создаёт ни запись, ни клиента", async () => {
+  for (const service of [{...activeService, workspace_id: WORKSPACE_B}, {...activeService, doctor_id: FOREIGN_SERVICE_ID}]) {
+    const call = await loadRouter({rows:{clinic_services:[service]}});
+    const {res,log} = await call({resource:"appointments",method:"POST",body:{client:"Тест",phone:"+70000000000",serviceItems:bundle}});
+    assert.equal(res.statusCode,400,JSON.stringify(res.body));
+    assert.equal(writtenTo(log,"appointments"),null);
+    assert.equal(writtenTo(log,"clients"),null);
+  }
+});
+
+test("MS5 отсутствие 055 — понятный отказ до записи клиента, не потеря списка", async () => {
+  const call = await loadRouter({missingColumns:["service_items"],rows:{clinic_services:[activeService]}});
+  const {res,log} = await call({resource:"appointments",method:"POST",body:{client:"Тест",phone:"+70000000000",serviceItems:bundle}});
+  assert.equal(res.statusCode,503,JSON.stringify(res.body));
+  assert.match(JSON.stringify(res.body),/055/);
+  assert.equal(writtenTo(log,"appointments"),null); assert.equal(writtenTo(log,"clients"),null);
+});
+
+test("MS6 изменение списка пересчитывает итог; архив прайса не меняет прошлый визит", async () => {
+  const before = {id:APPOINTMENT_ID,workspace_id:WORKSPACE_A,service_items:bundle,doctor_id:null,status:"arrived"};
+  const call = await loadRouter({rows:{appointments:[before],clinic_services:[]}});
+  const changed = [bundle[0],{...bundle[1],priceMinor:300000}];
+  const {res,log} = await call({resource:"appointments",method:"PATCH",body:{id:APPOINTMENT_ID,updates:{serviceItems:changed,notes:"Проверено"}}});
+  assert.equal(res.statusCode,200,JSON.stringify(res.body));
+  assert.deepEqual(writtenTo(log,"appointments")?.service_items,changed);
+  assert.equal(writtenTo(log,"appointments")?.price_minor,800050);
+  assert.equal(writtenTo(log,"appointments")?.duration_minutes,75);
+});
+
+test("MS7 старый клиент может изменить заметку, но не стереть многосоставную запись", async () => {
+  const call = await loadRouter({rows:{appointments:[{id:APPOINTMENT_ID,workspace_id:WORKSPACE_A,service_items:bundle,service:"Первая услуга + Услуга вручную",price_minor:700050,duration_minutes:75,status:"arrived"}]}});
+  const safe = await call({resource:"appointments",method:"PATCH",body:{id:APPOINTMENT_ID,updates:{notes:"Заметка"}}});
+  assert.equal(safe.res.statusCode,200,JSON.stringify(safe.res.body));
+  assert.equal(writtenTo(safe.log,"appointments")?.service_items,undefined);
+  const refused = await call({resource:"appointments",method:"PATCH",body:{id:APPOINTMENT_ID,updates:{service:"Одна услуга"}}});
+  assert.equal(refused.res.statusCode,400);
+  assert.equal(writtenTo(refused.log,"appointments"),null);
+});
+
+test("MS8 невалидный список даёт 400, а новая архивная услуга запрещена", async () => {
+  const call = await loadRouter({rows:{clinic_services:[{...activeService,is_active:false}]}});
+  for (const serviceItems of [[bundle[0],bundle[0]], [{...bundle[0],name:""}], bundle]) {
+    const result = await call({resource:"appointments",method:"POST",body:{client:"Тест",serviceItems}});
+    assert.equal(result.res.statusCode,400,JSON.stringify(result.res.body));
+  }
+});
+
+test("MS11 старая запись с архивной услугой редактируется; новая чужая ссылка в PATCH запрещена", async () => {
+  const before = {id:APPOINTMENT_ID,workspace_id:WORKSPACE_A,service_id:SERVICE_ID,doctor_id:null,status:"arrived"};
+  const call = await loadRouter({rows:{appointments:[before],clinic_services:[{...activeService,is_active:false}]}});
+  const kept = await call({resource:"appointments",method:"PATCH",body:{id:APPOINTMENT_ID,updates:{serviceItems:bundle}}});
+  assert.equal(kept.res.statusCode,200,JSON.stringify(kept.res.body));
+  const added = [...bundle,{...bundle[0],serviceId:FOREIGN_SERVICE_ID}];
+  const refused = await call({resource:"appointments",method:"PATCH",body:{id:APPOINTMENT_ID,updates:{serviceItems:added}}});
+  assert.equal(refused.res.statusCode,400,JSON.stringify(refused.res.body));
+  assert.equal(writtenTo(refused.log,"appointments"),null);
+});
+
+test("MS9 миграция 055 повторяема и сохраняет прежнюю цену и услугу", async () => {
+  const {PGlite} = await import("@electric-sql/pglite");
+  const db = new PGlite();
+  try {
+    await db.exec("create table appointments(id integer primary key, service text, price_minor bigint); insert into appointments values(1,'Legacy',700000);");
+    const sql = await readFile(path.join(repoRoot,"migrations/055_appointment_service_items.sql"),"utf8");
+    await db.exec(sql); await db.exec(sql);
+    const rows = await db.query("select service, price_minor::text, service_items from appointments");
+    assert.deepEqual(rows.rows,[{service:"Legacy",price_minor:"700000",service_items:[]}]);
+    await assert.rejects(db.exec("update appointments set service_items = '{}'::jsonb"));
+  } finally { await db.close(); }
+});
+
+test("MS10 форма перечитывает услуги и слоты по общему времени, продажа получает общий итог", async () => {
+  const source = await readFile(path.join(repoRoot,"artifacts/negis/src/pages/AppointmentsPage.tsx"),"utf8");
+  assert.match(source,/AppointmentExtraServices/);
+  assert.match(source,/appointment\.serviceItems\?\.slice\(1\)/);
+  assert.match(source,/durationMinutes: totalDurationMinutes/);
+  assert.match(source,/priceMinor: appointment\.priceMinor/);
+  assert.match(source,/serviceItems: appointment\.serviceItems/);
+});
 
 /* ── Права ── */
 
