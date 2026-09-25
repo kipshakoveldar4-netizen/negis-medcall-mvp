@@ -1,6 +1,7 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { getSupabaseServerClient } from "../supabase/server";
-import { VERTICAL_SETTINGS_KEY, isVertical, type Vertical } from "../vertical/terms";
+import { isVertical, type Vertical } from "../vertical/terms";
+import { onboardingSettings, readOnboardingPurpose, type WorkspacePurpose } from "./workspace-purpose";
 import { acceptUrl, createInvitationToken, escapeLikePattern, expiryFromNow, normalizeEmail, sendSupabaseInviteEmail } from "./staff-invitations";
 
 // Подключение клиники с портала Medina Control.
@@ -41,6 +42,7 @@ export type OnboardingRejection = { status: number; error: string; code: string;
 
 export type OnboardingRequest = {
   name: string;
+  purpose: WorkspacePurpose;
   vertical: Vertical;
   ownerEmail: string;
   ownerName: string;
@@ -51,13 +53,16 @@ export type OnboardingRequest = {
 export function validateOnboardingRequest(body: JsonRecord): OnboardingRequest | OnboardingRejection {
   const name = readString(body.name);
   const vertical = readString(body.vertical).toLowerCase();
+  const purpose = readOnboardingPurpose(body.purpose);
   const ownerEmail = normalizeEmail(body.ownerEmail);
   const ownerName = readString(body.ownerName);
   const timeZone = readString(body.timeZone);
 
   const details: string[] = [];
   if (name.length < 2 || name.length > 120) details.push("Название — от 2 до 120 символов.");
-  if (!isVertical(vertical)) details.push("Ниша обязательна: beauty (салон) или clinic (клиника). Умолчания нет намеренно.");
+  if (!purpose) details.push("Назначение пространства не распознано.");
+  if (purpose !== "marketing" && !isVertical(vertical)) details.push("Ниша обязательна: beauty (салон), dental (стоматология) или clinic (клиника).");
+  if (purpose === "marketing" && vertical) details.push("Для маркетингового пространства медицинская ниша не задаётся.");
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(ownerEmail)) details.push("Почта владельца не похожа на адрес.");
   if (!timeZone) details.push("Часовой пояс обязателен: без него «сегодня» считается неверно часть суток.");
   else {
@@ -68,11 +73,12 @@ export function validateOnboardingRequest(body: JsonRecord): OnboardingRequest |
     }
   }
 
-  if (details.length > 0) {
+  if (!purpose || details.length > 0) {
     return { status: 400, error: "Форма заполнена не до конца", code: "invalid_onboarding", details };
   }
 
-  return { name, vertical: vertical as Vertical, ownerEmail, ownerName: ownerName || ownerEmail, timeZone };
+  // Legacy ad checks remain conservative; marketing does not override their policy.
+  return { name, purpose, vertical: isVertical(vertical) ? vertical : "clinic", ownerEmail, ownerName: ownerName || ownerEmail, timeZone };
 }
 
 /**
@@ -287,10 +293,7 @@ export async function handlePlatformOnboarding(req: VercelRequest, res: VercelRe
 
   // Дальше каждый отказ называет, что УЖЕ создано: полусозданная клиника —
   // это состояние, которое владелец платформы должен видеть, а не угадывать.
-  const { error: settingsError } = await supabase.from("workspace_settings").insert([
-    { workspace_id: workspaceId, key: VERTICAL_SETTINGS_KEY, value: { vertical: validated.vertical } },
-    { workspace_id: workspaceId, key: "clinic_schedule", value: { timeZone: validated.timeZone } },
-  ]);
+  const { error: settingsError } = await supabase.from("workspace_settings").insert(onboardingSettings(workspaceId, validated));
   if (settingsError) {
     return sendJson(res, 502, {
       success: false,
@@ -344,7 +347,8 @@ export async function handlePlatformOnboarding(req: VercelRequest, res: VercelRe
     data: {
       workspaceId,
       name: validated.name,
-      vertical: validated.vertical,
+      purpose: validated.purpose,
+      vertical: validated.purpose === "marketing" ? null : validated.vertical,
       ownerEmail: validated.ownerEmail,
       timeZone: validated.timeZone,
       invitationExpiresAt: readString(asRecord(invitationRow).expires_at),

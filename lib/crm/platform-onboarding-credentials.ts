@@ -70,6 +70,13 @@ export async function handlePlatformOnboardingCredentials(req: VercelRequest, re
   }
 
   const body = asRecord(req.body);
+  if (body.purpose === "marketing") {
+    return sendJson(res, 400, {
+      success: false,
+      code: "marketing_invitation_required",
+      error: "Маркетинговое пространство подключается через ссылку-приглашение к аккаунту владельца.",
+    });
+  }
   const validated = validateOnboardingRequest(body);
   const passwordDetails = validateOwnerPassword(body.password);
   if ("status" in validated || passwordDetails.length > 0) {

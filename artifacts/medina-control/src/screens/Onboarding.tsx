@@ -42,6 +42,7 @@ type Result = {
   workspaceId: string;
   name: string;
   vertical?: string;
+  purpose?: string;
   ownerEmail: string;
   acceptUrl: string;
   emailSent: boolean;
@@ -77,6 +78,7 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
   const [mode, setMode] = useState<Mode>("credentials");
   const [name, setName] = useState("");
   const [vertical, setVertical] = useState("");
+  const [purpose, setPurpose] = useState("clinic_services");
   const [ownerEmail, setOwnerEmail] = useState("");
   const [ownerName, setOwnerName] = useState("");
   const [timeZone, setTimeZone] = useState("Asia/Almaty");
@@ -108,6 +110,7 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
 
   /** Смена режима гасит ошибки прежнего: их советы и кнопки — про другой путь. */
   function switchMode(next: Mode) {
+    if (purpose === "marketing" && next === "credentials") return;
     setMode(next);
     clearOutcome();
   }
@@ -170,7 +173,7 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         // Пароль в инвайт-путь не уходит даже заполненным полем.
-        body: JSON.stringify({ name, vertical, ownerEmail, ownerName, timeZone, ...(confirmAdditional ? { confirmAdditionalWorkspace: true } : {}) }),
+        body: JSON.stringify({ name, vertical, ownerEmail, ownerName, timeZone, purpose, ...(confirmAdditional ? { confirmAdditionalWorkspace: true } : {}) }),
       });
       const body = await response.json().catch(() => null);
       if (!response.ok || body?.success !== true) {
@@ -238,6 +241,7 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
     setShownPassword("");
     setName("");
     setVertical("");
+    setPurpose("clinic_services");
     setOwnerEmail("");
     setOwnerName("");
     setPassword("");
@@ -303,7 +307,7 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
         <p className="page-sub">
           {/* Без vertical (перевыпуск) — нейтральное «новая ссылка»: прежней
               могло и не быть, если приглашение падало на выписке. */}
-          «{result.name}» · {result.vertical === "beauty" ? "салон красоты" : result.vertical === "dental" ? "стоматология" : result.vertical === "clinic" ? "клиника" : "новая ссылка приглашения"} · {result.ownerEmail}
+          «{result.name}» · {result.purpose === "marketing" ? "маркетинг" : result.vertical === "beauty" ? "салон красоты" : result.vertical === "dental" ? "стоматология" : result.vertical === "clinic" ? "клиника" : "новая ссылка приглашения"} · {result.ownerEmail}
         </p>
 
         <div className="panel" style={{ padding: "18px 20px", maxWidth: 720 }}>
@@ -339,12 +343,25 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
 
   return (
     <>
-      <h1 className="page-title">Подключить клинику</h1>
+      <h1 className="page-title">Подключить пространство</h1>
       <p className="page-sub">Пространство, ниша, часовой пояс — и вход для владельца: логином с паролем или ссылкой-приглашением.</p>
 
       <form className="panel" style={{ padding: "20px", maxWidth: 640 }} onSubmit={(event) => void submit(event)}>
         <div className="editor" style={{ border: 0, padding: 0, margin: 0, boxShadow: "none" }}>
           <div className="fields" style={{ gridTemplateColumns: "1fr" }}>
+            <div className="field">
+              <label htmlFor="ob-purpose">Назначение пространства</label>
+              <select id="ob-purpose" value={purpose} onChange={(event) => {
+                setPurpose(event.target.value);
+                setVertical("");
+                setPassword("");
+                if (event.target.value === "marketing") setMode("invite");
+                clearOutcome();
+              }}>
+                <option value="clinic_services">Клиника, стоматология или салон</option>
+                <option value="marketing">Маркетинг и привлечение клиентов</option>
+              </select>
+            </div>
             <div className="field">
               <label id="ob-mode-label">Способ подключения</label>
               <div role="group" aria-labelledby="ob-mode-label" style={{ display: "flex", gap: 8 }}>
@@ -352,6 +369,7 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
                   type="button"
                   className={mode === "credentials" ? "btn-primary" : "btn"}
                   aria-pressed={mode === "credentials"}
+                  disabled={purpose === "marketing"}
                   onClick={() => switchMode("credentials")}
                 >
                   Логин и пароль
@@ -375,7 +393,7 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
               <label htmlFor="ob-name">Название</label>
               <input id="ob-name" value={name} onChange={(event) => setName(event.target.value)} placeholder="Салон «Люкс»" />
             </div>
-            <div className="field">
+            {purpose !== "marketing" && <div className="field">
               <label htmlFor="ob-vertical">Ниша</label>
               {/* Пустой первый пункт намеренно: ниша меняет правила проверки
                   рекламы, и выбрать её молча значило бы выбрать за клиента. */}
@@ -385,7 +403,7 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
                 <option value="dental">Стоматология</option>
                 <option value="clinic">Медицинская клиника</option>
               </select>
-            </div>
+            </div>}
             <div className="field">
               <label htmlFor="ob-email">Почта владельца{mode === "credentials" ? " (логин)" : ""}</label>
               <input

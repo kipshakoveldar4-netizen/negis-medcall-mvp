@@ -31,6 +31,49 @@ const VALID = {
   timeZone: "Asia/Almaty",
 };
 
+const { onboardingSettings, readOnboardingPurpose } = await import(pathToFileURL(path.join(repoRoot, "lib/crm/workspace-purpose.ts")).href) as {
+  readOnboardingPurpose(value: unknown): "clinic_services" | "marketing" | null;
+  onboardingSettings(id: string, input: { purpose: "clinic_services" | "marketing"; vertical: "clinic" | "beauty" | "dental"; timeZone: string }): unknown[];
+};
+
+test("Marketing purpose is explicit and rejects unknown values", () => {
+  assert.equal(readOnboardingPurpose(undefined), "clinic_services");
+  assert.equal(readOnboardingPurpose("marketing"), "marketing");
+  for (const value of [null, "", "unknown", {}, true]) assert.equal(readOnboardingPurpose(value), null);
+});
+
+test("Marketing settings do not assign a medical vertical or change advertising policy", () => {
+  assert.deepEqual(onboardingSettings("workspace-a", { purpose: "marketing", vertical: "clinic", timeZone: "Asia/Almaty" }), [
+    { workspace_id: "workspace-a", key: "workspace_purpose", value: { purpose: "marketing" } },
+    { workspace_id: "workspace-a", key: "clinic_schedule", value: { timeZone: "Asia/Almaty" } },
+  ]);
+  for (const vertical of ["clinic", "beauty", "dental"] as const) {
+    assert.deepEqual(onboardingSettings("workspace-b", { purpose: "clinic_services", vertical, timeZone: "Asia/Almaty" }), [
+      { workspace_id: "workspace-b", key: "workspace_vertical", value: { vertical } },
+      { workspace_id: "workspace-b", key: "clinic_schedule", value: { timeZone: "Asia/Almaty" } },
+    ]);
+  }
+});
+
+test("Marketing onboarding accepts no medical niche and rejects conflicting or unknown purposes", () => {
+  assert.ok(!("status" in validateOnboardingRequest({ ...VALID, purpose: "marketing", vertical: "" })));
+  assert.ok("status" in validateOnboardingRequest({ ...VALID, purpose: "marketing" }));
+  assert.ok("status" in validateOnboardingRequest({ ...VALID, purpose: "unknown" }));
+  assert.ok("status" in validateOnboardingRequest({ ...VALID, purpose: "marketing", vertical: "", timeZone: "" }));
+});
+
+test("Marketing onboarding remains platform-only and invitation-only", async () => {
+  const creds = await readFile(credsPath, "utf8");
+  assert.ok(creds.indexOf('body.purpose === "marketing"') < creds.indexOf("/auth/v1/admin/users"));
+  assert.ok(creds.includes('code: "marketing_invitation_required"'));
+  const form = await readFile(path.join(controlSrc, "screens/Onboarding.tsx"), "utf8");
+  assert.ok(form.includes('disabled={purpose === "marketing"}'));
+  assert.ok(form.includes('if (purpose === "marketing" && next === "credentials") return;'));
+  const server = await readFile(modulePath, "utf8");
+  assert.ok(server.includes("onboardingSettings(workspaceId, validated)"));
+  assert.ok(server.includes('validated.purpose === "marketing" ? null : validated.vertical'));
+});
+
 test("MB1 ниша обязательна и умолчания у неё нет", () => {
   const missing = validateOnboardingRequest({ ...VALID, vertical: "" });
   assert.ok("status" in missing && missing.status === 400, "без ниши — отказ");
@@ -69,7 +112,7 @@ test("MB3 инвайт-путь паролей не видит, парольны
   const form = await readFile(path.join(controlSrc, "screens", "Onboarding.tsx"), "utf8");
   assert.ok(form.includes("/join"), "форма объясняет путь через страницу приглашения");
   assert.ok(
-    /body: JSON\.stringify\(\{ name, vertical, ownerEmail, ownerName, timeZone, \.\.\.\(confirmAdditional \? \{ confirmAdditionalWorkspace: true \} : \{\}\) \}\),/.test(form),
+    /body: JSON\.stringify\(\{ name, vertical, ownerEmail, ownerName, timeZone, purpose, \.\.\.\(confirmAdditional \? \{ confirmAdditionalWorkspace: true \} : \{\}\) \}\),/.test(form),
     "инвайт-POST собирается без поля password, даже если оно заполнено",
   );
   assert.ok(form.includes("platform-onboarding-credentials"), "парольный режим зовёт свой отдельный маршрут");
