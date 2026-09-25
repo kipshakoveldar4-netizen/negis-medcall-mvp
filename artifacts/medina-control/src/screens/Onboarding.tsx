@@ -303,7 +303,7 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
   if (result) {
     return (
       <>
-        <h1 ref={titleRef} tabIndex={-1} className="page-title">{result.vertical ? "Клиника подключена" : "Приглашение перевыпущено"}</h1>
+        <h1 ref={titleRef} tabIndex={-1} className="page-title">{result.purpose === "marketing" ? "Пространство создано — ожидает владельца" : result.vertical ? "Клиника подключена" : "Приглашение перевыпущено"}</h1>
         <p className="page-sub">
           {/* Без vertical (перевыпуск) — нейтральное «новая ссылка»: прежней
               могло и не быть, если приглашение падало на выписке. */}
@@ -313,7 +313,7 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
         <div className="panel" style={{ padding: "18px 20px", maxWidth: 720 }}>
           <h2 className="section-title">Ссылка приглашения владельца</h2>
           <p className="muted" style={{ fontSize: 13, margin: "0 0 4px" }}>
-            По ней владелец задаёт себе пароль и попадает в свой кабинет. Действует 7 дней, показывается один раз.
+            Владелец открывает ссылку и принимает приглашение своим аккаунтом. Если аккаунта ещё нет, сначала регистрируется. Ссылка действует 7 дней и показывается один раз.
           </p>
           <div className="result-block">
             <div className="result-link">

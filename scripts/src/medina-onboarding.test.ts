@@ -68,6 +68,7 @@ test("Marketing onboarding remains platform-only and invitation-only", async () 
   assert.ok(creds.includes('code: "marketing_invitation_required"'));
   const form = await readFile(path.join(controlSrc, "screens/Onboarding.tsx"), "utf8");
   assert.ok(form.includes('disabled={purpose === "marketing"}'));
+  assert.ok(form.includes('result.purpose === "marketing" ? "Пространство создано — ожидает владельца"'));
   assert.ok(form.includes('if (purpose === "marketing" && next === "credentials") return;'));
   const server = await readFile(modulePath, "utf8");
   assert.ok(server.includes("onboardingSettings(workspaceId, validated)"));
