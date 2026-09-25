@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "test:site-intake": "tsx --test ./src/medina-site-intake.test.ts",
     "hello": "tsx ./src/hello.ts",
     "test:advertising-assistant": "tsx --test ./src/advertising-assistant.test.ts",
     "test:advertising-brief": "tsx --test ./src/advertising-campaign-brief.test.ts",
