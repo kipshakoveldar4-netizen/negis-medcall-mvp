@@ -1,5 +1,6 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { handleSiteIntake } from "../../lib/crm/site-intake-handler";
+import { handleSiteBlog } from "../../lib/crm/site-blog";
 import { handlePlatformOperators, handleOperatorAccount, handleOperatorInbox, handleClinicOperators } from "../../lib/crm/operators";
 import { handleOperatorLeads, handleClinicOperatorLeads } from "../../lib/crm/operator-leads";
 import { handleOperatorServices } from "../../lib/crm/operator-services";
@@ -191,6 +192,7 @@ async function dispatch(
   res: VercelResponse,
 ) {
   switch (routeKey) {
+    case "site-blog": return handleSiteBlog(req, res);
     case "platform-operators": return handlePlatformOperators(req, res);
     case "operator-account": return handleOperatorAccount(req, res);
     case "operator-inbox": return handleOperatorInbox(req, res);

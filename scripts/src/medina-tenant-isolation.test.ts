@@ -825,7 +825,7 @@ test("K3e TikTok video GET returns safe workspace evidence and POST stays off by
 
 test("K4 configuration resources remain administrator-only", async () => {
   await withRouter({ memberships: [memberBReception] }, async (ctx) => {
-    for (const segment of ["admin-settings", "ai-providers", "integration-statuses", "meta-accounts", "release-checks"]) {
+    for (const segment of ["admin-settings", "ai-providers", "integration-statuses", "meta-accounts", "release-checks", "site-blog"]) {
       const { res } = await ctx.call({ segments: [segment], query: { workspaceId: WORKSPACE_B } });
       assert.equal(res.statusCode, 403, `${segment} must be administrator-only`);
     }

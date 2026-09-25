@@ -12,6 +12,7 @@ import { useLocation } from 'wouter';
 const PAGE_LABELS: Record<string, string> = {
   '/ai-control-center': 'Главная',
   '/content-studio': 'Контент',
+  '/site-blog': 'Сайт и блог',
   '/ai-content-studio': 'Контент',
   '/content': 'Контент',
   '/studio': 'Контент',

@@ -329,6 +329,7 @@ export const CRM_ROUTE_AUTHORIZATION: Readonly<Record<string, RouteAuthorization
   // Worker route: HMAC only. A browser JWT must never satisfy it.
   "meta-insights-background-cycle": { kind: "internal_hmac", methods: ["POST"] },
   "site-inquiry": { kind: "site_intake", methods: ["POST", "OPTIONS"] },
+  "site-blog": { kind: "browser", methods: ["GET", "POST", "PATCH"], roles: WORKSPACE_ADMIN },
 };
 
 /** Sub-path routes, matched as `<resource>/<segment>`. */

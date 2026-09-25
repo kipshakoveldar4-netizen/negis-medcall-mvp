@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Link, useLocation } from 'wouter';
-import { BadgeDollarSign, BarChart2, Building2, CalendarDays, Clapperboard, Inbox, LayoutDashboard, Rocket, Settings, Store, Tag, Users, LogOut, type LucideIcon } from 'lucide-react';
+import { BadgeDollarSign, BarChart2, Building2, CalendarDays, Clapperboard, FileText, Inbox, LayoutDashboard, Rocket, Settings, Store, Tag, Users, LogOut, type LucideIcon } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
 import { isRealWorkspace } from '@/lib/demoStorage';
 import { capitalize, termsFor } from '../../../../../lib/vertical/terms';
@@ -52,6 +52,7 @@ const NAV_GROUPS: NavGroup[] = [
       { href: '/reports', icon: BarChart2, label: 'Статистика', roles: ['owner', 'manager'] },
       { href: '/ads', icon: Rocket, label: 'Рекламный агент', roles: ['owner', 'manager'] },
       { href: '/content-studio', icon: Clapperboard, label: 'Контент', roles: ['owner', 'manager'] },
+      { href: '/site-blog', icon: FileText, label: 'Сайт и блог', roles: ['owner', 'admin'] },
       // Маркет был недостижим: маршрут объявлен, а ссылки на него не было ни в
       // боковом меню, ни в мобильном — страница открывалась только вводом
       // адреса. Панель платформы сюда не ставится намеренно: она не экран

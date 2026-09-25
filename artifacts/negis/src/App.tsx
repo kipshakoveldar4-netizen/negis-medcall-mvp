@@ -35,6 +35,7 @@ const AdvertisingHub = lazy(() => import("@/pages/AdvertisingHub"));
 const AdsAutomation = lazy(() => import("@/pages/AdsAutomation"));
 const AppointmentsPage = lazy(() => import("@/pages/AppointmentsPage").then(m => ({ default: m.AppointmentsPage })));
 const ContentStudio = lazy(() => import("@/pages/ContentStudio"));
+const SiteBlog = lazy(() => import("@/pages/SiteBlog"));
 const AdminCenter = lazy(() => import("@/pages/AdminCenter"));
 const LeadsPage = lazy(() => import("@/pages/LeadsPage"));
 const ClientsPage = lazy(() => import("@/pages/ClientsPage"));
@@ -129,6 +130,7 @@ const ROUTE_PERMISSIONS: Record<string, string> = {
   '/profile': 'dashboard',
   '/targeting-agent': 'ads',
   '/content-studio': 'ads',
+  '/site-blog': 'admin',
   '/ai-content-studio': 'ads',
   '/content': 'ads',
   '/studio': 'ads',
@@ -298,6 +300,7 @@ function Router() {
         <Redirect to="/ads-automation" />
       </Route>
       <Route path="/content-studio" component={ContentStudioRoute} />
+      <Route path="/site-blog"><ProtectedPage component={SiteBlog} permission="admin" /></Route>
       <Route path="/ai-content-studio" component={ContentStudioRoute} />
       <Route path="/content" component={ContentStudioRoute} />
       <Route path="/studio" component={ContentStudioRoute} />

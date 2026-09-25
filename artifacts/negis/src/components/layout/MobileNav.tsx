@@ -5,6 +5,7 @@ import {
   BarChart2,
   CalendarDays,
   Clapperboard,
+  FileText,
   ClipboardList,
   LayoutDashboard,
   MessageCircle,
@@ -62,6 +63,7 @@ const drawerItems: MobileNavItem[] = [
   // прямому адресу. Свою часть базы и срез номеров обеспечивает сервер.
   { href: "/client-base", label: "База клиентов", icon: Users, permission: "booking" },
   { href: "/content-studio", label: "Контент", icon: Clapperboard, permission: "ads" },
+  { href: "/site-blog", label: "Сайт и блог", icon: FileText, permission: "admin" },
   { href: "/marketplace", label: "Маркет", icon: Store, permission: "marketplace" },
   { href: "/admin", label: "Настройки клиники", icon: Settings, permission: "admin" },
 ];

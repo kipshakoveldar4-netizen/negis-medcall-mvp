@@ -4233,6 +4233,7 @@ async function main() {
     "/ads-automation/history",
     "/targeting-agent",
     "/content-studio",
+    "/site-blog",
     "/privacy",
     "/terms",
     "/data-deletion",

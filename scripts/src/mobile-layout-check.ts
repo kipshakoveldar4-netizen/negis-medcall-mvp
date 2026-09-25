@@ -29,6 +29,7 @@ const routes = [
   "/ads-automation/history",
   "/targeting-agent",
   "/content-studio",
+  "/site-blog",
   "/privacy",
   "/terms",
   "/data-deletion",
