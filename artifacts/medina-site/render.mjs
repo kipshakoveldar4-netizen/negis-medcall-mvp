@@ -8,12 +8,12 @@ const serviceUrl = item => `/ru/services/${item.slug}/`;
 const articleUrl = item => `/ru/blog/${item.slug}/`;
 const action = '<a class="button primary" href="/ru/#consultation">Обсудить задачу <span aria-hidden="true">↗</span></a>';
 
-function layout({ title, description, content, section = '' }) {
+function layout({ title, description, content, section = '', intake = null }) {
   return `<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <title>${e(title)} | Medina OS</title><meta name="description" content="${e(description)}"><meta name="robots" content="noindex,nofollow">
-  <meta name="referrer" content="strict-origin-when-cross-origin"><link rel="icon" href="/assets/brand.png"><link rel="stylesheet" href="/site.css"></head>
+  <meta name="referrer" content="strict-origin-when-cross-origin"><link rel="icon" href="/assets/brand.png"><link rel="stylesheet" href="/site.css">${intake ? '<script src="/form.js" defer></script>' : ''}</head>
   <body><a class="skip" href="#main">К содержимому</a>
-  <div class="preview">Предпросмотр сайта · приём заявок пока не подключён</div>
+  <div class="preview">Предпросмотр сайта Medina OS</div>
   <header class="shell header"><a class="brand" href="/ru/" aria-label="Medina OS — главная"><img src="/assets/brand.png" width="32" height="32" alt="">Medina OS</a>
   <nav aria-label="Основная навигация"><a href="/ru/#services" ${section === 'services' ? 'aria-current="page"' : ''}>Услуги</a><a href="/ru/blog/" ${section === 'blog' ? 'aria-current="page"' : ''}>Блог</a><a href="${crmOrigin}/login">Войти в CRM</a></nav></header>
   <main id="main">${content}</main>
@@ -28,24 +28,25 @@ function articleCards() {
   return `<div class="articles">${articles.map(item => `<article><p class="eyebrow">${e(item.category)}</p><h3><a href="${articleUrl(item)}">${e(item.title)}</a></h3><p>${e(item.summary)}</p><a class="text-link" href="${articleUrl(item)}">Читать статью <span aria-hidden="true">↗</span></a></article>`).join('')}</div>`;
 }
 
-function consultation() {
-  return `<section id="consultation" class="consultation band"><div class="shell consultation-grid"><div><p class="eyebrow">Начнём с вашей задачи</p><h2>Оставить заявку</h2><p>Привлечение новых клиентов, обработка обращений или оба направления вместе.</p><p class="notice" id="form-status">Приём заявок ещё не подключён. Данные из этого предпросмотра никуда не отправляются.</p></div>
-  <form aria-describedby="form-status"><fieldset disabled><legend class="sr-only">Заявка на консультацию</legend>
-  <label>Ваше имя<input name="name" autocomplete="off" placeholder="Как к вам обращаться"></label>
-  <label>Телефон<input name="phone" type="tel" autocomplete="off" placeholder="+7"></label>
-  <label>Название бизнеса<input name="business" autocomplete="off" placeholder="Клиника, стоматология или салон"></label>
-  <label>Что вас интересует<select name="service"><option value="">Выберите направление</option>${services.map(item => `<option value="${item.slug}">${e(item.title)}</option>`).join('')}</select></label>
-  <button class="button primary" type="button" disabled>Оставить заявку</button></fieldset></form></div></section>`;
+function consultation(intake) {
+  return `<section id="consultation" class="consultation band"><div class="shell consultation-grid"><div><p class="eyebrow">Начнём с вашей задачи</p><h2>Оставить заявку</h2><p>Привлечение новых клиентов, обработка обращений или оба направления вместе.</p><p class="notice" id="form-status" role="status" aria-live="polite">${intake ? 'Оставьте контакты для обратной связи. Не указывайте медицинские сведения.' : 'Приём заявок ещё не подключён. Данные из этого предпросмотра никуда не отправляются.'}</p></div>
+  <form method="post" aria-describedby="form-status" ${intake ? `data-intake-endpoint="${e(intake.endpoint)}" data-site-key="${e(intake.siteKey)}" data-consent-version="${e(intake.consentVersion)}"` : ''}><fieldset ${intake ? '' : 'disabled'}><legend class="sr-only">Заявка на консультацию</legend>
+  <label>Ваше имя<input name="name" required maxlength="100" autocomplete="off" placeholder="Как к вам обращаться"></label>
+  <label>Телефон<input name="phone" type="tel" required maxlength="40" autocomplete="off" placeholder="+7"></label>
+  <label>Название бизнеса<input name="business" required maxlength="160" autocomplete="off" placeholder="Клиника, стоматология или салон"></label>
+  <label>Что вас интересует<select name="service" required><option value="">Выберите направление</option>${services.map(item => `<option value="${item.slug}">${e(item.title)}</option>`).join('')}</select></label>
+  ${intake ? `<label class="consent"><input type="checkbox" name="consent" required><span>Согласен на обработку имени, телефона и сведений об организации для обратной связи согласно <a href="${crmOrigin}/privacy" target="_blank" rel="noopener noreferrer">политике конфиденциальности</a>.</span></label><div data-challenge></div>` : ''}
+  <button class="button primary" type="${intake ? 'submit' : 'button'}" disabled>Оставить заявку</button></fieldset></form></div></section>`;
 }
 
-export function createPages() {
+export function createPages(intake = null) {
   const pages = new Map();
-  pages.set('/ru/', layout({ title: 'Маркетинг для клиник и салонов', description: 'Medina OS: реклама, обработка обращений и CRM для клиник, стоматологий и салонов.', content: `
+  pages.set('/ru/', layout({ intake, title: 'Маркетинг для клиник и салонов', description: 'Medina OS: реклама, обработка обращений и CRM для клиник, стоматологий и салонов.', content: `
     <section class="intro"><div class="shell"><p class="eyebrow">Для клиник · стоматологий · салонов</p><h1>Medina OS</h1><p class="intro-text">Реклама привлекает внимание.<br>Команда превращает его в запись.</p><p class="intro-note">Соединяем маркетинг, работу оператора и CRM, чтобы каждое обращение получало следующий шаг.</p>${action}<a class="secondary-link" href="#services">Выбрать услугу ↓</a></div></section>
     <section class="band shell" id="services"><div class="section-heading"><p class="eyebrow">Чем поможем</p><h2>От первого интереса<br>до разговора с клиентом</h2></div>${serviceList()}</section>
     <section class="process band"><div class="shell"><p class="eyebrow">Один связанный процесс</p><h2>Заявка не должна теряться<br>после рекламы</h2><ol class="steps"><li><span>01 / Привлечение</span><h3>Понятное предложение</h3><p>Услуга, город и креатив, согласованные с вашей командой.</p></li><li><span>02 / Обращение</span><h3>Контекст в CRM</h3><p>Запрос клиента и ответственный за следующий контакт.</p></li><li><span>03 / Запись</span><h3>Работа оператора</h3><p>Услуги из прайса и время специалиста, а не обещание наугад.</p></li></ol></div></section>
     <section class="band shell"><div class="section-heading"><p class="eyebrow">Без завышенных обещаний</p><h2>Понятно, что согласовано.<br>Видно, что произошло.</h2></div><div class="principles"><p><strong>Бюджет под контролем.</strong> Создание кампании не означает автоматического включения рекламы.</p><p><strong>Факты отдельно от ожиданий.</strong> Расходы, обращения и оплаченные продажи не подменяют друг друга.</p><p><strong>Условия до начала работы.</strong> Объём услуг, обязанности оператора и оплата согласуются отдельно.</p></div></section>
-    <section class="reading band"><div class="shell"><div class="section-heading"><p class="eyebrow">Блог Medina OS</p><h2>Разобраться в главном</h2></div>${articleCards()}</div></section>${consultation()}` }));
+    <section class="reading band"><div class="shell"><div class="section-heading"><p class="eyebrow">Блог Medina OS</p><h2>Разобраться в главном</h2></div>${articleCards()}</div></section>${consultation(intake)}` }));
   for (const item of services) pages.set(serviceUrl(item), layout({ title: item.title, description: item.short, section: 'services', content: `
     <div class="shell"><a class="back" href="/ru/#services">← Все услуги</a></div><section class="detail-head shell"><p class="eyebrow">Medina OS / Услуги</p><h1>${e(item.title)}</h1><p class="lead">${e(item.intro)}</p>${action}</section>
     <section class="band shell narrow"><h2>Как строится работа</h2><ol class="deliverables">${item.steps.map(step => `<li>${e(step)}</li>`).join('')}</ol><aside class="notice"><strong>Важно до начала работы</strong><p>${e(item.boundary)}</p></aside><h2>${e(item.question)}</h2><p>${e(item.answer)}</p></section><section class="reading band"><div class="shell"><h2>Полезно перед разговором</h2>${articleCards()}</div></section>` }));

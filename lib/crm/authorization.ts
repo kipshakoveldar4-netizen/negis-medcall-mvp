@@ -15,6 +15,8 @@ export type RouteKind =
   | "bootstrap"
   /** Worker-to-server route protected by the existing HMAC contract. */
   | "internal_hmac"
+  /** Single write-only public form; explicit server mapping + verified bot challenge. */
+  | "site_intake"
   /**
    * Панель владельца ПЛАТФОРМЫ: читает поперёк арендаторов.
    *
@@ -326,6 +328,7 @@ export const CRM_ROUTE_AUTHORIZATION: Readonly<Record<string, RouteAuthorization
 
   // Worker route: HMAC only. A browser JWT must never satisfy it.
   "meta-insights-background-cycle": { kind: "internal_hmac", methods: ["POST"] },
+  "site-inquiry": { kind: "site_intake", methods: ["POST", "OPTIONS"] },
 };
 
 /** Sub-path routes, matched as `<resource>/<segment>`. */

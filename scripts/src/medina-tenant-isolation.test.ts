@@ -367,7 +367,23 @@ test("C5 the worker route is not satisfied by a browser token", async () => {
   });
 });
 
-test("C6 every registered route is classified and no route is public", async () => {
+test("C5b site intake is disabled without explicit configuration and never exposes subpaths", async () => {
+  const previous = process.env.MEDINA_SITE_INTAKE_ENABLED;
+  delete process.env.MEDINA_SITE_INTAKE_ENABLED;
+  try {
+    await withRouter({ memberships: [] }, async ctx => {
+      const closed = await ctx.call({ segments: ["site-inquiry"], method: "POST", token: null, body: {} });
+      assert.equal(closed.res.statusCode, 503);
+      const nested = await ctx.call({ segments: ["site-inquiry", "leads"], method: "POST", token: null, body: {} });
+      assert.equal(nested.res.statusCode, 404);
+    });
+  } finally {
+    if (previous === undefined) delete process.env.MEDINA_SITE_INTAKE_ENABLED;
+    else process.env.MEDINA_SITE_INTAKE_ENABLED = previous;
+  }
+});
+
+test("C6 every route is classified; only the isolated site intake may accept anonymous writes", async () => {
   const registry = (await import(pathToFileURL(registryPath).href)) as {
     CRM_RESOURCE_AUTHORIZATION: Record<string, { kind: string; methods: string[] }>;
     CRM_ROUTE_AUTHORIZATION: Record<string, { kind: string; methods: string[] }>;
@@ -381,7 +397,8 @@ test("C6 every registered route is classified and no route is public", async () 
   // "platform" — панель владельца платформы: единственный вид, читающий
   // поперёк арендаторов. Он допущен сюда сознательно и с условиями ниже, а не
   // потому, что набор не заметил нового значения.
-  const kinds = new Set(["browser", "bootstrap", "internal_hmac", "platform"]);
+  const kinds = new Set(["browser", "bootstrap", "internal_hmac", "platform", "site_intake"]);
+  assert.deepEqual(Object.entries(all).filter(([, entry]) => entry.kind === "site_intake").map(([key]) => key), ["site-inquiry"]);
   for (const [key, entry] of Object.entries(all)) {
     assert.ok(kinds.has(entry.kind), `${key} has an unclassified kind`);
     assert.ok(entry.methods.length > 0, `${key} must declare its methods`);
@@ -402,6 +419,7 @@ test("C6 every registered route is classified and no route is public", async () 
   // Ни один ресурс общего вида не имеет права быть платформенным: они ходят
   // через readWorkspaceId и обязаны иметь арендатора.
   for (const [key, entry] of Object.entries(registry.CRM_RESOURCE_AUTHORIZATION)) {
+    assert.equal(entry.kind, "browser", `${key}: generic data resources always require workspace auth`);
     assert.notEqual(entry.kind, "platform", `${key}: обычный ресурс не может читать поперёк клиник`);
   }
   assert.equal(Object.keys(registry.CRM_RESOURCE_AUTHORIZATION).length, 21, "all 21 generic resources registered");

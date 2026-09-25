@@ -3,15 +3,20 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildSite, output } from './build.mjs';
+import { readFormSettings } from './settings.mjs';
 
 export async function createPreviewServer() {
-  const pages = await buildSite();
+  const intake = readFormSettings();
+  const pages = await buildSite(intake);
   const assets = new Map([['/site.css', ['site.css', 'text/css; charset=utf-8']], ['/assets/brand.png', ['assets/brand.png', 'image/png']], ['/robots.txt', ['robots.txt', 'text/plain; charset=utf-8']]]);
+  assets.set('/form.js', ['form.js', 'text/javascript; charset=utf-8']);
   return http.createServer(async (req, res) => {
     res.setHeader('X-Robots-Tag', 'noindex, nofollow');
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'none'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'");
+    res.setHeader('Content-Security-Policy', intake
+      ? `default-src 'self'; script-src 'self' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; connect-src 'self' https://challenges.cloudflare.com ${new URL(intake.endpoint).origin}; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`
+      : "default-src 'self'; script-src 'none'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'");
     if (req.method !== 'GET' && req.method !== 'HEAD') {
       res.writeHead(405, { Allow: 'GET, HEAD' }); res.end(); return;
     }

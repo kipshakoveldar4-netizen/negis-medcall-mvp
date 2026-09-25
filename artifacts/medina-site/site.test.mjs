@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { createPages, escapeHtml } from './render.mjs';
 import { createPreviewServer } from './dev.mjs';
+import { readFormSettings } from './settings.mjs';
 
 test('preview pages have safe metadata, valid internal links and disabled intake', () => {
   const pages = createPages();
@@ -53,4 +54,17 @@ test('preview HTTP routes, assets and privacy boundaries', async t => {
   assert.equal(image.headers.get('content-type'), 'image/png');
   assert.ok((await image.arrayBuffer()).byteLength > 0);
   assert.match(await (await fetch(base + '/robots.txt')).text(), /Disallow: \//);
+});
+
+test('form requires explicit public settings; secret is never rendered', () => {
+  assert.equal(readFormSettings({}), null);
+  assert.throws(() => readFormSettings({ MEDINA_SITE_FORM_ENABLED: 'true' }));
+  const config = readFormSettings({ MEDINA_SITE_FORM_ENABLED: 'true', MEDINA_SITE_API_ORIGIN: 'https://api.example.invalid',
+    MEDINA_SITE_TURNSTILE_SITE_KEY: 'public-test-key', MEDINA_SITE_CONSENT_VERSION: 'v1', MEDINA_SITE_TURNSTILE_SECRET: 'MUST-NOT-RENDER' });
+  const html = createPages(config).get('/ru/');
+  assert.match(html, /data-intake-endpoint="https:\/\/api.example.invalid\/api\/crm\/site-inquiry"/);
+  assert.match(html, /name="consent" required/);
+  assert.match(html, /method="post"/);
+  assert.doesNotMatch(html, /MUST-NOT-RENDER|workspaceId|<fieldset disabled/);
+  assert.match(html, /type="submit" disabled/);
 });
