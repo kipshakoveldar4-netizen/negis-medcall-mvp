@@ -215,7 +215,7 @@ export function buildAdvertisingAssistantBrief(input: AdvertisingAssistantInput)
       reason: "creative_test_ready",
       tone: "success",
       title: "Факты по креативам готовы",
-      text: `Тестов с данными за один период: ${creativeTestsComparable}. Сравните расход, показы и клики. Negis не выбирает победителя и не меняет кампании.`,
+      text: `Тестов с данными за один период: ${creativeTestsComparable}. Сравните расход, показы и клики. Medina OS не выбирает победителя и не меняет кампании.`,
       actionLabel: "Проверить историю",
       href: "/ads-automation/history",
     };

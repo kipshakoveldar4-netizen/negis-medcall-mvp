@@ -1064,7 +1064,7 @@ export function DemoAdmin() {
     if (!createdCredentials) return;
 
     const text = [
-      "Negis OS",
+      "Medina OS",
       `Login: ${createdCredentials.loginUrl}`,
       `Email: ${createdCredentials.email}`,
       `Role: ${roleLabels[createdCredentials.role]}`,

@@ -1,10 +1,10 @@
-# Negis OS — Design System
+# Medina OS — Design System
 
-Design foundation for **Negis OS**. This is a strategy + documentation reference; it does not
+Design foundation for **Medina OS**. This is a strategy + documentation reference; it does not
 mandate an immediate UI refactor. Existing working screens (Ads Automation, Content Studio,
 Dashboard, Admin) keep working while new screens are built against these rules.
 
-> Scope note: the visible product name is **Negis OS**. Legacy technical names (repo
+> Scope note: the visible product name is **Medina OS**. Legacy technical names (repo
 > `negis-medcall-mvp`, package `@workspace/negis`, env vars, API routes like `/api/crm/*`,
 > database tables) are **not** renamed — only user-facing brand text.
 
@@ -12,7 +12,7 @@ Dashboard, Admin) keep working while new screens are built against these rules.
 
 ## 1. Product identity
 
-- **Product name:** Negis OS
+- **Product name:** Medina OS
 - **Positioning:** AI Business OS для клиник
 - **Value proposition (one line):** Negis OS превращает рекламу в заявки, записи и повторные визиты — и подсказывает следующий шаг.
 - **Product promise:** одна система, где клиника видит весь путь клиента и получает конкретные действия от AI, а не сырые данные.

@@ -105,7 +105,7 @@ export function NegisQrScanner({ clinicId, userId, onClose, onConfirmed }: Negis
         <div className="flex items-center justify-between border-b border-[#E7ECF3] px-6 py-4">
           <div>
             <div className="text-lg font-bold text-[#0B1220]">Сканировать QR</div>
-            <div className="text-sm text-[#64748B]">Проверка идёт только через backend Negis App</div>
+            <div className="text-sm text-[#64748B]">Проверка идёт только через backend Medina OS App</div>
           </div>
           <button type="button" className="neu-icon-btn h-9 w-9" onClick={() => { stopCamera(); onClose(); }}>
             <X size={16} />

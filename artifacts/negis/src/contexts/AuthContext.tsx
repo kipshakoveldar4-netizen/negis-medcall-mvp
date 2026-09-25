@@ -713,7 +713,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         });
       } catch {
         cleanUrl();
-        toast.error('Не удалось проверить доступ через Negis Control');
+        toast.error('Не удалось проверить доступ через Medina OS');
         await setupSupabaseAuth();
         return;
       }
@@ -776,8 +776,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       clearAuthStorage();
       toast.error(
         err?.message === 'expired_token'
-          ? 'Доступ по ссылке истёк. Войдите снова из Negis Control.'
-          : 'Не удалось проверить доступ через Negis Control.',
+          ? 'Доступ по ссылке истёк. Войдите снова из Medina OS.'
+          : 'Не удалось проверить доступ через Medina OS.',
       );
       await setupSupabaseAuth();
       setIsLoading(false);

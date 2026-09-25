@@ -701,7 +701,7 @@ async function handleSendTelegram(req: VercelRequest, res: VercelResponse, conte
   // The bot token belongs to the platform, so the destination does too: a
   // caller-supplied chatId turned this into an open relay.
   const chatId = process.env.TELEGRAM_CHAT_ID?.trim();
-  const messageText = isTest ? "✅ Telegram подключён к Negis Content Studio" : packageText;
+  const messageText = isTest ? "✅ Telegram подключён к Medina OS Content Studio" : packageText;
 
   if (!token || !chatId) {
     if (typeof payload.videoId === "string") {

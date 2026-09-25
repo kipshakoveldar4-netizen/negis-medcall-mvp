@@ -2,9 +2,9 @@ import { Link } from "wouter";
 
 export default function Privacy() {
   return (
-    <LegalPage title="Политика конфиденциальности Negis" heading="Политика конфиденциальности Negis" updated="1 июля 2026">
+    <LegalPage title="Политика конфиденциальности Medina OS" heading="Политика конфиденциальности Medina OS" updated="1 июля 2026">
       <p style={P}>
-        Negis / Concept Med / MedCall AI предоставляет CRM и инструменты автоматизации для клиник. Оператором сервиса на этапе MVP является Negis. Эта политика описывает, какие данные могут обрабатываться при использовании CRM, рекламных модулей и интеграций.
+        Medina OS / Concept Med / MedCall AI предоставляет CRM и инструменты автоматизации для клиник. Оператором сервиса на этапе MVP является Medina OS. Эта политика описывает, какие данные могут обрабатываться при использовании CRM, рекламных модулей и интеграций.
       </p>
 
       <Section title="1. Какие данные обрабатываются">
@@ -33,19 +33,19 @@ export default function Privacy() {
 
       <Section title="3. Интеграции и сторонние сервисы">
         <p style={P}>
-          Negis не продаёт персональные данные. Данные могут передаваться только сервисам, необходимым для работы продукта: Supabase для хранения данных и файлов, Telegram для уведомлений или передачи контента, Meta для рекламных кампаний и OpenAI для генерации или анализа текстов. Передача происходит только в объёме, необходимом для выбранной функции.
+          Medina OS не продаёт персональные данные. Данные могут передаваться только сервисам, необходимым для работы продукта: Supabase для хранения данных и файлов, Telegram для уведомлений или передачи контента, Meta для рекламных кампаний и OpenAI для генерации или анализа текстов. Передача происходит только в объёме, необходимом для выбранной функции.
         </p>
       </Section>
 
       <Section title="4. Реклама и Meta/Facebook/Instagram">
         <p style={P}>
-          Если клиника подключает Meta/Facebook/Instagram Ads, Negis может использовать идентификаторы рекламного аккаунта, страницы, кампаний, групп объявлений, объявлений и креативов для создания, проверки, остановки или анализа рекламы. Рекламные бюджеты оплачиваются через Meta аккаунт клиента и не включаются в оплату Negis.
+          Если клиника подключает Meta/Facebook/Instagram Ads, Medina OS может использовать идентификаторы рекламного аккаунта, страницы, кампаний, групп объявлений, объявлений и креативов для создания, проверки, остановки или анализа рекламы. Рекламные бюджеты оплачиваются через Meta аккаунт клиента и не включаются в оплату Medina OS.
         </p>
       </Section>
 
       <Section title="5. Секретные ключи и токены">
         <p style={P}>
-          Секретные ключи, service role keys, access tokens и app secrets используются только на серверной стороне. Они не показываются обычным пользователям в интерфейсе Negis. В интерфейсе могут отображаться только безопасные технические признаки, например факт наличия ключа или публичные идентификаторы аккаунтов.
+          Секретные ключи, service role keys, access tokens и app secrets используются только на серверной стороне. Они не показываются обычным пользователям в интерфейсе Medina OS. В интерфейсе могут отображаться только безопасные технические признаки, например факт наличия ключа или публичные идентификаторы аккаунтов.
         </p>
       </Section>
 
@@ -102,7 +102,7 @@ function LegalPage({ title, heading, updated, children }: {
           {/* Logo + back */}
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 32 }}>
             <Link href="/" style={{ textDecoration: 'none' }}>
-              <span style={{ fontSize: 18, fontWeight: 800, letterSpacing: '0.15em', color: '#0B1220' }}>NEGIS</span>
+              <span style={{ fontSize: 18, fontWeight: 800, letterSpacing: '0.15em', color: '#0B1220' }}>Medina OS</span>
             </Link>
             <Link href="/" style={{ color: '#64748B', fontSize: 14, textDecoration: 'none' }}>
               На главную
@@ -130,7 +130,7 @@ function LegalPage({ title, heading, updated, children }: {
               <span style={{ color: '#E7ECF3' }}>·</span>
               <Link href="/data-deletion" style={{ color: '#94A3B8', fontSize: 13, textDecoration: 'none' }}>Data Deletion</Link>
               <span style={{ color: '#E7ECF3' }}>·</span>
-              <span style={{ color: '#B0BAC6', fontSize: 13 }}>© 2026 Negis</span>
+              <span style={{ color: '#B0BAC6', fontSize: 13 }}>© 2026 Medina OS</span>
             </div>
           </div>
 

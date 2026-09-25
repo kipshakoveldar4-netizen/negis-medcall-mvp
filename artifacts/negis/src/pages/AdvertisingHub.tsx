@@ -1069,7 +1069,7 @@ export default function AdvertisingHub() {
                 <p className="text-xs font-semibold uppercase" style={{ color: "var(--negis-primary)", letterSpacing: 0 }}>Контент и факты</p>
                 <h2 id="creative-evidence-title" className="mt-1 text-lg font-semibold" style={{ color: "var(--negis-text)" }}>Тест креативов</h2>
                 <p className="mt-1 max-w-2xl text-sm leading-relaxed" style={{ color: "var(--negis-muted)" }}>
-                  Факты по согласованным вариантам одного контент-пакета. Negis не выбирает победителя и не меняет кампании автоматически.
+                  Факты по согласованным вариантам одного контент-пакета. Medina OS не выбирает победителя и не меняет кампании автоматически.
                 </p>
               </div>
               <Link href="/content-studio">
@@ -1329,7 +1329,7 @@ export default function AdvertisingHub() {
         </section>
 
         <p className="text-xs leading-relaxed" style={{ color: "var(--negis-muted)" }}>
-          Безопасный режим: Negis создаёт новые кампании выключенными. Включение и расход бюджета остаются под контролем владельца рекламного кабинета.
+          Безопасный режим: Medina OS создаёт новые кампании выключенными. Включение и расход бюджета остаются под контролем владельца рекламного кабинета.
         </p>
       </div>
     </PageLayout>

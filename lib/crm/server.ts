@@ -6503,7 +6503,7 @@ export async function handleAdCreativeMetaUpload(req: VercelRequest, res: Vercel
   const assetId = firstString(body.assetId, body.id);
   const creativeType = normalizeCreativeFileType(body);
   const publicUrl = resolveAdCreativePublicUrl(body);
-  const title = firstString(body.title, body.fileName, body.file_name, "Negis video creative");
+  const title = firstString(body.title, body.fileName, body.file_name, "Medina OS video creative");
   const fileName = firstString(body.fileName, body.file_name, title);
   const mimeType = firstString(body.mimeType, body.mime_type);
 
@@ -6580,7 +6580,7 @@ export async function handleAdCreativeMetaUpload(req: VercelRequest, res: Vercel
       res,
       400,
       errorBody("Не удалось получить публичную ссылку креатива", [
-        "Видео загружено в Negis, но публичная ссылка не получена. Проверьте Supabase Storage bucket ad-creatives.",
+        "Видео загружено в Medina OS, но публичная ссылка не получена. Проверьте Supabase Storage bucket ad-creatives.",
       ]),
     );
   }
@@ -6696,7 +6696,7 @@ export async function handleAdCreativeMetaUpload(req: VercelRequest, res: Vercel
       res,
       metaError.step === "video_processing" ? 409 : 502,
       {
-        ...errorBody("Видео загружено в Negis, но Meta не приняла видео", [message]),
+        ...errorBody("Видео загружено в Medina OS, но Meta не приняла видео", [message]),
         data: { metaError },
       },
     );
@@ -7440,7 +7440,7 @@ function localizeMetaLaunchError(message: string) {
   }
 
   if (normalized.includes("video") && (normalized.includes("url") || normalized.includes("public"))) {
-    return "Видео загружено в Negis, но публичная ссылка не получена. Проверьте Supabase Storage bucket ad-creatives.";
+    return "Видео загружено в Medina OS, но публичная ссылка не получена. Проверьте Supabase Storage bucket ad-creatives.";
   }
 
   if (normalized.includes("permission") || normalized.includes("permissions") || normalized.includes("unsupported post request")) {

@@ -642,7 +642,7 @@ export default function ServicesPage() {
           <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
             <div>
               <p className="text-xs font-black uppercase tracking-[0.18em]" style={{ color: "var(--negis-primary)" }}>
-                Negis OS · {capitalize(terms.org)}
+                Medina OS · {capitalize(terms.org)}
               </p>
               <h1 className="mt-2 text-3xl font-black sm:text-4xl" style={{ color: "var(--negis-text)" }}>
                 Услуги

@@ -4,6 +4,7 @@
   "packageManager": "pnpm@10.33.2",
   "license": "MIT",
   "scripts": {
+    "test:branding": "node --test scripts/test-medina-branding.cjs",
     "test:crm-cold-start": "node scripts/test-crm-cold-start.cjs",
     "preinstall": "node scripts/preinstall.cjs",
     "build": "node scripts/run-pnpm.cjs run typecheck && node scripts/test-crm-cold-start.cjs && node scripts/run-pnpm.cjs --filter @workspace/negis run build",

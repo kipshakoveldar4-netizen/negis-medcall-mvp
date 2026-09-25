@@ -125,7 +125,7 @@ export default function ResetPassword() {
           display: 'inline-block', background: '#DDE5EE', borderRadius: 8,
           padding: '5px 12px', fontSize: 11, fontWeight: 600,
           letterSpacing: '0.18em', color: '#0B1220', marginBottom: 8,
-        }}>NEGIS</div>
+        }}>Medina OS</div>
         <p style={{ fontSize: 11, color: '#94A3B8', letterSpacing: '0.06em', margin: 0 }}>
           ВОССТАНОВЛЕНИЕ ПАРОЛЯ
         </p>

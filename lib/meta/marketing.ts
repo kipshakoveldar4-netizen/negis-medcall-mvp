@@ -212,7 +212,7 @@ const INSTAGRAM_PLACEMENT_FALLBACK_WARNING =
 const KZ_CITY_FALLBACK_WARNING =
   "Meta city key was not found, Kazakhstan country targeting was used.";
 export const META_VIDEO_LAUNCH_DISABLED_MESSAGE =
-  "Видео загружено в Negis, но автозапуск видео-рекламы через Meta API ещё находится в подготовке. Сейчас можно запускать фото-рекламу. Для видео используйте Ads Manager вручную или загрузите MP4 после включения video_id flow.";
+  "Видео загружено в Medina OS, но автозапуск видео-рекламы через Meta API ещё находится в подготовке. Сейчас можно запускать фото-рекламу. Для видео используйте Ads Manager вручную или загрузите MP4 после включения video_id flow.";
 export const META_MOV_VIDEO_WARNING =
   "MOV поддерживается Meta, но обработка может быть дольше. Для максимальной стабильности используйте MP4/H.264.";
 export const META_VIDEO_FORMAT_ERROR =
@@ -222,7 +222,7 @@ export const META_VIDEO_PROCESSING_TIMEOUT_MESSAGE =
 export const META_VIDEO_BINARY_TOO_LARGE_MESSAGE =
   "Видео слишком большое для серверной передачи. Используйте MP4 меньшего размера или подключите background worker.";
 export const META_VIDEO_THUMBNAIL_REQUIRED_MESSAGE =
-  "Для видео-рекламы нужна обложка (video_data.image_url). Negis создаёт её автоматически при загрузке видео. Загрузите видео заново, чтобы обложка создалась.";
+  "Для видео-рекламы нужна обложка (video_data.image_url). Medina OS создаёт её автоматически при загрузке видео. Загрузите видео заново, чтобы обложка создалась.";
 const META_VIDEO_BINARY_FALLBACK_LIMIT_BYTES = 25 * 1024 * 1024;
 const metaCityTargetCache = new Map<string, MetaCityTarget>();
 
@@ -914,7 +914,7 @@ export async function uploadMetaVideo(input: { videoUrl: string; title?: string 
 
   return metaRequest(`/${adAccountId}/advideos`, "POST", {
     file_url: videoUrl,
-    title: input.title || "Negis video creative",
+    title: input.title || "Medina OS video creative",
   }, "video_upload");
 }
 
@@ -1199,7 +1199,7 @@ export async function uploadMetaVideoAndGetId(input: {
   const videoUrl = input.videoUrl.trim();
   const fileName = input.fileName?.trim() || "negis-video.mp4";
   const mimeType = normalizeVideoMimeType(input.mimeType, fileName);
-  const title = input.title?.trim() || "Negis video creative";
+  const title = input.title?.trim() || "Medina OS video creative";
   const warnings: string[] = [];
   assertSupportedMetaVideoFormat({ mimeType, fileName });
   if (mimeType === "video/quicktime" || fileName.toLowerCase().endsWith(".mov")) addWarning(warnings, META_MOV_VIDEO_WARNING);
@@ -1227,7 +1227,7 @@ export async function uploadMetaVideoAndGetId(input: {
   } catch (error) {
     if (!shouldFallbackVideoUrlToBinary(error)) throw error;
     uploadMode = "binary";
-    addWarning(warnings, "Meta не смогла получить видео по public URL. Negis отправил видео в Meta server-to-server.");
+    addWarning(warnings, "Meta не смогла получить видео по public URL. Medina OS отправил видео в Meta server-to-server.");
     data = await uploadMetaVideoBinary({
       config: resolvedConfig,
       adAccountId,
@@ -1308,7 +1308,7 @@ export async function uploadMetaImageFromUrl(input: { imageUrl: string; name?: s
 
   return metaRequest(`/${adAccountId}/adimages`, "POST", {
     url: imageUrl,
-    name: input.name || "Negis image creative",
+    name: input.name || "Medina OS image creative",
   }, "image_upload");
 }
 

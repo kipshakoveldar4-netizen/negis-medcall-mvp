@@ -1570,7 +1570,7 @@ export default function AdminCenter() {
         adAccountId: metaAccount.adAccountId,
         pageId: metaAccount.pageId,
         instagramActorId: metaAccount.instagramActorId,
-        accountName: "Negis Meta Ads",
+        accountName: "Medina OS Meta Ads",
         currency: "USD",
         timezoneName: "Asia/Almaty",
         status: "draft",

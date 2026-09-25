@@ -138,8 +138,8 @@ async function checkAdsAutomationSource() {
   assertSourceIncludes(source, "matchesHistorySearch", "history search logic");
   assertSourceIncludes(source, "mergeHistoryCollections", "local and API history deduplication");
   assertSourceIncludes(source, "historyLoaded", "history loading and empty-state separation");
-  // Negis OS history header (exact spec copy).
-  assertSourceIncludes(source, "Все рекламные кампании, созданные через Negis OS.", "Negis OS history subtitle");
+  // Current product branding in the history header.
+  assertSourceIncludes(source, "Все рекламные кампании, созданные через Medina OS.", "Medina OS history subtitle");
   // Summary metric cards.
   assertSourceIncludes(source, "Всего запусков", "total launches metric");
   assertSourceIncludes(source, "Создано выключенными", "paused-created count metric");
@@ -2008,7 +2008,7 @@ async function checkSalesPageSource() {
   const negisSrc = path.join(repoRoot, "artifacts", "negis", "src");
   const source = await readFile(path.join(negisSrc, "pages", "SalesPage.tsx"), "utf8");
   for (const marker of [
-    "Negis OS · CRM",
+    "Medina OS · CRM",
     "Продажи",
     "Оплаты, услуги и выручка клиники.",
     "Добавить продажу",
@@ -3598,7 +3598,7 @@ async function checkAdvertisingHubSource() {
     "buildCreativeExperimentGroups",
     "Тест креативов",
     "Пока нечего сравнивать",
-    "Negis не выбирает победителя",
+    "Medina OS не выбирает победителя",
     "Данные за один период",
     "Лиды Meta не равны заявкам CRM",
   ]) {
@@ -3636,7 +3636,7 @@ async function checkAdvertisingHubSource() {
     "creative_test_needs_same_period",
     "creative_test_ready",
     "Сопоставьте период теста креативов",
-    "Negis не выбирает победителя и не меняет кампании",
+    "Medina OS не выбирает победителя и не меняет кампании",
   ]) {
     if (!assistant.includes(marker)) throw new Error(`Advertising assistant is missing ${marker}`);
   }

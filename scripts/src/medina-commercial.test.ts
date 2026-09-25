@@ -65,7 +65,7 @@ test("07 Medina OS branding is present on customer routes", () => {
 });
 
 test("08 Ads Automation PAUSED safety remains intact", () => {
-  assert.ok(adsAutomation.includes("Все рекламные кампании, созданные через Negis OS.") || adsAutomation.includes("выключенной"), "history subtitle present");
+  assert.ok(adsAutomation.includes("Все рекламные кампании, созданные через Medina OS."), "history subtitle present");
   assert.ok(acc.includes("Реклама в Medina OS создаётся выключенной. Включить её можно вручную в Meta Ads Manager."));
 });
 

@@ -1,16 +1,16 @@
 import { crmFetch } from '@/lib/api';
 
-export const CRM_SOURCES = ['Instagram', 'Google', 'WhatsApp', '2GIS', 'Вручную', 'Webhook', 'Import', 'Negis App'];
-export const BOOKING_SOURCES = ['CRM', 'Instagram', 'WhatsApp', 'Import', 'Negis App'];
+export const CRM_SOURCES = ['Instagram', 'Google', 'WhatsApp', '2GIS', 'Вручную', 'Webhook', 'Import', 'Medina OS'];
+export const BOOKING_SOURCES = ['CRM', 'Instagram', 'WhatsApp', 'Import', 'Medina OS'];
 
 export const sourceValueToLabel = (source: string | null | undefined) => {
-  if (source === 'negis_app' || source === 'Negis App') return 'Negis App';
+  if (source === 'negis_app' || source === 'Negis App' || source === 'Medina OS') return 'Medina OS';
   if (!source || source === 'crm') return 'CRM';
   return source;
 };
 
-export const sourceLabelToValue = (label: string) => label === 'Negis App' ? 'negis_app' : label;
-export const isNegisAppSource = (source: string | null | undefined) => source === 'negis_app' || source === 'Negis App';
+export const sourceLabelToValue = (label: string) => label === 'Medina OS' || label === 'Negis App' ? 'negis_app' : label;
+export const isNegisAppSource = (source: string | null | undefined) => source === 'negis_app' || source === 'Negis App' || source === 'Medina OS';
 
 export const QR_STATUS_LABELS: Record<string, string> = {
   created: 'QR создан',

@@ -2478,7 +2478,7 @@ export default function ContentStudio() {
           <SectionTitle
             icon={ImagePlus}
             title="Фото-креатив"
-            subtitle="Загрузите фото клиники — Negis соберёт готовый рекламный креатив с безопасным текстом. Скачайте или отправьте в AI запуск рекламы."
+            subtitle="Загрузите фото клиники — Medina OS соберёт готовый рекламный креатив с безопасным текстом. Скачайте или отправьте в AI запуск рекламы."
           />
 
           <div className="grid gap-4 md:grid-cols-2">
@@ -2804,7 +2804,7 @@ export default function ContentStudio() {
           <SectionTitle
             icon={Clapperboard}
             title="Как собирается ролик"
-            subtitle="Что делает Negis и что остаётся сделать во внешних инструментах."
+            subtitle="Что делает Medina OS и что остаётся сделать во внешних инструментах."
           />
           <div className="grid gap-3 md:grid-cols-4">
             {workflow.map((item, index) => (
@@ -2816,7 +2816,7 @@ export default function ContentStudio() {
                       item.inProduct ? "bg-[#D1FAE5] text-[#065F46]" : "bg-[#F1F5F9] text-[#64748B]"
                     }`}
                   >
-                    {item.inProduct ? "в Negis" : "вручную"}
+                    {item.inProduct ? "в Medina OS" : "вручную"}
                   </span>
                 </div>
                 <p className="mt-2 text-sm font-bold text-[#0B1220]">{item.step}</p>

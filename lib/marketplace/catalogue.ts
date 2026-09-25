@@ -75,8 +75,8 @@ export const MARKETPLACE_APPS: readonly MarketplaceApp[] = [
     setup: "with_us",
     provider: "wazzup",
     limits: [
-      "Отвечать пациенту из Negis нельзя — переписка ведётся в кабинете Wazzup",
-      "Абонплата Wazzup оплачивается вендору отдельно от тарифа Negis",
+      "Отвечать пациенту из Medina OS нельзя — переписка ведётся в кабинете Wazzup",
+      "Абонплата Wazzup оплачивается вендору отдельно от тарифа Medina OS",
     ],
   },
   {
@@ -89,7 +89,7 @@ export const MARKETPLACE_APPS: readonly MarketplaceApp[] = [
     setup: "with_us",
     provider: "whatsapp_cloud",
     limits: [
-      "Отправка сообщений из Negis не реализована",
+      "Отправка сообщений из Medina OS не реализована",
       "Meta берёт плату за шаблоны сообщений отдельно",
     ],
   },
@@ -98,7 +98,7 @@ export const MARKETPLACE_APPS: readonly MarketplaceApp[] = [
     title: "Реклама Meta",
     vendor: "Meta",
     category: "ads",
-    summary: "Запуск кампаний в Instagram прямо из Negis и выгрузка статистики по ним.",
+    summary: "Запуск кампаний в Instagram прямо из Medina OS и выгрузка статистики по ним.",
     state: "live",
     setup: "with_us",
     provider: "meta",
@@ -124,7 +124,7 @@ export const MARKETPLACE_APPS: readonly MarketplaceApp[] = [
   {
     id: "targeting-agent",
     title: "Подбор аудитории",
-    vendor: "Negis",
+    vendor: "Medina OS",
     category: "ads",
     summary: "Разбор ниши и предложение параметров аудитории для кампании.",
     state: "live",

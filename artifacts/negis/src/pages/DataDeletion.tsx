@@ -2,10 +2,10 @@ import { Link } from "wouter";
 
 export default function DataDeletion() {
   return (
-    <LegalPage title="Удаление данных пользователя — Negis" heading="Удаление данных пользователя" updated="17 мая 2026">
+    <LegalPage title="Удаление данных пользователя — Medina OS" heading="Удаление данных пользователя" updated="17 мая 2026">
 
       <p style={P}>
-        Если вы хотите удалить свои данные из Negis, отправьте запрос на email:{' '}
+        Если вы хотите удалить свои данные из Medina OS, отправьте запрос на email:{' '}
         <a href="mailto:kipshakoveldar4@gmail.com" style={A}>kipshakoveldar4@gmail.com</a>
       </p>
 
@@ -15,7 +15,7 @@ export default function DataDeletion() {
           <li style={LI}>email или телефон;</li>
           <li style={LI}>название клиники;</li>
           <li style={LI}>какие данные вы хотите удалить;</li>
-          <li style={LI}>что запрос связан с удалением данных из Negis.</li>
+          <li style={LI}>что запрос связан с удалением данных из Medina OS.</li>
         </ul>
       </Section>
 
@@ -27,7 +27,7 @@ export default function DataDeletion() {
 
       <Section title="Данные из Facebook / Instagram Lead Ads">
         <p style={P}>
-          Если ваши данные были получены через Facebook или Instagram Lead Ads, укажите это в запросе. Мы удалим связанные лиды и рекламные данные из аккаунта клиники в Negis.
+          Если ваши данные были получены через Facebook или Instagram Lead Ads, укажите это в запросе. Мы удалим связанные лиды и рекламные данные из аккаунта клиники в Medina OS.
         </p>
       </Section>
 
@@ -36,7 +36,7 @@ export default function DataDeletion() {
           background: '#F8FAFC', border: '1px solid #E7ECF3', borderRadius: 12,
           padding: '16px 20px', fontSize: 14, color: '#475569', lineHeight: 1.7,
         }}>
-          To request deletion of your data from Negis, please email{' '}
+          To request deletion of your data from Medina OS, please email{' '}
           <a href="mailto:kipshakoveldar4@gmail.com" style={A}>kipshakoveldar4@gmail.com</a>{' '}
           with your name, contact details, clinic name, and a clear request to delete your data.
           We will process the request within 30 days.
@@ -74,7 +74,7 @@ function LegalPage({ title, heading, updated, children }: {
 
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 32 }}>
             <Link href="/" style={{ textDecoration: 'none' }}>
-              <span style={{ fontSize: 18, fontWeight: 800, letterSpacing: '0.15em', color: '#0B1220' }}>NEGIS</span>
+              <span style={{ fontSize: 18, fontWeight: 800, letterSpacing: '0.15em', color: '#0B1220' }}>Medina OS</span>
             </Link>
             <Link href="/" style={{ color: '#64748B', fontSize: 14, textDecoration: 'none' }}>
               На главную
@@ -100,7 +100,7 @@ function LegalPage({ title, heading, updated, children }: {
               <span style={{ color: '#E7ECF3' }}>·</span>
               <Link href="/data-deletion" style={{ color: '#94A3B8', fontSize: 13, textDecoration: 'none' }}>Data Deletion</Link>
               <span style={{ color: '#E7ECF3' }}>·</span>
-              <span style={{ color: '#B0BAC6', fontSize: 13 }}>© 2026 Negis</span>
+              <span style={{ color: '#B0BAC6', fontSize: 13 }}>© 2026 Medina OS</span>
             </div>
           </div>
 

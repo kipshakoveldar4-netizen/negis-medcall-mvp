@@ -115,7 +115,7 @@ export default function MarketplacePage() {
 
   return (
     <PageLayout>
-      <PageHeader title="Маркет приложений" subtitle="Что клиника может подключить к Negis. У каждой карточки честное состояние: что работает, что работает частично, чего пока нет." />
+      <PageHeader title="Маркет приложений" subtitle="Что клиника может подключить к Medina OS. У каждой карточки честное состояние: что работает, что работает частично, чего пока нет." />
       {loading ? (
         <div className="flex items-center gap-2 text-sm font-semibold text-[#64748B]">
           <Loader2 className="animate-spin" size={16} /> Читаю подключения…

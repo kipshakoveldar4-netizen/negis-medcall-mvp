@@ -363,10 +363,10 @@ const labelStyle: CSSProperties = {
 
 const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
 const VIDEO_REAL_LAUNCH_DISABLED_MESSAGE =
-  "Видео загружено в Negis. Реклама будет подготовлена безопасно и создана выключенной после проверки.";
+  "Видео загружено в Medina OS. Реклама будет подготовлена безопасно и создана выключенной после проверки.";
 const VIDEO_LAUNCH_SOON_MESSAGE = "Видео-запуск через Meta API будет добавлен после отдельной проверки команды.";
 const VIDEO_LAUNCH_ENABLED_MESSAGE = "Видео будет подготовлено для Meta автоматически перед созданием объявления.";
-const VIDEO_REQUIREMENTS_MESSAGE = "Видео: желательно MP4, до 100 MB, кодек H.264, вертикальный формат 9:16 для Reels/Stories. MOV можно хранить в Negis, но для Meta автозапуска лучше MP4.";
+const VIDEO_REQUIREMENTS_MESSAGE = "Видео: желательно MP4, до 100 MB, кодек H.264, вертикальный формат 9:16 для Reels/Stories. MOV можно хранить в Medina OS, но для Meta автозапуска лучше MP4.";
 const MOV_VIDEO_WARNING = "MOV поддерживается Meta, но обработка может быть дольше. Для стабильности лучше MP4/H.264.";
 const VIDEO_FORMAT_ERROR = "Для автозапуска видео поддерживаются MP4 и MOV.";
 const DRY_RUN_REFERENCE_MESSAGE = "Последняя проверка без запуска прошла. Meta API не вызывался.";
@@ -1993,7 +1993,7 @@ export default function AdsAutomation() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             workspaceId,
-            uploadedBy: user?.email || user?.user_metadata?.full_name || "Negis user",
+            uploadedBy: user?.email || user?.user_metadata?.full_name || "Medina OS user",
             fileName: file.name,
             mimeType: file.type,
             fileSize: file.size,
@@ -2435,7 +2435,7 @@ export default function AdsAutomation() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           workspaceId,
-          uploadedBy: user?.email || user?.user_metadata?.full_name || "Negis user",
+          uploadedBy: user?.email || user?.user_metadata?.full_name || "Medina OS user",
           fileName: file.name,
           fileType,
           mimeType: file.type,
@@ -2716,7 +2716,7 @@ export default function AdsAutomation() {
     const creativeUrl = publicCreativeUrl || dryRunPreviewUrl;
     return {
       workspaceId,
-      launchedBy: user?.user_metadata?.full_name || user?.email || "Negis user",
+      launchedBy: user?.user_metadata?.full_name || user?.email || "Medina OS user",
       launchedByRole: userRole || "owner",
       sourceModule: "ads-automation",
       sourceId: creative?.id || "",
@@ -3023,7 +3023,7 @@ export default function AdsAutomation() {
       metaStatus: result.metaStatus || statusOverride?.toUpperCase() || nextStatusMode,
       budgetDailyMinor: Math.round(Number(brief.dailyBudget || 0) * 100),
       currency: "USD",
-      launchedBy: user?.email || "Negis user",
+      launchedBy: user?.email || "Medina OS user",
       createdAt: new Date().toISOString(),
       payload: {
         creativeType: creative?.fileType,
@@ -4367,7 +4367,7 @@ export default function AdsAutomation() {
             <div>
               <p className="text-base font-black text-emerald-950">Безопасный режим: реклама создаётся выключенной</p>
               <p className="mt-1 text-sm font-semibold leading-relaxed text-emerald-800">
-                Negis подготовит кампанию в Meta, но она не начнёт тратить бюджет. Сотрудник или администратор сможет проверить объявление и включить его вручную в Ads Manager.
+                Medina OS подготовит кампанию в Meta, но она не начнёт тратить бюджет. Сотрудник или администратор сможет проверить объявление и включить его вручную в Ads Manager.
               </p>
             </div>
           </div>
@@ -4634,7 +4634,7 @@ export default function AdsAutomation() {
         {showingInitialLoader ? (
           <section className="negis-glass flex min-h-44 flex-col items-center justify-center gap-3 p-8 text-center" aria-live="polite">
             <Loader2 className="animate-spin" size={24} style={{ color: "var(--negis-primary)" }} />
-            <p className="text-sm font-bold" style={{ color: "var(--negis-muted)" }}>Собираем запуски из Negis OS</p>
+            <p className="text-sm font-bold" style={{ color: "var(--negis-muted)" }}>Собираем запуски из Medina OS</p>
           </section>
         ) : historyItems.length === 0 ? (
           <section className="negis-glass-hero flex flex-col items-center gap-3 p-8 text-center">
@@ -4643,7 +4643,7 @@ export default function AdsAutomation() {
             </div>
             <h2 className="text-xl font-black" style={{ color: "var(--negis-text)" }}>Запусков пока нет</h2>
             <p className="max-w-md text-sm font-semibold leading-relaxed" style={{ color: "var(--negis-muted)" }}>
-              Создайте первую рекламную кампанию. Negis OS подготовит креатив, проверит данные и создаст кампанию в Meta выключенной.
+              Создайте первую рекламную кампанию. Medina OS подготовит креатив, проверит данные и создаст кампанию в Meta выключенной.
             </p>
             <button type="button" className="neu-btn-primary justify-center" onClick={() => setLocation("/ads-automation")}>
               <Rocket size={16} />
@@ -4992,14 +4992,14 @@ export default function AdsAutomation() {
           <div className="flex flex-col gap-5 xl:flex-row xl:items-end xl:justify-between">
             <div>
               <p className="text-xs font-black uppercase tracking-[0.18em] text-[#0D9488]">
-                {isHistoryView ? "Negis OS · Реклама" : "Meta Ads · Clean Medical"}
+                {isHistoryView ? "Medina OS · Реклама" : "Meta Ads · Clean Medical"}
               </p>
               <h1 className="mt-2 text-3xl font-black text-[#0F172A] sm:text-4xl">
                 {isHistoryView ? "История запусков" : "Запуск рекламы в Meta"}
               </h1>
               <p className="mt-3 max-w-3xl text-sm leading-relaxed text-[#64748B]">
                 {isHistoryView
-                  ? "Все рекламные кампании, созданные через Negis OS."
+                  ? "Все рекламные кампании, созданные через Medina OS."
                   : "Спокойный мастер для клиники: загрузите креатив, заполните параметры, проверьте предпросмотр и создайте кампанию выключенной."}
               </p>
             </div>
