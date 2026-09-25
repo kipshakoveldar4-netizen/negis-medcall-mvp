@@ -25,12 +25,19 @@ export type OperatorLead = {
   name: string;
   phone: string;
   status: string;
+  stageId?: string | null;
+  stageName?: string;
   source: string;
   createdAt: string;
   assigned?: boolean;
 };
 
 export type OperatorList<T> = { items: T[]; hasMore: boolean };
+export type OperatorLeadStage = { id: string; name: string };
+export type OperatorLeadList = OperatorList<OperatorLead> & {
+  stages?: OperatorLeadStage[];
+  stageEditingAvailable?: boolean;
+};
 export const OPERATOR_PAGE_SIZE = 20;
 export const operatorStatusLabels = {
   pending: "На проверке платформы",

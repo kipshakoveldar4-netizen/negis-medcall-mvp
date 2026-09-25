@@ -40,10 +40,13 @@ export async function operatorApi<T>(
   return payload.data as T;
 }
 
-export function useOperatorList<T>(path: string, enabled = true) {
+export function useOperatorList<
+  T,
+  TList extends OperatorList<T> = OperatorList<T>,
+>(path: string, enabled = true) {
   const [offset, setOffset] = useState(0);
   const [revision, setRevision] = useState(0);
-  const [data, setData] = useState<OperatorList<T> | null>(null);
+  const [data, setData] = useState<TList | null>(null);
   const [error, setError] = useState("");
   const refresh = useCallback(() => setRevision((value) => value + 1), []);
   useEffect(() => {
@@ -51,7 +54,7 @@ export function useOperatorList<T>(path: string, enabled = true) {
     setError("");
     if (!enabled) return;
     const controller = new AbortController();
-    void operatorApi<OperatorList<T>>(
+    void operatorApi<TList>(
       `${path}${path.includes("?") ? "&" : "?"}offset=${offset}`,
       undefined,
       "GET",

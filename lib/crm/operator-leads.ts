@@ -52,7 +52,9 @@ function lead(value: unknown): OperatorLead {
     id: str(row.id),
     name: str(row.full_name),
     phone: str(row.phone),
-    status: str(row.status),
+    status: typeof row.status === "string" ? row.status : "",
+    stageId: isUuidValue(row.stage_id) ? str(row.stage_id) : null,
+    stageName: str(row.stage_name),
     source: str(row.source),
     createdAt: str(row.created_at),
   };
@@ -75,6 +77,75 @@ export async function handleOperatorLeads(
     return fail(res, 400, "Выберите клинику и страницу списка.");
   const db = getSupabaseServerClient();
   if (!db) return fail(res, 503, "Хранилище не настроено.");
+  if (req.method === "PATCH") {
+    const body = record(req.body);
+    const allowed = ["leadId", "stageId", "expectedStageId", "expectedStatus"];
+    if (
+      Object.keys(body).some((key) => !allowed.includes(key)) ||
+      !isUuidValue(body.leadId) ||
+      !isUuidValue(body.stageId) ||
+      !(body.expectedStageId === null || isUuidValue(body.expectedStageId)) ||
+      typeof body.expectedStatus !== "string"
+    )
+      return fail(res, 400, "Выберите стадию и обновите данные заявки.");
+    const { error } = await db.rpc("set_growth_operator_lead_stage", {
+      p_request_id: requestId,
+      p_operator_user_id: user.id,
+      p_lead_id: body.leadId,
+      p_stage_id: body.stageId,
+      p_expected_stage_id: body.expectedStageId,
+      p_expected_status: body.expectedStatus,
+    });
+    if (error) {
+      const code = str(record(error).code);
+      if (["PGRST202", "42883"].includes(code))
+        return fail(
+          res,
+          503,
+          "Изменение стадий ещё не подключено. Требуется миграция 056.",
+          "operator_stage_not_provisioned",
+        );
+      if (code === "PT409")
+        return fail(
+          res,
+          409,
+          "Заявка или стадия изменились. Обновите список и выберите стадию снова.",
+          "operator_stage_conflict",
+        );
+      return dbError(res, error, true);
+    }
+    return json(res, 200, { success: true });
+  }
+  const pipeline = await db.rpc("read_growth_operator_lead_pipeline", {
+    p_request_id: requestId,
+    p_operator_user_id: user.id,
+    p_offset: start,
+  });
+  if (!pipeline.error) {
+    const value = record(pipeline.data);
+    if (!Array.isArray(value.items) || !Array.isArray(value.stages))
+      return fail(res, 503, "Не удалось проверить стадии заявок.");
+    return json(res, 200, {
+      success: true,
+      data: {
+        items: value.items.slice(0, OPERATOR_PAGE_SIZE).map(lead),
+        hasMore: value.items.length > OPERATOR_PAGE_SIZE,
+        stages: value.stages
+          .filter(
+            (item) => isUuidValue(record(item).id) && str(record(item).name),
+          )
+          .map((item) => ({
+            id: str(record(item).id),
+            name: str(record(item).name),
+          })),
+        stageEditingAvailable: true,
+      },
+    });
+  }
+  // Rolling deployment: only a missing 056 RPC falls back to the existing 054
+  // read-only permission check. Denials/timeouts must never fall back.
+  if (!["PGRST202", "42883"].includes(str(record(pipeline.error).code)))
+    return dbError(res, pipeline.error, true);
   // The RPC rechecks the accepted agreement, verified identity, approval and scope
   // at every read. No staff membership or caller-supplied workspace grants access.
   const { data, error } = await db.rpc("read_growth_operator_leads", {
@@ -90,6 +161,8 @@ export async function handleOperatorLeads(
     data: {
       items: data.slice(0, OPERATOR_PAGE_SIZE).map(lead),
       hasMore: data.length > OPERATOR_PAGE_SIZE,
+      stages: [],
+      stageEditingAvailable: false,
     },
   });
 }

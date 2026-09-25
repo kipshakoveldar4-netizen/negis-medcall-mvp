@@ -36,7 +36,7 @@ async function arrive(request = 801, appointment = 501, staff = 101) {
 
 before(async () => {
   await db.exec("create role anon; create role authenticated; create role service_role bypassrls; grant usage on schema public to service_role;");
-  for (const filename of ["009_medcall_mvp_persistence.sql", "010_staff_ready_crm.sql", "011_staff_auth_foundation.sql", "034_platform_subscriptions.sql", "052_operators_and_partner_ledger.sql"]) {
+  for (const filename of ["009_medcall_mvp_persistence.sql", "010_staff_ready_crm.sql", "011_staff_auth_foundation.sql", "014_meta_ad_launches.sql", "019_crm_lead_pipeline_foundation.sql", "034_platform_subscriptions.sql", "052_operators_and_partner_ledger.sql"]) {
     const sql = await readFile(path.join(root, "migrations", filename), "utf8");
     // gen_random_uuid is built in. PGlite does not need the pgcrypto extension.
     await db.exec(sql.replace(/CREATE EXTENSION IF NOT EXISTS pgcrypto;/i, ""));
@@ -47,6 +47,8 @@ before(async () => {
   await db.exec(await readFile(path.join(root, "migrations/053_operator_request_lifecycle.sql"), "utf8"));
   await db.exec(await readFile(path.join(root, "migrations/054_operator_lead_access.sql"), "utf8"));
   await db.exec(await readFile(path.join(root, "migrations/054_operator_lead_access.sql"), "utf8"));
+  await db.exec(await readFile(path.join(root, "migrations/056_operator_lead_processing.sql"), "utf8"));
+  await db.exec(await readFile(path.join(root, "migrations/056_operator_lead_processing.sql"), "utf8"));
   await db.exec(`
     insert into public.workspaces(id, name) values
       ('${id(1)}', 'Clinic A'), ('${id(2)}', 'Clinic B'), ('${id(3)}', 'Clinic C');
@@ -195,7 +197,7 @@ test("anonymous and authenticated browser roles cannot read or execute growth op
       assert.equal(result.allowed, false, `${role}/${table}`);
     }
     const functions = await db.query<{ name: string; allowed: boolean }>("select p.proname as name,has_function_privilege($1,p.oid,'EXECUTE') as allowed from pg_proc p where p.proname like '%growth%'", [role]);
-    assert.equal(functions.rows.length, 10);
+    assert.equal(functions.rows.length, 12);
     assert.ok(functions.rows.every((r) => !r.allowed));
   }
 });
@@ -381,4 +383,152 @@ test("operator read returns bounded pages with deterministic ordering", async ()
   const first = await readLeads(); const second = await readLeads(801, 201, 20);
   assert.equal(first.length, 21); assert.equal(second.length, 2);
   assert.equal(first[20].id, second[0].id);
+});
+
+async function pipeline(request = 801, user = 201, offset = 0) {
+  return (await row("select public.read_growth_operator_lead_pipeline($1,$2,$3) as value", [id(request), id(user), offset])).value as {
+    items: Record<string, unknown>[]; stages: { id: string; name: string }[];
+  };
+}
+async function stage(key = "in_progress", workspace = 1) {
+  return String((await row("select id from public.lead_stages where workspace_id=$1 and stage_key=$2", [id(workspace), key])).id);
+}
+async function changeStage(options: { request?: number; user?: number; lead?: number; stage?: string; expectedStage?: string | null; expectedStatus?: string | null } = {}) {
+  const {request = 801, user = 201, lead = 1101, expectedStage = null, expectedStatus = "Новая"} = options;
+  return db.query("select public.set_growth_operator_lead_stage($1,$2,$3,$4,$5,$6)",
+    [id(request), id(user), id(lead), options.stage ?? await stage(), expectedStage, expectedStatus]);
+}
+
+test("operator pipeline exposes only the clinic's active stages and permitted contact fields", async () => {
+  await accept(); await assign();
+  const inactive = await stage("lost");
+  await db.query("update public.lead_stages set is_active=false where id=$1", [inactive]);
+  const data = await pipeline();
+  assert.deepEqual(data.items.map(item => item.id), [id(1101)]);
+  assert.equal(data.stages.length, 3);
+  assert.ok(!data.stages.some(item => item.id === inactive));
+  const foreign = await stage("new", 2);
+  assert.ok(!data.stages.some(item => item.id === foreign));
+  assert.deepEqual(Object.keys(data.items[0]).sort(), ["id", "full_name", "phone", "status", "source", "created_at", "stage_id", "stage_name"].sort());
+  assert.deepEqual((await pipeline(801, 201, 20)).items, []);
+  await rejects(() => pipeline(801, 203), /operator_access_denied/);
+});
+
+test("operator changes only assigned lead stage and text snapshot, with contact-free audit", async () => {
+  await accept(); await assign();
+  const before = await row("select * from public.leads where id=$1", [id(1101)]);
+  await changeStage({expectedStatus: String(before.status)});
+  const after = await row("select * from public.leads where id=$1", [id(1101)]);
+  assert.equal(after.stage_id, await stage()); assert.equal(after.status, "В работе");
+  const omitStage = ({stage_id, status, updated_at, ...rest}: Record<string, unknown>) => rest;
+  assert.deepEqual(omitStage(before), omitStage(after));
+  assert.equal((await pipeline()).items[0].stage_name, "В работе");
+  const event = await row("select * from public.audit_logs where action='operator_lead_stage_changed'");
+  assert.equal(event.actor_role, "operator"); assert.equal(event.entity_id, id(1101));
+  assert.deepEqual(Object.keys(event.metadata as object).sort(), ["operator_request_id", "operator_id", "previous_stage_id", "stage_id"].sort());
+  assert.ok(!JSON.stringify(event).includes("+7700"));
+  assert.equal((await row("select count(*)::int n from public.growth_operator_arrivals")).n, 0);
+  assert.equal((await row("select count(*)::int n from public.appointments")).n, 2);
+  assert.equal((await row("select count(*)::int n from public.staff_users")).n, 4);
+});
+
+test("stage mutation rejects missing assignment, foreign lead, identity and nonaccepted agreement", async () => {
+  await rejects(() => changeStage(), /operator_access_denied/);
+  await accept();
+  await rejects(() => changeStage(), /operator_access_denied/);
+  await assign();
+  await rejects(() => changeStage({lead:1102}), /operator_access_denied/);
+  await rejects(() => changeStage({lead:1103}), /operator_access_denied/);
+  await rejects(() => changeStage({user:203}), /operator_access_denied/);
+  await rejects(() => changeStage({request:802}), /operator_access_denied/);
+});
+
+test("stage mutation rechecks suspension, revoked assignment and ended cooperation", async () => {
+  await accept(); await assign();
+  await db.exec(`update public.growth_operator_profiles set status='suspended',accepting_requests=false where id='${id(701)}'`);
+  await rejects(() => changeStage(), /operator_access_denied/);
+  await rejects(() => pipeline(), /operator_access_denied/);
+  await db.exec(`update public.growth_operator_profiles set status='approved' where id='${id(701)}'`);
+  await assign(1101, false);
+  await rejects(() => changeStage(), /operator_access_denied/);
+  await assign();
+  await db.exec(`update public.growth_operator_requests set status='ended',ended_at=now() where id='${id(801)}'`);
+  await rejects(() => changeStage(), /operator_access_denied/);
+});
+
+test("only active stages in the same workspace can be selected", async () => {
+  await accept(); await assign();
+  await rejects(() => changeStage({stage: id(9901)}), /operator_stage_unavailable/);
+  const foreign = await stage("new", 2);
+  await rejects(() => changeStage({stage: foreign}), /operator_stage_unavailable/);
+  await db.query("update public.lead_stages set is_active=false where id=$1", [await stage()]);
+  await rejects(() => changeStage(), /operator_stage_unavailable/);
+});
+
+test("stale status or stage cannot overwrite a clinic change; unchanged save adds no audit", async () => {
+  await accept(); await assign();
+  const initial = String((await row("select status from public.leads where id=$1", [id(1101)])).status);
+  await changeStage({expectedStatus: initial});
+  await rejects(() => changeStage({stage: id(9999), expectedStatus: initial}), /operator_stage_unavailable/);
+  await rejects(() => changeStage({stage: undefined, expectedStatus: initial}), /operator_stage_conflict/);
+  await changeStage({expectedStage: await stage(), expectedStatus:"В работе"});
+  assert.equal((await row("select count(*)::int n from public.audit_logs where action='operator_lead_stage_changed'")).n, 1);
+  await db.query("update public.leads set status='Изменена сотрудником' where id=$1", [id(1101)]);
+  await rejects(async () => changeStage({stage: await stage("lost"), expectedStage: await stage(), expectedStatus:"В работе"}), /operator_stage_conflict/);
+  assert.equal((await row("select status from public.leads where id=$1", [id(1101)])).status, "Изменена сотрудником");
+});
+
+test("whole-clinic agreement may process own unassigned lead but not a foreign lead", async () => {
+  await db.exec(`update public.growth_operator_requests set status='declined' where id='${id(801)}'`);
+  await db.exec(`insert into public.growth_operator_requests(id,workspace_id,operator_id,requested_by_staff_user_id,clinic_brief,price_per_arrival_minor,lead_scope)
+    values('${id(805)}','${id(1)}','${id(701)}','${id(101)}','Whole clinic',50000,'clinic')`);
+  await accept(805);
+  const initial = String((await row("select status from public.leads where id=$1", [id(1102)])).status);
+  await changeStage({request:805,lead:1102,expectedStatus:initial});
+  assert.equal((await row("select status from public.leads where id=$1", [id(1102)])).status, "В работе");
+  await rejects(() => changeStage({request:805,lead:1103}), /operator_access_denied/);
+});
+
+test("pipeline RPCs deny direct client execution and allow verified server invocation", async () => {
+  const signature = "public.set_growth_operator_lead_stage(uuid,uuid,uuid,uuid,uuid,text)";
+  const readSignature = "public.read_growth_operator_lead_pipeline(uuid,uuid,integer)";
+  for (const role of ["anon", "authenticated"]) {
+    for (const rpc of [signature, readSignature])
+      assert.equal((await row("select has_function_privilege($1,$2,'execute') as allowed", [role,rpc])).allowed, false);
+  }
+  await accept(); await assign();
+  const target = await stage();
+  const initial = String((await row("select status from public.leads where id=$1", [id(1101)])).status);
+  await db.exec("set local role service_role");
+  await changeStage({stage:target,expectedStatus:initial});
+  assert.equal((await pipeline()).items[0].stage_id, target);
+});
+
+test("056 reapplies without altering stage changes or creating duplicate audits", async () => {
+  await accept(); await assign();
+  const initial = String((await row("select status from public.leads where id=$1", [id(1101)])).status);
+  await changeStage({expectedStatus:initial});
+  // Strip transaction wrapper here to preserve the per-test rollback isolation.
+  const migration = await readFile(path.join(root,"migrations/056_operator_lead_processing.sql"),"utf8");
+  await db.exec(migration.replace(/^begin;$/m, "").replace(/^commit;$/m, ""));
+  assert.equal((await pipeline()).items[0].stage_name,"В работе");
+  assert.equal((await row("select count(*)::int n from public.audit_logs where action='operator_lead_stage_changed'")).n,1);
+});
+
+test("audit failure rolls back the stage mutation in the same transaction", async () => {
+  await accept(); await assign();
+  const before = await row("select stage_id,status,updated_at from public.leads where id=$1", [id(1101)]);
+  await db.exec(`create function public.fail_operator_audit_fixture() returns trigger language plpgsql as $$
+    begin if new.action='operator_lead_stage_changed' then raise exception 'fixture_audit_failure'; end if; return new; end $$;
+    create trigger fail_operator_audit_fixture before insert on public.audit_logs
+    for each row execute function public.fail_operator_audit_fixture();`);
+  await rejects(() => changeStage({expectedStatus:String(before.status)}), /fixture_audit_failure/);
+  assert.deepEqual(await row("select stage_id,status,updated_at from public.leads where id=$1", [id(1101)]),before);
+});
+
+test("legacy null status and stage can move to a structured stage without changing ownership", async () => {
+  await accept(); await assign();
+  await db.query("update public.leads set status=null,stage_id=null where id=$1",[id(1101)]);
+  await changeStage({expectedStatus:"",expectedStage:null});
+  assert.equal((await pipeline()).items[0].stage_id,await stage());
 });

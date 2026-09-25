@@ -17,6 +17,7 @@ const FOREIGN = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const OPERATOR = "33333333-3333-4333-8333-333333333333";
 const REQUEST = "44444444-4444-4444-8444-444444444444";
 const LEAD = "55555555-5555-4555-8555-555555555555";
+const STAGE = "66666666-6666-4666-8666-666666666666";
 type Row = Record<string, unknown>;
 type Query = {
   table: string;
@@ -63,11 +64,13 @@ test("operator HTTP authorization, DTOs and transitions", async (t) => {
   let dbFailureTable = "";
   let rpcData: unknown;
   let rpcFailure = "";
+  let pipelineMissing = false;
   function reset() {
     validToken = true;
     dbFailure = "";
     dbFailureTable = "";
     rpcFailure = "";
+    pipelineMissing = false;
     rpcData = REQUEST;
     log = [];
     rpcCalls = [];
@@ -174,6 +177,8 @@ test("operator HTTP authorization, DTOs and transitions", async (t) => {
       },
       rpc(name: string, args: Row) {
         rpcCalls.push({ name, args });
+        if (pipelineMissing && name === "read_growth_operator_lead_pipeline")
+          return Promise.resolve({data:null,error:{code:"PGRST202",message:"private-db-detail"}});
         return Promise.resolve({ data: rpcData, error: rpcFailure ? { code: rpcFailure, message: "private-db-detail" } : null });
       },
     };
@@ -418,14 +423,17 @@ test("operator HTTP authorization, DTOs and transitions", async (t) => {
     });
     await t.test("operator leads use only verified identity and agreement, never supplied workspace or user", async () => {
       reset(); tables.staff_users = [];
-      rpcData = [{ id: LEAD, full_name: "Заявка", phone: "fixture-phone", notes: "private-notes", auth_user_id: OTHER }];
+      rpcData = {items: [{ id: LEAD, full_name: "Заявка", phone: "fixture-phone", status:" Новая ", stage_id: STAGE, stage_name:"Новая", notes: "private-notes", auth_user_id: OTHER }], stages:[{id:STAGE,name:"Новая",workspace_id:OTHER,secret:"private-notes"}]};
       const res = await call("operator-leads", "GET", { userId: OTHER }, undefined, FOREIGN, { requestId: REQUEST });
       assert.equal(res.statusCode, 200);
-      assert.deepEqual(rpcCalls, [{ name: "read_growth_operator_leads", args: { p_request_id: REQUEST, p_operator_user_id: USER, p_offset: 0 } }]);
+      assert.deepEqual(rpcCalls, [{ name: "read_growth_operator_lead_pipeline", args: { p_request_id: REQUEST, p_operator_user_id: USER, p_offset: 0 } }]);
       assert.equal(log.length, 0);
       assert.ok(!JSON.stringify(res.body).includes("private-notes"));
       assert.ok(!JSON.stringify(res.body).includes(OTHER));
       assert.equal((res.body.data as {items: Row[]}).items[0].name, "Заявка");
+      assert.equal((res.body.data as {items: Row[]}).items[0].status, " Новая ");
+      assert.equal((res.body.data as Row).stageEditingAvailable, true);
+      assert.deepEqual((res.body.data as Row).stages, [{id:STAGE,name:"Новая"}]);
     });
     await t.test("RPC denial, schema lag, or malformed response never become empty success", async () => {
       for (const [failure, status] of [["P0001", 403], ["PGRST202", 503], ["500", 503]] as const) {
@@ -438,14 +446,56 @@ test("operator HTTP authorization, DTOs and transitions", async (t) => {
       assert.equal((await call("operator-leads", "GET", undefined, undefined, WORKSPACE, { requestId: REQUEST })).statusCode, 503);
     });
     await t.test("operator pages are bounded; wrong method, request or offset are refused", async () => {
-      reset(); rpcData = Array.from({length: 21}, (_, i) => ({id: String(i)}));
+      reset(); rpcData = { items: Array.from({length: 21}, (_, i) => ({id: String(i)})), stages:[] };
       const res = await call("operator-leads", "GET", undefined, undefined, WORKSPACE, { requestId: REQUEST, offset: "20" });
       assert.equal((res.body.data as {items: Row[]}).items.length, 20);
       assert.equal((res.body.data as {hasMore: boolean}).hasMore, true);
       assert.equal(rpcCalls[0].args.p_offset, 20);
-      assert.equal((await call("operator-leads", "PATCH", {})).statusCode, 405);
+      assert.equal((await call("operator-leads", "DELETE", {})).statusCode, 405);
       assert.equal((await call("operator-leads")).statusCode, 400);
       assert.equal((await call("operator-leads", "GET", undefined, undefined, WORKSPACE, { requestId: REQUEST, offset: "-1" })).statusCode, 400);
+    });
+    await t.test("missing 056 read RPC keeps 054 read-only, never bypassing access errors", async () => {
+      reset(); pipelineMissing = true; rpcData = [{id:LEAD,full_name:"Заявка"}];
+      const res = await call("operator-leads","GET",undefined,undefined,WORKSPACE,{requestId:REQUEST});
+      assert.equal(res.statusCode,200);
+      assert.equal((res.body.data as Row).stageEditingAvailable,false);
+      assert.deepEqual((res.body.data as Row).stages,[]);
+      assert.deepEqual(rpcCalls.map(r => r.name),["read_growth_operator_lead_pipeline","read_growth_operator_leads"]);
+      reset(); rpcFailure = "P0001";
+      assert.equal((await call("operator-leads","GET",undefined,undefined,WORKSPACE,{requestId:REQUEST})).statusCode,403);
+      assert.equal(rpcCalls.length,1);
+    });
+    const stageBody = {leadId:LEAD,stageId:STAGE,expectedStageId:null,expectedStatus:"Новая"};
+    await t.test("stage write uses token identity, no staff membership, only the narrow RPC", async () => {
+      reset(); tables.staff_users=[];
+      const res = await call("operator-leads","PATCH",stageBody,undefined,FOREIGN,{requestId:REQUEST});
+      assert.equal(res.statusCode,200);
+      assert.deepEqual(rpcCalls,[{name:"set_growth_operator_lead_stage",args:{p_request_id:REQUEST,p_operator_user_id:USER,p_lead_id:LEAD,p_stage_id:STAGE,p_expected_stage_id:null,p_expected_status:"Новая"}}]);
+      assert.equal(log.length,0);
+      assert.deepEqual(res.body,{success:true});
+    });
+    await t.test("stage write rejects unauthenticated, invalid, extra and forged write fields", async () => {
+      reset();
+      assert.equal((await call("operator-leads","PATCH",stageBody,null,WORKSPACE,{requestId:REQUEST})).statusCode,401);
+      validToken=false;
+      assert.equal((await call("operator-leads","PATCH",stageBody,undefined,WORKSPACE,{requestId:REQUEST})).statusCode,401);
+      assert.equal(rpcCalls.length,0);
+      for (const invalid of [{}, {...stageBody,stageId:"fake"}, {...stageBody,expectedStageId:undefined}, {...stageBody,expectedStatus:null}, {...stageBody,notes:"private"}, {...stageBody,userId:OTHER}, {...stageBody,workspaceId:FOREIGN}, {...stageBody,status:"arbitrary"}]) {
+        reset();
+        assert.equal((await call("operator-leads","PATCH",invalid,undefined,WORKSPACE,{requestId:REQUEST})).statusCode,400);
+        assert.equal(rpcCalls.length,0);
+      }
+    });
+    await t.test("stage write fails safely on conflict, revoked access and unapplied migration", async () => {
+      for (const [failure,status] of [["PT409",409],["P0001",403],["PGRST202",503],["500",503]] as const) {
+        reset(); rpcFailure=failure;
+        const res=await call("operator-leads","PATCH",stageBody,undefined,WORKSPACE,{requestId:REQUEST});
+        assert.equal(res.statusCode,status);
+        assert.equal(rpcCalls.length,1);
+        assert.ok(!JSON.stringify(res.body).includes("private-db-detail"));
+        if (failure === "PGRST202") assert.equal(res.body.code,"operator_stage_not_provisioned");
+      }
     });
     await t.test("clinic assignment uses verified staff and requires a matching accepted agreement", async () => {
       reset(); tables.growth_operator_requests[0].status = "accepted";
@@ -670,7 +720,7 @@ test("operator entry, clinic and platform controls stay distinct", async () => {
   assert.match(backend, /accept_growth_operator_request/);
 });
 
-test("operator contact UI uses explicit agreed scope without storing contacts or enabling CRM writes", async () => {
+test("operator contact UI uses explicit scope and guarded stage writes without general CRM editing", async () => {
   const read = (name: string) => readFile(path.join(root, name), "utf8");
   const clinic = await read("artifacts/negis/src/components/admin/ClinicOperators.tsx");
   const requests = await read("artifacts/negis/src/components/operators/OperatorRequests.tsx");
@@ -686,5 +736,13 @@ test("operator contact UI uses explicit agreed scope without storing contacts or
   assert.match(leads, /key=\{`\$\{requestId\}/);
   assert.match(leads, /window.addEventListener\("focus", refresh\)/);
   assert.doesNotMatch(leads, /localStorage|sessionStorage|medicalHistory|notes|meta-launch|appointments|responsible_user_id/);
-  assert.match(leads, /Только просмотр/);
+  assert.match(leads, /Доступен только просмотр/);
+  assert.match(leads, /stageEditingAvailable/);
+  assert.match(leads, /expectedStageId: item.stageId/);
+  assert.match(leads, /expectedStatus: item.status/);
+  assert.match(leads, /Сохранить стадию/);
+  assert.match(leads, /!clinic &&\s+list.data\?\.stageEditingAvailable/);
+  const backend = await read("lib/crm/operator-leads.ts");
+  assert.match(backend, /set_growth_operator_lead_stage/);
+  assert.doesNotMatch(backend, /\.update\(|\.insert\(|localStorage|launchMeta/);
 });

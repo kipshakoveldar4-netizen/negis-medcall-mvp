@@ -1,9 +1,17 @@
 import { useEffect, useState } from "react";
-import { ChevronLeft, ChevronRight, RefreshCw, Search } from "lucide-react";
+import {
+  ChevronLeft,
+  ChevronRight,
+  RefreshCw,
+  Save,
+  Search,
+} from "lucide-react";
 import { operatorApi, useOperatorList } from "@/lib/operatorApi";
 import {
   type OperatorLead,
   type OperatorLeadScope,
+  type OperatorLeadList,
+  type OperatorLeadStage,
 } from "../../../../../lib/crm/operator-contracts";
 
 export function OperatorLeads({
@@ -75,9 +83,10 @@ function LeadList({
   clinic: boolean;
   canAssign: boolean;
 }) {
-  const list = useOperatorList<OperatorLead>(path);
+  const list = useOperatorList<OperatorLead, OperatorLeadList>(path);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
   const refresh = list.refresh;
   useEffect(() => {
     // Revalidate access when returning to the page; never persist patient contacts.
@@ -99,13 +108,39 @@ function LeadList({
       setBusy(false);
     }
   }
+  async function changeStage(item: OperatorLead, stageId: string) {
+    setBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      await operatorApi(
+        path,
+        {
+          leadId: item.id,
+          stageId,
+          expectedStageId: item.stageId ?? null,
+          expectedStatus: item.status,
+        },
+        "PATCH",
+      );
+      setNotice("Стадия заявки сохранена.");
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Не удалось сохранить стадию.",
+      );
+    } finally {
+      // Recheck authorization on both success and failure, removing stale contacts.
+      refresh();
+      setBusy(false);
+    }
+  }
   return (
     <>
       <div className="flex items-center justify-between gap-2">
         <p className="text-sm opacity-70">
           {clinic
             ? "Изменение назначения не меняет ответственного сотрудника в CRM."
-            : "Только просмотр. Изменение заявок и запись пациентов пока доступны сотрудникам клиники."}
+            : "Стадии заявок"}
         </p>
         <button
           className="neu-btn shrink-0"
@@ -123,6 +158,23 @@ function LeadList({
         </p>
       )}
       {!list.data && !list.error && <p role="status">Загружаем заявки…</p>}
+      {notice && !list.error && (
+        <p role="status" className="text-sm text-emerald-700">
+          {notice}
+        </p>
+      )}
+      {!clinic && list.data?.stageEditingAvailable === false && (
+        <p className="text-sm opacity-70">
+          Изменение стадий ещё не подключено. Доступен только просмотр.
+        </p>
+      )}
+      {!clinic &&
+        list.data?.stageEditingAvailable &&
+        !list.data.stages?.length && (
+          <p className="text-sm opacity-70">
+            В клинике пока нет активных стадий заявок.
+          </p>
+        )}
       {list.data?.items.length === 0 && (
         <p className="text-sm">
           {clinic ? "Заявки не найдены." : "Доступных заявок пока нет."}
@@ -137,6 +189,9 @@ function LeadList({
             <div className="min-w-0 flex-1 break-words">
               <p className="font-medium">{item.name || "Имя не указано"}</p>
               <p className="text-sm">{item.phone || "Телефон не указан"}</p>
+              <p className="text-sm">
+                Стадия: {item.stageName || item.status || "Не указана"}
+              </p>
               {item.source && (
                 <p className="text-xs opacity-70">Источник: {item.source}</p>
               )}
@@ -153,6 +208,17 @@ function LeadList({
                 Назначена
               </label>
             )}
+            {!clinic &&
+              list.data?.stageEditingAvailable &&
+              Boolean(list.data?.stages?.length) && (
+                <LeadStageEditor
+                  key={`${item.id}:${item.stageId}:${item.status}`}
+                  item={item}
+                  stages={list.data?.stages ?? []}
+                  busy={busy}
+                  onSave={(stageId) => void changeStage(item, stageId)}
+                />
+              )}
           </div>
         ))}
       </div>
@@ -177,5 +243,60 @@ function LeadList({
         </button>
       </div>
     </>
+  );
+}
+
+function LeadStageEditor({
+  item,
+  stages,
+  busy,
+  onSave,
+}: {
+  item: OperatorLead;
+  stages: OperatorLeadStage[];
+  busy: boolean;
+  onSave: (stageId: string) => void;
+}) {
+  const [stageId, setStageId] = useState(item.stageId ?? "");
+  const knownStage = stages.some((stage) => stage.id === stageId);
+  return (
+    <form
+      className="flex w-full min-w-0 items-end gap-2 sm:max-w-sm"
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (!busy && knownStage) onSave(stageId);
+      }}
+    >
+      <label className="min-w-0 flex-1 text-sm">
+        Стадия заявки
+        <select
+          className="neu-input mt-1 w-full min-w-0"
+          value={stageId}
+          disabled={busy}
+          aria-label={`Стадия заявки: ${item.name || "без имени"}`}
+          onChange={(event) => setStageId(event.target.value)}
+        >
+          {!knownStage && (
+            <option value={stageId}>
+              {item.stageName || item.status || "Выберите стадию"}
+            </option>
+          )}
+          {stages.map((stage) => (
+            <option key={stage.id} value={stage.id}>
+              {stage.name}
+            </option>
+          ))}
+        </select>
+      </label>
+      <button
+        type="submit"
+        className="neu-btn shrink-0"
+        disabled={busy || !knownStage || stageId === item.stageId}
+        title="Сохранить стадию"
+        aria-label={`Сохранить стадию: ${item.name || "без имени"}`}
+      >
+        <Save size={18} />
+      </button>
+    </form>
   );
 }
