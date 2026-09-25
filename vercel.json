@@ -1,13 +1,26 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "installCommand": "pnpm install --frozen-lockfile",
-  "buildCommand": "pnpm --filter @workspace/negis run build",
+  "buildCommand": "pnpm --filter @workspace/negis run build && node artifacts/medina-site/copy-assets.mjs",
   "outputDirectory": "artifacts/negis/dist/public",
   "functions": {
     "api/content-studio/*.ts": { "maxDuration": 60 },
     "api/crm/*.ts": { "maxDuration": 60 }
   },
   "routes": [
+    {
+      "src": "/robots.txt",
+      "dest": "/api/crm/[...path].ts?path=site-page&page=/ru/robots.txt"
+    },
+    {
+      "src": "/ru",
+      "status": 308,
+      "headers": { "Location": "/ru/" }
+    },
+    {
+      "src": "/ru/(.*)",
+      "dest": "/api/crm/[...path].ts?path=site-page&page=/ru/$1"
+    },
     {
       "src": "/api/leads/webhook/([^/]+)",
       "dest": "/api/leads/webhook/[clinicId].ts"
