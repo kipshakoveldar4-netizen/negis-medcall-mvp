@@ -55,7 +55,8 @@ try {
       }
       await check('auth-context', 401, 'Bearer invalid-test-token');
       await check('site-page', 404);
-      console.log('CommonJS CRM cold start: 7 route checks passed; no network or credentials.');
+      const accessChecks = await require(${JSON.stringify(path.join(root, 'scripts', 'fixtures', 'crm-runtime-access.cjs'))})(handler);
+      console.log('CommonJS CRM cold start: 7 anonymous + ' + accessChecks + ' authenticated/denial checks passed; isolated fixtures, no network or credentials.');
     })().catch(error => { console.error(error); process.exitCode = 1; });
   `], { cwd: output, env: environment, encoding: 'utf8', timeout: 30000 });
   if (child.stdout) process.stdout.write(child.stdout);
