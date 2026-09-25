@@ -1,7 +1,6 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { handleSiteIntake } from "../../lib/crm/site-intake-handler";
 import { handleSiteBlog } from "../../lib/crm/site-blog";
-import { handleSitePage } from "../../lib/crm/site-page";
 import { handlePlatformOperators, handleOperatorAccount, handleOperatorInbox, handleClinicOperators } from "../../lib/crm/operators";
 import { handleOperatorLeads, handleClinicOperatorLeads } from "../../lib/crm/operator-leads";
 import { handleOperatorServices } from "../../lib/crm/operator-services";
@@ -333,10 +332,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   // This one write-only intake has its own bounded parser and bot verification.
   // Never dispatch it through generic CRM resources or resolve a visitor tenant.
-  if (route.authorization.kind === "site_public") {
-    if (route.key !== "site-page" || segments.length !== 1) return notFound(res);
-    return handleSitePage(req, res);
-  }
   if (route.authorization.kind === "site_intake") {
     if (route.key !== "site-inquiry" || segments.length !== 1) return notFound(res);
     return handleSiteIntake(req, res);

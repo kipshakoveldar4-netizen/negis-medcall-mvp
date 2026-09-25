@@ -17,8 +17,6 @@ export type RouteKind =
   | "internal_hmac"
   /** Single write-only public form; explicit server mapping + verified bot challenge. */
   | "site_intake"
-  /** Explicit public snapshots only; no caller-selected workspace. */
-  | "site_public"
   /**
    * Панель владельца ПЛАТФОРМЫ: читает поперёк арендаторов.
    *
@@ -331,7 +329,6 @@ export const CRM_ROUTE_AUTHORIZATION: Readonly<Record<string, RouteAuthorization
   // Worker route: HMAC only. A browser JWT must never satisfy it.
   "meta-insights-background-cycle": { kind: "internal_hmac", methods: ["POST"] },
   "site-inquiry": { kind: "site_intake", methods: ["POST", "OPTIONS"] },
-  "site-page": { kind: "site_public", methods: ["GET", "HEAD"] },
   "site-blog": { kind: "browser", methods: ["GET", "POST", "PATCH"], roles: WORKSPACE_ADMIN },
 };
 

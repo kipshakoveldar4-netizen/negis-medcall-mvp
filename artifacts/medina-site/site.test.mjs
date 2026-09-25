@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import { createPages, createSitemap, escapeHtml } from './render.mjs';
+import { createPages, escapeHtml } from './render.mjs';
 import { createPreviewServer } from './dev.mjs';
 import { readFormSettings } from './settings.mjs';
 
@@ -67,22 +67,4 @@ test('form requires explicit public settings; secret is never rendered', () => {
   assert.match(html, /method="post"/);
   assert.doesNotMatch(html, /MUST-NOT-RENDER|workspaceId|<fieldset disabled/);
   assert.match(html, /type="submit" disabled/);
-});
-
-test('public rendering excludes example drafts and escapes approved text', () => {
-  const origin = 'https://site.example.invalid';
-  const pages = createPages(null, { preview: false, indexable: true, origin, articles: [
-    { slug: 'approved', title: '<script>bad</script>', summary: '"quoted"', body: '<img src=x onerror=alert(1)>\n\nText' },
-  ] });
-  assert.equal(pages.has('/ru/blog/after-the-lead/'), false);
-  const article = pages.get('/ru/blog/approved/');
-  assert.match(article, /&lt;script&gt;/);
-  assert.doesNotMatch(article, /<script|<img src=x|Редакционный черновик|undefined/);
-  assert.match(article, /rel="canonical" href="https:\/\/site.example.invalid\/ru\/blog\/approved\/"/);
-  assert.match(article, /name="robots" content="index,follow"/);
-  assert.match(pages.get('/404.html'), /noindex,nofollow/);
-  const sitemap = createSitemap(pages, origin);
-  assert.match(sitemap, /\/ru\/blog\/approved\//);
-  assert.doesNotMatch(sitemap, /404.html|after-the-lead/);
-  assert.match(createPages(null, { preview: false }).get('/ru/blog/'), /Материалы готовятся/);
 });

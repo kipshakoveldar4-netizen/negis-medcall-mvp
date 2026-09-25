@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ChevronLeft, ChevronRight, FileText, Plus, RefreshCw, Save, Globe, EyeOff } from "lucide-react";
+import { ChevronLeft, ChevronRight, FileText, Plus, RefreshCw, Save } from "lucide-react";
 import { PageLayout } from "@/components/layout/PageLayout";
 import { useAuth } from "@/contexts/AuthContext";
 import { CrmApiError, crmErrorMessage, crmFetch } from "@/lib/api";
@@ -11,8 +11,6 @@ const errorText: Record<string, string> = {
   invalid_blog_draft: "Проверьте заголовок и адрес статьи: латинские буквы, цифры и дефисы.",
   workspace_access_denied: "Редактировать блог могут только владелец и администратор пространства.",
   authentication_required: "Войдите в аккаунт повторно.",
-  publication_not_configured: "Публикация ещё не подключена. Нужна миграция 060.",
-  incomplete_article: "Перед публикацией заполните краткое описание и текст статьи.",
 };
 function blogError(error: unknown, fallback: string): string {
   if (error instanceof CrmApiError) return errorText[error.code] || crmErrorMessage(error);
@@ -85,25 +83,9 @@ function BlogEditor({ workspaceId }: { workspaceId: string }) {
         method: selected ? "PATCH" : "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ...fields, id: selected?.id || createId.current, ...(selected ? { version: selected.version } : {}) }),
       }));
-      accept(result.data); setNotice("Черновик сохранён. Публичная версия не менялась.");
+      accept(result.data); setNotice("Черновик сохранён. В интернете он не опубликован.");
       setReload(value => value + 1);
     } catch (err) { setError(blogError(err, "Не удалось сохранить черновик.")); }
-    finally { setBusy(false); }
-  }
-  async function changePublication(publish: boolean) {
-    if (!selected || busy || dirty) return;
-    if (!window.confirm(publish
-      ? "Разрешить показ этой сохранённой версии на подключённом публичном сайте? Проверьте текст и права на его использование."
-      : "Снять статью с публичного сайта? Черновик останется в кабинете.")) return;
-    setBusy(true); setError(""); setNotice("");
-    try {
-      const result = await readReply(await crmFetch(endpoint, {
-        method: "PATCH", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id: selected.id, version: selected.version, action: publish ? "publish" : "unpublish" }),
-      }));
-      accept(result.data); setReload(value => value + 1);
-      setNotice(publish ? "Версия разрешена для публикации на подключённом сайте." : "Публикация снята. Черновик сохранён.");
-    } catch (err) { setError(blogError(err, "Не удалось изменить публикацию.")); }
     finally { setBusy(false); }
   }
   const inputClass = "w-full min-w-0 rounded border border-[var(--negis-border)] bg-[var(--negis-surface)] p-3 text-sm";
@@ -114,7 +96,7 @@ function BlogEditor({ workspaceId }: { workspaceId: string }) {
       <div><h1 className="text-2xl font-semibold">Сайт и блог</h1><p className="mt-2 text-sm text-[var(--negis-muted)]">Статьи вашего пространства</p></div>
       <button className={buttonClass} disabled={busy || loading} onClick={newDraft}><Plus size={16} />Новая статья</button>
     </header>
-    <p className="border-l-2 border-amber-500 pl-3 text-sm">Черновики закрыты. На подключённый сайт попадает только отдельно подтверждённая версия.</p>
+    <p className="border-l-2 border-amber-500 pl-3 text-sm">Публичная публикация ещё не подключена. Черновики доступны только в кабинете.</p>
     {error && <div role="alert" className="break-words border-l-2 border-red-500 p-3 text-sm">{error}</div>}
     {notice && <p role="status" className="text-sm text-[var(--negis-primary)]">{notice}</p>}
     <div className="grid min-w-0 gap-6 lg:grid-cols-[260px_minmax(0,1fr)]">
@@ -131,14 +113,7 @@ function BlogEditor({ workspaceId }: { workspaceId: string }) {
           </div>
           {preview ? <article className="min-w-0 break-words border-y border-[var(--negis-border)] py-6"><p className="mb-3 text-xs text-[var(--negis-muted)]">Закрытый предпросмотр · русский</p><h2 className="text-2xl font-semibold">{fields.title || "Без заголовка"}</h2><p className="my-4 whitespace-pre-wrap text-[var(--negis-muted)]">{fields.excerpt}</p>{fields.body.split(/\n\s*\n/).map((paragraph, index) => <p key={index} className="mb-4 whitespace-pre-wrap leading-relaxed">{paragraph}</p>)}</article>
             : <fieldset disabled={busy} className="min-w-0 space-y-4"><label className="block text-sm">Заголовок<input className={inputClass} maxLength={200} value={fields.title} onChange={e => setFields({ ...fields, title: e.target.value })} /></label><label className="block text-sm">Адрес статьи<input className={inputClass} placeholder="kak-podgotovit-reklamu" maxLength={100} value={fields.slug} onChange={e => setFields({ ...fields, slug: e.target.value })} /></label><label className="block text-sm">Краткое описание<textarea className={inputClass} rows={3} maxLength={500} value={fields.excerpt} onChange={e => setFields({ ...fields, excerpt: e.target.value })} /></label><label className="block text-sm">Текст статьи<textarea className={`${inputClass} min-h-72`} rows={14} maxLength={30000} value={fields.body} onChange={e => setFields({ ...fields, body: e.target.value })} /></label></fieldset>}
-          {selected && <p className="mt-4 text-sm" role="status">{selected.publishedAt
-            ? selected.publishedVersion === selected.version ? "Сохранённая версия разрешена для сайта." : "Есть изменения, не включённые в публичную версию."
-            : "Статья не опубликована."}</p>}
-          <div className="mt-5 flex flex-wrap items-center gap-3">
-            <button className={`${buttonClass} bg-[var(--negis-primary)] text-white`} disabled={busy || !fields.title.trim() || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(fields.slug)} onClick={() => void save()}><Save size={16} />{busy ? "Сохраняем…" : "Сохранить черновик"}</button>
-            <button className={buttonClass} disabled={busy || dirty || !selected || !fields.body.trim() || !fields.excerpt.trim()} onClick={() => void changePublication(true)}><Globe size={16} />{selected?.publishedAt ? "Обновить публикацию" : "Разрешить публикацию"}</button>
-            {selected?.publishedAt && <button className={buttonClass} disabled={busy || dirty} onClick={() => void changePublication(false)}><EyeOff size={16} />Снять с публикации</button>}
-          </div>
+          <div className="mt-5 flex flex-wrap items-center gap-3"><button className={`${buttonClass} bg-[var(--negis-primary)] text-white`} disabled={busy || !fields.title.trim() || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(fields.slug)} onClick={() => void save()}><Save size={16} />{busy ? "Сохраняем…" : "Сохранить черновик"}</button></div>
         </>}
       </section>
     </div>

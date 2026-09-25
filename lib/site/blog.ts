@@ -1,6 +1,5 @@
 export type BlogDraftFields = { title: string; slug: string; excerpt: string; body: string; locale: "ru" };
-export type BlogDraft = BlogDraftFields & { id: string; status: "draft"; version: number; updatedAt: string;
-  publishedAt?: string | null; publishedVersion?: number | null; publishedSlug?: string | null };
+export type BlogDraft = BlogDraftFields & { id: string; status: "draft"; version: number; updatedAt: string };
 export type BlogSummary = Omit<BlogDraft, "body">;
 export const emptyBlogDraft = (): BlogDraftFields => ({ title: "", slug: "", excerpt: "", body: "", locale: "ru" });
 

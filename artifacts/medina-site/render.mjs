@@ -1,4 +1,4 @@
-import { services, articles as previewArticles, crmOrigin } from './content.mjs';
+import { services, articles, crmOrigin } from './content.mjs';
 
 export function escapeHtml(value) {
   return String(value).replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
@@ -8,14 +8,13 @@ const serviceUrl = item => `/ru/services/${item.slug}/`;
 const articleUrl = item => `/ru/blog/${item.slug}/`;
 const action = '<a class="button primary" href="/ru/#consultation">Обсудить задачу <span aria-hidden="true">↗</span></a>';
 
-function baseLayout({ title, description, content, section = '', intake = null, preview = true, indexable = false, assetBase = '' }) {
+function layout({ title, description, content, section = '', intake = null }) {
   return `<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>${e(title)} | Medina OS</title><meta name="description" content="${e(description)}"><meta name="robots" content="${indexable ? 'index,follow' : 'noindex,nofollow'}">
-  <meta property="og:title" content="${e(title)}"><meta property="og:description" content="${e(description)}"><meta property="og:type" content="website"><meta property="og:locale" content="ru_RU">
-  <meta name="referrer" content="strict-origin-when-cross-origin"><link rel="icon" href="${assetBase}/assets/brand.png"><link rel="stylesheet" href="${assetBase}/site.css">${intake ? `<script src="${assetBase}/form.js" defer></script>` : ''}</head>
+  <title>${e(title)} | Medina OS</title><meta name="description" content="${e(description)}"><meta name="robots" content="noindex,nofollow">
+  <meta name="referrer" content="strict-origin-when-cross-origin"><link rel="icon" href="/assets/brand.png"><link rel="stylesheet" href="/site.css">${intake ? '<script src="/form.js" defer></script>' : ''}</head>
   <body><a class="skip" href="#main">К содержимому</a>
-  ${preview ? '<div class="preview">Предпросмотр сайта Medina OS</div>' : ''}
-  <header class="shell header"><a class="brand" href="/ru/" aria-label="Medina OS — главная"><img src="${assetBase}/assets/brand.png" width="32" height="32" alt="">Medina OS</a>
+  <div class="preview">Предпросмотр сайта Medina OS</div>
+  <header class="shell header"><a class="brand" href="/ru/" aria-label="Medina OS — главная"><img src="/assets/brand.png" width="32" height="32" alt="">Medina OS</a>
   <nav aria-label="Основная навигация"><a href="/ru/#services" ${section === 'services' ? 'aria-current="page"' : ''}>Услуги</a><a href="/ru/blog/" ${section === 'blog' ? 'aria-current="page"' : ''}>Блог</a><a href="${crmOrigin}/login">Войти в CRM</a></nav></header>
   <main id="main">${content}</main>
   <footer><div class="shell footer"><a class="brand" href="/ru/">Medina OS</a><p>Маркетинг, обращения и работа с клиентами.</p><a href="${crmOrigin}/privacy">Конфиденциальность</a><a href="${crmOrigin}/terms">Условия</a></div></footer></body></html>`;
@@ -25,9 +24,8 @@ function serviceList() {
   return `<div class="service-list">${services.map(item => `<a class="service" href="${serviceUrl(item)}"><span class="number">${item.number}</span><div><h3>${e(item.title)}</h3><p>${e(item.short)}</p></div><span class="arrow" aria-hidden="true">↗</span></a>`).join('')}</div>`;
 }
 
-function renderArticleCards(articles) {
-  if (!articles.length) return '<p>Материалы готовятся к публикации.</p>';
-  return `<div class="articles">${articles.map(item => `<article><p class="eyebrow">${e(item.category || 'Блог Medina OS')}</p><h3><a href="${articleUrl(item)}">${e(item.title)}</a></h3><p>${e(item.summary)}</p><a class="text-link" href="${articleUrl(item)}">Читать статью <span aria-hidden="true">↗</span></a></article>`).join('')}</div>`;
+function articleCards() {
+  return `<div class="articles">${articles.map(item => `<article><p class="eyebrow">${e(item.category)}</p><h3><a href="${articleUrl(item)}">${e(item.title)}</a></h3><p>${e(item.summary)}</p><a class="text-link" href="${articleUrl(item)}">Читать статью <span aria-hidden="true">↗</span></a></article>`).join('')}</div>`;
 }
 
 function consultation(intake) {
@@ -41,10 +39,7 @@ function consultation(intake) {
   <button class="button primary" type="${intake ? 'submit' : 'button'}" disabled>Оставить заявку</button></fieldset></form></div></section>`;
 }
 
-export function createPages(intake = null, options = {}) {
-  const articles = options.articles ?? (options.preview === false ? [] : previewArticles);
-  const articleCards = () => renderArticleCards(articles);
-  const layout = input => baseLayout({ ...options, ...input });
+export function createPages(intake = null) {
   const pages = new Map();
   pages.set('/ru/', layout({ intake, title: 'Маркетинг для клиник и салонов', description: 'Medina OS: реклама, обработка обращений и CRM для клиник, стоматологий и салонов.', content: `
     <section class="intro"><div class="shell"><p class="eyebrow">Для клиник · стоматологий · салонов</p><h1>Medina OS</h1><p class="intro-text">Реклама привлекает внимание.<br>Команда превращает его в запись.</p><p class="intro-note">Соединяем маркетинг, работу оператора и CRM, чтобы каждое обращение получало следующий шаг.</p>${action}<a class="secondary-link" href="#services">Выбрать услугу ↓</a></div></section>
@@ -56,23 +51,7 @@ export function createPages(intake = null, options = {}) {
     <div class="shell"><a class="back" href="/ru/#services">← Все услуги</a></div><section class="detail-head shell"><p class="eyebrow">Medina OS / Услуги</p><h1>${e(item.title)}</h1><p class="lead">${e(item.intro)}</p>${action}</section>
     <section class="band shell narrow"><h2>Как строится работа</h2><ol class="deliverables">${item.steps.map(step => `<li>${e(step)}</li>`).join('')}</ol><aside class="notice"><strong>Важно до начала работы</strong><p>${e(item.boundary)}</p></aside><h2>${e(item.question)}</h2><p>${e(item.answer)}</p></section><section class="reading band"><div class="shell"><h2>Полезно перед разговором</h2>${articleCards()}</div></section>` }));
   pages.set('/ru/blog/', layout({ title: 'Блог о рекламе и обработке заявок', description: 'Материалы Medina OS о подготовке рекламы, работе с обращениями и CRM.', section: 'blog', content: `<section class="detail-head shell"><p class="eyebrow">Блог Medina OS</p><h1>Меньше догадок.<br>Больше ясности.</h1><p class="lead">О рекламе, заявках и работе команды простыми словами.</p></section><section class="shell band">${articleCards()}</section>` }));
-  for (const item of articles) pages.set(articleUrl(item), layout({ title: item.title, description: item.summary, section: 'blog', content: `<div class="shell"><a class="back" href="/ru/blog/">← Все статьи</a></div><article class="shell narrow article"><header><p class="eyebrow">${e(item.category || 'Блог Medina OS')}</p><h1>${e(item.title)}</h1><p class="lead">${e(item.summary)}</p>${options.preview === false ? '' : '<p class="draft">Редакционный черновик · ожидает проверки перед публикацией</p>'}</header>${typeof item.body === 'string' ? item.body.split(/\n\s*\n/).map(text => `<p class="article-text">${e(text)}</p>`).join('') : item.sections.map(([heading, text]) => `<section><h2>${e(heading)}</h2><p>${e(text)}</p></section>`).join('')}<aside class="article-cta"><h2>Обсудим вашу задачу?</h2><p>Начните с направления, которое сейчас требует внимания команды.</p><a class="button primary" href="/ru/#consultation">Оставить заявку ↗</a></aside></article>` }));
+  for (const item of articles) pages.set(articleUrl(item), layout({ title: item.title, description: item.summary, section: 'blog', content: `<div class="shell"><a class="back" href="/ru/blog/">← Все статьи</a></div><article class="shell narrow article"><header><p class="eyebrow">${e(item.category)}</p><h1>${e(item.title)}</h1><p class="lead">${e(item.summary)}</p><p class="draft">Редакционный черновик · ожидает проверки перед публикацией</p></header>${item.sections.map(([heading, text]) => `<section><h2>${e(heading)}</h2><p>${e(text)}</p></section>`).join('')}<aside class="article-cta"><h2>Обсудим вашу задачу?</h2><p>Начните с направления, которое сейчас требует внимания команды.</p><a class="button primary" href="/ru/services/${item.service}/">Посмотреть услугу ↗</a></aside></article>` }));
   pages.set('/404.html', layout({ title: 'Страница не найдена', description: 'Этой страницы нет на сайте Medina OS.', content: '<section class="shell detail-head"><p class="eyebrow">404</p><h1>Здесь пока ничего нет</h1><p class="lead">Вернитесь на главную или выберите материал в блоге.</p><a class="button primary" href="/ru/">На главную</a></section>' }));
-  if (options.origin) {
-    const origin = new URL(options.origin);
-    if (origin.protocol !== 'https:' || origin.origin !== options.origin) throw new Error('Invalid site origin');
-    for (const [url, html] of pages) {
-      if (url === '/404.html') continue;
-      const canonical = e(origin.origin + url);
-      pages.set(url, html.replace('</head>', `<link rel="canonical" href="${canonical}"><meta property="og:url" content="${canonical}"></head>`));
-    }
-  }
-  pages.set('/404.html', pages.get('/404.html').replace('content="index,follow"', 'content="noindex,nofollow"'));
   return pages;
-}
-
-export function createSitemap(pages, origin) {
-  if (new URL(origin).protocol !== 'https:' || new URL(origin).origin !== origin) throw new Error('Invalid site origin');
-  return '<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
-    + [...pages.keys()].filter(url => url.startsWith('/ru/')).map(url => `<url><loc>${e(origin + url)}</loc></url>`).join('') + '</urlset>';
 }
