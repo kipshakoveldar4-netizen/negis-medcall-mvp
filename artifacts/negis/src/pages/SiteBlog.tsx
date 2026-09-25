@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight, FileText, Plus, RefreshCw, Save } from "lucide-react";
 import { PageLayout } from "@/components/layout/PageLayout";
 import { useAuth } from "@/contexts/AuthContext";
-import { crmFetch } from "@/lib/api";
+import { CrmApiError, crmErrorMessage, crmFetch } from "@/lib/api";
 import { emptyBlogDraft, type BlogDraft, type BlogDraftFields, type BlogSummary } from "../../../../lib/site/blog";
 
 const errorText: Record<string, string> = {
@@ -12,6 +12,10 @@ const errorText: Record<string, string> = {
   workspace_access_denied: "Редактировать блог могут только владелец и администратор пространства.",
   authentication_required: "Войдите в аккаунт повторно.",
 };
+function blogError(error: unknown, fallback: string): string {
+  if (error instanceof CrmApiError) return errorText[error.code] || crmErrorMessage(error);
+  return error instanceof Error ? error.message : fallback;
+}
 async function readReply(response: Response) {
   let data;
   try { data = JSON.parse(await response.text()); } catch { throw new Error("Не удалось подтвердить ответ сервера. Текст не удалён."); }
@@ -24,6 +28,7 @@ function BlogEditor({ workspaceId }: { workspaceId: string }) {
   const [offset, setOffset] = useState(0);
   const [hasMore, setHasMore] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [listAvailable, setListAvailable] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -38,10 +43,10 @@ function BlogEditor({ workspaceId }: { workspaceId: string }) {
 
   useEffect(() => {
     let active = true;
-    setLoading(true); setRows([]); setError("");
+    setLoading(true); setListAvailable(false); setRows([]); setError("");
     void crmFetch(`${endpoint}&offset=${offset}`, { cache: "no-store" }).then(readReply).then(data => {
-      if (active) { setRows(data.data); setHasMore(data.hasMore === true); }
-    }).catch(err => { if (active) setError(err.message); }).finally(() => { if (active) setLoading(false); });
+      if (active) { setRows(data.data); setHasMore(data.hasMore === true); setListAvailable(true); }
+    }).catch(err => { if (active) setError(blogError(err, "Не удалось загрузить статьи.")); }).finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
   }, [endpoint, offset, reload]);
 
@@ -67,7 +72,7 @@ function BlogEditor({ workspaceId }: { workspaceId: string }) {
     if (!replaceAllowed()) return;
     setBusy(true); setError(""); setNotice("");
     try { const result = await readReply(await crmFetch(`${endpoint}&id=${encodeURIComponent(id)}`, { cache: "no-store" })); accept(result.data); setPreview(false); }
-    catch (err) { setError(err instanceof Error ? err.message : "Не удалось открыть статью."); }
+    catch (err) { setError(blogError(err, "Не удалось открыть статью.")); }
     finally { setBusy(false); }
   }
   async function save() {
@@ -80,7 +85,7 @@ function BlogEditor({ workspaceId }: { workspaceId: string }) {
       }));
       accept(result.data); setNotice("Черновик сохранён. В интернете он не опубликован.");
       setReload(value => value + 1);
-    } catch (err) { setError(err instanceof Error ? err.message : "Не удалось сохранить черновик."); }
+    } catch (err) { setError(blogError(err, "Не удалось сохранить черновик.")); }
     finally { setBusy(false); }
   }
   const inputClass = "w-full min-w-0 rounded border border-[var(--negis-border)] bg-[var(--negis-surface)] p-3 text-sm";
@@ -97,7 +102,7 @@ function BlogEditor({ workspaceId }: { workspaceId: string }) {
     <div className="grid min-w-0 gap-6 lg:grid-cols-[260px_minmax(0,1fr)]">
       <section aria-label="Статьи" className="min-w-0 border-b border-[var(--negis-border)] pb-4 lg:border-b-0 lg:border-r lg:pr-5">
         <div className="mb-3 flex items-center justify-between"><h2 className="font-semibold">Черновики</h2><button className={buttonClass} title="Обновить список" aria-label="Обновить список" disabled={loading || busy} onClick={() => setReload(x => x + 1)}><RefreshCw size={16} /></button></div>
-        {loading ? <p className="text-sm">Загружаем статьи…</p> : rows.length === 0 ? <p className="text-sm text-[var(--negis-muted)]">{error ? "Список недоступен." : "Статей пока нет."}</p> : <ul className="divide-y divide-[var(--negis-border)]">{rows.map(row => <li key={row.id}><button disabled={busy} onClick={() => void openDraft(row.id)} aria-current={selected?.id === row.id ? "true" : undefined} className="w-full min-w-0 py-3 text-left text-sm hover:underline"><span className="block break-words font-medium">{row.title}</span><span className="text-xs text-[var(--negis-muted)]">Черновик · {new Date(row.updatedAt).toLocaleDateString("ru-RU")}</span></button></li>)}</ul>}
+        {loading ? <p className="text-sm">Загружаем статьи…</p> : rows.length === 0 ? <p className="text-sm text-[var(--negis-muted)]">{listAvailable ? "Статей пока нет." : "Список недоступен."}</p> : <ul className="divide-y divide-[var(--negis-border)]">{rows.map(row => <li key={row.id}><button disabled={busy} onClick={() => void openDraft(row.id)} aria-current={selected?.id === row.id ? "true" : undefined} className="w-full min-w-0 py-3 text-left text-sm hover:underline"><span className="block break-words font-medium">{row.title}</span><span className="text-xs text-[var(--negis-muted)]">Черновик · {new Date(row.updatedAt).toLocaleDateString("ru-RU")}</span></button></li>)}</ul>}
         <div className="mt-4 flex gap-2"><button className={buttonClass} aria-label="Предыдущие статьи" title="Предыдущие статьи" disabled={offset === 0 || loading || busy} onClick={() => setOffset(x => Math.max(0, x - 20))}><ChevronLeft size={16} /></button><button className={buttonClass} aria-label="Следующие статьи" title="Следующие статьи" disabled={!hasMore || loading || busy} onClick={() => setOffset(x => x + 20)}><ChevronRight size={16} /></button></div>
       </section>
       <section className="min-w-0" aria-label="Редактор статьи">

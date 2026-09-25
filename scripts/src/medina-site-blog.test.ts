@@ -15,6 +15,15 @@ const db = new PGlite();
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const fields = { title: "Статья", slug: "test-article", excerpt: "Описание", body: "Первый абзац\n\nВторой", locale: "ru" };
 
+test("editor distinguishes unavailable list from empty and translates auth errors", async () => {
+  const source = await readFile(path.join(root, "artifacts/negis/src/pages/SiteBlog.tsx"), "utf8");
+  assert.ok(source.includes("error instanceof CrmApiError"));
+  assert.ok(source.includes("Войдите в аккаунт повторно."));
+  assert.ok(source.includes('listAvailable ? "Статей пока нет." : "Список недоступен."'));
+  assert.ok(source.includes("setListAvailable(false)"));
+  assert.ok(source.includes("setListAvailable(true)"));
+});
+
 // Execute the handler's query chain against isolated PostgreSQL, including unique
 // conflicts and optimistic version predicates, instead of canned successful rows.
 function client() {
