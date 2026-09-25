@@ -4,6 +4,7 @@ import { canAssignRole, isStaffRole, isWorkspaceAdminRole } from "../auth/permis
 import { extractJsonObject, generateText, resolveTextProvider } from "../ai/text-provider";
 import { normalizeAdvertisingContentApproval } from "../advertising/campaignBrief";
 import { normalizePhone } from "./phone";
+import { arrivalPaymentError } from "./arrival-payment";
 import { normalizeAppointmentServices, readAppointmentServices, summarizeAppointmentServices } from "./appointment-services";
 import { hidesClientContacts, redactContacts, redactContactsList, stripContactWrites } from "./contact-privacy";
 import { isEmptyIdentity, rowBelongsTo, rowTargetsOnlySelf, seesOnlyOwnWork, type OwnWorkIdentity } from "./own-work";
@@ -1426,6 +1427,7 @@ function makeAppointment(body: JsonRecord): JsonRecord {
     // Цена записи: null — «цена не называлась», не ноль. readNumber здесь
     // нельзя: readNumber(null) === 0, и пустая цена стала бы «бесплатно».
     priceMinor: readNullableNumber(body.priceMinor ?? body.price_minor),
+    arrivalSaleId: firstString(body.arrivalSaleId, body.arrival_sale_id),
     // Кто завёл запись: от этого зависит, видит ли мастер телефон клиента.
     createdByStaffUserId: firstString(body.createdByStaffUserId, body.created_by_staff_user_id),
     source: readString(body.source),
@@ -1994,6 +1996,7 @@ const configs: Record<CrmResource, ResourceConfig> = {
         notes: row.notes,
         durationMinutes: row.duration_minutes,
         priceMinor: row.price_minor,
+        arrivalSaleId: row.arrival_sale_id,
         source: row.source,
         client_id: row.client_id,
         service_id: row.service_id,
@@ -4944,6 +4947,10 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
     }
 
     if (error) {
+      const paymentError = arrivalPaymentError(error);
+      if (paymentError && (resource === "appointments" || resource === "deals")) {
+        return sendJson(res, 409, { ...errorBody(paymentError), code: "arrival_payment" });
+      }
       // Дубль названия услуги — ошибка оператора, а не сбой сервиса: он должен
       // прочитать, что именно не так, и переименовать. Ветка узкая ПО КОДУ И
       // ПО РЕСУРСУ: шире — и любой отказ базы стал бы четырёхсоткой, а набор
@@ -4966,6 +4973,14 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
           : errorBody("Врач с таким именем уже есть", ["fullName must be unique within the workspace"]));
       }
       throw new Error(error.message);
+    }
+
+    // AFTER triggers finish atomically, but INSERT RETURNING predates their
+    // receipt link. Re-read the saved visit; never guess that payment exists.
+    if (resource === "appointments" && asRecord(data).status === "arrived") {
+      const refreshed = await supabase.from("appointments").select("*")
+        .eq("workspace_id", workspaceId).eq("id", asRecord(data).id).single();
+      if (!refreshed.error && refreshed.data) data = refreshed.data;
     }
 
     // Эхо мутации — четвёртый путь к телефону: PATCH возвращает ВСЮ строку,
@@ -5530,6 +5545,10 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
     }
 
     if (error) {
+      const paymentError = arrivalPaymentError(error);
+      if (paymentError && (resource === "appointments" || resource === "deals")) {
+        return sendJson(res, 409, { ...errorBody(paymentError), code: "arrival_payment" });
+      }
       // См. тот же разбор на создании: нарушение уникальности названия — это
       // четырёхсотка с человеческим текстом, всё остальное остаётся сбоем.
       if (resource === "clinic-services" && readString((error as { code?: unknown }).code) === UNIQUE_VIOLATION) {
@@ -5551,6 +5570,11 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
       throw new Error(error.message);
     }
 
+    if (resource === "appointments" && asRecord(data).status === "arrived") {
+      const refreshed = await supabase.from("appointments").select("*")
+        .eq("workspace_id", workspaceId).eq("id", id).single();
+      if (!refreshed.error && refreshed.data) data = refreshed.data;
+    }
     const item = redactContacts(
       config.fromRow(asRecord(data)),
       readWorkspaceContext(req)?.role,

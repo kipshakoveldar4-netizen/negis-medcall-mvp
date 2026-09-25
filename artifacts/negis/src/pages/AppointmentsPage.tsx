@@ -51,6 +51,7 @@ type Appointment = {
   durationMinutes: number;
   /** Цена записи в тиынах; null — «цена не называлась», не ноль. */
   priceMinor: number | null;
+  arrivalSaleId?: string;
   status: AppointmentStatus;
   notes: string;
   source: string;
@@ -78,7 +79,7 @@ type AppointmentForm = {
 
 type ApiResponse =
   | { success: true; mode?: string; warning?: string; data?: Record<string, unknown> }
-  | { success: false; error: string; details?: string[] };
+  | { success: false; error: string; details?: string[]; code?: string };
 
 const APPOINTMENT_PREFILL_KEY = "negis_appointment_prefill";
 const DEAL_PREFILL_KEY = "negis_deal_prefill";
@@ -521,6 +522,7 @@ function appointmentFromApi(value: unknown): Appointment {
     durationMinutes: readNumber(record.durationMinutes ?? record.duration_minutes, 60),
     priceMinor: (() => { const raw = record.priceMinor ?? record.price_minor; return raw === null || raw === undefined || raw === "" ? null : readNumber(raw, 0); })(),
     status: normalizeStatus(readString(record.status)),
+    arrivalSaleId: readString(record.arrivalSaleId) || readString(record.arrival_sale_id),
     notes: readString(record.notes),
     source: readString(record.source),
   };
@@ -928,9 +930,9 @@ function AppointmentCard({
               {label}
             </button>
           ))}
-        {/* Пришёл — значит платит: продажа стартует с записи, а не с чистой
-            формы, где клиента и запись пришлось бы выбирать заново. */}
-        {appointment.status === "arrived" ? (
+        {appointment.arrivalSaleId ? (
+          <span className="px-3 py-2 text-xs">Продажа оформлена</span>
+        ) : appointment.status === "arrived" ? (
           <button type="button" className="neu-btn-primary px-3 py-2 text-xs" onClick={() => onSale(appointment)}>
             Оформить продажу
           </button>
@@ -1852,6 +1854,11 @@ export function AppointmentsPage() {
     // нет. Прежний код принимал его за успех и обещал «сохранено локально» —
     // локально при этом тоже ничего не сохранялось.
     if (!response.ok || body?.success !== true || body.mode !== "supabase") {
+      if (body?.success === false && body.code === "arrival_payment") {
+        const error = new Error(body.error);
+        error.name = "ArrivalPaymentError";
+        throw error;
+      }
       const details = body?.success === false ? body.details?.join(", ") : "";
       throw new Error(details || (body?.success === false ? body.error : "Не удалось обновить запись на сервере"));
     }
@@ -1944,9 +1951,12 @@ export function AppointmentsPage() {
 
     try {
       // Только статус: остальные поля этой карточки мог изменить коллега.
-      const { unsaved } = await patchAppointment(updated, false, false, ["status"]);
+      const { unsaved, saved } = await patchAppointment(updated, false, false, ["status"]);
+      if (saved) setItems((current) => current.map((item) => item.id === appointment.id ? saved : item));
       if (unsaved.length > 0) warnAboutUnsaved(unsaved);
-      else toast.success(`Статус: ${getAppointmentStatusLabel(status)}`);
+      else toast.success(status === "arrived" && saved?.arrivalSaleId
+        ? "Приход подтверждён. Продажа оформлена."
+        : `Статус: ${getAppointmentStatusLabel(status)}`);
     } catch (error) {
       // Отказ сервера — откат, а не фантомный статус до перезагрузки. Прежний
       // текст обещал сохранение на этом устройстве, которого в рабочей клинике
@@ -1954,7 +1964,8 @@ export function AppointmentsPage() {
       // по-русски и без внутренних имён полей.
       setItems((current) => current.map((item) => (item.id === appointment.id ? appointment : item)));
       console.warn("appointments: status patch refused", error instanceof Error ? error.message : error);
-      toast.error("Не удалось обновить статус. Изменение отменено.");
+      toast.error(error instanceof Error && error.name === "ArrivalPaymentError"
+        ? error.message : "Не удалось обновить статус. Изменение отменено.");
     }
   };
 

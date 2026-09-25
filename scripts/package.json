@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "test:arrival-payment": "tsx --test ./src/medina-arrival-payment.test.ts",
     "test:site-blog": "tsx --test ./src/medina-site-blog.test.ts",
     "test:site-intake": "tsx --test ./src/medina-site-intake.test.ts ./src/medina-site-intake-handler.test.ts",
     "hello": "tsx ./src/hello.ts",
