@@ -2,6 +2,7 @@ import { defineConfig, type Plugin, type ViteDevServer } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import path from "path";
+import { pathToFileURL } from "node:url";
 // Статически, а не через await import: загрузчик конфига Vite перехватывает
 // динамические импорты внутри плагина и падает на них.
 import { createHash } from "node:crypto";
@@ -97,10 +98,31 @@ function targetingApiDevMiddleware(): Plugin {
         const requestUrl = new URL(req.url ?? "/", "http://localhost");
         const pathname = requestUrl.pathname;
 
+        const siteAssets: Record<string, [string, string]> = {
+          "/medina-site/site.css": ["artifacts/medina-site/site.css", "text/css"],
+          "/medina-site/form.js": ["artifacts/medina-site/form.js", "text/javascript"],
+          "/medina-site/assets/brand.png": ["artifacts/negis/public/icon-512.png", "image/png"],
+        };
+        if (siteAssets[pathname] && (req.method === "GET" || req.method === "HEAD")) {
+          try {
+            const [file, contentType] = siteAssets[pathname];
+            const content = await readFile(path.resolve(repoRoot, file));
+            res.setHeader("Content-Type", contentType);
+            res.end(req.method === "HEAD" ? undefined : content);
+          } catch (error) { next(error); }
+          return;
+        }
+        if (pathname === "/ru") {
+          res.writeHead(308, { Location: `/ru/${requestUrl.search}` });
+          res.end();
+          return;
+        }
+
         if (
           !pathname.startsWith("/api/targeting") &&
           !pathname.startsWith("/api/content-studio") &&
           !pathname.startsWith("/api/crm") &&
+          !pathname.startsWith("/ru/") &&
           pathname !== "/api/auth/register" &&
           pathname !== "/api/webhooks/wazzup" &&
           pathname !== "/api/webhooks/whatsapp"
@@ -113,7 +135,11 @@ function targetingApiDevMiddleware(): Plugin {
           const query = buildQuery(requestUrl);
           let modulePath: string | null = null;
 
-          if (pathname === "/api/auth/register") {
+          if (pathname.startsWith("/ru/")) {
+            modulePath = apiModule("api", "crm", "[...path].ts");
+            query.path = ["site-page"];
+            query.page = pathname;
+          } else if (pathname === "/api/auth/register") {
             modulePath = apiModule("api", "auth", "register.ts");
           } else if (pathname === "/api/webhooks/wazzup") {
             // Dev parity for the Wazzup inbound webhook: in production the
@@ -215,6 +241,23 @@ function stampServiceWorker(): Plugin {
 export default defineConfig(async () => ({
   base: basePath,
   plugins: [
+    {
+      name: "medina-site-node-renderer",
+      enforce: "pre",
+      resolveId(source, _importer, options) {
+        // Preserve Node's CommonJS loader for the server-only renderer in dev.
+        if (options.ssr && source.endsWith("/artifacts/medina-site/render.cjs")) {
+          return "\0medina-site-node-renderer";
+        }
+      },
+      load(id) {
+        if (id !== "\0medina-site-node-renderer") return;
+        const base = JSON.stringify(pathToFileURL(path.join(repoRoot, "package.json")).href);
+        return `import { createRequire } from 'node:module';
+          const renderer = createRequire(${base})('./artifacts/medina-site/render.cjs');
+          export const { createPages, createSitemap, escapeHtml } = renderer;`;
+      },
+    },
     react(),
     tailwindcss(),
     targetingApiDevMiddleware(),

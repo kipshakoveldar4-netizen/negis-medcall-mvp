@@ -36,6 +36,10 @@ The main (Fable) session is the orchestrator: it owns complex architecture and f
 - `implementation-worker` (sonnet): scoped coding tasks (UI polish, endpoint tweaks, tests) with a spec decided by the main session
 
 ## Invariants (apply to everyone, always)
+
+- Never test against active clinics or salons. Use isolated local fixtures or a dedicated test workspace in a separate test deployment/database.
+- Never push to the production branch or change production settings without explicit user approval for that release. A workspace alone does not isolate shared API failures.
+- Changes to shared API imports must pass `pnpm run test:crm-cold-start` as well as typecheck/build. Before an approved release, verify authentication on a separate preview deployment.
 - Photo Meta launch works and creates campaigns as PAUSED — do not break or change this
 - ACTIVE launch must remain gated — never remove or weaken the gate
 - Supabase signed upload works — do not break it
