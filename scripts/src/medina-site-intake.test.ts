@@ -10,6 +10,8 @@ const { validateSiteInquiry } = await import(pathToFileURL(path.join(root, "lib/
   validateSiteInquiry(value: unknown): { ok: true; data: { phone: string; name: string } } | { ok: false; code: string };
 };
 const db = new PGlite();
+const intake = await import(pathToFileURL(path.join(root, "lib/crm/site-intake-handler.ts")).href);
+const supabase = await import(pathToFileURL(path.join(root, "lib/supabase/server.ts")).href);
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const valid = { name: "Test", phone: "+77071234567", business: "Test salon", service: "call-center", pagePath: "/ru/", consentVersion: "v1", consent: true };
 const row = async (sql: string, params: unknown[] = []) => (await db.query<Record<string, unknown>>(sql, params)).rows[0];
@@ -39,7 +41,68 @@ before(async () => {
 });
 after(() => db.close());
 beforeEach(() => db.exec("begin"));
-afterEach(() => db.exec("rollback"));
+afterEach(async () => {
+  supabase.setSupabaseServerClientFactoryForTests(null);
+  await db.exec("rollback");
+});
+
+// Exercise the production persistence adapter, not a fake successful save callback.
+async function formFixture() {
+  supabase.setSupabaseServerClientFactoryForTests(() => ({
+    async rpc(name: string, args: Record<string, unknown>) {
+      assert.equal(name, "accept_crm_site_inquiry");
+      await db.exec("savepoint form_write");
+      try {
+        const result = await row("select public.accept_crm_site_inquiry($1,$2,$3::jsonb) as result",
+          [args.p_site_key, args.p_request_key, JSON.stringify(args.p_inquiry)]);
+        await db.exec("release savepoint form_write");
+        return { data: result.result, error: null };
+      } catch (error) {
+        await db.exec("rollback to savepoint form_write; release savepoint form_write");
+        return { data: null, error: { message: (error as Error).message } };
+      }
+    },
+  }));
+  const origin = "https://site.example.invalid";
+  const handler = intake.createSiteIntakeHandler({
+    env: () => ({ MEDINA_SITE_INTAKE_ENABLED: "true", MEDINA_SITE_ORIGIN: origin,
+      MEDINA_SITE_INTAKE_KEY: "medina-test", MEDINA_SITE_TURNSTILE_SECRET: "fixture-only-secret" }),
+    verify: async () => true,
+  });
+  return async (inquiry: unknown = valid) => {
+    let status = 0; let payload: unknown;
+    const res = { setHeader() {}, status(value: number) { status = value; return res; },
+      json(value: unknown) { payload = value; }, end() {} };
+    await handler({ method: "POST", headers: { origin, "content-type": "application/json" },
+      body: { requestKey: id(100), challengeToken: "fixture-challenge", inquiry } }, res);
+    return { status, payload };
+  };
+}
+
+test("public form success means a persisted lead and consent; retries do not duplicate", async () => {
+  const send = await formFixture();
+  for (let attempt = 0; attempt < 2; attempt++) {
+    assert.deepEqual(await send(), { status: 200, payload: { success: true } });
+  }
+  assert.equal((await row("select count(*)::int as n from public.leads")).n, 1);
+  assert.equal((await row("select count(*)::int as n from public.crm_site_inquiries")).n, 1);
+  const saved = await row("select workspace_id,phone,source from public.leads");
+  assert.equal(saved.workspace_id, id(1));
+  assert.equal(saved.phone, valid.phone);
+  assert.equal(saved.source, "website");
+  assert.ok((await row("select consent_received_at from public.crm_site_inquiries")).consent_received_at);
+  assert.deepEqual(await send({ ...valid, name: "Changed" }),
+    { status: 409, payload: { success: false, code: "request_conflict" } });
+});
+
+test("public form refuses tenant injection and database failures without partial leads", async () => {
+  const send = await formFixture();
+  assert.equal((await send({ ...valid, workspaceId: id(2) })).status, 400);
+  await db.exec("alter table public.crm_site_inquiries add constraint form_failure check(false) not valid");
+  assert.deepEqual(await send(), { status: 503, payload: { success: false, code: "intake_unavailable" } });
+  assert.equal((await row("select count(*)::int as n from public.leads")).n, 0);
+  assert.equal((await row("select count(*)::int as n from public.crm_site_inquiries")).n, 0);
+});
 
 test("validation normalizes existing phone format and excludes visitor tenant/IDs/raw URLs", () => {
   const result = validateSiteInquiry({ ...valid, phone: "8 (707) 123-45-67", name: " Test " });
