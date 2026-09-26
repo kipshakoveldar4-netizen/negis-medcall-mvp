@@ -11,6 +11,14 @@ const { arrivalPaymentError } = createRequire(import.meta.url)("../../lib/crm/ar
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const db = new PGlite(); // In-memory only. Never reads production configuration.
+const require = createRequire(import.meta.url);
+const serverClient = require("../../lib/supabase/server.ts") as {
+  setSupabaseServerClientFactoryForTests(factory: (() => unknown) | null): void;
+};
+const handler = require("../../api/crm/[...path].ts").default as (req: unknown, res: unknown) => Promise<void>;
+const originalFetch = globalThis.fetch;
+const originalUrl = process.env.SUPABASE_URL;
+const originalKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const row = async (sql: string) => (await db.query<Record<string, unknown>>(sql)).rows[0];
 const arrive = () => db.exec(`update appointments set status='arrived' where id='${id(10)}'`);
@@ -22,7 +30,7 @@ async function rejects(sql: string, code: string) {
 }
 before(async () => {
   await db.exec("create role anon; create role authenticated; create role service_role bypassrls;");
-  const numbers = new Set([9, 10, 11, 12, 13, 14, 19, 20, 30, 32, 33, 34, 36, 40, 45, 55, 61]);
+  const numbers = new Set([9, 10, 11, 12, 13, 14, 19, 20, 29, 30, 32, 33, 34, 36, 40, 45, 55, 61]);
   for (const file of (await readdir(path.join(root, "migrations"))).sort()) {
     if (!numbers.has(Number(file.slice(0, 3)))) continue;
     try {
@@ -43,6 +51,145 @@ beforeEach(async () => {
       ('${id(10)}','${id(1)}','${id(3)}','Two services',1500000,'confirmed');`);
 });
 afterEach(() => db.exec("rollback"));
+
+// Execute real route queries and trigger writes, rather than returning canned
+// successful API responses. This adapter is intentionally test-local/read-write.
+function apiDatabase() {
+  const ident = (value: string) => {
+    assert.match(value, /^[a-z_][a-z0-9_]*$/);
+    return `"${value}"`;
+  };
+  return { from(table: string) {
+    let operation = "select", single = false, columns = "*";
+    let values: Record<string, unknown> = {};
+    const filters: Array<[string, unknown]> = [];
+    let limit: number | undefined;
+    async function execute() {
+      const params: unknown[] = [];
+      const bind = (value: unknown) => { params.push(value); return `$${params.length}`; };
+      const selection = columns === "*" ? "*" : columns.split(",").map(v => ident(v.trim())).join(",");
+      let sql = `select ${selection} from ${ident(table)}`;
+      if (operation === "update") sql = `update ${ident(table)} set ${Object.entries(values)
+        .map(([key, value]) => `${ident(key)}=${bind(value)}`).join(",")}`;
+      if (operation === "insert") sql = `insert into ${ident(table)} (${Object.keys(values).map(ident).join(",")}) values (${Object.values(values).map(bind).join(",")})`;
+      if (filters.length) sql += " where " + filters.map(([key, value]) => `${ident(key)}=${bind(value)}`).join(" and ");
+      if (operation !== "select") sql += ` returning ${selection}`;
+      if (operation === "select" && limit !== undefined) sql += ` limit ${limit}`;
+      if (operation !== "select") await db.exec("savepoint api_write");
+      try {
+        const result = await db.query(sql, params);
+        if (operation !== "select") await db.exec("release savepoint api_write");
+        const rows = JSON.parse(JSON.stringify(result.rows));
+        return { data: single ? rows[0] ?? null : rows, error: null };
+      } catch (error) {
+        if (operation !== "select") await db.exec("rollback to savepoint api_write; release savepoint api_write");
+        return { data: null, error: { code: (error as { code: string }).code, message: "Isolated database rejected the query" } };
+      }
+    }
+    const query = {
+      select(value: string) { columns = value; return query; },
+      eq(key: string, value: unknown) { filters.push([key, value]); return query; },
+      order() { return query; },
+      limit(value: number) { assert.ok(Number.isInteger(value) && value > 0); limit = value; return query; },
+      insert(value: Record<string, unknown>) { operation = "insert"; values = value; return query; },
+      update(value: Record<string, unknown>) { operation = "update"; values = value; return query; },
+      single() { single = true; return execute(); },
+      maybeSingle() { single = true; return execute(); },
+      then(resolve: (value: unknown) => unknown, reject: (error: unknown) => unknown) { return execute().then(resolve, reject); },
+    };
+    return query;
+  } };
+}
+
+async function apiFixture(role = "owner") {
+  await db.exec(`insert into staff_users(id,workspace_id,auth_user_id,full_name,email,role)
+    values('${id(40)}','${id(1)}','${id(41)}','Test master','fixture@example.invalid','${role}');
+    insert into clinic_doctors(id,workspace_id,full_name,staff_user_id)
+    values('${id(42)}','${id(1)}','Test master','${id(40)}');
+    update appointments set doctor_id='${id(42)}',doctor_name='Test master' where id='${id(10)}'`);
+  process.env.SUPABASE_URL = "https://fixture.invalid";
+  process.env.SUPABASE_SERVICE_ROLE_KEY = "fixture-not-a-secret";
+  globalThis.fetch = (async (url: unknown) => {
+    assert.equal(url, "https://fixture.invalid/auth/v1/user");
+    return { ok: true, status: 200, text: async () => JSON.stringify({ id: id(41) }) };
+  }) as unknown as typeof fetch;
+  serverClient.setSupabaseServerClientFactoryForTests(apiDatabase);
+  return async (route = "appointments", method = "PATCH", updates: Record<string, unknown> = { status: "arrived" }, workspace = 1) => {
+    let status = 0; let body: Record<string, unknown> = {};
+    const res = { setHeader() {}, status(value: number) { status = value; return res; },
+      json(value: Record<string, unknown>) { body = value; } };
+    await handler({ method, headers: { authorization: "Bearer fixture.test.signature" },
+      query: { path: [route], workspaceId: id(workspace) },
+      body: method === "GET" ? undefined : { id: id(10), updates } }, res);
+    return { status, body };
+  };
+}
+afterEach(() => {
+  serverClient.setSupabaseServerClientFactoryForTests(null);
+  globalThis.fetch = originalFetch;
+  if (originalUrl === undefined) delete process.env.SUPABASE_URL; else process.env.SUPABASE_URL = originalUrl;
+  if (originalKey === undefined) delete process.env.SUPABASE_SERVICE_ROLE_KEY; else process.env.SUPABASE_SERVICE_ROLE_KEY = originalKey;
+});
+
+test("API arrival returns persisted sale link and sales exposes exact paid amount", async () => {
+  const call = await apiFixture();
+  const response = await call();
+  assert.equal(response.status, 200, JSON.stringify(response.body));
+  assert.equal(response.body.mode, "supabase");
+  const item = (response.body.data as { item: Record<string, unknown> }).item;
+  assert.equal(item.arrivalSaleId, (await sale()).id);
+  const sales = await call("deals", "GET");
+  assert.equal(sales.status, 200, JSON.stringify(sales.body));
+  const deals = (sales.body.data as { items: Record<string, unknown>[] }).items;
+  assert.equal(deals.length, 1);
+  assert.equal(deals[0].status, "paid");
+  assert.equal(deals[0].amountMinor, 1500000);
+  assert.ok(deals[0].paidAt);
+  assert.equal((await row("select count(*) from audit_logs where entity_type='appointment'")).count, 1);
+  await call();
+  assert.equal((await row("select count(*) from deals")).count, 1);
+});
+test("API missing price returns safe error and keeps visit unconfirmed", async () => {
+  const call = await apiFixture();
+  await db.exec(`update appointments set price_minor=null where id='${id(10)}'`);
+  const response = await call();
+  assert.equal(response.status, 409);
+  assert.equal(response.body.code, "arrival_payment");
+  assert.match(String(response.body.error), /стоимость/);
+  assert.equal((await row(`select status from appointments where id='${id(10)}'`)).status, "confirmed");
+  assert.equal((await row("select count(*) from deals")).count, 0);
+});
+test("master can confirm own arrival without gaining access to all sales", async () => {
+  const call = await apiFixture("doctor");
+  assert.equal((await call()).status, 200);
+  assert.equal((await sale()).responsible_user_id, id(40));
+  assert.equal((await call("deals", "GET")).status, 403);
+});
+test("cross-workspace confirmation never creates a payment", async () => {
+  const call = await apiFixture();
+  assert.equal((await call("appointments", "PATCH", { status: "arrived" }, 2)).status, 403);
+  assert.equal((await row("select count(*) from deals")).count, 0);
+});
+test("master cannot confirm another specialist's appointment", async () => {
+  const call = await apiFixture("doctor");
+  await db.exec(`update appointments set doctor_id=null,doctor_name='Other master' where id='${id(10)}'`);
+  assert.equal((await call()).status, 404);
+  assert.equal((await row("select count(*) from deals")).count, 0);
+});
+test("API preserves manual sales behavior until workspace explicitly opts in", async () => {
+  const call = await apiFixture();
+  await db.exec(`update workspaces set arrival_marks_paid=false where id='${id(1)}'`);
+  const response = await call();
+  assert.equal(response.status, 200);
+  assert.equal((response.body.data as { item: Record<string, unknown> }).item.arrivalSaleId, "");
+  assert.equal((await row("select count(*) from deals")).count, 0);
+});
+test("browser cannot forge the server-owned payment link", async () => {
+  const call = await apiFixture();
+  const response = await call("appointments", "PATCH", { status: "arrived", arrivalSaleId: id(99), arrival_sale_id: id(99) });
+  assert.equal(response.status, 200);
+  assert.equal((response.body.data as { item: Record<string, unknown> }).item.arrivalSaleId, (await sale()).id);
+});
 
 test("arrival creates one paid KZT sale using visit price and client", async () => {
   await arrive();
