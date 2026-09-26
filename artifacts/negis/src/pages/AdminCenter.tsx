@@ -485,7 +485,7 @@ const tabs: Array<{ id: AdminTab; label: string; icon: LucideIcon }> = [
 ];
 
 const clinicDefaults: ClinicSettings = {
-  clinicName: "Concept Med Clinic",
+  clinicName: "",
   city: "Astana",
   phone: "+7 700 000 00 00",
   whatsapp: "+7 700 000 00 00",
@@ -564,7 +564,7 @@ const metaDefaults: MetaAccount = {
   adAccountId: "",
   pageId: "",
   instagramActorId: "",
-  accountName: "Concept Med demo ad account",
+  accountName: "Medina OS Meta Ads",
   currency: "USD",
   timezoneName: "Asia/Almaty",
   status: "draft",

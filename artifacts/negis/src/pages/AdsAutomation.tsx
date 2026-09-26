@@ -1777,7 +1777,7 @@ export default function AdsAutomation() {
   const destination = destinationOptions.find((item) => item.value === brief.leadDestination) || destinationOptions[0];
   const selectedCity = getKzMetaCityOption(brief.cityId || brief.city);
   const destinationUrl = aiPackage?.destinationUrl || publicDestinationUrl(brief);
-  const clinicName = firstString(asRecord(user).workspaceName, asRecord(user).clinicName, "Concept Med");
+  const clinicName = firstString(asRecord(user).workspaceName, asRecord(user).clinicName, "Medina OS");
   // Один источник правды для «какой текст уедет в Meta»: то, что в пакете.
   //
   // Раньше здесь стояла скрытая подмена: при любом статусе кроме «safe» запуск

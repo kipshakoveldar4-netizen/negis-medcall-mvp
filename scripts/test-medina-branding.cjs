@@ -19,7 +19,7 @@ test('visible app copy no longer uses the old product name', () => {
         if (ts.isStringLiteral(node) || ts.isJsxText(node) || ts.isTemplateLiteralToken(node)) {
           const value = node.text;
           // This one legacy stored value must remain readable; it is never a label.
-          if (!(file.endsWith('/negisApp.ts') && value === 'Negis App') && /\b(?:Negis|NEGIS)\b/.test(value)) {
+          if (!(file.endsWith('/negisApp.ts') && value === 'Negis App') && /\b(?:Negis|NEGIS|Concept(?:\s+(?:Clinic|Med))?)\b/.test(value)) {
             failures.push(file + ': ' + value.slice(0, 100));
           }
         }

@@ -298,7 +298,7 @@ const chatSeed: ChatMessage[] = [
 const staffSeed: StaffMember[] = [
   { id: "staff-owner", name: "Эльдар Кипшаков", email: "owner@negis.local", phone: "+7 700 000 00 01", role: "owner", status: "active" },
   { id: "staff-reception", name: "Айгерим Ресепшн", email: "reception@negis.local", phone: "+7 700 000 00 02", role: "receptionist", status: "active" },
-  { id: "staff-marketer", name: "Маркетолог Concept", email: "marketing@negis.local", phone: "+7 700 000 00 03", role: "marketer", status: "active" },
+  { id: "staff-marketer", name: "Маркетолог", email: "marketing@negis.local", phone: "+7 700 000 00 03", role: "marketer", status: "active" },
 ];
 
 const toneClasses: Record<NonNullable<Metric["tone"]>, { bg: string; text: string }> = {
@@ -481,7 +481,7 @@ export function DemoClients() {
   return (
     <PageLayout>
       <div className="space-y-7">
-        <PageHeader title="Клиенты" subtitle="Единая база пациентов Concept Clinic с источниками, статусами и последними визитами." action={<PrimaryButton onClick={addClient}><UserPlus size={16} />Добавить клиента</PrimaryButton>} />
+        <PageHeader title="Клиенты" subtitle="Единая база клиентов с источниками, статусами и последними визитами." action={<PrimaryButton onClick={addClient}><UserPlus size={16} />Добавить клиента</PrimaryButton>} />
         {/*
           Плитки здесь были захардкожены и показывались как данные клиники:
           одни и те же числа при любой базе, включая пустую. Осталось только
@@ -517,7 +517,7 @@ export function DemoClients() {
                 </div>
                 <p className="mt-3 break-words rounded-xl bg-[#F8FAFC] px-3 py-2 text-sm text-[#64748B]">{client.comment}</p>
                 <div className="mt-4 grid grid-cols-3 gap-2">
-                  <QuickActionLink href={toWhatsappHref(client.phone, `Здравствуйте, ${client.name}! Пишем из Concept Clinic.`)}>
+                  <QuickActionLink href={toWhatsappHref(client.phone, `Здравствуйте, ${client.name}! Пишем по вашему обращению.`)}>
                     <MessageCircle size={14} />
                     WhatsApp
                   </QuickActionLink>
@@ -698,7 +698,7 @@ export function DemoLeads() {
                     <PhoneCall size={14} />
                     Позвонить
                   </QuickActionLink>
-                  <QuickActionLink href={toWhatsappHref(lead.phone, `Здравствуйте, ${lead.name}! Это Concept Clinic.`)}>
+                  <QuickActionLink href={toWhatsappHref(lead.phone, `Здравствуйте, ${lead.name}! Пишем по вашему обращению.`)}>
                     <MessageCircle size={14} />
                     WhatsApp
                   </QuickActionLink>
@@ -789,7 +789,7 @@ export function DemoCalls() {
                       <PhoneCall size={14} />
                       Позвонить
                     </QuickActionLink>
-                    <QuickActionLink href={toWhatsappHref(call.phone, "Здравствуйте! Это Concept Clinic по вашему обращению.")}>
+                    <QuickActionLink href={toWhatsappHref(call.phone, "Здравствуйте! Пишем по вашему обращению.")}>
                       <MessageCircle size={14} />
                       WhatsApp
                     </QuickActionLink>
