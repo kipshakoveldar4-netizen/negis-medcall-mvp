@@ -336,7 +336,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     if (route.key !== "site-page" || segments.length !== 1) return notFound(res);
     // The optional renderer must not prevent staff authentication or CRM boot.
     try {
-      const { handleSitePage } = await import("../../lib/crm/site-page");
+      const { handleSitePage } = await import("../../lib/crm/site-page.js");
       return await handleSitePage(req, res);
     } catch {
       res.setHeader("Cache-Control", "no-store");
