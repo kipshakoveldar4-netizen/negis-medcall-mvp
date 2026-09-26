@@ -22,7 +22,7 @@ function setup(responses) {
     FormData: class { get(key) { return fields[key]; } },
     crypto: { randomUUID: () => `request-${++keys}` },
     AbortController, setTimeout, clearTimeout,
-    fetch: async (url, init) => { requests.push({ url, ...init }); const response = responses.shift(); if (response instanceof Error) throw response; return response; },
+    fetch: async (url, init) => { requests.push({ url, ...init }); const response = await responses.shift(); if (response instanceof Error) throw response; return response; },
   });
   window.medinaChallengeReady();
   return { form, fields, status, button, fieldset, requests, resetCount: () => resets,
@@ -59,4 +59,30 @@ test('changed fields get a new request key; server errors are never printed verb
   ui.fields.phone = '+77071234568'; ui.token(); await ui.submit();
   assert.notEqual(JSON.parse(ui.requests[0].body).requestKey, JSON.parse(ui.requests[1].body).requestKey);
   assert.match(ui.status.textContent, /Проверьте номер/);
+});
+
+test('accepted form stays closed after another challenge callback and submit', async () => {
+  const ui = setup([{ ok: true, text: async () => '{"success":true}' }]);
+  ui.token(); await ui.submit();
+  ui.token();
+  assert.equal(ui.button.disabled, true);
+  await ui.submit();
+  assert.equal(ui.requests.length, 1);
+  assert.equal(ui.fieldset.disabled, true);
+  assert.match(ui.status.textContent, /Заявка принята/);
+});
+
+test('rapid repeat submissions stay locked while the request is pending', async () => {
+  let finish;
+  const pending = new Promise(resolve => { finish = resolve; });
+  const ui = setup([pending]);
+  ui.token();
+  const first = ui.submit();
+  ui.token(); await ui.submit();
+  assert.equal(ui.requests.length, 1);
+  assert.equal(ui.button.disabled, true);
+  assert.equal(ui.fieldset.disabled, true);
+  finish({ ok: true, text: async () => '{"success":true}' });
+  await first;
+  assert.match(ui.status.textContent, /Заявка принята/);
 });

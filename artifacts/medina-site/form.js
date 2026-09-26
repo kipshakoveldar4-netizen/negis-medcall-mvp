@@ -8,7 +8,7 @@
   let busy = false;
   let requestKey;
   let previousPayload = '';
-  const setToken = value => { token = value; button.disabled = busy || !token; };
+  const setToken = value => { token = value; button.disabled = busy || form.dataset.sent === 'true' || !token; };
   window.medinaChallengeReady = () => {
     widget = window.turnstile.render(form.querySelector('[data-challenge]'), {
       sitekey: form.dataset.siteKey, action: 'site_inquiry', size: 'flexible',
@@ -25,7 +25,7 @@
 
   form.addEventListener('submit', async event => {
     event.preventDefault();
-    if (busy || !token || !form.reportValidity()) return;
+    if (busy || form.dataset.sent === 'true' || !token || !form.reportValidity()) return;
     const fields = new FormData(form);
     const inquiry = {
       name: fields.get('name'), phone: fields.get('phone'), business: fields.get('business'),
