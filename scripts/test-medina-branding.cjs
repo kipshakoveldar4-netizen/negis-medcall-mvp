@@ -41,6 +41,17 @@ test('static legal pages use Medina OS without changing contact email', () => {
   }
 });
 
+test('new creative filenames use Medina OS while existing supplied names are preserved', () => {
+  const studio = read('artifacts/negis/src/pages/ContentStudio.tsx');
+  assert.ok(studio.includes('medina-os-photo-creative-${photoFormat}.jpg'));
+  const ads = read('artifacts/negis/src/pages/AdsAutomation.tsx');
+  assert.ok(ads.includes('firstString(payload.fileName, "medina-os-video.mp4")'));
+  const meta = read('lib/meta/marketing.ts');
+  assert.ok(meta.includes('input.fileName || "medina-os-video.mp4"'));
+  assert.ok(meta.includes('input.fileName?.trim() || "medina-os-video.mp4"'));
+  for (const source of [studio, ads, meta]) assert.doesNotMatch(source, /negis-(?:photo-creative|video)/);
+});
+
 test('old source values remain compatible while labels use Medina OS', () => {
   const output = ts.transpileModule(read('artifacts/negis/src/lib/negisApp.ts'), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },

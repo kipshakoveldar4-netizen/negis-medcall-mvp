@@ -938,7 +938,7 @@ export default function ContentStudio() {
     }
     const link = document.createElement("a");
     link.href = photoPreviewUrl;
-    link.download = `negis-photo-creative-${photoFormat}.jpg`;
+    link.download = `medina-os-photo-creative-${photoFormat}.jpg`;
     link.click();
     toast.success("Изображение скачивается");
   };

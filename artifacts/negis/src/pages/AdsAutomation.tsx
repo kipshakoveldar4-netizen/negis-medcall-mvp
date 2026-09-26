@@ -3209,7 +3209,7 @@ export default function AdsAutomation() {
           workspaceId,
           assetId: firstString(payload.sourceId),
           fileType: "video",
-          fileName: firstString(payload.fileName, "negis-video.mp4"),
+          fileName: firstString(payload.fileName, "medina-os-video.mp4"),
           mimeType: firstString(payload.mimeType, "video/mp4"),
           metaVideoId: videoId,
         }),

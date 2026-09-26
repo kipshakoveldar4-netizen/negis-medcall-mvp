@@ -1155,7 +1155,7 @@ async function uploadMetaVideoBinary(input: {
     },
     {
       fieldName: "source",
-      fileName: input.fileName || "negis-video.mp4",
+      fileName: input.fileName || "medina-os-video.mp4",
       mimeType: normalizeVideoMimeType(input.mimeType, input.fileName) || "video/mp4",
       buffer,
     },
@@ -1197,7 +1197,7 @@ export async function uploadMetaVideoAndGetId(input: {
   };
   const adAccountId = input.adAccountId?.trim() || config.adAccountId;
   const videoUrl = input.videoUrl.trim();
-  const fileName = input.fileName?.trim() || "negis-video.mp4";
+  const fileName = input.fileName?.trim() || "medina-os-video.mp4";
   const mimeType = normalizeVideoMimeType(input.mimeType, fileName);
   const title = input.title?.trim() || "Medina OS video creative";
   const warnings: string[] = [];
