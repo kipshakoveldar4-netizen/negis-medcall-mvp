@@ -36,8 +36,18 @@ try {
     if (process.env[key]) environment[key] = process.env[key];
   }
   environment.NODE_ENV = 'test';
+  for (const brokenRenderer of [false, true]) {
   const child = spawnSync(process.execPath, ['-e', `
     const assert = require('node:assert/strict');
+    const brokenRenderer = ${JSON.stringify(brokenRenderer)};
+    if (brokenRenderer) {
+      const Module = require('node:module');
+      const originalLoad = Module._load;
+      Module._load = function(request, ...args) {
+        if (request.endsWith('render.cjs')) throw new Error('SIMULATED_PRIVATE_RENDERER_FAILURE');
+        return originalLoad.call(this, request, ...args);
+      };
+    }
     global.fetch = async () => { throw new Error('Network forbidden in cold-start test'); };
     const handler = require('./api/crm/[...path].js').default;
     async function check(resource, expected, authorization) {
@@ -48,20 +58,22 @@ try {
         query: { path: [resource] }, headers: authorization ? { authorization } : {} }, res);
       assert.equal(status, expected, resource);
       if (expected === 401) assert.equal(body.success, false);
+      assert.ok(!JSON.stringify(body).includes('SIMULATED_PRIVATE_RENDERER_FAILURE'));
     }
     (async () => {
       for (const route of ['auth-context', 'appointments', 'clients', 'staff', 'site-blog']) {
         await check(route, 401);
       }
       await check('auth-context', 401, 'Bearer invalid-test-token');
-      await check('site-page', 404);
-      const accessChecks = await require(${JSON.stringify(path.join(root, 'scripts', 'fixtures', 'crm-runtime-access.cjs'))})(handler);
-      console.log('CommonJS CRM cold start: 7 anonymous + ' + accessChecks + ' authenticated/denial checks passed; isolated fixtures, no network or credentials.');
+      await check('site-page', brokenRenderer ? 503 : 404);
+      const accessChecks = await require(${JSON.stringify(path.join(root, 'scripts', 'fixtures', 'crm-runtime-access.cjs'))})(handler, { brokenRenderer });
+      console.log('CommonJS CRM cold start (' + (brokenRenderer ? 'broken site' : 'normal') + '): 7 anonymous + ' + accessChecks + ' authenticated/denial checks passed; isolated fixtures, no network or credentials.');
     })().catch(error => { console.error(error); process.exitCode = 1; });
   `], { cwd: output, env: environment, encoding: 'utf8', timeout: 30000 });
   if (child.stdout) process.stdout.write(child.stdout);
   if (child.stderr) process.stderr.write(child.stderr);
   assert.equal(child.status, 0, 'Compiled CRM must boot and enforce auth before deployment');
+  }
 } finally {
   // Only the freshly created, verified test directory can be removed.
   assert.equal(path.dirname(output), cache);

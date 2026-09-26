@@ -1,7 +1,6 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { handleSiteIntake } from "../../lib/crm/site-intake-handler";
 import { handleSiteBlog } from "../../lib/crm/site-blog";
-import { handleSitePage } from "../../lib/crm/site-page";
 import { handlePlatformOperators, handleOperatorAccount, handleOperatorInbox, handleClinicOperators } from "../../lib/crm/operators";
 import { handleOperatorLeads, handleClinicOperatorLeads } from "../../lib/crm/operator-leads";
 import { handleOperatorServices } from "../../lib/crm/operator-services";
@@ -335,7 +334,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   // Never dispatch it through generic CRM resources or resolve a visitor tenant.
   if (route.authorization.kind === "site_public") {
     if (route.key !== "site-page" || segments.length !== 1) return notFound(res);
-    return handleSitePage(req, res);
+    // The optional renderer must not prevent staff authentication or CRM boot.
+    try {
+      const { handleSitePage } = await import("../../lib/crm/site-page");
+      return await handleSitePage(req, res);
+    } catch {
+      res.setHeader("Cache-Control", "no-store");
+      res.setHeader("X-Robots-Tag", "noindex, nofollow");
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.setHeader("Content-Type", "text/plain; charset=utf-8");
+      return res.status(503).end(req.method === "HEAD" ? undefined : "Сайт временно недоступен. Попробуйте позже.");
+    }
   }
   if (route.authorization.kind === "site_intake") {
     if (route.key !== "site-inquiry" || segments.length !== 1) return notFound(res);

@@ -2,7 +2,7 @@
 const assert = require('node:assert/strict');
 const path = require('node:path');
 
-module.exports = async function checkRuntimeAccess(handler) {
+module.exports = async function checkRuntimeAccess(handler, { brokenRenderer = false } = {}) {
   const id = n => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
   const workspace = id(1);
   const roles = ['owner', 'admin', 'doctor'];
@@ -66,14 +66,20 @@ module.exports = async function checkRuntimeAccess(handler) {
   async function call(route, role, expected, query = {}, method = 'GET') {
     log.length = 0;
     let status, body;
-    const response = { setHeader() {}, status(value) { status = value; return response; },
+    const headers = {};
+    const response = { setHeader(key, value) { headers[key] = value; }, status(value) { status = value; return response; },
       json(value) { body = value; }, end(value) { body = value; } };
     await handler({ method, url: `/api/crm/${route}`, headers: role ? { authorization: `Bearer fixture.${role}.signature` } : {},
       ...(method === 'GET' ? {} : { body: {} }),
       query: { path: [route], ...(route === 'site-page' ? {} : { workspaceId: workspace }), ...query } }, response);
     assert.equal(status, expected, `${route}: ${role || 'anonymous'}`);
-    const serialized = JSON.stringify(body);
-    for (const forbidden of ['fixture-only-not-a-credential', 'signature', 'private auth diagnostic', 'private database diagnostic']) {
+    const serialized = JSON.stringify(body) ?? '';
+    if (route === 'site-page' && expected === 503) {
+      assert.equal(headers['Cache-Control'], 'no-store');
+      assert.equal(headers['X-Robots-Tag'], 'noindex, nofollow');
+      if (method === 'HEAD') assert.equal(body, undefined);
+    }
+    for (const forbidden of ['fixture-only-not-a-credential', 'signature', 'private auth diagnostic', 'private database diagnostic', 'SIMULATED_PRIVATE_RENDERER_FAILURE']) {
       assert.ok(!serialized.includes(forbidden), 'No credential or private diagnostic in response');
     }
     checks++;
@@ -111,7 +117,15 @@ module.exports = async function checkRuntimeAccess(handler) {
     await call('appointments', 'owner', 503);
     assert.ok(!log.some(entry => entry.table === 'appointments'));
     membershipFailure = false;
-    await call('site-page', undefined, 404);
+    await call('site-page', undefined, brokenRenderer ? 503 : 404);
+    if (brokenRenderer) {
+      await call('site-page', undefined, 503, {}, 'HEAD');
+      // A failed optional import must not poison later requests in a warm function.
+      await call('auth-context', 'owner', 200);
+      await call('appointments', 'doctor', 200);
+      await call('site-blog', 'admin', 200);
+      return checks;
+    }
     // Exercise the enabled renderer too; drafts and visitor-selected tenants stay private.
     process.env.MEDINA_PUBLIC_SITE_ENABLED = 'true';
     process.env.MEDINA_PUBLIC_SITE_WORKSPACE_ID = workspace;
