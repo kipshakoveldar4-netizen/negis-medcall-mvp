@@ -11,7 +11,13 @@ const blog = await load("lib/crm/site-blog.ts") as { handleSiteBlog(req: unknown
 const publicSite = await load("lib/crm/site-page.ts") as { handleSitePage(req: unknown, res: unknown): Promise<unknown> };
 const server = await load("lib/crm/server.ts") as { attachWorkspaceContext(req: unknown, context: unknown): void };
 const supabase = await load("lib/supabase/server.ts") as { setSupabaseServerClientFactoryForTests(factory: (() => unknown) | null): void };
-const schema = await load("lib/site/blog.ts") as { validateBlogWrite(body: unknown, updating: boolean): unknown };
+type PublicationVersion = { version: number; publishedAt?: string | null; publishedVersion?: number | null };
+const schema = await load("lib/site/blog.ts") as {
+  validateBlogWrite(body: unknown, updating: boolean): unknown;
+  getBlogPublicationState(post: PublicationVersion | null, unsavedChanges?: boolean): "draft" | "approved" | "changed";
+  blogPublicationLabels: Record<"draft" | "approved" | "changed", string>;
+  blogArticlePath(slug: string | null | undefined): string | null;
+};
 const db = new PGlite();
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const fields = { title: "Статья", slug: "test-article", excerpt: "Описание", body: "Первый абзац\n\nВторой", locale: "ru" };
@@ -23,6 +29,37 @@ test("editor distinguishes unavailable list from empty and translates auth error
   assert.ok(source.includes('listAvailable ? "Статей пока нет." : "Список недоступен."'));
   assert.ok(source.includes("setListAvailable(false)"));
   assert.ok(source.includes("setListAvailable(true)"));
+});
+
+test("publication display distinguishes draft, approved snapshot and unpublished changes", () => {
+  assert.equal(schema.getBlogPublicationState(null), "draft");
+  assert.equal(schema.getBlogPublicationState({ version: 1 }), "draft");
+  const approved = { version: 2, publishedVersion: 2, publishedAt: "2026-09-27T12:00:00Z" };
+  assert.equal(schema.getBlogPublicationState(approved), "approved");
+  assert.equal(schema.getBlogPublicationState(approved, true), "changed");
+  assert.equal(schema.getBlogPublicationState({ ...approved, version: 3 }), "changed");
+  assert.equal(schema.getBlogPublicationState({ ...approved, publishedVersion: null }), "changed");
+  assert.equal(schema.getBlogPublicationState({ version: 4, publishedAt: null, publishedVersion: null }), "draft");
+  assert.equal(schema.blogPublicationLabels.approved, "Версия разрешена для сайта");
+});
+
+test("article paths are local, bounded and reject invalid or unsafe slugs", () => {
+  assert.equal(schema.blogArticlePath("clinic-appointments"), "/ru/blog/clinic-appointments/");
+  assert.equal(schema.blogArticlePath("a".repeat(100)), `/ru/blog/${"a".repeat(100)}/`);
+  for (const slug of [null, undefined, "", "a".repeat(101), "../admin", "//evil.test", "javascript:alert(1)", "<img>", "Some-Article", "статья", "draft?preview=1", "draft#secret"]) {
+    assert.equal(schema.blogArticlePath(slug), null);
+  }
+});
+
+test("editor uses publication state for list and selection without creating public preview links", async () => {
+  const source = await readFile(path.join(root, "artifacts/negis/src/pages/SiteBlog.tsx"), "utf8");
+  assert.ok(source.includes("blogPublicationLabels[getBlogPublicationState(row)]"));
+  assert.ok(source.includes("getBlogPublicationState(selected, dirty)"));
+  assert.ok(source.includes("blogArticlePath(selected.publishedSlug)"));
+  assert.ok(source.includes("Адрес черновика"));
+  assert.ok(source.includes("Адрес разрешённой версии"));
+  assert.ok(source.includes("[overflow-wrap:anywhere]"));
+  assert.doesNotMatch(source, /href=\{(?:draftPath|approvedPath)\}|dangerouslySetInnerHTML/);
 });
 
 // Execute the handler's query chain against isolated PostgreSQL, including unique
@@ -202,6 +239,37 @@ async function publicCall(page = "/ru/blog/", extra: Record<string, unknown> = {
   try { await publicSite.handleSitePage({ method, url: page, query: { page, ...extra } }, res); return { status, html, headers }; }
   finally { names.forEach((name, i) => { if (previous[i] === undefined) delete process.env[name]; else process.env[name] = previous[i]; }); }
 }
+
+test("renamed draft keeps approved path until explicit update; withdrawal clears public path", async () => {
+  const summary = async () => (await call("GET")).payload.data as Array<PublicationVersion & { slug: string; publishedSlug: string | null }>;
+  await call("POST", { ...fields, id: id(10) });
+  assert.equal(schema.getBlogPublicationState((await summary())[0]), "draft");
+  await call("PATCH", { id: id(10), version: 1, action: "publish" });
+  assert.equal(schema.getBlogPublicationState((await summary())[0]), "approved");
+  await call("PATCH", { ...fields, slug: "updated-article", id: id(10), version: 2 });
+  const changed = (await summary())[0];
+  assert.equal(schema.getBlogPublicationState(changed), "changed");
+  assert.equal(schema.blogArticlePath(changed.slug), "/ru/blog/updated-article/");
+  assert.equal(schema.blogArticlePath(changed.publishedSlug), "/ru/blog/test-article/");
+  assert.equal((await publicCall("/ru/blog/test-article/")).status, 200);
+  assert.equal((await publicCall("/ru/blog/updated-article/")).status, 404);
+  assert.doesNotMatch((await publicCall("/ru/sitemap.xml")).html, /updated-article/);
+
+  await call("PATCH", { id: id(10), version: 3, action: "publish" });
+  const updated = (await summary())[0];
+  assert.equal(schema.getBlogPublicationState(updated), "approved");
+  assert.equal(schema.blogArticlePath(updated.publishedSlug), "/ru/blog/updated-article/");
+  assert.equal((await publicCall("/ru/blog/test-article/")).status, 404);
+  assert.equal((await publicCall("/ru/blog/updated-article/")).status, 200);
+  assert.match((await publicCall("/ru/sitemap.xml")).html, /updated-article/);
+
+  await call("PATCH", { id: id(10), version: 4, action: "unpublish" });
+  const withdrawn = (await summary())[0];
+  assert.equal(schema.getBlogPublicationState(withdrawn), "draft");
+  assert.equal(schema.blogArticlePath(withdrawn.publishedSlug), null);
+  assert.equal((await publicCall("/ru/blog/updated-article/")).status, 404);
+  assert.doesNotMatch((await publicCall("/ru/sitemap.xml")).html, /updated-article/);
+});
 
 test("public HTML never exposes drafts or foreign workspaces, and withdrawal is immediate", async () => {
   await call("POST", { ...fields, title: "PRIVATE DRAFT", id: id(10) });
