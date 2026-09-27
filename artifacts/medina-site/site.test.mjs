@@ -7,7 +7,7 @@ import { readFormSettings } from './settings.mjs';
 
 test('preview pages have safe metadata, valid internal links and disabled intake', () => {
   const pages = createPages();
-  assert.equal(pages.size, 9);
+  assert.equal(pages.size, 12);
   const titles = new Set();
   for (const html of pages.values()) {
     assert.match(html, /lang="ru"/);
@@ -85,4 +85,28 @@ test('public rendering excludes example drafts and escapes approved text', () =>
   assert.match(sitemap, /\/ru\/blog\/approved\//);
   assert.doesNotMatch(sitemap, /404.html|after-the-lead/);
   assert.match(createPages(null, { preview: false }).get('/ru/blog/'), /Материалы готовятся/);
+});
+
+test('audience pages have distinct search metadata, breadcrumbs and a working inquiry path', () => {
+  const origin = 'https://site.example.invalid';
+  const pages = createPages(null, { preview: false, indexable: true, origin });
+  const titles = new Set(), descriptions = new Set();
+  for (const slug of ['salons', 'dentistry', 'clinics']) {
+    const route = `/ru/solutions/${slug}/`;
+    const html = pages.get(route);
+    assert.ok(html);
+    assert.equal((html.match(/<h1>/g) || []).length, 1);
+    assert.match(html, /aria-label="Хлебные крошки"/);
+    assert.match(html, /href="\/ru\/#consultation"/);
+    assert.match(html, /href="\/ru\/services\//);
+    assert.match(html, /href="\/ru\/blog\/"/);
+    assert.ok(html.includes(`rel="canonical" href="${origin}${route}"`));
+    assert.ok(createSitemap(pages, origin).includes(`<loc>${origin}${route}</loc>`));
+    assert.ok(pages.get('/ru/').includes(`href="${route}"`));
+    titles.add(html.match(/<title>(.*?)<\/title>/)[1]);
+    descriptions.add(html.match(/name="description" content="([^"]+)"/)[1]);
+    assert.doesNotMatch(html, /<script|access_token|aggregateRating|testimonial/i);
+  }
+  assert.equal(titles.size, 3); assert.equal(descriptions.size, 3);
+  assert.match(pages.get('/ru/blog/'), /<h1>Блог о рекламе и работе с заявками<\/h1>/);
 });
