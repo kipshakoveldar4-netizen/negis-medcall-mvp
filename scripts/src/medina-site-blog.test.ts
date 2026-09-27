@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import test, { before, after, beforeEach, afterEach } from "node:test";
 import { PGlite } from "@electric-sql/pglite";
+import { createRequire } from "node:module";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const load = (file: string) => import(pathToFileURL(path.join(root, file)).href);
@@ -21,6 +22,73 @@ const schema = await load("lib/site/blog.ts") as {
 const db = new PGlite();
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const fields = { title: "Статья", slug: "test-article", excerpt: "Описание", body: "Первый абзац\n\nВторой", locale: "ru" };
+const article = await load("lib/site/article.ts") as {
+  parseArticleBody(body: string): unknown[];
+  safeArticleLink(href: string): boolean;
+};
+const renderer = createRequire(import.meta.url)(path.join(root, "artifacts/medina-site/render.cjs")) as {
+  renderArticleNodes(nodes: unknown[]): string;
+};
+
+test("article structure supports headings, lists and safe links without a second H1", () => {
+  const html = renderer.renderArticleNodes(article.parseArticleBody("# Раздел\n\n### Детали\n\n- Первый\n- **Второй**\n\n3. Шаг\n4. *Результат*\n\n[Блог](/ru/blog/)"));
+  assert.match(html, /<h2>Раздел<\/h2>/);
+  assert.match(html, /<h3>Детали<\/h3>/);
+  assert.match(html, /<ul><li><p>Первый/);
+  assert.match(html, /<strong>Второй<\/strong>/);
+  assert.match(html, /<ol start="3">/);
+  assert.match(html, /<em>Результат<\/em>/);
+  assert.match(html, /href="\/ru\/blog\/"/);
+  assert.doesNotMatch(html, /<h1|<script|<img|<iframe/);
+});
+
+test("article body never renders raw HTML, embeds or unsafe links", () => {
+  for (const body of [
+    '<script>alert(1)</script><img src=x onerror=alert(1)>',
+    '<svg onload=alert(1)><a href="javascript:alert(1)">x</a></svg>',
+    '[x](javascript:alert(1))', '[x](jav&#x61;script:alert(1))',
+    '[x](data:text/html,unsafe)', '[x](//external.example.invalid/path)',
+    '[x](https://user:password@example.invalid/path)',
+    '![image](https://example.invalid/pixel.png)', '[x](/api/crm/site-blog)',
+  ]) {
+    const html = renderer.renderArticleNodes(article.parseArticleBody(body));
+    assert.doesNotMatch(html, /<(?:script|img|svg|iframe|style)\b|href="(?:javascript:|data:|\/\/|\/api\/|https:\/\/user:)/i);
+  }
+  assert.equal(article.safeArticleLink("https://example.invalid/article"), true);
+  for (const href of ["http://example.invalid", "file:///secret", "javascript:alert(1)", "/ru/../admin", "\\evil", "https://a\nb", "https://user@example.invalid", "https://example.invalid/" + "a".repeat(2048)]) {
+    assert.equal(article.safeArticleLink(href), false);
+  }
+  assert.equal(renderer.renderArticleNodes(article.parseArticleBody("")), "");
+  assert.equal(renderer.renderArticleNodes(article.parseArticleBody("Первый\r\nстрока\r\n\r\nВторой")), "<p>Первый<br>строка</p><p>Второй</p>");
+  assert.doesNotThrow(() => article.parseArticleBody("а".repeat(30000)));
+  assert.throws(() => article.parseArticleBody("а".repeat(30001)));
+  assert.doesNotThrow(() => article.parseArticleBody("- ".repeat(200) + "вложенный список"));
+});
+
+test("React preview and public renderer produce the same article structure", async () => {
+  const frontendRequire = createRequire(path.join(root, "artifacts/negis/package.json"));
+  const { createElement } = frontendRequire("react");
+  const { renderToStaticMarkup } = frontendRequire("react-dom/server");
+  const { BlogArticleBody } = frontendRequire(path.join(root, "artifacts/negis/src/components/site/BlogArticleBody.tsx"));
+  const body = "## Раздел\n\nАбзац & текст\nстрока\n\n### Подраздел\n\n- **Первое**\n- *Второе*\n\n2. Шаг\n\n[Блог](/ru/blog/) и <script>bad()</script>";
+  const preview = renderToStaticMarkup(createElement(BlogArticleBody, { body }))
+    .replace(/^<div[^>]*>|<\/div>$/g, "").replaceAll("<br/>", "<br>");
+  assert.equal(preview, renderer.renderArticleNodes(article.parseArticleBody(body)));
+});
+
+test("editor block insertion preserves other text and refuses oversize changes", () => {
+  const frontendRequire = createRequire(path.join(root, "artifacts/negis/package.json"));
+  const { insertArticleBlock } = frontendRequire(path.join(root, "artifacts/negis/src/components/site/BlogBodyEditor.tsx"));
+  const value = "Вступление\n\nРаздел\n\nЗаключение";
+  const start = value.indexOf("Раздел");
+  const changed = insertArticleBlock(value, start, start + "Раздел".length, "## ", "Название раздела");
+  assert.ok(changed.value.startsWith("Вступление"));
+  assert.ok(changed.value.endsWith("Заключение"));
+  assert.equal(changed.value.slice(changed.selectionStart, changed.selectionEnd), "Раздел");
+  assert.match(renderer.renderArticleNodes(article.parseArticleBody(changed.value)), /<h2>Раздел<\/h2>/);
+  assert.equal(insertArticleBlock("", 0, 0, "- ", "Пункт списка").value, "- Пункт списка\n\n");
+  assert.equal(insertArticleBlock("а".repeat(30000), 0, 0, "## ", "Раздел"), null);
+});
 
 test("editor distinguishes unavailable list from empty and translates auth errors", async () => {
   const source = await readFile(path.join(root, "artifacts/negis/src/pages/SiteBlog.tsx"), "utf8");
@@ -239,6 +307,24 @@ async function publicCall(page = "/ru/blog/", extra: Record<string, unknown> = {
   try { await publicSite.handleSitePage({ method, url: page, query: { page, ...extra } }, res); return { status, html, headers }; }
   finally { names.forEach((name, i) => { if (previous[i] === undefined) delete process.env[name]; else process.env[name] = previous[i]; }); }
 }
+
+test("approved structured article is server-rendered without scripts and draft edits stay private", async () => {
+  const body = "## План работы\n\nПервый абзац\n\n### Подготовка\n\n- Прайс\n- Ответственный\n\n[Блог](/ru/blog/)\n\n<script>unsafe()</script>";
+  await call("POST", { ...fields, body, id: id(10) });
+  assert.equal((await publicCall("/ru/blog/test-article/")).status, 404);
+  await call("PATCH", { id: id(10), version: 1, action: "publish" });
+  const page = await publicCall("/ru/blog/test-article/");
+  assert.equal(page.status, 200);
+  assert.match(page.html, /<h2>План работы<\/h2>/);
+  assert.match(page.html, /<h3>Подготовка<\/h3>/);
+  assert.match(page.html, /<ul><li><p>Прайс/);
+  assert.match(page.html, /&lt;script&gt;/);
+  assert.doesNotMatch(page.html, /<script|dangerouslySetInnerHTML/);
+  assert.equal((page.html.match(/<h1>/g) || []).length, 1);
+  assert.ok(page.html.includes(renderer.renderArticleNodes(article.parseArticleBody(body))));
+  await call("PATCH", { ...fields, body: "## PRIVATE SECTION", id: id(10), version: 2 });
+  assert.doesNotMatch((await publicCall("/ru/blog/test-article/")).html, /PRIVATE SECTION/);
+});
 
 test("renamed draft keeps approved path until explicit update; withdrawal clears public path", async () => {
   const summary = async () => (await call("GET")).payload.data as Array<PublicationVersion & { slug: string; publishedSlug: string | null }>;

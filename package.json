@@ -95,10 +95,12 @@
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.105.4",
-    "@vercel/node": "^5.8.17"
+    "@vercel/node": "^5.8.17",
+    "markdown-it": "14.1.1"
   },
   "private": true,
   "devDependencies": {
+    "@types/markdown-it": "14.1.2",
     "@types/node": "catalog:",
     "prettier": "^3.8.3",
     "typescript": "~5.9.3"

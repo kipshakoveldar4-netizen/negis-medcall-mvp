@@ -4,6 +4,22 @@ function escapeHtml(value) {
   return String(value).replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
 }
 const e = escapeHtml;
+const articleTags = new Set(['p', 'h2', 'h3', 'ul', 'ol', 'li', 'strong', 'em', 'a', 'br']);
+function renderArticleNodes(nodes) {
+  return nodes.map(node => {
+    if (typeof node === 'string') return e(node);
+    if (!articleTags.has(node.tag)) throw new Error('Unsupported article element');
+    if (node.tag === 'br') return '<br>';
+    const attrs = node.tag === 'a' && node.href ? ` href="${e(node.href)}" rel="noopener noreferrer"`
+      : node.tag === 'ol' && Number.isSafeInteger(node.start) && node.start > 0 ? ` start="${node.start}"` : '';
+    return `<${node.tag}${attrs}>${renderArticleNodes(node.children)}</${node.tag}>`;
+  }).join('');
+}
+function articleBody(item) {
+  if (item.nodes) return `<div class="article-body">${renderArticleNodes(item.nodes)}</div>`;
+  return typeof item.body === 'string' ? item.body.split(/\n\s*\n/).map(text => `<p class="article-text">${e(text)}</p>`).join('')
+    : item.sections.map(([heading, text]) => `<section><h2>${e(heading)}</h2><p>${e(text)}</p></section>`).join('');
+}
 const serviceUrl = item => `/ru/services/${item.slug}/`;
 const articleUrl = item => `/ru/blog/${item.slug}/`;
 const audienceUrl = item => `/ru/solutions/${item.slug}/`;
@@ -71,7 +87,7 @@ function createPages(intake = null, options = {}) {
     <section class="band reading"><div class="shell narrow"><h2>Перед подключением</h2>${item.questions.map(([question, answer]) => `<section class="solution-question"><h3>${e(question)}</h3><p>${e(answer)}</p></section>`).join('')}</div></section>
     <section class="band shell narrow"><h2>С чего начать</h2><ul class="related-services">${item.serviceSlugs.map(slug => { const service = services.find(entry => entry.slug === slug); return `<li><a class="text-link" href="${serviceUrl(service)}">${e(service.title)}</a><p>${e(service.short)}</p></li>`; }).join('')}</ul><p><a class="text-link" href="/ru/blog/">Материалы о рекламе и работе с заявками →</a></p>${action}</section>` }));
   pages.set('/ru/blog/', layout({ title: 'Блог о рекламе и обработке заявок', description: 'Материалы Medina OS о подготовке рекламы, работе с обращениями и CRM.', section: 'blog', content: `<section class="detail-head shell"><p class="eyebrow">Блог Medina OS</p><h1>Блог о рекламе и работе с заявками</h1><p class="lead">О рекламе, заявках и работе команды простыми словами.</p></section><section class="shell band">${articleCards()}</section>` }));
-  for (const item of articles) pages.set(articleUrl(item), layout({ title: item.title, description: item.summary, section: 'blog', content: `<div class="shell"><a class="back" href="/ru/blog/">← Все статьи</a></div><article class="shell narrow article"><header><p class="eyebrow">${e(item.category || 'Блог Medina OS')}</p><h1>${e(item.title)}</h1><p class="lead">${e(item.summary)}</p>${options.preview === false ? '' : '<p class="draft">Редакционный черновик · ожидает проверки перед публикацией</p>'}</header>${typeof item.body === 'string' ? item.body.split(/\n\s*\n/).map(text => `<p class="article-text">${e(text)}</p>`).join('') : item.sections.map(([heading, text]) => `<section><h2>${e(heading)}</h2><p>${e(text)}</p></section>`).join('')}<aside class="article-cta"><h2>Обсудим вашу задачу?</h2><p>Начните с направления, которое сейчас требует внимания команды.</p><a class="button primary" href="/ru/#consultation">Оставить заявку ↗</a></aside></article>` }));
+  for (const item of articles) pages.set(articleUrl(item), layout({ title: item.title, description: item.summary, section: 'blog', content: `<div class="shell"><a class="back" href="/ru/blog/">← Все статьи</a></div><article class="shell narrow article"><header><p class="eyebrow">${e(item.category || 'Блог Medina OS')}</p><h1>${e(item.title)}</h1><p class="lead">${e(item.summary)}</p>${options.preview === false ? '' : '<p class="draft">Редакционный черновик · ожидает проверки перед публикацией</p>'}</header>${articleBody(item)}<aside class="article-cta"><h2>Обсудим вашу задачу?</h2><p>Начните с направления, которое сейчас требует внимания команды.</p><a class="button primary" href="/ru/#consultation">Оставить заявку ↗</a></aside></article>` }));
   pages.set('/404.html', layout({ title: 'Страница не найдена', description: 'Этой страницы нет на сайте Medina OS.', content: '<section class="shell detail-head"><p class="eyebrow">404</p><h1>Здесь пока ничего нет</h1><p class="lead">Вернитесь на главную или выберите материал в блоге.</p><a class="button primary" href="/ru/">На главную</a></section>' }));
   if (options.origin) {
     const origin = new URL(options.origin);
@@ -92,4 +108,4 @@ function createSitemap(pages, origin) {
     + [...pages.keys()].filter(url => url.startsWith('/ru/')).map(url => `<url><loc>${e(origin + url)}</loc></url>`).join('') + '</urlset>';
 }
 
-module.exports = { escapeHtml, createPages, createSitemap };
+module.exports = { escapeHtml, createPages, createSitemap, renderArticleNodes };

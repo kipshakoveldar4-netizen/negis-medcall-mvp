@@ -2,6 +2,7 @@ import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { getSupabaseServerClient } from "../supabase/server";
 import { createPages, createSitemap, type PublicArticle } from "../../artifacts/medina-site/render.cjs";
 import { readSiteIntakeConfig } from "./site-intake-handler";
+import { parseArticleBody } from "../site/article";
 
 export function publicSiteConfig(env: Record<string, string | undefined> = process.env) {
   if (env.MEDINA_PUBLIC_SITE_ENABLED !== "true") return null;
@@ -20,7 +21,7 @@ export function publicArticle(value: unknown): PublicArticle | null {
     || row.slug.length > 100 || typeof row.title !== "string" || !row.title.trim() || row.title.length > 200
     || typeof row.excerpt !== "string" || row.excerpt.length > 500
     || typeof row.body !== "string" || row.body.length > 30000) return null;
-  return { slug: row.slug, title: row.title, summary: row.excerpt, body: row.body };
+  return { slug: row.slug, title: row.title, summary: row.excerpt, body: row.body, nodes: parseArticleBody(row.body) };
 }
 
 // Isolated public read surface. No caller-selected tenant, draft fields or IDs.
