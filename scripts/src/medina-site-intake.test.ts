@@ -183,6 +183,24 @@ test("historical CRM lead is never overwritten or silently merged", async () => 
   assert.equal((await row("select notes from public.leads where id=$1", [id(90)])).notes, "Keep");
 });
 
+test("old site inquiries and leads do not expire on retry or a later submission", async () => {
+  await submit();
+  const original = await row("select id,full_name,phone,notes from public.leads where workspace_id=$1", [id(1)]);
+  await db.query("update public.leads set created_at='2000-01-01T00:00:00Z' where id=$1", [original.id]);
+  await db.query("update public.crm_site_inquiries set consent_received_at='2000-01-01T00:00:00Z' where request_key=$1", [id(100)]);
+
+  assert.deepEqual((await submit()).result, { accepted: true });
+  assert.equal((await row("select count(*)::int as n from public.leads")).n, 1);
+  assert.deepEqual((await submit(101)).result, { accepted: true });
+  assert.equal((await row("select count(*)::int as n from public.leads")).n, 2);
+  assert.equal((await row("select count(*)::int as n from public.crm_site_inquiries")).n, 2);
+  assert.deepEqual(await row("select id,full_name,phone,notes from public.leads where id=$1", [original.id]), original);
+  const receipt = await row("select lead_id,inquiry,consent_received_at < '2001-01-01'::timestamptz as still_old from public.crm_site_inquiries where request_key=$1", [id(100)]);
+  assert.equal(receipt.lead_id, original.id);
+  assert.deepEqual(receipt.inquiry, valid);
+  assert.equal(receipt.still_old, true);
+});
+
 test("anon and authenticated cannot read receipts or execute intake RPC", async () => {
   for (const role of ["anon", "authenticated"]) {
     await db.exec(`set local role ${role}`);
