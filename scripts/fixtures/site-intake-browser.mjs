@@ -17,7 +17,7 @@ const otherWorkspace = '00000000-0000-4000-8000-000000000002';
 const simulatedOrigin = 'https://site.example.invalid';
 
 // Loopback-only, disposable database. Never reads .env or accepts database URLs.
-export async function startSiteIntakeFixture() {
+export async function startSiteIntakeFixture({ articles = [] } = {}) {
   const db = new PGlite();
   await db.exec('create role anon; create role authenticated; create role service_role bypassrls; grant usage on schema public to anon, authenticated, service_role;');
   const selected = new Set([9, 10, 11, 12, 13, 14, 19, 58]);
@@ -122,9 +122,10 @@ export async function startSiteIntakeFixture() {
           }, reset() {}
         }; window.medinaChallengeReady();`); return;
       }
-      if (url.pathname === '/ru/') {
-        const pages = createPages({ endpoint: `${origin}/api/crm/site-inquiry`, siteKey: 'fixture-site-key', consentVersion: 'v1' }, { preview: false });
-        const html = pages.get('/ru/').replace('<body>', '<body><div class="preview">Локальная тестовая форма. Только вымышленные данные. База и защита изолированы.</div>');
+      const pages = createPages({ endpoint: `${origin}/api/crm/site-inquiry`, siteKey: 'fixture-site-key', consentVersion: 'v1' },
+        { preview: false, indexable: false, articles, origin: simulatedOrigin });
+      if (pages.has(url.pathname)) {
+        const html = pages.get(url.pathname).replace('<body>', '<body><div class="preview">Локальная тестовая форма. Только вымышленные данные. База и защита изолированы.</div>');
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); res.end(html); return;
       }
       json(res, 404, { error: 'not_found' });

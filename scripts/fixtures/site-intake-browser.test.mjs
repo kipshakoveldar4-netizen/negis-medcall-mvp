@@ -24,6 +24,12 @@ test('loopback form fixture persists only in its disposable database and stays f
     assert.equal(response.status, 200);
     assert.match(response.headers.get('content-security-policy'), /connect-src 'self'/);
     assert.match(await response.text(), /Локальная тестовая форма/);
+    for (const route of ['/ru/blog/', '/ru/solutions/salons/', '/ru/solutions/dentistry/', '/ru/solutions/clinics/']) {
+      const page = await call(route);
+      assert.equal(page.status, 200);
+      assert.match(page.headers.get('x-robots-tag'), /noindex/);
+    }
+    assert.equal((await call('/ru/blog/clinic-advertising-report/')).status, 404);
     const script = await (await call('/form.js')).text();
     assert.match(script, /\/__fixture\/challenge.js/);
     assert.doesNotMatch(script, /https:\/\/challenges.cloudflare.com/);
@@ -72,4 +78,17 @@ test('loopback form fixture persists only in its disposable database and stays f
     assert.deepEqual(await submit(key, { challengeToken }), { status: 403, body: { success: false, code: 'challenge_failed' } });
     assert.deepEqual(await state(), before);
   });
+});
+
+test('editorial preview is explicit, loopback-only and remains noindex', async t => {
+  const fixture = await startSiteIntakeFixture({ articles: [{ slug: 'fixture-article', title: 'Fixture article',
+    summary: 'Local editorial preview', nodes: [{ tag: 'p', children: ['Fixture body'] }] }] });
+  t.after(() => fixture.close());
+  const response = await fetch(`${fixture.origin}/ru/blog/fixture-article/`);
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get('x-robots-tag'), /noindex/);
+  const html = await response.text();
+  assert.match(html, /Fixture body/);
+  assert.ok(html.includes('rel="canonical" href="https://site.example.invalid/ru/blog/fixture-article/"'));
+  assert.match(html, /name="robots" content="noindex,nofollow"/);
 });
