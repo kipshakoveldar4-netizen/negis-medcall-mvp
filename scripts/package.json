@@ -14,6 +14,8 @@
     "test:site-deletion-preview": "tsx --test ./src/medina-site-deletion-preview.test.ts",
     "test:site-deletion-ui": "tsx --test ./src/medina-site-deletion-ui.test.ts",
     "test:site-deletion-sql": "tsx --test ./src/medina-site-deletion-sql.test.ts",
+    "test:site-deletion-postgres": "node --test ./fixtures/site-deletion-postgres.test.mjs",
+    "test:disposable-postgres-safety": "node --test ./fixtures/disposable-postgres.test.mjs",
     "hello": "tsx ./src/hello.ts",
     "test:advertising-assistant": "tsx --test ./src/advertising-assistant.test.ts",
     "test:advertising-brief": "tsx --test ./src/advertising-campaign-brief.test.ts",
@@ -99,6 +101,7 @@
   "devDependencies": {
     "@electric-sql/pglite": "0.5.8",
     "@types/node": "catalog:",
+    "pg": "8.20.0",
     "tsx": "catalog:"
   }
 }
