@@ -86,3 +86,16 @@ test('rapid repeat submissions stay locked while the request is pending', async 
   await first;
   assert.match(ui.status.textContent, /Заявка принята/);
 });
+
+test('erased submission never retries or creates a fresh key automatically', async () => {
+  const ui = setup([{ ok: false, text: async () => '{"code":"inquiry_erased","error":"private details"}' }]);
+  ui.token(); await ui.submit();
+  assert.match(ui.status.textContent, /Для новой заявки обновите страницу/);
+  assert.doesNotMatch(ui.status.textContent, /private|Заявка принята/);
+  assert.equal(ui.fieldset.disabled, true);
+  assert.equal(ui.resetCount(), 0);
+  ui.token(); await ui.submit();
+  ui.fields.name = 'Changed'; ui.token(); await ui.submit();
+  assert.equal(ui.requests.length, 1);
+  assert.equal(ui.button.disabled, true);
+});

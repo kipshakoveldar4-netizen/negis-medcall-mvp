@@ -76,9 +76,9 @@ test("failed challenge never saves; verified write uses only configured site", a
 });
 
 test("storage failures are safe; no fake success or raw errors", async () => {
-  for (const error of ["unavailable", "rate_limited", "request_conflict"]) {
+  for (const error of ["unavailable", "rate_limited", "request_conflict", "inquiry_erased"]) {
     const result = await call(mod.createSiteIntakeHandler({ env: () => env, verify: async () => true, save: async () => error }));
-    assert.equal(result.status, error === "rate_limited" ? 429 : error === "request_conflict" ? 409 : 503);
+    assert.equal(result.status, error === "rate_limited" ? 429 : ["request_conflict", "inquiry_erased"].includes(error) ? 409 : 503);
     assert.doesNotMatch(JSON.stringify(result.payload), /phone|secret|workspace/);
   }
   const result = await call(mod.createSiteIntakeHandler({ env: () => env, verify: async () => true, save: async () => { throw new Error("sensitive database error"); } }));

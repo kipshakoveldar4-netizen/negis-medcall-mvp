@@ -334,6 +334,7 @@ export const CRM_ROUTE_AUTHORIZATION: Readonly<Record<string, RouteAuthorization
   "site-page": { kind: "site_public", methods: ["GET", "HEAD"] },
   "site-blog": { kind: "browser", methods: ["GET", "POST", "PATCH"], roles: WORKSPACE_ADMIN },
   "site-inquiry-deletion-preview": { kind: "browser", methods: ["GET"], roles: WORKSPACE_ADMIN },
+  "site-inquiry-deletion": { kind: "browser", methods: ["POST"], roles: WORKSPACE_ADMIN },
 };
 
 /** Sub-path routes, matched as `<resource>/<segment>`. */
