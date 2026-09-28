@@ -11,6 +11,7 @@
     "test:site-editorial": "tsx --test ./src/medina-site-editorial.test.ts",
     "test:site-intake": "tsx --test ./src/medina-site-intake.test.ts ./src/medina-site-intake-handler.test.ts",
     "test:site-deletion-preview": "tsx --test ./src/medina-site-deletion-preview.test.ts",
+    "test:site-deletion-sql": "tsx --test ./src/medina-site-deletion-sql.test.ts",
     "hello": "tsx ./src/hello.ts",
     "test:advertising-assistant": "tsx --test ./src/advertising-assistant.test.ts",
     "test:advertising-brief": "tsx --test ./src/advertising-campaign-brief.test.ts",

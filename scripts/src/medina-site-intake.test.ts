@@ -25,7 +25,7 @@ async function rejects(fn: () => Promise<unknown>, pattern: RegExp) {
 
 before(async () => {
   await db.exec("create role anon; create role authenticated; create role service_role bypassrls; grant usage on schema public to anon, authenticated, service_role;");
-  const selected = new Set([9, 10, 11, 12, 13, 14, 19, 58]);
+  const selected = new Set([9, 10, 11, 12, 13, 14, 19, 58, 62]);
   for (const file of (await readdir(path.join(root, "migrations"))).sort()) {
     if (!selected.has(Number(file.slice(0, 3)))) continue;
     await db.exec((await readFile(path.join(root, "migrations", file), "utf8")).replace(/CREATE EXTENSION IF NOT EXISTS pgcrypto;/i, ""));
