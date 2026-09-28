@@ -20,15 +20,20 @@ function articleBody(item) {
   return typeof item.body === 'string' ? item.body.split(/\n\s*\n/).map(text => `<p class="article-text">${e(text)}</p>`).join('')
     : item.sections.map(([heading, text]) => `<section><h2>${e(heading)}</h2><p>${e(text)}</p></section>`).join('');
 }
+function publicationDate(value) {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/.test(value)) return null;
+  const date = new Date(value);
+  return Number.isFinite(date.getTime()) ? date.toISOString() : null;
+}
 const serviceUrl = item => `/ru/services/${item.slug}/`;
 const articleUrl = item => `/ru/blog/${item.slug}/`;
 const audienceUrl = item => `/ru/solutions/${item.slug}/`;
 const action = '<a class="button primary" href="/ru/#consultation">Оставить заявку <span aria-hidden="true">↗</span></a>';
 
-function baseLayout({ title, description, content, section = '', intake = null, preview = true, indexable = false, assetBase = '' }) {
+function baseLayout({ title, description, content, section = '', intake = null, preview = true, indexable = false, assetBase = '', article = false, origin }) {
   return `<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <title>${e(title)} | Medina OS</title><meta name="description" content="${e(description)}"><meta name="robots" content="${indexable ? 'index,follow' : 'noindex,nofollow'}">
-  <meta property="og:title" content="${e(title)}"><meta property="og:description" content="${e(description)}"><meta property="og:type" content="website"><meta property="og:locale" content="ru_RU">
+  <meta property="og:title" content="${e(title)}"><meta property="og:description" content="${e(description)}"><meta property="og:type" content="${article ? 'article' : 'website'}"><meta property="og:locale" content="ru_RU"><meta property="og:site_name" content="Medina OS">${origin ? `<meta property="og:image" content="${e(origin + assetBase + '/assets/brand.png')}"><meta property="og:image:alt" content="Medina OS">` : ''}
   <meta name="referrer" content="strict-origin-when-cross-origin"><link rel="icon" href="${assetBase}/assets/brand.png"><link rel="stylesheet" href="${assetBase}/site.css">${intake ? `<script src="${assetBase}/form.js" defer></script>` : ''}</head>
   <body><a class="skip" href="#main">К содержимому</a>
   ${preview ? '<div class="preview">Предпросмотр сайта Medina OS</div>' : ''}
@@ -48,6 +53,19 @@ function audienceList() {
 
 function breadcrumbs(label) {
   return `<nav class="shell breadcrumbs" aria-label="Хлебные крошки"><ol><li><a href="/ru/">Medina OS</a></li><li><a href="/ru/#audiences">Для кого</a></li><li><span aria-current="page">${e(label)}</span></li></ol></nav>`;
+}
+
+function articleBreadcrumbs(item) {
+  // Microdata is readable without JavaScript and preserves the strict CSP.
+  return `<nav class="shell breadcrumbs" aria-label="Хлебные крошки" itemscope itemtype="https://schema.org/BreadcrumbList"><ol>${[
+    ['Medina OS', '/ru/'], ['Блог', '/ru/blog/'], [item.title, articleUrl(item)],
+  ].map(([label, url], index) => `<li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem"><a itemprop="item" href="${e(url)}"${index === 2 ? ' aria-current="page"' : ''}><span itemprop="name">${e(label)}</span></a><meta itemprop="position" content="${index + 1}"></li>`).join('')}</ol></nav>`;
+}
+
+function publishedArticle(item, articles, options) {
+  const date = options.preview === false ? publicationDate(item.publishedAt) : null;
+  const related = articles.filter(other => other.slug !== item.slug).slice(0, 3);
+  return `${articleBreadcrumbs(item)}<article class="shell narrow article" itemscope itemtype="https://schema.org/BlogPosting"><meta itemprop="inLanguage" content="ru"><meta itemprop="headline" content="${e(item.title)}">${options.origin ? `<link itemprop="mainEntityOfPage" href="${e(options.origin + articleUrl(item))}">` : ''}<header><p class="eyebrow">${e(item.category || 'Блог Medina OS')}</p><h1>${e(item.title)}</h1><p class="lead" itemprop="description">${e(item.summary)}</p><p class="article-meta">Материал <span itemprop="author" itemscope itemtype="https://schema.org/Organization"><a href="/ru/" itemprop="url"><span itemprop="name">Medina OS</span></a></span>${date ? ` · Редакция опубликована <time itemprop="dateModified" datetime="${e(date)}">${new Intl.DateTimeFormat('ru-RU', { dateStyle: 'long', timeZone: 'UTC' }).format(new Date(date))}</time>` : ''}</p>${options.preview === false ? '' : '<p class="draft">Редакционный черновик · ожидает проверки перед публикацией</p>'}</header><div itemprop="articleBody">${articleBody(item)}</div><aside class="article-cta"><h2>Обсудим вашу задачу?</h2><p>Начните с направления, которое сейчас требует внимания команды.</p><a class="button primary" href="/ru/#consultation">Оставить заявку ↗</a></aside></article>${related.length ? `<section class="reading band"><div class="shell"><h2>Читайте также</h2>${renderArticleCards(related)}</div></section>` : ''}`;
 }
 
 function renderArticleCards(articles) {
@@ -87,7 +105,7 @@ function createPages(intake = null, options = {}) {
     <section class="band reading"><div class="shell narrow"><h2>Перед подключением</h2>${item.questions.map(([question, answer]) => `<section class="solution-question"><h3>${e(question)}</h3><p>${e(answer)}</p></section>`).join('')}</div></section>
     <section class="band shell narrow"><h2>С чего начать</h2><ul class="related-services">${item.serviceSlugs.map(slug => { const service = services.find(entry => entry.slug === slug); return `<li><a class="text-link" href="${serviceUrl(service)}">${e(service.title)}</a><p>${e(service.short)}</p></li>`; }).join('')}</ul><p><a class="text-link" href="/ru/blog/">Материалы о рекламе и работе с заявками →</a></p>${action}</section>` }));
   pages.set('/ru/blog/', layout({ title: 'Блог о рекламе и обработке заявок', description: 'Материалы Medina OS о подготовке рекламы, работе с обращениями и CRM.', section: 'blog', content: `<section class="detail-head shell"><p class="eyebrow">Блог Medina OS</p><h1>Блог о рекламе и работе с заявками</h1><p class="lead">О рекламе, заявках и работе команды простыми словами.</p></section><section class="shell band">${articleCards()}</section>` }));
-  for (const item of articles) pages.set(articleUrl(item), layout({ title: item.title, description: item.summary, section: 'blog', content: `<div class="shell"><a class="back" href="/ru/blog/">← Все статьи</a></div><article class="shell narrow article"><header><p class="eyebrow">${e(item.category || 'Блог Medina OS')}</p><h1>${e(item.title)}</h1><p class="lead">${e(item.summary)}</p>${options.preview === false ? '' : '<p class="draft">Редакционный черновик · ожидает проверки перед публикацией</p>'}</header>${articleBody(item)}<aside class="article-cta"><h2>Обсудим вашу задачу?</h2><p>Начните с направления, которое сейчас требует внимания команды.</p><a class="button primary" href="/ru/#consultation">Оставить заявку ↗</a></aside></article>` }));
+  for (const item of articles) pages.set(articleUrl(item), layout({ title: item.title, description: item.summary, section: 'blog', article: true, content: publishedArticle(item, articles, options) }));
   pages.set('/404.html', layout({ title: 'Страница не найдена', description: 'Этой страницы нет на сайте Medina OS.', content: '<section class="shell detail-head"><p class="eyebrow">404</p><h1>Здесь пока ничего нет</h1><p class="lead">Вернитесь на главную или выберите материал в блоге.</p><a class="button primary" href="/ru/">На главную</a></section>' }));
   if (options.origin) {
     const origin = new URL(options.origin);
@@ -102,10 +120,11 @@ function createPages(intake = null, options = {}) {
   return pages;
 }
 
-function createSitemap(pages, origin) {
+function createSitemap(pages, origin, articles = []) {
   if (new URL(origin).protocol !== 'https:' || new URL(origin).origin !== origin) throw new Error('Invalid site origin');
+  const dates = new Map(articles.map(item => [articleUrl(item), publicationDate(item.publishedAt)]));
   return '<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
-    + [...pages.keys()].filter(url => url.startsWith('/ru/')).map(url => `<url><loc>${e(origin + url)}</loc></url>`).join('') + '</urlset>';
+    + [...pages.keys()].filter(url => url.startsWith('/ru/')).map(url => `<url><loc>${e(origin + url)}</loc>${dates.get(url) ? `<lastmod>${e(dates.get(url))}</lastmod>` : ''}</url>`).join('') + '</urlset>';
 }
 
 module.exports = { escapeHtml, createPages, createSitemap, renderArticleNodes };

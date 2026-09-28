@@ -322,8 +322,14 @@ test("approved structured article is server-rendered without scripts and draft e
   assert.doesNotMatch(page.html, /<script|dangerouslySetInnerHTML/);
   assert.equal((page.html.match(/<h1>/g) || []).length, 1);
   assert.ok(page.html.includes(renderer.renderArticleNodes(article.parseArticleBody(body))));
+  const publication = await db.query<{ published_at: string }>("select published_at::text from site_blog_posts where id=$1", [id(10)]);
+  const expectedDate = new Date(publication.rows[0].published_at).toISOString();
+  assert.ok(page.html.includes(`itemprop="dateModified" datetime="${expectedDate}"`));
+  assert.ok((await publicCall("/ru/sitemap.xml")).html.includes(`<lastmod>${expectedDate}</lastmod>`));
   await call("PATCH", { ...fields, body: "## PRIVATE SECTION", id: id(10), version: 2 });
-  assert.doesNotMatch((await publicCall("/ru/blog/test-article/")).html, /PRIVATE SECTION/);
+  const afterDraftEdit = await publicCall("/ru/blog/test-article/");
+  assert.doesNotMatch(afterDraftEdit.html, /PRIVATE SECTION/);
+  assert.ok(afterDraftEdit.html.includes(`itemprop="dateModified" datetime="${expectedDate}"`));
 });
 
 test("renamed draft keeps approved path until explicit update; withdrawal clears public path", async () => {

@@ -110,3 +110,57 @@ test('audience pages have distinct search metadata, breadcrumbs and a working in
   assert.equal(titles.size, 3); assert.equal(descriptions.size, 3);
   assert.match(pages.get('/ru/blog/'), /<h1>Блог о рекламе и работе с заявками<\/h1>/);
 });
+
+test('article search markup matches visible text without scripts, fabricated experts or results', () => {
+  const origin = 'https://site.example.invalid';
+  const articles = [{ slug: 'appointments', title: 'Записи без путаницы', summary: 'Цена и время визита', body: 'Практический ответ.', publishedAt: '2026-09-28T10:00:00.123456+00:00' }];
+  const html = createPages(null, { preview: false, indexable: true, origin, assetBase: '/medina-site', articles }).get('/ru/blog/appointments/');
+  assert.match(html, /itemtype="https:\/\/schema.org\/BlogPosting"/);
+  assert.match(html, /itemprop="headline" content="Записи без путаницы"/);
+  assert.match(html, /<h1>Записи без путаницы<\/h1>/);
+  assert.match(html, /itemprop="description">Цена и время визита/);
+  assert.match(html, /itemprop="articleBody"/);
+  assert.match(html, /itemprop="author" itemscope itemtype="https:\/\/schema.org\/Organization"/);
+  assert.match(html, /itemprop="name">Medina OS/);
+  assert.match(html, /Редакция опубликована <time itemprop="dateModified" datetime="2026-09-28T10:00:00.123Z">/);
+  assert.match(html, /property="og:type" content="article"/);
+  assert.match(html, /property="og:image" content="https:\/\/site.example.invalid\/medina-site\/assets\/brand.png"/);
+  assert.match(html, /itemprop="mainEntityOfPage" href="https:\/\/site.example.invalid\/ru\/blog\/appointments\/"/);
+  assert.doesNotMatch(html, /<script|schema.org\/Person|aggregateRating|datePublished|Читайте также/);
+});
+
+test('breadcrumb positions and related links come only from provided public articles', () => {
+  const articles = [
+    { slug: 'one', title: 'Один', summary: 'Первый', body: 'Текст' },
+    { slug: 'two', title: 'Два', summary: 'Второй', body: 'Текст' },
+  ];
+  const pages = createPages(null, { preview: false, articles });
+  const html = pages.get('/ru/blog/one/');
+  assert.match(html, /schema.org\/BreadcrumbList/);
+  assert.deepEqual([...html.matchAll(/itemprop="position" content="(\d)"/g)].map(match => match[1]), ['1', '2', '3']);
+  const related = html.split('<h2>Читайте также</h2>')[1];
+  assert.match(related, /href="\/ru\/blog\/two\/"/);
+  assert.doesNotMatch(related, /href="\/ru\/blog\/one\/"|after-the-lead/);
+  const withdrawn = createPages(null, { preview: false, articles: [articles[0]] }).get('/ru/blog/one/');
+  assert.doesNotMatch(withdrawn, /\/ru\/blog\/two\/|Читайте также/);
+});
+
+test('sitemap lastmod uses actual publication revision and never invents dates', () => {
+  const origin = 'https://site.example.invalid';
+  const articles = [
+    { slug: 'dated', title: 'Дата', summary: 'Описание', body: 'Текст', publishedAt: '2026-09-28T10:00:00Z' },
+    { slug: 'undated', title: 'Без даты', summary: 'Описание', body: 'Текст' },
+    { slug: 'invalid', title: 'Ошибка', summary: 'Описание', body: 'Текст', publishedAt: '<script>bad</script>' },
+  ];
+  const pages = createPages(null, { preview: false, origin, articles });
+  const xml = createSitemap(pages, origin, articles);
+  assert.equal((xml.match(/<lastmod>/g) || []).length, 1);
+  assert.match(xml, /dated\/<\/loc><lastmod>2026-09-28T10:00:00.000Z<\/lastmod>/);
+  assert.doesNotMatch(pages.get('/ru/blog/undated/'), /dateModified|Редакция опубликована/);
+  assert.doesNotMatch(pages.get('/ru/blog/invalid/'), /<script|dateModified/);
+  const withoutPage = createSitemap(createPages(null, { preview: false }), origin, articles);
+  assert.doesNotMatch(withoutPage, /dated|lastmod/);
+  const preview = createPages(null, { articles });
+  assert.match(preview.get('/ru/blog/dated/'), /noindex,nofollow/);
+  assert.doesNotMatch(preview.get('/ru/blog/dated/'), /Редакция опубликована/);
+});
