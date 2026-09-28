@@ -52,7 +52,7 @@ export function createSiteInquiryDeletionPreviewHandler(
       if (site.error) return fail(503, "site_deletion_unavailable");
       if (!site.data) return fail(503, "site_deletion_not_configured");
       const lead = await client.from("leads")
-        .select("id,client_id,responsible_user_id,meta_campaign_launch_id,updated_at")
+        .select("id,source,status,stage_id,campaign,client_id,responsible_user_id,meta_campaign_launch_id,updated_at")
         .eq("workspace_id", context.workspaceId).eq("id", leadId).maybeSingle();
       if (lead.error) return fail(503, "site_deletion_unavailable");
       if (!lead.data) return fail(404, "site_inquiry_not_found");
@@ -70,6 +70,14 @@ export function createSiteInquiryDeletionPreviewHandler(
       if (lead.data.client_id) reviewReasons.push("linked_client");
       if (lead.data.responsible_user_id) reviewReasons.push("assigned_staff");
       if (lead.data.meta_campaign_launch_id) reviewReasons.push("linked_campaign");
+      if (lead.data.source !== "website") reviewReasons.push("non_site_source");
+      if (typeof lead.data.campaign === "string" && lead.data.campaign.trim()) reviewReasons.push("campaign_snapshot");
+      if (lead.data.stage_id) {
+        const stage = await client.from("lead_stages").select("semantic_group")
+          .eq("workspace_id", context.workspaceId).eq("id", lead.data.stage_id).maybeSingle();
+        if (stage.error) return fail(503, "site_deletion_unavailable");
+        if (stage.data?.semantic_group !== "new") reviewReasons.push("progressed_stage");
+      } else if (lead.data.status !== "new") reviewReasons.push("progressed_stage");
       // Return existence only: never fetch contacts, message bodies or the
       // contents of consent receipts. Missing dependency tables fail closed.
       for (const table of linkedTables) {
@@ -79,13 +87,25 @@ export function createSiteInquiryDeletionPreviewHandler(
         if (result.data.length) reviewReasons.push(table);
       }
       const audit = await client.from("audit_logs").select("id")
-        .eq("workspace_id", context.workspaceId).eq("entity_type", "lead").eq("entity_id", leadId).limit(1);
+        .eq("workspace_id", context.workspaceId).eq("entity_type", "lead").ilike("entity_id", leadId).limit(1);
       if (audit.error || !Array.isArray(audit.data)) return fail(503, "site_deletion_unavailable");
       if (audit.data.length) reviewReasons.push("audit_history");
       const otherReceipts = await client.from("crm_site_inquiries").select("id")
         .eq("lead_id", leadId).neq("site_id", site.data.id).limit(1);
       if (otherReceipts.error || !Array.isArray(otherReceipts.data)) return fail(503, "site_deletion_unavailable");
       if (otherReceipts.data.length) reviewReasons.push("other_site_receipts");
+      // Older deployments can still inspect scope before 062. A missing column
+      // only disables confirmation; other read failures must not imply readiness.
+      const permission = await client.from("crm_intake_sites").select("manual_deletion_enabled")
+        .eq("workspace_id", context.workspaceId).eq("id", site.data.id).eq("site_key", siteKey).maybeSingle();
+      const missingSchema = permission.error?.code === "42703" || permission.error?.code === "PGRST204";
+      if (permission.error && !missingSchema) return fail(503, "site_deletion_unavailable");
+      if (!missingSchema && typeof permission.data?.manual_deletion_enabled !== "boolean") {
+        return fail(503, "site_deletion_unavailable");
+      }
+      const deletionAvailability = missingSchema ? "schema_not_ready"
+        : permission.data?.manual_deletion_enabled !== true ? "disabled"
+        : reviewReasons.length ? "review_required" : "confirmation_required";
       return res.status(200).json({ success: true, data: {
         leadId: lead.data.id,
         // Preserve PostgreSQL microseconds; Date.toISOString() would truncate them.
@@ -95,7 +115,10 @@ export function createSiteInquiryDeletionPreviewHandler(
         reviewRequired: reviewReasons.length > 0,
         reviewReasons,
         confirmationRequired: true,
-        deletionEnabled: false,
+        // This is permission to present confirmation, not a promise of erasure.
+        // The RPC rechecks all dependencies, including future FKs, under lock.
+        deletionEnabled: deletionAvailability === "confirmation_required",
+        deletionAvailability,
       } });
     } catch { return fail(503, "site_deletion_unavailable"); }
   };

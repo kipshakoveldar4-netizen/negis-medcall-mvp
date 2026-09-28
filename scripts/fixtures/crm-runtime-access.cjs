@@ -16,8 +16,8 @@ module.exports = async function checkRuntimeAccess(handler, { brokenRenderer = f
     staff_users: users,
     workspaces: [{ id: workspace, name: 'Isolated runtime fixture' }],
     workspace_settings: [], clinic_doctors: [], appointments: [], clients: [],
-    crm_intake_sites: [{ id: id(40), workspace_id: workspace, site_key: 'runtime-fixture' }],
-    leads: [{ id: id(41), workspace_id: workspace, updated_at: '2026-09-28T01:02:03.123456Z' }],
+    crm_intake_sites: [{ id: id(40), workspace_id: workspace, site_key: 'runtime-fixture', manual_deletion_enabled: false }],
+    leads: [{ id: id(41), workspace_id: workspace, source: 'website', status: 'new', updated_at: '2026-09-28T01:02:03.123456Z' }],
     crm_site_inquiries: [{ id: id(42), site_id: id(40), lead_id: id(41) }],
     deals: [], tasks: [], wazzup_inbound_messages: [], whatsapp_cloud_inbound_messages: [],
     growth_operator_lead_assignments: [], growth_operator_bookings: [], audit_logs: [],
@@ -129,9 +129,16 @@ module.exports = async function checkRuntimeAccess(handler, { brokenRenderer = f
       if (role === 'doctor') assert.ok(!log.some(entry => entry.table === 'crm_site_inquiries'));
       else {
         assert.equal(scope.data.deletionEnabled, false);
+        assert.equal(scope.data.deletionAvailability, 'disabled');
         assert.deepEqual(scope.data.receiptIds, [id(42)]);
       }
     }
+    tables.crm_intake_sites[0].manual_deletion_enabled = true;
+    const eligibleScope = await call('site-inquiry-deletion-preview', 'owner', 200, { leadId: id(41) });
+    assert.equal(eligibleScope.data.deletionAvailability, 'confirmation_required');
+    assert.equal(eligibleScope.data.deletionEnabled, true);
+    assert.ok(!log.some(entry => entry.rpc));
+    tables.crm_intake_sites[0].manual_deletion_enabled = false;
     await call('site-inquiry-deletion-preview', 'owner', 403, { workspaceId: id(2), leadId: id(41) });
     assert.ok(!log.some(entry => entry.table === 'crm_site_inquiries'));
     await call('site-inquiry-deletion-preview', 'expired', 401, { leadId: id(41) });

@@ -24,6 +24,7 @@ let allowRpc = false;
 let rpcCalls: Record<string, unknown>[] = [];
 let rpcFailure = "";
 let rpcResponse: unknown = undefined;
+let permissionOverride: { data: unknown; error: { code: string; message: string } | null } | undefined;
 
 // Preview permits SELECT only; confirmation permits the single atomic RPC.
 // Everything runs against real local migrations, without credentials/network.
@@ -58,16 +59,27 @@ function client() {
       },
       eq(key: string, value: unknown) { return filter(key, "=", value); },
       neq(key: string, value: unknown) { return filter(key, "<>", value); },
+      ilike(key: string, value: unknown) { return filter(key, " ilike ", value); },
       limit(value: number) { limit = value; return query; },
       order(key: string) { assert.equal(key, "id"); order = " order by id"; return query; },
       maybeSingle() { single = true; return query; },
       async then(resolve: (value: unknown) => unknown) {
         if (table === failedTable) return resolve({ data: null, error: { message: "PRIVATE_DATABASE_ERROR", code: "PGRST205" } });
+        if (table === "crm_intake_sites" && columns === "manual_deletion_enabled" && permissionOverride) return resolve(permissionOverride);
         const where = predicates.length ? ` where ${predicates.join(" and ")}` : "";
         const projection = columns.split(",").map(column => column === "updated_at" ? "updated_at::text as updated_at" : column).join(",");
-        const result = await db.query(`select ${projection} from public.${table}${where}${order} limit ${Math.min(limit, rowCap)}`, params);
-        const total = count ? (await row(`select count(*)::int as n from public.${table}${where}`, params)).n : null;
-        return resolve({ data: single ? result.rows[0] ?? null : result.rows, count: total, error: null });
+        // Model PostgREST's separate transaction, including a missing 062 column.
+        await db.exec("savepoint preview_select");
+        try {
+          const result = await db.query(`select ${projection} from public.${table}${where}${order} limit ${Math.min(limit, rowCap)}`, params);
+          const total = count ? (await row(`select count(*)::int as n from public.${table}${where}`, params)).n : null;
+          await db.exec("release savepoint preview_select");
+          return resolve({ data: single ? result.rows[0] ?? null : result.rows, count: total, error: null });
+        } catch (error) {
+          await db.exec("rollback to savepoint preview_select; release savepoint preview_select");
+          const code = typeof error === "object" && error !== null && "code" in error ? error.code : "TEST";
+          return resolve({ data: null, error: { code, message: "PRIVATE_DATABASE_ERROR" } });
+        }
       },
     };
     function filter(key: string, operator: string, value: unknown) {
@@ -109,6 +121,7 @@ before(async () => {
 beforeEach(async () => {
   await db.exec("begin"); queried = []; failedTable = ""; rowCap = 200;
   allowRpc = false; rpcCalls = []; rpcFailure = ""; rpcResponse = undefined;
+  permissionOverride = undefined;
   supabase.setSupabaseServerClientFactoryForTests(client);
   for (const key of [100, 101]) await db.query("select public.accept_crm_site_inquiry('medina-test',$1,$2::jsonb)", [id(key), JSON.stringify(inquiry)]);
   leadId = String((await row("select lead_id from public.crm_site_inquiries where site_id=$1 limit 1", [id(10)])).lead_id);
@@ -122,7 +135,7 @@ test("owner OR admin gets exact lead/receipt scope without contacts or an enable
     const result = await call({ role }); assert.equal(result.status, 200);
     const leadUpdatedAt = (await row("select updated_at::text as stamp from public.leads where id=$1", [leadId])).stamp;
     assert.deepEqual(result.data, { leadId, leadUpdatedAt, receiptIds, receiptCount: 2, reviewRequired: false,
-      reviewReasons: [], confirmationRequired: true, deletionEnabled: false });
+      reviewReasons: [], confirmationRequired: true, deletionEnabled: false, deletionAvailability: "disabled" });
   }
   assert.equal((await row("select count(*)::int as n from public.leads")).n, 1);
   assert.equal((await row("select count(*)::int as n from public.crm_site_inquiries")).n, 2);
@@ -165,12 +178,14 @@ test("another workspace's same-phone lead, non-site lead and orphan receipt do n
 });
 
 test("converted lead with an appointment requires separate review and remains intact", async () => {
+  await enable();
   await db.query("insert into public.clients(id,workspace_id,full_name) values($1,$2,'Client')", [id(130), id(1)]);
   await db.query("update public.leads set client_id=$1 where id=$2", [id(130), leadId]);
   await db.query("insert into public.appointments(workspace_id,client_id,client_name,starts_at) values($1,$2,'Client',now())", [id(1), id(130)]);
   const result = await call(); assert.equal(result.status, 200);
   assert.equal(result.data?.reviewRequired, true); assert.deepEqual(result.data?.reviewReasons, ["linked_client"]);
   assert.equal(result.data?.deletionEnabled, false);
+  assert.equal(result.data?.deletionAvailability, "review_required");
   assert.equal((await row("select count(*)::int as n from public.appointments")).n, 1);
 });
 
@@ -350,9 +365,104 @@ test("errors and unexpected RPC data never disclose raw diagnostics or report fa
   assert.equal((await erase(body)).status, 503);
 });
 
-test("preview still works without 062; it needs no deletion-enabled flag or scheduler state", async () => {
+test("preview works without 062 but cannot offer confirmation", async () => {
   await db.exec("alter table public.crm_intake_sites drop column manual_deletion_enabled");
-  assert.equal((await call()).status, 200);
+  const result = await call();
+  assert.equal(result.status, 200);
+  assert.equal(result.data?.deletionEnabled, false);
+  assert.equal(result.data?.deletionAvailability, "schema_not_ready");
+  assert.equal(result.data?.receiptCount, 2);
+  assert.deepEqual(rpcCalls, []);
+});
+
+test("an explicit site permission allows confirmation for owner/admin without mutating scope or enabling intake", async () => {
+  await enable();
+  await db.query("update public.crm_intake_sites set enabled=false where id=$1", [id(10)]);
+  for (const role of ["owner", "admin"]) {
+    const result = await call({ role, config: { ...env, MEDINA_SITE_INTAKE_ENABLED: "false" } });
+    assert.equal(result.status, 200);
+    assert.equal(result.data?.deletionEnabled, true);
+    assert.equal(result.data?.deletionAvailability, "confirmation_required");
+    assert.equal(result.data?.confirmationRequired, true);
+    assert.equal(result.data?.reviewRequired, false);
+  }
+  assert.deepEqual(rpcCalls, []);
+  assert.equal((await row("select count(*)::int as n from public.leads")).n, 1);
+  assert.equal((await row("select count(*)::int as n from public.crm_site_inquiries")).n, 2);
+  assert.equal((await row("select enabled from public.crm_intake_sites where id=$1", [id(10)])).enabled, false);
+  await db.query("update public.crm_intake_sites set manual_deletion_enabled=false where id=$1", [id(10)]);
+  assert.equal((await call()).data?.deletionAvailability, "disabled");
+});
+
+test("schema-cache lag disables confirmation; failed or malformed permission reads never enable it", async () => {
+  for (const code of ["42703", "PGRST204"]) {
+    permissionOverride = { data: null, error: { code, message: "PRIVATE_DATABASE_ERROR" } };
+    const result = await call();
+    assert.equal(result.status, 200);
+    assert.equal(result.data?.deletionAvailability, "schema_not_ready");
+    assert.equal(result.data?.deletionEnabled, false);
+  }
+  for (const code of ["42501", "PGRST205", "57014", "TEST"]) {
+    permissionOverride = { data: { manual_deletion_enabled: true }, error: { code, message: "PRIVATE_DATABASE_ERROR" } };
+    assert.equal((await call()).status, 503);
+  }
+  for (const data of [null, {}, { manual_deletion_enabled: "true" }, { manual_deletion_enabled: 1 }]) {
+    permissionOverride = { data, error: null };
+    assert.equal((await call()).status, 503);
+  }
+  assert.deepEqual(rpcCalls, []);
+});
+
+test("known business blockers disable confirmation even when the site permission is enabled", async () => {
+  await enable();
+  for (const [column, value, reason] of [
+    ["source", "manual", "non_site_source"], ["campaign", "Legacy campaign", "campaign_snapshot"],
+    ["status", "in_progress", "progressed_stage"],
+  ]) {
+    await db.exec("savepoint lead_change");
+    await db.query(`update public.leads set ${column}=$1,stage_id=null where id=$2`, [value, leadId]);
+    const result = await call();
+    assert.equal(result.status, 200);
+    assert.deepEqual(result.data?.reviewReasons, [reason]);
+    assert.equal(result.data?.deletionAvailability, "review_required");
+    assert.equal(result.data?.deletionEnabled, false);
+    await db.exec("rollback to savepoint lead_change; release savepoint lead_change");
+  }
+});
+
+test("structured stage uses workspace-scoped semantics, not its display name or legacy status", async () => {
+  await enable();
+  const fresh = await row("select id from public.lead_stages where workspace_id=$1 and semantic_group='new' limit 1", [id(1)]);
+  const progressed = await row("select id from public.lead_stages where workspace_id=$1 and semantic_group='in_progress' limit 1", [id(1)]);
+  const foreign = await row("select id from public.lead_stages where workspace_id=$1 and semantic_group='new' limit 1", [id(2)]);
+  await db.query("update public.leads set stage_id=$1,status='legacy-name' where id=$2", [fresh.id, leadId]);
+  assert.equal((await call()).data?.deletionEnabled, true);
+  for (const stage of [progressed, foreign]) {
+    await db.query("update public.leads set stage_id=$1,status='new' where id=$2", [stage.id, leadId]);
+    const result = await call();
+    assert.deepEqual(result.data?.reviewReasons, ["progressed_stage"]);
+    assert.equal(result.data?.deletionEnabled, false);
+  }
+  failedTable = "lead_stages";
+  assert.equal((await call()).status, 503);
+});
+
+test("uppercase stored audit references still block confirmation without exposing history", async () => {
+  await enable();
+  await db.query("insert into public.audit_logs(workspace_id,action,entity_type,entity_id) values($1,'updated','lead',$2)", [id(1), leadId.toUpperCase()]);
+  const result = await call();
+  assert.deepEqual(result.data?.reviewReasons, ["audit_history"]);
+  assert.equal(result.data?.deletionEnabled, false);
+});
+
+test("permission revoked after preview is rechecked by confirmation RPC", async () => {
+  await enable();
+  assert.equal((await call()).data?.deletionEnabled, true);
+  const body = await confirmationBody();
+  await db.query("update public.crm_intake_sites set manual_deletion_enabled=false where id=$1", [id(10)]);
+  assert.equal((await erase(body)).payload.code, "site_deletion_disabled");
+  assert.equal((await row("select count(*)::int as n from public.leads")).n, 1);
+  assert.equal((await row("select count(*)::int as n from public.crm_site_inquiries")).n, 2);
 });
 
 test("late public-form retry after confirmed erasure returns safe 409 without recreating data", async () => {
