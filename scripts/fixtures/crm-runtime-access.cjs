@@ -16,6 +16,11 @@ module.exports = async function checkRuntimeAccess(handler, { brokenRenderer = f
     staff_users: users,
     workspaces: [{ id: workspace, name: 'Isolated runtime fixture' }],
     workspace_settings: [], clinic_doctors: [], appointments: [], clients: [],
+    crm_intake_sites: [{ id: id(40), workspace_id: workspace, site_key: 'runtime-fixture' }],
+    leads: [{ id: id(41), workspace_id: workspace }],
+    crm_site_inquiries: [{ id: id(42), site_id: id(40), lead_id: id(41) }],
+    deals: [], tasks: [], wazzup_inbound_messages: [], whatsapp_cloud_inbound_messages: [],
+    growth_operator_lead_assignments: [], growth_operator_bookings: [], audit_logs: [],
     site_blog_posts: [{ id: id(30), workspace_id: workspace, title: 'Private fixture',
       slug: 'private-fixture', excerpt: 'Private', body: 'Never public', version: 1,
       updated_at: '2026-01-01T00:00:00Z' }],
@@ -25,12 +30,13 @@ module.exports = async function checkRuntimeAccess(handler, { brokenRenderer = f
       assert.ok(Object.hasOwn(tables, table), `Unexpected table: ${table}`);
       const entry = { table, filters: [] };
       log.push(entry);
-      let single = false;
+      let single = false, exactCount = false;
       const predicates = [];
       const query = {
-        select() { return query; }, order() { return query; }, limit() { return query; },
+        select(_columns, options) { exactCount = options?.count === 'exact'; return query; }, order() { return query; }, limit() { return query; },
         range() { return query; },
         eq(key, value) { entry.filters.push([key, value]); predicates.push(row => row[key] === value); return query; },
+        neq(key, value) { predicates.push(row => row[key] !== value); return query; },
         in(key, values) { predicates.push(row => values.includes(row[key])); return query; },
         is(key, value) { predicates.push(row => (row[key] ?? null) === value); return query; },
         not(key, operator, value) {
@@ -43,7 +49,7 @@ module.exports = async function checkRuntimeAccess(handler, { brokenRenderer = f
           const rows = tables[table].filter(row => predicates.every(test => test(row)));
           const result = membershipFailure && table === 'staff_users'
             ? { data: null, error: { code: 'TEST', message: 'private database diagnostic' } }
-            : { data: single ? rows[0] ?? null : rows, error: null };
+            : { data: single ? rows[0] ?? null : rows, count: exactCount ? rows.length : null, error: null };
           return Promise.resolve(result).then(resolve, reject);
         },
       };
@@ -52,6 +58,8 @@ module.exports = async function checkRuntimeAccess(handler, { brokenRenderer = f
   };
   process.env.SUPABASE_URL = 'https://runtime-fixture.invalid';
   process.env.SUPABASE_SERVICE_ROLE_KEY = 'fixture-only-not-a-credential';
+  process.env.MEDINA_PUBLIC_SITE_WORKSPACE_ID = workspace;
+  process.env.MEDINA_SITE_INTAKE_KEY = 'runtime-fixture';
   global.fetch = async (url, options) => {
     assert.equal(url, 'https://runtime-fixture.invalid/auth/v1/user');
     assert.equal(options.method, 'GET');
@@ -104,7 +112,22 @@ module.exports = async function checkRuntimeAccess(handler, { brokenRenderer = f
       }
       await call('appointments', role, 403, { workspaceId: id(2) });
       assert.ok(!log.some(entry => entry.table === 'appointments'));
+      const scope = await call('site-inquiry-deletion-preview', role, role === 'doctor' ? 403 : 200, { leadId: id(41) });
+      if (role === 'doctor') assert.ok(!log.some(entry => entry.table === 'crm_site_inquiries'));
+      else {
+        assert.equal(scope.data.deletionEnabled, false);
+        assert.deepEqual(scope.data.receiptIds, [id(42)]);
+      }
     }
+    await call('site-inquiry-deletion-preview', 'owner', 403, { workspaceId: id(2), leadId: id(41) });
+    assert.ok(!log.some(entry => entry.table === 'crm_site_inquiries'));
+    await call('site-inquiry-deletion-preview', 'expired', 401, { leadId: id(41) });
+    assert.equal(log.length, 0);
+    await call('site-inquiry-deletion-preview', undefined, 401, { role: 'owner', leadId: id(41) });
+    for (const method of ['POST', 'PATCH', 'DELETE']) {
+      await call('site-inquiry-deletion-preview', 'owner', 405, { leadId: id(41) }, method);
+    }
+    await call('site-inquiry-deletion-preview/extra', 'owner', 404, { leadId: id(41), path: ['site-inquiry-deletion-preview', 'extra'] });
     await call('site-blog', 'doctor', 403, {}, 'POST');
     await call('site-blog', 'owner', 403, { workspaceId: id(2) });
     await call('auth-context', 'expired', 401);
@@ -152,6 +175,7 @@ module.exports = async function checkRuntimeAccess(handler, { brokenRenderer = f
     delete process.env.SUPABASE_SERVICE_ROLE_KEY;
     delete process.env.MEDINA_PUBLIC_SITE_ENABLED;
     delete process.env.MEDINA_PUBLIC_SITE_WORKSPACE_ID;
+    delete process.env.MEDINA_SITE_INTAKE_KEY;
     delete process.env.MEDINA_SITE_ORIGIN;
     global.fetch = async () => { throw new Error('Network forbidden'); };
   }
