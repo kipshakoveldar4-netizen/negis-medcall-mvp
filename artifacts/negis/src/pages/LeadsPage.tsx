@@ -26,10 +26,11 @@ import { PageHeader } from "@/components/ui/page-header";
 import { MetricCard } from "@/components/ui/metric-card";
 import { ChangeLogPanel } from "@/components/crm/change-log-panel";
 import { TaskPanel } from "@/components/crm/task-panel";
+import { SiteInquiryDeletion } from "@/components/crm/site-inquiry-deletion";
 import { useAuth } from "@/contexts/AuthContext";
 import { EmptyState } from "@/components/ui/empty-state";
 import { useDemoCollection, readDemoStorage, writeDemoStorage, isRealWorkspace, readWorkspaceId, workspaceScopedKey } from "@/lib/demoStorage";
-import { apiUrl, crmFetch } from "@/lib/api";
+import { apiUrl, crmFetch, clearCrmCache } from "@/lib/api";
 import {
   FALLBACK_LEAD_SOURCES,
   FALLBACK_LEAD_STAGES,
@@ -586,8 +587,8 @@ function leadPatchToApi(patch: Partial<Lead>): Record<string, unknown> {
 }
 
 export default function LeadsPage() {
-  const { rolePermissions } = useAuth();
-  const { items, loaded, loadError, addItem, updateItem } = useDemoCollection<Lead>("negis_demo_leads", leadsSeed, {
+  const { rolePermissions, userRole, user, session, clinicId, isDemoMode, isImpersonation } = useAuth();
+  const { items, loaded, loadError, setItems, addItem, updateItem } = useDemoCollection<Lead>("negis_demo_leads", leadsSeed, {
     endpoint: "/api/crm/leads",
     listKey: "leads",
     itemKey: "item",
@@ -1453,6 +1454,23 @@ export default function LeadsPage() {
                   <p>Данные ограничены текущей клиникой (workspace).</p>
                 </div>
               </details>
+            ) : null}
+
+            {!isDemoMode && !isImpersonation && session && user && clinicId === readWorkspaceId() && isRealWorkspace()
+              && (userRole === "owner" || userRole === "admin")
+              && (detailLead.source === "website" || detailLead.sourceKey === "website") ? (
+              <SiteInquiryDeletion
+                key={`${clinicId}:${user.id}:${detailLead.id}`}
+                workspaceId={clinicId}
+                leadId={detailLead.id}
+                request={crmFetch}
+                onDeleted={() => {
+                  clearCrmCache();
+                  setItems((current) => current.filter((lead) => lead.id !== detailLead.id));
+                  setDetailId(null);
+                  toast.success("Заявка и её копии согласия удалены");
+                }}
+              />
             ) : null}
 
             <div className="mt-5 grid grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:justify-end">
