@@ -1,4 +1,5 @@
 import { Link } from "wouter";
+import "./legal.css";
 
 export default function DataDeletion() {
   return (
@@ -69,7 +70,7 @@ function LegalPage({ title, heading, updated, children }: {
   return (
     <>
       <title>{title}</title>
-      <div style={{ minHeight: '100vh', background: '#F4F7FB', padding: '40px 16px 60px', fontFamily: "'Inter', sans-serif" }}>
+      <div className="public-legal-page" style={{ minHeight: '100vh', background: '#F4F7FB', padding: '40px 16px 60px', fontFamily: "'Inter', sans-serif" }}>
         <div style={{ maxWidth: 900, margin: '0 auto' }}>
 
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 32 }}>
@@ -81,11 +82,11 @@ function LegalPage({ title, heading, updated, children }: {
             </Link>
           </div>
 
-          <div style={{
-            background: '#FFFFFF', borderRadius: 20, padding: '48px 52px',
+          <div className="public-legal-panel" style={{
+            background: '#FFFFFF', borderRadius: 20,
             boxShadow: '6px 6px 16px #C8CDD4, -6px -6px 16px #FFFFFF',
           }}>
-            <h1 style={{ fontSize: 28, fontWeight: 700, color: '#0B1220', margin: '0 0 8px' }}>{heading}</h1>
+            <h1 className="public-legal-title" style={{ fontWeight: 700, color: '#0B1220', margin: '0 0 8px' }}>{heading}</h1>
             <p style={{ fontSize: 13, color: '#94A3B8', margin: '0 0 44px' }}>Дата обновления: {updated}</p>
 
             {children}

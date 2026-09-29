@@ -92,6 +92,30 @@ async function checkResponsiveCss() {
   console.log(`responsive CSS markers: ok (${viewportWidths.join(", ")}px audit matrix)`);
 }
 
+async function checkPublicLegalMobileSource() {
+  const pagesPath = join(repoRoot, "artifacts", "negis", "src", "pages");
+  const css = await readFile(join(pagesPath, "legal.css"), "utf8");
+  for (const marker of [
+    ".public-legal-page", "overflow-wrap: anywhere", ".public-legal-panel",
+    ".public-legal-title", "@media (max-width: 600px)", "padding: 28px 20px", "font-size: 24px",
+  ]) {
+    if (!css.includes(marker)) throw new Error(`Legal mobile CSS marker missing: ${marker}`);
+  }
+  for (const page of ["Privacy.tsx", "Terms.tsx", "DataDeletion.tsx"]) {
+    const source = await readFile(join(pagesPath, page), "utf8");
+    for (const marker of [
+      'import "./legal.css"', 'className="public-legal-page"',
+      'className="public-legal-panel"', 'className="public-legal-title"',
+    ]) {
+      if (!source.includes(marker)) throw new Error(`${page}: legal mobile marker missing: ${marker}`);
+    }
+    if (source.includes("padding: '48px 52px'") || source.includes("fontSize: 28")) {
+      throw new Error(`${page}: inline desktop styles override legal mobile layout`);
+    }
+  }
+  console.log("public legal pages: mobile-safe source markers ok (browser layout checked separately)");
+}
+
 async function checkLeadsPipelineMobileSource() {
   const leadsPath = join(repoRoot, "artifacts", "negis", "src", "pages", "LeadsPage.tsx");
   const source = await readFile(leadsPath, "utf8");
@@ -160,6 +184,7 @@ async function main() {
   console.log(`Mobile layout smoke at ${baseUrl}`);
   await checkManifest();
   await checkResponsiveCss();
+  await checkPublicLegalMobileSource();
   await checkLeadsPipelineMobileSource();
   await checkSalesMobileSource();
   await checkAdvertisingHubMobileSource();
