@@ -2,6 +2,7 @@ import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { getSupabaseServerClient } from "../supabase/server";
 import { createPages, createSitemap, type PublicArticle } from "../../artifacts/medina-site/render.cjs";
 import { readSiteIntakeConfig } from "./site-intake-handler";
+import { parseArticleBody } from "../site/article";
 
 export function publicSiteConfig(env: Record<string, string | undefined> = process.env) {
   if (env.MEDINA_PUBLIC_SITE_ENABLED !== "true") return null;
@@ -13,14 +14,15 @@ export function publicSiteConfig(env: Record<string, string | undefined> = proce
   return { workspaceId, origin, indexable: env.MEDINA_SITE_INDEXABLE === "true" };
 }
 
-export function publicArticle(value: unknown): PublicArticle | null {
+export function publicArticle(value: unknown, publishedAt?: unknown): PublicArticle | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const row = value as Record<string, unknown>;
   if (row.locale !== "ru" || typeof row.slug !== "string" || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(row.slug)
     || row.slug.length > 100 || typeof row.title !== "string" || !row.title.trim() || row.title.length > 200
     || typeof row.excerpt !== "string" || row.excerpt.length > 500
     || typeof row.body !== "string" || row.body.length > 30000) return null;
-  return { slug: row.slug, title: row.title, summary: row.excerpt, body: row.body };
+  return { slug: row.slug, title: row.title, summary: row.excerpt, body: row.body, nodes: parseArticleBody(row.body),
+    ...(typeof publishedAt === "string" ? { publishedAt } : {}) };
 }
 
 // Isolated public read surface. No caller-selected tenant, draft fields or IDs.
@@ -54,10 +56,10 @@ export async function handleSitePage(req: VercelRequest, res: VercelResponse) {
     if (!client) return end(503, "Сайт временно недоступен. Попробуйте позже.");
     // Bounded catalogue: exceeding the MVP cap fails instead of hiding articles.
     const { data, error } = await client.from("site_blog_posts")
-      .select("published_snapshot").eq("workspace_id", config.workspaceId)
+      .select("published_snapshot,published_at").eq("workspace_id", config.workspaceId)
       .not("published_snapshot", "is", null).order("published_at", { ascending: false }).order("id").limit(201);
     if (error || !Array.isArray(data) || data.length > 200) return end(503, "Сайт временно недоступен. Попробуйте позже.");
-    const articles = data.map(row => publicArticle(row.published_snapshot));
+    const articles = data.map(row => publicArticle(row.published_snapshot, row.published_at));
     if (articles.some(row => !row)) return end(503, "Сайт временно недоступен. Попробуйте позже.");
     // Form activation also requires the DB mapping to match this public site.
     let intake = null;
@@ -78,7 +80,7 @@ export async function handleSitePage(req: VercelRequest, res: VercelResponse) {
       origin: config.origin, indexable: config.indexable, assetBase: "/medina-site" });
     if (route === "/ru/sitemap.xml") {
       res.setHeader("Content-Type", "application/xml; charset=utf-8");
-      return end(200, createSitemap(pages, config.origin));
+      return end(200, createSitemap(pages, config.origin, articles as PublicArticle[]));
     }
     const html = pages.get(route);
     if (html && config.indexable) res.setHeader("X-Robots-Tag", "index, follow");

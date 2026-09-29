@@ -4,6 +4,26 @@ export type BlogDraft = BlogDraftFields & { id: string; status: "draft"; version
 export type BlogSummary = Omit<BlogDraft, "body">;
 export const emptyBlogDraft = (): BlogDraftFields => ({ title: "", slug: "", excerpt: "", body: "", locale: "ru" });
 
+export type BlogPublicationState = "draft" | "approved" | "changed";
+export const blogPublicationLabels: Record<BlogPublicationState, string> = {
+  draft: "Черновик",
+  approved: "Версия разрешена для сайта",
+  changed: "Есть неопубликованные изменения",
+};
+
+export function getBlogPublicationState(
+  post: Pick<BlogSummary, "publishedAt" | "publishedVersion" | "version"> | null,
+  unsavedChanges = false,
+): BlogPublicationState {
+  if (!post?.publishedAt) return "draft";
+  return !unsavedChanges && post.publishedVersion === post.version ? "approved" : "changed";
+}
+
+export function blogArticlePath(slug: string | null | undefined): string | null {
+  return slug && slug.length <= 100 && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug)
+    ? `/ru/blog/${slug}/` : null;
+}
+
 export function validateBlogWrite(value: unknown, updating: boolean):
   { fields: BlogDraftFields; id: string; version?: number } | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;

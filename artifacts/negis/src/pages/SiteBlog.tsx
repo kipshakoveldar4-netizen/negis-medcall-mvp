@@ -2,8 +2,10 @@ import { useEffect, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight, FileText, Plus, RefreshCw, Save, Globe, EyeOff } from "lucide-react";
 import { PageLayout } from "@/components/layout/PageLayout";
 import { useAuth } from "@/contexts/AuthContext";
+import { BlogArticleBody } from "@/components/site/BlogArticleBody";
+import { BlogBodyEditor } from "@/components/site/BlogBodyEditor";
 import { CrmApiError, crmErrorMessage, crmFetch } from "@/lib/api";
-import { emptyBlogDraft, type BlogDraft, type BlogDraftFields, type BlogSummary } from "../../../../lib/site/blog";
+import { blogArticlePath, blogPublicationLabels, emptyBlogDraft, getBlogPublicationState, type BlogDraft, type BlogDraftFields, type BlogSummary } from "../../../../lib/site/blog";
 
 const errorText: Record<string, string> = {
   blog_not_configured: "Хранилище статей ещё не подключено. Нужна миграция 059.",
@@ -41,6 +43,9 @@ function BlogEditor({ workspaceId }: { workspaceId: string }) {
   const [reload, setReload] = useState(0);
   const createId = useRef("");
   const dirty = fields !== null && JSON.stringify(fields) !== baseline;
+  const publicationState = getBlogPublicationState(selected, dirty);
+  const draftPath = blogArticlePath(fields?.slug);
+  const approvedPath = selected?.publishedAt ? blogArticlePath(selected.publishedSlug) : null;
   const endpoint = `/api/crm/site-blog?workspaceId=${encodeURIComponent(workspaceId)}`;
 
   useEffect(() => {
@@ -119,8 +124,8 @@ function BlogEditor({ workspaceId }: { workspaceId: string }) {
     {notice && <p role="status" className="text-sm text-[var(--negis-primary)]">{notice}</p>}
     <div className="grid min-w-0 gap-6 lg:grid-cols-[260px_minmax(0,1fr)]">
       <section aria-label="Статьи" className="min-w-0 border-b border-[var(--negis-border)] pb-4 lg:border-b-0 lg:border-r lg:pr-5">
-        <div className="mb-3 flex items-center justify-between"><h2 className="font-semibold">Черновики</h2><button className={buttonClass} title="Обновить список" aria-label="Обновить список" disabled={loading || busy} onClick={() => setReload(x => x + 1)}><RefreshCw size={16} /></button></div>
-        {loading ? <p className="text-sm">Загружаем статьи…</p> : rows.length === 0 ? <p className="text-sm text-[var(--negis-muted)]">{listAvailable ? "Статей пока нет." : "Список недоступен."}</p> : <ul className="divide-y divide-[var(--negis-border)]">{rows.map(row => <li key={row.id}><button disabled={busy} onClick={() => void openDraft(row.id)} aria-current={selected?.id === row.id ? "true" : undefined} className="w-full min-w-0 py-3 text-left text-sm hover:underline"><span className="block break-words font-medium">{row.title}</span><span className="text-xs text-[var(--negis-muted)]">Черновик · {new Date(row.updatedAt).toLocaleDateString("ru-RU")}</span></button></li>)}</ul>}
+        <div className="mb-3 flex items-center justify-between"><h2 className="font-semibold">Все статьи</h2><button className={buttonClass} title="Обновить список" aria-label="Обновить список" disabled={loading || busy} onClick={() => setReload(x => x + 1)}><RefreshCw size={16} /></button></div>
+        {loading ? <p className="text-sm">Загружаем статьи…</p> : rows.length === 0 ? <p className="text-sm text-[var(--negis-muted)]">{listAvailable ? "Статей пока нет." : "Список недоступен."}</p> : <ul className="divide-y divide-[var(--negis-border)]">{rows.map(row => <li key={row.id}><button disabled={busy} onClick={() => void openDraft(row.id)} aria-current={selected?.id === row.id ? "true" : undefined} className="w-full min-w-0 py-3 text-left text-sm hover:underline"><span className="block break-words font-medium">{row.title}</span><span className="block break-words text-xs text-[var(--negis-muted)]">{blogPublicationLabels[getBlogPublicationState(row)]} · {new Date(row.updatedAt).toLocaleDateString("ru-RU")}</span></button></li>)}</ul>}
         <div className="mt-4 flex gap-2"><button className={buttonClass} aria-label="Предыдущие статьи" title="Предыдущие статьи" disabled={offset === 0 || loading || busy} onClick={() => setOffset(x => Math.max(0, x - 20))}><ChevronLeft size={16} /></button><button className={buttonClass} aria-label="Следующие статьи" title="Следующие статьи" disabled={!hasMore || loading || busy} onClick={() => setOffset(x => x + 20)}><ChevronRight size={16} /></button></div>
       </section>
       <section className="min-w-0" aria-label="Редактор статьи">
@@ -129,11 +134,15 @@ function BlogEditor({ workspaceId }: { workspaceId: string }) {
             <div role="tablist" aria-label="Режим статьи" className="flex gap-1"><button role="tab" aria-selected={!preview} className={buttonClass} onClick={() => setPreview(false)}>Редактор</button><button role="tab" aria-selected={preview} className={buttonClass} onClick={() => setPreview(true)}>Предпросмотр</button></div>
             <span className="text-xs text-[var(--negis-muted)]">{dirty ? "Есть несохранённые изменения" : selected ? "Сохранено" : "Новый черновик"}</span>
           </div>
-          {preview ? <article className="min-w-0 break-words border-y border-[var(--negis-border)] py-6"><p className="mb-3 text-xs text-[var(--negis-muted)]">Закрытый предпросмотр · русский</p><h2 className="text-2xl font-semibold">{fields.title || "Без заголовка"}</h2><p className="my-4 whitespace-pre-wrap text-[var(--negis-muted)]">{fields.excerpt}</p>{fields.body.split(/\n\s*\n/).map((paragraph, index) => <p key={index} className="mb-4 whitespace-pre-wrap leading-relaxed">{paragraph}</p>)}</article>
-            : <fieldset disabled={busy} className="min-w-0 space-y-4"><label className="block text-sm">Заголовок<input className={inputClass} maxLength={200} value={fields.title} onChange={e => setFields({ ...fields, title: e.target.value })} /></label><label className="block text-sm">Адрес статьи<input className={inputClass} placeholder="kak-podgotovit-reklamu" maxLength={100} value={fields.slug} onChange={e => setFields({ ...fields, slug: e.target.value })} /></label><label className="block text-sm">Краткое описание<textarea className={inputClass} rows={3} maxLength={500} value={fields.excerpt} onChange={e => setFields({ ...fields, excerpt: e.target.value })} /></label><label className="block text-sm">Текст статьи<textarea className={`${inputClass} min-h-72`} rows={14} maxLength={30000} value={fields.body} onChange={e => setFields({ ...fields, body: e.target.value })} /></label></fieldset>}
-          {selected && <p className="mt-4 text-sm" role="status">{selected.publishedAt
-            ? selected.publishedVersion === selected.version ? "Сохранённая версия разрешена для сайта." : "Есть изменения, не включённые в публичную версию."
-            : "Статья не опубликована."}</p>}
+          {preview ? <article className="min-w-0 break-words border-y border-[var(--negis-border)] py-6"><p className="mb-3 text-xs text-[var(--negis-muted)]">Закрытый предпросмотр · русский</p><h2 className="text-2xl font-semibold">{fields.title || "Без заголовка"}</h2><p className="my-4 whitespace-pre-wrap text-[var(--negis-muted)]">{fields.excerpt}</p><BlogArticleBody body={fields.body} /></article>
+            : <fieldset disabled={busy} className="min-w-0 space-y-4"><label className="block text-sm">Заголовок<input className={inputClass} maxLength={200} value={fields.title} onChange={e => setFields({ ...fields, title: e.target.value })} /></label><label className="block text-sm">Адрес статьи<input className={inputClass} placeholder="kak-podgotovit-reklamu" maxLength={100} value={fields.slug} onChange={e => setFields({ ...fields, slug: e.target.value })} /></label><label className="block text-sm">Краткое описание<textarea className={inputClass} rows={3} maxLength={500} value={fields.excerpt} onChange={e => setFields({ ...fields, excerpt: e.target.value })} /></label><BlogBodyEditor value={fields.body} onChange={body => setFields({ ...fields, body })} inputClass={inputClass} buttonClass={buttonClass} /></fieldset>}
+          <div className="mt-4 min-w-0 space-y-2 text-sm">
+            <p role="status">{blogPublicationLabels[publicationState]}</p>
+            <dl className="space-y-2 text-[var(--negis-muted)]">
+              <div><dt>Адрес черновика</dt><dd className="[overflow-wrap:anywhere]">{draftPath || "Адрес не задан или некорректен"}</dd></div>
+              {selected?.publishedAt && <div><dt>Адрес разрешённой версии</dt><dd className="[overflow-wrap:anywhere]">{approvedPath || "Не удалось определить адрес"}</dd></div>}
+            </dl>
+          </div>
           <div className="mt-5 flex flex-wrap items-center gap-3">
             <button className={`${buttonClass} bg-[var(--negis-primary)] text-white`} disabled={busy || !fields.title.trim() || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(fields.slug)} onClick={() => void save()}><Save size={16} />{busy ? "Сохраняем…" : "Сохранить черновик"}</button>
             <button className={buttonClass} disabled={busy || dirty || !selected || !fields.body.trim() || !fields.excerpt.trim()} onClick={() => void changePublication(true)}><Globe size={16} />{selected?.publishedAt ? "Обновить публикацию" : "Разрешить публикацию"}</button>
