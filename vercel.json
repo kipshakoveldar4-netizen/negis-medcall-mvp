@@ -1,5 +1,10 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
+  "git": {
+    "deploymentEnabled": {
+      "codex/site-blog-release-20260929": false
+    }
+  },
   "installCommand": "pnpm install --frozen-lockfile",
   "buildCommand": "node scripts/test-crm-cold-start.cjs && pnpm --filter @workspace/negis run build && node artifacts/medina-site/copy-assets.mjs",
   "outputDirectory": "artifacts/negis/dist/public",
