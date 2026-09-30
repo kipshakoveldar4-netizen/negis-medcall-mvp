@@ -11,6 +11,7 @@ export const previewIsolation = Object.freeze({
     ANTHROPIC_API_KEY: "",
     META_ACCESS_TOKEN: "",
     META_APP_SECRET: "",
+    META_APP_ID: "",
     META_AD_ACCOUNT_ID: "",
     META_PAGE_ID: "",
     META_INSTAGRAM_ACTOR_ID: "",
@@ -60,3 +61,13 @@ export const previewIsolation = Object.freeze({
     "HEYGEN_API_KEY", "TAPNOW_API_KEY",
   ]),
 });
+
+// Vercel's form rejects empty values. Credential readers trim whitespace.
+// VITE_API_BASE_URL instead strips a trailing slash; '/' preserves same-origin.
+// DATABASE_URL has no trim/disable contract: do not synthesize a connection.
+// If it is ever inherited, stop rather than applying this UI profile as-is.
+export const previewUiOverrides = Object.freeze(Object.fromEntries(
+  Object.entries(previewIsolation.overrides)
+    .filter(([key]) => key !== "DATABASE_URL")
+    .map(([key, value]) => [key, key === "VITE_API_BASE_URL" ? "/" : value === "" ? " " : value]),
+));

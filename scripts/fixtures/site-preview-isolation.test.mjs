@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import test, { after, afterEach } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { previewIsolation as plan } from "./site-preview-isolation.mjs";
+import { previewIsolation as plan, previewUiOverrides as ui } from "./site-preview-isolation.mjs";
 
 const root = process.env.MEDINA_PREVIEW_SOURCE_ROOT
   ? path.resolve(process.env.MEDINA_PREVIEW_SOURCE_ROOT)
@@ -13,7 +13,7 @@ const originalEnv = process.env;
 const originalFetch = globalThis.fetch;
 const calls = [];
 // Never inherit credentials, DB URLs or an external agent URL into the tests.
-process.env = { NODE_ENV: "test", ...plan.overrides };
+process.env = { NODE_ENV: "test", ...ui };
 globalThis.fetch = async (url, init) => {
   calls.push({ url: String(url), headers: init?.headers });
   throw new Error("Network disabled in preview isolation fixture");
@@ -55,7 +55,7 @@ test("plan is branch-only, non-secret and leaves the approved Supabase overrides
 });
 
 test("both AI keys must be blank; removing only one leaves a fallback provider", async () => {
-  const env = plan.overrides;
+  const env = ui;
   assert.equal(ai.resolveTextProvider({ ...env, OPENAI_API_KEY: "fixture-not-a-key" }), "openai");
   assert.equal(ai.resolveTextProvider({ ...env, ANTHROPIC_API_KEY: "fixture-not-a-key" }), "anthropic");
   assert.equal(ai.resolveTextProvider(env), null);
@@ -65,6 +65,18 @@ test("both AI keys must be blank; removing only one leaves a fallback provider",
   assert.equal(studio.videoGenerationRefusal(studio.readGenerationConfig(env))?.status, 503);
 });
 
+test("UI overrides use whitespace only for blanks and no synthetic database URL", () => {
+  assert.equal(Object.hasOwn(ui, "DATABASE_URL"), false);
+  assert.equal(ui.VITE_API_BASE_URL, "/");
+  const apiSource = readFileSync(path.join(root, "artifacts/negis/src/lib/api.ts"), "utf8");
+  assert.ok(apiSource.includes('?.replace(/\\/$/, "") || ""'));
+  assert.equal(ui.VITE_API_BASE_URL.replace(/\/$/, ""), "");
+  for (const [key, value] of Object.entries(plan.overrides)) {
+    if (key === "DATABASE_URL" || key === "VITE_API_BASE_URL") continue;
+    assert.equal(ui[key], value === "" ? " " : value, key);
+  }
+});
+
 test("Meta is unconfigured and cannot make a diagnostic request", async () => {
   assert.equal(meta.getMetaConfig().configured, false);
   assert.equal(meta.isMetaVideoLaunchEnabled(), false);
@@ -72,20 +84,20 @@ test("Meta is unconfigured and cannot make a diagnostic request", async () => {
 });
 
 test("TikTok diagnostics and OAuth remain unconfigured", async () => {
-  assert.equal(tiktok.getTikTokAdsConfig(plan.overrides).configured, false);
-  assert.equal(tiktok.getTikTokAdsConfig(plan.overrides).oauthReady, false);
-  const result = await tiktok.validateTikTokAdsConnection({ env: plan.overrides });
+  assert.equal(tiktok.getTikTokAdsConfig(ui).configured, false);
+  assert.equal(tiktok.getTikTokAdsConfig(ui).oauthReady, false);
+  const result = await tiktok.validateTikTokAdsConnection({ env: ui });
   assert.equal(result.errorCode, "not_configured");
   assert.equal(plan.overrides.TIKTOK_DISABLED_LAUNCH_ENABLED, "false");
   assert.equal(plan.overrides.TIKTOK_VIDEO_UPLOAD_ENABLED, "false");
 });
 
 test("worker auth fails closed; no workspace or push configuration is inherited", () => {
-  assert.throws(() => worker.getWorkerAuthConfig(plan.overrides), (error) => error.statusCode === 503 && error.reason === "not_configured");
-  assert.deepEqual(worker.getWorkerWorkspaceAllowlist(plan.overrides), []);
-  assert.equal(push.readVapidKeys(plan.overrides), null);
-  assert.deepEqual(platform.platformOwnerIds(plan.overrides), []);
-  assert.deepEqual(cors.parseControlOrigins(plan.overrides.MEDINA_CONTROL_ORIGINS), []);
+  assert.throws(() => worker.getWorkerAuthConfig(ui), (error) => error.statusCode === 503 && error.reason === "not_configured");
+  assert.deepEqual(worker.getWorkerWorkspaceAllowlist(ui), []);
+  assert.equal(push.readVapidKeys(ui), null);
+  assert.deepEqual(platform.platformOwnerIds(ui), []);
+  assert.deepEqual(cors.parseControlOrigins(ui.MEDINA_CONTROL_ORIGINS), []);
 });
 
 function response() {
@@ -123,8 +135,8 @@ test("Targeting Agent is loopback-only, not falsely described as disabled", asyn
 });
 
 test("public site and intake stay closed until a separate test publication step", () => {
-  assert.equal(site.publicSiteConfig(plan.overrides), null);
-  assert.equal(intake.readSiteIntakeConfig(plan.overrides), null);
+  assert.equal(site.publicSiteConfig(ui), null);
+  assert.equal(intake.readSiteIntakeConfig(ui), null);
   assert.equal(plan.overrides.MEDINA_SITE_INDEXABLE, "false");
   assert.equal(plan.overrides.MEDINA_SITE_FORM_ENABLED, "false");
 });
