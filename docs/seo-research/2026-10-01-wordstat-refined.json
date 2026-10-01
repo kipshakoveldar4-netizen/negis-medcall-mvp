@@ -1,0 +1,212 @@
+{
+  "source": "Яндекс Wordstat",
+  "sourceUrl": "https://wordstat.yandex.ru/",
+  "collectedOn": "2026-10-01",
+  "collectionMethod": "authenticated_browser_rendered_dom",
+  "reportView": "Топы запросов / Популярные",
+  "matchMode": "broad_without_operators",
+  "queryLanguage": "ru",
+  "languageFilterApplied": false,
+  "devices": [
+    "desktop",
+    "smartphone",
+    "tablet"
+  ],
+  "metric": "search_queries_not_users_or_leads",
+  "nativeCsvObtained": false,
+  "detailColumns": [
+    "query",
+    "reportedCount"
+  ],
+  "seedSource": "2026-10-01-wordstat.json",
+  "limitations": [
+    "Rendered observations only, not a complete CSV export.",
+    "Reporting periods vary; broad counts overlap and must not be summed.",
+    "A zero describes this source phrase and slice only; no Google demand or lead forecast is inferred.",
+    "No account URLs, credentials, client data or technical network responses retained."
+  ],
+  "reports": [
+    {
+      "region": "Казахстан",
+      "regionId": 159,
+      "query": "программа для записи клиентов салона",
+      "dateStart": "2026-08-30",
+      "dateStop": "2026-09-28",
+      "reportedCount": 5,
+      "detailRows": [
+        [
+          "программа для записи клиентов салона",
+          5
+        ],
+        [
+          "программа для записи клиентов салона красоты",
+          4
+        ],
+        [
+          "программа для записи клиентов салона бесплатно",
+          2
+        ],
+        [
+          "программа для записи клиентов салона красоты бесплатно",
+          2
+        ]
+      ],
+      "sourceUrl": "https://wordstat.yandex.ru/?region=159&view=table&words=%D0%BF%D1%80%D0%BE%D0%B3%D1%80%D0%B0%D0%BC%D0%BC%D0%B0%20%D0%B4%D0%BB%D1%8F%20%D0%B7%D0%B0%D0%BF%D0%B8%D1%81%D0%B8%20%D0%BA%D0%BB%D0%B8%D0%B5%D0%BD%D1%82%D0%BE%D0%B2%20%D1%81%D0%B0%D0%BB%D0%BE%D0%BD%D0%B0",
+      "detailRowCount": 4
+    },
+    {
+      "region": "Казахстан",
+      "regionId": 159,
+      "query": "журнал записи клиентов салон",
+      "dateStart": "2026-08-30",
+      "dateStop": "2026-09-28",
+      "reportedCount": 2,
+      "detailRows": [
+        [
+          "журнал записи клиентов салон",
+          2
+        ],
+        [
+          "журнал записи клиентов салона красоты",
+          2
+        ]
+      ],
+      "sourceUrl": "https://wordstat.yandex.ru/?region=159&view=table&words=%D0%B6%D1%83%D1%80%D0%BD%D0%B0%D0%BB%20%D0%B7%D0%B0%D0%BF%D0%B8%D1%81%D0%B8%20%D0%BA%D0%BB%D0%B8%D0%B5%D0%BD%D1%82%D0%BE%D0%B2%20%D1%81%D0%B0%D0%BB%D0%BE%D0%BD",
+      "detailRowCount": 2
+    },
+    {
+      "region": "Казахстан",
+      "regionId": 159,
+      "query": "реклама медицинской клиники",
+      "dateStart": "2026-08-30",
+      "dateStop": "2026-09-28",
+      "reportedCount": 1,
+      "detailRows": [
+        [
+          "реклама медицинской клиники",
+          1
+        ]
+      ],
+      "sourceUrl": "https://wordstat.yandex.ru/?region=159&view=table&words=%D1%80%D0%B5%D0%BA%D0%BB%D0%B0%D0%BC%D0%B0%20%D0%BC%D0%B5%D0%B4%D0%B8%D1%86%D0%B8%D0%BD%D1%81%D0%BA%D0%BE%D0%B9%20%D0%BA%D0%BB%D0%B8%D0%BD%D0%B8%D0%BA%D0%B8",
+      "detailRowCount": 1
+    },
+    {
+      "region": "Казахстан",
+      "regionId": 159,
+      "query": "реклама стоматологической клиники",
+      "dateStart": "2026-08-30",
+      "dateStop": "2026-09-30",
+      "reportedCount": 0,
+      "detailRows": [],
+      "sourceUrl": "https://wordstat.yandex.ru/?region=159&view=table&words=%D1%80%D0%B5%D0%BA%D0%BB%D0%B0%D0%BC%D0%B0%20%D1%81%D1%82%D0%BE%D0%BC%D0%B0%D1%82%D0%BE%D0%BB%D0%BE%D0%B3%D0%B8%D1%87%D0%B5%D1%81%D0%BA%D0%BE%D0%B9%20%D0%BA%D0%BB%D0%B8%D0%BD%D0%B8%D0%BA%D0%B8",
+      "detailRowCount": 0
+    },
+    {
+      "region": "Казахстан",
+      "regionId": 159,
+      "query": "почему пациенты не записываются после рекламы клиники",
+      "dateStart": "2026-08-30",
+      "dateStop": "2026-09-30",
+      "reportedCount": 0,
+      "detailRows": [],
+      "sourceUrl": "https://wordstat.yandex.ru/?region=159&view=table&words=%D0%BF%D0%BE%D1%87%D0%B5%D0%BC%D1%83%20%D0%BF%D0%B0%D1%86%D0%B8%D0%B5%D0%BD%D1%82%D1%8B%20%D0%BD%D0%B5%20%D0%B7%D0%B0%D0%BF%D0%B8%D1%81%D1%8B%D0%B2%D0%B0%D1%8E%D1%82%D1%81%D1%8F%20%D0%BF%D0%BE%D1%81%D0%BB%D0%B5%20%D1%80%D0%B5%D0%BA%D0%BB%D0%B0%D0%BC%D1%8B%20%D0%BA%D0%BB%D0%B8%D0%BD%D0%B8%D0%BA%D0%B8",
+      "detailRowCount": 0
+    },
+    {
+      "region": "Россия",
+      "regionId": 225,
+      "query": "почему пациенты не записываются после рекламы клиники",
+      "dateStart": "2026-08-30",
+      "dateStop": "2026-09-28",
+      "reportedCount": 8,
+      "detailRows": [
+        [
+          "почему пациенты не записываются после рекламы клиники",
+          8
+        ]
+      ],
+      "sourceUrl": "https://wordstat.yandex.ru/?region=225&view=table&words=%D0%BF%D0%BE%D1%87%D0%B5%D0%BC%D1%83%20%D0%BF%D0%B0%D1%86%D0%B8%D0%B5%D0%BD%D1%82%D1%8B%20%D0%BD%D0%B5%20%D0%B7%D0%B0%D0%BF%D0%B8%D1%81%D1%8B%D0%B2%D0%B0%D1%8E%D1%82%D1%81%D1%8F%20%D0%BF%D0%BE%D1%81%D0%BB%D0%B5%20%D1%80%D0%B5%D0%BA%D0%BB%D0%B0%D0%BC%D1%8B%20%D0%BA%D0%BB%D0%B8%D0%BD%D0%B8%D0%BA%D0%B8",
+      "detailRowCount": 1
+    },
+    {
+      "region": "Россия",
+      "regionId": 225,
+      "query": "реклама стоматологической клиники",
+      "dateStart": "2026-08-30",
+      "dateStop": "2026-09-28",
+      "reportedCount": 137,
+      "detailRows": [
+        [
+          "реклама стоматологической клиники",
+          137
+        ]
+      ],
+      "sourceUrl": "https://wordstat.yandex.ru/?region=225&view=table&words=%D1%80%D0%B5%D0%BA%D0%BB%D0%B0%D0%BC%D0%B0%20%D1%81%D1%82%D0%BE%D0%BC%D0%B0%D1%82%D0%BE%D0%BB%D0%BE%D0%B3%D0%B8%D1%87%D0%B5%D1%81%D0%BA%D0%BE%D0%B9%20%D0%BA%D0%BB%D0%B8%D0%BD%D0%B8%D0%BA%D0%B8",
+      "detailRowCount": 1
+    },
+    {
+      "region": "Россия",
+      "regionId": 225,
+      "query": "реклама медицинской клиники",
+      "dateStart": "2026-08-30",
+      "dateStop": "2026-09-28",
+      "reportedCount": 119,
+      "detailRows": [
+        [
+          "реклама медицинской клиники",
+          119
+        ]
+      ],
+      "sourceUrl": "https://wordstat.yandex.ru/?region=225&view=table&words=%D1%80%D0%B5%D0%BA%D0%BB%D0%B0%D0%BC%D0%B0%20%D0%BC%D0%B5%D0%B4%D0%B8%D1%86%D0%B8%D0%BD%D1%81%D0%BA%D0%BE%D0%B9%20%D0%BA%D0%BB%D0%B8%D0%BD%D0%B8%D0%BA%D0%B8",
+      "detailRowCount": 1
+    },
+    {
+      "region": "Россия",
+      "regionId": 225,
+      "query": "журнал записи клиентов салон",
+      "dateStart": "2026-08-30",
+      "dateStop": "2026-09-28",
+      "reportedCount": 68,
+      "detailRows": [
+        [
+          "журнал записи клиентов салон",
+          68
+        ],
+        [
+          "журнал записи клиентов салона красоты",
+          61
+        ]
+      ],
+      "sourceUrl": "https://wordstat.yandex.ru/?region=225&view=table&words=%D0%B6%D1%83%D1%80%D0%BD%D0%B0%D0%BB%20%D0%B7%D0%B0%D0%BF%D0%B8%D1%81%D0%B8%20%D0%BA%D0%BB%D0%B8%D0%B5%D0%BD%D1%82%D0%BE%D0%B2%20%D1%81%D0%B0%D0%BB%D0%BE%D0%BD",
+      "detailRowCount": 2
+    },
+    {
+      "region": "Россия",
+      "regionId": 225,
+      "query": "программа для записи клиентов салона",
+      "dateStart": "2026-08-30",
+      "dateStop": "2026-09-28",
+      "reportedCount": 112,
+      "detailRows": [
+        [
+          "программа для записи клиентов салона",
+          112
+        ],
+        [
+          "программа для записи клиентов салона красоты",
+          91
+        ],
+        [
+          "программа для записи клиентов салона бесплатно",
+          26
+        ],
+        [
+          "программа для записи клиентов салона красоты бесплатно",
+          24
+        ]
+      ],
+      "sourceUrl": "https://wordstat.yandex.ru/?region=225&view=table&words=%D0%BF%D1%80%D0%BE%D0%B3%D1%80%D0%B0%D0%BC%D0%BC%D0%B0%20%D0%B4%D0%BB%D1%8F%20%D0%B7%D0%B0%D0%BF%D0%B8%D1%81%D0%B8%20%D0%BA%D0%BB%D0%B8%D0%B5%D0%BD%D1%82%D0%BE%D0%B2%20%D1%81%D0%B0%D0%BB%D0%BE%D0%BD%D0%B0",
+      "detailRowCount": 4
+    }
+  ]
+}
