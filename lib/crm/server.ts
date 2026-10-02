@@ -3973,32 +3973,10 @@ async function findClientsByName(
   return (Array.isArray(data) ? data : []).map((row) => asRecord(row));
 }
 
-/** Exact-name fallback used only when a specialist cannot see or enter phone. */
-async function findClientsByExactName(
-  supabase: CrmSupabaseClient,
-  workspaceId: string,
-  rawName: string,
-): Promise<JsonRecord[]> {
-  const name = rawName.replace(/\s+/g, " ").trim();
-  if (!name) return [];
-
-  const config = configs.clients;
-  const { data, error } = await supabase
-    .from(config.table)
-    .select(config.selectColumns ?? "*")
-    .eq("workspace_id", workspaceId)
-    .eq("full_name", name)
-    .order("created_at", { ascending: false })
-    .limit(2);
-
-  if (error) throw new Error(`client exact lookup: ${error.message}`);
-  return (Array.isArray(data) ? data : []).map((row) => asRecord(row));
-}
-
 type AppointmentClientResolution = {
   clientId: string;
   created: boolean;
-  match: "provided" | "phone" | "name" | "created";
+  match: "provided" | "phone" | "created";
   createdRow?: JsonRecord;
 };
 
@@ -4010,10 +3988,10 @@ type AppointmentClientResolution = {
  * permanent name/phone snapshot, but no row in clients. On the next visit the
  * receptionist could not find that person and the history had no stable key.
  *
- * Phone is the strong identity and uses the canonical indexed lookup from
- * migration 030. A name-only exact match is considered only when no phone is
- * available (the specialist privacy view); two matching names are deliberately
- * ambiguous and produce a new card rather than linking the wrong patient.
+ * Phone matching uses the canonical indexed lookup from migration 030.
+ * A name alone never identifies an existing person, even when unique in the
+ * clinic. Without contacts, reuse requires an explicitly selected clientId;
+ * otherwise a new card keeps namesakes' visits separate.
  */
 async function resolveAppointmentClientForCreate(
   supabase: CrmSupabaseClient,
@@ -4034,14 +4012,6 @@ async function resolveAppointmentClientForCreate(
   }
 
   const clientName = readString(row.client_name);
-  if (phoneCandidates.length === 0) {
-    const exactMatches = await findClientsByExactName(supabase, workspaceId, clientName);
-    if (exactMatches.length === 1) {
-      const matchedId = readString(exactMatches[0]?.id);
-      if (matchedId) return { clientId: matchedId, created: false, match: "name" };
-    }
-  }
-
   const clientId = randomUUID();
   const createdRow: JsonRecord = {
     id: clientId,

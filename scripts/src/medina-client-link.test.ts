@@ -115,7 +115,7 @@ function spyClient(
           // Точечный поиск фильтрует по-настоящему; списочное чтение — нет,
           // как и раньше.
           const tableRows = rows[table] ?? [];
-          const filtered = Object.keys(entry.filters).some((c) => c.endsWith("_normalized") || c === "client_id" || c.startsWith("__ilike:"))
+          const filtered = Object.keys(entry.filters).some((c) => c.endsWith("_normalized") || c === "client_id" || c === "full_name" || c.startsWith("__ilike:"))
             ? tableRows.map((r) => r as Record<string, unknown>).filter(matches)
             : tableRows;
           resolve({ data: filtered, error: null, count: filtered.length });
@@ -330,6 +330,56 @@ test("CLK6b a returning patient's canonical phone reuses the existing card", asy
   const appointmentInsert = log.find((entry) => entry.table === "appointments" && entry.op === "insert");
   assert.equal((appointmentInsert?.filters.__row as Record<string, unknown>).client_id, CLIENT_ID);
   assert.equal((res.body.data as Record<string, unknown>).clientCreated, false);
+});
+
+for (const scenario of [
+  { label: "one same-name card without contacts", clients: [{ ...ownClient, full_name: "Test Same Name", phone: null, whatsapp: null }] },
+  { label: "one same-name card with private contacts", clients: [{ ...ownClient, full_name: "Test Same Name", phone: "+77000000001", whatsapp: "+77000000002" }] },
+  { label: "multiple same-name cards", clients: [{ ...ownClient, full_name: "Test Same Name" }, { id: FOREIGN_CLIENT_ID, workspace_id: WORKSPACE_A, full_name: "Test Same Name" }] },
+  { label: "a same-name card in another workspace", clients: [{ id: FOREIGN_CLIENT_ID, workspace_id: WORKSPACE_B, full_name: "Test Same Name" }] },
+]) {
+  test(`CLK6c a name-only booking cannot select ${scenario.label}`, async () => {
+    const call = await loadRouter({ clients: scenario.clients });
+    const { res, log } = await call({
+      segments: ["appointments"], method: "POST",
+      body: { client: "Test Same Name", phone: "", whatsapp: "", clientId: "" },
+    });
+    assert.equal(res.statusCode, 201, JSON.stringify(res.body));
+    const created = log.find((entry) => entry.table === "clients" && entry.op === "insert")?.filters.__row as Record<string, unknown> | undefined;
+    assert.ok(created, "a typed name does not identify an existing person, even when unique in this clinic");
+    assert.equal(created.workspace_id, WORKSPACE_A);
+    assert.equal(created.full_name, "Test Same Name");
+    assert.equal(created.phone, null);
+    assert.equal(created.whatsapp, null);
+    assert.ok(!scenario.clients.some((client) => client.id === created.id));
+    const appointment = log.find((entry) => entry.table === "appointments" && entry.op === "insert")?.filters.__row as Record<string, unknown>;
+    assert.equal(appointment.client_id, created.id);
+    assert.equal((res.body.data as Record<string, unknown>).clientCreated, true);
+    assert.equal((res.body.data as Record<string, unknown>).clientMatch, "created");
+    assert.equal(log.filter((entry) => entry.table === "clients" && ["update", "delete", "upsert"].includes(entry.op)).length, 0);
+  });
+}
+
+test("CLK6d explicit same-name card selection works without revealing or requiring contacts", async () => {
+  const call = await loadRouter({ clients: [{ ...ownClient, full_name: "Test Same Name", phone: "+77000000001" }] });
+  const { res, log } = await call({
+    segments: ["appointments"], method: "POST", body: { client: "Test Same Name", clientId: CLIENT_ID },
+  });
+  assert.equal(res.statusCode, 201, JSON.stringify(res.body));
+  assert.equal(log.filter((entry) => entry.table === "clients" && entry.op === "insert").length, 0);
+  const appointment = log.find((entry) => entry.table === "appointments" && entry.op === "insert")?.filters.__row as Record<string, unknown>;
+  assert.equal(appointment.client_id, CLIENT_ID);
+  assert.equal(appointment.client_phone, null);
+  assert.equal((res.body.data as Record<string, unknown>).clientMatch, "provided");
+});
+
+test("CLK6e explicit name-only selection from a foreign workspace is refused before any insert", async () => {
+  const call = await loadRouter({ clients: [{ id: FOREIGN_CLIENT_ID, workspace_id: WORKSPACE_B, full_name: "Test Same Name" }] });
+  const { res, log } = await call({
+    segments: ["appointments"], method: "POST", body: { client: "Test Same Name", clientId: FOREIGN_CLIENT_ID },
+  });
+  assert.equal(res.statusCode, 400, JSON.stringify(res.body));
+  assert.equal(log.filter((entry) => entry.op === "insert").length, 0);
 });
 
 test("CLK7 editing an appointment keeps its client unless the edit says otherwise", async () => {
