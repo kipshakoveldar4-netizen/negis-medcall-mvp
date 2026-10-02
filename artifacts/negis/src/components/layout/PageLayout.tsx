@@ -38,15 +38,15 @@ export function PageLayout({ children, requireAuth = true }: PageLayoutProps) {
         paddingTop: isImpersonation ? 40 : 0,
       }}
     >
-      <div className="hidden md:block">
+      <div className="hidden lg:block">
         <Sidebar />
       </div>
-      <div className="flex min-h-[100dvh] flex-col md:pl-[268px]">
+      <div className="flex min-h-[100dvh] flex-col lg:pl-[268px]">
         {/* The header renders at every width: it is the only place the
             notification bell lives, so hiding it on desktop made realtime
             booking notifications unreachable there. */}
         <Topbar />
-        <main className="negis-main flex-1 overflow-y-auto pb-24 md:pb-0">
+        <main className="negis-main flex-1 overflow-y-auto pb-24 lg:pb-0">
           {children}
         </main>
       </div>

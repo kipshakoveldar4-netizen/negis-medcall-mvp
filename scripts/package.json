@@ -4,6 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "preview:crm": "node ./fixtures/crm-browser.mjs",
+    "test:crm-browser-fixture": "node --import tsx --test ./fixtures/crm-browser.test.mjs",
     "preview:site-intake": "node --import tsx ./fixtures/site-intake-browser.mjs",
     "preview:site-deletion": "node ./fixtures/site-deletion-browser.mjs",
     "test:site-intake-http": "node --import tsx --test ./fixtures/site-intake-browser.test.mjs",

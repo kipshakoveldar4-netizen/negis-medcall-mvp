@@ -71,3 +71,19 @@ test("MO4 поля с инлайновым шрифтом не зумят iOS", 
     "мобильное правило 16px !important для инлайновых полей обязано остаться",
   );
 });
+
+test("MO5 tablet navigation, sidebar and content padding share the 1024px boundary", async () => {
+  const layout = await readFile(path.join(negisSrc, "components/layout/PageLayout.tsx"), "utf8");
+  const nav = await readFile(path.join(negisSrc, "components/layout/MobileNav.tsx"), "utf8");
+  const css = await readFile(path.join(negisSrc, "index.css"), "utf8");
+  assert.ok(layout.includes('className="hidden lg:block"'));
+  assert.ok(layout.includes("lg:pl-[268px]"));
+  assert.ok(layout.includes("pb-24 lg:pb-0"));
+  assert.ok(nav.includes('className="mobile-bottom-nav lg:hidden"'));
+  assert.ok(nav.includes('className="mobile-nav-backdrop lg:hidden"'));
+  assert.match(css, /@media \(min-width: 1024px\)\s*\{\s*\.mobile-bottom-nav,/);
+  assert.match(css, /@media \(min-width: 768px\) and \(max-width: 1023px\)\s*\{\s*\.negis-main\s*\{\s*padding-bottom: calc\(112px \+ env\(safe-area-inset-bottom\)\)/);
+  const tablet = css.slice(css.indexOf("@media (min-width: 768px) and (max-width: 1023px)"));
+  assert.ok(tablet.includes("@media (max-width: 1023px), (pointer: coarse)"));
+  assert.match(tablet, /\.negis-main input[^{]*\{[^}]*font-size:\s*16px\s*!important/s);
+});
