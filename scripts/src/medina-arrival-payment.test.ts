@@ -30,7 +30,7 @@ async function rejects(sql: string, code: string) {
 }
 before(async () => {
   await db.exec("create role anon; create role authenticated; create role service_role bypassrls;");
-  const numbers = new Set([9, 10, 11, 12, 13, 14, 19, 20, 29, 30, 32, 33, 34, 36, 40, 43, 45, 55, 61, 63]);
+  const numbers = new Set([9, 10, 11, 12, 13, 14, 19, 20, 29, 30, 32, 33, 34, 36, 40, 43, 45, 55, 61, 63, 64]);
   for (const file of (await readdir(path.join(root, "migrations"))).sort()) {
     if (!numbers.has(Number(file.slice(0, 3)))) continue;
     try {
@@ -61,12 +61,26 @@ function apiDatabase(rpcRole: "service_role" | "anon" | "authenticated" = "servi
   };
   return {
     async rpc(name: string, args: Record<string, unknown>) {
-      assert.equal(name, "create_crm_appointment_with_new_client");
+      const calls: Record<string, { sql: string; params: unknown[] }> = {
+        create_crm_appointment_with_new_client: {
+          sql: "select public.create_crm_appointment_with_new_client($1::uuid, $2::jsonb, $3::jsonb) as item",
+          params: [args.p_workspace_id, JSON.stringify(args.p_client), JSON.stringify(args.p_appointment)],
+        },
+        read_crm_appointment_create_request: {
+          sql: "select public.read_crm_appointment_create_request($1::uuid,$2::uuid,$3::uuid,$4) as item",
+          params: [args.p_workspace_id, args.p_staff_user_id, args.p_request_key, args.p_request_fingerprint],
+        },
+        create_crm_appointment_once: {
+          sql: "select public.create_crm_appointment_once($1::uuid,$2::uuid,$3::uuid,$4,$5::jsonb,$6::jsonb,$7) as item",
+          params: [args.p_workspace_id, args.p_staff_user_id, args.p_request_key, args.p_request_fingerprint,
+            args.p_new_client === null ? null : JSON.stringify(args.p_new_client), JSON.stringify(args.p_appointment), args.p_client_match],
+        },
+      };
+      assert.ok(calls[name], `Unexpected RPC ${name}`);
       await db.exec(`savepoint api_rpc; set local role ${rpcRole}`);
       try {
         const result = await db.query<{ item: Record<string, unknown> }>(
-          "select public.create_crm_appointment_with_new_client($1::uuid, $2::jsonb, $3::jsonb) as item",
-          [args.p_workspace_id, JSON.stringify(args.p_client), JSON.stringify(args.p_appointment)],
+          calls[name].sql, calls[name].params,
         );
         await db.exec("reset role; release savepoint api_rpc");
         return { data: result.rows[0].item, error: null };
@@ -235,6 +249,299 @@ function apiItem(response: { status: number; body: Record<string, unknown> }, ex
   assert.equal(response.body.mode, "supabase");
   assert.equal((response.body.data as Record<string, unknown>).unsaved, undefined);
   return (response.body.data as { item: Record<string, unknown> }).item;
+}
+
+const keyedBooking = () => ({ ...bundleBooking(), requestKey: id(70) });
+const retryCounts = () => row(`select (select count(*) from clients) as clients,
+  (select count(*) from appointments) as appointments, (select count(*) from deals) as sales,
+  (select count(*) from crm_appointment_create_requests) as receipts,
+  (select count(*) from audit_logs) as journal`);
+
+for (const capacity of [1, 2]) {
+  test(`API lost successful reply replays one client/visit/sale/journal at capacity ${capacity}`, async () => {
+    const call = await bundleApiFixture();
+    await db.exec(`update clinic_doctors set capacity=${capacity}`);
+    const body = { ...keyedBooking(), status: "arrived" };
+    const first = await call("appointments", "POST", body);
+    const visit = apiItem(first, 201);
+    assert.equal((first.body.data as Record<string, unknown>).replayed, false);
+    const before = await retryCounts();
+    assert.deepEqual(before, { clients: 2, appointments: 2, sales: 1, receipts: 1, journal: 2 });
+    const retry = await call("appointments", "POST", { ...body, id: id(999), updated_at: "ignored", requestFingerprint: "forged" });
+    assert.deepEqual(apiItem(retry), visit);
+    assert.equal((retry.body.data as Record<string, unknown>).replayed, true);
+    assert.equal((retry.body.data as Record<string, unknown>).clientCreated, true);
+    assert.deepEqual(await retryCounts(), before);
+    assert.equal((await row("select amount_minor from deals")).amount_minor, 700050);
+  });
+}
+
+test("API retry returns later edits despite archived catalogue without restoring old data", async () => {
+  const call = await bundleApiFixture();
+  const visit = apiItem(await call("appointments", "POST", keyedBooking()), 201);
+  await db.exec(`update appointments set status='cancelled',notes='Later edit' where id='${visit.id}';
+    update clinic_services set is_active=false`);
+  const before = await retryCounts();
+  const retry = apiItem(await call("appointments", "POST", keyedBooking()));
+  assert.equal(retry.id, visit.id);
+  assert.equal(retry.status, "cancelled");
+  assert.equal(retry.notes, "Later edit");
+  assert.deepEqual(await retryCounts(), before);
+});
+
+test("API computes the fingerprint itself and rejects changed intent for a used key", async () => {
+  const call = await bundleApiFixture();
+  apiItem(await call("appointments", "POST", keyedBooking()), 201);
+  const before = await retryCounts();
+  const receipt = await row("select request_fingerprint from crm_appointment_create_requests");
+  for (const updates of [{ client: "Different person" }, { startsAt: "2026-10-04T09:00:00+05:00" },
+    { clientId: id(3) }, { clientId: "", client_id: id(3) }, { notes: "Different intent" }, { allowOutsideSchedule: true },
+    { serviceItems: serviceBundle.map(item => ({ ...item, priceMinor: 1 })) }]) {
+    const reply = await call("appointments", "POST", { ...keyedBooking(), ...updates, requestFingerprint: receipt.request_fingerprint });
+    assert.equal(reply.status, 409, JSON.stringify(reply.body));
+    assert.equal(reply.body.code, "appointment_request_conflict");
+    assert.deepEqual(await retryCounts(), before);
+  }
+});
+
+test("API normalizes aliases and service property order without hashing generated fields", async () => {
+  const call = await bundleApiFixture();
+  const original = keyedBooking();
+  const visit = apiItem(await call("appointments", "POST", original), 201);
+  const { client, startsAt, doctorId, doctor, serviceItems, ...rest } = original;
+  const reply = await call("appointments", "POST", { ...rest, client_name: client, starts_at: startsAt,
+    doctor_id: doctorId, doctor_name: doctor,
+    service_items: serviceItems.map(({ durationMinutes, priceMinor, name, serviceId }) => ({ durationMinutes, priceMinor, name, serviceId })) });
+  assert.equal(apiItem(reply).id, visit.id);
+});
+
+test("API existing-client replay does not overwrite the client and reflects later arrival", async () => {
+  const call = await bundleApiFixture();
+  const body = { ...keyedBooking(), clientId: id(3) };
+  const card = await row(`select * from clients where id='${id(3)}'`);
+  const first = await call("appointments", "POST", body);
+  const visit = apiItem(first, 201);
+  assert.equal((first.body.data as Record<string, unknown>).clientCreated, false);
+  apiItem(await call("appointments", "PATCH", { status: "arrived" }, 1, String(visit.id)));
+  const before = await retryCounts();
+  const reply = await call("appointments", "POST", body);
+  assert.equal(apiItem(reply).status, "arrived");
+  assert.equal((reply.body.data as Record<string, unknown>).clientMatch, "provided");
+  assert.deepEqual(await retryCounts(), before);
+  // Arrival updates visit history but retry itself must not rewrite the card.
+  assert.equal((await row(`select * from clients where id='${id(3)}'`)).full_name, card.full_name);
+});
+
+test("API a deleted receipt target refuses resurrection", async () => {
+  const call = await bundleApiFixture();
+  const visit = apiItem(await call("appointments", "POST", keyedBooking()), 201);
+  await db.exec(`delete from appointments where id='${visit.id}'`);
+  const before = await retryCounts();
+  const reply = await call("appointments", "POST", keyedBooking());
+  assert.equal(reply.status, 409);
+  assert.equal(reply.body.code, "appointment_request_unavailable");
+  assert.deepEqual(await retryCounts(), before);
+});
+
+test("API replay checks current own-work and does not expose another specialist's moved visit", async () => {
+  const call = await bundleApiFixture("doctor");
+  const visit = apiItem(await call("appointments", "POST", keyedBooking()), 201);
+  await db.exec(`update appointments set doctor_id=null,doctor_name='Other specialist',client_phone='+77001234567'
+    where id='${visit.id}'`);
+  const before = await retryCounts();
+  const reply = await call("appointments", "POST", keyedBooking());
+  assert.equal(reply.status, 404);
+  assert.equal(JSON.stringify(reply.body).includes("77001234567"), false);
+  assert.equal(JSON.stringify(reply.body).includes("Other specialist"), false);
+  assert.deepEqual(await retryCounts(), before);
+});
+
+test("API doctor retry redacts contacts added after the original booking", async () => {
+  const call = await bundleApiFixture("doctor");
+  const visit = apiItem(await call("appointments", "POST", keyedBooking()), 201);
+  await db.exec(`update appointments set client_phone='+77001234567',whatsapp='+77007654321' where id='${visit.id}'`);
+  const reply = await call("appointments", "POST", keyedBooking());
+  assert.equal(apiItem(reply).id, visit.id);
+  assert.equal(JSON.stringify(reply.body).includes("77001234567"), false);
+  assert.equal(JSON.stringify(reply.body).includes("77007654321"), false);
+});
+
+test("API implicit self booking keeps the original retry intent without mutating request input", async () => {
+  const call = await apiFixture("doctor");
+  const body = { requestKey: id(70), client: "Fixture client", service: "Manual fixture", priceMinor: 100,
+    startsAt: "2026-10-03T09:00:00+05:00" };
+  const original = { ...body };
+  const visit = apiItem(await call("appointments", "POST", body), 201);
+  assert.deepEqual(body, original);
+  assert.equal(apiItem(await call("appointments", "POST", body)).id, visit.id);
+});
+
+test("API receipt scope comes from authenticated staff, not supplied actor or workspace fields", async () => {
+  const call = await bundleApiFixture();
+  await db.exec(`update clinic_doctors set capacity=2`);
+  const first = apiItem(await call("appointments", "POST", keyedBooking()), 201);
+  assert.equal((await call("appointments", "POST", keyedBooking(), 2)).status, 403);
+  await db.exec(`insert into staff_users(id,workspace_id,auth_user_id,full_name,email,role)
+    values('${id(43)}','${id(1)}','${id(44)}','Fixture colleague','colleague@example.invalid','owner')`);
+  globalThis.fetch = (async (url: unknown) => {
+    assert.equal(url, "https://fixture.invalid/auth/v1/user");
+    return { ok: true, status: 200, text: async () => JSON.stringify({ id: id(44) }) };
+  }) as unknown as typeof fetch;
+  const second = apiItem(await call("appointments", "POST", { ...keyedBooking(), staffUserId: id(40), created_by_staff_user_id: id(40) }), 201);
+  assert.notEqual(second.id, first.id);
+  assert.notEqual(second.clientId, first.clientId);
+  assert.equal((await row(`select created_by_staff_user_id from appointments where id='${second.id}'`)).created_by_staff_user_id, id(43));
+  assert.equal((await retryCounts()).receipts, 2);
+});
+
+test("API retry after loss of membership is refused before returning any receipt", async () => {
+  const call = await bundleApiFixture();
+  apiItem(await call("appointments", "POST", keyedBooking()), 201);
+  await db.exec(`update staff_users set status='inactive' where id='${id(40)}'`);
+  const before = await retryCounts();
+  const reply = await call("appointments", "POST", keyedBooking());
+  assert.equal(reply.status, 403);
+  assert.equal(reply.body.data, undefined);
+  assert.deepEqual(await retryCounts(), before);
+});
+
+for (const rpcName of ["read_crm_appointment_create_request", "create_crm_appointment_once"]) {
+  test(`API missing ${rpcName} fails closed without legacy INSERT or unsaved success`, async () => {
+    const call = await bundleApiFixture();
+    const base = apiDatabase();
+    serverClient.setSupabaseServerClientFactoryForTests(() => ({ ...base, rpc: async (name: string, args: Record<string, unknown>) =>
+      name === rpcName ? { data: null, error: { code: "PGRST202", message: "private fixture SQL detail" } } : base.rpc(name, args) }));
+    const before = await retryCounts();
+    const reply = await call("appointments", "POST", keyedBooking());
+    assert.equal(reply.status, 503);
+    assert.equal(reply.body.code, "appointment_create_unavailable");
+    assert.equal(reply.body.data, undefined);
+    assert.equal(JSON.stringify(reply.body).includes("private fixture SQL detail"), false);
+    assert.deepEqual(await retryCounts(), before);
+  });
+}
+
+test("API malformed key and uncertain receipt read never become successful creates", async () => {
+  const call = await bundleApiFixture();
+  const before = await retryCounts();
+  for (const requestKey of [null, "", "arbitrary", 123]) {
+    assert.equal((await call("appointments", "POST", { ...keyedBooking(), requestKey })).status, 400);
+  }
+  const base = apiDatabase();
+  serverClient.setSupabaseServerClientFactoryForTests(() => ({ ...base, rpc: async () => ({
+    data: null, error: { code: "08006", message: "private connection detail" },
+  }) }));
+  const reply = await call("appointments", "POST", keyedBooking());
+  assert.equal(reply.status, 502);
+  assert.equal(reply.body.data, undefined);
+  assert.equal(JSON.stringify(reply.body).includes("private connection detail"), false);
+  assert.deepEqual(await retryCounts(), before);
+});
+
+test("API lost RPC response after commit is recovered without a second transaction or invented success", async () => {
+  const call = await bundleApiFixture();
+  const base = apiDatabase();
+  let creates = 0;
+  serverClient.setSupabaseServerClientFactoryForTests(() => ({ ...base, rpc: async (name: string, args: Record<string, unknown>) => {
+    const result = await base.rpc(name, args);
+    if (name !== "create_crm_appointment_once") return result;
+    creates++;
+    assert.equal(result.error, null);
+    return { data: null, error: { code: "08006", message: "Reply lost after isolated commit" } };
+  } }));
+  const body = { ...keyedBooking(), status: "arrived" };
+  const unknown = await call("appointments", "POST", body);
+  assert.equal(unknown.status, 502);
+  assert.equal(unknown.body.data, undefined);
+  const before = await retryCounts();
+  assert.deepEqual(before, { clients: 2, appointments: 2, sales: 1, receipts: 1, journal: 0 });
+  const retry = apiItem(await call("appointments", "POST", body));
+  assert.equal(retry.arrivalSaleId, (await row("select id from deals")).id);
+  assert.equal(creates, 1);
+  assert.deepEqual(await retryCounts(), before);
+});
+
+test("API existing-client keyed insert cannot fall back by discarding schema fields", async () => {
+  const call = await bundleApiFixture();
+  const base = apiDatabase();
+  let creates = 0;
+  serverClient.setSupabaseServerClientFactoryForTests(() => ({ ...base, rpc: async (name: string, args: Record<string, unknown>) => {
+    if (name !== "create_crm_appointment_once") return base.rpc(name, args);
+    creates++;
+    return { data: null, error: { code: "PGRST204", message: "Could not find the doctor_id column" } };
+  } }));
+  const before = await retryCounts();
+  const reply = await call("appointments", "POST", { ...keyedBooking(), clientId: id(3) });
+  assert.equal(reply.status, 503);
+  assert.equal(reply.body.code, "appointment_create_unavailable");
+  assert.equal(creates, 1);
+  assert.deepEqual(await retryCounts(), before);
+});
+
+test("API malformed or foreign receipt response fails without exposing its contents", async () => {
+  const call = await bundleApiFixture();
+  const base = apiDatabase();
+  const before = await retryCounts();
+  for (const data of [{}, { appointment: { id: id(99), workspace_id: id(2), client_name: "Private fixture name" },
+    replayed: true, clientCreated: true, clientMatch: "created" }]) {
+    serverClient.setSupabaseServerClientFactoryForTests(() => ({ ...base, rpc: async () => ({ data, error: null }) }));
+    const reply = await call("appointments", "POST", keyedBooking());
+    assert.equal(reply.status, 502);
+    assert.equal(reply.body.data, undefined);
+    assert.equal(JSON.stringify(reply.body).includes("Private fixture name"), false);
+    assert.deepEqual(await retryCounts(), before);
+  }
+});
+
+test("API keyed trigger failure rolls back all writes and leaves the intent retryable", async () => {
+  const call = await bundleApiFixture();
+  const before = await retryCounts();
+  const body = { ...keyedBooking(), status: "arrived", serviceItems: [{ name: "Unknown quote", priceMinor: null, durationMinutes: 60 }] };
+  const refused = await call("appointments", "POST", body);
+  assert.equal(refused.status, 409);
+  assert.equal(refused.body.code, "arrival_payment");
+  assert.deepEqual(await retryCounts(), before);
+  const saved = apiItem(await call("appointments", "POST", { ...keyedBooking(), status: "arrived" }), 201);
+  assert.ok(saved.arrivalSaleId);
+  assert.deepEqual(await retryCounts(), { clients: 2, appointments: 2, sales: 1, receipts: 1, journal: 2 });
+});
+
+for (const capacity of [1, 2]) {
+  test(`API commit between lookup and preflight replays at capacity ${capacity} without loser side effects`, async () => {
+    const call = await bundleApiFixture();
+    await db.exec(`update clinic_doctors set capacity=${capacity}`);
+    const base = apiDatabase();
+    let injected = false, reads = 0, creates = 0;
+    let winner: Record<string, unknown> = {};
+    serverClient.setSupabaseServerClientFactoryForTests(() => ({ ...base, rpc: async (name: string, args: Record<string, unknown>) => {
+      if (name === "read_crm_appointment_create_request") reads++;
+      if (name === "create_crm_appointment_once") creates++;
+      const result = await base.rpc(name, args);
+      if (name === "read_crm_appointment_create_request" && !injected) {
+        assert.equal(result.data, null);
+        injected = true;
+        // Deterministic interleaving with real SQL writes, not a canned success.
+        // Native two-connection lock contention remains a separate PostgreSQL test.
+        const committed = await base.rpc("create_crm_appointment_once", { ...args,
+          p_new_client: { id: id(80), workspace_id: id(1), full_name: "Concurrent fixture", status: "new" },
+          p_appointment: { workspace_id: id(1), client_id: id(80), created_by_staff_user_id: id(40),
+            client_name: "Concurrent fixture", doctor_id: id(42), doctor_name: "Test master",
+            starts_at: "2026-10-03T09:00:00+05:00", duration_minutes: 85, status: "confirmed",
+            service: "Fixture bundle", price_minor: 700050, service_items: serviceBundle }, p_client_match: "created" });
+        assert.equal(committed.error, null);
+        winner = (committed.data as Record<string, unknown>).appointment as Record<string, unknown>;
+      }
+      return result;
+    } }));
+    const reply = await call("appointments", "POST", keyedBooking());
+    const visit = apiItem(reply);
+    assert.equal(visit.id, winner.id);
+    assert.equal(visit.clientId, id(80));
+    assert.equal((reply.body.data as Record<string, unknown>).replayed, true);
+    assert.deepEqual(await retryCounts(), { clients: 2, appointments: 2, sales: 0, receipts: 1, journal: 0 });
+    assert.equal(reads, capacity === 1 ? 2 : 1);
+    assert.equal(creates, capacity === 1 ? 0 : 1);
+  });
 }
 
 test("API bundle create/read/edit/arrival preserves the quote, client and one exact KZT sale", async () => {
