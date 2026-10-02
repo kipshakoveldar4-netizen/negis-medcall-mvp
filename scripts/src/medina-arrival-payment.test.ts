@@ -207,8 +207,8 @@ const bundleBooking = () => ({
   startsAt: "2026-10-03T09:00:00+05:00", status: "confirmed",
   serviceItems: serviceBundle, priceMinor: 1, durationMinutes: 1, service: "Untrusted total",
 });
-async function bundleApiFixture() {
-  const call = await apiFixture();
+async function bundleApiFixture(role = "owner") {
+  const call = await apiFixture(role);
   await db.exec(`insert into clinic_services(id,workspace_id,doctor_id,name,base_price_minor,duration_minutes) values
     ('${id(50)}','${id(1)}','${id(42)}','First catalogue service',500050,45),
     ('${id(51)}','${id(1)}','${id(42)}','Second catalogue service',200000,30)`);
@@ -311,6 +311,87 @@ test("API rejects a foreign service in the bundle before creating a client or ap
   assert.equal((await row("select count(*) from clients")).count, 1);
   assert.equal((await row("select count(*) from appointments")).count, 1);
   assert.equal((await row("select count(*) from deals")).count, 0);
+});
+
+async function refuseFixtureInsert(table: "clients" | "appointments") {
+  // The failure occurs inside the real INSERT, after route preflight checks.
+  // Per-request savepoints must not roll back an earlier successful request.
+  await db.exec(`create function public.refuse_fixture_insert() returns trigger
+    language plpgsql as $$ begin
+      raise exception 'Isolated fixture insert refused' using errcode = '23514';
+    end $$;
+    create trigger refuse_fixture_insert before insert on public.${table}
+      for each row execute function public.refuse_fixture_insert()`);
+}
+async function stopRefusingFixtureInsert(table: "clients" | "appointments") {
+  await db.exec(`drop trigger refuse_fixture_insert on public.${table}`);
+}
+async function bookingCounts() {
+  return row(`select
+    (select count(*) from clients where workspace_id='${id(1)}') as clients,
+    (select count(*) from appointments where workspace_id='${id(1)}') as appointments,
+    (select count(*) from deals where workspace_id='${id(1)}') as deals`);
+}
+function assertWriteRefused(response: { status: number; body: Record<string, unknown> }) {
+  assert.equal(response.status, 502, JSON.stringify(response.body));
+  assert.equal(response.body.success, false);
+  assert.equal(response.body.data, undefined);
+  assert.doesNotMatch(JSON.stringify(response.body), /Isolated fixture insert refused|23514|fixture-not-a-secret/);
+}
+
+test("API client insert failure leaves no visit and a later retry creates one linked pair", async () => {
+  const call = await bundleApiFixture("doctor");
+  const baseline = await bookingCounts();
+  await refuseFixtureInsert("clients");
+  assertWriteRefused(await call("appointments", "POST", bundleBooking()));
+  assert.deepEqual(await bookingCounts(), baseline);
+  await stopRefusingFixtureInsert("clients");
+  const saved = apiItem(await call("appointments", "POST", bundleBooking()), 201);
+  assert.deepEqual(await bookingCounts(), { clients: 2, appointments: 2, deals: 0 });
+  assert.equal((await row(`select client_id from appointments where id='${saved.id}'`)).client_id, saved.clientId);
+});
+
+test("API refused appointment INSERT does not leave a new client behind", async () => {
+  const call = await bundleApiFixture("doctor");
+  const baseline = await bookingCounts();
+  await refuseFixtureInsert("appointments");
+  assertWriteRefused(await call("appointments", "POST", bundleBooking()));
+  assert.deepEqual(await bookingCounts(), baseline);
+});
+
+test("API retry after refused appointment INSERT creates only one new client", async () => {
+  const call = await bundleApiFixture("doctor");
+  await refuseFixtureInsert("appointments");
+  assertWriteRefused(await call("appointments", "POST", bundleBooking()));
+  await stopRefusingFixtureInsert("appointments");
+  const saved = apiItem(await call("appointments", "POST", bundleBooking()), 201);
+  assert.equal((await row(`select client_id from appointments where id='${saved.id}'`)).client_id, saved.clientId);
+  assert.deepEqual(await bookingCounts(), { clients: 2, appointments: 2, deals: 0 });
+});
+
+test("API failure and retry with an explicit client preserve that card and create one visit", async () => {
+  const call = await bundleApiFixture();
+  const original = await row(`select * from clients where id='${id(3)}'`);
+  const booking = { ...bundleBooking(), clientId: id(3) };
+  await refuseFixtureInsert("appointments");
+  assertWriteRefused(await call("appointments", "POST", booking));
+  assert.deepEqual(await bookingCounts(), { clients: 1, appointments: 1, deals: 0 });
+  assert.deepEqual(await row(`select * from clients where id='${id(3)}'`), original);
+  await stopRefusingFixtureInsert("appointments");
+  const saved = apiItem(await call("appointments", "POST", booking), 201);
+  assert.equal(saved.clientId, id(3));
+  assert.deepEqual(await bookingCounts(), { clients: 1, appointments: 2, deals: 0 });
+  assert.deepEqual(await row(`select * from clients where id='${id(3)}'`), original);
+});
+
+test("API repeated POST after a saved booking is refused before client creation at capacity one", async () => {
+  const call = await bundleApiFixture("doctor");
+  apiItem(await call("appointments", "POST", bundleBooking()), 201);
+  const stored = await bookingCounts();
+  const repeated = await call("appointments", "POST", bundleBooking());
+  assert.equal(repeated.status, 409, JSON.stringify(repeated.body));
+  assert.equal(repeated.body.code, "appointment_conflict");
+  assert.deepEqual(await bookingCounts(), stored);
 });
 
 test("arrival creates one paid KZT sale using visit price and client", async () => {
