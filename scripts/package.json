@@ -10,6 +10,8 @@
     "preview:site-deletion": "node ./fixtures/site-deletion-browser.mjs",
     "test:site-intake-http": "node --import tsx --test ./fixtures/site-intake-browser.test.mjs",
     "test:arrival-payment": "tsx --test ./src/medina-arrival-payment.test.ts",
+    "test:appointment-requests": "tsx --test ./src/medina-appointment-requests.test.ts",
+    "test:appointment-requests-postgres": "node --test ./fixtures/appointment-requests-postgres.test.mjs",
     "test:site-blog": "tsx --test ./src/medina-site-blog.test.ts",
     "test:site-editorial": "tsx --test ./src/medina-site-editorial.test.ts",
     "test:site-intake": "tsx --test ./src/medina-site-intake.test.ts ./src/medina-site-intake-handler.test.ts",
