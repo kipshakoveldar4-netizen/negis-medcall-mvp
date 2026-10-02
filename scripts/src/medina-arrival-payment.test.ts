@@ -30,7 +30,7 @@ async function rejects(sql: string, code: string) {
 }
 before(async () => {
   await db.exec("create role anon; create role authenticated; create role service_role bypassrls;");
-  const numbers = new Set([9, 10, 11, 12, 13, 14, 19, 20, 29, 30, 32, 33, 34, 36, 40, 45, 55, 61]);
+  const numbers = new Set([9, 10, 11, 12, 13, 14, 19, 20, 29, 30, 32, 33, 34, 36, 40, 43, 45, 55, 61]);
   for (const file of (await readdir(path.join(root, "migrations"))).sort()) {
     if (!numbers.has(Number(file.slice(0, 3)))) continue;
     try {
@@ -62,17 +62,20 @@ function apiDatabase() {
   return { from(table: string) {
     let operation = "select", single = false, columns = "*";
     let values: Record<string, unknown> = {};
-    const filters: Array<[string, unknown]> = [];
+    const filters: Array<[string, "=" | ">=" | "<" | "<=", unknown]> = [];
     let limit: number | undefined;
     async function execute() {
       const params: unknown[] = [];
-      const bind = (value: unknown) => { params.push(value); return `$${params.length}`; };
+      const bind = (value: unknown) => {
+        params.push(Array.isArray(value) ? JSON.stringify(value) : value);
+        return `$${params.length}`;
+      };
       const selection = columns === "*" ? "*" : columns.split(",").map(v => ident(v.trim())).join(",");
       let sql = `select ${selection} from ${ident(table)}`;
       if (operation === "update") sql = `update ${ident(table)} set ${Object.entries(values)
         .map(([key, value]) => `${ident(key)}=${bind(value)}`).join(",")}`;
       if (operation === "insert") sql = `insert into ${ident(table)} (${Object.keys(values).map(ident).join(",")}) values (${Object.values(values).map(bind).join(",")})`;
-      if (filters.length) sql += " where " + filters.map(([key, value]) => `${ident(key)}=${bind(value)}`).join(" and ");
+      if (filters.length) sql += " where " + filters.map(([key, operator, value]) => `${ident(key)}${operator}${bind(value)}`).join(" and ");
       if (operation !== "select") sql += ` returning ${selection}`;
       if (operation === "select" && limit !== undefined) sql += ` limit ${limit}`;
       if (operation !== "select") await db.exec("savepoint api_write");
@@ -88,7 +91,10 @@ function apiDatabase() {
     }
     const query = {
       select(value: string) { columns = value; return query; },
-      eq(key: string, value: unknown) { filters.push([key, value]); return query; },
+      eq(key: string, value: unknown) { filters.push([key, "=", value]); return query; },
+      gte(key: string, value: unknown) { filters.push([key, ">=", value]); return query; },
+      lt(key: string, value: unknown) { filters.push([key, "<", value]); return query; },
+      lte(key: string, value: unknown) { filters.push([key, "<=", value]); return query; },
       order() { return query; },
       limit(value: number) { assert.ok(Number.isInteger(value) && value > 0); limit = value; return query; },
       insert(value: Record<string, unknown>) { operation = "insert"; values = value; return query; },
@@ -114,13 +120,13 @@ async function apiFixture(role = "owner") {
     return { ok: true, status: 200, text: async () => JSON.stringify({ id: id(41) }) };
   }) as unknown as typeof fetch;
   serverClient.setSupabaseServerClientFactoryForTests(apiDatabase);
-  return async (route = "appointments", method = "PATCH", updates: Record<string, unknown> = { status: "arrived" }, workspace = 1) => {
+  return async (route = "appointments", method = "PATCH", updates: Record<string, unknown> = { status: "arrived" }, workspace = 1, appointmentId = id(10)) => {
     let status = 0; let body: Record<string, unknown> = {};
     const res = { setHeader() {}, status(value: number) { status = value; return res; },
       json(value: Record<string, unknown>) { body = value; } };
     await handler({ method, headers: { authorization: "Bearer fixture.test.signature" },
       query: { path: [route], workspaceId: id(workspace) },
-      body: method === "GET" ? undefined : { id: id(10), updates } }, res);
+      body: method === "GET" ? undefined : method === "POST" ? updates : { id: appointmentId, updates } }, res);
     return { status, body };
   };
 }
@@ -189,6 +195,122 @@ test("browser cannot forge the server-owned payment link", async () => {
   const response = await call("appointments", "PATCH", { status: "arrived", arrivalSaleId: id(99), arrival_sale_id: id(99) });
   assert.equal(response.status, 200);
   assert.equal((response.body.data as { item: Record<string, unknown> }).item.arrivalSaleId, (await sale()).id);
+});
+
+const serviceBundle = [
+  { serviceId: id(50), name: "First quoted service", priceMinor: 500050, durationMinutes: 45 },
+  { serviceId: id(51), name: "Second quoted service", priceMinor: 200000, durationMinutes: 30 },
+  { serviceId: "", name: "Free manual service", priceMinor: 0, durationMinutes: 10 },
+];
+const bundleBooking = () => ({
+  client: "Isolated new bundle client", doctorId: id(42), doctor: "Test master",
+  startsAt: "2026-10-03T09:00:00+05:00", status: "confirmed",
+  serviceItems: serviceBundle, priceMinor: 1, durationMinutes: 1, service: "Untrusted total",
+});
+async function bundleApiFixture() {
+  const call = await apiFixture();
+  await db.exec(`insert into clinic_services(id,workspace_id,doctor_id,name,base_price_minor,duration_minutes) values
+    ('${id(50)}','${id(1)}','${id(42)}','First catalogue service',500050,45),
+    ('${id(51)}','${id(1)}','${id(42)}','Second catalogue service',200000,30)`);
+  return call;
+}
+function apiItem(response: { status: number; body: Record<string, unknown> }, expectedStatus = 200) {
+  assert.equal(response.status, expectedStatus, JSON.stringify(response.body));
+  assert.equal(response.body.mode, "supabase");
+  assert.equal((response.body.data as Record<string, unknown>).unsaved, undefined);
+  return (response.body.data as { item: Record<string, unknown> }).item;
+}
+
+test("API bundle create/read/edit/arrival preserves the quote, client and one exact KZT sale", async () => {
+  const call = await bundleApiFixture();
+  const created = await call("appointments", "POST", bundleBooking());
+  const item = apiItem(created, 201);
+  const appointmentId = String(item.id);
+  assert.equal((created.body.data as Record<string, unknown>).clientCreated, true);
+  assert.ok(item.clientId && item.clientId !== id(3));
+  assert.deepEqual(item.serviceItems, serviceBundle);
+  assert.equal(item.priceMinor, 700050);
+  assert.equal(item.durationMinutes, 85);
+  assert.equal(item.serviceId, "");
+  const stored = await row(`select * from appointments where id='${appointmentId}'`);
+  assert.deepEqual(stored.service_items, serviceBundle);
+  assert.equal(stored.price_minor, 700050);
+  assert.equal(stored.duration_minutes, 85);
+  assert.equal(stored.service_id, null);
+  assert.equal(stored.client_id, item.clientId);
+  const clients = await call("clients", "GET");
+  assert.equal(clients.status, 200, JSON.stringify(clients.body));
+  assert.equal((clients.body.data as { items: Record<string, unknown>[] }).items.filter(client => client.id === item.clientId).length, 1);
+  const listed = await call("appointments", "GET");
+  assert.equal(listed.status, 200, JSON.stringify(listed.body));
+  assert.deepEqual((listed.body.data as { items: Record<string, unknown>[] }).items.find(visit => visit.id === appointmentId)?.serviceItems, serviceBundle);
+  assert.equal((await row("select count(*) from deals")).count, 0);
+
+  const revised = serviceBundle.map((service, index) => index === 1 ? { ...service, priceMinor: 300075 } : service);
+  const edited = apiItem(await call("appointments", "PATCH", { serviceItems: revised, priceMinor: 1, durationMinutes: 1 }, 1, appointmentId));
+  assert.deepEqual(edited.serviceItems, revised);
+  assert.equal(edited.priceMinor, 800125);
+  assert.equal(edited.durationMinutes, 85);
+  await db.exec(`update clinic_services set base_price_minor=9999999, name='Repriced catalogue', is_active=false where workspace_id='${id(1)}'`);
+  const arrived = apiItem(await call("appointments", "PATCH", { status: "arrived" }, 1, appointmentId));
+  assert.deepEqual(arrived.serviceItems, revised);
+  assert.equal(arrived.priceMinor, 800125);
+  const receipt = await row(`select * from deals where appointment_id='${appointmentId}'`);
+  assert.equal(receipt.id, arrived.arrivalSaleId);
+  assert.equal(receipt.amount_minor, 800125);
+  assert.equal(receipt.client_id, item.clientId);
+  assert.equal(receipt.responsible_user_id, id(40));
+  assert.equal(receipt.service_id, null, "the bundle must not count in full as just its first service");
+  assert.equal(receipt.title, revised.map(service => service.name).join(" + "));
+  assert.equal(receipt.currency, "KZT");
+  assert.equal(receipt.status, "paid");
+  const sales = await call("deals", "GET");
+  assert.equal(sales.status, 200, JSON.stringify(sales.body));
+  const deals = (sales.body.data as { items: Record<string, unknown>[] }).items;
+  assert.equal(deals.length, 1);
+  assert.equal(deals[0].amountMinor, 800125);
+  assert.equal(deals[0].appointmentId, appointmentId);
+  apiItem(await call("appointments", "PATCH", { status: "arrived" }, 1, appointmentId));
+  assert.equal((await row("select count(*) from deals")).count, 1);
+  assert.deepEqual(await row(`select * from deals where appointment_id='${appointmentId}'`), receipt);
+  assert.equal((await row("select count(*) from clients")).count, 2);
+});
+
+test("API bundle with a missing line price cannot become a zero-valued arrival sale", async () => {
+  const call = await bundleApiFixture();
+  const incomplete = serviceBundle.map((service, index) => index === 1 ? { ...service, priceMinor: null } : service);
+  const created = apiItem(await call("appointments", "POST", { ...bundleBooking(), serviceItems: incomplete }), 201);
+  assert.equal(created.priceMinor, null);
+  const response = await call("appointments", "PATCH", { status: "arrived" }, 1, String(created.id));
+  assert.equal(response.status, 409);
+  assert.equal(response.body.code, "arrival_payment");
+  const stored = await row(`select * from appointments where id='${created.id}'`);
+  assert.equal(stored.status, "confirmed");
+  assert.equal(stored.price_minor, null);
+  assert.deepEqual(stored.service_items, incomplete);
+  assert.equal((await row("select count(*) from deals")).count, 0);
+});
+
+test("API legacy total-only PATCH cannot change the stored bundle or record arrival", async () => {
+  const call = await bundleApiFixture();
+  const created = apiItem(await call("appointments", "POST", bundleBooking()), 201);
+  const response = await call("appointments", "PATCH", { priceMinor: 1, status: "arrived" }, 1, String(created.id));
+  assert.equal(response.status, 400, JSON.stringify(response.body));
+  const stored = await row(`select * from appointments where id='${created.id}'`);
+  assert.equal(stored.price_minor, 700050);
+  assert.equal(stored.status, "confirmed");
+  assert.deepEqual(stored.service_items, serviceBundle);
+  assert.equal((await row("select count(*) from deals")).count, 0);
+});
+
+test("API rejects a foreign service in the bundle before creating a client or appointment", async () => {
+  const call = await bundleApiFixture();
+  await db.exec(`update clinic_services set workspace_id='${id(2)}',doctor_id=null where id='${id(51)}'`);
+  const response = await call("appointments", "POST", bundleBooking());
+  assert.equal(response.status, 400, JSON.stringify(response.body));
+  assert.equal((await row("select count(*) from clients")).count, 1);
+  assert.equal((await row("select count(*) from appointments")).count, 1);
+  assert.equal((await row("select count(*) from deals")).count, 0);
 });
 
 test("arrival creates one paid KZT sale using visit price and client", async () => {
