@@ -87,3 +87,27 @@ test("MO5 tablet navigation, sidebar and content padding share the 1024px bounda
   assert.ok(tablet.includes("@media (max-width: 1023px), (pointer: coarse)"));
   assert.match(tablet, /\.negis-main input[^{]*\{[^}]*font-size:\s*16px\s*!important/s);
 });
+
+test("MO6 appointment date navigation has one control set and cannot flex-shrink into letters", async () => {
+  const source = await readFile(path.join(negisSrc, "pages", "AppointmentsPage.tsx"), "utf8");
+  const start = source.indexOf('role="group" aria-label="Выбор даты записи"');
+  assert.ok(start > 0, "calendar date controls have an accessible group");
+  const end = source.indexOf('aria-label="Вид календаря"', start);
+  assert.ok(end > start);
+  const toolbar = source.slice(start, end);
+  assert.equal((toolbar.match(/aria-label="Предыдущий день"/g) || []).length, 1);
+  assert.equal((toolbar.match(/aria-label="Следующий день"/g) || []).length, 1);
+  assert.equal((toolbar.match(/onClick=\{\(\) => setSelectedDate\(todayKey\)\}/g) || []).length, 1);
+  assert.match(toolbar, /flex min-w-0 flex-wrap/);
+  assert.match(toolbar, /w-full min-w-0 max-w-sm shrink-0 grid-cols-\[44px_minmax\(0,1fr\)_44px\]/);
+  assert.match(toolbar, /<time dateTime=\{selectedDate\} aria-live="polite"[^>]*min-h-16[^>]*\[overflow-wrap:normal\]/);
+  assert.match(toolbar, /aria-label="Дата календаря"[^>]*min-w-0 flex-1[^>]*type="date"/);
+  assert.match(toolbar, /disabled=\{selectedDate === todayKey\}/);
+});
+
+test("MO7 calendar view controls wrap by button, not by letter, and expose selection", async () => {
+  const source = await readFile(path.join(negisSrc, "pages", "AppointmentsPage.tsx"), "utf8");
+  assert.match(source, /aria-label="Вид календаря" className="flex flex-wrap gap-2/);
+  assert.match(source, /aria-pressed=\{view === mode\}[^>]*min-w-\[88px\] flex-1 whitespace-nowrap/);
+  assert.match(source, /seesWholeClinic \? \["grid", "day", "week", "month", "list"\] : \["day", "week", "month", "list"\]/);
+});

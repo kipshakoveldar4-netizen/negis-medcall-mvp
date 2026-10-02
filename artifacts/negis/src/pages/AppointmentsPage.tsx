@@ -2337,42 +2337,33 @@ export function AppointmentsPage() {
 
         <section className="neu-card">
           <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_360px] xl:items-start">
-            <div className="space-y-4">
-              <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
-                <button type="button" className="neu-btn px-4 py-2 text-sm" onClick={() => setSelectedDate(todayKey)}>Сегодня</button>
-                <div className="grid grid-cols-[44px_minmax(0,1fr)_44px] items-center gap-2 sm:max-w-md">
+            <div className="min-w-0 space-y-4">
+              <div role="group" aria-label="Выбор даты записи" className="flex min-w-0 flex-wrap items-center gap-3">
+                <div className="grid w-full min-w-0 max-w-sm shrink-0 grid-cols-[44px_minmax(0,1fr)_44px] items-center gap-2">
                   <button type="button" className="neu-icon-btn" onClick={() => setSelectedDate(addDaysKey(selectedDate, -1))} aria-label="Предыдущий день">
                     <ChevronLeft size={18} />
                   </button>
-                  <div className="rounded-2xl bg-[#F8FAFC] px-4 py-3 text-center text-sm font-black capitalize text-[#0F172A]">{formatDateLabel(selectedDate)}</div>
+                  <time dateTime={selectedDate} aria-live="polite" className="flex min-h-16 min-w-0 items-center justify-center rounded-lg bg-[#F8FAFC] px-2 py-2 text-center text-sm font-black capitalize text-[#0F172A] [overflow-wrap:normal]">{formatDateLabel(selectedDate)}</time>
                   <button type="button" className="neu-icon-btn" onClick={() => setSelectedDate(addDaysKey(selectedDate, 1))} aria-label="Следующий день">
                     <ChevronRight size={18} />
                   </button>
                 </div>
-                {/* Стрелки по дням: листать календарь — движение чаще, чем
-                    прыжок на произвольную дату через поле. */}
-                <button type="button" className="neu-btn px-3 py-2 text-sm" aria-label="Предыдущий день" onClick={() => setSelectedDate(addDaysKey(selectedDate, -1))}>
-                  ‹
-                </button>
-                <input className="neu-input w-full lg:w-auto" type="date" value={selectedDate} onChange={(event) => setSelectedDate(event.target.value || selectedDate)} />
-                <button type="button" className="neu-btn px-3 py-2 text-sm" aria-label="Следующий день" onClick={() => setSelectedDate(addDaysKey(selectedDate, 1))}>
-                  ›
-                </button>
-                {/* «Сегодня» — не украшение: уйдя на неделю вперёд, вернуться
-                    к текущему дню иначе можно только вспомнив число. День
-                    берётся в поясе КЛИНИКИ, а не телефона. */}
-                <button
-                  type="button"
-                  className={`neu-btn px-3 py-2 text-sm ${selectedDate === todayKey ? "text-[#0D9488]" : ""}`}
-                  onClick={() => setSelectedDate(todayKey)}
-                  disabled={selectedDate === todayKey}
-                >
-                  Сегодня
-                </button>
+                <div className="flex w-full min-w-0 max-w-sm items-center gap-2">
+                  <input aria-label="Дата календаря" className="neu-input min-w-0 flex-1" type="date" value={selectedDate} onChange={(event) => setSelectedDate(event.target.value || selectedDate)} />
+                  {/* Возврат к сегодняшнему дню именно в поясе клиники. */}
+                  <button
+                    type="button"
+                    className={`neu-btn shrink-0 px-3 py-2 text-sm ${selectedDate === todayKey ? "text-[#0D9488]" : ""}`}
+                    onClick={() => setSelectedDate(todayKey)}
+                    disabled={selectedDate === todayKey}
+                  >
+                    Сегодня
+                  </button>
+                </div>
               </div>
-              <div className={`grid ${seesWholeClinic ? "grid-cols-5" : "grid-cols-4"} gap-2 sm:max-w-md`}>
+              <div role="group" aria-label="Вид календаря" className="flex flex-wrap gap-2 sm:max-w-lg">
                 {((seesWholeClinic ? ["grid", "day", "week", "month", "list"] : ["day", "week", "month", "list"]) as CalendarView[]).map((mode) => (
-                  <button key={mode} type="button" className={`neu-btn px-3 py-2 text-sm ${view === mode ? "text-[#0D9488]" : ""}`} onClick={() => setView(mode)}>
+                  <button key={mode} type="button" aria-pressed={view === mode} className={`neu-btn min-w-[88px] flex-1 whitespace-nowrap px-2 py-2 text-sm ${view === mode ? "text-[#0D9488]" : ""}`} onClick={() => setView(mode)}>
                     {viewLabels[mode]}
                   </button>
                 ))}
