@@ -4025,9 +4025,7 @@ async function resolveAppointmentClientForCreate(
     last_visit_at: null,
     updated_at: new Date().toISOString(),
   };
-  const { error } = await supabase.from("clients").insert(createdRow);
-  if (error) throw new Error(`appointment client create: ${error.message}`);
-
+  // Prepare only. The new card and appointment must commit in one RPC below.
   return { clientId, created: true, match: "created", createdRow };
 }
 
@@ -4874,16 +4872,22 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
         });
       }
 
-      // Resolve the patient only after all slot/schedule checks pass. A refused
-      // booking must not leave a surprise client card behind. The appointment
-      // and its patient now share a durable id even when the operator typed a
-      // completely new person instead of selecting an existing card.
+      // Resolve after preflight; a new card is only prepared here. Its INSERT
+      // belongs to the same transaction as the appointment, including triggers.
       appointmentClientResolution = await resolveAppointmentClientForCreate(supabase, workspaceId, row);
       row.client_id = appointmentClientResolution.clientId;
     }
-    const runInsert = (candidate: JsonRecord) => (config.upsertConflict
-      ? supabase.from(config.table).upsert(candidate, { onConflict: config.upsertConflict }).select(config.selectColumns ?? "*").single()
-      : supabase.from(config.table).insert(candidate).select(config.selectColumns ?? "*").single());
+    const newAppointmentClient = appointmentClientResolution?.createdRow;
+    const runInsert = async (candidate: JsonRecord) => {
+      if (newAppointmentClient) {
+        return await supabase.rpc("create_crm_appointment_with_new_client", {
+          p_workspace_id: workspaceId, p_client: newAppointmentClient, p_appointment: candidate,
+        });
+      }
+      return await (config.upsertConflict
+        ? supabase.from(config.table).upsert(candidate, { onConflict: config.upsertConflict }).select(config.selectColumns ?? "*").single()
+        : supabase.from(config.table).insert(candidate).select(config.selectColumns ?? "*").single());
+    };
 
     let { data, error } = await runInsert(row);
 
@@ -4909,7 +4913,7 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
     // Та же логика для 032: запись и продажа создавались до этой ветки и
     // обязаны создаваться в окне между деплоем и миграцией. Теряется только
     // связь с услугой — и оператор узнаёт из лога, какой именно.
-    if (error && (resource === "appointments" || resource === "deals")) {
+    if (error && !newAppointmentClient && (resource === "appointments" || resource === "deals")) {
       const retried = await retryWithoutMissingColumns(resource, row, "creating", { data, error }, runInsert);
       data = retried.data as typeof data;
       error = retried.error as typeof error;
@@ -4917,6 +4921,14 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
     }
 
     if (error) {
+      if (newAppointmentClient && ["PGRST202", "42883", "42703", "PGRST204"].includes(readString(error.code))) {
+        return sendJson(res, 503, {
+          ...errorBody("Не удалось сохранить запись: требуется обновление базы", [
+            "Администратору нужно проверить миграцию 063. Клиент и запись не сохранены.",
+          ]),
+          code: "appointment_create_unavailable",
+        });
+      }
       const paymentError = arrivalPaymentError(error);
       if (paymentError && (resource === "appointments" || resource === "deals")) {
         return sendJson(res, 409, { ...errorBody(paymentError), code: "arrival_payment" });

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { withAppointmentCreateRpcSpy } from "./appointment-create-rpc-spy.js";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
@@ -45,6 +46,7 @@ const SERVICE_ID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 const HIDDEN_SERVICE_ID = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
 const FOREIGN_SERVICE_ID = "99999999-9999-4999-8999-999999999999";
 const APPOINTMENT_ID = "abababab-abab-4bab-8bab-abababababab";
+const CLIENT_ID = "12121212-1212-4121-8121-121212121212";
 const TOKEN = "header.payload.signature";
 
 type QueryLog = { table: string; op: string; filters: Record<string, unknown> };
@@ -199,7 +201,7 @@ async function loadRouter(options: {
   };
 
   supabaseModule.setSupabaseServerClientFactoryForTests(() =>
-    spyClient(clientRows, log, options.injected ?? [], new Set(options.missingColumns ?? [])));
+    withAppointmentCreateRpcSpy(spyClient(clientRows, log, options.injected ?? [], new Set(options.missingColumns ?? []))));
 
   const routerModule = (await import(pathToFileURL(routerPath).href)) as {
     default: (req: unknown, res: MockResponse) => Promise<unknown>;
@@ -588,15 +590,15 @@ test("CS11 длительность берётся из услуги, но вв�
   assert.equal(writtenTo(explicit.log, "appointments")?.duration_minutes, 90, "тело всегда сильнее каталога");
 });
 
-test("CS12 запись создаётся и до применения миграции, теряя только связь", async () => {
+test("CS12 запись существующего клиента до миграции теряет только связь", async () => {
   const call = await loadRouter({
-    rows: { clinic_services: [activeService] },
+    rows: { clinic_services: [activeService], clients: [{ id: CLIENT_ID, workspace_id: WORKSPACE_A }] },
     missingColumns: ["service_id"],
   });
   const { res, log, warnings: warned } = await call({
     resource: "appointments",
     method: "POST",
-    body: { client: "Пациент", serviceId: SERVICE_ID, startsAt: "2026-09-01T09:00:00.000Z" },
+    body: { client: "Пациент", clientId: CLIENT_ID, serviceId: SERVICE_ID, startsAt: "2026-09-01T09:00:00.000Z" },
   });
 
   assert.equal(res.statusCode, 201, JSON.stringify(res.body));
@@ -671,12 +673,12 @@ test("CS19 продажа связывается с услугой и на пр�
   );
 });
 
-test("CS20 запись создаётся и когда отсутствие колонки приходит из кэша схемы", async () => {
+test("CS20 запись существующего клиента обрабатывает отсутствие колонки в кэше схемы", async () => {
   // PostgREST отвергает запись в неизвестную колонку кодом PGRST204, не доходя
   // до Postgres. Откат, знающий только 42703, не сработал бы ни разу на hosted
   // Supabase — и всё окно между деплоем и миграцией запись не создавалась бы.
   const call = await loadRouter({
-    rows: { clinic_services: [activeService] },
+    rows: { clinic_services: [activeService], clients: [{ id: CLIENT_ID, workspace_id: WORKSPACE_A }] },
     injected: [{
       table: "appointments",
       op: "insert",
@@ -687,7 +689,7 @@ test("CS20 запись создаётся и когда отсутствие к
   const { res, warnings: warned } = await call({
     resource: "appointments",
     method: "POST",
-    body: { client: "Пациент", serviceId: SERVICE_ID, startsAt: "2026-09-01T09:00:00.000Z" },
+    body: { client: "Пациент", clientId: CLIENT_ID, serviceId: SERVICE_ID, startsAt: "2026-09-01T09:00:00.000Z" },
   });
 
   // Заглушка отвечает отказом на каждую вставку, поэтому вторая попытка тоже

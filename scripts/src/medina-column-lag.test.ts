@@ -4,7 +4,8 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-// Запись клиента переживает базу, отставшую от кода.
+// Запись существующего клиента переживает базу, отставшую от кода.
+// New-client creation requires atomic RPC 063; its fail-closed path has SQL tests.
 //
 // Что было. Мастер салона не мог записать ни одного клиента: «Не удалось
 // создать запись: Сбой на стороне сервиса». В логе Vercel — отказ базы «Could
@@ -220,6 +221,7 @@ async function callRouter(options: {
 }
 
 const booking = (over: Record<string, unknown> = {}) => ({
+  clientId: CLIENT_ID,
   client: "Мария Ли",
   phone: "+7 701 245 18 44",
   doctor: "Айгуль",

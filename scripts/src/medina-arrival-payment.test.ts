@@ -30,7 +30,7 @@ async function rejects(sql: string, code: string) {
 }
 before(async () => {
   await db.exec("create role anon; create role authenticated; create role service_role bypassrls;");
-  const numbers = new Set([9, 10, 11, 12, 13, 14, 19, 20, 29, 30, 32, 33, 34, 36, 40, 43, 45, 55, 61]);
+  const numbers = new Set([9, 10, 11, 12, 13, 14, 19, 20, 29, 30, 32, 33, 34, 36, 40, 43, 45, 55, 61, 63]);
   for (const file of (await readdir(path.join(root, "migrations"))).sort()) {
     if (!numbers.has(Number(file.slice(0, 3)))) continue;
     try {
@@ -54,12 +54,28 @@ afterEach(() => db.exec("rollback"));
 
 // Execute real route queries and trigger writes, rather than returning canned
 // successful API responses. This adapter is intentionally test-local/read-write.
-function apiDatabase() {
+function apiDatabase(rpcRole: "service_role" | "anon" | "authenticated" = "service_role") {
   const ident = (value: string) => {
     assert.match(value, /^[a-z_][a-z0-9_]*$/);
     return `"${value}"`;
   };
-  return { from(table: string) {
+  return {
+    async rpc(name: string, args: Record<string, unknown>) {
+      assert.equal(name, "create_crm_appointment_with_new_client");
+      await db.exec(`savepoint api_rpc; set local role ${rpcRole}`);
+      try {
+        const result = await db.query<{ item: Record<string, unknown> }>(
+          "select public.create_crm_appointment_with_new_client($1::uuid, $2::jsonb, $3::jsonb) as item",
+          [args.p_workspace_id, JSON.stringify(args.p_client), JSON.stringify(args.p_appointment)],
+        );
+        await db.exec("reset role; release savepoint api_rpc");
+        return { data: result.rows[0].item, error: null };
+      } catch (error) {
+        await db.exec("rollback to savepoint api_rpc; release savepoint api_rpc");
+        return { data: null, error: { code: (error as { code: string }).code, message: "Isolated database rejected the RPC" } };
+      }
+    },
+    from(table: string) {
     let operation = "select", single = false, columns = "*";
     let values: Record<string, unknown> = {};
     const filters: Array<[string, "=" | ">=" | "<" | "<=", unknown]> = [];
@@ -313,7 +329,7 @@ test("API rejects a foreign service in the bundle before creating a client or ap
   assert.equal((await row("select count(*) from deals")).count, 0);
 });
 
-async function refuseFixtureInsert(table: "clients" | "appointments") {
+async function refuseFixtureInsert(table: "clients" | "appointments" | "deals") {
   // The failure occurs inside the real INSERT, after route preflight checks.
   // Per-request savepoints must not roll back an earlier successful request.
   await db.exec(`create function public.refuse_fixture_insert() returns trigger
@@ -323,7 +339,7 @@ async function refuseFixtureInsert(table: "clients" | "appointments") {
     create trigger refuse_fixture_insert before insert on public.${table}
       for each row execute function public.refuse_fixture_insert()`);
 }
-async function stopRefusingFixtureInsert(table: "clients" | "appointments") {
+async function stopRefusingFixtureInsert(table: "clients" | "appointments" | "deals") {
   await db.exec(`drop trigger refuse_fixture_insert on public.${table}`);
 }
 async function bookingCounts() {
@@ -392,6 +408,146 @@ test("API repeated POST after a saved booking is refused before client creation 
   assert.equal(repeated.status, 409, JSON.stringify(repeated.body));
   assert.equal(repeated.body.code, "appointment_conflict");
   assert.deepEqual(await bookingCounts(), stored);
+});
+
+test("API refused arrived INSERT rolls back the client and retry records one linked sale", async () => {
+  const call = await bundleApiFixture("doctor");
+  const incomplete = serviceBundle.map(service => ({ ...service, priceMinor: null }));
+  const refused = await call("appointments", "POST", { ...bundleBooking(), status: "arrived", serviceItems: incomplete });
+  assert.equal(refused.status, 409, JSON.stringify(refused.body));
+  assert.equal(refused.body.code, "arrival_payment");
+  assert.deepEqual(await bookingCounts(), { clients: 1, appointments: 1, deals: 0 });
+  assert.equal((await row("select count(*) from audit_logs")).count, 0);
+  const saved = apiItem(await call("appointments", "POST", { ...bundleBooking(), status: "arrived" }), 201);
+  assert.ok(saved.arrivalSaleId);
+  assert.deepEqual(await bookingCounts(), { clients: 2, appointments: 2, deals: 1 });
+  const receipt = await row(`select * from deals where id='${saved.arrivalSaleId}'`);
+  assert.equal(receipt.client_id, saved.clientId);
+  assert.equal(receipt.appointment_id, saved.id);
+  assert.equal(receipt.amount_minor, 700050);
+});
+
+test("API sale INSERT failure rolls back the new card and arrived appointment", async () => {
+  const call = await bundleApiFixture();
+  await refuseFixtureInsert("deals");
+  assertWriteRefused(await call("appointments", "POST", { ...bundleBooking(), status: "arrived" }));
+  assert.deepEqual(await bookingCounts(), { clients: 1, appointments: 1, deals: 0 });
+  assert.equal((await row("select count(*) from audit_logs")).count, 0);
+});
+
+test("API without migration 063 refuses new-card creation but keeps existing-card booking", async () => {
+  const call = await bundleApiFixture();
+  await db.exec("drop function public.create_crm_appointment_with_new_client(uuid, jsonb, jsonb)");
+  const refused = await call("appointments", "POST", bundleBooking());
+  assert.equal(refused.status, 503, JSON.stringify(refused.body));
+  assert.equal(refused.body.code, "appointment_create_unavailable");
+  assert.deepEqual(await bookingCounts(), { clients: 1, appointments: 1, deals: 0 });
+  assert.equal((await row("select count(*) from audit_logs")).count, 0);
+  assert.equal(apiItem(await call("appointments", "POST", { ...bundleBooking(), clientId: id(3) }), 201).clientId, id(3));
+  assert.deepEqual(await bookingCounts(), { clients: 1, appointments: 2, deals: 0 });
+});
+
+test("API missing column inside atomic RPC refuses the whole pair without lossy retry", async () => {
+  const call = await bundleApiFixture();
+  await db.exec("alter table appointments drop column source");
+  const refused = await call("appointments", "POST", bundleBooking());
+  assert.equal(refused.status, 503, JSON.stringify(refused.body));
+  assert.equal(refused.body.code, "appointment_create_unavailable");
+  assert.deepEqual(await bookingCounts(), { clients: 1, appointments: 1, deals: 0 });
+});
+
+test("API RPC schema-cache refusal never falls back to separate INSERTs", async () => {
+  const call = await bundleApiFixture();
+  let attempts = 0;
+  serverClient.setSupabaseServerClientFactoryForTests(() => ({
+    ...apiDatabase(),
+    async rpc() {
+      attempts += 1;
+      return { data: null, error: { code: "PGRST202", message: "Isolated schema cache does not know this function" } };
+    },
+  }));
+  const response = await call("appointments", "POST", bundleBooking());
+  assert.equal(response.status, 503, JSON.stringify(response.body));
+  assert.equal(response.body.code, "appointment_create_unavailable");
+  assert.equal(attempts, 1);
+  assert.deepEqual(await bookingCounts(), { clients: 1, appointments: 1, deals: 0 });
+  assert.equal((await row("select count(*) from audit_logs")).count, 0);
+});
+
+test("API atomic new card preserves contacts and a later phone match reuses it unchanged", async () => {
+  const call = await bundleApiFixture();
+  const created = apiItem(await call("appointments", "POST", {
+    ...bundleBooking(), phone: "+7 700 000 00 01", whatsapp: "+7 700 000 00 02",
+  }), 201);
+  const card = await row(`select * from clients where id='${created.clientId}'`);
+  assert.equal(card.phone_normalized, "+77000000001");
+  assert.equal(card.whatsapp_normalized, "+77000000002");
+  const later = await call("appointments", "POST", {
+    ...bundleBooking(), phone: "8 700 000 00 01", startsAt: "2026-10-03T12:00:00+05:00",
+  });
+  assert.equal(apiItem(later, 201).clientId, created.clientId);
+  assert.equal((later.body.data as Record<string, unknown>).clientCreated, false);
+  assert.equal((later.body.data as Record<string, unknown>).clientMatch, "phone");
+  assert.deepEqual(await row(`select * from clients where id='${created.clientId}'`), card);
+  assert.deepEqual(await bookingCounts(), { clients: 2, appointments: 3, deals: 0 });
+});
+
+const atomicRpcArgs = () => ({
+  p_workspace_id: id(1),
+  p_client: { id: id(70), workspace_id: id(1), full_name: "Isolated atomic client", status: "new" },
+  p_appointment: { workspace_id: id(1), client_id: id(70), client_name: "Isolated atomic client", status: "scheduled", duration_minutes: 60 },
+});
+for (const role of ["anon", "authenticated"] as const) {
+  test(`atomic creation RPC refuses direct ${role} execution`, async () => {
+    const response = await apiDatabase(role).rpc("create_crm_appointment_with_new_client", atomicRpcArgs());
+    assert.equal(response.error?.code, "42501");
+    assert.deepEqual(await bookingCounts(), { clients: 1, appointments: 1, deals: 0 });
+  });
+}
+
+test("atomic creation RPC rejects mixed workspaces, mismatched links and receipt injection", async () => {
+  const base = atomicRpcArgs();
+  for (const changes of [
+    { p_workspace_id: id(2) },
+    { p_client: { ...base.p_client, workspace_id: id(2) } },
+    { p_appointment: { ...base.p_appointment, workspace_id: id(2) } },
+    { p_appointment: { ...base.p_appointment, client_id: id(3) } },
+    { p_appointment: { ...base.p_appointment, arrival_sale_id: id(99) } },
+  ]) {
+    const response = await apiDatabase().rpc("create_crm_appointment_with_new_client", { ...base, ...changes });
+    assert.equal(response.error?.code, "22023");
+    assert.deepEqual(await bookingCounts(), { clients: 1, appointments: 1, deals: 0 });
+  }
+});
+
+test("atomic creation RPC cannot overwrite an existing client or accept a foreign doctor", async () => {
+  await bundleApiFixture();
+  const original = await row(`select * from clients where id='${id(3)}'`);
+  const base = atomicRpcArgs();
+  const collision = await apiDatabase().rpc("create_crm_appointment_with_new_client", {
+    ...base, p_client: { ...base.p_client, id: id(3) }, p_appointment: { ...base.p_appointment, client_id: id(3) },
+  });
+  assert.equal(collision.error?.code, "23505");
+  assert.deepEqual(await row(`select * from clients where id='${id(3)}'`), original);
+  await db.exec(`insert into clinic_doctors(id,workspace_id,full_name) values('${id(80)}','${id(2)}','Foreign doctor')`);
+  const foreign = await apiDatabase().rpc("create_crm_appointment_with_new_client", {
+    ...base, p_appointment: { ...base.p_appointment, doctor_id: id(80) },
+  });
+  assert.equal(foreign.error?.code, "22023");
+  assert.deepEqual(await bookingCounts(), { clients: 1, appointments: 1, deals: 0 });
+});
+
+test("migration 063 is repeatable without backfill, activation or public RPC grants", async () => {
+  const before = await row(`select jsonb_agg(w order by id) as rows from workspaces w`);
+  const source = await readFile(path.join(root, "migrations/063_atomic_appointment_client.sql"), "utf8");
+  await db.exec(source.replace(/^begin;$/m, "").replace(/^commit;$/m, ""));
+  assert.deepEqual(await row(`select jsonb_agg(w order by id) as rows from workspaces w`), before);
+  assert.deepEqual(await bookingCounts(), { clients: 1, appointments: 1, deals: 0 });
+  assert.deepEqual(await row(`select
+    has_function_privilege('anon', 'public.create_crm_appointment_with_new_client(uuid,jsonb,jsonb)', 'execute') as anon,
+    has_function_privilege('authenticated', 'public.create_crm_appointment_with_new_client(uuid,jsonb,jsonb)', 'execute') as authenticated,
+    has_function_privilege('service_role', 'public.create_crm_appointment_with_new_client(uuid,jsonb,jsonb)', 'execute') as service`),
+  { anon: false, authenticated: false, service: true });
 });
 
 test("arrival creates one paid KZT sale using visit price and client", async () => {
