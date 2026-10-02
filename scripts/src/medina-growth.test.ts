@@ -124,6 +124,22 @@ test("payment retry is idempotent and changed retry is rejected", async () => {
   assert.equal((await row("select count(*)::int as n from public.growth_partner_commissions")).n, 1);
 });
 
+for (const change of [
+  { name: "workspace", workspace: 2, subscription: 602, currency: "KZT", paidAt: nowPaid },
+  { name: "subscription", workspace: 1, subscription: 602, currency: "KZT", paidAt: nowPaid },
+  { name: "currency", workspace: 1, subscription: 601, currency: "USD", paidAt: nowPaid },
+  { name: "payment time", workspace: 1, subscription: 601, currency: "KZT", paidAt: "2026-01-02T12:00:00Z" },
+]) {
+  test(`payment receipt replay cannot change ${change.name} or mint a second commission`, async () => {
+    await bind();
+    const original = await pay();
+    await rejects(() => pay(1001, change.workspace, change.subscription, "100000", change.currency, change.paidAt), /payment_request_conflict/);
+    assert.deepEqual(await pay(), original);
+    assert.equal((await row("select count(*)::int as n from public.platform_subscription_payments")).n, 1);
+    assert.equal((await row("select count(*)::int as n from public.growth_partner_commissions")).n, 1);
+  });
+}
+
 test("changed tariffs do not change historical commissions; renewal follows clinic across subscription rows", async () => {
   await bind(); await pay();
   await db.exec(`update public.growth_partners set first_commission_bps=5000,renewal_commission_bps=1000 where id='${id(301)}';
@@ -181,6 +197,21 @@ test("payout cannot exceed balance; retries do not withdraw twice", async () => 
   await rejects(() => payout(2001, "1"), /payout_request_conflict/);
 });
 
+for (const change of [
+  { name: "recipient", partner: 302, currency: "KZT", paidAt: nowPaid },
+  { name: "currency", partner: 301, currency: "USD", paidAt: nowPaid },
+  { name: "payment time", partner: 301, currency: "KZT", paidAt: "2026-01-02T12:00:00Z" },
+]) {
+  test(`payout receipt replay cannot change ${change.name}`, async () => {
+    await bind(); await pay();
+    const original = await payout();
+    await rejects(() => row("select public.confirm_growth_partner_payout($1, $2, $3, $4, $5, $6) as value",
+      [id(change.partner), "10000", change.currency, change.paidAt, id(2001), id(900)]), /payout_request_conflict/);
+    assert.deepEqual(await payout(), original);
+    assert.equal((await row("select count(*)::int as n from public.growth_partner_payouts")).n, 1);
+  });
+}
+
 test("KZT balance cannot pay a USD withdrawal", async () => {
   await bind(); await pay();
   await rejects(() => payout(2001, "1", 301, "USD"), /insufficient_partner_balance/);
@@ -208,6 +239,17 @@ test("service role uses functions, cannot overwrite referrals or mint receipts d
   await rejects(() => db.exec("update public.growth_referrals set source='promo_code'"), /permission denied/);
   await rejects(() => db.exec("delete from public.growth_partner_commissions"), /permission denied/);
   await rejects(() => db.exec("insert into public.platform_subscription_payments default values"), /permission denied/);
+});
+
+test("browser database roles cannot invoke payment or payout confirmation even with known identifiers", async () => {
+  for (const role of ["anon", "authenticated"]) {
+    await db.exec(`set local role ${role}`);
+    await rejects(() => pay(), /permission denied/);
+    await rejects(() => payout(), /permission denied/);
+    await db.exec("reset role");
+  }
+  assert.equal((await row("select count(*)::int as n from public.platform_subscription_payments")).n, 0);
+  assert.equal((await row("select count(*)::int as n from public.growth_partner_payouts")).n, 0);
 });
 
 test("operator acceptance checks identity and approval", async () => {
