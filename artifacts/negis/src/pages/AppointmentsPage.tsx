@@ -20,6 +20,7 @@ import { PageLayout } from "@/components/layout/PageLayout";
 import { MetricCard } from "@/components/ui/metric-card";
 import { apiUrl, crmFetch } from "@/lib/api";
 import { editAppointmentClient, matchesAppointmentClientHistory, selectAppointmentClient } from "@/lib/appointmentClient";
+import { canReleaseAppointmentAttempt, confirmedAppointmentCreate, isCurrentAppointmentAttempt, mergeCreatedAppointment, newAppointmentCreateAttempt, type AppointmentCreateAttempt } from "@/lib/appointmentCreateAttempt";
 import { isRealWorkspace, readWorkspaceId as readCurrentWorkspaceId, useDemoCollection, workspaceScopedKey } from "@/lib/demoStorage";
 import { formatPhone, toTelHref, toWhatsappHref } from "@/lib/phone";
 import { clinicToday, dayKeyInZone, isOnClinicDay } from "@/lib/clinicDay";
@@ -952,7 +953,7 @@ function AppointmentCard({
 }
 
 export function AppointmentsPage() {
-  const { vertical, userRole } = useAuth();
+  const { vertical, userRole, user } = useAuth();
   const terms = termsFor(vertical);
   const [, setLocation] = useLocation();
   // Заявка, из которой пришла эта запись: после успешного создания она сама
@@ -1008,6 +1009,32 @@ export function AppointmentsPage() {
   // отправлял второй POST: при allowConflict сервер не проверяет ничего, а
   // toRow не переносит клиентский id — получались две одинаковые записи.
   const [saving, setSaving] = useState(false);
+  const submitLock = useRef(false);
+  const createAttempt = useRef<AppointmentCreateAttempt | null>(null);
+  const [unconfirmedCreate, setUnconfirmedCreate] = useState(false);
+  const currentCreateScope = useRef({ workspaceId: readCurrentWorkspaceId(), actorId: user?.id || "" });
+  currentCreateScope.current = { workspaceId: readCurrentWorkspaceId(), actorId: user?.id || "" };
+
+  useEffect(() => {
+    const attempt = createAttempt.current;
+    if (attempt && !isCurrentAppointmentAttempt(attempt, readCurrentWorkspaceId(), user?.id || "")) {
+      createAttempt.current = null;
+      setUnconfirmedCreate(false);
+      setModalOpen(false);
+      setForm(defaultForm(todayKeyAtLoad));
+    }
+  }, [user?.id, currentCreateScope.current.workspaceId]);
+
+  useEffect(() => {
+    if (!saving && !unconfirmedCreate) return;
+    const warnBeforeLeaving = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
+    window.addEventListener("beforeunload", warnBeforeLeaving);
+    return () => window.removeEventListener("beforeunload", warnBeforeLeaving);
+  }, [saving, unconfirmedCreate]);
+
+  const closeAppointmentForm = () => {
+    if (!submitLock.current && !createAttempt.current?.uncertain) setModalOpen(false);
+  };
 
   const [catalog, setCatalog] = useState<CatalogService[]>([]);
   // Прайс, суженный под выбранного в форме мастера. Отдельное состояние, а не
@@ -1863,39 +1890,63 @@ export function AppointmentsPage() {
   const createAppointment = async (appointment: Appointment, allowConflict: boolean, allowOutsideSchedule = false) => {
     if (!isRealWorkspace()) {
       void addItem(appointment);
-      return { clientCreated: false };
+      return { clientCreated: false, replayed: false };
     }
 
-    const response = await crmFetch(`/api/crm/appointments?workspaceId=${encodeURIComponent(readCurrentWorkspaceId())}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        ...appointmentToApi(appointment),
-        workspaceId: readCurrentWorkspaceId(),
-        ...(allowConflict ? { allowConflict: true } : {}),
-        ...(allowOutsideSchedule ? { allowOutsideSchedule: true } : {}),
-      }),
+    const scope = currentCreateScope.current;
+    const attempt = createAttempt.current ?? newAppointmentCreateAttempt(scope.workspaceId, scope.actorId, {
+      ...appointmentToApi(appointment), workspaceId: scope.workspaceId,
+      ...(allowConflict ? { allowConflict: true } : {}),
+      ...(allowOutsideSchedule ? { allowOutsideSchedule: true } : {}),
     });
-    const body = await safeJson(response);
+    if (!isCurrentAppointmentAttempt(attempt, scope.workspaceId, scope.actorId)) throw new Error("Аккаунт записи изменился. Откройте форму заново.");
+    createAttempt.current = attempt;
+    let response: Response | undefined;
+    let body: ApiResponse | null = null;
+    try {
+      response = await crmFetch(`/api/crm/appointments?workspaceId=${encodeURIComponent(attempt.workspaceId)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...attempt.payload, requestKey: attempt.requestKey }),
+      });
+      body = await safeJson(response);
+      if (createAttempt.current !== attempt || !isCurrentAppointmentAttempt(attempt, currentCreateScope.current.workspaceId, currentCreateScope.current.actorId)) {
+        throw new Error("Аккаунт записи изменился. Ответ не добавлен в новое пространство.");
+      }
 
-    const conflict = conflictFromBody(body);
-    if (conflict) throw conflict;
-    const outside = scheduleRefusalFromBody(body);
-    if (outside) throw outside;
+      const conflict = conflictFromBody(body);
+      if (conflict) throw conflict;
+      const outside = scheduleRefusalFromBody(body);
+      if (outside) throw outside;
 
-    if (!response.ok || body?.success !== true || body.mode !== "supabase") {
-      const record = asRecord(body);
-      throw new ServerRefusalError(
-        readString(record.code),
-        readString(record.error) || "Не удалось создать запись на сервере",
-        Array.isArray(record.details) ? record.details.map((item) => readString(item)) : [],
-      );
+      if (!response.ok || body?.success !== true || body.mode !== "supabase") {
+        const record = asRecord(body);
+        throw new ServerRefusalError(
+          readString(record.code),
+          readString(record.error) || "Не удалось создать запись на сервере",
+          Array.isArray(record.details) ? record.details.map((item) => readString(item)) : [],
+        );
+      }
+
+      const saved = confirmedAppointmentCreate(body);
+      if (!saved) throw new Error("Сервер не подтвердил сохранённую запись. Повторите проверку.");
+      setItems((current) => mergeCreatedAppointment(current, appointmentFromApi(saved)));
+      warnAboutUnsaved(unsavedFromBody(body));
+      createAttempt.current = null;
+      setUnconfirmedCreate(false);
+      return { clientCreated: body.data?.clientCreated === true, replayed: body.data?.replayed === true };
+    } catch (error) {
+      if (createAttempt.current === attempt && isCurrentAppointmentAttempt(attempt, currentCreateScope.current.workspaceId, currentCreateScope.current.actorId)) {
+        if (canReleaseAppointmentAttempt(attempt, response?.status ?? 0, body)) {
+          createAttempt.current = null;
+          setUnconfirmedCreate(false);
+        } else {
+          attempt.uncertain = true;
+          setUnconfirmedCreate(true);
+        }
+      }
+      throw error;
     }
-
-    const saved = body.data?.item;
-    setItems((current) => [saved ? appointmentFromApi(saved) : appointment, ...current]);
-    warnAboutUnsaved(unsavedFromBody(body));
-    return { clientCreated: body.data?.clientCreated === true };
   };
 
   /**
@@ -1959,8 +2010,9 @@ export function AppointmentsPage() {
   };
 
   const submitForm = async (allowConflict = false, allowOutsideSchedule = false) => {
-    if (saving) return;
-    if (!form.client.trim()) {
+    if (submitLock.current || saving) return;
+    const retrying = !editingId && createAttempt.current?.uncertain === true;
+    if (!retrying && !form.client.trim()) {
       toast.error("Укажите имя клиента");
       return;
     }
@@ -1970,7 +2022,7 @@ export function AppointmentsPage() {
     // замыслу, и «Сохранить» не срабатывало бы никогда. Регистратор и владелец
     // телефон видят, и для них требование остаётся.
     const contactsHidden = userRole === "doctor";
-    if (!contactsHidden && !form.phone.trim()) {
+    if (!retrying && !contactsHidden && !form.phone.trim()) {
       toast.error("Укажите телефон клиента");
       return;
     }
@@ -1988,7 +2040,7 @@ export function AppointmentsPage() {
       || "";
     let appointment: Appointment;
     try {
-      appointment = appointmentFromForm(
+      appointment = retrying ? appointmentFromApi(createAttempt.current!.payload) : appointmentFromForm(
         { ...form, serviceId: resolvedServiceId, doctorId: resolvedDoctorId },
         editingId || undefined,
       );
@@ -2002,12 +2054,14 @@ export function AppointmentsPage() {
     // этот массив может быть усечён, и он не знает, что записал коллега
     // секунду назад с другого устройства.
     const localConflict = findConflict(appointment);
-    if (localConflict && !allowConflict) {
+    if (!retrying && localConflict && !allowConflict) {
       setConflictMessage(`У ${terms.specialistGenitive} уже есть запись на это время: ${localConflict.client}, ${timeKeyFromStartsAt(localConflict.startsAt)}. Выберите другое время.`);
       return;
     }
 
+    submitLock.current = true;
     setSaving(true);
+    setConflictMessage("");
     setScheduleMessage("");
     try {
     if (editingId) {
@@ -2042,7 +2096,7 @@ export function AppointmentsPage() {
     } else {
       try {
         const result = await createAppointment(appointment, allowConflict, allowOutsideSchedule);
-        toast.success(result.clientCreated ? "Запись создана, клиент добавлен в базу" : "Запись создана");
+        toast.success(result.replayed ? "Запись уже сохранена. Повтор не создал дубликат." : result.clientCreated ? "Запись создана, клиент добавлен в базу" : "Запись создана");
         if (prefillLeadRef.current) {
           const bookedLeadId = prefillLeadRef.current;
           prefillLeadRef.current = "";
@@ -2058,7 +2112,9 @@ export function AppointmentsPage() {
           return;
         }
         console.warn("appointments: create refused", error instanceof Error ? error.message : error);
-        toast.error(refusalText(error));
+        toast.error(createAttempt.current?.uncertain
+          ? "Сохранение не подтверждено. Повторите проверку в этой форме."
+          : refusalText(error));
         return;
       }
     }
@@ -2067,6 +2123,7 @@ export function AppointmentsPage() {
     setConflictMessage("");
     setSelectedDate(form.date);
     } finally {
+      submitLock.current = false;
       setSaving(false);
     }
   };
@@ -2532,7 +2589,7 @@ export function AppointmentsPage() {
       </div>
 
       {modalOpen ? (
-        <div className="fixed inset-0 z-[80] flex items-end bg-slate-950/35 p-3 sm:items-center sm:justify-center" onClick={() => setModalOpen(false)}>
+        <div className="fixed inset-0 z-[80] flex items-end bg-slate-950/35 p-3 sm:items-center sm:justify-center" onClick={closeAppointmentForm}>
           <form
             className="max-h-[calc(100dvh-32px)] w-full overflow-y-auto rounded-[28px] border border-[#DBE8E0] bg-white p-5 shadow-2xl sm:max-w-3xl sm:p-6"
             onClick={(event) => event.stopPropagation()}
@@ -2546,12 +2603,12 @@ export function AppointmentsPage() {
                 <p className="text-xs font-bold uppercase tracking-[0.16em] text-[#64748B]">{editingId ? "Редактирование" : "Новая запись"}</p>
                 <h2 className="mt-1 text-xl font-black text-[#0F172A]">{editingId ? "Карточка записи" : "Создать запись"}</h2>
               </div>
-              <button type="button" className="neu-icon-btn" onClick={() => setModalOpen(false)} aria-label="Закрыть">
+              <button type="button" className="neu-icon-btn" onClick={closeAppointmentForm} disabled={saving || unconfirmedCreate} aria-label="Закрыть">
                 <X size={18} />
               </button>
             </div>
 
-            <div className="grid gap-4 md:grid-cols-2">
+            <fieldset className="grid min-w-0 gap-4 border-0 p-0 md:grid-cols-2" disabled={saving || unconfirmedCreate}>
               <div>
                 {/* Смена имени или телефона снимает унаследованную связь: форма,
                     открытая из заявки Лауры, в которую вписали другого человека,
@@ -3042,7 +3099,7 @@ export function AppointmentsPage() {
                 <span className="mb-2 block text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">Комментарий</span>
                 <textarea className="neu-input min-h-28 w-full resize-y" value={form.notes} onChange={(event) => setForm((current) => ({ ...current, notes: event.target.value }))} />
               </label>
-            </div>
+            </fieldset>
 
             {conflictMessage ? (
               <div className="mt-5 rounded-2xl bg-amber-50 p-4 text-sm font-semibold text-amber-800">
@@ -3056,8 +3113,14 @@ export function AppointmentsPage() {
               </div>
             ) : null}
 
+            {unconfirmedCreate ? (
+              <div role="alert" className="mt-4 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm font-semibold text-amber-900">
+                Сохранение не подтверждено. Запись могла сохраниться; повторная проверка отправит те же данные с тем же номером запроса.
+              </div>
+            ) : null}
+
             <div className="mt-6 flex flex-col gap-2 sm:flex-row sm:justify-end">
-              <button type="button" className="neu-btn px-5 py-2.5 text-sm" onClick={() => setModalOpen(false)} disabled={saving}>Отмена</button>
+              <button type="button" className="neu-btn px-5 py-2.5 text-sm" onClick={closeAppointmentForm} disabled={saving || unconfirmedCreate}>Отмена</button>
               {/* Кнопки «Сохранить всё равно» при занятом времени больше нет:
                   владелец закрыл двойную запись, и сервер флаг обхода тоже не
                   читает. Баннер выше объясняет, что делать. */}
@@ -3069,13 +3132,13 @@ export function AppointmentsPage() {
                   type="button"
                   className="neu-btn px-5 py-2.5 text-sm text-sky-700"
                   onClick={() => void submitForm(false, true)}
-                  disabled={saving}
+                  disabled={saving || unconfirmedCreate}
                 >
                   Записать вне графика
                 </button>
               ) : null}
               <button type="submit" className="neu-btn-primary px-5 py-2.5 text-sm" disabled={saving}>
-                {saving ? "Сохраняем…" : editingId ? "Сохранить изменения" : "Создать запись"}
+                {saving ? "Сохраняем…" : unconfirmedCreate ? "Проверить сохранение" : editingId ? "Сохранить изменения" : "Создать запись"}
               </button>
             </div>
           </form>

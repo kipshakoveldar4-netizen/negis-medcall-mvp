@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { createBookingRetryFixture } from "./booking-retry.ts";
 
 // Supply only the two browser globals consumed by the fixture bootstrap.
 const previousStorage = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
@@ -53,4 +54,17 @@ test("visual fixture server cannot load application config or fall back to real 
   assert.match(source, /res\.statusCode = 403/);
   assert.match(source, /res\.statusCode = 404/);
   assert.match(source, /form-action 'none'/);
+});
+
+test("opt-in retry simulation keeps one in-memory row and demands the identical body and key", async () => {
+  const retry = createBookingRetryFixture();
+  const body = { requestKey: "00000000-0000-4000-8000-000000000080", client: "Synthetic retry" };
+  await assert.rejects(() => retry.send(body), /reply lost/);
+  assert.deepEqual(retry.stats(), { calls: 1, rows: 1 });
+  assert.equal((await retry.send({ ...body, requestKey: "changed" })).status, 409);
+  assert.equal((await retry.send({ ...body, client: "Changed client" })).status, 409);
+  const restored = await (await retry.send(body)).json();
+  assert.equal(restored.data.replayed, true);
+  assert.equal(restored.data.item.client, "Synthetic retry");
+  assert.deepEqual(retry.stats(), { calls: 4, rows: 1 });
 });

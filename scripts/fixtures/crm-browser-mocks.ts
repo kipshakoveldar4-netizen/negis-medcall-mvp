@@ -1,3 +1,6 @@
+import { createBookingRetryFixture } from "./booking-retry";
+const retryFixture = new URLSearchParams(window.location?.search || "").get("bookingRetry") === "lost-response"
+  ? createBookingRetryFixture() : null;
 const workspaceId = "00000000-0000-4000-8000-000000000001";
 const clientId = "00000000-0000-4000-8000-000000000002";
 const doctorId = "00000000-0000-4000-8000-000000000003";
@@ -44,6 +47,9 @@ export const crmRequest = async () => { throw new CrmApiError("Изменени�
 export async function crmFetch(input: string, init?: RequestInit): Promise<Response> {
   const url = new URL(input, "http://fixture.invalid");
   if (url.origin !== "http://fixture.invalid" || !url.pathname.startsWith("/api/crm/")) throw new Error("External request forbidden");
+  if (retryFixture && url.pathname === "/api/crm/appointments" && init?.method === "POST") {
+    return retryFixture.send(JSON.parse(String(init.body)));
+  }
   if (init?.method && init.method !== "GET") return Response.json({ success: false, error: "Изменения отключены на стенде" }, { status: 403 });
   const resource = url.pathname.split("/").at(-1) || "";
   let items = lists[resource] || [];
