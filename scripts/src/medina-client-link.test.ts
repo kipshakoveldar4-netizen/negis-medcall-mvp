@@ -4,6 +4,15 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+const clientFormUrl = new URL("../../artifacts/negis/src/lib/appointmentClient.ts", import.meta.url);
+const { editAppointmentClient } = await import(clientFormUrl.href) as {
+  editAppointmentClient(
+    current: { clientId: string; client: string; phone: string; whatsapp: string },
+    field: "client" | "phone" | "whatsapp",
+    value: string,
+  ): { clientId: string; client: string; phone: string; whatsapp: string };
+};
+
 // CRM — the client link, validated.
 //
 // Two defects with one shape. An appointment's client_id existed in the schema
@@ -447,11 +456,16 @@ test("CLK11 both «Записать» handoffs carry the client card, and a manu
     path.join(repoRoot, "artifacts", "negis", "src", "pages", "AppointmentsPage.tsx"),
     "utf8",
   );
-  for (const field of ["client", "phone"]) {
+  for (const field of ["client", "phone", "whatsapp"] as const) {
     assert.ok(
-      new RegExp(`\\.\\.\\.current, ${field}, clientId: ""`).test(appointments),
+      appointments.includes(`editAppointmentClient(current, "${field}", ${field})`),
       `editing «${field}» must clear the inherited link — the hint line disappearing is the operator's signal`,
     );
+    const replaced = editAppointmentClient({
+      clientId: CLIENT_ID, client: "Original", phone: "+77000000001", whatsapp: "+77000000002",
+    }, field, "replacement");
+    assert.equal(replaced.clientId, "");
+    assert.equal(replaced[field], "replacement");
   }
 });
 

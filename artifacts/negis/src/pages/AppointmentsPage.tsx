@@ -19,6 +19,7 @@ import { toast } from "sonner";
 import { PageLayout } from "@/components/layout/PageLayout";
 import { MetricCard } from "@/components/ui/metric-card";
 import { apiUrl, crmFetch } from "@/lib/api";
+import { editAppointmentClient, selectAppointmentClient } from "@/lib/appointmentClient";
 import { isRealWorkspace, readWorkspaceId as readCurrentWorkspaceId, useDemoCollection, workspaceScopedKey } from "@/lib/demoStorage";
 import { formatPhone, toTelHref, toWhatsappHref } from "@/lib/phone";
 import { clinicToday, dayKeyInZone, isOnClinicDay } from "@/lib/clinicDay";
@@ -1252,8 +1253,8 @@ export function AppointmentsPage() {
 
   /**
    * Search the real patient directory while the receptionist types a name.
-   * A unique exact match is linked automatically; ambiguous names stay as
-   * explicit choices so one patient is never attached to another by accident.
+   * Names are suggestions, not identity: even one exact result must be
+   * selected explicitly before replacing contacts or linking the visit.
    */
   useEffect(() => {
     const query = form.client.replace(/\s+/g, " ").trim();
@@ -1287,22 +1288,6 @@ export function AppointmentsPage() {
 
           setClientMatches(matches);
           setClientSearchAttempted(true);
-          const exact = matches.filter(
-            (client) => client.name.replace(/\s+/g, " ").trim().toLocaleLowerCase("ru") === query.toLocaleLowerCase("ru"),
-          );
-          if (exact.length === 1) {
-            const client = exact[0];
-            setForm((current) => {
-              if (current.clientId || current.client.replace(/\s+/g, " ").trim() !== query) return current;
-              return {
-                ...current,
-                clientId: client.id,
-                client: client.name,
-                phone: client.phone || current.phone,
-                whatsapp: client.whatsapp || client.phone || current.whatsapp,
-              };
-            });
-          }
         } catch {
           if (!cancelled) {
             setClientMatches([]);
@@ -2583,13 +2568,7 @@ export function AppointmentsPage() {
                 <TextField
                   label="Клиент/имя"
                   value={form.client}
-                  onChange={(client) => setForm((current) => ({
-                    ...current, client, clientId: "",
-                    // Once a linked patient's name is replaced, their contact
-                    // must not silently identify the newly typed person.
-                    phone: current.clientId ? "" : current.phone,
-                    whatsapp: current.clientId ? "" : current.whatsapp,
-                  }))}
+                  onChange={(client) => setForm((current) => editAppointmentClient(current, "client", client))}
                   placeholder="Начните вводить имя"
                 />
                 {form.clientId ? (
@@ -2612,13 +2591,7 @@ export function AppointmentsPage() {
                             className="block w-full rounded-xl px-3 py-2 text-left text-sm font-black"
                             style={{ background: "var(--negis-border)", color: "var(--negis-text)" }}
                             onClick={() => {
-                              setForm((current) => ({
-                                ...current,
-                                clientId: client.id,
-                                client: client.name,
-                                phone: client.phone || current.phone,
-                                whatsapp: client.whatsapp || client.phone || current.whatsapp,
-                              }));
+                              setForm((current) => selectAppointmentClient(current, client));
                               setClientMatches([]);
                             }}
                           >
@@ -2641,9 +2614,9 @@ export function AppointmentsPage() {
                   пустое поле «Телефон» выглядело бы как потерянные данные, а
                   введённый в него номер всё равно не сохранился бы. */}
               {userRole !== "doctor" && (
-              <TextField label="Телефон" value={form.phone} onChange={(phone) => setForm((current) => ({ ...current, phone, clientId: "" }))} placeholder="+7..." />
+              <TextField label="Телефон" value={form.phone} onChange={(phone) => setForm((current) => editAppointmentClient(current, "phone", phone))} placeholder="+7..." />
               )}
-              <TextField label="WhatsApp" value={form.whatsapp} onChange={(whatsapp) => setForm((current) => ({ ...current, whatsapp }))} placeholder="+7..." />
+              <TextField label="WhatsApp" value={form.whatsapp} onChange={(whatsapp) => setForm((current) => editAppointmentClient(current, "whatsapp", whatsapp))} placeholder="+7..." />
               {/*
                 Мастер стоит ПЕРВЫМ — как в запись.кз: сначала «к кому», потом
                 «на что». Выбор мастера сужает прайс до его услуг плюс общих,

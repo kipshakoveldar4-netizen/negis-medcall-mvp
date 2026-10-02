@@ -96,6 +96,7 @@
     "vapid:keys": "tsx ./src/generate-vapid-keys.ts",
     "test:my-clients": "tsx --test ./src/medina-my-clients.test.ts",
     "test:booking-form": "tsx --test ./src/medina-booking-form.test.ts",
+    "test:appointment-client": "tsx --test ./src/medina-appointment-client.test.ts",
     "test:salon-stats": "tsx --test ./src/medina-salon-stats.test.ts"
   },
   "devDependencies": {
