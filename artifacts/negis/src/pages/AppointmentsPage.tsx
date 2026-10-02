@@ -19,7 +19,7 @@ import { toast } from "sonner";
 import { PageLayout } from "@/components/layout/PageLayout";
 import { MetricCard } from "@/components/ui/metric-card";
 import { apiUrl, crmFetch } from "@/lib/api";
-import { editAppointmentClient, selectAppointmentClient } from "@/lib/appointmentClient";
+import { editAppointmentClient, matchesAppointmentClientHistory, selectAppointmentClient } from "@/lib/appointmentClient";
 import { isRealWorkspace, readWorkspaceId as readCurrentWorkspaceId, useDemoCollection, workspaceScopedKey } from "@/lib/demoStorage";
 import { formatPhone, toTelHref, toWhatsappHref } from "@/lib/phone";
 import { clinicToday, dayKeyInZone, isOnClinicDay } from "@/lib/clinicDay";
@@ -1716,29 +1716,22 @@ export function AppointmentsPage() {
    * должен быть архив: видно, кого числа какая услуга была, во сколько и к
    * какому мастеру». То же самое — «история посещений» в запись.кз.
    *
-   * Ищется по связанной карточке, затем по телефону (последние десять цифр),
-   * затем по точному имени. Для связанной карточки сервер отдаёт отдельную
+   * Для выбранной карточки история строго по client_id. Без выбора допустимо
+   * совпадение полного нормализованного контакта, но не имени. Сервер отдаёт отдельную
    * выборку по client_id: история не обрезается общим списком календаря. У
    * мастера эта выборка всё равно сужена сервером до собственной работы.
    */
   const visitHistory = useMemo(() => {
-    const digitsOf = (value: string) => (value || "").replace(/\D/g, "").slice(-10);
-    const phoneKey = digitsOf(form.phone) || digitsOf(form.whatsapp);
-    const nameKey = form.client.trim().toLowerCase();
-    if (!form.clientId && phoneKey.length < 10 && nameKey.length < 2) return [];
     const unique = new Map<string, Appointment>();
     for (const appointment of [...remoteVisitHistory, ...items]) unique.set(appointment.id, appointment);
     return [...unique.values()]
       .filter((appointment) => {
         if (editingId && appointment.id === editingId) return false;
-        if (form.clientId && appointment.clientId) return appointment.clientId === form.clientId;
-        const appointmentPhone = digitsOf(appointment.phone) || digitsOf(appointment.whatsapp);
-        if (phoneKey.length >= 10 && appointmentPhone) return appointmentPhone === phoneKey;
-        return nameKey.length >= 2 && appointment.client.trim().toLowerCase() === nameKey;
+        return matchesAppointmentClientHistory(form, appointment);
       })
       .sort((left, right) => (right.startsAt || "").localeCompare(left.startsAt || ""))
       .slice(0, 8);
-  }, [items, remoteVisitHistory, form.clientId, form.phone, form.whatsapp, form.client, editingId]);
+  }, [items, remoteVisitHistory, form.clientId, form.phone, form.whatsapp, editingId]);
 
   const openCreate = (date = selectedDate, time = "09:00") => {
     setEditingId(null);

@@ -1,9 +1,22 @@
+import { phoneDigits } from "./phone";
+
 export type AppointmentClientFields = {
   clientId: string;
   client: string;
   phone: string;
   whatsapp: string;
 };
+
+export function matchesAppointmentClientHistory(
+  current: Pick<AppointmentClientFields, "clientId" | "phone" | "whatsapp">,
+  appointment: { clientId?: string | null; phone?: string | null; whatsapp?: string | null },
+): boolean {
+  // A selected card excludes unlinked rows, even when contacts match.
+  if (current.clientId) return appointment.clientId === current.clientId;
+  const phone = phoneDigits(current.phone) || phoneDigits(current.whatsapp);
+  const appointmentPhone = phoneDigits(appointment.phone) || phoneDigits(appointment.whatsapp);
+  return phone.length >= 10 && phone.length <= 15 && phone === appointmentPhone;
+}
 
 export function selectAppointmentClient<T extends AppointmentClientFields>(
   current: T,
