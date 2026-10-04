@@ -861,14 +861,18 @@ test("operator booking UI freezes an uncertain request and handles access denial
 
 test("operator entry, clinic and platform controls stay distinct", async () => {
   const read = (name: string) => readFile(path.join(root, name), "utf8");
+  const portal = await read("artifacts/negis/src/pages/OperatorPortal.tsx");
   assert.match(
     await read("artifacts/negis/src/App.tsx"),
     /path="\/operator" component=\{OperatorPortal\}/,
   );
-  assert.match(
-    await read("artifacts/negis/src/pages/OperatorPortal.tsx"),
-    /Принимаю предложения клиник/,
-  );
+  assert.match(portal, /Принимаю предложения клиник/);
+  assert.match(portal, /const refreshProfile = useCallback/);
+  assert.match(portal, /setProfile\(null\);\s*setLoaded\(false\);[^]*setRevision/);
+  assert.match(portal, /window.addEventListener\("focus", revalidateProfile\)/);
+  assert.match(portal, /document.addEventListener\("visibilitychange", revalidateVisibleTab\)/);
+  assert.match(portal, /document.visibilityState === "visible"/);
+  assert.match(portal, /onClick=\{refreshProfile\}/);
   assert.match(
     await read("artifacts/negis/src/pages/AdminCenter.tsx"),
     /ClinicOperators key=\{workspaceId\}/,
