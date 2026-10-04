@@ -61,6 +61,20 @@ type CoreModuleShape = {
   normalizeScriptPackage: (value: unknown) => { hashtags: string[] };
 };
 
+type PaidGenerationModuleShape = {
+  resolvePaidGenerationAttempt: (
+    current: { requestKey: string; fingerprint: string } | null,
+    input: { kind: "photo" | "video"; prompt: string; format: string },
+    createRequestKey: () => string,
+  ) => { requestKey: string; fingerprint: string };
+  shouldKeepPaidGenerationAttempt: (input: {
+    responseReceived: boolean;
+    status?: number;
+    success?: boolean;
+    code?: string;
+  }) => boolean;
+};
+
 // GEN — настоящая генерация изображения и видео.
 //
 // До этой ветки контент-студия генерировала только текст, а картинку и ролик
@@ -93,6 +107,9 @@ const generation = (await import(
 const core = (await import(
   pathToFileURL(path.join(repoRoot, "lib", "content-studio", "core.ts")).href
 )) as CoreModuleShape;
+const paidGeneration = (await import(
+  pathToFileURL(path.join(repoRoot, "lib", "content-studio", "paid-generation.ts")).href
+)) as PaidGenerationModuleShape;
 
 const {
   createVideoJob,
@@ -767,4 +784,65 @@ test("GEN34 selected ad variant approval persists and follows the launch as safe
     crm.includes('hasAnyKey(body, [') && crm.includes('"contentApproval"'),
     "ordinary content edits must not erase the stored approval snapshot",
   );
+});
+
+test("GEN35 ambiguous paid retries reuse one key for the exact request", () => {
+  const firstKey = "11111111-1111-4111-8111-111111111111";
+  const secondKey = "22222222-2222-4222-8222-222222222222";
+  const first = paidGeneration.resolvePaidGenerationAttempt(
+    null,
+    { kind: "photo", prompt: "  кабинет клиники  ", format: "reels" },
+    () => firstKey,
+  );
+  const retry = paidGeneration.resolvePaidGenerationAttempt(
+    first,
+    { kind: "photo", prompt: "кабинет клиники", format: "reels" },
+    () => {
+      throw new Error("same request must not allocate another key");
+    },
+  );
+  assert.strictEqual(retry, first);
+
+  const changed = paidGeneration.resolvePaidGenerationAttempt(
+    first,
+    { kind: "photo", prompt: "другой кадр", format: "reels" },
+    () => secondKey,
+  );
+  assert.equal(changed.requestKey, secondKey);
+  assert.notEqual(changed.fingerprint, first.fingerprint);
+  assert.throws(
+    () => paidGeneration.resolvePaidGenerationAttempt(null, { kind: "video", prompt: "ролик", format: "reels" }, () => "weak-key"),
+    /безопасный ключ/i,
+  );
+});
+
+test("GEN36 only a confirmed result or explicit non-duplicate 4xx releases the paid key", () => {
+  assert.equal(paidGeneration.shouldKeepPaidGenerationAttempt({ responseReceived: false }), true);
+  assert.equal(paidGeneration.shouldKeepPaidGenerationAttempt({ responseReceived: true, status: 502, success: false }), true);
+  assert.equal(paidGeneration.shouldKeepPaidGenerationAttempt({ responseReceived: true, status: 200 }), true);
+  assert.equal(
+    paidGeneration.shouldKeepPaidGenerationAttempt({
+      responseReceived: true,
+      status: 409,
+      success: false,
+      code: "generation_request_duplicate",
+    }),
+    true,
+  );
+  assert.equal(paidGeneration.shouldKeepPaidGenerationAttempt({ responseReceived: true, status: 429, success: false }), false);
+  assert.equal(paidGeneration.shouldKeepPaidGenerationAttempt({ responseReceived: true, status: 200, success: true }), false);
+});
+
+test("GEN37 every paid media call requires the browser key and carries the retained attempt", async () => {
+  const route = await readFile(apiFile, "utf8");
+  const keyReader = route.slice(route.indexOf("function generationRequestKey"), route.indexOf("function sendUsageRefusal"));
+  assert.match(keyReader, /generation_idempotency_required/);
+  assert.doesNotMatch(keyReader, /randomUUID\(\)/, "the server must not silently replace a missing paid-request key");
+  assert.equal((route.match(/if \(!requestKey\) return sendGenerationRequestKeyRefusal\(res\)/g) || []).length, 2);
+
+  const studio = await readFile(studioPage, "utf8");
+  assert.match(studio, /photoGenerationAttempt = useRef<PaidGenerationAttempt \| null>/);
+  assert.match(studio, /videoGenerationAttempt = useRef<PaidGenerationAttempt \| null>/);
+  assert.equal((studio.match(/headers: paidGenerationHeaders\(attempt\.requestKey\)/g) || []).length, 2);
+  assert.doesNotMatch(studio, /headers: paidGenerationHeaders\(\)/);
 });

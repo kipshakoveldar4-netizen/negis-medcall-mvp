@@ -159,12 +159,21 @@ function sendJson(res: VercelResponse, status: number, payload: unknown) {
   return res.json(payload);
 }
 
-function generationRequestKey(req: VercelRequest): string {
+function generationRequestKey(req: VercelRequest): string | null {
   const headerValue = req.headers["x-idempotency-key"];
   const candidate = Array.isArray(headerValue) ? headerValue[0] : headerValue;
   return typeof candidate === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(candidate.trim())
     ? candidate.trim()
-    : randomUUID();
+    : null;
+}
+
+function sendGenerationRequestKeyRefusal(res: VercelResponse) {
+  return sendJson(res, 400, {
+    success: false,
+    error: "Платная генерация не запущена",
+    details: ["Браузер не передал безопасный ключ повтора. Обновите страницу и повторите попытку."],
+    code: "generation_idempotency_required",
+  });
 }
 
 function sendUsageRefusal(res: VercelResponse, reservation: ContentUsageReservation) {
@@ -877,6 +886,8 @@ async function handleGeneratePhoto(req: VercelRequest, res: VercelResponse, cont
       details: ["Опишите кадр — без описания генерировать нечего."],
     });
   }
+  const requestKey = generationRequestKey(req);
+  if (!requestKey) return sendGenerationRequestKeyRefusal(res);
 
   const size = imageSizeForFormat(payload.format);
   let usage: ContentUsageReservation;
@@ -884,7 +895,7 @@ async function handleGeneratePhoto(req: VercelRequest, res: VercelResponse, cont
     usage = await reserveContentGeneration({
       workspaceId: context.workspaceId,
       staffUserId: context.staffUserId,
-      requestKey: generationRequestKey(req),
+      requestKey,
       operation: "generated_image",
       kind: "image",
       units: 1,
@@ -1009,6 +1020,8 @@ async function handleGenerateVideo(req: VercelRequest, res: VercelResponse, cont
       details: ["Опишите ролик — без описания генерировать нечего."],
     });
   }
+  const requestKey = generationRequestKey(req);
+  if (!requestKey) return sendGenerationRequestKeyRefusal(res);
 
   const size = videoSizeForFormat(payload.format);
   const seconds = billableVideoSeconds(config.videoSeconds);
@@ -1017,7 +1030,7 @@ async function handleGenerateVideo(req: VercelRequest, res: VercelResponse, cont
     usage = await reserveContentGeneration({
       workspaceId: context.workspaceId,
       staffUserId: context.staffUserId,
-      requestKey: generationRequestKey(req),
+      requestKey,
       operation: "generated_video",
       kind: "video_seconds",
       units: seconds,
