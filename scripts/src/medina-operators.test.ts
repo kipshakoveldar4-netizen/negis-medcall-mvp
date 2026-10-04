@@ -890,6 +890,7 @@ test("operator contact UI uses explicit scope and guarded stage writes without g
   const clinic = await read("artifacts/negis/src/components/admin/ClinicOperators.tsx");
   const requests = await read("artifacts/negis/src/components/operators/OperatorRequests.tsx");
   const leads = await read("artifacts/negis/src/components/operators/OperatorLeads.tsx");
+  const api = await read("artifacts/negis/src/lib/operatorApi.ts");
   assert.match(clinic, /useState<OperatorLeadScope>\("assigned"\)/);
   assert.match(clinic, /value="assigned"/);
   assert.match(clinic, /value="clinic"/);
@@ -899,7 +900,11 @@ test("operator contact UI uses explicit scope and guarded stage writes without g
   assert.match(leads, /operator-leads\?requestId/);
   assert.match(leads, /leadScope === "assigned"/);
   assert.match(leads, /key=\{`\$\{requestId\}/);
-  assert.match(leads, /window.addEventListener\("focus", refresh\)/);
+  assert.match(leads, /window.addEventListener\("focus", revalidateAccess\)/);
+  assert.match(leads, /document.addEventListener\("visibilitychange", revalidateVisibleTab\)/);
+  assert.match(leads, /document.visibilityState === "visible"/);
+  assert.match(leads, /setBookingLeadId\(null\)/);
+  assert.match(api, /const refresh = useCallback\(\(\) => \{\s*\/\/[^]*setData\(null\);\s*setError\(""\);\s*setRevision/);
   assert.doesNotMatch(leads, /localStorage|sessionStorage|medicalHistory|notes|meta-launch|appointments|responsible_user_id/);
   assert.match(leads, /Доступен только просмотр/);
   assert.match(leads, /stageEditingAvailable/);

@@ -58,7 +58,13 @@ export function useOperatorList<
   const [revision, setRevision] = useState(0);
   const [data, setData] = useState<TList | null>(null);
   const [error, setError] = useState("");
-  const refresh = useCallback(() => setRevision((value) => value + 1), []);
+  const refresh = useCallback(() => {
+    // Operator lists can contain patient contacts. Hide the previous response
+    // before rechecking access instead of leaving it visible during the request.
+    setData(null);
+    setError("");
+    setRevision((value) => value + 1);
+  }, []);
   useEffect(() => {
     setData(null);
     setError("");
