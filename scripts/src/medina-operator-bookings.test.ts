@@ -9,12 +9,56 @@ const root = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "../..",
 );
+type BookingAttempt = {
+  requestId: string;
+  requestKey: string;
+  payload: { leadId: string; doctorId: string; serviceIds: string[]; startsLocal: string; timeZone: string };
+  uncertain: boolean;
+};
+const attemptModule = new URL(
+  "../../artifacts/negis/src/lib/operatorBookingAttempt.ts",
+  import.meta.url,
+);
+const {
+  canReleaseOperatorBookingAttempt,
+  isCurrentOperatorBookingAttempt,
+  newOperatorBookingAttempt,
+} = await import(attemptModule.href) as {
+  canReleaseOperatorBookingAttempt(status: number): boolean;
+  isCurrentOperatorBookingAttempt(attempt: BookingAttempt, requestId: string, leadId: string): boolean;
+  newOperatorBookingAttempt(
+    requestId: string,
+    payload: BookingAttempt["payload"],
+    makeKey?: () => string,
+  ): BookingAttempt;
+};
 const db = new PGlite();
 const id = (n: number) =>
   `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const row = async (sql: string, params: unknown[] = []) =>
   (await db.query<Record<string, unknown>>(sql, params)).rows[0];
 const time = "2030-01-07T10:00";
+
+test("operator retry keeps one detached request and only definite refusals release it", () => {
+  const payload = {
+    leadId: id(60),
+    doctorId: id(70),
+    serviceIds: [id(80), id(81)],
+    startsLocal: time,
+    timeZone: "Asia/Almaty",
+  };
+  const attempt = newOperatorBookingAttempt(id(50), payload, () => id(100));
+  payload.serviceIds.pop();
+  payload.startsLocal = "2030-01-07T12:00";
+
+  assert.deepEqual(attempt.payload.serviceIds, [id(80), id(81)]);
+  assert.equal(attempt.payload.startsLocal, time);
+  assert.ok(isCurrentOperatorBookingAttempt(attempt, id(50), id(60)));
+  assert.equal(isCurrentOperatorBookingAttempt(attempt, id(51), id(60)), false);
+  assert.equal(isCurrentOperatorBookingAttempt(attempt, id(50), id(61)), false);
+  for (const status of [400, 401, 403, 409, 422]) assert.ok(canReleaseOperatorBookingAttempt(status));
+  for (const status of [0, 500, 502, 503, 504]) assert.equal(canReleaseOperatorBookingAttempt(status), false);
+});
 async function book(
   options: {
     user?: number;

@@ -5,6 +5,12 @@ import {
   OperatorApiError,
   useOperatorList,
 } from "@/lib/operatorApi";
+import {
+  canReleaseOperatorBookingAttempt,
+  isCurrentOperatorBookingAttempt,
+  newOperatorBookingAttempt,
+  type OperatorBookingAttempt,
+} from "@/lib/operatorBookingAttempt";
 import { OperatorCatalogPagination } from "./OperatorServiceCatalog";
 import {
   formatArrivalPrice,
@@ -121,9 +127,32 @@ function BookingFields({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [catalogValid, setCatalogValid] = useState(false);
-  // One key survives retries and input edits while this form is open.
-  const [requestKey] = useState(() => crypto.randomUUID());
+  const [uncertainCreate, setUncertainCreate] = useState(false);
+  const createAttempt = useRef<OperatorBookingAttempt | null>(null);
   const inFlight = useRef(false);
+  const currentScope = useRef({ requestId, leadId });
+  currentScope.current = { requestId, leadId };
+
+  useEffect(() => {
+    const attempt = createAttempt.current;
+    if (attempt && !isCurrentOperatorBookingAttempt(attempt, requestId, leadId)) {
+      createAttempt.current = null;
+      inFlight.current = false;
+      setBusy(false);
+      setUncertainCreate(false);
+      setError("");
+    }
+  }, [requestId, leadId]);
+
+  useEffect(() => {
+    if (!busy && !uncertainCreate) return;
+    const warnBeforeLeaving = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", warnBeforeLeaving);
+    return () => window.removeEventListener("beforeunload", warnBeforeLeaving);
+  }, [busy, uncertainCreate]);
   const doctor = doctors.data?.items.find((item) => item.id === doctorId);
   const minutes = selected.reduce(
     (sum, item) => sum + (item.durationMinutes ?? 0),
@@ -148,33 +177,66 @@ function BookingFields({
   async function submit(event: React.FormEvent) {
     event.preventDefault();
     if (!ready || inFlight.current) return;
+    const attempt = createAttempt.current ?? newOperatorBookingAttempt(requestId, {
+      leadId,
+      doctorId,
+      serviceIds: selected.map((item) => item.id),
+      startsLocal,
+      timeZone,
+    });
+    if (!isCurrentOperatorBookingAttempt(attempt, requestId, leadId)) return;
+    createAttempt.current = attempt;
     inFlight.current = true;
     setBusy(true);
     setError("");
     try {
       const saved = await operatorApi<OperatorBooking>(
-        `operator-bookings?requestId=${encodeURIComponent(requestId)}`,
+        `operator-bookings?requestId=${encodeURIComponent(attempt.requestId)}`,
         {
-          leadId,
-          requestKey,
-          doctorId,
-          serviceIds: selected.map((item) => item.id),
-          startsLocal,
-          timeZone,
+          ...attempt.payload,
+          requestKey: attempt.requestKey,
         },
       );
+      if (createAttempt.current !== attempt || !isCurrentOperatorBookingAttempt(
+        attempt,
+        currentScope.current.requestId,
+        currentScope.current.leadId,
+      )) return;
+      createAttempt.current = null;
+      setUncertainCreate(false);
       onBooked(saved);
     } catch (err) {
+      if (createAttempt.current !== attempt || !isCurrentOperatorBookingAttempt(
+        attempt,
+        currentScope.current.requestId,
+        currentScope.current.leadId,
+      )) return;
       if (err instanceof OperatorApiError && [401, 403].includes(err.status)) {
+        createAttempt.current = null;
+        setUncertainCreate(false);
         onAccessDenied();
         return;
       }
-      setError(
-        err instanceof Error ? err.message : "Не удалось сохранить запись",
-      );
+      const status = err instanceof OperatorApiError ? err.status : 0;
+      if (canReleaseOperatorBookingAttempt(status)) {
+        createAttempt.current = null;
+        setUncertainCreate(false);
+        setError(err instanceof Error ? err.message : "Не удалось сохранить запись");
+      } else {
+        attempt.uncertain = true;
+        setUncertainCreate(true);
+        const reason = err instanceof Error ? err.message : "Ответ сервера не получен.";
+        setError(`Сохранение не подтверждено. Запись могла сохраниться; проверьте теми же данными. ${reason}`);
+      }
     } finally {
-      inFlight.current = false;
-      setBusy(false);
+      if (isCurrentOperatorBookingAttempt(
+        attempt,
+        currentScope.current.requestId,
+        currentScope.current.leadId,
+      )) {
+        inFlight.current = false;
+        setBusy(false);
+      }
     }
   }
   return (
@@ -182,7 +244,7 @@ function BookingFields({
       onSubmit={(event) => void submit(event)}
       className="min-w-0 space-y-3"
     >
-      <fieldset disabled={busy} className="min-w-0 space-y-3">
+      <fieldset disabled={busy || uncertainCreate} className="min-w-0 space-y-3">
         {doctors.error && (
           <p role="alert" className="text-sm text-red-700">
             {doctors.error}
@@ -263,7 +325,7 @@ function BookingFields({
         disabled={busy || !ready}
       >
         <CalendarPlus size={16} />
-        {busy ? "Сохраняем…" : "Создать запись"}
+        {busy ? "Сохраняем…" : uncertainCreate ? "Проверить сохранение" : "Создать запись"}
       </button>
     </form>
   );

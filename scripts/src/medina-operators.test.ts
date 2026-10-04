@@ -840,9 +840,13 @@ test("operator catalog UI is read-only, scoped to accepted operator requests and
   assert.match(server, /requireAuthenticatedUser/);
 });
 
-test("operator booking UI submits only catalog IDs, retains retry key and handles access denial", async () => {
+test("operator booking UI freezes an uncertain request and handles access denial", async () => {
   const ui = await readFile(path.join(root,"artifacts/negis/src/components/operators/OperatorBookingForm.tsx"),"utf8");
-  assert.match(ui,/useState\(\(\) => crypto.randomUUID\(\)\)/);
+  assert.match(ui,/newOperatorBookingAttempt/);
+  assert.match(ui,/createAttempt\.current \?\? newOperatorBookingAttempt/);
+  assert.match(ui,/\.\.\.attempt\.payload/);
+  assert.match(ui,/disabled=\{busy \|\| uncertainCreate\}/);
+  assert.match(ui,/Проверить сохранение/);
   assert.match(ui,/serviceIds: selected.map/);
   assert.match(ui,/OperatorApiError/);
   assert.match(ui,/onAccessDenied\(\)/);
