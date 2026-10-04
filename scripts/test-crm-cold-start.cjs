@@ -50,24 +50,27 @@ try {
     }
     global.fetch = async () => { throw new Error('Network forbidden in cold-start test'); };
     const handler = require('./api/crm/[...path].js').default;
-    async function check(resource, expected, authorization) {
+    async function check(resource, expected, authorization, method = 'GET') {
       let status, body;
       const res = { setHeader() {}, status(n) { status = n; return res; },
         json(value) { body = value; }, end(value) { body = value; } };
-      await handler({ method: 'GET', url: '/api/crm/' + resource,
+      await handler({ method, url: '/api/crm/' + resource,
         query: { path: [resource] }, headers: authorization ? { authorization } : {} }, res);
       assert.equal(status, expected, resource);
       if (expected === 401) assert.equal(body.success, false);
       assert.ok(!JSON.stringify(body).includes('SIMULATED_PRIVATE_RENDERER_FAILURE'));
     }
     (async () => {
-      for (const route of ['auth-context', 'appointments', 'clients', 'staff', 'site-blog']) {
+      for (const route of ['auth-context', 'appointments', 'clients', 'staff', 'site-blog', 'site-inquiry-deletion-preview']) {
         await check(route, 401);
       }
       await check('auth-context', 401, 'Bearer invalid-test-token');
+      await check('site-inquiry-deletion-preview', 401, 'Bearer invalid-test-token');
+      await check('site-inquiry-deletion', 401, undefined, 'POST');
+      await check('site-inquiry-deletion', 401, 'Bearer invalid-test-token', 'POST');
       await check('site-page', brokenRenderer ? 503 : 404);
       const accessChecks = await require(${JSON.stringify(path.join(root, 'scripts', 'fixtures', 'crm-runtime-access.cjs'))})(handler, { brokenRenderer });
-      console.log('CommonJS CRM cold start (' + (brokenRenderer ? 'broken site' : 'normal') + '): 7 anonymous + ' + accessChecks + ' authenticated/denial checks passed; isolated fixtures, no network or credentials.');
+      console.log('CommonJS CRM cold start (' + (brokenRenderer ? 'broken site' : 'normal') + '): 11 anonymous/invalid-token + ' + accessChecks + ' authenticated/denial checks passed; isolated fixtures, no network or credentials.');
     })().catch(error => { console.error(error); process.exitCode = 1; });
   `], { cwd: output, env: environment, encoding: 'utf8', timeout: 30000 });
   if (child.stdout) process.stdout.write(child.stdout);

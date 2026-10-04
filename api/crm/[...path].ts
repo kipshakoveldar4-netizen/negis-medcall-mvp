@@ -1,10 +1,12 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { handleSiteIntake } from "../../lib/crm/site-intake-handler";
 import { handleSiteBlog } from "../../lib/crm/site-blog";
+import { handleSiteInquiryDeletion, handleSiteInquiryDeletionPreview } from "../../lib/crm/site-inquiry-deletion";
 import { handlePlatformOperators, handleOperatorAccount, handleOperatorInbox, handleClinicOperators } from "../../lib/crm/operators";
 import { handleOperatorLeads, handleClinicOperatorLeads } from "../../lib/crm/operator-leads";
 import { handleOperatorServices } from "../../lib/crm/operator-services";
 import { handleOperatorBookings } from "../../lib/crm/operator-bookings";
+import { handleClinicOperatorArrivals, handleOperatorArrivals } from "../../lib/crm/operator-arrivals";
 import {
   handleAdCreativeMetaUpload,
   handleAdCreativeSignedUpload,
@@ -193,13 +195,19 @@ async function dispatch(
 ) {
   switch (routeKey) {
     case "site-blog": return handleSiteBlog(req, res);
+    case "site-inquiry-deletion-preview":
+      return segments.length === 1 ? handleSiteInquiryDeletionPreview(req, res) : notFound(res);
+    case "site-inquiry-deletion":
+      return segments.length === 1 ? handleSiteInquiryDeletion(req, res) : notFound(res);
     case "platform-operators": return handlePlatformOperators(req, res);
     case "operator-account": return handleOperatorAccount(req, res);
     case "operator-inbox": return handleOperatorInbox(req, res);
     case "operator-leads": return handleOperatorLeads(req, res);
     case "operator-services": return handleOperatorServices(req, res);
     case "operator-bookings": return handleOperatorBookings(req, res);
+    case "operator-arrivals": return handleOperatorArrivals(req, res);
     case "clinic-operator-leads": return handleClinicOperatorLeads(req, res);
+    case "clinic-operator-arrivals": return handleClinicOperatorArrivals(req, res);
     case "operator-directory": return handleClinicOperators(req, res, true);
     case "clinic-operator-requests": return handleClinicOperators(req, res);
     case "auth-context":
@@ -388,7 +396,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   try {
-    await ensureParsedBody(req);
+    // This route reads a bounded JSON body only after verified workspace auth.
+    // Workspace selection uses the query, never an untrusted deletion payload.
+    if (route.key !== "site-inquiry-deletion") await ensureParsedBody(req);
   } catch {
     return sendJson(res, 400, {
       success: false,

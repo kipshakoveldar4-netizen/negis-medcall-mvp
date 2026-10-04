@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { withAppointmentCreateRpcSpy } from "./appointment-create-rpc-spy.js";
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { crmTransportOffenders } from "./crm-transport-audit";
 
 // Security-2B — tenant isolation for /api/crm/*.
 //
@@ -114,7 +116,7 @@ async function loadRouter(options: LoadOptions) {
   let crmClientCreations = 0;
   supabaseModule.setSupabaseServerClientFactoryForTests(() => {
     crmClientCreations += 1;
-    return spyClient(clientRows, log);
+    return withAppointmentCreateRpcSpy(spyClient(clientRows, log));
   });
 
   const routerModule = (await import(pathToFileURL(routerPath).href)) as {
@@ -1028,67 +1030,23 @@ test("L5d every CRM call site goes through the authenticated helper", async () =
   // covered here — ContentStudio's /api/content-studio/* calls are a different
   // contract.
   const roots = ["pages", "components", "lib", "contexts"].map((dir) => path.join(negisSrc, dir));
-  const sharedHelpers = new Set(["crmFetch", "crmRequest", "crmJson"]);
-  const offenders: string[] = [];
+  const sources = new Map<string, string>();
 
   for (const root of roots) {
     let names: string[] = [];
     try {
-      names = await readdir(root);
+      names = await readdir(root, { recursive: true });
     } catch {
       continue;
     }
     for (const name of names) {
       if (!name.endsWith(".ts") && !name.endsWith(".tsx")) continue;
-      if (name === "api.ts") continue; // the one place allowed to call fetch for a CRM path
       const source = await readFile(path.join(root, name), "utf8");
-
-      const receivers = new Set<string>();
-      for (const match of source.matchAll(/([A-Za-z_$][A-Za-z0-9_$]*)\s*(?:<[^<>()]*>)?\s*\(\s*[`"'][^`"']*\/api\/crm\//g)) {
-        receivers.add(match[1]);
-      }
-
-      // A page may wrap the helper, and wrap the wrapper: AiControlCenter's
-      // fetchCrmList calls fetchJson calls crmFetch. Grow the safe set until it
-      // stops growing, then require every receiver of a CRM path to be in it.
-      const locals = [...source.matchAll(/(?:async )?function ([A-Za-z_$][A-Za-z0-9_$]*)\s*[<(]/g)].map((m) => ({
-        name: m[1],
-        body: source.slice(m.index ?? 0, (m.index ?? 0) + 1200),
-      }));
-      const localNames = new Set(locals.map((local) => local.name));
-      // Only the imported helpers start out safe. A local function that happens
-      // to be called crmRequest — both offending pages had one — has to earn it
-      // from its own body, which is the whole point of this check.
-      const imported = (source.match(/import \{([^}]*)\} from ["']@\/lib\/api["']/)?.[1] ?? "")
-        .split(",")
-        .map((entry) => entry.trim())
-        .filter((entry) => sharedHelpers.has(entry) && !localNames.has(entry));
-      const safe = new Set(imported);
-      for (let pass = 0; pass < locals.length + 1; pass += 1) {
-        let grew = false;
-        for (const local of locals) {
-          if (safe.has(local.name)) continue;
-          if ([...safe].some((known) => new RegExp(known + "[<(]").test(local.body))) {
-            safe.add(local.name);
-            grew = true;
-          }
-        }
-        if (!grew) break;
-      }
-
-      for (const helper of receivers) {
-        if (helper === "fetch") {
-          offenders.push(name + ": a CRM path is handed straight to fetch");
-          continue;
-        }
-        if (!safe.has(helper)) {
-          offenders.push(name + ": CRM paths flow through " + helper + ", which never reaches crmFetch");
-        }
-      }
+      sources.set(path.relative(negisSrc, path.join(root, name)).replaceAll("\\", "/"), source);
     }
   }
 
-  assert.deepEqual(offenders, [], "these CRM call sites bypass crmFetch and will answer 401");
+  assert.deepEqual(crmTransportOffenders(sources), [], "these CRM call sites bypass crmFetch or have an unverified transport");
 });
 
 // ===========================================================================

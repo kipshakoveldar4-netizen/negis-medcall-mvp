@@ -248,6 +248,24 @@ export function freeSlots(input: {
   return [...new Set(slots)].sort((a, b) => a - b);
 }
 
+/**
+ * Полуторачасовая запись занимает не только строку своего начала. Этот helper
+ * отмечает все получасовые строки, которых касается интервал визита, чтобы
+ * дневной список не называл 10:30 свободным при записи 10:00–11:30.
+ */
+export function occupiedGridSlots(input: {
+  startMinute: number;
+  durationMinutes: number;
+  slots: readonly number[];
+  stepMinutes?: number;
+}): number[] {
+  if (!Number.isFinite(input.startMinute)) return [];
+  const step = input.stepMinutes && input.stepMinutes > 0 ? input.stepMinutes : 30;
+  const duration = Number.isFinite(input.durationMinutes) && input.durationMinutes > 0 ? input.durationMinutes : 60;
+  const endMinute = input.startMinute + duration;
+  return input.slots.filter((slot) => slot < endMinute && input.startMinute < slot + step);
+}
+
 /** Группы как у запись.кз: Утро до 12:00, День до 18:00, Вечер после. */
 export function groupSlots(slots: readonly number[]): Array<{ label: string; slots: number[] }> {
   const morning = slots.filter((slot) => slot < 12 * 60);

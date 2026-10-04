@@ -25,7 +25,7 @@ async function rejects(fn: () => Promise<unknown>, pattern: RegExp) {
 
 before(async () => {
   await db.exec("create role anon; create role authenticated; create role service_role bypassrls; grant usage on schema public to anon, authenticated, service_role;");
-  const selected = new Set([9, 10, 11, 12, 13, 14, 19, 58]);
+  const selected = new Set([9, 10, 11, 12, 13, 14, 19, 58, 62]);
   for (const file of (await readdir(path.join(root, "migrations"))).sort()) {
     if (!selected.has(Number(file.slice(0, 3)))) continue;
     await db.exec((await readFile(path.join(root, "migrations", file), "utf8")).replace(/CREATE EXTENSION IF NOT EXISTS pgcrypto;/i, ""));
@@ -183,6 +183,24 @@ test("historical CRM lead is never overwritten or silently merged", async () => 
   assert.equal((await row("select notes from public.leads where id=$1", [id(90)])).notes, "Keep");
 });
 
+test("old site inquiries and leads do not expire on retry or a later submission", async () => {
+  await submit();
+  const original = await row("select id,full_name,phone,notes from public.leads where workspace_id=$1", [id(1)]);
+  await db.query("update public.leads set created_at='2000-01-01T00:00:00Z' where id=$1", [original.id]);
+  await db.query("update public.crm_site_inquiries set consent_received_at='2000-01-01T00:00:00Z' where request_key=$1", [id(100)]);
+
+  assert.deepEqual((await submit()).result, { accepted: true });
+  assert.equal((await row("select count(*)::int as n from public.leads")).n, 1);
+  assert.deepEqual((await submit(101)).result, { accepted: true });
+  assert.equal((await row("select count(*)::int as n from public.leads")).n, 2);
+  assert.equal((await row("select count(*)::int as n from public.crm_site_inquiries")).n, 2);
+  assert.deepEqual(await row("select id,full_name,phone,notes from public.leads where id=$1", [original.id]), original);
+  const receipt = await row("select lead_id,inquiry,consent_received_at < '2001-01-01'::timestamptz as still_old from public.crm_site_inquiries where request_key=$1", [id(100)]);
+  assert.equal(receipt.lead_id, original.id);
+  assert.deepEqual(receipt.inquiry, valid);
+  assert.equal(receipt.still_old, true);
+});
+
 test("anon and authenticated cannot read receipts or execute intake RPC", async () => {
   for (const role of ["anon", "authenticated"]) {
     await db.exec(`set local role ${role}`);
@@ -193,4 +211,66 @@ test("anon and authenticated cannot read receipts or execute intake RPC", async 
   await db.exec("set local role service_role");
   assert.deepEqual((await submit()).result, { accepted: true });
   await db.exec("reset role");
+});
+
+// S3 characterization: these document the current erasure gap, not a completed
+// deletion workflow. Update them alongside an explicitly approved erasure design.
+test("deleting a site lead leaves personal data in every receipt, including detached receipts", async () => {
+  await submit(); await submit(101);
+  await submit(102, valid, "other-test");
+  const lead = await row("select id from public.leads where workspace_id=$1", [id(1)]);
+  await db.query("delete from public.leads where workspace_id=$1 and id=$2", [id(1), lead.id]);
+  const receipts = await db.query<{ lead_id: string | null; inquiry: unknown }>(
+    "select i.lead_id,i.inquiry from public.crm_site_inquiries i join public.crm_intake_sites s on s.id=i.site_id where s.workspace_id=$1",
+    [id(1)],
+  );
+  assert.equal(receipts.rows.length, 2);
+  for (const receipt of receipts.rows) {
+    assert.equal(receipt.lead_id, null);
+    assert.deepEqual(receipt.inquiry, valid);
+  }
+  assert.equal((await row("select count(*)::int as n from public.leads where workspace_id=$1", [id(2)])).n, 1);
+  assert.equal((await row("select count(*)::int as n from public.crm_site_inquiries where lead_id is not null")).n, 1);
+});
+
+test("removing consent receipts alone does not remove the lead contact and notes", async () => {
+  await submit(); await submit(101);
+  const before = await row("select id,full_name,phone,notes from public.leads where workspace_id=$1", [id(1)]);
+  await db.query("delete from public.crm_site_inquiries where lead_id=$1", [before.id]);
+  assert.equal((await row("select count(*)::int as n from public.crm_site_inquiries")).n, 0);
+  assert.deepEqual(await row("select id,full_name,phone,notes from public.leads where id=$1", [before.id]), before);
+});
+
+test("disabling intake retains data; deleting site configuration removes receipts but not leads", async () => {
+  await submit(); await submit(101, valid, "other-test");
+  await db.query("update public.crm_intake_sites set enabled=false where site_key=$1", ["medina-test"]);
+  assert.equal((await row("select count(*)::int as n from public.crm_site_inquiries")).n, 2);
+  await rejects(() => submit(102), /site_unavailable/);
+  await db.query("delete from public.crm_intake_sites where site_key=$1 and workspace_id=$2", ["medina-test", id(1)]);
+  assert.equal((await row("select count(*)::int as n from public.crm_site_inquiries")).n, 1);
+  assert.equal((await row("select count(*)::int as n from public.leads where workspace_id=$1", [id(1)])).n, 1);
+  assert.equal((await row("select count(*)::int as n from public.leads where workspace_id=$1", [id(2)])).n, 1);
+});
+
+test("browser database roles cannot change or delete site consent receipts", async () => {
+  await submit();
+  for (const role of ["anon", "authenticated"]) {
+    await db.exec(`set local role ${role}`);
+    await rejects(() => db.query("delete from public.crm_site_inquiries where request_key=$1", [id(100)]), /permission denied/);
+    await rejects(() => db.query("update public.crm_site_inquiries set lead_id=null where request_key=$1", [id(100)]), /permission denied/);
+    await rejects(() => db.query("delete from public.crm_intake_sites where site_key=$1", ["medina-test"]), /permission denied/);
+    await db.exec("reset role");
+  }
+  assert.deepEqual((await row("select inquiry from public.crm_site_inquiries")).inquiry, valid);
+});
+
+test("consent storage stays outside generic CRM routes and public intake is not a deletion route", async () => {
+  const { resolveCrmRoute } = await import(pathToFileURL(path.join(root, "lib/crm/authorization.ts")).href) as {
+    resolveCrmRoute(segments: string[]): { authorization: { methods: string[] } } | null;
+  };
+  for (const resource of ["crm_site_inquiries", "crm_intake_sites"]) {
+    assert.equal(resolveCrmRoute([resource]), null);
+  }
+  assert.equal(resolveCrmRoute(["leads"])?.authorization.methods.includes("DELETE"), false);
+  assert.deepEqual(resolveCrmRoute(["site-inquiry"])?.authorization.methods, ["POST", "OPTIONS"]);
 });

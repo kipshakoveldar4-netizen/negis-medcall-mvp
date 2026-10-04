@@ -1,0 +1,73 @@
+// Non-secret plan only. Nothing here changes Vercel or starts a deployment.
+export const previewIsolation = Object.freeze({
+  branch: "codex/site-blog-release-20260929",
+  target: "preview",
+  candidate: "7f67f853947c7751d3f114d7f82fd6883f4a3f3b",
+  supabaseProject: "ukiobbwsdoblooynzlnx",
+  overrides: Object.freeze({
+    VITE_API_BASE_URL: "",
+    DATABASE_URL: "",
+    OPENAI_API_KEY: "",
+    ANTHROPIC_API_KEY: "",
+    META_ACCESS_TOKEN: "",
+    META_APP_SECRET: "",
+    META_APP_ID: "",
+    META_AD_ACCOUNT_ID: "",
+    META_PAGE_ID: "",
+    META_INSTAGRAM_ACTOR_ID: "",
+    META_BUSINESS_ID: "",
+    META_VIDEO_LAUNCH_ENABLED: "false",
+    TIKTOK_ACCESS_TOKEN: "",
+    TIKTOK_ADVERTISER_ID: "",
+    TIKTOK_APP_ID: "",
+    TIKTOK_APP_SECRET: "",
+    TIKTOK_WORKSPACE_ID: "",
+    TIKTOK_IDENTITY_ID: "",
+    TIKTOK_IDENTITY_AUTHORIZED_BC_ID: "",
+    TIKTOK_DISABLED_LAUNCH_ENABLED: "false",
+    TIKTOK_VIDEO_UPLOAD_ENABLED: "false",
+    WHATSAPP_VERIFY_TOKEN: "",
+    WHATSAPP_APP_SECRET: "",
+    WAZZUP_API_KEY: "",
+    WAZZUP_WEBHOOK_SECRET: "",
+    TELEGRAM_BOT_TOKEN: "",
+    TELEGRAM_CHAT_ID: "",
+    NEGIS_VAPID_PUBLIC_KEY: "",
+    NEGIS_VAPID_PRIVATE_KEY: "",
+    NEGIS_VAPID_SUBJECT: "",
+    META_INSIGHTS_WORKER_SECRET: "",
+    META_INSIGHTS_WORKSPACE_ALLOWLIST: "",
+    VIDEO_OPTIMIZATION_WORKER_SECRET: "",
+    VIDEO_OPTIMIZATION_ENABLED: "false",
+    TARGETING_AGENT_API_KEY: "",
+    // Empty URL falls back to localhost:3001; pin loopback explicitly instead.
+    // This confines the destination, but does not disable attempted requests.
+    TARGETING_AGENT_URL: "http://127.0.0.1:1",
+    MEDINA_PLATFORM_OWNER_IDS: "",
+    MEDINA_CONTROL_ORIGINS: "",
+    MEDINA_PUBLIC_SITE_ENABLED: "false",
+    MEDINA_SITE_INDEXABLE: "false",
+    MEDINA_SITE_FORM_ENABLED: "false",
+    MEDINA_SITE_INTAKE_ENABLED: "false",
+    MEDINA_PUBLIC_SITE_WORKSPACE_ID: "",
+    MEDINA_SITE_ORIGIN: "",
+    MEDINA_SITE_INTAKE_KEY: "",
+    MEDINA_SITE_TURNSTILE_SECRET: "",
+    MEDINA_SITE_TURNSTILE_SITE_KEY: "",
+  }),
+  // Status-only integrations in this candidate; clear if inherited as well.
+  additionalBlankIfPresent: Object.freeze([
+    "GEMINI_API_KEY", "ELEVENLABS_API_KEY", "ELEVENLABS_VOICE_ID",
+    "HEYGEN_API_KEY", "TAPNOW_API_KEY",
+  ]),
+});
+
+// Vercel's form rejects empty values. Credential readers trim whitespace.
+// VITE_API_BASE_URL instead strips a trailing slash; '/' preserves same-origin.
+// DATABASE_URL has no trim/disable contract: do not synthesize a connection.
+// If it is ever inherited, stop rather than applying this UI profile as-is.
+export const previewUiOverrides = Object.freeze(Object.fromEntries(
+  Object.entries(previewIsolation.overrides)
+    .filter(([key]) => key !== "DATABASE_URL")
+    .map(([key, value]) => [key, key === "VITE_API_BASE_URL" ? "/" : value === "" ? " " : value]),
+));

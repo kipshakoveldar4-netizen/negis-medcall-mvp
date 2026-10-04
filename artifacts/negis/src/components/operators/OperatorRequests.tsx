@@ -3,6 +3,7 @@ import { Check, X, RefreshCw, ChevronLeft, ChevronRight } from "lucide-react";
 import { operatorApi, useOperatorList } from "@/lib/operatorApi";
 import { OperatorLeads } from "./OperatorLeads";
 import { OperatorServiceCatalog } from "./OperatorServiceCatalog";
+import { OperatorArrivals } from "./OperatorArrivals";
 import {
   formatArrivalPrice,
   operatorStatusLabels,
@@ -19,6 +20,7 @@ export function OperatorRequests({ workspaceId }: { workspaceId?: string }) {
   const [error, setError] = useState("");
   const [openRequest, setOpenRequest] = useState<string | null>(null);
   const [openCatalog, setOpenCatalog] = useState<string | null>(null);
+  const [openArrivals, setOpenArrivals] = useState<string | null>(null);
   async function change(id: string, action: string) {
     if (
       action === "end" &&
@@ -33,6 +35,7 @@ export function OperatorRequests({ workspaceId }: { workspaceId?: string }) {
       await operatorApi(path, { id, action }, "PATCH");
       setOpenRequest(null);
       setOpenCatalog(null);
+      setOpenArrivals(null);
       list.refresh();
     } catch (err) {
       setError(
@@ -138,6 +141,20 @@ export function OperatorRequests({ workspaceId }: { workspaceId?: string }) {
                 <button
                   type="button"
                   className="neu-btn"
+                  aria-expanded={openArrivals === item.id}
+                  onClick={() =>
+                    setOpenArrivals(openArrivals === item.id ? null : item.id)
+                  }
+                >
+                  {openArrivals === item.id
+                    ? "Скрыть приходы"
+                    : workspaceId
+                      ? "Подтвердить приходы"
+                      : "Приходы и звонки"}
+                </button>
+                <button
+                  type="button"
+                  className="neu-btn"
                   aria-expanded={openRequest === item.id}
                   onClick={() =>
                     setOpenRequest(openRequest === item.id ? null : item.id)
@@ -170,6 +187,13 @@ export function OperatorRequests({ workspaceId }: { workspaceId?: string }) {
           )}
           {!workspaceId && item.status === "accepted" && openCatalog === item.id && (
             <OperatorServiceCatalog key={item.id} requestId={item.id} />
+          )}
+          {item.status === "accepted" && openArrivals === item.id && (
+            <OperatorArrivals
+              key={`${item.id}:arrivals`}
+              requestId={item.id}
+              workspaceId={workspaceId}
+            />
           )}
         </article>
       ))}

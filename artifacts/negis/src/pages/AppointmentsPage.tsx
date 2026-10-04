@@ -19,6 +19,8 @@ import { toast } from "sonner";
 import { PageLayout } from "@/components/layout/PageLayout";
 import { MetricCard } from "@/components/ui/metric-card";
 import { apiUrl, crmFetch } from "@/lib/api";
+import { editAppointmentClient, matchesAppointmentClientHistory, selectAppointmentClient } from "@/lib/appointmentClient";
+import { canReleaseAppointmentAttempt, clearPersistedAppointmentCreateAttempt, confirmedAppointmentCreate, isCurrentAppointmentAttempt, mergeCreatedAppointment, newAppointmentCreateAttempt, persistAppointmentCreateAttempt, restoreAppointmentCreateAttempt, type AppointmentCreateAttempt } from "@/lib/appointmentCreateAttempt";
 import { isRealWorkspace, readWorkspaceId as readCurrentWorkspaceId, useDemoCollection, workspaceScopedKey } from "@/lib/demoStorage";
 import { formatPhone, toTelHref, toWhatsappHref } from "@/lib/phone";
 import { clinicToday, dayKeyInZone, isOnClinicDay } from "@/lib/clinicDay";
@@ -26,7 +28,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import { MasterDayGrid } from "@/components/crm/master-day-grid";
 import { AppointmentExtraServices } from "@/components/crm/appointment-extra-services";
 import { appointmentPriceFromInput, normalizeAppointmentServices, readAppointmentServices, summarizeAppointmentServices, type AppointmentServiceItem } from "../../../../lib/crm/appointment-services";
-import { formatSlot, freeSlots, groupSlots, minuteOfClinicDay, workingIntervals } from "@/lib/dayGrid";
+import { formatSlot, freeSlots, groupSlots, minuteOfClinicDay, occupiedGridSlots, workingIntervals } from "@/lib/dayGrid";
 import { capitalize, termsFor, type Terms } from "../../../../lib/vertical/terms";
 import { leadStageDefinitionFromUnknown } from "@/lib/leadPipeline";
 
@@ -83,6 +85,12 @@ type ApiResponse =
 
 const APPOINTMENT_PREFILL_KEY = "negis_appointment_prefill";
 const DEAL_PREFILL_KEY = "negis_deal_prefill";
+
+function appointmentAttemptStorage(): Storage | null {
+  if (typeof window === "undefined") return null;
+  try { return window.sessionStorage; }
+  catch { return null; }
+}
 
 /** Строка справочника услуг — ровно те поля, которые нужны форме записи. */
 type CatalogService = {
@@ -951,7 +959,7 @@ function AppointmentCard({
 }
 
 export function AppointmentsPage() {
-  const { vertical, userRole } = useAuth();
+  const { vertical, userRole, user, clinicId } = useAuth();
   const terms = termsFor(vertical);
   const [, setLocation] = useLocation();
   // Заявка, из которой пришла эта запись: после успешного создания она сама
@@ -1007,6 +1015,61 @@ export function AppointmentsPage() {
   // отправлял второй POST: при allowConflict сервер не проверяет ничего, а
   // toRow не переносит клиентский id — получались две одинаковые записи.
   const [saving, setSaving] = useState(false);
+  const submitLock = useRef(false);
+  const createAttempt = useRef<AppointmentCreateAttempt | null>(null);
+  const restoredCreateScope = useRef("");
+  const [unconfirmedCreate, setUnconfirmedCreate] = useState(false);
+  const currentCreateScope = useRef({ workspaceId: readCurrentWorkspaceId(), actorId: user?.id || "" });
+  currentCreateScope.current = { workspaceId: readCurrentWorkspaceId(), actorId: user?.id || "" };
+
+  useEffect(() => {
+    const attempt = createAttempt.current;
+    if (attempt && !isCurrentAppointmentAttempt(attempt, readCurrentWorkspaceId(), user?.id || "")) {
+      const storage = appointmentAttemptStorage();
+      if (storage) clearPersistedAppointmentCreateAttempt(storage);
+      createAttempt.current = null;
+      setUnconfirmedCreate(false);
+      setModalOpen(false);
+      setForm(defaultForm(todayKeyAtLoad));
+    }
+  }, [clinicId, user?.id, currentCreateScope.current.workspaceId]);
+
+  useEffect(() => {
+    const storage = appointmentAttemptStorage();
+    if (!storage || !isRealWorkspace()) return;
+    const scope = currentCreateScope.current;
+    if (!scope.workspaceId || !scope.actorId) return;
+    const scopeKey = `${scope.workspaceId}:${scope.actorId}`;
+    if (restoredCreateScope.current === scopeKey || createAttempt.current) return;
+    restoredCreateScope.current = scopeKey;
+
+    const restored = restoreAppointmentCreateAttempt(storage, scope.workspaceId, scope.actorId);
+    if (!restored) return;
+    const restoredAppointment = appointmentFromApi(restored.payload);
+    createAttempt.current = restored;
+    prefillLeadRef.current = restored.leadId || "";
+    setEditingId(null);
+    setForm(formFromAppointment(restoredAppointment));
+    setSelectedDate(dateKeyFromStartsAt(restoredAppointment.startsAt));
+    setConflictMessage("");
+    setScheduleMessage("");
+    setClientMatches([]);
+    setRemoteVisitHistory([]);
+    setUnconfirmedCreate(true);
+    setModalOpen(true);
+    toast.warning("Найдена незавершённая запись. Проверьте, сохранилась ли она.");
+  }, [clinicId, user?.id]);
+
+  useEffect(() => {
+    if (!saving && !unconfirmedCreate) return;
+    const warnBeforeLeaving = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
+    window.addEventListener("beforeunload", warnBeforeLeaving);
+    return () => window.removeEventListener("beforeunload", warnBeforeLeaving);
+  }, [saving, unconfirmedCreate]);
+
+  const closeAppointmentForm = () => {
+    if (!submitLock.current && !createAttempt.current?.uncertain) setModalOpen(false);
+  };
 
   const [catalog, setCatalog] = useState<CatalogService[]>([]);
   // Прайс, суженный под выбранного в форме мастера. Отдельное состояние, а не
@@ -1252,8 +1315,8 @@ export function AppointmentsPage() {
 
   /**
    * Search the real patient directory while the receptionist types a name.
-   * A unique exact match is linked automatically; ambiguous names stay as
-   * explicit choices so one patient is never attached to another by accident.
+   * Names are suggestions, not identity: even one exact result must be
+   * selected explicitly before replacing contacts or linking the visit.
    */
   useEffect(() => {
     const query = form.client.replace(/\s+/g, " ").trim();
@@ -1287,22 +1350,6 @@ export function AppointmentsPage() {
 
           setClientMatches(matches);
           setClientSearchAttempted(true);
-          const exact = matches.filter(
-            (client) => client.name.replace(/\s+/g, " ").trim().toLocaleLowerCase("ru") === query.toLocaleLowerCase("ru"),
-          );
-          if (exact.length === 1) {
-            const client = exact[0];
-            setForm((current) => {
-              if (current.clientId || current.client.replace(/\s+/g, " ").trim() !== query) return current;
-              return {
-                ...current,
-                clientId: client.id,
-                client: client.name,
-                phone: client.phone || current.phone,
-                whatsapp: client.whatsapp || client.phone || current.whatsapp,
-              };
-            });
-          }
         } catch {
           if (!cancelled) {
             setClientMatches([]);
@@ -1555,6 +1602,7 @@ export function AppointmentsPage() {
   const dayBuckets = useMemo(() => {
     const buckets = new Map<string, Appointment[]>(slots.map((slot) => [slot, [] as Appointment[]]));
     const outside: Appointment[] = [];
+    const occupied = new Set<string>();
 
     const minutesOf = (value: string) => {
       const [hours, minutes] = value.split(":").map(Number);
@@ -1563,12 +1611,22 @@ export function AppointmentsPage() {
     const slotMinutes = slots.map(minutesOf);
 
     for (const appointment of dayAppointments) {
-      const instant = Date.parse(appointment.startsAt);
-      if (!Number.isFinite(instant)) {
+      const minutes = minuteOfClinicDay(appointment.startsAt, clinicTimeZone);
+      if (minutes === null) {
         outside.push(appointment);
         continue;
       }
-      const minutes = minutesOf(timeKeyFromStartsAt(appointment.startsAt));
+      if (activeStatuses.includes(appointment.status)) {
+        for (const occupiedMinute of occupiedGridSlots({
+          startMinute: minutes,
+          durationMinutes: appointment.durationMinutes,
+          slots: slotMinutes,
+        })) occupied.add(formatSlot(occupiedMinute));
+      }
+      if (minutes < slotMinutes[0] || minutes > slotMinutes[slotMinutes.length - 1]) {
+        outside.push(appointment);
+        continue;
+      }
       let index = -1;
       for (let i = 0; i < slotMinutes.length; i += 1) {
         if (slotMinutes[i] <= minutes) index = i;
@@ -1580,8 +1638,8 @@ export function AppointmentsPage() {
       buckets.get(slots[index])!.push(appointment);
     }
 
-    return { buckets, outside };
-  }, [dayAppointments, slots]);
+    return { buckets, outside, occupied };
+  }, [clinicTimeZone, dayAppointments, slots]);
   const weekAppointments = useMemo(
     () => filteredItems.filter((appointment) => isWithinWeek(appointment, weekStart, clinicTimeZone)),
     [filteredItems, weekStart, clinicTimeZone],
@@ -1731,29 +1789,22 @@ export function AppointmentsPage() {
    * должен быть архив: видно, кого числа какая услуга была, во сколько и к
    * какому мастеру». То же самое — «история посещений» в запись.кз.
    *
-   * Ищется по связанной карточке, затем по телефону (последние десять цифр),
-   * затем по точному имени. Для связанной карточки сервер отдаёт отдельную
+   * Для выбранной карточки история строго по client_id. Без выбора допустимо
+   * совпадение полного нормализованного контакта, но не имени. Сервер отдаёт отдельную
    * выборку по client_id: история не обрезается общим списком календаря. У
    * мастера эта выборка всё равно сужена сервером до собственной работы.
    */
   const visitHistory = useMemo(() => {
-    const digitsOf = (value: string) => (value || "").replace(/\D/g, "").slice(-10);
-    const phoneKey = digitsOf(form.phone) || digitsOf(form.whatsapp);
-    const nameKey = form.client.trim().toLowerCase();
-    if (!form.clientId && phoneKey.length < 10 && nameKey.length < 2) return [];
     const unique = new Map<string, Appointment>();
     for (const appointment of [...remoteVisitHistory, ...items]) unique.set(appointment.id, appointment);
     return [...unique.values()]
       .filter((appointment) => {
         if (editingId && appointment.id === editingId) return false;
-        if (form.clientId && appointment.clientId) return appointment.clientId === form.clientId;
-        const appointmentPhone = digitsOf(appointment.phone) || digitsOf(appointment.whatsapp);
-        if (phoneKey.length >= 10 && appointmentPhone) return appointmentPhone === phoneKey;
-        return nameKey.length >= 2 && appointment.client.trim().toLowerCase() === nameKey;
+        return matchesAppointmentClientHistory(form, appointment);
       })
       .sort((left, right) => (right.startsAt || "").localeCompare(left.startsAt || ""))
       .slice(0, 8);
-  }, [items, remoteVisitHistory, form.clientId, form.phone, form.whatsapp, form.client, editingId]);
+  }, [items, remoteVisitHistory, form.clientId, form.phone, form.whatsapp, editingId]);
 
   const openCreate = (date = selectedDate, time = "09:00") => {
     setEditingId(null);
@@ -1885,39 +1936,69 @@ export function AppointmentsPage() {
   const createAppointment = async (appointment: Appointment, allowConflict: boolean, allowOutsideSchedule = false) => {
     if (!isRealWorkspace()) {
       void addItem(appointment);
-      return { clientCreated: false };
+      return { clientCreated: false, replayed: false };
     }
 
-    const response = await crmFetch(`/api/crm/appointments?workspaceId=${encodeURIComponent(readCurrentWorkspaceId())}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        ...appointmentToApi(appointment),
-        workspaceId: readCurrentWorkspaceId(),
-        ...(allowConflict ? { allowConflict: true } : {}),
-        ...(allowOutsideSchedule ? { allowOutsideSchedule: true } : {}),
-      }),
+    const scope = currentCreateScope.current;
+    const attempt = createAttempt.current ?? newAppointmentCreateAttempt(scope.workspaceId, scope.actorId, {
+      ...appointmentToApi(appointment), workspaceId: scope.workspaceId,
+      ...(allowConflict ? { allowConflict: true } : {}),
+      ...(allowOutsideSchedule ? { allowOutsideSchedule: true } : {}),
     });
-    const body = await safeJson(response);
+    if (!createAttempt.current && isUuidText(prefillLeadRef.current)) attempt.leadId = prefillLeadRef.current;
+    if (!isCurrentAppointmentAttempt(attempt, scope.workspaceId, scope.actorId)) throw new Error("Аккаунт записи изменился. Откройте форму заново.");
+    createAttempt.current = attempt;
+    const storage = appointmentAttemptStorage();
+    if (storage) persistAppointmentCreateAttempt(storage, attempt);
+    let response: Response | undefined;
+    let body: ApiResponse | null = null;
+    try {
+      response = await crmFetch(`/api/crm/appointments?workspaceId=${encodeURIComponent(attempt.workspaceId)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...attempt.payload, requestKey: attempt.requestKey }),
+      });
+      body = await safeJson(response);
+      if (createAttempt.current !== attempt || !isCurrentAppointmentAttempt(attempt, currentCreateScope.current.workspaceId, currentCreateScope.current.actorId)) {
+        throw new Error("Аккаунт записи изменился. Ответ не добавлен в новое пространство.");
+      }
 
-    const conflict = conflictFromBody(body);
-    if (conflict) throw conflict;
-    const outside = scheduleRefusalFromBody(body);
-    if (outside) throw outside;
+      const conflict = conflictFromBody(body);
+      if (conflict) throw conflict;
+      const outside = scheduleRefusalFromBody(body);
+      if (outside) throw outside;
 
-    if (!response.ok || body?.success !== true || body.mode !== "supabase") {
-      const record = asRecord(body);
-      throw new ServerRefusalError(
-        readString(record.code),
-        readString(record.error) || "Не удалось создать запись на сервере",
-        Array.isArray(record.details) ? record.details.map((item) => readString(item)) : [],
-      );
+      if (!response.ok || body?.success !== true || body.mode !== "supabase") {
+        const record = asRecord(body);
+        throw new ServerRefusalError(
+          readString(record.code),
+          readString(record.error) || "Не удалось создать запись на сервере",
+          Array.isArray(record.details) ? record.details.map((item) => readString(item)) : [],
+        );
+      }
+
+      const saved = confirmedAppointmentCreate(body);
+      if (!saved) throw new Error("Сервер не подтвердил сохранённую запись. Повторите проверку.");
+      setItems((current) => mergeCreatedAppointment(current, appointmentFromApi(saved)));
+      warnAboutUnsaved(unsavedFromBody(body));
+      if (storage) clearPersistedAppointmentCreateAttempt(storage);
+      createAttempt.current = null;
+      setUnconfirmedCreate(false);
+      return { clientCreated: body.data?.clientCreated === true, replayed: body.data?.replayed === true };
+    } catch (error) {
+      if (createAttempt.current === attempt && isCurrentAppointmentAttempt(attempt, currentCreateScope.current.workspaceId, currentCreateScope.current.actorId)) {
+        if (canReleaseAppointmentAttempt(attempt, response?.status ?? 0, body)) {
+          if (storage) clearPersistedAppointmentCreateAttempt(storage);
+          createAttempt.current = null;
+          setUnconfirmedCreate(false);
+        } else {
+          attempt.uncertain = true;
+          if (storage) persistAppointmentCreateAttempt(storage, attempt);
+          setUnconfirmedCreate(true);
+        }
+      }
+      throw error;
     }
-
-    const saved = body.data?.item;
-    setItems((current) => [saved ? appointmentFromApi(saved) : appointment, ...current]);
-    warnAboutUnsaved(unsavedFromBody(body));
-    return { clientCreated: body.data?.clientCreated === true };
   };
 
   /**
@@ -1981,8 +2062,9 @@ export function AppointmentsPage() {
   };
 
   const submitForm = async (allowConflict = false, allowOutsideSchedule = false) => {
-    if (saving) return;
-    if (!form.client.trim()) {
+    if (submitLock.current || saving) return;
+    const retrying = !editingId && createAttempt.current?.uncertain === true;
+    if (!retrying && !form.client.trim()) {
       toast.error("Укажите имя клиента");
       return;
     }
@@ -1992,7 +2074,7 @@ export function AppointmentsPage() {
     // замыслу, и «Сохранить» не срабатывало бы никогда. Регистратор и владелец
     // телефон видят, и для них требование остаётся.
     const contactsHidden = userRole === "doctor";
-    if (!contactsHidden && !form.phone.trim()) {
+    if (!retrying && !contactsHidden && !form.phone.trim()) {
       toast.error("Укажите телефон клиента");
       return;
     }
@@ -2010,7 +2092,7 @@ export function AppointmentsPage() {
       || "";
     let appointment: Appointment;
     try {
-      appointment = appointmentFromForm(
+      appointment = retrying ? appointmentFromApi(createAttempt.current!.payload) : appointmentFromForm(
         { ...form, serviceId: resolvedServiceId, doctorId: resolvedDoctorId },
         editingId || undefined,
       );
@@ -2024,12 +2106,14 @@ export function AppointmentsPage() {
     // этот массив может быть усечён, и он не знает, что записал коллега
     // секунду назад с другого устройства.
     const localConflict = findConflict(appointment);
-    if (localConflict && !allowConflict) {
+    if (!retrying && localConflict && !allowConflict) {
       setConflictMessage(`У ${terms.specialistGenitive} уже есть запись на это время: ${localConflict.client}, ${timeKeyFromStartsAt(localConflict.startsAt)}. Выберите другое время.`);
       return;
     }
 
+    submitLock.current = true;
     setSaving(true);
+    setConflictMessage("");
     setScheduleMessage("");
     try {
     if (editingId) {
@@ -2064,7 +2148,7 @@ export function AppointmentsPage() {
     } else {
       try {
         const result = await createAppointment(appointment, allowConflict, allowOutsideSchedule);
-        toast.success(result.clientCreated ? "Запись создана, клиент добавлен в базу" : "Запись создана");
+        toast.success(result.replayed ? "Запись уже сохранена. Повтор не создал дубликат." : result.clientCreated ? "Запись создана, клиент добавлен в базу" : "Запись создана");
         if (prefillLeadRef.current) {
           const bookedLeadId = prefillLeadRef.current;
           prefillLeadRef.current = "";
@@ -2080,7 +2164,9 @@ export function AppointmentsPage() {
           return;
         }
         console.warn("appointments: create refused", error instanceof Error ? error.message : error);
-        toast.error(refusalText(error));
+        toast.error(createAttempt.current?.uncertain
+          ? "Сохранение не подтверждено. Повторите проверку в этой форме."
+          : refusalText(error));
         return;
       }
     }
@@ -2089,6 +2175,7 @@ export function AppointmentsPage() {
     setConflictMessage("");
     setSelectedDate(form.date);
     } finally {
+      submitLock.current = false;
       setSaving(false);
     }
   };
@@ -2127,11 +2214,21 @@ export function AppointmentsPage() {
           «Свободно», и запись на вечер жила за целым экраном скролла.
         */}
         {slots
-          .reduce<Array<{ kind: "busy"; slot: string; appointments: Appointment[] } | { kind: "free"; first: string; last: string }>>(
+          .reduce<Array<
+            | { kind: "busy"; slot: string; appointments: Appointment[] }
+            | { kind: "occupied"; slot: string }
+            | { kind: "free"; first: string; last: string }
+          >>(
             (segments, slot) => {
               const busy = dayBuckets.buckets.get(slot) || [];
               if (busy.length > 0) {
                 segments.push({ kind: "busy", slot, appointments: busy });
+                return segments;
+              }
+              if (dayBuckets.occupied.has(slot)) {
+                // Интервал продолжается из карточки выше. Ничего не дублируем,
+                // но разрываем диапазон «Свободно» на реальной границе визита.
+                segments.push({ kind: "occupied", slot });
                 return segments;
               }
               const previous = segments[segments.length - 1];
@@ -2142,7 +2239,7 @@ export function AppointmentsPage() {
             [],
           )
           .map((segment) =>
-            segment.kind === "busy" ? (
+            segment.kind === "occupied" ? null : segment.kind === "busy" ? (
               <div key={segment.slot} className="grid gap-3 rounded-2xl bg-[#F8FAFC] p-3 md:grid-cols-[84px_minmax(0,1fr)]">
                 <div className="flex items-center justify-between gap-3 md:block">
                   <p className="text-base font-black text-[#0F172A]">{segment.slot}</p>
@@ -2302,42 +2399,33 @@ export function AppointmentsPage() {
 
         <section className="neu-card">
           <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_360px] xl:items-start">
-            <div className="space-y-4">
-              <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
-                <button type="button" className="neu-btn px-4 py-2 text-sm" onClick={() => setSelectedDate(todayKey)}>Сегодня</button>
-                <div className="grid grid-cols-[44px_minmax(0,1fr)_44px] items-center gap-2 sm:max-w-md">
+            <div className="min-w-0 space-y-4">
+              <div role="group" aria-label="Выбор даты записи" className="flex min-w-0 flex-wrap items-center gap-3">
+                <div className="grid w-full min-w-0 max-w-sm shrink-0 grid-cols-[44px_minmax(0,1fr)_44px] items-center gap-2">
                   <button type="button" className="neu-icon-btn" onClick={() => setSelectedDate(addDaysKey(selectedDate, -1))} aria-label="Предыдущий день">
                     <ChevronLeft size={18} />
                   </button>
-                  <div className="rounded-2xl bg-[#F8FAFC] px-4 py-3 text-center text-sm font-black capitalize text-[#0F172A]">{formatDateLabel(selectedDate)}</div>
+                  <time dateTime={selectedDate} aria-live="polite" className="flex min-h-16 min-w-0 items-center justify-center rounded-lg bg-[#F8FAFC] px-2 py-2 text-center text-sm font-black capitalize text-[#0F172A] [overflow-wrap:normal]">{formatDateLabel(selectedDate)}</time>
                   <button type="button" className="neu-icon-btn" onClick={() => setSelectedDate(addDaysKey(selectedDate, 1))} aria-label="Следующий день">
                     <ChevronRight size={18} />
                   </button>
                 </div>
-                {/* Стрелки по дням: листать календарь — движение чаще, чем
-                    прыжок на произвольную дату через поле. */}
-                <button type="button" className="neu-btn px-3 py-2 text-sm" aria-label="Предыдущий день" onClick={() => setSelectedDate(addDaysKey(selectedDate, -1))}>
-                  ‹
-                </button>
-                <input className="neu-input w-full lg:w-auto" type="date" value={selectedDate} onChange={(event) => setSelectedDate(event.target.value || selectedDate)} />
-                <button type="button" className="neu-btn px-3 py-2 text-sm" aria-label="Следующий день" onClick={() => setSelectedDate(addDaysKey(selectedDate, 1))}>
-                  ›
-                </button>
-                {/* «Сегодня» — не украшение: уйдя на неделю вперёд, вернуться
-                    к текущему дню иначе можно только вспомнив число. День
-                    берётся в поясе КЛИНИКИ, а не телефона. */}
-                <button
-                  type="button"
-                  className={`neu-btn px-3 py-2 text-sm ${selectedDate === todayKey ? "text-[#0D9488]" : ""}`}
-                  onClick={() => setSelectedDate(todayKey)}
-                  disabled={selectedDate === todayKey}
-                >
-                  Сегодня
-                </button>
+                <div className="flex w-full min-w-0 max-w-sm items-center gap-2">
+                  <input aria-label="Дата календаря" className="neu-input min-w-0 flex-1" type="date" value={selectedDate} onChange={(event) => setSelectedDate(event.target.value || selectedDate)} />
+                  {/* Возврат к сегодняшнему дню именно в поясе клиники. */}
+                  <button
+                    type="button"
+                    className={`neu-btn shrink-0 px-3 py-2 text-sm ${selectedDate === todayKey ? "text-[#0D9488]" : ""}`}
+                    onClick={() => setSelectedDate(todayKey)}
+                    disabled={selectedDate === todayKey}
+                  >
+                    Сегодня
+                  </button>
+                </div>
               </div>
-              <div className={`grid ${seesWholeClinic ? "grid-cols-5" : "grid-cols-4"} gap-2 sm:max-w-md`}>
+              <div role="group" aria-label="Вид календаря" className="flex flex-wrap gap-2 sm:max-w-lg">
                 {((seesWholeClinic ? ["grid", "day", "week", "month", "list"] : ["day", "week", "month", "list"]) as CalendarView[]).map((mode) => (
-                  <button key={mode} type="button" className={`neu-btn px-3 py-2 text-sm ${view === mode ? "text-[#0D9488]" : ""}`} onClick={() => setView(mode)}>
+                  <button key={mode} type="button" aria-pressed={view === mode} className={`neu-btn min-w-[88px] flex-1 whitespace-nowrap px-2 py-2 text-sm ${view === mode ? "text-[#0D9488]" : ""}`} onClick={() => setView(mode)}>
                     {viewLabels[mode]}
                   </button>
                 ))}
@@ -2554,7 +2642,7 @@ export function AppointmentsPage() {
       </div>
 
       {modalOpen ? (
-        <div className="fixed inset-0 z-[80] flex items-end bg-slate-950/35 p-3 sm:items-center sm:justify-center" onClick={() => setModalOpen(false)}>
+        <div className="fixed inset-0 z-[80] flex items-end bg-slate-950/35 p-3 sm:items-center sm:justify-center" onClick={closeAppointmentForm}>
           <form
             className="max-h-[calc(100dvh-32px)] w-full overflow-y-auto rounded-[28px] border border-[#DBE8E0] bg-white p-5 shadow-2xl sm:max-w-3xl sm:p-6"
             onClick={(event) => event.stopPropagation()}
@@ -2568,12 +2656,12 @@ export function AppointmentsPage() {
                 <p className="text-xs font-bold uppercase tracking-[0.16em] text-[#64748B]">{editingId ? "Редактирование" : "Новая запись"}</p>
                 <h2 className="mt-1 text-xl font-black text-[#0F172A]">{editingId ? "Карточка записи" : "Создать запись"}</h2>
               </div>
-              <button type="button" className="neu-icon-btn" onClick={() => setModalOpen(false)} aria-label="Закрыть">
+              <button type="button" className="neu-icon-btn" onClick={closeAppointmentForm} disabled={saving || unconfirmedCreate} aria-label="Закрыть">
                 <X size={18} />
               </button>
             </div>
 
-            <div className="grid gap-4 md:grid-cols-2">
+            <fieldset className="grid min-w-0 gap-4 border-0 p-0 md:grid-cols-2" disabled={saving || unconfirmedCreate}>
               <div>
                 {/* Смена имени или телефона снимает унаследованную связь: форма,
                     открытая из заявки Лауры, в которую вписали другого человека,
@@ -2583,13 +2671,7 @@ export function AppointmentsPage() {
                 <TextField
                   label="Клиент/имя"
                   value={form.client}
-                  onChange={(client) => setForm((current) => ({
-                    ...current, client, clientId: "",
-                    // Once a linked patient's name is replaced, their contact
-                    // must not silently identify the newly typed person.
-                    phone: current.clientId ? "" : current.phone,
-                    whatsapp: current.clientId ? "" : current.whatsapp,
-                  }))}
+                  onChange={(client) => setForm((current) => editAppointmentClient(current, "client", client))}
                   placeholder="Начните вводить имя"
                 />
                 {form.clientId ? (
@@ -2612,13 +2694,7 @@ export function AppointmentsPage() {
                             className="block w-full rounded-xl px-3 py-2 text-left text-sm font-black"
                             style={{ background: "var(--negis-border)", color: "var(--negis-text)" }}
                             onClick={() => {
-                              setForm((current) => ({
-                                ...current,
-                                clientId: client.id,
-                                client: client.name,
-                                phone: client.phone || current.phone,
-                                whatsapp: client.whatsapp || client.phone || current.whatsapp,
-                              }));
+                              setForm((current) => selectAppointmentClient(current, client));
                               setClientMatches([]);
                             }}
                           >
@@ -2641,9 +2717,9 @@ export function AppointmentsPage() {
                   пустое поле «Телефон» выглядело бы как потерянные данные, а
                   введённый в него номер всё равно не сохранился бы. */}
               {userRole !== "doctor" && (
-              <TextField label="Телефон" value={form.phone} onChange={(phone) => setForm((current) => ({ ...current, phone, clientId: "" }))} placeholder="+7..." />
+              <TextField label="Телефон" value={form.phone} onChange={(phone) => setForm((current) => editAppointmentClient(current, "phone", phone))} placeholder="+7..." />
               )}
-              <TextField label="WhatsApp" value={form.whatsapp} onChange={(whatsapp) => setForm((current) => ({ ...current, whatsapp }))} placeholder="+7..." />
+              <TextField label="WhatsApp" value={form.whatsapp} onChange={(whatsapp) => setForm((current) => editAppointmentClient(current, "whatsapp", whatsapp))} placeholder="+7..." />
               {/*
                 Мастер стоит ПЕРВЫМ — как в запись.кз: сначала «к кому», потом
                 «на что». Выбор мастера сужает прайс до его услуг плюс общих,
@@ -3076,7 +3152,7 @@ export function AppointmentsPage() {
                 <span className="mb-2 block text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">Комментарий</span>
                 <textarea className="neu-input min-h-28 w-full resize-y" value={form.notes} onChange={(event) => setForm((current) => ({ ...current, notes: event.target.value }))} />
               </label>
-            </div>
+            </fieldset>
 
             {conflictMessage ? (
               <div className="mt-5 rounded-2xl bg-amber-50 p-4 text-sm font-semibold text-amber-800">
@@ -3090,8 +3166,14 @@ export function AppointmentsPage() {
               </div>
             ) : null}
 
+            {unconfirmedCreate ? (
+              <div role="alert" className="mt-4 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm font-semibold text-amber-900">
+                Сохранение не подтверждено. Запись могла сохраниться; повторная проверка отправит те же данные с тем же номером запроса.
+              </div>
+            ) : null}
+
             <div className="mt-6 flex flex-col gap-2 sm:flex-row sm:justify-end">
-              <button type="button" className="neu-btn px-5 py-2.5 text-sm" onClick={() => setModalOpen(false)} disabled={saving}>Отмена</button>
+              <button type="button" className="neu-btn px-5 py-2.5 text-sm" onClick={closeAppointmentForm} disabled={saving || unconfirmedCreate}>Отмена</button>
               {/* Кнопки «Сохранить всё равно» при занятом времени больше нет:
                   владелец закрыл двойную запись, и сервер флаг обхода тоже не
                   читает. Баннер выше объясняет, что делать. */}
@@ -3103,13 +3185,13 @@ export function AppointmentsPage() {
                   type="button"
                   className="neu-btn px-5 py-2.5 text-sm text-sky-700"
                   onClick={() => void submitForm(false, true)}
-                  disabled={saving}
+                  disabled={saving || unconfirmedCreate}
                 >
                   Записать вне графика
                 </button>
               ) : null}
               <button type="submit" className="neu-btn-primary px-5 py-2.5 text-sm" disabled={saving}>
-                {saving ? "Сохраняем…" : editingId ? "Сохранить изменения" : "Создать запись"}
+                {saving ? "Сохраняем…" : unconfirmedCreate ? "Проверить сохранение" : editingId ? "Сохранить изменения" : "Создать запись"}
               </button>
             </div>
           </form>

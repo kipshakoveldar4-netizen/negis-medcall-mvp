@@ -176,7 +176,9 @@ export const CRM_ROUTE_AUTHORIZATION: Readonly<Record<string, RouteAuthorization
   "operator-leads": { kind: "bootstrap", methods: ["GET", "PATCH"] },
   "operator-services": { kind: "bootstrap", methods: ["GET"] },
   "operator-bookings": { kind: "bootstrap", methods: ["GET", "POST"] },
+  "operator-arrivals": { kind: "bootstrap", methods: ["GET", "PATCH"] },
   "clinic-operator-leads": { kind: "browser", methods: ["GET", "PATCH"], roles: ["owner", "admin", "manager"] },
+  "clinic-operator-arrivals": { kind: "browser", methods: ["GET", "POST"], roles: ["owner", "admin", "manager"] },
   "platform-operators": { kind: "platform", methods: ["GET", "PATCH"] },
   "operator-directory": { kind: "browser", methods: ["GET"], roles: ["owner", "admin", "manager"] },
   "clinic-operator-requests": { kind: "browser", methods: ["GET", "POST", "PATCH"], roles: ["owner", "admin", "manager"] },
@@ -333,6 +335,8 @@ export const CRM_ROUTE_AUTHORIZATION: Readonly<Record<string, RouteAuthorization
   "site-inquiry": { kind: "site_intake", methods: ["POST", "OPTIONS"] },
   "site-page": { kind: "site_public", methods: ["GET", "HEAD"] },
   "site-blog": { kind: "browser", methods: ["GET", "POST", "PATCH"], roles: WORKSPACE_ADMIN },
+  "site-inquiry-deletion-preview": { kind: "browser", methods: ["GET"], roles: WORKSPACE_ADMIN },
+  "site-inquiry-deletion": { kind: "browser", methods: ["POST"], roles: WORKSPACE_ADMIN },
 };
 
 /** Sub-path routes, matched as `<resource>/<segment>`. */

@@ -38,6 +38,12 @@ type GridModule = {
     nowMinute: number | null;
     stepMinutes?: number;
   }) => number[];
+  occupiedGridSlots: (input: {
+    startMinute: number;
+    durationMinutes: number;
+    slots: readonly number[];
+    stepMinutes?: number;
+  }) => number[];
   groupSlots: (slots: readonly number[]) => Array<{ label: string; slots: number[] }>;
 };
 const grid: GridModule = (await import(pathToFileURL(gridPath).href)) as GridModule;
@@ -277,12 +283,33 @@ test("FS7 нулевая и бессмысленная длительность 
   assert.deepEqual(grid.freeSlots({ intervals: [], busy: [], durationMinutes: 60, nowMinute: null }), []);
 });
 
+test("FS7b дневной список не называет продолжение визита свободным", () => {
+  const slots = [570, 600, 630, 660, 690];
+  assert.deepEqual(
+    grid.occupiedGridSlots({ startMinute: 600, durationMinutes: 90, slots }),
+    [600, 630, 660],
+    "визит 10:00–11:30 занимает три получасовые строки",
+  );
+  assert.deepEqual(
+    grid.occupiedGridSlots({ startMinute: 615, durationMinutes: 60, slots }),
+    [600, 630, 660],
+    "визит между делениями занимает каждую пересечённую строку",
+  );
+  assert.deepEqual(
+    grid.occupiedGridSlots({ startMinute: 570, durationMinutes: 30, slots }),
+    [570],
+    "граница окончания не занимает следующий слот",
+  );
+});
+
 test("FS8 форма записей действительно пользуется движком слотов", async () => {
   // Слоты, посчитанные где-то сбоку и никуда не подключённые, — это то, что
   // сверка со спецификацией уже находила: код есть, пользователю недоступен.
   const page = await readFile(path.join(repoRoot, "artifacts", "negis", "src", "pages", "AppointmentsPage.tsx"), "utf8");
   assert.match(page, /freeSlots\(\{/, "форма считает слоты движком, а не своей копией");
   assert.match(page, /groupSlots\(slots\)/, "группировка утро/день/вечер — как в запись.кз");
+  assert.match(page, /occupiedGridSlots\(\{/, "дневной список учитывает длительность записи");
+  assert.match(page, /dayBuckets\.occupied\.has\(slot\)/, "занятые продолжением строки разрывают свободный диапазон");
   assert.ok(page.includes("Свободное время"), "секция названа на экране");
   // Правка не считает саму себя занятостью — иначе перенос записи показывал
   // бы её старое время занятым.

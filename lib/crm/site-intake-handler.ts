@@ -43,11 +43,12 @@ async function persist(siteKey: string, requestKey: string, inquiry: SiteInquiry
     p_site_key: siteKey, p_request_key: requestKey, p_inquiry: inquiry,
   });
   if (error) return error.message === "intake_rate_limited" ? "rate_limited"
-    : error.message === "request_conflict" ? "request_conflict" : "unavailable";
+    : error.message === "request_conflict" ? "request_conflict"
+    : error.message === "inquiry_erased" ? "inquiry_erased" : "unavailable";
   return record(data)?.accepted === true ? null : "unavailable";
 }
 
-async function boundedBody(req: VercelRequest): Promise<unknown> {
+export async function readSiteJsonBody(req: VercelRequest): Promise<unknown> {
   const declared = req.headers["content-length"];
   if (typeof declared === "string" && (!/^\d+$/.test(declared) || Number(declared) > 8192)) throw new Error("invalid_body");
   if (req.body !== undefined) {
@@ -98,7 +99,7 @@ export function createSiteIntakeHandler(deps: {
     // Local circuit breaker only; deployment must also configure edge/WAF limits.
     if (++attempts > 60) return reply(429, "rate_limited");
     let body: Record<string, unknown> | null;
-    try { body = record(await boundedBody(req)); } catch { return reply(400, "invalid_request"); }
+    try { body = record(await readSiteJsonBody(req)); } catch { return reply(400, "invalid_request"); }
     if (!body || Object.keys(body).some(key => !["requestKey", "inquiry", "challengeToken"].includes(key))) return reply(400, "invalid_request");
     const { requestKey, challengeToken } = body;
     if (typeof requestKey !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(requestKey)
@@ -110,6 +111,7 @@ export function createSiteIntakeHandler(deps: {
       const error = await (deps.save || persist)(config.siteKey, requestKey, inquiry.data);
       if (error === "rate_limited") return reply(429, error);
       if (error === "request_conflict") return reply(409, error);
+      if (error === "inquiry_erased") return reply(409, error);
       if (error) return reply(503, "intake_unavailable");
       return reply(200);
     } catch { return reply(503, "intake_unavailable"); }

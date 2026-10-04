@@ -31,19 +31,31 @@ seems to need a write, the check is wrong.
 
 ## Public surface — no credentials
 
+Use only GET/HEAD/OPTIONS in production. Mutating-method denial cases belong
+to isolated local fixtures or a separately approved test deployment, never to
+production (even without credentials). A public inquiry POST can write without
+a user token, so absence of Authorization is not a safety guarantee.
+
 Expect a refusal, and expect it to say nothing useful about what is behind it.
 
 - `GET /api/crm/health`, `/api/crm/storage-health`, `/api/crm/auth-context`,
   `/api/crm/leads` → `401 authentication_required`
+- `GET /api/targeting/health` → `401`
+- `GET /api/crm/<unregistered>` and an encoded traversal → `404 resource_not_found`
+
+### Isolated test environment only
+
+These expectations are not permission to send the requests to production.
+Providers must be stubbed; never call a live Meta account for a denial test.
+
 - `POST /api/crm/staff`, `/api/crm/meta-insights-sync` → `401`
 - `POST /api/crm/meta-insights-background-cycle` → `401 worker_unauthorized`
   (a browser token must not satisfy it either)
 - `POST /api/content-studio/generate-package`, `/api/content-studio/send-telegram`
   → `401` (and no OpenAI or Telegram call is made)
-- `GET /api/targeting/health`, `POST /api/targeting/launch` → `401`
+- `POST /api/targeting/launch` → `401`
 - `POST /api/auth/register` → `410 self_registration_disabled`
 - `POST /api/leads/webhook/<anything>` → `410 legacy_webhook_disabled`
-- `GET /api/crm/<unregistered>` and an encoded traversal → `404 resource_not_found`
 - `DELETE /api/crm/leads` → `405 method_not_allowed`
 
 ## Authenticated surface — your own account only
@@ -55,10 +67,9 @@ another clinic's real identifier.
   the selector in `localStorage` matching it.
 - Foreign selector on `leads`, `clients`, `appointments`, `meta-launches`,
   `staff` → `403 workspace_access_denied` for every one.
-- Tamper with client state — set the workspace selector and the legacy demo
-  blobs to a foreign id — and repeat: still `403`. The client is not authority.
-- `POST /api/crm/staff` for your own workspace → `409 staff_invitation_required`
-  (authorization first, then the closure).
+- Client-state tampering and `POST /api/crm/staff` denial checks are isolated-test
+  cases only. Never alter a production browser session, workspace selector or
+  localStorage for an audit. The client is not authority.
 - `GET /api/crm/health` → `200`, and the body carries presence flags only: no
   environment variable names, no Meta identifiers, no secret values.
 - Content Studio with a foreign selector → `403`; `/api/content-studio/videos`

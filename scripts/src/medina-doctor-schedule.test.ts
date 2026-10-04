@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { withAppointmentCreateRpcSpy } from "./appointment-create-rpc-spy.js";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
@@ -45,6 +46,7 @@ const HIDDEN_DOCTOR_ID = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
 const FOREIGN_DOCTOR_ID = "99999999-9999-4999-8999-999999999999";
 const APPOINTMENT_ID = "abababab-abab-4bab-8bab-abababababab";
 const SHIFT_ID = "fafafafa-fafa-4afa-8afa-fafafafafafa";
+const CLIENT_ID = "12121212-1212-4121-8121-121212121212";
 const TOKEN = "header.payload.signature";
 
 type QueryLog = { table: string; op: string; filters: Record<string, unknown> };
@@ -197,7 +199,7 @@ async function loadRouter(options: {
   };
 
   supabaseModule.setSupabaseServerClientFactoryForTests(() =>
-    spyClient(clientRows, log, options.injected ?? [], new Set(options.missingColumns ?? [])));
+    withAppointmentCreateRpcSpy(spyClient(clientRows, log, options.injected ?? [], new Set(options.missingColumns ?? []))));
 
   const routerModule = (await import(pathToFileURL(routerPath).href)) as {
     default: (req: unknown, res: MockResponse) => Promise<unknown>;
@@ -351,15 +353,15 @@ test("DS5 скрытый врач не попадает в новую запис
   assert.equal(writtenTo(allowed.log, "appointments")?.doctor_id, HIDDEN_DOCTOR_ID);
 });
 
-test("DS6 запись создаётся и до применения миграции, теряя только связь", async () => {
+test("DS6 запись существующего клиента до миграции теряет только связь", async () => {
   const call = await loadRouter({
-    rows: { clinic_doctors: [activeDoctor] },
+    rows: { clinic_doctors: [activeDoctor], clients: [{ id: CLIENT_ID, workspace_id: WORKSPACE_A }] },
     missingColumns: ["doctor_id"],
   });
   const { res, log, warnings: warned } = await call({
     resource: "appointments",
     method: "POST",
-    body: { client: "Пациент", doctorId: DOCTOR_ID, startsAt: MONDAY_INSIDE },
+    body: { client: "Пациент", clientId: CLIENT_ID, doctorId: DOCTOR_ID, startsAt: MONDAY_INSIDE },
   });
 
   assert.equal(res.statusCode, 201, JSON.stringify(res.body));
@@ -895,15 +897,15 @@ test("DS34 ночная смена доживает до утра следующ
   assert.equal(outside.res.statusCode, 409, "после конца смены — отказ");
 });
 
-test("DS35 откат снимает только отсутствующую колонку, сохраняя связь с услугой", async () => {
+test("DS35 запись существующего клиента теряет только отсутствующую колонку", async () => {
   const call = await loadRouter({
-    rows: { clinic_doctors: [activeDoctor], clinic_services: [{ id: SHIFT_ID, workspace_id: WORKSPACE_A, name: "Ботокс", is_active: true }] },
+    rows: { clinic_doctors: [activeDoctor], clinic_services: [{ id: SHIFT_ID, workspace_id: WORKSPACE_A, name: "Ботокс", is_active: true }], clients: [{ id: CLIENT_ID, workspace_id: WORKSPACE_A }] },
     missingColumns: ["doctor_id"],
   });
   const { res, log } = await call({
     resource: "appointments",
     method: "POST",
-    body: { client: "Пациент", doctorId: DOCTOR_ID, serviceId: SHIFT_ID, startsAt: MONDAY_INSIDE },
+    body: { client: "Пациент", clientId: CLIENT_ID, doctorId: DOCTOR_ID, serviceId: SHIFT_ID, startsAt: MONDAY_INSIDE },
   });
 
   assert.equal(res.statusCode, 201, JSON.stringify(res.body));

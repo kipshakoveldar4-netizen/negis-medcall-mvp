@@ -323,7 +323,7 @@ test("PN19 изменения записи: перенос, смена маст�
   // Смена мастера — ДВЕ новости: прежнему «отменена» (по ДО-состоянию),
   // новому «новая» (по ПОСЛЕ-состоянию). Одна общая «изменилась» оставила бы
   // прежнего мастера искать запись, которой у него больше нет.
-  const patchBlock = server.slice(server.indexOf("const doctorChanged ="), server.indexOf("const doctorChanged =") + 1800);
+  const patchBlock = server.slice(server.indexOf("const doctorChanged ="), server.indexOf("const doctorChanged =") + 1800).replace(/\r\n/g, "\n");
   assert.ok(patchBlock.includes('event: "cancelled",\n          appointment: beforeSnapshot'), "прежнему — отмена");
   assert.ok(patchBlock.includes('event: "created",\n          appointment: afterSnapshot'), "новому — новая запись");
   assert.ok(patchBlock.includes('event: "rescheduled",\n          appointment: afterSnapshot'), "перенос — со свежим временем");

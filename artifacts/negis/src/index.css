@@ -699,7 +699,23 @@
     }
   }
 
-  @media (min-width: 768px) {
+  /* Keep tablet content clear of compact navigation, without collapsing
+     tablet grids into the phone's single column. */
+  @media (min-width: 768px) and (max-width: 1023px) {
+    .negis-main {
+      padding-bottom: calc(112px + env(safe-area-inset-bottom));
+    }
+  }
+
+  @media (max-width: 1023px), (pointer: coarse) {
+    .negis-main input:not([type="checkbox"]):not([type="radio"]),
+    .negis-main select,
+    .negis-main textarea {
+      font-size: 16px !important;
+    }
+  }
+
+  @media (min-width: 1024px) {
     .mobile-bottom-nav,
     .mobile-nav-backdrop {
       display: none;

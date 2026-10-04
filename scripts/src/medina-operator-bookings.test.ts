@@ -9,12 +9,56 @@ const root = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "../..",
 );
+type BookingAttempt = {
+  requestId: string;
+  requestKey: string;
+  payload: { leadId: string; doctorId: string; serviceIds: string[]; startsLocal: string; timeZone: string };
+  uncertain: boolean;
+};
+const attemptModule = new URL(
+  "../../artifacts/negis/src/lib/operatorBookingAttempt.ts",
+  import.meta.url,
+);
+const {
+  canReleaseOperatorBookingAttempt,
+  isCurrentOperatorBookingAttempt,
+  newOperatorBookingAttempt,
+} = await import(attemptModule.href) as {
+  canReleaseOperatorBookingAttempt(status: number): boolean;
+  isCurrentOperatorBookingAttempt(attempt: BookingAttempt, requestId: string, leadId: string): boolean;
+  newOperatorBookingAttempt(
+    requestId: string,
+    payload: BookingAttempt["payload"],
+    makeKey?: () => string,
+  ): BookingAttempt;
+};
 const db = new PGlite();
 const id = (n: number) =>
   `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const row = async (sql: string, params: unknown[] = []) =>
   (await db.query<Record<string, unknown>>(sql, params)).rows[0];
 const time = "2030-01-07T10:00";
+
+test("operator retry keeps one detached request and only definite refusals release it", () => {
+  const payload = {
+    leadId: id(60),
+    doctorId: id(70),
+    serviceIds: [id(80), id(81)],
+    startsLocal: time,
+    timeZone: "Asia/Almaty",
+  };
+  const attempt = newOperatorBookingAttempt(id(50), payload, () => id(100));
+  payload.serviceIds.pop();
+  payload.startsLocal = "2030-01-07T12:00";
+
+  assert.deepEqual(attempt.payload.serviceIds, [id(80), id(81)]);
+  assert.equal(attempt.payload.startsLocal, time);
+  assert.ok(isCurrentOperatorBookingAttempt(attempt, id(50), id(60)));
+  assert.equal(isCurrentOperatorBookingAttempt(attempt, id(51), id(60)), false);
+  assert.equal(isCurrentOperatorBookingAttempt(attempt, id(50), id(61)), false);
+  for (const status of [400, 401, 403, 409, 422]) assert.ok(canReleaseOperatorBookingAttempt(status));
+  for (const status of [0, 500, 502, 503, 504]) assert.equal(canReleaseOperatorBookingAttempt(status), false);
+});
 async function book(
   options: {
     user?: number;
@@ -55,7 +99,7 @@ before(async () => {
   );
   const numbers = new Set([
     9, 10, 11, 12, 13, 14, 19, 20, 30, 32, 33, 34, 36, 40, 45, 52, 53, 54, 55,
-    56, 57,
+    56, 57, 65, 66,
   ]);
   for (const file of (await readdir(path.join(root, "migrations"))).sort()) {
     if (!numbers.has(Number(file.slice(0, 3)))) continue;
@@ -73,6 +117,18 @@ before(async () => {
   await db.exec(
     await readFile(
       path.join(root, "migrations/057_operator_catalog_booking.sql"),
+      "utf8",
+    ),
+  );
+  await db.exec(
+    await readFile(
+      path.join(root, "migrations/065_operator_arrival_attribution.sql"),
+      "utf8",
+    ),
+  );
+  await db.exec(
+    await readFile(
+      path.join(root, "migrations/066_operator_arrival_control_calls.sql"),
       "utf8",
     ),
   );
@@ -149,6 +205,160 @@ test("catalog booking saves all services, price, client and safe audit atomicall
   );
   await rejects(() => book({ local: "2030-01-07T12:00" }), /retry_conflict/);
   await rejects(() => book({ key: 101 }), /already_exists/);
+});
+test("operator arrival belongs only to its arrived operator booking", async () => {
+  await book();
+  const confirm = () => row(
+    "select public.confirm_growth_operator_arrival($1,$2,$3) as id",
+    [id(50), id(100), id(10)],
+  );
+  await rejects(confirm, /clinic_arrival_required/);
+  await db.exec(`insert into public.appointments(id,workspace_id,client_name,status)
+    values('${id(102)}','${id(1)}','Unrelated clinic visit','arrived')`);
+  await rejects(
+    () => row("select public.confirm_growth_operator_arrival($1,$2,$3)", [id(50), id(102), id(10)]),
+    /operator_arrival_unavailable/,
+  );
+  await db.exec(`update public.appointments set status='arrived' where id='${id(100)}'`);
+  const receipt = await confirm();
+  assert.deepEqual(await confirm(), receipt);
+  assert.deepEqual(
+    await row(`select operator_request_id,appointment_id,price_minor::text,currency,
+      clinic_confirmed_by_staff_user_id,operator_checked_at
+      from public.growth_operator_arrivals`),
+    {
+      operator_request_id: id(50),
+      appointment_id: id(100),
+      price_minor: "10000",
+      currency: "KZT",
+      clinic_confirmed_by_staff_user_id: id(10),
+      operator_checked_at: null,
+    },
+  );
+});
+test("clinic confirmation and three control-call outcomes stay scoped to one agreement", async () => {
+  await book();
+  await db.exec(
+    `update public.appointments set status='arrived' where id='${id(100)}'`,
+  );
+  await db.exec(`insert into public.staff_users(id,workspace_id,auth_user_id,full_name,email,role)
+    values('${id(12)}','${id(2)}','${id(13)}','Foreign owner','foreign@example.invalid','owner')`);
+  await rejects(
+    () =>
+      row("select public.confirm_growth_operator_booking_arrival($1,$2,$3)", [
+        id(50),
+        id(100),
+        id(12),
+      ]),
+    /clinic_confirmation_required/,
+  );
+  const receipt = await row(
+    "select public.confirm_growth_operator_booking_arrival($1,$2,$3) as id",
+    [id(50), id(100), id(10)],
+  );
+  const clinic = (
+    await row("select public.read_clinic_operator_arrivals($1,$2,$3) as data", [
+      id(50),
+      id(10),
+      0,
+    ])
+  ).data as { items: Record<string, unknown>[] };
+  assert.equal(clinic.items.length, 1);
+  assert.equal(clinic.items[0].appointment_id, id(100));
+  assert.equal(clinic.items[0].arrival_id, receipt.id);
+  assert.equal("client_phone" in clinic.items[0], false);
+
+  const operator = (
+    await row("select public.read_growth_operator_arrivals($1,$2,$3) as data", [
+      id(50),
+      id(20),
+      0,
+    ])
+  ).data as { items: Record<string, unknown>[] };
+  assert.equal(operator.items.length, 1);
+  assert.equal(operator.items[0].client_phone, "87000000000");
+  assert.equal("notes" in operator.items[0], false);
+
+  for (const result of ["confirmed", "unconfirmed", "unreachable"]) {
+    assert.equal(
+      (
+        await row(
+          "select public.record_growth_operator_control_call($1,$2,$3) as id",
+          [receipt.id, id(20), result],
+        )
+      ).id,
+      receipt.id,
+    );
+  }
+  await row("select public.record_growth_operator_control_call($1,$2,$3)", [
+    receipt.id,
+    id(20),
+    "unreachable",
+  ]);
+  assert.deepEqual(
+    await row(
+      "select operator_check_result,operator_checked_at is not null as checked from public.growth_operator_arrivals",
+    ),
+    { operator_check_result: "unreachable", checked: true },
+  );
+  assert.equal(
+    (
+      await row(
+        "select count(*)::int as n from public.audit_logs where action='operator_arrival_control_call'",
+      )
+    ).n,
+    3,
+  );
+  await rejects(
+    () =>
+      row("select public.record_growth_operator_control_call($1,$2,$3)", [
+        receipt.id,
+        id(21),
+        "confirmed",
+      ]),
+    /operator_arrival_access_denied/,
+  );
+  await rejects(
+    () =>
+      row("select public.read_clinic_operator_arrivals($1,$2,$3)", [
+        id(50),
+        id(12),
+        0,
+      ]),
+    /operator_arrival_access_denied/,
+  );
+  await db.exec(
+    "update public.growth_operator_profiles set status='suspended', accepting_requests=false",
+  );
+  await rejects(
+    () =>
+      row("select public.read_growth_operator_arrivals($1,$2,$3)", [
+        id(50),
+        id(20),
+        0,
+      ]),
+    /operator_arrival_access_denied/,
+  );
+  await db.exec(`update public.growth_operator_profiles set status='approved';
+    update public.growth_operator_requests set status='ended', ended_at=now()`);
+  await rejects(
+    () =>
+      row("select public.read_growth_operator_arrivals($1,$2,$3)", [
+        id(50),
+        id(20),
+        0,
+      ]),
+    /operator_arrival_access_denied/,
+  );
+  await rejects(
+    () =>
+      row("select public.read_clinic_operator_arrivals($1,$2,$3)", [
+        id(50),
+        id(10),
+        0,
+      ]),
+    /operator_arrival_access_denied/,
+  );
 });
 test("identity, assignment, workspace, suspension and ended cooperation are checked", async () => {
   await rejects(() => book({ user: 21 }), /access_denied/);
@@ -329,6 +539,46 @@ test("booking context and writes are server-only; raw catalog has no browser gra
   for (const role of ["anon", "authenticated"]) {
     await db.exec(`set local role ${role}`);
     await rejects(() => book(), /permission denied/);
+    await rejects(
+      () => row("select public.confirm_growth_operator_arrival($1,$2,$3)", [id(50), id(100), id(10)]),
+      /permission denied/,
+    );
+    await rejects(
+      () =>
+        row("select public.read_growth_operator_arrivals($1,$2,$3)", [
+          id(50),
+          id(20),
+          0,
+        ]),
+      /permission denied/,
+    );
+    await rejects(
+      () =>
+        row("select public.read_clinic_operator_arrivals($1,$2,$3)", [
+          id(50),
+          id(10),
+          0,
+        ]),
+      /permission denied/,
+    );
+    await rejects(
+      () =>
+        row("select public.confirm_growth_operator_booking_arrival($1,$2,$3)", [
+          id(50),
+          id(100),
+          id(10),
+        ]),
+      /permission denied/,
+    );
+    await rejects(
+      () =>
+        row("select public.record_growth_operator_control_call($1,$2,$3)", [
+          id(100),
+          id(20),
+          "confirmed",
+        ]),
+      /permission denied/,
+    );
     await db.exec("reset role");
   }
   await db.exec("set local role service_role");

@@ -71,3 +71,43 @@ test("MO4 поля с инлайновым шрифтом не зумят iOS", 
     "мобильное правило 16px !important для инлайновых полей обязано остаться",
   );
 });
+
+test("MO5 tablet navigation, sidebar and content padding share the 1024px boundary", async () => {
+  const layout = await readFile(path.join(negisSrc, "components/layout/PageLayout.tsx"), "utf8");
+  const nav = await readFile(path.join(negisSrc, "components/layout/MobileNav.tsx"), "utf8");
+  const css = await readFile(path.join(negisSrc, "index.css"), "utf8");
+  assert.ok(layout.includes('className="hidden lg:block"'));
+  assert.ok(layout.includes("lg:pl-[268px]"));
+  assert.ok(layout.includes("pb-24 lg:pb-0"));
+  assert.ok(nav.includes('className="mobile-bottom-nav lg:hidden"'));
+  assert.ok(nav.includes('className="mobile-nav-backdrop lg:hidden"'));
+  assert.match(css, /@media \(min-width: 1024px\)\s*\{\s*\.mobile-bottom-nav,/);
+  assert.match(css, /@media \(min-width: 768px\) and \(max-width: 1023px\)\s*\{\s*\.negis-main\s*\{\s*padding-bottom: calc\(112px \+ env\(safe-area-inset-bottom\)\)/);
+  const tablet = css.slice(css.indexOf("@media (min-width: 768px) and (max-width: 1023px)"));
+  assert.ok(tablet.includes("@media (max-width: 1023px), (pointer: coarse)"));
+  assert.match(tablet, /\.negis-main input[^{]*\{[^}]*font-size:\s*16px\s*!important/s);
+});
+
+test("MO6 appointment date navigation has one control set and cannot flex-shrink into letters", async () => {
+  const source = await readFile(path.join(negisSrc, "pages", "AppointmentsPage.tsx"), "utf8");
+  const start = source.indexOf('role="group" aria-label="Выбор даты записи"');
+  assert.ok(start > 0, "calendar date controls have an accessible group");
+  const end = source.indexOf('aria-label="Вид календаря"', start);
+  assert.ok(end > start);
+  const toolbar = source.slice(start, end);
+  assert.equal((toolbar.match(/aria-label="Предыдущий день"/g) || []).length, 1);
+  assert.equal((toolbar.match(/aria-label="Следующий день"/g) || []).length, 1);
+  assert.equal((toolbar.match(/onClick=\{\(\) => setSelectedDate\(todayKey\)\}/g) || []).length, 1);
+  assert.match(toolbar, /flex min-w-0 flex-wrap/);
+  assert.match(toolbar, /w-full min-w-0 max-w-sm shrink-0 grid-cols-\[44px_minmax\(0,1fr\)_44px\]/);
+  assert.match(toolbar, /<time dateTime=\{selectedDate\} aria-live="polite"[^>]*min-h-16[^>]*\[overflow-wrap:normal\]/);
+  assert.match(toolbar, /aria-label="Дата календаря"[^>]*min-w-0 flex-1[^>]*type="date"/);
+  assert.match(toolbar, /disabled=\{selectedDate === todayKey\}/);
+});
+
+test("MO7 calendar view controls wrap by button, not by letter, and expose selection", async () => {
+  const source = await readFile(path.join(negisSrc, "pages", "AppointmentsPage.tsx"), "utf8");
+  assert.match(source, /aria-label="Вид календаря" className="flex flex-wrap gap-2/);
+  assert.match(source, /aria-pressed=\{view === mode\}[^>]*min-w-\[88px\] flex-1 whitespace-nowrap/);
+  assert.match(source, /seesWholeClinic \? \["grid", "day", "week", "month", "list"\] : \["day", "week", "month", "list"\]/);
+});

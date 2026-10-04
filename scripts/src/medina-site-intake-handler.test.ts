@@ -12,7 +12,7 @@ type Handler = (req: Request, res: Response) => Promise<unknown>;
 const mod = await import(pathToFileURL(path.join(root, "lib/crm/site-intake-handler.ts")).href) as {
   readSiteIntakeConfig(env: Record<string, string>): Config | null;
   verifySiteChallenge(config: Config, token: string, request: (...args: unknown[]) => Promise<{ ok: boolean; text(): Promise<string> }>): Promise<boolean>;
-  createSiteIntakeHandler(deps: { env(): Record<string, string>; verify?(): Promise<boolean>; save?(site: string, key: string, inquiry: unknown): Promise<string | null> }): Handler;
+  createSiteIntakeHandler(deps: { env(): Record<string, string>; verify?(config: Config, token: string): Promise<boolean>; save?(site: string, key: string, inquiry: unknown): Promise<string | null> }): Handler;
 };
 const env = { MEDINA_SITE_INTAKE_ENABLED: "true", MEDINA_SITE_ORIGIN: "https://site.example.invalid", MEDINA_SITE_INTAKE_KEY: "medina-test", MEDINA_SITE_TURNSTILE_SECRET: "test-only-not-a-real-secret" };
 const body = { requestKey: "00000000-0000-4000-8000-000000000100", challengeToken: "mock-challenge", inquiry: {
@@ -63,6 +63,45 @@ test("body limits and tenant injection fail before provider or storage", async (
   assert.equal(calls, 0);
 });
 
+for (const accepted of [true, false]) {
+  test(`site inquiry contacts stay out of challenge verification and response (accepted=${accepted})`, async () => {
+    let providerCalls = 0;
+    let saved = 0;
+    const handler = mod.createSiteIntakeHandler({
+      env: () => env,
+      verify: (config, token) => mod.verifySiteChallenge(config, token, async (url, options) => {
+        providerCalls++;
+        assert.equal(url, "https://challenges.cloudflare.com/turnstile/v0/siteverify");
+        const init = options as { method: string; headers: Record<string, string>; body: string; signal: AbortSignal };
+        assert.equal(init.method, "POST");
+        assert.deepEqual(init.headers, { "Content-Type": "application/json" });
+        assert.deepEqual(JSON.parse(init.body), { secret: env.MEDINA_SITE_TURNSTILE_SECRET, response: body.challengeToken });
+        assert.ok(init.signal instanceof AbortSignal);
+        return { ok: true, text: async () => JSON.stringify({
+          success: accepted, hostname: config.hostname, action: "site_inquiry",
+          // Unexpected provider fields must never be echoed to a visitor or stored.
+          debug: { secret: config.secret, response: token, details: "private-provider-diagnostic" },
+        }) };
+      }),
+      save: async (site, key, inquiry) => {
+        saved++;
+        assert.equal(site, env.MEDINA_SITE_INTAKE_KEY);
+        assert.equal(key, body.requestKey);
+        assert.deepEqual(inquiry, body.inquiry);
+        return null;
+      },
+    });
+    const result = await call(handler, request({ headers: {
+      ...request().headers, "x-forwarded-for": "192.0.2.10", "user-agent": "synthetic-site-visitor",
+    } }));
+    assert.equal(providerCalls, 1);
+    assert.equal(saved, accepted ? 1 : 0);
+    assert.equal(result.status, accepted ? 200 : 403);
+    assert.deepEqual(result.payload, accepted ? { success: true } : { success: false, code: "challenge_failed" });
+    assert.equal(result.headers["Cache-Control"], "no-store");
+  });
+}
+
 test("failed challenge never saves; verified write uses only configured site", async () => {
   let saved = 0;
   const save = async (site: string, key: string, inquiry: unknown) => {
@@ -76,9 +115,9 @@ test("failed challenge never saves; verified write uses only configured site", a
 });
 
 test("storage failures are safe; no fake success or raw errors", async () => {
-  for (const error of ["unavailable", "rate_limited", "request_conflict"]) {
+  for (const error of ["unavailable", "rate_limited", "request_conflict", "inquiry_erased"]) {
     const result = await call(mod.createSiteIntakeHandler({ env: () => env, verify: async () => true, save: async () => error }));
-    assert.equal(result.status, error === "rate_limited" ? 429 : error === "request_conflict" ? 409 : 503);
+    assert.equal(result.status, error === "rate_limited" ? 429 : ["request_conflict", "inquiry_erased"].includes(error) ? 409 : 503);
     assert.doesNotMatch(JSON.stringify(result.payload), /phone|secret|workspace/);
   }
   const result = await call(mod.createSiteIntakeHandler({ env: () => env, verify: async () => true, save: async () => { throw new Error("sensitive database error"); } }));

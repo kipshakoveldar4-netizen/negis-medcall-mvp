@@ -18,6 +18,8 @@ const { createPages, createSitemap } = createRequire(import.meta.url)(path.join(
   createSitemap(pages: Map<string, string>, origin: string): string;
 };
 const filenames = (await readdir(directory)).filter(file => file.endsWith(".md") && file !== "README.md").sort();
+const pendingFilenames = (await readdir(path.join(directory, "pending"))).filter(file => file.endsWith(".md")).sort();
+const allEditorialFiles = [...filenames, ...pendingFilenames.map(file => path.join("pending", file))];
 const markdown = new MarkdownIt("commonmark", { html: false });
 
 // Editorial files are documents, not seeds: read title/intro using Markdown's
@@ -46,7 +48,30 @@ test("three editorial drafts match the editor contract and have distinct metadat
   for (const key of ["title", "slug", "excerpt"] as const) assert.equal(new Set(drafts.map(draft => draft[key])).size, 3);
 });
 
-for (const file of filenames) {
+test("new search-led drafts stay separate from the three approved materials", async () => {
+  assert.deepEqual(pendingFilenames, ["dentistry-advertising-proposal.md", "salon-booking-software-checklist.md"]);
+  const drafts = await Promise.all(allEditorialFiles.map(readDraft));
+  for (const key of ["title", "slug", "excerpt"] as const) {
+    assert.equal(new Set(drafts.map(draft => draft[key])).size, allEditorialFiles.length);
+  }
+  const pending = await readDraft(path.join("pending", "salon-booking-software-checklist.md"));
+  assert.match(pending.body, /вымышленные записи/);
+  assert.match(pending.body, /не перечень функций/);
+  assert.match(pending.body, /Неизвестную стоимость отметьте как вопрос, а не как ноль/);
+});
+
+test("dentistry proposal draft keeps responsibilities explicit without inventing outcomes", async () => {
+  const draft = await readDraft(path.join("pending", "dentistry-advertising-proposal.md"));
+  assert.match(draft.body, /Условная ситуация/);
+  assert.match(draft.body, /Неизвестную стоимость не записывайте как ноль/);
+  assert.match(draft.body, /на вымышленных данных в отдельной тестовой среде/);
+  assert.match(draft.body, /Суммы в разных валютах сохраняйте отдельно/);
+  assert.match(draft.body, /не готовый договор/);
+  const headings = markdown.parse(draft.body, {}).filter(token => token.type === "heading_open" && token.tag === "h3");
+  assert.equal(headings.length, 6);
+});
+
+for (const file of allEditorialFiles) {
   test(`editorial article renders safely with working links: ${file}`, async () => {
     const draft = await readDraft(file);
     const article = { ...draft, summary: draft.excerpt, nodes: parseArticleBody(draft.body) };
@@ -59,7 +84,7 @@ for (const file of filenames) {
     assert.ok(html.includes(`name="description" content="${draft.excerpt}"`));
     assert.match(html, /href="\/ru\/#consultation"/);
     assert.match(html, /href="\/ru\/solutions\//);
-    assert.match(html, /href="\/ru\/services\//);
+    if (filenames.includes(file)) assert.match(html, /href="\/ru\/services\//);
     assert.doesNotMatch(html, /<script|<iframe|<svg|onerror=|access_token|service_role|workspace_id/i);
     for (const [, href] of html.matchAll(/href="([^"]+)"/g)) {
       if (!href.startsWith("/ru/")) continue;
@@ -71,7 +96,7 @@ for (const file of filenames) {
 }
 
 test("local editorial files are absent from default public/preview pages and sitemap", async () => {
-  const drafts = await Promise.all(filenames.map(readDraft));
+  const drafts = await Promise.all(allEditorialFiles.map(readDraft));
   for (const pages of [createPages(null, { preview: false }), createPages()]) {
     const sitemap = createSitemap(pages, "https://site.example.invalid");
     const html = [...pages.values()].join("\n");

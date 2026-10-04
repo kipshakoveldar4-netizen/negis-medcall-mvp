@@ -1,5 +1,5 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { canAssignRole, isStaffRole, isWorkspaceAdminRole } from "../auth/permissions";
 import { extractJsonObject, generateText, resolveTextProvider } from "../ai/text-provider";
 import { normalizeAdvertisingContentApproval } from "../advertising/campaignBrief";
@@ -3973,32 +3973,10 @@ async function findClientsByName(
   return (Array.isArray(data) ? data : []).map((row) => asRecord(row));
 }
 
-/** Exact-name fallback used only when a specialist cannot see or enter phone. */
-async function findClientsByExactName(
-  supabase: CrmSupabaseClient,
-  workspaceId: string,
-  rawName: string,
-): Promise<JsonRecord[]> {
-  const name = rawName.replace(/\s+/g, " ").trim();
-  if (!name) return [];
-
-  const config = configs.clients;
-  const { data, error } = await supabase
-    .from(config.table)
-    .select(config.selectColumns ?? "*")
-    .eq("workspace_id", workspaceId)
-    .eq("full_name", name)
-    .order("created_at", { ascending: false })
-    .limit(2);
-
-  if (error) throw new Error(`client exact lookup: ${error.message}`);
-  return (Array.isArray(data) ? data : []).map((row) => asRecord(row));
-}
-
 type AppointmentClientResolution = {
   clientId: string;
   created: boolean;
-  match: "provided" | "phone" | "name" | "created";
+  match: "provided" | "phone" | "created";
   createdRow?: JsonRecord;
 };
 
@@ -4010,10 +3988,10 @@ type AppointmentClientResolution = {
  * permanent name/phone snapshot, but no row in clients. On the next visit the
  * receptionist could not find that person and the history had no stable key.
  *
- * Phone is the strong identity and uses the canonical indexed lookup from
- * migration 030. A name-only exact match is considered only when no phone is
- * available (the specialist privacy view); two matching names are deliberately
- * ambiguous and produce a new card rather than linking the wrong patient.
+ * Phone matching uses the canonical indexed lookup from migration 030.
+ * A name alone never identifies an existing person, even when unique in the
+ * clinic. Without contacts, reuse requires an explicitly selected clientId;
+ * otherwise a new card keeps namesakes' visits separate.
  */
 async function resolveAppointmentClientForCreate(
   supabase: CrmSupabaseClient,
@@ -4034,14 +4012,6 @@ async function resolveAppointmentClientForCreate(
   }
 
   const clientName = readString(row.client_name);
-  if (phoneCandidates.length === 0) {
-    const exactMatches = await findClientsByExactName(supabase, workspaceId, clientName);
-    if (exactMatches.length === 1) {
-      const matchedId = readString(exactMatches[0]?.id);
-      if (matchedId) return { clientId: matchedId, created: false, match: "name" };
-    }
-  }
-
   const clientId = randomUUID();
   const createdRow: JsonRecord = {
     id: clientId,
@@ -4055,9 +4025,7 @@ async function resolveAppointmentClientForCreate(
     last_visit_at: null,
     updated_at: new Date().toISOString(),
   };
-  const { error } = await supabase.from("clients").insert(createdRow);
-  if (error) throw new Error(`appointment client create: ${error.message}`);
-
+  // Prepare only. The new card and appointment must commit in one RPC below.
   return { clientId, created: true, match: "created", createdRow };
 }
 
@@ -4763,14 +4731,58 @@ async function createStaffItem(req: VercelRequest, res: VercelResponse) {
   }
 }
 
+class AppointmentRequestError extends Error {
+  constructor(readonly statusCode: number, readonly code: string, message: string) { super(message); }
+}
+
+function checkAppointmentRequestError(error: { code?: unknown } | null) {
+  if (!error) return;
+  const code = readString(error.code);
+  if (["PGRST202", "42883", "42703", "PGRST204", "42P01", "PGRST205"].includes(code)) {
+    throw new AppointmentRequestError(503, "appointment_create_unavailable", "Не удалось сохранить запись: администратору нужно проверить миграции 063 и 064");
+  }
+  if (code === "P6402") throw new AppointmentRequestError(409, "appointment_request_conflict", "Этот запрос уже использован для другой записи. Проверьте сохранённую запись перед повтором.");
+  if (code === "P6403") throw new AppointmentRequestError(409, "appointment_request_unavailable", "Ранее сохранённая запись больше недоступна. Повторное создание остановлено.");
+  if (code === "P6404") throw new AppointmentRequestError(403, "appointment_request_access_denied", "Нет доступа к сохранению записи");
+  if (code === "P6401") throw new AppointmentRequestError(400, "appointment_request_invalid", "Проверьте данные запроса записи");
+}
+
+function appointmentRequestFingerprint(body: JsonRecord, workspaceId: string): string {
+  // Hash the original intent, before resolving clients/catalogues or filling in
+  // the current staff identity. Generated IDs and timestamps are not intent.
+  const { updated_at: _updatedAt, ...snapshot } = configs.appointments.toRow(body, workspaceId);
+  return createHash("sha256").update(JSON.stringify({
+    version: 1, snapshot,
+    clientId: firstString(body.clientId, body.client_id),
+    doctorId: firstString(body.doctorId, body.doctor_id),
+    serviceId: firstString(body.serviceId, body.service_id),
+    serviceItems: hasAnyKey(body, ["serviceItems", "service_items"])
+      ? normalizeAppointmentServices(body.serviceItems ?? body.service_items) : null,
+    durationProvided: hasAnyKey(body, ["durationMinutes", "duration_minutes"]),
+    outsideSchedule: allowsOutsideSchedule(body),
+  })).digest("hex");
+}
+
+function appointmentRequestReceipt(value: unknown, workspaceId: string): JsonRecord {
+  const receipt = asRecord(value);
+  const appointment = asRecord(receipt.appointment);
+  if (!isUuid(appointment.id) || appointment.workspace_id !== workspaceId || typeof receipt.replayed !== "boolean"
+    || typeof receipt.clientCreated !== "boolean" || !["created", "provided", "phone"].includes(readString(receipt.clientMatch))) {
+    throw new Error("Invalid appointment request receipt");
+  }
+  return receipt;
+}
+
 async function createItem(resource: CrmResource, req: VercelRequest, res: VercelResponse) {
   if (resource === "staff") {
     return createStaffItem(req, res);
   }
 
   const config = configs[resource];
-  const body = asRecord(req.body);
+  const body = { ...asRecord(req.body) };
   const details = [...validationDetails(body, config.requiredPost), ...resourceValidationDetails(resource, body), ...appointmentServicesValidationDetails(resource, body)];
+  const keyedAppointment = resource === "appointments" && "requestKey" in body;
+  if (keyedAppointment && !isUuid(body.requestKey)) details.push("requestKey must be a UUID");
 
   if (details.length > 0) {
     return sendJson(res, 400, errorBody("Validation error", details));
@@ -4781,6 +4793,9 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
   const supabase = getSupabaseServerClient();
 
   if (!supabase || !isUuid(workspaceId)) {
+    if (keyedAppointment) return sendJson(res, 503, {
+      ...errorBody("Не удалось подтвердить сохранение записи"), code: "appointment_create_unavailable",
+    });
     return sendJson(
       res,
       200,
@@ -4798,14 +4813,39 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
     ]));
   }
 
+  let actorOwnWork: OwnWorkIdentity | null = null;
+  let appointmentRequest: JsonRecord | null = null;
+  const readReplay = async () => {
+    if (!appointmentRequest) return null;
+    const result = await supabase.rpc("read_crm_appointment_create_request", appointmentRequest);
+    checkAppointmentRequestError(result.error);
+    if (result.error) throw new Error("Appointment receipt read failed");
+    return result.data === null ? null : appointmentRequestReceipt(result.data, workspaceId);
+  };
+  const sendReplay = (receipt: JsonRecord) => {
+    const saved = asRecord(receipt.appointment);
+    if (saved.workspace_id !== workspaceId || (actorOwnWork && !rowTargetsOnlySelf(saved, actorOwnWork))) {
+      return sendJson(res, 404, errorBody("Запись недоступна"));
+    }
+    return sendJson(res, 200, success("supabase", {
+      item: redactContacts(config.fromRow(saved), readWorkspaceContext(req)?.role, readWorkspaceContext(req)?.staffUserId),
+      clientLinked: true, clientCreated: receipt.clientCreated, clientMatch: receipt.clientMatch, replayed: true,
+    }));
+  };
+
   try {
+    if (keyedAppointment) {
+      const staffUserId = readString(readWorkspaceContext(req)?.staffUserId);
+      if (!isUuid(staffUserId)) throw new AppointmentRequestError(403, "appointment_request_access_denied", "Нет доступа к сохранению записи");
+      appointmentRequest = { p_workspace_id: workspaceId, p_staff_user_id: staffUserId,
+        p_request_key: body.requestKey, p_request_fingerprint: appointmentRequestFingerprint(body, workspaceId) };
+    }
     // Мастер записывает клиента к СЕБЕ.
     //
     // Пустое поле заполняется его именем — это удобство, а не подмена: он и
     // так не выбирает исполнителя. А вот названный коллега — отказ, и вслух:
     // молча переписать чужую запись на себя значило бы соврать о том, что
     // сохранено, ровно так же, как это делала правка без ответа о потере.
-    let actorOwnWork: OwnWorkIdentity | null = null;
     if (resource === "appointments" && seesOnlyOwnWork(readWorkspaceContext(req)?.role)) {
       const identity = await readOwnWorkIdentity(supabase, workspaceId, readString(readWorkspaceContext(req)?.staffUserId));
       actorOwnWork = identity;
@@ -4831,6 +4871,11 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
       body.doctorName = body.doctor;
       if (identity.doctorId) body.doctorId = identity.doctorId;
     }
+
+    // A committed retry must not conflict with its own slot or depend on a
+    // catalogue entry that was subsequently archived. Current access still applies.
+    const replay = await readReplay();
+    if (replay) return sendReplay(replay);
 
     const row = stripContactWrites(config.toRow(body, workspaceId), readWorkspaceContext(req)?.role);
     let appointmentClientResolution: AppointmentClientResolution | null = null;
@@ -4904,18 +4949,38 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
         });
       }
 
-      // Resolve the patient only after all slot/schedule checks pass. A refused
-      // booking must not leave a surprise client card behind. The appointment
-      // and its patient now share a durable id even when the operator typed a
-      // completely new person instead of selecting an existing card.
+      // Resolve after preflight; a new card is only prepared here. Its INSERT
+      // belongs to the same transaction as the appointment, including triggers.
       appointmentClientResolution = await resolveAppointmentClientForCreate(supabase, workspaceId, row);
       row.client_id = appointmentClientResolution.clientId;
     }
-    const runInsert = (candidate: JsonRecord) => (config.upsertConflict
-      ? supabase.from(config.table).upsert(candidate, { onConflict: config.upsertConflict }).select(config.selectColumns ?? "*").single()
-      : supabase.from(config.table).insert(candidate).select(config.selectColumns ?? "*").single());
+    const newAppointmentClient = appointmentClientResolution?.createdRow;
+    const runInsert = async (candidate: JsonRecord) => {
+      if (appointmentRequest) {
+        return await supabase.rpc("create_crm_appointment_once", { ...appointmentRequest,
+          p_new_client: newAppointmentClient ?? null, p_appointment: candidate,
+          p_client_match: appointmentClientResolution?.match,
+        });
+      }
+      if (newAppointmentClient) {
+        return await supabase.rpc("create_crm_appointment_with_new_client", {
+          p_workspace_id: workspaceId, p_client: newAppointmentClient, p_appointment: candidate,
+        });
+      }
+      return await (config.upsertConflict
+        ? supabase.from(config.table).upsert(candidate, { onConflict: config.upsertConflict }).select(config.selectColumns ?? "*").single()
+        : supabase.from(config.table).insert(candidate).select(config.selectColumns ?? "*").single());
+    };
 
     let { data, error } = await runInsert(row);
+    if (appointmentRequest) {
+      checkAppointmentRequestError(error);
+      if (!error) {
+        const receipt = appointmentRequestReceipt(data, workspaceId);
+        if (receipt.replayed) return sendReplay(receipt);
+        data = asRecord(receipt.appointment);
+      }
+    }
 
     // Что из присланного НЕ доехало до базы. Пустой список — обычный день;
     // непустой означает, что человеку показали не то, что сохранено, и это
@@ -4939,7 +5004,7 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
     // Та же логика для 032: запись и продажа создавались до этой ветки и
     // обязаны создаваться в окне между деплоем и миграцией. Теряется только
     // связь с услугой — и оператор узнаёт из лога, какой именно.
-    if (error && (resource === "appointments" || resource === "deals")) {
+    if (error && !appointmentRequest && !newAppointmentClient && (resource === "appointments" || resource === "deals")) {
       const retried = await retryWithoutMissingColumns(resource, row, "creating", { data, error }, runInsert);
       data = retried.data as typeof data;
       error = retried.error as typeof error;
@@ -4947,6 +5012,14 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
     }
 
     if (error) {
+      if (newAppointmentClient && ["PGRST202", "42883", "42703", "PGRST204"].includes(readString(error.code))) {
+        return sendJson(res, 503, {
+          ...errorBody("Не удалось сохранить запись: требуется обновление базы", [
+            "Администратору нужно проверить миграцию 063. Клиент и запись не сохранены.",
+          ]),
+          code: "appointment_create_unavailable",
+        });
+      }
       const paymentError = arrivalPaymentError(error);
       if (paymentError && (resource === "appointments" || resource === "deals")) {
         return sendJson(res, 409, { ...errorBody(paymentError), code: "arrival_payment" });
@@ -4976,8 +5049,8 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
     }
 
     // AFTER triggers finish atomically, but INSERT RETURNING predates their
-    // receipt link. Re-read the saved visit; never guess that payment exists.
-    if (resource === "appointments" && asRecord(data).status === "arrived") {
+    // receipt link. The keyed RPC already re-reads inside its transaction.
+    if (resource === "appointments" && !appointmentRequest && asRecord(data).status === "arrived") {
       const refreshed = await supabase.from("appointments").select("*")
         .eq("workspace_id", workspaceId).eq("id", asRecord(data).id).single();
       if (!refreshed.error && refreshed.data) data = refreshed.data;
@@ -5063,8 +5136,23 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
           }
         : {}),
       ...(unsaved.length > 0 ? { unsaved: unsavedFieldsFor(unsaved) } : {}),
+      ...(appointmentRequest ? { replayed: false } : {}),
     }));
   } catch (error) {
+    // Another request may have committed after the early lookup, while this
+    // request was checking availability. Re-read before returning that refusal.
+    if (appointmentRequest && (error instanceof AppointmentConflictError || error instanceof AppointmentOutsideScheduleError
+      || error instanceof CrmReferenceValidationError || error instanceof AppointmentServicesSchemaError)) {
+      try {
+        const replay = await readReplay();
+        if (replay) return sendReplay(replay);
+      } catch (replayError) {
+        error = replayError;
+      }
+    }
+    if (error instanceof AppointmentRequestError) {
+      return sendJson(res, error.statusCode, { ...errorBody(error.message), code: error.code });
+    }
     if (error instanceof AppointmentConflictError) {
       return sendJson(res, 409, {
         success: false,

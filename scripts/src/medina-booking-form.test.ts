@@ -143,18 +143,18 @@ test("BF9 сброс услуги уносит её цену, а согласо�
   assert.match(sales, /prefill\.priceMinor \?\? prefill\.price_minor/);
 });
 
-test("BF10 архив клиента в форме: история ищется по карточке, телефону и имени", async () => {
+test("BF10 архив клиента: проверенный фильтр без совпадения по имени или хвосту телефона", async () => {
   const page = await read("artifacts", "negis", "src", "pages", "AppointmentsPage.tsx");
   // Просьба владельца дословно: «сбоку, когда записываешь, должен быть архив».
   assert.ok(page.includes("Архив клиента"), "панель существует и названа по-хозяйски");
-  // Порядок ключей поиска: карточка сильнее телефона, телефон сильнее имени.
   const memo = page.slice(page.indexOf("const visitHistory"), page.indexOf("const openCreate"));
-  assert.ok(memo.indexOf("appointment.clientId === form.clientId") < memo.indexOf("appointmentPhone === phoneKey"));
-  assert.ok(memo.indexOf("appointmentPhone === phoneKey") < memo.indexOf("appointment.client.trim().toLowerCase() === nameKey"));
+  assert.match(memo, /return matchesAppointmentClientHistory\(form, appointment\);/);
+  assert.doesNotMatch(memo, /nameKey|appointment\.client\.trim|\.slice\(-10\)/);
   // Правка не показывает саму себя как «прошлый визит».
   assert.match(memo, /editingId && appointment\.id === editingId\) return false/);
-  // Телефон сравнивается последними десятью цифрами: +7 и 8 — один человек.
-  assert.ok(memo.includes('.slice(-10)'), "телефон сравнивается последними десятью цифрами: +7 и 8 — один человек");
+  assert.match(memo, /unique\.set\(appointment\.id, appointment\)/);
+  assert.match(memo, /\.sort\(/);
+  assert.match(memo, /\.slice\(0, 8\)/);
 });
 
 test("BF11 ритм 2/2: выходные пишутся явно, отказ сервера останавливает запись честно", async () => {

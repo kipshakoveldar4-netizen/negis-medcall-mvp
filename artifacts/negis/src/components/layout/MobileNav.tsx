@@ -88,7 +88,7 @@ export function MobileNav() {
   return (
     <>
       {open && (
-        <div className="mobile-nav-backdrop md:hidden" onClick={() => setOpen(false)}>
+        <div className="mobile-nav-backdrop lg:hidden" onClick={() => setOpen(false)}>
           <section className="mobile-nav-sheet" onClick={(event) => event.stopPropagation()}>
             <div className="mb-4 flex items-center justify-between gap-3">
               <div>
@@ -127,7 +127,7 @@ export function MobileNav() {
             </div>
 
             {/* Профиль жил только в боковом меню, а оно скрыто классом
-                `hidden md:block`: сменить себе пароль с телефона было нельзя, а
+                `hidden lg:block`: сменить себе пароль с телефона было нельзя, а
                 салон работает с телефонов. Пункт стоит вне списка разделов —
                 он не маршрут, а диалог, и доступен любой роли. */}
             <button
@@ -159,7 +159,7 @@ export function MobileNav() {
 
       {showProfile && <ProfileDialog onClose={() => setShowProfile(false)} />}
 
-      <nav className="mobile-bottom-nav md:hidden" aria-label="Основная мобильная навигация">
+      <nav className="mobile-bottom-nav lg:hidden" aria-label="Основная мобильная навигация">
         {visiblePrimary.map(({ href, label, icon: Icon }) => {
           const active = isActive(location, href);
           return (

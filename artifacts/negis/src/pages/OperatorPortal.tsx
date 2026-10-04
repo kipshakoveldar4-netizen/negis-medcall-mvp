@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Link } from "wouter";
 import { LogOut, RefreshCw, Send } from "lucide-react";
 import { supabase, hasSupabaseFrontendEnv } from "@/lib/supabase";
@@ -26,6 +26,15 @@ export default function OperatorPortal() {
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
+  const refreshProfile = useCallback(() => {
+    if (!userId) return;
+    // The profile controls access to every clinic below. Hide the old account
+    // state before asking the server whether approval is still active.
+    setProfile(null);
+    setLoaded(false);
+    setMessage("");
+    setRevision((value) => value + 1);
+  }, [userId]);
   useEffect(() => {
     let alive = true;
     void supabase.auth.getSession().then(({ data }) => {
@@ -71,6 +80,25 @@ export default function OperatorPortal() {
       });
     return () => controller.abort();
   }, [userId, revision]);
+  useEffect(() => {
+    if (!userId) return;
+    let lastRevalidation = 0;
+    const revalidateProfile = () => {
+      const now = Date.now();
+      if (now - lastRevalidation < 250) return;
+      lastRevalidation = now;
+      refreshProfile();
+    };
+    const revalidateVisibleTab = () => {
+      if (document.visibilityState === "visible") revalidateProfile();
+    };
+    window.addEventListener("focus", revalidateProfile);
+    document.addEventListener("visibilitychange", revalidateVisibleTab);
+    return () => {
+      window.removeEventListener("focus", revalidateProfile);
+      document.removeEventListener("visibilitychange", revalidateVisibleTab);
+    };
+  }, [userId, refreshProfile]);
   async function authenticate(event: React.FormEvent) {
     event.preventDefault();
     setMessage("");
@@ -229,7 +257,7 @@ export default function OperatorPortal() {
             type="button"
             className="neu-btn"
             disabled={busy}
-            onClick={() => setRevision((value) => value + 1)}
+            onClick={refreshProfile}
           >
             <RefreshCw size={16} />
             Обновить статус

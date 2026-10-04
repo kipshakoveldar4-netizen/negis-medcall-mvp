@@ -44,6 +44,25 @@ export type OperatorBooking = {
   status: string;
   timeZone: string;
 };
+export type OperatorArrivalCheckResult =
+  | "confirmed"
+  | "unconfirmed"
+  | "unreachable";
+export type OperatorArrival = {
+  appointmentId: string;
+  arrivalId: string | null;
+  clientName: string;
+  clientPhone?: string;
+  startsAt: string;
+  service: string;
+  doctorName: string;
+  status: string;
+  priceMinor: string | null;
+  currency: string | null;
+  clinicConfirmedAt: string | null;
+  operatorCheckedAt: string | null;
+  operatorCheckResult: OperatorArrivalCheckResult | null;
+};
 export type OperatorService = {
   id: string;
   name: string;
@@ -66,6 +85,15 @@ export const operatorStatusLabels = {
   declined: "Отклонено",
   ended: "Завершено",
 } as const;
+
+export const operatorArrivalCheckLabels: Record<
+  OperatorArrivalCheckResult,
+  string
+> = {
+  confirmed: "Пациент подтвердил приход",
+  unconfirmed: "Пациент не подтвердил приход",
+  unreachable: "Не удалось дозвониться",
+};
 
 // Decimal input and formatting never round an agreed price through floating point.
 export function arrivalPriceToMinor(value: string): string | null {

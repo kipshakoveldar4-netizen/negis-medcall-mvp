@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { withAppointmentCreateRpcSpy } from "./appointment-create-rpc-spy.js";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
@@ -70,7 +71,7 @@ async function loadRouter(failing: Record<string, string>) {
     pathToFileURL(path.join(repoRoot, "lib", "supabase", "server.ts")).href
   )) as { setSupabaseServerClientFactoryForTests: (factory: (() => unknown) | null) => void };
 
-  supabaseModule.setSupabaseServerClientFactoryForTests(() => ({
+  supabaseModule.setSupabaseServerClientFactoryForTests(() => withAppointmentCreateRpcSpy({
     from(table: string) {
       const settle = (shape: "one" | "list") => {
         const message = failing[table];

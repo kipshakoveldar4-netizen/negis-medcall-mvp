@@ -125,12 +125,17 @@ test("CP4 контакт нельзя не только прочитать, но
 test("CP5 срез стоит во ВСЕХ ветках ответа, а не только в списке", async () => {
   const server = stripComments(await readFile(path.join(repoRoot, "lib", "crm", "server.ts"), "utf8"));
 
-  // Пять путей из карты утечки: список, обратный поиск по номеру, эхо POST,
-  // эхо PATCH и запись. Скрыть телефон только на экране значило бы отдать его
+  // Список, обратный поиск, эхо POST/PATCH, повтор POST и запись контактов.
+  // Скрыть телефон только на экране значило бы отдать его
   // всякому, кто откроет консоль браузера.
   assert.ok(/redactContactsList\(\s*\(Array\.isArray\(data\)/.test(server), "список записей срезается");
   assert.ok(/redactContactsList\(\s*rows\.map\(/.test(server), "обратный поиск по номеру срезается");
-  assert.equal((server.match(/redactContacts\(\s*config\.fromRow/g) ?? []).length, 2, "эхо POST и PATCH срезаются оба");
+  assert.equal((server.match(/redactContacts\(\s*config\.fromRow/g) ?? []).length, 3, "эхо POST, повтор POST и PATCH срезаются");
+  const replayStart = server.indexOf("const sendReplay =");
+  const replayEnd = server.indexOf("\n  };", replayStart);
+  assert.ok(replayStart > 0 && replayEnd > replayStart, "ветка повтора найдена");
+  assert.match(server.slice(replayStart, replayEnd), /redactContacts\(config\.fromRow\(saved\), readWorkspaceContext\(req\)\?\.role, readWorkspaceContext\(req\)\?\.staffUserId\)/,
+    "повтор срезается текущей ролью и текущим сотрудником, не ролью исходного запроса");
   // Каждый срез знает и КТО СМОТРИТ: с 043 телефон в своей записи мастеру
   // виден, а в чужой — нет, и без идентификатора смотрящего это не решить.
   assert.equal(

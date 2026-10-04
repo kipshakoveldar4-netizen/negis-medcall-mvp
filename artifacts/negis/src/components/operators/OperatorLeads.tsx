@@ -100,9 +100,27 @@ function LeadList({
     refresh();
   }, [refresh]);
   useEffect(() => {
-    // Revalidate access when returning to the page; never persist patient contacts.
-    window.addEventListener("focus", refresh);
-    return () => window.removeEventListener("focus", refresh);
+    // Mobile browsers commonly restore a tab without firing window focus. Close
+    // the open form, hide stale contacts and recheck access on either signal.
+    let lastRevalidation = 0;
+    const revalidateAccess = () => {
+      const now = Date.now();
+      if (now - lastRevalidation < 250) return;
+      lastRevalidation = now;
+      setBookingLeadId(null);
+      setError("");
+      setNotice("");
+      refresh();
+    };
+    const revalidateVisibleTab = () => {
+      if (document.visibilityState === "visible") revalidateAccess();
+    };
+    window.addEventListener("focus", revalidateAccess);
+    document.addEventListener("visibilitychange", revalidateVisibleTab);
+    return () => {
+      window.removeEventListener("focus", revalidateAccess);
+      document.removeEventListener("visibilitychange", revalidateVisibleTab);
+    };
   }, [refresh]);
   async function assign(item: OperatorLead, assigned: boolean) {
     setBusy(true);

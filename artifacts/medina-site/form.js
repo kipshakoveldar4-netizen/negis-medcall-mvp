@@ -8,7 +8,8 @@
   let busy = false;
   let requestKey;
   let previousPayload = '';
-  const setToken = value => { token = value; button.disabled = busy || form.dataset.sent === 'true' || !token; };
+  let erased = false;
+  const setToken = value => { token = value; button.disabled = busy || erased || form.dataset.sent === 'true' || !token; };
   window.medinaChallengeReady = () => {
     widget = window.turnstile.render(form.querySelector('[data-challenge]'), {
       sitekey: form.dataset.siteKey, action: 'site_inquiry', size: 'flexible',
@@ -25,7 +26,7 @@
 
   form.addEventListener('submit', async event => {
     event.preventDefault();
-    if (busy || form.dataset.sent === 'true' || !token || !form.reportValidity()) return;
+    if (busy || erased || form.dataset.sent === 'true' || !token || !form.reportValidity()) return;
     const fields = new FormData(form);
     const inquiry = {
       name: fields.get('name'), phone: fields.get('phone'), business: fields.get('business'),
@@ -48,6 +49,11 @@
       let data = null;
       try { data = JSON.parse(await response.text()); } catch { /* Never display a raw response. */ }
       if (!response.ok || data?.success !== true) {
+        if (data?.code === 'inquiry_erased') {
+          erased = true;
+          status.textContent = 'Эта отправка больше не принимается. Для новой заявки обновите страницу, заполните форму и подтвердите согласие заново.';
+          return;
+        }
         const messages = {
           invalid_phone: 'Проверьте номер телефона с кодом страны.',
           consent_required: 'Подтвердите согласие на обработку контактных данных.',
@@ -67,9 +73,9 @@
     } finally {
       clearTimeout(timeout);
       busy = false;
-      if (form.dataset.sent !== 'true') form.querySelector('fieldset').disabled = false;
+      if (form.dataset.sent !== 'true' && !erased) form.querySelector('fieldset').disabled = false;
       setToken('');
-      if (form.dataset.sent !== 'true' && widget !== undefined) window.turnstile.reset(widget);
+      if (form.dataset.sent !== 'true' && !erased && widget !== undefined) window.turnstile.reset(widget);
     }
   });
 })();
