@@ -28,7 +28,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import { MasterDayGrid } from "@/components/crm/master-day-grid";
 import { AppointmentExtraServices } from "@/components/crm/appointment-extra-services";
 import { appointmentPriceFromInput, normalizeAppointmentServices, readAppointmentServices, summarizeAppointmentServices, type AppointmentServiceItem } from "../../../../lib/crm/appointment-services";
-import { formatSlot, freeSlots, groupSlots, minuteOfClinicDay, workingIntervals } from "@/lib/dayGrid";
+import { formatSlot, freeSlots, groupSlots, minuteOfClinicDay, occupiedGridSlots, workingIntervals } from "@/lib/dayGrid";
 import { capitalize, termsFor, type Terms } from "../../../../lib/vertical/terms";
 import { leadStageDefinitionFromUnknown } from "@/lib/leadPipeline";
 
@@ -1567,6 +1567,7 @@ export function AppointmentsPage() {
   const dayBuckets = useMemo(() => {
     const buckets = new Map<string, Appointment[]>(slots.map((slot) => [slot, [] as Appointment[]]));
     const outside: Appointment[] = [];
+    const occupied = new Set<string>();
 
     const minutesOf = (value: string) => {
       const [hours, minutes] = value.split(":").map(Number);
@@ -1575,12 +1576,22 @@ export function AppointmentsPage() {
     const slotMinutes = slots.map(minutesOf);
 
     for (const appointment of dayAppointments) {
-      const instant = Date.parse(appointment.startsAt);
-      if (!Number.isFinite(instant)) {
+      const minutes = minuteOfClinicDay(appointment.startsAt, clinicTimeZone);
+      if (minutes === null) {
         outside.push(appointment);
         continue;
       }
-      const minutes = minutesOf(timeKeyFromStartsAt(appointment.startsAt));
+      if (activeStatuses.includes(appointment.status)) {
+        for (const occupiedMinute of occupiedGridSlots({
+          startMinute: minutes,
+          durationMinutes: appointment.durationMinutes,
+          slots: slotMinutes,
+        })) occupied.add(formatSlot(occupiedMinute));
+      }
+      if (minutes < slotMinutes[0] || minutes > slotMinutes[slotMinutes.length - 1]) {
+        outside.push(appointment);
+        continue;
+      }
       let index = -1;
       for (let i = 0; i < slotMinutes.length; i += 1) {
         if (slotMinutes[i] <= minutes) index = i;
@@ -1592,8 +1603,8 @@ export function AppointmentsPage() {
       buckets.get(slots[index])!.push(appointment);
     }
 
-    return { buckets, outside };
-  }, [dayAppointments, slots]);
+    return { buckets, outside, occupied };
+  }, [clinicTimeZone, dayAppointments, slots]);
   const weekAppointments = useMemo(
     () => filteredItems.filter((appointment) => isWithinWeek(appointment, weekStart, clinicTimeZone)),
     [filteredItems, weekStart, clinicTimeZone],
@@ -2162,11 +2173,21 @@ export function AppointmentsPage() {
           «Свободно», и запись на вечер жила за целым экраном скролла.
         */}
         {slots
-          .reduce<Array<{ kind: "busy"; slot: string; appointments: Appointment[] } | { kind: "free"; first: string; last: string }>>(
+          .reduce<Array<
+            | { kind: "busy"; slot: string; appointments: Appointment[] }
+            | { kind: "occupied"; slot: string }
+            | { kind: "free"; first: string; last: string }
+          >>(
             (segments, slot) => {
               const busy = dayBuckets.buckets.get(slot) || [];
               if (busy.length > 0) {
                 segments.push({ kind: "busy", slot, appointments: busy });
+                return segments;
+              }
+              if (dayBuckets.occupied.has(slot)) {
+                // Интервал продолжается из карточки выше. Ничего не дублируем,
+                // но разрываем диапазон «Свободно» на реальной границе визита.
+                segments.push({ kind: "occupied", slot });
                 return segments;
               }
               const previous = segments[segments.length - 1];
@@ -2177,7 +2198,7 @@ export function AppointmentsPage() {
             [],
           )
           .map((segment) =>
-            segment.kind === "busy" ? (
+            segment.kind === "occupied" ? null : segment.kind === "busy" ? (
               <div key={segment.slot} className="grid gap-3 rounded-2xl bg-[#F8FAFC] p-3 md:grid-cols-[84px_minmax(0,1fr)]">
                 <div className="flex items-center justify-between gap-3 md:block">
                   <p className="text-base font-black text-[#0F172A]">{segment.slot}</p>

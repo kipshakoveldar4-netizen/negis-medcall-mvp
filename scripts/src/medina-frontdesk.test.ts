@@ -56,6 +56,7 @@ test("FD4 «Открыть клиента» открывает карточку,
 test("FD5 пустые слоты дня схлопываются", () => {
   assert.ok(/kind: "free"/.test(appointments) && /previous\.kind === "free"\) previous\.last = slot/.test(appointments), "подряд идущие свободные получасовки складываются");
   assert.ok(/Свободно \{segment\.first === segment\.last/.test(appointments), "и подписываются диапазоном");
+  assert.ok(/kind: "occupied"/.test(appointments) && /dayBuckets\.occupied\.has\(slot\)/.test(appointments), "продолжение длинного визита разрывает свободный диапазон");
 });
 
 test("FD6 выбранный клиент сужает список записей в форме продажи", () => {
