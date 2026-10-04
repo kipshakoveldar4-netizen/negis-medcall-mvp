@@ -9824,6 +9824,151 @@ export async function handleMetaCampaignInsights(req: VercelRequest, res: Vercel
   return sendJson(res, 200, success("supabase", { insights, items: insights }));
 }
 
+const CRM_ADVERTISING_OUTCOMES_PAGE_SIZE = 500;
+const CRM_ADVERTISING_OUTCOMES_MAX_ATTRIBUTED_DEALS = 20_000;
+
+class CrmAdvertisingOutcomesError extends Error {}
+
+async function countCrmAdvertisingRows(
+  supabase: CrmSupabaseClient,
+  workspaceId: string,
+  table: "leads" | "deals",
+  options: { status?: string; attributedOnly?: boolean } = {},
+): Promise<number> {
+  let query = supabase
+    .from(table)
+    .select("id", { count: "exact", head: true })
+    .eq("workspace_id", workspaceId);
+  if (options.status) query = query.eq("status", options.status);
+  if (options.attributedOnly) query = query.not("meta_campaign_launch_id", "is", null);
+
+  const { count, error } = await query;
+  if (error || count === null || !Number.isSafeInteger(count) || count < 0) {
+    throw new CrmAdvertisingOutcomesError("count_failed");
+  }
+  return count;
+}
+
+async function loadAttributedPaidDealRows(
+  supabase: CrmSupabaseClient,
+  workspaceId: string,
+  expectedCount: number,
+): Promise<JsonRecord[]> {
+  if (expectedCount > CRM_ADVERTISING_OUTCOMES_MAX_ATTRIBUTED_DEALS) {
+    throw new CrmAdvertisingOutcomesError("report_too_large");
+  }
+
+  const rows: JsonRecord[] = [];
+  const ids = new Set<string>();
+  for (let offset = 0; offset < expectedCount; offset += CRM_ADVERTISING_OUTCOMES_PAGE_SIZE) {
+    const pageStop = Math.min(offset + CRM_ADVERTISING_OUTCOMES_PAGE_SIZE - 1, expectedCount - 1);
+    const { data, error } = await supabase
+      .from("deals")
+      .select("id,amount_minor,currency")
+      .eq("workspace_id", workspaceId)
+      .eq("status", "paid")
+      .not("meta_campaign_launch_id", "is", null)
+      .order("id", { ascending: true })
+      .range(offset, pageStop);
+    if (error) throw new CrmAdvertisingOutcomesError("read_failed");
+
+    const page = Array.isArray(data) ? data.map(asRecord) : [];
+    if (page.length !== pageStop - offset + 1) {
+      throw new CrmAdvertisingOutcomesError("changed_during_read");
+    }
+    for (const row of page) {
+      const id = readString(row.id);
+      if (!id || ids.has(id)) throw new CrmAdvertisingOutcomesError("duplicate_or_missing_id");
+      ids.add(id);
+      rows.push(row);
+    }
+  }
+
+  if (rows.length !== expectedCount) throw new CrmAdvertisingOutcomesError("changed_during_read");
+  return rows;
+}
+
+function aggregateAttributedDealRevenue(rows: JsonRecord[]) {
+  const byCurrency = new Map<string, bigint>();
+  for (const row of rows) {
+    const currency = readString(row.currency).toUpperCase();
+    const amountMinor = databaseIntegerString(row.amount_minor, "");
+    if (!/^[A-Z]{3}$/.test(currency) || !amountMinor) {
+      throw new CrmAdvertisingOutcomesError("invalid_money_row");
+    }
+    byCurrency.set(currency, (byCurrency.get(currency) || 0n) + BigInt(amountMinor));
+  }
+  return [...byCurrency.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([currency, amountMinor]) => ({
+      currency,
+      // CRM sales are entered in KZT minor units (tiyn); the existing sales UI
+      // stores no per-row exponent, so the report keeps the same explicit scale.
+      currencyExponent: 2,
+      amountMinor: amountMinor.toString(),
+    }));
+}
+
+/**
+ * Exact, owner-only CRM outcome snapshot for the advertising hub.
+ *
+ * The previous UI downloaded the generic lead/deal collections and silently
+ * treated PostgREST's response ceiling as a complete clinic. This endpoint
+ * counts every matching row and pages only the money rows needed for summing;
+ * a changing or oversized dataset fails closed instead of displaying a partial
+ * advertising result.
+ */
+export async function handleAdvertisingOutcomes(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== "GET") {
+    return sendJson(res, 405, errorBody("Method not allowed", ["Use GET"]));
+  }
+
+  const context = readWorkspaceContext(req);
+  if (!context || !isWorkspaceAdminRole(context.role) || !isUuid(context.workspaceId)) {
+    return sendJson(res, 403, errorBody("Forbidden", ["Workspace owner or admin access is required"]));
+  }
+
+  const supabase = getSupabaseServerClient();
+  if (!supabase) {
+    return sendJson(res, 503, errorBody("CRM outcomes unavailable", ["Supabase is not configured"]));
+  }
+
+  try {
+    const [totalLeads, attributedLeads, totalPaidDeals, paidAttributedDeals, pendingDeals] = await Promise.all([
+      countCrmAdvertisingRows(supabase, context.workspaceId, "leads"),
+      countCrmAdvertisingRows(supabase, context.workspaceId, "leads", { attributedOnly: true }),
+      countCrmAdvertisingRows(supabase, context.workspaceId, "deals", { status: "paid" }),
+      countCrmAdvertisingRows(supabase, context.workspaceId, "deals", { status: "paid", attributedOnly: true }),
+      countCrmAdvertisingRows(supabase, context.workspaceId, "deals", { status: "pending" }),
+    ]);
+    if (attributedLeads > totalLeads || paidAttributedDeals > totalPaidDeals) {
+      throw new CrmAdvertisingOutcomesError("changed_during_count");
+    }
+
+    const attributedDealRows = await loadAttributedPaidDealRows(
+      supabase,
+      context.workspaceId,
+      paidAttributedDeals,
+    );
+    const outcomes = {
+      attributedLeads,
+      unattributedLeads: totalLeads - attributedLeads,
+      paidAttributedDeals,
+      paidUnattributedDeals: totalPaidDeals - paidAttributedDeals,
+      pendingDeals,
+      attributedRevenueByCurrency: aggregateAttributedDealRevenue(attributedDealRows),
+      generatedAt: new Date().toISOString(),
+    };
+    return sendJson(res, 200, success("supabase", { outcomes }));
+  } catch {
+    return sendJson(
+      res,
+      502,
+      errorBody("Не удалось построить полный результат рекламы в CRM", ["Повторите запрос позже"]),
+    );
+  }
+}
+
 export async function handleMetaInsightsHistory(req: VercelRequest, res: VercelResponse) {
   if (req.method !== "GET") {
     return sendJson(res, 405, errorBody("Method not allowed", ["Use GET"]));

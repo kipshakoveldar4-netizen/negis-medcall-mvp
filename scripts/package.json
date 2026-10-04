@@ -22,6 +22,7 @@
     "test:disposable-postgres-safety": "node --test ./fixtures/disposable-postgres.test.mjs",
     "hello": "tsx ./src/hello.ts",
     "test:advertising-assistant": "tsx --test ./src/advertising-assistant.test.ts",
+    "test:advertising-outcomes": "tsx --test ./src/medina-advertising-outcomes.test.ts",
     "test:advertising-brief": "tsx --test ./src/advertising-campaign-brief.test.ts",
     "test:tiktok-ads-diagnostics": "tsx --test ./src/tiktok-ads-diagnostics.test.ts",
     "test:tiktok-campaign-dry-run": "tsx --test ./src/tiktok-campaign-dry-run.test.ts",

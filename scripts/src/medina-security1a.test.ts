@@ -154,6 +154,8 @@ test("15 the legacy ad cabinet is gone and /ads is a supported server-API hub", 
 
   const hub = await readFile(path.join(negisSrc, "pages", "AdvertisingHub.tsx"), "utf8");
   assert.ok(hub.includes("crmFetch") && hub.includes("/api/crm/meta-launches"), "hub reads the supported server API");
+  assert.ok(hub.includes("/api/crm/advertising-outcomes"), "hub reads the complete server-side CRM outcome snapshot");
+  assert.ok(!hub.includes("/api/crm/leads?workspaceId=") && !hub.includes("/api/crm/deals?workspaceId="), "hub does not total capped generic collections");
   assert.ok(hub.includes("isRealWorkspace") && hub.includes('body.mode !== "supabase"'), "production data cannot fall back to demo rows");
   assert.ok(!hub.includes('from "@/lib/supabase"') && !hub.includes(".from("), "hub never queries Supabase directly");
   for (const table of ["ad_accounts", "ad_reports", "platform_configs"]) {

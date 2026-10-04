@@ -3577,13 +3577,11 @@ async function checkAdvertisingHubSource() {
     "Связанная выручка CRM",
     "Связи с рекламой устанавливаются вручную.",
     "Выручка CRM показана отдельно от расходов Meta",
-    "aggregateCrmAdvertisingOutcomes",
+    "parseCrmAdvertisingOutcomes",
     "buildAdvertisingAssistantBrief",
     "Рекламный помощник",
-    "hasCampaignAttribution",
-    'resource: "leads" | "deals"',
-    "/api/crm/${resource}?workspaceId=",
-    'if (status !== "paid") continue;',
+    "/api/crm/advertising-outcomes?workspaceId=",
+    "generatedAt",
     "getSupabaseAccessToken",
     "/api/crm/auth-context?workspaceId=",
     "authBody.data?.isAdmin !== true",
@@ -3658,9 +3656,12 @@ async function checkAdvertisingHubSource() {
   if (authCheck < 0 || insightsRequest < 0 || insightsRequest < authCheck) {
     throw new Error("AdvertisingHub must confirm server owner/admin access before requesting Meta Insights");
   }
-  const crmCollectionsRequest = hub.indexOf("const [leads, deals] = await Promise.all([");
-  if (authCheck < 0 || crmCollectionsRequest < authCheck) {
+  const crmOutcomesRequest = hub.indexOf("/api/crm/advertising-outcomes?workspaceId=");
+  if (authCheck < 0 || crmOutcomesRequest < authCheck) {
     throw new Error("AdvertisingHub must confirm server owner/admin access before requesting CRM outcomes");
+  }
+  if (hub.includes("/api/crm/leads?workspaceId=") || hub.includes("/api/crm/deals?workspaceId=")) {
+    throw new Error("AdvertisingHub must use the complete aggregate endpoint instead of capped CRM collections");
   }
   if (!hub.includes('if (!productionWorkspace) {') || hub.indexOf("getSupabaseAccessToken()") < hub.indexOf('if (!productionWorkspace) {')) {
     throw new Error("AdvertisingHub must not request Insights for a local/demo workspace");

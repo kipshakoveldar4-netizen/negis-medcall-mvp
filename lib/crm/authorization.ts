@@ -302,6 +302,9 @@ export const CRM_ROUTE_AUTHORIZATION: Readonly<Record<string, RouteAuthorization
   "meta-campaign-insights": { kind: "browser", methods: ["GET"], roles: WORKSPACE_ADMIN },
   "meta-insights-history": { kind: "browser", methods: ["GET"], roles: WORKSPACE_ADMIN },
   "meta-insights-sync-runs": { kind: "browser", methods: ["GET"], roles: WORKSPACE_ADMIN },
+  // Exact CRM attribution snapshot for the advertising hub. It exposes only
+  // aggregate counts and currency totals, never patient or sale rows.
+  "advertising-outcomes": { kind: "browser", methods: ["GET"], roles: WORKSPACE_ADMIN },
 
   // The clinic's own WhatsApp connection: which channels feed its inbound
   // pipeline, how much they have filed, and the switch that stops one. It

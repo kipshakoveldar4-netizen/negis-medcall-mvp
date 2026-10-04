@@ -12,6 +12,7 @@ import {
   handleAdCreativeSignedUpload,
   handleAdCreativeUpload,
   handleAdsAiFill,
+  handleAdvertisingOutcomes,
   handleCrmAuthContext,
   handleCrmHealth,
   handleCrmResource,
@@ -283,6 +284,8 @@ async function dispatch(
       return handleMetaCampaignInsights(req, res);
     case "meta-insights-history":
       return handleMetaInsightsHistory(req, res);
+    case "advertising-outcomes":
+      return handleAdvertisingOutcomes(req, res);
     case "meta-insights-sync-runs":
       return handleMetaInsightsSyncRuns(req, res);
     case "ad-creatives/signed-upload":

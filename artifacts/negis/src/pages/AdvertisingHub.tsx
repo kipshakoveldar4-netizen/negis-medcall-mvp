@@ -123,6 +123,17 @@ type CrmAdvertisingOutcomes = {
     currencyExponent: number;
     amountMinor: bigint;
   }>;
+  generatedAt: string;
+};
+
+type CrmAdvertisingOutcomesPayload = {
+  attributedLeads?: unknown;
+  unattributedLeads?: unknown;
+  paidAttributedDeals?: unknown;
+  paidUnattributedDeals?: unknown;
+  pendingDeals?: unknown;
+  attributedRevenueByCurrency?: unknown;
+  generatedAt?: unknown;
 };
 
 const EMPTY_CRM_ADVERTISING_OUTCOMES: CrmAdvertisingOutcomes = {
@@ -132,6 +143,7 @@ const EMPTY_CRM_ADVERTISING_OUTCOMES: CrmAdvertisingOutcomes = {
   paidUnattributedDeals: 0,
   pendingDeals: 0,
   attributedRevenueByCurrency: [],
+  generatedAt: "",
 };
 
 type CampaignGoalForm = {
@@ -190,65 +202,48 @@ function readNonNegativeBigInt(value: unknown): bigint {
   }
 }
 
-function hasCampaignAttribution(row: Record<string, unknown>): boolean {
-  return Boolean(readString(row.metaCampaignLaunchId ?? row.meta_campaign_launch_id));
-}
-
-async function loadSupabaseCollection(
-  workspaceId: string,
-  resource: "leads" | "deals",
-  accessToken: string,
-): Promise<Record<string, unknown>[]> {
-  const response = await crmFetch(
-    `/api/crm/${resource}?workspaceId=${encodeURIComponent(workspaceId)}`,
-    { accessToken },
-  );
-  const body = await readJson<Record<string, unknown>>(response);
-  if (!response.ok || body.success !== true || body.mode !== "supabase") {
-    throw new Error(`${resource}_unavailable`);
+function requiredCount(value: unknown): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new Error("invalid_crm_outcome_count");
   }
-  const items = body.data?.[resource];
-  return Array.isArray(items) ? items.map(asRecord) : [];
+  return value;
 }
 
-function aggregateCrmAdvertisingOutcomes(
-  leads: Record<string, unknown>[],
-  deals: Record<string, unknown>[],
-): CrmAdvertisingOutcomes {
-  const revenue = new Map<string, { currency: string; currencyExponent: number; amountMinor: bigint }>();
-  let paidAttributedDeals = 0;
-  let paidUnattributedDeals = 0;
-  let pendingDeals = 0;
+function requiredMinorAmount(value: unknown): bigint {
+  const normalized = typeof value === "string" ? value.trim() : "";
+  if (!/^\d+$/.test(normalized)) throw new Error("invalid_crm_outcome_amount");
+  return BigInt(normalized);
+}
 
-  for (const deal of deals) {
-    const status = readString(deal.status).toLowerCase();
-    const attributed = hasCampaignAttribution(deal);
-    if (status === "pending") pendingDeals += 1;
-    if (status !== "paid") continue;
-    if (!attributed) {
-      paidUnattributedDeals += 1;
-      continue;
+function parseCrmAdvertisingOutcomes(value: unknown): CrmAdvertisingOutcomes {
+  const payload = asRecord(value) as CrmAdvertisingOutcomesPayload;
+  const revenueRows = payload.attributedRevenueByCurrency;
+  if (!Array.isArray(revenueRows)) throw new Error("invalid_crm_outcome_revenue");
+
+  const attributedRevenueByCurrency = revenueRows.map((raw) => {
+    const row = asRecord(raw);
+    const currency = readString(row.currency).toUpperCase();
+    const currencyExponent = row.currencyExponent;
+    if (!/^[A-Z]{3}$/.test(currency) || !Number.isInteger(currencyExponent) || Number(currencyExponent) < 0 || Number(currencyExponent) > 6) {
+      throw new Error("invalid_crm_outcome_currency");
     }
-
-    paidAttributedDeals += 1;
-    const currency = readString(deal.currency).toUpperCase() || "KZT";
-    const currencyExponent = 2;
-    const key = `${currency}:${currencyExponent}`;
-    const current = revenue.get(key);
-    revenue.set(key, {
+    return {
       currency,
-      currencyExponent,
-      amountMinor: (current?.amountMinor || 0n) + readNonNegativeBigInt(deal.amountMinor ?? deal.amount_minor),
-    });
-  }
+      currencyExponent: Number(currencyExponent),
+      amountMinor: requiredMinorAmount(row.amountMinor),
+    };
+  });
+  const generatedAt = readString(payload.generatedAt);
+  if (!generatedAt || Number.isNaN(Date.parse(generatedAt))) throw new Error("invalid_crm_outcome_time");
 
   return {
-    attributedLeads: leads.filter(hasCampaignAttribution).length,
-    unattributedLeads: leads.filter((lead) => !hasCampaignAttribution(lead)).length,
-    paidAttributedDeals,
-    paidUnattributedDeals,
-    pendingDeals,
-    attributedRevenueByCurrency: [...revenue.values()].sort((left, right) => left.currency.localeCompare(right.currency)),
+    attributedLeads: requiredCount(payload.attributedLeads),
+    unattributedLeads: requiredCount(payload.unattributedLeads),
+    paidAttributedDeals: requiredCount(payload.paidAttributedDeals),
+    paidUnattributedDeals: requiredCount(payload.paidUnattributedDeals),
+    pendingDeals: requiredCount(payload.pendingDeals),
+    attributedRevenueByCurrency,
+    generatedAt,
   };
 }
 
@@ -620,12 +615,16 @@ export default function AdvertisingHub() {
           return;
         }
 
-        const [leads, deals] = await Promise.all([
-          loadSupabaseCollection(workspaceId, "leads", accessToken),
-          loadSupabaseCollection(workspaceId, "deals", accessToken),
-        ]);
+        const outcomesResponse = await crmFetch(
+          `/api/crm/advertising-outcomes?workspaceId=${encodeURIComponent(workspaceId)}`,
+          { accessToken },
+        );
+        const outcomesBody = await readJson<{ outcomes?: CrmAdvertisingOutcomesPayload }>(outcomesResponse);
         if (cancelled) return;
-        setCrmOutcomes(aggregateCrmAdvertisingOutcomes(leads, deals));
+        if (!outcomesResponse.ok || outcomesBody.success !== true || outcomesBody.mode !== "supabase") {
+          throw new Error("crm_outcomes_unavailable");
+        }
+        setCrmOutcomes(parseCrmAdvertisingOutcomes(outcomesBody.data?.outcomes));
         setCrmOutcomesAccess("ready");
       } catch {
         if (!cancelled) {
@@ -1218,7 +1217,7 @@ export default function AdvertisingHub() {
               </div>
               <div className="mt-3 flex flex-col gap-3 border-l-4 px-4 py-3 sm:flex-row sm:items-center sm:justify-between" style={{ borderColor: "var(--negis-primary)", background: "var(--negis-primary-soft)" }}>
                 <p className="min-w-0 text-xs leading-relaxed" style={{ color: "var(--negis-muted)" }}>
-                  Связи с рекламой устанавливаются вручную. Выручка CRM показана отдельно от расходов Meta и не доказывает результат рекламы.
+                  Связи с рекламой устанавливаются вручную. Выручка CRM показана отдельно от расходов Meta и не доказывает результат рекламы. {formatInsightsUpdate(crmOutcomes.generatedAt)}.
                 </p>
                 {crmOutcomes.unattributedLeads > 0 ? (
                   <Link href="/leads"><span className="neu-btn inline-flex min-h-10 shrink-0 cursor-pointer items-center justify-center whitespace-nowrap text-sm">Связать заявки</span></Link>

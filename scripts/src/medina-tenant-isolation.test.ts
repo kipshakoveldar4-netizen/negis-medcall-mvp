@@ -697,9 +697,9 @@ test("K2 a foreign workspace Meta launch is refused before any Meta or CRM work"
   });
 });
 
-test("K3 Meta Insights stays administrator-only", async () => {
+test("K3 advertising results stay administrator-only", async () => {
   await withRouter({ memberships: [memberBReception] }, async (ctx) => {
-    for (const segment of ["meta-campaign-insights", "meta-insights-history", "meta-insights-sync-runs"]) {
+    for (const segment of ["meta-campaign-insights", "meta-insights-history", "meta-insights-sync-runs", "advertising-outcomes"]) {
       const { res } = await ctx.call({ segments: [segment], query: { workspaceId: WORKSPACE_B } });
       assert.equal(res.statusCode, 403, `${segment} must remain owner/admin`);
     }
