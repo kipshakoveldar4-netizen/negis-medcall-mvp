@@ -99,7 +99,7 @@ before(async () => {
   );
   const numbers = new Set([
     9, 10, 11, 12, 13, 14, 19, 20, 30, 32, 33, 34, 36, 40, 45, 52, 53, 54, 55,
-    56, 57,
+    56, 57, 65,
   ]);
   for (const file of (await readdir(path.join(root, "migrations"))).sort()) {
     if (!numbers.has(Number(file.slice(0, 3)))) continue;
@@ -117,6 +117,12 @@ before(async () => {
   await db.exec(
     await readFile(
       path.join(root, "migrations/057_operator_catalog_booking.sql"),
+      "utf8",
+    ),
+  );
+  await db.exec(
+    await readFile(
+      path.join(root, "migrations/065_operator_arrival_attribution.sql"),
       "utf8",
     ),
   );
@@ -193,6 +199,36 @@ test("catalog booking saves all services, price, client and safe audit atomicall
   );
   await rejects(() => book({ local: "2030-01-07T12:00" }), /retry_conflict/);
   await rejects(() => book({ key: 101 }), /already_exists/);
+});
+test("operator arrival belongs only to its arrived operator booking", async () => {
+  await book();
+  const confirm = () => row(
+    "select public.confirm_growth_operator_arrival($1,$2,$3) as id",
+    [id(50), id(100), id(10)],
+  );
+  await rejects(confirm, /clinic_arrival_required/);
+  await db.exec(`insert into public.appointments(id,workspace_id,client_name,status)
+    values('${id(102)}','${id(1)}','Unrelated clinic visit','arrived')`);
+  await rejects(
+    () => row("select public.confirm_growth_operator_arrival($1,$2,$3)", [id(50), id(102), id(10)]),
+    /operator_arrival_unavailable/,
+  );
+  await db.exec(`update public.appointments set status='arrived' where id='${id(100)}'`);
+  const receipt = await confirm();
+  assert.deepEqual(await confirm(), receipt);
+  assert.deepEqual(
+    await row(`select operator_request_id,appointment_id,price_minor::text,currency,
+      clinic_confirmed_by_staff_user_id,operator_checked_at
+      from public.growth_operator_arrivals`),
+    {
+      operator_request_id: id(50),
+      appointment_id: id(100),
+      price_minor: "10000",
+      currency: "KZT",
+      clinic_confirmed_by_staff_user_id: id(10),
+      operator_checked_at: null,
+    },
+  );
 });
 test("identity, assignment, workspace, suspension and ended cooperation are checked", async () => {
   await rejects(() => book({ user: 21 }), /access_denied/);
@@ -373,6 +409,10 @@ test("booking context and writes are server-only; raw catalog has no browser gra
   for (const role of ["anon", "authenticated"]) {
     await db.exec(`set local role ${role}`);
     await rejects(() => book(), /permission denied/);
+    await rejects(
+      () => row("select public.confirm_growth_operator_arrival($1,$2,$3)", [id(50), id(100), id(10)]),
+      /permission denied/,
+    );
     await db.exec("reset role");
   }
   await db.exec("set local role service_role");
