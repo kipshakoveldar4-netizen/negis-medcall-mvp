@@ -6,6 +6,7 @@ import { handlePlatformOperators, handleOperatorAccount, handleOperatorInbox, ha
 import { handleOperatorLeads, handleClinicOperatorLeads } from "../../lib/crm/operator-leads";
 import { handleOperatorServices } from "../../lib/crm/operator-services";
 import { handleOperatorBookings } from "../../lib/crm/operator-bookings";
+import { handleClinicOperatorArrivals, handleOperatorArrivals } from "../../lib/crm/operator-arrivals";
 import {
   handleAdCreativeMetaUpload,
   handleAdCreativeSignedUpload,
@@ -204,7 +205,9 @@ async function dispatch(
     case "operator-leads": return handleOperatorLeads(req, res);
     case "operator-services": return handleOperatorServices(req, res);
     case "operator-bookings": return handleOperatorBookings(req, res);
+    case "operator-arrivals": return handleOperatorArrivals(req, res);
     case "clinic-operator-leads": return handleClinicOperatorLeads(req, res);
+    case "clinic-operator-arrivals": return handleClinicOperatorArrivals(req, res);
     case "operator-directory": return handleClinicOperators(req, res, true);
     case "clinic-operator-requests": return handleClinicOperators(req, res);
     case "auth-context":

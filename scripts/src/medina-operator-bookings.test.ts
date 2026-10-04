@@ -99,7 +99,7 @@ before(async () => {
   );
   const numbers = new Set([
     9, 10, 11, 12, 13, 14, 19, 20, 30, 32, 33, 34, 36, 40, 45, 52, 53, 54, 55,
-    56, 57, 65,
+    56, 57, 65, 66,
   ]);
   for (const file of (await readdir(path.join(root, "migrations"))).sort()) {
     if (!numbers.has(Number(file.slice(0, 3)))) continue;
@@ -123,6 +123,12 @@ before(async () => {
   await db.exec(
     await readFile(
       path.join(root, "migrations/065_operator_arrival_attribution.sql"),
+      "utf8",
+    ),
+  );
+  await db.exec(
+    await readFile(
+      path.join(root, "migrations/066_operator_arrival_control_calls.sql"),
       "utf8",
     ),
   );
@@ -228,6 +234,130 @@ test("operator arrival belongs only to its arrived operator booking", async () =
       clinic_confirmed_by_staff_user_id: id(10),
       operator_checked_at: null,
     },
+  );
+});
+test("clinic confirmation and three control-call outcomes stay scoped to one agreement", async () => {
+  await book();
+  await db.exec(
+    `update public.appointments set status='arrived' where id='${id(100)}'`,
+  );
+  await db.exec(`insert into public.staff_users(id,workspace_id,auth_user_id,full_name,email,role)
+    values('${id(12)}','${id(2)}','${id(13)}','Foreign owner','foreign@example.invalid','owner')`);
+  await rejects(
+    () =>
+      row("select public.confirm_growth_operator_booking_arrival($1,$2,$3)", [
+        id(50),
+        id(100),
+        id(12),
+      ]),
+    /clinic_confirmation_required/,
+  );
+  const receipt = await row(
+    "select public.confirm_growth_operator_booking_arrival($1,$2,$3) as id",
+    [id(50), id(100), id(10)],
+  );
+  const clinic = (
+    await row("select public.read_clinic_operator_arrivals($1,$2,$3) as data", [
+      id(50),
+      id(10),
+      0,
+    ])
+  ).data as { items: Record<string, unknown>[] };
+  assert.equal(clinic.items.length, 1);
+  assert.equal(clinic.items[0].appointment_id, id(100));
+  assert.equal(clinic.items[0].arrival_id, receipt.id);
+  assert.equal("client_phone" in clinic.items[0], false);
+
+  const operator = (
+    await row("select public.read_growth_operator_arrivals($1,$2,$3) as data", [
+      id(50),
+      id(20),
+      0,
+    ])
+  ).data as { items: Record<string, unknown>[] };
+  assert.equal(operator.items.length, 1);
+  assert.equal(operator.items[0].client_phone, "87000000000");
+  assert.equal("notes" in operator.items[0], false);
+
+  for (const result of ["confirmed", "unconfirmed", "unreachable"]) {
+    assert.equal(
+      (
+        await row(
+          "select public.record_growth_operator_control_call($1,$2,$3) as id",
+          [receipt.id, id(20), result],
+        )
+      ).id,
+      receipt.id,
+    );
+  }
+  await row("select public.record_growth_operator_control_call($1,$2,$3)", [
+    receipt.id,
+    id(20),
+    "unreachable",
+  ]);
+  assert.deepEqual(
+    await row(
+      "select operator_check_result,operator_checked_at is not null as checked from public.growth_operator_arrivals",
+    ),
+    { operator_check_result: "unreachable", checked: true },
+  );
+  assert.equal(
+    (
+      await row(
+        "select count(*)::int as n from public.audit_logs where action='operator_arrival_control_call'",
+      )
+    ).n,
+    3,
+  );
+  await rejects(
+    () =>
+      row("select public.record_growth_operator_control_call($1,$2,$3)", [
+        receipt.id,
+        id(21),
+        "confirmed",
+      ]),
+    /operator_arrival_access_denied/,
+  );
+  await rejects(
+    () =>
+      row("select public.read_clinic_operator_arrivals($1,$2,$3)", [
+        id(50),
+        id(12),
+        0,
+      ]),
+    /operator_arrival_access_denied/,
+  );
+  await db.exec(
+    "update public.growth_operator_profiles set status='suspended', accepting_requests=false",
+  );
+  await rejects(
+    () =>
+      row("select public.read_growth_operator_arrivals($1,$2,$3)", [
+        id(50),
+        id(20),
+        0,
+      ]),
+    /operator_arrival_access_denied/,
+  );
+  await db.exec(`update public.growth_operator_profiles set status='approved';
+    update public.growth_operator_requests set status='ended', ended_at=now()`);
+  await rejects(
+    () =>
+      row("select public.read_growth_operator_arrivals($1,$2,$3)", [
+        id(50),
+        id(20),
+        0,
+      ]),
+    /operator_arrival_access_denied/,
+  );
+  await rejects(
+    () =>
+      row("select public.read_clinic_operator_arrivals($1,$2,$3)", [
+        id(50),
+        id(10),
+        0,
+      ]),
+    /operator_arrival_access_denied/,
   );
 });
 test("identity, assignment, workspace, suspension and ended cooperation are checked", async () => {
@@ -411,6 +541,42 @@ test("booking context and writes are server-only; raw catalog has no browser gra
     await rejects(() => book(), /permission denied/);
     await rejects(
       () => row("select public.confirm_growth_operator_arrival($1,$2,$3)", [id(50), id(100), id(10)]),
+      /permission denied/,
+    );
+    await rejects(
+      () =>
+        row("select public.read_growth_operator_arrivals($1,$2,$3)", [
+          id(50),
+          id(20),
+          0,
+        ]),
+      /permission denied/,
+    );
+    await rejects(
+      () =>
+        row("select public.read_clinic_operator_arrivals($1,$2,$3)", [
+          id(50),
+          id(10),
+          0,
+        ]),
+      /permission denied/,
+    );
+    await rejects(
+      () =>
+        row("select public.confirm_growth_operator_booking_arrival($1,$2,$3)", [
+          id(50),
+          id(100),
+          id(10),
+        ]),
+      /permission denied/,
+    );
+    await rejects(
+      () =>
+        row("select public.record_growth_operator_control_call($1,$2,$3)", [
+          id(100),
+          id(20),
+          "confirmed",
+        ]),
       /permission denied/,
     );
     await db.exec("reset role");

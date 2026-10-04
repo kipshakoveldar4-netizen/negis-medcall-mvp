@@ -18,6 +18,7 @@ const OPERATOR = "33333333-3333-4333-8333-333333333333";
 const REQUEST = "44444444-4444-4444-8444-444444444444";
 const LEAD = "55555555-5555-4555-8555-555555555555";
 const STAGE = "66666666-6666-4666-8666-666666666666";
+const ARRIVAL = "77777777-7777-4777-8777-777777777777";
 type Row = Record<string, unknown>;
 type Query = {
   table: string;
@@ -238,10 +239,12 @@ test("operator HTTP authorization, DTOs and transitions", async (t) => {
           "operator-inbox",
           "operator-services",
           "operator-bookings",
+          "operator-arrivals",
           "operator-directory",
           "clinic-operator-requests",
           "operator-leads",
           "clinic-operator-leads",
+          "clinic-operator-arrivals",
         ]) {
           assert.equal(
             (await call(route, "GET", undefined, null)).statusCode,
@@ -801,6 +804,168 @@ test("operator HTTP authorization, DTOs and transitions", async (t) => {
         assert.equal(log.length,0);
       }
     });
+    await t.test(
+      "arrival endpoints use verified identities and return only their narrow DTOs",
+      async () => {
+        reset();
+        rpcData = {
+          items: [
+            {
+              appointment_id: STAGE,
+              arrival_id: ARRIVAL,
+              client_name: "Пациент",
+              client_phone: "+7 700 000 00 00",
+              starts_at: "2030-01-07T05:00:00Z",
+              service: "Услуга",
+              doctor_name: "Мастер",
+              status: "arrived",
+              price_minor: "150000",
+              currency: "KZT",
+              clinic_confirmed_at: "2030-01-07T06:00:00Z",
+              operator_checked_at: null,
+              operator_check_result: null,
+              notes: "must-not-return",
+              private: "must-not-return",
+            },
+          ],
+        };
+        const operator = await call(
+          "operator-arrivals",
+          "GET",
+          undefined,
+          undefined,
+          FOREIGN,
+          { requestId: REQUEST },
+        );
+        assert.equal(operator.statusCode, 200);
+        assert.equal(
+          (operator.body.data as { items: Row[] }).items[0].clientPhone,
+          "+7 700 000 00 00",
+        );
+        assert.doesNotMatch(
+          JSON.stringify(operator.body),
+          /must-not-return|notes/,
+        );
+        assert.deepEqual(rpcCalls.at(-1), {
+          name: "read_growth_operator_arrivals",
+          args: {
+            p_request_id: REQUEST,
+            p_operator_user_id: USER,
+            p_offset: 0,
+          },
+        });
+
+        const saved = await call(
+          "operator-arrivals",
+          "PATCH",
+          { arrivalId: ARRIVAL, result: "unreachable" },
+          undefined,
+          FOREIGN,
+          { requestId: REQUEST },
+        );
+        assert.equal(saved.statusCode, 200);
+        assert.deepEqual(rpcCalls.at(-1), {
+          name: "record_growth_operator_control_call",
+          args: {
+            p_arrival_id: ARRIVAL,
+            p_operator_user_id: USER,
+            p_result: "unreachable",
+          },
+        });
+
+        const clinic = await call(
+          "clinic-operator-arrivals",
+          "GET",
+          undefined,
+          undefined,
+          WORKSPACE,
+          { requestId: REQUEST },
+        );
+        assert.equal(clinic.statusCode, 200);
+        assert.equal(
+          "clientPhone" in (clinic.body.data as { items: Row[] }).items[0],
+          false,
+        );
+        assert.deepEqual(rpcCalls.at(-1), {
+          name: "read_clinic_operator_arrivals",
+          args: {
+            p_request_id: REQUEST,
+            p_clinic_staff_id: "staff",
+            p_offset: 0,
+          },
+        });
+        const confirmed = await call(
+          "clinic-operator-arrivals",
+          "POST",
+          { appointmentId: STAGE },
+          undefined,
+          WORKSPACE,
+          { requestId: REQUEST },
+        );
+        assert.equal(confirmed.statusCode, 200);
+        assert.deepEqual(rpcCalls.at(-1), {
+          name: "confirm_growth_operator_booking_arrival",
+          args: {
+            p_request_id: REQUEST,
+            p_appointment_id: STAGE,
+            p_clinic_staff_id: "staff",
+          },
+        });
+      },
+    );
+    await t.test(
+      "arrival endpoints reject injected fields and fail closed when 066 is absent",
+      async () => {
+        reset();
+        const query = { requestId: REQUEST };
+        for (const body of [
+          { arrivalId: ARRIVAL, result: "unknown" },
+          { arrivalId: ARRIVAL, result: "confirmed", operatorUserId: OTHER },
+        ]) {
+          const count = rpcCalls.length;
+          assert.equal(
+            (
+              await call(
+                "operator-arrivals",
+                "PATCH",
+                body,
+                undefined,
+                WORKSPACE,
+                query,
+              )
+            ).statusCode,
+            400,
+          );
+          assert.equal(rpcCalls.length, count);
+        }
+        assert.equal(
+          (
+            await call(
+              "clinic-operator-arrivals",
+              "POST",
+              { appointmentId: STAGE, workspaceId: FOREIGN },
+              undefined,
+              WORKSPACE,
+              query,
+            )
+          ).statusCode,
+          400,
+        );
+        rpcFailure = "PGRST202";
+        rpcMessage = "private-db-detail";
+        const missing = await call(
+          "operator-arrivals",
+          "GET",
+          undefined,
+          undefined,
+          WORKSPACE,
+          query,
+        );
+        assert.equal(missing.statusCode, 503);
+        assert.equal(missing.body.code, "operator_arrivals_not_provisioned");
+        assert.doesNotMatch(JSON.stringify(missing.body), /private-db-detail/);
+      },
+    );
   } finally {
     globalThis.fetch = savedFetch;
     supabase.setSupabaseServerClientFactoryForTests(null);
@@ -919,4 +1084,40 @@ test("operator contact UI uses explicit scope and guarded stage writes without g
   const backend = await read("lib/crm/operator-leads.ts");
   assert.match(backend, /set_growth_operator_lead_stage/);
   assert.doesNotMatch(backend, /\.update\(|\.insert\(|localStorage|launchMeta/);
+});
+
+test("arrival UI separates clinic confirmation from operator control calls", async () => {
+  const read = (name: string) => readFile(path.join(root, name), "utf8");
+  const ui = await read(
+    "artifacts/negis/src/components/operators/OperatorArrivals.tsx",
+  );
+  const requests = await read(
+    "artifacts/negis/src/components/operators/OperatorRequests.tsx",
+  );
+  const backend = await read("lib/crm/operator-arrivals.ts");
+  assert.match(
+    requests,
+    /item\.status === "accepted" && openArrivals === item\.id/,
+  );
+  assert.match(requests, /Подтвердить приходы/);
+  assert.match(requests, /Приходы и звонки/);
+  assert.match(ui, /item\.status === "arrived"/);
+  assert.match(ui, /Подтвердить приход/);
+  assert.match(ui, /confirmed/);
+  assert.match(ui, /unconfirmed/);
+  assert.match(ui, /unreachable/);
+  assert.match(ui, /window\.addEventListener\("focus", revalidate\)/);
+  assert.match(ui, /document\.visibilityState === "visible"/);
+  assert.doesNotMatch(
+    ui,
+    /localStorage|sessionStorage|priceMinor:|workspaceId:\s*workspaceId/,
+  );
+  assert.match(backend, /requireAuthenticatedUser/);
+  assert.match(backend, /readWorkspaceContext/);
+  assert.match(backend, /confirm_growth_operator_booking_arrival/);
+  assert.match(backend, /record_growth_operator_control_call/);
+  assert.doesNotMatch(
+    backend,
+    /\.from\("appointments"\)|\.insert\(|\.update\(|meta-launch/,
+  );
 });
