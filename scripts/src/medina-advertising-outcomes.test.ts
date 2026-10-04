@@ -110,6 +110,9 @@ test("owner report pages past the PostgREST ceiling and keeps currencies separat
   const rangeCalls: RangeCall[] = [];
   const attributedDeals = Array.from({ length: 1_203 }, (_, index) => attributed(`deal-${String(index).padStart(4, "0")}`, 100));
   attributedDeals.push(attributed("deal-usd-1", 250, "USD"), attributed("deal-usd-2", 250, "USD"));
+  attributedDeals.slice(0, 1_000).forEach((deal, index) => {
+    deal.appointment_id = `appointment-${index}`;
+  });
   const deals: Row[] = [
     ...attributedDeals,
     ...Array.from({ length: 3 }, (_, index) => ({
@@ -117,6 +120,7 @@ test("owner report pages past the PostgREST ceiling and keeps currencies separat
       workspace_id: workspaceId,
       status: "paid",
       meta_campaign_launch_id: null,
+      appointment_id: index === 0 ? "appointment-unattributed" : null,
       amount_minor: 900,
       currency: "KZT",
     })),
@@ -149,6 +153,8 @@ test("owner report pages past the PostgREST ceiling and keeps currencies separat
   assert.equal(data.outcomes.unattributedLeads, 2);
   assert.equal(data.outcomes.paidAttributedDeals, 1_205);
   assert.equal(data.outcomes.paidUnattributedDeals, 3);
+  assert.equal(data.outcomes.paidAppointmentDeals, 1_001);
+  assert.equal(data.outcomes.paidAttributedAppointmentDeals, 1_000);
   assert.equal(data.outcomes.pendingDeals, 4);
   assert.deepEqual(data.outcomes.attributedRevenueByCurrency, [
     { currency: "KZT", currencyExponent: 2, amountMinor: "120300" },

@@ -119,6 +119,8 @@ type CrmAdvertisingOutcomes = {
   unattributedLeads: number;
   paidAttributedDeals: number;
   paidUnattributedDeals: number;
+  paidAppointmentDeals: number;
+  paidAttributedAppointmentDeals: number;
   pendingDeals: number;
   attributedRevenueByCurrency: Array<{
     currency: string;
@@ -133,6 +135,8 @@ type CrmAdvertisingOutcomesPayload = {
   unattributedLeads?: unknown;
   paidAttributedDeals?: unknown;
   paidUnattributedDeals?: unknown;
+  paidAppointmentDeals?: unknown;
+  paidAttributedAppointmentDeals?: unknown;
   pendingDeals?: unknown;
   attributedRevenueByCurrency?: unknown;
   generatedAt?: unknown;
@@ -143,6 +147,8 @@ const EMPTY_CRM_ADVERTISING_OUTCOMES: CrmAdvertisingOutcomes = {
   unattributedLeads: 0,
   paidAttributedDeals: 0,
   paidUnattributedDeals: 0,
+  paidAppointmentDeals: 0,
+  paidAttributedAppointmentDeals: 0,
   pendingDeals: 0,
   attributedRevenueByCurrency: [],
   generatedAt: "",
@@ -238,11 +244,27 @@ function parseCrmAdvertisingOutcomes(value: unknown): CrmAdvertisingOutcomes {
   const generatedAt = readString(payload.generatedAt);
   if (!generatedAt || Number.isNaN(Date.parse(generatedAt))) throw new Error("invalid_crm_outcome_time");
 
+  const paidAttributedDeals = requiredCount(payload.paidAttributedDeals);
+  const paidUnattributedDeals = requiredCount(payload.paidUnattributedDeals);
+  const paidAppointmentDeals = requiredCount(payload.paidAppointmentDeals);
+  const paidAttributedAppointmentDeals = requiredCount(payload.paidAttributedAppointmentDeals);
+  const totalPaidDeals = paidAttributedDeals + paidUnattributedDeals;
+  if (
+    !Number.isSafeInteger(totalPaidDeals)
+    || paidAppointmentDeals > totalPaidDeals
+    || paidAttributedAppointmentDeals > paidAppointmentDeals
+    || paidAttributedAppointmentDeals > paidAttributedDeals
+  ) {
+    throw new Error("invalid_crm_outcome_links");
+  }
+
   return {
     attributedLeads: requiredCount(payload.attributedLeads),
     unattributedLeads: requiredCount(payload.unattributedLeads),
-    paidAttributedDeals: requiredCount(payload.paidAttributedDeals),
-    paidUnattributedDeals: requiredCount(payload.paidUnattributedDeals),
+    paidAttributedDeals,
+    paidUnattributedDeals,
+    paidAppointmentDeals,
+    paidAttributedAppointmentDeals,
     pendingDeals: requiredCount(payload.pendingDeals),
     attributedRevenueByCurrency,
     generatedAt,
@@ -1202,7 +1224,7 @@ export default function AdvertisingHub() {
               <p className="text-xs font-semibold uppercase" style={{ color: "var(--negis-primary)", letterSpacing: 0 }}>Связь с CRM</p>
               <h2 id="advertising-crm-results-title" className="mt-1 text-lg font-semibold" style={{ color: "var(--negis-text)" }}>Результат в CRM</h2>
               <p className="mt-1 max-w-2xl text-sm leading-relaxed" style={{ color: "var(--negis-muted)" }}>
-                Только заявки и оплаченные продажи, которые вручную связаны с рекламными кампаниями.
+                Заявки, оплаченные продажи и точная связь продажи с записью. Рекламная атрибуция считается только по выбранной кампании.
               </p>
             </div>
             <div className="flex flex-wrap gap-3 text-sm font-semibold">
@@ -1215,7 +1237,7 @@ export default function AdvertisingHub() {
             <div className="negis-glass p-5 text-sm font-medium" style={{ color: "var(--negis-muted)" }}>Загружаем связанные заявки и продажи…</div>
           ) : crmOutcomesAccess === "ready" ? (
             <>
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
                 <MetricCard
                   label="Заявки с рекламой"
                   value={crmOutcomes.attributedLeads}
@@ -1231,6 +1253,13 @@ export default function AdvertisingHub() {
                   delta={`Оплачены без связи: ${crmOutcomes.paidUnattributedDeals}`}
                 />
                 <MetricCard
+                  label="Оплаченные записи"
+                  value={crmOutcomes.paidAppointmentDeals}
+                  icon={CheckCircle2}
+                  tone="secondary"
+                  delta={`С рекламой: ${crmOutcomes.paidAttributedAppointmentDeals} · без записи: ${crmOutcomes.paidAttributedDeals + crmOutcomes.paidUnattributedDeals - crmOutcomes.paidAppointmentDeals}`}
+                />
+                <MetricCard
                   label="Связанная выручка CRM"
                   value={crmRevenueValue}
                   icon={WalletCards}
@@ -1240,7 +1269,7 @@ export default function AdvertisingHub() {
               </div>
               <div className="mt-3 flex flex-col gap-3 border-l-4 px-4 py-3 sm:flex-row sm:items-center sm:justify-between" style={{ borderColor: "var(--negis-primary)", background: "var(--negis-primary-soft)" }}>
                 <p className="min-w-0 text-xs leading-relaxed" style={{ color: "var(--negis-muted)" }}>
-                  Связи с рекламой устанавливаются вручную. Выручка CRM показана отдельно от расходов Meta и не доказывает результат рекламы. {formatInsightsUpdate(crmOutcomes.generatedAt)}.
+                  Связь продажи с записью считается только по сохранённому appointment ID. Связи с рекламой устанавливаются вручную. Выручка CRM показана отдельно от расходов Meta и не доказывает результат рекламы. {formatInsightsUpdate(crmOutcomes.generatedAt)}.
                 </p>
                 {crmOutcomes.unattributedLeads > 0 ? (
                   <Link href="/leads"><span className="neu-btn inline-flex min-h-10 shrink-0 cursor-pointer items-center justify-center whitespace-nowrap text-sm">Связать заявки</span></Link>

@@ -9836,7 +9836,7 @@ async function countCrmAdvertisingRows(
   supabase: CrmSupabaseClient,
   workspaceId: string,
   table: "leads" | "deals",
-  options: { status?: string; attributedOnly?: boolean } = {},
+  options: { status?: string; attributedOnly?: boolean; appointmentLinkedOnly?: boolean } = {},
 ): Promise<number> {
   let query = supabase
     .from(table)
@@ -9844,6 +9844,7 @@ async function countCrmAdvertisingRows(
     .eq("workspace_id", workspaceId);
   if (options.status) query = query.eq("status", options.status);
   if (options.attributedOnly) query = query.not("meta_campaign_launch_id", "is", null);
+  if (options.appointmentLinkedOnly) query = query.not("appointment_id", "is", null);
 
   const { count, error } = await query;
   if (error || count === null || !Number.isSafeInteger(count) || count < 0) {
@@ -9913,7 +9914,7 @@ function aggregateAttributedDealRevenue(rows: JsonRecord[]) {
 }
 
 /**
- * Exact, owner-only CRM outcome snapshot for the advertising hub.
+ * Exact, administrator-only CRM outcome snapshot for the advertising hub.
  *
  * The previous UI downloaded the generic lead/deal collections and silently
  * treated PostgREST's response ceiling as a complete clinic. This endpoint
@@ -9937,14 +9938,34 @@ export async function handleAdvertisingOutcomes(req: VercelRequest, res: VercelR
   }
 
   try {
-    const [totalLeads, attributedLeads, totalPaidDeals, paidAttributedDeals, pendingDeals] = await Promise.all([
+    const [
+      totalLeads,
+      attributedLeads,
+      totalPaidDeals,
+      paidAttributedDeals,
+      paidAppointmentDeals,
+      paidAttributedAppointmentDeals,
+      pendingDeals,
+    ] = await Promise.all([
       countCrmAdvertisingRows(supabase, context.workspaceId, "leads"),
       countCrmAdvertisingRows(supabase, context.workspaceId, "leads", { attributedOnly: true }),
       countCrmAdvertisingRows(supabase, context.workspaceId, "deals", { status: "paid" }),
       countCrmAdvertisingRows(supabase, context.workspaceId, "deals", { status: "paid", attributedOnly: true }),
+      countCrmAdvertisingRows(supabase, context.workspaceId, "deals", { status: "paid", appointmentLinkedOnly: true }),
+      countCrmAdvertisingRows(supabase, context.workspaceId, "deals", {
+        status: "paid",
+        attributedOnly: true,
+        appointmentLinkedOnly: true,
+      }),
       countCrmAdvertisingRows(supabase, context.workspaceId, "deals", { status: "pending" }),
     ]);
-    if (attributedLeads > totalLeads || paidAttributedDeals > totalPaidDeals) {
+    if (
+      attributedLeads > totalLeads
+      || paidAttributedDeals > totalPaidDeals
+      || paidAppointmentDeals > totalPaidDeals
+      || paidAttributedAppointmentDeals > paidAttributedDeals
+      || paidAttributedAppointmentDeals > paidAppointmentDeals
+    ) {
       throw new CrmAdvertisingOutcomesError("changed_during_count");
     }
 
@@ -9958,6 +9979,8 @@ export async function handleAdvertisingOutcomes(req: VercelRequest, res: VercelR
       unattributedLeads: totalLeads - attributedLeads,
       paidAttributedDeals,
       paidUnattributedDeals: totalPaidDeals - paidAttributedDeals,
+      paidAppointmentDeals,
+      paidAttributedAppointmentDeals,
       pendingDeals,
       attributedRevenueByCurrency: aggregateAttributedDealRevenue(attributedDealRows),
       generatedAt: new Date().toISOString(),
