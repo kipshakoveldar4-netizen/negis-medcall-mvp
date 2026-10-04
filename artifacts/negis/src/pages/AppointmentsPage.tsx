@@ -20,7 +20,7 @@ import { PageLayout } from "@/components/layout/PageLayout";
 import { MetricCard } from "@/components/ui/metric-card";
 import { apiUrl, crmFetch } from "@/lib/api";
 import { editAppointmentClient, matchesAppointmentClientHistory, selectAppointmentClient } from "@/lib/appointmentClient";
-import { canReleaseAppointmentAttempt, confirmedAppointmentCreate, isCurrentAppointmentAttempt, mergeCreatedAppointment, newAppointmentCreateAttempt, type AppointmentCreateAttempt } from "@/lib/appointmentCreateAttempt";
+import { canReleaseAppointmentAttempt, clearPersistedAppointmentCreateAttempt, confirmedAppointmentCreate, isCurrentAppointmentAttempt, mergeCreatedAppointment, newAppointmentCreateAttempt, persistAppointmentCreateAttempt, restoreAppointmentCreateAttempt, type AppointmentCreateAttempt } from "@/lib/appointmentCreateAttempt";
 import { isRealWorkspace, readWorkspaceId as readCurrentWorkspaceId, useDemoCollection, workspaceScopedKey } from "@/lib/demoStorage";
 import { formatPhone, toTelHref, toWhatsappHref } from "@/lib/phone";
 import { clinicToday, dayKeyInZone, isOnClinicDay } from "@/lib/clinicDay";
@@ -85,6 +85,12 @@ type ApiResponse =
 
 const APPOINTMENT_PREFILL_KEY = "negis_appointment_prefill";
 const DEAL_PREFILL_KEY = "negis_deal_prefill";
+
+function appointmentAttemptStorage(): Storage | null {
+  if (typeof window === "undefined") return null;
+  try { return window.sessionStorage; }
+  catch { return null; }
+}
 
 /** Строка справочника услуг — ровно те поля, которые нужны форме записи. */
 type CatalogService = {
@@ -953,7 +959,7 @@ function AppointmentCard({
 }
 
 export function AppointmentsPage() {
-  const { vertical, userRole, user } = useAuth();
+  const { vertical, userRole, user, clinicId } = useAuth();
   const terms = termsFor(vertical);
   const [, setLocation] = useLocation();
   // Заявка, из которой пришла эта запись: после успешного создания она сама
@@ -1011,6 +1017,7 @@ export function AppointmentsPage() {
   const [saving, setSaving] = useState(false);
   const submitLock = useRef(false);
   const createAttempt = useRef<AppointmentCreateAttempt | null>(null);
+  const restoredCreateScope = useRef("");
   const [unconfirmedCreate, setUnconfirmedCreate] = useState(false);
   const currentCreateScope = useRef({ workspaceId: readCurrentWorkspaceId(), actorId: user?.id || "" });
   currentCreateScope.current = { workspaceId: readCurrentWorkspaceId(), actorId: user?.id || "" };
@@ -1018,12 +1025,40 @@ export function AppointmentsPage() {
   useEffect(() => {
     const attempt = createAttempt.current;
     if (attempt && !isCurrentAppointmentAttempt(attempt, readCurrentWorkspaceId(), user?.id || "")) {
+      const storage = appointmentAttemptStorage();
+      if (storage) clearPersistedAppointmentCreateAttempt(storage);
       createAttempt.current = null;
       setUnconfirmedCreate(false);
       setModalOpen(false);
       setForm(defaultForm(todayKeyAtLoad));
     }
-  }, [user?.id, currentCreateScope.current.workspaceId]);
+  }, [clinicId, user?.id, currentCreateScope.current.workspaceId]);
+
+  useEffect(() => {
+    const storage = appointmentAttemptStorage();
+    if (!storage || !isRealWorkspace()) return;
+    const scope = currentCreateScope.current;
+    if (!scope.workspaceId || !scope.actorId) return;
+    const scopeKey = `${scope.workspaceId}:${scope.actorId}`;
+    if (restoredCreateScope.current === scopeKey || createAttempt.current) return;
+    restoredCreateScope.current = scopeKey;
+
+    const restored = restoreAppointmentCreateAttempt(storage, scope.workspaceId, scope.actorId);
+    if (!restored) return;
+    const restoredAppointment = appointmentFromApi(restored.payload);
+    createAttempt.current = restored;
+    prefillLeadRef.current = restored.leadId || "";
+    setEditingId(null);
+    setForm(formFromAppointment(restoredAppointment));
+    setSelectedDate(dateKeyFromStartsAt(restoredAppointment.startsAt));
+    setConflictMessage("");
+    setScheduleMessage("");
+    setClientMatches([]);
+    setRemoteVisitHistory([]);
+    setUnconfirmedCreate(true);
+    setModalOpen(true);
+    toast.warning("Найдена незавершённая запись. Проверьте, сохранилась ли она.");
+  }, [clinicId, user?.id]);
 
   useEffect(() => {
     if (!saving && !unconfirmedCreate) return;
@@ -1910,8 +1945,11 @@ export function AppointmentsPage() {
       ...(allowConflict ? { allowConflict: true } : {}),
       ...(allowOutsideSchedule ? { allowOutsideSchedule: true } : {}),
     });
+    if (!createAttempt.current && isUuidText(prefillLeadRef.current)) attempt.leadId = prefillLeadRef.current;
     if (!isCurrentAppointmentAttempt(attempt, scope.workspaceId, scope.actorId)) throw new Error("Аккаунт записи изменился. Откройте форму заново.");
     createAttempt.current = attempt;
+    const storage = appointmentAttemptStorage();
+    if (storage) persistAppointmentCreateAttempt(storage, attempt);
     let response: Response | undefined;
     let body: ApiResponse | null = null;
     try {
@@ -1943,16 +1981,19 @@ export function AppointmentsPage() {
       if (!saved) throw new Error("Сервер не подтвердил сохранённую запись. Повторите проверку.");
       setItems((current) => mergeCreatedAppointment(current, appointmentFromApi(saved)));
       warnAboutUnsaved(unsavedFromBody(body));
+      if (storage) clearPersistedAppointmentCreateAttempt(storage);
       createAttempt.current = null;
       setUnconfirmedCreate(false);
       return { clientCreated: body.data?.clientCreated === true, replayed: body.data?.replayed === true };
     } catch (error) {
       if (createAttempt.current === attempt && isCurrentAppointmentAttempt(attempt, currentCreateScope.current.workspaceId, currentCreateScope.current.actorId)) {
         if (canReleaseAppointmentAttempt(attempt, response?.status ?? 0, body)) {
+          if (storage) clearPersistedAppointmentCreateAttempt(storage);
           createAttempt.current = null;
           setUnconfirmedCreate(false);
         } else {
           attempt.uncertain = true;
+          if (storage) persistAppointmentCreateAttempt(storage, attempt);
           setUnconfirmedCreate(true);
         }
       }

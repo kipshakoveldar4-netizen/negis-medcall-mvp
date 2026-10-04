@@ -1,20 +1,34 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-type CreateAttempt = { workspaceId: string; actorId: string; requestKey: string; payload: Record<string, unknown>; uncertain: boolean };
+type CreateAttempt = { workspaceId: string; actorId: string; requestKey: string; payload: Record<string, unknown>; uncertain: boolean; leadId?: string };
+type AttemptStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
 const moduleUrl = new URL("../../artifacts/negis/src/lib/appointmentCreateAttempt.ts", import.meta.url);
-const { canReleaseAppointmentAttempt, confirmedAppointmentCreate, isCurrentAppointmentAttempt, mergeCreatedAppointment, newAppointmentCreateAttempt } = await import(moduleUrl.href) as {
+const { canReleaseAppointmentAttempt, clearPersistedAppointmentCreateAttempt, confirmedAppointmentCreate, isCurrentAppointmentAttempt, mergeCreatedAppointment, newAppointmentCreateAttempt, persistAppointmentCreateAttempt, restoreAppointmentCreateAttempt } = await import(moduleUrl.href) as {
   newAppointmentCreateAttempt(workspaceId: string, actorId: string, payload: Record<string, unknown>, makeKey?: () => string): CreateAttempt;
   isCurrentAppointmentAttempt(attempt: CreateAttempt, workspaceId: string, actorId: string): boolean;
   canReleaseAppointmentAttempt(attempt: CreateAttempt, status: number, body: unknown): boolean;
   confirmedAppointmentCreate(body: unknown): Record<string, unknown> | null;
   mergeCreatedAppointment<T extends { id: string }>(items: T[], saved: T): T[];
+  persistAppointmentCreateAttempt(storage: AttemptStorage, attempt: CreateAttempt): boolean;
+  restoreAppointmentCreateAttempt(storage: AttemptStorage, workspaceId: string, actorId: string): CreateAttempt | null;
+  clearPersistedAppointmentCreateAttempt(storage: AttemptStorage): void;
 };
 
 const key = "00000000-0000-4000-8000-000000000080";
 const draft = () => ({ id: "local-generated-id", client: "Synthetic client", startsAt: "2026-10-03T09:00:00Z",
-  serviceItems: [{ name: "Synthetic service", priceMinor: 123450, durationMinutes: 60 }] });
+  phone: "+77000000080", serviceItems: [{ name: "Synthetic service", priceMinor: 123450, durationMinutes: 60 }] });
 const attempt = () => newAppointmentCreateAttempt("test-workspace", "test-actor", draft(), () => key);
+
+function memoryStorage(): AttemptStorage & { size(): number } {
+  const values = new Map<string, string>();
+  return {
+    getItem: (name) => values.get(name) ?? null,
+    setItem: (name, value) => { values.set(name, value); },
+    removeItem: (name) => { values.delete(name); },
+    size: () => values.size,
+  };
+}
 
 test("attempt takes one UUID and a detached original snapshot, without the generated appointment id", () => {
   let calls = 0;
@@ -34,6 +48,35 @@ test("attempt cannot cross the workspace or signed-in account", () => {
   assert.equal(isCurrentAppointmentAttempt(attempt(), "test-workspace", "other-actor"), false);
   assert.throws(() => newAppointmentCreateAttempt("", "test-actor", {}));
   assert.throws(() => newAppointmentCreateAttempt("test-workspace", "", {}));
+});
+
+test("same-tab reload restores the exact attempt as uncertain and keeps an optional lead link", () => {
+  const storage = memoryStorage();
+  const current = attempt();
+  current.leadId = "00000000-0000-4000-8000-000000000081";
+  assert.ok(persistAppointmentCreateAttempt(storage, current));
+
+  const restored = restoreAppointmentCreateAttempt(storage, "test-workspace", "test-actor");
+  assert.deepEqual(restored, { ...current, uncertain: true });
+  assert.notEqual(restored?.payload, current.payload);
+  assert.equal((restored?.payload as { phone?: string }).phone, "+77000000080");
+
+  clearPersistedAppointmentCreateAttempt(storage);
+  assert.equal(storage.size(), 0);
+});
+
+test("temporary attempt storage refuses corrupt data and cannot cross an account or workspace", () => {
+  for (const scope of [["other-workspace", "test-actor"], ["test-workspace", "other-actor"]] as const) {
+    const storage = memoryStorage();
+    assert.ok(persistAppointmentCreateAttempt(storage, attempt()));
+    assert.equal(restoreAppointmentCreateAttempt(storage, scope[0], scope[1]), null);
+    assert.equal(storage.size(), 0);
+  }
+
+  const storage = memoryStorage();
+  storage.setItem("medina_appointment_create_attempt_v1", "not-json");
+  assert.equal(restoreAppointmentCreateAttempt(storage, "test-workspace", "test-actor"), null);
+  assert.equal(storage.size(), 0);
 });
 
 for (const [status, code] of [[400, "validation"], [401, "authentication_required"], [403, "forbidden"],
@@ -86,5 +129,12 @@ test("booking form sends the saved attempt through crmFetch and protects uncerta
   assert.match(source, /<fieldset[^>]*disabled=\{saving \|\| unconfirmedCreate\}/);
   assert.match(source, /!submitLock\.current && !createAttempt\.current\?\.uncertain/);
   assert.match(source, /window\.addEventListener\("beforeunload", warnBeforeLeaving\)/);
+  assert.match(source, /persistAppointmentCreateAttempt\(storage, attempt\)/);
+  assert.match(source, /restoreAppointmentCreateAttempt\(storage, scope\.workspaceId, scope\.actorId\)/);
+  assert.match(source, /clearPersistedAppointmentCreateAttempt\(storage\)/);
   assert.doesNotMatch(source, /saved \? appointmentFromApi\(saved\) : appointment, \.\.\.current/);
+
+  const helper = await readFile(moduleUrl, "utf8");
+  assert.match(helper, /medina_appointment_create_attempt_v1/);
+  assert.doesNotMatch(helper, /localStorage/);
 });
