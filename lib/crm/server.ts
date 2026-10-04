@@ -29,7 +29,10 @@ import {
   buildMetaLaunchPayloadPreview,
   type MetaLaunchPayloadOptions,
 } from "./meta-launch-payload";
-import { evaluateMetaInsightsCompleteness } from "../meta/insightsCompleteness";
+import {
+  classifyMetaInsightsDataFreshness,
+  evaluateMetaInsightsCompleteness,
+} from "../meta/insightsCompleteness";
 import { notifyAppointmentEvent } from "./push-subscriptions";
 import { getSupabaseServerClient } from "../supabase/server";
 import {
@@ -10029,6 +10032,7 @@ export async function handleMetaInsightsHistory(req: VercelRequest, res: VercelR
       aggregates.set(launchId, aggregate);
     }
 
+    const freshnessCheckedAt = new Date().toISOString();
     const summaries = launches.map((launch) => {
       const launchId = readString(launch.id);
       const eligible = isMetaInsightsHistoryLaunchEligible(launch);
@@ -10037,6 +10041,11 @@ export async function handleMetaInsightsHistory(req: VercelRequest, res: VercelR
       return {
         metaCampaignLaunchId: launchId,
         availability: resolveMetaInsightsHistoryAvailability({ eligible, aggregate, latestRun }),
+        freshness: classifyMetaInsightsDataFreshness({
+          latestFetchedAt: aggregate?.latestFetchedAt,
+          checkedAt: freshnessCheckedAt,
+          freshnessSlaHours: META_INSIGHTS_BACKGROUND_FRESHNESS_SLA_HOURS,
+        }),
         lastRun: mapMetaInsightsHistoryLastRun(latestRun),
         coveredDateStart: aggregate?.coveredDateStart || null,
         coveredDateStop: aggregate?.coveredDateStop || null,
@@ -10058,7 +10067,11 @@ export async function handleMetaInsightsHistory(req: VercelRequest, res: VercelR
       };
     });
 
-    return sendJson(res, 200, success("supabase", { summaries, items: summaries }));
+    return sendJson(res, 200, success("supabase", {
+      summaries,
+      items: summaries,
+      freshnessCheckedAt,
+    }));
   } catch (error) {
     const safeError =
       error instanceof MetaInsightsError

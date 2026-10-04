@@ -40,6 +40,7 @@ type LoadState = "loading" | "ready" | "error";
 type LaunchState = "paused" | "active" | "failed" | "dry_run" | "video_processing" | "unknown";
 type InsightsAccess = "idle" | "checking" | "ready" | "required" | "forbidden" | "error";
 type InsightsAvailability = "available" | "not_synced" | "empty" | "running" | "failed" | "unavailable";
+type InsightsFreshness = "fresh" | "stale" | "unknown";
 
 type AdvertisingLaunch = {
   id: string;
@@ -80,6 +81,7 @@ type ServerAdminAuthContext = {
 type MetaInsightsHistorySummary = {
   metaCampaignLaunchId: string;
   availability: InsightsAvailability;
+  freshness: InsightsFreshness;
   coveredDateStart: string | null;
   coveredDateStop: string | null;
   latestFetchedAt: string | null;
@@ -289,7 +291,9 @@ function formatInsightsUpdate(value: string | null): string {
 }
 
 function aggregateAdvertisingInsights(summaries: MetaInsightsHistorySummary[]): AdvertisingInsightsAggregate {
-  const available = summaries.filter((summary) => summary.availability === "available" && summary.rowCount > 0);
+  const available = summaries.filter(
+    (summary) => summary.availability === "available" && summary.freshness === "fresh" && summary.rowCount > 0,
+  );
   const spend = new Map<string, { currency: string; currencyExponent: number; spendMinor: bigint }>();
   let impressions = 0n;
   let clicks = 0n;
@@ -749,7 +753,9 @@ export default function AdvertisingHub() {
   ), [insightsSummaries, launches]);
 
   const insightsStates = useMemo(() => ({
-    available: insightsSummaries.filter((summary) => summary.availability === "available").length,
+    fresh: insightsSummaries.filter((summary) => summary.availability === "available" && summary.freshness === "fresh").length,
+    stale: insightsSummaries.filter((summary) => summary.availability === "available" && summary.freshness === "stale").length,
+    unknownFreshness: insightsSummaries.filter((summary) => summary.availability === "available" && summary.freshness !== "fresh" && summary.freshness !== "stale").length,
     empty: insightsSummaries.filter((summary) => summary.availability === "empty").length,
     running: insightsSummaries.filter((summary) => summary.availability === "running").length,
     failed: insightsSummaries.filter((summary) => summary.availability === "failed").length,
@@ -758,6 +764,8 @@ export default function AdvertisingHub() {
 
   const insightsEmptyMessage = useMemo(() => {
     if (insightsStates.running > 0) return "Meta обновляет данные. Результаты появятся после завершения синхронизации.";
+    if (insightsStates.stale > 0) return "Сохранённые данные Meta устарели и не включены в текущую сводку. Обновите Insights в истории запусков.";
+    if (insightsStates.unknownFreshness > 0) return "Свежесть сохранённых данных Meta не подтверждена. Они доступны в истории, но не включены в текущую сводку.";
     if (insightsStates.empty > 0) return "Meta не вернула данные за выбранный период. Это нормально для выключенных или не откручивавшихся кампаний.";
     if (insightsStates.failed > 0) return "Не удалось обновить данные Meta. Подробности доступны владельцу в истории запусков.";
     if (insightsStates.notSynced > 0) return "Результаты ещё не синхронизированы. Кампания и её плановый бюджет уже сохранены.";
@@ -1028,6 +1036,11 @@ export default function AdvertisingHub() {
                   <p className="mt-1 text-xs leading-relaxed" style={{ color: "var(--negis-muted)" }}>
                     Фактический расход Meta показан отдельно от планового бюджета. Лиды Meta не равны заявкам CRM. Это ещё не оценка эффективности рекламы.
                   </p>
+                  {insightsStates.stale > 0 || insightsStates.unknownFreshness > 0 ? (
+                    <p className="mt-1 text-xs font-semibold leading-relaxed" style={{ color: "var(--negis-warning)" }}>
+                      Устаревшие данные и данные с неподтверждённой свежестью не включены в эту сводку.
+                    </p>
+                  ) : null}
                 </div>
                 <span className="shrink-0 text-xs font-semibold" style={{ color: "var(--negis-muted)" }}>{formatInsightsUpdate(insights.latestFetchedAt)}</span>
               </div>
@@ -1113,6 +1126,7 @@ export default function AdvertisingHub() {
                       {group.items.map((item) => {
                         const itemInsights = item.insights;
                         const hasData = itemInsights?.availability === "available" && itemInsights.rowCount > 0;
+                        const hasFreshData = hasData && itemInsights?.freshness === "fresh";
                         const dataMessage = !itemInsights || itemInsights.availability === "not_synced"
                           ? "Insights ещё не синхронизированы"
                           : itemInsights.availability === "empty"
@@ -1123,8 +1137,12 @@ export default function AdvertisingHub() {
                                 ? "Не удалось обновить Insights"
                                 : itemInsights.availability === "unavailable"
                                   ? "Insights недоступны для запуска"
-                                  : hasData
+                                  : hasFreshData
                                     ? "Фактические данные Meta"
+                                    : hasData && itemInsights.freshness === "stale"
+                                      ? "Данные Meta устарели"
+                                      : hasData
+                                        ? "Свежесть данных Meta не подтверждена"
                                     : "Данных Meta пока нет";
                         return (
                           <article key={item.metaCampaignLaunchId} className="neu-sm min-w-0 p-4">
@@ -1139,7 +1157,7 @@ export default function AdvertisingHub() {
                                 <p className="mt-1 break-words text-xs" style={{ color: "var(--negis-muted)" }}>{item.campaignName}</p>
                               </div>
                             </div>
-                            <p className="mt-3 text-xs font-semibold" style={{ color: hasData ? "var(--negis-primary)" : "var(--negis-muted)" }}>{dataMessage}</p>
+                            <p className="mt-3 text-xs font-semibold" style={{ color: hasFreshData ? "var(--negis-primary)" : hasData ? "var(--negis-warning)" : "var(--negis-muted)" }}>{dataMessage}</p>
                             {hasData && itemInsights ? (
                               <>
                                 <div className="mt-3 border-t pt-3" style={{ borderColor: "var(--negis-border)" }}>
@@ -1157,6 +1175,11 @@ export default function AdvertisingHub() {
                                   <div><dt style={{ color: "var(--negis-muted)" }}>Лиды Meta</dt><dd className="font-semibold" style={{ color: "var(--negis-text)" }}>{itemInsights.metaLeads === null ? "Нет данных" : formatCount(readNonNegativeBigInt(itemInsights.metaLeads))}</dd></div>
                                 </dl>
                                 <p className="mt-3 text-xs" style={{ color: "var(--negis-muted)" }}>{formatInsightsUpdate(itemInsights.latestFetchedAt)}</p>
+                                {!hasFreshData ? (
+                                  <p className="mt-1 text-xs font-semibold leading-relaxed" style={{ color: "var(--negis-warning)" }}>
+                                    Эти значения показаны для проверки истории и не участвуют в сравнении креативов.
+                                  </p>
+                                ) : null}
                               </>
                             ) : null}
                           </article>

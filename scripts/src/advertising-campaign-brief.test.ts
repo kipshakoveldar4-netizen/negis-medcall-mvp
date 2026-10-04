@@ -341,6 +341,7 @@ test("groups only unchanged approved variants without inventing a winner", () =>
   const summary = (metaCampaignLaunchId: string) => ({
     metaCampaignLaunchId,
     availability: "available",
+    freshness: "fresh",
     coveredDateStart: "2026-09-10",
     coveredDateStop: "2026-09-14",
     latestFetchedAt: "2026-09-15T08:00:00.000Z",
@@ -372,6 +373,15 @@ test("groups only unchanged approved variants without inventing a winner", () =>
     [summary("launch-direct")],
   );
   assert.equal(partial[0].reviewState, "partial");
+
+  const stale = creativeEvidence.buildCreativeExperimentGroups(
+    launches,
+    [
+      summary("launch-direct"),
+      { ...summary("launch-trust"), freshness: "stale" },
+    ],
+  );
+  assert.equal(stale[0].reviewState, "partial", "stale data must not produce a comparable experiment");
 });
 
 test("rejects unsupported versions, unknown platforms and empty payloads", () => {

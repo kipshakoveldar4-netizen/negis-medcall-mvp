@@ -2907,6 +2907,9 @@ async function checkMetaInsightsHistoryFoundation() {
     '.from("meta_campaign_launches")',
     "expectedCampaignByLaunch",
     "metaCampaignLaunchId: launchId",
+    "classifyMetaInsightsDataFreshness",
+    "freshnessCheckedAt",
+    "freshness:",
     'success("supabase"',
   ]) {
     if (!historyHandler.includes(marker)) throw new Error(`Meta Insights history endpoint is missing ${marker}`);
@@ -2948,6 +2951,9 @@ async function checkMetaInsightsHistoryFoundation() {
     "isServerLaunchUuid(item.id)",
     'historyInsightsAccess === "confirmed"',
     "Insights доступны",
+    "Insights устарели",
+    "Свежесть выгрузки не подтверждена",
+    "Обновите Insights перед текущими выводами",
     "Фактический расход Meta",
     "Лиды по данным Meta",
     "Insights ещё не синхронизированы",
@@ -3567,6 +3573,8 @@ async function checkAdvertisingHubSource() {
     "Лиды по данным Meta",
     "Лиды Meta не равны заявкам CRM.",
     "Это ещё не оценка эффективности рекламы.",
+    "Устаревшие данные и данные с неподтверждённой свежестью не включены в эту сводку.",
+    "Сохранённые данные Meta устарели и не включены в текущую сводку.",
     "Meta не вернула данные за выбранный период.",
     "aggregateAdvertisingInsights",
     "readNonNegativeBigInt",
@@ -3616,6 +3624,13 @@ async function checkAdvertisingHubSource() {
   if (hub.includes('method: "POST"')) {
     throw new Error("AdvertisingHub must remain read-only and must not launch campaigns");
   }
+  const insightsAggregate = hub.slice(
+    hub.indexOf("function aggregateAdvertisingInsights"),
+    hub.indexOf("function normalizeLaunch"),
+  );
+  if (!insightsAggregate.includes('summary.freshness === "fresh"')) {
+    throw new Error("AdvertisingHub current totals must exclude stale or unknown-freshness Insights");
+  }
   for (const marker of [
     "buildAdvertisingAssistantBrief",
     'reason: "launch_failed"',
@@ -3642,6 +3657,7 @@ async function checkAdvertisingHubSource() {
     "buildCreativeExperimentGroups",
     "approval.copyMatchesLaunch !== true",
     "variants.size < 2",
+    'insights.freshness === "fresh"',
     'reviewState: samePeriod ? "same_period"',
     "coveredDateStart",
     "coveredDateStop",

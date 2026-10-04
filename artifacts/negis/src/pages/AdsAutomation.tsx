@@ -303,10 +303,12 @@ type LaunchHistoryItem = {
 };
 
 type MetaInsightsHistoryAvailability = "available" | "not_synced" | "empty" | "running" | "failed" | "unavailable";
+type MetaInsightsHistoryFreshness = "fresh" | "stale" | "unknown";
 
 type MetaInsightsHistorySummary = {
   metaCampaignLaunchId: string;
   availability: MetaInsightsHistoryAvailability;
+  freshness: MetaInsightsHistoryFreshness;
   lastRun: {
     status: string;
     dateStart: string | null;
@@ -1374,6 +1376,12 @@ function formatMetaInsightsDateTime(value: string | null): string {
 
 function MetaInsightsHistoryDetails({ summary }: { summary: MetaInsightsHistorySummary | null }) {
   const availability = summary?.availability || "unavailable";
+  const freshness = summary?.freshness || "unknown";
+  const freshnessMessage = freshness === "fresh"
+    ? "Свежесть выгрузки подтверждена."
+    : freshness === "stale"
+      ? "Выгрузка устарела. Обновите Insights перед текущими выводами."
+      : "Свежесть выгрузки не подтверждена. Используйте значения только для проверки истории.";
   const stateMessage =
     availability === "not_synced"
       ? "Insights ещё не синхронизированы."
@@ -1412,6 +1420,7 @@ function MetaInsightsHistoryDetails({ summary }: { summary: MetaInsightsHistoryS
             <HistoryFact label="Обновлено" value={formatMetaInsightsDateTime(summary.latestFetchedAt)} />
           </div>
           <div className="mt-3 border-t border-[#D8E4EC] pt-3 text-xs font-semibold leading-relaxed" style={{ color: "var(--negis-muted)" }}>
+            <p style={{ color: freshness === "fresh" ? "var(--negis-primary)" : "var(--negis-warning)" }}>{freshnessMessage}</p>
             <p>Фактический расход Meta показывается отдельно от планового бюджета.</p>
             <p>Лиды по данным Meta не равны заявкам CRM.</p>
             <p>Это не оценка эффективности рекламы.</p>
@@ -4806,7 +4815,15 @@ export default function AdsAutomation() {
                               {historyContentApproval.copyMatchesLaunch === false ? "Текст изменён" : "Вариант согласован"}
                             </StatusPill>
                           ) : null}
-                          {historyInsightsSummary?.availability === "available" ? <StatusPill tone="slate">Insights доступны</StatusPill> : null}
+                          {historyInsightsSummary?.availability === "available" ? (
+                            <StatusPill tone={historyInsightsSummary.freshness === "fresh" ? "slate" : "amber"}>
+                              {historyInsightsSummary.freshness === "fresh"
+                                ? "Insights доступны"
+                                : historyInsightsSummary.freshness === "stale"
+                                  ? "Insights устарели"
+                                  : "Свежесть не подтверждена"}
+                            </StatusPill>
+                          ) : null}
                           {historyOptimized ? <StatusPill tone="blue">Видео оптимизировано</StatusPill> : null}
                         </div>
                       </div>
