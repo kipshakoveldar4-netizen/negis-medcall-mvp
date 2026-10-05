@@ -208,7 +208,11 @@ async function checkAdsAutomationSource() {
   assertSourceIncludes(source, "configBlocked: videoConfigBlocked", "readiness receives the config-loading block flag");
   assertSourceIncludes(source, 'setVideoJob({ id: "local-failed", status: "failed"', "optimization branch failures are classified as optimization_failed");
   // D3C raw large-video upload polish (canonical /api/crm/video-jobs)
-  assertSourceIncludes(source, '"/api/crm/video-jobs"', "large video uses the canonical video-jobs endpoint");
+  assertSourceIncludes(
+    source,
+    "/api/crm/video-jobs?workspaceId=${encodeURIComponent(workspaceId)}",
+    "large video uses the canonical workspace-scoped video-jobs endpoint",
+  );
   assertSourceIncludes(source, "Видео загружено для оптимизации", "optimizing card title");
   assertSourceIncludes(source, "Мы подготовим MP4-версию для Meta. Запуск будет доступен после обработки.", "optimizing card body");
   assertSourceIncludes(source, "Запуск рекламы будет доступен после оптимизации.", "launch-after-optimization message");

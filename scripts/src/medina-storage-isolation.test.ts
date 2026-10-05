@@ -20,6 +20,8 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."
 const routerPath = path.join(repoRoot, "api", "crm", "[...path].ts");
 const serverPath = path.join(repoRoot, "lib", "crm", "server.ts");
 const workerPath = path.join(repoRoot, "artifacts", "video-worker", "src", "worker.ts");
+const adsPagePath = path.join(repoRoot, "artifacts", "negis", "src", "pages", "AdsAutomation.tsx");
+const contentStudioPath = path.join(repoRoot, "artifacts", "negis", "src", "pages", "ContentStudio.tsx");
 const rawBucketMigration = path.join(repoRoot, "migrations", "016_video_processing_jobs.sql");
 
 const WORKSPACE_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -123,6 +125,7 @@ function mockResponse(): MockResponse {
 }
 
 const memberA: StaffRow = { id: "staff-a", workspace_id: WORKSPACE_A, role: "owner", status: "active" };
+const memberB: StaffRow = { id: "staff-b", workspace_id: WORKSPACE_B, role: "owner", status: "active" };
 
 async function loadRouter(rows: Record<string, unknown[]> = {}) {
   const queries: QueryLog[] = [];
@@ -554,4 +557,66 @@ test("ST13 a creative with neither a URL nor a stored object is refused, not sav
       "a creative with no reachable link must not reach the table",
     );
   });
+});
+
+// ===========================================================================
+// F. A multi-workspace browser signs and confirms the selected tenant
+// ===========================================================================
+
+test("ST14 signed upload requires and obeys the explicit workspace selector", async () => {
+  await withRouter({ staff_users: [memberA, memberB] }, async (ctx) => {
+    const body = {
+      fileName: "creative.jpg",
+      fileType: "image",
+      mimeType: "image/jpeg",
+      fileSize: 2048,
+      workspaceId: WORKSPACE_B,
+    };
+    const missing = await ctx.call({
+      segments: ["ad-creatives", "signed-upload"],
+      method: "POST",
+      body,
+    });
+    assert.equal(missing.res.statusCode, 403, JSON.stringify(missing.res.body));
+    assert.equal(missing.storage.length, 0, "an ambiguous tenant must not receive an upload token");
+
+    const selected = await ctx.call({
+      segments: ["ad-creatives", "signed-upload"],
+      method: "POST",
+      query: { workspaceId: WORKSPACE_A },
+      body,
+    });
+    assert.equal(selected.res.statusCode, 200, JSON.stringify(selected.res.body));
+    const signed = selected.storage.filter((entry) => entry.op === "createSignedUploadUrl");
+    assert.equal(signed.length, 1);
+    assert.ok(signed[0].key.startsWith(`${WORKSPACE_A}/`), `selector was ignored: ${signed[0].key}`);
+    assert.equal(signed[0].key.includes(WORKSPACE_B), false, "a body workspace must not select the upload tenant");
+  });
+});
+
+test("ST15 every signed-upload browser flow sends the active workspace selector", async () => {
+  const [adsPage, contentStudio] = await Promise.all([
+    readFile(adsPagePath, "utf8"),
+    readFile(contentStudioPath, "utf8"),
+  ]);
+
+  assert.equal(
+    (adsPage.match(/\/api\/crm\/ad-creatives\/signed-upload\?workspaceId=\$\{encodeURIComponent\(workspaceId\)\}/g) || []).length,
+    2,
+    "the main creative and thumbnail uploads must select the active workspace",
+  );
+  assert.equal(
+    (adsPage.match(/\/api\/crm\/video-jobs\?workspaceId=\$\{encodeURIComponent\(workspaceId\)\}/g) || []).length,
+    2,
+    "large-video signing and confirmation must select the same workspace",
+  );
+  assert.equal(
+    (adsPage.match(/\/api\/crm\/ad-creatives\?workspaceId=\$\{encodeURIComponent\(workspaceId\)\}/g) || []).length,
+    3,
+    "signed objects and thumbnails must save metadata in the selected workspace",
+  );
+  assert.ok(
+    contentStudio.includes('/api/crm/ad-creatives/signed-upload?workspaceId=${encodeURIComponent(readWorkspaceId())}'),
+    "Content Studio must use its workspace-scoped route helper for the signed upload",
+  );
 });

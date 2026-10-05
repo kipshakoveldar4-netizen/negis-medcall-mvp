@@ -985,16 +985,19 @@ export default function ContentStudio() {
       let fileName = `photo-creative-${Date.now()}.jpg`;
       if (hasSupabaseFrontendEnv) {
         try {
-          const signedResponse = await crmFetch("/api/crm/ad-creatives/signed-upload", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                            fileName,
-              fileType: "image",
-              mimeType: "image/jpeg",
-              fileSize: photoBlob.size,
-            }),
-          });
+          const signedResponse = await crmFetch(
+            `/api/crm/ad-creatives/signed-upload?workspaceId=${encodeURIComponent(readWorkspaceId())}`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                fileName,
+                fileType: "image",
+                mimeType: "image/jpeg",
+                fileSize: photoBlob.size,
+              }),
+            },
+          );
           const signedBody = await safeJson<{ bucket?: string; storageBucket?: string; storagePath?: string; token?: string; publicUrl?: string }>(signedResponse);
           if (signedResponse.ok && signedBody?.success === true) {
             const bucket = signedBody.data.bucket || signedBody.data.storageBucket || "ad-creatives";
