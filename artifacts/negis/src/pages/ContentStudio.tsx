@@ -2275,7 +2275,7 @@ export default function ContentStudio() {
                 ) : null}
               </div>
             ) : (
-              <p className="mt-2 text-sm font-semibold text-[#64748B]">Лимит проверится перед генерацией.</p>
+              <p className="mt-2 text-sm font-semibold text-amber-800">Не удалось проверить лимит. Нажмите «Обновить».</p>
             )}
           </div>
 
@@ -2334,9 +2334,12 @@ export default function ContentStudio() {
               className="neu-btn-primary inline-flex items-center gap-2 px-4 py-2.5 text-sm"
               disabled={
                 genBusy !== null ||
+                generationUsageLoading ||
+                !generationUsage ||
                 Boolean(
-                  generationUsage?.trackingAvailable &&
-                    (!generationUsage.images.enabled || generationUsage.images.remaining === 0),
+                  !generationUsage.trackingAvailable ||
+                    !generationUsage.images.enabled ||
+                    generationUsage.images.remaining === 0,
                 )
               }
               onClick={() => void generatePhoto()}
@@ -2349,13 +2352,15 @@ export default function ContentStudio() {
               className="neu-btn inline-flex items-center gap-2 px-4 py-2.5 text-sm"
               disabled={
                 genBusy !== null ||
+                generationUsageLoading ||
+                !generationUsage ||
                 videoJob?.status === "queued" ||
                 videoJob?.status === "in_progress" ||
                 Boolean(
-                  generationUsage?.trackingAvailable &&
-                    (!generationUsage.videoSeconds.enabled ||
-                      (generationUsage.videoSeconds.remaining !== null &&
-                        generationUsage.videoSeconds.remaining < generationUsage.videoSecondsPerGeneration)),
+                  !generationUsage.trackingAvailable ||
+                    !generationUsage.videoSeconds.enabled ||
+                    (generationUsage.videoSeconds.remaining !== null &&
+                      generationUsage.videoSeconds.remaining < generationUsage.videoSecondsPerGeneration),
                 )
               }
               onClick={() => void generateVideo()}
