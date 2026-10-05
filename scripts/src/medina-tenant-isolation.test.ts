@@ -872,7 +872,7 @@ test("K3 advertising results stay administrator-only", async () => {
 
 test("K3a TikTok diagnostics and campaign dry-run stay administrator-only", async () => {
   await withRouter({ memberships: [memberBReception] }, async (ctx) => {
-    for (const segment of ["tiktok-validate", "tiktok-dry-run", "tiktok-setup", "tiktok-connection", "tiktok-videos"]) {
+    for (const segment of ["tiktok-validate", "tiktok-dry-run", "tiktok-setup", "tiktok-connection", "tiktok-videos", "tiktok-launch"]) {
       const { res, log } = await ctx.call({
         segments: [segment],
         method: "POST",
@@ -890,7 +890,7 @@ test("K3b TikTok provisioning cannot be spoofed by an owner of a different works
   process.env.TIKTOK_WORKSPACE_ID = WORKSPACE_B;
   try {
     await withRouter({ memberships: [memberA] }, async (ctx) => {
-      for (const segment of ["tiktok-validate", "tiktok-dry-run", "tiktok-setup", "tiktok-connection", "tiktok-videos"]) {
+      for (const segment of ["tiktok-validate", "tiktok-dry-run", "tiktok-setup", "tiktok-connection", "tiktok-videos", "tiktok-launch"]) {
         const { res, log } = await ctx.call({ segments: [segment], method: "POST",
           query: { workspaceId: WORKSPACE_A }, body: { confirm: true, city: "Актобе", workspaceId: WORKSPACE_B } });
         assert.equal(res.statusCode, 403, segment);
@@ -903,6 +903,31 @@ test("K3b TikTok provisioning cannot be spoofed by an owner of a different works
   } finally {
     if (previous === undefined) delete process.env.TIKTOK_WORKSPACE_ID;
     else process.env.TIKTOK_WORKSPACE_ID = previous;
+  }
+});
+
+test("K3b1 TikTok launch fails closed before its feature flag when no workspace is provisioned", async () => {
+  const previousWorkspace = process.env.TIKTOK_WORKSPACE_ID;
+  const previousLaunch = process.env.TIKTOK_DISABLED_LAUNCH_ENABLED;
+  delete process.env.TIKTOK_WORKSPACE_ID;
+  process.env.TIKTOK_DISABLED_LAUNCH_ENABLED = "false";
+  try {
+    await withRouter({ memberships: [memberA] }, async (ctx) => {
+      const { res, log } = await ctx.call({
+        segments: ["tiktok-launch"],
+        method: "POST",
+        query: { workspaceId: WORKSPACE_A },
+        body: { confirm: true, confirmationPhrase: "СОЗДАТЬ" },
+      });
+      assert.equal(res.statusCode, 503);
+      assert.equal(res.body.code, "workspace_not_provisioned");
+      assert.equal(businessQueries(log).length, 0);
+    });
+  } finally {
+    if (previousWorkspace === undefined) delete process.env.TIKTOK_WORKSPACE_ID;
+    else process.env.TIKTOK_WORKSPACE_ID = previousWorkspace;
+    if (previousLaunch === undefined) delete process.env.TIKTOK_DISABLED_LAUNCH_ENABLED;
+    else process.env.TIKTOK_DISABLED_LAUNCH_ENABLED = previousLaunch;
   }
 });
 

@@ -55,6 +55,10 @@ import {
   requireMetaProvisionedWorkspace,
 } from "../../lib/meta/workspace";
 import {
+  requireTikTokProvisionedWorkspace,
+  TikTokConnectionError,
+} from "../../lib/tiktok/connections";
+import {
   requireAuthenticatedUser,
   requireWorkspaceAccess,
   WorkspaceAdminAuthError,
@@ -112,6 +116,15 @@ const META_ACCOUNT_BOUND_ROUTES = new Set([
   "meta-city-key",
   "meta-insights-sync",
   "ad-creative-meta-upload",
+]);
+
+const TIKTOK_ACCOUNT_BOUND_ROUTES = new Set([
+  "tiktok-validate",
+  "tiktok-connection",
+  "tiktok-dry-run",
+  "tiktok-setup",
+  "tiktok-videos",
+  "tiktok-launch",
 ]);
 
 function readMetaAccountId(body: unknown): string {
@@ -460,6 +473,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     if (META_ACCOUNT_BOUND_ROUTES.has(route.key)) {
       requireMetaProvisionedWorkspace(context.workspaceId);
     }
+    if (TIKTOK_ACCOUNT_BOUND_ROUTES.has(route.key)) {
+      requireTikTokProvisionedWorkspace(context.workspaceId);
+    }
     if (route.key === "meta-accounts" && method !== "GET") {
       requireMetaProvisionedAdAccount(readMetaAccountId(req.body));
     }
@@ -493,6 +509,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
     if (error instanceof MetaWorkspaceBoundaryError || error instanceof MetaAccountBoundaryError) {
       return sendJson(res, error.statusCode, {
+        success: false,
+        error: error.message,
+        code: error.code,
+      });
+    }
+    if (error instanceof TikTokConnectionError) {
+      return sendJson(res, error.status, {
         success: false,
         error: error.message,
         code: error.code,
