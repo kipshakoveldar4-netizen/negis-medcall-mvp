@@ -76,6 +76,7 @@ import {
   type MetaInsightsSafeErrorCode,
   type NormalizedMetaInsightRow,
 } from "../meta/insights";
+import { MetaWorkspaceBoundaryError, requireMetaProvisionedWorkspace } from "../meta/workspace";
 import { validateTikTokAdsConnection } from "../tiktok/diagnostics";
 import { buildTikTokCampaignDryRun } from "../tiktok/campaign";
 import { readTikTokVerifiedSetup, verifyTikTokSetup } from "../tiktok/setup";
@@ -9600,15 +9601,6 @@ export async function handleMetaInsightsBackgroundCycle(req: VercelRequest, res:
     return sendJson(res, 400, errorBody("Validation error", ["workerId is required"]));
   }
 
-  const supabase = getSupabaseServerClient();
-  if (!supabase) {
-    return sendJson(res, 503, {
-      ...errorBody("Meta Insights background cycle unavailable", ["Supabase недоступен."]),
-      code: "persistence_failed",
-      data: { requestId: verified.requestId },
-    });
-  }
-
   const allowlist = authConfig.workspaceAllowlist;
   const requestedWorkspaceIds = readJsonArray(body.workspaceIds ?? body.workspace_ids)
     .map((value) => readString(value).toLowerCase())
@@ -9630,6 +9622,28 @@ export async function handleMetaInsightsBackgroundCycle(req: VercelRequest, res:
   if (effectiveWorkspaceIds.length === 0) {
     console.log(`[meta-insights-cycle] request ${verified.requestId} worker ${workerId} no allowed workspaces`);
     return sendJson(res, 200, summary);
+  }
+
+  try {
+    for (const workspaceId of effectiveWorkspaceIds) {
+      requireMetaProvisionedWorkspace(workspaceId);
+    }
+  } catch (error) {
+    if (!(error instanceof MetaWorkspaceBoundaryError)) throw error;
+    return sendJson(res, error.statusCode, {
+      ...errorBody(error.message),
+      code: error.code,
+      data: { requestId: verified.requestId },
+    });
+  }
+
+  const supabase = getSupabaseServerClient();
+  if (!supabase) {
+    return sendJson(res, 503, {
+      ...errorBody("Meta Insights background cycle unavailable", ["Supabase недоступен."]),
+      code: "persistence_failed",
+      data: { requestId: verified.requestId },
+    });
   }
 
   const maxLaunchesRaw = readNumber(body.maxLaunches ?? body.max_launches);
@@ -9671,7 +9685,12 @@ export async function handleMetaInsightsBackgroundCycle(req: VercelRequest, res:
       metaCampaignLaunchId: readString(row.meta_campaign_launch_id),
       consecutiveFailureCount: readNumber(row.consecutive_failure_count) ?? 0,
     };
-    if (!isUuid(state.id) || !isUuid(state.workspaceId) || !isUuid(state.metaCampaignLaunchId)) {
+    if (
+      !isUuid(state.id) ||
+      !isUuid(state.workspaceId) ||
+      !isUuid(state.metaCampaignLaunchId) ||
+      !effectiveWorkspaceIds.includes(state.workspaceId.toLowerCase())
+    ) {
       summary.skipped += 1;
       continue;
     }
