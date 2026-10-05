@@ -7,8 +7,11 @@ import {
 } from "@/lib/operatorApi";
 import {
   canReleaseOperatorBookingAttempt,
+  clearOperatorBookingAttempt,
   isCurrentOperatorBookingAttempt,
   newOperatorBookingAttempt,
+  persistOperatorBookingAttempt,
+  restoreOperatorBookingAttempt,
   type OperatorBookingAttempt,
 } from "@/lib/operatorBookingAttempt";
 import { OperatorCatalogPagination } from "./OperatorServiceCatalog";
@@ -20,11 +23,13 @@ import {
 } from "../../../../../lib/crm/operator-contracts";
 
 export function OperatorBookingForm({
+  actorId,
   requestId,
   leadId,
   onBooked,
   onAccessDenied,
 }: {
+  actorId: string;
   requestId: string;
   leadId: string;
   onBooked: (booking: OperatorBooking) => void;
@@ -54,6 +59,12 @@ export function OperatorBookingForm({
           err instanceof OperatorApiError &&
           [401, 403].includes(err.status)
         ) {
+          clearOperatorBookingAttempt(
+            getOperatorBookingStorage(),
+            actorId,
+            requestId,
+            leadId,
+          );
           onAccessDenied();
           return;
         }
@@ -63,7 +74,7 @@ export function OperatorBookingForm({
           );
       });
     return () => controller.abort();
-  }, [requestId, leadId, revision, onAccessDenied]);
+  }, [actorId, requestId, leadId, revision, onAccessDenied]);
   return (
     <section
       aria-label="Запись пациента"
@@ -94,6 +105,7 @@ export function OperatorBookingForm({
       )}
       {context?.timeZone && (
         <BookingFields
+          actorId={actorId}
           requestId={requestId}
           leadId={leadId}
           timeZone={context.timeZone}
@@ -106,12 +118,14 @@ export function OperatorBookingForm({
 }
 
 function BookingFields({
+  actorId,
   requestId,
   leadId,
   timeZone,
   onBooked,
   onAccessDenied,
 }: {
+  actorId: string;
   requestId: string;
   leadId: string;
   timeZone: string;
@@ -128,21 +142,43 @@ function BookingFields({
   const [error, setError] = useState("");
   const [catalogValid, setCatalogValid] = useState(false);
   const [uncertainCreate, setUncertainCreate] = useState(false);
+  const [recoveredCreate, setRecoveredCreate] = useState(false);
   const createAttempt = useRef<OperatorBookingAttempt | null>(null);
   const inFlight = useRef(false);
-  const currentScope = useRef({ requestId, leadId });
-  currentScope.current = { requestId, leadId };
+  const currentScope = useRef({ actorId, requestId, leadId });
+  currentScope.current = { actorId, requestId, leadId };
+
+  useEffect(() => {
+    const restored = restoreOperatorBookingAttempt(
+      getOperatorBookingStorage(),
+      actorId,
+      requestId,
+      leadId,
+    );
+    createAttempt.current = restored;
+    inFlight.current = false;
+    setBusy(false);
+    setUncertainCreate(Boolean(restored));
+    setRecoveredCreate(Boolean(restored));
+    setError("");
+  }, [actorId, requestId, leadId]);
 
   useEffect(() => {
     const attempt = createAttempt.current;
-    if (attempt && !isCurrentOperatorBookingAttempt(attempt, requestId, leadId)) {
+    if (
+      attempt &&
+      !isCurrentOperatorBookingAttempt(
+        attempt,
+        actorId,
+        requestId,
+        leadId,
+      )
+    ) {
       createAttempt.current = null;
-      inFlight.current = false;
-      setBusy(false);
       setUncertainCreate(false);
-      setError("");
+      setRecoveredCreate(false);
     }
-  }, [requestId, leadId]);
+  }, [actorId, requestId, leadId]);
 
   useEffect(() => {
     if (!busy && !uncertainCreate) return;
@@ -176,16 +212,34 @@ function BookingFields({
     !!startsLocal;
   async function submit(event: React.FormEvent) {
     event.preventDefault();
-    if (!ready || inFlight.current) return;
-    const attempt = createAttempt.current ?? newOperatorBookingAttempt(requestId, {
-      leadId,
-      doctorId,
-      serviceIds: selected.map((item) => item.id),
-      startsLocal,
-      timeZone,
-    });
-    if (!isCurrentOperatorBookingAttempt(attempt, requestId, leadId)) return;
+    if ((!ready && !createAttempt.current) || inFlight.current) return;
+    const attempt =
+      createAttempt.current ??
+      newOperatorBookingAttempt(actorId, requestId, {
+        leadId,
+        doctorId,
+        serviceIds: selected.map((item) => item.id),
+        startsLocal,
+        timeZone,
+      });
+    if (
+      !isCurrentOperatorBookingAttempt(
+        attempt,
+        actorId,
+        requestId,
+        leadId,
+      )
+    )
+      return;
+    const storage = getOperatorBookingStorage();
+    if (!persistOperatorBookingAttempt(storage, attempt)) {
+      setError(
+        "Браузер не сохранил безопасный ключ повтора. Запись не отправлена; разрешите хранилище вкладки и повторите.",
+      );
+      return;
+    }
     createAttempt.current = attempt;
+    setRecoveredCreate(false);
     inFlight.current = true;
     setBusy(true);
     setError("");
@@ -197,33 +251,65 @@ function BookingFields({
           requestKey: attempt.requestKey,
         },
       );
-      if (createAttempt.current !== attempt || !isCurrentOperatorBookingAttempt(
-        attempt,
-        currentScope.current.requestId,
-        currentScope.current.leadId,
-      )) return;
+      if (
+        createAttempt.current !== attempt ||
+        !isCurrentOperatorBookingAttempt(
+          attempt,
+          currentScope.current.actorId,
+          currentScope.current.requestId,
+          currentScope.current.leadId,
+        )
+      )
+        return;
+      clearOperatorBookingAttempt(
+        storage,
+        attempt.actorId,
+        attempt.requestId,
+        attempt.payload.leadId,
+      );
       createAttempt.current = null;
       setUncertainCreate(false);
+      setRecoveredCreate(false);
       onBooked(saved);
     } catch (err) {
-      if (createAttempt.current !== attempt || !isCurrentOperatorBookingAttempt(
-        attempt,
-        currentScope.current.requestId,
-        currentScope.current.leadId,
-      )) return;
+      if (
+        createAttempt.current !== attempt ||
+        !isCurrentOperatorBookingAttempt(
+          attempt,
+          currentScope.current.actorId,
+          currentScope.current.requestId,
+          currentScope.current.leadId,
+        )
+      )
+        return;
       if (err instanceof OperatorApiError && [401, 403].includes(err.status)) {
+        clearOperatorBookingAttempt(
+          storage,
+          attempt.actorId,
+          attempt.requestId,
+          attempt.payload.leadId,
+        );
         createAttempt.current = null;
         setUncertainCreate(false);
+        setRecoveredCreate(false);
         onAccessDenied();
         return;
       }
       const status = err instanceof OperatorApiError ? err.status : 0;
       if (canReleaseOperatorBookingAttempt(status)) {
+        clearOperatorBookingAttempt(
+          storage,
+          attempt.actorId,
+          attempt.requestId,
+          attempt.payload.leadId,
+        );
         createAttempt.current = null;
         setUncertainCreate(false);
+        setRecoveredCreate(false);
         setError(err instanceof Error ? err.message : "Не удалось сохранить запись");
       } else {
         attempt.uncertain = true;
+        persistOperatorBookingAttempt(storage, attempt);
         setUncertainCreate(true);
         const reason = err instanceof Error ? err.message : "Ответ сервера не получен.";
         setError(`Сохранение не подтверждено. Запись могла сохраниться; проверьте теми же данными. ${reason}`);
@@ -231,6 +317,7 @@ function BookingFields({
     } finally {
       if (isCurrentOperatorBookingAttempt(
         attempt,
+        currentScope.current.actorId,
         currentScope.current.requestId,
         currentScope.current.leadId,
       )) {
@@ -319,16 +406,30 @@ function BookingFields({
           {error}
         </p>
       )}
+      {recoveredCreate && !error && (
+        <p role="status" className="text-sm break-words">
+          Найдена неподтверждённая отправка. Проверьте сохранение тем же запросом;
+          менять мастера, услуги и время до ответа нельзя.
+        </p>
+      )}
       <button
         type="submit"
         className="neu-btn-primary w-full sm:w-auto"
-        disabled={busy || !ready}
+        disabled={busy || (!ready && !uncertainCreate)}
       >
         <CalendarPlus size={16} />
         {busy ? "Сохраняем…" : uncertainCreate ? "Проверить сохранение" : "Создать запись"}
       </button>
     </form>
   );
+}
+
+function getOperatorBookingStorage(): Storage | null {
+  try {
+    return window.sessionStorage;
+  } catch {
+    return null;
+  }
 }
 
 function ServicePicker({

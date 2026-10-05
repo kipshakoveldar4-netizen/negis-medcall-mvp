@@ -11,7 +11,13 @@ import {
   type OperatorRequest,
 } from "../../../../../lib/crm/operator-contracts";
 
-export function OperatorRequests({ workspaceId }: { workspaceId?: string }) {
+export function OperatorRequests({
+  workspaceId,
+  actorId,
+}: {
+  workspaceId?: string;
+  actorId?: string;
+}) {
   const path = workspaceId
     ? `clinic-operator-requests?workspaceId=${encodeURIComponent(workspaceId)}`
     : "operator-inbox";
@@ -180,6 +186,7 @@ export function OperatorRequests({ workspaceId }: { workspaceId?: string }) {
           {item.status === "accepted" && openRequest === item.id && (
             <OperatorLeads
               key={item.id}
+              actorId={actorId}
               requestId={item.id}
               workspaceId={workspaceId}
               leadScope={item.leadScope || "assigned"}

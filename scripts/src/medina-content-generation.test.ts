@@ -829,6 +829,25 @@ test("GEN35 ambiguous paid retries reuse one key for the exact request", () => {
   );
 });
 
+test("GEN42 completed video without a file stays retryable and never looks successful", async () => {
+  const source = await readFile(studioPage, "utf8");
+  const polling = source.slice(
+    source.indexOf("const completedUrl ="),
+    source.indexOf("} catch (error)", source.indexOf("const completedUrl =")),
+  );
+
+  assert.ok(polling.length > 0, "video polling result handling must be present");
+  assert.ok(
+    /visibleStatus = body\.data\.status === "completed" && !completedUrl \? "failed"/.test(polling),
+    "a completed response without a usable URL must expose the retry state",
+  );
+  assert.ok(
+    polling.includes("новый платный рендер не запустится"),
+    "the operator must know that checking the existing job does not create another paid render",
+  );
+  assert.ok(polling.includes("url: completedUrl"), "only the trimmed usable URL may become the generated video");
+});
+
 test("GEN36 only a confirmed result or explicit non-duplicate 4xx releases the paid key", () => {
   assert.equal(paidGeneration.shouldKeepPaidGenerationAttempt({ responseReceived: false }), true);
   assert.equal(paidGeneration.shouldKeepPaidGenerationAttempt({ responseReceived: true, status: 502, success: false }), true);

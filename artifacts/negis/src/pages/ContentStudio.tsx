@@ -1327,9 +1327,14 @@ export default function ContentStudio() {
           return;
         }
 
+        const completedUrl =
+          body.data.status === "completed" && typeof body.data.creativeUrl === "string"
+            ? body.data.creativeUrl.trim()
+            : "";
+        const visibleStatus = body.data.status === "completed" && !completedUrl ? "failed" : body.data.status;
         setVideoJob((current) =>
           current && current.handle === handle
-            ? { ...current, status: body.data.status, progress: body.data.progress }
+            ? { ...current, status: visibleStatus, progress: body.data.progress }
             : current,
         );
 
@@ -1342,16 +1347,15 @@ export default function ContentStudio() {
         }
 
         if (body.data.status === "completed") {
-          const url = body.data.creativeUrl || "";
-          if (!url) {
+          if (!completedUrl) {
             setGenNotice({
               tone: "error",
-              text: "Сервис сообщил, что ролик готов, но ссылка на файл не пришла.",
+              text: "Сервис сообщил, что ролик готов, но ссылка на файл не пришла. Нажмите «Проверить ещё раз»: новый платный рендер не запустится.",
             });
             return;
           }
           setGenVideo({
-            url,
+            url: completedUrl,
             assetId: body.data.assetId,
             fileName: body.data.fileName,
             mimeType: body.data.mimeType || "video/mp4",

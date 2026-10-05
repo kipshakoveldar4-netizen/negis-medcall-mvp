@@ -17,10 +17,12 @@ import {
 } from "../../../../../lib/crm/operator-contracts";
 
 export function OperatorLeads({
+  actorId,
   requestId,
   workspaceId,
   leadScope,
 }: {
+  actorId?: string;
   requestId: string;
   workspaceId?: string;
   leadScope: OperatorLeadScope;
@@ -68,6 +70,7 @@ export function OperatorLeads({
       )}
       <LeadList
         key={`${requestId}:${submittedSearch}:${workspaceId || "operator"}`}
+        actorId={actorId}
         path={`${base}&search=${encodeURIComponent(submittedSearch)}`}
         requestId={requestId}
         clinic={Boolean(workspaceId)}
@@ -78,11 +81,13 @@ export function OperatorLeads({
 }
 
 function LeadList({
+  actorId,
   path,
   requestId,
   clinic,
   canAssign,
 }: {
+  actorId?: string;
   path: string;
   requestId: string;
   clinic: boolean;
@@ -248,7 +253,7 @@ function LeadList({
                   onSave={(stageId) => void changeStage(item, stageId)}
                 />
               )}
-            {!clinic && (
+            {!clinic && actorId && (
               <button
                 type="button"
                 className="neu-btn"
@@ -263,9 +268,10 @@ function LeadList({
                   : "Записать пациента"}
               </button>
             )}
-            {!clinic && bookingLeadId === item.id && (
+            {!clinic && actorId && bookingLeadId === item.id && (
               <OperatorBookingForm
                 key={item.id}
+                actorId={actorId}
                 requestId={requestId}
                 leadId={item.id}
                 onAccessDenied={bookingAccessDenied}

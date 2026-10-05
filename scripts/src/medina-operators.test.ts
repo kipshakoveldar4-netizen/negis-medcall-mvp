@@ -1008,7 +1008,11 @@ test("operator catalog UI is read-only, scoped to accepted operator requests and
 test("operator booking UI freezes an uncertain request and handles access denial", async () => {
   const ui = await readFile(path.join(root,"artifacts/negis/src/components/operators/OperatorBookingForm.tsx"),"utf8");
   assert.match(ui,/newOperatorBookingAttempt/);
-  assert.match(ui,/createAttempt\.current \?\? newOperatorBookingAttempt/);
+  assert.match(ui,/createAttempt\.current\s*\?\?\s*newOperatorBookingAttempt/);
+  assert.match(ui,/persistOperatorBookingAttempt/);
+  assert.match(ui,/restoreOperatorBookingAttempt/);
+  assert.match(ui,/clearOperatorBookingAttempt/);
+  assert.match(ui,/window\.sessionStorage/);
   assert.match(ui,/\.\.\.attempt\.payload/);
   assert.match(ui,/disabled=\{busy \|\| uncertainCreate\}/);
   assert.match(ui,/Проверить сохранение/);
@@ -1017,7 +1021,7 @@ test("operator booking UI freezes an uncertain request and handles access denial
   assert.match(ui,/onAccessDenied\(\)/);
   assert.match(ui,/Дата и время клиники/);
   assert.match(ui,/Создать запись/);
-  assert.doesNotMatch(ui,/localStorage|sessionStorage|type="number"|clientId:|priceMinor:/);
+  assert.doesNotMatch(ui,/localStorage|type="number"|clientId:|priceMinor:|phone:|whatsapp:|email:/i);
   const backend = await readFile(path.join(root,"lib/crm/operator-bookings.ts"),"utf8");
   assert.match(backend,/requireAuthenticatedUser/);
   assert.match(backend,/create_growth_operator_booking/);
@@ -1038,6 +1042,7 @@ test("operator entry, clinic and platform controls stay distinct", async () => {
   assert.match(portal, /document.addEventListener\("visibilitychange", revalidateVisibleTab\)/);
   assert.match(portal, /document.visibilityState === "visible"/);
   assert.match(portal, /onClick=\{refreshProfile\}/);
+  assert.match(portal, /actorId=\{userId\}/);
   assert.match(
     await read("artifacts/negis/src/pages/AdminCenter.tsx"),
     /ClinicOperators key=\{workspaceId\}/,

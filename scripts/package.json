@@ -76,6 +76,7 @@
     "test:active-launch-gate": "tsx --test ./src/medina-active-launch-gate.test.ts",
     "test:no-demo-copy": "tsx --test ./src/medina-no-demo-copy.test.ts",
     "test:platform-billing": "tsx --test ./src/medina-platform-billing.test.ts",
+    "test:platform-subscription-transition": "tsx --test ./src/medina-platform-subscription-transition.test.ts",
     "test:installable-app": "tsx --test ./src/medina-installable-app.test.ts",
     "test:vertical": "tsx --test ./src/medina-vertical.test.ts",
     "test:provision": "tsx --test ./src/medina-provision.test.ts",

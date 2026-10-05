@@ -10,6 +10,7 @@ const root = path.resolve(
   "../..",
 );
 type BookingAttempt = {
+  actorId: string;
   requestId: string;
   requestKey: string;
   payload: { leadId: string; doctorId: string; serviceIds: string[]; startsLocal: string; timeZone: string };
@@ -21,17 +22,45 @@ const attemptModule = new URL(
 );
 const {
   canReleaseOperatorBookingAttempt,
+  clearOperatorBookingAttempt,
   isCurrentOperatorBookingAttempt,
   newOperatorBookingAttempt,
+  persistOperatorBookingAttempt,
+  restoreOperatorBookingAttempt,
 } = await import(attemptModule.href) as {
   canReleaseOperatorBookingAttempt(status: number): boolean;
-  isCurrentOperatorBookingAttempt(attempt: BookingAttempt, requestId: string, leadId: string): boolean;
+  clearOperatorBookingAttempt(storage: AttemptStorage | null, actorId: string, requestId: string, leadId: string): void;
+  isCurrentOperatorBookingAttempt(attempt: BookingAttempt, actorId: string, requestId: string, leadId: string): boolean;
   newOperatorBookingAttempt(
+    actorId: string,
     requestId: string,
     payload: BookingAttempt["payload"],
     makeKey?: () => string,
   ): BookingAttempt;
+  persistOperatorBookingAttempt(storage: AttemptStorage | null, attempt: BookingAttempt): boolean;
+  restoreOperatorBookingAttempt(storage: AttemptStorage | null, actorId: string, requestId: string, leadId: string): BookingAttempt | null;
 };
+type AttemptStorage = {
+  getItem(key: string): string | null;
+  setItem(key: string, value: string): void;
+  removeItem(key: string): void;
+};
+
+class MemoryStorage implements AttemptStorage {
+  readonly values = new Map<string, string>();
+
+  getItem(key: string) {
+    return this.values.get(key) ?? null;
+  }
+
+  setItem(key: string, value: string) {
+    this.values.set(key, value);
+  }
+
+  removeItem(key: string) {
+    this.values.delete(key);
+  }
+}
 const db = new PGlite();
 const id = (n: number) =>
   `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -47,17 +76,103 @@ test("operator retry keeps one detached request and only definite refusals relea
     startsLocal: time,
     timeZone: "Asia/Almaty",
   };
-  const attempt = newOperatorBookingAttempt(id(50), payload, () => id(100));
+  const attempt = newOperatorBookingAttempt(id(20), id(50), payload, () => id(100));
   payload.serviceIds.pop();
   payload.startsLocal = "2030-01-07T12:00";
 
   assert.deepEqual(attempt.payload.serviceIds, [id(80), id(81)]);
   assert.equal(attempt.payload.startsLocal, time);
-  assert.ok(isCurrentOperatorBookingAttempt(attempt, id(50), id(60)));
-  assert.equal(isCurrentOperatorBookingAttempt(attempt, id(51), id(60)), false);
-  assert.equal(isCurrentOperatorBookingAttempt(attempt, id(50), id(61)), false);
+  assert.ok(isCurrentOperatorBookingAttempt(attempt, id(20), id(50), id(60)));
+  assert.equal(isCurrentOperatorBookingAttempt(attempt, id(21), id(50), id(60)), false);
+  assert.equal(isCurrentOperatorBookingAttempt(attempt, id(20), id(51), id(60)), false);
+  assert.equal(isCurrentOperatorBookingAttempt(attempt, id(20), id(50), id(61)), false);
   for (const status of [400, 401, 403, 409, 422]) assert.ok(canReleaseOperatorBookingAttempt(status));
   for (const status of [0, 500, 502, 503, 504]) assert.equal(canReleaseOperatorBookingAttempt(status), false);
+});
+
+test("operator retry survives a same-tab reload without contacts or cross-account reuse", () => {
+  const storage = new MemoryStorage();
+  const attempt = newOperatorBookingAttempt(
+    id(20),
+    id(50),
+    {
+      leadId: id(60),
+      doctorId: id(70),
+      serviceIds: [id(80), id(81)],
+      startsLocal: time,
+      timeZone: "Asia/Almaty",
+    },
+    () => id(100),
+  );
+
+  assert.ok(persistOperatorBookingAttempt(storage, attempt));
+  assert.equal(storage.values.size, 1);
+  const serialized = [...storage.values.values()][0];
+  assert.doesNotMatch(serialized, /name|phone|whatsapp|email|notes/i);
+
+  const restored = restoreOperatorBookingAttempt(
+    storage,
+    id(20),
+    id(50),
+    id(60),
+  );
+  assert.deepEqual(restored, { ...attempt, uncertain: true });
+  assert.equal(
+    restoreOperatorBookingAttempt(storage, id(21), id(50), id(60)),
+    null,
+  );
+  assert.equal(
+    restoreOperatorBookingAttempt(storage, id(20), id(51), id(60)),
+    null,
+  );
+  assert.equal(storage.values.size, 1);
+
+  clearOperatorBookingAttempt(storage, id(20), id(50), id(60));
+  assert.equal(storage.values.size, 0);
+});
+
+test("operator retry fails closed when tab storage is denied or altered", () => {
+  const attempt = newOperatorBookingAttempt(
+    id(20),
+    id(50),
+    {
+      leadId: id(60),
+      doctorId: id(70),
+      serviceIds: [id(80)],
+      startsLocal: time,
+      timeZone: "Asia/Almaty",
+    },
+    () => id(100),
+  );
+  const denied: AttemptStorage = {
+    getItem() {
+      throw new Error("denied");
+    },
+    setItem() {
+      throw new Error("denied");
+    },
+    removeItem() {
+      throw new Error("denied");
+    },
+  };
+  assert.equal(persistOperatorBookingAttempt(denied, attempt), false);
+  assert.equal(
+    restoreOperatorBookingAttempt(denied, id(20), id(50), id(60)),
+    null,
+  );
+
+  const storage = new MemoryStorage();
+  assert.ok(persistOperatorBookingAttempt(storage, attempt));
+  const [key] = storage.values.keys();
+  storage.values.set(
+    key,
+    JSON.stringify({ ...attempt, phone: "+77000000000" }),
+  );
+  assert.equal(
+    restoreOperatorBookingAttempt(storage, id(20), id(50), id(60)),
+    null,
+  );
+  assert.equal(storage.values.size, 0);
 });
 async function book(
   options: {

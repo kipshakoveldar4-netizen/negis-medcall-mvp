@@ -1947,9 +1947,13 @@ export function AppointmentsPage() {
     });
     if (!createAttempt.current && isUuidText(prefillLeadRef.current)) attempt.leadId = prefillLeadRef.current;
     if (!isCurrentAppointmentAttempt(attempt, scope.workspaceId, scope.actorId)) throw new Error("Аккаунт записи изменился. Откройте форму заново.");
-    createAttempt.current = attempt;
     const storage = appointmentAttemptStorage();
-    if (storage) persistAppointmentCreateAttempt(storage, attempt);
+    if (!storage || !persistAppointmentCreateAttempt(storage, attempt)) {
+      throw new Error(
+        "Браузер не сохранил безопасный ключ повтора. Запись не отправлена; разрешите хранилище вкладки и повторите.",
+      );
+    }
+    createAttempt.current = attempt;
     let response: Response | undefined;
     let body: ApiResponse | null = null;
     try {
@@ -1981,19 +1985,19 @@ export function AppointmentsPage() {
       if (!saved) throw new Error("Сервер не подтвердил сохранённую запись. Повторите проверку.");
       setItems((current) => mergeCreatedAppointment(current, appointmentFromApi(saved)));
       warnAboutUnsaved(unsavedFromBody(body));
-      if (storage) clearPersistedAppointmentCreateAttempt(storage);
+      clearPersistedAppointmentCreateAttempt(storage);
       createAttempt.current = null;
       setUnconfirmedCreate(false);
       return { clientCreated: body.data?.clientCreated === true, replayed: body.data?.replayed === true };
     } catch (error) {
       if (createAttempt.current === attempt && isCurrentAppointmentAttempt(attempt, currentCreateScope.current.workspaceId, currentCreateScope.current.actorId)) {
         if (canReleaseAppointmentAttempt(attempt, response?.status ?? 0, body)) {
-          if (storage) clearPersistedAppointmentCreateAttempt(storage);
+          clearPersistedAppointmentCreateAttempt(storage);
           createAttempt.current = null;
           setUnconfirmedCreate(false);
         } else {
           attempt.uncertain = true;
-          if (storage) persistAppointmentCreateAttempt(storage, attempt);
+          persistAppointmentCreateAttempt(storage, attempt);
           setUnconfirmedCreate(true);
         }
       }
