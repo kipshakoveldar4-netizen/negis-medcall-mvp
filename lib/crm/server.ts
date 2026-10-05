@@ -76,7 +76,11 @@ import {
   type MetaInsightsSafeErrorCode,
   type NormalizedMetaInsightRow,
 } from "../meta/insights";
-import { MetaWorkspaceBoundaryError, requireMetaProvisionedWorkspace } from "../meta/workspace";
+import {
+  MetaWorkspaceBoundaryError,
+  normalizeMetaAdAccountId,
+  requireMetaProvisionedWorkspace,
+} from "../meta/workspace";
 import { validateTikTokAdsConnection } from "../tiktok/diagnostics";
 import { buildTikTokCampaignDryRun } from "../tiktok/campaign";
 import { readTikTokVerifiedSetup, verifyTikTokSetup } from "../tiktok/setup";
@@ -4959,6 +4963,28 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
       row.client_id = appointmentClientResolution.clientId;
     }
     const newAppointmentClient = appointmentClientResolution?.createdRow;
+    let existingMetaAccountId = "";
+    if (resource === "meta-accounts") {
+      const { data: existingRows, error: existingError } = await supabase
+        .from(config.table)
+        .select("id")
+        .eq("workspace_id", workspaceId)
+        .order("updated_at", { ascending: false })
+        .limit(2);
+      if (existingError) throw new Error(existingError.message);
+      const ids = (Array.isArray(existingRows) ? existingRows : [])
+        .map((existing) => readString(asRecord(existing).id))
+        .filter((existingId) => isUuid(existingId));
+      if (ids.length > 1) {
+        return sendJson(res, 409, {
+          ...errorBody("Найдено несколько сохранённых привязок Meta", [
+            "Администратор платформы должен устранить дубликаты до следующего сохранения.",
+          ]),
+          code: "meta_account_binding_ambiguous",
+        });
+      }
+      existingMetaAccountId = ids[0] || "";
+    }
     const runInsert = async (candidate: JsonRecord) => {
       if (appointmentRequest) {
         return await supabase.rpc("create_crm_appointment_once", { ...appointmentRequest,
@@ -4970,6 +4996,15 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
         return await supabase.rpc("create_crm_appointment_with_new_client", {
           p_workspace_id: workspaceId, p_client: newAppointmentClient, p_appointment: candidate,
         });
+      }
+      if (existingMetaAccountId) {
+        return await supabase
+          .from(config.table)
+          .update(candidate)
+          .eq("id", existingMetaAccountId)
+          .eq("workspace_id", workspaceId)
+          .select(config.selectColumns ?? "*")
+          .single();
       }
       return await (config.upsertConflict
         ? supabase.from(config.table).upsert(candidate, { onConflict: config.upsertConflict }).select(config.selectColumns ?? "*").single()
@@ -8676,10 +8711,6 @@ function resolveMetaInsightsDateRange(
   return { dateStart, dateStop };
 }
 
-function normalizeMetaAccountId(value: unknown): string {
-  return readString(value).toLowerCase().replace(/^act_/, "");
-}
-
 function isRealMetaCampaignId(value: string): boolean {
   const normalized = value.trim().toLowerCase();
   return /^\d+$/.test(normalized) && !normalized.startsWith("0");
@@ -8740,8 +8771,8 @@ async function loadMetaInsightsLaunchContext(
 
   const config = getMetaConfig();
   const launchAdAccountId = readString(launch.ad_account_id);
-  const configuredAccount = normalizeMetaAccountId(config.adAccountId);
-  const launchAccount = normalizeMetaAccountId(launchAdAccountId);
+  const configuredAccount = normalizeMetaAdAccountId(config.adAccountId);
+  const launchAccount = normalizeMetaAdAccountId(launchAdAccountId);
   if (configuredAccount && launchAccount && configuredAccount !== launchAccount) {
     throw new MetaInsightsError("launch_not_eligible", "Запуск относится к другому Meta ad account.");
   }
@@ -8758,10 +8789,9 @@ async function loadMetaInsightsLaunchContext(
 
   const preferredAccount = configuredAccount || launchAccount;
   const accounts = (Array.isArray(accountRows) ? accountRows : []).map((row) => asRecord(row));
-  const account =
-    accounts.find((row) => normalizeMetaAccountId(row.ad_account_id) === preferredAccount) ||
-    accounts[0] ||
-    {};
+  const account = preferredAccount
+    ? accounts.find((row) => normalizeMetaAdAccountId(row.ad_account_id) === preferredAccount) || {}
+    : accounts[0] || {};
   const metadata = asRecord(account.metadata);
 
   return {

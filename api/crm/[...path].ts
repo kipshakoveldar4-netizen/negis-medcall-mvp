@@ -49,7 +49,9 @@ import { handleSalonStats } from "../../lib/crm/salon-stats";
 import { handleTikTokVideos } from "../../lib/crm/tiktok-videos";
 import { handleTikTokLaunch } from "../../lib/crm/tiktok-launch";
 import {
+  MetaAccountBoundaryError,
   MetaWorkspaceBoundaryError,
+  requireMetaProvisionedAdAccount,
   requireMetaProvisionedWorkspace,
 } from "../../lib/meta/workspace";
 import {
@@ -103,6 +105,7 @@ const resources: CrmResource[] = [
 ];
 
 const META_ACCOUNT_BOUND_ROUTES = new Set([
+  "meta-accounts",
   "meta-launch",
   "meta-status",
   "meta-validate",
@@ -110,6 +113,18 @@ const META_ACCOUNT_BOUND_ROUTES = new Set([
   "meta-insights-sync",
   "ad-creative-meta-upload",
 ]);
+
+function readMetaAccountId(body: unknown): string {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return "";
+  const record = body as Record<string, unknown>;
+  const updates = record.updates && typeof record.updates === "object" && !Array.isArray(record.updates)
+    ? record.updates as Record<string, unknown>
+    : {};
+  for (const value of [updates.adAccountId, updates.ad_account_id, record.adAccountId, record.ad_account_id]) {
+    if (typeof value === "string" && value.trim()) return value;
+  }
+  return "";
+}
 
 function sendJson(res: VercelResponse, status: number, payload: unknown) {
   res.status(status).setHeader("Content-Type", "application/json; charset=utf-8");
@@ -445,6 +460,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     if (META_ACCOUNT_BOUND_ROUTES.has(route.key)) {
       requireMetaProvisionedWorkspace(context.workspaceId);
     }
+    if (route.key === "meta-accounts" && method !== "GET") {
+      requireMetaProvisionedAdAccount(readMetaAccountId(req.body));
+    }
 
     if (isDisabledMethod) {
       // Registered but intentionally refused, and only revealed to a caller who
@@ -473,7 +491,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     if (error instanceof WorkspaceAdminAuthError) {
       return sendAuthError(res, error);
     }
-    if (error instanceof MetaWorkspaceBoundaryError) {
+    if (error instanceof MetaWorkspaceBoundaryError || error instanceof MetaAccountBoundaryError) {
       return sendJson(res, error.statusCode, {
         success: false,
         error: error.message,

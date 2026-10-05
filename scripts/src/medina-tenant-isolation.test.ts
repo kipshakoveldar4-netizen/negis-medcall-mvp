@@ -722,6 +722,7 @@ test("K2b shared Meta credentials cannot be used from another workspace", async 
   const previous = process.env.META_WORKSPACE_ID;
   process.env.META_WORKSPACE_ID = WORKSPACE_B;
   const requests = [
+    { segments: ["meta-accounts"], method: "GET", body: {} },
     { segments: ["meta-launch"], method: "POST", body: { dryRun: true } },
     { segments: ["meta-status"], method: "GET", query: { campaignId: "123456789" } },
     { segments: ["meta-validate"], method: "POST", body: { dryRun: true } },
@@ -744,6 +745,99 @@ test("K2b shared Meta credentials cannot be used from another workspace", async 
   } finally {
     if (previous === undefined) delete process.env.META_WORKSPACE_ID;
     else process.env.META_WORKSPACE_ID = previous;
+  }
+});
+
+test("K2d saved Meta accounts must match the provisioned server account", async () => {
+  const previousWorkspace = process.env.META_WORKSPACE_ID;
+  const previousAccount = process.env.META_AD_ACCOUNT_ID;
+  process.env.META_WORKSPACE_ID = WORKSPACE_A;
+  process.env.META_AD_ACCOUNT_ID = "act_123456789";
+  try {
+    await withRouter({ memberships: [memberA] }, async (ctx) => {
+      const missing = await ctx.call({
+        segments: ["meta-accounts"],
+        method: "POST",
+        body: { workspaceId: WORKSPACE_A },
+      });
+      assert.equal(missing.res.statusCode, 400);
+      assert.equal(missing.res.body.code, "meta_account_id_required");
+      assert.equal(businessQueries(missing.log).length, 0);
+
+      const foreign = await ctx.call({
+        segments: ["meta-accounts"],
+        method: "POST",
+        body: { workspaceId: WORKSPACE_A, adAccountId: "act_987654321" },
+      });
+      assert.equal(foreign.res.statusCode, 403);
+      assert.equal(foreign.res.body.code, "meta_account_not_authorized");
+      assert.equal(businessQueries(foreign.log).length, 0);
+
+      const matching = await ctx.call({
+        segments: ["meta-accounts"],
+        method: "POST",
+        body: { workspaceId: WORKSPACE_A, adAccountId: "123456789", status: "draft" },
+      });
+      assert.equal(matching.res.statusCode, 201);
+      const insert = businessQueries(matching.log).find((entry) => entry.op === "insert");
+      assert.ok(insert, "the provisioned account may be saved");
+      assert.equal((insert?.filters.__row as Record<string, unknown>).workspace_id, WORKSPACE_A);
+    });
+  } finally {
+    if (previousWorkspace === undefined) delete process.env.META_WORKSPACE_ID;
+    else process.env.META_WORKSPACE_ID = previousWorkspace;
+    if (previousAccount === undefined) delete process.env.META_AD_ACCOUNT_ID;
+    else process.env.META_AD_ACCOUNT_ID = previousAccount;
+  }
+});
+
+test("K2e repeated Meta account saves update the single workspace record", async () => {
+  const previousWorkspace = process.env.META_WORKSPACE_ID;
+  const previousAccount = process.env.META_AD_ACCOUNT_ID;
+  const existingId = "22222222-2222-4222-8222-222222222222";
+  process.env.META_WORKSPACE_ID = WORKSPACE_A;
+  process.env.META_AD_ACCOUNT_ID = "act_123456789";
+  try {
+    await withRouter({
+      memberships: [memberA],
+      rows: { meta_ad_accounts: [{ id: existingId, workspace_id: WORKSPACE_A }] },
+    }, async (ctx) => {
+      const { res, log } = await ctx.call({
+        segments: ["meta-accounts"],
+        method: "POST",
+        body: { workspaceId: WORKSPACE_A, adAccountId: "act_123456789", status: "draft" },
+      });
+      assert.equal(res.statusCode, 201);
+      assert.equal(businessQueries(log).some((entry) => entry.op === "insert"), false);
+      const update = businessQueries(log).find((entry) => entry.op === "update");
+      assert.ok(update, "a second save must update instead of inserting a duplicate");
+      assert.equal(update?.filters.id, existingId);
+      assert.equal(update?.filters.workspace_id, WORKSPACE_A);
+    });
+
+    await withRouter({
+      memberships: [memberA],
+      rows: {
+        meta_ad_accounts: [
+          { id: existingId, workspace_id: WORKSPACE_A },
+          { id: "33333333-3333-4333-8333-333333333333", workspace_id: WORKSPACE_A },
+        ],
+      },
+    }, async (ctx) => {
+      const { res, log } = await ctx.call({
+        segments: ["meta-accounts"],
+        method: "POST",
+        body: { workspaceId: WORKSPACE_A, adAccountId: "123456789", status: "draft" },
+      });
+      assert.equal(res.statusCode, 409);
+      assert.equal(res.body.code, "meta_account_binding_ambiguous");
+      assert.equal(businessQueries(log).some((entry) => entry.op === "insert" || entry.op === "update"), false);
+    });
+  } finally {
+    if (previousWorkspace === undefined) delete process.env.META_WORKSPACE_ID;
+    else process.env.META_WORKSPACE_ID = previousWorkspace;
+    if (previousAccount === undefined) delete process.env.META_AD_ACCOUNT_ID;
+    else process.env.META_AD_ACCOUNT_ID = previousAccount;
   }
 });
 

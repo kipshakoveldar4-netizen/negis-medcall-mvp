@@ -46,6 +46,15 @@ const metaWorkspace = (await import(`${pathToFileURL(metaWorkspacePath).href}?te
     statusCode: number;
     code: string;
   };
+  MetaAccountBoundaryError: new (...args: unknown[]) => Error & {
+    statusCode: number;
+    code: string;
+  };
+  normalizeMetaAdAccountId(value: unknown): string;
+  requireMetaProvisionedAdAccount(
+    adAccountId: unknown,
+    env?: Record<string, string | undefined>,
+  ): void;
   requireMetaProvisionedWorkspace(
     workspaceId: string,
     env?: Record<string, string | undefined>,
@@ -268,6 +277,34 @@ test("10a Meta workspace boundary fails closed and accepts only the provisioned 
   );
 });
 
+test("10b Meta account boundary normalizes act_ and rejects missing or foreign accounts", () => {
+  const env = { META_AD_ACCOUNT_ID: "act_123456789" };
+  assert.equal(metaWorkspace.normalizeMetaAdAccountId(" ACT_123456789 "), "123456789");
+  assert.equal(metaWorkspace.normalizeMetaAdAccountId("not-an-account"), "");
+  assert.doesNotThrow(() => metaWorkspace.requireMetaProvisionedAdAccount("123456789", env));
+  assert.throws(
+    () => metaWorkspace.requireMetaProvisionedAdAccount("", env),
+    (error: unknown) =>
+      error instanceof metaWorkspace.MetaAccountBoundaryError &&
+      error.statusCode === 400 &&
+      error.code === "meta_account_id_required",
+  );
+  assert.throws(
+    () => metaWorkspace.requireMetaProvisionedAdAccount("act_987654321", env),
+    (error: unknown) =>
+      error instanceof metaWorkspace.MetaAccountBoundaryError &&
+      error.statusCode === 403 &&
+      error.code === "meta_account_not_authorized",
+  );
+  assert.throws(
+    () => metaWorkspace.requireMetaProvisionedAdAccount("123456789", {}),
+    (error: unknown) =>
+      error instanceof metaWorkspace.MetaAccountBoundaryError &&
+      error.statusCode === 503 &&
+      error.code === "meta_account_not_provisioned",
+  );
+});
+
 // ---------------------------------------------------------------------------
 // Source-marker checks for replay/dedup, the cycle endpoint, and the worker.
 // These assert the security-critical wiring without touching production data.
@@ -297,6 +334,11 @@ const coreSlice = sliceBetween(
   "async function syncMetaInsightsForLaunch",
   "type ClaimedInsightsState",
 );
+const launchContextSlice = sliceBetween(
+  crmServerSource,
+  "async function loadMetaInsightsLaunchContext",
+  "function normalizedInsightToDatabaseRow",
+);
 const cycleSlice = sliceBetween(
   crmServerSource,
   "export async function handleMetaInsightsBackgroundCycle",
@@ -320,6 +362,13 @@ test("12 duplicate insert on a request_key is treated as already_processed, not 
   assert.ok(crmServerSource.includes('=== "23505"'));
   assert.ok(coreSlice.includes("isUniqueViolationError(pendingRunError)"));
   assert.ok(cycleSlice.includes("requestKey: `bg:${verified.requestId}:${state.metaCampaignLaunchId}`"));
+});
+
+test("12a configured Insights account metadata never falls back to a different saved account", () => {
+  assert.ok(launchContextSlice.includes("const account = preferredAccount"));
+  assert.ok(launchContextSlice.includes("normalizeMetaAdAccountId(row.ad_account_id) === preferredAccount"));
+  assert.ok(launchContextSlice.includes("|| {}"));
+  assert.ok(!launchContextSlice.includes("normalizeMetaAdAccountId(row.ad_account_id) === preferredAccount) ||\n    accounts[0]"));
 });
 
 // Background cycle endpoint (tests 13–26)
