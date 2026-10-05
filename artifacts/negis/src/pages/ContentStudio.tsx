@@ -33,9 +33,13 @@ import {
 import { checkMetaCompliance } from "../../../../lib/meta/compliance";
 import type { ContentAdVariant, ContentPackage } from "../../../../lib/content-studio/core";
 import {
+  clearStoredPaidGenerationAttempt,
+  readStoredPaidGenerationAttempt,
   resolvePaidGenerationAttempt,
   shouldKeepPaidGenerationAttempt,
+  writeStoredPaidGenerationAttempt,
   type PaidGenerationAttempt,
+  type PaidGenerationKind,
 } from "../../../../lib/content-studio/paid-generation";
 
 type ContentVideoStatus = "idea" | "script_ready" | "avatar_ready" | "telegram_ready";
@@ -604,6 +608,24 @@ function paidGenerationHeaders(requestKey: string): Record<string, string> {
   return { "Content-Type": "application/json", "X-Idempotency-Key": requestKey };
 }
 
+const PAID_GENERATION_ATTEMPT_KEY = "negis_content_studio_paid_generation_attempt";
+
+function paidGenerationAttemptKey(kind: PaidGenerationKind): string {
+  return workspaceScopedKey(`${PAID_GENERATION_ATTEMPT_KEY}:${kind}`);
+}
+
+function readBrowserPaidGenerationAttempt(kind: PaidGenerationKind): PaidGenerationAttempt | null {
+  return readStoredPaidGenerationAttempt(window.sessionStorage, paidGenerationAttemptKey(kind));
+}
+
+function writeBrowserPaidGenerationAttempt(kind: PaidGenerationKind, attempt: PaidGenerationAttempt): void {
+  writeStoredPaidGenerationAttempt(window.sessionStorage, paidGenerationAttemptKey(kind), attempt);
+}
+
+function clearBrowserPaidGenerationAttempt(kind: PaidGenerationKind): void {
+  clearStoredPaidGenerationAttempt(window.sessionStorage, paidGenerationAttemptKey(kind));
+}
+
 function readVideos(): ContentVideo[] {
   try {
     const raw = localStorage.getItem(workspaceScopedKey(STORAGE_KEY));
@@ -1072,11 +1094,15 @@ export default function ContentStudio() {
 
     let attempt: PaidGenerationAttempt;
     try {
+      photoGenerationAttempt.current = readBrowserPaidGenerationAttempt("photo");
       attempt = resolvePaidGenerationAttempt(
         photoGenerationAttempt.current,
         { kind: "photo", prompt, format: genFormat },
         () => globalThis.crypto?.randomUUID?.() || "",
       );
+      // The request cannot reach the paid provider until its retry key survives
+      // a full reload of this tab.
+      writeBrowserPaidGenerationAttempt("photo", attempt);
       photoGenerationAttempt.current = attempt;
     } catch (error) {
       setGenNotice({
@@ -1108,7 +1134,10 @@ export default function ContentStudio() {
         success: body?.success,
         code: body?.success === false ? body.code : undefined,
       });
-      if (!keepAttempt && photoGenerationAttempt.current === attempt) photoGenerationAttempt.current = null;
+      if (!keepAttempt && photoGenerationAttempt.current === attempt) {
+        photoGenerationAttempt.current = null;
+        clearBrowserPaidGenerationAttempt("photo");
+      }
 
       if (!response.ok || body?.success !== true) {
         void refreshGenerationUsage();
@@ -1161,11 +1190,13 @@ export default function ContentStudio() {
 
     let attempt: PaidGenerationAttempt;
     try {
+      videoGenerationAttempt.current = readBrowserPaidGenerationAttempt("video");
       attempt = resolvePaidGenerationAttempt(
         videoGenerationAttempt.current,
         { kind: "video", prompt, format: genFormat },
         () => globalThis.crypto?.randomUUID?.() || "",
       );
+      writeBrowserPaidGenerationAttempt("video", attempt);
       videoGenerationAttempt.current = attempt;
     } catch (error) {
       setGenNotice({
@@ -1203,7 +1234,10 @@ export default function ContentStudio() {
         success: body?.success,
         code: body?.success === false ? body.code : undefined,
       });
-      if (!keepAttempt && videoGenerationAttempt.current === attempt) videoGenerationAttempt.current = null;
+      if (!keepAttempt && videoGenerationAttempt.current === attempt) {
+        videoGenerationAttempt.current = null;
+        clearBrowserPaidGenerationAttempt("video");
+      }
 
       if (!response.ok || body?.success !== true) {
         void refreshGenerationUsage();

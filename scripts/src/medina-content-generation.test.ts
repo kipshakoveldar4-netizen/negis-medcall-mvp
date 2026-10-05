@@ -62,6 +62,14 @@ type CoreModuleShape = {
 };
 
 type PaidGenerationModuleShape = {
+  clearStoredPaidGenerationAttempt: (
+    storage: { getItem: (key: string) => string | null; setItem: (key: string, value: string) => void; removeItem: (key: string) => void },
+    key: string,
+  ) => void;
+  readStoredPaidGenerationAttempt: (
+    storage: { getItem: (key: string) => string | null; setItem: (key: string, value: string) => void; removeItem: (key: string) => void },
+    key: string,
+  ) => { requestKey: string; fingerprint: string } | null;
   resolvePaidGenerationAttempt: (
     current: { requestKey: string; fingerprint: string } | null,
     input: { kind: "photo" | "video"; prompt: string; format: string },
@@ -73,6 +81,11 @@ type PaidGenerationModuleShape = {
     success?: boolean;
     code?: string;
   }) => boolean;
+  writeStoredPaidGenerationAttempt: (
+    storage: { getItem: (key: string) => string | null; setItem: (key: string, value: string) => void; removeItem: (key: string) => void },
+    key: string,
+    attempt: { requestKey: string; fingerprint: string },
+  ) => void;
 };
 
 // GEN — настоящая генерация изображения и видео.
@@ -845,4 +858,57 @@ test("GEN37 every paid media call requires the browser key and carries the retai
   assert.match(studio, /videoGenerationAttempt = useRef<PaidGenerationAttempt \| null>/);
   assert.equal((studio.match(/headers: paidGenerationHeaders\(attempt\.requestKey\)/g) || []).length, 2);
   assert.doesNotMatch(studio, /headers: paidGenerationHeaders\(\)/);
+});
+
+test("GEN38 an ambiguous paid key survives a full reload in workspace-scoped session storage", async () => {
+  const values = new Map<string, string>();
+  const storage = {
+    getItem: (key: string) => values.get(key) ?? null,
+    setItem: (key: string, value: string) => values.set(key, value),
+    removeItem: (key: string) => void values.delete(key),
+  };
+  const key = "paid-photo::workspace-a";
+  const input = { kind: "photo" as const, prompt: "кабинет клиники", format: "reels" };
+  const first = paidGeneration.resolvePaidGenerationAttempt(null, input, () => "44444444-4444-4444-8444-444444444444");
+
+  paidGeneration.writeStoredPaidGenerationAttempt(storage, key, first);
+  const restoredAfterReload = paidGeneration.readStoredPaidGenerationAttempt(storage, key);
+  const retry = paidGeneration.resolvePaidGenerationAttempt(restoredAfterReload, input, () => {
+    throw new Error("a reload must not allocate another paid key");
+  });
+  assert.deepEqual(retry, first);
+
+  values.set(key, JSON.stringify({ version: 1, requestKey: "tampered", fingerprint: first.fingerprint }));
+  assert.equal(paidGeneration.readStoredPaidGenerationAttempt(storage, key), null);
+  assert.equal(values.has(key), false);
+
+  assert.throws(
+    () => paidGeneration.writeStoredPaidGenerationAttempt({
+      getItem: () => null,
+      setItem: () => undefined,
+      removeItem: () => undefined,
+    }, key, first),
+    /защитный ключ платной генерации/i,
+  );
+
+  paidGeneration.writeStoredPaidGenerationAttempt(storage, key, first);
+  paidGeneration.clearStoredPaidGenerationAttempt(storage, key);
+  assert.equal(values.has(key), false);
+
+  const studio = await readFile(studioPage, "utf8");
+  assert.match(studio, /window\.sessionStorage/);
+  assert.match(studio, /workspaceScopedKey\(`\$\{PAID_GENERATION_ATTEMPT_KEY\}:\$\{kind\}`\)/);
+  assert.equal((studio.match(/writeBrowserPaidGenerationAttempt\("(?:photo|video)", attempt\)/g) || []).length, 2);
+  assert.equal((studio.match(/clearBrowserPaidGenerationAttempt\("(?:photo|video)"\)/g) || []).length, 2);
+
+  const photoHandler = studio.slice(studio.indexOf("const generatePhoto"), studio.indexOf("const generateVideo"));
+  const videoHandler = studio.slice(studio.indexOf("const generateVideo"), studio.indexOf("/**\n   * Опрос состояния ролика"));
+  assert.ok(
+    photoHandler.indexOf('writeBrowserPaidGenerationAttempt("photo", attempt)') < photoHandler.indexOf('crmFetch(withWorkspace("/api/content-studio/generate-photo")'),
+    "the photo receipt must persist before the paid request",
+  );
+  assert.ok(
+    videoHandler.indexOf('writeBrowserPaidGenerationAttempt("video", attempt)') < videoHandler.indexOf('crmFetch(withWorkspace("/api/content-studio/generate-video")'),
+    "the video receipt must persist before the paid request",
+  );
 });
