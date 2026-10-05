@@ -49,6 +49,10 @@ import { handleSalonStats } from "../../lib/crm/salon-stats";
 import { handleTikTokVideos } from "../../lib/crm/tiktok-videos";
 import { handleTikTokLaunch } from "../../lib/crm/tiktok-launch";
 import {
+  MetaWorkspaceBoundaryError,
+  requireMetaProvisionedWorkspace,
+} from "../../lib/meta/workspace";
+import {
   requireAuthenticatedUser,
   requireWorkspaceAccess,
   WorkspaceAdminAuthError,
@@ -97,6 +101,15 @@ const resources: CrmResource[] = [
   "ad-creatives",
   "release-checks",
 ];
+
+const META_ACCOUNT_BOUND_ROUTES = new Set([
+  "meta-launch",
+  "meta-status",
+  "meta-validate",
+  "meta-city-key",
+  "meta-insights-sync",
+  "ad-creative-meta-upload",
+]);
 
 function sendJson(res: VercelResponse, status: number, payload: unknown) {
   res.status(status).setHeader("Content-Type", "application/json; charset=utf-8");
@@ -429,6 +442,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       ...(permission ? { permission } : {}),
     });
 
+    if (META_ACCOUNT_BOUND_ROUTES.has(route.key)) {
+      requireMetaProvisionedWorkspace(context.workspaceId);
+    }
+
     if (isDisabledMethod) {
       // Registered but intentionally refused, and only revealed to a caller who
       // was already authorized for it. Direct staff creation stays closed: it
@@ -455,6 +472,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
     if (error instanceof WorkspaceAdminAuthError) {
       return sendAuthError(res, error);
+    }
+    if (error instanceof MetaWorkspaceBoundaryError) {
+      return sendJson(res, error.statusCode, {
+        success: false,
+        error: error.message,
+        code: error.code,
+      });
     }
     throw error;
   }

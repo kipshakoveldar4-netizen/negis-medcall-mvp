@@ -697,6 +697,76 @@ test("K2 a foreign workspace Meta launch is refused before any Meta or CRM work"
   });
 });
 
+test("K2a Meta account routes fail closed until a workspace is provisioned", async () => {
+  const previous = process.env.META_WORKSPACE_ID;
+  delete process.env.META_WORKSPACE_ID;
+  try {
+    await withRouter({ memberships: [memberA] }, async (ctx) => {
+      const { res, log } = await ctx.call({
+        segments: ["meta-validate"],
+        method: "POST",
+        query: { workspaceId: WORKSPACE_A },
+        body: { dryRun: true },
+      });
+      assert.equal(res.statusCode, 503);
+      assert.equal(res.body.code, "meta_workspace_not_provisioned");
+      assert.equal(businessQueries(log).length, 0);
+    });
+  } finally {
+    if (previous === undefined) delete process.env.META_WORKSPACE_ID;
+    else process.env.META_WORKSPACE_ID = previous;
+  }
+});
+
+test("K2b shared Meta credentials cannot be used from another workspace", async () => {
+  const previous = process.env.META_WORKSPACE_ID;
+  process.env.META_WORKSPACE_ID = WORKSPACE_B;
+  const requests = [
+    { segments: ["meta-launch"], method: "POST", body: { dryRun: true } },
+    { segments: ["meta-status"], method: "GET", query: { campaignId: "123456789" } },
+    { segments: ["meta-validate"], method: "POST", body: { dryRun: true } },
+    { segments: ["meta-city-key"], method: "GET", query: { city: "Астана" } },
+    { segments: ["meta-insights-sync"], method: "POST", body: {} },
+    { segments: ["ad-creative-meta-upload"], method: "POST", body: { fileType: "video", dryRun: true } },
+  ];
+  try {
+    await withRouter({ memberships: [memberA] }, async (ctx) => {
+      for (const request of requests) {
+        const { res, log } = await ctx.call({
+          ...request,
+          query: { workspaceId: WORKSPACE_A, ...(request.query ?? {}) },
+        });
+        assert.equal(res.statusCode, 403, request.segments.join("/"));
+        assert.equal(res.body.code, "meta_workspace_not_authorized");
+        assert.equal(businessQueries(log).length, 0);
+      }
+    });
+  } finally {
+    if (previous === undefined) delete process.env.META_WORKSPACE_ID;
+    else process.env.META_WORKSPACE_ID = previous;
+  }
+});
+
+test("K2c the provisioned workspace can reach Meta diagnostics", async () => {
+  const previous = process.env.META_WORKSPACE_ID;
+  process.env.META_WORKSPACE_ID = WORKSPACE_A;
+  try {
+    await withRouter({ memberships: [memberA] }, async (ctx) => {
+      const { res } = await ctx.call({
+        segments: ["meta-validate"],
+        method: "POST",
+        query: { workspaceId: WORKSPACE_A },
+        body: { dryRun: true },
+      });
+      assert.equal(res.statusCode, 200);
+      assert.equal(res.body.success, true);
+    });
+  } finally {
+    if (previous === undefined) delete process.env.META_WORKSPACE_ID;
+    else process.env.META_WORKSPACE_ID = previous;
+  }
+});
+
 test("K3 advertising results stay administrator-only", async () => {
   await withRouter({ memberships: [memberBReception] }, async (ctx) => {
     for (const segment of ["meta-campaign-insights", "meta-insights-history", "meta-insights-sync-runs", "advertising-outcomes"]) {
