@@ -94,14 +94,14 @@ test("PB5 паузу можно поставить, не называя тари
   assert.ok(/\["active", "paused", "cancelled"\]/.test(handler), "пауза — законный статус");
 });
 
-test("PB6 отказ отмены прежней подписки не проглатывается", async () => {
+test("PB6 замена подписки выполняется одной серверной транзакцией", async () => {
   const handler = await codeOf(handlerPath);
 
-  // Следом идёт вставка, а частичный уникальный индекс не даст существовать
-  // двум действующим подпискам: проглоченный отказ дал бы непонятную ошибку
-  // базы вместо внятной причины.
-  assert.ok(/const \{ error: cancelError \}/.test(handler), "результат отмены читается");
-  assert.ok(/if \(cancelError\)/.test(handler), "и проверяется");
+  assert.ok(/\.rpc\("replace_platform_subscription"/.test(handler));
+  assert.ok(/Number\.isSafeInteger\(priceNumber\)/.test(handler), "дробные и небезопасно большие суммы не округляются молча");
+  assert.ok(!/const \{ error: cancelError \}/.test(handler));
+  assert.ok(!/\.from\("platform_subscriptions"\)[\s\S]{0,350}\.insert\(/.test(handler));
+  assert.ok(/code: migrationMissing \? "subscription_transition_unavailable"/.test(handler));
 });
 
 test("PB7 годовая сумма приводится к месяцу, а не складывается как есть", async () => {

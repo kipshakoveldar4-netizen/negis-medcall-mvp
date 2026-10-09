@@ -12,6 +12,7 @@ Negis MVP не запускает рекламу автоматически. Р�
 - `META_AD_ACCOUNT_ID`
 - `META_PAGE_ID`
 - `META_INSTAGRAM_ACTOR_ID`
+- `META_WORKSPACE_ID` — UUID единственного workspace, которому сервер назначил этот Meta ad account. Членство в другой клинике не даёт доступ к общему token/account.
 - `META_VIDEO_LAUNCH_ENABLED=false` by default. Set to `true` only to enable the experimental Meta `video_id` launch flow for MP4/MOV.
 - `META_ASTANA_CITY_KEY` optional legacy override for Astana. Do not create one env per city. Negis resolves Kazakhstan cities through a static map, in-memory cache, and Meta Targeting Search.
 

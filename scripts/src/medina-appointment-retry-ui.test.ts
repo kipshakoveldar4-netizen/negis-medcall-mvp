@@ -79,6 +79,26 @@ test("temporary attempt storage refuses corrupt data and cannot cross an account
   assert.equal(storage.size(), 0);
 });
 
+test("creation stops when the tab cannot retain and read back the retry key", () => {
+  const volatile: AttemptStorage = {
+    getItem: () => null,
+    setItem: () => undefined,
+    removeItem: () => undefined,
+  };
+  assert.equal(persistAppointmentCreateAttempt(volatile, attempt()), false);
+
+  const denied: AttemptStorage = {
+    getItem: () => {
+      throw new Error("denied");
+    },
+    setItem: () => {
+      throw new Error("denied");
+    },
+    removeItem: () => undefined,
+  };
+  assert.equal(persistAppointmentCreateAttempt(denied, attempt()), false);
+});
+
 for (const [status, code] of [[400, "validation"], [401, "authentication_required"], [403, "forbidden"],
   [409, "appointment_conflict"], [409, "outside_doctor_schedule"], [409, "arrival_payment"], [503, "appointment_create_unavailable"]] as const) {
   test(`definite refusal ${code} releases only an attempt with no prior uncertainty`, () => {
@@ -130,6 +150,16 @@ test("booking form sends the saved attempt through crmFetch and protects uncerta
   assert.match(source, /!submitLock\.current && !createAttempt\.current\?\.uncertain/);
   assert.match(source, /window\.addEventListener\("beforeunload", warnBeforeLeaving\)/);
   assert.match(source, /persistAppointmentCreateAttempt\(storage, attempt\)/);
+  assert.match(source, /!storage \|\| !persistAppointmentCreateAttempt\(storage, attempt\)/);
+  const createBlock = source.slice(
+    source.indexOf("const createAppointment = async"),
+    source.indexOf("const startSaleFromAppointment"),
+  );
+  assert.ok(
+    createBlock.indexOf("persistAppointmentCreateAttempt(storage, attempt)") <
+      createBlock.indexOf("response = await crmFetch"),
+    "the retry key must be retained before the appointment request",
+  );
   assert.match(source, /restoreAppointmentCreateAttempt\(storage, scope\.workspaceId, scope\.actorId\)/);
   assert.match(source, /clearPersistedAppointmentCreateAttempt\(storage\)/);
   assert.doesNotMatch(source, /saved \? appointmentFromApi\(saved\) : appointment, \.\.\.current/);

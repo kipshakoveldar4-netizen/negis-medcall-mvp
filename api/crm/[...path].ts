@@ -12,6 +12,7 @@ import {
   handleAdCreativeSignedUpload,
   handleAdCreativeUpload,
   handleAdsAiFill,
+  handleAdvertisingOutcomes,
   handleCrmAuthContext,
   handleCrmHealth,
   handleCrmResource,
@@ -47,6 +48,16 @@ import { handlePushSubscriptions } from "../../lib/crm/push-subscriptions";
 import { handleSalonStats } from "../../lib/crm/salon-stats";
 import { handleTikTokVideos } from "../../lib/crm/tiktok-videos";
 import { handleTikTokLaunch } from "../../lib/crm/tiktok-launch";
+import {
+  MetaAccountBoundaryError,
+  MetaWorkspaceBoundaryError,
+  requireMetaProvisionedAdAccount,
+  requireMetaProvisionedWorkspace,
+} from "../../lib/meta/workspace";
+import {
+  requireTikTokProvisionedWorkspace,
+  TikTokConnectionError,
+} from "../../lib/tiktok/connections";
 import {
   requireAuthenticatedUser,
   requireWorkspaceAccess,
@@ -96,6 +107,37 @@ const resources: CrmResource[] = [
   "ad-creatives",
   "release-checks",
 ];
+
+const META_ACCOUNT_BOUND_ROUTES = new Set([
+  "meta-accounts",
+  "meta-launch",
+  "meta-status",
+  "meta-validate",
+  "meta-city-key",
+  "meta-insights-sync",
+  "ad-creative-meta-upload",
+]);
+
+const TIKTOK_ACCOUNT_BOUND_ROUTES = new Set([
+  "tiktok-validate",
+  "tiktok-connection",
+  "tiktok-dry-run",
+  "tiktok-setup",
+  "tiktok-videos",
+  "tiktok-launch",
+]);
+
+function readMetaAccountId(body: unknown): string {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return "";
+  const record = body as Record<string, unknown>;
+  const updates = record.updates && typeof record.updates === "object" && !Array.isArray(record.updates)
+    ? record.updates as Record<string, unknown>
+    : {};
+  for (const value of [updates.adAccountId, updates.ad_account_id, record.adAccountId, record.ad_account_id]) {
+    if (typeof value === "string" && value.trim()) return value;
+  }
+  return "";
+}
 
 function sendJson(res: VercelResponse, status: number, payload: unknown) {
   res.status(status).setHeader("Content-Type", "application/json; charset=utf-8");
@@ -283,6 +325,8 @@ async function dispatch(
       return handleMetaCampaignInsights(req, res);
     case "meta-insights-history":
       return handleMetaInsightsHistory(req, res);
+    case "advertising-outcomes":
+      return handleAdvertisingOutcomes(req, res);
     case "meta-insights-sync-runs":
       return handleMetaInsightsSyncRuns(req, res);
     case "ad-creatives/signed-upload":
@@ -426,6 +470,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       ...(permission ? { permission } : {}),
     });
 
+    if (META_ACCOUNT_BOUND_ROUTES.has(route.key)) {
+      requireMetaProvisionedWorkspace(context.workspaceId);
+    }
+    if (TIKTOK_ACCOUNT_BOUND_ROUTES.has(route.key)) {
+      requireTikTokProvisionedWorkspace(context.workspaceId);
+    }
+    if (route.key === "meta-accounts" && method !== "GET") {
+      requireMetaProvisionedAdAccount(readMetaAccountId(req.body));
+    }
+
     if (isDisabledMethod) {
       // Registered but intentionally refused, and only revealed to a caller who
       // was already authorized for it. Direct staff creation stays closed: it
@@ -452,6 +506,20 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
     if (error instanceof WorkspaceAdminAuthError) {
       return sendAuthError(res, error);
+    }
+    if (error instanceof MetaWorkspaceBoundaryError || error instanceof MetaAccountBoundaryError) {
+      return sendJson(res, error.statusCode, {
+        success: false,
+        error: error.message,
+        code: error.code,
+      });
+    }
+    if (error instanceof TikTokConnectionError) {
+      return sendJson(res, error.status, {
+        success: false,
+        error: error.message,
+        code: error.code,
+      });
     }
     throw error;
   }

@@ -303,10 +303,12 @@ type LaunchHistoryItem = {
 };
 
 type MetaInsightsHistoryAvailability = "available" | "not_synced" | "empty" | "running" | "failed" | "unavailable";
+type MetaInsightsHistoryFreshness = "fresh" | "stale" | "unknown";
 
 type MetaInsightsHistorySummary = {
   metaCampaignLaunchId: string;
   availability: MetaInsightsHistoryAvailability;
+  freshness: MetaInsightsHistoryFreshness;
   lastRun: {
     status: string;
     dateStart: string | null;
@@ -1374,6 +1376,12 @@ function formatMetaInsightsDateTime(value: string | null): string {
 
 function MetaInsightsHistoryDetails({ summary }: { summary: MetaInsightsHistorySummary | null }) {
   const availability = summary?.availability || "unavailable";
+  const freshness = summary?.freshness || "unknown";
+  const freshnessMessage = freshness === "fresh"
+    ? "Свежесть выгрузки подтверждена."
+    : freshness === "stale"
+      ? "Выгрузка устарела. Обновите Insights перед текущими выводами."
+      : "Свежесть выгрузки не подтверждена. Используйте значения только для проверки истории.";
   const stateMessage =
     availability === "not_synced"
       ? "Insights ещё не синхронизированы."
@@ -1412,6 +1420,7 @@ function MetaInsightsHistoryDetails({ summary }: { summary: MetaInsightsHistoryS
             <HistoryFact label="Обновлено" value={formatMetaInsightsDateTime(summary.latestFetchedAt)} />
           </div>
           <div className="mt-3 border-t border-[#D8E4EC] pt-3 text-xs font-semibold leading-relaxed" style={{ color: "var(--negis-muted)" }}>
+            <p style={{ color: freshness === "fresh" ? "var(--negis-primary)" : "var(--negis-warning)" }}>{freshnessMessage}</p>
             <p>Фактический расход Meta показывается отдельно от планового бюджета.</p>
             <p>Лиды по данным Meta не равны заявкам CRM.</p>
             <p>Это не оценка эффективности рекламы.</p>
@@ -1987,7 +1996,7 @@ export default function AdsAutomation() {
       setUploadStatus("getting_signed_url");
       setUploadStage("Создаём задачу оптимизации видео");
       const created = await crmRequest<{ job?: Record<string, unknown>; signedUpload?: SignedUploadData | null; assetId?: string }>(
-        "/api/crm/video-jobs",
+        `/api/crm/video-jobs?workspaceId=${encodeURIComponent(workspaceId)}`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -2021,7 +2030,7 @@ export default function AdsAutomation() {
       }
 
       setUploadStage("Подтверждаем загрузку исходника");
-      const patched = await crmRequest<{ job?: Record<string, unknown> }>("/api/crm/video-jobs", {
+      const patched = await crmRequest<{ job?: Record<string, unknown> }>(`/api/crm/video-jobs?workspaceId=${encodeURIComponent(workspaceId)}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ id: createdJob.id, workspaceId, rawSize: file.size }),
@@ -2102,7 +2111,7 @@ export default function AdsAutomation() {
     try {
       const baseName = sourceFileName.replace(/\.[^.]+$/, "") || "video";
       const thumbnailFileName = `${baseName}-thumbnail.jpg`;
-      const signedBody = await crmRequest<SignedUploadData>("/api/crm/ad-creatives/signed-upload", {
+      const signedBody = await crmRequest<SignedUploadData>(`/api/crm/ad-creatives/signed-upload?workspaceId=${encodeURIComponent(workspaceId)}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -2159,7 +2168,7 @@ export default function AdsAutomation() {
 
       if (input.assetId) {
         try {
-          await crmRequest("/api/crm/ad-creatives", {
+          await crmRequest(`/api/crm/ad-creatives?workspaceId=${encodeURIComponent(workspaceId)}`, {
             method: "PATCH",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -2220,7 +2229,7 @@ export default function AdsAutomation() {
       );
       if (creative.id) {
         try {
-          await crmRequest("/api/crm/ad-creatives", {
+          await crmRequest(`/api/crm/ad-creatives?workspaceId=${encodeURIComponent(workspaceId)}`, {
             method: "PATCH",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -2366,7 +2375,7 @@ export default function AdsAutomation() {
 
       setUploadStatus("getting_signed_url");
       setUploadStage(uploadStatusLabel("getting_signed_url"));
-      const signedBody = await crmRequest<SignedUploadData>("/api/crm/ad-creatives/signed-upload", {
+      const signedBody = await crmRequest<SignedUploadData>(`/api/crm/ad-creatives/signed-upload?workspaceId=${encodeURIComponent(workspaceId)}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -2430,7 +2439,7 @@ export default function AdsAutomation() {
 
       setUploadStatus("saving_metadata");
       setUploadStage(uploadStatusLabel("saving_metadata"));
-      const body = await crmRequest<UploadResponse>("/api/crm/ad-creatives", {
+      const body = await crmRequest<UploadResponse>(`/api/crm/ad-creatives?workspaceId=${encodeURIComponent(workspaceId)}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -4806,7 +4815,15 @@ export default function AdsAutomation() {
                               {historyContentApproval.copyMatchesLaunch === false ? "Текст изменён" : "Вариант согласован"}
                             </StatusPill>
                           ) : null}
-                          {historyInsightsSummary?.availability === "available" ? <StatusPill tone="slate">Insights доступны</StatusPill> : null}
+                          {historyInsightsSummary?.availability === "available" ? (
+                            <StatusPill tone={historyInsightsSummary.freshness === "fresh" ? "slate" : "amber"}>
+                              {historyInsightsSummary.freshness === "fresh"
+                                ? "Insights доступны"
+                                : historyInsightsSummary.freshness === "stale"
+                                  ? "Insights устарели"
+                                  : "Свежесть не подтверждена"}
+                            </StatusPill>
+                          ) : null}
                           {historyOptimized ? <StatusPill tone="blue">Видео оптимизировано</StatusPill> : null}
                         </div>
                       </div>

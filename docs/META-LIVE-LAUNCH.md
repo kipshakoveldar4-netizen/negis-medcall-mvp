@@ -50,6 +50,7 @@ Set these variables in Vercel:
 - `META_AD_ACCOUNT_ID`
 - `META_PAGE_ID`
 - `META_INSTAGRAM_ACTOR_ID`
+- `META_WORKSPACE_ID` — UUID workspace, которому назначены серверные Meta credentials. Без него и при несовпадении workspace все account-bound маршруты закрываются до вызова Meta API.
 - `META_VIDEO_LAUNCH_ENABLED=false` by default. Set to `true` only when you want the experimental MP4/MOV `video_id` upload flow. Dry-run and Supabase storage work without enabling it.
 - `META_ASTANA_CITY_KEY` optional legacy override for Astana. New city targeting does not require one env per city: the backend uses a Kazakhstan city resolver with a static map, in-memory cache, then Meta Targeting Search.
 

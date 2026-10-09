@@ -40,6 +40,7 @@ type LoadState = "loading" | "ready" | "error";
 type LaunchState = "paused" | "active" | "failed" | "dry_run" | "video_processing" | "unknown";
 type InsightsAccess = "idle" | "checking" | "ready" | "required" | "forbidden" | "error";
 type InsightsAvailability = "available" | "not_synced" | "empty" | "running" | "failed" | "unavailable";
+type InsightsFreshness = "fresh" | "stale" | "unknown";
 
 type AdvertisingLaunch = {
   id: string;
@@ -80,6 +81,7 @@ type ServerAdminAuthContext = {
 type MetaInsightsHistorySummary = {
   metaCampaignLaunchId: string;
   availability: InsightsAvailability;
+  freshness: InsightsFreshness;
   coveredDateStart: string | null;
   coveredDateStop: string | null;
   latestFetchedAt: string | null;
@@ -117,12 +119,27 @@ type CrmAdvertisingOutcomes = {
   unattributedLeads: number;
   paidAttributedDeals: number;
   paidUnattributedDeals: number;
+  paidAppointmentDeals: number;
+  paidAttributedAppointmentDeals: number;
   pendingDeals: number;
   attributedRevenueByCurrency: Array<{
     currency: string;
     currencyExponent: number;
     amountMinor: bigint;
   }>;
+  generatedAt: string;
+};
+
+type CrmAdvertisingOutcomesPayload = {
+  attributedLeads?: unknown;
+  unattributedLeads?: unknown;
+  paidAttributedDeals?: unknown;
+  paidUnattributedDeals?: unknown;
+  paidAppointmentDeals?: unknown;
+  paidAttributedAppointmentDeals?: unknown;
+  pendingDeals?: unknown;
+  attributedRevenueByCurrency?: unknown;
+  generatedAt?: unknown;
 };
 
 const EMPTY_CRM_ADVERTISING_OUTCOMES: CrmAdvertisingOutcomes = {
@@ -130,8 +147,11 @@ const EMPTY_CRM_ADVERTISING_OUTCOMES: CrmAdvertisingOutcomes = {
   unattributedLeads: 0,
   paidAttributedDeals: 0,
   paidUnattributedDeals: 0,
+  paidAppointmentDeals: 0,
+  paidAttributedAppointmentDeals: 0,
   pendingDeals: 0,
   attributedRevenueByCurrency: [],
+  generatedAt: "",
 };
 
 type CampaignGoalForm = {
@@ -190,65 +210,64 @@ function readNonNegativeBigInt(value: unknown): bigint {
   }
 }
 
-function hasCampaignAttribution(row: Record<string, unknown>): boolean {
-  return Boolean(readString(row.metaCampaignLaunchId ?? row.meta_campaign_launch_id));
-}
-
-async function loadSupabaseCollection(
-  workspaceId: string,
-  resource: "leads" | "deals",
-  accessToken: string,
-): Promise<Record<string, unknown>[]> {
-  const response = await crmFetch(
-    `/api/crm/${resource}?workspaceId=${encodeURIComponent(workspaceId)}`,
-    { accessToken },
-  );
-  const body = await readJson<Record<string, unknown>>(response);
-  if (!response.ok || body.success !== true || body.mode !== "supabase") {
-    throw new Error(`${resource}_unavailable`);
+function requiredCount(value: unknown): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new Error("invalid_crm_outcome_count");
   }
-  const items = body.data?.[resource];
-  return Array.isArray(items) ? items.map(asRecord) : [];
+  return value;
 }
 
-function aggregateCrmAdvertisingOutcomes(
-  leads: Record<string, unknown>[],
-  deals: Record<string, unknown>[],
-): CrmAdvertisingOutcomes {
-  const revenue = new Map<string, { currency: string; currencyExponent: number; amountMinor: bigint }>();
-  let paidAttributedDeals = 0;
-  let paidUnattributedDeals = 0;
-  let pendingDeals = 0;
+function requiredMinorAmount(value: unknown): bigint {
+  const normalized = typeof value === "string" ? value.trim() : "";
+  if (!/^\d+$/.test(normalized)) throw new Error("invalid_crm_outcome_amount");
+  return BigInt(normalized);
+}
 
-  for (const deal of deals) {
-    const status = readString(deal.status).toLowerCase();
-    const attributed = hasCampaignAttribution(deal);
-    if (status === "pending") pendingDeals += 1;
-    if (status !== "paid") continue;
-    if (!attributed) {
-      paidUnattributedDeals += 1;
-      continue;
+function parseCrmAdvertisingOutcomes(value: unknown): CrmAdvertisingOutcomes {
+  const payload = asRecord(value) as CrmAdvertisingOutcomesPayload;
+  const revenueRows = payload.attributedRevenueByCurrency;
+  if (!Array.isArray(revenueRows)) throw new Error("invalid_crm_outcome_revenue");
+
+  const attributedRevenueByCurrency = revenueRows.map((raw) => {
+    const row = asRecord(raw);
+    const currency = readString(row.currency).toUpperCase();
+    const currencyExponent = row.currencyExponent;
+    if (!/^[A-Z]{3}$/.test(currency) || !Number.isInteger(currencyExponent) || Number(currencyExponent) < 0 || Number(currencyExponent) > 6) {
+      throw new Error("invalid_crm_outcome_currency");
     }
-
-    paidAttributedDeals += 1;
-    const currency = readString(deal.currency).toUpperCase() || "KZT";
-    const currencyExponent = 2;
-    const key = `${currency}:${currencyExponent}`;
-    const current = revenue.get(key);
-    revenue.set(key, {
+    return {
       currency,
-      currencyExponent,
-      amountMinor: (current?.amountMinor || 0n) + readNonNegativeBigInt(deal.amountMinor ?? deal.amount_minor),
-    });
+      currencyExponent: Number(currencyExponent),
+      amountMinor: requiredMinorAmount(row.amountMinor),
+    };
+  });
+  const generatedAt = readString(payload.generatedAt);
+  if (!generatedAt || Number.isNaN(Date.parse(generatedAt))) throw new Error("invalid_crm_outcome_time");
+
+  const paidAttributedDeals = requiredCount(payload.paidAttributedDeals);
+  const paidUnattributedDeals = requiredCount(payload.paidUnattributedDeals);
+  const paidAppointmentDeals = requiredCount(payload.paidAppointmentDeals);
+  const paidAttributedAppointmentDeals = requiredCount(payload.paidAttributedAppointmentDeals);
+  const totalPaidDeals = paidAttributedDeals + paidUnattributedDeals;
+  if (
+    !Number.isSafeInteger(totalPaidDeals)
+    || paidAppointmentDeals > totalPaidDeals
+    || paidAttributedAppointmentDeals > paidAppointmentDeals
+    || paidAttributedAppointmentDeals > paidAttributedDeals
+  ) {
+    throw new Error("invalid_crm_outcome_links");
   }
 
   return {
-    attributedLeads: leads.filter(hasCampaignAttribution).length,
-    unattributedLeads: leads.filter((lead) => !hasCampaignAttribution(lead)).length,
+    attributedLeads: requiredCount(payload.attributedLeads),
+    unattributedLeads: requiredCount(payload.unattributedLeads),
     paidAttributedDeals,
     paidUnattributedDeals,
-    pendingDeals,
-    attributedRevenueByCurrency: [...revenue.values()].sort((left, right) => left.currency.localeCompare(right.currency)),
+    paidAppointmentDeals,
+    paidAttributedAppointmentDeals,
+    pendingDeals: requiredCount(payload.pendingDeals),
+    attributedRevenueByCurrency,
+    generatedAt,
   };
 }
 
@@ -294,7 +313,9 @@ function formatInsightsUpdate(value: string | null): string {
 }
 
 function aggregateAdvertisingInsights(summaries: MetaInsightsHistorySummary[]): AdvertisingInsightsAggregate {
-  const available = summaries.filter((summary) => summary.availability === "available" && summary.rowCount > 0);
+  const available = summaries.filter(
+    (summary) => summary.availability === "available" && summary.freshness === "fresh" && summary.rowCount > 0,
+  );
   const spend = new Map<string, { currency: string; currencyExponent: number; spendMinor: bigint }>();
   let impressions = 0n;
   let clicks = 0n;
@@ -620,12 +641,16 @@ export default function AdvertisingHub() {
           return;
         }
 
-        const [leads, deals] = await Promise.all([
-          loadSupabaseCollection(workspaceId, "leads", accessToken),
-          loadSupabaseCollection(workspaceId, "deals", accessToken),
-        ]);
+        const outcomesResponse = await crmFetch(
+          `/api/crm/advertising-outcomes?workspaceId=${encodeURIComponent(workspaceId)}`,
+          { accessToken },
+        );
+        const outcomesBody = await readJson<{ outcomes?: CrmAdvertisingOutcomesPayload }>(outcomesResponse);
         if (cancelled) return;
-        setCrmOutcomes(aggregateCrmAdvertisingOutcomes(leads, deals));
+        if (!outcomesResponse.ok || outcomesBody.success !== true || outcomesBody.mode !== "supabase") {
+          throw new Error("crm_outcomes_unavailable");
+        }
+        setCrmOutcomes(parseCrmAdvertisingOutcomes(outcomesBody.data?.outcomes));
         setCrmOutcomesAccess("ready");
       } catch {
         if (!cancelled) {
@@ -750,7 +775,9 @@ export default function AdvertisingHub() {
   ), [insightsSummaries, launches]);
 
   const insightsStates = useMemo(() => ({
-    available: insightsSummaries.filter((summary) => summary.availability === "available").length,
+    fresh: insightsSummaries.filter((summary) => summary.availability === "available" && summary.freshness === "fresh").length,
+    stale: insightsSummaries.filter((summary) => summary.availability === "available" && summary.freshness === "stale").length,
+    unknownFreshness: insightsSummaries.filter((summary) => summary.availability === "available" && summary.freshness !== "fresh" && summary.freshness !== "stale").length,
     empty: insightsSummaries.filter((summary) => summary.availability === "empty").length,
     running: insightsSummaries.filter((summary) => summary.availability === "running").length,
     failed: insightsSummaries.filter((summary) => summary.availability === "failed").length,
@@ -759,6 +786,8 @@ export default function AdvertisingHub() {
 
   const insightsEmptyMessage = useMemo(() => {
     if (insightsStates.running > 0) return "Meta обновляет данные. Результаты появятся после завершения синхронизации.";
+    if (insightsStates.stale > 0) return "Сохранённые данные Meta устарели и не включены в текущую сводку. Обновите Insights в истории запусков.";
+    if (insightsStates.unknownFreshness > 0) return "Свежесть сохранённых данных Meta не подтверждена. Они доступны в истории, но не включены в текущую сводку.";
     if (insightsStates.empty > 0) return "Meta не вернула данные за выбранный период. Это нормально для выключенных или не откручивавшихся кампаний.";
     if (insightsStates.failed > 0) return "Не удалось обновить данные Meta. Подробности доступны владельцу в истории запусков.";
     if (insightsStates.notSynced > 0) return "Результаты ещё не синхронизированы. Кампания и её плановый бюджет уже сохранены.";
@@ -1029,6 +1058,11 @@ export default function AdvertisingHub() {
                   <p className="mt-1 text-xs leading-relaxed" style={{ color: "var(--negis-muted)" }}>
                     Фактический расход Meta показан отдельно от планового бюджета. Лиды Meta не равны заявкам CRM. Это ещё не оценка эффективности рекламы.
                   </p>
+                  {insightsStates.stale > 0 || insightsStates.unknownFreshness > 0 ? (
+                    <p className="mt-1 text-xs font-semibold leading-relaxed" style={{ color: "var(--negis-warning)" }}>
+                      Устаревшие данные и данные с неподтверждённой свежестью не включены в эту сводку.
+                    </p>
+                  ) : null}
                 </div>
                 <span className="shrink-0 text-xs font-semibold" style={{ color: "var(--negis-muted)" }}>{formatInsightsUpdate(insights.latestFetchedAt)}</span>
               </div>
@@ -1114,6 +1148,7 @@ export default function AdvertisingHub() {
                       {group.items.map((item) => {
                         const itemInsights = item.insights;
                         const hasData = itemInsights?.availability === "available" && itemInsights.rowCount > 0;
+                        const hasFreshData = hasData && itemInsights?.freshness === "fresh";
                         const dataMessage = !itemInsights || itemInsights.availability === "not_synced"
                           ? "Insights ещё не синхронизированы"
                           : itemInsights.availability === "empty"
@@ -1124,8 +1159,12 @@ export default function AdvertisingHub() {
                                 ? "Не удалось обновить Insights"
                                 : itemInsights.availability === "unavailable"
                                   ? "Insights недоступны для запуска"
-                                  : hasData
+                                  : hasFreshData
                                     ? "Фактические данные Meta"
+                                    : hasData && itemInsights.freshness === "stale"
+                                      ? "Данные Meta устарели"
+                                      : hasData
+                                        ? "Свежесть данных Meta не подтверждена"
                                     : "Данных Meta пока нет";
                         return (
                           <article key={item.metaCampaignLaunchId} className="neu-sm min-w-0 p-4">
@@ -1140,7 +1179,7 @@ export default function AdvertisingHub() {
                                 <p className="mt-1 break-words text-xs" style={{ color: "var(--negis-muted)" }}>{item.campaignName}</p>
                               </div>
                             </div>
-                            <p className="mt-3 text-xs font-semibold" style={{ color: hasData ? "var(--negis-primary)" : "var(--negis-muted)" }}>{dataMessage}</p>
+                            <p className="mt-3 text-xs font-semibold" style={{ color: hasFreshData ? "var(--negis-primary)" : hasData ? "var(--negis-warning)" : "var(--negis-muted)" }}>{dataMessage}</p>
                             {hasData && itemInsights ? (
                               <>
                                 <div className="mt-3 border-t pt-3" style={{ borderColor: "var(--negis-border)" }}>
@@ -1158,6 +1197,11 @@ export default function AdvertisingHub() {
                                   <div><dt style={{ color: "var(--negis-muted)" }}>Лиды Meta</dt><dd className="font-semibold" style={{ color: "var(--negis-text)" }}>{itemInsights.metaLeads === null ? "Нет данных" : formatCount(readNonNegativeBigInt(itemInsights.metaLeads))}</dd></div>
                                 </dl>
                                 <p className="mt-3 text-xs" style={{ color: "var(--negis-muted)" }}>{formatInsightsUpdate(itemInsights.latestFetchedAt)}</p>
+                                {!hasFreshData ? (
+                                  <p className="mt-1 text-xs font-semibold leading-relaxed" style={{ color: "var(--negis-warning)" }}>
+                                    Эти значения показаны для проверки истории и не участвуют в сравнении креативов.
+                                  </p>
+                                ) : null}
                               </>
                             ) : null}
                           </article>
@@ -1180,7 +1224,7 @@ export default function AdvertisingHub() {
               <p className="text-xs font-semibold uppercase" style={{ color: "var(--negis-primary)", letterSpacing: 0 }}>Связь с CRM</p>
               <h2 id="advertising-crm-results-title" className="mt-1 text-lg font-semibold" style={{ color: "var(--negis-text)" }}>Результат в CRM</h2>
               <p className="mt-1 max-w-2xl text-sm leading-relaxed" style={{ color: "var(--negis-muted)" }}>
-                Только заявки и оплаченные продажи, которые вручную связаны с рекламными кампаниями.
+                Заявки, оплаченные продажи и точная связь продажи с записью. Рекламная атрибуция считается только по выбранной кампании.
               </p>
             </div>
             <div className="flex flex-wrap gap-3 text-sm font-semibold">
@@ -1193,7 +1237,7 @@ export default function AdvertisingHub() {
             <div className="negis-glass p-5 text-sm font-medium" style={{ color: "var(--negis-muted)" }}>Загружаем связанные заявки и продажи…</div>
           ) : crmOutcomesAccess === "ready" ? (
             <>
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
                 <MetricCard
                   label="Заявки с рекламой"
                   value={crmOutcomes.attributedLeads}
@@ -1209,6 +1253,13 @@ export default function AdvertisingHub() {
                   delta={`Оплачены без связи: ${crmOutcomes.paidUnattributedDeals}`}
                 />
                 <MetricCard
+                  label="Оплаченные записи"
+                  value={crmOutcomes.paidAppointmentDeals}
+                  icon={CheckCircle2}
+                  tone="secondary"
+                  delta={`С рекламой: ${crmOutcomes.paidAttributedAppointmentDeals} · без записи: ${crmOutcomes.paidAttributedDeals + crmOutcomes.paidUnattributedDeals - crmOutcomes.paidAppointmentDeals}`}
+                />
+                <MetricCard
                   label="Связанная выручка CRM"
                   value={crmRevenueValue}
                   icon={WalletCards}
@@ -1218,7 +1269,7 @@ export default function AdvertisingHub() {
               </div>
               <div className="mt-3 flex flex-col gap-3 border-l-4 px-4 py-3 sm:flex-row sm:items-center sm:justify-between" style={{ borderColor: "var(--negis-primary)", background: "var(--negis-primary-soft)" }}>
                 <p className="min-w-0 text-xs leading-relaxed" style={{ color: "var(--negis-muted)" }}>
-                  Связи с рекламой устанавливаются вручную. Выручка CRM показана отдельно от расходов Meta и не доказывает результат рекламы.
+                  Связь продажи с записью считается только по сохранённому appointment ID. Связи с рекламой устанавливаются вручную. Выручка CRM показана отдельно от расходов Meta и не доказывает результат рекламы. {formatInsightsUpdate(crmOutcomes.generatedAt)}.
                 </p>
                 {crmOutcomes.unattributedLeads > 0 ? (
                   <Link href="/leads"><span className="neu-btn inline-flex min-h-10 shrink-0 cursor-pointer items-center justify-center whitespace-nowrap text-sm">Связать заявки</span></Link>

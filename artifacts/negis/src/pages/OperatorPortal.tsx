@@ -325,7 +325,10 @@ export default function OperatorPortal() {
               сотрудничества открывает только согласованный список заявок.
               Медицинская история и реклама недоступны.
             </p>
-            <OperatorRequests key={`${userId}:${revision}`} />
+            <OperatorRequests
+              key={`${userId}:${revision}`}
+              actorId={userId}
+            />
           </>
         )}
         <footer className="flex gap-4 text-sm opacity-70">

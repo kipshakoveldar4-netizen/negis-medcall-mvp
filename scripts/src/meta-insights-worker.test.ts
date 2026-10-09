@@ -40,6 +40,26 @@ const workerAuth = (await import(`${pathToFileURL(workerAuthPath).href}?test=${D
   }): { requestId: string; timestamp: number; nonce: string };
   resolveSignedRawBody(source: { rawBody?: unknown; body?: unknown }): Buffer;
 };
+const metaWorkspacePath = path.join(repoRoot, "lib", "meta", "workspace.ts");
+const metaWorkspace = (await import(`${pathToFileURL(metaWorkspacePath).href}?test=${Date.now()}`)) as {
+  MetaWorkspaceBoundaryError: new (...args: unknown[]) => Error & {
+    statusCode: number;
+    code: string;
+  };
+  MetaAccountBoundaryError: new (...args: unknown[]) => Error & {
+    statusCode: number;
+    code: string;
+  };
+  normalizeMetaAdAccountId(value: unknown): string;
+  requireMetaProvisionedAdAccount(
+    adAccountId: unknown,
+    env?: Record<string, string | undefined>,
+  ): void;
+  requireMetaProvisionedWorkspace(
+    workspaceId: string,
+    env?: Record<string, string | undefined>,
+  ): void;
+};
 
 const TEST_SECRET = "unit-test-worker-secret-value";
 const CYCLE_PATH = workerAuth.META_INSIGHTS_BACKGROUND_CYCLE_PATH;
@@ -234,6 +254,57 @@ test("10 verifyWorkerRequest rejects tampering, skew, and malformed headers", ()
   );
 });
 
+test("10a Meta workspace boundary fails closed and accepts only the provisioned workspace", () => {
+  const workspaceA = "9eb6f100-bb6a-4f99-9719-e85c34513a03";
+  const workspaceB = "1b64b1ba-741d-4f85-8bf8-653c3ca63db8";
+
+  assert.throws(
+    () => metaWorkspace.requireMetaProvisionedWorkspace(workspaceA, {}),
+    (error: unknown) =>
+      error instanceof metaWorkspace.MetaWorkspaceBoundaryError &&
+      error.statusCode === 503 &&
+      error.code === "meta_workspace_not_provisioned",
+  );
+  assert.throws(
+    () => metaWorkspace.requireMetaProvisionedWorkspace(workspaceA, { META_WORKSPACE_ID: workspaceB }),
+    (error: unknown) =>
+      error instanceof metaWorkspace.MetaWorkspaceBoundaryError &&
+      error.statusCode === 403 &&
+      error.code === "meta_workspace_not_authorized",
+  );
+  assert.doesNotThrow(() =>
+    metaWorkspace.requireMetaProvisionedWorkspace(workspaceA, { META_WORKSPACE_ID: workspaceA.toUpperCase() }),
+  );
+});
+
+test("10b Meta account boundary normalizes act_ and rejects missing or foreign accounts", () => {
+  const env = { META_AD_ACCOUNT_ID: "act_123456789" };
+  assert.equal(metaWorkspace.normalizeMetaAdAccountId(" ACT_123456789 "), "123456789");
+  assert.equal(metaWorkspace.normalizeMetaAdAccountId("not-an-account"), "");
+  assert.doesNotThrow(() => metaWorkspace.requireMetaProvisionedAdAccount("123456789", env));
+  assert.throws(
+    () => metaWorkspace.requireMetaProvisionedAdAccount("", env),
+    (error: unknown) =>
+      error instanceof metaWorkspace.MetaAccountBoundaryError &&
+      error.statusCode === 400 &&
+      error.code === "meta_account_id_required",
+  );
+  assert.throws(
+    () => metaWorkspace.requireMetaProvisionedAdAccount("act_987654321", env),
+    (error: unknown) =>
+      error instanceof metaWorkspace.MetaAccountBoundaryError &&
+      error.statusCode === 403 &&
+      error.code === "meta_account_not_authorized",
+  );
+  assert.throws(
+    () => metaWorkspace.requireMetaProvisionedAdAccount("123456789", {}),
+    (error: unknown) =>
+      error instanceof metaWorkspace.MetaAccountBoundaryError &&
+      error.statusCode === 503 &&
+      error.code === "meta_account_not_provisioned",
+  );
+});
+
 // ---------------------------------------------------------------------------
 // Source-marker checks for replay/dedup, the cycle endpoint, and the worker.
 // These assert the security-critical wiring without touching production data.
@@ -263,6 +334,11 @@ const coreSlice = sliceBetween(
   "async function syncMetaInsightsForLaunch",
   "type ClaimedInsightsState",
 );
+const launchContextSlice = sliceBetween(
+  crmServerSource,
+  "async function loadMetaInsightsLaunchContext",
+  "function normalizedInsightToDatabaseRow",
+);
 const cycleSlice = sliceBetween(
   crmServerSource,
   "export async function handleMetaInsightsBackgroundCycle",
@@ -288,6 +364,13 @@ test("12 duplicate insert on a request_key is treated as already_processed, not 
   assert.ok(cycleSlice.includes("requestKey: `bg:${verified.requestId}:${state.metaCampaignLaunchId}`"));
 });
 
+test("12a configured Insights account metadata never falls back to a different saved account", () => {
+  assert.ok(launchContextSlice.includes("const account = preferredAccount"));
+  assert.ok(launchContextSlice.includes("normalizeMetaAdAccountId(row.ad_account_id) === preferredAccount"));
+  assert.ok(launchContextSlice.includes("|| {}"));
+  assert.ok(!launchContextSlice.includes("normalizeMetaAdAccountId(row.ad_account_id) === preferredAccount) ||\n    accounts[0]"));
+});
+
 // Background cycle endpoint (tests 13–26)
 test("13 the cycle endpoint is registered in the existing catch-all and adds no new api file", () => {
   // Security-2B routes through an explicit registry and switch instead of an
@@ -307,6 +390,24 @@ test("15 the cycle intersects requested workspaceIds with the server allowlist",
   assert.ok(cycleSlice.includes("authConfig.workspaceAllowlist"));
   assert.ok(cycleSlice.includes("allowlist.includes(id)"));
   assert.ok(cycleSlice.includes("effectiveWorkspaceIds"));
+});
+
+test("15a the cycle binds every effective workspace to META_WORKSPACE_ID before persistence", () => {
+  const boundaryCheck = cycleSlice.indexOf("requireMetaProvisionedWorkspace(workspaceId)");
+  const persistenceStart = cycleSlice.indexOf("getSupabaseServerClient()");
+  assert.notEqual(boundaryCheck, -1, "the worker must enforce the Meta workspace boundary");
+  assert.notEqual(persistenceStart, -1, "the worker must initialize persistence");
+  assert.ok(boundaryCheck < persistenceStart, "workspace rejection must happen before Supabase claims any work");
+  assert.ok(cycleSlice.includes("error instanceof MetaWorkspaceBoundaryError"));
+  assert.ok(cycleSlice.includes("code: error.code"));
+});
+
+test("15b claimed rows cannot escape the already-authorized workspace set", () => {
+  assert.ok(cycleSlice.includes("effectiveWorkspaceIds.includes(state.workspaceId.toLowerCase())"));
+  const rowBoundary = cycleSlice.indexOf("effectiveWorkspaceIds.includes(state.workspaceId.toLowerCase())");
+  const providerSync = cycleSlice.indexOf("await syncMetaInsightsForLaunch({");
+  assert.notEqual(providerSync, -1);
+  assert.ok(rowBoundary < providerSync, "a foreign claimed row must be skipped before Meta sync");
 });
 
 test("16 maxLaunches defaults to 2 with an absolute maximum of 10", () => {

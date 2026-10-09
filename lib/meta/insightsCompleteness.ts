@@ -66,6 +66,14 @@ export type MetaInsightsCompletenessResult = {
   lastCompleteDate: string | null;
 };
 
+export type MetaInsightsDataFreshness = "fresh" | "stale" | "unknown";
+
+export type ClassifyMetaInsightsDataFreshnessInput = {
+  latestFetchedAt: string | null | undefined;
+  checkedAt: string;
+  freshnessSlaHours: number;
+};
+
 const DAY_MS = 86_400_000;
 
 type NumericDateRange = {
@@ -95,6 +103,34 @@ function parseTimestamp(value: string, fieldName: string): number {
   if (!Number.isFinite(timestamp))
     throw new Error(`${fieldName} must be a valid timestamp`);
   return timestamp;
+}
+
+export function classifyMetaInsightsDataFreshness(
+  input: ClassifyMetaInsightsDataFreshnessInput,
+): MetaInsightsDataFreshness {
+  const checkedAt = parseTimestamp(input.checkedAt, "checkedAt");
+  if (
+    !Number.isFinite(input.freshnessSlaHours) ||
+    input.freshnessSlaHours <= 0
+  ) {
+    throw new Error("freshnessSlaHours must be positive");
+  }
+
+  const latestFetchedAt = input.latestFetchedAt?.trim();
+  if (!latestFetchedAt || !/(?:z|[+-]\d{2}:\d{2})$/i.test(latestFetchedAt)) {
+    return "unknown";
+  }
+  const latestFetchedTimestamp = Date.parse(latestFetchedAt);
+  if (
+    !Number.isFinite(latestFetchedTimestamp) ||
+    latestFetchedTimestamp > checkedAt
+  ) {
+    return "unknown";
+  }
+
+  const freshnessDeadline =
+    checkedAt - input.freshnessSlaHours * 3_600_000;
+  return latestFetchedTimestamp >= freshnessDeadline ? "fresh" : "stale";
 }
 
 function toDateKey(day: number): string {

@@ -27,7 +27,7 @@ export function persistAppointmentCreateAttempt(
     const serialized = JSON.stringify({ version: 1, ...attempt });
     if (serialized.length > MAX_STORED_ATTEMPT_LENGTH) return false;
     storage.setItem(APPOINTMENT_ATTEMPT_SESSION_KEY, serialized);
-    return true;
+    return storage.getItem(APPOINTMENT_ATTEMPT_SESSION_KEY) === serialized;
   } catch {
     return false;
   }

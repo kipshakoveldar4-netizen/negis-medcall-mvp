@@ -224,3 +224,12 @@ test("BF16 сначала выбирают мастера, затем видят
   assert.ok(page.includes("Другая услуга…"), "после выбора мастера остаётся ручная услуга");
   assert.ok(page.includes('"Цена, ₸"') && page.includes('value={form.priceTenge}'), "у ручной услуги остаётся редактируемая цена");
 });
+
+test("BF17 все активные CRM-маршруты записи используют одну защищённую форму", async () => {
+  const app = await read("artifacts", "negis", "src", "App.tsx");
+  assert.match(app, /const AppointmentsRoute = \(\) => <ProtectedPage component=\{AppointmentsPage\} permission="booking" \/>/);
+  assert.match(app, /<Route path="\/booking" component=\{AppointmentsRoute\} \/>/);
+  assert.match(app, /<Route path="\/appointments" component=\{AppointmentsRoute\} \/>/);
+  assert.equal((app.match(/component=\{AppointmentsRoute\}/g) || []).length, 2);
+  assert.ok(!app.includes("DemoAppointments"), "демонстрационная форма не должна быть доступна из маршрутизатора");
+});

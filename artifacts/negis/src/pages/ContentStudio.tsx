@@ -32,6 +32,15 @@ import {
 } from "../../../../lib/advertising/campaignBrief";
 import { checkMetaCompliance } from "../../../../lib/meta/compliance";
 import type { ContentAdVariant, ContentPackage } from "../../../../lib/content-studio/core";
+import {
+  clearStoredPaidGenerationAttempt,
+  readStoredPaidGenerationAttempt,
+  resolvePaidGenerationAttempt,
+  shouldKeepPaidGenerationAttempt,
+  writeStoredPaidGenerationAttempt,
+  type PaidGenerationAttempt,
+  type PaidGenerationKind,
+} from "../../../../lib/content-studio/paid-generation";
 
 type ContentVideoStatus = "idea" | "script_ready" | "avatar_ready" | "telegram_ready";
 
@@ -79,6 +88,7 @@ type ApiResponse<TData> =
       telegramErrorCode?: number;
       status?: number;
       hint?: string;
+      code?: string;
     };
 
 type TelegramResponse = {
@@ -594,12 +604,26 @@ function withWorkspace(path: string): string {
   return `${path}${path.includes("?") ? "&" : "?"}workspaceId=${encodeURIComponent(workspaceId)}`;
 }
 
-function paidGenerationHeaders(): Record<string, string> {
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (typeof globalThis.crypto?.randomUUID === "function") {
-    headers["X-Idempotency-Key"] = globalThis.crypto.randomUUID();
-  }
-  return headers;
+function paidGenerationHeaders(requestKey: string): Record<string, string> {
+  return { "Content-Type": "application/json", "X-Idempotency-Key": requestKey };
+}
+
+const PAID_GENERATION_ATTEMPT_KEY = "negis_content_studio_paid_generation_attempt";
+
+function paidGenerationAttemptKey(kind: PaidGenerationKind): string {
+  return workspaceScopedKey(`${PAID_GENERATION_ATTEMPT_KEY}:${kind}`);
+}
+
+function readBrowserPaidGenerationAttempt(kind: PaidGenerationKind): PaidGenerationAttempt | null {
+  return readStoredPaidGenerationAttempt(window.sessionStorage, paidGenerationAttemptKey(kind));
+}
+
+function writeBrowserPaidGenerationAttempt(kind: PaidGenerationKind, attempt: PaidGenerationAttempt): void {
+  writeStoredPaidGenerationAttempt(window.sessionStorage, paidGenerationAttemptKey(kind), attempt);
+}
+
+function clearBrowserPaidGenerationAttempt(kind: PaidGenerationKind): void {
+  clearStoredPaidGenerationAttempt(window.sessionStorage, paidGenerationAttemptKey(kind));
 }
 
 function readVideos(): ContentVideo[] {
@@ -757,6 +781,8 @@ export default function ContentStudio() {
   const [videoJob, setVideoJob] = useState<VideoJobState | null>(null);
   const [generationUsage, setGenerationUsage] = useState<GenerationUsageSummary | null>(null);
   const [generationUsageLoading, setGenerationUsageLoading] = useState(true);
+  const photoGenerationAttempt = useRef<PaidGenerationAttempt | null>(null);
+  const videoGenerationAttempt = useRef<PaidGenerationAttempt | null>(null);
 
   const refreshGenerationUsage = useCallback(async () => {
     setGenerationUsageLoading(true);
@@ -959,16 +985,19 @@ export default function ContentStudio() {
       let fileName = `photo-creative-${Date.now()}.jpg`;
       if (hasSupabaseFrontendEnv) {
         try {
-          const signedResponse = await crmFetch("/api/crm/ad-creatives/signed-upload", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                            fileName,
-              fileType: "image",
-              mimeType: "image/jpeg",
-              fileSize: photoBlob.size,
-            }),
-          });
+          const signedResponse = await crmFetch(
+            `/api/crm/ad-creatives/signed-upload?workspaceId=${encodeURIComponent(readWorkspaceId())}`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                fileName,
+                fileType: "image",
+                mimeType: "image/jpeg",
+                fileSize: photoBlob.size,
+              }),
+            },
+          );
           const signedBody = await safeJson<{ bucket?: string; storageBucket?: string; storagePath?: string; token?: string; publicUrl?: string }>(signedResponse);
           if (signedResponse.ok && signedBody?.success === true) {
             const bucket = signedBody.data.bucket || signedBody.data.storageBucket || "ad-creatives";
@@ -1066,12 +1095,32 @@ export default function ContentStudio() {
       return;
     }
 
+    let attempt: PaidGenerationAttempt;
+    try {
+      photoGenerationAttempt.current = readBrowserPaidGenerationAttempt("photo");
+      attempt = resolvePaidGenerationAttempt(
+        photoGenerationAttempt.current,
+        { kind: "photo", prompt, format: genFormat },
+        () => globalThis.crypto?.randomUUID?.() || "",
+      );
+      // The request cannot reach the paid provider until its retry key survives
+      // a full reload of this tab.
+      writeBrowserPaidGenerationAttempt("photo", attempt);
+      photoGenerationAttempt.current = attempt;
+    } catch (error) {
+      setGenNotice({
+        tone: "error",
+        text: error instanceof Error ? error.message : "Не удалось защитить платную генерацию от повтора.",
+      });
+      return;
+    }
+
     setGenBusy("photo");
     setGenNotice(null);
     try {
       const response = await crmFetch(withWorkspace("/api/content-studio/generate-photo"), {
         method: "POST",
-        headers: paidGenerationHeaders(),
+        headers: paidGenerationHeaders(attempt.requestKey),
         body: JSON.stringify({ prompt, format: genFormat }),
       });
       const body = await safeJson<{
@@ -1082,12 +1131,26 @@ export default function ContentStudio() {
         model: string;
         fileSize: number;
       }>(response);
+      const keepAttempt = shouldKeepPaidGenerationAttempt({
+        responseReceived: true,
+        status: response.status,
+        success: body?.success,
+        code: body?.success === false ? body.code : undefined,
+      });
+      if (!keepAttempt && photoGenerationAttempt.current === attempt) {
+        photoGenerationAttempt.current = null;
+        clearBrowserPaidGenerationAttempt("photo");
+      }
 
       if (!response.ok || body?.success !== true) {
         void refreshGenerationUsage();
         setGenNotice({
           tone: "error",
-          text: generationRefusalText(body, response.status, "Не удалось сгенерировать изображение"),
+          text: `${generationRefusalText(body, response.status, "Не удалось сгенерировать изображение")}${
+            keepAttempt && (body?.success !== false || body.code !== "generation_request_duplicate")
+              ? " Повтор без изменения описания использует прежний защитный ключ и не запустит второй платный запрос."
+              : ""
+          }`,
         });
         return;
       }
@@ -1114,7 +1177,7 @@ export default function ContentStudio() {
     } catch (error) {
       setGenNotice({
         tone: "error",
-        text: error instanceof Error ? error.message : "Не удалось сгенерировать изображение",
+        text: `${error instanceof Error ? error.message : "Не удалось сгенерировать изображение"} Повтор без изменения описания использует прежний защитный ключ и не запустит второй платный запрос.`,
       });
     } finally {
       setGenBusy(null);
@@ -1125,6 +1188,24 @@ export default function ContentStudio() {
     const prompt = genPrompt.trim();
     if (!prompt) {
       setGenNotice({ tone: "warning", text: "Опишите ролик — без описания генерировать нечего." });
+      return;
+    }
+
+    let attempt: PaidGenerationAttempt;
+    try {
+      videoGenerationAttempt.current = readBrowserPaidGenerationAttempt("video");
+      attempt = resolvePaidGenerationAttempt(
+        videoGenerationAttempt.current,
+        { kind: "video", prompt, format: genFormat },
+        () => globalThis.crypto?.randomUUID?.() || "",
+      );
+      writeBrowserPaidGenerationAttempt("video", attempt);
+      videoGenerationAttempt.current = attempt;
+    } catch (error) {
+      setGenNotice({
+        tone: "error",
+        text: error instanceof Error ? error.message : "Не удалось защитить платную генерацию от повтора.",
+      });
       return;
     }
 
@@ -1141,7 +1222,7 @@ export default function ContentStudio() {
     try {
       const response = await crmFetch(withWorkspace("/api/content-studio/generate-video"), {
         method: "POST",
-        headers: paidGenerationHeaders(),
+        headers: paidGenerationHeaders(attempt.requestKey),
         body: JSON.stringify({ prompt, format: genFormat }),
       });
       const body = await safeJson<{
@@ -1150,13 +1231,27 @@ export default function ContentStudio() {
         progress: number;
         formatSubstituted: boolean;
       }>(response);
+      const keepAttempt = shouldKeepPaidGenerationAttempt({
+        responseReceived: true,
+        status: response.status,
+        success: body?.success,
+        code: body?.success === false ? body.code : undefined,
+      });
+      if (!keepAttempt && videoGenerationAttempt.current === attempt) {
+        videoGenerationAttempt.current = null;
+        clearBrowserPaidGenerationAttempt("video");
+      }
 
       if (!response.ok || body?.success !== true) {
         void refreshGenerationUsage();
         setVideoJob(null);
         setGenNotice({
           tone: "error",
-          text: generationRefusalText(body, response.status, "Не удалось запустить генерацию видео"),
+          text: `${generationRefusalText(body, response.status, "Не удалось запустить генерацию видео")}${
+            keepAttempt && (body?.success !== false || body.code !== "generation_request_duplicate")
+              ? " Повтор без изменения описания использует прежний защитный ключ и не запустит второй платный запрос."
+              : ""
+          }`,
         });
         return;
       }
@@ -1175,7 +1270,7 @@ export default function ContentStudio() {
       setVideoJob(null);
       setGenNotice({
         tone: "error",
-        text: error instanceof Error ? error.message : "Не удалось запустить генерацию видео",
+        text: `${error instanceof Error ? error.message : "Не удалось запустить генерацию видео"} Повтор без изменения описания использует прежний защитный ключ и не запустит второй платный запрос.`,
       });
     } finally {
       setGenBusy(null);
@@ -1232,9 +1327,14 @@ export default function ContentStudio() {
           return;
         }
 
+        const completedUrl =
+          body.data.status === "completed" && typeof body.data.creativeUrl === "string"
+            ? body.data.creativeUrl.trim()
+            : "";
+        const visibleStatus = body.data.status === "completed" && !completedUrl ? "failed" : body.data.status;
         setVideoJob((current) =>
           current && current.handle === handle
-            ? { ...current, status: body.data.status, progress: body.data.progress }
+            ? { ...current, status: visibleStatus, progress: body.data.progress }
             : current,
         );
 
@@ -1247,16 +1347,15 @@ export default function ContentStudio() {
         }
 
         if (body.data.status === "completed") {
-          const url = body.data.creativeUrl || "";
-          if (!url) {
+          if (!completedUrl) {
             setGenNotice({
               tone: "error",
-              text: "Сервис сообщил, что ролик готов, но ссылка на файл не пришла.",
+              text: "Сервис сообщил, что ролик готов, но ссылка на файл не пришла. Нажмите «Проверить ещё раз»: новый платный рендер не запустится.",
             });
             return;
           }
           setGenVideo({
-            url,
+            url: completedUrl,
             assetId: body.data.assetId,
             fileName: body.data.fileName,
             mimeType: body.data.mimeType || "video/mp4",
@@ -2217,7 +2316,7 @@ export default function ContentStudio() {
                 ) : null}
               </div>
             ) : (
-              <p className="mt-2 text-sm font-semibold text-[#64748B]">Лимит проверится перед генерацией.</p>
+              <p className="mt-2 text-sm font-semibold text-amber-800">Не удалось проверить лимит. Нажмите «Обновить».</p>
             )}
           </div>
 
@@ -2276,9 +2375,12 @@ export default function ContentStudio() {
               className="neu-btn-primary inline-flex items-center gap-2 px-4 py-2.5 text-sm"
               disabled={
                 genBusy !== null ||
+                generationUsageLoading ||
+                !generationUsage ||
                 Boolean(
-                  generationUsage?.trackingAvailable &&
-                    (!generationUsage.images.enabled || generationUsage.images.remaining === 0),
+                  !generationUsage.trackingAvailable ||
+                    !generationUsage.images.enabled ||
+                    generationUsage.images.remaining === 0,
                 )
               }
               onClick={() => void generatePhoto()}
@@ -2291,13 +2393,15 @@ export default function ContentStudio() {
               className="neu-btn inline-flex items-center gap-2 px-4 py-2.5 text-sm"
               disabled={
                 genBusy !== null ||
+                generationUsageLoading ||
+                !generationUsage ||
                 videoJob?.status === "queued" ||
                 videoJob?.status === "in_progress" ||
                 Boolean(
-                  generationUsage?.trackingAvailable &&
-                    (!generationUsage.videoSeconds.enabled ||
-                      (generationUsage.videoSeconds.remaining !== null &&
-                        generationUsage.videoSeconds.remaining < generationUsage.videoSecondsPerGeneration)),
+                  !generationUsage.trackingAvailable ||
+                    !generationUsage.videoSeconds.enabled ||
+                    (generationUsage.videoSeconds.remaining !== null &&
+                      generationUsage.videoSeconds.remaining < generationUsage.videoSecondsPerGeneration),
                 )
               }
               onClick={() => void generateVideo()}

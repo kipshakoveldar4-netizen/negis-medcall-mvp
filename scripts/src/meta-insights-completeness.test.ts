@@ -42,6 +42,11 @@ type CompletenessResult = {
   lastCompleteDate: string | null;
 };
 type CompletenessModule = {
+  classifyMetaInsightsDataFreshness(input: {
+    latestFetchedAt: string | null | undefined;
+    checkedAt: string;
+    freshnessSlaHours: number;
+  }): "fresh" | "stale" | "unknown";
   evaluateMetaInsightsCompleteness(
     input: EvaluateMetaInsightsCompletenessInput,
   ): CompletenessResult;
@@ -58,11 +63,68 @@ type CompletenessModule = {
 const completeness = ((importedCompleteness as { default?: unknown }).default ??
   importedCompleteness) as CompletenessModule;
 const {
+  classifyMetaInsightsDataFreshness,
   evaluateMetaInsightsCompleteness,
   findMetaInsightsUnknownGaps,
   isMetaInsightsLeaseActive,
   mergeMetaInsightsDateRanges,
 } = completeness;
+
+test("history freshness uses the same explicit SLA boundary", () => {
+  const checkedAt = "2026-07-14T12:00:00.000Z";
+  assert.equal(
+    classifyMetaInsightsDataFreshness({
+      latestFetchedAt: "2026-07-13T00:00:00.000Z",
+      checkedAt,
+      freshnessSlaHours: 36,
+    }),
+    "fresh",
+  );
+  assert.equal(
+    classifyMetaInsightsDataFreshness({
+      latestFetchedAt: "2026-07-12T23:59:59.999Z",
+      checkedAt,
+      freshnessSlaHours: 36,
+    }),
+    "stale",
+  );
+});
+
+test("history freshness stays unknown for missing, invalid or future timestamps", () => {
+  const base = {
+    checkedAt: "2026-07-14T12:00:00.000Z",
+    freshnessSlaHours: 36,
+  };
+  assert.equal(classifyMetaInsightsDataFreshness({ ...base, latestFetchedAt: null }), "unknown");
+  assert.equal(classifyMetaInsightsDataFreshness({ ...base, latestFetchedAt: "not-a-date" }), "unknown");
+  assert.equal(
+    classifyMetaInsightsDataFreshness({ ...base, latestFetchedAt: "2026-07-14T12:00:00" }),
+    "unknown",
+  );
+  assert.equal(
+    classifyMetaInsightsDataFreshness({ ...base, latestFetchedAt: "2026-07-14T12:00:00.001Z" }),
+    "unknown",
+  );
+});
+
+test("history freshness rejects an invalid clock or SLA", () => {
+  assert.throws(
+    () => classifyMetaInsightsDataFreshness({
+      latestFetchedAt: "2026-07-14T10:00:00.000Z",
+      checkedAt: "2026-07-14T12:00:00",
+      freshnessSlaHours: 36,
+    }),
+    /checkedAt must include an explicit timezone offset/,
+  );
+  assert.throws(
+    () => classifyMetaInsightsDataFreshness({
+      latestFetchedAt: "2026-07-14T10:00:00.000Z",
+      checkedAt: "2026-07-14T12:00:00.000Z",
+      freshnessSlaHours: 0,
+    }),
+    /freshnessSlaHours must be positive/,
+  );
+});
 
 const baseInput: EvaluateMetaInsightsCompletenessInput = {
   launchEligible: true,

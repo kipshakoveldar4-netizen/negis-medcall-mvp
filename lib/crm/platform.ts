@@ -389,10 +389,17 @@ async function handleSubscriptions(req: VercelRequest, res: VercelResponse) {
       details: ["Укажите цену в тиынах. Ноль — законное значение, но его нужно указать явно."],
     });
   }
-  const priceMinor = Math.trunc(priceNumber);
-  if (priceMinor < 0) {
+  if (priceNumber < 0) {
     return sendJson(res, 400, { success: false, error: "Цена не может быть отрицательной", code: "price_invalid" });
   }
+  if (!Number.isSafeInteger(priceNumber)) {
+    return sendJson(res, 400, {
+      success: false,
+      error: "Цена должна быть целым числом в тиынах",
+      code: "price_invalid",
+    });
+  }
+  const priceMinor = priceNumber;
 
   const billingPeriod = readString(body.billingPeriod ?? body.billing_period) || "monthly";
   if (!["monthly", "yearly"].includes(billingPeriod)) {
@@ -400,55 +407,57 @@ async function handleSubscriptions(req: VercelRequest, res: VercelResponse) {
   }
 
   const currency = (readString(body.currency) || "KZT").toUpperCase();
-  const now = new Date().toISOString();
-
-  // POST — новая подписка. Прежняя действующая закрывается: частичный
-  // уникальный индекс миграции 034 не даст существовать двум сразу, и лучше
-  // закрыть её здесь явно, чем получить отказ базы с непонятным текстом.
-  const { error: cancelError } = await supabase
-    .from("platform_subscriptions")
-    .update({ status: "cancelled", ended_at: now, updated_at: now })
-    .eq("workspace_id", workspaceId)
-    .eq("status", "active");
-
-  // Отказ отмены игнорировать нельзя: следом идёт вставка, а частичный
-  // уникальный индекс не даст существовать двум действующим подпискам сразу.
-  // Молча проглотив отказ, мы получили бы непонятную ошибку базы вместо
-  // внятной причины.
-  if (cancelError) {
-    return sendJson(res, 502, {
+  if (!/^[A-Z]{3}$/.test(currency)) {
+    return sendJson(res, 400, {
       success: false,
-      error: "Не удалось закрыть прежнюю подписку",
-      code: "unavailable",
-      details: ["Новая подписка не создана: у клиники осталась прежняя.", cancelError.message],
+      error: "Нужна валюта из трёх букв",
+      code: "currency_invalid",
     });
   }
 
-  const { data, error } = await supabase
-    .from("platform_subscriptions")
-    .insert({
-      workspace_id: workspaceId,
-      plan,
-      status: "active",
-      price_minor: priceMinor,
-      currency,
-      billing_period: billingPeriod,
-      started_at: now,
-      note: readString(body.note) || null,
-    })
-    .select("*")
-    .maybeSingle();
+  const note = readString(body.note);
+  if (note.length > 2000) {
+    return sendJson(res, 400, {
+      success: false,
+      error: "Комментарий слишком длинный",
+      code: "note_invalid",
+    });
+  }
+
+  // Cancellation and replacement must commit together. This RPC locks the
+  // clinic row, closes the previous active subscription and inserts the new
+  // one in a single transaction. It is manual plan assignment, not payment
+  // confirmation; a future provider webhook must use its own verified order.
+  const { data, error } = await supabase.rpc("replace_platform_subscription", {
+    p_workspace_id: workspaceId,
+    p_plan: plan,
+    p_price_minor: priceMinor,
+    p_currency: currency,
+    p_billing_period: billingPeriod,
+    p_note: note || null,
+  });
 
   if (error) {
-    return sendJson(res, 502, {
+    const migrationMissing = error.code === "PGRST202" || /replace_platform_subscription/i.test(error.message || "");
+    return sendJson(res, migrationMissing ? 503 : 502, {
       success: false,
-      error: "Не удалось создать подписку",
-      code: "unavailable",
-      details: [error.message],
+      error: migrationMissing
+        ? "Обновите схему подписок перед назначением тарифа"
+        : "Не удалось заменить подписку. Прежняя подписка сохранена.",
+      code: migrationMissing ? "subscription_transition_unavailable" : "unavailable",
     });
   }
 
-  return sendJson(res, 201, { success: true, data: { item: asRecord(data) } });
+  const item = asRecord(data);
+  if (!UUID_PATTERN.test(readString(item.id)) || readString(item.workspace_id) !== workspaceId) {
+    return sendJson(res, 502, {
+      success: false,
+      error: "База не подтвердила новую подписку",
+      code: "subscription_transition_unconfirmed",
+    });
+  }
+
+  return sendJson(res, 201, { success: true, data: { item } });
 }
 
 /**

@@ -9,10 +9,21 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."
 type UsageModule = {
   billableVideoSeconds: (value: unknown) => number;
   quotaForPlan: (plan: "basic" | "standard" | "pro" | null, kind: "text_request" | "image" | "video_seconds") => number | null;
+  reserveContentGeneration: (input: {
+    workspaceId: string;
+    staffUserId: string;
+    requestKey: string;
+    operation: "content_package" | "generated_image";
+    kind: "text_request" | "image";
+    units: number;
+  }) => Promise<{ allowed: boolean; tracked: boolean; warning?: string }>;
   summarizeUsageRows: (rows: Array<{ kind?: unknown; units?: unknown; status?: unknown }>) => Record<string, number>;
 };
 
 const usage = await import(pathToFileURL(path.join(repoRoot, "lib", "content-studio", "usage.ts")).href) as UsageModule;
+const supabaseServer = await import(pathToFileURL(path.join(repoRoot, "lib", "supabase", "server.ts")).href) as {
+  setSupabaseServerClientFactoryForTests: (factory: (() => unknown) | null) => void;
+};
 const migration = await readFile(path.join(repoRoot, "migrations", "051_content_generation_usage.sql"), "utf8");
 const route = await readFile(path.join(repoRoot, "api", "content-studio", "[...path].ts"), "utf8");
 const page = await readFile(path.join(repoRoot, "artifacts", "negis", "src", "pages", "ContentStudio.tsx"), "utf8");
@@ -99,4 +110,53 @@ test("CU7 platform owner sees workspace totals without prompts or generation pay
   assert.match(platformCard, /не хранит prompts, готовый контент, ссылки, ответы провайдера или ключи/);
   const responseShape = clinicHandler.slice(clinicHandler.lastIndexOf("return sendJson(res, 200"));
   assert.doesNotMatch(responseShape, /prompt|raw_response|public_url|access_token|service_role_key/i);
+});
+
+test("CU8 paid media fails closed when its usage receipt cannot be written", async () => {
+  const input = {
+    workspaceId: "11111111-1111-4111-8111-111111111111",
+    staffUserId: "22222222-2222-4222-8222-222222222222",
+    requestKey: "33333333-3333-4333-8333-333333333333",
+    operation: "generated_image" as const,
+    kind: "image" as const,
+    units: 1,
+  };
+
+  try {
+    supabaseServer.setSupabaseServerClientFactoryForTests(() => null);
+    await assert.rejects(() => usage.reserveContentGeneration(input), /не списывать средства без квитанции/i);
+
+    const chain: Record<string, unknown> = {};
+    chain.select = () => chain;
+    chain.eq = () => chain;
+    chain.order = () => chain;
+    chain.limit = async () => ({ data: [{ plan: "pro" }], error: null });
+    const missingFoundation = {
+      from: () => chain,
+      rpc: async () => ({ data: null, error: { code: "PGRST202", message: "reserve_content_generation_usage missing" } }),
+    };
+    supabaseServer.setSupabaseServerClientFactoryForTests(() => missingFoundation);
+    await assert.rejects(() => usage.reserveContentGeneration(input), /не списывать средства без квитанции/i);
+
+    const text = await usage.reserveContentGeneration({
+      ...input,
+      operation: "content_package",
+      kind: "text_request",
+    });
+    assert.equal(text.allowed, true);
+    assert.equal(text.tracked, false);
+    assert.match(text.warning || "", /не подключён/i);
+    assert.equal(
+      (page.match(/!generationUsage\.trackingAvailable/g) || []).length,
+      2,
+      "both paid media buttons must stay disabled while tracking is unavailable",
+    );
+    assert.equal(
+      (page.match(/generationUsageLoading \|\|\s*!generationUsage/g) || []).length,
+      2,
+      "both paid media buttons must stay disabled before a usage check succeeds",
+    );
+  } finally {
+    supabaseServer.setSupabaseServerClientFactoryForTests(null);
+  }
 });

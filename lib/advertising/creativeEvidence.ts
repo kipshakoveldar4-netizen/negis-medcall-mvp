@@ -11,6 +11,8 @@ export type CreativeEvidenceAvailability =
   | "failed"
   | "unavailable";
 
+export type CreativeEvidenceFreshness = "fresh" | "stale" | "unknown";
+
 export type CreativeEvidenceLaunchInput = {
   id: string;
   campaignName: string;
@@ -21,6 +23,7 @@ export type CreativeEvidenceLaunchInput = {
 export type CreativeEvidenceInsightsInput = {
   metaCampaignLaunchId: string;
   availability: CreativeEvidenceAvailability;
+  freshness: CreativeEvidenceFreshness;
   coveredDateStart: string | null;
   coveredDateStop: string | null;
   latestFetchedAt: string | null;
@@ -63,6 +66,7 @@ function hasUsableInsights(
   return Boolean(
     insights
       && insights.availability === "available"
+      && insights.freshness === "fresh"
       && insights.rowCount > 0
       && insights.coveredDateStart
       && insights.coveredDateStop,

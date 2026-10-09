@@ -68,6 +68,8 @@ export type ContentUsageReservation = {
 };
 
 const COUNTED_STATUSES = new Set(["reserved", "succeeded", "unknown"]);
+const MEDIA_TRACKING_REQUIRED_MESSAGE =
+  "Учёт лимитов генерации не подключён. Фото и видео не запущены, чтобы не списывать средства без квитанции.";
 
 function readRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -270,6 +272,7 @@ export async function reserveContentGeneration(input: {
 }): Promise<ContentUsageReservation> {
   const supabase = getSupabaseServerClient();
   if (!supabase) {
+    if (input.kind !== "text_request") throw new Error(MEDIA_TRACKING_REQUIRED_MESSAGE);
     return {
       allowed: true,
       tracked: false,
@@ -303,8 +306,10 @@ export async function reserveContentGeneration(input: {
   });
 
   if (error && isMissingUsageFoundation(error)) {
-    // Deploy-before-migration compatibility: the working generation flow is
-    // preserved, while the UI clearly says accounting is not active yet.
+    // Text helpers have no artificial quota yet and keep their compatibility
+    // mode. Media calls are billable units, so code-before-migration must stop
+    // before the provider instead of silently spending outside the ledger.
+    if (input.kind !== "text_request") throw new Error(MEDIA_TRACKING_REQUIRED_MESSAGE);
     return {
       allowed: true,
       tracked: false,

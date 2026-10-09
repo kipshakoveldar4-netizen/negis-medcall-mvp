@@ -208,7 +208,11 @@ async function checkAdsAutomationSource() {
   assertSourceIncludes(source, "configBlocked: videoConfigBlocked", "readiness receives the config-loading block flag");
   assertSourceIncludes(source, 'setVideoJob({ id: "local-failed", status: "failed"', "optimization branch failures are classified as optimization_failed");
   // D3C raw large-video upload polish (canonical /api/crm/video-jobs)
-  assertSourceIncludes(source, '"/api/crm/video-jobs"', "large video uses the canonical video-jobs endpoint");
+  assertSourceIncludes(
+    source,
+    "/api/crm/video-jobs?workspaceId=${encodeURIComponent(workspaceId)}",
+    "large video uses the canonical workspace-scoped video-jobs endpoint",
+  );
   assertSourceIncludes(source, "Видео загружено для оптимизации", "optimizing card title");
   assertSourceIncludes(source, "Мы подготовим MP4-версию для Meta. Запуск будет доступен после обработки.", "optimizing card body");
   assertSourceIncludes(source, "Запуск рекламы будет доступен после оптимизации.", "launch-after-optimization message");
@@ -2907,6 +2911,9 @@ async function checkMetaInsightsHistoryFoundation() {
     '.from("meta_campaign_launches")',
     "expectedCampaignByLaunch",
     "metaCampaignLaunchId: launchId",
+    "classifyMetaInsightsDataFreshness",
+    "freshnessCheckedAt",
+    "freshness:",
     'success("supabase"',
   ]) {
     if (!historyHandler.includes(marker)) throw new Error(`Meta Insights history endpoint is missing ${marker}`);
@@ -2948,6 +2955,9 @@ async function checkMetaInsightsHistoryFoundation() {
     "isServerLaunchUuid(item.id)",
     'historyInsightsAccess === "confirmed"',
     "Insights доступны",
+    "Insights устарели",
+    "Свежесть выгрузки не подтверждена",
+    "Обновите Insights перед текущими выводами",
     "Фактический расход Meta",
     "Лиды по данным Meta",
     "Insights ещё не синхронизированы",
@@ -3567,6 +3577,8 @@ async function checkAdvertisingHubSource() {
     "Лиды по данным Meta",
     "Лиды Meta не равны заявкам CRM.",
     "Это ещё не оценка эффективности рекламы.",
+    "Устаревшие данные и данные с неподтверждённой свежестью не включены в эту сводку.",
+    "Сохранённые данные Meta устарели и не включены в текущую сводку.",
     "Meta не вернула данные за выбранный период.",
     "aggregateAdvertisingInsights",
     "readNonNegativeBigInt",
@@ -3574,16 +3586,18 @@ async function checkAdvertisingHubSource() {
     "Результат в CRM",
     "Заявки с рекламой",
     "Оплаченные продажи с рекламой",
+    "Оплаченные записи",
+    "paidAppointmentDeals",
+    "paidAttributedAppointmentDeals",
+    "Связь продажи с записью считается только по сохранённому appointment ID.",
     "Связанная выручка CRM",
     "Связи с рекламой устанавливаются вручную.",
     "Выручка CRM показана отдельно от расходов Meta",
-    "aggregateCrmAdvertisingOutcomes",
+    "parseCrmAdvertisingOutcomes",
     "buildAdvertisingAssistantBrief",
     "Рекламный помощник",
-    "hasCampaignAttribution",
-    'resource: "leads" | "deals"',
-    "/api/crm/${resource}?workspaceId=",
-    'if (status !== "paid") continue;',
+    "/api/crm/advertising-outcomes?workspaceId=",
+    "generatedAt",
     "getSupabaseAccessToken",
     "/api/crm/auth-context?workspaceId=",
     "authBody.data?.isAdmin !== true",
@@ -3618,6 +3632,13 @@ async function checkAdvertisingHubSource() {
   if (hub.includes('method: "POST"')) {
     throw new Error("AdvertisingHub must remain read-only and must not launch campaigns");
   }
+  const insightsAggregate = hub.slice(
+    hub.indexOf("function aggregateAdvertisingInsights"),
+    hub.indexOf("function normalizeLaunch"),
+  );
+  if (!insightsAggregate.includes('summary.freshness === "fresh"')) {
+    throw new Error("AdvertisingHub current totals must exclude stale or unknown-freshness Insights");
+  }
   for (const marker of [
     "buildAdvertisingAssistantBrief",
     'reason: "launch_failed"',
@@ -3644,6 +3665,7 @@ async function checkAdvertisingHubSource() {
     "buildCreativeExperimentGroups",
     "approval.copyMatchesLaunch !== true",
     "variants.size < 2",
+    'insights.freshness === "fresh"',
     'reviewState: samePeriod ? "same_period"',
     "coveredDateStart",
     "coveredDateStop",
@@ -3658,9 +3680,12 @@ async function checkAdvertisingHubSource() {
   if (authCheck < 0 || insightsRequest < 0 || insightsRequest < authCheck) {
     throw new Error("AdvertisingHub must confirm server owner/admin access before requesting Meta Insights");
   }
-  const crmCollectionsRequest = hub.indexOf("const [leads, deals] = await Promise.all([");
-  if (authCheck < 0 || crmCollectionsRequest < authCheck) {
+  const crmOutcomesRequest = hub.indexOf("/api/crm/advertising-outcomes?workspaceId=");
+  if (authCheck < 0 || crmOutcomesRequest < authCheck) {
     throw new Error("AdvertisingHub must confirm server owner/admin access before requesting CRM outcomes");
+  }
+  if (hub.includes("/api/crm/leads?workspaceId=") || hub.includes("/api/crm/deals?workspaceId=")) {
+    throw new Error("AdvertisingHub must use the complete aggregate endpoint instead of capped CRM collections");
   }
   if (!hub.includes('if (!productionWorkspace) {') || hub.indexOf("getSupabaseAccessToken()") < hub.indexOf('if (!productionWorkspace) {')) {
     throw new Error("AdvertisingHub must not request Insights for a local/demo workspace");

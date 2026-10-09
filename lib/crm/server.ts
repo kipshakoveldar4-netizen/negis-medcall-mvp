@@ -29,7 +29,10 @@ import {
   buildMetaLaunchPayloadPreview,
   type MetaLaunchPayloadOptions,
 } from "./meta-launch-payload";
-import { evaluateMetaInsightsCompleteness } from "../meta/insightsCompleteness";
+import {
+  classifyMetaInsightsDataFreshness,
+  evaluateMetaInsightsCompleteness,
+} from "../meta/insightsCompleteness";
 import { notifyAppointmentEvent } from "./push-subscriptions";
 import { getSupabaseServerClient } from "../supabase/server";
 import {
@@ -73,6 +76,11 @@ import {
   type MetaInsightsSafeErrorCode,
   type NormalizedMetaInsightRow,
 } from "../meta/insights";
+import {
+  MetaWorkspaceBoundaryError,
+  normalizeMetaAdAccountId,
+  requireMetaProvisionedWorkspace,
+} from "../meta/workspace";
 import { validateTikTokAdsConnection } from "../tiktok/diagnostics";
 import { buildTikTokCampaignDryRun } from "../tiktok/campaign";
 import { readTikTokVerifiedSetup, verifyTikTokSetup } from "../tiktok/setup";
@@ -4955,6 +4963,28 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
       row.client_id = appointmentClientResolution.clientId;
     }
     const newAppointmentClient = appointmentClientResolution?.createdRow;
+    let existingMetaAccountId = "";
+    if (resource === "meta-accounts") {
+      const { data: existingRows, error: existingError } = await supabase
+        .from(config.table)
+        .select("id")
+        .eq("workspace_id", workspaceId)
+        .order("updated_at", { ascending: false })
+        .limit(2);
+      if (existingError) throw new Error(existingError.message);
+      const ids = (Array.isArray(existingRows) ? existingRows : [])
+        .map((existing) => readString(asRecord(existing).id))
+        .filter((existingId) => isUuid(existingId));
+      if (ids.length > 1) {
+        return sendJson(res, 409, {
+          ...errorBody("Найдено несколько сохранённых привязок Meta", [
+            "Администратор платформы должен устранить дубликаты до следующего сохранения.",
+          ]),
+          code: "meta_account_binding_ambiguous",
+        });
+      }
+      existingMetaAccountId = ids[0] || "";
+    }
     const runInsert = async (candidate: JsonRecord) => {
       if (appointmentRequest) {
         return await supabase.rpc("create_crm_appointment_once", { ...appointmentRequest,
@@ -4966,6 +4996,15 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
         return await supabase.rpc("create_crm_appointment_with_new_client", {
           p_workspace_id: workspaceId, p_client: newAppointmentClient, p_appointment: candidate,
         });
+      }
+      if (existingMetaAccountId) {
+        return await supabase
+          .from(config.table)
+          .update(candidate)
+          .eq("id", existingMetaAccountId)
+          .eq("workspace_id", workspaceId)
+          .select(config.selectColumns ?? "*")
+          .single();
       }
       return await (config.upsertConflict
         ? supabase.from(config.table).upsert(candidate, { onConflict: config.upsertConflict }).select(config.selectColumns ?? "*").single()
@@ -8672,10 +8711,6 @@ function resolveMetaInsightsDateRange(
   return { dateStart, dateStop };
 }
 
-function normalizeMetaAccountId(value: unknown): string {
-  return readString(value).toLowerCase().replace(/^act_/, "");
-}
-
 function isRealMetaCampaignId(value: string): boolean {
   const normalized = value.trim().toLowerCase();
   return /^\d+$/.test(normalized) && !normalized.startsWith("0");
@@ -8736,8 +8771,8 @@ async function loadMetaInsightsLaunchContext(
 
   const config = getMetaConfig();
   const launchAdAccountId = readString(launch.ad_account_id);
-  const configuredAccount = normalizeMetaAccountId(config.adAccountId);
-  const launchAccount = normalizeMetaAccountId(launchAdAccountId);
+  const configuredAccount = normalizeMetaAdAccountId(config.adAccountId);
+  const launchAccount = normalizeMetaAdAccountId(launchAdAccountId);
   if (configuredAccount && launchAccount && configuredAccount !== launchAccount) {
     throw new MetaInsightsError("launch_not_eligible", "Запуск относится к другому Meta ad account.");
   }
@@ -8754,10 +8789,9 @@ async function loadMetaInsightsLaunchContext(
 
   const preferredAccount = configuredAccount || launchAccount;
   const accounts = (Array.isArray(accountRows) ? accountRows : []).map((row) => asRecord(row));
-  const account =
-    accounts.find((row) => normalizeMetaAccountId(row.ad_account_id) === preferredAccount) ||
-    accounts[0] ||
-    {};
+  const account = preferredAccount
+    ? accounts.find((row) => normalizeMetaAdAccountId(row.ad_account_id) === preferredAccount) || {}
+    : accounts[0] || {};
   const metadata = asRecord(account.metadata);
 
   return {
@@ -9597,15 +9631,6 @@ export async function handleMetaInsightsBackgroundCycle(req: VercelRequest, res:
     return sendJson(res, 400, errorBody("Validation error", ["workerId is required"]));
   }
 
-  const supabase = getSupabaseServerClient();
-  if (!supabase) {
-    return sendJson(res, 503, {
-      ...errorBody("Meta Insights background cycle unavailable", ["Supabase недоступен."]),
-      code: "persistence_failed",
-      data: { requestId: verified.requestId },
-    });
-  }
-
   const allowlist = authConfig.workspaceAllowlist;
   const requestedWorkspaceIds = readJsonArray(body.workspaceIds ?? body.workspace_ids)
     .map((value) => readString(value).toLowerCase())
@@ -9627,6 +9652,28 @@ export async function handleMetaInsightsBackgroundCycle(req: VercelRequest, res:
   if (effectiveWorkspaceIds.length === 0) {
     console.log(`[meta-insights-cycle] request ${verified.requestId} worker ${workerId} no allowed workspaces`);
     return sendJson(res, 200, summary);
+  }
+
+  try {
+    for (const workspaceId of effectiveWorkspaceIds) {
+      requireMetaProvisionedWorkspace(workspaceId);
+    }
+  } catch (error) {
+    if (!(error instanceof MetaWorkspaceBoundaryError)) throw error;
+    return sendJson(res, error.statusCode, {
+      ...errorBody(error.message),
+      code: error.code,
+      data: { requestId: verified.requestId },
+    });
+  }
+
+  const supabase = getSupabaseServerClient();
+  if (!supabase) {
+    return sendJson(res, 503, {
+      ...errorBody("Meta Insights background cycle unavailable", ["Supabase недоступен."]),
+      code: "persistence_failed",
+      data: { requestId: verified.requestId },
+    });
   }
 
   const maxLaunchesRaw = readNumber(body.maxLaunches ?? body.max_launches);
@@ -9668,7 +9715,12 @@ export async function handleMetaInsightsBackgroundCycle(req: VercelRequest, res:
       metaCampaignLaunchId: readString(row.meta_campaign_launch_id),
       consecutiveFailureCount: readNumber(row.consecutive_failure_count) ?? 0,
     };
-    if (!isUuid(state.id) || !isUuid(state.workspaceId) || !isUuid(state.metaCampaignLaunchId)) {
+    if (
+      !isUuid(state.id) ||
+      !isUuid(state.workspaceId) ||
+      !isUuid(state.metaCampaignLaunchId) ||
+      !effectiveWorkspaceIds.includes(state.workspaceId.toLowerCase())
+    ) {
       summary.skipped += 1;
       continue;
     }
@@ -9824,6 +9876,174 @@ export async function handleMetaCampaignInsights(req: VercelRequest, res: Vercel
   return sendJson(res, 200, success("supabase", { insights, items: insights }));
 }
 
+const CRM_ADVERTISING_OUTCOMES_PAGE_SIZE = 500;
+const CRM_ADVERTISING_OUTCOMES_MAX_ATTRIBUTED_DEALS = 20_000;
+
+class CrmAdvertisingOutcomesError extends Error {}
+
+async function countCrmAdvertisingRows(
+  supabase: CrmSupabaseClient,
+  workspaceId: string,
+  table: "leads" | "deals",
+  options: { status?: string; attributedOnly?: boolean; appointmentLinkedOnly?: boolean } = {},
+): Promise<number> {
+  let query = supabase
+    .from(table)
+    .select("id", { count: "exact", head: true })
+    .eq("workspace_id", workspaceId);
+  if (options.status) query = query.eq("status", options.status);
+  if (options.attributedOnly) query = query.not("meta_campaign_launch_id", "is", null);
+  if (options.appointmentLinkedOnly) query = query.not("appointment_id", "is", null);
+
+  const { count, error } = await query;
+  if (error || count === null || !Number.isSafeInteger(count) || count < 0) {
+    throw new CrmAdvertisingOutcomesError("count_failed");
+  }
+  return count;
+}
+
+async function loadAttributedPaidDealRows(
+  supabase: CrmSupabaseClient,
+  workspaceId: string,
+  expectedCount: number,
+): Promise<JsonRecord[]> {
+  if (expectedCount > CRM_ADVERTISING_OUTCOMES_MAX_ATTRIBUTED_DEALS) {
+    throw new CrmAdvertisingOutcomesError("report_too_large");
+  }
+
+  const rows: JsonRecord[] = [];
+  const ids = new Set<string>();
+  for (let offset = 0; offset < expectedCount; offset += CRM_ADVERTISING_OUTCOMES_PAGE_SIZE) {
+    const pageStop = Math.min(offset + CRM_ADVERTISING_OUTCOMES_PAGE_SIZE - 1, expectedCount - 1);
+    const { data, error } = await supabase
+      .from("deals")
+      .select("id,amount_minor,currency")
+      .eq("workspace_id", workspaceId)
+      .eq("status", "paid")
+      .not("meta_campaign_launch_id", "is", null)
+      .order("id", { ascending: true })
+      .range(offset, pageStop);
+    if (error) throw new CrmAdvertisingOutcomesError("read_failed");
+
+    const page = Array.isArray(data) ? data.map(asRecord) : [];
+    if (page.length !== pageStop - offset + 1) {
+      throw new CrmAdvertisingOutcomesError("changed_during_read");
+    }
+    for (const row of page) {
+      const id = readString(row.id);
+      if (!id || ids.has(id)) throw new CrmAdvertisingOutcomesError("duplicate_or_missing_id");
+      ids.add(id);
+      rows.push(row);
+    }
+  }
+
+  if (rows.length !== expectedCount) throw new CrmAdvertisingOutcomesError("changed_during_read");
+  return rows;
+}
+
+function aggregateAttributedDealRevenue(rows: JsonRecord[]) {
+  const byCurrency = new Map<string, bigint>();
+  for (const row of rows) {
+    const currency = readString(row.currency).toUpperCase();
+    const amountMinor = databaseIntegerString(row.amount_minor, "");
+    if (!/^[A-Z]{3}$/.test(currency) || !amountMinor) {
+      throw new CrmAdvertisingOutcomesError("invalid_money_row");
+    }
+    byCurrency.set(currency, (byCurrency.get(currency) || 0n) + BigInt(amountMinor));
+  }
+  return [...byCurrency.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([currency, amountMinor]) => ({
+      currency,
+      // CRM sales are entered in KZT minor units (tiyn); the existing sales UI
+      // stores no per-row exponent, so the report keeps the same explicit scale.
+      currencyExponent: 2,
+      amountMinor: amountMinor.toString(),
+    }));
+}
+
+/**
+ * Exact, administrator-only CRM outcome snapshot for the advertising hub.
+ *
+ * The previous UI downloaded the generic lead/deal collections and silently
+ * treated PostgREST's response ceiling as a complete clinic. This endpoint
+ * counts every matching row and pages only the money rows needed for summing;
+ * a changing or oversized dataset fails closed instead of displaying a partial
+ * advertising result.
+ */
+export async function handleAdvertisingOutcomes(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== "GET") {
+    return sendJson(res, 405, errorBody("Method not allowed", ["Use GET"]));
+  }
+
+  const context = readWorkspaceContext(req);
+  if (!context || !isWorkspaceAdminRole(context.role) || !isUuid(context.workspaceId)) {
+    return sendJson(res, 403, errorBody("Forbidden", ["Workspace owner or admin access is required"]));
+  }
+
+  const supabase = getSupabaseServerClient();
+  if (!supabase) {
+    return sendJson(res, 503, errorBody("CRM outcomes unavailable", ["Supabase is not configured"]));
+  }
+
+  try {
+    const [
+      totalLeads,
+      attributedLeads,
+      totalPaidDeals,
+      paidAttributedDeals,
+      paidAppointmentDeals,
+      paidAttributedAppointmentDeals,
+      pendingDeals,
+    ] = await Promise.all([
+      countCrmAdvertisingRows(supabase, context.workspaceId, "leads"),
+      countCrmAdvertisingRows(supabase, context.workspaceId, "leads", { attributedOnly: true }),
+      countCrmAdvertisingRows(supabase, context.workspaceId, "deals", { status: "paid" }),
+      countCrmAdvertisingRows(supabase, context.workspaceId, "deals", { status: "paid", attributedOnly: true }),
+      countCrmAdvertisingRows(supabase, context.workspaceId, "deals", { status: "paid", appointmentLinkedOnly: true }),
+      countCrmAdvertisingRows(supabase, context.workspaceId, "deals", {
+        status: "paid",
+        attributedOnly: true,
+        appointmentLinkedOnly: true,
+      }),
+      countCrmAdvertisingRows(supabase, context.workspaceId, "deals", { status: "pending" }),
+    ]);
+    if (
+      attributedLeads > totalLeads
+      || paidAttributedDeals > totalPaidDeals
+      || paidAppointmentDeals > totalPaidDeals
+      || paidAttributedAppointmentDeals > paidAttributedDeals
+      || paidAttributedAppointmentDeals > paidAppointmentDeals
+    ) {
+      throw new CrmAdvertisingOutcomesError("changed_during_count");
+    }
+
+    const attributedDealRows = await loadAttributedPaidDealRows(
+      supabase,
+      context.workspaceId,
+      paidAttributedDeals,
+    );
+    const outcomes = {
+      attributedLeads,
+      unattributedLeads: totalLeads - attributedLeads,
+      paidAttributedDeals,
+      paidUnattributedDeals: totalPaidDeals - paidAttributedDeals,
+      paidAppointmentDeals,
+      paidAttributedAppointmentDeals,
+      pendingDeals,
+      attributedRevenueByCurrency: aggregateAttributedDealRevenue(attributedDealRows),
+      generatedAt: new Date().toISOString(),
+    };
+    return sendJson(res, 200, success("supabase", { outcomes }));
+  } catch {
+    return sendJson(
+      res,
+      502,
+      errorBody("Не удалось построить полный результат рекламы в CRM", ["Повторите запрос позже"]),
+    );
+  }
+}
+
 export async function handleMetaInsightsHistory(req: VercelRequest, res: VercelResponse) {
   if (req.method !== "GET") {
     return sendJson(res, 405, errorBody("Method not allowed", ["Use GET"]));
@@ -9884,6 +10104,7 @@ export async function handleMetaInsightsHistory(req: VercelRequest, res: VercelR
       aggregates.set(launchId, aggregate);
     }
 
+    const freshnessCheckedAt = new Date().toISOString();
     const summaries = launches.map((launch) => {
       const launchId = readString(launch.id);
       const eligible = isMetaInsightsHistoryLaunchEligible(launch);
@@ -9892,6 +10113,11 @@ export async function handleMetaInsightsHistory(req: VercelRequest, res: VercelR
       return {
         metaCampaignLaunchId: launchId,
         availability: resolveMetaInsightsHistoryAvailability({ eligible, aggregate, latestRun }),
+        freshness: classifyMetaInsightsDataFreshness({
+          latestFetchedAt: aggregate?.latestFetchedAt,
+          checkedAt: freshnessCheckedAt,
+          freshnessSlaHours: META_INSIGHTS_BACKGROUND_FRESHNESS_SLA_HOURS,
+        }),
         lastRun: mapMetaInsightsHistoryLastRun(latestRun),
         coveredDateStart: aggregate?.coveredDateStart || null,
         coveredDateStop: aggregate?.coveredDateStop || null,
@@ -9913,7 +10139,11 @@ export async function handleMetaInsightsHistory(req: VercelRequest, res: VercelR
       };
     });
 
-    return sendJson(res, 200, success("supabase", { summaries, items: summaries }));
+    return sendJson(res, 200, success("supabase", {
+      summaries,
+      items: summaries,
+      freshnessCheckedAt,
+    }));
   } catch (error) {
     const safeError =
       error instanceof MetaInsightsError
