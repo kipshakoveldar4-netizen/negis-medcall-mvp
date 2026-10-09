@@ -11,6 +11,7 @@
     "test:site-intake-http": "node --import tsx --test ./fixtures/site-intake-browser.test.mjs",
     "test:arrival-payment": "tsx --test ./src/medina-arrival-payment.test.ts",
     "test:appointment-requests": "tsx --test ./src/medina-appointment-requests.test.ts",
+    "test:appointment-preview-readiness": "node --test ./fixtures/appointment-preview-readiness.test.mjs",
     "test:appointment-requests-postgres": "node --test ./fixtures/appointment-requests-postgres.test.mjs",
     "test:site-blog": "tsx --test ./src/medina-site-blog.test.ts",
     "test:site-editorial": "tsx --test ./src/medina-site-editorial.test.ts",
