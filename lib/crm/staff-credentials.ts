@@ -359,6 +359,7 @@ export async function handleStaffPasswordReset(req: VercelRequest, res: VercelRe
   try {
     updated = (await fetch(`${supabaseUrl}/auth/v1/admin/users/${encodeURIComponent(targetAuthUserId)}`, {
       method: "PUT",
+      redirect: "error",
       headers: {
         apikey: serviceRoleKey,
         Authorization: `Bearer ${serviceRoleKey}`,
@@ -530,6 +531,7 @@ export async function handleStaffCredentials(req: VercelRequest, res: VercelResp
     try {
       return (await fetch(`${supabaseUrl}/auth/v1/admin/users`, {
         method: "POST",
+        redirect: "error",
         headers: {
           apikey: serviceRoleKey as string,
           Authorization: `Bearer ${serviceRoleKey}`,

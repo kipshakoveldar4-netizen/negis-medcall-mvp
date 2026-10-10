@@ -45,6 +45,7 @@ export const previewIsolation = Object.freeze({
     TARGETING_AGENT_URL: "http://127.0.0.1:1",
     MEDINA_PLATFORM_OWNER_IDS: "",
     MEDINA_CONTROL_ORIGINS: "",
+    MEDINA_APP_ORIGIN: "",
     MEDINA_PUBLIC_SITE_ENABLED: "false",
     MEDINA_SITE_INDEXABLE: "false",
     MEDINA_SITE_FORM_ENABLED: "false",
