@@ -99,7 +99,7 @@
   "dependencies": {
     "@supabase/supabase-js": "^2.105.4",
     "@vercel/node": "^5.8.17",
-    "markdown-it": "14.1.1"
+    "markdown-it": "14.3.2"
   },
   "private": true,
   "devDependencies": {

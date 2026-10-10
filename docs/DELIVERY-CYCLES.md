@@ -116,6 +116,10 @@
   нарушения границ видео/push и старого Express API. По команде «ИСПРАВЛЯЙ»
   они закрыты в локальном коде, подготовлена 068 для workspaces; отдельный
   выпуск и применение в облаке не выполнены, подробности ниже.
+  По повторному запросу владельца 10 октября закрыт также старый password reset,
+  удалены неиспользуемые уязвимые библиотеки, обновлены совместимые зависимости
+  и генератор API. Повторные регрессии 431/431; critical в обоих registry scan 0,
+  но high/moderate/low остаются. Это не завершение security-приёмки, см. ниже.
   Этот аудит не является приёмкой production или банковской интеграции.
 
 Каждый запуск закрывает один узкий пункт с проверками. Production-релиз отдельно:
@@ -888,8 +892,8 @@ sourcemap tooltip и смешанного импорта serverAuth сохран
 - [x] Typecheck общих библиотек, API (обычный и Node16), всех artifacts/scripts;
   CRM cold start normal и broken-site (11+46 / 11+45), Vite production build,
   `git diff --check`. Сборка сохранила прежние предупреждения sourcemap/dynamic import.
-- [ ] Отдельный Preview/worker выпуск, облачная 068, dependency update после
-  registry audit, RLS/grants реальных баз, headers/TLS/WAF/лимиты, реальные роли,
+- [ ] Отдельный Preview/worker выпуск, облачная 068, оставшиеся dependency risks
+  после совместимого обновления, RLS/grants реальных баз, headers/TLS/WAF/лимиты, реальные роли,
   конкуренция PostgreSQL и merchant sandbox не приняты. Checkout/payment webhook
   отсутствуют; защищённость банковских транзакций не заявляется.
 - Production, облачные права, цены, финансовые флаги и deployment не изменены.
@@ -899,6 +903,60 @@ sourcemap tooltip и смешанного импорта serverAuth сохран
   Это отдельный незавершённый пункт, а не отказ новых boundary-регрессий.
   Новые статьи, расходы, реклама, выплаты
   и настоящий или фиктивно успешный банковский платёж отсутствуют.
+
+### P-S1/R4: повторная проверка и зависимости, 10 октября - узкий пункт готов локально
+
+- [x] Повторно прочитаны CLAUDE.md, очередь, git status и diff. Чужие правки
+  059/065 сохранены. Новые миграции, cloud-настройки, выплаты и deployment
+  в этом пункте не выполнялись; прежний конфликт 065 остаётся открытым.
+- [x] Удалена реализация старого Express password reset: даже при случайном
+  подключении модуль отвечает 410 без базы, изменения пароля, SMTP и чтения
+  окружения. Существующий подтверждённый Supabase Auth flow не менялся.
+  Прежний модуль уже был отключён от router; активный Vercel обход не заявляется.
+- [x] Неиспользуемые xlsx, nodemailer и его types удалены из manifests/lockfile;
+  исключена SMTP-ветка с отключённой проверкой TLS. Импорта xlsx в приложении
+  не было. CSV-функции и действующее восстановление доступа сохранены.
+- [x] Совместимые обновления: markdown-it 14.3.2 / linkify-it 5.0.2,
+  proxy-addr 2.0.8, qs 6.16.0, body-parser 2.3.0, tar 7.5.22,
+  brace-expansion 1.1.21 и 5.0.12. Основные версии Express, Vite, React,
+  Supabase и Vercel SDK не менялись; minimumReleaseAge не ослаблен.
+  Случайное обновление tsx при разрешении зависимостей исключено из lockfile.
+  Основания: [markdown-it](https://github.com/markdown-it/markdown-it/security/advisories/GHSA-253c-mchw-3w2r),
+  [proxy-addr](https://github.com/jshttp/proxy-addr/security/advisories/GHSA-jqcg-44mw-7w3h),
+  [node-tar](https://github.com/isaacs/node-tar/security/advisories/GHSA-23hp-3jrh-7fpw).
+- [x] Расширенный скан инструментов разработки после основной чистки выявил
+  11 critical у Orval. Генератор обновлён с 8.9.1 до закреплённой 8.22.0:
+  исправления внедрения кода и небезопасных внешних ссылок подтверждены
+  [разработчиком генератора](https://github.com/orval-labs/orval/security/advisories/GHSA-cxq5-97v7-87j8).
+  Программный тест генерирует React Query/Zod из локальной схемы во временную
+  папку и проверяет синтаксис/существующие exports. Вредоносный OpenAPI path
+  с backtick и присваиванием локального маркера остаётся строкой: импорт и вызов
+  URL-builder не выполняют внедрённый код. Исходные generated-клиенты не перезаписаны.
+- [x] Финальный registry audit --prod: **30 предупреждений вместо 69**,
+  **0 critical, 12 high, 13 moderate, 5 low**. Оставшиеся пути этого скана
+  идут через @vercel/node: undici/busboy, ajv, braces, esbuild, js-yaml,
+  minimatch, smol-toml. Закреплённые/несовместимые версии не заменялись
+  принудительными major overrides; нулевой audit не заявляется.
+- [x] Финальный расширенный registry audit, включая dev: **54 предупреждения**,
+  **0 critical, 29 high, 19 moderate, 6 low**. Есть отдельные предупреждения
+  инструментов генерации/сборки, включая fast-uri, Babel, Vite и PostCSS.
+  Это не число доказанных production-эксплуатаций. Следующий security-пункт:
+  совместимость оставшихся обновлений и путь исполнения; не переносить эти
+  риски в статус «готово» только из-за отсутствия critical.
+- [x] Регрессии **431/431**, 0 skipped: прежние границы видео/push, вход,
+  tenant isolation, transport, платформа, staff credentials/invitations,
+  storage, ACTIVE gate, WhatsApp/Wazzup, прежний webhook и безопасный markdown.
+  Boundary-набор теперь **32** случая, в том числе **5** добавленных в этом пункте.
+  Первый новый тест генератора ожидал неверный регистр exports; после сверки
+  с существующими API-клиентами исправлен сам тест, не поведение генератора.
+- [x] Typecheck общих библиотек, API (обычный и Node16), artifacts/scripts,
+  cold start normal (11+46) / broken-site (11+45), сборки Vite и Express,
+  frozen-lockfile install без lifecycle scripts и git diff --check.
+  Старые предупреждения sourcemap/dynamic import сохранены и не скрыты.
+- [ ] Production/Preview выпуск этих исправлений, облачная 068, оставшиеся
+  зависимости и конфликт 065 не закрыты. Checkout, банковский webhook и
+  Freedom Pay sandbox отсутствуют: безопасность реальных транзакций пока
+  проверить нельзя. Рабочие клиники, реклама и настоящие платежи не затронуты.
 
 ### P-S1: атомарная ручная подписка, 5 октября — готово локально
 

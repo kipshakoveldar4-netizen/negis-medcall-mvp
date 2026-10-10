@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createECDH, generateKeyPairSync } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -437,6 +438,113 @@ test("SB legacy TikTok callback has no credential access even if mounted acciden
   const callback = await readFile(path.join(root, "artifacts/api-server/src/routes/ads-tiktok.ts"), "utf8");
   assert.doesNotMatch(callback, /supabaseAdmin|fetch\(/);
 });
+
+test("SB retired password route cannot mutate accounts even if mounted accidentally", async () => {
+  const index = await readFile(path.join(root, "artifacts/api-server/src/routes/index.ts"), "utf8");
+  assert.doesNotMatch(index, /import .*auth-reset|router\.use\(authResetRouter\)/);
+  const source = await readFile(path.join(root, "artifacts/api-server/src/routes/auth-reset.ts"), "utf8");
+  assert.doesNotMatch(source, /supabaseAdmin|nodemailer|updateUserById|listUsers|process\.env|fetch\(/);
+  const module = await load("artifacts/api-server/src/routes/auth-reset.ts");
+  const route = module.default.stack.find((layer: any) => layer.route?.path === "/auth/reset-password");
+  assert.equal(route.route.methods.post, true);
+  for (const body of [undefined, {}, { email: "fixture@example.test" }, { email: "fixture@example.test", password: "attacker-supplied" }]) {
+    const res = response();
+    await route.route.stack[0].handle({ body }, res);
+    assert.equal(res.statusCode, 410);
+    assert.deepEqual(res.body, { code: "password_reset_disabled" });
+  }
+});
+
+test("SB unused vulnerable mail and workbook libraries stay out of application dependencies", async () => {
+  for (const file of ["package.json", "artifacts/api-server/package.json", "artifacts/negis/package.json"]) {
+    const manifest = JSON.parse(await readFile(path.join(root, file), "utf8"));
+    for (const dependencies of [manifest.dependencies, manifest.devDependencies]) {
+      for (const name of ["nodemailer", "@types/nodemailer", "xlsx"]) {
+        assert.equal(dependencies?.[name], undefined, `${file}: ${name}`);
+      }
+    }
+  }
+  const manifest = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"));
+  assert.equal(manifest.dependencies["markdown-it"], "14.3.2");
+  const installed = JSON.parse(await readFile(path.join(root, "node_modules/markdown-it/package.json"), "utf8"));
+  assert.equal(installed.version, manifest.dependencies["markdown-it"]);
+  const spec = JSON.parse(await readFile(path.join(root, "lib/api-spec/package.json"), "utf8"));
+  assert.equal(spec.devDependencies.orval, "8.22.0");
+  const orval = JSON.parse(await readFile(path.join(root, "lib/api-spec/node_modules/orval/package.json"), "utf8"));
+  assert.equal(orval.version, spec.devDependencies.orval);
+});
+
+test("SB updated Express dependencies reject forged proxy trust and preserve form parsing", () => {
+  const requireApi = createRequire(path.join(root, "artifacts/api-server/package.json"));
+  const requireExpress = createRequire(requireApi.resolve("express"));
+  const proxyaddr = requireExpress("proxy-addr");
+  for (const subnet of ["::ffff:10.0.0.0/8", "::/1"]) {
+    assert.equal(proxyaddr.compile(subnet)("203.0.113.10"), false, subnet);
+  }
+  const trusted = proxyaddr.compile("10.0.0.0/8");
+  assert.equal(trusted("10.1.2.3"), true);
+  assert.equal(trusted("203.0.113.10"), false);
+  const qs = requireExpress("qs");
+  assert.deepEqual(qs.parse("clinic[id]=local&items[0]=first&items[1]=second"), {
+    clinic: { id: "local" }, items: ["first", "second"],
+  });
+  assert.deepEqual(qs.parse("__proto__[medinaInjected]=yes&constructor[prototype][medinaInjected]=yes"), {});
+  assert.equal(({} as any).medinaInjected, undefined);
+});
+
+async function isolatedCodegen(fn: (ctx: any) => Promise<void>) {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "medina-codegen-security-"));
+  const oldFetch = globalThis.fetch;
+  globalThis.fetch = (async () => { throw new Error("Code generation must not access the network"); }) as typeof fetch;
+  try {
+    const requireSpec = createRequire(path.join(root, "lib/api-spec/package.json"));
+    const orval = await import(pathToFileURL(requireSpec.resolve("orval")).href);
+    const typescript = createRequire(path.join(root, "package.json"))("typescript");
+    const generate = async (input: string, client: string, file: string) => {
+      const target = path.join(dir, file);
+      await orval.generate({ input, output: { target, client, mode: "single", clean: false, prettier: false, baseUrl: "/api" } }, dir);
+      const source = await readFile(target, "utf8");
+      const parsed = typescript.createSourceFile(target, source, typescript.ScriptTarget.Latest, true, typescript.ScriptKind.TS);
+      assert.deepEqual(parsed.parseDiagnostics, [], `${client} output must remain valid TypeScript`);
+      return { source, target };
+    };
+    await fn({ dir, generate });
+  } finally {
+    globalThis.fetch = oldFetch;
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+test("SB patched generator still handles the local API spec for React Query and Zod", () => isolatedCodegen(async (ctx) => {
+  const input = path.join(root, "lib/api-spec/openapi.yaml");
+  const react = await ctx.generate(input, "react-query", "react.ts");
+  assert.match(react.source, /useHealthCheck/);
+  assert.match(react.source, /getDashboardMetrics/);
+  const zod = await ctx.generate(input, "zod", "schemas.ts");
+  assert.match(zod.source, /export const HealthCheckResponse = zod\.object/);
+  assert.match(zod.source, /export const GetDashboardMetricsResponse = zod\.object/);
+}));
+
+test("SB generated request URL treats injected code as data, without evaluating it", () => isolatedCodegen(async (ctx) => {
+  const marker = "__medinaCodegenInjected";
+  const hostilePath = `/users/\` + (globalThis.${marker} = true) + \`/list`;
+  const spec = {
+    openapi: "3.0.3", info: { title: "Security fixture", version: "1.0.0" },
+    paths: { [hostilePath]: { get: { operationId: "securityProbe", responses: { "200": { description: "Local fixture" } } } } },
+  };
+  const input = path.join(ctx.dir, "hostile.json");
+  await writeFile(input, JSON.stringify(spec));
+  assert.equal((globalThis as any)[marker], undefined);
+  try {
+    const output = await ctx.generate(input, "fetch", "safe-client.ts");
+    const generated = await import(pathToFileURL(output.target).href);
+    assert.equal((globalThis as any)[marker], undefined);
+    assert.equal(generated.getSecurityProbeUrl(), `/api${hostilePath}`);
+    assert.equal((globalThis as any)[marker], undefined);
+  } finally {
+    delete (globalThis as any)[marker];
+  }
+}));
 
 test("SB workspace migration denies browser roles without changing business rows or server access", async () => {
   const db = new PGlite();

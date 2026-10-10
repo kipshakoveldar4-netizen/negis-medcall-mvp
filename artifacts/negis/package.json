@@ -77,7 +77,6 @@
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.105.4",
-    "papaparse": "^5.5.3",
-    "xlsx": "^0.18.5"
+    "papaparse": "^5.5.3"
   }
 }
