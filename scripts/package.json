@@ -56,7 +56,7 @@
     "test:failure-honesty": "tsx --test ./src/medina-failure-honesty.test.ts",
     "test:migration-chain": "tsx --test ./src/medina-migration-chain.test.ts",
     "test:wazzup-webhook": "tsx --test ./src/medina-wazzup-webhook.test.ts",
-    "test:transition-performance": "tsx --test ./src/medina-transition-performance.test.ts",
+    "test:transition-performance": "tsx --test ./src/medina-transition-performance.test.ts ./src/medina-crm-cache-runtime.test.ts",
     "test:whatsapp-cloud-webhook": "tsx --test ./src/medina-whatsapp-cloud-webhook.test.ts",
     "test:crm-phone-parity": "tsx --test ./src/medina-crm-phone-parity.test.ts",
     "test:whatsapp-channels": "tsx --test ./src/medina-whatsapp-channels.test.ts",
