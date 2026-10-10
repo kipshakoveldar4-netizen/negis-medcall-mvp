@@ -546,6 +546,53 @@ test("SB generated request URL treats injected code as data, without evaluating 
   }
 }));
 
+function deploymentParsers() {
+  const requireRoot = createRequire(path.join(root, "package.json"));
+  const requireVercel = createRequire(requireRoot.resolve("@vercel/node"));
+  const requireBuild = createRequire(requireVercel.resolve("@vercel/build-utils"));
+  return createRequire(requireBuild.resolve("@vercel/python-analysis"));
+}
+
+test("SB patched YAML parser bounds empty merges and preserves ordinary configuration", () => {
+  const requireParser = deploymentParsers();
+  assert.equal(requireParser("js-yaml/package.json").version, "4.3.2");
+  const yaml = requireParser("js-yaml");
+  const source = `arr: &arr [${Array(20).fill("{}").join(",")} ]\nresult:\n  <<: *arr\n`;
+  assert.throws(() => yaml.load(source, { maxTotalMergeKeys: 8 }), /maxTotalMergeKeys/);
+  assert.deepEqual(yaml.load("defaults: &defaults\n  port: 8080\nserver:\n  <<: *defaults\n  name: fixture\n"), {
+    defaults: { port: 8080 }, server: { port: 8080, name: "fixture" },
+  });
+});
+
+test("SB patched TOML parser preserves nested config and rejects duplicate keys", () => {
+  const requireParser = deploymentParsers();
+  const toml = requireParser("smol-toml");
+  const value = toml.parse('name = "fixture"\n[project]\nversion = "1.0"\n[[project.tasks]]\nname = "build"\n');
+  assert.equal(Object.getPrototypeOf(value), null);
+  assert.equal(Object.getPrototypeOf(value.project), null);
+  assert.deepEqual(JSON.parse(JSON.stringify(value)), { name: "fixture", project: { version: "1.0", tasks: [{ name: "build" }] } });
+  assert.deepEqual(toml.parse(toml.stringify(value)), value);
+  assert.throws(() => toml.parse("key = 1\nkey = 2\n"), /duplicate|defined/i);
+  const flat = Array.from({ length: 2000 }, (_, i) => `k${i} = ${i}`).join("\n");
+  const parsed = toml.parse(flat);
+  assert.equal(Object.keys(parsed).length, 2000);
+  assert.equal(parsed.k1999, 1999);
+});
+
+test("SB actual generator URI parser normalizes encoded host spelling consistently", () => {
+  const requireSpec = createRequire(path.join(root, "lib/api-spec/package.json"));
+  const requireOrval = createRequire(requireSpec.resolve("orval"));
+  const requireScalar = createRequire(requireOrval.resolve("@scalar/openapi-parser"));
+  const requireAjv = createRequire(requireScalar.resolve("ajv"));
+  assert.equal(requireAjv("fast-uri/package.json").version, "3.1.8");
+  const uri = requireAjv("fast-uri");
+  for (const spelling of ["//%41.com", "//A.com", "//a.com"]) {
+    assert.equal(uri.parse(spelling).host, "a.com");
+    assert.equal(uri.equal(spelling, "//a.com"), true);
+  }
+  assert.equal(uri.resolve("https://example.test/api/", "../health"), "https://example.test/health");
+});
+
 test("SB workspace migration denies browser roles without changing business rows or server access", async () => {
   const db = new PGlite();
   try {

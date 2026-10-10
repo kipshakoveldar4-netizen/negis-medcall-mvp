@@ -958,6 +958,43 @@ sourcemap tooltip и смешанного импорта serverAuth сохран
   Freedom Pay sandbox отсутствуют: безопасность реальных транзакций пока
   проверить нельзя. Рабочие клиники, реклама и настоящие платежи не затронуты.
 
+### P-S1/Q1: совместимые parser/build исправления, 10 октября - локально проверены
+
+- [x] По запросу «исправляй все возможные ошибки и публикуй» продолжен текущий
+  security-пункт. Накопленная ветка не допускается целиком в production:
+  следующий выпуск готовится только в прежний изолированный Preview.
+  Чужие незавершённые 059/065 не изменены и не войдут в чистый кандидат.
+- [x] В пределах прежних major закреплены js-yaml 4.3.2, smol-toml 1.9.0,
+  fast-uri 3.1.8, minimatch 10.2.3, Babel core 7.29.6, browserslist 4.28.7,
+  baseline-browser-mapping 2.11.0, source-map-js 1.2.2 и undici 5.29.0.
+  Vite обновлён с 7.3.3 до 7.3.7, PostCSS до 8.5.29, nanoid до 3.3.20.
+  Scoped overrides сохраняют major и компенсируют точные уязвимые upstream pins;
+  minimumReleaseAge 1440, защита TLS и ограничения внешних запусков сохранены.
+  Основания: [YAML](https://github.com/nodeca/js-yaml/security/advisories/GHSA-2883-xcg3-v3hh),
+  [TOML](https://github.com/squirrelchat/smol-toml/security/advisories/GHSA-r4xh-jqrq-34v2),
+  [URI](https://github.com/fastify/fast-uri/security/advisories/GHSA-hrr3-gc8f-f4qj),
+  [Vite](https://github.com/vitejs/vite/security/advisories/GHSA-fx2h-pf6j-xcff).
+- [x] Boundary-набор **35/35**, 0 skipped: добавлены проверки фактически
+  разрешённых parser-зависимостей, бюджета пустых YAML merges, TOML round-trip /
+  duplicate keys и нормализации percent-encoded host. Первый TOML-тест ожидал
+  обычный prototype, тогда как исправленный parser возвращает безопасный null
+  prototype. Тест дополнен явной проверкой null prototype и самих данных.
+  Генерация API по локальной схеме во временную папку также проходит.
+- [x] Typecheck библиотек, API (обычный и Node16), всех artifacts/scripts;
+  cold start normal (11+46) / broken-site (11+45), frontend build (1999 модулей),
+  Express build, frozen-lockfile install без lifecycle scripts и diff --check.
+- [x] Расширенный registry scan: **20 вместо 54**, **0 critical, 5 high,
+  11 moderate, 4 low**. Скан --prod: **18 вместо 30**, **0 critical, 5 high,
+  9 moderate, 4 low**. Остаются undici (для части исправлений нужен другой major),
+  busboy, ajv, braces, esbuild; в dev дополнительно fast-copy / selector-parser.
+  Это не число доказанных production-эксплуатаций. Принудительная замена
+  несовместимых API и декларация нулевого риска не выполнялись.
+- [ ] Выпуск, финальный набор чистого кандидата и облачная проверка ещё не
+  завершены. 068 не применена в облаке; production/рабочие базы/платежи не менялись.
+  В Vercel подтверждён прежний production e11bb2f и отсутствие 2FA у владельца;
+  настройку второго фактора должен выполнить сам владелец без передачи секретов.
+  Банковский sandbox и бизнес-условия по-прежнему не подтверждены.
+
 ### P-S1: атомарная ручная подписка, 5 октября — готово локально
 
 - [x] Подготовлена миграция `067_atomic_platform_subscription.sql`. Функция
