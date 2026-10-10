@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { crmFetch, crmErrorMessage } from "@/lib/api";
+import { CrmApiError, crmFetch, crmErrorMessage } from "@/lib/api";
 import {
   OPERATOR_PAGE_SIZE,
   type OperatorList,
@@ -20,28 +20,43 @@ export async function operatorApi<T>(
   method = "POST",
   signal?: AbortSignal,
 ): Promise<T> {
-  const response = await crmFetch(`/api/crm/${path}`, {
-    method: body === undefined ? "GET" : method,
-    signal,
-    cache: "no-store",
-    ...(body === undefined
-      ? {}
-      : {
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-        }),
-  });
+  const requestMethod = body === undefined ? "GET" : method;
+  let response: Response;
+  try {
+    response = await crmFetch(`/api/crm/${path}`, {
+      method: requestMethod,
+      signal,
+      cache: "no-store",
+      ...(body === undefined
+        ? {}
+        : {
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          }),
+    });
+  } catch (error) {
+    // Missing sessions fail before a Response exists. Forms must still take
+    // their access-denied path rather than treating this as an uncertain write.
+    if (error instanceof CrmApiError) {
+      throw new OperatorApiError(crmErrorMessage(error), error.status);
+    }
+    throw error;
+  }
   const payload = (await response.json().catch(() => null)) as {
     success?: boolean;
     error?: string;
     code?: string;
     data?: T;
   } | null;
-  if (!response.ok || !payload?.success) {
+  if (
+    !response.ok ||
+    payload?.success !== true ||
+    (requestMethod.toUpperCase() === "GET" && !Object.hasOwn(payload, "data"))
+  ) {
     throw new OperatorApiError(
       payload?.code === "authorization_unavailable"
         ? "Сервис входа не ответил. Попробуйте обновить данные чуть позже."
-        : payload?.error && response.status !== 401 && response.status !== 403
+        : typeof payload?.error === "string" && payload.error && response.status !== 401 && response.status !== 403
           ? payload.error
           : crmErrorMessage(response.status),
       response.status,
