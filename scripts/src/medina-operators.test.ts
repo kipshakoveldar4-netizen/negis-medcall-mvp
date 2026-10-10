@@ -1078,7 +1078,8 @@ test("operator contact UI uses explicit scope and guarded stage writes without g
   assert.match(leads, /document.addEventListener\("visibilitychange", revalidateVisibleTab\)/);
   assert.match(leads, /document.visibilityState === "visible"/);
   assert.match(leads, /setBookingLeadId\(null\)/);
-  assert.match(api, /const refresh = useCallback\(\(\) => \{\s*\/\/[^]*setData\(null\);\s*setError\(""\);\s*setRevision/);
+  assert.match(api, /const refresh = useCallback\(\(\) => \{\s*\/\/[^]*setResponse\(null\);\s*setRequest/);
+  assert.match(api, /response\?\.request === request/);
   assert.doesNotMatch(leads, /localStorage|sessionStorage|medicalHistory|notes|meta-launch|appointments|responsible_user_id/);
   assert.match(leads, /Доступен только просмотр/);
   assert.match(leads, /stageEditingAvailable/);
