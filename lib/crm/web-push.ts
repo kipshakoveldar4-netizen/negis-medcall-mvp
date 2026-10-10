@@ -36,6 +36,22 @@ const TTL_SECONDS = 3600;
 const RECORD_SIZE = 4096;
 const REQUEST_TIMEOUT_MS = 2500;
 
+/** Only browser push services may receive device keys or encrypted CRM data. */
+export function isTrustedPushEndpoint(endpoint: string): boolean {
+  if (!endpoint || endpoint.length > 1024 || /[\\\s]/.test(endpoint)) return false;
+  try {
+    const url = new URL(endpoint);
+    if (url.protocol !== "https:" || url.username || url.password || url.port || url.hash) return false;
+    const host = url.hostname;
+    return host === "fcm.googleapis.com"
+      || host === "updates.push.services.mozilla.com"
+      || /^[a-z0-9-]+(?:\.[a-z0-9-]+)*\.push\.apple\.com$/.test(host)
+      || /^[a-z0-9-]+(?:\.[a-z0-9-]+)*\.notify\.windows\.com$/.test(host);
+  } catch {
+    return false;
+  }
+}
+
 function base64UrlToBuffer(value: string): Buffer {
   return Buffer.from(value.replace(/-/g, "+").replace(/_/g, "/"), "base64");
 }
@@ -143,6 +159,7 @@ export async function sendWebPush(
   keys: VapidKeys,
   nowSeconds: number,
 ): Promise<PushResult> {
+  if (!isTrustedPushEndpoint(subscription.endpoint)) return { outcome: "rejected", status: 0 };
   const body = encryptPushPayload(payload, subscription);
   // Тип ответа берём свой, а не глобальный Response.
   //
@@ -162,6 +179,7 @@ export async function sendWebPush(
     },
     body: new Uint8Array(body),
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    redirect: "error",
   })) as { status: number };
   // Тело ответа не читается и не логируется: там нет ничего полезного, а вот
   // эндпойнт устройства в лог попасть не должен.

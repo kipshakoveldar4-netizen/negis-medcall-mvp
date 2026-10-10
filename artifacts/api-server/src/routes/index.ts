@@ -3,7 +3,6 @@ import healthRouter from "./health";
 import dashboardRouter from "./dashboard";
 import webhookRouter from "./webhook";
 import impersonationRouter from "./impersonation";
-import adsTikTokRouter from "./ads-tiktok";
 
 // ВНИМАНИЕ. У этого express-приложения нет ни одного слоя авторизации:
 // app.ts подключает только cors() и парсеры тела. Поэтому здесь подключается
@@ -22,6 +21,7 @@ import adsTikTokRouter from "./ads-tiktok";
 //                     а здесь он оставался открытым чёрным ходом.
 //   employees       — CRUD сотрудников без авторизации.
 //   test-auth       — POST /api/test/login, тестовый вход в проде.
+//   ads-tiktok      — OAuth callback without authenticated membership or state.
 //
 // Ни один из них не вызывается ни фронтендом, ни порталом платформы: это
 // остатки времён до Security-2. Возвращать что-то из этого можно только вместе
@@ -33,6 +33,5 @@ router.use(healthRouter);
 router.use(dashboardRouter);
 router.use(webhookRouter);
 router.use(impersonationRouter);
-router.use(adsTikTokRouter);
 
 export default router;

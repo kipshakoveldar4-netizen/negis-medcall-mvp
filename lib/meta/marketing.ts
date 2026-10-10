@@ -15,6 +15,13 @@ type MetaFetchResponse = {
   };
   text: () => Promise<string>;
   arrayBuffer?: () => Promise<ArrayBuffer>;
+  body?: {
+    getReader(): {
+      read(): Promise<{ done: boolean; value?: Uint8Array }>;
+      cancel(): Promise<unknown>;
+      releaseLock(): void;
+    };
+  } | null;
 };
 
 type MetaFetch = (
@@ -23,6 +30,8 @@ type MetaFetch = (
     method?: string;
     headers?: Record<string, string>;
     body?: string | Buffer;
+    signal?: AbortSignal;
+    redirect?: "error";
   },
 ) => Promise<MetaFetchResponse>;
 
@@ -106,6 +115,7 @@ export type MetaConfig = {
 };
 
 export type MetaLaunchInput = {
+  workspaceId?: string;
   campaignName: string;
   objective: string;
   status: "PAUSED" | "ACTIVE";
@@ -1105,49 +1115,79 @@ function makeMultipartBody(fields: Record<string, string>, file: { fieldName: st
   };
 }
 
-async function downloadVideoForBinaryFallback(input: { videoUrl: string; maxBytes: number }): Promise<Buffer> {
-  const safeFetch = fetch as unknown as MetaFetch;
-  const response = await safeFetch(input.videoUrl, { method: "GET" });
-  const contentLength = Number(response.headers?.get("content-length") || 0);
-  if (Number.isFinite(contentLength) && contentLength > input.maxBytes) {
-    throw new MetaApiError({
-      step: "video_upload",
-      message: META_VIDEO_BINARY_TOO_LARGE_MESSAGE,
-      debug: { contentLength, maxBytes: input.maxBytes },
-    });
+function assertOwnStorageVideoUrl(videoUrl: string, workspaceId?: string): void {
+  try {
+    if (!workspaceId || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(workspaceId)) throw new Error();
+    const storage = new URL(process.env.SUPABASE_URL?.trim() || "");
+    const url = new URL(videoUrl);
+    if (storage.protocol !== "https:" || storage.username || storage.password || storage.port
+      || url.protocol !== "https:" || url.origin !== storage.origin || url.username || url.password
+      || url.port || url.search || url.hash || /[\\\s]/.test(videoUrl)) throw new Error();
+    const prefix = "/storage/v1/object/public/ad-creatives/";
+    if (!url.pathname.startsWith(prefix)) throw new Error();
+    const segments = url.pathname.slice(prefix.length).split("/").map((part) => decodeURIComponent(part));
+    if (segments.some((part) => !part || part === "." || part === ".." || /[\\/%]/.test(part))) throw new Error();
+    const ownObject = segments[0] === workspaceId && segments.length > 1;
+    const ownOptimizedObject = segments[0] === "optimized" && segments[1] === workspaceId && segments.length > 2;
+    if (!ownObject && !ownOptimizedObject) throw new Error();
+  } catch {
+    throw new MetaApiError({ step: "video_upload", message: "Binary fallback requires a public video object in this workspace's configured storage" });
   }
-  if (!response.ok || !response.arrayBuffer) {
-    const data = await parseMetaResponse(response);
-    throw new MetaApiError({
-      step: "video_upload",
-      status: response.status,
-      message: `Could not download public video URL for binary fallback: ${response.status}`,
-      debug: data,
-    });
-  }
+}
 
-  const buffer = Buffer.from(await response.arrayBuffer());
-  if (buffer.length > input.maxBytes) {
-    throw new MetaApiError({
-      step: "video_upload",
-      message: META_VIDEO_BINARY_TOO_LARGE_MESSAGE,
-      debug: { contentLength: buffer.length, maxBytes: input.maxBytes },
-    });
+async function downloadVideoForBinaryFallback(input: { videoUrl: string; workspaceId?: string; maxBytes: number }): Promise<Buffer> {
+  assertOwnStorageVideoUrl(input.videoUrl, input.workspaceId);
+  const safeFetch = fetch as unknown as MetaFetch;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15_000);
+  let reader: ReturnType<NonNullable<MetaFetchResponse["body"]>["getReader"]> | undefined;
+  try {
+    const response = await safeFetch(input.videoUrl, { method: "GET", redirect: "error", signal: controller.signal });
+    reader = response.body?.getReader();
+    const contentLength = Number(response.headers?.get("content-length") || 0);
+    if (Number.isFinite(contentLength) && contentLength > input.maxBytes) {
+      throw new MetaApiError({ step: "video_upload", message: META_VIDEO_BINARY_TOO_LARGE_MESSAGE });
+    }
+    if (!response.ok || response.status < 200 || response.status >= 300 || !reader) {
+      throw new MetaApiError({ step: "video_upload", status: response.status, message: "Could not download video for binary fallback" });
+    }
+    const chunks: Buffer[] = [];
+    let size = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      size += value.byteLength;
+      if (size > input.maxBytes) {
+        throw new MetaApiError({ step: "video_upload", message: META_VIDEO_BINARY_TOO_LARGE_MESSAGE });
+      }
+      chunks.push(Buffer.from(value));
+    }
+    if (size === 0) throw new MetaApiError({ step: "video_upload", message: "Downloaded video is empty" });
+    return Buffer.concat(chunks, size);
+  } catch (error) {
+    if (error instanceof MetaApiError) throw error;
+    throw new MetaApiError({ step: "video_upload", message: "Video download failed or timed out" });
+  } finally {
+    clearTimeout(timer);
+    controller.abort();
+    await reader?.cancel().catch(() => {});
+    reader?.releaseLock();
   }
-  return buffer;
 }
 
 async function uploadMetaVideoBinary(input: {
   config: { baseUrl: string; accessToken: string };
   adAccountId: string;
   videoUrl: string;
+  workspaceId?: string;
   fileName: string;
   mimeType: string;
   title: string;
   maxBytes: number;
 }): Promise<MetaJson> {
   const safeFetch = fetch as unknown as MetaFetch;
-  const buffer = await downloadVideoForBinaryFallback({ videoUrl: input.videoUrl, maxBytes: input.maxBytes });
+  const buffer = await downloadVideoForBinaryFallback({ videoUrl: input.videoUrl, workspaceId: input.workspaceId, maxBytes: input.maxBytes });
   const multipart = makeMultipartBody(
     {
       access_token: input.config.accessToken,
@@ -1176,6 +1216,7 @@ async function uploadMetaVideoBinary(input: {
 }
 
 export async function uploadMetaVideoAndGetId(input: {
+  workspaceId?: string;
   adAccountId?: string;
   accessToken?: string;
   videoUrl: string;
@@ -1232,10 +1273,13 @@ export async function uploadMetaVideoAndGetId(input: {
       config: resolvedConfig,
       adAccountId,
       videoUrl,
+      workspaceId: input.workspaceId,
       fileName,
       mimeType,
       title,
-      maxBytes: input.maxBinaryBytes || META_VIDEO_BINARY_FALLBACK_LIMIT_BYTES,
+      maxBytes: Number.isSafeInteger(input.maxBinaryBytes) && (input.maxBinaryBytes ?? 0) > 0
+        ? Math.min(input.maxBinaryBytes!, META_VIDEO_BINARY_FALLBACK_LIMIT_BYTES)
+        : META_VIDEO_BINARY_FALLBACK_LIMIT_BYTES,
     });
   }
 
@@ -1544,6 +1588,7 @@ export async function launchMetaCampaign(input: MetaLaunchInput): Promise<MetaLa
   let videoUploadResult: MetaVideoUploadResult | undefined;
   if (preparedInput.creativeType === "video" && !preparedInput.videoId) {
     videoUploadResult = await uploadMetaVideoAndGetId({
+      workspaceId: preparedInput.workspaceId,
       videoUrl: preparedInput.videoUrl || "",
       fileName: preparedInput.fileName,
       mimeType: preparedInput.mimeType,

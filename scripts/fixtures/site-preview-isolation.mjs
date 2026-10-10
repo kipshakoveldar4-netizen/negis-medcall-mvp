@@ -2,7 +2,7 @@
 export const previewIsolation = Object.freeze({
   branch: "codex/site-blog-release-20260929",
   target: "preview",
-  candidate: "7f67f853947c7751d3f114d7f82fd6883f4a3f3b",
+  candidate: "e39276bd8acec9820672788807b83a0c409a2559",
   supabaseProject: "ukiobbwsdoblooynzlnx",
   overrides: Object.freeze({
     VITE_API_BASE_URL: "",

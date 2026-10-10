@@ -13,8 +13,9 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 
 import { getSupabaseServerClient } from "../supabase/server";
+import { hasPermission } from "../auth/permissions";
 import { readWorkspaceContext } from "./server";
-import { readVapidKeys, sendWebPush } from "./web-push";
+import { isTrustedPushEndpoint, readVapidKeys, sendWebPush } from "./web-push";
 import {
   MAX_ENDPOINTS_PER_EVENT,
   notificationFor,
@@ -112,7 +113,7 @@ export async function handlePushSubscriptions(req: VercelRequest, res: VercelRes
     const auth = readString(body.auth).trim();
     const label = readString(body.label).trim().slice(0, 60);
 
-    if (!endpoint.startsWith("https://") || endpoint.length > 1024 || !p256dh || !auth) {
+    if (!isTrustedPushEndpoint(endpoint) || !p256dh || !auth) {
       return sendJson(res, 400, { success: false, error: "Подписка неполная", code: "invalid_subscription" });
     }
     if (!keys) {
@@ -241,6 +242,18 @@ export async function notifyAppointmentEvent(input: {
     });
     if (devices.length === 0) return;
 
+    // Device rows outlive role changes. Check current membership, not the doctor card.
+    const { data: recipient, error: recipientError } = await input.supabase
+      .from("staff_users")
+      .select("id, workspace_id, auth_user_id, role, status")
+      .eq("id", decision.staffUserId)
+      .eq("workspace_id", input.workspaceId)
+      .eq("status", "active")
+      .maybeSingle();
+    if (recipientError || !recipient || recipient.id !== decision.staffUserId
+      || recipient.workspace_id !== input.workspaceId || recipient.status !== "active"
+      || !isUuid(readString(recipient.auth_user_id)) || !hasPermission(recipient.role, "view_appointments")) return;
+
     const payload = JSON.stringify(notification);
     const nowSeconds = Math.floor(Date.now() / 1000);
     const results = await Promise.allSettled(
@@ -264,6 +277,7 @@ export async function notifyAppointmentEvent(input: {
         .from("push_subscriptions")
         .update({ gone_at: stamp, updated_at: stamp })
         .eq("workspace_id", input.workspaceId)
+        .eq("staff_user_id", decision.staffUserId)
         .in("endpoint", gone);
     }
     if (delivered.length > 0) {
@@ -271,6 +285,7 @@ export async function notifyAppointmentEvent(input: {
         .from("push_subscriptions")
         .update({ last_success_at: stamp, updated_at: stamp })
         .eq("workspace_id", input.workspaceId)
+        .eq("staff_user_id", decision.staffUserId)
         .in("endpoint", delivered);
     }
   } catch {
