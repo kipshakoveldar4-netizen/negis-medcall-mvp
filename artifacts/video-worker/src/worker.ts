@@ -92,10 +92,32 @@ function inputExtension(job: JobRow): string {
 
 export async function processJob(supabase: SupabaseClient, config: WorkerConfig, job: JobRow): Promise<void> {
   const tmpBase = await mkdtemp(path.join(config.tmpDir, "negis-video-"));
+  let assetAuthorized = false;
+  let existingMetadata: Record<string, unknown> = {};
   try {
+    if (!job.workspace_id || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(job.workspace_id)) {
+      throw new Error("job has no valid workspace");
+    }
+    // Recheck queued jobs too: older API versions accepted unchecked asset ids.
+    if (job.asset_id) {
+      const { data: asset, error } = await supabase
+        .from("ad_creative_assets")
+        .select("id, workspace_id, metadata")
+        .eq("id", job.asset_id)
+        .eq("workspace_id", job.workspace_id)
+        .maybeSingle();
+      if (error || !asset || asset.id !== job.asset_id || asset.workspace_id !== job.workspace_id) {
+        throw new Error("video asset is not available in this workspace");
+      }
+      assetAuthorized = true;
+      existingMetadata = (asset.metadata && typeof asset.metadata === "object" ? asset.metadata : {}) as Record<string, unknown>;
+    }
     const rawBucket = job.raw_bucket || config.rawBucket;
     const rawPath = job.raw_path || "";
     if (!rawPath) throw new Error("job has no raw_path");
+    if (!rawPath.startsWith(`${job.workspace_id}/`) || rawPath.split("/").some((segment) => segment === "." || segment === "..") || /[\\%]/.test(rawPath)) {
+      throw new Error("raw object is not available in this workspace");
+    }
 
     // downloading (progress set during the claim)
     const { data: rawBlob, error: downloadError } = await supabase.storage.from(rawBucket).download(rawPath);
@@ -152,8 +174,6 @@ export async function processJob(supabase: SupabaseClient, config: WorkerConfig,
     // Point the asset at the optimized MP4: Meta launches read public_url, so the
     // raw original can never reach Meta once the job is ready.
     if (job.asset_id) {
-      const { data: assetRow } = await supabase.from("ad_creative_assets").select("metadata").eq("id", job.asset_id).maybeSingle();
-      const existingMetadata = (assetRow?.metadata && typeof assetRow.metadata === "object" ? assetRow.metadata : {}) as Record<string, unknown>;
       const { error: assetError } = await supabase
         .from("ad_creative_assets")
         .update({
@@ -177,7 +197,8 @@ export async function processJob(supabase: SupabaseClient, config: WorkerConfig,
           },
           updated_at: now,
         })
-        .eq("id", job.asset_id);
+        .eq("id", job.asset_id)
+        .eq("workspace_id", job.workspace_id);
       if (assetError) throw new Error(`asset update failed: ${assetError.message}`);
     }
 
@@ -225,11 +246,12 @@ export async function processJob(supabase: SupabaseClient, config: WorkerConfig,
         .from("video_processing_jobs")
         .update({ status: "failed", error: message, error_message: message, updated_at: new Date().toISOString() })
         .eq("id", job.id);
-      if (job.asset_id) {
+      if (job.asset_id && assetAuthorized) {
         await supabase
           .from("ad_creative_assets")
           .update({ status: "optimization_failed", updated_at: new Date().toISOString() })
-          .eq("id", job.asset_id);
+          .eq("id", job.asset_id)
+          .eq("workspace_id", job.workspace_id);
       }
     } catch (markError) {
       console.error(`[video-worker] job ${job.id} could not be marked failed: ${markError instanceof Error ? markError.message : "unknown"}`);

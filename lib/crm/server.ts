@@ -6782,7 +6782,7 @@ export async function handleAdCreativeMetaUpload(req: VercelRequest, res: Vercel
   }
 
   try {
-    const metaResponse = await uploadMetaVideoAndGetId({ videoUrl: publicUrl, fileName, mimeType, title });
+    const metaResponse = await uploadMetaVideoAndGetId({ workspaceId, videoUrl: publicUrl, fileName, mimeType, title });
     const metaVideoId = metaResponse.videoId;
     const lastCheckedAt = new Date().toISOString();
 
@@ -7217,6 +7217,7 @@ export async function handleVideoProcessingJobs(req: VercelRequest, res: VercelR
     const details: string[] = [];
 
     if (!VIDEO_MIME_TYPES.has(inputMimeType)) details.push("inputMimeType must be MP4, MOV or WEBM");
+    if (assetId && !isUuid(assetId)) details.push("assetId must be a UUID");
     if (inputSizeBytes <= 0) details.push("inputSizeBytes is required");
     if (inputSizeBytes > config.maxInputMb * 1024 * 1024) details.push(`Видео больше ${config.maxInputMb} MB. Загрузите файл меньшего размера.`);
     if (rawPath && !isOwnWorkspaceStoragePath(rawPath, workspaceId)) {
@@ -7247,6 +7248,18 @@ export async function handleVideoProcessingJobs(req: VercelRequest, res: VercelR
     }
 
     try {
+      if (assetId) {
+        const { data: asset, error: assetError } = await supabase
+          .from("ad_creative_assets")
+          .select("id, workspace_id")
+          .eq("id", assetId)
+          .eq("workspace_id", workspaceId)
+          .maybeSingle();
+        if (assetError) throw new Error("Could not verify video asset ownership");
+        if (!asset || asset.id !== assetId || asset.workspace_id !== workspaceId) {
+          return sendJson(res, 404, errorBody("Креатив не найден", ["not found"]));
+        }
+      }
       const { data, error } = await supabase
         .from("video_processing_jobs")
         .insert({
@@ -8368,6 +8381,7 @@ export async function handleMetaLaunch(req: VercelRequest, res: VercelResponse) 
         throw new Error("Meta env is not configured");
       }
       const result = await launchMetaCampaign({
+        workspaceId,
         campaignName: resolvedLaunch.campaignName,
         objective: resolvedLaunch.objective,
         status: resolvedLaunch.statusMode,

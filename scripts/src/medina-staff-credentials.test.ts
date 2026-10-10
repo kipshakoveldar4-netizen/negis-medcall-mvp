@@ -137,11 +137,12 @@ test("SC4 чужой аккаунт не захватывается, а член
   // Заданный пароль обязан дойти до Supabase — иначе сотрудник войти не сможет,
   // а экран покажет пароль, которого у аккаунта нет.
   assert.ok(/const password = String\(body\.password\);/.test(source));
-  assert.ok(/\bpassword,\n/.test(source), "пароль уходит в тело запроса к Admin API");
+  assert.ok(/\bpassword,\s/.test(source), "пароль уходит в тело запроса к Admin API");
 
   // Аккаунт создаётся ДО строки сотрудника: отказ «почта занята» не оставляет
   // ни висящих приглашений, ни половины членства.
-  assert.ok(source.indexOf("/auth/v1/admin/users") < source.indexOf('from("staff_users")\n    .insert'), "аккаунт первым");
+  const staffInsertAt = source.search(/\.from\("staff_users"\)\s*\.insert\(/);
+  assert.ok(staffInsertAt > source.indexOf("/auth/v1/admin/users"), "аккаунт первым");
   assert.ok(/escapeLikePattern\(validated\.email\)/.test(source), "почта в выборках — значение, не LIKE-шаблон");
 });
 
@@ -157,7 +158,8 @@ test("SC4c сотрудник без привязанного входа дос�
   // Второй профиль того же человека развалил бы историю: на строку уже
   // ссылаются задачи и журнал.
   assert.ok(
-    source.indexOf("if (existingStaffId) {") < source.indexOf('.from("staff_users")\n    .insert('),
+    source.indexOf("if (existingStaffId) {") >= 0
+      && source.indexOf("if (existingStaffId) {") < source.search(/\.from\("staff_users"\)\s*\.insert\(/),
     "достройка проверяется раньше вставки",
   );
 });
@@ -467,5 +469,5 @@ test("SC11 профиль открывается и с телефона", async 
   const layout = await readFile(
     path.join(repoRoot, "artifacts", "negis", "src", "components", "layout", "PageLayout.tsx"), "utf8",
   );
-  assert.ok(/hidden md:block[\s\S]{0,80}<Sidebar \/>/.test(layout), "сайдбар по-прежнему скрыт на узких экранах");
+  assert.ok(/hidden lg:block[\s\S]{0,80}<Sidebar \/>/.test(layout), "сайдбар по-прежнему скрыт на узких экранах");
 });

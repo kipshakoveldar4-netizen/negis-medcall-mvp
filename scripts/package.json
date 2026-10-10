@@ -50,6 +50,7 @@
     "test:api-surface-authorization": "tsx --test ./src/medina-api-surface-authorization.test.ts",
     "test:staff-invitations": "tsx --test ./src/medina-staff-invitations.test.ts",
     "test:storage-isolation": "tsx --test ./src/medina-storage-isolation.test.ts",
+    "test:security-boundaries": "tsx --test ./src/medina-security-boundaries.test.ts",
     "test:workspace-selection": "tsx --test ./src/medina-workspace-selection.test.ts",
     "test:failure-honesty": "tsx --test ./src/medina-failure-honesty.test.ts",
     "test:migration-chain": "tsx --test ./src/medina-migration-chain.test.ts",

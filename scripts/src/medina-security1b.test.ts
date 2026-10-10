@@ -291,7 +291,7 @@ test("22b a migration that only alters a table does not get a free pass on RLS a
 
     for (const table of alteredTables(sql)) {
       assert.ok(
-        grantsToServiceRole(migrations, table),
+        grantsToServiceRole(migrations, table) || RPC_ONLY_TABLES.has(table),
         `${file} alters ${table}, which nothing in the chain grants to service_role — `
           + "add the grant here rather than leaving the server's access to whatever production happens to hold",
       );
@@ -379,16 +379,44 @@ function createdTables(sql: string): string[] {
  * already run somewhere and must keep describing what it did.
  */
 function grantsToServiceRole(chain: Iterable<[string, string]>, table: string): boolean {
-  // String.raw, because a plain template literal would swallow the backslashes
-  // and leave a pattern that matches nothing while looking correct.
-  const pattern = new RegExp(
-    String.raw`grant[^;]*on\s+table\s+(?:public\.)?${table}\b[^;]*to[^;]*service_role`,
-  );
   for (const [, source] of chain) {
-    if (pattern.test(normalize(source))) return true;
+    for (const match of normalize(source).matchAll(/\bgrant\s+[^;]+?\s+on\s+(?:table\s+)?([^;]+?)\s+to\s+([^;]+);/g)) {
+      const tables = match[1].split(",").map((name) => name.trim().replace(/^public\./, ""));
+      const roles = match[2].split(",").map((name) => name.trim());
+      if (tables.includes(table) && roles.includes("service_role")) return true;
+    }
   }
   return false;
 }
+
+// Receipt rows are deliberately inaccessible even to service_role. Only the
+// two SECURITY DEFINER RPCs may read/write them; this is not a generic exemption.
+const RPC_ONLY_TABLES = new Set(["crm_appointment_create_requests"]);
+
+test("26a grant checks recognize table lists without accepting similarly named tables or roles", () => {
+  const chain = new Map([["local.sql", "grant select on public.first, public.second to service_role; grant select on table public.third to service_role;"]]);
+  for (const table of ["first", "second", "third"]) assert.equal(grantsToServiceRole(chain, table), true);
+  assert.equal(grantsToServiceRole(chain, "secon"), false);
+  assert.equal(grantsToServiceRole(new Map([["local.sql", "grant select on second to other_service_role;"]]), "second"), false);
+});
+
+test("26b RPC-only receipt table stays private and reachable only through its reviewed functions", () => {
+  const sql = normalize(migrations.get("064_appointment_create_requests.sql") ?? "");
+  assert.ok(sql.includes("alter table public.crm_appointment_create_requests enable row level security"));
+  assert.ok(sql.includes("revoke all on public.crm_appointment_create_requests from public, anon, authenticated, service_role;"));
+  assert.equal(grantsToServiceRole(migrations, "crm_appointment_create_requests"), false);
+  for (const name of ["read_crm_appointment_create_request", "create_crm_appointment_once"]) {
+    const start = sql.indexOf(`create or replace function public.${name}(`);
+    assert.ok(start >= 0, name);
+    const end = sql.indexOf("$$;", start);
+    const fn = sql.slice(start, end);
+    assert.ok(fn.includes("security definer"), name);
+    assert.ok(fn.includes("set search_path = ''"), name);
+    assert.ok(fn.includes("public.crm_appointment_create_requests"), name);
+    assert.match(sql, new RegExp(`grant execute on function public\\.${name}\\([^;]+\\) to service_role;`));
+    assert.match(sql, new RegExp(`revoke all on function public\\.${name}\\([^;]+\\) from public, anon, authenticated;`));
+  }
+});
 
 test("26 every new application table is reachable by the server that owns it", () => {
   // The routes run as service_role on a table created by postgres, which grants
@@ -399,7 +427,7 @@ test("26 every new application table is reachable by the server that owns it", (
   for (const [file, source] of migrations) {
     if (PRE_EXPLICIT_GRANT_ALLOWLIST.has(file)) continue;
     for (const table of createdTables(normalize(source))) {
-      if (!grantsToServiceRole(migrations, table)) {
+      if (!grantsToServiceRole(migrations, table) && !RPC_ONLY_TABLES.has(table)) {
         offenders.push(`${file}: ${table} is never granted to service_role`);
       }
     }
