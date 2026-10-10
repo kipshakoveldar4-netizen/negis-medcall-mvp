@@ -69,48 +69,76 @@ export function useOperatorList<
   T,
   TList extends OperatorList<T> = OperatorList<T>,
 >(path: string, enabled = true) {
-  const [offset, setOffset] = useState(0);
-  const [revision, setRevision] = useState(0);
-  const [data, setData] = useState<TList | null>(null);
-  const [error, setError] = useState("");
+  const [request, setRequest] = useState({ path, enabled, offset: 0, revision: 0 });
+  const [response, setResponse] = useState<{
+    request: typeof request;
+    data: TList | null;
+    error: string;
+  } | null>(null);
+
+  // Adjust this hook's state before children render, not in a passive effect.
+  // Each scope change gets a new identity, including A -> B -> A transitions.
+  if (request.path !== path || request.enabled !== enabled) {
+    setRequest({
+      path,
+      enabled,
+      offset: request.path === path ? request.offset : 0,
+      revision: request.revision + 1,
+    });
+  }
   const refresh = useCallback(() => {
-    // Operator lists can contain patient contacts. Hide the previous response
-    // before rechecking access instead of leaving it visible during the request.
-    setData(null);
-    setError("");
-    setRevision((value) => value + 1);
+    // Invalidate the result before effects run, even if an old GET completes.
+    setResponse(null);
+    setRequest((value) => ({ ...value, revision: value.revision + 1 }));
   }, []);
   useEffect(() => {
-    setData(null);
-    setError("");
-    if (!enabled) return;
+    setResponse(null);
+    if (!request.enabled) return;
     const controller = new AbortController();
     void operatorApi<TList>(
-      `${path}${path.includes("?") ? "&" : "?"}offset=${offset}`,
+      `${request.path}${request.path.includes("?") ? "&" : "?"}offset=${request.offset}`,
       undefined,
       "GET",
       controller.signal,
     )
       .then((result) => {
-        if (!controller.signal.aborted) setData(result);
+        if (!controller.signal.aborted)
+          setResponse({ request, data: result, error: "" });
       })
       .catch((error) => {
         if (!controller.signal.aborted)
-          setError(
-            error instanceof Error
-              ? error.message
-              : "Не удалось загрузить список",
-          );
+          setResponse({
+            request,
+            data: null,
+            error:
+              error instanceof Error
+                ? error.message
+                : "Не удалось загрузить список",
+          });
       });
     return () => controller.abort();
-  }, [path, enabled, offset, revision]);
+  }, [request]);
+  const current =
+    enabled &&
+    request.path === path &&
+    request.enabled === enabled &&
+    response?.request === request
+      ? response
+      : null;
   return {
-    data: enabled ? data : null,
-    error,
+    data: current?.data ?? null,
+    error: current?.error ?? "",
     refresh,
-    offset,
+    offset: request.path === path ? request.offset : 0,
     previous: () =>
-      setOffset((value) => Math.max(0, value - OPERATOR_PAGE_SIZE)),
-    next: () => setOffset((value) => value + OPERATOR_PAGE_SIZE),
+      setRequest((value) => {
+        const offset = Math.max(0, value.offset - OPERATOR_PAGE_SIZE);
+        return offset === value.offset ? value : { ...value, offset };
+      }),
+    next: () =>
+      setRequest((value) => ({
+        ...value,
+        offset: value.offset + OPERATOR_PAGE_SIZE,
+      })),
   };
 }
