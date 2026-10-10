@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "wouter";
 import { LogOut, RefreshCw, Send } from "lucide-react";
 import { supabase, hasSupabaseFrontendEnv } from "@/lib/supabase";
@@ -26,26 +26,42 @@ export default function OperatorPortal() {
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
+  const currentUserId = useRef<string | null>(null);
+  const profileEpoch = useRef(0);
   const refreshProfile = useCallback(() => {
-    if (!userId) return;
+    if (!userId || currentUserId.current !== userId) return;
+    profileEpoch.current += 1;
     // The profile controls access to every clinic below. Hide the old account
     // state before asking the server whether approval is still active.
     setProfile(null);
     setLoaded(false);
+    setBusy(false);
     setMessage("");
     setRevision((value) => value + 1);
   }, [userId]);
   useEffect(() => {
     let alive = true;
+    let authEventSeen = false;
+    const updateSession = (id: string | null) => {
+      if (currentUserId.current !== id) {
+        currentUserId.current = id;
+        profileEpoch.current += 1;
+        setProfile(null);
+        setLoaded(false);
+        setBusy(false);
+        setMessage("");
+      }
+      setUserId(id);
+      setReady(true);
+    };
     void supabase.auth.getSession().then(({ data }) => {
-      if (alive) {
-        setUserId(data.session?.user.id ?? null);
-        setReady(true);
+      if (alive && !authEventSeen) {
+        updateSession(data.session?.user.id ?? null);
       }
     });
     const { data } = supabase.auth.onAuthStateChange((_event, session) => {
-      setUserId(session?.user.id ?? null);
-      setReady(true);
+      authEventSeen = true;
+      if (alive) updateSession(session?.user.id ?? null);
     });
     return () => {
       alive = false;
@@ -58,6 +74,11 @@ export default function OperatorPortal() {
     setMessage("");
     if (!userId) return;
     const controller = new AbortController();
+    const startedAtEpoch = profileEpoch.current;
+    const isCurrent = () =>
+      !controller.signal.aborted &&
+      currentUserId.current === userId &&
+      profileEpoch.current === startedAtEpoch;
     void operatorApi<OperatorProfile | null>(
       "operator-account",
       undefined,
@@ -65,13 +86,13 @@ export default function OperatorPortal() {
       controller.signal,
     )
       .then((value) => {
-        if (!controller.signal.aborted) {
+        if (isCurrent()) {
           setProfile(value);
           setLoaded(true);
         }
       })
       .catch((error) => {
-        if (!controller.signal.aborted)
+        if (isCurrent())
           setMessage(
             error instanceof Error
               ? error.message
@@ -152,18 +173,28 @@ export default function OperatorPortal() {
     }
   }
   async function save(body: unknown, method = "POST") {
+    if (!userId || currentUserId.current !== userId) return;
+    // A focus refresh or account change invalidates even a successful old PATCH.
+    const startedAtEpoch = ++profileEpoch.current;
+    const isCurrent = () =>
+      currentUserId.current === userId &&
+      profileEpoch.current === startedAtEpoch;
     setBusy(true);
     setMessage("");
     try {
-      setProfile(
-        await operatorApi<OperatorProfile>("operator-account", body, method),
-      );
+      const saved = await operatorApi<OperatorProfile>("operator-account", body, method);
+      if (!isCurrent()) return;
+      setProfile(saved);
+      setLoaded(true);
     } catch (err) {
+      if (!isCurrent()) return;
+      setProfile(null);
+      setLoaded(false);
       setMessage(
         err instanceof Error ? err.message : "Не удалось сохранить профиль",
       );
     } finally {
-      setBusy(false);
+      if (isCurrent()) setBusy(false);
     }
   }
   return (
