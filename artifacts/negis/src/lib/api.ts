@@ -66,14 +66,14 @@ async function resolveAccessToken(explicit?: string): Promise<string> {
 }
 
 /**
- * Concurrent identical GETs share one network request.
+ * Concurrent identical cacheable GETs share one network request.
  *
  * Measured on production: the auth bootstrap fired /api/crm/auth-context three
  * times in a 15ms window (three serverless invocations, 1.4–4.3s each), and
  * the clients page issued the same list read twice more — every page paid for
  * its data several times over, which is most of what "переход подвисает" was.
  *
- * Only GET is deduplicated, and only while the request is in flight: a write
+ * Only cacheable GET is deduplicated while its request is in flight: a write
  * must never be swallowed by another write, and sequential reads (polling) are
  * untouched because the entry is gone by the time the next one starts. The key
  * includes the token so two sessions can never share a response. Followers get
@@ -168,11 +168,13 @@ function ttlFor(path: string): number {
 let cacheEpoch = 0;
 
 /**
- * Drops every cached answer. Called on sign-out and when the operator switches
- * clinic, so nothing from the previous session or tenant can be painted.
+ * Drops cached answers and detaches pending reads on sign-out, writes and
+ * workspace switches. Subsequent reads cannot reuse a pre-reset response;
+ * original callers still own their requests and cancellation.
  */
 export function clearCrmCache(): void {
   getCache.clear();
+  inflightGets.clear();
   cacheEpoch += 1;
 }
 
@@ -204,6 +206,12 @@ export async function crmFetch(path: string, init: CrmFetchInit = {}): Promise<R
   const dedupeKey = `${path}::${token}`;
   const cacheable = rest.cache !== "no-store" && !isUncacheable(path);
 
+  // Access revalidation and explicit fresh reads cannot join an older request,
+  // including one whose AbortSignal belongs to an unmounted operator view.
+  if (!cacheable) {
+    return fetch(apiUrl(path), { ...rest, headers: mergedHeaders });
+  }
+
   if (cacheable) {
     const hit = getCache.get(dedupeKey);
     if (hit && Date.now() - hit.at < ttlFor(path)) {
@@ -232,6 +240,8 @@ export async function crmFetch(path: string, init: CrmFetchInit = {}): Promise<R
       // устаревшее ещё целый TTL.
       if (startedAtEpoch !== cacheEpoch) return;
       const body = await response.clone().text();
+      // A reset can also happen while the response body is still arriving.
+      if (startedAtEpoch !== cacheEpoch) return;
       getCache.set(dedupeKey, {
         at: Date.now(),
         status: response.status,
@@ -241,7 +251,9 @@ export async function crmFetch(path: string, init: CrmFetchInit = {}): Promise<R
     })
     .catch(() => undefined)
     .finally(() => {
-      inflightGets.delete(dedupeKey);
+      if (inflightGets.get(dedupeKey) === request) {
+        inflightGets.delete(dedupeKey);
+      }
     });
   return request.then((response) => response.clone());
 }

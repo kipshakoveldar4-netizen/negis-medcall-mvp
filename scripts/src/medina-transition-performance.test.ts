@@ -13,11 +13,9 @@ import { fileURLToPath } from "node:url";
 // start until auth resolved. The owner's words for the sum of that were
 // «при переходе страницы подвисает».
 //
-// The fixes are browser-side, and the browser half of this repository is
-// testable at the source level only (the modules import import.meta.env and
-// react); these tests pin the properties the way workspace-selection and
-// failure-honesty already pin theirs. Each assertion names the regression it
-// exists to catch, and each was verified to fail against the pre-change file.
+// These source checks pin the routing and React integration properties. The
+// companion medina-crm-cache-runtime suite executes the real transport helper
+// with synthetic Vite config and isolated network/session fixtures.
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const negisSrc = path.join(repoRoot, "artifacts", "negis", "src");
