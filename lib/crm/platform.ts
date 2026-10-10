@@ -796,6 +796,7 @@ async function handleClinicCard(req: VercelRequest, res: VercelResponse) {
       try {
         type AdminUserResponse = { ok: boolean; status: number; json(): Promise<unknown> };
         const response = (await fetch(`${supabaseUrl}/auth/v1/admin/users/${encodeURIComponent(ownerStaffRow.authUserId)}`, {
+          redirect: "error",
           headers: { apikey: serviceRoleKey, Authorization: `Bearer ${serviceRoleKey}` },
         })) as unknown as AdminUserResponse;
         if (response.ok) {

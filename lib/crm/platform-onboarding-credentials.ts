@@ -1,4 +1,5 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
+import { readApplicationOrigin } from "../auth/application-origin";
 import { validatePasswordRules } from "../auth/password-rules";
 import { getSupabaseServerClient } from "../supabase/server";
 import { VERTICAL_SETTINGS_KEY } from "../vertical/terms";
@@ -52,14 +53,6 @@ function sendJson(res: VercelResponse, status: number, body: JsonRecord) {
  */
 export function validateOwnerPassword(value: unknown): string[] {
   return validatePasswordRules(value);
-}
-
-/** /login на том же хосте, что принял запрос, — как acceptUrl у инвайт-пути. */
-function loginUrl(req: VercelRequest): string {
-  const host = String(req.headers["x-forwarded-host"] || req.headers.host || "").split(",")[0].trim();
-  const proto = String(req.headers["x-forwarded-proto"] || "https").split(",")[0].trim();
-  if (!host) return "/login";
-  return `${proto}://${host}/login`;
 }
 
 /** POST /api/crm/platform-onboarding-credentials — за requirePlatformOwner. */
@@ -172,6 +165,7 @@ export async function handlePlatformOnboardingCredentials(req: VercelRequest, re
   try {
     createdResponse = (await fetch(`${supabaseUrl}/auth/v1/admin/users`, {
       method: "POST",
+      redirect: "error",
       headers: {
         apikey: serviceRoleKey,
         Authorization: `Bearer ${serviceRoleKey}`,
@@ -352,7 +346,7 @@ export async function handlePlatformOnboardingCredentials(req: VercelRequest, re
       vertical: validated.vertical,
       ownerEmail: validated.ownerEmail,
       timeZone: validated.timeZone,
-      loginUrl: loginUrl(req),
+      loginUrl: `${readApplicationOrigin()}/login`,
     },
   });
 }

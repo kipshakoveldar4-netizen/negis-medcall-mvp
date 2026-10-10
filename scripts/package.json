@@ -49,6 +49,7 @@
     "test:tenant-isolation": "tsx --test ./src/medina-tenant-isolation.test.ts ./src/medina-crm-transport-audit.test.ts",
     "test:api-surface-authorization": "tsx --test ./src/medina-api-surface-authorization.test.ts",
     "test:staff-invitations": "tsx --test ./src/medina-staff-invitations.test.ts",
+    "test:auth-links": "tsx --test ./src/medina-auth-links.test.ts",
     "test:storage-isolation": "tsx --test ./src/medina-storage-isolation.test.ts",
     "test:security-boundaries": "tsx --test ./src/medina-security-boundaries.test.ts",
     "test:workspace-selection": "tsx --test ./src/medina-workspace-selection.test.ts",

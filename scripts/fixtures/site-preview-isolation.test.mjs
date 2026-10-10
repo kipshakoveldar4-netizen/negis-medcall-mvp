@@ -52,6 +52,7 @@ test("plan is branch-only, non-secret and leaves the approved Supabase overrides
   }
   assert.equal(plan.overrides.VITE_API_BASE_URL, "");
   assert.equal(plan.overrides.DATABASE_URL, "");
+  assert.equal(plan.overrides.MEDINA_APP_ORIGIN, "", "Preview must not inherit a production auth-link origin");
 });
 
 test("both AI keys must be blank; removing only one leaves a fallback provider", async () => {

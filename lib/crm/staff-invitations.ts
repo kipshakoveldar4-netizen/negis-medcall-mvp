@@ -1,5 +1,6 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { VercelRequest, VercelResponse } from "@vercel/node";
+import { readApplicationOrigin } from "../auth/application-origin";
 import { canAssignRole, isStaffRole, type StaffRole } from "../auth/permissions";
 import { isSyntheticEmail } from "../auth/staff-logins";
 import { requireAuthenticatedUser, WorkspaceAdminAuthError } from "../auth/server";
@@ -215,9 +216,21 @@ export async function sendSupabaseInviteEmail(email: string, redirectTo: string)
   const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim();
   if (!supabaseUrl || !serviceRoleKey) return { sent: false, reason: "auth_not_configured" };
 
+  const origin = readApplicationOrigin();
+  if (!origin) return { sent: false, reason: "invite_origin_not_configured" };
+  try {
+    const target = new URL(redirectTo);
+    if (target.origin !== origin || target.username || target.password || target.pathname !== "/join" || target.hash) {
+      return { sent: false, reason: "invalid_invite_redirect" };
+    }
+  } catch {
+    return { sent: false, reason: "invalid_invite_redirect" };
+  }
+
   try {
     const response = (await fetch(`${supabaseUrl}/auth/v1/invite`, {
       method: "POST",
+      redirect: "error",
       headers: {
         apikey: serviceRoleKey,
         Authorization: `Bearer ${serviceRoleKey}`,
@@ -249,12 +262,9 @@ export async function sendSupabaseInviteEmail(email: string, redirectTo: string)
  * nothing. The page still strips it from the address bar on first read, and
  * still accepts the old fragment form for links already sent.
  */
-export function acceptUrl(req: VercelRequest, token: string): string {
-  const host = String(req.headers["x-forwarded-host"] || req.headers.host || "").split(",")[0].trim();
-  const proto = String(req.headers["x-forwarded-proto"] || "https").split(",")[0].trim();
+export function acceptUrl(_req: VercelRequest, token: string): string {
   const path = `/join?token=${encodeURIComponent(token)}`;
-  if (!host) return path;
-  return `${proto}://${host}${path}`;
+  return `${readApplicationOrigin()}${path}`;
 }
 
 /**

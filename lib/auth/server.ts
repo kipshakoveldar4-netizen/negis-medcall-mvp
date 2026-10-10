@@ -37,6 +37,7 @@ type SupabaseAuthFetch = (
   input: string,
   init?: {
     method?: string;
+    redirect?: "error";
     headers?: Record<string, string>;
     signal?: AbortSignal;
   },
@@ -157,6 +158,7 @@ async function verifySupabaseAccessToken(token: string): Promise<VerifiedSupabas
   try {
     response = await safeFetch(`${supabaseUrl}/auth/v1/user`, {
       method: "GET",
+      redirect: "error",
       headers: {
         Authorization: `Bearer ${token}`,
         apikey: serviceRoleKey,
