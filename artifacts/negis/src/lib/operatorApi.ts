@@ -19,6 +19,7 @@ export async function operatorApi<T>(
   body?: unknown,
   method = "POST",
   signal?: AbortSignal,
+  expectedUserId?: string,
 ): Promise<T> {
   const requestMethod = body === undefined ? "GET" : method;
   let response: Response;
@@ -26,6 +27,7 @@ export async function operatorApi<T>(
     response = await crmFetch(`/api/crm/${path}`, {
       method: requestMethod,
       signal,
+      expectedUserId,
       cache: "no-store",
       ...(body === undefined
         ? {}

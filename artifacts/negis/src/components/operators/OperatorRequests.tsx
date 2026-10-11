@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Check, X, RefreshCw, ChevronLeft, ChevronRight } from "lucide-react";
-import { operatorApi, useOperatorList } from "@/lib/operatorApi";
+import { operatorApi, OperatorApiError, useOperatorList } from "@/lib/operatorApi";
 import { OperatorLeads } from "./OperatorLeads";
 import { OperatorServiceCatalog } from "./OperatorServiceCatalog";
 import { OperatorArrivals } from "./OperatorArrivals";
@@ -27,6 +27,27 @@ export function OperatorRequests({
   const [openRequest, setOpenRequest] = useState<string | null>(null);
   const [openCatalog, setOpenCatalog] = useState<string | null>(null);
   const [openArrivals, setOpenArrivals] = useState<string | null>(null);
+  const mounted = useRef(false);
+  // A mutation belongs to its visible list snapshot, including refreshes/pages.
+  const currentView = useRef({ path, actorId, offset: list.offset, data: list.data });
+  const scopeChanged =
+    currentView.current.path !== path ||
+    currentView.current.actorId !== actorId ||
+    currentView.current.offset !== list.offset;
+  if (scopeChanged || currentView.current.data !== list.data) {
+    currentView.current = { path, actorId, offset: list.offset, data: list.data };
+    if (busy) setBusy(false);
+    if (scopeChanged) {
+      setError("");
+      setOpenRequest(null);
+      setOpenCatalog(null);
+      setOpenArrivals(null);
+    }
+  }
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
   async function change(id: string, action: string) {
     if (
       action === "end" &&
@@ -35,20 +56,42 @@ export function OperatorRequests({
       )
     )
       return;
+    const startedAtView = currentView.current;
+    const isCurrent = () => mounted.current && currentView.current === startedAtView;
+    const isSameScope = () =>
+      mounted.current &&
+      currentView.current.path === startedAtView.path &&
+      currentView.current.actorId === startedAtView.actorId;
     setBusy(true);
     setError("");
     try {
-      await operatorApi(path, { id, action }, "PATCH");
+      await operatorApi(
+        path,
+        { id, action },
+        "PATCH",
+        undefined,
+        workspaceId ? undefined : actorId,
+      );
+      if (!isCurrent()) return;
       setOpenRequest(null);
       setOpenCatalog(null);
       setOpenArrivals(null);
       list.refresh();
     } catch (err) {
+      const accessDenied = err instanceof OperatorApiError && [401, 403].includes(err.status);
+      // Refusal invalidates this actor/path even after a newer page or refresh.
+      if (accessDenied ? !isSameScope() : !isCurrent()) return;
+      if (accessDenied) {
+        setOpenRequest(null);
+        setOpenCatalog(null);
+        setOpenArrivals(null);
+        list.refresh();
+      }
       setError(
         err instanceof Error ? err.message : "Не удалось изменить предложение",
       );
     } finally {
-      setBusy(false);
+      if (isCurrent()) setBusy(false);
     }
   }
   return (
@@ -198,6 +241,7 @@ export function OperatorRequests({
           {item.status === "accepted" && openArrivals === item.id && (
             <OperatorArrivals
               key={`${item.id}:arrivals`}
+              actorId={workspaceId ? undefined : actorId}
               requestId={item.id}
               workspaceId={workspaceId}
             />

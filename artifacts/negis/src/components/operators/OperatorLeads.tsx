@@ -131,7 +131,7 @@ function LeadList({
     setBusy(true);
     setError("");
     try {
-      await operatorApi(path, { leadId: item.id, assigned }, "PATCH");
+      await operatorApi(path, { leadId: item.id, assigned }, "PATCH", undefined, actorId);
       refresh();
     } catch (err) {
       setError(
@@ -156,6 +156,8 @@ function LeadList({
           expectedStatus: item.status,
         },
         "PATCH",
+        undefined,
+        actorId,
       );
       setNotice("Стадия заявки сохранена.");
     } catch (err) {

@@ -28,6 +28,7 @@ export default function OperatorPortal() {
   const [message, setMessage] = useState("");
   const currentUserId = useRef<string | null>(null);
   const profileEpoch = useRef(0);
+  const profileMutation = useRef<AbortController | null>(null);
   const refreshProfile = useCallback(() => {
     if (!userId || currentUserId.current !== userId) return;
     profileEpoch.current += 1;
@@ -35,7 +36,7 @@ export default function OperatorPortal() {
     // state before asking the server whether approval is still active.
     setProfile(null);
     setLoaded(false);
-    setBusy(false);
+    setBusy(Boolean(profileMutation.current));
     setMessage("");
     setRevision((value) => value + 1);
   }, [userId]);
@@ -44,8 +45,12 @@ export default function OperatorPortal() {
     let authEventSeen = false;
     const updateSession = (id: string | null) => {
       if (currentUserId.current !== id) {
+        profileMutation.current?.abort();
+        profileMutation.current = null;
         currentUserId.current = id;
         profileEpoch.current += 1;
+        // Batched A -> B -> A events still require a new authoritative read.
+        setRevision((value) => value + 1);
         setProfile(null);
         setLoaded(false);
         setBusy(false);
@@ -65,6 +70,8 @@ export default function OperatorPortal() {
     });
     return () => {
       alive = false;
+      profileMutation.current?.abort();
+      profileMutation.current = null;
       data.subscription.unsubscribe();
     };
   }, []);
@@ -84,6 +91,7 @@ export default function OperatorPortal() {
       undefined,
       "GET",
       controller.signal,
+      userId,
     )
       .then((value) => {
         if (isCurrent()) {
@@ -173,16 +181,21 @@ export default function OperatorPortal() {
     }
   }
   async function save(body: unknown, method = "POST") {
-    if (!userId || currentUserId.current !== userId) return;
+    if (!userId || currentUserId.current !== userId || profileMutation.current) return;
+    const controller = new AbortController();
+    profileMutation.current = controller;
     // A focus refresh or account change invalidates even a successful old PATCH.
     const startedAtEpoch = ++profileEpoch.current;
     const isCurrent = () =>
+      !controller.signal.aborted &&
       currentUserId.current === userId &&
       profileEpoch.current === startedAtEpoch;
     setBusy(true);
     setMessage("");
     try {
-      const saved = await operatorApi<OperatorProfile>("operator-account", body, method);
+      const saved = await operatorApi<OperatorProfile>(
+        "operator-account", body, method, controller.signal, userId,
+      );
       if (!isCurrent()) return;
       setProfile(saved);
       setLoaded(true);
@@ -194,7 +207,15 @@ export default function OperatorPortal() {
         err instanceof Error ? err.message : "Не удалось сохранить профиль",
       );
     } finally {
-      if (isCurrent()) setBusy(false);
+      if (profileMutation.current === controller) {
+        profileMutation.current = null;
+        if (!controller.signal.aborted && currentUserId.current === userId) {
+          if (isCurrent()) setBusy(false);
+          // A focus GET may have read the pre-write profile. Reconcile after
+          // the write settles without publishing its obsolete approval state.
+          else refreshProfile();
+        }
+      }
     }
   }
   return (
