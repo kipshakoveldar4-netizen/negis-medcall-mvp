@@ -55,9 +55,9 @@ async function makeCase(fixture, observer, t) {
     blocked: () => mustBlock(observer, bPid, aPid) };
 }
 
-// This is intentionally separate from the PGlite suite: missing Docker/image
+// This is intentionally separate from the PGlite suite: a missing selected runtime
 // fails the command, never skips tests or connects to a supplied DATABASE_URL.
-test('site deletion contention on a disposable multi-session PostgreSQL', { timeout: 180000 }, async t => {
+test('site deletion contention on a disposable multi-session PostgreSQL', { timeout: 300000 }, async t => {
   const fixture = await startDisposablePostgres();
   t.after(() => fixture.close());
   const observer = await fixture.connect();

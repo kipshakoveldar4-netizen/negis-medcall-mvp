@@ -3,6 +3,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { promisify } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
 import pg from 'pg';
+import { startNativePostgres } from './native-postgres.mjs';
 
 const exec = promisify(execFile);
 const image = 'postgres:17-alpine';
@@ -52,6 +53,7 @@ export function ownedContainer(output, runId) {
 // No connection URL, Docker context override, host mounts or existing database
 // are accepted. Only this invocation's fresh, labelled container may be removed.
 export async function startDisposablePostgres() {
+  if (process.env.MEDINA_TEST_POSTGRES_NATIVE === '1') return startNativePostgres();
   const env = dockerEnvironment();
   let host;
   for (const candidate of localDockerHosts()) {
