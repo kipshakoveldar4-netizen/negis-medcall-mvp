@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { Link, useLocation } from "wouter";
 import {
   AlertTriangle,
@@ -28,7 +28,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import { apiUrl, crmFetch } from "@/lib/api";
 import { getSupabaseAccessToken } from "@/lib/serverAuth";
 import { hasSupabaseFrontendEnv, supabase } from "@/lib/supabase";
-import { readWorkspaceId, workspaceScopedKey } from "@/lib/demoStorage";
+import { readWorkspaceId } from "@/lib/demoStorage";
 import { getPlanFeature, normalizePlan, planFeatureBadge, type NegisPlan } from "@/lib/planFeatures";
 import {
   ADVERTISING_CAMPAIGN_PREFILL_KEY,
@@ -1247,9 +1247,11 @@ async function safeJson<T>(response: { text: () => Promise<string> }): Promise<A
 // Security-2B: /api/crm/* is authenticated server-side. This wrapper keeps the
 // page's Meta error formatting but delegates the request itself to crmFetch, so
 // the access token is attached exactly once, in one place.
-async function crmRequest<T>(path: string, init?: RequestInit): Promise<Extract<ApiResponse<T>, { success: true }>> {
+async function crmRequest<T>(path: string, init?: RequestInit & { expectedUserId?: string }): Promise<Extract<ApiResponse<T>, { success: true }>> {
   const response = await crmFetch(path, init);
+  init?.signal?.throwIfAborted();
   const body = await safeJson<T>(response);
+  init?.signal?.throwIfAborted();
 
   if (!response.ok || body.success === false) {
     const details = body.success === false ? body.details?.join(". ") : "";
@@ -1481,10 +1483,70 @@ function ReadinessRow({ label, state, note }: { label: string; state: ReadinessS
 }
 
 export default function AdsAutomation() {
-  const [location, setLocation] = useLocation();
   const { user, userRole, clinicId } = useAuth();
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const actorId = user?.id || "";
   const workspaceId = clinicId || readWorkspaceId();
+  const observedActorRef = useRef(actorId);
+  const [authEpoch, setAuthEpoch] = useState(0);
+  useLayoutEffect(() => {
+    if (!hasSupabaseFrontendEnv) return;
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      const nextActorId = session?.user.id || "";
+      if (observedActorRef.current === nextActorId) return;
+      observedActorRef.current = nextActorId;
+      setAuthEpoch((epoch) => epoch + 1);
+    });
+    return () => subscription.unsubscribe();
+  }, []);
+  return <AdsAutomationSession key={JSON.stringify([actorId, workspaceId, userRole, authEpoch])} actorId={actorId} workspaceId={workspaceId} />;
+}
+
+function AdsAutomationSession({ actorId, workspaceId }: { actorId: string; workspaceId: string }) {
+  const [location, setLocation] = useLocation();
+  const { user, userRole } = useAuth();
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const sessionRef = useRef<AbortController | null>(null);
+  const prefillRef = useRef<string | null>(null);
+  const workspaceScopedKey = (key: string) => `${key}::${workspaceId}`;
+
+  // Each effect setup owns a new lifetime, including StrictMode's replay.
+  useLayoutEffect(() => {
+    const session = new AbortController();
+    sessionRef.current = session;
+    const subscription = hasSupabaseFrontendEnv
+      ? supabase.auth.onAuthStateChange((_event, nextSession) => {
+          if ((nextSession?.user.id || "") !== actorId) session.abort();
+        }).data.subscription
+      : null;
+    return () => {
+      session.abort();
+      subscription?.unsubscribe();
+      if (sessionRef.current === session) sessionRef.current = null;
+    };
+  }, []);
+
+  function isSessionAlive(session: AbortController | null): session is AbortController {
+    return Boolean(actorId && session && sessionRef.current === session && !session.signal.aborted);
+  }
+
+  function assertSessionAlive(session: AbortController) {
+    if (!isSessionAlive(session)) throw new DOMException("Advertising session ended", "AbortError");
+  }
+
+  async function sessionFetch(session: AbortController, path: string, init?: RequestInit) {
+    assertSessionAlive(session);
+    // A fresh lifetime must not join or reuse a read from an expired session.
+    const response = await crmFetch(path, { ...init, cache: "no-store", expectedUserId: actorId, signal: session.signal });
+    assertSessionAlive(session);
+    return response;
+  }
+
+  async function sessionRequest<T>(session: AbortController, path: string, init?: RequestInit) {
+    assertSessionAlive(session);
+    const body = await crmRequest<T>(path, { ...init, cache: "no-store", expectedUserId: actorId, signal: session.signal });
+    assertSessionAlive(session);
+    return body;
+  }
   const [plan] = useState<NegisPlan>(() => normalizePlan(readStored("negis_plan", "demo")));
   const [currentStep, setCurrentStep] = useState(1);
   const [brief, setBrief] = useState<Brief>(() => normalizeBriefCity(readStored(workspaceScopedKey("negis_ads_automation_brief"), defaultBrief)));
@@ -1527,10 +1589,12 @@ export default function AdsAutomation() {
   const isAdminMode = uiMode === "admin";
 
   useEffect(() => {
+    if (!isSessionAlive(sessionRef.current)) return;
     window.localStorage.setItem(workspaceScopedKey("negis_ads_automation_brief"), JSON.stringify(brief));
   }, [brief]);
 
   useEffect(() => {
+    if (!isSessionAlive(sessionRef.current)) return;
     window.localStorage.setItem("negis_ads_automation_ui_mode", JSON.stringify(uiMode));
   }, [uiMode]);
 
@@ -1542,11 +1606,16 @@ export default function AdsAutomation() {
   // same key). Consume-once: the key is removed immediately so the import never
   // repeats. Nothing is launched or confirmed automatically.
   useEffect(() => {
+    const session = sessionRef.current;
+    if (!isSessionAlive(session)) return;
     let raw = "";
     try {
-      raw = window.localStorage.getItem(workspaceScopedKey(STUDIO_PREFILL_KEY)) || "";
+      if (prefillRef.current === null) {
+        prefillRef.current = window.localStorage.getItem(workspaceScopedKey(STUDIO_PREFILL_KEY)) || "";
+        if (prefillRef.current) window.localStorage.removeItem(workspaceScopedKey(STUDIO_PREFILL_KEY));
+      }
+      raw = prefillRef.current;
       if (!raw) return;
-      window.localStorage.removeItem(workspaceScopedKey(STUDIO_PREFILL_KEY));
       const data = parseAdvertisingCampaignPrefillForPlatform(JSON.parse(raw), "meta");
       if (!data) return;
 
@@ -1658,6 +1727,8 @@ export default function AdsAutomation() {
   }, [isHistoryView]);
 
   useEffect(() => {
+    const session = sessionRef.current;
+    if (!isSessionAlive(session)) return;
     const requestId = historyInsightsRequestRef.current + 1;
     historyInsightsRequestRef.current = requestId;
     setHistoryInsightsByLaunch({});
@@ -1677,7 +1748,8 @@ export default function AdsAutomation() {
     void (async () => {
       let serverAdminConfirmed = false;
       try {
-        const accessToken = await getSupabaseAccessToken();
+        const accessToken = await getSupabaseAccessToken(actorId);
+        assertSessionAlive(session);
         if (historyInsightsRequestRef.current !== requestId) return;
         if (!accessToken) {
           setHistoryInsightsAccess("required");
@@ -1685,10 +1757,11 @@ export default function AdsAutomation() {
           return;
         }
 
-        const authResponse = await crmFetch(`/api/crm/auth-context?workspaceId=${encodeURIComponent(workspaceId)}`, {
+        const authResponse = await sessionFetch(session, `/api/crm/auth-context?workspaceId=${encodeURIComponent(workspaceId)}`, {
           headers: { Authorization: `Bearer ${accessToken}` },
         });
         const authBody = await safeJson<ServerAdminAuthContext>(authResponse);
+        assertSessionAlive(session);
         if (historyInsightsRequestRef.current !== requestId) return;
         if (authResponse.status === 401) {
           setHistoryInsightsAccess("required");
@@ -1713,10 +1786,11 @@ export default function AdsAutomation() {
         }
         serverAdminConfirmed = true;
 
-        const insightsResponse = await crmFetch(`/api/crm/meta-insights-history?workspaceId=${encodeURIComponent(workspaceId)}`, {
+        const insightsResponse = await sessionFetch(session, `/api/crm/meta-insights-history?workspaceId=${encodeURIComponent(workspaceId)}`, {
           headers: { Authorization: `Bearer ${accessToken}` },
         });
         const insightsBody = await safeJson<{ summaries?: MetaInsightsHistorySummary[] }>(insightsResponse);
+        assertSessionAlive(session);
         if (historyInsightsRequestRef.current !== requestId) return;
         if (insightsResponse.status === 401) {
           setHistoryInsightsAccess("required");
@@ -1745,6 +1819,7 @@ export default function AdsAutomation() {
         setHistoryInsightsByLaunch(byLaunch);
         setHistoryInsightsAccess("confirmed");
       } catch {
+        if (!isSessionAlive(session)) return;
         if (historyInsightsRequestRef.current !== requestId) return;
         setHistoryInsightsAccess(serverAdminConfirmed ? "confirmed" : "unavailable");
         setHistoryInsightsMessage(
@@ -1775,8 +1850,11 @@ export default function AdsAutomation() {
     });
 
   useEffect(() => {
+    const session = sessionRef.current;
+    if (!isSessionAlive(session)) return;
     if (!videoJob || videoJob.status === "ready" || videoJob.status === "failed") return;
     const timer = window.setInterval(() => {
+      if (!isSessionAlive(session)) return;
       void pollVideoJob(videoJob.id);
     }, 5000);
     return () => window.clearInterval(timer);
@@ -1831,6 +1909,8 @@ export default function AdsAutomation() {
   };
 
   function goToStep(step: number, options: { skipGuard?: boolean } = {}) {
+    const session = sessionRef.current;
+    if (!isSessionAlive(session)) return;
     if (!options.skipGuard && clientStepForInternal(step) >= 3) {
       const previewGate = getPreviewReadiness({
         creativeReadiness: readCreativeReadiness(),
@@ -1846,27 +1926,36 @@ export default function AdsAutomation() {
       }
     }
     setCurrentStep(step);
-    window.setTimeout(() => window.scrollTo({ top: 0, behavior: "smooth" }), 0);
+    window.setTimeout(() => {
+      if (isSessionAlive(session)) window.scrollTo({ top: 0, behavior: "smooth" });
+    }, 0);
   }
 
   async function checkHealth() {
+    const session = sessionRef.current;
+    if (!isSessionAlive(session)) return;
     setLoading("health");
     try {
-      const body = await crmRequest<{ meta?: MetaSummary }>("/api/crm/health");
+      const body = await sessionRequest<{ meta?: MetaSummary }>(session, "/api/crm/health");
+      assertSessionAlive(session);
       setMetaSummary(body.data.meta || null);
       setLiveLaunchEnabled(Boolean(readStored(workspaceScopedKey("negis_meta_live_launch_enabled"), false)));
     } catch (error) {
+      if (!isSessionAlive(session)) return;
       setNotice(error instanceof Error ? error.message : "Не удалось проверить Meta env.");
     } finally {
-      setLoading(null);
+      if (isSessionAlive(session)) setLoading(null);
     }
   }
 
   async function checkStorage() {
+    const session = sessionRef.current;
+    if (!isSessionAlive(session)) return;
     setLoading("storage");
     setNotice("");
     try {
-      const body = await crmRequest<StorageHealth>("/api/crm/storage-health");
+      const body = await sessionRequest<StorageHealth>(session, "/api/crm/storage-health");
+      assertSessionAlive(session);
       setStorageHealth(body.data);
       if (body.data.exists && body.data.publicAccess) {
         setNotice("Загрузка проверена: файлы готовы для рекламы.");
@@ -1877,11 +1966,12 @@ export default function AdsAutomation() {
         toast.warning(message);
       }
     } catch (error) {
+      if (!isSessionAlive(session)) return;
       const message = error instanceof Error ? error.message : "Не удалось проверить загрузку файлов.";
       setNotice(message);
       toast.error(message);
     } finally {
-      setLoading(null);
+      if (isSessionAlive(session)) setLoading(null);
     }
   }
 
@@ -1934,10 +2024,14 @@ export default function AdsAutomation() {
   }
 
   async function pollVideoJob(jobId: string) {
+    const session = sessionRef.current;
+    if (!isSessionAlive(session)) return;
     try {
-      const body = await crmRequest<{ job?: Record<string, unknown> }>(
+      const body = await sessionRequest<{ job?: Record<string, unknown> }>(
+        session,
         `/api/crm/video-jobs?id=${encodeURIComponent(jobId)}&workspaceId=${encodeURIComponent(workspaceId)}`,
       );
+      assertSessionAlive(session);
       const job = normalizeVideoJob(asRecord(body.data.job));
       if (!job || job.id !== jobId) return;
       const wasReady = videoJob?.status === "ready";
@@ -1958,10 +2052,13 @@ export default function AdsAutomation() {
   // Retry a failed optimization job via the lower-level job endpoint. It resets the
   // job to queued; the existing polling effect resumes automatically. Launch stays blocked.
   async function retryVideoJob(jobId: string) {
+    const session = sessionRef.current;
+    if (!isSessionAlive(session)) return;
     if (!jobId) return;
     setLoading("video");
     try {
-      const body = await crmRequest<{ job?: Record<string, unknown> }>(
+      const body = await sessionRequest<{ job?: Record<string, unknown> }>(
+        session,
         `/api/crm/video-processing-jobs/${encodeURIComponent(jobId)}/retry`,
         {
           method: "POST",
@@ -1969,6 +2066,7 @@ export default function AdsAutomation() {
           body: JSON.stringify({ workspaceId, status: "failed" }),
         },
       );
+      assertSessionAlive(session);
       const job = normalizeVideoJob(asRecord(body.data.job));
       if (job) {
         setVideoJob(job);
@@ -1977,13 +2075,16 @@ export default function AdsAutomation() {
         toast.success("Обработка перезапущена");
       }
     } catch (error) {
+      if (!isSessionAlive(session)) return;
       toast.error(error instanceof Error ? error.message : VIDEO_OPTIMIZATION_FAILED_MESSAGE);
     } finally {
-      setLoading(null);
+      if (isSessionAlive(session)) setLoading(null);
     }
   }
 
   async function uploadLargeVideo(file: File, optimizationDebug: Partial<UploadDebug> = {}) {
+    const session = sessionRef.current;
+    if (!isSessionAlive(session)) return;
     setLoading("upload");
     setVideoJob(null);
     setCreativeFile(file);
@@ -1995,7 +2096,8 @@ export default function AdsAutomation() {
 
       setUploadStatus("getting_signed_url");
       setUploadStage("Создаём задачу оптимизации видео");
-      const created = await crmRequest<{ job?: Record<string, unknown>; signedUpload?: SignedUploadData | null; assetId?: string }>(
+      const created = await sessionRequest<{ job?: Record<string, unknown>; signedUpload?: SignedUploadData | null; assetId?: string }>(
+        session,
         `/api/crm/video-jobs?workspaceId=${encodeURIComponent(workspaceId)}`,
         {
           method: "POST",
@@ -2009,6 +2111,7 @@ export default function AdsAutomation() {
           }),
         },
       );
+      assertSessionAlive(session);
       const createdJob = normalizeVideoJob(asRecord(created.data.job));
       const signedUpload = created.data.signedUpload || null;
       const storageBucket = firstString(signedUpload?.bucket, signedUpload?.storageBucket);
@@ -2023,6 +2126,7 @@ export default function AdsAutomation() {
       const { error: uploadError } = await supabase.storage.from(storageBucket).uploadToSignedUrl(storagePath, token, file, {
         contentType: file.type || "video/mp4",
       });
+      assertSessionAlive(session);
       if (uploadError) {
         throw new Error(
           `Не удалось загрузить исходное видео в хранилище оптимизации: ${uploadError.message}. Проверьте общий лимит загрузки файлов в Supabase (Settings → Storage → Upload file size limit).`,
@@ -2030,11 +2134,12 @@ export default function AdsAutomation() {
       }
 
       setUploadStage("Подтверждаем загрузку исходника");
-      const patched = await crmRequest<{ job?: Record<string, unknown> }>(`/api/crm/video-jobs?workspaceId=${encodeURIComponent(workspaceId)}`, {
+      const patched = await sessionRequest<{ job?: Record<string, unknown> }>(session, `/api/crm/video-jobs?workspaceId=${encodeURIComponent(workspaceId)}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ id: createdJob.id, workspaceId, rawSize: file.size }),
       });
+      assertSessionAlive(session);
       const queuedJob = normalizeVideoJob(asRecord(patched.data.job)) || { ...createdJob, status: "queued" as VideoJobStatus };
 
       setCreative({
@@ -2071,6 +2176,7 @@ export default function AdsAutomation() {
       setNotice(`${VIDEO_OPTIMIZING_MESSAGE} ${VIDEO_OPTIMIZING_LAUNCH_BLOCKED_MESSAGE}`);
       toast.success("Видео загружено, оптимизация запущена");
     } catch (error) {
+      if (!isSessionAlive(session)) return;
       const message = error instanceof Error ? error.message : VIDEO_OPTIMIZATION_FAILED_MESSAGE;
       setCreative({
         fileName: file.name,
@@ -2100,7 +2206,7 @@ export default function AdsAutomation() {
       setNotice(message);
       toast.error(VIDEO_OPTIMIZATION_FAILED_MESSAGE);
     } finally {
-      setLoading(null);
+      if (isSessionAlive(session)) setLoading(null);
     }
   }
 
@@ -2108,10 +2214,12 @@ export default function AdsAutomation() {
     capture: VideoThumbnailCapture,
     sourceFileName: string,
   ): Promise<{ publicUrl: string; generatedAt: string; mimeType: string } | null> {
+    const session = sessionRef.current;
+    if (!isSessionAlive(session)) return null;
     try {
       const baseName = sourceFileName.replace(/\.[^.]+$/, "") || "video";
       const thumbnailFileName = `${baseName}-thumbnail.jpg`;
-      const signedBody = await crmRequest<SignedUploadData>(`/api/crm/ad-creatives/signed-upload?workspaceId=${encodeURIComponent(workspaceId)}`, {
+      const signedBody = await sessionRequest<SignedUploadData>(session, `/api/crm/ad-creatives/signed-upload?workspaceId=${encodeURIComponent(workspaceId)}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -2122,6 +2230,7 @@ export default function AdsAutomation() {
           fileSize: capture.blob.size,
         }),
       });
+      assertSessionAlive(session);
       const storageBucket = firstString(signedBody.data.bucket, signedBody.data.storageBucket, "ad-creatives");
       const storagePath = firstString(signedBody.data.storagePath);
       const token = firstString(signedBody.data.token);
@@ -2130,6 +2239,7 @@ export default function AdsAutomation() {
       const { error: uploadError } = await supabase.storage.from(storageBucket).uploadToSignedUrl(storagePath, token, capture.blob, {
         contentType: capture.mimeType,
       });
+      assertSessionAlive(session);
       if (uploadError) return null;
       return { publicUrl: thumbnailPublicUrl, generatedAt: new Date().toISOString(), mimeType: capture.mimeType };
     } catch {
@@ -2142,11 +2252,15 @@ export default function AdsAutomation() {
     fileName: string;
     publicUrl: string;
   }) {
+    const session = sessionRef.current;
+    if (!isSessionAlive(session)) return;
     setLoading("thumbnail");
     setNotice("Видео из AI Контент-студии загружено. Создаём обложку для Meta.");
     try {
       const capture = await captureVideoThumbnail(input.publicUrl);
+      assertSessionAlive(session);
       const thumbnail = capture ? await uploadVideoThumbnail(capture, input.fileName) : null;
+      assertSessionAlive(session);
       if (!thumbnail) {
         setNotice(
           "Видео передано из AI Контент-студии, но обложку не удалось создать автоматически. Загрузите исходный файл заново, чтобы продолжить запуск.",
@@ -2168,7 +2282,7 @@ export default function AdsAutomation() {
 
       if (input.assetId) {
         try {
-          await crmRequest(`/api/crm/ad-creatives?workspaceId=${encodeURIComponent(workspaceId)}`, {
+          await sessionRequest(session, `/api/crm/ad-creatives?workspaceId=${encodeURIComponent(workspaceId)}`, {
             method: "PATCH",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -2184,24 +2298,29 @@ export default function AdsAutomation() {
               },
             }),
           });
+          assertSessionAlive(session);
         } catch {
           // The in-memory cover is enough for this launch; metadata persistence
           // remains best-effort just as it is for a manually regenerated cover.
         }
       }
 
+      assertSessionAlive(session);
       setNotice("Видео и обложка из AI Контент-студии готовы. Проверьте параметры перед запуском.");
       toast.success("Видео из Content Studio готово для Meta");
     } catch {
+      if (!isSessionAlive(session)) return;
       setNotice(
         "Видео передано из AI Контент-студии, но обложку не удалось создать автоматически. Загрузите исходный файл заново, чтобы продолжить запуск.",
       );
     } finally {
-      setLoading((current) => (current === "thumbnail" ? null : current));
+      if (isSessionAlive(session)) setLoading((current) => (current === "thumbnail" ? null : current));
     }
   }
 
   async function regenerateThumbnail() {
+    const session = sessionRef.current;
+    if (!isSessionAlive(session)) return;
     if (!creative || creative.fileType !== "video") return;
     if (!creativeFile) {
       setNotice("Исходный файл видео недоступен в этой сессии. Загрузите видео заново, чтобы создать обложку.");
@@ -2210,7 +2329,9 @@ export default function AdsAutomation() {
     setLoading("thumbnail");
     try {
       const capture = await captureVideoThumbnail(creativeFile);
+      assertSessionAlive(session);
       const thumbnail = capture ? await uploadVideoThumbnail(capture, creativeFile.name) : null;
+      assertSessionAlive(session);
       if (!thumbnail) {
         setNotice(THUMBNAIL_FAILED_MESSAGE);
         toast.error(THUMBNAIL_FAILED_MESSAGE);
@@ -2229,7 +2350,7 @@ export default function AdsAutomation() {
       );
       if (creative.id) {
         try {
-          await crmRequest(`/api/crm/ad-creatives?workspaceId=${encodeURIComponent(workspaceId)}`, {
+          await sessionRequest(session, `/api/crm/ad-creatives?workspaceId=${encodeURIComponent(workspaceId)}`, {
             method: "PATCH",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -2246,18 +2367,24 @@ export default function AdsAutomation() {
               },
             }),
           });
+          assertSessionAlive(session);
         } catch {
           // Local state keeps the thumbnail; metadata sync is best-effort.
         }
       }
+      assertSessionAlive(session);
       setNotice("");
       toast.success("Обложка видео создана заново");
+    } catch (error) {
+      if (isSessionAlive(session)) throw error;
     } finally {
-      setLoading(null);
+      if (isSessionAlive(session)) setLoading(null);
     }
   }
 
   async function uploadCreative(file: File) {
+    const session = sessionRef.current;
+    if (!isSessionAlive(session)) return;
     setUploadStatus("validating");
     setUploadStage(uploadStatusLabel("validating"));
     setLastUploadError("");
@@ -2375,7 +2502,7 @@ export default function AdsAutomation() {
 
       setUploadStatus("getting_signed_url");
       setUploadStage(uploadStatusLabel("getting_signed_url"));
-      const signedBody = await crmRequest<SignedUploadData>(`/api/crm/ad-creatives/signed-upload?workspaceId=${encodeURIComponent(workspaceId)}`, {
+      const signedBody = await sessionRequest<SignedUploadData>(session, `/api/crm/ad-creatives/signed-upload?workspaceId=${encodeURIComponent(workspaceId)}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -2386,6 +2513,7 @@ export default function AdsAutomation() {
           fileSize: file.size,
         }),
       });
+      assertSessionAlive(session);
       signedUpload = signedBody.data;
       const storageBucket = firstString(signedUpload.bucket, signedUpload.storageBucket, "ad-creatives");
       storagePath = firstString(signedUpload.storagePath);
@@ -2401,6 +2529,7 @@ export default function AdsAutomation() {
       const { error: uploadError } = await supabase.storage.from(storageBucket).uploadToSignedUrl(storagePath, token, file, {
         contentType: file.type || (fileType === "video" ? "video/mp4" : "image/jpeg"),
       });
+      assertSessionAlive(session);
       if (uploadError) {
         throw new Error(`Supabase Storage: ${uploadError.message}`);
       }
@@ -2414,7 +2543,9 @@ export default function AdsAutomation() {
       if (fileType === "video") {
         setUploadStage("Создаём обложку видео автоматически");
         const capture = await captureVideoThumbnail(file);
+        assertSessionAlive(session);
         thumbnail = capture ? await uploadVideoThumbnail(capture, file.name) : null;
+        assertSessionAlive(session);
         if (!thumbnail) {
           thumbnailWarning = THUMBNAIL_FAILED_MESSAGE;
           toast.warning(THUMBNAIL_FAILED_MESSAGE);
@@ -2439,7 +2570,7 @@ export default function AdsAutomation() {
 
       setUploadStatus("saving_metadata");
       setUploadStage(uploadStatusLabel("saving_metadata"));
-      const body = await crmRequest<UploadResponse>(`/api/crm/ad-creatives?workspaceId=${encodeURIComponent(workspaceId)}`, {
+      const body = await sessionRequest<UploadResponse>(session, `/api/crm/ad-creatives?workspaceId=${encodeURIComponent(workspaceId)}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -2468,6 +2599,7 @@ export default function AdsAutomation() {
           },
         }),
       });
+      assertSessionAlive(session);
 
       const uploadedAsset = normalizeAsset(body.data.item || body.data.asset || body.data, fallback);
       setCreative(uploadedAsset);
@@ -2490,6 +2622,7 @@ export default function AdsAutomation() {
       if (uploadedReadiness.isReadyForMeta) goToStep(2);
       setNotice([uploadedReadiness.clientMessage, thumbnailWarning].filter(Boolean).join(" "));
     } catch (error) {
+      if (!isSessionAlive(session)) return;
       lastError = error instanceof Error ? error.message : uploadLinkMissingMessage(storageHealth);
       const fallback: CreativeAsset = {
         fileName: file.name,
@@ -2527,7 +2660,7 @@ export default function AdsAutomation() {
       });
       setNotice(friendlyCreativeError(lastError, fallback));
     } finally {
-      setLoading(null);
+      if (isSessionAlive(session)) setLoading(null);
     }
   }
 
@@ -2549,6 +2682,8 @@ export default function AdsAutomation() {
   }
 
   async function fillWithAi() {
+    const session = sessionRef.current;
+    if (!isSessionAlive(session)) return;
     const readiness = readCreativeReadiness();
     if (!readiness.isReadyForMeta) {
       setNotice(readiness.clientMessage);
@@ -2559,7 +2694,7 @@ export default function AdsAutomation() {
     setLoading("ai");
     setNotice("");
     try {
-      const body = await crmRequest<AiPackage>("/api/crm/ads-ai-fill", {
+      const body = await sessionRequest<AiPackage>(session, "/api/crm/ads-ai-fill", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -2581,6 +2716,7 @@ export default function AdsAutomation() {
           restrictions: brief.restrictions,
         }),
       });
+      assertSessionAlive(session);
       setAiPackage(body.data);
       setCompliance(null);
     setImproved(null);
@@ -2595,11 +2731,12 @@ export default function AdsAutomation() {
       );
       if (body.warning) setNotice(body.warning);
     } catch (error) {
+      if (!isSessionAlive(session)) return;
       const message = error instanceof Error ? error.message : "Не удалось подготовить рекламу.";
       setNotice(message);
       toast.error(message);
     } finally {
-      setLoading(null);
+      if (isSessionAlive(session)) setLoading(null);
     }
   }
 
@@ -2790,13 +2927,15 @@ export default function AdsAutomation() {
    * оператор видит результат и решает.
    */
   async function improveText() {
+    const session = sessionRef.current;
+    if (!isSessionAlive(session)) return;
     if (!aiPackage) {
       toast.error("Сначала нажмите «ИИ заполнить рекламу»");
       return;
     }
     setLoading("improve");
     try {
-      const body = await crmRequest<ImprovedText>("/api/content-studio/improve-ad-text", {
+      const body = await sessionRequest<ImprovedText>(session, "/api/content-studio/improve-ad-text", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -2805,6 +2944,7 @@ export default function AdsAutomation() {
           description: aiPackage.description || "",
         }),
       });
+      assertSessionAlive(session);
       setImproved(body.data);
       if (!body.data?.changed) {
         toast.message("Переписать лучше не получилось — оставили исходный текст");
@@ -2812,16 +2952,19 @@ export default function AdsAutomation() {
         toast.success(body.data?.status === "safe" ? "Текст переписан" : "Текст переписан, замечания остались");
       }
     } catch (error) {
+      if (!isSessionAlive(session)) return;
       const message = error instanceof Error ? error.message : "Не удалось переписать текст.";
       setImproved(null);
       setNotice(message);
       toast.error(message);
     } finally {
-      setLoading(null);
+      if (isSessionAlive(session)) setLoading(null);
     }
   }
 
   async function runComplianceCheck(stayOnLaunchStep = false) {
+    const session = sessionRef.current;
+    if (!isSessionAlive(session)) return;
     if (!aiPackage) {
       toast.error("Сначала нажмите «ИИ заполнить рекламу»");
       return;
@@ -2829,7 +2972,7 @@ export default function AdsAutomation() {
     setLoading("check");
     setNotice("");
     try {
-      const body = await crmRequest<LaunchResult>("/api/crm/meta-launch", {
+      const body = await sessionRequest<LaunchResult>(session, "/api/crm/meta-launch", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -2838,6 +2981,7 @@ export default function AdsAutomation() {
           complianceConfirmed: true,
         }),
       });
+      assertSessionAlive(session);
       setCompliance(body.data.compliance || null);
       const result = { ...body.data, warning: body.warning || body.data.warning };
       setLaunchResult(result);
@@ -2856,6 +3000,7 @@ export default function AdsAutomation() {
           .join(" "),
       );
     } catch (error) {
+      if (!isSessionAlive(session)) return;
       const message = error instanceof Error ? error.message : "Проверка не прошла.";
 
       // Отказ по тексту — это и есть результат проверки, а не её отсутствие.
@@ -2872,7 +3017,7 @@ export default function AdsAutomation() {
       setNotice(message);
       toast.error(message);
     } finally {
-      setLoading(null);
+      if (isSessionAlive(session)) setLoading(null);
     }
   }
 
@@ -2919,6 +3064,8 @@ export default function AdsAutomation() {
   }
 
   async function ensureVideoReady(): Promise<string> {
+    const session = sessionRef.current;
+    if (!isSessionAlive(session)) throw new DOMException("Advertising session ended", "AbortError");
     if (!creative || creative.fileType !== "video") return "";
     // Reuse the stored video_id: if Meta already confirmed it is ready, no API call is needed;
     // otherwise the server re-checks processing status for the same video_id instead of uploading again.
@@ -2927,7 +3074,7 @@ export default function AdsAutomation() {
 
     setLoading("video");
     try {
-      const body = await crmRequest<{
+      const body = await sessionRequest<{
         metaVideoId?: string;
         videoId?: string;
         uploadMode?: string;
@@ -2935,7 +3082,7 @@ export default function AdsAutomation() {
         processingStatus?: string;
         lastCheckedAt?: string;
         warnings?: string[];
-      }>("/api/crm/ad-creative-meta-upload", {
+      }>(session, "/api/crm/ad-creative-meta-upload", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -2948,6 +3095,7 @@ export default function AdsAutomation() {
           metaVideoId: creative.metaVideoId || "",
         }),
       });
+      assertSessionAlive(session);
       const metaVideoId = body.data.metaVideoId || body.data.videoId || "";
       if (!metaVideoId) throw new Error("Meta не вернула video_id.");
       const warnings = Array.isArray(body.data.warnings) ? body.data.warnings : [];
@@ -2969,6 +3117,7 @@ export default function AdsAutomation() {
       if (!videoReady) throw new VideoProcessingPendingError(metaVideoId, processingStatus);
       return metaVideoId;
     } catch (error) {
+      if (!isSessionAlive(session)) throw error;
       // Older/error responses report pending processing as a video_processing error with the
       // video_id in the payload — keep that id so the next attempt does not upload again.
       if (error instanceof CrmError) {
@@ -2993,7 +3142,7 @@ export default function AdsAutomation() {
       }
       throw error;
     } finally {
-      setLoading(null);
+      if (isSessionAlive(session)) setLoading(null);
     }
   }
 
@@ -3075,6 +3224,8 @@ export default function AdsAutomation() {
   }
 
   async function launch(nextStatusMode: "PAUSED" | "ACTIVE") {
+    const session = sessionRef.current;
+    if (!isSessionAlive(session)) return;
     const errors = prelaunchErrors(nextStatusMode);
     if (errors.length > 0) {
       setNotice(errors.join(" "));
@@ -3099,11 +3250,12 @@ export default function AdsAutomation() {
       let metaVideoId = creative?.metaVideoId || "";
       if (creative?.fileType === "video") {
         metaVideoId = await ensureVideoReady();
+        assertSessionAlive(session);
         setLoading("launch");
         setRealLaunchMessage(nextStatusMode === "ACTIVE" ? "Создаём и запускаем кампанию в Meta." : "Создаём кампанию в Meta выключенной.");
       }
 
-      const body = await crmRequest<LaunchResult>("/api/crm/meta-launch", {
+      const body = await sessionRequest<LaunchResult>(session, "/api/crm/meta-launch", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -3111,6 +3263,7 @@ export default function AdsAutomation() {
           videoId: metaVideoId,
         }),
       });
+      assertSessionAlive(session);
       if (body.data.dryRun) {
         throw new Error("Meta вернула режим проверки для реального запуска. Кампания не создана.");
       }
@@ -3154,6 +3307,7 @@ export default function AdsAutomation() {
       toast.success(nextStatusMode === "ACTIVE" ? "Реклама запущена" : "Кампания создана выключенной");
       if (body.warning) setNotice(body.warning);
     } catch (error) {
+      if (!isSessionAlive(session)) return;
       if (error instanceof VideoProcessingPendingError) {
         // Not a failure: Meta accepted the video and is still processing it.
         saveLocalLaunch(
@@ -3179,31 +3333,39 @@ export default function AdsAutomation() {
       setRealLaunchMessage(message);
       toast.error(message);
     } finally {
-      setLoading(null);
+      if (isSessionAlive(session)) setLoading(null);
     }
   }
 
   async function loadHistory() {
+    const session = sessionRef.current;
+    if (!isSessionAlive(session)) return;
     const local = readStored<LaunchHistoryItem[]>(localHistoryKey(workspaceId), []);
     setHistoryItems(mergeHistoryCollections(local, []));
     setLoading("history");
     setNotice("");
     try {
-      const body = await crmRequest<{ launches?: LaunchHistoryItem[]; items?: LaunchHistoryItem[] }>(`/api/crm/meta-launches?workspaceId=${encodeURIComponent(workspaceId)}`);
+      const body = await sessionRequest<{ launches?: LaunchHistoryItem[]; items?: LaunchHistoryItem[] }>(session, `/api/crm/meta-launches?workspaceId=${encodeURIComponent(workspaceId)}`);
+      assertSessionAlive(session);
       const remote = body.data.launches || body.data.items || [];
       setHistoryItems(mergeHistoryCollections(local, remote));
     } catch (error) {
+      if (!isSessionAlive(session)) return;
       const fallbackMessage = local.length
         ? "Не удалось обновить историю. Показываем запуски, сохранённые на этом устройстве."
         : "История запусков временно недоступна. Попробуйте обновить страницу позже.";
       setNotice(isAdminMode && error instanceof Error ? `${fallbackMessage} ${error.message}` : fallbackMessage);
     } finally {
-      setHistoryLoaded(true);
-      setLoading(null);
+      if (isSessionAlive(session)) {
+        setHistoryLoaded(true);
+        setLoading(null);
+      }
     }
   }
 
   async function recheckHistoryVideo(item: LaunchHistoryItem) {
+    const session = sessionRef.current;
+    if (!isSessionAlive(session)) return;
     const payload = asRecord(item.payload);
     const metaResponse = asRecord(item.metaResponse);
     const videoId = firstString(item.metaVideoId, payload.metaVideoId, metaResponse.videoId, metaResponse.metaVideoId);
@@ -3211,7 +3373,7 @@ export default function AdsAutomation() {
     const checkId = item.id || videoId;
     setHistoryVideoCheckId(checkId);
     try {
-      const body = await crmRequest<{ videoReady?: boolean; processingStatus?: string; lastCheckedAt?: string }>("/api/crm/ad-creative-meta-upload", {
+      const body = await sessionRequest<{ videoReady?: boolean; processingStatus?: string; lastCheckedAt?: string }>(session, "/api/crm/ad-creative-meta-upload", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -3223,6 +3385,7 @@ export default function AdsAutomation() {
           metaVideoId: videoId,
         }),
       });
+      assertSessionAlive(session);
       const videoReady = body.data.videoReady === true;
       const processingStatus = firstString(body.data.processingStatus) || (videoReady ? "ready" : "processing");
       const lastCheckedAt = firstString(body.data.lastCheckedAt) || new Date().toISOString();
@@ -3242,9 +3405,10 @@ export default function AdsAutomation() {
         toast.info(VIDEO_PROCESSING_PENDING_MESSAGE);
       }
     } catch (error) {
+      if (!isSessionAlive(session)) return;
       setNotice(error instanceof Error ? error.message : "Не удалось проверить готовность видео.");
     } finally {
-      setHistoryVideoCheckId("");
+      if (isSessionAlive(session)) setHistoryVideoCheckId("");
     }
   }
 

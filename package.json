@@ -18,6 +18,7 @@
     "test:mobile": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:mobile",
     "test:advertising-brief": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:advertising-brief",
     "test:advertising-assistant": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:advertising-assistant",
+    "test:ads-session-races": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:ads-session-races",
     "test:advertising-outcomes": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:advertising-outcomes",
     "test:tiktok-ads-diagnostics": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:tiktok-ads-diagnostics",
     "test:tiktok-campaign-dry-run": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:tiktok-campaign-dry-run",
