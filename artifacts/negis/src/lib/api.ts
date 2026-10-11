@@ -47,7 +47,7 @@ export function crmErrorMessage(error: unknown): string {
   return "Не удалось выполнить запрос. Попробуйте позже.";
 }
 
-type CrmFetchInit = RequestInit & { accessToken?: string };
+type CrmFetchInit = RequestInit & { accessToken?: string; expectedUserId?: string };
 
 /**
  * Resolves the current access token from the Supabase session.
@@ -57,12 +57,12 @@ type CrmFetchInit = RequestInit & { accessToken?: string };
  * a dependency cycle. Nothing is cached, so a rotated or cleared session takes
  * effect on the very next request.
  */
-async function resolveAccessToken(explicit?: string): Promise<string> {
+async function resolveAccessToken(explicit?: string, expectedUserId?: string): Promise<string> {
   const provided = (explicit || "").trim();
-  if (provided) return provided;
+  if (provided && !expectedUserId) return provided;
 
   const { getSupabaseAccessToken } = await import("@/lib/serverAuth");
-  return (await getSupabaseAccessToken()).trim();
+  return (await getSupabaseAccessToken(expectedUserId)).trim();
 }
 
 /**
@@ -184,8 +184,11 @@ export function clearCrmCache(): void {
  * anyway invites retry loops.
  */
 export async function crmFetch(path: string, init: CrmFetchInit = {}): Promise<Response> {
-  const { accessToken, headers, ...rest } = init;
-  const token = await resolveAccessToken(accessToken);
+  const { accessToken, expectedUserId, headers, ...rest } = init;
+  rest.signal?.throwIfAborted();
+  const token = await resolveAccessToken(accessToken, expectedUserId);
+  // A session lookup can finish after its view/account was invalidated.
+  rest.signal?.throwIfAborted();
   if (!token) {
     throw new CrmApiError(401, "authentication_required", "Authentication required");
   }

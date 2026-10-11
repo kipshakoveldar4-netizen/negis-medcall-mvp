@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   CheckCircle2,
   ChevronLeft,
@@ -8,7 +8,7 @@ import {
   RefreshCw,
   XCircle,
 } from "lucide-react";
-import { operatorApi, useOperatorList } from "@/lib/operatorApi";
+import { operatorApi, OperatorApiError, useOperatorList } from "@/lib/operatorApi";
 import {
   formatArrivalPrice,
   operatorArrivalCheckLabels,
@@ -45,9 +45,11 @@ function dateTime(value: string) {
 }
 
 export function OperatorArrivals({
+  actorId,
   requestId,
   workspaceId,
 }: {
+  actorId?: string;
   requestId: string;
   workspaceId?: string;
 }) {
@@ -58,6 +60,22 @@ export function OperatorArrivals({
   const list = useOperatorList<OperatorArrival>(path);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState("");
+  const mounted = useRef(false);
+  // A mutation belongs to its visible list snapshot, including refreshes/pages.
+  const currentView = useRef({ path, actorId, offset: list.offset, data: list.data });
+  const scopeChanged =
+    currentView.current.path !== path ||
+    currentView.current.actorId !== actorId ||
+    currentView.current.offset !== list.offset;
+  if (scopeChanged || currentView.current.data !== list.data) {
+    currentView.current = { path, actorId, offset: list.offset, data: list.data };
+    if (busyId !== null) setBusyId(null);
+    if (scopeChanged) setError("");
+  }
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
 
   useEffect(() => {
     const revalidate = () => list.refresh();
@@ -73,17 +91,34 @@ export function OperatorArrivals({
   }, [list.refresh]);
 
   async function confirm(item: OperatorArrival) {
+    const startedAtView = currentView.current;
+    const isCurrent = () => mounted.current && currentView.current === startedAtView;
+    const isSameScope = () =>
+      mounted.current &&
+      currentView.current.path === startedAtView.path &&
+      currentView.current.actorId === startedAtView.actorId;
     setBusyId(item.appointmentId);
     setError("");
     try {
-      await operatorApi(path, { appointmentId: item.appointmentId }, "POST");
+      await operatorApi(
+        path,
+        { appointmentId: item.appointmentId },
+        "POST",
+        undefined,
+        clinic ? undefined : actorId,
+      );
+      if (!isCurrent()) return;
       list.refresh();
     } catch (err) {
+      const accessDenied = err instanceof OperatorApiError && [401, 403].includes(err.status);
+      if (accessDenied ? !isSameScope() : !isCurrent()) return;
+      if (accessDenied) list.refresh();
       setError(
         err instanceof Error ? err.message : "Не удалось подтвердить приход",
       );
     } finally {
-      setBusyId(null);
+      if (isCurrent())
+        setBusyId((value) => value === item.appointmentId ? null : value);
     }
   }
 
@@ -92,19 +127,36 @@ export function OperatorArrivals({
     result: OperatorArrivalCheckResult,
   ) {
     if (!item.arrivalId) return;
+    const startedAtView = currentView.current;
+    const isCurrent = () => mounted.current && currentView.current === startedAtView;
+    const isSameScope = () =>
+      mounted.current &&
+      currentView.current.path === startedAtView.path &&
+      currentView.current.actorId === startedAtView.actorId;
     setBusyId(item.arrivalId);
     setError("");
     try {
-      await operatorApi(path, { arrivalId: item.arrivalId, result }, "PATCH");
+      await operatorApi(
+        path,
+        { arrivalId: item.arrivalId, result },
+        "PATCH",
+        undefined,
+        clinic ? undefined : actorId,
+      );
+      if (!isCurrent()) return;
       list.refresh();
     } catch (err) {
+      const accessDenied = err instanceof OperatorApiError && [401, 403].includes(err.status);
+      if (accessDenied ? !isSameScope() : !isCurrent()) return;
+      if (accessDenied) list.refresh();
       setError(
         err instanceof Error
           ? err.message
           : "Не удалось сохранить результат звонка",
       );
     } finally {
-      setBusyId(null);
+      if (isCurrent())
+        setBusyId((value) => value === item.arrivalId ? null : value);
     }
   }
 

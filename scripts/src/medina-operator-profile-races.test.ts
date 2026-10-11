@@ -213,6 +213,8 @@ type Request = {
   actorId: string | null;
   method: string;
   body: unknown;
+  signal?: AbortSignal;
+  expectedUserId?: string;
   claimed: boolean;
   settled: boolean;
   succeed(value: OperatorProfile | null): void;
@@ -253,7 +255,7 @@ async function fixture(t: TestContext, delayInitialSession = false) {
     if (name === "../../../../lib/crm/operator-contracts") return contracts;
     if (name === "@/lib/api") return {
       crmErrorMessage: (status: number) => `Synthetic CRM error ${status}`,
-      crmFetch(url: string, init: RequestInit) {
+      crmFetch(url: string, init: RequestInit & { expectedUserId?: string }) {
         assert.equal(url, "/api/crm/operator-account", "Only the profile endpoint is simulated");
         const pending = deferred<HttpResponse>();
         const reply = (payload: unknown, status: number) => {
@@ -265,6 +267,8 @@ async function fixture(t: TestContext, delayInitialSession = false) {
           actorId: currentSession?.user.id ?? null,
           method: init.method ?? "GET",
           body: init.body === undefined ? undefined : JSON.parse(String(init.body)),
+          signal: init.signal ?? undefined,
+          expectedUserId: init.expectedUserId,
           claimed: false,
           settled: false,
           succeed(value) { reply({ success: true, data: value }, 200); },
@@ -391,9 +395,62 @@ test("simulation R3.1 delayed successful PATCH cannot restore approved after sus
   oldSave.succeed(profile("A", "approved", false));
   await ui.flush();
   assert.equal(oldSave.settled, true, "The old successful save really completed");
+  assert.equal(ui.snapshot().cabinetActor, null, "Reconciliation must not publish old approval");
+  ui.take("GET", "A").succeed(profile("A", "suspended"));
+  await ui.flush();
   assert.deepEqual({ status: ui.snapshot().status, actor: ui.snapshot().cabinetActor }, {
     status: ui.labels.suspended, actor: null,
   }, "Late PATCH must not reopen a cabinet closed by a newer suspended GET");
+});
+
+test("simulation R3.8 batched A -> B -> A auth changes start a replacement profile GET", async (t) => {
+  const ui = await approvedFixture(t);
+  ui.changeSession("B");
+  ui.changeSession("A");
+  await ui.flush();
+  assert.equal(ui.snapshot().cabinetActor, null);
+  ui.take("GET", "A").succeed(profile("A", "suspended"));
+  await ui.flush();
+  assert.equal(ui.snapshot().status, ui.labels.suspended);
+  assert.equal(ui.snapshot().busy, false);
+});
+
+test("simulation R3.9 a focus GET before PATCH commit is reconciled after the write settles", async (t) => {
+  const ui = await approvedFixture(t);
+  ui.toggle(false);
+  await ui.flush();
+  const save = ui.take("PATCH", "A");
+  ui.focus();
+  await ui.flush();
+  ui.take("GET", "A").succeed(profile("A", "approved", true));
+  await ui.flush();
+  assert.equal(ui.snapshot().busy, true, "A focus event must not enable a second write while the first is pending");
+  save.succeed(profile("A", "approved", false));
+  await ui.flush();
+  assert.equal(ui.snapshot().cabinetActor, null, "Old PATCH approval cannot reopen access");
+  ui.take("GET", "A").succeed(profile("A", "approved", false));
+  await ui.flush();
+  assert.equal(ui.snapshot().acceptingRequests, false, "The authoritative post-write setting must become visible");
+  assert.equal(ui.snapshot().busy, false);
+});
+
+test("simulation R3.10 writes carry the original actor and are aborted synchronously on an auth change", async (t) => {
+  const ui = await approvedFixture(t);
+  ui.toggle(false);
+  await ui.flush();
+  const save = ui.take("PATCH", "A");
+  assert.equal(save.expectedUserId, "A");
+  assert.equal(save.signal?.aborted, false);
+  ui.changeSession("B");
+  assert.equal(save.signal?.aborted, true, "Cancellation cannot wait for effect cleanup");
+  ui.changeSession("A");
+  await ui.flush();
+  save.succeed(profile("A", "approved", false));
+  await ui.flush();
+  assert.equal(ui.snapshot().cabinetActor, null, "Returning to A does not revive the aborted save");
+  ui.take("GET", "A").succeed(profile("A", "suspended"));
+  await ui.flush();
+  assert.equal(ui.snapshot().status, ui.labels.suspended);
 });
 
 test("simulation R3.2 delayed successful A save cannot replace the loaded B profile", async (t) => {
