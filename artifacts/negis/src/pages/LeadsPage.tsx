@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { Link } from "wouter";
 import {
   BadgeDollarSign,
@@ -31,6 +31,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import { EmptyState } from "@/components/ui/empty-state";
 import { useDemoCollection, readDemoStorage, writeDemoStorage, isRealWorkspace, readWorkspaceId, workspaceScopedKey } from "@/lib/demoStorage";
 import { apiUrl, crmFetch, clearCrmCache } from "@/lib/api";
+import { hasSupabaseFrontendEnv, supabase } from "@/lib/supabase";
 import {
   FALLBACK_LEAD_SOURCES,
   FALLBACK_LEAD_STAGES,
@@ -455,12 +456,16 @@ async function loadTaxonomyList<TItem>(input: {
   listKey: string;
   workspaceId: string;
   mapItem: (value: unknown) => TItem | null;
+  request?: (path: string, init?: RequestInit) => Promise<Response>;
+  isCurrent?: () => boolean;
 }): Promise<{ mode: string; items: TItem[] }> {
-  const response = await crmFetch(`${input.endpoint}?workspaceId=${encodeURIComponent(input.workspaceId)}`);
+  const path = `${input.endpoint}?workspaceId=${encodeURIComponent(input.workspaceId)}`;
+  const response = input.request ? await input.request(path) : await crmFetch(path);
   const text = await response.text();
   const body = text
     ? (JSON.parse(text) as { success?: boolean; mode?: string; data?: Record<string, unknown> })
     : null;
+  if (input.isCurrent && !input.isCurrent()) throw new DOMException("Lead session ended", "AbortError");
   if (!response.ok || body?.success !== true) return { mode: "demo", items: [] };
   const rawItems = body.data?.[input.listKey];
   const items = Array.isArray(rawItems)
@@ -565,7 +570,14 @@ function leadToApi(lead: Lead): Record<string, unknown> {
   };
 }
 
-function leadPatchToApi(patch: Partial<Lead>): Record<string, unknown> {
+function leadPatchToApi(patch: Partial<Lead>, isLeadManager = false): Record<string, unknown> {
+  if (isLeadManager) return {
+    ...(patch.name !== undefined ? { name: patch.name } : {}),
+    ...(patch.phone !== undefined ? { phone: patch.phone } : {}),
+    ...(patch.notes !== undefined ? { notes: patch.notes } : {}),
+    ...(patch.status !== undefined ? { status: patch.status } : {}),
+    ...(isUuid(patch.stageId) ? { stageId: patch.stageId } : {}),
+  };
   return {
     name: patch.name,
     phone: patch.phone,
@@ -587,14 +599,88 @@ function leadPatchToApi(patch: Partial<Lead>): Record<string, unknown> {
 }
 
 export default function LeadsPage() {
+  const { user, userRole, clinicId } = useAuth();
+  const actorId = user?.id || "";
+  const workspaceId = userRole === "lead_manager" ? clinicId || "" : clinicId || readWorkspaceId();
+  const observedActorRef = useRef(actorId);
+  const [authEpoch, setAuthEpoch] = useState(0);
+  useLayoutEffect(() => {
+    if (!hasSupabaseFrontendEnv) return;
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      const nextActorId = nextSession?.user.id || "";
+      if (observedActorRef.current === nextActorId) return;
+      observedActorRef.current = nextActorId;
+      setAuthEpoch((epoch) => epoch + 1);
+    });
+    return () => subscription.unsubscribe();
+  }, []);
+  return <LeadsPageSession key={JSON.stringify([actorId, workspaceId, userRole, authEpoch])} actorId={actorId} workspaceId={workspaceId} />;
+}
+
+type LeadSessionAccess = {
+  actorId: string;
+  workspaceId: string;
+  isCurrent: () => boolean;
+  request: (path: string, init?: RequestInit) => Promise<Response>;
+};
+
+function LeadsPageSession({ actorId, workspaceId }: { actorId: string; workspaceId: string }) {
+  const { user, clinicId, userRole } = useAuth();
+  const sessionRef = useRef<AbortController | null>(null);
+  const liveScopeRef = useRef({ actorId, workspaceId });
+  liveScopeRef.current = {
+    actorId: user?.id || "",
+    workspaceId: userRole === "lead_manager" ? clinicId || "" : clinicId || readWorkspaceId(),
+  };
+  const [lifetime, setLifetime] = useState<{ controller: AbortController; epoch: number } | null>(null);
+
+  useLayoutEffect(() => {
+    const controller = new AbortController();
+    sessionRef.current = controller;
+    // Mount the collection only after setup, so its captured access object owns
+    // one controller even when StrictMode replays this lifetime's setup.
+    setLifetime((current) => ({ controller, epoch: (current?.epoch ?? 0) + 1 }));
+    const subscription = hasSupabaseFrontendEnv
+      ? supabase.auth.onAuthStateChange((_event, nextSession) => {
+          if ((nextSession?.user.id || "") !== actorId) controller.abort();
+        }).data.subscription
+      : null;
+    return () => {
+      controller.abort();
+      subscription?.unsubscribe();
+      if (sessionRef.current === controller) sessionRef.current = null;
+    };
+  }, []);
+
+  if (!lifetime) return null;
+  const { controller } = lifetime;
+  const isCurrent = () => Boolean(actorId && workspaceId
+    && liveScopeRef.current.actorId === actorId && liveScopeRef.current.workspaceId === workspaceId
+    && sessionRef.current === controller && !controller.signal.aborted);
+  const assertCurrent = () => {
+    if (!isCurrent()) throw new DOMException("Lead session ended", "AbortError");
+  };
+  const request = async (path: string, init?: RequestInit) => {
+    assertCurrent();
+    const response = await crmFetch(path, { ...init, cache: "no-store", expectedUserId: actorId, signal: controller.signal });
+    assertCurrent();
+    return response;
+  };
+  return <LeadsPageContent key={lifetime.epoch} access={{ actorId, workspaceId, isCurrent, request }} />;
+}
+
+function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
   const { rolePermissions, userRole, user, session, clinicId, isDemoMode, isImpersonation } = useAuth();
+  const isLeadManager = userRole === "lead_manager";
+  const scopeVersion = useRef(0);
   const { items, loaded, loadError, setItems, addItem, updateItem } = useDemoCollection<Lead>("negis_demo_leads", leadsSeed, {
     endpoint: "/api/crm/leads",
     listKey: "leads",
     itemKey: "item",
     fromApi: leadFromApi,
     toApi: leadToApi,
-    patchToApi: leadPatchToApi,
+    patchToApi: (patch) => leadPatchToApi(patch, isLeadManager),
+    strictAccess: isLeadManager ? access : undefined,
   });
 
   const [stageDefinitions, setStageDefinitions] = useState<LeadStageDefinition[]>(FALLBACK_LEAD_STAGES);
@@ -623,29 +709,65 @@ export default function LeadsPage() {
   const [attributionFilter, setAttributionFilter] = useState<"all" | "with_ads" | "without_ads">("all");
 
   useEffect(() => {
-    let cancelled = false;
-    void loadCampaignLaunchOptions().then((options) => {
-      if (!cancelled) setCampaignLaunchOptions(options);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    if (!isLeadManager || !loadError) return;
+    setDetailId(null);
+    setFormOpen(false);
+    setEditingId(null);
+    setForm(emptyForm);
+    setConvertingId(null);
+    setConversionMatched({});
+    setSaving(false);
+  }, [isLeadManager, loadError]);
+
+  useEffect(() => {
+    setFormOpen(false);
+    setEditingId(null);
+    setForm(emptyForm);
+    setDetailId(null);
+    setSaving(false);
+    setConvertingId(null);
+    setConversionMatched({});
+    setSearch("");
+    setFilter("all");
+    setAttributionFilter("all");
+    return () => { scopeVersion.current += 1; };
+  }, [user?.id, clinicId, userRole]);
 
   useEffect(() => {
     let cancelled = false;
-    const workspaceId = readWorkspaceId();
+    setCampaignLaunchOptions([]);
+    if (!isLeadManager) {
+      void loadCampaignLaunchOptions().then((options) => {
+        if (!cancelled) setCampaignLaunchOptions(options);
+      });
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [user?.id, clinicId, userRole, isLeadManager]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const workspaceId = isLeadManager ? access.workspaceId : readWorkspaceId();
+    const referenceAccess = isLeadManager ? { request: access.request, isCurrent: access.isCurrent } : {};
+    setStaffOptions([]);
+    setStructuredStagesAvailable(false);
+    setStructuredSourcesAvailable(false);
+    setStageDefinitions(FALLBACK_LEAD_STAGES);
+    setSourceDefinitions(FALLBACK_LEAD_SOURCES);
 
     void Promise.all([
-      loadTaxonomyList({ endpoint: "/api/crm/lead-stages", listKey: "stages", workspaceId, mapItem: leadStageDefinitionFromUnknown }),
-      loadTaxonomyList({ endpoint: "/api/crm/lead-sources", listKey: "sources", workspaceId, mapItem: leadSourceDefinitionFromUnknown }),
+      loadTaxonomyList({ endpoint: "/api/crm/lead-stages", listKey: "stages", workspaceId, mapItem: leadStageDefinitionFromUnknown, ...referenceAccess }),
+      loadTaxonomyList({ endpoint: "/api/crm/lead-sources", listKey: "sources", workspaceId, mapItem: leadSourceDefinitionFromUnknown, ...referenceAccess }),
       // Colleagues the lead can be handed to. Reference data like the two
       // above: rarely edited, and crmFetch keeps it for five minutes, so this
       // does not add a wait to every visit.
-      loadTaxonomyList({ endpoint: "/api/crm/lead-assignees", listKey: "assignees", workspaceId, mapItem: staffOptionFromUnknown }),
+      isLeadManager
+        ? Promise.resolve({ mode: "restricted", items: [] as StaffOption[] })
+        : loadTaxonomyList({ endpoint: "/api/crm/lead-assignees", listKey: "assignees", workspaceId, mapItem: staffOptionFromUnknown }),
     ])
       .then(([stageResult, sourceResult, staffResult]) => {
-        if (cancelled) return;
+        if (cancelled || (isLeadManager && !access.isCurrent())) return;
         setStaffOptions(staffResult.mode === "supabase" ? staffResult.items : []);
         const structuredStages = stageResult.mode === "supabase" && stageResult.items.length > 0;
         const structuredSources = sourceResult.mode === "supabase" && sourceResult.items.length > 0;
@@ -655,7 +777,7 @@ export default function LeadsPage() {
         setSourceDefinitions(structuredSources ? orderedActiveSources(sourceResult.items) : FALLBACK_LEAD_SOURCES);
       })
       .catch(() => {
-        if (cancelled) return;
+        if (cancelled || (isLeadManager && !access.isCurrent())) return;
         setStructuredStagesAvailable(false);
         setStructuredSourcesAvailable(false);
         setStageDefinitions(FALLBACK_LEAD_STAGES);
@@ -665,7 +787,7 @@ export default function LeadsPage() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [user?.id, clinicId, userRole, isLeadManager]);
 
   const activeStages = useMemo(() => orderedActiveStages(stageDefinitions), [stageDefinitions]);
   const activeSources = useMemo(() => orderedActiveSources(sourceDefinitions), [sourceDefinitions]);
@@ -730,9 +852,10 @@ export default function LeadsPage() {
     });
   }, [activeSources, activeStages, attributionFilter, items, filter, search]);
 
-  const detailLead = detailId ? items.find((lead) => lead.id === detailId) || null : null;
+  const detailLead = detailId && (!isLeadManager || !loadError) ? items.find((lead) => lead.id === detailId) || null : null;
 
   function openAdd() {
+    if (isLeadManager) return;
     const defaultStage = activeStages.find((stage) => stage.semanticGroup === "new") ?? activeStages[0];
     const defaultSource = structuredSourcesAvailable
       ? activeSources.find((source) => source.sourceKey === "manual") ?? activeSources[0]
@@ -748,6 +871,7 @@ export default function LeadsPage() {
   }
 
   function openEdit(lead: Lead) {
+    if (isLeadManager && (!access.isCurrent() || loadError)) return;
     const currentStage = stageForLead(lead, activeStages);
     const currentSource = sourceForLead(lead, activeSources);
     setEditingId(lead.id);
@@ -767,6 +891,7 @@ export default function LeadsPage() {
   }
 
   function submitForm() {
+    if (saving || (isLeadManager && (!editingId || !access.isCurrent() || loadError))) return;
     const name = form.name.trim();
     const phone = form.phone.trim();
     if (!name && !phone) {
@@ -784,46 +909,50 @@ export default function LeadsPage() {
     const patch = {
       name,
       phone,
-      source: sourceSnapshot,
-      campaign: campaignSnapshot,
-      metaCampaignLaunchId: form.metaCampaignLaunchId,
       status: selectedStage?.stageKey || "new",
       notes: form.notes.trim(),
       stageName: selectedStage?.name,
       stageKey: selectedStage?.stageKey,
       stageColor: selectedStage?.color,
       semanticGroup: selectedStage?.semanticGroup || "new",
-      sourceName: sourceSnapshot,
-      sourceKey: selectedSource?.sourceKey,
-      sourceChannel: selectedSource?.channel,
-      sourceColor: selectedSource?.color,
       ...(structuredStagesAvailable && isUuid(selectedStage?.id) ? { stageId: selectedStage.id } : {}),
-      ...(structuredSourcesAvailable && isUuid(selectedSource?.id) ? { sourceId: selectedSource.id } : {}),
-      // Always sent: an empty string is how the operator takes the lead off a
-      // colleague, and the server turns it into null.
-      responsibleUserId: form.responsibleUserId,
+      ...(!isLeadManager ? {
+        source: sourceSnapshot,
+        campaign: campaignSnapshot,
+        metaCampaignLaunchId: form.metaCampaignLaunchId,
+        sourceName: sourceSnapshot,
+        sourceKey: selectedSource?.sourceKey,
+        sourceChannel: selectedSource?.channel,
+        sourceColor: selectedSource?.color,
+        ...(structuredSourcesAvailable && isUuid(selectedSource?.id) ? { sourceId: selectedSource.id } : {}),
+        responsibleUserId: form.responsibleUserId,
+      } : {}),
     };
     // Форма закрывается только после подтверждения сервера: иначе отказ
     // уносил вместе с собой всё, что оператор набрал со слов звонящего.
     setSaving(true);
+    const version = scopeVersion.current;
     void (async () => {
       try {
         const saved = editingId
           ? await updateItem(editingId, patch)
-          : await addItem({ id: `lead-${Date.now()}`, createdAt: new Date().toISOString(), ...patch });
+          : await addItem({ id: `lead-${Date.now()}`, createdAt: new Date().toISOString(), source: sourceSnapshot, campaign: campaignSnapshot, ...patch });
         if (!saved) return;
+        if (version !== scopeVersion.current || (isLeadManager && !access.isCurrent())) return;
         toast.success(editingId ? "Заявка обновлена" : "Заявка добавлена");
         setFormOpen(false);
         setEditingId(null);
         setForm(emptyForm);
       } finally {
-        setSaving(false);
+        if (version === scopeVersion.current && (!isLeadManager || access.isCurrent())) setSaving(false);
       }
     })();
   }
 
-  function changeStatus(lead: Lead, stage: LeadStageDefinition) {
-    updateItem(lead.id, {
+  async function changeStatus(lead: Lead, stage: LeadStageDefinition) {
+    if (isLeadManager && (!access.isCurrent() || loadError)) return;
+    const version = scopeVersion.current;
+    const saved = await updateItem(lead.id, {
       status: stage.stageKey,
       stageName: stage.name,
       stageKey: stage.stageKey,
@@ -831,10 +960,13 @@ export default function LeadsPage() {
       semanticGroup: stage.semanticGroup,
       ...(structuredStagesAvailable && isUuid(stage.id) ? { stageId: stage.id } : {}),
     });
+    if (version !== scopeVersion.current || (isLeadManager && !access.isCurrent())) return false;
+    return saved;
   }
 
   // «Записать»: store the appointment prefill and confirm; navigation is the Link itself.
   function handleBookFromLead(lead: Lead) {
+    if (isLeadManager) return;
     try {
       saveAppointmentPrefill(lead);
       toast.success("Данные переданы в запись.");
@@ -846,7 +978,8 @@ export default function LeadsPage() {
   // Lead → client conversion: reuse an existing client matched by normalized phone,
   // otherwise create a new client from the lead fields, then link the lead via client_id.
   async function convertLeadToClient(lead: Lead) {
-    if (convertingId || lead.clientId) return;
+    if (isLeadManager || convertingId || lead.clientId) return;
+    const version = scopeVersion.current;
     setConvertingId(lead.id);
     try {
       const leadDigits = phoneDigits(lead.phone);
@@ -857,6 +990,7 @@ export default function LeadsPage() {
       // Сравнение по канонической форме делает сервер по индексу; здесь берём
       // первое совпадение.
       const matched = leadDigits ? (await findClientsByPhone(lead.phone))[0] : undefined;
+      if (version !== scopeVersion.current) return;
 
       if (matched && matched.id) {
         try {
@@ -913,6 +1047,7 @@ export default function LeadsPage() {
       } catch {
         // Offline/demo: the local client below still keeps the flow working.
       }
+      if (version !== scopeVersion.current) return;
 
       // In a real clinic the client exists only if Supabase saved it.
       //
@@ -955,9 +1090,9 @@ export default function LeadsPage() {
       setConversionMatched((current) => ({ ...current, [lead.id]: false }));
       toast.success("Клиент создан из заявки.");
     } catch {
-      toast.error("Не удалось создать клиента.");
+      if (version === scopeVersion.current) toast.error("Не удалось создать клиента.");
     } finally {
-      setConvertingId(null);
+      if (version === scopeVersion.current) setConvertingId(null);
     }
   }
 
@@ -969,7 +1104,7 @@ export default function LeadsPage() {
           kicker="Medina OS · CRM"
           title="Заявки"
           description="Новые обращения из рекламы, сайта, WhatsApp и других источников."
-          actions={
+          actions={!isLeadManager ? (
             <>
               <div className="inline-flex rounded-lg border p-0.5" style={{ borderColor: "var(--negis-border)", background: "var(--negis-surface)" }} role="group" aria-label="Режим интерфейса">
                 {([false, true] as const).map((admin) => (
@@ -990,7 +1125,7 @@ export default function LeadsPage() {
                 Добавить заявку
               </button>
             </>
-          }
+          ) : undefined}
         />
 
         {/* Summary metrics */}
@@ -1101,12 +1236,12 @@ export default function LeadsPage() {
             icon={Inbox}
             title="Заявок пока нет"
             description="Когда клиника начнёт получать обращения из рекламы, сайта или WhatsApp, они появятся здесь."
-            action={
+            action={!isLeadManager ? (
               <button type="button" className="neu-btn-primary justify-center" onClick={openAdd}>
                 <Plus size={16} aria-hidden />
                 Добавить заявку
               </button>
-            }
+            ) : undefined}
           />
         ) : visibleLeads.length === 0 ? (
           <EmptyState
@@ -1170,7 +1305,7 @@ export default function LeadsPage() {
                   <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:flex-wrap">
                     <a
                       className={`neu-btn justify-center ${hasPhone ? "" : "pointer-events-none opacity-50"}`}
-                      href={hasPhone ? toWhatsappHref(lead.phone, `Здравствуйте, ${lead.name || ""}! Пишем из клиники.`) : undefined}
+                      href={hasPhone ? toWhatsappHref(lead.phone, isLeadManager ? undefined : `Здравствуйте, ${lead.name || ""}! Пишем из клиники.`) : undefined}
                       target="_blank"
                       rel="noreferrer"
                       aria-disabled={!hasPhone}
@@ -1186,11 +1321,11 @@ export default function LeadsPage() {
                       <PhoneCall size={16} />
                       Позвонить
                     </a>
-                    <Link href="/appointments" className="neu-btn justify-center" onClick={() => handleBookFromLead(lead)}>
+                    {!isLeadManager && <Link href="/appointments" className="neu-btn justify-center" onClick={() => handleBookFromLead(lead)}>
                       <CalendarCheck size={16} />
                       Записать
-                    </Link>
-                    {lead.clientId ? (
+                    </Link>}
+                    {!isLeadManager && (lead.clientId ? (
                       <Link href="/clients" className="neu-btn justify-center" onClick={() => rememberOpenClient(lead.clientId)}>
                         <Users size={16} />
                         Открыть клиента
@@ -1205,7 +1340,7 @@ export default function LeadsPage() {
                         {convertingId === lead.id ? <Loader2 className="animate-spin" size={16} /> : <UserPlus size={16} />}
                         Создать клиента
                       </button>
-                    )}
+                    ))}
                     <button type="button" className="neu-btn justify-center" onClick={() => setDetailId(lead.id)}>
                       <ClipboardList size={16} />
                       Подробнее
@@ -1219,7 +1354,7 @@ export default function LeadsPage() {
       </div>
 
       {/* Add / edit modal */}
-      {formOpen ? (
+      {formOpen && (!isLeadManager || (editingId && !loadError)) ? (
         <div className="fixed inset-0 z-[80] flex items-center justify-center p-4" style={{ background: "rgba(15,23,42,0.35)" }} onClick={() => setFormOpen(false)}>
           <div className="negis-glass w-full max-w-lg max-h-[90vh] overflow-y-auto p-5 sm:p-6" style={{ background: "var(--negis-surface)" }} onClick={(event) => event.stopPropagation()}>
             <div className="flex items-center justify-between gap-3">
@@ -1235,7 +1370,7 @@ export default function LeadsPage() {
                 <span className="mb-1 block text-xs font-black uppercase tracking-[0.05em]" style={{ color: "var(--negis-muted)" }}>Телефон</span>
                 <input style={inputStyle} value={form.phone} onChange={(event) => setForm((current) => ({ ...current, phone: event.target.value }))} placeholder="+7 700 000 00 00" />
               </label>
-              <div className="grid gap-3 sm:grid-cols-2">
+              {!isLeadManager && <div className="grid gap-3 sm:grid-cols-2">
                 <label className="block">
                   <span className="mb-1 block text-xs font-black uppercase tracking-[0.05em]" style={{ color: "var(--negis-muted)" }}>Источник</span>
                   {structuredSourcesAvailable ? (
@@ -1271,8 +1406,8 @@ export default function LeadsPage() {
                   <span className="mb-1 block text-xs font-black uppercase tracking-[0.05em]" style={{ color: "var(--negis-muted)" }}>Кампания / услуга</span>
                   <input style={inputStyle} value={form.campaign} onChange={(event) => setForm((current) => ({ ...current, campaign: event.target.value }))} placeholder="Название кампании" />
                 </label>
-              </div>
-              <label className="block">
+              </div>}
+              {!isLeadManager && <label className="block">
                 <span className="mb-1 block text-xs font-black uppercase tracking-[0.05em]" style={{ color: "var(--negis-muted)" }}>Рекламная кампания</span>
                 <select
                   style={inputStyle}
@@ -1286,7 +1421,7 @@ export default function LeadsPage() {
                     <option key={option.id} value={option.id}>{option.label}</option>
                   ))}
                 </select>
-              </label>
+              </label>}
               <label className="block">
                 <span className="mb-1 block text-xs font-black uppercase tracking-[0.05em]" style={{ color: "var(--negis-muted)" }}>Этап</span>
                 <select
@@ -1301,7 +1436,7 @@ export default function LeadsPage() {
                   ))}
                 </select>
               </label>
-              {staffOptions.length > 0 && (
+              {!isLeadManager && staffOptions.length > 0 && (
                 <label className="block">
                   <span className="mb-1 block text-xs font-black uppercase tracking-[0.05em]" style={{ color: "var(--negis-muted)" }}>Ответственный</span>
                   <select
@@ -1360,7 +1495,7 @@ export default function LeadsPage() {
             </div>
 
             {/* Lead → client conversion */}
-            <div className="mt-4 rounded-2xl border p-3" style={{ borderColor: "var(--negis-border)" }}>
+            {!isLeadManager && <div className="mt-4 rounded-2xl border p-3" style={{ borderColor: "var(--negis-border)" }}>
               {detailLead.clientId ? (
                 <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                   <p className="text-sm font-bold" style={{ color: "var(--negis-text)" }}>Клиент уже создан</p>
@@ -1385,7 +1520,7 @@ export default function LeadsPage() {
                   </button>
                 </div>
               )}
-            </div>
+            </div>}
 
             {/* Quick status change */}
             <div className="mt-4">
@@ -1410,7 +1545,7 @@ export default function LeadsPage() {
               </div>
             </div>
 
-            {isRealWorkspace() && rolePermissions.tasks ? (
+            {!isLeadManager && isRealWorkspace() && rolePermissions.tasks ? (
               <div className="mt-4">
                 <TaskPanel
                   entityType="lead"
@@ -1420,7 +1555,7 @@ export default function LeadsPage() {
               </div>
             ) : null}
 
-            {isRealWorkspace() ? (
+            {!isLeadManager && isRealWorkspace() ? (
               <div className="mt-4">
                 <ChangeLogPanel
                   entityType="lead"
@@ -1440,7 +1575,7 @@ export default function LeadsPage() {
             </div>
 
             {/* Admin-only technical details (collapsed) */}
-            {isAdminMode ? (
+            {!isLeadManager && isAdminMode ? (
               <details className="mt-4 overflow-hidden rounded-2xl border" style={{ borderColor: "var(--negis-border)" }}>
                 <summary className="cursor-pointer list-none px-4 py-2.5 text-xs font-black uppercase tracking-[0.1em]" style={{ color: "var(--negis-primary)" }}>Технические данные</summary>
                 <div className="grid gap-1 px-4 pb-4 pt-1 text-xs font-semibold" style={{ color: "var(--negis-muted)" }}>
@@ -1478,14 +1613,14 @@ export default function LeadsPage() {
                 <Pencil size={16} />
                 Изменить
               </button>
-              <Link href="/appointments" className="neu-btn justify-center" onClick={() => handleBookFromLead(detailLead)}>
+              {!isLeadManager && <Link href="/appointments" className="neu-btn justify-center" onClick={() => handleBookFromLead(detailLead)}>
                 <CalendarCheck size={16} />
                 Записать
-              </Link>
-              <Link href="/sales" className="neu-btn-primary justify-center" onClick={() => saveDealPrefill(detailLead)}>
+              </Link>}
+              {!isLeadManager && <Link href="/sales" className="neu-btn-primary justify-center" onClick={() => saveDealPrefill(detailLead)}>
                 <BadgeDollarSign size={16} />
                 Оформить продажу
-              </Link>
+              </Link>}
             </div>
           </div>
         </div>

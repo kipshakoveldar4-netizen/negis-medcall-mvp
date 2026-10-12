@@ -28,6 +28,12 @@ type StaffRow = { id: string; workspace_id: string; role: string; status: string
 
 type QueryLog = { table: string; filters: Record<string, unknown>; op: string; columns?: string };
 type StaffDirectoryFixture = { rows: Record<string, unknown>[]; error?: { message: string } };
+type AssignedLeadFixture = {
+  rows?: Record<string, unknown>[];
+  error?: { code: string; message: string };
+  result?: unknown;
+  calls: Array<{ name: string; args: Record<string, unknown> }>;
+};
 
 /** Records every table touched and every filter applied. */
 function spyClient(rows: Record<string, unknown[]>, log: QueryLog[], staffDirectory?: StaffDirectoryFixture) {
@@ -72,6 +78,7 @@ type LoadOptions = {
   authThrows?: boolean;
   rows?: Record<string, unknown[]>;
   staffDirectory?: StaffDirectoryFixture;
+  assignedLeads?: AssignedLeadFixture;
 };
 
 type MockResponse = {
@@ -125,7 +132,22 @@ async function loadRouter(options: LoadOptions) {
   let crmClientCreations = 0;
   supabaseModule.setSupabaseServerClientFactoryForTests(() => {
     crmClientCreations += 1;
-    return withAppointmentCreateRpcSpy(spyClient(clientRows, log, options.staffDirectory));
+    const client = withAppointmentCreateRpcSpy(spyClient(clientRows, log, options.staffDirectory));
+    if (!options.assignedLeads) return client;
+    const fixture = options.assignedLeads;
+    return Object.assign(client, { async rpc(name: string, args: Record<string, unknown>) {
+      fixture.calls.push({ name, args });
+      if (fixture.error) return { data: null, error: fixture.error };
+      if (name === "read_assigned_crm_leads") {
+        return { data: fixture.result ?? (fixture.rows ?? []).filter((row) =>
+          row.workspace_id === args.p_workspace_id && row.responsible_user_id === args.p_staff_user_id), error: null };
+      }
+      assert.equal(name, "patch_assigned_crm_lead");
+      const target = fixture.rows?.find((row) => row.id === args.p_lead_id && row.workspace_id === args.p_workspace_id
+        && row.responsible_user_id === args.p_staff_user_id);
+      if (!target) return { data: null, error: { code: "P6902", message: "fixture-private" } };
+      return { data: fixture.result ?? { before: target, item: { ...target, ...(args.p_patch as object) } }, error: null };
+    } });
   });
 
   const routerModule = (await import(pathToFileURL(routerPath).href)) as {
@@ -1443,4 +1465,145 @@ test("N11 the lead form uses the minimal directory, not staff administration", a
   const source = await readFile(path.join(negisSrc, "pages", "LeadsPage.tsx"), "utf8");
   assert.ok(source.includes('endpoint: "/api/crm/lead-assignees", listKey: "assignees"'));
   assert.ok(!source.includes('endpoint: "/api/crm/staff"'));
+});
+
+const ownLeadStaffId = "30000000-0000-4000-8000-000000000001";
+const assignedLeadMember = { ...memberA, id: ownLeadStaffId, role: "lead_manager" };
+const ownLeadId = "40000000-0000-4000-8000-000000000001";
+const ownLeadRows = [
+  { id: ownLeadId, workspace_id: WORKSPACE_A, responsible_user_id: ownLeadStaffId, full_name: "Own fixture", phone: "+77001110001", status: "new" },
+  { id: "40000000-0000-4000-8000-000000000002", workspace_id: WORKSPACE_A, responsible_user_id: assignmentTeam[1].id, full_name: "Other fixture", phone: "+77001110002" },
+  { id: "40000000-0000-4000-8000-000000000003", workspace_id: WORKSPACE_A, responsible_user_id: null, full_name: "Unassigned fixture" },
+  { id: "40000000-0000-4000-8000-000000000004", workspace_id: WORKSPACE_B, responsible_user_id: ownLeadStaffId, full_name: "Foreign fixture" },
+];
+
+test("P1 assigned-only role has only two permissions and cannot grant roles", async () => {
+  const { permissionsForRole, canAssignRole, staffRoles } = await import(pathToFileURL(path.join(repoRoot, "lib/auth/permissions.ts")).href) as {
+    permissionsForRole(role: string): string[]; canAssignRole(actor: string, target: string): boolean; staffRoles: string[];
+  };
+  assert.ok(staffRoles.includes("lead_manager"));
+  assert.deepEqual(permissionsForRole("lead_manager"), ["view_leads", "manage_leads"]);
+  for (const role of staffRoles) assert.equal(canAssignRole("lead_manager", role), false);
+  assert.equal(canAssignRole("admin", "lead_manager"), true);
+  assert.ok(permissionsForRole("manager").includes("view_clients"), "existing supervisor unchanged");
+});
+
+test("P2 assigned leads are fetched only through the scoped RPC with verified identity", async () => {
+  const fixture: AssignedLeadFixture = { calls: [], rows: ownLeadRows };
+  await withRouter({ memberships: [assignedLeadMember], assignedLeads: fixture }, async ctx => {
+    const { res, log } = await ctx.call({ segments: ["leads"], query: { responsibleUserId: assignmentTeam[1].id, staffUserId: assignmentTeam[1].id },
+      body: { workspaceId: WORKSPACE_B, role: "owner", p_staff_user_id: assignmentTeam[1].id } });
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(((res.body.data as Record<string, unknown>).leads as Record<string, unknown>[]).map(x => x.id), [ownLeadId]);
+    assert.deepEqual(fixture.calls, [{ name: "read_assigned_crm_leads", args: {
+      p_workspace_id: WORKSPACE_A, p_staff_user_id: ownLeadStaffId, p_auth_user_id: USER_A,
+    } }]);
+    assert.equal(businessQueries(log).length, 0, "no generic leads SELECT may bypass RPC");
+  });
+});
+
+test("P3 assigned-only access has a closed browser-route allowlist", async () => {
+  const registry = await import(pathToFileURL(registryPath).href) as {
+    CRM_ROUTE_AUTHORIZATION: Record<string, { kind: string; methods?: string[] }>;
+  };
+  const fixture: AssignedLeadFixture = { calls: [], rows: ownLeadRows };
+  await withRouter({ memberships: [assignedLeadMember], assignedLeads: fixture }, async ctx => {
+    for (const [route, policy] of Object.entries(registry.CRM_ROUTE_AUTHORIZATION)) {
+      if (policy.kind !== "browser") continue;
+      for (const method of policy.methods ?? []) {
+        if ((route === "leads" && (method === "GET" || method === "PATCH"))
+          || ((route === "lead-stages" || route === "lead-sources") && method === "GET")) continue;
+        const { res, log } = await ctx.call({ segments: route.split("/"), method, body: { id: ownLeadId, updates: { notes: "forged" } } });
+        assert.ok([403,404,405].includes(res.statusCode), `${route} ${method}: ${res.statusCode}`);
+        assert.equal(businessQueries(log).length, 0, `${route} must fail before any business query`);
+      }
+    }
+    assert.equal(fixture.calls.length, 0);
+  });
+});
+
+test("P4 scoped PATCH is normalized and cannot use the generic UPDATE", async () => {
+  const fixture: AssignedLeadFixture = { calls: [], rows: ownLeadRows };
+  await withRouter({ memberships: [assignedLeadMember], assignedLeads: fixture }, async ctx => {
+    const { res, log } = await ctx.call({ segments: ["leads"], method: "PATCH",
+      body: { id: ownLeadId, workspaceId: WORKSPACE_B, updates: { name: " Updated ", notes: " Own note " } } });
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(fixture.calls[0], { name: "patch_assigned_crm_lead", args: {
+      p_workspace_id: WORKSPACE_A, p_staff_user_id: ownLeadStaffId, p_auth_user_id: USER_A,
+      p_lead_id: ownLeadId, p_patch: { full_name: "Updated", notes: "Own note" },
+    } });
+    assert.ok(!log.some(x => x.table === "leads"));
+    assert.equal((res.body.data as Record<string, unknown>).item !== undefined, true);
+  });
+});
+
+test("P5 assignment, source, client, campaign and unknown fields never reach the RPC", async () => {
+  const fixture: AssignedLeadFixture = { calls: [], rows: ownLeadRows };
+  await withRouter({ memberships: [assignedLeadMember], assignedLeads: fixture }, async ctx => {
+    for (const key of ["responsibleUserId","responsible_user_id","clientId","client_id","source","sourceId","source_id",
+      "campaign","metaCampaignLaunchId","meta_campaign_launch_id","workspace_id","role","permissions","updated_at","constructor","toString"]) {
+      const { res, log } = await ctx.call({ segments: ["leads"], method: "PATCH",
+        body: { id: ownLeadId, updates: { notes: "legitimate", [key]: "forged" } } });
+      assert.equal(res.statusCode, 400, key);
+      assert.equal(businessQueries(log).length, 0);
+    }
+    for (const updates of [{}, { notes: {} }, { name: "a", full_name: "b" }, { stageId: "bad" }, { status: "" }, { notes: "x".repeat(10001) }]) {
+      const { res } = await ctx.call({ segments: ["leads"], method: "PATCH", body: { id: ownLeadId, updates } });
+      assert.equal(res.statusCode, 400);
+    }
+    assert.equal(fixture.calls.length, 0);
+  });
+});
+
+test("P6 unassigned, another employee, foreign and missing PATCH IDs have one refusal", async () => {
+  const fixture: AssignedLeadFixture = { calls: [], rows: ownLeadRows };
+  await withRouter({ memberships: [assignedLeadMember], assignedLeads: fixture }, async ctx => {
+    let reference: unknown;
+    for (const id of [...ownLeadRows.slice(1).map(x => x.id), "40000000-0000-4000-8000-000000000099"]) {
+      const { res, log } = await ctx.call({ segments: ["leads"], method: "PATCH", body: { id, updates: { notes: "forged" } } });
+      assert.equal(res.statusCode, 404);
+      if (!reference) reference = res.body; else assert.deepEqual(res.body, reference);
+      assert.equal(businessQueries(log).length, 0);
+    }
+  });
+});
+
+test("P7 a revoked membership with a still valid token is denied before reading or patching", async () => {
+  for (const membership of [{ ...assignedLeadMember, status: "paused" }, { ...assignedLeadMember, role: "unknown" }]) {
+    const fixture: AssignedLeadFixture = { calls: [] };
+    await withRouter({ memberships: [membership], assignedLeads: fixture }, async ctx => {
+      for (const method of ["GET", "PATCH"]) {
+        const { res, log } = await ctx.call({ segments: ["leads"], method, body: { id: ownLeadId, updates: { notes: "n" } } });
+        assert.equal(res.statusCode, 403);
+        assert.equal(businessQueries(log).length, 0);
+      }
+      assert.equal(fixture.calls.length, 0);
+    });
+  }
+});
+
+test("P8 database revocation, reassignment, validation and missing migration never become demo success", async () => {
+  for (const [code, expected] of [["P6901",403],["P6902",404],["P6903",400],["PGRST202",502],["XX000",502]] as const) {
+    const fixture: AssignedLeadFixture = { calls: [], error: { code, message: "private-database-fixture" } };
+    await withRouter({ memberships: [assignedLeadMember], assignedLeads: fixture }, async ctx => {
+      const { res, log } = await ctx.call({ segments: ["leads"], method: "PATCH", body: { id: ownLeadId, updates: { notes: "n" } } });
+      assert.equal(res.statusCode, expected, code);
+      assert.equal(res.body.success, false);
+      assert.equal(res.body.mode, undefined);
+      assert.ok(!JSON.stringify(res.body).includes("private-database-fixture"));
+      assert.equal(businessQueries(log).length, 0);
+    });
+  }
+});
+
+test("P9 assigned-only GET rejects an invalid RPC result and a foreign workspace selector", async () => {
+  const fixture: AssignedLeadFixture = { calls: [], result: {} };
+  await withRouter({ memberships: [assignedLeadMember], assignedLeads: fixture }, async ctx => {
+    const { res } = await ctx.call({ segments: ["leads"] });
+    assert.equal(res.statusCode, 502);
+    fixture.calls.length = 0;
+    const denied = await ctx.call({ segments: ["leads"], query: { workspaceId: WORKSPACE_B } });
+    assert.equal(denied.res.statusCode, 403);
+    assert.equal(fixture.calls.length, 0);
+  });
 });

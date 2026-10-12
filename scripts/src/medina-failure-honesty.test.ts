@@ -3,6 +3,7 @@ import { withAppointmentCreateRpcSpy } from "./appointment-create-rpc-spy.js";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
+import ts from "typescript";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 // Security-2F — a failure has to look like one.
@@ -263,7 +264,8 @@ test("F8 the browser puts back a row the server refused", async () => {
   const update = source.slice(source.indexOf("const updateItem ="));
   assert.ok(add.includes("revertWrite("), "a refused create must roll back");
   assert.ok(update.includes("revertWrite("), "a refused update must roll back");
-  assert.ok(update.includes("const response = await crmFetch("), "the update must read the response at all");
+  assert.ok(update.includes("const response = await request("), "the update must read the response at all");
+  assert.ok(source.includes("const request = strictAccess?.request ?? crmFetch;"), "ordinary collections keep the authenticated helper");
 });
 
 test("F12 отказ сохранения не уносит с собой набранное сотрудником", async () => {
@@ -368,7 +370,7 @@ test("F9 a refused production read reaches the operator instead of an empty clin
   );
   const catchAt = effect.indexOf("} catch {");
   assert.ok(
-    effect.slice(catchAt).includes("if (!cancelled) reportLoadFailure();"),
+    effect.slice(catchAt).includes("if (!cancelled && isCurrent()) reportLoadFailure();"),
     "a thrown fetch must report too, but never after unmount",
   );
 
@@ -414,9 +416,16 @@ test("F11 every value the lead form collects reaches the API", async () => {
   assert.ok(literalStart > 0, "the form must still build one patch object");
   const literal = submit.slice(literalStart, submit.indexOf("\n    };", literalStart));
 
-  const collected = [...literal.matchAll(/^ {6}(?:\.\.\.\([^)]*\?\s*\{\s*)?([a-zA-Z][a-zA-Z0-9]*)\s*:/gm)]
-    .map((match) => match[1])
-    .filter((key) => !LEAD_FORM_DISPLAY_ONLY.has(key));
+  // Conditional spreads for the scoped role still carry ordinary-role fields.
+  // Parse the object instead of assuming one indentation level.
+  const ast = ts.createSourceFile("lead-form.ts", literal + "\n};", ts.ScriptTarget.Latest, true);
+  const collected: string[] = [];
+  const collect = (node: ts.Node): void => {
+    if ((ts.isPropertyAssignment(node) || ts.isShorthandPropertyAssignment(node))
+      && ts.isIdentifier(node.name) && !LEAD_FORM_DISPLAY_ONLY.has(node.name.text)) collected.push(node.name.text);
+    ts.forEachChild(node, collect);
+  };
+  collect(ast);
   assert.ok(collected.length >= 6, `the form should collect several fields, found: ${collected.join(", ")}`);
 
   const toApi = source.slice(source.indexOf("function leadToApi("), source.indexOf("function leadPatchToApi("));

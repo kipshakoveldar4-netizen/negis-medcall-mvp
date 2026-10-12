@@ -6,7 +6,7 @@
 // scripts/src/medina-tenant-isolation.test.ts, because the frontend package has
 // no path alias into lib/ and adding one would change the Vite build graph.
 
-export const staffRoles = ["owner", "admin", "receptionist", "marketer", "doctor", "manager"] as const;
+export const staffRoles = ["owner", "admin", "receptionist", "marketer", "doctor", "manager", "lead_manager"] as const;
 
 export type StaffRole = (typeof staffRoles)[number];
 
@@ -47,6 +47,8 @@ export type CrmPermission = (typeof crmPermissions)[number];
 
 const rolePermissions: Record<StaffRole, CrmPermission[]> = {
   owner: [...crmPermissions],
+  // Row scope and the closed route allowlist are enforced by the server.
+  lead_manager: ["view_leads", "manage_leads"],
   admin: [
     "manage_directory",
     "view_clients",
@@ -158,6 +160,7 @@ const roleRank: Record<StaffRole, number> = {
   marketer: 40,
   doctor: 40,
   receptionist: 20,
+  lead_manager: 20,
 };
 
 export function permissionsForRole(role: StaffRole): CrmPermission[] {

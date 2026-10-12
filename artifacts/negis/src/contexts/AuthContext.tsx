@@ -222,6 +222,20 @@ function loadStoredStaffAuth(): StaffAuthData | null {
 
 function routePermissionsForStaffRole(role: StaffRole): RolePermissions {
   if (role === 'owner' || role === 'admin') return ALL_PERMISSIONS;
+  if (role === 'lead_manager') return {
+    dashboard: false,
+    booking: false,
+    reception: false,
+    crm: true,
+    tasks: false,
+    chat: false,
+    marketplace: false,
+    admin: false,
+    directory: false,
+    reports: false,
+    ads: false,
+    settings: false,
+  };
 
   const crmPermissions = new Set(permissionsForRole(role));
 
@@ -529,10 +543,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     // the bug that would leak one clinic's list into another's screen.
     clearCrmCache();
     applyMembership(supabaseUser, selected, memberships);
-    // Every staff role in the permission table carries `dashboard`, and
-    // ProtectedPage redirects anyone it does not fit, so this lands correctly
-    // without duplicating the route table here.
-    setLocation('/dashboard');
+    setLocation(selected.role === 'lead_manager' ? '/leads' : '/dashboard');
   };
 
   /** Returns a multi-clinic user to the picker without ending the session. */

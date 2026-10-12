@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "test:assigned-leads": "tsx --test ./src/medina-assigned-lead-collection.test.ts ./src/medina-lead-manager-ui.test.ts",
     "preview:crm": "node ./fixtures/crm-browser.mjs",
     "test:crm-browser-fixture": "node --import tsx --test ./fixtures/crm-browser.test.mjs",
     "preview:site-intake": "node --import tsx ./fixtures/site-intake-browser.mjs",
@@ -13,6 +14,7 @@
     "test:appointment-requests": "tsx --test ./src/medina-appointment-requests.test.ts",
     "test:appointment-preview-readiness": "node --test ./fixtures/appointment-preview-readiness.test.mjs",
     "test:appointment-requests-postgres": "node --test ./fixtures/appointment-requests-postgres.test.mjs",
+    "test:assigned-leads-postgres": "node --test ./fixtures/assigned-leads-postgres.test.mjs",
     "test:site-blog": "tsx --test ./src/medina-site-blog.test.ts",
     "test:site-editorial": "tsx --test ./src/medina-site-editorial.test.ts",
     "test:site-intake": "tsx --test ./src/medina-site-intake.test.ts ./src/medina-site-intake-handler.test.ts",

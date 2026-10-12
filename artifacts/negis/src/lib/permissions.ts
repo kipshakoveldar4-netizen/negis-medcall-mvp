@@ -1,4 +1,4 @@
-export const staffRoles = ["owner", "admin", "receptionist", "marketer", "doctor", "manager"] as const;
+export const staffRoles = ["owner", "admin", "receptionist", "marketer", "doctor", "manager", "lead_manager"] as const;
 
 export type StaffRole = (typeof staffRoles)[number];
 
@@ -16,6 +16,7 @@ const roleRank: Record<StaffRole, number> = {
   marketer: 40,
   doctor: 40,
   receptionist: 20,
+  lead_manager: 20,
 };
 
 /** Роль строго ниже своей; owner не выдаётся никому и никогда. */
@@ -56,6 +57,7 @@ export type CrmPermission = (typeof crmPermissions)[number];
 
 const rolePermissions: Record<StaffRole, CrmPermission[]> = {
   owner: [...crmPermissions],
+  lead_manager: ["view_leads", "manage_leads"],
   admin: [
     "manage_directory",
     "view_clients",
@@ -156,6 +158,7 @@ export const roleLabels: Record<StaffRole, string> = {
   marketer: "Маркетолог",
   doctor: "Врач",
   manager: "Менеджер",
+  lead_manager: "Менеджер заявок",
 };
 
 export const permissionLabels: Record<CrmPermission, string> = {

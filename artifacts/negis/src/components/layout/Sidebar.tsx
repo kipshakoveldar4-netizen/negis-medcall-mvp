@@ -28,7 +28,7 @@ const NAV_GROUPS: NavGroup[] = [
   {
     title: 'Операции',
     items: [
-      { href: '/leads', icon: Inbox, label: 'Заявки', roles: ['owner', 'manager', 'agent'] },
+      { href: '/leads', icon: Inbox, label: 'Заявки', roles: ['owner', 'manager', 'agent', 'lead_manager'] },
       { href: '/clients', icon: Users, label: 'Клиенты', roles: ['owner', 'manager', 'agent'] },
       { href: '/appointments', icon: CalendarDays, label: 'Записи', roles: ['owner', 'manager', 'agent', 'booking_agent'] },
       { href: '/sales', icon: BadgeDollarSign, label: 'Продажи', roles: ['owner', 'manager', 'agent'] },
@@ -85,7 +85,9 @@ export function Sidebar() {
   const [showProfile, setShowProfile] = useState(false);
 
   const canUse = (item: NavItem) =>
-    !userRole || userRole === 'owner' || userRole === 'manager' || userRole === 'admin' || item.roles.includes(userRole);
+    userRole === 'lead_manager'
+      ? item.href === '/leads'
+      : !userRole || userRole === 'owner' || userRole === 'manager' || userRole === 'admin' || item.roles.includes(userRole);
   const visibleGroups = NAV_GROUPS
     .map((group) => ({ ...group, items: group.items.filter(canUse) }))
     .filter((group) => group.items.length > 0);

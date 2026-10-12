@@ -34,6 +34,7 @@ type ModalState = 'idle' | 'choice' | 'login' | 'reset' | 'newpassword';
 
 
 const roleRoute = (role: string | null) => {
+  if (role === 'lead_manager') return '/leads';
   if (role === 'owner' || role === 'manager') return '/dashboard';
   // Регистратор начинает с заявок: экран приёма вёл на фикстуру без
   // источника данных и теперь перенаправляет сюда же.

@@ -6,6 +6,7 @@ import { apiUrl, crmFetch } from "@/lib/api";
 import { hasSupabaseFrontendEnv, supabase } from "@/lib/supabase";
 import { isSyntheticEmail, loginOrEmailToAuthEmail } from "../../../../lib/auth/staff-logins";
 import { isStaffRole, roleLabels } from "@/lib/permissions";
+import { WORKSPACE_SELECTOR_KEY } from "@/lib/demoStorage";
 import { PENDING_INVITE_KEY } from "@/pages/JoinWorkspace";
 
 type StaffUser = {
@@ -209,7 +210,13 @@ export default function Login() {
       }
 
       toast.success("Вход выполнен");
-      setLocation("/dashboard");
+      const selectedWorkspaceId = localStorage.getItem(WORKSPACE_SELECTOR_KEY);
+      const selectedMembership = memberships
+        .filter((entry): entry is { workspaceId: string; role: string } =>
+          !!entry && typeof entry === "object" && "workspaceId" in entry && "role" in entry
+          && typeof entry.workspaceId === "string" && typeof entry.role === "string")
+        .find((entry) => entry.workspaceId === selectedWorkspaceId || memberships.length === 1);
+      setLocation(selectedMembership?.role === "lead_manager" ? "/leads" : "/dashboard");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Не удалось войти");
     } finally {

@@ -1,4 +1,5 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
+import { assignedLeadRouteAllowed, isAssignedLeadRole } from "../../lib/crm/assigned-leads";
 import { handleSiteIntake } from "../../lib/crm/site-intake-handler";
 import { handleSiteBlog } from "../../lib/crm/site-blog";
 import { handleSiteInquiryDeletion, handleSiteInquiryDeletionPreview } from "../../lib/crm/site-inquiry-deletion";
@@ -472,6 +473,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       ...(route.authorization.roles ? { roles: route.authorization.roles } : {}),
       ...(permission ? { permission } : {}),
     });
+
+    // A newly registered browser endpoint is closed to this scoped role by default.
+    if (isAssignedLeadRole(context.role) && !assignedLeadRouteAllowed(route.key, method)) {
+      return sendJson(res, 403, { success: false, error: "Недостаточно прав", code: "insufficient_permission" });
+    }
 
     if (META_ACCOUNT_BOUND_ROUTES.has(route.key)) {
       requireMetaProvisionedWorkspace(context.workspaceId);
