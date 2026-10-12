@@ -1224,7 +1224,7 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
           <EmptyState
             icon={Inbox}
             title="Не удалось загрузить заявки"
-            description="Это сбой связи, а не пустой список: заявки на месте. Не заводите их заново — обновите страницу."
+            description="Данные недоступны: соединение или права доступа могли измениться. Не заводите их заново. Обновите страницу."
             action={
               <button type="button" className="neu-btn-primary justify-center" onClick={() => window.location.reload()}>
                 Обновить страницу

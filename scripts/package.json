@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "test:assigned-leads": "tsx --test ./src/medina-assigned-lead-collection.test.ts ./src/medina-lead-manager-ui.test.ts",
+    "test:admin-session": "tsx --test ./src/medina-admin-session.test.ts",
     "preview:crm": "node ./fixtures/crm-browser.mjs",
     "test:crm-browser-fixture": "node --import tsx --test ./fixtures/crm-browser.test.mjs",
     "preview:site-intake": "node --import tsx ./fixtures/site-intake-browser.mjs",
