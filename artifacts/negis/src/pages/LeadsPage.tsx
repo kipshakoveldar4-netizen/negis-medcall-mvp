@@ -642,7 +642,7 @@ export default function LeadsPage() {
       // Colleagues the lead can be handed to. Reference data like the two
       // above: rarely edited, and crmFetch keeps it for five minutes, so this
       // does not add a wait to every visit.
-      loadTaxonomyList({ endpoint: "/api/crm/staff", listKey: "staff", workspaceId, mapItem: staffOptionFromUnknown }),
+      loadTaxonomyList({ endpoint: "/api/crm/lead-assignees", listKey: "assignees", workspaceId, mapItem: staffOptionFromUnknown }),
     ])
       .then(([stageResult, sourceResult, staffResult]) => {
         if (cancelled) return;

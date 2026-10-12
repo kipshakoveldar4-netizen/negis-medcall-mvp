@@ -26,10 +26,11 @@ const TOKEN = "header.payload.signature";
 
 type StaffRow = { id: string; workspace_id: string; role: string; status: string };
 
-type QueryLog = { table: string; filters: Record<string, unknown>; op: string };
+type QueryLog = { table: string; filters: Record<string, unknown>; op: string; columns?: string };
+type StaffDirectoryFixture = { rows: Record<string, unknown>[]; error?: { message: string } };
 
 /** Records every table touched and every filter applied. */
-function spyClient(rows: Record<string, unknown[]>, log: QueryLog[]) {
+function spyClient(rows: Record<string, unknown[]>, log: QueryLog[], staffDirectory?: StaffDirectoryFixture) {
   return {
     from(table: string) {
       const entry: QueryLog = { table, filters: {}, op: "select" };
@@ -37,7 +38,10 @@ function spyClient(rows: Record<string, unknown[]>, log: QueryLog[]) {
       const builder: Record<string, unknown> = {};
       const chain = () => builder;
       Object.assign(builder, {
-        select: () => chain(),
+        select: (columns?: string) => {
+          if (columns === "id,full_name,status") entry.columns = columns;
+          return chain();
+        },
         insert: (row: unknown) => { entry.op = "insert"; entry.filters.__row = row; return chain(); },
         update: (row: unknown) => { entry.op = "update"; entry.filters.__row = row; return chain(); },
         upsert: (row: unknown) => { entry.op = "upsert"; entry.filters.__row = row; return chain(); },
@@ -48,9 +52,13 @@ function spyClient(rows: Record<string, unknown[]>, log: QueryLog[]) {
         maybeSingle: () => Promise.resolve({ data: (rows[table] ?? [])[0] ?? null, error: null }),
         eq(column: string, value: unknown) { entry.filters[column] = value; return chain(); },
         in(column: string, values: unknown) { entry.filters[column] = values; return chain(); },
-        then(resolve: (value: { data: unknown; error: null; count?: number }) => void) {
-          const table_rows = rows[table] ?? [];
-          resolve({ data: table_rows, error: null, count: table_rows.length });
+        then(resolve: (value: { data: unknown; error: { message: string } | null; count?: number }) => void) {
+          const directoryRead = table === "staff_users" && !("auth_user_id" in entry.filters) && staffDirectory;
+          const table_rows = directoryRead
+            ? directoryRead.rows.filter((row) => Object.entries(entry.filters).every(([key, value]) => row[key] === value))
+            : rows[table] ?? [];
+          const error = directoryRead ? directoryRead.error ?? null : null;
+          resolve({ data: error ? null : table_rows, error, count: table_rows.length });
         },
       });
       return builder;
@@ -63,6 +71,7 @@ type LoadOptions = {
   authOk?: boolean;
   authThrows?: boolean;
   rows?: Record<string, unknown[]>;
+  staffDirectory?: StaffDirectoryFixture;
 };
 
 type MockResponse = {
@@ -116,7 +125,7 @@ async function loadRouter(options: LoadOptions) {
   let crmClientCreations = 0;
   supabaseModule.setSupabaseServerClientFactoryForTests(() => {
     crmClientCreations += 1;
-    return withAppointmentCreateRpcSpy(spyClient(clientRows, log));
+    return withAppointmentCreateRpcSpy(spyClient(clientRows, log, options.staffDirectory));
   });
 
   const routerModule = (await import(pathToFileURL(routerPath).href)) as {
@@ -1299,4 +1308,139 @@ test("M2 an inactive colleague cannot be made responsible for a lead", async () 
     block.includes("CrmReferenceValidationError"),
     "the refusal must be the validation error the router turns into 400, not a raw failure",
   );
+});
+
+const leadSupervisor = { ...memberA, role: "manager" };
+const assignmentTeam = Array.from({ length: 8 }, (_, index) => ({
+  id: `10000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
+  workspace_id: WORKSPACE_A,
+  full_name: index < 6 ? `Manager ${index + 1}` : index === 6 ? "Supervisor" : "Administrator",
+  status: "active",
+  email: `fixture-${index}@example.test`,
+  auth_user_id: `auth-fixture-${index}`,
+  permissions: ["fixture-only"],
+  password_hash: "fixture-not-a-credential",
+}));
+const assignmentPeople = assignmentTeam.map((row) => ({ id: row.id, name: row.full_name }));
+const isAssigneeRead = (entry: QueryLog) => entry.table === "staff_users" && !("auth_user_id" in entry.filters);
+
+test("N1 manual assignment reads eight names without granting staff administration", async () => {
+  await withRouter({ memberships: [leadSupervisor], staffDirectory: { rows: assignmentTeam } }, async (ctx) => {
+    const administrative = await ctx.call({ segments: ["staff"] });
+    assert.equal(administrative.res.statusCode, 403);
+    const { res, log } = await ctx.call({ segments: ["lead-assignees"] });
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.mode, "supabase");
+    const data = res.body.data as Record<string, unknown>;
+    assert.deepEqual(data.assignees, assignmentPeople);
+    assert.deepEqual(data.items, assignmentPeople);
+    const query = log.find(isAssigneeRead);
+    assert.ok(query);
+    assert.equal(query.columns, "id,full_name,status");
+    assert.equal(query.filters.workspace_id, WORKSPACE_A);
+    assert.equal(query.filters.status, "active");
+    for (const item of data.assignees as Record<string, unknown>[]) {
+      assert.deepEqual(Object.keys(item).sort(), ["id", "name"]);
+    }
+    assert.ok(log.every((entry) => entry.op === "select"));
+  });
+});
+
+test("N2 assignment options exclude foreign and inactive employees and malformed IDs", async () => {
+  await withRouter({
+    memberships: [leadSupervisor],
+    staffDirectory: { rows: [
+      ...assignmentTeam,
+      { ...assignmentTeam[0], id: "20000000-0000-4000-8000-000000000001", workspace_id: WORKSPACE_B },
+      { ...assignmentTeam[0], id: "20000000-0000-4000-8000-000000000002", status: "inactive" },
+      { ...assignmentTeam[0], id: "not-a-staff-uuid" },
+    ] },
+  }, async (ctx) => {
+    const { res } = await ctx.call({ segments: ["lead-assignees"] });
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual((res.body.data as Record<string, unknown>).assignees, assignmentPeople);
+  });
+});
+
+test("N3 an anonymous caller cannot read assignment names", async () => {
+  await withRouter({ memberships: [leadSupervisor], staffDirectory: { rows: assignmentTeam } }, async (ctx) => {
+    const { res, log } = await ctx.call({ segments: ["lead-assignees"], token: null });
+    assert.equal(res.statusCode, 401);
+    assert.equal(log.length, 0);
+    assert.equal(ctx.crmClientCreations, 0);
+  });
+});
+
+test("N4 an invalid session cannot read assignment names", async () => {
+  await withRouter({ memberships: [leadSupervisor], authOk: false, staffDirectory: { rows: assignmentTeam } }, async (ctx) => {
+    const { res, log } = await ctx.call({ segments: ["lead-assignees"] });
+    assert.equal(res.statusCode, 401);
+    assert.equal(log.length, 0);
+  });
+});
+
+test("N5 browser-supplied permissions cannot open the assignment directory", async () => {
+  await withRouter({ memberships: [{ ...memberA, role: "doctor" }], staffDirectory: { rows: assignmentTeam } }, async (ctx) => {
+    const { res, log } = await ctx.call({
+      segments: ["lead-assignees"],
+      body: { role: "manager", permissions: ["manage_leads"] },
+    });
+    assert.equal(res.statusCode, 403);
+    assert.equal(log.filter(isAssigneeRead).length, 0);
+  });
+});
+
+test("N6 a foreign workspace selector is denied before reading assignment options", async () => {
+  await withRouter({ memberships: [leadSupervisor], staffDirectory: { rows: assignmentTeam } }, async (ctx) => {
+    const { res, log } = await ctx.call({ segments: ["lead-assignees"], query: { workspaceId: WORKSPACE_B } });
+    assert.equal(res.statusCode, 403);
+    assert.equal(log.filter(isAssigneeRead).length, 0);
+  });
+});
+
+test("N7 the body cannot override the server-verified assignment workspace", async () => {
+  await withRouter({ memberships: [leadSupervisor], staffDirectory: { rows: assignmentTeam } }, async (ctx) => {
+    const { res, log } = await ctx.call({
+      segments: ["lead-assignees"],
+      body: { workspaceId: WORKSPACE_B, workspace_id: WORKSPACE_B },
+    });
+    assert.equal(res.statusCode, 200);
+    assert.equal(log.find(isAssigneeRead)?.filters.workspace_id, WORKSPACE_A);
+    assert.deepEqual((res.body.data as Record<string, unknown>).assignees, assignmentPeople);
+  });
+});
+
+test("N8 the assignment directory has no write methods", async () => {
+  await withRouter({ memberships: [memberA], staffDirectory: { rows: assignmentTeam } }, async (ctx) => {
+    for (const method of ["POST", "PATCH", "PUT", "DELETE"]) {
+      const { res, log } = await ctx.call({ segments: ["lead-assignees"], method, body: { role: "owner" } });
+      assert.equal(res.statusCode, 405, method);
+      assert.equal(log.filter(isAssigneeRead).length, 0);
+      assert.ok(log.every((entry) => entry.op === "select"));
+    }
+  });
+});
+
+test("N9 an inactive supervisor cannot read names through an old valid token", async () => {
+  await withRouter({ memberships: [{ ...leadSupervisor, status: "inactive" }], staffDirectory: { rows: assignmentTeam } }, async (ctx) => {
+    const { res, log } = await ctx.call({ segments: ["lead-assignees"] });
+    assert.equal(res.statusCode, 403);
+    assert.equal(log.filter(isAssigneeRead).length, 0);
+  });
+});
+
+test("N10 a failed directory read is not reported as an empty successful list", async () => {
+  await withRouter({ memberships: [leadSupervisor], staffDirectory: { rows: assignmentTeam, error: { message: "private-fixture-diagnostic" } } }, async (ctx) => {
+    const { res } = await ctx.call({ segments: ["lead-assignees"] });
+    assert.equal(res.statusCode, 502);
+    assert.equal(res.body.success, false);
+    assert.ok(!JSON.stringify(res.body).includes("private-fixture-diagnostic"));
+    assert.equal(res.body.data, undefined);
+  });
+});
+
+test("N11 the lead form uses the minimal directory, not staff administration", async () => {
+  const source = await readFile(path.join(negisSrc, "pages", "LeadsPage.tsx"), "utf8");
+  assert.ok(source.includes('endpoint: "/api/crm/lead-assignees", listKey: "assignees"'));
+  assert.ok(!source.includes('endpoint: "/api/crm/staff"'));
 });

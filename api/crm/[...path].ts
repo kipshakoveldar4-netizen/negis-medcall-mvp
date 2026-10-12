@@ -16,6 +16,7 @@ import {
   handleCrmAuthContext,
   handleCrmHealth,
   handleCrmResource,
+  handleLeadAssignees,
   handleMetaCityKey,
   handleMetaCampaignInsights,
   handleMetaInsightsBackgroundCycle,
@@ -299,6 +300,8 @@ async function dispatch(
       return handleStorageHealth(req, res);
     case "meta-launch":
       return handleMetaLaunch(req, res);
+    case "lead-assignees":
+      return handleLeadAssignees(req, res);
     case "meta-status":
       return handleMetaStatus(req, res);
     case "meta-validate":
