@@ -80,7 +80,9 @@ export function MobileNav() {
   const terms = termsFor(vertical);
 
   const canUse = (item: MobileNavItem) =>
-    userRole === "owner" || userRole === "manager" || userRole === "admin" || Boolean(rolePermissions[item.permission]);
+    userRole === "lead_manager"
+      ? item.href === "/leads"
+      : userRole === "owner" || userRole === "manager" || userRole === "admin" || Boolean(rolePermissions[item.permission]);
   const visiblePrimary = primaryItems.filter(canUse);
   const visibleDrawer = drawerItems.filter(canUse);
   const moreActive = visibleDrawer.some((item) => isActive(location, item.href));

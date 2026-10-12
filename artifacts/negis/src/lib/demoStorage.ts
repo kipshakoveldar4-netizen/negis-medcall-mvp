@@ -9,6 +9,13 @@ type ApiCollectionOptions<TItem extends { id: string }> = {
   toApi?: (item: TItem) => Record<string, unknown>;
   patchToApi?: (patch: Partial<TItem>) => Record<string, unknown>;
   fromApi?: (item: unknown) => TItem;
+  // Opt-in for assigned-only leads: never reuse a workspace-wide cached list.
+  strictAccess?: {
+    actorId: string;
+    workspaceId: string;
+    isCurrent: () => boolean;
+    request: (path: string, init?: RequestInit) => Promise<Response>;
+  };
 };
 
 type ApiResponse<TData> =
@@ -191,6 +198,7 @@ export function useDemoCollection<TItem extends { id: string }>(
     toApi,
     patchToApi,
     fromApi,
+    strictAccess,
   } = stable;
 
   // Selection-2: which clinic this collection belongs to, read on every render
@@ -202,22 +210,24 @@ export function useDemoCollection<TItem extends { id: string }>(
   // cleared — so a stale list never reached the screen. That is a property of a
   // component two files away, and not something this hook should be relying on
   // to keep one clinic's records off another clinic's page.
-  const workspaceId = readWorkspaceId();
+  const workspaceId = strictAccess?.workspaceId ?? readWorkspaceId();
+  const isCurrent = () => !strictAccess || strictAccess.isCurrent();
+  const request = strictAccess?.request ?? crmFetch;
 
   // Production = UUID workspace with an API-backed collection: never render demo
   // seeds, never read/write the negis_demo_* localStorage cache, and never fall
   // back to demo data. Demo workspaces keep the original behavior untouched.
-  const [productionMode] = useState(() => Boolean(endpoint) && isRealWorkspace());
+  const [productionMode] = useState(() => Boolean(strictAccess) || (Boolean(endpoint) && isRealWorkspace()));
   const [items, setItems] = useState<TItem[]>(() => {
     if (!productionMode) return stable.seed;
-    const cached = endpoint ? readFreshListCache(endpoint, workspaceId) : null;
+    const cached = endpoint && !strictAccess ? readFreshListCache(endpoint, workspaceId) : null;
     if (!cached) return [];
     return cached.map((row) => (fromApi ? fromApi(row) : (row as TItem)));
   });
   // loaded: demo mode is ready immediately; production paints a fresh cached
   // read at once and refreshes behind it, or waits for the first API settle.
   const [loaded, setLoaded] = useState(
-    () => !productionMode || (Boolean(endpoint) && readFreshListCache(endpoint as string, workspaceId) !== null),
+    () => !productionMode || (!strictAccess && Boolean(endpoint) && readFreshListCache(endpoint as string, workspaceId) !== null),
   );
   // A failed production read was the last silent failure left: the server has
   // answered 502 since the failure-honesty change, but this hook dropped the
@@ -230,6 +240,8 @@ export function useDemoCollection<TItem extends { id: string }>(
     // Demo mode owns its localStorage copy: an unreachable API is the normal
     // state there, not a failure worth announcing.
     if (!productionMode) return;
+    if (!isCurrent()) return;
+    if (strictAccess) setItems([]);
     setLoadError(true);
     // One toast per page, not one per collection — several lists load at once
     // and sonner dedupes by id.
@@ -258,10 +270,10 @@ export function useDemoCollection<TItem extends { id: string }>(
 
     const loadFromApi = async () => {
       try {
-        const response = await crmFetch(`${endpoint}?workspaceId=${encodeURIComponent(workspaceId)}`);
+        const response = await request(`${endpoint}?workspaceId=${encodeURIComponent(workspaceId)}`);
         const body = await safeJson<Record<string, unknown>>(response);
 
-        if (cancelled) return;
+        if (cancelled || !isCurrent()) return;
 
         if (!response.ok || body?.success !== true || body.mode !== "supabase") {
           // Production stays empty — no demo fallback — but no longer silent.
@@ -270,11 +282,11 @@ export function useDemoCollection<TItem extends { id: string }>(
         }
 
         const rawItems = body.data[listKey];
-        if (!Array.isArray(rawItems)) return;
+        if (!Array.isArray(rawItems)) { if (strictAccess) reportLoadFailure(); return; }
 
         // Only a confirmed supabase answer is worth remembering; the raw rows
         // go in so every consumer keeps applying its own fromApi.
-        if (productionMode) {
+        if (productionMode && !strictAccess) {
           listReadCache.set(listCacheKey(endpoint, workspaceId), { rows: rawItems, at: Date.now() });
         }
 
@@ -285,9 +297,9 @@ export function useDemoCollection<TItem extends { id: string }>(
         if (!productionMode) writeDemoStorage(key, mapped);
       } catch {
         // Demo keeps localStorage seed/data as the offline fallback.
-        if (!cancelled) reportLoadFailure();
+        if (!cancelled && isCurrent()) reportLoadFailure();
       } finally {
-        if (!cancelled) setLoaded(true);
+        if (!cancelled && isCurrent()) setLoaded(true);
       }
     };
 
@@ -317,16 +329,20 @@ export function useDemoCollection<TItem extends { id: string }>(
    */
   const revertWrite = (restore: (current: TItem[]) => TItem[]) => {
     if (!productionMode) return;
-    setStoredItems(restore);
+    if (!isCurrent()) return;
+    if (strictAccess) setLoadError(true);
+    setStoredItems(strictAccess ? [] : restore);
     toast.error("Не удалось сохранить. Изменение отменено, повторите попытку.");
   };
 
   const setStoredItems = (next: TItem[] | ((current: TItem[]) => TItem[])) => {
+    if (!isCurrent()) return;
     // Any local write makes the cached read stale — including a rollback, whose
     // outcome the cache has no way to know. The next mount fetches fresh rather
     // than briefly resurrecting a list from before the write.
     if (productionMode && endpoint) listReadCache.delete(listCacheKey(endpoint, workspaceId));
     setItems((current) => {
+      if (!isCurrent()) return strictAccess ? [] : current;
       const value = typeof next === "function" ? next(current) : next;
       if (!productionMode) writeDemoStorage(key, value);
       return value;
@@ -343,6 +359,7 @@ export function useDemoCollection<TItem extends { id: string }>(
    * открытой. Прежние вызывающие без await продолжают работать как раньше.
    */
   const addItem = (item: TItem): Promise<boolean> => {
+    if (strictAccess) return Promise.resolve(false);
     setStoredItems((current) => [item, ...current]);
 
     // Демо-режим: localStorage и есть запись, отказу неоткуда взяться.
@@ -386,6 +403,7 @@ export function useDemoCollection<TItem extends { id: string }>(
 
   /** Возвращает, ПРИНЯЛ ли сервер правку — см. addItem. */
   const updateItem = (id: string, patch: Partial<TItem>): Promise<boolean> => {
+    if (!isCurrent()) return Promise.resolve(false);
     // Captured from this render rather than from inside the updater, so the
     // rollback does not depend on when React runs it.
     const previous = items.find((entry) => entry.id === id);
@@ -398,23 +416,30 @@ export function useDemoCollection<TItem extends { id: string }>(
 
     return (async () => {
       try {
-        const workspaceId = readWorkspaceId();
+        const targetWorkspaceId = strictAccess?.workspaceId ?? readWorkspaceId();
         // Тот же селектор в адресе, что и у чтения — см. addItem.
-        const response = await crmFetch(`${endpoint}?workspaceId=${encodeURIComponent(workspaceId)}`, {
+        const response = await request(`${endpoint}?workspaceId=${encodeURIComponent(targetWorkspaceId)}`, {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             id,
-            workspaceId,
+            workspaceId: targetWorkspaceId,
             updates: patchToApi ? patchToApi(patch) : patch,
           }),
         });
         const body = await safeJson<Record<string, unknown>>(response);
+        if (!isCurrent()) return false;
         // The patch used to be posted and forgotten, so a refused update looked
         // identical to an accepted one.
         if (!response.ok || body?.success !== true || body.mode !== "supabase") {
           revertWrite(restore);
           return false;
+        }
+        if (strictAccess) {
+          const rawItem = body.data[itemKey];
+          if (!rawItem) { revertWrite(restore); return false; }
+          const savedItem = fromApi ? fromApi(rawItem) : (rawItem as TItem);
+          setStoredItems((current) => current.map((entry) => entry.id === id ? savedItem : entry));
         }
         return true;
       } catch {

@@ -167,5 +167,6 @@ export function staffRoleLabels(vertical: Vertical): Record<string, string> {
     marketer: "Маркетолог",
     doctor: capitalize(terms.specialist),
     manager: "Менеджер",
+    lead_manager: "Менеджер заявок",
   };
 }

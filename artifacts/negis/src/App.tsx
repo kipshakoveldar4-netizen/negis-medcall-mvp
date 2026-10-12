@@ -136,7 +136,8 @@ const ROUTE_PERMISSIONS: Record<string, string> = {
   '/studio': 'ads',
 };
 
-function firstAllowedRoute(rolePermissions: Record<string, boolean>) {
+function firstAllowedRoute(rolePermissions: Record<string, boolean>, userRole: string | null = null) {
+  if (userRole === 'lead_manager') return '/leads';
   const first = Object.entries(ROUTE_PERMISSIONS).find(([, permission]) => rolePermissions[permission]);
   return first?.[0] ?? '/';
 }
@@ -189,12 +190,14 @@ function ProtectedPage({
   demoFallbackTitle?: string;
 }) {
   const { isLoading, userRole, rolePermissions, isDemoMode } = useAuth();
-  const [, setLocation] = useLocation();
-  const allowed = userRole === 'owner' || userRole === 'manager' || !!rolePermissions[permission];
+  const [location, setLocation] = useLocation();
+  const allowed = userRole === 'lead_manager'
+    ? permission === 'crm' && location === '/leads'
+    : userRole === 'owner' || userRole === 'manager' || !!rolePermissions[permission];
 
   useEffect(() => {
-    if (!isLoading && !allowed) setLocation(firstAllowedRoute(rolePermissions));
-  }, [allowed, isLoading, rolePermissions, setLocation]);
+    if (!isLoading && !allowed) setLocation(firstAllowedRoute(rolePermissions, userRole));
+  }, [allowed, isLoading, rolePermissions, userRole, setLocation]);
 
   if (isLoading || !allowed) return null;
   if (isDemoMode && demoFallbackTitle) return <DemoPlaceholder title={demoFallbackTitle} />;

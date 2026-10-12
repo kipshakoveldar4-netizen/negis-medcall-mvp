@@ -5,6 +5,7 @@ import { extractJsonObject, generateText, resolveTextProvider } from "../ai/text
 import { normalizeAdvertisingContentApproval } from "../advertising/campaignBrief";
 import { normalizePhone } from "./phone";
 import { arrivalPaymentError } from "./arrival-payment";
+import { assignedLeadPatch, assignedLeadRouteAllowed, isAssignedLeadRole } from "./assigned-leads";
 import { normalizeAppointmentServices, readAppointmentServices, summarizeAppointmentServices } from "./appointment-services";
 import { hidesClientContacts, redactContacts, redactContactsList, stripContactWrites } from "./contact-privacy";
 import { isEmptyIdentity, rowBelongsTo, rowTargetsOnlySelf, seesOnlyOwnWork, type OwnWorkIdentity } from "./own-work";
@@ -10374,7 +10375,7 @@ export async function handleLeadAssignees(req: VercelRequest, res: VercelRespons
     return sendJson(res, 405, errorBody("Method not allowed", ["Use GET"]));
   }
   const context = readWorkspaceContext(req);
-  if (!context || !isUuid(context.workspaceId) || !context.permissions.includes("manage_leads")) {
+  if (!context || isAssignedLeadRole(context.role) || !isUuid(context.workspaceId) || !context.permissions.includes("manage_leads")) {
     return sendJson(res, 403, { success: false, error: "Access denied", code: "workspace_access_denied" });
   }
 
@@ -10402,7 +10403,67 @@ export async function handleLeadAssignees(req: VercelRequest, res: VercelRespons
   }
 }
 
+async function handleAssignedLeads(req: VercelRequest, res: VercelResponse) {
+  const context = readWorkspaceContext(req);
+  if (!context || !isAssignedLeadRole(context.role) || !isUuid(context.workspaceId)
+    || !isUuid(context.staffUserId) || !isUuid(context.userId)) {
+    return sendJson(res, 403, { success: false, error: "Недостаточно прав", code: "workspace_access_denied" });
+  }
+  const body = asRecord(req.body);
+  const id = firstString(body.id, readQueryString(req.query.id));
+  let patch: JsonRecord | null = null;
+  if (req.method === "PATCH") {
+    if (!isUuid(id)) return sendJson(res, 400, errorBody("Некорректная заявка"));
+    const rawPatch = Object.prototype.hasOwnProperty.call(body, "updates")
+      ? asRecord(body.updates)
+      : Object.fromEntries(Object.entries(body).filter(([key]) => key !== "id" && key !== "workspaceId"));
+    patch = assignedLeadPatch(rawPatch);
+    if (!patch) return sendJson(res, 400, errorBody("Эти поля заявки недоступны для изменения"));
+  }
+  const supabase = getSupabaseServerClient();
+  if (!supabase) return sendJson(res, 503, errorBody("Хранилище не настроено"));
+  const params = {
+    p_workspace_id: context.workspaceId,
+    p_staff_user_id: context.staffUserId,
+    p_auth_user_id: context.userId,
+  };
+  try {
+    // No generic service-role SELECT/UPDATE or demo/column-lag fallback for this role.
+    const { data, error } = req.method === "GET"
+      ? await supabase.rpc("read_assigned_crm_leads", params)
+      : await supabase.rpc("patch_assigned_crm_lead", { ...params, p_lead_id: id, p_patch: patch });
+    if (error) {
+      if (error.code === "P6901") return sendJson(res, 403, { success: false, error: "Доступ отозван", code: "workspace_access_denied" });
+      if (error.code === "P6902") return sendJson(res, 404, { success: false, error: "Заявка недоступна", code: "resource_not_found" });
+      if (error.code === "P6903") return sendJson(res, 400, errorBody("Не удалось принять изменения заявки"));
+      return sendJson(res, 502, errorBody("Не удалось выполнить запрос заявок"));
+    }
+    if (req.method === "GET") {
+      if (!Array.isArray(data)) return sendJson(res, 502, errorBody("Не удалось загрузить заявки"));
+      const items = data.map((row) => configs.leads.fromRow(asRecord(row)));
+      return sendJson(res, 200, success("supabase", { leads: items, items }));
+    }
+    const result = asRecord(data);
+    const saved = asRecord(result.item);
+    if (saved.id !== id || saved.responsible_user_id !== context.staffUserId) {
+      return sendJson(res, 502, errorBody("Не удалось подтвердить сохранение заявки"));
+    }
+    await recordCrmChange({ supabase, workspaceId: context.workspaceId, entity: "lead", entityId: id,
+      action: "updated", changes: diffForJournal("lead", asRecord(result.before), saved), ...journalActor(req) });
+    const item = configs.leads.fromRow(saved);
+    return sendJson(res, 200, success("supabase", { item }));
+  } catch {
+    return sendJson(res, 502, errorBody("Не удалось выполнить запрос заявок"));
+  }
+}
+
 export async function handleCrmResource(resource: CrmResource, req: VercelRequest, res: VercelResponse) {
+  if (isAssignedLeadRole(readWorkspaceContext(req)?.role)) {
+    if (!assignedLeadRouteAllowed(resource, req.method ?? "")) {
+      return sendJson(res, 403, { success: false, error: "Недостаточно прав", code: "insufficient_permission" });
+    }
+    if (resource === "leads") return handleAssignedLeads(req, res);
+  }
   if (req.method === "GET") {
     return listItems(resource, req, res);
   }

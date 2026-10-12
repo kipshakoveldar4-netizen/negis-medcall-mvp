@@ -209,7 +209,9 @@ test("J9 миграция 038 по правилу паритета, и прим�
   const { staffRoles } = (await import(
     pathToFileURL(path.join(repoRoot, "lib", "auth", "permissions.ts")).href
   )) as { staffRoles: readonly string[] };
-  const constrained = (migration.match(/granted_role in \(([^)]*)\)/) ?? [])[1] ?? "";
+  const forward = await readFile(path.join(repoRoot, "migrations/069_assigned_lead_manager.sql"), "utf8");
+  assert.ok(forward.includes("alter table public.staff_join_requests add constraint staff_join_requests_role_check"));
+  const constrained = (forward.match(/granted_role in \(([^)]*)\)/) ?? [])[1] ?? "";
   const allowed = constrained.split(",").map((part) => part.trim().replace(/'/g, "")).filter(Boolean);
   assert.deepEqual(
     [...allowed].sort(),

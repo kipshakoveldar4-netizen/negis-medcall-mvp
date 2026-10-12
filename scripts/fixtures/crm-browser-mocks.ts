@@ -1,6 +1,7 @@
 import { createBookingRetryFixture } from "./booking-retry";
 const retryFixture = new URLSearchParams(window.location?.search || "").get("bookingRetry") === "lost-response"
   ? createBookingRetryFixture() : null;
+const assignedLeadFixture = new URLSearchParams(window.location?.search || "").get("fixtureRole") === "lead_manager";
 const workspaceId = "00000000-0000-4000-8000-000000000001";
 const clientId = "00000000-0000-4000-8000-000000000002";
 const doctorId = "00000000-0000-4000-8000-000000000003";
@@ -31,8 +32,10 @@ export const verifyCurrentPassword = async () => false;
 const auth = {
   session: { user: { id: "fixture-user" } }, isLoading: false, isDemoMode: false, isStaffMode: false, isImpersonation: false,
   user: { id: "fixture-user", email: "test@example.invalid", user_metadata: { full_name: "Тестовый владелец" } },
-  userRole: "owner", vertical: "beauty", clinicId: workspaceId, availableWorkspaces: [],
-  rolePermissions: { booking: true, clients: true, leads: true, sales: true, tasks: true, dashboard: true, admin: true },
+  userRole: assignedLeadFixture ? "lead_manager" : "owner", vertical: "beauty", clinicId: workspaceId, availableWorkspaces: [],
+  rolePermissions: assignedLeadFixture
+    ? { crm: true, booking: false, clients: false, leads: true, sales: false, tasks: false, dashboard: false, admin: false }
+    : { booking: true, clients: true, leads: true, sales: true, tasks: true, dashboard: true, admin: true },
   signOut: async () => {}, clearWorkspaceSelection() {},
 };
 export const useAuth = () => auth;
@@ -52,6 +55,9 @@ export async function crmFetch(input: string, init?: RequestInit): Promise<Respo
   }
   if (init?.method && init.method !== "GET") return Response.json({ success: false, error: "Изменения отключены на стенде" }, { status: 403 });
   const resource = url.pathname.split("/").at(-1) || "";
+  if (assignedLeadFixture && !["leads", "lead-stages", "lead-sources"].includes(resource)) {
+    return Response.json({ success: false, error: "Доступ закрыт на изолированном стенде" }, { status: 403 });
+  }
   let items = lists[resource] || [];
   if (resource === "clients" && url.searchParams.has("search")) {
     const query = url.searchParams.get("search")!.toLocaleLowerCase("ru");
