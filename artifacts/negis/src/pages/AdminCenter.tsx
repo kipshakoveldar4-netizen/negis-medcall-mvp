@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation } from "wouter";
 import { PlanCalculator } from "@/components/admin/PlanCalculator";
 import { ClinicOperators } from "@/components/admin/ClinicOperators";
@@ -41,11 +41,12 @@ import { MetricCard } from "@/components/ui/metric-card";
 import { WhatsAppChannels } from "@/components/admin/WhatsAppChannels";
 import { DoctorSchedule } from "@/components/admin/DoctorSchedule";
 import { useAuth } from "@/contexts/AuthContext";
-import { apiUrl, crmFetch, CrmApiError, crmErrorMessage } from "@/lib/api";
+import { apiUrl, crmFetch as sendCrmFetch, CrmApiError, crmErrorMessage } from "@/lib/api";
 import { formatJoinCode } from "../../../../lib/crm/join-codes";
 import { loginFromEmail, loginFromFullName, normalizeLogin } from "../../../../lib/auth/staff-logins";
 import { readWorkspaceId, workspaceScopedKey } from "@/lib/demoStorage";
 import { getSupabaseAccessToken } from "@/lib/serverAuth";
+import { hasSupabaseFrontendEnv, supabase } from "@/lib/supabase";
 import {
   canAssignRole,
   permissionLabels,
@@ -126,9 +127,9 @@ type ApiResponse<T> = {
 };
 
 type AdminAuthContextData = {
-  workspaceId: string;
-  role: "owner" | "admin";
-  staffUserId: string;
+  workspaceId: string | null;
+  role: string | null;
+  staffUserId: string | null;
   isAdmin: boolean;
 };
 
@@ -672,7 +673,7 @@ function hasMetaFormValues(account: MetaAccount): boolean {
   );
 }
 
-async function safeJson<T>(response: globalThis.Response): Promise<ApiResponse<T>> {
+async function parseApiResponse<T>(response: globalThis.Response): Promise<ApiResponse<T>> {
   const text = await response.text();
   if (!text.trim()) return {};
   try {
@@ -689,48 +690,8 @@ async function safeJson<T>(response: globalThis.Response): Promise<ApiResponse<T
 // Security-2D: Content Studio is authenticated now, and the workspace travels as
 // a query selector the server verifies against the caller's membership — never
 // as a field in the body.
-function withWorkspace(path: string): string {
-  const workspaceId = readWorkspaceId();
+function withWorkspace(path: string, workspaceId: string): string {
   return `${path}${path.includes("?") ? "&" : "?"}workspaceId=${encodeURIComponent(workspaceId)}`;
-}
-
-// Security-2B: same reason as AdsAutomation — the token belongs to crmFetch,
-// not to each call site. adminCrmRequest below stays separate because it also
-// refuses to run at all without a session.
-async function crmRequest<T>(path: string, init?: globalThis.RequestInit): Promise<ApiResponse<T>> {
-  const response = await crmFetch(path, init);
-  const body = await safeJson<T>(response);
-  if (!response.ok || body.success === false) {
-    // CrmApiError, а не голый Error: код отказа — единственное, по чему экран
-    // может сказать «отзовите приглашение в списке ниже» вместо «не удалось».
-    // Сообщение остаётся прежним, поэтому вызывающие, печатающие error.message,
-    // ничего не теряют.
-    const code = typeof (body as { code?: unknown }).code === "string" ? (body as { code: string }).code : "request_failed";
-    throw new CrmApiError(response.status, code, body.error || body.details?.join(", ") || `HTTP ${response.status}`);
-  }
-  return body;
-}
-
-async function adminCrmRequest<T>(
-  path: string,
-  init?: {
-    method?: string;
-    headers?: Record<string, string>;
-    body?: string;
-    signal?: AbortSignal;
-  },
-): Promise<ApiResponse<T>> {
-  // The session is checked up front so the operator gets this message rather
-  // than a bare 401; crmFetch then resolves and attaches the token itself.
-  const accessToken = await getSupabaseAccessToken();
-  if (!accessToken) throw new Error("Нужно войти заново для защищённой синхронизации.");
-
-  const response = await crmFetch(path, { ...init, accessToken });
-  const body = await safeJson<T>(response);
-  if (!response.ok || body.success !== true) {
-    throw new Error(body.details?.[0] || body.error || `HTTP ${response.status}`);
-  }
-  return body;
 }
 
 function localIsoDateOffset(days: number): string {
@@ -850,14 +811,177 @@ function permissionSummary(permissions: CrmPermission[]) {
 }
 
 export default function AdminCenter() {
+  const { clinicId, user, userRole, isDemoMode } = useAuth();
+  const actorId = user?.id || "";
+  const workspaceId = clinicId || readWorkspaceId();
+  const observedActorRef = useRef(actorId);
+  const [authEpoch, setAuthEpoch] = useState(0);
+  useLayoutEffect(() => {
+    if (!hasSupabaseFrontendEnv) return;
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      const nextActorId = nextSession?.user.id || "";
+      if (observedActorRef.current === nextActorId) return;
+      observedActorRef.current = nextActorId;
+      // Raw transitions must invalidate even when React batches A -> B -> A.
+      setAuthEpoch((epoch) => epoch + 1);
+    });
+    return () => subscription.unsubscribe();
+  }, []);
+  return <AdminCenterSession key={JSON.stringify([actorId, workspaceId, userRole, isDemoMode, authEpoch])}
+    actorId={actorId} workspaceId={workspaceId} userRole={userRole} isDemoMode={isDemoMode} />;
+}
+
+type AdminSessionAccess = {
+  actorId: string;
+  workspaceId: string;
+  isCurrent: () => boolean;
+  assertCurrent: () => void;
+  request: typeof sendCrmFetch;
+  releaseResponse: (response: globalThis.Response) => void;
+};
+
+function AdminCenterSession({ actorId, workspaceId, userRole, isDemoMode }: {
+  actorId: string;
+  workspaceId: string;
+  userRole: ReturnType<typeof useAuth>["userRole"];
+  isDemoMode: boolean;
+}) {
+  const auth = useAuth();
+  const sessionRef = useRef<AbortController | null>(null);
+  const liveScopeRef = useRef({ actorId, workspaceId, userRole, isDemoMode });
+  liveScopeRef.current = {
+    actorId: auth.user?.id || "",
+    workspaceId: auth.clinicId || readWorkspaceId(),
+    userRole: auth.userRole,
+    isDemoMode: auth.isDemoMode,
+  };
+  const [lifetime, setLifetime] = useState<{ controller: AbortController; epoch: number } | null>(null);
+  useLayoutEffect(() => {
+    const controller = new AbortController();
+    sessionRef.current = controller;
+    // Content captures one controller, including across StrictMode setup replay.
+    setLifetime((current) => ({ controller, epoch: (current?.epoch ?? 0) + 1 }));
+    const subscription = hasSupabaseFrontendEnv && !isDemoMode
+      ? supabase.auth.onAuthStateChange((_event, nextSession) => {
+          if ((nextSession?.user.id || "") !== actorId) controller.abort();
+        }).data.subscription
+      : null;
+    return () => {
+      controller.abort();
+      subscription?.unsubscribe();
+      if (sessionRef.current === controller) sessionRef.current = null;
+    };
+  }, []);
+
+  if (!lifetime) return null;
+  const { controller } = lifetime;
+  // Rendering local/demo fixtures does not require a real SDK actor or env.
+  const isCurrent = () => liveScopeRef.current.actorId === actorId
+    && liveScopeRef.current.workspaceId === workspaceId && liveScopeRef.current.userRole === userRole
+    && liveScopeRef.current.isDemoMode === isDemoMode
+    && sessionRef.current === controller && !controller.signal.aborted;
+  const assertCurrent = () => {
+    if (!isCurrent()) throw new DOMException("Admin session ended", "AbortError");
+  };
+  const responseCleanups = new WeakMap<globalThis.Response, () => void>();
+  const releaseResponse = (response: globalThis.Response) => {
+    responseCleanups.get(response)?.();
+    responseCleanups.delete(response);
+  };
+  const request: typeof sendCrmFetch = async (path, init = {}) => {
+    assertCurrent();
+    if (!actorId) throw new CrmApiError(401, "authentication_required", "Authentication required");
+    const callerSignal = init.signal;
+    const requestController = callerSignal ? new AbortController() : controller;
+    const signal = requestController.signal;
+    const cleanup = () => {
+      controller.signal.removeEventListener("abort", abort);
+      callerSignal?.removeEventListener("abort", abort);
+    };
+    const abort = () => {
+      requestController.abort();
+      cleanup();
+    };
+    if (callerSignal) {
+      controller.signal.addEventListener("abort", abort, { once: true });
+      callerSignal.addEventListener("abort", abort, { once: true });
+      if (controller.signal.aborted || callerSignal.aborted) abort();
+    }
+    try {
+      if (signal.aborted) throw new DOMException("Admin request cancelled", "AbortError");
+      const response = await sendCrmFetch(path, { ...init, cache: "no-store", expectedUserId: actorId, signal });
+      assertCurrent();
+      if (signal.aborted) throw new DOMException("Admin request cancelled", "AbortError");
+      // Keep both cancellations attached until safeJson consumes the body.
+      if (callerSignal) responseCleanups.set(response, cleanup);
+      return response;
+    } catch (error) {
+      cleanup();
+      throw error;
+    }
+  };
+  return <AdminCenterContent key={lifetime.epoch} access={{ actorId, workspaceId, isCurrent, assertCurrent, request, releaseResponse }} />;
+}
+
+function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
   const [, setLocation] = useLocation();
-  const { clinicId, user, vertical } = useAuth();
+  const { user, vertical } = useAuth();
+  const workspaceId = access.workspaceId;
+  const crmFetch = access.request;
+
+  async function safeJson<T>(response: globalThis.Response): Promise<ApiResponse<T>> {
+    try {
+      access.assertCurrent();
+      const body = await parseApiResponse<T>(response);
+      access.assertCurrent();
+      return body;
+    } finally {
+      access.releaseResponse(response);
+    }
+  }
+
+  async function sessionAccessToken() {
+    access.assertCurrent();
+    if (!access.actorId) return "";
+    const token = await getSupabaseAccessToken(access.actorId);
+    access.assertCurrent();
+    return token;
+  }
+
+  async function crmRequest<T>(path: string, init?: globalThis.RequestInit): Promise<ApiResponse<T>> {
+    access.assertCurrent();
+    const response = await crmFetch(path, init);
+    access.assertCurrent();
+    const body = await safeJson<T>(response);
+    access.assertCurrent();
+    if (init?.signal?.aborted) throw new DOMException("Admin request cancelled", "AbortError");
+    if (!response.ok || body.success === false) {
+      const code = typeof (body as { code?: unknown }).code === "string" ? (body as { code: string }).code : "request_failed";
+      throw new CrmApiError(response.status, code, body.error || body.details?.join(", ") || `HTTP ${response.status}`);
+    }
+    return body;
+  }
+
+  async function adminCrmRequest<T>(path: string, init?: globalThis.RequestInit): Promise<ApiResponse<T>> {
+    access.assertCurrent();
+    const accessToken = await sessionAccessToken();
+    access.assertCurrent();
+    if (!accessToken) throw new Error("Нужно войти заново для защищённой синхронизации.");
+    const response = await crmFetch(path, { ...init, accessToken });
+    access.assertCurrent();
+    const body = await safeJson<T>(response);
+    access.assertCurrent();
+    if (init?.signal?.aborted) throw new DOMException("Admin request cancelled", "AbortError");
+    if (!response.ok || body.success !== true) {
+      throw new Error(body.details?.[0] || body.error || `HTTP ${response.status}`);
+    }
+    return body;
+  }
   // Подпись вкладки исполнителей зависит от ниши: у клиники «Врачи», у салона
   // «Мастера». Ключ вкладки остаётся doctors — переименовывать его значило бы
   // трогать реестры, а не слово на кнопке.
   const tabLabel = (tab: { id: AdminTab; label: string }) =>
     tab.id === "doctors" ? capitalize(termsFor(vertical).specialistPlural) : tab.label;
-  const workspaceId = clinicId || readWorkspaceId();
   // «Врач» в клинике и «Мастер» в салоне: роль в базе одна, слово на экране —
   // из словаря ниши. Владелец салона: «нет должности мастеров».
   const roleTitles = staffRoleLabels(vertical);
@@ -966,9 +1090,12 @@ export default function AdminCenter() {
     [metaInsightsRows],
   );
 
-  const setBusy = (key: string, value: boolean) => setLoading((current) => ({ ...current, [key]: value }));
+  const setBusy = (key: string, value: boolean) => {
+    if (access.isCurrent()) setLoading((current) => ({ ...current, [key]: value }));
+  };
 
   async function checkServerAdminAccess() {
+    if (!access.isCurrent()) return;
     setServerAdminAuth({ status: "checking" });
 
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(workspaceId)) {
@@ -977,7 +1104,8 @@ export default function AdminCenter() {
     }
 
     try {
-      const accessToken = await getSupabaseAccessToken();
+      const accessToken = await sessionAccessToken();
+      if (!access.isCurrent()) return;
       if (!accessToken) {
         setServerAdminAuth({ status: "reauth" });
         return;
@@ -987,6 +1115,7 @@ export default function AdminCenter() {
         headers: { Authorization: `Bearer ${accessToken}` },
       });
       const body = await safeJson<AdminAuthContextData>(response);
+      if (!access.isCurrent()) return;
 
       if (response.status === 401) {
         setServerAdminAuth({ status: "reauth" });
@@ -996,13 +1125,27 @@ export default function AdminCenter() {
         setServerAdminAuth({ status: "forbidden" });
         return;
       }
-      if (!response.ok || body.success !== true || !body.data?.isAdmin) {
+      const data = body.data;
+      const selected = data && data.workspaceId === workspaceId
+        && typeof data.role === "string" && Boolean(data.role)
+        && typeof data.staffUserId === "string" && Boolean(data.staffUserId);
+      const unselected = data && data.workspaceId === null && data.role === null && data.staffUserId === null;
+      if (!response.ok || body.success !== true || !data || typeof data.isAdmin !== "boolean"
+        || (!selected && !unselected)) {
         setServerAdminAuth({ status: "unavailable" });
         return;
       }
-
-      setServerAdminAuth({ status: "confirmed", role: body.data.role, staffUserId: body.data.staffUserId });
+      if (data.isAdmin === false) {
+        setServerAdminAuth({ status: "forbidden" });
+        return;
+      }
+      if (!selected || (data.role !== "owner" && data.role !== "admin") || !data.staffUserId) {
+        setServerAdminAuth({ status: "unavailable" });
+        return;
+      }
+      setServerAdminAuth({ status: "confirmed", role: data.role, staffUserId: data.staffUserId });
     } catch {
+      if (!access.isCurrent()) return;
       setServerAdminAuth({ status: "unavailable" });
     }
   }
@@ -1032,6 +1175,7 @@ export default function AdminCenter() {
   }
 
   async function loadMetaInsightsDiagnostics() {
+    if (!access.isCurrent()) return;
     if (serverAdminAuth.status !== "confirmed") return;
     setBusy("meta-insights-load", true);
     setMetaInsightsMessage("");
@@ -1047,6 +1191,7 @@ export default function AdminCenter() {
           `/api/crm/meta-campaign-insights?workspaceId=${encodeURIComponent(workspaceId)}`,
         ),
       ]);
+      if (!access.isCurrent()) return;
       if (
         launchesBody.mode !== "supabase" ||
         runsBody.mode !== "supabase" ||
@@ -1063,6 +1208,7 @@ export default function AdminCenter() {
       setMetaInsightsLastRun(runsBody.data?.runs?.[0] || null);
       setMetaInsightsRows(insightsBody.data?.insights || []);
     } catch (error) {
+      if (!access.isCurrent()) return;
       setMetaInsightsMessage(error instanceof Error ? error.message : "Не удалось загрузить диагностику Insights.");
     } finally {
       setBusy("meta-insights-load", false);
@@ -1070,6 +1216,7 @@ export default function AdminCenter() {
   }
 
   async function synchronizeMetaInsights() {
+    if (!access.isCurrent()) return;
     if (serverAdminAuth.status !== "confirmed") {
       setMetaInsightsMessage("Сначала подтвердите админ-доступ.");
       return;
@@ -1092,6 +1239,7 @@ export default function AdminCenter() {
           dateStop: metaInsightsDateStop,
         }),
       });
+      if (!access.isCurrent()) return;
       if (body.mode !== "supabase" || !body.data?.run) {
         throw new Error("Синхронизация не вернула подтверждённый Supabase run.");
       }
@@ -1100,12 +1248,15 @@ export default function AdminCenter() {
           ? "Синхронизация завершена: Meta не вернула дневные строки за выбранный период."
           : `Синхронизация завершена. Сохранено строк: ${body.data.rowsUpserted}.`;
       await loadMetaInsightsDiagnostics();
+      if (!access.isCurrent()) return;
       setMetaInsightsMessage(successMessage);
       toast.success("Meta Insights синхронизированы");
     } catch (error) {
+      if (!access.isCurrent()) return;
       const message = error instanceof Error ? error.message : "Не удалось синхронизировать Meta Insights.";
       toast.error(message);
       await loadMetaInsightsDiagnostics();
+      if (!access.isCurrent()) return;
       setMetaInsightsMessage(message);
     } finally {
       setBusy("meta-insights-sync", false);
@@ -1124,15 +1275,18 @@ export default function AdminCenter() {
   }, [serverAdminAuth.status, workspaceId]);
 
   async function checkCrmHealth() {
+    if (!access.isCurrent()) return null;
     setBusy("crm-health", true);
     try {
       const body = await crmRequest<CrmHealthData>("/api/crm/health");
+      if (!access.isCurrent()) return null;
       const data = body.data || null;
       setHealth(data);
       setIntegrationCards(buildIntegrationCards(data));
       toast.success("Диагностика CRM обновлена");
       return data;
     } catch (error) {
+      if (!access.isCurrent()) return null;
       toast.error(error instanceof Error ? error.message : "Не удалось проверить CRM health");
       return null;
     } finally {
@@ -1141,14 +1295,16 @@ export default function AdminCenter() {
   }
 
   async function checkTelegram() {
+    if (!access.isCurrent()) return;
     setBusy("telegram", true);
     try {
-      const response = await crmFetch(withWorkspace("/api/content-studio/send-telegram"), {
+      const response = await crmFetch(withWorkspace("/api/content-studio/send-telegram", workspaceId), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ test: true }),
       });
       const body = await safeJson<Record<string, unknown>>(response);
+      if (!access.isCurrent()) return;
       const description = body.telegramDescription || body.error || "Telegram не подключен";
       const hint = body.hint || body.warning || "";
       setIntegrationCards((cards) =>
@@ -1168,15 +1324,20 @@ export default function AdminCenter() {
         return;
       }
       toast.success("Telegram подключен");
+    } catch (error) {
+      if (!access.isCurrent()) return;
+      throw error;
     } finally {
       setBusy("telegram", false);
     }
   }
 
   async function checkTargetingAgent() {
+    if (!access.isCurrent()) return;
     setBusy("targeting", true);
     try {
       const body = await crmRequest<Record<string, unknown>>("/api/targeting/health");
+      if (!access.isCurrent()) return;
       setIntegrationCards((cards) =>
         cards.map((card) =>
           card.key === "targetingAgent"
@@ -1186,6 +1347,7 @@ export default function AdminCenter() {
       );
       toast.success("Targeting Agent отвечает");
     } catch (error) {
+      if (!access.isCurrent()) return;
       setIntegrationCards((cards) =>
         cards.map((card) =>
           card.key === "targetingAgent"
@@ -1200,6 +1362,7 @@ export default function AdminCenter() {
   }
 
   async function checkTikTokAds() {
+    if (!access.isCurrent()) return;
     if (serverAdminAuth.status !== "confirmed") {
       setIntegrationCards((cards) =>
         cards.map((card) =>
@@ -1223,6 +1386,7 @@ export default function AdminCenter() {
         `/api/crm/tiktok-validate?workspaceId=${encodeURIComponent(workspaceId)}`,
         { method: "POST" },
       );
+      if (!access.isCurrent()) return;
       const diagnostic = body.data;
       if (!diagnostic) throw new Error("TikTok не вернул результат проверки.");
 
@@ -1259,6 +1423,7 @@ export default function AdminCenter() {
         toast.warning(diagnostic.message || "TikTok Ads пока не подключён");
       }
     } catch (error) {
+      if (!access.isCurrent()) return;
       const message = error instanceof Error ? error.message : "Не удалось проверить TikTok Ads.";
       setIntegrationCards((cards) =>
         cards.map((card) =>
@@ -1305,6 +1470,7 @@ export default function AdminCenter() {
   }
 
   async function buildTikTokDryRun() {
+    if (!access.isCurrent()) return;
     if (serverAdminAuth.status !== "confirmed") {
       setTikTokDryRunMessage("Сначала подтвердите админ-доступ.");
       toast.warning("Сначала подтвердите админ-доступ");
@@ -1326,6 +1492,7 @@ export default function AdminCenter() {
           body: JSON.stringify(buildTikTokRequestPayload()),
         },
       );
+      if (!access.isCurrent()) return;
       if (!body.data) throw new Error("TikTok dry-run не вернул план кампании.");
       setTikTokDryRun(body.data);
       setTikTokDryRunMessage(
@@ -1341,6 +1508,7 @@ export default function AdminCenter() {
         toast.warning("Заполните обязательные поля TikTok-брифа");
       }
     } catch (error) {
+      if (!access.isCurrent()) return;
       const message = error instanceof Error ? error.message : "Не удалось собрать TikTok dry-run.";
       setTikTokDryRun(null);
       setTikTokDryRunMessage(message);
@@ -1351,6 +1519,7 @@ export default function AdminCenter() {
   }
 
   async function launchTikTokDisabled() {
+    if (!access.isCurrent()) return;
     if (serverAdminAuth.status !== "confirmed") {
       setTikTokLaunchMessage("Сначала подтвердите админ-доступ.");
       return;
@@ -1382,6 +1551,7 @@ export default function AdminCenter() {
           }),
         },
       );
+      if (!access.isCurrent()) return;
       if (!body.data) throw new Error("TikTok не вернул итог безопасного запуска.");
       setTikTokLaunchResult(body.data);
       setTikTokLaunchMessage(body.data.message);
@@ -1391,6 +1561,7 @@ export default function AdminCenter() {
         toast.warning(body.data.message);
       }
     } catch (error) {
+      if (!access.isCurrent()) return;
       const message = error instanceof Error ? error.message : "Не удалось безопасно создать рекламу в TikTok.";
       setTikTokLaunchMessage(message);
       toast.error(message);
@@ -1400,9 +1571,11 @@ export default function AdminCenter() {
   }
 
   async function checkAdCreativesStorage() {
+    if (!access.isCurrent()) return;
     setBusy("adCreativesStorage", true);
     try {
       const body = await crmRequest<StorageHealth>("/api/crm/storage-health");
+      if (!access.isCurrent()) return;
       const storage = body.data || {};
       const ready = Boolean(storage.exists && storage.publicAccess && storage.publicUrlWorks);
       const details = [
@@ -1430,6 +1603,7 @@ export default function AdminCenter() {
         toast.warning(storage.hint || "Проверьте bucket ad-creatives и public access.");
       }
     } catch (error) {
+      if (!access.isCurrent()) return;
       setIntegrationCards((cards) =>
         cards.map((card) =>
           card.key === "adCreativesStorage"
@@ -1448,15 +1622,19 @@ export default function AdminCenter() {
   }
 
   async function checkAllIntegrations() {
+    if (!access.isCurrent()) return;
     const data = await checkCrmHealth();
+    if (!access.isCurrent()) return;
     if (data) setIntegrationCards(buildIntegrationCards(data));
     await Promise.allSettled([checkTelegram(), checkTargetingAgent(), checkAdCreativesStorage(), checkTikTokAds()]);
   }
 
   async function runReleaseAutocheck() {
+    if (!access.isCurrent()) return;
     setBusy("release-autocheck", true);
     try {
       const data = await checkCrmHealth();
+      if (!access.isCurrent()) return;
       const targetingOk = await (async () => {
         try {
           const body = await crmRequest<Record<string, unknown>>("/api/targeting/health");
@@ -1465,11 +1643,12 @@ export default function AdminCenter() {
           return false;
         }
       })();
+      if (!access.isCurrent()) return;
       const telegramEnvConfigured = isProviderConfigured(data, "telegram");
       const telegramOk = telegramEnvConfigured
         ? await (async () => {
             try {
-              const response = await crmFetch(withWorkspace("/api/content-studio/send-telegram"), {
+              const response = await crmFetch(withWorkspace("/api/content-studio/send-telegram", workspaceId), {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ test: true }),
@@ -1481,6 +1660,7 @@ export default function AdminCenter() {
             }
           })()
         : false;
+      if (!access.isCurrent()) return;
 
       const autoResults: Record<string, { status: ReleaseStatus; notes: string }> = {
         supabase_configured: {
@@ -1548,6 +1728,7 @@ export default function AdminCenter() {
             }),
           ),
       );
+      if (!access.isCurrent()) return;
       toast.success("Автопроверка релиза завершена");
     } finally {
       setBusy("release-autocheck", false);
@@ -1555,9 +1736,11 @@ export default function AdminCenter() {
   }
 
   async function prefillMetaFromEnv() {
+    if (!access.isCurrent()) return;
     setBusy("meta-prefill", true);
     try {
       const data = health || (await checkCrmHealth());
+      if (!access.isCurrent()) return;
       const meta = data?.meta;
       if (!meta) {
         toast.error("Meta env summary недоступен");
@@ -1591,6 +1774,7 @@ export default function AdminCenter() {
   }
 
   async function checkMetaCityKey() {
+    if (!access.isCurrent()) return;
     const city = getKzMetaCityOption(metaCityKeyInput);
     if (!city.id) {
       toast.error("Введите город для проверки");
@@ -1600,6 +1784,7 @@ export default function AdminCenter() {
     setBusy("meta-city-key", true);
     try {
       const body = await crmRequest<MetaCityKeyResult>(`/api/crm/meta-city-key?city=${encodeURIComponent(city.id)}`);
+      if (!access.isCurrent()) return;
       const result = body.data || null;
       setMetaCityKeyResult(result);
       if (result?.key) {
@@ -1608,6 +1793,7 @@ export default function AdminCenter() {
         toast.warning(result?.warning || "City key не найден, будет использован Казахстан.");
       }
     } catch (error) {
+      if (!access.isCurrent()) return;
       toast.error(error instanceof Error ? error.message : "Не удалось проверить Meta city key");
     } finally {
       setBusy("meta-city-key", false);
@@ -1615,6 +1801,7 @@ export default function AdminCenter() {
   }
 
   async function saveClinicSettings() {
+    if (!access.isCurrent()) return;
     writeStored("negis_clinic_settings", clinic);
     setBusy("clinic", true);
     try {
@@ -1623,8 +1810,10 @@ export default function AdminCenter() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ workspaceId, key: "clinic", value: clinic }),
       });
+      if (!access.isCurrent()) return;
       toast.success("Настройки клиники сохранены");
     } catch (error) {
+      if (!access.isCurrent()) return;
       toast.warning(error instanceof Error ? error.message : "Сохранено локально, Supabase недоступен");
     } finally {
       setBusy("clinic", false);
@@ -1658,24 +1847,30 @@ export default function AdminCenter() {
   }, []);
 
   async function loadJoinRequests() {
+    if (!access.isCurrent()) return;
     try {
       const body = await crmRequest<{ requests?: JoinRequestRow[] }>(
         `/api/crm/staff-join-requests?workspaceId=${encodeURIComponent(workspaceId)}`,
       );
+      if (!access.isCurrent()) return;
       setJoinRequests({ state: "ready", value: body.data?.requests || [] });
     } catch (error) {
+      if (!access.isCurrent()) return;
       if (error instanceof CrmApiError && error.code === "not_provisioned") setJoinNotProvisioned(true);
       setJoinRequests({ state: error instanceof CrmApiError && error.status === 403 ? "denied" : "failed" });
     }
   }
 
   async function loadJoinCode() {
+    if (!access.isCurrent()) return;
     try {
       const body = await crmRequest<{ code?: string | null }>(
         `/api/crm/join-code?workspaceId=${encodeURIComponent(workspaceId)}`,
       );
+      if (!access.isCurrent()) return;
       setJoinCode({ state: "ready", value: body.data?.code ?? null });
     } catch (error) {
+      if (!access.isCurrent()) return;
       if (error instanceof CrmApiError && error.code === "not_provisioned") setJoinNotProvisioned(true);
       setJoinCode({ state: error instanceof CrmApiError && error.status === 403 ? "denied" : "failed" });
     }
@@ -1686,6 +1881,7 @@ export default function AdminCenter() {
    * ломает код у всех, кому его уже продиктовали.
    */
   async function issueJoinCode() {
+    if (!access.isCurrent()) return;
     const currentCode = joinCode.state === "ready" ? joinCode.value : null;
     if (currentCode) {
       const confirmed = window.confirm(
@@ -1700,11 +1896,13 @@ export default function AdminCenter() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({}),
       });
+      if (!access.isCurrent()) return;
       setJoinCode({ state: "ready", value: body.data?.code ?? null });
       toast.success(body.data?.concurrent
         ? "Код уже сменили в другой вкладке — на экране действующий"
         : currentCode ? "Код сменён" : "Код выпущен");
     } catch (error) {
+      if (!access.isCurrent()) return;
       toast.error(staffErrorText(error, "Не удалось выпустить код"));
     } finally {
       setBusy("joinCode", false);
@@ -1712,6 +1910,7 @@ export default function AdminCenter() {
   }
 
   async function decideJoinRequest(request: JoinRequestRow, decision: "approve" | "reject") {
+    if (!access.isCurrent()) return;
     if (decision === "approve" && !decisionRole) {
       toast.error("Выберите роль — без неё нельзя одобрить.");
       return;
@@ -1732,6 +1931,7 @@ export default function AdminCenter() {
           body: JSON.stringify({ id: request.id, decision, ...(decision === "approve" ? { role: decisionRole } : {}) }),
         },
       );
+      if (!access.isCurrent()) return;
       const who = request.fullName || request.email;
       if (decision === "reject") {
         toast.success("Заявка отклонена. Человек увидит отказ и сможет подать заново.");
@@ -1748,6 +1948,7 @@ export default function AdminCenter() {
       setDecisionRole("");
       await Promise.all([loadJoinRequests(), loadStaff(), loadInvitations()]);
     } catch (error) {
+      if (!access.isCurrent()) return;
       toast.error(staffErrorText(error, "Не удалось обработать заявку"));
       // Обновить список обязательно: чаще всего отказ означает, что заявку уже
       // решил коллега, а карточка с кнопками так и висела бы на экране.
@@ -1768,6 +1969,7 @@ export default function AdminCenter() {
    * созданий аккаунтов — это то, за что Supabase отвечает 429.
    */
   async function createStaffBatch() {
+    if (!access.isCurrent()) return;
     // Строка на человека, четыре допустимых формы:
     //   «Айгуль Ботанова»            — логин сделаем из имени
     //   «Айгуль Ботанова, aigul»     — логин задан явно
@@ -1823,6 +2025,7 @@ export default function AdminCenter() {
     const results: BatchStaffResult[] = [];
     try {
       for (const row of unique) {
+        if (!access.isCurrent()) return;
         const password = generateStaffPassword();
         const payload = row.email
           ? { email: row.email, role: batchRole, fullName: row.fullName || row.email.split("@")[0], password }
@@ -1834,6 +2037,7 @@ export default function AdminCenter() {
             body: JSON.stringify(payload),
           });
           const body = await safeJson<{ acceptUrl?: string; login?: string }>(response);
+          if (!access.isCurrent()) return;
           const code = typeof (body as { code?: unknown }).code === "string" ? (body as { code: string }).code : "request_failed";
           if (response.ok && body.success !== false) {
             // Печатаем то, что ВЫДАЛ сервер: при столкновении логин получил
@@ -1855,6 +2059,7 @@ export default function AdminCenter() {
             });
           }
         } catch (error) {
+          if (!access.isCurrent()) return;
           results.push({ source: row.source, login: row.login || row.email, kind: "failed", error: staffErrorText(error, "Отказ") });
         }
         setBatchResults([...results]);
@@ -1876,6 +2081,7 @@ export default function AdminCenter() {
   }
 
   async function copyBatchCredentials() {
+    if (!access.isCurrent()) return;
     const rows = (batchResults ?? []).filter((row) => row.kind === "created" && row.password);
     if (rows.length === 0) return;
     try {
@@ -1884,26 +2090,32 @@ export default function AdminCenter() {
       await navigator.clipboard.writeText(
         rows.map((row) => `${row.source} — логин ${row.login}, пароль ${row.password}`).join("\n"),
       );
+      if (!access.isCurrent()) return;
       toast.success("Скопировано");
     } catch {
+      if (!access.isCurrent()) return;
       // Буфер недоступен — таблица на экране, её можно переписать руками.
       toast.error("Буфер недоступен — перепишите с экрана");
     }
   }
 
   async function loadInvitations() {
+    if (!access.isCurrent()) return;
     try {
       const body = await crmRequest<{ invitations?: StaffInvitation[] }>(
         `/api/crm/staff-invitations?workspaceId=${encodeURIComponent(workspaceId)}`,
       );
+      if (!access.isCurrent()) return;
       setInvitations(body.data?.invitations || []);
     } catch {
+      if (!access.isCurrent()) return;
       // A clinic without the enrollment table yet simply has no invitations.
       setInvitations([]);
     }
   }
 
   async function sendInvitation() {
+    if (!access.isCurrent()) return;
     const email = inviteForm.email.trim().toLowerCase();
     if (!email) {
       toast.error("Укажите email сотрудника");
@@ -1920,6 +2132,7 @@ export default function AdminCenter() {
           body: JSON.stringify({ email, role: inviteForm.role }),
         },
       );
+      if (!access.isCurrent()) return;
       setIssuedInvite({
         email,
         acceptUrl: body.data?.acceptUrl || "",
@@ -1928,8 +2141,10 @@ export default function AdminCenter() {
       });
       setInviteForm({ email: "", role: "receptionist" });
       await loadInvitations();
+      if (!access.isCurrent()) return;
       toast.success(body.data?.emailSent ? "Приглашение отправлено" : "Приглашение создано — передайте ссылку");
     } catch (error) {
+      if (!access.isCurrent()) return;
       // No local fallback: an invitation that only exists in this browser would
       // be a person who believes they have access and does not.
       toast.error(staffErrorText(error, "Не удалось создать приглашение"));
@@ -1945,6 +2160,7 @@ export default function AdminCenter() {
    * администратор успел его передать: сервер пароль не возвращает и не хранит.
    */
   async function createStaffWithPassword() {
+    if (!access.isCurrent()) return;
     const entered = inviteForm.email.trim();
     if (!entered || !staffPassword) {
       toast.error("Нужны логин (или почта) и пароль сотрудника");
@@ -1969,6 +2185,7 @@ export default function AdminCenter() {
         body: JSON.stringify(payload),
       });
       const responseBody = await safeJson<{ acceptUrl?: string; staff?: unknown; login?: string; email?: string }>(response);
+      if (!access.isCurrent()) return;
       if (!response.ok || responseBody.success === false) {
         // Занятая почта — не тупик: сервер уже выписал приглашение, и ссылка
         // приходит вместе с отказом. Показываем её тем же блоком, что и у
@@ -1977,6 +2194,7 @@ export default function AdminCenter() {
           setIssuedInvite({ email: entered.toLowerCase(), acceptUrl: responseBody.data.acceptUrl, emailSent: false, emailStatus: "already_registered" });
           setStaffMode("invite");
           await loadInvitations();
+          if (!access.isCurrent()) return;
         }
         const code = typeof (responseBody as { code?: unknown }).code === "string" ? (responseBody as { code: string }).code : "request_failed";
         throw new CrmApiError(response.status, code, responseBody.error || `HTTP ${response.status}`);
@@ -1988,8 +2206,10 @@ export default function AdminCenter() {
       setStaffFullName("");
       setInviteForm({ email: "", role: "receptionist" });
       await Promise.all([loadStaff(), loadInvitations()]);
+      if (!access.isCurrent()) return;
       toast.success("Сотрудник добавлен — передайте ему логин и пароль");
     } catch (error) {
+      if (!access.isCurrent()) return;
       toast.error(staffErrorText(error, "Не удалось добавить сотрудника"));
     } finally {
       setBusy("staff", false);
@@ -2004,6 +2224,7 @@ export default function AdminCenter() {
    * блоком, что и при заведении: сервер его не возвращает и не хранит.
    */
   async function resetStaffPassword(member: StaffMember) {
+    if (!access.isCurrent()) return;
     // Подтверждение обязательно: смена мгновенно ломает пароль, которым
     // сотрудник пользуется прямо сейчас. Случайный клик по соседней кнопке
     // (на телефоне они рядом) выкинул бы человека из системы посреди смены.
@@ -2020,10 +2241,12 @@ export default function AdminCenter() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ staffUserId: member.id, password }),
       });
+      if (!access.isCurrent()) return;
       setCreatedStaff({ email: member.email, password, kind: "reset" });
       setStaffMode("password");
       toast.success("Пароль задан — передайте его сотруднику");
     } catch (error) {
+      if (!access.isCurrent()) return;
       // Обрыв связи не означает, что пароль НЕ применён: Supabase мог успеть
       // его записать, и тогда старый уже не работает, а нового не знает никто.
       // У входа по логину письма-подстраховки нет, поэтому пароль остаётся на
@@ -2042,9 +2265,11 @@ export default function AdminCenter() {
   }
 
   async function copyStaffCredentials() {
+    if (!access.isCurrent()) return;
     if (!createdStaff) return;
     try {
       await navigator.clipboard.writeText(`Логин: ${loginFromEmail(createdStaff.email)}\nПароль: ${createdStaff.password}`);
+      if (!access.isCurrent()) return;
       toast.success("Скопировано");
     } catch {
       // Буфер недоступен — данные на экране, их можно переписать руками.
@@ -2052,6 +2277,7 @@ export default function AdminCenter() {
   }
 
   async function revokeInvitation(id: string) {
+    if (!access.isCurrent()) return;
     try {
       await crmRequest(`/api/crm/staff-invitations?workspaceId=${encodeURIComponent(workspaceId)}`, {
         method: "PATCH",
@@ -2059,8 +2285,10 @@ export default function AdminCenter() {
         body: JSON.stringify({ id }),
       });
       await loadInvitations();
+      if (!access.isCurrent()) return;
       toast.success("Приглашение отозвано");
     } catch (error) {
+      if (!access.isCurrent()) return;
       toast.error(staffErrorText(error, "Не удалось отозвать приглашение"));
     }
   }
@@ -2074,6 +2302,7 @@ export default function AdminCenter() {
    * не понимая связи.
    */
   async function reissueInvitation(invitation: StaffInvitation) {
+    if (!access.isCurrent()) return;
     setBusy("staff", true);
     try {
       await crmRequest(`/api/crm/staff-invitations?workspaceId=${encodeURIComponent(workspaceId)}`, {
@@ -2081,6 +2310,7 @@ export default function AdminCenter() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ id: invitation.id }),
       });
+      if (!access.isCurrent()) return;
       const body = await crmRequest<{ acceptUrl?: string; emailSent?: boolean; emailStatus?: string }>(
         `/api/crm/staff-invitations?workspaceId=${encodeURIComponent(workspaceId)}`,
         {
@@ -2089,6 +2319,7 @@ export default function AdminCenter() {
           body: JSON.stringify({ email: invitation.email, role: invitation.role }),
         },
       );
+      if (!access.isCurrent()) return;
       setIssuedInvite({
         email: invitation.email,
         acceptUrl: body.data?.acceptUrl || "",
@@ -2096,8 +2327,10 @@ export default function AdminCenter() {
         emailStatus: body.data?.emailStatus || "",
       });
       await loadInvitations();
+      if (!access.isCurrent()) return;
       toast.success("Ссылка перевыпущена — прежняя больше не работает");
     } catch (error) {
+      if (!access.isCurrent()) return;
       // Отзыв мог пройти, а выписка — нет: обещать «старая ещё работает» нельзя.
       toast.error(staffErrorText(error, "Не удалось перевыпустить приглашение. Проверьте список ниже."));
     } finally {
@@ -2106,12 +2339,15 @@ export default function AdminCenter() {
   }
 
   async function loadStaff() {
+    if (!access.isCurrent()) return;
     try {
       const body = await crmRequest<{ staff?: StaffMember[]; items?: StaffMember[] }>(
         `/api/crm/staff?workspaceId=${encodeURIComponent(workspaceId)}`,
       );
+      if (!access.isCurrent()) return;
       setStaff(body.data?.staff || body.data?.items || []);
     } catch {
+      if (!access.isCurrent()) return;
       // An administrator who cannot read the team is shown an empty table
       // rather than a plausible-looking one.
       setStaff([]);
@@ -2119,6 +2355,7 @@ export default function AdminCenter() {
   }
 
   async function updateStaffStatus(id: string, status: string) {
+    if (!access.isCurrent()) return;
     try {
       await crmRequest(`/api/crm/staff?workspaceId=${encodeURIComponent(workspaceId)}`, {
         method: "PATCH",
@@ -2126,8 +2363,10 @@ export default function AdminCenter() {
         body: JSON.stringify({ id, status }),
       });
       await loadStaff();
+      if (!access.isCurrent()) return;
       toast.success(status === "active" ? "Сотрудник активирован" : "Доступ приостановлен");
     } catch (error) {
+      if (!access.isCurrent()) return;
       // No local edit on failure: the previous behaviour changed the row in
       // this browser only, so a suspended colleague kept working.
       toast.error(staffErrorText(error, "Не удалось изменить статус"));
@@ -2143,6 +2382,7 @@ export default function AdminCenter() {
    * никак: обходной путь «пригласить заново» закрыт проверкой already_member.
    */
   async function updateStaffRole(id: string, role: StaffRole) {
+    if (!access.isCurrent()) return;
     try {
       await crmRequest(`/api/crm/staff?workspaceId=${encodeURIComponent(workspaceId)}`, {
         method: "PATCH",
@@ -2150,13 +2390,16 @@ export default function AdminCenter() {
         body: JSON.stringify({ id, role }),
       });
       await loadStaff();
+      if (!access.isCurrent()) return;
       toast.success(`Роль изменена: ${roleTitles[role]}`);
     } catch (error) {
+      if (!access.isCurrent()) return;
       toast.error(staffErrorText(error, "Не удалось изменить роль"));
     }
   }
 
   async function saveAiProvider(provider: AiProviderSetting) {
+    if (!access.isCurrent()) return;
     const next = aiProviders.map((item) => (item.id === provider.id ? provider : item));
     setAiProviders(next);
     writeStored("negis_ai_provider_settings", next);
@@ -2174,8 +2417,10 @@ export default function AdminCenter() {
           config: { module: provider.module, status: provider.status },
         }),
       });
+      if (!access.isCurrent()) return;
       toast.success(`${provider.label} сохранен`);
     } catch (error) {
+      if (!access.isCurrent()) return;
       toast.warning(error instanceof Error ? error.message : "Сохранено локально");
     } finally {
       setBusy(`ai-${provider.id}`, false);
@@ -2183,6 +2428,7 @@ export default function AdminCenter() {
   }
 
   async function saveMetaConfig(status: Status = metaAccount.status) {
+    if (!access.isCurrent()) return;
     const next = { ...metaAccount, status };
     setMetaAccount(next);
     writeStored("negis_meta_account", next);
@@ -2197,11 +2443,13 @@ export default function AdminCenter() {
           metadata: { permissions: next.permissions, manualApprovalOnly: true, liveLaunchEnabled: metaLiveLaunchEnabled },
         }),
       });
+      if (!access.isCurrent()) return;
       const mode = body.mode === "supabase" ? "supabase" : "local";
       setMetaConfigMode(mode);
       writeStored("negis_meta_config_save_mode", mode);
       toast.success("Meta config сохранен без secret token");
     } catch (error) {
+      if (!access.isCurrent()) return;
       setMetaConfigMode("local");
       writeStored("negis_meta_config_save_mode", "local");
       toast.warning(error instanceof Error ? error.message : "Meta config сохранен локально");
@@ -2211,6 +2459,7 @@ export default function AdminCenter() {
   }
 
   async function saveMetaLiveLaunchEnabled(enabled: boolean) {
+    if (!access.isCurrent()) return;
     setMetaLiveLaunchEnabled(enabled);
     writeStored("negis_meta_live_launch_enabled", enabled);
     setBusy("meta-live-launch", true);
@@ -2228,8 +2477,10 @@ export default function AdminCenter() {
           },
         }),
       });
+      if (!access.isCurrent()) return;
       toast.success(enabled ? "Live launch разрешен" : "Live launch выключен");
     } catch (error) {
+      if (!access.isCurrent()) return;
       toast.warning(error instanceof Error ? error.message : "Live launch сохранен локально");
     } finally {
       setBusy("meta-live-launch", false);
@@ -2237,6 +2488,7 @@ export default function AdminCenter() {
   }
 
   async function saveReleaseCheck(check: ReleaseCheck) {
+    if (!access.isCurrent()) return;
     const next = releaseChecks.map((item) => (item.checkKey === check.checkKey ? check : item));
     setReleaseChecks(next);
     writeStored("negis_release_checks", next);
@@ -2254,6 +2506,7 @@ export default function AdminCenter() {
         }),
       });
     } catch (error) {
+      if (!access.isCurrent()) return;
       toast.warning(error instanceof Error ? error.message : "Release check сохранен локально");
     } finally {
       setBusy(`release-${check.checkKey}`, false);
@@ -2261,21 +2514,27 @@ export default function AdminCenter() {
   }
 
   async function copyEnvList() {
+    if (!access.isCurrent()) return;
     const text = envList.join("\n");
     try {
       await navigator.clipboard.writeText(text);
+      if (!access.isCurrent()) return;
       toast.success("Список env скопирован");
     } catch {
+      if (!access.isCurrent()) return;
       toast.error("Не удалось скопировать автоматически");
     }
   }
 
   async function copyInviteLink() {
+    if (!access.isCurrent()) return;
     if (!issuedInvite?.acceptUrl) return;
     try {
       await navigator.clipboard.writeText(issuedInvite.acceptUrl);
+      if (!access.isCurrent()) return;
       toast.success("Ссылка скопирована");
     } catch {
+      if (!access.isCurrent()) return;
       toast.error("Не удалось скопировать автоматически");
     }
   }
@@ -2519,9 +2778,10 @@ export default function AdminCenter() {
                   type="button"
                   className="neu-btn"
                   onClick={() => {
+                    if (!access.isCurrent()) return;
                     void navigator.clipboard.writeText(formatJoinCode(joinCode.value as string)).then(
-                      () => toast.success("Скопировано"),
-                      () => toast.error("Буфер недоступен — перепишите с экрана"),
+                      () => { if (access.isCurrent()) toast.success("Скопировано"); },
+                      () => { if (access.isCurrent()) toast.error("Буфер недоступен — перепишите с экрана"); },
                     );
                   }}
                 >
@@ -2997,6 +3257,7 @@ export default function AdminCenter() {
 
   function renderIntegrations() {
     const resetTikTokPreparedLaunch = () => {
+      if (!access.isCurrent()) return;
       setTikTokDryRun(null);
       setTikTokDryRunMessage("");
       setTikTokLaunchResult(null);
@@ -3005,6 +3266,7 @@ export default function AdminCenter() {
       setTikTokLaunchRequestKey("");
     };
     const updateTikTokDryRunField = <Key extends keyof TikTokDryRunForm>(key: Key, value: TikTokDryRunForm[Key]) => {
+      if (!access.isCurrent()) return;
       setTikTokDryRunForm((current) => ({ ...current, [key]: value }));
       resetTikTokPreparedLaunch();
     };
@@ -3126,6 +3388,7 @@ export default function AdminCenter() {
                 { method: save ? "POST" : "GET", signal,
                   ...(save ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirm: true }) } : {}) },
               );
+              access.assertCurrent();
               if (!response.data) throw new Error("Не удалось проверить подключение TikTok.");
               return response.data;
             }}
@@ -3138,6 +3401,7 @@ export default function AdminCenter() {
             list={async (signal) => {
               const response = await adminCrmRequest<TikTokVideoList>(
                 `/api/crm/tiktok-videos?workspaceId=${encodeURIComponent(workspaceId)}`, { signal });
+              access.assertCurrent();
               if (!response.data) throw new Error("Не удалось прочитать видео клиники.");
               return response.data;
             }}
@@ -3147,10 +3411,12 @@ export default function AdminCenter() {
                 `/api/crm/tiktok-videos?workspaceId=${encodeURIComponent(workspaceId)}${readOnly ? `&assetId=${encodeURIComponent(assetId)}` : ""}`,
                 readOnly ? { signal } : { method: "POST", headers: { "Content-Type": "application/json" },
                   body: JSON.stringify({ assetId, action, confirm: action === "transfer", retry }), signal });
+              access.assertCurrent();
               if (!response.data) throw new Error("Не удалось проверить передачу видео.");
               return response.data;
             }}
             onSelected={(assetId) => {
+              if (!access.isCurrent()) return;
               setTikTokVideoSelection({ workspaceId, assetId });
               resetTikTokPreparedLaunch();
             }}
@@ -3166,6 +3432,7 @@ export default function AdminCenter() {
                 { method: "POST", headers: { "Content-Type": "application/json" },
                   body: JSON.stringify({ city: tiktokDryRunForm.city }), signal },
               );
+              access.assertCurrent();
               if (!response.data) throw new Error("TikTok verification unavailable");
               return response.data;
             }}
@@ -3537,6 +3804,7 @@ export default function AdminCenter() {
             type="button"
             className="neu-btn-primary mt-4 w-full justify-center"
             onClick={() => {
+              if (!access.isCurrent()) return;
               void saveMetaConfig("draft");
               toast.success("Тестовый draft подготовлен. Реальная реклама не запущена.");
             }}
@@ -3992,10 +4260,13 @@ export default function AdminCenter() {
               type="button"
               className="neu-btn mt-3"
               onClick={async () => {
+                if (!access.isCurrent()) return;
                 try {
                   await navigator.clipboard.writeText(workspaceId);
+                  if (!access.isCurrent()) return;
                   toast.success("Идентификатор клиники скопирован");
                 } catch {
+                  if (!access.isCurrent()) return;
                   toast.error("Не удалось скопировать идентификатор");
                 }
               }}
