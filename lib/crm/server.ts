@@ -10369,6 +10369,39 @@ export async function handleCrmAuthContext(req: VercelRequest, res: VercelRespon
   }
 }
 
+export async function handleLeadAssignees(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== "GET") {
+    return sendJson(res, 405, errorBody("Method not allowed", ["Use GET"]));
+  }
+  const context = readWorkspaceContext(req);
+  if (!context || !isUuid(context.workspaceId) || !context.permissions.includes("manage_leads")) {
+    return sendJson(res, 403, { success: false, error: "Access denied", code: "workspace_access_denied" });
+  }
+
+  try {
+    const supabase = getSupabaseServerClient();
+    if (!supabase) {
+      return sendJson(res, 503, errorBody("Хранилище не настроено"));
+    }
+    const { data, error } = await supabase
+      .from("staff_users")
+      .select("id,full_name,status")
+      .eq("workspace_id", context.workspaceId)
+      .eq("status", "active")
+      .order("full_name", { ascending: true });
+    if (error) {
+      return sendJson(res, 502, errorBody("Не удалось загрузить ответственных"));
+    }
+    const assignees = (Array.isArray(data) ? data : [])
+      .map(asRecord)
+      .filter((row) => isUuid(row.id) && row.status === "active")
+      .map((row) => ({ id: row.id, name: readString(row.full_name) || "Сотрудник" }));
+    return sendJson(res, 200, success("supabase", { assignees, items: assignees }));
+  } catch {
+    return sendJson(res, 502, errorBody("Не удалось загрузить ответственных"));
+  }
+}
+
 export async function handleCrmResource(resource: CrmResource, req: VercelRequest, res: VercelResponse) {
   if (req.method === "GET") {
     return listItems(resource, req, res);
