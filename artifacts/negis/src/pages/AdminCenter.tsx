@@ -1003,6 +1003,8 @@ function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
   });
   const [health, setHealth] = useState<CrmHealthData | null>(null);
   const [serverAdminAuth, setServerAdminAuth] = useState<ServerAdminAuthState>({ status: "checking" });
+  const hasStaffManagementAccess = serverAdminAuth.status === "confirmed"
+    && (serverAdminAuth.role === "owner" || serverAdminAuth.role === "admin");
   const [integrationCards, setIntegrationCards] = useState<IntegrationCard[]>(() => buildIntegrationCards(null));
   const [tiktokDryRunForm, setTikTokDryRunForm] = useState<TikTokDryRunForm>(() => ({
     campaignName: "",
@@ -2596,10 +2598,12 @@ function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
                 <Database size={16} />
                 Проверить интеграции
               </button>
-              <button type="button" className="neu-btn w-full justify-center" onClick={() => setActiveTab("staff")}>
-                <UserPlus size={16} />
-                Добавить сотрудника
-              </button>
+              {hasStaffManagementAccess && (
+                <button type="button" className="neu-btn w-full justify-center" onClick={() => setActiveTab("staff")}>
+                  <UserPlus size={16} />
+                  Добавить сотрудника
+                </button>
+              )}
               <button type="button" className="neu-btn w-full justify-center" onClick={() => setLocation("/ads-automation")}>
                 <Rocket size={16} />
                 AI запуск рекламы
@@ -2612,6 +2616,7 @@ function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
   }
 
   function renderStaff() {
+    if (!hasStaffManagementAccess) return null;
     const actorRole: StaffRole = serverAdminAuth.role || "admin";
     const actorStaffUserId = serverAdminAuth.staffUserId || "";
     // Роли ниже своей — те, что сервер примет; owner недоступен никому.

@@ -287,6 +287,96 @@ function authPanel(fixture: Fixture) {
   return nodes(fixture.renderer.tree()).find((node) => node.props["data-testid"] === "server-admin-auth");
 }
 
+const staffUi = {
+  add: "\u0414\u043e\u0431\u0430\u0432\u0438\u0442\u044c \u0441\u043e\u0442\u0440\u0443\u0434\u043d\u0438\u043a\u0430",
+  passwordMode: "\u041b\u043e\u0433\u0438\u043d \u0438 \u043f\u0430\u0440\u043e\u043b\u044c",
+  inviteMode: "\u0421\u0441\u044b\u043b\u043a\u0430-\u043f\u0440\u0438\u0433\u043b\u0430\u0448\u0435\u043d\u0438\u0435",
+  generate: "\u0421\u0433\u0435\u043d\u0435\u0440\u0438\u0440\u043e\u0432\u0430\u0442\u044c",
+  invite: "\u041e\u0442\u043f\u0440\u0430\u0432\u0438\u0442\u044c \u043f\u0440\u0438\u0433\u043b\u0430\u0448\u0435\u043d\u0438\u0435",
+  bulk: "\u0414\u043e\u0431\u0430\u0432\u0438\u0442\u044c \u0441\u0440\u0430\u0437\u0443 \u043d\u0435\u0441\u043a\u043e\u043b\u044c\u043a\u0438\u0445",
+  bulkSubmit: "\u0417\u0430\u0432\u0435\u0441\u0442\u0438 \u0432\u0441\u0435\u0445",
+  checkAccess: "\u041f\u0440\u043e\u0432\u0435\u0440\u0438\u0442\u044c \u0434\u043e\u0441\u0442\u0443\u043f",
+  staffName: "\u0418\u043c\u044f \u0441\u043e\u0442\u0440\u0443\u0434\u043d\u0438\u043a\u0430",
+  staffEmail: "\u041f\u043e\u0447\u0442\u0430 \u0441\u043e\u0442\u0440\u0443\u0434\u043d\u0438\u043a\u0430",
+  copySingle: "\u0421\u043a\u043e\u043f\u0438\u0440\u043e\u0432\u0430\u0442\u044c \u043b\u043e\u0433\u0438\u043d \u0438 \u043f\u0430\u0440\u043e\u043b\u044c",
+  copyBulk: "\u0421\u043a\u043e\u043f\u0438\u0440\u043e\u0432\u0430\u0442\u044c \u0441\u043f\u0438\u0441\u043e\u043a",
+  copyInvite: "\u0421\u043a\u043e\u043f\u0438\u0440\u043e\u0432\u0430\u0442\u044c \u0441\u0441\u044b\u043b\u043a\u0443",
+};
+function buttons(fixture: Fixture, text: string) {
+  return nodes(fixture.renderer.tree()).filter((node) => node.type === "button" && label(node).trim() === text);
+}
+function button(fixture: Fixture, text: string) {
+  const matches = buttons(fixture, text);
+  assert.equal(matches.length, 1, "expected exactly one rendered action");
+  assert.equal(typeof matches[0].props.onClick, "function");
+  assert.ok(!matches[0].props.disabled, "rendered action must remain usable");
+  return matches[0];
+}
+function staffCreation(fixture: Fixture) {
+  return nodes(fixture.renderer.tree()).find((node) => node.type === "section"
+    && nodes(node.props.children).some((child) => child.type === "h2" && label(child) === staffUi.add));
+}
+function formControls(fixture: Fixture) {
+  const section = staffCreation(fixture);
+  assert.ok(section, "confirmed staff access must render the creation section");
+  return nodes(section).filter((node) => ["input", "select", "textarea"].includes(node.type));
+}
+async function tab(fixture: Fixture, activeTab: "overview" | "staff") {
+  fixture.snapshot().setActiveTab(activeTab); await fixture.renderer.flush();
+}
+function renderedText(fixture: Fixture) {
+  return label(fixture.renderer.tree()) + nodes(fixture.renderer.tree())
+    .map((node) => typeof node.props.value === "string" ? node.props.value : "").join("\n");
+}
+function assertStaffHidden(fixture: Fixture, markers: string[] = []) {
+  assert.equal(staffCreation(fixture), undefined, "staff creation must be absent, not merely disabled");
+  for (const text of Object.values(staffUi).filter((value) => value !== staffUi.checkAccess)) {
+    assert.equal(buttons(fixture, text).length, 0, "staff modes, actions and credential-copy controls must be hidden");
+  }
+  assert.equal(nodes(fixture.renderer.tree()).filter((node) => node.type === "input" || node.type === "textarea"
+    || (node.type === "select" && !["overview", "staff"].includes(node.props.value))).length, 0,
+  "single/password/invitation/bulk inputs and role selectors must be absent");
+  for (const marker of markers) {
+    assert.ok(!renderedText(fixture).includes(marker), "synthetic credential results and drafts must not remain rendered");
+  }
+}
+async function assertBothStaffViewsHidden(fixture: Fixture, markers: string[] = []) {
+  await tab(fixture, "staff"); assertStaffHidden(fixture, markers);
+  await tab(fixture, "overview"); assertStaffHidden(fixture, markers);
+}
+function staffResults(fixture: Fixture) {
+  const { createdStaff, issuedInvite, batchResults } = fixture.snapshot();
+  return clone({ createdStaff, issuedInvite, batchResults });
+}
+async function seedStaffResults(fixture: Fixture) {
+  await staffTab(fixture);
+  fixture.snapshot().setInviteForm({ email: "single.fixture", role: "receptionist" });
+  fixture.snapshot().setStaffPassword("LocalFixtureOnly234"); await fixture.renderer.flush();
+  await button(fixture, staffUi.add).props.onClick(); await fixture.renderer.flush();
+  button(fixture, staffUi.bulk).props.onClick(); await fixture.renderer.flush();
+  formControls(fixture).find((node) => node.type === "textarea")!.props.onChange({ target: {
+    value: "first.bulk@example.test\nsecond.bulk@example.test",
+  } });
+  await fixture.renderer.flush();
+  button(fixture, staffUi.bulkSubmit).props.onClick(); await fixture.renderer.flush();
+  button(fixture, staffUi.inviteMode).props.onClick(); await fixture.renderer.flush();
+  formControls(fixture).find((node) => node.type === "input" && node.props.type === "email")!.props.onChange({ target: {
+    value: "issued.fixture@example.test",
+  } });
+  await fixture.renderer.flush();
+  await button(fixture, staffUi.invite).props.onClick(); await fixture.renderer.flush();
+  const results = staffResults(fixture);
+  assert.ok(results.createdStaff?.password, "exercise real single creation with a fake local response");
+  assert.ok(results.issuedInvite?.acceptUrl, "exercise real invitation creation with a fake local response");
+  assert.equal(results.batchResults.length, 2, "exercise both sequential bulk rows");
+  assert.ok(results.batchResults.every((row: any) => row.kind === "created" && row.password));
+  const markers: string[] = [results.createdStaff.email, results.createdStaff.password, results.issuedInvite.email,
+    results.issuedInvite.acceptUrl, ...results.batchResults.flatMap((row: any) => [row.source, row.login, row.password])];
+  for (const marker of markers) assert.ok(renderedText(fixture).includes(marker), "synthetic result must first be visible");
+  for (const text of [staffUi.copySingle, staffUi.copyBulk, staffUi.copyInvite]) button(fixture, text);
+  return { results, markers };
+}
+
 test("raw SDK A-B-A changes the outer epoch and permanently expires the old lifetime before context catches up", async () => {
   const fixture = await ready();
   try {
@@ -646,3 +736,149 @@ test("auth-context distinguishes explicit non-admin/403 from malformed or unavai
     assert.equal(fixture.dispatches.length, 0, "missing token cannot send an auth request");
   } finally { fixture.renderer.dispose(); }
 });
+
+for (const role of ["owner", "admin"] as const) {
+  test(`server-confirmed ${role} retains the overview staff action and single/password/invitation/bulk controls`, async () => {
+    const fixture = setup(); fixture.setAuth({ userRole: role });
+    try {
+      await fixture.renderer.flush();
+      assert.equal(fixture.snapshot().serverAdminAuth.status, "confirmed");
+      assert.equal(fixture.snapshot().serverAdminAuth.role, role);
+      assert.equal(staffCreation(fixture), undefined, "overview must not itself render the form");
+      button(fixture, staffUi.add).props.onClick(); await fixture.renderer.flush();
+      for (const text of [staffUi.add, staffUi.passwordMode, staffUi.inviteMode, staffUi.generate, staffUi.bulk]) button(fixture, text);
+      assert.equal(button(fixture, staffUi.passwordMode).props["aria-pressed"], true);
+      const passwordControls = formControls(fixture);
+      assert.equal(passwordControls.filter((node) => node.type === "input").length, 3, "login, name and password remain available");
+      assert.equal(passwordControls.filter((node) => node.type === "select").length, 1, "single staff role selector remains");
+      for (const control of passwordControls) assert.equal(typeof control.props.onChange, "function");
+      assert.ok(passwordControls.some((node) => node.props.placeholder === staffUi.staffName));
+      assert.equal(buttons(fixture, staffUi.invite).length, 0);
+
+      button(fixture, staffUi.inviteMode).props.onClick(); await fixture.renderer.flush();
+      assert.equal(button(fixture, staffUi.inviteMode).props["aria-pressed"], true);
+      button(fixture, staffUi.invite);
+      const inviteControls = formControls(fixture);
+      assert.equal(inviteControls.filter((node) => node.type === "input").length, 1);
+      assert.ok(inviteControls.some((node) => node.props.type === "email" && node.props.placeholder === staffUi.staffEmail));
+      assert.equal(buttons(fixture, staffUi.add).length, 0);
+      assert.equal(buttons(fixture, staffUi.generate).length, 0);
+
+      button(fixture, staffUi.bulk).props.onClick(); await fixture.renderer.flush();
+      button(fixture, staffUi.bulkSubmit);
+      assert.equal(formControls(fixture).filter((node) => node.type === "textarea").length, 1);
+      assert.equal(formControls(fixture).filter((node) => node.type === "select").length, 2, "single and bulk role selectors remain");
+      button(fixture, staffUi.passwordMode).props.onClick(); await fixture.renderer.flush();
+      button(fixture, staffUi.add); button(fixture, staffUi.generate); button(fixture, staffUi.bulkSubmit);
+      await tab(fixture, "overview"); button(fixture, staffUi.add);
+      assert.equal(fixture.dispatches.filter((call) => call.init.method === "POST").length, 0, "navigation and mode toggles create no staff");
+      assert.deepEqual(fixture.storageWrites, []);
+    } finally { fixture.renderer.dispose(); }
+  });
+}
+
+for (const serverRole of ["manager", "receptionist", "marketer", "doctor", "lead_manager"] as const) {
+  test(`server non-admin ${serverRole} hides staff creation and the overview action for matching or stale client owner roles`, async () => {
+    for (const clientRole of [serverRole, "owner"]) {
+      const fixture = setup(); fixture.setAuth({ userRole: clientRole });
+      fixture.reply(async () => Response.json(authBody({ role: serverRole, isAdmin: false })));
+      try {
+        await fixture.renderer.flush();
+        assert.equal(fixture.snapshot().serverAdminAuth.status, "forbidden", clientRole);
+        await assertBothStaffViewsHidden(fixture);
+        assert.equal(fixture.dispatches.filter((call) => call.init.method === "POST").length, 0);
+        assert.deepEqual(fixture.storageWrites, []);
+      } finally { fixture.renderer.dispose(); }
+    }
+  });
+}
+
+test("initial checking hides staff creation and the overview action even for a client owner", async () => {
+  const fixture = setup(), pending = deferred<string>(); fixture.token(() => pending.promise);
+  try {
+    await fixture.renderer.flush();
+    assert.equal(fixture.snapshot().serverAdminAuth.status, "checking");
+    await assertBothStaffViewsHidden(fixture);
+    assert.equal(fixture.dispatches.length, 0, "pending token lookup has not dispatched any request");
+    pending.resolve("local-fixture-token"); await fixture.renderer.flush();
+    assert.equal(fixture.snapshot().serverAdminAuth.status, "confirmed");
+    button(fixture, staffUi.add).props.onClick(); await fixture.renderer.flush();
+    assert.ok(staffCreation(fixture), "successful confirmation restores the form");
+  } finally { fixture.renderer.dispose(); }
+});
+
+const deniedStaffChecks = [
+  { status: "reauth", response: () => Response.json({ success: false }, { status: 401 }) },
+  { status: "forbidden", response: () => Response.json(authBody({ role: "manager", isAdmin: false })) },
+  { status: "unavailable", response: () => Response.json({ success: false }, { status: 503 }) },
+] as const;
+for (const scenario of deniedStaffChecks) {
+  test(`${scenario.status} hides owner staff controls and synthetic results throughout a real pending recheck`, async () => {
+    const fixture = await ready();
+    try {
+      const { results, markers } = await seedStaffResults(fixture);
+      const content = fixture.renderer.instance("AdminCenterContent");
+      const pending = deferred<string>(); fixture.token(() => pending.promise);
+      fixture.reply(async () => scenario.response());
+      const dispatchCount = fixture.dispatches.length, tokenCount = fixture.tokenCalls.length;
+      button(fixture, staffUi.checkAccess).props.onClick(); await fixture.renderer.flush();
+      assert.equal(fixture.snapshot().serverAdminAuth.status, "checking");
+      assert.equal(fixture.tokenCalls.length, tokenCount + 1, "the actual recheck must be awaiting its token");
+      assert.equal(fixture.dispatches.length, dispatchCount, "controls hide before any recheck reply");
+      assertStaffHidden(fixture, markers);
+      await assertBothStaffViewsHidden(fixture, markers);
+      assert.deepEqual(staffResults(fixture), results, "results still exist in state, so absence must come from rendering access");
+      assert.equal(fixture.renderer.instance("AdminCenterContent"), content, "recheck must exercise the existing confirmed lifetime");
+      pending.resolve("local-fixture-token"); await fixture.renderer.flush();
+      assert.equal(fixture.snapshot().serverAdminAuth.status, scenario.status);
+      await assertBothStaffViewsHidden(fixture, markers);
+      assert.deepEqual(staffResults(fixture), results);
+      const recheckCalls = fixture.dispatches.slice(dispatchCount);
+      assert.equal(recheckCalls.filter((call) => call.path.includes("/auth-context?")).length, 1);
+      assert.ok(recheckCalls.every((call) => !call.init.method || call.init.method === "GET"),
+        "auth recheck and existing tab reads must not create, invite or change credentials");
+      assert.deepEqual(fixture.storageWrites, []);
+    } finally { fixture.renderer.dispose(); }
+  });
+}
+
+for (const role of ["owner", "admin"] as const) {
+  test(`previously confirmed ${role} immediately hides both modes, bulk, drafts and results during recheck and restores on confirmation`, async () => {
+    for (const mode of [staffUi.passwordMode, staffUi.inviteMode]) {
+      const fixture = setup(); fixture.setAuth({ userRole: role });
+      try {
+        await fixture.renderer.flush();
+        assert.equal(fixture.snapshot().serverAdminAuth.status, "confirmed");
+        const { results, markers } = await seedStaffResults(fixture);
+        button(fixture, mode).props.onClick();
+        fixture.snapshot().setInviteForm({ email: "draft.fixture@example.test", role: "receptionist" });
+        fixture.snapshot().setStaffPassword("LocalDraftFixture234");
+        fixture.snapshot().setBatchEmails("draft.bulk@example.test"); await fixture.renderer.flush();
+        const drafts = mode === staffUi.passwordMode
+          ? ["draft.fixture@example.test", "LocalDraftFixture234", "draft.bulk@example.test"]
+          : ["draft.fixture@example.test", "draft.bulk@example.test"];
+        for (const draft of drafts) assert.ok(renderedText(fixture).includes(draft), "draft input must first be rendered");
+        const content = fixture.renderer.instance("AdminCenterContent");
+        const pending = deferred<Response>();
+        fixture.reply(async () => pending.promise);
+        const dispatchCount = fixture.dispatches.length;
+        button(fixture, staffUi.checkAccess).props.onClick(); await fixture.renderer.flush();
+        assert.equal(fixture.snapshot().serverAdminAuth.status, "checking");
+        assert.equal(fixture.dispatches.length, dispatchCount + 1, "auth transport is genuinely pending");
+        assertStaffHidden(fixture, [...markers, ...drafts]);
+        await assertBothStaffViewsHidden(fixture, [...markers, ...drafts]);
+        assert.deepEqual(staffResults(fixture), results);
+        assert.equal(fixture.renderer.instance("AdminCenterContent"), content);
+        fixture.reply(); pending.resolve(Response.json(authBody({ role }))); await fixture.renderer.flush();
+        assert.equal(fixture.snapshot().serverAdminAuth.status, "confirmed");
+        assert.equal(fixture.snapshot().serverAdminAuth.role, role);
+        button(fixture, staffUi.add).props.onClick(); await fixture.renderer.flush();
+        button(fixture, mode); button(fixture, staffUi.bulkSubmit);
+        button(fixture, mode === staffUi.passwordMode ? staffUi.add : staffUi.invite);
+        for (const text of [staffUi.copySingle, staffUi.copyBulk, staffUi.copyInvite]) button(fixture, text);
+        for (const marker of [...markers, ...drafts]) assert.ok(renderedText(fixture).includes(marker), "confirmation restores the existing local form state");
+        assert.deepEqual(fixture.storageWrites, []);
+      } finally { fixture.renderer.dispose(); }
+    }
+  });
+}
