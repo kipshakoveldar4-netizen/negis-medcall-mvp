@@ -623,7 +623,10 @@ test("BC-R отказ сервера называется человеку, а �
   assert.ok(!/Проверьте расписание перед повтором/.test(page), "совет невпопад убран");
   assert.ok(/class ServerRefusalError/.test(page), "отказ несёт код и детали сервера");
   assert.ok(/function refusalText/.test(page), "и переводится в человеческий текст");
-  assert.ok(/toast\.error\(refusalText\(error\)\)/.test(page), "тост показывает причину");
+  assert.ok(
+    /toast\.error\(createAttempt\.current\?\.uncertain[\s\S]{0,180}:\s*refusalText\(error\)\)/.test(page),
+    "тост показывает причину, если исход попытки не остаётся неопределённым",
+  );
 
   // Обрыв связи по-прежнему не выдаётся за «ничего не сохранилось»: вставка
   // могла пройти до разрыва.
