@@ -86,7 +86,7 @@ test('one Russian UTF-8 document stays under docs, outside runtime and public ou
   assert.equal(meta('charset', 'utf-8').attrs.charset.toLowerCase(), 'utf-8');
   const titles = [...head.matchAll(/<title\b[^>]*>([\s\S]*?)<\/title\s*>/gi)];
   assert.equal(titles.length, 1);
-  assert.equal(textContent(titles[0][1]), 'ИП Медина | Medina OS');
+  assert.equal(textContent(titles[0][1]), 'Medina OS | ИП КЫПШАКОВА ДИАНА КИЯСКЫЗЫ');
   const viewport = meta('name', 'viewport').attrs.content ?? '';
   assert.match(viewport, /(?:^|,)\s*width\s*=\s*device-width\s*(?:,|$)/i);
   assert.match(viewport, /(?:^|,)\s*initial-scale\s*=\s*1(?:\.0)?\s*(?:,|$)/i);
@@ -135,8 +135,9 @@ test('no scripts, forms, embeds, redirects, canonical or verification metadata',
   assert.doesNotMatch(html, /application\/ld\+json/i, 'no JSON-LD');
 });
 
-test('only embedded PNG assets and resolvable same-page navigation are allowed', () => {
+test('only embedded PNG assets, same-page navigation and one approved mailto are allowed', () => {
   const ids = new Set(tags.map(node => node.attrs.id).filter(Boolean));
+  let mailtoCount = 0;
   for (const node of tags) {
     if (Object.hasOwn(node.attrs, 'src')) {
       assert.equal(node.name, 'img', 'only images may have src');
@@ -148,15 +149,21 @@ test('only embedded PNG assets and resolvable same-page navigation are allowed',
         assert.match(node.attrs.href, /^data:image\/png;base64,[A-Za-z0-9+/]+={0,2}$/);
       } else {
         assert.equal(node.name, 'a');
-        assert.match(node.attrs.href, /^#[\w:.-]+$/);
-        assert.ok(ids.has(node.attrs.href.slice(1)), `missing local anchor ${node.attrs.href}`);
+        if (/^mailto:/i.test(node.attrs.href)) {
+          assert.equal(node.attrs.href, 'mailto:Yelkipq@gmail.com', 'only the approved email, without query parameters');
+          mailtoCount += 1;
+        } else {
+          assert.match(node.attrs.href, /^#[\w:.-]+$/);
+          assert.ok(ids.has(node.attrs.href.slice(1)), `missing local anchor ${node.attrs.href}`);
+        }
       }
     }
   }
+  assert.ok(mailtoCount <= 1, 'at most one mailto link; it does not send email automatically');
   const css = [...html.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style\s*>/gi)].map(match => match[1])
     .concat(tags.map(node => node.attrs.style ?? '')).join('\n');
   assert.doesNotMatch(css.replace(/\/\*[\s\S]*?\*\//g, ''), /@import\b|url\s*\(|expression\s*\(|-moz-binding|behavior\s*:/i);
-  assert.doesNotMatch(decodeEntities(html), /\b(?:https?|wss?|ftp):|\/\/[a-z0-9.-]+\.[a-z]{2,}|\b(?:mailto|tel|javascript):/iu, 'no external, contact or executable URL');
+  assert.doesNotMatch(decodeEntities(html), /\b(?:https?|wss?|ftp):|\/\/[a-z0-9.-]+\.[a-z]{2,}|\b(?:tel|javascript):|\bmailto:(?!Yelkipq@gmail\.com(?=["'<>\s]|$))/iu, 'no external, unapproved contact or executable URL');
 });
 
 test('logo and favicon contain identical canonical base64 bytes from the repository PNG', () => {
@@ -178,17 +185,45 @@ test('logo and favicon contain identical canonical base64 bytes from the reposit
   assert.equal(expected.readUInt32BE(20), 192);
 });
 
-test('body identifies the company, country and local draft without invented contacts or credentials', () => {
+test('the approved email is visible only in contacts and no other email is allowed', () => {
+  const nodes = elements(html);
+  const contacts = nodes.filter(node => !node.closing && node.name === 'section' && node.attrs.id === 'contacts');
+  assert.equal(contacts.length, 1, 'one contacts section');
+  let depth = 0;
+  let contactEnd;
+  for (const node of nodes.filter(node => node.index >= contacts[0].index && node.name === 'section')) {
+    depth += node.closing ? -1 : 1;
+    if (depth === 0) {
+      contactEnd = node;
+      break;
+    }
+  }
+  assert.ok(contactEnd, 'contacts section must close');
+  const emailPattern = /[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Z0-9-]+(?:\.[A-Z0-9-]+)+/giu;
+  const emails = [...decodeEntities(html).matchAll(emailPattern)].map(match => match[0]);
+  assert.deepEqual(new Set(emails), new Set(['Yelkipq@gmail.com']), 'exact approved email allowlist');
+  const outsideContacts = html.slice(0, contacts[0].index) + html.slice(contactEnd.end);
+  assert.doesNotMatch(decodeEntities(outsideContacts), emailPattern, 'no email outside contacts, including hidden text and metadata');
+  assert.ok(bodyText().includes('Yelkipq@gmail.com'), 'approved email must be in non-hidden body text');
+});
+
+test('body identifies the company, location and local draft without unapproved personal data or credentials', () => {
   const headings = [...body.matchAll(/<h1\b[^>]*>([\s\S]*?)<\/h1\s*>/gi)];
   assert.equal(headings.length, 1);
-  assert.equal(textContent(headings[0][1]), 'ИП Медина');
+  assert.equal(textContent(headings[0][1]), 'Medina OS');
   const text = bodyText();
-  for (const required of ['ИП Медина', 'Medina OS', 'Казахстан', 'Локальный черновик']) {
+  for (const required of ['ИП КЫПШАКОВА ДИАНА КИЯСКЫЗЫ', 'Medina OS', 'Казахстан', 'Актобе', 'medinaos.com', 'Локальный черновик']) {
     assert.ok(text.includes(required), `${required} must occur in non-hidden body text`);
   }
-  const content = `${text} ${tags.flatMap(node => [node.attrs.alt ?? '', node.attrs['aria-label'] ?? '']).join(' ')}`;
-  assert.doesNotMatch(content, /[^\s<>@]+@[^\s<>@]+\.[^\s<>@]+/u, 'no invented email');
-  assert.doesNotMatch(content, /\+\d(?:[\s().-]*\d){6,14}|(?:^|\D)[78](?:[\s().-]*\d){10}(?!\d)/u, 'no phone number, including Baspana contacts');
+  for (const anchor of body.matchAll(/<a\b[^>]*>([\s\S]*?)<\/a\s*>/gi)) {
+    assert.doesNotMatch(textContent(anchor[1]), /\bmedinaos\.com\b/i, 'selected domain must be plain text, not a link');
+  }
+  const content = `${textContent(html.replace(/<style\b[^>]*>[\s\S]*?<\/style\s*>/gi, ''))} ${tags.flatMap(node => Object.entries(node.attrs)
+    .filter(([, value]) => !value.startsWith('data:image/png;base64,'))
+    .map(([, value]) => value)).join(' ')}`;
+  assert.doesNotMatch(content, /\+\d(?:[\s().-]*\d){6,14}|(?:^|\D)[78](?:[\s().-]*\d){10}(?!\d)/u, 'no phone number');
   assert.doesNotMatch(content, /(?:^|\D)\d{12}(?!\d)|\bKZ\d{2}[A-Z0-9]{16}\b|(?:БИН|ИИН|БИК|IBAN)\s*[:№-]?\s*[A-Z\d]{6,}/iu, 'no fabricated legal or bank identifier');
+  assert.doesNotMatch(content, /(?:улица|ул\.|проспект|пр-т|переулок|пер\.|микрорайон|мкр\.|улиц[аы]|көшесі)\s+[\p{L}\d][^<>\n]{0,100}\d|(?:дом|д\.|квартира|кв\.)\s*[:№-]?\s*\d/iu, 'no full street address or house number');
+  assert.doesNotMatch(content, /(?:номер\s+(?:документа|удостоверения|паспорта)|(?:документ|удостоверение|паспорт)\s*№)\s*[:№-]?\s*[A-Z\d]{5,}|(?:скан|копия)\s+(?:документа|удостоверения|паспорта)|(?:банковский\s+сч[её]т|расч[её]тный\s+сч[её]т|номер\s+карты)\s*[:№-]?\s*[A-Z\d]{6,}/iu, 'no document number, identity scan or bank account data');
   assert.doesNotMatch(content, /\bMeta\s+Verified\b|(?:официальный|верифицированный|сертифицированный)\s+(?:партн[её]р\s+)?(?:Meta|Facebook)|(?:подтверждено|одобрено)\s+(?:Meta|Facebook)/iu, 'no affirmative Meta verification claims');
 });
