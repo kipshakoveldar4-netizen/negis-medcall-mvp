@@ -51,6 +51,7 @@ type LoadOptions = {
   rows?: Record<string, unknown[]>;
   /** Tables whose queries fail, to exercise degraded paths. */
   errors?: Record<string, string>;
+  malformedData?: Record<string, unknown>;
 };
 
 async function loadRouter(options: LoadOptions = {}) {
@@ -77,7 +78,16 @@ async function loadRouter(options: LoadOptions = {}) {
       const settle = (shape: "one" | "list") => {
         const message = options.errors?.[table];
         if (message) return Promise.resolve({ data: null, error: { message } });
-        const tableRows = options.rows?.[table] ?? [];
+        if (options.malformedData && table in options.malformedData) {
+          return Promise.resolve({ data: options.malformedData[table], error: null });
+        }
+        let tableRows = options.rows?.[table] ?? [];
+        if (table === "workspace_settings") {
+          tableRows = tableRows.filter((row) => {
+            const record = row as Record<string, unknown>;
+            return record.key === undefined || record.key === entry.filters.key;
+          });
+        }
         return Promise.resolve(
           shape === "list"
             ? { data: tableRows, error: null, count: tableRows.length }
@@ -151,6 +161,71 @@ function membershipsOf(body: Record<string, unknown>): Array<Record<string, unkn
   const data = (body.data ?? {}) as Record<string, unknown>;
   return Array.isArray(data.memberships) ? (data.memberships as Array<Record<string, unknown>>) : [];
 }
+
+test("WP1 bootstrap returns purposes only for verified memberships, not a requested profile or foreign setting", async () => {
+  await withRouter({ rows: { ...twoMemberships, workspace_settings: [
+    { workspace_id: WORKSPACE_A, key: "workspace_vertical", value: { vertical: "beauty" } },
+    { workspace_id: WORKSPACE_B, key: "workspace_purpose", value: { purpose: "mortgage_leads", secret: "private-profile-detail" } },
+    { workspace_id: WORKSPACE_C, key: "workspace_purpose", value: { purpose: "unrecognized-foreign" } },
+  ] } }, async (ctx) => {
+    const { res, queries } = await ctx.call({ workspaceId: WORKSPACE_B, purpose: "clinic_services", role: "owner" });
+    assert.equal(res.statusCode, 200);
+    const memberships = membershipsOf(res.body);
+    assert.deepEqual(memberships.map((entry) => entry.purpose), ["clinic_services", "mortgage_leads"]);
+    assert.equal(memberships[0].vertical, "beauty");
+    assert.equal(memberships[1].role, "marketer", "Purpose does not grant an owner role");
+    assert.equal((res.body.data as Record<string, unknown>).purpose, "mortgage_leads");
+    const query = queries.find((entry) => entry.table === "workspace_settings" && entry.filters.key === "workspace_purpose");
+    assert.ok(query);
+    assert.deepEqual(query.filters.workspace_id, [WORKSPACE_A, WORKSPACE_B]);
+    assert.ok(!JSON.stringify(res.body).includes(WORKSPACE_C));
+    assert.ok(!JSON.stringify(res.body).includes("private-profile-detail"));
+  });
+});
+
+test("WP2 absence of a profile row is explicitly legacy clinic mode, while marketing stays nonmedical metadata", async () => {
+  await withRouter({ rows: { ...twoMemberships, workspace_settings: [
+    { workspace_id: WORKSPACE_B, key: "workspace_purpose", value: { purpose: "marketing" } },
+  ] } }, async (ctx) => {
+    const { res } = await ctx.call();
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(membershipsOf(res.body).map((entry) => entry.purpose), ["clinic_services", "marketing"]);
+    assert.equal((res.body.data as Record<string, unknown>).purpose, null, "No profile is selected before choosing a workspace");
+  });
+});
+
+test("WP3 explicit unknown or malformed own profiles fail closed instead of silently becoming a clinic", async () => {
+  for (const value of [{}, null, [], { purpose: "unknown" }, { purpose: null }, { purpose: false }]) {
+    await withRouter({ rows: { ...twoMemberships, workspace_settings: [
+      { workspace_id: WORKSPACE_A, key: "workspace_purpose", value },
+    ] } }, async (ctx) => {
+      const { res } = await ctx.call();
+      assert.equal(res.statusCode, 503);
+      assert.equal(res.body.success, false);
+      assert.equal(res.body.data, undefined);
+    });
+  }
+});
+
+test("WP4 unreadable profile storage or duplicate rows cannot return an authoritative bootstrap", async () => {
+  for (const options of [
+    { rows: twoMemberships, errors: { workspace_settings: "synthetic storage outage" } },
+    { rows: twoMemberships, malformedData: { workspace_settings: null } },
+    { rows: twoMemberships, malformedData: { workspace_settings: {} } },
+    { rows: twoMemberships, malformedData: { workspace_settings: [{ value: { purpose: "mortgage_leads" } }] } },
+    { rows: { ...twoMemberships, workspace_settings: [
+      { workspace_id: WORKSPACE_A, key: "workspace_purpose", value: { purpose: "mortgage_leads" } },
+      { workspace_id: WORKSPACE_A, key: "workspace_purpose", value: { purpose: "clinic_services" } },
+    ] } },
+  ]) {
+    await withRouter(options, async (ctx) => {
+      const { res } = await ctx.call();
+      assert.equal(res.statusCode, 503);
+      assert.equal(res.body.data, undefined);
+      assert.ok(!JSON.stringify(res.body).includes("synthetic storage outage"));
+    });
+  }
+});
 
 // ===========================================================================
 // A. The server names the choice

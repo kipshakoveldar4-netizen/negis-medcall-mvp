@@ -44,6 +44,7 @@ import {
 } from "./change-journal";
 import { checkMetaCompliance } from "../meta/compliance";
 import { DEFAULT_VERTICAL, readVertical, VERTICAL_SETTINGS_KEY, type Vertical } from "../vertical/terms";
+import { isWorkspacePurpose, WORKSPACE_PURPOSE_SETTINGS_KEY, type WorkspacePurpose } from "./workspace-purpose";
 import {
   MetaApiError,
   type MetaTargetingResolution,
@@ -10281,6 +10282,33 @@ async function lookupWorkspaceVerticals(workspaceIds: string[]): Promise<Record<
   }
 }
 
+async function lookupWorkspacePurposes(workspaceIds: string[]): Promise<Record<string, WorkspacePurpose>> {
+  const ids = [...new Set(workspaceIds.filter((id) => isUuid(id)))];
+  if (ids.length === 0) return {};
+  const supabase = getSupabaseServerClient();
+  if (!supabase) throw new Error("workspace_profile_unavailable");
+
+  const { data, error } = await supabase.from("workspace_settings")
+    .select("workspace_id, value").in("workspace_id", ids).eq("key", WORKSPACE_PURPOSE_SETTINGS_KEY);
+  if (error || !Array.isArray(data)) throw new Error("workspace_profile_unavailable");
+
+  // A missing setting is legacy clinic mode, not a failed or malformed read.
+  const purposes: Record<string, WorkspacePurpose> = {};
+  for (const id of ids) purposes[id] = "clinic_services";
+  const seen = new Set<string>();
+  for (const row of data) {
+    const record = asRecord(row);
+    const id = firstString(record.workspace_id);
+    if (!isUuid(id)) throw new Error("workspace_profile_unavailable");
+    if (!ids.includes(id)) continue;
+    const purpose = asRecord(record.value).purpose;
+    if (!isWorkspacePurpose(purpose) || seen.has(id)) throw new Error("workspace_profile_unavailable");
+    purposes[id] = purpose;
+    seen.add(id);
+  }
+  return purposes;
+}
+
 async function lookupWorkspaceNames(workspaceIds: string[]): Promise<Record<string, string>> {
   const ids = [...new Set(workspaceIds.filter((id) => isUuid(id)))];
   if (ids.length === 0) return {};
@@ -10319,9 +10347,10 @@ export async function handleCrmAuthContext(req: VercelRequest, res: VercelRespon
     // Selection-1: a caller with several memberships has to pick one, and a
     // list of UUIDs is not a choice anyone can make.
     const workspaceIds = memberships.map((membership) => membership.workspaceId);
-    const [workspaceNames, workspaceVerticals] = await Promise.all([
+    const [workspaceNames, workspaceVerticals, workspacePurposes] = await Promise.all([
       lookupWorkspaceNames(workspaceIds),
       lookupWorkspaceVerticals(workspaceIds),
+      lookupWorkspacePurposes(workspaceIds),
     ]);
     const safeMemberships = memberships.map((membership) => ({
       staffUserId: membership.staffUserId,
@@ -10330,6 +10359,7 @@ export async function handleCrmAuthContext(req: VercelRequest, res: VercelRespon
       // Вертикаль едет вместе с членством: браузер выбирает словарь подписей
       // до первого запроса данных, и переключение клиники меняет его сразу.
       vertical: workspaceVerticals[membership.workspaceId] || DEFAULT_VERTICAL,
+      purpose: workspacePurposes[membership.workspaceId],
       role: membership.role,
       permissions: membership.permissions,
       status: "active",
@@ -10355,6 +10385,7 @@ export async function handleCrmAuthContext(req: VercelRequest, res: VercelRespon
         workspaceId: selected ? selected.workspaceId : null,
         role: selected ? selected.role : null,
         staffUserId: selected ? selected.staffUserId : null,
+        purpose: selected ? selected.purpose : null,
         permissions: selected ? selected.permissions : [],
         // Роль администратора считает сервер, а не браузер: список ролей с
         // правом администрирования живёт в каталоге разрешений.
