@@ -158,11 +158,9 @@ export async function handleWazzupWebhook(req: VercelRequest, res: VercelRespons
   try {
     const counts = await processInboundWhatsAppMessages(supabase, WAZZUP_TABLES, inbound);
     return sendJson(res, 200, { success: true, ...counts });
-  } catch (error) {
-    // Scope only — never the payload: phones, names and texts are patient
-    // data and must not reach the logs.
-    const detail = error instanceof Error ? error.message : String(error);
-    console.warn(`[wazzup] webhook processing failed: ${detail}`);
+  } catch {
+    // Database errors may contain row values or secrets; log a fixed event only.
+    console.warn("[wazzup] webhook processing failed");
     return sendJson(res, 503, { success: false, error: "Service unavailable" });
   }
 }

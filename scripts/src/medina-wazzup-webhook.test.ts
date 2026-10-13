@@ -43,6 +43,7 @@ function mockResponse(): MockResponse {
 type SpyOptions = {
   rows?: Record<string, unknown[]>;
   errors?: Record<string, string>;
+  throws?: Record<string, object>;
   /**
    * Models a database where migration 028 has not been applied: any query
    * filtering on leads.phone_normalized answers Postgres 42703 the way
@@ -64,6 +65,7 @@ function spyClient(options: SpyOptions, log: QueryLog[]) {
       const entry: QueryLog = { table, op: "select", filters: {} };
       log.push(entry);
       const settle = (shape: "one" | "list") => {
+        if (options.throws?.[table]) return Promise.reject(options.throws[table]);
         if (options.phoneNormalizedLookupError && "phone_normalized" in entry.filters) {
           return Promise.resolve({
             data: null,
@@ -117,7 +119,10 @@ async function loadHandler(options: SpyOptions = {}, env: { secret?: string | nu
   const log: QueryLog[] = [];
   const warnings: string[] = [];
   const originalWarn = console.warn;
-  console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(" ")); };
+  // The spy must not stringify an injected error on the handler's behalf.
+  console.warn = (...args: unknown[]) => {
+    warnings.push(args.map((arg) => typeof arg === "string" ? arg : "[non-string warning argument]").join(" "));
+  };
 
   if (env.secret === null) delete process.env.WAZZUP_WEBHOOK_SECRET;
   else process.env.WAZZUP_WEBHOOK_SECRET = env.secret ?? SECRET;
@@ -131,7 +136,7 @@ async function loadHandler(options: SpyOptions = {}, env: { secret?: string | nu
   let clientCreations = 0;
   supabaseModule.setSupabaseServerClientFactoryForTests(() => {
     clientCreations += 1;
-    if (options.rows === undefined && options.errors === undefined) return null;
+    if (options.rows === undefined && options.errors === undefined && options.throws === undefined) return null;
     return spyClient(options, log);
   });
 
@@ -557,6 +562,88 @@ test("WZ15 neither the phone nor the message text reaches the logs", async () =>
       assert.equal(logged.includes("Тестовый Пациент"), false, "and the name");
     },
   );
+});
+
+for (const { id, stage, table, expectedTables } of [
+  {
+    id: "WZ23", stage: "ledger", table: "wazzup_inbound_messages",
+    expectedTables: ["wazzup_inbound_messages"],
+  },
+  {
+    id: "WZ24", stage: "channel", table: "wazzup_channels",
+    expectedTables: ["wazzup_inbound_messages", "wazzup_channels"],
+  },
+  {
+    id: "WZ25", stage: "lead", table: "leads",
+    expectedTables: ["wazzup_inbound_messages", "wazzup_channels", "leads"],
+  },
+]) {
+  test(`${id} a ${stage} lookup error cannot disclose synthetic private data in warnings or the retry response`, async () => {
+    const privateData = {
+      detail: `SYNTHETIC_${id}_DATABASE_DETAIL`,
+      phone: "77010000023",
+      contactName: "SYNTHETIC_WZ_CONTACT_NAME",
+      text: "SYNTHETIC_WZ_MESSAGE_TEXT",
+      email: "synthetic-wz-contact@example.invalid",
+      token: "SYNTHETIC_WZ_TOKEN_DO_NOT_USE",
+      service_role_key: "SYNTHETIC_WZ_KEY_DO_NOT_USE",
+    };
+    await withHandler({
+      rows: { wazzup_channels: [channelRow], wazzup_inbound_messages: [], leads: [] },
+      errors: { [table]: JSON.stringify(privateData) },
+    }, {}, async (ctx) => {
+      const { res, log, warnings } = await ctx.call({
+        secret: SECRET,
+        body: { messages: [inboundMessage({ chatId: privateData.phone, contact: { name: privateData.contactName }, text: privateData.text })] },
+      });
+
+      assert.deepEqual(log.map((entry) => entry.table), expectedTables, "the fixture must reach the intended failing lookup");
+      assert.equal(leadInserts(log).length, 0, "a failed lookup must leave the retry without a new lead");
+      assert.equal(res.statusCode, 503, "Wazzup must retry the database failure");
+      assert.deepEqual(res.body, { success: false, error: "Service unavailable" });
+
+      const disclosed = `${warnings.join("\n")}\n${JSON.stringify(res.body)}`;
+      for (const marker of [
+        ...Object.values(privateData), ...Object.keys(privateData),
+        SECRET, "test-service-role-key", CHANNEL_A, MESSAGE_1, WORKSPACE_A,
+      ]) {
+        assert.equal(disclosed.includes(marker), false, `warnings and the retry response must omit ${marker}`);
+      }
+      assert.deepEqual(warnings, ["[wazzup] webhook processing failed"], "only the fixed failure scope may be logged");
+    });
+  });
+}
+
+test("WZ26 a database-rejected object is neither stringified nor JSON-serialized by the catch", async () => {
+  let stringifications = 0;
+  let serializations = 0;
+  const injectedError = {
+    message: "SYNTHETIC_WZ_OBJECT_DATABASE_DETAIL",
+    phone: "77010000026",
+    contactName: "SYNTHETIC_WZ_OBJECT_CONTACT_NAME",
+    text: "SYNTHETIC_WZ_OBJECT_MESSAGE_TEXT",
+    email: "synthetic-wz-object@example.invalid",
+    token: "SYNTHETIC_WZ_OBJECT_TOKEN_DO_NOT_USE",
+    service_role_key: "SYNTHETIC_WZ_OBJECT_KEY_DO_NOT_USE",
+    toString() { stringifications += 1; return this.message; },
+    toJSON() { serializations += 1; return this.message; },
+  };
+  await withHandler({
+    rows: { wazzup_channels: [channelRow], wazzup_inbound_messages: [], leads: [] },
+    throws: { wazzup_channels: injectedError },
+  }, {}, async (ctx) => {
+    const { res, log, warnings } = await ctx.call({
+      secret: SECRET,
+      body: { messages: [inboundMessage({ chatId: injectedError.phone, contact: { name: injectedError.contactName }, text: injectedError.text })] },
+    });
+
+    assert.deepEqual(log.map((entry) => entry.table), ["wazzup_inbound_messages", "wazzup_channels"]);
+    assert.equal(res.statusCode, 503, "an arbitrary database rejection must still allow Wazzup to retry");
+    assert.deepEqual(res.body, { success: false, error: "Service unavailable" });
+    assert.equal(stringifications, 0, "the catch must not call String(error), toString or implicit coercion");
+    assert.equal(serializations, 0, "the catch must not JSON.stringify the injected error");
+    assert.deepEqual(warnings, ["[wazzup] webhook processing failed"]);
+  });
 });
 
 // ===========================================================================

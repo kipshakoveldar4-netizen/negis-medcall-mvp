@@ -227,11 +227,9 @@ export async function handleWhatsAppCloudWebhook(
   try {
     const counts = await processInboundWhatsAppMessages(supabase, CLOUD_TABLES, inbound);
     return sendJson(res, 200, { success: true, ...counts });
-  } catch (error) {
-    // Scope only — never the payload: phones, names and texts are patient
-    // data and must not reach the logs.
-    const detail = error instanceof Error ? error.message : String(error);
-    console.warn(`[whatsapp-cloud] webhook processing failed: ${detail}`);
+  } catch {
+    // Database errors may contain row values or secrets; log a fixed event only.
+    console.warn("[whatsapp-cloud] webhook processing failed");
     return sendJson(res, 503, { success: false, error: "Service unavailable" });
   }
 }
