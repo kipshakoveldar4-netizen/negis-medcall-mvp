@@ -42,7 +42,7 @@ const plan = JSON.parse(await readFile(new URL("../fixtures/baspana-account-prep
   status: string;
   target: { environment: string; database: string; previewOrigin: string };
   company: { name: string; city: string; country: string };
-  platformBusiness: { reportedName: string; website: null; metaPortfolioId: null; verificationStatus: string };
+  platformBusiness: { reportedName: string; website: null; websiteStatus: string; metaPortfolioId: null; verificationStatus: string };
   onboardingDraft: Record<string, unknown>;
   proposedTimeZone: string;
   accounts: { login: string; fullName: string; role: PlannedRole }[];
@@ -163,9 +163,11 @@ test("The reported platform business is separate from the client and remains unv
   assert.notEqual(plan.platformBusiness.reportedName, plan.company.name);
   assert.notEqual(plan.platformBusiness.reportedName, "Moto Shtorm");
   assert.equal(plan.platformBusiness.website, null, "a website must not be invented");
+  assert.equal(plan.platformBusiness.websiteStatus, "absent", "the owner confirmed there is no public website");
   assert.equal(plan.platformBusiness.metaPortfolioId, null, "the existing app portfolio is not assumed to belong to the platform IP");
   assert.equal(plan.platformBusiness.verificationStatus, "not_submitted");
-  assert.ok(plan.pending.includes("platform_public_website"));
+  assert.ok(!plan.pending.includes("platform_public_website"), "website availability must not be asked again");
+  assert.ok(plan.pending.includes("platform_website_requirement_or_preparation"));
   assert.ok(plan.pending.includes("platform_business_identity_and_portfolio"));
   assert.equal(plan.whatsapp.provider, null);
   assert.equal(plan.whatsapp.enabled, false);
