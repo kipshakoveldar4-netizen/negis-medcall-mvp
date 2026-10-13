@@ -47,7 +47,7 @@ const plan = JSON.parse(await readFile(new URL("../fixtures/baspana-account-prep
   proposedTimeZone: string;
   accounts: { login: string; fullName: string; role: PlannedRole }[];
   assignment: { mode: string; assignedByRole: string; assigneeRole: string; managerVisibility: string; unassignedVisibleTo: string[] };
-  whatsapp: { selectedApproach: string; metaAppId: string; provider: null; enabled: boolean; phoneNumberId: null; channelId: null; inboundOnly: boolean; preserveBusinessApp: boolean; importHistory: boolean };
+  whatsapp: { selectedApproach: string; connectionMode: string; allowApiOnly: boolean; metaAppId: string; provider: null; enabled: boolean; phoneNumberId: null; channelId: null; inboundOnly: boolean; preserveBusinessApp: boolean; importHistory: boolean };
   pending: string[];
 };
 
@@ -171,4 +171,18 @@ test("The reported platform business is separate from the client and remains unv
   assert.ok(plan.pending.includes("platform_business_identity_and_portfolio"));
   assert.equal(plan.whatsapp.provider, null);
   assert.equal(plan.whatsapp.enabled, false);
+});
+
+test("Baspana requires Coexistence and cannot use an API-only fallback in preparation", () => {
+  assert.equal(plan.whatsapp.connectionMode, "coexistence");
+  assert.equal(plan.whatsapp.allowApiOnly, false);
+  assert.equal(plan.whatsapp.preserveBusinessApp, true);
+  assert.equal(plan.whatsapp.inboundOnly, true);
+  assert.equal(plan.whatsapp.importHistory, false);
+  assert.equal(plan.whatsapp.provider, null);
+  assert.equal(plan.whatsapp.enabled, false);
+  assert.equal(plan.whatsapp.phoneNumberId, null);
+  assert.equal(plan.whatsapp.channelId, null);
+  assert.ok(plan.pending.includes("coexistence_embedded_signup_acceptance"));
+  assert.ok(plan.pending.includes("shared_meta_callback_isolation"));
 });

@@ -44,6 +44,8 @@
   },
   "whatsapp": {
     "selectedApproach": "direct_meta_negis",
+    "connectionMode": "coexistence",
+    "allowApiOnly": false,
     "metaAppId": "1791176138576964",
     "provider": null,
     "enabled": false,
