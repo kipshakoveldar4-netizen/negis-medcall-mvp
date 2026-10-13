@@ -31,7 +31,8 @@ const VALID = {
   timeZone: "Asia/Almaty",
 };
 
-const { onboardingSettings, readOnboardingPurpose } = await import(pathToFileURL(path.join(repoRoot, "lib/crm/workspace-purpose.ts")).href) as {
+const { onboardingSettings, readOnboardingPurpose, isWorkspacePurpose } = await import(pathToFileURL(path.join(repoRoot, "lib/crm/workspace-purpose.ts")).href) as {
+  isWorkspacePurpose(value: unknown): boolean;
   readOnboardingPurpose(value: unknown): "clinic_services" | "marketing" | "mortgage_leads" | null;
   onboardingSettings(id: string, input: { purpose: "clinic_services" | "marketing" | "mortgage_leads"; vertical: "clinic" | "beauty" | "dental" | null; timeZone: string }): unknown[];
 };
@@ -41,6 +42,11 @@ test("Marketing purpose is explicit and rejects unknown values", () => {
   assert.equal(readOnboardingPurpose("marketing"), "marketing");
   assert.equal(readOnboardingPurpose("mortgage_leads"), "mortgage_leads");
   for (const value of [null, "", "unknown", {}, true]) assert.equal(readOnboardingPurpose(value), null);
+});
+
+test("A confirmed workspace purpose is explicit, unlike the legacy onboarding default", () => {
+  for (const purpose of ["clinic_services", "marketing", "mortgage_leads"]) assert.equal(isWorkspacePurpose(purpose), true);
+  for (const value of [undefined, null, "", "unknown", "clinic", {}, true]) assert.equal(isWorkspacePurpose(value), false);
 });
 
 test("Marketing settings do not assign a medical vertical or change advertising policy", () => {

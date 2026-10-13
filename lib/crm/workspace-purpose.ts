@@ -3,9 +3,13 @@ import { isVertical, VERTICAL_SETTINGS_KEY, type Vertical } from "../vertical/te
 export type WorkspacePurpose = "clinic_services" | "marketing" | "mortgage_leads";
 export const WORKSPACE_PURPOSE_SETTINGS_KEY = "workspace_purpose";
 
+export function isWorkspacePurpose(value: unknown): value is WorkspacePurpose {
+  return value === "clinic_services" || value === "marketing" || value === "mortgage_leads";
+}
+
 export function readOnboardingPurpose(value: unknown): WorkspacePurpose | null {
   if (value === undefined || value === "clinic_services") return "clinic_services";
-  return value === "marketing" || value === "mortgage_leads" ? value : null;
+  return isWorkspacePurpose(value) ? value : null;
 }
 
 /** Purpose is not an advertising compliance policy or a permission grant. */

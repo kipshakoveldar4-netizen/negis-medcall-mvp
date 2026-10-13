@@ -2,6 +2,7 @@ import React, { createContext, useContext, useEffect, useRef, useState } from 'r
 import { Session, User } from '@supabase/supabase-js';
 import { supabase } from '@/lib/supabase';
 import { DEFAULT_VERTICAL, readVertical, type Vertical } from '../../../../lib/vertical/terms';
+import { isWorkspacePurpose, type WorkspacePurpose } from '../../../../lib/crm/workspace-purpose';
 import { useLocation } from 'wouter';
 import { toast } from 'sonner';
 import { apiUrl, clearCrmCache, crmFetch } from '@/lib/api';
@@ -82,6 +83,7 @@ interface AuthContextType {
   isStaffMode: boolean;
   /** Ниша рабочего пространства: она решает подписи и правила рекламы. */
   vertical: Vertical;
+  workspacePurpose: WorkspacePurpose | null;
   impersonationClinicName: string | null;
   /**
    * Selection-1: every workspace the server listed for this user. The server
@@ -97,7 +99,7 @@ interface AuthContextType {
   signOut: () => Promise<void>;
 }
 
-export type WorkspaceChoice = { id: string; name: string; role: string; vertical: Vertical };
+export type WorkspaceChoice = { id: string; name: string; role: string; vertical: Vertical; purpose: WorkspacePurpose };
 
 /* ── Constants ────────────────────────────────────────────── */
 const IMP_KEY     = 'negis_impersonation';
@@ -293,6 +295,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [clinicId,                setClinicId]                = useState<string | null>(null);
   const [userRole,                setUserRole]                = useState<UserRole | null>(null);
   const [vertical,                setVertical]                = useState<Vertical>(DEFAULT_VERTICAL);
+  const [workspacePurpose, setWorkspacePurpose] = useState<WorkspacePurpose | null>(null);
   const [rolePermissions,         setRolePermissions]         = useState<RolePermissions>({});
   const [isLoading,               setIsLoading]               = useState(true);
   const [isImpersonation,         setIsImpersonation]         = useState(false);
@@ -306,6 +309,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   // callback would capture whatever the closure saw when it was created.
   const membershipsRef = useRef<AuthContextMembership[]>([]);
   const userRef = useRef<User | null>(null);
+  const authRevisionRef = useRef(0);
+  const authIdentityRef = useRef<string | null>(null);
+  const mountedRef = useRef(true);
   useEffect(() => {
     userRef.current = user;
   }, [user]);
@@ -314,11 +320,44 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const subscriptionRef = useRef<{ unsubscribe: () => void } | null>(null);
 
   useEffect(() => {
-    initAuth();
-    return () => { subscriptionRef.current?.unsubscribe(); };
+    mountedRef.current = true;
+    void initAuth();
+    return () => {
+      mountedRef.current = false;
+      authRevisionRef.current += 1;
+      subscriptionRef.current?.unsubscribe();
+    };
   }, []);
 
   /* ── Helpers ──────────────────────────────────────────── */
+
+  const isCurrentAuthResolution = (userId: string, revision: number) =>
+    mountedRef.current && authIdentityRef.current === userId && authRevisionRef.current === revision;
+
+  const beginAuthResolution = (nextUser: User | null) => {
+    const nextId = nextUser?.id ?? null;
+    const changed = authIdentityRef.current !== nextId;
+    authIdentityRef.current = nextId;
+    userRef.current = nextUser;
+    const revision = ++authRevisionRef.current;
+    if (changed || !nextUser) {
+      clearCrmCache();
+      clearListReadCache();
+      membershipsRef.current = [];
+      setAvailableWorkspaces([]);
+      setClinicId(null);
+      setUserRole(null);
+      setRolePermissions({});
+      setVertical(DEFAULT_VERTICAL);
+      setWorkspacePurpose(null);
+      setIsStaffMode(false);
+      setIsDemoMode(false);
+      setIsImpersonation(false);
+      setImpersonationClinicName(null);
+      setIsLoading(Boolean(nextUser));
+    }
+    return revision;
+  };
 
   /** Apply stored impersonation state to React state (idempotent). */
   const applyImpersonationState = (d: ImpersonationData) => {
@@ -329,6 +368,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setImpersonationClinicName(d.clinic_name);
     setUserRole('owner');
     setRolePermissions(ALL_PERMISSIONS);
+    setVertical(DEFAULT_VERTICAL);
+    setWorkspacePurpose('clinic_services');
   };
 
   const applyDemoWorkspaceState = (d: DemoAuthData) => {
@@ -348,6 +389,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setImpersonationClinicName(null);
     setUserRole('owner');
     setRolePermissions(ALL_PERMISSIONS);
+    setVertical(DEFAULT_VERTICAL);
+    setWorkspacePurpose('clinic_services');
     setSession(null);
     setUser(demoUser);
   };
@@ -371,6 +414,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setImpersonationClinicName(null);
     setUserRole(role);
     setRolePermissions(routePermissionsForStaffRole(role));
+    setVertical(DEFAULT_VERTICAL);
+    setWorkspacePurpose('clinic_services');
     setUser(staffUser);
   };
 
@@ -386,14 +431,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     role: string;
     permissions: string[];
     vertical: Vertical;
+    purpose: WorkspacePurpose;
   };
 
-  const fetchAuthContext = async (): Promise<{
+  const fetchAuthContext = async (userId: string, revision: number): Promise<{
     memberships: AuthContextMembership[];
     status: number;
   }> => {
     try {
-      const accessToken = await getSupabaseAccessToken();
+      const accessToken = await getSupabaseAccessToken(userId);
+      if (!isCurrentAuthResolution(userId, revision)) return { memberships: [], status: 0 };
       if (!accessToken) return { memberships: [], status: 401 };
 
       const response = await crmFetch('/api/crm/auth-context', { accessToken });
@@ -404,6 +451,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       if (body?.success !== true || !body.data) return { memberships: [], status: response.status };
 
       const raw = Array.isArray(body.data.memberships) ? body.data.memberships : [];
+      if (raw.some((entry) => !entry || typeof entry !== 'object' || !isWorkspacePurpose((entry as Record<string, unknown>).purpose))) {
+        return { memberships: [], status: 422 };
+      }
       const memberships = raw
         .map((entry) => entry as Record<string, unknown>)
         .filter((entry) => typeof entry.workspaceId === 'string' && typeof entry.role === 'string')
@@ -417,6 +467,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           // первого запроса данных, а переключение клиники меняет его сразу.
           // Неизвестное значение — клиника: readVertical сам падает в умолчание.
           vertical: readVertical(entry.vertical),
+          purpose: entry.purpose as WorkspacePurpose,
         }));
 
       return { memberships, status: response.status };
@@ -434,6 +485,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       // Ниша нужна прямо здесь: в списке клиник у одной роли разные подписи —
       // «Врач» в клинике и «Мастер» в салоне.
       vertical: entry.vertical,
+      purpose: entry.purpose,
     }));
 
   const rememberSelector = (workspaceId: string | null) => {
@@ -460,13 +512,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setImpersonationClinicName(null);
     setUserRole(role);
     setVertical(selected.vertical);
+    setWorkspacePurpose(selected.purpose);
     setRolePermissions(routePermissionsForStaffRole(role));
     setUser(supabaseUser);
     setAvailableWorkspaces(toWorkspaceChoices(memberships));
   };
 
-  const tryApplySupabaseStaffUser = async (supabaseUser: User): Promise<boolean> => {
-    const { memberships, status } = await fetchAuthContext();
+  const tryApplySupabaseStaffUser = async (supabaseUser: User, revision: number): Promise<boolean> => {
+    const { memberships, status } = await fetchAuthContext(supabaseUser.id, revision);
+    if (!isCurrentAuthResolution(supabaseUser.id, revision)) return true;
 
     // «Прочитать не удалось» — не то же самое, что «членств нет». Разница стала
     // видна, когда смену пароля вынесли в кабинет: updateUser поднимает
@@ -485,9 +539,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       return true;
     }
 
+    if (JSON.stringify(membershipsRef.current) !== JSON.stringify(memberships)) {
+      clearCrmCache();
+      clearListReadCache();
+    }
     membershipsRef.current = memberships;
     if (memberships.length === 0) {
       setAvailableWorkspaces([]);
+      if (status === 422) {
+        applyNoWorkspaceAccess(false);
+        toast.error('Не удалось подтвердить профиль рабочего пространства. Обновите страницу или обратитесь в поддержку.');
+        return true;
+      }
       return false;
     }
 
@@ -532,7 +595,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const selected = memberships.find((entry) => entry.workspaceId === workspaceId);
     const supabaseUser = userRef.current;
 
-    if (!selected || !supabaseUser) {
+    if (!selected || !supabaseUser || authIdentityRef.current !== supabaseUser.id) {
       toast.error('Клиника недоступна. Войдите заново.');
       return;
     }
@@ -554,6 +617,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setClinicId(null);
     setUserRole(null);
     setRolePermissions({});
+    setVertical(DEFAULT_VERTICAL);
+    setWorkspacePurpose(null);
   };
 
   /* ── 1. Init ──────────────────────────────────────────── */
@@ -624,7 +689,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   /* ── 2. Supabase subscription setup ───────────────────── */
   const setupSupabaseAuth = async () => {
     /* Set up the persistent listener FIRST so we don't miss events */
+    subscriptionRef.current?.unsubscribe();
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, sess) => {
+      if (!mountedRef.current) return;
+      const revision = beginAuthResolution(sess?.user ?? null);
       setSession(sess);
       setUser(sess?.user ?? null);
 
@@ -652,7 +720,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
       if (sess?.user) {
         void (async () => {
-          const handledAsStaff = await tryApplySupabaseStaffUser(sess.user);
+          const handledAsStaff = await tryApplySupabaseStaffUser(sess.user, revision);
+          if (!isCurrentAuthResolution(sess.user.id, revision)) return;
           if (handledAsStaff) {
             setIsLoading(false);
             return;
@@ -669,7 +738,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     subscriptionRef.current = subscription;
 
     /* Then check the current session */
+    const initialRevision = authRevisionRef.current;
     const { data: { session: sess } } = await supabase.auth.getSession();
+    if (!mountedRef.current || authRevisionRef.current !== initialRevision) return;
+    const revision = beginAuthResolution(sess?.user ?? null);
     setSession(sess);
     setUser(sess?.user ?? null);
 
@@ -696,7 +768,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
 
     if (sess?.user) {
-      const handledAsStaff = await tryApplySupabaseStaffUser(sess.user);
+      const handledAsStaff = await tryApplySupabaseStaffUser(sess.user, revision);
+      if (!isCurrentAuthResolution(sess.user.id, revision)) return;
       if (handledAsStaff) {
         setIsLoading(false);
         return;
@@ -807,11 +880,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
      backed). It runs before this function. Reaching here therefore means the
      signed-in account is not linked to any clinic — we grant NO role and NO
      permissions rather than guessing or elevating. */
-  const applyNoWorkspaceAccess = () => {
+  const applyNoWorkspaceAccess = (notifyUnlinked = true) => {
     setClinicId(null);
     setUserRole(null);
     setRolePermissions({});
+    setVertical(DEFAULT_VERTICAL);
+    setWorkspacePurpose(null);
+    setIsStaffMode(false);
     setIsLoading(false);
+    if (!notifyUnlinked) return;
     // Selection-1: a user with several memberships is not unlinked, they have
     // not chosen yet. Telling them to call their administrator sent them to
     // someone who could not have helped.
@@ -836,6 +913,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   /* ── 5. Sign out ──────────────────────────────────────── */
   const signOut = async () => {
+    beginAuthResolution(null);
     // Nothing the previous account read may survive into the next one.
     clearCrmCache();
     // Второй кэш — списков экранов. Он жил в памяти модуля с ключом
@@ -898,6 +976,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       session, user, clinicId, userRole, isLoading,
       rolePermissions,
       isImpersonation, isDemoMode, isStaffMode, impersonationClinicName, vertical,
+      workspacePurpose,
       availableWorkspaces, selectWorkspace, clearWorkspaceSelection,
       signOut,
     }}>
