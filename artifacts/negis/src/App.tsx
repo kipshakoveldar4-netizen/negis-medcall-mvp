@@ -6,6 +6,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { AuthProvider } from "@/contexts/AuthContext";
 import { useAuth } from "@/contexts/AuthContext";
 import { workspaceAllowsRoute } from "@/lib/workspaceRoutes";
+import { LoaderCircle, RotateCw } from "lucide-react";
 
 // Eager: the public entry (Landing) and the shared fallbacks stay in the main
 // chunk so the first paint never waits on a second request.
@@ -345,18 +346,34 @@ function Router() {
 }
 
 /* ── App ── */
+function SessionContent() {
+  const { isSigningOut, signOutFailed, signOut } = useAuth();
+  if (isSigningOut) return (
+    <main className="flex min-h-screen flex-col items-center justify-center gap-4 px-6 text-center" aria-live="polite" style={{ background: "var(--negis-bg)", color: "var(--negis-text)" }}>
+      {!signOutFailed && <LoaderCircle size={24} className="animate-spin" aria-hidden="true" />}
+      <h1 className="text-lg font-semibold">{signOutFailed ? 'Не удалось завершить выход' : 'Выходим из аккаунта'}</h1>
+      {signOutFailed && <button type="button" className="flex min-h-11 items-center gap-2 rounded-md border px-4 text-sm font-medium" onClick={() => void signOut()}>
+        <RotateCw size={16} aria-hidden="true" />Повторить выход
+      </button>}
+    </main>
+  );
+  return <>
+    <FbPixelInit />
+    <ImpersonationBanner />
+    <WorkspacePicker />
+    <RoutePrefetcher />
+    <Router />
+    <UpdatePrompt />
+  </>;
+}
+
 function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, "")}>
         <AuthProvider>
           <TooltipProvider>
-            <FbPixelInit />
-            <ImpersonationBanner />
-            <WorkspacePicker />
-            <RoutePrefetcher />
-            <Router />
-            <UpdatePrompt />
+            <SessionContent />
             <Toaster position="bottom-right" />
           </TooltipProvider>
         </AuthProvider>

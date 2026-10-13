@@ -275,6 +275,7 @@ async function fixture(t: TestContext, options: { history?: boolean; holdHealth?
     return exports;
   }
   const serverAuth = evaluate<{ getSupabaseAccessToken(expected?: string): Promise<string> }>(code.auth, "auth.simulation.cjs", (name) => {
+    if (name === "@/lib/authSignOut") return { isSignOutPending: () => false, getSignOutRevision: () => 0 };
     assert.equal(name, "@/lib/supabase"); return { hasSupabaseFrontendEnv: true, supabase };
   });
   const api = evaluate<{ crmFetch(path: string, init?: RequestInit): Promise<Response> }>(code.api, "api.simulation.cjs", (name) => {

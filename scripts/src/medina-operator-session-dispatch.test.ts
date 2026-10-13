@@ -73,6 +73,7 @@ async function fixture() {
     return exports;
   }
   const auth = evaluate<{ getSupabaseAccessToken(expected?: string): Promise<string> }>(code.auth, "serverAuth.fixture.cjs", (name) => {
+    if (name === "@/lib/authSignOut") return { isSignOutPending: () => false, getSignOutRevision: () => 0 };
     assert.equal(name, "@/lib/supabase");
     return { hasSupabaseFrontendEnv: true, supabase: { auth: { async getSession() {
       state.lookups++;

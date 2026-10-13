@@ -264,8 +264,11 @@ test("P18 sign-out and a clinic switch drop the cache", async () => {
   const source = await readSource("contexts", "AuthContext.tsx");
 
   assert.ok(source.includes("clearCrmCache"), "AuthContext must be able to drop it");
-  const signOut = source.slice(source.indexOf("const signOut = async"), source.indexOf("const signOut = async") + 400);
+  const signOutAt = source.indexOf("const signOut =");
+  assert.ok(signOutAt >= 0, "the exact logout handler exists");
+  const signOut = source.slice(signOutAt, source.indexOf("  return (", signOutAt));
   assert.ok(signOut.includes("clearCrmCache()"), "nothing the previous account read may survive into the next one");
+  assert.ok(signOut.indexOf("clearCrmCache()") < signOut.indexOf("const request ="), "the cache drops before the SDK request starts");
   const select = source.slice(source.indexOf("const selectWorkspace"), source.indexOf("const clearWorkspaceSelection"));
   assert.ok(select.includes("clearCrmCache()"), "a cache that outlives a tenant switch leaks one clinic into another");
 });

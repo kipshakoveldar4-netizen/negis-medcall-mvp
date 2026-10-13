@@ -207,10 +207,12 @@ test("CP9 кэш списков не переживает смену польз�
   // ресепшена мастер, вошедший следом за регистратором, первую минуту видел бы
   // её строки с телефонами — до того как придёт срезанный ответ сервера.
   assert.ok(/export function clearListReadCache/.test(storage), "кэш умеет очищаться");
-  const signOutAt = auth.indexOf("const signOut");
-  const signOutBody = auth.slice(signOutAt, signOutAt + 900);
+  const signOutAt = auth.indexOf("const signOut =");
+  assert.ok(signOutAt >= 0, "обработчик выхода существует, не путать его с signOutRequestRef");
+  const signOutBody = auth.slice(signOutAt, auth.indexOf("  return (", signOutAt));
   assert.ok(/clearListReadCache\(\)/.test(signOutBody), "и очищается при выходе");
   assert.ok(/clearCrmCache\(\)/.test(signOutBody), "рядом с общим кэшем запросов");
+  assert.ok(signOutBody.indexOf("clearListReadCache()") < signOutBody.indexOf("const request ="), "кэш очищается до ожидания SDK");
 });
 
 /* ── Свой клиент против клиента клиники (правило владельца от 21.08.2026) ── */

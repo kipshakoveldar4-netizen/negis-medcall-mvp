@@ -12,6 +12,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..")
 const ts = createRequire(path.join(root, "package.json"))("typescript") as typeof import("typescript");
 const read = (file: string) => readFile(path.join(root, file), "utf8");
 const source = await read("artifacts/negis/src/contexts/AuthContext.tsx");
+const signOutSource = await read("artifacts/negis/src/lib/authSignOut.ts");
 const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value));
 
 type Node = { type: any; props: Record<string, any> };
@@ -194,17 +195,20 @@ type Snapshot = {
   rolePermissions: Record<string, boolean>; vertical: string; workspacePurpose: string | null;
   availableWorkspaces: { id: string; name: string; role: string; vertical: string; purpose: string }[];
   isLoading: boolean; isStaffMode: boolean; isDemoMode: boolean; isImpersonation: boolean;
+  isSigningOut: boolean; signOutFailed: boolean;
   selectWorkspace: (id: string) => void; clearWorkspaceSelection: () => void; signOut: () => Promise<void>;
 };
 type Init = RequestInit & { accessToken?: string; expectedUserId?: string };
 type PendingRequest = { url: string; init: Init; actor: string | undefined; reply: (body: unknown, status?: number) => void;
   resolve: (response: Response) => void; reject: (error: unknown) => void };
-type Options = { initialActor?: string | null; deferSession?: boolean; storage?: Record<string, string> };
+type Options = { initialActor?: string | null; deferSession?: boolean; storage?: Record<string, string>;
+  sessionStorage?: Record<string, string>; deferSignOut?: boolean };
 
 function setup(options: Options = {}) {
   const renderer = hookRenderer();
   const storage = memoryStorage(options.storage);
-  const sessionStorage = memoryStorage();
+  const sessionStorage = memoryStorage(options.sessionStorage);
+  const signOutBoundary = evaluate(signOutSource, {}, { window: { localStorage: storage, sessionStorage } });
   const sessionGate = deferred<{ data: { session: ReturnType<typeof localSession> } }>();
   const callbacks = new Set<(event: string, session: ReturnType<typeof localSession>) => void>();
   const requests: PendingRequest[] = [];
@@ -218,6 +222,9 @@ function setup(options: Options = {}) {
   let sdkActor = options.initialActor === undefined ? actorA : options.initialActor;
   let tokenReply: ((expected?: string) => Promise<string>) | undefined;
   let logoutGate: ReturnType<typeof deferred<void>> | undefined;
+  if (options.deferSignOut) logoutGate = deferred<void>();
+  let logoutFailure: "return" | "throw" | null = null;
+  let completedSignOuts = 0;
   let signOutCalls = 0;
   let getSessionCalls = 0;
   if (!options.deferSession) sessionGate.resolve({ data: { session: localSession(sdkActor) } });
@@ -231,10 +238,17 @@ function setup(options: Options = {}) {
       callbacks.add(callback);
       return { data: { subscription: { unsubscribe: () => callbacks.delete(callback) } } };
     },
-    getSession() { getSessionCalls += 1; return sessionGate.promise; },
+    getSession() {
+      getSessionCalls += 1;
+      return completedSignOuts > 0
+        ? Promise.resolve({ data: { session: localSession(sdkActor) } }) : sessionGate.promise;
+    },
     async signOut() {
       signOutCalls += 1;
       if (logoutGate) await logoutGate.promise;
+      if (logoutFailure === "throw") throw new Error("Isolated SDK logout failure");
+      if (logoutFailure === "return") return { error: new Error("Isolated SDK logout failure") };
+      completedSignOuts += 1;
       emit(null);
       return { error: null };
     },
@@ -242,6 +256,7 @@ function setup(options: Options = {}) {
   const auth = evaluate(source, {
     react: { ...renderer.hooks, default: renderer.hooks },
     "@/lib/supabase": { supabase: { auth: sdk } },
+    "@/lib/authSignOut": signOutBoundary,
     "../../../../lib/vertical/terms": terms,
     "../../../../lib/crm/workspace-purpose": purposes,
     wouter: { useLocation: () => ["/dashboard", (location: string) => locations.push(location)] },
@@ -276,12 +291,14 @@ function setup(options: Options = {}) {
   function Probe() { snapshot = auth.useAuth(); return null; }
   renderer.mount(auth.AuthProvider, Probe);
   return {
-    renderer, storage, sessionGate, requests, tokenCalls, cacheClears, caches, toasts, locations, emit,
+    renderer, storage, sessionStorage, signOutBoundary, sessionGate, requests, tokenCalls, cacheClears, caches, toasts, locations, emit,
     snapshot: () => snapshot,
     subscriptions: () => callbacks.size,
     sdkCalls: () => ({ signOut: signOutCalls, getSession: getSessionCalls }),
     token(reply?: typeof tokenReply) { tokenReply = reply; },
     holdSignOut() { logoutGate = deferred<void>(); return logoutGate; },
+    releaseSignOut() { logoutGate?.resolve(); },
+    failSignOut(kind: typeof logoutFailure) { logoutFailure = kind; },
     request(actor: string, index = 0) {
       const request = requests.filter((entry) => entry.actor === actor)[index];
       assert.ok(request, `missing bootstrap ${index + 1} for isolated actor ${actor}`);
@@ -303,9 +320,9 @@ async function confirm(fixture: Fixture, memberships = [membership()]) {
 }
 function context(fixture: Fixture) {
   const { user, session, clinicId, userRole, rolePermissions, vertical, workspacePurpose, availableWorkspaces,
-    isLoading, isStaffMode, isDemoMode, isImpersonation } = fixture.snapshot();
+    isLoading, isStaffMode, isDemoMode, isImpersonation, isSigningOut, signOutFailed } = fixture.snapshot();
   return clone({ user, session, clinicId, userRole, rolePermissions, vertical, workspacePurpose, availableWorkspaces,
-    isLoading, isStaffMode, isDemoMode, isImpersonation });
+    isLoading, isStaffMode, isDemoMode, isImpersonation, isSigningOut, signOutFailed });
 }
 function assertUnselected(fixture: Fixture, choices = false) {
   const value = fixture.snapshot();
@@ -565,6 +582,8 @@ test("signOut clears the confirmed profile and invalidates rechecks before a pen
     assertUnselected(fixture);
     assert.equal(fixture.snapshot().user, null);
     assert.equal(fixture.snapshot().session, null);
+    assert.equal(fixture.snapshot().isSigningOut, true);
+    assert.equal(fixture.snapshot().isLoading, true);
     assert.equal(fixture.sdkCalls().signOut, 1);
     const before = effects(fixture);
     await fixture.respond(recheck, success([membership()]));
@@ -573,6 +592,145 @@ test("signOut clears the confirmed profile and invalidates rechecks before a pen
     await signingOut;
     await fixture.renderer.flush();
     assertUnselected(fixture);
+    assert.equal(fixture.snapshot().isSigningOut, false);
+    assert.equal(fixture.signOutBoundary.isSignOutPending(), false);
+  });
+});
+
+test("SDK auth events during a pending logout cannot revive an account, bootstrap or unlinked toast", async () => {
+  await withFixture(async (fixture) => {
+    await confirm(fixture, [mortgage()]);
+    const gate = fixture.holdSignOut();
+    const signingOut = fixture.snapshot().signOut();
+    await fixture.renderer.flush();
+    const before = effects(fixture);
+    const requests = fixture.requests.length;
+    const tokens = fixture.tokenCalls.length;
+    for (const [actor, event] of [[actorA, "INITIAL_SESSION"], [actorA, "TOKEN_REFRESHED"],
+      [actorA, "USER_UPDATED"], [actorB, "SIGNED_IN"], [null, "SIGNED_OUT"]] as const) {
+      fixture.emit(actor, event);
+      await fixture.renderer.flush();
+      assert.deepEqual(effects(fixture), before, event);
+      assert.equal(fixture.requests.length, requests);
+      assert.equal(fixture.tokenCalls.length, tokens);
+      assertUnselected(fixture);
+      assert.equal(fixture.snapshot().user, null);
+    }
+    gate.resolve(); await signingOut; await fixture.renderer.flush();
+    fixture.emit(actorB); await fixture.renderer.flush();
+    await fixture.respond(fixture.request(actorB), success([mortgage()]));
+    assert.equal(fixture.snapshot().user?.id, actorB);
+    assert.equal(fixture.snapshot().workspacePurpose, "mortgage_leads");
+    assert.equal(fixture.snapshot().isSigningOut, false);
+    assert.equal(fixture.toasts.length, 0);
+  });
+});
+
+test("reload with a pending logout finishes SDK cleanup before any old-session profile lookup", async () => {
+  await withFixture(async (fixture) => {
+    assert.equal(fixture.snapshot().isSigningOut, true);
+    assert.equal(fixture.snapshot().isLoading, true);
+    assertUnselected(fixture);
+    assert.equal(fixture.requests.length, 0);
+    assert.equal(fixture.tokenCalls.length, 0);
+    assert.equal(fixture.sdkCalls().signOut, 1);
+    assert.equal(fixture.subscriptions(), 0);
+    fixture.releaseSignOut(); await fixture.renderer.flush();
+    assert.equal(fixture.signOutBoundary.isSignOutPending(), false);
+    assert.equal(fixture.snapshot().isSigningOut, false);
+    assert.equal(fixture.snapshot().user, null);
+    assert.equal(fixture.toasts.length, 0);
+    assert.equal(fixture.requests.length, 0);
+    assert.equal(fixture.subscriptions(), 1, "new logins remain observable after recovery");
+    fixture.emit(actorB); await fixture.renderer.flush();
+    await fixture.respond(fixture.request(actorB), success([mortgage()]));
+    assert.equal(fixture.snapshot().user?.id, actorB);
+  }, { initialActor: actorA, sessionStorage: { negis_signout_pending_v1: "1" }, deferSignOut: true });
+});
+
+test("SDK logout errors keep the UI fenced and retryable without claiming unlinked or successful logout", async () => {
+  for (const failure of ["return", "throw"] as const) {
+    await withFixture(async (fixture) => {
+      await confirm(fixture, [mortgage()]);
+      fixture.failSignOut(failure);
+      await fixture.snapshot().signOut(); await fixture.renderer.flush();
+      assertUnselected(fixture);
+      assert.equal(fixture.snapshot().user, null);
+      assert.equal(fixture.snapshot().session, null);
+      assert.equal(fixture.snapshot().isSigningOut, true);
+      assert.equal(fixture.snapshot().signOutFailed, true);
+      assert.equal(fixture.signOutBoundary.isSignOutPending(), true);
+      assert.equal(fixture.toasts.length, 0);
+      assert.equal(fixture.locations.length, 0);
+      fixture.emit(actorA, "TOKEN_REFRESHED"); await fixture.renderer.flush();
+      assert.equal(fixture.requests.length, 1);
+      fixture.failSignOut(null);
+      await fixture.snapshot().signOut(); await fixture.renderer.flush();
+      assert.equal(fixture.sdkCalls().signOut, 2);
+      assert.equal(fixture.snapshot().isSigningOut, false);
+      assert.equal(fixture.snapshot().signOutFailed, false);
+      assert.equal(fixture.signOutBoundary.isSignOutPending(), false);
+      assert.deepEqual(fixture.locations, ["/"]);
+      assert.equal(fixture.toasts.length, 0);
+    });
+  }
+});
+
+test("repeated logout clicks share one SDK request, marker and navigation", async () => {
+  await withFixture(async (fixture) => {
+    await confirm(fixture, [mortgage()]);
+    const gate = fixture.holdSignOut();
+    const first = fixture.snapshot().signOut();
+    const second = fixture.snapshot().signOut();
+    assert.equal(first, second);
+    await fixture.renderer.flush();
+    assert.equal(fixture.sdkCalls().signOut, 1);
+    assert.equal(fixture.locations.length, 0);
+    gate.resolve(); await first; await fixture.renderer.flush();
+    assert.deepEqual(fixture.locations, ["/"]);
+    assert.equal(fixture.snapshot().isSigningOut, false);
+  });
+});
+
+test("failed reload cleanup cannot restore legacy authentication or show an unlinked profile toast", async () => {
+  await withFixture(async (fixture) => {
+    fixture.failSignOut("return");
+    fixture.releaseSignOut(); await fixture.renderer.flush();
+    assertUnselected(fixture);
+    assert.equal(fixture.snapshot().user, null);
+    assert.equal(fixture.snapshot().isDemoMode, false);
+    assert.equal(fixture.snapshot().isImpersonation, false);
+    assert.equal(fixture.snapshot().signOutFailed, true);
+    assert.equal(fixture.snapshot().isSigningOut, true);
+    assert.equal(fixture.tokenCalls.length, 0);
+    assert.equal(fixture.requests.length, 0);
+    assert.equal(fixture.toasts.length, 0);
+    fixture.failSignOut(null);
+    await fixture.snapshot().signOut(); await fixture.renderer.flush();
+    assert.equal(fixture.snapshot().isSigningOut, false);
+    assert.equal(fixture.subscriptions(), 1);
+    assert.equal(fixture.snapshot().user, null);
+  }, { initialActor: actorA, sessionStorage: { negis_signout_pending_v1: "1" }, deferSignOut: true,
+    storage: { negis_demo_user: JSON.stringify({ id: "isolated-demo", name: "Local demo" }),
+      negis_demo_workspace: JSON.stringify({ id: "isolated-demo-workspace", name: "Local demo" }),
+      negis_demo_session: JSON.stringify({ mode: "demo", authenticated: true, createdAt: "2026-01-01T00:00:00Z" }) } });
+});
+
+test("a completed SDK logout cannot update an unmounted provider or publish old profile data", async () => {
+  await withFixture(async (fixture) => {
+    await confirm(fixture, [mortgage()]);
+    const gate = fixture.holdSignOut();
+    const signingOut = fixture.snapshot().signOut();
+    await fixture.renderer.flush();
+    fixture.renderer.dispose();
+    const writes = fixture.renderer.writes.length;
+    const locations = fixture.locations.length;
+    gate.resolve(); await signingOut; await fixture.renderer.flush();
+    assert.equal(fixture.renderer.writes.length, writes);
+    assert.equal(fixture.locations.length, locations);
+    assert.equal(fixture.toasts.length, 0);
+    assert.equal(fixture.signOutBoundary.isSignOutPending(), false);
+    assert.equal(fixture.subscriptions(), 0);
   });
 });
 

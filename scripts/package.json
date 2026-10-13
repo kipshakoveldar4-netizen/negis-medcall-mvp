@@ -57,7 +57,7 @@
     "test:auth-links": "tsx --test ./src/medina-auth-links.test.ts",
     "test:storage-isolation": "tsx --test ./src/medina-storage-isolation.test.ts",
     "test:security-boundaries": "tsx --test ./src/medina-security-boundaries.test.ts",
-    "test:workspace-selection": "tsx --test ./src/medina-workspace-selection.test.ts ./src/medina-auth-profile-session.test.ts",
+    "test:workspace-selection": "tsx --test ./src/medina-workspace-selection.test.ts ./src/medina-auth-profile-session.test.ts ./src/medina-signout-boundary.test.ts",
     "test:failure-honesty": "tsx --test ./src/medina-failure-honesty.test.ts",
     "test:migration-chain": "tsx --test ./src/medina-migration-chain.test.ts",
     "test:wazzup-webhook": "tsx --test ./src/medina-wazzup-webhook.test.ts",
