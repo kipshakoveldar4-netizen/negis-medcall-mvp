@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test:mortgage": "tsx --test ./src/medina-mortgage-policy.test.ts ./src/medina-mortgage-navigation.test.ts ./src/medina-lead-manager-ui.test.ts ./src/medina-assigned-lead-collection.test.ts",
+    "test:mortgage": "tsx --test ./src/medina-mortgage-policy.test.ts ./src/medina-mortgage-navigation.test.ts ./src/medina-lead-manager-ui.test.ts ./src/medina-assigned-lead-collection.test.ts ./src/medina-protected-route-fallback.test.ts",
     "test:assigned-leads": "tsx --test ./src/medina-assigned-lead-collection.test.ts ./src/medina-lead-manager-ui.test.ts",
     "test:admin-session": "tsx --test ./src/medina-admin-session.test.ts",
     "preview:crm": "node ./fixtures/crm-browser.mjs",
@@ -105,7 +105,7 @@
     "build:icons": "tsx ./src/build-app-icons.ts",
     "seed:clinic": "tsx ./src/seed-clinic.ts",
     "provision:workspace": "tsx ./src/provision-workspace.ts",
-    "test:route-permissions": "tsx --test ./src/medina-route-permissions.test.ts",
+    "test:route-permissions": "tsx --test ./src/medina-route-permissions.test.ts ./src/medina-protected-route-fallback.test.ts",
     "test:push": "tsx --test ./src/medina-push-notifications.test.ts",
     "vapid:keys": "tsx ./src/generate-vapid-keys.ts",
     "test:my-clients": "tsx --test ./src/medina-my-clients.test.ts",

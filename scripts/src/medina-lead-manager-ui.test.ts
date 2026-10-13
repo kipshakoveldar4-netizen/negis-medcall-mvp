@@ -360,7 +360,9 @@ test("mortgage routes intersect roles and never mount medical, advertising or un
       const allowed = workspaceRoutes.workspaceAllowsRoute("mortgage_leads", role, location);
       const tree = routes.ProtectedPage({ component: "Screen", permission: location === "/leads" ? "crm" : location === "/admin" ? "admin" : "dashboard" });
       assert.equal(tree?.type === "Screen", allowed, `${role}: ${location}`);
-      assert.equal(redirected, allowed ? "" : ["owner", "admin", "lead_manager"].includes(role) ? "/leads" : "/");
+      const supportedRole = ["owner", "admin", "lead_manager"].includes(role);
+      assert.equal(redirected, allowed || !supportedRole ? "" : "/leads");
+      if (!supportedRole) assert.match(label(tree), /Доступ к пространству ограничен/);
     }
   }
   assert.equal(workspaceRoutes.workspaceAllowsRoute(null, "owner", "/leads"), false);
