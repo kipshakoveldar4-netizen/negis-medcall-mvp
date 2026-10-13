@@ -200,18 +200,32 @@ function ProtectedPage({
   permission: string;
   demoFallbackTitle?: string;
 }) {
-  const { isLoading, userRole, rolePermissions, isDemoMode, workspacePurpose } = useAuth();
+  const { isLoading, userRole, rolePermissions, isDemoMode, workspacePurpose, signOut } = useAuth();
   const [location, setLocation] = useLocation();
   const roleAllowed = userRole === 'lead_manager'
     ? permission === 'crm' && location === '/leads'
     : userRole === 'owner' || userRole === 'manager' || !!rolePermissions[permission];
   const allowed = roleAllowed && workspaceAllowsRoute(workspacePurpose, userRole, location);
+  const noMortgageRoute = workspacePurpose === 'mortgage_leads'
+    && !workspaceAllowsRoute(workspacePurpose, userRole, '/leads');
 
   useEffect(() => {
-    if (!isLoading && !allowed) setLocation(firstAllowedRoute(rolePermissions, userRole, workspacePurpose));
-  }, [allowed, isLoading, rolePermissions, userRole, workspacePurpose, setLocation]);
+    if (isLoading || allowed || noMortgageRoute) return;
+    const target = firstAllowedRoute(rolePermissions, userRole, workspacePurpose);
+    if (target !== location) setLocation(target);
+  }, [allowed, isLoading, noMortgageRoute, location, rolePermissions, userRole, workspacePurpose, setLocation]);
 
-  if (isLoading || !allowed) return null;
+  if (isLoading) return null;
+  // Landing sends a signed-in mortgage user back to /leads; redirecting there
+  // via / would loop when this role has no permitted mortgage route.
+  if (noMortgageRoute) return (
+    <main className="flex min-h-screen flex-col items-center justify-center gap-4 px-6 text-center" style={{ background: "var(--negis-bg)", color: "var(--negis-text)" }}>
+      <h1 className="text-xl font-semibold">Доступ к пространству ограничен</h1>
+      <p className="max-w-md text-sm" style={{ color: "var(--negis-muted)" }}>Для вашей роли нет доступных разделов. Обратитесь к администратору пространства.</p>
+      <button type="button" className="min-h-11 rounded-md border px-4 text-sm font-medium" onClick={() => void signOut()}>Выйти</button>
+    </main>
+  );
+  if (!allowed) return null;
   if (isDemoMode && demoFallbackTitle) return <DemoPlaceholder title={demoFallbackTitle} />;
   return <Component />;
 }
