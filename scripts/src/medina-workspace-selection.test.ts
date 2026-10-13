@@ -529,10 +529,11 @@ test("W14 clearing the selection takes the current page down with it", async () 
   // underneath the picker with its rows still on screen.
   assert.ok(body.includes("setRolePermissions({})"), "the switch must drop the permissions");
   assert.ok(body.includes("setClinicId(null)"), "and the workspace");
+  assert.ok(body.includes("setWorkspacePurpose(null)"), "and the profile used by the purpose gate");
 
   const app = await readFile(path.join(negisSrc, "App.tsx"), "utf8");
   assert.ok(
-    app.includes("if (isLoading || !allowed) return null;"),
+    app.includes("if (isLoading) return null;") && app.includes("if (!allowed) return null;"),
     "ProtectedPage must render nothing once permissions are gone",
   );
 });

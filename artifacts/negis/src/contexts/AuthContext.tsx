@@ -7,6 +7,7 @@ import { useLocation } from 'wouter';
 import { toast } from 'sonner';
 import { apiUrl, clearCrmCache, crmFetch } from '@/lib/api';
 import { getSupabaseAccessToken } from '@/lib/serverAuth';
+import { isSignOutPending, markSignOutPending, clearSignOutPending } from '@/lib/authSignOut';
 import { clearListReadCache, WORKSPACE_SELECTOR_KEY } from '@/lib/demoStorage';
 import { isStaffRole, permissionsForRole, type StaffRole } from '@/lib/permissions';
 
@@ -78,6 +79,8 @@ interface AuthContextType {
   userRole: UserRole | null;
   rolePermissions: RolePermissions;
   isLoading: boolean;
+  isSigningOut: boolean;
+  signOutFailed: boolean;
   isImpersonation: boolean;
   isDemoMode: boolean;
   isStaffMode: boolean;
@@ -298,6 +301,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [workspacePurpose, setWorkspacePurpose] = useState<WorkspacePurpose | null>(null);
   const [rolePermissions,         setRolePermissions]         = useState<RolePermissions>({});
   const [isLoading,               setIsLoading]               = useState(true);
+  const [isSigningOut, setIsSigningOut] = useState(isSignOutPending);
+  const [signOutFailed, setSignOutFailed] = useState(false);
   const [isImpersonation,         setIsImpersonation]         = useState(false);
   const [isDemoMode,              setIsDemoMode]              = useState(false);
   const [isStaffMode,             setIsStaffMode]             = useState(false);
@@ -312,6 +317,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const authRevisionRef = useRef(0);
   const authIdentityRef = useRef<string | null>(null);
   const mountedRef = useRef(true);
+  const signOutRequestRef = useRef<Promise<void> | null>(null);
   useEffect(() => {
     userRef.current = user;
   }, [user]);
@@ -332,7 +338,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   /* ── Helpers ──────────────────────────────────────────── */
 
   const isCurrentAuthResolution = (userId: string, revision: number) =>
-    mountedRef.current && authIdentityRef.current === userId && authRevisionRef.current === revision;
+    mountedRef.current && !isSignOutPending()
+    && authIdentityRef.current === userId && authRevisionRef.current === revision;
 
   const beginAuthResolution = (nextUser: User | null) => {
     const nextId = nextUser?.id ?? null;
@@ -623,6 +630,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   /* ── 1. Init ──────────────────────────────────────────── */
   const initAuth = async () => {
+    if (isSignOutPending()) {
+      await signOut();
+      return;
+    }
     const params = new URLSearchParams(window.location.search);
     const token  = params.get('impersonate_token');
     const testHash = params.get('test_token_hash');
@@ -691,7 +702,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     /* Set up the persistent listener FIRST so we don't miss events */
     subscriptionRef.current?.unsubscribe();
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, sess) => {
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || isSignOutPending()) return;
       const revision = beginAuthResolution(sess?.user ?? null);
       setSession(sess);
       setUser(sess?.user ?? null);
@@ -912,68 +923,51 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   /* ── 5. Sign out ──────────────────────────────────────── */
-  const signOut = async () => {
+  const signOut = (): Promise<void> => {
+    if (signOutRequestRef.current) return signOutRequestRef.current;
+    const recovering = isSignOutPending();
+    markSignOutPending();
     beginAuthResolution(null);
-    // Nothing the previous account read may survive into the next one.
+    setIsSigningOut(true);
+    setSignOutFailed(false);
+    setIsLoading(true);
+    setSession(null);
+    setUser(null);
     clearCrmCache();
-    // Второй кэш — списков экранов. Он жил в памяти модуля с ключом
-    // «эндпоинт + клиника», без пользователя, и на общей машине ресепшена
-    // мастер, вошедший следом, первую минуту видел строки регистратора вместе
-    // с телефонами — до того как придёт срезанный ответ сервера.
     clearListReadCache();
-    if (isDemoMode) {
-      clearDemoStorage();
-      clearStaffStorage();
-      setIsDemoMode(false);
-      setIsStaffMode(false);
-      setSession(null);
-      setUser(null);
-      setClinicId(null);
-      setUserRole(null);
-      setRolePermissions({});
-      setLocation('/');
-      return;
-    }
-
-    if (isStaffMode) {
-      clearStaffStorage();
-      clearDemoStorage();
-      setIsStaffMode(false);
-      setSession(null);
-      setUser(null);
-      setClinicId(null);
-      setUserRole(null);
-      setRolePermissions({});
-      await supabase.auth.signOut();
-      setLocation('/');
-      return;
-    }
-
-    if (isImpersonation) {
-      clearImpersonationStorage();
-      clearStaffStorage();
-      setIsImpersonation(false);
-      setSession(null);
-      setUser(null);
-      setImpersonationClinicName(null);
-      setClinicId(null);
-      setUserRole(null);
-      setRolePermissions({});
-      /* Also terminate the Supabase session created for RLS */
-      await supabase.auth.signOut();
-      setLocation('/');
-      return;
-    }
     clearStaffStorage();
     clearDemoStorage();
-    await supabase.auth.signOut();
-    setLocation('/');
-    toast.success('Вы успешно вышли из системы');
+    clearImpersonationStorage();
+    const request = Promise.resolve().then(async () => {
+      try {
+        if (!isDemoMode) {
+          const { error } = await supabase.auth.signOut();
+          if (error) throw error;
+        }
+        if (!clearSignOutPending()) throw new Error('signout_marker_unavailable');
+        if (!mountedRef.current) return;
+        setIsSigningOut(false);
+        setIsLoading(false);
+        setLocation('/');
+        if (!recovering && !isDemoMode && !isStaffMode && !isImpersonation) {
+          toast.success('Вы успешно вышли из системы');
+        }
+        // Recovery after a reload ends the stored SDK session before starting
+        // the subscription; subsequent sign-ins must still be observed.
+        if (!isDemoMode && !subscriptionRef.current) await setupSupabaseAuth();
+      } catch {
+        if (mountedRef.current) setSignOutFailed(true);
+      } finally {
+        signOutRequestRef.current = null;
+      }
+    });
+    signOutRequestRef.current = request;
+    return request;
   };
 
   return (
     <AuthContext.Provider value={{
-      session, user, clinicId, userRole, isLoading,
+      session, user, clinicId, userRole, isLoading, isSigningOut, signOutFailed,
       rolePermissions,
       isImpersonation, isDemoMode, isStaffMode, impersonationClinicName, vertical,
       workspacePurpose,
