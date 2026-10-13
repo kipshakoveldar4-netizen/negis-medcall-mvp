@@ -36,6 +36,8 @@
     "unassignedVisibleTo": ["owner", "admin"]
   },
   "whatsapp": {
+    "selectedApproach": "direct_meta_negis",
+    "metaAppId": "1791176138576964",
     "provider": null,
     "enabled": false,
     "phoneNumberId": null,
@@ -51,7 +53,10 @@
     "human_credential_entry_and_submission",
     "time_zone_confirmation",
     "exact_username_availability",
-    "provider_and_company_portfolio",
+    "platform_business_identity_and_portfolio",
+    "meta_tech_provider_and_app_review",
+    "coexistence_embedded_signup_acceptance",
+    "shared_meta_callback_isolation",
     "test_channel_schema_and_permissions",
     "signed_synthetic_inbound_and_assignment_acceptance"
   ]

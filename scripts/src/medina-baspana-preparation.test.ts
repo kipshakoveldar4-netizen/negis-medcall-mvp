@@ -45,7 +45,7 @@ const plan = JSON.parse(await readFile(new URL("../fixtures/baspana-account-prep
   proposedTimeZone: string;
   accounts: { login: string; fullName: string; role: PlannedRole }[];
   assignment: { mode: string; assignedByRole: string; assigneeRole: string; managerVisibility: string; unassignedVisibleTo: string[] };
-  whatsapp: { provider: null; enabled: boolean; phoneNumberId: null; channelId: null; inboundOnly: boolean; preserveBusinessApp: boolean; importHistory: boolean };
+  whatsapp: { selectedApproach: string; metaAppId: string; provider: null; enabled: boolean; phoneNumberId: null; channelId: null; inboundOnly: boolean; preserveBusinessApp: boolean; importHistory: boolean };
   pending: string[];
 };
 
@@ -132,4 +132,25 @@ test("Preparation preserves manual assignment and leaves WhatsApp disconnected",
   assert.equal(plan.whatsapp.preserveBusinessApp, true);
   assert.equal(plan.whatsapp.importHistory, false);
   assert.ok(plan.pending.includes("signed_synthetic_inbound_and_assignment_acceptance"));
+});
+
+test("Choosing direct Meta does not approve business identity, Coexistence or the shared callback", () => {
+  assert.equal(plan.whatsapp.selectedApproach, "direct_meta_negis");
+  assert.equal(plan.whatsapp.metaAppId, "1791176138576964");
+  assert.equal(plan.whatsapp.provider, null, "the selected approach is not a connected provider");
+  assert.equal(plan.whatsapp.enabled, false);
+  assert.equal(plan.whatsapp.channelId, null);
+  assert.equal(plan.whatsapp.phoneNumberId, null);
+  for (const gate of [
+    "platform_business_identity_and_portfolio",
+    "meta_tech_provider_and_app_review",
+    "coexistence_embedded_signup_acceptance",
+    "shared_meta_callback_isolation",
+    "test_channel_schema_and_permissions",
+  ]) {
+    assert.ok(plan.pending.includes(gate), `${gate} must remain pending after a direction choice`);
+  }
+  assert.equal(plan.whatsapp.preserveBusinessApp, true);
+  assert.equal(plan.whatsapp.importHistory, false);
+  assert.equal(plan.whatsapp.inboundOnly, true);
 });
