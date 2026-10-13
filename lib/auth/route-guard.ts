@@ -1,6 +1,7 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import type { CrmPermission, StaffRole } from "./permissions";
 import { requireWorkspaceAccess, WorkspaceAdminAuthError, type WorkspaceAccessContext } from "./server";
+import { lookupWorkspacePurposes, requirePurposeRoute } from '../crm/workspace-policy';
 
 // Security-2D — the authorization boundary for private serverless routes that
 // live outside /api/crm/*.
@@ -97,6 +98,9 @@ export async function authorizePrivateRoute(
       ...(authorization.roles ? { roles: authorization.roles } : {}),
       ...(permission ? { permission } : {}),
     });
+    context.purpose = (await lookupWorkspacePurposes([context.workspaceId]))[context.workspaceId];
+    // All current non-CRM private routes are outside the inbound-lead module.
+    requirePurposeRoute(context.purpose, context.role, 'private-route', method);
 
     if (authorization.kind === "disabled") {
       // Same ordering as the CRM staff route: the closure is only disclosed to

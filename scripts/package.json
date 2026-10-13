@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "test:mortgage": "tsx --test ./src/medina-mortgage-policy.test.ts ./src/medina-mortgage-navigation.test.ts ./src/medina-lead-manager-ui.test.ts ./src/medina-assigned-lead-collection.test.ts",
     "test:assigned-leads": "tsx --test ./src/medina-assigned-lead-collection.test.ts ./src/medina-lead-manager-ui.test.ts",
     "test:admin-session": "tsx --test ./src/medina-admin-session.test.ts",
     "preview:crm": "node ./fixtures/crm-browser.mjs",

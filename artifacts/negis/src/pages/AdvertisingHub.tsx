@@ -1284,7 +1284,7 @@ export default function AdvertisingHub() {
                 {crmOutcomesAccess === "idle" ? "Результат CRM доступен в рабочем пространстве" : "Не удалось показать результат CRM"}
               </p>
               <p className="mt-1 text-sm leading-relaxed" style={{ color: "var(--negis-muted)" }}>
-                {crmOutcomesAccess === "idle" ? "В демо-режиме фактические заявки и продажи не подменяются тестовыми данными." : crmOutcomesMessage}
+                {crmOutcomesAccess === "idle" ? "В пробном доступе фактические заявки и продажи не подменяются тестовыми данными." : crmOutcomesMessage}
               </p>
             </div>
           )}

@@ -374,6 +374,7 @@ test("the user's clinic/mortgage picker swaps purpose, vertical and role and cle
     assert.equal(fixture.snapshot().vertical, terms.DEFAULT_VERTICAL);
     assert.equal(fixture.snapshot().userRole, "lead_manager");
     assert.equal(fixture.storage.getItem(selectorKey), workspaceB);
+    assert.equal(fixture.locations.at(-1), "/leads");
     fixture.snapshot().selectWorkspace(workspaceA);
     await fixture.renderer.flush();
     assert.equal(fixture.snapshot().workspacePurpose, "clinic_services");

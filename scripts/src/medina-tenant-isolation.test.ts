@@ -45,7 +45,7 @@ function spyClient(rows: Record<string, unknown[]>, log: QueryLog[], staffDirect
       const chain = () => builder;
       Object.assign(builder, {
         select: (columns?: string) => {
-          if (columns === "id,full_name,status") entry.columns = columns;
+          entry.columns = columns?.replace(/\s+/g, "");
           return chain();
         },
         insert: (row: unknown) => { entry.op = "insert"; entry.filters.__row = row; return chain(); },
@@ -201,9 +201,23 @@ async function withRouter<T>(options: LoadOptions, fn: (ctx: Awaited<ReturnType<
   }
 }
 
-/** Tables that hold tenant data; the membership lookup is not one of them. */
+function isWorkspaceProfileQuery(entry: QueryLog): boolean {
+  return entry.table === "workspace_settings" && entry.op === "select"
+    && entry.columns === "workspace_id,value" && entry.filters.key === "workspace_purpose";
+}
+
+function assertWorkspaceProfileQuery(log: QueryLog[], workspaceId: string) {
+  assert.deepEqual(log.filter((entry) => entry.table === "workspace_settings" && entry.filters.key === "workspace_purpose"), [{
+    table: "workspace_settings",
+    op: "select",
+    columns: "workspace_id,value",
+    filters: { workspace_id: [workspaceId], key: "workspace_purpose" },
+  }], "the purpose profile must be a minimal read of the verified workspace only");
+}
+
+/** Membership and the separately asserted purpose lookup are not business reads. */
 function businessQueries(log: QueryLog[]): QueryLog[] {
-  return log.filter((entry) => entry.table !== "staff_users");
+  return log.filter((entry) => entry.table !== "staff_users" && !isWorkspaceProfileQuery(entry));
 }
 
 // ===========================================================================
@@ -246,6 +260,7 @@ test("A5 an unauthenticated request issues no business query at all", async () =
   await withRouter({ memberships: [memberA] }, async (ctx) => {
     const { log } = await ctx.call({ segments: ["leads"], token: null });
     assert.equal(businessQueries(log).length, 0, "no CRM table may be touched before authentication");
+    assert.deepEqual(log, [], "even the safe profile lookup must wait for authentication");
   });
 });
 
@@ -279,13 +294,15 @@ test("B1 a verified user with no membership is refused with 403", async () => {
     assert.equal(res.statusCode, 403);
     assert.equal(res.body.code, "workspace_access_denied");
     assert.equal(businessQueries(log).length, 0);
+    assert.ok(log.every((entry) => entry.table === "staff_users"), "no profile lookup before verified membership");
   });
 });
 
 test("B2 an inactive membership grants nothing", async () => {
   await withRouter({ memberships: [{ ...memberA, status: "disabled" }] }, async (ctx) => {
-    const { res } = await ctx.call({ segments: ["leads"] });
+    const { res, log } = await ctx.call({ segments: ["leads"] });
     assert.equal(res.statusCode, 403);
+    assert.ok(log.every((entry) => entry.table === "staff_users"), "inactive membership must not read a profile or business data");
   });
 });
 
@@ -293,6 +310,7 @@ test("B3 a single active membership is inferred without a selector", async () =>
   await withRouter({ memberships: [memberA], rows: { leads: [] } }, async (ctx) => {
     const { res, log } = await ctx.call({ segments: ["leads"] });
     assert.equal(res.statusCode, 200);
+    assertWorkspaceProfileQuery(log, WORKSPACE_A);
     const leadQuery = businessQueries(log).find((entry) => entry.table === "leads");
     assert.ok(leadQuery, "the leads table must be queried");
     assert.equal(leadQuery?.filters.workspace_id, WORKSPACE_A);
@@ -305,14 +323,16 @@ test("B4 selecting a workspace the user does not belong to is refused", async ()
     assert.equal(res.statusCode, 403);
     assert.equal(res.body.code, "workspace_access_denied");
     assert.equal(businessQueries(log).length, 0, "a foreign selector must be refused before any query");
+    assert.ok(log.every((entry) => entry.table === "staff_users"), "a foreign selector must not trigger a profile lookup");
   });
 });
 
 test("B5 several memberships require an explicit choice", async () => {
   await withRouter({ memberships: [memberA, memberBReception] }, async (ctx) => {
-    const { res } = await ctx.call({ segments: ["leads"] });
+    const { res, log } = await ctx.call({ segments: ["leads"] });
     assert.equal(res.statusCode, 403);
     assert.equal(res.body.code, "workspace_selection_required");
+    assert.ok(log.every((entry) => entry.table === "staff_users"), "no profile lookup before workspace selection");
   });
 });
 
@@ -320,6 +340,7 @@ test("B6 an authorized selector picks that workspace", async () => {
   await withRouter({ memberships: [memberA, memberBReception], rows: { leads: [] } }, async (ctx) => {
     const { res, log } = await ctx.call({ segments: ["leads"], query: { workspaceId: WORKSPACE_B } });
     assert.equal(res.statusCode, 200);
+    assertWorkspaceProfileQuery(log, WORKSPACE_B);
     assert.equal(businessQueries(log).find((entry) => entry.table === "leads")?.filters.workspace_id, WORKSPACE_B);
   });
 });
@@ -332,6 +353,7 @@ test("B7 a workspace in the body cannot override the verified context", async ()
       body: { name: "Test", phone: "+70000000000", workspaceId: WORKSPACE_B, workspace_id: WORKSPACE_B },
     });
     assert.ok(res.statusCode >= 200 && res.statusCode < 300, `create should succeed, got ${res.statusCode}`);
+    assertWorkspaceProfileQuery(log, WORKSPACE_A);
     const insert = businessQueries(log).find((entry) => entry.op === "insert");
     const row = insert?.filters.__row as Record<string, unknown> | undefined;
     assert.equal(row?.workspace_id, WORKSPACE_A, "create must use the verified workspace");
@@ -350,6 +372,7 @@ test("B8 a browser-supplied role or permission list is ignored", async () => {
       body: { role: "owner", permissions: ["view_admin"] },
     });
     assert.equal(denied.res.statusCode, 403, "the body cannot grant an admin-only resource");
+    assert.ok(denied.log.every((entry) => entry.table === "staff_users"), "permission denial must precede profile and business reads");
   });
 });
 
@@ -497,12 +520,25 @@ test("C7 health diagnostics are no longer public", async () => {
 // D. Read isolation
 // ===========================================================================
 
+test("D0 only the minimal purpose SELECT is excluded from business queries", () => {
+  const profile: QueryLog = { table: "workspace_settings", op: "select", columns: "workspace_id,value",
+    filters: { workspace_id: [WORKSPACE_A], key: "workspace_purpose" } };
+  const business: QueryLog[] = [
+    { ...profile, columns: "*" },
+    { ...profile, filters: { workspace_id: WORKSPACE_A, key: "private_setting" } },
+    { ...profile, op: "update" },
+    { table: "leads", op: "select", filters: { workspace_id: WORKSPACE_A } },
+  ];
+  assert.deepEqual(businessQueries([profile, ...business]), business);
+});
+
 test("D1 list queries are always scoped to the verified workspace", async () => {
   const readable = ["leads", "clients", "appointments", "deals", "calls", "tasks", "chat"];
   await withRouter({ memberships: [memberA], rows: Object.fromEntries(readable.map((r) => [r, []])) }, async (ctx) => {
     for (const resource of readable) {
       const { res, log } = await ctx.call({ segments: [resource] });
       assert.equal(res.statusCode, 200, `${resource} must be readable by the owner`);
+      assertWorkspaceProfileQuery(log, WORKSPACE_A);
       const query = businessQueries(log)[0];
       assert.ok(query, `${resource} must issue a query`);
       assert.equal(query.filters.workspace_id, WORKSPACE_A, `${resource} must filter by the verified workspace`);
@@ -512,11 +548,13 @@ test("D1 list queries are always scoped to the verified workspace", async () => 
 
 test("D2 a foreign workspace is never queried, whatever the client sends", async () => {
   await withRouter({ memberships: [memberA], rows: { clients: [] } }, async (ctx) => {
-    const { log } = await ctx.call({
+    const { res, log } = await ctx.call({
       segments: ["clients"],
-      query: { workspaceId: WORKSPACE_A, workspace_id: WORKSPACE_B },
-      body: { workspaceId: WORKSPACE_B },
+      query: { workspaceId: WORKSPACE_A, workspace_id: WORKSPACE_B, workspacePurpose: "mortgage_leads" },
+      body: { workspaceId: WORKSPACE_B, purpose: "mortgage_leads", workspacePurpose: "mortgage_leads" },
     });
+    assert.equal(res.statusCode, 200, "browser purpose must not override the absent clinic_services profile");
+    assertWorkspaceProfileQuery(log, WORKSPACE_A);
     for (const entry of businessQueries(log)) {
       assert.notEqual(entry.filters.workspace_id, WORKSPACE_B, "no query may reference the foreign workspace");
     }
@@ -638,6 +676,7 @@ test("H1 generic staff creation is disabled, but only after authorization", asyn
     const { res, log } = await ctx.call({ segments: ["staff"], method: "POST", body: attackerBody });
     assert.equal(res.statusCode, 409);
     assert.equal(res.body.code, "staff_invitation_required");
+    assertWorkspaceProfileQuery(log, WORKSPACE_A);
     assert.equal(businessQueries(log).length, 0, "no staff row may be written");
   });
 });
@@ -741,6 +780,7 @@ test("K2a Meta account routes fail closed until a workspace is provisioned", asy
       });
       assert.equal(res.statusCode, 503);
       assert.equal(res.body.code, "meta_workspace_not_provisioned");
+      assertWorkspaceProfileQuery(log, WORKSPACE_A);
       assert.equal(businessQueries(log).length, 0);
     });
   } finally {
@@ -770,6 +810,7 @@ test("K2b shared Meta credentials cannot be used from another workspace", async 
         });
         assert.equal(res.statusCode, 403, request.segments.join("/"));
         assert.equal(res.body.code, "meta_workspace_not_authorized");
+        assertWorkspaceProfileQuery(log, WORKSPACE_A);
         assert.equal(businessQueries(log).length, 0);
       }
     });
@@ -793,6 +834,7 @@ test("K2d saved Meta accounts must match the provisioned server account", async 
       });
       assert.equal(missing.res.statusCode, 400);
       assert.equal(missing.res.body.code, "meta_account_id_required");
+      assertWorkspaceProfileQuery(missing.log, WORKSPACE_A);
       assert.equal(businessQueries(missing.log).length, 0);
 
       const foreign = await ctx.call({
@@ -802,6 +844,7 @@ test("K2d saved Meta accounts must match the provisioned server account", async 
       });
       assert.equal(foreign.res.statusCode, 403);
       assert.equal(foreign.res.body.code, "meta_account_not_authorized");
+      assertWorkspaceProfileQuery(foreign.log, WORKSPACE_A);
       assert.equal(businessQueries(foreign.log).length, 0);
 
       const matching = await ctx.call({
@@ -925,10 +968,12 @@ test("K3b TikTok provisioning cannot be spoofed by an owner of a different works
         const { res, log } = await ctx.call({ segments: [segment], method: "POST",
           query: { workspaceId: WORKSPACE_A }, body: { confirm: true, city: "Актобе", workspaceId: WORKSPACE_B } });
         assert.equal(res.statusCode, 403, segment);
+        assertWorkspaceProfileQuery(log, WORKSPACE_A);
         assert.equal(businessQueries(log).length, 0);
       }
       const { res, log } = await ctx.call({ segments: ["tiktok-connection"], query: { workspaceId: WORKSPACE_A } });
       assert.equal(res.statusCode, 403);
+      assertWorkspaceProfileQuery(log, WORKSPACE_A);
       assert.equal(businessQueries(log).length, 0);
     });
   } finally {
@@ -952,6 +997,7 @@ test("K3b1 TikTok launch fails closed before its feature flag when no workspace 
       });
       assert.equal(res.statusCode, 503);
       assert.equal(res.body.code, "workspace_not_provisioned");
+      assertWorkspaceProfileQuery(log, WORKSPACE_A);
       assert.equal(businessQueries(log).length, 0);
     });
   } finally {
@@ -975,6 +1021,7 @@ test("K3c TikTok connection GET is workspace-scoped and returns only the safe DT
       const { res, log } = await ctx.call({ segments: ["tiktok-connection"], query: { workspaceId: WORKSPACE_A } });
       assert.equal(res.statusCode, 200);
       assert.equal((res.body.data as { state: string }).state, "connected");
+      assertWorkspaceProfileQuery(log, WORKSPACE_A);
       assert.equal(businessQueries(log)[0]?.filters.workspace_id, WORKSPACE_A);
       assert.doesNotMatch(JSON.stringify(res.body), /7123456789012345678|private-token|access_token/);
       for (const method of ["GET", "POST"]) {
@@ -1035,6 +1082,7 @@ test("K3e TikTok video GET returns safe workspace evidence and POST stays off by
       assert.equal((evidence.res.body.data as { videoIdAvailable: boolean }).videoIdAvailable, true);
       for (const result of [library, evidence]) {
         assert.doesNotMatch(JSON.stringify(result.res.body), /v070private|private-provider-token|7123456789012345678|https:|storage_path/);
+        assertWorkspaceProfileQuery(result.log, WORKSPACE_A);
         for (const query of businessQueries(result.log)) assert.equal(query.filters.workspace_id, WORKSPACE_A);
       }
       const blocked = await ctx.call({ segments: ["tiktok-videos"], method: "POST", query: { workspaceId: WORKSPACE_A },
@@ -1498,6 +1546,7 @@ test("P2 assigned leads are fetched only through the scoped RPC with verified id
     assert.deepEqual(fixture.calls, [{ name: "read_assigned_crm_leads", args: {
       p_workspace_id: WORKSPACE_A, p_staff_user_id: ownLeadStaffId, p_auth_user_id: USER_A,
     } }]);
+    assertWorkspaceProfileQuery(log, WORKSPACE_A);
     assert.equal(businessQueries(log).length, 0, "no generic leads SELECT may bypass RPC");
   });
 });
@@ -1516,6 +1565,7 @@ test("P3 assigned-only access has a closed browser-route allowlist", async () =>
         const { res, log } = await ctx.call({ segments: route.split("/"), method, body: { id: ownLeadId, updates: { notes: "forged" } } });
         assert.ok([403,404,405].includes(res.statusCode), `${route} ${method}: ${res.statusCode}`);
         assert.equal(businessQueries(log).length, 0, `${route} must fail before any business query`);
+        assert.ok(log.every((entry) => entry.table === "staff_users"), `${route} must not read a profile before permission denial`);
       }
     }
     assert.equal(fixture.calls.length, 0);
@@ -1545,6 +1595,7 @@ test("P5 assignment, source, client, campaign and unknown fields never reach the
       const { res, log } = await ctx.call({ segments: ["leads"], method: "PATCH",
         body: { id: ownLeadId, updates: { notes: "legitimate", [key]: "forged" } } });
       assert.equal(res.statusCode, 400, key);
+      assertWorkspaceProfileQuery(log, WORKSPACE_A);
       assert.equal(businessQueries(log).length, 0);
     }
     for (const updates of [{}, { notes: {} }, { name: "a", full_name: "b" }, { stageId: "bad" }, { status: "" }, { notes: "x".repeat(10001) }]) {
@@ -1563,6 +1614,7 @@ test("P6 unassigned, another employee, foreign and missing PATCH IDs have one re
       const { res, log } = await ctx.call({ segments: ["leads"], method: "PATCH", body: { id, updates: { notes: "forged" } } });
       assert.equal(res.statusCode, 404);
       if (!reference) reference = res.body; else assert.deepEqual(res.body, reference);
+      assertWorkspaceProfileQuery(log, WORKSPACE_A);
       assert.equal(businessQueries(log).length, 0);
     }
   });
@@ -1576,6 +1628,7 @@ test("P7 a revoked membership with a still valid token is denied before reading 
         const { res, log } = await ctx.call({ segments: ["leads"], method, body: { id: ownLeadId, updates: { notes: "n" } } });
         assert.equal(res.statusCode, 403);
         assert.equal(businessQueries(log).length, 0);
+        assert.ok(log.every((entry) => entry.table === "staff_users"), "revoked membership must not read a profile");
       }
       assert.equal(fixture.calls.length, 0);
     });
@@ -1591,6 +1644,7 @@ test("P8 database revocation, reassignment, validation and missing migration nev
       assert.equal(res.body.success, false);
       assert.equal(res.body.mode, undefined);
       assert.ok(!JSON.stringify(res.body).includes("private-database-fixture"));
+      assertWorkspaceProfileQuery(log, WORKSPACE_A);
       assert.equal(businessQueries(log).length, 0);
     });
   }

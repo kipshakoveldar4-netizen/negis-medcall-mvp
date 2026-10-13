@@ -5,6 +5,7 @@ import { Toaster } from "sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { AuthProvider } from "@/contexts/AuthContext";
 import { useAuth } from "@/contexts/AuthContext";
+import { workspaceAllowsRoute } from "@/lib/workspaceRoutes";
 
 // Eager: the public entry (Landing) and the shared fallbacks stay in the main
 // chunk so the first paint never waits on a second request.
@@ -79,18 +80,24 @@ const PREFETCH_ROUTES: Array<() => Promise<unknown>> = [
 ];
 
 function RoutePrefetcher() {
-  const { isLoading, userRole } = useAuth();
+  const { isLoading, userRole, workspacePurpose } = useAuth();
 
   useEffect(() => {
-    if (isLoading || !userRole) return;
+    if (isLoading || !userRole || !workspacePurpose) return;
     const idle: (cb: () => void) => number =
       typeof window.requestIdleCallback === "function"
         ? (cb) => window.requestIdleCallback(cb)
         : (cb) => window.setTimeout(cb, 1200);
+    let cancelled = false;
     idle(() => {
-      for (const load of PREFETCH_ROUTES) void load().catch(() => undefined);
+      if (cancelled) return;
+      const loads = workspacePurpose === 'mortgage_leads'
+        ? [() => import('@/pages/LeadsPage'), ...(userRole === 'owner' || userRole === 'admin' ? [() => import('@/pages/AdminCenter')] : [])]
+        : PREFETCH_ROUTES;
+      for (const load of loads) void load().catch(() => undefined);
     });
-  }, [isLoading, userRole]);
+    return () => { cancelled = true; };
+  }, [isLoading, userRole, workspacePurpose]);
 
   return null;
 }
@@ -136,9 +143,13 @@ const ROUTE_PERMISSIONS: Record<string, string> = {
   '/studio': 'ads',
 };
 
-function firstAllowedRoute(rolePermissions: Record<string, boolean>, userRole: string | null = null) {
+function firstAllowedRoute(rolePermissions: Record<string, boolean>, userRole: string | null, workspacePurpose: ReturnType<typeof useAuth>['workspacePurpose']) {
+  if (workspacePurpose === 'mortgage_leads') {
+    return workspaceAllowsRoute(workspacePurpose, userRole, '/leads') && rolePermissions.crm ? '/leads' : '/';
+  }
   if (userRole === 'lead_manager') return '/leads';
-  const first = Object.entries(ROUTE_PERMISSIONS).find(([, permission]) => rolePermissions[permission]);
+  const first = Object.entries(ROUTE_PERMISSIONS).find(([route, permission]) =>
+    workspaceAllowsRoute(workspacePurpose, userRole, route) && rolePermissions[permission]);
   return first?.[0] ?? '/';
 }
 
@@ -189,15 +200,16 @@ function ProtectedPage({
   permission: string;
   demoFallbackTitle?: string;
 }) {
-  const { isLoading, userRole, rolePermissions, isDemoMode } = useAuth();
+  const { isLoading, userRole, rolePermissions, isDemoMode, workspacePurpose } = useAuth();
   const [location, setLocation] = useLocation();
-  const allowed = userRole === 'lead_manager'
+  const roleAllowed = userRole === 'lead_manager'
     ? permission === 'crm' && location === '/leads'
     : userRole === 'owner' || userRole === 'manager' || !!rolePermissions[permission];
+  const allowed = roleAllowed && workspaceAllowsRoute(workspacePurpose, userRole, location);
 
   useEffect(() => {
-    if (!isLoading && !allowed) setLocation(firstAllowedRoute(rolePermissions, userRole));
-  }, [allowed, isLoading, rolePermissions, userRole, setLocation]);
+    if (!isLoading && !allowed) setLocation(firstAllowedRoute(rolePermissions, userRole, workspacePurpose));
+  }, [allowed, isLoading, rolePermissions, userRole, workspacePurpose, setLocation]);
 
   if (isLoading || !allowed) return null;
   if (isDemoMode && demoFallbackTitle) return <DemoPlaceholder title={demoFallbackTitle} />;

@@ -326,7 +326,13 @@ function mockResponse(): MockResponse {
 }
 
 type StaffRow = { id: string; workspace_id: string; role: string; status: string };
-type QueryLog = { table: string; op: string; filters: Record<string, unknown> };
+type QueryLog = {
+  table: string;
+  op: string;
+  columns?: string;
+  filters: Record<string, unknown>;
+  filterMethods: Record<string, "eq" | "in">;
+};
 
 const INVITEE_EMAIL = "invited@clinic.test";
 const WORKSPACE_B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -339,7 +345,13 @@ const negisSrc = path.join(repoRoot, "artifacts", "negis", "src");
  * database client, so these assertions are about what the deployed code does
  * rather than about what its source looks like.
  */
-async function loadRouter(options: { memberships?: StaffRow[]; authOk?: boolean; rows?: Record<string, unknown[]> } = {}) {
+async function loadRouter(options: {
+  memberships?: StaffRow[];
+  authOk?: boolean;
+  rows?: Record<string, unknown[]>;
+  profileData?: unknown;
+  errors?: Record<string, string>;
+} = {}) {
   const log: QueryLog[] = [];
   process.env.SUPABASE_URL = "https://project.example.test";
   process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key";
@@ -361,24 +373,38 @@ async function loadRouter(options: { memberships?: StaffRow[]; authOk?: boolean;
   const rows: Record<string, unknown[]> = { staff_users: options.memberships ?? [], ...(options.rows ?? {}) };
   supabaseModule.setSupabaseServerClientFactoryForTests(() => ({
     from(table: string) {
-      const entry: QueryLog = { table, op: "select", filters: {} };
+      const entry: QueryLog = { table, op: "select", filters: {}, filterMethods: {} };
       log.push(entry);
       const builder: Record<string, unknown> = {};
       const chain = () => builder;
+      const settle = (shape: "one" | "list") => {
+        const message = options.errors?.[table];
+        if (message) return Promise.resolve({ data: null, error: { code: "08006", message } });
+        const data = table === "workspace_settings" && options.profileData !== undefined
+          ? options.profileData
+          : rows[table] ?? [];
+        return Promise.resolve({
+          data: shape === "one" && Array.isArray(data) ? data[0] ?? null : data,
+          error: null,
+        });
+      };
       Object.assign(builder, {
-        select: () => chain(),
+        select: (columns?: string) => { entry.columns = columns?.replace(/\s/g, ""); return chain(); },
         insert: (row: unknown) => { entry.op = "insert"; entry.filters.__row = row; return chain(); },
         update: (row: unknown) => { entry.op = "update"; entry.filters.__row = row; return chain(); },
         order: () => chain(),
         limit: () => chain(),
-        eq(column: string, value: unknown) { entry.filters[column] = value; return chain(); },
+        eq(column: string, value: unknown) {
+          entry.filters[column] = value; entry.filterMethods[column] = "eq"; return chain();
+        },
+        in(column: string, value: unknown) {
+          entry.filters[column] = value; entry.filterMethods[column] = "in"; return chain();
+        },
         ilike(column: string, value: unknown) { entry.filters[column] = value; return chain(); },
         is(column: string, value: unknown) { entry.filters["is:" + column] = value; return chain(); },
-        maybeSingle: () => Promise.resolve({ data: (rows[table] ?? [])[0] ?? null, error: null }),
-        single: () => Promise.resolve({ data: (rows[table] ?? [])[0] ?? null, error: null }),
-        then(resolve: (value: { data: unknown; error: null }) => void) {
-          resolve({ data: rows[table] ?? [], error: null });
-        },
+        maybeSingle: () => settle("one"),
+        single: () => settle("one"),
+        then(onFulfilled: (value: unknown) => unknown) { return settle("list").then(onFulfilled); },
       });
       return builder;
     },
@@ -413,6 +439,18 @@ async function loadRouter(options: { memberships?: StaffRow[]; authOk?: boolean;
 }
 
 const owner: StaffRow = { id: STAFF_A, workspace_id: WORKSPACE_A, role: "owner", status: "active" };
+
+function assertWorkspaceProfileQuery(log: QueryLog[]): QueryLog {
+  const profiles = log.filter((entry) => entry.table === "workspace_settings");
+  assert.deepEqual(profiles, [{
+    table: "workspace_settings",
+    op: "select",
+    columns: "workspace_id,value",
+    filters: { workspace_id: [WORKSPACE_A], key: "workspace_purpose" },
+    filterMethods: { workspace_id: "in", key: "eq" },
+  }], "the profile lookup must select only the verified workspace's purpose");
+  return profiles[0]!;
+}
 
 test("I19 creating an invitation requires a token, a membership and the permission", async () => {
   const anonymous = await loadRouter();
@@ -457,22 +495,53 @@ test("I20 the workspace comes from the verified context, never from the caller",
     const foreign = await call({ segments: ["staff-invitations"], method: "GET", query: { workspaceId: WORKSPACE_B } });
     assert.equal(foreign.status, 403);
     assert.equal(foreign.body.code, "workspace_access_denied");
+    assert.ok(foreign.log.every((entry) => entry.table === "staff_users"), "a foreign selector reaches neither profiles nor invitations");
+    assert.equal(JSON.stringify(foreign.body).includes(WORKSPACE_B), false, "the refusal discloses no foreign workspace");
 
     // A workspace in the body is not a selector and must not become one.
     const bodyOverride = await call({
       segments: ["staff-invitations"],
       method: "GET",
       query: { workspaceId: WORKSPACE_A },
-      body: { workspaceId: WORKSPACE_B, workspace_id: WORKSPACE_B },
+      body: { workspaceId: WORKSPACE_B, workspace_id: WORKSPACE_B, purpose: "mortgage_leads" },
     });
-    assert.equal(bodyOverride.status, 200);
+    assert.equal(bodyOverride.status, 200, "an absent profile stays legacy clinic regardless of the body");
+    const profile = assertWorkspaceProfileQuery(bodyOverride.log);
     const reads = bodyOverride.log.filter((entry) => entry.table === "staff_invitations");
     assert.ok(reads.length > 0, "the list actually queried the table");
-    for (const read of reads) {
+    for (const read of bodyOverride.log.filter((entry) => entry.table !== "staff_users" && entry !== profile)) {
       assert.equal(read.filters.workspace_id, WORKSPACE_A, "every query is scoped to the verified workspace");
+      assert.equal(read.filterMethods.workspace_id, "eq", "business reads retain their scalar workspace filter");
+      assert.ok(bodyOverride.log.indexOf(profile) < bodyOverride.log.indexOf(read), "the profile is verified before business work");
     }
   } finally {
     restore();
+  }
+});
+
+test("I20b an unreadable or malformed profile fails closed before invitation work", async () => {
+  for (const options of [
+    { errors: { workspace_settings: "connection refused" } },
+    { profileData: null },
+    { profileData: {} },
+    { profileData: [null] },
+    { profileData: [{ workspace_id: WORKSPACE_A, value: { purpose: "unrecognized" } }] },
+    { profileData: [
+      { workspace_id: WORKSPACE_A, value: { purpose: "clinic_services" } },
+      { workspace_id: WORKSPACE_A, value: { purpose: "clinic_services" } },
+    ] },
+  ]) {
+    const { call, restore } = await loadRouter({ memberships: [owner], ...options });
+    try {
+      const res = await call({ segments: ["staff-invitations"], method: "GET" });
+      assert.equal(res.status, 503, JSON.stringify(options));
+      assert.equal(res.body.code, "workspace_profile_unavailable");
+      const profile = assertWorkspaceProfileQuery(res.log);
+      assert.ok(res.log.every((entry) => entry.table === "staff_users" || entry === profile), "no invitation query may follow a failed profile lookup");
+      assert.equal(JSON.stringify(res.body).includes("connection refused"), false);
+    } finally {
+      restore();
+    }
   }
 });
 
@@ -752,7 +821,13 @@ test("I31 вкладка «Сотрудники»: перевыпуск, сме�
   const admin = await readFile(path.join(negisSrc, "pages", "AdminCenter.tsx"), "utf8");
   assert.ok(/Перевыпустить ссылку/.test(admin), "потерянная ссылка сотрудника — не тупик");
   assert.ok(/updateStaffRole/.test(admin), "роль принятого сотрудника меняется из кабинета");
-  assert.ok(/canAssignRole\(serverAdminAuth\.role \|\| "admin", role\)/.test(admin), "предлагаются только роли, которые сервер примет");
+  assert.ok(/const workspaceStaffRoles: readonly StaffRole\[\] = isMortgage \? \["lead_manager", "admin"\] : staffRoles;/.test(admin),
+    "the workspace profile narrows the role list while legacy clinics retain staffRoles");
+  const staffRenderer = admin.slice(admin.indexOf("function renderStaff()"), admin.indexOf("function renderRoles()"));
+  assert.ok(/const actorRole: StaffRole = serverAdminAuth\.role \|\| "admin";/.test(staffRenderer),
+    "role rank is taken from the verified server actor");
+  assert.ok(/const assignableRoles = workspaceStaffRoles\.filter\(\(role\) => canAssignRole\(actorRole, role\)\);/.test(staffRenderer),
+    "предлагаются только роли, которые сервер примет");
   // Судим только обработчики вкладки: диагностические вкладки печатают
   // технические сообщения намеренно.
   const staffHandlers = admin.slice(admin.indexOf("async function sendInvitation"), admin.indexOf("async function saveAiProvider"));

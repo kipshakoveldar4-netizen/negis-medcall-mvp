@@ -504,7 +504,7 @@ test("W13 a collection refetches when the clinic changes, without relying on the
   const hook = source.slice(source.indexOf("export function useDemoCollection"));
 
   assert.ok(
-    hook.includes("const workspaceId = readWorkspaceId();"),
+    hook.slice(0, hook.indexOf("const loadFromApi")).includes("const workspaceId = strictAccess?.workspaceId ?? readWorkspaceId();"),
     "the workspace must be read where the hook can depend on it, not inside the effect",
   );
   assert.ok(

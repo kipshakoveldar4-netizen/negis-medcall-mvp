@@ -1,8 +1,9 @@
-import { useState } from 'react';
+import { useLayoutEffect, useState } from 'react';
 import { Link, useLocation } from 'wouter';
 import { BadgeDollarSign, BarChart2, Building2, CalendarDays, Clapperboard, FileText, Inbox, LayoutDashboard, Rocket, Settings, Store, Tag, Users, LogOut, type LucideIcon } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
 import { isRealWorkspace } from '@/lib/demoStorage';
+import { workspaceAllowsRoute } from '@/lib/workspaceRoutes';
 import { capitalize, termsFor } from '../../../../../lib/vertical/terms';
 import { ProfileDialog } from './ProfileDialog';
 import { loginFromEmail } from '../../../../../lib/auth/staff-logins';
@@ -70,7 +71,7 @@ const NAV_GROUPS: NavGroup[] = [
 
 export function Sidebar() {
   const [location] = useLocation();
-  const { signOut, user, userRole, availableWorkspaces, clearWorkspaceSelection, vertical } = useAuth();
+  const { signOut, user, clinicId, userRole, availableWorkspaces, clearWorkspaceSelection, vertical, workspacePurpose } = useAuth();
 
   // Подпись «работаем без базы клиники» вешалась на isDemoMode, а он не
   // становится истинным никогда: флаг включается только из сохранённой сессии
@@ -84,10 +85,15 @@ export function Sidebar() {
   const terms = termsFor(vertical);
   const [showProfile, setShowProfile] = useState(false);
 
+  // Unmount the profile (including password fields) before a new context paints.
+  useLayoutEffect(() => {
+    setShowProfile(false);
+  }, [user?.id, clinicId, userRole, workspacePurpose]);
+
   const canUse = (item: NavItem) =>
-    userRole === 'lead_manager'
+    workspaceAllowsRoute(workspacePurpose, userRole, item.href) && (userRole === 'lead_manager'
       ? item.href === '/leads'
-      : !userRole || userRole === 'owner' || userRole === 'manager' || userRole === 'admin' || item.roles.includes(userRole);
+      : !userRole || userRole === 'owner' || userRole === 'manager' || userRole === 'admin' || item.roles.includes(userRole));
   const visibleGroups = NAV_GROUPS
     .map((group) => ({ ...group, items: group.items.filter(canUse) }))
     .filter((group) => group.items.length > 0);
@@ -96,6 +102,9 @@ export function Sidebar() {
     .split(' ').map((w: string) => w[0]).join('').slice(0, 2).toUpperCase();
 
   const openProfile = () => setShowProfile(true);
+  const workspaceSwitchProps: { 'aria-label'?: string; title?: string } = workspacePurpose === 'mortgage_leads'
+    ? { 'aria-label': 'Сменить пространство', title: 'Сменить пространство' }
+    : {};
 
   return (
     <>
@@ -115,7 +124,7 @@ export function Sidebar() {
           <div className="min-w-0">
             <p className="truncate text-sm font-semibold" style={{ color: 'var(--negis-dark-text)' }}>Medina OS</p>
             <p className="mt-0.5 truncate text-[11px] font-medium" style={{ color: 'var(--negis-dark-muted)' }}>
-              {noClinicSelected ? 'Пробный доступ' : 'Медицинская CRM'}
+              {workspacePurpose === 'mortgage_leads' ? 'Ипотечные заявки' : noClinicSelected ? 'Пробный доступ' : 'Медицинская CRM'}
             </p>
           </div>
         </div>
@@ -129,11 +138,11 @@ export function Sidebar() {
               </p>
               <div className="flex flex-col gap-0.5">
                 {group.items.map(({ href, icon: Icon, label: staticLabel }) => {
-                  // Единственный пункт, чья подпись зависит от ниши: у клиники
-                  // это врачи, у салона — мастера. Словарь один — lib/vertical.
                   const label = href === '/staff-schedule'
                     ? `${capitalize(terms.specialistPlural)} и график`
-                    : staticLabel;
+                    : href === '/admin' && workspacePurpose === 'mortgage_leads'
+                      ? 'Команда'
+                      : staticLabel;
                   const active = location === href || location.startsWith(href + '/') || (href === '/ads' && location.startsWith('/ads-automation'));
                   return (
                     <Link key={href} href={href}>
@@ -181,6 +190,7 @@ export function Sidebar() {
               onClick={clearWorkspaceSelection}
               aria-label="Сменить клинику"
               title="Сменить клинику"
+              {...workspaceSwitchProps}
               className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg transition-colors hover:text-white"
               style={{ color: 'var(--negis-dark-muted)' }}
             >

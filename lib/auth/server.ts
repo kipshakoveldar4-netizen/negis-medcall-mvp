@@ -1,4 +1,5 @@
 import type { VercelRequest } from "@vercel/node";
+import type { WorkspacePurpose } from '../crm/workspace-purpose';
 import { getSupabaseServerClient } from "../supabase/server";
 import {
   type CrmPermission,
@@ -55,6 +56,8 @@ export type WorkspaceMembership = {
 };
 
 export type WorkspaceAccessContext = {
+  /** Resolved from server settings by the route guard, never from the browser. */
+  purpose?: WorkspacePurpose;
   userId: string;
   staffUserId: string;
   workspaceId: string;

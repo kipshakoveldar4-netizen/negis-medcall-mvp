@@ -83,13 +83,14 @@ async function fixture() {
     setItem: (key: string, value: string) => storage.set(key, value),
   } } });
   const use = exports.useDemoCollection as (key: string, seed: Item[], options: object) => View;
-  function mount(strict = true) {
+  function mount(strict = true, allowScopedCreate = false) {
     const renderDriver = driver();
     const scope = { alive: true };
     const fn = () => {
       currentDriver = renderDriver;
       return use("negis_demo_leads", [{ id: "demo-contact", phone: "demo" }], {
         endpoint: "/api/crm/leads", listKey: "leads", fromApi: (x: unknown) => x,
+        allowScopedCreate,
         ...(strict ? { strictAccess: { actorId: "fixture-A", workspaceId: W1, isCurrent: () => scope.alive, request } } : {}),
       });
     };
@@ -162,4 +163,38 @@ test("late PATCH body after account invalidation cannot report success or restor
   const save = h.render().updateItem(own.id, { notes: "after" }); const bodyGate = deferred<void>();
   f.requests[1].answer({ item: own }, 200, bodyGate.promise); await tick(); h.dispose(); bodyGate.resolve();
   assert.equal(await save, false); assert.equal(h.late, 0); assert.equal(f.toasts.length, 0);
+});
+
+test('explicit scoped create uses the bound tenant and transport instead of a changed selector', async () => {
+  const f = await fixture(); const h = f.mount(true, true); h.render();
+  f.requests[0].answer({ leads: [] }); await settle();
+  f.storage.set('negis_workspace_selector', W2);
+  const added = h.render().addItem({ id: 'temporary' });
+  assert.equal(f.requests[1].path, `/api/crm/leads?workspaceId=${W1}`);
+  assert.equal(f.requests[1].init?.method, 'POST');
+  assert.equal(JSON.parse(String(f.requests[1].init?.body)).workspaceId, W1);
+  f.requests[1].answer({ item: { id: 'server-saved' } });
+  assert.equal(await added, true);
+  assert.equal(h.render().items[0].id, 'server-saved');
+  assert.equal(f.storage.has('negis_demo_leads'), false); h.dispose();
+});
+
+test('expired scoped create never dispatches and a late body cannot publish or report success', async () => {
+  const f = await fixture(); const h = f.mount(true, true); h.render();
+  f.requests[0].answer({ leads: [] }); await settle();
+  const view = h.render(); const added = view.addItem({ id: 'temporary' });
+  const gate = deferred<void>(); f.requests[1].answer({ item: { id: 'server-saved' } }, 200, gate.promise);
+  await tick(); h.dispose(); gate.resolve();
+  assert.equal(await added, false); assert.equal(h.late, 0); assert.deepEqual(f.toasts, []);
+  assert.equal(await view.addItem({ id: 'expired' }), false); assert.equal(f.requests.length, 2);
+});
+
+test('scoped create denial or missing stored row clears optimistic data and cannot claim success', async () => {
+  for (const status of [200, 401, 403, 502]) {
+    const f = await fixture(); const h = f.mount(true, true); h.render();
+    f.requests[0].answer({ leads: [own] }); await settle();
+    const added = h.render().addItem({ id: 'temporary' }); f.requests[1].answer({}, status);
+    assert.equal(await added, false); assert.equal(h.render().loadError, true); assert.equal(h.render().items.length, 0);
+    h.dispose();
+  }
 });

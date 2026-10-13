@@ -54,7 +54,9 @@ afterEach(() => db.exec("rollback"));
 
 // Execute real route queries and trigger writes, rather than returning canned
 // successful API responses. This adapter is intentionally test-local/read-write.
-function apiDatabase(rpcRole: "service_role" | "anon" | "authenticated" = "service_role") {
+type ApiFilter = [string, "=" | ">=" | "<" | "<=" | "in", unknown];
+type ApiQuery = { table: string; operation: string; columns: string; filters: ApiFilter[] };
+function apiDatabase(rpcRole: "service_role" | "anon" | "authenticated" = "service_role", queries: ApiQuery[] = []) {
   const ident = (value: string) => {
     assert.match(value, /^[a-z_][a-z0-9_]*$/);
     return `"${value}"`;
@@ -92,9 +94,10 @@ function apiDatabase(rpcRole: "service_role" | "anon" | "authenticated" = "servi
     from(table: string) {
     let operation = "select", single = false, columns = "*";
     let values: Record<string, unknown> = {};
-    const filters: Array<[string, "=" | ">=" | "<" | "<=", unknown]> = [];
+    const filters: ApiFilter[] = [];
     let limit: number | undefined;
     async function execute() {
+      queries.push({ table, operation, columns, filters: [...filters] });
       const params: unknown[] = [];
       const bind = (value: unknown) => {
         params.push(Array.isArray(value) ? JSON.stringify(value) : value);
@@ -105,23 +108,30 @@ function apiDatabase(rpcRole: "service_role" | "anon" | "authenticated" = "servi
       if (operation === "update") sql = `update ${ident(table)} set ${Object.entries(values)
         .map(([key, value]) => `${ident(key)}=${bind(value)}`).join(",")}`;
       if (operation === "insert") sql = `insert into ${ident(table)} (${Object.keys(values).map(ident).join(",")}) values (${Object.values(values).map(bind).join(",")})`;
-      if (filters.length) sql += " where " + filters.map(([key, operator, value]) => `${ident(key)}${operator}${bind(value)}`).join(" and ");
+      if (filters.length) sql += " where " + filters.map(([key, operator, value]) => {
+        if (operator !== "in") return `${ident(key)}${operator}${bind(value)}`;
+        assert.ok(Array.isArray(value));
+        return value.length ? `${ident(key)} in (${value.map(bind).join(",")})` : "false";
+      }).join(" and ");
       if (operation !== "select") sql += ` returning ${selection}`;
       if (operation === "select" && limit !== undefined) sql += ` limit ${limit}`;
-      if (operation !== "select") await db.exec("savepoint api_write");
+      // Settings read failures must not abort the enclosing fixture transaction.
+      const savepoint = operation !== "select" ? "api_write" : table === "workspace_settings" ? "api_settings" : null;
+      if (savepoint) await db.exec(`savepoint ${savepoint}`);
       try {
         const result = await db.query(sql, params);
-        if (operation !== "select") await db.exec("release savepoint api_write");
+        if (savepoint) await db.exec(`release savepoint ${savepoint}`);
         const rows = JSON.parse(JSON.stringify(result.rows));
         return { data: single ? rows[0] ?? null : rows, error: null };
       } catch (error) {
-        if (operation !== "select") await db.exec("rollback to savepoint api_write; release savepoint api_write");
+        if (savepoint) await db.exec(`rollback to savepoint ${savepoint}; release savepoint ${savepoint}`);
         return { data: null, error: { code: (error as { code: string }).code, message: "Isolated database rejected the query" } };
       }
     }
     const query = {
       select(value: string) { columns = value; return query; },
       eq(key: string, value: unknown) { filters.push([key, "=", value]); return query; },
+      in(key: string, value: unknown[]) { filters.push([key, "in", [...value]]); return query; },
       gte(key: string, value: unknown) { filters.push([key, ">=", value]); return query; },
       lt(key: string, value: unknown) { filters.push([key, "<", value]); return query; },
       lte(key: string, value: unknown) { filters.push([key, "<=", value]); return query; },
@@ -149,15 +159,17 @@ async function apiFixture(role = "owner") {
     assert.equal(url, "https://fixture.invalid/auth/v1/user");
     return { ok: true, status: 200, text: async () => JSON.stringify({ id: id(41) }) };
   }) as unknown as typeof fetch;
-  serverClient.setSupabaseServerClientFactoryForTests(apiDatabase);
+  const queries: ApiQuery[] = [];
+  serverClient.setSupabaseServerClientFactoryForTests(() => apiDatabase("service_role", queries));
   return async (route = "appointments", method = "PATCH", updates: Record<string, unknown> = { status: "arrived" }, workspace = 1, appointmentId = id(10)) => {
+    queries.length = 0;
     let status = 0; let body: Record<string, unknown> = {};
     const res = { setHeader() {}, status(value: number) { status = value; return res; },
       json(value: Record<string, unknown>) { body = value; } };
     await handler({ method, headers: { authorization: "Bearer fixture.test.signature" },
       query: { path: [route], workspaceId: id(workspace) },
       body: method === "GET" ? undefined : method === "POST" ? updates : { id: appointmentId, updates } }, res);
-    return { status, body };
+    return { status, body, queries: [...queries] };
   };
 }
 afterEach(() => {
@@ -167,10 +179,15 @@ afterEach(() => {
   if (originalKey === undefined) delete process.env.SUPABASE_SERVICE_ROLE_KEY; else process.env.SUPABASE_SERVICE_ROLE_KEY = originalKey;
 });
 
+const profileQueries = (queries: ApiQuery[]) => queries.filter(query => query.table === "workspace_settings"
+  && query.filters.some(([key, operator, value]) => key === "key" && operator === "=" && value === "workspace_purpose"));
+
 test("API arrival returns persisted sale link and sales exposes exact paid amount", async () => {
   const call = await apiFixture();
   const response = await call();
   assert.equal(response.status, 200, JSON.stringify(response.body));
+  assert.deepEqual(profileQueries(response.queries), [{ table: "workspace_settings", operation: "select",
+    columns: "workspace_id, value", filters: [["workspace_id", "in", [id(1)]], ["key", "=", "workspace_purpose"]] }]);
   assert.equal(response.body.mode, "supabase");
   const item = (response.body.data as { item: Record<string, unknown> }).item;
   assert.equal(item.arrivalSaleId, (await sale()).id);
@@ -185,6 +202,44 @@ test("API arrival returns persisted sale link and sales exposes exact paid amoun
   await call();
   assert.equal((await row("select count(*) from deals")).count, 1);
 });
+test("API profile lookup ignores foreign profiles and unrelated settings without changing arrival payment", async () => {
+  const call = await apiFixture();
+  await db.exec(`insert into workspace_settings(workspace_id,key,value) values
+    ('${id(2)}','workspace_purpose','{"purpose":"mortgage_leads"}'),
+    ('${id(1)}','fixture_setting','{"retained":true}')`);
+  assert.equal((await call()).status, 200);
+  assert.equal((await sale()).amount_minor, 1500000);
+  assert.deepEqual((await row(`select value from workspace_settings where workspace_id='${id(1)}'`)).value, { retained: true });
+  const empty = await apiDatabase().from("workspace_settings").select("workspace_id, value").in("workspace_id", []);
+  assert.deepEqual(empty, { data: [], error: null });
+});
+
+for (const failure of ["malformed", "query error"]) {
+  test(`API ${failure} profile fails closed before any arrival writes and remains retryable`, async () => {
+    const call = await apiFixture();
+    const before = await retryCounts();
+    if (failure === "malformed") {
+      await db.exec(`insert into workspace_settings(workspace_id,key,value)
+        values('${id(1)}','workspace_purpose','{"purpose":"unrecognized"}')`);
+    } else {
+      await db.exec("alter table workspace_settings rename column value to fixture_value");
+    }
+    const response = await call();
+    assert.equal(response.status, 503, JSON.stringify(response.body));
+    assert.equal(response.body.code, "workspace_profile_unavailable");
+    assert.equal(response.body.data, undefined);
+    const profiles = profileQueries(response.queries);
+    assert.equal(profiles.length, 1);
+    assert.deepEqual(response.queries.filter(query => query.table !== "staff_users" && !profiles.includes(query)), []);
+    assert.deepEqual(await retryCounts(), before);
+    assert.equal((await row(`select status from appointments where id='${id(10)}'`)).status, "confirmed");
+    if (failure === "malformed") await db.exec("delete from workspace_settings where key='workspace_purpose'");
+    else await db.exec("alter table workspace_settings rename column fixture_value to value");
+    assert.equal((await call()).status, 200);
+    assert.equal((await sale()).amount_minor, 1500000);
+  });
+}
+
 test("API missing price returns safe error and keeps visit unconfirmed", async () => {
   const call = await apiFixture();
   await db.exec(`update appointments set price_minor=null where id='${id(10)}'`);

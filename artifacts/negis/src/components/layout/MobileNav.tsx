@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useLayoutEffect, useState } from "react";
 import { useLocation } from "wouter";
 import {
   BadgeDollarSign,
@@ -23,6 +23,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
+import { workspaceAllowsRoute } from "@/lib/workspaceRoutes";
 import { capitalize, termsFor } from "../../../../../lib/vertical/terms";
 import { ProfileDialog } from "./ProfileDialog";
 
@@ -76,13 +77,19 @@ export function MobileNav() {
   const [open, setOpen] = useState(false);
   const [showProfile, setShowProfile] = useState(false);
   const [location, setLocation] = useLocation();
-  const { signOut, userRole, rolePermissions, vertical } = useAuth();
+  const { signOut, user, clinicId, userRole, rolePermissions, vertical, workspacePurpose } = useAuth();
   const terms = termsFor(vertical);
 
+  // Closing the profile also discards its unsaved password fields.
+  useLayoutEffect(() => {
+    setOpen(false);
+    setShowProfile(false);
+  }, [user?.id, clinicId, userRole, workspacePurpose]);
+
   const canUse = (item: MobileNavItem) =>
-    userRole === "lead_manager"
+    workspaceAllowsRoute(workspacePurpose, userRole, item.href) && (userRole === "lead_manager"
       ? item.href === "/leads"
-      : userRole === "owner" || userRole === "manager" || userRole === "admin" || Boolean(rolePermissions[item.permission]);
+      : userRole === "owner" || userRole === "manager" || userRole === "admin" || Boolean(rolePermissions[item.permission]));
   const visiblePrimary = primaryItems.filter(canUse);
   const visibleDrawer = drawerItems.filter(canUse);
   const moreActive = visibleDrawer.some((item) => isActive(location, item.href));
@@ -104,12 +111,10 @@ export function MobileNav() {
 
             <div className="grid grid-cols-2 gap-2">
               {visibleDrawer.map(({ href, label: staticLabel, icon: Icon }) => {
-                // Две подписи зависят от ниши; остальные нейтральны и живут
-                // статикой в списке выше.
                 const label = href === "/staff-schedule"
                   ? `${capitalize(terms.specialistPlural)} и график`
                   : href === "/admin"
-                    ? `Настройки ${terms.orgGenitive}`
+                    ? workspacePurpose === "mortgage_leads" ? "Команда" : `Настройки ${terms.orgGenitive}`
                     : staticLabel;
                 return (
                   <button

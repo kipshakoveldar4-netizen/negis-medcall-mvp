@@ -7,6 +7,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import { z } from 'zod';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
+import type { WorkspacePurpose } from '../../../../lib/crm/workspace-purpose';
 
 const loginSchema = z.object({
   // Логин или почта: z.string().email() отвергал бы «aigul.botanova» ещё до
@@ -33,7 +34,8 @@ type NewPasswordValues = z.infer<typeof newPasswordSchema>;
 type ModalState = 'idle' | 'choice' | 'login' | 'reset' | 'newpassword';
 
 
-const roleRoute = (role: string | null) => {
+const roleRoute = (role: string | null, purpose: WorkspacePurpose | null = null) => {
+  if (purpose === 'mortgage_leads') return '/leads';
   if (role === 'lead_manager') return '/leads';
   if (role === 'owner' || role === 'manager') return '/dashboard';
   // Регистратор начинает с заявок: экран приёма вёл на фикстуру без
@@ -50,15 +52,15 @@ export default function Landing() {
   const [error,      setError]      = useState('');
   const [successMsg, setSuccessMsg] = useState('');
   const [, setLocation] = useLocation();
-  const { session, userRole, isLoading: authLoading, clinicId, isDemoMode } = useAuth();
+  const { session, userRole, isLoading: authLoading, clinicId, isDemoMode, workspacePurpose } = useAuth();
   const modalRef = useRef<HTMLDivElement>(null);
 
   /* Auto-redirect if already authenticated (e.g. after dev login or page refresh) */
   useEffect(() => {
     if (!authLoading && clinicId && (session || isDemoMode)) {
-      setLocation(roleRoute(userRole));
+      setLocation(roleRoute(userRole, workspacePurpose));
     }
-  }, [authLoading, session, clinicId, userRole, isDemoMode]);
+  }, [authLoading, session, clinicId, userRole, isDemoMode, workspacePurpose]);
 
   const loginForm       = useForm<LoginValues>      ({ resolver: zodResolver(loginSchema) });
   const resetForm       = useForm<ResetValues>      ({ resolver: zodResolver(resetSchema) });
@@ -78,7 +80,7 @@ export default function Landing() {
     // Условие — применённое членство, а не голая сессия: у вошедшего без
     // клиники roleRoute вёл на защищённый маршрут, тот отбрасывал обратно
     // сюда, и кнопка «Войти» становилась бесконечным пинг-понгом без выхода.
-    if (session && clinicId) { setLocation(roleRoute(userRole)); return; }
+    if (session && clinicId) { setLocation(roleRoute(userRole, workspacePurpose)); return; }
     setError(''); setSuccessMsg('');
     loginForm.reset();
     setModalState('choice');

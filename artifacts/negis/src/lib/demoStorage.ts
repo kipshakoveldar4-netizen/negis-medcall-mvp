@@ -9,6 +9,7 @@ type ApiCollectionOptions<TItem extends { id: string }> = {
   toApi?: (item: TItem) => Record<string, unknown>;
   patchToApi?: (patch: Partial<TItem>) => Record<string, unknown>;
   fromApi?: (item: unknown) => TItem;
+  allowScopedCreate?: boolean;
   // Opt-in for assigned-only leads: never reuse a workspace-wide cached list.
   strictAccess?: {
     actorId: string;
@@ -199,6 +200,7 @@ export function useDemoCollection<TItem extends { id: string }>(
     patchToApi,
     fromApi,
     strictAccess,
+    allowScopedCreate = false,
   } = stable;
 
   // Selection-2: which clinic this collection belongs to, read on every render
@@ -359,7 +361,7 @@ export function useDemoCollection<TItem extends { id: string }>(
    * открытой. Прежние вызывающие без await продолжают работать как раньше.
    */
   const addItem = (item: TItem): Promise<boolean> => {
-    if (strictAccess) return Promise.resolve(false);
+    if (strictAccess && (!allowScopedCreate || !endpoint || !isCurrent())) return Promise.resolve(false);
     setStoredItems((current) => [item, ...current]);
 
     // Демо-режим: localStorage и есть запись, отказу неоткуда взяться.
@@ -367,7 +369,7 @@ export function useDemoCollection<TItem extends { id: string }>(
 
     return (async () => {
       try {
-        const workspaceId = readWorkspaceId();
+        const workspaceId = strictAccess?.workspaceId ?? readWorkspaceId();
         const payload = {
           ...(toApi ? toApi(item) : item),
           workspaceId,
@@ -377,19 +379,24 @@ export function useDemoCollection<TItem extends { id: string }>(
         // двумя клиниками получал отказ «нужно выбрать клинику» на КАЖДУЮ
         // запись, хотя список читался нормально — тот же запрос уже слал
         // workspaceId в query.
-        const response = await crmFetch(`${endpoint}?workspaceId=${encodeURIComponent(workspaceId)}`, {
+        const response = await request(`${endpoint}?workspaceId=${encodeURIComponent(workspaceId)}`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
         });
         const body = await safeJson<Record<string, unknown>>(response);
+        if (!isCurrent()) return false;
         if (!response.ok || body?.success !== true || body.mode !== "supabase") {
           revertWrite((current) => current.filter((entry) => entry.id !== item.id));
           return false;
         }
 
         const rawItem = body.data[itemKey];
-        if (!rawItem) return true;
+        if (!rawItem) {
+          if (!strictAccess) return true;
+          revertWrite((current) => current.filter((entry) => entry.id !== item.id));
+          return false;
+        }
 
         const savedItem = fromApi ? fromApi(rawItem) : (rawItem as TItem);
         setStoredItems((current) => current.map((currentItem) => (currentItem.id === item.id ? savedItem : currentItem)));

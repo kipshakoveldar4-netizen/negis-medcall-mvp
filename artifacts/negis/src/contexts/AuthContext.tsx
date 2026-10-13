@@ -606,7 +606,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     // the bug that would leak one clinic's list into another's screen.
     clearCrmCache();
     applyMembership(supabaseUser, selected, memberships);
-    setLocation(selected.role === 'lead_manager' ? '/leads' : '/dashboard');
+    setLocation(selected.purpose === 'mortgage_leads' || selected.role === 'lead_manager' ? '/leads' : '/dashboard');
   };
 
   /** Returns a multi-clinic user to the picker without ending the session. */

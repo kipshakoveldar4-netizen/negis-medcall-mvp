@@ -811,7 +811,7 @@ function permissionSummary(permissions: CrmPermission[]) {
 }
 
 export default function AdminCenter() {
-  const { clinicId, user, userRole, isDemoMode } = useAuth();
+  const { clinicId, user, userRole, isDemoMode, workspacePurpose } = useAuth();
   const actorId = user?.id || "";
   const workspaceId = clinicId || readWorkspaceId();
   const observedActorRef = useRef(actorId);
@@ -827,8 +827,8 @@ export default function AdminCenter() {
     });
     return () => subscription.unsubscribe();
   }, []);
-  return <AdminCenterSession key={JSON.stringify([actorId, workspaceId, userRole, isDemoMode, authEpoch])}
-    actorId={actorId} workspaceId={workspaceId} userRole={userRole} isDemoMode={isDemoMode} />;
+  return <AdminCenterSession key={JSON.stringify([actorId, workspaceId, userRole, isDemoMode, workspacePurpose, authEpoch])}
+    actorId={actorId} workspaceId={workspaceId} userRole={userRole} isDemoMode={isDemoMode} workspacePurpose={workspacePurpose} />;
 }
 
 type AdminSessionAccess = {
@@ -840,20 +840,22 @@ type AdminSessionAccess = {
   releaseResponse: (response: globalThis.Response) => void;
 };
 
-function AdminCenterSession({ actorId, workspaceId, userRole, isDemoMode }: {
+function AdminCenterSession({ actorId, workspaceId, userRole, isDemoMode, workspacePurpose }: {
   actorId: string;
   workspaceId: string;
   userRole: ReturnType<typeof useAuth>["userRole"];
   isDemoMode: boolean;
+  workspacePurpose: ReturnType<typeof useAuth>["workspacePurpose"];
 }) {
   const auth = useAuth();
   const sessionRef = useRef<AbortController | null>(null);
-  const liveScopeRef = useRef({ actorId, workspaceId, userRole, isDemoMode });
+  const liveScopeRef = useRef({ actorId, workspaceId, userRole, isDemoMode, workspacePurpose });
   liveScopeRef.current = {
     actorId: auth.user?.id || "",
     workspaceId: auth.clinicId || readWorkspaceId(),
     userRole: auth.userRole,
     isDemoMode: auth.isDemoMode,
+    workspacePurpose: auth.workspacePurpose,
   };
   const [lifetime, setLifetime] = useState<{ controller: AbortController; epoch: number } | null>(null);
   useLayoutEffect(() => {
@@ -879,6 +881,7 @@ function AdminCenterSession({ actorId, workspaceId, userRole, isDemoMode }: {
   const isCurrent = () => liveScopeRef.current.actorId === actorId
     && liveScopeRef.current.workspaceId === workspaceId && liveScopeRef.current.userRole === userRole
     && liveScopeRef.current.isDemoMode === isDemoMode
+    && liveScopeRef.current.workspacePurpose === workspacePurpose
     && sessionRef.current === controller && !controller.signal.aborted;
   const assertCurrent = () => {
     if (!isCurrent()) throw new DOMException("Admin session ended", "AbortError");
@@ -925,7 +928,11 @@ function AdminCenterSession({ actorId, workspaceId, userRole, isDemoMode }: {
 
 function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
   const [, setLocation] = useLocation();
-  const { user, vertical } = useAuth();
+  const { user, vertical, workspacePurpose } = useAuth();
+  const isMortgage = workspacePurpose === "mortgage_leads";
+  const visibleTabs = isMortgage ? tabs.filter((tab) => tab.id === "staff") : tabs;
+  const workspaceStaffRoles: readonly StaffRole[] = isMortgage ? ["lead_manager", "admin"] : staffRoles;
+  const defaultStaffRole: StaffRole = isMortgage ? "lead_manager" : "receptionist";
   const workspaceId = access.workspaceId;
   const crmFetch = access.request;
 
@@ -981,11 +988,12 @@ function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
   // «Мастера». Ключ вкладки остаётся doctors — переименовывать его значило бы
   // трогать реестры, а не слово на кнопке.
   const tabLabel = (tab: { id: AdminTab; label: string }) =>
-    tab.id === "doctors" ? capitalize(termsFor(vertical).specialistPlural) : tab.label;
+    isMortgage ? "Команда" : tab.id === "doctors" ? capitalize(termsFor(vertical).specialistPlural) : tab.label;
   // «Врач» в клинике и «Мастер» в салоне: роль в базе одна, слово на экране —
   // из словаря ниши. Владелец салона: «нет должности мастеров».
   const roleTitles = staffRoleLabels(vertical);
-  const [activeTab, setActiveTab] = useState<AdminTab>("overview");
+  const [activeTab, setRequestedTab] = useState<AdminTab>(isMortgage ? "staff" : "overview");
+  const setActiveTab = (tab: AdminTab) => setRequestedTab(isMortgage ? "staff" : tab);
   const [clinic, setClinic] = useState<ClinicSettings>(() => readStored("negis_clinic_settings", clinicDefaults));
   // Commercial-3B: the team is whatever the server says it is. This list used
   // to be seeded from localStorage demo data and written back there, so an
@@ -1036,7 +1044,7 @@ function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
   // Commercial-3B: staff are added by invitation. The clinic names an address
   // and a role; the person proves control of that address through Supabase Auth
   // and redeems the token. Nothing here mints a password or a membership.
-  const [inviteForm, setInviteForm] = useState({ email: "", role: "receptionist" as StaffRole });
+  const [inviteForm, setInviteForm] = useState<{ email: string; role: StaffRole }>({ email: "", role: defaultStaffRole });
   const [invitations, setInvitations] = useState<StaffInvitation[]>([]);
   const [issuedInvite, setIssuedInvite] = useState<{ email: string; acceptUrl: string; emailSent: boolean; emailStatus?: string } | null>(null);
   // Два пути зачисления. Умолчание — пароль: письма-приглашения до клиник
@@ -1066,7 +1074,7 @@ function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
   // показывают один раз и раздают из рук в руки.
   const [batchOpen, setBatchOpen] = useState(false);
   const [batchEmails, setBatchEmails] = useState("");
-  const [batchRole, setBatchRole] = useState<StaffRole>("receptionist");
+  const [batchRole, setBatchRole] = useState<StaffRole>(defaultStaffRole);
   const [batchResults, setBatchResults] = useState<BatchStaffResult[] | null>(null);
 
   // Ждущие решения. null («прочитать не удалось») даёт пустой список: рисовать
@@ -1177,7 +1185,7 @@ function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
   }
 
   async function loadMetaInsightsDiagnostics() {
-    if (!access.isCurrent()) return;
+    if (!access.isCurrent() || isMortgage) return;
     if (serverAdminAuth.status !== "confirmed") return;
     setBusy("meta-insights-load", true);
     setMetaInsightsMessage("");
@@ -1266,7 +1274,7 @@ function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
   }
 
   useEffect(() => {
-    if (serverAdminAuth.status === "confirmed") {
+    if (!isMortgage && serverAdminAuth.status === "confirmed") {
       void loadMetaInsightsDiagnostics();
     } else {
       setMetaInsightsLaunches([]);
@@ -1274,7 +1282,7 @@ function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
       setMetaInsightsLastRun(null);
       setMetaInsightsRows([]);
     }
-  }, [serverAdminAuth.status, workspaceId]);
+  }, [serverAdminAuth.status, workspaceId, isMortgage]);
 
   async function checkCrmHealth() {
     if (!access.isCurrent()) return null;
@@ -1845,7 +1853,7 @@ function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
   useEffect(() => {
     if (typeof window === "undefined") return;
     const requested = new URLSearchParams(window.location.search).get("tab");
-    if (requested && tabs.some((tab) => tab.id === requested)) setActiveTab(requested as AdminTab);
+    if (requested && visibleTabs.some((tab) => tab.id === requested)) setActiveTab(requested as AdminTab);
   }, []);
 
   async function loadJoinRequests() {
@@ -1887,7 +1895,7 @@ function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
     const currentCode = joinCode.state === "ready" ? joinCode.value : null;
     if (currentCode) {
       const confirmed = window.confirm(
-        "Сменить код клиники?\n\nСтарый перестанет работать сразу, и всем, кому вы его называли, придётся сообщить новый. Уже поданные заявки и работающие сотрудники не пострадают.",
+        `${isMortgage ? "Сменить код пространства?" : "Сменить код клиники?"}\n\nСтарый перестанет работать сразу, и всем, кому вы его называли, придётся сообщить новый. Уже поданные заявки и работающие сотрудники не пострадают.`,
       );
       if (!confirmed) return;
     }
@@ -2141,7 +2149,7 @@ function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
         emailSent: Boolean(body.data?.emailSent),
         emailStatus: body.data?.emailStatus || "",
       });
-      setInviteForm({ email: "", role: "receptionist" });
+      setInviteForm({ email: "", role: defaultStaffRole });
       await loadInvitations();
       if (!access.isCurrent()) return;
       toast.success(body.data?.emailSent ? "Приглашение отправлено" : "Приглашение создано — передайте ссылку");
@@ -2206,7 +2214,7 @@ function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
       setCreatedStaff({ email: issued, password: staffPassword, kind: "created" });
       setStaffPassword("");
       setStaffFullName("");
-      setInviteForm({ email: "", role: "receptionist" });
+      setInviteForm({ email: "", role: defaultStaffRole });
       await Promise.all([loadStaff(), loadInvitations()]);
       if (!access.isCurrent()) return;
       toast.success("Сотрудник добавлен — передайте ему логин и пароль");
@@ -2620,7 +2628,7 @@ function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
     const actorRole: StaffRole = serverAdminAuth.role || "admin";
     const actorStaffUserId = serverAdminAuth.staffUserId || "";
     // Роли ниже своей — те, что сервер примет; owner недоступен никому.
-    const assignableRoles = staffRoles.filter((role) => canAssignRole(actorRole, role));
+    const assignableRoles = workspaceStaffRoles.filter((role) => canAssignRole(actorRole, role));
     const statusText = (status: string) => (status === "active" ? "работает" : status === "paused" ? "на паузе" : status);
     // Своя строка и строка владельца (для админа) не редактируются: сервер
     // такие запросы отклоняет, и кнопка обещала бы невозможное.
@@ -2632,8 +2640,10 @@ function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
         <section className="neu-card">
           <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
             <div>
-              <h2 className="text-lg font-black text-[#0F172A]">Сотрудники</h2>
-              <p className="text-sm text-[#64748B]">Доступы выдаются по ролям. Каждый входит со своим паролем — пароли за сотрудников не создаются.</p>
+              <h2 className="text-lg font-black text-[#0F172A]">{isMortgage ? "Команда" : "Сотрудники"}</h2>
+              <p className="text-sm text-[#64748B]">{isMortgage
+                ? "Доступы выдаются по ролям. У каждого участника команды свой логин и пароль."
+                : "Доступы выдаются по ролям. Каждый входит со своим паролем — пароли за сотрудников не создаются."}</p>
             </div>
             <span className="rounded-full bg-[#E0F2FE] px-3 py-1 text-xs font-bold text-[#0369A1]">Профилей: {staff.length}</span>
           </div>
@@ -2657,7 +2667,7 @@ function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
                         onChange={(event) => updateStaffRole(member.id, event.target.value as StaffRole)}
                         aria-label={`Роль: ${member.name}`}
                       >
-                        {!assignableRoles.includes(member.role) ? <option value="">{roleTitles[member.role]}</option> : null}
+                        {!assignableRoles.includes(member.role) ? <option value="" disabled={isMortgage}>{roleTitles[member.role]}</option> : null}
                         {assignableRoles.map((role) => (
                           <option key={role} value={role}>{roleTitles[role]}</option>
                         ))}
@@ -2709,7 +2719,7 @@ function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
                           onChange={(event) => updateStaffRole(member.id, event.target.value as StaffRole)}
                           aria-label={`Роль: ${member.name}`}
                         >
-                          {!assignableRoles.includes(member.role) ? <option value="">{roleTitles[member.role]}</option> : null}
+                          {!assignableRoles.includes(member.role) ? <option value="" disabled={isMortgage}>{roleTitles[member.role]}</option> : null}
                           {assignableRoles.map((role) => (
                             <option key={role} value={role}>{roleTitles[role]}</option>
                           ))}
@@ -2754,7 +2764,7 @@ function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
         {/* Код клиники стоит первым: по нему приходят люди, и владелец должен
             видеть его, а не искать. */}
         <section className="neu-card">
-          <h2 className="text-lg font-black text-[#0F172A]">Код клиники</h2>
+          <h2 className="text-lg font-black text-[#0F172A]">{isMortgage ? "Код пространства" : "Код клиники"}</h2>
           <p className="mt-2 text-sm text-[#64748B]">
             Диктуйте код только своим людям. По коду нельзя войти — по нему можно только попроситься, а пускаете вы.
           </p>
@@ -2768,7 +2778,9 @@ function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
           )}
           {/* 403 — это не сбой: обновление страницы не поможет никогда. */}
           {joinCode.state === "denied" && (
-            <p className="mt-3 text-sm text-[#94A3B8]">Код клиники видят владелец и администратор. Попросите их продиктовать его.</p>
+            <p className="mt-3 text-sm text-[#94A3B8]">{isMortgage
+              ? "Код пространства видят владелец и администратор. Попросите их продиктовать его."
+              : "Код клиники видят владелец и администратор. Попросите их продиктовать его."}</p>
           )}
           {joinCode.state === "ready" && joinCode.value === null && (
             <button type="button" className="neu-btn-primary mt-4" disabled={loading.joinCode} onClick={() => void issueJoinCode()}>
@@ -2823,10 +2835,14 @@ function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
             </p>
           )}
           {joinRequests.state === "denied" && (
-            <p className="mt-3 text-sm text-[#94A3B8]">Заявки разбирают владелец и администратор клиники.</p>
+            <p className="mt-3 text-sm text-[#94A3B8]">{isMortgage
+              ? "Заявки разбирают владелец и администратор пространства."
+              : "Заявки разбирают владелец и администратор клиники."}</p>
           )}
           {joinRequests.state === "ready" && pendingJoinRequests.length === 0 && (
-            <p className="mt-3 text-sm text-[#64748B]">Заявок нет. Продиктуйте код клиники тем, кого ждёте — он в карточке выше.</p>
+            <p className="mt-3 text-sm text-[#64748B]">{isMortgage
+              ? "Заявок нет. Продиктуйте код пространства тем, кого ждёте — он в карточке выше."
+              : "Заявок нет. Продиктуйте код клиники тем, кого ждёте — он в карточке выше."}</p>
           )}
           {joinRequests.state === "ready" && pendingJoinRequests.length > 0 && (
             <div className="mt-3 space-y-3">
@@ -2953,11 +2969,9 @@ function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
               value={inviteForm.role}
               onChange={(event) => setInviteForm({ ...inviteForm, role: event.target.value as StaffRole })}
             >
-              {staffRoles
-                .filter((role) => canAssignRole(serverAdminAuth.role || "admin", role))
-                .map((role) => (
-                  <option key={role} value={role}>{roleTitles[role]}</option>
-                ))}
+              {assignableRoles.map((role) => (
+                <option key={role} value={role}>{roleTitles[role]}</option>
+              ))}
             </select>
             {staffMode === "password" ? (
               <>
@@ -4158,12 +4172,12 @@ function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
         <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
           <div>
             <p className="text-xs font-bold uppercase tracking-[0.18em] text-[#64748B]">Администрирование</p>
-            <h1 className="mt-2 text-2xl font-semibold text-[#0F172A]">Настройки клиники</h1>
+            <h1 className="mt-2 text-2xl font-semibold text-[#0F172A]">{isMortgage ? "Команда" : "Настройки клиники"}</h1>
             <p className="mt-2 max-w-3xl text-sm text-[#64748B]">
-              Клиника: {workspaceId}. Владелец: {loginFromEmail(user?.email) || "demo user"}.
+              {isMortgage ? "Пространство" : "Клиника"}: {workspaceId}. {isMortgage ? "Участник" : "Владелец"}: {loginFromEmail(user?.email) || "demo user"}.
             </p>
           </div>
-          <button type="button" className="neu-btn w-full justify-center xl:w-auto" onClick={() => setLocation("/ai-control-center")}>
+          <button type="button" className="neu-btn w-full justify-center xl:w-auto" onClick={() => setLocation(isMortgage ? "/leads" : "/ai-control-center")}>
             Вернуться в приложение
           </button>
         </div>
@@ -4171,7 +4185,7 @@ function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
         {/* Internal platform diagnostics — progressive disclosure for Medina
             Platform staff only; hidden by default from the clinic settings flow.
             Commercial-2+ will move this behind a server-verified superadmin role. */}
-        <details className="rounded-xl border border-slate-700 bg-slate-900 text-white">
+        {!isMortgage && <details className="rounded-xl border border-slate-700 bg-slate-900 text-white">
           <summary className="cursor-pointer select-none p-4 text-sm font-semibold text-slate-200">
             Диагностика платформы · внутренний раздел Medina Platform
           </summary>
@@ -4188,7 +4202,7 @@ function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
               <ReleaseBanner readiness={readiness} />
             </div>
           </div>
-        </details>
+        </details>}
 
         <section className="neu-card flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between" data-testid="server-admin-auth">
           <div className="flex min-w-0 items-start gap-3">
@@ -4211,7 +4225,9 @@ function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
                 {serverAdminAuth.status === "checking" && "Проверяем доступ…"}
               </h2>
               <p className="mt-1 text-sm text-[#64748B]">
-                {serverAdminAuth.status === "confirmed" && "Доступ администратора подтверждён для текущей клиники."}
+                {serverAdminAuth.status === "confirmed" && (isMortgage
+                  ? "Доступ администратора подтверждён для текущего пространства."
+                  : "Доступ администратора подтверждён для текущей клиники.")}
                 {serverAdminAuth.status === "reauth" && "Для защиты данных необходимо войти в аккаунт повторно."}
                 {serverAdminAuth.status === "forbidden" && "Для этого раздела нужна активная роль владельца или администратора."}
                 {serverAdminAuth.status === "unavailable" && "Сервис авторизации временно недоступен. Остальные разделы можно использовать."}
@@ -4253,13 +4269,15 @@ function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
             подписки, рядом стоит прайс, а расчёт стоимости считает нашу часть
             счёта и позволяет вписать чужую.
           */}
-          <PlanCalculator />
-          <VerticalSwitch />
+          {!isMortgage && <PlanCalculator />}
+          {!isMortgage && <VerticalSwitch />}
           <section className="neu-card" aria-label="Поддержка">
             <p className="text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">Поддержка</p>
             <h2 className="mt-1 text-base font-black text-[#0F172A]">Связь с Medina OS</h2>
             <p className="mt-1 text-sm text-[#64748B]">
-              Канал поддержки настраивается для вашей клиники. До подключения обращайтесь к вашему менеджеру Medina OS и указывайте идентификатор клиники.
+              {isMortgage
+                ? "По вопросам доступа обращайтесь к вашему менеджеру Medina OS и указывайте идентификатор пространства."
+                : "Канал поддержки настраивается для вашей клиники. До подключения обращайтесь к вашему менеджеру Medina OS и указывайте идентификатор клиники."}
             </p>
             <button
               type="button"
@@ -4269,14 +4287,14 @@ function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
                 try {
                   await navigator.clipboard.writeText(workspaceId);
                   if (!access.isCurrent()) return;
-                  toast.success("Идентификатор клиники скопирован");
+                  toast.success(isMortgage ? "Идентификатор пространства скопирован" : "Идентификатор клиники скопирован");
                 } catch {
                   if (!access.isCurrent()) return;
                   toast.error("Не удалось скопировать идентификатор");
                 }
               }}
             >
-              Скопировать идентификатор клиники
+              {isMortgage ? "Скопировать идентификатор пространства" : "Скопировать идентификатор клиники"}
             </button>
           </section>
         </div>
@@ -4284,7 +4302,7 @@ function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
         <div className="md:hidden">
           <label className="mb-2 block text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">Раздел админки</label>
           <select className="neu-input w-full" value={activeTab} onChange={(event) => setActiveTab(event.target.value as AdminTab)}>
-            {tabs.map((tab) => (
+            {visibleTabs.map((tab) => (
               <option key={tab.id} value={tab.id}>
                 {/* Счётчик и в мобильном селекте: иначе на телефоне его не
                     видно вовсе, а именно с телефона смотрят чаще. */}
@@ -4297,7 +4315,7 @@ function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
 
         <nav className="hidden overflow-x-auto md:block" aria-label="Admin sections">
           <div className="inline-flex min-w-max gap-2 rounded-[28px] border border-white/70 bg-white/55 p-2 shadow-[8px_10px_28px_rgba(116,135,154,0.12)]">
-            {tabs.map((tab) => (
+            {visibleTabs.map((tab) => (
               <button
                 key={tab.id}
                 type="button"
@@ -4316,18 +4334,20 @@ function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
           </div>
         </nav>
 
-        {activeTab === "overview" && renderOverview()}
-        {activeTab === "staff" && renderStaff()}
-        {activeTab === "operators" && <ClinicOperators key={workspaceId} workspaceId={workspaceId} />}
-        {activeTab === "doctors" && <DoctorSchedule />}
-        {activeTab === "roles" && renderRoles()}
-        {activeTab === "clinic" && renderClinic()}
-        {activeTab === "whatsapp" && <WhatsAppChannels />}
-        {activeTab === "integrations" && renderIntegrations()}
-        {activeTab === "ai" && renderAiProviders()}
-        {activeTab === "meta" && renderMeta()}
-        {activeTab === "release" && renderReleaseChecklist()}
-        {activeTab === "diagnostics" && renderDiagnostics()}
+        {isMortgage ? renderStaff() : <>
+          {activeTab === "overview" && renderOverview()}
+          {activeTab === "staff" && renderStaff()}
+          {activeTab === "operators" && <ClinicOperators key={workspaceId} workspaceId={workspaceId} />}
+          {activeTab === "doctors" && <DoctorSchedule />}
+          {activeTab === "roles" && renderRoles()}
+          {activeTab === "clinic" && renderClinic()}
+          {activeTab === "whatsapp" && <WhatsAppChannels />}
+          {activeTab === "integrations" && renderIntegrations()}
+          {activeTab === "ai" && renderAiProviders()}
+          {activeTab === "meta" && renderMeta()}
+          {activeTab === "release" && renderReleaseChecklist()}
+          {activeTab === "diagnostics" && renderDiagnostics()}
+        </>}
       </div>
     </PageLayout>
   );
