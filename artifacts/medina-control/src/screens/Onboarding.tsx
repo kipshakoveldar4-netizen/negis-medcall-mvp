@@ -46,7 +46,7 @@ const REISSUE_CODES = new Set([
 type Result = {
   workspaceId: string;
   name: string;
-  vertical?: string;
+  vertical?: string | null;
   purpose?: string;
   ownerEmail: string;
   ownerLogin?: string;
@@ -59,7 +59,8 @@ type Result = {
 type CredsResult = {
   workspaceId: string;
   name: string;
-  vertical: string;
+  vertical: string | null;
+  purpose: string;
   ownerEmail: string;
   ownerLogin: string;
   ownerLoginOnly: boolean;
@@ -303,9 +304,9 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
   if (credsResult) {
     return (
       <>
-        <h1 ref={titleRef} tabIndex={-1} className="page-title">Клиника подключена — вход по логину и паролю</h1>
+        <h1 ref={titleRef} tabIndex={-1} className="page-title">{credsResult.purpose === "mortgage_leads" ? "Пространство подключено — вход по логину и паролю" : "Клиника подключена — вход по логину и паролю"}</h1>
         <p className="page-sub" style={{ overflowWrap: "anywhere" }}>
-          «{credsResult.name}» · {credsResult.vertical === "beauty" ? "салон красоты" : credsResult.vertical === "dental" ? "стоматология" : "клиника"} · {ownerIdentity(credsResult)}
+          «{credsResult.name}» · {credsResult.purpose === "mortgage_leads" ? "ипотечные заявки" : credsResult.vertical === "beauty" ? "салон красоты" : credsResult.vertical === "dental" ? "стоматология" : "клиника"} · {ownerIdentity(credsResult)}
         </p>
 
         <div className="panel" style={{ padding: "18px 20px", maxWidth: 720 }}>
@@ -342,8 +343,10 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
         <div className="panel" style={{ padding: "18px 20px", maxWidth: 720 }}>
           <h2 className="section-title">Дальше</h2>
           <p className="muted" style={{ fontSize: 13, margin: 0 }}>
-            1. Назначьте тариф на «Обзоре» — кнопка «Назначить» у новой клиники.<br />
-            2. Активность владельца появится в карточке клиники после первого входа.
+            {credsResult.purpose === "mortgage_leads" ? "Активность владельца появится в карточке пространства после первого входа." : <>
+              1. Назначьте тариф на «Обзоре» — кнопка «Назначить» у новой клиники.<br />
+              2. Активность владельца появится в карточке клиники после первого входа.
+            </>}
           </p>
           <div style={{ marginTop: 14, display: "flex", flexWrap: "wrap", gap: 8 }}>
             <button type="button" className="btn" onClick={onDone}>К обзору</button>
@@ -357,11 +360,11 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
   if (result) {
     return (
       <>
-        <h1 ref={titleRef} tabIndex={-1} className="page-title">{result.purpose === "marketing" ? "Пространство создано — ожидает владельца" : result.vertical ? "Клиника подключена" : "Приглашение перевыпущено"}</h1>
+        <h1 ref={titleRef} tabIndex={-1} className="page-title">{result.purpose === "mortgage_leads" ? "Пространство создано — ожидает владельца" : result.purpose === "marketing" ? "Пространство создано — ожидает владельца" : result.vertical ? "Клиника подключена" : "Приглашение перевыпущено"}</h1>
         <p className="page-sub" style={{ overflowWrap: "anywhere" }}>
           {/* Без vertical (перевыпуск) — нейтральное «новая ссылка»: прежней
               могло и не быть, если приглашение падало на выписке. */}
-          «{result.name}» · {result.purpose === "marketing" ? "маркетинг" : result.vertical === "beauty" ? "салон красоты" : result.vertical === "dental" ? "стоматология" : result.vertical === "clinic" ? "клиника" : "новая ссылка приглашения"} · {ownerIdentity(result)}
+          «{result.name}» · {result.purpose === "mortgage_leads" ? "ипотечные заявки" : result.purpose === "marketing" ? "маркетинг" : result.vertical === "beauty" ? "салон красоты" : result.vertical === "dental" ? "стоматология" : result.vertical === "clinic" ? "клиника" : "новая ссылка приглашения"} · {ownerIdentity(result)}
         </p>
 
         <div className="panel" style={{ padding: "18px 20px", maxWidth: 720 }}>
@@ -390,8 +393,10 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
         <div className="panel" style={{ padding: "18px 20px", maxWidth: 720 }}>
           <h2 className="section-title">Дальше</h2>
           <p className="muted" style={{ fontSize: 13, margin: 0 }}>
-            1. Назначьте тариф на «Обзоре» — кнопка «Назначить» у новой клиники.<br />
-            2. Когда владелец примет приглашение, его активность появится в карточке клиники.
+            {result.purpose === "mortgage_leads" || (!result.purpose && !result.vertical) ? "Когда владелец примет приглашение, его активность появится в карточке пространства." : <>
+              1. Назначьте тариф на «Обзоре» — кнопка «Назначить» у новой клиники.<br />
+              2. Когда владелец примет приглашение, его активность появится в карточке клиники.
+            </>}
           </p>
           <div style={{ marginTop: 14, display: "flex", flexWrap: "wrap", gap: 8 }}>
             <button type="button" className="btn" onClick={onDone}>К обзору</button>
@@ -405,7 +410,7 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
   return (
     <>
       <h1 className="page-title">Подключить пространство</h1>
-      <p className="page-sub">Пространство, ниша, часовой пояс — и вход для владельца: логином с паролем или ссылкой-приглашением.</p>
+      <p className="page-sub">Название, назначение, часовой пояс и вход владельца.</p>
 
       <form className="panel" style={{ padding: "20px", maxWidth: 640, minWidth: 0 }} aria-busy={busy} onSubmit={(event) => void submit(event)}>
         <fieldset className="editor" disabled={busy} style={{ border: 0, padding: 0, margin: 0, minWidth: 0, boxShadow: "none" }}>
@@ -420,6 +425,7 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
                 clearOutcome();
               }}>
                 <option value="clinic_services">Клиника, стоматология или салон</option>
+                <option value="mortgage_leads">Ипотечные заявки</option>
                 <option value="marketing">Маркетинг и привлечение клиентов</option>
               </select>
             </div>
@@ -463,9 +469,9 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
             </div> : null}
             <div className="field">
               <label htmlFor="ob-name">Название</label>
-              <input id="ob-name" value={name} onChange={(event) => setName(event.target.value)} placeholder="Салон «Люкс»" />
+              <input id="ob-name" value={name} onChange={(event) => setName(event.target.value)} placeholder={purpose === "clinic_services" ? "Салон «Люкс»" : "Название компании"} />
             </div>
-            {purpose !== "marketing" && <div className="field">
+            {purpose === "clinic_services" && <div className="field">
               <label htmlFor="ob-vertical">Ниша</label>
               {/* Пустой первый пункт намеренно: ниша меняет правила проверки
                   рекламы, и выбрать её молча значило бы выбрать за клиента. */}

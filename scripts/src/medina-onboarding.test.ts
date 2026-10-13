@@ -17,7 +17,7 @@ const controlSrc = path.join(repoRoot, "artifacts", "medina-control", "src");
 
 type OnboardingModule = {
   validateOnboardingRequest: (body: Record<string, unknown>) =>
-    | { name: string; vertical: string; ownerEmail: string; ownerName: string; timeZone: string }
+    | { name: string; purpose: string; vertical: string | null; ownerEmail: string; ownerName: string; timeZone: string }
     | { status: number; error: string; code: string; details?: string[] };
 };
 
@@ -32,13 +32,14 @@ const VALID = {
 };
 
 const { onboardingSettings, readOnboardingPurpose } = await import(pathToFileURL(path.join(repoRoot, "lib/crm/workspace-purpose.ts")).href) as {
-  readOnboardingPurpose(value: unknown): "clinic_services" | "marketing" | null;
-  onboardingSettings(id: string, input: { purpose: "clinic_services" | "marketing"; vertical: "clinic" | "beauty" | "dental"; timeZone: string }): unknown[];
+  readOnboardingPurpose(value: unknown): "clinic_services" | "marketing" | "mortgage_leads" | null;
+  onboardingSettings(id: string, input: { purpose: "clinic_services" | "marketing" | "mortgage_leads"; vertical: "clinic" | "beauty" | "dental" | null; timeZone: string }): unknown[];
 };
 
 test("Marketing purpose is explicit and rejects unknown values", () => {
   assert.equal(readOnboardingPurpose(undefined), "clinic_services");
   assert.equal(readOnboardingPurpose("marketing"), "marketing");
+  assert.equal(readOnboardingPurpose("mortgage_leads"), "mortgage_leads");
   for (const value of [null, "", "unknown", {}, true]) assert.equal(readOnboardingPurpose(value), null);
 });
 
@@ -56,7 +57,9 @@ test("Marketing settings do not assign a medical vertical or change advertising 
 });
 
 test("Marketing onboarding accepts no medical niche and rejects conflicting or unknown purposes", () => {
-  assert.ok(!("status" in validateOnboardingRequest({ ...VALID, purpose: "marketing", vertical: "" })));
+  const marketing = validateOnboardingRequest({ ...VALID, purpose: "marketing", vertical: "" });
+  assert.ok(!("status" in marketing));
+  assert.equal(marketing.vertical, null);
   assert.ok("status" in validateOnboardingRequest({ ...VALID, purpose: "marketing" }));
   assert.ok("status" in validateOnboardingRequest({ ...VALID, purpose: "unknown" }));
   assert.ok("status" in validateOnboardingRequest({ ...VALID, purpose: "marketing", vertical: "", timeZone: "" }));
@@ -72,7 +75,28 @@ test("Marketing onboarding remains platform-only and invitation-only", async () 
   assert.ok(form.includes('if (purpose === "marketing" && next === "credentials") return;'));
   const server = await readFile(modulePath, "utf8");
   assert.ok(server.includes("onboardingSettings(workspaceId, validated)"));
-  assert.ok(server.includes('validated.purpose === "marketing" ? null : validated.vertical'));
+  assert.ok(server.includes('vertical: validated.vertical,'));
+});
+
+test("Mortgage onboarding is explicit, has no medical vertical and keeps timezone validation", () => {
+  for (const vertical of [undefined, ""]) {
+    const result = validateOnboardingRequest({ ...VALID, purpose: "mortgage_leads", vertical });
+    assert.ok(!("status" in result));
+    assert.equal(result.purpose, "mortgage_leads");
+    assert.equal(result.vertical, null);
+  }
+  for (const patch of [{ vertical: "beauty" }, { vertical: "clinic" }, { vertical: "dental" },
+    { vertical: "mortgage" }, { vertical: null }, { vertical: {} }, { vertical: false }, { timeZone: "" }, { timeZone: "Nowhere" }]) {
+    assert.ok("status" in validateOnboardingRequest({ ...VALID, purpose: "mortgage_leads", vertical: "", ...patch }));
+  }
+});
+
+test("Mortgage profile settings contain only purpose and timezone, never medical or financial defaults", () => {
+  assert.deepEqual(onboardingSettings("mortgage-fixture", { purpose: "mortgage_leads", vertical: null, timeZone: "Asia/Almaty" }), [
+    { workspace_id: "mortgage-fixture", key: "workspace_purpose", value: { purpose: "mortgage_leads" } },
+    { workspace_id: "mortgage-fixture", key: "clinic_schedule", value: { timeZone: "Asia/Almaty" } },
+  ]);
+  assert.throws(() => onboardingSettings("invalid", { purpose: "clinic_services", vertical: null, timeZone: "Asia/Almaty" }), /workspace_vertical_required/);
 });
 
 test("MB1 ниша обязательна и умолчания у неё нет", () => {
@@ -168,12 +192,13 @@ test("MB10 парольный путь: без письма, пароль не �
   // Ни в одну таблицу пароль не пишется: в insert-литералах слово password
   // допустимо только как имя флага password_reset_required.
   const inserts = creds.match(/\.insert\((\{[\s\S]*?\}|\[[\s\S]*?\])\)/g) || [];
-  assert.ok(inserts.length >= 3, "все три insert найдены");
+  assert.equal(inserts.length, 2, "пространство и сотрудник используют литералы");
   for (const literal of inserts) {
     assert.ok(!/password(?!_reset_required)/i.test(literal), "insert без пароля");
   }
-  // Каждый insert — литерал на месте: insert(переменная) регекс бы не увидел.
-  assert.equal((creds.match(/\.insert\(/g) || []).length, inserts.length, "инсертов через переменную нет");
+  // Settings use the same narrowly scoped builder as invitation onboarding.
+  assert.ok(creds.includes('.from("workspace_settings").insert(onboardingSettings(workspaceId, validated))'));
+  assert.equal((creds.match(/\.insert\(/g) || []).length, inserts.length + 1, "все insert - литералы или проверенный builder настроек");
   // Обходных путей пароля наружу нет: модуль не апдейтит, не логирует и
   // отвечает только через локальный sendJson.
   assert.ok(!/\.update\(|\.upsert\(/.test(creds), "модуль только вставляет");
