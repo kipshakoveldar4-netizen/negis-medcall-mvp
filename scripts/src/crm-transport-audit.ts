@@ -107,8 +107,83 @@ function hasVerifiedDeletionTransport(sources: CrmSources): boolean {
     && mounts === 1 && requests === 2 && apiImports === 1 && factoryImports === 1 && componentImports === 1;
 }
 
+// Validate the admin page's one session-bound injection before accepting its alias.
+function hasVerifiedAdminTransport(sources: CrmSources): boolean {
+  let valid = true, imports = 0, calls = 0, mounts = 0, sessions = 0, contents = 0, aliases = 0, wrappers = 0;
+  for (const [file, source] of sources) {
+    const ast = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+    const inFunction = (node: ts.Node, name: string) => {
+      for (let parent: ts.Node | undefined = node.parent; parent; parent = parent.parent) {
+        if (ts.isFunctionDeclaration(parent)) return parent.name?.text === name;
+      }
+      return false;
+    };
+    const visit = (node: ts.Node): void => {
+      if (file === 'pages/AdminCenter.tsx') {
+        if (ts.isFunctionDeclaration(node) && node.name?.text === 'AdminCenterSession') sessions++;
+        if (ts.isFunctionDeclaration(node) && node.name?.text === 'AdminCenterContent') {
+          contents++;
+          const param = node.parameters[0];
+          if (node.parameters.length !== 1 || param.initializer || param.name.getText(ast) !== '{ access }') valid = false;
+        }
+        if (ts.isVariableDeclaration(node) && node.name.getText(ast) === 'request' && inFunction(node, 'AdminCenterSession')) {
+          wrappers++;
+          if (!node.initializer || !ts.isArrowFunction(node.initializer)) valid = false;
+        }
+        if (ts.isVariableDeclaration(node) && node.name.getText(ast) === 'crmFetch') {
+          aliases++;
+          if (!inFunction(node, 'AdminCenterContent') || node.initializer?.getText(ast) !== 'access.request'
+            || !ts.isVariableDeclarationList(node.parent) || !(node.parent.flags & ts.NodeFlags.Const)) valid = false;
+        }
+        if (ts.isBinaryExpression(node) && node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment
+          && node.operatorToken.kind <= ts.SyntaxKind.LastAssignment
+          && /^(access|crmFetch|request)(\.|\[|$)/.test(node.left.getText(ast))) valid = false;
+        if (ts.isCallExpression(node) && node.expression.getText(ast) === 'fetch'
+          && (inFunction(node, 'AdminCenterSession') || inFunction(node, 'AdminCenterContent'))) valid = false;
+      }
+      if (ts.isIdentifier(node) && node.text === 'sendCrmFetch') {
+        const parent = node.parent;
+        if (file !== 'pages/AdminCenter.tsx') valid = false;
+        else if (ts.isImportSpecifier(parent) && parent.name === node) {
+          const declaration = parent.parent.parent.parent;
+          imports++;
+          if (parent.isTypeOnly || parent.propertyName?.text !== 'crmFetch' || !ts.isImportDeclaration(declaration)
+            || !ts.isStringLiteral(declaration.moduleSpecifier) || declaration.moduleSpecifier.text !== '@/lib/api') valid = false;
+        } else if (ts.isTypeQueryNode(parent)) {
+          // Type annotation, not a replaceable value.
+        } else if (ts.isCallExpression(parent) && parent.expression === node && inFunction(node, 'AdminCenterSession')) {
+          calls++;
+          if (parent.arguments[0]?.getText(ast) !== 'path') valid = false;
+        } else valid = false;
+      }
+      if (ts.isIdentifier(node) && node.text === 'AdminCenterContent') {
+        const parent = node.parent;
+        if (file !== 'pages/AdminCenter.tsx') valid = false;
+        else if (ts.isFunctionDeclaration(parent) && parent.name === node) {
+          // Declaration checked above.
+        } else if (ts.isJsxSelfClosingElement(parent) && parent.tagName === node && inFunction(node, 'AdminCenterSession')) {
+          mounts++;
+          const attributes = parent.attributes.properties;
+          const access = attributes.filter(ts.isJsxAttribute).filter((attribute) => attribute.name.getText(ast) === 'access');
+          const initializer = access[0]?.initializer;
+          const object = initializer && ts.isJsxExpression(initializer) ? initializer.expression : undefined;
+          if (attributes.some(ts.isJsxSpreadAttribute) || access.length !== 1 || !object || !ts.isObjectLiteralExpression(object)) valid = false;
+          else {
+            const requests = object.properties.filter((property) => property.name?.getText(ast) === 'request');
+            if (object.properties.some(ts.isSpreadAssignment) || requests.length !== 1 || !ts.isShorthandPropertyAssignment(requests[0])) valid = false;
+          }
+        } else valid = false;
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(ast);
+  }
+  return valid && imports === 1 && calls === 1 && mounts === 1 && sessions === 1 && contents === 1 && aliases === 1 && wrappers === 1;
+}
+
 export function crmTransportOffenders(sources: CrmSources): string[] {
   const injectedDeletionIsSafe = hasVerifiedDeletionTransport(sources);
+  const injectedAdminIsSafe = hasVerifiedAdminTransport(sources);
   const sharedHelpers = new Set(["crmFetch", "crmRequest", "crmJson"]);
   const offenders: string[] = [];
   for (const [name, source] of sources) {
@@ -141,6 +216,7 @@ export function crmTransportOffenders(sources: CrmSources): string[] {
       .split(",").map((entry) => entry.trim()).filter((entry) => sharedHelpers.has(entry) && !localNames.has(entry));
     const safe = new Set(imported);
     if (name === modelFile && injectedDeletionIsSafe) safe.add("request");
+    if (name === 'pages/AdminCenter.tsx' && injectedAdminIsSafe) safe.add('crmFetch');
     for (let pass = 0; pass < locals.length + 1; pass += 1) {
       let grew = false;
       for (const local of locals) {

@@ -62,11 +62,11 @@ function observeContent(source: string) {
   const returned = content.body.statements.filter(ts.isReturnStatement).at(-1);
   assert.ok(returned, "content must render after defining its real action closures");
   const capture = `\n__capture({ serverAdminAuth, staff, createdStaff, issuedInvite, invitations,
-    batchResults, batchEmails, staffPassword, inviteForm, loading, joinRequests, joinCode,
+    activeTab, batchRole, batchResults, batchEmails, staffPassword, inviteForm, loading, joinRequests, joinCode,
     setActiveTab, setInviteForm, setStaffPassword, setBatchEmails,
     checkServerAdminAccess, loadStaff, loadInvitations, sendInvitation, createStaffWithPassword,
     createStaffBatch, resetStaffPassword, reissueInvitation, updateStaffStatus,
-    crmFetch, crmRequest, adminCrmRequest });\n`;
+    loadMetaInsightsDiagnostics, crmFetch, crmRequest, adminCrmRequest });\n`;
   return source.slice(0, returned.getStart(ast)) + capture + source.slice(returned.getStart(ast))
     + "\nexports.fixture = { AdminCenterSession, AdminCenterContent };";
 }
@@ -77,6 +77,7 @@ type Instance = { type: any; key: unknown; props: any; slots: any[]; cursor: num
 function hookRenderer() {
   const instances = new Map<string, Instance>();
   const writes: { instance: Instance; value: any }[] = [];
+  const trees: any[] = [];
   let current: Instance;
   let rootNode: Node;
   let tree: any;
@@ -136,13 +137,15 @@ function hookRenderer() {
     useLayoutEffect: (create: () => any, deps?: unknown[]) => effect(create, deps, true),
   };
   return {
-    hooks, writes,
-    mount(type: any, children: any[]) { children.forEach((child) => own.add(child)); own.add(type); rootNode = jsx(type, {}); },
+    hooks, writes, trees,
+    mount(type: any, children: any[], props: any = {}) {
+      children.forEach((child) => own.add(child)); own.add(type); rootNode = jsx(type, props);
+    },
     invalidate() { dirty = true; },
     async flush() {
       for (let pass = 0; pass < 100; pass++) {
         if (mounted && dirty) {
-          dirty = false; tree = render(rootNode, "root");
+          dirty = false; tree = render(rootNode, "root"); trees.push(tree);
           for (const layout of [true, false]) {
             const pending = [...instances.values()].flatMap((item) => item.slots)
               .filter((item) => item?.pending && item.layout === layout);
@@ -192,7 +195,7 @@ const permissions = evaluate(await read("artifacts/negis/src/lib/permissions.ts"
 const logins = evaluate(await read("lib/auth/staff-logins.ts"));
 const terms = evaluate(await read("lib/vertical/terms.ts"));
 
-function setup() {
+function setup(search = "") {
   const renderer = hookRenderer();
   const callbacks = new Set<(event: string, session: any) => void>();
   const calls: { path: string; init: Init }[] = [];
@@ -201,8 +204,12 @@ function setup() {
   const toasts: { kind: string; message: string }[] = [];
   const stored = new Map<string, string>();
   const storageWrites: string[] = [];
+  const locations: string[] = [];
+  const copies: string[] = [];
+  const snapshots: any[] = [];
   let snapshot: any;
   let auth = { user: { id: actorA, email: "owner@example.test" }, userRole: "owner", clinicId: workspaceA,
+    workspacePurpose: "clinic_services" as "clinic_services" | "marketing" | "mortgage_leads" | null,
     vertical: "clinic", rolePermissions: { admin: true }, session: {}, availableWorkspaces: [], isDemoMode: false };
   let sdkActor = actorA;
   let tokenReply: ((expected?: string) => Promise<string>) | undefined;
@@ -233,15 +240,15 @@ function setup() {
   }).selected;
   const importedFetch = (url: string, init: Init = {}) => { calls.push({ path: url, init }); return api.crmFetch(url, init); };
   const module = evaluate(observeContent(adminSource), {
-    __capture: (value: any) => { snapshot = value; },
+    __capture: (value: any) => { snapshot = value; snapshots.push(value); },
     crypto: { getRandomValues: (bytes: Uint32Array) => { bytes.fill(17); return bytes; } },
-    window: { location: { search: "" }, confirm: () => true, localStorage: {
+    window: { location: { search }, confirm: () => true, localStorage: {
       getItem: (key: string) => stored.get(key) ?? null,
       setItem: (key: string, value: string) => { storageWrites.push(key); stored.set(key, value); },
     } },
-    navigator: { clipboard: { writeText: async () => {} } },
+    navigator: { clipboard: { writeText: async (value: string) => { copies.push(value); } } },
   }, {
-    react: renderer.hooks, wouter: { Link: "Link", useLocation: () => ["/admin", () => {}] },
+    react: renderer.hooks, wouter: { Link: "Link", useLocation: () => ["/admin", (url: string) => locations.push(url)] },
     sonner: { toast: new Proxy({}, { get: (_target, kind) => (message: string) => toasts.push({ kind: String(kind), message }) }) },
     "@/contexts/AuthContext": { useAuth: () => auth },
     "@/lib/supabase": { hasSupabaseFrontendEnv: true, supabase: { auth: { onAuthStateChange(callback: any) {
@@ -258,13 +265,19 @@ function setup() {
   });
   renderer.mount(module.default, [module.fixture.AdminCenterSession, module.fixture.AdminCenterContent]);
   return {
-    renderer, calls, dispatches, tokenCalls, toasts, storageWrites, snapshot: () => snapshot,
+    renderer, calls, dispatches, tokenCalls, toasts, storageWrites, locations, copies, snapshots, snapshot: () => snapshot,
     access: () => renderer.instance("AdminCenterContent").props.access,
     emit(id: string | null, event = id ? "SIGNED_IN" : "SIGNED_OUT") {
       sdkActor = id || "";
       for (const callback of [...callbacks]) callback(event, id ? { user: { id } } : null);
     },
     setAuth(patch: Partial<typeof auth>) { auth = { ...auth, ...patch }; renderer.invalidate(); },
+    mountSession() {
+      renderer.mount(module.fixture.AdminCenterSession, [module.fixture.AdminCenterContent], {
+        actorId: auth.user.id, workspaceId: auth.clinicId, userRole: auth.userRole,
+        isDemoMode: auth.isDemoMode, workspacePurpose: auth.workspacePurpose,
+      });
+    },
     reply(value?: Reply) { transportReply = value; },
     token(value?: typeof tokenReply) { tokenReply = value; },
     subscriptions: () => callbacks.size,
@@ -350,7 +363,7 @@ function staffResults(fixture: Fixture) {
 }
 async function seedStaffResults(fixture: Fixture) {
   await staffTab(fixture);
-  fixture.snapshot().setInviteForm({ email: "single.fixture", role: "receptionist" });
+  fixture.snapshot().setInviteForm({ email: "single.fixture", role: fixture.snapshot().inviteForm.role });
   fixture.snapshot().setStaffPassword("LocalFixtureOnly234"); await fixture.renderer.flush();
   await button(fixture, staffUi.add).props.onClick(); await fixture.renderer.flush();
   button(fixture, staffUi.bulk).props.onClick(); await fixture.renderer.flush();
@@ -389,14 +402,15 @@ test("raw SDK A-B-A changes the outer epoch and permanently expires the old life
     assert.equal(access.isCurrent(), false, "batched A-B-A cannot revive A's previous controller");
     await fixture.renderer.flush();
     assert.notEqual(fixture.renderer.instance("AdminCenterSession").key, key);
-    assert.deepEqual(JSON.parse(String(fixture.renderer.instance("AdminCenterSession").key)), [actorA, workspaceA, "owner", false, 2]);
+    assert.deepEqual(JSON.parse(String(fixture.renderer.instance("AdminCenterSession").key)), [actorA, workspaceA, "owner", false, "clinic_services", 2]);
     assert.equal(fixture.access().isCurrent(), true);
     assert.equal(access.isCurrent(), false);
   } finally { fixture.renderer.dispose(); }
 });
 
-test("actor, workspace and same-actor role changes each remount content and expire captured access", async () => {
-  for (const patch of [{ user: { id: actorB, email: "head@example.test" } }, { clinicId: workspaceB }, { userRole: "manager" }]) {
+test("actor, workspace, role and purpose changes each remount content and expire captured access", async () => {
+  for (const patch of [{ user: { id: actorB, email: "head@example.test" } }, { clinicId: workspaceB }, { userRole: "manager" },
+    { workspacePurpose: "mortgage_leads" as const }, { workspacePurpose: "marketing" as const }, { workspacePurpose: null }]) {
     const fixture = await ready();
     try {
       const old = fixture.renderer.instance("AdminCenterContent"), access = fixture.access();
@@ -609,8 +623,8 @@ test("a late bulk transport success or failure never starts the next row or emit
   }
 });
 
-test("role/workspace remount, disposal and StrictMode replay stop a deferred bulk before its next POST", async () => {
-  for (const boundary of ["role", "workspace", "dispose", "strict-mode"] as const) {
+test("role/workspace/purpose remount, disposal and StrictMode replay stop a deferred bulk before its next POST", async () => {
+  for (const boundary of ["role", "workspace", "purpose", "dispose", "strict-mode"] as const) {
     const fixture = await ready();
     try {
       fixture.snapshot().setBatchEmails("first@example.test\nsecond@example.test"); await fixture.renderer.flush();
@@ -622,6 +636,7 @@ test("role/workspace remount, disposal and StrictMode replay stop a deferred bul
       assert.equal(fixture.dispatches.filter((call) => call.init.method === "POST").length, 1);
       if (boundary === "role") fixture.setAuth({ userRole: "manager" });
       else if (boundary === "workspace") fixture.setAuth({ clinicId: workspaceB });
+      else if (boundary === "purpose") fixture.setAuth({ workspacePurpose: "mortgage_leads" });
       else if (boundary === "dispose") fixture.renderer.dispose();
       else fixture.renderer.replaySessionLayout();
       await fixture.renderer.flush();
@@ -882,3 +897,250 @@ for (const role of ["owner", "admin"] as const) {
     }
   });
 }
+
+const prohibitedTabs = ["overview", "operators", "doctors", "roles", "clinic", "whatsapp", "integrations",
+  "ai", "meta", "release", "diagnostics"];
+const mortgageUi = {
+  team: "\u041a\u043e\u043c\u0430\u043d\u0434\u0430",
+  member: "\u0423\u0447\u0430\u0441\u0442\u043d\u0438\u043a",
+  return: "\u0412\u0435\u0440\u043d\u0443\u0442\u044c\u0441\u044f \u0432 \u043f\u0440\u0438\u043b\u043e\u0436\u0435\u043d\u0438\u0435",
+  copyId: "\u0421\u043a\u043e\u043f\u0438\u0440\u043e\u0432\u0430\u0442\u044c \u0438\u0434\u0435\u043d\u0442\u0438\u0444\u0438\u043a\u0430\u0442\u043e\u0440 \u043f\u0440\u043e\u0441\u0442\u0440\u0430\u043d\u0441\u0442\u0432\u0430",
+};
+function assertMortgageTree(tree: any) {
+  const all = nodes(tree);
+  for (const name of ["PlanCalculator", "VerticalSwitch", "ClinicOperators", "DoctorSchedule", "WhatsAppChannels",
+    "TikTokSetupCheck", "TikTokConnection", "TikTokVideoUpload", "MetricCard", "ReleaseBanner"]) {
+    assert.ok(all.every((node) => (typeof node.type === "function" ? node.type.name : node.type) !== name),
+      `${name} must never be mounted for mortgage`);
+  }
+  assert.equal(all.filter((node) => node.type === "details").length, 0, "platform diagnostics must be absent");
+  assert.doesNotMatch(label(tree), /\u043a\u043b\u0438\u043d\u0438\u043a|WhatsApp|Meta\/Facebook|Release checklist/i);
+}
+function assertMortgageNetwork(fixture: Fixture) {
+  for (const call of fixture.calls) {
+    assert.match(call.path, /^\/api\/crm\/(auth-context|staff|staff-invitations|staff-credentials|staff-join-requests|join-code)\?/,
+      "mortgage may only dispatch authentication or team requests");
+  }
+}
+
+test("mortgage starts on staff, rejects every prohibited query/tab and never mounts or fetches clinic/advertising tools", async () => {
+  for (const requested of ["", "staff", "unknown", ...prohibitedTabs]) {
+    const fixture = setup(requested ? `?tab=${requested}` : "");
+    fixture.setAuth({ workspacePurpose: "mortgage_leads" });
+    try {
+      await fixture.renderer.flush();
+      assert.equal(fixture.snapshot().serverAdminAuth.status, "confirmed");
+      assert.ok(fixture.snapshots.every((snapshot) => snapshot.activeTab === "staff"),
+        "even the first content frame must be staff, before effects run");
+      assert.ok(authPanel(fixture)); assert.ok(staffCreation(fixture));
+      const header = nodes(fixture.renderer.tree()).find((node) => node.type === "p" && label(node).includes(`${workspaceA}.`))!;
+      assert.ok(label(header).includes(`${mortgageUi.member}: ${logins.loginFromEmail("owner@example.test")}`));
+      assert.doesNotMatch(label(header), /\u0412\u043b\u0430\u0434\u0435\u043b\u0435\u0446:/);
+      assert.equal(fixture.snapshot().inviteForm.role, "lead_manager");
+      assert.equal(fixture.snapshot().batchRole, "lead_manager");
+      const nav = nodes(fixture.renderer.tree()).find((node) => node.type === "nav")!;
+      assert.deepEqual(nodes(nav).filter((node) => node.type === "button").map(label), [mortgageUi.team]);
+      const selector = nodes(fixture.renderer.tree()).find((node) => node.type === "select" && node.props.value === "staff")!;
+      assert.deepEqual(nodes(selector).filter((node) => node.type === "option").map((node) => node.props.value), ["staff"]);
+      const callsBefore = fixture.calls.length;
+      for (const prohibited of prohibitedTabs) {
+        fixture.snapshot().setActiveTab(prohibited);
+        selector.props.onChange({ target: { value: prohibited } });
+        await fixture.renderer.flush();
+        assert.equal(fixture.snapshot().activeTab, "staff");
+      }
+      await fixture.snapshot().loadMetaInsightsDiagnostics(); await fixture.renderer.flush();
+      assert.equal(fixture.calls.length, callsBefore, "blocked tab changes and diagnostic callbacks dispatch nothing");
+      for (const tree of fixture.renderer.trees) assertMortgageTree(tree);
+      assertMortgageNetwork(fixture);
+      assert.equal(fixture.dispatches.filter((call) => call.init.method === "POST").length, 0);
+      button(fixture, mortgageUi.return).props.onClick();
+      assert.deepEqual(fixture.locations, ["/leads"]);
+      await button(fixture, mortgageUi.copyId).props.onClick();
+      assert.deepEqual(fixture.copies, [workspaceA]);
+      assert.deepEqual(fixture.storageWrites, []);
+    } finally { fixture.renderer.dispose(); }
+  }
+});
+
+for (const role of ["owner", "admin"] as const) {
+  test(`mortgage ${role} role pickers intersect the profile roles with server-confirmed assignment rights`, async () => {
+    const fixture = setup(); fixture.setAuth({ workspacePurpose: "mortgage_leads" });
+    fixture.reply(async (url) => {
+      if (url.includes("/auth-context?")) return Response.json(authBody({ role }));
+      if (url.includes("/staff?")) return ok({ staff: roster });
+      if (url.includes("/staff-join-requests?")) return ok({ requests: [{ id: "join-local", status: "pending", email: "join@example.test" }] });
+      return ok({ login: "mortgage.issued", invitations: [], code: "LOCAL123" });
+    });
+    try {
+      await fixture.renderer.flush();
+      assert.equal(fixture.snapshot().serverAdminAuth.role, role, "server role, not the stale client owner, controls choices");
+      button(fixture, staffUi.bulk).props.onClick();
+      button(fixture, "\u041e\u0434\u043e\u0431\u0440\u0438\u0442\u044c").props.onClick(); await fixture.renderer.flush();
+      const choices = role === "owner" ? ["lead_manager", "admin"] : ["lead_manager"];
+      const pickers = () => nodes(fixture.renderer.tree()).filter((node) => node.type === "select" && node.props.value !== "staff");
+      assert.equal(pickers().length, 5, "mobile/desktop membership, join approval, single and bulk all have role pickers");
+      for (const picker of pickers()) {
+        assert.deepEqual(nodes(picker).filter((node) => node.type === "option" && node.props.value)
+          .map((node) => node.props.value), choices);
+      }
+      const single = formControls(fixture).find((node) => node.type === "select")!;
+      single.props.onChange({ target: { value: choices.at(-1) } }); await fixture.renderer.flush();
+      const controls = formControls(fixture).filter((node) => node.type === "input");
+      controls[0].props.onChange({ target: { value: "new.mortgage" } });
+      controls[2].props.onChange({ target: { value: "LocalMortgage234" } }); await fixture.renderer.flush();
+      await button(fixture, staffUi.add).props.onClick(); await fixture.renderer.flush();
+      const created = fixture.dispatches.find((call) => call.path.includes("/staff-credentials?") && call.init.method === "POST")!;
+      assert.equal(JSON.parse(String(created.init.body)).role, choices.at(-1), "owner can create admin, admin can create only lead_manager");
+      assert.equal(fixture.snapshot().inviteForm.role, "lead_manager", "successful creation resets to the mortgage default");
+      button(fixture, staffUi.inviteMode).props.onClick(); await fixture.renderer.flush();
+      for (const picker of pickers()) {
+        assert.deepEqual(nodes(picker).filter((node) => node.type === "option" && node.props.value)
+          .map((node) => node.props.value), choices);
+      }
+      formControls(fixture).find((node) => node.props.type === "email")!.props.onChange({ target: { value: "new.mortgage@example.test" } });
+      await fixture.renderer.flush(); await button(fixture, staffUi.invite).props.onClick(); await fixture.renderer.flush();
+      assert.equal(fixture.snapshot().inviteForm.role, "lead_manager", "invitation reset keeps the same allowed default");
+      assertMortgageNetwork(fixture); assert.deepEqual(fixture.storageWrites, []);
+    } finally { fixture.renderer.dispose(); }
+  });
+}
+
+test("mortgage retains the server-admin gate and hides credentials during checking and every auth failure", async () => {
+  for (const scenario of deniedStaffChecks) {
+    const fixture = setup(); fixture.setAuth({ workspacePurpose: "mortgage_leads" });
+    try {
+      await fixture.renderer.flush();
+      const { results, markers } = await seedStaffResults(fixture);
+      const pending = deferred<Response>(); fixture.reply(() => pending.promise);
+      button(fixture, staffUi.checkAccess).props.onClick(); await fixture.renderer.flush();
+      assert.equal(fixture.snapshot().serverAdminAuth.status, "checking");
+      assertStaffHidden(fixture, markers); assert.ok(authPanel(fixture));
+      fixture.reply(async () => scenario.response()); pending.resolve(scenario.response()); await fixture.renderer.flush();
+      assert.equal(fixture.snapshot().serverAdminAuth.status, scenario.status);
+      assertStaffHidden(fixture, markers); assert.deepEqual(staffResults(fixture), results);
+      assertMortgageTree(fixture.renderer.tree()); assertMortgageNetwork(fixture);
+      if (scenario.status === "reauth") {
+        button(fixture, "\u0412\u043e\u0439\u0442\u0438 \u0441\u043d\u043e\u0432\u0430").props.onClick();
+        assert.deepEqual(fixture.locations, ["/login"]);
+      }
+      assert.deepEqual(fixture.storageWrites, []);
+    } finally { fixture.renderer.dispose(); }
+  }
+});
+
+test("live scope independently rejects a same-account/workspace purpose change before outer remount", async () => {
+  for (const workspacePurpose of ["mortgage_leads", "marketing", null] as const) {
+    const fixture = setup(); fixture.mountSession(); await fixture.renderer.flush();
+    try {
+      const old = fixture.renderer.instance("AdminCenterContent"), access = fixture.access();
+      const closure = fixture.snapshot(), count = fixture.calls.length;
+      fixture.setAuth({ workspacePurpose }); await fixture.renderer.flush();
+      assert.equal(fixture.renderer.instance("AdminCenterContent"), old, "pin the session props to isolate the live-scope comparison");
+      assert.equal(access.isCurrent(), false);
+      await assert.rejects(closure.crmFetch("/api/crm/staff"), { name: "AbortError" });
+      await assert.rejects(closure.crmRequest("/api/crm/staff"), { name: "AbortError" });
+      await closure.checkServerAdminAccess();
+      assert.equal(fixture.calls.length, count, "retained callbacks cannot dispatch for the changed profile");
+    } finally { fixture.renderer.dispose(); }
+  }
+});
+
+test("purpose transitions cancel pending token waits for auth and credentials without late POSTs or state writes", async () => {
+  for (const action of ["checkServerAdminAccess", "createStaffWithPassword", "createStaffBatch"] as const) {
+    const fixture = await ready();
+    try {
+      fixture.snapshot().setInviteForm({ email: "pending.fixture", role: "receptionist" });
+      fixture.snapshot().setStaffPassword("LocalPending234");
+      fixture.snapshot().setBatchEmails("first@example.test\nsecond@example.test"); await fixture.renderer.flush();
+      const pending = deferred<string>(); fixture.token(() => pending.promise);
+      const old = fixture.renderer.instance("AdminCenterContent"), access = fixture.access();
+      const saved = fixture.snapshot()[action](); await fixture.renderer.flush();
+      const call = fixture.calls.at(-1)!;
+      fixture.token(); fixture.setAuth({ workspacePurpose: "mortgage_leads" }); await fixture.renderer.flush();
+      assert.equal(access.isCurrent(), false); assert.equal(old.disposed, true);
+      if (action !== "checkServerAdminAccess") assert.equal(call.init.signal?.aborted, true);
+      const count = fixture.dispatches.length, start = fixture.renderer.writes.length;
+      pending.resolve("local-fixture-token"); await saved;
+      assert.equal(fixture.dispatches.length, count, "old token resolution dispatches nothing");
+      assert.equal(fixture.dispatches.filter((entry) => entry.init.method === "POST").length, 0);
+      assert.deepEqual(contentWrites(fixture, old, start), []); assert.deepEqual(fixture.toasts, []);
+      assert.equal(fixture.snapshot().activeTab, "staff");
+      assert.deepEqual(staffResults(fixture), { createdStaff: null, issuedInvite: null, batchResults: null });
+      assertMortgageTree(fixture.renderer.tree());
+    } finally { fixture.renderer.dispose(); }
+  }
+});
+
+test("a pending clinic Meta diagnostic body cannot publish into the same workspace's mortgage profile", async () => {
+  const fixture = setup(), body = deferred<string>();
+  fixture.reply(async (url) => url.includes("/meta-")
+    ? ({ ok: true, status: 200, text: () => body.promise }) as Response
+    : Response.json(authBody()));
+  try {
+    await fixture.renderer.flush();
+    assert.equal(fixture.snapshot().serverAdminAuth.status, "confirmed");
+    const meta = fixture.dispatches.filter((call) => call.path.includes("/meta-"));
+    assert.equal(meta.length, 3, "the real clinic diagnostics effect is awaiting its three response bodies");
+    const old = fixture.renderer.instance("AdminCenterContent"), access = fixture.access();
+    fixture.reply(); fixture.setAuth({ workspacePurpose: "mortgage_leads" });
+    const count = fixture.calls.length; await fixture.renderer.flush();
+    assert.equal(access.isCurrent(), false); assert.equal(old.disposed, true);
+    assert.ok(meta.every((call) => call.init.signal?.aborted));
+    assert.ok(fixture.calls.slice(count).every((call) => !call.path.includes("/meta-")));
+    const start = fixture.renderer.writes.length;
+    body.resolve(JSON.stringify({ success: true, data: { launches: [{ id: "expired-clinic" }], runs: [], insights: [] } }));
+    await fixture.renderer.flush();
+    assert.deepEqual(contentWrites(fixture, old, start), []); assert.deepEqual(fixture.toasts, []);
+    assertMortgageTree(fixture.renderer.tree());
+  } finally { fixture.renderer.dispose(); }
+});
+
+test("same-account/workspace purpose round trips remount and never restore old credentials or drafts", async () => {
+  for (const initial of ["clinic_services", "mortgage_leads"] as const) {
+    const fixture = setup(); fixture.setAuth({ workspacePurpose: initial }); await fixture.renderer.flush();
+    try {
+      const { markers } = await seedStaffResults(fixture);
+      const old = fixture.renderer.instance("AdminCenterContent"), access = fixture.access();
+      const key = fixture.renderer.instance("AdminCenterSession").key;
+      const nextPurpose = initial === "clinic_services" ? "mortgage_leads" : "clinic_services";
+      for (const workspacePurpose of [nextPurpose, initial] as const) {
+        fixture.setAuth({ workspacePurpose }); await fixture.renderer.flush();
+        assert.equal(old.disposed, true); assert.equal(access.isCurrent(), false);
+        assert.notEqual(fixture.renderer.instance("AdminCenterContent"), old);
+        assert.equal(fixture.snapshot().activeTab, workspacePurpose === "mortgage_leads" ? "staff" : "overview");
+        assert.deepEqual(staffResults(fixture), { createdStaff: null, issuedInvite: null, batchResults: null });
+        assert.equal(fixture.snapshot().staffPassword, ""); assert.equal(fixture.snapshot().batchEmails, "");
+        assert.equal(fixture.snapshot().inviteForm.email, "");
+        assert.equal(fixture.snapshot().inviteForm.role, workspacePurpose === "mortgage_leads" ? "lead_manager" : "receptionist");
+        for (const marker of markers) assert.ok(!renderedText(fixture).includes(marker));
+      }
+      assert.equal(fixture.renderer.instance("AdminCenterSession").key, key, "returning to the same key must still create a fresh lifetime");
+      assert.deepEqual(fixture.storageWrites, []);
+    } finally { fixture.renderer.dispose(); }
+  }
+});
+
+test("clinic and salon keep overview, diagnostics, billing, vertical switch and specialist query tabs", async () => {
+  for (const vertical of ["clinic", "beauty"]) {
+    const fixture = setup(); fixture.setAuth({ vertical, workspacePurpose: "clinic_services" });
+    try {
+      await fixture.renderer.flush();
+      assert.equal(fixture.snapshot().activeTab, "overview");
+      const all = nodes(fixture.renderer.tree());
+      for (const name of ["PlanCalculator", "VerticalSwitch", "MetricCard"]) assert.ok(all.some((node) => node.type === name));
+      assert.ok(all.some((node) => node.type === "details"));
+      assert.ok(fixture.dispatches.some((call) => call.path.includes("/meta-launches?")));
+      const nav = all.find((node) => node.type === "nav")!;
+      assert.equal(nodes(nav).filter((node) => node.type === "button").length, prohibitedTabs.length + 1);
+      const specialistLabel = terms.capitalize(terms.termsFor(vertical).specialistPlural);
+      button(fixture, specialistLabel).props.onClick(); await fixture.renderer.flush();
+      assert.ok(nodes(fixture.renderer.tree()).some((node) => node.type === "DoctorSchedule"));
+    } finally { fixture.renderer.dispose(); }
+    const linked = setup("?tab=doctors"); linked.setAuth({ vertical, workspacePurpose: "clinic_services" });
+    try {
+      await linked.renderer.flush(); assert.equal(linked.snapshot().activeTab, "doctors");
+      assert.ok(nodes(linked.renderer.tree()).some((node) => node.type === "DoctorSchedule"));
+    } finally { linked.renderer.dispose(); }
+  }
+});

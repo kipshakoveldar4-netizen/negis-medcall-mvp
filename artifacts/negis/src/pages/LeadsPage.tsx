@@ -599,7 +599,7 @@ function leadPatchToApi(patch: Partial<Lead>, isLeadManager = false): Record<str
 }
 
 export default function LeadsPage() {
-  const { user, userRole, clinicId } = useAuth();
+  const { user, userRole, clinicId, workspacePurpose } = useAuth();
   const actorId = user?.id || "";
   const workspaceId = userRole === "lead_manager" ? clinicId || "" : clinicId || readWorkspaceId();
   const observedActorRef = useRef(actorId);
@@ -614,7 +614,7 @@ export default function LeadsPage() {
     });
     return () => subscription.unsubscribe();
   }, []);
-  return <LeadsPageSession key={JSON.stringify([actorId, workspaceId, userRole, authEpoch])} actorId={actorId} workspaceId={workspaceId} />;
+  return <LeadsPageSession key={JSON.stringify([actorId, workspaceId, userRole, workspacePurpose, authEpoch])} actorId={actorId} workspaceId={workspaceId} />;
 }
 
 type LeadSessionAccess = {
@@ -625,12 +625,15 @@ type LeadSessionAccess = {
 };
 
 function LeadsPageSession({ actorId, workspaceId }: { actorId: string; workspaceId: string }) {
-  const { user, clinicId, userRole } = useAuth();
+  const { user, clinicId, userRole, workspacePurpose } = useAuth();
+  const capturedScope = useRef({ userRole, workspacePurpose }).current;
   const sessionRef = useRef<AbortController | null>(null);
-  const liveScopeRef = useRef({ actorId, workspaceId });
+  const liveScopeRef = useRef({ actorId, workspaceId, userRole, workspacePurpose });
   liveScopeRef.current = {
     actorId: user?.id || "",
     workspaceId: userRole === "lead_manager" ? clinicId || "" : clinicId || readWorkspaceId(),
+    userRole,
+    workspacePurpose,
   };
   const [lifetime, setLifetime] = useState<{ controller: AbortController; epoch: number } | null>(null);
 
@@ -656,6 +659,7 @@ function LeadsPageSession({ actorId, workspaceId }: { actorId: string; workspace
   const { controller } = lifetime;
   const isCurrent = () => Boolean(actorId && workspaceId
     && liveScopeRef.current.actorId === actorId && liveScopeRef.current.workspaceId === workspaceId
+    && liveScopeRef.current.userRole === capturedScope.userRole && liveScopeRef.current.workspacePurpose === capturedScope.workspacePurpose
     && sessionRef.current === controller && !controller.signal.aborted);
   const assertCurrent = () => {
     if (!isCurrent()) throw new DOMException("Lead session ended", "AbortError");
@@ -670,8 +674,11 @@ function LeadsPageSession({ actorId, workspaceId }: { actorId: string; workspace
 }
 
 function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
-  const { rolePermissions, userRole, user, session, clinicId, isDemoMode, isImpersonation } = useAuth();
+  const { rolePermissions, userRole, user, session, clinicId, isDemoMode, isImpersonation, workspacePurpose } = useAuth();
   const isLeadManager = userRole === "lead_manager";
+  const isMortgage = workspacePurpose === "mortgage_leads";
+  const strictSession = isLeadManager || isMortgage;
+  const clinicalActions = !isLeadManager && !isMortgage;
   const scopeVersion = useRef(0);
   const { items, loaded, loadError, setItems, addItem, updateItem } = useDemoCollection<Lead>("negis_demo_leads", leadsSeed, {
     endpoint: "/api/crm/leads",
@@ -680,7 +687,8 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
     fromApi: leadFromApi,
     toApi: leadToApi,
     patchToApi: (patch) => leadPatchToApi(patch, isLeadManager),
-    strictAccess: isLeadManager ? access : undefined,
+    strictAccess: strictSession ? access : undefined,
+    allowScopedCreate: isMortgage && (userRole === "owner" || userRole === "admin"),
   });
 
   const [stageDefinitions, setStageDefinitions] = useState<LeadStageDefinition[]>(FALLBACK_LEAD_STAGES);
@@ -707,9 +715,10 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
   const [staffOptions, setStaffOptions] = useState<StaffOption[]>([]);
   // CRM8: secondary attribution filter — works on top of stage filter and search.
   const [attributionFilter, setAttributionFilter] = useState<"all" | "with_ads" | "without_ads">("all");
+  const [responsibleFilter, setResponsibleFilter] = useState("all");
 
   useEffect(() => {
-    if (!isLeadManager || !loadError) return;
+    if (!strictSession || !loadError) return;
     setDetailId(null);
     setFormOpen(false);
     setEditingId(null);
@@ -717,7 +726,7 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
     setConvertingId(null);
     setConversionMatched({});
     setSaving(false);
-  }, [isLeadManager, loadError]);
+  }, [strictSession, loadError]);
 
   useEffect(() => {
     setFormOpen(false);
@@ -730,13 +739,14 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
     setSearch("");
     setFilter("all");
     setAttributionFilter("all");
+    setResponsibleFilter("all");
     return () => { scopeVersion.current += 1; };
-  }, [user?.id, clinicId, userRole]);
+  }, [user?.id, clinicId, userRole, workspacePurpose]);
 
   useEffect(() => {
     let cancelled = false;
     setCampaignLaunchOptions([]);
-    if (!isLeadManager) {
+    if (clinicalActions) {
       void loadCampaignLaunchOptions().then((options) => {
         if (!cancelled) setCampaignLaunchOptions(options);
       });
@@ -744,12 +754,12 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
     return () => {
       cancelled = true;
     };
-  }, [user?.id, clinicId, userRole, isLeadManager]);
+  }, [user?.id, clinicId, userRole, clinicalActions]);
 
   useEffect(() => {
     let cancelled = false;
-    const workspaceId = isLeadManager ? access.workspaceId : readWorkspaceId();
-    const referenceAccess = isLeadManager ? { request: access.request, isCurrent: access.isCurrent } : {};
+    const workspaceId = strictSession ? access.workspaceId : readWorkspaceId();
+    const referenceAccess = strictSession ? { request: access.request, isCurrent: access.isCurrent } : {};
     setStaffOptions([]);
     setStructuredStagesAvailable(false);
     setStructuredSourcesAvailable(false);
@@ -764,10 +774,10 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
       // does not add a wait to every visit.
       isLeadManager
         ? Promise.resolve({ mode: "restricted", items: [] as StaffOption[] })
-        : loadTaxonomyList({ endpoint: "/api/crm/lead-assignees", listKey: "assignees", workspaceId, mapItem: staffOptionFromUnknown }),
+        : loadTaxonomyList({ endpoint: "/api/crm/lead-assignees", listKey: "assignees", workspaceId, mapItem: staffOptionFromUnknown, ...referenceAccess }),
     ])
       .then(([stageResult, sourceResult, staffResult]) => {
-        if (cancelled || (isLeadManager && !access.isCurrent())) return;
+        if (cancelled || (strictSession && !access.isCurrent())) return;
         setStaffOptions(staffResult.mode === "supabase" ? staffResult.items : []);
         const structuredStages = stageResult.mode === "supabase" && stageResult.items.length > 0;
         const structuredSources = sourceResult.mode === "supabase" && sourceResult.items.length > 0;
@@ -777,7 +787,7 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
         setSourceDefinitions(structuredSources ? orderedActiveSources(sourceResult.items) : FALLBACK_LEAD_SOURCES);
       })
       .catch(() => {
-        if (cancelled || (isLeadManager && !access.isCurrent())) return;
+        if (cancelled || (strictSession && !access.isCurrent())) return;
         setStructuredStagesAvailable(false);
         setStructuredSourcesAvailable(false);
         setStageDefinitions(FALLBACK_LEAD_STAGES);
@@ -787,7 +797,7 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
     return () => {
       cancelled = true;
     };
-  }, [user?.id, clinicId, userRole, isLeadManager]);
+  }, [user?.id, clinicId, userRole, strictSession, workspacePurpose]);
 
   const activeStages = useMemo(() => orderedActiveStages(stageDefinitions), [stageDefinitions]);
   const activeSources = useMemo(() => orderedActiveSources(sourceDefinitions), [sourceDefinitions]);
@@ -837,6 +847,9 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
   const visibleLeads = useMemo(() => {
     const query = search.trim().toLowerCase();
     return items.filter((lead) => {
+      if (isMortgage && !isLeadManager && responsibleFilter !== "all") {
+        if (responsibleFilter === "unassigned" ? Boolean(lead.responsibleUserId) : lead.responsibleUserId !== responsibleFilter) return false;
+      }
       const selectedStage = filter === "all" ? null : activeStages.find((stage) => stage.id === filter);
       if (selectedStage) {
         const exactStructuredMatch = Boolean(lead.stageId && lead.stageId === selectedStage.id);
@@ -850,12 +863,12 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
       if (!query) return true;
       return [lead.name, lead.phone, leadSourceName(lead, activeSources), lead.campaign].some((field) => (field || "").toLowerCase().includes(query));
     });
-  }, [activeSources, activeStages, attributionFilter, items, filter, search]);
+  }, [activeSources, activeStages, attributionFilter, items, filter, search, responsibleFilter, isMortgage, isLeadManager]);
 
-  const detailLead = detailId && (!isLeadManager || !loadError) ? items.find((lead) => lead.id === detailId) || null : null;
+  const detailLead = detailId && (!strictSession || !loadError) ? items.find((lead) => lead.id === detailId) || null : null;
 
   function openAdd() {
-    if (isLeadManager) return;
+    if (isLeadManager || (strictSession && (!access.isCurrent() || loadError))) return;
     const defaultStage = activeStages.find((stage) => stage.semanticGroup === "new") ?? activeStages[0];
     const defaultSource = structuredSourcesAvailable
       ? activeSources.find((source) => source.sourceKey === "manual") ?? activeSources[0]
@@ -871,7 +884,7 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
   }
 
   function openEdit(lead: Lead) {
-    if (isLeadManager && (!access.isCurrent() || loadError)) return;
+    if (strictSession && (!access.isCurrent() || loadError)) return;
     const currentStage = stageForLead(lead, activeStages);
     const currentSource = sourceForLead(lead, activeSources);
     setEditingId(lead.id);
@@ -891,7 +904,7 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
   }
 
   function submitForm() {
-    if (saving || (isLeadManager && (!editingId || !access.isCurrent() || loadError))) return;
+    if (saving || (isLeadManager && !editingId) || (strictSession && (!access.isCurrent() || loadError))) return;
     const name = form.name.trim();
     const phone = form.phone.trim();
     if (!name && !phone) {
@@ -918,8 +931,7 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
       ...(structuredStagesAvailable && isUuid(selectedStage?.id) ? { stageId: selectedStage.id } : {}),
       ...(!isLeadManager ? {
         source: sourceSnapshot,
-        campaign: campaignSnapshot,
-        metaCampaignLaunchId: form.metaCampaignLaunchId,
+        ...(clinicalActions ? { campaign: campaignSnapshot, metaCampaignLaunchId: form.metaCampaignLaunchId } : {}),
         sourceName: sourceSnapshot,
         sourceKey: selectedSource?.sourceKey,
         sourceChannel: selectedSource?.channel,
@@ -938,19 +950,19 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
           ? await updateItem(editingId, patch)
           : await addItem({ id: `lead-${Date.now()}`, createdAt: new Date().toISOString(), source: sourceSnapshot, campaign: campaignSnapshot, ...patch });
         if (!saved) return;
-        if (version !== scopeVersion.current || (isLeadManager && !access.isCurrent())) return;
+        if (version !== scopeVersion.current || (strictSession && !access.isCurrent())) return;
         toast.success(editingId ? "Заявка обновлена" : "Заявка добавлена");
         setFormOpen(false);
         setEditingId(null);
         setForm(emptyForm);
       } finally {
-        if (version === scopeVersion.current && (!isLeadManager || access.isCurrent())) setSaving(false);
+        if (version === scopeVersion.current && (!strictSession || access.isCurrent())) setSaving(false);
       }
     })();
   }
 
   async function changeStatus(lead: Lead, stage: LeadStageDefinition) {
-    if (isLeadManager && (!access.isCurrent() || loadError)) return;
+    if (strictSession && (!access.isCurrent() || loadError)) return;
     const version = scopeVersion.current;
     const saved = await updateItem(lead.id, {
       status: stage.stageKey,
@@ -960,13 +972,13 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
       semanticGroup: stage.semanticGroup,
       ...(structuredStagesAvailable && isUuid(stage.id) ? { stageId: stage.id } : {}),
     });
-    if (version !== scopeVersion.current || (isLeadManager && !access.isCurrent())) return false;
+    if (version !== scopeVersion.current || (strictSession && !access.isCurrent())) return false;
     return saved;
   }
 
   // «Записать»: store the appointment prefill and confirm; navigation is the Link itself.
   function handleBookFromLead(lead: Lead) {
-    if (isLeadManager) return;
+    if (!clinicalActions) return;
     try {
       saveAppointmentPrefill(lead);
       toast.success("Данные переданы в запись.");
@@ -978,7 +990,7 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
   // Lead → client conversion: reuse an existing client matched by normalized phone,
   // otherwise create a new client from the lead fields, then link the lead via client_id.
   async function convertLeadToClient(lead: Lead) {
-    if (isLeadManager || convertingId || lead.clientId) return;
+    if (!clinicalActions || convertingId || lead.clientId) return;
     const version = scopeVersion.current;
     setConvertingId(lead.id);
     try {
@@ -1106,7 +1118,7 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
           description="Новые обращения из рекламы, сайта, WhatsApp и других источников."
           actions={!isLeadManager ? (
             <>
-              <div className="inline-flex rounded-lg border p-0.5" style={{ borderColor: "var(--negis-border)", background: "var(--negis-surface)" }} role="group" aria-label="Режим интерфейса">
+              {!isMortgage && <div className="inline-flex rounded-lg border p-0.5" style={{ borderColor: "var(--negis-border)", background: "var(--negis-surface)" }} role="group" aria-label="Режим интерфейса">
                 {([false, true] as const).map((admin) => (
                   <button
                     key={admin ? "admin" : "client"}
@@ -1119,7 +1131,7 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
                     {admin ? "Админ режим" : "Клиентский режим"}
                   </button>
                 ))}
-              </div>
+              </div>}
               <button type="button" className="neu-btn-primary justify-center" onClick={openAdd}>
                 <Plus size={16} aria-hidden />
                 Добавить заявку
@@ -1144,14 +1156,14 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
         </section>
 
         {/* CRM8: attribution counts in a compact strip — mobile stays uncluttered. */}
-        <section className="negis-glass flex flex-wrap items-center gap-x-6 gap-y-1.5 p-4 text-sm" aria-label="Атрибуция рекламы">
+        {!isMortgage && <section className="negis-glass flex flex-wrap items-center gap-x-6 gap-y-1.5 p-4 text-sm" aria-label="Атрибуция рекламы">
           <p className="font-medium" style={{ color: "var(--negis-muted)" }}>
             Связаны с рекламой: <span className="font-semibold tabular-nums" style={{ color: "var(--negis-text)" }}>{attributionCounts.attributed}</span>
           </p>
           <p className="font-medium" style={{ color: "var(--negis-muted)" }}>
             Без рекламной кампании: <span className="font-semibold tabular-nums" style={{ color: "var(--negis-text)" }}>{attributionCounts.unattributed}</span>
           </p>
-        </section>
+        </section>}
 
         {/* Filters + search */}
         <section className="negis-glass p-4 sm:p-5">
@@ -1177,7 +1189,7 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
             })}
           </div>
           {/* CRM8: secondary attribution filter (independent of stage filter). */}
-          <div className="mt-3 flex flex-wrap items-center gap-2" role="group" aria-label="Фильтр по рекламе">
+          {!isMortgage && <div className="mt-3 flex flex-wrap items-center gap-2" role="group" aria-label="Фильтр по рекламе">
             <span className="text-xs font-semibold uppercase tracking-[0.05em]" style={{ color: "var(--negis-muted)" }}>Реклама:</span>
             {attributionFilterOptions.map((option) => {
               const active = attributionFilter === option.id;
@@ -1198,7 +1210,16 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
                 </button>
               );
             })}
-          </div>
+          </div>}
+          {isMortgage && !isLeadManager && <label className="mt-3 block">
+            <span className="mb-1 block text-xs font-semibold" style={{ color: "var(--negis-muted)" }}>Ответственный</span>
+            <select style={inputStyle} value={responsibleFilter} aria-label="Фильтр по ответственному"
+              onChange={(event) => setResponsibleFilter(event.target.value)}>
+              <option value="all">Все ответственные</option>
+              <option value="unassigned">Не назначен</option>
+              {staffOptions.map((member) => <option key={member.id} value={member.id}>{member.name}</option>)}
+            </select>
+          </label>}
           <label className="relative mt-3 block">
             <span className="sr-only">Поиск по заявкам</span>
             <Search className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2" size={17} style={{ color: "var(--negis-muted)" }} />
@@ -1305,7 +1326,7 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
                   <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:flex-wrap">
                     <a
                       className={`neu-btn justify-center ${hasPhone ? "" : "pointer-events-none opacity-50"}`}
-                      href={hasPhone ? toWhatsappHref(lead.phone, isLeadManager ? undefined : `Здравствуйте, ${lead.name || ""}! Пишем из клиники.`) : undefined}
+                      href={hasPhone ? toWhatsappHref(lead.phone, clinicalActions ? `Здравствуйте, ${lead.name || ""}! Пишем из клиники.` : undefined) : undefined}
                       target="_blank"
                       rel="noreferrer"
                       aria-disabled={!hasPhone}
@@ -1321,11 +1342,11 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
                       <PhoneCall size={16} />
                       Позвонить
                     </a>
-                    {!isLeadManager && <Link href="/appointments" className="neu-btn justify-center" onClick={() => handleBookFromLead(lead)}>
+                    {clinicalActions && <Link href="/appointments" className="neu-btn justify-center" onClick={() => handleBookFromLead(lead)}>
                       <CalendarCheck size={16} />
                       Записать
                     </Link>}
-                    {!isLeadManager && (lead.clientId ? (
+                    {clinicalActions && (lead.clientId ? (
                       <Link href="/clients" className="neu-btn justify-center" onClick={() => rememberOpenClient(lead.clientId)}>
                         <Users size={16} />
                         Открыть клиента
@@ -1354,7 +1375,7 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
       </div>
 
       {/* Add / edit modal */}
-      {formOpen && (!isLeadManager || (editingId && !loadError)) ? (
+      {formOpen && (!strictSession || (!loadError && (!isLeadManager || editingId))) ? (
         <div className="fixed inset-0 z-[80] flex items-center justify-center p-4" style={{ background: "rgba(15,23,42,0.35)" }} onClick={() => setFormOpen(false)}>
           <div className="negis-glass w-full max-w-lg max-h-[90vh] overflow-y-auto p-5 sm:p-6" style={{ background: "var(--negis-surface)" }} onClick={(event) => event.stopPropagation()}>
             <div className="flex items-center justify-between gap-3">
@@ -1402,12 +1423,12 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
                     />
                   )}
                 </label>
-                <label className="block">
+                {!isMortgage && <label className="block">
                   <span className="mb-1 block text-xs font-black uppercase tracking-[0.05em]" style={{ color: "var(--negis-muted)" }}>Кампания / услуга</span>
                   <input style={inputStyle} value={form.campaign} onChange={(event) => setForm((current) => ({ ...current, campaign: event.target.value }))} placeholder="Название кампании" />
-                </label>
+                </label>}
               </div>}
-              {!isLeadManager && <label className="block">
+              {clinicalActions && <label className="block">
                 <span className="mb-1 block text-xs font-black uppercase tracking-[0.05em]" style={{ color: "var(--negis-muted)" }}>Рекламная кампания</span>
                 <select
                   style={inputStyle}
@@ -1495,7 +1516,7 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
             </div>
 
             {/* Lead → client conversion */}
-            {!isLeadManager && <div className="mt-4 rounded-2xl border p-3" style={{ borderColor: "var(--negis-border)" }}>
+            {clinicalActions && <div className="mt-4 rounded-2xl border p-3" style={{ borderColor: "var(--negis-border)" }}>
               {detailLead.clientId ? (
                 <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                   <p className="text-sm font-bold" style={{ color: "var(--negis-text)" }}>Клиент уже создан</p>
@@ -1545,7 +1566,7 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
               </div>
             </div>
 
-            {!isLeadManager && isRealWorkspace() && rolePermissions.tasks ? (
+            {clinicalActions && isRealWorkspace() && rolePermissions.tasks ? (
               <div className="mt-4">
                 <TaskPanel
                   entityType="lead"
@@ -1555,7 +1576,7 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
               </div>
             ) : null}
 
-            {!isLeadManager && isRealWorkspace() ? (
+            {clinicalActions && isRealWorkspace() ? (
               <div className="mt-4">
                 <ChangeLogPanel
                   entityType="lead"
@@ -1575,7 +1596,7 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
             </div>
 
             {/* Admin-only technical details (collapsed) */}
-            {!isLeadManager && isAdminMode ? (
+            {clinicalActions && isAdminMode ? (
               <details className="mt-4 overflow-hidden rounded-2xl border" style={{ borderColor: "var(--negis-border)" }}>
                 <summary className="cursor-pointer list-none px-4 py-2.5 text-xs font-black uppercase tracking-[0.1em]" style={{ color: "var(--negis-primary)" }}>Технические данные</summary>
                 <div className="grid gap-1 px-4 pb-4 pt-1 text-xs font-semibold" style={{ color: "var(--negis-muted)" }}>
@@ -1591,7 +1612,7 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
               </details>
             ) : null}
 
-            {!isDemoMode && !isImpersonation && session && user && clinicId === readWorkspaceId() && isRealWorkspace()
+            {!isMortgage && !isDemoMode && !isImpersonation && session && user && clinicId === readWorkspaceId() && isRealWorkspace()
               && (userRole === "owner" || userRole === "admin")
               && (detailLead.source === "website" || detailLead.sourceKey === "website") ? (
               <SiteInquiryDeletion
@@ -1613,11 +1634,11 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
                 <Pencil size={16} />
                 Изменить
               </button>
-              {!isLeadManager && <Link href="/appointments" className="neu-btn justify-center" onClick={() => handleBookFromLead(detailLead)}>
+              {clinicalActions && <Link href="/appointments" className="neu-btn justify-center" onClick={() => handleBookFromLead(detailLead)}>
                 <CalendarCheck size={16} />
                 Записать
               </Link>}
-              {!isLeadManager && <Link href="/sales" className="neu-btn-primary justify-center" onClick={() => saveDealPrefill(detailLead)}>
+              {clinicalActions && <Link href="/sales" className="neu-btn-primary justify-center" onClick={() => saveDealPrefill(detailLead)}>
                 <BadgeDollarSign size={16} />
                 Оформить продажу
               </Link>}

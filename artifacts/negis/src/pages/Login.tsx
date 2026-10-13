@@ -8,6 +8,8 @@ import { isSyntheticEmail, loginOrEmailToAuthEmail } from "../../../../lib/auth/
 import { isStaffRole, roleLabels } from "@/lib/permissions";
 import { WORKSPACE_SELECTOR_KEY } from "@/lib/demoStorage";
 import { PENDING_INVITE_KEY } from "@/pages/JoinWorkspace";
+import { isWorkspacePurpose, type WorkspacePurpose } from "../../../../lib/crm/workspace-purpose";
+import { workspaceEntryRoute } from "@/lib/workspaceRoutes";
 
 type StaffUser = {
   id?: string;
@@ -212,11 +214,11 @@ export default function Login() {
       toast.success("Вход выполнен");
       const selectedWorkspaceId = localStorage.getItem(WORKSPACE_SELECTOR_KEY);
       const selectedMembership = memberships
-        .filter((entry): entry is { workspaceId: string; role: string } =>
-          !!entry && typeof entry === "object" && "workspaceId" in entry && "role" in entry
-          && typeof entry.workspaceId === "string" && typeof entry.role === "string")
+        .filter((entry): entry is { workspaceId: string; role: string; purpose: WorkspacePurpose } =>
+          !!entry && typeof entry === "object" && "workspaceId" in entry && "role" in entry && "purpose" in entry
+          && typeof entry.workspaceId === "string" && typeof entry.role === "string" && isWorkspacePurpose(entry.purpose))
         .find((entry) => entry.workspaceId === selectedWorkspaceId || memberships.length === 1);
-      setLocation(selectedMembership?.role === "lead_manager" ? "/leads" : "/dashboard");
+      setLocation(workspaceEntryRoute(selectedMembership?.purpose ?? null, selectedMembership?.role ?? null));
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Не удалось войти");
     } finally {

@@ -27,7 +27,9 @@ const TOKEN = "header.payload.signature";
 type QueryLog = {
   table: string;
   op: string;
+  columns?: string;
   filters: Record<string, unknown>;
+  filterMethods: Record<string, "eq" | "in">;
   row?: unknown;
   /** An aggregate read: PostgREST returns a count and no rows. */
   head?: boolean;
@@ -56,6 +58,7 @@ function mockResponse(): MockResponse {
 
 type LoadOptions = {
   rows?: Record<string, unknown[]>;
+  profileData?: unknown;
   /** Tables that answer "relation does not exist" — a provider not provisioned. */
   missingTables?: string[];
   errors?: Record<string, string>;
@@ -88,7 +91,7 @@ async function loadRouter(options: LoadOptions = {}) {
 
   supabaseModule.setSupabaseServerClientFactoryForTests(() => ({
     from(table: string) {
-      const entry: QueryLog = { table, op: "select", filters: {} };
+      const entry: QueryLog = { table, op: "select", filters: {}, filterMethods: {} };
       log.push(entry);
       const settle = (shape: "one" | "list") => {
         if (options.missingTables?.includes(table)) {
@@ -110,6 +113,9 @@ async function loadRouter(options: LoadOptions = {}) {
         }
         const message = options.errors?.[table];
         if (message) return Promise.resolve({ data: null, count: null, error: { code: "08006", message } });
+        if (table === "workspace_settings" && options.profileData !== undefined) {
+          return Promise.resolve({ data: options.profileData, error: null });
+        }
         const rows =
           table === "staff_users"
             ? [membershipFor(options.role ?? "owner")]
@@ -118,9 +124,12 @@ async function loadRouter(options: LoadOptions = {}) {
         // fixture may stay minimal without silently filtering itself out.
         const matches = (row: unknown) => {
           const record = row as Record<string, unknown>;
-          return Object.entries(entry.filters).every(([column, value]) =>
-            column.includes(":") || !(column in record) ? true : record[column] === value,
-          );
+          return Object.entries(entry.filters).every(([column, value]) => {
+            if (column.includes(":") || !(column in record)) return true;
+            return entry.filterMethods[column] === "in"
+              ? Array.isArray(value) && value.includes(record[column])
+              : record[column] === value;
+          });
         };
 
         // Aggregate reads (head: true) answer with a count and no body.
@@ -147,7 +156,8 @@ async function loadRouter(options: LoadOptions = {}) {
       };
       const builder: Record<string, unknown> = {};
       Object.assign(builder, {
-        select: (_columns?: unknown, options?: { count?: string; head?: boolean }) => {
+        select: (columns?: string, options?: { count?: string; head?: boolean }) => {
+          entry.columns = columns?.replace(/\s/g, "");
           if (options?.head) entry.head = true;
           return builder;
         },
@@ -158,8 +168,12 @@ async function loadRouter(options: LoadOptions = {}) {
           return builder;
         },
         limit: (value: number) => { entry.limited = value; return builder; },
-        eq(column: string, value: unknown) { entry.filters[column] = value; return builder; },
-        in(column: string, value: unknown) { entry.filters[column] = value; return builder; },
+        eq(column: string, value: unknown) {
+          entry.filters[column] = value; entry.filterMethods[column] = "eq"; return builder;
+        },
+        in(column: string, value: unknown) {
+          entry.filters[column] = value; entry.filterMethods[column] = "in"; return builder;
+        },
         is: () => builder,
         single: () => settle("one"),
         maybeSingle: () => settle("one"),
@@ -219,6 +233,18 @@ const wazzupChannel = {
 function channelsOf(body: Record<string, unknown>): Array<Record<string, unknown>> {
   const data = (body.data ?? {}) as Record<string, unknown>;
   return Array.isArray(data.channels) ? (data.channels as Array<Record<string, unknown>>) : [];
+}
+
+function assertWorkspaceProfileQuery(log: QueryLog[]): QueryLog {
+  const profiles = log.filter((entry) => entry.table === "workspace_settings");
+  assert.deepEqual(profiles, [{
+    table: "workspace_settings",
+    op: "select",
+    columns: "workspace_id,value",
+    filters: { workspace_id: [WORKSPACE_A], key: "workspace_purpose" },
+    filterMethods: { workspace_id: "in", key: "eq" },
+  }], "the profile lookup must select only the verified workspace's purpose");
+  return profiles[0]!;
 }
 
 // ===========================================================================
@@ -332,13 +358,16 @@ test("WC4 every read is filtered by the verified workspace", async () => {
   await withRouter({
     rows: { wazzup_channels: [wazzupChannel], whatsapp_cloud_numbers: [], wazzup_inbound_messages: [], whatsapp_cloud_inbound_messages: [] },
   }, async (ctx) => {
-    const { res, log } = await ctx.call({});
-    assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+    const { res, log } = await ctx.call({ body: { workspaceId: WORKSPACE_B, purpose: "mortgage_leads" } });
+    assert.equal(res.statusCode, 200, "an absent profile stays legacy clinic regardless of the body");
 
-    const tenantQueries = log.filter((entry) => entry.table !== "staff_users" && entry.table !== "workspaces");
+    const profile = assertWorkspaceProfileQuery(log);
+    const tenantQueries = log.filter((entry) => entry.table !== "staff_users" && entry.table !== "workspaces" && entry !== profile);
     assert.ok(tenantQueries.length > 0, "the handler must query something");
     for (const entry of tenantQueries) {
       assert.equal(entry.filters.workspace_id, WORKSPACE_A, `${entry.table} must be scoped to the verified workspace`);
+      assert.equal(entry.filterMethods.workspace_id, "eq", `${entry.table} must retain its scalar workspace filter`);
+      assert.ok(log.indexOf(profile) < log.indexOf(entry), "the profile is verified before business work");
     }
   });
 });
@@ -353,6 +382,7 @@ test("WC4b naming another workspace in the request is refused, not quietly ignor
     const { res, log } = await ctx.call({ query: { workspaceId: WORKSPACE_B } });
 
     assert.equal(res.statusCode, 403, JSON.stringify(res.body));
+    assert.equal(log.some((entry) => entry.table === "workspace_settings"), false, "a foreign selector must be refused before any profile lookup");
     assert.equal(
       log.some((entry) => entry.table === "wazzup_channels" || entry.table === "whatsapp_cloud_numbers"),
       false,
@@ -360,6 +390,29 @@ test("WC4b naming another workspace in the request is refused, not quietly ignor
     );
     assert.equal(JSON.stringify(res.body).includes(WORKSPACE_B), false, "and the answer discloses nothing about it");
   });
+});
+
+test("WC4c an unreadable or malformed profile fails closed before channel work", async () => {
+  for (const options of [
+    { errors: { workspace_settings: "connection refused" } },
+    { profileData: null },
+    { profileData: {} },
+    { profileData: [null] },
+    { profileData: [{ workspace_id: WORKSPACE_A, value: { purpose: "unrecognized" } }] },
+    { profileData: [
+      { workspace_id: WORKSPACE_A, value: { purpose: "clinic_services" } },
+      { workspace_id: WORKSPACE_A, value: { purpose: "clinic_services" } },
+    ] },
+  ]) {
+    await withRouter({ ...options, rows: { wazzup_channels: [wazzupChannel] } }, async (ctx) => {
+      const { res, log } = await ctx.call({});
+      assert.equal(res.statusCode, 503, JSON.stringify(options));
+      assert.equal(res.body.code, "workspace_profile_unavailable");
+      const profile = assertWorkspaceProfileQuery(log);
+      assert.ok(log.every((entry) => entry.table === "staff_users" || entry === profile), "no channel query may follow a failed profile lookup");
+      assert.equal(JSON.stringify(res.body).includes("connection refused"), false);
+    });
+  }
 });
 
 test("WC5 the switch cannot reach another clinic's channel", async () => {

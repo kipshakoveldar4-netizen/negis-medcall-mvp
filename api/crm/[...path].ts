@@ -39,6 +39,7 @@ import {
   readWorkspaceContext,
 } from "../../lib/crm/server";
 import { normalizeCrmSegments, resolveCrmRoute } from "../../lib/crm/authorization";
+import { lookupWorkspacePurposes, requirePurposeRoute, requireMortgagePayload } from '../../lib/crm/workspace-policy';
 import { handleStaffInvitationAccept, handleStaffInvitations } from "../../lib/crm/staff-invitations";
 import { handleStaffCredentials } from "../../lib/crm/staff-credentials";
 import { handleJoinCode, handleJoinRequest, handleStaffJoinRequests } from "../../lib/crm/staff-join-requests";
@@ -478,6 +479,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     if (isAssignedLeadRole(context.role) && !assignedLeadRouteAllowed(route.key, method)) {
       return sendJson(res, 403, { success: false, error: "Недостаточно прав", code: "insufficient_permission" });
     }
+    context.purpose = (await lookupWorkspacePurposes([context.workspaceId]))[context.workspaceId];
+    requirePurposeRoute(context.purpose, context.role, route.key, method);
+    if (context.purpose === 'mortgage_leads') requireMortgagePayload(route.key, method, req.body);
 
     if (META_ACCOUNT_BOUND_ROUTES.has(route.key)) {
       requireMetaProvisionedWorkspace(context.workspaceId);

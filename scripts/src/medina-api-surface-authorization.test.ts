@@ -289,13 +289,22 @@ type HandlerOptions = {
   memberships?: StaffRow[];
   authOk?: boolean;
   /**
-   * Rows per table. Without it every table answers with the membership rows,
-   * which is what the tests written before this existed expect.
+   * Rows per table. Legacy tables default to membership rows; workspace_settings
+   * defaults to [] so the absent purpose profile uses clinic_services.
    */
   tables?: Record<string, unknown[]>;
 };
 
-type QueryLog = { table: string; filters: Record<string, unknown> };
+type QueryLog = { table: string; filters: Record<string, unknown>; op: string; columns?: string };
+
+function assertWorkspaceProfileQuery(queries: QueryLog[], workspaceId: string) {
+  assert.deepEqual(queries.filter((entry) => entry.table === "workspace_settings"), [{
+    table: "workspace_settings",
+    op: "select",
+    columns: "workspace_id,value",
+    filters: { workspace_id: [workspaceId], key: "workspace_purpose" },
+  }], "the purpose profile must be a minimal read of the verified workspace only");
+}
 
 type ProviderCalls = { auth: number; openai: number; telegram: number; agent: number; supabaseClients: number };
 
@@ -341,16 +350,16 @@ async function loadHandler(file: string, options: HandlerOptions = {}) {
   supabaseModule.setSupabaseServerClientFactoryForTests(() => {
     calls.supabaseClients += 1;
     const makeBuilder = (table: string) => {
-      const tableRows = options.tables?.[table] ?? rows;
-      const entry: QueryLog = { table, filters: {} };
+      const tableRows = options.tables?.[table] ?? (table === "workspace_settings" ? [] : rows);
+      const entry: QueryLog = { table, filters: {}, op: "select" };
       queries.push(entry);
       const builder: Record<string, unknown> = {};
       const chain = () => builder;
       Object.assign(builder, {
-        select: () => chain(),
-        insert: () => chain(),
-        update: () => chain(),
-        upsert: () => chain(),
+        select: (columns?: string) => { entry.columns = columns?.replace(/\s+/g, ""); return chain(); },
+        insert: () => { entry.op = "insert"; return chain(); },
+        update: () => { entry.op = "update"; return chain(); },
+        upsert: () => { entry.op = "upsert"; return chain(); },
         order: () => chain(),
         limit: () => chain(),
         eq: (column: string, value: unknown) => { entry.filters[column] = value; return chain(); },
@@ -440,6 +449,7 @@ test("S11 Content Studio denies a workspace the caller is not a member of", asyn
     assert.equal(result.status, 403);
     assert.equal(result.body.code, "workspace_access_denied");
     assert.equal(result.calls.openai, 0, "a denied caller must not reach the provider");
+    assert.ok(result.queries.every((entry) => entry.table === "staff_users"), "denial must precede profile and business reads");
   } finally {
     restore();
   }
@@ -450,10 +460,13 @@ test("S12 the legacy Content Studio video store is closed, and only to an author
   try {
     const anonymous = await call({ method: "GET", query: { path: "videos" }, token: null });
     assert.equal(anonymous.status, 401, "the closure is not disclosed before authentication");
+    assert.deepEqual(anonymous.queries, []);
 
     const authorized = await call({ method: "GET", query: { path: "videos", workspaceId: WORKSPACE_A } });
     assert.equal(authorized.status, 410);
     assert.equal(authorized.body.code, "route_disabled");
+    assertWorkspaceProfileQuery(authorized.queries, WORKSPACE_A);
+    assert.ok(authorized.queries.every((entry) => ["staff_users", "workspace_settings"].includes(entry.table)), "a disabled route must not read business data");
   } finally {
     restore();
   }
@@ -809,6 +822,7 @@ test("S30 a report for a campaign outside the workspace is a 404 and never reach
       assert.equal(result.status, 404, `${file} disclosed a foreign campaign`);
       assert.equal(result.body.code, "resource_not_found");
       assert.equal(result.calls.agent, 0, `${file} asked the agent about a campaign the caller does not own`);
+      assertWorkspaceProfileQuery(result.queries, WORKSPACE_A);
     } finally {
       restore();
     }
@@ -823,6 +837,7 @@ test("S31 the ownership lookup is filtered by both the campaign and the workspac
     });
     try {
       const result = await call({ query: { campaignId: CAMPAIGN_A } });
+      assertWorkspaceProfileQuery(result.queries, WORKSPACE_A);
       const lookup = result.queries.find((entry) => entry.table === "targeting_campaigns");
       assert.ok(lookup, `${file} must look the campaign up before calling the agent`);
       assert.equal(lookup.filters.id, CAMPAIGN_A);
@@ -850,6 +865,7 @@ test("S32 a report for the caller's own campaign is served", async () => {
       const result = await call({ query: { campaignId: CAMPAIGN_A } });
       assert.equal(result.status, 200, `${file} refused the caller's own campaign: ${JSON.stringify(result.body)}`);
       assert.equal(result.calls.agent, 1, `${file} must ask the agent for an owned campaign`);
+      assertWorkspaceProfileQuery(result.queries, WORKSPACE_A);
     } finally {
       restore();
     }

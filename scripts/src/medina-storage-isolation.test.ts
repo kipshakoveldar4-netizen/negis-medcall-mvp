@@ -31,15 +31,16 @@ const FOREIGN_JOB = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 const TOKEN = "header.payload.signature";
 
 type StaffRow = { id: string; workspace_id: string; role: string; status: string };
-type QueryLog = { table: string; op: string; filters: Record<string, unknown>; row?: unknown };
+type QueryLog = { table: string; op: string; filters: Record<string, unknown>; columns?: string; row?: unknown };
 type StorageCall = { op: string; bucket: string; key: string };
 
 /** Records every table, filter and row; resolves from a fixed row map. */
-function dbSpy(rows: Record<string, unknown[]>, log: QueryLog[]) {
+function dbSpy(rows: Record<string, unknown[]>, log: QueryLog[], errors: Record<string, { message: string }> = {}) {
   return (table: string) => {
     const entry: QueryLog = { table, op: "select", filters: {} };
     log.push(entry);
     const settle = (shape: "one" | "list") => {
+      if (errors[table]) return Promise.resolve({ data: null, error: errors[table] });
       const tableRows = rows[table] ?? [];
       if (shape === "list") return Promise.resolve({ data: tableRows, error: null, count: tableRows.length });
       // `insert(...).select().single()` returns the row that was written, and a
@@ -51,7 +52,7 @@ function dbSpy(rows: Record<string, unknown[]>, log: QueryLog[]) {
     };
     const builder: Record<string, unknown> = {};
     Object.assign(builder, {
-      select: () => builder,
+      select: (columns: string) => { entry.columns = columns; return builder; },
       insert: (row: unknown) => { entry.op = "insert"; entry.row = row; return builder; },
       update: (row: unknown) => { entry.op = "update"; entry.row = row; return builder; },
       upsert: (row: unknown) => { entry.op = "upsert"; entry.row = row; return builder; },
@@ -59,6 +60,7 @@ function dbSpy(rows: Record<string, unknown[]>, log: QueryLog[]) {
       order: () => builder,
       limit: () => builder,
       eq(column: string, value: unknown) { entry.filters[column] = value; return builder; },
+      in(column: string, values: unknown[]) { entry.filters[column] = [...values]; return builder; },
       is(column: string, value: unknown) { entry.filters[column] = value; return builder; },
       single: () => settle("one"),
       maybeSingle: () => settle("one"),
@@ -130,6 +132,7 @@ const memberB: StaffRow = { id: "staff-b", workspace_id: WORKSPACE_B, role: "own
 async function loadRouter(rows: Record<string, unknown[]> = {}) {
   const queries: QueryLog[] = [];
   const storage: StorageCall[] = [];
+  const errors: Record<string, { message: string }> = {};
 
   process.env.SUPABASE_URL = "https://project.example.test";
   process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key";
@@ -146,9 +149,9 @@ async function loadRouter(rows: Record<string, unknown[]> = {}) {
     pathToFileURL(path.join(repoRoot, "lib", "supabase", "server.ts")).href
   )) as { setSupabaseServerClientFactoryForTests: (factory: (() => unknown) | null) => void };
 
-  const clientRows: Record<string, unknown[]> = { staff_users: [memberA], ...rows };
+  const clientRows: Record<string, unknown[]> = { staff_users: [memberA], workspace_settings: [], ...rows };
   supabaseModule.setSupabaseServerClientFactoryForTests(() => ({
-    from: dbSpy(clientRows, queries),
+    from: dbSpy(clientRows, queries, errors),
     storage: storageSpy(storage),
   }));
 
@@ -189,6 +192,7 @@ async function loadRouter(rows: Record<string, unknown[]> = {}) {
 
   return {
     call,
+    errors,
     restore: () => {
       globalThis.fetch = originalFetch;
       supabaseModule.setSupabaseServerClientFactoryForTests(null);
@@ -228,6 +232,10 @@ function multipartBody(fields: Record<string, string>): { buffer: Buffer; conten
 
 function uploads(calls: StorageCall[]): StorageCall[] {
   return calls.filter((entry) => entry.op === "upload" || entry.op === "createSignedUploadUrl");
+}
+
+function profileQueries(queries: QueryLog[]): QueryLog[] {
+  return queries.filter((entry) => entry.table === "workspace_settings" && entry.filters.key === "workspace_purpose");
 }
 
 // ===========================================================================
@@ -284,19 +292,44 @@ test("ST2 a multipart upload naming a foreign key still writes under the caller'
 
 test("ST3 the signed upload route derives the key from the authorized workspace", async () => {
   await withRouter({}, async (ctx) => {
-    const { res, storage } = await ctx.call({
+    const { res, queries, storage } = await ctx.call({
       segments: ["ad-creatives", "signed-upload"],
       method: "POST",
       body: { fileName: "creative.jpg", mimeType: "image/jpeg", fileSize: 2048, workspaceId: WORKSPACE_B },
     });
 
     assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+    assert.deepEqual(profileQueries(queries), [{ table: "workspace_settings", op: "select",
+      columns: "workspace_id, value", filters: { workspace_id: [WORKSPACE_A], key: "workspace_purpose" } }]);
     const signed = storage.filter((entry) => entry.op === "createSignedUploadUrl");
     assert.equal(signed.length, 1);
     assert.equal(signed[0].bucket, "ad-creatives");
     assert.ok(signed[0].key.startsWith(`${WORKSPACE_A}/`), `key escaped the workspace prefix: ${signed[0].key}`);
   });
 });
+
+for (const failure of ["malformed", "query error"]) {
+  test(`signed upload ${failure} profile fails closed before business queries or storage`, async () => {
+    const rows: Record<string, unknown[]> = failure === "malformed" ? { workspace_settings: [
+      { workspace_id: WORKSPACE_A, key: "workspace_purpose", value: { purpose: "unrecognized" } },
+    ] } : {};
+    await withRouter(rows, async (ctx) => {
+      if (failure === "query error") ctx.errors.workspace_settings = { message: "private fixture profile detail" };
+      const { res, queries, storage } = await ctx.call({
+        segments: ["ad-creatives", "signed-upload"], method: "POST",
+        body: { fileName: "creative.jpg", mimeType: "image/jpeg", fileSize: 2048, workspaceId: WORKSPACE_B },
+      });
+      assert.equal(res.statusCode, 503, JSON.stringify(res.body));
+      assert.equal(res.body.code, "workspace_profile_unavailable");
+      assert.equal(res.body.data, undefined);
+      assert.equal(JSON.stringify(res.body).includes("private fixture profile detail"), false);
+      const profiles = profileQueries(queries);
+      assert.equal(profiles.length, 1);
+      assert.deepEqual(queries.filter((entry) => entry.table !== "staff_users" && !profiles.includes(entry)), []);
+      assert.deepEqual(storage, []);
+    });
+  });
+}
 
 // ===========================================================================
 // B. The browser never chooses which object the worker reads
@@ -578,6 +611,7 @@ test("ST14 signed upload requires and obeys the explicit workspace selector", as
       body,
     });
     assert.equal(missing.res.statusCode, 403, JSON.stringify(missing.res.body));
+    assert.deepEqual(profileQueries(missing.queries), [], "an ambiguous membership must not read any tenant profile");
     assert.equal(missing.storage.length, 0, "an ambiguous tenant must not receive an upload token");
 
     const selected = await ctx.call({
@@ -587,6 +621,8 @@ test("ST14 signed upload requires and obeys the explicit workspace selector", as
       body,
     });
     assert.equal(selected.res.statusCode, 200, JSON.stringify(selected.res.body));
+    assert.deepEqual(profileQueries(selected.queries), [{ table: "workspace_settings", op: "select",
+      columns: "workspace_id, value", filters: { workspace_id: [WORKSPACE_A], key: "workspace_purpose" } }]);
     const signed = selected.storage.filter((entry) => entry.op === "createSignedUploadUrl");
     assert.equal(signed.length, 1);
     assert.ok(signed[0].key.startsWith(`${WORKSPACE_A}/`), `selector was ignored: ${signed[0].key}`);

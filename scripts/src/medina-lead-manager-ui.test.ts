@@ -36,6 +36,7 @@ function evaluate(source: string, bindings: Record<string, unknown> = {}, import
 
 const { permissionsForRole } = evaluate(await read("lib/permissions.ts"));
 const { staffRoleLabels } = evaluate(await readFile(path.join(root, "lib/vertical/terms.ts"), "utf8"));
+const workspaceRoutes = evaluate(await read("lib/workspaceRoutes.ts"));
 
 function select(source: string, names: string[]) {
   const ast = ts.createSourceFile("fixture.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
@@ -134,7 +135,7 @@ function setup(role = "lead_manager") {
   const driver = hookDriver();
   const callbacks = new Set<(event: string, session: any) => void>();
   let auth = { userRole: role, clinicId: workspace, user: { id: actor }, session: {}, rolePermissions: { crm: true, tasks: true },
-    isDemoMode: false, isImpersonation: false, vertical: "clinic", availableWorkspaces: [] };
+    isDemoMode: false, isImpersonation: false, vertical: "clinic", workspacePurpose: "clinic_services", availableWorkspaces: [] };
   const requests: { path: string; init?: RequestInit & { expectedUserId?: string } }[] = [];
   const updates: { patch: any; payload: any }[] = [];
   const toasts: string[] = [];
@@ -188,6 +189,7 @@ function setup(role = "lead_manager") {
     setAuth(patch: Partial<typeof auth>) { auth = { ...auth, ...patch }; driver.invalidate(); },
     refuse() { loadError = true; items = []; driver.invalidate(); },
     empty() { items = []; driver.invalidate(); },
+    setLeads(next: any[]) { items = next; driver.invalidate(); },
     reply(value: typeof reply) { reply = value; }, save(value: Promise<boolean>) { saved = value; },
   };
 }
@@ -211,7 +213,8 @@ test("lead manager routes, home and both menus are leads-only; other route permi
   for (const location of ["/leads", "/clients", "/sales", "/dashboard", "/appointments", "/reports"]) {
     let redirected = "";
     const routes = evaluate(select(app, ["ROUTE_PERMISSIONS", "firstAllowedRoute", "ProtectedPage"]), {
-      useAuth: () => ({ userRole: "lead_manager", rolePermissions: current.ALL_PERMISSIONS, isLoading: false }),
+      ...workspaceRoutes,
+      useAuth: () => ({ userRole: "lead_manager", rolePermissions: current.ALL_PERMISSIONS, isLoading: false, workspacePurpose: "clinic_services" }),
       useLocation: () => [location, (url: string) => { redirected = url; }], useEffect: (run: () => void) => run(),
     }).selected;
     const tree = routes.ProtectedPage({ component: "Screen", permission: location === "/dashboard" ? "dashboard" : "crm" });
@@ -226,7 +229,8 @@ test("lead manager routes, home and both menus are leads-only; other route permi
     const nav = evaluate(await read(`components/layout/${file}.tsx`), {}, {
       react: driver.hooks, wouter: { Link: "Link", useLocation: () => ["/leads", () => {}] },
       "@/contexts/AuthContext": { useAuth: () => ({ userRole: "lead_manager", rolePermissions: current.ALL_PERMISSIONS,
-        user: null, vertical: "clinic", availableWorkspaces: [] }) },
+        user: null, vertical: "clinic", workspacePurpose: "clinic_services", availableWorkspaces: [] }) },
+      "@/lib/workspaceRoutes": workspaceRoutes,
       "@/lib/demoStorage": { isRealWorkspace: () => true },
       "../../../../../lib/vertical/terms": { termsFor: () => ({}), capitalize: (word: string) => word },
       "../../../../../lib/auth/staff-logins": { loginFromEmail: () => "" }, "./ProfileDialog": { ProfileDialog: "ProfileDialog" },
@@ -281,6 +285,87 @@ test("existing roles retain add, attribution, assignment, conversion, history an
   assert.ok(fixture.driver.nodes().some((node) => node.props["data-testid"] === "lead-responsible-select"));
   assert.ok(fixture.driver.nodes().some((node) => node.props["data-testid"] === "lead-campaign-select"));
   fixture.driver.dispose();
+});
+
+test("mortgage owner/admin keep manual assignment but cannot book, sell, convert or load ads", async () => {
+  for (const role of ["owner", "admin"]) {
+    const fixture = setup(role);
+    fixture.setAuth({ workspacePurpose: "mortgage_leads" });
+    fixture.content(); await fixture.driver.flush();
+    assert.equal(fixture.collection().strictAccess, fixture.access);
+    assert.equal(fixture.collection().allowScopedCreate, true);
+    assert.ok(fixture.requests.some((call) => call.path.startsWith("/api/crm/lead-assignees")));
+    assert.ok(fixture.requests.every((call) => !call.path.startsWith("/api/crm/meta-launches")));
+    button(fixture.driver, "Добавить заявку");
+    assert.equal(fixture.driver.nodes().some((node) => node.type === "Link"), false);
+    button(fixture.driver, "Подробнее").props.onClick(); await fixture.driver.flush();
+    assert.equal(fixture.driver.nodes().some((node) => ["TaskPanel", "ChangeLogPanel", "SiteInquiryDeletion"].includes(String(node.type))), false);
+    assert.equal(fixture.driver.nodes().some((node) => node.type === "Link"), false);
+    button(fixture.driver, "Изменить").props.onClick(); await fixture.driver.flush();
+    assert.ok(fixture.driver.nodes().some((node) => node.props["data-testid"] === "lead-responsible-select"));
+    assert.ok(fixture.driver.nodes().every((node) => node.props["data-testid"] !== "lead-campaign-select"));
+    button(fixture.driver, "Сохранить").props.onClick(); await fixture.driver.flush();
+    assert.equal(fixture.updates[0].payload.responsibleUserId, actor);
+    assert.equal("campaign" in fixture.updates[0].payload, false);
+    assert.equal("metaCampaignLaunchId" in fixture.updates[0].payload, false);
+    fixture.refuse(); await fixture.driver.flush();
+    assert.doesNotMatch(label(fixture.driver.tree()), /Local contact|Изменить заявку/);
+    fixture.driver.dispose();
+  }
+});
+
+test("mortgage save and reference lifetime cannot continue after profile or role changes", async () => {
+  for (const patch of [{ workspacePurpose: "clinic_services" }, { userRole: "lead_manager" }]) {
+    const fixture = setup("admin");
+    fixture.setAuth({ workspacePurpose: "mortgage_leads" });
+    fixture.lifetime(); await fixture.driver.flush();
+    const oldAccess = fixture.driver.tree().props.access as Access;
+    assert.equal(oldAccess.isCurrent(), true);
+    fixture.setAuth(patch); await fixture.driver.flush();
+    assert.equal(oldAccess.isCurrent(), false);
+    await assert.rejects(oldAccess.request("/api/crm/leads"), /Lead session ended/);
+    assert.equal(fixture.requests.length, 0);
+    fixture.driver.dispose();
+  }
+});
+
+test('mortgage manual-distribution filters show unassigned or one manager without changing records', async () => {
+  const fixture = setup('admin'); fixture.setAuth({ workspacePurpose: 'mortgage_leads' });
+  fixture.setLeads([{ ...lead, id: 'a', name: 'Manager A contact' },
+    { ...lead, id: 'b', name: 'Manager B contact', responsibleUserId: workspace },
+    { ...lead, id: 'u', name: 'Unassigned contact', responsibleUserId: undefined }]);
+  fixture.content(); await fixture.driver.flush();
+  const select = () => fixture.driver.nodes().find((node) => node.props['aria-label'] === 'Фильтр по ответственному')!;
+  assert.ok(select());
+  select().props.onChange({ target: { value: 'unassigned' } }); await fixture.driver.flush();
+  assert.match(label(fixture.driver.tree()), /Unassigned contact/);
+  assert.doesNotMatch(label(fixture.driver.tree()), /Manager [AB] contact/);
+  select().props.onChange({ target: { value: actor } }); await fixture.driver.flush();
+  assert.match(label(fixture.driver.tree()), /Manager A contact/);
+  assert.doesNotMatch(label(fixture.driver.tree()), /Manager B contact|Unassigned contact/);
+  assert.deepEqual(fixture.updates, []);
+  fixture.driver.dispose();
+});
+
+test("mortgage routes intersect roles and never mount medical, advertising or unsupported pages", async () => {
+  const app = await read("App.tsx");
+  for (const role of ["owner", "admin", "lead_manager", "manager", "marketer", "doctor"]) {
+    for (const location of ["/leads", "/admin", "/clients", "/sales", "/appointments", "/booking", "/dashboard", "/ads", "/ads-automation/history", "/site-blog", "/services", "/reports"]) {
+      let redirected = "";
+      const routes = evaluate(select(app, ["ROUTE_PERMISSIONS", "firstAllowedRoute", "ProtectedPage"]), {
+        ...workspaceRoutes,
+        useAuth: () => ({ userRole: role, rolePermissions: { crm: true, admin: role !== "lead_manager", ads: true, dashboard: true, booking: true }, isLoading: false, workspacePurpose: "mortgage_leads" }),
+        useLocation: () => [location, (url: string) => { redirected = url; }], useEffect: (run: () => void) => run(),
+      }).selected;
+      const allowed = workspaceRoutes.workspaceAllowsRoute("mortgage_leads", role, location);
+      const tree = routes.ProtectedPage({ component: "Screen", permission: location === "/leads" ? "crm" : location === "/admin" ? "admin" : "dashboard" });
+      assert.equal(tree?.type === "Screen", allowed, `${role}: ${location}`);
+      assert.equal(redirected, allowed ? "" : ["owner", "admin", "lead_manager"].includes(role) ? "/leads" : "/");
+    }
+  }
+  assert.equal(workspaceRoutes.workspaceAllowsRoute(null, "owner", "/leads"), false);
+  const landing = evaluate(select(await read("pages/Landing.tsx"), ["roleRoute"])).selected;
+  for (const role of ["owner", "admin", "lead_manager"]) assert.equal(landing.roleRoute(role, "mortgage_leads"), "/leads");
 });
 
 test("access refusal closes contact detail/edit and a late invalid save has no toast", async () => {
@@ -344,8 +429,10 @@ test("outer key changes for batched A-B-A auth events and workspace/role switche
   const initial = fixture.driver.tree().key;
   fixture.emit("actor-b"); fixture.emit(actor); await fixture.driver.flush();
   assert.notEqual(fixture.driver.tree().key, initial);
-  assert.deepEqual(JSON.parse(fixture.driver.tree().key), [actor, workspace, "lead_manager", 2]);
+  assert.deepEqual(JSON.parse(fixture.driver.tree().key), [actor, workspace, "lead_manager", "clinic_services", 2]);
   fixture.setAuth({ clinicId: "workspace-b", userRole: "manager" }); await fixture.driver.flush();
-  assert.deepEqual(JSON.parse(fixture.driver.tree().key), [actor, "workspace-b", "manager", 2]);
+  assert.deepEqual(JSON.parse(fixture.driver.tree().key), [actor, "workspace-b", "manager", "clinic_services", 2]);
+  fixture.setAuth({ workspacePurpose: "mortgage_leads" }); await fixture.driver.flush();
+  assert.deepEqual(JSON.parse(fixture.driver.tree().key), [actor, "workspace-b", "manager", "mortgage_leads", 2]);
   fixture.driver.dispose();
 });

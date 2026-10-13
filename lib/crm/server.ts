@@ -44,7 +44,8 @@ import {
 } from "./change-journal";
 import { checkMetaCompliance } from "../meta/compliance";
 import { DEFAULT_VERTICAL, readVertical, VERTICAL_SETTINGS_KEY, type Vertical } from "../vertical/terms";
-import { isWorkspacePurpose, WORKSPACE_PURPOSE_SETTINGS_KEY, type WorkspacePurpose } from "./workspace-purpose";
+import type { WorkspacePurpose } from "./workspace-purpose";
+import { lookupWorkspacePurposes } from './workspace-policy';
 import {
   MetaApiError,
   type MetaTargetingResolution,
@@ -2523,6 +2524,7 @@ async function buildLeadReferenceRow(
   supabase: CrmSupabaseClient,
   workspaceId: string,
   body: JsonRecord,
+  purpose?: WorkspacePurpose,
 ): Promise<JsonRecord> {
   const row: JsonRecord = {};
 
@@ -2601,13 +2603,16 @@ async function buildLeadReferenceRow(
         workspaceId,
         table: "staff_users",
         id: responsibleId,
-        select: "id,full_name,status",
+        select: purpose === 'mortgage_leads' ? "id,full_name,status,role" : "id,full_name,status",
         fieldName: "responsibleUserId",
       });
       // A deactivated colleague must not stay assignable: the lead would sit in
       // a queue nobody reads.
       if (readString(staff.status).toLowerCase() !== "active") {
         throw new CrmReferenceValidationError(["responsibleUserId must be an active staff member"]);
+      }
+      if (purpose === 'mortgage_leads' && staff.role !== 'lead_manager') {
+        throw new CrmReferenceValidationError(['responsibleUserId must be an active lead manager']);
       }
       row.responsible_user_id = staff.id;
     }
@@ -4896,7 +4901,7 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
       if (isUuid(actorStaffUserId)) row.created_by_staff_user_id = actorStaffUserId;
     }
     if (resource === "leads") {
-      Object.assign(row, await buildLeadReferenceRow(supabase, workspaceId, body));
+      Object.assign(row, await buildLeadReferenceRow(supabase, workspaceId, body, readWorkspaceContext(req)?.purpose));
     }
     if (resource === "deals") {
       Object.assign(row, await buildDealReferenceRow(supabase, workspaceId, body));
@@ -5427,7 +5432,7 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
     }
 
     if (resource === "leads") {
-      Object.assign(row, await buildLeadReferenceRow(supabase, workspaceId, patchBody));
+      Object.assign(row, await buildLeadReferenceRow(supabase, workspaceId, patchBody, readWorkspaceContext(req)?.purpose));
     }
     if (resource === "deals") {
       Object.assign(row, await buildDealReferenceRow(supabase, workspaceId, patchBody));
@@ -10282,33 +10287,6 @@ async function lookupWorkspaceVerticals(workspaceIds: string[]): Promise<Record<
   }
 }
 
-async function lookupWorkspacePurposes(workspaceIds: string[]): Promise<Record<string, WorkspacePurpose>> {
-  const ids = [...new Set(workspaceIds.filter((id) => isUuid(id)))];
-  if (ids.length === 0) return {};
-  const supabase = getSupabaseServerClient();
-  if (!supabase) throw new Error("workspace_profile_unavailable");
-
-  const { data, error } = await supabase.from("workspace_settings")
-    .select("workspace_id, value").in("workspace_id", ids).eq("key", WORKSPACE_PURPOSE_SETTINGS_KEY);
-  if (error || !Array.isArray(data)) throw new Error("workspace_profile_unavailable");
-
-  // A missing setting is legacy clinic mode, not a failed or malformed read.
-  const purposes: Record<string, WorkspacePurpose> = {};
-  for (const id of ids) purposes[id] = "clinic_services";
-  const seen = new Set<string>();
-  for (const row of data) {
-    const record = asRecord(row);
-    const id = firstString(record.workspace_id);
-    if (!isUuid(id)) throw new Error("workspace_profile_unavailable");
-    if (!ids.includes(id)) continue;
-    const purpose = asRecord(record.value).purpose;
-    if (!isWorkspacePurpose(purpose) || seen.has(id)) throw new Error("workspace_profile_unavailable");
-    purposes[id] = purpose;
-    seen.add(id);
-  }
-  return purposes;
-}
-
 async function lookupWorkspaceNames(workspaceIds: string[]): Promise<Record<string, string>> {
   const ids = [...new Set(workspaceIds.filter((id) => isUuid(id)))];
   if (ids.length === 0) return {};
@@ -10417,7 +10395,7 @@ export async function handleLeadAssignees(req: VercelRequest, res: VercelRespons
     }
     const { data, error } = await supabase
       .from("staff_users")
-      .select("id,full_name,status")
+      .select(context.purpose === 'mortgage_leads' ? "id,full_name,status,role" : "id,full_name,status")
       .eq("workspace_id", context.workspaceId)
       .eq("status", "active")
       .order("full_name", { ascending: true });
@@ -10427,6 +10405,7 @@ export async function handleLeadAssignees(req: VercelRequest, res: VercelRespons
     const assignees = (Array.isArray(data) ? data : [])
       .map(asRecord)
       .filter((row) => isUuid(row.id) && row.status === "active")
+      .filter((row) => context.purpose !== 'mortgage_leads' || row.role === 'lead_manager')
       .map((row) => ({ id: row.id, name: readString(row.full_name) || "Сотрудник" }));
     return sendJson(res, 200, success("supabase", { assignees, items: assignees }));
   } catch {

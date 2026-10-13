@@ -338,7 +338,16 @@ test("SC6 экран предлагает пароль первым и пока�
   // Пароль не оседает в браузере нигде, кроме состояния экрана.
   assert.ok(!/writeStored\([^)]*[Pp]assword/.test(admin) && !/localStorage[^\n]*[Pp]assword/.test(admin), "пароль не пишется в localStorage");
   // Роли выше своей не предлагаются: сервер их отклонит.
-  assert.ok(/canAssignRole\(serverAdminAuth\.role \|\| "admin", role\)/.test(admin));
+  const roleSource = stripComments(admin);
+  const staffUi = roleSource.slice(roleSource.indexOf("function renderStaff()"), roleSource.indexOf("function renderRoles()"));
+  assert.ok(/const actorRole: StaffRole = serverAdminAuth\.role \|\| "admin"/.test(staffUi), "assignment rank comes from server-confirmed access");
+  assert.ok(/const isMortgage = workspacePurpose === "mortgage_leads"/.test(roleSource));
+  assert.ok(/const workspaceStaffRoles: readonly StaffRole\[\] = isMortgage \? \["lead_manager", "admin"\] : staffRoles/.test(roleSource),
+    "clinic keeps normal roles; mortgage offers only lead_manager/admin");
+  assert.ok(/const assignableRoles = workspaceStaffRoles\.filter\(\(role\) => canAssignRole\(actorRole, role\)\)/.test(staffUi),
+    "profile roles are intersected with the real rank check, including admin peer denial");
+  assert.ok(/value=\{inviteForm\.role\}[\s\S]*?\{assignableRoles\.map\(\(role\) =>/.test(staffUi),
+    "the creation picker uses the rank-filtered profile roles");
 });
 
 // ── Смена пароля самим сотрудником ──────────────────────────────────────────

@@ -81,3 +81,28 @@ test("a comment describing the old composition cannot bless a replaced prop", ()
   changed.set(page, changed.get(page)! + "\n// <SiteInquiryDeletion request={crmFetch} />\n");
   assert.notDeepEqual(crmTransportOffenders(changed), []);
 });
+
+const adminFile = 'pages/AdminCenter.tsx';
+const adminSource = await readFile(new URL(`../../artifacts/negis/src/${adminFile}`, import.meta.url), 'utf8');
+test('actual session-bound admin transport is traced without a global injected-request exemption', () => {
+  assert.deepEqual(crmTransportOffenders(new Map([[adminFile, adminSource]])), []);
+});
+for (const [name, from, to] of [
+  ['raw network wrapper', 'await sendCrmFetch(path,', 'await fetch(path,'],
+  ['wrong API import', 'from "@/lib/api"', 'from "@/lib/not-authenticated"'],
+  ['unsafe injected field', 'assertCurrent, request, releaseResponse', 'assertCurrent, request: fetch, releaseResponse'],
+  ['duplicate injected field', 'assertCurrent, request, releaseResponse', 'assertCurrent, request, request: fetch, releaseResponse'],
+  ['object spread override', 'assertCurrent, request, releaseResponse', 'assertCurrent, request, releaseResponse, ...unsafe'],
+  ['JSX spread override', 'key={lifetime.epoch} access=', 'key={lifetime.epoch} {...unsafe} access='],
+  ['untrusted content alias', 'const crmFetch = access.request;', 'const crmFetch = fetch;'],
+  ['reassigned injected request', 'const crmFetch = access.request;', 'access.request = fetch; const crmFetch = access.request;'],
+] as const) {
+  test(`admin transport composition rejects ${name}`, () => {
+    assert.ok(adminSource.includes(from));
+    assert.notDeepEqual(crmTransportOffenders(new Map([[adminFile, adminSource.replace(from, to)]])), []);
+  });
+}
+test('another admin content caller cannot inject bare fetch', () => {
+  assert.notDeepEqual(crmTransportOffenders(new Map([[adminFile, adminSource],
+    ['components/unsafe.tsx', 'const Unsafe = () => <AdminCenterContent access={{ request: fetch }} />;']])), []);
+});
