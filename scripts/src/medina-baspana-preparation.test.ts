@@ -175,7 +175,7 @@ test("The owner-authorized public platform business is separate from the client 
     metaPortfolioId: "1694609597992242",
     metaPortfolioStatus: "owner_confirmed_unverified",
     metaAppPortfolioLinkStatus: "not_confirmed",
-    verificationStatus: "not_submitted",
+    verificationStatus: "owner_reported_pending_review",
   });
   assert.equal(plan.company.name, "Baspana ipoteka building");
   assert.notEqual(plan.platformBusiness.reportedName, plan.company.name);
@@ -184,10 +184,10 @@ test("The owner-authorized public platform business is separate from the client 
   assert.ok(!plan.pending.includes("platform_website_requirement_or_preparation"), "the published website replaces the preparation gate with Meta acceptance");
 });
 
-test("Website publication and portfolio selection do not imply Meta approval or app ownership transfer", () => {
+test("Website publication, portfolio selection and reported submission do not imply Meta approval or app ownership transfer", () => {
   assert.equal(plan.platformBusiness.websiteStatus, "published_pending_meta_acceptance");
   assert.equal(plan.platformBusiness.metaPortfolioStatus, "owner_confirmed_unverified");
-  assert.equal(plan.platformBusiness.verificationStatus, "not_submitted");
+  assert.equal(plan.platformBusiness.verificationStatus, "owner_reported_pending_review", "the owner's report is not independently verified Meta approval");
   assert.equal(plan.platformBusiness.metaAppPortfolioLinkStatus, "not_confirmed", "selecting a portfolio does not confirm app linkage or transfer ownership");
   for (const gate of [
     "platform_website_meta_acceptance",
