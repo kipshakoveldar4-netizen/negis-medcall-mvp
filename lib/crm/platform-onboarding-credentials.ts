@@ -1,9 +1,10 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { readApplicationOrigin } from "../auth/application-origin";
 import { validatePasswordRules } from "../auth/password-rules";
+import { emailFromLogin, isLoginShape, isSyntheticEmail, normalizeLogin } from "../auth/staff-logins";
 import { getSupabaseServerClient } from "../supabase/server";
 import { VERTICAL_SETTINGS_KEY } from "../vertical/terms";
-import { validateOnboardingRequest } from "./platform-onboarding";
+import { validateOnboardingRequest, type OnboardingRejection, type OnboardingRequest } from "./platform-onboarding";
 import { escapeLikePattern } from "./staff-invitations";
 
 // Подключение клиники с логином и паролем — упрощённый путь без письма.
@@ -55,6 +56,36 @@ export function validateOwnerPassword(value: unknown): string[] {
   return validatePasswordRules(value);
 }
 
+type CredentialsOnboardingRequest = OnboardingRequest & { ownerLogin: string; ownerLoginOnly: boolean };
+
+/** The same Auth address is used at creation and at username sign-in. */
+export function validateCredentialsOnboardingRequest(body: JsonRecord): CredentialsOnboardingRequest | OnboardingRejection {
+  let ownerLogin = "";
+  if (body.ownerLogin !== undefined) {
+    const rawLogin = readString(body.ownerLogin);
+    ownerLogin = normalizeLogin(rawLogin);
+    if ((body.ownerEmail !== undefined && (typeof body.ownerEmail !== "string" || readString(body.ownerEmail))) ||
+        typeof body.ownerLogin !== "string" || rawLogin.length > 24 ||
+        !/^[a-z0-9._ -]+$/i.test(rawLogin) || !isLoginShape(ownerLogin)) {
+      return {
+        status: 400, error: "Форма заполнена не до конца", code: "invalid_onboarding",
+        details: ["Укажите либо почту, либо логин владельца: 3–24 символа латиницей, цифры и точки."],
+      };
+    }
+  } else if (isSyntheticEmail(body.ownerEmail)) {
+    return {
+      status: 400, error: "Форма заполнена не до конца", code: "invalid_onboarding",
+      details: ["Служебный адрес выдаёт система. Укажите логин без «@» в поле логина или настоящую почту."],
+    };
+  }
+  const validated = validateOnboardingRequest(ownerLogin ? {
+    ...body,
+    ownerEmail: emailFromLogin(ownerLogin),
+    ownerName: readString(body.ownerName) || ownerLogin,
+  } : body);
+  return "status" in validated ? validated : { ...validated, ownerLogin, ownerLoginOnly: Boolean(ownerLogin) };
+}
+
 /** POST /api/crm/platform-onboarding-credentials — за requirePlatformOwner. */
 export async function handlePlatformOnboardingCredentials(req: VercelRequest, res: VercelResponse) {
   const supabase = getSupabaseServerClient();
@@ -70,7 +101,7 @@ export async function handlePlatformOnboardingCredentials(req: VercelRequest, re
       error: "Маркетинговое пространство подключается через ссылку-приглашение к аккаунту владельца.",
     });
   }
-  const validated = validateOnboardingRequest(body);
+  const validated = validateCredentialsOnboardingRequest(body);
   const passwordDetails = validateOwnerPassword(body.password);
   if ("status" in validated || passwordDetails.length > 0) {
     const details = [...("status" in validated ? validated.details || [] : []), ...passwordDetails];
@@ -82,6 +113,7 @@ export async function handlePlatformOnboardingCredentials(req: VercelRequest, re
     });
   }
   const password = String(body.password);
+  const ownerIdentifier = validated.ownerLogin || validated.ownerEmail;
 
   // То же правило, что у инвайт-пути: один клиент — одно подключение за раз.
   // Живое приглашение владельца на эту почту значит, что пространство уже
@@ -109,10 +141,10 @@ export async function handlePlatformOnboardingCredentials(req: VercelRequest, re
     const existingName = readString(asRecord(existingWorkspace).name);
     return sendJson(res, 409, {
       success: false,
-      error: "Эта почта уже подключается",
+      error: validated.ownerLoginOnly ? "Этот логин уже подключается" : "Эта почта уже подключается",
       code: "invitation_already_pending",
       details: [
-        `Владельцу уже выписано живое приглашение${existingName ? ` в «${existingName}»` : ""}. Перевыпустите его кнопкой ниже — второе пространство для той же почты не создаётся.`,
+        `Владельцу уже выписано живое приглашение${existingName ? ` в «${existingName}»` : ""}. Перевыпустите его кнопкой ниже — второе пространство для того же входа не создаётся.`,
       ],
       data: { existingWorkspaceId },
     });
@@ -136,12 +168,17 @@ export async function handlePlatformOnboardingCredentials(req: VercelRequest, re
       const ownedNames = ownedRows.map((row) => readString(asRecord(row).name)).filter(Boolean);
       return sendJson(res, 409, {
         success: false,
-        error: "У этой почты уже есть клиника",
+        error: validated.ownerLoginOnly ? "У этого логина уже есть пространство" : "У этой почты уже есть клиника",
         code: "owner_already_has_workspace",
         details: [
-          `За почтой уже числится: ${ownedNames.map((name) => `«${name}»`).join(", ")}.`,
-          "Если владелец не может войти — перевыпустите приглашение кнопкой ниже: при выписке Supabase создаёт аккаунт и шлёт письмо, а ссылку можно передать и вручную.",
-          "Если владельцу нужна вторая точка — подключите её через «Ссылку-приглашение».",
+          `За этим входом уже числится: ${ownedNames.map((name) => `«${name}»`).join(", ")}.`,
+          ...(validated.ownerLoginOnly ? [
+            "Не создавайте второе пространство. Если привязка владельца не завершена, передайте новую ссылку вручную; для её принятия нужен действующий пароль.",
+            "У логина нет почты для восстановления. Если пароль потерян или нужна ещё одна точка, обратитесь в поддержку.",
+          ] : [
+            "Если владелец не может войти — перевыпустите приглашение кнопкой ниже: при выписке Supabase создаёт аккаунт и шлёт письмо, а ссылку можно передать и вручную.",
+            "Если владельцу нужна вторая точка — подключите её через «Ссылку-приглашение».",
+          ]),
         ],
         data: { existingWorkspaceId: readString(asRecord(ownedRows[0]).id) },
       });
@@ -220,7 +257,7 @@ export async function handlePlatformOnboardingCredentials(req: VercelRequest, re
         if (!ownerRow) {
           return sendJson(res, 409, {
             success: false,
-            error: "У этой почты уже есть аккаунт и недособранное пространство",
+            error: validated.ownerLoginOnly ? "У этого логина уже есть аккаунт и недособранное пространство" : "У этой почты уже есть аккаунт и недособранное пространство",
             code: "email_already_registered",
             details: [
               "Похоже на прерванное подключение: пространство создано, а владелец к нему не привязан.",
@@ -237,11 +274,22 @@ export async function handlePlatformOnboardingCredentials(req: VercelRequest, re
         // бы молча создать вторую клинику.
         return sendJson(res, 409, {
           success: false,
-          error: "Эта почта уже владеет клиникой",
+          error: validated.ownerLoginOnly ? "Этот логин уже владеет пространством" : "Эта почта уже владеет клиникой",
           code: "email_already_registered",
           details: [
-            `За почтой уже числится: ${assembledNames.map((name) => `«${name}»`).join(", ")}. Возможно, подключение уже состоялось — проверьте карточку клиники.`,
-            "Если владельцу нужна вторая точка — подключите её через «Ссылку-приглашение»: форма попросит подтвердить создание второй клиники.",
+            `За этим входом уже числится: ${assembledNames.map((name) => `«${name}»`).join(", ")}. Возможно, подключение уже состоялось — проверьте карточку пространства.`,
+            validated.ownerLoginOnly ? "Если владельцу нужна вторая точка, обратитесь в поддержку: повторное создание аккаунта не допускается." : "Если владельцу нужна вторая точка — подключите её через «Ссылку-приглашение»: форма попросит подтвердить создание второй клиники.",
+          ],
+        });
+      }
+      if (validated.ownerLoginOnly) {
+        return sendJson(res, 409, {
+          success: false,
+          error: "Логин недоступен",
+          code: "owner_login_unavailable",
+          details: [
+            "Существующий аккаунт и его пароль не изменены. Для нового владельца выберите другой логин.",
+            "Если это повтор прерванного подключения, не создавайте дубль и обратитесь в поддержку.",
           ],
         });
       }
@@ -283,8 +331,8 @@ export async function handlePlatformOnboardingCredentials(req: VercelRequest, re
       error: "Аккаунт владельца создан, а пространство — нет",
       code: "partial_credentials_onboarding",
       details: [
-        `Аккаунт ${validated.ownerEmail} уже существует, вход по заданному паролю работает, но клиники за ним нет.`,
-        "Повторная отправка этой формы откажет («почта занята») — подключите эту почту через «Ссылку-приглашение»: владелец войдёт с паролем и примет её.",
+        `Аккаунт ${ownerIdentifier} уже существует, но пространство не создано.`,
+        validated.ownerLoginOnly ? "Не отправляйте форму повторно и не создавайте дубль под другим логином. Требуется восстановление подключения поддержкой; письмо для пароля этому входу недоступно." : "Повторная отправка этой формы откажет («почта занята») — подключите эту почту через «Ссылку-приглашение»: владелец войдёт с паролем и примет её.",
       ],
     });
   }
@@ -345,6 +393,8 @@ export async function handlePlatformOnboardingCredentials(req: VercelRequest, re
       name: validated.name,
       vertical: validated.vertical,
       ownerEmail: validated.ownerEmail,
+      ownerLogin: validated.ownerLogin,
+      ownerLoginOnly: validated.ownerLoginOnly,
       timeZone: validated.timeZone,
       loginUrl: `${readApplicationOrigin()}/login`,
     },

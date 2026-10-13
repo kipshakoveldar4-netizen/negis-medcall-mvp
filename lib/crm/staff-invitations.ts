@@ -208,6 +208,7 @@ function publicInvitation(row: InvitationRow) {
  * already has an account — must not leave a half-created invitation behind.
  */
 export async function sendSupabaseInviteEmail(email: string, redirectTo: string): Promise<{ sent: boolean; reason?: string }> {
+  if (isSyntheticEmail(email)) return { sent: false, reason: "login_only" };
   // Typed structurally rather than through the global Response: the serverless
   // build compiles this file without the DOM lib, where `Response` has neither
   // `ok` nor `status`. lib/content-studio does the same for its Telegram call.
