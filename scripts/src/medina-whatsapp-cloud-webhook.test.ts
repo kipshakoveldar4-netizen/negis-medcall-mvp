@@ -52,6 +52,7 @@ function mockResponse(): MockResponse {
 type SpyOptions = {
   rows?: Record<string, unknown[]>;
   errors?: Record<string, string>;
+  throws?: Record<string, object>;
   /**
    * Models a database where migration 028 has not been applied: any query
    * filtering on leads.phone_normalized answers Postgres 42703 the way
@@ -73,6 +74,7 @@ function spyClient(options: SpyOptions, log: QueryLog[]) {
       const entry: QueryLog = { table, op: "select", filters: {} };
       log.push(entry);
       const settle = (shape: "one" | "list") => {
+        if (options.throws?.[table]) return Promise.reject(options.throws[table]);
         if (options.phoneNormalizedLookupError && "phone_normalized" in entry.filters) {
           return Promise.resolve({
             data: null,
@@ -144,7 +146,10 @@ async function loadHandler(
   const log: QueryLog[] = [];
   const warnings: string[] = [];
   const originalWarn = console.warn;
-  console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(" ")); };
+  // The spy must not stringify an injected error on the handler's behalf.
+  console.warn = (...args: unknown[]) => {
+    warnings.push(args.map((arg) => typeof arg === "string" ? arg : "[non-string warning argument]").join(" "));
+  };
 
   if (env.appSecret === null) delete process.env.WHATSAPP_APP_SECRET;
   else process.env.WHATSAPP_APP_SECRET = env.appSecret ?? APP_SECRET;
@@ -160,7 +165,7 @@ async function loadHandler(
   let clientCreations = 0;
   supabaseModule.setSupabaseServerClientFactoryForTests(() => {
     clientCreations += 1;
-    if (options.rows === undefined && options.errors === undefined) return null;
+    if (options.rows === undefined && options.errors === undefined && options.throws === undefined) return null;
     return spyClient(options, log);
   });
 
@@ -763,5 +768,85 @@ test("CW19 neither the phone nor the message text reaches the logs", async () =>
     assert.equal(joined.includes("77010000001"), false, "the phone is patient data");
     assert.equal(joined.includes("секретный"), false, "the text is patient data");
     assert.equal(joined.includes("Тестовый"), false, "the name is patient data");
+  });
+});
+
+for (const { id, stage, table, expectedTables } of [
+  {
+    id: "CW26", stage: "ledger", table: "whatsapp_cloud_inbound_messages",
+    expectedTables: ["whatsapp_cloud_inbound_messages"],
+  },
+  {
+    id: "CW27", stage: "channel", table: "whatsapp_cloud_numbers",
+    expectedTables: ["whatsapp_cloud_inbound_messages", "whatsapp_cloud_numbers"],
+  },
+  {
+    id: "CW28", stage: "lead", table: "leads",
+    expectedTables: ["whatsapp_cloud_inbound_messages", "whatsapp_cloud_numbers", "leads"],
+  },
+]) {
+  test(`${id} a ${stage} lookup error cannot disclose synthetic private data in warnings or the retry response`, async () => {
+    const privateData = {
+      detail: `SYNTHETIC_${id}_DATABASE_DETAIL`,
+      phone: "77010000026",
+      contactName: "SYNTHETIC_CW_CONTACT_NAME",
+      text: "SYNTHETIC_CW_MESSAGE_TEXT",
+      email: "synthetic-cw-contact@example.invalid",
+      token: "SYNTHETIC_CW_TOKEN_DO_NOT_USE",
+      service_role_key: "SYNTHETIC_CW_KEY_DO_NOT_USE",
+    };
+    await withHandler({
+      rows: { whatsapp_cloud_numbers: [numberRow], whatsapp_cloud_inbound_messages: [], leads: [] },
+      errors: { [table]: JSON.stringify(privateData) },
+    }, {}, async (ctx) => {
+      const body = inboundPayload({ from: privateData.phone, contactName: privateData.contactName, text: privateData.text });
+      const { res, log, warnings } = await ctx.call({ rawBody: body, signature: sign(body) });
+
+      assert.deepEqual(log.map((entry) => entry.table), expectedTables, "the fixture must reach the intended failing lookup");
+      assert.equal(leadInserts(log).length, 0, "a failed lookup must leave the retry without a new lead");
+      assert.equal(res.statusCode, 503, "Meta must retry the database failure");
+      assert.deepEqual(res.body, { success: false, error: "Service unavailable" });
+      assert.equal(res.text, "");
+
+      const disclosed = `${warnings.join("\n")}\n${JSON.stringify(res.body)}`;
+      for (const marker of [
+        ...Object.values(privateData), ...Object.keys(privateData),
+        APP_SECRET, VERIFY_TOKEN, "test-service-role-key", PHONE_NUMBER_ID, WAMID_1, WORKSPACE_A, "77470000000",
+      ]) {
+        assert.equal(disclosed.includes(marker), false, `warnings and the retry response must omit ${marker}`);
+      }
+      assert.deepEqual(warnings, ["[whatsapp-cloud] webhook processing failed"], "only the fixed failure scope may be logged");
+    });
+  });
+}
+
+test("CW29 a database-rejected object is neither stringified nor JSON-serialized by the catch", async () => {
+  let stringifications = 0;
+  let serializations = 0;
+  const injectedError = {
+    message: "SYNTHETIC_CW_OBJECT_DATABASE_DETAIL",
+    phone: "77010000029",
+    contactName: "SYNTHETIC_CW_OBJECT_CONTACT_NAME",
+    text: "SYNTHETIC_CW_OBJECT_MESSAGE_TEXT",
+    email: "synthetic-cw-object@example.invalid",
+    token: "SYNTHETIC_CW_OBJECT_TOKEN_DO_NOT_USE",
+    service_role_key: "SYNTHETIC_CW_OBJECT_KEY_DO_NOT_USE",
+    toString() { stringifications += 1; return this.message; },
+    toJSON() { serializations += 1; return this.message; },
+  };
+  await withHandler({
+    rows: { whatsapp_cloud_numbers: [numberRow], whatsapp_cloud_inbound_messages: [], leads: [] },
+    throws: { whatsapp_cloud_numbers: injectedError },
+  }, {}, async (ctx) => {
+    const body = inboundPayload({ from: injectedError.phone, contactName: injectedError.contactName, text: injectedError.text });
+    const { res, log, warnings } = await ctx.call({ rawBody: body, signature: sign(body) });
+
+    assert.deepEqual(log.map((entry) => entry.table), ["whatsapp_cloud_inbound_messages", "whatsapp_cloud_numbers"]);
+    assert.equal(res.statusCode, 503, "an arbitrary database rejection must still allow Meta to retry");
+    assert.deepEqual(res.body, { success: false, error: "Service unavailable" });
+    assert.equal(res.text, "");
+    assert.equal(stringifications, 0, "the catch must not call String(error), toString or implicit coercion");
+    assert.equal(serializations, 0, "the catch must not JSON.stringify the injected error");
+    assert.deepEqual(warnings, ["[whatsapp-cloud] webhook processing failed"]);
   });
 });
