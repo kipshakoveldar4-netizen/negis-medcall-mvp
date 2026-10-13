@@ -92,7 +92,7 @@ test('one Russian UTF-8 document stays under docs, outside runtime and public ou
   assert.match(viewport, /(?:^|,)\s*initial-scale\s*=\s*1(?:\.0)?\s*(?:,|$)/i);
 });
 
-test('robots and early CSP keep the standalone draft closed to indexing and active content', () => {
+test('robots and early CSP keep the standalone company page closed to indexing and active content', () => {
   assert.deepEqual(new Set(meta('name', 'robots').attrs.content?.toLowerCase().split(/[\s,]+/).filter(Boolean)),
     new Set(['noindex', 'nofollow', 'noarchive']));
   const policy = meta('http-equiv', 'content-security-policy');
@@ -207,14 +207,15 @@ test('the approved email is visible only in contacts and no other email is allow
   assert.ok(bodyText().includes('Yelkipq@gmail.com'), 'approved email must be in non-hidden body text');
 });
 
-test('body identifies the company, location and local draft without unapproved personal data or credentials', () => {
+test('body identifies only the approved company and location without draft notices or private data', () => {
   const headings = [...body.matchAll(/<h1\b[^>]*>([\s\S]*?)<\/h1\s*>/gi)];
   assert.equal(headings.length, 1);
   assert.equal(textContent(headings[0][1]), 'Medina OS');
   const text = bodyText();
-  for (const required of ['ИП КЫПШАКОВА ДИАНА КИЯСКЫЗЫ', 'Medina OS', 'Казахстан', 'Актобе', 'medinaos.com', 'Локальный черновик']) {
+  for (const required of ['ИП КЫПШАКОВА ДИАНА КИЯСКЫЗЫ', 'Medina OS', 'Казахстан', 'Актобе', 'medinaos.com']) {
     assert.ok(text.includes(required), `${required} must occur in non-hidden body text`);
   }
+  assert.doesNotMatch(text, /Локальный черновик|Не опубликовано|ещё (?:не )?соглас/iu);
   for (const anchor of body.matchAll(/<a\b[^>]*>([\s\S]*?)<\/a\s*>/gi)) {
     assert.doesNotMatch(textContent(anchor[1]), /\bmedinaos\.com\b/i, 'selected domain must be plain text, not a link');
   }
