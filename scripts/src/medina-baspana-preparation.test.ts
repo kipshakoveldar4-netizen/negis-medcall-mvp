@@ -42,7 +42,16 @@ const plan = JSON.parse(await readFile(new URL("../fixtures/baspana-account-prep
   status: string;
   target: { environment: string; database: string; previewOrigin: string };
   company: { name: string; city: string; country: string };
-  platformBusiness: { reportedName: string; website: null; websiteStatus: string; metaPortfolioId: null; verificationStatus: string };
+  platformBusiness: {
+    reportedName: string;
+    publicLegalName: string;
+    website: string;
+    websiteStatus: string;
+    metaPortfolioId: string;
+    metaPortfolioStatus: string;
+    metaAppPortfolioLinkStatus: string;
+    verificationStatus: string;
+  };
   onboardingDraft: Record<string, unknown>;
   proposedTimeZone: string;
   accounts: { login: string; fullName: string; role: PlannedRole }[];
@@ -157,20 +166,53 @@ test("Choosing direct Meta does not approve business identity, Coexistence or th
   assert.equal(plan.whatsapp.inboundOnly, true);
 });
 
-test("The reported platform business is separate from the client and remains unverified", () => {
-  assert.equal(plan.platformBusiness.reportedName, "ИП Медина");
+test("The owner-authorized public platform business is separate from the client and remains unverified", () => {
+  assert.deepEqual(plan.platformBusiness, {
+    reportedName: "ИП Медина",
+    publicLegalName: "ИП КЫПШАКОВА ДИАНА КИЯСКЫЗЫ",
+    website: "https://medinaos.com",
+    websiteStatus: "published_pending_meta_acceptance",
+    metaPortfolioId: "1694609597992242",
+    metaPortfolioStatus: "owner_confirmed_unverified",
+    metaAppPortfolioLinkStatus: "not_confirmed",
+    verificationStatus: "not_submitted",
+  });
   assert.equal(plan.company.name, "Baspana ipoteka building");
   assert.notEqual(plan.platformBusiness.reportedName, plan.company.name);
   assert.notEqual(plan.platformBusiness.reportedName, "Moto Shtorm");
-  assert.equal(plan.platformBusiness.website, null, "a website must not be invented");
-  assert.equal(plan.platformBusiness.websiteStatus, "absent", "the owner confirmed there is no public website");
-  assert.equal(plan.platformBusiness.metaPortfolioId, null, "the existing app portfolio is not assumed to belong to the platform IP");
-  assert.equal(plan.platformBusiness.verificationStatus, "not_submitted");
   assert.ok(!plan.pending.includes("platform_public_website"), "website availability must not be asked again");
-  assert.ok(plan.pending.includes("platform_website_requirement_or_preparation"));
-  assert.ok(plan.pending.includes("platform_business_identity_and_portfolio"));
+  assert.ok(!plan.pending.includes("platform_website_requirement_or_preparation"), "the published website replaces the preparation gate with Meta acceptance");
+});
+
+test("Website publication and portfolio selection do not imply Meta approval or app ownership transfer", () => {
+  assert.equal(plan.platformBusiness.websiteStatus, "published_pending_meta_acceptance");
+  assert.equal(plan.platformBusiness.metaPortfolioStatus, "owner_confirmed_unverified");
+  assert.equal(plan.platformBusiness.verificationStatus, "not_submitted");
+  assert.equal(plan.platformBusiness.metaAppPortfolioLinkStatus, "not_confirmed", "selecting a portfolio does not confirm app linkage or transfer ownership");
+  for (const gate of [
+    "platform_website_meta_acceptance",
+    "platform_business_identity_and_portfolio",
+    "meta_app_portfolio_link_confirmation",
+    "meta_tech_provider_and_app_review",
+    "shared_meta_callback_isolation",
+    "coexistence_embedded_signup_acceptance",
+    "test_channel_schema_and_permissions",
+    "signed_synthetic_inbound_and_assignment_acceptance",
+  ]) {
+    assert.ok(plan.pending.includes(gate), `${gate} remains independently pending after website publication and portfolio selection`);
+  }
+  assert.equal(plan.status, "prepared_not_created");
+  assert.equal(plan.whatsapp.selectedApproach, "direct_meta_negis");
+  assert.equal(plan.whatsapp.metaAppId, "1791176138576964");
   assert.equal(plan.whatsapp.provider, null);
   assert.equal(plan.whatsapp.enabled, false);
+  assert.equal(plan.whatsapp.phoneNumberId, null);
+  assert.equal(plan.whatsapp.channelId, null);
+  assert.equal(plan.whatsapp.connectionMode, "coexistence");
+  assert.equal(plan.whatsapp.allowApiOnly, false);
+  assert.equal(plan.whatsapp.preserveBusinessApp, true);
+  assert.equal(plan.whatsapp.inboundOnly, true);
+  assert.equal(plan.whatsapp.importHistory, false);
 });
 
 test("Baspana requires Coexistence and cannot use an API-only fallback in preparation", () => {

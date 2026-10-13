@@ -12,9 +12,12 @@
   },
   "platformBusiness": {
     "reportedName": "ИП Медина",
-    "website": null,
-    "websiteStatus": "absent",
-    "metaPortfolioId": null,
+    "publicLegalName": "ИП КЫПШАКОВА ДИАНА КИЯСКЫЗЫ",
+    "website": "https://medinaos.com",
+    "websiteStatus": "published_pending_meta_acceptance",
+    "metaPortfolioId": "1694609597992242",
+    "metaPortfolioStatus": "owner_confirmed_unverified",
+    "metaAppPortfolioLinkStatus": "not_confirmed",
     "verificationStatus": "not_submitted"
   },
   "onboardingDraft": {
@@ -62,8 +65,9 @@
     "human_credential_entry_and_submission",
     "time_zone_confirmation",
     "exact_username_availability",
-    "platform_website_requirement_or_preparation",
+    "platform_website_meta_acceptance",
     "platform_business_identity_and_portfolio",
+    "meta_app_portfolio_link_confirmation",
     "meta_tech_provider_and_app_review",
     "coexistence_embedded_signup_acceptance",
     "shared_meta_callback_isolation",
