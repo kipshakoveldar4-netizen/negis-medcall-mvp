@@ -58,6 +58,7 @@ const ROLE_LABELS: Record<string, string> = {
   marketer: "Маркетолог",
   doctor: "Врач",
   manager: "Менеджер",
+  lead_manager: "Менеджер заявок",
 };
 
 const INVITATION_LABELS: Record<string, { label: string; cls: string }> = {

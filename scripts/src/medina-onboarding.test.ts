@@ -231,7 +231,8 @@ test("MB13 портал: парольный режим по умолчанию, 
   const form = await readFile(path.join(controlSrc, "screens", "Onboarding.tsx"), "utf8");
   assert.ok(/useState<Mode>\("credentials"\)/.test(form), "упрощённый путь — умолчание: его и просили");
   assert.ok(/email_already_registered/.test(form) && /Переключить на приглашение/.test(form), "занятая почта ведёт в инвайт-режим кнопкой");
-  assert.ok(/setShownPassword\(password\)/.test(form) && /setPassword\(""\)/.test(form), "пароль переезжает на экран результата и очищается в форме");
+  assert.ok(/const submittedPassword = password;/.test(form) && /password: submittedPassword/.test(form), "запрос использует снимок отправленного пароля");
+  assert.ok(/setShownPassword\(submittedPassword\)/.test(form) && /setPassword\(""\)/.test(form), "показывается отправленный пароль, поле формы очищается");
   assert.ok(/generatePassword/.test(form), "пароль можно сгенерировать, а не выдумывать на ходу");
 });
 

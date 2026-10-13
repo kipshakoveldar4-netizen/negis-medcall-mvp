@@ -1,5 +1,6 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { getSupabaseServerClient } from "../supabase/server";
+import { isSyntheticEmail, loginFromEmail } from "../auth/staff-logins";
 import { isVertical, type Vertical } from "../vertical/terms";
 import { onboardingSettings, readOnboardingPurpose, type WorkspacePurpose } from "./workspace-purpose";
 import { acceptUrl, createInvitationToken, escapeLikePattern, expiryFromNow, normalizeEmail, sendSupabaseInviteEmail } from "./staff-invitations";
@@ -191,6 +192,8 @@ export async function handlePlatformInvitationReissue(req: VercelRequest, res: V
       workspaceId,
       name: readString(workspace.name),
       ownerEmail,
+      ownerLogin: isSyntheticEmail(ownerEmail) ? loginFromEmail(ownerEmail) : "",
+      ownerLoginOnly: isSyntheticEmail(ownerEmail),
       invitationExpiresAt: readString(asRecord(invitationRow).expires_at),
       acceptUrl: link,
       emailSent: email.sent,
@@ -207,6 +210,13 @@ export async function handlePlatformOnboarding(req: VercelRequest, res: VercelRe
   }
 
   const body = asRecord(req.body);
+  if (body.ownerLogin !== undefined || isSyntheticEmail(body.ownerEmail)) {
+    return sendJson(res, 400, {
+      success: false,
+      error: "Новое приглашение требует настоящую почту владельца. Для логина используйте подключение с паролем.",
+      code: "invalid_onboarding",
+    });
+  }
   const validated = validateOnboardingRequest(body);
   if ("status" in validated) {
     return sendJson(res, validated.status, {
