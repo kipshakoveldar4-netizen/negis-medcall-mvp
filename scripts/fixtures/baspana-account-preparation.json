@@ -1,0 +1,58 @@
+{
+  "status": "prepared_not_created",
+  "target": {
+    "environment": "preview",
+    "database": "medina-os-site-test",
+    "previewOrigin": "https://negis-medcall-mvp-api-server-q64dqx3xb-yeldar-s-projects.vercel.app"
+  },
+  "company": {
+    "name": "Baspana ipoteka building",
+    "city": "Астана",
+    "country": "Казахстан"
+  },
+  "onboardingDraft": {
+    "name": "Baspana ipoteka building",
+    "purpose": "mortgage_leads",
+    "vertical": "",
+    "ownerLogin": "baspana.dinara",
+    "ownerName": "Динара",
+    "timeZone": ""
+  },
+  "proposedTimeZone": "Asia/Almaty",
+  "accounts": [
+    { "login": "baspana.dinara", "fullName": "Динара", "role": "owner" },
+    { "login": "baspana.tolkyn", "fullName": "Турсын Толкын", "role": "admin" },
+    { "login": "baspana.gulnur", "fullName": "Танетова Гульнур", "role": "lead_manager" },
+    { "login": "baspana.adelya", "fullName": "Кажыгалиева Аделя", "role": "lead_manager" },
+    { "login": "baspana.nesibeli", "fullName": "Ахметова Несибели", "role": "lead_manager" },
+    { "login": "baspana.munira", "fullName": "Айтмухамедова Мунира", "role": "lead_manager" },
+    { "login": "baspana.tleugaisha", "fullName": "Накишева Тлеугайша", "role": "lead_manager" }
+  ],
+  "assignment": {
+    "mode": "manual",
+    "assignedByRole": "admin",
+    "assigneeRole": "lead_manager",
+    "managerVisibility": "assigned_only",
+    "unassignedVisibleTo": ["owner", "admin"]
+  },
+  "whatsapp": {
+    "provider": null,
+    "enabled": false,
+    "phoneNumberId": null,
+    "channelId": null,
+    "inboundOnly": true,
+    "preserveBusinessApp": true,
+    "importHistory": false
+  },
+  "pending": [
+    "isolated_control_target_and_platform_access",
+    "mortgage_onboarding_acceptance",
+    "explicit_test_creation_approval",
+    "human_credential_entry_and_submission",
+    "time_zone_confirmation",
+    "exact_username_availability",
+    "provider_and_company_portfolio",
+    "test_channel_schema_and_permissions",
+    "signed_synthetic_inbound_and_assignment_acceptance"
+  ]
+}
