@@ -44,7 +44,7 @@ export type OnboardingRejection = { status: number; error: string; code: string;
 export type OnboardingRequest = {
   name: string;
   purpose: WorkspacePurpose;
-  vertical: Vertical;
+  vertical: Vertical | null;
   ownerEmail: string;
   ownerName: string;
   timeZone: string;
@@ -62,8 +62,11 @@ export function validateOnboardingRequest(body: JsonRecord): OnboardingRequest |
   const details: string[] = [];
   if (name.length < 2 || name.length > 120) details.push("Название — от 2 до 120 символов.");
   if (!purpose) details.push("Назначение пространства не распознано.");
-  if (purpose !== "marketing" && !isVertical(vertical)) details.push("Ниша обязательна: beauty (салон), dental (стоматология) или clinic (клиника).");
+  if (purpose === "clinic_services" && !isVertical(vertical)) details.push("Ниша обязательна: beauty (салон), dental (стоматология) или clinic (клиника).");
   if (purpose === "marketing" && vertical) details.push("Для маркетингового пространства медицинская ниша не задаётся.");
+  if (purpose === "mortgage_leads" && (vertical || (body.vertical !== undefined && typeof body.vertical !== "string"))) {
+    details.push("Для ипотечных заявок медицинская ниша не задаётся.");
+  }
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(ownerEmail)) details.push("Почта владельца не похожа на адрес.");
   if (!timeZone) details.push("Часовой пояс обязателен: без него «сегодня» считается неверно часть суток.");
   else {
@@ -78,8 +81,8 @@ export function validateOnboardingRequest(body: JsonRecord): OnboardingRequest |
     return { status: 400, error: "Форма заполнена не до конца", code: "invalid_onboarding", details };
   }
 
-  // Legacy ad checks remain conservative; marketing does not override their policy.
-  return { name, purpose, vertical: isVertical(vertical) ? vertical : "clinic", ownerEmail, ownerName: ownerName || ownerEmail, timeZone };
+  // Nonmedical purposes have no vertical; they do not override ad policy.
+  return { name, purpose, vertical: purpose === "clinic_services" && isVertical(vertical) ? vertical : null, ownerEmail, ownerName: ownerName || ownerEmail, timeZone };
 }
 
 /**
@@ -311,8 +314,8 @@ export async function handlePlatformOnboarding(req: VercelRequest, res: VercelRe
       code: "partial_onboarding",
       details: [
         `Пространство ${workspaceId} уже существует — не создавайте второе.`,
-        "Не записаны ниша и часовой пояс; приглашение владельцу не отправлялось.",
-        "Приглашение в это пространство выписывается кнопкой ниже; ниша и часовой пояс останутся незаполненными.",
+        "Не записаны профиль пространства и часовой пояс; приглашение владельцу не отправлялось.",
+        "Приглашение в это пространство выписывается кнопкой ниже; профиль и часовой пояс останутся незаполненными.",
       ],
       // Кнопка перевыпуска работает по id — без него совет был невыполним.
       data: { existingWorkspaceId: workspaceId },
@@ -342,7 +345,7 @@ export async function handlePlatformOnboarding(req: VercelRequest, res: VercelRe
       error: "Пространство создано, но приглашение не выписалось",
       code: "partial_onboarding",
       details: [
-        `Пространство ${workspaceId} с нишей и поясом уже существует — не создавайте второе.`,
+        `Пространство ${workspaceId} с настройками уже существует — не создавайте второе.`,
         "Перевыпустите приглашение кнопкой ниже — оно уйдёт в уже созданное пространство.",
       ],
       data: { existingWorkspaceId: workspaceId },
@@ -358,7 +361,7 @@ export async function handlePlatformOnboarding(req: VercelRequest, res: VercelRe
       workspaceId,
       name: validated.name,
       purpose: validated.purpose,
-      vertical: validated.purpose === "marketing" ? null : validated.vertical,
+      vertical: validated.vertical,
       ownerEmail: validated.ownerEmail,
       timeZone: validated.timeZone,
       invitationExpiresAt: readString(asRecord(invitationRow).expires_at),

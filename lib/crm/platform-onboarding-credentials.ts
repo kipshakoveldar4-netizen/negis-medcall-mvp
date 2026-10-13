@@ -3,9 +3,9 @@ import { readApplicationOrigin } from "../auth/application-origin";
 import { validatePasswordRules } from "../auth/password-rules";
 import { emailFromLogin, isLoginShape, isSyntheticEmail, normalizeLogin } from "../auth/staff-logins";
 import { getSupabaseServerClient } from "../supabase/server";
-import { VERTICAL_SETTINGS_KEY } from "../vertical/terms";
 import { validateOnboardingRequest, type OnboardingRejection, type OnboardingRequest } from "./platform-onboarding";
 import { escapeLikePattern } from "./staff-invitations";
+import { onboardingSettings } from "./workspace-purpose";
 
 // Подключение клиники с логином и паролем — упрощённый путь без письма.
 //
@@ -338,10 +338,7 @@ export async function handlePlatformOnboardingCredentials(req: VercelRequest, re
   }
   const workspaceId = readString(asRecord(workspaceRow).id);
 
-  const { error: settingsError } = await supabase.from("workspace_settings").insert([
-    { workspace_id: workspaceId, key: VERTICAL_SETTINGS_KEY, value: { vertical: validated.vertical } },
-    { workspace_id: workspaceId, key: "clinic_schedule", value: { timeZone: validated.timeZone } },
-  ]);
+  const { error: settingsError } = await supabase.from("workspace_settings").insert(onboardingSettings(workspaceId, validated));
   if (settingsError) {
     return sendJson(res, 502, {
       success: false,
@@ -349,8 +346,8 @@ export async function handlePlatformOnboardingCredentials(req: VercelRequest, re
       code: "partial_credentials_onboarding",
       details: [
         `Пространство ${workspaceId} и аккаунт владельца уже существуют — не создавайте второе.`,
-        "Не записаны ниша и часовой пояс; membership владельца тоже не создан.",
-        "Вход владельцу вернёт перевыпуск приглашения кнопкой ниже; ниша и часовой пояс останутся незаполненными.",
+        "Не записаны профиль пространства и часовой пояс; membership владельца тоже не создан.",
+        "Вход владельцу вернёт перевыпуск приглашения кнопкой ниже; профиль и часовой пояс останутся незаполненными.",
       ],
       data: { existingWorkspaceId: workspaceId },
     });
@@ -377,7 +374,7 @@ export async function handlePlatformOnboardingCredentials(req: VercelRequest, re
       error: "Пространство создано, но владелец к нему не привязан",
       code: "partial_credentials_onboarding",
       details: [
-        `Пространство ${workspaceId} с нишей и поясом уже существует — не создавайте второе.`,
+        `Пространство ${workspaceId} с настройками уже существует — не создавайте второе.`,
         "Вход владельца сказал бы «аккаунт не связан с клиникой». Перевыпустите приглашение кнопкой ниже — владелец войдёт со своим паролем и примет его.",
       ],
       data: { existingWorkspaceId: workspaceId },
@@ -391,6 +388,7 @@ export async function handlePlatformOnboardingCredentials(req: VercelRequest, re
     data: {
       workspaceId,
       name: validated.name,
+      purpose: validated.purpose,
       vertical: validated.vertical,
       ownerEmail: validated.ownerEmail,
       ownerLogin: validated.ownerLogin,

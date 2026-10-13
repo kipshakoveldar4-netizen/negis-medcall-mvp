@@ -45,7 +45,7 @@ const inserts: Step[] = [
 ];
 
 // Real handlers in a VM with synthetic DB/Auth only; no real env or network.
-async function fixture(steps: Step[], authReply = { ok: true, status: 201, data: { id: "auth-owner" } as Row }) {
+async function fixture(steps: Step[], authReply = { ok: true, status: 201, data: { id: "auth-owner" } as Row }, allowEmailFixture = false) {
   const calls: Array<{ table: string; mode: Step["mode"]; operations: Array<[string, unknown[]]> }> = [];
   const authCalls: Array<{ url: string; init: RequestInit; body: Row }> = [];
   const mailCalls: string[] = [];
@@ -102,6 +102,7 @@ async function fixture(steps: Step[], authReply = { ok: true, status: 201, data:
             acceptUrl: () => "https://crm.unit.test/join?token=unit-token",
             sendSupabaseInviteEmail: async (email: string, link: string) => {
               mailCalls.push(email);
+              if (allowEmailFixture) return { sent: false, reason: "unit_mail_disabled" };
               assert.ok(logins.isSyntheticEmail(email), "Fixture never sends real invitation emails");
               return sendSupabaseInviteEmail(email, link);
             },
@@ -158,6 +159,74 @@ test("Owner email flow retains normalized email and does not require a username"
   assert.equal(result.data?.ownerLoginOnly, false);
   assert.equal(result.data?.ownerLogin, "");
   assert.equal(f.authCalls[0].body.email, "owner@example.test");
+});
+
+test("Mortgage credentials store only the explicit lead purpose and timezone for either owner identity", async () => {
+  for (const identity of [{ ownerLogin: "qa.owner" }, { ownerLogin: undefined, ownerEmail: "owner@example.test" }]) {
+    const f = await fixture([...preflight, ...inserts]);
+    const result = await f.submit({ ...input, ...identity, purpose: "mortgage_leads", vertical: "" });
+    assert.equal(result.status, 201);
+    assert.equal(result.data?.purpose, "mortgage_leads");
+    assert.equal(result.data?.vertical, null);
+    const settings = f.calls.find((call) => call.table === "workspace_settings")?.operations.find(([method]) => method === "insert")?.[1][0];
+    assert.deepEqual(settings, [
+      { workspace_id: "new-workspace", key: "workspace_purpose", value: { purpose: "mortgage_leads" } },
+      { workspace_id: "new-workspace", key: "clinic_schedule", value: { timeZone: "Asia/Almaty" } },
+    ]);
+    assert.equal(f.mailCalls.length, 0);
+    assert.equal(f.authCalls.length, 1);
+    assert.equal(result.data?.ownerLoginOnly, Boolean(identity.ownerLogin));
+    assert.ok(!JSON.stringify(settings).includes(input.password));
+  }
+});
+
+test("Mortgage identity conflicts or medical niches cannot create or reset accounts", async () => {
+  for (const vertical of ["beauty", "dental", "clinic", "mortgage", null, {}, false]) {
+    const f = await fixture([]);
+    assert.equal((await f.submit({ ...input, purpose: "mortgage_leads", vertical })).status, 400);
+    assert.equal(f.calls.length, 0);
+    assert.equal(f.authCalls.length, 0);
+  }
+  const f = await fixture([...preflight, { table: "workspaces", mode: "read", data: [] }], {
+    ok: false, status: 422, data: { error_code: "email_exists" },
+  });
+  const result = await f.submit({ ...input, purpose: "mortgage_leads", vertical: "" });
+  assert.equal(result.status, 409);
+  assert.equal(result.body.code, "owner_login_unavailable");
+  assert.ok(f.calls.every((call) => call.mode === "read"));
+});
+
+test("Mortgage invitation stores the same nonmedical profile without credential or real mail calls", async () => {
+  const f = await fixture([...preflight, ...inserts.slice(0, 2),
+    { table: "staff_invitations", mode: "insert", data: { id: "invite", expires_at: "2099-01-01" } },
+  ], undefined, true);
+  await f.load("platform-onboarding.ts");
+  await f.exports.handlePlatformOnboarding({ body: {
+    ...input, ownerLogin: undefined, ownerEmail: "invite@example.test", purpose: "mortgage_leads", vertical: "",
+  } }, f.res);
+  const result = f.outcome();
+  assert.equal(result.status, 201);
+  assert.equal((result.body.data as Row).purpose, "mortgage_leads");
+  assert.equal((result.body.data as Row).vertical, null);
+  const settings = f.calls.find((call) => call.table === "workspace_settings")?.operations.find(([method]) => method === "insert")?.[1][0] as Row[];
+  assert.equal(settings[0].key, "workspace_purpose");
+  assert.deepEqual(settings[0].value, { purpose: "mortgage_leads" });
+  assert.equal(f.authCalls.length, 0);
+  assert.equal(f.mailCalls.length, 1);
+  assert.equal((result.body.data as Row).emailSent, false);
+  assert.ok(f.calls.every((call) => call.table !== "staff_users"));
+});
+
+test("Mortgage partial settings failure reports the stored workspace without claiming a working profile", async () => {
+  const f = await fixture([...preflight, inserts[0], {
+    table: "workspace_settings", mode: "insert", error: { message: "fixture-write-failure" },
+  }]);
+  const result = await f.submit({ ...input, purpose: "mortgage_leads", vertical: "" });
+  assert.equal(result.status, 502);
+  assert.equal(result.body.code, "partial_credentials_onboarding");
+  assert.equal(result.data?.existingWorkspaceId, "new-workspace");
+  assert.match(JSON.stringify(result.body), /профиль пространства/);
+  assert.ok(!f.calls.some((call) => call.table === "staff_users"));
 });
 
 test("Blank owner name falls back to the canonical username, not its internal address", async () => {

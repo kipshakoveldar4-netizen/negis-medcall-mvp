@@ -96,7 +96,7 @@ function fill(ui: Ui, login?: string) {
 }
 function success(loginOnly = false) {
   return { success: true, data: {
-    workspaceId: "workspace-fixture", name: "Local fixture", vertical: "beauty", timeZone: "Asia/Almaty",
+    workspaceId: "workspace-fixture", name: "Local fixture", purpose: "clinic_services", vertical: "beauty", timeZone: "Asia/Almaty",
     loginUrl: "https://example.test/login", ownerLoginOnly: loginOnly,
     ownerLogin: loginOnly ? "canonical.owner" : "owner@example.test",
     ownerEmail: loginOnly ? logins.emailFromLogin("canonical.owner") : "owner@example.test",
@@ -153,6 +153,127 @@ test("Explicit username uses shared normalization, needs no email and displays t
   assert.match(ui.content(), /поддержку; не создавайте повторное пространство/);
 });
 
+test("Mortgage purpose clears the medical niche and submits username credentials without email", async () => {
+  const ui = setup();
+  const option = nodes(ui.field("ob-purpose")).find((node) => node.props.value === "mortgage_leads");
+  assert.ok(option);
+  assert.equal(text(option), "Ипотечные заявки");
+  ui.change("ob-email", "unused@example.test");
+  fill(ui, "Aigul_Botanova");
+  ui.change("ob-purpose", "mortgage_leads");
+  assert.ok(!ui.list().some((node) => node.props.id === "ob-vertical" || node.props.htmlFor === "ob-vertical"));
+  assert.equal(ui.field("ob-password").props.value, "");
+  assert.equal(ui.button("Логин и пароль").props.disabled, false);
+  assert.equal(ui.button("Логин").props["aria-pressed"], true);
+  ui.change("ob-password", fixturePassword);
+  ui.submit();
+  assert.equal(ui.requests[0].url, "/api/crm/platform-onboarding-credentials");
+  assert.deepEqual(ui.requests[0].body, { name: "Local fixture", vertical: "", ownerName: "",
+    timeZone: "Asia/Almaty", purpose: "mortgage_leads", password: fixturePassword, ownerLogin: "aigul.botanova" });
+  assert.equal(ui.list().find((node) => node.type === "fieldset")!.props.disabled, true);
+  ui.click("Почта");
+  ui.click("Ссылка-приглашение");
+  assert.equal(ui.button("Логин").props["aria-pressed"], true);
+  assert.equal(ui.button("Логин и пароль").props["aria-pressed"], true);
+  ui.change("ob-password", "changed-while-pending");
+  const response = success(true);
+  await ui.respond({ ...response, data: { ...response.data, purpose: "mortgage_leads", vertical: null } });
+  assert.equal(text(ui.list().find((node) => node.type === "h1")), "Пространство подключено — вход по логину и паролю");
+  assert.equal(text(ui.list().find((node) => node.props.className === "page-sub")), "«Local fixture» · ипотечные заявки · canonical.owner");
+  assert.ok(ui.list().some((node) => node.type === "code" && text(node) === "canonical.owner"));
+  assert.ok(ui.list().some((node) => node.type === "code" && text(node) === fixturePassword));
+  assert.doesNotMatch(ui.content(), /staff\.negis\.|unused@example\.test|Aigul_Botanova|changed-while-pending|клиник|салон|стоматолог|тариф|реклам|оплат/i);
+  ui.click("Подключить ещё одну");
+  assert.equal(ui.field("ob-purpose").props.value, "clinic_services");
+  assert.equal(ui.field("ob-vertical").props.value, "");
+  assertClean(ui);
+});
+
+test("Mortgage credentials also retain the email identity path", async () => {
+  const ui = setup();
+  fill(ui);
+  ui.change("ob-purpose", "mortgage_leads");
+  assert.equal(ui.field("ob-email").props.type, "email");
+  assert.ok(!ui.list().some((node) => node.props.id === "ob-vertical" || node.props.id === "ob-login"));
+  ui.change("ob-password", fixturePassword);
+  ui.submit();
+  assert.deepEqual(ui.requests[0].body, { name: "Local fixture", vertical: "", ownerName: "",
+    timeZone: "Asia/Almaty", purpose: "mortgage_leads", password: fixturePassword, ownerEmail: "owner@example.test" });
+  const response = success();
+  await ui.respond({ ...response, data: { ...response.data, purpose: "mortgage_leads", vertical: null } });
+  assert.match(ui.content(), /Пространство подключено — вход по логину и паролю/);
+  assert.match(ui.content(), /ипотечные заявки · owner@example\.test/);
+  assert.match(ui.content(), /Забыли пароль/);
+  assert.doesNotMatch(ui.content(), /клиник|салон|стоматолог|тариф/i);
+});
+
+test("Mortgage invitation remains email-only with empty vertical and a neutral result", async () => {
+  const ui = setup();
+  fill(ui, "aigul");
+  ui.change("ob-purpose", "mortgage_leads");
+  ui.click("Ссылка-приглашение");
+  ui.change("ob-email", "owner@example.test");
+  assert.ok(!ui.list().some((node) => ["ob-vertical", "ob-login", "ob-password", "ob-identity-label"].includes(node.props.id)));
+  ui.submit();
+  assert.equal(ui.requests[0].url, "/api/crm/platform-onboarding");
+  assert.deepEqual(ui.requests[0].body, { name: "Local fixture", vertical: "", ownerEmail: "owner@example.test",
+    ownerName: "", timeZone: "Asia/Almaty", purpose: "mortgage_leads" });
+  await ui.respond({ success: true, data: { workspaceId: "workspace-fixture", name: "Local fixture",
+    purpose: "mortgage_leads", vertical: null, ownerEmail: "owner@example.test",
+    acceptUrl: "https://example.test/join#local", emailSent: true } });
+  assert.equal(text(ui.list().find((node) => node.type === "h1")), "Пространство создано — ожидает владельца");
+  assert.equal(text(ui.list().find((node) => node.props.className === "page-sub")), "«Local fixture» · ипотечные заявки · owner@example.test");
+  assert.match(ui.content(), /Supabase отправил владельцу письмо/);
+  assert.doesNotMatch(ui.content(), /клиник|салон|стоматолог|тариф|staff\.negis\./i);
+});
+
+test("Mortgage partial onboarding reissue stays neutral when the server does not return its profile", async () => {
+  const ui = setup();
+  fill(ui, "aigul");
+  ui.change("ob-purpose", "mortgage_leads");
+  ui.change("ob-password", fixturePassword);
+  ui.submit();
+  await ui.respond(conflict("partial_credentials_onboarding", "existing-workspace"), 502);
+  ui.click("Перевыпустить приглашение");
+  assert.equal(ui.requests[1].url, "/api/crm/platform-invitation-reissue");
+  assert.deepEqual(ui.requests[1].body, { workspaceId: "existing-workspace" });
+  await ui.respond({ success: true, data: { workspaceId: "existing-workspace", name: "Local fixture",
+    ownerLogin: "canonical.owner", ownerLoginOnly: true,
+    ownerEmail: logins.emailFromLogin("canonical.owner"), acceptUrl: "https://example.test/join#local",
+    emailSent: false, emailStatus: "login_only" } });
+  assert.equal(text(ui.list().find((node) => node.type === "h1")), "Приглашение перевыпущено");
+  assert.equal(text(ui.list().find((node) => node.props.className === "page-sub")), "«Local fixture» · новая ссылка приглашения · canonical.owner");
+  assert.match(ui.content(), /Передайте ссылку владельцу лично/);
+  assert.match(ui.content(), /поддержку; не создавайте повторное пространство/);
+  assert.doesNotMatch(ui.content(), /staff\.negis\.|Выслать письмо|Забыли пароль|клиник|салон|стоматолог|тариф|ипотечные заявки/i);
+});
+
+test("Returning from mortgage preserves explicit medical niche selection and existing result labels", async () => {
+  for (const [vertical, label] of [["beauty", "салон красоты"], ["dental", "стоматология"], ["clinic", "клиника"]]) {
+    for (const invite of [false, true]) {
+      const ui = setup();
+      fill(ui);
+      ui.change("ob-purpose", "mortgage_leads");
+      ui.change("ob-purpose", "clinic_services");
+      assert.equal(ui.field("ob-vertical").props.value, "");
+      assert.deepEqual(nodes(ui.field("ob-vertical")).filter((node) => node.type === "option").map((node) => node.props.value), ["", "beauty", "dental", "clinic"]);
+      ui.change("ob-vertical", vertical);
+      if (invite) ui.click("Ссылка-приглашение");
+      else ui.change("ob-password", fixturePassword);
+      ui.submit();
+      assert.equal(ui.requests[0].body.purpose, "clinic_services");
+      assert.equal(ui.requests[0].body.vertical, vertical);
+      const response = success();
+      await ui.respond({ ...response, data: { ...response.data, vertical,
+        acceptUrl: "https://example.test/join#local", emailSent: true } });
+      assert.equal(text(ui.list().find((node) => node.type === "h1")), invite ? "Клиника подключена" : "Клиника подключена — вход по логину и паролю");
+      assert.equal(text(ui.list().find((node) => node.props.className === "page-sub")), `«Local fixture» · ${label} · owner@example.test`);
+      assert.match(ui.content(), /Назначьте тариф/);
+      assert.doesNotMatch(ui.content(), /ипотечные заявки/);
+    }
+  }
+});
+
 test("Invalid usernames and explicit service emails never reach an API", () => {
   for (const login of ["", "ab", "!!!", "qa!owner", "qaвowner", "a".repeat(25), "aigul@example.test", logins.emailFromLogin("aigul")]) {
     const ui = setup();
@@ -161,15 +282,18 @@ test("Invalid usernames and explicit service emails never reach an API", () => {
     assert.equal(ui.requests.length, 0, login);
     assert.ok(ui.list().some((node) => node.props.role === "alert"));
   }
-  for (const invite of [false, true]) {
-    for (const domain of logins.STAFF_LOGIN_DOMAINS) {
-      const ui = setup();
-      fill(ui);
-      if (invite) ui.click("Ссылка-приглашение");
-      ui.change("ob-email", `aigul@${domain}`);
-      ui.submit();
-      assert.equal(ui.requests.length, 0);
-      assert.match(ui.content(), /Служебный адрес нельзя использовать/);
+  for (const purpose of ["clinic_services", "mortgage_leads"]) {
+    for (const invite of [false, true]) {
+      for (const domain of logins.STAFF_LOGIN_DOMAINS) {
+        const ui = setup();
+        fill(ui);
+        if (purpose === "mortgage_leads") ui.change("ob-purpose", purpose);
+        if (invite) ui.click("Ссылка-приглашение");
+        ui.change("ob-email", `aigul@${domain}`);
+        ui.submit();
+        assert.equal(ui.requests.length, 0);
+        assert.match(ui.content(), /Служебный адрес нельзя использовать/);
+      }
     }
   }
 });
@@ -284,12 +408,35 @@ test("Marketing remains invitation-only even after username credentials were sel
   assert.equal(ui.button("Логин и пароль").props.disabled, true);
   ui.click("Логин и пароль");
   assert.equal(ui.button("Ссылка-приглашение").props["aria-pressed"], true);
-  assert.ok(!ui.list().some((node) => node.props.id === "ob-password" || node.props.id === "ob-login"));
+  assert.ok(!ui.list().some((node) => node.props.id === "ob-password" || node.props.id === "ob-login" || node.props.id === "ob-vertical"));
   ui.change("ob-email", "owner@example.test");
   ui.submit();
   assert.equal(ui.requests[0].url, "/api/crm/platform-onboarding");
   assert.equal(ui.requests[0].body.purpose, "marketing");
+  assert.equal(ui.requests[0].body.vertical, "");
   assert.ok(!("password" in ui.requests[0].body) && !("ownerLogin" in ui.requests[0].body));
+});
+
+test("Returning from marketing to mortgage permits explicit credentials again", async () => {
+  const ui = setup();
+  fill(ui, "aigul");
+  ui.change("ob-purpose", "marketing");
+  ui.change("ob-purpose", "mortgage_leads");
+  assert.equal(ui.button("Логин и пароль").props.disabled, false);
+  assert.equal(ui.button("Ссылка-приглашение").props["aria-pressed"], true);
+  ui.click("Логин и пароль");
+  assert.equal(ui.button("Логин").props["aria-pressed"], true);
+  assert.ok(!ui.list().some((node) => node.props.id === "ob-vertical"));
+  ui.change("ob-password", fixturePassword);
+  ui.submit();
+  assert.equal(ui.requests[0].url, "/api/crm/platform-onboarding-credentials");
+  assert.equal(ui.requests[0].body.purpose, "mortgage_leads");
+  assert.equal(ui.requests[0].body.vertical, "");
+  assert.equal(ui.requests[0].body.ownerLogin, "aigul");
+  assert.ok(!("ownerEmail" in ui.requests[0].body));
+  const response = success(true);
+  await ui.respond({ ...response, data: { ...response.data, purpose: "mortgage_leads", vertical: null } });
+  assert.match(ui.content(), /ипотечные заявки/);
 });
 
 test("Mode controls wrap and result contracts distinguish login-only owners", () => {
@@ -302,5 +449,7 @@ test("Mode controls wrap and result contracts distinguish login-only owners", ()
   const credsType = source.slice(source.indexOf("type CredsResult"), source.indexOf("function ownerIdentity"));
   assert.match(credsType, /ownerLogin: string;/);
   assert.match(credsType, /ownerLoginOnly: boolean;/);
+  assert.match(credsType, /purpose: string;/);
+  assert.match(credsType, /vertical: string \| null;/);
   assert.doesNotMatch(source, /\bemailFromLogin\(|\{(?:credsResult|result)\.ownerEmail\}/);
 });
