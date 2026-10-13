@@ -10,6 +10,12 @@
     "city": "Астана",
     "country": "Казахстан"
   },
+  "platformBusiness": {
+    "reportedName": "ИП Медина",
+    "website": null,
+    "metaPortfolioId": null,
+    "verificationStatus": "not_submitted"
+  },
   "onboardingDraft": {
     "name": "Baspana ipoteka building",
     "purpose": "mortgage_leads",
@@ -53,6 +59,7 @@
     "human_credential_entry_and_submission",
     "time_zone_confirmation",
     "exact_username_availability",
+    "platform_public_website",
     "platform_business_identity_and_portfolio",
     "meta_tech_provider_and_app_review",
     "coexistence_embedded_signup_acceptance",
