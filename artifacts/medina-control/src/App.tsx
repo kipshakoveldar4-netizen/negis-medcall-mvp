@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { Session } from "@supabase/supabase-js";
-import { supabase } from "./lib/supabase";
+import { controlConfig, supabase } from "./lib/supabase";
 import { Login } from "./screens/Login";
 import { Overview } from "./screens/Overview";
 import { ClinicCard } from "./screens/ClinicCard";
@@ -20,8 +20,12 @@ export default function App() {
   const [screen, setScreen] = useState<"overview" | "onboard" | "operators">("overview");
 
   useEffect(() => {
+    if (!controlConfig.ready) return;
     void supabase.auth.getSession().then(({ data }) => {
       setSession(data.session);
+      setReady(true);
+    }, () => {
+      setSession(null);
       setReady(true);
     });
     const { data: listener } = supabase.auth.onAuthStateChange((_event, next) => {
@@ -30,7 +34,8 @@ export default function App() {
     return () => listener.subscription.unsubscribe();
   }, []);
 
-  if (!ready) return null;
+  if (!controlConfig.ready) return <Login />;
+  if (!ready) return <div className="login-form-side" role="status">Проверяем вход...</div>;
   if (!session) return <Login />;
 
   return (

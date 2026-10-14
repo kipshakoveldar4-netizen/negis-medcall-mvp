@@ -89,7 +89,7 @@
     "test:vertical": "tsx --test ./src/medina-vertical.test.ts",
     "test:provision": "tsx --test ./src/medina-provision.test.ts",
     "test:mobile-overlays": "tsx --test ./src/medina-mobile-overlays.test.ts",
-    "test:control-portal": "tsx --test ./src/medina-control-portal.test.ts",
+    "test:control-portal": "tsx --test ./src/medina-control-portal.test.ts ./src/medina-control-isolation.test.ts ./src/medina-control-preview-build.test.ts ./src/medina-control-public-env.test.ts",
     "test:onboarding-portal": "tsx --test ./src/medina-onboarding.test.ts ./src/medina-owner-login-runtime.test.ts ./src/medina-owner-login-ui.test.ts",
     "test:text-provider": "tsx --test ./src/medina-text-provider.test.ts",
     "test:staff-credentials": "tsx --test ./src/medina-staff-credentials.test.ts ./src/medina-staff-exact-login-runtime.test.ts",

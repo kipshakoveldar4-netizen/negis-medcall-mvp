@@ -153,6 +153,25 @@ test("Explicit username uses shared normalization, needs no email and displays t
   assert.match(ui.content(), /поддержку; не создавайте повторное пространство/);
 });
 
+test("Approved isolated owner fixture can select UTC without changing the default timezone", async () => {
+  const ui = setup();
+  assert.equal(ui.field("ob-tz").props.value, "Asia/Almaty");
+  const options = nodes(ui.field("ob-tz")).filter((node) => node.type === "option");
+  assert.equal(options.filter((node) => node.props.value === "UTC").length, 1);
+  assert.ok(options.some((node) => node.props.value === "Asia/Almaty"));
+  fill(ui, "medinaqa.20261014.bowner");
+  ui.change("ob-purpose", "mortgage_leads");
+  ui.change("ob-tz", "UTC");
+  ui.change("ob-password", fixturePassword);
+  ui.submit();
+  assert.equal(ui.requests[0].body.timeZone, "UTC");
+  assert.equal(ui.requests[0].body.purpose, "mortgage_leads");
+  assert.equal(ui.requests[0].body.ownerLogin, "medinaqa.20261014.bowner");
+  assert.equal(ui.requests[0].body.vertical, "");
+  const response = success(true);
+  await ui.respond({ ...response, data: { ...response.data, purpose: "mortgage_leads", vertical: null, timeZone: "UTC" } });
+});
+
 test("Mortgage purpose clears the medical niche and submits username credentials without email", async () => {
   const ui = setup();
   const option = nodes(ui.field("ob-purpose")).find((node) => node.props.value === "mortgage_leads");

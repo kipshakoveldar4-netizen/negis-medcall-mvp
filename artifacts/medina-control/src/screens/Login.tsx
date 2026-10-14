@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { hasSupabaseEnv, supabase } from "../lib/supabase";
+import { controlConfig, supabase } from "../lib/supabase";
 
 // Вход владельца платформы — обычный пароль Supabase.
 //
@@ -16,8 +16,8 @@ export function Login() {
   async function signIn(event: React.FormEvent) {
     event.preventDefault();
     setError("");
-    if (!hasSupabaseEnv) {
-      setError("Портал не настроен: не заданы адрес и ключ Supabase.");
+    if (!controlConfig.ready) {
+      setError(controlConfig.error);
       return;
     }
     setBusy(true);
@@ -46,14 +46,14 @@ export function Login() {
           <p>Только для владельца платформы.</p>
           <div className="field">
             <label htmlFor="email">Почта</label>
-            <input id="email" type="email" autoComplete="username" value={email} onChange={(event) => setEmail(event.target.value)} />
+            <input id="email" type="email" autoComplete="username" disabled={!controlConfig.ready} value={email} onChange={(event) => setEmail(event.target.value)} />
           </div>
           <div className="field">
             <label htmlFor="password">Пароль</label>
-            <input id="password" type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} />
+            <input id="password" type="password" autoComplete="current-password" disabled={!controlConfig.ready} value={password} onChange={(event) => setPassword(event.target.value)} />
           </div>
-          {error ? <div className="notice error" role="alert">{error}</div> : null}
-          <button type="submit" className="btn-primary" disabled={busy}>{busy ? "Проверяю…" : "Войти"}</button>
+          {error || !controlConfig.ready ? <div className="notice error" role="alert">{error || (!controlConfig.ready && controlConfig.error)}</div> : null}
+          <button type="submit" className="btn-primary" disabled={busy || !controlConfig.ready}>{busy ? "Проверяю…" : "Войти"}</button>
         </form>
       </div>
     </div>

@@ -6,7 +6,7 @@
     }
   },
   "installCommand": "pnpm install --frozen-lockfile",
-  "buildCommand": "node scripts/test-crm-cold-start.cjs && pnpm --filter @workspace/negis run build && node artifacts/medina-site/copy-assets.mjs",
+  "buildCommand": "node scripts/test-crm-cold-start.cjs && pnpm --filter @workspace/negis run build && node artifacts/medina-site/copy-assets.mjs && node artifacts/medina-control/build-preview.mjs",
   "outputDirectory": "artifacts/negis/dist/public",
   "functions": {
     "api/content-studio/*.ts": { "maxDuration": 60 },
@@ -58,6 +58,12 @@
       "src": "/api/targeting/health",
       "dest": "/api/targeting/health.ts"
     },
+    {
+      "src": "/medina-control",
+      "status": 308,
+      "headers": { "Location": "/medina-control/" }
+    },
+    { "src": "/medina-control/", "dest": "/medina-control/index.html" },
     { "handle": "filesystem" },
     { "src": "/(.*)", "dest": "/index.html" }
   ]

@@ -26,6 +26,7 @@ const TIME_ZONES = [
   "Asia/Tashkent",
   "Asia/Bishkek",
   "Europe/Moscow",
+  "UTC",
 ];
 
 type Mode = "credentials" | "invite";
