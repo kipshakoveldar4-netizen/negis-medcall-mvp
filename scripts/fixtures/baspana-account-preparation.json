@@ -18,7 +18,9 @@
     "metaPortfolioId": "1694609597992242",
     "metaPortfolioStatus": "owner_confirmed_unverified",
     "metaAppPortfolioLinkStatus": "not_confirmed",
-    "verificationStatus": "owner_reported_pending_review"
+    "verificationStatus": "additional_information_required_phone_evidence",
+    "verificationEvidence": "owner_provided_meta_screenshot",
+    "phoneEvidenceStatus": "owner_reports_no_phone_bill"
   },
   "onboardingDraft": {
     "name": "Baspana ipoteka building",
@@ -67,6 +69,7 @@
     "exact_username_availability",
     "platform_website_meta_acceptance",
     "platform_business_identity_and_portfolio",
+    "platform_phone_ownership_evidence",
     "meta_app_portfolio_link_confirmation",
     "meta_tech_provider_and_app_review",
     "coexistence_embedded_signup_acceptance",

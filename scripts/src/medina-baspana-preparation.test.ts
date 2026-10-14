@@ -51,6 +51,8 @@ const plan = JSON.parse(await readFile(new URL("../fixtures/baspana-account-prep
     metaPortfolioStatus: string;
     metaAppPortfolioLinkStatus: string;
     verificationStatus: string;
+    verificationEvidence: string;
+    phoneEvidenceStatus: string;
   };
   onboardingDraft: Record<string, unknown>;
   proposedTimeZone: string;
@@ -175,7 +177,9 @@ test("The owner-authorized public platform business is separate from the client 
     metaPortfolioId: "1694609597992242",
     metaPortfolioStatus: "owner_confirmed_unverified",
     metaAppPortfolioLinkStatus: "not_confirmed",
-    verificationStatus: "owner_reported_pending_review",
+    verificationStatus: "additional_information_required_phone_evidence",
+    verificationEvidence: "owner_provided_meta_screenshot",
+    phoneEvidenceStatus: "owner_reports_no_phone_bill",
   });
   assert.equal(plan.company.name, "Baspana ipoteka building");
   assert.notEqual(plan.platformBusiness.reportedName, plan.company.name);
@@ -184,14 +188,17 @@ test("The owner-authorized public platform business is separate from the client 
   assert.ok(!plan.pending.includes("platform_website_requirement_or_preparation"), "the published website replaces the preparation gate with Meta acceptance");
 });
 
-test("Website publication, portfolio selection and reported submission do not imply Meta approval or app ownership transfer", () => {
+test("The Meta phone-document request does not imply approval or authorize connecting WhatsApp", () => {
   assert.equal(plan.platformBusiness.websiteStatus, "published_pending_meta_acceptance");
   assert.equal(plan.platformBusiness.metaPortfolioStatus, "owner_confirmed_unverified");
-  assert.equal(plan.platformBusiness.verificationStatus, "owner_reported_pending_review", "the owner's report is not independently verified Meta approval");
+  assert.equal(plan.platformBusiness.verificationStatus, "additional_information_required_phone_evidence");
+  assert.equal(plan.platformBusiness.verificationEvidence, "owner_provided_meta_screenshot", "a supplied screenshot is not a live browser check");
+  assert.equal(plan.platformBusiness.phoneEvidenceStatus, "owner_reports_no_phone_bill");
   assert.equal(plan.platformBusiness.metaAppPortfolioLinkStatus, "not_confirmed", "selecting a portfolio does not confirm app linkage or transfer ownership");
   for (const gate of [
     "platform_website_meta_acceptance",
     "platform_business_identity_and_portfolio",
+    "platform_phone_ownership_evidence",
     "meta_app_portfolio_link_confirmation",
     "meta_tech_provider_and_app_review",
     "shared_meta_callback_isolation",
