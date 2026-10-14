@@ -92,6 +92,12 @@ test('one Russian UTF-8 document stays under docs, outside runtime and public ou
   assert.match(viewport, /(?:^|,)\s*initial-scale\s*=\s*1(?:\.0)?\s*(?:,|$)/i);
 });
 
+test('the approved Save group domain-verification tag is static and appears exactly once in head', () => {
+  assert.equal(meta('name', 'facebook-domain-verification').attrs.content, 'zg4jvzzo2t6arctcg0c3jo6ph0oatn');
+  assert.equal(tags.filter(node => node.name === 'meta' && node.attrs.name === 'facebook-domain-verification').length, 1);
+  assert.doesNotMatch(body, /facebook-domain-verification/i);
+});
+
 test('robots and early CSP keep the standalone company page closed to indexing and active content', () => {
   assert.deepEqual(new Set(meta('name', 'robots').attrs.content?.toLowerCase().split(/[\s,]+/).filter(Boolean)),
     new Set(['noindex', 'nofollow', 'noarchive']));
@@ -117,7 +123,7 @@ test('robots and early CSP keep the standalone company page closed to indexing a
   }
 });
 
-test('no scripts, forms, embeds, redirects, canonical or verification metadata', () => {
+test('no active content, redirects, canonical or unapproved verification metadata', () => {
   const forbidden = new Set(['script', 'form', 'iframe', 'frame', 'frameset', 'object', 'embed', 'base', 'template', 'input', 'select', 'textarea']);
   for (const node of tags) {
     assert.ok(!forbidden.has(node.name), `forbidden element ${node.name}`);
@@ -128,7 +134,11 @@ test('no scripts, forms, embeds, redirects, canonical or verification metadata',
     assert.ok(!(node.attrs.rel ?? '').toLowerCase().split(/\s+/).includes('canonical'), 'no canonical URL');
     if (node.name === 'meta') {
       assert.notEqual(node.attrs['http-equiv']?.toLowerCase(), 'refresh', 'no redirect');
-      assert.doesNotMatch(`${node.attrs.name ?? ''} ${node.attrs.property ?? ''}`, /verif(?:ication|ied)|msvalidate|^\s*fb:/i);
+      if (node.attrs.name === 'facebook-domain-verification') {
+        assert.deepEqual({ ...node.attrs }, { name: 'facebook-domain-verification', content: 'zg4jvzzo2t6arctcg0c3jo6ph0oatn' });
+      } else {
+        assert.doesNotMatch(`${node.attrs.name ?? ''} ${node.attrs.property ?? ''}`, /verif(?:ication|ied)|msvalidate|^\s*fb:/i);
+      }
     }
     assert.notEqual(node.attrs.itemtype?.toLowerCase(), 'https://schema.org/organization', 'no structured company claims');
   }
