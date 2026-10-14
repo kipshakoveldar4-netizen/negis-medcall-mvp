@@ -83,3 +83,59 @@ env. Не добавлять localhost к production CORS ради локаль�
 Не удалять рабочие маршруты и не заменять интерфейс действующей CRM ради
 тестового онбординга. Обзор, карточка и операторы уже реализованы; текущая
 очередь приёмки и ограничения находятся в `docs/DELIVERY-CYCLES.md`.
+
+### Ручная настройка тестовой формы, 14 октября
+
+Автоматический перенос ключа/перезапуск ранее не был разрешён средством
+выполнения. Этот порядок выполняет человек; агент не повторяет отвергнутую
+команду и не получает ключ из Vercel, браузера или буфера обмена.
+
+1. Открыть локальный `artifacts/medina-control/.env.local`. Он исключён из Git;
+   подготовлены только режим и адреса из разрешённого плана, ключ пустой.
+   Не переносить сюда настройки рабочей CRM. `.env.example` содержит лишь
+   шаблон и не подключает портал автоматически.
+2. В Supabase выбрать **medina-os-site-test**, ref `ukiobbwsdoblooynzlnx`, затем
+   Project Settings -> API Keys. Вручную вставить существующий **publishable**
+   ключ в `VITE_SUPABASE_ANON_KEY`; если используется legacy ключ, допустим
+   только **anon**, не `service_role`. Не создавать новый ключ, не раскрывать
+   secret/service-role, не присылать ключ или пароль в чат. После заполнения
+   агент не читает этот файл. Ключ другой базы не подходит, даже если публичный.
+3. Перезапустить локальный портал вручную в PowerShell. Исходный безопасный
+   процесс запущен с пустыми переменными: они имеют приоритет над `.env.local`,
+   поэтому одного обновления страницы недостаточно. Код ниже прекращает только
+   подтверждённый Vite именно этого приложения на loopback 5185; неизвестный
+   слушатель приводит к остановке инструкции, а не к его завершению. Запуск
+   нового процесса не меняет постоянные переменные Windows.
+
+```powershell
+Set-Location -LiteralPath 'C:/Users/Lenovo/Documents/Codex/medina-os'
+$listeners = @(Get-NetTCPConnection -LocalPort 5185 -State Listen -ErrorAction SilentlyContinue)
+if ($listeners.Count -gt 1) { throw 'На 5185 несколько слушателей. Остановитесь и сообщите об этом.' }
+if ($listeners.Count -eq 1) {
+  $listener = $listeners[0]
+  $process = Get-CimInstance Win32_Process -Filter ('ProcessId = ' + $listener.OwningProcess)
+  if ($listener.LocalAddress -ne '127.0.0.1' -or $process.Name -ne 'node.exe' -or
+      $process.CommandLine -notlike '*medina-os\artifacts\medina-control\*' -or
+      $process.CommandLine -notlike '*vite\bin\vite.js*' -or
+      $process.CommandLine -notlike '*"--port" "5185" "--host" "127.0.0.1"*') {
+    throw 'Процесс на 5185 не совпадает с тестовым порталом. Не завершайте его.'
+  }
+  Stop-Process -Id $listener.OwningProcess -ErrorAction Stop
+}
+Remove-Item Env:VITE_MEDINA_CONTROL_MODE, Env:VITE_MEDINA_API_URL, Env:VITE_SUPABASE_URL, Env:VITE_SUPABASE_ANON_KEY -ErrorAction SilentlyContinue
+node 'C:/Users/Lenovo/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/pnpm/bin/pnpm.cjs' --filter @workspace/medina-control exec vite --port 5185 --host 127.0.0.1
+```
+
+4. Оставить окно PowerShell открытым и открыть `http://127.0.0.1:5185`.
+   При корректной конфигурации исчезает сообщение «Портал не настроен» и
+   доступны поля входа. Пока серверные platform owner/CORS отключены, это
+   **не** готовое создание владельца. Не менять guards, использовать прокси
+   или подставлять рабочую базу ради преодоления отказа.
+5. После ручной настройки сообщить только «форма настроена». Для проверки
+   создать новый временный Preview с тем же `acc7145` и точными тестовыми
+   platform owner/CORS можно лишь после отдельного разрешения. После этого
+   вручную заменить только `VITE_MEDINA_API_URL` на его immutable origin и
+   перезапустить портал. Вход eldar1@mail.ru, новый пароль и финальную отправку
+   тестового онбординга выполняет человек. После проверки восстановить overrides
+   и согласовать удаление конкретного временного deployment; старый g90saa028
+   уже удалён, использовать его нельзя.
