@@ -55,7 +55,8 @@ const plan = JSON.parse(await readFile(new URL("../fixtures/baspana-account-prep
     phoneEvidenceStatus: string;
   };
   onboardingDraft: Record<string, unknown>;
-  proposedTimeZone: string;
+  confirmedTimeZone: string;
+  timeZoneConfirmedOn: string;
   accounts: { login: string; fullName: string; role: PlannedRole }[];
   assignment: { mode: string; assignedByRole: string; assigneeRole: string; managerVisibility: string; unassignedVisibleTo: string[] };
   whatsapp: { selectedApproach: string; connectionMode: string; allowApiOnly: boolean; metaAppId: string; provider: null; enabled: boolean; phoneNumberId: null; channelId: null; inboundOnly: boolean; preserveBusinessApp: boolean; importHistory: boolean };
@@ -86,15 +87,23 @@ test("Baspana preparation remains an unsubmitted draft for the exact isolated Pr
   assert.ok(plan.pending.includes("isolated_control_target_and_platform_access"));
   assert.ok(plan.pending.includes("explicit_test_creation_approval"));
   assert.ok(plan.pending.includes("human_credential_entry_and_submission"));
-  assert.equal(plan.onboardingDraft.timeZone, "");
-  const result = validateCredentialsOnboardingRequest(plan.onboardingDraft);
-  assert.ok("status" in result);
-  assert.equal(result.status, 400, "unfinished business settings cannot pass onboarding validation");
-  assert.ok(plan.pending.includes("time_zone_confirmation"));
+});
+
+test("The owner-confirmed Baspana time zone is recorded without submitting the account draft", () => {
+  assert.equal(plan.confirmedTimeZone, "Asia/Almaty");
+  assert.equal(plan.timeZoneConfirmedOn, "2026-10-15");
+  assert.equal(plan.onboardingDraft.timeZone, plan.confirmedTimeZone);
+  assert.ok(!plan.pending.includes("time_zone_confirmation"));
+  assert.equal(plan.status, "prepared_not_created");
+  assert.ok(plan.pending.includes("explicit_test_creation_approval"));
+  assert.ok(plan.pending.includes("human_credential_entry_and_submission"));
+  const missingTimeZone = validateCredentialsOnboardingRequest({ ...plan.onboardingDraft, timeZone: "" });
+  assert.ok("status" in missingTimeZone);
+  assert.equal(missingTimeZone.status, 400, "the confirmed draft must not remove the server's time-zone requirement");
 });
 
 test("The owner draft uses the dedicated username bootstrap, not a medical niche or fake personal email", () => {
-  const result = validateCredentialsOnboardingRequest({ ...plan.onboardingDraft, timeZone: plan.proposedTimeZone });
+  const result = validateCredentialsOnboardingRequest(plan.onboardingDraft);
   assert.ok(!("status" in result));
   assert.equal(result.purpose, "mortgage_leads");
   assert.equal(result.vertical, null);

@@ -28,9 +28,10 @@
     "vertical": "",
     "ownerLogin": "baspana.dinara",
     "ownerName": "Динара",
-    "timeZone": ""
+    "timeZone": "Asia/Almaty"
   },
-  "proposedTimeZone": "Asia/Almaty",
+  "confirmedTimeZone": "Asia/Almaty",
+  "timeZoneConfirmedOn": "2026-10-15",
   "accounts": [
     { "login": "baspana.dinara", "fullName": "Динара", "role": "owner" },
     { "login": "baspana.tolkyn", "fullName": "Турсын Толкын", "role": "admin" },
@@ -65,7 +66,6 @@
     "mortgage_onboarding_acceptance",
     "explicit_test_creation_approval",
     "human_credential_entry_and_submission",
-    "time_zone_confirmation",
     "exact_username_availability",
     "platform_website_meta_acceptance",
     "platform_business_identity_and_portfolio",
