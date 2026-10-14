@@ -474,8 +474,8 @@ export async function handleStaffCredentials(req: VercelRequest, res: VercelResp
   // сотрудника. Вторая: две разные женщины по имени «Дана Ким» в одной клинике
   // дают один и тот же выведенный логин, и вторая получала бы «этот человек уже
   // в команде, меняйте роль» — про совершенно другого человека. Столкновение
-  // логинов разрешается ниже, хвостом, и это единственное место, где оно
-  // разрешается.
+  // разрешается ниже: в ипотечном профиле это отказ, в прежнем профиле клиники
+  // сохраняется подбор хвоста.
   //
   // Достройка непривязанной строки (сотрудник из seed или заведённый руками)
   // осталась за почтовым путём: там администратор называет ЕГО адрес, и строка
@@ -565,7 +565,8 @@ export async function handleStaffCredentials(req: VercelRequest, res: VercelResp
   }
 
   // Логины глобальны на всю платформу, и два салона законно хотят «aigul».
-  // Занятость логина — не отказ, а повод взять следующий: aigul.k7, aigul.m3.
+  // В прежних профилях занятость ведёт к подбору хвоста: aigul.k7, aigul.m3.
+  // Ипотечный профиль сохраняет точный согласованный логин или возвращает отказ.
   // Администратор увидит ВЫДАННЫЙ логин в таблице с паролем и продиктует именно
   // его.
   //
@@ -579,7 +580,9 @@ export async function handleStaffCredentials(req: VercelRequest, res: VercelResp
   let issuedEmail = validated.email;
   let created: AdminCreateResponse | null = null;
   let failure: { taken: boolean; status: number } | null = null;
-  const maxAttempts = validated.login ? LOGIN_ATTEMPTS : 1;
+  // Purpose comes from verified workspace access, never from the request body.
+  const exactLogin = context.purpose === "mortgage_leads";
+  const maxAttempts = validated.login && !exactLogin ? LOGIN_ATTEMPTS : 1;
 
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     issuedEmail = validated.login ? emailFromLogin(loginWithSuffix(validated.login, attempt)) : validated.email;
@@ -594,13 +597,14 @@ export async function handleStaffCredentials(req: VercelRequest, res: VercelResp
   }
 
   if (!created && validated.login && failure?.taken) {
-    // Восемь занятых подряд — это уже не «занято», а что-то другое; молча
-    // придумывать девятый вариант нельзя: логин печатают на бумажке.
+    auditRefusal("login_unavailable", context.workspaceId, context.staffUserId);
     return sendJson(res, 409, {
       success: false,
-      error: "Свободный логин не подобрался",
+      error: exactLogin ? "Этот логин уже занят" : "Свободный логин не подобрался",
       code: "login_unavailable",
-      details: ["Этот логин занят вместе с ближайшими вариантами. Задайте другой — например с инициалом: aigul.b."],
+      details: exactLogin
+        ? ["Другой логин автоматически не создаётся. Если предыдущая попытка уже создала аккаунт, обратитесь в поддержку для восстановления подключения; иначе согласуйте другой логин."]
+        : ["Этот логин занят вместе с ближайшими вариантами. Задайте другой — например с инициалом: aigul.b."],
     });
   }
 
