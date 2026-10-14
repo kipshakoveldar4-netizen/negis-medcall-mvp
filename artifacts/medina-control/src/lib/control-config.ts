@@ -57,3 +57,16 @@ export function resolveControlConfig(
   }
   return { ready: true, apiOrigin, supabaseUrl, anonKey };
 }
+
+export function resolveControlBrowserEnv(
+  env: Record<string, string | undefined>,
+  development = false,
+): Record<string, string> {
+  const config = resolveControlConfig(env, development);
+  return {
+    VITE_MEDINA_CONTROL_MODE: config.ready ? env.VITE_MEDINA_CONTROL_MODE?.trim() || "" : "",
+    VITE_MEDINA_API_URL: config.ready ? config.apiOrigin : "",
+    VITE_SUPABASE_URL: config.ready ? config.supabaseUrl : "",
+    VITE_SUPABASE_ANON_KEY: config.ready ? config.anonKey : "",
+  };
+}
