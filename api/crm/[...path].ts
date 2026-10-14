@@ -46,6 +46,7 @@ import { handleJoinCode, handleJoinRequest, handleStaffJoinRequests } from "../.
 import { handlePlatformWhatsappNumber } from "../../lib/crm/platform-whatsapp";
 import { handleWhatsAppChannels } from "../../lib/crm/whatsapp-channels";
 import { handleCrmChangeLog } from "../../lib/crm/change-log";
+import { handleLeadTeamAnalytics } from "../../lib/crm/lead-team-analytics";
 import { handleMyClients } from "../../lib/crm/my-clients";
 import { handlePushSubscriptions } from "../../lib/crm/push-subscriptions";
 import { handleSalonStats } from "../../lib/crm/salon-stats";
@@ -239,6 +240,7 @@ async function dispatch(
   res: VercelResponse,
 ) {
   switch (routeKey) {
+    case "lead-team-analytics": return segments.length === 1 ? handleLeadTeamAnalytics(req, res) : notFound(res);
     case "site-blog": return handleSiteBlog(req, res);
     case "site-inquiry-deletion-preview":
       return segments.length === 1 ? handleSiteInquiryDeletionPreview(req, res) : notFound(res);

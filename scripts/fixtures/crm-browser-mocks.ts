@@ -1,7 +1,10 @@
 import { createBookingRetryFixture } from "./booking-retry";
 const retryFixture = new URLSearchParams(window.location?.search || "").get("bookingRetry") === "lost-response"
   ? createBookingRetryFixture() : null;
-const assignedLeadFixture = new URLSearchParams(window.location?.search || "").get("fixtureRole") === "lead_manager";
+const fixtureParams = new URLSearchParams(window.location?.search || "");
+const fixtureRole = fixtureParams.get("fixtureRole");
+const assignedLeadFixture = fixtureRole === "lead_manager";
+const mortgageFixture = fixtureParams.get("fixturePurpose") === "mortgage_leads";
 const workspaceId = "00000000-0000-4000-8000-000000000001";
 const clientId = "00000000-0000-4000-8000-000000000002";
 const doctorId = "00000000-0000-4000-8000-000000000003";
@@ -9,6 +12,14 @@ const serviceId = "00000000-0000-4000-8000-000000000004";
 const appointmentId = "00000000-0000-4000-8000-000000000005";
 const today = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Almaty" });
 const longName = "Тестовая Александра Константинопольская";
+const teamMembers = Array.from({ length: 5 }, (_, index) => ({
+  staffId: `00000000-0000-4000-8000-${String(100 + index).padStart(12, "0")}`,
+  name: index === 0 ? longName : `Тестовый менеджер ${index + 1}`,
+  role: "lead_manager", status: index === 4 ? "inactive" : "active",
+  assigned: { total: 1, new: index === 0 ? 1 : 0, inProgress: index === 1 ? 1 : 0,
+    booked: index === 2 ? 1 : 0, lost: index === 3 ? 1 : 0, other: index === 4 ? 1 : 0 },
+  activity: { updatedEvents: index + 1, createdEvents: 1, touchedLeads: 1, lastRecordedAt: new Date().toISOString() },
+}));
 const service = "Тестовая комплексная услуга с очень длинным названием";
 const client = { id: clientId, name: longName, fullName: longName, full_name: longName, phone: "+77000000001", whatsapp: "+77000000001", status: "active", source: "Тест", visits: 2, notes: "Только вымышленные данные" };
 const appointment = { id: appointmentId, clientId, client: longName, client_name: longName, phone: client.phone, client_phone: client.phone, whatsapp: client.whatsapp, doctorId, doctor: "Тестовый специалист", doctor_name: "Тестовый специалист", service, service_name: service, serviceId, startsAt: `${today}T10:00:00+05:00`, starts_at: `${today}T10:00:00+05:00`, durationMinutes: 90, priceMinor: 1250000, status: "confirmed", notes: "Вымышленная запись для проверки вёрстки" };
@@ -32,7 +43,9 @@ export const verifyCurrentPassword = async () => false;
 const auth = {
   session: { user: { id: "fixture-user" } }, isLoading: false, isDemoMode: false, isStaffMode: false, isImpersonation: false,
   user: { id: "fixture-user", email: "test@example.invalid", user_metadata: { full_name: "Тестовый владелец" } },
-  userRole: assignedLeadFixture ? "lead_manager" : "owner", vertical: "beauty", clinicId: workspaceId, availableWorkspaces: [],
+  userRole: assignedLeadFixture ? "lead_manager" : fixtureRole === "admin" ? "admin" : "owner",
+  workspacePurpose: mortgageFixture ? "mortgage_leads" : "clinic_services",
+  vertical: "beauty", clinicId: workspaceId, availableWorkspaces: [],
   rolePermissions: assignedLeadFixture
     ? { crm: true, booking: false, clients: false, leads: true, sales: false, tasks: false, dashboard: false, admin: false }
     : { booking: true, clients: true, leads: true, sales: true, tasks: true, dashboard: true, admin: true },
@@ -57,6 +70,21 @@ export async function crmFetch(input: string, init?: RequestInit): Promise<Respo
   const resource = url.pathname.split("/").at(-1) || "";
   if (assignedLeadFixture && !["leads", "lead-stages", "lead-sources"].includes(resource)) {
     return Response.json({ success: false, error: "Доступ закрыт на изолированном стенде" }, { status: 403 });
+  }
+  if (resource === "lead-team-analytics") {
+    if (!mortgageFixture || !["owner", "admin"].includes(auth.userRole)) return Response.json({ success: false }, { status: 403 });
+    const days = Number(url.searchParams.get("days") || 30);
+    if (![7, 30, 90].includes(days)) return Response.json({ success: false }, { status: 400 });
+    const generatedAt = new Date().toISOString();
+    return Response.json({ success: true, mode: "supabase", data: { analytics: {
+      generatedAt, period: { days, from: new Date(Date.parse(generatedAt) - days * 86_400_000).toISOString(), to: generatedAt },
+      totalLeads: 7, unassignedLeads: 1, otherAssigneeLeads: 1, activityStatus: "available", members: teamMembers,
+    } } });
+  }
+  if (mortgageFixture && resource === "lead-assignees") {
+    return Response.json({ success: true, mode: "supabase", data: {
+      assignees: teamMembers.filter((member) => member.status === "active").map((member) => ({ id: member.staffId, name: member.name })),
+    } });
   }
   let items = lists[resource] || [];
   if (resource === "clients" && url.searchParams.has("search")) {

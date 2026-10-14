@@ -25,6 +25,7 @@ import { PageLayout } from "@/components/layout/PageLayout";
 import { PageHeader } from "@/components/ui/page-header";
 import { MetricCard } from "@/components/ui/metric-card";
 import { ChangeLogPanel } from "@/components/crm/change-log-panel";
+import { LeadTeamAnalytics } from "@/components/crm/lead-team-analytics";
 import { TaskPanel } from "@/components/crm/task-panel";
 import { SiteInquiryDeletion } from "@/components/crm/site-inquiry-deletion";
 import { useAuth } from "@/contexts/AuthContext";
@@ -622,6 +623,7 @@ type LeadSessionAccess = {
   workspaceId: string;
   isCurrent: () => boolean;
   request: (path: string, init?: RequestInit) => Promise<Response>;
+  loadTeamAnalytics: (days: number) => Promise<Response>;
 };
 
 function LeadsPageSession({ actorId, workspaceId }: { actorId: string; workspaceId: string }) {
@@ -670,7 +672,8 @@ function LeadsPageSession({ actorId, workspaceId }: { actorId: string; workspace
     assertCurrent();
     return response;
   };
-  return <LeadsPageContent key={lifetime.epoch} access={{ actorId, workspaceId, isCurrent, request }} />;
+  const loadTeamAnalytics = (days: number) => request(`/api/crm/lead-team-analytics?workspaceId=${encodeURIComponent(workspaceId)}&days=${days}`);
+  return <LeadsPageContent key={lifetime.epoch} access={{ actorId, workspaceId, isCurrent, request, loadTeamAnalytics }} />;
 }
 
 function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
@@ -813,14 +816,21 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
     if (typeof window !== "undefined") window.localStorage.setItem(LEADS_UI_MODE_KEY, admin ? "admin" : "client");
   };
 
+  const responsibleLeads = useMemo(() => {
+    if (!isMortgage || isLeadManager || responsibleFilter === "all") return items;
+    return items.filter((lead) => responsibleFilter === "unassigned"
+      ? !lead.responsibleUserId
+      : lead.responsibleUserId === responsibleFilter);
+  }, [items, responsibleFilter, isMortgage, isLeadManager]);
+
   const metrics = useMemo(() => {
     const counts: Record<LeadStatusKey, number> = { new: 0, in_progress: 0, booked: 0, lost: 0 };
-    for (const lead of items) counts[semanticGroupForLead(lead)] += 1;
+    for (const lead of responsibleLeads) counts[semanticGroupForLead(lead)] += 1;
     return counts;
-  }, [items]);
+  }, [responsibleLeads]);
 
   const summaryMetrics: Array<{ label: string; value: number; icon: LucideIcon; tone: "primary" | "info" | "success" | "warning" | "error" | "muted" }> = [
-    { label: "Всего заявок", value: items.length, icon: Inbox, tone: "primary" },
+    { label: "Всего заявок", value: responsibleLeads.length, icon: Inbox, tone: "primary" },
     { label: "Новые", value: metrics.new, icon: Sparkles, tone: "info" },
     { label: "В работе", value: metrics.in_progress, icon: ClipboardList, tone: "warning" },
     { label: "Записаны", value: metrics.booked, icon: CheckCircle2, tone: "success" },
@@ -846,10 +856,7 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
 
   const visibleLeads = useMemo(() => {
     const query = search.trim().toLowerCase();
-    return items.filter((lead) => {
-      if (isMortgage && !isLeadManager && responsibleFilter !== "all") {
-        if (responsibleFilter === "unassigned" ? Boolean(lead.responsibleUserId) : lead.responsibleUserId !== responsibleFilter) return false;
-      }
+    return responsibleLeads.filter((lead) => {
       const selectedStage = filter === "all" ? null : activeStages.find((stage) => stage.id === filter);
       if (selectedStage) {
         const exactStructuredMatch = Boolean(lead.stageId && lead.stageId === selectedStage.id);
@@ -863,7 +870,7 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
       if (!query) return true;
       return [lead.name, lead.phone, leadSourceName(lead, activeSources), lead.campaign].some((field) => (field || "").toLowerCase().includes(query));
     });
-  }, [activeSources, activeStages, attributionFilter, items, filter, search, responsibleFilter, isMortgage, isLeadManager]);
+  }, [activeSources, activeStages, attributionFilter, responsibleLeads, filter, search]);
 
   const detailLead = detailId && (!strictSession || !loadError) ? items.find((lead) => lead.id === detailId) || null : null;
 
@@ -1154,6 +1161,10 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
             />
           ))}
         </section>
+
+        {isMortgage && (userRole === "owner" || userRole === "admin") && (
+          <LeadTeamAnalytics key={JSON.stringify([access.actorId, access.workspaceId, userRole])} access={access} />
+        )}
 
         {/* CRM8: attribution counts in a compact strip — mobile stays uncluttered. */}
         {!isMortgage && <section className="negis-glass flex flex-wrap items-center gap-x-6 gap-y-1.5 p-4 text-sm" aria-label="Атрибуция рекламы">

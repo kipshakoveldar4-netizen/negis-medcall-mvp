@@ -14,6 +14,7 @@ const ts = createRequire(path.join(root, "package.json"))("typescript") as typeo
 const read = (file: string) => readFile(path.join(root, "artifacts/negis/src", file), "utf8");
 const leads = await read("pages/LeadsPage.tsx");
 const pipeline = await read("lib/leadPipeline.ts");
+const teamAnalytics = await read("components/crm/lead-team-analytics.tsx");
 const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value));
 
 function evaluate(source: string, bindings: Record<string, unknown> = {}, imports: Record<string, unknown> = {}) {
@@ -34,7 +35,7 @@ function evaluate(source: string, bindings: Record<string, unknown> = {}, import
   return exports;
 }
 
-const { permissionsForRole } = evaluate(await read("lib/permissions.ts"));
+const { permissionsForRole, roleLabels } = evaluate(await read("lib/permissions.ts"));
 const { staffRoleLabels } = evaluate(await readFile(path.join(root, "lib/vertical/terms.ts"), "utf8"));
 const workspaceRoutes = evaluate(await read("lib/workspaceRoutes.ts"));
 
@@ -129,7 +130,9 @@ const stages = [
 const lead = { id: "lead-1", name: "Local contact", phone: "+77000000000", status: "new", stageId,
   source: "website", campaign: "Preserve campaign", sourceId: workspace, responsibleUserId: actor,
   metaCampaignLaunchId: actor, notes: "Original note" };
-type Access = { actorId: string; workspaceId: string; isCurrent: () => boolean; request: (path: string, init?: RequestInit) => Promise<Response> };
+type Access = { actorId: string; workspaceId: string; isCurrent: () => boolean;
+  request: (path: string, init?: RequestInit) => Promise<Response>; loadTeamAnalytics: (days: number) => Promise<Response> };
+type TeamAccess = Pick<Access, "isCurrent" | "loadTeamAnalytics">;
 
 function setup(role = "lead_manager") {
   const driver = hookDriver();
@@ -180,7 +183,8 @@ function setup(role = "lead_manager") {
       },
     },
   });
-  const access: Access = { actorId: actor, workspaceId: workspace, isCurrent: () => true, request: crmFetch };
+  const access: Access = { actorId: actor, workspaceId: workspace, isCurrent: () => true, request: crmFetch,
+    loadTeamAnalytics: async (days) => Response.json(teamPayload(days)) };
   return {
     driver, module, access, requests, updates, toasts, collection: () => collection,
     content() { driver.mount(() => module.fixture.LeadsPageContent({ access })); },
@@ -196,6 +200,64 @@ function setup(role = "lead_manager") {
 function button(driver: ReturnType<typeof hookDriver>, name: string) {
   const found = driver.nodes().find((node) => node.type === "button" && label(node.props.children) === name);
   assert.ok(found, `missing button: ${name}`); return found;
+}
+
+function teamPayload(days = 30) {
+  return { success: true, mode: "supabase", data: { analytics: {
+    generatedAt: "2026-10-15T10:00:00Z",
+    period: { days, from: new Date(Date.parse("2026-10-15T10:00:00Z") - days * 86400000).toISOString(), to: "2026-10-15T10:00:00Z" },
+    totalLeads: 20, unassignedLeads: 5, otherAssigneeLeads: 4, activityStatus: "available",
+    members: [
+      { staffId: "manager", name: "Manager fixture", role: "lead_manager", status: "active",
+        assigned: { total: 9, new: 1, inProgress: 2, booked: 3, lost: 1, other: 2 },
+        activity: { updatedEvents: 13, createdEvents: 7, touchedLeads: 6, lastRecordedAt: "2026-10-14T09:00:00Z" } },
+      { staffId: "admin", name: "Admin fixture", role: "admin", status: "paused",
+        assigned: { total: 2, new: 0, inProgress: 0, booked: 0, lost: 0, other: 2 }, activity: null },
+      { staffId: "owner", name: "Owner fixture", role: "owner", status: "active",
+        assigned: { total: 0, new: 0, inProgress: 0, booked: 0, lost: 0, other: 0 },
+        activity: { updatedEvents: 0, createdEvents: 0, touchedLeads: 0, lastRecordedAt: null } },
+    ],
+  } } };
+}
+
+function teamSetup() {
+  const driver = hookDriver();
+  let current = true;
+  const requests: Array<{ days: number; response: ReturnType<typeof deferred<Response>> }> = [];
+  const access: TeamAccess = { isCurrent: () => current,
+    loadTeamAnalytics: (days) => {
+      const response = deferred<Response>(); requests.push({ days, response }); return response.promise;
+    } };
+  let propAccess = access;
+  const module = evaluate(teamAnalytics, {}, { react: driver.hooks,
+    "@/lib/permissions": { roleLabels },
+  });
+  driver.mount(() => module.LeadTeamAnalytics({ access: propAccess }));
+  return {
+    driver, requests, access,
+    async toggle(open: boolean) {
+      const details = driver.nodes().find((node) => node.type === "details"); assert.ok(details);
+      details.props.onToggle({ currentTarget: { open } }); await driver.flush();
+    },
+    async period(days: number) {
+      const select = driver.nodes().find((node) => node.type === "select"); assert.ok(select);
+      select.props.onChange({ target: { value: String(days) } }); await driver.flush();
+    },
+    async refresh() {
+      const refresh = driver.nodes().find((node) => node.props["aria-label"] === "Обновить работу команды"); assert.ok(refresh);
+      refresh.props.onClick(); await driver.flush();
+    },
+    async resolve(index: number, payload = teamPayload(), status = 200) {
+      requests[index].response.resolve(Response.json(payload, { status })); await driver.flush();
+    },
+    invalidate() { current = false; driver.invalidate(); },
+    replaceAccess(next: TeamAccess) { propAccess = next; driver.invalidate(); },
+    text: () => label(driver.tree()),
+    cells(name = "Manager fixture") {
+      const row = driver.nodes().find((node) => node.type === "tr" && label(node).includes(name)); assert.ok(row);
+      return nodes(row).filter((node) => node.type === "td").map(label);
+    },
+  };
 }
 
 test("lead manager routes, home and both menus are leads-only; other route permissions are unchanged", async () => {
@@ -347,6 +409,218 @@ test('mortgage manual-distribution filters show unassigned or one manager withou
   fixture.driver.dispose();
 });
 
+test("mortgage summaries follow responsibility while stage and search only narrow the list", async () => {
+  for (const role of ["owner", "admin"]) {
+    const fixture = setup(role);
+    fixture.setAuth({ workspacePurpose: "mortgage_leads" });
+    fixture.setLeads([
+      { ...lead, id: "a-new", name: "A new" },
+      { ...lead, id: "a-progress", name: "A progress", stageId: undefined, status: "in_progress" },
+      { ...lead, id: "a-booked", name: "A booked", stageId: undefined, status: "booked" },
+      { ...lead, id: "a-lost", name: "A lost", stageId: undefined, status: "lost" },
+      { ...lead, id: "b-new", name: "B new", responsibleUserId: workspace },
+      { ...lead, id: "b-lost", name: "B lost", stageId: undefined, status: "lost", responsibleUserId: workspace },
+      { ...lead, id: "u-progress", name: "Unassigned progress", stageId: undefined, status: "in_progress", responsibleUserId: undefined },
+      { ...lead, id: "u-booked", name: "Unassigned booked", stageId: undefined, status: "booked", responsibleUserId: null },
+      { ...lead, id: "u-lost", name: "Unassigned lost", stageId: undefined, status: "lost", responsibleUserId: "" },
+    ]);
+    fixture.content(); await fixture.driver.flush();
+    // Summary order: total, new, in progress, booked, lost.
+    const summary = () => fixture.driver.nodes().filter((node) => node.type === "MetricCard").map((node) => node.props.value);
+    const selectResponsible = async (value: string) => {
+      const select = fixture.driver.nodes().find((node) => node.props["aria-label"] === "Фильтр по ответственному");
+      assert.ok(select);
+      select.props.onChange({ target: { value } }); await fixture.driver.flush();
+    };
+    const search = async (value: string) => {
+      const input = fixture.driver.nodes().find((node) => node.type === "input" && node.props.type === "search");
+      assert.ok(input);
+      input.props.onChange({ target: { value } }); await fixture.driver.flush();
+    };
+
+    assert.deepEqual(summary(), [9, 2, 2, 2, 3], role);
+    await selectResponsible(actor);
+    assert.deepEqual(summary(), [4, 1, 1, 1, 1], role);
+    button(fixture.driver, "Новая").props.onClick(); await fixture.driver.flush();
+    assert.match(label(fixture.driver.tree()), /A new/);
+    assert.doesNotMatch(label(fixture.driver.tree()), /A progress|A booked|A lost|B new|Unassigned/);
+    assert.deepEqual(summary(), [4, 1, 1, 1, 1], "stage selection must not zero other summaries");
+
+    await search("no matching lead");
+    assert.doesNotMatch(label(fixture.driver.tree()), /A new/);
+    assert.deepEqual(summary(), [4, 1, 1, 1, 1], "search must keep its existing list-only policy");
+    await search("a NEW");
+    assert.match(label(fixture.driver.tree()), /A new/);
+    assert.deepEqual(summary(), [4, 1, 1, 1, 1]);
+    await search("");
+    button(fixture.driver, "Все").props.onClick(); await fixture.driver.flush();
+
+    await selectResponsible("unassigned");
+    assert.deepEqual(summary(), [3, 0, 1, 1, 1]);
+    assert.match(label(fixture.driver.tree()), /Unassigned progress|Unassigned booked|Unassigned lost/);
+    assert.doesNotMatch(label(fixture.driver.tree()), /A new|B new/);
+    await selectResponsible(workspace);
+    assert.deepEqual(summary(), [2, 1, 0, 0, 1]);
+    await selectResponsible("missing-staff");
+    assert.deepEqual(summary(), [0, 0, 0, 0, 0]);
+    await selectResponsible("all");
+    assert.deepEqual(summary(), [9, 2, 2, 2, 3]);
+    assert.deepEqual(fixture.updates, []);
+    fixture.driver.dispose();
+  }
+});
+
+test("team analytics mounts below summaries only for mortgage owner/admin and is keyed by scope", async () => {
+  for (const purpose of ["mortgage_leads", "clinic_services", "marketing"]) {
+    for (const role of ["owner", "admin", "lead_manager", "manager", "marketer"]) {
+      const fixture = setup(role); fixture.setAuth({ workspacePurpose: purpose });
+      fixture.content(); await fixture.driver.flush();
+      const component = fixture.driver.nodes().find((node) => node.type === "LeadTeamAnalytics");
+      const allowed = purpose === "mortgage_leads" && ["owner", "admin"].includes(role);
+      assert.equal(Boolean(component), allowed, `${purpose}/${role}`);
+      if (component) {
+        assert.equal(component.props.access, fixture.access);
+        assert.equal(component.key, JSON.stringify([actor, workspace, role]));
+        const summary = fixture.driver.nodes().findIndex((node) => node.props["aria-label"] === "Сводка по заявкам");
+        assert.ok(fixture.driver.nodes().indexOf(component) > summary);
+      }
+      assert.equal(fixture.requests.some((request) => request.path.includes("lead-team-analytics")), false);
+      fixture.driver.dispose();
+    }
+  }
+});
+
+test("team analytics is lazy, uses bound access, renders factual snapshots and clears on collapse", async () => {
+  const fixture = teamSetup(); await fixture.driver.flush();
+  assert.equal(fixture.requests.length, 0);
+  assert.match(fixture.text(), /Работа команды/);
+  assert.doesNotMatch(fixture.text(), /Manager fixture|Всего заявок/);
+  await fixture.toggle(true);
+  assert.equal(fixture.requests.length, 1);
+  assert.equal(fixture.requests[0].days, 30);
+  assert.deepEqual(Object.keys(fixture.access).sort(), ["isCurrent", "loadTeamAnalytics"]);
+  assert.match(fixture.text(), /Загрузка работы команды/);
+  await fixture.resolve(0);
+  assert.match(fixture.text(), /Текущие заявки · все время/);
+  assert.match(fixture.text(), /Не назначены5Другие ответственные4/);
+  assert.match(fixture.text(), /последние 30 дней/);
+  assert.match(fixture.text(), /Журнал сохранений: возможны пропуски/);
+  for (const text of ["Активен", "Неактивен", "Менеджер заявок", "Администратор", "Владелец"]) {
+    assert.ok(fixture.text().includes(text), text);
+  }
+  assert.deepEqual(fixture.cells().slice(0, 9), ["9", "1", "2", "3", "1", "2", "13", "7", "6"]);
+  assert.notEqual(fixture.cells()[9], "-");
+  assert.deepEqual(fixture.cells("Admin fixture").slice(6), ["-", "-", "-", "-"]);
+  assert.deepEqual(fixture.cells("Owner fixture").slice(6), ["0", "0", "0", "-"]);
+  assert.doesNotMatch(fixture.text(), /CPL|ROI|конверси|звонк|платеж|балл|первый ответ/i);
+  const scroller = fixture.driver.nodes().find((node) => node.props.role === "region"); assert.ok(scroller);
+  assert.match(scroller.props.className, /max-w-full.*overflow-x-auto/);
+  const identityHeadings = nodes(scroller).filter((node) => node.type === "th" && (node.props.rowSpan === 2 || node.props.scope === "row"));
+  assert.equal(identityHeadings.length, 4, "employee header and every member name stay visible while scrolling");
+  for (const heading of identityHeadings) {
+    assert.match(heading.props.className, /\bsticky\b.*\bleft-0\b/);
+    assert.match(heading.props.className, /\bmin-w-44\b.*\bmax-w-56\b/);
+    assert.equal(heading.props.style.background, "var(--negis-surface)");
+    assert.match(heading.props.className, heading.props.rowSpan === 2 ? /\bz-20\b/ : /\bz-10\b/);
+  }
+  await fixture.toggle(false);
+  assert.doesNotMatch(fixture.text(), /Manager fixture|Всего заявок/);
+  await fixture.toggle(true);
+  assert.equal(fixture.requests.length, 2);
+  assert.doesNotMatch(fixture.text(), /Manager fixture/);
+  fixture.driver.dispose();
+});
+
+test("team analytics period changes clear data and ignore superseded responses and JSON bodies", async () => {
+  const fixture = teamSetup(); await fixture.driver.flush(); await fixture.toggle(true); await fixture.resolve(0);
+  const oldBody = deferred<unknown>();
+  await fixture.refresh();
+  assert.doesNotMatch(fixture.text(), /Manager fixture|Всего заявок/);
+  fixture.requests[1].response.resolve({ ok: true, json: () => oldBody.promise } as Response);
+  await fixture.driver.flush();
+  await fixture.period(7);
+  assert.equal(fixture.requests[2].days, 7);
+  assert.doesNotMatch(fixture.text(), /Manager fixture/);
+  await fixture.resolve(2, teamPayload(7));
+  oldBody.resolve(teamPayload()); await fixture.driver.flush();
+  assert.match(fixture.text(), /последние 7 дней/);
+  assert.doesNotMatch(fixture.text(), /последние 30 дней/);
+  await fixture.period(90);
+  assert.equal(fixture.requests[3].days, 90);
+  assert.doesNotMatch(fixture.text(), /Manager fixture|Всего заявок/);
+  await fixture.period(30);
+  await fixture.resolve(4);
+  const stale = teamPayload(90); stale.data.analytics.members[0].name = "Stale fixture";
+  await fixture.resolve(3, stale);
+  assert.match(fixture.text(), /Manager fixture/);
+  assert.doesNotMatch(fixture.text(), /Stale fixture|последние 90 дней/);
+  const count = fixture.requests.length;
+  await fixture.period(14);
+  assert.equal(fixture.requests.length, count, "only 7/30/90 can dispatch");
+  fixture.driver.dispose();
+});
+
+test("team analytics refresh failures and invalid/demo contracts clear prior data without invented zeroes", async () => {
+  const demo = teamPayload(); demo.mode = "demo";
+  const invalid = teamPayload(); invalid.data.analytics.members[0].assigned.other = -1;
+  for (const [payload, status] of [[teamPayload(), 403], [teamPayload(), 502], [demo, 200], [invalid, 200], [teamPayload(7), 200]] as const) {
+    const fixture = teamSetup(); await fixture.driver.flush(); await fixture.toggle(true); await fixture.resolve(0);
+    assert.match(fixture.text(), /Manager fixture/);
+    await fixture.refresh();
+    assert.doesNotMatch(fixture.text(), /Manager fixture|Всего заявок/);
+    await fixture.resolve(1, payload, status);
+    assert.doesNotMatch(fixture.text(), /Manager fixture|Всего заявок/);
+    assert.match(fixture.text(), status === 403 ? /Нет доступа/ : /Не удалось загрузить/);
+    assert.ok(fixture.driver.nodes().some((node) => node.props.role === "alert"));
+    fixture.driver.dispose();
+  }
+});
+
+test("team analytics unavailable activity is not zero and empty members keep snapshot counters", async () => {
+  const fixture = teamSetup(); await fixture.driver.flush(); await fixture.toggle(true);
+  const payload = teamPayload(); payload.data.analytics.activityStatus = "unavailable";
+  await fixture.resolve(0, payload);
+  assert.deepEqual(fixture.cells().slice(6), ["-", "-", "-", "-"]);
+  assert.match(fixture.text(), /Активность недоступна/);
+  assert.equal(fixture.cells()[5], "2", "other statuses remain visible");
+  await fixture.refresh();
+  const empty = teamPayload(); empty.data.analytics.members = [];
+  await fixture.resolve(1, empty);
+  assert.match(fixture.text(), /Сотрудников нет/);
+  assert.match(fixture.text(), /Не назначены5Другие ответственные4/);
+  assert.equal(fixture.driver.nodes().some((node) => node.type === "table"), false);
+  fixture.driver.dispose();
+});
+
+test("team analytics captures access once and ignores invalidated scopes and late JSON after cleanup", async () => {
+  const fixture = teamSetup(); await fixture.driver.flush();
+  fixture.replaceAccess({ isCurrent: () => true,
+    loadTeamAnalytics: async () => { throw new Error("Unbound loader"); } });
+  await fixture.driver.flush(); await fixture.toggle(true);
+  assert.equal(fixture.requests[0].days, 30);
+  fixture.invalidate(); await fixture.driver.flush();
+  assert.equal(fixture.driver.tree(), null);
+  let parsed = false;
+  fixture.requests[0].response.resolve({ ok: true, json: async () => { parsed = true; return teamPayload(); } } as Response);
+  await fixture.driver.flush(); assert.equal(parsed, false); assert.equal(fixture.driver.tree(), null);
+  fixture.driver.dispose();
+
+  for (const cleanup of ["invalidate", "unmount", "collapse"]) {
+    const pending = teamSetup(); await pending.driver.flush(); await pending.toggle(true);
+    const body = deferred<unknown>(); let parsing = false;
+    pending.requests[0].response.resolve({ ok: true, json: () => { parsing = true; return body.promise; } } as Response);
+    await pending.driver.flush(); assert.equal(parsing, true);
+    if (cleanup === "invalidate") { pending.invalidate(); await pending.driver.flush(); }
+    else if (cleanup === "unmount") pending.driver.dispose();
+    else await pending.toggle(false);
+    body.resolve(teamPayload()); await pending.driver.flush();
+    assert.doesNotMatch(pending.text(), /Manager fixture|Всего заявок/, cleanup);
+    pending.driver.dispose();
+  }
+  const expired = teamSetup(); expired.invalidate(); await expired.driver.flush();
+  assert.equal(expired.driver.tree(), null); assert.equal(expired.requests.length, 0); expired.driver.dispose();
+});
+
 test("mortgage routes intersect roles and never mount medical, advertising or unsupported pages", async () => {
   const app = await read("App.tsx");
   for (const role of ["owner", "admin", "lead_manager", "manager", "marketer", "doctor"]) {
@@ -398,25 +672,40 @@ test("lifetime aborts immediately on account change, never revives on A-B-A, and
   const init = fixture.requests[0].init!;
   assert.equal(init.cache, "no-store"); assert.equal(init.expectedUserId, actor);
   assert.equal(init.signal?.aborted, false);
+  await first.loadTeamAnalytics(30);
+  assert.equal(fixture.requests[1].path, `/api/crm/lead-team-analytics?workspaceId=${encodeURIComponent(workspace)}&days=30`);
+  assert.equal(fixture.requests[1].init?.cache, "no-store");
+  assert.equal(fixture.requests[1].init?.expectedUserId, actor);
+  assert.equal(fixture.requests[1].init?.signal, init.signal);
   fixture.emit("actor-b"); fixture.emit(actor);
   assert.equal(first.isCurrent(), false); assert.equal(init.signal?.aborted, true);
   await assert.rejects(first.request("/api/crm/leads"), { name: "AbortError" });
+  await assert.rejects(first.loadTeamAnalytics(7), { name: "AbortError" });
+  assert.equal(fixture.requests.length, 2, "expired analytics loader must not dispatch");
   fixture.driver.replayLayout(); await fixture.driver.flush();
   const next: Access = fixture.driver.tree().props.access;
   assert.equal(next.isCurrent(), true); assert.equal(first.isCurrent(), false);
+  await next.loadTeamAnalytics(90);
+  assert.equal(fixture.requests[2].path.endsWith("&days=90"), true);
+  assert.notEqual(fixture.requests[2].init?.signal, init.signal);
+  assert.equal(fixture.requests[2].init?.signal?.aborted, false);
   fixture.setAuth({ clinicId: "workspace-b" }); await fixture.driver.flush();
   assert.equal(next.isCurrent(), false);
+  await assert.rejects(next.loadTeamAnalytics(30), { name: "AbortError" });
   fixture.driver.dispose(); assert.equal(next.isCurrent(), false);
 });
 
-test("guarded reference requests reject late response and late body parse", async () => {
-  const fixture = setup(); fixture.lifetime(); await fixture.driver.flush();
-  const access: Access = fixture.driver.tree().props.access;
-  const pending = deferred<Response>(); fixture.reply(() => pending.promise);
-  const requested = access.request("/api/crm/lead-stages");
-  fixture.emit("actor-b"); pending.resolve(Response.json({ success: true }));
-  await assert.rejects(requested, { name: "AbortError" }); fixture.driver.dispose();
+test("guarded reference and team analytics requests reject late response and late body parse", async () => {
+  for (const request of [(access: Access) => access.request("/api/crm/lead-stages"), (access: Access) => access.loadTeamAnalytics(30)]) {
+    const fixture = setup(); fixture.lifetime(); await fixture.driver.flush();
+    const access: Access = fixture.driver.tree().props.access;
+    const pending = deferred<Response>(); fixture.reply(() => pending.promise);
+    const requested = request(access);
+    fixture.emit("actor-b"); pending.resolve(Response.json({ success: true }));
+    await assert.rejects(requested, { name: "AbortError" }); fixture.driver.dispose();
+  }
 
+  const fixture = setup();
   const body = deferred<string>(); let alive = true;
   const parsed = fixture.module.fixture.loadTaxonomyList({ endpoint: "/api/crm/lead-stages", workspaceId: workspace,
     listKey: "stages", mapItem: (value: unknown) => value, isCurrent: () => alive,

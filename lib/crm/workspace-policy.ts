@@ -35,6 +35,7 @@ const MORTGAGE_METHODS: Readonly<Record<string, readonly string[]>> = {
   'lead-stages': ['GET'],
   'lead-sources': ['GET'],
   'lead-assignees': ['GET'],
+  'lead-team-analytics': ['GET'],
   staff: ['GET', 'PATCH'],
   'staff-credentials': ['POST', 'PATCH'],
   'staff-invitations': ['GET', 'POST', 'PATCH'],

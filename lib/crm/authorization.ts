@@ -171,6 +171,7 @@ export const CRM_RESOURCE_AUTHORIZATION: Readonly<Record<string, RouteAuthorizat
 export const CRM_ROUTE_AUTHORIZATION: Readonly<Record<string, RouteAuthorization>> = {
   // Assignment needs names and staff IDs, not the administrative staff directory.
   "lead-assignees": { kind: "browser", methods: ["GET"], permissions: { GET: "manage_leads" } },
+  "lead-team-analytics": { kind: "browser", methods: ["GET"], roles: WORKSPACE_ADMIN },
   // Identity bootstrap: any authenticated user, before a workspace is chosen.
   "auth-context": { kind: "bootstrap", methods: ["GET"] },
   "operator-account": { kind: "bootstrap", methods: ["GET", "POST", "PATCH"] },
