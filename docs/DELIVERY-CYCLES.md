@@ -1073,6 +1073,50 @@
   локальный Control, регрессии, тестовая команда и документация. Общий M1
   не завершён; опубликованный CRM Preview остаётся acc7145.
 
+### M1: временный доступ Control, 14 октября - остановлено, cleanup не завершён
+
+- [x] Владелец отдельно разрешил только тестовой ветке временные platform owner
+  для существующего eldar1@mail.ru и CORS origin http://127.0.0.1:5185,
+  перевыпуск acc7145, затем одно пространство «QA Baspana — онбординг» и
+  owner medinaqa.20261014.bowner / UTC через форму человеком. Это не разрешение
+  на семь настоящих Baspana аккаунтов, рабочие роли, миграции или интеграции.
+- [x] Read-only Auth Users подтвердил medina-os-site-test / ukiobbwsdoblooynzlnx,
+  ровно одну строку существующего тестового владельца и прежние 5 аккаунтов.
+  Не читали пароли/токены, ничего не создавали/обновляли в Auth или БД.
+- [x] В Vercel оба выбранных encrypted overrides имели baseline ровно один
+  пробел, target только preview и прежнюю release-ветку. Baseline/restore plan
+  сохранён в ignored node_modules/.cache/m1-control-access-baseline-20261014.json.
+  Временно изменены только MEDINA_PLATFORM_OWNER_IDS и MEDINA_CONTROL_ORIGINS;
+  остальные 49 overrides по updatedAt не изменились.
+- [x] Официальным CLI создан один Preview с точным acc7145 SHA/ref, без новых
+  project/production/alias overrides: **dpl_J1kkEu63cj7oYC4M1UZweHm4N9yq**,
+  **Ready**, **Preview**, сборка 50 секунд:
+  https://negis-medcall-mvp-api-server-g90saa028-yeldar-s-projects.vercel.app .
+  Код Control 4dffbf6 оставался только локальным, не переносился в CRM release.
+- [x] Автоматическая настройка публичного тестового ключа и перезапуск локального
+  сервера отклонены execution policy до CreateProcess. Команда не запускалась;
+  ключ не прочитан/перенесён, server/env files/сессии не изменены. Альтернативный
+  способ выполнить тот же запрещённый перенос не применялся. Local 5185
+  по-прежнему исходный PID 8376, форма/поля/submit disabled. Вход не принят.
+- [x] Чтобы не оставлять project overrides активными без продолжения, оба
+  восстановлены из baseline; повторный официальный GET подтвердил ровно один
+  пробел в каждом, прежний preview/branch scope. Working production остался
+  dpl_9GKvizmEDhX7Gpbw77PngtNoWXSL / e11bb2f. База, аккаунты, staff rights,
+  цены/финансы, WhatsApp, Meta, сайт ИП и чужие 059/065 не изменены.
+- [ ] **Временный g90saa028 ещё не выведен из эксплуатации.** Восстановление
+  project env не меняет копию окружения уже выпущенного Vercel deployment.
+  Поэтому полный отзыв временного platform/CORS доступа НЕ подтверждён.
+  До продолжения нужно согласовать удаление только этого generated Preview,
+  без проекта/БД/пользователей/кода; отдельный delete-dialog подготовлен,
+  окончательная кнопка не нажата. Снимок в ignored cache:
+  m1-control-preview-delete-confirm-20261014.jpg. Baseline помечен
+  env_restored_preview_retirement_pending / restoreRequired=true.
+- [ ] Создание QA workspace/owner и реальных сотрудников не выполнено.
+  Не повторять выдачу временных прав или выпуск ради той же заблокированной
+  автоматической настройки. Сначала завершить cleanup и определить разрешённый
+  способ настройки формы; серверные guards не обходить. Неизменённые тесты
+  и build в этом операционном пункте не повторялись. Общий M1 не готов.
+
 ### M1: приватность журналов входящих WhatsApp, 13 октября - готово локально
 
 - [x] При подготовке собственного канала найден риск в обоих адаптерах:
