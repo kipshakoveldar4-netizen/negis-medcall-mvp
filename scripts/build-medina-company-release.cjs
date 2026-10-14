@@ -29,7 +29,7 @@ function buildCompanyRelease(destination) {
   fs.mkdirSync(staticDirectory, { recursive: true });
   const page = fs.readFileSync(source);
   fs.writeFileSync(path.join(staticDirectory, 'index.html'), page);
-  fs.writeFileSync(path.join(staticDirectory, 'robots.txt'), 'User-agent: *\nDisallow: /\n');
+  fs.writeFileSync(path.join(staticDirectory, 'robots.txt'), 'User-agent: facebookexternalhit\nAllow: /\n\nUser-agent: *\nDisallow: /\n');
   fs.writeFileSync(path.join(staticDirectory, '_headers'), '/*\n'
     + Object.entries(headers).map(([name, value]) => `  ${name}: ${value}\n`).join(''));
   fs.writeFileSync(path.join(staticDirectory, '404.html'), '<!doctype html>\n<html lang="ru"><head>'

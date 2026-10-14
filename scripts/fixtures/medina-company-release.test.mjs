@@ -89,11 +89,11 @@ test('source contract: index bytes and reported SHA256 equal the prepared compan
   assert.equal(sha256(indexPage), release.sha256);
 });
 
-test('source contract: index and 404 are noindex and robots.txt denies every crawler and path', () => {
+test('source contract: index and 404 stay noindex and only the approved Meta crawler can read the site', () => {
   for (const page of [indexPage, notFoundPage]) {
     assert.match(page.toString('utf8'), /<meta\s+name="robots"\s+content="noindex, nofollow, noarchive"\s*\/?>/i);
   }
-  assert.equal(robots, 'User-agent: *\nDisallow: /\n');
+  assert.equal(robots, 'User-agent: facebookexternalhit\nAllow: /\n\nUser-agent: *\nDisallow: /\n');
 });
 
 test('source contract: global _headers declares CSP, noindex and security response headers', () => {
