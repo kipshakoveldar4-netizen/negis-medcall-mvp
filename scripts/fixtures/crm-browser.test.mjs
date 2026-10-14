@@ -68,3 +68,32 @@ test("opt-in retry simulation keeps one in-memory row and demands the identical 
   assert.equal(restored.data.item.client, "Synthetic retry");
   assert.deepEqual(retry.stats(), { calls: 4, rows: 1 });
 });
+
+test("mortgage team preview remains synthetic and restricts analytics to owner/admin", async () => {
+  for (const [role, purpose, expected] of [["owner", "mortgage_leads", 200], ["admin", "mortgage_leads", 200],
+    ["lead_manager", "mortgage_leads", 403], ["owner", "clinic_services", 403]]) {
+    const storageBefore = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+    const windowBefore = Object.getOwnPropertyDescriptor(globalThis, "window");
+    Object.defineProperty(globalThis, "localStorage", { configurable: true, value: { setItem() {} } });
+    Object.defineProperty(globalThis, "window", { configurable: true, value: {
+      location: { search: `?fixtureRole=${role}&fixturePurpose=${purpose}` },
+    } });
+    try {
+      const isolated = await import(`./crm-browser-mocks.ts?team-${role}-${purpose}`);
+      const response = await isolated.crmFetch("/api/crm/lead-team-analytics?days=7");
+      assert.equal(response.status, expected);
+      if (expected === 200) {
+        const { data: { analytics } } = await response.json();
+        assert.equal(analytics.members.length, 5);
+        assert.equal(analytics.period.days, 7);
+        assert.equal(analytics.members.reduce((total, member) => total + member.assigned.total, 0)
+          + analytics.unassignedLeads + analytics.otherAssigneeLeads, analytics.totalLeads);
+        assert.ok(analytics.members.every((member) => member.name.startsWith("Тестов")));
+        assert.equal((await isolated.crmFetch("/api/crm/lead-team-analytics", { method: "POST" })).status, 403);
+      }
+    } finally {
+      if (storageBefore) Object.defineProperty(globalThis, "localStorage", storageBefore); else delete globalThis.localStorage;
+      if (windowBefore) Object.defineProperty(globalThis, "window", windowBefore); else delete globalThis.window;
+    }
+  }
+});

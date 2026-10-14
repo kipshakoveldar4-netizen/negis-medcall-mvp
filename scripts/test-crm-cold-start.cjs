@@ -61,7 +61,7 @@ try {
       assert.ok(!JSON.stringify(body).includes('SIMULATED_PRIVATE_RENDERER_FAILURE'));
     }
     (async () => {
-      for (const route of ['auth-context', 'appointments', 'clients', 'staff', 'site-blog', 'site-inquiry-deletion-preview']) {
+      for (const route of ['auth-context', 'appointments', 'clients', 'staff', 'site-blog', 'site-inquiry-deletion-preview', 'lead-team-analytics']) {
         await check(route, 401);
       }
       await check('auth-context', 401, 'Bearer invalid-test-token');
@@ -70,7 +70,7 @@ try {
       await check('site-inquiry-deletion', 401, 'Bearer invalid-test-token', 'POST');
       await check('site-page', brokenRenderer ? 503 : 404);
       const accessChecks = await require(${JSON.stringify(path.join(root, 'scripts', 'fixtures', 'crm-runtime-access.cjs'))})(handler, { brokenRenderer });
-      console.log('CommonJS CRM cold start (' + (brokenRenderer ? 'broken site' : 'normal') + '): 11 anonymous/invalid-token + ' + accessChecks + ' authenticated/denial checks passed; isolated fixtures, no network or credentials.');
+      console.log('CommonJS CRM cold start (' + (brokenRenderer ? 'broken site' : 'normal') + '): 12 anonymous/invalid-token + ' + accessChecks + ' authenticated/denial checks passed; isolated fixtures, no network or credentials.');
     })().catch(error => { console.error(error); process.exitCode = 1; });
   `], { cwd: output, env: environment, encoding: 'utf8', timeout: 30000 });
   if (child.stdout) process.stdout.write(child.stdout);
