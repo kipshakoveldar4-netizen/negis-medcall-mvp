@@ -92,7 +92,7 @@
     "test:control-portal": "tsx --test ./src/medina-control-portal.test.ts",
     "test:onboarding-portal": "tsx --test ./src/medina-onboarding.test.ts ./src/medina-owner-login-runtime.test.ts ./src/medina-owner-login-ui.test.ts",
     "test:text-provider": "tsx --test ./src/medina-text-provider.test.ts",
-    "test:staff-credentials": "tsx --test ./src/medina-staff-credentials.test.ts",
+    "test:staff-credentials": "tsx --test ./src/medina-staff-credentials.test.ts ./src/medina-staff-exact-login-runtime.test.ts",
     "test:staff-logins": "tsx --test ./src/medina-staff-logins.test.ts",
     "test:contact-privacy": "tsx --test ./src/medina-contact-privacy.test.ts",
     "test:own-work": "tsx --test ./src/medina-own-work.test.ts",
