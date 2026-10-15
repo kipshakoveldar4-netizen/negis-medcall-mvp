@@ -17,10 +17,12 @@ const { default: react } = await import(pathToFileURL(require.resolve("@vitejs/p
 const { default: tailwindcss } = await import(pathToFileURL(require.resolve("@tailwindcss/vite")).href);
 const entryPath = path.join(root, "scripts/fixtures/crm-browser.tsx");
 const mocks = path.join(root, "scripts/fixtures/crm-browser-mocks.ts");
-const routes = new Set(["/", "/appointments", "/clients", "/sales", "/leads", "/login"]);
+const routes = new Set(["/", "/appointments", "/clients", "/sales", "/leads", "/login", "/dashboard", "/tasks", "/analytics", "/admin"]);
+const requestedPort=Number(process.argv.find(arg=>arg.startsWith('--port='))?.split('=')[1]||5181);
+if(!Number.isInteger(requestedPort)||requestedPort<1024||requestedPort>65535)throw new Error('Invalid local fixture port');
 const server = await createServer({
   configFile: false, root: frontend, envDir: false, appType: "custom",
-  cacheDir: path.join(tmpdir(), "medina-crm-browser-vite"),
+  cacheDir: path.join(tmpdir(), `medina-crm-browser-vite-${requestedPort}`),
   optimizeDeps: { entries: [entryPath] },
   resolve: { dedupe: ["react", "react-dom"], alias: [
     { find: "@/contexts/AuthContext", replacement: mocks },
@@ -52,7 +54,7 @@ const server = await createServer({
       res.end(await vite.transformIndexHtml(pathname, `<!doctype html><html lang="ru"><head><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>Medina OS · тестовая CRM</title></head><body><div id="root"></div><script type="module" src="/@fs/${entryPath.replaceAll("\\", "/")}"></script></body></html>`));
     });
   } }],
-  server: { host: "127.0.0.1", port: 5181, strictPort: false, fs: { allow: [root] } },
+  server: { host: "127.0.0.1", port: requestedPort, strictPort: true, fs: { allow: [root] } },
 });
 await server.listen();
 server.printUrls();

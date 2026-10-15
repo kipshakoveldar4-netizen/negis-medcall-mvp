@@ -9,10 +9,23 @@ import ClientsPage from "../../artifacts/negis/src/pages/ClientsPage";
 import SalesPage from "../../artifacts/negis/src/pages/SalesPage";
 import LeadsPage from "../../artifacts/negis/src/pages/LeadsPage";
 import Login from "../../artifacts/negis/src/pages/Login";
+import AdminCenter from "../../artifacts/negis/src/pages/AdminCenter";
+import MortgageOverview from '../../artifacts/negis/src/pages/MortgageOverview';
+import MortgageClients from '../../artifacts/negis/src/pages/MortgageClients';
+import MortgageCalendar from '../../artifacts/negis/src/pages/MortgageCalendar';
+import MortgageTasks from '../../artifacts/negis/src/pages/MortgageTasks';
+import MortgageAnalytics from '../../artifacts/negis/src/pages/MortgageAnalytics';
+import {useAuth} from './crm-browser-mocks';
+
+const mortgage=useAuth().workspacePurpose==='mortgage_leads';
 
 createRoot(document.getElementById("root")!).render(<Router><Switch>
-  <Route path="/appointments" component={AppointmentsPage} />
-  <Route path="/clients" component={ClientsPage} />
+  <Route path="/appointments" component={mortgage?MortgageCalendar:AppointmentsPage} />
+  <Route path="/clients" component={mortgage?MortgageClients:ClientsPage} />
+  <Route path="/dashboard" component={MortgageOverview} />
+  <Route path="/tasks" component={MortgageTasks} />
+  <Route path="/analytics" component={MortgageAnalytics} />
+  <Route path="/admin" component={AdminCenter} />
   <Route path="/sales" component={SalesPage} />
   <Route path="/leads" component={LeadsPage} />
   <Route path="/login" component={Login} />

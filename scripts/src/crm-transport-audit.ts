@@ -181,15 +181,237 @@ function hasVerifiedAdminTransport(sources: CrmSources): boolean {
   return valid && imports === 1 && calls === 1 && mounts === 1 && sessions === 1 && contents === 1 && aliases === 1 && wrappers === 1;
 }
 
+const mortgageFile = "lib/mortgage-workspace.tsx";
+const mortgageAnalyticsFile = "pages/MortgageAnalytics.tsx";
+
+// Prove this context -> hook -> consumer chain, not the names `request` or
+// `mutate`. Only the exact call sites below receive an exemption.
+function verifiedMortgageReceivers(sources: CrmSources): Map<string, Set<number>> | undefined {
+  const files = new Map([...sources].filter(([file]) => file === mortgageFile || file === mortgageAnalyticsFile)
+    .map(([file, source]) => [file, ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)]));
+  const model = files.get(mortgageFile);
+  if (!model) return undefined;
+  // Binding identities distinguish a verified closure from a same-named shadow.
+  const program = ts.createProgram([...files.keys()], { noLib: true, noResolve: true }, {
+    getSourceFile: (file) => files.get(file), getDefaultLibFileName: () => "", writeFile: () => {},
+    getCurrentDirectory: () => "", getDirectories: () => [], fileExists: (file) => files.has(file),
+    readFile: (file) => sources.get(file), getCanonicalFileName: (file) => file,
+    useCaseSensitiveFileNames: () => true, getNewLine: () => "\n",
+  });
+  const checker = program.getTypeChecker();
+  const nodes = (root: ts.Node): ts.Node[] => {
+    const result: ts.Node[] = [];
+    const visit = (node: ts.Node) => { result.push(node); ts.forEachChild(node, visit); };
+    visit(root);
+    return result;
+  };
+  const one = <T,>(values: T[]): T | undefined => values.length === 1 ? values[0] : undefined;
+  const symbol = (node: ts.Node) => ts.isIdentifier(node) && ts.isShorthandPropertyAssignment(node.parent)
+    ? checker.getShorthandAssignmentValueSymbol(node.parent)
+    : ts.isExportSpecifier(node.parent) ? checker.getExportSpecifierLocalTargetSymbol(node.parent) : checker.getSymbolAtLocation(node);
+  const boundTo = (node: ts.Node, name: ts.Node) => Boolean(symbol(name)) && symbol(node) === symbol(name);
+  const references = (name: ts.Node, allowed: (node: ts.Identifier) => boolean) => [...files.values()]
+    .every((ast) => nodes(ast).filter(ts.isIdentifier).filter((node) => boundTo(node, name)).every(allowed));
+  const fingerprint = (node: ts.Node): unknown[] => {
+    const children: unknown[] = [];
+    ts.forEachChild(node, (child) => { children.push(fingerprint(child)); });
+    return [node.kind, ts.isIdentifier(node) || ts.isLiteralExpression(node) ? node.text : null,
+      ts.isVariableDeclarationList(node) ? node.flags & ts.NodeFlags.BlockScoped : null, children];
+  };
+  const matches = (node: ts.Node | undefined, text: string) => {
+    if (!node) return false;
+    const parse = (source: string) => ts.createSourceFile("proof.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+    let expected: ts.Node | undefined;
+    if (ts.isBlock(node)) expected = parse(text).statements[0];
+    else if (ts.isJsxExpression(node)) {
+      const statement = parse(`const proof = <Proof value=${text} />;`).statements[0] as ts.VariableStatement;
+      expected = ((statement.declarationList.declarations[0].initializer as ts.JsxSelfClosingElement)
+        .attributes.properties[0] as ts.JsxAttribute).initializer;
+    } else {
+      const statement = parse(ts.isObjectBindingPattern(node) ? `const ${text} = {};` : `const proof = ${text};`).statements[0] as ts.VariableStatement;
+      const declaration = statement.declarationList.declarations[0];
+      expected = ts.isObjectBindingPattern(node) ? declaration.name : declaration.initializer;
+    }
+    return Boolean(expected) && JSON.stringify(fingerprint(node)) === JSON.stringify(fingerprint(expected!));
+  };
+  const constant = (node: ts.VariableDeclaration) => ts.isVariableDeclarationList(node.parent)
+    && Boolean(node.parent.flags & ts.NodeFlags.Const);
+  const variable = (root: ts.Node, name: string) => one(nodes(root).filter(ts.isVariableDeclaration)
+    .filter((node) => ts.isIdentifier(node.name) && node.name.text === name && constant(node)));
+  const declaration = (name: string) => one(model.statements.filter(ts.isFunctionDeclaration).filter((node) => node.name?.text === name));
+  const returnsFrom = (fn: ts.FunctionDeclaration) => nodes(fn).filter(ts.isReturnStatement).filter((node) => {
+    let parent: ts.Node | undefined = node.parent;
+    while (parent && !ts.isFunctionLike(parent)) parent = parent.parent;
+    return parent === fn;
+  });
+  const imported = (ast: ts.SourceFile, name: string, from: string) => one(nodes(ast).filter(ts.isImportSpecifier).filter((node) => {
+    const parent = node.parent.parent.parent;
+    return node.name.text === name && !node.propertyName && !node.isTypeOnly && ts.isImportDeclaration(parent)
+      && !parent.importClause?.isTypeOnly && ts.isStringLiteral(parent.moduleSpecifier)
+      && modulePath(ast.fileName, parent.moduleSpecifier.text) === modulePath(ast.fileName, from);
+  }));
+  const dependency = (node: ts.Node) => ts.isArrayLiteralExpression(node.parent) && ts.isCallExpression(node.parent.parent)
+    && node.parent.parent.arguments[1] === node.parent;
+  const readOnlyProperty = (node: ts.Identifier) => {
+    let parent: ts.Node = node;
+    while (ts.isPropertyAccessExpression(parent.parent) && parent.parent.expression === parent) parent = parent.parent;
+    return parent !== node && !(ts.isBinaryExpression(parent.parent) && parent.parent.left === parent
+      && parent.parent.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && parent.parent.operatorToken.kind <= ts.SyntaxKind.LastAssignment)
+      && !ts.isDeleteExpression(parent.parent) && !ts.isPostfixUnaryExpression(parent.parent)
+      && !(ts.isPrefixUnaryExpression(parent.parent) && [ts.SyntaxKind.PlusPlusToken, ts.SyntaxKind.MinusMinusToken].includes(parent.parent.operator));
+  };
+  const scope = declaration("MortgageScope"), session = declaration("MortgageSession"), hook = declaration("useMortgageWorkspace");
+  const context = variable(model, "MortgageContext");
+  const crm = imported(model, "crmFetch", "@/lib/api");
+  if (!scope?.body || !session?.body || !hook?.body || !context || !crm
+    || !matches(context.initializer, "createContext<Access | null>(null)")) return undefined;
+  if (session.modifiers?.some((node) => node.kind === ts.SyntaxKind.ExportKeyword)
+    || (ts.isVariableStatement(context.parent.parent) && context.parent.parent.modifiers?.some((node) => node.kind === ts.SyntaxKind.ExportKeyword))
+    || !matches(session.parameters[0]?.name, "{ scope, live, children }") || session.parameters[0].initializer) return undefined;
+  if (!references(hook.name!, (node) => node === hook.name)) return undefined;
+  for (const name of ["createContext", "useContext", "useMemo", "useCallback", "useRef"]) {
+    const binding = imported(model, name, "react");
+    if (!binding || !nodes(model).filter(ts.isCallExpression).filter((node) => ts.isIdentifier(node.expression) && node.expression.text === name)
+      .every((node) => boundTo(node.expression, binding.name)) || !references(binding.name, (node) => node === binding.name
+        || (ts.isCallExpression(node.parent) && node.parent.expression === node))) return undefined;
+  }
+  const auth = imported(model, "useAuth", "@/contexts/AuthContext");
+  const authCall = one(nodes(scope).filter(ts.isCallExpression).filter((node) => auth && boundTo(node.expression, auth.name)));
+  if (!auth || !authCall || !ts.isVariableDeclaration(authCall.parent)
+    || !matches(authCall.parent.name, "{ user, userRole, clinicId, workspacePurpose, isLoading, isSigningOut, isDemoMode, isImpersonation }")) return undefined;
+  const scopeValue = variable(scope, "scope"), live = variable(scope, "live"), captured = variable(session, "captured");
+  if (!scopeValue || !live || !captured || !matches(captured.initializer, "useRef(scope).current")
+    || !matches(live.initializer, "useRef(scope)") || !matches(scopeValue.initializer, `{
+      actorId: !isLoading && !isSigningOut && !isDemoMode && !isImpersonation ? user?.id || "" : "",
+      workspaceId: userRole === "lead_manager" ? clinicId || "" : clinicId || readWorkspaceId(),
+      role: userRole, purpose: workspacePurpose,
+    }`)) return undefined;
+  const sessionMount = one(nodes(scope).filter(ts.isJsxOpeningElement).filter((node) => node.tagName.getText() === "MortgageSession"));
+  if (!sessionMount || sessionMount.attributes.properties.some(ts.isJsxSpreadAttribute)) return undefined;
+  for (const [name, value] of [["scope", "{scope}"], ["live", "{live}"]] as const) {
+    const attr = one(sessionMount.attributes.properties.filter(ts.isJsxAttribute).filter((node) => node.name.getText() === name));
+    if (!matches(attr?.initializer, value)) return undefined;
+  }
+  if (!references(scopeValue.name, (node) => node === scopeValue.name || readOnlyProperty(node)
+    || (ts.isCallExpression(node.parent) && node.parent.expression.getText() === "useRef")
+    || (ts.isBinaryExpression(node.parent) && node.parent.right === node && matches(node.parent, "live.current = scope"))
+    || (ts.isJsxExpression(node.parent) && node.parent.parent.parent === sessionMount.attributes))) return undefined;
+  if (!references(session.name!, (node) => node === session.name
+    || ((ts.isJsxOpeningElement(node.parent) || ts.isJsxClosingElement(node.parent)) && node.parent.tagName === node && node.parent.parent === sessionMount.parent))) return undefined;
+  if (!references(captured.name, (node) => node === captured.name || readOnlyProperty(node) || dependency(node))) return undefined;
+  const access = variable(session, "access");
+  if (!access?.initializer || !ts.isCallExpression(access.initializer) || access.initializer.expression.getText() !== "useMemo") return undefined;
+  const factory = access.initializer.arguments[0];
+  // Pin the small security-critical factory, including actor binding, init order,
+  // cancellation and denial. Comments/neighboring calls cannot prove delegation.
+  if (!factory || !ts.isArrowFunction(factory) || factory.parameters.length !== 0 || !matches(factory.body, `{
+    if (!lifetime) return null;
+    const { controller } = lifetime;
+    const isCurrent = () => Boolean(captured.actorId && captured.workspaceId
+      && live.current.actorId === captured.actorId && live.current.workspaceId === captured.workspaceId
+      && live.current.role === captured.role && live.current.purpose === captured.purpose
+      && sessionRef.current === controller && !controller.signal.aborted && !invalidated.current);
+    const request = async (path: string, init?: RequestInit) => {
+      if (!isCurrent()) throw ended();
+      const signal = init?.signal ? AbortSignal.any([controller.signal, init.signal]) : controller.signal;
+      signal.throwIfAborted();
+      const response = await crmFetch(path, { ...init, cache: "no-store", expectedUserId: captured.actorId, signal });
+      if (!isCurrent()) throw ended();
+      if (response.status === 401 || response.status === 403 || response.status === 404) {
+        invalidated.current = response.status === 401 ? "expired" : response.status === 403 ? "denied" : "missing";
+        controller.abort();
+        setRevoked(invalidated.current);
+        throw ended();
+      }
+      signal.throwIfAborted();
+      return response;
+    };
+    return { workspaceId: captured.workspaceId, isCurrent, request };
+  }`)) return undefined;
+  const crmCall = one(nodes(factory).filter(ts.isCallExpression).filter((node) => boundTo(node.expression, crm.name)));
+  if (!crmCall || !references(crm.name, (node) => node === crm.name || node === crmCall.expression)) return undefined;
+  const provider = one(nodes(session).filter(ts.isJsxOpeningElement).filter((node) => node.tagName.getText() === "MortgageContext.Provider"));
+  if (!provider || provider.attributes.properties.some(ts.isJsxSpreadAttribute)
+    || !matches(one(provider.attributes.properties.filter(ts.isJsxAttribute).filter((node) => node.name.getText() === "value"))?.initializer, "{access}")) return undefined;
+  if (!references(access.name, (node) => node === access.name || (ts.isJsxExpression(node.parent) && node.parent.parent.parent === provider.attributes)
+    || (ts.isPrefixUnaryExpression(node.parent) && node.parent.operator === ts.SyntaxKind.ExclamationToken)
+    || (readOnlyProperty(node) && node.parent.getText() === "access.isCurrent"))) return undefined;
+  const hookAccess = variable(hook, "access"), mutate = variable(hook, "mutate");
+  if (!hookAccess || !matches(hookAccess.initializer, "useContext(MortgageContext)") || !mutate?.initializer
+    || !matches(mutate.initializer, `useCallback(async (endpoint: string, method: string, body: unknown) => {
+      const response = await access.request(\`\${endpoint}?workspaceId=\${encodeURIComponent(access.workspaceId)}\`, {
+        method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+      });
+      await readResult(access, response);
+      if (!access.isCurrent()) throw ended();
+      refresh();
+    }, [access, refresh])`)) return undefined;
+  if (!references(context.name, (node) => node === context.name
+    || (ts.isCallExpression(node.parent) && node.parent === hookAccess.initializer)
+    || ((ts.isPropertyAccessExpression(node.parent) && node.parent.expression === node)
+      && (node.parent.parent === provider || (ts.isJsxClosingElement(node.parent.parent) && node.parent.parent.parent === provider.parent))))) return undefined;
+  const resultReader = declaration("readResult");
+  const readerAccess = resultReader?.parameters[0]?.name;
+  if (!readerAccess || !references(readerAccess, (node) => node === readerAccess
+    || (readOnlyProperty(node) && node.parent.getText() === "access.isCurrent"))) return undefined;
+  const hookReturn = one(returnsFrom(hook));
+  if (!hookReturn?.expression || !ts.isObjectLiteralExpression(hookReturn.expression)
+    || hookReturn.expression.properties.some(ts.isSpreadAssignment)) return undefined;
+  const requestProperty = one(hookReturn.expression.properties.filter((node) => node.name?.getText() === "request"));
+  if (!requestProperty || !ts.isPropertyAssignment(requestProperty) || !matches(requestProperty.initializer, "access.request")) return undefined;
+  const requestCalls = nodes(hook).filter(ts.isCallExpression).filter((node) => ts.isPropertyAccessExpression(node.expression)
+    && node.expression.name.text === "request" && boundTo(node.expression.expression, hookAccess.name));
+  if (requestCalls.length !== 3 || !references(hookAccess.name, (node) => node === hookAccess.name || dependency(node)
+    || (ts.isPrefixUnaryExpression(node.parent) && node.parent.operator === ts.SyntaxKind.ExclamationToken)
+    || (readOnlyProperty(node) && ["access.workspaceId", "access.isCurrent", "access.request"].includes(node.parent.getText())
+      && (node.parent.getText() !== "access.request" || node.parent === requestProperty.initializer || requestCalls.some((call) => call.expression === node.parent)))
+    || (ts.isCallExpression(node.parent) && node.parent.expression.getText() === "readResult" && node.parent.arguments[0] === node))) return undefined;
+  const calls = new Map<string, Set<number>>();
+  const approve = (file: string, node: ts.CallExpression) => {
+    const expression = node.expression;
+    const receiver = ts.isPropertyAccessExpression(expression) ? expression.name : expression;
+    if (!calls.has(file)) calls.set(file, new Set());
+    calls.get(file)!.add(receiver.getStart());
+  };
+  requestCalls.forEach((node) => approve(mortgageFile, node));
+  if (!references(mutate.name, (node) => node === mutate.name || dependency(node)
+    || (ts.isCallExpression(node.parent) && node.parent.expression === node))) return undefined;
+  nodes(hook).filter(ts.isCallExpression).filter((node) => boundTo(node.expression, mutate.name)).forEach((node) => approve(mortgageFile, node));
+  const analytics = files.get(mortgageAnalyticsFile);
+  if (analytics) {
+    const hookImport = imported(analytics, "useMortgageWorkspace", "@/lib/mortgage-workspace");
+    const report = one(analytics.statements.filter(ts.isFunctionDeclaration).filter((node) => node.name?.text === "MortgageAnalyticsReport"));
+    const workspace = report && variable(report, "workspace");
+    if (!hookImport || !report || !workspace?.initializer || !ts.isCallExpression(workspace.initializer)
+      || !boundTo(workspace.initializer.expression, hookImport.name)
+      || !references(hookImport.name, (node) => node === hookImport.name
+        || (ts.isCallExpression(node.parent) && node.parent === workspace.initializer && node.parent.expression === node))) return undefined;
+    const binding = one(nodes(report).filter(ts.isVariableDeclaration).filter((node) => ts.isObjectBindingPattern(node.name)
+      && node.name.elements.some((element) => element.name.getText() === "request")));
+    if (!binding || !constant(binding) || !ts.isObjectBindingPattern(binding.name) || !binding.initializer
+      || !boundTo(binding.initializer, workspace.name) || !matches(binding.name, "{ isCurrent, request }")) return undefined;
+    const request = binding.name.elements.find((node) => node.name.getText() === "request")!;
+    const requestCall = one(nodes(report).filter(ts.isCallExpression).filter((node) => boundTo(node.expression, request.name)));
+    if (!requestCall || !references(request.name, (node) => node === request.name || node === requestCall.expression || dependency(node))
+      || !references(workspace.name, (node) => node === workspace.name || node === binding.initializer
+        || (readOnlyProperty(node) && node.parent.getText() !== "workspace.request"))) return undefined;
+    approve(mortgageAnalyticsFile, requestCall);
+  }
+  return calls;
+}
+
 export function crmTransportOffenders(sources: CrmSources): string[] {
   const injectedDeletionIsSafe = hasVerifiedDeletionTransport(sources);
   const injectedAdminIsSafe = hasVerifiedAdminTransport(sources);
+  const mortgageReceivers = verifiedMortgageReceivers(sources);
   const sharedHelpers = new Set(["crmFetch", "crmRequest", "crmJson"]);
   const offenders: string[] = [];
   for (const [name, source] of sources) {
     if (name === "lib/api.ts") continue;
     const receivers = new Set<string>();
-    for (const match of source.matchAll(/([A-Za-z_$][A-Za-z0-9_$]*)\s*(?:<[^<>()]*>)?\s*\(\s*[`"'][^`"']*\/api\/crm\//g)) receivers.add(match[1]);
+    for (const match of source.matchAll(/([A-Za-z_$][A-Za-z0-9_$]*)\s*(?:<[^<>()]*>)?\s*\(\s*[`"'][^`"']*\/api\/crm\//g)) {
+      if (!mortgageReceivers?.get(name)?.has(match.index!)) receivers.add(match[1]);
+    }
     const ast = ts.createSourceFile(name, source, ts.ScriptTarget.Latest, true,
       name.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
     const locals: { name: string; calls: Set<string> }[] = [];
@@ -229,9 +451,11 @@ export function crmTransportOffenders(sources: CrmSources): string[] {
     }
     for (const helper of receivers) {
       if (helper === "fetch") offenders.push(name + ": a CRM path is handed straight to fetch");
+      else if (name === mortgageFile || name === mortgageAnalyticsFile) offenders.push(name + ": CRM path uses an unverified scoped receiver " + helper);
       else if (!safe.has(helper)) offenders.push(name + ": CRM paths flow through " + helper + ", which never reaches crmFetch");
     }
     if (name === modelFile && !injectedDeletionIsSafe) offenders.push(name + ": unverified injected transport chain");
+    if ((name === mortgageFile || name === mortgageAnalyticsFile) && !mortgageReceivers) offenders.push(name + ": unverified scoped mortgage transport chain");
   }
   return offenders;
 }

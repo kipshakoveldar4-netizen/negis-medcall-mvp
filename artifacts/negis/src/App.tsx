@@ -29,6 +29,11 @@ const OperatorPortal = lazy(() => import("@/pages/OperatorPortal"));
 const ClientBasePage = lazy(() => import("@/pages/ClientBasePage"));
 const StatsPage = lazy(() => import("@/pages/StatsPage"));
 const Dashboard = lazy(() => import("@/pages/Dashboard"));
+const MortgageOverview = lazy(() => import("@/pages/MortgageOverview"));
+const MortgageClients = lazy(() => import("@/pages/MortgageClients"));
+const MortgageCalendar = lazy(() => import("@/pages/MortgageCalendar"));
+const MortgageTasks = lazy(() => import("@/pages/MortgageTasks"));
+const MortgageAnalytics = lazy(() => import("@/pages/MortgageAnalytics"));
 const AiControlCenter = lazy(() => import("@/pages/AiControlCenter"));
 // Security-1A removed the legacy ad cabinet that queried tables absent from the
 // production schema. /ads is now a small hub over the supported advertising
@@ -93,7 +98,7 @@ function RoutePrefetcher() {
     idle(() => {
       if (cancelled) return;
       const loads = workspacePurpose === 'mortgage_leads'
-        ? [() => import('@/pages/LeadsPage'), ...(userRole === 'owner' || userRole === 'admin' ? [() => import('@/pages/AdminCenter')] : [])]
+        ? [() => import('@/pages/MortgageOverview'), () => import('@/pages/MortgageCalendar'), () => import('@/pages/MortgageClients'), () => import('@/pages/MortgageTasks'), () => import('@/pages/LeadsPage'), ...(userRole === 'owner' || userRole === 'admin' ? [() => import('@/pages/AdminCenter'), () => import('@/pages/MortgageAnalytics')] : [])]
         : PREFETCH_ROUTES;
       for (const load of loads) void load().catch(() => undefined);
     });
@@ -128,6 +133,7 @@ const ROUTE_PERMISSIONS: Record<string, string> = {
   '/leads': 'crm',
   '/clients': 'crm',
   '/tasks': 'tasks',
+  '/analytics': 'crm',
   '/chat': 'chat',
   '/marketplace': 'marketplace',
   '/market': 'marketplace',
@@ -146,7 +152,7 @@ const ROUTE_PERMISSIONS: Record<string, string> = {
 
 function firstAllowedRoute(rolePermissions: Record<string, boolean>, userRole: string | null, workspacePurpose: ReturnType<typeof useAuth>['workspacePurpose']) {
   if (workspacePurpose === 'mortgage_leads') {
-    return workspaceAllowsRoute(workspacePurpose, userRole, '/leads') && rolePermissions.crm ? '/leads' : '/';
+    return workspaceAllowsRoute(workspacePurpose, userRole, '/dashboard') && rolePermissions.crm ? '/dashboard' : '/';
   }
   if (userRole === 'lead_manager') return '/leads';
   const first = Object.entries(ROUTE_PERMISSIONS).find(([route, permission]) =>
@@ -204,7 +210,7 @@ function ProtectedPage({
   const { isLoading, userRole, rolePermissions, isDemoMode, workspacePurpose, signOut } = useAuth();
   const [location, setLocation] = useLocation();
   const roleAllowed = userRole === 'lead_manager'
-    ? permission === 'crm' && location === '/leads'
+    ? permission === 'crm' && (location === '/leads' || (workspacePurpose === 'mortgage_leads' && workspaceAllowsRoute(workspacePurpose, userRole, location)))
     : userRole === 'owner' || userRole === 'manager' || !!rolePermissions[permission];
   const allowed = roleAllowed && workspaceAllowsRoute(workspacePurpose, userRole, location);
   const noMortgageRoute = workspacePurpose === 'mortgage_leads'
@@ -252,7 +258,11 @@ function ProtectedPage({
  * for the life of the app, and moving between two different pages is supposed
  * to unmount anyway.
  */
-const AppointmentsRoute = () => <ProtectedPage component={AppointmentsPage} permission="booking" />;
+function PurposePage({ mortgage, clinic, permission }: { mortgage: ComponentType; clinic: ComponentType; permission: string }) {
+  const { workspacePurpose } = useAuth();
+  return <ProtectedPage component={workspacePurpose === 'mortgage_leads' ? mortgage : clinic} permission={workspacePurpose === 'mortgage_leads' ? 'crm' : permission} />;
+}
+const AppointmentsRoute = () => <PurposePage mortgage={MortgageCalendar} clinic={AppointmentsPage} permission="booking" />;
 const MarketRoute = () => <ProtectedPage component={MarketplacePage} permission="marketplace" />;
 const AdvertisingHubRoute = () => <ProtectedPage component={AdvertisingHub} permission="ads" />;
 const AdsAutomationRoute = () => <ProtectedPage component={AdsAutomation} permission="ads" />;
@@ -272,7 +282,8 @@ function Router() {
       <Route path="/join-request" component={JoinRequest} />
       <Route path="/operator" component={OperatorPortal} />
       <Route path="/ai-control-center" component={() => <ProtectedPage component={AiControlCenter} permission="dashboard" />} />
-      <Route path="/dashboard" component={() => <ProtectedPage component={Dashboard} permission="dashboard" />} />
+      <Route path="/dashboard" component={() => <PurposePage mortgage={MortgageOverview} clinic={Dashboard} permission="dashboard" />} />
+      <Route path="/analytics" component={() => <PurposePage mortgage={MortgageAnalytics} clinic={NotFound} permission="crm" />} />
       <Route path="/booking" component={AppointmentsRoute} />
       <Route path="/appointments" component={AppointmentsRoute} />
       {/*
@@ -304,8 +315,8 @@ function Router() {
       <Route path="/client-base" component={() => <ProtectedPage component={ClientBasePage} permission="booking" />} />
       <Route path="/staff-schedule" component={() => <ProtectedPage component={DirectoryPage} permission="directory" />} />
       <Route path="/leads" component={() => <ProtectedPage component={LeadsPage} permission="crm" />} />
-      <Route path="/clients" component={() => <ProtectedPage component={ClientsPage} permission="crm" />} />
-      <Route path="/tasks" component={() => <ProtectedPage component={DemoTasks} permission="tasks" />} />
+      <Route path="/clients" component={() => <PurposePage mortgage={MortgageClients} clinic={ClientsPage} permission="crm" />} />
+      <Route path="/tasks" component={() => <PurposePage mortgage={MortgageTasks} clinic={DemoTasks} permission="tasks" />} />
       <Route path="/chat" component={() => <ProtectedPage component={DemoChat} permission="chat" />} />
       <Route path="/marketplace" component={MarketRoute} />
       {/* Панель платформы выехала из CRM в отдельный портал Medina Control

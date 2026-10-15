@@ -88,10 +88,21 @@ export function MobileNav() {
 
   const canUse = (item: MobileNavItem) =>
     workspaceAllowsRoute(workspacePurpose, userRole, item.href) && (userRole === "lead_manager"
-      ? item.href === "/leads"
+      ? item.href === "/leads" || (workspacePurpose === "mortgage_leads" && ["/dashboard","/clients","/appointments","/tasks"].includes(item.href))
       : userRole === "owner" || userRole === "manager" || userRole === "admin" || Boolean(rolePermissions[item.permission]));
-  const visiblePrimary = primaryItems.filter(canUse);
-  const visibleDrawer = drawerItems.filter(canUse);
+  const mortgagePrimary: MobileNavItem[] = [
+    { href: '/dashboard', label: 'Главная', icon: LayoutDashboard, permission: 'crm' },
+    { href: '/leads', label: 'Заявки', icon: ClipboardList, permission: 'crm' },
+    { href: '/appointments', label: 'Календарь', icon: CalendarDays, permission: 'crm' },
+    { href: '/tasks', label: 'Задачи', icon: ClipboardList, permission: 'crm' },
+  ];
+  const mortgageDrawer: MobileNavItem[] = [
+    { href: '/clients', label: 'Клиенты', icon: Users, permission: 'crm' },
+    { href: '/analytics', label: 'Аналитика команды', icon: BarChart2, permission: 'crm' },
+    { href: '/admin', label: 'Команда', icon: Settings, permission: 'admin' },
+  ];
+  const visiblePrimary = (workspacePurpose === 'mortgage_leads' ? mortgagePrimary : primaryItems).filter(canUse);
+  const visibleDrawer = (workspacePurpose === 'mortgage_leads' ? mortgageDrawer : drawerItems).filter(canUse);
   const moreActive = visibleDrawer.some((item) => isActive(location, item.href));
 
   return (

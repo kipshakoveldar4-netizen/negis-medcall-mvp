@@ -35,7 +35,7 @@ type ModalState = 'idle' | 'choice' | 'login' | 'reset' | 'newpassword';
 
 
 const roleRoute = (role: string | null, purpose: WorkspacePurpose | null = null) => {
-  if (purpose === 'mortgage_leads') return '/leads';
+  if (purpose === 'mortgage_leads') return '/dashboard';
   if (role === 'lead_manager') return '/leads';
   if (role === 'owner' || role === 'manager') return '/dashboard';
   // Регистратор начинает с заявок: экран приёма вёл на фикстуру без

@@ -1,6 +1,6 @@
 import { useLayoutEffect, useState } from 'react';
 import { Link, useLocation } from 'wouter';
-import { BadgeDollarSign, BarChart2, Building2, CalendarDays, Clapperboard, FileText, Inbox, LayoutDashboard, Rocket, Settings, Store, Tag, Users, LogOut, type LucideIcon } from 'lucide-react';
+import { BadgeDollarSign, BarChart2, Building2, CalendarDays, CheckSquare, Clapperboard, FileText, Inbox, LayoutDashboard, Rocket, Settings, Store, Tag, Users, LogOut, type LucideIcon } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
 import { isRealWorkspace } from '@/lib/demoStorage';
 import { workspaceAllowsRoute } from '@/lib/workspaceRoutes';
@@ -15,7 +15,7 @@ import { loginFromEmail } from '../../../../../lib/auth/staff-logins';
 // NOTE: this is one of the two navigation surfaces (the other is MobileNav).
 // Keep their route sets in sync — smoke-negis-routes.ts and
 // medina-commercial.test.ts assert on both files.
-type NavItem = { href: string; icon: LucideIcon; label: string; roles: string[] };
+type NavItem = { href: string; icon: LucideIcon; label: string; roles: string[]; mortgageOnly?: boolean };
 type NavGroup = { title: string; items: NavItem[] };
 
 const NAV_GROUPS: NavGroup[] = [
@@ -31,6 +31,7 @@ const NAV_GROUPS: NavGroup[] = [
     items: [
       { href: '/leads', icon: Inbox, label: 'Заявки', roles: ['owner', 'manager', 'agent', 'lead_manager'] },
       { href: '/clients', icon: Users, label: 'Клиенты', roles: ['owner', 'manager', 'agent'] },
+      { href: '/tasks', icon: CheckSquare, label: 'Задачи', roles: ['owner','admin','lead_manager'], mortgageOnly: true },
       { href: '/appointments', icon: CalendarDays, label: 'Записи', roles: ['owner', 'manager', 'agent', 'booking_agent'] },
       { href: '/sales', icon: BadgeDollarSign, label: 'Продажи', roles: ['owner', 'manager', 'agent'] },
       // Услуги стоят в «Операциях», а не в «Управлении»: право на чтение здесь
@@ -51,6 +52,7 @@ const NAV_GROUPS: NavGroup[] = [
     items: [
       // Статистика — раздел из кабинета запись.кз: выручка, загрузка, услуги.
       { href: '/reports', icon: BarChart2, label: 'Статистика', roles: ['owner', 'manager'] },
+      { href: '/analytics', icon: BarChart2, label: 'Аналитика команды', roles: ['owner','admin'], mortgageOnly: true },
       { href: '/ads', icon: Rocket, label: 'Рекламный агент', roles: ['owner', 'manager'] },
       { href: '/content-studio', icon: Clapperboard, label: 'Контент', roles: ['owner', 'manager'] },
       { href: '/site-blog', icon: FileText, label: 'Сайт и блог', roles: ['owner', 'admin'] },
@@ -91,8 +93,8 @@ export function Sidebar() {
   }, [user?.id, clinicId, userRole, workspacePurpose]);
 
   const canUse = (item: NavItem) =>
-    workspaceAllowsRoute(workspacePurpose, userRole, item.href) && (userRole === 'lead_manager'
-      ? item.href === '/leads'
+    (!item.mortgageOnly || workspacePurpose === 'mortgage_leads') && workspaceAllowsRoute(workspacePurpose, userRole, item.href) && (userRole === 'lead_manager'
+      ? item.href === '/leads' || (workspacePurpose === 'mortgage_leads' && ['/dashboard','/clients','/appointments','/tasks'].includes(item.href))
       : !userRole || userRole === 'owner' || userRole === 'manager' || userRole === 'admin' || item.roles.includes(userRole));
   const visibleGroups = NAV_GROUPS
     .map((group) => ({ ...group, items: group.items.filter(canUse) }))
@@ -138,7 +140,9 @@ export function Sidebar() {
               </p>
               <div className="flex flex-col gap-0.5">
                 {group.items.map(({ href, icon: Icon, label: staticLabel }) => {
-                  const label = href === '/staff-schedule'
+                  const label = workspacePurpose === 'mortgage_leads' && href === '/dashboard' ? 'Главная'
+                    : workspacePurpose === 'mortgage_leads' && href === '/appointments' ? 'Календарь'
+                    : href === '/staff-schedule'
                     ? `${capitalize(terms.specialistPlural)} и график`
                     : href === '/admin' && workspacePurpose === 'mortgage_leads'
                       ? 'Команда'

@@ -169,6 +169,7 @@ export const CRM_RESOURCE_AUTHORIZATION: Readonly<Record<string, RouteAuthorizat
 
 /** Non-resource routes handled directly by the catch-all. */
 export const CRM_ROUTE_AUTHORIZATION: Readonly<Record<string, RouteAuthorization>> = {
+  "mortgage-workspace": { kind: "browser", methods: ["GET", "POST", "PATCH"], roles: ["owner", "admin", "lead_manager"] },
   // Assignment needs names and staff IDs, not the administrative staff directory.
   "lead-assignees": { kind: "browser", methods: ["GET"], permissions: { GET: "manage_leads" } },
   "lead-team-analytics": { kind: "browser", methods: ["GET"], roles: WORKSPACE_ADMIN },

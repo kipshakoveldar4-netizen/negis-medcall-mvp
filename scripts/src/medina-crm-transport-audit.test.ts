@@ -11,8 +11,8 @@ for (const file of [model, component, page]) {
   sources.set(file, await readFile(new URL(`../../artifacts/negis/src/${file}`, import.meta.url), "utf8"));
 }
 
-function mutate(file: string, from: string, to: string) {
-  const changed = new Map(sources);
+function mutate(file: string, from: string, to: string, base: ReadonlyMap<string, string> = sources) {
+  const changed = new Map(base);
   const source = changed.get(file)!;
   assert.ok(source.includes(from), "mutation must change the current source");
   changed.set(file, source.replace(from, to));
@@ -106,3 +106,102 @@ test('another admin content caller cannot inject bare fetch', () => {
   assert.notDeepEqual(crmTransportOffenders(new Map([[adminFile, adminSource],
     ['components/unsafe.tsx', 'const Unsafe = () => <AdminCenterContent access={{ request: fetch }} />;']])), []);
 });
+
+const mortgage = "lib/mortgage-workspace.tsx";
+const mortgageAnalytics = "pages/MortgageAnalytics.tsx";
+const mortgageSources = new Map<string, string>();
+for (const file of [mortgage, mortgageAnalytics]) {
+  mortgageSources.set(file, await readFile(new URL(`../../artifacts/negis/src/${file}`, import.meta.url), "utf8"));
+}
+
+test("actual mortgage context, hook mutations and analytics delegate to actor-bound crmFetch", () => {
+  assert.deepEqual(crmTransportOffenders(mortgageSources), []);
+  assert.deepEqual(crmTransportOffenders(new Map([[mortgage, mortgageSources.get(mortgage)!]])), []);
+});
+
+for (const [name, file, from, to] of [
+  ["raw session fetch", mortgage, "await crmFetch(path,", "await fetch(path,"],
+  ["fake API import", mortgage, 'from "@/lib/api"', 'from "@/lib/not-authenticated"'],
+  ["fake auth import", mortgage, 'from "@/contexts/AuthContext"', 'from "@/contexts/ForgedContext"'],
+  ["forged auth source", mortgage, "= useAuth();", "= unsafeAuth();"],
+  ["reassigned memo hook", mortgage, "const captured = useRef(scope).current;", "const captured = useRef(scope).current; useMemo = unsafeMemo;"],
+  ["memo factory shadows captured actor", mortgage, "useMemo<Access | null>(() =>", "useMemo<Access | null>((captured = unsafeScope) =>"],
+  ["shadowed authenticated helper", mortgage, "const captured = useRef(scope).current;", "const captured = useRef(scope).current; const crmFetch = fetch;"],
+  ["missing actor binding", mortgage, "expectedUserId: captured.actorId,", ""],
+  ["forged actor binding", mortgage, "expectedUserId: captured.actorId,", 'expectedUserId: "foreign-actor",'],
+  ["actor overridden after binding", mortgage, "expectedUserId: captured.actorId, signal", 'expectedUserId: captured.actorId, signal, ...init'],
+  ["duplicate actor option", mortgage, "expectedUserId: captured.actorId, signal", 'expectedUserId: captured.actorId, expectedUserId: "foreign-actor", signal'],
+  ["weakened current-scope check", mortgage, "live.current.workspaceId === captured.workspaceId", "true"],
+  ["missing dispatch guard", mortgage, "if (!isCurrent()) throw ended();", ""],
+  ["missing response guard", mortgage, "if (!isCurrent()) throw ended();\n      if (response.status", "if (response.status"],
+  ["missing no-store", mortgage, 'cache: "no-store",', ""],
+  ["missing session cancellation", mortgage, "&& !controller.signal.aborted", ""],
+  ["missing denial invalidation", mortgage, "controller.abort();\n        setRevoked", "setRevoked"],
+  ["forged scope identity", mortgage, 'user?.id || ""', '"foreign-actor"'],
+  ["wrong captured scope", mortgage, "useRef(scope).current", "useRef(unsafeScope).current"],
+  ["mutable captured identity", mortgage, "const captured = useRef(scope).current;", 'const captured = useRef(scope).current; captured.actorId = "foreign-actor";'],
+  ["mutable source identity", mortgage, "const live = useRef(scope);", 'scope.actorId = "foreign-actor"; const live = useRef(scope);'],
+  ["scope prop replacement", mortgage, "scope={scope} live={live}", "scope={unsafeScope} live={live}"],
+  ["session prop spread", mortgage, "scope={scope} live={live}", "scope={scope} live={live} {...unsafe}"],
+  ["exported private session", mortgage, "function MortgageSession(", "export function MortgageSession("],
+  ["exported private context", mortgage, "const MortgageContext =", "export const MortgageContext ="],
+  ["aliased context export", mortgage, "const MortgageContext =", "export { MortgageContext as UnsafeContext }; const MortgageContext ="],
+  ["untrusted context default", mortgage, "createContext<Access | null>(null)", "createContext<Access | null>(unsafeAccess)"],
+  ["provider transport replacement", mortgage, "value={access}", "value={{ ...access, request: fetch }}"],
+  ["duplicate provider value", mortgage, "value={access}", "value={access} value={unsafeAccess}"],
+  ["provider spread override", mortgage, "value={access}", "value={access} {...unsafe}"],
+  ["hook consumes wrong context", mortgage, "useContext(MortgageContext)", "useContext(OtherContext)"],
+  ["hook replaces context value", mortgage, "const access = useContext(MortgageContext);", "const access = { request: fetch };"],
+  ["shadowed context hook", mortgage, "const access = useContext(MortgageContext);", "const useContext = () => unsafeAccess; const access = useContext(MortgageContext);"],
+  ["hook transport reassignment", mortgage, "const access = useContext(MortgageContext);", "const access = useContext(MortgageContext); access.request = fetch;"],
+  ["hook transport object override", mortgage, "const access = useContext(MortgageContext);", "const access = useContext(MortgageContext); Object.assign(access, { request: fetch });"],
+  ["hook transport escape", mortgage, "const access = useContext(MortgageContext);", "const access = useContext(MortgageContext); const stolen = access.request;"],
+  ["response helper mutates transport", mortgage, "if (!access.isCurrent()) throw ended();", "access.request = fetch; if (!access.isCurrent()) throw ended();"],
+  ["unsafe conditional hook return", mortgage, "const access = useContext(MortgageContext);", "if (unsafe) return { request: fetch }; const access = useContext(MortgageContext);"],
+  ["reassigned exported hook", mortgage, "const MortgageContext =", "useMortgageWorkspace = unsafeHook; const MortgageContext ="],
+  ["raw mutation fetch", mortgage, "await access.request(`${endpoint}?workspaceId=", "await fetch(`${endpoint}?workspaceId="],
+  ["raw snapshot fetch", mortgage, "await access.request(path,", "await fetch(path,"],
+  ["raw contact search", mortgage, "await access.request(`/api/crm/", "await fetch(`/api/crm/"],
+  ["unsafe hook return", mortgage, "request: access.request, isCurrent:", "request: fetch, isCurrent:"],
+  ["duplicate hook transport", mortgage, "request: access.request, isCurrent:", "request: access.request, request: fetch, isCurrent:"],
+  ["hook return spread override", mortgage, "request: access.request, isCurrent: access.isCurrent,", "request: access.request, isCurrent: access.isCurrent, ...unsafe,"],
+  ["fake consumer hook import", mortgageAnalytics, 'from "@/lib/mortgage-workspace"', 'from "@/lib/not-scoped"'],
+  ["reassigned consumer hook", mortgageAnalytics, "const workspace = useMortgageWorkspace({ days });", "useMortgageWorkspace = unsafeHook; const workspace = useMortgageWorkspace({ days });"],
+  ["untrusted consumer object", mortgageAnalytics, "const workspace = useMortgageWorkspace({ days });", "const workspace = unsafeWorkspace;"],
+  ["default consumer request", mortgageAnalytics, "{ isCurrent, request } = workspace", "{ isCurrent, request = fetch } = workspace"],
+  ["consumer transport override", mortgageAnalytics, "const { isCurrent, request } = workspace;", "workspace.request = fetch; const { isCurrent, request } = workspace;"],
+  ["consumer object override", mortgageAnalytics, "const { isCurrent, request } = workspace;", "Object.assign(workspace, { request: fetch }); const { isCurrent, request } = workspace;"],
+  ["consumer transport alias", mortgageAnalytics, "const { isCurrent, request } = workspace;", "const { isCurrent, request } = workspace; const alias = request;"],
+  ["raw analytics fetch", mortgageAnalytics, "=> request(`/api/crm/", "=> fetch(`/api/crm/"],
+  ["shadowed analytics request", mortgageAnalytics, "(period: number) => request(", "(request: any) => request("],
+] as const) {
+  test(`scoped mortgage transport rejects ${name}`, () => {
+    const offenders = crmTransportOffenders(mutate(file, from, to, mortgageSources));
+    assert.ok(offenders.some((entry) => entry.includes("unverified scoped mortgage transport chain")), offenders.join("\n"));
+  });
+}
+
+test("analytics cannot prove its transport without the hook implementation", () => {
+  assert.notDeepEqual(crmTransportOffenders(new Map([[mortgageAnalytics, mortgageSources.get(mortgageAnalytics)!]])), []);
+});
+
+test("a comment with the original mortgage transport cannot prove a replaced wrapper", () => {
+  const changed = mutate(mortgage, "await crmFetch(path,", "await fetch(path,", mortgageSources);
+  changed.set(mortgage, changed.get(mortgage)! + "\n// await crmFetch(path, { expectedUserId: captured.actorId });\n");
+  assert.notDeepEqual(crmTransportOffenders(changed), []);
+});
+
+for (const file of [mortgage, mortgageAnalytics, "components/mortgage/unsafe.tsx"]) {
+  for (const [name, extra] of [
+    ["unrelated request", 'function Unsafe(request: Function) { return request("/api/crm/leads"); }'],
+    ["unrelated mutate", 'function Unsafe(mutate: Function) { return mutate("/api/crm/leads"); }'],
+    ["raw fetch", 'fetch("/api/crm/leads");'],
+    ["unverified object request", 'const unsafe = { request: fetch }; unsafe.request("/api/crm/leads");'],
+  ] as const) {
+    test(`mortgage proof does not exempt ${name} in ${file}`, () => {
+      const changed = new Map(mortgageSources);
+      changed.set(file, (changed.get(file) ?? "") + "\n" + extra);
+      assert.ok(crmTransportOffenders(changed).some((entry) => entry.startsWith(file + ":")));
+    });
+  }
+}

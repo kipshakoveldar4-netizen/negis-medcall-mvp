@@ -40,6 +40,7 @@ import {
 } from "../../lib/crm/server";
 import { normalizeCrmSegments, resolveCrmRoute } from "../../lib/crm/authorization";
 import { lookupWorkspacePurposes, requirePurposeRoute, requireMortgagePayload } from '../../lib/crm/workspace-policy';
+import { handleMortgageWorkspace } from '../../lib/crm/mortgage-workspace';
 import { handleStaffInvitationAccept, handleStaffInvitations } from "../../lib/crm/staff-invitations";
 import { handleStaffCredentials } from "../../lib/crm/staff-credentials";
 import { handleJoinCode, handleJoinRequest, handleStaffJoinRequests } from "../../lib/crm/staff-join-requests";
@@ -241,6 +242,7 @@ async function dispatch(
 ) {
   switch (routeKey) {
     case "lead-team-analytics": return segments.length === 1 ? handleLeadTeamAnalytics(req, res) : notFound(res);
+    case "mortgage-workspace": return segments.length === 1 ? handleMortgageWorkspace(req, res) : notFound(res);
     case "site-blog": return handleSiteBlog(req, res);
     case "site-inquiry-deletion-preview":
       return segments.length === 1 ? handleSiteInquiryDeletionPreview(req, res) : notFound(res);
@@ -477,11 +479,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       ...(permission ? { permission } : {}),
     });
 
-    // A newly registered browser endpoint is closed to this scoped role by default.
-    if (isAssignedLeadRole(context.role) && !assignedLeadRouteAllowed(route.key, method)) {
+    const purposeScopedActivity = route.key === "mortgage-workspace" && ["GET", "POST", "PATCH"].includes(method);
+    if (isAssignedLeadRole(context.role) && !assignedLeadRouteAllowed(route.key, method) && !purposeScopedActivity) {
       return sendJson(res, 403, { success: false, error: "Недостаточно прав", code: "insufficient_permission" });
     }
     context.purpose = (await lookupWorkspacePurposes([context.workspaceId]))[context.workspaceId];
+    // New activity access is purpose-scoped; the generic clinic resources stay closed.
+    if (isAssignedLeadRole(context.role) && !assignedLeadRouteAllowed(route.key, method, context.purpose)) {
+      return sendJson(res, 403, { success: false, error: "Недостаточно прав", code: "insufficient_permission" });
+    }
     requirePurposeRoute(context.purpose, context.role, route.key, method);
     if (context.purpose === 'mortgage_leads') requireMortgagePayload(route.key, method, req.body);
 

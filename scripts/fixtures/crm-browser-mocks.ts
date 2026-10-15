@@ -1,7 +1,14 @@
 import { createBookingRetryFixture } from "./booking-retry";
+import { mortgageBrowserRequest, mortgageLeadBrowserRequest } from './mortgage-browser-store';
 const retryFixture = new URLSearchParams(window.location?.search || "").get("bookingRetry") === "lost-response"
   ? createBookingRetryFixture() : null;
 const fixtureParams = new URLSearchParams(window.location?.search || "");
+// Keep explicit visual-test settings across local page reloads, not CRM data.
+for (const key of ["fixtureRole", "fixturePurpose"]) {
+  const value = fixtureParams.get(key);
+  if (value) sessionStorage.setItem(`medina-visual:${key}`, value);
+  else if (sessionStorage.getItem(`medina-visual:${key}`)) fixtureParams.set(key, sessionStorage.getItem(`medina-visual:${key}`)!);
+}
 const fixtureRole = fixtureParams.get("fixtureRole");
 const assignedLeadFixture = fixtureRole === "lead_manager";
 const mortgageFixture = fixtureParams.get("fixturePurpose") === "mortgage_leads";
@@ -35,7 +42,8 @@ const keys: Record<string, string> = { "clinic-doctors": "doctors", "clinic-serv
 export const hasSupabaseFrontendEnv = true;
 export const arrivedByRecoveryLink = false;
 export const supabase = { auth: {
-  getSession: async () => ({ data: { session: null } }),
+  getSession: async () => ({ data: { session: window.location.pathname === "/admin"
+    ? { user: { id: "fixture-user" }, access_token: "visual-fixture-not-a-valid-token" } : null } }),
   signInWithPassword: async () => ({ data: null, error: { message: "Вход отключён на локальном стенде" } }),
   onAuthStateChange: () => ({ data: { subscription: { unsubscribe() {} } } }),
 } };
@@ -66,8 +74,21 @@ export async function crmFetch(input: string, init?: RequestInit): Promise<Respo
   if (retryFixture && url.pathname === "/api/crm/appointments" && init?.method === "POST") {
     return retryFixture.send(JSON.parse(String(init.body)));
   }
-  if (init?.method && init.method !== "GET") return Response.json({ success: false, error: "Изменения отключены на стенде" }, { status: 403 });
   const resource = url.pathname.split("/").at(-1) || "";
+  if(mortgageFixture && resource==='mortgage-workspace')return mortgageBrowserRequest(url,init,auth.userRole);
+  if(mortgageFixture && resource==='leads')return mortgageLeadBrowserRequest(init,auth.userRole);
+  if(mortgageFixture && resource==='auth-context')return Response.json({success:true,mode:'supabase',data:{
+    workspaceId,isAdmin:['owner','admin'].includes(auth.userRole),role:auth.userRole,staffUserId:'00000000-0000-4000-8000-000000000010',
+  }});
+  if(mortgageFixture && resource==='staff'){
+    if(!['owner','admin'].includes(auth.userRole))return Response.json({error:'Доступ закрыт'},{status:403});
+    const staff=[{id:'00000000-0000-4000-8000-000000000010',name:'Тестовый владелец',role:'owner'},
+      {id:'00000000-0000-4000-8000-000000000011',name:'Тестовый администратор',role:'admin'},
+      ...teamMembers.slice(0,2).map(m=>({id:m.staffId,name:m.name,role:m.role}))]
+      .map((m,i)=>({...m,email:`fixture-${i}@example.invalid`,phone:'',status:'active'}));
+    return Response.json({success:true,mode:'supabase',data:{staff,items:staff,directoryAvailable:true}});
+  }
+  if (init?.method && init.method !== "GET") return Response.json({ success: false, error: "Изменения отключены на стенде" }, { status: 403 });
   if (assignedLeadFixture && !["leads", "lead-stages", "lead-sources"].includes(resource)) {
     return Response.json({ success: false, error: "Доступ закрыт на изолированном стенде" }, { status: 403 });
   }

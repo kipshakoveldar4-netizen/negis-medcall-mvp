@@ -143,14 +143,16 @@ function setup(surface: Surface, patch: Partial<Auth> = {}, previous = false, al
   return fixture;
 }
 
-test("mortgage menus expose leads and team only to the agreed roles", () => {
+test("mortgage menus expose seven owner/admin sections and five own-work manager sections", () => {
   for (const surface of surfaces) {
     for (const role of ["owner", "admin", "lead_manager", "manager", "receptionist", "doctor", "marketer", "agent", "booking_agent", null]) {
       const fixture = setup(surface, { userRole: role, rolePermissions: { crm: true, admin: true, booking: true, ads: true } });
       fixture.openDrawer();
+      const own = [{href:'/appointments',label:'Календарь'},{href:'/clients',label:'Клиенты'},
+        {href:'/dashboard',label:'Главная'},{href:'/leads',label:'Заявки'},{href:'/tasks',label:'Задачи'}];
       const expected = role === "owner" || role === "admin"
-        ? [{ href: "/admin", label: "Команда" }, { href: "/leads", label: "Заявки" }]
-        : role === "lead_manager" ? [{ href: "/leads", label: "Заявки" }] : [];
+        ? [{href:'/admin',label:'Команда'},{href:'/analytics',label:'Аналитика команды'},...own]
+        : role === "lead_manager" ? own : [];
       assert.deepEqual(fixture.routes(), expected, `${surface}: ${role}`);
       assert.ok(fixture.policyCalls.length > 0);
       assert.ok(fixture.policyCalls.every((call) => call.purpose === "mortgage_leads" && call.role === role));
@@ -190,7 +192,8 @@ test("purpose allow cannot override existing restrictions and purpose deny wins 
   for (const surface of surfaces) {
     const restricted = setup(surface, { userRole: "lead_manager" }, false, () => true);
     restricted.openDrawer();
-    assert.deepEqual(restricted.routes(), [{ href: "/leads", label: "Заявки" }]);
+    assert.deepEqual(restricted.routes(), [{href:'/appointments',label:'Календарь'},{href:'/clients',label:'Клиенты'},
+      {href:'/dashboard',label:'Главная'},{href:'/leads',label:'Заявки'},{href:'/tasks',label:'Задачи'}]);
     const denied = setup(surface, {}, false, () => false);
     denied.openDrawer();
     assert.deepEqual(denied.routes(), []);

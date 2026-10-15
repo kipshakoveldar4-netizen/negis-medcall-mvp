@@ -1565,11 +1565,60 @@ test("P3 assigned-only access has a closed browser-route allowlist", async () =>
         const { res, log } = await ctx.call({ segments: route.split("/"), method, body: { id: ownLeadId, updates: { notes: "forged" } } });
         assert.ok([403,404,405].includes(res.statusCode), `${route} ${method}: ${res.statusCode}`);
         assert.equal(businessQueries(log).length, 0, `${route} must fail before any business query`);
-        assert.ok(log.every((entry) => entry.table === "staff_users"), `${route} must not read a profile before permission denial`);
+        if (route === "mortgage-workspace") {
+          // Only the dedicated route needs purpose to decide this role's access.
+          assert.equal(res.statusCode, 403, "the dedicated route requires authoritative mortgage purpose");
+          assertWorkspaceProfileQuery(log, WORKSPACE_A);
+          assert.ok(log.every((entry) => entry.table === "staff_users" || isWorkspaceProfileQuery(entry)),
+            "only membership and the verified workspace purpose may be read before denial");
+        } else {
+          assert.ok(log.every((entry) => entry.table === "staff_users"), `${route} must not read a profile before permission denial`);
+        }
       }
     }
     assert.equal(fixture.calls.length, 0);
   });
+});
+
+test("P3a dedicated mortgage access verifies membership and workspace selection before its purpose read", async () => {
+  for (const scenario of [
+    { memberships: [assignedLeadMember], token: null, status: 401 },
+    { memberships: [assignedLeadMember], authOk: false, status: 401 },
+    { memberships: [], status: 403 },
+    { memberships: [{ ...assignedLeadMember, status: "inactive" }], status: 403 },
+    { memberships: [assignedLeadMember], query: { workspaceId: WORKSPACE_B }, status: 403 },
+    { memberships: [assignedLeadMember, { ...assignedLeadMember, id: "staff-b", workspace_id: WORKSPACE_B }], status: 403 },
+  ]) {
+    const fixture: AssignedLeadFixture = { calls: [], rows: ownLeadRows };
+    await withRouter({ memberships: scenario.memberships, authOk: scenario.authOk, assignedLeads: fixture }, async ctx => {
+      for (const method of ["GET", "POST", "PATCH"]) {
+        const { res, log } = await ctx.call({ segments: ["mortgage-workspace"], method, token: scenario.token,
+          query: scenario.query, body: { purpose: "mortgage_leads", role: "owner" } });
+        assert.equal(res.statusCode, scenario.status);
+        assert.ok(log.every((entry) => entry.table === "staff_users"), "unverified scope must not read a profile or business data");
+      }
+      assert.equal(fixture.calls.length, 0);
+    });
+  }
+});
+
+test("P3b a browser-claimed mortgage purpose cannot open the dedicated route", async () => {
+  for (const profile of [[], [{ workspace_id: WORKSPACE_A, value: { purpose: "clinic_services" } }]]) {
+    const fixture: AssignedLeadFixture = { calls: [], rows: ownLeadRows };
+    await withRouter({ memberships: [assignedLeadMember], assignedLeads: fixture, rows: { workspace_settings: profile } }, async ctx => {
+      for (const method of ["GET", "POST", "PATCH"]) {
+        const { res, log } = await ctx.call({ segments: ["mortgage-workspace"], method,
+          query: { workspaceId: WORKSPACE_A, purpose: "mortgage_leads" },
+          body: { workspaceId: WORKSPACE_B, purpose: "mortgage_leads", role: "owner" } });
+        assert.equal(res.statusCode, 403);
+        assert.equal(res.body.success, false);
+        assertWorkspaceProfileQuery(log, WORKSPACE_A);
+        assert.ok(log.every((entry) => entry.table === "staff_users" || isWorkspaceProfileQuery(entry)));
+        assert.equal(businessQueries(log).length, 0);
+      }
+      assert.equal(fixture.calls.length, 0);
+    });
+  }
 });
 
 test("P4 scoped PATCH is normalized and cannot use the generic UPDATE", async () => {

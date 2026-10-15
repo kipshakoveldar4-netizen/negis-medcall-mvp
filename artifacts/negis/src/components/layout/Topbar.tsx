@@ -1,4 +1,5 @@
 import { useLocation } from 'wouter';
+import { useAuth } from '@/contexts/AuthContext';
 
 // Security-1A: the notification bell was removed.
 //
@@ -28,13 +29,17 @@ const PAGE_LABELS: Record<string, string> = {
   '/ads-automation/history': 'История запусков',
   '/onboarding': 'Настройка клиники',
   '/admin': 'Настройки',
+  '/tasks': 'Задачи',
+  '/analytics': 'Аналитика команды',
 };
 
 export function Topbar() {
   const [location] = useLocation();
+  const { workspacePurpose } = useAuth();
 
   const cleanLocation = location.split('?')[0];
-  const pageLabel = PAGE_LABELS[cleanLocation] ?? 'Medina OS';
+  const mortgageLabels: Record<string,string> = { '/dashboard':'Главная','/appointments':'Календарь','/booking':'Календарь','/admin':'Команда' };
+  const pageLabel = (workspacePurpose === 'mortgage_leads' ? mortgageLabels[cleanLocation] : undefined) ?? PAGE_LABELS[cleanLocation] ?? 'Medina OS';
 
   const today = new Date().toLocaleDateString('ru', {
     day: 'numeric',

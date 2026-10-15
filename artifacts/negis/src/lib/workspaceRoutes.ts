@@ -5,10 +5,11 @@ export function workspaceAllowsRoute(purpose: WorkspacePurpose | null, role: str
   if (!purpose) return false;
   if (purpose !== 'mortgage_leads') return true;
   const route = path.split('?')[0];
-  if (route === '/leads') return role === 'owner' || role === 'admin' || role === 'lead_manager';
-  return route === '/admin' && (role === 'owner' || role === 'admin');
+  if (!['owner','admin','lead_manager'].includes(role || '')) return false;
+  if (['/dashboard','/leads','/clients','/appointments','/booking','/tasks'].includes(route)) return true;
+  return ['/admin','/analytics'].includes(route) && (role === 'owner' || role === 'admin');
 }
 
 export function workspaceEntryRoute(purpose: WorkspacePurpose | null, role: string | null) {
-  return purpose === 'mortgage_leads' || role === 'lead_manager' ? '/leads' : '/dashboard';
+  return purpose === 'mortgage_leads' ? '/dashboard' : role === 'lead_manager' ? '/leads' : '/dashboard';
 }

@@ -3,8 +3,9 @@ export function isAssignedLeadRole(role: unknown): boolean {
   return role === "lead_manager";
 }
 
-export function assignedLeadRouteAllowed(route: string, method: string): boolean {
+export function assignedLeadRouteAllowed(route: string, method: string, purpose?: string): boolean {
   return (route === "leads" && (method === "GET" || method === "PATCH"))
+    || (purpose === "mortgage_leads" && route === "mortgage-workspace" && ["GET", "POST", "PATCH"].includes(method))
     || ((route === "lead-stages" || route === "lead-sources") && method === "GET");
 }
 
