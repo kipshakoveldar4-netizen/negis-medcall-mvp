@@ -362,7 +362,7 @@ test("mortgage owner/admin keep manual assignment but cannot book, sell, convert
     assert.equal(fixture.driver.nodes().some((node) => node.type === "Link"), false);
     button(fixture.driver, "Подробнее").props.onClick(); await fixture.driver.flush();
     assert.equal(fixture.driver.nodes().some((node) => ["TaskPanel", "ChangeLogPanel", "SiteInquiryDeletion"].includes(String(node.type))), false);
-    assert.equal(fixture.driver.nodes().some((node) => node.type === "Link"), false);
+    assert.deepEqual(fixture.driver.nodes().filter((node) => node.type === "Link").map((node) => node.props.href), [`/clients?leadId=${encodeURIComponent(lead.id)}`]);
     button(fixture.driver, "Изменить").props.onClick(); await fixture.driver.flush();
     assert.ok(fixture.driver.nodes().some((node) => node.props["data-testid"] === "lead-responsible-select"));
     assert.ok(fixture.driver.nodes().every((node) => node.props["data-testid"] !== "lead-campaign-select"));
@@ -374,6 +374,23 @@ test("mortgage owner/admin keep manual assignment but cannot book, sell, convert
     assert.doesNotMatch(label(fixture.driver.tree()), /Local contact|Изменить заявку/);
     fixture.driver.dispose();
   }
+});
+
+test("mortgage details link to the existing scoped contact instead of medical conversion or an AI placeholder", async () => {
+  for (const role of ["owner", "admin", "lead_manager"]) {
+    const fixture = setup(role); fixture.setAuth({ workspacePurpose: "mortgage_leads" });
+    fixture.content(); await fixture.driver.flush();
+    button(fixture.driver, "Подробнее").props.onClick(); await fixture.driver.flush();
+    const link = fixture.driver.nodes().find((node) => node.type === "Link" && label(node) === "Открыть карточку клиента");
+    assert.equal(link?.props.href, `/clients?leadId=${encodeURIComponent(lead.id)}`);
+    assert.equal(fixture.driver.nodes().some((node) => node.props.label === "Клиент"), false);
+    assert.doesNotMatch(label(fixture.driver.tree()), /AI-рекомендация|Следующий шаг|Создать клиента/);
+    fixture.driver.dispose();
+  }
+  const clinical = setup("owner"); clinical.content(); await clinical.driver.flush();
+  button(clinical.driver, "Подробнее").props.onClick(); await clinical.driver.flush();
+  assert.ok(clinical.driver.nodes().some((node) => node.props.label === "Клиент"));
+  assert.match(label(clinical.driver.tree()), /AI-рекомендация/); clinical.driver.dispose();
 });
 
 test("mortgage save and reference lifetime cannot continue after profile or role changes", async () => {
@@ -624,7 +641,7 @@ test("team analytics captures access once and ignores invalidated scopes and lat
 test("mortgage routes intersect roles and never mount medical, advertising or unsupported pages", async () => {
   const app = await read("App.tsx");
   for (const role of ["owner", "admin", "lead_manager", "manager", "marketer", "doctor"]) {
-    for (const location of ["/leads", "/admin", "/clients", "/sales", "/appointments", "/booking", "/dashboard", "/ads", "/ads-automation/history", "/site-blog", "/services", "/reports"]) {
+    for (const location of ["/leads", "/admin", "/clients", "/sales", "/appointments", "/booking", "/dashboard", "/tasks", "/analytics", "/ads", "/ads-automation/history", "/site-blog", "/services", "/reports"]) {
       let redirected = "";
       const routes = evaluate(select(app, ["ROUTE_PERMISSIONS", "firstAllowedRoute", "ProtectedPage"]), {
         ...workspaceRoutes,
@@ -632,16 +649,17 @@ test("mortgage routes intersect roles and never mount medical, advertising or un
         useLocation: () => [location, (url: string) => { redirected = url; }], useEffect: (run: () => void) => run(),
       }).selected;
       const allowed = workspaceRoutes.workspaceAllowsRoute("mortgage_leads", role, location);
-      const tree = routes.ProtectedPage({ component: "Screen", permission: location === "/leads" ? "crm" : location === "/admin" ? "admin" : "dashboard" });
+      const purposeRoute = ["/leads", "/clients", "/appointments", "/booking", "/dashboard", "/tasks", "/analytics"].includes(location);
+      const tree = routes.ProtectedPage({ component: "Screen", permission: purposeRoute ? "crm" : routes.ROUTE_PERMISSIONS[location] ?? "dashboard" });
       assert.equal(tree?.type === "Screen", allowed, `${role}: ${location}`);
       const supportedRole = ["owner", "admin", "lead_manager"].includes(role);
-      assert.equal(redirected, allowed || !supportedRole ? "" : "/leads");
+      assert.equal(redirected, allowed || !supportedRole ? "" : "/dashboard");
       if (!supportedRole) assert.match(label(tree), /Доступ к пространству ограничен/);
     }
   }
   assert.equal(workspaceRoutes.workspaceAllowsRoute(null, "owner", "/leads"), false);
   const landing = evaluate(select(await read("pages/Landing.tsx"), ["roleRoute"])).selected;
-  for (const role of ["owner", "admin", "lead_manager"]) assert.equal(landing.roleRoute(role, "mortgage_leads"), "/leads");
+  for (const role of ["owner", "admin", "lead_manager"]) assert.equal(landing.roleRoute(role, "mortgage_leads"), "/dashboard");
 });
 
 test("access refusal closes contact detail/edit and a late invalid save has no toast", async () => {

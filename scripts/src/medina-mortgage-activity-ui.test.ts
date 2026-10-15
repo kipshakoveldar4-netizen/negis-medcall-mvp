@@ -429,3 +429,58 @@ test("the form blocks inactive/unassigned meeting managers, permits tasks withou
     d.unmount();
   }
 });
+
+function creationPage(kind: "meeting" | "task", initialSearch: string) {
+  const d = driver();
+  let search = initialSearch;
+  const pathname = kind === "meeting" ? "/appointments" : "/tasks";
+  const calls: Array<{ url: string; replace: boolean }> = [];
+  const workspace: any = { data: null, loading: false, error: "", refresh() {} };
+  let captured: any;
+  let page: Record<string, any>;
+  const mount = () => d.mount(() => page.Body());
+  const navigate = (url: string, options: { replace?: boolean }) => {
+    calls.push({ url, replace: Boolean(options.replace) });
+    search = url.includes("?") ? url.slice(url.indexOf("?") + 1) : "";
+    mount();
+  };
+  const input = kind === "meeting" ? calendarSource : taskSource;
+  const body = kind === "meeting" ? "MortgageCalendarBody" : "MortgageTasksBody";
+  page = evaluate(input.replace("return <PageLayout>", "__capture({ editor, setEditor }); return <PageLayout>") + `\nexports.Body = ${body};`, {
+    react: d.hooks, wouter: { useSearch: () => search, useLocation: () => [pathname, navigate], Link: "Link" },
+    "@/lib/clinicDay": clinicDay, "@/lib/dayGrid": dayGrid,
+    "@/lib/mortgage-workspace": { ...pure, useMortgageWorkspace: () => workspace },
+  }, { __capture: (value: any) => { captured = value; }, window: { setInterval: () => 1, clearInterval() {} } });
+  mount();
+  return { d, calls, workspace, mount, editor: () => captured.editor,
+    close() { captured.setEditor(null); }, search: () => search,
+    setSearch(value: string) { search = value; mount(); } };
+}
+
+for (const kind of ["meeting", "task"] as const) {
+  test(`${kind} creation consumes only the one-shot URL intent after data is ready`, async () => {
+    const f = creationPage(kind, "leadId=local-client&new=1&keep=two%20words");
+    await f.d.flush(); assert.equal(f.editor(), null); assert.equal(f.calls.length, 0);
+    f.workspace.data = snapshot(); f.mount(); await f.d.flush();
+    assert.ok(f.editor()); assert.equal(f.calls.length, 1); assert.equal(f.calls[0].replace, true);
+    const params = new URLSearchParams(f.search());
+    assert.equal(params.get("new"), null); assert.equal(params.get("leadId"), "local-client");
+    assert.equal(params.get("keep"), "two words");
+    await f.d.replay(); assert.equal(f.calls.length, 1);
+    f.close(); await f.d.flush(); assert.equal(f.editor(), null);
+    f.setSearch("leadId=local-client&new=1&keep=two%20words"); await f.d.flush();
+    assert.ok(f.editor()); assert.equal(f.calls.length, 2);
+    const cleaned = f.search(); f.d.unmount();
+    const reloaded = creationPage(kind, cleaned);
+    reloaded.workspace.data = snapshot(); await reloaded.d.flush();
+    assert.equal(reloaded.editor(), null); assert.equal(reloaded.calls.length, 0); reloaded.d.unmount();
+  });
+
+  test(`${kind} ordinary navigation and non-create flags do not open a dialog`, async () => {
+    for (const search of ["", "leadId=local-client", "leadId=local-client&new=0"]) {
+      const f = creationPage(kind, search);
+      f.workspace.data = snapshot(); await f.d.flush();
+      assert.equal(f.editor(), null); assert.equal(f.calls.length, 0); f.d.unmount();
+    }
+  });
+}

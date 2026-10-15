@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Link, useSearch } from "wouter";
+import { Link, useLocation, useSearch } from "wouter";
 import { CalendarDays, Check, ChevronLeft, ChevronRight, Clock3, Loader2, Pencil, Plus, RefreshCw, UserRoundX, X } from "lucide-react";
 import { PageLayout } from "@/components/layout/PageLayout";
 import { PageHeader } from "@/components/ui/page-header";
@@ -47,6 +47,7 @@ export default function MortgageCalendar() {
 }
 
 function MortgageCalendarBody() {
+  const [pathname, navigate] = useLocation();
   const search = useSearch();
   const params = new URLSearchParams(search);
   const leadId = params.get("leadId") || undefined;
@@ -76,11 +77,16 @@ function MortgageCalendarBody() {
   }, [workspace.data]);
   const autoOpened = useRef("");
   useEffect(() => {
+    if (params.get("new") !== "1") { autoOpened.current = ""; return; }
     if (workspace.data && params.get("new") === "1" && autoOpened.current !== search) {
       autoOpened.current = search;
       setEditor({});
+      const next = new URLSearchParams(search);
+      next.delete("new");
+      const query = next.toString();
+      navigate(`${pathname}${query ? `?${query}` : ""}`, { replace: true });
     }
-  }, [search, workspace.data]);
+  }, [search, workspace.data, pathname, navigate]);
   const [now, setNow] = useState(Date.now());
   useEffect(() => { const timer = window.setInterval(() => setNow(Date.now()), 60_000); return () => window.clearInterval(timer); }, []);
   const today = timeZone ? dayKeyInZone(now, timeZone) : "";

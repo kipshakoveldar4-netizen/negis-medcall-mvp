@@ -1521,7 +1521,11 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
               <Fact label="Кампания" value={detailLead.campaign || "—"} />
               <Fact label="Рекламная кампания" value={linkedCampaignDetail(detailLead, campaignLaunchOptions)} />
               <Fact label="Ответственный" value={responsibleName(detailLead, staffOptions)} />
-              <Fact label="Клиент" value={detailLead.clientId ? "Создан" : "Не создан"} />
+              {isMortgage ? (
+                <Link href={`/clients?leadId=${encodeURIComponent(detailLead.id)}`} className="inline-flex items-center gap-2 text-[var(--negis-primary)] underline underline-offset-2">
+                  <Users size={15} />Открыть карточку клиента
+                </Link>
+              ) : <Fact label="Клиент" value={detailLead.clientId ? "Создан" : "Не создан"} />}
               <Fact label="Создана" value={formatCreatedAt(detailLead.createdAt)} />
               <Fact label="Заметки" value={detailLead.notes || "—"} />
             </div>
@@ -1598,13 +1602,13 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
             ) : null}
 
             {/* AI recommendation placeholder */}
-            <div className="mt-4 rounded-2xl p-3" style={{ background: negisToneSoftBg("ai") }}>
+            {!isMortgage && <div className="mt-4 rounded-2xl p-3" style={{ background: negisToneSoftBg("ai") }}>
               <div className="flex items-center gap-2">
                 <Sparkles size={15} style={{ color: "var(--negis-ai)" }} />
                 <p className="text-sm font-bold" style={{ color: "var(--negis-text)" }}>Следующий шаг</p>
               </div>
               <p className="mt-1 text-sm font-semibold" style={{ color: "var(--negis-muted)" }}>{AI_RECOMMENDATION_PLACEHOLDER}</p>
-            </div>
+            </div>}
 
             {/* Admin-only technical details (collapsed) */}
             {clinicalActions && isAdminMode ? (

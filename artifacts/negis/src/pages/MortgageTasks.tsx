@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Link, useSearch } from "wouter";
+import { Link, useLocation, useSearch } from "wouter";
 import { Check, Circle, ClipboardList, Flag, Loader2, Pencil, Plus, RefreshCw, Search, X } from "lucide-react";
 import { PageLayout } from "@/components/layout/PageLayout";
 import { PageHeader } from "@/components/ui/page-header";
@@ -48,6 +48,7 @@ export default function MortgageTasks() {
 }
 
 function MortgageTasksBody() {
+  const [pathname, navigate] = useLocation();
   const search = useSearch();
   const params = new URLSearchParams(search);
   const leadId = params.get("leadId") || undefined;
@@ -66,11 +67,16 @@ function MortgageTasksBody() {
   }, []);
   const autoOpened = useRef("");
   useEffect(() => {
+    if (params.get("new") !== "1") { autoOpened.current = ""; return; }
     if (workspace.data && params.get("new") === "1" && autoOpened.current !== search) {
       autoOpened.current = search;
       setEditor({});
+      const next = new URLSearchParams(search);
+      next.delete("new");
+      const query = next.toString();
+      navigate(`${pathname}${query ? `?${query}` : ""}`, { replace: true });
     }
-  }, [search, workspace.data]);
+  }, [search, workspace.data, pathname, navigate]);
   const data = workspace.data;
   const invalidRange = filters.due === "range" && Boolean(filters.from && filters.to && filters.from > filters.to);
   const tasks = useMemo(() => data && !invalidRange ? mortgageFilterTasks(data.activities, filters, data.timeZone, now) : [], [data, filters, now, invalidRange]);
