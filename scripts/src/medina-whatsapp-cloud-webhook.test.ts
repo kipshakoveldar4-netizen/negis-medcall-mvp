@@ -17,7 +17,9 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 const WORKSPACE_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const WORKSPACE_B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const PHONE_NUMBER_ID = "111000111000111";
+const PHONE_NUMBER_B = "222000222000222";
 const WAMID_1 = "wamid.HBgLNzcwMTAwMDAwMDEVAgARGBIwRkVDQ0NDRTdGN0E1QUYwMDA=";
 const STAGE_NEW = "5ba0e000-0000-4000-8000-000000000001";
 const SOURCE_WHATSAPP = "50c0e000-0000-4000-8000-000000000001";
@@ -25,6 +27,19 @@ const APP_SECRET = "test-app-secret";
 const VERIFY_TOKEN = "test-verify-token";
 
 type QueryLog = { table: string; op: string; filters: Record<string, unknown>; row?: unknown };
+type FixtureRow = Record<string, unknown>;
+type WebhookChange = { field: string; value: Record<string, unknown> };
+
+let networkAttempts = 0;
+const originalFetch = globalThis.fetch;
+globalThis.fetch = async () => {
+  networkAttempts += 1;
+  throw new Error("WhatsApp webhook fixtures must not use the network");
+};
+test.after(() => {
+  globalThis.fetch = originalFetch;
+  assert.equal(networkAttempts, 0, "only the in-memory database client may be used");
+});
 
 type MockResponse = {
   statusCode: number;
@@ -50,7 +65,7 @@ function mockResponse(): MockResponse {
 }
 
 type SpyOptions = {
-  rows?: Record<string, unknown[]>;
+  rows?: Record<string, FixtureRow[]>;
   errors?: Record<string, string>;
   throws?: Record<string, object>;
   /**
@@ -69,9 +84,13 @@ type SpyOptions = {
 };
 
 function spyClient(options: SpyOptions, log: QueryLog[]) {
+  const tables = options.rows ?? {};
+  let nextId = 0;
   return {
     from(table: string) {
       const entry: QueryLog = { table, op: "select", filters: {} };
+      const predicates: Array<(row: FixtureRow) => boolean> = [];
+      let rowLimit = Infinity;
       log.push(entry);
       const settle = (shape: "one" | "list") => {
         if (options.throws?.[table]) return Promise.reject(options.throws[table]);
@@ -89,44 +108,59 @@ function spyClient(options: SpyOptions, log: QueryLog[]) {
         }
         const message = options.errors?.[table];
         if (message) return Promise.resolve({ data: null, error: { message } });
-        const rows = options.rows?.[table] ?? [];
-        if (shape === "list") {
-          // An equality on phone_normalized is answered by the database, not by
-          // the fixture: the column is STORED GENERATED, so the query returns
-          // only rows already carrying that exact value. Modelling that is what
-          // keeps CW14 sensitive — a handler that sends the raw phone, or the
-          // wrong canonical form, matches nothing and files a duplicate.
-          const wanted = entry.filters.phone_normalized;
-          if (wanted !== undefined) {
-            const matched = rows.filter(
-              (row) => (row as Record<string, unknown>).phone_normalized === wanted,
-            );
-            return Promise.resolve({ data: matched, error: null });
+        const rows = tables[table] ??= [];
+        let matched: FixtureRow[];
+        if (entry.op === "insert") {
+          const row: FixtureRow = {
+            id: `11111111-1111-4111-8111-${String(++nextId).padStart(12, "0")}`,
+            ...(entry.row as FixtureRow),
+          };
+          if (table === "leads") {
+            // The adapter inserts canonical phones; model the generated column
+            // and nullable assignment so later messages can find this new row.
+            row.phone_normalized = row.phone;
+            row.responsible_user_id ??= null;
           }
-          return Promise.resolve({ data: rows, error: null });
+          rows.push(row);
+          matched = [row];
+        } else {
+          matched = rows.filter((row) => predicates.every((matches) => matches(row))).slice(0, rowLimit);
+          if (entry.op === "update") {
+            for (const row of matched) Object.assign(row, entry.row);
+          }
         }
-        if (entry.op === "insert" && rows.length === 0) {
-          const row = { id: "11111111-1111-4111-8111-111111111199", ...(entry.row as object) };
-          return Promise.resolve({ data: row, error: null });
+        if (shape === "one" && matched.length > 1) {
+          return Promise.resolve({ data: null, error: { code: "PGRST116", message: "Multiple fixture rows matched" } });
         }
-        return Promise.resolve({ data: rows[0] ?? null, error: null });
+        return Promise.resolve({ data: shape === "list" ? matched : matched[0] ?? null, error: null });
       };
       const builder: Record<string, unknown> = {};
       Object.assign(builder, {
         select: () => builder,
         insert: (row: unknown) => { entry.op = "insert"; entry.row = row; return builder; },
-        eq(column: string, value: unknown) { entry.filters[column] = value; return builder; },
-        neq(column: string, value: unknown) { entry.filters[`neq:${column}`] = value; return builder; },
-        not(column: string, op: string) { entry.filters[`not:${column}`] = op; return builder; },
+        update: (row: unknown) => { entry.op = "update"; entry.row = row; return builder; },
+        eq(column: string, value: unknown) {
+          entry.filters[column] = value;
+          predicates.push((row) => row[column] === value);
+          return builder;
+        },
+        neq(column: string, value: unknown) {
+          entry.filters[`neq:${column}`] = value;
+          predicates.push((row) => row[column] != null && row[column] !== value);
+          return builder;
+        },
+        not(column: string, op: string, value: unknown) {
+          assert.equal(op, "is");
+          assert.equal(value, null);
+          entry.filters[`not:${column}`] = op;
+          predicates.push((row) => row[column] != null);
+          return builder;
+        },
         order(column: string) { entry.filters[`order:${column}`] = true; return builder; },
-        limit: () => builder,
+        limit: (count: number) => { rowLimit = count; return builder; },
         single: () => settle("one"),
         maybeSingle: () => settle("one"),
         then(onFulfilled: (value: unknown) => unknown) {
-          if (entry.op === "insert") {
-            const message = options.errors?.[table];
-            return Promise.resolve(message ? { data: null, error: { message } } : { data: null, error: null }).then(onFulfilled);
-          }
           return settle("list").then(onFulfilled);
         },
       });
@@ -163,10 +197,11 @@ async function loadHandler(
   )) as { setSupabaseServerClientFactoryForTests: (factory: (() => unknown) | null) => void };
 
   let clientCreations = 0;
+  const client = spyClient(options, log);
   supabaseModule.setSupabaseServerClientFactoryForTests(() => {
     clientCreations += 1;
     if (options.rows === undefined && options.errors === undefined && options.throws === undefined) return null;
-    return spyClient(options, log);
+    return client;
   });
 
   const module = (await import(
@@ -218,7 +253,7 @@ async function withHandler<T>(
   }
 }
 
-const numberRow = { workspace_id: WORKSPACE_A, enabled: true };
+const numberRow = { phone_number_id: PHONE_NUMBER_ID, workspace_id: WORKSPACE_A, enabled: true };
 
 function inboundPayload(overrides: {
   messageId?: string;
@@ -281,6 +316,43 @@ function statusesPayload(): string {
 
 function leadInserts(log: QueryLog[]): QueryLog[] {
   return log.filter((entry) => entry.table === "leads" && entry.op === "insert");
+}
+
+function payloadChange(payload: string): WebhookChange {
+  return (JSON.parse(payload) as { entry: Array<{ changes: WebhookChange[] }> }).entry[0].changes[0];
+}
+
+function batchPayload(changes: WebhookChange[]): string {
+  return JSON.stringify({
+    object: "whatsapp_business_account",
+    entry: [{ id: "10000000000000", changes }],
+  });
+}
+
+function ignoredFieldChanges(): WebhookChange[] {
+  const historyMessages = [
+    { from: "77010000001", id: "wamid.fixture.history.existing", timestamp: "1700000000", type: "text", text: { body: "HISTORY_MUST_NOT_OVERWRITE" } },
+    { from: "77010000090", id: "wamid.fixture.history.new", timestamp: "1700000000", type: "text", text: { body: "HISTORY_MUST_NOT_CREATE" } },
+  ];
+  const outboundEchoes = [
+    { from: "77470000000", to: "77010000001", id: "wamid.fixture.echo.existing", timestamp: "1770000000", type: "text", text: { body: "OUTBOUND_MUST_NOT_OVERWRITE" } },
+    { from: "77470000000", to: "77010000091", id: "wamid.fixture.echo.new", timestamp: "1770000000", type: "text", text: { body: "OUTBOUND_MUST_NOT_CREATE" } },
+  ];
+  const metadata = { display_phone_number: "77470000000", phone_number_id: PHONE_NUMBER_ID };
+  // Message-shaped canaries pin the field gate, not direction/timestamp detection.
+  // These synthetic fixtures are not a Coexistence wire-schema acceptance test.
+  return [
+    {
+      field: "history",
+      value: { messaging_product: "whatsapp", metadata, messages: historyMessages,
+        history: [{ threads: historyMessages.map((message) => ({ id: message.from, messages: [message] })) }] },
+    },
+    {
+      field: "smb_message_echoes",
+      value: { messaging_product: "whatsapp", metadata, message_echoes: outboundEchoes, messages: outboundEchoes },
+    },
+    payloadChange(statusesPayload()),
+  ];
 }
 
 // ===========================================================================
@@ -404,8 +476,8 @@ test("CW12 an inbound message becomes a lead in the number's workspace, inside t
       whatsapp_cloud_numbers: [numberRow],
       whatsapp_cloud_inbound_messages: [],
       leads: [],
-      lead_stages: [{ id: STAGE_NEW }],
-      lead_sources: [{ id: SOURCE_WHATSAPP }],
+      lead_stages: [{ id: STAGE_NEW, workspace_id: WORKSPACE_A, semantic_group: "new", sort_order: 0 }],
+      lead_sources: [{ id: SOURCE_WHATSAPP, workspace_id: WORKSPACE_A, source_key: "whatsapp" }],
     },
   }, {}, async (ctx) => {
     const body = inboundPayload();
@@ -439,7 +511,7 @@ test("CW13 a replayed wamid is a no-op", async () => {
   await withHandler({
     rows: {
       whatsapp_cloud_numbers: [numberRow],
-      whatsapp_cloud_inbound_messages: [{ id: "seen-row" }],
+      whatsapp_cloud_inbound_messages: [{ id: "seen-row", message_id: WAMID_1 }],
       leads: [],
     },
   }, {}, async (ctx) => {
@@ -460,6 +532,8 @@ test("CW14 an open lead with the same phone in another spelling is a repeat, not
       // migration 028's expression makes of it. Meta sends 77010000001.
       leads: [{
         id: "22222222-2222-4222-8222-222222222222",
+        workspace_id: WORKSPACE_A,
+        status: "new",
         phone: "8 701 000-00-01",
         phone_normalized: "+77010000001",
       }],
@@ -475,6 +549,158 @@ test("CW14 an open lead with the same phone in another spelling is a repeat, not
     const ledger = log.find((entry) => entry.table === "whatsapp_cloud_inbound_messages" && entry.op === "insert");
     assert.ok(ledger, "the repeat is recorded");
     assert.equal((ledger.row as Record<string, unknown>).kind, "repeat");
+  });
+});
+
+test("CW30 a signed mixed batch isolates two enabled channels and ignores unknown and disabled numbers", async () => {
+  const disabledNumber = "333000333000333";
+  const unknownNumber = "999000999000999";
+  const stageB = "5ba0e000-0000-4000-8000-000000000002";
+  const sourceB = "50c0e000-0000-4000-8000-000000000002";
+  const rows: Record<string, FixtureRow[]> = {
+    whatsapp_cloud_numbers: [
+      { phone_number_id: PHONE_NUMBER_B, workspace_id: WORKSPACE_B, enabled: true },
+      { phone_number_id: disabledNumber, workspace_id: WORKSPACE_B, enabled: false },
+      { ...numberRow },
+    ],
+    whatsapp_cloud_inbound_messages: [],
+    leads: [],
+    lead_stages: [
+      { id: stageB, workspace_id: WORKSPACE_B, semantic_group: "new", sort_order: 0 },
+      { id: STAGE_NEW, workspace_id: WORKSPACE_A, semantic_group: "new", sort_order: 0 },
+    ],
+    lead_sources: [
+      { id: sourceB, workspace_id: WORKSPACE_B, source_key: "whatsapp" },
+      { id: SOURCE_WHATSAPP, workspace_id: WORKSPACE_A, source_key: "whatsapp" },
+    ],
+  };
+  const channelsBefore = structuredClone(rows.whatsapp_cloud_numbers);
+  const changes = [
+    { phoneNumberId: PHONE_NUMBER_ID, messageId: "wamid.fixture.tenant.a", from: "77010000030", text: "TENANT_A_ONLY", contactName: "Fixture A" },
+    { phoneNumberId: PHONE_NUMBER_B, messageId: "wamid.fixture.tenant.b", from: "77010000030", text: "TENANT_B_ONLY", contactName: "Fixture B" },
+    { phoneNumberId: unknownNumber, messageId: "wamid.fixture.unknown", from: "77010000031" },
+    { phoneNumberId: disabledNumber, messageId: "wamid.fixture.disabled", from: "77010000032" },
+  ].map((message) => payloadChange(inboundPayload(message)));
+  changes[0].value.workspace_id = WORKSPACE_B;
+  changes[1].value.workspace_id = WORKSPACE_A;
+  const body = batchPayload(changes);
+
+  await withHandler({ rows }, {}, async (ctx) => {
+    const { res, log } = await ctx.call({ rawBody: body, signature: sign(body) });
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(res.body, { success: true, created: 2, repeats: 0, ignored: 2 });
+    assert.deepEqual(log.filter((query) => query.table === "whatsapp_cloud_numbers").map((query) => query.filters.phone_number_id),
+      [PHONE_NUMBER_ID, PHONE_NUMBER_B, unknownNumber, disabledNumber]);
+    assert.deepEqual(leadInserts(log).map((query) => query.row), [
+      { workspace_id: WORKSPACE_A, full_name: "Fixture A", phone: "+77010000030", source: "whatsapp", status: "new",
+        stage_id: STAGE_NEW, source_id: SOURCE_WHATSAPP, notes: "WhatsApp: TENANT_A_ONLY" },
+      { workspace_id: WORKSPACE_B, full_name: "Fixture B", phone: "+77010000030", source: "whatsapp", status: "new",
+        stage_id: stageB, source_id: sourceB, notes: "WhatsApp: TENANT_B_ONLY" },
+    ]);
+    assert.equal(rows.leads.length, 2, "the same customer phone must not merge workspaces");
+    assert.notEqual(rows.leads[0].id, rows.leads[1].id);
+    const expectedLedger = [
+      { message_id: "wamid.fixture.tenant.a", channel_id: PHONE_NUMBER_ID, workspace_id: WORKSPACE_A, lead_id: rows.leads[0].id, kind: "created" },
+      { message_id: "wamid.fixture.tenant.b", channel_id: PHONE_NUMBER_B, workspace_id: WORKSPACE_B, lead_id: rows.leads[1].id, kind: "created" },
+    ];
+    assert.deepEqual(log.filter((query) => query.table === "whatsapp_cloud_inbound_messages" && query.op === "insert").map((query) => query.row), expectedLedger);
+    assert.deepEqual(rows.whatsapp_cloud_inbound_messages.map(({ id, ...row }) => row), expectedLedger);
+    assert.equal(log.filter((query) => query.op !== "select").length, 4, "only two local lead/ledger pairs may be written");
+    assert.ok(log.every((query) => query.op !== "update"), "no channel or lead may be updated");
+    assert.deepEqual(rows.whatsapp_cloud_numbers, channelsBefore);
+    assert.deepEqual(log.filter((query) => query.table === "leads" && query.op === "select").map((query) => query.filters.workspace_id),
+      [WORKSPACE_A, WORKSPACE_B]);
+
+    const beforeReplay = structuredClone(rows);
+    const replay = await ctx.call({ rawBody: body, signature: sign(body) });
+    assert.deepEqual(replay.res.body, { success: true, created: 0, repeats: 0, ignored: 4 });
+    assert.equal(replay.res.statusCode, 200);
+    assert.ok(replay.log.every((query) => query.op === "select"), "a sequential replay may not write leads or ledger rows");
+    assert.deepEqual(rows, beforeReplay);
+  });
+});
+
+test("CW31 signed same-phone repeats keep each channel's existing lead, notes and assignment", async () => {
+  const rows: Record<string, FixtureRow[]> = {
+    whatsapp_cloud_numbers: [
+      { phone_number_id: PHONE_NUMBER_B, workspace_id: WORKSPACE_B, enabled: true },
+      { ...numberRow },
+    ],
+    whatsapp_cloud_inbound_messages: [],
+    leads: [
+      { id: "lead-b", workspace_id: WORKSPACE_B, phone: "+77010000001", phone_normalized: "+77010000001", status: "new", notes: "B_PRIVATE_NOTE", responsible_user_id: "manager-b" },
+      { id: "lead-a", workspace_id: WORKSPACE_A, phone: "+77010000001", phone_normalized: "+77010000001", status: "new", notes: "A_PRIVATE_NOTE", responsible_user_id: "manager-a" },
+    ],
+  };
+  const before = structuredClone(rows.leads);
+  const body = batchPayload([
+    payloadChange(inboundPayload({ messageId: "wamid.fixture.repeat.a", text: "A_REPEAT" })),
+    payloadChange(inboundPayload({ phoneNumberId: PHONE_NUMBER_B, messageId: "wamid.fixture.repeat.b", text: "B_REPEAT" })),
+  ]);
+  await withHandler({ rows }, {}, async (ctx) => {
+    const { res, log } = await ctx.call({ rawBody: body, signature: sign(body) });
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(res.body, { success: true, created: 0, repeats: 2, ignored: 0 });
+    assert.deepEqual(rows.whatsapp_cloud_inbound_messages.map(({ id, ...row }) => row), [
+      { message_id: "wamid.fixture.repeat.a", channel_id: PHONE_NUMBER_ID, workspace_id: WORKSPACE_A, lead_id: "lead-a", kind: "repeat" },
+      { message_id: "wamid.fixture.repeat.b", channel_id: PHONE_NUMBER_B, workspace_id: WORKSPACE_B, lead_id: "lead-b", kind: "repeat" },
+    ]);
+    assert.ok(log.filter((query) => query.op !== "select").every((query) => query.table === "whatsapp_cloud_inbound_messages" && query.op === "insert"));
+    assert.deepEqual(rows.leads, before, "repeat text cannot change either tenant's notes or responsible manager");
+  });
+});
+
+test("CW32 signed history, outbound phone echoes and receipts alone never reach the database", async () => {
+  const rows: Record<string, FixtureRow[]> = {
+    whatsapp_cloud_numbers: [{ ...numberRow }],
+    whatsapp_cloud_inbound_messages: [],
+    leads: [{ id: "existing-lead", workspace_id: WORKSPACE_A, phone: "+77010000001", phone_normalized: "+77010000001",
+      status: "new", notes: "KEEP_EXISTING_NOTE", responsible_user_id: "existing-manager" }],
+  };
+  const before = structuredClone(rows);
+  const body = batchPayload(ignoredFieldChanges());
+  await withHandler({ rows }, {}, async (ctx) => {
+    const { res, log } = await ctx.call({ rawBody: body, signature: sign(body) });
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(res.body, { success: true, created: 0, repeats: 0, ignored: 0 });
+    assert.equal(ctx.clientCreations, 0, "non-inbound fields must not initialize the database client");
+    assert.deepEqual(log, []);
+    assert.deepEqual(rows, before, "history and outbound echoes cannot create leads, ledger entries or edit existing contacts");
+  });
+});
+
+test("CW33 signed history, outbound echoes and receipts do not contaminate legitimate new and repeat messages", async () => {
+  const rows: Record<string, FixtureRow[]> = {
+    whatsapp_cloud_numbers: [{ ...numberRow }],
+    whatsapp_cloud_inbound_messages: [],
+    leads: [{ id: "existing-lead", workspace_id: WORKSPACE_A, phone: "+77010000001", phone_normalized: "+77010000001",
+      status: "new", notes: "KEEP_EXISTING_NOTE", responsible_user_id: "existing-manager" }],
+  };
+  const before = structuredClone(rows.leads[0]);
+  const [history, echoes, receipts] = ignoredFieldChanges();
+  const body = batchPayload([
+    history,
+    payloadChange(inboundPayload({ messageId: "wamid.fixture.live.repeat", text: "LIVE_REPEAT_MUST_NOT_OVERWRITE" })),
+    echoes,
+    payloadChange(inboundPayload({ messageId: "wamid.fixture.live.new", from: "77010000033", text: "LIVE_NEW_NOTE" })),
+    receipts,
+  ]);
+  await withHandler({ rows }, {}, async (ctx) => {
+    const { res, log } = await ctx.call({ rawBody: body, signature: sign(body) });
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(res.body, { success: true, created: 1, repeats: 1, ignored: 0 });
+    assert.deepEqual(rows.leads[0], before, "ignored fields and a live repeat preserve notes and assignment");
+    assert.equal(rows.leads.length, 2, "neither historical contacts nor the outbound business phone become leads");
+    assert.deepEqual(leadInserts(log).map((query) => query.row), [
+      { workspace_id: WORKSPACE_A, full_name: "Тестовый Пациент", phone: "+77010000033", source: "whatsapp", status: "new", notes: "WhatsApp: LIVE_NEW_NOTE" },
+    ]);
+    assert.equal(rows.leads[1].responsible_user_id, null);
+    assert.deepEqual(rows.whatsapp_cloud_inbound_messages.map(({ id, ...row }) => row), [
+      { message_id: "wamid.fixture.live.repeat", channel_id: PHONE_NUMBER_ID, workspace_id: WORKSPACE_A, lead_id: "existing-lead", kind: "repeat" },
+      { message_id: "wamid.fixture.live.new", channel_id: PHONE_NUMBER_ID, workspace_id: WORKSPACE_A, lead_id: rows.leads[1].id, kind: "created" },
+    ]);
+    assert.equal(log.filter((query) => query.op !== "select").length, 3, "only one lead and two live-message ledger entries may be written");
+    assert.ok(log.every((query) => query.op !== "update"));
   });
 });
 
@@ -498,7 +724,7 @@ test("CW23 the repeat check is an indexed equality on the canonical phone", asyn
     rows: {
       whatsapp_cloud_numbers: [numberRow],
       whatsapp_cloud_inbound_messages: [],
-      leads: [{ id: "22222222-2222-4222-8222-222222222222", phone_normalized: "+77010000001" }],
+      leads: [{ id: "22222222-2222-4222-8222-222222222222", workspace_id: WORKSPACE_A, status: "new", phone_normalized: "+77010000001" }],
     },
   }, {}, async (ctx) => {
     const body = inboundPayload();
@@ -530,7 +756,7 @@ test("CW24 a database without migration 028 still dedups, through the scanning f
     rows: {
       whatsapp_cloud_numbers: [numberRow],
       whatsapp_cloud_inbound_messages: [],
-      leads: [{ id: "22222222-2222-4222-8222-222222222222", phone: "8 701 000-00-01" }],
+      leads: [{ id: "22222222-2222-4222-8222-222222222222", workspace_id: WORKSPACE_A, status: "new", phone: "8 701 000-00-01" }],
     },
     missingPhoneNormalized: true,
   }, {}, async (ctx) => {
@@ -556,7 +782,7 @@ test("CW25 a real lead-lookup failure is still a 503 — the fallback is not a c
     rows: {
       whatsapp_cloud_numbers: [numberRow],
       whatsapp_cloud_inbound_messages: [],
-      leads: [{ id: "22222222-2222-4222-8222-222222222222", phone: "8 701 000-00-01" }],
+      leads: [{ id: "22222222-2222-4222-8222-222222222222", workspace_id: WORKSPACE_A, status: "new", phone: "8 701 000-00-01" }],
     },
     phoneNormalizedLookupError: "connection refused",
   }, {}, async (ctx) => {
@@ -581,7 +807,7 @@ test("CW15 a database outage answers 503 so Meta retries", async () => {
 test("CW16 a disabled number is ignored the same way as an unknown one", async () => {
   await withHandler({
     rows: {
-      whatsapp_cloud_numbers: [{ workspace_id: WORKSPACE_A, enabled: false }],
+      whatsapp_cloud_numbers: [{ ...numberRow, enabled: false }],
       whatsapp_cloud_inbound_messages: [],
       leads: [],
     },

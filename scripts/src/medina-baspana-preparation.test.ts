@@ -241,12 +241,12 @@ test("The owner-authorized public platform business is separate from the client 
     metaPortfolioId: "1694609597992242",
     metaPortfolioStatus: "owner_confirmed_unverified",
     metaAppPortfolioLinkStatus: "not_confirmed",
-    verificationStatus: "in_review",
+    verificationStatus: "additional_information_required_name_address_phone",
     verificationEvidence: "live_meta_security_center",
     verificationObservedOn: "2026-10-15",
-    verificationNote: "Security Center shows the full public legal name and an in-review status with an estimate of about two business days; verification is not approved.",
+    verificationNote: "Latest live Security Center requires additional information. Meta rejected the supplied evidence for registered name, address and phone. No new application or document was submitted.",
     phoneEvidenceStatus: "owner_reports_phone_confirmation",
-    phoneEvidenceNote: "Owner reports personally confirming the WhatsApp number; exact integration scope is unknown and no connection is confirmed.",
+    phoneEvidenceNote: "Owner reports personally confirming the WhatsApp number, but the latest live Meta notice still rejects evidence of the company phone. Number verification does not establish business verification or CRM connection.",
   });
   assert.equal(plan.company.name, "Baspana ipoteka building");
   assert.notEqual(plan.platformBusiness.reportedName, plan.company.name);
@@ -255,10 +255,10 @@ test("The owner-authorized public platform business is separate from the client 
   assert.ok(!plan.pending.includes("platform_website_requirement_or_preparation"), "the published website replaces the preparation gate with Meta acceptance");
 });
 
-test("Live Meta review and owner-reported phone confirmation do not block accounts or authorize WhatsApp", () => {
+test("Live Meta rejection and owner-reported phone confirmation do not undo accounts or authorize WhatsApp", () => {
   assert.equal(plan.platformBusiness.websiteStatus, "published_pending_meta_acceptance");
   assert.equal(plan.platformBusiness.metaPortfolioStatus, "owner_confirmed_unverified");
-  assert.equal(plan.platformBusiness.verificationStatus, "in_review");
+  assert.equal(plan.platformBusiness.verificationStatus, "additional_information_required_name_address_phone");
   assert.equal(plan.platformBusiness.verificationEvidence, "live_meta_security_center");
   assert.equal(plan.platformBusiness.phoneEvidenceStatus, "owner_reports_phone_confirmation");
   assert.equal(plan.platformBusiness.metaAppPortfolioLinkStatus, "not_confirmed", "selecting a portfolio does not confirm app linkage or transfer ownership");
@@ -271,6 +271,8 @@ test("Live Meta review and owner-reported phone confirmation do not block accoun
     "coexistence_embedded_signup_acceptance",
     "shared_meta_callback_isolation",
     "test_channel_schema_and_permissions",
+    "atomic_inbound_deduplication_acceptance",
+    "mortgage_channel_disable_rollback",
     "signed_synthetic_inbound_and_assignment_acceptance",
   ];
   assert.deepEqual(plan.whatsappPending, whatsappGates, "all existing WhatsApp gates remain separate from account creation");

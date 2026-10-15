@@ -55,12 +55,12 @@
     "metaPortfolioId": "1694609597992242",
     "metaPortfolioStatus": "owner_confirmed_unverified",
     "metaAppPortfolioLinkStatus": "not_confirmed",
-    "verificationStatus": "in_review",
+    "verificationStatus": "additional_information_required_name_address_phone",
     "verificationEvidence": "live_meta_security_center",
     "verificationObservedOn": "2026-10-15",
-    "verificationNote": "Security Center shows the full public legal name and an in-review status with an estimate of about two business days; verification is not approved.",
+    "verificationNote": "Latest live Security Center requires additional information. Meta rejected the supplied evidence for registered name, address and phone. No new application or document was submitted.",
     "phoneEvidenceStatus": "owner_reports_phone_confirmation",
-    "phoneEvidenceNote": "Owner reports personally confirming the WhatsApp number; exact integration scope is unknown and no connection is confirmed."
+    "phoneEvidenceNote": "Owner reports personally confirming the WhatsApp number, but the latest live Meta notice still rejects evidence of the company phone. Number verification does not establish business verification or CRM connection."
   },
   "onboardingDraft": {
     "name": "Baspana ipoteka building",
@@ -117,6 +117,8 @@
     "coexistence_embedded_signup_acceptance",
     "shared_meta_callback_isolation",
     "test_channel_schema_and_permissions",
+    "atomic_inbound_deduplication_acceptance",
+    "mortgage_channel_disable_rollback",
     "signed_synthetic_inbound_and_assignment_acceptance"
   ]
 }
