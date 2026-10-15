@@ -3,7 +3,7 @@
   "target": {
     "environment": "preview",
     "database": "medina-os-site-test",
-    "previewOrigin": "https://negis-medcall-mvp-api-server-q64dqx3xb-yeldar-s-projects.vercel.app"
+    "previewOrigin": "https://negis-medcall-mvp-api-server-git-codex-200904-yeldar-s-projects.vercel.app"
   },
   "company": {
     "name": "Baspana ipoteka building",
@@ -18,9 +18,12 @@
     "metaPortfolioId": "1694609597992242",
     "metaPortfolioStatus": "owner_confirmed_unverified",
     "metaAppPortfolioLinkStatus": "not_confirmed",
-    "verificationStatus": "additional_information_required_phone_evidence",
-    "verificationEvidence": "owner_provided_meta_screenshot",
-    "phoneEvidenceStatus": "owner_reports_no_phone_bill"
+    "verificationStatus": "in_review",
+    "verificationEvidence": "live_meta_security_center",
+    "verificationObservedOn": "2026-10-15",
+    "verificationNote": "Security Center shows the full public legal name and an in-review status with an estimate of about two business days; verification is not approved.",
+    "phoneEvidenceStatus": "owner_reports_phone_confirmation",
+    "phoneEvidenceNote": "Owner reports personally confirming the WhatsApp number; exact integration scope is unknown and no connection is confirmed."
   },
   "onboardingDraft": {
     "name": "Baspana ipoteka building",
@@ -29,6 +32,12 @@
     "ownerLogin": "baspana.dinara",
     "ownerName": "Динара",
     "timeZone": "Asia/Almaty"
+  },
+  "ownerBootstrapAcceptance": {
+    "status": "accepted",
+    "scope": "test_owner_only",
+    "release": "9a9d25a",
+    "acceptedOn": "2026-10-14"
   },
   "confirmedTimeZone": "Asia/Almaty",
   "timeZoneConfirmedOn": "2026-10-15",
@@ -63,10 +72,12 @@
   },
   "pending": [
     "isolated_control_target_and_platform_access",
-    "mortgage_onboarding_acceptance",
-    "explicit_test_creation_approval",
+    "exact_production_release_and_required_schema_approval",
+    "real_baspana_workspace_and_seven_account_creation_confirmation",
     "human_credential_entry_and_submission",
-    "exact_username_availability",
+    "exact_username_availability"
+  ],
+  "whatsappPending": [
     "platform_website_meta_acceptance",
     "platform_business_identity_and_portfolio",
     "platform_phone_ownership_evidence",

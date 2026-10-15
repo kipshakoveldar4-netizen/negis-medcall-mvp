@@ -52,15 +52,20 @@ const plan = JSON.parse(await readFile(new URL("../fixtures/baspana-account-prep
     metaAppPortfolioLinkStatus: string;
     verificationStatus: string;
     verificationEvidence: string;
+    verificationObservedOn: string;
+    verificationNote: string;
     phoneEvidenceStatus: string;
+    phoneEvidenceNote: string;
   };
   onboardingDraft: Record<string, unknown>;
+  ownerBootstrapAcceptance: { status: string; scope: string; release: string; acceptedOn: string };
   confirmedTimeZone: string;
   timeZoneConfirmedOn: string;
   accounts: { login: string; fullName: string; role: PlannedRole }[];
   assignment: { mode: string; assignedByRole: string; assigneeRole: string; managerVisibility: string; unassignedVisibleTo: string[] };
   whatsapp: { selectedApproach: string; connectionMode: string; allowApiOnly: boolean; metaAppId: string; provider: null; enabled: boolean; phoneNumberId: null; channelId: null; inboundOnly: boolean; preserveBusinessApp: boolean; importHistory: boolean };
   pending: string[];
+  whatsappPending: string[];
 };
 
 test("Baspana preparation has seven exact canonical logins and no issued credentials", () => {
@@ -70,23 +75,36 @@ test("Baspana preparation has seven exact canonical logins and no issued credent
     "baspana.nesibeli", "baspana.munira", "baspana.tleugaisha",
   ]);
   assert.equal(new Set(plan.accounts.map(account => account.login)).size, 7);
+  assert.deepEqual(plan.accounts.map(account => account.fullName), [
+    "Динара", "Турсын Толкын", "Танетова Гульнур", "Кажыгалиева Аделя",
+    "Ахметова Несибели", "Айтмухамедова Мунира", "Накишева Тлеугайша",
+  ]);
   for (const account of plan.accounts) {
     assert.ok(isLoginShape(account.login));
     assert.equal(normalizeLogin(account.login), account.login);
     assert.equal(loginOrEmailToAuthEmail(account.login), emailFromLogin(account.login));
     assert.ok(account.fullName.length >= 2 && account.fullName.length <= 120);
   }
-  assert.doesNotMatch(JSON.stringify(plan), /"(?:password|access_token|refresh_token|secret|apiKey|auth_user_id|workspaceId)"\s*:/i);
+  assert.doesNotMatch(JSON.stringify(plan), /"(?:password|access_token|refresh_token|secret|apiKey|auth_?(?:user_?)?id|workspace_?id)"\s*:/i);
   assert.ok(plan.pending.includes("exact_username_availability"), "a valid shape does not establish account availability");
 });
 
 test("Baspana preparation remains an unsubmitted draft for the exact isolated Preview", () => {
   assert.equal(plan.target.environment, "preview");
   assert.equal(plan.target.database, "medina-os-site-test");
-  assert.equal(plan.target.previewOrigin, "https://negis-medcall-mvp-api-server-q64dqx3xb-yeldar-s-projects.vercel.app");
-  assert.ok(plan.pending.includes("isolated_control_target_and_platform_access"));
-  assert.ok(plan.pending.includes("explicit_test_creation_approval"));
-  assert.ok(plan.pending.includes("human_credential_entry_and_submission"));
+  assert.equal(plan.target.previewOrigin, "https://negis-medcall-mvp-api-server-git-codex-200904-yeldar-s-projects.vercel.app");
+  assert.deepEqual(plan.pending, [
+    "isolated_control_target_and_platform_access",
+    "exact_production_release_and_required_schema_approval",
+    "real_baspana_workspace_and_seven_account_creation_confirmation",
+    "human_credential_entry_and_submission",
+    "exact_username_availability",
+  ], "account creation has its own approval queue without Meta or WhatsApp blockers");
+  assert.deepEqual(plan.ownerBootstrapAcceptance, {
+    status: "accepted", scope: "test_owner_only", release: "9a9d25a", acceptedOn: "2026-10-14",
+  });
+  assert.ok(!plan.pending.includes("mortgage_onboarding_acceptance"));
+  assert.ok(!plan.whatsappPending.includes("mortgage_onboarding_acceptance"));
 });
 
 test("The owner-confirmed Baspana time zone is recorded without submitting the account draft", () => {
@@ -95,7 +113,7 @@ test("The owner-confirmed Baspana time zone is recorded without submitting the a
   assert.equal(plan.onboardingDraft.timeZone, plan.confirmedTimeZone);
   assert.ok(!plan.pending.includes("time_zone_confirmation"));
   assert.equal(plan.status, "prepared_not_created");
-  assert.ok(plan.pending.includes("explicit_test_creation_approval"));
+  assert.ok(plan.pending.includes("real_baspana_workspace_and_seven_account_creation_confirmation"));
   assert.ok(plan.pending.includes("human_credential_entry_and_submission"));
   const missingTimeZone = validateCredentialsOnboardingRequest({ ...plan.onboardingDraft, timeZone: "" });
   assert.ok("status" in missingTimeZone);
@@ -153,7 +171,7 @@ test("Preparation preserves manual assignment and leaves WhatsApp disconnected",
   assert.equal(plan.whatsapp.inboundOnly, true);
   assert.equal(plan.whatsapp.preserveBusinessApp, true);
   assert.equal(plan.whatsapp.importHistory, false);
-  assert.ok(plan.pending.includes("signed_synthetic_inbound_and_assignment_acceptance"));
+  assert.ok(plan.whatsappPending.includes("signed_synthetic_inbound_and_assignment_acceptance"));
 });
 
 test("Choosing direct Meta does not approve business identity, Coexistence or the shared callback", () => {
@@ -170,7 +188,7 @@ test("Choosing direct Meta does not approve business identity, Coexistence or th
     "shared_meta_callback_isolation",
     "test_channel_schema_and_permissions",
   ]) {
-    assert.ok(plan.pending.includes(gate), `${gate} must remain pending after a direction choice`);
+    assert.ok(plan.whatsappPending.includes(gate), `${gate} must remain pending after a direction choice`);
   }
   assert.equal(plan.whatsapp.preserveBusinessApp, true);
   assert.equal(plan.whatsapp.importHistory, false);
@@ -186,9 +204,12 @@ test("The owner-authorized public platform business is separate from the client 
     metaPortfolioId: "1694609597992242",
     metaPortfolioStatus: "owner_confirmed_unverified",
     metaAppPortfolioLinkStatus: "not_confirmed",
-    verificationStatus: "additional_information_required_phone_evidence",
-    verificationEvidence: "owner_provided_meta_screenshot",
-    phoneEvidenceStatus: "owner_reports_no_phone_bill",
+    verificationStatus: "in_review",
+    verificationEvidence: "live_meta_security_center",
+    verificationObservedOn: "2026-10-15",
+    verificationNote: "Security Center shows the full public legal name and an in-review status with an estimate of about two business days; verification is not approved.",
+    phoneEvidenceStatus: "owner_reports_phone_confirmation",
+    phoneEvidenceNote: "Owner reports personally confirming the WhatsApp number; exact integration scope is unknown and no connection is confirmed.",
   });
   assert.equal(plan.company.name, "Baspana ipoteka building");
   assert.notEqual(plan.platformBusiness.reportedName, plan.company.name);
@@ -197,25 +218,27 @@ test("The owner-authorized public platform business is separate from the client 
   assert.ok(!plan.pending.includes("platform_website_requirement_or_preparation"), "the published website replaces the preparation gate with Meta acceptance");
 });
 
-test("The Meta phone-document request does not imply approval or authorize connecting WhatsApp", () => {
+test("Live Meta review and owner-reported phone confirmation do not block accounts or authorize WhatsApp", () => {
   assert.equal(plan.platformBusiness.websiteStatus, "published_pending_meta_acceptance");
   assert.equal(plan.platformBusiness.metaPortfolioStatus, "owner_confirmed_unverified");
-  assert.equal(plan.platformBusiness.verificationStatus, "additional_information_required_phone_evidence");
-  assert.equal(plan.platformBusiness.verificationEvidence, "owner_provided_meta_screenshot", "a supplied screenshot is not a live browser check");
-  assert.equal(plan.platformBusiness.phoneEvidenceStatus, "owner_reports_no_phone_bill");
+  assert.equal(plan.platformBusiness.verificationStatus, "in_review");
+  assert.equal(plan.platformBusiness.verificationEvidence, "live_meta_security_center");
+  assert.equal(plan.platformBusiness.phoneEvidenceStatus, "owner_reports_phone_confirmation");
   assert.equal(plan.platformBusiness.metaAppPortfolioLinkStatus, "not_confirmed", "selecting a portfolio does not confirm app linkage or transfer ownership");
-  for (const gate of [
+  const whatsappGates = [
     "platform_website_meta_acceptance",
     "platform_business_identity_and_portfolio",
     "platform_phone_ownership_evidence",
     "meta_app_portfolio_link_confirmation",
     "meta_tech_provider_and_app_review",
-    "shared_meta_callback_isolation",
     "coexistence_embedded_signup_acceptance",
+    "shared_meta_callback_isolation",
     "test_channel_schema_and_permissions",
     "signed_synthetic_inbound_and_assignment_acceptance",
-  ]) {
-    assert.ok(plan.pending.includes(gate), `${gate} remains independently pending after website publication and portfolio selection`);
+  ];
+  assert.deepEqual(plan.whatsappPending, whatsappGates, "all existing WhatsApp gates remain separate from account creation");
+  for (const gate of whatsappGates) {
+    assert.ok(!plan.pending.includes(gate), `${gate} must not block the seven accounts`);
   }
   assert.equal(plan.status, "prepared_not_created");
   assert.equal(plan.whatsapp.selectedApproach, "direct_meta_negis");
@@ -241,6 +264,6 @@ test("Baspana requires Coexistence and cannot use an API-only fallback in prepar
   assert.equal(plan.whatsapp.enabled, false);
   assert.equal(plan.whatsapp.phoneNumberId, null);
   assert.equal(plan.whatsapp.channelId, null);
-  assert.ok(plan.pending.includes("coexistence_embedded_signup_acceptance"));
-  assert.ok(plan.pending.includes("shared_meta_callback_isolation"));
+  assert.ok(plan.whatsappPending.includes("coexistence_embedded_signup_acceptance"));
+  assert.ok(plan.whatsappPending.includes("shared_meta_callback_isolation"));
 });
