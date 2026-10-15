@@ -40,7 +40,14 @@ const { mortgageRouteAllowed } = await import(new URL("../../lib/crm/workspace-p
 
 const plan = JSON.parse(await readFile(new URL("../fixtures/baspana-account-preparation.json", import.meta.url), "utf8")) as {
   status: string;
-  target: { environment: string; database: string; previewOrigin: string };
+  provisioning: { createdLogins: string[]; ownerFirstLogin: string; staff: string; credentialsDelivery: string; teamAnalytics: string };
+  target: { environment: string; database: string; projectRef: string; appOrigin: string; controlOrigin: string; releaseSource: string };
+  productionRelease: {
+    approval: { status: string; releaseSource: string; necessaryMigrations: string[]; accountCreationScope: string };
+    crm: { deploymentId: string; status: string };
+    migrations: { status: string; applied: string[]; exactFunctionHashVerificationCount: number };
+    control: { deploymentId: string; status: string; configurationChange: string; platformOwnerAuthentication: string; onboarding: string };
+  };
   company: { name: string; city: string; country: string };
   platformBusiness: {
     reportedName: string;
@@ -68,13 +75,21 @@ const plan = JSON.parse(await readFile(new URL("../fixtures/baspana-account-prep
   whatsappPending: string[];
 };
 
-test("Baspana preparation has seven exact canonical logins and no issued credentials", () => {
-  assert.equal(plan.status, "prepared_not_created");
+test("Baspana preparation has seven exact canonical logins and stores no credential values", () => {
+  assert.equal(plan.status, "accounts_created");
+  assert.deepEqual(plan.provisioning, {
+    createdLogins: plan.accounts.map(account => account.login), ownerFirstLogin: "accepted",
+    staff: "seven_active_profiles_verified", credentialsDelivery: "owner_saved_one_time_results",
+    teamAnalytics: "seven_members_loaded_zero_counters",
+  });
   assert.deepEqual(plan.accounts.map(account => account.login), [
     "baspana.dinara", "baspana.tolkyn", "baspana.gulnur", "baspana.adelya",
     "baspana.nesibeli", "baspana.munira", "baspana.tleugaisha",
   ]);
   assert.equal(new Set(plan.accounts.map(account => account.login)).size, 7);
+  assert.deepEqual(plan.accounts.map(account => account.role), [
+    "owner", "admin", "lead_manager", "lead_manager", "lead_manager", "lead_manager", "lead_manager",
+  ]);
   assert.deepEqual(plan.accounts.map(account => account.fullName), [
     "Динара", "Турсын Толкын", "Танетова Гульнур", "Кажыгалиева Аделя",
     "Ахметова Несибели", "Айтмухамедова Мунира", "Накишева Тлеугайша",
@@ -86,20 +101,41 @@ test("Baspana preparation has seven exact canonical logins and no issued credent
     assert.ok(account.fullName.length >= 2 && account.fullName.length <= 120);
   }
   assert.doesNotMatch(JSON.stringify(plan), /"(?:password|access_token|refresh_token|secret|apiKey|auth_?(?:user_?)?id|workspace_?id)"\s*:/i);
-  assert.ok(plan.pending.includes("exact_username_availability"), "a valid shape does not establish account availability");
+  assert.deepEqual(plan.pending, [], "the seven exact active logins are independently verified in the staff roster");
 });
 
-test("Baspana preparation remains an unsubmitted draft for the exact isolated Preview", () => {
-  assert.equal(plan.target.environment, "preview");
-  assert.equal(plan.target.database, "medina-os-site-test");
-  assert.equal(plan.target.previewOrigin, "https://negis-medcall-mvp-api-server-git-codex-200904-yeldar-s-projects.vercel.app");
-  assert.deepEqual(plan.pending, [
-    "isolated_control_target_and_platform_access",
-    "exact_production_release_and_required_schema_approval",
-    "real_baspana_workspace_and_seven_account_creation_confirmation",
-    "human_credential_entry_and_submission",
-    "exact_username_availability",
-  ], "account creation has its own approval queue without Meta or WhatsApp blockers");
+test("Baspana preparation records the approved release and verified seven accounts separately from WhatsApp", () => {
+  assert.equal(plan.status, "accounts_created");
+  assert.deepEqual(plan.target, {
+    environment: "production",
+    database: "medcall-negis-crm",
+    projectRef: "eeoudrmohgftcdoexdmd",
+    appOrigin: "https://negis-medcall-mvp-api-server.vercel.app",
+    controlOrigin: "https://medcall-mvp-medina-control.vercel.app",
+    releaseSource: "1d0afa58138b36598e5b4a6febe59878a16d26be",
+  });
+  assert.deepEqual(plan.productionRelease, {
+    approval: {
+      status: "explicitly_approved",
+      releaseSource: plan.target.releaseSource,
+      necessaryMigrations: ["062", "063", "064", "065", "066", "067", "069"],
+      accountCreationScope: "all_seven_real_baspana_accounts",
+    },
+    crm: { deploymentId: "dpl_3qZHHvHLSRkxEy1mGe5dFpc7QnSM", status: "READY" },
+    migrations: {
+      status: "applied",
+      applied: ["062", "063", "064", "065", "066", "067", "069"],
+      exactFunctionHashVerificationCount: 14,
+    },
+    control: {
+      deploymentId: "dpl_EK7CYSgtmqKudnJBjzcmYJvXuMJc",
+      status: "READY",
+      configurationChange: "missing_public_api_url_only",
+      platformOwnerAuthentication: "accepted",
+      onboarding: "owner_created",
+    },
+  });
+  assert.deepEqual(plan.pending, [], "all seven accounts and their roles are verified; WhatsApp has its own gates");
   assert.deepEqual(plan.ownerBootstrapAcceptance, {
     status: "accepted", scope: "test_owner_only", release: "9a9d25a", acceptedOn: "2026-10-14",
   });
@@ -107,14 +143,15 @@ test("Baspana preparation remains an unsubmitted draft for the exact isolated Pr
   assert.ok(!plan.whatsappPending.includes("mortgage_onboarding_acceptance"));
 });
 
-test("The owner-confirmed Baspana time zone is recorded without submitting the account draft", () => {
+test("The owner-confirmed Baspana time zone remains required by the onboarding validator", () => {
   assert.equal(plan.confirmedTimeZone, "Asia/Almaty");
   assert.equal(plan.timeZoneConfirmedOn, "2026-10-15");
   assert.equal(plan.onboardingDraft.timeZone, plan.confirmedTimeZone);
   assert.ok(!plan.pending.includes("time_zone_confirmation"));
-  assert.equal(plan.status, "prepared_not_created");
-  assert.ok(plan.pending.includes("real_baspana_workspace_and_seven_account_creation_confirmation"));
-  assert.ok(plan.pending.includes("human_credential_entry_and_submission"));
+  assert.equal(plan.status, "accounts_created");
+  assert.equal(plan.productionRelease.control.platformOwnerAuthentication, "accepted");
+  assert.equal(plan.productionRelease.control.onboarding, "owner_created");
+  assert.deepEqual(plan.pending, []);
   const missingTimeZone = validateCredentialsOnboardingRequest({ ...plan.onboardingDraft, timeZone: "" });
   assert.ok("status" in missingTimeZone);
   assert.equal(missingTimeZone.status, 400, "the confirmed draft must not remove the server's time-zone requirement");
@@ -240,7 +277,7 @@ test("Live Meta review and owner-reported phone confirmation do not block accoun
   for (const gate of whatsappGates) {
     assert.ok(!plan.pending.includes(gate), `${gate} must not block the seven accounts`);
   }
-  assert.equal(plan.status, "prepared_not_created");
+  assert.equal(plan.status, "accounts_created");
   assert.equal(plan.whatsapp.selectedApproach, "direct_meta_negis");
   assert.equal(plan.whatsapp.metaAppId, "1791176138576964");
   assert.equal(plan.whatsapp.provider, null);
