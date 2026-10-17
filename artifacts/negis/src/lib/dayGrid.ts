@@ -12,6 +12,8 @@
  * isOnClinicDay).
  */
 
+import { findAppointmentCapacityConflict } from "../../../../lib/crm/appointment-capacity";
+
 export type GridAppointment = {
   id: string;
   doctorId: string;
@@ -215,7 +217,7 @@ export function gridBounds(
  *
  * Там администратор не держит расписание в голове: выбрал услугу и мастера —
  * система сама показала, куда можно. Слот свободен, если услуга ЦЕЛИКОМ
- * помещается в рабочее окно и не задевает ни одной живой записи.
+ * помещается в рабочее окно и не превышает ёмкость мастера.
  *
  * Шаг сетки 30 минут — как у запись.кз. Услуга длиной 90 минут займёт три
  * шага, и слот «11:30» исчезнет, если в 12:00 кто-то стоит: предлагать время,
@@ -230,10 +232,12 @@ export function freeSlots(input: {
   /** Сегодняшним днём прошедшее время не предлагается. Null — день не сегодня. */
   nowMinute: number | null;
   stepMinutes?: number;
+  capacity?: number;
 }): number[] {
   const step = input.stepMinutes && input.stepMinutes > 0 ? input.stepMinutes : 30;
   const duration = Number.isFinite(input.durationMinutes) && input.durationMinutes > 0 ? input.durationMinutes : 60;
   const slots: number[] = [];
+  const busy = input.busy.map(([start, end], index) => ({ start, end, value: index }));
 
   for (const [start, end] of input.intervals) {
     // Первый слот — на границе шага, не раньше начала окна.
@@ -241,7 +245,7 @@ export function freeSlots(input: {
     for (; cursor + duration <= end; cursor += step) {
       if (input.nowMinute !== null && cursor <= input.nowMinute) continue;
       const cursorEnd = cursor + duration;
-      const taken = input.busy.some(([busyStart, busyEnd]) => cursor < busyEnd && busyStart < cursorEnd);
+      const taken = findAppointmentCapacityConflict({ start: cursor, end: cursorEnd }, busy, input.capacity ?? 1) !== null;
       if (!taken) slots.push(cursor);
     }
   }

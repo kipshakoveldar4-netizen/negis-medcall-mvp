@@ -57,7 +57,7 @@ test('appointment request contention on disposable PostgreSQL', { timeout: 30000
   t.after(() => fixture.close());
   const observer = await fixture.connect();
   await observer.query('create role anon; create role authenticated; create role service_role bypassrls; grant usage on schema public to service_role;');
-  const numbers = new Set([9, 10, 11, 12, 13, 14, 19, 20, 29, 30, 32, 33, 34, 36, 40, 43, 45, 55, 61, 63, 64, 72]);
+  const numbers = new Set([9, 10, 11, 12, 13, 14, 19, 20, 29, 30, 32, 33, 34, 36, 40, 43, 45, 52, 53, 54, 55, 56, 57, 61, 63, 64, 72, 73]);
   for (const file of (await readdir(path.join(root, 'migrations'))).sort()) {
     if (numbers.has(Number(file.slice(0, 3)))) await observer.query(await readFile(path.join(root, 'migrations', file), 'utf8'));
   }

@@ -7,6 +7,7 @@ import { normalizePhone } from "./phone";
 import { arrivalPaymentError } from "./arrival-payment";
 import { assignedLeadPatch, assignedLeadRouteAllowed, isAssignedLeadRole } from "./assigned-leads";
 import { normalizeAppointmentServices, readAppointmentServices, summarizeAppointmentServices } from "./appointment-services";
+import { findAppointmentCapacityConflict } from "./appointment-capacity";
 import { hidesClientContacts, redactContacts, redactContactsList, stripContactWrites } from "./contact-privacy";
 import { isEmptyIdentity, rowBelongsTo, rowTargetsOnlySelf, seesOnlyOwnWork, type OwnWorkIdentity } from "./own-work";
 import { escapeLikePattern } from "./staff-invitations";
@@ -2808,13 +2809,9 @@ async function assertNoAppointmentConflict(
     return;
   }
 
-  // Пересечения СЧИТАЮТСЯ, а не отклоняются по первому.
-  //
-  // Прежняя версия бросала отказ на первом же наложении. Для врача это верно,
-  // для мастера — нет: он ведёт двух клиентов параллельно постоянно, и обойти
-  // отказ можно было только кнопкой, снимающей проверку целиком. Салон,
-  // привыкший её жать, терял защиту и от настоящей двойной записи.
-  const overlapping: Array<{ id: string; startsAt: string; clientName: string; doctorName: string; doctorId: string }> = [];
+  // Keep the intervals: a long candidate can span several consecutive visits
+  // without exceeding the number of places used at any one instant.
+  const overlapping: Array<{ start: number; end: number; value: { id: string; startsAt: string; clientName: string; doctorName: string; doctorId: string } }> = [];
 
   for (const raw of Array.isArray(data) ? data : []) {
     const row = asRecord(raw);
@@ -2831,11 +2828,15 @@ async function assertNoAppointmentConflict(
 
     if (start < otherEnd && otherStart < end) {
       overlapping.push({
-        id,
-        startsAt: readString(row.starts_at),
-        clientName: readString(row.client_name),
-        doctorName: readString(row.doctor_name),
-        doctorId: readString(row.doctor_id),
+        start: otherStart,
+        end: otherEnd,
+        value: {
+          id,
+          startsAt: readString(row.starts_at),
+          clientName: readString(row.client_name),
+          doctorName: readString(row.doctor_name),
+          doctorId: readString(row.doctor_id),
+        },
       });
     }
   }
@@ -2846,15 +2847,16 @@ async function assertNoAppointmentConflict(
   // большинства записей его нет, и лишний запрос к справочнику там ни к чему.
   const capacity = await readDoctorCapacity(supabase, workspaceId, readString(candidate.doctorId), candidate.doctorName);
 
-  // Кандидат занимает одно место, поэтому сравнение с «ёмкость минус один».
-  if (overlapping.length < capacity) return;
+  // Consecutive visits can overlap a long candidate without using two places
+  // simultaneously. Only the peak within its half-open interval consumes capacity.
+  const conflict = findAppointmentCapacityConflict({ start, end }, overlapping, capacity);
+  if (!conflict) return;
 
   // Пояс поверх подтяжек. Мастер записывает только к себе — гейты на создании
   // и правке это обеспечивают, — поэтому пересечение у него всегда со своей же
   // записью. Но отказ, называющий пациента, обязан оставаться безопасным и
   // тогда, когда какой-то путь эти гейты обойдёт: сравнение идёт по имени, а
   // у двух однофамильцев записи попадают в проверку друг друга.
-  const conflict = overlapping[0];
   if (candidate.ownWork && !rowTargetsOnlySelf({ doctor_id: conflict.doctorId, doctor_name: conflict.doctorName }, candidate.ownWork)) {
     throw new AppointmentConflictError({ ...conflict, clientName: "" });
   }
@@ -5580,14 +5582,21 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
       //
       // Запись, которая остаётся на своём месте в своём статусе, не занимает
       // ничего нового — судить её повторно не за что.
-      const moved = ["doctor_name", "starts_at", "duration_minutes"].some(
+      const moved = ["doctor_id", "doctor_name", "starts_at", "duration_minutes"].some(
         (column) => column in row && !sameFieldValue(column, row[column], before[column]),
       );
       const revived = "status" in row
         && occupiesSlot(merged.status)
         && !occupiesSlot(readString(before.status));
 
-      if (beforeIsReadable && (moved || revived)) {
+      const oldStart = Date.parse(readString(before.starts_at));
+      const newStart = Date.parse(merged.startsAt);
+      const retainedInterval = occupiesSlot(readString(before.status))
+        && readString(before.doctor_id).toLowerCase() === merged.doctorId.toLowerCase()
+        && readString(before.doctor_name).trim().toLowerCase() === merged.doctorName.trim().toLowerCase()
+        && Number.isFinite(oldStart) && Number.isFinite(newStart) && newStart >= oldStart
+        && newStart + merged.durationMinutes * 60_000 <= oldStart + appointmentMinutes(before.duration_minutes) * 60_000;
+      if (beforeIsReadable && (moved || revived) && !retainedInterval) {
         // ownWork передаётся и здесь. Без него отказ «слот занят» называл
         // пациента чужой записи — то есть оставался способом вычитать день
         // коллеги перебором времени, ничего при этом не записав.

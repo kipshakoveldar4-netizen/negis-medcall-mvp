@@ -28,6 +28,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import { MasterDayGrid } from "@/components/crm/master-day-grid";
 import { AppointmentExtraServices } from "@/components/crm/appointment-extra-services";
 import { appointmentPriceFromInput, normalizeAppointmentServices, readAppointmentServices, summarizeAppointmentServices, type AppointmentServiceItem } from "../../../../lib/crm/appointment-services";
+import { findAppointmentCapacityConflict } from "../../../../lib/crm/appointment-capacity";
 import { formatSlot, freeSlots, groupSlots, minuteOfClinicDay, occupiedGridSlots, workingIntervals } from "@/lib/dayGrid";
 import { capitalize, termsFor, type Terms } from "../../../../lib/vertical/terms";
 import { leadStageDefinitionFromUnknown } from "@/lib/leadPipeline";
@@ -171,7 +172,7 @@ async function loadCatalogServices(doctorId = ""): Promise<{ services: CatalogSe
 const OTHER_SERVICE_OPTION = "__other__";
 
 /** Строка справочника врачей — то, что нужно форме записи. */
-type DirectoryDoctor = { id: string; fullName: string; specialty: string; sortOrder: number; isActive: boolean };
+type DirectoryDoctor = { id: string; fullName: string; specialty: string; capacity: number; sortOrder: number; isActive: boolean };
 
 /** Строка графика врача. Минуты — от полуночи по времени клиники. */
 type DoctorShift = {
@@ -216,6 +217,7 @@ function directoryDoctorFromApi(record: Record<string, unknown>): DirectoryDocto
     id: readString(record.id),
     fullName: readString(record.fullName) || readString(record.full_name),
     specialty: readString(record.specialty),
+    capacity: readNumber(record.capacity, 1),
     sortOrder: readNumber(record.sortOrder ?? record.sort_order, 0),
     isActive:
       record.isActive === undefined && record.is_active === undefined
@@ -792,9 +794,10 @@ function describeConflict(error: SlotTakenError, terms: Terms): string {
 
 function appointmentInterval(appointment: Appointment) {
   const start = new Date(appointment.startsAt).getTime();
+  const minutes = Number.isFinite(appointment.durationMinutes) && appointment.durationMinutes > 0 ? appointment.durationMinutes : 60;
   return {
     start,
-    end: start + appointment.durationMinutes * 60_000,
+    end: start + minutes * 60_000,
   };
 }
 
@@ -1720,6 +1723,13 @@ export function AppointmentsPage() {
       : "";
     const doctorId = form.doctorId || ownDoctorId;
     if (!doctorId && userRole !== "doctor") return null;
+    const ownDoctorName = userRole === "doctor" && !doctorId
+      ? (form.doctor || items.find((appointment) => appointment.doctor.trim())?.doctor || "").trim().toLowerCase()
+      : "";
+    const doctor = directory.items.find((entry) => doctorId
+      ? entry.id.toLowerCase() === doctorId.toLowerCase()
+      : Boolean(ownDoctorName) && entry.fullName.trim().toLowerCase() === ownDoctorName);
+    const capacity = doctor?.capacity ?? 1;
 
     if (clinicTimeZone && deviceTimeZone && clinicTimeZone !== deviceTimeZone) {
       return { groups: [] as ReturnType<typeof groupSlots>, reason: "другой пояс" as const };
@@ -1751,24 +1761,24 @@ export function AppointmentsPage() {
 
     const busy = items
       .filter((appointment) => {
-        if (appointment.id === editingId) return false;
-        if (!activeStatuses.includes(appointment.status)) return false;
+        if (editingId && appointment.id.toLowerCase() === editingId.toLowerCase()) return false;
+        if (!activeStatuses.includes(normalizeStatus(appointment.status))) return false;
         if (!isOnDay(appointment, form.date, clinicTimeZone)) return false;
-        if (doctorId && appointment.doctorId) return appointment.doctorId === doctorId;
+        if (doctorId && appointment.doctorId) return appointment.doctorId.toLowerCase() === doctorId.toLowerCase();
         if (!doctorId) return true;
         const name = (appointment.doctor || "").trim().toLowerCase();
-        const card = activeDoctors.find((entry) => entry.id === doctorId);
-        return Boolean(name) && name === (card?.fullName || "").trim().toLowerCase();
+        return Boolean(name) && name === (doctor?.fullName || "").trim().toLowerCase();
       })
       .map((appointment) => {
         const startMinute = minuteOfClinicDay(appointment.startsAt, clinicTimeZone);
         if (startMinute === null) return null;
-        return [startMinute, startMinute + (appointment.durationMinutes || 60)] as [number, number];
+        const minutes = Number.isFinite(appointment.durationMinutes) && appointment.durationMinutes > 0 ? appointment.durationMinutes : 60;
+        return [startMinute, startMinute + minutes] as [number, number];
       })
       .filter((interval): interval is [number, number] => interval !== null);
 
     const nowMinute = form.date === todayKey ? minuteOfClinicDay(new Date().toISOString(), clinicTimeZone) : null;
-    const slots = freeSlots({ intervals, busy, durationMinutes: totalDurationMinutes, nowMinute });
+    const slots = freeSlots({ intervals, busy, durationMinutes: totalDurationMinutes, nowMinute, capacity });
 
     // Пустота пустоте рознь: «всё занято» — только когда виновата занятость.
     let reason: "закрыт" | "занято" | "день кончился" | "не помещается" | null = null;
@@ -1776,13 +1786,13 @@ export function AppointmentsPage() {
       if (definesThisDay && intervals.length === 0) reason = "закрыт";
       else if (
         nowMinute !== null &&
-        freeSlots({ intervals, busy, durationMinutes: totalDurationMinutes, nowMinute: null }).length > 0
+        freeSlots({ intervals, busy, durationMinutes: totalDurationMinutes, nowMinute: null, capacity }).length > 0
       ) reason = "день кончился";
       else if (busy.length === 0) reason = "не помещается";
       else reason = "занято";
     }
     return { groups: groupSlots(slots), reason };
-  }, [form.date, form.doctorId, totalDurationMinutes, shifts, items, editingId, activeDoctors, clinicTimeZone, deviceTimeZone, todayKey, userRole]);
+  }, [form.date, form.doctor, form.doctorId, totalDurationMinutes, shifts, items, editingId, directory.items, clinicTimeZone, deviceTimeZone, todayKey, userRole]);
 
   /**
    * Архив клиента — просьба владельца дословно: «сбоку, когда записываешь,
@@ -2055,14 +2065,26 @@ export function AppointmentsPage() {
   };
 
   const findConflict = (candidate: Appointment): Appointment | null => {
+    if (!activeStatuses.includes(normalizeStatus(candidate.status))) return null;
     const candidateInterval = appointmentInterval(candidate);
-    return items.find((appointment) => {
-      if (appointment.id === candidate.id) return false;
-      if (appointment.doctor !== candidate.doctor) return false;
-      if (!activeStatuses.includes(appointment.status)) return false;
-      const currentInterval = appointmentInterval(appointment);
-      return candidateInterval.start < currentInterval.end && currentInterval.start < candidateInterval.end;
-    }) ?? null;
+    const doctorName = candidate.doctor.trim().toLowerCase();
+    const previous = items.find((appointment) => appointment.id.toLowerCase() === candidate.id.toLowerCase());
+    if (previous && activeStatuses.includes(normalizeStatus(previous.status))
+      && previous.doctorId.toLowerCase() === candidate.doctorId.toLowerCase()
+      && previous.doctor.trim().toLowerCase() === doctorName) {
+      const previousInterval = appointmentInterval(previous);
+      // Retaining or shrinking an occupied interval consumes no additional place.
+      if (candidateInterval.start >= previousInterval.start && candidateInterval.end <= previousInterval.end) return null;
+    }
+    const doctor = directory.items.find((entry) => candidate.doctorId
+      ? entry.id.toLowerCase() === candidate.doctorId.toLowerCase()
+      : entry.fullName.trim().toLowerCase() === doctorName);
+    const intervals = items
+      .filter((appointment) => appointment.id.toLowerCase() !== candidate.id.toLowerCase()
+        && appointment.doctor.trim().toLowerCase() === doctorName
+        && activeStatuses.includes(normalizeStatus(appointment.status)))
+      .map((appointment) => ({ ...appointmentInterval(appointment), value: appointment }));
+    return findAppointmentCapacityConflict(candidateInterval, intervals, doctor?.capacity ?? 1);
   };
 
   const submitForm = async (allowConflict = false, allowOutsideSchedule = false) => {

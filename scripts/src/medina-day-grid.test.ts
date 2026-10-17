@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import path from "node:path";
 import test from "node:test";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 
 // Общий календарь дня: колонка на мастера.
 //
@@ -37,6 +38,7 @@ type GridModule = {
     durationMinutes: number;
     nowMinute: number | null;
     stepMinutes?: number;
+    capacity?: number;
   }) => number[];
   occupiedGridSlots: (input: {
     startMinute: number;
@@ -46,7 +48,7 @@ type GridModule = {
   }) => number[];
   groupSlots: (slots: readonly number[]) => Array<{ label: string; slots: number[] }>;
 };
-const grid: GridModule = (await import(pathToFileURL(gridPath).href)) as GridModule;
+const grid: GridModule = createRequire(import.meta.url)(gridPath) as GridModule;
 
 const visit = (id: string, startsAt: string, durationMinutes = 60) => ({
   id, doctorId: "d1", doctor: "Айдана", startsAt, durationMinutes,
@@ -241,6 +243,31 @@ test("FS2 занятая запись выбивает все слоты, кот
   // услуга, начатая в 11:30, наехала бы на клиента в 12:00.
   const slots = grid.freeSlots({ intervals: [[600, 840]], busy: [[720, 780]], durationMinutes: 60, nowMinute: null });
   assert.deepEqual(slots, [600, 630, 660, 780]);
+});
+
+test("FS capacity defaults to one and permits only remaining simultaneous group places", () => {
+  const input: Parameters<GridModule["freeSlots"]>[0] = { intervals: [[600, 720]], busy: [[600, 660]], durationMinutes: 60, nowMinute: null };
+  assert.deepEqual(grid.freeSlots(input), [660]);
+  assert.deepEqual(grid.freeSlots({ ...input, capacity: 2 }), [600, 630, 660]);
+  assert.deepEqual(grid.freeSlots({ ...input, busy: [[600, 660], [630, 690]], capacity: 2 }), [660]);
+  assert.deepEqual(grid.freeSlots({ ...input, busy: [[600, 660], [630, 690]], capacity: 3 }), [600, 630, 660]);
+});
+
+test("FS capacity counts peak, clips visits, and releases equal boundaries before starts", () => {
+  assert.deepEqual(grid.freeSlots({
+    intervals: [[600, 720]], busy: [[540, 600], [600, 660], [660, 720], [720, 780]],
+    durationMinutes: 120, nowMinute: null, capacity: 2,
+  }), [600]);
+  assert.deepEqual(grid.freeSlots({
+    intervals: [[600, 720]], busy: [[600, 670], [660, 720]],
+    durationMinutes: 120, nowMinute: null, capacity: 2,
+  }), []);
+});
+
+test("FS bad capacity falls back to one and invalid busy intervals do not take a place", () => {
+  const input: Parameters<GridModule["freeSlots"]>[0] = { intervals: [[600, 660]], busy: [[600, 660]], durationMinutes: 60, nowMinute: null };
+  for (const capacity of [0, -1, NaN, Infinity]) assert.deepEqual(grid.freeSlots({ ...input, capacity }), []);
+  assert.deepEqual(grid.freeSlots({ ...input, busy: [[600, 600], [660, 600], [NaN, 660], [600, Infinity]] }), [600]);
 });
 
 test("FS3 сегодня прошедшее время не предлагается", () => {

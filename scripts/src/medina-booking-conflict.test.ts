@@ -612,6 +612,30 @@ test("BC26 отказ чтения справочника не поднимае�
   assert.equal(res.statusCode, 409, "не прочитали ёмкость — значит не знаем, значит нельзя");
 });
 
+test("BC27 a long group visit can bridge adjacent appointments at capacity two", async () => {
+  const call = await loadRouter({ appointments: [occupiedRow(), occupiedRow({ id: OTHER_ID, starts_at: SLOT_END })], doctors: [doctorRow(2)] });
+  const { res } = await call({ body: booking({ durationMinutes: 120 }) });
+  assert.equal(res.statusCode, 201, JSON.stringify(res.body));
+});
+
+test("BC28 peak occupancy, not the first intersecting client, determines the refusal", async () => {
+  const call = await loadRouter({
+    appointments: [occupiedRow({ duration_minutes: 15 }), occupiedRow({ id: OTHER_ID, starts_at: SLOT_END }),
+      occupiedRow({ id: "a0000000-0000-4000-8000-000000000009", starts_at: SLOT_END })],
+    doctors: [doctorRow(2)],
+  });
+  const { res, log } = await call({ body: booking({ durationMinutes: 120 }) });
+  assert.equal(res.statusCode, 409);
+  assert.ok([OTHER_ID, "a0000000-0000-4000-8000-000000000009"].includes(String((res.body.conflict as Record<string, unknown>).id)));
+  assert.equal(writes(log).length, 0);
+});
+
+test("BC29 shrinking an occupied legacy group interval does not book a new place", async () => {
+  const call = await loadRouter({ appointments: [occupiedRow({ duration_minutes: 120 }), occupiedRow({ id: OTHER_ID })], doctors: [doctorRow(1)] });
+  const { res } = await call({ method: "PATCH", body: { id: EXISTING_ID, updates: { durationMinutes: 60 } } });
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+});
+
 test("BC-R отказ сервера называется человеку, а не заменяется советом невпопад", async () => {
   const page = await readFile(pagePath, "utf8");
 

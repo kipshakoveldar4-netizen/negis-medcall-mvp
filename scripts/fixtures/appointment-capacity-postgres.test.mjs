@@ -66,7 +66,7 @@ async function makeCase(fixture, db, t, capacity = 1, paid = false) {
     }
     assert.fail('A real database lock wait is required; elapsed time alone does not prove serialization');
   };
-  const operator = async () => {
+  const operator = async (options = {}) => {
     const profile = randomUUID(), user = randomUUID(), request = randomUUID(), lead = randomUUID(), service = randomUUID();
     await db.query(`insert into growth_operator_profiles(id,auth_user_id,display_name,status,accepting_requests,approved_by,approved_at)
       values($1,$2,'Fixture operator','approved',true,$3,now())`, [profile, user, randomUUID()]);
@@ -80,10 +80,10 @@ async function makeCase(fixture, db, t, capacity = 1, paid = false) {
     await db.query(`insert into clinic_doctor_shifts(workspace_id,doctor_id,on_date,on_date_end,start_minute,end_minute,is_working)
       values($1,$2,'2090-10-20','2090-10-20',0,1440,true)`, [workspace, doctor]);
     await db.query(`insert into clinic_services(id,workspace_id,doctor_id,name,base_price_minor,duration_minutes)
-      values($1,$2,$3,'Fixture service',1000,60)`, [service, workspace, doctor]);
+      values($1,$2,$3,'Fixture service',1000,$4)`, [service, workspace, doctor, options.minutes ?? 60]);
     return client => row(client,
       'select public.create_growth_operator_booking($1,$2,$3,$4,$5,$6,$7,$8) as result',
-      [request, user, lead, randomUUID(), doctor, [service], '2090-10-20 09:00:00', 'UTC']);
+      [request, user, lead, randomUUID(), doctor, [service], options.startsLocal ?? '2090-10-20 09:00:00', 'UTC']);
   };
   return { a, b, workspace, doctor, staffB, create, counts, blocked, operator };
 }
@@ -106,7 +106,19 @@ test('atomic appointment capacity on disposable PostgreSQL', { timeout: 300000 }
   await historical.create(historical.a);
   const guard = await readFile(path.join(root, 'migrations/072_atomic_appointment_capacity.sql'), 'utf8');
   await db.query(guard); await db.query(guard);
-  t.diagnostic(`PostgreSQL ${(await row(db, 'show server_version')).server_version}; migrations through 072; synthetic workspaces only`);
+  const bridge = await makeCase(fixture, db, t, 2);
+  await bridge.create(bridge.a);
+  await bridge.create(bridge.a, { appointment: { starts_at: '2090-10-20T10:00:00Z' } });
+  await capacityDenied(bridge.create(bridge.a, { appointment: { duration_minutes: 120 } }));
+  const peakGuard = await readFile(path.join(root, 'migrations/073_peak_appointment_capacity.sql'), 'utf8');
+  await db.query(peakGuard); await db.query(peakGuard);
+  t.diagnostic(`PostgreSQL ${(await row(db, 'show server_version')).server_version}; migrations through 073; synthetic workspaces only`);
+
+  await t.test('073 fixes the reproduced 072 refusal for a long visit across adjacent visits', async () => {
+    await bridge.create(bridge.a, { appointment: { duration_minutes: 120 } });
+    await capacityDenied(bridge.create(bridge.b, { appointment: { starts_at: '2090-10-20T09:30:00Z', duration_minutes: 30 } }));
+    assert.deepEqual(await bridge.counts(), { appointments: 3, clients: 3, receipts: 3, deals: 0 });
+  });
 
   await t.test('idempotent install preserves history and is not directly executable', async () => {
     assert.equal((await historical.counts()).appointments, 2);
@@ -141,6 +153,40 @@ test('atomic appointment capacity on disposable PostgreSQL', { timeout: 300000 }
     assert.ok((await pending).value);
     await capacityDenied(f.create(f.a));
     assert.deepEqual(await f.counts(), { appointments: 2, clients: 2, receipts: 2, deals: 0 });
+  });
+
+  await t.test('a waiting long visit fits adjacent visits, then capacity still rejects a third at the peak', async t => {
+    const f = await makeCase(fixture, db, t, 2);
+    await f.a.query('begin');
+    await f.create(f.a);
+    await f.create(f.a, { appointment: { starts_at: '2090-10-20T10:00:00Z' } });
+    const pending = observed(f.create(f.b, { appointment: { duration_minutes: 120 } }));
+    await f.blocked(); await f.a.query('commit');
+    assert.ok((await pending).value);
+    await capacityDenied(f.create(f.a, { appointment: { starts_at: '2090-10-20T10:00:00Z', duration_minutes: 30 } }));
+    assert.deepEqual(await f.counts(), { appointments: 3, clients: 3, receipts: 3, deals: 0 });
+  });
+
+  await t.test('partial overlaps fill three places only where all three actually meet', async t => {
+    const f = await makeCase(fixture, db, t, 3);
+    await f.create(f.a, { appointment: { duration_minutes: 120 } });
+    await f.create(f.a, { appointment: { starts_at: '2090-10-20T09:30:00Z' } });
+    await f.create(f.a, { appointment: { starts_at: '2090-10-20T10:30:00Z', duration_minutes: 30 } });
+    await f.create(f.a, { appointment: { duration_minutes: 120 } });
+    await capacityDenied(f.create(f.b, { appointment: { starts_at: '2090-10-20T09:45:00Z', duration_minutes: 5 } }));
+    assert.equal((await f.counts()).appointments, 4);
+  });
+
+  await t.test('rescheduling across adjacent visits works but expansion into a full peak rolls back', async t => {
+    const f = await makeCase(fixture, db, t, 2);
+    await f.create(f.a);
+    await f.create(f.a, { appointment: { starts_at: '2090-10-20T10:00:00Z' } });
+    const moved = await f.create(f.a, { appointment: { starts_at: '2090-10-20T11:00:00Z' } });
+    await f.a.query('update appointments set starts_at=$1,duration_minutes=120 where id=$2', [start, moved.appointment.id]);
+    await f.create(f.a, { appointment: { starts_at: '2090-10-20T11:00:00Z' } });
+    await f.create(f.a, { appointment: { starts_at: '2090-10-20T11:00:00Z' } });
+    await capacityDenied(f.b.query('update appointments set duration_minutes=180 where id=$1', [moved.appointment.id]));
+    assert.equal((await row(db, 'select duration_minutes from appointments where id=$1', [moved.appointment.id])).duration_minutes, 120);
   });
 
   await t.test('rollback lets a waiting request succeed; same-key replay still works when full', async t => {
@@ -235,9 +281,19 @@ test('atomic appointment capacity on disposable PostgreSQL', { timeout: 300000 }
     await f.a.query('begin'); await f.create(f.a);
     const pending = observed(book(f.b));
     await f.blocked(); await f.a.query('commit');
-    assert.equal((await pending).error?.message, 'operator_booking_time_taken');
+    await capacityDenied(Promise.reject((await pending).error));
     assert.deepEqual(await f.counts(), one);
     assert.equal((await row(db, 'select count(*)::int as n from growth_operator_bookings where workspace_id=$1', [f.workspace])).n, 0);
+  });
+
+  await t.test('operator long booking uses the same peak rule and leaves no side effects on refusal', async t => {
+    const f = await makeCase(fixture, db, t, 2), book = await f.operator({ minutes: 120 });
+    await f.create(f.a);
+    await f.create(f.a, { appointment: { starts_at: '2090-10-20T10:00:00Z' } });
+    await book(f.b);
+    await capacityDenied(f.create(f.a, { appointment: { duration_minutes: 120 } }));
+    assert.deepEqual(await f.counts(), { appointments: 3, clients: 3, receipts: 2, deals: 0 });
+    assert.equal((await row(db, 'select count(*)::int as n from growth_operator_bookings where workspace_id=$1', [f.workspace])).n, 1);
   });
 
   await t.test('CRM waits for the operator booking and rolls back its losing new client', async t => {
