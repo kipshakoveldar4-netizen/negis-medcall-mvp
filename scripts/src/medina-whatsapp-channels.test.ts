@@ -197,6 +197,7 @@ async function loadRouter(options: LoadOptions = {}) {
         headers: { authorization: `Bearer ${TOKEN}` },
         query: { path: ["whatsapp-channels"], ...(input.query ?? {}) },
         body: input.body,
+        async *[Symbol.asyncIterator]() {},
       },
       res,
     );
@@ -549,5 +550,142 @@ test("WC10 an unsupported method is refused", async () => {
   await withRouter({ rows: {} }, async (ctx) => {
     const { res } = await ctx.call({ method: "DELETE" });
     assert.equal(res.statusCode, 405);
+  });
+});
+
+const mortgageProfile = [{ workspace_id: WORKSPACE_A, value: { purpose: "mortgage_leads" } }];
+const cloudChannel = {
+  id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+  workspace_id: WORKSPACE_A,
+  phone_number_id: "111000111000111",
+  enabled: true,
+};
+
+test("WC11 mortgage owner/admin can read only their own masked channels", async () => {
+  for (const role of ["owner", "admin"]) await withRouter({
+    role,
+    profileData: mortgageProfile,
+    rows: {
+      wazzup_channels: [wazzupChannel, { ...wazzupChannel, workspace_id: WORKSPACE_B, channel_id: "foreign-channel" }],
+      whatsapp_cloud_numbers: [cloudChannel, { ...cloudChannel, workspace_id: WORKSPACE_B, phone_number_id: "foreign-number" }],
+    },
+  }, async (ctx) => {
+    const { res, log } = await ctx.call({});
+    assert.equal(res.statusCode, 200, role);
+    assert.deepEqual(channelsOf(res.body).map((row) => [row.provider, row.keyMasked]), [
+      ["wazzup", "…abcd"], ["whatsapp_cloud", "…0111"],
+    ]);
+    assert.equal(JSON.stringify(res.body).includes(wazzupChannel.channel_id), false);
+    assert.equal(JSON.stringify(res.body).includes(cloudChannel.phone_number_id), false);
+    for (const query of log.filter((entry) => !["staff_users", "workspace_settings"].includes(entry.table))) {
+      assert.equal(query.op, "select");
+      assert.equal(query.filters.workspace_id, WORKSPACE_A);
+    }
+  });
+});
+
+test("WC12 mortgage owner/admin can stop their own intake for either provider", async () => {
+  for (const role of ["owner", "admin"]) await withRouter({
+    role,
+    profileData: mortgageProfile,
+    rows: { wazzup_channels: [wazzupChannel], whatsapp_cloud_numbers: [cloudChannel] },
+  }, async (ctx) => {
+    for (const [provider, table, id] of [
+      ["wazzup", "wazzup_channels", CHANNEL_ROW_A],
+      ["whatsapp_cloud", "whatsapp_cloud_numbers", cloudChannel.id],
+    ]) {
+      const { res, log } = await ctx.call({ method: "PATCH", body: {
+        id, provider, enabled: false, workspaceId: WORKSPACE_B, workspace_id: WORKSPACE_B,
+        purpose: "clinic_services", channel_id: "must-not-be-written",
+      } });
+      assert.equal(res.statusCode, 200, `${role}:${provider}`);
+      const writes = log.filter((entry) => entry.op !== "select");
+      assert.equal(writes.length, 1);
+      assert.equal(writes[0].table, table);
+      assert.deepEqual(writes[0].filters, { id, workspace_id: WORKSPACE_A });
+      const written = writes[0].row as Record<string, unknown>;
+      assert.equal(written.enabled, false);
+      assert.deepEqual(Object.keys(written).sort(), ["enabled", "updated_at"]);
+      assert.ok(typeof written.updated_at === "string");
+      assert.deepEqual((res.body.data as Record<string, unknown>).item, { id, enabled: false });
+    }
+  });
+});
+
+test("WC13 mortgage channel activation and payload aliases fail before channel queries", async () => {
+  for (const role of ["owner", "admin"]) await withRouter({
+    role,
+    profileData: mortgageProfile,
+    rows: { wazzup_channels: [wazzupChannel] },
+  }, async (ctx) => {
+    for (const provider of ["wazzup", "whatsapp_cloud"]) for (const payload of [
+      { enabled: true }, { enabled: "false" }, { enabled: 0 }, { enabled: null }, {},
+      { updates: { enabled: false } },
+      { enabled: true, updates: { enabled: false }, purpose: "clinic_services" },
+    ]) {
+      const { res, log } = await ctx.call({ method: "PATCH", body: { id: CHANNEL_ROW_A, provider, ...payload } });
+      assert.equal(res.statusCode, 403, `${role}:${provider}:${JSON.stringify(payload)}`);
+      assert.equal(res.body.code, "workspace_module_unavailable");
+      assert.ok(log.every((entry) => ["staff_users", "workspace_settings"].includes(entry.table)));
+    }
+    for (const body of [undefined, null, [], "enabled=false", JSON.stringify({ id: CHANNEL_ROW_A, provider: "wazzup", enabled: true })]) {
+      const { res, log } = await ctx.call({ method: "PATCH", body });
+      assert.equal(res.statusCode, 403, `${role}:${JSON.stringify(body)}`);
+      assert.ok(log.every((entry) => ["staff_users", "workspace_settings"].includes(entry.table)));
+    }
+  });
+});
+
+test("WC14 mortgage managers and unsupported roles cannot read or stop channels", async () => {
+  for (const role of ["lead_manager", "manager", "receptionist", "doctor", "marketer"]) await withRouter({
+    role,
+    profileData: mortgageProfile,
+    rows: { wazzup_channels: [wazzupChannel] },
+  }, async (ctx) => {
+    for (const method of ["GET", "PATCH", "POST", "DELETE"]) {
+      const { res, log } = await ctx.call({ method, body: { id: CHANNEL_ROW_A, provider: "wazzup", enabled: false } });
+      assert.ok([403, 405].includes(res.statusCode), `${role}:${method}`);
+      assert.ok(log.every((entry) => ["staff_users", "workspace_settings"].includes(entry.table)));
+    }
+  });
+});
+
+test("WC15 mortgage stop cannot reach foreign channels or select a foreign workspace", async () => {
+  for (const role of ["owner", "admin"]) await withRouter({
+    role,
+    profileData: mortgageProfile,
+    rows: {
+      wazzup_channels: [{ ...wazzupChannel, workspace_id: WORKSPACE_B }],
+      whatsapp_cloud_numbers: [{ ...cloudChannel, workspace_id: WORKSPACE_B }],
+    },
+  }, async (ctx) => {
+    for (const [provider, id] of [["wazzup", CHANNEL_ROW_A], ["whatsapp_cloud", cloudChannel.id]]) {
+      const body = { id, provider, enabled: false, workspaceId: WORKSPACE_B };
+      const { res, log } = await ctx.call({ method: "PATCH", body });
+      assert.equal(res.statusCode, 404);
+      assert.equal(res.body.success, false);
+      assert.equal(JSON.stringify(res.body).includes(WORKSPACE_B), false);
+      const writes = log.filter((entry) => entry.op === "update");
+      assert.equal(writes.length, 1);
+      assert.equal(writes[0].filters.workspace_id, WORKSPACE_A);
+      const denied = await ctx.call({ method: "PATCH", body, query: { workspaceId: WORKSPACE_B } });
+      assert.equal(denied.res.statusCode, 403);
+      assert.ok(denied.log.every((entry) => entry.table === "staff_users"));
+    }
+  });
+});
+
+test("WC16 mortgage stop reports a storage failure without pretending intake stopped", async () => {
+  await withRouter({
+    profileData: mortgageProfile,
+    errors: { wazzup_channels: "local fixture storage failure" },
+  }, async (ctx) => {
+    const { res, log } = await ctx.call({ method: "PATCH", body: {
+      id: CHANNEL_ROW_A, provider: "wazzup", enabled: false,
+    } });
+    assert.equal(res.statusCode, 502);
+    assert.equal(res.body.success, false);
+    assert.equal(JSON.stringify(res.body).includes("local fixture storage failure"), false);
+    assert.equal(log.find((entry) => entry.op === "update")?.filters.workspace_id, WORKSPACE_A);
   });
 });

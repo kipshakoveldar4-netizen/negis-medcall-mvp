@@ -42,6 +42,7 @@ const MORTGAGE_METHODS: Readonly<Record<string, readonly string[]>> = {
   'staff-invitations': ['GET', 'POST', 'PATCH'],
   'staff-join-requests': ['GET', 'PATCH'],
   'join-code': ['GET', 'POST'],
+  'whatsapp-channels': ['GET', 'PATCH'],
   'push-subscriptions': ['GET', 'POST', 'PATCH'],
 };
 
@@ -61,6 +62,12 @@ export function requirePurposeRoute(purpose: WorkspacePurpose, role: string, rou
 }
 
 export function requireMortgagePayload(route: string, method: string, body: unknown) {
+  // The mortgage team may stop its own intake, never activate an integration.
+  if (route === 'whatsapp-channels' && method === 'PATCH'
+    && (!body || typeof body !== 'object' || Array.isArray(body)
+      || (body as Record<string, unknown>).enabled !== false)) {
+    throw new WorkspaceAdminAuthError(403, 'Действие недоступно для этого пространства', 'workspace_module_unavailable');
+  }
   if (!body || typeof body !== 'object' || Array.isArray(body) || method === 'GET') return;
   const record = body as Record<string, unknown>;
   const updates = record.updates && typeof record.updates === 'object' && !Array.isArray(record.updates)
