@@ -25,6 +25,7 @@ import {
   Megaphone,
   MessageCircle,
   Music2,
+  Power,
   RefreshCw,
   Rocket,
   Save,
@@ -840,6 +841,34 @@ type AdminSessionAccess = {
   releaseResponse: (response: globalThis.Response) => void;
 };
 
+type MortgageWhatsAppChannel = {
+  id: string;
+  provider: "wazzup" | "whatsapp_cloud";
+  keyMasked: string;
+  enabled: boolean;
+  leadsFiled: number;
+  repeatsSeen: number;
+  lastInboundAt: string | null;
+};
+
+type MortgageWhatsAppScope = { controller: AbortController; loadTicket: number; busy: boolean };
+
+function mortgageWhatsAppChannelsFrom(value: unknown): MortgageWhatsAppChannel[] {
+  if (!Array.isArray(value)) throw new Error("Не удалось прочитать состояние каналов WhatsApp.");
+  return value.map((channel) => {
+    if (!channel || typeof channel.id !== "string" || !channel.id
+      || (channel.provider !== "wazzup" && channel.provider !== "whatsapp_cloud")
+      || typeof channel.keyMasked !== "string" || typeof channel.enabled !== "boolean"
+      || !Number.isSafeInteger(channel.leadsFiled) || channel.leadsFiled < 0
+      || !Number.isSafeInteger(channel.repeatsSeen) || channel.repeatsSeen < 0
+      || (channel.lastInboundAt !== null && typeof channel.lastInboundAt !== "string")) {
+      throw new Error("Не удалось прочитать состояние каналов WhatsApp.");
+    }
+    return { id: channel.id, provider: channel.provider, keyMasked: channel.keyMasked, enabled: channel.enabled,
+      leadsFiled: channel.leadsFiled, repeatsSeen: channel.repeatsSeen, lastInboundAt: channel.lastInboundAt };
+  });
+}
+
 function AdminCenterSession({ actorId, workspaceId, userRole, isDemoMode, workspacePurpose }: {
   actorId: string;
   workspaceId: string;
@@ -928,9 +957,10 @@ function AdminCenterSession({ actorId, workspaceId, userRole, isDemoMode, worksp
 
 function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
   const [, setLocation] = useLocation();
-  const { user, vertical, workspacePurpose } = useAuth();
+  const { user, userRole, vertical, workspacePurpose } = useAuth();
   const isMortgage = workspacePurpose === "mortgage_leads";
-  const visibleTabs = isMortgage ? tabs.filter((tab) => tab.id === "staff") : tabs;
+  const mortgageChannelRole = userRole === "owner" || userRole === "admin";
+  const visibleTabs = isMortgage ? tabs.filter((tab) => tab.id === "staff" || (tab.id === "whatsapp" && mortgageChannelRole)) : tabs;
   const workspaceStaffRoles: readonly StaffRole[] = isMortgage ? ["lead_manager", "admin"] : staffRoles;
   const defaultStaffRole: StaffRole = isMortgage ? "lead_manager" : "receptionist";
   const workspaceId = access.workspaceId;
@@ -988,12 +1018,12 @@ function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
   // «Мастера». Ключ вкладки остаётся doctors — переименовывать его значило бы
   // трогать реестры, а не слово на кнопке.
   const tabLabel = (tab: { id: AdminTab; label: string }) =>
-    isMortgage ? "Команда" : tab.id === "doctors" ? capitalize(termsFor(vertical).specialistPlural) : tab.label;
+    isMortgage && tab.id === "staff" ? "Команда" : tab.id === "doctors" ? capitalize(termsFor(vertical).specialistPlural) : tab.label;
   // «Врач» в клинике и «Мастер» в салоне: роль в базе одна, слово на экране —
   // из словаря ниши. Владелец салона: «нет должности мастеров».
   const roleTitles = staffRoleLabels(vertical);
   const [activeTab, setRequestedTab] = useState<AdminTab>(isMortgage ? "staff" : "overview");
-  const setActiveTab = (tab: AdminTab) => setRequestedTab(isMortgage ? "staff" : tab);
+  const setActiveTab = (tab: AdminTab) => setRequestedTab(isMortgage && !(tab === "whatsapp" && mortgageChannelRole) ? "staff" : tab);
   const [clinic, setClinic] = useState<ClinicSettings>(() => readStored("negis_clinic_settings", clinicDefaults));
   // Commercial-3B: the team is whatever the server says it is. This list used
   // to be seeded from localStorage demo data and written back there, so an
@@ -1013,6 +1043,14 @@ function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
   const [serverAdminAuth, setServerAdminAuth] = useState<ServerAdminAuthState>({ status: "checking" });
   const hasStaffManagementAccess = serverAdminAuth.status === "confirmed"
     && (serverAdminAuth.role === "owner" || serverAdminAuth.role === "admin");
+  const hasMortgageChannelAccess = isMortgage && mortgageChannelRole && hasStaffManagementAccess;
+  const [mortgageChannels, setMortgageChannels] = useState<MortgageWhatsAppChannel[] | null>(null);
+  const [mortgageChannelsLoading, setMortgageChannelsLoading] = useState(false);
+  const [mortgageChannelsError, setMortgageChannelsError] = useState("");
+  const [mortgageChannelBusy, setMortgageChannelBusy] = useState<string | null>(null);
+  const mortgageChannelScope = useRef<MortgageWhatsAppScope | null>(null);
+  const mortgageChannelAllowed = useRef(false);
+  mortgageChannelAllowed.current = hasMortgageChannelAccess && activeTab === "whatsapp";
   const [integrationCards, setIntegrationCards] = useState<IntegrationCard[]>(() => buildIntegrationCards(null));
   const [tiktokDryRunForm, setTikTokDryRunForm] = useState<TikTokDryRunForm>(() => ({
     campaignName: "",
@@ -1104,8 +1142,97 @@ function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
     if (access.isCurrent()) setLoading((current) => ({ ...current, [key]: value }));
   };
 
+  function isMortgageChannelCurrent(scope: MortgageWhatsAppScope) {
+    return access.isCurrent() && mortgageChannelAllowed.current && mortgageChannelScope.current === scope
+      && !scope.controller.signal.aborted;
+  }
+
+  function reportMortgageChannelError(error: unknown) {
+    const message = error instanceof CrmApiError ? crmErrorMessage(error)
+      : error instanceof Error ? error.message : "Не удалось обновить канал WhatsApp.";
+    setMortgageChannelsError(message);
+    if (error instanceof CrmApiError && (error.status === 401 || error.status === 403)) {
+      setMortgageChannels(null);
+      setServerAdminAuth({ status: error.status === 401 ? "reauth" : "forbidden" });
+      mortgageChannelScope.current?.controller.abort();
+    }
+    return message;
+  }
+
+  async function loadMortgageChannels(scope = mortgageChannelScope.current) {
+    if (!scope || !isMortgageChannelCurrent(scope) || scope.busy) return;
+    const ticket = ++scope.loadTicket;
+    setMortgageChannelsLoading(true);
+    setMortgageChannelsError("");
+    try {
+      const body = await crmRequest<{ channels?: unknown }>(
+        `/api/crm/whatsapp-channels?workspaceId=${encodeURIComponent(workspaceId)}`,
+        { signal: scope.controller.signal },
+      );
+      if (!isMortgageChannelCurrent(scope) || ticket !== scope.loadTicket) return;
+      if (body.success !== true || body.mode !== "supabase") throw new Error("Не удалось подтвердить состояние каналов WhatsApp.");
+      setMortgageChannels(mortgageWhatsAppChannelsFrom(body.data?.channels));
+    } catch (error) {
+      if (!isMortgageChannelCurrent(scope)) return;
+      if (ticket !== scope.loadTicket && !(error instanceof CrmApiError && (error.status === 401 || error.status === 403))) return;
+      setMortgageChannels(null);
+      const message = reportMortgageChannelError(error);
+      if (error instanceof CrmApiError && (error.status === 401 || error.status === 403)) toast.error(message);
+    } finally {
+      if (isMortgageChannelCurrent(scope) && ticket === scope.loadTicket) setMortgageChannelsLoading(false);
+    }
+  }
+
+  async function disableMortgageChannel(channel: MortgageWhatsAppChannel) {
+    const scope = mortgageChannelScope.current;
+    if (!scope || !isMortgageChannelCurrent(scope) || scope.busy || channel.enabled !== true
+      || !mortgageChannels?.some((entry) => entry.id === channel.id && entry.provider === channel.provider && entry.enabled)) return;
+    scope.busy = true;
+    // A read begun before this mutation cannot restore the previous enabled state.
+    scope.loadTicket += 1;
+    setMortgageChannelsLoading(false);
+    setMortgageChannelBusy(`${channel.provider}:${channel.id}`);
+    setMortgageChannelsError("");
+    try {
+      const body = await crmRequest<{ item?: { id?: string; enabled?: boolean } }>(
+        `/api/crm/whatsapp-channels?workspaceId=${encodeURIComponent(workspaceId)}`,
+        { method: "PATCH", signal: scope.controller.signal, headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id: channel.id, provider: channel.provider, enabled: false }) },
+      );
+      if (!isMortgageChannelCurrent(scope)) return;
+      if (body.success !== true || body.mode !== "supabase" || body.data?.item?.id !== channel.id || body.data.item.enabled !== false) {
+        throw new Error("Сервер не подтвердил выключение канала. Обновите состояние перед повторной попыткой.");
+      }
+      setMortgageChannels((current) => current?.map((entry) => entry.id === channel.id && entry.provider === channel.provider
+        ? { ...entry, enabled: false } : entry) ?? null);
+      toast.success("Канал выключен — новые заявки не создаются.");
+    } catch (error) {
+      if (!isMortgageChannelCurrent(scope)) return;
+      toast.error(reportMortgageChannelError(error));
+    } finally {
+      if (isMortgageChannelCurrent(scope)) {
+        scope.busy = false;
+        setMortgageChannelBusy(null);
+      }
+    }
+  }
+
+  useLayoutEffect(() => {
+    if (!hasMortgageChannelAccess || activeTab !== "whatsapp" || !access.isCurrent()) return;
+    const scope: MortgageWhatsAppScope = { controller: new AbortController(), loadTicket: 0, busy: false };
+    mortgageChannelScope.current = scope;
+    setMortgageChannels(null);
+    setMortgageChannelBusy(null);
+    void loadMortgageChannels(scope);
+    return () => {
+      scope.controller.abort();
+      if (mortgageChannelScope.current === scope) mortgageChannelScope.current = null;
+    };
+  }, [activeTab, hasMortgageChannelAccess, serverAdminAuth, workspaceId]);
+
   async function checkServerAdminAccess() {
     if (!access.isCurrent()) return;
+    mortgageChannelScope.current?.controller.abort();
     setServerAdminAuth({ status: "checking" });
 
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(workspaceId)) {
@@ -2547,6 +2674,56 @@ function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
       if (!access.isCurrent()) return;
       toast.error("Не удалось скопировать автоматически");
     }
+  }
+
+  function renderMortgageWhatsApp() {
+    if (!hasMortgageChannelAccess || !access.isCurrent()) return null;
+    return (
+      <div className="space-y-5" data-testid="mortgage-whatsapp-channels">
+        <section className="neu-card flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <h2 className="text-lg font-black text-[#0F172A]">WhatsApp: ипотечные заявки</h2>
+          <button type="button" className="neu-btn w-full justify-center sm:w-auto" onClick={() => void loadMortgageChannels()}
+            disabled={mortgageChannelsLoading || mortgageChannelBusy !== null}>
+            <RefreshCw size={16} />Обновить
+          </button>
+        </section>
+        {mortgageChannelsLoading && <p role="status" className="text-sm text-[#64748B]">Загружаем состояние каналов…</p>}
+        {mortgageChannelsError && <p role="alert" className="text-sm text-[#DC2626]">{mortgageChannelsError}</p>}
+        {!mortgageChannelsLoading && mortgageChannels?.length === 0 && (
+          <p className="text-sm text-[#64748B]">WhatsApp пока не подключён к этому пространству.</p>
+        )}
+        {mortgageChannels && mortgageChannels.length > 0 && <div className="grid gap-4 lg:grid-cols-2">
+          {mortgageChannels.map((channel) => (
+            <section key={`${channel.provider}:${channel.id}`} className="neu-card min-w-0">
+              <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+                <div className="flex min-w-0 items-center gap-3">
+                  <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#ECFDF5] text-[#059669]">
+                    <MessageCircle size={18} />
+                  </span>
+                  <div className="min-w-0">
+                    <p className="break-all font-black text-[#0F172A]">WhatsApp {channel.keyMasked}</p>
+                    <p className="text-xs text-[#64748B]">{channel.provider === "wazzup" ? "через Wazzup" : "напрямую от WhatsApp"}</p>
+                  </div>
+                </div>
+                <span className={`rounded-full px-3 py-1 text-xs font-bold ${channel.enabled ? "bg-[#ECFDF5] text-[#059669]" : "bg-[#F1F5F9] text-[#64748B]"}`}>
+                  {channel.enabled ? "Приём включён" : "Выключен"}
+                </span>
+              </div>
+              <dl className="grid grid-cols-3 gap-3 text-center">
+                <div className="min-w-0"><dt className="text-xs text-[#64748B]">Заявок</dt><dd className="break-words text-lg font-black text-[#0F172A]">{channel.leadsFiled}</dd></div>
+                <div className="min-w-0"><dt className="text-xs text-[#64748B]">Повторных</dt><dd className="break-words text-lg font-black text-[#0F172A]">{channel.repeatsSeen}</dd></div>
+                <div className="min-w-0"><dt className="text-xs text-[#64748B]">Последнее</dt><dd className="break-words text-sm font-bold text-[#0F172A]">{formatAdminDateTime(channel.lastInboundAt)}</dd></div>
+              </dl>
+              {channel.enabled && <button type="button" className="neu-btn mt-4 w-full justify-center"
+                disabled={mortgageChannelBusy !== null} onClick={() => void disableMortgageChannel(channel)}>
+                {mortgageChannelBusy === `${channel.provider}:${channel.id}` ? <Loader2 className="animate-spin" size={16} /> : <Power size={16} />}
+                Выключить приём заявок
+              </button>}
+            </section>
+          ))}
+        </div>}
+      </div>
+    );
   }
 
   function renderOverview() {
@@ -4334,7 +4511,7 @@ function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
           </div>
         </nav>
 
-        {isMortgage ? renderStaff() : <>
+        {isMortgage ? (activeTab === "whatsapp" ? renderMortgageWhatsApp() : renderStaff()) : <>
           {activeTab === "overview" && renderOverview()}
           {activeTab === "staff" && renderStaff()}
           {activeTab === "operators" && <ClinicOperators key={workspaceId} workspaceId={workspaceId} />}

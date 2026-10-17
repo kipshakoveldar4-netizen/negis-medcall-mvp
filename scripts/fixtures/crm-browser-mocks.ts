@@ -67,7 +67,15 @@ export const API_BASE_URL = "";
 export const publicApiUrl = apiUrl;
 export class CrmApiError extends Error {}
 export const crmJson = (response: Response) => response.json();
-export const crmRequest = async () => { throw new CrmApiError("Изменения отключены на стенде"); };
+export const crmRequest = async (input?: string, init?: RequestInit) => {
+  if (!mortgageFixture || !input || new URL(input, "http://fixture.invalid").pathname !== "/api/crm/whatsapp-channels") {
+    throw new CrmApiError("Изменения отключены на стенде");
+  }
+  const response = await crmFetch(input, init);
+  if (!response.ok) throw new CrmApiError("Изменения отключены на стенде");
+  return response.json();
+};
+let fixtureWhatsAppEnabled = true;
 export async function crmFetch(input: string, init?: RequestInit): Promise<Response> {
   const url = new URL(input, "http://fixture.invalid");
   if (url.origin !== "http://fixture.invalid" || !url.pathname.startsWith("/api/crm/")) throw new Error("External request forbidden");
@@ -75,6 +83,21 @@ export async function crmFetch(input: string, init?: RequestInit): Promise<Respo
     return retryFixture.send(JSON.parse(String(init.body)));
   }
   const resource = url.pathname.split("/").at(-1) || "";
+  if (mortgageFixture && resource === "whatsapp-channels") {
+    if (!["owner", "admin"].includes(auth.userRole)) return Response.json({ success: false }, { status: 403 });
+    const channel = { id: "00000000-0000-4000-8000-000000000071", provider: "wazzup", keyMasked: "••••0071",
+      enabled: fixtureWhatsAppEnabled, leadsFiled: 12, repeatsSeen: 3, lastInboundAt: `${today}T10:00:00+05:00` };
+    if (init?.method === "PATCH") {
+      const body = JSON.parse(String(init.body));
+      if (body.id !== channel.id || body.provider !== channel.provider || body.enabled !== false) {
+        return Response.json({ success: false }, { status: 400 });
+      }
+      fixtureWhatsAppEnabled = false;
+      return Response.json({ success: true, mode: "supabase", data: { item: { id: channel.id, enabled: false } } });
+    }
+    if (init?.method && init.method !== "GET") return Response.json({ success: false }, { status: 403 });
+    return Response.json({ success: true, mode: "supabase", data: { channels: [channel] } });
+  }
   if(mortgageFixture && resource==='mortgage-workspace')return mortgageBrowserRequest(url,init,auth.userRole);
   if(mortgageFixture && resource==='leads')return mortgageLeadBrowserRequest(init,auth.userRole);
   if(mortgageFixture && resource==='auth-context')return Response.json({success:true,mode:'supabase',data:{

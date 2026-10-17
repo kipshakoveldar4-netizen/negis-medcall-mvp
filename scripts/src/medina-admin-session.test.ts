@@ -63,6 +63,8 @@ function observeContent(source: string) {
   assert.ok(returned, "content must render after defining its real action closures");
   const capture = `\n__capture({ serverAdminAuth, staff, createdStaff, issuedInvite, invitations,
     activeTab, batchRole, batchResults, batchEmails, staffPassword, inviteForm, loading, joinRequests, joinCode,
+    mortgageChannels, mortgageChannelsLoading, mortgageChannelsError, mortgageChannelBusy,
+    loadMortgageChannels, disableMortgageChannel,
     setActiveTab, setInviteForm, setStaffPassword, setBatchEmails,
     checkServerAdminAccess, loadStaff, loadInvitations, sendInvitation, createStaffWithPassword,
     createStaffBatch, resetStaffPassword, reissueInvitation, updateStaffStatus,
@@ -189,6 +191,14 @@ const invitation = { id: "invite-local", email: "invited@example.test", role: "r
 const ok = (data: unknown = {}) => Response.json({ success: true, mode: "supabase", data });
 const authBody = (patch: Record<string, unknown> = {}) => ({ success: true, mode: "supabase",
   data: { workspaceId: workspaceA, role: "owner", staffUserId: "owner-local", isAdmin: true, ...patch } });
+const channelRows = [
+  { id: "channel-local", provider: "wazzup", keyMasked: "\u2026abcd", enabled: true,
+    leadsFiled: 17, repeatsSeen: 23, lastInboundAt: null },
+  { id: "channel-local", provider: "whatsapp_cloud", keyMasked: "\u2026efgh", enabled: true,
+    leadsFiled: 29, repeatsSeen: 31, lastInboundAt: "2026-10-14T10:00:00Z" },
+  { id: "channel-disabled", provider: "whatsapp_cloud", keyMasked: "\u2026ijkl", enabled: false,
+    leadsFiled: 0, repeatsSeen: 0, lastInboundAt: null },
+];
 type Init = RequestInit & { expectedUserId?: string; accessToken?: string };
 type Reply = (url: string, init: Init) => Promise<Response>;
 const permissions = evaluate(await read("artifacts/negis/src/lib/permissions.ts"));
@@ -229,6 +239,8 @@ function setup(search = "") {
     if (resource === "staff-invitations") return ok({ invitations: [invitation], acceptUrl: "https://example.test/local-invite" });
     if (resource === "staff-credentials") return ok({ login: "issued.local" });
     if (resource === "join-code") return ok({ code: "LOCAL123" });
+    if (resource === "whatsapp-channels") return init.method === "PATCH"
+      ? ok({ item: { id: JSON.parse(String(init.body)).id, enabled: false } }) : ok({ channels: channelRows });
     return ok({ requests: [], launches: [], runs: [], insights: [] });
   };
   // Keep the real crmFetch token-wait/abort behavior without loading import.meta.env
@@ -898,7 +910,7 @@ for (const role of ["owner", "admin"] as const) {
   });
 }
 
-const prohibitedTabs = ["overview", "operators", "doctors", "roles", "clinic", "whatsapp", "integrations",
+const prohibitedTabs = ["overview", "operators", "doctors", "roles", "clinic", "integrations",
   "ai", "meta", "release", "diagnostics"];
 const mortgageUi = {
   team: "\u041a\u043e\u043c\u0430\u043d\u0434\u0430",
@@ -914,12 +926,12 @@ function assertMortgageTree(tree: any) {
       `${name} must never be mounted for mortgage`);
   }
   assert.equal(all.filter((node) => node.type === "details").length, 0, "platform diagnostics must be absent");
-  assert.doesNotMatch(label(tree), /\u043a\u043b\u0438\u043d\u0438\u043a|WhatsApp|Meta\/Facebook|Release checklist/i);
+  assert.doesNotMatch(label(tree), /\u043a\u043b\u0438\u043d\u0438\u043a|Meta\/Facebook|Release checklist/i);
 }
 function assertMortgageNetwork(fixture: Fixture) {
   for (const call of fixture.calls) {
-    assert.match(call.path, /^\/api\/crm\/(auth-context|staff|staff-invitations|staff-credentials|staff-join-requests|join-code)\?/,
-      "mortgage may only dispatch authentication or team requests");
+    assert.match(call.path, /^\/api\/crm\/(auth-context|staff|staff-invitations|staff-credentials|staff-join-requests|join-code|whatsapp-channels)\?/,
+      "mortgage may only dispatch authentication, team or existing channel requests");
   }
 }
 
@@ -939,9 +951,9 @@ test("mortgage starts on staff, rejects every prohibited query/tab and never mou
       assert.equal(fixture.snapshot().inviteForm.role, "lead_manager");
       assert.equal(fixture.snapshot().batchRole, "lead_manager");
       const nav = nodes(fixture.renderer.tree()).find((node) => node.type === "nav")!;
-      assert.deepEqual(nodes(nav).filter((node) => node.type === "button").map(label), [mortgageUi.team]);
+      assert.deepEqual(nodes(nav).filter((node) => node.type === "button").map(label), [mortgageUi.team, "WhatsApp"]);
       const selector = nodes(fixture.renderer.tree()).find((node) => node.type === "select" && node.props.value === "staff")!;
-      assert.deepEqual(nodes(selector).filter((node) => node.type === "option").map((node) => node.props.value), ["staff"]);
+      assert.deepEqual(nodes(selector).filter((node) => node.type === "option").map((node) => node.props.value), ["staff", "whatsapp"]);
       const callsBefore = fixture.calls.length;
       for (const prohibited of prohibitedTabs) {
         fixture.snapshot().setActiveTab(prohibited);
@@ -1132,15 +1144,276 @@ test("clinic and salon keep overview, diagnostics, billing, vertical switch and 
       assert.ok(all.some((node) => node.type === "details"));
       assert.ok(fixture.dispatches.some((call) => call.path.includes("/meta-launches?")));
       const nav = all.find((node) => node.type === "nav")!;
-      assert.equal(nodes(nav).filter((node) => node.type === "button").length, prohibitedTabs.length + 1);
+      assert.equal(nodes(nav).filter((node) => node.type === "button").length, prohibitedTabs.length + 2);
       const specialistLabel = terms.capitalize(terms.termsFor(vertical).specialistPlural);
       button(fixture, specialistLabel).props.onClick(); await fixture.renderer.flush();
       assert.ok(nodes(fixture.renderer.tree()).some((node) => node.type === "DoctorSchedule"));
+      fixture.snapshot().setActiveTab("whatsapp"); await fixture.renderer.flush();
+      assert.ok(nodes(fixture.renderer.tree()).some((node) => node.type === "WhatsAppChannels"), "clinic keeps its existing toggle panel");
+      assert.equal(nodes(fixture.renderer.tree()).some((node) => node.props["data-testid"] === "mortgage-whatsapp-channels"), false);
     } finally { fixture.renderer.dispose(); }
     const linked = setup("?tab=doctors"); linked.setAuth({ vertical, workspacePurpose: "clinic_services" });
     try {
       await linked.renderer.flush(); assert.equal(linked.snapshot().activeTab, "doctors");
       assert.ok(nodes(linked.renderer.tree()).some((node) => node.type === "DoctorSchedule"));
     } finally { linked.renderer.dispose(); }
+  }
+});
+
+const disableIntake = "\u0412\u044b\u043a\u043b\u044e\u0447\u0438\u0442\u044c \u043f\u0440\u0438\u0451\u043c \u0437\u0430\u044f\u0432\u043e\u043a";
+const refreshChannels = "\u041e\u0431\u043d\u043e\u0432\u0438\u0442\u044c";
+function channelPanel(fixture: Fixture) {
+  return nodes(fixture.renderer.tree()).find((node) => node.props["data-testid"] === "mortgage-whatsapp-channels");
+}
+function channelCalls(fixture: Fixture) {
+  return fixture.calls.filter((call) => call.path.includes("/whatsapp-channels?"));
+}
+async function readyChannels() {
+  const fixture = setup("?tab=whatsapp");
+  fixture.setAuth({ workspacePurpose: "mortgage_leads" });
+  await fixture.renderer.flush();
+  assert.ok(channelPanel(fixture)); assert.equal(fixture.snapshot().mortgageChannels.length, 3);
+  return fixture;
+}
+
+test("mortgage channel navigation and reads require both owner/admin client role and server confirmation", async () => {
+  for (const role of ["owner", "admin", "lead_manager", "manager", "receptionist", "doctor", "marketer", "agent", "booking_agent"]) {
+    const fixture = setup("?tab=whatsapp");
+    fixture.setAuth({ workspacePurpose: "mortgage_leads", userRole: role });
+    const pending = deferred<Response>();
+    fixture.reply(async (url) => url.includes("/auth-context?") ? pending.promise : ok());
+    try {
+      await fixture.renderer.flush();
+      assert.equal(channelPanel(fixture), undefined); assert.equal(channelCalls(fixture).length, 0);
+      fixture.reply(); pending.resolve(Response.json(authBody())); await fixture.renderer.flush();
+      const allowed = role === "owner" || role === "admin";
+      const nav = nodes(fixture.renderer.tree()).find((node) => node.type === "nav")!;
+      assert.deepEqual(nodes(nav).filter((node) => node.type === "button").map(label), allowed ? [mortgageUi.team, "WhatsApp"] : [mortgageUi.team]);
+      const selector = nodes(fixture.renderer.tree()).find((node) => node.type === "select" && ["staff", "whatsapp"].includes(node.props.value))!;
+      assert.deepEqual(nodes(selector).filter((node) => node.type === "option").map((node) => node.props.value), allowed ? ["staff", "whatsapp"] : ["staff"]);
+      assert.equal(Boolean(channelPanel(fixture)), allowed);
+      assert.equal(channelCalls(fixture).length, allowed ? 1 : 0);
+      selector.props.onChange({ target: { value: "staff" } }); await fixture.renderer.flush();
+      selector.props.onChange({ target: { value: "whatsapp" } }); await fixture.renderer.flush();
+      assert.equal(fixture.snapshot().activeTab, allowed ? "whatsapp" : "staff");
+      assert.equal(channelCalls(fixture).length, allowed ? 2 : 0);
+      await fixture.snapshot().disableMortgageChannel(channelRows[0]);
+      if (!allowed) assert.equal(channelCalls(fixture).length, 0, "a forged callback cannot give manager roles channel access");
+      assertMortgageTree(fixture.renderer.tree()); assertMortgageNetwork(fixture);
+    } finally { fixture.renderer.dispose(); }
+  }
+  for (const scenario of deniedStaffChecks) {
+    const fixture = setup("?tab=whatsapp"); fixture.setAuth({ workspacePurpose: "mortgage_leads" });
+    fixture.reply(async () => scenario.response());
+    try {
+      await fixture.renderer.flush();
+      assert.equal(channelPanel(fixture), undefined); assert.equal(channelCalls(fixture).length, 0);
+      await fixture.snapshot().loadMortgageChannels(); await fixture.snapshot().disableMortgageChannel(channelRows[0]);
+      assert.equal(channelCalls(fixture).length, 0);
+    } finally { fixture.renderer.dispose(); }
+  }
+  for (const workspacePurpose of ["clinic_services", "marketing", null] as const) {
+    const fixture = setup("?tab=whatsapp"); fixture.setAuth({ workspacePurpose });
+    try {
+      await fixture.renderer.flush(); assert.equal(channelPanel(fixture), undefined);
+      await fixture.snapshot().loadMortgageChannels(); await fixture.snapshot().disableMortgageChannel(channelRows[0]);
+      assert.equal(channelCalls(fixture).length, 0, "only mortgage purpose may dispatch through the new panel");
+      assert.ok(nodes(fixture.renderer.tree()).some((node) => node.type === "WhatsAppChannels"));
+    } finally { fixture.renderer.dispose(); }
+  }
+});
+
+test("mortgage displays only masked DTO fields and disables existing channels without any enable or binding controls", async () => {
+  const fixture = await readyChannels();
+  const pending = deferred<Response>();
+  try {
+    fixture.reply(async (_url, init) => init.method === "PATCH" ? pending.promise : ok({ channels: channelRows.map((row) => ({ ...row,
+      phone: "synthetic-phone-marker", credential: "synthetic-credential-marker", chats: ["synthetic-chat-marker"] })) }));
+    await fixture.snapshot().loadMortgageChannels(); await fixture.renderer.flush();
+    const panel = channelPanel(fixture)!;
+    for (const marker of ["\u2026abcd", "\u2026efgh", "\u2026ijkl", "17", "23", "29", "31"]) assert.ok(label(panel).includes(marker));
+    assert.doesNotMatch(label(panel), /synthetic-(phone|credential|chat)-marker/);
+    assert.equal(nodes(panel).some((node) => ["input", "textarea", "select", "a", "Link"].includes(node.type)), false);
+    assert.deepEqual(nodes(panel).filter((node) => node.type === "button").map(label), [refreshChannels, disableIntake, disableIntake]);
+    assert.deepEqual(Object.keys(fixture.snapshot().mortgageChannels[0]).sort(), Object.keys(channelRows[0]).sort());
+    const action = buttons(fixture, disableIntake)[0];
+    action.props.onClick(); action.props.onClick(); await fixture.renderer.flush();
+    const patches = channelCalls(fixture).filter((call) => call.init.method === "PATCH");
+    assert.equal(patches.length, 1, "synchronous busy guard prevents duplicate mutations");
+    assert.deepEqual(JSON.parse(String(patches[0].init.body)), { id: "channel-local", provider: "wazzup", enabled: false });
+    assert.match(patches[0].path, new RegExp(`workspaceId=${workspaceA}$`));
+    assert.equal(patches[0].init.expectedUserId, actorA); assert.equal(patches[0].init.cache, "no-store");
+    assert.equal(patches[0].init.signal?.aborted, false);
+    assert.equal(buttons(fixture, refreshChannels)[0].props.disabled, true);
+    assert.ok(buttons(fixture, disableIntake).every((entry) => entry.props.disabled));
+    assert.equal(fixture.snapshot().mortgageChannels[0].enabled, true, "no optimistic success");
+    const count = channelCalls(fixture).length;
+    await fixture.snapshot().loadMortgageChannels(); assert.equal(channelCalls(fixture).length, count);
+    pending.resolve(ok({ item: { id: "channel-local", enabled: false } })); await fixture.renderer.flush();
+    assert.deepEqual(clone(fixture.snapshot().mortgageChannels.map((row: any) => row.enabled)), [false, true, false], "provider and id together identify a channel");
+    assert.equal(buttons(fixture, disableIntake).length, 1);
+    assert.equal(fixture.toasts.filter((entry) => entry.kind === "success").length, 1);
+    await fixture.snapshot().disableMortgageChannel(fixture.snapshot().mortgageChannels[0]);
+    await fixture.snapshot().disableMortgageChannel({ ...channelRows[2], enabled: true });
+    fixture.reply(async () => ok({ item: { id: "channel-local", enabled: false } }));
+    await buttons(fixture, disableIntake)[0].props.onClick(); await fixture.renderer.flush();
+    const writes = channelCalls(fixture).filter((call) => call.init.method === "PATCH");
+    assert.equal(writes.length, 2); assert.ok(writes.every((call) => JSON.parse(String(call.init.body)).enabled === false));
+    assert.equal(JSON.parse(String(writes[1].init.body)).provider, "whatsapp_cloud");
+    assert.equal(buttons(fixture, disableIntake).length, 0, "disabled channels have no action at all");
+    assert.deepEqual(fixture.storageWrites, []);
+  } finally { fixture.renderer.dispose(); }
+});
+
+test("mortgage channel reads distinguish empty data, API errors, demo responses and malformed DTOs", async () => {
+  for (const reply of [
+    () => Response.json({ success: false, error: "Local refusal" }, { status: 502 }),
+    () => ok(), () => Response.json({ success: true, mode: "demo", data: { channels: [] } }),
+    () => Response.json({ mode: "supabase", data: { channels: [] } }),
+    () => ok({ channels: [{ ...channelRows[0], enabled: "true" }] }),
+    () => ok({ channels: [{ ...channelRows[0], leadsFiled: -1 }] }),
+    () => ok({ channels: [{ ...channelRows[0], provider: "unknown" }] }),
+    () => { throw new Error("Local transport failure"); },
+  ]) {
+    const fixture = await readyChannels(); fixture.reply(async () => reply());
+    try {
+      await fixture.snapshot().loadMortgageChannels(); await fixture.renderer.flush();
+      assert.equal(fixture.snapshot().mortgageChannels, null);
+      assert.ok(nodes(channelPanel(fixture)).some((node) => node.props.role === "alert"));
+      assert.equal(buttons(fixture, disableIntake).length, 0); assert.equal(fixture.toasts.some((entry) => entry.kind === "success"), false);
+      assert.equal(fixture.snapshot().mortgageChannelsLoading, false);
+      fixture.reply(async () => ok({ channels: [] }));
+      await fixture.snapshot().loadMortgageChannels(); await fixture.renderer.flush();
+      assert.deepEqual(clone(fixture.snapshot().mortgageChannels), []); assert.equal(fixture.snapshot().mortgageChannelsError, "");
+      assert.equal(nodes(channelPanel(fixture)).some((node) => node.props.role === "alert"), false);
+    } finally { fixture.renderer.dispose(); }
+  }
+});
+
+test("mortgage channel mutations never report success for rejected or unconfirmed disables", async () => {
+  for (const reply of [
+    () => Response.json({ success: false, error: "Local refusal" }, { status: 400 }),
+    () => Response.json({ success: false, error: "Local refusal" }, { status: 404 }),
+    () => Response.json({ success: false, error: "Local refusal" }, { status: 502 }),
+    () => Response.json({ success: false }), () => ok(),
+    () => ok({ item: { id: "channel-local", enabled: true } }),
+    () => ok({ item: { id: "another-channel", enabled: false } }),
+    () => Response.json({ success: true, mode: "demo", data: { item: { id: "channel-local", enabled: false } } }),
+    () => { throw new Error("Local transport failure"); },
+  ]) {
+    const fixture = await readyChannels(); fixture.reply(async () => reply());
+    try {
+      await fixture.snapshot().disableMortgageChannel(channelRows[0]); await fixture.renderer.flush();
+      assert.equal(fixture.snapshot().mortgageChannels[0].enabled, true);
+      assert.ok(fixture.snapshot().mortgageChannelsError);
+      assert.equal(fixture.toasts.filter((entry) => entry.kind === "error").length, 1);
+      assert.equal(fixture.toasts.some((entry) => entry.kind === "success"), false);
+      assert.equal(fixture.snapshot().mortgageChannelBusy, null); assert.equal(buttons(fixture, disableIntake)[0].props.disabled, false);
+    } finally { fixture.renderer.dispose(); }
+  }
+});
+
+test("a confirmed mortgage disable wins over older reads and only the latest refresh may publish", async () => {
+  const fixture = await readyChannels(); const body = deferred<string>();
+  try {
+    fixture.reply(async (_url, init) => init.method === "PATCH" ? ok({ item: { id: "channel-local", enabled: false } })
+      : ({ ok: true, status: 200, text: () => body.promise }) as Response);
+    const read = fixture.snapshot().loadMortgageChannels(); await fixture.renderer.flush();
+    await fixture.snapshot().disableMortgageChannel(channelRows[0]); await fixture.renderer.flush();
+    body.resolve(JSON.stringify({ success: true, mode: "supabase", data: { channels: channelRows } })); await read; await fixture.renderer.flush();
+    assert.equal(fixture.snapshot().mortgageChannels[0].enabled, false); assert.equal(fixture.snapshot().mortgageChannelsLoading, false);
+    const older = deferred<Response>(); let count = 0;
+    fixture.reply(async () => ++count === 1 ? older.promise : ok({ channels: [] }));
+    const first = fixture.snapshot().loadMortgageChannels();
+    await fixture.snapshot().loadMortgageChannels(); await fixture.renderer.flush();
+    older.resolve(Response.json({ success: false }, { status: 502 })); await first; await fixture.renderer.flush();
+    assert.deepEqual(clone(fixture.snapshot().mortgageChannels), []); assert.equal(fixture.snapshot().mortgageChannelsError, "");
+  } finally { fixture.renderer.dispose(); }
+});
+
+test("mortgage channel GET/PATCH revocations clear the panel, abort sibling reads and reject retained actions", async () => {
+  for (const status of [401, 403]) for (const method of ["GET", "PATCH"]) {
+    const fixture = await readyChannels(); const body = deferred<string>();
+    try {
+      const closure = fixture.snapshot();
+      fixture.reply(async () => ({ ok: true, status: 200, text: () => body.promise }) as Response);
+      const sibling = closure.loadMortgageChannels(); await fixture.renderer.flush();
+      const siblingCall = channelCalls(fixture).at(-1)!;
+      fixture.reply(async () => Response.json({ success: false, error: "Local membership revoked" }, { status }));
+      if (method === "GET") await closure.loadMortgageChannels(); else await closure.disableMortgageChannel(channelRows[0]);
+      await fixture.renderer.flush();
+      assert.equal(fixture.snapshot().serverAdminAuth.status, status === 401 ? "reauth" : "forbidden");
+      assert.equal(fixture.snapshot().mortgageChannels, null); assert.equal(channelPanel(fixture), undefined);
+      assert.equal(siblingCall.init.signal?.aborted, true);
+      const count = channelCalls(fixture).length, start = fixture.renderer.writes.length;
+      await closure.loadMortgageChannels(); await closure.disableMortgageChannel(channelRows[0]);
+      body.resolve(JSON.stringify({ success: true, mode: "supabase", data: { channels: channelRows } })); await sibling;
+      await fixture.renderer.flush();
+      assert.equal(channelCalls(fixture).length, count); assert.equal(fixture.renderer.writes.length, start);
+      assert.equal(fixture.toasts.some((entry) => entry.kind === "success"), false);
+    } finally { fixture.renderer.dispose(); }
+  }
+});
+
+test("an older mortgage read auth denial still revokes a newer pending disable", async () => {
+  for (const status of [401, 403]) {
+    const fixture = await readyChannels(); const readReply = deferred<Response>(), patchReply = deferred<Response>();
+    try {
+      fixture.reply(async (_url, init) => init.method === "PATCH" ? patchReply.promise : readReply.promise);
+      const read = fixture.snapshot().loadMortgageChannels(); await fixture.renderer.flush();
+      const patch = fixture.snapshot().disableMortgageChannel(channelRows[0]); await fixture.renderer.flush();
+      const patchCall = channelCalls(fixture).at(-1)!;
+      readReply.resolve(Response.json({ success: false }, { status })); await read; await fixture.renderer.flush();
+      assert.equal(channelPanel(fixture), undefined); assert.equal(patchCall.init.signal?.aborted, true);
+      const start = fixture.renderer.writes.length;
+      patchReply.resolve(ok({ item: { id: "channel-local", enabled: false } })); await patch; await fixture.renderer.flush();
+      assert.equal(fixture.renderer.writes.length, start); assert.equal(fixture.toasts.some((entry) => entry.kind === "success"), false);
+    } finally { fixture.renderer.dispose(); }
+  }
+});
+
+test("mortgage channel work cannot cross account/workspace/role/purpose, auth recheck, tab or StrictMode lifetimes", async () => {
+  for (const boundary of ["actor", "workspace", "role", "purpose", "sdk-roundtrip", "recheck", "tab", "strict"] as const) {
+    for (const method of ["GET", "PATCH"]) {
+      const fixture = await readyChannels(); const body = deferred<string>();
+      try {
+        const closure = fixture.snapshot(), old = fixture.renderer.instance("AdminCenterContent");
+        fixture.reply(async () => ({ ok: true, status: 200, text: () => body.promise }) as Response);
+        const work = method === "GET" ? closure.loadMortgageChannels() : closure.disableMortgageChannel(channelRows[0]);
+        await fixture.renderer.flush(); const call = channelCalls(fixture).at(-1)!;
+        fixture.reply();
+        if (boundary === "actor") fixture.setAuth({ user: { id: actorB, email: "other@example.test" } });
+        if (boundary === "workspace") fixture.setAuth({ clinicId: workspaceB });
+        if (boundary === "role") fixture.setAuth({ userRole: "lead_manager" });
+        if (boundary === "purpose") fixture.setAuth({ workspacePurpose: "clinic_services" });
+        if (boundary === "sdk-roundtrip") { fixture.emit(actorB); fixture.emit(actorA); }
+        if (boundary === "recheck") await closure.checkServerAdminAccess();
+        if (boundary === "tab") closure.setActiveTab("staff");
+        if (boundary === "strict") fixture.renderer.replaySessionLayout();
+        await fixture.renderer.flush();
+        assert.equal(call.init.signal?.aborted, true, `${boundary} ${method} must cancel body consumption`);
+        const count = channelCalls(fixture).length, start = fixture.renderer.writes.length, toasts = fixture.toasts.length;
+        body.resolve(JSON.stringify({ success: true, mode: "supabase", data: method === "GET" ? { channels: channelRows } : { item: { id: "channel-local", enabled: false } } }));
+        await work; await fixture.renderer.flush();
+        assert.equal(channelCalls(fixture).length, count);
+        assert.deepEqual(contentWrites(fixture, old, start), []); assert.equal(fixture.toasts.length, toasts);
+      } finally { fixture.renderer.dispose(); }
+    }
+  }
+});
+
+test("mortgage channel pending token waits never dispatch after account/workspace/role/purpose changes", async () => {
+  for (const patch of [{ user: { id: actorB, email: "other@example.test" } }, { clinicId: workspaceB },
+    { userRole: "lead_manager" }, { workspacePurpose: "clinic_services" as const }]) {
+    const fixture = await readyChannels(); const token = deferred<string>();
+    try {
+      fixture.token(() => token.promise);
+      const work = fixture.snapshot().disableMortgageChannel(channelRows[0]); await fixture.renderer.flush();
+      fixture.token(); fixture.setAuth(patch); await fixture.renderer.flush();
+      const count = fixture.dispatches.length;
+      token.resolve("local-fixture-token"); await work; await fixture.renderer.flush();
+      assert.equal(fixture.dispatches.length, count); assert.equal(fixture.toasts.some((entry) => entry.kind === "success"), false);
+      assert.equal(fixture.dispatches.some((call) => call.path.includes("/whatsapp-channels?") && call.init.method === "PATCH"), false);
+    } finally { fixture.renderer.dispose(); }
   }
 });

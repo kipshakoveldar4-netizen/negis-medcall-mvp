@@ -49,6 +49,7 @@
     "test:failure-honesty": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:failure-honesty",
     "test:migration-chain": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:migration-chain",
     "test:wazzup-webhook": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:wazzup-webhook",
+    "test:wazzup-contention": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:wazzup-contention",
     "test:transition-performance": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:transition-performance",
     "test:whatsapp-cloud-webhook": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:whatsapp-cloud-webhook",
     "test:crm-phone-parity": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:crm-phone-parity",

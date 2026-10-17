@@ -13,13 +13,14 @@ import { normalizePhone } from "./phone";
 // unknown or disabled channel is counted as ignored so the adapter can answer
 // 200 without disclosure.
 //
-// Ordering is load-bearing and pinned by the adapter suites:
+// Existing channels retain the legacy ordering pinned by the adapter suites:
 //   1. Ledger replay check first — a message already in the ledger already
 //      produced whatever it was going to; providers retry until they see 200.
 //   2. Ledger write LAST — any failure before it answers 503 and the provider
 //      retries into a clean slate. A unique violation on the write itself is
-//      a concurrent duplicate delivery: the phone dedup already kept the lead
-//      single, so the loss is only a double count, never a double lead.
+//      a concurrent duplicate delivery, but the separate lead write is not
+//      atomic and can duplicate a lead. Explicitly opted-in Wazzup channels
+//      use migration 071's transaction instead; Cloud/legacy remain unchanged.
 //
 // Personal data: phones, names and message texts are patient data. They go to
 // the database and nowhere else — thrown errors carry scope only, and the
@@ -122,6 +123,29 @@ function isMissingColumn(error: { code?: unknown; message?: unknown } | null): b
   return message.includes("phone_normalized") && message.includes("does not exist");
 }
 
+function usesWazzupTables(tables: InboundProviderTables): boolean {
+  return tables.channelTable === 'wazzup_channels' && tables.channelKeyColumn === 'channel_id'
+    && tables.ledgerTable === 'wazzup_inbound_messages';
+}
+
+async function readInboundChannel(
+  supabase: SupabaseServerClient, tables: InboundProviderTables, channelKey: string,
+): Promise<JsonRecord> {
+  const optedInProvider = usesWazzupTables(tables);
+  const read = (columns: string) => supabase.from(tables.channelTable).select(columns)
+    .eq(tables.channelKeyColumn, channelKey).maybeSingle();
+  let result = await read(optedInProvider ? 'workspace_id, enabled, atomic_inbound' : 'workspace_id, enabled');
+  // A release may precede 071. Preserve unopted legacy channels only; an
+  // opted-in channel whose RPC fails never falls back to separate writes.
+  if (optedInProvider && result.error
+    && ['42703', 'PGRST204'].includes(readString(result.error.code))
+    && readString(result.error.message).includes('atomic_inbound')) {
+    result = await read('workspace_id, enabled');
+  }
+  if (result.error) throw new Error(`channel lookup: ${result.error.message}`);
+  return asRecord(result.data);
+}
+
 /**
  * The open lead this phone already has in this workspace, or nothing.
  *
@@ -209,15 +233,26 @@ export async function processInboundWhatsAppMessages(
 
     // The channel row is the tenant authority. Unknown or disabled channels
     // are acknowledged and ignored — not an error, and not information.
-    const { data: channel, error: channelError } = await supabase
-      .from(tables.channelTable)
-      .select("workspace_id, enabled")
-      .eq(tables.channelKeyColumn, message.channelKey)
-      .maybeSingle();
-    if (channelError) throw new Error(`channel lookup: ${channelError.message}`);
-    const workspaceId = readString(asRecord(channel).workspace_id);
-    if (!workspaceId || asRecord(channel).enabled !== true) {
+    const channel = await readInboundChannel(supabase, tables, message.channelKey);
+    const workspaceId = readString(channel.workspace_id);
+    if (!workspaceId || channel.enabled !== true) {
       ignored += 1;
+      continue;
+    }
+
+    if (usesWazzupTables(tables) && channel.atomic_inbound === true) {
+      const { data, error } = await supabase.rpc('process_wazzup_inbound_message', {
+        p_channel_id: message.channelKey,
+        p_message_id: message.messageId,
+        p_phone: message.phone,
+        p_contact_name: message.contactName.slice(0, 200),
+        p_text: message.text.slice(0, NOTES_LIMIT),
+      });
+      if (error) throw new Error('atomic inbound failed');
+      if (data === 'created') created += 1;
+      else if (data === 'repeat') repeats += 1;
+      else if (data === 'ignored') ignored += 1;
+      else throw new Error('atomic inbound invalid result');
       continue;
     }
 
@@ -256,8 +291,8 @@ export async function processInboundWhatsAppMessages(
 
     // Ledger last: if anything above failed we answered 503 and the provider
     // will retry into a clean slate. A unique violation here means a
-    // concurrent duplicate delivery — the phone dedup above already kept the
-    // lead single, so the loss is only a double count, never a double lead.
+    // concurrent duplicate delivery. This legacy path is not atomic; opted-in
+    // Wazzup intake above keeps the lead and receipt in one transaction.
     const { error: ledgerError } = await supabase.from(tables.ledgerTable).insert({
       message_id: message.messageId,
       channel_id: message.channelKey,

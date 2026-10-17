@@ -1,24 +1,26 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import test from "node:test";
+import test, { after } from "node:test";
 import { createBookingRetryFixture } from "./booking-retry.ts";
 
-// Supply only the two browser globals consumed by the fixture bootstrap.
+// Supply only synthetic browser globals; never load application credentials.
 const previousStorage = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
 const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+const previousSessionStorage = Object.getOwnPropertyDescriptor(globalThis, "sessionStorage");
 const storage = new Map();
-const fixtureWindow = {};
+const fixtureWindow = { location: { search: "", pathname: "/" } };
 Object.defineProperty(globalThis, "localStorage", { configurable: true, value: { setItem: (key, value) => storage.set(key, value) } });
 Object.defineProperty(globalThis, "window", { configurable: true, value: fixtureWindow });
-let fixture;
-try {
-  fixture = await import("./crm-browser-mocks.ts");
-} finally {
+Object.defineProperty(globalThis, "sessionStorage", { configurable: true, value: { setItem() {}, getItem() { return null; } } });
+after(() => {
   if (previousStorage) Object.defineProperty(globalThis, "localStorage", previousStorage);
   else delete globalThis.localStorage;
   if (previousWindow) Object.defineProperty(globalThis, "window", previousWindow);
   else delete globalThis.window;
-}
+  if (previousSessionStorage) Object.defineProperty(globalThis, "sessionStorage", previousSessionStorage);
+  else delete globalThis.sessionStorage;
+});
+const fixture = await import("./crm-browser-mocks.ts");
 
 test("visual fixture uses fabricated contacts and filters the displayed client list", async () => {
   const response = await fixture.crmFetch("/api/crm/clients?search=" + encodeURIComponent("Мария"));
@@ -80,6 +82,23 @@ test("mortgage team preview remains synthetic and restricts analytics to owner/a
     } });
     try {
       const isolated = await import(`./crm-browser-mocks.ts?team-${role}-${purpose}`);
+      const channels = await isolated.crmFetch("/api/crm/whatsapp-channels");
+      if (purpose === "mortgage_leads" && expected === 200) {
+        const { data } = await channels.json();
+        assert.equal(data.channels[0].enabled, true);
+        const body = { id: data.channels[0].id, provider: "wazzup", enabled: false };
+        assert.equal((await isolated.crmRequest("/api/crm/whatsapp-channels", {
+          method: "PATCH", body: JSON.stringify(body),
+        })).data.item.enabled, false);
+        assert.equal((await isolated.crmRequest("/api/crm/whatsapp-channels")).data.channels[0].enabled, false);
+        await assert.rejects(() => isolated.crmRequest("/api/crm/whatsapp-channels", {
+          method: "PATCH", body: JSON.stringify({ ...body, enabled: true }),
+        }), /отключены/);
+        await assert.rejects(() => isolated.crmRequest("https://example.invalid/api/crm/whatsapp-channels"), /External request forbidden/);
+      } else if (purpose === "mortgage_leads") {
+        assert.equal(channels.status, 403);
+        await assert.rejects(() => isolated.crmRequest("/api/crm/whatsapp-channels"), /отключены/);
+      }
       const response = await isolated.crmFetch("/api/crm/lead-team-analytics?days=7");
       assert.equal(response.status, expected);
       if (expected === 200) {
