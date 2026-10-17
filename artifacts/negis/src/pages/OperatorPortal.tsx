@@ -380,6 +380,7 @@ export default function OperatorPortal() {
             <OperatorRequests
               key={`${userId}:${revision}`}
               actorId={userId}
+              onAccessDenied={refreshProfile}
             />
           </>
         )}

@@ -134,6 +134,8 @@ function BookingFields({
 }) {
   const doctors = useOperatorList<OperatorDoctor>(
     `operator-services?requestId=${encodeURIComponent(requestId)}`,
+    true,
+    onAccessDenied,
   );
   const [doctorId, setDoctorId] = useState("");
   const [selected, setSelected] = useState<OperatorService[]>([]);
@@ -377,6 +379,7 @@ function BookingFields({
             selected={selected}
             onChange={setSelected}
             onValidity={setCatalogValid}
+            onAccessDenied={onAccessDenied}
           />
         )}
         {selected.length > 0 && (
@@ -441,15 +444,19 @@ function ServicePicker({
   selected,
   onChange,
   onValidity,
+  onAccessDenied,
 }: {
   requestId: string;
   doctorId: string;
   selected: OperatorService[];
   onChange: (items: OperatorService[]) => void;
   onValidity: (valid: boolean) => void;
+  onAccessDenied: () => void;
 }) {
   const list = useOperatorList<OperatorService>(
     `operator-services?requestId=${encodeURIComponent(requestId)}&doctorId=${encodeURIComponent(doctorId)}`,
+    true,
+    onAccessDenied,
   );
   useEffect(() => {
     onValidity(!!list.data && !list.error);

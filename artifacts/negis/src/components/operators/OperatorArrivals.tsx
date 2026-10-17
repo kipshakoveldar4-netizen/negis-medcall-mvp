@@ -48,16 +48,18 @@ export function OperatorArrivals({
   actorId,
   requestId,
   workspaceId,
+  onAccessDenied,
 }: {
   actorId?: string;
   requestId: string;
   workspaceId?: string;
+  onAccessDenied?: () => void;
 }) {
   const clinic = Boolean(workspaceId);
   const path = clinic
     ? `clinic-operator-arrivals?workspaceId=${encodeURIComponent(workspaceId!)}&requestId=${encodeURIComponent(requestId)}`
     : `operator-arrivals?requestId=${encodeURIComponent(requestId)}`;
-  const list = useOperatorList<OperatorArrival>(path);
+  const list = useOperatorList<OperatorArrival>(path, true, clinic ? undefined : onAccessDenied);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState("");
   const mounted = useRef(false);
@@ -112,7 +114,10 @@ export function OperatorArrivals({
     } catch (err) {
       const accessDenied = err instanceof OperatorApiError && [401, 403].includes(err.status);
       if (accessDenied ? !isSameScope() : !isCurrent()) return;
-      if (accessDenied) list.refresh();
+      if (accessDenied) {
+        list.refresh();
+        if (!clinic) onAccessDenied?.();
+      }
       setError(
         err instanceof Error ? err.message : "Не удалось подтвердить приход",
       );
@@ -148,7 +153,10 @@ export function OperatorArrivals({
     } catch (err) {
       const accessDenied = err instanceof OperatorApiError && [401, 403].includes(err.status);
       if (accessDenied ? !isSameScope() : !isCurrent()) return;
-      if (accessDenied) list.refresh();
+      if (accessDenied) {
+        list.refresh();
+        if (!clinic) onAccessDenied?.();
+      }
       setError(
         err instanceof Error
           ? err.message

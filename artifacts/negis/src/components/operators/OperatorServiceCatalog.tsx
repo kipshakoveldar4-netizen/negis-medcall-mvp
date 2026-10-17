@@ -47,12 +47,16 @@ export function OperatorCatalogPagination({
 function Services({
   requestId,
   doctorId,
+  onAccessDenied,
 }: {
   requestId: string;
   doctorId: string;
+  onAccessDenied?: () => void;
 }) {
   const list = useOperatorList<OperatorService>(
     `operator-services?requestId=${encodeURIComponent(requestId)}&doctorId=${encodeURIComponent(doctorId)}`,
+    true,
+    onAccessDenied,
   );
   useEffect(() => {
     window.addEventListener("focus", list.refresh);
@@ -95,9 +99,11 @@ function Services({
   );
 }
 
-export function OperatorServiceCatalog({ requestId }: { requestId: string }) {
+export function OperatorServiceCatalog({ requestId, onAccessDenied }: { requestId: string; onAccessDenied?: () => void }) {
   const list = useOperatorList<OperatorDoctor>(
     `operator-services?requestId=${encodeURIComponent(requestId)}`,
+    true,
+    onAccessDenied,
   );
   const [doctorId, setDoctorId] = useState("");
   const doctor = list.data?.items.find((item) => item.id === doctorId);
@@ -157,6 +163,7 @@ export function OperatorServiceCatalog({ requestId }: { requestId: string }) {
           key={`${requestId}:${doctor.id}`}
           requestId={requestId}
           doctorId={doctor.id}
+          onAccessDenied={onAccessDenied}
         />
       )}
     </section>

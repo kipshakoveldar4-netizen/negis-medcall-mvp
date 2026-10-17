@@ -6,7 +6,7 @@ import {
   Save,
   Search,
 } from "lucide-react";
-import { operatorApi, useOperatorList } from "@/lib/operatorApi";
+import { operatorApi, OperatorApiError, useOperatorList } from "@/lib/operatorApi";
 import { OperatorBookingForm } from "./OperatorBookingForm";
 import {
   formatArrivalPrice,
@@ -21,11 +21,13 @@ export function OperatorLeads({
   requestId,
   workspaceId,
   leadScope,
+  onAccessDenied,
 }: {
   actorId?: string;
   requestId: string;
   workspaceId?: string;
   leadScope: OperatorLeadScope;
+  onAccessDenied?: () => void;
 }) {
   const [search, setSearch] = useState("");
   const [submittedSearch, setSubmittedSearch] = useState("");
@@ -75,6 +77,7 @@ export function OperatorLeads({
         requestId={requestId}
         clinic={Boolean(workspaceId)}
         canAssign={Boolean(workspaceId) && leadScope === "assigned"}
+        onAccessDenied={onAccessDenied}
       />
     </section>
   );
@@ -86,14 +89,16 @@ function LeadList({
   requestId,
   clinic,
   canAssign,
+  onAccessDenied,
 }: {
   actorId?: string;
   path: string;
   requestId: string;
   clinic: boolean;
   canAssign: boolean;
+  onAccessDenied?: () => void;
 }) {
-  const list = useOperatorList<OperatorLead, OperatorLeadList>(path);
+  const list = useOperatorList<OperatorLead, OperatorLeadList>(path, true, onAccessDenied);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -103,7 +108,8 @@ function LeadList({
     setBookingLeadId(null);
     setError("Доступ к заявке изменился. Список обновлён.");
     refresh();
-  }, [refresh]);
+    onAccessDenied?.();
+  }, [refresh, onAccessDenied]);
   useEffect(() => {
     // Mobile browsers commonly restore a tab without firing window focus. Close
     // the open form, hide stale contacts and recheck access on either signal.
@@ -134,6 +140,7 @@ function LeadList({
       await operatorApi(path, { leadId: item.id, assigned }, "PATCH", undefined, actorId);
       refresh();
     } catch (err) {
+      if (err instanceof OperatorApiError && [401, 403].includes(err.status)) onAccessDenied?.();
       setError(
         err instanceof Error ? err.message : "Не удалось назначить заявку.",
       );
@@ -161,6 +168,7 @@ function LeadList({
       );
       setNotice("Стадия заявки сохранена.");
     } catch (err) {
+      if (err instanceof OperatorApiError && [401, 403].includes(err.status)) onAccessDenied?.();
       setError(
         err instanceof Error ? err.message : "Не удалось сохранить стадию.",
       );

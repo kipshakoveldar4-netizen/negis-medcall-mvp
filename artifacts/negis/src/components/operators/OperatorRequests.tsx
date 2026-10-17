@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Check, X, RefreshCw, ChevronLeft, ChevronRight } from "lucide-react";
 import { operatorApi, OperatorApiError, useOperatorList } from "@/lib/operatorApi";
 import { OperatorLeads } from "./OperatorLeads";
@@ -14,14 +14,16 @@ import {
 export function OperatorRequests({
   workspaceId,
   actorId,
+  onAccessDenied,
 }: {
   workspaceId?: string;
   actorId?: string;
+  onAccessDenied?: () => void;
 }) {
   const path = workspaceId
     ? `clinic-operator-requests?workspaceId=${encodeURIComponent(workspaceId)}`
     : "operator-inbox";
-  const list = useOperatorList<OperatorRequest>(path);
+  const list = useOperatorList<OperatorRequest>(path, true, workspaceId ? undefined : onAccessDenied);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [openRequest, setOpenRequest] = useState<string | null>(null);
@@ -48,6 +50,15 @@ export function OperatorRequests({
     mounted.current = true;
     return () => { mounted.current = false; };
   }, []);
+  const invalidateAccess = useCallback(() => {
+    if (!mounted.current || currentView.current.path !== path || currentView.current.actorId !== actorId) return;
+    setOpenRequest(null);
+    setOpenCatalog(null);
+    setOpenArrivals(null);
+    setError("Доступ оператора изменился.");
+    list.refresh();
+    onAccessDenied?.();
+  }, [path, actorId, list.refresh, onAccessDenied]);
   async function change(id: string, action: string) {
     if (
       action === "end" &&
@@ -86,6 +97,7 @@ export function OperatorRequests({
         setOpenCatalog(null);
         setOpenArrivals(null);
         list.refresh();
+        if (!workspaceId) onAccessDenied?.();
       }
       setError(
         err instanceof Error ? err.message : "Не удалось изменить предложение",
@@ -233,10 +245,11 @@ export function OperatorRequests({
               requestId={item.id}
               workspaceId={workspaceId}
               leadScope={item.leadScope || "assigned"}
+              onAccessDenied={workspaceId ? undefined : invalidateAccess}
             />
           )}
           {!workspaceId && item.status === "accepted" && openCatalog === item.id && (
-            <OperatorServiceCatalog key={item.id} requestId={item.id} />
+            <OperatorServiceCatalog key={item.id} requestId={item.id} onAccessDenied={invalidateAccess} />
           )}
           {item.status === "accepted" && openArrivals === item.id && (
             <OperatorArrivals
@@ -244,6 +257,7 @@ export function OperatorRequests({
               actorId={workspaceId ? undefined : actorId}
               requestId={item.id}
               workspaceId={workspaceId}
+              onAccessDenied={workspaceId ? undefined : invalidateAccess}
             />
           )}
         </article>

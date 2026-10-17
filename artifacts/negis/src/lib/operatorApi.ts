@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { CrmApiError, crmFetch, crmErrorMessage } from "@/lib/api";
 import {
   OPERATOR_PAGE_SIZE,
@@ -70,13 +70,15 @@ export async function operatorApi<T>(
 export function useOperatorList<
   T,
   TList extends OperatorList<T> = OperatorList<T>,
->(path: string, enabled = true) {
+>(path: string, enabled = true, onAccessDenied?: () => void) {
   const [request, setRequest] = useState({ path, enabled, offset: 0, revision: 0 });
   const [response, setResponse] = useState<{
     request: typeof request;
     data: TList | null;
     error: string;
   } | null>(null);
+  const live = useRef({ path, enabled, request, onAccessDenied });
+  live.current = { path, enabled, request, onAccessDenied };
 
   // Adjust this hook's state before children render, not in a passive effect.
   // Each scope change gets a new identity, including A -> B -> A transitions.
@@ -97,6 +99,8 @@ export function useOperatorList<
     setResponse(null);
     if (!request.enabled) return;
     const controller = new AbortController();
+    const isCurrent = () => !controller.signal.aborted && live.current.request === request
+      && live.current.path === request.path && live.current.enabled === request.enabled;
     void operatorApi<TList>(
       `${request.path}${request.path.includes("?") ? "&" : "?"}offset=${request.offset}`,
       undefined,
@@ -104,11 +108,11 @@ export function useOperatorList<
       controller.signal,
     )
       .then((result) => {
-        if (!controller.signal.aborted)
+        if (isCurrent())
           setResponse({ request, data: result, error: "" });
       })
       .catch((error) => {
-        if (!controller.signal.aborted)
+        if (isCurrent()) {
           setResponse({
             request,
             data: null,
@@ -117,6 +121,9 @@ export function useOperatorList<
                 ? error.message
                 : "Не удалось загрузить список",
           });
+          if (error instanceof OperatorApiError && [401, 403].includes(error.status))
+            live.current.onAccessDenied?.();
+        }
       });
     return () => controller.abort();
   }, [request]);

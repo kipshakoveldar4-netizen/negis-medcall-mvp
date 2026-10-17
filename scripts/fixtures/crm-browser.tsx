@@ -15,11 +15,24 @@ import MortgageClients from '../../artifacts/negis/src/pages/MortgageClients';
 import MortgageCalendar from '../../artifacts/negis/src/pages/MortgageCalendar';
 import MortgageTasks from '../../artifacts/negis/src/pages/MortgageTasks';
 import MortgageAnalytics from '../../artifacts/negis/src/pages/MortgageAnalytics';
-import {useAuth} from './crm-browser-mocks';
+import {useAuth, suspendOperatorFixture} from './crm-browser-mocks';
+import OperatorPortal from '../../artifacts/negis/src/pages/OperatorPortal';
 
 const mortgage=useAuth().workspacePurpose==='mortgage_leads';
 
+function OperatorFixture() {
+  const [revoked, setRevoked] = React.useState(false);
+  return <React.StrictMode>
+    <div className="border-b p-3"><button type="button" className="neu-btn" disabled={revoked}
+      onClick={() => { suspendOperatorFixture(); setRevoked(true); }}>
+      {revoked ? "ТЕСТ: одобрение отозвано" : "ТЕСТ: отозвать одобрение"}
+    </button></div>
+    <OperatorPortal />
+  </React.StrictMode>;
+}
+
 createRoot(document.getElementById("root")!).render(<Router><Switch>
+  <Route path="/operator" component={OperatorFixture} />
   <Route path="/appointments" component={mortgage?MortgageCalendar:AppointmentsPage} />
   <Route path="/clients" component={mortgage?MortgageClients:ClientsPage} />
   <Route path="/dashboard" component={MortgageOverview} />
