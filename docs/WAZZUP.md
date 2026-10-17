@@ -484,6 +484,56 @@ Preview. Изменение подписки в Wazzup может затрону
   синтетические лиды в других рабочих пространствах и не импортировать историю.
   Внешняя доставка и рабочая активация **ещё не приняты**.
 
+### Рабочий da7b2f7 и канал Baspana, 17 октября — включены, доставка ожидается
+
+- Получено точное разрешение: da7b2f7 + только 071 в medcall-negis-crm и
+  привязка только Baspana. Владелец вошёл в Wazzup 4970-7979 во встроенном
+  браузере; Edge больше не использовался. Другие каналы не открывались.
+- 071 взята из Git-архива точного разрешённого коммита, не грязного checkout.
+  В рабочем SQL Editor выполнена с guard по точным Baspana ID/имени/профилю,
+  зависимостям и отсутствию существующей привязки. До/после внутри транзакции
+  сверены count/fingerprint прежних каналов без нового atomic-поля; все прежние
+  значения сохранены, opt-in у них false. Никакой канал миграцией не включён.
+  Независимая рабочая security-проверка **11/11 true**: RLS, закрытые browser
+  CRUD/policies/RPC, generated phone/index, service_role EXECUTE, SECURITY DEFINER,
+  пустой search_path и отсутствие auto opt-in.
+- Официальный Vercel CLI собрал только Git-архив da7b2f7 с production env,
+  --skip-domain: dpl_5P8x9uzQ5yfgik7pC9jjXc3KZ9Uy, READY, target=production,
+  https://negis-medcall-mvp-api-server-8l36q5sd4-yeldar-s-projects.vercel.app .
+  До promote canonical по alias API оставался на прежнем 9087386. Фактический
+  output index-BplZFDjn.js скачан через авторизованный Resources/Download file:
+  единственный Supabase origin/ref — рабочий eeoudrmohgftcdoexdmd, token anon,
+  service_role в клиенте нет. Чужие 059/065/env/dist в архив не попали.
+- После проверки официальный promote переключил основной адрес CRM на этот
+  deployment; alias API подтвердил точный ID. Новых проектов, remote push,
+  общих env или изменений Deployment Protection нет. Старый выпуск сохранён.
+- В Settings API у прежних WAZZUP_API_KEY и WAZZUP_WEBHOOK_SECRET тип sensitive:
+  чтение не раскрывает значения. Они не заменялись/не ротировались. Существующий
+  ключ из видимого Wazzup UI использован только в памяти для двух официальных GET.
+  Точный согласованный номер: transport whatsapp, state active. GET webhooks
+  подтвердил прежний canonical /api/webhooks/wazzup, messagesAndStatuses=true,
+  contactsAndDealsCreation=false. PATCH подписки/импорт/исходящие не выполнялись.
+  Проверочный POST {test:true} по прежнему callback получил 200/success=true:
+  существующий секрет принимается. Это tester ping, **не доставка Wazzup**.
+- Guarded transaction вставила ровно одну новую привязку подтверждённого канала
+  к Baspana с enabled=true и atomic_inbound=true. Конфликт существующей
+  привязки завершился бы отказом, не upsert. Fingerprint/count остальных строк
+  совпали. Итог: enabled/atomic/only_baspana true, маска канала 870c.
+- После выпуска без авторизации auth-context — 401 Authentication required;
+  webhook без секрета — 401/success=false. Ни один этот запрос не создаёт лид.
+  Только scoped SELECT Baspana после включения: receipts/created/test marker 0;
+  новых обращений пока нет. Поддельные POST messages/SQL leads в рабочую БД
+  не отправлялись, предыдущая переписка в CRM не импортировалась.
+- Открытая CRM оказалась под другим профилем, не Baspana. Агент не выходил из
+  него, не переключал workspace и не менял его сессию/данные. Пользователю
+  переданы два действия: внешний WhatsApp «Проверка CRM Baspana 17.10» на
+  согласованный номер и обычный вход baspana.tolkyn в рабочую CRM. Проверка
+  реальной доставки/видимости администратору **ожидается**, M1 ещё не 100%.
+  Новые заявки должны быть неназначенными для ручного распределения, не
+  автоматически назначенными admin или менеджерам. API-key/raw UI/callback URL
+  очищены из временной памяти; секреты в файлы, скриншоты, вывод и git не попадали.
+  WhatsApp на телефоне не переносился, QR/linked devices не менялись.
+
 1. **Отдельно подтвердить target и release.** Зафиксировать точный release,
    целевой deployment/БД, scope env и разрешённые действия. В шаблонах ниже
    `APPROVED_WORKSPACE_ID` — только изолированный тестовый workspace,
