@@ -9,8 +9,9 @@
   `dpl_5P8x9uzQ5yfgik7pC9jjXc3KZ9Uy`; ипотечные разделы из `9087386` и 070
   уже опубликованы. Новая защита конкурентной записи `aab66bb` выпущена только
   в изолированный Preview; 072 применена только к medina-os-site-test и проверена
-  через SQL/API/UI. Продолжение групповой вместимости подготовлено отдельной
-  073 и исправлением формы/API; в рабочий выпуск они не включены, см. R2 ниже.
+  через SQL/API/UI. Продолжение групповой вместимости `95ceb1f` выпущено только
+  в тестовый Preview, 073 — только в medina-os-site-test. Приёмка новой формы
+  после входа ещё ожидается; в рабочий выпуск это не включено, см. R2 ниже.
   Незавершённые чужие правки 059/065 в рабочем каталоге
   не являются подготовленным выпуском и не включались в production.
 - Семь рабочих аккаунтов Baspana созданы. Wazzup Inbox подключён только к
@@ -256,7 +257,24 @@
   третья разрешена, следующая сверх двух мест отклонена с точной парой
   23P01/appointment_capacity_exceeded, лишних клиентов/квитанций нет, replay
   вернул прежний ID. Контроль после rollback: fixture residue=false.
-- Изолированный Preview и приёмка новой формы после входа ещё не завершены.
+- Изолированный Preview `95ceb1f9dcf0f69ba65c120937a73a05d8530427`:
+  `dpl_sZrUa53qaSSriwZJkznnygKLSpjz`, READY / target=null,
+  https://negis-medcall-mvp-api-server-iiezaxiiv-yeldar-s-projects.vercel.app .
+  Он наследует изоляцию прежнего haa5ak555; source hashes пяти изменённых
+  runtime/SQL-файлов совпали с Git. Загружались только 11 новых файлов из Git,
+  не чужие изменения и не локальные env. Никакого push/production promotion.
+- Фактический bundle index-BpnDS3wd.js содержит только
+  https://ukiobbwsdoblooynzlnx.supabase.co, API same-origin; service_role в нём
+  отсутствует. Форма /login загрузилась; auth-context и appointments без
+  пользовательской авторизации дали authentication_required, без данных.
+  Production deployment, metadata окружения, build-настройки, SSO и отсутствие
+  bypass сохранены по контрольным снимкам Vercel до/после.
+- Новая форма после входа ещё НЕ принята. Вкладка подготовлена для прежнего
+  тестового eldar1@mail.ru; пароль/роль/сеанс прежнего Preview не менялись.
+  Нужен только вход пользователя на новом origin, не новое разрешение выпуска.
+  Локальные и SQL-проверки не подменяют эту UI-приёмку. Временных строк после
+  SQL rollback нет. Доказательства: node_modules/.cache/appointment-preview-peak/
+  073-test-rollback.png, 073-preview-auth-denial.png, 073-preview-login.png.
   Это исправление узкого пункта групповой вместимости, не «вся CRM 100%».
 
 Приоритет владельца от 2 октября 2026: **CRM → рекламная готовность и операторы → платежи**.
