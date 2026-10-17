@@ -584,6 +584,28 @@ Signup не найдено. Подключение не выполнено, API-
   облачная авторизация/синтетический end-to-end, затем отдельный рабочий выпуск
   и binding Baspana. В облаке 071 и новый код не применены, заявок/сообщений
   на рабочих данных нет; M1 остаётся **не готов**. Подробности в WAZZUP.md.
+  **Следующий запуск 17 октября — Preview da7b2f7 разрешён и готов.**
+  Создан `dpl_7afLT5fEBZ51bF4FmBYhifkMnSmU`, Ready, target=null:
+  https://negis-medcall-mvp-api-server-ab2yn8ncj-yeldar-s-projects.vercel.app .
+  814 файлов только точного Git-коммита, без чужих 059/065/env/dist;
+  production/remote branches/project settings не менялись. Реально собранный
+  `index-ptb2elSB.js` скачан через авторизованный Resources/Download file:
+  только тестовый Supabase origin/ref/anon, без service_role. 51 override,
+  project env metadata, SSO и bypass settings до/после неизменны; production
+  остаётся `dpl_7rk1vYu1ckMeA7im2xRJy1XUheUd / 9087386`.
+  Отдельный случайный webhook secret задан только этому тестовому deployment,
+  значение не сохранялось/не выводилось, рабочий webhook не менялся.
+  Read-only SQL в medina-os-site-test выявил отсутствующие зависимости:
+  таблицы 026 и `phone_normalized` из 028; 071 тоже отсутствует. Предыдущие
+  workspaces/settings/leads/stages/sources есть, старый test workspace имеет
+  3 лида. 071 не применялась вслепую: запрошено отдельное согласие на 026/028
+  только в тестовой базе. Привязки, временные профили, роли и заявки не менялись.
+  Форма входа открылась, анонимный auth-context вернул authentication_required;
+  в форме заполнен только eldar1@mail.ru, ожидается пользовательский вход.
+  Внешний POST test=true остановлен SSO Vercel (401 Protected deployment),
+  не считается тестом webhook/секрета CRM. Защита не отключалась, automation
+  bypass не создавался, cookies/сессии не извлекались. Сквозная приёмка,
+  атомарность/stop/назначение в облаке пока не приняты. M1 **не завершён**.
   Нужны отдельное пространство, общий входящий канал, ручное назначение и
   серверная видимость только назначенных заявок у пяти менеджеров.
   Существующая роль `manager` означает управляющего всей клиникой и читает весь
