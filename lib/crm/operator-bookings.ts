@@ -123,6 +123,14 @@ export async function handleOperatorBookings(
   );
   if (error) {
     const e = record(error);
+    if (req.method === "POST" && e.code === "23P01" && e.message === "appointment_capacity_exceeded") {
+      const [status, message] = messages.operator_booking_time_taken;
+      return res.status(status).json({
+        success: false,
+        error: message,
+        code: "operator_booking_time_taken",
+      });
+    }
     if (["PGRST202", "42883", "42703", "PGRST204"].includes(String(e.code)))
       return fail(
         503,

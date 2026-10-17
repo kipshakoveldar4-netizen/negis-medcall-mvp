@@ -533,6 +533,46 @@ test("API existing-client keyed insert cannot fall back by discarding schema fie
   assert.deepEqual(await retryCounts(), before);
 });
 
+for (const keyed of [true, false]) {
+  for (const existingClient of [true, false]) {
+    if (!keyed && existingClient) continue;
+    for (const [code, message, status] of [
+      ["23P01", "appointment_capacity_exceeded", 409],
+      ["23P01", "another_exclusion", 502],
+      ["23514", "appointment_capacity_exceeded", 502],
+      ["23P01", "appointment_capacity_exceeded: private-client", 502],
+    ] as const) {
+      test(`API capacity ${keyed ? "keyed" : "legacy"} ${existingClient ? "existing" : "new"}-client create classifies ${code}/${message}`, async () => {
+        const call = await bundleApiFixture();
+        const base = apiDatabase();
+        const rpcName = keyed ? "create_crm_appointment_once" : "create_crm_appointment_with_new_client";
+        let creates = 0;
+        serverClient.setSupabaseServerClientFactoryForTests(() => ({ ...base, rpc: async (name: string, args: Record<string, unknown>) => {
+          if (name !== rpcName) return base.rpc(name, args);
+          creates++;
+          return { data: null, error: { code, message, details: "private-client +77000000000", hint: "private SQL constraint" } };
+        } }));
+        const before = await retryCounts();
+        const body = { ...(keyed ? keyedBooking() : bundleBooking()), status: "arrived", ...(existingClient ? { clientId: id(3) } : {}) };
+        const reply = await call("appointments", "POST", body);
+        assert.equal(reply.status, status, JSON.stringify(reply.body));
+        if (status === 409) {
+          assert.deepEqual(reply.body, {
+            success: false,
+            error: "Это время у врача уже занято",
+            code: "appointment_conflict",
+          });
+        } else {
+          assert.equal(reply.body.code, undefined);
+        }
+        assert.doesNotMatch(JSON.stringify(reply.body), /private-client|77000000000|SQL|23P01|appointment_capacity_exceeded|another_exclusion/);
+        assert.equal(creates, 1, "no retry or fallback after the RPC refusal");
+        assert.deepEqual(await retryCounts(), before, "no client, visit, sale, receipt or journal side effects");
+      });
+    }
+  }
+}
+
 test("API malformed or foreign receipt response fails without exposing its contents", async () => {
   const call = await bundleApiFixture();
   const base = apiDatabase();

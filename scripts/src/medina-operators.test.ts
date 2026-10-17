@@ -67,6 +67,7 @@ test("operator HTTP authorization, DTOs and transitions", async (t) => {
   let rpcData: unknown;
   let rpcFailure = "";
   let rpcMessage = "private-db-detail";
+  let rpcErrorFields: Row = {};
   let pipelineMissing = false;
   function reset() {
     validToken = true;
@@ -74,6 +75,7 @@ test("operator HTTP authorization, DTOs and transitions", async (t) => {
     dbFailureTable = "";
     rpcFailure = "";
     rpcMessage = "private-db-detail";
+    rpcErrorFields = {};
     pipelineMissing = false;
     rpcData = REQUEST;
     log = [];
@@ -189,7 +191,7 @@ test("operator HTTP authorization, DTOs and transitions", async (t) => {
         rpcCalls.push({ name, args });
         if (pipelineMissing && name === "read_growth_operator_lead_pipeline")
           return Promise.resolve({data:null,error:{code:"PGRST202",message:"private-db-detail"}});
-        return Promise.resolve({ data: rpcData, error: rpcFailure ? { code: rpcFailure, message: rpcMessage } : null });
+        return Promise.resolve({ data: rpcData, error: rpcFailure ? { code: rpcFailure, message: rpcMessage, ...rpcErrorFields } : null });
       },
     };
   }
@@ -803,6 +805,55 @@ test("operator HTTP authorization, DTOs and transitions", async (t) => {
         assert.doesNotMatch(JSON.stringify(result.body),/private-db-detail/);
         assert.equal(log.length,0);
       }
+    });
+    await t.test("operator capacity refusal has an explicit safe code and no fallback writes", async () => {
+      for (const [code, message, status] of [
+        ["23P01", "appointment_capacity_exceeded", 409],
+        ["23P01", "another_exclusion", 503],
+        ["23514", "appointment_capacity_exceeded", 503],
+        ["23P01", "appointment_capacity_exceeded: private-client", 503],
+      ] as const) {
+        reset();
+        rpcFailure = code;
+        rpcMessage = message;
+        rpcErrorFields = { details: "private-client +77000000000", hint: "private SQL constraint" };
+        const result = await call("operator-bookings", "POST", {
+          leadId: LEAD, requestKey: STAGE, doctorId: OPERATOR, serviceIds: [OTHER],
+          startsLocal: "2030-01-07T10:00", timeZone: "Asia/Almaty",
+        }, undefined, WORKSPACE, { requestId: REQUEST });
+        assert.equal(result.statusCode, status, JSON.stringify(result.body));
+        if (status === 409) {
+          assert.deepEqual(result.body, {
+            success: false,
+            error: "Это время уже занято. Выберите другое время.",
+            code: "operator_booking_time_taken",
+          });
+        } else {
+          assert.equal(result.body.code, undefined, "unrelated failures retain their existing format");
+        }
+        assert.doesNotMatch(JSON.stringify(result.body), /private-client|77000000000|SQL|23P01|appointment_capacity_exceeded|another_exclusion/);
+        assert.equal(rpcCalls.length, 1);
+        assert.equal(rpcCalls[0].name, "create_growth_operator_booking");
+        assert.equal(log.length, 0, "no fallback, audit or other table operations after refusal");
+      }
+      reset();
+      rpcFailure = "P0001";
+      rpcMessage = "operator_booking_time_taken";
+      const existing = await call("operator-bookings", "POST", {
+        leadId: LEAD, requestKey: STAGE, doctorId: OPERATOR, serviceIds: [OTHER],
+        startsLocal: "2030-01-07T10:00", timeZone: "Asia/Almaty",
+      }, undefined, WORKSPACE, { requestId: REQUEST });
+      assert.equal(existing.statusCode, 409);
+      assert.deepEqual(existing.body, { success: false, error: "Это время уже занято. Выберите другое время." });
+      reset();
+      rpcFailure = "23P01";
+      rpcMessage = "appointment_capacity_exceeded";
+      const context = await call("operator-bookings", "GET", undefined, undefined, WORKSPACE, { requestId: REQUEST, leadId: LEAD });
+      assert.equal(context.statusCode, 503, "only the create RPC gets the new capacity mapping");
+      assert.equal(context.body.code, undefined);
+      assert.equal(rpcCalls.length, 1);
+      assert.equal(rpcCalls[0].name, "read_growth_operator_booking_context");
+      assert.equal(log.length, 0);
     });
     await t.test(
       "arrival endpoints use verified identities and return only their narrow DTOs",

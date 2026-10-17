@@ -227,9 +227,27 @@ test("BF16 сначала выбирают мастера, затем видят
 
 test("BF17 все активные CRM-маршруты записи используют одну защищённую форму", async () => {
   const app = await read("artifacts", "negis", "src", "App.tsx");
-  assert.match(app, /const AppointmentsRoute = \(\) => <ProtectedPage component=\{AppointmentsPage\} permission="booking" \/>/);
+  assert.match(app, /const AppointmentsRoute = \(\) => <PurposePage mortgage=\{MortgageCalendar\} clinic=\{AppointmentsPage\} permission="booking" \/>/);
   assert.match(app, /<Route path="\/booking" component=\{AppointmentsRoute\} \/>/);
   assert.match(app, /<Route path="\/appointments" component=\{AppointmentsRoute\} \/>/);
   assert.equal((app.match(/component=\{AppointmentsRoute\}/g) || []).length, 2);
+
+  const purposePage = app.match(/function PurposePage\([\s\S]*?\n\}(?=\r?\n|$)/)?.[0];
+  assert.ok(purposePage, "the shared booking route must delegate through PurposePage");
+  assert.match(purposePage, /^function PurposePage\(\{ mortgage, clinic, permission \}:/);
+  assert.match(purposePage, /const \{ workspacePurpose \} = useAuth\(\);\s*return <ProtectedPage component=\{workspacePurpose === 'mortgage_leads' \? mortgage : clinic\} permission=\{workspacePurpose === 'mortgage_leads' \? 'crm' : permission\} \/>;/);
+
+  const protectedPage = app.match(/function ProtectedPage\([\s\S]*?\n\}(?=\r?\n|$)/)?.[0];
+  assert.ok(protectedPage, "both booking branches must retain the underlying access guard");
+  assert.match(protectedPage, /^function ProtectedPage\(\{\s*component: Component,\s*permission,/);
+  assert.match(protectedPage, /const \{ isLoading, userRole, rolePermissions,[^}]*\} = useAuth\(\);/);
+  assert.match(protectedPage, /const \[location, setLocation\] = useLocation\(\);/);
+  const roleAllowed = protectedPage.match(/const roleAllowed = ([\s\S]*?);/)?.[1].replace(/\s+/g, " ");
+  assert.equal(roleAllowed,
+    "userRole === 'lead_manager' ? permission === 'crm' && (location === '/leads' || (workspacePurpose === 'mortgage_leads' && workspaceAllowsRoute(workspacePurpose, userRole, location)))"
+    + " : userRole === 'owner' || userRole === 'manager' || !!rolePermissions[permission]");
+  assert.match(protectedPage, /const allowed = roleAllowed && workspaceAllowsRoute\(workspacePurpose, userRole, location\);/);
+  assert.match(protectedPage, /if \(isLoading\) return null;[\s\S]*if \(!allowed\) return null;[\s\S]*return <Component \/>;/);
+  assert.equal((protectedPage.match(/return <Component \/>;/g) || []).length, 1);
   assert.ok(!app.includes("DemoAppointments"), "демонстрационная форма не должна быть доступна из маршрутизатора");
 });

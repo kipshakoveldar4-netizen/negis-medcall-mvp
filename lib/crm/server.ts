@@ -2670,6 +2670,10 @@ export class AppointmentConflictError extends Error {
   }
 }
 
+function isAppointmentCapacityError(error: { code?: unknown; message?: unknown } | null): boolean {
+  return error?.code === "23P01" && error.message === "appointment_capacity_exceeded";
+}
+
 /**
  * Only these two release the slot; everything else holds it.
  *
@@ -5058,6 +5062,13 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
     }
 
     if (error) {
+      if (resource === "appointments" && isAppointmentCapacityError(error)) {
+        return sendJson(res, 409, {
+          success: false,
+          error: "Это время у врача уже занято",
+          code: "appointment_conflict",
+        });
+      }
       if (newAppointmentClient && ["PGRST202", "42883", "42703", "PGRST204"].includes(readString(error.code))) {
         return sendJson(res, 503, {
           ...errorBody("Не удалось сохранить запись: требуется обновление базы", [
@@ -5679,6 +5690,13 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
     }
 
     if (error) {
+      if (resource === "appointments" && isAppointmentCapacityError(error)) {
+        return sendJson(res, 409, {
+          success: false,
+          error: "Это время у врача уже занято",
+          code: "appointment_conflict",
+        });
+      }
       const paymentError = arrivalPaymentError(error);
       if (paymentError && (resource === "appointments" || resource === "deals")) {
         return sendJson(res, 409, { ...errorBody(paymentError), code: "arrival_payment" });

@@ -301,6 +301,51 @@ test("CL7 отказ не про колонку не лечится повтор
   assert.equal(attempts.writes, 1, "и повторов не было вовсе");
 });
 
+for (const method of ["POST", "PATCH"]) {
+  for (const [code, message, status] of [
+    ["23P01", "appointment_capacity_exceeded", 409],
+    ["23P01", "another_exclusion", 502],
+    ["23514", "appointment_capacity_exceeded", 502],
+    ["23P01", "appointment_capacity_exceeded: private-client", 502],
+  ] as const) {
+    test(`capacity ${method} classifies only the exact database pair: ${code}/${message}`, async () => {
+      const writeError = { code, message, details: "private-client +77000000000", hint: "private SQL constraint" };
+      const { res, writes, allWrites, attempts } = await callRouter({
+        method,
+        writeError,
+        body: method === "POST" ? booking() : { id: APPOINTMENT_ID, updates: { status: "confirmed" } },
+      });
+      assert.equal(res.statusCode, status, JSON.stringify(res.body));
+      if (status === 409) {
+        assert.deepEqual(res.body, {
+          success: false,
+          error: "Это время у врача уже занято",
+          code: "appointment_conflict",
+        });
+      } else {
+        assert.equal(res.body.code, undefined);
+      }
+      assert.doesNotMatch(JSON.stringify(res.body), /private-client|77000000000|SQL|23P01|appointment_capacity_exceeded|another_exclusion/);
+      assert.equal(writes.length, 0);
+      assert.equal(allWrites.length, 0, "no successful journal, payment or other writes");
+      assert.equal(attempts.writes, 1, "no retry or success-side-effect write after refusal");
+    });
+  }
+
+  test(`capacity ${method} does not classify a non-appointment resource`, async () => {
+    const { res, allWrites, attempts } = await callRouter({
+      method,
+      resource: "tasks",
+      writeError: { code: "23P01", message: "appointment_capacity_exceeded" },
+      body: method === "POST" ? { title: "Fixture task" } : { id: APPOINTMENT_ID, updates: { title: "Fixture task" } },
+    });
+    assert.equal(res.statusCode, 502, JSON.stringify(res.body));
+    assert.equal(res.body.code, undefined);
+    assert.equal(allWrites.length, 0);
+    assert.equal(attempts.writes, 1);
+  });
+}
+
 test("CL8 незнакомая колонка не крутит цикл до таймаута", async () => {
   const { res, writes, attempts } = await callRouter({
     writeError: { code: "PGRST204", message: "Could not find the mystery_column of appointments in the schema cache" },
