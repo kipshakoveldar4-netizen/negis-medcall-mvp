@@ -18,6 +18,7 @@
     "test:appointment-requests-postgres": "node --test ./fixtures/appointment-requests-postgres.test.mjs",
     "test:appointment-capacity-postgres": "node --test ./fixtures/appointment-capacity-postgres.test.mjs",
     "test:assigned-leads-postgres": "node --test ./fixtures/assigned-leads-postgres.test.mjs",
+    "test:operator-access-postgres": "node --test ./fixtures/operator-access-postgres.test.mjs",
     "test:site-blog": "tsx --test ./src/medina-site-blog.test.ts",
     "test:site-editorial": "tsx --test ./src/medina-site-editorial.test.ts",
     "test:site-intake": "tsx --test ./src/medina-site-intake.test.ts ./src/medina-site-intake-handler.test.ts",
