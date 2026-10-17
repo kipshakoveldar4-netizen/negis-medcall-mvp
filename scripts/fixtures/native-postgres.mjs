@@ -66,6 +66,14 @@ async function optionalFile(file) {
   catch (error) { if (error.code === 'ENOENT') return null; throw error; }
 }
 
+export async function cleanupNativeStartup(readLog, close) {
+  let startupLog = null;
+  try { startupLog = await readLog(); }
+  catch { /* Diagnostic failures must not bypass owned-server cleanup. */ }
+  await close();
+  return startupLog;
+}
+
 // Explicit opt-in only. No installation, URL, existing cluster, environment-selected
 // binary or service is accepted. The archive is provisioned/verified separately.
 export async function startNativePostgres() {
@@ -152,8 +160,7 @@ export async function startNativePostgres() {
     await setup.end(); sessions.delete(setup);
     return { connect: () => connect(), close };
   } catch (error) {
-    const startupLog = await optionalFile(path.join(directory, 'server.log'));
-    await close();
+    const startupLog = await cleanupNativeStartup(() => optionalFile(path.join(directory, 'server.log')), close);
     throw new Error('Native PostgreSQL fixture failed; no external database was contacted.'
       + (startupLog ? ` Startup log: ${startupLog.slice(0, 2000)}` : ''), { cause: error });
   }

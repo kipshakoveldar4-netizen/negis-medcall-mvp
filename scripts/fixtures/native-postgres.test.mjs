@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import test from 'node:test';
-import { nativeEnvironment, nativePid, nativeRunDirectory, nativeServerOptions, ownedNativeServer } from './native-postgres.mjs';
+import { cleanupNativeStartup, nativeEnvironment, nativePid, nativeRunDirectory, nativeServerOptions, ownedNativeServer } from './native-postgres.mjs';
 
 const id = '00000000-0000-4000-8000-000000000001';
 const root = path.resolve('fixture-cache');
@@ -46,4 +46,15 @@ test('bootstrap PID parsing never authorizes stopping a non-listening server', (
   assert.equal(ownedNativeServer(bootstrap, data, 5432), false);
   assert.equal(nativePid(pid.replace(data, root), data), null);
   assert.equal(nativePid('invalid', data), null);
+});
+
+test('startup log failure cannot skip cleanup and cleanup failures remain visible', async () => {
+  let cleaned = 0;
+  assert.equal(await cleanupNativeStartup(async () => { throw new Error('unreadable diagnostic log'); },
+    async () => { cleaned++; }), null);
+  assert.equal(cleaned, 1);
+  assert.equal(await cleanupNativeStartup(async () => 'fixture log', async () => { cleaned++; }), 'fixture log');
+  assert.equal(cleaned, 2);
+  await assert.rejects(cleanupNativeStartup(async () => { throw new Error('unreadable diagnostic log'); },
+    async () => { throw new Error('cleanup not confirmed'); }), /cleanup not confirmed/);
 });
