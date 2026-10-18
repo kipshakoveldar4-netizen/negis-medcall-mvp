@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useLayoutEffect, useRef, useState } from "react";
 import { Check, X, RefreshCw, ChevronLeft, ChevronRight } from "lucide-react";
 import { operatorApi, OperatorApiError, useOperatorList } from "@/lib/operatorApi";
 import { OperatorLeads } from "./OperatorLeads";
@@ -46,7 +46,7 @@ export function OperatorRequests({
       setOpenArrivals(null);
     }
   }
-  useEffect(() => {
+  useLayoutEffect(() => {
     mounted.current = true;
     return () => { mounted.current = false; };
   }, []);
@@ -82,6 +82,7 @@ export function OperatorRequests({
         "PATCH",
         undefined,
         workspaceId ? undefined : actorId,
+        isCurrent,
       );
       if (!isCurrent()) return;
       setOpenRequest(null);

@@ -20,6 +20,7 @@ export async function operatorApi<T>(
   method = "POST",
   signal?: AbortSignal,
   expectedUserId?: string,
+  dispatchGuard?: () => boolean,
 ): Promise<T> {
   const requestMethod = body === undefined ? "GET" : method;
   let response: Response;
@@ -28,6 +29,7 @@ export async function operatorApi<T>(
       method: requestMethod,
       signal,
       expectedUserId,
+      dispatchGuard,
       cache: "no-store",
       ...(body === undefined
         ? {}

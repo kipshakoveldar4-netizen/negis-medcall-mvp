@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   CheckCircle2,
   ChevronLeft,
@@ -74,7 +74,7 @@ export function OperatorArrivals({
     if (busyId !== null) setBusyId(null);
     if (scopeChanged) setError("");
   }
-  useEffect(() => {
+  useLayoutEffect(() => {
     mounted.current = true;
     return () => { mounted.current = false; };
   }, []);
@@ -108,6 +108,7 @@ export function OperatorArrivals({
         "POST",
         undefined,
         clinic ? undefined : actorId,
+        isCurrent,
       );
       if (!isCurrent()) return;
       list.refresh();
@@ -147,6 +148,7 @@ export function OperatorArrivals({
         "PATCH",
         undefined,
         clinic ? undefined : actorId,
+        isCurrent,
       );
       if (!isCurrent()) return;
       list.refresh();

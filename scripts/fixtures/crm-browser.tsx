@@ -15,15 +15,26 @@ import MortgageClients from '../../artifacts/negis/src/pages/MortgageClients';
 import MortgageCalendar from '../../artifacts/negis/src/pages/MortgageCalendar';
 import MortgageTasks from '../../artifacts/negis/src/pages/MortgageTasks';
 import MortgageAnalytics from '../../artifacts/negis/src/pages/MortgageAnalytics';
-import {useAuth, suspendOperatorFixture, endOperatorCooperationFixture} from './crm-browser-mocks';
+import {useAuth, suspendOperatorFixture, endOperatorCooperationFixture, operatorDispatchFixture} from './crm-browser-mocks';
 import OperatorPortal from '../../artifacts/negis/src/pages/OperatorPortal';
 
 const mortgage=useAuth().workspacePurpose==='mortgage_leads';
+
+function DispatchFixtureControls() {
+  const [snapshot, setSnapshot] = React.useState(() => operatorDispatchFixture!.snapshot());
+  React.useEffect(() => operatorDispatchFixture!.subscribe(() => setSnapshot(operatorDispatchFixture!.snapshot())), []);
+  return <div className="flex flex-wrap items-center gap-3 border-b p-3">
+    <button type="button" className="neu-btn" disabled={!snapshot.held}
+      onClick={() => operatorDispatchFixture!.release()}>ТЕСТ: отпустить ожидающий запрос</button>
+    <p role="status">ТЕСТ: в очереди {snapshot.queued}; отправок {snapshot.dispatched}; отменено {snapshot.canceled}</p>
+  </div>;
+}
 
 function OperatorFixture() {
   const [revoked, setRevoked] = React.useState(false);
   const [ended, setEnded] = React.useState(false);
   return <React.StrictMode>
+    {operatorDispatchFixture && <DispatchFixtureControls />}
     <div className="border-b p-3 flex flex-wrap gap-3"><button type="button" className="neu-btn" disabled={revoked}
       onClick={() => { suspendOperatorFixture(); setRevoked(true); }}>
       {revoked ? "ТЕСТ: одобрение отозвано" : "ТЕСТ: отозвать одобрение"}

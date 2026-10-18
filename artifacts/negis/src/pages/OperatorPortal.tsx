@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Link } from "wouter";
 import { LogOut, RefreshCw, Send } from "lucide-react";
 import { supabase, hasSupabaseFrontendEnv } from "@/lib/supabase";
@@ -40,7 +40,7 @@ export default function OperatorPortal() {
     setMessage("");
     setRevision((value) => value + 1);
   }, [userId]);
-  useEffect(() => {
+  useLayoutEffect(() => {
     let alive = true;
     let authEventSeen = false;
     const updateSession = (id: string | null) => {
@@ -194,7 +194,7 @@ export default function OperatorPortal() {
     setMessage("");
     try {
       const saved = await operatorApi<OperatorProfile>(
-        "operator-account", body, method, controller.signal, userId,
+        "operator-account", body, method, controller.signal, userId, isCurrent,
       );
       if (!isCurrent()) return;
       setProfile(saved);

@@ -1,5 +1,6 @@
 import { createBookingRetryFixture } from "./booking-retry";
 import { createOperatorBrowserFixture } from "./operator-browser-store";
+import { createOperatorDispatchFixture } from "./operator-dispatch-fixture";
 import { mortgageBrowserRequest, mortgageLeadBrowserRequest } from './mortgage-browser-store';
 const retryFixture = new URLSearchParams(window.location?.search || "").get("bookingRetry") === "lost-response"
   ? createBookingRetryFixture() : null;
@@ -14,6 +15,8 @@ const fixtureRole = fixtureParams.get("fixtureRole");
 const assignedLeadFixture = fixtureRole === "lead_manager";
 const mortgageFixture = fixtureParams.get("fixturePurpose") === "mortgage_leads";
 const operatorFixture = createOperatorBrowserFixture();
+export const operatorDispatchFixture = fixtureParams.get("operatorDispatch") === "deferred"
+  ? createOperatorDispatchFixture((url, init) => operatorFixture.request(url, init)) : null;
 export const suspendOperatorFixture = () => operatorFixture.suspend();
 export const endOperatorCooperationFixture = () => operatorFixture.endCooperation();
 const workspaceId = "00000000-0000-4000-8000-000000000001";
@@ -47,7 +50,7 @@ export const hasSupabaseFrontendEnv = true;
 export const arrivedByRecoveryLink = false;
 export const supabase = { auth: {
   getSession: async () => ({ data: { session: ["/admin", "/operator"].includes(window.location.pathname)
-    ? { user: { id: "fixture-user" }, access_token: "visual-fixture-not-a-valid-token" } : null } }),
+    ? { user: { id: window.location.pathname === "/operator" ? "00000000-0000-4000-8000-000000000805" : "fixture-user" }, access_token: "visual-fixture-not-a-valid-token" } : null } }),
   signInWithPassword: async () => ({ data: null, error: { message: "Вход отключён на локальном стенде" } }),
   onAuthStateChange: () => ({ data: { subscription: { unsubscribe() {} } } }),
   signOut: async () => ({ error: null }),
@@ -89,7 +92,8 @@ export async function crmFetch(input: string, init?: RequestInit): Promise<Respo
     return retryFixture.send(JSON.parse(String(init.body)));
   }
   const resource = url.pathname.split("/").at(-1) || "";
-  if (window.location.pathname === "/operator") return operatorFixture.request(url, init);
+  if (window.location.pathname === "/operator") return operatorDispatchFixture
+    ? operatorDispatchFixture.request(url, init) : operatorFixture.request(url, init);
   if (mortgageFixture && resource === "whatsapp-channels") {
     if (!["owner", "admin"].includes(auth.userRole)) return Response.json({ success: false }, { status: 403 });
     const channel = { id: "00000000-0000-4000-8000-000000000071", provider: "wazzup", keyMasked: "••••0071",

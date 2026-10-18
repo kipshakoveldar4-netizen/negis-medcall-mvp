@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   ChevronLeft,
   ChevronRight,
@@ -103,13 +103,31 @@ function LeadList({
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [bookingLeadId, setBookingLeadId] = useState<string | null>(null);
+  const mounted = useRef(false);
+  const currentView = useRef({ path, actorId, offset: list.offset, data: list.data });
+  const scopeChanged = currentView.current.path !== path || currentView.current.actorId !== actorId
+    || currentView.current.offset !== list.offset;
+  if (scopeChanged || currentView.current.data !== list.data) {
+    currentView.current = { path, actorId, offset: list.offset, data: list.data };
+    if (busy) setBusy(false);
+    if (scopeChanged) {
+      setError("");
+      setNotice("");
+      setBookingLeadId(null);
+    }
+  }
+  useLayoutEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
   const refresh = list.refresh;
   const bookingAccessDenied = useCallback(() => {
+    if (!mounted.current || currentView.current.path !== path || currentView.current.actorId !== actorId) return;
     setBookingLeadId(null);
     setError("Доступ к заявке изменился. Список обновлён.");
     refresh();
     onAccessDenied?.();
-  }, [refresh, onAccessDenied]);
+  }, [refresh, onAccessDenied, path, actorId]);
   useEffect(() => {
     // Mobile browsers commonly restore a tab without firing window focus. Close
     // the open form, hide stale contacts and recheck access on either signal.
@@ -134,22 +152,36 @@ function LeadList({
     };
   }, [refresh]);
   async function assign(item: OperatorLead, assigned: boolean) {
+    const startedAtView = currentView.current;
+    const isCurrent = () => mounted.current && currentView.current === startedAtView;
+    const isSameScope = () => mounted.current && currentView.current.path === startedAtView.path
+      && currentView.current.actorId === startedAtView.actorId;
     setBusy(true);
     setError("");
     try {
-      await operatorApi(path, { leadId: item.id, assigned }, "PATCH", undefined, actorId);
+      await operatorApi(path, { leadId: item.id, assigned }, "PATCH", undefined, actorId, isCurrent);
+      if (!isCurrent()) return;
       refresh();
     } catch (err) {
-      if (err instanceof OperatorApiError && [401, 403].includes(err.status)) onAccessDenied?.();
+      const accessDenied = err instanceof OperatorApiError && [401, 403].includes(err.status);
+      if (accessDenied ? !isSameScope() : !isCurrent()) return;
+      if (accessDenied) {
+        setBookingLeadId(null);
+        onAccessDenied?.();
+      }
       setError(
         err instanceof Error ? err.message : "Не удалось назначить заявку.",
       );
       refresh();
     } finally {
-      setBusy(false);
+      if (isCurrent()) setBusy(false);
     }
   }
   async function changeStage(item: OperatorLead, stageId: string) {
+    const startedAtView = currentView.current;
+    const isCurrent = () => mounted.current && currentView.current === startedAtView;
+    const isSameScope = () => mounted.current && currentView.current.path === startedAtView.path
+      && currentView.current.actorId === startedAtView.actorId;
     setBusy(true);
     setError("");
     setNotice("");
@@ -165,17 +197,27 @@ function LeadList({
         "PATCH",
         undefined,
         actorId,
+        isCurrent,
       );
+      if (!isCurrent()) return;
       setNotice("Стадия заявки сохранена.");
     } catch (err) {
-      if (err instanceof OperatorApiError && [401, 403].includes(err.status)) onAccessDenied?.();
+      const accessDenied = err instanceof OperatorApiError && [401, 403].includes(err.status);
+      if (accessDenied ? !isSameScope() : !isCurrent()) return;
+      if (accessDenied) {
+        setBookingLeadId(null);
+        if (!isCurrent()) refresh();
+        onAccessDenied?.();
+      }
       setError(
         err instanceof Error ? err.message : "Не удалось сохранить стадию.",
       );
     } finally {
       // Recheck authorization on both success and failure, removing stale contacts.
-      refresh();
-      setBusy(false);
+      if (isCurrent()) {
+        refresh();
+        setBusy(false);
+      }
     }
   }
   return (

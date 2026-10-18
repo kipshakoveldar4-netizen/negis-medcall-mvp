@@ -251,7 +251,7 @@ async function fixture(t: TestContext, delayInitialSession = false) {
   }
   const contracts = evaluate<{ operatorStatusLabels: Record<string, string> }>(source.contracts, "operator-contracts.simulation.cjs", unexpected);
   const api = evaluate<object>(source.api, "operator-api.simulation.cjs", (name) => {
-    if (name === "react") return driver.hooks;
+    if (name === "react") return { ...driver.hooks, useLayoutEffect: driver.hooks.useEffect };
     if (name === "../../../../lib/crm/operator-contracts") return contracts;
     if (name === "@/lib/api") return {
       crmErrorMessage: (status: number) => `Synthetic CRM error ${status}`,
@@ -285,7 +285,7 @@ async function fixture(t: TestContext, delayInitialSession = false) {
     return unexpected(name);
   });
   const portal = evaluate<{ default: () => Child }>(source.portal, "OperatorPortal.simulation.cjs", (name) => {
-    if (name === "react") return driver.hooks;
+    if (name === "react") return { ...driver.hooks, useLayoutEffect: driver.hooks.useEffect };
     if (name === "react/jsx-runtime") return { jsx, jsxs: jsx, Fragment: Symbol("Fragment") };
     if (name === "wouter") return { Link: Symbol("Link") };
     if (name === "lucide-react") return { RefreshCw, LogOut: Symbol("LogOut"), Send: Symbol("Send") };

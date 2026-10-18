@@ -47,7 +47,11 @@ export function crmErrorMessage(error: unknown): string {
   return "Не удалось выполнить запрос. Попробуйте позже.";
 }
 
-type CrmFetchInit = RequestInit & { accessToken?: string; expectedUserId?: string };
+type CrmFetchInit = RequestInit & {
+  accessToken?: string;
+  expectedUserId?: string;
+  dispatchGuard?: () => boolean;
+};
 
 /**
  * Resolves the current access token from the Supabase session.
@@ -184,11 +188,13 @@ export function clearCrmCache(): void {
  * anyway invites retry loops.
  */
 export async function crmFetch(path: string, init: CrmFetchInit = {}): Promise<Response> {
-  const { accessToken, expectedUserId, headers, ...rest } = init;
+  const { accessToken, expectedUserId, dispatchGuard, headers, ...rest } = init;
   rest.signal?.throwIfAborted();
+  if (dispatchGuard && !dispatchGuard()) throw new DOMException("Request view changed", "AbortError");
   const token = await resolveAccessToken(accessToken, expectedUserId);
   // A session lookup can finish after its view/account was invalidated.
   rest.signal?.throwIfAborted();
+  if (dispatchGuard && !dispatchGuard()) throw new DOMException("Request view changed", "AbortError");
   if (!token) {
     throw new CrmApiError(401, "authentication_required", "Authentication required");
   }

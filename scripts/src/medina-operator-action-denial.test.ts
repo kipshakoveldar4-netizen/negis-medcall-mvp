@@ -247,7 +247,7 @@ async function fixture(t: TestContext, kind: Kind) {
     constructor(readonly status: number) { super(`Synthetic CRM error ${status}`); }
   }
   const api = evaluate<object>(source.api, (name) => {
-    if (name === "react") return driver.hooks;
+    if (name === "react") return { ...driver.hooks, useLayoutEffect: driver.hooks.useEffect };
     if (name === "../../../../lib/crm/operator-contracts") return contracts;
     if (name === "@/lib/api") return {
       CrmApiError: SyntheticCrmApiError,
@@ -282,7 +282,7 @@ async function fixture(t: TestContext, kind: Kind) {
   const components = evaluate<Record<string, (props: Props) => Child>>(
     kind === "requests" ? source.requests : source.arrivals,
     (name) => {
-      if (name === "react") return driver.hooks;
+      if (name === "react") return { ...driver.hooks, useLayoutEffect: driver.hooks.useEffect };
       if (name === "react/jsx-runtime") return { jsx, jsxs: jsx, Fragment: Symbol("Fragment") };
       if (name === "lucide-react") return icons;
       if (name === "@/lib/operatorApi") return api;

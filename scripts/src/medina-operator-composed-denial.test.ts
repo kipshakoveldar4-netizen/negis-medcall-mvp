@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
@@ -53,7 +54,7 @@ type Slot =
   | { kind: "state"; value: unknown; set(update: unknown): void }
   | { kind: "ref"; value: { current: unknown } }
   | { kind: "memo"; value: unknown; deps: Dependencies; initialized: boolean }
-  | { kind: "effect"; deps: Dependencies; committed: boolean; draft?: { create: Effect; deps: Dependencies }; cleanup?: () => void };
+  | { kind: "effect"; layout: boolean; deps: Dependencies; committed: boolean; draft?: { create: Effect; deps: Dependencies }; cleanup?: () => void };
 const jsx = (type: unknown, props: Props, key?: unknown): Element => ({ type, props, key });
 const Fragment = Symbol("Fragment");
 const icons = Object.fromEntries([
@@ -95,6 +96,11 @@ function hookDriver() {
     assert.equal(slots[index].kind, kind, "Hook order must remain stable within each instance");
     return slots[index] as Extract<Slot, { kind: K }>;
   }
+  function effect(create: Effect, deps: Dependencies, layout: boolean) {
+    const current = slot("effect", () => ({ kind: "effect", layout, deps: undefined, committed: false }));
+    assert.equal(current.layout, layout, "Effect phase must remain stable");
+    current.draft = { create, deps };
+  }
   const hooks = {
     useState<T>(initial: T | (() => T)) {
       const current = slot("state", () => {
@@ -126,9 +132,8 @@ function hookDriver() {
       return current.value as T;
     },
     useCallback<T>(callback: T, deps?: Dependencies) { return hooks.useMemo(() => callback, deps); },
-    useEffect(create: Effect, deps?: Dependencies) {
-      slot("effect", () => ({ kind: "effect", deps: undefined, committed: false })).draft = { create, deps };
-    },
+    useEffect(create: Effect, deps?: Dependencies) { effect(create, deps, false); },
+    useLayoutEffect(create: Effect, deps?: Dependencies) { effect(create, deps, true); },
   };
   return {
     hooks,
@@ -151,22 +156,25 @@ function hookDriver() {
       }
       assert.fail("Render-phase retries did not converge");
     },
-    commit() {
+    commit(layout = false) {
       const pending = slots.filter((item): item is Extract<Slot, { kind: "effect" }> => item.kind === "effect"
-        && item.draft !== undefined && (!item.committed || !sameDependencies(item.deps, item.draft.deps)));
+        && item.layout === layout && item.draft !== undefined && (!item.committed || !sameDependencies(item.deps, item.draft.deps)));
       for (const item of pending) item.cleanup?.();
       for (const item of pending) {
         const draft = item.draft!;
         item.deps = draft.deps; item.committed = true;
         item.cleanup = draft.create() || undefined;
       }
-      for (const item of slots) if (item.kind === "effect") item.draft = undefined;
-      staged = false;
+      for (const item of slots) if (item.kind === "effect" && item.layout === layout) item.draft = undefined;
+      if (!layout) staged = false;
     },
     dispose() {
       if (disposed) return;
       disposed = true; dirty = false; staged = false;
-      for (const item of slots) if (item.kind === "effect") item.cleanup?.();
+      for (const item of slots) if (item.kind === "effect" && item.layout) item.cleanup?.();
+      return () => {
+        for (const item of slots) if (item.kind === "effect" && !item.layout) item.cleanup?.();
+      };
     },
   };
 }
@@ -183,7 +191,8 @@ function renderer() {
   let rootInstance: Instance | undefined;
   let input: Child;
   const history: Instance[] = [];
-  const hooks = Object.fromEntries(["useState", "useRef", "useMemo", "useCallback", "useEffect"].map((name) => [
+  const passiveDisposals: Array<() => void> = [];
+  const hooks = Object.fromEntries(["useState", "useRef", "useMemo", "useCallback", "useEffect", "useLayoutEffect"].map((name) => [
     name, (...args: unknown[]) => {
       assert.ok(active?.driver, "No active component hook driver");
       return (active.driver.hooks[name as keyof typeof active.driver.hooks] as (...values: unknown[]) => unknown)(...args);
@@ -195,7 +204,8 @@ function renderer() {
   }
   function dispose(instance: Instance) {
     for (const child of instance.children) dispose(child);
-    instance.driver?.dispose();
+    const cleanup = instance.driver?.dispose();
+    if (cleanup) passiveDisposals.push(cleanup);
   }
   function compatible(left: Child, right: Child): boolean {
     if (isElement(left) && isElement(right)) return left.type === right.type && left.key === right.key;
@@ -244,12 +254,20 @@ function renderer() {
     if (instance) visit(instance);
     return result;
   }
-  function render() { rootInstance = reconcile(rootInstance, input); }
+  function render() {
+    rootInstance = reconcile(rootInstance, input);
+    for (const instance of instances().reverse()) {
+      if (instance.driver?.staged()) inside(instance, () => instance.driver!.commit(true));
+    }
+  }
   async function drain(commit: boolean) {
     for (let index = 0; index < 32; index++) {
       if (!rootInstance || instances().some((instance) => instance.driver?.dirty())) render();
-      if (commit) for (const instance of instances().reverse()) {
-        if (instance.driver?.staged()) inside(instance, () => instance.driver!.commit());
+      if (commit) {
+        for (const cleanup of passiveDisposals.splice(0)) cleanup();
+        for (const instance of instances().reverse()) {
+          if (instance.driver?.staged()) inside(instance, () => instance.driver!.commit());
+        }
       }
       await Promise.resolve();
     }
@@ -267,7 +285,11 @@ function renderer() {
     instances: (name: string) => instances().filter((instance) => isElement(instance.input)
       && typeof instance.input.type === "function" && instance.input.type.name === name),
     writes: () => history.reduce((sum, instance) => sum + (instance.driver?.writes() ?? 0), 0),
-    dispose() { if (rootInstance) dispose(rootInstance); rootInstance = undefined; },
+    dispose() {
+      if (rootInstance) dispose(rootInstance);
+      rootInstance = undefined;
+      for (const cleanup of passiveDisposals.splice(0)) cleanup();
+    },
   };
 }
 
@@ -278,8 +300,11 @@ type Pending = {
   body: Record<string, unknown> | undefined;
   signal?: AbortSignal;
   expectedUserId?: string;
+  dispatchGuard?: () => boolean;
+  dispatched: boolean;
   claimed: boolean;
   settled: boolean;
+  release(): void;
   succeed(data?: unknown): void;
   fail(status: number): void;
   authFail(status: number): void;
@@ -295,14 +320,15 @@ function eventTarget() {
     removeEventListener(name: string, callback: () => void) { listeners.get(name)?.delete(callback); },
   };
 }
-async function runtime(t: TestContext) {
+async function runtime(t: TestContext, queueMutations = false) {
   const source = await compiled;
   const render = renderer();
   t.after(() => render.dispose());
   const requests: Pending[] = [];
+  const dispatched: Pending[] = [];
   const storage = new Map<string, string>();
   const globals = {
-    Error, AbortController,
+    Error, AbortController, crypto: { randomUUID },
     window: { ...eventTarget(), confirm: () => true, sessionStorage: {
       getItem: (key: string) => storage.get(key) ?? null,
       setItem: (key: string, value: string) => storage.set(key, value),
@@ -332,27 +358,38 @@ async function runtime(t: TestContext) {
       if (name === "@/lib/api") return {
         CrmApiError: SyntheticCrmApiError,
         crmErrorMessage: (error: number | SyntheticCrmApiError) => `Synthetic CRM error ${typeof error === "number" ? error : error.status}`,
-        crmFetch(url: string, init: RequestInit & { expectedUserId?: string }) {
+        crmFetch(url: string, init: RequestInit & { expectedUserId?: string; dispatchGuard?: () => boolean }) {
           assert.equal(init.cache, "no-store");
           let resolve!: (response: unknown) => void;
           let reject!: (error: Error) => void;
           const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
           const settle = () => { assert.equal(request.settled, false); request.settled = true; };
           const reply = (payload: unknown, status: number) => {
+            assert.equal(request.dispatched, true, "Only dispatched requests may receive a server response");
             settle(); resolve({ ok: status < 400, status, json: async () => payload });
           };
           const request: Pending = {
             url, method: init.method ?? "GET", signal: init.signal ?? undefined,
-            origin: render.origin(), expectedUserId: init.expectedUserId,
+            origin: render.origin(), expectedUserId: init.expectedUserId, dispatchGuard: init.dispatchGuard,
             body: typeof init.body === "string" ? JSON.parse(init.body) : undefined,
-            claimed: false, settled: false,
+            claimed: false, settled: false, dispatched: false,
+            release() {
+              assert.equal(request.dispatched || request.settled, false, "Release the synthetic auth gate once");
+              if (init.dispatchGuard?.() === false) {
+                settle(); reject(new DOMException("Obsolete component action", "AbortError"));
+                return;
+              }
+              request.dispatched = true;
+              dispatched.push(request);
+            },
             succeed(data) { reply({ success: true, ...(data === undefined ? {} : { data }) }, 200); },
             fail(status) { reply({ success: false, error: `Synthetic failure ${status}` }, status); },
             authFail(status) { settle(); reject(new SyntheticCrmApiError(status)); },
             reject() { settle(); reject(new Error("Synthetic network failure")); },
           };
           requests.push(request);
-          // Intentionally ignore abort at transport level: guards must reject late results.
+          if (!queueMutations || request.method === "GET") request.release();
+          // Once dispatched, ignore abort: outcome guards must reject late results.
           return promise;
         },
       };
@@ -382,7 +419,7 @@ async function runtime(t: TestContext) {
   function button(label: string) {
     return find((node) => node.type === "button" && (text(node.props.children) === label || node.props["aria-label"] === label));
   }
-  return { render, requests, take, load, find, invoke, section, button };
+  return { render, requests, dispatched, storage, take, load, find, invoke, section, button };
 }
 
 const REQUEST_A = "11111111-1111-4111-8111-111111111111";
@@ -390,9 +427,11 @@ const REQUEST_B = "22222222-2222-4222-8222-222222222222";
 const DOCTOR = "33333333-3333-4333-8333-333333333333";
 const LEAD = "44444444-4444-4444-8444-444444444444";
 const ACTOR = "55555555-5555-4555-8555-555555555555";
+const SERVICE = "66666666-6666-4666-8666-666666666666";
+const WORKSPACE = "77777777-7777-4777-8777-777777777777";
 const list = (items: unknown[], extra = {}) => ({ items, hasMore: true, ...extra });
 const doctors = () => list([{ id: DOCTOR, name: "Synthetic doctor", specialty: "Synthetic specialty" }]);
-const services = () => list([{ id: "synthetic-service", name: "Synthetic catalog service", priceMinor: "100", durationMinutes: 30, currency: "KZT" }]);
+const services = () => list([{ id: SERVICE, name: "Synthetic catalog service", priceMinor: "100", durationMinutes: 30, currency: "KZT" }]);
 const leadPhone = (scope: string) => `SYNTHETIC_LEAD_PHONE_${scope}`;
 const arrivalPhone = (scope: string) => `SYNTHETIC_ARRIVAL_PHONE_${scope}`;
 const labels = {
@@ -515,6 +554,254 @@ async function startAction(ui: Ui, target: "stage" | "call") {
   assert.equal(mutation.expectedUserId, ACTOR);
   assert.equal(mutation.body?.[target === "stage" ? "stageId" : "result"], target === "stage" ? "stage-two" : "confirmed");
   return mutation;
+}
+
+type QueuedAction = "request" | "call" | "stage" | "booking" | "clinic-assignment" | "clinic-confirmation";
+type ActionTransition = "unmount" | "actor" | "path" | "refresh" | "page";
+const savedBooking = {
+  startsAt: "2026-10-18T04:00:00Z", timeZone: "Asia/Almaty", doctorName: "Synthetic doctor",
+  service: "Synthetic catalog service", priceMinor: "100",
+};
+async function queuedAction(t: TestContext, target: QueuedAction) {
+  const ui = await runtime(t, true);
+  let denied = 0;
+  const onAccessDenied = () => { denied++; };
+  const arrivals = target === "call" || target === "clinic-confirmation";
+  const clinic = target === "clinic-assignment" || target === "clinic-confirmation";
+  const name = target === "request" ? "OperatorRequests" : arrivals ? "OperatorArrivals" : "OperatorLeads";
+  const component = ui.load(target === "request" ? "requests" : arrivals ? "arrivals" : "leads")[name];
+  const props = {
+    actorId: target === "clinic-confirmation" ? undefined : ACTOR, requestId: REQUEST_A, leadScope: "assigned",
+    ...(clinic ? { workspaceId: WORKSPACE } : {}), onAccessDenied,
+  };
+  ui.render.mount(jsx(component, props));
+  await ui.render.flush();
+  const origin = name === "OperatorLeads" ? "LeadList" : name;
+  const rows = target === "request" ? [{
+    id: REQUEST_A, status: "accepted", displayName: "Synthetic clinic", pricePerArrivalMinor: "100", currency: "KZT", leadScope: "assigned",
+  }] : arrivals ? [{
+    appointmentId: "synthetic-appointment", arrivalId: target === "clinic-confirmation" ? null : "synthetic-arrival", status: "arrived",
+    clientName: "Synthetic arrival", clientPhone: arrivalPhone("queued"), startsAt: "2026-10-18T09:00:00Z",
+    priceMinor: "100", currency: "KZT",
+  }] : [{ id: LEAD, name: "Synthetic patient", phone: leadPhone("queued"), status: "new", stageId: "stage-one" }];
+  const initialRead = ui.take(origin);
+  initialRead.succeed(list(rows, {
+    stageEditingAvailable: true, stages: [{ id: "stage-one", name: "Synthetic stage one" }, { id: "stage-two", name: "Synthetic stage two" }],
+  }));
+  await ui.render.flush();
+  if (target === "booking") {
+    ui.invoke(ui.find((node) => node.type === "button" && node.props["aria-expanded"] === false, ui.section(labels.leads)));
+    await ui.render.flush();
+    ui.take("OperatorBookingForm").succeed({ timeZone: "Asia/Almaty" });
+    await ui.render.flush();
+    ui.take("BookingFields").succeed(doctors());
+    await ui.render.flush();
+    ui.invoke(ui.find((node) => node.type === "select", ui.section(labels.booking)), "onChange", { target: { value: DOCTOR } });
+    await ui.render.flush();
+    ui.take("ServicePicker").succeed(services());
+    await ui.render.flush();
+    ui.invoke(ui.find((node) => node.type === "input" && node.props.type === "checkbox", ui.section(labels.booking)), "onChange");
+    ui.invoke(ui.find((node) => node.type === "input" && node.props.type === "datetime-local", ui.section(labels.booking)), "onChange", { target: { value: "2026-10-18T09:00" } });
+    await ui.render.flush();
+    assert.equal(ui.render.instances("BookingFields").length, 1);
+    assert.equal(ui.render.instances("ServicePicker").length, 1);
+    assert.notEqual(ui.find((node) => node.type === "button" && node.props.type === "submit", ui.section(labels.booking)).props.disabled, true);
+    ui.invoke(ui.find((node) => node.type === "form", ui.section(labels.booking)), "onSubmit");
+  } else if (target === "request") {
+    const article = ui.find((node) => node.type === "article");
+    ui.invoke(ui.find((node) => node.type === "button" && node.props.disabled === false, article));
+  } else if (target === "clinic-assignment") {
+    ui.invoke(ui.find((node) => node.type === "input" && node.props.type === "checkbox", ui.section(labels.leads)), "onChange", { target: { checked: true } });
+  } else if (target === "clinic-confirmation") {
+    const article = ui.find((node) => node.type === "article", ui.section(labels.arrivals));
+    ui.invoke(ui.find((node) => node.type === "button" && elements(node.props.children).some((child) => child.type === icons.CheckCircle2), article));
+  }
+  let mutation: Pending;
+  if (target === "stage" || target === "call") mutation = await startAction(ui, target);
+  else {
+    await ui.render.flush();
+    mutation = ui.take("event", target === "booking" || target === "clinic-confirmation" ? "POST" : "PATCH");
+  }
+  assert.equal(mutation.expectedUserId, props.actorId);
+  assert.equal(mutation.dispatched, false, "The real event handler must wait at the synthetic auth gate");
+  if (target === "request") assert.deepEqual(mutation.body, { id: REQUEST_A, action: "end" });
+  if (target === "clinic-assignment") {
+    assert.equal(mutation.url, `/api/crm/clinic-operator-leads?workspaceId=${WORKSPACE}&requestId=${REQUEST_A}&search=`);
+    assert.deepEqual(mutation.body, { leadId: LEAD, assigned: true });
+  }
+  if (target === "clinic-confirmation") {
+    assert.equal(mutation.url, `/api/crm/clinic-operator-arrivals?workspaceId=${WORKSPACE}&requestId=${REQUEST_A}`);
+    assert.deepEqual(mutation.body, { appointmentId: "synthetic-appointment" });
+  }
+  if (target === "booking") {
+    assert.equal(mutation.url, `/api/crm/operator-bookings?requestId=${REQUEST_A}`);
+    assert.equal(ui.storage.size, 1, "The real booking attempt must persist before POST");
+    const attempt = JSON.parse([...ui.storage.values()][0]);
+    assert.deepEqual({ ...attempt.payload, requestKey: attempt.requestKey }, mutation.body);
+    assert.equal(attempt.actorId, ACTOR);
+    assert.equal(attempt.requestId, REQUEST_A);
+    assert.equal(attempt.payload.leadId, LEAD);
+    assert.deepEqual(attempt.payload.serviceIds, [SERVICE]);
+    assert.match(attempt.requestKey, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+  }
+  const owner = ui.render.instances(name)[0];
+  const listOwner = ui.render.instances(origin)[0];
+  async function transition(change: ActionTransition) {
+    if (change === "unmount") ui.render.update(null);
+    else if (change === "actor") ui.render.update(jsx(component, { ...props, actorId: REQUEST_B }));
+    else if (change === "path") ui.render.update(jsx(component, {
+      ...props, ...(target === "request" || clinic ? { workspaceId: REQUEST_B } : { requestId: REQUEST_B }),
+    }));
+    else {
+      const section = target === "request" ? ui.find((node) => node.type === "section")
+        : ui.section(arrivals ? labels.arrivals : labels.leads);
+      ui.invoke(ui.find((node) => node.type === "button" && elements(node.props.children)
+        .some((child) => child.type === (change === "page" ? icons.ChevronRight : icons.RefreshCw)), section));
+    }
+    await ui.render.beforeEffects();
+    assert.equal(initialRead.signal?.aborted, false, "Release queued actions before passive list cleanup can abort");
+    if (change !== "unmount") assert.equal(ui.render.instances(name)[0], owner, "Keep the real outer component instance across scope changes");
+    if (change === "actor" || change === "refresh") assert.equal(ui.render.instances(origin)[0], listOwner, "Actor changes and refreshes must retain the real list owner");
+  }
+  return { ...ui, mutation, transition, denied: () => denied };
+}
+
+for (const target of ["request", "call", "stage", "booking", "clinic-assignment", "clinic-confirmation"] as const) {
+  const changes = target === "clinic-confirmation" ? ["unmount", "path", "refresh"] as const : ["unmount", "actor", "path", "refresh"] as const;
+  for (const change of changes) {
+    test(`component queued ${target}: ${change} prevents dispatch before passive cleanup`, async (t) => {
+      const ui = await queuedAction(t, target);
+      await ui.transition(change);
+      const before = ui.render.content();
+      const writes = ui.render.writes();
+      const count = ui.requests.length;
+      const dispatched = ui.dispatched.length;
+      ui.mutation.release();
+      await ui.render.beforeEffects();
+      assert.equal(ui.dispatched.length, dispatched, "An obsolete component mutation must never reach the fake network");
+      assert.equal(ui.mutation.dispatchGuard?.(), false, "The live predicate must close without passive cleanup");
+      assert.equal(ui.mutation.settled, true, "The queued transport must reject cancellation, not leave the action hanging");
+      assert.equal(ui.render.content(), before);
+      assert.equal(ui.render.writes(), writes, "Cancellation must not write obsolete state or refresh a list");
+      assert.equal(ui.requests.length, count);
+      assert.equal(ui.denied(), 0, "Cancellation is not a same-scope authorization denial");
+    });
+  }
+  test(`component queued ${target}: a live scope dispatches once and completes normally`, async (t) => {
+    const ui = await queuedAction(t, target);
+    assert.equal(typeof ui.mutation.dispatchGuard, "function", "The component must pass its live predicate through operatorApi to crmFetch");
+    assert.equal(ui.mutation.dispatchGuard!(), true);
+    const dispatched = ui.dispatched.length;
+    ui.mutation.release();
+    assert.equal(ui.dispatched.length, dispatched + 1);
+    assert.equal(ui.dispatched.at(-1), ui.mutation);
+    ui.mutation.succeed(target === "booking" ? savedBooking : undefined);
+    await ui.render.flush();
+    assert.equal(ui.denied(), 0);
+    assert.equal(ui.take(target === "request" ? "OperatorRequests" : target === "call" || target === "clinic-confirmation" ? "OperatorArrivals" : "LeadList").settled, false,
+      "Successful live mutations still revalidate the real list");
+    if (target === "booking") assert.equal(ui.storage.size, 0, "A confirmed live booking releases its persisted attempt");
+  });
+}
+
+test("component queued request: changing the visible page invalidates dispatch before passive cleanup", async (t) => {
+  const ui = await queuedAction(t, "request");
+  await ui.transition("page");
+  const dispatched = ui.dispatched.length;
+  ui.mutation.release();
+  await ui.render.beforeEffects();
+  assert.equal(ui.dispatched.length, dispatched);
+  assert.equal(ui.mutation.dispatchGuard?.(), false);
+  assert.equal(ui.denied(), 0);
+});
+
+for (const outcome of ["success", "network"] as const) {
+  test(`component queued booking: dispatched POST unmount preserves its ambiguous attempt on late ${outcome}`, async (t) => {
+    const ui = await queuedAction(t, "booking");
+    ui.mutation.release();
+    assert.equal(ui.mutation.dispatched, true);
+    const persisted = [...ui.storage.entries()];
+    await ui.transition("unmount");
+    const writes = ui.render.writes();
+    const count = ui.requests.length;
+    if (outcome === "success") ui.mutation.succeed(savedBooking); else ui.mutation.reject();
+    await ui.render.beforeEffects();
+    assert.deepEqual([...ui.storage.entries()], persisted, "Unmount and late outcomes must retain the durable retry key for reconciliation");
+    assert.equal(ui.render.writes(), writes, "The old BookingFields and onBooked callback must stay silent after layout cleanup");
+    assert.equal(ui.requests.length, count);
+    assert.equal(ui.denied(), 0);
+  });
+}
+
+for (const target of ["stage", "clinic-assignment"] as const) {
+  for (const outcome of [403, "success"] as const) {
+    test(`component dispatched ${target}: late ${outcome} after same-scope refreshed leads ${outcome === 403 ? "revokes the protected view and rechecks" : "cannot publish stale success"}`, async (t) => {
+      const ui = await queuedAction(t, target);
+      assert.equal(ui.mutation.dispatchGuard?.(), true);
+      ui.mutation.release();
+      assert.equal(ui.mutation.dispatched, true, "Exercise a real in-flight response, not a canceled queued action");
+      const owner = ui.render.instances("LeadList")[0];
+      await ui.transition("refresh");
+      await ui.render.flush();
+      const refreshed = ui.take("LeadList");
+      assert.equal(refreshed.url, `${ui.mutation.url}&offset=0`, "The new GET must retain the mutation's actor/path scope");
+      const freshData = list([{
+        id: LEAD, name: "Synthetic refreshed patient", phone: leadPhone("refreshed"), status: "new", stageId: "stage-one", assigned: false,
+      }], { stageEditingAvailable: true, stages: [{ id: "stage-one", name: "Synthetic stage one" }, { id: "stage-two", name: "Synthetic stage two" }] });
+      refreshed.succeed(freshData);
+      await ui.render.flush();
+      assert.equal(ui.render.instances("LeadList")[0], owner);
+      assert.ok(ui.render.content().includes(leadPhone("refreshed")), "A newer same-scope protected list must render before the old response");
+      assert.equal(ui.mutation.dispatchGuard?.(), false, "The dispatched action no longer owns the refreshed snapshot");
+      if (target === "stage") {
+        ui.invoke(ui.find((node) => node.type === "button" && node.props["aria-expanded"] === false, ui.section(labels.leads)));
+        await ui.render.flush();
+        ui.take("OperatorBookingForm").succeed({ timeZone: "Asia/Almaty" });
+        await ui.render.flush();
+        ui.take("BookingFields").succeed(doctors());
+        await ui.render.flush();
+        assert.equal(ui.render.instances("BookingFields").length, 1);
+        ui.find((node) => node.type === "form", ui.section(labels.booking));
+      } else {
+        assert.equal(ui.find((node) => node.type === "input" && node.props.type === "checkbox", ui.section(labels.leads)).props.checked, false);
+      }
+      const before = ui.render.content();
+      const writes = ui.render.writes();
+      const count = ui.requests.length;
+      if (outcome === "success") ui.mutation.succeed(); else ui.mutation.fail(403);
+      await ui.render.beforeEffects();
+      assert.equal(ui.requests.length, count, "Observe the outcome before passive revalidation starts");
+      assert.equal(ui.render.nodes().filter((node) => node.props.role === "status").length, outcome === 403 ? 1 : 0,
+        "An obsolete mutation must never publish a saved-stage success notice");
+      if (outcome === "success") {
+        assert.equal(ui.render.content(), before);
+        assert.equal(ui.render.writes(), writes);
+        assert.equal(ui.denied(), 0);
+        await ui.render.flush();
+        assert.equal(ui.requests.length, count, "Stale success cannot refresh the newer authorized list");
+        return;
+      }
+      assert.equal(ui.denied(), 1, "A dispatched same-scope 403 must still invoke denial after a newer GET succeeds");
+      assert.equal(ui.render.content().includes(leadPhone("refreshed")), false);
+      assert.equal(ui.render.instances("BookingFields").length, 0);
+      assert.equal(ui.render.nodes().filter((node) => node.type === "input" && node.props.type === "checkbox").length, 0);
+      assert.equal(ui.render.nodes().filter((node) => node.type === "section" && node.props["aria-label"] === labels.booking).length, 0);
+      assert.equal(text(ui.find((node) => node.props.role === "alert").props.children), "Synthetic CRM error 403");
+      await ui.render.flush();
+      const recheck = ui.take("LeadList");
+      assert.equal(recheck.url, refreshed.url);
+      assert.equal(recheck.settled, false);
+      assert.equal(ui.requests.length, count + 1, "Late denial must issue exactly one fresh authorization read");
+      assert.equal(ui.render.content().includes(leadPhone("refreshed")), false);
+      recheck.succeed(freshData);
+      await ui.render.flush();
+      assert.equal(ui.denied(), 1);
+      assert.equal(ui.requests.length, count + 1);
+      assert.equal(ui.render.instances("BookingFields").length, 0, "Fresh authorization must not reopen the revoked booking form");
+      assert.equal(ui.render.nodes().filter((node) => node.props.role === "status").length, 0);
+      if (target === "clinic-assignment") assert.equal(ui.find((node) => node.type === "input" && node.props.type === "checkbox", ui.section(labels.leads)).props.checked, false);
+    });
+  }
 }
 
 const readTargets: ReadTarget[] = ["booking-doctors", "booking-services", "catalog-doctors", "catalog-services", "leads", "arrivals"];

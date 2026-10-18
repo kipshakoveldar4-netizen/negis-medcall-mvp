@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { CalendarPlus, RefreshCw } from "lucide-react";
 import {
   operatorApi,
@@ -147,8 +147,13 @@ function BookingFields({
   const [recoveredCreate, setRecoveredCreate] = useState(false);
   const createAttempt = useRef<OperatorBookingAttempt | null>(null);
   const inFlight = useRef(false);
+  const mounted = useRef(false);
   const currentScope = useRef({ actorId, requestId, leadId });
   currentScope.current = { actorId, requestId, leadId };
+  useLayoutEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
 
   useEffect(() => {
     const restored = restoreOperatorBookingAttempt(
@@ -245,6 +250,9 @@ function BookingFields({
     inFlight.current = true;
     setBusy(true);
     setError("");
+    const isCurrent = () => mounted.current && createAttempt.current === attempt
+      && isCurrentOperatorBookingAttempt(attempt, currentScope.current.actorId,
+        currentScope.current.requestId, currentScope.current.leadId);
     try {
       const saved = await operatorApi<OperatorBooking>(
         `operator-bookings?requestId=${encodeURIComponent(attempt.requestId)}`,
@@ -255,17 +263,9 @@ function BookingFields({
         "POST",
         undefined,
         attempt.actorId,
+        isCurrent,
       );
-      if (
-        createAttempt.current !== attempt ||
-        !isCurrentOperatorBookingAttempt(
-          attempt,
-          currentScope.current.actorId,
-          currentScope.current.requestId,
-          currentScope.current.leadId,
-        )
-      )
-        return;
+      if (!isCurrent()) return;
       clearOperatorBookingAttempt(
         storage,
         attempt.actorId,
@@ -277,16 +277,7 @@ function BookingFields({
       setRecoveredCreate(false);
       onBooked(saved);
     } catch (err) {
-      if (
-        createAttempt.current !== attempt ||
-        !isCurrentOperatorBookingAttempt(
-          attempt,
-          currentScope.current.actorId,
-          currentScope.current.requestId,
-          currentScope.current.leadId,
-        )
-      )
-        return;
+      if (!isCurrent()) return;
       if (err instanceof OperatorApiError && [401, 403].includes(err.status)) {
         clearOperatorBookingAttempt(
           storage,
@@ -320,7 +311,7 @@ function BookingFields({
         setError(`Сохранение не подтверждено. Запись могла сохраниться; проверьте теми же данными. ${reason}`);
       }
     } finally {
-      if (isCurrentOperatorBookingAttempt(
+      if (mounted.current && isCurrentOperatorBookingAttempt(
         attempt,
         currentScope.current.actorId,
         currentScope.current.requestId,
