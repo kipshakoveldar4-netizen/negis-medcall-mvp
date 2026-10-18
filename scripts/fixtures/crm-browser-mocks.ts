@@ -9,6 +9,7 @@ const fixtureParams = new URLSearchParams(window.location?.search || "");
 const fixtureTimeZone = ["UTC", "Pacific/Chatham"].includes(fixtureParams.get("fixtureTimeZone") || "")
   ? fixtureParams.get("fixtureTimeZone")! : "Asia/Almaty";
 const fixtureAppointmentTime = fixtureParams.get("fixtureAppointment") === "midnight" ? "00:10" : "10:00";
+const fixturePriceMinor = fixtureParams.get("fixturePrice") === "fractional" ? 1250050 : 1250000;
 export const clinicArrivalFixture = isClinicArrivalFixtureLocation(window.location)
   ? createClinicArrivalBrowserFixture(window.location.search) : null;
 // Keep explicit visual-test settings across local page reloads, not CRM data.
@@ -42,14 +43,17 @@ const teamMembers = Array.from({ length: 5 }, (_, index) => ({
 }));
 const service = "Тестовая комплексная услуга с очень длинным названием";
 const client = { id: clientId, name: longName, fullName: longName, full_name: longName, phone: "+77000000001", whatsapp: "+77000000001", status: "active", source: "Тест", visits: 2, notes: "Только вымышленные данные" };
-const appointment = { id: appointmentId, clientId, client: longName, client_name: longName, phone: client.phone, client_phone: client.phone, whatsapp: client.whatsapp, doctorId, doctor: "Тестовый специалист", doctor_name: "Тестовый специалист", service, service_name: service, serviceId, startsAt: `${today}T${fixtureAppointmentTime}:00+05:00`, starts_at: `${today}T${fixtureAppointmentTime}:00+05:00`, durationMinutes: 90, priceMinor: 1250000, status: "confirmed", notes: "Вымышленная запись для проверки вёрстки" };
+const appointment = { id: appointmentId, clientId, client: longName, client_name: longName, phone: client.phone, client_phone: client.phone, whatsapp: client.whatsapp, doctorId, doctor: "Тестовый специалист", doctor_name: "Тестовый специалист", service, service_name: service, serviceId, startsAt: `${today}T${fixtureAppointmentTime}:00+05:00`, starts_at: `${today}T${fixtureAppointmentTime}:00+05:00`, durationMinutes: 90, priceMinor: fixturePriceMinor, status: "confirmed", notes: "Вымышленная запись для проверки вёрстки" };
+const historyStartsAt = new Date(Date.parse(appointment.startsAt) - 7 * 86_400_000).toISOString();
 const lists: Record<string, unknown[]> = {
-  appointments: [appointment],
+  appointments: [appointment, ...(fixtureParams.get("fixturePrice") === "fractional" ? [{
+    ...appointment, id: "00000000-0000-4000-8000-000000000099", startsAt: historyStartsAt, starts_at: historyStartsAt, status: "arrived",
+  }] : [])],
   clients: [client, { ...client, id: "00000000-0000-4000-8000-000000000006", name: "Тестовая Мария", full_name: "Тестовая Мария", fullName: "Тестовая Мария", phone: "+77000000002" }],
-  deals: [{ id: "00000000-0000-4000-8000-000000000007", clientId, client: longName, client_name: longName, title: service, service, service_name: service, amountMinor: 1250000, amount_minor: 1250000, currency: "KZT", status: "paid", paidAt: `${today}T10:00:00+05:00`, createdAt: `${today}T10:00:00+05:00` }],
+  deals: [{ id: "00000000-0000-4000-8000-000000000007", clientId, client: longName, client_name: longName, title: service, service, service_name: service, amountMinor: fixturePriceMinor, amount_minor: fixturePriceMinor, currency: "KZT", status: "paid", paidAt: `${today}T10:00:00+05:00`, createdAt: `${today}T10:00:00+05:00` }],
   leads: [{ id: "00000000-0000-4000-8000-000000000008", client: longName, client_name: longName, name: longName, phone: client.phone, service, source: "Тестовая реклама", status: "new", createdAt: new Date().toISOString() }],
   "clinic-doctors": [{ id: doctorId, fullName: "Тестовый специалист", specialty: "Тестовый прайс", isActive: true }],
-  "clinic-services": [{ id: serviceId, name: service, doctorId, basePriceMinor: 1250000, durationMinutes: 90, isActive: true }],
+  "clinic-services": [{ id: serviceId, name: service, doctorId, basePriceMinor: fixturePriceMinor, durationMinutes: 90, isActive: true }],
 };
 const keys: Record<string, string> = { "clinic-doctors": "doctors", "clinic-services": "services", "doctor-shifts": "shifts" };
 export const hasSupabaseFrontendEnv = true;

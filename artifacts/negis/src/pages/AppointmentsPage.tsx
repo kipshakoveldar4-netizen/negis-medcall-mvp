@@ -30,6 +30,7 @@ import { MasterDayGrid } from "@/components/crm/master-day-grid";
 import { AppointmentExtraServices } from "@/components/crm/appointment-extra-services";
 import { appointmentPriceFromInput, normalizeAppointmentServices, readAppointmentServices, summarizeAppointmentServices, type AppointmentServiceItem } from "../../../../lib/crm/appointment-services";
 import { findAppointmentCapacityConflict } from "../../../../lib/crm/appointment-capacity";
+import { formatArrivalPrice } from "../../../../lib/crm/operator-contracts";
 import { formatSlot, freeSlots, groupSlots, minuteOfClinicDay, occupiedGridSlots, workingIntervals } from "@/lib/dayGrid";
 import { capitalize, termsFor, type Terms } from "../../../../lib/vertical/terms";
 import { leadStageDefinitionFromUnknown } from "@/lib/leadPipeline";
@@ -933,7 +934,7 @@ function AppointmentCard({
         <Detail label={capitalize(terms.specialist)}>{appointment.doctor}</Detail>
         <Detail label="Длительность">{appointment.durationMinutes} мин</Detail>
         {appointment.priceMinor !== null ? (
-          <Detail label="Цена"><span className="tabular-nums">{Math.round(appointment.priceMinor / 100).toLocaleString("ru-RU")} ₸</span></Detail>
+          <Detail label="Цена"><span className="tabular-nums">{formatArrivalPrice(String(appointment.priceMinor), "KZT")}</span></Detail>
         ) : null}
         <Detail label="Источник">{appointment.source || "Ресепшн"}</Detail>
       </div>
@@ -2934,7 +2935,7 @@ export function AppointmentsPage() {
                         </p>
                       ) : null}
                       {serviceMatches.map((service) => {
-                          const price = service.basePriceMinor === null ? "" : ` — ${(service.basePriceMinor / 100).toLocaleString("ru-RU")} ₸`;
+                          const price = service.basePriceMinor === null ? "" : ` — ${formatArrivalPrice(String(service.basePriceMinor), "KZT")}`;
                           const length = service.durationMinutes ? ` · ${service.durationMinutes} мин` : "";
                           return (
                             <button
@@ -2993,7 +2994,7 @@ export function AppointmentsPage() {
                     }}
                   >
                     {activeCatalog.map((service) => {
-                      const price = service.basePriceMinor === null ? "" : ` — ${(service.basePriceMinor / 100).toLocaleString("ru-RU")} ₸`;
+                      const price = service.basePriceMinor === null ? "" : ` — ${formatArrivalPrice(String(service.basePriceMinor), "KZT")}`;
                       const length = service.durationMinutes ? ` · ${service.durationMinutes} мин` : "";
                       return (
                         <option key={service.id} value={service.id} disabled={form.additionalServices.some(item => item.serviceId === service.id)}>{`${service.name}${price}${length}`}</option>
@@ -3151,7 +3152,7 @@ export function AppointmentsPage() {
               <div className="md:col-span-2 border-t pt-3 flex flex-wrap gap-x-6 gap-y-2 text-sm" aria-label="Итого по записи">
                 <span>Услуг: {1 + form.additionalServices.length}</span>
                 <span>Общее время: {totalDurationMinutes} мин</span>
-                <strong>Итого: {totalPriceMinor === null || !Number.isFinite(totalPriceMinor) ? "цена не указана для всех услуг" : `${(totalPriceMinor / 100).toLocaleString("ru-RU")} ₸`}</strong>
+                <strong>Итого: {totalPriceMinor === null || !Number.isFinite(totalPriceMinor) ? "цена не указана для всех услуг" : formatArrivalPrice(String(totalPriceMinor), "KZT")}</strong>
               </div>
               <SelectField label="Статус" value={form.status} onChange={(status) => setForm((current) => ({ ...current, status: normalizeStatus(status) }))}>
                 {statusOptions.map((status) => <option key={status} value={status}>{getAppointmentStatusLabel(status)}</option>)}
@@ -3174,7 +3175,7 @@ export function AppointmentsPage() {
                         {visit.doctor ? ` · ${visit.doctor}` : ""}
                         <span style={{ color: "var(--negis-muted)" }}> · {getAppointmentStatusLabel(visit.status)}</span>
                         {visit.priceMinor !== null ? (
-                          <span className="tabular-nums"> · {Math.round(visit.priceMinor / 100).toLocaleString("ru-RU")} ₸</span>
+                          <span className="tabular-nums"> · {formatArrivalPrice(String(visit.priceMinor), "KZT")}</span>
                         ) : null}
                       </p>
                     ))}

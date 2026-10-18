@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -31,7 +32,7 @@ test("BF1 мастер стоит в форме раньше услуги — п
 
 test("BF2 услуга в списке читается с ценой и длительностью, ноль остаётся нулём", async () => {
   const page = await read("artifacts", "negis", "src", "pages", "AppointmentsPage.tsx");
-  assert.match(page, /\(service\.basePriceMinor \/ 100\)\.toLocaleString\("ru-RU"\)/);
+  assert.match(page, /formatArrivalPrice\(String\(service\.basePriceMinor\), "KZT"\)/);
   assert.match(page, /` · \$\{service\.durationMinutes\} мин`/);
   // «Бесплатная консультация» с ценой 0 — осознанный ноль, а не отсутствие
   // цены: readNumber(price, 0) || null ронял его в null.
@@ -343,4 +344,166 @@ test("BF20 создание, правка, восстановление и от�
     assert.ok(guard.getStart(ast) - callback.body.getStart(ast) < firstConversion, `${name} guards the first conversion`);
   }
   assert.match(page, /const \[clinicTimeZoneReady, setClinicTimeZoneReady\] = useState\(\(\) => !isRealWorkspace\(\)\)/);
+});
+
+type PriceNode = { type: unknown; props: Record<string, unknown> };
+type PriceChild = PriceNode | string | number | null | boolean | PriceChild[];
+
+function priceJsx(type: unknown, props: Record<string, unknown> | null, ...children: PriceChild[]): PriceNode {
+  return { type, props: { ...props, children: children.length === 1 ? children[0] : children } };
+}
+
+function priceText(value: unknown): string {
+  if (typeof value === "string" || typeof value === "number") return String(value);
+  if (Array.isArray(value)) return value.map(priceText).join("");
+  if (value && typeof value === "object" && "props" in value) return priceText((value as PriceNode).props.children);
+  return "";
+}
+
+function compactPrice(value: unknown): string {
+  return priceText(value).replace(/[\s\u00a0\u202f]+/g, "");
+}
+
+async function actualAppointmentPriceViews() {
+  const page = await read("artifacts", "negis", "src", "pages", "AppointmentsPage.tsx");
+  const ast = ts.createSourceFile("AppointmentsPage.tsx", page, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const helperNames = ["normalizeStatus", "pad", "toTimeKey", "timeKeyFromStartsAt", "getAppointmentStatusLabel",
+    "getAppointmentStatusClass", "statusBadge", "Detail", "AppointmentCard"];
+  const selected = helperNames.map((name) => {
+    const node = ast.statements.find((statement): statement is ts.FunctionDeclaration =>
+      ts.isFunctionDeclaration(statement) && statement.name?.text === name);
+    assert.ok(node, `execute the real price component and helpers: missing ${name}`);
+    return node.getText(ast);
+  });
+  for (const name of ["allowedStatusMoves", "statusButtonLabels"]) {
+    let initializer: ts.Expression | undefined;
+    for (const statement of ast.statements) {
+      if (!ts.isVariableStatement(statement)) continue;
+      const variable = statement.declarationList.declarations.find((declaration) => ts.isIdentifier(declaration.name) && declaration.name.text === name);
+      if (variable?.initializer) initializer = variable.initializer;
+    }
+    assert.ok(initializer, `actual card policy missing: ${name}`);
+    selected.push(`const ${name} = ${initializer.getText(ast)};`);
+  }
+  let historyPrice: ts.ConditionalExpression | undefined;
+  let totalPrice: ts.ConditionalExpression | undefined;
+  const optionPrices: ts.Expression[] = [];
+  function visit(node: ts.Node): void {
+    if (ts.isConditionalExpression(node) && node.condition.getText(ast).replace(/\s/g, "") === "visit.priceMinor!==null") historyPrice = node;
+    if (ts.isJsxExpression(node) && node.expression && ts.isConditionalExpression(node.expression)
+      && node.expression.condition.getText(ast).includes("totalPriceMinor")) totalPrice = node.expression;
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.name.text === "price" && node.initializer
+      && node.initializer.getText(ast).includes("service.basePriceMinor")) optionPrices.push(node.initializer);
+    ts.forEachChild(node, visit);
+  }
+  visit(ast);
+  assert.ok(historyPrice, "execute the real history-price conditional, including its null branch");
+  assert.ok(totalPrice, "execute the real booking-total conditional");
+  assert.equal(optionPrices.length, 2, "both catalogue selectors retain their own real price label");
+  const historyPriceExpression = historyPrice;
+  const totalPriceExpression = totalPrice;
+  const require = createRequire(import.meta.url);
+  const bindings: Record<string, unknown> = {
+    ...require(path.join(repoRoot, "lib/vertical/terms.ts")),
+    ...require(path.join(repoRoot, "lib/crm/operator-contracts.ts")),
+    ...require(path.join(repoRoot, "artifacts/negis/src/lib/clinicDateTime.ts")),
+    ...require(path.join(repoRoot, "artifacts/negis/src/lib/phone.ts")),
+    jsx: priceJsx, useAuth: () => ({ vertical: "clinic", userRole: "owner" }), MessageCircle: "MessageCircle", PhoneCall: "PhoneCall",
+  };
+  const compilerOptions = {
+    target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.React, jsxFactory: "jsx",
+  };
+  const cardCode = ts.transpileModule(`${selected.join("\n")}\nreturn AppointmentCard;`, { compilerOptions }).outputText;
+  const card = new Function("exports", ...Object.keys(bindings), cardCode)({}, ...Object.values(bindings)) as (
+    props: { appointment: Record<string, unknown>; timeZone: string; onEdit(): void; onStatus(): void; onSale(): void },
+  ) => PriceNode;
+  function expression(source: ts.Expression, values: Record<string, unknown>): unknown {
+    const code = ts.transpileModule(`return (${source.getText(ast)});`, { compilerOptions }).outputText;
+    const scope = { ...bindings, ...values };
+    return new Function(...Object.keys(scope), code)(...Object.values(scope));
+  }
+  return {
+    card(minor: number | null): PriceNode[] {
+      const tree = card({
+        appointment: {
+          id: "local-price-display", client: "Local price fixture", phone: "", whatsapp: "", startsAt: "2026-10-19T04:10:00.000Z",
+          service: "Local consultation", doctor: "Local specialist", durationMinutes: 45, status: "scheduled", priceMinor: minor,
+        },
+        timeZone: "Asia/Almaty", onEdit() {}, onStatus() {}, onSale() {},
+      });
+      const prices: PriceNode[] = [];
+      function find(value: unknown): void {
+        if (Array.isArray(value)) { value.forEach(find); return; }
+        if (!value || typeof value !== "object" || !("props" in value)) return;
+        const node = value as PriceNode;
+        if (node.props.label === "Цена") prices.push(node);
+        find(node.props.children);
+      }
+      find(tree);
+      return prices;
+    },
+    history: (minor: number | null) => expression(historyPriceExpression, { visit: { priceMinor: minor } }),
+    total: (minor: number | null) => expression(totalPriceExpression, { totalPriceMinor: minor }),
+    options: (minor: number | null) => optionPrices.map((node) => expression(node, { service: { basePriceMinor: minor } })),
+  };
+}
+
+const appointmentPriceViews = await actualAppointmentPriceViews();
+const priceDisplayCases = [
+  { minor: 10050, expected: "100,50₸" },
+  { minor: 1, expected: "0,01₸" },
+  { minor: 0, expected: "0₸" },
+  { minor: 700050, expected: "7000,50₸" },
+  { minor: Number.MAX_SAFE_INTEGER, expected: "90071992547409,91₸" },
+];
+
+for (const { minor, expected } of priceDisplayCases) {
+  test(`BF-PRICE actual AppointmentCard displays exact ${minor} minor units`, () => {
+    const cards = appointmentPriceViews.card(minor);
+    assert.equal(cards.length, 1);
+    assert.equal(compactPrice(cards[0]), expected);
+  });
+  test(`BF-PRICE actual visit-history JSX displays exact ${minor} minor units`, () => {
+    assert.equal(compactPrice(appointmentPriceViews.history(minor)), `·${expected}`);
+  });
+  test(`BF-PRICE catalogue labels and total retain exact ${minor} minor units`, () => {
+    assert.equal(compactPrice(appointmentPriceViews.total(minor)), expected);
+    assert.deepEqual(appointmentPriceViews.options(minor).map(compactPrice), [`—${expected}`, `—${expected}`]);
+  });
+}
+
+test("BF-PRICE null is unknown, never a fabricated free appointment", () => {
+  assert.deepEqual(appointmentPriceViews.card(null), []);
+  assert.equal(appointmentPriceViews.history(null), null);
+  assert.equal(appointmentPriceViews.total(null), "цена не указана для всех услуг");
+  assert.deepEqual(appointmentPriceViews.options(null), ["", ""]);
+  assert.equal(compactPrice(appointmentPriceViews.card(0)[0]), "0₸");
+});
+
+test("BF-PRICE all five presentation points share the existing exact formatter without rounding", async () => {
+  const page = await read("artifacts", "negis", "src", "pages", "AppointmentsPage.tsx");
+  const ast = ts.createSourceFile("AppointmentsPage.tsx", page, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const expected = new Map([["appointment.priceMinor", 0], ["visit.priceMinor", 0], ["service.basePriceMinor", 0], ["totalPriceMinor", 0]]);
+  const priceFields = /\b(?:appointment\.priceMinor|visit\.priceMinor|service\.basePriceMinor|totalPriceMinor)\b/;
+  function visit(node: ts.Node): void {
+    if (ts.isCallExpression(node)) {
+      const callee = node.expression.getText(ast);
+      const text = node.getText(ast);
+      if (callee === "Math.round") assert.doesNotMatch(text, priceFields, "rounding minutes is allowed; rounding prices is not");
+      if (ts.isPropertyAccessExpression(node.expression) && node.expression.name.text === "toLocaleString") {
+        assert.doesNotMatch(text, priceFields, "formatting a divided floating-point price loses exact minor units");
+      }
+      if (callee === "formatArrivalPrice") {
+        const stringified = node.arguments[0];
+        assert.ok(stringified && ts.isCallExpression(stringified) && stringified.expression.getText(ast) === "String");
+        const field = stringified.arguments[0]?.getText(ast) ?? "";
+        assert.ok(expected.has(field), `unexpected displayed price field ${field}`);
+        assert.equal(node.arguments[1]?.getText(ast), '"KZT"');
+        expected.set(field, expected.get(field)! + 1);
+      }
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(ast);
+  assert.deepEqual([...expected], [["appointment.priceMinor", 1], ["visit.priceMinor", 1], ["service.basePriceMinor", 2], ["totalPriceMinor", 1]]);
 });
