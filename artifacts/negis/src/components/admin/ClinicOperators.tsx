@@ -9,7 +9,11 @@ import {
   type OperatorProfile,
 } from "../../../../../lib/crm/operator-contracts";
 
-export function ClinicOperators({ workspaceId }: { workspaceId: string }) {
+export function ClinicOperators({ workspaceId, actorId, isSessionCurrent }: {
+  workspaceId: string;
+  actorId: string;
+  isSessionCurrent: () => boolean;
+}) {
   const list = useOperatorList<OperatorProfile>(
     `operator-directory?workspaceId=${encodeURIComponent(workspaceId)}`,
   );
@@ -200,7 +204,7 @@ export function ClinicOperators({ workspaceId }: { workspaceId: string }) {
           {message}
         </p>
       )}
-      <OperatorRequests key={revision} workspaceId={workspaceId} />
+      <OperatorRequests key={revision} workspaceId={workspaceId} actorId={actorId} isSessionCurrent={isSessionCurrent} />
     </div>
   );
 }

@@ -277,7 +277,8 @@ function setup(search = "") {
   });
   renderer.mount(module.default, [module.fixture.AdminCenterSession, module.fixture.AdminCenterContent]);
   return {
-    renderer, calls, dispatches, tokenCalls, toasts, storageWrites, locations, copies, snapshots, snapshot: () => snapshot,
+    renderer, calls, dispatches, tokenCalls, toasts, storageWrites, locations, copies, snapshots,
+    api, fetch: importedFetch, snapshot: () => snapshot,
     access: () => renderer.instance("AdminCenterContent").props.access,
     emit(id: string | null, event = id ? "SIGNED_IN" : "SIGNED_OUT") {
       sdkActor = id || "";
@@ -311,6 +312,183 @@ function contentWrites(fixture: Fixture, instance: Instance, start: number) {
 function authPanel(fixture: Fixture) {
   return nodes(fixture.renderer.tree()).find((node) => node.props["data-testid"] === "server-admin-auth");
 }
+
+const clinicSources = Promise.all([
+  read("artifacts/negis/src/components/admin/ClinicOperators.tsx"),
+  read("artifacts/negis/src/components/operators/OperatorRequests.tsx"),
+  read("artifacts/negis/src/components/operators/OperatorArrivals.tsx"),
+  read("artifacts/negis/src/lib/operatorApi.ts"),
+  read("lib/crm/operator-contracts.ts"),
+]);
+async function clinicArrival(fixture: Fixture) {
+  const [clinicSource, requestSource, arrivalSource, operatorSource, contractsSource] = await clinicSources;
+  const contracts = evaluate(contractsSource);
+  const children = [hookRenderer(), hookRenderer(), hookRenderer()];
+  const requestId = "00000000-0000-4000-8000-000000000010";
+  const arrival = { appointmentId: "00000000-0000-4000-8000-000000000011", arrivalId: null,
+    status: "arrived", clientName: "Synthetic clinic arrival", startsAt: "2090-10-20T09:00:00Z" };
+  let refreshes = 0;
+  const list = (items: unknown[]) => ({ data: { items, hasMore: false }, offset: 0, error: "",
+    refresh: () => { refreshes++; }, next() {}, previous() {} });
+  fixture.snapshot().setActiveTab("operators"); await fixture.renderer.flush();
+  const clinicProps = nodes(fixture.renderer.tree()).find(node => node.type === "ClinicOperators")?.props;
+  assert.ok(clinicProps, "Use the clinic props produced by the actual AdminCenterContent");
+  const directory = list([]);
+  const clinic = evaluate(clinicSource, {}, {
+    react: children[0].hooks, "@/lib/operatorApi": { useOperatorList: () => directory },
+    "../../../../../lib/crm/operator-contracts": contracts,
+  });
+  children[0].mount(clinic.ClinicOperators, [], clinicProps); await children[0].flush();
+  const requestProps = nodes(children[0].tree()).find(node => node.type === "OperatorRequests")?.props;
+  assert.ok(requestProps, "Traverse the actual ClinicOperators forwarding JSX");
+  const requestsList = list([{ id: requestId, status: "accepted", displayName: "Synthetic operator",
+    clinicBrief: "Local fixture only", pricePerArrivalMinor: "0", currency: "KZT", leadScope: "assigned" }]);
+  const requests = evaluate(requestSource, {}, {
+    react: children[1].hooks, "@/lib/operatorApi": { useOperatorList: () => requestsList },
+    "./OperatorLeads": { OperatorLeads: "OperatorLeads" },
+    "./OperatorServiceCatalog": { OperatorServiceCatalog: "OperatorServiceCatalog" },
+    "./OperatorArrivals": { OperatorArrivals: "OperatorArrivals" },
+    "../../../../../lib/crm/operator-contracts": contracts,
+  });
+  children[1].mount(requests.OperatorRequests, [], requestProps); await children[1].flush();
+  const open = nodes(children[1].tree()).find(node => node.type === "button"
+    && label(node).trim() === "\u041f\u043e\u0434\u0442\u0432\u0435\u0440\u0434\u0438\u0442\u044c \u043f\u0440\u0438\u0445\u043e\u0434\u044b");
+  assert.ok(open); open.props.onClick(); await children[1].flush();
+  const arrivalProps = nodes(children[1].tree()).find(node => node.type === "OperatorArrivals")?.props;
+  assert.ok(arrivalProps, "Open the actual request's arrival panel");
+  const operator = evaluate(select(operatorSource, ["OperatorApiError", "operatorApi"]), {
+    crmFetch: fixture.fetch, CrmApiError: fixture.api.CrmApiError, crmErrorMessage: fixture.api.crmErrorMessage,
+  }).selected;
+  const ast = ts.createSourceFile("OperatorArrivals.tsx", arrivalSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const component = ast.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "OperatorArrivals") as import("typescript").FunctionDeclaration;
+  const returned = component.body!.statements.filter(ts.isReturnStatement).at(-1)!;
+  let confirm!: (item: typeof arrival) => Promise<void>;
+  const arrivalsList = list([arrival]);
+  const arrivals = evaluate(arrivalSource.slice(0, returned.getStart(ast))
+    + "\n__observeConfirm(confirm);\n" + arrivalSource.slice(returned.getStart(ast)), {
+    __observeConfirm: (handler: typeof confirm) => { confirm = handler; },
+    window: { addEventListener() {}, removeEventListener() {} },
+    document: { addEventListener() {}, removeEventListener() {}, visibilityState: "visible" },
+  }, {
+    react: children[2].hooks, "@/lib/operatorApi": { ...operator, useOperatorList: () => arrivalsList },
+    "../../../../../lib/crm/operator-contracts": contracts,
+  });
+  children[2].mount(arrivals.OperatorArrivals, [], arrivalProps); await children[2].flush();
+  return { clinicProps, requestProps, arrivalProps, arrival, confirm: () => confirm(arrival),
+    renderer: children[2], refreshes: () => refreshes, dispose: () => children.forEach(child => child.dispose()) };
+}
+const clinicPosts = (fixture: Fixture) => fixture.dispatches.filter(call =>
+  call.path.startsWith("/api/crm/clinic-operator-arrivals?") && call.init.method === "POST");
+
+test("clinic arrival keeps the actor and live session through every actual parent", async () => {
+  const fixture = await ready(), ui = await clinicArrival(fixture);
+  try {
+    for (const props of [ui.clinicProps, ui.requestProps, ui.arrivalProps]) {
+      assert.equal(props.actorId, actorA);
+      assert.equal(props.isSessionCurrent, fixture.access().isCurrent);
+    }
+    await ui.confirm();
+    const posts = clinicPosts(fixture);
+    assert.equal(posts.length, 1);
+    assert.equal(fixture.tokenCalls.at(-1), actorA);
+    assert.deepEqual(JSON.parse(String(posts[0].init.body)), { appointmentId: ui.arrival.appointmentId });
+    assert.equal(Object.hasOwn(posts[0].init, "expectedUserId"), false);
+    assert.equal(Object.hasOwn(posts[0].init, "dispatchGuard"), false);
+    assert.equal(ui.refreshes(), 1);
+  } finally { ui.dispose(); fixture.renderer.dispose(); }
+});
+
+test("clinic arrival queued before raw SDK account/logout/A-B-A changes never dispatches", async () => {
+  for (const boundary of ["actor", "logout", "roundtrip"]) {
+    const fixture = await ready(), ui = await clinicArrival(fixture), token = deferred<string>();
+    let work: Promise<void> | undefined;
+    try {
+      fixture.token(async () => token.promise);
+      work = ui.confirm(); await ui.renderer.flush();
+      assert.equal(clinicPosts(fixture).length, 0);
+      fixture.emit(boundary === "logout" ? null : actorB);
+      if (boundary === "roundtrip") fixture.emit(actorA);
+      const writes = ui.renderer.writes.length;
+      token.resolve("local-fixture-token"); await work; await ui.renderer.flush();
+      assert.equal(clinicPosts(fixture).length, 0, boundary);
+      assert.equal(ui.renderer.writes.length, writes, "Expired work cannot publish an error or release another action's busy state");
+      assert.equal(ui.refreshes(), 0);
+    } finally { token.resolve("local-fixture-token"); await work; ui.dispose(); fixture.renderer.dispose(); }
+  }
+});
+
+test("clinic arrival retained handlers stop before state writes or token lookup after session expiry", async () => {
+  for (const boundary of ["actor", "logout", "roundtrip"]) {
+    const fixture = await ready(), ui = await clinicArrival(fixture);
+    try {
+      fixture.emit(boundary === "logout" ? null : actorB);
+      if (boundary === "roundtrip") fixture.emit(actorA);
+      const writes = ui.renderer.writes.length, lookups = fixture.tokenCalls.length;
+      await ui.confirm(); await ui.renderer.flush();
+      assert.equal(ui.renderer.writes.length, writes, boundary);
+      assert.equal(fixture.tokenCalls.length, lookups);
+      assert.equal(clinicPosts(fixture).length, 0);
+      assert.equal(ui.refreshes(), 0);
+    } finally { ui.dispose(); fixture.renderer.dispose(); }
+  }
+});
+
+test("clinic arrival refuses a different SDK actor even before auth events reach the parent", async () => {
+  const fixture = await ready(), ui = await clinicArrival(fixture), lookup = deferred<void>();
+  let work: Promise<void> | undefined;
+  try {
+    const auth = evaluate(await read("artifacts/negis/src/lib/serverAuth.ts"), {}, {
+      "@/lib/supabase": { hasSupabaseFrontendEnv: true, supabase: { auth: { async getSession() {
+        await lookup.promise;
+        return { data: { session: { user: { id: actorB }, access_token: "synthetic-B-not-a-real-token" } }, error: null };
+      } } } },
+      "@/lib/authSignOut": { isSignOutPending: () => false, getSignOutRevision: () => 0 },
+    });
+    fixture.token(expected => auth.getSupabaseAccessToken(expected));
+    work = ui.confirm(); await ui.renderer.flush();
+    assert.equal(clinicPosts(fixture).length, 0);
+    lookup.resolve(); await work; await ui.renderer.flush();
+    assert.equal(fixture.access().isCurrent(), true, "No raw event or parent rerender is needed to reproduce this token mismatch");
+    assert.equal(fixture.tokenCalls.at(-1), actorA);
+    assert.equal(clinicPosts(fixture).length, 0);
+    assert.equal(ui.refreshes(), 1, "A live-scope authentication refusal still invalidates the list");
+  } finally { lookup.resolve(); await work; ui.dispose(); fixture.renderer.dispose(); }
+});
+
+test("clinic arrival accepts same-actor token refresh while the original session remains live", async () => {
+  const fixture = await ready(), ui = await clinicArrival(fixture), lookup = deferred<string>();
+  let work: Promise<void> | undefined;
+  try {
+    fixture.token(() => lookup.promise);
+    work = ui.confirm(); await ui.renderer.flush();
+    fixture.emit(actorA, "TOKEN_REFRESHED");
+    assert.equal(fixture.access().isCurrent(), true);
+    lookup.resolve("synthetic-A-rotated"); await work; await ui.renderer.flush();
+    assert.equal(clinicPosts(fixture).length, 1);
+    assert.equal(new Headers(clinicPosts(fixture)[0].init.headers).get("Authorization"), "Bearer synthetic-A-rotated");
+    assert.equal(ui.refreshes(), 1);
+  } finally { lookup.resolve("synthetic-A-rotated"); await work; ui.dispose(); fixture.renderer.dispose(); }
+});
+
+test("clinic arrival late outcomes after raw account transitions cannot publish before React commits", async () => {
+  for (const boundary of ["actor", "roundtrip"]) for (const status of [200, 401, 403, "network"] as const) {
+    const fixture = await ready(), ui = await clinicArrival(fixture), reply = deferred<Response>();
+    let work: Promise<void> | undefined;
+    try {
+      fixture.reply(async () => reply.promise);
+      work = ui.confirm(); await ui.renderer.flush();
+      assert.equal(clinicPosts(fixture).length, 1);
+      fixture.emit(actorB); if (boundary === "roundtrip") fixture.emit(actorA);
+      const writes = ui.renderer.writes.length;
+      if (status === "network") reply.reject(new Error("Synthetic transport failure"));
+      else reply.resolve(Response.json({ success: status === 200 }, { status }));
+      await work; await ui.renderer.flush();
+      assert.equal(ui.renderer.writes.length, writes, `${boundary}/${status}`);
+      assert.equal(ui.refreshes(), 0);
+      assert.equal(clinicPosts(fixture).length, 1, "Already dispatched writes are not represented as canceled");
+    } finally { reply.resolve(ok()); await work; ui.dispose(); fixture.renderer.dispose(); }
+  }
+});
 
 const staffUi = {
   add: "\u0414\u043e\u0431\u0430\u0432\u0438\u0442\u044c \u0441\u043e\u0442\u0440\u0443\u0434\u043d\u0438\u043a\u0430",

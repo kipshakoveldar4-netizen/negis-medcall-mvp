@@ -46,11 +46,13 @@ function dateTime(value: string) {
 
 export function OperatorArrivals({
   actorId,
+  isSessionCurrent,
   requestId,
   workspaceId,
   onAccessDenied,
 }: {
-  actorId?: string;
+  actorId: string;
+  isSessionCurrent?: () => boolean;
   requestId: string;
   workspaceId?: string;
   onAccessDenied?: () => void;
@@ -93,10 +95,12 @@ export function OperatorArrivals({
   }, [list.refresh]);
 
   async function confirm(item: OperatorArrival) {
+    if (!mounted.current || !actorId || isSessionCurrent?.() === false) return;
     const startedAtView = currentView.current;
-    const isCurrent = () => mounted.current && currentView.current === startedAtView;
+    const isCurrent = () => mounted.current && isSessionCurrent?.() !== false && currentView.current === startedAtView;
     const isSameScope = () =>
       mounted.current &&
+      isSessionCurrent?.() !== false &&
       currentView.current.path === startedAtView.path &&
       currentView.current.actorId === startedAtView.actorId;
     setBusyId(item.appointmentId);
@@ -107,7 +111,7 @@ export function OperatorArrivals({
         { appointmentId: item.appointmentId },
         "POST",
         undefined,
-        clinic ? undefined : actorId,
+        actorId,
         isCurrent,
       );
       if (!isCurrent()) return;
@@ -132,11 +136,12 @@ export function OperatorArrivals({
     item: OperatorArrival,
     result: OperatorArrivalCheckResult,
   ) {
-    if (!item.arrivalId) return;
+    if (!item.arrivalId || !mounted.current || !actorId || isSessionCurrent?.() === false) return;
     const startedAtView = currentView.current;
-    const isCurrent = () => mounted.current && currentView.current === startedAtView;
+    const isCurrent = () => mounted.current && isSessionCurrent?.() !== false && currentView.current === startedAtView;
     const isSameScope = () =>
       mounted.current &&
+      isSessionCurrent?.() !== false &&
       currentView.current.path === startedAtView.path &&
       currentView.current.actorId === startedAtView.actorId;
     setBusyId(item.arrivalId);
@@ -147,7 +152,7 @@ export function OperatorArrivals({
         { arrivalId: item.arrivalId, result },
         "PATCH",
         undefined,
-        clinic ? undefined : actorId,
+        actorId,
         isCurrent,
       );
       if (!isCurrent()) return;

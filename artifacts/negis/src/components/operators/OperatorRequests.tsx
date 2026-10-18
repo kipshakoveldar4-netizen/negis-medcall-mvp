@@ -14,10 +14,12 @@ import {
 export function OperatorRequests({
   workspaceId,
   actorId,
+  isSessionCurrent,
   onAccessDenied,
 }: {
   workspaceId?: string;
-  actorId?: string;
+  actorId: string;
+  isSessionCurrent?: () => boolean;
   onAccessDenied?: () => void;
 }) {
   const path = workspaceId
@@ -255,7 +257,8 @@ export function OperatorRequests({
           {item.status === "accepted" && openArrivals === item.id && (
             <OperatorArrivals
               key={`${item.id}:arrivals`}
-              actorId={workspaceId ? undefined : actorId}
+              actorId={actorId}
+              isSessionCurrent={isSessionCurrent}
               requestId={item.id}
               workspaceId={workspaceId}
               onAccessDenied={workspaceId ? undefined : invalidateAccess}

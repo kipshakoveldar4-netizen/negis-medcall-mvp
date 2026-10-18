@@ -229,8 +229,11 @@ async function fixture(t: TestContext, kind: Kind) {
   const driver = hookDriver();
   t.after(() => driver.dispose());
   const requests: Request[] = [];
+  let sessionActor = "synthetic-actor";
+  let sessionRevision = 0;
+  const isSessionCurrent = () => sessionActor === "synthetic-actor" && sessionRevision === 0;
   let props: Props = kind === "requests" ? { actorId: "synthetic-actor" }
-    : { actorId: "synthetic-actor", requestId: "synthetic-request-A", ...(kind === "confirm" ? { workspaceId: "synthetic-workspace-A" } : {}) };
+    : { actorId: "synthetic-actor", requestId: "synthetic-request-A", ...(kind === "confirm" ? { workspaceId: "synthetic-workspace-A", isSessionCurrent } : {}) };
   const globals = {
     Error, AbortController,
     window: { ...eventTarget(), confirm: () => true },
@@ -355,11 +358,11 @@ async function fixture(t: TestContext, kind: Kind) {
       await driver.flush();
       assert.equal(snapshot().busy, true);
       const mutation = take(kind === "confirm" ? "POST" : "PATCH");
-      assert.equal(mutation.expectedUserId, props.workspaceId ? undefined : props.actorId,
-        "Operator writes pin their actor; clinic writes preserve the existing auth semantics");
+      assert.equal(mutation.expectedUserId, kind === "requests" && props.workspaceId ? undefined : props.actorId,
+        "Arrival writes in both modes must pin their actor");
       const arrivals = driver.nodes().find((node) => node.type === boundaries.OperatorArrivals);
-      if (arrivals) assert.equal(arrivals.props.actorId, props.workspaceId ? undefined : props.actorId,
-        "Requests must forward the operator actor to the nested Arrivals view");
+      if (arrivals) assert.equal(arrivals.props.actorId, props.actorId,
+        "Requests must preserve the actor for the nested Arrivals view in either mode");
       return mutation;
     },
     changeScope() {
@@ -370,6 +373,10 @@ async function fixture(t: TestContext, kind: Kind) {
     changeActor() {
       props = { ...props, actorId: "synthetic-actor-B" };
       driver.invalidate();
+    },
+    changeSessionActor(actorId: string) {
+      if (sessionActor !== actorId) sessionRevision++;
+      sessionActor = actorId;
     },
     refresh() { invoke(iconButton(icons.RefreshCw)); },
     next() { invoke(iconButton(icons.ChevronRight)); },
@@ -538,5 +545,30 @@ for (const kind of kinds) {
         }
       });
     }
+  }
+}
+
+for (const transition of ["A-B", "A-B-A"] as const) {
+  for (const outcome of ["success", "network", 401, 403] as const) {
+    test(`confirm: raw ${transition} session expiration suppresses late ${outcome} without a render`, async (t) => {
+      const ui = await fixture(t, "confirm");
+      const obsolete = await ui.startAction();
+      ui.changeSessionActor("synthetic-actor-B");
+      if (transition === "A-B-A") ui.changeSessionActor("synthetic-actor");
+      const before = ui.snapshot();
+      const writes = ui.setterCalls();
+      const count = ui.requests.length;
+      if (outcome === "success") obsolete.succeed();
+      else if (outcome === "network") obsolete.reject();
+      else obsolete.fail(outcome);
+      await ui.drainBeforeEffects();
+      assert.deepEqual(ui.snapshot(), before, "Expired success/error/finally must not alter the old rendered view");
+      assert.equal(ui.setterCalls(), writes, "Session invalidation must stop writes before React rerenders or unmounts");
+      assert.equal(ui.requests.length, count, "An expired confirmation cannot refresh authorization");
+      await ui.flush();
+      assert.deepEqual(ui.snapshot(), before);
+      assert.equal(ui.setterCalls(), writes);
+      assert.equal(ui.requests.length, count);
+    });
   }
 }

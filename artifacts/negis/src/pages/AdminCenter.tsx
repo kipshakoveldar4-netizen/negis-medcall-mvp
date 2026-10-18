@@ -4514,7 +4514,8 @@ function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
         {isMortgage ? (activeTab === "whatsapp" ? renderMortgageWhatsApp() : renderStaff()) : <>
           {activeTab === "overview" && renderOverview()}
           {activeTab === "staff" && renderStaff()}
-          {activeTab === "operators" && <ClinicOperators key={workspaceId} workspaceId={workspaceId} />}
+          {activeTab === "operators" && <ClinicOperators key={workspaceId} workspaceId={workspaceId}
+            actorId={access.actorId} isSessionCurrent={access.isCurrent} />}
           {activeTab === "doctors" && <DoctorSchedule />}
           {activeTab === "roles" && renderRoles()}
           {activeTab === "clinic" && renderClinic()}

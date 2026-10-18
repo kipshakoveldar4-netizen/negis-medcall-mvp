@@ -19,6 +19,7 @@ if (sourceRef !== undefined) {
   assert.equal(execFileSync("git", ["cat-file", "-t", sourceRef], { cwd: root, encoding: "utf8" }).trim(), "commit");
 }
 const files = {
+  clinic: "artifacts/negis/src/components/admin/ClinicOperators.tsx",
   requests: "artifacts/negis/src/components/operators/OperatorRequests.tsx",
   leads: "artifacts/negis/src/components/operators/OperatorLeads.tsx",
   booking: "artifacts/negis/src/components/operators/OperatorBookingForm.tsx",
@@ -59,7 +60,7 @@ const jsx = (type: unknown, props: Props, key?: unknown): Element => ({ type, pr
 const Fragment = Symbol("Fragment");
 const icons = Object.fromEntries([
   "Check", "X", "RefreshCw", "ChevronLeft", "ChevronRight", "CheckCircle2", "Phone", "PhoneOff", "XCircle",
-  "Save", "Search", "CalendarPlus",
+  "Save", "Search", "CalendarPlus", "Send",
 ].map((name) => [name, Symbol(name)]));
 function isElement(child: Child): child is Element {
   return child !== null && typeof child === "object" && !Array.isArray(child);
@@ -351,6 +352,7 @@ async function runtime(t: TestContext, queueMutations = false) {
       if (name === "lucide-react") return icons;
       if (name.endsWith("/crm/operator-contracts")) return load("contracts");
       const componentModules: Record<string, string> = {
+        "@/components/operators/OperatorRequests": "requests",
         "./OperatorLeads": "leads", "./OperatorBookingForm": "booking", "./OperatorServiceCatalog": "catalog",
         "./OperatorArrivals": "arrivals", "@/lib/operatorApi": "api", "@/lib/operatorBookingAttempt": "attempts",
       };
@@ -571,7 +573,7 @@ async function queuedAction(t: TestContext, target: QueuedAction) {
   const name = target === "request" ? "OperatorRequests" : arrivals ? "OperatorArrivals" : "OperatorLeads";
   const component = ui.load(target === "request" ? "requests" : arrivals ? "arrivals" : "leads")[name];
   const props = {
-    actorId: target === "clinic-confirmation" ? undefined : ACTOR, requestId: REQUEST_A, leadScope: "assigned",
+    actorId: ACTOR, requestId: REQUEST_A, leadScope: "assigned",
     ...(clinic ? { workspaceId: WORKSPACE } : {}), onAccessDenied,
   };
   ui.render.mount(jsx(component, props));
@@ -667,7 +669,7 @@ async function queuedAction(t: TestContext, target: QueuedAction) {
 }
 
 for (const target of ["request", "call", "stage", "booking", "clinic-assignment", "clinic-confirmation"] as const) {
-  const changes = target === "clinic-confirmation" ? ["unmount", "path", "refresh"] as const : ["unmount", "actor", "path", "refresh"] as const;
+  const changes = ["unmount", "actor", "path", "refresh"] as const;
   for (const change of changes) {
     test(`component queued ${target}: ${change} prevents dispatch before passive cleanup`, async (t) => {
       const ui = await queuedAction(t, target);
@@ -702,6 +704,139 @@ for (const target of ["request", "call", "stage", "booking", "clinic-assignment"
       "Successful live mutations still revalidate the real list");
     if (target === "booking") assert.equal(ui.storage.size, 0, "A confirmed live booking releases its persisted attempt");
   });
+}
+
+async function clinicConfirmation(t: TestContext) {
+  const ui = await runtime(t, true);
+  const Clinic = ui.load("clinic").ClinicOperators;
+  let actorId = ACTOR;
+  let epoch = 0;
+  let session = { current: true };
+  let rawActor = ACTOR;
+  function view() {
+    const lifetime = session;
+    return jsx(Clinic, { workspaceId: WORKSPACE, actorId, isSessionCurrent: () => lifetime.current }, epoch);
+  }
+  const row = (label: string) => ({
+    appointmentId: "synthetic-appointment", arrivalId: null, status: "arrived",
+    clientName: `Synthetic clinic patient ${label}`, startsAt: "2026-10-18T09:00:00Z",
+    service: "Synthetic clinic service", priceMinor: "100", currency: "KZT",
+  });
+  async function populate(label: string) {
+    await ui.render.flush();
+    ui.take("ClinicOperators").succeed(list([]));
+    ui.take("OperatorRequests").succeed(list([{
+      id: REQUEST_A, status: "accepted", displayName: `Synthetic clinic ${label}`,
+      pricePerArrivalMinor: "100", currency: "KZT", leadScope: "assigned",
+    }]));
+    await ui.render.flush();
+    ui.invoke(ui.button("\u041f\u043e\u0434\u0442\u0432\u0435\u0440\u0434\u0438\u0442\u044c \u043f\u0440\u0438\u0445\u043e\u0434\u044b"));
+    await ui.render.flush();
+    ui.take("OperatorArrivals").succeed(list([row(label)]));
+    await ui.render.flush();
+  }
+  function confirmationButton() {
+    return ui.find((node) => node.type === "button" && elements(node.props.children)
+      .some((child) => child.type === icons.CheckCircle2), ui.section(labels.arrivals));
+  }
+  async function start() {
+    ui.invoke(confirmationButton());
+    await ui.render.flush();
+    const mutation = ui.take("event", "POST");
+    assert.equal(mutation.url, `/api/crm/clinic-operator-arrivals?workspaceId=${WORKSPACE}&requestId=${REQUEST_A}`);
+    assert.deepEqual(mutation.body, { appointmentId: "synthetic-appointment" });
+    assert.equal(mutation.expectedUserId, actorId, "The real clinic/request/arrival chain must preserve its actor");
+    assert.equal(mutation.dispatchGuard?.(), true);
+    assert.equal(mutation.dispatched, false);
+    assert.equal(confirmationButton().props.disabled, true);
+    return mutation;
+  }
+  ui.render.mount(view());
+  await populate("A");
+  return {
+    ...ui, start, confirmationButton,
+    changeRawActor(nextActor: string) {
+      if (rawActor !== nextActor) session.current = false;
+      rawActor = nextActor;
+    },
+    async replaceActor(nextActor: string) {
+      const oldClinic = ui.render.instances("ClinicOperators")[0];
+      const oldRequests = ui.render.instances("OperatorRequests")[0];
+      const oldArrivals = ui.render.instances("OperatorArrivals")[0];
+      session.current = false;
+      session = { current: true };
+      actorId = rawActor = nextActor;
+      epoch++;
+      ui.render.update(view());
+      await ui.render.beforeEffects();
+      assert.notEqual(ui.render.instances("ClinicOperators")[0], oldClinic);
+      assert.notEqual(ui.render.instances("OperatorRequests")[0], oldRequests);
+      assert.equal(ui.render.instances("OperatorArrivals").length, 0);
+      await populate(`epoch-${epoch}`);
+      assert.notEqual(ui.render.instances("OperatorArrivals")[0], oldArrivals);
+    },
+  };
+}
+
+for (const transition of ["A-B", "A-B-A"] as const) {
+  test(`composed clinic confirmation: raw ${transition} invalidates queued dispatch without a render`, async (t) => {
+    const ui = await clinicConfirmation(t);
+    const mutation = await ui.start();
+    const clinic = ui.render.instances("ClinicOperators")[0];
+    const arrivals = ui.render.instances("OperatorArrivals")[0];
+    ui.changeRawActor(REQUEST_B);
+    if (transition === "A-B-A") ui.changeRawActor(ACTOR);
+    const before = ui.render.content();
+    const writes = ui.render.writes();
+    const count = ui.requests.length;
+    const dispatched = ui.dispatched.length;
+    assert.equal(mutation.dispatchGuard?.(), false, "An expired session cannot revive when its actor returns");
+    mutation.release();
+    await ui.render.beforeEffects();
+    assert.equal(mutation.settled, true);
+    assert.equal(mutation.dispatched, false);
+    assert.equal(ui.dispatched.length, dispatched);
+    assert.equal(ui.requests.length, count);
+    assert.equal(ui.render.writes(), writes, "Cancellation must not write error/busy state or refresh a list");
+    assert.equal(ui.render.content(), before);
+    assert.equal(ui.render.instances("ClinicOperators")[0], clinic);
+    assert.equal(ui.render.instances("OperatorArrivals")[0], arrivals);
+  });
+  for (const outcome of ["success", "network", 401, 403] as const) {
+    test(`composed clinic confirmation: late ${outcome} after ${transition} replacement cannot alter the current confirmation`, async (t) => {
+      const ui = await clinicConfirmation(t);
+      const obsolete = await ui.start();
+      obsolete.release();
+      await ui.replaceActor(REQUEST_B);
+      if (transition === "A-B-A") await ui.replaceActor(ACTOR);
+      const current = await ui.start();
+      current.release();
+      const clinic = ui.render.instances("ClinicOperators")[0];
+      const arrivals = ui.render.instances("OperatorArrivals")[0];
+      const before = ui.render.content();
+      const writes = ui.render.writes();
+      const count = ui.requests.length;
+      const dispatched = ui.dispatched.length;
+      if (outcome === "success") obsolete.succeed();
+      else if (outcome === "network") obsolete.reject();
+      else obsolete.fail(outcome);
+      await ui.render.beforeEffects();
+      assert.equal(ui.render.content(), before);
+      assert.equal(ui.render.writes(), writes, "Old success/error/finally callbacks must make no state writes");
+      assert.equal(ui.requests.length, count);
+      assert.equal(ui.dispatched.length, dispatched);
+      assert.equal(ui.render.instances("ClinicOperators")[0], clinic);
+      assert.equal(ui.render.instances("OperatorArrivals")[0], arrivals);
+      assert.equal(ui.confirmationButton().props.disabled, true, "Old finally cannot unlock the new actor's pending POST");
+      assert.equal(current.settled, false);
+      await ui.render.flush();
+      assert.equal(ui.requests.length, count, "No delayed refresh may escape the obsolete callback");
+      current.fail(409);
+      await ui.render.flush();
+      assert.equal(ui.confirmationButton().props.disabled, false);
+      assert.equal(text(ui.find((node) => node.props.role === "alert").props.children), "Synthetic failure 409");
+    });
+  }
 }
 
 test("component queued request: changing the visible page invalidates dispatch before passive cleanup", async (t) => {
