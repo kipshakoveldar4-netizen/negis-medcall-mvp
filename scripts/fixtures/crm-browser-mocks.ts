@@ -15,6 +15,7 @@ const assignedLeadFixture = fixtureRole === "lead_manager";
 const mortgageFixture = fixtureParams.get("fixturePurpose") === "mortgage_leads";
 const operatorFixture = createOperatorBrowserFixture();
 export const suspendOperatorFixture = () => operatorFixture.suspend();
+export const endOperatorCooperationFixture = () => operatorFixture.endCooperation();
 const workspaceId = "00000000-0000-4000-8000-000000000001";
 const clientId = "00000000-0000-4000-8000-000000000002";
 const doctorId = "00000000-0000-4000-8000-000000000003";

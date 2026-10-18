@@ -8,10 +8,12 @@ const ids = {
 // Visual-only state. No Auth, environment, database or external request is used.
 export function createOperatorBrowserFixture() {
   let suspended = false;
+  let ended = false;
   const ok = (data: unknown) => Response.json({ success: true, data });
   const deny = () => Response.json({ success: false }, { status: 403 });
   return {
     suspend() { suspended = true; },
+    endCooperation() { ended = true; },
     request(url: URL, init?: RequestInit): Response {
       init?.signal?.throwIfAborted();
       if (url.origin !== "http://fixture.invalid" || !url.pathname.startsWith("/api/crm/operator-")) {
@@ -25,9 +27,10 @@ export function createOperatorBrowserFixture() {
       });
       if (suspended) return deny();
       if (resource === "operator-inbox") return ok({ items: [{
-        id: ids.request, displayName: "ТЕСТ O1 пространство", status: "accepted", leadScope: "assigned",
+        id: ids.request, displayName: "ТЕСТ O1 пространство", status: ended ? "ended" : "accepted", leadScope: "assigned",
         clinicBrief: "Только синтетические данные", currency: "KZT", pricePerArrivalMinor: "0",
       }], hasMore: false });
+      if (ended) return deny();
       if (url.searchParams.get("requestId") !== ids.request) return deny();
       if (resource === "operator-leads") return ok({ items: [{
         id: ids.lead, name: "ТЕСТ O1 контакт", phone: "+70000000991", status: "new", stageId: null,

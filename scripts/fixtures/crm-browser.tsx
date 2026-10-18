@@ -15,17 +15,21 @@ import MortgageClients from '../../artifacts/negis/src/pages/MortgageClients';
 import MortgageCalendar from '../../artifacts/negis/src/pages/MortgageCalendar';
 import MortgageTasks from '../../artifacts/negis/src/pages/MortgageTasks';
 import MortgageAnalytics from '../../artifacts/negis/src/pages/MortgageAnalytics';
-import {useAuth, suspendOperatorFixture} from './crm-browser-mocks';
+import {useAuth, suspendOperatorFixture, endOperatorCooperationFixture} from './crm-browser-mocks';
 import OperatorPortal from '../../artifacts/negis/src/pages/OperatorPortal';
 
 const mortgage=useAuth().workspacePurpose==='mortgage_leads';
 
 function OperatorFixture() {
   const [revoked, setRevoked] = React.useState(false);
+  const [ended, setEnded] = React.useState(false);
   return <React.StrictMode>
-    <div className="border-b p-3"><button type="button" className="neu-btn" disabled={revoked}
+    <div className="border-b p-3 flex flex-wrap gap-3"><button type="button" className="neu-btn" disabled={revoked}
       onClick={() => { suspendOperatorFixture(); setRevoked(true); }}>
       {revoked ? "ТЕСТ: одобрение отозвано" : "ТЕСТ: отозвать одобрение"}
+    </button><button type="button" className="neu-btn" disabled={ended}
+      onClick={() => { endOperatorCooperationFixture(); setEnded(true); }}>
+      {ended ? "ТЕСТ: сотрудничество завершено" : "ТЕСТ: завершить сотрудничество"}
     </button></div>
     <OperatorPortal />
   </React.StrictMode>;
