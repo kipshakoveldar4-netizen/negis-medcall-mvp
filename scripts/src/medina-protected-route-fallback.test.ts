@@ -93,17 +93,43 @@ test("unsupported mortgage roles settle on a denial instead of a Landing -> lead
   }
 });
 
-test("allowed mortgage roles still render leads and manager admin URLs redirect once", () => {
+test("allowed mortgage roles still render their own-work routes", () => {
   for (const role of ["owner", "admin", "lead_manager"]) {
-    const app = fixture({ userRole: role });
-    assert.equal(app.render()?.type, app.privatePage);
-    assert.deepEqual(app.navigations, []);
+    for (const entry of ["/dashboard", "/leads", "/clients", "/appointments", "/booking", "/tasks"]) {
+      const app = fixture({ userRole: role }, entry);
+      assert.equal(app.render()?.type, app.privatePage, `${role}: ${entry}`);
+      assert.deepEqual(app.navigations, []);
+    }
   }
-  const manager = fixture({ userRole: "lead_manager" }, "/admin");
-  assert.equal(manager.render(), null);
-  assert.equal(manager.location(), "/leads");
-  assert.equal(manager.render()?.type, manager.privatePage);
-  assert.deepEqual(manager.navigations, ["/leads"]);
+});
+
+test("lead-manager admin, analytics and ad URLs stay denied before one purpose-specific fallback", () => {
+  for (const purpose of ["mortgage_leads", "clinic_services", "marketing"] as const) {
+    for (const [entry, permission] of [["/admin", "admin"], ["/analytics", "crm"],
+      ["/ads", "ads"], ["/ads-automation", "ads"]]) {
+      const manager = fixture({ workspacePurpose: purpose, userRole: "lead_manager",
+        rolePermissions: { crm: true, admin: true, dashboard: true, ads: true } }, entry);
+      assert.equal(manager.render(permission), null, `${purpose}: ${entry} must not render before redirect`);
+      const target = purpose === "mortgage_leads" ? "/dashboard" : "/leads";
+      assert.equal(manager.location(), target);
+      assert.equal(manager.render()?.type, manager.privatePage);
+      assert.deepEqual(manager.navigations, [target]);
+    }
+  }
+});
+
+test("guests cannot render private routes in any workspace profile", () => {
+  for (const purpose of ["mortgage_leads", "clinic_services", "marketing", null] as const) {
+    for (const [entry, permission] of [["/dashboard", "dashboard"], ["/leads", "crm"],
+      ["/admin", "admin"], ["/ads", "ads"]]) {
+      const guest = fixture({ workspacePurpose: purpose, userRole: null, rolePermissions: {} }, entry);
+      for (let render = 0; render < 3; render++) {
+        assert.ok(!nodes(guest.render(permission)).some((node) => node.type === guest.privatePage),
+          `${purpose}: ${entry}`);
+      }
+      assert.ok(guest.navigations.length <= 1, "guest denial must not create a redirect loop");
+    }
+  }
 });
 
 test("loading and unverified purposes never render the denied private component", () => {

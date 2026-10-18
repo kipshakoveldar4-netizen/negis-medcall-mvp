@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -19,6 +20,7 @@ import { fileURLToPath } from "node:url";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const negisSrc = path.join(repoRoot, "artifacts", "negis", "src");
+const ts = createRequire(path.join(repoRoot, "package.json"))("typescript") as typeof import("typescript");
 
 async function readSource(...segments: string[]): Promise<string> {
   return readFile(path.join(negisSrc, ...segments), "utf8");
@@ -300,18 +302,45 @@ test("P19 no page is reachable through two different inline route wrappers", asy
 
 test("P20 the shared pages point at hoisted components, not at fresh closures", async () => {
   const source = await readSource("App.tsx");
+  const ast = ts.createSourceFile("App.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const declarations = ast.statements.filter(ts.isVariableStatement)
+    .flatMap((statement) => [...statement.declarationList.declarations]);
+  const routes: import("typescript").JsxSelfClosingElement[] = [];
+  const visit = (node: import("typescript").Node) => {
+    if (ts.isJsxSelfClosingElement(node) && node.tagName.getText(ast) === "Route") routes.push(node);
+    ts.forEachChild(node, visit);
+  };
+  visit(ast);
+  const attribute = (element: import("typescript").JsxSelfClosingElement, name: string) =>
+    element.attributes.properties.find((property): property is import("typescript").JsxAttribute =>
+      ts.isJsxAttribute(property) && property.name.getText(ast) === name)?.initializer;
 
-  for (const wrapper of ["AppointmentsRoute", "MarketRoute", "AdsAutomationRoute", "ContentStudioRoute"]) {
-    const declaration = `const ${wrapper} = () => <ProtectedPage`;
-    assert.equal(
-      source.split(declaration).length - 1,
-      1,
-      `${wrapper} must be declared exactly once, at module level`,
-    );
+  for (const [wrapper, guard, paths] of [
+    ["AppointmentsRoute", "PurposePage", ["/booking", "/appointments"]],
+    ["MarketRoute", "ProtectedPage", ["/marketplace", "/market"]],
+    ["AdsAutomationRoute", "ProtectedPage", ["/ads-automation/history", "/ads-automation"]],
+    ["ContentStudioRoute", "ProtectedPage", ["/content-studio", "/ai-content-studio", "/content", "/studio"]],
+  ] as const) {
+    const matches = declarations.filter((declaration) => ts.isIdentifier(declaration.name) && declaration.name.text === wrapper);
+    assert.equal(matches.length, 1, `${wrapper} must be declared exactly once, at module level`);
+    const initializer = matches[0].initializer;
+    assert.ok(initializer && ts.isArrowFunction(initializer));
+    assert.ok(ts.isJsxSelfClosingElement(initializer.body));
+    assert.equal(initializer.body.tagName.getText(ast), guard, `${wrapper} must retain its access guard`);
+    if (wrapper === "AppointmentsRoute") {
+      assert.equal(attribute(initializer.body, "mortgage")?.getText(ast), "{MortgageCalendar}");
+      assert.equal(attribute(initializer.body, "clinic")?.getText(ast), "{AppointmentsPage}");
+      assert.equal(attribute(initializer.body, "permission")?.getText(ast), '"booking"');
+    }
+    for (const routePath of paths) {
+      const matchingRoutes = routes.filter((route) => {
+        const pathname = attribute(route, "path");
+        return pathname && ts.isStringLiteral(pathname) && pathname.text === routePath;
+      });
+      assert.equal(matchingRoutes.length, 1, `${routePath} must have exactly one route`);
+      const component = attribute(matchingRoutes[0], "component");
+      assert.ok(component && ts.isJsxExpression(component) && component.expression && ts.isIdentifier(component.expression));
+      assert.equal(component.expression.text, wrapper, `${routePath} must reuse ${wrapper} instead of a fresh closure`);
+    }
   }
-  assert.ok(
-    source.includes('path="/ads-automation/history" component={AdsAutomationRoute}') &&
-      source.includes('path="/ads-automation" component={AdsAutomationRoute}'),
-    "both ads paths must resolve to the same component so the wizard survives a trip to history",
-  );
 });

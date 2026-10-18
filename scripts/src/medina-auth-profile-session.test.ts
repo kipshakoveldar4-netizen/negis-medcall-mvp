@@ -390,8 +390,11 @@ test("the user's clinic/mortgage picker swaps purpose, vertical and role and cle
     assert.equal(fixture.snapshot().workspacePurpose, "mortgage_leads");
     assert.equal(fixture.snapshot().vertical, terms.DEFAULT_VERTICAL);
     assert.equal(fixture.snapshot().userRole, "lead_manager");
+    assert.equal(fixture.snapshot().rolePermissions.crm, true);
+    assert.equal(fixture.snapshot().rolePermissions.admin, false);
+    assert.equal(fixture.snapshot().rolePermissions.ads, false);
     assert.equal(fixture.storage.getItem(selectorKey), workspaceB);
-    assert.equal(fixture.locations.at(-1), "/leads");
+    assert.equal(fixture.locations.at(-1), "/dashboard");
     fixture.snapshot().selectWorkspace(workspaceA);
     await fixture.renderer.flush();
     assert.equal(fixture.snapshot().workspacePurpose, "clinic_services");
@@ -406,15 +409,31 @@ test("the user's clinic/mortgage picker swaps purpose, vertical and role and cle
   });
 });
 
+for (const purpose of ["clinic_services", "marketing"] as const) {
+  test(`the ${purpose} lead manager picker keeps the leads-only entry route`, async () => {
+    await withFixture(async (fixture) => {
+      await confirm(fixture, [membership(), { ...mortgage(), purpose }]);
+      fixture.snapshot().selectWorkspace(workspaceB);
+      await fixture.renderer.flush();
+      assert.equal(fixture.snapshot().workspacePurpose, purpose);
+      assert.equal(fixture.snapshot().userRole, "lead_manager");
+      assert.equal(fixture.snapshot().rolePermissions.admin, false);
+      assert.equal(fixture.locations.at(-1), "/leads");
+    });
+  });
+}
+
 test("a picker cannot apply a workspace outside the current server memberships", async () => {
   await withFixture(async (fixture) => {
     await confirm(fixture, [membership(), mortgage()]);
     fixture.snapshot().selectWorkspace(workspaceB);
     await fixture.renderer.flush();
     const before = context(fixture);
+    const navigations = [...fixture.locations];
     fixture.snapshot().selectWorkspace(unknownWorkspace);
     await fixture.renderer.flush();
     assert.deepEqual(context(fixture), before);
+    assert.deepEqual(fixture.locations, navigations);
     assert.equal(fixture.storage.getItem(selectorKey), workspaceB);
   });
 });
