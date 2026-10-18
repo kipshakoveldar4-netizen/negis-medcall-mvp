@@ -154,6 +154,66 @@ test('expanded mortgage CRM on a fresh isolated PostgreSQL cluster',{timeout:300
       assert.equal(metrics.find(m=>m.id===a.id).doneTasks,1);
       assert.equal(metrics.find(m=>m.id===b.id).doneTasks,0);
     });
+    await t.test('missed meetings credit the recorded owner once while workload stays with the current manager',async()=>{
+      const before=await read(db,owner),now=Date.now();
+      assert.equal(before.periodDays,30);
+      assert.equal(before.contacts.find(x=>x.id===leadA).responsibleUserId,a.id);
+      assert.equal(before.memberMetrics.find(m=>m.id===owner.id).missedMeetings,0);
+      assert.equal(before.memberMetrics.find(m=>m.id===a.id).missedMeetings,0);
+      const existing=before.activities.filter(x=>x.kind==='meeting'&&x.status==='open'&&x.responsibleUserId===a.id);
+      let start=now-3600000;
+      while(existing.some(x=>Date.parse(x.startsAt)<start+1800000&&Date.parse(x.endsAt)>start)) start-=3600000;
+      assert.ok(start>now-30*86400000);
+      const payload={...meeting(leadA,new Date(start).toISOString(),new Date(start+1800000).toISOString()),title:'Synthetic current-period missed meeting'};
+      const key=randomUUID(),created=await save(db,owner,payload,null,null,key);
+      const activity=s=>s.activities.find(x=>x.id===created.id);
+      const events=s=>s.events.filter(x=>x.activityId===created.id);
+      const ownerName=before.members.find(m=>m.id===owner.id).name;
+      const initial=await read(db,owner);
+      assert.equal(activity(initial).status,'open');
+      assert.equal(activity(initial).responsibleUserId,a.id);
+      assert.equal(activity(initial).updatedAt,created.updatedAt);
+      assert.equal(events(initial).length,1);
+      assert.equal(events(initial)[0].actorName,ownerName);
+      const replay=await save(db,owner,payload,null,null,key);
+      assert.equal(replay.id,created.id);assert.equal(replay.replayed,true);
+      const replayed=await read(db,owner);
+      assert.deepEqual(activity(replayed),activity(initial));
+      assert.deepEqual(events(replayed),events(initial));
+      let current=activity(replayed),expectedEvents=1;
+      const versions=new Set([current.updatedAt]);
+      for(const status of ['missed','open','missed']){
+        const previous=current,result=await save(db,owner,{...payload,status},current.id,current.updatedAt);
+        assert.equal(result.id,created.id);
+        assert.notEqual(result.updatedAt,previous.updatedAt);
+        versions.add(result.updatedAt);expectedEvents++;
+        const snapshot=await read(db,owner);
+        current=activity(snapshot);
+        assert.equal(current.status,status);assert.equal(current.updatedAt,result.updatedAt);
+        assert.equal(current.responsibleUserId,a.id);
+        assert.equal(snapshot.activities.filter(x=>x.id===created.id).length,1);
+        const history=events(snapshot);
+        assert.equal(history.length,expectedEvents);
+        assert.equal(new Set(history.map(x=>x.id)).size,expectedEvents);
+        assert.ok(history.every(x=>x.actorName===ownerName));
+        assert.equal(snapshot.memberMetrics.find(m=>m.id===owner.id).missedMeetings,1);
+        assert.equal(snapshot.memberMetrics.find(m=>m.id===a.id).missedMeetings,0);
+        await denied(save(db,owner,{...payload,status},previous.id,previous.updatedAt),'P7005');
+        const retried=await read(db,owner);
+        assert.deepEqual(activity(retried),current);assert.deepEqual(events(retried),history);
+        assert.deepEqual(retried.memberMetrics,snapshot.memberMetrics);
+      }
+      assert.equal(versions.size,4);
+      const after=await read(db,owner);
+      assert.equal(events(after).length,4);
+      assert.equal(after.memberMetrics.find(m=>m.id===owner.id).missedMeetings,1);
+      assert.equal(after.memberMetrics.find(m=>m.id===a.id).missedMeetings,0);
+      assert.equal(after.contacts.find(x=>x.id===leadA).responsibleUserId,a.id);
+      for(const member of [owner,a]) assert.equal(after.memberMetrics.find(m=>m.id===member.id).assignedLeads,before.memberMetrics.find(m=>m.id===member.id).assignedLeads);
+      const manager=await read(db,a,leadA);
+      assert.deepEqual(manager.memberMetrics,[]);assert.deepEqual(manager.members.map(m=>m.id),[a.id]);
+      assert.deepEqual(activity(manager),current);assert.deepEqual(events(manager),events(after));
+    });
     await t.test('contact pagination leaves full metrics intact and search treats wildcard characters literally',async()=>{
       await db.query(`insert into public.leads(workspace_id,full_name,phone,status,responsible_user_id)
         select $1,'Paging contact '||n,'+77000001'||lpad(n::text,3,'0'),'new',$2 from generate_series(1,105) n`,[w,a.id]);
