@@ -1,10 +1,13 @@
 import { createBookingRetryFixture } from "./booking-retry";
 import { createOperatorBrowserFixture } from "./operator-browser-store";
 import { createOperatorDispatchFixture } from "./operator-dispatch-fixture";
+import { createClinicArrivalBrowserFixture, isClinicArrivalFixtureLocation, type ClinicArrivalGuardedInit } from "./clinic-arrival-browser-store";
 import { mortgageBrowserRequest, mortgageLeadBrowserRequest } from './mortgage-browser-store';
 const retryFixture = new URLSearchParams(window.location?.search || "").get("bookingRetry") === "lost-response"
   ? createBookingRetryFixture() : null;
 const fixtureParams = new URLSearchParams(window.location?.search || "");
+export const clinicArrivalFixture = isClinicArrivalFixtureLocation(window.location)
+  ? createClinicArrivalBrowserFixture(window.location.search) : null;
 // Keep explicit visual-test settings across local page reloads, not CRM data.
 for (const key of ["fixtureRole", "fixturePurpose"]) {
   const value = fixtureParams.get(key);
@@ -85,9 +88,11 @@ export const crmRequest = async (input?: string, init?: RequestInit) => {
   return response.json();
 };
 let fixtureWhatsAppEnabled = true;
-export async function crmFetch(input: string, init?: RequestInit): Promise<Response> {
+export async function crmFetch(input: string, init?: ClinicArrivalGuardedInit): Promise<Response> {
   const url = new URL(input, "http://fixture.invalid");
   if (url.origin !== "http://fixture.invalid" || !url.pathname.startsWith("/api/crm/")) throw new Error("External request forbidden");
+  if (window.location.pathname === "/clinic-arrival") return clinicArrivalFixture
+    ? clinicArrivalFixture.request(url, init) : Response.json({ success: false }, { status: 403 });
   if (retryFixture && url.pathname === "/api/crm/appointments" && init?.method === "POST") {
     return retryFixture.send(JSON.parse(String(init.body)));
   }

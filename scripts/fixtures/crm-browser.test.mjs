@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test, { after } from "node:test";
 import { createBookingRetryFixture } from "./booking-retry.ts";
+import ts from "typescript";
+import { clinicArrivalFixtureIds as arrivalIds } from "./clinic-arrival-browser-store.ts";
 
 // Supply only synthetic browser globals; never load application credentials.
 const previousStorage = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
@@ -115,4 +117,141 @@ test("mortgage team preview remains synthetic and restricts analytics to owner/a
       if (windowBefore) Object.defineProperty(globalThis, "window", windowBefore); else delete globalThis.window;
     }
   }
+});
+
+let arrivalImport = 0;
+async function withArrivalLocation(location, check) {
+  const before = fixtureWindow.location;
+  fixtureWindow.location = { search: "", protocol: "http:", hostname: "127.0.0.1", ...location };
+  try {
+    await check(await import(`./crm-browser-mocks.ts?clinic-arrival-${++arrivalImport}`));
+  } finally {
+    fixtureWindow.location = before;
+  }
+}
+const arrivalPath = `/api/crm/clinic-operator-arrivals?workspaceId=${arrivalIds.workspace}&requestId=${arrivalIds.request}`;
+const arrivalWrite = (local) => ({
+  method: "POST", body: JSON.stringify({ appointmentId: arrivalIds.appointment }),
+  expectedUserId: local.snapshot().lifetime.actorId,
+  dispatchGuard: local.snapshot().lifetime.isSessionCurrent,
+});
+
+test("clinic arrival gate is inactive on every existing fixture route even with opt-in query settings", async () => {
+  for (const pathname of ["/", "/appointments", "/clients", "/sales", "/leads", "/login", "/dashboard",
+    "/tasks", "/analytics", "/admin", "/operator"]) {
+    await withArrivalLocation({ pathname, search: "?phase=response&reply=success" }, async (isolated) => {
+      assert.equal(isolated.clinicArrivalFixture, null);
+      if (pathname === "/operator") {
+        await assert.rejects(isolated.crmFetch(arrivalPath, { method: "POST" }), /Only isolated operator fixture routes/);
+      } else {
+        assert.equal((await isolated.crmFetch(arrivalPath, { method: "POST" })).status, 403);
+      }
+    });
+  }
+});
+
+test("clinic arrival route refuses non-loopback activation and cannot fall through to other fixture modes", async () => {
+  for (const hostname of ["preview.invalid", "0.0.0.0", undefined]) {
+    await withArrivalLocation({ pathname: "/clinic-arrival", hostname,
+      search: "?fixturePurpose=mortgage_leads&bookingRetry=lost-response" }, async (isolated) => {
+      assert.equal(isolated.clinicArrivalFixture, null);
+      assert.equal((await isolated.crmFetch(arrivalPath)).status, 403);
+      assert.equal((await isolated.crmFetch("/api/crm/appointments", { method: "POST" })).status, 403);
+      assert.equal((await isolated.crmFetch("/api/crm/whatsapp-channels", { method: "PATCH" })).status, 403);
+    });
+  }
+});
+
+test("clinic arrival mocks compose only synthetic reads and guarded writes, without changing auth", async () => {
+  await withArrivalLocation({ pathname: "/clinic-arrival" }, async (isolated) => {
+    const local = isolated.clinicArrivalFixture;
+    assert.ok(local);
+    assert.equal(isolated.useAuth().session.user.id, "fixture-user");
+    assert.equal((await isolated.supabase.auth.getSession()).data.session, null);
+    assert.equal((await isolated.crmFetch("/api/crm/clients")).status, 403);
+    assert.equal((await isolated.crmFetch(arrivalPath, { method: "PATCH" })).status, 403);
+    const { data } = await (await isolated.crmFetch(arrivalPath)).json();
+    assert.equal(data.items[0].clientName, "TEST A: synthetic patient");
+    assert.equal(data.items[0].arrivalId, null);
+    assert.doesNotMatch(JSON.stringify(data), /phone|email|whatsapp/i);
+    const pending = isolated.crmFetch(arrivalPath, arrivalWrite(local));
+    const rejected = assert.rejects(pending, { name: "AbortError" });
+    local.switchABA();
+    local.release();
+    await rejected;
+    assert.equal(local.snapshot().dispatched, 0);
+    assert.equal(local.snapshot().canceled, 1);
+    assert.equal(isolated.useAuth().session.user.id, "fixture-user");
+    await assert.rejects(() => isolated.crmFetch("https://example.invalid" + arrivalPath), /External request forbidden/);
+    await assert.rejects(() => fixtureWindow.fetch(arrivalPath), /Network disabled/);
+  });
+});
+
+test("clinic arrival response mode forwards the old actor's simulated failure without cancellation", async () => {
+  await withArrivalLocation({ pathname: "/clinic-arrival", search: "?phase=response&reply=error" }, async (isolated) => {
+    const local = isolated.clinicArrivalFixture;
+    const pending = isolated.crmFetch(arrivalPath, arrivalWrite(local));
+    await Promise.resolve();
+    assert.equal(local.snapshot().dispatched, 1);
+    local.switchActor();
+    local.release();
+    assert.equal((await pending).status, 500);
+    assert.equal(local.snapshot().canceled, 0);
+    assert.equal(local.snapshot().lastOutcome.actor, "A");
+    assert.equal((await (await isolated.crmFetch(arrivalPath)).json()).data.items[0].clientName, "TEST B: synthetic patient");
+  });
+});
+
+test("clinic arrival browser route mounts the real component under StrictMode with lifetime-bound props", async () => {
+  const source = await readFile(new URL("./crm-browser.tsx", import.meta.url), "utf8");
+  assert.match(source, /import \{ OperatorArrivals \} from ['"].*components\/operators\/OperatorArrivals['"]/);
+  assert.match(source, /<Route path="\/clinic-arrival" component=\{ClinicArrivalFixture\}/);
+  assert.match(source, /<React\.StrictMode><ClinicArrivalFixtureView \/><\/React\.StrictMode>/);
+  assert.match(source, /<OperatorArrivals key=\{lifetime\.revision\} actorId=\{lifetime\.actorId\}/);
+  assert.match(source, /isSessionCurrent=\{lifetime\.isSessionCurrent\}/);
+  assert.match(source, /onClick=\{fixture\.switchABA\}/);
+  assert.match(source, /snapshot\.queued.*snapshot\.dispatched.*snapshot\.canceled/);
+});
+
+test("clinic arrival server middleware is loopback-only and preserves CSP and API denial without starting a server", async () => {
+  const source = await readFile(new URL("./crm-browser.mjs", import.meta.url), "utf8");
+  assert.match(source, /const routes = new Set\([^;]*"\/clinic-arrival"/);
+  const parsed = ts.createSourceFile("fixture.mjs", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+  let middlewareBody;
+  function visit(node) {
+    if (ts.isMethodDeclaration(node) && node.name.getText(parsed) === "configureServer") middlewareBody = node.body.getText(parsed);
+    ts.forEachChild(node, visit);
+  }
+  visit(parsed);
+  assert.ok(middlewareBody);
+  // Execute just the middleware registration, never Vite, environment setup or listen().
+  const configure = new Function("entryPath", "routes", `return function(vite) ${middlewareBody}`)(
+    "/synthetic/crm-browser.tsx", new Set(["/clinic-arrival", "/operator"]),
+  );
+  let handler;
+  configure({ middlewares: { use(value) { handler = value; } }, transformIndexHtml: async (_path, html) => html });
+  async function request(url, host) {
+    const result = { statusCode: 200, headers: {}, body: "" };
+    await handler({ url, headers: { host, accept: "text/html" } }, {
+      set statusCode(value) { result.statusCode = value; },
+      setHeader(key, value) { result.headers[key] = value; },
+      end(body) { result.body = body; },
+    }, () => { throw new Error("Unexpected fixture fallback"); });
+    return result;
+  }
+  for (const host of ["127.0.0.1:5181", "localhost:5181", "[::1]:5181"]) {
+    const result = await request("/clinic-arrival?phase=response&reply=error", host);
+    assert.equal(result.statusCode, 200);
+    assert.match(result.body, /\/synthetic\/crm-browser\.tsx/);
+    assert.equal(result.headers["Cache-Control"], "no-store");
+    assert.match(result.headers["Content-Security-Policy"], /default-src 'self';/);
+    assert.match(result.headers["Content-Security-Policy"], /connect-src 'self' ws:\/\/127\.0\.0\.1:\*/);
+    assert.match(result.headers["Content-Security-Policy"], /form-action 'none'; frame-src 'none'/);
+  }
+  for (const host of [undefined, "preview.invalid", "127.0.0.1.external.invalid", "localhost@external.invalid"]) {
+    assert.equal((await request("/clinic-arrival", host)).statusCode, 403);
+  }
+  assert.equal((await request(arrivalPath, "127.0.0.1:5181")).statusCode, 403);
+  assert.equal((await request("/not-included", "127.0.0.1:5181")).statusCode, 404);
+  assert.equal((await request("/operator", "127.0.0.1:5181")).statusCode, 200);
 });

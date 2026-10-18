@@ -17,7 +17,7 @@ const { default: react } = await import(pathToFileURL(require.resolve("@vitejs/p
 const { default: tailwindcss } = await import(pathToFileURL(require.resolve("@tailwindcss/vite")).href);
 const entryPath = path.join(root, "scripts/fixtures/crm-browser.tsx");
 const mocks = path.join(root, "scripts/fixtures/crm-browser-mocks.ts");
-const routes = new Set(["/", "/appointments", "/clients", "/sales", "/leads", "/login", "/dashboard", "/tasks", "/analytics", "/admin", "/operator"]);
+const routes = new Set(["/", "/appointments", "/clients", "/sales", "/leads", "/login", "/dashboard", "/tasks", "/analytics", "/admin", "/operator", "/clinic-arrival"]);
 const requestedPort=Number(process.argv.find(arg=>arg.startsWith('--port='))?.split('=')[1]||5181);
 if(!Number.isInteger(requestedPort)||requestedPort<1024||requestedPort>65535)throw new Error('Invalid local fixture port');
 const server = await createServer({
@@ -40,6 +40,11 @@ const server = await createServer({
     vite.middlewares.use(async (req, res, next) => {
       const pathname = new URL(req.url || "/", "http://127.0.0.1").pathname;
       if (pathname.startsWith("/api/")) { res.statusCode = 403; res.end("API disabled in fixture"); return; }
+      if (pathname === "/clinic-arrival" && !/^(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?$/i.test(req.headers.host || "")) {
+        res.statusCode = 403;
+        res.end("Clinic arrival fixture is loopback-only");
+        return;
+      }
       if (!routes.has(pathname)) {
         if (req.headers["sec-fetch-dest"] === "document" || req.headers.accept?.includes("text/html")) {
           res.statusCode = 404;
