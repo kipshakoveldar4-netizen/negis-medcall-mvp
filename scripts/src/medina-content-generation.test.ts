@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { Script } from "node:vm";
 
 // Формы модулей описаны здесь, а не импортированы: rootDir этого пакета —
 // scripts/src, и любой import из lib/** ломает сборку типов. Тот же приём, что
@@ -846,6 +848,100 @@ test("GEN42 completed video without a file stays retryable and never looks succe
     "the operator must know that checking the existing job does not create another paid render",
   );
   assert.ok(polling.includes("url: completedUrl"), "only the trimmed usable URL may become the generated video");
+});
+
+test("GEN43 checking a file-less completed job reuses its handle without another generation POST", async (t) => {
+  const source = await readFile(studioPage, "utf8");
+  const ts = createRequire(path.join(repoRoot, "package.json"))("typescript") as typeof import("typescript");
+  const ast = ts.createSourceFile(studioPage, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const polling: string[] = [], retries: string[] = [];
+  const visit = (node: import("typescript").Node) => {
+    if (ts.isCallExpression(node) && node.expression.getText(ast) === "useEffect") {
+      const callback = node.arguments[0];
+      if (callback && callback.getText(ast).includes("const completedUrl =")) polling.push(callback.getText(ast));
+    }
+    if (ts.isJsxElement(node) && node.openingElement.tagName.getText(ast) === "button" &&
+        node.children.some((child) => ts.isJsxText(child) && child.text.includes("Проверить ещё раз"))) {
+      const click = node.openingElement.attributes.properties.find((property) =>
+        ts.isJsxAttribute(property) && property.name.getText(ast) === "onClick");
+      assert.ok(click && ts.isJsxAttribute(click) && click.initializer && ts.isJsxExpression(click.initializer) && click.initializer.expression);
+      retries.push(click.initializer.expression.getText(ast));
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(ast);
+  assert.equal(polling.length, 1, "execute the actual polling effect, not a copied implementation");
+  assert.equal(retries.length, 1, "execute the actual retry button callback");
+  const compiled = ts.transpileModule(`globalThis.poll = ${polling[0]}; globalThis.retry = ${retries[0]};`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+  }).outputText;
+
+  for (const missingUrl of [undefined, " \n\t ", 17]) {
+    await t.test(`unusable URL ${JSON.stringify(missingUrl)}`, async () => {
+      type Job = { handle: string; status: string; progress: number };
+      const original: Job = { handle: "local-job+/=handle", status: "in_progress", progress: 4 };
+      let job: Job = { ...original }, notice: unknown = null, video: unknown = null;
+      const requests: { url: string; method: string }[] = [], successes: string[] = [];
+      const responses = [
+        { success: true, data: { status: "completed", progress: 100, creativeUrl: missingUrl } },
+        { success: true, data: { status: "completed", progress: 100, creativeUrl: "  https://example.invalid/fixture.mp4 \n", assetId: "local-asset", fileName: "fixture.mp4", mimeType: "video/mp4", fileSize: 42 } },
+      ];
+      let timerCalls = 0;
+      const context = {
+        videoJob: job,
+        setVideoJob(update: (current: Job) => Job) { job = update(job); context.videoJob = job; },
+        setGenNotice(value: unknown) { notice = value; },
+        setGenVideo(value: unknown) { video = value; },
+        withWorkspace: (url: string) => `${url}&workspaceId=local-workspace`,
+        async crmFetch(url: string, init?: { method?: string }) {
+          requests.push({ url, method: init?.method ?? "GET" });
+          assert.ok(responses.length, "unexpected extra request");
+          return { ok: true, status: 200, body: responses.shift() };
+        },
+        safeJson: async (response: { body: unknown }) => response.body,
+        generationRefusalText: () => { throw new Error("unexpected refusal"); },
+        toast: { success: (message: string) => successes.push(message) },
+        VIDEO_POLL_INTERVAL_MS: 12000,
+        setTimeout: () => { timerCalls++; throw new Error("completed jobs must stop polling"); },
+        clearTimeout: () => undefined,
+        poll: undefined as undefined | (() => undefined | (() => void)),
+        retry: undefined as undefined | (() => void),
+      };
+      new Script(compiled).runInNewContext(context);
+      const firstCleanup = context.poll!();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(job.handle, original.handle);
+      assert.equal(job.status, "failed");
+      assert.equal(video, null);
+      assert.deepEqual(successes, []);
+      assert.match((notice as { text: string }).text, /Проверить ещё раз/);
+      assert.equal(requests.length, 1);
+
+      firstCleanup?.();
+      context.retry!();
+      assert.equal(notice, null);
+      assert.equal(job.handle, original.handle);
+      assert.equal(job.status, "in_progress");
+      assert.equal(requests.length, 1, "the button must not start generation");
+      const retryCleanup = context.poll!();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(job.status, "completed");
+      assert.equal(job.handle, original.handle);
+      assert.deepEqual(JSON.parse(JSON.stringify(video)), {
+        url: "https://example.invalid/fixture.mp4", assetId: "local-asset", fileName: "fixture.mp4",
+        mimeType: "video/mp4", model: "", fileSize: 42,
+      });
+      assert.deepEqual(successes, ["Ролик готов"]);
+      assert.deepEqual(requests, Array.from({ length: 2 }, () => ({
+        url: `/api/content-studio/video-generation?handle=${encodeURIComponent(original.handle)}&workspaceId=local-workspace`, method: "GET",
+      })));
+      assert.equal(responses.length, 0);
+      assert.equal(timerCalls, 0);
+      retryCleanup?.();
+      assert.equal(context.poll!(), undefined, "a completed job must not poll again");
+      assert.equal(requests.length, 2);
+    });
+  }
 });
 
 test("GEN36 only a confirmed result or explicit non-duplicate 4xx releases the paid key", () => {
