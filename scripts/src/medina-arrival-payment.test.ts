@@ -103,7 +103,15 @@ function apiDatabase(rpcRole: "service_role" | "anon" | "authenticated" = "servi
         params.push(Array.isArray(value) ? JSON.stringify(value) : value);
         return `$${params.length}`;
       };
-      const selection = columns === "*" ? "*" : columns.split(",").map(v => ident(v.trim())).join(",");
+      const leadColumns = "*,stage_definition:lead_stages(id,stage_key,name,color,semantic_group,sort_order,is_default,is_active),source_definition:lead_sources(id,source_key,name,channel,color,sort_order,is_default,is_active)";
+      // Execute the router's known embedded lead projection against real rows.
+      const selection = table === "leads" && columns === leadColumns
+        ? `"leads".*,
+          (select to_jsonb(definition) from (select id,stage_key,name,color,semantic_group,sort_order,is_default,is_active
+            from lead_stages where id="leads".stage_id) definition) as stage_definition,
+          (select to_jsonb(definition) from (select id,source_key,name,channel,color,sort_order,is_default,is_active
+            from lead_sources where id="leads".source_id) definition) as source_definition`
+        : columns === "*" ? "*" : columns.split(",").map(v => ident(v.trim())).join(",");
       let sql = `select ${selection} from ${ident(table)}`;
       if (operation === "update") sql = `update ${ident(table)} set ${Object.entries(values)
         .map(([key, value]) => `${ident(key)}=${bind(value)}`).join(",")}`;
@@ -638,6 +646,156 @@ for (const capacity of [1, 2]) {
     assert.equal(creates, capacity === 1 ? 0 : 1);
   });
 }
+
+test("G2-C1 receptionist linked lead and two catalogue services reach one explicit pending sale", async () => {
+  const call = await bundleApiFixture("receptionist");
+  await db.exec(`update workspaces set arrival_marks_paid=false where id='${id(1)}';
+    insert into clients(id,workspace_id,full_name) values('${id(60)}','${id(1)}','G2 synthetic client');
+    insert into leads(id,workspace_id,full_name) values('${id(61)}','${id(1)}','G2 synthetic lead')`);
+  const client = await row(`select * from clients where id='${id(60)}'`);
+  const linked = apiItem(await call("leads", "PATCH", { clientId: id(60) }, 1, id(61)));
+  assert.equal(linked.id, id(61));
+  assert.equal(linked.clientId, id(60));
+  assert.equal((await row(`select client_id from leads where id='${id(61)}'`)).client_id, id(60));
+  const leads = await call("leads", "GET");
+  assert.equal(leads.status, 200, JSON.stringify(leads.body));
+  assert.equal((leads.body.data as { items: Record<string, unknown>[] }).items[0].clientId, id(60));
+
+  const catalogue = await call("clinic-services", "GET");
+  assert.equal(catalogue.status, 200, JSON.stringify(catalogue.body));
+  const services = (catalogue.body.data as { items: Record<string, unknown>[] }).items
+    .map(service => ({ serviceId: service.id, name: service.name, priceMinor: service.basePriceMinor, durationMinutes: service.durationMinutes }))
+    .sort((a, b) => String(a.serviceId).localeCompare(String(b.serviceId)));
+  assert.deepEqual(services, [
+    { serviceId: id(50), name: "First catalogue service", priceMinor: 500050, durationMinutes: 45 },
+    { serviceId: id(51), name: "Second catalogue service", priceMinor: 200000, durationMinutes: 30 },
+  ]);
+  const booking = { ...keyedBooking(), client: client.full_name, clientId: linked.clientId, serviceItems: services };
+  const before = await retryCounts();
+  const created = await call("appointments", "POST", booking);
+  const visit = apiItem(created, 201);
+  const appointmentId = String(visit.id);
+  assert.equal((created.body.data as Record<string, unknown>).clientCreated, false);
+  assert.equal((created.body.data as Record<string, unknown>).clientMatch, "provided");
+  assert.equal(visit.clientId, id(60));
+  assert.deepEqual(visit.serviceItems, services);
+  assert.equal(visit.priceMinor, 700050);
+  assert.equal(visit.durationMinutes, 75);
+  const stored = await row(`select * from appointments where id='${appointmentId}'`);
+  assert.equal(stored.workspace_id, id(1));
+  assert.equal(stored.client_id, id(60));
+  assert.equal(stored.doctor_id, id(42));
+  assert.equal(stored.created_by_staff_user_id, id(40));
+  assert.deepEqual(stored.service_items, services);
+  assert.equal(stored.service_id, null);
+  assert.equal(stored.price_minor, 700050);
+  assert.equal(stored.duration_minutes, 75);
+  assert.equal(new Date(String(stored.starts_at)).toISOString(), "2026-10-03T04:00:00.000Z");
+  const receipt = await row("select * from crm_appointment_create_requests");
+  assert.equal(receipt.workspace_id, id(1));
+  assert.equal(receipt.staff_user_id, id(40));
+  assert.equal(receipt.request_key, id(70));
+  assert.equal(receipt.appointment_id, appointmentId);
+  const listed = await call("appointments", "GET");
+  assert.equal(listed.status, 200, JSON.stringify(listed.body));
+  assert.deepEqual((listed.body.data as { items: Record<string, unknown>[] }).items.find(item => item.id === appointmentId),
+    { ...visit, startsAt: "2026-10-03T04:00:00.000Z", time: "2026-10-03T04:00:00.000Z" });
+  const afterCreate = await retryCounts();
+  assert.equal(afterCreate.clients, before.clients);
+  assert.equal(afterCreate.appointments, Number(before.appointments) + 1);
+  assert.equal(afterCreate.receipts, 1);
+  assert.equal(afterCreate.sales, 0);
+  const repeated = await call("appointments", "POST", booking);
+  assert.equal(apiItem(repeated).id, appointmentId);
+  assert.equal((repeated.body.data as Record<string, unknown>).replayed, true);
+  assert.deepEqual(await retryCounts(), afterCreate);
+
+  const arrived = apiItem(await call("appointments", "PATCH", { status: "arrived" }, 1, appointmentId));
+  assert.equal(arrived.id, appointmentId);
+  assert.equal(arrived.status, "arrived");
+  assert.equal(arrived.arrivalSaleId, "");
+  assert.equal((await row("select count(*) from deals")).count, 0);
+  assert.equal((await row(`select arrival_sale_id from appointments where id='${appointmentId}'`)).arrival_sale_id, null);
+  const pending = apiItem(await call("deals", "POST", {
+    title: arrived.service, clientId: arrived.clientId, leadId: linked.id, appointmentId: arrived.id,
+    responsibleUserId: id(40), serviceId: "", amountMinor: arrived.priceMinor, currency: "KZT", status: "pending",
+    notes: "G2-C1 synthetic manual CRM record; no payment",
+  }), 201);
+  assert.equal(pending.clientId, id(60));
+  assert.equal(pending.leadId, id(61));
+  assert.equal(pending.appointmentId, appointmentId);
+  assert.equal(pending.responsibleUserId, id(40));
+  assert.equal(pending.amountMinor, 700050);
+  assert.equal(pending.currency, "KZT");
+  assert.equal(pending.status, "pending");
+  assert.equal(pending.paidAt, null);
+  const savedSale = await row(`select * from deals where id='${pending.id}'`);
+  assert.equal(savedSale.workspace_id, id(1));
+  assert.equal(savedSale.client_id, id(60));
+  assert.equal(savedSale.lead_id, id(61));
+  assert.equal(savedSale.appointment_id, appointmentId);
+  assert.equal(savedSale.responsible_user_id, id(40));
+  assert.equal(savedSale.amount_minor, 700050);
+  assert.equal(savedSale.currency, "KZT");
+  assert.equal(savedSale.status, "pending");
+  assert.equal(savedSale.service_id, null);
+  assert.equal(savedSale.paid_at, null);
+  assert.equal(savedSale.payment_method, null);
+
+  // Only booking replay/arrival are idempotent here, not a second manual sale POST.
+  const afterSale = await retryCounts();
+  const replay = await call("appointments", "POST", booking);
+  assert.equal(apiItem(replay).id, appointmentId);
+  assert.equal(apiItem(replay).status, "arrived");
+  assert.equal((replay.body.data as Record<string, unknown>).replayed, true);
+  assert.deepEqual(await retryCounts(), afterSale);
+  assert.equal(apiItem(await call("appointments", "PATCH", { status: "arrived" }, 1, appointmentId)).arrivalSaleId, "");
+  const sales = await call("deals", "GET");
+  assert.equal(sales.status, 200, JSON.stringify(sales.body));
+  assert.deepEqual((sales.body.data as { items: Record<string, unknown>[] }).items, [pending]);
+  assert.deepEqual(await row(`select * from deals where id='${pending.id}'`), savedSale);
+  assert.deepEqual(await row(`select * from clients where id='${id(60)}'`), client);
+  assert.equal((await row(`select count(*) from appointments where client_id='${id(60)}'`)).count, 1);
+  assert.equal((await row("select count(*) from deals")).count, 1);
+  assert.equal((await row("select count(*) from deals where status='paid'")).count, 0);
+  assert.equal((await retryCounts()).appointments, Number(before.appointments) + 1);
+  assert.equal((await retryCounts()).receipts, 1);
+  assert.equal((await row(`select role from staff_users where id='${id(40)}'`)).role, "receptionist");
+  assert.equal((await row(`select arrival_marks_paid from workspaces where id='${id(1)}'`)).arrival_marks_paid, false);
+});
+
+test("G2-C1 receptionist foreign client is refused for lead, booking and manual sale without writes", async () => {
+  const call = await bundleApiFixture("receptionist");
+  await db.exec(`update workspaces set arrival_marks_paid=false where id='${id(1)}';
+    insert into clients(id,workspace_id,full_name) values('${id(60)}','${id(2)}','G2 foreign client');
+    insert into leads(id,workspace_id,full_name,client_id)
+      values('${id(61)}','${id(1)}','G2 own linked lead','${id(3)}')`);
+  const snapshot = async () => (await row(`select jsonb_build_object(
+    'clients',(select jsonb_agg(c order by id) from clients c),
+    'leads',(select jsonb_agg(l order by id) from leads l),
+    'appointments',(select jsonb_agg(a order by id) from appointments a),
+    'deals',(select jsonb_agg(d order by id) from deals d),
+    'receipts',(select jsonb_agg(r order by request_key) from crm_appointment_create_requests r),
+    'journal',(select jsonb_agg(j order by id) from audit_logs j)) as state`)).state;
+  const before = await snapshot();
+  const attempts = [
+    () => call("leads", "PATCH", { clientId: id(60) }, 1, id(61)),
+    () => call("appointments", "POST", { ...keyedBooking(), clientId: id(60), serviceItems: serviceBundle.slice(0, 2) }),
+    () => call("deals", "POST", {
+      title: "G2 foreign-client manual sale",
+      clientId: id(60), leadId: id(61), appointmentId: id(10), amountMinor: 700050, currency: "KZT", status: "pending",
+    }),
+  ];
+  for (const attempt of attempts) {
+    const response = await attempt();
+    assert.equal(response.status, 400, JSON.stringify(response.body));
+    assert.match(JSON.stringify(response.body), /clientId/);
+    assert.ok(response.queries.some(query => query.table === "clients"
+      && query.filters.some(([key, operator, value]) => key === "workspace_id" && operator === "=" && value === id(1))));
+    assert.deepEqual(response.queries.filter(query => query.operation !== "select"), []);
+    assert.deepEqual(await snapshot(), before);
+  }
+});
 
 test("API bundle create/read/edit/arrival preserves the quote, client and one exact KZT sale", async () => {
   const call = await bundleApiFixture();
