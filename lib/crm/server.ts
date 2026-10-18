@@ -5079,6 +5079,15 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
     }
 
     if (error) {
+      if (resource === "meta-accounts" && readString(error.code) === UNIQUE_VIOLATION
+        && readString(error.message).includes('"meta_ad_accounts_one_workspace_idx"')) {
+        return sendJson(res, 409, {
+          ...errorBody("Привязка Meta уже изменена другим действием", [
+            "Обновите список привязок и проверьте сохранённые данные перед повтором.",
+          ]),
+          code: "meta_account_binding_conflict",
+        });
+      }
       if (resource === "appointments" && isAppointmentCapacityError(error)) {
         return sendJson(res, 409, {
           success: false,

@@ -28,6 +28,11 @@ type StaffRow = { id: string; workspace_id: string; role: string; status: string
 
 type QueryLog = { table: string; filters: Record<string, unknown>; op: string; columns?: string };
 type StaffDirectoryFixture = { rows: Record<string, unknown>[]; error?: { message: string } };
+type WriteFailureFixture = {
+  table: string;
+  op: "insert" | "update" | "upsert" | "delete";
+  error: { code: string; message: string; details?: string; hint?: string };
+};
 type AssignedLeadFixture = {
   rows?: Record<string, unknown>[];
   error?: { code: string; message: string };
@@ -36,13 +41,19 @@ type AssignedLeadFixture = {
 };
 
 /** Records every table touched and every filter applied. */
-function spyClient(rows: Record<string, unknown[]>, log: QueryLog[], staffDirectory?: StaffDirectoryFixture) {
+function spyClient(
+  rows: Record<string, unknown[]>,
+  log: QueryLog[],
+  staffDirectory?: StaffDirectoryFixture,
+  writeFailure?: WriteFailureFixture,
+) {
   return {
     from(table: string) {
       const entry: QueryLog = { table, filters: {}, op: "select" };
       log.push(entry);
       const builder: Record<string, unknown> = {};
       const chain = () => builder;
+      const writeError = () => writeFailure?.table === table && writeFailure.op === entry.op ? writeFailure.error : null;
       Object.assign(builder, {
         select: (columns?: string) => {
           entry.columns = columns?.replace(/\s+/g, "");
@@ -55,7 +66,10 @@ function spyClient(rows: Record<string, unknown[]>, log: QueryLog[], staffDirect
         order: () => chain(),
         limit: () => chain(),
         single: () => chain(),
-        maybeSingle: () => Promise.resolve({ data: (rows[table] ?? [])[0] ?? null, error: null }),
+        maybeSingle: () => {
+          const error = writeError();
+          return Promise.resolve({ data: error ? null : (rows[table] ?? [])[0] ?? null, error });
+        },
         eq(column: string, value: unknown) { entry.filters[column] = value; return chain(); },
         in(column: string, values: unknown) { entry.filters[column] = values; return chain(); },
         then(resolve: (value: { data: unknown; error: { message: string } | null; count?: number }) => void) {
@@ -63,7 +77,7 @@ function spyClient(rows: Record<string, unknown[]>, log: QueryLog[], staffDirect
           const table_rows = directoryRead
             ? directoryRead.rows.filter((row) => Object.entries(entry.filters).every(([key, value]) => row[key] === value))
             : rows[table] ?? [];
-          const error = directoryRead ? directoryRead.error ?? null : null;
+          const error = writeError() ?? (directoryRead ? directoryRead.error ?? null : null);
           resolve({ data: error ? null : table_rows, error, count: table_rows.length });
         },
       });
@@ -78,6 +92,7 @@ type LoadOptions = {
   authThrows?: boolean;
   rows?: Record<string, unknown[]>;
   staffDirectory?: StaffDirectoryFixture;
+  writeFailure?: WriteFailureFixture;
   assignedLeads?: AssignedLeadFixture;
 };
 
@@ -132,7 +147,7 @@ async function loadRouter(options: LoadOptions) {
   let crmClientCreations = 0;
   supabaseModule.setSupabaseServerClientFactoryForTests(() => {
     crmClientCreations += 1;
-    const client = withAppointmentCreateRpcSpy(spyClient(clientRows, log, options.staffDirectory));
+    const client = withAppointmentCreateRpcSpy(spyClient(clientRows, log, options.staffDirectory, options.writeFailure));
     if (!options.assignedLeads) return client;
     const fixture = options.assignedLeads;
     return Object.assign(client, { async rpc(name: string, args: Record<string, unknown>) {
@@ -912,6 +927,207 @@ test("K2e repeated Meta account saves update the single workspace record", async
     else process.env.META_WORKSPACE_ID = previousWorkspace;
     if (previousAccount === undefined) delete process.env.META_AD_ACCOUNT_ID;
     else process.env.META_AD_ACCOUNT_ID = previousAccount;
+  }
+});
+
+const metaBindingConstraint = "meta_ad_accounts_one_workspace_idx";
+const metaBindingWriteError: WriteFailureFixture["error"] = {
+  code: "23505",
+  message: `fixture-private duplicate key value violates unique constraint "${metaBindingConstraint}"`,
+  details: "fixture-private conflicting workspace and account row",
+  hint: "fixture-private database diagnostic",
+};
+const metaBindingExistingId = "22222222-2222-4222-8222-222222222222";
+const metaBindingWriteCases: Array<{ op: "insert" | "update"; rows: Record<string, unknown>[] }> = [
+  { op: "insert", rows: [] },
+  { op: "update", rows: [{ id: metaBindingExistingId, workspace_id: WORKSPACE_A, account_name: "fixture-private saved account" }] },
+];
+const metaBindingBody = {
+  workspaceId: WORKSPACE_A, workspace_id: WORKSPACE_B, id: WORKSPACE_B,
+  adAccountId: "act_123456789", status: "draft",
+};
+
+async function withMetaBindingRouter(options: LoadOptions, fn: (ctx: Awaited<ReturnType<typeof loadRouter>>) => Promise<void>) {
+  const previousWorkspace = process.env.META_WORKSPACE_ID;
+  const previousAccount = process.env.META_AD_ACCOUNT_ID;
+  process.env.META_WORKSPACE_ID = WORKSPACE_A;
+  process.env.META_AD_ACCOUNT_ID = "act_123456789";
+  try {
+    await withRouter(options, fn);
+  } finally {
+    if (previousWorkspace === undefined) delete process.env.META_WORKSPACE_ID;
+    else process.env.META_WORKSPACE_ID = previousWorkspace;
+    if (previousAccount === undefined) delete process.env.META_AD_ACCOUNT_ID;
+    else process.env.META_AD_ACCOUNT_ID = previousAccount;
+  }
+}
+
+function assertSafeMetaBindingFailure(res: MockResponse, error = metaBindingWriteError) {
+  assert.equal(res.body.success, false);
+  assert.equal(typeof res.body.error, "string");
+  assert.match(res.body.error as string, /[А-Яа-яЁё]/, "the operator must receive a Russian error");
+  const serialized = JSON.stringify(res.body);
+  assert.doesNotMatch(serialized, /"(?:item|diagnostics?|message|hint|data|mode|warning)"\s*:/,
+    "failed writes must not return an item, diagnostic or demo payload at any depth");
+  for (const privateText of [metaBindingConstraint, "fixture-private", error.code, error.message, error.details, error.hint]) {
+    if (privateText) assert.ok(!serialized.includes(privateText), "database failure material must not reach the response");
+  }
+}
+
+function assertSingleMetaBindingWrite(log: QueryLog[], op: "insert" | "update") {
+  assertWorkspaceProfileQuery(log, WORKSPACE_A);
+  const queries = businessQueries(log);
+  assert.deepEqual(queries.map(({ table, op }) => [table, op]), [
+    ["meta_ad_accounts", "select"], ["meta_ad_accounts", op],
+  ], "one snapshot and one write only: no retry, journal or other business query");
+  assert.equal(queries[0].columns, "id");
+  assert.deepEqual(queries[0].filters, { workspace_id: WORKSPACE_A });
+  const write = queries[1];
+  const row = write.filters.__row as Record<string, unknown>;
+  assert.equal(row.workspace_id, WORKSPACE_A, "the body cannot replace the verified tenant");
+  assert.equal(row.id, undefined, "the body cannot choose the stored row ID");
+  if (op === "update") {
+    assert.equal(write.filters.id, metaBindingExistingId);
+    assert.equal(write.filters.workspace_id, WORKSPACE_A);
+  }
+  assert.ok(!JSON.stringify(queries).includes(WORKSPACE_B), "no query or write may target the foreign workspace");
+}
+
+for (const scenario of metaBindingWriteCases) {
+  test(`K2f G5-C3 exact quoted workspace constraint returns a safe conflict on ${scenario.op}`, { timeout: 10_000 }, async () => {
+    await withMetaBindingRouter({
+      memberships: [memberA], rows: { meta_ad_accounts: scenario.rows },
+      writeFailure: { table: "meta_ad_accounts", op: scenario.op, error: metaBindingWriteError },
+    }, async (ctx) => {
+      const { res, log } = await ctx.call({ segments: ["meta-accounts"], method: "POST", body: metaBindingBody });
+      assertSingleMetaBindingWrite(log, scenario.op);
+      assert.equal(res.statusCode, 409);
+      assert.equal(res.body.code, "meta_account_binding_conflict");
+      assertSafeMetaBindingFailure(res);
+    });
+  });
+}
+
+test("K2g G5-C3 near-match database failures retain generic 502 on insert and update", { timeout: 10_000 }, async () => {
+  const errors = [
+    { ...metaBindingWriteError, code: "XX000" },
+    { ...metaBindingWriteError, message: 'fixture-private unique constraint "meta_ad_accounts_pkey"' },
+    { ...metaBindingWriteError, message: `fixture-private unique constraint ${metaBindingConstraint}` },
+    { ...metaBindingWriteError, message: `fixture-private unique constraint ${metaBindingConstraint}_similar` },
+    { ...metaBindingWriteError, message: 'fixture-private unique constraint "meta_ad_accounts_one_workspace_id"' },
+    { ...metaBindingWriteError, message: `fixture-private unique constraint "${metaBindingConstraint}_suffix"` },
+  ];
+  for (const scenario of metaBindingWriteCases) {
+    for (const error of errors) {
+      await withMetaBindingRouter({
+        memberships: [memberA], rows: { meta_ad_accounts: scenario.rows },
+        writeFailure: { table: "meta_ad_accounts", op: scenario.op, error },
+      }, async (ctx) => {
+        const { res, log } = await ctx.call({ segments: ["meta-accounts"], method: "POST", body: metaBindingBody });
+        assertSingleMetaBindingWrite(log, scenario.op);
+        assert.equal(res.statusCode, 502, `${scenario.op}: ${error.code}: ${error.message}`);
+        assert.notEqual(res.body.code, "meta_account_binding_conflict");
+        assertSafeMetaBindingFailure(res, error);
+      });
+    }
+  }
+});
+
+test("K2h G5-C3 the exact Meta constraint does not reclassify another resource", { timeout: 10_000 }, async () => {
+  for (const [resource, table, expectedStatus] of [
+    ["clients", "clients", 502], ["clinic-services", "clinic_services", 400], ["clinic-doctors", "clinic_doctors", 400],
+  ] as const) {
+    await withMetaBindingRouter({
+      memberships: [memberA],
+      writeFailure: { table, op: "insert", error: metaBindingWriteError },
+    }, async (ctx) => {
+      const { res, log } = await ctx.call({ segments: [resource], method: "POST", body: { name: "Local fixture", fullName: "Local fixture" } });
+      assert.equal(res.statusCode, expectedStatus, resource);
+      assert.notEqual(res.statusCode, 409, resource);
+      assert.notEqual(res.body.code, "meta_account_binding_conflict", resource);
+      assertSafeMetaBindingFailure(res);
+      assertWorkspaceProfileQuery(log, WORKSPACE_A);
+      const writes = businessQueries(log).filter((entry) => entry.op !== "select");
+      assert.equal(writes.length, 1, "no retry or journal after a refused write");
+      assert.equal(writes[0].table, table);
+      assert.equal((writes[0].filters.__row as Record<string, unknown>).workspace_id, WORKSPACE_A);
+    });
+  }
+});
+
+test("K2i G5-C3 existing service and doctor unique-error responses keep their own behavior", { timeout: 10_000 }, async () => {
+  for (const [resource, table, constraint, expectedError, expectedDetail] of [
+    ["clinic-services", "clinic_services", "clinic_services_workspace_name_idx", "Услуга с таким названием уже есть", "name must be unique within the workspace"],
+    ["clinic-doctors", "clinic_doctors", "clinic_doctors_workspace_name_idx", "Врач с таким именем уже есть", "fullName must be unique within the workspace"],
+    ["clinic-doctors", "clinic_doctors", "clinic_doctors_workspace_staff_user_idx", "Этот сотрудник уже привязан к другому врачу", "staffUserId must be unique within the workspace"],
+  ] as const) {
+    const error = { ...metaBindingWriteError, message: `fixture-private unique constraint "${constraint}"` };
+    await withMetaBindingRouter({ memberships: [memberA], writeFailure: { table, op: "insert", error } }, async (ctx) => {
+      const { res, log } = await ctx.call({ segments: [resource], method: "POST", body: { name: "Local fixture", fullName: "Local fixture" } });
+      assert.equal(res.statusCode, 400);
+      assert.deepEqual(res.body, { success: false, error: expectedError, details: [expectedDetail] });
+      assertSafeMetaBindingFailure(res, error);
+      assertWorkspaceProfileQuery(log, WORKSPACE_A);
+      assert.deepEqual(businessQueries(log).filter((entry) => entry.op !== "select").map((entry) => [entry.table, entry.op]), [[table, "insert"]]);
+    });
+  }
+});
+
+test("K2j G5-C3 write failure injection leaves other tables, operations and reads unchanged", { timeout: 10_000 }, async () => {
+  const scenarios: Array<{ resource: string; method: string; rows: Record<string, unknown>[]; failureOp: "insert" | "update"; status: number }> = [
+    { resource: "meta-accounts", method: "GET", rows: [], failureOp: "insert", status: 200 },
+    { resource: "meta-accounts", method: "POST", rows: [], failureOp: "update", status: 201 },
+    { resource: "meta-accounts", method: "POST", rows: metaBindingWriteCases[1].rows, failureOp: "insert", status: 201 },
+    { resource: "clients", method: "POST", rows: [], failureOp: "insert", status: 201 },
+  ];
+  for (const scenario of scenarios) {
+    await withMetaBindingRouter({
+      memberships: [memberA], rows: { meta_ad_accounts: scenario.rows },
+      writeFailure: { table: "meta_ad_accounts", op: scenario.failureOp, error: metaBindingWriteError },
+    }, async (ctx) => {
+      const { res, log } = await ctx.call({ segments: [scenario.resource], method: scenario.method,
+        body: scenario.resource === "meta-accounts" ? metaBindingBody : { name: "Local fixture" } });
+      assert.equal(res.statusCode, scenario.status, `${scenario.resource} ${scenario.method} with injected ${scenario.failureOp}`);
+      assert.equal(res.body.success, true);
+      assertWorkspaceProfileQuery(log, WORKSPACE_A);
+      if (scenario.resource === "meta-accounts" && scenario.method === "POST") {
+        assertSingleMetaBindingWrite(log, scenario.rows.length ? "update" : "insert");
+      }
+      if (scenario.method === "GET") assert.ok(log.every((entry) => entry.op === "select"));
+    });
+  }
+});
+
+test("K2k G5-C3 auth, tenant and provisioning refusals precede injected business writes", { timeout: 10_000 }, async () => {
+  const refusals = ["anonymous", "invalid-token", "inactive", "role", "foreign-selector", "unprovisioned", "foreign-provisioning", "foreign-account"];
+  for (const scenario of metaBindingWriteCases) {
+    for (const refusal of refusals) {
+      const beforeProfile = ["anonymous", "invalid-token", "inactive", "role", "foreign-selector"].includes(refusal);
+      await withMetaBindingRouter({
+        memberships: [{ ...memberA, ...(refusal === "inactive" ? { status: "disabled" } : {}), ...(refusal === "role" ? { role: "receptionist" } : {}) }],
+        authOk: refusal !== "invalid-token", rows: { meta_ad_accounts: scenario.rows },
+        writeFailure: { table: "meta_ad_accounts", op: scenario.op, error: metaBindingWriteError },
+      }, async (ctx) => {
+        if (refusal === "unprovisioned") delete process.env.META_WORKSPACE_ID;
+        if (refusal === "foreign-provisioning") process.env.META_WORKSPACE_ID = WORKSPACE_B;
+        const { res, log } = await ctx.call({ segments: ["meta-accounts"], method: "POST",
+          token: refusal === "anonymous" ? null : TOKEN,
+          query: refusal === "foreign-selector" ? { workspaceId: WORKSPACE_B } : {},
+          body: { ...metaBindingBody, ...(refusal === "foreign-account" ? { adAccountId: "act_987654321" } : {}) },
+        });
+        const expectedStatus = refusal === "anonymous" || refusal === "invalid-token" ? 401 : refusal === "unprovisioned" ? 503 : 403;
+        assert.equal(res.statusCode, expectedStatus, `${scenario.op}: ${refusal}`);
+        assert.equal(res.body.success, false);
+        assert.notEqual(res.body.code, "meta_account_binding_conflict");
+        assert.equal(businessQueries(log).length, 0, `${refusal} must precede the account snapshot and every business write`);
+        if (beforeProfile) assert.ok(log.every((entry) => entry.table === "staff_users"), `${refusal} must precede the profile read`);
+        else assertWorkspaceProfileQuery(log, WORKSPACE_A);
+        if (refusal === "foreign-selector" || refusal === "inactive") assert.equal(res.body.code, "workspace_access_denied");
+        if (refusal === "unprovisioned") assert.equal(res.body.code, "meta_workspace_not_provisioned");
+        if (refusal === "foreign-provisioning") assert.equal(res.body.code, "meta_workspace_not_authorized");
+        if (refusal === "foreign-account") assert.equal(res.body.code, "meta_account_not_authorized");
+      });
+    }
   }
 });
 
