@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import ts from "typescript";
 
 // Форма записи по образцу запись.кз: мастер первым, его услуги с ценами,
 // цена записи как снимок договорённости, длительность любым числом минут.
@@ -190,7 +191,7 @@ test("BF13 пустой день мастера называет ближайш�
   // «Открыла — пусто» читается как «мои записи пропали»: живой случай Айданы
   // и Дильназ, у обеих ближайшая запись стояла назавтра.
   assert.ok(page.includes("Ближайшая запись —"), "ссылка на ближайшую существует");
-  assert.match(page, /setSelectedDate\(dateKeyFromStartsAt\(nextAppointment\.startsAt\)\)/, "и открывает её день");
+  assert.match(page, /setSelectedDate\(dateKeyFromStartsAt\(nextAppointment\.startsAt, clinicTimeZone\)\)/, "и открывает её день в поясе клиники");
 });
 
 test("BF14 имя клиента ищется в базе, а выбранная карточка открывает полную историю", async () => {
@@ -250,4 +251,96 @@ test("BF17 все активные CRM-маршруты записи испол�
   assert.match(protectedPage, /if \(isLoading\) return null;[\s\S]*if \(!allowed\) return null;[\s\S]*return <Component \/>;/);
   assert.equal((protectedPage.match(/return <Component \/>;/g) || []).length, 1);
   assert.ok(!app.includes("DemoAppointments"), "демонстрационная форма не должна быть доступна из маршрутизатора");
+});
+
+test("BF18 форма, карточки и календарь передают один пояс клиники во все преобразования времени", async () => {
+  const page = await read("artifacts", "negis", "src", "pages", "AppointmentsPage.tsx");
+  const ast = ts.createSourceFile("AppointmentsPage.tsx", page, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const zoneArgument = new Map([
+    ["dateKeyFromStartsAt", 1], ["timeKeyFromStartsAt", 1], ["formFromAppointment", 1],
+    ["formatVisitDay", 1], ["describeConflict", 2], ["appointmentFromForm", 2],
+  ]);
+  const scopes = new Set(["AppointmentsPage", "AppointmentCard", "formFromAppointment", "describeConflict"]);
+  let checkedCalls = 0;
+  let checkedCards = 0;
+  function visit(node: ts.Node, scope = ""): void {
+    if (ts.isFunctionDeclaration(node) && node.name) scope = node.name.text;
+    if (scopes.has(scope) && ts.isCallExpression(node) && ts.isIdentifier(node.expression)) {
+      const index = zoneArgument.get(node.expression.text);
+      if (index !== undefined) {
+        const line = ast.getLineAndCharacterOfPosition(node.getStart(ast)).line + 1;
+        assert.equal(node.arguments[index]?.getText(ast), scope === "AppointmentsPage" ? "clinicTimeZone" : "timeZone",
+          `${node.expression.text} at line ${line} must not use device-local time`);
+        if (node.expression.text === "appointmentFromForm") {
+          assert.ok(node.arguments[3], "edit conversion must receive the original instant to preserve a repeated DST minute");
+        }
+        checkedCalls += 1;
+      }
+    }
+    if (ts.isJsxSelfClosingElement(node) && node.tagName.getText(ast) === "AppointmentCard") {
+      const zone = node.attributes.properties.find((property): property is ts.JsxAttribute =>
+        ts.isJsxAttribute(property) && property.name.getText(ast) === "timeZone");
+      assert.ok(zone?.initializer && ts.isJsxExpression(zone.initializer));
+      assert.equal(zone.initializer.expression?.getText(ast), "clinicTimeZone");
+      checkedCards += 1;
+    }
+    ts.forEachChild(node, (child) => visit(child, scope));
+  }
+  visit(ast);
+  assert.ok(checkedCalls >= 10, "calendar, edit, restore, cards and history must retain their real time conversions");
+  assert.equal(checkedCards, 2, "both day and list cards must receive clinic time");
+});
+
+test("BF19 разные пояса устройства и клиники не отключают подсказки свободного времени", async () => {
+  const page = await read("artifacts", "negis", "src", "pages", "AppointmentsPage.tsx");
+  const ast = ts.createSourceFile("AppointmentsPage.tsx", page, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  let callback = "";
+  function visit(node: ts.Node): void {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.name.text === "formSlots"
+      && node.initializer && ts.isCallExpression(node.initializer)) callback = node.initializer.arguments[0].getText(ast);
+    ts.forEachChild(node, visit);
+  }
+  visit(ast);
+  assert.ok(callback, "the real free-slot calculation remains mounted");
+  assert.doesNotMatch(callback, /clinicTimeZone\s*!==\s*deviceTimeZone/);
+  assert.match(callback, /minuteOfClinicDay\(appointment\.startsAt, clinicTimeZone\)/);
+  assert.match(callback, /isOnDay\(appointment, form\.date, clinicTimeZone\)/);
+});
+
+test("BF20 создание, правка, восстановление и отправка формы ждут известного пояса клиники", async () => {
+  const page = await read("artifacts", "negis", "src", "pages", "AppointmentsPage.tsx");
+  const ast = ts.createSourceFile("AppointmentsPage.tsx", page, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const guardedActions = new Map<string, ts.ArrowFunction>();
+  let restoreEffect: ts.ArrowFunction | undefined;
+  function visit(node: ts.Node): void {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)
+      && ["openCreate", "openEdit", "submitForm"].includes(node.name.text)
+      && node.initializer && ts.isArrowFunction(node.initializer)) guardedActions.set(node.name.text, node.initializer);
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "useEffect") {
+      const callback = node.arguments[0];
+      if (callback && ts.isArrowFunction(callback) && callback.getText(ast).includes("restoreAppointmentCreateAttempt(")) restoreEffect = callback;
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(ast);
+  assert.equal(guardedActions.size, 3);
+  assert.ok(restoreEffect);
+  guardedActions.set("restore", restoreEffect);
+  for (const [name, callback] of guardedActions) {
+    assert.ok(ts.isBlock(callback.body));
+    const guard = callback.body.statements.find((statement): statement is ts.IfStatement => ts.isIfStatement(statement)
+      && statement.expression.getText(ast).includes("!clinicTimeZoneReady"));
+    assert.ok(guard, `${name} must reject an unresolved clock before using device fallback`);
+    let returns = false;
+    function findReturn(node: ts.Node): void {
+      if (ts.isReturnStatement(node)) returns = true;
+      ts.forEachChild(node, findReturn);
+    }
+    findReturn(guard.thenStatement);
+    assert.equal(returns, true, `${name} must actually stop, not only display a warning`);
+    const firstConversion = callback.body.getText(ast).search(/(?:setForm|appointmentFromForm|restoreAppointmentCreateAttempt)\(/);
+    assert.ok(firstConversion >= 0);
+    assert.ok(guard.getStart(ast) - callback.body.getStart(ast) < firstConversion, `${name} guards the first conversion`);
+  }
+  assert.match(page, /const \[clinicTimeZoneReady, setClinicTimeZoneReady\] = useState\(\(\) => !isRealWorkspace\(\)\)/);
 });

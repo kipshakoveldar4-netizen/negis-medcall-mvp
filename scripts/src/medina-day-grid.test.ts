@@ -361,9 +361,13 @@ test("FS9 ревью-находки закрыты и не вернутся", as
   assert.ok(monthBlock.includes("Number.isFinite(instant)"), "нечитаемая дата — «не знаю», а не «сегодня»");
   assert.ok(!monthBlock.includes("activeStatuses"), "фильтр «Отменено» не должен рисовать пустой месяц");
 
-  // При несовпадении поясов подсказка прячется с объяснением, а не врёт.
-  assert.match(page, /clinicTimeZone !== deviceTimeZone[\s\S]{0,120}другой пояс/);
-  assert.ok(page.includes("часы устройства не совпадают с часами салона"), "причина названа человеку");
+  // The form and free slots now share the clinic clock, including remote devices.
+  const formSlots = page.slice(page.indexOf("const formSlots = useMemo"), page.indexOf("const openCreate ="));
+  assert.ok(!formSlots.includes("deviceTimeZone"), "device zone must not suppress valid clinic slots");
+  assert.ok(!formSlots.includes('"другой пояс"'));
+  assert.ok(formSlots.includes("minuteOfClinicDay(appointment.startsAt, clinicTimeZone)"));
+  assert.ok(page.includes("workspaceDateTimeToIso(`${dateKey}T${timeKey}`, timeZone, unchangedIso)"));
+  assert.ok(page.includes("Время {terms.orgGenitive}: {clinicTimeZone}"), "the displayed clock is identified");
 
   // Пустота пустоте рознь: четыре причины, а не одно «всё занято».
   for (const phrase of [

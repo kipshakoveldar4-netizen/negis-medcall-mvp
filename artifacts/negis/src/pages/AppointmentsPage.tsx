@@ -24,6 +24,7 @@ import { canReleaseAppointmentAttempt, clearPersistedAppointmentCreateAttempt, c
 import { isRealWorkspace, readWorkspaceId as readCurrentWorkspaceId, useDemoCollection, workspaceScopedKey } from "@/lib/demoStorage";
 import { formatPhone, toTelHref, toWhatsappHref } from "@/lib/phone";
 import { clinicToday, dayKeyInZone, isOnClinicDay } from "@/lib/clinicDay";
+import { requireWorkspaceTimeZone, workspaceDateTimeToIso, workspaceLocalDateTime } from "@/lib/clinicDateTime";
 import { useAuth } from "@/contexts/AuthContext";
 import { MasterDayGrid } from "@/components/crm/master-day-grid";
 import { AppointmentExtraServices } from "@/components/crm/appointment-extra-services";
@@ -192,23 +193,29 @@ type DoctorShift = {
  * нему выбирает между списком и текстовым полем, и «справочник выключен» не
  * имеет права выглядеть как «врачей нет».
  */
-async function loadDirectory<T>(path: string, listKey: string, availableKey: string, map: (record: Record<string, unknown>) => T): Promise<{ items: T[]; available: boolean; timeZone: string }> {
-  if (!isRealWorkspace()) return { items: [], available: false, timeZone: "" };
+async function loadDirectory<T>(path: string, listKey: string, availableKey: string, map: (record: Record<string, unknown>) => T): Promise<{ items: T[]; available: boolean; timeZone: string; resolved: boolean }> {
+  if (!isRealWorkspace()) return { items: [], available: false, timeZone: "", resolved: true };
   try {
     const workspaceId = readCurrentWorkspaceId();
     const response = await crmFetch(`${path}?workspaceId=${encodeURIComponent(workspaceId)}`);
     const text = await response.text();
     const body = text ? (JSON.parse(text) as { success?: boolean; mode?: string; data?: Record<string, unknown> }) : null;
-    if (!response.ok || body?.success !== true || body.mode !== "supabase") return { items: [], available: false, timeZone: "" };
+    if (!response.ok || body?.success !== true || body.mode !== "supabase") return { items: [], available: false, timeZone: "", resolved: false };
+    if (path === "/api/crm/doctor-schedule" && typeof body.data?.timeZone !== "string") {
+      throw new Error("Schedule response has no confirmed time zone");
+    }
     const raw = body.data?.[listKey] ?? body.data?.items;
     const list = Array.isArray(raw) ? raw : [];
+    const timeZone = readString(body.data?.timeZone);
+    if (timeZone) requireWorkspaceTimeZone(timeZone);
     return {
       items: list.map((item) => map(asRecord(item))),
       available: body.data?.[availableKey] !== false,
-      timeZone: readString(body.data?.timeZone),
+      timeZone,
+      resolved: true,
     };
   } catch {
-    return { items: [], available: false, timeZone: "" };
+    return { items: [], available: false, timeZone: "", resolved: false };
   }
 }
 
@@ -437,13 +444,15 @@ function toLocalDate(dateKey: string, timeKey = "09:00"): Date {
   return new Date(year, month - 1, day, hour, minute, 0, 0);
 }
 
-function toStartsAt(dateKey: string, timeKey: string): string {
+function toStartsAt(dateKey: string, timeKey: string, timeZone = "", unchangedIso?: string): string {
+  if (timeZone) return workspaceDateTimeToIso(`${dateKey}T${timeKey}`, timeZone, unchangedIso);
   return toLocalDate(dateKey, timeKey).toISOString();
 }
 
-function dateKeyFromStartsAt(startsAt: string): string {
+function dateKeyFromStartsAt(startsAt: string, timeZone = ""): string {
   const date = new Date(startsAt);
   if (Number.isNaN(date.getTime())) return todayKeyAtLoad;
+  if (timeZone) return workspaceLocalDateTime(startsAt, timeZone).slice(0, 10);
   return toDateKey(date);
 }
 
@@ -461,9 +470,10 @@ function isoWeekdayOf(dateKey: string): number {
   return weekday === 0 ? 7 : weekday;
 }
 
-function timeKeyFromStartsAt(startsAt: string): string {
+function timeKeyFromStartsAt(startsAt: string, timeZone = ""): string {
   const date = new Date(startsAt);
   if (Number.isNaN(date.getTime())) return "09:00";
+  if (timeZone) return workspaceLocalDateTime(startsAt, timeZone).slice(11, 16);
   return toTimeKey(date);
 }
 
@@ -597,10 +607,10 @@ async function safeJson(response: globalThis.Response): Promise<ApiResponse | nu
 }
 
 /** «24.08» — коротко: год в архиве почти всегда текущий, а место в строке дорого. */
-function formatVisitDay(startsAt: string): string {
+function formatVisitDay(startsAt: string, timeZone = ""): string {
   const parsed = new Date(startsAt);
   if (Number.isNaN(parsed.getTime())) return "—";
-  return parsed.toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit" });
+  return parsed.toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit", ...(timeZone ? { timeZone } : {}) });
 }
 
 function defaultForm(date: string, time = "09:00"): AppointmentForm {
@@ -626,7 +636,7 @@ function defaultForm(date: string, time = "09:00"): AppointmentForm {
   };
 }
 
-function formFromAppointment(appointment: Appointment): AppointmentForm {
+function formFromAppointment(appointment: Appointment, timeZone = ""): AppointmentForm {
   const first = appointment.serviceItems?.[0];
   return {
     clientId: appointment.clientId || "",
@@ -638,8 +648,8 @@ function formFromAppointment(appointment: Appointment): AppointmentForm {
     additionalServices: appointment.serviceItems?.slice(1) ?? [],
     doctor: appointment.doctor,
     doctorId: appointment.doctorId || "",
-    date: dateKeyFromStartsAt(appointment.startsAt),
-    time: timeKeyFromStartsAt(appointment.startsAt),
+    date: dateKeyFromStartsAt(appointment.startsAt, timeZone),
+    time: timeKeyFromStartsAt(appointment.startsAt, timeZone),
     durationMinutes: first?.durationMinutes ?? appointment.durationMinutes,
     priceTenge: (first ? first.priceMinor : appointment.priceMinor) == null ? "" : String((first ? first.priceMinor! : appointment.priceMinor!) / 100),
     status: appointment.status,
@@ -652,7 +662,7 @@ function formServiceItems(form: AppointmentForm): AppointmentServiceItem[] {
   return [{ serviceId: form.serviceId, name: form.service.trim(), priceMinor: appointmentPriceFromInput(form.priceTenge), durationMinutes: form.durationMinutes }, ...form.additionalServices];
 }
 
-function appointmentFromForm(form: AppointmentForm, existingId?: string): Appointment {
+function appointmentFromForm(form: AppointmentForm, existingId?: string, timeZone = "", unchangedIso?: string): Appointment {
   const serviceItems = normalizeAppointmentServices(formServiceItems(form));
   const total = summarizeAppointmentServices(serviceItems);
   return {
@@ -666,7 +676,7 @@ function appointmentFromForm(form: AppointmentForm, existingId?: string): Appoin
     serviceItems,
     doctor: form.doctor.trim(),
     doctorId: form.doctorId || "",
-    startsAt: toStartsAt(form.date, form.time),
+    startsAt: toStartsAt(form.date, form.time, timeZone, unchangedIso),
     // Неизвестная цена хотя бы одной услуги оставляет итог неизвестным.
     priceMinor: total.priceMinor,
     durationMinutes: total.durationMinutes,
@@ -786,8 +796,8 @@ function describeSchedule(error: OutsideScheduleError, terms: Terms): string {
   return `${who} не работает в это время${when ? ` (${when}, время ${terms.orgGenitive})` : ""}. ${hours} Записать всё равно?`;
 }
 
-function describeConflict(error: SlotTakenError, terms: Terms): string {
-  const at = error.conflict.startsAt ? timeKeyFromStartsAt(error.conflict.startsAt) : "";
+function describeConflict(error: SlotTakenError, terms: Terms, timeZone = ""): string {
+  const at = error.conflict.startsAt ? timeKeyFromStartsAt(error.conflict.startsAt, timeZone) : "";
   const who = error.conflict.clientName || `другой ${terms.customer}`;
   return `У ${terms.specialistGenitive} уже есть запись на это время: ${who}${at ? `, ${at}` : ""}. Выберите другое время или другого ${terms.specialistGenitive}.`;
 }
@@ -804,13 +814,8 @@ function appointmentInterval(appointment: Appointment) {
 /**
  * Попадает ли запись в календарный день клиники.
  *
- * Не то же самое, что dateKeyFromStartsAt: тот считает день по поясу
- * устройства и живёт в паре с timeKeyFromStartsAt, обслуживая форму
- * редактирования. Здесь же сравниваются списки, а вторая сторона сравнения —
- * todayKey — посчитана в поясе клиники. Пока эти две половины считались в
- * разных поясах, «Сегодня записей» было верно ровно в том случае, когда пояса
- * совпадают, то есть именно тогда, когда исправлять было нечего: в UTC+5 на
- * ноутбуке по Гринвичу карточка называла число записей за чужие сутки.
+ * Форма, карточки и фильтры используют один пояс. Голая дата уже обозначает
+ * календарный день и не должна смещаться вместе с часовым поясом устройства.
  */
 function isOnDay(appointment: Appointment, dateKey: string, timeZone: string): boolean {
   return isOnClinicDay(appointment.startsAt, dateKey, timeZone);
@@ -887,18 +892,20 @@ function TextField({
 
 function AppointmentCard({
   appointment,
+  timeZone,
   onEdit,
   onStatus,
   onSale,
 }: {
   appointment: Appointment;
+  timeZone: string;
   onEdit: (appointment: Appointment) => void;
   onStatus: (appointment: Appointment, status: AppointmentStatus) => void;
   onSale: (appointment: Appointment) => void;
 }) {
   const { vertical } = useAuth();
   const terms = termsFor(vertical);
-  const startTime = timeKeyFromStartsAt(appointment.startsAt);
+  const startTime = timeKeyFromStartsAt(appointment.startsAt, timeZone);
   const whatsapp = appointment.whatsapp || appointment.phone;
   const moves = allowedStatusMoves[appointment.status] || [];
 
@@ -990,6 +997,8 @@ export function AppointmentsPage() {
   const [modalOpen, setModalOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState<AppointmentForm>(() => defaultForm(todayKeyAtLoad));
+  const [clinicTimeZone, setClinicTimeZone] = useState("");
+  const [clinicTimeZoneReady, setClinicTimeZoneReady] = useState(() => !isRealWorkspace());
   const totalDurationMinutes = form.durationMinutes + form.additionalServices.reduce((sum, item) => sum + item.durationMinutes, 0);
   const totalPriceMinor = useMemo(() => {
     try { return summarizeAppointmentServices(formServiceItems(form)).priceMinor; }
@@ -1040,6 +1049,7 @@ export function AppointmentsPage() {
   useEffect(() => {
     const storage = appointmentAttemptStorage();
     if (!storage || !isRealWorkspace()) return;
+    if (!clinicTimeZoneReady) return;
     const scope = currentCreateScope.current;
     if (!scope.workspaceId || !scope.actorId) return;
     const scopeKey = `${scope.workspaceId}:${scope.actorId}`;
@@ -1052,8 +1062,8 @@ export function AppointmentsPage() {
     createAttempt.current = restored;
     prefillLeadRef.current = restored.leadId || "";
     setEditingId(null);
-    setForm(formFromAppointment(restoredAppointment));
-    setSelectedDate(dateKeyFromStartsAt(restoredAppointment.startsAt));
+    setForm(formFromAppointment(restoredAppointment, clinicTimeZone));
+    setSelectedDate(dateKeyFromStartsAt(restoredAppointment.startsAt, clinicTimeZone));
     setConflictMessage("");
     setScheduleMessage("");
     setClientMatches([]);
@@ -1061,7 +1071,7 @@ export function AppointmentsPage() {
     setUnconfirmedCreate(true);
     setModalOpen(true);
     toast.warning("Найдена незавершённая запись. Проверьте, сохранилась ли она.");
-  }, [clinicId, user?.id]);
+  }, [clinicId, user?.id, clinicTimeZone, clinicTimeZoneReady]);
 
   useEffect(() => {
     if (!saving && !unconfirmedCreate) return;
@@ -1110,7 +1120,6 @@ export function AppointmentsPage() {
     }
   }, [directory]);
   const [shifts, setShifts] = useState<DoctorShift[]>([]);
-  const [clinicTimeZone, setClinicTimeZone] = useState("");
   // Прочитать график не удалось — это НЕ то же самое, что «пояс не задан».
   // Утверждать второе, когда верно первое, — ровно та подмена, которую этот
   // продукт ловит у себя везде остальное.
@@ -1141,7 +1150,7 @@ export function AppointmentsPage() {
   // ничего не выбрал сам. Иначе экран отнимал бы у него выбор на каждой
   // загрузке.
   useEffect(() => {
-    if (!clinicTimeZone) return;
+    if (!clinicTimeZone || createAttempt.current) return;
     setSelectedDate((current) => (current === todayKeyAtLoad ? clinicToday(clinicTimeZone) : current));
   }, [clinicTimeZone]);
 
@@ -1162,6 +1171,7 @@ export function AppointmentsPage() {
       // Пояс приходит вместе с графиком: маршрут настроек доступен только
       // владельцу и администратору, и регистратор получил бы оттуда отказ.
       setClinicTimeZone(result.timeZone);
+      setClinicTimeZoneReady(result.resolved);
       setScheduleReadable(result.available);
     });
     return () => {
@@ -1487,6 +1497,7 @@ export function AppointmentsPage() {
 
   useEffect(() => {
     if (typeof window === "undefined") return;
+    if (!clinicTimeZoneReady || createAttempt.current) return;
 
     // Selection-2: a handoff belongs to the clinic it was made in.
     const prefillKey = workspaceScopedKey(APPOINTMENT_PREFILL_KEY);
@@ -1495,8 +1506,9 @@ export function AppointmentsPage() {
       const raw = window.localStorage.getItem(prefillKey);
       if (!raw) return;
       const prefill = JSON.parse(raw) as Record<string, unknown>;
+      const prefillDate = clinicTimeZone && selectedDate === todayKeyAtLoad ? clinicToday(clinicTimeZone) : selectedDate;
       const nextForm = {
-        ...defaultForm(selectedDate),
+        ...defaultForm(prefillDate),
         // Заявка передаёт карточку клиента с самого начала — терялась она здесь.
         clientId: readString(prefill.clientId),
         client: readString(prefill.clientName) || readString(prefill.name),
@@ -1513,7 +1525,7 @@ export function AppointmentsPage() {
     } catch {
       window.localStorage.removeItem(prefillKey);
     }
-  }, [selectedDate]);
+  }, [selectedDate, clinicTimeZone, clinicTimeZoneReady]);
 
   /**
    * Заявка → «Записана» после успешно созданной записи.
@@ -1731,10 +1743,6 @@ export function AppointmentsPage() {
       : Boolean(ownDoctorName) && entry.fullName.trim().toLowerCase() === ownDoctorName);
     const capacity = doctor?.capacity ?? 1;
 
-    if (clinicTimeZone && deviceTimeZone && clinicTimeZone !== deviceTimeZone) {
-      return { groups: [] as ReturnType<typeof groupSlots>, reason: "другой пояс" as const };
-    }
-
     const isoWeekday = new Date(Date.UTC(year, month - 1, day)).getUTCDay() || 7;
     const gridShifts = shifts.map((shift) => ({
       doctorId: shift.doctorId,
@@ -1792,7 +1800,7 @@ export function AppointmentsPage() {
       else reason = "занято";
     }
     return { groups: groupSlots(slots), reason };
-  }, [form.date, form.doctor, form.doctorId, totalDurationMinutes, shifts, items, editingId, directory.items, clinicTimeZone, deviceTimeZone, todayKey, userRole]);
+  }, [form.date, form.doctor, form.doctorId, totalDurationMinutes, shifts, items, editingId, directory.items, clinicTimeZone, todayKey, userRole]);
 
   /**
    * Архив клиента — просьба владельца дословно: «сбоку, когда записываешь,
@@ -1817,6 +1825,10 @@ export function AppointmentsPage() {
   }, [items, remoteVisitHistory, form.clientId, form.phone, form.whatsapp, editingId]);
 
   const openCreate = (date = selectedDate, time = "09:00") => {
+    if (!clinicTimeZoneReady) {
+      toast.error("Не удалось определить часовой пояс. Обновите страницу и повторите.");
+      return false;
+    }
     setEditingId(null);
     setConflictMessage("");
     setScheduleMessage("");
@@ -1834,16 +1846,21 @@ export function AppointmentsPage() {
     setClientSearchAttempted(false);
     setRemoteVisitHistory([]);
     setModalOpen(true);
+    return true;
   };
 
   const openEdit = (appointment: Appointment) => {
+    if (!clinicTimeZoneReady) {
+      toast.error("Не удалось определить часовой пояс. Обновите страницу и повторите.");
+      return;
+    }
     // Обе панели закрываются: отказ, оставшийся от прошлой записи, предлагал бы
     // «Записать вне графика» для совсем другого визита.
     setConflictMessage("");
     setScheduleMessage("");
     setEditingId(appointment.id);
     setConflictMessage("");
-    setForm(formFromAppointment(appointment));
+    setForm(formFromAppointment(appointment, clinicTimeZone));
     setDoctorSearch("");
     setClientMatches([]);
     setClientSearchAttempted(false);
@@ -2088,6 +2105,10 @@ export function AppointmentsPage() {
   };
 
   const submitForm = async (allowConflict = false, allowOutsideSchedule = false) => {
+    if (!clinicTimeZoneReady) {
+      toast.error("Не удалось определить часовой пояс. Обновите страницу и повторите.");
+      return;
+    }
     if (submitLock.current || saving) return;
     const retrying = !editingId && createAttempt.current?.uncertain === true;
     if (!retrying && !form.client.trim()) {
@@ -2121,6 +2142,8 @@ export function AppointmentsPage() {
       appointment = retrying ? appointmentFromApi(createAttempt.current!.payload) : appointmentFromForm(
         { ...form, serviceId: resolvedServiceId, doctorId: resolvedDoctorId },
         editingId || undefined,
+        clinicTimeZone,
+        editingId ? items.find((item) => item.id === editingId)?.startsAt : undefined,
       );
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Проверьте услуги записи.");
@@ -2133,7 +2156,7 @@ export function AppointmentsPage() {
     // секунду назад с другого устройства.
     const localConflict = findConflict(appointment);
     if (!retrying && localConflict && !allowConflict) {
-      setConflictMessage(`У ${terms.specialistGenitive} уже есть запись на это время: ${localConflict.client}, ${timeKeyFromStartsAt(localConflict.startsAt)}. Выберите другое время.`);
+      setConflictMessage(`У ${terms.specialistGenitive} уже есть запись на это время: ${localConflict.client}, ${timeKeyFromStartsAt(localConflict.startsAt, clinicTimeZone)}. Выберите другое время.`);
       return;
     }
 
@@ -2158,7 +2181,7 @@ export function AppointmentsPage() {
           setItems((current) => current.map((item) => (item.id === editingId ? previous : item)));
         }
         if (error instanceof SlotTakenError) {
-          setConflictMessage(describeConflict(error, terms));
+          setConflictMessage(describeConflict(error, terms, clinicTimeZone));
           return;
         }
         if (error instanceof OutsideScheduleError) {
@@ -2182,7 +2205,7 @@ export function AppointmentsPage() {
         }
       } catch (error) {
         if (error instanceof SlotTakenError) {
-          setConflictMessage(describeConflict(error, terms));
+          setConflictMessage(describeConflict(error, terms, clinicTimeZone));
           return;
         }
         if (error instanceof OutsideScheduleError) {
@@ -2228,7 +2251,7 @@ export function AppointmentsPage() {
             <ul className="mt-2 space-y-1 text-sm font-semibold text-amber-900">
               {dayBuckets.outside.map((appointment) => (
                 <li key={appointment.id}>
-                  {timeKeyFromStartsAt(appointment.startsAt)} · {appointment.client} · {appointment.doctor || `без ${terms.specialistGenitive}`}
+                  {timeKeyFromStartsAt(appointment.startsAt, clinicTimeZone)} · {appointment.client} · {appointment.doctor || `без ${terms.specialistGenitive}`}
                 </li>
               ))}
             </ul>
@@ -2276,7 +2299,7 @@ export function AppointmentsPage() {
                 </div>
                 <div className="space-y-3">
                   {segment.appointments.map((appointment) => (
-                    <AppointmentCard key={appointment.id} appointment={appointment} onEdit={openEdit} onStatus={updateAppointmentStatus} onSale={startSaleFromAppointment} />
+                    <AppointmentCard key={appointment.id} appointment={appointment} timeZone={clinicTimeZone} onEdit={openEdit} onStatus={updateAppointmentStatus} onSale={startSaleFromAppointment} />
                   ))}
                 </div>
               </div>
@@ -2326,7 +2349,7 @@ export function AppointmentsPage() {
             <div className="mt-4 space-y-2">
               {dayItems.slice(0, 3).map((appointment) => (
                 <button key={appointment.id} type="button" className="w-full rounded-xl bg-[#F8FAFC] px-3 py-2 text-left" onClick={() => openEdit(appointment)}>
-                  <p className="text-sm font-black text-[#1A56DB]">{timeKeyFromStartsAt(appointment.startsAt)}</p>
+                  <p className="text-sm font-black text-[#1A56DB]">{timeKeyFromStartsAt(appointment.startsAt, clinicTimeZone)}</p>
                   <p className="truncate text-sm font-bold text-[#0F172A]">{appointment.client}</p>
                   <p className="truncate text-xs text-[#64748B]">{appointment.service}</p>
                 </button>
@@ -2344,9 +2367,9 @@ export function AppointmentsPage() {
                       type="button"
                       className="mt-1 text-sm font-black"
                       style={{ color: "var(--negis-primary)" }}
-                      onClick={() => setSelectedDate(dateKeyFromStartsAt(nextAppointment.startsAt))}
+                      onClick={() => setSelectedDate(dateKeyFromStartsAt(nextAppointment.startsAt, clinicTimeZone))}
                     >
-                      Ближайшая запись — {formatVisitDay(nextAppointment.startsAt)} в {timeKeyFromStartsAt(nextAppointment.startsAt)} · открыть
+                      Ближайшая запись — {formatVisitDay(nextAppointment.startsAt, clinicTimeZone)} в {timeKeyFromStartsAt(nextAppointment.startsAt, clinicTimeZone)} · открыть
                     </button>
                   ) : null}
                 </div>
@@ -2369,7 +2392,7 @@ export function AppointmentsPage() {
       </div>
       <div className="space-y-3">
         {weekAppointments.map((appointment) => (
-          <AppointmentCard key={appointment.id} appointment={appointment} onEdit={openEdit} onStatus={updateAppointmentStatus} onSale={startSaleFromAppointment} />
+          <AppointmentCard key={appointment.id} appointment={appointment} timeZone={clinicTimeZone} onEdit={openEdit} onStatus={updateAppointmentStatus} onSale={startSaleFromAppointment} />
         ))}
         {weekAppointments.length === 0 ? <p className="rounded-2xl bg-[#F8FAFC] p-4 text-sm text-[#64748B]">Записей по выбранным фильтрам нет.</p> : null}
       </div>
@@ -2378,16 +2401,9 @@ export function AppointmentsPage() {
 
   return (
     <PageLayout>
-      {/*
-        Честность про время. Правило графика считается в поясе клиники, но
-        часы, которые набирает регистратор, всё ещё читаются в поясе его
-        ноутбука — и продукт этого не исправляет в этой ветке. Молчать об
-        этом нельзя: расхождение видно только тому, кто о нём знает.
-      */}
       {clinicTimeZone && deviceTimeZone && clinicTimeZone !== deviceTimeZone ? (
         <div className="mb-4 rounded-2xl bg-amber-50 p-4 text-sm font-semibold text-amber-800">
-          Часовой пояс устройства ({deviceTimeZone}) отличается от часового пояса {terms.orgGenitive} ({clinicTimeZone}).
-          Время на экране может отличаться от времени {terms.orgGenitive}.
+          Время {terms.orgGenitive}: {clinicTimeZone}. Часовой пояс устройства: {deviceTimeZone}.
         </div>
       ) : null}
       {!clinicTimeZone && scheduleReadable ? (
@@ -2462,7 +2478,7 @@ export function AppointmentsPage() {
               <p className="text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">Следующая запись</p>
               {nextAppointment ? (
                 <div className="mt-3">
-                  <p className="text-lg font-black text-[#0F172A]">{timeKeyFromStartsAt(nextAppointment.startsAt)} · {nextAppointment.client}</p>
+                  <p className="text-lg font-black text-[#0F172A]">{timeKeyFromStartsAt(nextAppointment.startsAt, clinicTimeZone)} · {nextAppointment.client}</p>
                   <p className="mt-1 text-sm text-[#64748B]">{nextAppointment.service}</p>
                   <a className="neu-btn mt-3 w-full px-3 py-2 text-xs" href={toWhatsappHref(nextAppointment.whatsapp || nextAppointment.phone, `Здравствуйте, ${nextAppointment.client}! Напоминаем о записи.`)} target="_blank" rel="noreferrer">
                     <MessageCircle size={14} />
@@ -2570,7 +2586,7 @@ export function AppointmentsPage() {
               if (appointment) void updateAppointmentStatus(appointment, status);
             }}
             onCreate={({ doctorId, doctorName, time }) => {
-              openCreate(selectedDate, time);
+              if (!openCreate(selectedDate, time)) return;
               // Мастер известен точнее, чем через фильтр: ткнули в его колонку.
               // Подставляется ПОСЛЕ openCreate — тот собирает форму заново.
               if (doctorId || doctorName) {
@@ -3035,9 +3051,7 @@ export function AppointmentsPage() {
                           ? "Рабочий день уже закончился — на сегодня времени не осталось. Выберите другую дату."
                           : formSlots.reason === "не помещается"
                             ? "Услуга такой длительности не помещается в рабочее окно этого дня."
-                            : formSlots.reason === "другой пояс"
-                              ? "Подсказка времени скрыта: часы устройства не совпадают с часами салона, и подставленное время встало бы неверно."
-                              : "Свободного времени не осталось — всё занято записями."}
+                            : "Свободного времени не осталось — всё занято записями."}
                     </p>
                   ) : (
                     <div className="space-y-2">
@@ -3155,7 +3169,7 @@ export function AppointmentsPage() {
                   <div className="mt-2 space-y-1">
                     {visitHistory.map((visit) => (
                       <p key={visit.id} className="text-sm font-semibold" style={{ color: "var(--negis-text)" }}>
-                        <span className="tabular-nums">{formatVisitDay(visit.startsAt)} · {timeKeyFromStartsAt(visit.startsAt)}</span>
+                        <span className="tabular-nums">{formatVisitDay(visit.startsAt, clinicTimeZone)} · {timeKeyFromStartsAt(visit.startsAt, clinicTimeZone)}</span>
                         {visit.service ? ` · ${visit.service}` : ""}
                         {visit.doctor ? ` · ${visit.doctor}` : ""}
                         <span style={{ color: "var(--negis-muted)" }}> · {getAppointmentStatusLabel(visit.status)}</span>

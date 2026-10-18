@@ -51,7 +51,7 @@ const TOKEN = "header.payload.signature";
 
 type QueryLog = { table: string; op: string; filters: Record<string, unknown> };
 type Filter = { column: string; op: "eq" | "gte" | "lte"; value: unknown };
-type InjectedError = { table: string; op: "select" | "insert" | "update"; code: string; message: string };
+type InjectedError = { table: string; op: "select" | "insert" | "update"; code: string; message: string; key?: string; throws?: boolean };
 
 function spyClient(
   rows: Record<string, unknown[]>,
@@ -87,7 +87,8 @@ function spyClient(
         Object.keys(row && typeof row === "object" ? (row as Record<string, unknown>) : {})
           .find((column) => missingColumns.has(column));
 
-      const failure = () => injected.find((item) => item.table === table && item.op === entry.op) ?? null;
+      const failure = () => injected.find((item) => item.table === table && item.op === entry.op
+        && (item.key === undefined || entry.filters.key === item.key)) ?? null;
 
       const settle = (resolve: (value: { data: unknown; error: unknown }) => void) => {
         const missing = entry.filters.__missing;
@@ -97,6 +98,7 @@ function spyClient(
         }
         const fail = failure();
         if (fail) {
+          if (fail.throws) throw new Error(fail.message);
           resolve({ data: null, error: { message: fail.message, code: fail.code } });
           return;
         }
@@ -769,6 +771,113 @@ test("DS26 часовой пояс едет вместе с графиком, а
   assert.equal(res.statusCode, 200, JSON.stringify(res.body));
   assert.equal((res.body.data as Record<string, unknown>).timeZone, "Asia/Almaty");
 });
+
+for (const role of ["owner", "admin", "receptionist", "manager", "doctor"]) {
+  test(`DS-TZ valid clinic time zone is readable by ${role}`, async () => {
+    const call = await loadRouter({
+      role,
+      rows: { clinic_doctor_shifts: [mondayShift], workspace_settings: [scheduleSetting("Asia/Almaty")] },
+    });
+    const { res, log } = await call({ resource: "doctor-schedule", method: "GET" });
+
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+    assert.equal(res.body.success, true);
+    const data = res.body.data as Record<string, unknown>;
+    assert.equal(data.timeZone, "Asia/Almaty");
+    assert.equal(data.scheduleAvailable, true);
+    assert.equal((data.shifts as unknown[]).length, 1);
+    assert.ok(log.some((entry) => entry.table === "workspace_settings"
+      && entry.filters.workspace_id === WORKSPACE_A && entry.filters.key === "clinic_schedule"));
+    assert.ok(log.every((entry) => entry.op === "select"));
+  });
+}
+
+for (const fixture of [
+  { name: "absent setting", settings: [] },
+  { name: "absent timeZone field", settings: [{ ...scheduleSetting(""), value: {} }] },
+  { name: "empty timeZone", settings: [scheduleSetting("")] },
+  { name: "null timeZone", settings: [{ ...scheduleSetting(""), value: { timeZone: null } }] },
+]) {
+  test(`DS-TZ confirmed legacy ${fixture.name} remains readable`, async () => {
+    const call = await loadRouter({
+      rows: { clinic_doctor_shifts: [mondayShift], workspace_settings: fixture.settings },
+    });
+    const { res, log } = await call({ resource: "doctor-schedule", method: "GET" });
+
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+    assert.equal(res.body.success, true);
+    const data = res.body.data as Record<string, unknown>;
+    assert.equal(data.timeZone, "");
+    assert.equal(data.scheduleAvailable, true);
+    assert.ok(log.every((entry) => entry.op === "select"));
+  });
+}
+
+for (const missingTable of [false, true]) {
+  for (const throws of [false, true]) {
+    test(`DS-TZ settings read ${throws ? "throw" : "error"} refuses GET${missingTable ? " without migration 033" : ""}`, async () => {
+      const privateDetail = "private-settings-detail-DS-TZ";
+      const injected: InjectedError[] = [
+        { table: "workspace_settings", op: "select", key: "clinic_schedule", code: "42501", message: privateDetail, throws },
+      ];
+      if (missingTable) injected.push({
+        table: "clinic_doctor_shifts", op: "select", code: "PGRST205", message: "Could not find the table in the schema cache",
+      });
+      const call = await loadRouter({
+        rows: { clinic_doctor_shifts: [mondayShift], workspace_settings: [scheduleSetting("Asia/Almaty")] },
+        injected,
+      });
+      const { res, log } = await call({ resource: "doctor-schedule", method: "GET" });
+
+      assert.equal(res.statusCode, 502, JSON.stringify(res.body));
+      assert.equal(res.body.success, false);
+      assert.equal(res.body.data, undefined);
+      assert.ok(!JSON.stringify(res.body).includes(privateDetail));
+      assert.ok(log.some((entry) => entry.table === "workspace_settings"));
+      assert.ok(log.every((entry) => entry.op === "select"));
+    });
+  }
+}
+
+for (const fixture of [
+  { name: "invalid zone", value: { timeZone: "Invalid/DS-TZ-Private" } },
+  { name: "numeric zone", value: { timeZone: 5 } },
+  { name: "object zone", value: { timeZone: { invalid: "DS-TZ-private-zone" } } },
+  { name: "string settings", value: "DS-TZ-private-settings" },
+  { name: "array settings", value: [] },
+]) {
+  test(`DS-TZ malformed ${fixture.name} must not look like a known-empty zone`, async () => {
+    const call = await loadRouter({
+      rows: { clinic_doctor_shifts: [mondayShift], workspace_settings: [{ ...scheduleSetting(""), value: fixture.value }] },
+    });
+    const { res, log } = await call({ resource: "doctor-schedule", method: "GET" });
+
+    assert.equal(res.statusCode, 502, JSON.stringify(res.body));
+    assert.equal(res.body.success, false);
+    assert.equal(res.body.data, undefined);
+    assert.ok(!JSON.stringify(res.body).includes("DS-TZ"));
+    assert.ok(log.every((entry) => entry.op === "select"));
+  });
+}
+
+for (const timeZone of ["Asia/Almaty", ""]) {
+  test(`DS-TZ missing migration 033 retains a confirmed ${timeZone ? "valid" : "empty"} zone`, async () => {
+    const call = await loadRouter({
+      rows: { workspace_settings: [scheduleSetting(timeZone)] },
+      injected: [{ table: "clinic_doctor_shifts", op: "select", code: "PGRST205", message: "Could not find the table in the schema cache" }],
+    });
+    const { res, log } = await call({ resource: "doctor-schedule", method: "GET" });
+
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+    assert.equal(res.body.success, true);
+    const data = res.body.data as Record<string, unknown>;
+    assert.equal(data.scheduleAvailable, false);
+    assert.equal(data.timeZone, timeZone);
+    assert.deepEqual(data.shifts, []);
+    assert.ok(log.some((entry) => entry.table === "workspace_settings"));
+    assert.ok(log.every((entry) => entry.op === "select"));
+  });
+}
 
 test("DS31 повторное сохранение той же записи не подпадает под правило", async () => {
   // Самая дорогая находка ревью: row.starts_at нормализуется в …T15:00:00.000Z,

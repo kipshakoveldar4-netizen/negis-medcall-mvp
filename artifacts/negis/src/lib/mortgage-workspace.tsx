@@ -3,8 +3,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import { crmFetch } from "@/lib/api";
 import { readWorkspaceId } from "@/lib/demoStorage";
 import { hasSupabaseFrontendEnv, supabase } from "@/lib/supabase";
-import { dayKeyInZone } from "@/lib/clinicDay";
-import { formatSlot, minuteOfClinicDay } from "@/lib/dayGrid";
+import { requireWorkspaceTimeZone, workspaceLocalDateTime, workspaceDateTimeToIso } from "@/lib/clinicDateTime";
 import type { MortgageActivity, MortgageActivityDraft, MortgageActivityStatus, MortgageContact, MortgagePriority, MortgageSnapshot, MortgageSnapshotQuery } from "../../../../lib/crm/mortgage-contract";
 
 export type { MortgageActivity, MortgageActivityDraft, MortgageActivityKind, MortgageActivityStatus, MortgageContact, MortgageMember, MortgagePriority, MortgageSnapshot, MortgageSnapshotQuery } from "../../../../lib/crm/mortgage-contract";
@@ -275,37 +274,15 @@ export function useMortgageWorkspace(query: MortgageSnapshotQuery = {}) {
 }
 
 export function requireMortgageTimeZone(timeZone: string): string {
-  if (!timeZone) throw new Error("Сервер не вернул часовой пояс рабочего пространства.");
-  try { new Intl.DateTimeFormat("en-GB", { timeZone }).format(0); }
-  catch { throw new Error("Сервер вернул неверный часовой пояс рабочего пространства."); }
-  return timeZone;
+  return requireWorkspaceTimeZone(timeZone);
 }
 
 export function mortgageLocalDateTime(iso: string | null | undefined, timeZone: string): string {
-  requireMortgageTimeZone(timeZone);
-  if (!iso || !Number.isFinite(Date.parse(iso))) return "";
-  const minute = minuteOfClinicDay(iso, timeZone);
-  return minute === null ? "" : `${dayKeyInZone(Date.parse(iso), timeZone)}T${formatSlot(minute)}`;
+  return workspaceLocalDateTime(iso, timeZone);
 }
 
 export function mortgageDateTimeToIso(local: string, timeZone: string, unchangedIso?: string | null): string {
-  requireMortgageTimeZone(timeZone);
-  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(local)) throw new Error("Укажите дату и время.");
-  const wall = Date.parse(`${local}:00Z`);
-  if (!Number.isFinite(wall) || new Date(wall).toISOString().slice(0, 16) !== local) throw new Error("Проверьте дату и время.");
-  if (unchangedIso && mortgageLocalDateTime(unchangedIso, timeZone) === local) return unchangedIso;
-  // Probe offsets on both sides of a transition. Never parse a wall time in the device zone.
-  const offsets = new Set<number>();
-  for (let hours = -36; hours <= 36; hours += 6) {
-    const instant = wall + hours * 3_600_000;
-    const formatted = mortgageLocalDateTime(new Date(instant).toISOString(), timeZone);
-    offsets.add(Date.parse(`${formatted}:00Z`) - instant);
-  }
-  const candidates = [...offsets].map((offset) => wall - offset)
-    .filter((instant) => mortgageLocalDateTime(new Date(instant).toISOString(), timeZone) === local);
-  if (candidates.length === 0) throw new Error("Это время отсутствует из-за перевода часов. Выберите другое время.");
-  if (candidates.length !== 1) throw new Error("Это время повторяется из-за перевода часов. Выберите другое время.");
-  return new Date(candidates[0]).toISOString();
+  return workspaceDateTimeToIso(local, timeZone, unchangedIso);
 }
 
 export function mortgageAddDays(day: string, days: number): string {

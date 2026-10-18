@@ -32,7 +32,9 @@ function evaluate(input: string, imports: Record<string, unknown> = {}, bindings
   return exports;
 }
 const clinicDay = evaluate(await read("lib/clinicDay.ts"));
-const dayGrid = evaluate(await read("lib/dayGrid.ts"));
+const capacity = evaluate(await readFile(path.join(root, "lib/crm/appointment-capacity.ts"), "utf8"));
+const dayGrid = evaluate(await read("lib/dayGrid.ts"), { "../../../../lib/crm/appointment-capacity": capacity });
+const clinicDateTime = evaluate(await read("lib/clinicDateTime.ts"), { "./clinicDay": clinicDay, "./dayGrid": dayGrid });
 const sameDeps = (left?: unknown[], right?: unknown[]) => Boolean(left && right && left.length === right.length && left.every((value, index) => Object.is(value, right[index])));
 function driver() {
   const slots: any[] = [];
@@ -106,7 +108,7 @@ function moduleFixture(d = driver(), fetcher: (path: string, init: any) => Promi
     "@/lib/demoStorage": { readWorkspaceId: () => "selected-workspace" },
     "@/lib/supabase": { hasSupabaseFrontendEnv: true, supabase: { auth: { onAuthStateChange(callback: any) {
       listeners.add(callback); return { data: { subscription: { unsubscribe: () => listeners.delete(callback) } } };
-    } } } }, "@/lib/clinicDay": clinicDay, "@/lib/dayGrid": dayGrid,
+    } } } }, "@/lib/clinicDay": clinicDay, "@/lib/dayGrid": dayGrid, "@/lib/clinicDateTime": clinicDateTime,
   });
   return { module, d, auth, listeners };
 }

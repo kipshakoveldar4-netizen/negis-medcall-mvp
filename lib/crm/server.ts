@@ -3132,6 +3132,7 @@ function appointmentSnapshotFrom(row: unknown): {
 export async function readClinicScheduleTimeZone(
   supabase: CrmSupabaseClient,
   workspaceId: string,
+  options: { strict?: boolean } = {},
 ): Promise<string | null> {
   try {
     const { data, error } = await supabase
@@ -3143,15 +3144,27 @@ export async function readClinicScheduleTimeZone(
 
     if (error) throw new Error(error.message);
 
-    const value = asRecord(asRecord(data).value);
+    const setting = asRecord(data);
+    if (options.strict && data != null && (typeof data !== "object" || Array.isArray(data)
+      || !Object.prototype.hasOwnProperty.call(setting, "value")
+      || (setting.value != null && (typeof setting.value !== "object" || Array.isArray(setting.value))))) {
+      throw new Error("Invalid clinic schedule settings");
+    }
+    const value = asRecord(setting.value);
     if (!Object.prototype.hasOwnProperty.call(value, "timeZone")) return null;
 
     const timeZone = readString(value.timeZone);
-    if (!timeZone) return null;
+    if (!timeZone) {
+      if (options.strict && value.timeZone != null && typeof value.timeZone !== "string") {
+        throw new Error("Invalid clinic time zone");
+      }
+      return null;
+    }
 
     try {
       new Intl.DateTimeFormat(undefined, { timeZone });
     } catch {
+      if (options.strict) throw new Error("Invalid clinic time zone");
       console.warn(`workspace_settings clinic_schedule: unusable time zone, schedule rule stays off`);
       return null;
     }
@@ -3159,6 +3172,7 @@ export async function readClinicScheduleTimeZone(
     return timeZone;
   } catch (error) {
     console.warn(supabaseWarning("workspace_settings clinic_schedule", error));
+    if (options.strict) throw new Error("Clinic time zone unavailable");
     return null;
   }
 }
@@ -4571,7 +4585,8 @@ async function listItems(resource: CrmResource, req: VercelRequest, res: VercelR
 
     if (error && resource === "doctor-schedule" && isMissingDirectoryTable(error)) {
       console.warn("doctor-schedule: migration 033 is not applied yet; answering with an unavailable schedule");
-      return sendJson(res, 200, success("supabase", { [config.listKey]: [], items: [], scheduleAvailable: false, timeZone: "" }));
+      const timeZone = (await readClinicScheduleTimeZone(supabase, workspaceId, { strict: true })) || "";
+      return sendJson(res, 200, success("supabase", { [config.listKey]: [], items: [], scheduleAvailable: false, timeZone }));
     }
 
     if (error) {
@@ -4598,7 +4613,7 @@ async function listItems(resource: CrmResource, req: VercelRequest, res: VercelR
     // Записям он нужен не меньше: без него «сегодня» на сводке считается в UTC,
     // и в UTC+5 примерно пять часов каждую ночь экран называет чужие сутки.
     const scheduleTimeZone = resource === "doctor-schedule" || resource === "appointments"
-      ? (await readClinicScheduleTimeZone(supabase, workspaceId)) || ""
+      ? (await readClinicScheduleTimeZone(supabase, workspaceId, { strict: resource === "doctor-schedule" })) || ""
       : "";
     return sendJson(
       res,

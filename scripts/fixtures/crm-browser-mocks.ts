@@ -6,6 +6,9 @@ import { mortgageBrowserRequest, mortgageLeadBrowserRequest } from './mortgage-b
 const retryFixture = new URLSearchParams(window.location?.search || "").get("bookingRetry") === "lost-response"
   ? createBookingRetryFixture() : null;
 const fixtureParams = new URLSearchParams(window.location?.search || "");
+const fixtureTimeZone = ["UTC", "Pacific/Chatham"].includes(fixtureParams.get("fixtureTimeZone") || "")
+  ? fixtureParams.get("fixtureTimeZone")! : "Asia/Almaty";
+const fixtureAppointmentTime = fixtureParams.get("fixtureAppointment") === "midnight" ? "00:10" : "10:00";
 export const clinicArrivalFixture = isClinicArrivalFixtureLocation(window.location)
   ? createClinicArrivalBrowserFixture(window.location.search) : null;
 // Keep explicit visual-test settings across local page reloads, not CRM data.
@@ -39,7 +42,7 @@ const teamMembers = Array.from({ length: 5 }, (_, index) => ({
 }));
 const service = "Тестовая комплексная услуга с очень длинным названием";
 const client = { id: clientId, name: longName, fullName: longName, full_name: longName, phone: "+77000000001", whatsapp: "+77000000001", status: "active", source: "Тест", visits: 2, notes: "Только вымышленные данные" };
-const appointment = { id: appointmentId, clientId, client: longName, client_name: longName, phone: client.phone, client_phone: client.phone, whatsapp: client.whatsapp, doctorId, doctor: "Тестовый специалист", doctor_name: "Тестовый специалист", service, service_name: service, serviceId, startsAt: `${today}T10:00:00+05:00`, starts_at: `${today}T10:00:00+05:00`, durationMinutes: 90, priceMinor: 1250000, status: "confirmed", notes: "Вымышленная запись для проверки вёрстки" };
+const appointment = { id: appointmentId, clientId, client: longName, client_name: longName, phone: client.phone, client_phone: client.phone, whatsapp: client.whatsapp, doctorId, doctor: "Тестовый специалист", doctor_name: "Тестовый специалист", service, service_name: service, serviceId, startsAt: `${today}T${fixtureAppointmentTime}:00+05:00`, starts_at: `${today}T${fixtureAppointmentTime}:00+05:00`, durationMinutes: 90, priceMinor: 1250000, status: "confirmed", notes: "Вымышленная запись для проверки вёрстки" };
 const lists: Record<string, unknown[]> = {
   appointments: [appointment],
   clients: [client, { ...client, id: "00000000-0000-4000-8000-000000000006", name: "Тестовая Мария", full_name: "Тестовая Мария", fullName: "Тестовая Мария", phone: "+77000000002" }],
@@ -151,7 +154,7 @@ export async function crmFetch(input: string, init?: ClinicArrivalGuardedInit): 
     const query = url.searchParams.get("search")!.toLocaleLowerCase("ru");
     items = items.filter((item: any) => item.name.toLocaleLowerCase("ru").includes(query));
   }
-  return Response.json({ success: true, mode: "supabase", data: { items, [keys[resource] || resource]: items, directoryAvailable: true, timeZone: "Asia/Almaty" } });
+  return Response.json({ success: true, mode: "supabase", data: { items, [keys[resource] || resource]: items, directoryAvailable: true, timeZone: fixtureTimeZone } });
 }
 
 // Only the disposable loopback origin receives these fabricated identifiers.
