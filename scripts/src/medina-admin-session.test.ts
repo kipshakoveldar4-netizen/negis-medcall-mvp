@@ -490,6 +490,201 @@ test("clinic arrival late outcomes after raw account transitions cannot publish 
   }
 });
 
+type ClinicAction = "send" | "withdraw" | "end";
+async function clinicAction(fixture: Fixture, kind: ClinicAction, confirm?: () => boolean) {
+  const [clinicSource, requestSource, , operatorSource, contractsSource] = await clinicSources;
+  const contracts = evaluate(contractsSource);
+  const children = [hookRenderer(), hookRenderer()];
+  const operator = evaluate(select(operatorSource, ["OperatorApiError", "operatorApi"]), {
+    crmFetch: fixture.fetch, CrmApiError: fixture.api.CrmApiError, crmErrorMessage: fixture.api.crmErrorMessage,
+  }).selected;
+  const profileId = "00000000-0000-4000-8000-000000000020";
+  const requestId = "00000000-0000-4000-8000-000000000021";
+  let refreshes = 0;
+  const list = (items: unknown[]) => ({ data: { items, hasMore: false }, offset: 0, error: "",
+    refresh: () => { refreshes++; }, next() {}, previous() {} });
+  fixture.snapshot().setActiveTab("operators"); await fixture.renderer.flush();
+  const clinicProps = nodes(fixture.renderer.tree()).find(node => node.type === "ClinicOperators")?.props;
+  assert.ok(clinicProps);
+  // A list response retains its identity across local form renders.
+  const directory = list([{ id: profileId, displayName: "Synthetic operator" }]);
+  const stableClinic = evaluate(clinicSource, {}, {
+    react: children[0].hooks, "@/lib/operatorApi": { ...operator, useOperatorList: () => directory },
+    "../../../../../lib/crm/operator-contracts": contracts,
+  });
+  children[0].mount(stableClinic.ClinicOperators, [], clinicProps); await children[0].flush();
+  const requestProps = nodes(children[0].tree()).find(node => node.type === "OperatorRequests")?.props;
+  assert.ok(requestProps);
+  let action!: (...args: any[]) => Promise<void>;
+  let target = children[0];
+  if (kind === "send") {
+    const offer = nodes(target.tree()).find(node => node.type === "button" && label(node).trim() === "Предложить сотрудничество");
+    assert.ok(offer); offer.props.onClick(); await target.flush();
+    for (const [type, value] of [["textarea", "Synthetic technical agreement"], ["input", "0"]]) {
+      const field = nodes(target.tree()).find(node => node.type === type);
+      assert.ok(field); field.props.onChange({ target: { value } });
+    }
+    await target.flush();
+    action = nodes(target.tree()).find(node => node.type === "form")!.props.onSubmit;
+  } else {
+    target = children[1];
+    const ast = ts.createSourceFile("OperatorRequests.tsx", requestSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+    const component = ast.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "OperatorRequests") as import("typescript").FunctionDeclaration;
+    const returned = component.body!.statements.filter(ts.isReturnStatement).at(-1)!;
+    const requests = list([{ id: requestId, status: kind === "withdraw" ? "requested" : "accepted",
+      displayName: "Synthetic collaboration", clinicBrief: "Synthetic technical agreement",
+      pricePerArrivalMinor: "0", currency: "KZT", leadScope: "assigned" }]);
+    const module = evaluate(requestSource.slice(0, returned.getStart(ast)) + "\n__observeAction(change);\n" + requestSource.slice(returned.getStart(ast)), {
+      __observeAction: (handler: typeof action) => { action = handler; },
+      window: { confirm: confirm ?? (() => true) },
+    }, {
+      react: target.hooks, "@/lib/operatorApi": { ...operator, useOperatorList: () => requests },
+      "./OperatorLeads": { OperatorLeads: "OperatorLeads" },
+      "./OperatorServiceCatalog": { OperatorServiceCatalog: "OperatorServiceCatalog" },
+      "./OperatorArrivals": { OperatorArrivals: "OperatorArrivals" },
+      "../../../../../lib/crm/operator-contracts": contracts,
+    });
+    target.mount(module.OperatorRequests, [], requestProps); await target.flush();
+  }
+  const retained = action;
+  return { kind, profileId, requestId, renderer: target, refreshes: () => refreshes,
+    invoke: () => kind === "send" ? retained({ preventDefault() {} }) : retained(requestId, kind),
+    dispose: () => children.forEach(child => child.dispose()) };
+}
+const clinicActions = (fixture: Fixture) => fixture.dispatches.filter(call =>
+  call.path.startsWith("/api/crm/clinic-operator-requests?") && ["POST", "PATCH"].includes(String(call.init.method)));
+
+test("clinic collaboration actual parent chain pins every mutation to the original actor", async () => {
+  for (const kind of ["send", "withdraw", "end"] as const) {
+    const fixture = await ready(), ui = await clinicAction(fixture, kind);
+    try {
+      await ui.invoke(); await ui.renderer.flush();
+      assert.equal(fixture.tokenCalls.at(-1), actorA);
+      assert.equal(clinicActions(fixture).length, 1);
+      const call = clinicActions(fixture)[0];
+      assert.equal(call.init.method, kind === "send" ? "POST" : "PATCH");
+      assert.deepEqual(JSON.parse(String(call.init.body)), kind === "send"
+        ? { operatorId: ui.profileId, clinicBrief: "Synthetic technical agreement", pricePerArrivalMinor: "0", leadScope: "assigned" }
+        : { id: ui.requestId, action: kind });
+      assert.equal(ui.refreshes(), kind === "send" ? 0 : 1);
+    } finally { ui.dispose(); fixture.renderer.dispose(); }
+  }
+});
+
+test("clinic collaboration queued token waits stop at raw account/logout/A-B-A boundaries", async () => {
+  for (const kind of ["send", "withdraw", "end"] as const) for (const boundary of ["actor", "logout", "roundtrip"]) {
+    const fixture = await ready(), ui = await clinicAction(fixture, kind), token = deferred<string>();
+    let work: Promise<void> | undefined;
+    try {
+      fixture.token(() => token.promise); work = ui.invoke(); await ui.renderer.flush();
+      assert.equal(clinicActions(fixture).length, 0);
+      fixture.emit(boundary === "logout" ? null : actorB); if (boundary === "roundtrip") fixture.emit(actorA);
+      const writes = ui.renderer.writes.length;
+      token.resolve("synthetic-token"); await work; await ui.renderer.flush();
+      assert.equal(clinicActions(fixture).length, 0, `${kind}/${boundary}`);
+      assert.equal(ui.renderer.writes.length, writes);
+      assert.equal(ui.refreshes(), 0);
+    } finally { token.resolve("synthetic-token"); await work; ui.dispose(); fixture.renderer.dispose(); }
+  }
+});
+
+test("clinic collaboration expired retained handlers stop before state or token lookup", async () => {
+  for (const kind of ["send", "withdraw", "end"] as const) for (const boundary of ["actor", "logout", "roundtrip"]) {
+    const fixture = await ready(), ui = await clinicAction(fixture, kind);
+    try {
+      fixture.emit(boundary === "logout" ? null : actorB); if (boundary === "roundtrip") fixture.emit(actorA);
+      const writes = ui.renderer.writes.length, lookups = fixture.tokenCalls.length;
+      await ui.invoke(); await ui.renderer.flush();
+      assert.equal(ui.renderer.writes.length, writes, `${kind}/${boundary}`);
+      assert.equal(fixture.tokenCalls.length, lookups);
+      assert.equal(clinicActions(fixture).length, 0);
+    } finally { ui.dispose(); fixture.renderer.dispose(); }
+  }
+});
+
+test("clinic collaboration late outcomes cannot mutate UI after raw SDK expiry", async () => {
+  for (const kind of ["send", "withdraw", "end"] as const) for (const outcome of [200, 401, 403, "network"] as const) {
+    const fixture = await ready(), ui = await clinicAction(fixture, kind), reply = deferred<Response>();
+    let work: Promise<void> | undefined;
+    try {
+      fixture.reply(() => reply.promise); work = ui.invoke(); await ui.renderer.flush();
+      assert.equal(clinicActions(fixture).length, 1);
+      fixture.emit(actorB); fixture.emit(actorA);
+      const writes = ui.renderer.writes.length;
+      if (outcome === "network") reply.reject(new Error("Synthetic transport failure"));
+      else reply.resolve(Response.json({ success: outcome === 200 }, { status: outcome }));
+      await work; await ui.renderer.flush();
+      assert.equal(ui.renderer.writes.length, writes, `${kind}/${outcome}`);
+      assert.equal(ui.refreshes(), 0);
+      assert.equal(clinicActions(fixture).length, 1);
+    } finally { reply.resolve(ok()); await work; ui.dispose(); fixture.renderer.dispose(); }
+  }
+});
+
+test("clinic collaboration allows token refresh for the same actor", async () => {
+  for (const kind of ["send", "withdraw", "end"] as const) {
+    const fixture = await ready(), ui = await clinicAction(fixture, kind), token = deferred<string>();
+    let work: Promise<void> | undefined;
+    try {
+      fixture.token(() => token.promise); work = ui.invoke(); await ui.renderer.flush();
+      fixture.emit(actorA, "TOKEN_REFRESHED"); token.resolve("synthetic-rotated-token");
+      await work; await ui.renderer.flush();
+      assert.equal(clinicActions(fixture).length, 1);
+      assert.equal(new Headers(clinicActions(fixture)[0].init.headers).get("Authorization"), "Bearer synthetic-rotated-token");
+      assert.equal(fixture.tokenCalls.at(-1), actorA);
+    } finally { token.resolve("synthetic-rotated-token"); await work; ui.dispose(); fixture.renderer.dispose(); }
+  }
+});
+
+test("clinic collaboration refuses a different SDK actor before the parent receives an auth event", async () => {
+  for (const kind of ["send", "withdraw", "end"] as const) {
+    const fixture = await ready(), ui = await clinicAction(fixture, kind), lookup = deferred<void>();
+    let work: Promise<void> | undefined;
+    try {
+      const auth = evaluate(await read("artifacts/negis/src/lib/serverAuth.ts"), {}, {
+        "@/lib/supabase": { hasSupabaseFrontendEnv: true, supabase: { auth: { async getSession() {
+          await lookup.promise;
+          return { data: { session: { user: { id: actorB }, access_token: "synthetic-other-actor" } }, error: null };
+        } } } },
+        "@/lib/authSignOut": { isSignOutPending: () => false, getSignOutRevision: () => 0 },
+      });
+      fixture.token(expected => auth.getSupabaseAccessToken(expected));
+      work = ui.invoke(); await ui.renderer.flush();
+      assert.equal(clinicActions(fixture).length, 0);
+      lookup.resolve(); await work; await ui.renderer.flush();
+      assert.equal(fixture.access().isCurrent(), true, "Actor mismatch must be refused even without a parent auth event");
+      assert.equal(fixture.tokenCalls.at(-1), actorA);
+      assert.equal(clinicActions(fixture).length, 0);
+    } finally { lookup.resolve(); await work; ui.dispose(); fixture.renderer.dispose(); }
+  }
+});
+
+test("clinic collaboration rechecks expiry after the end confirmation dialog", async () => {
+  const fixture = await ready();
+  const ui = await clinicAction(fixture, "end", () => { fixture.emit(actorB); fixture.emit(actorA); return true; });
+  try {
+    const writes = ui.renderer.writes.length, lookups = fixture.tokenCalls.length;
+    await ui.invoke(); await ui.renderer.flush();
+    assert.equal(ui.renderer.writes.length, writes);
+    assert.equal(fixture.tokenCalls.length, lookups);
+    assert.equal(clinicActions(fixture).length, 0);
+  } finally { ui.dispose(); fixture.renderer.dispose(); }
+});
+
+test("clinic collaboration repeated submit retains one real pending token lookup and POST", async () => {
+  const fixture = await ready(), ui = await clinicAction(fixture, "send"), token = deferred<string>();
+  let work: Promise<void> | undefined;
+  try {
+    fixture.token(() => token.promise);
+    const lookups = fixture.tokenCalls.length;
+    work = ui.invoke(); await ui.invoke(); await ui.renderer.flush();
+    assert.equal(fixture.tokenCalls.length, lookups + 1);
+    assert.equal(clinicActions(fixture).length, 0);
+    token.resolve("synthetic-token"); await work; await ui.renderer.flush();
+    assert.equal(clinicActions(fixture).length, 1);
+  } finally { token.resolve("synthetic-token"); await work; ui.dispose(); fixture.renderer.dispose(); }
+});
+
 const staffUi = {
   add: "\u0414\u043e\u0431\u0430\u0432\u0438\u0442\u044c \u0441\u043e\u0442\u0440\u0443\u0434\u043d\u0438\u043a\u0430",
   passwordMode: "\u041b\u043e\u0433\u0438\u043d \u0438 \u043f\u0430\u0440\u043e\u043b\u044c",

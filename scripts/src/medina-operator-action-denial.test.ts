@@ -358,8 +358,8 @@ async function fixture(t: TestContext, kind: Kind) {
       await driver.flush();
       assert.equal(snapshot().busy, true);
       const mutation = take(kind === "confirm" ? "POST" : "PATCH");
-      assert.equal(mutation.expectedUserId, kind === "requests" && props.workspaceId ? undefined : props.actorId,
-        "Arrival writes in both modes must pin their actor");
+      assert.equal(mutation.expectedUserId, props.actorId,
+        "Clinic and operator writes must pin their original actor");
       const arrivals = driver.nodes().find((node) => node.type === boundaries.OperatorArrivals);
       if (arrivals) assert.equal(arrivals.props.actorId, props.actorId,
         "Requests must preserve the actor for the nested Arrivals view in either mode");

@@ -48,6 +48,7 @@ export function OperatorRequests({
       setOpenArrivals(null);
     }
   }
+  const renderedView = currentView.current;
   useLayoutEffect(() => {
     mounted.current = true;
     return () => { mounted.current = false; };
@@ -62,6 +63,8 @@ export function OperatorRequests({
     onAccessDenied?.();
   }, [path, actorId, list.refresh, onAccessDenied]);
   async function change(id: string, action: string) {
+    const isCurrent = () => mounted.current && isSessionCurrent?.() !== false && currentView.current === renderedView;
+    if (!actorId || !isCurrent()) return;
     if (
       action === "end" &&
       !window.confirm(
@@ -69,10 +72,11 @@ export function OperatorRequests({
       )
     )
       return;
-    const startedAtView = currentView.current;
-    const isCurrent = () => mounted.current && currentView.current === startedAtView;
+    if (!isCurrent()) return;
+    const startedAtView = renderedView;
     const isSameScope = () =>
       mounted.current &&
+      isSessionCurrent?.() !== false &&
       currentView.current.path === startedAtView.path &&
       currentView.current.actorId === startedAtView.actorId;
     setBusy(true);
@@ -83,7 +87,7 @@ export function OperatorRequests({
         { id, action },
         "PATCH",
         undefined,
-        workspaceId ? undefined : actorId,
+        actorId,
         isCurrent,
       );
       if (!isCurrent()) return;

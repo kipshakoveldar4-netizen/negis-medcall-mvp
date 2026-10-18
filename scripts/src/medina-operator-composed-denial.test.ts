@@ -321,7 +321,7 @@ function eventTarget() {
     removeEventListener(name: string, callback: () => void) { listeners.get(name)?.delete(callback); },
   };
 }
-async function runtime(t: TestContext, queueMutations = false) {
+async function runtime(t: TestContext, queueMutations = false, confirm = () => true) {
   const source = await compiled;
   const render = renderer();
   t.after(() => render.dispose());
@@ -330,7 +330,7 @@ async function runtime(t: TestContext, queueMutations = false) {
   const storage = new Map<string, string>();
   const globals = {
     Error, AbortController, crypto: { randomUUID },
-    window: { ...eventTarget(), confirm: () => true, sessionStorage: {
+    window: { ...eventTarget(), confirm, sessionStorage: {
       getItem: (key: string) => storage.get(key) ?? null,
       setItem: (key: string, value: string) => storage.set(key, value),
       removeItem: (key: string) => storage.delete(key),
@@ -703,6 +703,384 @@ for (const target of ["request", "call", "stage", "booking", "clinic-assignment"
     assert.equal(ui.take(target === "request" ? "OperatorRequests" : target === "call" || target === "clinic-confirmation" ? "OperatorArrivals" : "LeadList").settled, false,
       "Successful live mutations still revalidate the real list");
     if (target === "booking") assert.equal(ui.storage.size, 0, "A confirmed live booking releases its persisted attempt");
+  });
+}
+
+type ClinicMutation = "send" | "withdraw" | "end";
+async function clinicMutation(t: TestContext, target: ClinicMutation) {
+  let confirmed = true;
+  let confirmations = 0;
+  const ui = await runtime(t, true, () => { confirmations++; return confirmed; });
+  const Clinic = ui.load("clinic").ClinicOperators;
+  let actorId = ACTOR;
+  let workspaceId = WORKSPACE;
+  let epoch = 0;
+  let session = { current: true };
+  let rawActor = ACTOR;
+  function view() {
+    const lifetime = session;
+    return jsx(Clinic, { workspaceId, actorId, isSessionCurrent: () => lifetime.current }, epoch);
+  }
+  function control() {
+    return target === "send"
+      ? ui.find((node) => node.type === "form")
+      : ui.find((node) => node.type === "button" && typeof node.props.disabled === "boolean",
+        ui.find((node) => node.type === "article", ui.section("\u041f\u0440\u0435\u0434\u043b\u043e\u0436\u0435\u043d\u0438\u044f \u043e \u0441\u043e\u0442\u0440\u0443\u0434\u043d\u0438\u0447\u0435\u0441\u0442\u0432\u0435")));
+  }
+  function busyControl() {
+    return target === "send" ? ui.find((node) => node.type === "button" && node.props.type === "submit", control()) : control();
+  }
+  async function prepareOffer() {
+    ui.invoke(ui.button("\u041f\u0440\u0435\u0434\u043b\u043e\u0436\u0438\u0442\u044c \u0441\u043e\u0442\u0440\u0443\u0434\u043d\u0438\u0447\u0435\u0441\u0442\u0432\u043e"));
+    await ui.render.flush();
+    ui.invoke(ui.find((node) => node.type === "textarea", control()), "onChange", { target: { value: "Synthetic user-only 0 KZT agreement" } });
+    ui.invoke(ui.find((node) => node.type === "input" && node.props.inputMode === "decimal", control()), "onChange", { target: { value: "0" } });
+    await ui.render.flush();
+  }
+  async function populate() {
+    await ui.render.flush();
+    ui.take("ClinicOperators").succeed(list([{
+      id: REQUEST_B, displayName: `Synthetic operator ${epoch}`, status: "approved", acceptingRequests: true,
+    }]));
+    ui.take("OperatorRequests").succeed(list([{
+      id: REQUEST_A, status: target === "withdraw" ? "requested" : "accepted",
+      displayName: `Synthetic agreement ${epoch}`, clinicBrief: "Synthetic user-only 0 KZT agreement",
+      pricePerArrivalMinor: "0", currency: "KZT", leadScope: "assigned",
+    }]));
+    await ui.render.flush();
+    if (target === "send") await prepareOffer();
+    assert.notEqual(busyControl().props.disabled, true);
+  }
+  async function start() {
+    ui.invoke(control(), target === "send" ? "onSubmit" : "onClick");
+    await ui.render.flush();
+    const mutation = ui.take("event", target === "send" ? "POST" : "PATCH");
+    assert.equal(mutation.url, `/api/crm/clinic-operator-requests?workspaceId=${workspaceId}`);
+    assert.deepEqual(mutation.body, target === "send" ? {
+      operatorId: REQUEST_B, clinicBrief: "Synthetic user-only 0 KZT agreement", pricePerArrivalMinor: "0", leadScope: "assigned",
+    } : { id: REQUEST_A, action: target });
+    assert.equal(mutation.dispatched, false, "The real clinic handler must reach the synthetic lookup gate");
+    assert.equal(busyControl().props.disabled, true);
+    return mutation;
+  }
+  ui.render.mount(view());
+  await populate();
+  return {
+    ...ui, start, control, busyControl,
+    cancelConfirmation() { confirmed = false; },
+    confirmations: () => confirmations,
+    changeRawActor(nextActor: string) {
+      if (rawActor !== nextActor) session.current = false;
+      rawActor = nextActor;
+    },
+    async changeWorkspace(nextWorkspace = REQUEST_B) {
+      workspaceId = nextWorkspace;
+      ui.render.update(view());
+      await ui.render.beforeEffects();
+    },
+    async replaceWorkspace(nextWorkspace: string) {
+      workspaceId = nextWorkspace;
+      ui.render.update(view());
+      await populate();
+    },
+    async replaceActor(nextActor: string, remount = true) {
+      session.current = false;
+      session = { current: true };
+      actorId = rawActor = nextActor;
+      if (remount) epoch++;
+      ui.render.update(view());
+      if (remount) await populate();
+      else {
+        await ui.render.flush();
+        if (target === "send") await prepareOffer();
+      }
+    },
+  };
+}
+function clinicSnapshot(ui: Ui) {
+  return { content: ui.render.content(), writes: ui.render.writes(), requests: ui.requests.length, dispatched: ui.dispatched.length };
+}
+function assertClinicQuiet(ui: Ui, before: ReturnType<typeof clinicSnapshot>) {
+  assert.equal(ui.render.content(), before.content, "An obsolete clinic action cannot overwrite the visible view");
+  assert.equal(ui.render.writes(), before.writes, "An obsolete clinic action must not attempt state or busy writes");
+  assert.equal(ui.requests.length, before.requests, "An obsolete clinic action cannot dispatch or schedule a refresh");
+  assert.equal(ui.dispatched.length, before.dispatched);
+}
+
+for (const target of ["send", "withdraw"] as const) {
+  test(`clinic mutation baseline ${target}: pins the original actor and forwards a live guard`, async (t) => {
+    const ui = await clinicMutation(t, target);
+    const mutation = await ui.start();
+    assert.equal(mutation.expectedUserId, ACTOR, "Clinic writes must pin the original actor, not omit expectedUserId");
+    assert.equal(mutation.dispatchGuard?.(), true, "The real handler must forward its live guard to crmFetch");
+    ui.changeRawActor(REQUEST_B);
+    assert.equal(mutation.expectedUserId, ACTOR, "A queued lookup must never adopt the replacement actor");
+  });
+  for (const transition of ["A-B", "A-B-A", "unmount", "workspace"] as const) {
+    test(`clinic mutation baseline ${target}: ${transition} cancels queued lookup before passive effects`, async (t) => {
+      const ui = await clinicMutation(t, target);
+      const mutation = await ui.start();
+      if (transition === "unmount") ui.render.update(null);
+      else if (transition === "workspace") await ui.changeWorkspace();
+      else {
+        ui.changeRawActor(REQUEST_B);
+        if (transition === "A-B-A") ui.changeRawActor(ACTOR);
+      }
+      const before = clinicSnapshot(ui);
+      mutation.release();
+      await ui.render.beforeEffects();
+      assert.equal(mutation.dispatched, false, "Expired clinic actions must be canceled at the queued lookup gate");
+      assert.equal(mutation.settled, true);
+      assert.equal(mutation.dispatchGuard?.(), false);
+      assertClinicQuiet(ui, before);
+    });
+  }
+  for (const transition of ["expired A-B-A", "unmount"] as const) {
+    test(`clinic mutation baseline ${target}: retained event after ${transition} does nothing`, async (t) => {
+      const ui = await clinicMutation(t, target);
+      const retained = ui.control();
+      if (transition === "unmount") ui.render.update(null);
+      else { ui.changeRawActor(REQUEST_B); ui.changeRawActor(ACTOR); }
+      const before = clinicSnapshot(ui);
+      ui.invoke(retained, target === "send" ? "onSubmit" : "onClick");
+      await ui.render.beforeEffects();
+      assertClinicQuiet(ui, before);
+    });
+  }
+  for (const transition of ["expired A-B-A", "replacement A-B-A"] as const) {
+    for (const outcome of ["success", "network", 401, 403] as const) {
+      test(`clinic mutation baseline ${target}: late ${outcome} after ${transition} preserves view and busy owner`, async (t) => {
+        const ui = await clinicMutation(t, target);
+        const obsolete = await ui.start();
+        obsolete.release();
+        let current: Pending | undefined;
+        if (transition === "replacement A-B-A") {
+          await ui.replaceActor(REQUEST_B);
+          await ui.replaceActor(ACTOR);
+          current = await ui.start();
+          current.release();
+        } else { ui.changeRawActor(REQUEST_B); ui.changeRawActor(ACTOR); }
+        const before = clinicSnapshot(ui);
+        if (outcome === "success") obsolete.succeed();
+        else if (outcome === "network") obsolete.reject();
+        else obsolete.fail(outcome);
+        await ui.render.beforeEffects();
+        assertClinicQuiet(ui, before);
+        assert.equal(ui.busyControl().props.disabled, true, "Old finally must not unlock the current pending action");
+        if (current) assert.equal(current.settled, false);
+        await ui.render.flush();
+        assertClinicQuiet(ui, before);
+        if (current) {
+          current.fail(409);
+          await ui.render.flush();
+          assert.equal(ui.busyControl().props.disabled, false);
+        }
+      });
+    }
+  }
+}
+for (const target of ["send", "withdraw", "end"] as const) {
+  test(`clinic mutation baseline ${target}: same actor dispatches once and still revalidates`, async (t) => {
+    const ui = await clinicMutation(t, target);
+    const mutation = await ui.start();
+    const dispatched = ui.dispatched.length;
+    mutation.release();
+    assert.equal(ui.dispatched.length, dispatched + 1);
+    assert.equal(ui.dispatched.at(-1), mutation);
+    assert.equal(ui.requests.filter((request) => request.method !== "GET").length, 1);
+    mutation.succeed();
+    await ui.render.flush();
+    assert.equal(ui.take("OperatorRequests").settled, false, "Current clinic writes still refresh the real request list");
+    assert.equal(ui.confirmations(), target === "end" ? 1 : 0, "Only ending cooperation asks for confirmation");
+  });
+}
+test("clinic mutation baseline end: canceling confirmation leaves requests and busy state unchanged", async (t) => {
+  const ui = await clinicMutation(t, "end");
+  ui.cancelConfirmation();
+  const before = clinicSnapshot(ui);
+  ui.invoke(ui.control());
+  await ui.render.flush();
+  assertClinicQuiet(ui, before);
+  assert.equal(ui.confirmations(), 1);
+  assert.equal(ui.busyControl().props.disabled, false);
+});
+
+type ClinicMutationUi = Awaited<ReturnType<typeof clinicMutation>>;
+type OfferEdit = "brief" | "price" | "leadScope" | "brief-revert" | "price-revert" | "leadScope-revert" | "directory-refresh";
+function offerDraft(ui: ClinicMutationUi) {
+  return {
+    brief: ui.find((node) => node.type === "textarea", ui.control()).props.value,
+    price: ui.find((node) => node.type === "input" && node.props.inputMode === "decimal", ui.control()).props.value,
+    leadScope: ui.find((node) => node.type === "select", ui.control()).props.value,
+  };
+}
+async function editPendingOffer(ui: ClinicMutationUi, edit: OfferEdit) {
+  if (edit === "directory-refresh") {
+    const refresh = ui.render.nodes().find((node) => node.type === "button"
+      && elements(node.props.children).some((child) => child.type === icons.RefreshCw));
+    assert.ok(refresh);
+    ui.invoke(refresh);
+    await ui.render.flush();
+    ui.take("ClinicOperators").succeed(list([{
+      id: REQUEST_B, displayName: "Synthetic refreshed operator", status: "approved", acceptingRequests: true,
+    }]));
+    await ui.render.flush();
+    return;
+  }
+  const field = edit.startsWith("brief") ? "brief" : edit.startsWith("price") ? "price" : "leadScope";
+  function input() {
+    return ui.find((node) => field === "brief" ? node.type === "textarea"
+      : field === "price" ? node.type === "input" && node.props.inputMode === "decimal" : node.type === "select", ui.control());
+  }
+  const original = input().props.value;
+  const value = field === "brief" ? "Synthetic edited user-only 0 KZT agreement" : field === "price" ? "0.00" : "clinic";
+  ui.invoke(input(), "onChange", { target: { value } });
+  await ui.render.flush();
+  assert.equal(input().props.value, value);
+  if (edit.endsWith("-revert")) {
+    ui.invoke(input(), "onChange", { target: { value: original } });
+    await ui.render.flush();
+    assert.equal(input().props.value, original);
+  }
+}
+async function pendingOfferLease(t: TestContext, edit: OfferEdit, outcome: "canceled" | "success" | "network" | 401 | 403) {
+  const ui = await clinicMutation(t, "send");
+  const retained = ui.control();
+  const obsolete = await ui.start();
+  if (outcome !== "canceled") obsolete.release();
+  await editPendingOffer(ui, edit);
+  const draft = offerDraft(ui);
+  assert.equal(obsolete.dispatchGuard?.(), false, "An edit or directory refresh must invalidate the old form frame, even after revert");
+  assert.equal(ui.busyControl().props.disabled, true, "Changing the form frame must not unlock an unresolved send");
+  const before = clinicSnapshot(ui);
+  ui.invoke(retained, "onSubmit");
+  ui.invoke(ui.control(), "onSubmit");
+  ui.invoke(ui.control(), "onSubmit");
+  await ui.render.flush();
+  assertClinicQuiet(ui, before);
+  assert.equal(ui.requests.filter((request) => request.method === "POST").length, 1, "Duplicate submit events must not even queue another lookup");
+  if (outcome === "canceled") obsolete.release();
+  else if (outcome === "success") obsolete.succeed();
+  else if (outcome === "network") obsolete.reject();
+  else obsolete.fail(outcome);
+  await ui.render.flush();
+  assert.equal(obsolete.settled, true);
+  assert.equal(obsolete.dispatched, outcome !== "canceled");
+  assert.deepEqual(offerDraft(ui), draft, "Settling the old attempt must preserve newer fields rather than close or clear the form");
+  assert.equal(ui.render.nodes().filter((node) => node.props.role === "status" || node.props.role === "alert").length, 0,
+    "The invalidated form frame cannot publish success or error notices");
+  assert.equal(ui.requests.length, before.requests, "The old frame cannot refresh the request list");
+  assert.equal(ui.busyControl().props.disabled, false, "The owning attempt must release busy for this still-live actor/workspace");
+  ui.invoke(ui.control(), "onSubmit");
+  await ui.render.flush();
+  const current = ui.take("event", "POST");
+  assert.equal(current.expectedUserId, ACTOR);
+  assert.equal(current.dispatchGuard?.(), true);
+  assert.deepEqual(current.body, {
+    operatorId: REQUEST_B, clinicBrief: draft.brief, pricePerArrivalMinor: "0", leadScope: draft.leadScope,
+  });
+  assert.equal(ui.busyControl().props.disabled, true);
+  const dispatched = ui.dispatched.length;
+  current.release();
+  assert.equal(ui.dispatched.length, dispatched + 1);
+  current.succeed();
+  await ui.render.flush();
+  assert.equal(ui.take("OperatorRequests").settled, false, "A fresh live send still dispatches and revalidates normally");
+}
+for (const edit of ["brief", "price", "leadScope", "brief-revert", "price-revert", "leadScope-revert", "directory-refresh"] as const) {
+  for (const outcome of ["canceled", "success"] as const) {
+    test(`clinic pending lease send: ${edit} blocks duplicate ${outcome === "canceled" ? "queued" : "dispatched"} sends and preserves the draft`, async (t) => {
+      await pendingOfferLease(t, edit, outcome);
+    });
+  }
+}
+for (const outcome of ["network", 401, 403] as const) {
+  test(`clinic pending lease send: late ${outcome} releases only the live lease and preserves edited fields`, async (t) => {
+    await pendingOfferLease(t, "brief", outcome);
+  });
+}
+for (const transition of ["actor", "workspace", "unmount"] as const) {
+  for (const outcome of ["canceled", "success", "network", 401, 403] as const) {
+    test(`clinic pending lease send: old ${outcome} after ${transition} replacement cannot unlock the new action`, async (t) => {
+      const ui = await clinicMutation(t, "send");
+      const owner = ui.render.instances("ClinicOperators")[0];
+      const obsolete = await ui.start();
+      if (outcome !== "canceled") obsolete.release();
+      if (transition === "workspace") await ui.replaceWorkspace(REQUEST_B);
+      else await ui.replaceActor(REQUEST_B, transition === "unmount");
+      assert.equal(ui.render.instances("ClinicOperators")[0] === owner, transition !== "unmount");
+      const current = await ui.start();
+      current.release();
+      assert.equal(current.expectedUserId, transition === "workspace" ? ACTOR : REQUEST_B);
+      const before = clinicSnapshot(ui);
+      if (outcome === "canceled") obsolete.release();
+      else if (outcome === "success") obsolete.succeed();
+      else if (outcome === "network") obsolete.reject();
+      else obsolete.fail(outcome);
+      await ui.render.beforeEffects();
+      assertClinicQuiet(ui, before);
+      assert.equal(ui.busyControl().props.disabled, true, "An expired, moved or unmounted owner cannot release the new lease");
+      assert.equal(current.settled, false);
+      await ui.render.flush();
+      assertClinicQuiet(ui, before);
+      current.fail(409);
+      await ui.render.flush();
+      assert.equal(ui.busyControl().props.disabled, false);
+    });
+  }
+}
+for (const target of ["send", "withdraw", "end"] as const) {
+  for (const transition of ["workspace", "workspace A-B-A"] as const) {
+    test(`clinic pending lease ${target}: retained handler across same-instance ${transition} stays inert`, async (t) => {
+      const ui = await clinicMutation(t, target);
+      const clinic = ui.render.instances("ClinicOperators")[0];
+      const requests = ui.render.instances("OperatorRequests")[0];
+      const retained = ui.control();
+      await ui.changeWorkspace();
+      if (transition === "workspace A-B-A") await ui.changeWorkspace(WORKSPACE);
+      assert.equal(ui.render.instances("ClinicOperators")[0], clinic);
+      assert.equal(ui.render.instances("OperatorRequests")[0], requests);
+      const before = clinicSnapshot(ui);
+      ui.invoke(retained, target === "send" ? "onSubmit" : "onClick");
+      await ui.render.beforeEffects();
+      assertClinicQuiet(ui, before);
+      assert.equal(ui.confirmations(), 0, "An obsolete end handler must not open confirmation");
+    });
+  }
+}
+for (const status of [401, 403] as const) {
+  test(`clinic pending lease withdraw: still-live ${status} after request refresh invalidates newer live data`, async (t) => {
+    const ui = await clinicMutation(t, "withdraw");
+    const owner = ui.render.instances("OperatorRequests")[0];
+    const obsolete = await ui.start();
+    obsolete.release();
+    const section = ui.find((node) => node.type === "section" && Boolean(node.props["aria-label"]));
+    ui.invoke(ui.find((node) => node.type === "button" && elements(node.props.children).some((child) => child.type === icons.RefreshCw), section));
+    await ui.render.flush();
+    ui.take("OperatorRequests").succeed(list([{
+      id: REQUEST_A, status: "requested", displayName: "Synthetic refreshed live agreement",
+      clinicBrief: "Synthetic user-only 0 KZT agreement", pricePerArrivalMinor: "0", currency: "KZT", leadScope: "assigned",
+    }]));
+    await ui.render.flush();
+    assert.equal(ui.render.instances("OperatorRequests")[0], owner);
+    assert.ok(ui.render.content().includes("Synthetic refreshed live agreement"));
+    assert.equal(obsolete.dispatchGuard?.(), false);
+    const current = await ui.start();
+    current.release();
+    const count = ui.requests.length;
+    obsolete.fail(status);
+    await ui.render.beforeEffects();
+    assert.equal(ui.requests.length, count, "Observe denial before its passive revalidation");
+    assert.equal(ui.render.content().includes("Synthetic refreshed live agreement"), false);
+    assert.equal(text(ui.find((node) => node.props.role === "alert").props.children), `Synthetic CRM error ${status}`);
+    assert.equal(current.settled, false, "A newer pending mutation must not hide still-live access revocation");
+    await ui.render.flush();
+    assert.equal(ui.requests.length, count + 1);
+    assert.equal(ui.take("OperatorRequests").settled, false);
+    const before = clinicSnapshot(ui);
+    current.fail(409);
+    await ui.render.flush();
+    assertClinicQuiet(ui, before);
   });
 }
 

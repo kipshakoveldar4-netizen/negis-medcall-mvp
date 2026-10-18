@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { Send, RefreshCw, ChevronLeft, ChevronRight } from "lucide-react";
 import { operatorApi, useOperatorList } from "@/lib/operatorApi";
 import { OperatorRequests } from "@/components/operators/OperatorRequests";
@@ -24,13 +24,44 @@ export function ClinicOperators({ workspaceId, actorId, isSessionCurrent }: {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [revision, setRevision] = useState(0);
+  const mounted = useRef(false);
+  // Editing or reloading the view must not unlock an unresolved submission.
+  const pending = useRef<object | null>(null);
+  const currentView = useRef({ workspaceId, actorId, data: list.data, offset: list.offset,
+    selected, brief, price, leadScope });
+  const scopeChanged = currentView.current.workspaceId !== workspaceId || currentView.current.actorId !== actorId;
+  if (scopeChanged || currentView.current.data !== list.data || currentView.current.offset !== list.offset
+    || currentView.current.selected !== selected || currentView.current.brief !== brief
+    || currentView.current.price !== price || currentView.current.leadScope !== leadScope) {
+    currentView.current = { workspaceId, actorId, data: list.data, offset: list.offset, selected, brief, price, leadScope };
+    if (scopeChanged) {
+      pending.current = null;
+      if (busy) setBusy(false);
+      setSelected(null);
+      setBrief("");
+      setPrice("");
+      setLeadScope("assigned");
+      setMessage("");
+    }
+  }
+  const renderedView = currentView.current;
+  useLayoutEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
   async function send(event: React.FormEvent) {
     event.preventDefault();
+    const isCurrent = () => mounted.current && isSessionCurrent() && currentView.current === renderedView;
+    const isSameScope = () => mounted.current && isSessionCurrent()
+      && currentView.current.workspaceId === workspaceId && currentView.current.actorId === actorId;
+    if (pending.current || !actorId || !isCurrent()) return;
     const amount = arrivalPriceToMinor(price);
     if (!selected || amount === null) {
       setMessage("Укажите цену в тенге, не более двух знаков после запятой.");
       return;
     }
+    const attempt = {};
+    pending.current = attempt;
     setBusy(true);
     setMessage("");
     try {
@@ -42,18 +73,27 @@ export function ClinicOperators({ workspaceId, actorId, isSessionCurrent }: {
           pricePerArrivalMinor: amount,
           leadScope,
         },
+        "POST",
+        undefined,
+        actorId,
+        isCurrent,
       );
+      if (!isCurrent()) return;
       setSelected(null);
       setBrief("");
       setPrice("");
       setRevision((value) => value + 1);
       setMessage("Предложение отправлено оператору.");
     } catch (err) {
+      if (!isCurrent()) return;
       setMessage(
         err instanceof Error ? err.message : "Не удалось отправить предложение",
       );
     } finally {
-      setBusy(false);
+      if (pending.current === attempt) {
+        pending.current = null;
+        if (isSameScope()) setBusy(false);
+      }
     }
   }
   return (
