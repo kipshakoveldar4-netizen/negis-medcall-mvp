@@ -247,6 +247,12 @@ before(async () => {
       "utf8",
     ),
   );
+  await db.exec(
+    await readFile(
+      path.join(root, "migrations/074_operator_arrival_access_locks.sql"),
+      "utf8",
+    ),
+  );
   await db.exec(`
     insert into public.workspaces(id,name) values('${id(1)}','Clinic'),('${id(2)}','Foreign');
     insert into public.workspace_settings(workspace_id,key,value) values('${id(1)}','clinic_schedule','{"timeZone":"Asia/Almaty"}');

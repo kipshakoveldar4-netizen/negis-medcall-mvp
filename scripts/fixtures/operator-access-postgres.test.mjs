@@ -89,6 +89,19 @@ async function makeCase(fixture, db, t, scope = 'assigned') {
   const booking = (client = b, lead = i.lead, key = randomUUID(), user = i.user) => row(client,
     'select public.create_growth_operator_booking($1,$2,$3,$4,$5,$6,$7,$8) as result',
     [i.request, user, lead, key, i.doctor, [i.service], '2090-10-20 09:00:00', 'UTC']);
+  const confirm = (appointment, client = b, staff = i.staff) => row(client,
+    'select public.confirm_growth_operator_booking_arrival($1,$2,$3) as id', [i.request, appointment, staff]);
+  const controlCall = (arrival, result = 'confirmed', client = b, user = i.user) => row(client,
+    'select public.record_growth_operator_control_call($1,$2,$3) as id', [arrival, user, result]);
+  const arrivedBooking = async () => {
+    const { result } = await booking();
+    await db.query("update appointments set status='arrived' where id=$1 and workspace_id=$2", [result.id, i.workspace]);
+    return result.id;
+  };
+  const arrivalState = () => row(db, `select
+    (select jsonb_agg(to_jsonb(r) order by id) from growth_operator_arrivals r where workspace_id=$1) as receipts,
+    (select jsonb_agg(to_jsonb(a) order by created_at,id) from audit_logs a where workspace_id=$1) as audits,
+    (select count(*)::int from deals where workspace_id=$1) as deals`, [i.workspace]);
   const state = () => row(db, `select
     (select jsonb_agg(to_jsonb(l) order by id) from leads l where workspace_id=$1) as leads,
     (select count(*)::int from clients where workspace_id=$1) as clients,
@@ -116,7 +129,8 @@ async function makeCase(fixture, db, t, scope = 'assigned') {
   const aBackend = (await row(a, 'select pg_backend_pid() as pid')).pid;
   const bBackend = (await row(b, 'select pg_backend_pid() as pid')).pid;
   assert.notEqual(aBackend, bBackend);
-  return { ...i, a, b, leads, pipeline, context, arrivals, changeStage, booking, state, revoke, blocked };
+  return { ...i, a, b, leads, pipeline, context, arrivals, changeStage, booking, confirm,
+    controlCall, arrivedBooking, arrivalState, state, revoke, blocked };
 }
 
 test('external operator access and revocation on disposable PostgreSQL', { timeout: 300000 }, async t => {
@@ -125,9 +139,13 @@ test('external operator access and revocation on disposable PostgreSQL', { timeo
   const db = await fixture.connect();
   await db.query('create role anon; create role authenticated; create role service_role bypassrls; grant usage on schema public to service_role');
   const numbers = new Set([9, 10, 11, 12, 13, 14, 19, 20, 29, 30, 32, 33, 34, 36, 40, 43, 45,
-    52, 53, 54, 55, 56, 57, 61, 63, 64, 66, 72, 73]);
+    52, 53, 54, 55, 56, 57, 61, 63, 64, 66, 72, 73, 74]);
   for (const file of (await readdir(path.join(root, 'migrations'))).sort()) {
-    if (numbers.has(Number(file.slice(0, 3)))) await db.query(await readFile(path.join(root, 'migrations', file), 'utf8'));
+    if (numbers.has(Number(file.slice(0, 3)))) {
+      const source = await readFile(path.join(root, 'migrations', file), 'utf8');
+      await db.query(source);
+      if (Number(file.slice(0, 3)) === 74) await db.query(source);
+    }
   }
   t.diagnostic(`PostgreSQL ${(await row(db, 'show server_version')).server_version}; local synthetic data only; no external URL accepted`);
 
@@ -236,6 +254,102 @@ test('external operator access and revocation on disposable PostgreSQL', { timeo
     assert.equal(state.appointments, 0); assert.equal(state.deals, 0);
   });
 
+  await t.test('arrival confirmation and all call results are idempotent and never create a sale', async t => {
+    const f = await makeCase(fixture, db, t), appointment = await f.arrivedBooking();
+    const { id } = await f.confirm(appointment);
+    const first = await f.arrivalState();
+    assert.equal(first.receipts.length, 1);
+    assert.equal(first.receipts[0].price_minor, 0);
+    assert.equal(first.receipts[0].currency, 'KZT');
+    assert.equal(first.receipts[0].operator_check_result, null);
+    assert.equal((await f.confirm(appointment)).id, id);
+    assert.deepEqual(await f.arrivalState(), first);
+    for (const result of ['confirmed', 'unconfirmed', 'unreachable']) {
+      assert.equal((await f.controlCall(id, result)).id, id);
+      const saved = await f.arrivalState();
+      assert.equal(saved.receipts[0].operator_check_result, result);
+      assert.notEqual(saved.receipts[0].operator_checked_at, null);
+      assert.equal(saved.deals, 0);
+      assert.equal(saved.audits.at(-1).action, 'operator_arrival_control_call');
+      assert.deepEqual(Object.keys(saved.audits.at(-1).metadata).sort(),
+        ['operator_request_id', 'previous_result', 'result']);
+      await f.controlCall(id, result);
+      assert.deepEqual(await f.arrivalState(), saved);
+    }
+    const own = (await f.arrivals()).result.items;
+    assert.deepEqual(own.map(item => item.arrival_id), [id]);
+    assert.equal(own[0].client_phone, '+70000000000');
+    assert.equal(Object.hasOwn(own[0], 'notes'), false);
+    const before = await f.arrivalState();
+    await arrivalDenied(f.controlCall(id, 'confirmed', f.b, f.otherUser));
+    await arrivalDenied(f.arrivals(f.b, f.otherUser));
+    assert.deepEqual(await f.arrivalState(), before);
+  });
+
+  for (const kind of ['profile', 'agreement']) {
+    await t.test(`committed ${kind} revocation denies a control call waiting on its receipt`, async t => {
+      const f = await makeCase(fixture, db, t), appointment = await f.arrivedBooking();
+      const { id } = await f.confirm(appointment), before = await f.arrivalState();
+      await f.a.query('begin');
+      await f.revoke(kind);
+      await f.a.query('select id from growth_operator_arrivals where id=$1 for update', [id]);
+      const pending = observed(f.controlCall(id));
+      await f.blocked();
+      await f.a.query('commit');
+      const result = await pending;
+      assert.equal(result.error?.code, 'P0001');
+      assert.equal(result.error?.message, 'operator_arrival_access_denied');
+      assert.deepEqual(await f.arrivalState(), before);
+      await arrivalDenied(f.controlCall(id));
+    });
+  }
+
+  for (const change of ["status='inactive'", "role='doctor'"]) {
+    await t.test(`${change} denies a clinic confirmation waiting on its appointment`, async t => {
+      const f = await makeCase(fixture, db, t), appointment = await f.arrivedBooking();
+      const before = await f.arrivalState();
+      await f.a.query('begin');
+      await f.a.query(`update staff_users set ${change} where id=$1`, [f.staff]);
+      await f.a.query('select id from appointments where id=$1 for update', [appointment]);
+      const pending = observed(f.confirm(appointment));
+      await f.blocked();
+      await f.a.query('commit');
+      const result = await pending;
+      assert.equal(result.error?.code, 'P0001');
+      assert.equal(result.error?.message, 'clinic_confirmation_required');
+      assert.deepEqual(await f.arrivalState(), before);
+    });
+  }
+
+  await t.test('a control call holding approval first completes before revocation; its replay is denied', async t => {
+    const f = await makeCase(fixture, db, t), appointment = await f.arrivedBooking();
+    const { id } = await f.confirm(appointment);
+    await f.b.query('begin');
+    await f.controlCall(id);
+    const pending = observed(f.revoke('profile'));
+    await f.blocked(f.b, f.a);
+    await f.b.query('commit');
+    assert.equal((await pending).error, undefined);
+    const before = await f.arrivalState();
+    assert.equal(before.receipts[0].operator_check_result, 'confirmed');
+    await arrivalDenied(f.controlCall(id));
+    assert.deepEqual(await f.arrivalState(), before);
+  });
+
+  await t.test('a clinic confirmation holding staff permission first completes before membership revocation', async t => {
+    const f = await makeCase(fixture, db, t), appointment = await f.arrivedBooking();
+    await f.b.query('begin');
+    const { id } = await f.confirm(appointment);
+    const pending = observed(f.a.query("update staff_users set status='inactive' where id=$1", [f.staff]));
+    await f.blocked(f.b, f.a);
+    await f.b.query('commit');
+    assert.equal((await pending).error, undefined);
+    const before = await f.arrivalState();
+    assert.equal(before.receipts[0].id, id);
+    await assert.rejects(f.confirm(appointment), { code: 'P0001', message: 'clinic_confirmation_required' });
+    assert.deepEqual(await f.arrivalState(), before);
+  });
+
   await t.test('browser roles have neither table access nor execution of server-only operator RPCs', async t => {
     const f = await makeCase(fixture, db, t);
     for (const role of ['anon', 'authenticated']) {
@@ -247,7 +361,18 @@ test('external operator access and revocation on disposable PostgreSQL', { timeo
       await assert.rejects(f.leads(f.a), { code: '42501' });
       await assert.rejects(f.context(f.a), { code: '42501' });
       await assert.rejects(f.changeStage(f.a), { code: '42501' });
+      await assert.rejects(f.arrivals(f.a), { code: '42501' });
+      await assert.rejects(f.confirm(randomUUID(), f.a), { code: '42501' });
+      await assert.rejects(f.controlCall(randomUUID(), 'confirmed', f.a), { code: '42501' });
       await f.a.query('reset role');
+    }
+    for (const sql of [
+      'select public.confirm_growth_operator_arrival($1,$2,$3)',
+      "select public.record_growth_operator_check($1,$2,'confirmed')",
+    ]) {
+      const args = sql.includes('confirm_growth')
+        ? [f.request, randomUUID(), f.staff] : [randomUUID(), f.user];
+      await assert.rejects(f.b.query(sql, args), { code: '42501' });
     }
     const rls = await db.query(`select relrowsecurity from pg_class where oid=any($1::regclass[])`, [[
       'public.growth_operator_profiles', 'public.growth_operator_requests', 'public.growth_operator_lead_assignments',

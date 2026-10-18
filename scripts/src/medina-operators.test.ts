@@ -855,6 +855,226 @@ test("operator HTTP authorization, DTOs and transitions", async (t) => {
       assert.equal(rpcCalls[0].name, "read_growth_operator_booking_context");
       assert.equal(log.length, 0);
     });
+    const arrivalMutations = [
+      {
+        route: "operator-arrivals",
+        method: "PATCH",
+        body: { arrivalId: ARRIVAL, result: "confirmed" },
+        rpc: "record_growth_operator_control_call",
+        args: {
+          p_arrival_id: ARRIVAL,
+          p_operator_user_id: USER,
+          p_result: "confirmed",
+        },
+      },
+      {
+        route: "clinic-operator-arrivals",
+        method: "POST",
+        body: { appointmentId: STAGE },
+        rpc: "confirm_growth_operator_booking_arrival",
+        args: {
+          p_request_id: REQUEST,
+          p_appointment_id: STAGE,
+          p_clinic_staff_id: "staff",
+        },
+      },
+    ];
+    await t.test("arrival mutations reject missing and rejected tokens before RPC", async () => {
+      for (const mutation of arrivalMutations) {
+        for (const auth of [
+          { token: null, valid: true },
+          { token: "malformed", valid: true },
+          { token: "test.payload.signature", valid: false },
+        ]) {
+          reset();
+          validToken = auth.valid;
+          const res = await call(mutation.route, mutation.method, mutation.body, auth.token, WORKSPACE, { requestId: REQUEST });
+          assert.equal(res.statusCode, 401, `${mutation.route}: token ${auth.token}, valid=${auth.valid}`);
+          assert.equal(res.body.success, false);
+          assert.equal(res.body.code, "authentication_required");
+          assert.equal(rpcCalls.length, 0);
+          assert.equal(log.length, 0);
+        }
+      }
+    });
+    await t.test("clinic arrival confirmation enforces active workspace roles", async () => {
+      for (const role of ["owner", "admin", "manager", "receptionist", "doctor", "marketer", "lead_manager"]) {
+        reset();
+        tables.staff_users[0].role = role;
+        const allowed = ["owner", "admin", "manager"].includes(role);
+        const res = await call("clinic-operator-arrivals", "POST", { appointmentId: STAGE }, undefined, WORKSPACE, { requestId: REQUEST });
+        assert.equal(res.statusCode, allowed ? 200 : 403, role);
+        if (allowed) {
+          assert.deepEqual(res.body, { success: true });
+          assert.deepEqual(rpcCalls, [{ name: "confirm_growth_operator_booking_arrival", args: {
+            p_request_id: REQUEST, p_appointment_id: STAGE, p_clinic_staff_id: "staff",
+          } }]);
+        } else {
+          assert.equal(res.body.success, false);
+          assert.equal(rpcCalls.length, 0);
+          assert.ok(log.every((entry) => entry.table === "staff_users" && entry.op === "select"));
+        }
+      }
+      for (const scenario of ["missing", "inactive", "foreign"] as const) {
+        reset();
+        if (scenario === "missing") tables.staff_users = [];
+        if (scenario === "inactive") tables.staff_users[0].status = "inactive";
+        const res = await call("clinic-operator-arrivals", "POST", { appointmentId: STAGE }, undefined,
+          scenario === "foreign" ? FOREIGN : WORKSPACE, { requestId: REQUEST });
+        assert.equal(res.statusCode, 403, scenario);
+        assert.equal(rpcCalls.length, 0);
+        assert.ok(log.every((entry) => entry.table === "staff_users" && entry.op === "select"));
+      }
+    });
+    await t.test("clinic arrival confirmation rechecks revoked membership with the same token", async () => {
+      const token = "same.payload.signature";
+      for (const revocation of ["role", "inactive", "deleted"] as const) {
+        reset();
+        tables.staff_users.push({ ...tables.staff_users[0], id: "foreign-staff", workspace_id: FOREIGN });
+        const before = await call("clinic-operator-arrivals", "POST", { appointmentId: STAGE }, token, WORKSPACE, { requestId: REQUEST });
+        assert.equal(before.statusCode, 200, revocation);
+        assert.equal(rpcCalls.length, 1);
+        if (revocation === "role") tables.staff_users[0].role = "receptionist";
+        if (revocation === "inactive") tables.staff_users[0].status = "inactive";
+        if (revocation === "deleted") tables.staff_users.shift();
+        log = [];
+        rpcCalls = [];
+        const after = await call("clinic-operator-arrivals", "POST", { appointmentId: STAGE }, token, WORKSPACE, { requestId: REQUEST });
+        assert.equal(after.statusCode, 403, revocation);
+        assert.equal(after.body.success, false);
+        assert.equal(rpcCalls.length, 0, "Revoked access cannot borrow the active foreign membership");
+        assert.ok(log.every((entry) => entry.table === "staff_users" && entry.op === "select"));
+      }
+    });
+    await t.test("arrival mutations preserve verified actor identity and reject supplied actors", async () => {
+      for (const result of ["confirmed", "unconfirmed", "unreachable"]) {
+        reset();
+        tables.staff_users = [];
+        const res = await call("operator-arrivals", "PATCH", { arrivalId: ARRIVAL, result }, undefined, FOREIGN, {
+          requestId: REQUEST, userId: OTHER, operatorUserId: OTHER, staffId: OTHER, role: "owner",
+        });
+        assert.equal(res.statusCode, 200);
+        assert.deepEqual(res.body, { success: true });
+        assert.deepEqual(rpcCalls, [{ name: "record_growth_operator_control_call", args: {
+          p_arrival_id: ARRIVAL, p_operator_user_id: USER, p_result: result,
+        } }]);
+        assert.equal(log.length, 0, "Operator control calls need no clinic staff membership");
+      }
+      reset();
+      const member = tables.staff_users[0];
+      tables.staff_users = [
+        { ...member, id: "foreign-staff", workspace_id: FOREIGN },
+        { ...member, id: "selected-staff", role: "manager" },
+        { ...member, id: "other-user-staff", auth_user_id: OTHER },
+      ];
+      tables.growth_operator_profiles = [];
+      const clinic = await call("clinic-operator-arrivals", "POST", { appointmentId: STAGE }, undefined, WORKSPACE, {
+        requestId: REQUEST, userId: OTHER, staffId: "foreign-staff", clinicStaffId: OTHER, role: "owner",
+      });
+      assert.equal(clinic.statusCode, 200);
+      assert.deepEqual(clinic.body, { success: true });
+      assert.deepEqual(rpcCalls, [{ name: "confirm_growth_operator_booking_arrival", args: {
+        p_request_id: REQUEST, p_appointment_id: STAGE, p_clinic_staff_id: "selected-staff",
+      } }]);
+      assert.deepEqual(log.find((entry) => entry.table === "staff_users")?.filters, { auth_user_id: USER, status: "active" });
+      for (const mutation of arrivalMutations) {
+        for (const forged of [
+          { userId: OTHER }, { operatorUserId: OTHER }, { staffId: OTHER },
+          { clinicStaffId: OTHER }, { p_operator_user_id: OTHER }, { p_clinic_staff_id: OTHER },
+          { workspaceId: FOREIGN }, { role: "owner" },
+        ]) {
+          reset();
+          const res = await call(mutation.route, mutation.method, { ...mutation.body, ...forged }, undefined, WORKSPACE, { requestId: REQUEST });
+          assert.equal(res.statusCode, 400, `${mutation.route}: ${Object.keys(forged)[0]}`);
+          assert.equal(rpcCalls.length, 0);
+          assert.ok(log.every((entry) => entry.op === "select" && ["staff_users", "workspace_settings"].includes(entry.table)));
+        }
+      }
+    });
+    await t.test("arrival mutations reject wrong methods and malformed selectors", async () => {
+      for (const mutation of arrivalMutations) {
+        for (const method of ["PUT", "DELETE", mutation.method === "PATCH" ? "POST" : "PATCH"]) {
+          reset();
+          const res = await call(mutation.route, method, mutation.body, undefined, WORKSPACE, { requestId: REQUEST });
+          assert.equal(res.statusCode, 405, `${mutation.route}: ${method}`);
+          assert.equal(res.body.code, "method_not_allowed");
+          assert.equal(rpcCalls.length, 0);
+          assert.equal(log.length, 0);
+        }
+        const invalidQueries: Row[] = [
+          {}, { requestId: "not-a-uuid" }, { requestId: null }, { requestId: [REQUEST] },
+          { requestId: REQUEST, offset: "-1" }, { requestId: REQUEST, offset: "1.5" },
+          { requestId: REQUEST, offset: ["0"] }, { requestId: REQUEST, offset: "1000000" },
+        ];
+        for (const query of invalidQueries) {
+          reset();
+          const res = await call(mutation.route, mutation.method, mutation.body, undefined, WORKSPACE, query);
+          assert.equal(res.statusCode, 400, `${mutation.route}: ${JSON.stringify(query)}`);
+          assert.equal(res.body.success, false);
+          assert.equal(rpcCalls.length, 0);
+          assert.ok(log.every((entry) => entry.op === "select" && ["staff_users", "workspace_settings"].includes(entry.table)));
+        }
+      }
+    });
+    await t.test("arrival mutations reject malformed IDs and control-call results", async () => {
+      for (const mutation of arrivalMutations) {
+        const idKey = mutation.method === "PATCH" ? "arrivalId" : "appointmentId";
+        const invalidBodies: Row[] = [
+          {}, ...["not-a-uuid", "", null, [ARRIVAL], 42].map((id) => ({ ...mutation.body, [idKey]: id })),
+        ];
+        if (mutation.method === "PATCH") {
+          invalidBodies.push(...[undefined, null, [], 42, "Confirmed", "", "unknown"].map((result) => ({ arrivalId: ARRIVAL, result })));
+        }
+        for (const body of invalidBodies) {
+          reset();
+          const res = await call(mutation.route, mutation.method, body, undefined, WORKSPACE, { requestId: REQUEST });
+          assert.equal(res.statusCode, 400, `${mutation.route}: ${JSON.stringify(body)}`);
+          assert.equal(rpcCalls.length, 0);
+          assert.ok(log.every((entry) => entry.op === "select" && ["staff_users", "workspace_settings"].includes(entry.table)));
+        }
+      }
+    });
+    await t.test("arrival mutation RPC refusals retain safe HTTP statuses without fallback writes", async () => {
+      const failures = [
+        ["P0001", "operator_check_invalid", 400, 400],
+        ["P0001", "clinic_confirmation_required", 403, 403],
+        ["P0001", "clinic_arrival_required", 409, 409],
+        ["P0001", "operator_arrival_unavailable", 409, 409],
+        ["P0001", "arrival_already_assigned", 409, 409],
+        ["P0001", "accepted_assignment_required", 403, 409],
+        ["P0001", "operator_arrival_access_denied", 403, 409],
+        ["PGRST202", "private-db-detail", 503, 503],
+        ["PGRST205", "private-db-detail", 503, 503],
+        ["42P01", "private-db-detail", 503, 503],
+        ["42703", "private-db-detail", 503, 503],
+        ["42883", "private-db-detail", 503, 503],
+        ["P0001", "private-db-detail", 503, 503],
+        ["42501", "private-db-detail", 503, 503],
+        ["XX000", "private-db-detail", 503, 503],
+      ] as const;
+      for (const mutation of arrivalMutations) {
+        for (const [code, message, operatorStatus, clinicStatus] of failures) {
+          reset();
+          rpcFailure = code;
+          rpcMessage = message;
+          rpcErrorFields = { details: "sensitive-db-detail", hint: "private-db-hint", operator_user_id: OTHER };
+          const res = await call(mutation.route, mutation.method, mutation.body, undefined, WORKSPACE, { requestId: REQUEST });
+          assert.equal(res.statusCode, mutation.method === "PATCH" ? operatorStatus : clinicStatus, `${mutation.route}: ${code}/${message}`);
+          assert.equal(res.body.success, false);
+          assert.equal(res.body.code, ["PGRST202", "PGRST205", "42P01", "42703", "42883"].includes(code)
+            ? "operator_arrivals_not_provisioned" : "operator_arrivals_unavailable");
+          assert.equal(typeof res.body.error, "string");
+          assert.ok(res.body.error);
+          assert.deepEqual(Object.keys(res.body).sort(), ["code", "error", "success"]);
+          const payload = JSON.stringify(res.body);
+          assert.doesNotMatch(payload, /private-db-detail|sensitive-db-detail|private-db-hint/);
+          assert.ok(!payload.includes(message));
+          assert.ok(!payload.includes(OTHER));
+          assert.deepEqual(rpcCalls, [{ name: mutation.rpc, args: mutation.args }]);
+          assert.ok(log.every((entry) => entry.op === "select" && ["staff_users", "workspace_settings"].includes(entry.table)));
+        }
+      }
+    });
     await t.test(
       "arrival endpoints use verified identities and return only their narrow DTOs",
       async () => {
