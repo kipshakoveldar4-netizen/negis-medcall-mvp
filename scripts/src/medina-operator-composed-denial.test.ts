@@ -564,7 +564,7 @@ const savedBooking = {
   startsAt: "2026-10-18T04:00:00Z", timeZone: "Asia/Almaty", doctorName: "Synthetic doctor",
   service: "Synthetic catalog service", priceMinor: "100",
 };
-async function queuedAction(t: TestContext, target: QueuedAction) {
+async function queuedAction(t: TestContext, target: QueuedAction, openStageBooking = false) {
   const ui = await runtime(t, true);
   let denied = 0;
   const onAccessDenied = () => { denied++; };
@@ -591,6 +591,15 @@ async function queuedAction(t: TestContext, target: QueuedAction) {
     stageEditingAvailable: true, stages: [{ id: "stage-one", name: "Synthetic stage one" }, { id: "stage-two", name: "Synthetic stage two" }],
   }));
   await ui.render.flush();
+  if (target === "stage" && openStageBooking) {
+    ui.invoke(ui.find((node) => node.type === "button" && node.props["aria-expanded"] === false, ui.section(labels.leads)));
+    await ui.render.flush();
+    ui.take("OperatorBookingForm").succeed({ timeZone: "Asia/Almaty" });
+    await ui.render.flush();
+    ui.take("BookingFields").succeed(doctors());
+    await ui.render.flush();
+    ui.find((node) => node.type === "form", ui.section(labels.booking));
+  }
   if (target === "booking") {
     ui.invoke(ui.find((node) => node.type === "button" && node.props["aria-expanded"] === false, ui.section(labels.leads)));
     await ui.render.flush();
@@ -684,9 +693,21 @@ for (const target of ["request", "call", "stage", "booking", "clinic-assignment"
       assert.equal(ui.mutation.dispatchGuard?.(), false, "The live predicate must close without passive cleanup");
       assert.equal(ui.mutation.settled, true, "The queued transport must reject cancellation, not leave the action hanging");
       assert.equal(ui.render.content(), before);
-      assert.equal(ui.render.writes(), writes, "Cancellation must not write obsolete state or refresh a list");
+      const releasesLiveLease = change === "refresh" && (target === "stage" || target === "clinic-assignment");
+      assert.equal(ui.render.writes(), writes + Number(releasesLiveLease),
+        "A refreshed live lead scope may only release its settled lease; other obsolete callbacks make no writes");
       assert.equal(ui.requests.length, count);
       assert.equal(ui.denied(), 0, "Cancellation is not a same-scope authorization denial");
+      if (releasesLiveLease) {
+        await ui.render.flush();
+        ui.take("LeadList").succeed(list([{ id: LEAD, name: "Synthetic refreshed patient", status: "new", assigned: false }]));
+        await ui.render.flush();
+        const control = ui.find((node) => target === "clinic-assignment"
+          ? node.type === "input" && node.props.type === "checkbox"
+          : node.type === "button" && typeof node.props["aria-expanded"] === "boolean", ui.section(labels.leads));
+        assert.equal(control.props.disabled, false, "Settling the canceled lookup must unlock the same live scope");
+        assert.equal(ui.requests.filter((request) => request.method === "PATCH").length, 1);
+      }
     });
   }
   test(`component queued ${target}: a live scope dispatches once and completes normally`, async (t) => {
@@ -1084,6 +1105,242 @@ for (const status of [401, 403] as const) {
   });
 }
 
+type LeadMutation = "assign" | "unassign" | "stage";
+async function composedLeadMutation(t: TestContext, target: LeadMutation) {
+  const ui = await runtime(t, true);
+  const clinic = target !== "stage";
+  const Root = clinic ? ui.load("clinic").ClinicOperators : ui.load("requests").OperatorRequests;
+  let actorId = ACTOR;
+  let rawActor = ACTOR;
+  let epoch = 0;
+  let session = { current: true };
+  let denied = 0;
+  function view() {
+    const lifetime = session;
+    return jsx(Root, {
+      actorId, ...(clinic ? { workspaceId: WORKSPACE } : {}),
+      isSessionCurrent: () => lifetime.current, onAccessDenied: () => { denied++; },
+    }, epoch);
+  }
+  function leadRows(label: string) {
+    return list([{
+      id: LEAD, name: `Synthetic assignment ${label}`, phone: leadPhone(label), status: "new",
+      stageId: "stage-one", stageName: "Synthetic stage one", assigned: target === "unassign",
+    }], { stageEditingAvailable: true, stages: [{ id: "stage-one", name: "Synthetic stage one" }, { id: "stage-two", name: "Synthetic stage two" }] });
+  }
+  function control() {
+    return clinic
+      ? ui.find((node) => node.type === "input" && node.props.type === "checkbox", ui.section(labels.leads))
+      : ui.find((node) => node.type === "form" && elements(node.props.children).some((child) => child.type === "select"), ui.section(labels.leads));
+  }
+  function busyControl() {
+    return clinic ? control() : ui.find((node) => node.type === "button" && typeof node.props["aria-expanded"] === "boolean", ui.section(labels.leads));
+  }
+  function invoke(controlNode = control()) {
+    ui.invoke(controlNode, clinic ? "onChange" : "onSubmit", clinic ? { target: { checked: target === "assign" } } : undefined);
+  }
+  async function populate(label: string) {
+    await ui.render.flush();
+    if (clinic) ui.take("ClinicOperators").succeed(list([]));
+    ui.take("OperatorRequests").succeed(list([{
+      id: REQUEST_A, status: "accepted", displayName: `Synthetic agreement ${label}`,
+      clinicBrief: "Synthetic agreement", pricePerArrivalMinor: "0", currency: "KZT", leadScope: "assigned",
+    }]));
+    await ui.render.flush();
+    const toggles = ui.render.nodes().filter((node) => node.type === "button" && node.props["aria-expanded"] === false);
+    ui.invoke(toggles.at(-1)!);
+    await ui.render.flush();
+    ui.take("LeadList").succeed(leadRows(label));
+    await ui.render.flush();
+    if (!clinic) {
+      ui.invoke(ui.find((node) => node.type === "select", control()), "onChange", { target: { value: "stage-two" } });
+      await ui.render.flush();
+    }
+    assert.equal(ui.render.instances("OperatorRequests").length, 1);
+    assert.equal(ui.render.instances("OperatorLeads").length, 1);
+    assert.equal(ui.render.instances("LeadList").length, 1);
+    assert.notEqual(busyControl().props.disabled, true);
+  }
+  async function start() {
+    invoke();
+    await ui.render.flush();
+    const mutation = ui.take("event", "PATCH");
+    assert.equal(mutation.url, `/api/crm/${clinic ? `clinic-operator-leads?workspaceId=${WORKSPACE}&` : "operator-leads?"}requestId=${REQUEST_A}&search=`);
+    assert.deepEqual(mutation.body, clinic ? { leadId: LEAD, assigned: target === "assign" }
+      : { leadId: LEAD, stageId: "stage-two", expectedStageId: "stage-one", expectedStatus: "new" });
+    assert.equal(mutation.dispatched, false);
+    return mutation;
+  }
+  async function refresh(label = "refreshed-assignment") {
+    ui.invoke(ui.find((node) => node.type === "button" && elements(node.props.children).some((child) => child.type === icons.RefreshCw), ui.section(labels.leads)));
+    await ui.render.flush();
+    ui.take("LeadList").succeed(leadRows(label));
+    await ui.render.flush();
+  }
+  async function settleLeadRead(label = "settled-assignment") {
+    ui.take("LeadList").succeed(leadRows(label));
+    await ui.render.flush();
+  }
+  ui.render.mount(view());
+  await populate("initial-assignment");
+  return {
+    ...ui, control, busyControl, invoke, start, refresh, settleLeadRead, denied: () => denied,
+    rawActor(nextActor: string) {
+      if (rawActor !== nextActor) session.current = false;
+      rawActor = nextActor;
+    },
+    async replaceActor(nextActor: string) {
+      session.current = false;
+      session = { current: true };
+      actorId = rawActor = nextActor;
+      epoch++;
+      ui.render.update(view());
+      await populate(`replacement-${epoch}`);
+    },
+  };
+}
+
+for (const target of ["assign", "unassign", "stage"] as const) {
+  test(`composed lead mutation ${target}: original actor and unchanged live session dispatch once`, async (t) => {
+    const ui = await composedLeadMutation(t, target);
+    const mutation = await ui.start();
+    assert.equal(mutation.expectedUserId, ACTOR, "The real request/lead chain must retain the actor");
+    ui.rawActor(ACTOR);
+    assert.equal(mutation.dispatchGuard?.(), true, "Same-actor session refresh must keep the current action valid");
+    const dispatched = ui.dispatched.length;
+    mutation.release();
+    assert.equal(ui.dispatched.length, dispatched + 1);
+    mutation.succeed();
+    await ui.render.flush();
+    assert.equal(ui.take("LeadList").settled, false, "Current actions still recheck authorization");
+    assert.equal(ui.denied(), 0);
+  });
+  for (const transition of ["A-B", "logout", "A-B-A"] as const) {
+    test(`composed lead mutation ${target}: raw ${transition} cancels queued dispatch without rendering`, async (t) => {
+      const ui = await composedLeadMutation(t, target);
+      const mutation = await ui.start();
+      ui.rawActor(transition === "logout" ? "" : REQUEST_B);
+      if (transition === "A-B-A") ui.rawActor(ACTOR);
+      const before = clinicSnapshot(ui);
+      assert.equal(mutation.expectedUserId, ACTOR);
+      assert.equal(mutation.dispatchGuard?.(), false, "A->B->A cannot revive the old session predicate");
+      mutation.release();
+      await ui.render.beforeEffects();
+      assert.equal(mutation.dispatched, false);
+      assert.equal(mutation.settled, true);
+      assertClinicQuiet(ui, before);
+      assert.equal(ui.denied(), 0);
+    });
+  }
+  for (const transition of ["expired-session", "refreshed-frame", "unmount"] as const) {
+    test(`composed lead mutation ${target}: retained handler after ${transition} stops before state or lookup`, async (t) => {
+      const ui = await composedLeadMutation(t, target);
+      const retained = ui.control();
+      if (transition === "expired-session") { ui.rawActor(REQUEST_B); ui.rawActor(ACTOR); }
+      else if (transition === "refreshed-frame") await ui.refresh();
+      else ui.render.update(null);
+      const before = clinicSnapshot(ui);
+      ui.invoke(retained);
+      await ui.render.beforeEffects();
+      assertClinicQuiet(ui, before);
+    });
+  }
+  for (const outcome of ["success", "network", 401, 403] as const) {
+    test(`composed lead mutation ${target}: late ${outcome} after raw session expiry makes no writes`, async (t) => {
+      const ui = await composedLeadMutation(t, target);
+      const mutation = await ui.start();
+      mutation.release();
+      ui.rawActor(REQUEST_B);
+      ui.rawActor(ACTOR);
+      const before = clinicSnapshot(ui);
+      if (outcome === "success") mutation.succeed();
+      else if (outcome === "network") mutation.reject();
+      else mutation.fail(outcome);
+      await ui.render.beforeEffects();
+      assertClinicQuiet(ui, before);
+      await ui.render.flush();
+      assertClinicQuiet(ui, before);
+      assert.equal(ui.denied(), 0, "An expired action cannot revoke a replacement session");
+    });
+    test(`composed lead mutation ${target}: late ${outcome} after replacement A-B-A cannot unlock a newer pending action`, async (t) => {
+      const ui = await composedLeadMutation(t, target);
+      const obsolete = await ui.start();
+      obsolete.release();
+      await ui.replaceActor(REQUEST_B);
+      await ui.replaceActor(ACTOR);
+      const current = await ui.start();
+      current.release();
+      const before = clinicSnapshot(ui);
+      if (outcome === "success") obsolete.succeed();
+      else if (outcome === "network") obsolete.reject();
+      else obsolete.fail(outcome);
+      await ui.render.beforeEffects();
+      assertClinicQuiet(ui, before);
+      assert.equal(ui.busyControl().props.disabled, true);
+      assert.equal(current.settled, false);
+      assert.equal(ui.denied(), 0);
+      await ui.render.flush();
+      assertClinicQuiet(ui, before);
+      current.fail(409);
+      await ui.render.flush();
+      await ui.settleLeadRead();
+      assert.equal(ui.busyControl().props.disabled, false, "The new action still owns and releases its own lease");
+    });
+  }
+  for (const status of [401, 403] as const) {
+    test(`composed lead mutation ${target}: current ${status} after list refresh still removes protected data`, async (t) => {
+      const ui = await composedLeadMutation(t, target);
+      const mutation = await ui.start();
+      mutation.release();
+      await ui.refresh();
+      assert.ok(ui.render.content().includes(leadPhone("refreshed-assignment")));
+      const count = ui.requests.length;
+      mutation.fail(status);
+      await ui.render.beforeEffects();
+      assert.equal(ui.requests.length, count, "Observe the denial before its passive revalidation");
+      assert.equal(ui.render.content().includes(leadPhone("refreshed-assignment")), false);
+      assert.equal(ui.denied(), target === "stage" ? 1 : 0);
+      assert.equal(ui.render.nodes().filter((node) => node.type === "input" && node.props.type === "checkbox").length, 0);
+      await ui.render.flush();
+      assert.equal(ui.requests.length, count + 1, "Still-live denial must schedule exactly one authorization read");
+      assert.equal(ui.take(target === "stage" ? "OperatorRequests" : "LeadList").settled, false);
+    });
+  }
+  test(`composed lead mutation ${target}: repeated synchronous events queue only one lookup`, async (t) => {
+    const ui = await composedLeadMutation(t, target);
+    const retained = ui.control();
+    ui.invoke(retained);
+    ui.invoke(retained);
+    await ui.render.beforeEffects();
+    assert.equal(ui.requests.filter((request) => request.method === "PATCH").length, 1);
+    assert.equal(ui.busyControl().props.disabled, true);
+    const mutation = ui.take("event", "PATCH");
+    assert.equal(mutation.dispatched, false);
+    mutation.release();
+    mutation.succeed();
+    await ui.render.flush();
+    assert.equal(ui.take("LeadList").settled, false);
+  });
+  for (const dispatched of [false, true]) {
+    test(`composed lead mutation ${target}: ${dispatched ? "dispatched" : "queued"} lease survives list refresh and blocks repeated handlers`, async (t) => {
+      const ui = await composedLeadMutation(t, target);
+      const retained = ui.control();
+      const mutation = await ui.start();
+      if (dispatched) mutation.release();
+      await ui.refresh();
+      assert.equal(ui.busyControl().props.disabled, true, "Refreshing data cannot unlock a pending mutation");
+      const before = clinicSnapshot(ui);
+      ui.invoke(retained);
+      await ui.render.beforeEffects();
+      assertClinicQuiet(ui, before);
+      assert.equal(ui.requests.filter((request) => request.method === "PATCH").length, 1);
+      if (dispatched) mutation.succeed(); else mutation.release();
+      await ui.render.flush();
+      assert.notEqual(ui.busyControl().props.disabled, true, "Only the settled live lease may release the control");
+    });
+  }
+}
+
 async function clinicConfirmation(t: TestContext) {
   const ui = await runtime(t, true);
   const Clinic = ui.load("clinic").ClinicOperators;
@@ -1249,7 +1506,7 @@ for (const outcome of ["success", "network"] as const) {
 for (const target of ["stage", "clinic-assignment"] as const) {
   for (const outcome of [403, "success"] as const) {
     test(`component dispatched ${target}: late ${outcome} after same-scope refreshed leads ${outcome === 403 ? "revokes the protected view and rechecks" : "cannot publish stale success"}`, async (t) => {
-      const ui = await queuedAction(t, target);
+      const ui = await queuedAction(t, target, target === "stage");
       assert.equal(ui.mutation.dispatchGuard?.(), true);
       ui.mutation.release();
       assert.equal(ui.mutation.dispatched, true, "Exercise a real in-flight response, not a canceled queued action");
@@ -1267,8 +1524,8 @@ for (const target of ["stage", "clinic-assignment"] as const) {
       assert.ok(ui.render.content().includes(leadPhone("refreshed")), "A newer same-scope protected list must render before the old response");
       assert.equal(ui.mutation.dispatchGuard?.(), false, "The dispatched action no longer owns the refreshed snapshot");
       if (target === "stage") {
-        ui.invoke(ui.find((node) => node.type === "button" && node.props["aria-expanded"] === false, ui.section(labels.leads)));
-        await ui.render.flush();
+        assert.equal(ui.find((node) => node.type === "button" && node.props["aria-expanded"] === true, ui.section(labels.leads)).props.disabled, true,
+          "Refreshing the list cannot unlock the in-flight mutation; the form was opened before it started");
         ui.take("OperatorBookingForm").succeed({ timeZone: "Asia/Almaty" });
         await ui.render.flush();
         ui.take("BookingFields").succeed(doctors());
@@ -1288,8 +1545,12 @@ for (const target of ["stage", "clinic-assignment"] as const) {
         "An obsolete mutation must never publish a saved-stage success notice");
       if (outcome === "success") {
         assert.equal(ui.render.content(), before);
-        assert.equal(ui.render.writes(), writes);
+        assert.equal(ui.render.writes(), writes + 1, "Only the settled live lease may write busy=false; stale success must not publish state");
         assert.equal(ui.denied(), 0);
+        const control = ui.find((node) => target === "clinic-assignment"
+          ? node.type === "input" && node.props.type === "checkbox"
+          : node.type === "button" && typeof node.props["aria-expanded"] === "boolean", ui.section(labels.leads));
+        assert.equal(control.props.disabled, false);
         await ui.render.flush();
         assert.equal(ui.requests.length, count, "Stale success cannot refresh the newer authorized list");
         return;

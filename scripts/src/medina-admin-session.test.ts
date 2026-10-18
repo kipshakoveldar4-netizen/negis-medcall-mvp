@@ -685,6 +685,187 @@ test("clinic collaboration repeated submit retains one real pending token lookup
   } finally { token.resolve("synthetic-token"); await work; ui.dispose(); fixture.renderer.dispose(); }
 });
 
+const clinicLeadSource = read("artifacts/negis/src/components/operators/OperatorLeads.tsx");
+async function clinicAssignment(fixture: Fixture) {
+  const [clinicSource, requestSource, , operatorSource, contractsSource] = await clinicSources;
+  const leadSource = await clinicLeadSource;
+  const contracts = evaluate(contractsSource);
+  const children = [hookRenderer(), hookRenderer(), hookRenderer(), hookRenderer()];
+  const operator = evaluate(select(operatorSource, ["OperatorApiError", "operatorApi"]), {
+    crmFetch: fixture.fetch, CrmApiError: fixture.api.CrmApiError, crmErrorMessage: fixture.api.crmErrorMessage,
+  }).selected;
+  const requestId = "00000000-0000-4000-8000-000000000030";
+  const lead = { id: "00000000-0000-4000-8000-000000000031", name: "Synthetic assignment",
+    phone: "+70000000000", status: "new", assigned: false };
+  let refreshes = 0;
+  const list = (items: unknown[]) => ({ data: { items, hasMore: false }, offset: 0, error: "",
+    refresh: () => { refreshes++; }, next() {}, previous() {} });
+  fixture.snapshot().setActiveTab("operators"); await fixture.renderer.flush();
+  const clinicProps = nodes(fixture.renderer.tree()).find(node => node.type === "ClinicOperators")?.props;
+  assert.ok(clinicProps);
+  const directory = list([]);
+  const clinic = evaluate(clinicSource, {}, {
+    react: children[0].hooks, "@/lib/operatorApi": { ...operator, useOperatorList: () => directory },
+    "../../../../../lib/crm/operator-contracts": contracts,
+  });
+  children[0].mount(clinic.ClinicOperators, [], clinicProps); await children[0].flush();
+  const requestProps = nodes(children[0].tree()).find(node => node.type === "OperatorRequests")?.props;
+  assert.ok(requestProps);
+  const requestsList = list([{ id: requestId, status: "accepted", displayName: "Synthetic operator",
+    clinicBrief: "Synthetic agreement", pricePerArrivalMinor: "0", currency: "KZT", leadScope: "assigned" }]);
+  const requests = evaluate(requestSource, { window: { confirm: () => true } }, {
+    react: children[1].hooks, "@/lib/operatorApi": { ...operator, useOperatorList: () => requestsList },
+    "./OperatorLeads": { OperatorLeads: "OperatorLeads" },
+    "./OperatorServiceCatalog": { OperatorServiceCatalog: "OperatorServiceCatalog" },
+    "./OperatorArrivals": { OperatorArrivals: "OperatorArrivals" },
+    "../../../../../lib/crm/operator-contracts": contracts,
+  });
+  children[1].mount(requests.OperatorRequests, [], requestProps); await children[1].flush();
+  const open = nodes(children[1].tree()).find(node => node.type === "button" && label(node).trim() === "Назначить заявки");
+  assert.ok(open); open.props.onClick(); await children[1].flush();
+  const leadProps = nodes(children[1].tree()).find(node => node.type === "OperatorLeads")?.props;
+  assert.ok(leadProps);
+  const ast = ts.createSourceFile("OperatorLeads.tsx", leadSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const component = ast.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "LeadList") as import("typescript").FunctionDeclaration;
+  const returned = component.body!.statements.filter(ts.isReturnStatement).at(-1)!;
+  let action!: (item: typeof lead, assigned: boolean) => Promise<void>;
+  const observed = leadSource.slice(0, returned.getStart(ast)) + "\n__observeAssign(assign);\n" + leadSource.slice(returned.getStart(ast));
+  const imports = (renderer: ReturnType<typeof hookRenderer>) => ({
+    react: renderer.hooks, "@/lib/operatorApi": { ...operator, useOperatorList: () => leadsList },
+    "./OperatorBookingForm": { OperatorBookingForm: "OperatorBookingForm" },
+    "../../../../../lib/crm/operator-contracts": contracts,
+  });
+  const bindings = { __observeAssign: (handler: typeof action) => { action = handler; },
+    window: { addEventListener() {}, removeEventListener() {} },
+    document: { addEventListener() {}, removeEventListener() {}, visibilityState: "visible" } };
+  const leadsList = list([lead]);
+  const outer = evaluate(leadSource, bindings, imports(children[2]));
+  children[2].mount(outer.OperatorLeads, [], leadProps); await children[2].flush();
+  const listProps = nodes(children[2].tree()).find(node => typeof node.type === "function" && node.type.name === "LeadList")?.props;
+  assert.ok(listProps);
+  const inner = evaluate(observed + "\nexports.fixture = { LeadList };", bindings, imports(children[3]));
+  children[3].mount(inner.fixture.LeadList, [], listProps); await children[3].flush();
+  const retained = action;
+  return { lead, requestId, props: [clinicProps, requestProps, leadProps, listProps], renderer: children[3],
+    invoke: (assigned = true) => retained(lead, assigned), refreshes: () => refreshes,
+    dispose: () => children.forEach(child => child.dispose()) };
+}
+const clinicAssignments = (fixture: Fixture) => fixture.dispatches.filter(call =>
+  call.path.startsWith("/api/crm/clinic-operator-leads?") && call.init.method === "PATCH");
+
+test("clinic assignment parent chain preserves the actor and live session for assigning and removing", async () => {
+  for (const assigned of [true, false]) {
+    const fixture = await ready(), ui = await clinicAssignment(fixture);
+    try {
+      for (const props of ui.props) {
+        assert.equal(props.actorId, actorA);
+        assert.equal(props.isSessionCurrent, fixture.access().isCurrent);
+      }
+      await ui.invoke(assigned); await ui.renderer.flush();
+      assert.equal(fixture.tokenCalls.at(-1), actorA);
+      assert.equal(clinicAssignments(fixture).length, 1);
+      assert.deepEqual(JSON.parse(String(clinicAssignments(fixture)[0].init.body)), { leadId: ui.lead.id, assigned });
+      assert.equal(ui.refreshes(), 1);
+    } finally { ui.dispose(); fixture.renderer.dispose(); }
+  }
+});
+
+test("clinic assignment queued transport stops on raw SDK account logout and A-B-A boundaries", async () => {
+  for (const assigned of [true, false]) for (const boundary of ["actor", "logout", "roundtrip"]) {
+    const fixture = await ready(), ui = await clinicAssignment(fixture), token = deferred<string>();
+    let work: Promise<void> | undefined;
+    try {
+      fixture.token(() => token.promise); work = ui.invoke(assigned); await ui.renderer.flush();
+      assert.equal(clinicAssignments(fixture).length, 0);
+      fixture.emit(boundary === "logout" ? null : actorB); if (boundary === "roundtrip") fixture.emit(actorA);
+      const writes = ui.renderer.writes.length;
+      token.resolve("synthetic-original-token"); await work; await ui.renderer.flush();
+      assert.equal(clinicAssignments(fixture).length, 0, `${assigned}/${boundary}`);
+      assert.equal(ui.renderer.writes.length, writes);
+      assert.equal(ui.refreshes(), 0);
+    } finally { token.resolve("synthetic-original-token"); await work; ui.dispose(); fixture.renderer.dispose(); }
+  }
+});
+
+test("clinic assignment expired retained handlers stop before token lookups or state writes", async () => {
+  for (const boundary of ["actor", "logout", "roundtrip"]) {
+    const fixture = await ready(), ui = await clinicAssignment(fixture);
+    try {
+      fixture.emit(boundary === "logout" ? null : actorB); if (boundary === "roundtrip") fixture.emit(actorA);
+      const writes = ui.renderer.writes.length, lookups = fixture.tokenCalls.length;
+      await ui.invoke(); await ui.renderer.flush();
+      assert.equal(ui.renderer.writes.length, writes, boundary);
+      assert.equal(fixture.tokenCalls.length, lookups);
+      assert.equal(clinicAssignments(fixture).length, 0);
+    } finally { ui.dispose(); fixture.renderer.dispose(); }
+  }
+});
+
+test("clinic assignment late outcomes cannot refresh or publish after raw SDK expiry", async () => {
+  for (const boundary of ["actor", "logout", "roundtrip"]) for (const outcome of [200, 401, 403, "network"] as const) {
+    const fixture = await ready(), ui = await clinicAssignment(fixture), reply = deferred<Response>();
+    let work: Promise<void> | undefined;
+    try {
+      fixture.reply(() => reply.promise); work = ui.invoke(); await ui.renderer.flush();
+      assert.equal(clinicAssignments(fixture).length, 1);
+      fixture.emit(boundary === "logout" ? null : actorB); if (boundary === "roundtrip") fixture.emit(actorA);
+      const writes = ui.renderer.writes.length;
+      if (outcome === "network") reply.reject(new Error("Synthetic assignment transport failure"));
+      else reply.resolve(Response.json({ success: outcome === 200 }, { status: outcome }));
+      await work; await ui.renderer.flush();
+      assert.equal(ui.renderer.writes.length, writes, `${boundary}/${outcome}`);
+      assert.equal(ui.refreshes(), 0);
+      assert.equal(clinicAssignments(fixture).length, 1, "Already sent writes are not claimed to be canceled");
+    } finally { reply.resolve(ok()); await work; ui.dispose(); fixture.renderer.dispose(); }
+  }
+});
+
+test("clinic assignment still permits same-actor token refresh", async () => {
+  const fixture = await ready(), ui = await clinicAssignment(fixture), token = deferred<string>();
+  let work: Promise<void> | undefined;
+  try {
+    fixture.token(() => token.promise); work = ui.invoke(); await ui.renderer.flush();
+    fixture.emit(actorA, "TOKEN_REFRESHED"); token.resolve("synthetic-rotated-token");
+    await work; await ui.renderer.flush();
+    assert.equal(clinicAssignments(fixture).length, 1);
+    assert.equal(fixture.tokenCalls.at(-1), actorA);
+    assert.equal(new Headers(clinicAssignments(fixture)[0].init.headers).get("Authorization"), "Bearer synthetic-rotated-token");
+    assert.equal(ui.refreshes(), 1);
+  } finally { token.resolve("synthetic-rotated-token"); await work; ui.dispose(); fixture.renderer.dispose(); }
+});
+
+test("clinic assignment rejects a different real serverAuth actor before parent auth events", async () => {
+  const fixture = await ready(), ui = await clinicAssignment(fixture), lookup = deferred<void>();
+  let work: Promise<void> | undefined;
+  try {
+    const auth = evaluate(await read("artifacts/negis/src/lib/serverAuth.ts"), {}, {
+      "@/lib/supabase": { hasSupabaseFrontendEnv: true, supabase: { auth: { async getSession() {
+        await lookup.promise;
+        return { data: { session: { user: { id: actorB }, access_token: "synthetic-other-actor" } }, error: null };
+      } } } },
+      "@/lib/authSignOut": { isSignOutPending: () => false, getSignOutRevision: () => 0 },
+    });
+    fixture.token(expected => auth.getSupabaseAccessToken(expected));
+    work = ui.invoke(); await ui.renderer.flush(); lookup.resolve(); await work; await ui.renderer.flush();
+    assert.equal(fixture.access().isCurrent(), true);
+    assert.equal(fixture.tokenCalls.at(-1), actorA);
+    assert.equal(clinicAssignments(fixture).length, 0);
+    assert.equal(ui.refreshes(), 1, "Live-scope authentication refusal still refreshes protected data");
+  } finally { lookup.resolve(); await work; ui.dispose(); fixture.renderer.dispose(); }
+});
+
+test("clinic assignment repeated invocation owns one pending lookup and PATCH", async () => {
+  const fixture = await ready(), ui = await clinicAssignment(fixture), token = deferred<string>();
+  let work: Promise<void> | undefined, duplicate: Promise<void> | undefined;
+  try {
+    fixture.token(() => token.promise); const lookups = fixture.tokenCalls.length;
+    work = ui.invoke(); duplicate = ui.invoke(); await ui.renderer.flush();
+    assert.equal(fixture.tokenCalls.length, lookups + 1);
+    token.resolve("synthetic-original-token"); await work; await duplicate; await ui.renderer.flush();
+    assert.equal(clinicAssignments(fixture).length, 1);
+  } finally { token.resolve("synthetic-original-token"); await work; await duplicate; ui.dispose(); fixture.renderer.dispose(); }
+});
+
 const staffUi = {
   add: "\u0414\u043e\u0431\u0430\u0432\u0438\u0442\u044c \u0441\u043e\u0442\u0440\u0443\u0434\u043d\u0438\u043a\u0430",
   passwordMode: "\u041b\u043e\u0433\u0438\u043d \u0438 \u043f\u0430\u0440\u043e\u043b\u044c",

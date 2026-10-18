@@ -18,12 +18,14 @@ import {
 
 export function OperatorLeads({
   actorId,
+  isSessionCurrent,
   requestId,
   workspaceId,
   leadScope,
   onAccessDenied,
 }: {
   actorId?: string;
+  isSessionCurrent?: () => boolean;
   requestId: string;
   workspaceId?: string;
   leadScope: OperatorLeadScope;
@@ -73,6 +75,7 @@ export function OperatorLeads({
       <LeadList
         key={`${requestId}:${submittedSearch}:${workspaceId || "operator"}`}
         actorId={actorId}
+        isSessionCurrent={isSessionCurrent}
         path={`${base}&search=${encodeURIComponent(submittedSearch)}`}
         requestId={requestId}
         clinic={Boolean(workspaceId)}
@@ -85,6 +88,7 @@ export function OperatorLeads({
 
 function LeadList({
   actorId,
+  isSessionCurrent,
   path,
   requestId,
   clinic,
@@ -92,6 +96,7 @@ function LeadList({
   onAccessDenied,
 }: {
   actorId?: string;
+  isSessionCurrent?: () => boolean;
   path: string;
   requestId: string;
   clinic: boolean;
@@ -104,18 +109,24 @@ function LeadList({
   const [notice, setNotice] = useState("");
   const [bookingLeadId, setBookingLeadId] = useState<string | null>(null);
   const mounted = useRef(false);
+  // A list refresh must not release an unresolved mutation's submission lock.
+  const pending = useRef<object | null>(null);
   const currentView = useRef({ path, actorId, offset: list.offset, data: list.data });
-  const scopeChanged = currentView.current.path !== path || currentView.current.actorId !== actorId
-    || currentView.current.offset !== list.offset;
+  const identityChanged = currentView.current.path !== path || currentView.current.actorId !== actorId;
+  const scopeChanged = identityChanged || currentView.current.offset !== list.offset;
   if (scopeChanged || currentView.current.data !== list.data) {
     currentView.current = { path, actorId, offset: list.offset, data: list.data };
-    if (busy) setBusy(false);
+    if (identityChanged) {
+      pending.current = null;
+      if (busy) setBusy(false);
+    }
     if (scopeChanged) {
       setError("");
       setNotice("");
       setBookingLeadId(null);
     }
   }
+  const renderedView = currentView.current;
   useLayoutEffect(() => {
     mounted.current = true;
     return () => { mounted.current = false; };
@@ -152,10 +163,12 @@ function LeadList({
     };
   }, [refresh]);
   async function assign(item: OperatorLead, assigned: boolean) {
-    const startedAtView = currentView.current;
-    const isCurrent = () => mounted.current && currentView.current === startedAtView;
-    const isSameScope = () => mounted.current && currentView.current.path === startedAtView.path
-      && currentView.current.actorId === startedAtView.actorId;
+    const isCurrent = () => mounted.current && isSessionCurrent?.() !== false && currentView.current === renderedView;
+    if (!actorId || pending.current || !isCurrent()) return;
+    const attempt = {};
+    const isSameScope = () => mounted.current && isSessionCurrent?.() !== false && pending.current === attempt
+      && currentView.current.path === path && currentView.current.actorId === actorId;
+    pending.current = attempt;
     setBusy(true);
     setError("");
     try {
@@ -174,14 +187,19 @@ function LeadList({
       );
       refresh();
     } finally {
-      if (isCurrent()) setBusy(false);
+      if (pending.current === attempt) {
+        if (isSameScope()) setBusy(false);
+        pending.current = null;
+      }
     }
   }
   async function changeStage(item: OperatorLead, stageId: string) {
-    const startedAtView = currentView.current;
-    const isCurrent = () => mounted.current && currentView.current === startedAtView;
-    const isSameScope = () => mounted.current && currentView.current.path === startedAtView.path
-      && currentView.current.actorId === startedAtView.actorId;
+    const isCurrent = () => mounted.current && isSessionCurrent?.() !== false && currentView.current === renderedView;
+    if (!actorId || pending.current || !isCurrent()) return;
+    const attempt = {};
+    const isSameScope = () => mounted.current && isSessionCurrent?.() !== false && pending.current === attempt
+      && currentView.current.path === path && currentView.current.actorId === actorId;
+    pending.current = attempt;
     setBusy(true);
     setError("");
     setNotice("");
@@ -216,7 +234,10 @@ function LeadList({
       // Recheck authorization on both success and failure, removing stale contacts.
       if (isCurrent()) {
         refresh();
-        setBusy(false);
+      }
+      if (pending.current === attempt) {
+        if (isSameScope()) setBusy(false);
+        pending.current = null;
       }
     }
   }

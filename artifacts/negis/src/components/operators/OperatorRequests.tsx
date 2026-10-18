@@ -249,6 +249,7 @@ export function OperatorRequests({
             <OperatorLeads
               key={item.id}
               actorId={actorId}
+              isSessionCurrent={isSessionCurrent}
               requestId={item.id}
               workspaceId={workspaceId}
               leadScope={item.leadScope || "assigned"}
