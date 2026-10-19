@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { withAppointmentCreateRpcSpy } from "./appointment-create-rpc-spy.js";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
@@ -10,6 +11,9 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 // Владелец: «мастера не должны видеть контактные данные клиентов, только имя и
 // время записи» — и следом: записи должны быть только СВОИ. Контакты уже
 // срезаны (test:contact-privacy); здесь сужается сам набор строк.
+// Oct 19, 2026 explicit owner decision: an own, doctor-authored appointment
+// exposes even contacts added later by an admin. Other/unknown authors stay
+// redacted; this readback exception does not permit doctor contact writes.
 //
 // Что проверяется поведением, а не текстом исходника: чужая запись не приходит
 // в списке; чужая запись не приходит и через эхо PATCH (иначе сужение списка
@@ -26,8 +30,12 @@ const routerPath = path.join(repoRoot, "api", "crm", "[...path].ts");
 const WORKSPACE = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const USER = "11111111-1111-4111-8111-111111111111";
 const STAFF_MASTER = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+const STAFF_OTHER = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeee1";
 const DOCTOR_CARD = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
 const OTHER_CARD = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+const OTHER_WORKSPACE = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1";
+const FOREIGN_CARD = "dddddddd-dddd-4ddd-8ddd-ddddddddddd1";
+const FOREIGN_APPOINTMENT = "10000000-0000-4000-8000-000000000009";
 const MINE_LINKED = "10000000-0000-4000-8000-000000000001";
 const MINE_BY_NAME = "10000000-0000-4000-8000-000000000002";
 const SOMEONE_ELSES = "10000000-0000-4000-8000-000000000003";
@@ -81,6 +89,7 @@ function spyClient(rows: Record<string, unknown[]>, log: Query[], failReadsOn: S
       const eqs: Array<[string, unknown]> = [];
       const likes: Array<[string, string]> = [];
       let requested = "*";
+      let single = false;
 
       /** «table» роняет все чтения таблицы, «table:column» — только те, что просят эту колонку. */
       const readFails = () =>
@@ -99,7 +108,7 @@ function spyClient(rows: Record<string, unknown[]>, log: Query[], failReadsOn: S
         select: (columns?: unknown) => { requested = typeof columns === "string" ? columns : "*"; return chain(); },
         order: () => chain(),
         limit: () => chain(),
-        single: () => chain(),
+        single: () => { single = true; return chain(); },
         in: () => chain(),
         gte: () => chain(),
         lt: () => chain(),
@@ -110,17 +119,25 @@ function spyClient(rows: Record<string, unknown[]>, log: Query[], failReadsOn: S
         ilike(column: string, value: string) { likes.push([column, value]); entry.filters[`${column}__ilike`] = value; return chain(); },
         maybeSingle: () => Promise.resolve(readFails()
           ? { data: null, error: { code: "57014", message: `canceling statement due to statement timeout on ${table}` } }
-          : { data: matching()[0] ?? null, error: null }),
+          : { data: matching()[0] ? { ...matching()[0] } : null, error: null }),
         then(resolve: (value: { data: unknown; error: unknown }) => void) {
           if (entry.op === "select") {
             if (readFails()) {
               resolve({ data: null, error: { code: "57014", message: `canceling statement due to statement timeout on ${table}` } });
               return;
             }
-            resolve({ data: matching(), error: null });
+            const selected = matching().map((row) => ({ ...row }));
+            resolve({ data: single ? selected[0] ?? null : selected, error: null });
             return;
           }
-          const written = { id: entry.row?.id ?? MINE_LINKED, ...(entry.row ?? {}) };
+          if (entry.op === "update") {
+            const targets = matching();
+            for (const target of targets) Object.assign(target, entry.row);
+            resolve({ data: targets[0] ? { ...targets[0] } : null, error: null });
+            return;
+          }
+          const written = { id: entry.row?.id ?? randomUUID(), ...(entry.row ?? {}) };
+          (rows[table] ??= []).push(written);
           resolve({ data: written, error: null });
         },
       });
@@ -182,6 +199,7 @@ async function callRouter(options: {
   /** Имя карточки справочника, если оно разошлось с именем в записях. */
   cardName?: string;
   failReadsOn?: string[];
+  appointmentRows?: Record<string, unknown>[];
 }) {
   const log: Query[] = [];
   process.env.SUPABASE_URL = "https://project.example.test";
@@ -196,7 +214,10 @@ async function callRouter(options: {
   const role = options.role ?? "doctor";
   const staffName = options.staffName ?? MY_NAME;
   const rows: Record<string, unknown[]> = {
-    staff_users: [{ id: STAFF_MASTER, auth_user_id: USER, workspace_id: WORKSPACE, role, status: "active", full_name: staffName }],
+    staff_users: [
+      { id: STAFF_MASTER, auth_user_id: USER, workspace_id: WORKSPACE, role, status: "active", full_name: staffName },
+      { id: STAFF_OTHER, auth_user_id: null, workspace_id: WORKSPACE, role: "receptionist", status: "active", full_name: "Synthetic receptionist" },
+    ],
     clinic_doctors: options.linkedCard === false
       ? [{ id: OTHER_CARD, workspace_id: WORKSPACE, full_name: "Динара", staff_user_id: null, is_active: true }]
       : [
@@ -205,8 +226,9 @@ async function callRouter(options: {
         // Полный тёзка с отдельной карточкой: его записи попадают в проверку
         // пересечений по имени, и отказ не имеет права назвать его пациента.
         { id: NAMESAKE_CARD, workspace_id: WORKSPACE, full_name: staffName, staff_user_id: null, is_active: true },
+        { id: FOREIGN_CARD, workspace_id: OTHER_WORKSPACE, full_name: staffName, staff_user_id: null, is_active: true },
       ],
-    appointments: [
+    appointments: options.appointmentRows?.map((row) => ({ ...row })) ?? [
       appointment({ id: MINE_LINKED, doctor_id: DOCTOR_CARD, doctor_name: staffName, client_name: "Мария" }),
       // История до 033: связи нет, есть только имя — и регистр другой.
       appointment({ id: MINE_BY_NAME, doctor_id: null, doctor_name: staffName.toLowerCase(), client_name: "Асель" }),
@@ -255,7 +277,7 @@ async function callRouter(options: {
     },
     res,
   );
-  return { res, log };
+  return { res, log, rows };
 }
 
 const listedIds = (res: MockResponse) =>
@@ -498,3 +520,214 @@ test("OW27 связанная запись без имени в снимке в�
   const { res } = await callRouter({});
   assert.ok(listedIds(res).includes(MINE_NO_NAME), `запись без имени мастера потеряна: ${JSON.stringify(listedIds(res))}`);
 });
+
+const STORED_PHONE = "+77015550101";
+const STORED_WHATSAPP = "+77015550102";
+const STORED_NOTES = `Allergy noted; call ${STORED_PHONE}, WhatsApp ${STORED_WHATSAPP}`;
+
+function authoredAppointment(author: string | null | undefined) {
+  return appointment({
+    id: MINE_LINKED,
+    doctor_id: DOCTOR_CARD,
+    doctor_name: MY_NAME,
+    client_name: "Synthetic existing patient",
+    client_phone: STORED_PHONE,
+    whatsapp: STORED_WHATSAPP,
+    notes: STORED_NOTES,
+    duration_minutes: 60,
+    ...(author === undefined ? {} : { created_by_staff_user_id: author }),
+  });
+}
+
+function responseItem(res: MockResponse): Record<string, unknown> {
+  assert.equal(res.body.success, true, JSON.stringify(res.body));
+  assert.equal(res.body.mode, "supabase", JSON.stringify(res.body));
+  return (res.body.data as Record<string, unknown>).item as Record<string, unknown>;
+}
+
+function assertStoredContacts(item: Record<string, unknown>) {
+  assert.equal(item.phone, STORED_PHONE, "stored phone survives the appointment mapper");
+  assert.equal(item.whatsapp, STORED_WHATSAPP, "stored WhatsApp survives the appointment mapper");
+  assert.equal(item.notes, STORED_NOTES, "own-authored notes are not contact-masked");
+  assert.equal(item.createdByStaffUserId, STAFF_MASTER, "trusted author survives readback");
+}
+
+function assertHiddenContacts(item: Record<string, unknown>) {
+  assert.equal(item.id, MINE_LINKED, "the appointment remains visible, only contacts are hidden");
+  assert.equal(item.client, "Synthetic existing patient");
+  assert.equal(item.startsAt, "2026-08-20T09:00:00.000Z");
+  for (const field of ["phone", "whatsapp", "clientPhone", "client_phone"]) {
+    assert.equal(field in item, false, `${field} is absent, not merely empty`);
+  }
+  assert.match(String(item.notes), /Allergy noted/, "non-contact notes survive");
+  assert.notEqual(item.notes, STORED_NOTES, "stored contact-bearing notes are masked");
+  assert.ok(!JSON.stringify(item).includes(STORED_PHONE));
+  assert.ok(!JSON.stringify(item).includes(STORED_WHATSAPP));
+}
+
+test("OW-author GET retains a doctor's own stored appointment contacts", async () => {
+  const seeded = authoredAppointment(STAFF_MASTER);
+  const { res, log, rows } = await callRouter({ appointmentRows: [seeded] });
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  assert.equal(res.body.mode, "supabase");
+  const items = (res.body.data as Record<string, unknown>).appointments as Record<string, unknown>[];
+  assert.equal(items.length, 1);
+  assertStoredContacts(items[0]);
+  assert.deepEqual(rows.appointments, [seeded], "a read does not mutate the stored fixture");
+  assert.equal(log.filter((query) => query.op !== "select").length, 0);
+});
+
+test("OW-author PATCH echoes own stored contacts after a status-only update", async () => {
+  const seeded = authoredAppointment(STAFF_MASTER);
+  const { res, log, rows } = await callRouter({
+    appointmentRows: [seeded],
+    method: "PATCH",
+    body: { id: MINE_LINKED, updates: { status: "confirmed" } },
+  });
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  const writes = log.filter((query) => query.table === "appointments" && query.op === "update");
+  assert.equal(writes.length, 1);
+  assert.deepEqual(writes[0].filters, { id: MINE_LINKED, workspace_id: WORKSPACE });
+  assert.deepEqual(Object.keys(writes[0].row ?? {}).sort(), ["status", "updated_at"]);
+  const stored = (rows.appointments as Record<string, unknown>[])[0];
+  assert.deepEqual(stored, { ...seeded, status: "confirmed", updated_at: writes[0].row?.updated_at });
+  const item = responseItem(res);
+  assert.equal(item.id, MINE_LINKED);
+  assert.equal(item.status, "confirmed");
+  assertStoredContacts(item);
+});
+
+test("OW-author POST stamps the authenticated author and ignores both spoofed author aliases", async () => {
+  const { res, log, rows } = await callRouter({
+    appointmentRows: [],
+    method: "POST",
+    // Doctor contact writes are intentionally not part of this mapper contract.
+    body: {
+      client: "Synthetic new patient",
+      startsAt: "2090-10-20T23:00:00.000Z",
+      durationMinutes: 60,
+      createdByStaffUserId: STAFF_OTHER,
+      created_by_staff_user_id: STAFF_OTHER,
+    },
+  });
+  assert.equal(res.statusCode, 201, JSON.stringify(res.body));
+  const writes = log.filter((query) => query.table === "appointments" && query.op === "insert");
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].row?.created_by_staff_user_id, STAFF_MASTER);
+  assert.equal(writes[0].row?.doctor_id, DOCTOR_CARD);
+  const stored = (rows.appointments as Record<string, unknown>[])[0];
+  assert.equal(stored.created_by_staff_user_id, STAFF_MASTER);
+  assert.equal((res.body.data as Record<string, unknown>).clientLinked, true);
+  const item = responseItem(res);
+  assert.equal(item.id, stored.id);
+  assert.equal(item.createdByStaffUserId, STAFF_MASTER, "POST echo must retain the server's author, not the spoof");
+});
+
+const hiddenAuthors = [
+  { label: "another staff author", author: STAFF_OTHER },
+  { label: "null author", author: null },
+  { label: "unknown legacy author", author: undefined },
+];
+
+for (const { label, author } of hiddenAuthors) {
+  for (const method of ["GET", "PATCH"]) {
+    test(`OW-author ${method} hides contacts for ${label}`, async () => {
+      const seeded = authoredAppointment(author);
+      const { res, rows } = await callRouter({
+        appointmentRows: [seeded],
+        method,
+        ...(method === "PATCH" ? { body: { id: MINE_LINKED, updates: { status: "confirmed" } } } : {}),
+      });
+      assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+      const item = method === "PATCH"
+        ? responseItem(res)
+        : ((res.body.data as Record<string, unknown>).appointments as Record<string, unknown>[])[0];
+      assert.equal(res.body.mode, "supabase");
+      assertHiddenContacts(item);
+      const stored = (rows.appointments as Record<string, unknown>[])[0];
+      assert.equal(stored.client_phone, STORED_PHONE, "redaction must not clear the stored phone");
+      assert.equal(stored.whatsapp, STORED_WHATSAPP);
+      assert.equal(stored.notes, STORED_NOTES);
+      assert.equal(stored.created_by_staff_user_id, author);
+    });
+  }
+
+  test(`OW-author PATCH cannot grant contacts by spoofing ${label}`, async () => {
+    const { res, log, rows } = await callRouter({
+      appointmentRows: [authoredAppointment(author)],
+      method: "PATCH",
+      body: {
+        id: MINE_LINKED,
+        updates: { status: "confirmed", createdByStaffUserId: STAFF_MASTER, created_by_staff_user_id: STAFF_MASTER },
+      },
+    });
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+    const write = log.find((query) => query.table === "appointments" && query.op === "update");
+    assert.ok(write?.row);
+    assert.equal("created_by_staff_user_id" in write.row, false);
+    assert.equal("createdByStaffUserId" in write.row, false);
+    assert.equal((rows.appointments as Record<string, unknown>[])[0].created_by_staff_user_id, author);
+    assertHiddenContacts(responseItem(res));
+  });
+}
+
+for (const { label, target } of [
+  {
+    label: "another doctor with a different name",
+    target: { ...authoredAppointment(STAFF_MASTER), id: SOMEONE_ELSES, doctor_id: OTHER_CARD, doctor_name: "Динара" },
+  },
+  {
+    label: "another workspace with the same doctor name",
+    target: { ...authoredAppointment(null), id: FOREIGN_APPOINTMENT, workspace_id: OTHER_WORKSPACE, doctor_id: FOREIGN_CARD },
+  },
+]) {
+  for (const method of ["GET", "PATCH"]) {
+    test(`OW-author ${method} never exposes ${label}`, async () => {
+      const { res, log, rows } = await callRouter({
+        appointmentRows: [target],
+        method,
+        ...(method === "PATCH" ? { body: {
+          id: target.id,
+          updates: { status: "confirmed", createdByStaffUserId: STAFF_MASTER, created_by_staff_user_id: STAFF_MASTER },
+        } } : {}),
+      });
+      assert.equal(res.statusCode, method === "GET" ? 200 : 404, JSON.stringify(res.body));
+      if (method === "GET") assert.deepEqual(listedIds(res), []);
+      const output = JSON.stringify(res.body);
+      for (const privateValue of ["Synthetic existing patient", STORED_PHONE, STORED_WHATSAPP, STORED_NOTES]) {
+        assert.ok(!output.includes(privateValue), `scoped response leaked ${privateValue}`);
+      }
+      assert.equal(log.filter((query) => query.op !== "select").length, 0);
+      assert.deepEqual(rows.appointments, [target]);
+    });
+  }
+}
+
+test("OW-author receptionist control reads the same stored contacts regardless of author", async () => {
+  const seeded = authoredAppointment(null);
+  const { res } = await callRouter({ role: "receptionist", appointmentRows: [seeded] });
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  const items = (res.body.data as Record<string, unknown>).appointments as Record<string, unknown>[];
+  assert.equal(items.length, 1);
+  assert.equal(items[0].phone, STORED_PHONE);
+  assert.equal(items[0].whatsapp, STORED_WHATSAPP);
+  assert.equal(items[0].notes, STORED_NOTES);
+});
+
+for (const method of ["POST", "PATCH"]) {
+  test(`OW-author ${method} still refuses doctor contact writes despite a spoofed author`, async () => {
+    const seeded = authoredAppointment(STAFF_MASTER);
+    const fields = { phone: STORED_PHONE, createdByStaffUserId: STAFF_MASTER, created_by_staff_user_id: STAFF_MASTER };
+    const { res, log, rows } = await callRouter({
+      appointmentRows: [seeded],
+      method,
+      body: method === "POST"
+        ? { ...fields, client: "Synthetic new patient", startsAt: "2090-10-20T23:00:00.000Z" }
+        : { id: MINE_LINKED, updates: { ...fields, status: "confirmed" } },
+    });
+    assert.equal(res.statusCode, 403, JSON.stringify(res.body));
+    assert.equal(res.body.success, false);
+    assert.equal(log.filter((query) => query.op !== "select").length, 0);
+    assert.deepEqual(rows.appointments, [seeded]);
+  });
+}

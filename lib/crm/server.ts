@@ -2009,6 +2009,7 @@ const configs: Record<CrmResource, ResourceConfig> = {
         durationMinutes: row.duration_minutes,
         priceMinor: row.price_minor,
         arrivalSaleId: row.arrival_sale_id,
+        createdByStaffUserId: row.created_by_staff_user_id,
         source: row.source,
         client_id: row.client_id,
         service_id: row.service_id,

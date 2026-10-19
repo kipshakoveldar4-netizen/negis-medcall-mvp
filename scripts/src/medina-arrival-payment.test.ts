@@ -54,7 +54,7 @@ afterEach(() => db.exec("rollback"));
 
 // Execute real route queries and trigger writes, rather than returning canned
 // successful API responses. This adapter is intentionally test-local/read-write.
-type ApiFilter = [string, "=" | ">=" | "<" | "<=" | "in", unknown];
+type ApiFilter = [string, "=" | ">=" | "<" | "<=" | "in" | "ilike", unknown];
 type ApiQuery = { table: string; operation: string; columns: string; filters: ApiFilter[] };
 function apiDatabase(rpcRole: "service_role" | "anon" | "authenticated" = "service_role", queries: ApiQuery[] = []) {
   const ident = (value: string) => {
@@ -117,6 +117,7 @@ function apiDatabase(rpcRole: "service_role" | "anon" | "authenticated" = "servi
         .map(([key, value]) => `${ident(key)}=${bind(value)}`).join(",")}`;
       if (operation === "insert") sql = `insert into ${ident(table)} (${Object.keys(values).map(ident).join(",")}) values (${Object.values(values).map(bind).join(",")})`;
       if (filters.length) sql += " where " + filters.map(([key, operator, value]) => {
+        if (operator === "ilike") return `${ident(key)} ilike ${bind(value)}`;
         if (operator !== "in") return `${ident(key)}${operator}${bind(value)}`;
         assert.ok(Array.isArray(value));
         return value.length ? `${ident(key)} in (${value.map(bind).join(",")})` : "false";
@@ -139,6 +140,7 @@ function apiDatabase(rpcRole: "service_role" | "anon" | "authenticated" = "servi
     const query = {
       select(value: string) { columns = value; return query; },
       eq(key: string, value: unknown) { filters.push([key, "=", value]); return query; },
+      ilike(key: string, value: string) { filters.push([key, "ilike", value]); return query; },
       in(key: string, value: unknown[]) { filters.push([key, "in", [...value]]); return query; },
       gte(key: string, value: unknown) { filters.push([key, ">=", value]); return query; },
       lt(key: string, value: unknown) { filters.push([key, "<", value]); return query; },
@@ -419,15 +421,204 @@ test("API replay checks current own-work and does not expose another specialist'
   assert.deepEqual(await retryCounts(), before);
 });
 
-test("API doctor retry redacts contacts added after the original booking", async () => {
+const lateDoctorPhone = "+77001234567";
+const lateDoctorWhatsapp = "+77007654321";
+const lateDoctorNotes = `Allergy noted; call ${lateDoctorPhone}, WhatsApp ${lateDoctorWhatsapp}`;
+
+// Explicit owner decision, Oct 19, 2026: authorship, not who supplied the phone,
+// controls readback. A doctor's own authored booking exposes contacts added later
+// by an admin on replay/GET/PATCH. Other/null authors remain redacted, foreign
+// work stays inaccessible, and doctor contact writes remain forbidden.
+async function doctorContactFixture(author: string | null) {
   const call = await bundleApiFixture("doctor");
-  const visit = apiItem(await call("appointments", "POST", keyedBooking()), 201);
-  await db.exec(`update appointments set client_phone='+77001234567',whatsapp='+77007654321' where id='${visit.id}'`);
-  const reply = await call("appointments", "POST", keyedBooking());
-  assert.equal(apiItem(reply).id, visit.id);
-  assert.equal(JSON.stringify(reply.body).includes("77001234567"), false);
-  assert.equal(JSON.stringify(reply.body).includes("77007654321"), false);
-});
+  await db.exec(`insert into staff_users(id,workspace_id,auth_user_id,full_name,email,role)
+    values('${id(43)}','${id(1)}','${id(44)}','Fixture admin','admin@example.invalid','admin')`);
+  const booking = { ...keyedBooking(), createdByStaffUserId: id(43), created_by_staff_user_id: id(43) };
+  const visit = apiItem(await call("appointments", "POST", booking), 201);
+  assert.equal((await row(`select created_by_staff_user_id from appointments where id='${visit.id}'`))
+    .created_by_staff_user_id, id(40), "POST ignores both spoofed author aliases");
+  // Seed current other/legacy authorship independently of the doctor's receipt:
+  // owning a creation receipt must not itself grant contact visibility.
+  await db.query("update appointments set created_by_staff_user_id=$1 where id=$2", [author, visit.id]);
+  const doctorFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: unknown) => {
+    assert.equal(url, "https://fixture.invalid/auth/v1/user");
+    return { ok: true, status: 200, text: async () => JSON.stringify({ id: id(44) }) };
+  }) as unknown as typeof fetch;
+  try {
+    const edited = apiItem(await call("appointments", "PATCH", {
+      phone: lateDoctorPhone, whatsapp: lateDoctorWhatsapp, notes: lateDoctorNotes,
+    }, 1, String(visit.id)));
+    assert.equal(edited.phone, lateDoctorPhone, "admin can add contacts after booking");
+    assert.equal(edited.whatsapp, lateDoctorWhatsapp);
+    assert.equal(edited.notes, lateDoctorNotes);
+  } finally {
+    globalThis.fetch = doctorFetch;
+  }
+  const stored = await row(`select * from appointments where id='${visit.id}'`);
+  assert.equal(stored.created_by_staff_user_id, author, "admin contact edits do not transfer authorship");
+  assert.equal(stored.client_phone, lateDoctorPhone);
+  assert.equal(stored.whatsapp, lateDoctorWhatsapp);
+  assert.equal(stored.notes, lateDoctorNotes);
+  return { call, booking, visit, stored };
+}
+
+for (const { label, author } of [
+  { label: "own author", author: id(40) },
+  { label: "other author", author: id(43) },
+  { label: "null author", author: null },
+]) {
+  for (const method of ["replay", "GET", "PATCH"]) {
+    test(`API doctor author-readback ${method}: ${label} with admin-added contacts`, async () => {
+      const { call, booking, visit, stored } = await doctorContactFixture(author);
+      const before = await retryCounts();
+      const clientBefore = await row(`select * from clients where id='${visit.clientId}'`);
+      const reply = method === "replay" ? await call("appointments", "POST", {
+        ...booking, createdByStaffUserId: id(40), created_by_staff_user_id: id(40),
+      }) : method === "GET" ? await call("appointments", "GET")
+        : await call("appointments", "PATCH", {
+          status: "scheduled", createdByStaffUserId: id(40), created_by_staff_user_id: id(40),
+        }, 1, String(visit.id));
+      assert.equal(reply.status, 200, JSON.stringify(reply.body));
+      assert.equal(reply.body.success, true);
+      assert.equal(reply.body.mode, "supabase");
+      const item = method === "GET"
+        ? (reply.body.data as { appointments: Record<string, unknown>[] }).appointments.find(item => item.id === visit.id)
+        : apiItem(reply);
+      assert.ok(item, "own-work appointment remains visible regardless of author");
+      assert.equal(item.id, visit.id);
+      assert.equal(item.client, booking.client);
+      assert.equal(new Date(String(item.startsAt)).toISOString(), "2026-10-03T04:00:00.000Z");
+      assert.equal(item.status, method === "PATCH" ? "scheduled" : "confirmed");
+      if (author === id(40)) {
+        assert.equal(item.phone, lateDoctorPhone);
+        assert.equal(item.whatsapp, lateDoctorWhatsapp);
+        assert.equal(item.notes, lateDoctorNotes);
+      } else {
+        for (const field of ["phone", "whatsapp", "email", "clientPhone", "client_phone", "clientWhatsapp", "client_whatsapp"]) {
+          assert.equal(field in item, false, `${field} is absent, not empty`);
+        }
+        assert.match(String(item.notes), /Allergy noted/, "non-contact notes survive");
+        assert.notEqual(item.notes, lateDoctorNotes);
+        for (const contact of [lateDoctorPhone.slice(1), lateDoctorWhatsapp.slice(1)]) {
+          assert.equal(JSON.stringify(reply.body).includes(contact), false, "no contact leaks through any response alias");
+        }
+      }
+      assert.equal(item.createdByStaffUserId, author ?? "", "readback reports stored author, never supplied author");
+      const after = await row(`select * from appointments where id='${visit.id}'`);
+      assert.deepEqual(after, method === "PATCH"
+        ? { ...stored, status: "scheduled", updated_at: after.updated_at } : stored,
+      "readback/redaction must not change stored contacts or authorship");
+      assert.deepEqual(await row(`select * from clients where id='${visit.clientId}'`), clientBefore);
+      assert.deepEqual(await retryCounts(), method === "PATCH" ? { ...before, journal: Number(before.journal) + 1 } : before);
+      assert.deepEqual(reply.queries.filter(query => query.table === "clients" || query.table === "deals"), []);
+      if (method === "PATCH") {
+        const writes = reply.queries.filter(query => query.operation !== "select");
+        assert.deepEqual(writes.map(query => query.table), ["appointments", "audit_logs"]);
+        assert.deepEqual(writes[0].filters, [["id", "=", visit.id], ["workspace_id", "=", id(1)]]);
+      } else {
+        assert.deepEqual(reply.queries.filter(query => query.operation !== "select"), []);
+        if (method === "replay") assert.equal((reply.body.data as Record<string, unknown>).replayed, true);
+      }
+    });
+  }
+}
+
+for (const scope of ["other doctor", "foreign workspace"]) {
+  for (const method of ["replay", "GET", "PATCH"]) {
+    test(`API doctor author-readback ${method}: ${scope} never grants contact access`, async () => {
+      const { call, booking, visit } = await doctorContactFixture(id(40));
+      if (scope === "other doctor") {
+        await db.exec(`insert into clinic_doctors(id,workspace_id,full_name)
+          values('${id(45)}','${id(1)}','Other specialist');
+          update appointments set doctor_id='${id(45)}',doctor_name='Other specialist' where id='${visit.id}'`);
+      }
+      const stored = await row(`select * from appointments where id='${visit.id}'`);
+      const before = await retryCounts();
+      const observedQueries: ApiQuery[] = [];
+      const base = apiDatabase("service_role", observedQueries);
+      const rpcCalls: string[] = [];
+      serverClient.setSupabaseServerClientFactoryForTests(() => ({ ...base,
+        rpc: async (name: string, args: Record<string, unknown>) => {
+          rpcCalls.push(name);
+          return base.rpc(name, args);
+        },
+      }));
+      const workspace = scope === "foreign workspace" ? 2 : 1;
+      const reply = method === "replay" ? await call("appointments", "POST", booking, workspace)
+        : method === "GET" ? await call("appointments", "GET", {}, workspace)
+          : await call("appointments", "PATCH", {
+            status: "scheduled", createdByStaffUserId: id(40), created_by_staff_user_id: id(40),
+          }, workspace, String(visit.id));
+      assert.equal(reply.status, workspace === 2 ? 403 : method === "GET" ? 200 : 404, JSON.stringify(reply.body));
+      if (reply.status === 200) {
+        const data = reply.body.data as { appointments: Record<string, unknown>[]; items: Record<string, unknown>[] };
+        for (const list of [data.appointments, data.items]) assert.ok(list.every(item => item.id !== visit.id));
+      } else {
+        assert.equal(reply.body.success, false);
+        assert.equal(reply.body.data, undefined);
+      }
+      for (const hidden of [booking.client, lateDoctorPhone.slice(1), lateDoctorWhatsapp.slice(1), lateDoctorNotes]) {
+        assert.equal(JSON.stringify(reply.body).includes(hidden), false);
+      }
+      assert.deepEqual(await row(`select * from appointments where id='${visit.id}'`), stored);
+      assert.deepEqual(await retryCounts(), before);
+      assert.deepEqual(observedQueries.filter(query => query.operation !== "select"), []);
+      assert.deepEqual(observedQueries.filter(query => query.table === "clients" || query.table === "deals"), [],
+        "scope denial must precede any client/contact-card access");
+      for (const query of observedQueries.filter(query => query.table === "appointments")) {
+        assert.ok(query.filters.some(([column, operator, value]) => column === "workspace_id" && operator === "=" && value === id(1)));
+        if (method === "GET" && query.columns === "*") {
+          assert.ok(query.filters.some(([column, operator, value]) =>
+            (column === "doctor_id" && operator === "=" && value === id(42))
+            || (column === "doctor_name" && operator === "ilike" && value === "Test master")),
+          "GET scopes contact-bearing appointment reads to the acting doctor");
+        }
+      }
+      if (workspace === 2) {
+        assert.deepEqual(rpcCalls, [], "workspace denial precedes receipt/contact reads or writes");
+        assert.deepEqual(observedQueries.filter(query => !["staff_users", "workspace_settings"].includes(query.table)), []);
+      } else {
+        assert.deepEqual(rpcCalls, method === "replay" ? ["read_crm_appointment_create_request"] : []);
+      }
+    });
+  }
+}
+
+for (const method of ["POST", "PATCH"]) {
+  test(`API doctor author-readback ${method}: contact writes still fail before reads despite author spoofing`, async () => {
+    const { call, booking, visit, stored } = await doctorContactFixture(id(40));
+    const before = await retryCounts();
+    const observedQueries: ApiQuery[] = [];
+    const base = apiDatabase("service_role", observedQueries);
+    const rpcCalls: string[] = [];
+    serverClient.setSupabaseServerClientFactoryForTests(() => ({ ...base,
+      rpc: async (name: string, args: Record<string, unknown>) => {
+        rpcCalls.push(name);
+        return base.rpc(name, args);
+      },
+    }));
+    for (const field of ["phone", "client_phone", "clientPhone", "whatsapp", "client_whatsapp", "email"]) {
+      observedQueries.length = 0;
+      const fields = { [field]: field === "email" ? "blocked@example.invalid" : "+77009999999",
+        createdByStaffUserId: id(40), created_by_staff_user_id: id(40) };
+      const reply = await call("appointments", method, method === "POST"
+        ? { ...booking, ...fields } : { ...fields, status: "scheduled" }, 1, String(visit.id));
+      assert.equal(reply.status, 403, `${field}: ${JSON.stringify(reply.body)}`);
+      assert.equal(reply.body.success, false);
+      assert.equal(reply.body.data, undefined);
+      for (const contact of [lateDoctorPhone.slice(1), lateDoctorWhatsapp.slice(1), "77009999999", "blocked@example.invalid"]) {
+        assert.equal(JSON.stringify(reply.body).includes(contact), false);
+      }
+      assert.deepEqual(rpcCalls, [], "contact-write rejection must precede receipt access");
+      assert.deepEqual(observedQueries.filter(query => query.operation !== "select"), []);
+      assert.deepEqual(observedQueries.filter(query => !["staff_users", "workspace_settings"].includes(query.table)), [],
+        "contact-write rejection precedes appointment and client reads");
+      assert.deepEqual(await row(`select * from appointments where id='${visit.id}'`), stored);
+      assert.deepEqual(await retryCounts(), before);
+    }
+  });
+}
 
 test("API implicit self booking keeps the original retry intent without mutating request input", async () => {
   const call = await apiFixture("doctor");
