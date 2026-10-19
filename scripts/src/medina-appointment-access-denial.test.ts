@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
@@ -39,7 +40,7 @@ async function localModule(file: string, imports: Record<string, Record<string, 
   const source = await readFile(path.join(root, file), "utf8");
   const exports: Record<string, any> = {};
   const forbidden = () => { throw new Error(`External call from pure local helper: ${file}`); };
-  new Script(compile(source, file), { filename: file }).runInNewContext({ exports, Error, fetch: forbidden,
+  new Script(compile(source, file), { filename: file }).runInNewContext({ exports, Error, crypto: { randomUUID }, fetch: forbidden,
     require(name: string) {
       assert.ok(Object.hasOwn(imports, name), `unexpected helper import: ${name}`);
       return imports[name];
@@ -83,7 +84,7 @@ const helpers = select(ast.statements, [
   "asRecord", "appointmentFromApi", "appointmentToApi", "safeJson", "defaultForm", "formFromAppointment",
   "formServiceItems", "appointmentFromForm", "SlotTakenError", "ServerRefusalError", "APPOINTMENT_ERROR_TEXTS",
   "refusalText", "conflictFromBody", "OutsideScheduleError", "scheduleRefusalFromBody", "describeSchedule",
-  "describeConflict", "appointmentInterval", "AppointmentAccessRefusalError", "appointmentAttemptStorage",
+  "describeConflict", "appointmentInterval", "AppointmentAccessRefusalError", "appointmentAttemptStorage", "isUuidText",
 ]);
 const state = select(page.body.statements, [
   "userRole", "terms",
@@ -133,7 +134,7 @@ assert.equal(scopeStatements.filter((node) => ts.isExpressionStatement(node)
 const scope = scopeStatements.map((node) => node.getText(ast)).join("\n");
 const actions = select(page.body.statements, [
   "openEdit", "unsavedFromBody", "warnAboutUnsaved", "patchAppointment", "updateAppointmentStatus",
-  "findConflict", "submitForm", "visitHistory",
+  "findConflict", "submitForm", "visitHistory", "createAppointment",
 ]);
 const compiled = compile(`${helpers}\nfunction renderActions() {
   const [appointmentItems, setItems] = useState(seedItems);
@@ -147,7 +148,7 @@ const compiled = compile(`${helpers}\nfunction renderActions() {
     clientMatches, clientSearchAttempted, remoteVisitHistory, visitHistory, doctorSearch, serviceSearch,
     setItems, setClientMatches, setClientSearchAttempted, setRemoteVisitHistory, setDoctorSearch, setServiceSearch,
     createAttempt, unconfirmedCreate, prefillLeadRef, setModalOpen, setEditingId, setUnconfirmedCreate,
-    mutationScope, isCurrentMutationScope, openEdit, setForm, patchAppointment, submitForm, updateAppointmentStatus };
+    mutationScope, isCurrentMutationScope, openEdit, setForm, patchAppointment, createAppointment, submitForm, updateAppointmentStatus };
 }\nexports.renderActions = renderActions;
 exports.AccessRefusal = AppointmentAccessRefusalError;`, "AppointmentsPage.extracted-actions.ts");
 
@@ -185,6 +186,7 @@ type Snapshot = {
   openEdit(appointment: typeof own): void;
   setForm(update: (current: Record<string, any>) => Record<string, any>): void;
   patchAppointment(appointment: typeof own): Promise<{ unsaved: string[]; saved: typeof own | null }>;
+  createAppointment(appointment: typeof own, allowConflict: boolean, allowOutsideSchedule?: boolean): Promise<unknown>;
   submitForm(): Promise<void>;
   updateAppointmentStatus(appointment: typeof own, status: string): Promise<void>;
 };
@@ -201,7 +203,7 @@ function observable(view: Snapshot) {
     "clientMatches", "clientSearchAttempted", "remoteVisitHistory", "visitHistory", "doctorSearch", "serviceSearch",
     "conflictMessage", "scheduleMessage"].map((name) => [name, view[name as keyof Snapshot]])));
 }
-function fixture(options: { queueToken?: boolean; storedAttempt?: Record<string, any>; role?: string } = {}) {
+function fixture(options: { queueToken?: boolean; storedAttempt?: Record<string, any>; role?: string; actorTokens?: boolean } = {}) {
   const slots: any[] = [], stateWrites: unknown[] = [];
   let cursor = 0, dirty = true, sdkActor = actorA, selectedWorkspace = workspaceId;
   const context = { user: { id: actorA }, userRole: options.role ?? "doctor", clinicId: workspaceId, vertical: "clinic",
@@ -213,7 +215,7 @@ function fixture(options: { queueToken?: boolean; storedAttempt?: Record<string,
     setItem: (key: string, value: string) => { stored.set(key, value); },
     removeItem: (key: string) => { stored.delete(key); } };
   if (options.storedAttempt) assert.equal(attempts.persistAppointmentCreateAttempt(sessionStorage, options.storedAttempt), true);
-  const requests: { url: string; init: Init; body: any; gate: ReturnType<typeof deferred<Response>> }[] = [];
+  const requests: { url: string; init: Init; body: any; actorId: string; gate: ReturnType<typeof deferred<Response>> }[] = [];
   const tokens: { expected?: string; gate: ReturnType<typeof deferred<string>> }[] = [];
   const listeners = new Set<(event: string, session: { user: { id: string } } | null) => void>();
   const forbidden = () => { throw new Error("External calls and unrelated page actions are forbidden"); };
@@ -225,17 +227,18 @@ function fixture(options: { queueToken?: boolean; storedAttempt?: Record<string,
         const gate = deferred<string>();
         tokens.push({ expected, gate });
         const token = options.queueToken ? await gate.promise : "fixture.appointment.token";
-        return !expected || expected === sdkActor ? token : "";
+        return !expected || expected === sdkActor ? options.actorTokens ? `fixture.${sdkActor}.token` : token : "";
       } };
     },
     fetch(url: string, init: Init) {
       assert.ok([workspaceId, workspaceB].some((id) => url === `/api/crm/appointments?workspaceId=${id}`));
-      assert.equal(init.method, "PATCH");
-      assert.equal(new Headers(init.headers).get("Authorization"), "Bearer fixture.appointment.token");
+      assert.ok(init.method === "PATCH" || init.method === "POST", "only mocked appointment writes are allowed");
+      assert.equal(new Headers(init.headers).get("Authorization"), options.actorTokens
+        ? `Bearer fixture.${sdkActor}.token` : "Bearer fixture.appointment.token");
       assert.equal(init.expectedUserId, undefined, "actual crmFetch strips dispatch metadata before fetch");
       assert.equal(init.dispatchGuard, undefined);
       const gate = deferred<Response>();
-      requests.push({ url, init, body: JSON.parse(String(init.body)), gate });
+      requests.push({ url, init, body: JSON.parse(String(init.body)), actorId: sdkActor, gate });
       return gate.promise;
     },
   });
@@ -260,7 +263,7 @@ function fixture(options: { queueToken?: boolean; storedAttempt?: Record<string,
     } } },
     activeCatalog: [], activeDoctors: [], directory: { items: [] },
     readCurrentWorkspaceId: () => selectedWorkspace,
-    createAppointment: forbidden, markLeadBooked: forbidden,
+    addItem: forbidden, markLeadBooked: forbidden,
     console: { warn() {} }, toast: { error: (message: string) => errors.push(message), success: (message: string) => successes.push(message),
       warning: (message: string, options?: { id?: string }) => warnings.push({ message, id: options?.id }) },
     useState(initial: any) {
@@ -333,6 +336,12 @@ function fixture(options: { queueToken?: boolean; storedAttempt?: Record<string,
       if (kind === "raw ABA") { emit(actorB); emit(actorA); }
     },
     setWorkspaceSelector(id: string) { selectedWorkspace = id; },
+    setActor(id: string) { context.user = { id }; emit(id); },
+    createForm(appointment = own, notes = "Local create draft") {
+      const view = open(appointment, notes);
+      view.setItems([]); view.setEditingId(null);
+      return render();
+    },
     installNewView() {
       render().setItems([clone(unrelated)]);
       return open(unrelated, "New scope draft must survive");
@@ -827,3 +836,119 @@ for (const kind of ["role", "raw ABA"] as const) {
     assert.equal(f.errors.length + f.successes.length, 0);
   });
 }
+
+// Current create-path characterizations, NOT safe-retry/session acceptance. Replies
+// below are synthetic transport data: no database insertion or authorization is asserted.
+const createdReply = (item = own): Reply => ({ status: 201,
+  body: { success: true, mode: "supabase", data: { item, replayed: false, clientCreated: false } } });
+
+test("CREATE control: actual submitForm -> createAppointment -> crmFetch persists key and paints confirmed reply", async () => {
+  const f = fixture({ actorTokens: true });
+  const creating = f.createForm().submitForm();
+  await tick();
+  assert.equal(f.requests.length, 1);
+  assert.equal(f.requests[0]!.init.method, "POST");
+  assert.equal(f.tokens[0]!.expected, undefined, "current create token lookup is unbound");
+  const attempt = f.render().createAttempt.current;
+  assert.ok(attempt);
+  assert.equal(f.requests[0]!.body.requestKey, attempt.requestKey);
+  assert.equal(f.stored.size, 1);
+  assert.deepEqual(clone(f.render().items), []);
+  f.reply(createdReply());
+  await creating;
+  assert.deepEqual(clone(f.render().items), [own]);
+  assert.equal(f.render().modalOpen, false);
+  assert.equal(f.render().saving, false);
+  assert.equal(f.stored.size, 0);
+  assert.equal(f.successes.length, 1);
+});
+
+for (const kind of ["raw actor", "account", "workspace", "role", "raw ABA"] as const) {
+  test(`CREATE BASELINE: ${kind} change while token queued still dispatches the original POST (not acceptance)`, async () => {
+    const f = fixture({ queueToken: true, actorTokens: true });
+    const creating = f.createForm().submitForm();
+    await tick();
+    assert.equal(f.requests.length, 0);
+    assert.equal(f.tokens[0]!.expected, undefined);
+    const original = clone(f.render().createAttempt.current!);
+    if (kind === "raw actor") f.emit(actorB);
+    else f.transition(kind);
+    if (kind !== "raw actor" && kind !== "raw ABA") f.render();
+    f.releaseToken();
+    await tick();
+    assert.equal(f.requests.length, 1, "current create has no dispatch guard after token await");
+    const request = f.requests[0]!;
+    assert.equal(request.init.method, "POST");
+    assert.equal(request.url, `/api/crm/appointments?workspaceId=${workspaceId}`);
+    assert.equal(request.body.requestKey, original.requestKey);
+    assert.deepEqual(request.body, { ...original.payload, requestKey: original.requestKey });
+    const actor = kind === "raw actor" || kind === "account" ? actorB : actorA;
+    assert.equal(request.actorId, actor);
+    assert.equal(new Headers(request.init.headers).get("Authorization"), `Bearer fixture.${actor}.token`);
+    f.reply({ status: 403, body: { success: false, code: "permission_denied", error: "Synthetic refusal, no save claimed" } });
+    await creating;
+    assert.equal(f.successes.length, 0);
+  });
+}
+
+for (const kind of ["account", "workspace", "role", "raw ABA"] as const) {
+  test(`CREATE BASELINE: late reply after ${kind} affects a newer pending edit (not acceptance)`, async () => {
+    const f = fixture({ actorTokens: true });
+    const creating = f.createForm().submitForm();
+    await tick();
+    assert.equal(f.requests[0]!.init.method, "POST");
+    f.transition(kind);
+    f.render();
+    const newer = f.installNewView().submitForm();
+    await tick();
+    assert.equal(f.requests[1]!.init.method, "PATCH");
+    assert.equal(f.render().saving, true);
+    assert.equal(f.render().submitLock.current, true);
+    const form = clone(f.render().form), count = f.writes.length;
+    f.reply(createdReply(), 0);
+    await creating;
+    const acceptsLate = kind === "role" || kind === "raw ABA";
+    assert.deepEqual(clone(f.render().items), acceptsLate ? [own, unrelated] : [unrelated]);
+    assert.equal(f.writes.length - count, acceptsLate ? 1 : 0);
+    assert.deepEqual(clone(f.render().form), form, "newer draft values themselves were not replaced");
+    assert.equal(f.render().modalOpen, !acceptsLate, "role/epoch-only change permits the old create to close the newer modal");
+    assert.equal(f.render().saving, false, "old create finally resets the newer edit's pending indicator");
+    assert.equal(f.render().submitLock.current, false, "old create finally releases the newer edit's submit lock");
+    assert.equal(f.successes.length, acceptsLate ? 1 : 0);
+    assert.equal(f.errors.length, acceptsLate ? 0 : 1);
+    f.reply({ status: 200, body: { success: true, mode: "supabase", data: { item: unrelated } } }, 1);
+    await newer;
+  });
+}
+
+test("CREATE BASELINE: account switch deletes A's scalar v1 recovery slot, then B occupies the sole slot (not acceptance)", async () => {
+  const f = fixture({ actorTokens: true });
+  const creatingA = f.createForm().submitForm();
+  await tick();
+  const keyA = f.requests[0]!.body.requestKey;
+  assert.equal(f.stored.size, 1);
+  assert.equal(JSON.parse([...f.stored.values()][0]!).requestKey, keyA);
+  f.setActor(actorB);
+  f.render();
+  assert.equal(f.stored.size, 0, "actual account cleanup deletes the in-flight A recovery key");
+  assert.equal(f.render().createAttempt.current, null);
+  const creatingB = f.createForm(unrelated, "Account B create draft").submitForm();
+  await tick();
+  const keyB = f.requests[1]!.body.requestKey;
+  assert.notEqual(keyB, keyA);
+  assert.equal(f.stored.size, 1);
+  const savedB = JSON.parse([...f.stored.values()][0]!);
+  assert.equal(savedB.requestKey, keyB);
+  assert.equal(savedB.actorId, actorB);
+  assert.equal([...f.stored.values()].some((value) => value.includes(keyA)), false);
+  f.reply("network", 0);
+  await creatingA;
+  f.reply("network", 1);
+  await creatingB;
+  assert.equal(f.render().createAttempt.current!.requestKey, keyB);
+  assert.equal(f.render().createAttempt.current!.uncertain, true);
+  f.setActor(actorA);
+  f.render();
+  assert.equal(f.stored.size, 0, "returning to A also deletes B's uncertain scalar slot");
+  assert.equal(f.render().createAttempt.current, null, "A's original key cannot be restored");
+});
