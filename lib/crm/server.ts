@@ -3064,16 +3064,15 @@ async function readOwnAppointments(
 ): Promise<{ data: unknown; error: unknown }> {
   const identity = await readOwnWorkIdentity(supabase, workspaceId, staffUserId);
 
+  if (identity.readFailed) {
+    // Partial identity reads can hide linked work as an apparently free day.
+    console.warn("appointments: own-work identity is unknown after a failed read; refusing instead of answering empty");
+    return { data: null, error: { message: "own-work identity is unavailable" } };
+  }
+
   // Ни ссылки, ни имени — показывать нечего. Пустой список безопаснее любого
   // «на всякий случай покажем всё»: последнее и есть та самая утечка.
   if (isEmptyIdentity(identity)) {
-    // «Не с кем связать» и «не смогли выяснить» — разные ответы. Первый честно
-    // пуст. Второй обязан быть отказом: пустой календарь после сбоя чтения
-    // выглядит как свободный день, и мастер уходит домой.
-    if (identity.readFailed) {
-      console.warn("appointments: own-work identity is unknown after a failed read; refusing instead of answering empty");
-      return { data: null, error: { message: "own-work identity is unavailable" } };
-    }
     console.warn("appointments: staff member is not linked to any specialist card; answering with no appointments");
     return { data: [], error: null };
   }
@@ -3101,7 +3100,9 @@ async function readOwnAppointments(
     }
   }
 
-  const rows = [...merged.values()].filter((row) => !clientId || readString(row.client_id) === clientId);
+  // Name reads also find namesakes; an explicit doctor link takes precedence.
+  const rows = [...merged.values()].filter((row) => rowBelongsTo(row, identity)
+    && (!clientId || readString(row.client_id) === clientId));
   const column = configs.appointments.sortableColumn;
   const ascending = configs.appointments.sortableAscending ?? false;
   rows.sort((left, right) => {

@@ -198,8 +198,10 @@ async function callRouter(options: {
   staffName?: string;
   /** Имя карточки справочника, если оно разошлось с именем в записях. */
   cardName?: string;
+  namesakeName?: string;
   failReadsOn?: string[];
   appointmentRows?: Record<string, unknown>[];
+  journalRows?: Record<string, unknown>[];
 }) {
   const log: Query[] = [];
   process.env.SUPABASE_URL = "https://project.example.test";
@@ -225,7 +227,7 @@ async function callRouter(options: {
         { id: OTHER_CARD, workspace_id: WORKSPACE, full_name: "Динара", staff_user_id: null, is_active: true },
         // Полный тёзка с отдельной карточкой: его записи попадают в проверку
         // пересечений по имени, и отказ не имеет права назвать его пациента.
-        { id: NAMESAKE_CARD, workspace_id: WORKSPACE, full_name: staffName, staff_user_id: null, is_active: true },
+        { id: NAMESAKE_CARD, workspace_id: WORKSPACE, full_name: options.namesakeName ?? staffName, staff_user_id: null, is_active: true },
         { id: FOREIGN_CARD, workspace_id: OTHER_WORKSPACE, full_name: staffName, staff_user_id: null, is_active: true },
       ],
     appointments: options.appointmentRows?.map((row) => ({ ...row })) ?? [
@@ -251,7 +253,7 @@ async function callRouter(options: {
     workspace_settings: [],
     // Журнал не пуст: без событий проверка «чужая история не отдаётся» была бы
     // зелёной всегда — просто потому, что отдавать нечего.
-    audit_logs: [
+    audit_logs: options.journalRows?.map((row) => ({ ...row })) ?? [
       journalEvent(MINE_LINKED, "Мария"),
       journalEvent(SOMEONE_ELSES, "Чужой клиент"),
     ],
@@ -287,9 +289,8 @@ test("OW1 мастеру приходят только его записи — �
   const { res } = await callRouter({});
   assert.equal(res.statusCode, 200, JSON.stringify(res.body));
   const ids = listedIds(res).sort();
-  // Тёзка тоже попадает: одно имя на двоих различить нечем, и это записано в
-  // ограничениях правила. Чужая запись коллеги — не попадает.
-  assert.deepEqual(ids, [MINE_LINKED, MINE_BY_NAME, MINE_RENAMED, MINE_OLD_NAME, MINE_NO_NAME, NAMESAKE_ROW].sort());
+  // Name fallback preserves legacy rows, but cannot override another doctor ID.
+  assert.deepEqual(ids, [MINE_LINKED, MINE_BY_NAME, MINE_RENAMED, MINE_OLD_NAME, MINE_NO_NAME].sort());
 });
 
 test("OW2 чужая запись не приходит вовсе — ни строкой, ни именем клиента", async () => {
@@ -314,9 +315,8 @@ test("OW5 имя с запятой не ломает сужение — филь
   // данными, фильтром видимости не является.
   const { res } = await callRouter({ staffName: COMMA_NAME });
   const ids = listedIds(res).sort();
-  // Прежнее имя карточки («Айгуль С.») в набор входит: оно собрано из уже
-  // связанных записей, а не выдумано — см. OW26.
-  assert.deepEqual(ids, [MINE_LINKED, MINE_BY_NAME, MINE_RENAMED, MINE_NO_NAME, MINE_OLD_NAME, NAMESAKE_ROW].sort(), JSON.stringify(res.body));
+  // Linked history supplies old names; even punctuation cannot admit a conflicting ID.
+  assert.deepEqual(ids, [MINE_LINKED, MINE_BY_NAME, MINE_RENAMED, MINE_NO_NAME, MINE_OLD_NAME].sort(), JSON.stringify(res.body));
 });
 
 test("OW6 мастер без карточки и без имени не получает всю клинику", async () => {
@@ -421,12 +421,21 @@ test("OW16 браузерная таблица прав не обещает ма
 });
 
 test("OW17 мастер без карточки справочника видит свои записи по имени", async () => {
-  // Единственный источник личности здесь — staff_users.full_name. Пока
-  // карточку не завели (а до 033 её не было ни у кого), это норма, а не сбой.
-  const { res } = await callRouter({ linkedCard: false });
-  const ids = listedIds(res).sort();
-  assert.ok(ids.includes(MINE_BY_NAME) && ids.includes(MINE_LINKED), JSON.stringify(res.body));
-  assert.ok(!ids.includes(SOMEONE_ELSES), "и чужие всё равно не приходят");
+  // Without a linked card, only null/omitted-ID legacy rows may match the staff name.
+  const omittedId = "10000000-0000-4000-8000-000000000010";
+  const seeded = [
+    appointment({ id: MINE_BY_NAME, doctor_id: null, doctor_name: MY_NAME.toLowerCase() }),
+    appointment({ id: omittedId, doctor_name: MY_NAME }),
+    ...[
+      [MINE_LINKED, DOCTOR_CARD], [NAMESAKE_ROW, NAMESAKE_CARD], [SOMEONE_ELSES, OTHER_CARD],
+    ].map(([id, doctorId]) => appointment({ id, doctor_id: doctorId, doctor_name: MY_NAME })),
+  ];
+  const { res, log, rows } = await callRouter({ linkedCard: false, appointmentRows: seeded });
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  assert.deepEqual(listedIds(res).sort(), [MINE_BY_NAME, omittedId].sort(),
+    "a matching name must not admit any explicit doctor ID without a verified linked card");
+  assert.deepEqual(rows.appointments, seeded);
+  assert.equal(log.filter(query => query.op !== "select").length, 0);
 });
 
 test("OW18 звёздочка в имени не превращает фильтр в «покажи всё»", async () => {
@@ -563,6 +572,168 @@ function assertHiddenContacts(item: Record<string, unknown>) {
   assert.notEqual(item.notes, STORED_NOTES, "stored contact-bearing notes are masked");
   assert.ok(!JSON.stringify(item).includes(STORED_PHONE));
   assert.ok(!JSON.stringify(item).includes(STORED_WHATSAPP));
+}
+
+for (const failedRead of ["clinic_doctors", "staff_users:full_name", "appointments:doctor_name"]) {
+  test(`OW-identity GET refuses ${failedRead} failure without private data or writes`, async () => {
+    const seeded = [
+      { ...authoredAppointment(STAFF_MASTER), doctor_name: "Synthetic previous doctor name" },
+      {
+        ...authoredAppointment(STAFF_MASTER), id: MINE_BY_NAME, doctor_id: null,
+        client_name: "Synthetic legacy patient",
+      },
+    ];
+    const { res, log, rows } = await callRouter({ appointmentRows: seeded, failReadsOn: [failedRead] });
+    assert.ok(log.some(query => query.table === "staff_users" && query.filters.auth_user_id === USER),
+      "the authenticated membership lookup still executes");
+    assert.notEqual(res.statusCode, 401, "the injected failure must not invalidate authentication");
+    assert.notEqual(res.statusCode, 403, "the injected failure must not remove workspace access");
+    assert.deepEqual(rows.appointments, seeded, "failed reads must not change the original appointments");
+    assert.equal(log.filter(query => query.op !== "select").length, 0, "identity failures cannot cause writes");
+    const output = JSON.stringify(res.body);
+    assert.deepEqual({
+      unavailable: res.statusCode >= 500 && res.statusCode < 600,
+      success: res.body.success,
+      errorType: typeof res.body.error,
+      privatePayloadKeys: [
+        "data", "appointments", "items", "item", "client", "phone", "whatsapp", "notes", "startsAt", "doctorId",
+      ].filter(key => key in res.body),
+      exposedPrivateValues: [
+        MINE_LINKED, MINE_BY_NAME, "Synthetic existing patient", "Synthetic legacy patient",
+        STORED_PHONE, STORED_WHATSAPP, STORED_NOTES,
+      ].filter(value => output.includes(value)),
+    }, {
+      unavailable: true,
+      success: false,
+      errorType: "string",
+      privatePayloadKeys: [],
+      exposedPrivateValues: [],
+    }, "one failed identity source must produce an honest unavailable response, not a partial calendar");
+  });
+}
+
+type NameFallbackRoute = "GET" | "PATCH" | "change-log";
+
+function nameFallbackFixture(fallback: "current" | "historical", doctorId: string | null | undefined) {
+  const staffName = fallback === "historical" ? "Synthetic renamed doctor" : MY_NAME;
+  const matchedName = fallback === "historical" ? "Synthetic previous doctor" : MY_NAME;
+  const anchor = appointment({
+    id: MINE_NO_NAME,
+    doctor_id: DOCTOR_CARD,
+    doctor_name: fallback === "historical" ? matchedName : "",
+    client_name: "Synthetic own linked anchor",
+  });
+  const target: Record<string, unknown> = {
+    ...authoredAppointment(STAFF_MASTER),
+    id: NAMESAKE_ROW,
+    doctor_id: doctorId,
+    doctor_name: matchedName,
+    client_name: "Synthetic name-fallback patient",
+  };
+  if (doctorId === undefined) delete target.doctor_id;
+  const event = journalEvent(NAMESAKE_ROW, String(target.client_name));
+  return {
+    matchedName, anchor, target, event,
+    options: {
+      staffName, cardName: staffName, namesakeName: matchedName,
+      appointmentRows: [anchor, target], journalRows: [event],
+    },
+  };
+}
+
+function callNameFallbackRoute(fixture: ReturnType<typeof nameFallbackFixture>, route: NameFallbackRoute) {
+  return callRouter({
+    ...fixture.options,
+    ...(route === "PATCH" ? {
+      method: "PATCH", body: { id: fixture.target.id, updates: { status: "confirmed" } },
+    } : route === "change-log" ? {
+      pathSegments: ["change-log"], query: { entityType: "appointment", entityId: fixture.target.id },
+    } : {}),
+  });
+}
+
+for (const fallback of ["current", "historical"] as const) {
+  for (const route of ["GET", "PATCH", "change-log"] as const) {
+    test(`OW-namesake ${route} rejects an explicit conflicting doctor ID via ${fallback} name fallback`, async () => {
+      const fixture = nameFallbackFixture(fallback, NAMESAKE_CARD);
+      const { res, log, rows } = await callNameFallbackRoute(fixture, route);
+      const data = res.body.data as Record<string, unknown> | undefined;
+      const output = JSON.stringify(res.body);
+      const ids = (value: unknown) => (Array.isArray(value) ? value : []).map(item => String(item.id));
+      assert.deepEqual({
+        status: res.statusCode,
+        success: res.body.success,
+        appointmentIds: ids(data?.appointments),
+        itemIds: ids(data?.items),
+        events: route === "change-log" ? res.body.events : null,
+        exposedPrivateValues: [fixture.target.id, fixture.target.client_name, STORED_PHONE, STORED_WHATSAPP, STORED_NOTES]
+          .filter(value => output.includes(String(value))),
+        writes: log.filter(query => query.op !== "select").map(query => [query.table, query.op]),
+        journalReads: log.filter(query => query.table === "audit_logs" && query.op === "select").length,
+      }, {
+        status: route === "PATCH" ? 404 : 200,
+        success: route !== "PATCH",
+        appointmentIds: route === "GET" ? [MINE_NO_NAME] : [],
+        itemIds: route === "GET" ? [MINE_NO_NAME] : [],
+        events: route === "change-log" ? [] : null,
+        exposedPrivateValues: [],
+        writes: [],
+        journalReads: 0,
+      }, "an explicit other doctor ID must override matching names and stored authorship");
+      assert.deepEqual(rows.appointments, fixture.options.appointmentRows);
+      assert.deepEqual(rows.audit_logs, fixture.options.journalRows);
+    });
+  }
+}
+
+const positiveNameFallbackCases = [
+  { label: "own doctor ID with an old doctor name", fallback: "current", doctorId: DOCTOR_CARD, doctorName: "Synthetic older doctor name" },
+  { label: "own doctor ID with a null doctor name", fallback: "current", doctorId: DOCTOR_CARD, doctorName: null },
+  { label: "own doctor ID with an omitted doctor name", fallback: "current", doctorId: DOCTOR_CARD, doctorName: undefined },
+  { label: "current name fallback with a null doctor ID", fallback: "current", doctorId: null },
+  { label: "current name fallback with an omitted doctor ID", fallback: "current", doctorId: undefined },
+  { label: "historical name fallback with a null doctor ID", fallback: "historical", doctorId: null },
+  { label: "historical name fallback with an omitted doctor ID", fallback: "historical", doctorId: undefined },
+] as const;
+
+for (const scenario of positiveNameFallbackCases) {
+  test(`OW-namesake preserves ${scenario.label} across GET, PATCH and change-log`, async () => {
+    for (const route of ["GET", "PATCH", "change-log"] as const) {
+      const fixture = nameFallbackFixture(scenario.fallback, scenario.doctorId);
+      if ("doctorName" in scenario) {
+        if (scenario.doctorName === undefined) delete fixture.target.doctor_name;
+        else fixture.target.doctor_name = scenario.doctorName;
+      }
+      const { res, log, rows } = await callNameFallbackRoute(fixture, route);
+      assert.equal(res.statusCode, 200, `${route}: ${JSON.stringify(res.body)}`);
+      assert.equal(res.body.success, true);
+      assert.equal(res.body.mode, "supabase");
+      if (route === "change-log") {
+        const events = res.body.events as Record<string, unknown>[];
+        assert.deepEqual(events.map(event => event.id), [fixture.event.id]);
+        assert.ok(JSON.stringify(events).includes(String(fixture.target.client_name)), "own history remains nonempty");
+      } else {
+        const data = res.body.data as Record<string, unknown>;
+        const items = data.appointments as Record<string, unknown>[];
+        const item = route === "GET" ? items.find(item => item.id === fixture.target.id) : responseItem(res);
+        assert.ok(item, `${route}: own or legacy appointment remains accessible`);
+        assert.equal(item.id, fixture.target.id);
+        assertStoredContacts(item);
+        if (route === "GET") assert.deepEqual(listedIds(res).sort(), [MINE_NO_NAME, NAMESAKE_ROW].sort());
+        else assert.equal(item.status, "confirmed");
+      }
+      const writes = log.filter(query => query.op !== "select");
+      assert.deepEqual(writes.map(query => [query.table, query.op]), route === "PATCH"
+        ? [["appointments", "update"], ["audit_logs", "insert"]] : []);
+      const stored = (rows.appointments as Record<string, unknown>[]).find(item => item.id === fixture.target.id);
+      assert.deepEqual(stored, route === "PATCH"
+        ? { ...fixture.target, status: "confirmed", updated_at: stored?.updated_at } : fixture.target);
+      if (scenario.fallback === "historical") {
+        assert.ok(log.some(query => query.table === "appointments" && query.filters.doctor_id === DOCTOR_CARD),
+          "historical identity is anchored to the acting doctor's linked appointment");
+      }
+    }
+  });
 }
 
 test("OW-author GET retains a doctor's own stored appointment contacts", async () => {

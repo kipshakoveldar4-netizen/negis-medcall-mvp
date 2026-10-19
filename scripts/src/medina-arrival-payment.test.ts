@@ -524,6 +524,94 @@ for (const { label, author } of [
   }
 }
 
+test("API same-name doctor reassignment revokes author access and redacts contacts for the new assignee", async () => {
+  const { call, booking, visit, stored: authored } = await doctorContactFixture(id(40));
+  assert.equal(authored.doctor_id, id(42));
+  // Active directory names are unique; archive A's card, not A's staff account.
+  await db.exec(`update clinic_doctors set is_active=false where id='${id(42)}';
+    update clinic_services set doctor_id=null where id in ('${id(50)}','${id(51)}');
+    insert into staff_users(id,workspace_id,auth_user_id,full_name,email,role)
+    values('${id(45)}','${id(1)}','${id(46)}','Test master','other-doctor@example.invalid','doctor');
+    insert into clinic_doctors(id,workspace_id,full_name,staff_user_id)
+    values('${id(47)}','${id(1)}','Test master','${id(45)}')`);
+  let authUserId = id(44);
+  globalThis.fetch = (async (url: unknown) => {
+    assert.equal(url, "https://fixture.invalid/auth/v1/user");
+    return { ok: true, status: 200, text: async () => JSON.stringify({ id: authUserId }) };
+  }) as unknown as typeof fetch;
+  apiItem(await call("clients", "PATCH", {
+    phone: lateDoctorPhone, whatsapp: lateDoctorWhatsapp, notes: lateDoctorNotes,
+  }, 1, String(visit.clientId)));
+  const moved = apiItem(await call("appointments", "PATCH", {
+    doctorId: id(47), doctor: "Test master", serviceItems: serviceBundle,
+  }, 1, String(visit.id)));
+  assert.equal(moved.doctorId, id(47));
+  assert.equal(moved.doctor, "Test master");
+  assert.equal(moved.createdByStaffUserId, id(40));
+  const stored = await row(`select * from appointments where id='${visit.id}'`);
+  assert.deepEqual(stored, { ...authored, doctor_id: id(47), updated_at: stored.updated_at },
+    "admin reassignment changes the doctor ID, not the identical name, contacts or author");
+  const clientBefore = await row(`select * from clients where id='${visit.clientId}'`);
+  assert.equal(clientBefore.phone, lateDoctorPhone);
+  assert.equal(clientBefore.whatsapp, lateDoctorWhatsapp);
+  const before = await retryCounts();
+
+  authUserId = id(41);
+  const hidden = await call("appointments", "GET");
+  assert.equal(hidden.status, 200, JSON.stringify(hidden.body));
+  assert.equal(hidden.body.mode, "supabase");
+  const hiddenData = hidden.body.data as { appointments: Record<string, unknown>[]; items: Record<string, unknown>[] };
+  for (const list of [hiddenData.appointments, hiddenData.items]) {
+    assert.ok(list.some(item => item.id === id(10)), "A still sees an appointment assigned to A");
+    assert.ok(list.every(item => item.id !== visit.id), "authorship and matching names cannot override B's doctor ID");
+  }
+  assert.ok(hidden.queries.some(query => query.table === "appointments" && query.columns === "*"
+    && query.filters.some(([column, operator, value]) => column === "doctor_name" && operator === "ilike" && value === "Test master")),
+  "the same-name query runs against the reassigned row before the merged result is filtered");
+  const denied = await call("appointments", "PATCH", { status: "arrived" }, 1, String(visit.id));
+  assert.equal(denied.status, 404, JSON.stringify(denied.body));
+  const clients = await call("clients", "GET");
+  assert.equal(clients.status, 403, JSON.stringify(clients.body));
+  for (const reply of [denied, clients]) {
+    assert.equal(reply.body.success, false);
+    assert.equal(reply.body.data, undefined);
+  }
+  for (const reply of [hidden, denied, clients]) {
+    for (const secret of [booking.client, lateDoctorPhone.slice(1), lateDoctorWhatsapp.slice(1), lateDoctorNotes]) {
+      assert.equal(JSON.stringify(reply.body).includes(secret), false);
+    }
+    assert.deepEqual(reply.queries.filter(query => query.operation !== "select"), []);
+    assert.deepEqual(reply.queries.filter(query => query.table === "clients" || query.table === "deals"), [],
+      "denial must not read client contacts or touch sales");
+  }
+
+  authUserId = id(46);
+  const visible = await call("appointments", "GET");
+  assert.equal(visible.status, 200, JSON.stringify(visible.body));
+  assert.equal(visible.body.mode, "supabase");
+  const visibleData = visible.body.data as { appointments: Record<string, unknown>[]; items: Record<string, unknown>[] };
+  for (const list of [visibleData.appointments, visibleData.items]) {
+    assert.deepEqual(list.map(item => item.id), [visit.id], "B sees only the appointment assigned to B, not same-named A's work");
+    const item = list[0];
+    assert.equal(item.doctorId, id(47));
+    assert.equal(item.client, booking.client);
+    assert.equal(item.status, "confirmed");
+    assert.equal(item.createdByStaffUserId, id(40), "reassignment does not make B the author");
+    for (const field of ["phone", "whatsapp", "email", "clientPhone", "client_phone", "clientWhatsapp", "client_whatsapp"]) {
+      assert.equal(field in item, false, `${field} is absent, not empty`);
+    }
+    assert.match(String(item.notes), /Allergy noted/);
+    assert.notEqual(item.notes, lateDoctorNotes);
+  }
+  for (const contact of [lateDoctorPhone.slice(1), lateDoctorWhatsapp.slice(1)]) {
+    assert.equal(JSON.stringify(visible.body).includes(contact), false, "no contact leaks through any response alias");
+  }
+  assert.deepEqual(visible.queries.filter(query => query.operation !== "select" || query.table === "clients" || query.table === "deals"), []);
+  assert.deepEqual(await row(`select * from appointments where id='${visit.id}'`), stored);
+  assert.deepEqual(await row(`select * from clients where id='${visit.clientId}'`), clientBefore);
+  assert.deepEqual(await retryCounts(), before, "GETs and A's refused arrival PATCH create no writes, sale or journal entry");
+});
+
 for (const scope of ["other doctor", "foreign workspace"]) {
   for (const method of ["replay", "GET", "PATCH"]) {
     test(`API doctor author-readback ${method}: ${scope} never grants contact access`, async () => {
