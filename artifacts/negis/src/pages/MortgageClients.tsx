@@ -131,7 +131,7 @@ function MortgageClientsBody() {
       </div>}
     </div>
 
-    {creating && canCreate && <MortgageContactForm members={workspace.data?.members || []} isCurrent={workspace.isCurrent}
+    {creating && canCreate && <MortgageContactForm request={workspace.request} isCurrent={workspace.isCurrent}
       onClose={() => setCreating(false)} onSubmit={async ({ name, phone, notes, responsibleUserId }) => {
         await workspace.createContact({ name, phone, notes, ...(responsibleUserId ? { responsibleUserId } : {}) });
       }} />}

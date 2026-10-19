@@ -2522,11 +2522,49 @@ async function readWorkspaceReference(input: {
   return asRecord(data);
 }
 
+function isMortgageLeadAssignee(staff: JsonRecord, actor?: { staffUserId: string; role: string } | null): boolean {
+  return staff.role === "lead_manager"
+    || (actor?.role === "admin" && staff.role === "admin" && staff.id === actor.staffUserId);
+}
+
+class MortgageSelfLeadError extends Error {
+  constructor(readonly statusCode: number, readonly code: string, message: string) { super(message); }
+}
+
+function isMortgageAdminSelfAssignment(req: VercelRequest, row: JsonRecord): boolean {
+  const actor = readWorkspaceContext(req);
+  return actor?.purpose === "mortgage_leads" && actor.role === "admin" && row.responsible_user_id === actor.staffUserId;
+}
+
+async function saveMortgageAdminSelfLead(supabase: CrmSupabaseClient, req: VercelRequest, row: JsonRecord, leadId: string | null) {
+  const actor = readWorkspaceContext(req);
+  if (!actor || !isMortgageAdminSelfAssignment(req, row)) {
+    throw new MortgageSelfLeadError(403, "mortgage_admin_self_access_denied", "Нет доступа к назначению заявки себе");
+  }
+  const result = await supabase.rpc("save_mortgage_admin_self_lead", {
+    p_workspace_id: actor.workspaceId, p_staff_user_id: actor.staffUserId, p_auth_user_id: actor.userId,
+    p_lead_id: leadId, p_row: row,
+  });
+  const code = readString(result.error?.code);
+  if (["PGRST202", "42883", "42703", "PGRST204", "42P01", "PGRST205"].includes(code)) {
+    throw new MortgageSelfLeadError(503, "mortgage_admin_self_unavailable", "Назначение себе пока недоступно: требуется миграция 077");
+  }
+  if (code === "P7001" || code === "P7703") throw new MortgageSelfLeadError(403, "mortgage_admin_self_access_denied", "Нет доступа к назначению заявки себе");
+  if (code === "P7702") throw new MortgageSelfLeadError(404, "lead_not_found", "Заявка не найдена");
+  if (code === "P7701") throw new MortgageSelfLeadError(400, "mortgage_admin_self_invalid", "Проверьте данные заявки");
+  if (result.error) throw new Error("Admin-self lead save failed");
+  const saved = asRecord(result.data);
+  if (!isUuid(saved.id) || saved.workspace_id !== actor.workspaceId || saved.responsible_user_id !== actor.staffUserId
+    || (leadId !== null && readString(saved.id).toLowerCase() !== leadId.toLowerCase())) throw new Error("Invalid admin-self lead save response");
+  return { data: saved, error: null };
+}
+
 async function buildLeadReferenceRow(
   supabase: CrmSupabaseClient,
   workspaceId: string,
   body: JsonRecord,
   purpose?: WorkspacePurpose,
+  actor?: { staffUserId: string; role: string } | null,
 ): Promise<JsonRecord> {
   const row: JsonRecord = {};
 
@@ -2613,8 +2651,8 @@ async function buildLeadReferenceRow(
       if (readString(staff.status).toLowerCase() !== "active") {
         throw new CrmReferenceValidationError(["responsibleUserId must be an active staff member"]);
       }
-      if (purpose === 'mortgage_leads' && staff.role !== 'lead_manager') {
-        throw new CrmReferenceValidationError(['responsibleUserId must be an active lead manager']);
+      if (purpose === 'mortgage_leads' && !isMortgageLeadAssignee(staff, actor)) {
+        throw new CrmReferenceValidationError(['responsibleUserId must be an active lead manager or the acting administrator']);
       }
       row.responsible_user_id = staff.id;
     }
@@ -4811,6 +4849,50 @@ function appointmentRequestReceipt(value: unknown, workspaceId: string): JsonRec
   return receipt;
 }
 
+class SaleRequestError extends Error {
+  constructor(readonly statusCode: number, readonly code: string, message: string) {
+    super(message);
+  }
+}
+
+function checkSaleRequestError(error: { code?: unknown } | null) {
+  if (!error) return;
+  const code = readString(error.code);
+  if (["PGRST202", "42883", "42703", "PGRST204", "42P01", "PGRST205"].includes(code)) {
+    throw new SaleRequestError(503, "sale_create_unavailable", "Не удалось подтвердить продажу: администратору нужно проверить миграцию 076");
+  }
+  if (code === "P7602") throw new SaleRequestError(409, "sale_request_conflict", "Этот запрос уже использован для другой продажи. Проверьте сохранённую продажу.");
+  if (code === "P7603") throw new SaleRequestError(409, "sale_request_unavailable", "Ранее сохранённая продажа больше недоступна. Повторное создание остановлено.");
+  if (code === "P7604") throw new SaleRequestError(403, "sale_request_access_denied", "Нет доступа к сохранению продажи");
+  if (code === "P7601") throw new SaleRequestError(400, "sale_request_invalid", "Проверьте данные запроса продажи");
+}
+
+function saleRequestFingerprint(body: JsonRecord, workspaceId: string): string {
+  const { updated_at: _updatedAt, paid_at: _paidAt, closed_at: _closedAt, ...snapshot } = configs.deals.toRow(body, workspaceId);
+  // Defaults may generate today's timestamp. Hash only explicit dates and the
+  // original normalized intent, not generated fields or the browser's hash.
+  return createHash("sha256").update(JSON.stringify({
+    version: 1, snapshot,
+    paidAt: maybeDate(body.paidAt ?? body.paid_at),
+    closedAt: maybeDate(body.closedAt ?? body.closed_at),
+    clientId: firstString(body.clientId, body.client_id),
+    leadId: firstString(body.leadId, body.lead_id),
+    appointmentId: firstString(body.appointmentId, body.appointment_id),
+    serviceId: firstString(body.serviceId, body.service_id),
+    metaCampaignLaunchId: firstString(body.metaCampaignLaunchId, body.meta_campaign_launch_id),
+    responsibleUserId: firstString(body.responsibleUserId, body.responsible_user_id),
+  })).digest("hex");
+}
+
+function saleRequestReceipt(value: unknown, workspaceId: string): JsonRecord {
+  const receipt = asRecord(value);
+  const sale = asRecord(receipt.sale);
+  if (!isUuid(sale.id) || sale.workspace_id !== workspaceId || typeof receipt.replayed !== "boolean") {
+    throw new Error("Invalid sale request receipt");
+  }
+  return receipt;
+}
+
 async function createItem(resource: CrmResource, req: VercelRequest, res: VercelResponse) {
   if (resource === "staff") {
     return createStaffItem(req, res);
@@ -4820,7 +4902,19 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
   const body = { ...asRecord(req.body) };
   const details = [...validationDetails(body, config.requiredPost), ...resourceValidationDetails(resource, body), ...appointmentServicesValidationDetails(resource, body)];
   const keyedAppointment = resource === "appointments" && "requestKey" in body;
+  const keyedSale = resource === "deals" && "requestKey" in body;
   if (keyedAppointment && !isUuid(body.requestKey)) details.push("requestKey must be a UUID");
+  if (keyedSale && (typeof body.requestKey !== "string"
+    || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(body.requestKey))) {
+    details.push("requestKey must be a UUID v4");
+  }
+  if (keyedSale) {
+    const amount = readNumber(body.amountMinor ?? body.amount_minor);
+    if (!readString(body.title)) details.push("title is required for a keyed sale");
+    if (typeof amount !== "number" || !Number.isSafeInteger(amount) || amount < 0) {
+      details.push("amountMinor must be an explicit non-negative safe integer");
+    }
+  }
 
   if (details.length > 0) {
     return sendJson(res, 400, errorBody("Validation error", details));
@@ -4831,6 +4925,9 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
   const supabase = getSupabaseServerClient();
 
   if (!supabase || !isUuid(workspaceId)) {
+    if (keyedSale) return sendJson(res, 503, {
+      ...errorBody("Не удалось подтвердить сохранение продажи"), code: "sale_create_unavailable",
+    });
     if (keyedAppointment) return sendJson(res, 503, {
       ...errorBody("Не удалось подтвердить сохранение записи"), code: "appointment_create_unavailable",
     });
@@ -4853,6 +4950,17 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
 
   let actorOwnWork: OwnWorkIdentity | null = null;
   let appointmentRequest: JsonRecord | null = null;
+  let saleRequest: JsonRecord | null = null;
+  const readSaleReplay = async () => {
+    if (!saleRequest) return null;
+    const result = await supabase.rpc("read_crm_sale_create_request", saleRequest);
+    checkSaleRequestError(result.error);
+    if (result.error) throw new Error("Sale receipt read failed");
+    return result.data === null ? null : saleRequestReceipt(result.data, workspaceId);
+  };
+  const sendSaleReplay = (receipt: JsonRecord) => sendJson(res, 200, success("supabase", {
+    item: config.fromRow(asRecord(receipt.sale)), replayed: true,
+  }));
   const readReplay = async () => {
     if (!appointmentRequest) return null;
     const result = await supabase.rpc("read_crm_appointment_create_request", appointmentRequest);
@@ -4872,6 +4980,17 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
   };
 
   try {
+    if (keyedSale) {
+      const actor = readWorkspaceContext(req);
+      if (!isUuid(actor?.staffUserId) || !isUuid(actor?.userId)) {
+        throw new SaleRequestError(403, "sale_request_access_denied", "Нет доступа к сохранению продажи");
+      }
+      saleRequest = { p_workspace_id: workspaceId, p_staff_user_id: actor.staffUserId,
+        p_auth_user_id: actor.userId, p_request_key: body.requestKey,
+        p_request_fingerprint: saleRequestFingerprint(body, workspaceId) };
+      const replay = await readSaleReplay();
+      if (replay) return sendSaleReplay(replay);
+    }
     if (keyedAppointment) {
       const staffUserId = readString(readWorkspaceContext(req)?.staffUserId);
       if (!isUuid(staffUserId)) throw new AppointmentRequestError(403, "appointment_request_access_denied", "Нет доступа к сохранению записи");
@@ -4924,7 +5043,7 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
       if (isUuid(actorStaffUserId)) row.created_by_staff_user_id = actorStaffUserId;
     }
     if (resource === "leads") {
-      Object.assign(row, await buildLeadReferenceRow(supabase, workspaceId, body, readWorkspaceContext(req)?.purpose));
+      Object.assign(row, await buildLeadReferenceRow(supabase, workspaceId, body, readWorkspaceContext(req)?.purpose, readWorkspaceContext(req)));
     }
     if (resource === "deals") {
       Object.assign(row, await buildDealReferenceRow(supabase, workspaceId, body));
@@ -5016,6 +5135,12 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
       existingMetaAccountId = ids[0] || "";
     }
     const runInsert = async (candidate: JsonRecord) => {
+      if (resource === "leads" && isMortgageAdminSelfAssignment(req, candidate)) {
+        return await saveMortgageAdminSelfLead(supabase, req, candidate, null);
+      }
+      if (saleRequest) {
+        return await supabase.rpc("create_crm_sale_once", { ...saleRequest, p_sale: candidate });
+      }
       if (appointmentRequest) {
         return await supabase.rpc("create_crm_appointment_once", { ...appointmentRequest,
           p_new_client: newAppointmentClient ?? null, p_appointment: candidate,
@@ -5042,6 +5167,14 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
     };
 
     let { data, error } = await runInsert(row);
+    if (saleRequest) {
+      checkSaleRequestError(error);
+      if (!error) {
+        const receipt = saleRequestReceipt(data, workspaceId);
+        if (receipt.replayed) return sendSaleReplay(receipt);
+        data = asRecord(receipt.sale);
+      }
+    }
     if (appointmentRequest) {
       checkAppointmentRequestError(error);
       if (!error) {
@@ -5073,7 +5206,7 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
     // Та же логика для 032: запись и продажа создавались до этой ветки и
     // обязаны создаваться в окне между деплоем и миграцией. Теряется только
     // связь с услугой — и оператор узнаёт из лога, какой именно.
-    if (error && !appointmentRequest && !newAppointmentClient && (resource === "appointments" || resource === "deals")) {
+    if (error && !appointmentRequest && !saleRequest && !newAppointmentClient && (resource === "appointments" || resource === "deals")) {
       const retried = await retryWithoutMissingColumns(resource, row, "creating", { data, error }, runInsert);
       data = retried.data as typeof data;
       error = retried.error as typeof error;
@@ -5221,9 +5354,17 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
           }
         : {}),
       ...(unsaved.length > 0 ? { unsaved: unsavedFieldsFor(unsaved) } : {}),
-      ...(appointmentRequest ? { replayed: false } : {}),
+      ...(appointmentRequest || saleRequest ? { replayed: false } : {}),
     }));
   } catch (error) {
+    if (saleRequest && error instanceof CrmReferenceValidationError) {
+      try {
+        const replay = await readSaleReplay();
+        if (replay) return sendSaleReplay(replay);
+      } catch (replayError) {
+        error = replayError;
+      }
+    }
     // Another request may have committed after the early lookup, while this
     // request was checking availability. Re-read before returning that refusal.
     if (appointmentRequest && (error instanceof AppointmentConflictError || error instanceof AppointmentOutsideScheduleError
@@ -5236,6 +5377,12 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
       }
     }
     if (error instanceof AppointmentRequestError) {
+      return sendJson(res, error.statusCode, { ...errorBody(error.message), code: error.code });
+    }
+    if (error instanceof SaleRequestError) {
+      return sendJson(res, error.statusCode, { ...errorBody(error.message), code: error.code });
+    }
+    if (error instanceof MortgageSelfLeadError) {
       return sendJson(res, error.statusCode, { ...errorBody(error.message), code: error.code });
     }
     if (error instanceof AppointmentConflictError) {
@@ -5317,7 +5464,9 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
   const body = asRecord(req.body);
   const updates = asRecord(body.updates);
   const patchBody = Object.keys(updates).length > 0 ? updates : body;
-  const id = firstString(body.id, patchBody.id, readQueryString(req.query.id));
+  const requestedId = firstString(body.id, patchBody.id, readQueryString(req.query.id));
+  // PostgreSQL canonicalizes UUIDs; the reply and text journal key must agree.
+  const id = isUuid(requestedId) ? requestedId.toLowerCase() : requestedId;
 
   if (!id) {
     return sendJson(res, 400, {
@@ -5471,7 +5620,7 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
     }
 
     if (resource === "leads") {
-      Object.assign(row, await buildLeadReferenceRow(supabase, workspaceId, patchBody, readWorkspaceContext(req)?.purpose));
+      Object.assign(row, await buildLeadReferenceRow(supabase, workspaceId, patchBody, readWorkspaceContext(req)?.purpose, readWorkspaceContext(req)));
     }
     if (resource === "deals") {
       Object.assign(row, await buildDealReferenceRow(supabase, workspaceId, patchBody));
@@ -5671,13 +5820,13 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
       }
     }
 
-    const runUpdate = (candidate: JsonRecord) => supabase
-      .from(config.table)
-      .update(candidate)
-      .eq("id", id)
-      .eq("workspace_id", workspaceId)
-      .select(config.selectColumns ?? "*")
-      .single();
+    const runUpdate = async (candidate: JsonRecord) => {
+      if (resource === "leads" && isMortgageAdminSelfAssignment(req, candidate)) {
+        return await saveMortgageAdminSelfLead(supabase, req, candidate, id);
+      }
+      return await supabase.from(config.table).update(candidate).eq("id", id).eq("workspace_id", workspaceId)
+        .select(config.selectColumns ?? "*").single();
+    };
 
     let { data, error } = await runUpdate(row);
 
@@ -5839,6 +5988,9 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
       ...(unsaved.length > 0 ? { unsaved: unsavedFieldsFor(unsaved) } : {}),
     }));
   } catch (error) {
+    if (error instanceof MortgageSelfLeadError) {
+      return sendJson(res, error.statusCode, { ...errorBody(error.message), code: error.code });
+    }
     if (error instanceof AppointmentConflictError) {
       return sendJson(res, 409, {
         success: false,
@@ -10458,7 +10610,7 @@ export async function handleLeadAssignees(req: VercelRequest, res: VercelRespons
     const assignees = (Array.isArray(data) ? data : [])
       .map(asRecord)
       .filter((row) => isUuid(row.id) && row.status === "active")
-      .filter((row) => context.purpose !== 'mortgage_leads' || row.role === 'lead_manager')
+      .filter((row) => context.purpose !== 'mortgage_leads' || isMortgageLeadAssignee(row, context))
       .map((row) => ({ id: row.id, name: readString(row.full_name) || "Сотрудник" }));
     return sendJson(res, 200, success("supabase", { assignees, items: assignees }));
   } catch {

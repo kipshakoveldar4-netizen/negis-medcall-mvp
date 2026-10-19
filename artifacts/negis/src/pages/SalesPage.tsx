@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { Link } from "wouter";
 import {
   BadgeDollarSign,
@@ -18,6 +18,9 @@ import { PageLayout } from "@/components/layout/PageLayout";
 import { MetricCard } from "@/components/ui/metric-card";
 import { apiUrl, crmFetch } from "@/lib/api";
 import { isRealWorkspace, readDemoStorage, readWorkspaceId, useDemoCollection, workspaceScopedKey } from "@/lib/demoStorage";
+import { useAuth } from "@/contexts/AuthContext";
+import { hasSupabaseFrontendEnv, supabase } from "@/lib/supabase";
+import { canReleaseSalesAttempt, clearPersistedSalesCreateAttempt, confirmedSalesCreate, isCurrentSalesAttempt, mergeCreatedSale, newSalesCreateAttempt, persistSalesCreateAttempt, restoreSalesCreateAttempt, sameSalesCreateIntent, SalesAttemptRestoreError, type SalesCreateAttempt } from "@/lib/salesCreateAttempt";
 
 type DealStatus = "pending" | "paid" | "cancelled" | "refunded";
 type PaymentMethod = "" | "cash" | "card" | "kaspi" | "transfer" | "other";
@@ -218,7 +221,8 @@ function tengeToAmountMinor(value: string): number | null {
   if (!normalized) return null;
   const tenge = Number(normalized);
   if (!Number.isFinite(tenge) || tenge < 0) return null;
-  return Math.round(tenge * 100);
+  const amountMinor = Math.round(tenge * 100);
+  return Number.isSafeInteger(amountMinor) ? amountMinor : null;
 }
 
 function amountMinorToTengeInput(amountMinor: number): string {
@@ -360,6 +364,25 @@ function emptyForm(): DealForm {
   };
 }
 
+function formFromDeal(deal: Deal): DealForm {
+  return {
+    title: deal.title,
+    serviceId: deal.serviceId || "",
+    amountTenge: amountMinorToTengeInput(deal.amountMinor),
+    status: deal.status,
+    paymentMethod: normalizePaymentMethod(deal.paymentMethod),
+    clientId: deal.clientId || "",
+    leadId: deal.leadId || "",
+    appointmentId: deal.appointmentId || "",
+    metaCampaignLaunchId: deal.metaCampaignLaunchId || "",
+    notes: deal.notes || "",
+  };
+}
+
+function salesAttemptStorage(): Storage | null {
+  try { return typeof window === "undefined" ? null : window.sessionStorage; } catch { return null; }
+}
+
 function toneColor(tone: NegisTone): string {
   return `var(--negis-${tone})`;
 }
@@ -393,7 +416,10 @@ function DealFact({ label, children }: { label: string; children: ReactNode }) {
 }
 
 export default function SalesPage() {
-  const { items, loaded, loadError, addItem, updateItem } = useDemoCollection<Deal>("negis_demo_deals", dealsSeed, {
+  const { user, clinicId } = useAuth();
+  const workspaceId = clinicId || readWorkspaceId();
+  const actorId = user?.id || "";
+  const { items, loaded, loadError, addItem, updateItem, setItems } = useDemoCollection<Deal>("negis_demo_deals", dealsSeed, {
     endpoint: "/api/crm/deals",
     listKey: "deals",
     itemKey: "item",
@@ -412,9 +438,75 @@ export default function SalesPage() {
   const [form, setForm] = useState<DealForm>(() => emptyForm());
   // Двойной клик по «Добавить продажу» заводил вторую оплату на ту же сумму.
   const [saving, setSaving] = useState(false);
+  const submitLock = useRef(false);
+  const createAttempt = useRef<SalesCreateAttempt | null>(null);
+  const [unconfirmedCreate, setUnconfirmedCreate] = useState(false);
+  const restoreStatus = useRef<"pending" | "ready" | "blocked">("pending");
+  const [restoreError, setRestoreError] = useState("");
+  const observedActor = useRef(actorId);
+  const authObserved = useRef(false);
+  const liveAuthEpoch = useRef(0);
+  const [authEpoch, setAuthEpoch] = useState(0);
+  const scopeEpoch = hasSupabaseFrontendEnv && isRealWorkspace(workspaceId) ? authEpoch : 0;
+  const currentCreateScope = useRef({ workspaceId, actorId, epoch: scopeEpoch, active: false });
+  if (currentCreateScope.current.workspaceId !== workspaceId || currentCreateScope.current.actorId !== actorId
+    || currentCreateScope.current.epoch !== scopeEpoch) {
+    currentCreateScope.current = { workspaceId, actorId, epoch: scopeEpoch, active: false };
+  }
+  const scope = currentCreateScope.current;
+  const matchesSdkActor = () => !hasSupabaseFrontendEnv || !isRealWorkspace(scope.workspaceId)
+    || (scope.epoch === liveAuthEpoch.current && (!authObserved.current || observedActor.current === scope.actorId));
+  const isCurrentScope = () => scope.active && currentCreateScope.current === scope && matchesSdkActor()
+    && readWorkspaceId() === scope.workspaceId;
   const [isAdminMode, setIsAdminMode] = useState(() => typeof window !== "undefined" && window.localStorage.getItem(SALES_UI_MODE_KEY) === "admin");
 
+  useLayoutEffect(() => {
+    if (!hasSupabaseFrontendEnv) return;
+    let mounted = true;
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+      if (!mounted) return;
+      const nextActor = event === "SIGNED_OUT" ? "" : session?.user.id || "";
+      authObserved.current = true;
+      if (observedActor.current === nextActor) return;
+      observedActor.current = nextActor;
+      // Invalidate synchronously: React may batch A -> B -> A into one render.
+      liveAuthEpoch.current += 1;
+      if (isRealWorkspace(currentCreateScope.current.workspaceId)) currentCreateScope.current.active = false;
+      setAuthEpoch(liveAuthEpoch.current);
+    });
+    return () => { mounted = false; subscription.unsubscribe(); };
+  }, []);
+
+  useLayoutEffect(() => {
+    // AuthContext may still describe the actor from before the SDK event.
+    scope.active = matchesSdkActor();
+    submitLock.current = false;
+    createAttempt.current = null;
+    restoreStatus.current = "pending";
+    setRestoreError("");
+    setSaving(false);
+    setUnconfirmedCreate(false);
+    setEditingId(null);
+    setFormOpen(false);
+    setForm(emptyForm());
+    setReferences({ clients: [], leads: [], appointments: [], campaigns: [], services: [] });
+    if (scope.active) {
+      if (isRealWorkspace(scope.workspaceId)) readSaleRecovery();
+      else restoreStatus.current = "ready";
+    }
+    // Invalidate queued token lookups and late replies before passive cleanup.
+    return () => { scope.active = false; };
+  }, [scope]);
+
   useEffect(() => {
+    if (!saving && !unconfirmedCreate && !restoreError) return;
+    const warnBeforeLeaving = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
+    window.addEventListener("beforeunload", warnBeforeLeaving);
+    return () => window.removeEventListener("beforeunload", warnBeforeLeaving);
+  }, [saving, unconfirmedCreate, restoreError]);
+
+  useEffect(() => {
+    if (!isCurrentScope()) return;
     let cancelled = false;
     void (async () => {
       const workspaceId = readWorkspaceId();
@@ -432,7 +524,7 @@ export default function SalesPage() {
         // вовсе, и обещание «услуги подставляются в продажу» не выполняется.
         loadReferenceCollection("/api/crm/clinic-services", "services", workspaceScopedKey("negis_demo_clinic_services")),
       ]);
-      if (cancelled) return;
+      if (cancelled || !isCurrentScope()) return;
       setReferences({
         clients: clientsRaw.map(clientOption).filter((item): item is ClientOption => item !== null),
         leads: leadsRaw.map(leadOption).filter((item): item is LeadOption => item !== null),
@@ -442,10 +534,11 @@ export default function SalesPage() {
       });
     })();
     return () => { cancelled = true; };
-  }, []);
+  }, [scope]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
+    if (!isCurrentScope() || restoreStatus.current !== "ready" || submitLock.current || createAttempt.current) return;
     // Selection-2: a handoff belongs to the clinic it was made in.
     const prefillKey = workspaceScopedKey(DEAL_PREFILL_KEY);
     const raw = window.localStorage.getItem(prefillKey);
@@ -466,8 +559,8 @@ export default function SalesPage() {
         // эффект подстановки из справочника не трогает заполненную сумму.
         amountTenge: (() => {
           const raw = prefill.priceMinor ?? prefill.price_minor;
-          const minor = typeof raw === "number" && Number.isFinite(raw) && raw >= 0 ? raw : null;
-          return minor === null ? "" : String(Math.round(minor / 100));
+          const minor = typeof raw === "number" && Number.isSafeInteger(raw) && raw >= 0 ? raw : null;
+          return minor === null ? "" : amountMinorToTengeInput(minor);
         })(),
         metaCampaignLaunchId: str(prefill.metaCampaignLaunchId) || str(prefill.meta_campaign_launch_id),
       });
@@ -477,13 +570,13 @@ export default function SalesPage() {
     } finally {
       window.localStorage.removeItem(prefillKey);
     }
-  }, []);
+  }, [scope, restoreError]);
 
   // Цена из прайса для услуги, пришедшей префиллом: справочник загружается
   // позже префилла, поэтому подстановка ждёт его отдельным эффектом и не
   // трогает сумму, если оператор уже что-то ввёл.
   useEffect(() => {
-    if (!formOpen || editingId || !form.serviceId || form.amountTenge.trim()) return;
+    if (restoreStatus.current !== "ready" || submitLock.current || createAttempt.current || !formOpen || editingId || !form.serviceId || form.amountTenge.trim()) return;
     const service = references.services.find((item) => item.id === form.serviceId);
     if (service && service.basePriceMinor !== null) {
       setForm((current) =>
@@ -598,12 +691,16 @@ export default function SalesPage() {
   }
 
   function openAdd() {
+    if (!isCurrentScope()) return;
+    if (restoreStatus.current !== "ready" || submitLock.current || createAttempt.current) { setFormOpen(true); return; }
     setEditingId(null);
     setForm(emptyForm());
     setFormOpen(true);
   }
 
   function openEdit(deal: Deal) {
+    if (!isCurrentScope()) return;
+    if (restoreStatus.current !== "ready" || submitLock.current || createAttempt.current) { setFormOpen(true); return; }
     setEditingId(deal.id);
     setForm({
       title: deal.title,
@@ -621,6 +718,7 @@ export default function SalesPage() {
   }
 
   function handleLeadSelection(leadId: string) {
+    if (!isCurrentScope() || restoreStatus.current !== "ready" || submitLock.current || createAttempt.current) return;
     const lead = references.leads.find((item) => item.id === leadId);
     setForm((current) => ({
       ...current,
@@ -633,6 +731,7 @@ export default function SalesPage() {
   }
 
   function handleAppointmentSelection(appointmentId: string) {
+    if (!isCurrentScope() || restoreStatus.current !== "ready" || submitLock.current || createAttempt.current) return;
     const appointment = references.appointments.find((item) => item.id === appointmentId);
     if (!appointment) {
       setForm((current) => ({ ...current, appointmentId }));
@@ -652,13 +751,15 @@ export default function SalesPage() {
   }
 
   function submitForm() {
+    if (!isCurrentScope() || restoreStatus.current !== "ready" || submitLock.current || saving) return;
+    const retrying = createAttempt.current !== null;
     const title = form.title.trim();
-    if (!title) {
+    if (!retrying && !title) {
       toast.error("Укажите название услуги или продажи");
       return;
     }
     const amountMinor = tengeToAmountMinor(form.amountTenge);
-    if (amountMinor === null) {
+    if (!retrying && amountMinor === null) {
       toast.error("Укажите корректную сумму в тенге");
       return;
     }
@@ -670,7 +771,7 @@ export default function SalesPage() {
     const nextDeal: Deal = {
       id: existing?.id || `deal-${Date.now()}`,
       title,
-      amountMinor,
+      amountMinor: amountMinor ?? 0,
       currency: "KZT",
       status: form.status,
       paymentMethod: form.paymentMethod || undefined,
@@ -689,25 +790,127 @@ export default function SalesPage() {
 
     // Деньги — то место, где «сохранилось или нет» должно быть известно точно:
     // форма ждёт ответ сервера и при отказе остаётся с набранной суммой.
+    submitLock.current = true;
     setSaving(true);
+    const realCreate = !editingId && isRealWorkspace(scope.workspaceId);
     void (async () => {
       try {
-        const saved = editingId ? await updateItem(editingId, nextDeal) : await addItem(nextDeal);
+        const saved = editingId ? await updateItem(editingId, nextDeal)
+          : isRealWorkspace(scope.workspaceId) ? await createSale(nextDeal) : await addItem(nextDeal);
+        if (!isCurrentScope()) return;
         if (!saved) return;
         toast.success(
           editingId
             ? "Продажа обновлена"
-            : form.status === "paid"
+            : realCreate ? "Продажа сохранена" : form.status === "paid"
               ? "Оплаченная продажа добавлена"
               : "Продажа добавлена",
         );
         setFormOpen(false);
         setEditingId(null);
         setForm(emptyForm());
+      } catch (error) {
+        if (!isCurrentScope()) return;
+        toast.error(createAttempt.current?.uncertain
+          ? "Сохранение не подтверждено. Повторите проверку в этой форме."
+          : error instanceof Error ? error.message : "Не удалось сохранить продажу.");
       } finally {
-        setSaving(false);
+        if (isCurrentScope()) {
+          submitLock.current = false;
+          setSaving(false);
+        }
       }
     })();
+  }
+
+  function blockSaleRecovery(error: unknown) {
+    restoreStatus.current = "blocked";
+    setRestoreError(error instanceof Error ? error.message : "Не удалось восстановить повтор продажи. Новые продажи заблокированы.");
+    setFormOpen(true);
+  }
+
+  function readSaleRecovery(): boolean {
+    if (!isCurrentScope()) return false;
+    try {
+      if (!scope.actorId) throw new Error("Не удалось определить аккаунт продажи. Войдите снова.");
+      const storage = salesAttemptStorage();
+      if (!storage) throw new SalesAttemptRestoreError("unreadable");
+      const restored = restoreSalesCreateAttempt(storage, scope.workspaceId, scope.actorId);
+      if (restored && createAttempt.current && !sameSalesCreateIntent(restored, createAttempt.current)) {
+        throw new SalesAttemptRestoreError("invalid");
+      }
+      if (restored && !createAttempt.current) {
+        createAttempt.current = restored;
+        setEditingId(null);
+        setForm(formFromDeal(dealFromApi(restored.payload)));
+        setUnconfirmedCreate(true);
+        setFormOpen(true);
+      }
+      restoreStatus.current = "ready";
+      setRestoreError("");
+      return true;
+    } catch (error) {
+      blockSaleRecovery(error);
+      return false;
+    }
+  }
+
+  function retrySaleRecovery() {
+    if (!isCurrentScope() || submitLock.current) return;
+    readSaleRecovery();
+  }
+
+  async function createSale(deal: Deal): Promise<boolean> {
+    if (restoreStatus.current !== "ready") return false;
+    const previous = createAttempt.current;
+    if (!readSaleRecovery()) return false;
+    // Finding a stored attempt during a new submit requires an explicit retry.
+    if (!previous && createAttempt.current) return false;
+    const attempt = createAttempt.current ?? newSalesCreateAttempt(scope.workspaceId, scope.actorId, dealToApi(deal));
+    if (!isCurrentScope() || !isCurrentSalesAttempt(attempt, scope.workspaceId, scope.actorId)) return false;
+    const storage = salesAttemptStorage();
+    createAttempt.current = attempt;
+    if (!storage || !persistSalesCreateAttempt(storage, attempt)) {
+      blockSaleRecovery(new SalesAttemptRestoreError("unreadable"));
+      throw new Error("Браузер не сохранил безопасный ключ повтора. Продажа не отправлена; разрешите хранилище вкладки и повторите.");
+    }
+    const isCurrent = () => isCurrentScope() && createAttempt.current === attempt;
+    let response: Response | undefined;
+    let body: unknown = null;
+    try {
+      response = await crmFetch(`/api/crm/deals?workspaceId=${encodeURIComponent(attempt.workspaceId)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        expectedUserId: attempt.actorId,
+        dispatchGuard: isCurrent,
+        body: JSON.stringify({ ...attempt.payload, requestKey: attempt.requestKey }),
+      });
+      body = await response.json();
+      if (!isCurrent()) return false;
+      const saved = (response.status === 200 || response.status === 201) ? confirmedSalesCreate(body) : null;
+      if (!saved) throw new Error(str(asRecord(body).error) || "Сервер не подтвердил сохранённую продажу.");
+      setItems(current => mergeCreatedSale(current, dealFromApi(saved)));
+      clearPersistedSalesCreateAttempt(storage, attempt);
+      createAttempt.current = null;
+      setUnconfirmedCreate(false);
+      return true;
+    } catch (error) {
+      if (!isCurrent()) return false;
+      if (canReleaseSalesAttempt(attempt, response?.status ?? 0, body)) {
+        clearPersistedSalesCreateAttempt(storage, attempt);
+        createAttempt.current = null;
+        setUnconfirmedCreate(false);
+      } else {
+        attempt.uncertain = true;
+        persistSalesCreateAttempt(storage, attempt);
+        setUnconfirmedCreate(true);
+      }
+      throw error;
+    }
+  }
+
+  function closeSaleForm() {
+    if (isCurrentScope() && restoreStatus.current === "ready" && !submitLock.current && !createAttempt.current?.uncertain) setFormOpen(false);
   }
 
   const fallbackOption = (value: string, options: Array<{ id: string }>, label: string) =>
@@ -952,17 +1155,17 @@ export default function SalesPage() {
       </div>
 
       {formOpen ? (
-        <div className="fixed inset-0 z-[80] flex items-center justify-center p-4" style={{ background: "rgba(15,23,42,0.35)" }} onClick={() => setFormOpen(false)}>
+        <div className="fixed inset-0 z-[80] flex items-center justify-center p-4" style={{ background: "rgba(15,23,42,0.35)" }} onClick={closeSaleForm}>
           <div className="negis-glass max-h-[90vh] w-full max-w-2xl overflow-y-auto p-5 sm:p-6" style={{ background: "var(--negis-surface)" }} onClick={(event) => event.stopPropagation()}>
             <div className="flex items-center justify-between gap-3">
               <div>
                 <p className="text-xs font-black uppercase tracking-[0.12em]" style={{ color: "var(--negis-primary)" }}>Продажи</p>
                 <h2 className="mt-1 text-lg font-black" style={{ color: "var(--negis-text)" }}>{editingId ? "Изменить продажу" : "Новая продажа"}</h2>
               </div>
-              <button type="button" className="neu-btn px-3 py-2" onClick={() => setFormOpen(false)} aria-label="Закрыть"><X size={16} /></button>
+              <button type="button" className="neu-btn px-3 py-2" disabled={saving || unconfirmedCreate || Boolean(restoreError)} onClick={closeSaleForm} aria-label="Закрыть"><X size={16} /></button>
             </div>
 
-            <div className="mt-5 grid gap-4">
+            <fieldset className="mt-5 grid min-w-0 gap-4" disabled={saving || unconfirmedCreate || Boolean(restoreError)}>
               {/*
                 Выбор услуги появляется только когда справочник есть и доступен.
                 Он заполняет название и цену, но оставляет оба поля
@@ -1072,13 +1275,17 @@ export default function SalesPage() {
                 <span className="mb-1 block text-xs font-black uppercase tracking-[0.05em]" style={{ color: "var(--negis-muted)" }}>Примечание</span>
                 <textarea style={{ ...inputStyle, minHeight: 92, resize: "vertical" }} value={form.notes} onChange={(event) => setForm((current) => ({ ...current, notes: event.target.value }))} placeholder="Детали оплаты или договорённости с клиентом" />
               </label>
-            </div>
+            </fieldset>
+
+            {restoreError ? <p role="alert" className="mt-4 text-sm" style={{ color: "var(--negis-error)" }}>{restoreError}</p>
+              : unconfirmedCreate ? <p role="status" className="mt-4 text-sm" style={{ color: "var(--negis-warning)" }}>Сохранение не подтверждено. Проверьте продажу повторно.</p> : null}
 
             <div className="mt-5 flex flex-col gap-2 sm:flex-row sm:justify-end">
-              <button type="button" className="neu-btn justify-center" onClick={() => setFormOpen(false)}>Отмена</button>
-              <button type="button" className="neu-btn-primary justify-center" disabled={saving} onClick={submitForm}>
-                {saving ? "Сохраняю…" : editingId ? "Сохранить" : "Добавить продажу"}
-              </button>
+              <button type="button" className="neu-btn justify-center" disabled={saving || unconfirmedCreate || Boolean(restoreError)} onClick={closeSaleForm}>Отмена</button>
+              {restoreError ? <button type="button" className="neu-btn-primary justify-center" disabled={saving} onClick={retrySaleRecovery}><RotateCcw size={16} />Повторить чтение</button>
+                : <button type="button" className="neu-btn-primary justify-center" disabled={saving} onClick={submitForm}>
+                {saving ? "Сохраняю…" : unconfirmedCreate ? "Проверить сохранение" : editingId ? "Сохранить" : "Добавить продажу"}
+              </button>}
             </div>
           </div>
         </div>

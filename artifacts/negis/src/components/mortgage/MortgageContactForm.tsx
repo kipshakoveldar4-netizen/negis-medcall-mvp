@@ -1,21 +1,23 @@
-import { useId, useState, type FormEvent } from "react";
+import { useEffect, useId, useState, type FormEvent } from "react";
 import { Loader2, Save, X } from "lucide-react";
 import { Dialog, DialogClose, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { phoneDigits } from "@/lib/phone";
+import { useAuth } from "@/contexts/AuthContext";
 import { mortgageButtonClass, mortgageContactStatus, mortgageErrorMessage, mortgageInputClass, mortgagePrimaryClass } from "./MortgagePrimitives";
-import type { MortgageContact, MortgageMember } from "../../../../../lib/crm/mortgage-contract";
+import type { MortgageContact } from "../../../../../lib/crm/mortgage-contract";
 
 export type MortgageContactFields = {
   name: string; phone: string; notes: string; status?: string; responsibleUserId?: string;
 };
 
-export function MortgageContactForm({ contact, members, isCurrent, onSubmit, onClose }: {
+export function MortgageContactForm({ contact, request, isCurrent, onSubmit, onClose }: {
   contact?: MortgageContact;
-  members: MortgageMember[];
+  request: (path: string, init?: RequestInit) => Promise<Response>;
   isCurrent: () => boolean;
   onSubmit: (fields: MortgageContactFields) => Promise<void>;
   onClose: () => void;
 }) {
+  const { clinicId, userRole } = useAuth();
   const id = useId();
   const [name, setName] = useState(contact?.name || "");
   const [phone, setPhone] = useState(contact?.phone || "");
@@ -24,12 +26,47 @@ export function MortgageContactForm({ contact, members, isCurrent, onSubmit, onC
   const [responsibleUserId, setResponsibleUserId] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const [assignees, setAssignees] = useState<Array<{ id: string; name: string }>>([]);
+  const [assigneesError, setAssigneesError] = useState("");
+  const [assigneesLoading, setAssigneesLoading] = useState(!contact);
+  useEffect(() => {
+    if (contact) return;
+    let active = true;
+    const controller = new AbortController();
+    const current = () => active && isCurrent();
+    setAssignees([]);
+    setResponsibleUserId("");
+    setAssigneesError("");
+    setAssigneesLoading(true);
+    void (async () => {
+      try {
+        if (!clinicId || !["owner", "admin"].includes(userRole || "") || !current()) throw new Error("Нет доступа к списку ответственных.");
+        const response = await request(`/api/crm/lead-assignees?${new URLSearchParams({ workspaceId: clinicId })}`, { signal: controller.signal });
+        const body = await response.json();
+        if (!current()) return;
+        const rows: unknown = body?.data?.assignees;
+        if (!response.ok || body?.success !== true || body?.mode !== "supabase" || !Array.isArray(rows)
+          || !rows.every((row) => row && typeof row.id === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(row.id) && typeof row.name === "string")
+          || new Set(rows.map((row) => row.id)).size !== rows.length) throw new Error("Не удалось загрузить ответственных.");
+        setAssignees(rows);
+      } catch {
+        if (current()) setAssigneesError("Не удалось загрузить ответственных.");
+      } finally {
+        if (current()) setAssigneesLoading(false);
+      }
+    })();
+    return () => { active = false; controller.abort(); };
+  }, [clinicId, userRole, contact, request, isCurrent]);
   const statuses = ["new", "in_progress", "booked", "lost"];
   if (!statuses.includes(status)) statuses.push(status);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (saving || !isCurrent()) return;
+    if (!contact && responsibleUserId && !assignees.some((member) => member.id === responsibleUserId)) {
+      setError("Выберите доступного ответственного.");
+      return;
+    }
     if (!name.trim()) {
       setError("Укажите имя клиента.");
       return;
@@ -76,10 +113,11 @@ export function MortgageContactForm({ contact, members, isCurrent, onSubmit, onC
             </select>
           </div> : <div className="space-y-1.5">
             <label htmlFor={`${id}-responsible`} className="block text-xs font-medium">Ответственный</label>
-            <select id={`${id}-responsible`} className={mortgageInputClass} value={responsibleUserId} onChange={(event) => setResponsibleUserId(event.target.value)}>
+            <select id={`${id}-responsible`} className={mortgageInputClass} value={responsibleUserId} disabled={assigneesLoading || Boolean(assigneesError)} onChange={(event) => setResponsibleUserId(event.target.value)}>
               <option value="">Не назначен</option>
-              {members.filter((member) => member.status === "active" && member.role === "lead_manager").map((member) => <option key={member.id} value={member.id}>{member.name || "Без имени"}</option>)}
+              {assignees.map((member) => <option key={member.id} value={member.id}>{member.name || "Без имени"}</option>)}
             </select>
+            {assigneesError && <p role="alert" className="text-sm text-red-700">{assigneesError}</p>}
           </div>}
           <div className="space-y-1.5">
             <label htmlFor={`${id}-notes`} className="block text-xs font-medium">Заметки</label>

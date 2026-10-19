@@ -120,6 +120,51 @@ test("mortgage team preview remains synthetic and restricts analytics to owner/a
 });
 
 let arrivalImport = 0;
+test("sale retry opt-in only simulates the same immutable keyed sale and leaves other writes blocked", async () => {
+  const previous = fixtureWindow.location;
+  fixtureWindow.location = { search: "?salesRetry=lost-response", pathname: "/sales" };
+  try {
+    const isolated = await import("./crm-browser-mocks.ts?sales-retry");
+    const sale = { requestKey: "00000000-0000-4000-8000-000000000080", title: "Synthetic pending sale",
+      amountMinor: 700050, currency: "KZT", status: "pending" };
+    const post = body => isolated.crmFetch("/api/crm/deals", { method: "POST", body: JSON.stringify(body) });
+    await assert.rejects(() => post(sale), /reply lost/);
+    assert.equal((await post({ ...sale, amountMinor: 1 })).status, 409);
+    const { data } = await (await post(sale)).json();
+    assert.equal(data.replayed, true);
+    assert.equal(data.item.amountMinor, 700050);
+    assert.equal(data.item.status, "pending");
+    assert.equal((await isolated.crmFetch("/api/crm/appointments", { method: "POST", body: "{}" })).status, 403);
+    await assert.rejects(() => isolated.crmFetch("https://example.invalid/api/crm/deals"), /External request forbidden/);
+  } finally { fixtureWindow.location = previous; }
+});
+
+test("synthetic admin can explicitly assign a contact to herself without adding a manager or widening manager visibility", async () => {
+  const previous = fixtureWindow.location;
+  fixtureWindow.location = { search: "?fixturePurpose=mortgage_leads&fixtureRole=admin", pathname: "/clients" };
+  try {
+    const isolated = await import("./crm-browser-mocks.ts?admin-self");
+    const context = (await (await isolated.crmFetch("/api/crm/auth-context")).json()).data;
+    assert.equal(context.role, "admin");
+    assert.equal(context.purpose, "mortgage_leads");
+    const assignees = (await (await isolated.crmFetch("/api/crm/lead-assignees")).json()).data.assignees;
+    assert.ok(assignees.some(row => row.id === context.staffUserId));
+    const { data: { item } } = await (await isolated.crmFetch("/api/crm/leads", { method: "POST", body: JSON.stringify({
+      name: "Тестовый клиент администратора", phone: "+12025550143", responsibleUserId: context.staffUserId,
+    }) })).json();
+    assert.equal(item.responsibleUserId, context.staffUserId);
+    const { mortgageBrowserRequest } = await import("./mortgage-browser-store.ts");
+    const url = new URL("http://fixture.invalid/api/crm/mortgage-workspace");
+    const snapshot = (await (await mortgageBrowserRequest(url, undefined, "admin")).json()).data;
+    assert.equal(snapshot.memberMetrics.find(row => row.id === context.staffUserId).assignedLeads, 1);
+    assert.equal(snapshot.metrics.activeManagers, 2);
+    const restricted = (await (await mortgageBrowserRequest(url, undefined, "lead_manager")).json()).data;
+    assert.equal(restricted.contacts.some(row => row.id === item.id), false);
+    assert.equal(restricted.members.some(row => row.id === context.staffUserId), false);
+    await assert.rejects(() => isolated.crmFetch("https://example.invalid/api/crm/leads"), /External request forbidden/);
+  } finally { fixtureWindow.location = previous; }
+});
+
 async function withArrivalLocation(location, check) {
   const before = fixtureWindow.location;
   fixtureWindow.location = { search: "", protocol: "http:", hostname: "127.0.0.1", ...location };

@@ -205,3 +205,130 @@ for (const file of [mortgage, mortgageAnalytics, "components/mortgage/unsafe.tsx
     });
   }
 }
+
+const activityDialog = "components/mortgage/ActivityDialog.tsx";
+const contactForm = "components/mortgage/MortgageContactForm.tsx";
+const calendar = "pages/MortgageCalendar.tsx";
+const tasks = "pages/MortgageTasks.tsx";
+const clients = "pages/MortgageClients.tsx";
+const contactDetail = "components/mortgage/MortgageContactDetail.tsx";
+const boundSources = new Map(mortgageSources);
+for (const file of [activityDialog, contactForm, calendar, tasks, clients, contactDetail]) {
+  boundSources.set(file, await readFile(new URL(`../../artifacts/negis/src/${file}`, import.meta.url), "utf8"));
+}
+const rejectsBoundTransport = (changed: ReadonlyMap<string, string>) => {
+  const offenders = crmTransportOffenders(changed);
+  assert.ok(offenders.some((entry) => entry.includes("unverified scoped mortgage transport chain")), offenders.join("\n"));
+};
+
+test("actual activity forwarding and both contact-form parents use the verified mortgage session", () => {
+  assert.deepEqual(crmTransportOffenders(boundSources), []);
+});
+
+for (const [file, initializer] of [
+  [calendar, "const workspace = useMortgageWorkspace(query);"],
+  [tasks, "const workspace = useMortgageWorkspace({ leadId, days: 90 });"],
+  [clients, "const workspace = useMortgageWorkspace(query);"],
+  [contactDetail, "const workspace = useMortgageWorkspace({ leadId });"],
+] as const) {
+  for (const [name, from, to] of [
+    ["fake hook import", 'from "@/lib/mortgage-workspace"', 'from "@/lib/not-scoped"'],
+    ["fake hook call", initializer, initializer.replace("useMortgageWorkspace(", "unsafeWorkspace(")],
+    ["reassigned hook", initializer, `useMortgageWorkspace = unsafeHook; ${initializer}`],
+    ["shadowed hook", initializer, `const useMortgageWorkspace = unsafeHook; ${initializer}`],
+    ["mutable workspace", initializer, initializer.replace("const workspace", "let workspace")],
+    ["reassigned transport", initializer, `${initializer} workspace.request = fetch;`],
+    ["object transport override", initializer, `${initializer} Object.assign(workspace, { request: fetch });`],
+    ["escaped transport", initializer, `${initializer} const stolen = workspace.request;`],
+  ] as const) {
+    test(`bound mortgage parent ${file} rejects ${name}`, () => {
+      rejectsBoundTransport(mutate(file, from, to, boundSources));
+    });
+  }
+  const prop = file === calendar || file === tasks ? "workspace={workspace}" : "request={workspace.request}";
+  for (const [name, value] of [
+    ["wrong transport", prop.startsWith("workspace") ? "workspace={unsafeWorkspace}" : "request={fetch}"],
+    ["spread before prop", `{...unsafeProps} ${prop}`],
+    ["spread after prop", `${prop} {...unsafeProps}`],
+    ["duplicate prop", `${prop} ${prop}`],
+    ["shadowed prop receiver", prop.startsWith("workspace")
+      ? "workspace={(() => { const workspace = unsafeWorkspace; return workspace; })()}"
+      : "request={(() => { const workspace = unsafeWorkspace; return workspace.request; })()}"],
+  ] as const) {
+    test(`bound mortgage parent ${file} rejects ${name}`, () => {
+      rejectsBoundTransport(mutate(file, prop, value, boundSources));
+    });
+  }
+  test(`bound mortgage proof requires the actual parent ${file}`, () => {
+    const changed = new Map(boundSources);
+    changed.delete(file);
+    rejectsBoundTransport(changed);
+  });
+}
+
+for (const [name, file, from, to] of [
+  ["default dialog props", activityDialog, "props: ActivityDialogProps)", "props: ActivityDialogProps = unsafeProps)"],
+  ["default form workspace", activityDialog, "function ActivityForm({ workspace,", "function ActivityForm({ workspace = unsafeWorkspace,"],
+  ["default form props", activityDialog, "ActivityDialogProps & { timeZone: string })", "ActivityDialogProps & { timeZone: string } = unsafeProps)"],
+  ["reassigned dialog workspace", activityDialog, "if (!props.open", "props.workspace = unsafeWorkspace; if (!props.open"],
+  ["escaped dialog workspace", activityDialog, "if (!props.open", "Object.assign(props.workspace, { request: fetch }); if (!props.open"],
+  ["wrong form forwarding", activityDialog, "{...props} timeZone=", "{...unsafeProps} timeZone="],
+  ["form spread override", activityDialog, "{...props} timeZone=", "{...props} {...unsafeProps} timeZone="],
+  ["form explicit override", activityDialog, "{...props} timeZone=", "{...props} workspace={unsafeWorkspace} timeZone="],
+  ["form override before spread", activityDialog, "{...props} timeZone=", "workspace={unsafeWorkspace} {...props} timeZone="],
+  ["form request reassignment", activityDialog, "const initialLead =", "workspace.request = fetch; const initialLead ="],
+  ["form object override", activityDialog, "const initialLead =", "Object.assign(workspace, { request: fetch }); const initialLead ="],
+  ["form transport alias", activityDialog, "const initialLead =", "const stolen = workspace.request; const initialLead ="],
+  ["shadowed form workspace", activityDialog, "void (async () => {", "void (async (workspace = unsafeWorkspace) => {"],
+  ["raw activity fetch", activityDialog, "await workspace.request(`/api/crm/", "await fetch(`/api/crm/"],
+  ["default contact request", contactForm, "{ contact, request,", "{ contact, request = fetch,"],
+  ["reassigned contact request", contactForm, "const id = useId();", "request = fetch; const id = useId();"],
+  ["escaped contact request", contactForm, "const id = useId();", "const stolen = request; const id = useId();"],
+  ["shadowed contact request", contactForm, "void (async () => {", "void (async (request = fetch) => {"],
+  ["raw contact fetch", contactForm, "await request(`/api/crm/", "await fetch(`/api/crm/"],
+] as const) {
+  test(`bound mortgage consumers reject ${name}`, () => {
+    rejectsBoundTransport(mutate(file, from, to, boundSources));
+  });
+}
+
+for (const [name, extra] of [
+  ["additional activity parent", `import { ActivityDialog } from "@/components/mortgage/ActivityDialog";
+    const Unsafe = () => <ActivityDialog workspace={unsafeWorkspace} />;`],
+  ["additional contact parent", `import { MortgageContactForm } from "@/components/mortgage/MortgageContactForm";
+    const Unsafe = () => <MortgageContactForm request={fetch} />;`],
+  ["aliased activity import", `import { ActivityDialog as Form } from "@/components/mortgage/ActivityDialog";
+    const Unsafe = () => <Form workspace={unsafeWorkspace} />;`],
+  ["default activity import", `import Form from "@/components/mortgage/ActivityDialog";
+    const Unsafe = () => <Form workspace={unsafeWorkspace} />;`],
+  ["namespace contact import", `import * as forms from "@/components/mortgage/MortgageContactForm";
+    const Unsafe = () => <forms.MortgageContactForm request={fetch} />;`],
+  ["contact reexport", 'export * from "@/components/mortgage/MortgageContactForm";'],
+] as const) {
+  test(`bound mortgage proof rejects ${name}`, () => {
+    rejectsBoundTransport(new Map([...boundSources, ["components/unsafe-parent.tsx", extra]]));
+  });
+}
+
+for (const [file, extra] of [
+  [calendar, 'function Unsafe() { return <ActivityDialog workspace={unsafeWorkspace} />; }'],
+  [clients, 'function Unsafe() { return <MortgageContactForm request={fetch} />; }'],
+  [activityDialog, 'function Unsafe() { return <ActivityForm workspace={unsafeWorkspace} />; }'],
+] as const) {
+  test(`a second caller in the same file is not blessed: ${file}`, () => {
+    rejectsBoundTransport(new Map(boundSources).set(file, boundSources.get(file)! + "\n" + extra));
+  });
+}
+
+for (const file of [activityDialog, contactForm, calendar, tasks, clients, contactDetail, "components/unrelated.tsx"]) {
+  for (const extra of [
+    'function Unsafe(request: Function) { return request("/api/crm/leads"); }',
+    'fetch("/api/crm/leads");',
+    'function Unsafe(workspace: any) { return workspace.request("/api/crm/leads"); }',
+  ]) {
+    test(`bound proof approves only its own call positions in ${file}: ${extra}`, () => {
+      const changed = new Map(boundSources).set(file, (boundSources.get(file) ?? "") + "\n" + extra);
+      assert.ok(crmTransportOffenders(changed).some((entry) => entry.startsWith(file + ":")));
+    });
+  }
+}

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useId, useRef, useState, type FormEvent } from "react";
 import { CalendarDays, Check, Loader2, Save, Search, UserRound, X } from "lucide-react";
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { useAuth } from "@/contexts/AuthContext";
 import {
   mortgageButtonClass, mortgageDateTimeToIso, mortgageFieldClass, mortgageLocalDateTime, mortgagePrimaryClass,
   mortgagePriorityLabels, mortgageStatusLabels, useMortgageWorkspace,
@@ -42,6 +43,7 @@ function nextHour(local: string): string {
 }
 
 function ActivityForm({ workspace, activity, kind, leadId, initialStartsAt, onOpenChange, timeZone }: ActivityDialogProps & { timeZone: string }) {
+  const { clinicId, userRole } = useAuth();
   const id = useId();
   const initialLead = activity?.leadId || leadId || "";
   const initialStart = mortgageLocalDateTime(activity?.startsAt, timeZone) || initialStartsAt || mortgageLocalDateTime(new Date().toISOString(), timeZone);
@@ -64,7 +66,28 @@ function ActivityForm({ workspace, activity, kind, leadId, initialStartsAt, onOp
   const [requestId] = useState(() => crypto.randomUUID());
   const savingRef = useRef(false);
   const alive = useRef(true);
+  const [selfAdmin, setSelfAdmin] = useState<{ workspaceId: string; staffUserId: string } | null>(null);
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
+  useEffect(() => {
+    setSelfAdmin(null);
+    if (kind !== "meeting" || userRole !== "admin" || !clinicId || !workspace.isCurrent()) return;
+    let active = true;
+    const controller = new AbortController();
+    void (async () => {
+      try {
+        const response = await workspace.request(`/api/crm/auth-context?${new URLSearchParams({ workspaceId: clinicId })}`, { signal: controller.signal });
+        const body = await response.json();
+        if (!active || !workspace.isCurrent()) return;
+        const data = body?.data;
+        if (response.ok && body?.success === true && body?.mode === "supabase" && data?.workspaceId === clinicId
+          && data?.purpose === "mortgage_leads" && data?.role === "admin" && typeof data?.staffUserId === "string"
+          && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(data.staffUserId)) {
+          setSelfAdmin({ workspaceId: clinicId, staffUserId: data.staffUserId });
+        }
+      } catch { /* Only a verified response can enable the admin-self exception. */ }
+    })();
+    return () => { active = false; controller.abort(); };
+  }, [clinicId, userRole, kind, workspace.request, workspace.isCurrent]);
   const loaded = useCallback((contact: MortgageContact | null, loadError: string) => {
     setSelected(contact);
     setContactError(loadError);
@@ -83,14 +106,16 @@ function ActivityForm({ workspace, activity, kind, leadId, initialStartsAt, onOp
     }, 250);
     return () => { active = false; window.clearTimeout(timeout); };
   }, [search, workspace.searchContacts, workspace.isCurrent]);
-  const manager = workspace.data?.members.find((member) => member.id === selected?.responsibleUserId && member.role === "lead_manager" && member.status === "active");
+  const manager = workspace.data?.members.find((member) => member.id === selected?.responsibleUserId && member.status === "active"
+    && (member.role === "lead_manager" || (member.role === "admin" && userRole === "admin"
+      && selfAdmin !== null && selfAdmin.workspaceId === clinicId && member.id === selfAdmin.staffUserId)));
   const allowedStatuses: MortgageActivityStatus[] = kind === "meeting" ? ["open", "done", "cancelled", "missed"] : ["open", "in_progress", "done", "cancelled"];
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     if (savingRef.current || !workspace.isCurrent()) return;
     setError("");
     if (!selected || selected.id !== selectedId) { setError("Выберите доступного клиента."); return; }
-    if (kind === "meeting" && !manager) { setError("Для встречи клиенту нужен назначенный активный менеджер."); return; }
+    if (kind === "meeting" && !manager) { setError("Для встречи клиенту нужен активный менеджер или вы как ответственный администратор."); return; }
     if (!title.trim()) { setError("Укажите название."); return; }
     if (!allowedStatuses.includes(status)) { setError("Выберите допустимый статус."); return; }
     savingRef.current = true;
@@ -142,7 +167,7 @@ function ActivityForm({ workspace, activity, kind, leadId, initialStartsAt, onOp
               {searching ? <p className="py-2 text-sm text-[var(--negis-muted)]">Поиск...</p> : searchError ? <p role="alert" className="text-sm text-red-700">{searchError}</p> : results.length === 0 ? <p className="py-2 text-sm text-[var(--negis-muted)]">Клиенты не найдены</p> : results.map((contact) => <button key={contact.id} type="button" className="flex w-full min-w-0 items-center gap-2 border-b border-[var(--negis-border)] px-2 py-3 text-left text-sm hover:bg-[var(--negis-surface-2)]" onClick={() => { setSelected(null); setSelectedId(contact.id); setContactError(""); }}><span className="min-w-0 flex-1 break-words">{contact.name}<span className="block text-xs text-[var(--negis-muted)]">{contact.phone}</span></span><Check className="h-4 w-4 shrink-0" /></button>)}
             </div>
           </>}
-          {selected && <p className={`break-words text-sm ${kind === "meeting" && !manager ? "text-amber-800" : "text-[var(--negis-muted)]"}`}>Ответственный: {selected.responsibleName || "не назначен"}{kind === "meeting" && !manager ? ". Нет активного менеджера." : ""}</p>}
+          {selected && <p className={`break-words text-sm ${kind === "meeting" && !manager ? "text-amber-800" : "text-[var(--negis-muted)]"}`}>Ответственный: {selected.responsibleName || "не назначен"}{kind === "meeting" && !manager ? ". Нет доступного ответственного." : ""}</p>}
         </div>
         {kind === "meeting" ? <div className="grid min-w-0 gap-3 sm:grid-cols-2">
           <label className="grid min-w-0 gap-1.5 text-sm" htmlFor={`${id}-start`}>Начало<input id={`${id}-start`} className={mortgageFieldClass} type="datetime-local" value={startsAt} onInput={(event) => setStartsAt(event.currentTarget.value)} onChange={(event) => setStartsAt(event.target.value)} required /></label>

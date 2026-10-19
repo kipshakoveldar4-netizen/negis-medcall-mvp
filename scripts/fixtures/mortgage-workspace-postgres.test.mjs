@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
@@ -8,23 +9,50 @@ import { fileURLToPath } from 'node:url';
 import { startDisposablePostgres } from './disposable-postgres.mjs';
 
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../..');
-const files=['009_medcall_mvp_persistence.sql','010_staff_ready_crm.sql','011_staff_auth_foundation.sql',
-  '013_release_admin_settings.sql','014_meta_ad_launches.sql','019_crm_lead_pipeline_foundation.sql',
-  '028_leads_phone_normalized.sql','038_staff_join_requests.sql','069_assigned_lead_manager.sql','070_mortgage_workspace.sql'];
 const observed=p=>p.then(value=>({value}),error=>({error}));
 const read=async(c,p,lead=null)=>(await c.query('select public.read_mortgage_workspace($1,$2,$3,\'\',0,$4,null,null,30) as result',[p.w,p.id,p.auth,lead])).rows[0].result;
 const save=async(c,p,payload,id=null,version=null,key=randomUUID())=>(await c.query(
   'select public.save_mortgage_activity($1,$2,$3,$4,$5,$6,$7::jsonb) as result',[p.w,p.id,p.auth,id,version,key,JSON.stringify(payload)])).rows[0].result;
+const saveSelfLead=async(c,p,row={},id=null)=>(await c.query(
+  'select public.save_mortgage_admin_self_lead($1,$2,$3,$4,$5::jsonb) as result',
+  [p.w,p.id,p.auth,id,JSON.stringify({responsible_user_id:p.id,...row})])).rows[0].result;
 const task=(lead,title='Synthetic task')=>({kind:'task',leadId:lead,title,notes:'Synthetic notes',status:'open',priority:'normal',startsAt:null,endsAt:null,dueAt:null});
 const meeting=(lead,start='2027-01-10T10:00:00Z',end='2027-01-10T11:00:00Z')=>({...task(lead,'Synthetic meeting'),kind:'meeting',startsAt:start,endsAt:end});
 async function denied(operation,code){ const r=await observed(operation); assert.equal(r.error?.code,code,r.error?.message||'RPC unexpectedly succeeded'); }
+async function deniedInTransaction(db,operation,code){
+  await db.query('savepoint expected_denial');
+  try { await denied(operation(),code); }
+  finally { await db.query('rollback to savepoint expected_denial');await db.query('release savepoint expected_denial'); }
+}
+async function waitForLock(db,waiter,holder){
+  for(let i=0;i<200;i++){
+    const blockers=(await db.query('select pg_blocking_pids($1) as blockers',[waiter])).rows[0].blockers;
+    if(blockers.includes(holder)) return;
+    await delay(15);
+  }
+  assert.fail('A real PostgreSQL lock wait on the expected holder must be observed');
+}
 
 test('expanded mortgage CRM on a fresh isolated PostgreSQL cluster',{timeout:300000},async t=>{
+  const available=(await readdir(path.join(root,'migrations'))).filter(file=>/^\d{3}_.+\.sql$/.test(file)).sort();
+  const upgrade=available.filter(file=>file.startsWith('077_'));
+  assert.equal(upgrade.length,1,'Main-owned SQL077 must be available before this fixture can verify admin self meetings');
+  const files=available.filter(file=>Number(file.slice(0,3))>=9&&Number(file.slice(0,3))<=75).concat(upgrade);
   const f=await startDisposablePostgres();
   try {
     const db=await f.connect();
     await db.query('create role anon; create role authenticated; create role service_role bypassrls; grant usage on schema public to anon,authenticated,service_role;');
-    for(const file of files) await db.query(await readFile(path.join(root,'migrations',file),'utf8'));
+    // Historical media migrations expect this Supabase catalogue, not a service.
+    await db.query('create schema storage; create table storage.buckets(id text primary key,name text,public boolean,file_size_limit bigint,allowed_mime_types text[]);');
+    for(const file of files) {
+      // Pin historical SQL; only the new 077 candidate comes from this worktree.
+      const source=/^(059|065|070)_/.test(file)
+        ? execFileSync('git',['show',`HEAD:migrations/${file}`],{cwd:root,encoding:'utf8',windowsHide:true})
+        : await readFile(path.join(root,'migrations',file),'utf8');
+      await db.query(source);
+      if(file===upgrade[0]) await db.query(source);
+    }
+    t.diagnostic('Synthetic loopback PostgreSQL only; committed 059/065/070, working 077, no SQL076');
     const w=randomUUID(),foreign=randomUUID();
     for(const id of [w,foreign]) {
       await db.query('insert into public.workspaces(id,name) values($1,\'Synthetic mortgage\')',[id]);
@@ -40,7 +68,7 @@ test('expanded mortgage CRM on a fresh isolated PostgreSQL cluster',{timeout:300
       values($1,$2,$3,$4,'new',$5)`,[id,i===4?foreign:w,`Contact ${i}`,`+7700000000${i}`,i<2?a.id:i===2?b.id:i===3?null:outsider.id]);
     const [leadA,leadA2,leadB,unassigned,foreignLead]=leads;
 
-    await t.test('three tables deny browser CRUD and three RPCs deny direct execution',async()=>{
+    await t.test('three activity tables deny browser CRUD and all four mortgage RPCs deny direct execution',async()=>{
       for(const table of ['mortgage_activities','mortgage_activity_events','mortgage_activity_requests']) {
         const r=(await db.query("select relrowsecurity as rls,has_table_privilege('anon',$1,'SELECT') as a,has_table_privilege('authenticated',$1,'INSERT') as b from pg_class where oid=$1::regclass",[`public.${table}`])).rows[0];
         assert.deepEqual(r,{rls:true,a:false,b:false});
@@ -48,13 +76,13 @@ test('expanded mortgage CRM on a fresh isolated PostgreSQL cluster',{timeout:300
           assert.equal((await db.query('select has_table_privilege($1,$2,$3) as permitted',[role,`public.${table}`,permission])).rows[0].permitted,false);
         }
       }
-      const functions=(await db.query("select p.oid::regprocedure::text as signature from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public' and p.proname in ('mortgage_actor_role','read_mortgage_workspace','save_mortgage_activity')")).rows;
-      assert.equal(functions.length,3);
+      const functions=(await db.query("select p.oid::regprocedure::text as signature from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public' and p.proname in ('mortgage_actor_role','read_mortgage_workspace','save_mortgage_activity','save_mortgage_admin_self_lead')")).rows;
+      assert.equal(functions.length,4);
       for(const fn of functions)for(const role of ['anon','authenticated','service_role']){
         assert.equal((await db.query('select has_function_privilege($1,$2,\'EXECUTE\') as permitted',[role,fn.signature])).rows[0].permitted,role==='service_role');
       }
       const c=await f.connect();await c.query('set role authenticated');
-      await denied(read(c,owner),'42501');await c.end();
+      await denied(read(c,owner),'42501');await denied(saveSelfLead(c,admin,{full_name:'Synthetic denied browser'}),'42501');await c.end();
       const service=await f.connect();await service.query('set role service_role');
       assert.equal((await read(service,owner)).contactsTotal,4);await service.end();
     });
@@ -214,6 +242,139 @@ test('expanded mortgage CRM on a fresh isolated PostgreSQL cluster',{timeout:300
       assert.deepEqual(manager.memberMetrics,[]);assert.deepEqual(manager.members.map(m=>m.id),[a.id]);
       assert.deepEqual(activity(manager),current);assert.deepEqual(events(manager),events(after));
     });
+    await t.test('current admin self meetings preserve distribution, own workload, recorded actors and manager isolation',async()=>{
+      await db.query('begin');
+      try {
+        const before=await read(db,admin),ownerLead=randomUUID(),peer={...admin,id:randomUUID(),auth:randomUUID()};
+        await db.query("insert into public.staff_users(id,workspace_id,auth_user_id,email,full_name,role,status) values($1,$2,$3,'synthetic-peer@example.invalid','Synthetic peer','admin','active')",[peer.id,w,peer.auth]);
+        const own=(await saveSelfLead(db,admin,{full_name:'Synthetic self contact',phone:'+77000008888'})).id;
+        const own2=(await saveSelfLead(db,admin,{full_name:'Synthetic second self contact',phone:'+77000008889'})).id;
+        await db.query("insert into public.leads(id,workspace_id,full_name,phone,status,responsible_user_id) values($1,$2,'Synthetic owner contact','+77000008887','new',$3)",[ownerLead,w,owner.id]);
+        const start=Date.now()+3600000,iso=offset=>new Date(start+offset).toISOString();
+        const payload=meeting(own,iso(0),iso(3600000));
+        const created=await save(db,admin,payload),key=randomUUID();
+        const createdTask=await save(db,admin,task(own),null,null,key);
+        assert.equal((await save(db,admin,task(own),null,null,key)).id,createdTask.id);
+        await deniedInTransaction(db,()=>save(db,admin,meeting(own2,iso(1800000),iso(5400000))),'P7004');
+        await save(db,admin,meeting(own2,iso(3600000),iso(7200000)));
+        const ownRead=await read(db,admin,own),current=ownRead.activities.find(item=>item.id===createdTask.id);
+        assert.equal(ownRead.contacts[0].responsibleUserId,admin.id);
+        assert.equal(ownRead.activities.find(item=>item.id===created.id).responsibleUserId,admin.id);
+        await save(db,admin,{...task(own),status:'done'},current.id,current.updatedAt);
+        const snapshot=await read(db,admin),row=snapshot.memberMetrics.find(member=>member.id===admin.id);
+        assert.equal(row.role,'admin');assert.equal(row.assignedLeads,2);assert.equal(row.plannedMeetings,2);
+        assert.equal(row.doneTasks,before.memberMetrics.find(member=>member.id===admin.id).doneTasks+1);
+        assert.equal(snapshot.metrics.activeManagers,before.metrics.activeManagers);
+        assert.ok(snapshot.contacts.some(item=>item.id===leadA),'admin retains existing team distribution scope');
+        const manager=await read(db,a);
+        assert.ok(manager.contacts.every(item=>item.responsibleUserId===a.id));
+        assert.ok(manager.activities.every(item=>item.responsibleUserId===a.id));
+        assert.deepEqual(manager.members.map(member=>member.id),[a.id]);assert.deepEqual(manager.memberMetrics,[]);
+        await deniedInTransaction(db,()=>read(db,a,own),'P7002');await deniedInTransaction(db,()=>save(db,a,task(own)),'P7002');
+        await deniedInTransaction(db,()=>save(db,peer,meeting(own,iso(10800000),iso(14400000))),'P7006');
+        await deniedInTransaction(db,()=>save(db,owner,meeting(own,iso(10800000),iso(14400000))),'P7006');
+        await deniedInTransaction(db,()=>save(db,owner,meeting(ownerLead,iso(10800000),iso(14400000))),'P7006');
+        await deniedInTransaction(db,()=>save(db,{...admin,auth:peer.auth},payload),'P7001');
+        await db.query('update public.leads set responsible_user_id=$1 where id=$2',[outsider.id,own2]);
+        await deniedInTransaction(db,()=>save(db,admin,meeting(own2,iso(10800000),iso(14400000))),'P7006');
+        await db.query("update public.staff_users set status='inactive' where id=$1",[admin.id]);
+        await deniedInTransaction(db,()=>save(db,admin,payload),'P7001');
+      } finally { await db.query('rollback'); }
+    });
+    await t.test('explicit assignment to admin removes the old manager contact, history and write access',async()=>{
+      await db.query('begin');
+      try {
+        const before=await read(db,admin),old=await read(db,a,leadA);
+        assert.ok(old.activities.length>0);assert.ok(old.events.length>0);
+        await saveSelfLead(db,admin,{},leadA);
+        await deniedInTransaction(db,()=>read(db,a,leadA),'P7002');await deniedInTransaction(db,()=>save(db,a,task(leadA)),'P7002');
+        const remaining=await read(db,a);
+        assert.ok(remaining.contacts.every(item=>item.id!==leadA));assert.ok(remaining.activities.every(item=>item.leadId!==leadA));
+        const activityIds=new Set(old.activities.map(item=>item.id));
+        assert.ok(remaining.events.every(event=>!activityIds.has(event.activityId)));assert.deepEqual(remaining.memberMetrics,[]);
+        const own=await read(db,admin,leadA);assert.equal(own.contacts[0].responsibleUserId,admin.id);
+        assert.equal(own.activities.length,old.activities.length);assert.equal(own.events.length,old.events.length);
+        const metrics=(await read(db,admin)).memberMetrics;
+        assert.equal(metrics.find(member=>member.id===admin.id).assignedLeads,before.memberMetrics.find(member=>member.id===admin.id).assignedLeads+1);
+        assert.equal(metrics.find(member=>member.id===a.id).doneTasks,before.memberMetrics.find(member=>member.id===a.id).doneTasks);
+      } finally { await db.query('rollback'); }
+    });
+    await t.test('SQL077 service-only self INSERT/PATCH returns full lead and definitions and rejects substituted identity or tenant references',async()=>{
+      const service=await f.connect();await service.query('set role service_role');await service.query('begin');
+      try {
+        const stage=randomUUID(),source=randomUUID(),foreignStage=randomUUID(),foreignSource=randomUUID();
+        for(const [id,workspace] of [[stage,w],[foreignStage,foreign]]) await service.query(
+          "insert into public.lead_stages(id,workspace_id,stage_key,name,semantic_group) values($1,$2,'synthetic-rpc','Synthetic stage','new')",[id,workspace]);
+        for(const [id,workspace] of [[source,w],[foreignSource,foreign]]) await service.query(
+          "insert into public.lead_sources(id,workspace_id,source_key,name,channel) values($1,$2,'synthetic-rpc','Synthetic source','manual')",[id,workspace]);
+        const created=await saveSelfLead(service,admin,{full_name:'Synthetic atomic self',phone:'+77000007777',notes:'Original',stage_id:stage,source_id:source});
+        assert.equal(created.workspace_id,w);assert.equal(created.responsible_user_id,admin.id);
+        assert.equal(created.full_name,'Synthetic atomic self');assert.equal(created.phone,'+77000007777');
+        assert.equal(created.stage_definition.id,stage);assert.equal(created.stage_definition.semantic_group,'new');
+        assert.equal(created.source_definition.id,source);assert.equal(created.source_definition.channel,'manual');
+        const patched=await saveSelfLead(service,admin,{notes:'Updated atomically'},created.id);
+        assert.equal(patched.id,created.id);assert.equal(patched.full_name,created.full_name);assert.equal(patched.notes,'Updated atomically');
+        assert.equal(patched.stage_definition.id,stage);assert.equal(patched.source_definition.id,source);
+        for(const actor of [owner,a]) await deniedInTransaction(service,()=>saveSelfLead(service,actor,{full_name:'Denied role'}),'P7703');
+        await deniedInTransaction(service,()=>saveSelfLead(service,{...admin,auth:a.auth},{full_name:'Denied auth'}),'P7001');
+        for(const row of [{responsible_user_id:owner.id},{workspace_id:foreign},{stage_id:foreignStage},{source_id:foreignSource},{staff_user_id:admin.id}]) {
+          await deniedInTransaction(service,()=>saveSelfLead(service,admin,row,created.id),'P7701');
+        }
+        for(const id of [randomUUID(),foreignLead]) await deniedInTransaction(service,()=>saveSelfLead(service,admin,{},id),'P7702');
+        await deniedInTransaction(service,()=>saveSelfLead(service,admin,{notes:'Forbidden foreign write'},foreignLead),'P7702');
+        assert.equal((await service.query('select notes from public.leads where id=$1',[created.id])).rows[0].notes,'Updated atomically');
+      } finally { await service.query('rollback');await service.end(); }
+    });
+    for(const change of ['demotion','deactivation']) for(const operation of ['INSERT','PATCH']) {
+      await t.test(`SQL077 ${operation} waits for concurrent ${change} and then denies acquiring an unassigned lead`,async()=>{
+        const actor={w,id:randomUUID(),auth:randomUUID()},marker=`Synthetic race ${randomUUID()}`,target=operation==='PATCH'?randomUUID():null;
+        const holder=await f.connect(),writer=await f.connect();let pending;
+        try {
+          await db.query("insert into public.staff_users(id,workspace_id,auth_user_id,email,full_name,role,status) values($1,$2,$3,$4,'Synthetic race admin','admin','active')",[actor.id,w,actor.auth,`${actor.id}@example.invalid`]);
+          if(target) await db.query("insert into public.leads(id,workspace_id,full_name,phone,status) values($1,$2,$3,'+77000006666','new')",[target,w,marker]);
+          await writer.query('set role service_role');
+          const holderPid=(await holder.query('select pg_backend_pid() as pid')).rows[0].pid;
+          const writerPid=(await writer.query('select pg_backend_pid() as pid')).rows[0].pid;
+          await holder.query('begin');
+          await holder.query('update public.staff_users set role=$1,status=$2 where id=$3',
+            [change==='demotion'?'lead_manager':'admin',change==='deactivation'?'inactive':'active',actor.id]);
+          pending=observed(saveSelfLead(writer,actor,{full_name:marker,phone:'+77000006666'},target));
+          await waitForLock(db,writerPid,holderPid);
+          await holder.query('commit');
+          const result=await pending;assert.equal(result.error?.code,change==='demotion'?'P7703':'P7001');
+          const leads=(await db.query('select id,responsible_user_id from public.leads where workspace_id=$1 and full_name=$2',[w,marker])).rows;
+          assert.equal(leads.length,operation==='PATCH'?1:0);
+          if(target) {assert.equal(leads[0].id,target);assert.equal(leads[0].responsible_user_id,null);}
+        } finally {
+          await holder.query('rollback');if(pending) await pending;await holder.end();await writer.end();
+          await db.query('delete from public.leads where workspace_id=$1 and full_name=$2',[w,marker]);
+          await db.query('delete from public.staff_users where id=$1',[actor.id]);
+        }
+      });
+      await t.test(`SQL077 ${operation} holds the verified actor lock until commit before concurrent ${change}`,async()=>{
+        const actor={w,id:randomUUID(),auth:randomUUID()},marker=`Synthetic holding ${randomUUID()}`,target=operation==='PATCH'?randomUUID():null;
+        const writer=await f.connect(),revoker=await f.connect();let pending;
+        try {
+          await db.query("insert into public.staff_users(id,workspace_id,auth_user_id,email,full_name,role,status) values($1,$2,$3,$4,'Synthetic holding admin','admin','active')",[actor.id,w,actor.auth,`${actor.id}@example.invalid`]);
+          if(target) await db.query("insert into public.leads(id,workspace_id,full_name,phone,status) values($1,$2,$3,'+77000005555','new')",[target,w,marker]);
+          await writer.query('set role service_role');await writer.query('begin');
+          const saved=await saveSelfLead(writer,actor,{full_name:marker,phone:'+77000005555'},target);
+          const writerPid=(await writer.query('select pg_backend_pid() as pid')).rows[0].pid;
+          const revokerPid=(await revoker.query('select pg_backend_pid() as pid')).rows[0].pid;
+          pending=observed(revoker.query('update public.staff_users set role=$1,status=$2 where id=$3',
+            [change==='demotion'?'lead_manager':'admin',change==='deactivation'?'inactive':'active',actor.id]));
+          await waitForLock(db,revokerPid,writerPid);await writer.query('commit');
+          assert.equal((await pending).error,undefined);
+          assert.equal((await db.query('select responsible_user_id from public.leads where id=$1',[saved.id])).rows[0].responsible_user_id,actor.id);
+          const membership=(await db.query('select role,status from public.staff_users where id=$1',[actor.id])).rows[0];
+          assert.deepEqual(membership,{role:change==='demotion'?'lead_manager':'admin',status:change==='deactivation'?'inactive':'active'});
+        } finally {
+          await writer.query('rollback');if(pending) await pending;await writer.end();await revoker.end();
+          await db.query('delete from public.leads where workspace_id=$1 and full_name=$2',[w,marker]);
+          await db.query('delete from public.staff_users where id=$1',[actor.id]);
+        }
+      });
+    }
     await t.test('contact pagination leaves full metrics intact and search treats wildcard characters literally',async()=>{
       await db.query(`insert into public.leads(workspace_id,full_name,phone,status,responsible_user_id)
         select $1,'Paging contact '||n,'+77000001'||lpad(n::text,3,'0'),'new',$2 from generate_series(1,105) n`,[w,a.id]);

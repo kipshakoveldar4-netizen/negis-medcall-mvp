@@ -5,6 +5,7 @@ const today=new Date().toLocaleDateString('en-CA',{timeZone:'Asia/Almaty'});
 const stamp=new Date().toISOString();
 const manager='00000000-0000-4000-8000-000000000100';
 const second='00000000-0000-4000-8000-000000000101';
+export const mortgageFixtureAdmin={id:'00000000-0000-4000-8000-000000000011',name:'Тестовый администратор',role:'admin',status:'active'};
 const contacts:MortgageContact[]=Array.from({length:6},(_,i)=>({
   id:`00000000-0000-4000-8000-${String(200+i).padStart(12,'0')}`,
   name:['Тестовая Анна Садыкова','Тестовый Ерлан Касымов','Тестовая Мария Константинопольская','Тестовый Арман','Тестовая Алия','Тестовый неназначенный клиент'][i],
@@ -25,10 +26,11 @@ export async function mortgageLeadBrowserRequest(init:RequestInit|undefined,role
   const body=JSON.parse(String(init?.body||'{}'));
   if(method==='POST'){
     if(!['owner','admin'].includes(role))return Response.json({error:'Доступ закрыт'},{status:403});
-    const responsibleUserId=[manager,second].includes(body.responsibleUserId)?body.responsibleUserId:null;
+    const responsibleUserId=[manager,second,...(role==='admin'?[mortgageFixtureAdmin.id]:[])].includes(body.responsibleUserId)?body.responsibleUserId:null;
+    if(body.responsibleUserId&&!responsibleUserId)return Response.json({error:'Ответственный недоступен'},{status:400});
     const item:MortgageContact={id:crypto.randomUUID(),name:body.name,phone:body.phone,notes:body.notes||'',status:'new',source:'manual',
       createdAt:new Date().toISOString(),updatedAt:new Date().toISOString(),responsibleUserId,
-      responsibleName:responsibleUserId===manager?'Тестовая Александра Константинопольская':responsibleUserId===second?'Тестовый менеджер 2':null};
+      responsibleName:responsibleUserId===manager?'Тестовая Александра Константинопольская':responsibleUserId===second?'Тестовый менеджер 2':responsibleUserId===mortgageFixtureAdmin.id?mortgageFixtureAdmin.name:null};
     contacts.push(item);
     return Response.json({success:true,mode:'supabase',data:{item}});
   }
@@ -48,12 +50,12 @@ export async function mortgageBrowserRequest(url:URL,init:RequestInit|undefined,
     const page=Number(url.searchParams.get('page')||0),days=Number(url.searchParams.get('days')||30);
     const ownedActivities=activities.filter(a=>visible.some(c=>c.id===a.leadId)&&(!leadId||a.leadId===leadId));
     const members=[{id:manager,name:'Тестовая Александра Константинопольская',role:'lead_manager',status:'active'},
-      {id:second,name:'Тестовый менеджер 2',role:'lead_manager',status:'active'}].filter(m=>role!=='lead_manager'||m.id===manager);
+      {id:second,name:'Тестовый менеджер 2',role:'lead_manager',status:'active'},mortgageFixtureAdmin].filter(m=>role!=='lead_manager'||m.id===manager);
     const data:MortgageSnapshot={timeZone:'Asia/Almaty',contacts:selected.slice(page*100,(page+1)*100),contactsTotal:selected.length,page,pageSize:100,
       activities:ownedActivities,activitiesTruncated:false,members,events:[],periodDays:days,
       metrics:{totalLeads:visible.length,unassignedLeads:visible.filter(c=>!c.responsibleUserId).length,inProgressLeads:visible.filter(c=>c.status==='in_progress').length,
         meetingsToday:ownedActivities.filter(a=>a.kind==='meeting'&&a.status==='open').length,
-        overdueTasks:ownedActivities.filter(a=>a.kind==='task'&&a.status==='open'&&a.dueAt&&Date.parse(a.dueAt)<Date.now()).length,activeManagers:members.length},
+        overdueTasks:ownedActivities.filter(a=>a.kind==='task'&&a.status==='open'&&a.dueAt&&Date.parse(a.dueAt)<Date.now()).length,activeManagers:members.filter(m=>m.role==='lead_manager'&&m.status==='active').length},
       memberMetrics:role==='lead_manager'?[]:members.map(m=>({id:m.id,name:m.name,role:m.role,assignedLeads:contacts.filter(c=>c.responsibleUserId===m.id).length,
         openTasks:ownedActivities.filter(a=>a.kind==='task'&&a.responsibleUserId===m.id&&a.status==='open').length,
         overdueTasks:ownedActivities.filter(a=>a.kind==='task'&&a.responsibleUserId===m.id&&a.status==='open'&&a.dueAt&&Date.parse(a.dueAt)<Date.now()).length,

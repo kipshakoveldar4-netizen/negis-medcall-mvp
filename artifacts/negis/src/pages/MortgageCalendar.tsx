@@ -100,7 +100,7 @@ function MortgageCalendarBody() {
   const meetings = (workspace.data?.activities ?? []).filter((item) => item.kind === "meeting" && (managerId === "all" || item.responsibleUserId === managerId))
     .sort((left, right) => Date.parse(left.startsAt!) - Date.parse(right.startsAt!) || left.id.localeCompare(right.id));
   const visibleMeetings = meetings.filter((item) => days.some((date) => mortgageMeetingOnDay(item, date, timeZone)));
-  const managers = workspace.data?.members.filter((member) => member.role === "lead_manager") ?? [];
+  const managers = workspace.data?.members.filter((member) => member.role === "lead_manager" || (member.role === "admin" && member.status === "active")) ?? [];
   const newAt = (date: string, minute?: number) => setEditor({ initialStartsAt: `${date}T${formatSlot(minute ?? (date === today ? (minuteOfClinicDay(new Date(now).toISOString(), timeZone) ?? 0) : 0))}` });
   const move = (direction: number) => setDay((current) => mode === "month" ? mortgageMonthStep(current, direction) : mortgageAddDays(current, direction * (mode === "week" ? 7 : 1)));
   const changeStatus = async () => {
@@ -132,7 +132,7 @@ function MortgageCalendarBody() {
     </div>
     <div className="flex min-w-0 flex-wrap items-center justify-between gap-3">
       <h2 className="min-w-0 break-words text-base font-semibold capitalize">{title}</h2>
-      <label className="flex w-full min-w-0 items-center gap-2 text-sm sm:w-72"><span className="shrink-0">Менеджер</span><select className={mortgageFieldClass} value={managerId} onChange={(event) => setManagerId(event.target.value)}><option value="all">Все</option>{managers.map((manager) => <option key={manager.id} value={manager.id}>{manager.name}{manager.status !== "active" ? " (неактивен)" : ""}</option>)}</select></label>
+      <label className="flex w-full min-w-0 items-center gap-2 text-sm sm:w-72"><span className="shrink-0">Ответственный</span><select aria-label="Ответственный" className={mortgageFieldClass} value={managerId} onChange={(event) => setManagerId(event.target.value)}><option value="all">Все</option>{managers.map((manager) => <option key={manager.id} value={manager.id}>{manager.name}{manager.status !== "active" ? " (неактивен)" : ""}</option>)}</select></label>
     </div>
     {leadId && <div className="flex flex-wrap items-center gap-3 text-sm"><Link href={`/clients?leadId=${encodeURIComponent(leadId)}`} className="font-medium text-[var(--negis-primary)] underline underline-offset-2">Карточка клиента</Link><Link href="/appointments" className="text-[var(--negis-muted)] underline underline-offset-2">Все клиенты</Link></div>}
     <MortgageNotice loading={workspace.loading} error={workspace.error} refresh={workspace.refresh} truncated={workspace.data?.activitiesTruncated} />

@@ -91,7 +91,7 @@ export function MortgageContactDetail({ leadId, canEdit, onClose, onChanged }: {
         </section>
 
       </div>}
-    {editingContact && canEdit && <MortgageContactForm contact={editingContact} members={data?.members || []} isCurrent={workspace.isCurrent}
+    {editingContact && canEdit && <MortgageContactForm contact={editingContact} request={workspace.request} isCurrent={workspace.isCurrent}
       onClose={() => setEditingContact(null)} onSubmit={async ({ name, phone, notes, status }) => {
         await workspace.updateContact(editingContact.id, { name, phone, notes, status });
         if (workspace.isCurrent()) onChanged();

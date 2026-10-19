@@ -124,6 +124,28 @@ test("all pages past the PostgREST ceiling are included", async () => {
   assert.deepEqual(f.queries.filter((q) => q.table === "leads").map((q) => q.range), [[0, 499], [500, 999], [1000, 1499]]);
 });
 
+test("an admin's own assignments have a team row without moving recorded actions or granting manager reports", async () => {
+  const f = fixture(), admin = id(6);
+  f.rows.staff_users.push({ id: admin, workspace_id: workspace, full_name: "Synthetic admin", role: "admin", status: "active" });
+  f.rows.leads.find((row) => row.id === id(10))!.responsible_user_id = admin;
+  f.rows.audit_logs.push({ id: id(27), workspace_id: workspace, entity_type: "lead", entity_id: id(12),
+    actor_kind: "manual", actor_staff_user_id: admin, action: "updated", created_at: recent });
+  const res = await call({ role: "admin" });
+  assert.equal(res.statusCode, 200);
+  const analytics = res.body.data.analytics;
+  const row = analytics.members.find((member: Row) => member.staffId === admin);
+  assert.equal(row.role, "admin");
+  assert.equal(row.status, "active");
+  assert.deepEqual(row.assigned, { total: 1, new: 1, inProgress: 0, booked: 0, lost: 0, other: 0 });
+  assert.deepEqual(row.activity, { updatedEvents: 1, createdEvents: 0, touchedLeads: 1, lastRecordedAt: recent });
+  assert.equal(analytics.members.find((member: Row) => member.staffId === managerA).assigned.total, 2);
+  assert.equal(analytics.members.find((member: Row) => member.staffId === managerB).activity.updatedEvents, 2);
+  assert.equal(analytics.totalLeads, 6);
+  f.queries.length = 0;
+  assert.equal((await call({ role: "lead_manager" })).statusCode, 403);
+  assert.deepEqual(f.queries, []);
+});
+
 test("roles, purpose, context, method and period deny before any storage access", async () => {
   const f = fixture();
   for (const role of ["lead_manager", "manager", "receptionist", "doctor", "marketer"]) assert.equal((await call({ role })).statusCode, 403);

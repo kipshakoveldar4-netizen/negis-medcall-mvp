@@ -2,10 +2,11 @@ import { createBookingRetryFixture } from "./booking-retry";
 import { createOperatorBrowserFixture } from "./operator-browser-store";
 import { createOperatorDispatchFixture } from "./operator-dispatch-fixture";
 import { createClinicArrivalBrowserFixture, isClinicArrivalFixtureLocation, type ClinicArrivalGuardedInit } from "./clinic-arrival-browser-store";
-import { mortgageBrowserRequest, mortgageLeadBrowserRequest } from './mortgage-browser-store';
+import { mortgageBrowserRequest, mortgageLeadBrowserRequest, mortgageFixtureAdmin } from './mortgage-browser-store';
 const retryFixture = new URLSearchParams(window.location?.search || "").get("bookingRetry") === "lost-response"
   ? createBookingRetryFixture() : null;
 const fixtureParams = new URLSearchParams(window.location?.search || "");
+const saleRetryFixture = fixtureParams.get("salesRetry") === "lost-response" ? createBookingRetryFixture() : null;
 const fixtureTimeZone = ["UTC", "Pacific/Chatham"].includes(fixtureParams.get("fixtureTimeZone") || "")
   ? fixtureParams.get("fixtureTimeZone")! : "Asia/Almaty";
 const fixtureAppointmentTime = fixtureParams.get("fixtureAppointment") === "midnight" ? "00:10" : "10:00";
@@ -103,6 +104,10 @@ export async function crmFetch(input: string, init?: ClinicArrivalGuardedInit): 
   if (retryFixture && url.pathname === "/api/crm/appointments" && init?.method === "POST") {
     return retryFixture.send(JSON.parse(String(init.body)));
   }
+  // In-memory visual simulation only, not evidence of a server commit.
+  if (saleRetryFixture && url.pathname === "/api/crm/deals" && init?.method === "POST") {
+    return saleRetryFixture.send(JSON.parse(String(init.body)));
+  }
   const resource = url.pathname.split("/").at(-1) || "";
   if (window.location.pathname === "/operator") return operatorDispatchFixture
     ? operatorDispatchFixture.request(url, init) : operatorFixture.request(url, init);
@@ -124,7 +129,8 @@ export async function crmFetch(input: string, init?: ClinicArrivalGuardedInit): 
   if(mortgageFixture && resource==='mortgage-workspace')return mortgageBrowserRequest(url,init,auth.userRole);
   if(mortgageFixture && resource==='leads')return mortgageLeadBrowserRequest(init,auth.userRole);
   if(mortgageFixture && resource==='auth-context')return Response.json({success:true,mode:'supabase',data:{
-    workspaceId,isAdmin:['owner','admin'].includes(auth.userRole),role:auth.userRole,staffUserId:'00000000-0000-4000-8000-000000000010',
+    workspaceId,purpose:'mortgage_leads',isAdmin:['owner','admin'].includes(auth.userRole),role:auth.userRole,
+    staffUserId:auth.userRole==='admin'?mortgageFixtureAdmin.id:'00000000-0000-4000-8000-000000000010',
   }});
   if(mortgageFixture && resource==='staff'){
     if(!['owner','admin'].includes(auth.userRole))return Response.json({error:'Доступ закрыт'},{status:403});
@@ -150,7 +156,8 @@ export async function crmFetch(input: string, init?: ClinicArrivalGuardedInit): 
   }
   if (mortgageFixture && resource === "lead-assignees") {
     return Response.json({ success: true, mode: "supabase", data: {
-      assignees: teamMembers.filter((member) => member.status === "active").map((member) => ({ id: member.staffId, name: member.name })),
+      assignees: [...teamMembers.filter((member) => member.status === "active").map((member) => ({ id: member.staffId, name: member.name })),
+        ...(auth.userRole === "admin" ? [{ id: mortgageFixtureAdmin.id, name: mortgageFixtureAdmin.name }] : [])],
     } });
   }
   let items = lists[resource] || [];

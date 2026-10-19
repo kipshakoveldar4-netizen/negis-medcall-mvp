@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { setImmediate as tick } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
@@ -15,10 +16,27 @@ type Slot = { kind: string; value?: unknown; deps?: readonly unknown[]; set?: (v
 type View = {
   items: Array<{ id: string; status: string }>;
   loaded: boolean; loadError: boolean; form: Record<string, string>; formOpen: boolean; saving: boolean;
+  unconfirmedCreate: boolean; editingId: string | null;
+  restoreError: string;
   openAdd(): void; setForm(value: Record<string, string>): void; submitForm(): void;
+  openEdit(deal: unknown): void; closeSaleForm(): void;
+  retrySaleRecovery(): void;
 };
 type Request = { path: string; method: "GET" | "POST"; headers: Record<string, string>; body: Values };
-const exposed = ["items", "loaded", "loadError", "form", "formOpen", "saving", "openAdd", "setForm", "submitForm"];
+type AuthListener = (event: string, session: { user: { id: string } } | null) => void;
+const exposed = ["items", "loaded", "loadError", "form", "formOpen", "saving", "openAdd", "setForm", "submitForm",
+  "unconfirmedCreate", "editingId", "openEdit", "closeSaleForm", "restoreError", "retrySaleRecovery"];
+
+export type SalesRetryRuntimeOptions = {
+  actorId?: string;
+  sessionStored?: Map<string, string>;
+  localStored?: Map<string, string>;
+  storageMode?: "denied" | "no-readback";
+  sessionGetItem?: (key: string) => string | null;
+  randomUUID?: () => string;
+  getAccessToken?: (expectedUserId?: string) => Promise<string>;
+  hasSupabaseFrontendEnv?: boolean;
+};
 
 function compile(source: string, fileName: string, page = false) {
   let observed = 0;
@@ -57,19 +75,25 @@ function compile(source: string, fileName: string, page = false) {
 const compiled = Promise.all([
   ["api", "artifacts/negis/src/lib/api.ts"],
   ["storage", "artifacts/negis/src/lib/demoStorage.ts"],
+  ["attempt", "artifacts/negis/src/lib/salesCreateAttempt.ts"],
   ["page", "artifacts/negis/src/pages/SalesPage.tsx"],
 ].map(async ([key, file]) => [key, compile(await readFile(path.join(root, file), "utf8"), file, key === "page")]));
 
 // Deliberately limited to SalesPage and its inline collection hook, not a DOM renderer.
 export async function createSalesRetryRuntime(workspaceId: string,
-  deals: (method: "GET" | "POST", body: Values) => Promise<Response>) {
+  deals: (method: "GET" | "POST", body: Values) => Promise<Response>, options: SalesRetryRuntimeOptions = {}) {
   const code = Object.fromEntries(await compiled) as Record<string, string>;
   const slots: Slot[] = [];
   const pending = new Set<Promise<Response>>();
   const unexpected: unknown[] = [];
   const calls: Request[] = [];
   const toasts: Array<{ kind: string; message: string }> = [];
-  const stored = new Map([["negis_workspace_selector", workspaceId]]);
+  const stored = options.localStored ?? new Map([["negis_workspace_selector", workspaceId]]);
+  const sessionStored = options.sessionStored ?? new Map<string, string>();
+  const tokenLookups: Array<string | undefined> = [];
+  const authListeners = new Set<AuthListener>();
+  let actorId = options.actorId ?? "00000000-0000-4000-8000-000000000090";
+  let selectedWorkspaceId = workspaceId;
   let cursor = 0, dirty = true, alive = true;
   let view: View;
   const sameDeps = (a?: readonly unknown[], b?: readonly unknown[]) => Boolean(a && b && a.length === b.length
@@ -103,6 +127,11 @@ export async function createSalesRetryRuntime(workspaceId: string,
       if (!sameDeps(item.deps, deps)) item.pending = true;
       item.create = create; item.deps = deps;
     },
+    useLayoutEffect(create: Effect, deps?: readonly unknown[]) {
+      const item = slot("layout", () => ({ kind: "layout", pending: true, create, deps }));
+      if (!sameDeps(item.deps, deps)) item.pending = true;
+      item.create = create; item.deps = deps;
+    },
   };
   function transport(raw: string, init: RequestInit = {}): Promise<Response> {
     let request: Request;
@@ -111,7 +140,7 @@ export async function createSalesRetryRuntime(workspaceId: string,
       assert.ok(raw.startsWith("/api/crm/"), "no external client transport");
       const url = new URL(raw, "https://sales-fixture.invalid");
       assert.equal(url.origin, "https://sales-fixture.invalid");
-      assert.equal(url.searchParams.get("workspaceId"), workspaceId);
+      assert.equal(url.searchParams.get("workspaceId"), selectedWorkspaceId);
       assert.deepEqual([...url.searchParams.keys()], ["workspaceId"]);
       const method = init.method ?? "GET";
       assert.ok(method === "GET" || method === "POST");
@@ -133,15 +162,33 @@ export async function createSalesRetryRuntime(workspaceId: string,
     void task.then(() => pending.delete(task), () => pending.delete(task));
     return task;
   }
+  const listeners = new Map<string, Set<unknown>>();
   const window = { localStorage: {
     getItem: (key: string) => stored.get(key) ?? null,
     setItem: (key: string, value: string) => stored.set(key, value),
     removeItem: (key: string) => stored.delete(key),
-  } };
+  }, sessionStorage: {
+    getItem: (key: string) => {
+      if (options.storageMode === "denied") throw new Error("synthetic storage denial");
+      if (options.sessionGetItem) return options.sessionGetItem(key);
+      return options.storageMode === "no-readback" ? null : sessionStored.get(key) ?? null;
+    },
+    setItem: (key: string, value: string) => {
+      if (options.storageMode === "denied") throw new Error("synthetic storage denial");
+      sessionStored.set(key, value);
+    },
+    removeItem: (key: string) => { sessionStored.delete(key); },
+  },
+    addEventListener: (name: string, listener: unknown) => {
+      const group = listeners.get(name) ?? new Set(); group.add(listener); listeners.set(name, group);
+    },
+    removeEventListener: (name: string, listener: unknown) => { listeners.get(name)?.delete(listener); },
+  };
   const toast = Object.fromEntries(["success", "error"].map(kind => [kind, (message: string) => toasts.push({ kind, message })]));
   function evaluate(source: string, imports: Record<string, unknown>) {
     const exports: Record<string, unknown> = {};
-    new Script(source).runInNewContext({ exports, window, fetch: transport, Headers, Response, DOMException, Error,
+    const fixtureCrypto = { randomUUID: options.randomUUID ?? randomUUID };
+    new Script(source).runInNewContext({ exports, window, crypto: fixtureCrypto, fetch: transport, Headers, Response, DOMException, Error,
       require(name: string) {
         assert.ok(Object.hasOwn(imports, name), `unexpected VM import: ${name}`);
         return imports[name];
@@ -149,21 +196,36 @@ export async function createSalesRetryRuntime(workspaceId: string,
     });
     return exports;
   }
-  const api = evaluate(code.api, { "@/lib/serverAuth": { getSupabaseAccessToken: async () => "fixture.test.signature" } });
+  const api = evaluate(code.api, { "@/lib/serverAuth": { getSupabaseAccessToken: async (expected?: string) => {
+    tokenLookups.push(expected);
+    if (options.getAccessToken) return options.getAccessToken(expected);
+    return !expected || expected === actorId ? "fixture.test.signature" : "";
+  } } });
   const storage = evaluate(code.storage, { react: hooks, sonner: { toast }, "@/lib/api": api });
+  const attempt = evaluate(code.attempt, {});
   const decorations = new Proxy({}, { get: (_object, key) => String(key) });
   const page = evaluate(code.page, {
     react: hooks, sonner: { toast }, wouter: { Link: "Link" }, "lucide-react": decorations,
     "@/components/layout/PageLayout": decorations, "@/components/ui/metric-card": decorations,
     "@/lib/api": api, "@/lib/demoStorage": storage,
+    "@/lib/salesCreateAttempt": attempt,
+    "@/lib/supabase": { hasSupabaseFrontendEnv: options.hasSupabaseFrontendEnv ?? true, supabase: { auth: {
+      onAuthStateChange(listener: AuthListener) {
+        authListeners.add(listener);
+        return { data: { subscription: { unsubscribe: () => { authListeners.delete(listener); } } } };
+      },
+    } } },
+    "@/contexts/AuthContext": { useAuth: () => ({ user: actorId ? { id: actorId } : null, clinicId: selectedWorkspaceId }) },
     "react/jsx-runtime": { jsx: () => assert.fail("final JSX must be observation-only"), jsxs: () => assert.fail("unexpected JSX") },
   }).default as () => View;
   function render() {
     if (!dirty || !alive) return;
     cursor = 0; dirty = false; view = page();
-    const effects = slots.filter(item => item.kind === "effect" && item.pending);
-    for (const item of effects) item.cleanup?.();
-    for (const item of effects) { item.pending = false; item.cleanup = item.create!() || undefined; }
+    for (const kind of ["layout", "effect"]) {
+      const effects = slots.filter(item => item.kind === kind && item.pending);
+      for (const item of effects) item.cleanup?.();
+      for (const item of effects) { item.pending = false; item.cleanup = item.create!() || undefined; }
+    }
   }
   async function settle() {
     for (let pass = 0; pass < 50; pass++) {
@@ -172,7 +234,7 @@ export async function createSalesRetryRuntime(workspaceId: string,
       await Promise.allSettled([...pending]);
       await tick();
       assert.deepEqual(unexpected, [], "no unapproved transport or lifecycle activity");
-      if (!dirty && !pending.size) return;
+      if ((!alive || !dirty) && !pending.size) return;
     }
     assert.fail("SalesPage runtime did not settle");
   }
@@ -181,5 +243,13 @@ export async function createSalesRetryRuntime(workspaceId: string,
     alive = false;
   }
   try { await settle(); } catch (error) { dispose(); throw error; }
-  return { calls, toasts, stored, render, settle, dispose, get view() { return view; } };
+  return { calls, toasts, stored, sessionStored, tokenLookups, listeners, authListeners, render, settle, dispose,
+    emitSdkActor(nextActorId: string | null, event = nextActorId ? "SIGNED_IN" : "SIGNED_OUT") {
+      for (const listener of [...authListeners]) listener(event, nextActorId ? { user: { id: nextActorId } } : null);
+    },
+    setScope(nextActorId: string, nextWorkspaceId = selectedWorkspaceId) {
+      actorId = nextActorId; selectedWorkspaceId = nextWorkspaceId;
+      stored.set("negis_workspace_selector", nextWorkspaceId); dirty = true; render();
+    },
+    get view() { return view; } };
 }

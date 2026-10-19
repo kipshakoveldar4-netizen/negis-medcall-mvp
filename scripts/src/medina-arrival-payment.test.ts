@@ -41,6 +41,9 @@ before(async () => {
       throw new Error(`${file}: ${(error as Error).message}`);
     }
   }
+  // 076 is being developed locally: execute its actual source, never a Git-only
+  // snapshot or a synthetic receipt implementation. 059/065 remain excluded.
+  await db.exec(await readFile(path.join(root, "migrations/076_crm_sale_create_requests.sql"), "utf8"));
 });
 after(() => db.close());
 beforeEach(async () => {
@@ -77,6 +80,15 @@ function apiDatabase(rpcRole: "service_role" | "anon" | "authenticated" = "servi
           sql: "select public.create_crm_appointment_once($1::uuid,$2::uuid,$3::uuid,$4,$5::jsonb,$6::jsonb,$7) as item",
           params: [args.p_workspace_id, args.p_staff_user_id, args.p_request_key, args.p_request_fingerprint,
             args.p_new_client === null ? null : JSON.stringify(args.p_new_client), JSON.stringify(args.p_appointment), args.p_client_match],
+        },
+        read_crm_sale_create_request: {
+          sql: "select public.read_crm_sale_create_request($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5::text) as item",
+          params: [args.p_workspace_id, args.p_staff_user_id, args.p_auth_user_id, args.p_request_key, args.p_request_fingerprint],
+        },
+        create_crm_sale_once: {
+          sql: "select public.create_crm_sale_once($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5::text,$6::jsonb) as item",
+          params: [args.p_workspace_id, args.p_staff_user_id, args.p_auth_user_id, args.p_request_key,
+            args.p_request_fingerprint, JSON.stringify(args.p_sale)],
         },
       };
       assert.ok(calls[name], `Unexpected RPC ${name}`);
@@ -322,6 +334,513 @@ const retryCounts = () => row(`select (select count(*) from clients) as clients,
   (select count(*) from appointments) as appointments, (select count(*) from deals) as sales,
   (select count(*) from crm_appointment_create_requests) as receipts,
   (select count(*) from audit_logs) as journal`);
+
+const keyedSale = (changes: Record<string, unknown> = {}) => ({
+  requestKey: id(170), title: "Isolated manual sale", amountMinor: 700050, currency: "KZT", status: "pending",
+  clientId: id(3), appointmentId: id(10), serviceId: id(50), responsibleUserId: id(40), notes: "Original sale intent",
+  ...changes,
+});
+async function saleApiFixture(role = "owner") {
+  const call = await bundleApiFixture(role);
+  await db.exec(`update workspaces set arrival_marks_paid=false where id='${id(1)}'`);
+  return call;
+}
+// Inspect as the fixture owner: service_role may execute the RPCs but cannot read receipts directly.
+const saleRequestState = () => row(`select jsonb_build_object(
+  'sales',(select jsonb_agg(d order by id) from deals d),
+  'receipts',(select jsonb_agg(r order by workspace_id,staff_user_id,request_key) from crm_sale_create_requests r),
+  'journal',(select jsonb_agg(j order by id) from audit_logs j)) as state`);
+const saleRpcArgs = (changes: Record<string, unknown> = {}) => ({
+  p_workspace_id: id(1), p_staff_user_id: id(40), p_auth_user_id: id(41),
+  p_request_key: id(170), p_request_fingerprint: "a".repeat(64),
+  p_sale: { workspace_id: id(1), title: "SQL manual pending sale", amount_minor: 700050, currency: "KZT", status: "pending",
+    client_id: id(3), appointment_id: id(10), service_id: id(50), responsible_user_id: id(40) },
+  ...changes,
+});
+
+for (const role of ["owner", "admin", "receptionist", "manager"]) {
+  test(`API keyed sale ${role}: same intent replays one sale, receipt and first-create journal`, async () => {
+    const call = await saleApiFixture(role);
+    const body = keyedSale();
+    const first = await call("deals", "POST", body);
+    const saved = apiItem(first, 201);
+    assert.equal((first.body.data as Record<string, unknown>).replayed, false);
+    assert.equal(saved.status, "pending"); assert.equal(saved.paidAt, null);
+    assert.equal((await row("select count(*) from crm_sale_create_requests")).count, 1);
+    assert.equal((await row("select count(*) from deals")).count, 1);
+    assert.equal((await row("select count(*) from audit_logs where entity_type='deal'")).count, 1);
+    const before = await saleRequestState();
+    const replay = await call("deals", "POST", body);
+    assert.deepEqual(apiItem(replay), saved);
+    assert.equal((replay.body.data as Record<string, unknown>).replayed, true);
+    assert.deepEqual(await saleRequestState(), before);
+  });
+}
+
+test("API keyed sale hashes normalized original intent, not supplied fingerprints or generated fields", async () => {
+  const call = await saleApiFixture();
+  const saved = apiItem(await call("deals", "POST", { ...keyedSale(), requestFingerprint: "forged" }), 201);
+  const receipt = await row("select * from crm_sale_create_requests");
+  assert.match(String(receipt.request_fingerprint), /^[0-9a-f]{64}$/);
+  assert.equal(receipt.workspace_id, id(1)); assert.equal(receipt.staff_user_id, id(40));
+  assert.equal(receipt.request_key, id(170)); assert.equal(receipt.sale_id, saved.id);
+  const before = await saleRequestState();
+  const replay = await call("deals", "POST", {
+    requestKey: id(170), title: "  Isolated manual sale  ", amount_minor: 700050, currency: "kzt", status: "PENDING",
+    client_id: id(3), appointment_id: id(10), service_id: id(50), responsible_user_id: id(40), notes: "Original sale intent",
+    requestFingerprint: "different-forgery", id: id(999), created_at: "2090-01-01", updated_at: "2091-01-01",
+  });
+  assert.deepEqual(apiItem(replay), saved);
+  assert.equal((replay.body.data as Record<string, unknown>).replayed, true);
+  assert.deepEqual(await saleRequestState(), before);
+});
+
+test("API keyed sale rejects changed intent before reference preflight without writes", async () => {
+  const call = await saleApiFixture();
+  apiItem(await call("deals", "POST", keyedSale()), 201);
+  const receipt = await row("select request_fingerprint from crm_sale_create_requests");
+  const before = await saleRequestState();
+  for (const updates of [{ title: "Different sale" }, { amountMinor: 700051 }, { currency: "USD" }, { status: "paid" },
+    { notes: "Different intent" }, { paymentMethod: "cash" }, { clientId: id(999) }, { appointmentId: id(999) },
+    { serviceId: id(999) }, { responsibleUserId: id(999) }, { paidAt: "2090-01-01T00:00:00Z" }]) {
+    const reply = await call("deals", "POST", { ...keyedSale(), ...updates, requestFingerprint: receipt.request_fingerprint });
+    assert.equal(reply.status, 409, JSON.stringify(reply.body));
+    assert.equal(reply.body.data, undefined);
+    assert.deepEqual(await saleRequestState(), before);
+    assert.deepEqual(reply.queries.filter(query => query.operation !== "select"), []);
+  }
+});
+
+for (const keyed of [false, true]) {
+  test(`API ${keyed ? "different sale keys" : "legacy unkeyed sales"} preserve intentional create-new behavior`, async () => {
+    const call = await saleApiFixture();
+    const { requestKey: _key, ...legacy } = keyedSale();
+    const first = apiItem(await call("deals", "POST", keyed ? keyedSale() : legacy), 201);
+    const second = apiItem(await call("deals", "POST", keyed ? keyedSale({ requestKey: id(171) }) : legacy), 201);
+    assert.notEqual(first.id, second.id);
+    assert.equal((await row("select count(*) from deals")).count, 2);
+    assert.equal((await row("select count(*) from crm_sale_create_requests")).count, keyed ? 2 : 0);
+    assert.equal((await row("select count(*) from deals where status='paid' or paid_at is not null")).count, 0);
+  });
+}
+
+test("API sale receipts isolate verified actor/workspace and ignore supplied scope fields", async () => {
+  const call = await saleApiFixture();
+  const body = keyedSale({ clientId: "", appointmentId: "", serviceId: "", responsibleUserId: "" });
+  const first = apiItem(await call("deals", "POST", { ...body, workspaceId: id(2), staffUserId: id(99), authUserId: id(99) }), 201);
+  const before = await saleRequestState();
+  assert.equal((await call("deals", "POST", body, 2)).status, 403);
+  assert.deepEqual(await saleRequestState(), before);
+  await db.exec(`insert into staff_users(id,workspace_id,auth_user_id,full_name,email,role) values
+    ('${id(43)}','${id(1)}','${id(44)}','Second local actor','second@example.invalid','admin'),
+    ('${id(45)}','${id(2)}','${id(46)}','Other local workspace','other@example.invalid','owner')`);
+  let actor = id(44);
+  globalThis.fetch = (async (url: unknown) => {
+    assert.equal(url, "https://fixture.invalid/auth/v1/user");
+    return { ok: true, status: 200, text: async () => JSON.stringify({ id: actor }) };
+  }) as unknown as typeof fetch;
+  const second = apiItem(await call("deals", "POST", { ...body, staffUserId: id(40), authUserId: id(41) }), 201);
+  actor = id(46);
+  const third = apiItem(await call("deals", "POST", { ...body, workspaceId: id(1), staffUserId: id(40) }, 2), 201);
+  assert.equal(new Set([first.id, second.id, third.id]).size, 3);
+  const receipts = (await db.query("select workspace_id,staff_user_id,request_key,sale_id from crm_sale_create_requests order by staff_user_id")).rows;
+  assert.deepEqual(receipts, [
+    { workspace_id: id(1), staff_user_id: id(40), request_key: id(170), sale_id: first.id },
+    { workspace_id: id(1), staff_user_id: id(43), request_key: id(170), sale_id: second.id },
+    { workspace_id: id(2), staff_user_id: id(45), request_key: id(170), sale_id: third.id },
+  ]);
+});
+
+test("API sale replay preserves later edits despite archived catalogue", async () => {
+  const call = await saleApiFixture();
+  const saved = apiItem(await call("deals", "POST", keyedSale()), 201);
+  const edited = apiItem(await call("deals", "PATCH", { notes: "Later edit", amountMinor: 12345, status: "cancelled" }, 1, String(saved.id)));
+  await db.exec("update clinic_services set is_active=false");
+  const before = await saleRequestState();
+  const reply = await call("deals", "POST", keyedSale());
+  // SQL JSON retains the session offset; the query adapter serializes Dates as UTC.
+  const instants = (item: Record<string, unknown>) => ({ ...item,
+    createdAt: new Date(String(item.createdAt)).toISOString(), updatedAt: new Date(String(item.updatedAt)).toISOString() });
+  assert.deepEqual(instants(apiItem(reply)), instants(edited));
+  assert.equal((reply.body.data as Record<string, unknown>).replayed, true);
+  assert.equal(reply.queries.some(query => query.table === "clinic_services"), false, "replay precedes active catalogue preflight");
+  assert.deepEqual(await saleRequestState(), before);
+});
+
+test("API sale saved between receipt lookup and failed catalogue preflight replays without loser writes", async () => {
+  const call = await saleApiFixture();
+  const base = apiDatabase();
+  let inserted = false, reads = 0, routeCreates = 0;
+  let winner: Record<string, unknown> = {};
+  let winnerState: Record<string, unknown> = {};
+  serverClient.setSupabaseServerClientFactoryForTests(() => ({ ...base, rpc: async (name: string, args: Record<string, unknown>) => {
+    if (name === "read_crm_sale_create_request") reads++;
+    if (name === "create_crm_sale_once") routeCreates++;
+    const result = await base.rpc(name, args);
+    if (name === "read_crm_sale_create_request" && !inserted) {
+      assert.equal(result.data, null);
+      inserted = true;
+      // Real SQL interleaving in one fixture transaction, not a two-connection lock test.
+      const saved = await base.rpc("create_crm_sale_once", { ...args, p_sale: { ...saleRpcArgs().p_sale,
+        title: "Isolated manual sale", notes: "Original sale intent", paid_at: null, closed_at: null, payment_method: null } });
+      assert.equal(saved.error, null);
+      winner = (saved.data as Record<string, unknown>).sale as Record<string, unknown>;
+      await db.exec("update clinic_services set is_active=false");
+      winnerState = await saleRequestState();
+    }
+    return result;
+  } }));
+  const reply = await call("deals", "POST", keyedSale());
+  assert.equal(apiItem(reply).id, winner.id);
+  assert.equal((reply.body.data as Record<string, unknown>).replayed, true);
+  assert.equal(reads, 2); assert.equal(routeCreates, 0);
+  assert.deepEqual(await saleRequestState(), winnerState);
+  assert.equal((await row("select count(*) from audit_logs")).count, 0, "loser replay cannot invent a post-domain audit");
+});
+
+test("API deleted sale keeps its receipt tombstone and refuses resurrection", async () => {
+  const call = await saleApiFixture();
+  const saved = apiItem(await call("deals", "POST", keyedSale()), 201);
+  await db.query("delete from deals where id=$1", [saved.id]);
+  const receipt = await row("select * from crm_sale_create_requests");
+  assert.equal(receipt.sale_id, null);
+  const before = await saleRequestState();
+  const reply = await call("deals", "POST", keyedSale());
+  assert.equal(reply.status, 409, JSON.stringify(reply.body));
+  assert.equal(reply.body.data, undefined);
+  assert.deepEqual(await saleRequestState(), before);
+  const direct = await apiDatabase().rpc("read_crm_sale_create_request", saleRpcArgs({ p_request_fingerprint: receipt.request_fingerprint }));
+  assert.equal(direct.error?.code, "P7603");
+});
+
+for (const revoke of ["status='inactive'", "role='doctor'", `auth_user_id='${id(999)}'`]) {
+  test(`API sale replay denies current actor revocation ${revoke} before receipt access`, async () => {
+    const call = await saleApiFixture();
+    apiItem(await call("deals", "POST", keyedSale()), 201);
+    await db.exec(`update staff_users set ${revoke} where id='${id(40)}'`);
+    const before = await saleRequestState();
+    let receiptReads = 0;
+    const base = apiDatabase();
+    serverClient.setSupabaseServerClientFactoryForTests(() => ({ ...base, rpc: async (name: string, args: Record<string, unknown>) => {
+      if (name === "read_crm_sale_create_request") receiptReads++;
+      return base.rpc(name, args);
+    } }));
+    const reply = await call("deals", "POST", keyedSale());
+    assert.equal(reply.status, 403, JSON.stringify(reply.body));
+    assert.equal(reply.body.data, undefined);
+    assert.equal(receiptReads, 0);
+    assert.deepEqual(await saleRequestState(), before);
+  });
+}
+
+for (const rpcName of ["read_crm_sale_create_request", "create_crm_sale_once"]) {
+  test(`API ${rpcName} rechecks live authorization inside SQL after route authorization`, async () => {
+    const call = await saleApiFixture();
+    const before = await saleRequestState();
+    const base = apiDatabase();
+    let checked = false;
+    serverClient.setSupabaseServerClientFactoryForTests(() => ({ ...base, rpc: async (name: string, args: Record<string, unknown>) => {
+      if (name === rpcName) { await db.exec(`update staff_users set status='inactive' where id='${id(40)}'`); checked = true; }
+      return base.rpc(name, args);
+    } }));
+    const reply = await call("deals", "POST", keyedSale());
+    assert.equal(checked, true);
+    assert.equal(reply.status, 403, JSON.stringify(reply.body));
+    assert.equal(reply.body.data, undefined);
+    assert.deepEqual(await saleRequestState(), before);
+  });
+}
+
+test("API malformed sale keys never dispatch SQL or become legacy creates", async () => {
+  const call = await saleApiFixture();
+  const before = await saleRequestState();
+  const queries: ApiQuery[] = [];
+  const base = apiDatabase("service_role", queries);
+  let rpcs = 0;
+  serverClient.setSupabaseServerClientFactoryForTests(() => ({ ...base, rpc: async (name: string, args: Record<string, unknown>) => {
+    rpcs++; return base.rpc(name, args);
+  } }));
+  for (const requestKey of [null, "", "not-a-uuid", 123, {}, "00000000-0000-1000-8000-000000000170"]) {
+    const reply = await call("deals", "POST", keyedSale({ requestKey }));
+    assert.equal(reply.status, 400, JSON.stringify({ requestKey, reply: reply.body }));
+    assert.equal(reply.body.data, undefined);
+  }
+  assert.equal(rpcs, 0);
+  assert.deepEqual(queries.filter(query => query.operation !== "select"), []);
+  assert.deepEqual(await saleRequestState(), before);
+});
+
+test("API keyed sale rejects invalid amounts and blank titles before RPC without legacy fallback", async () => {
+  const call = await saleApiFixture();
+  const before = await saleRequestState();
+  const queries: ApiQuery[] = [];
+  const base = apiDatabase("service_role", queries);
+  let rpcs = 0;
+  serverClient.setSupabaseServerClientFactoryForTests(() => ({ ...base, rpc: async (name: string, args: Record<string, unknown>) => {
+    rpcs++; return base.rpc(name, args);
+  } }));
+  const { amountMinor: _amount, ...body } = keyedSale();
+  const attempts: Record<string, unknown>[] = [body, keyedSale({ title: "" }), keyedSale({ title: " \t\r\n " })];
+  for (const alias of ["amountMinor", "amount_minor"]) {
+    for (const value of [-1, 0.5, Number.MAX_SAFE_INTEGER + 1, "9007199254740992", "0.5", "not-a-number"]) {
+      attempts.push({ ...body, [alias]: value });
+    }
+  }
+  for (const input of attempts) {
+    const reply = await call("deals", "POST", input);
+    assert.equal(reply.status, 400, JSON.stringify({ input, reply: reply.body }));
+    assert.equal(reply.body.data, undefined);
+  }
+  assert.equal(rpcs, 0, "invalid keyed amounts/titles must fail before reading or creating a receipt");
+  assert.deepEqual(queries.filter(query => query.operation !== "select"), []);
+  assert.deepEqual(await saleRequestState(), before);
+});
+
+test("API keyed sale accepts explicit zero and MAX_SAFE_INTEGER and canonically replays numeric-string aliases", async () => {
+  const call = await saleApiFixture();
+  for (const [index, amount] of [0, Number.MAX_SAFE_INTEGER].entries()) {
+    const body = keyedSale({ requestKey: id(180 + index), amountMinor: amount });
+    const saved = apiItem(await call("deals", "POST", body), 201);
+    assert.equal(saved.amountMinor, amount); assert.equal(saved.status, "pending");
+    const before = await saleRequestState();
+    const { amountMinor: _amount, ...original } = body;
+    const reply = await call("deals", "POST", { ...original, amount_minor: String(amount) });
+    const replay = apiItem(reply);
+    assert.equal(replay.id, saved.id); assert.equal(replay.amountMinor, amount);
+    assert.equal((reply.body.data as Record<string, unknown>).replayed, true);
+    assert.deepEqual(await saleRequestState(), before);
+  }
+  assert.equal((await row("select count(*) from deals")).count, 2);
+  assert.equal((await row("select count(*) from crm_sale_create_requests")).count, 2);
+  assert.equal((await row("select count(*) from deals where status='paid' or paid_at is not null")).count, 0);
+});
+
+for (const rpcName of ["read_crm_sale_create_request", "create_crm_sale_once"]) {
+  for (const missing of ["actual SQL function", "schema cache"]) {
+    test(`API missing sale ${rpcName} (${missing}) returns 503 without legacy INSERT`, async () => {
+      const call = await saleApiFixture();
+      const before = await saleRequestState();
+      const queries: ApiQuery[] = [];
+      const base = apiDatabase("service_role", queries);
+      if (missing === "actual SQL function") {
+        const signature = rpcName === "read_crm_sale_create_request" ? "uuid,uuid,uuid,uuid,text" : "uuid,uuid,uuid,uuid,text,jsonb";
+        await db.exec(`alter function public.${rpcName}(${signature}) rename to fixture_missing_sale_rpc`);
+        serverClient.setSupabaseServerClientFactoryForTests(() => base);
+      } else {
+        serverClient.setSupabaseServerClientFactoryForTests(() => ({ ...base, rpc: async (name: string, args: Record<string, unknown>) =>
+          name === rpcName ? { data: null, error: { code: "PGRST202", message: "private sale schema detail" } } : base.rpc(name, args) }));
+      }
+      const reply = await call("deals", "POST", keyedSale());
+      assert.equal(reply.status, 503, JSON.stringify(reply.body));
+      assert.equal(reply.body.code, "sale_create_unavailable");
+      assert.equal(reply.body.data, undefined);
+      assert.doesNotMatch(JSON.stringify(reply.body), /private sale schema detail|fixture_missing_sale_rpc/);
+      assert.deepEqual(queries.filter(query => query.operation !== "select"), []);
+      assert.deepEqual(await saleRequestState(), before);
+    });
+  }
+  test(`API unknown ${rpcName} error cannot fall back to unkeyed INSERT`, async () => {
+    const call = await saleApiFixture();
+    const before = await saleRequestState();
+    const queries: ApiQuery[] = [];
+    const base = apiDatabase("service_role", queries);
+    serverClient.setSupabaseServerClientFactoryForTests(() => ({ ...base, rpc: async (name: string, args: Record<string, unknown>) =>
+      name === rpcName ? { data: null, error: { code: "08006", message: "private sale connection detail" } } : base.rpc(name, args) }));
+    const reply = await call("deals", "POST", keyedSale());
+    assert.equal(reply.status, 502, JSON.stringify(reply.body));
+    assert.equal(reply.body.data, undefined);
+    assert.doesNotMatch(JSON.stringify(reply.body), /private sale connection detail/);
+    assert.deepEqual(queries.filter(query => query.operation !== "select"), []);
+    assert.deepEqual(await saleRequestState(), before);
+  });
+  test(`API malformed or foreign ${rpcName} receipts fail closed`, async () => {
+    const call = await saleApiFixture();
+    const before = await saleRequestState();
+    const base = apiDatabase();
+    for (const data of [{}, { sale: { id: id(99), workspace_id: id(1) }, replayed: "true" },
+      { sale: { id: id(99), workspace_id: id(2), title: "Private foreign sale" }, replayed: true }]) {
+      serverClient.setSupabaseServerClientFactoryForTests(() => ({ ...base, rpc: async (name: string, args: Record<string, unknown>) =>
+        name === rpcName ? { data, error: null } : base.rpc(name, args) }));
+      const reply = await call("deals", "POST", keyedSale());
+      assert.equal(reply.status, 502, JSON.stringify(reply.body));
+      assert.equal(reply.body.data, undefined);
+      assert.doesNotMatch(JSON.stringify(reply.body), /Private foreign sale/);
+      assert.deepEqual(await saleRequestState(), before);
+    }
+  });
+}
+
+test("API lost sale RPC reply recovers the saved row without claiming crash-atomic journal", async () => {
+  const call = await saleApiFixture();
+  const base = apiDatabase();
+  let creates = 0;
+  serverClient.setSupabaseServerClientFactoryForTests(() => ({ ...base, rpc: async (name: string, args: Record<string, unknown>) => {
+    const result = await base.rpc(name, args);
+    if (name !== "create_crm_sale_once") return result;
+    creates++;
+    assert.equal(result.error, null);
+    return { data: null, error: { code: "08006", message: "Synthetic reply lost after real sale SQL" } };
+  } }));
+  const first = await call("deals", "POST", keyedSale());
+  assert.equal(first.status, 502);
+  assert.equal(first.body.data, undefined);
+  assert.equal((await row("select count(*) from deals")).count, 1);
+  assert.equal((await row("select count(*) from crm_sale_create_requests")).count, 1);
+  assert.equal((await row("select count(*) from audit_logs")).count, 0);
+  const before = await saleRequestState();
+  const replay = await call("deals", "POST", keyedSale());
+  assert.equal(apiItem(replay).id, (await row("select id from deals")).id);
+  assert.equal((replay.body.data as Record<string, unknown>).replayed, true);
+  assert.equal(creates, 1);
+  assert.deepEqual(await saleRequestState(), before, "replay neither duplicates a sale nor invents the missing post-domain audit");
+});
+
+for (const role of ["anon", "authenticated"] as const) {
+  test(`SQL sale receipts refuse direct ${role} execution and remain invisible even with temporary SELECT`, async () => {
+    await saleApiFixture();
+    const saved = await apiDatabase().rpc("create_crm_sale_once", saleRpcArgs());
+    assert.equal(saved.error, null);
+    const before = await saleRequestState();
+    for (const rpcName of ["read_crm_sale_create_request", "create_crm_sale_once"]) {
+      const refused = await apiDatabase(role).rpc(rpcName, saleRpcArgs());
+      assert.equal(refused.error?.code, "42501");
+      assert.deepEqual(await saleRequestState(), before);
+    }
+    await db.exec(`savepoint sale_receipt_rls_probe;
+      grant select on public.crm_sale_create_requests to ${role}; set local role ${role}`);
+    try { assert.equal((await row("select count(*) from public.crm_sale_create_requests")).count, 0); }
+    finally { await db.exec("reset role; rollback to savepoint sale_receipt_rls_probe; release savepoint sale_receipt_rls_probe"); }
+    assert.deepEqual(await saleRequestState(), before);
+  });
+}
+
+test("SQL sale receipt ACL permits service RPC execution but no direct receipt-table privileges", async () => {
+  await saleApiFixture();
+  assert.equal((await row("select relrowsecurity from pg_class where oid='public.crm_sale_create_requests'::regclass")).relrowsecurity, true);
+  for (const role of ["anon", "authenticated", "service_role"]) {
+    const permissions = await row(`select
+      has_table_privilege('${role}','public.crm_sale_create_requests','select') as can_read,
+      has_table_privilege('${role}','public.crm_sale_create_requests','insert') as can_insert,
+      has_table_privilege('${role}','public.crm_sale_create_requests','update') as can_update,
+      has_table_privilege('${role}','public.crm_sale_create_requests','delete') as can_delete,
+      has_function_privilege('${role}','public.read_crm_sale_create_request(uuid,uuid,uuid,uuid,text)','execute') as read_rpc,
+      has_function_privilege('${role}','public.create_crm_sale_once(uuid,uuid,uuid,uuid,text,jsonb)','execute') as create_rpc`);
+    assert.deepEqual(permissions, { can_read: false, can_insert: false, can_update: false, can_delete: false,
+      read_rpc: role === "service_role", create_rpc: role === "service_role" });
+  }
+});
+
+test("SQL sale RPCs validate live actor/auth/workspace and input without leaking receipts", async () => {
+  await saleApiFixture();
+  const saved = await apiDatabase().rpc("create_crm_sale_once", saleRpcArgs());
+  assert.equal(saved.error, null);
+  const before = await saleRequestState();
+  for (const rpcName of ["read_crm_sale_create_request", "create_crm_sale_once"]) {
+    for (const changes of [{ p_staff_user_id: id(999) }, { p_auth_user_id: id(999) }, { p_workspace_id: id(2) }]) {
+      const refused = await apiDatabase().rpc(rpcName, saleRpcArgs(changes));
+      assert.equal(refused.error?.code, "P7604");
+      assert.equal(refused.data, null);
+      assert.deepEqual(await saleRequestState(), before);
+    }
+    for (const changes of [{ p_request_key: null }, { p_auth_user_id: null }, { p_request_fingerprint: "not-a-hash" }]) {
+      const refused = await apiDatabase().rpc(rpcName, saleRpcArgs(changes));
+      assert.equal(refused.error?.code, "P7601");
+      assert.deepEqual(await saleRequestState(), before);
+    }
+    const conflict = await apiDatabase().rpc(rpcName, saleRpcArgs({ p_request_fingerprint: "b".repeat(64) }));
+    assert.equal(conflict.error?.code, "P7602");
+    assert.deepEqual(await saleRequestState(), before);
+    for (const revoke of ["status='inactive'", "role='doctor'"]) {
+      await db.exec(`update staff_users set ${revoke} where id='${id(40)}'`);
+      const refused = await apiDatabase().rpc(rpcName, saleRpcArgs());
+      assert.equal(refused.error?.code, "P7604");
+      assert.deepEqual(await saleRequestState(), before);
+      await db.exec(`update staff_users set status='active',role='owner' where id='${id(40)}'`);
+    }
+  }
+});
+
+test("SQL sale create validates reference tenants and rejects injected columns before writing", async () => {
+  await saleApiFixture();
+  await db.exec(`insert into clients(id,workspace_id,full_name) values('${id(80)}','${id(2)}','Other local client');
+    insert into leads(id,workspace_id,full_name) values('${id(81)}','${id(2)}','Other local lead');
+    insert into appointments(id,workspace_id,client_id,service) values('${id(82)}','${id(2)}','${id(80)}','Other local visit');
+    insert into clinic_services(id,workspace_id,name) values('${id(83)}','${id(2)}','Other local service');
+    insert into staff_users(id,workspace_id,auth_user_id,full_name,email,role)
+      values('${id(84)}','${id(2)}','${id(85)}','Other local staff','foreign@example.invalid','owner')`);
+  const before = await saleRequestState();
+  const base = saleRpcArgs();
+  for (const changes of [{ workspace_id: id(2) }, { client_id: id(80) }, { lead_id: id(81) },
+    { appointment_id: id(82) }, { service_id: id(83) }, { responsible_user_id: id(84) },
+    { id: id(999) }, { created_at: "2090-01-01" }, { title: "" }, { title: " \t\r\n " }, { amount_minor: -1 },
+    { amount_minor: Number.MAX_SAFE_INTEGER + 1 }, { status: "invalid" }]) {
+    const refused = await apiDatabase().rpc("create_crm_sale_once", { ...base, p_sale: { ...base.p_sale, ...changes } });
+    assert.equal(refused.error?.code, "P7601", JSON.stringify(changes));
+    assert.deepEqual(await saleRequestState(), before);
+  }
+});
+
+test("SQL sale replay returns current rows before catalogue checks and tombstones refuse resurrection", async () => {
+  await saleApiFixture();
+  const created = await apiDatabase().rpc("create_crm_sale_once", saleRpcArgs());
+  assert.equal(created.error, null);
+  const sale = (created.data as Record<string, unknown>).sale as Record<string, unknown>;
+  assert.equal((created.data as Record<string, unknown>).replayed, false);
+  await db.query("update deals set status='cancelled',amount_minor=12345,notes='Later SQL edit' where id=$1", [sale.id]);
+  await db.exec("update clinic_services set is_active=false");
+  const before = await saleRequestState();
+  for (const rpcName of ["read_crm_sale_create_request", "create_crm_sale_once"]) {
+    const replay = await apiDatabase().rpc(rpcName, saleRpcArgs());
+    assert.equal(replay.error, null);
+    const data = replay.data as Record<string, unknown>;
+    const current = data.sale as Record<string, unknown>;
+    assert.equal(data.replayed, true);
+    assert.equal(current.id, sale.id); assert.equal(current.amount_minor, 12345);
+    assert.equal(current.status, "cancelled"); assert.equal(current.notes, "Later SQL edit");
+    assert.deepEqual(await saleRequestState(), before);
+  }
+  await db.query("delete from deals where id=$1", [sale.id]);
+  assert.equal((await row("select sale_id from crm_sale_create_requests")).sale_id, null);
+  const tombstone = await saleRequestState();
+  for (const rpcName of ["read_crm_sale_create_request", "create_crm_sale_once"]) {
+    const refused = await apiDatabase().rpc(rpcName, saleRpcArgs());
+    assert.equal(refused.error?.code, "P7603"); assert.equal(refused.data, null);
+    assert.deepEqual(await saleRequestState(), tombstone);
+  }
+});
+
+test("SQL sale receipt failure atomically rolls back the inserted sale and leaves its key retryable", async () => {
+  await saleApiFixture();
+  const before = await saleRequestState();
+  await db.exec(`create function public.refuse_fixture_sale_receipt() returns trigger language plpgsql as $$ begin
+      raise exception 'Synthetic receipt write refusal' using errcode='23514'; end $$;
+    create trigger refuse_fixture_sale_receipt before insert on public.crm_sale_create_requests
+      for each row execute function public.refuse_fixture_sale_receipt()`);
+  const refused = await apiDatabase().rpc("create_crm_sale_once", saleRpcArgs());
+  assert.equal(refused.error?.code, "23514");
+  assert.equal(refused.data, null);
+  assert.deepEqual(await saleRequestState(), before, "receipt failure must not leave the earlier INSERT or audit behind");
+  await db.exec("drop trigger refuse_fixture_sale_receipt on public.crm_sale_create_requests");
+  const retry = await apiDatabase().rpc("create_crm_sale_once", saleRpcArgs());
+  assert.equal(retry.error, null);
+  const saved = (retry.data as Record<string, unknown>).sale as Record<string, unknown>;
+  assert.equal((await row("select count(*) from deals")).count, 1);
+  assert.equal((await row("select count(*) from crm_sale_create_requests")).count, 1);
+  assert.equal((await row("select sale_id from crm_sale_create_requests")).sale_id, saved.id);
+  assert.equal((await row("select count(*) from audit_logs")).count, 0, "RPC does not own the server's post-domain audit");
+});
+
+test("SQL migration 076 repeats without backfill, workspace activation or receipt access grants", async () => {
+  await saleApiFixture();
+  assert.equal((await apiDatabase().rpc("create_crm_sale_once", saleRpcArgs())).error, null);
+  const before = await saleRequestState();
+  const workspaces = await row("select jsonb_agg(w order by id) as rows from workspaces w");
+  const source = await readFile(path.join(root, "migrations/076_crm_sale_create_requests.sql"), "utf8");
+  await db.exec(source.replace(/^begin;$/gmi, "").replace(/^commit;$/gmi, ""));
+  assert.deepEqual(await saleRequestState(), before);
+  assert.deepEqual(await row("select jsonb_agg(w order by id) as rows from workspaces w"), workspaces);
+  assert.equal((await row("select has_table_privilege('service_role','public.crm_sale_create_requests','select') as permitted")).permitted, false);
+});
 
 for (const capacity of [1, 2]) {
   test(`API lost successful reply replays one client/visit/sale/journal at capacity ${capacity}`, async () => {
@@ -928,7 +1447,7 @@ for (const capacity of [1, 2]) {
 }
 
 for (const scenario of ["normal save", "lost saved response", "refused before insert"] as const) {
-  test(`G2 SalesPage pending-sale runtime: ${scenario} characterizes create-new POST, not idempotency`, async () => {
+  test(`G2 SalesPage keyed pending-sale runtime: ${scenario} preserves one sale and first-create journal`, async () => {
     const call = await apiFixture();
     await db.exec(`update workspaces set arrival_marks_paid=false where id='${id(1)}';
       update appointments set status='arrived' where id='${id(10)}'`);
@@ -959,12 +1478,14 @@ for (const scenario of ["normal save", "lost saved response", "refused before in
           return Response.json(denied.body, { status: denied.status });
         }
         const reply = await call("deals", "POST", body);
-        const item = apiItem(reply, 201);
+        const replayed = scenario === "lost saved response" && attempt === 2;
+        const item = apiItem(reply, replayed ? 200 : 201);
+        assert.equal((reply.body.data as Record<string, unknown>).replayed, replayed);
         savedIds.push(String(item.id));
         // Read SQL state BEFORE any simulated loss. The outer test later rolls back;
         // this proves writes before reply loss, not durable commit/crash recovery.
         const rows = await persisted();
-        assert.equal(rows.length, savedIds.length);
+        assert.equal(rows.length, 1);
         assert.ok(rows.some(row => row.id === item.id && row.status === "pending" && row.paid_at === null));
         if (scenario === "lost saved response" && attempt === 1) beforeLoss = rows;
         else return Response.json(reply.body, { status: reply.status });
@@ -993,13 +1514,19 @@ for (const scenario of ["normal save", "lost saved response", "refused before in
         assert.equal(runtime.view.items.length, 0, "optimistic row is removed when delivery fails");
         assert.equal(runtime.toasts.filter(toast => toast.kind === "success").length, 0);
         assert.equal(runtime.toasts.filter(toast => toast.kind === "error").length, 1);
-        assert.match(runtime.toasts.find(toast => toast.kind === "error")!.message, /Сохранение не подтверждено/);
-        assert.doesNotMatch(runtime.toasts.find(toast => toast.kind === "error")!.message, /отменено|повторите попытку/);
+        const message = runtime.toasts.find(toast => toast.kind === "error")!.message;
+        if (scenario === "lost saved response") {
+          assert.match(message, /Сохранение не подтверждено/);
+          assert.doesNotMatch(message, /отменено|повторите попытку/);
+        } else assert.doesNotMatch(message, /Сохранение не подтверждено/, "a definite pre-insert 403 is not a lost reply");
         assert.equal((await persisted()).length, scenario === "lost saved response" ? 1 : 0);
         if (scenario === "lost saved response") {
           assert.equal(beforeLoss.length, 1);
           assert.equal(beforeLoss[0].id, savedIds[0]);
           assert.deepEqual(await persisted(), beforeLoss);
+        } else {
+          assert.equal((await row("select count(*) from crm_sale_create_requests")).count, 0,
+            "the confirmed pre-insert 403 created no receipt before a fresh attempt");
         }
         const latest = runtime.view.submitForm;
         assert.notEqual(latest, first, "retry must come from the latest actual page closure");
@@ -1010,22 +1537,28 @@ for (const scenario of ["normal save", "lost saved response", "refused before in
       }
       const posts = runtime.calls.filter(request => request.method === "POST");
       assert.equal(posts.length, scenario === "normal save" ? 1 : 2);
-      if (posts.length === 2) assert.deepEqual(posts[1].body, posts[0].body, "same user input and API payload on retry");
+      if (posts.length === 2) {
+        if (scenario === "refused before insert") {
+          const { requestKey: rejectedKey, ...rejectedBody } = posts[0].body;
+          const { requestKey: freshKey, ...freshBody } = posts[1].body;
+          assert.deepEqual(freshBody, rejectedBody, "same business payload after a definite pre-insert refusal");
+          assert.notEqual(freshKey, rejectedKey, "a confirmed refusal may retire its unused key");
+        } else assert.deepEqual(posts[1].body, posts[0].body, "a lost reply must reuse the identical key and full payload");
+      }
       for (const post of posts) {
-        for (const key of ["id", "requestKey", "request_key", "requestId", "request_id", "idempotencyKey", "idempotency_key"]) {
-          assert.equal(Object.hasOwn(post.body, key), false, `no supported sale retry identity sent as ${key}`);
+        assert.match(String(post.body.requestKey), /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+        for (const key of ["id", "request_key", "requestId", "request_id", "idempotencyKey", "idempotency_key"]) {
+          assert.equal(Object.hasOwn(post.body, key), false, `requestKey is the only sale retry identity, not ${key}`);
         }
         assert.deepEqual(Object.keys(post.headers).sort(), ["authorization", "content-type"]);
         assert.equal(post.body.amountMinor, 700050);
         assert.equal(post.body.status, "pending");
       }
       const rows = await persisted();
-      const expected = scenario === "lost saved response" ? 2 : 1;
-      // Known retry risk under existing create-new semantics, not acceptance of
-      // idempotency and not a new rule forbidding intentional multiple sales.
+      const expected = 1;
       assert.equal(rows.length, expected);
       assert.equal(new Set(savedIds).size, expected);
-      assert.deepEqual(rows.map(row => row.id).sort(), [...savedIds].sort());
+      assert.deepEqual(rows.map(row => row.id).sort(), [...new Set(savedIds)].sort());
       for (const row of rows) {
         assert.match(String(row.id), /^[0-9a-f-]{36}$/);
         assert.equal(row.appointment_id, id(10)); assert.equal(row.client_id, id(3));
@@ -1034,6 +1567,7 @@ for (const scenario of ["normal save", "lost saved response", "refused before in
       }
       assert.equal((await row("select count(*) from deals where status='paid' or paid_at is not null")).count, 0);
       assert.deepEqual(await retryCounts(), { ...before, sales: expected, journal: expected });
+      assert.equal((await row("select count(*) from crm_sale_create_requests")).count, 1);
       assert.equal(losses, scenario === "lost saved response" ? 1 : 0);
       assert.equal(runtime.view.saving, false); assert.equal(runtime.view.formOpen, false);
       assert.equal(runtime.view.form.title, ""); assert.equal(runtime.view.form.amountTenge, "");

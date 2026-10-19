@@ -183,12 +183,16 @@ function hasVerifiedAdminTransport(sources: CrmSources): boolean {
 
 const mortgageFile = "lib/mortgage-workspace.tsx";
 const mortgageAnalyticsFile = "pages/MortgageAnalytics.tsx";
+const activityDialogFile = "components/mortgage/ActivityDialog.tsx";
+const contactFormFile = "components/mortgage/MortgageContactForm.tsx";
+const mortgageConsumerFiles = new Set([mortgageFile, mortgageAnalyticsFile, activityDialogFile, contactFormFile]);
 
 // Prove this context -> hook -> consumer chain, not the names `request` or
 // `mutate`. Only the exact call sites below receive an exemption.
 function verifiedMortgageReceivers(sources: CrmSources): Map<string, Set<number>> | undefined {
-  const files = new Map([...sources].filter(([file]) => file === mortgageFile || file === mortgageAnalyticsFile)
-    .map(([file, source]) => [file, ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)]));
+  const files = new Map([...sources]
+    .map(([file, source]) => [file, ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true,
+      file.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS)]));
   const model = files.get(mortgageFile);
   if (!model) return undefined;
   // Binding identities distinguish a verified closure from a same-named shadow.
@@ -199,10 +203,14 @@ function verifiedMortgageReceivers(sources: CrmSources): Map<string, Set<number>
     useCaseSensitiveFileNames: () => true, getNewLine: () => "\n",
   });
   const checker = program.getTypeChecker();
+  const nodeCache = new Map<ts.Node, ts.Node[]>();
   const nodes = (root: ts.Node): ts.Node[] => {
+    const cached = nodeCache.get(root);
+    if (cached) return cached;
     const result: ts.Node[] = [];
     const visit = (node: ts.Node) => { result.push(node); ts.forEachChild(node, visit); };
     visit(root);
+    nodeCache.set(root, result);
     return result;
   };
   const one = <T,>(values: T[]): T | undefined => values.length === 1 ? values[0] : undefined;
@@ -211,7 +219,7 @@ function verifiedMortgageReceivers(sources: CrmSources): Map<string, Set<number>
     : ts.isExportSpecifier(node.parent) ? checker.getExportSpecifierLocalTargetSymbol(node.parent) : checker.getSymbolAtLocation(node);
   const boundTo = (node: ts.Node, name: ts.Node) => Boolean(symbol(name)) && symbol(node) === symbol(name);
   const references = (name: ts.Node, allowed: (node: ts.Identifier) => boolean) => [...files.values()]
-    .every((ast) => nodes(ast).filter(ts.isIdentifier).filter((node) => boundTo(node, name)).every(allowed));
+    .every((ast) => nodes(ast).filter(ts.isIdentifier).filter((node) => node.text === name.getText() && boundTo(node, name)).every(allowed));
   const fingerprint = (node: ts.Node): unknown[] => {
     const children: unknown[] = [];
     ts.forEachChild(node, (child) => { children.push(fingerprint(child)); });
@@ -252,7 +260,7 @@ function verifiedMortgageReceivers(sources: CrmSources): Map<string, Set<number>
   }));
   const dependency = (node: ts.Node) => ts.isArrayLiteralExpression(node.parent) && ts.isCallExpression(node.parent.parent)
     && node.parent.parent.arguments[1] === node.parent;
-  const readOnlyProperty = (node: ts.Identifier) => {
+  const readOnlyProperty = (node: ts.Node) => {
     let parent: ts.Node = node;
     while (ts.isPropertyAccessExpression(parent.parent) && parent.parent.expression === parent) parent = parent.parent;
     return parent !== node && !(ts.isBinaryExpression(parent.parent) && parent.parent.left === parent
@@ -397,6 +405,108 @@ function verifiedMortgageReceivers(sources: CrmSources): Map<string, Set<number>
         || (readOnlyProperty(node) && node.parent.getText() !== "workspace.request"))) return undefined;
     approve(mortgageAnalyticsFile, requestCall);
   }
+
+  const functionIn = (ast: ts.SourceFile, name: string) => one(ast.statements.filter(ts.isFunctionDeclaration)
+    .filter((node) => node.name?.text === name));
+  const ownerOf = (node: ts.Node): ts.Node | undefined => {
+    let parent = node.parent;
+    while (parent && !ts.isFunctionDeclaration(parent)) parent = parent.parent;
+    return parent;
+  };
+  const jsxValue = (mount: ts.JsxSelfClosingElement, name: string) => {
+    const attribute = one(mount.attributes.properties.filter(ts.isJsxAttribute).filter((node) => node.name.getText() === name));
+    return attribute?.initializer && ts.isJsxExpression(attribute.initializer) ? attribute.initializer.expression : undefined;
+  };
+  const workspaceUse = (node: ts.Node, requests: ts.Node[], forwards: ts.Node[] = []) => {
+    if (forwards.includes(node)) return true;
+    const parent = node.parent;
+    return readOnlyProperty(node) && ts.isPropertyAccessExpression(parent) && parent.expression === node
+      && (parent.name.text !== "request" || requests.includes(parent) || dependency(parent));
+  };
+  // Every import and mount of these injection boundaries must be accounted for,
+  // including callers outside the usual mortgage directory.
+  const verifyParents = (file: string, name: string, parents: [string, string][], prop: "workspace" | "request") => {
+    const ast = files.get(file), component = ast && functionIn(ast, name);
+    if (!component?.name || !component.body || !references(component.name, (node) => node === component.name
+      || (name === "ActivityDialog" && ts.isExportAssignment(node.parent) && !node.parent.isExportEquals))) return false;
+    const mounts: ts.JsxSelfClosingElement[] = [];
+    for (const [caller, owner] of parents) {
+      const parentAst = files.get(caller), fn = parentAst && functionIn(parentAst, owner);
+      const binding = parentAst && imported(parentAst, name, `@/${file.replace(/\.tsx$/, "")}`);
+      const hookBinding = parentAst && imported(parentAst, "useMortgageWorkspace", "@/lib/mortgage-workspace");
+      const workspace = fn && variable(fn, "workspace");
+      const hookCall = workspace?.initializer;
+      if (!parentAst || !fn || !binding || !hookBinding || !workspace?.initializer
+        || !hookCall || !ts.isCallExpression(hookCall) || !boundTo(hookCall.expression, hookBinding.name)
+        || !references(hookBinding.name, (node) => node === hookBinding.name || node === hookCall.expression)) return false;
+      const mount = one(nodes(fn).filter(ts.isJsxSelfClosingElement).filter((node) => boundTo(node.tagName, binding.name)));
+      if (!mount || ownerOf(mount) !== fn || mount.attributes.properties.some(ts.isJsxSpreadAttribute)
+        || !references(binding.name, (node) => node === binding.name || node === mount.tagName)) return false;
+      const value = jsxValue(mount, prop);
+      const receiver = value && prop === "request" && ts.isPropertyAccessExpression(value) && value.name.text === "request"
+        ? value.expression : value;
+      if (!value || (prop === "request" && receiver === value) || !receiver || !boundTo(receiver, workspace.name)
+        || !references(workspace.name, (node) => node === workspace.name || dependency(node)
+          || workspaceUse(node, prop === "request" ? [value] : [], prop === "workspace" ? [value] : []))) return false;
+      mounts.push(mount);
+    }
+    for (const [caller, source] of files) {
+      for (const node of nodes(source)) {
+        if (ts.isStringLiteral(node) && modulePath(caller, node.text) === file.replace(/\.tsx$/, "")) {
+          const declaration = node.parent;
+          if (!parents.some(([expected]) => expected === caller) || !ts.isImportDeclaration(declaration)
+            || declaration.importClause?.isTypeOnly || declaration.importClause?.name
+            || !declaration.importClause?.namedBindings || !ts.isNamedImports(declaration.importClause.namedBindings)
+            || declaration.importClause.namedBindings.elements.some((entry) => entry.name.text !== name || entry.propertyName || entry.isTypeOnly)) return false;
+        }
+        if ((ts.isJsxSelfClosingElement(node) || ts.isJsxOpeningElement(node)) && node.tagName.getText() === name
+          && !mounts.includes(node as ts.JsxSelfClosingElement)) return false;
+      }
+    }
+    return true;
+  };
+  const activity = files.get(activityDialogFile);
+  if (activity) {
+    if (!verifyParents(activityDialogFile, "ActivityDialog", [
+      ["pages/MortgageCalendar.tsx", "MortgageCalendarBody"], ["pages/MortgageTasks.tsx", "MortgageTasksBody"],
+    ], "workspace")) return undefined;
+    const dialog = functionIn(activity, "ActivityDialog")!, form = functionIn(activity, "ActivityForm");
+    const props = dialog.parameters[0];
+    const parameter = form?.parameters[0];
+    if (dialog.parameters.length !== 1 || !props || !ts.isIdentifier(props.name) || props.initializer
+      || !form?.name || !parameter || form.parameters.length !== 1 || parameter.initializer || !ts.isObjectBindingPattern(parameter.name)) return undefined;
+    const workspace = one(parameter.name.elements.filter((node) => node.name.getText() === "workspace"));
+    const mount = one(nodes(dialog).filter(ts.isJsxSelfClosingElement).filter((node) => boundTo(node.tagName, form.name!)));
+    if (!workspace || workspace.propertyName || workspace.initializer || workspace.dotDotDotToken || !mount
+      || !references(form.name, (node) => node === form.name || node === mount.tagName)) return undefined;
+    const spread = one(mount.attributes.properties.filter(ts.isJsxSpreadAttribute));
+    if (!spread || !boundTo(spread.expression, props.name) || mount.attributes.properties.length !== 3
+      || mount.attributes.properties.filter(ts.isJsxAttribute).some((node) => !["key", "timeZone"].includes(node.name.getText()))
+      || !jsxValue(mount, "key") || !jsxValue(mount, "timeZone")
+      || !references(props.name, (node) => node === props.name || node === spread.expression
+        || (ts.isPropertyAccessExpression(node.parent) && node.parent.expression === node
+          && (node.parent.name.text === "workspace" ? workspaceUse(node.parent, []) : readOnlyProperty(node))))) return undefined;
+    const requests = nodes(form).filter(ts.isCallExpression).filter((node) => ts.isPropertyAccessExpression(node.expression)
+      && node.expression.name.text === "request" && node.expression.expression.getText() === "workspace");
+    if (requests.length !== 1 || !ts.isPropertyAccessExpression(requests[0].expression)
+      || !boundTo(requests[0].expression.expression, workspace.name)
+      || !references(workspace.name, (node) => node === workspace.name || workspaceUse(node, requests.map((call) => call.expression)))) return undefined;
+    approve(activityDialogFile, requests[0]);
+  }
+  const contact = files.get(contactFormFile);
+  if (contact) {
+    if (!verifyParents(contactFormFile, "MortgageContactForm", [
+      ["pages/MortgageClients.tsx", "MortgageClientsBody"], ["components/mortgage/MortgageContactDetail.tsx", "MortgageContactDetail"],
+    ], "request")) return undefined;
+    const form = functionIn(contact, "MortgageContactForm")!, parameter = form.parameters[0];
+    if (form.parameters.length !== 1 || !parameter || parameter.initializer || !ts.isObjectBindingPattern(parameter.name)) return undefined;
+    const request = one(parameter.name.elements.filter((node) => node.name.getText() === "request"));
+    if (!request || request.propertyName || request.initializer || request.dotDotDotToken) return undefined;
+    const requests = nodes(form).filter(ts.isCallExpression).filter((node) => ts.isIdentifier(node.expression) && node.expression.text === "request");
+    if (requests.length !== 1 || !boundTo(requests[0].expression, request.name)
+      || !references(request.name, (node) => node === request.name || node === requests[0].expression || dependency(node))) return undefined;
+    approve(contactFormFile, requests[0]);
+  }
   return calls;
 }
 
@@ -451,11 +561,11 @@ export function crmTransportOffenders(sources: CrmSources): string[] {
     }
     for (const helper of receivers) {
       if (helper === "fetch") offenders.push(name + ": a CRM path is handed straight to fetch");
-      else if (name === mortgageFile || name === mortgageAnalyticsFile) offenders.push(name + ": CRM path uses an unverified scoped receiver " + helper);
+      else if (mortgageConsumerFiles.has(name)) offenders.push(name + ": CRM path uses an unverified scoped receiver " + helper);
       else if (!safe.has(helper)) offenders.push(name + ": CRM paths flow through " + helper + ", which never reaches crmFetch");
     }
     if (name === modelFile && !injectedDeletionIsSafe) offenders.push(name + ": unverified injected transport chain");
-    if ((name === mortgageFile || name === mortgageAnalyticsFile) && !mortgageReceivers) offenders.push(name + ": unverified scoped mortgage transport chain");
+    if (mortgageConsumerFiles.has(name) && !mortgageReceivers) offenders.push(name + ": unverified scoped mortgage transport chain");
   }
   return offenders;
 }

@@ -15,6 +15,9 @@ const source = await read("lib/mortgage-workspace.tsx");
 const calendarSource = await read("pages/MortgageCalendar.tsx");
 const taskSource = await read("pages/MortgageTasks.tsx");
 const dialogSource = await read("components/mortgage/ActivityDialog.tsx");
+const contactFormSource = await read("components/mortgage/MortgageContactForm.tsx");
+const clientsSource = await read("pages/MortgageClients.tsx");
+const contactDetailSource = await read("components/mortgage/MortgageContactDetail.tsx");
 type Node = { type: any; props: Record<string, any>; key?: unknown };
 const jsx = (type: any, props: Node["props"], key?: unknown): Node => ({ type, props, key });
 function evaluate(input: string, imports: Record<string, unknown> = {}, bindings: Record<string, unknown> = {}) {
@@ -94,6 +97,10 @@ const defer = <T,>() => {
   return { promise, resolve, reject };
 };
 const scope = { actorId: "local-actor", workspaceId: "local-workspace", role: "owner", purpose: "mortgage_leads" };
+const formAuth = { useAuth: () => ({ clinicId: scope.workspaceId, userRole: scope.role }) };
+const selfStaffId = "22222222-2222-4222-8222-222222222222";
+const selfAuthId = "11111111-1111-4111-8111-111111111111";
+const otherStaffId = "33333333-3333-4333-8333-333333333333";
 const contact = { id: "local-client", name: "Local Client", phone: "000", notes: "", status: "new", source: "manual", createdAt: "2026-10-14T10:00:00Z", updatedAt: "2026-10-14T10:00:00.123456Z", responsibleUserId: "local-manager", responsibleName: "Local Manager" };
 const snapshot = () => ({ timeZone: "Asia/Qyzylorda", contacts: [contact], contactsTotal: 1, activities: [], members: [{ id: "local-manager", name: "Local Manager", role: "lead_manager", status: "active" }], events: [],
   metrics: { totalLeads: 1, unassignedLeads: 0, inProgressLeads: 0, meetingsToday: 0, overdueTasks: 0, activeManagers: 1 },
@@ -202,7 +209,7 @@ test("StrictMode replay creates a fresh live controller, never reactivating old 
 });
 
 test("401/403/404 reads and mutations revoke the entire scope, hide loaded data/dialogs and show a non-sensitive alert", async () => {
-  const dialog = evaluate(dialogSource, { react: {}, "@/lib/mortgage-workspace": pure });
+  const dialog = evaluate(dialogSource, { react: {}, "@/lib/mortgage-workspace": pure, "@/contexts/AuthContext": formAuth });
   for (const status of [401, 403, 404]) for (const method of ["GET", "PATCH", "POST"]) {
     const calls: any[] = [];
     let refuse = false;
@@ -405,7 +412,7 @@ test("the real activity form retains a UUID across failed retries and converts m
     drafts.push(draft); if (fail) { fail = false; throw new Error("Local retry"); }
   } };
   const observed = dialogSource.replace("return <DialogContent", "__capture({ submit, loaded, setTitle, setStartsAt, setEndsAt, setDueAt, error }); return <DialogContent") + "\nexports.fixture = { ActivityForm };";
-  const form = evaluate(observed, { react: d.hooks, "@/lib/mortgage-workspace": pure }, { __capture: (value: any) => { captured = value; } });
+  const form = evaluate(observed, { react: d.hooks, "@/lib/mortgage-workspace": pure, "@/contexts/AuthContext": formAuth }, { __capture: (value: any) => { captured = value; } });
   d.mount(() => form.fixture.ActivityForm({ workspace, kind: "meeting", leadId: contact.id, timeZone: snapshot().timeZone, onOpenChange: () => { closed = true; } }));
   await d.flush(); captured.loaded(contact, ""); captured.setTitle("Local meeting"); captured.setStartsAt("2026-10-15T23:30"); captured.setEndsAt("2026-10-16T00:30"); await d.flush();
   await captured.submit({ preventDefault() {} }); await d.flush();
@@ -416,12 +423,198 @@ test("the real activity form retains a UUID across failed retries and converts m
   assert.equal(drafts[0].responsibleUserId, undefined); d.unmount();
 });
 
+function formNodes(value: any): Node[] {
+  if (!value || typeof value !== "object") return [];
+  if (Array.isArray(value)) return value.flatMap(formNodes);
+  return "type" in value ? [value, ...formNodes(value.props?.children)] : [];
+}
+
+function contactFormFixture(fetcher: (path: string, init: any) => Promise<Response>, editing = false, bound?: { request: (path: string, init: any) => Promise<Response>; isCurrent: () => boolean }) {
+  const d = driver(), requests: any[] = [], submitted: any[] = [];
+  let current = true, closed = false;
+  const isCurrent = () => current && (!bound || bound.isCurrent());
+  const request = async (path: string, init: any) => { requests.push({ path, init }); return bound ? bound.request(path, init) : fetcher(path, init); };
+  const form = evaluate(contactFormSource, {
+    react: d.hooks, "@/contexts/AuthContext": { useAuth: () => ({ clinicId: scope.workspaceId, userRole: "admin" }) },
+    "@/lib/phone": { phoneDigits: (value: string) => value.replace(/\D/g, "") },
+    "./MortgagePrimitives": { mortgageContactStatus: (value: string) => value, mortgageErrorMessage: (error: Error) => error.message },
+  });
+  const props = { contact: editing ? contact : undefined,
+    request, isCurrent, onSubmit: async (fields: any) => { submitted.push(fields); }, onClose: () => { closed = true; } };
+  d.mount(() => form.MortgageContactForm(props));
+  let output: any;
+  const flush = async () => { output = await d.flush(); return formNodes(output); };
+  const nodes = () => formNodes(output);
+  const field = (suffix: string) => nodes().find((node) => node.props.id === `fixture-form-${suffix}`)!;
+  const submit = async () => { await nodes().find((node) => node.type === "form")!.props.onSubmit({ preventDefault() {} }); await flush(); };
+  return { d, requests, submitted, flush, nodes, field, submit, isClosed: () => closed, revoke: () => { current = false; } };
+}
+
+test("create and edit parents forward their existing bound request and session guard to the contact form", async () => {
+  for (const editing of [false, true]) {
+    const d = driver(), queries: any[] = [];
+    const workspace = { data: snapshot(), loading: false, error: "", isCurrent: () => true,
+      request: async () => response(), refresh() {} };
+    const primitives = { MortgageIconButton: "MortgageIconButton", MortgagePageHeader: "MortgagePageHeader", MortgageState: "MortgageState",
+      mortgageContactStatus: (value: string) => value, mortgageDate: () => "Synthetic date" };
+    const page = evaluate((editing ? contactDetailSource : clientsSource) + (editing ? "" : "\nexports.Body = MortgageClientsBody;"), {
+      react: d.hooks, wouter: { Link: "Link", useSearchParams: () => [new URLSearchParams(), () => undefined] },
+      "@/contexts/AuthContext": { useAuth: () => ({ clinicId: scope.workspaceId, userRole: "admin" }) },
+      "@/lib/mortgage-workspace": { useMortgageWorkspace: (query: any) => { queries.push(query); return workspace; } },
+      "@/lib/phone": { formatPhone: (value: string) => value, toTelHref: (value: string) => `tel:${value}` },
+      "@/components/mortgage/MortgagePrimitives": primitives, "./MortgagePrimitives": primitives,
+      "@/components/mortgage/MortgageContactForm": { MortgageContactForm: "MortgageContactForm" },
+      "./MortgageContactForm": { MortgageContactForm: "MortgageContactForm" },
+    });
+    d.mount(() => editing ? page.MortgageContactDetail({ leadId: contact.id, canEdit: true, onClose() {}, onChanged() {} }) : page.Body());
+    let nodes = formNodes(await d.flush());
+    const open = nodes.find((node) => editing ? node.type === "MortgageIconButton" && node.props.label === "Изменить контакт"
+      : node.type === "button" && JSON.stringify(node.props.children).includes("Новый контакт"));
+    assert.ok(open);open.props.onClick();nodes = formNodes(await d.flush());
+    const forms = nodes.filter((node) => node.type === "MortgageContactForm");
+    assert.equal(forms.length, 1);
+    assert.equal(forms[0].props.request, workspace.request);
+    assert.equal(forms[0].props.isCurrent, workspace.isCurrent);
+    assert.equal("members" in forms[0].props, false);
+    assert.equal(forms[0].props.contact, editing ? contact : undefined);
+    assert.ok(queries.every((query) => editing ? query.leadId === contact.id : query.q === "" && query.page === 0));
+    forms[0].props.onClose();nodes = formNodes(await d.flush());
+    assert.equal(nodes.some((node) => node.type === "MortgageContactForm"), false);d.unmount();
+  }
+});
+
+test("new-contact picker uses bound lead-assignees only, defaults unassigned and explicitly submits admin self", async () => {
+  assert.doesNotMatch(contactFormSource, /useMortgageWorkspace/);
+  assert.doesNotMatch(contactFormSource, /\bmembers\b/);
+  const allowed = [{ id: selfStaffId, name: "Synthetic current admin" }, { id: otherStaffId, name: "Synthetic lead manager" }];
+  const f = contactFormFixture(async () => response({ assignees: allowed }));
+  await f.flush();
+  assert.equal(f.requests.length, 1);
+  assert.equal(f.requests[0].path, `/api/crm/lead-assignees?workspaceId=${scope.workspaceId}`);
+  assert.ok(f.requests[0].init.signal instanceof AbortSignal);
+  assert.equal(f.field("responsible").props.value, "");
+  assert.deepEqual(f.nodes().filter((node) => node.type === "option").map((node) => node.props.value), ["", selfStaffId, otherStaffId]);
+  f.field("name").props.onChange({ target: { value: "Synthetic new contact" } });
+  f.field("phone").props.onChange({ target: { value: "+77000000000" } });
+  f.field("responsible").props.onChange({ target: { value: selfStaffId } });
+  await f.flush(); await f.submit();
+  assert.equal(f.submitted[0].responsibleUserId, selfStaffId);
+  assert.equal(f.isClosed(), true);
+  f.d.unmount();
+});
+
+test("contact picker reuses the parent's actual bound transport without a snapshot read", async () => {
+  const requests: any[] = [], session = moduleFixture(driver(), async (path, init) => {
+    requests.push({ path, init });
+    return response({ assignees: [{ id: selfStaffId, name: "Synthetic admin" }] });
+  });
+  const adminScope = { ...scope, role: "admin" }, live = { current: adminScope };
+  session.d.mount(() => session.module.fixture.MortgageSession({ scope: adminScope, live, children: "Synthetic form" }));
+  const provider = await session.d.flush(), access = provider.props.value;
+  const f = contactFormFixture(async () => { throw new Error("Only the parent's transport is permitted"); }, false, access);
+  await f.flush();
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].path, `/api/crm/lead-assignees?workspaceId=${scope.workspaceId}`);
+  assert.equal(requests[0].init.cache, "no-store");
+  assert.equal(requests[0].init.expectedUserId, scope.actorId);
+  assert.ok(requests[0].init.signal instanceof AbortSignal);
+  assert.equal(f.nodes().filter((node) => node.type === "option").length, 2);
+  const listener = [...session.listeners][0];
+  listener("SIGNED_OUT", null);
+  assert.equal(access.isCurrent(), false); assert.equal(requests[0].init.signal.aborted, true);
+  f.d.unmount(); session.d.unmount();
+});
+
+test("contact picker never falls back to members after failed, malformed or stale responses", async () => {
+  for (const fetcher of [
+    async () => new Response("{}", { status: 403 }),
+    async () => { throw new Error("Local outage"); },
+    async () => response({ assignees: [{ id: selfAuthId }] }),
+    async () => response({ assignees: [{ id: selfStaffId, name: "One" }, { id: selfStaffId, name: "Duplicate" }] }),
+  ]) {
+    const f = contactFormFixture(fetcher); await f.flush();
+    assert.equal(f.field("responsible").props.disabled, true);
+    assert.deepEqual(f.nodes().filter((node) => node.type === "option").map((node) => node.props.value), [""]);
+    f.field("name").props.onChange({ target: { value: "Synthetic contact" } });
+    f.field("phone").props.onChange({ target: { value: "+77000000000" } });
+    f.field("responsible").props.onChange({ target: { value: otherStaffId } });
+    await f.flush(); await f.submit(); assert.equal(f.submitted.length, 0); f.d.unmount();
+  }
+  const pending = defer<Response>(), stale = contactFormFixture(() => pending.promise);
+  await stale.flush(); stale.revoke(); const writes = stale.d.writes.length;
+  pending.resolve(response({ assignees: [{ id: selfStaffId, name: "Stale" }] }));
+  await stale.flush(); assert.equal(stale.d.writes.length, writes); assert.equal(stale.submitted.length, 0); stale.d.unmount();
+  const editing = contactFormFixture(async () => { throw new Error("Editing must not list assignees"); }, true);
+  await editing.flush(); assert.equal(editing.requests.length, 0); editing.d.unmount();
+});
+
+function adminMeetingFixture({ role = "admin", memberRole = "admin", memberStatus = "active", context = {},
+  fetcher }: { role?: string; memberRole?: string; memberStatus?: string; context?: Record<string, unknown>; fetcher?: () => Promise<Response> } = {}) {
+  const d = driver(), drafts: any[] = [], requests: any[] = [];
+  let captured: any, current = true;
+  const workspace = { data: { ...snapshot(), members: [{ id: selfStaffId, name: "Synthetic self", role: memberRole, status: memberStatus }] },
+    isCurrent: () => current, searchContacts: async () => [], saveActivity: async (draft: any) => { drafts.push(draft); },
+    request: async (path: string, init: any) => {
+      requests.push({ path, init });
+      return fetcher ? fetcher() : response({ workspaceId: scope.workspaceId, purpose: "mortgage_leads", role: "admin", staffUserId: selfStaffId, ...context });
+    } };
+  const observed = dialogSource.replace("return <DialogContent", "__capture({ submit, loaded, setTitle, error, manager }); return <DialogContent") + "\nexports.fixture = { ActivityForm };";
+  const form = evaluate(observed, { react: d.hooks, "@/lib/mortgage-workspace": pure,
+    "@/contexts/AuthContext": { useAuth: () => ({ clinicId: scope.workspaceId, userRole: role, user: { id: selfAuthId } }) } },
+  { __capture: (value: any) => { captured = value; } });
+  d.mount(() => form.fixture.ActivityForm({ workspace, kind: "meeting", leadId: contact.id, timeZone: snapshot().timeZone, onOpenChange() {} }));
+  const ready = async () => { await d.flush(); captured.loaded({ ...contact, responsibleUserId: selfStaffId }, ""); captured.setTitle("Synthetic self meeting"); await d.flush(); };
+  return { d, drafts, requests, ready, captured: () => captured, revoke: () => { current = false; } };
+}
+
+test("admin self meetings use the selected verified STAFF id, not the authentication id", async () => {
+  const f = adminMeetingFixture(); await f.ready();
+  assert.notEqual(selfStaffId, selfAuthId);
+  assert.equal(f.requests.length, 1);
+  assert.equal(f.requests[0].path, `/api/crm/auth-context?workspaceId=${scope.workspaceId}`);
+  assert.ok(f.requests[0].init.signal instanceof AbortSignal);
+  assert.equal(f.captured().manager.id, selfStaffId);
+  await f.captured().submit({ preventDefault() {} });
+  assert.equal(f.drafts.length, 1); assert.equal(f.drafts[0].responsibleUserId, undefined); f.d.unmount();
+});
+
+test("meeting admin exception rejects other admins, owner, inactive, foreign, missing and forged identity responses", async () => {
+  for (const options of [
+    { context: { staffUserId: otherStaffId } }, { context: { staffUserId: selfAuthId } },
+    { context: { staffUserId: null } }, { context: { staffUserId: "invalid" } },
+    { context: { workspaceId: "foreign-workspace" } }, { context: { role: "owner" } },
+    { context: { purpose: "clinic_services" } }, { role: "owner" }, { role: "lead_manager" },
+    { memberRole: "owner" }, { memberStatus: "inactive" },
+    { fetcher: async () => new Response("{}", { status: 403 }) },
+    { fetcher: async () => { throw new Error("Local context outage"); } },
+  ]) {
+    const f = adminMeetingFixture(options); await f.ready();
+    assert.equal(f.captured().manager, undefined, JSON.stringify(options));
+    await f.captured().submit({ preventDefault() {} });
+    assert.equal(f.drafts.length, 0); f.d.unmount();
+  }
+  const pending = defer<Response>(), f = adminMeetingFixture({ fetcher: () => pending.promise });
+  await f.ready(); assert.equal(f.captured().manager, undefined);
+  f.revoke(); const writes = f.d.writes.length;
+  pending.resolve(response({ workspaceId: scope.workspaceId, role: "admin", purpose: "mortgage_leads", staffUserId: selfStaffId }));
+  await f.d.flush(); assert.equal(f.d.writes.length, writes);
+  await f.captured().submit({ preventDefault() {} }); assert.equal(f.drafts.length, 0); f.d.unmount();
+});
+
+test("active lead-manager meetings remain valid for owner, admin and lead-manager actors", async () => {
+  for (const role of ["owner", "admin", "lead_manager"]) {
+    const f = adminMeetingFixture({ role, memberRole: "lead_manager", fetcher: async () => { throw new Error("Local context unavailable"); } });
+    await f.ready(); assert.equal(f.captured().manager.id, selfStaffId);
+    await f.captured().submit({ preventDefault() {} }); assert.equal(f.drafts.length, 1); f.d.unmount();
+  }
+});
+
 test("the form blocks inactive/unassigned meeting managers, permits tasks without due dates, and blocks double submit", async () => {
   for (const kind of ["meeting", "task"]) {
     const d = driver(); let captured: any; const pending = defer<void>(); const drafts: any[] = [];
     const workspace = { data: { ...snapshot(), members: [] }, isCurrent: () => true, searchContacts: async () => [], saveActivity: async (draft: any) => { drafts.push(draft); return pending.promise; } };
     const observed = dialogSource.replace("return <DialogContent", "__capture({ submit, loaded, setTitle, error }); return <DialogContent") + "\nexports.fixture = { ActivityForm };";
-    const form = evaluate(observed, { react: d.hooks, "@/lib/mortgage-workspace": pure }, { __capture: (value: any) => { captured = value; } });
+    const form = evaluate(observed, { react: d.hooks, "@/lib/mortgage-workspace": pure, "@/contexts/AuthContext": formAuth }, { __capture: (value: any) => { captured = value; } });
     d.mount(() => form.fixture.ActivityForm({ workspace, kind, leadId: contact.id, timeZone: snapshot().timeZone, onOpenChange() {} }));
     await d.flush(); captured.loaded(contact, ""); captured.setTitle("Local task"); await d.flush();
     const first = captured.submit({ preventDefault() {} });
@@ -459,7 +652,84 @@ function creationPage(kind: "meeting" | "task", initialSearch: string) {
     setSearch(value: string) { search = value; mount(); } };
 }
 
+function readFilterSnapshot(kind: "meeting" | "task") {
+  const data = snapshot(), day = clinicDay.dayKeyInZone(Date.now(), data.timeZone);
+  return { ...data, members: [
+    ...data.members,
+    { id: selfStaffId, name: "Synthetic current admin", role: "admin", status: "active" },
+    { id: otherStaffId, name: "Synthetic peer admin", role: "admin", status: "active" },
+    { id: "inactive-admin", name: "Synthetic inactive admin", role: "admin", status: "inactive" },
+    { id: "inactive-manager", name: "Synthetic former manager", role: "lead_manager", status: "inactive" },
+    { id: "owner", name: "Synthetic owner", role: "owner", status: "active" },
+  ], activities: [selfStaffId, otherStaffId, "local-manager"].map((id) => activity({
+    id: `${kind}-${id}`, kind, title: `Synthetic work for ${id}`, responsibleUserId: id,
+    startsAt: kind === "meeting" ? `${day}T10:00:00+05:00` : null,
+    endsAt: kind === "meeting" ? `${day}T11:00:00+05:00` : null,
+  })) };
+}
+
+const responsibleSelect = (tree: unknown) => formNodes(tree).find((node) => node.type === "select" && node.props["aria-label"] === "Ответственный")!;
+const listedActivityIds = (tree: unknown) => formNodes(tree).filter((node) => node.type === "li").map((node) => node.key);
+
 for (const kind of ["meeting", "task"] as const) {
+  test(`${kind} read filter includes active admins, retains managers and only narrows already-scoped work`, async () => {
+    const f = creationPage(kind, ""), data = readFilterSnapshot(kind), original = JSON.stringify(data);
+    let writes = 0;
+    f.workspace.data = data;
+    f.workspace.saveActivity = async () => { writes += 1; throw new Error("A read filter must not write"); };
+    let tree = await f.d.flush();
+    const options = formNodes(responsibleSelect(tree)).filter((node) => node.type === "option");
+    assert.deepEqual(options.map((node) => node.props.value), ["all", "local-manager", selfStaffId, otherStaffId, "inactive-manager"]);
+    assert.match(JSON.stringify(options.find((node) => node.props.value === "inactive-manager")), /неактивен/);
+    assert.equal(listedActivityIds(tree).length, 3);
+    for (const id of [selfStaffId, otherStaffId, "local-manager"]) {
+      responsibleSelect(tree).props.onChange({ target: { value: id } });
+      tree = await f.d.flush();
+      assert.deepEqual(listedActivityIds(tree), [`${kind}-${id}`]);
+    }
+    responsibleSelect(tree).props.onChange({ target: { value: "all" } });
+    tree = await f.d.flush();assert.equal(listedActivityIds(tree).length, 3);
+    assert.equal(writes, 0);assert.equal(f.calls.length, 0);
+    assert.equal(data.metrics.activeManagers, 1);assert.equal(JSON.stringify(data), original);
+    f.d.unmount();
+
+    const own = creationPage(kind, "");
+    own.workspace.data = { ...data, members: [data.members[0]], activities: data.activities.filter((item) => item.responsibleUserId === "local-manager") };
+    const ownTree = await own.d.flush();
+    assert.deepEqual(formNodes(responsibleSelect(ownTree)).filter((node) => node.type === "option").map((node) => node.props.value), ["all", "local-manager"]);
+    assert.deepEqual(listedActivityIds(ownTree), [`${kind}-local-manager`]);own.d.unmount();
+  });
+
+  test(`${kind} individual filters reuse the authorized HTTP snapshot without broader reads or writes`, async () => {
+    const data = readFilterSnapshot(kind), requests: any[] = [];
+    const session = moduleFixture(driver(), async (path, init) => { requests.push({ path, init }); return response(data); });
+    const boundScope = { ...scope, role: "admin" }, live = { current: boundScope };
+    session.d.mount(() => session.module.fixture.MortgageSession({ scope: boundScope, live, children: "Synthetic read filters" }));
+    const access = (await session.d.flush()).props.value;
+    const page = moduleFixture();page.d.setContext(access);
+    const body = kind === "meeting" ? "MortgageCalendarBody" : "MortgageTasksBody";
+    const input = kind === "meeting" ? calendarSource : taskSource;
+    const rendered = evaluate(input + `\nexports.Body = ${body};`, {
+      react: page.d.hooks, wouter: { useSearch: () => "", useLocation: () => [kind === "meeting" ? "/appointments" : "/tasks", () => { throw new Error("No navigation expected"); }], Link: "Link" },
+      "@/lib/clinicDay": clinicDay, "@/lib/dayGrid": dayGrid, "@/lib/mortgage-workspace": page.module,
+    }, { window: { setInterval: () => 1, clearInterval() {} } });
+    page.d.mount(() => rendered.Body());
+    let tree = await page.d.flush();
+    const initialReads = requests.length;assert.ok(initialReads > 0);
+    assert.ok(requests.every(({ path, init }) => path.startsWith("/api/crm/mortgage-workspace?")
+      && new URL(path, "http://fixture.invalid").searchParams.get("workspaceId") === scope.workspaceId
+      && (init.method ?? "GET") === "GET" && init.cache === "no-store" && init.expectedUserId === scope.actorId));
+    responsibleSelect(tree).props.onChange({ target: { value: selfStaffId } });
+    tree = await page.d.flush();assert.deepEqual(listedActivityIds(tree), [`${kind}-${selfStaffId}`]);
+    responsibleSelect(tree).props.onChange({ target: { value: otherStaffId } });
+    tree = await page.d.flush();assert.deepEqual(listedActivityIds(tree), [`${kind}-${otherStaffId}`]);
+    assert.equal(requests.length, initialReads, 'filtering must not request additional workspace or assignee data');
+    [...session.listeners][0]("SIGNED_OUT", null);
+    tree = page.d.paint();assert.deepEqual(listedActivityIds(tree), []);
+    assert.deepEqual(formNodes(responsibleSelect(tree)).filter((node) => node.type === "option").map((node) => node.props.value), ["all"]);
+    page.d.unmount();session.d.unmount();
+  });
+
   test(`${kind} creation consumes only the one-shot URL intent after data is ready`, async () => {
     const f = creationPage(kind, "leadId=local-client&new=1&keep=two%20words");
     await f.d.flush(); assert.equal(f.editor(), null); assert.equal(f.calls.length, 0);
