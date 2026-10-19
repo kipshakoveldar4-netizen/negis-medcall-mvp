@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import test, { before, after, beforeEach, afterEach } from "node:test";
 import { PGlite } from "@electric-sql/pglite";
 import { createRequire } from "node:module";
+import { createSalesRetryRuntime } from "./sales-retry-test-runtime.js";
 const { arrivalPaymentError } = createRequire(import.meta.url)("../../lib/crm/arrival-payment.ts") as {
   arrivalPaymentError(error: { code?: string }): string | null;
 };
@@ -923,6 +924,121 @@ for (const capacity of [1, 2]) {
     assert.deepEqual(await retryCounts(), { clients: 2, appointments: 2, sales: 0, receipts: 1, journal: 0 });
     assert.equal(reads, capacity === 1 ? 2 : 1);
     assert.equal(creates, capacity === 1 ? 0 : 1);
+  });
+}
+
+for (const scenario of ["normal save", "lost saved response", "refused before insert"] as const) {
+  test(`G2 SalesPage pending-sale runtime: ${scenario} characterizes create-new POST, not idempotency`, async () => {
+    const call = await apiFixture();
+    await db.exec(`update workspaces set arrival_marks_paid=false where id='${id(1)}';
+      update appointments set status='arrived' where id='${id(10)}'`);
+    const before = await retryCounts();
+    const persisted = async () => (await db.query<Record<string, unknown>>(
+      "select * from deals where workspace_id=$1 order by id", [id(1)],
+    )).rows;
+    const savedIds: string[] = [];
+    let attempts = 0, losses = 0;
+    let proofFailure: unknown;
+    let beforeLoss: Record<string, unknown>[] = [];
+    const runtime = await createSalesRetryRuntime(id(1), async (method, body) => {
+      if (method === "GET") {
+        const reply = await call("deals", "GET");
+        return Response.json(reply.body, { status: reply.status });
+      }
+      const attempt = ++attempts;
+      try {
+        if (scenario === "refused before insert" && attempt === 1) {
+          // Only this synthetic actor is temporarily denied; input stays identical.
+          await db.exec(`update staff_users set role='doctor' where id='${id(40)}'`);
+          let denied;
+          try { denied = await call("deals", "POST", body); }
+          finally { await db.exec(`update staff_users set role='owner' where id='${id(40)}'`); }
+          assert.equal(denied.status, 403, JSON.stringify(denied.body));
+          assert.deepEqual(denied.queries.filter(query => query.operation !== "select"), []);
+          assert.deepEqual(await retryCounts(), before);
+          return Response.json(denied.body, { status: denied.status });
+        }
+        const reply = await call("deals", "POST", body);
+        const item = apiItem(reply, 201);
+        savedIds.push(String(item.id));
+        // Read SQL state BEFORE any simulated loss. The outer test later rolls back;
+        // this proves writes before reply loss, not durable commit/crash recovery.
+        const rows = await persisted();
+        assert.equal(rows.length, savedIds.length);
+        assert.ok(rows.some(row => row.id === item.id && row.status === "pending" && row.paid_at === null));
+        if (scenario === "lost saved response" && attempt === 1) beforeLoss = rows;
+        else return Response.json(reply.body, { status: reply.status });
+      } catch (error) { proofFailure = error; throw error; }
+      losses++;
+      throw new TypeError("Synthetic response lost after local router save and SQL readback");
+    });
+    try {
+      assert.equal(runtime.view.loaded, true);
+      assert.equal(runtime.view.loadError, false);
+      assert.equal(runtime.toasts.length, 0);
+      runtime.view.openAdd(); runtime.render();
+      runtime.view.setForm({ ...runtime.view.form, title: "Synthetic manual pending sale", amountTenge: "7000.50",
+        clientId: id(3), appointmentId: id(10), notes: "Diagnostic only; no payment" });
+      await runtime.settle();
+      const input = JSON.parse(JSON.stringify(runtime.view.form));
+      const first = runtime.view.submitForm;
+      first(); runtime.render();
+      assert.equal(runtime.view.saving, true);
+      await runtime.settle();
+      assert.ifError(proofFailure);
+      assert.equal(runtime.view.saving, false);
+      if (scenario !== "normal save") {
+        assert.equal(runtime.view.formOpen, true);
+        assert.deepEqual(JSON.parse(JSON.stringify(runtime.view.form)), input);
+        assert.equal(runtime.view.items.length, 0, "optimistic row is removed when delivery fails");
+        assert.equal(runtime.toasts.filter(toast => toast.kind === "success").length, 0);
+        assert.equal(runtime.toasts.filter(toast => toast.kind === "error").length, 1);
+        assert.equal((await persisted()).length, scenario === "lost saved response" ? 1 : 0);
+        if (scenario === "lost saved response") {
+          assert.equal(beforeLoss.length, 1);
+          assert.equal(beforeLoss[0].id, savedIds[0]);
+          assert.deepEqual(await persisted(), beforeLoss);
+        }
+        const latest = runtime.view.submitForm;
+        assert.notEqual(latest, first, "retry must come from the latest actual page closure");
+        latest(); runtime.render();
+        assert.equal(runtime.view.saving, true);
+        await runtime.settle();
+        assert.ifError(proofFailure);
+      }
+      const posts = runtime.calls.filter(request => request.method === "POST");
+      assert.equal(posts.length, scenario === "normal save" ? 1 : 2);
+      if (posts.length === 2) assert.deepEqual(posts[1].body, posts[0].body, "same user input and API payload on retry");
+      for (const post of posts) {
+        for (const key of ["id", "requestKey", "request_key", "requestId", "request_id", "idempotencyKey", "idempotency_key"]) {
+          assert.equal(Object.hasOwn(post.body, key), false, `no supported sale retry identity sent as ${key}`);
+        }
+        assert.deepEqual(Object.keys(post.headers).sort(), ["authorization", "content-type"]);
+        assert.equal(post.body.amountMinor, 700050);
+        assert.equal(post.body.status, "pending");
+      }
+      const rows = await persisted();
+      const expected = scenario === "lost saved response" ? 2 : 1;
+      // Known retry risk under existing create-new semantics, not acceptance of
+      // idempotency and not a new rule forbidding intentional multiple sales.
+      assert.equal(rows.length, expected);
+      assert.equal(new Set(savedIds).size, expected);
+      assert.deepEqual(rows.map(row => row.id).sort(), [...savedIds].sort());
+      for (const row of rows) {
+        assert.match(String(row.id), /^[0-9a-f-]{36}$/);
+        assert.equal(row.appointment_id, id(10)); assert.equal(row.client_id, id(3));
+        assert.equal(row.amount_minor, 700050); assert.equal(row.status, "pending");
+        assert.equal(row.paid_at, null); assert.equal(row.closed_at, null); assert.equal(row.payment_method, null);
+      }
+      assert.equal((await row("select count(*) from deals where status='paid' or paid_at is not null")).count, 0);
+      assert.deepEqual(await retryCounts(), { ...before, sales: expected, journal: expected });
+      assert.equal(losses, scenario === "lost saved response" ? 1 : 0);
+      assert.equal(runtime.view.saving, false); assert.equal(runtime.view.formOpen, false);
+      assert.equal(runtime.view.form.title, ""); assert.equal(runtime.view.form.amountTenge, "");
+      assert.deepEqual(Array.from(runtime.view.items, item => item.id), [savedIds.at(-1)]);
+      assert.equal(runtime.toasts.filter(toast => toast.kind === "success").length, 1);
+      assert.equal(runtime.stored.has("negis_demo_deals"), false);
+    } finally { runtime.dispose(); }
   });
 }
 
