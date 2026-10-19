@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useLocation } from "wouter";
 import {
   CalendarCheck,
@@ -34,6 +34,7 @@ import { formatArrivalPrice } from "../../../../lib/crm/operator-contracts";
 import { formatSlot, freeSlots, groupSlots, minuteOfClinicDay, occupiedGridSlots, workingIntervals } from "@/lib/dayGrid";
 import { capitalize, termsFor, type Terms } from "../../../../lib/vertical/terms";
 import { leadStageDefinitionFromUnknown } from "@/lib/leadPipeline";
+import { hasSupabaseFrontendEnv, supabase } from "@/lib/supabase";
 
 type AppointmentStatus = "scheduled" | "confirmed" | "arrived" | "no_show" | "cancelled";
 type CalendarView = "grid" | "day" | "week" | "month" | "list";
@@ -81,6 +82,19 @@ type AppointmentForm = {
   notes: string;
   source: string;
 };
+
+type AppointmentMutationScope = {
+  workspaceId: string;
+  actorId: string;
+  role: string | null;
+  epoch: number;
+  active: boolean;
+  deniedIds: Set<string>;
+};
+
+class AppointmentAccessRefusalError extends Error {
+  constructor() { super("Запись больше недоступна. Обновите список."); }
+}
 
 type ApiResponse =
   | { success: true; mode?: string; warning?: string; data?: Record<string, unknown> }
@@ -970,7 +984,7 @@ function AppointmentCard({
 }
 
 export function AppointmentsPage() {
-  const { vertical, userRole, user, clinicId } = useAuth();
+  const { vertical, userRole, user, clinicId, isLoading, isSigningOut, isDemoMode, isImpersonation } = useAuth();
   const terms = termsFor(vertical);
   const [, setLocation] = useLocation();
   // Заявка, из которой пришла эта запись: после успешного создания она сама
@@ -1020,7 +1034,7 @@ export function AppointmentsPage() {
   // «Записана». На монтировании модалка закрыта и ref пуст — стирать нечего;
   // префилл заряжает ref и открывает модалку строго после этого эффекта.
   useEffect(() => {
-    if (!modalOpen) prefillLeadRef.current = "";
+    if (!modalOpen && !createAttempt.current?.uncertain) prefillLeadRef.current = "";
   }, [modalOpen]);
   const [conflictMessage, setConflictMessage] = useState("");
   // Создание теперь ждёт сервер, а модалка остаётся открытой всё это время.
@@ -1046,33 +1060,6 @@ export function AppointmentsPage() {
       setForm(defaultForm(todayKeyAtLoad));
     }
   }, [clinicId, user?.id, currentCreateScope.current.workspaceId]);
-
-  useEffect(() => {
-    const storage = appointmentAttemptStorage();
-    if (!storage || !isRealWorkspace()) return;
-    if (!clinicTimeZoneReady) return;
-    const scope = currentCreateScope.current;
-    if (!scope.workspaceId || !scope.actorId) return;
-    const scopeKey = `${scope.workspaceId}:${scope.actorId}`;
-    if (restoredCreateScope.current === scopeKey || createAttempt.current) return;
-    restoredCreateScope.current = scopeKey;
-
-    const restored = restoreAppointmentCreateAttempt(storage, scope.workspaceId, scope.actorId);
-    if (!restored) return;
-    const restoredAppointment = appointmentFromApi(restored.payload);
-    createAttempt.current = restored;
-    prefillLeadRef.current = restored.leadId || "";
-    setEditingId(null);
-    setForm(formFromAppointment(restoredAppointment, clinicTimeZone));
-    setSelectedDate(dateKeyFromStartsAt(restoredAppointment.startsAt, clinicTimeZone));
-    setConflictMessage("");
-    setScheduleMessage("");
-    setClientMatches([]);
-    setRemoteVisitHistory([]);
-    setUnconfirmedCreate(true);
-    setModalOpen(true);
-    toast.warning("Найдена незавершённая запись. Проверьте, сохранилась ли она.");
-  }, [clinicId, user?.id, clinicTimeZone, clinicTimeZoneReady]);
 
   useEffect(() => {
     if (!saving && !unconfirmedCreate) return;
@@ -1320,12 +1307,121 @@ export function AppointmentsPage() {
       .slice(0, 8);
   }, [activeDoctors, doctorSearch]);
 
-  const { items, loaded, loadError, addItem, setItems } = useDemoCollection<Appointment>("negis_demo_appointments", appointmentsSeed, {
+  const { items: appointmentItems, loaded, loadError, addItem, setItems } = useDemoCollection<Appointment>("negis_demo_appointments", appointmentsSeed, {
     endpoint: "/api/crm/appointments",
     listKey: "appointments",
     toApi: appointmentToApi,
     fromApi: appointmentFromApi,
   });
+
+  const mutationWorkspaceId = clinicId || readCurrentWorkspaceId();
+  const mutationActorId = !isLoading && !isSigningOut && !isDemoMode && !isImpersonation ? user?.id || "" : "";
+  const observedMutationActor = useRef(mutationActorId);
+  const mutationAuthObserved = useRef(false);
+  const liveMutationEpoch = useRef(0);
+  const [mutationAuthEpoch, setMutationAuthEpoch] = useState(0);
+  const mutationEpoch = hasSupabaseFrontendEnv && isRealWorkspace(mutationWorkspaceId) ? mutationAuthEpoch : 0;
+  const deniedMutationIds = useRef(new Set<string>());
+  const currentMutationScope = useRef<AppointmentMutationScope>({
+    workspaceId: mutationWorkspaceId, actorId: mutationActorId, role: userRole, epoch: mutationEpoch,
+    active: false, deniedIds: deniedMutationIds.current,
+  });
+  if (currentMutationScope.current.workspaceId !== mutationWorkspaceId || currentMutationScope.current.actorId !== mutationActorId
+    || currentMutationScope.current.role !== userRole || currentMutationScope.current.epoch !== mutationEpoch) {
+    currentMutationScope.current = {
+      workspaceId: mutationWorkspaceId, actorId: mutationActorId, role: userRole, epoch: mutationEpoch,
+      active: false, deniedIds: deniedMutationIds.current,
+    };
+  }
+  const mutationScope = currentMutationScope.current;
+  // A read started before revocation must not put a refused record back on screen.
+  const items = useMemo(() => appointmentItems.filter((item) => !mutationScope.deniedIds.has(item.id.toLowerCase())),
+    [appointmentItems, mutationScope]);
+  const matchesMutationSdkActor = () => !hasSupabaseFrontendEnv || !isRealWorkspace(mutationScope.workspaceId)
+    || (mutationScope.epoch === liveMutationEpoch.current
+      && (!mutationAuthObserved.current || observedMutationActor.current === mutationScope.actorId));
+  const isCurrentMutationScope = () => mutationScope.active && currentMutationScope.current === mutationScope
+    && matchesMutationSdkActor() && readCurrentWorkspaceId() === mutationScope.workspaceId;
+  const editingAppointmentRef = useRef(editingId);
+  editingAppointmentRef.current = editingId;
+
+  useLayoutEffect(() => {
+    if (!hasSupabaseFrontendEnv) return;
+    let mounted = true;
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+      if (!mounted) return;
+      const nextActor = event === "SIGNED_OUT" ? "" : session?.user.id || "";
+      mutationAuthObserved.current = true;
+      if (observedMutationActor.current === nextActor) return;
+      observedMutationActor.current = nextActor;
+      // React can batch A -> B -> A; invalidate before the next render/token lookup.
+      liveMutationEpoch.current += 1;
+      if (isRealWorkspace(currentMutationScope.current.workspaceId)) currentMutationScope.current.active = false;
+      setMutationAuthEpoch(liveMutationEpoch.current);
+    });
+    return () => { mounted = false; subscription.unsubscribe(); };
+  }, []);
+
+  useLayoutEffect(() => {
+    mutationScope.active = matchesMutationSdkActor()
+      && (!isRealWorkspace(mutationScope.workspaceId) || Boolean(mutationScope.actorId));
+    submitLock.current = false;
+    setSaving(false);
+    setEditingId(null);
+    setModalOpen(false);
+    setForm(defaultForm(todayKeyAtLoad));
+    setConflictMessage("");
+    setScheduleMessage("");
+    setClientMatches([]);
+    setClientSearchAttempted(false);
+    setRemoteVisitHistory([]);
+    return () => { mutationScope.active = false; };
+  }, [mutationScope]);
+
+  useEffect(() => {
+    const storage = appointmentAttemptStorage();
+    if (!storage || !isRealWorkspace() || !clinicTimeZoneReady || !isCurrentMutationScope()) return;
+    const scope = currentCreateScope.current;
+    if (!scope.workspaceId || !scope.actorId) return;
+    const scopeKey = `${scope.workspaceId}:${scope.actorId}`;
+    const pending = createAttempt.current;
+    if (pending && (!pending.uncertain || !isCurrentAppointmentAttempt(pending, scope.workspaceId, scope.actorId))) return;
+    if (!pending && restoredCreateScope.current === scopeKey) return;
+    restoredCreateScope.current = scopeKey;
+
+    const restored = pending ?? restoreAppointmentCreateAttempt(storage, scope.workspaceId, scope.actorId);
+    if (!restored) return;
+    const restoredAppointment = appointmentFromApi(restored.payload);
+    createAttempt.current = restored;
+    prefillLeadRef.current = restored.leadId || "";
+    setEditingId(null);
+    setForm(formFromAppointment(restoredAppointment, clinicTimeZone));
+    setSelectedDate(dateKeyFromStartsAt(restoredAppointment.startsAt, clinicTimeZone));
+    setConflictMessage("");
+    setScheduleMessage("");
+    setClientMatches([]);
+    setRemoteVisitHistory([]);
+    setUnconfirmedCreate(true);
+    setModalOpen(true);
+    toast.warning("Найдена незавершённая запись. Проверьте, сохранилась ли она.", { id: "appointment-create-recovery" });
+  }, [mutationScope, clinicTimeZone, clinicTimeZoneReady, unconfirmedCreate]);
+
+  const discardRefusedAppointment = (id: string) => {
+    mutationScope.deniedIds.add(id.toLowerCase());
+    setItems((current) => current.filter((item) => item.id.toLowerCase() !== id.toLowerCase()));
+    setRemoteVisitHistory((current) => current.filter((item) => item.id.toLowerCase() !== id.toLowerCase()));
+    if (editingAppointmentRef.current?.toLowerCase() !== id.toLowerCase()) return;
+    setModalOpen(false);
+    setEditingId(null);
+    setForm(defaultForm(todayKeyAtLoad));
+    setClientMatches([]);
+    setClientSearchAttempted(false);
+    setRemoteVisitHistory([]);
+    setServiceSearch("");
+    setDoctorSearch("");
+    setConflictMessage("");
+    setScheduleMessage("");
+  };
 
   /**
    * Search the real patient directory while the receptionist types a name.
@@ -1818,12 +1914,13 @@ export function AppointmentsPage() {
     for (const appointment of [...remoteVisitHistory, ...items]) unique.set(appointment.id, appointment);
     return [...unique.values()]
       .filter((appointment) => {
+        if (mutationScope.deniedIds.has(appointment.id.toLowerCase())) return false;
         if (editingId && appointment.id === editingId) return false;
         return matchesAppointmentClientHistory(form, appointment);
       })
       .sort((left, right) => (right.startsAt || "").localeCompare(left.startsAt || ""))
       .slice(0, 8);
-  }, [items, remoteVisitHistory, form.clientId, form.phone, form.whatsapp, editingId]);
+  }, [items, remoteVisitHistory, form.clientId, form.phone, form.whatsapp, editingId, mutationScope]);
 
   const openCreate = (date = selectedDate, time = "09:00") => {
     if (!clinicTimeZoneReady) {
@@ -1851,6 +1948,7 @@ export function AppointmentsPage() {
   };
 
   const openEdit = (appointment: Appointment) => {
+    if (!isCurrentMutationScope() || mutationScope.deniedIds.has(appointment.id.toLowerCase())) return;
     if (!clinicTimeZoneReady) {
       toast.error("Не удалось определить часовой пояс. Обновите страницу и повторите.");
       return;
@@ -1903,16 +2001,25 @@ export function AppointmentsPage() {
     allowOutsideSchedule = false,
     fields?: Array<keyof ReturnType<typeof appointmentToApi>>,
   ) => {
+    if (!isCurrentMutationScope() || mutationScope.deniedIds.has(appointment.id.toLowerCase())) {
+      throw new DOMException("Appointment session ended", "AbortError");
+    }
     const full = appointmentToApi(appointment);
+    // An author may read the phone added by reception, but cannot write it back.
+    if (userRole === "doctor") {
+      for (const key of ["phone", "clientPhone", "whatsapp"]) delete full[key];
+    }
     const updates = fields
       ? Object.fromEntries(fields.filter((key) => key in full).map((key) => [key, full[key]]))
       : full;
-    const response = await crmFetch(`/api/crm/appointments?workspaceId=${encodeURIComponent(readCurrentWorkspaceId())}`, {
+    const response = await crmFetch(`/api/crm/appointments?workspaceId=${encodeURIComponent(mutationScope.workspaceId)}`, {
       method: "PATCH",
+      expectedUserId: mutationScope.actorId,
+      dispatchGuard: () => isCurrentMutationScope() && !mutationScope.deniedIds.has(appointment.id.toLowerCase()),
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         id: appointment.id,
-        workspaceId: readCurrentWorkspaceId(),
+        workspaceId: mutationScope.workspaceId,
         updates: {
           ...updates,
           ...(allowConflict ? { allowConflict: true } : {}),
@@ -1922,7 +2029,15 @@ export function AppointmentsPage() {
         },
       }),
     });
+    if (!isCurrentMutationScope()) throw new DOMException("Appointment session ended", "AbortError");
+    if (response.status === 401 || response.status === 403 || response.status === 404) {
+      mutationScope.deniedIds.add(appointment.id.toLowerCase());
+      throw new AppointmentAccessRefusalError();
+    }
     const body = await safeJson(response);
+    if (!isCurrentMutationScope() || mutationScope.deniedIds.has(appointment.id.toLowerCase())) {
+      throw new DOMException("Appointment session ended", "AbortError");
+    }
 
     const conflict = conflictFromBody(body);
     if (conflict) throw conflict;
@@ -2059,26 +2174,30 @@ export function AppointmentsPage() {
   };
 
   const updateAppointmentStatus = async (appointment: Appointment, status: AppointmentStatus) => {
+    if (!isCurrentMutationScope() || mutationScope.deniedIds.has(appointment.id.toLowerCase())) return;
     const updated = { ...appointment, status };
-    setItems((current) => current.map((item) => (item.id === appointment.id ? updated : item)));
 
     try {
       // Только статус: остальные поля этой карточки мог изменить коллега.
       const { unsaved, saved } = await patchAppointment(updated, false, false, ["status"]);
+      if (!isCurrentMutationScope()) return;
+      if (mutationScope.deniedIds.has(appointment.id.toLowerCase())) throw new AppointmentAccessRefusalError();
       if (saved) setItems((current) => current.map((item) => item.id === appointment.id ? saved : item));
       if (unsaved.length > 0) warnAboutUnsaved(unsaved);
       else toast.success(status === "arrived" && saved?.arrivalSaleId
         ? "Приход подтверждён. Продажа оформлена."
         : `Статус: ${getAppointmentStatusLabel(status)}`);
     } catch (error) {
-      // Отказ сервера — откат, а не фантомный статус до перезагрузки. Прежний
-      // текст обещал сохранение на этом устройстве, которого в рабочей клинике
-      // не происходит. Причина отказа — оператору в консоль, тост остаётся
-      // по-русски и без внутренних имён полей.
-      setItems((current) => current.map((item) => (item.id === appointment.id ? appointment : item)));
+      if (!isCurrentMutationScope()) return;
+      if (error instanceof AppointmentAccessRefusalError || mutationScope.deniedIds.has(appointment.id.toLowerCase())) {
+        discardRefusedAppointment(appointment.id);
+        toast.error("Запись больше недоступна. Обновите список.");
+        return;
+      }
+      // Keep the last confirmed row; a lost reply proves neither save nor rollback.
       console.warn("appointments: status patch refused", error instanceof Error ? error.message : error);
       toast.error(error instanceof Error && error.name === "ArrivalPaymentError"
-        ? error.message : "Не удалось обновить статус. Изменение отменено.");
+        ? error.message : "Не удалось подтвердить изменение статуса. Обновите список перед повтором.");
     }
   };
 
@@ -2106,6 +2225,7 @@ export function AppointmentsPage() {
   };
 
   const submitForm = async (allowConflict = false, allowOutsideSchedule = false) => {
+    if (editingId && (!isCurrentMutationScope() || mutationScope.deniedIds.has(editingId.toLowerCase()))) return;
     if (!clinicTimeZoneReady) {
       toast.error("Не удалось определить часовой пояс. Обновите страницу и повторите.");
       return;
@@ -2167,10 +2287,10 @@ export function AppointmentsPage() {
     setScheduleMessage("");
     try {
     if (editingId) {
-      const previous = items.find((item) => item.id === editingId);
-      setItems((current) => current.map((item) => (item.id === editingId ? appointment : item)));
       try {
         const { unsaved, saved } = await patchAppointment(appointment, allowConflict, allowOutsideSchedule);
+        if (!isCurrentMutationScope()) return;
+        if (mutationScope.deniedIds.has(editingId.toLowerCase())) throw new AppointmentAccessRefusalError();
         // Строка на экране — серверная, а не введённая: иначе несохранённые
         // поля продолжали бы показываться сохранёнными до перезагрузки, и
         // коллега на своём устройстве видел бы другую длительность визита.
@@ -2178,8 +2298,11 @@ export function AppointmentsPage() {
         if (unsaved.length > 0) warnAboutUnsaved(unsaved);
         else toast.success("Запись обновлена");
       } catch (error) {
-        if (previous) {
-          setItems((current) => current.map((item) => (item.id === editingId ? previous : item)));
+        if (!isCurrentMutationScope()) return;
+        if (error instanceof AppointmentAccessRefusalError || mutationScope.deniedIds.has(editingId.toLowerCase())) {
+          discardRefusedAppointment(editingId);
+          toast.error("Запись больше недоступна. Обновите список.");
+          return;
         }
         if (error instanceof SlotTakenError) {
           setConflictMessage(describeConflict(error, terms, clinicTimeZone));
@@ -2225,8 +2348,10 @@ export function AppointmentsPage() {
     setConflictMessage("");
     setSelectedDate(form.date);
     } finally {
-      submitLock.current = false;
-      setSaving(false);
+      if (!editingId || isCurrentMutationScope()) {
+        submitLock.current = false;
+        setSaving(false);
+      }
     }
   };
 
