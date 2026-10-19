@@ -3,6 +3,8 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { Script } from "node:vm";
+import ts from "typescript";
 
 // VT — ниша рабочего пространства проходит весь путь.
 //
@@ -31,6 +33,7 @@ const switchPath = path.join(repoRoot, "artifacts", "negis", "src", "components"
 type TermsModule = {
   readVertical: (value: unknown) => string;
   termsFor: (vertical: string) => Record<string, string>;
+  capitalize: (value: string) => string;
   DEFAULT_VERTICAL: string;
   VERTICAL_SETTINGS_KEY: string;
   VERTICALS: readonly string[];
@@ -43,6 +46,53 @@ async function codeOf(file: string): Promise<string> {
   return source
     .replace(/(^|\s)\/\/.*$/gm, "$1")
     .replace(/\{?\/\*[\s\S]*?\*\/\}?/g, " ");
+}
+
+function nodes(root: ts.Node): ts.Node[] {
+  const result: ts.Node[] = [];
+  const visit = (node: ts.Node): void => { result.push(node); ts.forEachChild(node, visit); };
+  visit(root);
+  return result;
+}
+
+function compile(source: string): Script {
+  const result = ts.transpileModule(source, { reportDiagnostics: true, compilerOptions: {
+    module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX,
+  } });
+  assert.deepEqual(result.diagnostics?.filter((item) => item.category === ts.DiagnosticCategory.Error), []);
+  return new Script(result.outputText);
+}
+
+function evaluate(code: Script, imports: Record<string, unknown> = {}, globals: Record<string, unknown> = {}) {
+  const exports: Record<string, any> = {};
+  code.runInNewContext({ ...globals, exports, require(name: string) {
+    if (Object.hasOwn(imports, name)) return imports[name];
+    if (name === "react/jsx-runtime") {
+      const jsx = (type: unknown, props: Record<string, any>) => ({ type, props });
+      return { jsx, jsxs: jsx, Fragment: "Fragment" };
+    }
+    if (name === "lucide-react") return new Proxy({}, { get: (_target, name) => String(name) });
+    throw new Error(`Unmocked import: ${name}`);
+  } });
+  return exports;
+}
+
+// Source mutants stay in memory; callers compile before asserting rejection.
+function rewrite(source: string, edit: (node: ts.Node, ast: ts.SourceFile) => ts.Node | undefined) {
+  const ast = ts.createSourceFile("fixture.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  let changes = 0;
+  const result = ts.transform(ast, [(context) => {
+    const visit: ts.Visitor = (node) => {
+      const changed = edit(node, ast);
+      if (changed) { changes++; return changed; }
+      return ts.visitEachChild(node, visit, context);
+    };
+    return (node) => ts.visitNode(node, visit) as ts.SourceFile;
+  }]);
+  assert.ok(changes > 0, "a local mutant must change actual source");
+  const printed = ts.createPrinter().printFile(result.transformed[0]);
+  result.dispose();
+  return printed;
 }
 
 test("VT1 умолчание — клиника, и оно несимметрично намеренно", () => {
@@ -165,17 +215,103 @@ test("VT9 право на справочники отделено от прав�
 });
 
 test("VT11 мобильное меню ведёт к справочнику и говорит словами ниши", async () => {
-  const mobileNav = await codeOf(path.join(repoRoot, "artifacts", "negis", "src", "components", "layout", "MobileNav.tsx"));
+  const mobileNav = await readFile(path.join(repoRoot, "artifacts/negis/src/components/layout/MobileNav.tsx"), "utf8");
+  const policy = evaluate(compile(await readFile(path.join(repoRoot, "artifacts/negis/src/lib/workspaceRoutes.ts"), "utf8")));
+  type Element = { type: unknown; props: Record<string, any> };
+  function elements(value: any): Element[] {
+    if (Array.isArray(value)) return value.flatMap(elements);
+    return value && typeof value === "object" && "props" in value ? [value, ...elements(value.props.children)] : [];
+  }
+  function label(value: any): string {
+    if (Array.isArray(value)) return value.map(label).join("");
+    return value && typeof value === "object" ? label(value.props?.children) : typeof value === "string" ? value : "";
+  }
+  function drawer(code: Script, vertical: string, purpose: string | null, role: string, permissions: Record<string, boolean>) {
+    const states: any[] = [], navigations: string[] = [];
+    let cursor = 0, mounting = true;
+    const module = evaluate(code, {
+      react: {
+        useState(initial: any) {
+          const slot = cursor++;
+          if (!(slot in states)) states[slot] = typeof initial === "function" ? initial() : initial;
+          return [states[slot], (value: any) => { states[slot] = typeof value === "function" ? value(states[slot]) : value; }];
+        },
+        useLayoutEffect(effect: () => void) { if (mounting) effect(); },
+      },
+      wouter: { useLocation: () => ["/leads", (href: string) => navigations.push(href)] },
+      "@/contexts/AuthContext": { useAuth: () => ({ user: { id: "local-staff" }, clinicId: "local-workspace",
+        userRole: role, vertical, workspacePurpose: purpose, rolePermissions: permissions, signOut() {} }) },
+      "@/lib/workspaceRoutes": policy,
+      "../../../../../lib/vertical/terms": terms,
+      "./ProfileDialog": { ProfileDialog: "ProfileDialog" },
+    });
+    const closed = module.MobileNav(); mounting = false;
+    const more = elements(closed).find((node) => node.type === "button" && label(node) === "Ещё");
+    assert.ok(more, "the actual drawer is openable");
+    more.props.onClick(); cursor = 0;
+    const opened = module.MobileNav();
+    assert.ok(elements(opened).some((node) => node.props.className === "mobile-nav-sheet"));
+    const routes: { href: string; label: string }[] = [];
+    for (const button of elements(opened).filter((node) => node.type === "button"
+      && node.props.className?.split(" ").includes("mobile-nav-drawer-item") && label(node) !== "Профиль и пароль")) {
+      const start = navigations.length;
+      button.props.onClick();
+      assert.equal(navigations.length, start + 1, "a drawer entry must navigate");
+      routes.push({ href: navigations[start], label: label(button) });
+    }
+    return routes;
+  }
+  function assertDirectory(code: Script) {
+    for (const [vertical, expected] of [["clinic", "Врачи и график"], ["beauty", "Мастера и график"], ["dental", "Стоматологи и график"]]) {
+      for (const purpose of ["clinic_services", "marketing"]) {
+        for (const role of ["owner", "admin", "manager", "receptionist", "doctor"]) {
+          const menu = drawer(code, vertical, purpose, role, { directory: true, admin: false });
+          assert.deepEqual(menu.filter((item) => item.href === "/staff-schedule"), [{ href: "/staff-schedule", label: expected }]);
+        }
+        for (const role of ["receptionist", "doctor", "lead_manager"]) {
+          const permissions = { directory: role === "lead_manager", admin: true, booking: true, crm: true };
+          assert.ok(!drawer(code, vertical, purpose, role, permissions).some((item) => item.href === "/staff-schedule"),
+            "admin/booking permissions must not substitute for directory or override lead-manager restrictions");
+        }
+      }
+      for (const purpose of ["mortgage_leads", null]) for (const role of ["owner", "admin", "lead_manager"]) {
+        const menu = drawer(code, vertical, purpose, role, { directory: true, admin: true, crm: true });
+        assert.ok(!menu.some((item) => item.href === "/staff-schedule"), "purpose denial wins over role and permissions");
+        if (purpose === null) assert.deepEqual(menu, []);
+      }
+    }
+  }
+  assertDirectory(compile(mobileNav));
 
-  // Страница существовала, но с телефона до неё было не добраться: пункт жил
-  // только в боковом меню, которое на мобильной вёрстке скрыто целиком.
-  assert.ok(/href: "\/staff-schedule"[\s\S]{0,120}permission: "directory"/.test(mobileNav), "пункт есть и закрыт правом справочников");
-  assert.ok(/href === "\/staff-schedule"[\s\S]{0,120}terms\.specialistPlural/.test(mobileNav), "подпись — из словаря вертикали");
-  // Пин держит не только вычисление, но и рендер: мутант, вернувший в <span>
-  // статическую подпись или отфильтровавший пункт из ящика, проходил бы два
-  // пина выше, не показывая салону ничего.
-  assert.ok(/<span>\{label\}<\/span>/.test(mobileNav), "вычисленная подпись действительно рендерится");
-  assert.ok(/const visibleDrawer = drawerItems\.filter\(canUse\);/.test(mobileNav), "ящик не фильтруется ничем, кроме прав");
+  const staticLabel = rewrite(mobileNav, (node) => {
+    if (!ts.isJsxExpression(node) || !node.expression || !ts.isIdentifier(node.expression) || node.expression.text !== "label") return;
+    for (let parent: ts.Node | undefined = node.parent; parent; parent = parent.parent) {
+      if (ts.isCallExpression(parent) && ts.isPropertyAccessExpression(parent.expression)
+        && ts.isIdentifier(parent.expression.expression) && parent.expression.expression.text === "visibleDrawer") {
+        return ts.factory.updateJsxExpression(node, ts.factory.createIdentifier("staticLabel"));
+      }
+    }
+    return undefined;
+  });
+  const missingEntry = rewrite(mobileNav, (node, ast) => {
+    if (!ts.isArrayLiteralExpression(node)) return;
+    const entries = node.elements.filter((entry) => !(ts.isObjectLiteralExpression(entry) && entry.properties.some((prop) =>
+      ts.isPropertyAssignment(prop) && prop.name.getText(ast) === "href" && ts.isStringLiteral(prop.initializer) && prop.initializer.text === "/staff-schedule")));
+    if (entries.length !== node.elements.length) return ts.factory.updateArrayLiteralExpression(node, entries);
+    return undefined;
+  });
+  const unfiltered = rewrite(mobileNav, (node) => {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.name.text === "visibleDrawer"
+      && node.initializer && ts.isCallExpression(node.initializer) && ts.isPropertyAccessExpression(node.initializer.expression)
+      && node.initializer.expression.name.text === "filter") {
+      return ts.factory.updateVariableDeclaration(node, node.name, node.exclamationToken, node.type, node.initializer.expression.expression);
+    }
+    return undefined;
+  });
+  for (const mutant of [staticLabel, missingEntry, unfiltered]) {
+    const code = compile(mutant);
+    assert.throws(() => assertDirectory(code), assert.AssertionError, "static, hidden or ungated directory entries must fail");
+  }
 });
 
 test("VT12 экран справочника не говорит «врач» жёстко", async () => {
@@ -210,15 +346,97 @@ test("VT12 экран справочника не говорит «врач» ж
 });
 
 test("VT13 форма записи говорит словами ниши", async () => {
-  const appointments = await codeOf(path.join(repoRoot, "artifacts", "negis", "src", "pages", "AppointmentsPage.tsx"));
-
-  // Экран справочника обещает салону поле «Мастер» — обещание держит форма
-  // записи: поле, фильтр, отказы конфликтов и подсказка графика берут слова из
-  // словаря, а не из зашитой строки.
+  const pagePath = path.join(repoRoot, "artifacts/negis/src/pages/AppointmentsPage.tsx");
+  const source = await readFile(pagePath, "utf8");
+  const appointments = await codeOf(pagePath);
   assert.ok(!/врач/i.test(appointments), "жёстких «врачей» в коде формы записи нет");
-  assert.ok(/termsFor\(vertical\)/.test(appointments), "словарь берётся по нише пространства");
-  assert.ok(/describeConflict\(error, terms\)/.test(appointments), "отказ о занятом времени — по нише");
-  assert.ok(/describeSchedule\(error, terms\)/.test(appointments), "отказ о графике — по нише");
+
+  function fixture(source: string) {
+    const ast = ts.createSourceFile("AppointmentsPage.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+    const page = ast.statements.find((node): node is ts.FunctionDeclaration => ts.isFunctionDeclaration(node) && node.name?.text === "AppointmentsPage");
+    assert.ok(page?.body);
+    const dictionary = page.body.statements.find((node): node is ts.VariableStatement => ts.isVariableStatement(node)
+      && node.declarationList.declarations.some((decl) => ts.isIdentifier(decl.name) && decl.name.text === "terms"));
+    assert.ok(dictionary, "execute the page's actual niche selection");
+    const names = ["SlotTakenError", "OutsideScheduleError", "describeConflict", "describeSchedule"];
+    const helpers = names.map((name) => {
+      const declaration = ast.statements.find((node) => (ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) && node.name?.text === name);
+      assert.ok(declaration, `${name} is an actual appointment helper`);
+      return declaration.getText(ast);
+    });
+    const handlers = nodes(page).filter(ts.isIfStatement).filter((node) => ts.isBinaryExpression(node.expression)
+      && node.expression.operatorToken.kind === ts.SyntaxKind.InstanceOfKeyword && ts.isIdentifier(node.expression.right)
+      && ["SlotTakenError", "OutsideScheduleError"].includes(node.expression.right.text));
+    for (const kind of ["SlotTakenError", "OutsideScheduleError"]) {
+      assert.equal(handlers.filter((node) => ts.isBinaryExpression(node.expression)
+        && ts.isIdentifier(node.expression.right) && node.expression.right.text === kind).length, 2, `${kind}: create and edit handlers remain covered`);
+    }
+    const labels = nodes(page).filter(ts.isJsxAttribute).filter((node) => node.name.getText(ast) === "label")
+      .flatMap((node) => node.initializer && ts.isJsxExpression(node.initializer) && node.initializer.expression ? [node.initializer.expression] : [])
+      .filter((node) => nodes(node).some((child) => ts.isPropertyAccessExpression(child) && ts.isIdentifier(child.expression)
+        && child.expression.text === "terms" && ["specialist", "specialistPlural"].includes(child.name.text)));
+    assert.ok(labels.length >= 3, "check actual form fields and the specialist filter, not an unused dictionary");
+    const conflict: string[] = [], schedule: string[] = [], times: unknown[][] = [];
+    const module = evaluate(compile(`${helpers.join("\n")}
+      export { SlotTakenError, OutsideScheduleError };
+      export function labels(vertical) { ${dictionary.getText(ast)} return [${labels.map((node) => node.getText(ast)).join(",")}]; }
+      ${handlers.map((node, index) => `export function handle${index}(error, vertical, clinicTimeZone) { ${dictionary.getText(ast)} ${node.getText(ast)} }`).join("\n")}
+    `), {}, { termsFor: terms.termsFor, capitalize: terms.capitalize,
+      setConflictMessage: (message: string) => conflict.push(message), setScheduleMessage: (message: string) => schedule.push(message),
+      // Observe formatter plumbing; the booking suite checks real time conversion.
+      timeKeyFromStartsAt: (...args: unknown[]) => { times.push(args); return "15:30"; },
+    });
+    const kinds = handlers.map((node) => (node.expression as ts.BinaryExpression).right.getText(ast));
+    return { module, kinds, conflict, schedule, times };
+  }
+  function assertNiche(app: ReturnType<typeof fixture>) {
+    for (const vertical of ["clinic", "beauty", "dental"]) {
+      const words = terms.termsFor(vertical);
+      const labels = Array.from(app.module.labels(vertical));
+      assert.ok(labels.includes(terms.capitalize(words.specialist)), `${vertical}: the form names the specialist`);
+      assert.ok(labels.includes(`Все ${words.specialistPlural}`), `${vertical}: the filter names the specialists`);
+      for (let index = 0; index < app.kinds.length; index++) {
+        const handle = app.module[`handle${index}`];
+        const conflictHandler = app.kinds[index] === "SlotTakenError";
+        for (const named of [false, true]) {
+          app.conflict.length = 0; app.schedule.length = 0; app.times.length = 0;
+          const startsAt = named ? "2026-10-19T10:30:00Z" : "";
+          handle(new app.module.SlotTakenError({ startsAt, clientName: named ? "Local client" : "", doctorName: "" }), vertical, "Asia/Qyzylorda");
+          assert.deepEqual(app.conflict, conflictHandler
+            ? [`У ${words.specialistGenitive} уже есть запись на это время: ${named ? "Local client, 15:30" : `другой ${words.customer}`}. Выберите другое время или другого ${words.specialistGenitive}.`] : []);
+          assert.deepEqual(app.schedule, [], "an unrelated refusal must not set schedule text");
+          assert.deepEqual(app.times, conflictHandler && named ? [[startsAt, "Asia/Qyzylorda"]] : [], "conflicts use clinic time, never an implicit device zone");
+          app.conflict.length = 0; app.schedule.length = 0;
+          handle(new app.module.OutsideScheduleError({ doctorName: named ? "Local specialist" : "", localTime: "15:30",
+            weekdayLabel: "Понедельник", intervals: named ? ["09:00–17:00"] : [] }), vertical, "Asia/Qyzylorda");
+          const hours = named ? `Часы ${words.dutyGenitive}: 09:00–17:00.` : `В этот день ${words.dutyGenitive} нет.`;
+          assert.deepEqual(app.schedule, conflictHandler ? []
+            : [`${named ? "Local specialist" : terms.capitalize(words.specialist)} не работает в это время (Понедельник, 15:30, время ${words.orgGenitive}). ${hours} Записать всё равно?`]);
+          assert.deepEqual(app.conflict, [], "an unrelated refusal must not set conflict text");
+        }
+      }
+    }
+  }
+  assertNiche(fixture(source));
+  for (const helper of ["describeConflict", "describeSchedule"]) {
+    const mutant = rewrite(source, (node) => {
+      if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === helper) {
+        return ts.factory.updateCallExpression(node, node.expression, node.typeArguments, node.arguments.map((arg, index) => index === 1
+          ? ts.factory.createCallExpression(ts.factory.createIdentifier("termsFor"), undefined, [ts.factory.createStringLiteral("clinic")]) : arg));
+      }
+      return undefined;
+    });
+    const app = fixture(mutant);
+    assert.throws(() => assertNiche(app), assert.AssertionError, `${helper}: a clinic dictionary substituted for the workspace niche must fail`);
+  }
+  const deviceTime = rewrite(source, (node) => {
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "describeConflict") {
+      return ts.factory.updateCallExpression(node, node.expression, node.typeArguments, node.arguments.slice(0, 2));
+    }
+    return undefined;
+  });
+  const app = fixture(deviceTime);
+  assert.throws(() => assertNiche(app), assert.AssertionError, "dropping the clinic time-zone argument must fail");
 });
 
 test("VT10 страница справочников доступна без админ-центра", async () => {

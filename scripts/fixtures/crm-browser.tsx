@@ -26,7 +26,7 @@ const mortgage=useAuth().workspacePurpose==='mortgage_leads';
 function AppointmentCreateFixture() {
   const fixture = appointmentCreateFixture!;
   const snapshot = React.useSyncExternalStore(fixture.subscribe, fixture.snapshot);
-  return <div className="flex h-[100dvh] min-w-0 flex-col overflow-hidden" data-testid="appointment-create-fixture">
+  return <div className="flex min-w-0 flex-col overflow-hidden" style={{ height: "100dvh" }} data-testid="appointment-create-fixture">
     <section aria-label="ТЕСТ: создание записи G2-C12" className="shrink-0 border-b border-amber-300 bg-amber-50 px-3 py-2 text-xs text-slate-900">
       <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
         <strong>ТЕСТ G2-C12: только локальная симуляция</strong>

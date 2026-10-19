@@ -20,6 +20,7 @@
     "test:assigned-leads-postgres": "node --test ./fixtures/assigned-leads-postgres.test.mjs",
     "test:meta-account-binding-postgres": "node --test ./fixtures/meta-account-binding-postgres.test.mjs",
     "test:operator-access-postgres": "node --test ./fixtures/operator-access-postgres.test.mjs",
+    "test:platform-subscription-postgres": "node --test ./fixtures/platform-subscription-postgres.test.mjs",
     "test:site-blog": "tsx --test ./src/medina-site-blog.test.ts",
     "test:site-editorial": "tsx --test ./src/medina-site-editorial.test.ts",
     "test:site-intake": "tsx --test ./src/medina-site-intake.test.ts ./src/medina-site-intake-handler.test.ts",

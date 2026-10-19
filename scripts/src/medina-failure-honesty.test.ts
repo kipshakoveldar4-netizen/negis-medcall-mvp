@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import ts from "typescript";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { Script } from "node:vm";
 
 // Security-2F — a failure has to look like one.
 //
@@ -492,14 +493,137 @@ test("F14 экран записей тоже различает «пусто» �
   // Проверка списком экранов (F13) этого не поймала: там перечислены три
   // страницы, и самая рабочая в список не попала. Поэтому проверка отдельная.
   const source = await readFile(path.join(negisSrc, "pages", "AppointmentsPage.tsx"), "utf8");
-  assert.ok(/const \{ items, loaded, loadError/.test(source), "экран берёт признак отказа у хука");
-  assert.ok(source.includes("Не удалось загрузить записи"), "отказ называется своими словами");
-  assert.ok(/Это сбой связи, а не свободный день/.test(source), "и прямо говорит, что день не свободен");
-  // Ни один вид не рисуется поверх отказа: пустая сетка и есть та самая ложь.
-  for (const view of ["grid", "day", "week", "list"]) {
-    assert.ok(
-      source.includes(`loaded && !loadError && view === "${view}"`),
-      `вид ${view} не рисуется, пока список не прочитан`,
-    );
+  const ast = ts.createSourceFile("AppointmentsPage.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const page = ast.statements.find((node): node is ts.FunctionDeclaration =>
+    ts.isFunctionDeclaration(node) && node.name?.text === "AppointmentsPage");
+  assert.ok(page?.body);
+  const collection = page.body.statements.find((node): node is ts.VariableStatement => ts.isVariableStatement(node)
+    && node.declarationList.declarations.some((decl) => decl.initializer && ts.isCallExpression(decl.initializer)
+      && ts.isIdentifier(decl.initializer.expression) && decl.initializer.expression.text === "useDemoCollection"));
+  assert.ok(collection, "the page must consume the actual appointment collection");
+  const binding = collection.declarationList.declarations[0].name;
+  assert.ok(ts.isObjectBindingPattern(binding));
+  const flags = new Map(binding.elements.map((entry) => [(entry.propertyName ?? entry.name).getText(ast), entry.name.getText(ast)]));
+  for (const name of ["items", "loaded", "loadError"]) assert.ok(flags.has(name), `consume the hook's ${name}, aliases allowed`);
+
+  const storage = ts.createSourceFile("demoStorage.ts", await readFile(path.join(negisSrc, "lib", "demoStorage.ts"), "utf8"), ts.ScriptTarget.Latest, true);
+  const hook = storage.statements.find((node): node is ts.FunctionDeclaration => ts.isFunctionDeclaration(node) && node.name?.text === "useDemoCollection");
+  const returned = hook?.body?.statements.find((node): node is ts.ReturnStatement => ts.isReturnStatement(node));
+  assert.ok(returned?.expression && ts.isObjectLiteralExpression(returned.expression));
+  for (const name of ["items", "loaded", "loadError"]) {
+    assert.ok(returned.expression.properties.some((prop) => prop.name?.getText(storage) === name), `the real hook exposes ${name}`);
+  }
+
+  const conditionals: ts.ConditionalExpression[] = [];
+  const collect = (node: ts.Node): void => {
+    if (ts.isConditionalExpression(node)) conditionals.push(node);
+    ts.forEachChild(node, collect);
+  };
+  collect(page);
+  const notice = conditionals.filter((node) => node.whenTrue.getText(ast).includes("Не удалось загрузить записи"));
+  const loading = conditionals.filter((node) => node.whenTrue.getText(ast).includes("Загружаем записи…"));
+  assert.equal(notice.length, 1, "the persistent failure notice must be rendered");
+  assert.equal(loading.length, 1, "loading is a separate state");
+  const guards = new Map<string, ts.Expression>();
+  for (const node of conditionals) {
+    const findView = (child: ts.Node): void => {
+      if (ts.isBinaryExpression(child) && child.operatorToken.kind === ts.SyntaxKind.EqualsEqualsEqualsToken
+        && ts.isIdentifier(child.left) && child.left.text === "view" && ts.isStringLiteral(child.right)) {
+        assert.ok(!guards.has(child.right.text), `one render guard for ${child.right.text}`);
+        guards.set(child.right.text, node.condition);
+      }
+      ts.forEachChild(child, findView);
+    };
+    findView(node.condition);
+  }
+  const viewType = ast.statements.find((node): node is ts.TypeAliasDeclaration => ts.isTypeAliasDeclaration(node) && node.name.text === "CalendarView");
+  assert.ok(viewType && ts.isUnionTypeNode(viewType.type));
+  const modes = viewType.type.types.map((node) => {
+    assert.ok(ts.isLiteralTypeNode(node) && ts.isStringLiteral(node.literal));
+    return node.literal.text;
+  });
+  assert.deepEqual([...guards.keys()].sort(), [...modes].sort(), "every calendar view, including month, has a checked render gate");
+
+  type Element = { type: unknown; props: Record<string, any> };
+  function elements(value: any): Element[] {
+    if (Array.isArray(value)) return value.flatMap(elements);
+    return value && typeof value === "object" && "props" in value ? [value, ...elements(value.props.children)] : [];
+  }
+  function text(value: any): string {
+    if (Array.isArray(value)) return value.map(text).join("");
+    return value && typeof value === "object" ? text(value.props?.children) : typeof value === "string" ? value : "";
+  }
+  const printer = ts.createPrinter();
+  function fixture(conditions = guards) {
+    let state = { items: [] as { id: string }[], loaded: false, loadError: false }, reloads = 0;
+    const exports: Record<string, any> = {};
+    const code = `export function render(view, seesWholeClinic) {
+      ${collection!.getText(ast)}
+      return { notice: (${notice[0].getText(ast)}), loading: (${loading[0].getText(ast)}),
+        visible: [${modes.map((mode) => `Boolean(${printer.printNode(ts.EmitHint.Expression, conditions.get(mode)!, ast)})`).join(",")}] };
+    }`;
+    new Script(ts.transpileModule(code, { compilerOptions: {
+      target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX,
+    } }).outputText).runInNewContext({ exports, appointmentsSeed: [], appointmentToApi: () => {}, appointmentFromApi: () => {},
+      useDemoCollection(_key: string, _seed: unknown, options: Record<string, unknown>) {
+        assert.equal(options.endpoint, "/api/crm/appointments");
+        assert.equal(options.listKey, "appointments");
+        return state;
+      },
+      window: { location: { reload: () => { reloads++; } } },
+      require(name: string) {
+        assert.equal(name, "react/jsx-runtime", "no DOM or network imports");
+        const jsx = (type: unknown, props: Element["props"]) => ({ type, props });
+        return { jsx, jsxs: jsx };
+      },
+    });
+    return {
+      render(next: typeof state, view: string, wholeClinic: boolean) { state = next; return exports.render(view, wholeClinic); },
+      reloads: () => reloads,
+    };
+  }
+  function assertReadStates(app: ReturnType<typeof fixture>) {
+    for (const items of [[], [{ id: "local-cached-appointment" }]]) for (const mode of modes) for (const wholeClinic of [true, false]) {
+      for (const [loaded, loadError] of [[false, false], [false, true], [true, true], [true, false]]) {
+        const result = app.render({ items, loaded, loadError }, mode, wholeClinic);
+        assert.equal(Boolean(result.loading), !loaded, `${mode}: pending is not empty`);
+        assert.equal(Boolean(result.notice), loadError, `${mode}: a refused read stays visible`);
+        const visible = Array.from(result.visible) as boolean[];
+        assert.deepEqual(visible, modes.map((candidate) => loaded && !loadError && candidate === mode && (mode !== "grid" || wholeClinic)),
+          `${mode}: failed/pending reads cannot look like an empty day, including with cached rows`);
+        if (loadError) {
+          assert.match(text(result.notice), /Не удалось загрузить записи/);
+          assert.match(text(result.notice), /Это сбой связи, а не свободный день/);
+          assert.match(text(result.notice), /Не записывайте клиентов поверх/);
+          assert.ok(elements(result.notice).some((node) => node.props["aria-live"] === "assertive"));
+          const retry = elements(result.notice).find((node) => node.type === "button" && text(node).trim() === "Обновить страницу");
+          assert.ok(retry, "the refusal offers recovery");
+          const before = app.reloads(); retry.props.onClick();
+          assert.equal(app.reloads(), before + 1);
+        }
+      }
+    }
+  }
+  assertReadStates(fixture());
+
+  // Remove each prerequisite independently on each actual view expression.
+  // Compilation is outside assert.throws: only a behavioral failure counts.
+  for (const mode of modes) for (const prerequisite of ["loaded", "loadError"]) {
+    let changes = 0;
+    const mutated = ts.transform(guards.get(mode)!, [(context) => {
+      const visit: ts.Visitor = (node) => {
+        if (prerequisite === "loadError" && ts.isPrefixUnaryExpression(node) && node.operator === ts.SyntaxKind.ExclamationToken
+          && ts.isIdentifier(node.operand) && node.operand.text === flags.get("loadError")
+          || prerequisite === "loaded" && ts.isIdentifier(node) && node.text === flags.get("loaded")) {
+          changes++; return ts.factory.createTrue();
+        }
+        return ts.visitEachChild(node, visit, context);
+      };
+      return (node) => ts.visitNode(node, visit) as ts.Expression;
+    }]);
+    assert.equal(changes, 1, `${mode}: remove only the ${prerequisite} gate`);
+    const app = fixture(new Map(guards).set(mode, mutated.transformed[0]));
+    assert.throws(() => assertReadStates(app), assert.AssertionError, `${mode}: missing ${prerequisite} must fail`);
+    mutated.dispose();
   }
 });

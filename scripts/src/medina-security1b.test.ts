@@ -390,8 +390,17 @@ function grantsToServiceRole(chain: Iterable<[string, string]>, table: string): 
 }
 
 // Receipt rows are deliberately inaccessible even to service_role. Only the
-// two SECURITY DEFINER RPCs may read/write them; this is not a generic exemption.
-const RPC_ONLY_TABLES = new Set(["crm_appointment_create_requests"]);
+// reviewed pair of SECURITY DEFINER RPCs per table may read/write them.
+const RPC_ONLY_TABLES = new Map([
+  ["crm_appointment_create_requests", {
+    migration: "064_appointment_create_requests.sql",
+    functions: ["read_crm_appointment_create_request", "create_crm_appointment_once"],
+  }],
+  ["crm_sale_create_requests", {
+    migration: "076_crm_sale_create_requests.sql",
+    functions: ["read_crm_sale_create_request", "create_crm_sale_once"],
+  }],
+]);
 
 test("26a grant checks recognize table lists without accepting similarly named tables or roles", () => {
   const chain = new Map([["local.sql", "grant select on public.first, public.second to service_role; grant select on table public.third to service_role;"]]);
@@ -400,23 +409,51 @@ test("26a grant checks recognize table lists without accepting similarly named t
   assert.equal(grantsToServiceRole(new Map([["local.sql", "grant select on second to other_service_role;"]]), "second"), false);
 });
 
-test("26b RPC-only receipt table stays private and reachable only through its reviewed functions", () => {
-  const sql = normalize(migrations.get("064_appointment_create_requests.sql") ?? "");
-  assert.ok(sql.includes("alter table public.crm_appointment_create_requests enable row level security"));
-  assert.ok(sql.includes("revoke all on public.crm_appointment_create_requests from public, anon, authenticated, service_role;"));
-  assert.equal(grantsToServiceRole(migrations, "crm_appointment_create_requests"), false);
-  for (const name of ["read_crm_appointment_create_request", "create_crm_appointment_once"]) {
+function assertPrivateReceipt(chain: Map<string, string>, table: string) {
+  const review = RPC_ONLY_TABLES.get(table);
+  assert.ok(review, "an RPC-only exception needs an explicit reviewed migration and function pair");
+  const sql = normalize(chain.get(review.migration) ?? "");
+  assert.ok(createdTables(sql).includes(table));
+  assert.match(sql, new RegExp(`alter table public\\.${table} enable row level security\\s*;`));
+  assert.match(sql, new RegExp(`revoke all on public\\.${table} from public\\s*,\\s*anon\\s*,\\s*authenticated\\s*,\\s*service_role\\s*;`));
+  assert.equal(grantsToServiceRole(chain, table), false);
+  for (const name of review.functions) {
     const start = sql.indexOf(`create or replace function public.${name}(`);
     assert.ok(start >= 0, name);
     const end = sql.indexOf("$$;", start);
     const fn = sql.slice(start, end);
     assert.ok(fn.includes("security definer"), name);
     assert.ok(fn.includes("set search_path = ''"), name);
-    assert.ok(fn.includes("public.crm_appointment_create_requests"), name);
+    assert.ok(fn.includes(`public.${table}`), name);
     assert.match(sql, new RegExp(`grant execute on function public\\.${name}\\([^;]+\\) to service_role;`));
-    assert.match(sql, new RegExp(`revoke all on function public\\.${name}\\([^;]+\\) from public, anon, authenticated;`));
+    assert.match(sql, new RegExp(`revoke all on function public\\.${name}\\([^;]+\\) from public\\s*,\\s*anon\\s*,\\s*authenticated;`));
   }
-});
+}
+
+for (const [table, review] of RPC_ONLY_TABLES) {
+  test(`26b RPC-only ${table} stays private and reachable through its reviewed functions`, () => {
+    assertPrivateReceipt(migrations, table);
+  });
+
+  test(`26b ${table} privacy check rejects weakened grants and inaccessible or unsafe RPCs`, () => {
+    const source = migrations.get(review.migration)!;
+    for (const [from, to] of [
+      ["enable row level security", "disable row level security"],
+      ["security definer", "security invoker"],
+      ["set search_path = ''", "set search_path = public"],
+      [`revoke all on public.${table}`, `grant select on public.${table}`],
+      [`grant execute on function public.${review.functions[0]}`, `revoke execute on function public.${review.functions[0]}`],
+    ]) {
+      assert.ok(source.includes(from), "each mutation must change the current migration");
+      const changed = new Map(migrations);
+      changed.set(review.migration, source.replace(from, to));
+      assert.throws(() => assertPrivateReceipt(changed, table));
+    }
+    const exposed = new Map(migrations);
+    exposed.set("999_synthetic_exposure.sql", `grant select on public.${table} to service_role;`);
+    assert.throws(() => assertPrivateReceipt(exposed, table));
+  });
+}
 
 test("26 every new application table is reachable by the server that owns it", () => {
   // The routes run as service_role on a table created by postgres, which grants

@@ -32,7 +32,8 @@ function evaluate(source: string, bindings: Record<string, unknown> = {}, import
   const code = ts.transpileModule(source, { compilerOptions: {
     module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX,
   } }).outputText;
-  new Script(code).runInNewContext({ exports, AbortController, AbortSignal, DOMException, Headers, Response,
+  // App modules share one Error prototype in the browser, including imported API errors.
+  new Script(code).runInNewContext({ exports, Error, AbortController, AbortSignal, DOMException, Headers, Response,
     URLSearchParams, ...bindings,
     require(name: string) {
       if (name in imports) return imports[name];
@@ -68,7 +69,8 @@ function observeContent(source: string) {
     setActiveTab, setInviteForm, setStaffPassword, setBatchEmails,
     checkServerAdminAccess, loadStaff, loadInvitations, sendInvitation, createStaffWithPassword,
     createStaffBatch, resetStaffPassword, reissueInvitation, updateStaffStatus,
-    loadMetaInsightsDiagnostics, crmFetch, crmRequest, adminCrmRequest });\n`;
+    loadMetaInsightsDiagnostics, saveMetaConfig, metaAccount, metaConfigMode,
+    crmFetch, crmRequest, adminCrmRequest });\n`;
   return source.slice(0, returned.getStart(ast)) + capture + source.slice(returned.getStart(ast))
     + "\nexports.fixture = { AdminCenterSession, AdminCenterContent };";
 }
@@ -204,6 +206,7 @@ type Reply = (url: string, init: Init) => Promise<Response>;
 const permissions = evaluate(await read("artifacts/negis/src/lib/permissions.ts"));
 const logins = evaluate(await read("lib/auth/staff-logins.ts"));
 const terms = evaluate(await read("lib/vertical/terms.ts"));
+const cities = evaluate(await read("lib/meta/cities.ts"));
 
 function setup(search = "") {
   const renderer = hookRenderer();
@@ -273,7 +276,7 @@ function setup(search = "") {
     "../../../../lib/auth/staff-logins": logins,
     "../../../../lib/vertical/terms": terms,
     "../../../../lib/crm/join-codes": { formatJoinCode: (value: string) => value },
-    "../../../../lib/meta/cities": { KZ_META_CITY_OPTIONS: [], getKzMetaCityOption: () => null },
+    "../../../../lib/meta/cities": cities,
   });
   renderer.mount(module.default, [module.fixture.AdminCenterSession, module.fixture.AdminCenterContent]);
   return {
@@ -1056,6 +1059,171 @@ test("caller abort and lifetime abort are both preserved without replacing the e
     assert.equal(fixture.calls.length, count, "already-aborted operation cannot enter base transport");
   } finally { fixture.renderer.dispose(); }
 });
+
+const metaSaveLabel = "\u0421\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c Meta config";
+const metaServerNotice = "\u0421\u043e\u0445\u0440\u0430\u043d\u0435\u043d\u043e \u0432 Supabase";
+// Safe public response from lib/crm/server.ts's exact Meta binding conflict branch.
+const metaConflictBody = {
+  success: false,
+  code: "meta_account_binding_conflict",
+  error: "\u041f\u0440\u0438\u0432\u044f\u0437\u043a\u0430 Meta \u0443\u0436\u0435 \u0438\u0437\u043c\u0435\u043d\u0435\u043d\u0430 \u0434\u0440\u0443\u0433\u0438\u043c \u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0435\u043c",
+  details: ["\u041e\u0431\u043d\u043e\u0432\u0438\u0442\u0435 \u0441\u043f\u0438\u0441\u043e\u043a \u043f\u0440\u0438\u0432\u044f\u0437\u043e\u043a \u0438 \u043f\u0440\u043e\u0432\u0435\u0440\u044c\u0442\u0435 \u0441\u043e\u0445\u0440\u0430\u043d\u0451\u043d\u043d\u044b\u0435 \u0434\u0430\u043d\u043d\u044b\u0435 \u043f\u0435\u0440\u0435\u0434 \u043f\u043e\u0432\u0442\u043e\u0440\u043e\u043c."],
+};
+type MetaSaveOutcome = "conflict" | "success";
+function metaSaveResponse(outcome: MetaSaveOutcome) {
+  return outcome === "conflict" ? Response.json(metaConflictBody, { status: 409 }) : ok();
+}
+function metaSaveCalls(fixture: Fixture) {
+  return fixture.calls.filter((call) => call.path === "/api/crm/meta-accounts");
+}
+function editMetaField(fixture: Fixture, field: string, value: string) {
+  const control = nodes(fixture.renderer.tree()).find((node) => node.props.label === field);
+  assert.equal(typeof control?.props.onChange, "function", "actual Meta field must be rendered");
+  control!.props.onChange(value);
+}
+async function metaDraft(fixture: Fixture, name: string) {
+  fixture.snapshot().setActiveTab("meta"); await fixture.renderer.flush();
+  editMetaField(fixture, "Ad Account ID", "act_local_g5_fixture");
+  editMetaField(fixture, "Account name", name); await fixture.renderer.flush();
+  assert.equal(typeof fixture.snapshot().saveMetaConfig, "function");
+  return clone(fixture.snapshot().metaAccount);
+}
+
+for (const initialMode of ["none", "supabase"]) {
+  test("G5 actual Meta save conflict warns without server success from " + initialMode, async () => {
+    const fixture = await ready();
+    try {
+      const draft = await metaDraft(fixture, "Synthetic G5 conflict draft");
+      if (initialMode === "supabase") {
+        await button(fixture, metaSaveLabel).props.onClick(); await fixture.renderer.flush();
+      }
+      assert.equal(fixture.snapshot().metaConfigMode, initialMode);
+      const start = fixture.toasts.length, snapshots = fixture.snapshots.length;
+      const pending = deferred<Response>(); fixture.reply(async () => pending.promise);
+      const saved = button(fixture, metaSaveLabel).props.onClick(); await fixture.renderer.flush();
+      assert.equal(fixture.snapshot().loading.meta, true);
+      assert.equal(buttons(fixture, metaSaveLabel)[0].props.disabled, true);
+      assert.equal(fixture.toasts.length, start, "pending save cannot claim success");
+      pending.resolve(metaSaveResponse("conflict")); await saved; await fixture.renderer.flush();
+      assert.deepEqual(fixture.toasts.slice(start), [{ kind: "warning", message: metaConflictBody.error }]);
+      assert.equal(fixture.snapshot().metaConfigMode, "local");
+      assert.deepEqual(clone(fixture.snapshot().metaAccount), draft, "conflict preserves the local draft, not an invented row");
+      assert.equal(fixture.snapshot().loading.meta, false);
+      button(fixture, metaSaveLabel);
+      assert.ok(!label(fixture.renderer.tree()).includes(metaServerNotice));
+      assert.ok(fixture.snapshots.slice(snapshots).filter((snapshot) => snapshot.loading.meta === false)
+        .every((snapshot) => snapshot.metaConfigMode !== "supabase"), "settled conflict must never advertise a server save");
+      const call = metaSaveCalls(fixture).at(-1)!;
+      assert.equal(fixture.dispatches.filter((entry) => entry.path === call.path).length, initialMode === "supabase" ? 2 : 1);
+      assert.equal(fixture.tokenCalls.at(-1), actorA);
+      assert.equal(call.init.method, "POST"); assert.equal(call.init.expectedUserId, actorA);
+      assert.equal(call.init.cache, "no-store"); assert.equal(call.init.signal?.aborted, false);
+      assert.deepEqual(JSON.parse(String(call.init.body)), { workspaceId: workspaceA, ...draft,
+        metadata: { permissions: draft.permissions, manualApprovalOnly: true, liveLaunchEnabled: false } });
+    } finally { fixture.renderer.dispose(); }
+  });
+}
+
+test("G5 actual Meta save retries a conflict under the same current actor without inventing a row", async () => {
+  const fixture = await ready();
+  try {
+    const draft = await metaDraft(fixture, "Synthetic G5 retry draft"), access = fixture.access();
+    const content = fixture.renderer.instance("AdminCenterContent");
+    fixture.reply(async () => metaSaveResponse("conflict"));
+    await button(fixture, metaSaveLabel).props.onClick(); await fixture.renderer.flush();
+    assert.equal(fixture.snapshot().metaConfigMode, "local");
+    assert.deepEqual(fixture.toasts, [{ kind: "warning", message: metaConflictBody.error }]);
+    fixture.emit(actorA, "TOKEN_REFRESHED"); await fixture.renderer.flush();
+    assert.equal(fixture.renderer.instance("AdminCenterContent"), content); assert.equal(access.isCurrent(), true);
+    const pending = deferred<Response>(); fixture.reply(async () => pending.promise);
+    const retried = button(fixture, metaSaveLabel).props.onClick(); await fixture.renderer.flush();
+    assert.equal(fixture.snapshot().metaConfigMode, "local"); assert.equal(fixture.snapshot().loading.meta, true);
+    assert.equal(fixture.toasts.length, 1);
+    pending.resolve(metaSaveResponse("success")); await retried; await fixture.renderer.flush();
+    const saves = metaSaveCalls(fixture);
+    assert.equal(saves.length, 2, "no automatic retry, lookup or fabricated row");
+    assert.equal(fixture.dispatches.filter((call) => call.path === "/api/crm/meta-accounts").length, 2);
+    assert.ok(saves.every((call) => call.init.method === "POST" && call.init.expectedUserId === actorA
+      && call.init.cache === "no-store" && call.init.signal === saves[0].init.signal));
+    assert.equal(saves[0].init.body, saves[1].init.body);
+    assert.equal(JSON.parse(String(saves[1].init.body)).id, undefined);
+    assert.deepEqual(clone(fixture.snapshot().metaAccount), draft);
+    assert.equal(fixture.snapshot().metaConfigMode, "supabase"); assert.equal(fixture.snapshot().loading.meta, false);
+    assert.deepEqual(fixture.toasts.map((toast) => toast.kind), ["warning", "success"]);
+    assert.ok(label(fixture.renderer.tree()).includes(metaServerNotice)); button(fixture, metaSaveLabel);
+  } finally { fixture.renderer.dispose(); }
+});
+
+for (const boundary of ["actor", "workspace", "role", "purpose", "sdk-roundtrip"] as const) {
+  for (const outcome of ["conflict", "success"] as const) {
+    test("G5 old Meta " + outcome + " cannot publish across " + boundary + " while the new save is busy", async () => {
+      for (const phase of ["transport", "body"]) {
+        const fixture = await ready();
+        const response = deferred<Response>(), body = deferred<string>(), nextResponse = deferred<Response>();
+        try {
+          await metaDraft(fixture, "Synthetic G5 old draft");
+          const old = fixture.renderer.instance("AdminCenterContent"), closure = fixture.snapshot(), access = fixture.access();
+          let bodyReads = 0;
+          const reply = metaSaveResponse(outcome);
+          fixture.reply(async () => phase === "transport" ? response.promise : ({
+            ok: reply.ok, status: reply.status, text: () => { bodyReads++; return body.promise; },
+          }) as Response);
+          const saved = button(fixture, metaSaveLabel).props.onClick(); await fixture.renderer.flush();
+          const oldCall = metaSaveCalls(fixture).at(-1)!;
+          assert.equal(fixture.snapshot().loading.meta, true);
+          assert.equal(bodyReads, phase === "body" ? 1 : 0, "suspend the actual requested boundary");
+          fixture.reply();
+          if (boundary === "actor") {
+            fixture.emit(actorB); fixture.setAuth({ user: { id: actorB, email: "other@example.test" } });
+          }
+          if (boundary === "workspace") fixture.setAuth({ clinicId: workspaceB });
+          if (boundary === "role") fixture.setAuth({ userRole: "admin" });
+          if (boundary === "purpose") fixture.setAuth({ workspacePurpose: "marketing" });
+          if (boundary === "sdk-roundtrip") { fixture.emit(actorB); fixture.emit(actorA); }
+          await fixture.renderer.flush();
+          assert.equal(old.disposed, true); assert.equal(access.isCurrent(), false);
+          assert.equal(oldCall.init.signal?.aborted, true);
+          assert.equal(fixture.snapshot().serverAdminAuth.status, "confirmed");
+          await metaDraft(fixture, "Synthetic G5 new draft");
+          // Give the new lifetime the opposite mode so either stale outcome is observable.
+          const currentOutcome = outcome === "conflict" ? "success" : "conflict";
+          fixture.reply(async () => metaSaveResponse(currentOutcome));
+          await button(fixture, metaSaveLabel).props.onClick(); await fixture.renderer.flush();
+          const mode = currentOutcome === "success" ? "supabase" : "local";
+          assert.equal(fixture.snapshot().metaConfigMode, mode);
+          fixture.reply(async () => nextResponse.promise);
+          const currentSave = button(fixture, metaSaveLabel).props.onClick(); await fixture.renderer.flush();
+          editMetaField(fixture, "Account name", "Synthetic G5 unsaved new draft"); await fixture.renderer.flush();
+          const draft = clone(fixture.snapshot().metaAccount), loading = clone(fixture.snapshot().loading);
+          const start = fixture.renderer.writes.length, toastStart = clone(fixture.toasts);
+          const storageStart = fixture.storageWrites.length, callStart = fixture.calls.length, tokenStart = fixture.tokenCalls.length;
+          assert.equal(loading.meta, true);
+          await closure.saveMetaConfig("configured");
+          response.resolve(metaSaveResponse(outcome)); body.resolve(await reply.text());
+          await saved; await fixture.renderer.flush();
+          assert.equal(fixture.renderer.writes.length, start, phase + ": expired work must not attempt state writes");
+          assert.equal(fixture.calls.length, callStart); assert.equal(fixture.tokenCalls.length, tokenStart);
+          assert.equal(fixture.storageWrites.length, storageStart); assert.deepEqual(fixture.toasts, toastStart);
+          assert.equal(fixture.snapshot().metaConfigMode, mode);
+          assert.deepEqual(clone(fixture.snapshot().metaAccount), draft);
+          assert.deepEqual(clone(fixture.snapshot().loading), loading);
+          assert.equal(buttons(fixture, metaSaveLabel)[0].props.disabled, true, "old finally must not release the new busy state");
+          const currentCall = metaSaveCalls(fixture).at(-1)!;
+          assert.equal(currentCall.init.expectedUserId, boundary === "actor" ? actorB : actorA);
+          assert.equal(JSON.parse(String(currentCall.init.body)).workspaceId, boundary === "workspace" ? workspaceB : workspaceA);
+          assert.equal(currentCall.init.signal?.aborted, false);
+          nextResponse.resolve(metaSaveResponse(currentOutcome)); await currentSave; await fixture.renderer.flush();
+          assert.equal(fixture.snapshot().loading.meta, false);
+          assert.equal(fixture.snapshot().metaConfigMode, mode);
+          assert.deepEqual(clone(fixture.snapshot().metaAccount), draft); button(fixture, metaSaveLabel);
+        } finally {
+          fixture.renderer.dispose();
+          response.resolve(ok()); body.resolve("{}"); nextResponse.resolve(ok());
+        }
+      }
+    });
+  }
+}
 
 test("raw sign-out invalidates captured requests immediately and cannot dispatch using stale context", async () => {
   const fixture = await ready();

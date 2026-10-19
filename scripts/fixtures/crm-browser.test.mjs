@@ -247,6 +247,24 @@ test("clinic arrival response mode forwards the old actor's simulated failure wi
   });
 });
 
+test("appointment create fixture fixes viewport height without relying on scanning fixture-only Tailwind classes", async () => {
+  const source = await readFile(new URL("./crm-browser.tsx", import.meta.url), "utf8");
+  const parsed = ts.createSourceFile("crm-browser.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const roots = [];
+  function visit(node) {
+    if (ts.isJsxOpeningElement(node) && node.attributes.properties.some(attribute => ts.isJsxAttribute(attribute)
+      && attribute.name.getText(parsed) === "data-testid" && attribute.initializer?.text === "appointment-create-fixture")) roots.push(node);
+    ts.forEachChild(node, visit);
+  }
+  visit(parsed);
+  assert.equal(roots.length, 1);
+  const style = roots[0].attributes.properties.find(attribute => ts.isJsxAttribute(attribute) && attribute.name.getText(parsed) === "style");
+  assert.ok(style && ts.isJsxExpression(style.initializer) && ts.isObjectLiteralExpression(style.initializer.expression));
+  const height = style.initializer.expression.properties.find(property => ts.isPropertyAssignment(property) && property.name.getText(parsed) === "height");
+  assert.ok(height && ts.isStringLiteral(height.initializer));
+  assert.equal(height.initializer.text, "100dvh");
+});
+
 test("clinic arrival browser route mounts the real component under StrictMode with lifetime-bound props", async () => {
   const source = await readFile(new URL("./crm-browser.tsx", import.meta.url), "utf8");
   assert.match(source, /import \{ OperatorArrivals \} from ['"].*components\/operators\/OperatorArrivals['"]/);
