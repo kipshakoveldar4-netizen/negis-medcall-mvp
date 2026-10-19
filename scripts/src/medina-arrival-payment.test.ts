@@ -993,6 +993,8 @@ for (const scenario of ["normal save", "lost saved response", "refused before in
         assert.equal(runtime.view.items.length, 0, "optimistic row is removed when delivery fails");
         assert.equal(runtime.toasts.filter(toast => toast.kind === "success").length, 0);
         assert.equal(runtime.toasts.filter(toast => toast.kind === "error").length, 1);
+        assert.match(runtime.toasts.find(toast => toast.kind === "error")!.message, /Сохранение не подтверждено/);
+        assert.doesNotMatch(runtime.toasts.find(toast => toast.kind === "error")!.message, /отменено|повторите попытку/);
         assert.equal((await persisted()).length, scenario === "lost saved response" ? 1 : 0);
         if (scenario === "lost saved response") {
           assert.equal(beforeLoss.length, 1);

@@ -334,7 +334,7 @@ export function useDemoCollection<TItem extends { id: string }>(
     if (!isCurrent()) return;
     if (strictAccess) setLoadError(true);
     setStoredItems(strictAccess ? [] : restore);
-    toast.error("Не удалось сохранить. Изменение отменено, повторите попытку.");
+    toast.error("Сохранение не подтверждено. Обновите список и проверьте данные перед повтором.");
   };
 
   const setStoredItems = (next: TItem[] | ((current: TItem[]) => TItem[])) => {
