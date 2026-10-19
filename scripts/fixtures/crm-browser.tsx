@@ -2,6 +2,7 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 import { Route, Router, Switch } from "wouter";
 import { Toaster } from "sonner";
+import { ArrowLeftRight, Repeat2, RotateCw, Play } from "../../artifacts/negis/node_modules/lucide-react";
 import "./crm-browser-mocks";
 import "../../artifacts/negis/src/index.css";
 import { AppointmentsPage } from "../../artifacts/negis/src/pages/AppointmentsPage";
@@ -15,12 +16,65 @@ import MortgageClients from '../../artifacts/negis/src/pages/MortgageClients';
 import MortgageCalendar from '../../artifacts/negis/src/pages/MortgageCalendar';
 import MortgageTasks from '../../artifacts/negis/src/pages/MortgageTasks';
 import MortgageAnalytics from '../../artifacts/negis/src/pages/MortgageAnalytics';
-import {useAuth, suspendOperatorFixture, endOperatorCooperationFixture, operatorDispatchFixture, clinicArrivalFixture} from './crm-browser-mocks';
+import {useAuth, suspendOperatorFixture, endOperatorCooperationFixture, operatorDispatchFixture, clinicArrivalFixture, appointmentCreateFixture} from './crm-browser-mocks';
 import OperatorPortal from '../../artifacts/negis/src/pages/OperatorPortal';
 import { OperatorArrivals } from '../../artifacts/negis/src/components/operators/OperatorArrivals';
 import { clinicArrivalFixtureIds } from './clinic-arrival-browser-store';
 
 const mortgage=useAuth().workspacePurpose==='mortgage_leads';
+
+function AppointmentCreateFixture() {
+  const fixture = appointmentCreateFixture!;
+  const snapshot = React.useSyncExternalStore(fixture.subscribe, fixture.snapshot);
+  return <div className="flex h-[100dvh] min-w-0 flex-col overflow-hidden" data-testid="appointment-create-fixture">
+    <section aria-label="ТЕСТ: создание записи G2-C12" className="shrink-0 border-b border-amber-300 bg-amber-50 px-3 py-2 text-xs text-slate-900">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+        <strong>ТЕСТ G2-C12: только локальная симуляция</strong>
+        <div role="group" aria-label="ТЕСТ: аккаунт" className="flex flex-wrap items-center gap-2">
+          <button type="button" className="neu-btn inline-flex items-center gap-2 text-xs" onClick={fixture.switchActor}>
+            <ArrowLeftRight size={14} aria-hidden="true" />ТЕСТ: актор {snapshot.actor === "A" ? "B" : "A"}
+          </button>
+          <button type="button" className="neu-icon-btn" title="ТЕСТ: сырые события A-B-A синхронно"
+            aria-label="ТЕСТ: сырые события A-B-A" disabled={snapshot.actor !== "A"} onClick={fixture.switchABA}>
+            <Repeat2 size={16} aria-hidden="true" />
+          </button>
+          <button type="button" className="neu-icon-btn" title="ТЕСТ: TOKEN_REFRESHED того же актора"
+            aria-label="ТЕСТ: обновить сессию того же актора" onClick={fixture.refreshSameActor}>
+            <RotateCw size={16} aria-hidden="true" />
+          </button>
+        </div>
+        <label className="inline-flex items-center gap-2">
+          <input type="checkbox" checked={snapshot.role === "doctor"} onChange={fixture.toggleRole} />
+          ТЕСТ: роль doctor (иначе owner)
+        </label>
+        <div className="flex flex-wrap items-center gap-2">
+          <label className="inline-flex items-center gap-2">ТЕСТ: удержание
+            <select className="max-w-full rounded border border-amber-300 bg-white p-1" value={snapshot.phase}
+              disabled={snapshot.held > 0} onChange={(event) => fixture.setPhase(event.target.value === "response" ? "response" : "lookup")}>
+              <option value="lookup">До отправки</option><option value="response">После отправки</option>
+            </select>
+          </label>
+          <button type="button" className="neu-btn inline-flex items-center gap-2 text-xs" disabled={!snapshot.held} onClick={fixture.release}>
+            <Play size={14} aria-hidden="true" />ТЕСТ: отпустить запрос
+          </button>
+        </div>
+      </div>
+      <p role="status" className="mt-2 break-words" data-testid="appointment-create-actor">
+        ТЕСТ: {snapshot.actor} / {snapshot.actorId} / {snapshot.role}; поколение {snapshot.revision}; SDK-событий {snapshot.authEvents}; обновлений {snapshot.refreshes}
+      </p>
+      <p role="status" className="mt-1 break-words" data-testid="appointment-create-counts">
+        ТЕСТ: POST-вызовов {snapshot.calls}; в очереди всего {snapshot.queued}; удержано до/после {snapshot.heldQueued}/{snapshot.heldResponse}; отправлено {snapshot.dispatched}; заблокировано {snapshot.blocked}; ответов {snapshot.replies}; поздних {snapshot.lateReplies}; ключей {snapshot.keys}
+      </p>
+      <p className="mt-1">ТЕСТ: A/B в одной вымышленной клинике; без сети. Это не проверка транспорта или сохранения на сервере.</p>
+      {snapshot.lastReply && <p role="status" className="mt-1">ТЕСТ: последний ответ {snapshot.lastReply.actor}/{snapshot.lastReply.role}; {snapshot.lastReply.replayed ? "повтор ключа" : "новый ключ"}; {snapshot.lastReply.stale ? "устаревший" : "текущий"}</p>}
+    </section>
+    {/* A containing block reserves the controls' space even for the page's fixed modal/navigation. */}
+    <div className="min-h-0 flex-1 overflow-hidden" style={{ transform: "translateZ(0)" }} data-appointment-create-scene="true">
+      <style>{`[data-appointment-create-scene] .fixed.inset-0 > form { max-height: 100%; }`}</style>
+      <div className="h-full overflow-y-auto"><AppointmentsPage /></div>
+    </div>
+  </div>;
+}
 
 function ClinicArrivalFixtureView() {
   const fixture = clinicArrivalFixture!;
@@ -80,7 +134,7 @@ function OperatorFixture() {
 createRoot(document.getElementById("root")!).render(<Router><Switch>
   <Route path="/clinic-arrival" component={ClinicArrivalFixture} />
   <Route path="/operator" component={OperatorFixture} />
-  <Route path="/appointments" component={mortgage?MortgageCalendar:AppointmentsPage} />
+  <Route path="/appointments" component={appointmentCreateFixture?AppointmentCreateFixture:mortgage?MortgageCalendar:AppointmentsPage} />
   <Route path="/clients" component={mortgage?MortgageClients:ClientsPage} />
   <Route path="/dashboard" component={MortgageOverview} />
   <Route path="/tasks" component={MortgageTasks} />

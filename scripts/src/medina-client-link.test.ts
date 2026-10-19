@@ -442,13 +442,9 @@ test("CLK8 the appointments page carries clientId through every step that used t
   }
 });
 
-test("CLK10 a refused patch rolls the page back and does not claim a local save", async () => {
-  // Adversarial review of this branch: the page applied the edit to state,
-  // called the server, and on refusal showed only a toast — the list kept the
-  // phantom status until the next full load. And the fallback texts promised
-  // «сохранено локально», which in a real clinic is simply false: nothing is
-  // saved locally there. This branch introduced the first 400 on this route,
-  // so it owns making the refusal visible and rolled back.
+test("CLK10 patches publish only confirmed rows and never restore a refused private record", async () => {
+  // G2-C11 removed optimistic writes: restoring the old row on 403 exposed its
+  // contacts again. The action matrix separately executes the actual handlers.
   const source = await readFile(
     path.join(repoRoot, "artifacts", "negis", "src", "pages", "AppointmentsPage.tsx"),
     "utf8",
@@ -459,18 +455,24 @@ test("CLK10 a refused patch rolls the page back and does not claim a local save"
     source.indexOf("const findConflict"),
   );
   const statusCatch = statusHandler.slice(statusHandler.indexOf("catch"));
-  assert.ok(
-    statusCatch.includes("item.id === appointment.id ? appointment : item"),
-    "a refused status change must put the previous appointment back",
-  );
+  const statusAwait = statusHandler.indexOf("await patchAppointment");
+  const statusWrite = statusHandler.indexOf("setItems(");
+  assert.ok(statusAwait >= 0 && statusWrite > statusAwait, "no unconfirmed status is published before the server reply");
+  assert.ok(statusHandler.includes("item.id === appointment.id ? saved : item"), "only the returned row is published");
+  assert.ok(statusCatch.includes("discardRefusedAppointment(appointment.id)"), "a denied record is hidden, not restored");
+  assert.ok(!statusCatch.includes("setItems("), "ordinary errors retain the confirmed list without restoring private snapshots");
 
   const submit = source.slice(source.indexOf("const submitForm"), source.indexOf("const renderDay"));
-  assert.ok(submit.includes("const previous = items.find"), "the edit path must capture what it is replacing");
-  const submitCatch = submit.slice(submit.indexOf("catch"));
-  assert.ok(
-    submitCatch.includes("? previous : item"),
-    "a refused edit must restore the previous appointment, not keep the phantom",
-  );
+  const editAwait = submit.indexOf("await patchAppointment");
+  const editWrite = submit.indexOf("setItems(");
+  assert.ok(editAwait >= 0 && editWrite > editAwait, "no unconfirmed form values are published before PATCH returns");
+  assert.ok(submit.includes("item.id === editingId ? saved : item"), "the edit publishes the server-confirmed row");
+  const editCatchStart = submit.indexOf("} catch (error)", editAwait);
+  const editCatchEnd = submit.indexOf("\n    } else {", editCatchStart);
+  assert.ok(editCatchStart > editAwait && editCatchEnd > editCatchStart, "inspect only the actual edit refusal branch");
+  const submitCatch = submit.slice(editCatchStart, editCatchEnd);
+  assert.ok(submitCatch.includes("discardRefusedAppointment(editingId)"), "a denied edit closes and clears its record");
+  assert.ok(!submitCatch.includes("setItems("), "catch paths must not restore a denied contact snapshot");
 
   // Scoped to the refusal paths on purpose: the demo-mode info toast is
   // truthful — there the collection really does live in localStorage. The lie

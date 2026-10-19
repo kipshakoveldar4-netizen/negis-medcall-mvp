@@ -3,9 +3,12 @@ import { createOperatorBrowserFixture } from "./operator-browser-store";
 import { createOperatorDispatchFixture } from "./operator-dispatch-fixture";
 import { createClinicArrivalBrowserFixture, isClinicArrivalFixtureLocation, type ClinicArrivalGuardedInit } from "./clinic-arrival-browser-store";
 import { mortgageBrowserRequest, mortgageLeadBrowserRequest, mortgageFixtureAdmin } from './mortgage-browser-store';
+import { appointmentCreateFixtureIds, createAppointmentCreateBrowserFixture, isAppointmentCreateFixtureLocation } from "./appointment-create-browser-store";
 const retryFixture = new URLSearchParams(window.location?.search || "").get("bookingRetry") === "lost-response"
   ? createBookingRetryFixture() : null;
 const fixtureParams = new URLSearchParams(window.location?.search || "");
+export const appointmentCreateFixture = isAppointmentCreateFixtureLocation(window.location)
+  ? createAppointmentCreateBrowserFixture(window.location.search) : null;
 const saleRetryFixture = fixtureParams.get("salesRetry") === "lost-response" ? createBookingRetryFixture() : null;
 const fixtureTimeZone = ["UTC", "Pacific/Chatham"].includes(fixtureParams.get("fixtureTimeZone") || "")
   ? fixtureParams.get("fixtureTimeZone")! : "Asia/Almaty";
@@ -20,14 +23,14 @@ for (const key of ["fixtureRole", "fixturePurpose"]) {
   else if (sessionStorage.getItem(`medina-visual:${key}`)) fixtureParams.set(key, sessionStorage.getItem(`medina-visual:${key}`)!);
 }
 const fixtureRole = fixtureParams.get("fixtureRole");
-const assignedLeadFixture = fixtureRole === "lead_manager";
-const mortgageFixture = fixtureParams.get("fixturePurpose") === "mortgage_leads";
+const assignedLeadFixture = !appointmentCreateFixture && fixtureRole === "lead_manager";
+const mortgageFixture = !appointmentCreateFixture && fixtureParams.get("fixturePurpose") === "mortgage_leads";
 const operatorFixture = createOperatorBrowserFixture();
 export const operatorDispatchFixture = fixtureParams.get("operatorDispatch") === "deferred"
   ? createOperatorDispatchFixture((url, init) => operatorFixture.request(url, init)) : null;
 export const suspendOperatorFixture = () => operatorFixture.suspend();
 export const endOperatorCooperationFixture = () => operatorFixture.endCooperation();
-const workspaceId = "00000000-0000-4000-8000-000000000001";
+const workspaceId = appointmentCreateFixture ? appointmentCreateFixtureIds.workspace : "00000000-0000-4000-8000-000000000001";
 const clientId = "00000000-0000-4000-8000-000000000002";
 const doctorId = "00000000-0000-4000-8000-000000000003";
 const serviceId = "00000000-0000-4000-8000-000000000004";
@@ -60,10 +63,11 @@ const keys: Record<string, string> = { "clinic-doctors": "doctors", "clinic-serv
 export const hasSupabaseFrontendEnv = true;
 export const arrivedByRecoveryLink = false;
 export const supabase = { auth: {
-  getSession: async () => ({ data: { session: ["/admin", "/operator"].includes(window.location.pathname)
+  getSession: async () => ({ data: { session: appointmentCreateFixture ? appointmentCreateFixture.session() : ["/admin", "/operator"].includes(window.location.pathname)
     ? { user: { id: window.location.pathname === "/operator" ? "00000000-0000-4000-8000-000000000805" : "fixture-user" }, access_token: "visual-fixture-not-a-valid-token" } : null } }),
   signInWithPassword: async () => ({ data: null, error: { message: "Вход отключён на локальном стенде" } }),
-  onAuthStateChange: () => ({ data: { subscription: { unsubscribe() {} } } }),
+  onAuthStateChange: (listener: Parameters<NonNullable<typeof appointmentCreateFixture>["onAuthStateChange"]>[0]) => appointmentCreateFixture
+    ? appointmentCreateFixture.onAuthStateChange(listener) : { data: { subscription: { unsubscribe() {} } } },
   signOut: async () => ({ error: null }),
 } };
 export const verifyCurrentPassword = async () => false;
@@ -78,6 +82,13 @@ const auth = {
     : { booking: true, clients: true, leads: true, sales: true, tasks: true, dashboard: true, admin: true },
   signOut: async () => {}, clearWorkspaceSelection() {},
 };
+// Keep useAuth a plain mutable mock: the fixture parent subscribes to rerender React.
+appointmentCreateFixture?.bindAuth(({ actorId, role }) => {
+  auth.user.id = actorId;
+  auth.session.user.id = actorId;
+  auth.userRole = role;
+  auth.workspacePurpose = "clinic_services";
+});
 export const useAuth = () => auth;
 export const clearCrmCache = () => {};
 export const crmErrorMessage = (status?: unknown) => window.location.pathname === "/operator" && status === 403
@@ -99,6 +110,10 @@ let fixtureWhatsAppEnabled = true;
 export async function crmFetch(input: string, init?: ClinicArrivalGuardedInit): Promise<Response> {
   const url = new URL(input, "http://fixture.invalid");
   if (url.origin !== "http://fixture.invalid" || !url.pathname.startsWith("/api/crm/")) throw new Error("External request forbidden");
+  if (appointmentCreateFixture && (init?.method || "GET").toUpperCase() !== "GET") {
+    return isAppointmentCreateFixtureLocation(window.location)
+      ? appointmentCreateFixture.request(url, init) : Response.json({ success: false }, { status: 403 });
+  }
   if (window.location.pathname === "/clinic-arrival") return clinicArrivalFixture
     ? clinicArrivalFixture.request(url, init) : Response.json({ success: false }, { status: 403 });
   if (retryFixture && url.pathname === "/api/crm/appointments" && init?.method === "POST") {

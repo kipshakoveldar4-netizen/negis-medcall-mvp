@@ -10,6 +10,7 @@ import {
   MessageCircle,
   PhoneCall,
   Plus,
+  RotateCw,
   Search,
   Stethoscope,
   UserCheck,
@@ -20,7 +21,7 @@ import { PageLayout } from "@/components/layout/PageLayout";
 import { MetricCard } from "@/components/ui/metric-card";
 import { apiUrl, crmFetch } from "@/lib/api";
 import { editAppointmentClient, matchesAppointmentClientHistory, selectAppointmentClient } from "@/lib/appointmentClient";
-import { canReleaseAppointmentAttempt, clearPersistedAppointmentCreateAttempt, confirmedAppointmentCreate, isCurrentAppointmentAttempt, mergeCreatedAppointment, newAppointmentCreateAttempt, persistAppointmentCreateAttempt, restoreAppointmentCreateAttempt, type AppointmentCreateAttempt } from "@/lib/appointmentCreateAttempt";
+import { AppointmentAttemptRestoreError, canReleaseAppointmentAttempt, clearPersistedAppointmentCreateAttempt, confirmedAppointmentCreate, isCurrentAppointmentAttempt, mergeCreatedAppointment, newAppointmentCreateAttempt, persistAppointmentCreateAttempt, restoreAppointmentCreateAttempt, sameAppointmentCreateIntent, type AppointmentCreateAttempt } from "@/lib/appointmentCreateAttempt";
 import { isRealWorkspace, readWorkspaceId as readCurrentWorkspaceId, useDemoCollection, workspaceScopedKey } from "@/lib/demoStorage";
 import { formatPhone, toTelHref, toWhatsappHref } from "@/lib/phone";
 import { clinicToday, dayKeyInZone, isOnClinicDay } from "@/lib/clinicDay";
@@ -95,6 +96,8 @@ type AppointmentMutationScope = {
 class AppointmentAccessRefusalError extends Error {
   constructor() { super("Запись больше недоступна. Обновите список."); }
 }
+
+class AppointmentCreateRecoveryError extends Error {}
 
 type ApiResponse =
   | { success: true; mode?: string; warning?: string; data?: Record<string, unknown> }
@@ -1046,20 +1049,8 @@ export function AppointmentsPage() {
   const createAttempt = useRef<AppointmentCreateAttempt | null>(null);
   const restoredCreateScope = useRef("");
   const [unconfirmedCreate, setUnconfirmedCreate] = useState(false);
-  const currentCreateScope = useRef({ workspaceId: readCurrentWorkspaceId(), actorId: user?.id || "" });
-  currentCreateScope.current = { workspaceId: readCurrentWorkspaceId(), actorId: user?.id || "" };
-
-  useEffect(() => {
-    const attempt = createAttempt.current;
-    if (attempt && !isCurrentAppointmentAttempt(attempt, readCurrentWorkspaceId(), user?.id || "")) {
-      const storage = appointmentAttemptStorage();
-      if (storage) clearPersistedAppointmentCreateAttempt(storage);
-      createAttempt.current = null;
-      setUnconfirmedCreate(false);
-      setModalOpen(false);
-      setForm(defaultForm(todayKeyAtLoad));
-    }
-  }, [clinicId, user?.id, currentCreateScope.current.workspaceId]);
+  const [createRecoveryError, setCreateRecoveryError] = useState("");
+  const [createRecoveryRead, setCreateRecoveryRead] = useState(0);
 
   useEffect(() => {
     if (!saving && !unconfirmedCreate) return;
@@ -1375,28 +1366,48 @@ export function AppointmentsPage() {
     setClientMatches([]);
     setClientSearchAttempted(false);
     setRemoteVisitHistory([]);
+    // Drop only this view's handle. Its durable receipt remains owned by the
+    // original actor/workspace, including an interrupted in-flight create.
+    createAttempt.current = null;
+    restoredCreateScope.current = "";
+    prefillLeadRef.current = "";
+    setUnconfirmedCreate(false);
+    setCreateRecoveryError("");
     return () => { mutationScope.active = false; };
   }, [mutationScope]);
 
   useEffect(() => {
-    const storage = appointmentAttemptStorage();
-    if (!storage || !isRealWorkspace() || !clinicTimeZoneReady || !isCurrentMutationScope()) return;
-    const scope = currentCreateScope.current;
+    if (!isRealWorkspace(mutationScope.workspaceId) || !clinicTimeZoneReady || !isCurrentMutationScope()) return;
+    const scope = mutationScope;
     if (!scope.workspaceId || !scope.actorId) return;
-    const scopeKey = `${scope.workspaceId}:${scope.actorId}`;
+    const scopeKey = `${scope.workspaceId}:${scope.actorId}:${createRecoveryRead}`;
     const pending = createAttempt.current;
     if (pending && (!pending.uncertain || !isCurrentAppointmentAttempt(pending, scope.workspaceId, scope.actorId))) return;
     if (!pending && restoredCreateScope.current === scopeKey) return;
     restoredCreateScope.current = scopeKey;
 
-    const restored = pending ?? restoreAppointmentCreateAttempt(storage, scope.workspaceId, scope.actorId);
+    let restored: AppointmentCreateAttempt | null;
+    try {
+      const storage = appointmentAttemptStorage();
+      if (!storage) throw new AppointmentAttemptRestoreError("unreadable");
+      const durable = restoreAppointmentCreateAttempt(storage, scope.workspaceId, scope.actorId);
+      if (pending && durable && !sameAppointmentCreateIntent(pending, durable)) throw new AppointmentAttemptRestoreError("conflict");
+      restored = pending ?? durable;
+      setCreateRecoveryError("");
+    } catch (error) {
+      setCreateRecoveryError(error instanceof Error ? error.message : "Не удалось прочитать незавершённую запись.");
+      return;
+    }
     if (!restored) return;
     const restoredAppointment = appointmentFromApi(restored.payload);
     createAttempt.current = restored;
     prefillLeadRef.current = restored.leadId || "";
     setEditingId(null);
-    setForm(formFromAppointment(restoredAppointment, clinicTimeZone));
-    setSelectedDate(dateKeyFromStartsAt(restoredAppointment.startsAt, clinicTimeZone));
+    // Legacy receipts have no role provenance. They can be reconciled with
+    // the same key, but must not reveal an earlier role's draft in this view.
+    const showDraft = restored.originRole === scope.role;
+    setForm(showDraft ? formFromAppointment(restoredAppointment, clinicTimeZone) : defaultForm(todayKeyAtLoad));
+    if (showDraft) setSelectedDate(dateKeyFromStartsAt(restoredAppointment.startsAt, clinicTimeZone));
     setConflictMessage("");
     setScheduleMessage("");
     setClientMatches([]);
@@ -1404,7 +1415,7 @@ export function AppointmentsPage() {
     setUnconfirmedCreate(true);
     setModalOpen(true);
     toast.warning("Найдена незавершённая запись. Проверьте, сохранилась ли она.", { id: "appointment-create-recovery" });
-  }, [mutationScope, clinicTimeZone, clinicTimeZoneReady, unconfirmedCreate]);
+  }, [mutationScope, clinicTimeZone, clinicTimeZoneReady, unconfirmedCreate, createRecoveryRead]);
 
   const discardRefusedAppointment = (id: string) => {
     mutationScope.deniedIds.add(id.toLowerCase());
@@ -1636,13 +1647,17 @@ export function AppointmentsPage() {
     // Демо-пространство живёт в localStorage чужой страницы: PATCH к серверу
     // ответил бы 200 mode:"demo", ничего не изменив, и тост солгал бы. Фича
     // работает там, где работают настоящие заявки — в реальной клинике.
-    if (!isRealWorkspace()) return;
+    if (!isRealWorkspace(mutationScope.workspaceId) || !isCurrentMutationScope()) return;
     try {
       let status = "booked";
       let stageId = "";
       try {
-        const response = await crmFetch(`/api/crm/lead-stages?workspaceId=${encodeURIComponent(readCurrentWorkspaceId())}`);
+        const response = await crmFetch(`/api/crm/lead-stages?workspaceId=${encodeURIComponent(mutationScope.workspaceId)}`, {
+          expectedUserId: mutationScope.actorId, dispatchGuard: isCurrentMutationScope,
+        });
+        if (!isCurrentMutationScope()) return;
         const body = (await response.json()) as { success?: boolean; data?: Record<string, unknown> };
+        if (!isCurrentMutationScope()) return;
         const rawStages = body?.data?.stages;
         const stages = (Array.isArray(rawStages) ? rawStages : [])
           .map((item) => leadStageDefinitionFromUnknown(item))
@@ -1655,24 +1670,30 @@ export function AppointmentsPage() {
           if (/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(booked.id)) stageId = booked.id;
         }
       } catch {
+        if (!isCurrentMutationScope()) return;
         // Пайплайн не прочитался — канонический booked всё равно честен.
       }
-      const response = await crmFetch(`/api/crm/leads?workspaceId=${encodeURIComponent(readCurrentWorkspaceId())}`, {
+      const response = await crmFetch(`/api/crm/leads?workspaceId=${encodeURIComponent(mutationScope.workspaceId)}`, {
         method: "PATCH",
+        expectedUserId: mutationScope.actorId,
+        dispatchGuard: isCurrentMutationScope,
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           id: leadId,
-          workspaceId: readCurrentWorkspaceId(),
+          workspaceId: mutationScope.workspaceId,
           status,
           ...(stageId ? { stageId } : {}),
         }),
       });
+      if (!isCurrentMutationScope()) return;
       const body = (await response.json().catch(() => null)) as { success?: boolean; mode?: string } | null;
+      if (!isCurrentMutationScope()) return;
       // 200 с mode:"demo" — это «сервер ничего не записал»: тот же порог, что
       // у создания записи строкой выше.
       if (!response.ok || body?.success !== true || body.mode !== "supabase") throw new Error(String(response.status));
       toast.success("Заявка переведена в «Записана»");
     } catch (error) {
+      if (!isCurrentMutationScope()) return;
       console.warn("appointments: lead stage update refused", error instanceof Error ? error.message : error);
       toast.error("Запись создана, но заявка не переведена в «Записана» — переключите стадию вручную.");
     }
@@ -1923,6 +1944,8 @@ export function AppointmentsPage() {
   }, [items, remoteVisitHistory, form.clientId, form.phone, form.whatsapp, editingId, mutationScope]);
 
   const openCreate = (date = selectedDate, time = "09:00") => {
+    if (!isCurrentMutationScope() || submitLock.current || saving || createAttempt.current) return false;
+    if (createRecoveryError) { toast.error(createRecoveryError); return false; }
     if (!clinicTimeZoneReady) {
       toast.error("Не удалось определить часовой пояс. Обновите страницу и повторите.");
       return false;
@@ -1949,6 +1972,7 @@ export function AppointmentsPage() {
 
   const openEdit = (appointment: Appointment) => {
     if (!isCurrentMutationScope() || mutationScope.deniedIds.has(appointment.id.toLowerCase())) return;
+    if (submitLock.current || saving || createAttempt.current) return;
     if (!clinicTimeZoneReady) {
       toast.error("Не удалось определить часовой пояс. Обновите страницу и повторите.");
       return;
@@ -2077,24 +2101,29 @@ export function AppointmentsPage() {
    * Демо-режим не трогаем: там коллекция и есть запись, сервера нет.
    */
   const createAppointment = async (appointment: Appointment, allowConflict: boolean, allowOutsideSchedule = false) => {
+    if (!isCurrentMutationScope()) throw new DOMException("Appointment view changed", "AbortError");
     if (!isRealWorkspace()) {
       void addItem(appointment);
-      return { clientCreated: false, replayed: false };
+      return { clientCreated: false, replayed: false, leadId: "" };
     }
 
-    const scope = currentCreateScope.current;
+    if (createRecoveryError) throw new Error(createRecoveryError);
+    const scope = mutationScope;
     const attempt = createAttempt.current ?? newAppointmentCreateAttempt(scope.workspaceId, scope.actorId, {
       ...appointmentToApi(appointment), workspaceId: scope.workspaceId,
       ...(allowConflict ? { allowConflict: true } : {}),
       ...(allowOutsideSchedule ? { allowOutsideSchedule: true } : {}),
-    });
-    if (!createAttempt.current && isUuidText(prefillLeadRef.current)) attempt.leadId = prefillLeadRef.current;
+    }, undefined, { originRole: scope.role || undefined,
+      ...(isUuidText(prefillLeadRef.current) ? { leadId: prefillLeadRef.current } : {}) });
     if (!isCurrentAppointmentAttempt(attempt, scope.workspaceId, scope.actorId)) throw new Error("Аккаунт записи изменился. Откройте форму заново.");
     const storage = appointmentAttemptStorage();
     if (!storage || !persistAppointmentCreateAttempt(storage, attempt)) {
-      throw new Error(
-        "Браузер не сохранил безопасный ключ повтора. Запись не отправлена; разрешите хранилище вкладки и повторите.",
-      );
+      const message = "Браузер не подтвердил безопасный ключ повтора. Новый запрос не отправлен; разрешите хранилище вкладки и повторите чтение.";
+      if (isCurrentMutationScope()) {
+        restoredCreateScope.current = "";
+        setCreateRecoveryError(message);
+      }
+      throw new Error(message);
     }
     createAttempt.current = attempt;
     let response: Response | undefined;
@@ -2102,13 +2131,14 @@ export function AppointmentsPage() {
     try {
       response = await crmFetch(`/api/crm/appointments?workspaceId=${encodeURIComponent(attempt.workspaceId)}`, {
         method: "POST",
+        expectedUserId: scope.actorId,
+        dispatchGuard: () => isCurrentMutationScope() && createAttempt.current === attempt,
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ...attempt.payload, requestKey: attempt.requestKey }),
       });
+      if (!isCurrentMutationScope() || createAttempt.current !== attempt) throw new DOMException("Appointment view changed", "AbortError");
       body = await safeJson(response);
-      if (createAttempt.current !== attempt || !isCurrentAppointmentAttempt(attempt, currentCreateScope.current.workspaceId, currentCreateScope.current.actorId)) {
-        throw new Error("Аккаунт записи изменился. Ответ не добавлен в новое пространство.");
-      }
+      if (!isCurrentMutationScope() || createAttempt.current !== attempt) throw new DOMException("Appointment view changed", "AbortError");
 
       const conflict = conflictFromBody(body);
       if (conflict) throw conflict;
@@ -2126,20 +2156,25 @@ export function AppointmentsPage() {
 
       const saved = confirmedAppointmentCreate(body);
       if (!saved) throw new Error("Сервер не подтвердил сохранённую запись. Повторите проверку.");
-      setItems((current) => mergeCreatedAppointment(current, appointmentFromApi(saved)));
+      if (!clearPersistedAppointmentCreateAttempt(storage, attempt)) {
+        throw new AppointmentCreateRecoveryError("Запись сохранена, но хранилище повтора недоступно. Повторите проверку этой записи; не создавайте новую.");
+      }
+      setItems((current) => isCurrentMutationScope() ? mergeCreatedAppointment(current, appointmentFromApi(saved)) : current);
       warnAboutUnsaved(unsavedFromBody(body));
-      clearPersistedAppointmentCreateAttempt(storage);
       createAttempt.current = null;
       setUnconfirmedCreate(false);
-      return { clientCreated: body.data?.clientCreated === true, replayed: body.data?.replayed === true };
+      return { clientCreated: body.data?.clientCreated === true, replayed: body.data?.replayed === true, leadId: attempt.leadId || "" };
     } catch (error) {
-      if (createAttempt.current === attempt && isCurrentAppointmentAttempt(attempt, currentCreateScope.current.workspaceId, currentCreateScope.current.actorId)) {
-        if (canReleaseAppointmentAttempt(attempt, response?.status ?? 0, body)) {
-          clearPersistedAppointmentCreateAttempt(storage);
-          createAttempt.current = null;
-          setUnconfirmedCreate(false);
-        } else {
-          attempt.uncertain = true;
+      const current = isCurrentMutationScope() && createAttempt.current === attempt;
+      if (current && canReleaseAppointmentAttempt(attempt, response?.status ?? 0, body)
+        && clearPersistedAppointmentCreateAttempt(storage, attempt)) {
+        createAttempt.current = null;
+        setUnconfirmedCreate(false);
+      } else {
+        // The key was retained before dispatch. A stale callback must not
+        // resurrect it after another live reconciliation has cleared it.
+        attempt.uncertain = true;
+        if (current) {
           persistAppointmentCreateAttempt(storage, attempt);
           setUnconfirmedCreate(true);
         }
@@ -2225,7 +2260,8 @@ export function AppointmentsPage() {
   };
 
   const submitForm = async (allowConflict = false, allowOutsideSchedule = false) => {
-    if (editingId && (!isCurrentMutationScope() || mutationScope.deniedIds.has(editingId.toLowerCase()))) return;
+    if (!isCurrentMutationScope() || (editingId && mutationScope.deniedIds.has(editingId.toLowerCase()))) return;
+    if (!editingId && createRecoveryError) { toast.error(createRecoveryError); return; }
     if (!clinicTimeZoneReady) {
       toast.error("Не удалось определить часовой пояс. Обновите страницу и повторите.");
       return;
@@ -2321,13 +2357,14 @@ export function AppointmentsPage() {
     } else {
       try {
         const result = await createAppointment(appointment, allowConflict, allowOutsideSchedule);
+        if (!isCurrentMutationScope()) return;
         toast.success(result.replayed ? "Запись уже сохранена. Повтор не создал дубликат." : result.clientCreated ? "Запись создана, клиент добавлен в базу" : "Запись создана");
-        if (prefillLeadRef.current) {
-          const bookedLeadId = prefillLeadRef.current;
-          prefillLeadRef.current = "";
-          void markLeadBooked(bookedLeadId);
+        if (result.leadId) {
+          if (prefillLeadRef.current === result.leadId) prefillLeadRef.current = "";
+          void markLeadBooked(result.leadId);
         }
       } catch (error) {
+        if (!isCurrentMutationScope()) return;
         if (error instanceof SlotTakenError) {
           setConflictMessage(describeConflict(error, terms, clinicTimeZone));
           return;
@@ -2337,6 +2374,7 @@ export function AppointmentsPage() {
           return;
         }
         console.warn("appointments: create refused", error instanceof Error ? error.message : error);
+        if (error instanceof AppointmentCreateRecoveryError) { toast.error(error.message); return; }
         toast.error(createAttempt.current?.uncertain
           ? "Сохранение не подтверждено. Повторите проверку в этой форме."
           : refusalText(error));
@@ -2344,16 +2382,26 @@ export function AppointmentsPage() {
       }
     }
 
+    if (!isCurrentMutationScope()) return;
     setModalOpen(false);
     setConflictMessage("");
     setSelectedDate(form.date);
     } finally {
-      if (!editingId || isCurrentMutationScope()) {
+      if (isCurrentMutationScope()) {
         submitLock.current = false;
         setSaving(false);
       }
     }
   };
+
+  const recoveryErrorNotice = createRecoveryError ? (
+    <div role="alert" className="my-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-900">
+      <p>{createRecoveryError}</p>
+      <button type="button" className="neu-btn mt-3 inline-flex items-center gap-2 text-sm" onClick={() => setCreateRecoveryRead((current) => current + 1)}>
+        <RotateCw size={16} aria-hidden="true" />Повторить чтение
+      </button>
+    </div>
+  ) : null;
 
   const renderDay = () => (
     <section className="neu-card">
@@ -2809,6 +2857,7 @@ export function AppointmentsPage() {
         {loaded && !loadError && view === "list" ? renderList() : null}
       </div>
 
+      {!modalOpen ? recoveryErrorNotice : null}
       {modalOpen ? (
         <div className="fixed inset-0 z-[80] flex items-end bg-slate-950/35 p-3 sm:items-center sm:justify-center" onClick={closeAppointmentForm}>
           <form
@@ -2829,6 +2878,7 @@ export function AppointmentsPage() {
               </button>
             </div>
 
+            {!editingId ? recoveryErrorNotice : null}
             <fieldset className="grid min-w-0 gap-4 border-0 p-0 md:grid-cols-2" disabled={saving || unconfirmedCreate}>
               <div>
                 {/* Смена имени или телефона снимает унаследованную связь: форма,
@@ -3334,6 +3384,7 @@ export function AppointmentsPage() {
 
             {unconfirmedCreate ? (
               <div role="alert" className="mt-4 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm font-semibold text-amber-900">
+                {createAttempt.current?.originRole !== mutationScope.role ? <p>Данные прежней формы скрыты. Проверяется исходный запрос.</p> : null}
                 Сохранение не подтверждено. Запись могла сохраниться; повторная проверка отправит те же данные с тем же номером запроса.
               </div>
             ) : null}
@@ -3356,7 +3407,7 @@ export function AppointmentsPage() {
                   Записать вне графика
                 </button>
               ) : null}
-              <button type="submit" className="neu-btn-primary px-5 py-2.5 text-sm" disabled={saving}>
+              <button type="submit" className="neu-btn-primary px-5 py-2.5 text-sm" disabled={saving || (!editingId && Boolean(createRecoveryError))}>
                 {saving ? "Сохраняем…" : unconfirmedCreate ? "Проверить сохранение" : editingId ? "Сохранить изменения" : "Создать запись"}
               </button>
             </div>
