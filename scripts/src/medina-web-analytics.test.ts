@@ -368,3 +368,13 @@ test("the document declares one no-referrer policy in its head before scripts", 
   const firstScript = html.search(/<script\b/i);
   assert.ok(firstScript === -1 || policies[0].index! < firstScript);
 });
+
+test("the filesystem-served public privacy page discloses the filtered analytics integration", async () => {
+  const html = await readFile(path.join(frontend, "public/privacy/index.html"), "utf8");
+  assert.match(html, /Last updated: October 20, 2026/);
+  assert.match(html, /Vercel Web Analytics/);
+  assert.match(html, /stripped of query parameters and fragments/);
+  assert.match(html, /do not measure employee productivity/);
+  assert.match(html, /<meta name="referrer" content="no-referrer"/);
+  assert.doesNotMatch(html, /<script\b/i, "The notice itself does not need a collector");
+});
