@@ -415,6 +415,7 @@ async function uiFixture(marker: Marker, location: string) {
     "@/pages/not-found": { default: stub("NotFound") },
     "@/components/layout/UpdatePrompt": { UpdatePrompt: stub("UpdatePrompt") },
     "@/components/FbPixelInit": { default: stub("FbPixelInit") },
+    "@/components/WebAnalytics": { WebAnalytics: stub("WebAnalytics") },
     "@/components/WorkspacePicker": { WorkspacePicker: stub("WorkspacePicker", "nav") },
     "@/components/layout/RouteErrorBoundary": { RouteErrorBoundary: passthrough },
   };
