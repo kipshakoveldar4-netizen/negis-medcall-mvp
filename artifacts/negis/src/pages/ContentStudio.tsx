@@ -854,6 +854,9 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
   const [photoFormat, setPhotoFormat] = useState<PhotoFormatId>("story");
   const [photoLayout, setPhotoLayout] = useState<PhotoLayoutId>("gradient_bottom");
   const [photoTexts, setPhotoTexts] = useState<PhotoCreativeTexts>(defaultPhotoTexts);
+  const photoTextInputsRef = useRef({ format: photoFormat, sourceType: photoSourceType, sourceName: photoSourceName, texts: photoTexts });
+  const photoTextRevision = useRef(0);
+  const photoTextPending = useRef<object | null>(null);
   const [photoPreviewUrl, setPhotoPreviewUrl] = useState("");
   const [photoBlob, setPhotoBlob] = useState<Blob | null>(null);
   const [photoBusy, setPhotoBusy] = useState<"render" | "suggest" | "handoff" | null>(null);
@@ -951,8 +954,28 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
     }
   }, []);
 
-  const updatePhotoTexts = (key: keyof PhotoCreativeTexts, value: string) =>
-    setPhotoTexts((current) => ({ ...current, [key]: value }));
+  const updatePhotoTexts = (key: keyof PhotoCreativeTexts, value: string) => {
+    const inputs = photoTextInputsRef.current;
+    if (inputs.texts[key] === value) return;
+    const texts = { ...inputs.texts, [key]: value };
+    photoTextRevision.current += 1;
+    photoTextInputsRef.current = { ...inputs, texts };
+    setPhotoTexts(texts);
+  };
+
+  const updatePhotoFormat = (format: PhotoFormatId) => {
+    if (photoTextInputsRef.current.format === format) return;
+    photoTextRevision.current += 1;
+    photoTextInputsRef.current = { ...photoTextInputsRef.current, format };
+    setPhotoFormat(format);
+  };
+
+  const updatePhotoSourceType = (sourceType: string) => {
+    if (photoTextInputsRef.current.sourceType === sourceType) return;
+    photoTextRevision.current += 1;
+    photoTextInputsRef.current = { ...photoTextInputsRef.current, sourceType };
+    setPhotoSourceType(sourceType);
+  };
 
   // Дисклеймер печатается на самом макете, но в проверку не отдавался — и
   // правило про дисклеймер требовало добавить то, что уже стоит на картинке.
@@ -975,6 +998,8 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
       toast.error("Загрузите изображение (JPG, PNG или WEBP)");
       return;
     }
+    photoTextRevision.current += 1;
+    photoTextInputsRef.current = { ...photoTextInputsRef.current, sourceName: file.name };
     if (photoSourceUrl.startsWith("blob:")) URL.revokeObjectURL(photoSourceUrl);
     if (photoPreviewUrl.startsWith("blob:")) URL.revokeObjectURL(photoPreviewUrl);
     setPhotoSourceUrl(URL.createObjectURL(file));
@@ -984,39 +1009,80 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
   };
 
   const suggestPhotoTexts = async () => {
+    const session = sessionRef.current;
+    if (photoTextPending.current || !isHandoffSessionAlive(session)) return;
+    const brief = packageBriefRef.current;
+    const briefRevision = packageBriefRevision.current;
+    const inputs = photoTextInputsRef.current;
+    const revision = photoTextRevision.current;
+    const attempt = {};
+    photoTextPending.current = attempt;
+    const isCurrent = () => photoTextPending.current === attempt && isHandoffSessionAlive(session)
+      && packageBriefRef.current === brief && packageBriefRevision.current === briefRevision
+      && photoTextInputsRef.current === inputs && photoTextRevision.current === revision;
+    const isVerified = async () => isCurrent() && await isHandoffSessionCurrent(session) && isCurrent();
     setPhotoBusy("suggest");
     try {
-      const response = await crmFetch(withWorkspace("/api/content-studio/generate-package"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-                    mode: "ads",
-          format: photoFormat,
-          service: packageBrief.service,
-          city: packageBrief.city,
-          offer: packageBrief.offer,
-          audience: packageBrief.audience,
-          goal: packageBrief.goal,
-          tone: packageBrief.tone,
-          materialNotes: `${photoSourceType}${photoSourceName ? `: ${photoSourceName}` : ""}`,
-        }),
-      });
-      const body = await safeJson<ContentPackage>(response);
-      if (!response.ok || body?.success !== true) {
-        throw new Error(body?.success === false ? body.error : "Не удалось предложить тексты");
+      if (!await isVerified()) return;
+      const payload = {
+        mode: "ads",
+        format: inputs.format,
+        service: brief.service,
+        city: brief.city,
+        offer: brief.offer,
+        audience: brief.audience,
+        goal: brief.goal,
+        tone: brief.tone,
+        materialNotes: `${inputs.sourceType}${inputs.sourceName ? `: ${inputs.sourceName}` : ""}`,
+      };
+      let data: ContentPackage;
+      let mode: string;
+      if (localDraftsOnly) {
+        data = demoContentPackage(payload);
+        mode = "demo";
+      } else {
+        const response = await crmFetch(`/api/content-studio/generate-package?workspaceId=${encodeURIComponent(workspaceId)}`, {
+          expectedUserId: actorId, dispatchGuard: isCurrent, signal: session.signal,
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        if (handoffAccessDenied(response)) throw new Error("Доступ к подбору текстов отозван. Обновите страницу.");
+        if (!await isVerified()) return;
+        const body = await safeJson<ContentPackage>(response);
+        if (!await isVerified()) return;
+        if (!response.ok || body?.success !== true) {
+          throw new Error(body?.success === false ? body.error : "Не удалось предложить тексты");
+        }
+        data = body.data;
+        mode = body.mode;
       }
-      setPhotoTexts((current) => ({
-        ...current,
-        headline: body.data.adHeadline || current.headline,
-        offer: packageBrief.offer || body.data.adPrimaryText.split(".")[0] || current.offer,
-        cta: body.data.cta || current.cta,
-      }));
-      setPhotoSuggestMode(body.mode);
-      toast.success(body.mode === "demo" ? "Образец текстов готов" : "Тексты готовы");
+      if (!await isVerified()) return;
+      if (!data || typeof mode !== "string" || ![data.adHeadline, data.adPrimaryText, data.cta].every((value) => typeof value === "string")) {
+        throw new Error("Сервер вернул неполные тексты. Прежние поля сохранены.");
+      }
+      const texts = {
+        ...inputs.texts,
+        headline: data.adHeadline || inputs.texts.headline,
+        offer: brief.offer || data.adPrimaryText.split(".")[0] || inputs.texts.offer,
+        cta: data.cta || inputs.texts.cta,
+      };
+      photoTextRevision.current += 1;
+      photoTextInputsRef.current = { ...inputs, texts };
+      setPhotoTexts(texts);
+      setPhotoSuggestMode(mode);
+      toast.success(mode === "demo" ? "Образец текстов готов" : "Тексты готовы");
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Ошибка генерации текстов");
+      if (!await isVerified()) return;
+      toast.error(handoffAccessDenied(error) ? "Доступ к подбору текстов отозван. Обновите страницу."
+        : error instanceof Error ? error.message : "Ошибка генерации текстов");
     } finally {
-      setPhotoBusy(null);
+      if (photoTextPending.current === attempt) {
+        photoTextPending.current = null;
+        if (session && sessionRef.current === session && !session.signal.aborted) {
+          setPhotoBusy((current) => current === "suggest" ? null : current);
+        }
+      }
     }
   };
 
@@ -2916,7 +2982,7 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
             </div>
             <label>
               <span style={labelStyle}>Тип фото</span>
-              <select style={inputStyle} value={photoSourceType} onChange={(event) => setPhotoSourceType(event.target.value)}>
+              <select style={inputStyle} value={photoSourceType} onChange={(event) => updatePhotoSourceType(event.target.value)}>
                 {photoSourceTypes.map((type) => (
                   <option key={type} value={type}>
                     {type}
@@ -2935,7 +3001,7 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
                 className={`rounded-full border px-4 py-2 text-xs font-black ${
                   photoFormat === format.id ? "border-[#0D9488] bg-[#0D9488] text-white" : "border-[#E7ECF3] bg-white text-[#475569]"
                 }`}
-                onClick={() => setPhotoFormat(format.id)}
+                onClick={() => updatePhotoFormat(format.id)}
               >
                 {format.label}
               </button>

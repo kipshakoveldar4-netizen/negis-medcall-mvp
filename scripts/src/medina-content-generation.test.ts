@@ -1005,6 +1005,13 @@ type LocalPackageBrief = { mode: string; format: string; service: string; city: 
   goal: string; tone: string; materialNotes: string };
 type LocalPackageCallbacks = { generate: () => Promise<void>; click: () => void; disabled: boolean;
   updateBrief: (key: keyof LocalPackageBrief, value: string) => void };
+type LocalPhotoTexts = { headline: string; offer: string; cta: string; disclaimer: string };
+type LocalPhotoInputs = { photoFormat: string; photoSourceType: string; photoSourceName: string; photoTexts: LocalPhotoTexts;
+  photoSourceUrl: string; photoPreviewUrl: string; photoBusy: string | null; photoSuggestMode: string };
+type LocalPhotoSuggestionCallbacks = { suggest: () => Promise<void>; click: () => void; disabled: boolean;
+  updateBrief: LocalPackageCallbacks["updateBrief"]; updateTexts: (key: keyof LocalPhotoTexts, value: string) => void;
+  changeFormat: (value: string) => void; changeSourceType: (value: string) => void;
+  selectFile: (file: { name: string; type: string; size: number } | null) => void };
 const LOCAL_PACKAGE_BRIEF: LocalPackageBrief = { mode: "idea", format: "reels", service: "Synthetic service A", city: "Synthetic city A",
   offer: "Synthetic offer A", audience: "Synthetic audience A", goal: "leads", tone: "local", materialNotes: "Local materials A" };
 const LOCAL_GENERATED_PACKAGE = { ideaTitle: "Synthetic generated package A", hook: "Local hook A", script: "Local script A",
@@ -1149,7 +1156,69 @@ const generationCallbackPrograms = (async () => {
       ${select(source, ["isSessionAlive", "isGenerationSessionCurrent", ...handoffHelpers, "updatePackageBrief", "generatePackage"])}
       return { generate: generatePackage, updateBrief: updatePackageBrief, click: ${packageButtons[0].click}, disabled: ${packageButtons[0].disabled} };
     };`;
+  const photoInputNames = ["photoFormat", "photoSourceType", "photoSourceName", "photoTexts", "photoSourceUrl", "photoPreviewUrl", "photoBusy", "photoSuggestMode"];
+  const photoDefaults = photoInputNames.map((name) => {
+    const statement = child.body!.statements.find((node) => ts.isVariableStatement(node)
+      && node.declarationList.declarations.some((item) => ts.isArrayBindingPattern(item.name)
+        && item.name.elements[0] && ts.isBindingElement(item.name.elements[0])
+        && item.name.elements[0].name.getText(ast) === name)) as import("typescript").VariableStatement | undefined;
+    assert.ok(statement);
+    const initializer = statement.declarationList.declarations[0].initializer;
+    assert.ok(initializer && ts.isCallExpression(initializer) && initializer.arguments[0]);
+    return `${name}: ${initializer.arguments[0].getText(ast)}`;
+  });
+  const photoRefDeclarations = child.body.statements.filter((node) => ts.isVariableStatement(node)
+    && node.declarationList.declarations.some((item) => ts.isIdentifier(item.name) && /photo/i.test(item.name.text)
+      && item.initializer && ts.isCallExpression(item.initializer) && item.initializer.expression.getText(ast) === "useRef"));
+  const photoRefNames = photoRefDeclarations.flatMap((node) => (node as import("typescript").VariableStatement)
+    .declarationList.declarations.map((item) => item.name.getText(ast)));
+  const photoExtraHelpers = ["updatePhotoFormat", "updatePhotoSourceType"].filter((name) =>
+    child.body!.statements.some((node) => ts.isVariableStatement(node)
+      && node.declarationList.declarations.some((item) => item.name.getText(ast) === name)));
+  const photoEvents = { click: [] as string[], disabled: [] as string[], format: [] as string[], sourceType: [] as string[] };
+  const visitPhotoEvents = (node: import("typescript").Node) => {
+    if (ts.isJsxOpeningElement(node)) {
+      const expression = (name: string) => {
+        const item = node.attributes.properties.find((attribute) => ts.isJsxAttribute(attribute) && attribute.name.getText(ast) === name);
+        return item && ts.isJsxAttribute(item) && item.initializer && ts.isJsxExpression(item.initializer)
+          ? item.initializer.expression?.getText(ast) : undefined;
+      };
+      if (expression("onClick")?.includes("suggestPhotoTexts()")) {
+        photoEvents.click.push(expression("onClick")!); photoEvents.disabled.push(expression("disabled")!);
+      }
+      if (node.tagName.getText(ast) === "button" && expression("key") === "format.id" && node.getText(ast).includes("photoFormat")) {
+        photoEvents.format.push(expression("onClick")!);
+      }
+      if (node.tagName.getText(ast) === "select" && expression("value") === "photoSourceType") {
+        photoEvents.sourceType.push(expression("onChange")!);
+      }
+    }
+    ts.forEachChild(node, visitPhotoEvents);
+  };
+  visitPhotoEvents(child);
+  for (const [name, matches] of Object.entries(photoEvents)) assert.equal(matches.length, 1, `execute exactly one actual photo ${name} handler`);
+  const photoRefs = `exports.selected = function renderPhotoRefs(packageBrief, { ${photoInputNames.join(", ")} }) {
+    ${[...packageRefDeclarations, ...photoRefDeclarations].map((node) => node.getText(ast)).join("\n")}
+    ${packageRefAssignments.map((node) => node.getText(ast)).join("\n")}
+    return { ${[...packageRefNames, ...photoRefNames].join(", ")} };
+  };`;
+  const photoSuggestion = `${select(source, ["safeJson", "withWorkspace", ...denialHelpers])}
+    exports.selected = function capturePhotoSuggestion({ actorId, workspaceId, localDraftsOnly, sessionRef }, packageBrief,
+      { ${photoInputNames.join(", ")} }, refs) {
+      const { ${[...packageRefNames, ...photoRefNames].join(", ")} } = refs;
+      ${select(source, ["isSessionAlive", "isGenerationSessionCurrent", ...handoffHelpers, "updatePackageBrief",
+        "updatePhotoTexts", ...photoExtraHelpers, "onPhotoFileSelected", "suggestPhotoTexts"])}
+      return { suggest: suggestPhotoTexts, click: ${photoEvents.click[0]}, disabled: ${photoEvents.disabled[0]},
+        updateBrief: updatePackageBrief, updateTexts: updatePhotoTexts, selectFile: onPhotoFileSelected,
+        changeFormat(value) { const format = { id: value }; return (${photoEvents.format[0]})(); },
+        changeSourceType(value) { return (${photoEvents.sourceType[0]})({ target: { value } }); } };
+    };`;
   return {
+    photoDefaults: ts.transpileModule(`${select(source, ["photoSourceTypes", "defaultPhotoTexts"])}
+      exports.selected = { photoSourceTypes, inputs: { ${photoDefaults.join(", ")} } };`,
+      { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText,
+    photoRefs: ts.transpileModule(photoRefs, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText,
+    photoSuggestion: ts.transpileModule(photoSuggestion, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText,
     packageRefs: ts.transpileModule(packageRefs, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText,
     package: ts.transpileModule(packageProgram, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText,
     packageDemo: compile(await readFile(path.join(repoRoot, "lib/content-studio/core.ts"), "utf8"),
@@ -1306,7 +1375,7 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
   let targetedTokenStarted: ReturnType<typeof generationDeferred<void>> | undefined;
   const tokenStarted = generationDeferred<void>(), bodyStarted = generationDeferred<void>();
   let delayedBody: ReturnType<typeof generationDeferred<string>> | undefined;
-  type Resource = "generation" | "usage" | "poll" | "restore" | "signed" | "metadata" | "approval" | "package-generation" | "package-save";
+  type Resource = "generation" | "usage" | "poll" | "restore" | "signed" | "metadata" | "approval" | "package-generation" | "package-save" | "photo-suggest";
   let responseWait: ReturnType<typeof generationDeferred<void>> | undefined, responseResource: Resource | undefined;
   const responseStarted = generationDeferred<void>();
   let handoffResponseHook: ((resource: Resource) => void) | undefined;
@@ -1357,19 +1426,21 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
   const handoffStatuses: Partial<Record<Resource, number>> = {};
   const handoffBodyFailures = new Set<Resource>();
   const handoffTransportFailures: Partial<Record<Resource, number>> = {};
-  let packageFixtureActive = false;
+  let packageFixtureActive = false, photoSuggestionActive = false;
   const packageReplies: { generation: unknown; save: unknown; generationText?: string; saveText?: string } = {
     generation: { success: true, mode: "fixture", data: LOCAL_GENERATED_PACKAGE },
     save: { success: true, data: { video: { id: "saved-package-a" } } },
   };
   const packageBodyReads: Resource[] = [];
+  const photoSuggestionReply: { body: unknown; text?: string } = { body: { success: true, mode: "fixture", data: LOCAL_GENERATED_PACKAGE } };
   const signedReply = { success: true, data: { bucket: "fixture-creatives", storagePath: "workspace-a/local.jpg",
     token: "synthetic-upload-token", publicUrl: "https://example.invalid/local-upload.jpg" } };
   const localResponse = (value: unknown, resource: Resource) => {
     handoffResponseHook?.(resource);
     const response = Response.json(value, { status: handoffStatuses[resource] ?? 200 });
-    if (resource === "package-generation" || resource === "package-save") {
-      const text = resource === "package-generation" ? packageReplies.generationText : packageReplies.saveText;
+    if (resource === "package-generation" || resource === "package-save" || resource === "photo-suggest") {
+      const text = resource === "photo-suggest" ? photoSuggestionReply.text
+        : resource === "package-generation" ? packageReplies.generationText : packageReplies.saveText;
       const read = response.text.bind(response);
       Object.defineProperty(response, "text", { configurable: true, value: () => {
         packageBodyReads.push(resource); return text === undefined ? read() : Promise.resolve(text);
@@ -1395,11 +1466,12 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
     async fetch(url: string, init: LocalGenerationInit) {
       const method = init.method || "GET";
       dispatches.push({ url, method, headers: new Headers(init.headers), body: init.body ? JSON.parse(String(init.body)) : null, signal: init.signal });
-      const resource = url.includes("generate-package") ? "package-generation"
+      const resource = url.includes("generate-package") ? (photoSuggestionActive ? "photo-suggest" : "package-generation")
         : packageFixtureActive && url.split("?")[0] === "/api/crm/content-videos" && method === "POST" ? "package-save"
         : url.includes("signed-upload") ? "signed" : method === "PATCH" ? "approval" : "metadata";
       if (responseWait && responseResource === resource) { responseStarted.resolve(); await responseWait.promise; }
       if (handoffTransportFailures[resource]) throw new api.CrmApiError(handoffTransportFailures[resource]!, "authentication_required", "Synthetic denied transport");
+      if (resource === "photo-suggest") { assert.equal(method, "POST"); return localResponse(photoSuggestionReply.body, resource); }
       if (resource === "package-generation" || resource === "package-save") {
         assert.equal(method, "POST");
         return localResponse(resource === "package-generation" ? packageReplies.generation : packageReplies.save, resource);
@@ -1430,6 +1502,7 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
   const setters = Object.fromEntries([
     "GenBusy", "GenNotice", "GenImage", "GenVideo", "VideoJob", "GenerationUsage", "GenerationUsageLoading", "Videos", "ActiveId", "PhotoBusy",
     "Loading", "Notice", "ContentPackage", "ContentPackageId", "SelectedAdVariantId", "PackageGenerationMode", "GenPrompt", "PackageBrief",
+    "PhotoTexts", "PhotoSuggestMode", "PhotoFormat", "PhotoSourceType", "PhotoSourceName", "PhotoSourceUrl", "PhotoPreviewUrl", "PhotoBlob",
   ].map((field) => [`set${field}`, (update: unknown) => {
     const value = typeof update === "function" ? (update as (previous: unknown) => unknown)(state[field]) : update;
     state[field] = value; writes.push({ field, value });
@@ -1516,7 +1589,41 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
   const renderPackageRefs = evaluateGenerationFixture<(brief: LocalPackageBrief) => Record<string, unknown>>(programs.packageRefs, {
     useRef(initial: unknown) { return packageRefInstance.slots[packageRefInstance.cursor++] ??= { current: initial }; },
   });
+  const photoSuggestionRequests: { url: string; init: LocalGenerationInit }[] = [];
+  const photoDefaults = evaluateGenerationFixture<{ photoSourceTypes: string[]; inputs: LocalPhotoInputs }>(programs.photoDefaults, {});
+  const localObjectUrls: { operation: string; name: string }[] = [];
+  const capturePhotoSuggestion = evaluateGenerationFixture<(session: LocalGenerationSession, brief: LocalPackageBrief,
+    inputs: LocalPhotoInputs, refs: Record<string, unknown>) => LocalPhotoSuggestionCallbacks>(programs.photoSuggestion, {
+    ...bindings, ...purePackageDemo,
+    URL: {
+      createObjectURL(file: { name: string }) { localObjectUrls.push({ operation: "create", name: file.name }); return `blob:synthetic-${localObjectUrls.length}`; },
+      revokeObjectURL(name: string) { localObjectUrls.push({ operation: "revoke", name }); },
+    },
+    async crmFetch(url: string, init: LocalGenerationInit) {
+      photoSuggestionRequests.push({ url, init }); activeTransport = "photo-suggest";
+      try { return await api.crmFetch(url, init); } finally { activeTransport = undefined; }
+    },
+  });
+  const photoRefInstances = new Map<LocalGenerationSession["sessionRef"], { slots: { current: unknown }[]; cursor: number }>();
+  let photoRefInstance: { slots: { current: unknown }[]; cursor: number };
+  const renderPhotoRefs = evaluateGenerationFixture<(brief: LocalPackageBrief, inputs: LocalPhotoInputs) => Record<string, unknown>>(programs.photoRefs, {
+    useRef(initial: unknown) { return photoRefInstance.slots[photoRefInstance.cursor++] ??= { current: initial }; },
+  });
   return {
+    photoSuggestions() {
+      assert.ok(lifetime, "photo suggestions must receive actual wrapper-computed session props");
+      photoSuggestionActive = true;
+      if (!("PackageBrief" in state)) state.PackageBrief = { ...LOCAL_PACKAGE_BRIEF };
+      if (!("PhotoTexts" in state)) Object.assign(state, Object.fromEntries(Object.entries(JSON.parse(JSON.stringify(photoDefaults.inputs)))
+        .map(([key, value]) => [key[0].toUpperCase() + key.slice(1), value])));
+      const inputs = Object.fromEntries(Object.keys(photoDefaults.inputs).map((key) => [key, state[key[0].toUpperCase() + key.slice(1)]])) as LocalPhotoInputs;
+      const next = lifetime.render();
+      photoRefInstance = photoRefInstances.get(next.session.sessionRef) ?? { slots: [], cursor: 0 };
+      photoRefInstances.set(next.session.sessionRef, photoRefInstance); photoRefInstance.cursor = 0;
+      const refs = renderPhotoRefs(state.PackageBrief as LocalPackageBrief, inputs);
+      return { ...next, inputs, refs, callbacks: capturePhotoSuggestion(next.session, state.PackageBrief as LocalPackageBrief, inputs, refs) };
+    },
+    photoSuggestionReply, photoSuggestionRequests, photoDefaults, localObjectUrls,
     packages() {
       assert.ok(lifetime, "package generation must receive actual wrapper-computed session props");
       packageFixtureActive = true;
@@ -3151,3 +3258,325 @@ for (const rejected of PACKAGE_REJECTED_GENERATIONS) {
     } finally { fixture.lifetime!.unmount(); }
   });
 }
+
+type LocalPhotoSuggestion = ReturnType<LocalHandoffFixture["photoSuggestions"]>;
+const LOCAL_PHOTO_FILE = { name: "synthetic-clinic-a.png", type: "image/png", size: 42 };
+
+function photoSuggestionSnapshot(fixture: LocalHandoffFixture) {
+  return JSON.parse(JSON.stringify({ texts: fixture.state.PhotoTexts, mode: fixture.state.PhotoSuggestMode }));
+}
+
+async function pausePhotoSuggestion(fixture: LocalHandoffFixture, phase: "token" | "body") {
+  const token = phase === "token" ? fixture.deferToken("photo-suggest") : undefined;
+  const body = phase === "body" ? fixture.deferBody("photo-suggest") : undefined;
+  const captured = fixture.photoSuggestions(), work = captured.callbacks.suggest();
+  const resume = (value?: string) => { token?.resolve(); body?.resolve(value ?? JSON.stringify(fixture.photoSuggestionReply.body)); };
+  try {
+    if (token) await token.started; else await fixture.bodyStarted.promise;
+    assert.equal(fixture.dispatches.length, phase === "token" ? 0 : 1, "pause actual suggestion transport/auth or response text");
+    return { captured, work, resume };
+  } catch (error) { resume(); await work; throw error; }
+}
+
+for (const phase of ["token", "body"] as const) {
+  for (const boundary of ["account", "silent-account", "workspace", "actor-A-B-A", "unmount"] as const) {
+    test(`G5C10 ${phase}-pending suggestion remains silent after ${boundary}`, { timeout: 5000 }, async () => {
+      const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE);
+      const paused = await pausePhotoSuggestion(fixture, phase);
+      try {
+        if (boundary === "account" || boundary === "actor-A-B-A") fixture.sdkSession("actor-b");
+        if (boundary === "silent-account") fixture.sdkSession("actor-b", "fixture-token-b", null);
+        if (boundary === "workspace") fixture.workspace(HANDOFF_WORKSPACE_B);
+        if (boundary === "actor-A-B-A") { fixture.lifetime!.render(); fixture.sdkSession("actor-a"); fixture.lifetime!.render(); }
+        if (boundary === "unmount") fixture.lifetime!.unmount();
+        fixture.state.PhotoTexts = { headline: "Current B headline", offer: "Current B offer", cta: "Current B CTA", disclaimer: "Current B disclaimer" };
+        fixture.state.PhotoSuggestMode = "current-b-mode";
+        const before = photoSuggestionSnapshot(fixture), writes = fixture.writes.length, mutations = fixture.mutations.length;
+        paused.resume(); await paused.work;
+        assert.deepEqual(photoSuggestionSnapshot(fixture), before);
+        assert.deepEqual(fixture.writes.slice(writes), boundary === "workspace" || boundary === "silent-account"
+          ? [{ field: "PhotoBusy", value: null }] : []);
+        assert.equal(fixture.dispatches.length, phase === "token" ? 0 : 1);
+        assert.deepEqual(fixture.toasts, []); assert.deepEqual(fixture.mutations.slice(mutations), []);
+        assert.deepEqual(fixture.uploads, []); assert.deepEqual(fixture.navigations, []);
+      } finally { paused.resume(); await paused.work; fixture.lifetime!.unmount(); }
+    });
+  }
+}
+
+test("G5C10 workspace A-B-A remount cannot revive an old suggestion body", { timeout: 5000 }, async () => {
+  const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE);
+  const paused = await pausePhotoSuggestion(fixture, "body");
+  try {
+    fixture.workspace(HANDOFF_WORKSPACE_B); fixture.lifetime!.render();
+    fixture.workspace(REAL_DEMO_TEST_WORKSPACE); const returned = fixture.photoSuggestions();
+    assert.equal(returned.key, paused.captured.key);
+    assert.notEqual(returned.session.sessionRef, paused.captured.session.sessionRef);
+    const before = photoSuggestionSnapshot(fixture), writes = fixture.writes.length;
+    paused.resume(); await paused.work;
+    assert.deepEqual(photoSuggestionSnapshot(fixture), before); assert.deepEqual(fixture.writes.slice(writes), []);
+    assert.deepEqual(fixture.toasts, []); assert.equal(fixture.dispatches.length, 1);
+  } finally { paused.resume(); await paused.work; fixture.lifetime!.unmount(); }
+});
+
+const PHOTO_INPUT_CHANGES: { name: string; edit: (fixture: LocalHandoffFixture, captured: LocalPhotoSuggestion) => void }[] = [
+  { name: "brief ABA", edit: (_fixture, captured) => {
+    captured.callbacks.updateBrief("service", "Temporary service B"); captured.callbacks.updateBrief("service", LOCAL_PACKAGE_BRIEF.service);
+  } },
+  { name: "format ABA", edit: (_fixture, captured) => {
+    captured.callbacks.changeFormat("feed"); captured.callbacks.changeFormat(captured.inputs.photoFormat);
+  } },
+  { name: "source type ABA", edit: (fixture, captured) => {
+    captured.callbacks.changeSourceType(fixture.photoDefaults.photoSourceTypes[1]); captured.callbacks.changeSourceType(captured.inputs.photoSourceType);
+  } },
+  { name: "same-name photo replacement", edit: (_fixture, captured) => { captured.callbacks.selectFile({ ...LOCAL_PHOTO_FILE }); } },
+  { name: "manual headline edit", edit: (_fixture, captured) => { captured.callbacks.updateTexts("headline", "New manual headline"); } },
+  { name: "editable text ABA", edit: (_fixture, captured) => {
+    captured.callbacks.updateTexts("cta", "Temporary CTA B"); captured.callbacks.updateTexts("cta", captured.inputs.photoTexts.cta);
+  } },
+];
+
+for (const change of PHOTO_INPUT_CHANGES) {
+  test(`G5C10 ${change.name} expires an already parsed suggestion intent synchronously`, { timeout: 5000 }, async () => {
+    const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE);
+    if (change.name === "same-name photo replacement") fixture.photoSuggestions().callbacks.selectFile(LOCAL_PHOTO_FILE);
+    const paused = await pausePhotoSuggestion(fixture, "body");
+    try {
+      change.edit(fixture, paused.captured);
+      const before = photoSuggestionSnapshot(fixture), writes = fixture.writes.length;
+      // Resume before another render: revision invalidation must happen inside the input handler.
+      paused.resume(); await paused.work;
+      assert.deepEqual(photoSuggestionSnapshot(fixture), before);
+      assert.deepEqual(fixture.writes.slice(writes), [{ field: "PhotoBusy", value: null }]);
+      assert.deepEqual(fixture.toasts, []); assert.equal(fixture.dispatches.length, 1);
+      assert.deepEqual(fixture.uploads, []);
+    } finally { paused.resume(); await paused.work; fixture.lifetime!.unmount(); }
+  });
+}
+
+test("G5C10 brief edit during actual token lookup prevents any suggestion POST", { timeout: 5000 }, async () => {
+  const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE);
+  const paused = await pausePhotoSuggestion(fixture, "token");
+  try {
+    paused.captured.callbacks.updateBrief("city", "Changed city B");
+    const before = photoSuggestionSnapshot(fixture);
+    paused.resume(); await paused.work;
+    assert.equal(fixture.dispatches.length, 0); assert.deepEqual(photoSuggestionSnapshot(fixture), before); assert.deepEqual(fixture.toasts, []);
+  } finally { paused.resume(); await paused.work; fixture.lifetime!.unmount(); }
+});
+
+for (const outcome of ["error", "auth", "unreadable"] as const) {
+  test(`G5C10 late ${outcome} suggestion body cannot emit a notice under a replaced actor`, { timeout: 5000 }, async () => {
+    const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE);
+    const paused = await pausePhotoSuggestion(fixture, "body");
+    try {
+      fixture.sdkSession("actor-b");
+      const before = photoSuggestionSnapshot(fixture), writes = fixture.writes.length;
+      paused.resume(outcome === "unreadable" ? "{invalid" : JSON.stringify({ success: false, error: "Synthetic late refusal",
+        code: outcome === "auth" ? "authentication_required" : "fixture_failure" }));
+      await paused.work;
+      assert.deepEqual(photoSuggestionSnapshot(fixture), before); assert.deepEqual(fixture.writes.slice(writes), []);
+      assert.deepEqual(fixture.toasts, []); assert.equal(fixture.dispatches.length, 1);
+    } finally { paused.resume(); await paused.work; fixture.lifetime!.unmount(); }
+  });
+}
+
+test("G5C10 same-actor refresh sends one exact scoped payload and retains the manual disclaimer", { timeout: 5000 }, async () => {
+  const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE);
+  const initial = fixture.photoSuggestions(); initial.callbacks.selectFile(LOCAL_PHOTO_FILE);
+  initial.callbacks.updateTexts("disclaimer", "Operator's retained disclaimer");
+  const paused = await pausePhotoSuggestion(fixture, "token");
+  try {
+    fixture.sdkSession("actor-a", "fixture-token-a-refreshed", "TOKEN_REFRESHED");
+    assert.equal(fixture.photoSuggestions().key, paused.captured.key);
+    paused.resume(); await paused.work;
+    assert.equal(fixture.dispatches.length, 1);
+    const call = fixture.dispatches[0];
+    assert.equal(call.url, `/api/content-studio/generate-package?workspaceId=${REAL_DEMO_TEST_WORKSPACE}`);
+    assert.equal(call.method, "POST"); assert.equal(call.headers.get("Authorization"), "Bearer fixture-token-a-refreshed");
+    assert.equal(call.headers.get("Content-Type"), "application/json"); assert.equal(call.signal, paused.captured.session.sessionRef.current!.signal);
+    assert.deepEqual(call.body, { mode: "ads", format: fixture.photoDefaults.inputs.photoFormat, service: LOCAL_PACKAGE_BRIEF.service,
+      city: LOCAL_PACKAGE_BRIEF.city, offer: LOCAL_PACKAGE_BRIEF.offer, audience: LOCAL_PACKAGE_BRIEF.audience,
+      goal: LOCAL_PACKAGE_BRIEF.goal, tone: LOCAL_PACKAGE_BRIEF.tone,
+      materialNotes: `${fixture.photoDefaults.inputs.photoSourceType}: ${LOCAL_PHOTO_FILE.name}` });
+    assert.equal(fixture.photoSuggestionRequests[0].init.expectedUserId, "actor-a");
+    assert.equal(typeof fixture.photoSuggestionRequests[0].init.dispatchGuard, "function");
+    assert.deepEqual(JSON.parse(JSON.stringify(fixture.state.PhotoTexts)), { headline: LOCAL_GENERATED_PACKAGE.adHeadline,
+      offer: LOCAL_PACKAGE_BRIEF.offer, cta: LOCAL_GENERATED_PACKAGE.cta, disclaimer: "Operator's retained disclaimer" });
+    assert.equal(fixture.state.PhotoSuggestMode, "fixture"); assert.equal(fixture.state.PhotoBusy, null);
+    assert.deepEqual(fixture.toasts, [{ kind: "success", message: "Тексты готовы" }]);
+    assert.deepEqual(fixture.writes.filter((write) => /^(ContentPackage|Gen|PackageGeneration)/.test(write.field)), []);
+    assert.deepEqual(fixture.uploads, []); assert.deepEqual(fixture.navigations, []);
+  } finally { paused.resume(); await paused.work; fixture.lifetime!.unmount(); }
+});
+
+test("G5C10 valid three-field response preserves manual fallbacks and ignores unused package fields", async () => {
+  const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE);
+  const initial = fixture.photoSuggestions();
+  initial.callbacks.updateBrief("offer", ""); initial.callbacks.updateTexts("headline", "Manual headline"); initial.callbacks.updateTexts("cta", "Manual CTA");
+  fixture.photoSuggestionReply.body = { success: true, mode: "fixture", data: { adHeadline: "", adPrimaryText: "First sentence. Second sentence.", cta: "", shotList: 42 } };
+  try {
+    await fixture.photoSuggestions().callbacks.suggest();
+    assert.deepEqual(JSON.parse(JSON.stringify(fixture.state.PhotoTexts)), { headline: "Manual headline", offer: "First sentence", cta: "Manual CTA",
+      disclaimer: fixture.photoDefaults.inputs.photoTexts.disclaimer });
+    assert.equal(fixture.dispatches.length, 1); assert.equal(fixture.toasts[0].kind, "success");
+  } finally { fixture.lifetime!.unmount(); }
+});
+
+test("G5C10 no-op input handlers do not expire a pending suggestion", { timeout: 5000 }, async () => {
+  const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE);
+  const paused = await pausePhotoSuggestion(fixture, "body");
+  try {
+    const writes = fixture.writes.length;
+    paused.captured.callbacks.updateBrief("service", LOCAL_PACKAGE_BRIEF.service);
+    paused.captured.callbacks.changeFormat(paused.captured.inputs.photoFormat);
+    paused.captured.callbacks.changeSourceType(paused.captured.inputs.photoSourceType);
+    paused.captured.callbacks.updateTexts("headline", paused.captured.inputs.photoTexts.headline);
+    assert.deepEqual(fixture.writes.slice(writes), []);
+    paused.resume(); await paused.work;
+    assert.equal(fixture.state.PhotoSuggestMode, "fixture"); assert.equal(fixture.dispatches.length, 1);
+    assert.equal(fixture.toasts[0].kind, "success");
+  } finally { paused.resume(); await paused.work; fixture.lifetime!.unmount(); }
+});
+
+test("G5C10 pending lock is set before the first auth await and blocks old or disabled click callbacks", { timeout: 5000 }, async () => {
+  const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE), token = fixture.deferToken();
+  const initial = fixture.photoSuggestions(), work = initial.callbacks.suggest();
+  try {
+    initial.callbacks.click(); const disabled = fixture.photoSuggestions(); assert.equal(disabled.callbacks.disabled, true); disabled.callbacks.click();
+    await token.started; await flushLocalVideoWork();
+    assert.equal(fixture.sdkReads.total, 1, "duplicate callbacks cannot begin a second auth/transport chain");
+    assert.equal(fixture.photoSuggestionRequests.length, 0); assert.equal(fixture.dispatches.length, 0);
+    token.resolve(); await work; await flushLocalVideoWork();
+    assert.equal(fixture.dispatches.length, 1); assert.equal(fixture.toasts.length, 1);
+  } finally { token.resolve(); await work; await flushLocalVideoWork(); fixture.lifetime!.unmount(); }
+});
+
+test("G5C10 pending body stays locked after photo edits until settlement then permits the current retry", { timeout: 5000 }, async () => {
+  const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE);
+  const paused = await pausePhotoSuggestion(fixture, "body");
+  try {
+    paused.captured.callbacks.changeFormat("feed");
+    const edited = fixture.photoSuggestions(); edited.callbacks.click(); paused.captured.callbacks.click(); await flushLocalVideoWork();
+    assert.equal(fixture.dispatches.length, 1);
+    const before = photoSuggestionSnapshot(fixture);
+    paused.resume(); await paused.work; await flushLocalVideoWork();
+    assert.deepEqual(photoSuggestionSnapshot(fixture), before); assert.deepEqual(fixture.toasts, []);
+    await fixture.photoSuggestions().callbacks.suggest();
+    assert.equal(fixture.dispatches.length, 2); assert.equal((fixture.dispatches[1].body as { format: string }).format, "feed");
+    assert.equal(fixture.toasts.length, 1);
+  } finally { paused.resume(); await paused.work; await flushLocalVideoWork(); fixture.lifetime!.unmount(); }
+});
+
+for (const status of [401, 403] as const) {
+  for (const source of ["HTTP-before-body", "transport"] as const) {
+    test(`G5C10 ${status} ${source} denies suggestion without fallback or reading a denied body`, async () => {
+      const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE);
+      if (source === "transport") fixture.handoffTransportFailures["photo-suggest"] = status;
+      else { fixture.handoffStatuses["photo-suggest"] = status; fixture.handoffBodyFailures.add("photo-suggest"); }
+      const captured = fixture.photoSuggestions(), before = photoSuggestionSnapshot(fixture), writes = fixture.writes.length;
+      try {
+        await captured.callbacks.suggest();
+        assert.deepEqual(photoSuggestionSnapshot(fixture), before);
+        assert.deepEqual(fixture.writes.slice(writes).filter((write) => write.field !== "PhotoBusy"), []);
+        assert.equal(fixture.packageBodyReads.includes("photo-suggest"), false);
+        assert.equal(fixture.dispatches.length, 1); assert.equal(fixture.toasts.length, 1); assert.equal(fixture.toasts[0].kind, "error");
+        assert.deepEqual(fixture.uploads, []);
+      } finally { fixture.lifetime!.unmount(); }
+    });
+  }
+}
+
+for (const failure of ["HTTP-500", "success-false", "invalid-JSON", "body-reject", "transport-500"] as const) {
+  test(`G5C10 ordinary ${failure} preserves manual fields and reports error without success`, async () => {
+    const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE);
+    if (failure === "HTTP-500") fixture.handoffStatuses["photo-suggest"] = 500;
+    if (failure === "success-false") fixture.photoSuggestionReply.body = { success: false, error: "Synthetic provider unavailable" };
+    if (failure === "invalid-JSON") fixture.photoSuggestionReply.text = "{invalid";
+    if (failure === "body-reject") fixture.handoffBodyFailures.add("photo-suggest");
+    if (failure === "transport-500") fixture.handoffTransportFailures["photo-suggest"] = 500;
+    const captured = fixture.photoSuggestions(), before = photoSuggestionSnapshot(fixture);
+    try {
+      await captured.callbacks.suggest();
+      assert.deepEqual(photoSuggestionSnapshot(fixture), before); assert.equal(fixture.state.PhotoBusy, null);
+      assert.equal(fixture.dispatches.length, 1); assert.equal(fixture.toasts.length, 1); assert.equal(fixture.toasts[0].kind, "error");
+    } finally { fixture.lifetime!.unmount(); }
+  });
+}
+
+for (const malformed of [
+  { name: "empty data", data: {} }, { name: "null data", data: null },
+  { name: "headline object", data: { ...LOCAL_GENERATED_PACKAGE, adHeadline: {} } },
+  { name: "primary text number", data: { ...LOCAL_GENERATED_PACKAGE, adPrimaryText: 42 } },
+  { name: "CTA array", data: { ...LOCAL_GENERATED_PACKAGE, cta: [] } },
+  { name: "mode object", data: LOCAL_GENERATED_PACKAGE, mode: {} },
+]) {
+  test(`G5C10 malformed ${malformed.name} is rejected before any text or mode setter`, async () => {
+    const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE);
+    fixture.photoSuggestionReply.body = { success: true, mode: malformed.mode ?? "fixture", data: malformed.data };
+    const captured = fixture.photoSuggestions(), before = photoSuggestionSnapshot(fixture), writes = fixture.writes.length;
+    try {
+      await captured.callbacks.suggest();
+      assert.deepEqual(photoSuggestionSnapshot(fixture), before);
+      assert.deepEqual(fixture.writes.slice(writes).filter((write) => write.field !== "PhotoBusy"), [], "malformed responses must never be queued for React publication");
+      assert.equal(fixture.toasts.length, 1); assert.equal(fixture.toasts[0].kind, "error"); assert.equal(fixture.dispatches.length, 1);
+    } finally { fixture.lifetime!.unmount(); }
+  });
+}
+
+test("G5C10 explicit matching local demo maps the actual pure demo package without API or SDK access", async () => {
+  const fixture = await localGenerationCallbacks("photo", true);
+  fixture.workspace("demo-local-a"); fixture.auth({ user: null, isDemoMode: true });
+  const captured = fixture.photoSuggestions(), reads = fixture.sdkReads.total, mutations = fixture.mutations.length;
+  const payload = { ...LOCAL_PACKAGE_BRIEF, mode: "ads", format: captured.inputs.photoFormat, materialNotes: captured.inputs.photoSourceType };
+  const demo = fixture.purePackageDemo(payload);
+  try {
+    await captured.callbacks.suggest();
+    assert.deepEqual(JSON.parse(JSON.stringify(fixture.state.PhotoTexts)), { ...captured.inputs.photoTexts,
+      headline: demo.adHeadline, offer: LOCAL_PACKAGE_BRIEF.offer, cta: demo.cta });
+    assert.equal(fixture.state.PhotoSuggestMode, "demo"); assert.equal(fixture.sdkReads.total, reads);
+    assert.deepEqual(fixture.dispatches, []); assert.deepEqual(fixture.photoSuggestionRequests, []); assert.deepEqual(fixture.uploads, []);
+    assert.deepEqual(fixture.mutations.slice(mutations), []); assert.deepEqual(fixture.toasts, [{ kind: "success", message: "Образец текстов готов" }]);
+  } finally { fixture.lifetime!.unmount(); }
+});
+
+for (const boundary of ["UUID-demo", "anonymous-not-demo", "selector-mismatch"] as const) {
+  test(`G5C10 ${boundary} is not eligible for a local demo suggestion`, async () => {
+    const fixture = await localGenerationCallbacks("photo", true);
+    fixture.workspace("demo-local-a"); fixture.auth({ user: null, isDemoMode: true });
+    if (boundary === "UUID-demo") fixture.workspace(REAL_DEMO_TEST_WORKSPACE);
+    if (boundary === "anonymous-not-demo") fixture.auth({ isDemoMode: false });
+    if (boundary === "selector-mismatch") fixture.auth({ clinicId: "demo-selected-b" });
+    const captured = fixture.photoSuggestions(), reads = fixture.sdkReads.total, writes = fixture.writes.length;
+    try {
+      assert.equal(captured.session.localDraftsOnly, false); await captured.callbacks.suggest();
+      assert.deepEqual(fixture.writes.slice(writes), []); assert.deepEqual(fixture.toasts, []);
+      assert.deepEqual(fixture.dispatches, []); assert.equal(fixture.sdkReads.total, reads);
+    } finally { fixture.lifetime!.unmount(); }
+  });
+}
+
+test("G5C10 mounted selector mismatch releases its suggestion tag and permits retry after restoration", { timeout: 5000 }, async () => {
+  const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE);
+  const paused = await pausePhotoSuggestion(fixture, "body");
+  try {
+    fixture.workspace(HANDOFF_WORKSPACE_B);
+    const before = photoSuggestionSnapshot(fixture), writes = fixture.writes.length;
+    paused.resume(); await paused.work;
+    assert.deepEqual(photoSuggestionSnapshot(fixture), before); assert.deepEqual(fixture.toasts, []);
+    assert.deepEqual(fixture.writes.slice(writes), [{ field: "PhotoBusy", value: null }]);
+    fixture.workspace(REAL_DEMO_TEST_WORKSPACE);
+    const restored = fixture.photoSuggestions(); assert.equal(restored.key, paused.captured.key); assert.equal(restored.callbacks.disabled, false);
+    await restored.callbacks.suggest(); assert.equal(fixture.dispatches.length, 2); assert.equal(fixture.state.PhotoSuggestMode, "fixture");
+  } finally { paused.resume(); await paused.work; fixture.lifetime!.unmount(); }
+});
+
+test("G5C10 settled suggestion cannot clear a different current photo busy tag", { timeout: 5000 }, async () => {
+  const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE);
+  const paused = await pausePhotoSuggestion(fixture, "body");
+  try {
+    fixture.state.PhotoBusy = "render";
+    paused.resume(); await paused.work;
+    assert.equal(fixture.state.PhotoBusy, "render"); assert.equal(fixture.state.PhotoSuggestMode, "fixture");
+  } finally { paused.resume(); await paused.work; fixture.lifetime!.unmount(); }
+});
