@@ -605,6 +605,12 @@ function withWorkspace(path: string): string {
   return `${path}${path.includes("?") ? "&" : "?"}workspaceId=${encodeURIComponent(workspaceId)}`;
 }
 
+function handoffAccessDenied(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  const { status, statusCode } = value as { status?: unknown; statusCode?: unknown };
+  return [status, statusCode].some((code) => code === 401 || code === 403 || code === "401" || code === "403");
+}
+
 function paidGenerationHeaders(requestKey: string): Record<string, string> {
   return { "Content-Type": "application/json", "X-Idempotency-Key": requestKey };
 }
@@ -801,6 +807,17 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
       const token = await getSupabaseAccessToken(actorId);
       return Boolean(token && isSessionAlive(session));
     } catch { return false; }
+  }
+
+  function isHandoffSessionAlive(session: AbortController | null): session is AbortController {
+    return Boolean(localDraftsOnly && !actorId && workspaceId
+      && !isRealWorkspace(workspaceId) && readWorkspaceId() === workspaceId
+      && session && sessionRef.current === session && !session.signal.aborted) || isSessionAlive(session);
+  }
+
+  async function isHandoffSessionCurrent(session: AbortController | null): Promise<boolean> {
+    if (!isHandoffSessionAlive(session)) return false;
+    return localDraftsOnly || await isGenerationSessionCurrent(session);
   }
 
   async function pollingSessionState(session: AbortController | null): Promise<"current" | "unverified" | "ended"> {
@@ -1048,6 +1065,8 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
     void copyText([photoTexts.headline, photoTexts.offer, photoTexts.cta].filter(Boolean).join("\n"), "Тексты креатива");
 
   const usePhotoInAdsAutomation = async () => {
+    const session = sessionRef.current;
+    if (!await isHandoffSessionCurrent(session) || !isHandoffSessionAlive(session)) return;
     if (!photoBlob) {
       toast.error("Сначала сгенерируйте макет");
       return;
@@ -1058,11 +1077,12 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
       // Ads Automation gets a real public creative URL.
       let creativeUrl = "";
       let fileName = `photo-creative-${Date.now()}.jpg`;
-      if (hasSupabaseFrontendEnv) {
+      if (hasSupabaseFrontendEnv && !localDraftsOnly) {
         try {
           const signedResponse = await crmFetch(
-            `/api/crm/ad-creatives/signed-upload?workspaceId=${encodeURIComponent(readWorkspaceId())}`,
+            `/api/crm/ad-creatives/signed-upload?workspaceId=${encodeURIComponent(workspaceId)}`,
             {
+              expectedUserId: actorId, dispatchGuard: () => isHandoffSessionAlive(session), signal: session.signal,
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
@@ -1073,7 +1093,13 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
               }),
             },
           );
+          if (!await isHandoffSessionCurrent(session) || !isHandoffSessionAlive(session)) return;
+          if (handoffAccessDenied(signedResponse)) {
+            toast.error("Доступ к передаче креатива отозван. Обновите страницу.");
+            return;
+          }
           const signedBody = await safeJson<{ bucket?: string; storageBucket?: string; storagePath?: string; token?: string; publicUrl?: string }>(signedResponse);
+          if (!await isHandoffSessionCurrent(session) || !isHandoffSessionAlive(session)) return;
           if (signedResponse.ok && signedBody?.success === true) {
             const bucket = signedBody.data.bucket || signedBody.data.storageBucket || "ad-creatives";
             const storagePath = signedBody.data.storagePath || "";
@@ -1082,6 +1108,11 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
               const { error: uploadError } = await supabase.storage.from(bucket).uploadToSignedUrl(storagePath, token, photoBlob, {
                 contentType: "image/jpeg",
               });
+              if (!await isHandoffSessionCurrent(session) || !isHandoffSessionAlive(session)) return;
+              if (handoffAccessDenied(uploadError)) {
+                toast.error("Доступ к передаче креатива отозван. Обновите страницу.");
+                return;
+              }
               if (!uploadError) {
                 creativeUrl = signedBody.data.publicUrl || "";
                 if (!creativeUrl) {
@@ -1094,10 +1125,16 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
               }
             }
           }
-        } catch {
+        } catch (error) {
+          if (!await isHandoffSessionCurrent(session) || !isHandoffSessionAlive(session)) return;
+          if (handoffAccessDenied(error)) {
+            toast.error("Доступ к передаче креатива отозван. Обновите страницу.");
+            return;
+          }
           creativeUrl = "";
         }
       }
+      if (!await isHandoffSessionCurrent(session) || !isHandoffSessionAlive(session)) return;
       if (!creativeUrl) {
         toast.warning("Не удалось загрузить креатив в Storage — передаём только тексты. Изображение можно скачать и загрузить вручную.");
         fileName = "";
@@ -1108,31 +1145,45 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
 
       // Persist metadata: content_videos keeps the whole body in raw_payload.
       try {
-        await crmFetch("/api/crm/content-videos", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-                        title: photoTexts.headline,
-            niche: packageBrief.service,
-            goal: "photo_creative",
-            style: layoutLabel,
-            audience: packageBrief.audience,
-            caption: photoTexts.offer,
-            cta: photoTexts.cta,
-            status: "idea",
-            photoCreative: {
-              format: photoFormat,
-              layout: photoLayout,
-              sourceType: photoSourceType,
-              creativeUrl,
-              texts: photoTexts,
-            },
-          }),
-        });
-      } catch {
-        // Metadata persistence is best-effort in demo mode.
+        if (!localDraftsOnly) {
+          const response = await crmFetch(`/api/crm/content-videos?workspaceId=${encodeURIComponent(workspaceId)}`, {
+            expectedUserId: actorId, dispatchGuard: () => isHandoffSessionAlive(session), signal: session.signal,
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              title: photoTexts.headline,
+              niche: packageBrief.service,
+              goal: "photo_creative",
+              style: layoutLabel,
+              audience: packageBrief.audience,
+              caption: photoTexts.offer,
+              cta: photoTexts.cta,
+              status: "idea",
+              photoCreative: {
+                format: photoFormat,
+                layout: photoLayout,
+                sourceType: photoSourceType,
+                creativeUrl,
+                texts: photoTexts,
+              },
+            }),
+          });
+          if (!await isHandoffSessionCurrent(session) || !isHandoffSessionAlive(session)) return;
+          if (handoffAccessDenied(response)) {
+            toast.error("Доступ к передаче креатива отозван. Обновите страницу.");
+            return;
+          }
+        }
+      } catch (error) {
+        if (!await isHandoffSessionCurrent(session) || !isHandoffSessionAlive(session)) return;
+        if (handoffAccessDenied(error)) {
+          toast.error("Доступ к передаче креатива отозван. Обновите страницу.");
+          return;
+        }
+        // A metadata outage does not discard the current user's local draft.
       }
 
+      if (!await isHandoffSessionCurrent(session) || !isHandoffSessionAlive(session)) return;
       writeContentToAdsAutomation({
         sourceKind: "photo",
         campaignName: photoTexts.headline,
@@ -1157,7 +1208,7 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
       toast.success("Фото-креатив передан в AI запуск рекламы");
       setLocation("/ads-automation");
     } finally {
-      setPhotoBusy(null);
+      if (isHandoffSessionAlive(session)) setPhotoBusy(null);
     }
   };
 
@@ -1519,11 +1570,14 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
 
   async function persistSelectedContentApproval(
     approval: AdvertisingContentApproval,
-  ): Promise<boolean> {
-    if (!contentPackageId || !contentPackage) return false;
+    session: AbortController | null,
+  ): Promise<boolean | null> {
+    if (!contentPackageId || !contentPackage || localDraftsOnly
+      || !await isHandoffSessionCurrent(session) || !isHandoffSessionAlive(session)) return false;
 
     try {
-      const response = await crmFetch("/api/crm/content-videos", {
+      const response = await crmFetch(`/api/crm/content-videos?workspaceId=${encodeURIComponent(workspaceId)}`, {
+        expectedUserId: actorId, dispatchGuard: () => isHandoffSessionAlive(session), signal: session.signal,
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1548,14 +1602,19 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
           contentVersion: approval.version,
         }),
       });
+      if (handoffAccessDenied(response)) return null;
+      if (!await isHandoffSessionCurrent(session) || !isHandoffSessionAlive(session)) return false;
       const body = await safeJson<unknown>(response);
+      if (!await isHandoffSessionCurrent(session) || !isHandoffSessionAlive(session)) return false;
       return response.ok && body?.success === true;
-    } catch {
-      return false;
+    } catch (error) {
+      return handoffAccessDenied(error) ? null : false;
     }
   }
 
   const useGeneratedInAdsAutomation = async (file: GeneratedFile, creativeType: "image" | "video") => {
+    const session = sessionRef.current;
+    if (!await isHandoffSessionCurrent(session) || !isHandoffSessionAlive(session)) return;
     if (packageCompliance?.status === "blocked") {
       toast.error("Выбранный текст нельзя передавать в рекламу. Выберите безопасный вариант.");
       return;
@@ -1564,8 +1623,13 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
       ? createContentApproval(contentPackageId, selectedAdVariant)
       : undefined;
     const approvalPersisted = contentApproval
-      ? await persistSelectedContentApproval(contentApproval)
+      ? await persistSelectedContentApproval(contentApproval, session)
       : false;
+    if (!await isHandoffSessionCurrent(session) || !isHandoffSessionAlive(session)) return;
+    if (approvalPersisted === null) {
+      toast.error("Доступ к передаче креатива отозван. Обновите страницу.");
+      return;
+    }
     writeContentToAdsAutomation({
       sourceKind: "generated",
       sourceId: contentPackageId || undefined,
@@ -1699,6 +1763,8 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
   };
 
   const useInAdsAutomation = async () => {
+    const session = sessionRef.current;
+    if (!await isHandoffSessionCurrent(session) || !isHandoffSessionAlive(session)) return;
     if (!contentPackage) {
       toast.error("Сначала сгенерируйте пакет контента");
       return;
@@ -1712,7 +1778,12 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
       return;
     }
     const contentApproval = createContentApproval(contentPackageId, selectedAdVariant);
-    const approvalPersisted = await persistSelectedContentApproval(contentApproval);
+    const approvalPersisted = await persistSelectedContentApproval(contentApproval, session);
+    if (!await isHandoffSessionCurrent(session) || !isHandoffSessionAlive(session)) return;
+    if (approvalPersisted === null) {
+      toast.error("Доступ к передаче креатива отозван. Обновите страницу.");
+      return;
+    }
     writeContentToAdsAutomation({
       sourceKind: "package",
       sourceId: contentPackageId || undefined,

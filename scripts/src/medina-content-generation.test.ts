@@ -1082,7 +1082,28 @@ const generationCallbackPrograms = (async () => {
     };`;
   const demo = `${select(source, ["STORAGE_KEY", "readVideos"])}
     exports.selected = function captureLocalDraftHydration({ workspaceId, localDraftsOnly }) { return ${demoEffects[0]}; };`;
+  const handoffHelpers = ["isHandoffSessionAlive", "isHandoffSessionCurrent"].filter((name) =>
+    child.body!.statements.some((node) => ts.isFunctionDeclaration(node) && node.name?.text === name));
+  const denialHelpers = ast.statements.some((node) => ts.isFunctionDeclaration(node) && node.name?.text === "handoffAccessDenied")
+    ? ["handoffAccessDenied"] : [];
+  const handoff = `${select(source, ["safeJson", "withWorkspace", "photoFormats", "photoLayouts", "createContentApproval", "writeAdsAutomationPrefill", ...denialHelpers])}
+    exports.selected = function captureHandoffs({ actorId, workspaceId, localDraftsOnly, sessionRef },
+      { contentPackageId = "fixture-package-a", contentPackage = handoffPackage, selectedAdVariant = handoffVariant } = {}) {
+      ${select(source, ["isSessionAlive", "isGenerationSessionCurrent", ...handoffHelpers,
+        "writeContentToAdsAutomation", "persistSelectedContentApproval", "usePhotoInAdsAutomation", "useGeneratedInAdsAutomation", "useInAdsAutomation"])}
+      return { photo: usePhotoInAdsAutomation, generated: useGeneratedInAdsAutomation, package: useInAdsAutomation,
+        approve: persistSelectedContentApproval };
+    };`;
   return {
+    handoff: ts.transpileModule(handoff, {
+      compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+      transformers: { before: [(context) => (root) => {
+        const visit: import("typescript").Visitor = (node) => ts.isPropertyAccessExpression(node)
+          && node.name.text === "env" && ts.isMetaProperty(node.expression)
+          ? ts.factory.createIdentifier("forbiddenHandoffEnv") : ts.visitEachChild(node, visit, context);
+        return ts.visitNode(root, visit) as import("typescript").SourceFile;
+      }] },
+    }).outputText,
     demo: ts.transpileModule(demo, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText,
     videoRefs: ts.transpileModule(videoRefs, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText,
     video: ts.transpileModule(video, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText,
@@ -1098,7 +1119,7 @@ const generationCallbackPrograms = (async () => {
     api: compile(await readFile(path.join(repoRoot, "artifacts/negis/src/lib/api.ts"), "utf8"), [
       "CrmApiError", "resolveAccessToken", "inflightGets", "getCache", "REFERENCE_TTL_MS", "LIST_TTL_MS",
       "cacheEpoch", "isUncacheable", "ttlFor", "clearCrmCache", "crmFetch",
-    ], ["crmFetch"]),
+    ], ["crmFetch", "CrmApiError"]),
     auth: compile(await readFile(path.join(repoRoot, "artifacts/negis/src/lib/serverAuth.ts"), "utf8"),
       ["getSupabaseAccessToken"], ["getSupabaseAccessToken"]),
     storage: compile(await readFile(path.join(repoRoot, "artifacts/negis/src/lib/demoStorage.ts"), "utf8"),
@@ -1185,7 +1206,7 @@ function generationLifetime(code: string, bindings: Record<string, unknown>) {
   };
 }
 
-async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime = false) {
+async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime = false, initialWorkspace = "workspace-a") {
   const programs = await generationCallbackPrograms;
   const mutations: { storage: string; operation: string; key: string }[] = [];
   const storageReads: { storage: string; key: string }[] = [];
@@ -1216,36 +1237,54 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
     workspaceScopedKey: (key: string) => string;
     isRealWorkspace: (workspaceId?: string) => boolean;
   }>(programs.storage, { window });
-  localStorage.setItem(storage.WORKSPACE_SELECTOR_KEY, "workspace-a");
+  localStorage.setItem(storage.WORKSPACE_SELECTOR_KEY, initialWorkspace);
   let sdkActor = "actor-a", sdkToken = "fixture-token-a";
-  let authState = { user: { id: "actor-a" } as { id: string } | null, userRole: "owner", clinicId: "workspace-a", workspacePurpose: "clinic_services",
+  let authState = { user: { id: "actor-a" } as { id: string } | null, userRole: "owner", clinicId: initialWorkspace, workspacePurpose: "clinic_services",
     isLoading: false, isSigningOut: false, isDemoMode: false, isImpersonation: false };
   const subscriptions = new Set<(event: string, session: { user: { id: string } }) => void>();
   let tokenWait: ReturnType<typeof generationDeferred<void>> | undefined;
+  let tokenResource: Resource | undefined, activeTransport: Resource | undefined;
+  let targetedTokenStarted: ReturnType<typeof generationDeferred<void>> | undefined;
   const tokenStarted = generationDeferred<void>(), bodyStarted = generationDeferred<void>();
   let delayedBody: ReturnType<typeof generationDeferred<string>> | undefined;
-  type Resource = "generation" | "usage" | "poll" | "restore";
+  type Resource = "generation" | "usage" | "poll" | "restore" | "signed" | "metadata" | "approval";
+  let responseWait: ReturnType<typeof generationDeferred<void>> | undefined, responseResource: Resource | undefined;
+  const responseStarted = generationDeferred<void>();
+  let handoffResponseHook: ((resource: Resource) => void) | undefined;
   let delayedResource: Resource = "generation";
   const state: Record<string, unknown> = {};
   const writes: { field: string; value: unknown }[] = [], toasts: { kind: string; message: string }[] = [];
   const dispatches: LocalGenerationDispatch[] = [];
   const sdkReads = { total: 0, failed: 0 };
   let sdkFailure: "throw" | "error" | undefined;
-  const sdk = { auth: {
+  let nextSdkFailure: "throw" | "error" | undefined;
+  const uploads: { bucket: string; path: string; token: string; file: unknown; options: unknown }[] = [];
+  const uploadStarted = generationDeferred<void>();
+  let uploadWait: ReturnType<typeof generationDeferred<void>> | undefined, uploadFailure = false;
+  let uploadError: unknown, uploadThrown: unknown;
+  const sdk = { storage: { from(bucket: string) { return {
+    async uploadToSignedUrl(storagePath: string, token: string, file: unknown, options: unknown) {
+      uploads.push({ bucket, path: storagePath, token, file, options }); uploadStarted.resolve();
+      if (uploadWait) await uploadWait.promise;
+      if (uploadThrown) throw uploadThrown;
+      return { error: uploadError ?? (uploadFailure ? new Error("Synthetic storage failure") : null) };
+    },
+  }; } }, auth: {
     onAuthStateChange(callback: (event: string, session: { user: { id: string } }) => void) {
       subscriptions.add(callback);
       return { data: { subscription: { unsubscribe: () => subscriptions.delete(callback) } } };
     },
     async getSession() {
       sdkReads.total++;
-      const pending = tokenWait;
-      tokenWait = undefined;
+      const pending = !tokenResource || tokenResource === activeTransport ? tokenWait : undefined;
+      if (pending) { tokenWait = undefined; tokenResource = undefined; targetedTokenStarted?.resolve(); }
       tokenStarted.resolve();
       if (pending) await pending.promise;
-      if (sdkFailure) sdkReads.failed++;
-      if (sdkFailure === "throw") throw new Error("Synthetic transient SDK failure");
+      const failure = nextSdkFailure ?? sdkFailure; nextSdkFailure = undefined;
+      if (failure) sdkReads.failed++;
+      if (failure === "throw") throw new Error("Synthetic transient SDK failure");
       return { data: { session: { user: { id: sdkActor }, access_token: sdkToken } },
-        error: sdkFailure === "error" ? new Error("Synthetic transient SDK error") : null };
+        error: failure === "error" ? new Error("Synthetic transient SDK error") : null };
     },
   } };
   const auth = evaluateGenerationFixture<{ getSupabaseAccessToken: (expected?: string) => Promise<string> }>(programs.auth, {
@@ -1256,8 +1295,17 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
       mimeType: "image/png", model: "fixture-image", fileSize: 42 }
     : { handle: "local-a-signed-handle", status: "queued", progress: 0, formatSubstituted: false };
   const reply = { success: true, mode: "fixture", data: result };
+  const handoffStatuses: Partial<Record<Resource, number>> = {};
+  const handoffBodyFailures = new Set<Resource>();
+  const handoffTransportFailures: Partial<Record<Resource, number>> = {};
+  const signedReply = { success: true, data: { bucket: "fixture-creatives", storagePath: "workspace-a/local.jpg",
+    token: "synthetic-upload-token", publicUrl: "https://example.invalid/local-upload.jpg" } };
   const localResponse = (value: unknown, resource: Resource) => {
-    const response = Response.json(value);
+    handoffResponseHook?.(resource);
+    const response = Response.json(value, { status: handoffStatuses[resource] ?? 200 });
+    if (handoffBodyFailures.has(resource)) {
+      Object.defineProperty(response, "text", { value: async () => { throw new Error("Synthetic body read failure"); } });
+    }
     if (delayedBody && delayedResource === resource) {
       const pending = delayedBody;
       delayedBody = undefined;
@@ -1267,11 +1315,22 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
   };
   const pollReply = { success: true, data: { status: "completed", progress: 100, creativeUrl: "https://example.invalid/poll-a.mp4",
     assetId: "poll-asset-a", fileName: "poll-a.mp4", mimeType: "video/mp4", fileSize: 84 } };
-  const api = evaluateGenerationFixture<{ crmFetch: (url: string, init?: LocalGenerationInit) => Promise<Response> }>(programs.api, {
+  const api = evaluateGenerationFixture<{ crmFetch: (url: string, init?: LocalGenerationInit) => Promise<Response>;
+    CrmApiError: new (status: number, code: string, message: string) => Error }>(programs.api, {
     apiUrl: (url: string) => url,
     async fetch(url: string, init: LocalGenerationInit) {
       const method = init.method || "GET";
       dispatches.push({ url, method, headers: new Headers(init.headers), body: init.body ? JSON.parse(String(init.body)) : null, signal: init.signal });
+      const resource = url.includes("signed-upload") ? "signed" : method === "PATCH" ? "approval" : "metadata";
+      if (responseWait && responseResource === resource) { responseStarted.resolve(); await responseWait.promise; }
+      if (handoffTransportFailures[resource]) throw new api.CrmApiError(handoffTransportFailures[resource]!, "authentication_required", "Synthetic denied transport");
+      if (url.split("?")[0] === "/api/crm/ad-creatives/signed-upload") {
+        assert.equal(method, "POST"); return localResponse(signedReply, "signed");
+      }
+      if (url.split("?")[0] === "/api/crm/content-videos" && (method === "POST" || method === "PATCH")) {
+        return localResponse({ success: !handoffStatuses[method === "PATCH" ? "approval" : "metadata"], data: {} },
+          method === "PATCH" ? "approval" : "metadata");
+      }
       if (url === `/api/content-studio/generate-${kind}?workspaceId=workspace-a` && method === "POST") {
         return localResponse(reply, "generation");
       }
@@ -1289,7 +1348,7 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
     },
   }, { "@/lib/serverAuth": auth });
   const setters = Object.fromEntries([
-    "GenBusy", "GenNotice", "GenImage", "GenVideo", "VideoJob", "GenerationUsage", "GenerationUsageLoading", "Videos", "ActiveId",
+    "GenBusy", "GenNotice", "GenImage", "GenVideo", "VideoJob", "GenerationUsage", "GenerationUsageLoading", "Videos", "ActiveId", "PhotoBusy",
   ].map((field) => [`set${field}`, (update: unknown) => {
     const value = typeof update === "function" ? (update as (previous: unknown) => unknown)(state[field]) : update;
     state[field] = value; writes.push({ field, value });
@@ -1321,10 +1380,39 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
     toast: {
       success: (message: string) => toasts.push({ kind: "success", message }),
       error: (message: string) => toasts.push({ kind: "error", message }),
+      warning: (message: string) => toasts.push({ kind: "warning", message }),
     },
   };
   const captureVideo = evaluateGenerationFixture<(job: LocalVideoJob | null, file: unknown) => LocalVideoCallbacks>(programs.video, bindings);
   const captureLocalDrafts = evaluateGenerationFixture<(session: LocalGenerationSession) => () => void>(programs.demo, bindings);
+  const briefModule = await import(pathToFileURL(path.join(repoRoot, "lib", "advertising", "campaignBrief.ts")).href);
+  const navigations: string[] = [];
+  const handoffRequests: { url: string; init: LocalGenerationInit }[] = [];
+  const handoffPackage = { ideaTitle: "Synthetic package", hook: "Local hook", script: "Local script", voiceover: "Local voice",
+    caption: "Local caption", cta: "Local CTA", videoPrompt: "Local video brief", adPrimaryText: "Fallback copy", adHeadline: "Fallback headline" };
+  const handoffVariant = { id: "variant-a", label: "Synthetic variant", angle: "local", primaryText: "Approved local copy",
+    headline: "Approved local headline", description: "Approved local description", cta: "LEARN_MORE" };
+  const captureHandoffs = evaluateGenerationFixture<(session: LocalGenerationSession, options?: {
+    contentPackageId?: string; contentPackage?: typeof handoffPackage | null; selectedAdVariant?: typeof handoffVariant | null;
+  }) => {
+    photo: () => Promise<void>; generated: (file: unknown, type: "image" | "video") => Promise<void>; package: () => Promise<void>;
+    approve: (approval: unknown, session: AbortController | null) => Promise<boolean | null>;
+  }>(programs.handoff, {
+    ...bindings, ...briefModule, handoffPackage, handoffVariant, hasSupabaseFrontendEnv: true,
+    forbiddenHandoffEnv: new Proxy({}, { get() { throw new Error("Handoff must not access environment configuration"); } }),
+    // Observe the transport boundary, but always execute the actual crmFetch/auth implementation.
+    async crmFetch(url: string, init: LocalGenerationInit) {
+      handoffRequests.push({ url, init });
+      activeTransport = url.includes("signed-upload") ? "signed" : init.method === "PATCH" ? "approval" : "metadata";
+      try { return await api.crmFetch(url, init); } finally { activeTransport = undefined; }
+    },
+    photoBlob: { size: 42 }, photoFormat: "feed", photoLayout: "minimal", photoSourceType: "upload",
+    photoTexts: { headline: "Synthetic photo", offer: "Local photo offer", cta: "Local photo CTA" },
+    packageBrief: { service: "Synthetic service", city: "Synthetic city", offer: "Synthetic offer", audience: "Synthetic audience",
+      goal: "leads", tone: "local", format: "reels" },
+    packageCompliance: { status: "safe" }, advertisingGoalContext: { targetPatients: 7 },
+    setLocation: (location: string) => navigations.push(location),
+  });
   const page = evaluateGenerationFixture<{
     generatePhoto: () => Promise<void>;
     generateVideo: () => Promise<void>;
@@ -1333,6 +1421,19 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
     clearBrowserPaidGenerationAttempt: (kind: LocalGenerationKind, key?: string, expectedRequestKey?: string) => void;
   }>(programs.page, bindings);
   return {
+    handoffs(options?: Parameters<typeof captureHandoffs>[1]) {
+      assert.ok(lifetime, "handoffs must use the actual wrapper session");
+      const next = lifetime.render();
+      return { ...next, callbacks: captureHandoffs(next.session, options) };
+    },
+    handoffStatuses, handoffBodyFailures, handoffTransportFailures, handoffRequests, signedReply, uploads, uploadStarted, navigations,
+    onHandoffResponse(callback?: (resource: Resource) => void) { handoffResponseHook = callback; },
+    deferResponse(resource: Resource) { responseResource = resource; responseWait = generationDeferred<void>();
+      return Object.assign(responseWait, { started: responseStarted.promise }); },
+    uploadError(value: unknown) { uploadError = value; },
+    uploadThrown(value: unknown) { uploadThrown = value; },
+    uploadFailure(value = true) { uploadFailure = value; },
+    deferUpload() { uploadWait = generationDeferred<void>(); return uploadWait; },
     localDrafts() {
       assert.ok(lifetime, "local drafts must receive their actual wrapper-computed session props");
       const next = lifetime.render();
@@ -1351,6 +1452,7 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
     clearReceipt: (key: string, expectedRequestKey: string) => page.clearBrowserPaidGenerationAttempt(kind, key, expectedRequestKey),
     lifetime, mounted, subscriptions, captured, sdkReads,
     sdkFailure(mode?: "throw" | "error") { sdkFailure = mode; },
+    sdkFailureOnce(mode: "throw" | "error") { nextSdkFailure = mode; },
     dispatches, mutations, sessionStorage, state, writes, toasts, reply, tokenStarted, bodyStarted,
     pendingKey: () => page.paidGenerationAttemptKey(kind),
     workspace(id: string) { localStorage.setItem(storage.WORKSPACE_SELECTOR_KEY, id); authState = { ...authState, clinicId: id }; },
@@ -1359,7 +1461,10 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
       sdkActor = actor; sdkToken = token;
       if (event) for (const callback of [...subscriptions]) callback(event, { user: { id: actor } });
     },
-    deferToken() { tokenWait = generationDeferred<void>(); return tokenWait; },
+    deferToken(resource?: Resource) {
+      tokenResource = resource; tokenWait = generationDeferred<void>(); targetedTokenStarted = generationDeferred<void>();
+      return Object.assign(tokenWait, { started: targetedTokenStarted.promise });
+    },
     deferBody(resource: Resource = "generation") {
       delayedResource = resource; delayedBody = generationDeferred<string>(); return delayedBody;
     },
@@ -2228,3 +2333,375 @@ test("GEN66 retained allowed-demo hydration rechecks a changed raw workspace sel
     assert.deepEqual(fixture.dispatches, []);
   } finally { fixture.lifetime!.unmount(); }
 });
+
+type LocalHandoffKind = "photo" | "image" | "video" | "package";
+type LocalHandoffFixture = Awaited<ReturnType<typeof localGenerationCallbacks>>;
+type LocalHandoff = ReturnType<LocalHandoffFixture["handoffs"]>;
+type LocalHandoffPrefill = {
+  sourceKind: string; targetPatients: number; service: string; primaryText: string;
+  contentApproval?: { packageId?: string; variantId: string; approvedCopy: { primaryText: string } };
+  creative: { type: string; url?: string; fileName?: string; assetId?: string; thumbnailUrl?: string };
+};
+const HANDOFF_WORKSPACE_B = "22222222-2222-4222-8222-222222222222";
+const HANDOFF_FILE = { url: "https://example.invalid/generated.png", assetId: "fixture-generated-asset", fileName: "generated.png",
+  mimeType: "image/png", model: "fixture", fileSize: 42 };
+
+function invokeLocalHandoff(handoff: LocalHandoff, kind: LocalHandoffKind) {
+  if (kind === "photo") return handoff.callbacks.photo();
+  if (kind === "package") return handoff.callbacks.package();
+  return handoff.callbacks.generated(kind === "image" ? HANDOFF_FILE : {
+    ...HANDOFF_FILE, url: "https://example.invalid/generated.mp4", fileName: "generated.mp4", mimeType: "video/mp4",
+    thumbnailUrl: "https://example.invalid/thumbnail.jpg", thumbnailSource: "fixture-thumbnail",
+  }, kind);
+}
+
+function readLocalHandoff(fixture: LocalHandoffFixture, workspace = REAL_DEMO_TEST_WORKSPACE) {
+  const raw = fixture.localStorage.getItem(`negis_ads_automation_prefill::${workspace}`);
+  assert.ok(raw, "the actual prefill writer must persist the handoff in the captured workspace");
+  return JSON.parse(raw) as LocalHandoffPrefill;
+}
+
+const handoffStages = [
+  { kind: "photo", resource: "signed", phase: "token" },
+  { kind: "photo", resource: "signed", phase: "body" },
+  { kind: "photo", resource: "signed", phase: "upload" },
+  { kind: "photo", resource: "metadata", phase: "token" },
+  { kind: "photo", resource: "metadata", phase: "response" },
+  ...(["image", "video", "package"] as const).flatMap((kind) => ([
+    { kind, resource: "approval", phase: "token" }, { kind, resource: "approval", phase: "body" },
+  ] as const)),
+] as const;
+
+for (const stage of handoffStages) {
+  for (const boundary of ["account", "silent-account", "workspace", "workspace-remount", "A-B-A", "unmount"] as const) {
+    test(`GEN67 actual ${stage.kind} handoff stops ${stage.resource}-${stage.phase} after ${boundary}`, { timeout: 5000 }, async () => {
+      const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE);
+      const handoff = fixture.handoffs(), controller = handoff.session.sessionRef.current!;
+      const token = stage.phase === "token" ? fixture.deferToken(stage.resource) : undefined;
+      const body = stage.phase === "body" ? fixture.deferBody(stage.resource) : undefined;
+      const upload = stage.phase === "upload" ? fixture.deferUpload() : undefined;
+      const response = stage.phase === "response" ? fixture.deferResponse(stage.resource) : undefined;
+      const bodyValue = JSON.stringify(stage.resource === "signed" ? fixture.signedReply : { success: true, data: {} });
+      const work = invokeLocalHandoff(handoff, stage.kind);
+      try {
+        if (token) await token.started;
+        if (body) await fixture.bodyStarted.promise;
+        if (upload) await fixture.uploadStarted.promise;
+        if (response) await response.started;
+        const expectedDispatches = stage.resource === "signed" ? (stage.phase === "token" ? 0 : 1)
+          : stage.resource === "metadata" ? (stage.phase === "token" ? 1 : 2) : (stage.phase === "token" ? 0 : 1);
+        assert.equal(fixture.dispatches.length, expectedDispatches, "pause the actual requested boundary, not an earlier auth guard");
+        if (boundary === "account" || boundary === "A-B-A") fixture.sdkSession("actor-b");
+        if (boundary === "silent-account") fixture.sdkSession("actor-b", "fixture-token-b", null);
+        if (boundary === "workspace" || boundary === "workspace-remount") fixture.workspace(HANDOFF_WORKSPACE_B);
+        if (boundary === "workspace-remount" || boundary === "A-B-A") fixture.lifetime!.render();
+        if (boundary === "A-B-A") { fixture.sdkSession("actor-a"); fixture.lifetime!.render(); }
+        if (boundary === "unmount") fixture.lifetime!.unmount();
+        if (!["silent-account", "workspace"].includes(boundary)) assert.equal(controller.signal.aborted, true);
+        const mutations = fixture.mutations.length, writes = fixture.writes.length, uploads = fixture.uploads.length;
+        token?.resolve(); body?.resolve(bodyValue); upload?.resolve(); response?.resolve(); await work; await flushLocalVideoWork();
+        assert.equal(fixture.dispatches.length, expectedDispatches, "an expired callback cannot issue a follow-up request");
+        assert.equal(fixture.uploads.length, uploads, "a signed response cannot begin storage upload under an expired actor/workspace");
+        assert.deepEqual(fixture.mutations.slice(mutations), [], "no prefill can leak into the new workspace");
+        assert.deepEqual(fixture.writes.slice(writes), boundary === "silent-account" && stage.kind === "photo"
+          ? [{ field: "PhotoBusy", value: null }] : []);
+        assert.deepEqual(fixture.toasts, []);
+        assert.deepEqual(fixture.navigations, []);
+        assert.equal(fixture.dispatches.some((call) => call.url.includes("/generate-")), false);
+      } finally {
+        token?.resolve(); body?.resolve(bodyValue); upload?.resolve(); response?.resolve(); await work; fixture.lifetime!.unmount();
+      }
+    });
+  }
+}
+
+for (const kind of ["photo", "image", "video", "package"] as const) {
+  test(`GEN68 actual ${kind} handoff survives same-actor refresh and preserves its payload`, { timeout: 5000 }, async () => {
+    const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE);
+    const handoff = fixture.handoffs(), controller = handoff.session.sessionRef.current!;
+    const token = fixture.deferToken(kind === "photo" ? "signed" : "approval");
+    const work = invokeLocalHandoff(handoff, kind);
+    try {
+      await token.started;
+      fixture.sdkSession("actor-a", "fixture-token-a-refreshed", "TOKEN_REFRESHED");
+      assert.equal(fixture.lifetime!.render().key, handoff.key);
+      assert.equal(controller.signal.aborted, false);
+      token.resolve(); await work;
+      assert.equal(fixture.dispatches.length, kind === "photo" ? 2 : 1);
+      for (const call of fixture.dispatches) {
+        assert.equal(new URL(call.url, "https://example.invalid").searchParams.get("workspaceId"), REAL_DEMO_TEST_WORKSPACE);
+        assert.equal(call.headers.get("Authorization"), "Bearer fixture-token-a-refreshed");
+        assert.equal(call.signal, controller.signal);
+      }
+      for (const { init } of fixture.handoffRequests) {
+        assert.equal(init.expectedUserId, "actor-a"); assert.equal(init.signal, controller.signal);
+        assert.equal(init.dispatchGuard?.(), true);
+      }
+      const prefill = readLocalHandoff(fixture);
+      assert.equal(prefill.sourceKind, kind === "image" || kind === "video" ? "generated" : kind);
+      assert.equal(prefill.targetPatients, 7);
+      assert.equal(prefill.service, "Synthetic service");
+      assert.equal(prefill.primaryText, kind === "photo" ? "Local photo offer. Local photo CTA." : "Approved local copy");
+      assert.equal(prefill.creative.type, kind === "photo" || kind === "image" ? "image" : "video");
+      if (kind === "photo") {
+        assert.equal(fixture.uploads.length, 1); assert.equal(fixture.uploads[0].bucket, "fixture-creatives");
+        assert.equal(prefill.creative.url, fixture.signedReply.data.publicUrl);
+        assert.equal((fixture.dispatches[1].body as { photoCreative: { creativeUrl: string } }).photoCreative.creativeUrl, prefill.creative.url);
+        assert.equal(fixture.state.PhotoBusy, null);
+      } else {
+        assert.equal(fixture.uploads.length, 0);
+        const approval = (fixture.dispatches[0].body as { contentApproval: NonNullable<LocalHandoffPrefill["contentApproval"]> }).contentApproval;
+        assert.deepEqual(prefill.contentApproval, approval);
+        assert.equal(approval.packageId, "fixture-package-a"); assert.equal(approval.variantId, "variant-a");
+        assert.equal(approval.approvedCopy.primaryText, "Approved local copy");
+        if (kind !== "package") assert.equal(prefill.creative.assetId, HANDOFF_FILE.assetId);
+        if (kind === "video") assert.equal(prefill.creative.thumbnailUrl, "https://example.invalid/thumbnail.jpg");
+      }
+      assert.deepEqual(fixture.navigations, ["/ads-automation"]);
+      assert.equal(fixture.toasts.length, 1); assert.equal(fixture.toasts[0].kind, "success");
+      assert.equal(fixture.dispatches.some((call) => call.url.includes("/generate-")), false);
+    } finally { token.resolve(); await work; fixture.lifetime!.unmount(); }
+  });
+}
+
+for (const status of [401, 403] as const) {
+  for (const resource of ["signed", "metadata", "approval"] as const) {
+    for (const failure of ["response", "body-reject", "transport"] as const) {
+      test(`GEN69 actual ${resource} ${status} ${failure} denies handoff despite a valid same-actor token`, async () => {
+        const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE);
+        if (failure === "transport") fixture.handoffTransportFailures[resource] = status;
+        else fixture.handoffStatuses[resource] = status;
+        if (failure === "body-reject") fixture.handoffBodyFailures.add(resource);
+        try {
+          await invokeLocalHandoff(fixture.handoffs(), resource === "approval" ? "package" : "photo");
+          assert.equal(fixture.dispatches.length, resource === "metadata" ? 2 : 1);
+          assert.equal(fixture.uploads.length, resource === "metadata" ? 1 : 0);
+          assert.deepEqual(fixture.mutations.filter((item) => item.key.includes("ads_automation_prefill")), []);
+          assert.deepEqual(fixture.navigations, []);
+          assert.equal(fixture.toasts.length, 1); assert.equal(fixture.toasts[0].kind, "error");
+          assert.ok(fixture.sdkReads.total > 0, "same actor remains genuinely authenticated; rights denial must remain distinct");
+        } finally { fixture.lifetime!.unmount(); }
+      });
+    }
+  }
+  for (const field of ["status", "statusCode"] as const) {
+    for (const value of [status, String(status)]) {
+      for (const mode of ["returned", "thrown"] as const) {
+        test(`GEN69 actual ${mode} upload ${field}=${JSON.stringify(value)} denies the complete photo handoff`, async () => {
+          const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE);
+          const error = { [field]: value, message: "Synthetic upload denial" };
+          if (mode === "returned") fixture.uploadError(error); else fixture.uploadThrown(error);
+          try {
+            await fixture.handoffs().callbacks.photo();
+            assert.equal(fixture.dispatches.length, 1); assert.equal(fixture.uploads.length, 1);
+            assert.deepEqual(fixture.navigations, []);
+            assert.deepEqual(fixture.mutations.filter((item) => item.key.includes("ads_automation_prefill")), []);
+            assert.equal(fixture.toasts.length, 1); assert.equal(fixture.toasts[0].kind, "error");
+          } finally { fixture.lifetime!.unmount(); }
+        });
+      }
+    }
+  }
+  for (const kind of ["image", "video"] as const) {
+    test(`GEN69 actual generated ${kind} approval ${status} stops prefill and navigation`, async () => {
+      const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE);
+      fixture.handoffStatuses.approval = status;
+      try {
+        await invokeLocalHandoff(fixture.handoffs(), kind);
+        assert.equal(fixture.dispatches.length, 1); assert.deepEqual(fixture.uploads, []);
+        assert.deepEqual(fixture.navigations, []);
+        assert.deepEqual(fixture.mutations.filter((item) => item.key.includes("ads_automation_prefill")), []);
+        assert.equal(fixture.toasts.length, 1); assert.equal(fixture.toasts[0].kind, "error");
+      } finally { fixture.lifetime!.unmount(); }
+    });
+  }
+}
+
+for (const failure of ["signed-500", "storage-500", "storage-unavailable", "metadata-500", "metadata-transport-500"] as const) {
+  test(`GEN70 actual photo ${failure} preserves current-scope local handoff behavior`, async () => {
+    const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE);
+    if (failure === "signed-500") fixture.handoffStatuses.signed = 500;
+    if (failure === "storage-500") fixture.uploadError({ statusCode: "500", message: "Synthetic upload unavailable" });
+    if (failure === "storage-unavailable") fixture.uploadFailure();
+    if (failure === "metadata-500") fixture.handoffStatuses.metadata = 500;
+    if (failure === "metadata-transport-500") fixture.handoffTransportFailures.metadata = 500;
+    try {
+      await fixture.handoffs().callbacks.photo();
+      const prefill = readLocalHandoff(fixture);
+      assert.equal(prefill.sourceKind, "photo");
+      if (!failure.startsWith("metadata")) {
+        assert.ok(!prefill.creative.url); assert.ok(!prefill.creative.fileName);
+        assert.ok(fixture.toasts.some((toast) => toast.kind === "warning" && toast.message.includes("только тексты")));
+      } else {
+        assert.equal(prefill.creative.url, fixture.signedReply.data.publicUrl);
+        assert.deepEqual(fixture.toasts, [{ kind: "success", message: "Фото-креатив передан в AI запуск рекламы" }]);
+      }
+      assert.deepEqual(fixture.navigations, ["/ads-automation"]);
+      assert.equal(fixture.state.PhotoBusy, null);
+      assert.ok(fixture.toasts.every((toast) => toast.kind !== "error"));
+    } finally { fixture.lifetime!.unmount(); }
+  });
+}
+
+for (const kind of ["image", "video", "package"] as const) {
+  test(`GEN70 actual ${kind} approval 500 preserves local prefill and the existing warning`, async () => {
+    const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE);
+    fixture.handoffStatuses.approval = 500;
+    try {
+      await invokeLocalHandoff(fixture.handoffs(), kind);
+      assert.ok(readLocalHandoff(fixture).contentApproval);
+      assert.deepEqual(fixture.navigations, ["/ads-automation"]);
+      assert.equal(fixture.toasts.length, 1); assert.equal(fixture.toasts[0].kind, "warning");
+      assert.ok(fixture.toasts[0].message.includes("отметка согласования не сохранилась"));
+      assert.equal(fixture.dispatches.length, 1); assert.deepEqual(fixture.uploads, []);
+    } finally { fixture.lifetime!.unmount(); }
+  });
+}
+
+for (const kind of ["photo", "image", "video", "package"] as const) {
+  test(`GEN71 explicit synthetic demo ${kind} handoff is local-only without SDK or paid-cache access`, async () => {
+    const fixture = await localGenerationCallbacks("photo", true);
+    fixture.workspace("demo-local-a"); fixture.auth({ user: null, isDemoMode: true });
+    const handoff = fixture.handoffs();
+    const reads = fixture.sdkReads.total, storageReads = fixture.storageReads.length;
+    try {
+      assert.equal(handoff.session.localDraftsOnly, true); assert.equal(handoff.session.actorId, "");
+      await invokeLocalHandoff(handoff, kind);
+      assert.equal(readLocalHandoff(fixture, "demo-local-a").sourceKind, kind === "image" || kind === "video" ? "generated" : kind);
+      assert.deepEqual(fixture.dispatches, []); assert.deepEqual(fixture.uploads, []);
+      assert.equal(fixture.sdkReads.total, reads);
+      assert.deepEqual(fixture.storageReads.slice(storageReads).filter((item) => /paid_generation|video_job/.test(item.key)), []);
+      assert.deepEqual(fixture.navigations, ["/ads-automation"]);
+    } finally { fixture.lifetime!.unmount(); }
+  });
+  for (const boundary of ["account", "workspace", "unmount", "UUID-demo", "anonymous-not-demo"] as const) {
+    test(`GEN71 actual ${kind} local handoff cannot outlive ${boundary}`, async () => {
+      const fixture = await localGenerationCallbacks("photo", true);
+      fixture.workspace("demo-local-a"); fixture.auth({ user: null, isDemoMode: true });
+      let handoff = fixture.handoffs();
+      if (boundary === "account") { fixture.auth({ user: { id: "actor-b" }, isDemoMode: false }); fixture.lifetime!.render(); }
+      if (boundary === "workspace") fixture.workspace("demo-local-b");
+      if (boundary === "unmount") fixture.lifetime!.unmount();
+      if (boundary === "UUID-demo") { fixture.workspace(REAL_DEMO_TEST_WORKSPACE); handoff = fixture.handoffs(); }
+      if (boundary === "anonymous-not-demo") { fixture.auth({ isDemoMode: false }); handoff = fixture.handoffs(); }
+      const mutations = fixture.mutations.length, reads = fixture.sdkReads.total;
+      try {
+        await invokeLocalHandoff(handoff, kind);
+        assert.deepEqual(fixture.mutations.slice(mutations), []);
+        assert.deepEqual(fixture.dispatches, []); assert.deepEqual(fixture.uploads, []);
+        assert.deepEqual(fixture.navigations, []); assert.deepEqual(fixture.toasts, []);
+        assert.equal(fixture.sdkReads.total, reads);
+      } finally { fixture.lifetime!.unmount(); }
+    });
+  }
+}
+
+for (const status of [401, 403] as const) {
+  test(`GEN72 nested approval ${status} returns null before a transient SDK failure can downgrade denial`, async () => {
+    const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE);
+    fixture.handoffStatuses.approval = status;
+    fixture.handoffBodyFailures.add("approval");
+    fixture.onHandoffResponse((resource) => { if (resource === "approval") fixture.sdkFailureOnce("error"); });
+    const handoff = fixture.handoffs();
+    try {
+      const result = await handoff.callbacks.approve({ variantId: "variant-a", version: 1 }, handoff.session.sessionRef.current);
+      assert.equal(result, null, "known denial must survive both an unreadable body and a pending transient auth error");
+      assert.equal(fixture.sdkReads.failed, 0, "classify the known response before probing auth again");
+      assert.equal(fixture.dispatches.length, 1); assert.deepEqual(fixture.uploads, []);
+      assert.deepEqual(fixture.navigations, []); assert.deepEqual(fixture.toasts, []);
+      assert.deepEqual(fixture.mutations.filter((item) => item.key.includes("ads_automation_prefill")), []);
+    } finally { fixture.lifetime!.unmount(); }
+  });
+  for (const kind of ["image", "video", "package"] as const) {
+    test(`GEN72 actual ${kind} approval ${status} cannot become fallback when one auth probe fails then recovers`, async () => {
+      const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE);
+      fixture.handoffStatuses.approval = status;
+      fixture.onHandoffResponse((resource) => { if (resource === "approval") fixture.sdkFailureOnce("error"); });
+      try {
+        const handoff = fixture.handoffs();
+        await invokeLocalHandoff(handoff, kind);
+        assert.equal(fixture.sdkReads.failed, 1, "exercise the real one-shot SDK outage after receiving a known denial");
+        assert.equal(fixture.dispatches.length, 1);
+        assert.deepEqual(fixture.navigations, []); assert.deepEqual(fixture.toasts.slice(), []);
+        assert.deepEqual(fixture.mutations.filter((item) => item.key.includes("ads_automation_prefill")), []);
+        fixture.onHandoffResponse();
+        await invokeLocalHandoff(handoff, kind);
+        assert.equal(fixture.dispatches.length, 2, "auth must actually recover in the same unchanged session");
+        assert.deepEqual(fixture.navigations, []);
+        assert.deepEqual(fixture.mutations.filter((item) => item.key.includes("ads_automation_prefill")), []);
+        assert.equal(fixture.toasts.length, 1); assert.equal(fixture.toasts[0].kind, "error");
+      } finally { fixture.lifetime!.unmount(); }
+    });
+  }
+}
+
+for (const kind of ["photo", "image", "video", "package"] as const) {
+  for (const failure of ["actor-mismatch", "missing-token", "SDK-error", "SDK-throw"] as const) {
+    test(`GEN73 actual ${kind} handoff rejects ${failure} before any effect`, async () => {
+      const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE);
+      const handoff = fixture.handoffs();
+      if (failure === "actor-mismatch") fixture.sdkSession("actor-b", "fixture-token-b", null);
+      if (failure === "missing-token") fixture.sdkSession("actor-a", "", null);
+      if (failure === "SDK-error") fixture.sdkFailure("error");
+      if (failure === "SDK-throw") fixture.sdkFailure("throw");
+      const mutations = fixture.mutations.length;
+      try {
+        await invokeLocalHandoff(handoff, kind);
+        assert.deepEqual(fixture.dispatches, []); assert.deepEqual(fixture.uploads, []);
+        assert.deepEqual(fixture.navigations, []); assert.deepEqual(fixture.toasts, []);
+        assert.deepEqual(fixture.writes, []); assert.deepEqual(fixture.mutations.slice(mutations), []);
+        assert.ok(fixture.sdkReads.total > 0);
+      } finally { fixture.lifetime!.unmount(); }
+    });
+  }
+  for (const boundary of ["account", "workspace", "unmount"] as const) {
+    test(`GEN73 pending local demo ${kind} handoff rechecks ${boundary} after its async guard`, async () => {
+      const fixture = await localGenerationCallbacks("photo", true);
+      fixture.workspace("demo-local-a"); fixture.auth({ user: null, isDemoMode: true });
+      const handoff = fixture.handoffs(), reads = fixture.sdkReads.total;
+      const work = invokeLocalHandoff(handoff, kind);
+      if (boundary === "account") { fixture.auth({ user: { id: "actor-b" }, isDemoMode: false }); fixture.lifetime!.render(); }
+      if (boundary === "workspace") fixture.workspace("demo-local-b");
+      if (boundary === "unmount") fixture.lifetime!.unmount();
+      const mutations = fixture.mutations.length;
+      try {
+        await work;
+        assert.deepEqual(fixture.dispatches, []); assert.deepEqual(fixture.uploads, []);
+        assert.deepEqual(fixture.navigations, []); assert.deepEqual(fixture.toasts, []);
+        assert.deepEqual(fixture.writes, []); assert.deepEqual(fixture.mutations.slice(mutations), []);
+        assert.equal(fixture.sdkReads.total, reads);
+      } finally { await work; fixture.lifetime!.unmount(); }
+    });
+  }
+}
+
+for (const mode of ["no-package-id", "no-package", "local-demo", "unavailable"] as const) {
+  test(`GEN74 actual nested approval returns false without unauthorized side effects for ${mode}`, async () => {
+    const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE);
+    if (mode === "local-demo") { fixture.workspace("demo-local-a"); fixture.auth({ user: null, isDemoMode: true }); }
+    if (mode === "unavailable") fixture.handoffStatuses.approval = 500;
+    const handoff = fixture.handoffs(mode === "no-package-id" ? { contentPackageId: "" }
+      : mode === "no-package" ? { contentPackage: null } : undefined);
+    const mutations = fixture.mutations.length;
+    try {
+      assert.equal(await handoff.callbacks.approve({ variantId: "variant-a", version: 1 }, handoff.session.sessionRef.current), false);
+      assert.equal(fixture.dispatches.length, mode === "unavailable" ? 1 : 0);
+      assert.deepEqual(fixture.uploads, []); assert.deepEqual(fixture.navigations, []); assert.deepEqual(fixture.toasts, []);
+      assert.deepEqual(fixture.mutations.slice(mutations), []);
+    } finally { fixture.lifetime!.unmount(); }
+  });
+}
+
+for (const kind of ["image", "video"] as const) {
+  test(`GEN74 generated ${kind} without a selected package variant still hands off in the same current scope`, async () => {
+    const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE);
+    try {
+      await invokeLocalHandoff(fixture.handoffs({ contentPackageId: "", contentPackage: null, selectedAdVariant: null }), kind);
+      const prefill = readLocalHandoff(fixture);
+      assert.equal(prefill.sourceKind, "generated"); assert.equal(prefill.primaryText, "Synthetic offer");
+      assert.ok(!prefill.contentApproval); assert.deepEqual(fixture.dispatches, []); assert.deepEqual(fixture.uploads, []);
+      assert.deepEqual(fixture.navigations, ["/ads-automation"]);
+      assert.equal(fixture.toasts.length, 1); assert.equal(fixture.toasts[0].kind, "success");
+    } finally { fixture.lifetime!.unmount(); }
+  });
+}
