@@ -990,6 +990,52 @@ node_modules/.cache/baspana-overview-20261020/mint-office/. Локальный �
 рабочие Baspana, салоны, права, WhatsApp, реклама и платежи не менялись.
 Чужие правки миграций 059/065 сохранены. Выпуск — только по отдельному разрешению.
 
+### Цикл G4-C12: согласованное оформление на medinaos.com — опубликовано 20 октября
+
+Основание: владелец явно разрешил опубликовать принятый стиль, Inter и анимации,
+только оформление, без изменения данных и настроек Baspana и салонов.
+
+- [x] Read-only Vercel preflight подтвердил действующий production 3291e0f /
+  dpl_J5XhoBDGb4wHFcs8RqKyPMss9cr5. От этой версии выделен узкий кандидат
+  9379bdc8095160561f8e1824b068f89490df19b3, ветка
+  codex/mint-style-release-20261020. Перенесён только UI-diff 375c413..7f0511d,
+  а не накопленная рабочая ветка. Независимый агент сверил все UI-файлы и
+  зависимости; исходный ClinicOperators call сохранён без неопубликованных props.
+  API, lib, миграции, locks и vercel.json побайтово не менялись.
+- [x] Кандидат: mortgage 107/107, activity/admin/privacy/mobile/tokens/routes
+  119/119, cold-start 58+57 в изоляции, frontend/scripts typecheck и build прошли.
+  Старое test-only ожидание fallback /leads исправлено на уже существующий
+  production /dashboard, без изменения runtime. Локальный путь внутри node_modules
+  искажал распределение chunks; облачный CSS проверен отдельно (155751 байт),
+  результат локального path-specific предупреждения не выдан за облачный дефект.
+- [x] Preview g6hrlfjn6 / dpl_B4UmcuzHXnBQCdqxxi3sbujHhLKv READY,
+  target=null, точный 9379bdc; унаследовано прежнее изолированное окружение.
+  В обычном авторизованном браузере проверены форма входа, Inter и отказ
+  authentication_required у auth-context без CRM-входа. Через pageAssets сверены
+  CSS и два наблюдаемых шрифта с исходниками. Прямой CLI-запрос был направлен
+  защитой на авторизацию; обход или bypass не создавался. Реальный вход
+  тестового пользователя в этом выпуске заново не заявляется.
+- [x] Production-environment сборка qhf5davce /
+  dpl_HxoJj546hDpkzhgQCqNA4NGUGBJV сначала создана без переноса доменов,
+  затем после READY продвинута на medinaos.com и прежний
+  negis-medcall-mvp-api-server.vercel.app. 33 uploaded-source fingerprints
+  совпали с узким Git-кандидатом. Защита, env metadata и build/project settings
+  до/после совпали; прежний выпуск сохранён для отката.
+- [x] После публикации на обоих доменах: /login=200, одинаковые JS/CSS hashes,
+  в entry bundle только прежняя рабочая Supabase-база, не тестовая; CSS содержит
+  общую тему, Inter и motion/reduced-motion. Все три WOFF2=200 и побайтово
+  совпадают с согласованным Git. Без авторизации auth-context=401 с точным
+  code=authentication_required, без data/user/staff. Браузер открыл только
+  публичную форму входа medinaos.com, не рабочие пространства.
+
+Артефакты: node_modules/.cache/mint-style-release-tools-20261020/:
+before/preview/production receipts, preview-assets-proof.json, released-smoke.json,
+medinaos-login.png и сценарии. Принятая мобильная/desktop визуальная проверка
+описана в G4-C10/C11; этот выпуск не заявляет нового тестирования живых заявок.
+Ни одного business write, чтения заявок, изменения аккаунтов/ролей/настроек,
+SQL/миграций, WhatsApp, рекламы или платежей. Чужие правки 059/065 сохранены;
+остальные накопленные доработки основной локальной ветки не опубликованы.
+
 ### Цикл G5-C1: повторное получение готового видео — готов локально
 
 - [x] Read-only сверка A1–A3 отделила уже проверенные локальные контракты от

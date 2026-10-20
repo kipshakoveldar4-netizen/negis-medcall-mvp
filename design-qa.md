@@ -100,4 +100,30 @@ with phone/desktop verification and no publication.
   `soft-type-motion` directory. Local-only, no database/deployment/WhatsApp or
   working Baspana/salon changes. Unrelated migrations 059/065 were preserved.
 
+## Approved Production Release, 20 October
+
+The owner subsequently approved publishing this style, font and motion only.
+The narrowly extracted release is 9379bdc, based on actual production 3291e0f,
+not the accumulated development branch. API, libraries, migrations and project
+configuration remain unchanged. An independent source/dependency review passed.
+
+- Candidate verification: mortgage 107/107; activity/admin/privacy/mobile/tokens/
+  routes 119/119; isolated cold-start 58+57; frontend/scripts typechecks and build.
+- Preview g6hrlfjn6: READY, exact source fingerprint checks; ordinary browser
+  login/font/CSS check and unauthenticated auth-context refusal. No protection
+  bypass, new roles, fixtures or claimed new authenticated-user acceptance.
+- Production qhf5davce, dpl_HxoJj546hDpkzhgQCqNA4NGUGBJV: READY and assigned
+  to medinaos.com and the prior Vercel domain. Uploaded source checks 33/33.
+  Environment metadata, project settings and protection match the baseline.
+- Both domains return the same built entry/CSS, correct existing production
+  database URL, exact three bundled Inter files and auth-context 401 without
+  private data. The 155751-byte cloud CSS includes the agreed theme/motion;
+  its hash matches the stylesheet observed in the isolated Preview.
+- Published public browser evidence:
+  `C:/Users/Lenovo/Documents/Codex/medina-os/node_modules/.cache/mint-style-release-tools-20261020/medinaos-login.png`.
+  Receipts and machine-readable smoke/source proofs are in that same directory.
+  Private production screens were not opened or used for testing; visual phone/
+  desktop acceptance remains the synthetic evidence above. No business data or
+  Baspana/salon/WhatsApp settings were changed. Previous deployment retained.
+
 final result: passed
