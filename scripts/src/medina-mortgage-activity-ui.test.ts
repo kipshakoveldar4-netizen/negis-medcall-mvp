@@ -163,6 +163,83 @@ test("calendar places overlaps in lanes, clips overnight meetings and excludes a
   assert.equal(calendar.mortgageMeetingOnDay(activity({ endsAt: "2026-10-15T19:00:00Z" }), "2026-10-16", "Asia/Qyzylorda"), false);
 });
 
+test("bounded meeting columns use half-open boundaries without mutating the original activity", () => {
+  const bounds = Object.freeze([570, 630]);
+  for (const [start, end, expected] of [
+    ["08:00", "09:00", []], ["09:00", "09:30", []],
+    ["10:30", "11:00", []], ["11:00", "12:00", []],
+    ["09:00", "09:45", [[570, 585]]], ["10:15", "11:00", [[615, 630]]],
+    ["08:00", "12:00", [[570, 630]]], ["09:30", "10:30", [[570, 630]]],
+  ] as const) {
+    const original = Object.freeze(activity({ startsAt: `2026-10-15T${start}:00+05:00`, endsAt: `2026-10-15T${end}:00+05:00` }));
+    const before = JSON.stringify(original);
+    const column = calendar.mortgageMeetingColumn(Object.freeze([original]), "2026-10-15", "Asia/Qyzylorda", bounds);
+    assert.deepEqual(Array.from(column, (entry: any) => [entry.startMinute, entry.endMinute]), expected, `${start}-${end}`);
+    for (const entry of column) {
+      assert.equal(entry.item.activity, original);
+      assert.equal(entry.item.id, original.id);
+      assert.equal(entry.item.durationMinutes, entry.endMinute - entry.startMinute);
+    }
+    assert.equal(JSON.stringify(original), before);
+    const unbounded = calendar.mortgageMeetingColumn([original], "2026-10-15", "Asia/Qyzylorda");
+    assert.equal(unbounded.length, 1, "omitting bounds must retain out-of-range meetings");
+    assert.equal(unbounded[0].item.activity, original);
+    assert.equal(unbounded[0].startMinute, Number(start.slice(0, 2)) * 60 + Number(start.slice(3)));
+    assert.equal(unbounded[0].endMinute, Number(end.slice(0, 2)) * 60 + Number(end.slice(3)));
+  }
+});
+
+test("clipped overlap chains reuse lanes at touching endpoints and ignore invisible meetings", () => {
+  const originals = [
+    ["before", "08:00", "09:30"], ["a", "09:00", "10:00"], ["b", "09:45", "10:30"],
+    ["c", "10:00", "11:00"], ["d", "11:00", "12:30"], ["after", "12:00", "13:00"],
+  ].map(([id, start, end]) => Object.freeze(activity({ id, startsAt: `2026-10-15T${start}:00+05:00`, endsAt: `2026-10-15T${end}:00+05:00` })));
+  const input = Object.freeze([...originals].reverse());
+  const column = calendar.mortgageMeetingColumn(input, "2026-10-15", "Asia/Qyzylorda", [570, 720]);
+  assert.deepEqual(Array.from(column, ({ item, startMinute, endMinute, lane, lanes }: any) => [item.id, startMinute, endMinute, lane, lanes]), [
+    ["a", 570, 600, 0, 2], ["b", 585, 630, 1, 2], ["c", 600, 660, 0, 2], ["d", 660, 720, 0, 1],
+  ]);
+  for (const { item } of column) assert.equal(item.activity, originals.find((original) => original.id === item.id));
+  assert.deepEqual(input.map((item) => item.id), ["after", "d", "c", "b", "a", "before"]);
+});
+
+test("bounded overnight columns use workspace wall dates, including fractional-offset zones and exclusive midnight", () => {
+  for (const [zone, startsAt, endsAt] of [
+    ["Asia/Qyzylorda", "2026-10-15T18:30:00Z", "2026-10-15T19:30:00Z"],
+    ["Pacific/Chatham", "2026-10-15T09:45:00Z", "2026-10-15T10:45:00Z"],
+  ]) {
+    const original = Object.freeze(activity({ startsAt, endsAt }));
+    for (const [day, bounds, expected] of [
+      ["2026-10-15", [1410, 1440], [[1410, 1440]]],
+      ["2026-10-16", [0, 30], [[0, 30]]],
+      ["2026-10-16", [30, 60], []],
+      ["2026-10-14", [0, 1440], []],
+    ] as const) {
+      const column = calendar.mortgageMeetingColumn([original], day, zone, bounds);
+      assert.deepEqual(Array.from(column, (entry: any) => [entry.startMinute, entry.endMinute]), expected, `${zone}: ${day}`);
+      for (const entry of column) assert.equal(entry.item.activity, original);
+    }
+    const midnight = activity({ startsAt, endsAt: pure.mortgageDateTimeToIso("2026-10-16T00:00", zone) });
+    assert.equal(calendar.mortgageMeetingOnDay(midnight, "2026-10-16", zone), false);
+    assert.equal(calendar.mortgageMeetingColumn([midnight], "2026-10-16", zone, [0, 30]).length, 0);
+  }
+  const spanning = activity({ startsAt: "2026-10-14T18:30:00Z", endsAt: "2026-10-16T19:30:00Z" });
+  const middle = calendar.mortgageMeetingColumn([spanning], "2026-10-15", "Asia/Qyzylorda", [540, 1260]);
+  assert.deepEqual(Array.from(middle, (entry: any) => [entry.startMinute, entry.endMinute]), [[540, 1260]]);
+  assert.equal(middle[0].item.activity, spanning);
+});
+
+test("bounded columns exclude tasks and invalid, missing, zero-length or reversed meeting times", () => {
+  for (const overrides of [
+    { kind: "task" }, { startsAt: null }, { endsAt: null }, { startsAt: "invalid" }, { endsAt: "invalid" },
+    { endsAt: "2026-10-15T05:00:00Z" }, { endsAt: "2026-10-15T04:00:00Z" },
+  ]) {
+    const invalid = activity(overrides);
+    assert.equal(calendar.mortgageMeetingOnDay(invalid, "2026-10-15", "Asia/Qyzylorda"), false);
+    assert.equal(calendar.mortgageMeetingColumn([invalid], "2026-10-15", "Asia/Qyzylorda", [540, 1260]).length, 0);
+  }
+});
+
 test("task filters use zoned due dates and do not mark done/cancelled work overdue", () => {
   const now = Date.parse("2026-10-15T19:30:00Z");
   const due = activity({ kind: "task", startsAt: null, endsAt: null, dueAt: "2026-10-15T19:15:00Z", priority: "high", title: "Documents" });
@@ -672,6 +749,312 @@ function readFilterSnapshot(kind: "meeting" | "task") {
 
 const responsibleSelect = (tree: unknown) => formNodes(tree).find((node) => node.type === "select" && node.props["aria-label"] === "Ответственный")!;
 const listedActivityIds = (tree: unknown) => formNodes(tree).filter((node) => node.type === "li").map((node) => node.key);
+
+function requiredNode(tree: unknown, predicate: (node: Node) => boolean, description: string): Node {
+  const node = formNodes(tree).find(predicate);
+  assert.ok(node, description);
+  return node;
+}
+function nodeText(value: any): string {
+  if (Array.isArray(value)) return value.map(nodeText).join("");
+  if (value && typeof value === "object") return nodeText(value.props?.children);
+  return typeof value === "string" || typeof value === "number" ? String(value) : "";
+}
+const calendarField = (tree: unknown, label: string) => requiredNode(tree, (node) => node.props["aria-label"] === label, label);
+const calendarStart = (tree: unknown) => calendarField(tree, "Начало отображаемого дня");
+const calendarEnd = (tree: unknown) => calendarField(tree, "Конец отображаемого дня");
+const calendarAllHours = (tree: unknown) => requiredNode(tree, (node) => node.type === "input" && node.props.type === "checkbox", "all-hours checkbox");
+const calendarMode = (tree: unknown, label: string) => requiredNode(calendarField(tree, "Вид календаря"), (node) => node.type === "button" && nodeText(node) === label, label);
+const calendarSlots = (tree: unknown) => formNodes(tree).filter((node) => node.type === "button" && node.props["aria-label"]?.endsWith(": новая встреча"));
+const calendarBlocks = (tree: unknown) => formNodes(tree).filter((node) => node.type === "button" && node.props.style?.width && node.props.style?.height);
+const calendarDate = (tree: unknown) => requiredNode(tree, (node) => node.props.id === "mortgage-calendar-date", "calendar date input");
+
+async function calendarDisplayFixture(items: ReturnType<typeof activity>[] = []) {
+  const f = creationPage("meeting", `leadId=${contact.id}`), data = { ...snapshot(), activities: items };
+  f.workspace.data = data;
+  const unexpected = () => assert.fail("Changing the display must not read, refresh or mutate workspace data");
+  Object.assign(f.workspace, { request: unexpected, refresh: unexpected, saveActivity: unexpected, createContact: unexpected, updateContact: unexpected });
+  let tree = await f.d.flush();
+  calendarDate(tree).props.onChange({ target: { value: "2026-10-15" } });
+  const flush = async () => { tree = await f.d.flush(); return tree; };
+  await flush();
+  return { ...f, data, flush, tree: () => tree };
+}
+
+function assertCalendarGrid(tree: unknown, start: number, end: number, columns: number) {
+  const region = requiredNode(tree, (node) => node.props.role === "region" && node.props["aria-label"]?.startsWith("Расписание встреч,"), "schedule region");
+  assert.equal(region.props["aria-label"], `Расписание встреч, ${dayGrid.formatSlot(start)}–${dayGrid.formatSlot(end)}`);
+  const height = end - start; // One pixel per minute: 60px/hour and 30px/slot.
+  const tracks = formNodes(region).filter((node) => node.type === "div" && node.props.style?.height !== undefined);
+  assert.equal(tracks.length, columns + 1, "one time axis plus one track per date");
+  for (const track of tracks) assert.equal(track.props.style.height, height);
+  const expectedSlots = Array.from({ length: (end - start) / 30 }, (_, index) => start + index * 30);
+  for (const track of tracks.slice(1)) {
+    const slots = calendarSlots(track);
+    assert.deepEqual(slots.map((slot) => slot.key), expectedSlots);
+    for (const slot of slots) {
+      assert.equal(slot.props.style.top, Number(slot.key) - start);
+      assert.equal(slot.props.style.height, 30);
+      assert.ok(Number(slot.key) < end && Number(slot.key) < 1440, "end boundary is not a creation slot");
+    }
+  }
+  const marks = formNodes(tracks[0]).filter((node) => node.type === "span");
+  const expectedMarks = Array.from({ length: 49 }, (_, index) => index * 30)
+    .filter((minute) => minute >= start && minute <= end && (minute === start || minute === end || minute % 60 === 0));
+  assert.deepEqual(marks.map((mark) => mark.key), expectedMarks);
+  for (const mark of marks) {
+    assert.equal(nodeText(mark), dayGrid.formatSlot(Number(mark.key)));
+    assert.ok(mark.props.style.top >= 0 && mark.props.style.top < height, "hour labels remain inside the grid");
+    if (Number(mark.key) < end) assert.equal(mark.props.style.top - marks[0].props.style.top, Number(mark.key) - start);
+  }
+  assert.equal(marks.at(-1)!.key, end);
+  assert.ok(marks.at(-1)!.props.style.top < height, "end label is clamped inside the grid");
+  assert.ok(marks.at(-1)!.props.style.top > marks.at(-2)!.props.style.top, "end label follows the preceding hour mark");
+  for (const block of calendarBlocks(region)) {
+    assert.ok(block.props.style.top >= 0 && block.props.style.height > 0);
+    assert.ok(block.props.style.top + block.props.style.height <= height);
+  }
+}
+
+test("calendar display defaults to confirmed 08:00-19:00 hours every day, including weekends and loaded outliers", async (t) => {
+  for (const items of [[], [activity({ startsAt: "2026-10-15T02:00:00Z", endsAt: "2026-10-15T18:30:00Z" })]]) {
+    const f = await calendarDisplayFixture(items);t.after(() => f.d.unmount());
+    assert.equal(calendarStart(f.tree()).props.value, 480);
+    assert.equal(calendarEnd(f.tree()).props.value, 1140);
+    assert.equal(calendarAllHours(f.tree()).props.checked, false);
+    assert.equal(calendarMode(f.tree(), "Неделя").props["aria-pressed"], true);
+    assertCalendarGrid(f.tree(), 480, 1140, 7);
+    assert.equal(calendarSlots(f.tree()).length, 7 * 22);
+    for (const date of ["2026-10-17", "2026-10-18"]) {
+      const weekend = requiredNode(f.tree(), (node) => node.type === "div" && node.key === date && node.props.style?.height, "weekend track");
+      assert.equal(calendarSlots(weekend).length, 22);
+      assert.equal(calendarSlots(weekend)[0].key, 480);assert.equal(calendarSlots(weekend).at(-1)!.key, 1110);
+    }
+    calendarMode(f.tree(), "День").props.onClick();await f.flush();
+    for (const date of ["2026-10-17", "2026-10-18"]) {
+      calendarDate(f.tree()).props.onChange({ target: { value: date } });await f.flush();
+      assertCalendarGrid(f.tree(), 480, 1140, 1);assert.equal(calendarSlots(f.tree()).length, 22);
+    }
+    assert.equal(f.calls.length, 0);
+  }
+});
+
+test("calendar selects expose bounded half-hour options and reject invalid or crossing display ranges", async (t) => {
+  const f = await calendarDisplayFixture();t.after(() => f.d.unmount());
+  const original = JSON.stringify(f.data);
+  const checkOptions = () => {
+    const start = calendarStart(f.tree()), end = calendarEnd(f.tree());
+    assert.equal(start.type, "select");assert.equal(end.type, "select");
+    assert.equal(start.props.disabled, false);assert.equal(end.props.disabled, false);
+    assert.deepEqual(formNodes(start).filter((node) => node.type === "option").map((node) => [node.props.value, nodeText(node)]),
+      Array.from({ length: end.props.value / 30 }, (_, index) => [index * 30, dayGrid.formatSlot(index * 30)]));
+    assert.deepEqual(formNodes(end).filter((node) => node.type === "option").map((node) => [node.props.value, nodeText(node)]),
+      Array.from({ length: (1440 - start.props.value) / 30 }, (_, index) => [start.props.value + (index + 1) * 30, dayGrid.formatSlot(start.props.value + (index + 1) * 30)]));
+  };
+  checkOptions();
+  for (const [control, invalid] of [
+    [calendarStart, ["-30", "555", "1140", "1170", "1440", "570.5", "NaN", "Infinity"]],
+    [calendarEnd, ["-30", "0", "450", "480", "615", "1470", "600.5", "NaN", "Infinity"]],
+  ] as const) for (const value of invalid) {
+    control(f.tree()).props.onChange({ target: { value } });await f.flush();
+    assert.equal(calendarStart(f.tree()).props.value, 480, `invalid value: ${value}`);
+    assert.equal(calendarEnd(f.tree()).props.value, 1140, `invalid value: ${value}`);
+    assertCalendarGrid(f.tree(), 480, 1140, 7);
+  }
+  for (const [control, value, start, end] of [
+    [calendarStart, "0", 0, 1140], [calendarEnd, "30", 0, 30],
+    [calendarEnd, "1440", 0, 1440], [calendarStart, "1410", 1410, 1440],
+    [calendarStart, "570", 570, 1440], [calendarEnd, "630", 570, 630],
+  ] as const) {
+    control(f.tree()).props.onChange({ target: { value } });await f.flush();
+    assert.equal(calendarStart(f.tree()).props.value, start);assert.equal(calendarEnd(f.tree()).props.value, end);
+    checkOptions();assertCalendarGrid(f.tree(), start, end, 7);
+  }
+  assert.equal(JSON.stringify(f.data), original);
+});
+
+test("custom display geometry offsets clipped meetings and lanes from dayStart at 60 pixels per hour", async (t) => {
+  const items = [
+    activity({ id: "left", startsAt: "2026-10-15T04:00:00Z", endsAt: "2026-10-15T04:45:00Z" }),
+    activity({ id: "overlap", startsAt: "2026-10-15T04:30:00Z", endsAt: "2026-10-15T05:00:00Z" }),
+    activity({ id: "right", startsAt: "2026-10-15T05:00:00Z", endsAt: "2026-10-15T06:00:00Z" }),
+  ];
+  const f = await calendarDisplayFixture(items);t.after(() => f.d.unmount());
+  calendarStart(f.tree()).props.onChange({ target: { value: "570" } });await f.flush();
+  calendarEnd(f.tree()).props.onChange({ target: { value: "630" } });await f.flush();
+  assertCalendarGrid(f.tree(), 570, 630, 7);
+  assert.deepEqual(calendarBlocks(f.tree()).map((node) => [node.key, node.props.style.top, node.props.style.height, node.props.style.left, node.props.style.width]), [
+    ["left", 0, 15, "calc(0% + 1px)", "calc(50% - 2px)"],
+    ["overlap", 0, 30, "calc(50% + 1px)", "calc(50% - 2px)"],
+    ["right", 30, 30, "calc(0% + 1px)", "calc(100% - 2px)"],
+  ]);
+  for (const block of calendarBlocks(f.tree())) {
+    const original = items.find((item) => item.id === block.key)!;
+    assert.ok(block.props.title.includes(pure.mortgageInstantLabel(original.startsAt, f.data.timeZone)));
+    assert.ok(block.props.title.includes(pure.mortgageInstantLabel(original.endsAt, f.data.timeZone)));
+    block.props.onClick();await f.flush();assert.equal(f.editor().activity, original);
+    const dialog = requiredNode(f.tree(), (node) => node.type === "ActivityDialog", "edit dialog");
+    assert.equal(dialog.props.activity, original);
+    dialog.props.onOpenChange(false);await f.flush();assert.equal(f.editor(), null);
+  }
+  calendarEnd(f.tree()).props.onChange({ target: { value: "1110" } });await f.flush();
+  assertCalendarGrid(f.tree(), 570, 1110, 7);
+  assert.equal(calendarSlots(f.tree())[0].props.style.height, 30);
+  // The nine-hour body is 540px, leaving room for the header below the 620px viewport cap.
+  assert.equal(calendarSlots(f.tree()).at(-1)!.props.style.top + 30, 540);
+});
+
+test("24-hour mode disables range controls and preserves the selected range through month/day/week views", async (t) => {
+  const f = await calendarDisplayFixture();t.after(() => f.d.unmount());
+  calendarStart(f.tree()).props.onChange({ target: { value: "570" } });await f.flush();
+  calendarEnd(f.tree()).props.onChange({ target: { value: "630" } });await f.flush();
+  calendarAllHours(f.tree()).props.onChange({ target: { checked: true } });await f.flush();
+  assert.equal(calendarAllHours(f.tree()).props.checked, true);
+  assert.equal(calendarStart(f.tree()).props.disabled, true);assert.equal(calendarEnd(f.tree()).props.disabled, true);
+  assert.equal(calendarStart(f.tree()).props.value, 570);assert.equal(calendarEnd(f.tree()).props.value, 630);
+  assertCalendarGrid(f.tree(), 0, 1440, 7);
+  calendarMode(f.tree(), "Месяц").props.onClick();await f.flush();
+  assert.equal(calendarMode(f.tree(), "Месяц").props["aria-pressed"], true);
+  calendarField(f.tree(), "Календарь встреч, месяц");
+  assert.equal(formNodes(f.tree()).some((node) => node.props["aria-label"] === "Часы календаря"), false);
+  assert.equal(calendarSlots(f.tree()).length, 0);
+  const cell = requiredNode(f.tree(), (node) => node.type === "div" && node.key === "2026-10-16", "month date cell");
+  requiredNode(cell, (node) => node.type === "button" && node.props.title === pure.mortgageDayLabel("2026-10-16"), "month day link").props.onClick();
+  await f.flush();assert.equal(calendarDate(f.tree()).props.value, "2026-10-16");
+  assert.equal(calendarMode(f.tree(), "День").props["aria-pressed"], true);
+  assert.equal(calendarAllHours(f.tree()).props.checked, true);assertCalendarGrid(f.tree(), 0, 1440, 1);
+  calendarAllHours(f.tree()).props.onChange({ target: { checked: false } });await f.flush();
+  assert.equal(calendarStart(f.tree()).props.disabled, false);assert.equal(calendarEnd(f.tree()).props.disabled, false);
+  assertCalendarGrid(f.tree(), 570, 630, 1);
+  calendarMode(f.tree(), "Неделя").props.onClick();await f.flush();assertCalendarGrid(f.tree(), 570, 630, 7);
+  assert.equal(f.calls.length, 0);
+});
+
+test("outliers remain in the meeting list and count while only intersecting blocks enter the display grid", async (t) => {
+  const items = [
+    ["early", "06:00", "07:00"], ["ends-at-start", "07:00", "08:00"], ["clips-start", "07:30", "08:30"],
+    ["inside", "10:00", "11:00"], ["clips-end", "18:30", "19:30"], ["starts-at-end", "19:00", "20:00"],
+    ["late", "23:00", "23:30"],
+  ].map(([id, start, end]) => activity({ id, startsAt: `2026-10-15T${start}:00+05:00`, endsAt: `2026-10-15T${end}:00+05:00` }));
+  items.push(activity({ id: "overnight", startsAt: "2026-10-15T18:30:00Z", endsAt: "2026-10-15T19:30:00Z" }));
+  const f = await calendarDisplayFixture(items);t.after(() => f.d.unmount());
+  const original = JSON.stringify(f.data), ids = items.map((item) => item.id);
+  const checkList = () => {
+    assert.deepEqual(listedActivityIds(f.tree()), ids);
+    const heading = requiredNode(f.tree(), (node) => node.props.id === "mortgage-meetings-list", "meeting list count");
+    assert.equal(nodeText(heading), "Встречи 8");
+  };
+  checkList();assertCalendarGrid(f.tree(), 480, 1140, 7);
+  const status = requiredNode(f.tree(), (node) => node.props.role === "status", "outside-range count");
+  assert.equal(nodeText(status), "Встреч вне диапазона: 7", "overnight outlier is counted once, not per day");
+  assert.deepEqual(calendarBlocks(f.tree()).map((block) => [block.key, block.props.style.top, block.props.style.height]), [
+    ["clips-start", 0, 30], ["inside", 120, 60], ["clips-end", 630, 30],
+  ]);
+  const clipped = calendarBlocks(f.tree())[0];assert.match(nodeText(clipped), /07:30/);
+  clipped.props.onClick();await f.flush();assert.equal(f.editor().activity, items[2]);f.close();await f.flush();
+  const earlyRow = requiredNode(f.tree(), (node) => node.type === "li" && node.key === "early", "out-of-range list row");
+  requiredNode(earlyRow, (node) => node.type === "MortgageIconButton" && node.props.label.startsWith("Редактировать:"), "outlier edit action").props.onClick();
+  await f.flush();assert.equal(f.editor().activity, items[0]);f.close();await f.flush();
+  calendarAllHours(f.tree()).props.onChange({ target: { checked: true } });await f.flush();
+  checkList();assertCalendarGrid(f.tree(), 0, 1440, 7);
+  assert.deepEqual(calendarBlocks(f.tree()).map((block) => block.key), [...ids, "overnight"]);
+  assert.equal(formNodes(f.tree()).filter((node) => node.props.role === "status").length, 0);
+  calendarAllHours(f.tree()).props.onChange({ target: { checked: false } });await f.flush();checkList();
+  assert.equal(nodeText(requiredNode(f.tree(), (node) => node.props.role === "status", "restored outside count")), "Встреч вне диапазона: 7");
+  calendarMode(f.tree(), "Месяц").props.onClick();await f.flush();checkList();
+  assert.equal(JSON.stringify(f.data), original);
+});
+
+test("meeting creation uses the displayed start and every clickable half-hour preserves its exact local slot", async (t) => {
+  const f = await calendarDisplayFixture();t.after(() => f.d.unmount());
+  calendarMode(f.tree(), "День").props.onClick();await f.flush();
+  for (const [start, end, allHours] of [[480, 1140, false], [570, 630, false], [570, 630, true], [1410, 1440, false]] as const) {
+    calendarAllHours(f.tree()).props.onChange({ target: { checked: false } });await f.flush();
+    calendarEnd(f.tree()).props.onChange({ target: { value: "1440" } });await f.flush();
+    calendarStart(f.tree()).props.onChange({ target: { value: String(start) } });await f.flush();
+    calendarEnd(f.tree()).props.onChange({ target: { value: String(end) } });await f.flush();
+    calendarAllHours(f.tree()).props.onChange({ target: { checked: allHours } });await f.flush();
+    const dayStart = allHours ? 0 : start, dayEnd = allHours ? 1440 : end;
+    assertCalendarGrid(f.tree(), dayStart, dayEnd, 1);
+    requiredNode(f.tree(), (node) => node.type === "button" && nodeText(node) === "Новая встреча", "new meeting action").props.onClick();
+    await f.flush();assert.equal(f.editor().initialStartsAt, `2026-10-15T${dayGrid.formatSlot(dayStart)}`);
+    f.close();await f.flush();
+    const slots = calendarSlots(f.tree());assert.equal(slots.length, (dayEnd - dayStart) / 30);
+    for (const slot of slots) {
+      slot.props.onClick();await f.flush();
+      const expected = `2026-10-15T${dayGrid.formatSlot(Number(slot.key))}`;
+      assert.equal(f.editor().initialStartsAt, expected);
+      assert.equal(requiredNode(f.tree(), (node) => node.type === "ActivityDialog", "creation dialog").props.initialStartsAt, expected);
+      assert.equal(pure.mortgageLocalDateTime(pure.mortgageDateTimeToIso(expected, f.data.timeZone), f.data.timeZone), expected);
+      f.close();await f.flush();
+    }
+    calendarMode(f.tree(), "Месяц").props.onClick();await f.flush();
+    const cell = requiredNode(f.tree(), (node) => node.type === "div" && node.key === "2026-10-16", "month creation cell");
+    requiredNode(cell, (node) => node.type === "button" && node.props["aria-label"]?.startsWith("Создать встречу:"), "month add action").props.onClick();
+    await f.flush();assert.equal(f.editor().initialStartsAt, `2026-10-16T${dayGrid.formatSlot(dayStart)}`);
+    f.close();await f.flush();calendarMode(f.tree(), "День").props.onClick();await f.flush();
+  }
+  calendarMode(f.tree(), "Неделя").props.onClick();await f.flush();
+  const otherDay = requiredNode(f.tree(), (node) => node.type === "div" && node.key === "2026-10-17" && node.props.style?.height, "week date track");
+  calendarSlots(otherDay)[0].props.onClick();await f.flush();
+  assert.equal(f.editor().initialStartsAt, "2026-10-17T23:30");
+  assert.equal(f.calls.length, 0);
+});
+
+test("calendar range toggles make no requests and period navigation retains the authorized scoped query without writes", async (t) => {
+  const data = snapshot(), original = JSON.stringify(data), requests: Array<{ path: string; init: any }> = [];
+  const session = moduleFixture(driver(), async (path, init) => { requests.push({ path, init });return response(data); });
+  t.after(() => session.d.unmount());
+  const live = { current: { ...scope } };
+  session.d.mount(() => session.module.fixture.MortgageSession({ scope, live, children: "Synthetic calendar" }));
+  const access = (await session.d.flush()).props.value, page = moduleFixture();
+  t.after(() => page.d.unmount());page.d.setContext(access);
+  const rendered = evaluate(calendarSource + "\nexports.Body = MortgageCalendarBody;", {
+    react: page.d.hooks,
+    wouter: { useSearch: () => `leadId=${contact.id}`, useLocation: () => ["/appointments", () => assert.fail("Display changes must not navigate")], Link: "Link" },
+    "@/lib/clinicDay": clinicDay, "@/lib/dayGrid": dayGrid, "@/lib/mortgage-workspace": page.module,
+  }, { window: { setInterval: () => 1, clearInterval() {} } });
+  page.d.mount(() => rendered.Body());let tree = await page.d.flush();
+  calendarDate(tree).props.onChange({ target: { value: "2026-10-15" } });tree = await page.d.flush();
+  const initialReads = requests.length;assert.ok(initialReads > 0);
+  const assertRequest = (from: string, to: string) => {
+    const { path, init } = requests.at(-1)!;
+    const url = new URL(path, "http://fixture.invalid");
+    assert.equal(url.pathname, "/api/crm/mortgage-workspace");
+    assert.deepEqual(Object.fromEntries(url.searchParams), {
+      workspaceId: scope.workspaceId, leadId: contact.id, from, to, days: "90",
+    });
+    assert.equal(init.method ?? "GET", "GET");assert.equal(init.body, undefined);
+    assert.equal(init.expectedUserId, scope.actorId);assert.equal(init.cache, "no-store");
+  };
+  assertRequest("2026-10-11T19:00:00.000Z", "2026-10-18T19:00:00.000Z");
+  calendarStart(tree).props.onChange({ target: { value: "570" } });tree = await page.d.flush();
+  calendarEnd(tree).props.onChange({ target: { value: "630" } });tree = await page.d.flush();
+  for (const checked of [true, false]) {
+    calendarAllHours(tree).props.onChange({ target: { checked } });tree = await page.d.flush();
+    assert.equal(requests.length, initialReads, "display-only range changes must reuse the snapshot");
+  }
+  for (const [label, from, to] of [
+    ["День", "2026-10-14T19:00:00.000Z", "2026-10-15T19:00:00.000Z"],
+    ["Месяц", "2026-09-27T19:00:00.000Z", "2026-11-08T19:00:00.000Z"],
+  ]) {
+    const before = requests.length;calendarMode(tree, label).props.onClick();tree = await page.d.flush();
+    assert.equal(requests.length, before + 1, "only the newly visible period may be requested");assertRequest(from, to);
+  }
+  const beforeNext = requests.length;
+  requiredNode(tree, (node) => node.type === "MortgageIconButton" && node.props.label === "Следующий период", "next month").props.onClick();
+  tree = await page.d.flush();assert.equal(requests.length, beforeNext + 1);
+  assertRequest("2026-10-25T19:00:00.000Z", "2026-12-06T19:00:00.000Z");
+  calendarMode(tree, "День").props.onClick();tree = await page.d.flush();
+  assertRequest("2026-11-14T19:00:00.000Z", "2026-11-15T19:00:00.000Z");
+  const beforeDate = requests.length;
+  calendarDate(tree).props.onChange({ target: { value: "2026-11-16" } });tree = await page.d.flush();
+  assert.equal(requests.length, beforeDate + 1);assertRequest("2026-11-15T19:00:00.000Z", "2026-11-16T19:00:00.000Z");
+  assertCalendarGrid(tree, 570, 630, 1);
+  assert.ok(requests.every(({ path, init }) => new URL(path, "http://fixture.invalid").pathname === "/api/crm/mortgage-workspace"
+    && (init.method ?? "GET") === "GET" && init.body === undefined && init.cache === "no-store" && init.expectedUserId === scope.actorId));
+  assert.equal(JSON.stringify(data), original);
+});
 
 for (const kind of ["meeting", "task"] as const) {
   test(`${kind} read filter includes active admins, retains managers and only narrows already-scoped work`, async () => {
