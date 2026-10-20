@@ -61,6 +61,10 @@ function label(value: any): string {
 }
 const sameDeps = (left?: unknown[], right?: unknown[]) => Boolean(left && right && left.length === right.length
   && left.every((value, index) => Object.is(value, right[index])));
+const { teamBookingConversion, fixture: teamContract } = evaluate(
+  teamAnalytics + "\nexports.fixture = { readAnalytics, safeSum };", {}, {
+    react: {}, "@/lib/permissions": { roleLabels },
+  });
 
 function hookDriver() {
   const slots: any[] = [];
@@ -220,11 +224,60 @@ function teamPayload(days = 30) {
   } } };
 }
 
-function teamSetup() {
+function inconsistentTeamPayloads() {
+  type Snapshot = ReturnType<typeof teamPayload>["data"]["analytics"];
+  const cases: Array<[string, (analytics: Snapshot) => void]> = [
+    ["duplicate staff IDs", (value) => { value.members[2].staffId = value.members[0].staffId; }],
+    ["reversed period", (value) => { value.period.from = "2026-10-15T10:00:01Z"; }],
+    ["period after generation", (value) => { value.period.to = "2026-10-15T10:00:01Z"; }],
+    ["stage sum too high", (value) => { value.members[0].assigned.other += 1; }],
+    ["stage sum too low", (value) => { value.members[0].assigned.other -= 1; }],
+    ["booked exceeds assigned", (value) => { value.members[0].assigned.booked = 10; }],
+    ["lead census too high", (value) => { value.totalLeads += 1; }],
+    ["lead census too low", (value) => { value.totalLeads -= 1; }],
+    ["unassigned census mismatch", (value) => { value.unassignedLeads += 1; }],
+    ["other assignee census mismatch", (value) => { value.otherAssigneeLeads += 1; }],
+    ["empty staff without census adjustment", (value) => { value.members = []; }],
+    ["stage sum overflow", (value) => {
+      value.members = [value.members[0]];
+      value.members[0].assigned = { total: Number.MAX_SAFE_INTEGER, new: Number.MAX_SAFE_INTEGER,
+        inProgress: 0, booked: 1, lost: 0, other: 0 };
+      value.totalLeads = Number.MAX_SAFE_INTEGER; value.unassignedLeads = 0; value.otherAssigneeLeads = 0;
+    }],
+    ["lead census overflow", (value) => {
+      value.members = [value.members[0]];
+      value.members[0].assigned = { total: Number.MAX_SAFE_INTEGER, new: 0,
+        inProgress: 0, booked: Number.MAX_SAFE_INTEGER, lost: 0, other: 0 };
+      value.totalLeads = Number.MAX_SAFE_INTEGER; value.unassignedLeads = 1; value.otherAssigneeLeads = 0;
+    }],
+    ["staff total sum overflow", (value) => {
+      value.members[0].assigned = { total: Number.MAX_SAFE_INTEGER, new: 0,
+        inProgress: 0, booked: Number.MAX_SAFE_INTEGER, lost: 0, other: 0 };
+      value.totalLeads = Number.MAX_SAFE_INTEGER; value.unassignedLeads = 0; value.otherAssigneeLeads = 0;
+    }],
+  ];
+  return cases.map(([name, change]) => {
+    const payload = teamPayload(); change(payload.data.analytics); return { name, payload };
+  });
+}
+
+function teamResults(driver: ReturnType<typeof hookDriver>) {
+  const section = driver.nodes().find((node) => node.props["aria-label"] === "Результаты по назначенным заявкам");
+  assert.ok(section); return section;
+}
+
+function teamSummary(driver: ReturnType<typeof hookDriver>) {
+  const summary = nodes(teamResults(driver)).find((node) => node.type === "dl"); assert.ok(summary);
+  const values = nodes(summary).filter((node) => node.type === "dd").map(label);
+  return Object.fromEntries(nodes(summary).filter((node) => node.type === "dt")
+    .map((node, index) => [label(node), values[index]]));
+}
+
+function teamSetup(props: { initiallyExpanded?: boolean; heading?: string } = {}, initialAccess?: TeamAccess) {
   const driver = hookDriver();
   let current = true;
   const requests: Array<{ days: number; response: ReturnType<typeof deferred<Response>> }> = [];
-  const access: TeamAccess = { isCurrent: () => current,
+  const access: TeamAccess = initialAccess ?? { isCurrent: () => current,
     loadTeamAnalytics: (days) => {
       const response = deferred<Response>(); requests.push({ days, response }); return response.promise;
     } };
@@ -232,7 +285,7 @@ function teamSetup() {
   const module = evaluate(teamAnalytics, {}, { react: driver.hooks,
     "@/lib/permissions": { roleLabels },
   });
-  driver.mount(() => module.LeadTeamAnalytics({ access: propAccess }));
+  driver.mount(() => module.LeadTeamAnalytics({ ...props, access: propAccess }));
   return {
     driver, requests, access,
     async toggle(open: boolean) {
@@ -487,6 +540,59 @@ test("mortgage summaries follow responsibility while stage and search only narro
   }
 });
 
+test("booking conversion rounds one decimal and distinguishes zero rates from invalid denominators", () => {
+  for (const [booked, assigned, expected] of [
+    [3, 11, 27.3], [3, 9, 33.3], [1, 6, 16.7], [2, 3, 66.7], [0, 2, 0], [9, 9, 100],
+    [0, Number.MAX_SAFE_INTEGER, 0], [Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, 100],
+  ]) assert.equal(teamBookingConversion(booked, assigned), expected, `${booked}/${assigned}`);
+  for (const [booked, assigned] of [
+    [0, 0], [1, 0], [0, -1], [-1, 9], [10, 9], [1.5, 9], [1, 9.5],
+    [NaN, 9], [1, NaN], [Infinity, 9], [1, Infinity],
+    [Number.MAX_SAFE_INTEGER + 1, Number.MAX_SAFE_INTEGER], [1, Number.MAX_SAFE_INTEGER + 1],
+  ]) assert.equal(teamBookingConversion(booked, assigned), null, `${booked}/${assigned}`);
+});
+
+test("team analytics parser accepts count bases and safe sums but rejects inconsistent cohorts and periods", () => {
+  for (const days of [7, 30, 90]) {
+    const payload = teamPayload(days);
+    assert.equal(teamContract.readAnalytics(payload, days), payload.data.analytics);
+    assert.throws(() => teamContract.readAnalytics(payload, days === 7 ? 30 : 7), /Invalid team analytics response/);
+  }
+  assert.equal(teamContract.safeSum([]), 0);
+  assert.equal(teamContract.safeSum([Number.MAX_SAFE_INTEGER - 1, 1]), Number.MAX_SAFE_INTEGER);
+  assert.equal(teamContract.safeSum([Number.MAX_SAFE_INTEGER, 1]), null);
+  const boundary = teamPayload();
+  boundary.data.analytics.members = [boundary.data.analytics.members[0]];
+  boundary.data.analytics.members[0].assigned = { total: Number.MAX_SAFE_INTEGER, new: 0,
+    inProgress: 0, booked: Number.MAX_SAFE_INTEGER, lost: 0, other: 0 };
+  boundary.data.analytics.totalLeads = Number.MAX_SAFE_INTEGER;
+  boundary.data.analytics.unassignedLeads = 0; boundary.data.analytics.otherAssigneeLeads = 0;
+  assert.equal(teamContract.readAnalytics(boundary, 30), boundary.data.analytics);
+  for (const { name, payload } of inconsistentTeamPayloads()) {
+    assert.throws(() => teamContract.readAnalytics(payload, 30), /Inconsistent team analytics response/, name);
+  }
+});
+
+test("team analytics parser requires nonnegative safe integers for every snapshot and activity count", () => {
+  const groups = [
+    ["totalLeads", "unassignedLeads", "otherAssigneeLeads"],
+    ["total", "new", "inProgress", "booked", "lost", "other"],
+    ["updatedEvents", "createdEvents", "touchedLeads"],
+  ];
+  for (const [index, keys] of groups.entries()) {
+    for (const key of keys) {
+      for (const invalid of [-1, 0.5, Number.MAX_SAFE_INTEGER + 1, NaN, Infinity, "3", null, undefined]) {
+        const payload = teamPayload();
+        const analytics = payload.data.analytics;
+        const record: Record<string, unknown> = index === 0 ? analytics
+          : index === 1 ? analytics.members[0].assigned : analytics.members[0].activity!;
+        record[key] = invalid;
+        assert.throws(() => teamContract.readAnalytics(payload, 30), /Invalid team analytics response/, `${index}/${key}/${invalid}`);
+      }
+    }
+  }
+});
+
 test("team analytics mounts below summaries only for mortgage owner/admin and is keyed by scope", async () => {
   for (const purpose of ["mortgage_leads", "clinic_services", "marketing"]) {
     for (const role of ["owner", "admin", "lead_manager", "manager", "marketer"]) {
@@ -498,6 +604,8 @@ test("team analytics mounts below summaries only for mortgage owner/admin and is
       if (component) {
         assert.equal(component.props.access, fixture.access);
         assert.equal(component.key, JSON.stringify([actor, workspace, role]));
+        assert.equal(component.props.initiallyExpanded, undefined, "LeadsPage retains default lazy loading");
+        assert.equal(component.props.heading, undefined, "LeadsPage retains the default heading");
         const summary = fixture.driver.nodes().findIndex((node) => node.props["aria-label"] === "Сводка по заявкам");
         assert.ok(fixture.driver.nodes().indexOf(component) > summary);
       }
@@ -529,7 +637,8 @@ test("team analytics is lazy, uses bound access, renders factual snapshots and c
   assert.notEqual(fixture.cells()[9], "-");
   assert.deepEqual(fixture.cells("Admin fixture").slice(6), ["-", "-", "-", "-"]);
   assert.deepEqual(fixture.cells("Owner fixture").slice(6), ["0", "0", "0", "-"]);
-  assert.doesNotMatch(fixture.text(), /CPL|ROI|конверси|звонк|платеж|балл|первый ответ/i);
+  assert.match(fixture.text(), /Конверсия в запись27,3%/);
+  assert.doesNotMatch(fixture.text(), /CPL|ROI|звонк|платеж|балл|первый ответ/i);
   const scroller = fixture.driver.nodes().find((node) => node.props.role === "region"); assert.ok(scroller);
   assert.match(scroller.props.className, /max-w-full.*overflow-x-auto/);
   const identityHeadings = nodes(scroller).filter((node) => node.type === "th" && (node.props.rowSpan === 2 || node.props.scope === "row"));
@@ -546,6 +655,135 @@ test("team analytics is lazy, uses bound access, renders factual snapshots and c
   assert.equal(fixture.requests.length, 2);
   assert.doesNotMatch(fixture.text(), /Manager fixture/);
   fixture.driver.dispose();
+});
+
+test("team results use the weighted assigned cohort with count-labelled member meters, zero and no denominator", async () => {
+  const fixture = teamSetup(); await fixture.driver.flush(); await fixture.toggle(true); await fixture.resolve(0);
+  assert.deepEqual(teamSummary(fixture.driver), {
+    "Назначено сотрудникам": "11", "Записаны": "3", "Конверсия в запись": "27,3%", "Потеряны": "1",
+  }, "3/11 excludes unassigned/other assignees and does not average member percentages or use activity counts");
+  const results = teamResults(fixture.driver);
+  assert.match(label(results), /Текущие назначенные заявки · всё время/);
+  assert.doesNotMatch(label(results), /7 дней|30 дней|90 дней|последние|Правки|Создания/);
+  const cohort = nodes(results).find((node) => node.props["aria-label"] === "Конверсия в запись по сотрудникам");
+  assert.ok(cohort);
+  for (const [name, count, rate, value] of [
+    ["Manager fixture", "3 из 9", "33,3%", 33.3],
+    ["Admin fixture", "0 из 2", "0%", 0],
+    ["Owner fixture", "0 из 0", "—", null],
+  ] as const) {
+    const member: Node | undefined = nodes(cohort).find((node) => node.type === "dl" && label(node).includes(name)); assert.ok(member);
+    assert.match(label(member), new RegExp(count));
+    assert.equal(label(nodes(member).find((node) => node.type === "strong")), rate);
+    const basis: Node | undefined = nodes(member).find((node) => typeof node.props.title === "string"); assert.ok(basis);
+    assert.match(basis.props.title, /все текущие заявки сотрудника/);
+    assert.match(basis.props.title, /текущий снимок, не история переходов за период/);
+    const meters: Node[] = nodes(member).filter((node) => node.type === "meter");
+    if (value === null) {
+      assert.equal(meters.length, 0, "missing denominator is not a zero-valued meter");
+      assert.ok(nodes(member).some((node) => node.props["aria-hidden"] === "true"));
+    } else {
+      assert.equal(meters.length, 1);
+      assert.equal(meters[0].props.value, value); assert.equal(meters[0].props.min, 0); assert.equal(meters[0].props.max, 100);
+      assert.equal(meters[0].props["aria-label"], `Конверсия в запись: ${name}; ${count}`);
+      assert.equal(label(meters[0]), rate);
+    }
+  }
+  const zero = teamPayload(); zero.data.analytics.members[0].assigned.booked = 0;
+  zero.data.analytics.members[0].assigned.other += 3;
+  await fixture.refresh(); await fixture.resolve(1, zero);
+  assert.equal(teamSummary(fixture.driver)["Конверсия в запись"], "0%", "a nonempty assigned cohort can have a valid zero rate");
+  assert.deepEqual(nodes(teamResults(fixture.driver)).filter((node) => node.type === "meter").map((node) => node.props.value), [0, 0]);
+  fixture.driver.dispose();
+});
+
+test("team analytics expansion is opt-in and autoload captures the original bound access", async () => {
+  const lazy = teamSetup({ initiallyExpanded: false, heading: "Local result heading" }); await lazy.driver.flush();
+  assert.equal(lazy.requests.length, 0);
+  assert.equal(label(lazy.driver.nodes().find((node) => node.type === "summary")), "Local result heading");
+  lazy.driver.dispose();
+
+  const fixture = teamSetup({ initiallyExpanded: true, heading: "Результаты по заявкам и конверсия" });
+  await fixture.driver.flush();
+  assert.equal(fixture.driver.nodes().find((node) => node.type === "details")?.props.open, true);
+  assert.equal(fixture.requests.length, 1); assert.equal(fixture.requests[0].days, 30);
+  assert.match(fixture.text(), /Результаты по заявкам и конверсия/);
+  await fixture.toggle(true);
+  assert.equal(fixture.requests.length, 1, "native initial toggle must not dispatch twice");
+  let reboundRequests = 0;
+  fixture.replaceAccess({ isCurrent: () => true, loadTeamAnalytics: async () => {
+    reboundRequests += 1; return Response.json(teamPayload());
+  } });
+  await fixture.driver.flush(); await fixture.resolve(0);
+  await fixture.period(7); await fixture.resolve(1, teamPayload(7));
+  assert.equal(fixture.requests[1].days, 7); assert.equal(reboundRequests, 0);
+  fixture.driver.dispose();
+
+  const expired = teamSetup({ initiallyExpanded: true }); expired.invalidate(); await expired.driver.flush();
+  assert.equal(expired.driver.tree(), null); assert.equal(expired.requests.length, 0); expired.driver.dispose();
+});
+
+test("expanded team analytics autoload uses the real bound session and expired callbacks cannot dispatch", async () => {
+  const session = setup("owner"); session.setAuth({ workspacePurpose: "mortgage_leads" });
+  session.reply(async () => Response.json(teamPayload())); session.lifetime(); await session.driver.flush();
+  const access: Access = session.driver.tree().props.access;
+  const fixture = teamSetup({ initiallyExpanded: true }, access); await fixture.driver.flush();
+  assert.equal(session.requests.length, 1);
+  assert.equal(session.requests[0].path, `/api/crm/lead-team-analytics?workspaceId=${workspace}&days=30`);
+  assert.equal(session.requests[0].init?.cache, "no-store");
+  assert.equal(session.requests[0].init?.expectedUserId, actor);
+  assert.equal(session.requests[0].init?.signal?.aborted, false);
+  assert.equal(teamSummary(fixture.driver)["Конверсия в запись"], "27,3%");
+  const period = fixture.driver.nodes().find((node) => node.type === "select"); assert.ok(period);
+  const refresh = fixture.driver.nodes().find((node) => node.props["aria-label"] === "Обновить работу команды"); assert.ok(refresh);
+  const details = fixture.driver.nodes().find((node) => node.type === "details"); assert.ok(details);
+  session.emit("actor-b"); session.emit(actor);
+  assert.equal(access.isCurrent(), false); assert.equal(session.requests[0].init?.signal?.aborted, true);
+  period.props.onChange({ target: { value: "7" } }); refresh.props.onClick(); details.props.onToggle({ currentTarget: { open: false } });
+  fixture.driver.invalidate(); await fixture.driver.flush();
+  assert.equal(fixture.driver.tree(), null); assert.equal(session.requests.length, 1);
+  fixture.driver.dispose(); session.driver.dispose();
+});
+
+test("mortgage analytics puts expanded staff results first and binds autoload to its workspace access", async () => {
+  const source = await read("pages/MortgageAnalytics.tsx");
+  for (const [role, clinicId] of [["owner", workspace], ["admin", workspace], ["lead_manager", workspace],
+    ["manager", workspace], ["marketer", workspace], ["owner", null]] as const) {
+    const driver = hookDriver();
+    const requests: string[] = [];
+    let current = true;
+    const isCurrent = () => current;
+    const module = evaluate(source + "\nexports.fixture = { MortgageAnalyticsAccess, MortgageAnalyticsReport };", { URLSearchParams }, {
+      react: driver.hooks,
+      "@/contexts/AuthContext": { useAuth: () => ({ clinicId, userRole: role, user: { id: actor } }) },
+      "@/lib/permissions": { roleLabels },
+      "@/lib/mortgage-workspace": { MortgageScope: "MortgageScope", useMortgageWorkspace: () => ({
+        isCurrent, loading: true, error: "", data: null, refresh: () => {},
+        request: async (url: string) => { requests.push(url); return Response.json(teamPayload()); },
+      }) },
+    });
+    driver.mount(() => module.fixture.MortgageAnalyticsAccess()); await driver.flush();
+    if (!clinicId || !["owner", "admin"].includes(role)) {
+      assert.equal(driver.nodes().some((node) => node.type === module.fixture.MortgageAnalyticsReport), false);
+      assert.match(label(driver.tree()), clinicId ? /Отчёт доступен владельцу и администратору/ : /пространство не выбрано/);
+      assert.equal(requests.length, 0); driver.dispose(); continue;
+    }
+    assert.equal(driver.tree().key, JSON.stringify([clinicId, role, actor]));
+    driver.mount(() => module.fixture.MortgageAnalyticsReport({ workspaceId: clinicId })); await driver.flush();
+    const team = driver.nodes().find((node) => node.type === "LeadTeamAnalytics"); assert.ok(team);
+    assert.equal(team.key, clinicId); assert.equal(team.props.initiallyExpanded, true);
+    assert.equal(team.props.heading, "Результаты по заявкам и конверсия");
+    assert.equal(team.props.access.isCurrent, isCurrent);
+    const workload = driver.nodes().findIndex((node) => node.props["aria-labelledby"] === "mortgage-member-report");
+    assert.ok(workload > driver.nodes().indexOf(team), "staff results precede workload even while workload is loading");
+    const child = teamSetup(team.props, team.props.access); await child.driver.flush();
+    assert.deepEqual(requests, [`/api/crm/lead-team-analytics?workspaceId=${clinicId}&days=30`]);
+    assert.equal(teamSummary(child.driver)["Конверсия в запись"], "27,3%");
+    current = false; driver.invalidate(); child.driver.invalidate(); await driver.flush(); await child.driver.flush();
+    assert.equal(driver.nodes().some((node) => node.type === "LeadTeamAnalytics"), false);
+    assert.equal(child.driver.tree(), null);
+    child.driver.dispose(); driver.dispose();
+  }
 });
 
 test("team analytics period changes clear data and ignore superseded responses and JSON bodies", async () => {
@@ -593,6 +831,44 @@ test("team analytics refresh failures and invalid/demo contracts clear prior dat
   }
 });
 
+test("team analytics rejects inconsistent staff results without leaving stale conversion or meters", async () => {
+  for (const { name, payload } of inconsistentTeamPayloads()) {
+    const fixture = teamSetup({ initiallyExpanded: true }); await fixture.driver.flush(); await fixture.resolve(0);
+    assert.equal(teamSummary(fixture.driver)["Конверсия в запись"], "27,3%", name);
+    await fixture.refresh(); await fixture.resolve(1, payload);
+    assert.match(fixture.text(), /Не удалось загрузить работу команды/, name);
+    assert.doesNotMatch(fixture.text(), /Manager fixture|Всего заявок|Конверсия в запись|27,3%|33,3%/, name);
+    assert.equal(fixture.driver.nodes().some((node) => node.type === "meter" || node.type === "table"), false, name);
+    assert.ok(fixture.driver.nodes().some((node) => node.props.role === "alert"), name);
+    fixture.driver.dispose();
+  }
+});
+
+test("team conversion stays an all-time snapshot across activity windows and unavailable activity", async () => {
+  const fixture = teamSetup({ initiallyExpanded: true }); await fixture.driver.flush(); await fixture.resolve(0);
+  const snapshot = label(teamResults(fixture.driver));
+  for (const days of [7, 30, 90]) {
+    await fixture.period(days);
+    const available = teamPayload(days);
+    available.data.analytics.members[0].activity!.updatedEvents = days;
+    available.data.analytics.members[0].activity!.createdEvents = days + 1;
+    available.data.analytics.members[0].activity!.touchedLeads = days + 2;
+    await fixture.resolve(fixture.requests.length - 1, available);
+    assert.match(fixture.text(), new RegExp(`Ручные события · последние ${days} дней`));
+    assert.deepEqual(fixture.cells().slice(6, 9), [String(days), String(days + 1), String(days + 2)]);
+    assert.equal(label(teamResults(fixture.driver)), snapshot, `${days}-day activity must not change conversion`);
+    await fixture.refresh();
+    const unavailable = clone(available); unavailable.data.analytics.activityStatus = "unavailable";
+    await fixture.resolve(fixture.requests.length - 1, unavailable);
+    assert.match(fixture.text(), /Активность недоступна/);
+    for (const name of ["Manager fixture", "Admin fixture", "Owner fixture"]) {
+      assert.deepEqual(fixture.cells(name).slice(6), ["-", "-", "-", "-"], name);
+    }
+    assert.equal(label(teamResults(fixture.driver)), snapshot, "unavailable activity must not zero or hide current conversion");
+  }
+  fixture.driver.dispose();
+});
+
 test("team analytics unavailable activity is not zero and empty members keep snapshot counters", async () => {
   const fixture = teamSetup(); await fixture.driver.flush(); await fixture.toggle(true);
   const payload = teamPayload(); payload.data.analytics.activityStatus = "unavailable";
@@ -601,11 +877,15 @@ test("team analytics unavailable activity is not zero and empty members keep sna
   assert.match(fixture.text(), /Активность недоступна/);
   assert.equal(fixture.cells()[5], "2", "other statuses remain visible");
   await fixture.refresh();
-  const empty = teamPayload(); empty.data.analytics.members = [];
+  const empty = teamPayload(); empty.data.analytics.members = []; empty.data.analytics.otherAssigneeLeads = 15;
   await fixture.resolve(1, empty);
   assert.match(fixture.text(), /Сотрудников нет/);
-  assert.match(fixture.text(), /Не назначены5Другие ответственные4/);
+  assert.match(fixture.text(), /Всего заявок20Не назначены5Другие ответственные15/);
+  assert.deepEqual(teamSummary(fixture.driver), {
+    "Назначено сотрудникам": "0", "Записаны": "0", "Конверсия в запись": "—", "Потеряны": "0",
+  });
   assert.equal(fixture.driver.nodes().some((node) => node.type === "table"), false);
+  assert.equal(fixture.driver.nodes().some((node) => node.type === "meter"), false);
   fixture.driver.dispose();
 });
 
@@ -622,17 +902,19 @@ test("team analytics captures access once and ignores invalidated scopes and lat
   await fixture.driver.flush(); assert.equal(parsed, false); assert.equal(fixture.driver.tree(), null);
   fixture.driver.dispose();
 
-  for (const cleanup of ["invalidate", "unmount", "collapse"]) {
-    const pending = teamSetup(); await pending.driver.flush(); await pending.toggle(true);
-    const body = deferred<unknown>(); let parsing = false;
-    pending.requests[0].response.resolve({ ok: true, json: () => { parsing = true; return body.promise; } } as Response);
-    await pending.driver.flush(); assert.equal(parsing, true);
-    if (cleanup === "invalidate") { pending.invalidate(); await pending.driver.flush(); }
-    else if (cleanup === "unmount") pending.driver.dispose();
-    else await pending.toggle(false);
-    body.resolve(teamPayload()); await pending.driver.flush();
-    assert.doesNotMatch(pending.text(), /Manager fixture|Всего заявок/, cleanup);
-    pending.driver.dispose();
+  for (const initiallyExpanded of [false, true]) {
+    for (const cleanup of ["invalidate", "unmount", "collapse"]) {
+      const pending = teamSetup({ initiallyExpanded }); await pending.driver.flush(); await pending.toggle(true);
+      const body = deferred<unknown>(); let parsing = false;
+      pending.requests[0].response.resolve({ ok: true, json: () => { parsing = true; return body.promise; } } as Response);
+      await pending.driver.flush(); assert.equal(parsing, true);
+      if (cleanup === "invalidate") { pending.invalidate(); await pending.driver.flush(); }
+      else if (cleanup === "unmount") pending.driver.dispose();
+      else await pending.toggle(false);
+      body.resolve(teamPayload()); await pending.driver.flush();
+      assert.doesNotMatch(pending.text(), /Manager fixture|Всего заявок|Конверсия в запись|27,3%|33,3%/, cleanup);
+      pending.driver.dispose();
+    }
   }
   const expired = teamSetup(); expired.invalidate(); await expired.driver.flush();
   assert.equal(expired.driver.tree(), null); assert.equal(expired.requests.length, 0); expired.driver.dispose();

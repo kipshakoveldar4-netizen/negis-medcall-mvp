@@ -3,6 +3,7 @@ import { createOperatorBrowserFixture } from "./operator-browser-store";
 import { createOperatorDispatchFixture } from "./operator-dispatch-fixture";
 import { createClinicArrivalBrowserFixture, isClinicArrivalFixtureLocation, type ClinicArrivalGuardedInit } from "./clinic-arrival-browser-store";
 import { mortgageBrowserRequest, mortgageLeadBrowserRequest, mortgageFixtureAdmin } from './mortgage-browser-store';
+import type { MortgageSnapshot } from '../../lib/crm/mortgage-contract';
 import { appointmentCreateFixtureIds, createAppointmentCreateBrowserFixture, isAppointmentCreateFixtureLocation } from "./appointment-create-browser-store";
 const retryFixture = new URLSearchParams(window.location?.search || "").get("bookingRetry") === "lost-response"
   ? createBookingRetryFixture() : null;
@@ -163,10 +164,25 @@ export async function crmFetch(input: string, init?: ClinicArrivalGuardedInit): 
     if (!mortgageFixture || !["owner", "admin"].includes(auth.userRole)) return Response.json({ success: false }, { status: 403 });
     const days = Number(url.searchParams.get("days") || 30);
     if (![7, 30, 90].includes(days)) return Response.json({ success: false }, { status: 400 });
+    const snapshotResponse = await mortgageBrowserRequest(new URL(`/api/crm/mortgage-workspace?days=${days}`, window.location.origin), undefined, auth.userRole);
+    const snapshot = (await snapshotResponse.json()).data as MortgageSnapshot;
+    const members = snapshot.members.map((member) => {
+      const mine = snapshot.contacts.filter((contact) => contact.responsibleUserId === member.id);
+      const assigned = { total: mine.length, new: 0, inProgress: 0, booked: 0, lost: 0, other: 0 };
+      for (const contact of mine) {
+        const bucket = contact.status === "new" ? "new" : contact.status === "in_progress" ? "inProgress"
+          : contact.status === "booked" ? "booked" : contact.status === "lost" ? "lost" : "other";
+        assigned[bucket] += 1;
+      }
+      return { staffId: member.id, name: member.name, role: member.role, status: member.status, assigned,
+        activity: { updatedEvents: 0, createdEvents: 0, touchedLeads: 0, lastRecordedAt: null } };
+    });
     const generatedAt = new Date().toISOString();
     return Response.json({ success: true, mode: "supabase", data: { analytics: {
       generatedAt, period: { days, from: new Date(Date.parse(generatedAt) - days * 86_400_000).toISOString(), to: generatedAt },
-      totalLeads: 7, unassignedLeads: 1, otherAssigneeLeads: 1, activityStatus: "available", members: teamMembers,
+      totalLeads: snapshot.metrics.totalLeads, unassignedLeads: snapshot.metrics.unassignedLeads,
+      otherAssigneeLeads: snapshot.contacts.filter((contact) => contact.responsibleUserId && !members.some((member) => member.staffId === contact.responsibleUserId)).length,
+      activityStatus: "available", members,
     } } });
   }
   if (mortgageFixture && resource === "lead-assignees") {

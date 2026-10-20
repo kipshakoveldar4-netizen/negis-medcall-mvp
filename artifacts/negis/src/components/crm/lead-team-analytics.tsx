@@ -48,6 +48,24 @@ function isTimestamp(value: unknown): value is string {
   return typeof value === "string" && value.trim() !== "" && Number.isFinite(Date.parse(value));
 }
 
+export function teamBookingConversion(booked: number, assigned: number): number | null {
+  if (!Number.isSafeInteger(booked) || !Number.isSafeInteger(assigned) || assigned <= 0 || booked < 0 || booked > assigned) return null;
+  return Math.round(booked / assigned * 1000) / 10;
+}
+
+function safeSum(values: number[]): number | null {
+  let sum = 0;
+  for (const value of values) {
+    sum += value;
+    if (!Number.isSafeInteger(sum)) return null;
+  }
+  return sum;
+}
+
+function percent(value: number | null): string {
+  return value === null ? "—" : `${value.toLocaleString("ru-RU", { maximumFractionDigits: 1 })}%`;
+}
+
 function readAnalytics(body: unknown, days: number): Analytics {
   const analytics = isRecord(body) && body.success === true && body.mode === "supabase" && isRecord(body.data)
     ? body.data.analytics : null;
@@ -66,7 +84,16 @@ function readAnalytics(body: unknown, days: number): Analytics {
         && (member.activity.lastRecordedAt === null || isTimestamp(member.activity.lastRecordedAt)))))) {
     throw new Error("Invalid team analytics response");
   }
-  return analytics as Analytics;
+  const result = analytics as Analytics;
+  const ids = new Set(result.members.map((member) => member.staffId));
+  if (ids.size !== result.members.length
+    || Date.parse(result.period.from) > Date.parse(result.period.to)
+    || Date.parse(result.period.to) > Date.parse(result.generatedAt)
+    || result.members.some((member) => safeSum(ASSIGNED_FIELDS.filter((key) => key !== "total").map((key) => member.assigned[key])) !== member.assigned.total)
+    || safeSum([result.unassignedLeads, result.otherAssigneeLeads, ...result.members.map((member) => member.assigned.total)]) !== result.totalLeads) {
+    throw new Error("Inconsistent team analytics response");
+  }
+  return result;
 }
 
 function dateTime(value: string): string {
@@ -75,9 +102,11 @@ function dateTime(value: string): string {
   });
 }
 
-export function LeadTeamAnalytics({ access }: { access: SessionAccess }) {
+export function LeadTeamAnalytics({ access, initiallyExpanded = false, heading = "Работа команды" }: {
+  access: SessionAccess; initiallyExpanded?: boolean; heading?: string;
+}) {
   const [sessionAccess] = useState(() => access);
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(initiallyExpanded);
   const [days, setDays] = useState<number>(30);
   const [refresh, setRefresh] = useState(0);
   const [state, setState] = useState<LoadState>({ kind: "idle" });
@@ -113,6 +142,9 @@ export function LeadTeamAnalytics({ access }: { access: SessionAccess }) {
 
   if (!sessionAccess.isCurrent()) return null;
   const analytics = state.kind === "ready" ? state.analytics : null;
+  const assignedTotal = analytics?.members.reduce((sum, member) => sum + member.assigned.total, 0) ?? 0;
+  const bookedTotal = analytics?.members.reduce((sum, member) => sum + member.assigned.booked, 0) ?? 0;
+  const lostTotal = analytics?.members.reduce((sum, member) => sum + member.assigned.lost, 0) ?? 0;
   const loading = state.kind === "loading";
 
   return (
@@ -124,7 +156,7 @@ export function LeadTeamAnalytics({ access }: { access: SessionAccess }) {
         setState({ kind: next ? "loading" : "idle" });
         setExpanded(next);
       }}>
-      <summary className="cursor-pointer text-sm font-semibold" style={{ color: "var(--negis-text)" }}>Работа команды</summary>
+      <summary className="cursor-pointer text-sm font-semibold" style={{ color: "var(--negis-text)" }}>{heading}</summary>
       {expanded && <div className="min-w-0 space-y-4 pt-4" aria-busy={loading}>
         <div className="flex flex-wrap items-end justify-between gap-3">
           <label className="text-xs" style={{ color: "var(--negis-muted)" }}>
@@ -162,6 +194,34 @@ export function LeadTeamAnalytics({ access }: { access: SessionAccess }) {
         </p>}
 
         {analytics && <>
+          <section className="min-w-0" aria-label="Результаты по назначенным заявкам">
+            <h3 className="mb-3 text-xs font-semibold text-[var(--negis-muted)]">Текущие назначенные заявки · всё время</h3>
+            <dl className="grid min-w-0 grid-cols-2 gap-4 border-y border-[var(--negis-border)] py-4 lg:grid-cols-4">
+              {[
+                ["Назначено сотрудникам", assignedTotal.toLocaleString("ru-RU")],
+                ["Записаны", bookedTotal.toLocaleString("ru-RU")],
+                ["Конверсия в запись", percent(teamBookingConversion(bookedTotal, assignedTotal))],
+                ["Потеряны", lostTotal.toLocaleString("ru-RU")],
+              ].map(([label, value]) => <div key={label} className="min-w-0">
+                <dt className="break-words text-xs text-[var(--negis-muted)]">{label}</dt>
+                <dd className="mt-1 break-words text-xl font-semibold tabular-nums text-[var(--negis-text)]">{value}</dd>
+              </div>)}
+            </dl>
+            {analytics.members.length > 0 && <div className="mt-4 grid min-w-0 gap-x-8 gap-y-4 lg:grid-cols-2" aria-label="Конверсия в запись по сотрудникам">
+              {analytics.members.map((member) => {
+                const conversion = teamBookingConversion(member.assigned.booked, member.assigned.total);
+                return <dl key={member.staffId} className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-3 gap-y-1.5">
+                  <dt className="min-w-0 break-words text-xs font-medium text-[var(--negis-text)]">{member.name || "Сотрудник"}<span className="mt-0.5 block text-[11px] font-normal text-[var(--negis-muted)]">{member.status === "active" ? "Активен" : "Неактивен"}</span></dt>
+                  <dd className="text-right text-xs tabular-nums text-[var(--negis-text)]"><strong className="font-semibold">{percent(conversion)}</strong><span className="mt-0.5 block text-[11px] text-[var(--negis-muted)]">{member.assigned.booked.toLocaleString("ru-RU")} из {member.assigned.total.toLocaleString("ru-RU")}</span></dd>
+                  <dd className="col-span-2 min-w-0" title="Заявки в статусе «Записана» / все текущие заявки сотрудника. Это текущий снимок, не история переходов за период.">
+                    {conversion === null ? <div className="h-2 bg-[var(--negis-surface-2)]" aria-hidden="true" />
+                      : <meter min={0} max={100} value={conversion} aria-label={`Конверсия в запись: ${member.name || "Сотрудник"}; ${member.assigned.booked} из ${member.assigned.total}`}
+                        className="block h-2 w-full appearance-none overflow-hidden rounded-sm bg-[var(--negis-surface-2)] [&::-webkit-meter-bar]:h-2 [&::-webkit-meter-bar]:rounded-sm [&::-webkit-meter-bar]:border-0 [&::-webkit-meter-bar]:bg-[var(--negis-surface-2)] [&::-webkit-meter-bar]:bg-none [&::-webkit-meter-optimum-value]:bg-[var(--negis-primary)] [&::-webkit-meter-optimum-value]:bg-none [&::-moz-meter-bar]:bg-[var(--negis-primary)] [&::-moz-meter-bar]:bg-none">{percent(conversion)}</meter>}
+                  </dd>
+                </dl>;
+              })}
+            </div>}
+          </section>
           <div>
             <h3 className="mb-2 text-xs font-semibold" style={{ color: "var(--negis-muted)" }}>Текущие заявки · все время</h3>
             <dl className="grid gap-3 sm:grid-cols-3">

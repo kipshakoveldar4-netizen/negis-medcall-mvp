@@ -46,6 +46,8 @@ function MortgageAnalyticsReport({ workspaceId }: { workspaceId: string }) {
       }} />
     </MortgagePageHeader>
 
+    {isCurrent() && <LeadTeamAnalytics key={workspaceId} access={access} initiallyExpanded heading="Результаты по заявкам и конверсия" />}
+
     <section className="min-w-0" aria-labelledby="mortgage-member-report">
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <h2 id="mortgage-member-report" className="text-sm font-semibold">Нагрузка и действия сотрудников</h2>
@@ -107,7 +109,6 @@ function MortgageAnalyticsReport({ workspaceId }: { workspaceId: string }) {
         </div>}
     </section>
 
-    {isCurrent() && <LeadTeamAnalytics key={workspaceId} access={access} />}
   </div>;
 }
 
