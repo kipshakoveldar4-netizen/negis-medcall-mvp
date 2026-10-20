@@ -854,13 +854,49 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
   const [photoFormat, setPhotoFormat] = useState<PhotoFormatId>("story");
   const [photoLayout, setPhotoLayout] = useState<PhotoLayoutId>("gradient_bottom");
   const [photoTexts, setPhotoTexts] = useState<PhotoCreativeTexts>(defaultPhotoTexts);
-  const photoTextInputsRef = useRef({ format: photoFormat, sourceType: photoSourceType, sourceName: photoSourceName, texts: photoTexts });
+  const photoTextInputsRef = useRef({ format: photoFormat, layout: photoLayout, sourceType: photoSourceType, sourceName: photoSourceName, sourceUrl: photoSourceUrl, texts: photoTexts });
   const photoTextRevision = useRef(0);
   const photoTextPending = useRef<object | null>(null);
   const [photoPreviewUrl, setPhotoPreviewUrl] = useState("");
   const [photoBlob, setPhotoBlob] = useState<Blob | null>(null);
+  const photoArtifactRef = useRef<{
+    blob: Blob; previewUrl: string; inputs: typeof photoTextInputsRef.current;
+    revision: number; session: AbortController;
+  } | null>(null);
+  const photoRenderPending = useRef<object | null>(null);
+  const photoHandoffPending = useRef<object | null>(null);
+  const photoObjectUrls = useRef(new Set<string>());
   const [photoBusy, setPhotoBusy] = useState<"render" | "suggest" | "handoff" | null>(null);
   const [photoSuggestMode, setPhotoSuggestMode] = useState("");
+
+  useLayoutEffect(() => () => {
+    for (const url of photoObjectUrls.current) URL.revokeObjectURL(url);
+    photoObjectUrls.current.clear();
+    photoArtifactRef.current = null;
+  }, []);
+
+  function releasePhotoUrl(url: string) {
+    if (photoObjectUrls.current.delete(url)) URL.revokeObjectURL(url);
+  }
+
+  function invalidatePhotoPreview() {
+    const artifact = photoArtifactRef.current;
+    photoArtifactRef.current = null;
+    if (!artifact) return;
+    releasePhotoUrl(artifact.previewUrl);
+    setPhotoBlob(null);
+    setPhotoPreviewUrl("");
+  }
+
+  function isPhotoArtifactCurrent(
+    artifact: typeof photoArtifactRef.current,
+    session: AbortController | null,
+  ): artifact is NonNullable<typeof photoArtifactRef.current> {
+    return Boolean(artifact && isHandoffSessionAlive(session) && artifact.session === session
+      && photoArtifactRef.current === artifact && photoTextInputsRef.current === artifact.inputs
+      && photoTextRevision.current === artifact.revision && artifact.blob === photoBlob
+      && artifact.previewUrl === photoPreviewUrl);
+  }
 
   const [genPrompt, setGenPrompt] = useState("");
   const [genFormat, setGenFormat] = useState("reels");
@@ -960,6 +996,7 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
     const texts = { ...inputs.texts, [key]: value };
     photoTextRevision.current += 1;
     photoTextInputsRef.current = { ...inputs, texts };
+    invalidatePhotoPreview();
     setPhotoTexts(texts);
   };
 
@@ -967,13 +1004,23 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
     if (photoTextInputsRef.current.format === format) return;
     photoTextRevision.current += 1;
     photoTextInputsRef.current = { ...photoTextInputsRef.current, format };
+    invalidatePhotoPreview();
     setPhotoFormat(format);
+  };
+
+  const updatePhotoLayout = (layout: PhotoLayoutId) => {
+    if (photoTextInputsRef.current.layout === layout) return;
+    photoTextRevision.current += 1;
+    photoTextInputsRef.current = { ...photoTextInputsRef.current, layout };
+    invalidatePhotoPreview();
+    setPhotoLayout(layout);
   };
 
   const updatePhotoSourceType = (sourceType: string) => {
     if (photoTextInputsRef.current.sourceType === sourceType) return;
     photoTextRevision.current += 1;
     photoTextInputsRef.current = { ...photoTextInputsRef.current, sourceType };
+    invalidatePhotoPreview();
     setPhotoSourceType(sourceType);
   };
 
@@ -993,19 +1040,20 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
   );
 
   const onPhotoFileSelected = (file: File | null) => {
+    if (!isHandoffSessionAlive(sessionRef.current)) return;
     if (!file) return;
     if (!file.type.startsWith("image/")) {
       toast.error("Загрузите изображение (JPG, PNG или WEBP)");
       return;
     }
+    const sourceUrl = URL.createObjectURL(file);
+    photoObjectUrls.current.add(sourceUrl);
+    releasePhotoUrl(photoTextInputsRef.current.sourceUrl);
     photoTextRevision.current += 1;
-    photoTextInputsRef.current = { ...photoTextInputsRef.current, sourceName: file.name };
-    if (photoSourceUrl.startsWith("blob:")) URL.revokeObjectURL(photoSourceUrl);
-    if (photoPreviewUrl.startsWith("blob:")) URL.revokeObjectURL(photoPreviewUrl);
-    setPhotoSourceUrl(URL.createObjectURL(file));
+    photoTextInputsRef.current = { ...photoTextInputsRef.current, sourceName: file.name, sourceUrl };
+    invalidatePhotoPreview();
+    setPhotoSourceUrl(sourceUrl);
     setPhotoSourceName(file.name);
-    setPhotoPreviewUrl("");
-    setPhotoBlob(null);
   };
 
   const suggestPhotoTexts = async () => {
@@ -1069,6 +1117,7 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
       };
       photoTextRevision.current += 1;
       photoTextInputsRef.current = { ...inputs, texts };
+      invalidatePhotoPreview();
       setPhotoTexts(texts);
       setPhotoSuggestMode(mode);
       toast.success(mode === "demo" ? "Образец текстов готов" : "Тексты готовы");
@@ -1087,48 +1136,72 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
   };
 
   const generatePhotoLayout = async (layoutOverride?: PhotoLayoutId) => {
-    if (!photoSourceUrl) {
+    const session = sessionRef.current;
+    if (photoRenderPending.current || !isHandoffSessionAlive(session)) return;
+    if (!photoTextInputsRef.current.sourceUrl) {
       toast.error("Сначала загрузите фото клиники");
       return;
     }
-    const layout = layoutOverride || photoLayout;
+    if (layoutOverride) updatePhotoLayout(layoutOverride);
+    const inputs = photoTextInputsRef.current;
+    const revision = photoTextRevision.current;
+    const attempt = {};
+    photoRenderPending.current = attempt;
+    const isCurrent = () => photoRenderPending.current === attempt && isHandoffSessionAlive(session)
+      && photoTextInputsRef.current === inputs && photoTextRevision.current === revision;
+    const isVerified = async () => isCurrent() && await isHandoffSessionCurrent(session) && isCurrent();
     setPhotoBusy("render");
     try {
-      const format = photoFormats.find((item) => item.id === photoFormat) || photoFormats[0];
+      if (!await isVerified()) return;
+      const format = photoFormats.find((item) => item.id === inputs.format) || photoFormats[0];
       const blob = await renderPhotoCreative({
-        imageUrl: photoSourceUrl,
+        imageUrl: inputs.sourceUrl,
         width: format.width,
         height: format.height,
-        layout,
-        texts: photoTexts,
+        layout: inputs.layout,
+        texts: inputs.texts,
       });
+      if (!await isVerified()) return;
       if (!blob) throw new Error("Не удалось создать макет");
-      if (photoPreviewUrl.startsWith("blob:")) URL.revokeObjectURL(photoPreviewUrl);
+      const previewUrl = URL.createObjectURL(blob);
+      photoObjectUrls.current.add(previewUrl);
+      invalidatePhotoPreview();
+      photoArtifactRef.current = { blob, previewUrl, inputs, revision, session };
       setPhotoBlob(blob);
-      setPhotoPreviewUrl(URL.createObjectURL(blob));
+      setPhotoPreviewUrl(previewUrl);
       toast.success("Макет креатива готов");
     } catch (error) {
+      if (!await isVerified()) return;
       toast.error(error instanceof Error ? error.message : "Ошибка создания макета");
     } finally {
-      setPhotoBusy(null);
+      if (photoRenderPending.current === attempt) {
+        photoRenderPending.current = null;
+        if (session && sessionRef.current === session && !session.signal.aborted) {
+          setPhotoBusy((current) => current === "render" ? null : current);
+        }
+      }
     }
   };
 
   const createAnotherPhotoVersion = async () => {
-    const currentIndex = photoLayouts.findIndex((item) => item.id === photoLayout);
+    if (photoRenderPending.current || !isHandoffSessionAlive(sessionRef.current)) return;
+    const currentIndex = photoLayouts.findIndex((item) => item.id === photoTextInputsRef.current.layout);
     const next = photoLayouts[(currentIndex + 1) % photoLayouts.length].id;
-    setPhotoLayout(next);
     await generatePhotoLayout(next);
   };
 
-  const downloadPhotoCreative = () => {
-    if (!photoPreviewUrl) {
+  const downloadPhotoCreative = async () => {
+    const session = sessionRef.current;
+    const artifact = photoArtifactRef.current;
+    if (!isHandoffSessionAlive(session)) return;
+    if (!isPhotoArtifactCurrent(artifact, session) || photoRenderPending.current) {
       toast.error("Сначала сгенерируйте макет");
       return;
     }
+    if (!await isHandoffSessionCurrent(session) || !isPhotoArtifactCurrent(artifact, session) || photoRenderPending.current) return;
     const link = document.createElement("a");
-    link.href = photoPreviewUrl;
-    link.download = `medina-os-photo-creative-${photoFormat}.jpg`;
+    link.href = artifact.previewUrl;
+    link.download = `medina-os-photo-creative-${artifact.inputs.format}.jpg`;
     link.click();
     toast.success("Изображение скачивается");
   };
@@ -1138,13 +1211,25 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
 
   const usePhotoInAdsAutomation = async () => {
     const session = sessionRef.current;
-    if (!await isHandoffSessionCurrent(session) || !isHandoffSessionAlive(session)) return;
-    if (!photoBlob) {
+    if (photoHandoffPending.current || !isHandoffSessionAlive(session)) return;
+    const artifact = photoArtifactRef.current;
+    if (!isPhotoArtifactCurrent(artifact, session) || photoRenderPending.current) {
       toast.error("Сначала сгенерируйте макет");
       return;
     }
-    setPhotoBusy("handoff");
+    const inputs = artifact.inputs;
+    const brief = packageBriefRef.current;
+    const briefRevision = packageBriefRevision.current;
+    const attempt = {};
+    photoHandoffPending.current = attempt;
+    const photoCurrent = () => photoHandoffPending.current === attempt && isPhotoArtifactCurrent(artifact, session)
+      && !photoRenderPending.current && packageBriefRef.current === brief && packageBriefRevision.current === briefRevision;
+    const photoVerified = async () => photoCurrent() && await isHandoffSessionCurrent(session) && photoCurrent();
+    let handoffStarted = false;
     try {
+      if (!await photoVerified()) return;
+      setPhotoBusy("handoff");
+      handoffStarted = true;
       // Upload the rendered JPEG through the existing signed upload flow so
       // Ads Automation gets a real public creative URL.
       let creativeUrl = "";
@@ -1154,33 +1239,33 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
           const signedResponse = await crmFetch(
             `/api/crm/ad-creatives/signed-upload?workspaceId=${encodeURIComponent(workspaceId)}`,
             {
-              expectedUserId: actorId, dispatchGuard: () => isHandoffSessionAlive(session), signal: session.signal,
+              expectedUserId: actorId, dispatchGuard: photoCurrent, signal: session.signal,
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
                 fileName,
                 fileType: "image",
                 mimeType: "image/jpeg",
-                fileSize: photoBlob.size,
+                fileSize: artifact.blob.size,
               }),
             },
           );
-          if (!await isHandoffSessionCurrent(session) || !isHandoffSessionAlive(session)) return;
+          if (!await photoVerified()) return;
           if (handoffAccessDenied(signedResponse)) {
             toast.error("Доступ к передаче креатива отозван. Обновите страницу.");
             return;
           }
           const signedBody = await safeJson<{ bucket?: string; storageBucket?: string; storagePath?: string; token?: string; publicUrl?: string }>(signedResponse);
-          if (!await isHandoffSessionCurrent(session) || !isHandoffSessionAlive(session)) return;
+          if (!await photoVerified()) return;
           if (signedResponse.ok && signedBody?.success === true) {
             const bucket = signedBody.data.bucket || signedBody.data.storageBucket || "ad-creatives";
             const storagePath = signedBody.data.storagePath || "";
             const token = signedBody.data.token || "";
             if (storagePath && token) {
-              const { error: uploadError } = await supabase.storage.from(bucket).uploadToSignedUrl(storagePath, token, photoBlob, {
+              const { error: uploadError } = await supabase.storage.from(bucket).uploadToSignedUrl(storagePath, token, artifact.blob, {
                 contentType: "image/jpeg",
               });
-              if (!await isHandoffSessionCurrent(session) || !isHandoffSessionAlive(session)) return;
+              if (!await photoVerified()) return;
               if (handoffAccessDenied(uploadError)) {
                 toast.error("Доступ к передаче креатива отозван. Обновите страницу.");
                 return;
@@ -1198,7 +1283,7 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
             }
           }
         } catch (error) {
-          if (!await isHandoffSessionCurrent(session) || !isHandoffSessionAlive(session)) return;
+          if (!await photoVerified()) return;
           if (handoffAccessDenied(error)) {
             toast.error("Доступ к передаче креатива отозван. Обновите страницу.");
             return;
@@ -1206,48 +1291,48 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
           creativeUrl = "";
         }
       }
-      if (!await isHandoffSessionCurrent(session) || !isHandoffSessionAlive(session)) return;
+      if (!await photoVerified()) return;
       if (!creativeUrl) {
         toast.warning("Не удалось загрузить креатив в Storage — передаём только тексты. Изображение можно скачать и загрузить вручную.");
         fileName = "";
       }
 
-      const formatLabel = photoFormats.find((item) => item.id === photoFormat)?.label || photoFormat;
-      const layoutLabel = photoLayouts.find((item) => item.id === photoLayout)?.label || photoLayout;
+      const formatLabel = photoFormats.find((item) => item.id === inputs.format)?.label || inputs.format;
+      const layoutLabel = photoLayouts.find((item) => item.id === inputs.layout)?.label || inputs.layout;
 
       // Persist metadata: content_videos keeps the whole body in raw_payload.
       try {
         if (!localDraftsOnly) {
           const response = await crmFetch(`/api/crm/content-videos?workspaceId=${encodeURIComponent(workspaceId)}`, {
-            expectedUserId: actorId, dispatchGuard: () => isHandoffSessionAlive(session), signal: session.signal,
+            expectedUserId: actorId, dispatchGuard: photoCurrent, signal: session.signal,
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-              title: photoTexts.headline,
-              niche: packageBrief.service,
+              title: inputs.texts.headline,
+              niche: brief.service,
               goal: "photo_creative",
               style: layoutLabel,
-              audience: packageBrief.audience,
-              caption: photoTexts.offer,
-              cta: photoTexts.cta,
+              audience: brief.audience,
+              caption: inputs.texts.offer,
+              cta: inputs.texts.cta,
               status: "idea",
               photoCreative: {
-                format: photoFormat,
-                layout: photoLayout,
-                sourceType: photoSourceType,
+                format: inputs.format,
+                layout: inputs.layout,
+                sourceType: inputs.sourceType,
                 creativeUrl,
-                texts: photoTexts,
+                texts: inputs.texts,
               },
             }),
           });
-          if (!await isHandoffSessionCurrent(session) || !isHandoffSessionAlive(session)) return;
+          if (!await photoVerified()) return;
           if (handoffAccessDenied(response)) {
             toast.error("Доступ к передаче креатива отозван. Обновите страницу.");
             return;
           }
         }
       } catch (error) {
-        if (!await isHandoffSessionCurrent(session) || !isHandoffSessionAlive(session)) return;
+        if (!await photoVerified()) return;
         if (handoffAccessDenied(error)) {
           toast.error("Доступ к передаче креатива отозван. Обновите страницу.");
           return;
@@ -1255,32 +1340,37 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
         // A metadata outage does not discard the current user's local draft.
       }
 
-      if (!await isHandoffSessionCurrent(session) || !isHandoffSessionAlive(session)) return;
+      if (!await photoVerified()) return;
       writeContentToAdsAutomation({
         sourceKind: "photo",
-        campaignName: photoTexts.headline,
-        service: packageBrief.service,
-        city: packageBrief.city,
-        offer: photoTexts.offer,
-        audience: packageBrief.audience,
-        primaryText: `${photoTexts.offer}. ${photoTexts.cta}.`,
-        headline: photoTexts.headline,
-        description: photoTexts.offer,
+        campaignName: inputs.texts.headline,
+        service: brief.service,
+        city: brief.city,
+        offer: inputs.texts.offer,
+        audience: brief.audience,
+        primaryText: `${inputs.texts.offer}. ${inputs.texts.cta}.`,
+        headline: inputs.texts.headline,
+        description: inputs.texts.offer,
         cta: "LEARN_MORE",
         creative: {
           type: "image",
           url: creativeUrl,
           fileName,
           mimeType: "image/jpeg",
-          fileSize: photoBlob.size,
-          format: photoFormat,
-          brief: `Фото-креатив: ${layoutLabel}, формат ${formatLabel}, CTA «${photoTexts.cta}»`,
+          fileSize: artifact.blob.size,
+          format: inputs.format,
+          brief: `Фото-креатив: ${layoutLabel}, формат ${formatLabel}, CTA «${inputs.texts.cta}»`,
         },
       });
       toast.success("Фото-креатив передан в AI запуск рекламы");
       setLocation("/ads-automation");
     } finally {
-      if (isHandoffSessionAlive(session)) setPhotoBusy(null);
+      if (photoHandoffPending.current === attempt) {
+        photoHandoffPending.current = null;
+        if (handoffStarted && session && sessionRef.current === session && !session.signal.aborted) {
+          setPhotoBusy((current) => current === "handoff" ? null : current);
+        }
+      }
     }
   };
 
@@ -3017,7 +3107,7 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
                 className={`rounded-full border px-4 py-2 text-xs font-black ${
                   photoLayout === layout.id ? "border-[#0D9488] bg-[#0D9488] text-white" : "border-[#E7ECF3] bg-white text-[#475569]"
                 }`}
-                onClick={() => setPhotoLayout(layout.id)}
+                onClick={() => updatePhotoLayout(layout.id)}
               >
                 {layout.label}
               </button>

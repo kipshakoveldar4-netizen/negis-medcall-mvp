@@ -1007,10 +1007,11 @@ type LocalPackageCallbacks = { generate: () => Promise<void>; click: () => void;
   updateBrief: (key: keyof LocalPackageBrief, value: string) => void };
 type LocalPhotoTexts = { headline: string; offer: string; cta: string; disclaimer: string };
 type LocalPhotoInputs = { photoFormat: string; photoSourceType: string; photoSourceName: string; photoTexts: LocalPhotoTexts;
-  photoSourceUrl: string; photoPreviewUrl: string; photoBusy: string | null; photoSuggestMode: string };
+  photoSourceUrl: string; photoPreviewUrl: string; photoLayout: string; photoBlob: Blob | null; photoBusy: string | null; photoSuggestMode: string };
 type LocalPhotoSuggestionCallbacks = { suggest: () => Promise<void>; click: () => void; disabled: boolean;
   updateBrief: LocalPackageCallbacks["updateBrief"]; updateTexts: (key: keyof LocalPhotoTexts, value: string) => void;
-  changeFormat: (value: string) => void; changeSourceType: (value: string) => void;
+  changeFormat: (value: string) => void; changeSourceType: (value: string) => void; changeLayout: (value: string) => void;
+  render: (layout?: string) => Promise<void>; next: () => Promise<void>; download: () => void | Promise<void>; handoff: () => Promise<void>;
   selectFile: (file: { name: string; type: string; size: number } | null) => void };
 const LOCAL_PACKAGE_BRIEF: LocalPackageBrief = { mode: "idea", format: "reels", service: "Synthetic service A", city: "Synthetic city A",
   offer: "Synthetic offer A", audience: "Synthetic audience A", goal: "leads", tone: "local", materialNotes: "Local materials A" };
@@ -1105,10 +1106,11 @@ const generationCallbackPrograms = (async () => {
     child.body!.statements.some((node) => ts.isFunctionDeclaration(node) && node.name?.text === name));
   const denialHelpers = ast.statements.some((node) => ts.isFunctionDeclaration(node) && node.name?.text === "handoffAccessDenied")
     ? ["handoffAccessDenied"] : [];
-  const handoff = `${select(source, ["safeJson", "withWorkspace", "photoFormats", "photoLayouts", "createContentApproval", "writeAdsAutomationPrefill", ...denialHelpers])}
+  const handoff = (refs: string[], helpers: string[]) => `${select(source, ["safeJson", "withWorkspace", "photoFormats", "photoLayouts", "createContentApproval", "writeAdsAutomationPrefill", ...denialHelpers])}
     exports.selected = function captureHandoffs({ actorId, workspaceId, localDraftsOnly, sessionRef },
-      { contentPackageId = "fixture-package-a", contentPackage = handoffPackage, selectedAdVariant = handoffVariant } = {}) {
-      ${select(source, ["isSessionAlive", "isGenerationSessionCurrent", ...handoffHelpers,
+      { contentPackageId = "fixture-package-a", contentPackage = handoffPackage, selectedAdVariant = handoffVariant } = {}, refs = {}) {
+      const { ${refs.join(", ")} } = refs;
+      ${select(source, ["isSessionAlive", "isGenerationSessionCurrent", ...handoffHelpers, ...helpers,
         "writeContentToAdsAutomation", "persistSelectedContentApproval", "usePhotoInAdsAutomation", "useGeneratedInAdsAutomation", "useInAdsAutomation"])}
       return { photo: usePhotoInAdsAutomation, generated: useGeneratedInAdsAutomation, package: useInAdsAutomation,
         approve: persistSelectedContentApproval };
@@ -1156,7 +1158,7 @@ const generationCallbackPrograms = (async () => {
       ${select(source, ["isSessionAlive", "isGenerationSessionCurrent", ...handoffHelpers, "updatePackageBrief", "generatePackage"])}
       return { generate: generatePackage, updateBrief: updatePackageBrief, click: ${packageButtons[0].click}, disabled: ${packageButtons[0].disabled} };
     };`;
-  const photoInputNames = ["photoFormat", "photoSourceType", "photoSourceName", "photoTexts", "photoSourceUrl", "photoPreviewUrl", "photoBusy", "photoSuggestMode"];
+  const photoInputNames = ["photoFormat", "photoLayout", "photoSourceType", "photoSourceName", "photoTexts", "photoSourceUrl", "photoPreviewUrl", "photoBlob", "photoBusy", "photoSuggestMode"];
   const photoDefaults = photoInputNames.map((name) => {
     const statement = child.body!.statements.find((node) => ts.isVariableStatement(node)
       && node.declarationList.declarations.some((item) => ts.isArrayBindingPattern(item.name)
@@ -1172,10 +1174,17 @@ const generationCallbackPrograms = (async () => {
       && item.initializer && ts.isCallExpression(item.initializer) && item.initializer.expression.getText(ast) === "useRef"));
   const photoRefNames = photoRefDeclarations.flatMap((node) => (node as import("typescript").VariableStatement)
     .declarationList.declarations.map((item) => item.name.getText(ast)));
-  const photoExtraHelpers = ["updatePhotoFormat", "updatePhotoSourceType"].filter((name) =>
+  const photoExtraHelpers = ["updatePhotoFormat", "updatePhotoSourceType", "updatePhotoLayout"].filter((name) =>
     child.body!.statements.some((node) => ts.isVariableStatement(node)
       && node.declarationList.declarations.some((item) => item.name.getText(ast) === name)));
-  const photoEvents = { click: [] as string[], disabled: [] as string[], format: [] as string[], sourceType: [] as string[] };
+  const photoArtifactHelpers = ["releasePhotoUrl", "invalidatePhotoPreview", "isPhotoArtifactCurrent"].filter((name) =>
+    child.body!.statements.some((node) => ts.isFunctionDeclaration(node) && node.name?.text === name));
+  const photoCleanupEffects = child.body.statements.filter((node) => ts.isExpressionStatement(node)
+    && ts.isCallExpression(node.expression) && node.expression.expression.getText(ast) === "useLayoutEffect"
+    && node.expression.arguments[0]?.getText(ast).includes("photoObjectUrls"))
+    .map((node) => ((node as import("typescript").ExpressionStatement).expression as import("typescript").CallExpression).arguments[0].getText(ast));
+  assert.ok(photoCleanupEffects.length <= 1, "retain exactly the actual optional photo URL cleanup effect");
+  const photoEvents = { click: [] as string[], disabled: [] as string[], format: [] as string[], sourceType: [] as string[], layout: [] as string[] };
   const visitPhotoEvents = (node: import("typescript").Node) => {
     if (ts.isJsxOpeningElement(node)) {
       const expression = (name: string) => {
@@ -1192,6 +1201,9 @@ const generationCallbackPrograms = (async () => {
       if (node.tagName.getText(ast) === "select" && expression("value") === "photoSourceType") {
         photoEvents.sourceType.push(expression("onChange")!);
       }
+      if (node.tagName.getText(ast) === "button" && expression("key") === "layout.id" && node.getText(ast).includes("photoLayout")) {
+        photoEvents.layout.push(expression("onClick")!);
+      }
     }
     ts.forEachChild(node, visitPhotoEvents);
   };
@@ -1202,28 +1214,43 @@ const generationCallbackPrograms = (async () => {
     ${packageRefAssignments.map((node) => node.getText(ast)).join("\n")}
     return { ${[...packageRefNames, ...photoRefNames].join(", ")} };
   };`;
-  const photoSuggestion = `${select(source, ["safeJson", "withWorkspace", ...denialHelpers])}
+  const photoSuggestion = `${select(source, ["safeJson", "withWorkspace", "photoFormats", "photoLayouts", "writeAdsAutomationPrefill", ...denialHelpers])}
     exports.selected = function capturePhotoSuggestion({ actorId, workspaceId, localDraftsOnly, sessionRef }, packageBrief,
       { ${photoInputNames.join(", ")} }, refs) {
       const { ${[...packageRefNames, ...photoRefNames].join(", ")} } = refs;
-      ${select(source, ["isSessionAlive", "isGenerationSessionCurrent", ...handoffHelpers, "updatePackageBrief",
-        "updatePhotoTexts", ...photoExtraHelpers, "onPhotoFileSelected", "suggestPhotoTexts"])}
+      ${select(source, ["isSessionAlive", "isGenerationSessionCurrent", ...handoffHelpers, ...photoArtifactHelpers, "updatePackageBrief",
+        "updatePhotoTexts", ...photoExtraHelpers, "onPhotoFileSelected", "suggestPhotoTexts", "generatePhotoLayout",
+        "createAnotherPhotoVersion", "downloadPhotoCreative", "writeContentToAdsAutomation", "usePhotoInAdsAutomation"])}
       return { suggest: suggestPhotoTexts, click: ${photoEvents.click[0]}, disabled: ${photoEvents.disabled[0]},
+        render: generatePhotoLayout, next: createAnotherPhotoVersion, download: downloadPhotoCreative, handoff: usePhotoInAdsAutomation,
         updateBrief: updatePackageBrief, updateTexts: updatePhotoTexts, selectFile: onPhotoFileSelected,
         changeFormat(value) { const format = { id: value }; return (${photoEvents.format[0]})(); },
-        changeSourceType(value) { return (${photoEvents.sourceType[0]})({ target: { value } }); } };
+        changeSourceType(value) { return (${photoEvents.sourceType[0]})({ target: { value } }); },
+        changeLayout(value) { const layout = { id: value }; return (${photoEvents.layout[0]})(); } };
     };`;
+  const photoCleanup = `exports.selected = function capturePhotoCleanup(refs) {
+    const { ${photoRefNames.join(", ")} } = refs;
+    return ${photoCleanupEffects.length ? `(${photoCleanupEffects[0]})()` : "() => {}"};
+  };`;
+  const forbidEnv = (context: import("typescript").TransformationContext) => (root: import("typescript").SourceFile) => {
+    const visit: import("typescript").Visitor = (node) => ts.isPropertyAccessExpression(node)
+      && node.name.text === "env" && ts.isMetaProperty(node.expression)
+      ? ts.factory.createIdentifier("forbiddenHandoffEnv") : ts.visitEachChild(node, visit, context);
+    return ts.visitNode(root, visit) as import("typescript").SourceFile;
+  };
   return {
-    photoDefaults: ts.transpileModule(`${select(source, ["photoSourceTypes", "defaultPhotoTexts"])}
-      exports.selected = { photoSourceTypes, inputs: { ${photoDefaults.join(", ")} } };`,
+    photoDefaults: ts.transpileModule(`${select(source, ["photoSourceTypes", "photoFormats", "photoLayouts", "defaultPhotoTexts"])}
+      exports.selected = { photoSourceTypes, photoFormats, photoLayouts, inputs: { ${photoDefaults.join(", ")} } };`,
       { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText,
     photoRefs: ts.transpileModule(photoRefs, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText,
-    photoSuggestion: ts.transpileModule(photoSuggestion, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText,
+    photoCleanup: ts.transpileModule(photoCleanup, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText,
+    photoSuggestion: ts.transpileModule(photoSuggestion, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+      transformers: { before: [forbidEnv] } }).outputText,
     packageRefs: ts.transpileModule(packageRefs, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText,
     package: ts.transpileModule(packageProgram, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText,
     packageDemo: compile(await readFile(path.join(repoRoot, "lib/content-studio/core.ts"), "utf8"),
       ["briefString", "demoContentPackage"], ["demoContentPackage"]),
-    handoff: ts.transpileModule(handoff, {
+    handoff: ts.transpileModule(handoff([...packageRefNames, ...photoRefNames], photoArtifactHelpers), {
       compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
       transformers: { before: [(context) => (root) => {
         const visit: import("typescript").Visitor = (node) => ts.isPropertyAccessExpression(node)
@@ -1288,7 +1315,10 @@ function generationLifetime(code: string, bindings: Record<string, unknown>) {
   let child: Instance | undefined, current = wrapper, key: string | undefined;
   let snapshot: LocalGenerationSession | undefined;
   const slot = () => current.slots[current.cursor++] ??= {};
-  const dispose = (instance?: Instance) => { instance?.slots.forEach((item) => item.cleanup?.()); };
+  const dispose = (instance?: Instance) => {
+    instance?.slots.forEach((item) => item.cleanup?.());
+    if (instance && instance === child) (bindings.onChildUnmount as ((sessionRef: LocalGenerationSession["sessionRef"]) => void) | undefined)?.(snapshot!.sessionRef);
+  };
   const flushEffects = (instance: Instance) => {
     for (const item of instance.slots) {
       if (!item.pending) continue;
@@ -1502,13 +1532,15 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
   const setters = Object.fromEntries([
     "GenBusy", "GenNotice", "GenImage", "GenVideo", "VideoJob", "GenerationUsage", "GenerationUsageLoading", "Videos", "ActiveId", "PhotoBusy",
     "Loading", "Notice", "ContentPackage", "ContentPackageId", "SelectedAdVariantId", "PackageGenerationMode", "GenPrompt", "PackageBrief",
-    "PhotoTexts", "PhotoSuggestMode", "PhotoFormat", "PhotoSourceType", "PhotoSourceName", "PhotoSourceUrl", "PhotoPreviewUrl", "PhotoBlob",
+    "PhotoTexts", "PhotoSuggestMode", "PhotoFormat", "PhotoLayout", "PhotoSourceType", "PhotoSourceName", "PhotoSourceUrl", "PhotoPreviewUrl", "PhotoBlob",
   ].map((field) => [`set${field}`, (update: unknown) => {
     const value = typeof update === "function" ? (update as (previous: unknown) => unknown)(state[field]) : update;
     state[field] = value; writes.push({ field, value });
   }]));
+  const photoScopeCleanups = new Map<LocalGenerationSession["sessionRef"], () => void>();
   const lifetime = withLifetime ? generationLifetime(programs.lifetime, {
     ...storage, ...auth, supabase: sdk, hasSupabaseFrontendEnv: true, useAuth: () => authState,
+    onChildUnmount(sessionRef: LocalGenerationSession["sessionRef"]) { photoScopeCleanups.get(sessionRef)?.(); photoScopeCleanups.delete(sessionRef); },
   }) : undefined;
   const mounted = lifetime?.render();
   const captured = mounted?.session ?? { actorId: "actor-a", workspaceId: "workspace-a", localDraftsOnly: false, sessionRef: { current: new AbortController() } };
@@ -1546,21 +1578,30 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
     caption: "Local caption", cta: "Local CTA", videoPrompt: "Local video brief", adPrimaryText: "Fallback copy", adHeadline: "Fallback headline" };
   const handoffVariant = { id: "variant-a", label: "Synthetic variant", angle: "local", primaryText: "Approved local copy",
     headline: "Approved local headline", description: "Approved local description", cta: "LEARN_MORE" };
+  const legacyPhotoBlob = new Blob([new Uint8Array(42)], { type: "image/jpeg" });
+  const localObjectUrls: { operation: string; name: string; value?: unknown }[] = [];
+  let nextObjectUrl = 0;
+  const photoUrl = {
+    createObjectURL(value: unknown) { const name = `blob:synthetic-${++nextObjectUrl}`;
+      localObjectUrls.push({ operation: "create", name, value }); return name; },
+    revokeObjectURL(name: string) { localObjectUrls.push({ operation: "revoke", name }); },
+  };
+  const forbiddenHandoffEnv = new Proxy({}, { get() { throw new Error("Handoff must not access environment configuration"); } });
   const captureHandoffs = evaluateGenerationFixture<(session: LocalGenerationSession, options?: {
     contentPackageId?: string; contentPackage?: typeof handoffPackage | null; selectedAdVariant?: typeof handoffVariant | null;
-  }) => {
+  }, refs?: Record<string, unknown>) => {
     photo: () => Promise<void>; generated: (file: unknown, type: "image" | "video") => Promise<void>; package: () => Promise<void>;
     approve: (approval: unknown, session: AbortController | null) => Promise<boolean | null>;
   }>(programs.handoff, {
     ...bindings, ...briefModule, handoffPackage, handoffVariant, hasSupabaseFrontendEnv: true,
-    forbiddenHandoffEnv: new Proxy({}, { get() { throw new Error("Handoff must not access environment configuration"); } }),
+    forbiddenHandoffEnv, URL: photoUrl,
     // Observe the transport boundary, but always execute the actual crmFetch/auth implementation.
     async crmFetch(url: string, init: LocalGenerationInit) {
       handoffRequests.push({ url, init });
       activeTransport = url.includes("signed-upload") ? "signed" : init.method === "PATCH" ? "approval" : "metadata";
       try { return await api.crmFetch(url, init); } finally { activeTransport = undefined; }
     },
-    photoBlob: { size: 42 }, photoFormat: "feed", photoLayout: "minimal", photoSourceType: "upload",
+    photoBlob: legacyPhotoBlob, photoPreviewUrl: "blob:legacy-rendered-preview", photoFormat: "feed", photoLayout: "minimal", photoSourceType: "upload",
     photoTexts: { headline: "Synthetic photo", offer: "Local photo offer", cta: "Local photo CTA" },
     packageBrief: { service: "Synthetic service", city: "Synthetic city", offer: "Synthetic offer", audience: "Synthetic audience",
       goal: "leads", tone: "local", format: "reels" },
@@ -1590,17 +1631,31 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
     useRef(initial: unknown) { return packageRefInstance.slots[packageRefInstance.cursor++] ??= { current: initial }; },
   });
   const photoSuggestionRequests: { url: string; init: LocalGenerationInit }[] = [];
-  const photoDefaults = evaluateGenerationFixture<{ photoSourceTypes: string[]; inputs: LocalPhotoInputs }>(programs.photoDefaults, {});
-  const localObjectUrls: { operation: string; name: string }[] = [];
+  const photoDefaults = evaluateGenerationFixture<{ photoSourceTypes: string[]; inputs: LocalPhotoInputs;
+    photoFormats: { id: string; width: number; height: number }[]; photoLayouts: { id: string }[] }>(programs.photoDefaults, {});
+  const renderCalls: { imageUrl: string; width: number; height: number; layout: string; texts: LocalPhotoTexts }[] = [];
+  const renderStarted = generationDeferred<void>();
+  let renderWait: ReturnType<typeof generationDeferred<void>> | undefined;
+  const renderReply: { blob: Blob | null; error?: unknown } = { blob: new Blob([new Uint8Array(42)], { type: "image/jpeg" }) };
+  const anchors: { href: string; download: string; clicked: boolean }[] = [];
   const capturePhotoSuggestion = evaluateGenerationFixture<(session: LocalGenerationSession, brief: LocalPackageBrief,
     inputs: LocalPhotoInputs, refs: Record<string, unknown>) => LocalPhotoSuggestionCallbacks>(programs.photoSuggestion, {
-    ...bindings, ...purePackageDemo,
-    URL: {
-      createObjectURL(file: { name: string }) { localObjectUrls.push({ operation: "create", name: file.name }); return `blob:synthetic-${localObjectUrls.length}`; },
-      revokeObjectURL(name: string) { localObjectUrls.push({ operation: "revoke", name }); },
+    ...bindings, ...purePackageDemo, ...briefModule, URL: photoUrl, forbiddenHandoffEnv, hasSupabaseFrontendEnv: true,
+    advertisingGoalContext: { targetPatients: 7 }, setLocation: (location: string) => navigations.push(location),
+    document: { createElement(tag: string) {
+      assert.equal(tag, "a"); const link = { href: "", download: "", clicked: false, click() { this.clicked = true; } };
+      anchors.push(link); return link;
+    } },
+    async renderPhotoCreative(input: typeof renderCalls[number]) {
+      renderCalls.push(input); const pending = renderWait, blob = renderReply.blob, error = renderReply.error;
+      renderWait = undefined; renderStarted.resolve();
+      if (pending) await pending.promise;
+      if (error) throw error;
+      return blob;
     },
     async crmFetch(url: string, init: LocalGenerationInit) {
-      photoSuggestionRequests.push({ url, init }); activeTransport = "photo-suggest";
+      if (url.includes("generate-package")) { photoSuggestionRequests.push({ url, init }); activeTransport = "photo-suggest"; }
+      else { handoffRequests.push({ url, init }); activeTransport = url.includes("signed-upload") ? "signed" : "metadata"; }
       try { return await api.crmFetch(url, init); } finally { activeTransport = undefined; }
     },
   });
@@ -1609,6 +1664,14 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
   const renderPhotoRefs = evaluateGenerationFixture<(brief: LocalPackageBrief, inputs: LocalPhotoInputs) => Record<string, unknown>>(programs.photoRefs, {
     useRef(initial: unknown) { return photoRefInstance.slots[photoRefInstance.cursor++] ??= { current: initial }; },
   });
+  const capturePhotoCleanup = evaluateGenerationFixture<(refs: Record<string, unknown>) => () => void>(programs.photoCleanup, { URL: photoUrl });
+  const photoRefsFor = (session: LocalGenerationSession, brief: LocalPackageBrief, inputs: LocalPhotoInputs) => {
+    photoRefInstance = photoRefInstances.get(session.sessionRef) ?? { slots: [], cursor: 0 };
+    photoRefInstances.set(session.sessionRef, photoRefInstance); photoRefInstance.cursor = 0;
+    const refs = renderPhotoRefs(brief, inputs);
+    if (!photoScopeCleanups.has(session.sessionRef)) photoScopeCleanups.set(session.sessionRef, capturePhotoCleanup(refs));
+    return refs;
+  };
   return {
     photoSuggestions() {
       assert.ok(lifetime, "photo suggestions must receive actual wrapper-computed session props");
@@ -1618,12 +1681,12 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
         .map(([key, value]) => [key[0].toUpperCase() + key.slice(1), value])));
       const inputs = Object.fromEntries(Object.keys(photoDefaults.inputs).map((key) => [key, state[key[0].toUpperCase() + key.slice(1)]])) as LocalPhotoInputs;
       const next = lifetime.render();
-      photoRefInstance = photoRefInstances.get(next.session.sessionRef) ?? { slots: [], cursor: 0 };
-      photoRefInstances.set(next.session.sessionRef, photoRefInstance); photoRefInstance.cursor = 0;
-      const refs = renderPhotoRefs(state.PackageBrief as LocalPackageBrief, inputs);
+      const refs = photoRefsFor(next.session, state.PackageBrief as LocalPackageBrief, inputs);
       return { ...next, inputs, refs, callbacks: capturePhotoSuggestion(next.session, state.PackageBrief as LocalPackageBrief, inputs, refs) };
     },
     photoSuggestionReply, photoSuggestionRequests, photoDefaults, localObjectUrls,
+    renderCalls, renderStarted, renderReply, anchors,
+    deferRender() { renderWait = generationDeferred<void>(); return renderWait; },
     packages() {
       assert.ok(lifetime, "package generation must receive actual wrapper-computed session props");
       packageFixtureActive = true;
@@ -1639,7 +1702,20 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
     handoffs(options?: Parameters<typeof captureHandoffs>[1]) {
       assert.ok(lifetime, "handoffs must use the actual wrapper session");
       const next = lifetime.render();
-      return { ...next, callbacks: captureHandoffs(next.session, options) };
+      const inputs: LocalPhotoInputs = { ...photoDefaults.inputs, photoFormat: "feed", photoLayout: "minimal", photoSourceType: "upload",
+        photoTexts: { headline: "Synthetic photo", offer: "Local photo offer", cta: "Local photo CTA", disclaimer: "" },
+        photoBlob: legacyPhotoBlob, photoPreviewUrl: "blob:legacy-rendered-preview" };
+      const refs = photoRefsFor(next.session, { ...LOCAL_PACKAGE_BRIEF, service: "Synthetic service", city: "Synthetic city", offer: "Synthetic offer",
+        audience: "Synthetic audience" }, inputs);
+      const artifact = refs.photoArtifactRef as { current: unknown } | undefined;
+      if (artifact && !artifact.current) {
+        // The C8 fixture starts with a legitimately rendered, matching artifact; the real guard still executes.
+        artifact.current = { blob: legacyPhotoBlob, previewUrl: inputs.photoPreviewUrl,
+          inputs: (refs.photoTextInputsRef as { current: unknown }).current,
+          revision: (refs.photoTextRevision as { current: number }).current, session: next.session.sessionRef.current };
+        (refs.photoObjectUrls as { current: Set<string> }).current.add(inputs.photoPreviewUrl);
+      }
+      return { ...next, callbacks: captureHandoffs(next.session, options, refs) };
     },
     handoffStatuses, handoffBodyFailures, handoffTransportFailures, handoffRequests, signedReply, uploads, uploadStarted, navigations,
     onHandoffResponse(callback?: (resource: Resource) => void) { handoffResponseHook = callback; },
@@ -2618,7 +2694,7 @@ for (const stage of handoffStages) {
         assert.equal(fixture.dispatches.length, expectedDispatches, "an expired callback cannot issue a follow-up request");
         assert.equal(fixture.uploads.length, uploads, "a signed response cannot begin storage upload under an expired actor/workspace");
         assert.deepEqual(fixture.mutations.slice(mutations), [], "no prefill can leak into the new workspace");
-        assert.deepEqual(fixture.writes.slice(writes), boundary === "silent-account" && stage.kind === "photo"
+        assert.deepEqual(fixture.writes.slice(writes), (boundary === "silent-account" || boundary === "workspace") && stage.kind === "photo"
           ? [{ field: "PhotoBusy", value: null }] : []);
         assert.deepEqual(fixture.toasts, []);
         assert.deepEqual(fixture.navigations, []);
@@ -2638,6 +2714,7 @@ for (const kind of ["photo", "image", "video", "package"] as const) {
     const work = invokeLocalHandoff(handoff, kind);
     try {
       await token.started;
+      if (kind === "photo") assert.ok(fixture.handoffRequests.every(({ init }) => init.dispatchGuard?.() === true), "the artifact-bound guard is live while handoff is pending");
       fixture.sdkSession("actor-a", "fixture-token-a-refreshed", "TOKEN_REFRESHED");
       assert.equal(fixture.lifetime!.render().key, handoff.key);
       assert.equal(controller.signal.aborted, false);
@@ -2650,7 +2727,7 @@ for (const kind of ["photo", "image", "video", "package"] as const) {
       }
       for (const { init } of fixture.handoffRequests) {
         assert.equal(init.expectedUserId, "actor-a"); assert.equal(init.signal, controller.signal);
-        assert.equal(init.dispatchGuard?.(), true);
+        assert.equal(init.dispatchGuard?.(), kind !== "photo", "the completed photo attempt must no longer authorize dispatch");
       }
       const prefill = readLocalHandoff(fixture);
       assert.equal(prefill.sourceKind, kind === "image" || kind === "video" ? "generated" : kind);
@@ -3579,4 +3656,290 @@ test("G5C10 settled suggestion cannot clear a different current photo busy tag",
     paused.resume(); await paused.work;
     assert.equal(fixture.state.PhotoBusy, "render"); assert.equal(fixture.state.PhotoSuggestMode, "fixture");
   } finally { paused.resume(); await paused.work; fixture.lifetime!.unmount(); }
+});
+
+function photoWithSource(fixture: LocalHandoffFixture) {
+  fixture.photoSuggestions().callbacks.selectFile(LOCAL_PHOTO_FILE);
+  return fixture.photoSuggestions();
+}
+
+async function renderedPhoto(fixture: LocalHandoffFixture) {
+  await photoWithSource(fixture).callbacks.render();
+  return fixture.photoSuggestions();
+}
+
+function renderedPhotoState(fixture: LocalHandoffFixture) {
+  return { blob: fixture.state.PhotoBlob, preview: fixture.state.PhotoPreviewUrl, texts: JSON.parse(JSON.stringify(fixture.state.PhotoTexts)) };
+}
+
+async function pausePhotoRender(fixture: LocalHandoffFixture, phase: "token" | "renderer") {
+  const token = phase === "token" ? fixture.deferToken() : undefined;
+  const renderer = phase === "renderer" ? fixture.deferRender() : undefined;
+  const captured = photoWithSource(fixture), work = captured.callbacks.render();
+  const resume = () => { token?.resolve(); renderer?.resolve(); };
+  try {
+    if (token) {
+      await flushLocalVideoWork();
+      assert.ok(fixture.sdkReads.total > 0, "the actual render callback must verify its captured actor before canvas work");
+      await token.started; assert.equal(fixture.renderCalls.length, 0);
+    } else await fixture.renderStarted.promise;
+    return { captured, work, resume };
+  } catch (error) { resume(); await work; throw error; }
+}
+
+test("G5C11 fresh render preserves exact dimensions, layout, text and blob through download and handoff", async () => {
+  const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE);
+  try {
+    const source = photoWithSource(fixture);
+    source.callbacks.changeFormat("feed"); source.callbacks.changeLayout("minimal_premium");
+    source.callbacks.updateTexts("headline", "Rendered exact headline");
+    const current = fixture.photoSuggestions(); await current.callbacks.render();
+    const photo = fixture.photoSuggestions(), blob = fixture.renderReply.blob;
+    assert.equal(fixture.renderCalls.length, 1);
+    assert.deepEqual(JSON.parse(JSON.stringify(fixture.renderCalls[0])), { imageUrl: current.inputs.photoSourceUrl, width: 1080, height: 1080,
+      layout: "minimal_premium", texts: JSON.parse(JSON.stringify(current.inputs.photoTexts)) });
+    assert.equal(fixture.state.PhotoBlob, blob);
+    const artifactRef = photo.refs.photoArtifactRef as { current: { blob: Blob; previewUrl: string; inputs: unknown; session: AbortController; revision: number } } | undefined;
+    assert.ok(artifactRef?.current, "the actual render callback must retain an artifact bound to its inputs and lifetime");
+    const artifact = artifactRef.current;
+    assert.equal(artifact.blob, blob); assert.equal(artifact.previewUrl, fixture.state.PhotoPreviewUrl);
+    assert.equal(artifact.inputs, (photo.refs.photoTextInputsRef as { current: unknown }).current);
+    assert.equal(artifact.session, photo.session.sessionRef.current);
+    assert.equal(artifact.revision, (photo.refs.photoTextRevision as { current: number }).current);
+    assert.ok(fixture.localObjectUrls.some((event) => event.operation === "create" && event.name === artifact.previewUrl && event.value === blob));
+    await photo.callbacks.download();
+    assert.equal(fixture.anchors.length, 1); assert.equal(fixture.anchors[0].href, artifact.previewUrl);
+    assert.equal(fixture.anchors[0].download, "medina-os-photo-creative-feed.jpg"); assert.equal(fixture.anchors[0].clicked, true);
+    await photo.callbacks.handoff();
+    assert.equal(fixture.dispatches.length, 2); assert.equal(fixture.uploads.length, 1); assert.equal(fixture.uploads[0].file, blob);
+    assert.deepEqual(JSON.parse(JSON.stringify(fixture.uploads[0].options)), { contentType: "image/jpeg" });
+    assert.equal((fixture.dispatches[0].body as { fileSize: number }).fileSize, blob!.size);
+    const metadata = fixture.dispatches[1].body as { photoCreative: { texts: LocalPhotoTexts; format: string; layout: string } };
+    assert.deepEqual(metadata.photoCreative.texts, JSON.parse(JSON.stringify(current.inputs.photoTexts)));
+    assert.equal(metadata.photoCreative.format, "feed"); assert.equal(metadata.photoCreative.layout, "minimal_premium");
+    assert.equal(readLocalHandoff(fixture).primaryText, `${current.inputs.photoTexts.offer}. ${current.inputs.photoTexts.cta}.`);
+    assert.deepEqual(fixture.navigations, ["/ads-automation"]);
+  } finally { fixture.lifetime!.unmount(); }
+});
+
+test("G5C11 another-version reads the current layout through retained callbacks", async () => {
+  const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE);
+  try {
+    const photo = photoWithSource(fixture), index = fixture.photoDefaults.photoLayouts.findIndex((item) => item.id === photo.inputs.photoLayout);
+    await photo.callbacks.next(); await photo.callbacks.next();
+    const count = fixture.photoDefaults.photoLayouts.length;
+    assert.deepEqual(fixture.renderCalls.map((call) => call.layout), [fixture.photoDefaults.photoLayouts[(index + 1) % count].id,
+      fixture.photoDefaults.photoLayouts[(index + 2) % count].id]);
+    assert.equal(fixture.state.PhotoLayout, fixture.renderCalls[1].layout); assert.equal(fixture.dispatches.length, 0);
+  } finally { fixture.lifetime!.unmount(); }
+});
+
+for (const phase of ["token", "renderer"] as const) {
+  test(`G5C11 render mutex blocks duplicate render and next-version during ${phase}`, { timeout: 5000 }, async () => {
+    const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE);
+    const paused = await pausePhotoRender(fixture, phase);
+    const duplicate = paused.captured.callbacks.render(), next = fixture.photoSuggestions().callbacks.next();
+    try {
+      await flushLocalVideoWork(); assert.equal(fixture.renderCalls.length, phase === "token" ? 0 : 1);
+      paused.resume(); await Promise.all([paused.work, duplicate, next]);
+      assert.equal(fixture.renderCalls.length, 1); assert.equal(fixture.toasts.filter((item) => item.kind === "success").length, 1);
+    } finally { paused.resume(); await Promise.all([paused.work, duplicate, next]); fixture.lifetime!.unmount(); }
+  });
+}
+
+const PHOTO_STALE_RENDERS = [
+  { phase: "token", boundary: "account" }, { phase: "token", boundary: "workspace" }, { phase: "token", boundary: "input-ABA" },
+  { phase: "renderer", boundary: "account" }, { phase: "renderer", boundary: "workspace" }, { phase: "renderer", boundary: "A-B-A" },
+  { phase: "renderer", boundary: "input-ABA" }, { phase: "renderer", boundary: "unmount" },
+] as const;
+
+for (const { phase, boundary } of PHOTO_STALE_RENDERS) {
+  test(`G5C11 ${phase}-pending render cannot publish or revoke URLs after ${boundary}`, { timeout: 5000 }, async () => {
+    const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE);
+    const paused = await pausePhotoRender(fixture, phase);
+    try {
+      if (boundary === "account" || boundary === "A-B-A") fixture.sdkSession("actor-b");
+      if (boundary === "workspace") fixture.workspace(HANDOFF_WORKSPACE_B);
+      if (boundary === "A-B-A") { fixture.lifetime!.render(); fixture.sdkSession("actor-a"); fixture.photoSuggestions(); }
+      if (boundary === "input-ABA") { paused.captured.callbacks.changeFormat("feed"); paused.captured.callbacks.changeFormat(paused.captured.inputs.photoFormat); }
+      if (boundary === "unmount") fixture.lifetime!.unmount();
+      const before = renderedPhotoState(fixture), writes = fixture.writes.length, urls = fixture.localObjectUrls.length, toasts = fixture.toasts.length;
+      paused.resume(); await paused.work;
+      assert.deepEqual(renderedPhotoState(fixture), before); assert.deepEqual(fixture.localObjectUrls.slice(urls), []);
+      assert.deepEqual(fixture.writes.slice(writes).filter((write) => write.field !== "PhotoBusy"), []);
+      assert.deepEqual(fixture.toasts.slice(toasts), []); assert.deepEqual(fixture.dispatches, []);
+    } finally { paused.resume(); await paused.work; fixture.lifetime!.unmount(); }
+  });
+}
+
+for (const input of ["file", "format", "layout", "source-type", "text", "accepted-AI-text"] as const) {
+  test(`G5C11 changing ${input} invalidates its rendered artifact and revokes that preview exactly once`, async () => {
+    const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE);
+    try {
+      const photo = await renderedPhoto(fixture), preview = fixture.state.PhotoPreviewUrl;
+      if (input === "file") photo.callbacks.selectFile({ ...LOCAL_PHOTO_FILE, name: "replacement.png" });
+      if (input === "format") photo.callbacks.changeFormat("feed");
+      if (input === "layout") photo.callbacks.changeLayout("minimal_premium");
+      if (input === "source-type") photo.callbacks.changeSourceType(fixture.photoDefaults.photoSourceTypes[1]);
+      if (input === "text") photo.callbacks.updateTexts("disclaimer", "Changed manual disclaimer");
+      if (input === "accepted-AI-text") await photo.callbacks.suggest();
+      assert.equal(fixture.state.PhotoBlob, null); assert.equal(fixture.state.PhotoPreviewUrl, "");
+      assert.equal((photo.refs.photoArtifactRef as { current: unknown }).current, null);
+      assert.equal(fixture.localObjectUrls.filter((event) => event.operation === "revoke" && event.name === preview).length, 1);
+      fixture.lifetime!.unmount();
+      assert.equal(fixture.localObjectUrls.filter((event) => event.operation === "revoke" && event.name === preview).length, 1);
+    } finally { fixture.lifetime!.unmount(); }
+  });
+}
+
+test("G5C11 actual photo cleanup revokes only its owned live source and preview once on unmount", async () => {
+  const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE);
+  const photo = await renderedPhoto(fixture), source = fixture.state.PhotoSourceUrl, preview = fixture.state.PhotoPreviewUrl;
+  fixture.lifetime!.unmount(); fixture.lifetime!.unmount();
+  assert.equal(fixture.localObjectUrls.filter((item) => item.operation === "revoke" && item.name === source).length, 1);
+  assert.equal(fixture.localObjectUrls.filter((item) => item.operation === "revoke" && item.name === preview).length, 1);
+  assert.equal((photo.refs.photoObjectUrls as { current: Set<string> }).current.size, 0);
+  assert.equal((photo.refs.photoArtifactRef as { current: unknown }).current, null);
+});
+
+test("G5C11 late A canvas completion cannot revoke or replace B's accepted artifact", { timeout: 5000 }, async () => {
+  const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE), paused = await pausePhotoRender(fixture, "renderer");
+  try {
+    fixture.sdkSession("actor-b"); fixture.auth({ user: { id: "actor-b" } }); fixture.photoSuggestions();
+    fixture.renderReply.blob = new Blob(["accepted B"], { type: "image/jpeg" });
+    const current = await renderedPhoto(fixture), before = renderedPhotoState(fixture), urls = fixture.localObjectUrls.length, toasts = fixture.toasts.length;
+    paused.resume(); await paused.work;
+    assert.deepEqual(renderedPhotoState(fixture), before); assert.deepEqual(fixture.localObjectUrls.slice(urls), []);
+    assert.deepEqual(fixture.toasts.slice(toasts), []);
+    await current.callbacks.download(); assert.equal(fixture.anchors[0].href, before.preview);
+  } finally { paused.resume(); await paused.work; fixture.lifetime!.unmount(); }
+});
+
+test("G5C11 no-op format, layout, type and text updates retain the exact artifact without URL churn", async () => {
+  const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE);
+  try {
+    const photo = await renderedPhoto(fixture), before = renderedPhotoState(fixture), urls = fixture.localObjectUrls.length, writes = fixture.writes.length;
+    photo.callbacks.changeFormat(photo.inputs.photoFormat); photo.callbacks.changeLayout(photo.inputs.photoLayout);
+    photo.callbacks.changeSourceType(photo.inputs.photoSourceType); photo.callbacks.updateTexts("headline", photo.inputs.photoTexts.headline);
+    assert.deepEqual(renderedPhotoState(fixture), before); assert.deepEqual(fixture.localObjectUrls.slice(urls), []);
+    assert.deepEqual(fixture.writes.slice(writes), []);
+    await photo.callbacks.download(); assert.equal(fixture.anchors[0].href, before.preview);
+  } finally { fixture.lifetime!.unmount(); }
+});
+
+test("G5C11 render finally cannot clear another current photo busy tag", { timeout: 5000 }, async () => {
+  const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE), paused = await pausePhotoRender(fixture, "renderer");
+  try { fixture.state.PhotoBusy = "handoff"; paused.resume(); await paused.work; assert.equal(fixture.state.PhotoBusy, "handoff"); }
+  finally { paused.resume(); await paused.work; fixture.lifetime!.unmount(); }
+});
+
+test("G5C11 mounted workspace mismatch releases only render loading and permits a restored-scope retry", { timeout: 5000 }, async () => {
+  const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE), paused = await pausePhotoRender(fixture, "renderer");
+  try {
+    fixture.workspace(HANDOFF_WORKSPACE_B); const before = renderedPhotoState(fixture), urls = fixture.localObjectUrls.length;
+    paused.resume(); await paused.work;
+    assert.deepEqual(renderedPhotoState(fixture), before); assert.deepEqual(fixture.localObjectUrls.slice(urls), []);
+    assert.equal(fixture.state.PhotoBusy, null); assert.deepEqual(fixture.toasts, []);
+    fixture.workspace(REAL_DEMO_TEST_WORKSPACE); await fixture.photoSuggestions().callbacks.render();
+    assert.equal(fixture.renderCalls.length, 2); assert.equal(fixture.state.PhotoBlob, fixture.renderReply.blob);
+  } finally { paused.resume(); await paused.work; fixture.lifetime!.unmount(); }
+});
+
+for (const result of ["null", "error"] as const) {
+  test(`G5C11 renderer ${result} is honest and never creates an artifact or success notice`, async () => {
+    const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE);
+    const photo = photoWithSource(fixture), urls = fixture.localObjectUrls.length;
+    if (result === "null") fixture.renderReply.blob = null; else fixture.renderReply.error = new Error("Synthetic canvas failure");
+    try {
+      await photo.callbacks.render(); assert.equal(fixture.state.PhotoBlob, null); assert.equal(fixture.state.PhotoPreviewUrl, "");
+      assert.deepEqual(fixture.localObjectUrls.slice(urls), []); assert.equal(fixture.toasts.length, 1); assert.equal(fixture.toasts[0].kind, "error");
+    } finally { fixture.lifetime!.unmount(); }
+  });
+}
+
+test("G5C11 explicit local demo renders and downloads locally with zero auth or provider transport", async () => {
+  const fixture = await localGenerationCallbacks("photo", true);
+  fixture.workspace("demo-local-a"); fixture.auth({ user: null, isDemoMode: true }); const reads = fixture.sdkReads.total;
+  try {
+    const photo = await renderedPhoto(fixture); await photo.callbacks.download();
+    assert.equal(fixture.renderCalls.length, 1); assert.equal(fixture.anchors.length, 1);
+    assert.equal(fixture.sdkReads.total, reads); assert.deepEqual(fixture.dispatches, []); assert.deepEqual(fixture.uploads, []);
+  } finally { fixture.lifetime!.unmount(); }
+});
+
+test("G5C11 failed same-input rerender preserves the prior valid blob, preview and owned URLs", async () => {
+  const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE);
+  try {
+    const photo = await renderedPhoto(fixture), before = renderedPhotoState(fixture), urls = fixture.localObjectUrls.length, toasts = fixture.toasts.length;
+    fixture.renderReply.blob = null;
+    await photo.callbacks.render();
+    assert.equal(fixture.state.PhotoBlob, before.blob); assert.equal(fixture.state.PhotoPreviewUrl, before.preview);
+    assert.deepEqual(fixture.localObjectUrls.slice(urls), []);
+    assert.deepEqual(fixture.toasts.slice(toasts).map((item) => item.kind), ["error"]);
+    await fixture.photoSuggestions().callbacks.download();
+    assert.equal(fixture.anchors.length, 1); assert.equal(fixture.anchors[0].href, before.preview);
+    assert.deepEqual(fixture.dispatches, []);
+  } finally { fixture.lifetime!.unmount(); }
+});
+
+const PHOTO_ARTIFACT_HANDOFF_STAGES = [
+  { phase: "signed-token", change: "format" }, { phase: "signed-body", change: "brief" },
+  { phase: "upload", change: "text" }, { phase: "metadata-token", change: "layout" }, { phase: "metadata-response", change: "file" },
+] as const;
+
+for (const { phase, change } of PHOTO_ARTIFACT_HANDOFF_STAGES) {
+  test(`G5C11 handoff ${phase} rechecks captured artifact and brief before further effects`, { timeout: 5000 }, async () => {
+    const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE), photo = await renderedPhoto(fixture);
+    const token = phase.endsWith("token") ? fixture.deferToken(phase === "signed-token" ? "signed" : "metadata") : undefined;
+    const body = phase === "signed-body" ? fixture.deferBody("signed") : undefined;
+    const upload = phase === "upload" ? fixture.deferUpload() : undefined;
+    const response = phase === "metadata-response" ? fixture.deferResponse("metadata") : undefined;
+    const work = photo.callbacks.handoff(), resume = () => { token?.resolve(); body?.resolve(JSON.stringify(fixture.signedReply)); upload?.resolve(); response?.resolve(); };
+    try {
+      if (token) await token.started; if (body) await fixture.bodyStarted.promise;
+      if (upload) await fixture.uploadStarted.promise; if (response) await response.started;
+      if (change === "format") { photo.callbacks.changeFormat("feed"); photo.callbacks.changeFormat(photo.inputs.photoFormat); }
+      if (change === "brief") { photo.callbacks.updateBrief("service", "Temporary service B"); photo.callbacks.updateBrief("service", LOCAL_PACKAGE_BRIEF.service); }
+      if (change === "text") photo.callbacks.updateTexts("headline", "Edited after render");
+      if (change === "layout") { photo.callbacks.changeLayout("minimal_premium"); photo.callbacks.changeLayout(photo.inputs.photoLayout); }
+      if (change === "file") photo.callbacks.selectFile({ ...LOCAL_PHOTO_FILE, name: "new-after-render.png" });
+      const requests = fixture.dispatches.length, uploads = fixture.uploads.length, mutations = fixture.mutations.length, toasts = fixture.toasts.length;
+      resume(); await work;
+      assert.equal(fixture.dispatches.length, requests); assert.equal(fixture.uploads.length, uploads);
+      assert.deepEqual(fixture.mutations.slice(mutations), []); assert.deepEqual(fixture.navigations, []); assert.deepEqual(fixture.toasts.slice(toasts), []);
+    } finally { resume(); await work; fixture.lifetime!.unmount(); }
+  });
+}
+
+test("G5C11 artifact handoff pending lock precedes auth and suppresses duplicate callbacks", { timeout: 5000 }, async () => {
+  const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE), photo = await renderedPhoto(fixture);
+  const token = fixture.deferToken(), reads = fixture.sdkReads.total;
+  const work = photo.callbacks.handoff(), duplicate = photo.callbacks.handoff();
+  try {
+    await token.started; await flushLocalVideoWork(); assert.equal(fixture.sdkReads.total - reads, 1); assert.equal(fixture.dispatches.length, 0);
+    token.resolve(); await Promise.all([work, duplicate]);
+    assert.equal(fixture.dispatches.length, 2); assert.equal(fixture.uploads.length, 1); assert.equal(fixture.uploads[0].file, fixture.renderReply.blob);
+    assert.deepEqual(fixture.navigations, ["/ads-automation"]);
+  } finally { token.resolve(); await Promise.all([work, duplicate]); fixture.lifetime!.unmount(); }
+});
+
+test("G5C11 download rechecks the artifact after token wait before creating any anchor", { timeout: 5000 }, async () => {
+  const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE), photo = await renderedPhoto(fixture), token = fixture.deferToken();
+  const work = photo.callbacks.download();
+  try {
+    await flushLocalVideoWork(); assert.equal(fixture.anchors.length, 0, "anchor creation requires a fresh actor check");
+    photo.callbacks.updateTexts("headline", "New manual title"); token.resolve(); await work;
+    assert.deepEqual(fixture.anchors, []); assert.deepEqual(fixture.dispatches, []);
+  } finally { token.resolve(); await work; fixture.lifetime!.unmount(); }
+});
+
+test("G5C11 edited artifact is rejected by both retained download and handoff callbacks without external effects", async () => {
+  const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE);
+  try {
+    const rendered = await renderedPhoto(fixture); rendered.callbacks.updateTexts("offer", "Edited offer after render");
+    const mutated = fixture.mutations.length;
+    await rendered.callbacks.download(); await rendered.callbacks.handoff();
+    assert.deepEqual(fixture.anchors, []); assert.deepEqual(fixture.dispatches, []); assert.deepEqual(fixture.uploads, []);
+    assert.deepEqual(fixture.navigations, []); assert.deepEqual(fixture.mutations.slice(mutated), []);
+  } finally { fixture.lifetime!.unmount(); }
 });
