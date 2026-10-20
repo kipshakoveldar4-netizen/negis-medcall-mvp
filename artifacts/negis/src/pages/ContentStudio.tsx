@@ -142,14 +142,14 @@ type AdvertisingGoalContext = Pick<
   "targetPatients" | "durationDays" | "maxBudget" | "dailyBudget" | "budgetCurrency"
 >;
 
-function writeAdsAutomationPrefill(input: AdsAutomationPrefillInput) {
+function writeAdsAutomationPrefill(input: AdsAutomationPrefillInput, storageKey = workspaceScopedKey(ADVERTISING_CAMPAIGN_PREFILL_KEY)) {
   const prefill = createAdvertisingCampaignPrefill({
     ...input,
     platform: "meta",
     generatedAt: input.generatedAt || new Date().toISOString(),
   });
   localStorage.setItem(
-    workspaceScopedKey(ADVERTISING_CAMPAIGN_PREFILL_KEY),
+    storageKey,
     JSON.stringify(prefill),
   );
 }
@@ -904,6 +904,8 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
   const librarySnapshotRef = useRef<ContentLibrarySnapshot>({ form, videos, activeId });
   const libraryWritePending = useRef<ContentLibraryWrite | null>(null);
   const libraryReadEpoch = useRef(0);
+  const clipboardPending = useRef<object | null>(null);
+  const libraryHandoffPending = useRef<object | null>(null);
   const libraryView = librarySnapshotRef.current;
   const libraryStorageKey = `${STORAGE_KEY}::${workspaceId}`;
 
@@ -944,10 +946,29 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
   const [packageBrief, setPackageBrief] = useState<PackageBrief>(defaultPackageBrief);
   const packageBriefRef = useRef(packageBrief);
   const packageBriefRevision = useRef(0);
+  const packageBriefViewRevision = packageBriefRevision.current;
   const packageGenerationPending = useRef<object | null>(null);
   const [advertisingGoalContext, setAdvertisingGoalContext] = useState<AdvertisingGoalContext>({});
+  const advertisingGoalContextRef = useRef(advertisingGoalContext);
   const [contentPackage, setContentPackage] = useState<ContentPackage | null>(null);
   const [selectedAdVariantId, setSelectedAdVariantId] = useState("");
+  const packageCopySnapshotRef = useRef({ contentPackage, selectedAdVariantId });
+  const packageCopyView = packageCopySnapshotRef.current;
+
+  function publishPackageContent(next: ContentPackage | null) {
+    const snapshot = packageCopySnapshotRef.current;
+    if (snapshot.contentPackage === next) return;
+    packageCopySnapshotRef.current = { ...snapshot, contentPackage: next };
+    setContentPackage(next);
+  }
+
+  function selectPackageVariant(id: string, expected = packageCopyView) {
+    const snapshot = packageCopySnapshotRef.current;
+    if (snapshot !== expected || snapshot.selectedAdVariantId === id
+      || (id && !snapshot.contentPackage?.adVariants.some((variant) => variant.id === id))) return;
+    packageCopySnapshotRef.current = { ...snapshot, selectedAdVariantId: id };
+    setSelectedAdVariantId(id);
+  }
   const [packageGenerationMode, setPackageGenerationMode] = useState("");
   const [contentPackageId, setContentPackageId] = useState("");
   const photoFileInputRef = useRef<HTMLInputElement | null>(null);
@@ -959,6 +980,8 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
   const [photoTexts, setPhotoTexts] = useState<PhotoCreativeTexts>(defaultPhotoTexts);
   const photoTextInputsRef = useRef({ format: photoFormat, layout: photoLayout, sourceType: photoSourceType, sourceName: photoSourceName, sourceUrl: photoSourceUrl, texts: photoTexts });
   const photoTextRevision = useRef(0);
+  const photoCopyView = photoTextInputsRef.current;
+  const photoCopyViewRevision = photoTextRevision.current;
   const photoTextPending = useRef<object | null>(null);
   const [photoPreviewUrl, setPhotoPreviewUrl] = useState("");
   const [photoBlob, setPhotoBlob] = useState<Blob | null>(null);
@@ -1040,7 +1063,7 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
   }, [refreshGenerationUsage]);
 
   const writeContentToAdsAutomation = (input: AdsAutomationPrefillInput) =>
-    writeAdsAutomationPrefill({ ...advertisingGoalContext, ...input });
+    writeAdsAutomationPrefill({ ...advertisingGoalContext, ...input }, `${ADVERTISING_CAMPAIGN_PREFILL_KEY}::${workspaceId}`);
 
   useEffect(() => {
     const key = workspaceScopedKey(ADVERTISING_CONTENT_STUDIO_PREFILL_KEY);
@@ -1059,6 +1082,7 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
         dailyBudget: incoming.dailyBudget,
         budgetCurrency: incoming.budgetCurrency,
       };
+      advertisingGoalContextRef.current = context;
       setAdvertisingGoalContext(context);
 
       const goalDetails = [
@@ -1310,7 +1334,7 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
   };
 
   const copyPhotoTexts = () =>
-    void copyText([photoTexts.headline, photoTexts.offer, photoTexts.cta].filter(Boolean).join("\n"), "Тексты креатива");
+    void copyText([photoTexts.headline, photoTexts.offer, photoTexts.cta].filter(Boolean).join("\n"), "Тексты креатива", "photo");
 
   const usePhotoInAdsAutomation = async () => {
     const session = sessionRef.current;
@@ -1982,8 +2006,8 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
     const isVerified = async () => isCurrent() && await isHandoffSessionCurrent(session) && isCurrent();
     const denyAccess = () => {
       setContentPackageId("");
-      setContentPackage(null);
-      setSelectedAdVariantId("");
+      publishPackageContent(null);
+      selectPackageVariant("", packageCopySnapshotRef.current);
       setPackageGenerationMode("");
       const message = "Доступ к пакету контента отозван. Обновите страницу.";
       setNotice(message);
@@ -2033,8 +2057,8 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
       }
       // A new draft must never inherit an approval/library ID from its predecessor.
       setContentPackageId("");
-      setContentPackage(data);
-      setSelectedAdVariantId(data.adVariants[0]?.id || "");
+      publishPackageContent(data);
+      selectPackageVariant(data.adVariants[0]?.id || "", packageCopySnapshotRef.current);
       setPackageGenerationMode(mode);
       // Готовый photo prompt — это ровно то, что нужно генератору изображения.
       // Заполняем только пустое поле: перезаписать текст, который оператор уже
@@ -2384,9 +2408,35 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
     }
   };
 
-  const copyText = async (text: string, label: string) => {
-    await navigator.clipboard.writeText(text);
-    toast.success(`${label} скопирован`);
+  const copyText = async (text: string, label: string, source: "library" | "package" | "photo" = "library") => {
+    const session = sessionRef.current;
+    const sourceCurrent = () => source === "library" ? librarySnapshotRef.current === libraryView
+      : source === "package" ? packageCopySnapshotRef.current === packageCopyView
+      : photoTextInputsRef.current === photoCopyView && photoTextRevision.current === photoCopyViewRevision;
+    if (clipboardPending.current || !isHandoffSessionAlive(session) || !sourceCurrent()) return false;
+    const attempt = {};
+    clipboardPending.current = attempt;
+    const current = () => clipboardPending.current === attempt && isHandoffSessionAlive(session) && sourceCurrent();
+    const verified = async () => current() && await isHandoffSessionCurrent(session) && current();
+    try {
+      if (!await verified()) return false;
+      if (!text.trim()) {
+        toast.warning("Нет текста для копирования.");
+        return false;
+      }
+      await navigator.clipboard.writeText(text);
+      if (!await verified()) return false;
+      toast.success(`${label} скопирован`);
+      return true;
+    } catch {
+      if (!await verified()) return false;
+      const message = "Не удалось скопировать текст в буфер обмена.";
+      setNotice(message);
+      toast.error(message);
+      return false;
+    } finally {
+      if (clipboardPending.current === attempt) clipboardPending.current = null;
+    }
   };
 
   const createIdea = async () => {
@@ -2659,31 +2709,51 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
 
   // AI Target is no longer a standalone module: the studio hands content
   // straight to Ads Automation, where "ИИ заполнит" covers targeting.
-  const transferToAdsAutomation = () => {
-    const hasAdvertisingGoalContext = advertisingGoalContext.targetPatients !== undefined;
-    writeContentToAdsAutomation({
-      sourceKind: "library",
-      sourceId: current.id,
-      campaignName: hasAdvertisingGoalContext
-        ? packageBrief.service || current.title || form.title
-        : current.title || form.title,
-      service: hasAdvertisingGoalContext
-        ? packageBrief.service
-        : current.niche || form.niche,
-      city: hasAdvertisingGoalContext ? packageBrief.city : undefined,
-      offer: hasAdvertisingGoalContext
-        ? packageBrief.offer
-        : current.cta || current.goal || form.goal,
-      audience: hasAdvertisingGoalContext
-        ? packageBrief.audience
-        : current.audience || form.audience,
-      primaryText: current.caption || current.script || current.hook || form.title,
-      headline: current.hook || current.title || form.title,
-      description: current.cta || current.goal || form.goal,
-      cta: "LEARN_MORE",
-    });
-    toast.success("Контент передан в AI запуск рекламы");
-    setLocation("/ads-automation");
+  const transferToAdsAutomation = async () => {
+    const session = sessionRef.current;
+    const sourceCurrent = () => librarySnapshotRef.current === libraryView && !libraryWritePending.current
+      && packageBriefRef.current === packageBrief && packageBriefRevision.current === packageBriefViewRevision
+      && advertisingGoalContextRef.current === advertisingGoalContext;
+    if (libraryHandoffPending.current || !isHandoffSessionAlive(session) || !sourceCurrent()) return;
+    const attempt = {};
+    libraryHandoffPending.current = attempt;
+    const currentScope = () => libraryHandoffPending.current === attempt && isHandoffSessionAlive(session) && sourceCurrent();
+    const verified = async () => currentScope() && await isHandoffSessionCurrent(session) && currentScope();
+    try {
+      if (!await verified()) return;
+      const hasAdvertisingGoalContext = advertisingGoalContext.targetPatients !== undefined;
+      writeContentToAdsAutomation({
+        sourceKind: "library",
+        sourceId: current.id,
+        campaignName: hasAdvertisingGoalContext
+          ? packageBrief.service || current.title || form.title
+          : current.title || form.title,
+        service: hasAdvertisingGoalContext
+          ? packageBrief.service
+          : current.niche || form.niche,
+        city: hasAdvertisingGoalContext ? packageBrief.city : undefined,
+        offer: hasAdvertisingGoalContext
+          ? packageBrief.offer
+          : current.cta || current.goal || form.goal,
+        audience: hasAdvertisingGoalContext
+          ? packageBrief.audience
+          : current.audience || form.audience,
+        primaryText: current.caption || current.script || current.hook || form.title,
+        headline: current.hook || current.title || form.title,
+        description: current.cta || current.goal || form.goal,
+        cta: "LEARN_MORE",
+      });
+      if (!currentScope()) return;
+      toast.success("Контент передан в AI запуск рекламы");
+      setLocation("/ads-automation");
+    } catch {
+      if (!await verified()) return;
+      const message = "Не удалось сохранить контент для рекламного раздела. Переход не выполнен.";
+      setNotice(message);
+      toast.error(message);
+    } finally {
+      if (libraryHandoffPending.current === attempt) libraryHandoffPending.current = null;
+    }
   };
 
   return (
@@ -2865,7 +2935,7 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
                         key={variant.id}
                         type="button"
                         aria-pressed={isSelected}
-                        onClick={() => setSelectedAdVariantId(variant.id)}
+                        onClick={() => selectPackageVariant(variant.id)}
                         className={`min-w-0 rounded-xl border p-4 text-left transition-colors ${
                           isSelected
                             ? "border-[#0D9488] bg-white ring-2 ring-[#0D9488]/15"
@@ -2902,19 +2972,19 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
               </div>
 
               <div className="grid gap-4 xl:grid-cols-2">
-                <PromptBox title="Сценарий Reels/TikTok" value={contentPackage.script} onCopy={() => void copyText(contentPackage.script, "Сценарий")} />
-                <PromptBox title="Shot list" value={contentPackage.shotList.join("\n")} onCopy={() => void copyText(contentPackage.shotList.join("\n"), "Shot list")} />
-                <PromptBox title="Текст на экране" value={contentPackage.textOnScreen.join("\n")} onCopy={() => void copyText(contentPackage.textOnScreen.join("\n"), "Текст на экране")} />
-                <PromptBox title="Voiceover" value={contentPackage.voiceover} onCopy={() => void copyText(contentPackage.voiceover, "Voiceover")} />
-                <PromptBox title="Caption для соцсетей" value={contentPackage.caption} onCopy={() => void copyText(contentPackage.caption, "Caption")} />
+                <PromptBox title="Сценарий Reels/TikTok" value={contentPackage.script} onCopy={() => void copyText(contentPackage.script, "Сценарий", "package")} />
+                <PromptBox title="Shot list" value={contentPackage.shotList.join("\n")} onCopy={() => void copyText(contentPackage.shotList.join("\n"), "Shot list", "package")} />
+                <PromptBox title="Текст на экране" value={contentPackage.textOnScreen.join("\n")} onCopy={() => void copyText(contentPackage.textOnScreen.join("\n"), "Текст на экране", "package")} />
+                <PromptBox title="Voiceover" value={contentPackage.voiceover} onCopy={() => void copyText(contentPackage.voiceover, "Voiceover", "package")} />
+                <PromptBox title="Caption для соцсетей" value={contentPackage.caption} onCopy={() => void copyText(contentPackage.caption, "Caption", "package")} />
                 <PromptBox
                   title="Текст объявления Meta"
                   value={`${selectedAdVariant?.primaryText || contentPackage.adPrimaryText}\n\nЗаголовок: ${selectedAdVariant?.headline || contentPackage.adHeadline}\nCTA: ${selectedAdVariant?.cta || contentPackage.cta}`}
-                  onCopy={() => void copyText(selectedAdVariant?.primaryText || contentPackage.adPrimaryText, "Текст объявления")}
+                  onCopy={() => void copyText(selectedAdVariant?.primaryText || contentPackage.adPrimaryText, "Текст объявления", "package")}
                 />
-                <PromptBox title="Photo prompt" value={contentPackage.photoPrompt} onCopy={() => void copyText(contentPackage.photoPrompt, "Photo prompt")} />
-                <PromptBox title="Video prompt" value={contentPackage.videoPrompt} onCopy={() => void copyText(contentPackage.videoPrompt, "Video prompt")} />
-                <PromptBox title="WhatsApp сообщение" value={contentPackage.whatsappMessage} onCopy={() => void copyText(contentPackage.whatsappMessage, "WhatsApp сообщение")} />
+                <PromptBox title="Photo prompt" value={contentPackage.photoPrompt} onCopy={() => void copyText(contentPackage.photoPrompt, "Photo prompt", "package")} />
+                <PromptBox title="Video prompt" value={contentPackage.videoPrompt} onCopy={() => void copyText(contentPackage.videoPrompt, "Video prompt", "package")} />
+                <PromptBox title="WhatsApp сообщение" value={contentPackage.whatsappMessage} onCopy={() => void copyText(contentPackage.whatsappMessage, "WhatsApp сообщение", "package")} />
               </div>
 
               {/*

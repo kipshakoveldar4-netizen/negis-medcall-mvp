@@ -1020,6 +1020,14 @@ type LocalLibraryForm = typeof LOCAL_LIBRARY_FORM;
 type LocalLibraryVideo = LocalLibraryForm & { id: string; status: string; createdAt: string };
 type LocalLibrarySnapshot = { form: LocalLibraryForm; videos: LocalLibraryVideo[]; activeId: string };
 type LocalLibraryTextKind = "script" | "avatar" | "tapnow";
+type LocalEditorCallbacks = {
+  copies: Record<string, () => unknown>; transfer: () => unknown;
+  editTitle: (value: string) => void; selectLibrary: (id: string) => void;
+  updateBrief: LocalPackageCallbacks["updateBrief"]; updateTexts: LocalPhotoSuggestionCallbacks["updateTexts"];
+  changeFormat: (format: string) => void; selectVariant: (id: string) => void;
+  publishPackage: (data: typeof LOCAL_GENERATED_PACKAGE) => void; hydrateGoal: () => void;
+  writePrefill: (input: Record<string, unknown>, key?: string) => void;
+};
 type LocalLibraryCallbacks = { create: () => Promise<unknown>; update: (patch: Partial<LocalLibraryVideo>) => unknown;
   persist: (id: string, patch: Partial<LocalLibraryVideo>) => unknown; save: (rows: LocalLibraryVideo[], id?: string) => unknown;
   script: () => Promise<unknown>; prompt: (kind: "avatar" | "tapnow") => Promise<unknown>;
@@ -1251,15 +1259,16 @@ const generationCallbackPrograms = (async () => {
   };
   visitPackageButton(child);
   assert.equal(packageButtons.length, 1, "execute the actual package button's click and disabled expressions");
-  const packageRefs = `exports.selected = function renderPackageRefs(packageBrief) {
+  const packageRefs = `exports.selected = function renderPackageRefs(packageBrief, contentPackage = null, selectedAdVariantId = "") {
     ${packageRefDeclarations.map((node) => node.getText(ast)).join("\n")}
     ${packageRefAssignments.map((node) => node.getText(ast)).join("\n")}
     return { ${packageRefNames.join(", ")} };
   };`;
-  const packageProgram = `${select(source, ["safeJson", "withWorkspace", ...denialHelpers])}
-    exports.selected = function capturePackage({ actorId, workspaceId, localDraftsOnly, sessionRef }, packageBrief, refs, loading) {
+  const packageDependencies = libraryDependencies(["generatePackage", "updatePackageBrief"]);
+  const packageProgram = `${texts(packageDependencies.top)}
+    exports.selected = function capturePackage({ actorId, workspaceId, localDraftsOnly, sessionRef }, packageBrief, refs, loading, contentPackage = null, selectedAdVariantId = "") {
       const { ${packageRefNames.join(", ")} } = refs;
-      ${select(source, ["isSessionAlive", "isGenerationSessionCurrent", ...handoffHelpers, "updatePackageBrief", "generatePackage"])}
+      ${texts(packageDependencies.nested)}
       return { generate: generatePackage, updateBrief: updatePackageBrief, click: ${packageButtons[0].click}, disabled: ${packageButtons[0].disabled} };
     };`;
   const photoInputNames = ["photoFormat", "photoLayout", "photoSourceType", "photoSourceName", "photoTexts", "photoSourceUrl", "photoPreviewUrl", "photoBlob", "photoBusy", "photoSuggestMode"];
@@ -1313,7 +1322,7 @@ const generationCallbackPrograms = (async () => {
   };
   visitPhotoEvents(child);
   for (const [name, matches] of Object.entries(photoEvents)) assert.equal(matches.length, 1, `execute exactly one actual photo ${name} handler`);
-  const photoRefs = `exports.selected = function renderPhotoRefs(packageBrief, { ${photoInputNames.join(", ")} }) {
+  const photoRefs = `exports.selected = function renderPhotoRefs(packageBrief, { ${photoInputNames.join(", ")} }, contentPackage = null, selectedAdVariantId = "") {
     ${[...packageRefDeclarations, ...photoRefDeclarations].map((node) => node.getText(ast)).join("\n")}
     ${packageRefAssignments.map((node) => node.getText(ast)).join("\n")}
     return { ${[...packageRefNames, ...photoRefNames].join(", ")} };
@@ -1336,6 +1345,67 @@ const generationCallbackPrograms = (async () => {
     const { ${photoRefNames.join(", ")} } = refs;
     return ${photoCleanupEffects.length ? `(${photoCleanupEffects[0]})()` : "() => {}"};
   };`;
+  const copyEvents: Record<string, string> = {}, variantEvents: string[] = [], transferEvents: string[] = [], goalEffects: string[] = [];
+  const packagePublications: string[] = [];
+  const visitEditorEvents = (node: import("typescript").Node) => {
+    if (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) {
+      const attribute = (name: string) => node.attributes.properties.find((item) => ts.isJsxAttribute(item) && item.name.getText(ast) === name);
+      const expression = (name: string) => {
+        const item = attribute(name);
+        return item && ts.isJsxAttribute(item) && item.initializer && ts.isJsxExpression(item.initializer) ? item.initializer.expression?.getText(ast) : undefined;
+      };
+      const onCopy = expression("onCopy"), click = expression("onClick"), title = attribute("title");
+      if (onCopy?.includes("copyText(")) {
+        assert.ok(title && ts.isJsxAttribute(title) && title.initializer && ts.isStringLiteral(title.initializer));
+        assert.equal(copyEvents[title.initializer.text], undefined); copyEvents[title.initializer.text] = onCopy;
+      }
+      if (click === "copyPhotoTexts") copyEvents.photo = click;
+      if (click?.includes("copyText(packageText,")) copyEvents["Content package"] = click;
+      if (click?.includes("variant.id")) variantEvents.push(click);
+      if (click === "transferToAdsAutomation") transferEvents.push(click);
+    }
+    if (ts.isCallExpression(node) && node.expression.getText(ast) === "useEffect" && node.arguments[0]?.getText(ast).includes("ADVERTISING_CONTENT_STUDIO_PREFILL_KEY")) goalEffects.push(node.arguments[0].getText(ast));
+    ts.forEachChild(node, visitEditorEvents);
+  };
+  visitEditorEvents(child);
+  assert.equal(Object.keys(copyEvents).length, 13, "execute all actual package/library/photo copy bindings");
+  assert.equal(variantEvents.length, 1); assert.equal(transferEvents.length, 1); assert.equal(goalEffects.length, 1);
+  const visitPublication = (node: import("typescript").Node) => {
+    if (ts.isExpressionStatement(node) && ts.isCallExpression(node.expression)
+      && ["publishPackageContent", "setContentPackage", "selectPackageVariant", "setSelectedAdVariantId"].includes(node.expression.expression.getText(ast))
+      && node.expression.arguments[0]?.getText(ast).includes("data")) packagePublications.push(node.getText(ast));
+    ts.forEachChild(node, visitPublication);
+  };
+  visitPublication(childDeclarations.get("generatePackage")!);
+  assert.equal(packagePublications.length, 2, "reuse the actual accepted-package content/selection publication statements");
+  const auxiliaryRefDeclarations = child.body.statements.filter((node) => ts.isVariableStatement(node)
+    && node.declarationList.declarations.some((item) => ts.isIdentifier(item.name) && /clipboard|advertisingGoal/i.test(item.name.text)
+      && item.initializer && ts.isCallExpression(item.initializer) && item.initializer.expression.getText(ast) === "useRef"));
+  const auxiliaryRefNames = auxiliaryRefDeclarations.flatMap((node) => (node as import("typescript").VariableStatement).declarationList.declarations.map((item) => item.name.getText(ast)));
+  const editorRefNames = [...new Set([...libraryRefNames, ...photoRefNames, ...packageRefNames, ...auxiliaryRefNames])];
+  const editorExpressions = [...Object.values(copyEvents), ...variantEvents, ...transferEvents, ...goalEffects, ...packagePublications,
+    ...libraryEvents.form, ...libraryEvents.selection];
+  const editor = libraryDependencies(["copyText", "copyPhotoTexts", "transferToAdsAutomation", "updatePackageBrief", "updatePhotoTexts", ...photoExtraHelpers], editorExpressions);
+  const editorProgram = `${texts(editor.top)}
+    exports.selected = function captureEditor({ actorId, workspaceId, localDraftsOnly, sessionRef },
+      { form, videos, activeId, packageBrief, contentPackage, selectedAdVariantId, advertisingGoalContext, ${photoInputNames.join(", ")} }, refs) {
+      const { ${editorRefNames.join(", ")} } = refs;
+      ${texts(editor.nested)}
+      return { copies: { ${Object.entries(copyEvents).map(([name, expression]) => `${JSON.stringify(name)}: ${expression}`).join(", ")} }, transfer: ${transferEvents[0]},
+        editTitle(value) { return (${libraryEvents.form[0]})(value); }, selectLibrary(id) { const video = { id }; return (${libraryEvents.selection[0]})(); },
+        selectVariant(id) { const variant = { id }; return (${variantEvents[0]})(); }, publishPackage(data) { ${packagePublications.join("\n")} },
+        updateBrief: updatePackageBrief, updateTexts: updatePhotoTexts,
+        changeFormat(value) { const format = { id: value }; return (${photoEvents.format[0]})(); }, hydrateGoal() { return (${goalEffects[0]})(); }, writePrefill: writeAdsAutomationPrefill };
+    };`;
+  const observeCopy = (context: import("typescript").TransformationContext) => (root: import("typescript").SourceFile) => {
+    const visit: import("typescript").Visitor = (node) => {
+      // JSX deliberately discards copy promises; observe them without changing the actual callback or guards.
+      if (ts.isCallExpression(node) && node.expression.getText() === "copyText") return ts.factory.createCallExpression(ts.factory.createIdentifier("trackCopyPromise"), undefined,
+        [ts.visitEachChild(node, visit, context)]);
+      return ts.visitEachChild(node, visit, context);
+    };
+    return ts.visitNode(root, visit) as import("typescript").SourceFile;
+  };
   const forbidEnv = (context: import("typescript").TransformationContext) => (root: import("typescript").SourceFile) => {
     const visit: import("typescript").Visitor = (node) => ts.isPropertyAccessExpression(node)
       && node.name.text === "env" && ts.isMetaProperty(node.expression)
@@ -1344,6 +1414,9 @@ const generationCallbackPrograms = (async () => {
   };
   return {
     library: ts.transpileModule(libraryProgram, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText,
+    editor: ts.transpileModule(editorProgram, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS }, transformers: { before: [observeCopy] } }).outputText,
+    editorRefs: ts.transpileModule(`exports.selected = function renderEditorRefs(advertisingGoalContext) { ${auxiliaryRefDeclarations.map((node) => node.getText(ast)).join("\n")}
+      return { ${auxiliaryRefNames.join(", ")} }; };`, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText,
     telegramPackage: compile(source, ["buildTelegramPackage"], ["buildTelegramPackage"]),
     telegramApi: compile(await readFile(path.join(repoRoot, "api/content-studio/[...path].ts"), "utf8"),
       ["telegramHint", "readTelegramBody", "sendTelegramMessage"], ["sendTelegramMessage", "readTelegramBody", "telegramHint"]),
@@ -1680,7 +1753,7 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
   }, { "@/lib/serverAuth": auth });
   const setters = Object.fromEntries([
     "GenBusy", "GenNotice", "GenImage", "GenVideo", "VideoJob", "GenerationUsage", "GenerationUsageLoading", "Videos", "ActiveId", "PhotoBusy",
-    "Loading", "Notice", "ContentPackage", "ContentPackageId", "SelectedAdVariantId", "PackageGenerationMode", "GenPrompt", "PackageBrief", "Form",
+    "Loading", "Notice", "ContentPackage", "ContentPackageId", "SelectedAdVariantId", "PackageGenerationMode", "GenPrompt", "PackageBrief", "Form", "AdvertisingGoalContext",
     "PhotoTexts", "PhotoSuggestMode", "PhotoFormat", "PhotoLayout", "PhotoSourceType", "PhotoSourceName", "PhotoSourceUrl", "PhotoPreviewUrl", "PhotoBlob",
   ].map((field) => [`set${field}`, (update: unknown) => {
     const value = typeof update === "function" ? (update as (previous: unknown) => unknown)(state[field]) : update;
@@ -1798,7 +1871,7 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
   const packageRequests: { url: string; init: LocalGenerationInit }[] = [];
   const purePackageDemo = evaluateGenerationFixture<{ demoContentPackage: (input: Record<string, unknown>) => Record<string, unknown> }>(programs.packageDemo, {});
   const capturePackage = evaluateGenerationFixture<(session: LocalGenerationSession, brief: LocalPackageBrief,
-    refs: Record<string, unknown>, loading: unknown) => LocalPackageCallbacks>(programs.package, {
+    refs: Record<string, unknown>, loading: unknown, contentPackage: unknown, selectedId: unknown) => LocalPackageCallbacks>(programs.package, {
     ...bindings, ...purePackageDemo, ...briefModule,
     async crmFetch(url: string, init: LocalGenerationInit) {
       packageRequests.push({ url, init }); activeTransport = url.includes("generate-package") ? "package-generation" : "package-save";
@@ -1807,9 +1880,14 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
   });
   const packageRefInstances = new Map<LocalGenerationSession["sessionRef"], { slots: { current: unknown }[]; cursor: number }>();
   let packageRefInstance: { slots: { current: unknown }[]; cursor: number };
-  const renderPackageRefs = evaluateGenerationFixture<(brief: LocalPackageBrief) => Record<string, unknown>>(programs.packageRefs, {
+  const renderPackageRefs = evaluateGenerationFixture<(brief: LocalPackageBrief, contentPackage: unknown, selectedId: unknown) => Record<string, unknown>>(programs.packageRefs, {
     useRef(initial: unknown) { return packageRefInstance.slots[packageRefInstance.cursor++] ??= { current: initial }; },
   });
+  const packageRefsFor = (session: LocalGenerationSession) => {
+    packageRefInstance = packageRefInstances.get(session.sessionRef) ?? { slots: [], cursor: 0 };
+    packageRefInstances.set(session.sessionRef, packageRefInstance); packageRefInstance.cursor = 0;
+    return renderPackageRefs(state.PackageBrief as LocalPackageBrief, state.ContentPackage ?? null, state.SelectedAdVariantId ?? "");
+  };
   const photoSuggestionRequests: { url: string; init: LocalGenerationInit }[] = [];
   const photoDefaults = evaluateGenerationFixture<{ photoSourceTypes: string[]; inputs: LocalPhotoInputs;
     photoFormats: { id: string; width: number; height: number }[]; photoLayouts: { id: string }[] }>(programs.photoDefaults, {});
@@ -1841,18 +1919,64 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
   });
   const photoRefInstances = new Map<LocalGenerationSession["sessionRef"], { slots: { current: unknown }[]; cursor: number }>();
   let photoRefInstance: { slots: { current: unknown }[]; cursor: number };
-  const renderPhotoRefs = evaluateGenerationFixture<(brief: LocalPackageBrief, inputs: LocalPhotoInputs) => Record<string, unknown>>(programs.photoRefs, {
+  const renderPhotoRefs = evaluateGenerationFixture<(brief: LocalPackageBrief, inputs: LocalPhotoInputs, contentPackage: unknown, selectedId: unknown) => Record<string, unknown>>(programs.photoRefs, {
     useRef(initial: unknown) { return photoRefInstance.slots[photoRefInstance.cursor++] ??= { current: initial }; },
   });
   const capturePhotoCleanup = evaluateGenerationFixture<(refs: Record<string, unknown>) => () => void>(programs.photoCleanup, { URL: photoUrl });
   const photoRefsFor = (session: LocalGenerationSession, brief: LocalPackageBrief, inputs: LocalPhotoInputs) => {
     photoRefInstance = photoRefInstances.get(session.sessionRef) ?? { slots: [], cursor: 0 };
     photoRefInstances.set(session.sessionRef, photoRefInstance); photoRefInstance.cursor = 0;
-    const refs = renderPhotoRefs(brief, inputs);
+    const refs = renderPhotoRefs(brief, inputs, state.ContentPackage ?? null, state.SelectedAdVariantId ?? "");
     if (!photoScopeCleanups.has(session.sessionRef)) photoScopeCleanups.set(session.sessionRef, capturePhotoCleanup(refs));
     return refs;
   };
+  const clipboardWrites: string[] = [], copyPromises: Promise<unknown>[] = [];
+  const clipboardStarted = generationDeferred<void>();
+  let clipboardWait: ReturnType<typeof generationDeferred<void>> | undefined, clipboardFailure = false;
+  const editorRefInstances = new Map<LocalGenerationSession["sessionRef"], { slots: { current: unknown }[]; cursor: number }>();
+  let editorRefInstance: { slots: { current: unknown }[]; cursor: number };
+  const renderEditorRefs = evaluateGenerationFixture<(goal: unknown) => Record<string, unknown>>(programs.editorRefs, {
+    useRef(initial: unknown) { return editorRefInstance.slots[editorRefInstance.cursor++] ??= { current: initial }; },
+  });
+  const captureEditor = evaluateGenerationFixture<(session: LocalGenerationSession, snapshot: Record<string, unknown>, refs: Record<string, unknown>) => LocalEditorCallbacks>(programs.editor, {
+    ...bindings, ...briefModule, URL: photoUrl, setLocation: (location: string) => navigations.push(location),
+    trackCopyPromise(work: Promise<unknown>) { copyPromises.push(work); void work.catch(() => {}); return work; },
+    navigator: { clipboard: { async writeText(text: string) {
+      clipboardWrites.push(text); clipboardStarted.resolve(); const wait = clipboardWait; clipboardWait = undefined;
+      if (wait) await wait.promise;
+      if (clipboardFailure) throw new Error("Synthetic clipboard write failure");
+    } } },
+  });
   return {
+    editor() {
+      assert.ok(lifetime, "copy and library transfer must use the actual keyed wrapper");
+      if (!("PackageBrief" in state)) state.PackageBrief = { ...LOCAL_PACKAGE_BRIEF };
+      if (!("ContentPackage" in state)) state.ContentPackage = null;
+      if (!("SelectedAdVariantId" in state)) state.SelectedAdVariantId = "";
+      if (!("AdvertisingGoalContext" in state)) state.AdvertisingGoalContext = {};
+      if (!("PhotoTexts" in state)) Object.assign(state, Object.fromEntries(Object.entries(JSON.parse(JSON.stringify(photoDefaults.inputs)))
+        .map(([key, value]) => [key[0].toUpperCase() + key.slice(1), value])));
+      const next = lifetime.render(), inputs = Object.fromEntries(Object.keys(photoDefaults.inputs).map((key) => [key, state[key[0].toUpperCase() + key.slice(1)]]));
+      editorRefInstance = editorRefInstances.get(next.session.sessionRef) ?? { slots: [], cursor: 0 };
+      editorRefInstances.set(next.session.sessionRef, editorRefInstance); editorRefInstance.cursor = 0;
+      const refs = { ...photoRefsFor(next.session, state.PackageBrief as LocalPackageBrief, inputs as LocalPhotoInputs),
+        ...packageRefsFor(next.session), ...libraryRefsFor(next.session), ...renderEditorRefs(state.AdvertisingGoalContext) };
+      return { ...next, refs, callbacks: captureEditor(next.session, { form: state.Form, videos: state.Videos, activeId: state.ActiveId,
+        packageBrief: state.PackageBrief, contentPackage: state.ContentPackage, selectedAdVariantId: state.SelectedAdVariantId,
+        advertisingGoalContext: state.AdvertisingGoalContext, ...inputs }, refs) };
+    },
+    clipboardWrites, clipboardStarted, copyPromises,
+    startCopy(editor: { callbacks: LocalEditorCallbacks }, title: string) {
+      const previous = copyPromises.length; assert.equal(typeof editor.callbacks.copies[title], "function", `actual JSX copy binding: ${title}`);
+      editor.callbacks.copies[title](); assert.equal(copyPromises.length, previous + 1); return copyPromises.at(-1)!;
+    },
+    deferClipboard() { clipboardWait = generationDeferred<void>(); return clipboardWait; },
+    clipboardFailure(value = true) { clipboardFailure = value; },
+    goalPrefill(context: Record<string, unknown>) {
+      const incoming = briefModule.createAdvertisingCampaignPrefill({ platform: "meta", sourceModule: "advertising-hub", sourceKind: "goal", service: LOCAL_PACKAGE_BRIEF.service, city: LOCAL_PACKAGE_BRIEF.city,
+        offer: LOCAL_PACKAGE_BRIEF.offer, audience: LOCAL_PACKAGE_BRIEF.audience, ...context });
+      localStorage.setItem(storage.workspaceScopedKey(briefModule.ADVERTISING_CONTENT_STUDIO_PREFILL_KEY), JSON.stringify(incoming));
+    },
     library() {
       assert.ok(lifetime, "library callbacks must use the actual keyed wrapper session"); libraryFixtureActive = true;
       const next = lifetime.render(), refs = libraryRefsFor(next.session);
@@ -1887,10 +2011,8 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
       if (!("PackageBrief" in state)) Object.assign(state, { PackageBrief: { ...LOCAL_PACKAGE_BRIEF }, ContentPackage: null,
         ContentPackageId: "", SelectedAdVariantId: "", PackageGenerationMode: "", GenPrompt: "", Loading: null, Notice: "" });
       const next = lifetime.render();
-      packageRefInstance = packageRefInstances.get(next.session.sessionRef) ?? { slots: [], cursor: 0 };
-      packageRefInstances.set(next.session.sessionRef, packageRefInstance); packageRefInstance.cursor = 0;
-      const refs = renderPackageRefs(state.PackageBrief as LocalPackageBrief);
-      return { ...next, refs, callbacks: capturePackage(next.session, state.PackageBrief as LocalPackageBrief, refs, state.Loading) };
+      const refs = packageRefsFor(next.session);
+      return { ...next, refs, callbacks: capturePackage(next.session, state.PackageBrief as LocalPackageBrief, refs, state.Loading, state.ContentPackage ?? null, state.SelectedAdVariantId ?? "") };
     },
     packageReplies, packageRequests, packageBodyReads, purePackageDemo: purePackageDemo.demoContentPackage,
     handoffs(options?: Parameters<typeof captureHandoffs>[1]) {
@@ -2824,6 +2946,8 @@ type LocalHandoffFixture = Awaited<ReturnType<typeof localGenerationCallbacks>>;
 type LocalHandoff = ReturnType<LocalHandoffFixture["handoffs"]>;
 type LocalHandoffPrefill = {
   sourceKind: string; targetPatients: number; service: string; primaryText: string;
+  platform?: string; sourceId?: string; campaignName?: string; city?: string; offer?: string; audience?: string;
+  headline?: string; description?: string; cta?: string; durationDays?: number; maxBudget?: number; dailyBudget?: number; budgetCurrency?: string;
   contentApproval?: { packageId?: string; variantId: string; approvedCopy: { primaryText: string } };
   creative: { type: string; url?: string; fileName?: string; assetId?: string; thumbnailUrl?: string };
 };
@@ -5266,3 +5390,313 @@ for (const { status, description, expectedHint } of [
     assert.equal(result.telegramDescription, description); assert.match(result.hint!, expectedHint);
   });
 }
+
+const LOCAL_COPY_ROW = { ...LOCAL_LIBRARY_ROW_A, hook: "Library hook", script: "Library script", voiceover: "Library voiceover",
+  cta: "Library CTA", caption: "Library caption", hashtags: ["#library"], avatarPrompt: "Library avatar", tapnowPrompt: "Library TapNow" };
+const LOCAL_COPY_PACKAGE = { ...LOCAL_GENERATED_PACKAGE, adVariants: [...LOCAL_GENERATED_PACKAGE.adVariants,
+  { ...LOCAL_GENERATED_PACKAGE.adVariants[0], id: "copy-variant-b", primaryText: "Copy variant B" }] };
+const COPY_GOAL = { targetPatients: 9, durationDays: 14, maxBudget: 70000, dailyBudget: 5000, budgetCurrency: "KZT" };
+const COPY_CASES = [
+  { source: "package", title: "Сценарий Reels/TikTok", text: LOCAL_COPY_PACKAGE.script, label: "Сценарий" },
+  { source: "package", title: "Shot list", text: LOCAL_COPY_PACKAGE.shotList.join("\n"), label: "Shot list" },
+  { source: "package", title: "Текст на экране", text: LOCAL_COPY_PACKAGE.textOnScreen.join("\n"), label: "Текст на экране" },
+  { source: "package", title: "Voiceover", text: LOCAL_COPY_PACKAGE.voiceover, label: "Voiceover" },
+  { source: "package", title: "Caption для соцсетей", text: LOCAL_COPY_PACKAGE.caption, label: "Caption" },
+  { source: "package", title: "Текст объявления Meta", text: LOCAL_COPY_PACKAGE.adVariants[0].primaryText, label: "Текст объявления" },
+  { source: "package", title: "Photo prompt", text: LOCAL_COPY_PACKAGE.photoPrompt, label: "Photo prompt" },
+  { source: "package", title: "Video prompt", text: LOCAL_COPY_PACKAGE.videoPrompt, label: "Video prompt" },
+  { source: "package", title: "WhatsApp сообщение", text: LOCAL_COPY_PACKAGE.whatsappMessage, label: "WhatsApp сообщение" },
+  { source: "library", title: "Avatar prompt", text: LOCAL_COPY_ROW.avatarPrompt, label: "Avatar prompt" },
+  { source: "library", title: "TapNow prompt", text: LOCAL_COPY_ROW.tapnowPrompt, label: "TapNow prompt" },
+  { source: "library", title: "Content package", text: "", label: "Content package" },
+  { source: "photo", title: "photo", text: "Copy photo headline\nCopy photo offer\nCopy photo CTA", label: "Тексты креатива" },
+] as const;
+type LocalCopySource = typeof COPY_CASES[number]["source"];
+type LocalEditor = ReturnType<LocalHandoffFixture["editor"]>;
+async function copyFixture(demo = false) {
+  const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE);
+  if (demo) { fixture.workspace("demo-local-a"); fixture.auth({ user: null, isDemoMode: true }); }
+  fixture.seedLibrary([LOCAL_COPY_ROW, LOCAL_LIBRARY_ROW_B], LOCAL_COPY_ROW.id);
+  const editor = fixture.editor(); editor.callbacks.publishPackage(LOCAL_COPY_PACKAGE);
+  editor.callbacks.updateTexts("headline", "Copy photo headline"); editor.callbacks.updateTexts("offer", "Copy photo offer"); editor.callbacks.updateTexts("cta", "Copy photo CTA");
+  return fixture;
+}
+function copyCase(source: LocalCopySource) { return COPY_CASES.find((item) => item.source === source)!; }
+function expectedCopy(fixture: LocalHandoffFixture, item: typeof COPY_CASES[number]) {
+  return item.title === "Content package" ? fixture.buildTelegramPackage(LOCAL_COPY_ROW) : item.text;
+}
+async function pauseActualCopy(fixture: LocalHandoffFixture, source: LocalCopySource, phase: "token" | "clipboard") {
+  const token = phase === "token" ? fixture.deferToken() : undefined;
+  const clipboard = phase === "clipboard" ? fixture.deferClipboard() : undefined;
+  const captured = fixture.editor(), item = copyCase(source), work = fixture.startCopy(captured, item.title);
+  const resume = () => { token?.resolve(); clipboard?.resolve(); };
+  try {
+    await flushLocalVideoWork(); assert.equal(fixture.clipboardWrites.length, phase === "token" ? 0 : 1);
+    if (token) await token.started; else await fixture.clipboardStarted.promise;
+    return { captured, item, work, resume };
+  } catch (error) { resume(); await Promise.allSettled([work]); throw error; }
+}
+function editCopySource(fixture: LocalHandoffFixture, captured: LocalEditor, boundary: string) {
+  if (boundary === "account" || boundary === "session-ABA") fixture.sdkSession("actor-b");
+  if (boundary === "session-ABA") { fixture.lifetime!.render(); fixture.sdkSession("actor-a"); fixture.lifetime!.render(); }
+  if (boundary === "workspace") fixture.workspace(HANDOFF_WORKSPACE_B);
+  if (boundary === "unmount") fixture.lifetime!.unmount();
+  if (boundary === "form-ABA") { captured.callbacks.editTitle("Temporary copy form B"); fixture.editor().callbacks.editTitle(LOCAL_LIBRARY_FORM.title); }
+  if (boundary === "selection-ABA") { captured.callbacks.selectLibrary(LOCAL_LIBRARY_ROW_B.id); fixture.editor().callbacks.selectLibrary(LOCAL_COPY_ROW.id); }
+  if (boundary === "package-ABA") {
+    captured.callbacks.publishPackage({ ...LOCAL_COPY_PACKAGE, script: "Replacement package B" }); fixture.editor().callbacks.publishPackage(LOCAL_COPY_PACKAGE);
+  }
+  if (boundary === "variant-ABA") { captured.callbacks.selectVariant("copy-variant-b"); fixture.editor().callbacks.selectVariant(LOCAL_COPY_PACKAGE.adVariants[0].id); }
+  if (boundary === "photo-ABA") { captured.callbacks.updateTexts("headline", "Temporary photo B"); fixture.editor().callbacks.updateTexts("headline", "Copy photo headline"); }
+  if (boundary === "format-ABA") { const original = String(fixture.state.PhotoFormat); captured.callbacks.changeFormat(original === "feed" ? "story" : "feed"); fixture.editor().callbacks.changeFormat(original); }
+}
+
+for (const item of COPY_CASES) {
+  test(`G5C15 actual ${item.source} JSX copy ${item.title} writes exactly its text and label once`, async () => {
+    const fixture = await copyFixture();
+    try {
+      const captured = fixture.editor(); await fixture.startCopy(captured, item.title);
+      assert.deepEqual(fixture.clipboardWrites, [expectedCopy(fixture, item)]);
+      assert.deepEqual(fixture.toasts, [{ kind: "success", message: `${item.label} скопирован` }]);
+      assert.ok(fixture.sdkReads.total > 0); assert.deepEqual(fixture.dispatches, []); assert.deepEqual(fixture.uploads, []); assert.deepEqual(fixture.navigations, []);
+    } finally { fixture.lifetime!.unmount(); }
+  });
+}
+
+const COPY_STALE_CASES = [
+  { source: "library", phase: "token", boundary: "account" }, { source: "library", phase: "token", boundary: "workspace" },
+  { source: "library", phase: "clipboard", boundary: "unmount" }, { source: "library", phase: "clipboard", boundary: "session-ABA" },
+  { source: "library", phase: "clipboard", boundary: "form-ABA" }, { source: "library", phase: "clipboard", boundary: "selection-ABA" },
+  { source: "package", phase: "token", boundary: "package-ABA" }, { source: "package", phase: "clipboard", boundary: "package-ABA" },
+  { source: "package", phase: "clipboard", boundary: "variant-ABA" }, { source: "package", phase: "clipboard", boundary: "account" },
+  { source: "photo", phase: "token", boundary: "photo-ABA" }, { source: "photo", phase: "clipboard", boundary: "photo-ABA" },
+  { source: "photo", phase: "clipboard", boundary: "format-ABA" }, { source: "photo", phase: "clipboard", boundary: "workspace" },
+] as const;
+for (const { source, phase, boundary } of COPY_STALE_CASES) {
+  test(`G5C15 ${source} copy ${phase} stays silent after ${boundary}`, { timeout: 5000 }, async () => {
+    const fixture = await copyFixture(), paused = await pauseActualCopy(fixture, source, phase);
+    try {
+      editCopySource(fixture, paused.captured, boundary);
+      const writes = fixture.writes.length, mutations = fixture.mutations.length, toasts = fixture.toasts.length;
+      paused.resume(); await paused.work;
+      assert.equal(fixture.clipboardWrites.length, phase === "token" ? 0 : 1); assert.deepEqual(fixture.toasts.slice(toasts), []);
+      assert.deepEqual(fixture.writes.slice(writes), []); assert.deepEqual(fixture.mutations.slice(mutations), []);
+      assert.deepEqual(fixture.dispatches, []); assert.deepEqual(fixture.navigations, []);
+    } finally { paused.resume(); await Promise.allSettled([paused.work]); fixture.lifetime!.unmount(); }
+  });
+}
+
+for (const { source, boundary } of [{ source: "library", boundary: "form-ABA" }, { source: "package", boundary: "variant-ABA" }, { source: "photo", boundary: "photo-ABA" }] as const) {
+  test(`G5C15 retained ${source} JSX callback cannot copy after ${boundary}`, async () => {
+    const fixture = await copyFixture(), captured = fixture.editor();
+    try {
+      editCopySource(fixture, captured, boundary); const writes = fixture.writes.length, toasts = fixture.toasts.length;
+      await fixture.startCopy(captured, copyCase(source).title);
+      assert.deepEqual(fixture.clipboardWrites, []); assert.deepEqual(fixture.toasts.slice(toasts), []); assert.deepEqual(fixture.writes.slice(writes), []);
+    } finally { fixture.lifetime!.unmount(); }
+  });
+
+  test(`G5C15 stale ${source} clipboard failure remains silent after ${boundary}`, { timeout: 5000 }, async () => {
+    const fixture = await copyFixture(), paused = await pauseActualCopy(fixture, source, "clipboard");
+    try {
+      fixture.clipboardFailure(); editCopySource(fixture, paused.captured, boundary); const writes = fixture.writes.length, toasts = fixture.toasts.length;
+      paused.resume(); await Promise.allSettled([paused.work]);
+      assert.deepEqual(fixture.toasts.slice(toasts), []); assert.deepEqual(fixture.writes.slice(writes), []); assert.equal(fixture.clipboardWrites.length, 1);
+    } finally { paused.resume(); await Promise.allSettled([paused.work]); fixture.lifetime!.unmount(); }
+  });
+}
+
+for (const source of ["library", "package", "photo"] as const) {
+  test(`G5C15 ${source} copy survives same-actor token refresh without losing its text`, { timeout: 5000 }, async () => {
+    const fixture = await copyFixture(), paused = await pauseActualCopy(fixture, source, source === "library" ? "token" : "clipboard");
+    try {
+      fixture.sdkSession("actor-a", "fixture-copy-refreshed", "TOKEN_REFRESHED"); assert.equal(fixture.editor().key, paused.captured.key);
+      paused.resume(); await paused.work; assert.deepEqual(fixture.clipboardWrites, [expectedCopy(fixture, paused.item)]);
+      assert.deepEqual(fixture.toasts, [{ kind: "success", message: `${paused.item.label} скопирован` }]); assert.deepEqual(fixture.dispatches, []);
+    } finally { paused.resume(); await Promise.allSettled([paused.work]); fixture.lifetime!.unmount(); }
+  });
+
+  test(`G5C15 ${source} no-op input preserves a pending actual JSX copy`, { timeout: 5000 }, async () => {
+    const fixture = await copyFixture(), paused = await pauseActualCopy(fixture, source, "clipboard");
+    try {
+      if (source === "library") { paused.captured.callbacks.editTitle(LOCAL_LIBRARY_FORM.title); paused.captured.callbacks.selectLibrary(LOCAL_COPY_ROW.id); }
+      if (source === "package") { paused.captured.callbacks.publishPackage(LOCAL_COPY_PACKAGE); paused.captured.callbacks.selectVariant(LOCAL_COPY_PACKAGE.adVariants[0].id); }
+      if (source === "photo") { paused.captured.callbacks.updateTexts("headline", "Copy photo headline"); paused.captured.callbacks.changeFormat(String(fixture.state.PhotoFormat)); }
+      paused.resume(); await paused.work; assert.equal(fixture.clipboardWrites.length, 1); assert.equal(fixture.toasts.filter((toast) => toast.kind === "success").length, 1);
+    } finally { paused.resume(); await Promise.allSettled([paused.work]); fixture.lifetime!.unmount(); }
+  });
+
+  test(`G5C15 explicit local demo ${source} copies locally with zero SDK, API or storage uploads`, async () => {
+    const fixture = await copyFixture(true);
+    try {
+      await fixture.startCopy(fixture.editor(), copyCase(source).title); assert.deepEqual(fixture.clipboardWrites, [expectedCopy(fixture, copyCase(source))]);
+      assert.equal(fixture.sdkReads.total, 0); assert.deepEqual(fixture.dispatches, []); assert.deepEqual(fixture.uploads, []);
+      assert.equal(fixture.toasts.filter((toast) => toast.kind === "success").length, 1);
+    } finally { fixture.lifetime!.unmount(); }
+  });
+}
+
+for (const phase of ["token", "clipboard"] as const) {
+  test(`G5C15 clipboard singleflight blocks cross-source duplicates during ${phase}`, { timeout: 5000 }, async () => {
+    const fixture = await copyFixture(), paused = await pauseActualCopy(fixture, "library", phase);
+    const duplicate = [fixture.startCopy(paused.captured, copyCase("package").title), fixture.startCopy(fixture.editor(), "photo")];
+    try {
+      await flushLocalVideoWork(); assert.equal(fixture.clipboardWrites.length, phase === "token" ? 0 : 1);
+      paused.resume(); await Promise.all([paused.work, ...duplicate]); assert.equal(fixture.clipboardWrites.length, 1);
+      assert.equal(fixture.toasts.filter((toast) => toast.kind === "success").length, 1);
+    } finally { paused.resume(); await Promise.allSettled([paused.work, ...duplicate]); fixture.lifetime!.unmount(); }
+  });
+}
+
+test("G5C15 empty actual library copy warns without writing clipboard or claiming success", async () => {
+  const fixture = await copyFixture(); fixture.seedLibrary([{ ...LOCAL_COPY_ROW, avatarPrompt: "" }]);
+  try {
+    await fixture.startCopy(fixture.editor(), "Avatar prompt"); assert.deepEqual(fixture.clipboardWrites, []);
+    assert.equal(fixture.toasts.filter((toast) => toast.kind === "warning").length, 1); assert.equal(fixture.toasts.some((toast) => toast.kind === "success"), false);
+  } finally { fixture.lifetime!.unmount(); }
+});
+
+test("G5C15 current clipboard failure is explicit and its released lock allows one successful retry", async () => {
+  const fixture = await copyFixture(); fixture.clipboardFailure();
+  try {
+    await Promise.allSettled([fixture.startCopy(fixture.editor(), "Avatar prompt")]);
+    assert.equal(fixture.toasts.filter((toast) => toast.kind === "error").length, 1); assert.ok(fixture.state.Notice);
+    assert.equal(fixture.toasts.some((toast) => toast.kind === "success"), false);
+    fixture.clipboardFailure(false); await fixture.startCopy(fixture.editor(), "Avatar prompt"); assert.equal(fixture.clipboardWrites.length, 2);
+    assert.equal(fixture.toasts.filter((toast) => toast.kind === "success").length, 1);
+  } finally { fixture.lifetime!.unmount(); }
+});
+
+for (const mode of ["throw", "error"] as const) {
+  test(`G5C15 SDK ${mode} forbids clipboard and header transfer side effects`, async () => {
+    const fixture = await copyFixture(); fixture.sdkFailure(mode); const mutations = fixture.mutations.length;
+    try {
+      await fixture.startCopy(fixture.editor(), "Avatar prompt"); await fixture.editor().callbacks.transfer();
+      assert.deepEqual(fixture.clipboardWrites, []); assert.deepEqual(fixture.toasts, []); assert.deepEqual(fixture.navigations, []);
+      assert.deepEqual(fixture.mutations.slice(mutations), []); assert.deepEqual(fixture.dispatches, []);
+    } finally { fixture.sdkFailure(); fixture.lifetime!.unmount(); }
+  });
+}
+
+test("G5C15 an obsolete variant button cannot select into a newly published package", async () => {
+  const fixture = await copyFixture(), captured = fixture.editor();
+  try {
+    captured.callbacks.publishPackage({ ...LOCAL_COPY_PACKAGE, ideaTitle: "New copy package" });
+    const selected = fixture.state.SelectedAdVariantId, writes = fixture.writes.length;
+    captured.callbacks.selectVariant("copy-variant-b"); assert.equal(fixture.state.SelectedAdVariantId, selected); assert.deepEqual(fixture.writes.slice(writes), []);
+  } finally { fixture.lifetime!.unmount(); }
+});
+
+async function pauseLibraryTransfer(fixture: LocalHandoffFixture) {
+  const token = fixture.deferToken(), captured = fixture.editor(), mutations = fixture.mutations.length;
+  const work = Promise.resolve().then(() => captured.callbacks.transfer());
+  try {
+    await flushLocalVideoWork(); assert.deepEqual(fixture.mutations.slice(mutations), []); assert.deepEqual(fixture.navigations, []);
+    await token.started; return { token, captured, work };
+  } catch (error) { token.resolve(); await Promise.allSettled([work]); throw error; }
+}
+function editTransferSource(fixture: LocalHandoffFixture, captured: LocalEditor, boundary: string) {
+  editCopySource(fixture, captured, boundary);
+  if (boundary === "brief-ABA") { captured.callbacks.updateBrief("service", "Temporary brief B"); fixture.editor().callbacks.updateBrief("service", LOCAL_PACKAGE_BRIEF.service); }
+  if (boundary === "goal-ABA") {
+    fixture.goalPrefill({ ...COPY_GOAL, targetPatients: 3 }); fixture.editor().callbacks.hydrateGoal();
+    fixture.goalPrefill(COPY_GOAL); fixture.editor().callbacks.hydrateGoal();
+  }
+}
+for (const goal of [false, true]) {
+  test(`G5C15 header transfer preserves exact library payload${goal ? " and current advertising goal" : " without a goal"} at the original workspace key`, async () => {
+    const fixture = await copyFixture();
+    if (goal) { fixture.goalPrefill(COPY_GOAL); fixture.editor().callbacks.hydrateGoal(); }
+    const toasts = fixture.toasts.length, mutations = fixture.mutations.length;
+    try {
+      await fixture.editor().callbacks.transfer(); const prefill = readLocalHandoff(fixture);
+      const key = `negis_ads_automation_prefill::${REAL_DEMO_TEST_WORKSPACE}`;
+      assert.deepEqual(fixture.mutations.slice(mutations).map((mutation) => ({ storage: mutation.storage, operation: mutation.operation, key: mutation.key })), [{ storage: "local", operation: "set", key }]);
+      assert.equal(prefill.platform, "meta"); assert.equal(prefill.sourceKind, "library"); assert.equal(prefill.sourceId, LOCAL_COPY_ROW.id);
+      assert.equal(prefill.campaignName, goal ? LOCAL_PACKAGE_BRIEF.service : LOCAL_COPY_ROW.title);
+      assert.equal(prefill.service, goal ? LOCAL_PACKAGE_BRIEF.service : LOCAL_COPY_ROW.niche); assert.equal(prefill.city, goal ? LOCAL_PACKAGE_BRIEF.city : undefined);
+      assert.equal(prefill.offer, goal ? LOCAL_PACKAGE_BRIEF.offer : LOCAL_COPY_ROW.cta); assert.equal(prefill.audience, goal ? LOCAL_PACKAGE_BRIEF.audience : LOCAL_COPY_ROW.audience);
+      assert.equal(prefill.primaryText, LOCAL_COPY_ROW.caption); assert.equal(prefill.headline, LOCAL_COPY_ROW.hook); assert.equal(prefill.description, LOCAL_COPY_ROW.cta); assert.equal(prefill.cta, "LEARN_MORE");
+      for (const name of Object.keys(COPY_GOAL) as (keyof typeof COPY_GOAL)[]) assert.equal(prefill[name], goal ? COPY_GOAL[name] : undefined);
+      assert.deepEqual(fixture.navigations, ["/ads-automation"]); assert.equal(fixture.toasts.slice(toasts).filter((toast) => toast.kind === "success").length, 1);
+      assert.equal(fixture.localStorage.getItem(`negis_ads_automation_prefill::${HANDOFF_WORKSPACE_B}`), null);
+      assert.deepEqual(fixture.dispatches, []); assert.deepEqual(fixture.uploads, []); assert.deepEqual(fixture.clipboardWrites, []);
+    } finally { fixture.lifetime!.unmount(); }
+  });
+}
+
+for (const boundary of ["account", "workspace", "unmount", "session-ABA", "form-ABA", "selection-ABA", "brief-ABA", "goal-ABA"]) {
+  test(`G5C15 header transfer stops after ${boundary} during actual fresh auth`, { timeout: 5000 }, async () => {
+    const fixture = await copyFixture(), paused = await pauseLibraryTransfer(fixture);
+    try {
+      editTransferSource(fixture, paused.captured, boundary); const writes = fixture.writes.length, mutations = fixture.mutations.length, toasts = fixture.toasts.length;
+      paused.token.resolve(); await paused.work;
+      assert.deepEqual(fixture.mutations.slice(mutations), []); assert.deepEqual(fixture.writes.slice(writes), []);
+      assert.deepEqual(fixture.toasts.slice(toasts), []); assert.deepEqual(fixture.navigations, []); assert.deepEqual(fixture.dispatches, []);
+      assert.equal(fixture.localStorage.getItem(`negis_ads_automation_prefill::${REAL_DEMO_TEST_WORKSPACE}`), null);
+      assert.equal(fixture.localStorage.getItem(`negis_ads_automation_prefill::${HANDOFF_WORKSPACE_B}`), null);
+    } finally { paused.token.resolve(); await Promise.allSettled([paused.work]); fixture.lifetime!.unmount(); }
+  });
+}
+
+for (const boundary of ["form-ABA", "brief-ABA", "goal-ABA"]) {
+  test(`G5C15 retained header transfer refuses an obsolete ${boundary} render`, async () => {
+    const fixture = await copyFixture(), captured = fixture.editor();
+    try {
+      editTransferSource(fixture, captured, boundary); const writes = fixture.writes.length, mutations = fixture.mutations.length, toasts = fixture.toasts.length;
+      await captured.callbacks.transfer(); assert.deepEqual(fixture.mutations.slice(mutations), []); assert.deepEqual(fixture.writes.slice(writes), []);
+      assert.deepEqual(fixture.toasts.slice(toasts), []); assert.deepEqual(fixture.navigations, []); assert.deepEqual(fixture.dispatches, []);
+    } finally { fixture.lifetime!.unmount(); }
+  });
+}
+
+test("G5C15 header handoff mutex permits one prefill and navigation across retained duplicate callbacks", { timeout: 5000 }, async () => {
+  const fixture = await copyFixture(), paused = await pauseLibraryTransfer(fixture);
+  const duplicate = [paused.captured.callbacks.transfer(), fixture.editor().callbacks.transfer()];
+  try {
+    await flushLocalVideoWork(); assert.equal(fixture.sdkReads.total, 1); assert.deepEqual(fixture.navigations, []);
+    paused.token.resolve(); await Promise.all([paused.work, ...duplicate]); assert.deepEqual(fixture.navigations, ["/ads-automation"]);
+    assert.equal(fixture.mutations.filter((mutation) => mutation.key.startsWith("negis_ads_automation_prefill::")).length, 1);
+    assert.equal(fixture.toasts.filter((toast) => toast.kind === "success").length, 1); assert.deepEqual(fixture.dispatches, []);
+  } finally { paused.token.resolve(); await Promise.allSettled([paused.work, ...duplicate]); fixture.lifetime!.unmount(); }
+});
+
+test("G5C15 a pending actual library PATCH prevents header transfer from overtaking the write", { timeout: 5000 }, async () => {
+  const fixture = await copyFixture(), token = fixture.deferToken("library-patch"), work = Promise.resolve(fixture.library().callbacks.update(LOCAL_LIBRARY_PATCH));
+  try {
+    await token.started; const mutations = fixture.mutations.length, toasts = fixture.toasts.length;
+    await fixture.editor().callbacks.transfer(); assert.deepEqual(fixture.mutations.slice(mutations), []); assert.deepEqual(fixture.toasts.slice(toasts), []);
+    assert.deepEqual(fixture.navigations, []); assert.deepEqual(fixture.dispatches, []);
+  } finally { token.resolve(); await Promise.allSettled([work]); fixture.lifetime!.unmount(); }
+});
+
+test("G5C15 header storage failure reports failure without navigation or a false transfer success", async () => {
+  const fixture = await copyFixture(); fixture.localStorage.failNextWrite(`negis_ads_automation_prefill::${REAL_DEMO_TEST_WORKSPACE}`);
+  try {
+    await Promise.resolve().then(() => fixture.editor().callbacks.transfer()); assert.deepEqual(fixture.navigations, []);
+    assert.equal(fixture.localStorage.getItem(`negis_ads_automation_prefill::${REAL_DEMO_TEST_WORKSPACE}`), null);
+    assert.ok(fixture.state.Notice); assert.equal(fixture.toasts.filter((toast) => toast.kind === "error").length, 1);
+    assert.equal(fixture.toasts.some((toast) => toast.kind === "success"), false); assert.deepEqual(fixture.dispatches, []);
+  } finally { fixture.lifetime!.unmount(); }
+});
+
+test("G5C15 actual prefill writer honors an explicit original-workspace key after the live selector changes", async () => {
+  const fixture = await copyFixture(), captured = fixture.editor(), key = `negis_ads_automation_prefill::${REAL_DEMO_TEST_WORKSPACE}`;
+  fixture.workspace(HANDOFF_WORKSPACE_B); const mutations = fixture.mutations.length;
+  try {
+    captured.callbacks.writePrefill({ sourceKind: "library", sourceId: LOCAL_COPY_ROW.id, campaignName: LOCAL_COPY_ROW.title, primaryText: LOCAL_COPY_ROW.script }, key);
+    assert.deepEqual(fixture.mutations.slice(mutations).map((mutation) => mutation.key), [key]);
+    const saved = JSON.parse(fixture.localStorage.getItem(key)!); assert.equal(saved.primaryText, LOCAL_COPY_ROW.script); assert.equal(saved.platform, "meta");
+    assert.equal(fixture.localStorage.getItem(`negis_ads_automation_prefill::${HANDOFF_WORKSPACE_B}`), null);
+    assert.deepEqual(fixture.navigations, []); assert.deepEqual(fixture.dispatches, []);
+  } finally { fixture.lifetime!.unmount(); }
+});
+
+test("G5C15 explicit matching local demo header transfer writes only local prefill without SDK or API", async () => {
+  const fixture = await copyFixture(true);
+  try {
+    await fixture.editor().callbacks.transfer(); assert.equal(readLocalHandoff(fixture, "demo-local-a").sourceKind, "library");
+    assert.equal(fixture.sdkReads.total, 0); assert.deepEqual(fixture.dispatches, []); assert.deepEqual(fixture.uploads, []);
+    assert.deepEqual(fixture.navigations, ["/ads-automation"]); assert.equal(fixture.toasts.filter((toast) => toast.kind === "success").length, 1);
+  } finally { fixture.lifetime!.unmount(); }
+});
