@@ -17,6 +17,7 @@ import NotFound from "@/pages/not-found";
 import FbPixelInit from "@/components/FbPixelInit";
 import { WorkspacePicker } from "@/components/WorkspacePicker";
 import { RouteErrorBoundary } from "@/components/layout/RouteErrorBoundary";
+import { WebAnalytics } from "@/components/WebAnalytics";
 
 // Lazy: every operational screen loads as its own chunk. Before this, all 28
 // routes (including the 4.6k-line AdsAutomation) shipped in one bundle that
@@ -382,6 +383,7 @@ function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, "")}>
+        <WebAnalytics />
         <AuthProvider>
           <TooltipProvider>
             <SessionContent />
