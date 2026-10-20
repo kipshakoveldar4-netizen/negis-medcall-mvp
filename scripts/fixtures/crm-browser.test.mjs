@@ -105,7 +105,13 @@ test("mortgage team preview remains synthetic and restricts analytics to owner/a
       assert.equal(response.status, expected);
       if (expected === 200) {
         const { data: { analytics } } = await response.json();
-        assert.equal(analytics.members.length, 5);
+        const snapshot = (await (await isolated.crmFetch('/api/crm/mortgage-workspace')).json()).data;
+        assert.deepEqual(analytics.members.map(member => member.staffId).sort(), snapshot.members.map(member => member.id).sort());
+        assert.equal(analytics.members.length, 3);
+        assert.ok(analytics.members.some(member => member.role === 'admin'));
+        for (const member of analytics.members) assert.equal(member.assigned.total,
+          snapshot.contacts.filter(contact => contact.responsibleUserId === member.staffId).length);
+        assert.equal(analytics.totalLeads, snapshot.metrics.totalLeads);
         assert.equal(analytics.period.days, 7);
         assert.equal(analytics.members.reduce((total, member) => total + member.assigned.total, 0)
           + analytics.unassignedLeads + analytics.otherAssigneeLeads, analytics.totalLeads);

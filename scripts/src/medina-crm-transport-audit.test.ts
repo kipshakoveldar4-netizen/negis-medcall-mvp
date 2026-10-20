@@ -109,8 +109,10 @@ test('another admin content caller cannot inject bare fetch', () => {
 
 const mortgage = "lib/mortgage-workspace.tsx";
 const mortgageAnalytics = "pages/MortgageAnalytics.tsx";
+const mortgageResults = "components/mortgage/MortgageResults.tsx";
+const contractPanel = "components/mortgage/MortgageContractPanel.tsx";
 const mortgageSources = new Map<string, string>();
-for (const file of [mortgage, mortgageAnalytics]) {
+for (const file of [mortgage, mortgageAnalytics, mortgageResults]) {
   mortgageSources.set(file, await readFile(new URL(`../../artifacts/negis/src/${file}`, import.meta.url), "utf8"));
 }
 
@@ -213,7 +215,7 @@ const tasks = "pages/MortgageTasks.tsx";
 const clients = "pages/MortgageClients.tsx";
 const contactDetail = "components/mortgage/MortgageContactDetail.tsx";
 const boundSources = new Map(mortgageSources);
-for (const file of [activityDialog, contactForm, calendar, tasks, clients, contactDetail]) {
+for (const file of [activityDialog, contactForm, calendar, tasks, clients, contactDetail, contractPanel]) {
   boundSources.set(file, await readFile(new URL(`../../artifacts/negis/src/${file}`, import.meta.url), "utf8"));
 }
 const rejectsBoundTransport = (changed: ReadonlyMap<string, string>) => {
@@ -223,6 +225,99 @@ const rejectsBoundTransport = (changed: ReadonlyMap<string, string>) => {
 
 test("actual activity forwarding and both contact-form parents use the verified mortgage session", () => {
   assert.deepEqual(crmTransportOffenders(boundSources), []);
+});
+
+for (const [file, name, parent, initializer] of [
+  [mortgageResults, "MortgageResults", mortgageAnalytics, "const workspace = useMortgageWorkspace({ days });"],
+  [contractPanel, "MortgageContractPanel", contactDetail, "const workspace = useMortgageWorkspace({ leadId });"],
+] as const) {
+  for (const [label, from, to] of [
+    ["fake parent hook", initializer, initializer.replace("useMortgageWorkspace", "unsafeHook")],
+    ["parent transport escape", initializer, `${initializer} const stolen = workspace.request;`],
+    ["fetch prop", "request={workspace.request}", "request={fetch}"],
+    ["spread before prop", "request={workspace.request}", "{...unsafeProps} request={workspace.request}"],
+    ["spread after prop", "request={workspace.request}", "request={workspace.request} {...unsafeProps}"],
+    ["duplicate prop", "request={workspace.request}", "request={workspace.request} request={fetch}"],
+    ["aliased import", `import { ${name} }`, `import { ${name} as Unsafe }`],
+  ] as const) {
+    test(`outcomes ${name} rejects ${label}`, () => {
+      // ContactDetail has another request prop; target the outcomes mount itself.
+      const source = boundSources.get(parent)!;
+      const mount = source.indexOf(`<${name} `);
+      const changed = from.startsWith("request=")
+        ? new Map(boundSources).set(parent, source.slice(0, mount) + source.slice(mount).replace(from, to))
+        : mutate(parent, from, to, boundSources);
+      assert.notEqual(changed.get(parent), source);
+      rejectsBoundTransport(changed);
+    });
+  }
+  for (const [label, extra] of [
+    ["extra parent", `import { ${name} } from "@/${file.replace(/\.tsx$/, "")}"; const Unsafe = () => <${name} request={fetch} />;`],
+    ["aliased parent", `import { ${name} as Alias } from "@/${file.replace(/\.tsx$/, "")}"; const Unsafe = () => <Alias request={fetch} />;`],
+    ["namespace parent", `import * as forms from "@/${file.replace(/\.tsx$/, "")}"; const Unsafe = () => <forms.${name} request={fetch} />;`],
+    ["default parent", `import Alias from "@/${file.replace(/\.tsx$/, "")}"; const Unsafe = () => <Alias request={fetch} />;`],
+    ["reexport", `export * from "@/${file.replace(/\.tsx$/, "")}";`],
+    ["dynamic import", `const forms = import("@/${file.replace(/\.tsx$/, "")}");`],
+  ] as const) {
+    test(`outcomes ${name} rejects ${label}`, () => {
+      rejectsBoundTransport(new Map(boundSources).set("components/unsafe-parent.tsx", extra));
+    });
+  }
+  test(`outcomes ${name} rejects a second mount in its approved parent`, () => {
+    rejectsBoundTransport(new Map(boundSources).set(parent, boundSources.get(parent)! + `\nfunction Unsafe() { return <${name} request={fetch} />; }`));
+  });
+  test(`outcomes ${name} requires its implementation`, () => {
+    const changed = new Map(boundSources);
+    changed.delete(file);
+    rejectsBoundTransport(changed);
+  });
+}
+
+for (const [label, file, from, to] of [
+  ["default wrapper", contractPanel, "props: MortgageContractPanelProps)", "props: MortgageContractPanelProps = unsafeProps)"],
+  ["wrong spread", contractPanel, "{...props}", "{...unsafeProps}"],
+  ["extra spread", contractPanel, "{...props}", "{...props} {...unsafeProps}"],
+  ["override after spread", contractPanel, "{...props}", "{...props} request={fetch}"],
+  ["override before spread", contractPanel, "{...props}", "request={fetch} {...props}"],
+  ["props escape", contractPanel, "return <MortgageContractSession", "const stolen = props; return <MortgageContractSession"],
+  ["props request escape", contractPanel, "return <MortgageContractSession", "const stolen = props.request; return <MortgageContractSession"],
+  ["default session request", contractPanel, "canVoid, request, isCurrent }", "canVoid, request = fetch, isCurrent }"],
+  ["default session props", contractPanel, "isCurrent }: MortgageContractPanelProps)", "isCurrent }: MortgageContractPanelProps = unsafeProps)"],
+  ["session request escape", contractPanel, "const headingId = useId();", "const stolen = request; const headingId = useId();"],
+  ["session request replacement", contractPanel, "const headingId = useId();", "request = fetch; const headingId = useId();"],
+  ["session dependency escape", contractPanel, "const headingId = useId();", "steal(null, [request]); const headingId = useId();"],
+  ["session forged callback hook", contractPanel, 'from "react"', 'from "unsafe-react"'],
+  ["raw session read", contractPanel, "await request(path, { signal:", "await fetch(path, { signal:"],
+  ["raw session write", contractPanel, "await request(path, { method,", "await fetch(path, { method,"],
+  ["shadowed session request", contractPanel, 'async function mutate(method: "POST"', 'async function mutate(request: any, method: "POST"'],
+  ["exported session", contractPanel, "function MortgageContractSession(", "export function MortgageContractSession("],
+  ["default results request", mortgageResults, "workspaceId, request, isCurrent }: MortgageResultsProps", "workspaceId, request = fetch, isCurrent }: MortgageResultsProps"],
+  ["results request escape", mortgageResults, "const headingId = useId();", "const stolen = request; const headingId = useId();"],
+  ["results request replacement", mortgageResults, "const headingId = useId();", "request = fetch; const headingId = useId();"],
+  ["query fetch replacement", mortgageResults, "() => ({ workspaceId, request, isCurrent, days, refresh })", "() => ({ workspaceId, request: fetch, isCurrent, days, refresh })"],
+  ["query duplicate request", mortgageResults, "() => ({ workspaceId, request, isCurrent, days, refresh })", "() => ({ workspaceId, request, request: fetch, isCurrent, days, refresh })"],
+  ["query spread", mortgageResults, "() => ({ workspaceId, request, isCurrent, days, refresh })", "() => ({ workspaceId, request, isCurrent, days, refresh, ...unsafe })"],
+  ["query memo alias", mortgageResults, "const query = useMemo(", "const query = unsafeMemo("],
+  ["query fake memo import", mortgageResults, 'from "react"', 'from "unsafe-react"'],
+  ["query mutable capture", mortgageResults, "const query = useMemo(", "let query = useMemo("],
+  ["query reassignment", mortgageResults, "const latest = useRef(query);", "query.request = fetch; const latest = useRef(query);"],
+  ["query object override", mortgageResults, "const latest = useRef(query);", "Object.assign(query, { request: fetch }); const latest = useRef(query);"],
+  ["query request escape", mortgageResults, "const latest = useRef(query);", "const stolen = query.request; const latest = useRef(query);"],
+  ["query object escape", mortgageResults, "const latest = useRef(query);", "steal(query); const latest = useRef(query);"],
+  ["latest request escape", mortgageResults, "latest.current = query;", "latest.current = query; const stolen = latest.current.request;"],
+  ["stored query escape", mortgageResults, "const headingId = useId();", "const stolen = state.query; const headingId = useId();"],
+  ["stored request escape", mortgageResults, "const headingId = useId();", "const stolen = state.query?.request; const headingId = useId();"],
+  ["visible snapshot escape", mortgageResults, 'const reload = () => {', 'const stolen = visible; const reload = () => {'],
+  ["shadowed state setter", mortgageResults, "setState({ query, kind:", "((setState = steal) => setState({ query, kind: \"loading\" }))(); setState({ query, kind:"],
+  ["raw results fetch", mortgageResults, "await query.request(`/api/crm/", "await fetch(`/api/crm/"],
+  ["shadowed query", mortgageResults, "void (async () => {", "void (async (query = unsafeQuery) => {"],
+] as const) {
+  test(`outcomes consumers reject ${label}`, () => rejectsBoundTransport(mutate(file, from, to, boundSources)));
+}
+
+test("private contract session cannot acquire another caller", () => {
+  rejectsBoundTransport(new Map(boundSources).set(contractPanel, boundSources.get(contractPanel)! +
+    '\nfunction Unsafe() { return <MortgageContractSession request={fetch} />; }'));
 });
 
 for (const [file, initializer] of [
@@ -320,7 +415,7 @@ for (const [file, extra] of [
   });
 }
 
-for (const file of [activityDialog, contactForm, calendar, tasks, clients, contactDetail, "components/unrelated.tsx"]) {
+for (const file of [activityDialog, contactForm, calendar, tasks, clients, contactDetail, contractPanel, mortgageResults, "components/unrelated.tsx"]) {
   for (const extra of [
     'function Unsafe(request: Function) { return request("/api/crm/leads"); }',
     'fetch("/api/crm/leads");',

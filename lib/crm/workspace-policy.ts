@@ -32,6 +32,8 @@ export async function lookupWorkspacePurposes(workspaceIds: string[]): Promise<R
 // Existing route permissions still run first; purpose only narrows them.
 const MORTGAGE_METHODS: Readonly<Record<string, readonly string[]>> = {
   'mortgage-workspace': ['GET', 'POST', 'PATCH'],
+  'mortgage-contracts': ['GET', 'POST', 'PATCH'],
+  'mortgage-results': ['GET'],
   leads: ['GET', 'POST', 'PATCH'],
   'lead-stages': ['GET'],
   'lead-sources': ['GET'],
@@ -50,6 +52,7 @@ export function mortgageRouteAllowed(role: string, route: string, method: string
   if (!['owner', 'admin', 'lead_manager'].includes(role)) return false;
   if (role === 'lead_manager') return (route === 'leads' && ['GET', 'PATCH'].includes(method))
     || (route === 'mortgage-workspace' && ['GET', 'POST', 'PATCH'].includes(method))
+    || (route === 'mortgage-contracts' && ['GET', 'POST'].includes(method))
     || (['lead-stages', 'lead-sources'].includes(route) && method === 'GET')
     || (route === 'push-subscriptions' && ['GET', 'POST', 'PATCH'].includes(method));
   return Object.hasOwn(MORTGAGE_METHODS, route) && MORTGAGE_METHODS[route].includes(method);

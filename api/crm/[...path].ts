@@ -41,6 +41,7 @@ import {
 import { normalizeCrmSegments, resolveCrmRoute } from "../../lib/crm/authorization";
 import { lookupWorkspacePurposes, requirePurposeRoute, requireMortgagePayload } from '../../lib/crm/workspace-policy';
 import { handleMortgageWorkspace } from '../../lib/crm/mortgage-workspace';
+import { handleMortgageOutcomes } from '../../lib/crm/mortgage-outcomes';
 import { handleStaffInvitationAccept, handleStaffInvitations } from "../../lib/crm/staff-invitations";
 import { handleStaffCredentials } from "../../lib/crm/staff-credentials";
 import { handleJoinCode, handleJoinRequest, handleStaffJoinRequests } from "../../lib/crm/staff-join-requests";
@@ -243,6 +244,8 @@ async function dispatch(
   switch (routeKey) {
     case "lead-team-analytics": return segments.length === 1 ? handleLeadTeamAnalytics(req, res) : notFound(res);
     case "mortgage-workspace": return segments.length === 1 ? handleMortgageWorkspace(req, res) : notFound(res);
+    case "mortgage-contracts": return segments.length === 1 ? handleMortgageOutcomes(req, res, "contracts") : notFound(res);
+    case "mortgage-results": return segments.length === 1 ? handleMortgageOutcomes(req, res, "results") : notFound(res);
     case "site-blog": return handleSiteBlog(req, res);
     case "site-inquiry-deletion-preview":
       return segments.length === 1 ? handleSiteInquiryDeletionPreview(req, res) : notFound(res);
@@ -479,7 +482,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       ...(permission ? { permission } : {}),
     });
 
-    const purposeScopedActivity = route.key === "mortgage-workspace" && ["GET", "POST", "PATCH"].includes(method);
+    const purposeScopedActivity = (route.key === "mortgage-workspace" && ["GET", "POST", "PATCH"].includes(method))
+      || (route.key === "mortgage-contracts" && ["GET", "POST"].includes(method));
     if (isAssignedLeadRole(context.role) && !assignedLeadRouteAllowed(route.key, method) && !purposeScopedActivity) {
       return sendJson(res, 403, { success: false, error: "Недостаточно прав", code: "insufficient_permission" });
     }

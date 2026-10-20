@@ -2,6 +2,8 @@ import { useState } from "react";
 import { CalendarPlus, ClipboardPlus, Pencil, Phone, RefreshCw, X } from "lucide-react";
 import { Link } from "wouter";
 import { useMortgageWorkspace } from "@/lib/mortgage-workspace";
+import { useAuth } from "@/contexts/AuthContext";
+import { MortgageContractPanel } from "@/components/mortgage/MortgageContractPanel";
 import { formatPhone, toTelHref } from "@/lib/phone";
 import type { MortgageContact } from "../../../../../lib/crm/mortgage-contract";
 import { MortgageContactForm } from "./MortgageContactForm";
@@ -18,6 +20,7 @@ const eventLabels: Record<string, string> = {
 export function MortgageContactDetail({ leadId, canEdit, onClose, onChanged }: {
   leadId: string; canEdit: boolean; onClose: () => void; onChanged: () => void;
 }) {
+  const { clinicId, userRole } = useAuth();
   const workspace = useMortgageWorkspace({ leadId });
   const [editingContact, setEditingContact] = useState<MortgageContact | null>(null);
   const data = workspace.isCurrent() && !workspace.loading && !workspace.error ? workspace.data : null;
@@ -71,6 +74,10 @@ export function MortgageContactDetail({ leadId, canEdit, onClose, onChanged }: {
             <ClipboardPlus size={15} aria-hidden="true" />Новая задача
           </Link>
         </div>
+
+        {clinicId && <MortgageContractPanel leadId={leadId} workspaceId={clinicId} timeZone={data.timeZone}
+          canEdit={canEdit} canVoid={userRole === "owner" || userRole === "admin"}
+          request={workspace.request} isCurrent={workspace.isCurrent} />}
 
         <section className="min-w-0 border-t border-[var(--negis-border)] pt-4" aria-labelledby="mortgage-contact-activities">
           <h3 id="mortgage-contact-activities" className="mb-2 text-sm font-semibold">Встречи и задачи</h3>

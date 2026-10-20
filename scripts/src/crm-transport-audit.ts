@@ -185,7 +185,9 @@ const mortgageFile = "lib/mortgage-workspace.tsx";
 const mortgageAnalyticsFile = "pages/MortgageAnalytics.tsx";
 const activityDialogFile = "components/mortgage/ActivityDialog.tsx";
 const contactFormFile = "components/mortgage/MortgageContactForm.tsx";
-const mortgageConsumerFiles = new Set([mortgageFile, mortgageAnalyticsFile, activityDialogFile, contactFormFile]);
+const contractPanelFile = "components/mortgage/MortgageContractPanel.tsx";
+const resultsFile = "components/mortgage/MortgageResults.tsx";
+const mortgageConsumerFiles = new Set([mortgageFile, mortgageAnalyticsFile, activityDialogFile, contactFormFile, contractPanelFile, resultsFile]);
 
 // Prove this context -> hook -> consumer chain, not the names `request` or
 // `mutate`. Only the exact call sites below receive an exemption.
@@ -375,6 +377,9 @@ function verifiedMortgageReceivers(sources: CrmSources): Map<string, Set<number>
       && (node.parent.getText() !== "access.request" || node.parent === requestProperty.initializer || requestCalls.some((call) => call.expression === node.parent)))
     || (ts.isCallExpression(node.parent) && node.parent.expression.getText() === "readResult" && node.parent.arguments[0] === node))) return undefined;
   const calls = new Map<string, Set<number>>();
+  // Shared parents are checked after every boundary has proved its exact forward.
+  const parentForwards = new Set<ts.Node>();
+  const parentChecks: (() => boolean)[] = [];
   const approve = (file: string, node: ts.CallExpression) => {
     const expression = node.expression;
     const receiver = ts.isPropertyAccessExpression(expression) ? expression.name : expression;
@@ -400,9 +405,9 @@ function verifiedMortgageReceivers(sources: CrmSources): Map<string, Set<number>
       || !boundTo(binding.initializer, workspace.name) || !matches(binding.name, "{ isCurrent, request }")) return undefined;
     const request = binding.name.elements.find((node) => node.name.getText() === "request")!;
     const requestCall = one(nodes(report).filter(ts.isCallExpression).filter((node) => boundTo(node.expression, request.name)));
-    if (!requestCall || !references(request.name, (node) => node === request.name || node === requestCall.expression || dependency(node))
-      || !references(workspace.name, (node) => node === workspace.name || node === binding.initializer
-        || (readOnlyProperty(node) && node.parent.getText() !== "workspace.request"))) return undefined;
+    if (!requestCall || !references(request.name, (node) => node === request.name || node === requestCall.expression || dependency(node))) return undefined;
+    parentChecks.push(() => references(workspace.name, (node) => node === workspace.name || node === binding.initializer
+      || (readOnlyProperty(node) && (node.parent.getText() !== "workspace.request" || parentForwards.has(node.parent)))));
     approve(mortgageAnalyticsFile, requestCall);
   }
 
@@ -445,9 +450,12 @@ function verifiedMortgageReceivers(sources: CrmSources): Map<string, Set<number>
       const value = jsxValue(mount, prop);
       const receiver = value && prop === "request" && ts.isPropertyAccessExpression(value) && value.name.text === "request"
         ? value.expression : value;
-      if (!value || (prop === "request" && receiver === value) || !receiver || !boundTo(receiver, workspace.name)
-        || !references(workspace.name, (node) => node === workspace.name || dependency(node)
-          || workspaceUse(node, prop === "request" ? [value] : [], prop === "workspace" ? [value] : []))) return false;
+      if (!value || (prop === "request" && receiver === value) || !receiver || !boundTo(receiver, workspace.name)) return false;
+      parentForwards.add(value);
+      parentChecks.push(() => references(workspace.name, (node) => node === workspace.name || dependency(node)
+        || workspaceUse(node, [...parentForwards], [...parentForwards])
+        || (caller === mortgageAnalyticsFile && ts.isVariableDeclaration(node.parent)
+          && node.parent.initializer === node && matches(node.parent.name, "{ isCurrent, request }"))));
       mounts.push(mount);
     }
     for (const [caller, source] of files) {
@@ -507,6 +515,93 @@ function verifiedMortgageReceivers(sources: CrmSources): Map<string, Set<number>
       || !references(request.name, (node) => node === request.name || node === requests[0].expression || dependency(node))) return undefined;
     approve(contactFormFile, requests[0]);
   }
+  const requestParameter = (fn: ts.FunctionDeclaration) => {
+    const parameter = fn.parameters[0];
+    if (fn.parameters.length !== 1 || !parameter || parameter.initializer || !ts.isObjectBindingPattern(parameter.name)) return undefined;
+    const request = one(parameter.name.elements.filter((node) => node.name.getText() === "request"));
+    return request && !request.propertyName && !request.initializer && !request.dotDotDotToken ? request : undefined;
+  };
+  const verifiedReactHook = (ast: ts.SourceFile, name: string) => {
+    const binding = imported(ast, name, "react");
+    return binding && references(binding.name, (node) => node === binding.name
+      || (ts.isCallExpression(node.parent) && node.parent.expression === node))
+      && nodes(ast).filter(ts.isCallExpression).filter((node) => ts.isIdentifier(node.expression) && node.expression.text === name)
+        .every((node) => boundTo(node.expression, binding.name));
+  };
+  const panel = files.get(contractPanelFile);
+  if (panel) {
+    if (!verifyParents(contractPanelFile, "MortgageContractPanel", [
+      ["components/mortgage/MortgageContactDetail.tsx", "MortgageContactDetail"],
+    ], "request")) return undefined;
+    const wrapper = functionIn(panel, "MortgageContractPanel")!, session = functionIn(panel, "MortgageContractSession");
+    const props = wrapper.parameters[0], request = session && requestParameter(session);
+    const mount = session?.name && one(nodes(wrapper).filter(ts.isJsxSelfClosingElement).filter((node) => boundTo(node.tagName, session.name!)));
+    if (wrapper.parameters.length !== 1 || !props || !ts.isIdentifier(props.name) || props.initializer
+      || !session?.name || session.modifiers?.some((node) => node.kind === ts.SyntaxKind.ExportKeyword) || !request || !mount
+      || !references(session.name, (node) => node === session.name || node === mount.tagName)) return undefined;
+    const spread = one(mount.attributes.properties.filter(ts.isJsxSpreadAttribute));
+    if (!spread || !boundTo(spread.expression, props.name) || mount.attributes.properties.length !== 2
+      || !jsxValue(mount, "key") || mount.attributes.properties.filter(ts.isJsxAttribute).some((node) => node.name.getText() !== "key")
+      || !references(props.name, (node) => node === props.name || node === spread.expression
+        || (readOnlyProperty(node) && ts.isPropertyAccessExpression(node.parent) && node.parent.expression === node
+          && ["workspaceId", "leadId", "timeZone"].includes(node.parent.name.text)))) return undefined;
+    const requests = nodes(session).filter(ts.isCallExpression).filter((node) => ts.isIdentifier(node.expression) && node.expression.text === "request");
+    const load = variable(session, "load");
+    if (requests.length !== 2 || !requests.every((node) => boundTo(node.expression, request.name))
+      || !load?.initializer || !verifiedReactHook(panel, "useCallback") || !ts.isCallExpression(load.initializer)
+      || load.initializer.expression.getText() !== "useCallback"
+      || !references(request.name, (node) => node === request.name || requests.some((call) => call.expression === node)
+        || (dependency(node) && node.parent.parent === load.initializer))) return undefined;
+    requests.forEach((node) => approve(contractPanelFile, node));
+  }
+  const results = files.get(resultsFile);
+  if (results) {
+    if (!verifyParents(resultsFile, "MortgageResults", [[mortgageAnalyticsFile, "MortgageAnalyticsReport"]], "request")) return undefined;
+    const component = functionIn(results, "MortgageResults")!, request = requestParameter(component);
+    const query = variable(component, "query"), memo = imported(results, "useMemo", "react");
+    if (!request || !query || !memo || !["useMemo", "useRef", "useEffect", "useState"].every((name) => verifiedReactHook(results, name)) || !matches(query.initializer,
+      "useMemo(() => ({ workspaceId, request, isCurrent, days, refresh }), [workspaceId, request, isCurrent, days, refresh])")
+      || !ts.isCallExpression(query.initializer!) || !boundTo(query.initializer.expression, memo.name)
+      || !references(memo.name, (node) => node === memo.name || node === (query.initializer as ts.CallExpression).expression)
+      || !references(request.name, (node) => node === request.name
+        || (ts.isShorthandPropertyAssignment(node.parent) && nodes(query.initializer!).includes(node))
+        || (dependency(node) && node.parent.parent === query.initializer))) return undefined;
+    const requests = nodes(component).filter(ts.isCallExpression).filter((node) => ts.isPropertyAccessExpression(node.expression)
+      && node.expression.name.text === "request");
+    const call = one(requests);
+    const latest = variable(component, "latest");
+    // State retains the query identity, so it must not become a second route
+    // for extracting or forwarding the transport captured by that query.
+    const stateBinding = one(nodes(component).filter(ts.isVariableDeclaration).filter((node) => constant(node)
+      && ts.isArrayBindingPattern(node.name) && node.name.elements.length === 2
+      && node.name.elements[0].getText() === "state" && node.name.elements[1].getText() === "setState"));
+    const visible = variable(component, "visible");
+    const state = stateBinding && ts.isArrayBindingPattern(stateBinding.name) ? stateBinding.name.elements[0] : undefined;
+    const setter = stateBinding && ts.isArrayBindingPattern(stateBinding.name) ? stateBinding.name.elements[1] : undefined;
+    if (!state || !ts.isBindingElement(state) || !setter || !ts.isBindingElement(setter)
+      || !matches(stateBinding?.initializer, 'useState<LoadState>({ query: null, kind: "loading" })')
+      || !visible?.initializer || !matches(visible.initializer, 'state.query === query ? state : { kind: "loading" as const }')
+      || !references(state.name, (node) => node === state.name || nodes(visible.initializer!).includes(node))
+      || !references(setter.name, (node) => node === setter.name || (ts.isCallExpression(node.parent) && node.parent.expression === node))
+      || !references(visible.name, (node) => node === visible.name || (readOnlyProperty(node)
+        && ts.isPropertyAccessExpression(node.parent) && node.parent.expression === node
+        && ["kind", "denied", "message", "data"].includes(node.parent.name.text)))) return undefined;
+    if (!call || !ts.isPropertyAccessExpression(call.expression) || !boundTo(call.expression.expression, query.name)
+      || !latest || !matches(latest.initializer, "useRef(query)")
+      || !references(latest.name, (node) => node === latest.name || (readOnlyProperty(node) && node.parent.getText() === "latest.current"
+        && matches(node.parent.parent, "latest.current === query"))
+        || (ts.isPropertyAccessExpression(node.parent) && node.parent.expression === node && matches(node.parent.parent, "latest.current = query")))
+      || !references(query.name, (node) => node === query.name
+        || (readOnlyProperty(node) && ts.isPropertyAccessExpression(node.parent) && node.parent.expression === node
+          && (node.parent.name.text === "request" ? node.parent === call.expression : ["workspaceId", "days", "isCurrent"].includes(node.parent.name.text)))
+        || node.parent === latest.initializer
+        || matches(node.parent, "latest.current = query") || matches(node.parent, "latest.current === query") || matches(node.parent, "state.query === query")
+        || (dependency(node) && ts.isCallExpression(node.parent.parent) && node.parent.parent.expression.getText() === "useEffect")
+        || (ts.isShorthandPropertyAssignment(node.parent) && ts.isObjectLiteralExpression(node.parent.parent)
+          && ts.isCallExpression(node.parent.parent.parent) && boundTo(node.parent.parent.parent.expression, setter.name)))) return undefined;
+    approve(resultsFile, call);
+  }
+  if (!parentChecks.every((check) => check())) return undefined;
   return calls;
 }
 

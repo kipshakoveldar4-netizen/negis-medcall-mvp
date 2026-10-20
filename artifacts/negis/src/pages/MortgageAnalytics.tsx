@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { PageLayout } from "@/components/layout/PageLayout";
 import { LeadTeamAnalytics } from "@/components/crm/lead-team-analytics";
+import { MortgageResults } from "@/components/mortgage/MortgageResults";
 import { useAuth } from "@/contexts/AuthContext";
 import { roleLabels, type StaffRole } from "@/lib/permissions";
 import { MortgageScope, useMortgageWorkspace } from "@/lib/mortgage-workspace";
@@ -46,6 +47,7 @@ function MortgageAnalyticsReport({ workspaceId }: { workspaceId: string }) {
       }} />
     </MortgagePageHeader>
 
+    {isCurrent() && <MortgageResults workspaceId={workspaceId} request={workspace.request} isCurrent={isCurrent} />}
     {isCurrent() && <LeadTeamAnalytics key={workspaceId} access={access} initiallyExpanded heading="Результаты по заявкам и конверсия" />}
 
     <section className="min-w-0" aria-labelledby="mortgage-member-report">

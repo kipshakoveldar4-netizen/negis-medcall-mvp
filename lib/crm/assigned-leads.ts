@@ -6,6 +6,7 @@ export function isAssignedLeadRole(role: unknown): boolean {
 export function assignedLeadRouteAllowed(route: string, method: string, purpose?: string): boolean {
   return (route === "leads" && (method === "GET" || method === "PATCH"))
     || (purpose === "mortgage_leads" && route === "mortgage-workspace" && ["GET", "POST", "PATCH"].includes(method))
+    || (purpose === "mortgage_leads" && route === "mortgage-contracts" && ["GET", "POST"].includes(method))
     || ((route === "lead-stages" || route === "lead-sources") && method === "GET");
 }
 

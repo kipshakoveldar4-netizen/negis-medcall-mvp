@@ -39,6 +39,11 @@ type AssignedLeadFixture = {
   result?: unknown;
   calls: Array<{ name: string; args: Record<string, unknown> }>;
 };
+type MortgageOutcomesFixture = {
+  calls: Array<{ name: string; args: Record<string, unknown> }>;
+  result?: Record<string, unknown>;
+  error?: { code: string; message: string };
+};
 
 /** Records every table touched and every filter applied. */
 function spyClient(
@@ -94,6 +99,7 @@ type LoadOptions = {
   staffDirectory?: StaffDirectoryFixture;
   writeFailure?: WriteFailureFixture;
   assignedLeads?: AssignedLeadFixture;
+  mortgageOutcomes?: MortgageOutcomesFixture;
 };
 
 type MockResponse = {
@@ -148,9 +154,15 @@ async function loadRouter(options: LoadOptions) {
   supabaseModule.setSupabaseServerClientFactoryForTests(() => {
     crmClientCreations += 1;
     const client = withAppointmentCreateRpcSpy(spyClient(clientRows, log, options.staffDirectory, options.writeFailure));
-    if (!options.assignedLeads) return client;
+    if (!options.assignedLeads && !options.mortgageOutcomes) return client;
     const fixture = options.assignedLeads;
     return Object.assign(client, { async rpc(name: string, args: Record<string, unknown>) {
+      if (options.mortgageOutcomes && ["read_mortgage_contracts", "save_mortgage_contract", "read_mortgage_results"].includes(name)) {
+        const outcomes = options.mortgageOutcomes;
+        outcomes.calls.push({ name, args });
+        return { data: outcomes.error ? null : outcomes.result ?? { records: [], truncated: false }, error: outcomes.error ?? null };
+      }
+      assert.ok(fixture, `unexpected RPC ${name}`);
       fixture.calls.push({ name, args });
       if (fixture.error) return { data: null, error: fixture.error };
       if (name === "read_assigned_crm_leads") {
@@ -1781,8 +1793,8 @@ test("P3 assigned-only access has a closed browser-route allowlist", async () =>
         const { res, log } = await ctx.call({ segments: route.split("/"), method, body: { id: ownLeadId, updates: { notes: "forged" } } });
         assert.ok([403,404,405].includes(res.statusCode), `${route} ${method}: ${res.statusCode}`);
         assert.equal(businessQueries(log).length, 0, `${route} must fail before any business query`);
-        if (route === "mortgage-workspace") {
-          // Only the dedicated route needs purpose to decide this role's access.
+        if (route === "mortgage-workspace" || (route === "mortgage-contracts" && ["GET", "POST"].includes(method))) {
+          // Only these dedicated methods need purpose to decide this role's access.
           assert.equal(res.statusCode, 403, "the dedicated route requires authoritative mortgage purpose");
           assertWorkspaceProfileQuery(log, WORKSPACE_A);
           assert.ok(log.every((entry) => entry.table === "staff_users" || isWorkspaceProfileQuery(entry)),
@@ -1807,8 +1819,9 @@ test("P3a dedicated mortgage access verifies membership and workspace selection 
   ]) {
     const fixture: AssignedLeadFixture = { calls: [], rows: ownLeadRows };
     await withRouter({ memberships: scenario.memberships, authOk: scenario.authOk, assignedLeads: fixture }, async ctx => {
-      for (const method of ["GET", "POST", "PATCH"]) {
-        const { res, log } = await ctx.call({ segments: ["mortgage-workspace"], method, token: scenario.token,
+      for (const [route, method] of [["mortgage-workspace", "GET"], ["mortgage-workspace", "POST"], ["mortgage-workspace", "PATCH"],
+        ["mortgage-contracts", "GET"], ["mortgage-contracts", "POST"]]) {
+        const { res, log } = await ctx.call({ segments: [route], method, token: scenario.token,
           query: scenario.query, body: { purpose: "mortgage_leads", role: "owner" } });
         assert.equal(res.statusCode, scenario.status);
         assert.ok(log.every((entry) => entry.table === "staff_users"), "unverified scope must not read a profile or business data");
@@ -1818,12 +1831,13 @@ test("P3a dedicated mortgage access verifies membership and workspace selection 
   }
 });
 
-test("P3b a browser-claimed mortgage purpose cannot open the dedicated route", async () => {
+test("P3b a browser-claimed mortgage purpose cannot open the dedicated routes", async () => {
   for (const profile of [[], [{ workspace_id: WORKSPACE_A, value: { purpose: "clinic_services" } }]]) {
     const fixture: AssignedLeadFixture = { calls: [], rows: ownLeadRows };
     await withRouter({ memberships: [assignedLeadMember], assignedLeads: fixture, rows: { workspace_settings: profile } }, async ctx => {
-      for (const method of ["GET", "POST", "PATCH"]) {
-        const { res, log } = await ctx.call({ segments: ["mortgage-workspace"], method,
+      for (const [route, method] of [["mortgage-workspace", "GET"], ["mortgage-workspace", "POST"], ["mortgage-workspace", "PATCH"],
+        ["mortgage-contracts", "GET"], ["mortgage-contracts", "POST"]]) {
+        const { res, log } = await ctx.call({ segments: [route], method,
           query: { workspaceId: WORKSPACE_A, purpose: "mortgage_leads" },
           body: { workspaceId: WORKSPACE_B, purpose: "mortgage_leads", role: "owner" } });
         assert.equal(res.statusCode, 403);
@@ -1833,6 +1847,189 @@ test("P3b a browser-claimed mortgage purpose cannot open the dedicated route", a
         assert.equal(businessQueries(log).length, 0);
       }
       assert.equal(fixture.calls.length, 0);
+    });
+  }
+});
+
+const outcomesProfile = [{ workspace_id: WORKSPACE_A, value: { purpose: "mortgage_leads" } }];
+const outcomesRequestId = "50000000-0000-4000-8000-000000000001";
+const outcomesContractId = "60000000-0000-4000-8000-000000000001";
+const outcomesCreate = { leadId: ownLeadId, requestId: outcomesRequestId, signedAt: "2026-06-01T12:00:00Z", reference: " Fixture " };
+const outcomesVoid = { leadId: ownLeadId, requestId: outcomesRequestId, id: outcomesContractId, reason: " Fixture correction " };
+const outcomesIdentity = { p_workspace_id: WORKSPACE_A, p_staff_user_id: ownLeadStaffId, p_auth_user_id: USER_A };
+
+for (const role of ["owner", "admin", "lead_manager"]) {
+  test(`P3c ${role} contract reads and writes use only verified RPC identity`, async () => {
+    const fixture: MortgageOutcomesFixture = { calls: [] };
+    await withRouter({ memberships: [{ ...assignedLeadMember, role }], mortgageOutcomes: fixture,
+      rows: { workspace_settings: outcomesProfile } }, async ctx => {
+      for (const method of role === "lead_manager" ? ["GET", "POST"] : ["GET", "POST", "PATCH"]) {
+        const { res, log } = await ctx.call({ segments: ["mortgage-contracts"], method,
+          query: { workspaceId: WORKSPACE_A, leadId: ownLeadId, purpose: "clinic_services", role: "owner",
+            staffUserId: assignmentTeam[1].id, p_staff_user_id: assignmentTeam[1].id, p_workspace_id: WORKSPACE_B, p_auth_user_id: "forged" },
+          body: method === "GET" ? { workspaceId: WORKSPACE_B, role: "owner", leadId: ownLeadRows[1].id }
+            : method === "POST" ? outcomesCreate : outcomesVoid });
+        assert.equal(res.statusCode, 200, `${role} ${method}`);
+        assert.equal(res.body.mode, "supabase");
+        assertWorkspaceProfileQuery(log, WORKSPACE_A);
+        assert.equal(businessQueries(log).length, 0, "outcomes must not use generic business queries");
+        assert.deepEqual(fixture.calls.at(-1), method === "GET"
+          ? { name: "read_mortgage_contracts", args: { ...outcomesIdentity, p_lead_id: ownLeadId } }
+          : { name: "save_mortgage_contract", args: { ...outcomesIdentity, p_lead_id: ownLeadId,
+            p_contract_id: method === "POST" ? null : outcomesContractId, p_request_id: outcomesRequestId,
+            p_payload: method === "POST" ? { signedAt: "2026-06-01T12:00:00.000Z", reference: "Fixture" } : { reason: "Fixture correction" } } });
+      }
+      assert.equal(fixture.calls.length, role === "lead_manager" ? 2 : 3);
+    });
+  });
+}
+
+test("P3d lead-manager correction and results are denied before profile lookup even for mortgage purpose", async () => {
+  const fixture: MortgageOutcomesFixture = { calls: [] };
+  await withRouter({ memberships: [assignedLeadMember], mortgageOutcomes: fixture,
+    rows: { workspace_settings: outcomesProfile } }, async ctx => {
+    for (const [route, method] of [["mortgage-contracts", "PATCH"], ["mortgage-results", "GET"]]) {
+      const { res, log } = await ctx.call({ segments: [route], method,
+        query: { purpose: "mortgage_leads", role: "owner" }, body: { ...outcomesVoid, role: "owner", permissions: ["view_admin"] } });
+      assert.equal(res.statusCode, 403);
+      assert.ok(log.every((entry) => entry.table === "staff_users"), `${route} ${method} must not read a profile`);
+    }
+    assert.deepEqual(fixture.calls, []);
+  });
+});
+
+for (const role of ["owner", "admin"]) {
+  test(`P3e ${role} results allow only supported periods and verified identity`, async () => {
+    const fixture: MortgageOutcomesFixture = { calls: [], result: { members: [] } };
+    await withRouter({ memberships: [{ ...assignedLeadMember, role }], mortgageOutcomes: fixture,
+      rows: { workspace_settings: outcomesProfile } }, async ctx => {
+      for (const days of [undefined, "7", "30", "90"]) {
+        const { res, log } = await ctx.call({ segments: ["mortgage-results"], query: { days,
+          staffUserId: assignmentTeam[1].id, responsibleUserId: assignmentTeam[1].id, p_workspace_id: WORKSPACE_B },
+          body: { workspaceId: WORKSPACE_B, role: "lead_manager", days: 999, p_auth_user_id: "forged" } });
+        assert.equal(res.statusCode, 200);
+        assertWorkspaceProfileQuery(log, WORKSPACE_A);
+        assert.equal(businessQueries(log).length, 0);
+        assert.deepEqual(fixture.calls.at(-1), { name: "read_mortgage_results", args: { ...outcomesIdentity, p_days: Number(days ?? 30) } });
+      }
+      fixture.calls.length = 0;
+      for (const days of ["0", "365", "07", "30.0", "30&role=owner", ["7", "90"], 30, {}, null]) {
+        const { res, log } = await ctx.call({ segments: ["mortgage-results"], query: { days } });
+        assert.equal(res.statusCode, 400);
+        assertWorkspaceProfileQuery(log, WORKSPACE_A);
+        assert.equal(businessQueries(log).length, 0);
+      }
+      assert.deepEqual(fixture.calls, []);
+    });
+  });
+}
+
+test("P3f results and contracts cannot widen their registered methods", async () => {
+  const fixture: MortgageOutcomesFixture = { calls: [] };
+  await withRouter({ memberships: [{ ...assignedLeadMember, role: "owner" }], mortgageOutcomes: fixture,
+    rows: { workspace_settings: outcomesProfile } }, async ctx => {
+    for (const [route, methods] of [["mortgage-contracts", ["PUT", "DELETE", "HEAD"]],
+      ["mortgage-results", ["POST", "PATCH", "PUT", "DELETE", "HEAD"]]] as const) {
+      for (const method of methods) {
+        const { res, log } = await ctx.call({ segments: [route], method, body: outcomesCreate });
+        assert.equal(res.statusCode, 405, `${route} ${method}`);
+        assert.equal(businessQueries(log).length, 0);
+        assert.ok(!log.some(isWorkspaceProfileQuery));
+      }
+    }
+    assert.deepEqual(fixture.calls, []);
+  });
+});
+
+test("P3g outcome roles and authoritative mortgage purpose only narrow access", async () => {
+  for (const role of ["owner", "admin", "lead_manager", "manager", "doctor", "receptionist"]) {
+    for (const profile of [[], [{ workspace_id: WORKSPACE_A, value: { purpose: "clinic_services" } }], outcomesProfile]) {
+      const fixture: MortgageOutcomesFixture = { calls: [] };
+      await withRouter({ memberships: [{ ...assignedLeadMember, role }], mortgageOutcomes: fixture,
+        rows: { workspace_settings: profile } }, async ctx => {
+        for (const [route, method] of [["mortgage-contracts", "GET"], ["mortgage-contracts", "POST"],
+          ["mortgage-contracts", "PATCH"], ["mortgage-results", "GET"]]) {
+          if (profile === outcomesProfile && (["owner", "admin"].includes(role)
+            || (role === "lead_manager" && route === "mortgage-contracts" && method !== "PATCH"))) continue;
+          const { res, log } = await ctx.call({ segments: [route], method,
+            query: { purpose: "mortgage_leads", role: "owner", leadId: ownLeadId },
+            body: { ...outcomesCreate, purpose: "mortgage_leads", role: "owner" } });
+          assert.equal(res.statusCode, 403, `${role} ${route} ${method}`);
+          assert.equal(businessQueries(log).length, 0);
+          const preflightAllowed = ["owner", "admin"].includes(role)
+            || (role === "lead_manager" && route === "mortgage-contracts" && method !== "PATCH");
+          if (preflightAllowed) assertWorkspaceProfileQuery(log, WORKSPACE_A);
+          else assert.ok(log.every((entry) => entry.table === "staff_users"));
+        }
+        assert.deepEqual(fixture.calls, []);
+      });
+    }
+  }
+});
+
+test("P3h outcome body identity and permission forgery is rejected before RPC", async () => {
+  const fixture: MortgageOutcomesFixture = { calls: [] };
+  await withRouter({ memberships: [{ ...assignedLeadMember, role: "owner" }], mortgageOutcomes: fixture,
+    rows: { workspace_settings: outcomesProfile } }, async ctx => {
+    for (const method of ["POST", "PATCH"]) {
+      for (const key of ["workspaceId", "workspace_id", "staffUserId", "responsibleStaffId", "responsible_user_id",
+        "recordedBy", "recorded_by", "p_auth_user_id", "p_staff_user_id", "p_workspace_id", "role", "permissions", "purpose", "updates"]) {
+        const { res, log } = await ctx.call({ segments: ["mortgage-contracts"], method,
+          body: { ...(method === "POST" ? outcomesCreate : outcomesVoid), [key]: "forged" } });
+        assert.equal(res.statusCode, 400, `${method} ${key}`);
+        assert.equal(res.body.code, "invalid_contract");
+        assertWorkspaceProfileQuery(log, WORKSPACE_A);
+        assert.equal(businessQueries(log).length, 0);
+      }
+    }
+    for (const leadId of [undefined, "bad", [ownLeadId, ownLeadRows[1].id], {}]) {
+      const { res } = await ctx.call({ segments: ["mortgage-contracts"], query: { leadId }, body: { leadId: ownLeadId } });
+      assert.equal(res.statusCode, 400, "the body cannot repair a malformed read selector");
+    }
+    assert.deepEqual(fixture.calls, []);
+  });
+});
+
+test("P3i outcomes membership and tenant selection precede profile and RPC for both resources", async () => {
+  for (const scenario of [
+    { memberships: [{ ...assignedLeadMember, role: "owner" }], token: null, status: 401 },
+    { memberships: [], status: 403 },
+    { memberships: [{ ...assignedLeadMember, role: "owner", status: "inactive" }], status: 403 },
+    { memberships: [{ ...assignedLeadMember, role: "owner" }], workspaceId: WORKSPACE_B, status: 403 },
+  ]) {
+    const fixture: MortgageOutcomesFixture = { calls: [] };
+    await withRouter({ memberships: scenario.memberships, mortgageOutcomes: fixture,
+      rows: { workspace_settings: outcomesProfile } }, async ctx => {
+      for (const [route, method] of [["mortgage-contracts", "GET"], ["mortgage-contracts", "POST"],
+        ["mortgage-contracts", "PATCH"], ["mortgage-results", "GET"]]) {
+        const { res, log } = await ctx.call({ segments: [route], method, token: scenario.token,
+          query: { workspaceId: scenario.workspaceId, leadId: ownLeadId }, body: outcomesCreate });
+        assert.equal(res.statusCode, scenario.status);
+        assert.ok(log.every((entry) => entry.table === "staff_users"));
+      }
+      assert.deepEqual(fixture.calls, []);
+    });
+  }
+});
+
+test("P3j outcome RPC scope revocation and invisible records never fall back to generic queries", async () => {
+  for (const [code, status] of [["P7001", 403], ["P7002", 404]] as const) {
+    const fixture: MortgageOutcomesFixture = { calls: [], error: { code, message: "private-outcomes-diagnostic" } };
+    await withRouter({ memberships: [{ ...assignedLeadMember, role: "owner" }], mortgageOutcomes: fixture,
+      rows: { workspace_settings: outcomesProfile } }, async ctx => {
+      for (const [route, method] of [["mortgage-contracts", "GET"], ["mortgage-contracts", "POST"],
+        ["mortgage-contracts", "PATCH"], ["mortgage-results", "GET"]]) {
+        const { res, log } = await ctx.call({ segments: [route], method, query: { leadId: ownLeadId },
+          body: method === "PATCH" ? outcomesVoid : outcomesCreate });
+        assert.equal(res.statusCode, status);
+        assert.equal(res.body.success, false);
+        assert.equal(res.body.mode, undefined);
+        assert.ok(!JSON.stringify(res.body).includes("private-outcomes-diagnostic"));
+        assertWorkspaceProfileQuery(log, WORKSPACE_A);
+        assert.equal(businessQueries(log).length, 0);
+        assert.equal(fixture.calls.at(-1)?.args.p_workspace_id, WORKSPACE_A);
+      }
+      assert.equal(fixture.calls.length, 4);
     });
   }
 });

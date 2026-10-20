@@ -3,6 +3,7 @@ import { createOperatorBrowserFixture } from "./operator-browser-store";
 import { createOperatorDispatchFixture } from "./operator-dispatch-fixture";
 import { createClinicArrivalBrowserFixture, isClinicArrivalFixtureLocation, type ClinicArrivalGuardedInit } from "./clinic-arrival-browser-store";
 import { mortgageBrowserRequest, mortgageLeadBrowserRequest, mortgageFixtureAdmin } from './mortgage-browser-store';
+import { mortgageOutcomesBrowserRequest } from './mortgage-outcomes-browser-store';
 import type { MortgageSnapshot } from '../../lib/crm/mortgage-contract';
 import { appointmentCreateFixtureIds, createAppointmentCreateBrowserFixture, isAppointmentCreateFixtureLocation } from "./appointment-create-browser-store";
 const retryFixture = new URLSearchParams(window.location?.search || "").get("bookingRetry") === "lost-response"
@@ -143,6 +144,12 @@ export async function crmFetch(input: string, init?: ClinicArrivalGuardedInit): 
     return Response.json({ success: true, mode: "supabase", data: { channels: [channel] } });
   }
   if(mortgageFixture && resource==='mortgage-workspace')return mortgageBrowserRequest(url,init,auth.userRole);
+  if (mortgageFixture && ['mortgage-contracts', 'mortgage-results'].includes(resource)) {
+    const response = await mortgageBrowserRequest(new URL('/api/crm/mortgage-workspace', url.origin), undefined, auth.userRole);
+    if (!response.ok) return response;
+    const snapshot = (await response.json()).data as MortgageSnapshot;
+    return mortgageOutcomesBrowserRequest(url, init, auth.userRole, snapshot);
+  }
   if(mortgageFixture && resource==='leads')return mortgageLeadBrowserRequest(init,auth.userRole);
   if(mortgageFixture && resource==='auth-context')return Response.json({success:true,mode:'supabase',data:{
     workspaceId,purpose:'mortgage_leads',isAdmin:['owner','admin'].includes(auth.userRole),role:auth.userRole,
@@ -164,7 +171,7 @@ export async function crmFetch(input: string, init?: ClinicArrivalGuardedInit): 
     if (!mortgageFixture || !["owner", "admin"].includes(auth.userRole)) return Response.json({ success: false }, { status: 403 });
     const days = Number(url.searchParams.get("days") || 30);
     if (![7, 30, 90].includes(days)) return Response.json({ success: false }, { status: 400 });
-    const snapshotResponse = await mortgageBrowserRequest(new URL(`/api/crm/mortgage-workspace?days=${days}`, window.location.origin), undefined, auth.userRole);
+    const snapshotResponse = await mortgageBrowserRequest(new URL(`/api/crm/mortgage-workspace?days=${days}`, url.origin), undefined, auth.userRole);
     const snapshot = (await snapshotResponse.json()).data as MortgageSnapshot;
     const members = snapshot.members.map((member) => {
       const mine = snapshot.contacts.filter((contact) => contact.responsibleUserId === member.id);
