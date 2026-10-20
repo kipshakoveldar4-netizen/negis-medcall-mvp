@@ -1019,10 +1019,15 @@ const LOCAL_LIBRARY_FORM = { title: "Synthetic library idea", niche: "Synthetic 
 type LocalLibraryForm = typeof LOCAL_LIBRARY_FORM;
 type LocalLibraryVideo = LocalLibraryForm & { id: string; status: string; createdAt: string };
 type LocalLibrarySnapshot = { form: LocalLibraryForm; videos: LocalLibraryVideo[]; activeId: string };
+type LocalLibraryTextKind = "script" | "avatar" | "tapnow";
 type LocalLibraryCallbacks = { create: () => Promise<unknown>; update: (patch: Partial<LocalLibraryVideo>) => unknown;
   persist: (id: string, patch: Partial<LocalLibraryVideo>) => unknown; save: (rows: LocalLibraryVideo[], id?: string) => unknown;
+  script: () => Promise<unknown>; prompt: (kind: "avatar" | "tapnow") => Promise<unknown>;
   editTitle: (value: string) => void; select: (id: string) => void; read: (key?: string) => LocalLibraryVideo[];
   write: (rows: LocalLibraryVideo[], key?: string) => void };
+const LOCAL_LIBRARY_SCRIPT = { hook: "Synthetic hook", script: "Synthetic generated script", voiceover: "Synthetic voiceover",
+  cta: "Synthetic CTA", caption: "Synthetic caption", hashtags: ["#synthetic"] };
+const LOCAL_LIBRARY_PROMPT = { prompt: "Synthetic visual prompt", negativePrompt: "Synthetic negative prompt", format: "video" };
 const LOCAL_LIBRARY_ROW_A: LocalLibraryVideo = { ...LOCAL_LIBRARY_FORM, id: "33333333-3333-4333-8333-333333333333", status: "idea", createdAt: "2090-10-20T00:00:00Z" };
 const LOCAL_LIBRARY_ROW_B: LocalLibraryVideo = { ...LOCAL_LIBRARY_FORM, title: "Synthetic second idea", id: "44444444-4444-4444-8444-444444444444",
   status: "idea", createdAt: "2090-10-21T00:00:00Z" };
@@ -1156,7 +1161,7 @@ const generationCallbackPrograms = (async () => {
   };
   visitLibraryEvents(child);
   for (const [name, matches] of Object.entries(libraryEvents)) assert.equal(matches.length, 1, `execute the actual library ${name} handler`);
-  const library = libraryDependencies(["createIdea", "updateCurrentVideo", "persistCurrentVideoPatch", "saveVideos", "readVideos", "writeVideos"],
+  const library = libraryDependencies(["createIdea", "updateCurrentVideo", "persistCurrentVideoPatch", "saveVideos", "readVideos", "writeVideos", "generateScript", "generatePrompt"],
     [...libraryEvents.form, ...libraryEvents.selection]);
   const libraryRestore = libraryDependencies(["readVideos"], [videoEffects.restore[0], demoEffects[0]]);
   const texts = (nodes: Map<string, import("typescript").Statement>, excluded: string[] = []) => [...new Set([...nodes]
@@ -1171,6 +1176,7 @@ const generationCallbackPrograms = (async () => {
       const { ${libraryRefNames.join(", ")} } = refs;
       ${texts(library.nested)}
       return { create: createIdea, update: updateCurrentVideo, persist: persistCurrentVideoPatch, save: saveVideos,
+        script: generateScript, prompt: generatePrompt,
         editTitle(value) { return (${libraryEvents.form[0]})(value); },
         select(id) { const video = { id }; return (${libraryEvents.selection[0]})(); }, read: readVideos, write: writeVideos };
     };`;
@@ -1348,6 +1354,8 @@ const generationCallbackPrograms = (async () => {
     package: ts.transpileModule(packageProgram, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText,
     packageDemo: compile(await readFile(path.join(repoRoot, "lib/content-studio/core.ts"), "utf8"),
       ["briefString", "demoContentPackage"], ["demoContentPackage"]),
+    libraryDemo: compile(await readFile(path.join(repoRoot, "lib/content-studio/core.ts"), "utf8"),
+      ["readString", "demoScriptPackage", "demoAvatarPrompt", "demoTapNowPrompt"], ["demoScriptPackage", "demoAvatarPrompt", "demoTapNowPrompt"]),
     handoff: ts.transpileModule(handoff([...packageRefNames, ...photoRefNames], photoArtifactHelpers), {
       compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
       transformers: { before: [(context) => (root) => {
@@ -1508,7 +1516,7 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
   let targetedTokenStarted: ReturnType<typeof generationDeferred<void>> | undefined;
   const tokenStarted = generationDeferred<void>(), bodyStarted = generationDeferred<void>();
   let delayedBody: ReturnType<typeof generationDeferred<string>> | undefined;
-  type Resource = "generation" | "usage" | "poll" | "restore" | "signed" | "metadata" | "approval" | "package-generation" | "package-save" | "photo-suggest" | "library-create" | "library-patch";
+  type Resource = "generation" | "usage" | "poll" | "restore" | "signed" | "metadata" | "approval" | "package-generation" | "package-save" | "photo-suggest" | "library-create" | "library-patch" | `library-${LocalLibraryTextKind}`;
   let responseWait: ReturnType<typeof generationDeferred<void>> | undefined, responseResource: Resource | undefined;
   const responseStarted = generationDeferred<void>();
   let handoffResponseHook: ((resource: Resource) => void) | undefined;
@@ -1571,13 +1579,24 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
     patch: { success: true, mode: "supabase", data: { video: { ...LOCAL_LIBRARY_ROW_A, script: "Canonical saved script", status: "script_ready" } } },
     restore: { success: true, mode: "supabase", data: { videos: [LOCAL_LIBRARY_ROW_A, LOCAL_LIBRARY_ROW_B] } },
   };
+  const libraryTextReplies: Record<LocalLibraryTextKind, unknown> & { text?: string } = {
+    script: { success: true, mode: "openai", data: LOCAL_LIBRARY_SCRIPT },
+    avatar: { success: true, mode: "openai", data: LOCAL_LIBRARY_PROMPT },
+    tapnow: { success: true, mode: "openai", data: LOCAL_LIBRARY_PROMPT },
+  };
+  const libraryTextKind = (url: string): LocalLibraryTextKind | undefined => {
+    const path = url.split("?")[0];
+    return path === "/api/content-studio/generate-script" ? "script" : path === "/api/content-studio/generate-avatar-prompt" ? "avatar"
+      : path === "/api/content-studio/generate-tapnow-prompt" ? "tapnow" : undefined;
+  };
   const signedReply = { success: true, data: { bucket: "fixture-creatives", storagePath: "workspace-a/local.jpg",
     token: "synthetic-upload-token", publicUrl: "https://example.invalid/local-upload.jpg" } };
   const localResponse = (value: unknown, resource: Resource) => {
     handoffResponseHook?.(resource);
     const response = Response.json(value, { status: handoffStatuses[resource] ?? 200 });
     if (resource === "package-generation" || resource === "package-save" || resource === "photo-suggest" || resource.startsWith("library-") || resource === "restore") {
-      const text = resource.startsWith("library-") ? libraryReplies.text : resource === "restore" ? undefined : resource === "photo-suggest" ? photoSuggestionReply.text
+      const text = ["library-script", "library-avatar", "library-tapnow"].includes(resource) ? libraryTextReplies.text
+        : resource.startsWith("library-") ? libraryReplies.text : resource === "restore" ? undefined : resource === "photo-suggest" ? photoSuggestionReply.text
         : resource === "package-generation" ? packageReplies.generationText : packageReplies.saveText;
       const read = response.text.bind(response);
       Object.defineProperty(response, "text", { configurable: true, value: () => {
@@ -1604,13 +1623,15 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
     async fetch(url: string, init: LocalGenerationInit) {
       const method = init.method || "GET";
       dispatches.push({ url, method, headers: new Headers(init.headers), body: init.body ? JSON.parse(String(init.body)) : null, signal: init.signal });
-      const resource = libraryFixtureActive && url.split("?")[0] === "/api/crm/content-videos"
+      const textKind = libraryFixtureActive ? libraryTextKind(url) : undefined;
+      const resource: Resource = textKind ? `library-${textKind}` : libraryFixtureActive && url.split("?")[0] === "/api/crm/content-videos"
         ? method === "POST" ? "library-create" : method === "PATCH" ? "library-patch" : "restore"
         : url.includes("generate-package") ? (photoSuggestionActive ? "photo-suggest" : "package-generation")
         : packageFixtureActive && url.split("?")[0] === "/api/crm/content-videos" && method === "POST" ? "package-save"
         : url.includes("signed-upload") ? "signed" : method === "PATCH" ? "approval" : "metadata";
       if (responseWait && responseResource === resource) { responseStarted.resolve(); await responseWait.promise; }
       if (handoffTransportFailures[resource]) throw new api.CrmApiError(handoffTransportFailures[resource]!, "authentication_required", "Synthetic denied transport");
+      if (textKind) { assert.equal(method, "POST"); return localResponse(libraryTextReplies[textKind], resource); }
       if (resource === "library-create" || resource === "library-patch" || (resource === "restore" && libraryFixtureActive)) {
         return localResponse(resource === "library-create" ? libraryReplies.create : resource === "library-patch" ? libraryReplies.patch : libraryReplies.restore, resource);
       }
@@ -1703,11 +1724,15 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
   const captureVideo = evaluateGenerationFixture<(job: LocalVideoJob | null, file: unknown) => LocalVideoCallbacks>(programs.video, bindings);
   const captureLocalDrafts = evaluateGenerationFixture<(session: LocalGenerationSession, refs: Record<string, unknown>) => () => void>(programs.demo, bindings);
   const libraryRequests: { url: string; init: LocalGenerationInit }[] = [];
+  const pureLibraryDemo = evaluateGenerationFixture<{ demoScriptPackage: () => typeof LOCAL_LIBRARY_SCRIPT;
+    demoAvatarPrompt: (input: Record<string, unknown>) => { prompt: string; negativePrompt?: string };
+    demoTapNowPrompt: (input: Record<string, unknown>) => { prompt: string; negativePrompt?: string } }>(programs.libraryDemo, {});
   const captureLibrary = evaluateGenerationFixture<(session: LocalGenerationSession, snapshot: LocalLibrarySnapshot,
     refs: Record<string, unknown>, loading: unknown) => LocalLibraryCallbacks>(programs.library, {
-    ...bindings,
+    ...bindings, ...pureLibraryDemo,
     async crmFetch(url: string, init: LocalGenerationInit = {}) {
-      libraryRequests.push({ url, init }); activeTransport = init.method === "PATCH" ? "library-patch" : init.method === "POST" ? "library-create" : "restore";
+      libraryRequests.push({ url, init }); const textKind = libraryTextKind(url);
+      activeTransport = textKind ? `library-${textKind}` : init.method === "PATCH" ? "library-patch" : init.method === "POST" ? "library-create" : "restore";
       try { return await api.crmFetch(url, init); } finally { activeTransport = undefined; }
     },
   });
@@ -1824,7 +1849,7 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
       const refs = libraryRefsFor(next.session), snapshot = refs.librarySnapshotRef as { current: LocalLibrarySnapshot } | undefined;
       if (snapshot) snapshot.current = { form, videos: rows, activeId: selectedId };
     },
-    libraryReplies, libraryRequests, libraryDefaults,
+    libraryReplies, libraryTextReplies, libraryRequests, libraryDefaults, pureLibraryDemo,
     libraryKey: (workspaceId = storage.readWorkspaceId()) => `negis_content_studio_videos::${workspaceId}`,
     photoSuggestions() {
       assert.ok(lifetime, "photo suggestions must receive actual wrapper-computed session props");
@@ -4462,4 +4487,385 @@ test("G5C12 confirmed empty GET drops cached server rows while retaining local d
     await flushLocalVideoWork(); assert.deepEqual(JSON.parse(JSON.stringify(libraryRows(fixture))), [draft]);
     assert.equal(fixture.state.ActiveId, draft.id); assert.deepEqual(JSON.parse(fixture.localStorage.getItem(fixture.libraryKey())!), [draft]);
   } finally { if (typeof cleanup === "function") cleanup(); fixture.lifetime!.unmount(); }
+});
+
+function invokeLibraryText(captured: LocalLibrary, kind: LocalLibraryTextKind) {
+  return kind === "script" ? captured.callbacks.script() : captured.callbacks.prompt(kind);
+}
+function libraryTextPatch(kind: LocalLibraryTextKind) {
+  return kind === "script" ? { ...LOCAL_LIBRARY_SCRIPT, status: "script_ready" }
+    : { [kind === "avatar" ? "avatarPrompt" : "tapnowPrompt"]: `${LOCAL_LIBRARY_PROMPT.prompt}\n\nNegative prompt: ${LOCAL_LIBRARY_PROMPT.negativePrompt}`, status: "avatar_ready" };
+}
+function libraryTextReceipt(fixture: LocalHandoffFixture, kind: LocalLibraryTextKind) {
+  const canonical = { ...LOCAL_LIBRARY_ROW_A, ...libraryTextPatch(kind),
+    [kind === "script" ? "script" : kind === "avatar" ? "avatarPrompt" : "tapnowPrompt"]: `Canonical ${kind} receipt` };
+  fixture.libraryReplies.patch = { success: true, mode: "supabase", data: { video: canonical } };
+  return canonical;
+}
+async function pauseLibraryText(fixture: LocalHandoffFixture, kind: LocalLibraryTextKind, phase: "token" | "body" | "response" | "patch-body") {
+  const resource = `library-${kind}` as const;
+  const token = phase === "token" ? fixture.deferToken(resource) : undefined;
+  const body = phase === "body" || phase === "patch-body" ? fixture.deferBody(phase === "patch-body" ? "library-patch" : resource) : undefined;
+  const response = phase === "response" ? fixture.deferResponse(resource) : undefined;
+  const captured = fixture.library(), work = invokeLibraryText(captured, kind);
+  const resume = (value?: unknown) => {
+    token?.resolve(); response?.resolve();
+    body?.resolve(JSON.stringify(value ?? (phase === "patch-body" ? fixture.libraryReplies.patch : fixture.libraryTextReplies[kind])));
+  };
+  try {
+    await flushLocalVideoWork();
+    assert.equal(fixture.dispatches.length, phase === "token" ? 0 : phase === "patch-body" ? 2 : 1, "reach the actual deferred provider/save boundary");
+    if (token) await token.started;
+    else if (response) await response.started;
+    else await fixture.bodyStarted.promise;
+    return { captured, work, resume };
+  } catch (error) { resume(); await work; throw error; }
+}
+
+const LIBRARY_TEXT_STALE_CASES = [
+  { kind: "script", phase: "token", boundary: "account" },
+  { kind: "script", phase: "body", boundary: "workspace" },
+  { kind: "script", phase: "response", boundary: "unmount" },
+  { kind: "script", phase: "body", boundary: "session-ABA" },
+  { kind: "script", phase: "body", boundary: "form-ABA" },
+  { kind: "avatar", phase: "token", boundary: "workspace" },
+  { kind: "avatar", phase: "body", boundary: "account" },
+  { kind: "avatar", phase: "body", boundary: "selection-ABA" },
+  { kind: "tapnow", phase: "body", boundary: "unmount" },
+  { kind: "tapnow", phase: "body", boundary: "session-ABA" },
+  { kind: "tapnow", phase: "body", boundary: "form-ABA" },
+  { kind: "script", phase: "patch-body", boundary: "account" },
+  { kind: "tapnow", phase: "patch-body", boundary: "workspace" },
+] as const;
+for (const { kind, phase, boundary } of LIBRARY_TEXT_STALE_CASES) {
+  test(`G5C13 ${kind} ${phase} cannot publish, save or notify after ${boundary}`, { timeout: 5000 }, async () => {
+    const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE);
+    fixture.seedLibrary([LOCAL_LIBRARY_ROW_A, LOCAL_LIBRARY_ROW_B], LOCAL_LIBRARY_ROW_A.id);
+    const paused = await pauseLibraryText(fixture, kind, phase), controller = paused.captured.session.sessionRef.current!;
+    try {
+      if (boundary === "account" || boundary === "session-ABA") fixture.sdkSession("actor-b");
+      if (boundary === "session-ABA") { fixture.lifetime!.render(); fixture.sdkSession("actor-a"); fixture.lifetime!.render(); }
+      if (boundary === "workspace") fixture.workspace(HANDOFF_WORKSPACE_B);
+      if (boundary === "unmount") fixture.lifetime!.unmount();
+      if (boundary === "form-ABA") {
+        paused.captured.callbacks.editTitle("Temporary form B"); fixture.library().callbacks.editTitle(LOCAL_LIBRARY_FORM.title);
+      }
+      if (boundary === "selection-ABA") {
+        paused.captured.callbacks.select(LOCAL_LIBRARY_ROW_B.id); fixture.library().callbacks.select(LOCAL_LIBRARY_ROW_A.id);
+      }
+      if (boundary === "workspace") fixture.state.Loading = "telegram";
+      const before = libraryState(fixture), writes = fixture.writes.length, mutations = fixture.mutations.length;
+      const requests = fixture.dispatches.length, toasts = fixture.toasts.length;
+      paused.resume(); await paused.work; await flushLocalVideoWork();
+      assert.deepEqual(libraryState(fixture), before);
+      assert.deepEqual(fixture.writes.slice(writes).filter((write) => controller.signal.aborted || write.field !== "Loading"), []);
+      assert.deepEqual(fixture.mutations.slice(mutations), []); assert.deepEqual(fixture.toasts.slice(toasts), []);
+      assert.equal(fixture.dispatches.length, requests); assert.equal(fixture.localStorage.getItem(fixture.libraryKey(HANDOFF_WORKSPACE_B)), null);
+      if (boundary === "workspace") assert.equal(fixture.state.Loading, "telegram", "only this operation's loading tag may be released");
+    } finally { paused.resume(); await paused.work; fixture.lifetime!.unmount(); }
+  });
+}
+
+for (const kind of ["script", "avatar", "tapnow"] as const) {
+  test(`G5C13 retained ${kind} callback refuses an obsolete form/selection/session snapshot before provider POST`, async () => {
+    const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE);
+    fixture.seedLibrary([LOCAL_LIBRARY_ROW_A, LOCAL_LIBRARY_ROW_B], LOCAL_LIBRARY_ROW_A.id);
+    const captured = fixture.library();
+    try {
+      if (kind === "script") { captured.callbacks.editTitle("Temporary form B"); fixture.library().callbacks.editTitle(LOCAL_LIBRARY_FORM.title); }
+      if (kind === "avatar") { captured.callbacks.select(LOCAL_LIBRARY_ROW_B.id); fixture.library().callbacks.select(LOCAL_LIBRARY_ROW_A.id); }
+      if (kind === "tapnow") { fixture.sdkSession("actor-b"); fixture.lifetime!.render(); fixture.sdkSession("actor-a"); fixture.lifetime!.render(); }
+      const before = libraryState(fixture), writes = fixture.writes.length, mutations = fixture.mutations.length;
+      await invokeLibraryText(captured, kind);
+      assert.deepEqual(fixture.dispatches, []); assert.deepEqual(libraryState(fixture), before);
+      assert.deepEqual(fixture.writes.slice(writes), []); assert.deepEqual(fixture.mutations.slice(mutations), []); assert.deepEqual(fixture.toasts, []);
+    } finally { fixture.lifetime!.unmount(); }
+  });
+
+  test(`G5C13 same-actor refresh ${kind} sends the captured payload and accepts only canonical PATCH fields`, { timeout: 5000 }, async () => {
+    const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE);
+    fixture.seedLibrary([LOCAL_LIBRARY_ROW_A]); const canonical = libraryTextReceipt(fixture, kind);
+    const paused = await pauseLibraryText(fixture, kind, "token");
+    try {
+      fixture.sdkSession("actor-a", "fixture-token-text-refreshed", "TOKEN_REFRESHED");
+      assert.equal(fixture.library().key, paused.captured.key); paused.resume(); await paused.work;
+      assert.equal(fixture.dispatches.length, 2);
+      const [provider, patch] = fixture.dispatches;
+      const endpoint = kind === "script" ? "generate-script" : `generate-${kind}-prompt`;
+      assert.equal(provider.url, `/api/content-studio/${endpoint}?workspaceId=${REAL_DEMO_TEST_WORKSPACE}`); assert.equal(provider.method, "POST");
+      assert.deepEqual(provider.body, { ...LOCAL_LIBRARY_FORM, ...LOCAL_LIBRARY_ROW_A, videoId: LOCAL_LIBRARY_ROW_A.id });
+      assert.equal(patch.url, `/api/crm/content-videos?workspaceId=${REAL_DEMO_TEST_WORKSPACE}`); assert.equal(patch.method, "PATCH");
+      assert.deepEqual(patch.body, { ...libraryTextPatch(kind), id: LOCAL_LIBRARY_ROW_A.id });
+      for (let index = 0; index < 2; index++) {
+        assert.equal(fixture.dispatches[index].headers.get("Authorization"), "Bearer fixture-token-text-refreshed");
+        assert.equal(fixture.dispatches[index].signal, paused.captured.session.sessionRef.current!.signal);
+        assert.equal(fixture.libraryRequests[index].init.expectedUserId, "actor-a");
+        assert.equal(typeof fixture.libraryRequests[index].init.dispatchGuard, "function");
+      }
+      assert.deepEqual(JSON.parse(JSON.stringify(libraryRows(fixture))), [canonical]);
+      assert.deepEqual(JSON.parse(fixture.localStorage.getItem(fixture.libraryKey())!), [canonical]);
+      assert.equal(fixture.state.ActiveId, LOCAL_LIBRARY_ROW_A.id); assert.equal(fixture.state.Loading, null);
+      assert.equal(fixture.toasts.filter((toast) => toast.kind === "success").length, 1);
+      assert.equal(fixture.toasts.filter((toast) => toast.kind === "error").length, 0);
+    } finally { paused.resume(); await paused.work; fixture.lifetime!.unmount(); }
+  });
+}
+
+for (const { kind, phase } of [
+  { kind: "script", phase: "token" }, { kind: "avatar", phase: "body" }, { kind: "tapnow", phase: "patch-body" },
+] as const) {
+  test(`G5C13 ${kind} ${phase} owns the shared mutex across provider, create and PATCH callbacks`, { timeout: 5000 }, async () => {
+    const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE); fixture.seedLibrary([LOCAL_LIBRARY_ROW_A]);
+    const paused = await pauseLibraryText(fixture, kind, phase);
+    const duplicate = [paused.captured.callbacks.script(), paused.captured.callbacks.prompt("avatar"), paused.captured.callbacks.prompt("tapnow"),
+      paused.captured.callbacks.create(), Promise.resolve(paused.captured.callbacks.update(LOCAL_LIBRARY_PATCH))];
+    const calls = phase === "token" ? 0 : phase === "patch-body" ? 2 : 1;
+    try {
+      await flushLocalVideoWork(); assert.equal(fixture.dispatches.length, calls, "old-render handlers must not issue extra provider/create/PATCH requests");
+      paused.resume(); await Promise.all([paused.work, ...duplicate]);
+      assert.equal(fixture.dispatches.length, 2); assert.equal(fixture.toasts.filter((toast) => toast.kind === "success").length, 1);
+    } finally { paused.resume(); await Promise.all([paused.work, ...duplicate]); fixture.lifetime!.unmount(); }
+  });
+}
+
+for (const kind of ["script", "avatar", "tapnow"] as const) {
+  for (const status of [401, 403] as const) {
+    test(`G5C13 ${kind} ${status} stops before an unreadable provider body with no PATCH or fallback`, async () => {
+      const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE); fixture.seedLibrary([LOCAL_LIBRARY_ROW_A]);
+      const resource = `library-${kind}` as const; fixture.handoffStatuses[resource] = status; fixture.handoffBodyFailures.add(resource);
+      const captured = fixture.library(), before = libraryState(fixture), mutations = fixture.mutations.length;
+      try {
+        await invokeLibraryText(captured, kind); assert.equal(fixture.dispatches.length, 1);
+        assert.equal(fixture.packageBodyReads.includes(resource), false); assert.deepEqual(libraryState(fixture), before);
+        assert.deepEqual(fixture.mutations.slice(mutations), []); assert.ok(fixture.state.Notice);
+        assert.equal(fixture.toasts.some((toast) => toast.kind === "success" || toast.kind === "warning"), false);
+      } finally { fixture.lifetime!.unmount(); }
+    });
+  }
+}
+
+for (const { kind, status } of [{ kind: "script", status: 401 }, { kind: "tapnow", status: 403 }] as const) {
+  test(`G5C13 valid ${kind} provider output cannot hide PATCH ${status} behind a body failure`, async () => {
+    const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE); fixture.seedLibrary([LOCAL_LIBRARY_ROW_A]);
+    fixture.handoffStatuses["library-patch"] = status; fixture.handoffBodyFailures.add("library-patch");
+    const captured = fixture.library(), before = libraryState(fixture), mutations = fixture.mutations.length;
+    try {
+      await invokeLibraryText(captured, kind); assert.equal(fixture.dispatches.length, 2);
+      assert.equal(fixture.packageBodyReads.includes("library-patch"), false); assert.deepEqual(libraryState(fixture), before);
+      assert.deepEqual(fixture.mutations.slice(mutations), []); assert.ok(fixture.state.Notice);
+      assert.equal(fixture.toasts.some((toast) => toast.kind === "success" || toast.kind === "warning"), false);
+    } finally { fixture.lifetime!.unmount(); }
+  });
+}
+
+test("G5C13 structured provider transport denial remains denied despite later successful fresh auth", async () => {
+  const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE); fixture.seedLibrary([LOCAL_LIBRARY_ROW_A]);
+  fixture.handoffTransportFailures["library-avatar"] = 401;
+  const captured = fixture.library(), before = libraryState(fixture), mutations = fixture.mutations.length;
+  try {
+    await captured.callbacks.prompt("avatar"); assert.equal(fixture.dispatches.length, 1);
+    assert.deepEqual(libraryState(fixture), before); assert.deepEqual(fixture.mutations.slice(mutations), []); assert.ok(fixture.state.Notice);
+    assert.equal(fixture.toasts.some((toast) => toast.kind === "success" || toast.kind === "warning"), false);
+  } finally { fixture.lifetime!.unmount(); }
+});
+
+const LIBRARY_TEXT_MALFORMED: { kind: LocalLibraryTextKind; name: string; data: unknown }[] = [
+  { kind: "script", name: "null", data: null }, { kind: "script", name: "missing fields", data: {} },
+  { kind: "script", name: "nonstring script", data: { ...LOCAL_LIBRARY_SCRIPT, script: {} } },
+  { kind: "script", name: "malformed hashtags", data: { ...LOCAL_LIBRARY_SCRIPT, hashtags: ["#synthetic", {}] } },
+  { kind: "avatar", name: "null", data: null },
+  { kind: "avatar", name: "nonstring prompt", data: { ...LOCAL_LIBRARY_PROMPT, prompt: {} } },
+  { kind: "tapnow", name: "malformed negative prompt", data: { ...LOCAL_LIBRARY_PROMPT, negativePrompt: {} } },
+  { kind: "tapnow", name: "malformed format", data: { ...LOCAL_LIBRARY_PROMPT, format: "unrecognized" } },
+];
+for (const { kind, name, data } of LIBRARY_TEXT_MALFORMED) {
+  test(`G5C13 ${kind} rejects ${name} provider data before any PATCH/cache or success`, async () => {
+    const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE); fixture.seedLibrary([LOCAL_LIBRARY_ROW_A]);
+    fixture.libraryTextReplies[kind] = { success: true, mode: "openai", data };
+    const captured = fixture.library(), before = libraryState(fixture), mutations = fixture.mutations.length;
+    try {
+      await invokeLibraryText(captured, kind); assert.equal(fixture.dispatches.length, 1);
+      assert.deepEqual(libraryState(fixture), before); assert.deepEqual(fixture.mutations.slice(mutations), []);
+      assert.ok(fixture.state.Notice); assert.equal(fixture.toasts.some((toast) => toast.kind === "success"), false);
+    } finally { fixture.lifetime!.unmount(); }
+  });
+}
+
+for (const kind of ["script", "avatar", "tapnow"] as const) {
+  test(`G5C13 ${kind} valid output for content-* stays local with an explicit unsaved notice`, async () => {
+    const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE);
+    const draft = { ...LOCAL_LIBRARY_ROW_A, id: "content-synthetic-text-target" }; fixture.seedLibrary([draft]);
+    try {
+      await invokeLibraryText(fixture.library(), kind); assert.equal(fixture.dispatches.length, 1);
+      assert.deepEqual(JSON.parse(JSON.stringify(libraryRows(fixture))), [{ ...draft, ...libraryTextPatch(kind) }]);
+      assert.ok(fixture.state.Notice); assert.match(String(fixture.state.Notice), /браузер|локаль/i);
+      assert.equal(fixture.state.ActiveId, draft.id); assert.ok(fixture.localStorage.getItem(fixture.libraryKey()));
+    } finally { fixture.lifetime!.unmount(); }
+  });
+}
+
+for (const kind of ["avatar", "tapnow"] as const) {
+  test(`G5C13 ${kind} without an active idea refuses before any external POST`, async () => {
+    const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE); fixture.seedLibrary([]);
+    try {
+      await fixture.library().callbacks.prompt(kind); assert.deepEqual(fixture.dispatches, []); assert.equal(libraryRows(fixture).length, 0);
+      assert.ok(fixture.state.Notice); assert.equal(fixture.toasts.some((toast) => toast.kind === "success"), false);
+      assert.equal(fixture.localStorage.getItem(fixture.libraryKey()), null);
+    } finally { fixture.lifetime!.unmount(); }
+  });
+}
+
+test("G5C13 script without an idea creates a local draft only after valid provider data", async () => {
+  const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE); fixture.seedLibrary([]);
+  const paused = await pauseLibraryText(fixture, "script", "body");
+  try {
+    assert.equal(libraryRows(fixture).length, 0); assert.equal(fixture.localStorage.getItem(fixture.libraryKey()), null);
+    paused.resume(); await paused.work; assert.equal(fixture.dispatches.length, 1);
+    const [draft] = libraryRows(fixture); assert.match(draft.id, /^content-/);
+    assert.deepEqual(JSON.parse(JSON.stringify({ ...draft, id: undefined, createdAt: undefined })), { ...LOCAL_LIBRARY_FORM, ...libraryTextPatch("script") });
+    assert.equal(fixture.state.ActiveId, draft.id); assert.ok(fixture.state.Notice);
+    assert.deepEqual(JSON.parse(fixture.localStorage.getItem(fixture.libraryKey())!), JSON.parse(JSON.stringify([draft])));
+  } finally { paused.resume(); await paused.work; fixture.lifetime!.unmount(); }
+});
+
+for (const { kind, mode } of [{ kind: "script", mode: "throw" }, { kind: "tapnow", mode: "error" }] as const) {
+  test(`G5C13 ${kind} fresh SDK ${mode} stops before provider transport and releases its pending lock`, async () => {
+    const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE); fixture.seedLibrary([LOCAL_LIBRARY_ROW_A]);
+    const captured = fixture.library(), before = libraryState(fixture); fixture.sdkFailure(mode);
+    try {
+      await invokeLibraryText(captured, kind); assert.deepEqual(fixture.dispatches, []); assert.deepEqual(libraryState(fixture), before);
+      assert.equal(fixture.toasts.some((toast) => toast.kind === "success"), false);
+      fixture.sdkFailure(); libraryTextReceipt(fixture, kind); await invokeLibraryText(fixture.library(), kind);
+      assert.equal(fixture.dispatches.length, 2, "a failed auth probe must not strand the pending owner");
+    } finally { fixture.sdkFailure(); fixture.lifetime!.unmount(); }
+  });
+}
+
+for (const { kind, failure } of [{ kind: "script", failure: "HTTP" }, { kind: "avatar", failure: "transport" }] as const) {
+  test(`G5C13 current ${kind} ${failure} error is visible without a fabricated result`, async () => {
+    const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE); fixture.seedLibrary([LOCAL_LIBRARY_ROW_A]);
+    const resource = `library-${kind}` as const;
+    if (failure === "HTTP") { fixture.handoffStatuses[resource] = 500; fixture.libraryTextReplies[kind] = { success: false, error: "Synthetic provider unavailable" }; }
+    else fixture.handoffTransportFailures[resource] = 500;
+    const captured = fixture.library(), before = libraryState(fixture), mutations = fixture.mutations.length;
+    try {
+      await invokeLibraryText(captured, kind); assert.equal(fixture.dispatches.length, 1);
+      assert.deepEqual(libraryState(fixture), before); assert.deepEqual(fixture.mutations.slice(mutations), []);
+      assert.ok(fixture.state.Notice); assert.equal(fixture.toasts.filter((toast) => toast.kind === "error").length, 1);
+      assert.equal(fixture.toasts.some((toast) => toast.kind === "success" || toast.kind === "warning"), false);
+    } finally { fixture.lifetime!.unmount(); }
+  });
+}
+
+for (const kind of ["script", "tapnow"] as const) {
+  test(`G5C13 late ${kind} provider error body is silent after account/workspace replacement`, { timeout: 5000 }, async () => {
+    const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE); fixture.seedLibrary([LOCAL_LIBRARY_ROW_A]);
+    const paused = await pauseLibraryText(fixture, kind, "body");
+    try {
+      if (kind === "script") fixture.sdkSession("actor-b"); else fixture.workspace(HANDOFF_WORKSPACE_B);
+      const before = libraryState(fixture), writes = fixture.writes.length, mutations = fixture.mutations.length;
+      paused.resume({ success: false, error: "Synthetic late provider refusal" }); await paused.work;
+      assert.deepEqual(libraryState(fixture), before); assert.deepEqual(fixture.mutations.slice(mutations), []); assert.deepEqual(fixture.toasts, []);
+      assert.deepEqual(fixture.writes.slice(writes).filter((write) => kind === "script" || write.field !== "Loading"), []);
+      assert.equal(fixture.dispatches.length, 1);
+    } finally { paused.resume(); await paused.work; fixture.lifetime!.unmount(); }
+  });
+}
+
+test("G5C13 no-op form and selection input preserves the owned provider-to-PATCH operation", { timeout: 5000 }, async () => {
+  const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE); fixture.seedLibrary([LOCAL_LIBRARY_ROW_A]);
+  const canonical = libraryTextReceipt(fixture, "script"), paused = await pauseLibraryText(fixture, "script", "body");
+  try {
+    paused.captured.callbacks.editTitle(LOCAL_LIBRARY_FORM.title); paused.captured.callbacks.select(LOCAL_LIBRARY_ROW_A.id);
+    paused.resume(); await paused.work; assert.equal(fixture.dispatches.length, 2);
+    assert.deepEqual(JSON.parse(JSON.stringify(libraryRows(fixture))), [canonical]);
+    assert.equal(fixture.toasts.filter((toast) => toast.kind === "success").length, 1);
+  } finally { paused.resume(); await paused.work; fixture.lifetime!.unmount(); }
+});
+
+test("G5C13 provider and PATCH success cannot claim completion when the local cache commit fails", async () => {
+  const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE); fixture.seedLibrary([LOCAL_LIBRARY_ROW_A]);
+  libraryTextReceipt(fixture, "script"); const captured = fixture.library(), before = libraryState(fixture);
+  fixture.localStorage.failNextWrite(fixture.libraryKey());
+  try {
+    await captured.callbacks.script(); assert.equal(fixture.dispatches.length, 2); assert.deepEqual(libraryState(fixture), before);
+    assert.equal(fixture.localStorage.getItem(fixture.libraryKey()), null); assert.ok(fixture.state.Notice);
+    assert.equal(fixture.toasts.some((toast) => toast.kind === "success"), false);
+  } finally { fixture.lifetime!.unmount(); }
+});
+
+for (const kind of ["script", "avatar", "tapnow"] as const) {
+  test(`G5C13 explicit demo ${kind} uses the real pure core function with zero API, SDK or uploads`, async () => {
+    const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE);
+    fixture.workspace("demo-local-a"); fixture.auth({ user: null, isDemoMode: true });
+    const draft = { ...LOCAL_LIBRARY_ROW_A, id: "content-local-demo-text" }; fixture.seedLibrary([draft]);
+    const captured = fixture.library(); assert.equal(captured.session.localDraftsOnly, true);
+    const prompt = kind === "script" ? null : kind === "avatar" ? fixture.pureLibraryDemo.demoAvatarPrompt(draft) : fixture.pureLibraryDemo.demoTapNowPrompt(draft);
+    const patch = kind === "script" ? { ...fixture.pureLibraryDemo.demoScriptPackage(), status: "script_ready" }
+      : { [kind === "avatar" ? "avatarPrompt" : "tapnowPrompt"]: `${prompt!.prompt}\n\nNegative prompt: ${prompt!.negativePrompt}`, status: "avatar_ready" };
+    try {
+      await invokeLibraryText(captured, kind);
+      assert.deepEqual(fixture.dispatches, []); assert.deepEqual(fixture.libraryRequests, []); assert.deepEqual(fixture.uploads, []);
+      assert.equal(fixture.sdkReads.total, 0); assert.deepEqual(JSON.parse(JSON.stringify(libraryRows(fixture))), JSON.parse(JSON.stringify([{ ...draft, ...patch }])));
+      assert.deepEqual(JSON.parse(fixture.localStorage.getItem(fixture.libraryKey())!), JSON.parse(JSON.stringify([{ ...draft, ...patch }])));
+      assert.equal(fixture.state.ActiveId, draft.id); assert.ok(fixture.state.Notice);
+      assert.equal(fixture.toasts.filter((toast) => toast.kind === "success").length, 1);
+    } finally { fixture.lifetime!.unmount(); }
+  });
+}
+
+test("G5C13 unknown provider mode rejects otherwise valid script data before PATCH or cache", async () => {
+  const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE); fixture.seedLibrary([LOCAL_LIBRARY_ROW_A]);
+  fixture.libraryTextReplies.script = { success: true, mode: "unrecognized-provider", data: LOCAL_LIBRARY_SCRIPT };
+  const captured = fixture.library(), before = libraryState(fixture), mutations = fixture.mutations.length;
+  try {
+    await captured.callbacks.script(); assert.equal(fixture.dispatches.length, 1);
+    assert.deepEqual(libraryState(fixture), before); assert.deepEqual(fixture.mutations.slice(mutations), []); assert.ok(fixture.state.Notice);
+    assert.equal(fixture.toasts.some((toast) => toast.kind === "success"), false);
+  } finally { fixture.lifetime!.unmount(); }
+});
+
+test("G5C13 empty script hashtags are valid and preserve the exact provider-to-canonical-PATCH mapping", async () => {
+  const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE); fixture.seedLibrary([LOCAL_LIBRARY_ROW_A]);
+  const script = { ...LOCAL_LIBRARY_SCRIPT, hashtags: [] }, patch = { ...script, status: "script_ready" };
+  const canonical = { ...LOCAL_LIBRARY_ROW_A, ...patch, script: "Canonical empty-tags script" };
+  fixture.libraryTextReplies.script = { success: true, mode: "anthropic", data: script };
+  fixture.libraryReplies.patch = { success: true, mode: "supabase", data: { video: canonical } };
+  try {
+    await fixture.library().callbacks.script(); assert.equal(fixture.dispatches.length, 2);
+    assert.deepEqual(fixture.dispatches[1].body, { ...patch, id: LOCAL_LIBRARY_ROW_A.id });
+    assert.deepEqual(JSON.parse(JSON.stringify(libraryRows(fixture))), [canonical]);
+    assert.equal(fixture.toasts.filter((toast) => toast.kind === "success").length, 1);
+  } finally { fixture.lifetime!.unmount(); }
+});
+
+test("G5C13 a prompt without optional format or negative text is valid without fabricated defaults", async () => {
+  const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE); fixture.seedLibrary([LOCAL_LIBRARY_ROW_A]);
+  const patch = { avatarPrompt: "Synthetic prompt without optional fields", status: "avatar_ready" };
+  const canonical = { ...LOCAL_LIBRARY_ROW_A, ...patch };
+  fixture.libraryTextReplies.avatar = { success: true, mode: "anthropic", data: { prompt: patch.avatarPrompt } };
+  fixture.libraryReplies.patch = { success: true, mode: "supabase", data: { video: canonical } };
+  try {
+    await fixture.library().callbacks.prompt("avatar"); assert.equal(fixture.dispatches.length, 2);
+    assert.deepEqual(fixture.dispatches[1].body, { ...patch, id: LOCAL_LIBRARY_ROW_A.id });
+    assert.deepEqual(JSON.parse(JSON.stringify(libraryRows(fixture))), [canonical]);
+    assert.equal(fixture.toasts.filter((toast) => toast.kind === "success").length, 1);
+  } finally { fixture.lifetime!.unmount(); }
+});
+
+test("G5C13 a live selector mismatch releases its own spinner and permits a fresh callback after restoration", { timeout: 5000 }, async () => {
+  const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE); fixture.seedLibrary([LOCAL_LIBRARY_ROW_A]);
+  const canonical = libraryTextReceipt(fixture, "script"), paused = await pauseLibraryText(fixture, "script", "body");
+  try {
+    assert.equal(fixture.state.Loading, "script"); fixture.workspace(HANDOFF_WORKSPACE_B);
+    const before = libraryState(fixture), writes = fixture.writes.length, mutations = fixture.mutations.length;
+    paused.resume(); await paused.work;
+    assert.equal(fixture.state.Loading, null); assert.equal(paused.captured.session.sessionRef.current!.signal.aborted, false);
+    assert.deepEqual(libraryState(fixture), before); assert.deepEqual(fixture.writes.slice(writes).filter((write) => write.field !== "Loading"), []);
+    assert.deepEqual(fixture.mutations.slice(mutations), []); assert.deepEqual([...fixture.toasts], []); assert.equal(fixture.dispatches.length, 1);
+    fixture.workspace(REAL_DEMO_TEST_WORKSPACE); const fresh = fixture.library(); assert.equal(fresh.key, paused.captured.key);
+    await fresh.callbacks.script(); assert.equal(fixture.dispatches.length, 3);
+    assert.deepEqual(JSON.parse(JSON.stringify(libraryRows(fixture))), [canonical]);
+    assert.equal(fixture.state.Loading, null); assert.equal(fixture.toasts.filter((toast) => toast.kind === "success").length, 1);
+  } finally { paused.resume(); await paused.work; fixture.lifetime!.unmount(); }
 });

@@ -34,7 +34,7 @@ import {
   type AdvertisingCampaignPrefillInput,
 } from "../../../../lib/advertising/campaignBrief";
 import { checkMetaCompliance } from "../../../../lib/meta/compliance";
-import { demoContentPackage, type ContentAdVariant, type ContentPackage } from "../../../../lib/content-studio/core";
+import { demoAvatarPrompt, demoContentPackage, demoScriptPackage, demoTapNowPrompt, type ContentAdVariant, type ContentPackage } from "../../../../lib/content-studio/core";
 import {
   clearStoredPaidGenerationAttempt,
   readStoredPaidGenerationAttempt,
@@ -78,6 +78,7 @@ type ContentLibraryWrite = {
   session: AbortController;
   snapshot: ContentLibrarySnapshot;
   storageKey: string;
+  published?: ContentLibrarySnapshot;
 };
 
 type ScriptPackage = Pick<ContentVideo, "hook" | "script" | "voiceover" | "cta" | "caption" | "hashtags">;
@@ -692,6 +693,23 @@ function combinePrompt(result: PromptPackage) {
     .join("\n\n");
 }
 
+function parseScriptPackage(value: unknown): ScriptPackage | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const script = value as ScriptPackage;
+  if (![script.hook, script.script, script.voiceover, script.cta, script.caption].every((item) => typeof item === "string")
+    || !Array.isArray(script.hashtags) || !script.hashtags.every((tag) => typeof tag === "string")) return null;
+  return { hook: script.hook, script: script.script, voiceover: script.voiceover, cta: script.cta, caption: script.caption, hashtags: script.hashtags };
+}
+
+function parsePromptPackage(value: unknown): PromptPackage | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const prompt = value as PromptPackage;
+  if (typeof prompt.prompt !== "string" || !prompt.prompt.trim()
+    || (prompt.negativePrompt !== undefined && typeof prompt.negativePrompt !== "string")
+    || (prompt.format !== undefined && prompt.format !== "photo" && prompt.format !== "video")) return null;
+  return { prompt: prompt.prompt, negativePrompt: prompt.negativePrompt, format: prompt.format };
+}
+
 function telegramErrorMessage<TData>(body: ApiResponse<TData> | null, fallback: string) {
   if (body?.success === false) {
     const description = body.details?.filter(Boolean).join(", ") || body.telegramDescription || body.error;
@@ -889,7 +907,7 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
 
   function isLibraryWriteCurrent(write: ContentLibraryWrite) {
     return libraryWritePending.current === write && isHandoffSessionAlive(write.session)
-      && librarySnapshotRef.current === write.snapshot;
+      && librarySnapshotRef.current === (write.published ?? write.snapshot);
   }
 
   async function isLibraryWriteVerified(write: ContentLibraryWrite) {
@@ -2268,8 +2286,10 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
   const saveVideos = async (
     nextVideos: ContentVideo[], selectedId?: string,
     expected = libraryView, session = sessionRef.current, storageKey = libraryStorageKey,
+    write?: ContentLibraryWrite,
   ) => {
-    const current = () => isHandoffSessionAlive(session) && librarySnapshotRef.current === expected;
+    const current = () => isHandoffSessionAlive(session) && librarySnapshotRef.current === expected
+      && (!write || (libraryWritePending.current === write && write.snapshot === expected && !write.published));
     if (!current() || !await isHandoffSessionCurrent(session) || !current()) return false;
     const parsed = nextVideos.map(parseContentVideo);
     if (!parsed.every((video): video is ContentVideo => video !== null)
@@ -2286,36 +2306,43 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
       return false;
     }
     if (!current()) return false;
-    librarySnapshotRef.current = { ...expected, videos: sorted, activeId: nextId };
+    const published = { ...expected, videos: sorted, activeId: nextId };
+    librarySnapshotRef.current = published;
+    if (write) write.published = published;
     setVideos(sorted);
     setActiveId(nextId);
     return true;
   };
 
+  async function applyCurrentVideoPatch(patch: Partial<ContentVideo>, write: ContentLibraryWrite) {
+    if (write.published || !await isLibraryWriteVerified(write)) return false;
+    const active = write.snapshot.videos.find((video) => video.id === write.snapshot.activeId) ?? write.snapshot.videos[0];
+    const keys = new Set(["title", "niche", "goal", "duration", "style", "audience", "hook", "script", "voiceover", "cta", "caption", "hashtags", "avatarPrompt", "tapnowPrompt", "status"]);
+    if (!active || Object.keys(patch).some((key) => !keys.has(key))) return false;
+    const nextVideo = parseContentVideo({ ...active, ...patch });
+    if (!nextVideo) {
+      setNotice("Изменение контента не подтверждено. Прежняя идея сохранена.");
+      return false;
+    }
+    const result = await persistCurrentVideoPatch(active.id, patch, write);
+    if (result === "stale" || !await isLibraryWriteVerified(write)) return false;
+    if (result === "denied") {
+      setNotice("Доступ к изменению контента отозван. Обновите страницу.");
+      return false;
+    }
+    const accepted = typeof result === "object" ? result : nextVideo;
+    if (!await saveVideos(write.snapshot.videos.map((video) => video.id === active.id ? accepted : video), active.id,
+      write.snapshot, write.session, write.storageKey, write)) return false;
+    if (!await isLibraryWriteVerified(write)) return false;
+    if (result === "local") setNotice("Изменение сохранено только в этом браузере: запись на сервере не подтверждена.");
+    return true;
+  }
+
   const updateCurrentVideo = async (patch: Partial<ContentVideo>) => {
     const write = beginLibraryWrite(libraryView);
     if (!write) return false;
     try {
-      if (!await isLibraryWriteVerified(write)) return false;
-      const active = write.snapshot.videos.find((video) => video.id === write.snapshot.activeId) ?? write.snapshot.videos[0];
-      const keys = new Set(["title", "niche", "goal", "duration", "style", "audience", "hook", "script", "voiceover", "cta", "caption", "hashtags", "avatarPrompt", "tapnowPrompt", "status"]);
-      if (!active || Object.keys(patch).some((key) => !keys.has(key))) return false;
-      const nextVideo = parseContentVideo({ ...active, ...patch });
-      if (!nextVideo) {
-        setNotice("Изменение контента не подтверждено. Прежняя идея сохранена.");
-        return false;
-      }
-      const result = await persistCurrentVideoPatch(active.id, patch, write);
-      if (result === "stale" || !await isLibraryWriteVerified(write)) return false;
-      if (result === "denied") {
-        setNotice("Доступ к изменению контента отозван. Обновите страницу.");
-        return false;
-      }
-      const accepted = typeof result === "object" ? result : nextVideo;
-      if (!await saveVideos(write.snapshot.videos.map((video) => video.id === active.id ? accepted : video), active.id,
-        write.snapshot, write.session, write.storageKey)) return false;
-      if (result === "local") setNotice("Изменение сохранено только в этом браузере: запись на сервере не подтверждена.");
-      return true;
+      return await applyCurrentVideoPatch(patch, write);
     } finally {
       if (libraryWritePending.current === write) libraryWritePending.current = null;
     }
@@ -2424,80 +2451,103 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
     }
   };
 
-  const generateScript = async () => {
-    setLoading("script");
-    setNotice("");
-
+  async function generateLibraryText(kind: "script" | "avatar" | "tapnow") {
+    const write = beginLibraryWrite(libraryView);
+    if (!write) return;
+    let started = false;
+    const denyAccess = () => {
+      const message = "Доступ к созданию контента отозван. Обновите страницу.";
+      setNotice(message);
+      toast.error(message);
+    };
     try {
-      const payload = { ...form, ...activeVideo, videoId: activeVideo?.id };
-      const response = await crmFetch(withWorkspace("/api/content-studio/generate-script"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      const body = await safeJson<ScriptPackage>(response);
-      if (!response.ok || body?.success !== true) {
-        throw new Error(body?.success === false ? body.error : "Не удалось сгенерировать сценарий");
+      if (!await isLibraryWriteVerified(write)) return;
+      const active = write.snapshot.videos.find((video) => video.id === write.snapshot.activeId) ?? write.snapshot.videos[0];
+      if (kind !== "script" && !active) {
+        setNotice("Сначала создайте идею ролика, затем её промпт.");
+        return;
       }
-
-      const patch: Partial<ContentVideo> = {
-        ...body.data,
-        status: "script_ready",
+      const payload = {
+        ...write.snapshot.form, ...active,
+        videoId: active && isRealWorkspace(active.id) ? active.id : undefined,
       };
-
-      if (activeVideo) {
-        if (!await updateCurrentVideo(patch)) return;
+      setLoading(kind);
+      started = true;
+      setNotice("");
+      let data: unknown;
+      let mode: string;
+      if (localDraftsOnly) {
+        data = kind === "script" ? demoScriptPackage() : kind === "avatar" ? demoAvatarPrompt(payload) : demoTapNowPrompt(payload);
+        mode = "demo";
       } else {
+        const resource = kind === "script" ? "generate-script" : `generate-${kind}-prompt`;
+        const response = await crmFetch(`/api/content-studio/${resource}?workspaceId=${encodeURIComponent(workspaceId)}`, {
+          expectedUserId: actorId, dispatchGuard: () => isLibraryWriteCurrent(write), signal: write.session.signal,
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        if (handoffAccessDenied(response)) {
+          if (await isLibraryWriteVerified(write)) denyAccess();
+          return;
+        }
+        if (!await isLibraryWriteVerified(write)) return;
+        const body = await safeJson<unknown>(response);
+        if (!await isLibraryWriteVerified(write)) return;
+        if (!response.ok || body?.success !== true) {
+          throw new Error(generationRefusalText(body, response.status, "Не удалось подготовить контент"));
+        }
+        data = body.data;
+        mode = body.mode;
+      }
+      if (!await isLibraryWriteVerified(write)) return;
+      if (!["demo", "openai", "anthropic"].includes(mode)) throw new Error("Результат генерации не подтверждён. Прежний контент сохранён.");
+      let patch: Partial<ContentVideo>;
+      if (kind === "script") {
+        const script = parseScriptPackage(data);
+        if (!script) throw new Error("Сервер вернул неполный сценарий. Прежний контент сохранён.");
+        patch = { ...script, status: "script_ready" };
+      } else {
+        const prompt = parsePromptPackage(data);
+        if (!prompt) throw new Error("Сервер вернул неполный промпт. Прежний контент сохранён.");
+        patch = { [kind === "avatar" ? "avatarPrompt" : "tapnowPrompt"]: combinePrompt(prompt), status: "avatar_ready" };
+      }
+      if (active) {
+        if (!await applyCurrentVideoPatch(patch, write)) return;
+      } else {
+        // Without a saved idea, the generated script remains an explicit local draft.
         const video: ContentVideo = {
-          ...form,
-          ...patch,
-          id: newVideoId(),
-          status: "script_ready",
+          ...write.snapshot.form, ...patch, id: newVideoId(), status: "script_ready",
           createdAt: new Date().toISOString(),
         };
-        if (!await saveVideos([video, ...videos], video.id)) return;
+        if (!await saveVideos([video, ...write.snapshot.videos], video.id, write.snapshot, write.session, write.storageKey, write)) return;
+        if (!await isLibraryWriteVerified(write)) return;
+        setNotice("Сценарий сохранён только в этом браузере. Запись на сервере не создавалась.");
       }
-
-      toast.success(body.mode === "demo" ? "Образец сценария готов" : "Сценарий готов");
+      if (!await isLibraryWriteVerified(write)) return;
+      const ready = kind === "script" ? "Сценарий готов" : kind === "avatar" ? "Avatar prompt готов" : "TapNow prompt готов";
+      toast.success(mode === "demo" ? kind === "script" ? "Образец сценария готов" : "Образец промпта готов" : ready);
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Ошибка генерации сценария");
-    } finally {
-      setLoading(null);
-    }
-  };
-
-  const generatePrompt = async (kind: "avatar" | "tapnow") => {
-    setLoading(kind);
-    setNotice("");
-
-    const path =
-      kind === "avatar"
-        ? "/api/content-studio/generate-avatar-prompt"
-        : "/api/content-studio/generate-tapnow-prompt";
-
-    try {
-      const response = await crmFetch(withWorkspace(path), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...form, ...activeVideo, videoId: activeVideo?.id }),
-      });
-      const body = await safeJson<PromptPackage>(response);
-      if (!response.ok || body?.success !== true) {
-        throw new Error(body?.success === false ? body.error : "Не удалось сгенерировать prompt");
+      if (!await isLibraryWriteVerified(write)) return;
+      if (handoffAccessDenied(error)) {
+        denyAccess();
+        return;
       }
-
-      const prompt = combinePrompt(body.data);
-      if (!await updateCurrentVideo({
-        [kind === "avatar" ? "avatarPrompt" : "tapnowPrompt"]: prompt,
-        status: "avatar_ready",
-      })) return;
-      toast.success(kind === "avatar" ? "Avatar prompt готов" : "TapNow prompt готов");
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Ошибка генерации prompt");
+      const message = error instanceof Error ? error.message : "Не удалось подготовить контент";
+      setNotice(message);
+      toast.error(message);
     } finally {
-      setLoading(null);
+      if (libraryWritePending.current === write) {
+        libraryWritePending.current = null;
+        if (started && sessionRef.current === write.session && !write.session.signal.aborted) {
+          setLoading((current) => current === kind ? null : current);
+        }
+      }
     }
-  };
+  }
+
+  const generateScript = () => generateLibraryText("script");
+  const generatePrompt = (kind: "avatar" | "tapnow") => generateLibraryText(kind);
 
   const testTelegram = async () => {
     setLoading("telegram-test");
