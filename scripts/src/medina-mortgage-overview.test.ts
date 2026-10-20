@@ -62,9 +62,18 @@ const find = (tree: any, predicate: (node: Node) => boolean) => {
   return node;
 };
 const section = (tree: any, id: string) => find(tree, (node) => node.type === "section" && node.props["aria-labelledby"] === id);
-const button = (tree: any, label: string) => find(tree, (node) => node.type === "button" && (node.props["aria-label"] === label || text(node) === label));
+const button = (tree: any, label: string) => find(tree, (node) => node.type === "button" && (node.props["aria-label"] === label
+  || text(node) === label || [node.props.children].flat().some((child) => typeof child === "string" && child.trim() === label)));
 const links = (tree: any, href: string) => nodes(tree).filter((node) => node.type === "a" && node.props.href === href);
 const rows = (tree: any) => nodes(tree).filter((node) => node.type === "li");
+const expectAgenda = (tree: any, selected: "meetings" | "tasks") => {
+  const agenda = section(tree, "mortgage-agenda");
+  assert.equal(text(find(agenda, (node) => node.type === "h2")), "Ближайшие дела");
+  assert.equal(button(agenda, "Встречи").props["aria-pressed"], selected === "meetings");
+  assert.equal(button(agenda, "Задачи").props["aria-pressed"], selected === "tasks");
+  assert.ok(links(agenda, selected === "meetings" ? "/appointments" : "/tasks").length);
+  return agenda;
+};
 const frozenNow = Date.parse("2026-10-15T19:30:00Z");
 
 const contact = (overrides: Record<string, any> = {}) => ({
@@ -293,6 +302,64 @@ test("refresh and retry call the workspace refresh while revoked handlers and ag
   f.dispose(); assert.equal(f.intervals.size, 0);
 });
 
+for (const role of ["owner", "admin", "lead_manager"]) {
+  for (const overdueTasks of [0, 41531]) test(`${role} defaults the agenda from server overdue totals, not sampled activities (${overdueTasks})`, () => {
+    const data = snapshot({ activities: overdueTasks ? [activity()] : [task()], activitiesTruncated: true });
+    data.metrics.overdueTasks = overdueTasks;
+    const f = fixture(role, data), tree = f.paint();
+    const agenda = expectAgenda(tree, overdueTasks ? "tasks" : "meetings");
+    assert.equal(rows(agenda).length, 0, "A server count must not invent activities missing from the sample");
+    assert.match(text(agenda), overdueTasks ? /В выборке нет открытых задач/ : /В выборке нет ближайших встреч/);
+    assert.match(text(tree), /Встречи и задачи: неполная выборка.*Счётчики полные/);
+    assert.deepEqual(f.writes, []);
+    f.dispose();
+  });
+}
+
+test("an untouched agenda follows server overdue totals after loading and later snapshots", () => {
+  const f = fixture("owner", null);
+  f.workspace.loading = true;
+  assert.equal(rows(f.paint()).length, 0);
+  f.workspace.data = freeze(snapshot());
+  f.workspace.loading = false;
+  expectAgenda(f.paint(), "tasks");
+  const withoutOverdue = snapshot();
+  withoutOverdue.metrics.overdueTasks = 0;
+  f.workspace.data = freeze(withoutOverdue);
+  expectAgenda(f.paint(), "meetings");
+  f.workspace.data = freeze(snapshot());
+  expectAgenda(f.paint(), "tasks");
+  assert.equal(f.refreshes(), 0);
+  assert.deepEqual(f.writes, []);
+  f.dispose();
+});
+
+for (const selected of ["meetings", "tasks"] as const) test(`explicit ${selected} selection survives rerenders, refreshed totals and clock updates`, () => {
+  const initial = snapshot();
+  initial.metrics.overdueTasks = selected === "meetings" ? 41531 : 0;
+  const f = fixture("owner", initial);
+  let tree = f.paint();
+  expectAgenda(tree, selected === "meetings" ? "tasks" : "meetings");
+  button(tree, selected === "meetings" ? "Встречи" : "Задачи").props.onClick();
+  expectAgenda(f.paint(), selected);
+  expectAgenda(f.paint(), selected);
+  for (const overdueTasks of [0, 41531]) {
+    const next = snapshot();
+    next.metrics.overdueTasks = overdueTasks;
+    f.workspace.data = freeze(next);
+    expectAgenda(f.paint(), selected);
+  }
+  f.workspace.loading = true;
+  assert.equal(rows(f.paint()).length, 0);
+  f.workspace.loading = false;
+  expectAgenda(f.paint(), selected);
+  tree = f.tick(frozenNow + 60_000);
+  expectAgenda(tree, selected);
+  assert.equal(f.refreshes(), 0);
+  assert.deepEqual(f.writes, []);
+  f.dispose();
+});
+
 test("agenda tabs render the real activity helpers, sort and cap samples, and only navigate", () => {
   const meetings = Array.from({ length: 7 }, (_, i) => activity({ id: `meeting-${i}`, title: `Upcoming ${i}`,
     startsAt: `2026-10-16T0${i}:10:00Z`, endsAt: `2026-10-16T0${i}:50:00Z` })).reverse();
@@ -301,7 +368,10 @@ test("agenda tabs render the real activity helpers, sort and cap samples, and on
     activity({ id: "cancelled", title: "Excluded cancelled meeting", status: "cancelled" }),
     task({ id: "done", title: "Excluded done task", status: "done" }), ...meetings, ...tasks] });
   const f = fixture("owner", data), original = JSON.stringify(data);
-  let tree = f.paint(), agenda = section(tree, "mortgage-agenda");
+  let tree = f.paint();
+  button(tree, "Встречи").props.onClick();
+  tree = f.paint();
+  let agenda = section(tree, "mortgage-agenda");
   assert.equal(button(agenda, "Встречи").props["aria-pressed"], true);
   assert.equal(button(agenda, "Задачи").props["aria-pressed"], false);
   assert.deepEqual(rows(agenda).map((row) => text(row).match(/Upcoming \d/)?.[0]), ["Upcoming 0", "Upcoming 1", "Upcoming 2", "Upcoming 3", "Upcoming 4"]);
@@ -329,17 +399,21 @@ test("empty activity samples retain server totals and never claim that all work 
   const f = fixture("owner", data);
   let tree = f.paint();
   assert.match(text(tree), /Встречи и задачи: неполная выборка.*Счётчики полные/);
-  assert.match(text(section(tree, "mortgage-agenda")), /В выборке нет ближайших встреч/);
-  for (const [label, value] of [["Всего заявок", data.metrics.totalLeads], ["В работе", data.metrics.inProgressLeads],
-    ["Встречи сегодня", data.metrics.meetingsToday], ["Просроченные задачи", data.metrics.overdueTasks]] as const) {
+  assert.match(text(expectAgenda(tree, "tasks")), /В выборке нет открытых задач/);
+  const metrics = find(tree, (node) => node.type === "dl" && node.props["aria-label"] === "Показатели рабочего пространства");
+  for (const [label, value, href] of [["Всего заявок", data.metrics.totalLeads, "/leads"], ["В работе", data.metrics.inProgressLeads, "/leads"],
+    ["Встречи сегодня", data.metrics.meetingsToday, "/appointments"], ["Просроченные задачи", data.metrics.overdueTasks, "/tasks"]] as const) {
     const metric = find(tree, (node) => node.type === "a" && compact(node.props["aria-label"] || "") === compact(`${label}: ${value.toLocaleString("ru-RU")}`));
-    assert.equal(compact(text(metric)), countText(value), "Counts come from full server metrics, not the returned rows");
+    assert.equal(metric.props.href, href);
+    assert.ok(compact(text(metric)).includes(countText(value)), "Counts come from full server metrics, not the returned rows");
+    assert.ok(nodes(metrics).some((node) => node.type === "dt" && text(node) === label));
+    assert.ok(nodes(metrics).some((node) => node.type === "dd" && compact(text(node)) === countText(value)));
   }
   assert.match(text(section(tree, "mortgage-overview-contacts")), /вне текущей страницы контактов/);
   assert.match(text(section(tree, "mortgage-team-load")), /Нет данных по сотрудникам/);
   assert.doesNotMatch(text(tree), /Все заявки назначены|Просроченных задач нет|Ближайших встреч нет/);
-  button(tree, "Задачи").props.onClick(); tree = f.paint();
-  assert.match(text(section(tree, "mortgage-agenda")), /В выборке нет открытых задач/);
+  button(tree, "Встречи").props.onClick(); tree = f.paint();
+  assert.match(text(expectAgenda(tree, "meetings")), /В выборке нет ближайших встреч/);
   assert.ok(compact(text(tree)).includes(countText(data.metrics.overdueTasks)));
   f.dispose();
 });
@@ -348,9 +422,9 @@ test("contact previews label their displayed sample, retain full totals, and do 
   const contacts = Array.from({ length: 8 }, (_, i) => ({ ...unassignedContact(), id: `unassigned-${i}`, name: `Synthetic preview ${i}` }));
   const data = snapshot({ contacts }), f = fixture("owner", data), tree = f.paint();
   const preview = section(tree, "mortgage-overview-contacts");
-  assert.equal(rows(preview).length, 5);
-  assert.match(text(preview), /Показано:?\s*5/);
-  assert.doesNotMatch(text(preview), /В текущей странице:\s*5|Synthetic preview [567]/);
+  assert.equal(rows(preview).length, 3);
+  assert.match(text(preview), /Показано:?\s*3/);
+  assert.doesNotMatch(text(preview), /В текущей странице:\s*3|Synthetic preview [34567]/);
   assert.ok(compact(text(preview)).includes(countText(data.metrics.unassignedLeads)));
   assert.equal(rows(preview).filter((row) => text(row).includes("Без телефона")).length, 0);
   f.dispose();
@@ -365,12 +439,62 @@ test("contact previews label their displayed sample, retain full totals, and do 
   empty.dispose();
 });
 
+for (const role of ["owner", "admin", "lead_manager"]) test(`${role} sees three correctly scoped contacts in server order with role-appropriate sections`, () => {
+  const assigned = Array.from({ length: 8 }, (_, i) => contact({
+    id: `assigned-${i}`, name: `Synthetic assigned preview ${i}`, phone: `+7700000100${i}`,
+  })).reverse();
+  const unassigned = Array.from({ length: 8 }, (_, i) => ({ ...unassignedContact(),
+    id: `unassigned-${i}`, name: `Synthetic unassigned preview ${i}`, phone: `+7700000200${i}`,
+  })).reverse();
+  const data = snapshot({ contacts: assigned.flatMap((item, i) => [item, unassigned[i]]), page: 4, pageSize: 100 });
+  const original = JSON.stringify(data), f = fixture(role, data), tree = f.paint();
+  const preview = section(tree, "mortgage-overview-contacts"), teamAccess = role !== "lead_manager";
+  const expected = (teamAccess ? unassigned : assigned).slice(0, 3);
+  assert.equal(text(find(preview, (node) => node.type === "h2")), teamAccess ? "Заявки без ответственного" : "Последние заявки");
+  assert.deepEqual(rows(preview).map((row) => text(find(row, (node) => node.type === "a" && !node.props["aria-label"]))),
+    expected.map((item) => item.name), "Filter the returned page by responsibility before taking the first three rows");
+  assert.match(text(preview), /Показано:?\s*3/);
+  assert.ok(links(preview, teamAccess ? "/leads" : "/clients").length);
+  assert.ok(compact(text(preview)).includes(countText(teamAccess ? data.metrics.unassignedLeads : data.contactsTotal)));
+  for (const item of expected) {
+    assert.ok(links(preview, `/clients?leadId=${encodeURIComponent(item.id)}`).length);
+    assert.ok(links(preview, `tel:${item.phone}`).length);
+  }
+  const serialized = JSON.stringify(preview);
+  for (const item of data.contacts.filter((item) => !expected.some((visible) => visible.id === item.id))) {
+    assert.ok(!serialized.includes(item.name), `Do not render out-of-sample or out-of-scope contact ${item.id}`);
+    assert.ok(!serialized.includes(item.phone), `Do not render out-of-sample or out-of-scope phone ${item.id}`);
+  }
+  const sections = nodes(tree).filter((node) => node.type === "section").map((node) => node.props["aria-labelledby"]);
+  if (teamAccess) {
+    assert.ok(sections.indexOf("mortgage-overview-contacts") < sections.indexOf("mortgage-agenda"));
+    assert.ok(sections.indexOf("mortgage-agenda") < sections.indexOf("mortgage-team-load"));
+    assert.equal(text(find(section(tree, "mortgage-team-load"), (node) => node.type === "h2")), "Нагрузка команды");
+  } else {
+    assert.ok(!sections.includes("mortgage-team-load"));
+    assert.equal(links(tree, "/analytics").length, 0);
+    for (const item of unassigned) {
+      assert.ok(!JSON.stringify(tree).includes(item.name));
+      assert.ok(!JSON.stringify(tree).includes(item.phone));
+    }
+    const work = section(tree, "mortgage-own-work");
+    for (const href of ["/clients", "/appointments", "/tasks"]) assert.ok(links(work, href).length);
+  }
+  assert.equal(JSON.stringify(data), original);
+  assert.deepEqual(f.writes, []);
+  f.dispose();
+});
+
 test("header, activity day labels, clock updates and contact dates use the clinic zone, not the UTC device", () => {
   const f = fixture(), data = f.workspace.data;
   let tree = f.paint();
   const header = find(tree, (node) => node.type === "header");
-  const expectedDate = new Intl.DateTimeFormat("ru-RU", { timeZone: data.timeZone, weekday: "long", day: "numeric", month: "long" }).format(frozenNow);
-  assert.ok(text(header).includes(expectedDate));
+  const formattedDate = new Intl.DateTimeFormat("ru-RU", { timeZone: data.timeZone, weekday: "long", day: "numeric", month: "long" }).format(frozenNow);
+  const expectedDate = formattedDate.charAt(0).toLocaleUpperCase("ru-RU") + formattedDate.slice(1);
+  const dateLabel = find(header, (node) => node.type === "p" && text(node) === expectedDate);
+  assert.ok(!nodes(header).some((node) => String(node.props.className || "").split(/\s+/).some((token) => /(?:^|:)capitalize$/.test(token))), "Capitalize only the first date letter in text, not every word through CSS");
+  assert.equal(text(dateLabel), expectedDate);
+  button(tree, "Встречи").props.onClick(); tree = f.paint();
   let row = rows(section(tree, "mortgage-agenda"))[0];
   assert.match(text(row), /05:10 Сегодня/);
   assert.match(text(row), /до 06:10/);
@@ -387,7 +511,7 @@ test("header, activity day labels, clock updates and contact dates use the clini
   tree = f.tick(Date.parse("2026-10-16T19:30:00Z"));
   assert.match(text(section(tree, "mortgage-agenda")), /В выборке нет ближайших встреч/);
   const nextDate = new Intl.DateTimeFormat("ru-RU", { timeZone: data.timeZone, weekday: "long", day: "numeric", month: "long" }).format(Date.parse("2026-10-16T19:30:00Z"));
-  assert.ok(text(find(tree, (node) => node.type === "header")).includes(nextDate));
+  assert.ok(text(find(tree, (node) => node.type === "header")).includes(nextDate.charAt(0).toLocaleUpperCase("ru-RU") + nextDate.slice(1)));
   f.dispose(); assert.equal(f.intervals.size, 0);
 });
 
