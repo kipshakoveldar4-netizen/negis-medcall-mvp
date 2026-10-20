@@ -79,6 +79,7 @@ type ContentLibraryWrite = {
   snapshot: ContentLibrarySnapshot;
   storageKey: string;
   published?: ContentLibrarySnapshot;
+  persistence?: "server" | "local";
 };
 
 type ScriptPackage = Pick<ContentVideo, "hook" | "script" | "voiceover" | "cta" | "caption" | "hashtags">;
@@ -110,7 +111,7 @@ type ApiResponse<TData> =
 type TelegramResponse = {
   sent: boolean;
   packageText: string;
-  test?: boolean;
+  test: boolean;
   parts?: number;
 };
 
@@ -708,6 +709,16 @@ function parsePromptPackage(value: unknown): PromptPackage | null {
     || (prompt.negativePrompt !== undefined && typeof prompt.negativePrompt !== "string")
     || (prompt.format !== undefined && prompt.format !== "photo" && prompt.format !== "video")) return null;
   return { prompt: prompt.prompt, negativePrompt: prompt.negativePrompt, format: prompt.format };
+}
+
+function parseTelegramResponse(value: unknown, mode: string, test: boolean, packageText?: string): TelegramResponse | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const result = value as TelegramResponse;
+  if (typeof result.sent !== "boolean" || result.test !== test || typeof result.packageText !== "string" || !result.packageText.trim()
+    || (!test && result.packageText !== packageText)) return null;
+  if (result.sent ? mode !== "telegram" || !Number.isSafeInteger(result.parts) || (result.parts ?? 0) < 1
+    : mode !== "demo" || result.parts !== undefined) return null;
+  return { sent: result.sent, test: result.test, packageText: result.packageText, parts: result.parts };
 }
 
 function telegramErrorMessage<TData>(body: ApiResponse<TData> | null, fallback: string) {
@@ -2334,6 +2345,7 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
     if (!await saveVideos(write.snapshot.videos.map((video) => video.id === active.id ? accepted : video), active.id,
       write.snapshot, write.session, write.storageKey, write)) return false;
     if (!await isLibraryWriteVerified(write)) return false;
+    write.persistence = result === "local" ? "local" : "server";
     if (result === "local") setNotice("Изменение сохранено только в этом браузере: запись на сервере не подтверждена.");
     return true;
   }
@@ -2549,80 +2561,101 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
   const generateScript = () => generateLibraryText("script");
   const generatePrompt = (kind: "avatar" | "tapnow") => generateLibraryText(kind);
 
-  const testTelegram = async () => {
-    setLoading("telegram-test");
-    setNotice("");
-
+  async function runLibraryTelegram(test: boolean) {
+    const write = beginLibraryWrite(libraryView);
+    if (!write) return;
+    const kind = test ? "telegram-test" : "telegram";
+    let started = false;
+    let delivered = false;
+    const denyAccess = () => {
+      const message = "Доступ к Telegram отозван. Обновите страницу.";
+      setNotice(message);
+      toast.error(message);
+    };
     try {
-      const response = await crmFetch(withWorkspace("/api/content-studio/send-telegram"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ test: true }),
-      });
-      const body = await safeJson<TelegramResponse>(response);
-      if (!response.ok || body?.success !== true) {
-        const message = telegramErrorMessage(body, "Не удалось проверить Telegram");
-        setNotice(message);
-        toast.error(message);
+      if (!await isLibraryWriteVerified(write)) return;
+      const active = write.snapshot.videos.find((video) => video.id === write.snapshot.activeId) ?? write.snapshot.videos[0];
+      if (!test && !active) {
+        setNotice("Сначала создайте идею ролика.");
         return;
       }
-
-      if (body.data.sent && body.mode === "telegram") {
-        setNotice("Telegram подключён");
-        toast.success("Telegram подключён");
-      } else {
-        const message = body.warning || "Telegram не подключён, пакет готов для копирования.";
+      if (localDraftsOnly) {
+        const message = test ? "В локальном режиме Telegram не проверяется. Сообщение не отправлялось."
+          : "Пакет доступен для копирования. В локальном режиме сообщение в Telegram не отправлялось.";
         setNotice(message);
         toast.warning(message);
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Не удалось проверить Telegram";
-      setNotice(message);
-      toast.error(message);
-    } finally {
-      setLoading(null);
-    }
-  };
-
-  const sendTelegram = async () => {
-    if (!activeVideo) {
-      toast.error("Сначала создайте идею ролика");
-      return;
-    }
-
-    setLoading("telegram");
-    setNotice("");
-
-    try {
-      const response = await crmFetch(withWorkspace("/api/content-studio/send-telegram"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(activeVideo),
-      });
-      const body = await safeJson<TelegramResponse>(response);
-      if (!response.ok || body?.success !== true) {
-        const message = telegramErrorMessage(body, "Не удалось отправить в Telegram");
-        setNotice(message);
-        toast.error(message);
         return;
       }
-
-      if (!await updateCurrentVideo({ status: "telegram_ready" })) return;
-      setNotice(
-        body.warning ||
-          (body.data.sent
-            ? `Пакет отправлен в Telegram${body.data.parts && body.data.parts > 1 ? ` частями: ${body.data.parts}` : ""}.`
-            : "Telegram не подключён, но пакет готов для копирования."),
-      );
-      toast.success(body.data.sent ? "Отправлено в Telegram" : "Пакет готов для копирования");
+      setLoading(kind);
+      started = true;
+      setNotice("");
+      const response = await crmFetch(`/api/content-studio/send-telegram?workspaceId=${encodeURIComponent(workspaceId)}`, {
+        expectedUserId: actorId, dispatchGuard: () => isLibraryWriteCurrent(write), signal: write.session.signal,
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(test ? { test: true } : active),
+      });
+      if (handoffAccessDenied(response)) {
+        if (await isLibraryWriteVerified(write)) denyAccess();
+        return;
+      }
+      if (!await isLibraryWriteVerified(write)) return;
+      const body = await safeJson<unknown>(response);
+      if (!await isLibraryWriteVerified(write)) return;
+      if (!response.ok || body?.success !== true) {
+        throw new Error(telegramErrorMessage(body, test ? "Проверка Telegram не подтверждена" : "Доставка в Telegram не подтверждена"));
+      }
+      const result = parseTelegramResponse(body.data, body.mode, test, active ? buildTelegramPackage(active) : undefined);
+      if (!result) throw new Error("Сервер вернул неподтверждённый результат Telegram.");
+      delivered = result.sent;
+      if (body.warning !== undefined && typeof body.warning !== "string") throw new Error("Сервер вернул неполные данные Telegram.");
+      if (!result.sent) {
+        const message = body.warning || "Telegram не подключён. Пакет доступен только для копирования; сообщение не отправлено.";
+        setNotice(message);
+        toast.warning(message);
+        return;
+      }
+      if (test) {
+        setNotice("Telegram подключён");
+        toast.success("Telegram подключён");
+        return;
+      }
+      const saved = await applyCurrentVideoPatch({ status: "telegram_ready" }, write);
+      if (!await isLibraryWriteVerified(write)) return;
+      const published = write.published?.videos.find((video) => video.id === active?.id);
+      if (!saved || write.persistence !== "server" || published?.status !== "telegram_ready") {
+        const message = "Telegram подтвердил отправку. Статус в библиотеке на сервере не подтверждён. Не отправляйте пакет повторно ради статуса; обновите библиотеку.";
+        setNotice(message);
+        toast.warning(message);
+        return;
+      }
+      setNotice(`Пакет отправлен в Telegram${result.parts && result.parts > 1 ? ` частями: ${result.parts}` : ""}.`);
+      toast.success("Отправлено в Telegram");
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Ошибка Telegram";
+      if (!await isLibraryWriteVerified(write)) return;
+      if (handoffAccessDenied(error) && !delivered) {
+        denyAccess();
+        return;
+      }
+      const detail = error instanceof Error ? error.message : "Не удалось проверить Telegram";
+      const message = delivered ? test ? "Telegram подтвердил проверочное сообщение, но дополнительные данные ответа не подтверждены."
+        : "Telegram подтвердил отправку, но статус в библиотеке не подтверждён. Не отправляйте пакет повторно ради статуса."
+        : `${detail} Проверьте Telegram перед повторной попыткой: часть сообщения могла быть доставлена.`;
       setNotice(message);
-      toast.error(message);
+      if (delivered) toast.warning(message);
+      else toast.error(message);
     } finally {
-      setLoading(null);
+      if (libraryWritePending.current === write) {
+        libraryWritePending.current = null;
+        if (started && sessionRef.current === write.session && !write.session.signal.aborted) {
+          setLoading((current) => current === kind ? null : current);
+        }
+      }
     }
-  };
+  }
+
+  const testTelegram = () => runLibraryTelegram(true);
+  const sendTelegram = () => runLibraryTelegram(false);
 
   // AI Target is no longer a standalone module: the studio hands content
   // straight to Ads Automation, where "ИИ заполнит" covers targeting.

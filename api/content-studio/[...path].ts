@@ -152,6 +152,7 @@ type TelegramApiBody = {
   error_code?: number;
   description?: string;
   raw?: string;
+  result?: unknown;
 };
 
 function sendJson(res: VercelResponse, status: number, payload: unknown) {
@@ -369,15 +370,27 @@ async function sendTelegramMessage(input: {
   });
 
   const body = await readTelegramBody(response);
+  const message = body.result && typeof body.result === "object" && !Array.isArray(body.result)
+    ? body.result as Record<string, unknown> : null;
+  const chat = message?.chat && typeof message.chat === "object" && !Array.isArray(message.chat)
+    ? message.chat as Record<string, unknown> : null;
+  const acknowledged = body.ok === true && message !== null && chat !== null
+    && Number.isSafeInteger(message.message_id) && Number(message.message_id) > 0
+    && Number.isSafeInteger(message.date) && Number(message.date) >= 0
+    && Number.isSafeInteger(chat.id) && Number(chat.id) !== 0
+    && typeof message.text === "string" && Boolean(message.text.trim());
   const description =
-    body.description || (body.raw ? "Telegram returned a non-JSON response body." : `Telegram API error: HTTP ${response.status}`);
+    typeof body.description === "string" && body.description.trim() ? body.description
+      : body.raw ? "Telegram returned a non-JSON response body."
+      : !acknowledged && response.ok ? "Telegram did not return a valid sent-message acknowledgement."
+      : `Telegram API error: HTTP ${response.status}`;
 
-  if (!response.ok || body.ok === false) {
+  if (!response.ok || !acknowledged) {
     return {
       success: false as const,
       status: response.status,
       telegramDescription: description,
-      telegramErrorCode: body.error_code,
+      telegramErrorCode: Number.isSafeInteger(body.error_code) ? body.error_code : undefined,
       hint: telegramHint(description, response.status),
     };
   }

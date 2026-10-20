@@ -1023,11 +1023,13 @@ type LocalLibraryTextKind = "script" | "avatar" | "tapnow";
 type LocalLibraryCallbacks = { create: () => Promise<unknown>; update: (patch: Partial<LocalLibraryVideo>) => unknown;
   persist: (id: string, patch: Partial<LocalLibraryVideo>) => unknown; save: (rows: LocalLibraryVideo[], id?: string) => unknown;
   script: () => Promise<unknown>; prompt: (kind: "avatar" | "tapnow") => Promise<unknown>;
+  testTelegram: () => Promise<unknown>; sendTelegram: () => Promise<unknown>;
   editTitle: (value: string) => void; select: (id: string) => void; read: (key?: string) => LocalLibraryVideo[];
   write: (rows: LocalLibraryVideo[], key?: string) => void };
 const LOCAL_LIBRARY_SCRIPT = { hook: "Synthetic hook", script: "Synthetic generated script", voiceover: "Synthetic voiceover",
   cta: "Synthetic CTA", caption: "Synthetic caption", hashtags: ["#synthetic"] };
 const LOCAL_LIBRARY_PROMPT = { prompt: "Synthetic visual prompt", negativePrompt: "Synthetic negative prompt", format: "video" };
+const LOCAL_TELEGRAM_DELIVERY = { sent: true, packageText: "Synthetic Telegram package", parts: 2 };
 const LOCAL_LIBRARY_ROW_A: LocalLibraryVideo = { ...LOCAL_LIBRARY_FORM, id: "33333333-3333-4333-8333-333333333333", status: "idea", createdAt: "2090-10-20T00:00:00Z" };
 const LOCAL_LIBRARY_ROW_B: LocalLibraryVideo = { ...LOCAL_LIBRARY_FORM, title: "Synthetic second idea", id: "44444444-4444-4444-8444-444444444444",
   status: "idea", createdAt: "2090-10-21T00:00:00Z" };
@@ -1161,7 +1163,7 @@ const generationCallbackPrograms = (async () => {
   };
   visitLibraryEvents(child);
   for (const [name, matches] of Object.entries(libraryEvents)) assert.equal(matches.length, 1, `execute the actual library ${name} handler`);
-  const library = libraryDependencies(["createIdea", "updateCurrentVideo", "persistCurrentVideoPatch", "saveVideos", "readVideos", "writeVideos", "generateScript", "generatePrompt"],
+  const library = libraryDependencies(["createIdea", "updateCurrentVideo", "persistCurrentVideoPatch", "saveVideos", "readVideos", "writeVideos", "generateScript", "generatePrompt", "testTelegram", "sendTelegram"],
     [...libraryEvents.form, ...libraryEvents.selection]);
   const libraryRestore = libraryDependencies(["readVideos"], [videoEffects.restore[0], demoEffects[0]]);
   const texts = (nodes: Map<string, import("typescript").Statement>, excluded: string[] = []) => [...new Set([...nodes]
@@ -1177,6 +1179,7 @@ const generationCallbackPrograms = (async () => {
       ${texts(library.nested)}
       return { create: createIdea, update: updateCurrentVideo, persist: persistCurrentVideoPatch, save: saveVideos,
         script: generateScript, prompt: generatePrompt,
+        testTelegram, sendTelegram,
         editTitle(value) { return (${libraryEvents.form[0]})(value); },
         select(id) { const video = { id }; return (${libraryEvents.selection[0]})(); }, read: readVideos, write: writeVideos };
     };`;
@@ -1341,6 +1344,9 @@ const generationCallbackPrograms = (async () => {
   };
   return {
     library: ts.transpileModule(libraryProgram, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText,
+    telegramPackage: compile(source, ["buildTelegramPackage"], ["buildTelegramPackage"]),
+    telegramApi: compile(await readFile(path.join(repoRoot, "api/content-studio/[...path].ts"), "utf8"),
+      ["telegramHint", "readTelegramBody", "sendTelegramMessage"], ["sendTelegramMessage", "readTelegramBody", "telegramHint"]),
     libraryRefs: ts.transpileModule(libraryRefs, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText,
     libraryDefaults: compile(source, ["initialVideo"], ["initialVideo"]),
     photoDefaults: ts.transpileModule(`${select(source, ["photoSourceTypes", "photoFormats", "photoLayouts", "defaultPhotoTexts"])}
@@ -1472,6 +1478,7 @@ function generationLifetime(code: string, bindings: Record<string, unknown>) {
 
 async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime = false, initialWorkspace = "workspace-a") {
   const programs = await generationCallbackPrograms;
+  const { buildTelegramPackage } = evaluateGenerationFixture<{ buildTelegramPackage: (video: LocalLibraryVideo) => string }>(programs.telegramPackage, {});
   const mutations: { storage: string; operation: string; key: string }[] = [];
   const storageReads: { storage: string; key: string }[] = [];
   const memoryStorage = (name: string) => {
@@ -1516,7 +1523,7 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
   let targetedTokenStarted: ReturnType<typeof generationDeferred<void>> | undefined;
   const tokenStarted = generationDeferred<void>(), bodyStarted = generationDeferred<void>();
   let delayedBody: ReturnType<typeof generationDeferred<string>> | undefined;
-  type Resource = "generation" | "usage" | "poll" | "restore" | "signed" | "metadata" | "approval" | "package-generation" | "package-save" | "photo-suggest" | "library-create" | "library-patch" | `library-${LocalLibraryTextKind}`;
+  type Resource = "generation" | "usage" | "poll" | "restore" | "signed" | "metadata" | "approval" | "package-generation" | "package-save" | "photo-suggest" | "library-create" | "library-patch" | "library-telegram" | `library-${LocalLibraryTextKind}`;
   let responseWait: ReturnType<typeof generationDeferred<void>> | undefined, responseResource: Resource | undefined;
   const responseStarted = generationDeferred<void>();
   let handoffResponseHook: ((resource: Resource) => void) | undefined;
@@ -1584,6 +1591,10 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
     avatar: { success: true, mode: "openai", data: LOCAL_LIBRARY_PROMPT },
     tapnow: { success: true, mode: "openai", data: LOCAL_LIBRARY_PROMPT },
   };
+  const telegramReplies: { test: unknown; send: unknown; text?: string } = {
+    test: { success: true, mode: "telegram", data: { ...LOCAL_TELEGRAM_DELIVERY, test: true } },
+    send: { success: true, mode: "telegram", data: { ...LOCAL_TELEGRAM_DELIVERY, test: false, packageText: buildTelegramPackage(LOCAL_LIBRARY_ROW_A) } },
+  };
   const libraryTextKind = (url: string): LocalLibraryTextKind | undefined => {
     const path = url.split("?")[0];
     return path === "/api/content-studio/generate-script" ? "script" : path === "/api/content-studio/generate-avatar-prompt" ? "avatar"
@@ -1595,7 +1606,8 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
     handoffResponseHook?.(resource);
     const response = Response.json(value, { status: handoffStatuses[resource] ?? 200 });
     if (resource === "package-generation" || resource === "package-save" || resource === "photo-suggest" || resource.startsWith("library-") || resource === "restore") {
-      const text = ["library-script", "library-avatar", "library-tapnow"].includes(resource) ? libraryTextReplies.text
+      const text = resource === "library-telegram" ? telegramReplies.text
+        : ["library-script", "library-avatar", "library-tapnow"].includes(resource) ? libraryTextReplies.text
         : resource.startsWith("library-") ? libraryReplies.text : resource === "restore" ? undefined : resource === "photo-suggest" ? photoSuggestionReply.text
         : resource === "package-generation" ? packageReplies.generationText : packageReplies.saveText;
       const read = response.text.bind(response);
@@ -1622,15 +1634,18 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
     apiUrl: (url: string) => url,
     async fetch(url: string, init: LocalGenerationInit) {
       const method = init.method || "GET";
-      dispatches.push({ url, method, headers: new Headers(init.headers), body: init.body ? JSON.parse(String(init.body)) : null, signal: init.signal });
+      const body: unknown = init.body ? JSON.parse(String(init.body)) : null;
+      dispatches.push({ url, method, headers: new Headers(init.headers), body, signal: init.signal });
       const textKind = libraryFixtureActive ? libraryTextKind(url) : undefined;
-      const resource: Resource = textKind ? `library-${textKind}` : libraryFixtureActive && url.split("?")[0] === "/api/crm/content-videos"
+      const telegram = libraryFixtureActive && url.split("?")[0] === "/api/content-studio/send-telegram";
+      const resource: Resource = telegram ? "library-telegram" : textKind ? `library-${textKind}` : libraryFixtureActive && url.split("?")[0] === "/api/crm/content-videos"
         ? method === "POST" ? "library-create" : method === "PATCH" ? "library-patch" : "restore"
         : url.includes("generate-package") ? (photoSuggestionActive ? "photo-suggest" : "package-generation")
         : packageFixtureActive && url.split("?")[0] === "/api/crm/content-videos" && method === "POST" ? "package-save"
         : url.includes("signed-upload") ? "signed" : method === "PATCH" ? "approval" : "metadata";
       if (responseWait && responseResource === resource) { responseStarted.resolve(); await responseWait.promise; }
       if (handoffTransportFailures[resource]) throw new api.CrmApiError(handoffTransportFailures[resource]!, "authentication_required", "Synthetic denied transport");
+      if (telegram) { assert.equal(method, "POST"); return localResponse(telegramReplies[body && (body as { test?: unknown }).test === true ? "test" : "send"], resource); }
       if (textKind) { assert.equal(method, "POST"); return localResponse(libraryTextReplies[textKind], resource); }
       if (resource === "library-create" || resource === "library-patch" || (resource === "restore" && libraryFixtureActive)) {
         return localResponse(resource === "library-create" ? libraryReplies.create : resource === "library-patch" ? libraryReplies.patch : libraryReplies.restore, resource);
@@ -1732,7 +1747,8 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
     ...bindings, ...pureLibraryDemo,
     async crmFetch(url: string, init: LocalGenerationInit = {}) {
       libraryRequests.push({ url, init }); const textKind = libraryTextKind(url);
-      activeTransport = textKind ? `library-${textKind}` : init.method === "PATCH" ? "library-patch" : init.method === "POST" ? "library-create" : "restore";
+      activeTransport = url.split("?")[0] === "/api/content-studio/send-telegram" ? "library-telegram"
+        : textKind ? `library-${textKind}` : init.method === "PATCH" ? "library-patch" : init.method === "POST" ? "library-create" : "restore";
       try { return await api.crmFetch(url, init); } finally { activeTransport = undefined; }
     },
   });
@@ -1849,7 +1865,7 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
       const refs = libraryRefsFor(next.session), snapshot = refs.librarySnapshotRef as { current: LocalLibrarySnapshot } | undefined;
       if (snapshot) snapshot.current = { form, videos: rows, activeId: selectedId };
     },
-    libraryReplies, libraryTextReplies, libraryRequests, libraryDefaults, pureLibraryDemo,
+    libraryReplies, libraryTextReplies, telegramReplies, libraryRequests, libraryDefaults, pureLibraryDemo, buildTelegramPackage,
     libraryKey: (workspaceId = storage.readWorkspaceId()) => `negis_content_studio_videos::${workspaceId}`,
     photoSuggestions() {
       assert.ok(lifetime, "photo suggestions must receive actual wrapper-computed session props");
@@ -4869,3 +4885,384 @@ test("G5C13 a live selector mismatch releases its own spinner and permits a fres
     assert.equal(fixture.state.Loading, null); assert.equal(fixture.toasts.filter((toast) => toast.kind === "success").length, 1);
   } finally { paused.resume(); await paused.work; fixture.lifetime!.unmount(); }
 });
+
+type LocalTelegramKind = "test" | "send";
+function invokeLibraryTelegram(captured: LocalLibrary, kind: LocalTelegramKind) {
+  return kind === "test" ? captured.callbacks.testTelegram() : captured.callbacks.sendTelegram();
+}
+function telegramStatusReceipt(fixture: LocalHandoffFixture) {
+  const canonical = { ...LOCAL_LIBRARY_ROW_A, status: "telegram_ready", caption: "Canonical Telegram status receipt" };
+  fixture.libraryReplies.patch = { success: true, mode: "supabase", data: { video: canonical } };
+  return canonical;
+}
+async function pauseLibraryTelegram(fixture: LocalHandoffFixture, kind: LocalTelegramKind, phase: "token" | "body" | "response" | "patch-body") {
+  const token = phase === "token" ? fixture.deferToken("library-telegram") : undefined;
+  const body = phase === "body" || phase === "patch-body" ? fixture.deferBody(phase === "patch-body" ? "library-patch" : "library-telegram") : undefined;
+  const response = phase === "response" ? fixture.deferResponse("library-telegram") : undefined;
+  const captured = fixture.library(), work = invokeLibraryTelegram(captured, kind);
+  const resume = (value?: unknown) => { token?.resolve(); response?.resolve();
+    body?.resolve(JSON.stringify(value ?? (phase === "patch-body" ? fixture.libraryReplies.patch : fixture.telegramReplies[kind]))); };
+  try {
+    await flushLocalVideoWork();
+    assert.equal(fixture.dispatches.length, phase === "token" ? 0 : phase === "patch-body" ? 2 : 1, "reach the actual Telegram transport/body or status-PATCH wait");
+    if (token) await token.started; else if (response) await response.started; else await fixture.bodyStarted.promise;
+    return { captured, work, resume };
+  } catch (error) { resume(); await work; throw error; }
+}
+
+const TELEGRAM_STALE_CASES = [
+  { kind: "test", phase: "token", boundary: "account" }, { kind: "test", phase: "body", boundary: "workspace" },
+  { kind: "test", phase: "body", boundary: "form-ABA" }, { kind: "test", phase: "body", boundary: "unmount" },
+  { kind: "send", phase: "token", boundary: "workspace" }, { kind: "send", phase: "body", boundary: "account" },
+  { kind: "send", phase: "body", boundary: "session-ABA" }, { kind: "send", phase: "body", boundary: "form-ABA" },
+  { kind: "send", phase: "body", boundary: "selection-ABA" }, { kind: "send", phase: "response", boundary: "unmount" },
+  { kind: "send", phase: "patch-body", boundary: "account" }, { kind: "send", phase: "patch-body", boundary: "workspace" },
+] as const;
+for (const { kind, phase, boundary } of TELEGRAM_STALE_CASES) {
+  test(`G5C14 ${kind} ${phase} has no late request, library/cache or notice effects after ${boundary}`, { timeout: 5000 }, async () => {
+    const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE);
+    fixture.seedLibrary([LOCAL_LIBRARY_ROW_A, LOCAL_LIBRARY_ROW_B], LOCAL_LIBRARY_ROW_A.id); telegramStatusReceipt(fixture);
+    const paused = await pauseLibraryTelegram(fixture, kind, phase), controller = paused.captured.session.sessionRef.current!;
+    try {
+      if (boundary === "account" || boundary === "session-ABA") fixture.sdkSession("actor-b");
+      if (boundary === "session-ABA") { fixture.lifetime!.render(); fixture.sdkSession("actor-a"); fixture.lifetime!.render(); }
+      if (boundary === "workspace") { fixture.workspace(HANDOFF_WORKSPACE_B); fixture.state.Loading = "avatar"; }
+      if (boundary === "unmount") fixture.lifetime!.unmount();
+      if (boundary === "form-ABA") { paused.captured.callbacks.editTitle("Temporary Telegram form B"); fixture.library().callbacks.editTitle(LOCAL_LIBRARY_FORM.title); }
+      if (boundary === "selection-ABA") { paused.captured.callbacks.select(LOCAL_LIBRARY_ROW_B.id); fixture.library().callbacks.select(LOCAL_LIBRARY_ROW_A.id); }
+      const before = libraryState(fixture), writes = fixture.writes.length, mutations = fixture.mutations.length;
+      const requests = fixture.dispatches.length, toasts = fixture.toasts.length;
+      paused.resume(); await paused.work;
+      assert.deepEqual(libraryState(fixture), before); assert.deepEqual(fixture.mutations.slice(mutations), []);
+      assert.deepEqual(fixture.writes.slice(writes).filter((write) => controller.signal.aborted || write.field !== "Loading"), []);
+      assert.deepEqual(fixture.toasts.slice(toasts), []); assert.equal(fixture.dispatches.length, requests);
+      assert.equal(fixture.localStorage.getItem(fixture.libraryKey(HANDOFF_WORKSPACE_B)), null);
+      if (boundary === "workspace") assert.equal(fixture.state.Loading, "avatar");
+    } finally { paused.resume(); await paused.work; fixture.lifetime!.unmount(); }
+  });
+}
+
+for (const kind of ["test", "send"] as const) {
+  test(`G5C14 retained ${kind} callback refuses its obsolete form or selection before POST`, async () => {
+    const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE);
+    fixture.seedLibrary([LOCAL_LIBRARY_ROW_A, LOCAL_LIBRARY_ROW_B], LOCAL_LIBRARY_ROW_A.id); const captured = fixture.library();
+    try {
+      if (kind === "test") { captured.callbacks.editTitle("Temporary Telegram form B"); fixture.library().callbacks.editTitle(LOCAL_LIBRARY_FORM.title); }
+      else { captured.callbacks.select(LOCAL_LIBRARY_ROW_B.id); fixture.library().callbacks.select(LOCAL_LIBRARY_ROW_A.id); }
+      const before = libraryState(fixture), writes = fixture.writes.length, mutations = fixture.mutations.length;
+      await invokeLibraryTelegram(captured, kind); assert.deepEqual(fixture.dispatches, []); assert.deepEqual(libraryState(fixture), before);
+      assert.deepEqual(fixture.writes.slice(writes), []); assert.deepEqual(fixture.mutations.slice(mutations), []); assert.deepEqual(fixture.toasts, []);
+    } finally { fixture.lifetime!.unmount(); }
+  });
+
+  test(`G5C14 same-actor refresh ${kind} binds the original actor, workspace, signal and exact payload`, { timeout: 5000 }, async () => {
+    const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE);
+    fixture.seedLibrary(kind === "test" ? [] : [LOCAL_LIBRARY_ROW_A, LOCAL_LIBRARY_ROW_B], kind === "test" ? "" : LOCAL_LIBRARY_ROW_A.id);
+    const canonical = telegramStatusReceipt(fixture), before = libraryState(fixture), paused = await pauseLibraryTelegram(fixture, kind, "token");
+    try {
+      fixture.sdkSession("actor-a", "fixture-token-telegram-refreshed", "TOKEN_REFRESHED");
+      assert.equal(fixture.library().key, paused.captured.key); paused.resume(); await paused.work;
+      assert.equal(fixture.dispatches.length, kind === "test" ? 1 : 2);
+      const call = fixture.dispatches[0]; assert.equal(call.url, `/api/content-studio/send-telegram?workspaceId=${REAL_DEMO_TEST_WORKSPACE}`);
+      assert.equal(call.method, "POST"); assert.deepEqual(call.body, kind === "test" ? { test: true } : LOCAL_LIBRARY_ROW_A);
+      for (let index = 0; index < fixture.dispatches.length; index++) {
+        assert.equal(fixture.dispatches[index].headers.get("Authorization"), "Bearer fixture-token-telegram-refreshed");
+        assert.equal(fixture.dispatches[index].signal, paused.captured.session.sessionRef.current!.signal);
+        assert.equal(fixture.libraryRequests[index].init.expectedUserId, "actor-a"); assert.equal(typeof fixture.libraryRequests[index].init.dispatchGuard, "function");
+      }
+      if (kind === "test") { assert.deepEqual(libraryState(fixture), before); assert.equal(fixture.localStorage.getItem(fixture.libraryKey()), null); }
+      else {
+        assert.equal(fixture.dispatches[1].method, "PATCH"); assert.equal(fixture.dispatches[1].url, `/api/crm/content-videos?workspaceId=${REAL_DEMO_TEST_WORKSPACE}`);
+        assert.deepEqual(fixture.dispatches[1].body, { id: LOCAL_LIBRARY_ROW_A.id, status: "telegram_ready" });
+        assert.deepEqual(JSON.parse(JSON.stringify(libraryRows(fixture))), [LOCAL_LIBRARY_ROW_B, canonical]);
+        assert.deepEqual(JSON.parse(fixture.localStorage.getItem(fixture.libraryKey())!), [LOCAL_LIBRARY_ROW_B, canonical]);
+        assert.equal(fixture.state.ActiveId, LOCAL_LIBRARY_ROW_A.id); assert.match(String(fixture.state.Notice), /2/);
+      }
+      assert.equal(fixture.state.Loading, null); assert.equal(fixture.toasts.filter((toast) => toast.kind === "success").length, 1);
+    } finally { paused.resume(); await paused.work; fixture.lifetime!.unmount(); }
+  });
+}
+
+for (const { kind, phase } of [{ kind: "test", phase: "token" }, { kind: "send", phase: "body" }, { kind: "send", phase: "patch-body" }] as const) {
+  test(`G5C14 ${kind} ${phase} owns the mutex against Telegram, create, generation and PATCH duplicates`, { timeout: 5000 }, async () => {
+    const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE); fixture.seedLibrary([LOCAL_LIBRARY_ROW_A]); telegramStatusReceipt(fixture);
+    const paused = await pauseLibraryTelegram(fixture, kind, phase);
+    const duplicate = [paused.captured.callbacks.testTelegram(), paused.captured.callbacks.sendTelegram(), paused.captured.callbacks.create(),
+      paused.captured.callbacks.script(), paused.captured.callbacks.prompt("avatar"), Promise.resolve(paused.captured.callbacks.update(LOCAL_LIBRARY_PATCH))];
+    const count = phase === "token" ? 0 : phase === "patch-body" ? 2 : 1;
+    try {
+      await flushLocalVideoWork(); assert.equal(fixture.dispatches.length, count);
+      paused.resume(); await Promise.all([paused.work, ...duplicate]); assert.equal(fixture.dispatches.length, kind === "test" ? 1 : 2);
+      assert.equal(fixture.toasts.filter((toast) => toast.kind === "success").length, 1);
+    } finally { paused.resume(); await Promise.all([paused.work, ...duplicate]); fixture.lifetime!.unmount(); }
+  });
+}
+
+for (const kind of ["test", "send"] as const) {
+  for (const status of [401, 403] as const) {
+    test(`G5C14 ${kind} ${status} denies before an unreadable body and never writes status or fallback`, async () => {
+      const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE); fixture.seedLibrary([LOCAL_LIBRARY_ROW_A]);
+      fixture.handoffStatuses["library-telegram"] = status; fixture.handoffBodyFailures.add("library-telegram");
+      const captured = fixture.library(), before = libraryState(fixture), mutations = fixture.mutations.length;
+      try {
+        await invokeLibraryTelegram(captured, kind); assert.equal(fixture.dispatches.length, 1); assert.equal(fixture.packageBodyReads.includes("library-telegram"), false);
+        assert.deepEqual(libraryState(fixture), before); assert.deepEqual(fixture.mutations.slice(mutations), []); assert.ok(fixture.state.Notice);
+        assert.equal(fixture.toasts.some((toast) => toast.kind === "success" || toast.kind === "warning"), false);
+      } finally { fixture.lifetime!.unmount(); }
+    });
+  }
+}
+
+test("G5C14 structured Telegram transport 403 stays denied after fresh same-actor auth succeeds", async () => {
+  const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE); fixture.seedLibrary([LOCAL_LIBRARY_ROW_A]);
+  fixture.handoffTransportFailures["library-telegram"] = 403; const before = libraryState(fixture);
+  try {
+    await fixture.library().callbacks.sendTelegram(); assert.equal(fixture.dispatches.length, 1); assert.deepEqual(libraryState(fixture), before);
+    assert.equal(fixture.localStorage.getItem(fixture.libraryKey()), null); assert.ok(fixture.state.Notice);
+    assert.equal(fixture.toasts.some((toast) => toast.kind === "success" || toast.kind === "warning"), false);
+  } finally { fixture.lifetime!.unmount(); }
+});
+
+const TELEGRAM_INVALID_RESPONSES: { name: string; kind: LocalTelegramKind; mode?: string; data: unknown }[] = [
+  { name: "null data", kind: "test", data: null },
+  { name: "nonboolean sent", kind: "send", data: { sent: "true", test: false, parts: 1 } },
+  { name: "nonstring package", kind: "send", data: { sent: true, packageText: {}, test: false, parts: 1 } },
+  { name: "mismatched test flag", kind: "test", data: { ...LOCAL_TELEGRAM_DELIVERY, test: false } },
+  { name: "zero parts", kind: "send", data: { sent: true, test: false, parts: 0 } },
+  { name: "fractional parts", kind: "test", data: { ...LOCAL_TELEGRAM_DELIVERY, test: true, parts: 1.5 } },
+  { name: "sent in demo mode", kind: "send", mode: "demo", data: { sent: true, test: false, parts: 1 } },
+  { name: "unsent in telegram mode", kind: "test", data: { ...LOCAL_TELEGRAM_DELIVERY, sent: false, test: true, parts: undefined } },
+  { name: "unknown mode", kind: "send", mode: "mock", data: { sent: true, test: false, parts: 1 } },
+  { name: "wrong package echo", kind: "send", data: { ...LOCAL_TELEGRAM_DELIVERY, test: false } },
+  { name: "unsent with parts", kind: "send", mode: "demo", data: { sent: false, test: false, parts: 1 } },
+];
+for (const { name, kind, mode, data } of TELEGRAM_INVALID_RESPONSES) {
+  test(`G5C14 ${kind} rejects ${name} without PATCH, status mutation, cache or success`, async () => {
+    const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE); fixture.seedLibrary([LOCAL_LIBRARY_ROW_A]);
+    const payload = data && typeof data === "object" ? { packageText: fixture.buildTelegramPackage(LOCAL_LIBRARY_ROW_A), ...data } : data;
+    fixture.telegramReplies[kind] = { success: true, mode: mode ?? "telegram", data: payload };
+    const captured = fixture.library(), before = libraryState(fixture), mutations = fixture.mutations.length;
+    try {
+      await invokeLibraryTelegram(captured, kind); assert.equal(fixture.dispatches.length, 1);
+      assert.deepEqual(libraryState(fixture), before); assert.deepEqual(fixture.mutations.slice(mutations), []); assert.ok(fixture.state.Notice);
+      assert.equal(fixture.toasts.some((toast) => toast.kind === "success"), false);
+    } finally { fixture.lifetime!.unmount(); }
+  });
+}
+
+for (const kind of ["test", "send"] as const) {
+  test(`G5C14 ${kind} sent=false is copy-ready warning only and never writes telegram_ready`, async () => {
+    const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE); fixture.seedLibrary([LOCAL_LIBRARY_ROW_A]);
+    const warning = "Synthetic Telegram is not connected; package is ready to copy.";
+    fixture.telegramReplies[kind] = { success: true, mode: "demo", warning,
+      data: { sent: false, test: kind === "test", packageText: fixture.buildTelegramPackage(LOCAL_LIBRARY_ROW_A) } };
+    const captured = fixture.library(), before = libraryState(fixture), mutations = fixture.mutations.length;
+    try {
+      await invokeLibraryTelegram(captured, kind); assert.equal(fixture.dispatches.length, 1);
+      assert.deepEqual(libraryState(fixture), before); assert.deepEqual(fixture.mutations.slice(mutations), []);
+      assert.equal(fixture.state.Notice, warning); assert.deepEqual(fixture.toasts, [{ kind: "warning", message: warning }]);
+    } finally { fixture.lifetime!.unmount(); }
+  });
+}
+
+test("G5C14 confirmed test delivery with an active idea never patches or changes its status", async () => {
+  const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE); fixture.seedLibrary([LOCAL_LIBRARY_ROW_A]);
+  const before = libraryState(fixture), mutations = fixture.mutations.length;
+  try {
+    await fixture.library().callbacks.testTelegram(); assert.equal(fixture.dispatches.length, 1); assert.deepEqual(fixture.dispatches[0].body, { test: true });
+    assert.deepEqual(libraryState(fixture), before); assert.deepEqual(fixture.mutations.slice(mutations), []);
+    assert.equal(fixture.toasts.filter((toast) => toast.kind === "success").length, 1);
+  } finally { fixture.lifetime!.unmount(); }
+});
+
+for (const failure of ["PATCH 403", "PATCH outage", "cache failure", "wrong canonical status"] as const) {
+  test(`G5C14 delivered send with ${failure} preserves delivery proof but warns status is not server-confirmed`, async () => {
+    const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE); fixture.seedLibrary([LOCAL_LIBRARY_ROW_A]);
+    const canonical = telegramStatusReceipt(fixture), before = libraryState(fixture);
+    if (failure === "PATCH 403") { fixture.handoffStatuses["library-patch"] = 403; fixture.handoffBodyFailures.add("library-patch"); }
+    if (failure === "PATCH outage") fixture.handoffTransportFailures["library-patch"] = 500;
+    if (failure === "cache failure") fixture.localStorage.failNextWrite(fixture.libraryKey());
+    if (failure === "wrong canonical status") fixture.libraryReplies.patch = { success: true, mode: "supabase", data: { video: { ...canonical, status: "idea" } } };
+    try {
+      await fixture.library().callbacks.sendTelegram(); assert.equal(fixture.dispatches.length, 2);
+      const notice = String(fixture.state.Notice); assert.match(notice, /Telegram.*подтвердил.*отправ/i); assert.match(notice, /статус.*не подтвержд/i);
+      assert.doesNotMatch(notice, /не удалось отправить|сообщение не отправлено/i);
+      assert.equal(fixture.toasts.filter((toast) => toast.kind === "warning").length, 1); assert.equal(fixture.toasts.some((toast) => toast.kind === "success" || toast.kind === "error"), false);
+      if (failure === "PATCH 403" || failure === "cache failure") { assert.deepEqual(libraryState(fixture), before); assert.equal(fixture.localStorage.getItem(fixture.libraryKey()), null); }
+      if (failure === "PATCH 403") assert.equal(fixture.packageBodyReads.includes("library-patch"), false);
+      if (failure === "PATCH outage") assert.equal(libraryRows(fixture)[0].status, "telegram_ready");
+      assert.equal(fixture.dispatches.filter((call) => call.url.includes("send-telegram")).length, 1, "never repeat delivery just to recover its status write");
+    } finally { fixture.lifetime!.unmount(); }
+  });
+}
+
+test("G5C14 a malformed optional warning cannot erase strict delivery proof or fabricate full success", async () => {
+  const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE); fixture.seedLibrary([LOCAL_LIBRARY_ROW_A]);
+  fixture.telegramReplies.send = { success: true, mode: "telegram", warning: {},
+    data: { ...LOCAL_TELEGRAM_DELIVERY, test: false, packageText: fixture.buildTelegramPackage(LOCAL_LIBRARY_ROW_A) } };
+  const before = libraryState(fixture), mutations = fixture.mutations.length;
+  try {
+    await fixture.library().callbacks.sendTelegram(); assert.equal(fixture.dispatches.length, 1);
+    assert.deepEqual(libraryState(fixture), before); assert.deepEqual(fixture.mutations.slice(mutations), []);
+    assert.match(String(fixture.state.Notice), /Telegram.*подтвердил.*отправ/i);
+    assert.doesNotMatch(String(fixture.state.Notice), /часть сообщения могла|не удалось отправить/i);
+    assert.equal(fixture.toasts.filter((toast) => toast.kind === "warning").length, 1); assert.equal(fixture.toasts.some((toast) => toast.kind === "success" || toast.kind === "error"), false);
+  } finally { fixture.lifetime!.unmount(); }
+});
+
+for (const { kind, failure } of [{ kind: "test", failure: "HTTP" }, { kind: "send", failure: "network" }] as const) {
+  test(`G5C14 current ${kind} ${failure} failure warns to check Telegram before retrying`, async () => {
+    const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE); fixture.seedLibrary([LOCAL_LIBRARY_ROW_A]);
+    if (failure === "HTTP") { fixture.handoffStatuses["library-telegram"] = 502; fixture.telegramReplies.test = { success: false, error: "Synthetic upstream failure" }; }
+    else fixture.handoffTransportFailures["library-telegram"] = 502;
+    const before = libraryState(fixture), mutations = fixture.mutations.length;
+    try {
+      await invokeLibraryTelegram(fixture.library(), kind); assert.equal(fixture.dispatches.length, 1);
+      assert.deepEqual(libraryState(fixture), before); assert.deepEqual(fixture.mutations.slice(mutations), []);
+      assert.match(String(fixture.state.Notice), /проверьте Telegram.*перед повтор/i); assert.equal(fixture.toasts.filter((toast) => toast.kind === "error").length, 1);
+      assert.equal(fixture.toasts.some((toast) => toast.kind === "success"), false);
+    } finally { fixture.lifetime!.unmount(); }
+  });
+}
+
+for (const kind of ["test", "send"] as const) {
+  test(`G5C14 late ${kind} error body remains silent after the original scope expires`, { timeout: 5000 }, async () => {
+    const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE); fixture.seedLibrary([LOCAL_LIBRARY_ROW_A]);
+    const paused = await pauseLibraryTelegram(fixture, kind, "body");
+    try {
+      fixture.sdkSession("actor-b"); const before = libraryState(fixture), writes = fixture.writes.length, mutations = fixture.mutations.length;
+      paused.resume({ success: false, error: "Synthetic late Telegram failure" }); await paused.work;
+      assert.deepEqual(libraryState(fixture), before); assert.deepEqual(fixture.writes.slice(writes), []);
+      assert.deepEqual(fixture.mutations.slice(mutations), []); assert.deepEqual(fixture.toasts, []); assert.equal(fixture.dispatches.length, 1);
+    } finally { paused.resume(); await paused.work; fixture.lifetime!.unmount(); }
+  });
+}
+
+test("G5C14 send without an idea refuses before Telegram POST or any status mutation", async () => {
+  const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE); fixture.seedLibrary([]);
+  try {
+    await fixture.library().callbacks.sendTelegram(); assert.deepEqual(fixture.dispatches, []); assert.equal(libraryRows(fixture).length, 0);
+    assert.ok(fixture.state.Notice); assert.equal(fixture.localStorage.getItem(fixture.libraryKey()), null);
+    assert.equal(fixture.toasts.some((toast) => toast.kind === "success"), false);
+  } finally { fixture.lifetime!.unmount(); }
+});
+
+for (const { kind, mode } of [{ kind: "test", mode: "throw" }, { kind: "send", mode: "error" }] as const) {
+  test(`G5C14 ${kind} fresh SDK ${mode} stops before external transport and frees the mutex for retry`, async () => {
+    const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE); fixture.seedLibrary([LOCAL_LIBRARY_ROW_A]); telegramStatusReceipt(fixture);
+    const before = libraryState(fixture); fixture.sdkFailure(mode);
+    try {
+      await invokeLibraryTelegram(fixture.library(), kind); assert.deepEqual(fixture.dispatches, []); assert.deepEqual(libraryState(fixture), before);
+      fixture.sdkFailure(); await invokeLibraryTelegram(fixture.library(), kind); assert.equal(fixture.dispatches.length, kind === "test" ? 1 : 2);
+      assert.equal(fixture.toasts.filter((toast) => toast.kind === "success").length, 1);
+    } finally { fixture.sdkFailure(); fixture.lifetime!.unmount(); }
+  });
+}
+
+for (const kind of ["test", "send"] as const) {
+  test(`G5C14 explicit local demo ${kind} never sends, checks auth or changes the local idea status`, async () => {
+    const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE);
+    fixture.workspace("demo-local-a"); fixture.auth({ user: null, isDemoMode: true });
+    fixture.seedLibrary([{ ...LOCAL_LIBRARY_ROW_A, id: "content-local-telegram" }]); const captured = fixture.library();
+    const before = libraryState(fixture), mutations = fixture.mutations.length;
+    try {
+      assert.equal(captured.session.localDraftsOnly, true); await invokeLibraryTelegram(captured, kind);
+      assert.deepEqual(fixture.dispatches, []); assert.deepEqual(fixture.libraryRequests, []); assert.deepEqual(fixture.uploads, []); assert.equal(fixture.sdkReads.total, 0);
+      assert.deepEqual(libraryState(fixture), before); assert.deepEqual(fixture.mutations.slice(mutations), []);
+      assert.match(String(fixture.state.Notice), /не отправ|не подключ/i); assert.equal(fixture.toasts.filter((toast) => toast.kind === "warning").length, 1);
+      assert.equal(fixture.toasts.some((toast) => toast.kind === "success"), false);
+    } finally { fixture.lifetime!.unmount(); }
+  });
+}
+
+test("G5C14 no-op input preserves a pending Telegram send and its canonical status commit", { timeout: 5000 }, async () => {
+  const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE); fixture.seedLibrary([LOCAL_LIBRARY_ROW_A]);
+  const canonical = telegramStatusReceipt(fixture), paused = await pauseLibraryTelegram(fixture, "send", "body");
+  try {
+    paused.captured.callbacks.editTitle(LOCAL_LIBRARY_FORM.title); paused.captured.callbacks.select(LOCAL_LIBRARY_ROW_A.id);
+    paused.resume(); await paused.work; assert.equal(fixture.dispatches.length, 2);
+    assert.deepEqual(JSON.parse(JSON.stringify(libraryRows(fixture))), [canonical]); assert.equal(fixture.toasts.filter((toast) => toast.kind === "success").length, 1);
+  } finally { paused.resume(); await paused.work; fixture.lifetime!.unmount(); }
+});
+
+test("G5C14 a live selector mismatch clears only its own Telegram spinner and allows a fresh restored-scope send", { timeout: 5000 }, async () => {
+  const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE); fixture.seedLibrary([LOCAL_LIBRARY_ROW_A]);
+  const canonical = telegramStatusReceipt(fixture), paused = await pauseLibraryTelegram(fixture, "send", "body");
+  try {
+    assert.equal(fixture.state.Loading, "telegram"); fixture.workspace(HANDOFF_WORKSPACE_B); const before = libraryState(fixture), mutations = fixture.mutations.length;
+    paused.resume(); await paused.work; assert.equal(fixture.state.Loading, null); assert.deepEqual(libraryState(fixture), before);
+    assert.deepEqual(fixture.mutations.slice(mutations), []); assert.deepEqual(fixture.toasts, []); assert.equal(fixture.dispatches.length, 1);
+    fixture.workspace(REAL_DEMO_TEST_WORKSPACE); const fresh = fixture.library(); assert.equal(fresh.key, paused.captured.key);
+    await fresh.callbacks.sendTelegram(); assert.equal(fixture.dispatches.length, 3);
+    assert.deepEqual(JSON.parse(JSON.stringify(libraryRows(fixture))), [canonical]); assert.equal(fixture.state.Loading, null);
+  } finally { paused.resume(); await paused.work; fixture.lifetime!.unmount(); }
+});
+
+type LocalTelegramUpstream = {
+  sendTelegramMessage(input: { token: string; chatId: string; text: string;
+    safeFetch: (url: string | URL, init?: { method?: string; headers?: Record<string, string>; body?: string }) => Promise<{ ok: boolean; status: number; text: () => Promise<string> }>;
+  }): Promise<{ success: boolean; status: number; telegramDescription?: string; telegramErrorCode?: number; hint?: string }>;
+};
+const LOCAL_TELEGRAM_MESSAGE = { message_id: 17, date: 0, chat: { id: 12345 }, text: "Synthetic message: Қазақша, русский, plain text." };
+async function actualTelegramUpstream(raw: string, status = 200) {
+  const programs = await generationCallbackPrograms, api = evaluateGenerationFixture<LocalTelegramUpstream>(programs.telegramApi, {});
+  const calls: { url: string; init?: { method?: string; headers?: Record<string, string>; body?: string } }[] = [];
+  let bodyReads = 0;
+  const input = { token: "synthetic-not-a-bot-token", chatId: "synthetic-platform-destination", text: LOCAL_TELEGRAM_MESSAGE.text,
+    callerChatId: "synthetic-untrusted-caller", payload: { chatId: "synthetic-untrusted-caller", chat_id: "synthetic-untrusted-caller" },
+    async safeFetch(url: string | URL, init?: { method?: string; headers?: Record<string, string>; body?: string }) {
+      calls.push({ url: String(url), init });
+      return { ok: status >= 200 && status < 300, status, text: async () => { bodyReads++; return raw; } };
+    },
+  };
+  const result = await api.sendTelegramMessage(input);
+  assert.equal(calls.length, 1); assert.equal(bodyReads, 1);
+  assert.equal(calls[0].url, "https://api.telegram.org/botsynthetic-not-a-bot-token/sendMessage"); assert.equal(calls[0].init?.method, "POST");
+  assert.deepEqual({ ...calls[0].init?.headers }, { "Content-Type": "application/json" });
+  assert.deepEqual(JSON.parse(calls[0].init!.body!), { chat_id: input.chatId, text: input.text }, "the actual helper forwards only the platform destination and plain text");
+  return result;
+}
+
+const TELEGRAM_INVALID_UPSTREAM_ACKS: { name: string; raw: string }[] = [
+  { name: "empty 200", raw: "" }, { name: "non-JSON 200", raw: "<html>Synthetic proxy response</html>" },
+  { name: "null body", raw: "null" }, { name: "array body", raw: "[]" },
+  { name: "missing ok", raw: JSON.stringify({ result: LOCAL_TELEGRAM_MESSAGE }) },
+  { name: "ok false", raw: JSON.stringify({ ok: false, result: LOCAL_TELEGRAM_MESSAGE }) },
+  { name: "string true", raw: JSON.stringify({ ok: "true", result: LOCAL_TELEGRAM_MESSAGE }) },
+  { name: "missing Message", raw: JSON.stringify({ ok: true }) },
+  { name: "array Message", raw: JSON.stringify({ ok: true, result: [] }) },
+  { name: "zero message ID", raw: JSON.stringify({ ok: true, result: { ...LOCAL_TELEGRAM_MESSAGE, message_id: 0 } }) },
+  { name: "unsafe message ID", raw: JSON.stringify({ ok: true, result: { ...LOCAL_TELEGRAM_MESSAGE, message_id: Number.MAX_SAFE_INTEGER + 1 } }) },
+  { name: "negative date", raw: JSON.stringify({ ok: true, result: { ...LOCAL_TELEGRAM_MESSAGE, date: -1 } }) },
+  { name: "fractional date", raw: JSON.stringify({ ok: true, result: { ...LOCAL_TELEGRAM_MESSAGE, date: 1.5 } }) },
+  { name: "array chat", raw: JSON.stringify({ ok: true, result: { ...LOCAL_TELEGRAM_MESSAGE, chat: [] } }) },
+  { name: "zero chat ID", raw: JSON.stringify({ ok: true, result: { ...LOCAL_TELEGRAM_MESSAGE, chat: { id: 0 } } }) },
+  { name: "unsafe chat ID", raw: JSON.stringify({ ok: true, result: { ...LOCAL_TELEGRAM_MESSAGE, chat: { id: Number.MAX_SAFE_INTEGER + 1 } } }) },
+  { name: "nonstring message text", raw: JSON.stringify({ ok: true, result: { ...LOCAL_TELEGRAM_MESSAGE, text: {} } }) },
+  { name: "blank message text", raw: JSON.stringify({ ok: true, result: { ...LOCAL_TELEGRAM_MESSAGE, text: "  " } }) },
+];
+for (const { name, raw } of TELEGRAM_INVALID_UPSTREAM_ACKS) {
+  test(`G5C14 upstream ${name} cannot acknowledge delivery`, async () => {
+    const result = await actualTelegramUpstream(raw);
+    assert.equal(result.success, false); assert.equal(result.status, 200);
+    assert.equal(typeof result.telegramDescription, "string"); assert.ok(result.telegramDescription); assert.ok(result.hint);
+  });
+}
+
+for (const chatId of [12345, -1007654321]) {
+  test(`G5C14 upstream valid ${chatId > 0 ? "private" : "group"} Message acknowledges Unicode plain-text delivery`, async () => {
+    const result = await actualTelegramUpstream(JSON.stringify({ ok: true, result: { ...LOCAL_TELEGRAM_MESSAGE, chat: { id: chatId } } }));
+    assert.deepEqual(JSON.parse(JSON.stringify(result)), { success: true, status: 200 });
+  });
+}
+
+for (const { status, description, expectedHint } of [
+  { status: 401, description: "Unauthorized", expectedHint: /TELEGRAM_BOT_TOKEN/ },
+  { status: 400, description: "Bad Request: chat not found", expectedHint: /TELEGRAM_CHAT_ID.*\/start/ },
+]) {
+  test(`G5C14 upstream HTTP ${status} preserves the actual Telegram error and actionable hint`, async () => {
+    const result = await actualTelegramUpstream(JSON.stringify({ ok: false, error_code: status, description }), status);
+    assert.equal(result.success, false); assert.equal(result.status, status); assert.equal(result.telegramErrorCode, status);
+    assert.equal(result.telegramDescription, description); assert.match(result.hint!, expectedHint);
+  });
+}
