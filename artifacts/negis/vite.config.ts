@@ -304,6 +304,7 @@ export default defineConfig(async () => ({
         manualChunks(id: string) {
           if (!id.includes("node_modules")) return;
           if (/[\\/]node_modules[\\/](react|react-dom|scheduler)[\\/]/.test(id)) return "vendor-react";
+          if (/[\\/]node_modules[\\/](framer-motion|motion-dom|motion-utils)[\\/]/.test(id)) return "vendor-motion";
           if (id.includes("@supabase")) return "vendor-supabase";
           if (id.includes("recharts") || id.includes("d3-")) return "vendor-charts";
           if (id.includes("react-hook-form") || id.includes("zod") || id.includes("@hookform")) return "vendor-forms";

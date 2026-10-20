@@ -38,7 +38,10 @@ function evaluate(input: string, imports: Record<string, unknown>, bindings: Rec
 function render(value: any): any {
   if (Array.isArray(value)) return value.map(render);
   if (!value || typeof value !== "object") return value;
-  if (typeof value.type === "function") return render(value.type(value.props));
+  if (typeof value.type === "function") {
+    const output = value.type(value.props);
+    return render(output?.props && value.key !== undefined ? { ...output, key: value.key } : output);
+  }
   return { ...value, props: { ...value.props, children: render(value.props.children) } };
 }
 
@@ -121,9 +124,21 @@ function freeze<T>(value: T): T {
   return value;
 }
 
-function fixture(role = "owner", initialData: any = snapshot()) {
+function fixture(role = "owner", initialData: any = snapshot(), initialReducedMotion: boolean | null = false, server = false) {
   let now = frozenNow, cursor = 0, dirty = false, current = true, refreshes = 0, intervalId = 0;
+  let reducedMotion = initialReducedMotion;
   const slots: any[] = [], pending: Array<() => void> = [], writes: string[] = [];
+  const motionQuery = "(prefers-reduced-motion: reduce)";
+  type MediaListener = (event: { type: "change"; matches: boolean; media: string }) => void;
+  type MediaRegistration = { target: unknown; listener: MediaListener };
+  const media = { listeners: new Set<MediaListener>(), added: [] as MediaRegistration[], removed: [] as MediaRegistration[], queries: [] as string[] };
+  const motionNodes: Node[] = [];
+  const motionProps = new Set(["initial", "animate", "exit", "whileHover", "whileTap", "transition", "layout", "layoutId"]);
+  // Capture TSX motion inputs separately from host output; this does not simulate animation or exit retention.
+  const motion = Object.fromEntries(["div", "ul", "span"].map((type) => [type, (props: Node["props"]) => {
+    motionNodes.push({ type, props });
+    return jsx(type, Object.fromEntries(Object.entries(props).filter(([name]) => !motionProps.has(name))));
+  }]));
   const intervals = new Map<number, { callback: () => void; delay: number }>();
   class FixtureDate extends Date {
     constructor(value?: string | number | Date) { super(value === undefined ? now : value instanceof Date ? value.getTime() : value); }
@@ -142,12 +157,31 @@ function fixture(role = "owner", initialData: any = snapshot()) {
       super(locales, { timeZone: "UTC", ...options });
     }
   }
-  const bindings = { Date: FixtureDate, Intl: new Proxy(Intl, {
-    get(target, key) { return key === "DateTimeFormat" ? FixtureDateTimeFormat : Reflect.get(target, key); },
-  }), window: {
+  const fixtureWindow = {
     setInterval(callback: () => void, delay: number) { const id = ++intervalId; intervals.set(id, { callback, delay }); return id; },
     clearInterval(id: number) { intervals.delete(id); },
-  } };
+    matchMedia(query: string) {
+      assert.equal(query, motionQuery);
+      media.queries.push(query);
+      return {
+        media: query,
+        get matches() { return reducedMotion === true; },
+        addEventListener(type: string, listener: MediaListener) {
+          assert.equal(type, "change");
+          media.added.push({ target: this, listener });
+          media.listeners.add(listener);
+        },
+        removeEventListener(type: string, listener: MediaListener) {
+          assert.equal(type, "change");
+          media.removed.push({ target: this, listener });
+          media.listeners.delete(listener);
+        },
+      };
+    },
+  };
+  const bindings = { Date: FixtureDate, Intl: new Proxy(Intl, {
+    get(target, key) { return key === "DateTimeFormat" ? FixtureDateTimeFormat : Reflect.get(target, key); },
+  }), ...(server ? {} : { window: fixtureWindow }) };
   const sameDeps = (a?: unknown[], b?: unknown[]) => Boolean(a && b && a.length === b.length && a.every((value, i) => Object.is(value, b[i])));
   const hooks = {
     useState(initial: any) {
@@ -160,8 +194,30 @@ function fixture(role = "owner", initialData: any = snapshot()) {
     },
     useEffect(create: () => any, deps?: unknown[]) {
       const index = cursor++, previous = slots[index];
+      if (server) return;
       if (!previous || !sameDeps(previous.deps, deps)) pending.push(() => { previous?.cleanup?.(); slots[index].cleanup = create(); });
       slots[index] = { deps, cleanup: previous?.cleanup };
+    },
+    // Model snapshots and subscription lifetime, not React concurrency or hydration.
+    useSyncExternalStore(subscribe: (listener: () => void) => () => void, getSnapshot: () => unknown, getServerSnapshot: () => unknown) {
+      const index = cursor++;
+      if (server) return getServerSnapshot();
+      const slot = slots[index] ??= {};
+      slot.getSnapshot = getSnapshot;
+      slot.value = getSnapshot();
+      if (slot.subscribe !== subscribe) {
+        slot.subscribe = subscribe;
+        pending.push(() => {
+          slot.cleanup?.();
+          const notify = () => {
+            const next = slot.getSnapshot();
+            if (!Object.is(next, slot.value)) { slot.value = next; dirty = true; }
+          };
+          slot.cleanup = subscribe(notify);
+          notify();
+        });
+      }
+      return slot.value;
     },
   };
   const auth = { clinicId: "synthetic-workspace", userRole: role,
@@ -177,7 +233,8 @@ function fixture(role = "owner", initialData: any = snapshot()) {
   const day = evaluate(daySource, {}, bindings);
   const phone = evaluate(phoneSource, {}, bindings);
   const module = evaluate(`${overviewSource}\nexports.fixture = { MortgageOverviewBody, OverviewActivity };`, {
-    react: hooks, wouter: router, "@/components/layout/PageLayout": { PageLayout: "FixturePageLayout" },
+    react: hooks, wouter: router, "framer-motion": { motion },
+    "@/components/layout/PageLayout": { PageLayout: "FixturePageLayout" },
     "@/contexts/AuthContext": { useAuth: () => auth }, "@/lib/phone": phone, "@/lib/clinicDay": day,
     "@/lib/mortgage-workspace": { MortgageScope: "FixtureMortgageScope", useMortgageWorkspace: () => workspace },
     "@/components/mortgage/MortgagePrimitives": primitives,
@@ -185,14 +242,21 @@ function fixture(role = "owner", initialData: any = snapshot()) {
   const paint = () => {
     let output: any;
     for (let pass = 0; pass < 20; pass++) {
-      dirty = false; cursor = 0;
+      dirty = false; cursor = 0; motionNodes.length = 0;
       output = render(module.fixture.MortgageOverviewBody());
       for (const effect of pending.splice(0)) effect();
       if (!dirty) return output;
     }
     throw new Error("Overview fixture did not settle");
   };
-  return { auth, workspace, module, paint, writes, intervals, refreshes: () => refreshes,
+  return { auth, workspace, module, paint, writes, intervals, motionNodes, media, refreshes: () => refreshes, needsPaint: () => dirty,
+    setReducedMotion(value: boolean | null) {
+      const previous = reducedMotion === true;
+      reducedMotion = value;
+      if (previous !== (value === true)) {
+        for (const listener of [...media.listeners]) listener({ type: "change", matches: value === true, media: motionQuery });
+      }
+    },
     revoke() { current = false; },
     tick(instant: number) { now = instant; for (const { callback } of intervals.values()) callback(); return paint(); },
     dispose() { for (const slot of slots) slot?.cleanup?.(); },
@@ -206,6 +270,210 @@ test("overview retains the page and mortgage-scope wrapper without bootstrapping
   assert.equal(tree.props.children.props.children.type, f.module.fixture.MortgageOverviewBody);
   assert.deepEqual(f.writes, []);
   f.dispose();
+});
+
+for (const reducedMotion of [false, true]) test(`motion props respect reduced-motion=${reducedMotion} without delaying counts or agenda rows`, () => {
+  const data = snapshot(), f = fixture("owner", data, reducedMotion);
+  let tree = f.paint();
+  const metrics = find(tree, (node) => node.type === "dl" && node.props["aria-label"] === "Показатели рабочего пространства");
+  assert.deepEqual(nodes(metrics).filter((node) => node.type === "dd").map((node) => compact(text(node))),
+    [data.metrics.totalLeads, data.metrics.inProgressLeads, data.metrics.meetingsToday, data.metrics.overdueTasks].map(countText));
+  assert.equal(rows(section(tree, "mortgage-overview-contacts")).length, 1);
+  const team = section(tree, "mortgage-team-load");
+  assert.equal(rows(team).length, data.memberMetrics.length);
+  for (const member of data.memberMetrics) {
+    const row = find(team, (node) => node.type === "li" && text(node).includes(member.name));
+    assert.equal(compact(text(find(row, (node) => node.type === "strong"))), countText(member.assignedLeads));
+  }
+  const metricMotion = f.motionNodes.filter((node) => nodes(node).some((child) => child.type === "dt"));
+  assert.equal(metricMotion.length, 4);
+  for (const node of metricMotion) {
+    assert.equal(node.type, "div");
+    assert.equal(node.props.initial, false);
+    assert.equal(node.props.animate, undefined);
+    assert.equal(node.props.transition.duration, reducedMotion ? 0 : 0.16);
+    if (reducedMotion) {
+      assert.equal(node.props.whileHover, undefined);
+      assert.equal(node.props.whileTap, undefined);
+    } else {
+      assert.deepEqual({ ...node.props.whileHover }, { y: -2 });
+      assert.deepEqual({ ...node.props.whileTap }, { scale: 0.99 });
+    }
+  }
+  const bars = f.motionNodes.filter((node) => node.props.animate?.scaleX !== undefined);
+  assert.equal(bars.length, data.memberMetrics.length);
+  const maxLoad = Math.max(1, ...data.memberMetrics.map((member) => member.assignedLeads));
+  for (const [index, bar] of bars.entries()) {
+    assert.equal(bar.type, "div");
+    assert.equal(text(bar), "");
+    assert.ok(bar.props.style?.transformOrigin === "left" || String(bar.props.className).split(/\s+/).includes("origin-left"),
+      "Scale decorative loads from the left edge");
+    assert.deepEqual({ ...bar.props.animate }, { scaleX: data.memberMetrics[index].assignedLeads / maxLoad });
+    if (reducedMotion) assert.equal(bar.props.initial, false);
+    else assert.deepEqual({ ...bar.props.initial }, { scaleX: 0 });
+    assert.equal(bar.props.transition.duration, reducedMotion ? 0 : 0.24);
+    assert.ok(nodes(team).some((node) => node.props["aria-hidden"] === "true" && nodes(node).some((child) =>
+      child.type === "div" && child.props.className === bar.props.className && text(child) === "")),
+      "Load bars remain decorative; visible counts are ordinary text");
+  }
+  let layoutId: unknown;
+  for (const selected of ["tasks", "meetings", "tasks"] as const) {
+    button(tree, selected === "meetings" ? "Встречи" : "Задачи").props.onClick();
+    tree = f.paint();
+    const agenda = expectAgenda(tree, selected);
+    const list = find(agenda, (node) => node.type === "ul");
+    assert.equal(list.key, selected);
+    assert.equal(rows(list).length, 1);
+    assert.match(text(list), new RegExp(selected === "meetings" ? activity().title : task().title));
+    assert.doesNotMatch(text(agenda), new RegExp(selected === "meetings" ? task().title : activity().title));
+    const lists = f.motionNodes.filter((node) => node.type === "ul");
+    assert.equal(lists.length, 1);
+    if (reducedMotion) assert.equal(lists[0].props.initial, false);
+    else assert.deepEqual({ ...lists[0].props.initial }, { opacity: 0, y: 4 });
+    assert.deepEqual({ ...lists[0].props.animate }, { opacity: 1, y: 0 });
+    assert.equal(lists[0].props.transition.duration, reducedMotion ? 0 : 0.18);
+    const underlines = f.motionNodes.filter((node) => node.type === "span" && node.props.layoutId);
+    assert.equal(underlines.length, 1);
+    const underline = underlines[0];
+    assert.equal(typeof underline.props.layoutId, "string");
+    layoutId ??= underline.props.layoutId;
+    assert.equal(underline.props.layoutId, layoutId);
+    assert.equal(underline.props["aria-hidden"], "true");
+    assert.equal(text(underline), "");
+    assert.equal(underline.props.transition.duration, reducedMotion ? 0 : 0.18);
+    assert.equal(nodes(button(agenda, selected === "meetings" ? "Встречи" : "Задачи")).filter((node) =>
+      node.type === "span" && node.props["aria-hidden"] === "true" && text(node) === "").length, 1);
+    assert.equal(f.motionNodes.length, 8, "Only four metric hosts, one agenda list, one underline and two decorative bars use motion");
+    for (const node of f.motionNodes) assert.equal(node.props.exit, undefined);
+    for (const node of nodes(tree)) {
+      for (const prop of ["initial", "animate", "exit", "whileHover", "whileTap", "transition", "layout", "layoutId"]) {
+        assert.ok(!Object.hasOwn(node.props, prop), `Do not leak motion prop ${prop} into the host fixture`);
+      }
+    }
+  }
+  assert.doesNotMatch(overviewSource, /\bAnimatePresence\b/, "The VM cannot model retained exits; overview must not introduce a presence wrapper");
+  assert.deepEqual(f.writes, []);
+  f.dispose();
+});
+
+test("the same mounted overview follows motion preference changes and treats a null preference as normal motion", () => {
+  const f = fixture();
+  let tree = f.paint();
+  button(tree, "Встречи").props.onClick();
+  tree = f.paint();
+  const originalText = text(tree);
+  for (const preference of [true, false, null] as const) {
+    f.setReducedMotion(preference);
+    assert.equal(f.needsPaint(), preference !== null, "A changed media match requests a render through the real subscription");
+    tree = f.paint();
+    assert.equal(text(tree), originalText);
+    expectAgenda(tree, "meetings");
+    assert.equal(rows(section(tree, "mortgage-agenda")).length, 1);
+    assert.equal(f.motionNodes.length, 8);
+    for (const node of f.motionNodes) {
+      assert.equal(node.props.transition.duration === 0, preference === true);
+      if (preference === true) {
+        assert.equal(node.props.whileHover, undefined);
+        assert.equal(node.props.whileTap, undefined);
+        if (node.type !== "span") assert.equal(node.props.initial, false);
+      }
+    }
+  }
+  assert.equal(f.refreshes(), 0);
+  assert.deepEqual(f.writes, []);
+  f.dispose();
+});
+
+test("reduced-motion subscriptions reuse one listener across renders and remove that exact listener on disposal", () => {
+  const f = fixture();
+  f.paint();
+  assert.equal(f.media.added.length, 1);
+  assert.equal(f.media.listeners.size, 1);
+  const registration = f.media.added[0];
+  for (const preference of [true, false, true]) {
+    f.setReducedMotion(preference);
+    assert.equal(f.needsPaint(), true);
+    const tree = f.paint();
+    button(tree, preference ? "Встречи" : "Задачи").props.onClick();
+    f.paint();
+    f.tick(frozenNow + 60_000);
+    assert.equal(f.media.added.length, 1, "Stable subscribe identity must not resubscribe on preference, agenda or clock renders");
+    assert.equal(f.media.removed.length, 0);
+    assert.deepEqual([...f.media.listeners], [registration.listener]);
+  }
+  f.setReducedMotion(true);
+  assert.equal(f.needsPaint(), false, "An unchanged media match must not schedule a render");
+  f.workspace.loading = true;
+  f.paint();
+  assert.equal(f.media.listeners.size, 1, "The page subscription outlives temporarily hidden snapshot content");
+  f.dispose();
+  assert.equal(f.media.listeners.size, 0);
+  assert.equal(f.media.removed.length, 1);
+  assert.equal(f.media.removed[0].listener, registration.listener);
+  assert.equal(f.media.removed[0].target, registration.target);
+  assert.equal(f.intervals.size, 0);
+  f.setReducedMotion(false);
+  assert.equal(f.needsPaint(), false, "A disposed page must not receive media-query changes");
+  assert.deepEqual(f.writes, []);
+});
+
+test("the server snapshot disables motion without reading window or subscribing to media changes", () => {
+  const data = snapshot(), f = fixture("owner", data, false, true), tree = f.paint();
+  assert.equal(rows(expectAgenda(tree, "tasks")).length, 1);
+  assert.equal(rows(section(tree, "mortgage-team-load")).length, data.memberMetrics.length);
+  const metrics = find(tree, (node) => node.type === "dl" && node.props["aria-label"] === "Показатели рабочего пространства");
+  assert.deepEqual(nodes(metrics).filter((node) => node.type === "dd").map((node) => compact(text(node))),
+    [data.metrics.totalLeads, data.metrics.inProgressLeads, data.metrics.meetingsToday, data.metrics.overdueTasks].map(countText));
+  assert.equal(f.motionNodes.length, 8);
+  for (const node of f.motionNodes) {
+    assert.equal(node.props.initial, false);
+    assert.equal(node.props.transition.duration, 0);
+    assert.equal(node.props.whileHover, undefined);
+    assert.equal(node.props.whileTap, undefined);
+  }
+  assert.deepEqual(f.media.queries, []);
+  assert.deepEqual(f.media.added, []);
+  assert.equal(f.intervals.size, 0);
+  assert.deepEqual(f.writes, []);
+  f.dispose();
+});
+
+test("actual manualChunks isolates motion packages across module layouts without changing other vendor groups", async () => {
+  const source = await readFile(path.join(root, "artifacts/negis/vite.config.ts"), "utf8");
+  const ast = ts.createSourceFile("vite.config.ts", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const methods: import("typescript").MethodDeclaration[] = [];
+  const visit = (node: import("typescript").Node) => {
+    if (ts.isMethodDeclaration(node) && (ts.isIdentifier(node.name) || ts.isStringLiteral(node.name)) && node.name.text === "manualChunks") methods.push(node);
+    ts.forEachChild(node, visit);
+  };
+  visit(ast);
+  assert.equal(methods.length, 1, "Locate the unique actual manualChunks method, never execute the Vite config");
+  const code = ts.transpileModule(`({ ${methods[0].getText(ast)} }).manualChunks;`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None },
+  }).outputText;
+  const manualChunks = new Script(code).runInNewContext({}, { timeout: 1000 }) as (id: string) => string | undefined;
+  const cases = [
+    ["framer-motion", "vendor-motion"], ["motion-dom", "vendor-motion"], ["motion-utils", "vendor-motion"],
+    ["react", "vendor-react"], ["react-dom", "vendor-react"], ["scheduler", "vendor-react"],
+    ["@supabase/supabase-js", "vendor-supabase"], ["@supabase/auth-js", "vendor-supabase"],
+    ["react-hook-form", "vendor-forms"], ["@hookform/resolvers", "vendor-forms"], ["zod", "vendor-forms"],
+    ["recharts", "vendor-charts"], ["d3-scale", "vendor-charts"], ["lucide-react", "vendor"], ["wouter", "vendor"],
+    ["react-is", "vendor"], ["framer-motion-extra", "vendor"], ["motion-dom-extra", "vendor"], ["motion-utils-extra", "vendor"],
+    ["my-framer-motion", "vendor"], ["@fixture/framer-motion", "vendor"], ["fixture/motion-dom", "vendor"],
+  ] as const;
+  for (const separator of ["/", "\\"]) {
+    for (const layout of ["normal", "pnpm"]) {
+      for (const [name, expected] of cases) {
+        const nested = layout === "pnpm" ? `.pnpm/${name.replaceAll("/", "+")}@0.0.0/node_modules/` : "";
+        const id = `${separator === "\\" ? "C:" : ""}/fixture/node_modules/${nested}${name}/dist/index.js`.replaceAll("/", separator);
+        assert.equal(manualChunks(id), expected, `${layout}: ${id}`);
+      }
+    }
+    for (const app of ["src/pages/MortgageOverview.tsx", "src/framer-motion/index.ts", "src/motion-utils/index.ts"]) {
+      assert.equal(manualChunks(`/fixture/${app}`.replaceAll("/", separator)), undefined);
+    }
+    assert.equal(manualChunks("/fixture/not_node_modules/framer-motion/index.js".replaceAll("/", separator)), "vendor");
+  }
 });
 
 for (const role of ["owner", "admin"]) test(`${role} sees actual team loads, unassigned contacts and analytics links`, () => {
@@ -259,6 +527,7 @@ for (const state of ["loading", "error", "stale", "missing-workspace", "missing-
   test(`${state} hides previously loaded names, phones, activities and all snapshot counts`, () => {
     const data = snapshot(), f = fixture("owner", data);
     assert.match(text(f.paint()), /Synthetic unassigned client/);
+    assert.equal(f.motionNodes.length, 8, "Begin with the actual motion-enabled overview mounted");
     if (state === "loading") f.workspace.loading = true;
     if (state === "error") f.workspace.error = "Synthetic local read failure";
     if (state === "stale") f.revoke();
@@ -275,6 +544,7 @@ for (const state of ["loading", "error", "stale", "missing-workspace", "missing-
     }
     assert.equal(nodes(tree).filter((node) => node.type === "dl").length, 0);
     assert.equal(rows(tree).length, 0);
+    assert.equal(f.motionNodes.length, 0, `${state} must synchronously remove every snapshot motion host`);
     assert.ok(nodes(tree).some((node) => ["status", "alert"].includes(node.props.role)));
     if (state === "loading" || state === "stale") assert.equal(button(tree, "Обновить обзор").props.disabled, true);
     assert.deepEqual(f.writes, []);
@@ -297,6 +567,7 @@ test("refresh and retry call the workspace refresh while revoked handlers and ag
   f.revoke(); oldRefresh.props.onClick(); oldTasks.props.onClick();
   await Promise.resolve(); assert.equal(f.refreshes(), 2);
   assert.equal(rows(f.paint()).length, 0);
+  assert.equal(f.motionNodes.length, 0, "Revocation must not retain motion hosts after invoking old handlers");
   assert.equal(JSON.stringify(f.workspace.data), original);
   assert.deepEqual(f.writes, []);
   f.dispose(); assert.equal(f.intervals.size, 0);

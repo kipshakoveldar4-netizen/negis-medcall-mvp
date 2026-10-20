@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useSyncExternalStore, type CSSProperties } from "react";
+import { motion } from "framer-motion";
 import { AlarmClock, ArrowDownLeft, ArrowUpRight, BarChart3, CalendarDays, Check, CheckSquare, ChevronRight, Clock3, Inbox, ListFilter, RefreshCw, Users, type LucideIcon } from "lucide-react";
 import { Link } from "wouter";
 import { PageLayout } from "@/components/layout/PageLayout";
@@ -16,9 +17,20 @@ export default function MortgageOverview() {
   return <PageLayout><MortgageScope><MortgageOverviewBody /></MortgageScope></PageLayout>;
 }
 
+const reducedMotionQuery = "(prefers-reduced-motion: reduce)";
+const readReducedMotion = () => window.matchMedia(reducedMotionQuery).matches;
+const serverReducedMotion = () => true;
+
+function subscribeReducedMotion(listener: () => void) {
+  const query = window.matchMedia(reducedMotionQuery);
+  query.addEventListener("change", listener);
+  return () => query.removeEventListener("change", listener);
+}
+
 function MortgageOverviewBody() {
   const { clinicId, userRole, availableWorkspaces } = useAuth();
   const workspace = useMortgageWorkspace();
+  const reducedMotion = useSyncExternalStore(subscribeReducedMotion, readReducedMotion, serverReducedMotion);
   const [now, setNow] = useState(Date.now);
   const [agendaSelection, setAgenda] = useState<"meetings" | "tasks" | null>(null);
   useEffect(() => {
@@ -45,7 +57,7 @@ function MortgageOverviewBody() {
   const completedMeetings = memberRows.reduce((sum, member) => sum + member.doneMeetings, 0);
   const dateLabel = data ? new Intl.DateTimeFormat("ru-RU", { timeZone: data.timeZone, weekday: "long", day: "numeric", month: "long" }).format(now) : "";
 
-  return <div className="mx-auto w-full min-w-0 max-w-[1440px] space-y-5 sm:space-y-6" style={{ letterSpacing: 0 }}>
+  return <div className="mx-auto w-full min-w-0 max-w-[1440px] space-y-5 sm:space-y-6" style={{ letterSpacing: 0, "--negis-muted": "#626B78" } as CSSProperties}>
     <header className="flex min-w-0 flex-wrap items-start justify-between gap-4">
       <div className="min-w-0">
         <p className="mb-1.5 text-xs font-medium text-[var(--negis-muted)]">{teamAccess ? "Рабочее пространство команды" : "Мой рабочий день"}</p>
@@ -64,10 +76,10 @@ function MortgageOverviewBody() {
       : !data ? <MortgageState kind="empty">Обзор недоступен.</MortgageState>
       : <>
         <dl className="grid min-w-0 grid-cols-2 gap-3 xl:grid-cols-4" aria-label="Показатели рабочего пространства">
-          <OverviewMetric label={teamAccess ? "Всего заявок" : "Мои заявки"} value={data.metrics.totalLeads} icon={Inbox} href="/leads" tone="neutral" />
-          <OverviewMetric label="В работе" value={data.metrics.inProgressLeads} icon={ListFilter} href="/leads" tone="green" />
-          <OverviewMetric label="Встречи сегодня" value={data.metrics.meetingsToday} icon={CalendarDays} href="/appointments" tone="blue" />
-          <OverviewMetric label="Просроченные задачи" value={data.metrics.overdueTasks} icon={AlarmClock} href="/tasks" tone={data.metrics.overdueTasks ? "red" : "neutral"} />
+          <OverviewMetric reducedMotion={reducedMotion} label={teamAccess ? "Всего заявок" : "Мои заявки"} value={data.metrics.totalLeads} icon={Inbox} href="/leads" tone="neutral" />
+          <OverviewMetric reducedMotion={reducedMotion} label="В работе" value={data.metrics.inProgressLeads} icon={ListFilter} href="/leads" tone="green" />
+          <OverviewMetric reducedMotion={reducedMotion} label="Встречи сегодня" value={data.metrics.meetingsToday} icon={CalendarDays} href="/appointments" tone="blue" />
+          <OverviewMetric reducedMotion={reducedMotion} label="Просроченные задачи" value={data.metrics.overdueTasks} icon={AlarmClock} href="/tasks" tone={data.metrics.overdueTasks ? "red" : "neutral"} />
         </dl>
 
         <div className="flex min-w-0 flex-wrap items-center justify-between gap-x-5 gap-y-2 border-y border-[var(--negis-border)] py-2.5 text-sm">
@@ -90,19 +102,20 @@ function MortgageOverviewBody() {
           {teamAccess && <OverviewContacts contacts={recent} teamAccess total={data.metrics.unassignedLeads} timeZone={data.timeZone} />}
           <section className={`min-w-0 ${teamAccess ? "border-t border-[var(--negis-border)] pt-5 xl:border-l xl:border-t-0 xl:pl-6 xl:pt-0" : ""}`} aria-labelledby="mortgage-agenda">
             <div className="flex flex-wrap items-center justify-between gap-3 pb-4">
-              <h2 id="mortgage-agenda" className="text-base font-semibold">Ближайшие дела</h2>
+              <h2 id="mortgage-agenda" className="inline-flex items-center gap-2 text-base font-semibold"><CalendarDays size={17} className="shrink-0 text-[var(--negis-muted)]" aria-hidden="true" />Ближайшие дела</h2>
               <Link href={agenda === "meetings" ? "/appointments" : "/tasks"} className="inline-flex items-center gap-1 text-xs font-medium text-[var(--negis-primary)] hover:underline">{agenda === "meetings" ? "Календарь" : "Все задачи"}<ArrowUpRight size={14} aria-hidden="true" /></Link>
             </div>
             <div role="group" aria-label="Вид ближайших дел" className="mb-1 flex gap-5 border-b border-[var(--negis-border)]">
               {([{ key: "meetings", label: "Встречи", icon: CalendarDays }, { key: "tasks", label: "Задачи", icon: CheckSquare }] as const).map(({ key, label, icon: Icon }) =>
                 <button key={key} type="button" aria-pressed={agenda === key} onClick={() => { if (workspace.isCurrent()) setAgenda(key); }}
-                  className={`inline-flex min-h-11 items-center gap-2 border-b-2 px-1 text-sm font-medium focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--negis-primary)] ${agenda === key ? "border-[var(--negis-primary)] text-[var(--negis-primary)]" : "border-transparent text-[var(--negis-muted)]"}`}>
+                  className={`relative inline-flex min-h-11 items-center gap-2 border-b-2 border-transparent px-1 text-sm font-medium transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--negis-primary)] motion-reduce:transition-none ${agenda === key ? "text-[var(--negis-primary)]" : "text-[var(--negis-muted)] hover:text-[var(--negis-text)]"}`}>
                   <Icon size={15} aria-hidden="true" />{label}{key === "tasks" && data.metrics.overdueTasks > 0 && <span className="rounded-sm bg-red-50 px-1.5 py-0.5 text-[11px] font-semibold tabular-nums text-red-700" aria-label={`Просрочено: ${data.metrics.overdueTasks}`}>{data.metrics.overdueTasks.toLocaleString("ru-RU")}</span>}
+                  {agenda === key && <motion.span layoutId="mortgage-overview-agenda-active" initial={false} aria-hidden="true" className="pointer-events-none absolute inset-x-0 -bottom-0.5 h-0.5 bg-[var(--negis-primary)]" transition={{ duration: reducedMotion ? 0 : 0.18, ease: "easeOut" }} />}
                 </button>)}
             </div>
-            {(agenda === "meetings" ? meetings : tasks).length ? <ul className="divide-y divide-[var(--negis-border)]">
+            {(agenda === "meetings" ? meetings : tasks).length ? <motion.ul key={agenda} initial={reducedMotion ? false : { opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: reducedMotion ? 0 : 0.18, ease: "easeOut" }} className="divide-y divide-[var(--negis-border)]">
               {(agenda === "meetings" ? meetings : tasks).map((activity) => <OverviewActivity key={activity.id} activity={activity} timeZone={data.timeZone} now={now} />)}
-            </ul> : <div className="flex min-h-44 flex-col items-center justify-center gap-2 py-8 text-center text-[var(--negis-muted)]" role="status">
+            </motion.ul> : <div className="flex min-h-44 flex-col items-center justify-center gap-2 py-8 text-center text-[var(--negis-muted)]" role="status">
               {agenda === "meetings" ? <CalendarDays size={24} strokeWidth={1.5} aria-hidden="true" /> : <CheckSquare size={24} strokeWidth={1.5} aria-hidden="true" />}
               <p className="text-sm font-medium">{agenda === "meetings" ? "В выборке нет ближайших встреч" : "В выборке нет открытых задач"}</p>
               <Link href={agenda === "meetings" ? "/appointments" : "/tasks"} className="text-xs text-[var(--negis-primary)] hover:underline">{agenda === "meetings" ? "Открыть календарь" : "Открыть задачи"}</Link>
@@ -119,7 +132,7 @@ function MortgageOverviewBody() {
 
         {teamAccess ? <section className="min-w-0 border-t border-[var(--negis-border)] pt-5" aria-labelledby="mortgage-team-load">
             <div className="mb-1 flex flex-wrap items-center justify-between gap-3">
-              <h2 id="mortgage-team-load" className="text-base font-semibold">Нагрузка команды</h2>
+              <h2 id="mortgage-team-load" className="inline-flex items-center gap-2 text-base font-semibold"><Users size={17} className="shrink-0 text-[var(--negis-muted)]" aria-hidden="true" />Нагрузка команды</h2>
               <Link href="/analytics" className="inline-flex items-center gap-1 text-xs font-medium text-[var(--negis-primary)] hover:underline">Аналитика<ArrowUpRight size={14} aria-hidden="true" /></Link>
             </div>
             <p className="mb-4 text-xs text-[var(--negis-muted)]">Назначенные заявки · сейчас</p>
@@ -127,7 +140,7 @@ function MortgageOverviewBody() {
               <span aria-hidden="true" className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-xs font-semibold ${index % 2 ? "bg-blue-50 text-blue-700" : "bg-emerald-50 text-emerald-800"}`}>{initials(member.name)}</span>
               <div className="min-w-0 flex-1">
                 <div className="flex min-w-0 items-start justify-between gap-2 text-sm"><span className="min-w-0 break-words font-medium">{member.name || "Без имени"}</span><strong className="shrink-0 font-semibold tabular-nums">{member.assignedLeads.toLocaleString("ru-RU")}</strong></div>
-                <div className="mb-1.5 mt-1 h-1.5 overflow-hidden rounded-sm bg-[var(--negis-border)]" aria-hidden="true"><div className={`h-full rounded-sm ${index % 2 ? "bg-blue-500" : "bg-emerald-500"}`} style={{ width: `${member.assignedLeads / maxLoad * 100}%` }} /></div>
+                <div className="mb-1.5 mt-1.5 h-1.5 overflow-hidden rounded-sm bg-[var(--negis-border)]" aria-hidden="true"><motion.div initial={reducedMotion ? false : { scaleX: 0 }} animate={{ scaleX: member.assignedLeads / maxLoad }} transition={{ duration: reducedMotion ? 0 : 0.24, ease: "easeOut" }} className={`h-full w-full origin-left rounded-sm ${index % 2 ? "bg-blue-500" : "bg-emerald-500"}`} /></div>
                 <p className="break-words text-xs text-[var(--negis-muted)]">Задач: {member.openTasks} · Плановых встреч: {member.plannedMeetings}{Boolean(member.overdueTasks) && <span className="text-red-700"> · Просрочено: {member.overdueTasks}</span>}</p>
               </div>
             </li>)}</ul> : <MortgageState kind="empty">Нет данных по сотрудникам.</MortgageState>}
@@ -144,27 +157,27 @@ function initials(name: string) {
   return name.trim().split(/\s+/).slice(0, 2).map((part) => Array.from(part)[0]).join("").toLocaleUpperCase("ru-RU") || "?";
 }
 
-function OverviewMetric({ label, value, icon: Icon, href, tone }: { label: string; value: number; icon: LucideIcon; href: string; tone: "neutral" | "green" | "blue" | "red" }) {
+function OverviewMetric({ label, value, icon: Icon, href, tone, reducedMotion }: { label: string; value: number; icon: LucideIcon; href: string; tone: "neutral" | "green" | "blue" | "red"; reducedMotion: boolean }) {
   const colors = { neutral: "bg-[var(--negis-surface-2)] text-[var(--negis-text-2)]", green: "bg-emerald-50 text-emerald-700", blue: "bg-blue-50 text-blue-700", red: "bg-red-50 text-red-700" };
-  return <div className="relative min-w-0 rounded-lg border border-[var(--negis-border)] bg-[var(--negis-surface)] p-3 transition-colors hover:border-[var(--negis-primary)] sm:p-4">
+  return <motion.div initial={false} whileHover={reducedMotion ? undefined : { y: -2 }} whileTap={reducedMotion ? undefined : { scale: 0.99 }} transition={{ duration: reducedMotion ? 0 : 0.16, ease: "easeOut" }} className="relative min-w-0 rounded-lg border border-[var(--negis-border)] bg-[var(--negis-surface)] p-3 transition-colors hover:border-[var(--negis-primary)] hover:shadow-sm focus-within:border-[var(--negis-primary)] motion-reduce:transition-none sm:p-4">
     <dt className="min-h-8 break-words text-xs text-[var(--negis-muted)] sm:min-h-5">{label}</dt>
     <dd className={`mt-1 flex min-w-0 items-center justify-between gap-2 text-2xl font-semibold tabular-nums sm:text-3xl ${tone === "red" ? "text-red-700" : "text-[var(--negis-text)]"}`}><Link href={href} aria-label={`${label}: ${value.toLocaleString("ru-RU")}`} className="min-w-0 break-words after:absolute after:inset-0 after:rounded-lg hover:text-[var(--negis-primary)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--negis-primary)]">{value.toLocaleString("ru-RU")}</Link><span className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-md sm:h-8 sm:w-8 ${colors[tone]}`}><Icon size={17} aria-hidden="true" /></span></dd>
-  </div>;
+  </motion.div>;
 }
 
 function OverviewContacts({ contacts, teamAccess, total, timeZone, className = "" }: {
   contacts: MortgageContact[]; teamAccess: boolean; total: number; timeZone: string; className?: string;
 }) {
   return <section className={`min-w-0 ${className}`} aria-labelledby="mortgage-overview-contacts">
-    <div className="mb-2 flex flex-wrap items-start justify-between gap-3">
-      <div className="min-w-0"><h2 id="mortgage-overview-contacts" className="break-words text-base font-semibold">{teamAccess ? "Заявки без ответственного" : "Последние заявки"}</h2><p className="mt-1 text-xs text-[var(--negis-muted)]">{teamAccess ? `Показано: ${contacts.length} · Всего без ответственного: ${total.toLocaleString("ru-RU")}` : `Показано ${contacts.length} из ${total.toLocaleString("ru-RU")}`}</p></div>
-      <Link href={teamAccess ? "/leads" : "/clients"} className="inline-flex min-h-9 items-center gap-1 text-xs font-medium text-[var(--negis-primary)] hover:underline">{teamAccess ? "Распределить" : "Все клиенты"}<ArrowUpRight size={14} aria-hidden="true" /></Link>
+    <div className="mb-2 grid grid-cols-[minmax(0,1fr)_auto] items-start gap-3">
+      <div className="min-w-0"><h2 id="mortgage-overview-contacts" className="flex items-start gap-2 break-words text-base font-semibold"><Inbox size={17} className="mt-0.5 shrink-0 text-[var(--negis-muted)]" aria-hidden="true" />{teamAccess ? "Заявки без ответственного" : "Последние заявки"}</h2><p className="mt-1 text-xs text-[var(--negis-muted)]">{teamAccess ? `Показано: ${contacts.length} · Всего без ответственного: ${total.toLocaleString("ru-RU")}` : `Показано ${contacts.length} из ${total.toLocaleString("ru-RU")}`}</p></div>
+      <Link href={teamAccess ? "/leads" : "/clients"} aria-label={teamAccess ? "Открыть распределение заявок" : "Все клиенты"} title={teamAccess ? "Открыть распределение заявок" : "Все клиенты"} className="inline-flex min-h-9 items-center gap-1 text-xs font-medium text-[var(--negis-primary)] hover:underline max-sm:h-11 max-sm:w-11 max-sm:justify-center max-sm:rounded-md max-sm:border max-sm:border-[var(--negis-border)] max-sm:hover:bg-[var(--negis-surface)]"><span className="hidden sm:inline">{teamAccess ? "Распределить" : "Все клиенты"}</span><ArrowUpRight size={16} className="shrink-0" aria-hidden="true" /></Link>
     </div>
-    {contacts.length ? <ul className="divide-y divide-[var(--negis-border)]">{contacts.map((contact) => <li key={contact.id} className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-3 gap-y-1.5 py-3.5">
+    {contacts.length ? <ul className="divide-y divide-[var(--negis-border)]">{contacts.map((contact) => <li key={contact.id} className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-3 gap-y-1.5 rounded-md py-3.5 transition-colors hover:bg-[var(--negis-surface)] focus-within:bg-[var(--negis-surface)] motion-reduce:transition-none">
       <Link href={`/clients?leadId=${encodeURIComponent(contact.id)}`} className="min-w-0 break-words text-sm font-medium hover:text-[var(--negis-primary)] hover:underline">{contact.name || "Без имени"}</Link>
       <Link href={`/clients?leadId=${encodeURIComponent(contact.id)}`} aria-label={`Карточка: ${contact.name || "Без имени"}`} className="col-start-2 row-span-2 row-start-1 inline-flex min-h-11 max-w-32 items-center justify-end gap-1 text-xs"><span className={`min-w-0 break-words rounded border px-2 py-1 ${contact.status === "new" ? "border-blue-100 bg-blue-50 text-blue-800" : "border-[var(--negis-border)] text-[var(--negis-muted)]"}`}>{mortgageContactStatus(contact.status)}</span><ChevronRight size={15} className="shrink-0 text-[var(--negis-muted)]" aria-hidden="true" /></Link>
       <div className="col-start-1 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-xs text-[var(--negis-muted)]">
-        {contact.phone ? <a href={toTelHref(contact.phone)} className="inline-flex min-h-6 items-center break-words hover:text-[var(--negis-primary)] hover:underline">{formatPhone(contact.phone)}</a> : <span>Без телефона</span>}
+        {contact.phone ? <a href={toTelHref(contact.phone)} className="inline-flex min-h-11 items-center break-words hover:text-[var(--negis-primary)] hover:underline sm:min-h-6">{formatPhone(contact.phone)}</a> : <span>Без телефона</span>}
         <span>{contact.source === "manual" ? "Вручную" : contact.source === "whatsapp" || contact.source === "wazzup" ? "WhatsApp" : contact.source || "Источник не указан"}</span>
       </div>
       <time dateTime={contact.createdAt} className="col-span-2 hidden text-[11px] text-[var(--negis-muted)] sm:block">{mortgageDate(contact.createdAt, timeZone)}</time>
@@ -178,7 +191,7 @@ function OverviewActivity({ activity, timeZone, now }: { activity: MortgageActiv
   const today = instant && dayKeyInZone(Date.parse(instant), timeZone) === dayKeyInZone(now, timeZone);
   const time = instant ? new Intl.DateTimeFormat("ru-RU", { timeZone, hour: "2-digit", minute: "2-digit" }).format(Date.parse(instant)) : "—";
   const date = instant ? today ? "Сегодня" : new Intl.DateTimeFormat("ru-RU", { timeZone, day: "numeric", month: "short" }).format(Date.parse(instant)) : "Без срока";
-  return <li className="flex min-w-0 items-start gap-3 py-4 sm:gap-4">
+  return <li className="flex min-w-0 items-start gap-3 rounded-md py-4 transition-colors hover:bg-[var(--negis-surface)] focus-within:bg-[var(--negis-surface)] motion-reduce:transition-none sm:gap-4">
     <div className={`w-16 shrink-0 border-r border-[var(--negis-border)] pr-3 sm:w-20 ${overdue ? "text-red-700" : "text-[var(--negis-text)]"}`}><time dateTime={instant || undefined} className="block text-base font-semibold tabular-nums">{time}</time><span className="mt-1 block text-[11px] text-[var(--negis-muted)]">{date}</span></div>
     <div className="min-w-0 flex-1"><Link href={mortgageActivityHref(activity)} className="block break-words text-sm font-semibold hover:text-[var(--negis-primary)] hover:underline">{activity.title}</Link><Link href={`/clients?leadId=${encodeURIComponent(activity.leadId)}`} className="mt-1 block break-words text-xs text-[var(--negis-muted)] hover:text-[var(--negis-primary)] hover:underline">{activity.contactName || "Без имени"}</Link><div className="mt-2 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-xs text-[var(--negis-muted)]">{activity.responsibleName && <span className="break-words">{activity.responsibleName}</span>}{activity.kind === "meeting" && activity.endsAt && <span className="inline-flex items-center gap-1"><Clock3 size={12} aria-hidden="true" />до {new Intl.DateTimeFormat("ru-RU", { timeZone, hour: "2-digit", minute: "2-digit" }).format(Date.parse(activity.endsAt))}</span>}{overdue && <span className="font-medium text-red-700">Просрочено</span>}{activity.kind === "task" && activity.priority === "high" && <span className="text-amber-800">Высокий приоритет</span>}</div></div>
     <Link href={mortgageActivityHref(activity)} aria-label={`Открыть: ${activity.title}`} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-md text-[var(--negis-muted)] hover:bg-[var(--negis-surface-2)] hover:text-[var(--negis-primary)] sm:h-8 sm:w-8"><ChevronRight size={16} aria-hidden="true" /></Link>
