@@ -1014,7 +1014,7 @@ test("GEN38 an ambiguous paid key survives a full reload in workspace-scoped ses
   assert.match(studio, /window\.sessionStorage/);
   assert.match(studio, /workspaceScopedKey\(`\$\{PAID_GENERATION_ATTEMPT_KEY\}:\$\{kind\}`\)/);
   assert.equal((studio.match(/writeBrowserPaidGenerationAttempt\("(?:photo|video)", attempt\)/g) || []).length, 2);
-  assert.equal((studio.match(/clearBrowserPaidGenerationAttempt\("(?:photo|video)"\)/g) || []).length, 2);
+  assert.equal((studio.match(/clearBrowserPaidGenerationAttempt\("(?:photo|video)", attemptKey, attempt\.requestKey\)/g) || []).length, 2);
 
   const photoHandler = studio.slice(studio.indexOf("const generatePhoto"), studio.indexOf("const generateVideo"));
   const videoHandler = studio.slice(studio.indexOf("const generateVideo"), studio.indexOf("/**\n   * Опрос состояния ролика"));
@@ -1027,3 +1027,610 @@ test("GEN38 an ambiguous paid key survives a full reload in workspace-scoped ses
     "the video receipt must persist before the paid request",
   );
 });
+
+type LocalGenerationKind = "photo" | "video";
+type LocalGenerationInit = RequestInit & { expectedUserId?: string; dispatchGuard?: () => boolean };
+type LocalGenerationDispatch = { url: string; method: string; headers: Headers; body: unknown };
+
+function generationDeferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+// Like GEN43, select executable declarations without importing the app, env or SDK.
+// Include the real transport/auth lookup: a stubbed crmFetch would hide the race.
+const generationCallbackPrograms = (async () => {
+  const ts = createRequire(path.join(repoRoot, "package.json"))("typescript") as typeof import("typescript");
+  const select = (source: string, names: string[]) => {
+    const ast = ts.createSourceFile("generation-fixture.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+    return names.map((name) => {
+      const matches: import("typescript").Node[] = [];
+      const visit = (node: import("typescript").Node) => {
+        if (((ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) && node.name?.text === name) ||
+            (ts.isVariableStatement(node) && node.declarationList.declarations.some((item) => item.name.getText(ast) === name))) {
+          matches.push(node);
+        }
+        ts.forEachChild(node, visit);
+      };
+      visit(ast);
+      assert.equal(matches.length, 1, `execute exactly one actual ${name} declaration`);
+      return matches[0].getText(ast);
+    }).join("\n");
+  };
+  const compile = (source: string, names: string[], exposed: string[]) => ts.transpileModule(
+    `${select(source, names)}\nexports.selected = { ${exposed.join(", ")} };`,
+    { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } },
+  ).outputText;
+  const source = await readFile(studioPage, "utf8");
+  const ast = ts.createSourceFile(studioPage, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const child = ast.statements.find((node) => ts.isFunctionDeclaration(node)
+    && node.name?.text === "ContentStudioSession") as import("typescript").FunctionDeclaration | undefined;
+  assert.ok(child?.body, "execute the actual keyed ContentStudioSession lifetime");
+  const lastHelper = child.body.statements.find((node) => ts.isFunctionDeclaration(node)
+    && node.name?.text === "isGenerationSessionCurrent");
+  assert.ok(lastHelper);
+  // Retain the real child prefix, including its layout effect and both guards.
+  // Replace only the unrelated editor/render tail with an observation point.
+  const lifetime = `${select(source, ["ContentStudio"])}\n${source.slice(child.getStart(ast), lastHelper.end)}
+    return { actorId, workspaceId, sessionRef, isSessionAlive, isGenerationSessionCurrent };
+  }\nexports.selected = { ContentStudio };`;
+  return {
+    lifetime: ts.transpileModule(lifetime, { compilerOptions: {
+      target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX,
+    } }).outputText,
+    page: compile(source, [
+      "safeJson", "withWorkspace", "paidGenerationHeaders", "PAID_GENERATION_ATTEMPT_KEY",
+      "paidGenerationAttemptKey", "readBrowserPaidGenerationAttempt", "writeBrowserPaidGenerationAttempt",
+      "clearBrowserPaidGenerationAttempt", "VIDEO_JOB_KEY", "writeStoredVideoJob", "generationRefusalText",
+      "isSessionAlive", "isGenerationSessionCurrent", "refreshGenerationUsage", "generatePhoto", "generateVideo",
+    ], ["generatePhoto", "generateVideo", "refreshGenerationUsage", "paidGenerationAttemptKey", "clearBrowserPaidGenerationAttempt"]),
+    api: compile(await readFile(path.join(repoRoot, "artifacts/negis/src/lib/api.ts"), "utf8"), [
+      "CrmApiError", "resolveAccessToken", "inflightGets", "getCache", "REFERENCE_TTL_MS", "LIST_TTL_MS",
+      "cacheEpoch", "isUncacheable", "ttlFor", "clearCrmCache", "crmFetch",
+    ], ["crmFetch"]),
+    auth: compile(await readFile(path.join(repoRoot, "artifacts/negis/src/lib/serverAuth.ts"), "utf8"),
+      ["getSupabaseAccessToken"], ["getSupabaseAccessToken"]),
+    storage: compile(await readFile(path.join(repoRoot, "artifacts/negis/src/lib/demoStorage.ts"), "utf8"),
+      ["WORKSPACE_SELECTOR_KEY", "readWorkspaceId", "workspaceScopedKey"],
+      ["WORKSPACE_SELECTOR_KEY", "readWorkspaceId", "workspaceScopedKey"]),
+  };
+})();
+
+function evaluateGenerationFixture<T>(code: string, bindings: Record<string, unknown>, imports: Record<string, unknown> = {}): T {
+  const exports: { selected?: T } = {};
+  new Script(code).runInNewContext({
+    exports, Error, DOMException, AbortController, Headers, Response,
+    fetch: () => { throw new Error("Unmocked generation network call"); },
+    ...bindings,
+    require(name: string) {
+      assert.ok(Object.hasOwn(imports, name), `Unmocked generation import: ${name}`);
+      return imports[name];
+    },
+  });
+  return exports.selected!;
+}
+
+type LocalGenerationSession = {
+  actorId: string;
+  workspaceId: string;
+  sessionRef: { current: AbortController | null };
+  isSessionAlive: (session: AbortController | null) => boolean;
+  isGenerationSessionCurrent: (session: AbortController | null) => Promise<boolean>;
+};
+
+function generationLifetime(code: string, bindings: Record<string, unknown>) {
+  type Slot = { value?: unknown; deps?: unknown[]; pending?: boolean; effect?: () => void | (() => void); cleanup?: () => void };
+  type Instance = { slots: Slot[]; cursor: number };
+  type Element = { type: (props: { actorId: string; workspaceId: string }) => LocalGenerationSession;
+    props: { actorId: string; workspaceId: string }; key: string };
+  const wrapper: Instance = { slots: [], cursor: 0 };
+  let child: Instance | undefined, current = wrapper, key: string | undefined;
+  let snapshot: LocalGenerationSession | undefined;
+  const slot = () => current.slots[current.cursor++] ??= {};
+  const dispose = (instance?: Instance) => { instance?.slots.forEach((item) => item.cleanup?.()); };
+  const flushEffects = (instance: Instance) => {
+    for (const item of instance.slots) {
+      if (!item.pending) continue;
+      item.pending = false;
+      item.cleanup?.();
+      item.cleanup = item.effect?.() || undefined;
+    }
+  };
+  const module = evaluateGenerationFixture<{ ContentStudio: () => Element }>(code, {
+    ...bindings,
+    useRef(initial: unknown) {
+      const item = slot();
+      if (!("value" in item)) item.value = { current: initial };
+      return item.value;
+    },
+    useState(initial: unknown) {
+      const item = slot();
+      if (!("value" in item)) item.value = initial;
+      return [item.value, (value: unknown) => {
+        item.value = typeof value === "function" ? (value as (previous: unknown) => unknown)(item.value) : value;
+      }];
+    },
+    useLayoutEffect(effect: Slot["effect"], deps: unknown[]) {
+      const item = slot();
+      if (item.deps && item.deps.length === deps.length && deps.every((value, index) => Object.is(value, item.deps![index]))) return;
+      item.deps = deps; item.effect = effect; item.pending = true;
+    },
+    useLocation: () => ["/content-studio", () => undefined],
+  }, { "react/jsx-runtime": { jsx: (type: Element["type"], props: Element["props"], key: string) => ({ type, props, key }) } });
+  return {
+    render() {
+      current = wrapper; wrapper.cursor = 0;
+      const element = module.ContentStudio();
+      if (!child || key !== element.key) {
+        dispose(child); child = { slots: [], cursor: 0 }; key = element.key;
+      }
+      current = child; child.cursor = 0;
+      snapshot = element.type(element.props);
+      flushEffects(child); flushEffects(wrapper);
+      return { key, session: snapshot };
+    },
+    unmount() { dispose(child); dispose(wrapper); child = undefined; },
+  };
+}
+
+async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime = false) {
+  const programs = await generationCallbackPrograms;
+  const mutations: { storage: string; operation: string; key: string }[] = [];
+  const memoryStorage = (name: string) => {
+    const values = new Map<string, string>();
+    const failedReads: string[] = [];
+    let failReadKey: string | undefined;
+    return {
+      failedReads,
+      failNextRead(key: string) { failReadKey = key; },
+      getItem(key: string) {
+        if (key === failReadKey) {
+          failReadKey = undefined; failedReads.push(key);
+          throw new Error("Synthetic receipt read failure");
+        }
+        return values.get(key) ?? null;
+      },
+      setItem(key: string, value: string) { mutations.push({ storage: name, operation: "set", key }); values.set(key, value); },
+      removeItem(key: string) { mutations.push({ storage: name, operation: "remove", key }); values.delete(key); },
+    };
+  };
+  const localStorage = memoryStorage("local"), sessionStorage = memoryStorage("session");
+  const window = { localStorage, sessionStorage };
+  const storage = evaluateGenerationFixture<{
+    WORKSPACE_SELECTOR_KEY: string;
+    readWorkspaceId: () => string;
+    workspaceScopedKey: (key: string) => string;
+  }>(programs.storage, { window });
+  localStorage.setItem(storage.WORKSPACE_SELECTOR_KEY, "workspace-a");
+  let sdkActor = "actor-a", sdkToken = "fixture-token-a";
+  let authState = { user: { id: "actor-a" }, userRole: "owner", clinicId: "workspace-a", workspacePurpose: "clinic_services",
+    isLoading: false, isSigningOut: false, isDemoMode: false, isImpersonation: false };
+  const subscriptions = new Set<(event: string, session: { user: { id: string } }) => void>();
+  let tokenWait: ReturnType<typeof generationDeferred<void>> | undefined;
+  const tokenStarted = generationDeferred<void>(), bodyStarted = generationDeferred<void>();
+  let delayedBody: ReturnType<typeof generationDeferred<string>> | undefined;
+  let delayedResource: "generation" | "usage" = "generation";
+  const state: Record<string, unknown> = {};
+  const writes: { field: string; value: unknown }[] = [], toasts: { kind: string; message: string }[] = [];
+  const dispatches: LocalGenerationDispatch[] = [];
+  const sdkReads = { total: 0, failed: 0 };
+  let sdkFailure: "throw" | "error" | undefined;
+  const sdk = { auth: {
+    onAuthStateChange(callback: (event: string, session: { user: { id: string } }) => void) {
+      subscriptions.add(callback);
+      return { data: { subscription: { unsubscribe: () => subscriptions.delete(callback) } } };
+    },
+    async getSession() {
+      sdkReads.total++;
+      const pending = tokenWait;
+      tokenWait = undefined;
+      tokenStarted.resolve();
+      if (pending) await pending.promise;
+      if (sdkFailure) sdkReads.failed++;
+      if (sdkFailure === "throw") throw new Error("Synthetic transient SDK failure");
+      return { data: { session: { user: { id: sdkActor }, access_token: sdkToken } },
+        error: sdkFailure === "error" ? new Error("Synthetic transient SDK error") : null };
+    },
+  } };
+  const auth = evaluateGenerationFixture<{ getSupabaseAccessToken: (expected?: string) => Promise<string> }>(programs.auth, {
+    supabase: sdk, hasSupabaseFrontendEnv: true, isSignOutPending: () => false, getSignOutRevision: () => 0,
+  });
+  const result = kind === "photo"
+    ? { creativeUrl: "https://example.invalid/local-a.png", assetId: "asset-a", fileName: "local-a.png",
+      mimeType: "image/png", model: "fixture-image", fileSize: 42 }
+    : { handle: "local-a-signed-handle", status: "queued", progress: 0, formatSubstituted: false };
+  const reply = { success: true, mode: "fixture", data: result };
+  const localResponse = (value: unknown, resource: "generation" | "usage") => {
+    const response = Response.json(value);
+    if (delayedBody && delayedResource === resource) {
+      const pending = delayedBody;
+      delayedBody = undefined;
+      Object.defineProperty(response, "text", { value: () => { bodyStarted.resolve(); return pending.promise; } });
+    }
+    return response;
+  };
+  const api = evaluateGenerationFixture<{ crmFetch: (url: string, init?: LocalGenerationInit) => Promise<Response> }>(programs.api, {
+    apiUrl: (url: string) => url,
+    async fetch(url: string, init: LocalGenerationInit) {
+      const method = init.method || "GET";
+      dispatches.push({ url, method, headers: new Headers(init.headers), body: init.body ? JSON.parse(String(init.body)) : null });
+      if (url === `/api/content-studio/generate-${kind}?workspaceId=workspace-a` && method === "POST") {
+        return localResponse(reply, "generation");
+      }
+      assert.match(url, /^\/api\/content-studio\/usage\?workspaceId=workspace-[ab]$/);
+      assert.equal(method, "GET", "no unlisted paid, auth or follow-up endpoint may dispatch");
+      return localResponse({ success: true, data: { marker: "local-usage" } }, "usage");
+    },
+  }, { "@/lib/serverAuth": auth });
+  const setters = Object.fromEntries([
+    "GenBusy", "GenNotice", "GenImage", "GenVideo", "VideoJob", "GenerationUsage", "GenerationUsageLoading",
+  ].map((field) => [`set${field}`, (value: unknown) => { state[field] = value; writes.push({ field, value }); }]));
+  const lifetime = withLifetime ? generationLifetime(programs.lifetime, {
+    ...storage, ...auth, supabase: sdk, hasSupabaseFrontendEnv: true, useAuth: () => authState,
+  }) : undefined;
+  const mounted = lifetime?.render();
+  const captured = mounted?.session ?? { actorId: "actor-a", workspaceId: "workspace-a", sessionRef: { current: new AbortController() } };
+  const page = evaluateGenerationFixture<{
+    generatePhoto: () => Promise<void>;
+    generateVideo: () => Promise<void>;
+    refreshGenerationUsage: () => Promise<void>;
+    paidGenerationAttemptKey: (kind: LocalGenerationKind) => string;
+    clearBrowserPaidGenerationAttempt: (kind: LocalGenerationKind, key?: string, expectedRequestKey?: string) => void;
+  }>(programs.page, {
+    ...paidGeneration, ...storage, ...setters, ...api, ...auth, window, localStorage,
+    actorId: captured.actorId, workspaceId: captured.workspaceId, sessionRef: captured.sessionRef,
+    genPrompt: "Synthetic clinic room", genFormat: "reels",
+    photoGenerationAttempt: { current: null }, videoGenerationAttempt: { current: null },
+    crypto: { randomUUID: () => "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" },
+    useCallback: (callback: unknown) => callback,
+    toast: {
+      success: (message: string) => toasts.push({ kind: "success", message }),
+      error: (message: string) => toasts.push({ kind: "error", message }),
+    },
+  });
+  return {
+    generate: kind === "photo" ? page.generatePhoto : page.generateVideo,
+    refresh: page.refreshGenerationUsage,
+    clearReceipt: (key: string, expectedRequestKey: string) => page.clearBrowserPaidGenerationAttempt(kind, key, expectedRequestKey),
+    lifetime, mounted, subscriptions, captured, sdkReads,
+    sdkFailure(mode?: "throw" | "error") { sdkFailure = mode; },
+    dispatches, mutations, sessionStorage, state, writes, toasts, reply, tokenStarted, bodyStarted,
+    pendingKey: () => page.paidGenerationAttemptKey(kind),
+    workspace(id: string) { localStorage.setItem(storage.WORKSPACE_SELECTOR_KEY, id); authState = { ...authState, clinicId: id }; },
+    auth(patch: Partial<typeof authState>) { authState = { ...authState, ...patch }; },
+    sdkSession(actor: string, token = "fixture-token-b", event: string | null = "SIGNED_IN") {
+      sdkActor = actor; sdkToken = token;
+      if (event) for (const callback of [...subscriptions]) callback(event, { user: { id: actor } });
+    },
+    deferToken() { tokenWait = generationDeferred<void>(); return tokenWait; },
+    deferBody(resource: "generation" | "usage" = "generation") {
+      delayedResource = resource; delayedBody = generationDeferred<string>(); return delayedBody;
+    },
+  };
+}
+
+for (const kind of ["photo", "video"] as const) {
+  for (const boundary of ["workspace", "account"] as const) {
+    test(`GEN44 ${kind} late A body cannot clear B's receipt or publish after ${boundary} change`, { timeout: 5000 }, async () => {
+      const fixture = await localGenerationCallbacks(kind, boundary === "account"), body = fixture.deferBody();
+      const work = fixture.generate();
+      try {
+        await fixture.bodyStarted.promise;
+        assert.equal(fixture.dispatches.length, 1, "defer the body of an already dispatched A request");
+        assert.equal(fixture.dispatches[0].method, "POST");
+        assert.equal(fixture.dispatches[0].headers.get("Authorization"), "Bearer fixture-token-a");
+        const receiptA = paidGeneration.readStoredPaidGenerationAttempt(fixture.sessionStorage, fixture.pendingKey());
+        assert.ok(receiptA, "A's real callback must persist its paid receipt before dispatch");
+
+        if (boundary === "workspace") fixture.workspace("workspace-b");
+        else fixture.sdkSession("actor-b", "fixture-token-b", null); // No auth event: only the spinner may finish locally.
+        if (boundary === "account") {
+          assert.equal(fixture.lifetime!.render().key, fixture.mounted!.key);
+          assert.equal(fixture.mounted!.session.isSessionAlive(fixture.captured.sessionRef.current), true);
+        }
+        const keyB = fixture.pendingKey();
+        const receiptB = paidGeneration.resolvePaidGenerationAttempt(null,
+          { kind, prompt: "Synthetic B pending retry", format: "reels" },
+          () => "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+        paidGeneration.writeStoredPaidGenerationAttempt(fixture.sessionStorage, keyB, receiptB);
+        const storedB = fixture.sessionStorage.getItem(keyB);
+        assert.ok(storedB);
+        fixture.state.GenBusy = kind;
+        fixture.state.GenNotice = { tone: "info", text: "B pending retry" };
+        const writeStart = fixture.writes.length, toastStart = fixture.toasts.length, mutationStart = fixture.mutations.length;
+        body.resolve(JSON.stringify(fixture.reply));
+        await work;
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        assert.deepEqual({
+          pendingBIntact: fixture.sessionStorage.getItem(keyB) === storedB,
+          mutationsOfB: fixture.mutations.slice(mutationStart).filter((mutation) => mutation.storage === "session" && mutation.key === keyB),
+          stateWrites: fixture.writes.slice(writeStart),
+          toasts: fixture.toasts.slice(toastStart),
+          followups: fixture.dispatches.slice(1).map(({ url, method }) => ({ url, method })),
+        }, { pendingBIntact: true, mutationsOfB: [],
+          stateWrites: boundary === "account" ? [{ field: "GenBusy", value: null }] : [], toasts: [], followups: [] },
+        "stale data, receipt cleanup, toasts and follow-ups are forbidden; only a live local spinner may reset");
+      } finally { body.resolve(JSON.stringify(fixture.reply)); await work; fixture.lifetime?.unmount(); }
+    });
+  }
+
+  test(`GEN45 ${kind} SDK actor change during token lookup dispatches zero POSTs`, { timeout: 5000 }, async () => {
+    const fixture = await localGenerationCallbacks(kind), token = fixture.deferToken();
+    const work = fixture.generate();
+    try {
+      await fixture.tokenStarted.promise;
+      assert.equal(fixture.dispatches.length, 0, "the SDK lookup must still be pending");
+      fixture.sdkSession("actor-b");
+      token.resolve();
+      await work;
+      assert.deepEqual(fixture.dispatches.filter((call) => call.method === "POST").map(({ url, headers }) => ({
+        url, authorization: headers.get("Authorization"),
+      })), [], "A's paid request must never use B's token, even in the same workspace");
+    } finally { token.resolve(); await work; }
+  });
+
+  test(`GEN46 ${kind} same-actor token refresh permits exactly one paid POST`, { timeout: 5000 }, async () => {
+    const fixture = await localGenerationCallbacks(kind), token = fixture.deferToken();
+    const work = fixture.generate();
+    try {
+      await fixture.tokenStarted.promise;
+      assert.equal(fixture.dispatches.length, 0);
+      const receipt = paidGeneration.readStoredPaidGenerationAttempt(fixture.sessionStorage, fixture.pendingKey());
+      assert.ok(receipt);
+      fixture.sdkSession("actor-a", "fixture-token-a-refreshed", "TOKEN_REFRESHED");
+      token.resolve();
+      await work;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      const posts = fixture.dispatches.filter((call) => call.method === "POST");
+      assert.equal(posts.length, 1);
+      assert.equal(posts[0].url, `/api/content-studio/generate-${kind}?workspaceId=workspace-a`);
+      assert.equal(posts[0].headers.get("Authorization"), "Bearer fixture-token-a-refreshed");
+      assert.equal(posts[0].headers.get("X-Idempotency-Key"), receipt.requestKey);
+      assert.deepEqual(posts[0].body, { prompt: "Synthetic clinic room", format: "reels" });
+      assert.equal(fixture.sessionStorage.getItem(fixture.pendingKey()), null);
+      assert.equal(fixture.state.GenBusy, null);
+      assert.equal(fixture.state.GenNotice, null);
+      const { creativeUrl, ...file } = fixture.reply.data;
+      assert.deepEqual(JSON.parse(JSON.stringify(fixture.state[kind === "photo" ? "GenImage" : "VideoJob"])),
+        kind === "photo" ? { ...file, url: creativeUrl } : fixture.reply.data);
+      assert.equal(fixture.toasts.length, kind === "photo" ? 1 : 0);
+      assert.deepEqual(fixture.dispatches.filter((call) => call.method === "GET").map((call) => call.url),
+        ["/api/content-studio/usage?workspaceId=workspace-a"]);
+      assert.equal((fixture.state.GenerationUsage as { marker: string }).marker, "local-usage");
+    } finally { token.resolve(); await work; }
+  });
+
+  for (const boundary of ["workspace", "role", "purpose", "unmount", "account", "A-B-A"] as const) {
+    for (const phase of ["token", "body"] as const) {
+      test(`GEN47 ${kind} actual wrapper invalidates ${phase}-pending work on ${boundary}`, { timeout: 5000 }, async () => {
+        const fixture = await localGenerationCallbacks(kind, true);
+        const lifetime = fixture.lifetime!, mounted = fixture.mounted!, oldSession = mounted.session;
+        const controller = oldSession.sessionRef.current!;
+        assert.equal(fixture.subscriptions.size, 2, "the real wrapper and child must subscribe");
+        assert.equal(oldSession.isSessionAlive(controller), true);
+        const token = phase === "token" ? fixture.deferToken() : undefined;
+        const body = phase === "body" ? fixture.deferBody() : undefined;
+        const work = fixture.generate();
+        try {
+          await (token ? fixture.tokenStarted.promise : fixture.bodyStarted.promise);
+          const dispatchCount = phase === "token" ? 0 : 1;
+          assert.equal(fixture.dispatches.length, dispatchCount);
+          if (boundary === "workspace") fixture.workspace("workspace-b");
+          if (boundary === "role") fixture.auth({ userRole: "admin" });
+          if (boundary === "purpose") fixture.auth({ workspacePurpose: "marketing" });
+          if (boundary === "account") {
+            fixture.sdkSession("actor-b");
+            assert.equal(controller.signal.aborted, true, "an SDK auth event forbids even spinner cleanup");
+          }
+          if (boundary === "A-B-A") {
+            fixture.sdkSession("actor-b");
+            fixture.sdkSession("actor-a", "fixture-token-a-returned");
+            assert.equal(controller.signal.aborted, true, "SDK abort must precede the batched wrapper render");
+          }
+          if (boundary === "unmount") lifetime.unmount();
+          else {
+            const next = lifetime.render();
+            assert.notEqual(next.key, mounted.key, "the actual wrapper key must invalidate this lifetime");
+            assert.notEqual(next.session.sessionRef.current, controller);
+            assert.equal(next.session.isSessionAlive(next.session.sessionRef.current), true);
+          }
+          assert.equal(controller.signal.aborted, true);
+          assert.equal(oldSession.sessionRef.current, null, "the real layout cleanup must release its ref");
+          assert.equal(await oldSession.isGenerationSessionCurrent(controller), false);
+
+          const keyB = fixture.pendingKey();
+          const pendingB = paidGeneration.resolvePaidGenerationAttempt(null,
+            { kind, prompt: "Synthetic new lifetime pending retry", format: "reels" },
+            () => "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+          paidGeneration.writeStoredPaidGenerationAttempt(fixture.sessionStorage, keyB, pendingB);
+          const storedB = fixture.sessionStorage.getItem(keyB);
+          assert.ok(storedB);
+          const writes = fixture.writes.length, mutations = fixture.mutations.length;
+          token?.resolve(); body?.resolve(JSON.stringify(fixture.reply));
+          await work;
+          await fixture.generate();
+          await fixture.refresh(); // A retained callback cannot restart work after cleanup either.
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          assert.equal(fixture.dispatches.length, dispatchCount, "no stale paid POST or follow-up may dispatch");
+          assert.equal(fixture.sessionStorage.getItem(keyB), storedB);
+          assert.deepEqual(fixture.mutations.slice(mutations), []);
+          assert.deepEqual(fixture.writes.slice(writes), [], "stale catch/finally must not write");
+          assert.deepEqual(fixture.toasts, []);
+        } finally {
+          token?.resolve(); body?.resolve(JSON.stringify(fixture.reply)); await work;
+          lifetime.unmount();
+          assert.equal(fixture.subscriptions.size, 0);
+        }
+      });
+    }
+  }
+
+  test(`GEN48 ${kind} actual wrapper preserves its lifetime on same-actor refresh`, { timeout: 5000 }, async () => {
+    const fixture = await localGenerationCallbacks(kind, true), token = fixture.deferToken();
+    const lifetime = fixture.lifetime!, mounted = fixture.mounted!, controller = mounted.session.sessionRef.current!;
+    const work = fixture.generate();
+    try {
+      await fixture.tokenStarted.promise;
+      fixture.sdkSession("actor-a", "fixture-token-a-refreshed", "TOKEN_REFRESHED");
+      const refreshed = lifetime.render();
+      assert.equal(refreshed.key, mounted.key);
+      assert.equal(refreshed.session.sessionRef.current, controller);
+      assert.equal(refreshed.session.isSessionAlive(controller), true);
+      assert.equal(fixture.subscriptions.size, 2);
+      token.resolve(); await work;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      const posts = fixture.dispatches.filter((call) => call.method === "POST");
+      assert.equal(posts.length, 1);
+      assert.equal(posts[0].headers.get("Authorization"), "Bearer fixture-token-a-refreshed");
+      assert.ok(fixture.state[kind === "photo" ? "GenImage" : "VideoJob"]);
+      assert.equal(fixture.state.GenBusy, null);
+      assert.equal(fixture.sessionStorage.getItem(fixture.pendingKey()), null);
+      assert.equal((fixture.state.GenerationUsage as { marker: string }).marker, "local-usage");
+    } finally { token.resolve(); await work; lifetime.unmount(); assert.equal(fixture.subscriptions.size, 0); }
+  });
+
+  test(`GEN49 ${kind} actual cleanup uses the captured key and matches the stored request`, async () => {
+    const fixture = await localGenerationCallbacks(kind);
+    const attempt = (requestKey: string) => paidGeneration.resolvePaidGenerationAttempt(null,
+      { kind, prompt: "Synthetic receipt comparison", format: "reels" }, () => requestKey);
+    const original = attempt("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+    const replacement = attempt("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+    const keyA = fixture.pendingKey();
+    paidGeneration.writeStoredPaidGenerationAttempt(fixture.sessionStorage, keyA, original);
+    paidGeneration.writeStoredPaidGenerationAttempt(fixture.sessionStorage, keyA, replacement);
+    const replacementRaw = fixture.sessionStorage.getItem(keyA);
+    fixture.workspace("workspace-b");
+    const keyB = fixture.pendingKey();
+    paidGeneration.writeStoredPaidGenerationAttempt(fixture.sessionStorage, keyB, replacement);
+    fixture.clearReceipt(keyA, original.requestKey);
+    assert.equal(fixture.sessionStorage.getItem(keyA), replacementRaw, "a replaced same-workspace receipt must survive");
+    assert.equal(fixture.sessionStorage.getItem(keyB), replacementRaw);
+    fixture.clearReceipt(keyA, replacement.requestKey);
+    assert.equal(fixture.sessionStorage.getItem(keyA), null, "a matching receipt is cleared at the captured old key");
+    assert.equal(fixture.sessionStorage.getItem(keyB), replacementRaw, "current workspace must never select the cleanup target");
+    assert.deepEqual(fixture.dispatches, []);
+  });
+}
+
+for (const boundary of ["workspace", "account", "account-event"] as const) {
+  test(`GEN50 actual usage refresh isolates late data and local spinner cleanup after ${boundary} change`, { timeout: 5000 }, async () => {
+    const fixture = await localGenerationCallbacks("photo", boundary !== "workspace"), body = fixture.deferBody("usage");
+    const reply = JSON.stringify({ success: true, data: { marker: "stale-a-usage" } });
+    const work = fixture.refresh();
+    try {
+      await fixture.bodyStarted.promise;
+      assert.equal(fixture.dispatches.length, 1);
+      assert.equal(fixture.dispatches[0].method, "GET");
+      if (boundary === "workspace") fixture.workspace("workspace-b");
+      else fixture.sdkSession("actor-b", "fixture-token-b", boundary === "account-event" ? "SIGNED_IN" : null);
+      if (boundary === "account") {
+        assert.equal(fixture.lifetime!.render().key, fixture.mounted!.key);
+        assert.equal(fixture.mounted!.session.isSessionAlive(fixture.captured.sessionRef.current), true);
+      }
+      fixture.state.GenerationUsage = { marker: "current-b-usage" };
+      fixture.state.GenerationUsageLoading = true;
+      const writes = fixture.writes.length;
+      body.resolve(reply); await work;
+      assert.deepEqual(fixture.writes.slice(writes), boundary === "account"
+        ? [{ field: "GenerationUsageLoading", value: false }] : []);
+      assert.deepEqual(fixture.state.GenerationUsage, { marker: "current-b-usage" });
+      assert.equal(fixture.state.GenerationUsageLoading, boundary !== "account");
+      assert.equal(fixture.dispatches.length, 1);
+      assert.deepEqual(fixture.toasts, []);
+    } finally { body.resolve(reply); await work; fixture.lifetime?.unmount(); }
+  });
+}
+
+for (const kind of ["photo", "video"] as const) {
+  test(`GEN51 ${kind} accepted result survives a throwing receipt comparison read`, { timeout: 5000 }, async () => {
+    const fixture = await localGenerationCallbacks(kind), body = fixture.deferBody();
+    const work = fixture.generate();
+    try {
+      await fixture.bodyStarted.promise;
+      const key = fixture.pendingKey(), stored = fixture.sessionStorage.getItem(key);
+      assert.ok(stored, "the paid receipt must already be persisted");
+      const mutations = fixture.mutations.length;
+      fixture.sessionStorage.failNextRead(key);
+      body.resolve(JSON.stringify(fixture.reply));
+      await work;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.deepEqual(fixture.sessionStorage.failedReads, [key], "exercise the actual cleanup comparison, not the initial receipt write");
+      assert.deepEqual(fixture.mutations.slice(mutations), [], "failed best-effort cleanup must retain the paid receipt");
+      assert.equal(fixture.sessionStorage.getItem(key), stored);
+      const { creativeUrl, ...file } = fixture.reply.data;
+      assert.deepEqual(JSON.parse(JSON.stringify(fixture.state[kind === "photo" ? "GenImage" : "VideoJob"])),
+        kind === "photo" ? { ...file, url: creativeUrl } : fixture.reply.data,
+        "cleanup must not discard the accepted image or signed video handle");
+      assert.equal(fixture.state.GenNotice, null, "a cleanup failure is not a failed paid generation");
+      assert.equal(fixture.state.GenBusy, null);
+      assert.equal(fixture.toasts.length, kind === "photo" ? 1 : 0);
+      assert.deepEqual(fixture.dispatches.map(({ method, url }) => ({ method, url })), [
+        { method: "POST", url: `/api/content-studio/generate-${kind}?workspaceId=workspace-a` },
+        { method: "GET", url: "/api/content-studio/usage?workspaceId=workspace-a" },
+      ]);
+      const retained = paidGeneration.readStoredPaidGenerationAttempt(fixture.sessionStorage, key);
+      assert.ok(retained);
+      const retry = paidGeneration.resolvePaidGenerationAttempt(retained,
+        { kind, prompt: "Synthetic clinic room", format: "reels" },
+        () => { throw new Error("a retained receipt must never allocate a second paid request key"); });
+      assert.equal(retry.requestKey, fixture.dispatches[0].headers.get("X-Idempotency-Key"));
+    } finally { body.resolve(JSON.stringify(fixture.reply)); await work; }
+  });
+}
+
+for (const resource of ["photo", "video", "usage"] as const) {
+  for (const mode of ["throw", "error"] as const) {
+    for (const phase of ["token", "body"] as const) {
+      test(`GEN52 ${resource} ${phase}-pending SDK ${mode} permits only live spinner cleanup`, { timeout: 5000 }, async () => {
+        const fixture = await localGenerationCallbacks(resource === "usage" ? "photo" : resource, true);
+        const token = phase === "token" ? fixture.deferToken() : undefined;
+        const body = phase === "body" ? fixture.deferBody(resource === "usage" ? "usage" : "generation") : undefined;
+        const reply = JSON.stringify(resource === "usage" ? { success: true, data: { marker: "unverified-usage" } } : fixture.reply);
+        const work = resource === "usage" ? fixture.refresh() : fixture.generate();
+        try {
+          await (token ? fixture.tokenStarted.promise : fixture.bodyStarted.promise);
+          const session = fixture.mounted!.session, controller = session.sessionRef.current!;
+          assert.equal(session.isSessionAlive(controller), true);
+          const dispatchCount = phase === "token" ? 0 : 1;
+          assert.equal(fixture.dispatches.length, dispatchCount);
+          const key = fixture.pendingKey(), stored = fixture.sessionStorage.getItem(key);
+          if (resource !== "usage") assert.ok(stored);
+          const previous = { marker: "previous-local-result" };
+          const dataField = resource === "usage" ? "GenerationUsage" : resource === "photo" ? "GenImage" : "VideoJob";
+          fixture.state[dataField] = previous;
+          const writes = fixture.writes.length, mutations = fixture.mutations.length, sdkReads = fixture.sdkReads.total;
+          fixture.sdkFailure(mode);
+          token?.resolve(); body?.resolve(reply);
+          await work;
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          const spinnerField = resource === "usage" ? "GenerationUsageLoading" : "GenBusy";
+          const spinnerValue = resource === "usage" ? false : null;
+          assert.deepEqual(fixture.writes.slice(writes), [{ field: spinnerField, value: spinnerValue }],
+            "a transient SDK failure must release only the current lifetime's spinner");
+          assert.equal(fixture.state[dataField], previous, "unverified data must never publish");
+          assert.equal(fixture.state[spinnerField], spinnerValue);
+          assert.deepEqual(fixture.mutations.slice(mutations), []);
+          assert.equal(fixture.sessionStorage.getItem(key), stored);
+          assert.deepEqual(fixture.toasts, []);
+          assert.equal(fixture.dispatches.length, dispatchCount, "failed validation cannot trigger a follow-up");
+          const validationLookups = resource === "usage" && phase === "token" ? 0 : 1;
+          assert.equal(fixture.sdkReads.total - sdkReads, validationLookups, "finally must not perform another token lookup");
+          assert.equal(fixture.sdkReads.failed, phase === "token" && resource !== "usage" ? 2 : 1);
+          assert.equal(session.isSessionAlive(controller), true, "SDK failure alone does not invalidate the local lifetime");
+
+          fixture.sdkFailure();
+          await fixture.refresh();
+          assert.equal((fixture.state.GenerationUsage as { marker: string }).marker, "local-usage", "the same lifetime recovers after the transient failure");
+          assert.equal(fixture.state.GenerationUsageLoading, false);
+          assert.equal(fixture.dispatches.length, dispatchCount + 1);
+          assert.equal(fixture.dispatches.at(-1)?.method, "GET");
+        } finally {
+          fixture.sdkFailure(); token?.resolve(); body?.resolve(reply); await work;
+          fixture.lifetime!.unmount();
+          assert.equal(fixture.subscriptions.size, 0);
+        }
+      });
+    }
+  }
+}

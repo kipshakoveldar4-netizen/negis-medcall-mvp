@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { useLocation } from "wouter";
 import {
   ArrowRight,
@@ -18,8 +18,10 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { PageLayout } from "@/components/layout/PageLayout";
+import { useAuth } from "@/contexts/AuthContext";
 import { apiUrl, crmFetch } from "@/lib/api";
 import { supabase, hasSupabaseFrontendEnv } from "@/lib/supabase";
+import { getSupabaseAccessToken } from "@/lib/serverAuth";
 import { readWorkspaceId, workspaceScopedKey } from "@/lib/demoStorage";
 import {
   ADVERTISING_CAMPAIGN_PREFILL_KEY,
@@ -622,8 +624,11 @@ function writeBrowserPaidGenerationAttempt(kind: PaidGenerationKind, attempt: Pa
   writeStoredPaidGenerationAttempt(window.sessionStorage, paidGenerationAttemptKey(kind), attempt);
 }
 
-function clearBrowserPaidGenerationAttempt(kind: PaidGenerationKind): void {
-  clearStoredPaidGenerationAttempt(window.sessionStorage, paidGenerationAttemptKey(kind));
+function clearBrowserPaidGenerationAttempt(kind: PaidGenerationKind, key = paidGenerationAttemptKey(kind), expectedRequestKey?: string): void {
+  try {
+    if (expectedRequestKey && readStoredPaidGenerationAttempt(window.sessionStorage, key)?.requestKey !== expectedRequestKey) return;
+    clearStoredPaidGenerationAttempt(window.sessionStorage, key);
+  } catch { /* A receipt cleanup failure must not discard an accepted paid result. */ }
 }
 
 function readVideos(): ContentVideo[] {
@@ -748,7 +753,54 @@ function PromptBox({ title, value, onCopy }: { title: string; value?: string; on
 }
 
 export default function ContentStudio() {
+  const { user, userRole, clinicId, workspacePurpose, isLoading, isSigningOut, isDemoMode, isImpersonation } = useAuth();
+  const actorId = !isLoading && !isSigningOut && !isDemoMode && !isImpersonation ? user?.id || "" : "";
+  const workspaceId = clinicId || readWorkspaceId();
+  const observedActorRef = useRef(user?.id || "");
+  const [authEpoch, setAuthEpoch] = useState(0);
+  useLayoutEffect(() => {
+    if (!hasSupabaseFrontendEnv) return;
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      const nextActor = session?.user.id || "";
+      if (observedActorRef.current === nextActor) return;
+      observedActorRef.current = nextActor;
+      setAuthEpoch((value) => value + 1);
+    });
+    return () => subscription.unsubscribe();
+  }, []);
+  return <ContentStudioSession key={JSON.stringify([actorId, workspaceId, userRole, workspacePurpose, authEpoch])} actorId={actorId} workspaceId={workspaceId} />;
+}
+
+function ContentStudioSession({ actorId, workspaceId }: { actorId: string; workspaceId: string }) {
   const [, setLocation] = useLocation();
+  const sessionRef = useRef<AbortController | null>(null);
+  useLayoutEffect(() => {
+    const session = new AbortController();
+    sessionRef.current = session;
+    const subscription = hasSupabaseFrontendEnv
+      ? supabase.auth.onAuthStateChange((_event, next) => {
+          if ((next?.user.id || "") !== actorId) session.abort();
+        }).data.subscription
+      : null;
+    return () => {
+      session.abort();
+      subscription?.unsubscribe();
+      if (sessionRef.current === session) sessionRef.current = null;
+    };
+  }, [actorId, workspaceId]);
+
+  function isSessionAlive(session: AbortController | null): session is AbortController {
+    return Boolean(actorId && workspaceId && session && sessionRef.current === session && !session.signal.aborted
+      && readWorkspaceId() === workspaceId);
+  }
+
+  async function isGenerationSessionCurrent(session: AbortController | null): Promise<boolean> {
+    if (!isSessionAlive(session)) return false;
+    try {
+      const token = await getSupabaseAccessToken(actorId);
+      return Boolean(token && isSessionAlive(session));
+    } catch { return false; }
+  }
   const [form, setForm] = useState(initialVideo);
   const [videos, setVideos] = useState<ContentVideo[]>([]);
   const [activeId, setActiveId] = useState<string>("");
@@ -780,23 +832,28 @@ export default function ContentStudio() {
   const [genVideo, setGenVideo] = useState<GeneratedFile | null>(null);
   const [videoJob, setVideoJob] = useState<VideoJobState | null>(null);
   const [generationUsage, setGenerationUsage] = useState<GenerationUsageSummary | null>(null);
-  const [generationUsageLoading, setGenerationUsageLoading] = useState(true);
+  const [generationUsageLoading, setGenerationUsageLoading] = useState(false);
   const photoGenerationAttempt = useRef<PaidGenerationAttempt | null>(null);
   const videoGenerationAttempt = useRef<PaidGenerationAttempt | null>(null);
 
   const refreshGenerationUsage = useCallback(async () => {
+    const session = sessionRef.current;
+    if (!isSessionAlive(session)) return;
     setGenerationUsageLoading(true);
     try {
-      const response = await crmFetch(withWorkspace("/api/content-studio/usage"));
+      const response = await crmFetch(withWorkspace("/api/content-studio/usage"), {
+        expectedUserId: actorId, dispatchGuard: () => isSessionAlive(session), signal: session.signal, cache: "no-store",
+      });
       const body = await safeJson<GenerationUsageSummary>(response);
+      if (!await isGenerationSessionCurrent(session)) return;
       if (response.ok && body?.success === true) setGenerationUsage(body.data);
     } catch {
       // The paid write still checks its quota server-side. A diagnostic read
       // must never replace the working studio with an error screen.
     } finally {
-      setGenerationUsageLoading(false);
+      if (isSessionAlive(session)) setGenerationUsageLoading(false);
     }
-  }, []);
+  }, [actorId, workspaceId]);
 
   useEffect(() => {
     void refreshGenerationUsage();
@@ -1089,6 +1146,9 @@ export default function ContentStudio() {
   // --- Настоящая генерация изображения и видео -----------------------------
 
   const generatePhoto = async () => {
+    const session = sessionRef.current;
+    if (!isSessionAlive(session)) return;
+    const attemptKey = paidGenerationAttemptKey("photo");
     const prompt = genPrompt.trim();
     if (!prompt) {
       setGenNotice({ tone: "warning", text: "Опишите кадр — без описания генерировать нечего." });
@@ -1119,6 +1179,7 @@ export default function ContentStudio() {
     setGenNotice(null);
     try {
       const response = await crmFetch(withWorkspace("/api/content-studio/generate-photo"), {
+        expectedUserId: actorId, dispatchGuard: () => isSessionAlive(session), signal: session.signal,
         method: "POST",
         headers: paidGenerationHeaders(attempt.requestKey),
         body: JSON.stringify({ prompt, format: genFormat }),
@@ -1131,6 +1192,7 @@ export default function ContentStudio() {
         model: string;
         fileSize: number;
       }>(response);
+      if (!await isGenerationSessionCurrent(session)) return;
       const keepAttempt = shouldKeepPaidGenerationAttempt({
         responseReceived: true,
         status: response.status,
@@ -1139,7 +1201,7 @@ export default function ContentStudio() {
       });
       if (!keepAttempt && photoGenerationAttempt.current === attempt) {
         photoGenerationAttempt.current = null;
-        clearBrowserPaidGenerationAttempt("photo");
+        clearBrowserPaidGenerationAttempt("photo", attemptKey, attempt.requestKey);
       }
 
       if (!response.ok || body?.success !== true) {
@@ -1175,16 +1237,20 @@ export default function ContentStudio() {
       toast.success("Изображение сгенерировано");
       void refreshGenerationUsage();
     } catch (error) {
+      if (!await isGenerationSessionCurrent(session)) return;
       setGenNotice({
         tone: "error",
         text: `${error instanceof Error ? error.message : "Не удалось сгенерировать изображение"} Повтор без изменения описания использует прежний защитный ключ и не запустит второй платный запрос.`,
       });
     } finally {
-      setGenBusy(null);
+      if (isSessionAlive(session)) setGenBusy(null);
     }
   };
 
   const generateVideo = async () => {
+    const session = sessionRef.current;
+    if (!isSessionAlive(session)) return;
+    const attemptKey = paidGenerationAttemptKey("video");
     const prompt = genPrompt.trim();
     if (!prompt) {
       setGenNotice({ tone: "warning", text: "Опишите ролик — без описания генерировать нечего." });
@@ -1221,6 +1287,7 @@ export default function ContentStudio() {
     writeStoredVideoJob(null);
     try {
       const response = await crmFetch(withWorkspace("/api/content-studio/generate-video"), {
+        expectedUserId: actorId, dispatchGuard: () => isSessionAlive(session), signal: session.signal,
         method: "POST",
         headers: paidGenerationHeaders(attempt.requestKey),
         body: JSON.stringify({ prompt, format: genFormat }),
@@ -1231,6 +1298,7 @@ export default function ContentStudio() {
         progress: number;
         formatSubstituted: boolean;
       }>(response);
+      if (!await isGenerationSessionCurrent(session)) return;
       const keepAttempt = shouldKeepPaidGenerationAttempt({
         responseReceived: true,
         status: response.status,
@@ -1239,7 +1307,7 @@ export default function ContentStudio() {
       });
       if (!keepAttempt && videoGenerationAttempt.current === attempt) {
         videoGenerationAttempt.current = null;
-        clearBrowserPaidGenerationAttempt("video");
+        clearBrowserPaidGenerationAttempt("video", attemptKey, attempt.requestKey);
       }
 
       if (!response.ok || body?.success !== true) {
@@ -1267,13 +1335,14 @@ export default function ContentStudio() {
       });
       void refreshGenerationUsage();
     } catch (error) {
+      if (!await isGenerationSessionCurrent(session)) return;
       setVideoJob(null);
       setGenNotice({
         tone: "error",
         text: `${error instanceof Error ? error.message : "Не удалось запустить генерацию видео"} Повтор без изменения описания использует прежний защитный ключ и не запустит второй платный запрос.`,
       });
     } finally {
-      setGenBusy(null);
+      if (isSessionAlive(session)) setGenBusy(null);
     }
   };
 
