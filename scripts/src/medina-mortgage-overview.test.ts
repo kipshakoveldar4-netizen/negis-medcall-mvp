@@ -69,6 +69,10 @@ const button = (tree: any, label: string) => find(tree, (node) => node.type === 
   || text(node) === label || [node.props.children].flat().some((child) => typeof child === "string" && child.trim() === label)));
 const links = (tree: any, href: string) => nodes(tree).filter((node) => node.type === "a" && node.props.href === href);
 const rows = (tree: any) => nodes(tree).filter((node) => node.type === "li");
+const expectClasses = (node: Node, ...expected: string[]) => {
+  const classes = String(node.props.className || "").split(/\s+/);
+  for (const name of expected) assert.ok(classes.includes(name), `Expected ${node.type} to use ${name}`);
+};
 const expectAgenda = (tree: any, selected: "meetings" | "tasks") => {
   const agenda = section(tree, "mortgage-agenda");
   assert.equal(text(find(agenda, (node) => node.type === "h2")), "Ближайшие дела");
@@ -268,6 +272,108 @@ test("overview retains the page and mortgage-scope wrapper without bootstrapping
   assert.equal(tree.type, "FixturePageLayout");
   assert.equal(tree.props.children.type, "FixtureMortgageScope");
   assert.equal(tree.props.children.props.children.type, f.module.fixture.MortgageOverviewBody);
+  assert.deepEqual(f.writes, []);
+  f.dispose();
+});
+
+test("overview uses shared page buttons and inherited colors for every supported role", () => {
+  for (const role of ["owner", "admin", "lead_manager"]) {
+    const f = fixture(role), tree = f.paint(), header = find(tree, (node) => node.type === "header");
+    for (const node of nodes(tree)) {
+      assert.deepEqual(Object.keys(node.props.style || {}).filter((name) => name.startsWith("--negis-")), [],
+        "The overview must inherit shared color tokens instead of redefining them locally");
+    }
+    const refresh = button(header, "Обновить обзор");
+    expectClasses(refresh, "neu-icon-btn", "!h-11", "!w-11");
+    assert.equal(refresh.props.title, "Обновить обзор");
+    assert.equal(refresh.props["aria-label"], "Обновить обзор");
+    assert.equal(refresh.props.type, "button");
+    assert.equal(text(refresh), "");
+    assert.ok(nodes(refresh).some((node) => node.type === "icon-RefreshCw"));
+    assert.equal(links(header, "/leads").length, 1);
+    expectClasses(links(header, "/leads")[0], "neu-btn-primary");
+    const agenda = section(tree, "mortgage-agenda");
+    expectClasses(links(agenda, "/tasks")[0], "neu-btn");
+    expectClasses(find(agenda, (node) => node.type === "a" && node.props["aria-label"] === `Открыть: ${task().title}`), "neu-icon-btn");
+    const contacts = section(tree, "mortgage-overview-contacts"), teamAccess = role !== "lead_manager";
+    const action = find(contacts, (node) => node.type === "a" && node.props["aria-label"] === (teamAccess ? "Открыть распределение заявок" : "Все клиенты"));
+    expectClasses(action, "neu-btn", "max-sm:!h-11", "max-sm:!w-11");
+    assert.equal(action.props.href, teamAccess ? "/leads" : "/clients");
+    assert.equal(action.props.title, action.props["aria-label"]);
+    expectClasses(find(action, (node) => node.type === "span"), "hidden", "sm:inline");
+    assert.ok(nodes(action).some((node) => node.type === "icon-ArrowUpRight" && node.props["aria-hidden"] === "true"));
+    expectClasses(links(contacts, teamAccess ? "tel:+77000002222" : "tel:+77000001111")[0], "min-h-11", "sm:min-h-6");
+    if (teamAccess) expectClasses(links(section(tree, "mortgage-team-load"), "/analytics")[0], "neu-btn");
+    assert.deepEqual(f.writes, []);
+    f.dispose();
+  }
+});
+
+test("only the first overview metric receives the shared mint accent while values and destinations stay intact", () => {
+  for (const role of ["owner", "admin", "lead_manager"]) {
+    const data = snapshot(), f = fixture(role, data), tree = f.paint();
+    const metrics = find(tree, (node) => node.type === "dl" && node.props["aria-label"] === "Показатели рабочего пространства");
+    const cards = nodes(metrics).filter((node) => node.type === "div" && nodes(node).some((child) => child.type === "dt"));
+    assert.equal(cards.length, 4);
+    assert.deepEqual(cards.map((node) => node.props.style?.background === "var(--negis-mint)"), [true, false, false, false]);
+    const values = [data.metrics.totalLeads, data.metrics.inProgressLeads, data.metrics.meetingsToday, data.metrics.overdueTasks];
+    for (const [index, card] of cards.entries()) {
+      expectClasses(card, "neu-sm");
+      assert.equal(compact(text(find(card, (node) => node.type === "dd"))), countText(values[index]));
+      assert.equal(find(card, (node) => node.type === "a").props.href, ["/leads", "/leads", "/appointments", "/tasks"][index]);
+      if (index > 0) assert.equal(card.props.style, undefined, "Non-accent metrics keep the shared neutral surface");
+    }
+    assert.equal(cards[0].props.style.boxShadow, "none");
+    expectClasses(find(cards[0], (node) => node.type === "dt"), "text-[var(--negis-mint-deep)]");
+    expectClasses(find(cards[0], (node) => node.type === "dd"), "text-[var(--negis-mint-ink)]");
+    expectClasses(find(cards[3], (node) => node.type === "dd"), "text-[var(--negis-danger)]");
+    assert.deepEqual(f.writes, []);
+    f.dispose();
+  }
+});
+
+test("agenda pills, team loads and contact badges use the common palette with motion enabled or reduced", () => {
+  const contacts = [unassignedContact(), { ...unassignedContact(), id: "synthetic-followup", name: "Synthetic followup", status: "in_progress" }];
+  const data = snapshot({ contacts }), f = fixture("owner", data);
+  let tree = f.paint(), layoutId: unknown;
+  for (const reducedMotion of [false, true]) {
+    f.setReducedMotion(reducedMotion);
+    for (const selected of ["meetings", "tasks"] as const) {
+      button(tree, selected === "meetings" ? "Встречи" : "Задачи").props.onClick();
+      tree = f.paint();
+      const agenda = expectAgenda(tree, selected);
+      const active = button(agenda, selected === "meetings" ? "Встречи" : "Задачи");
+      const inactive = button(agenda, selected === "meetings" ? "Задачи" : "Встречи");
+      expectClasses(active, "isolate", "rounded-full", "text-white");
+      expectClasses(inactive, "rounded-full", "bg-[var(--negis-ground)]", "text-[var(--negis-ink-2)]", "hover:bg-[var(--negis-plate)]");
+      assert.ok(!String(inactive.props.className).split(/\s+/).includes("text-white"));
+      const fills = f.motionNodes.filter((node) => node.type === "span" && node.props.layoutId);
+      assert.equal(fills.length, 1);
+      expectClasses(fills[0], "absolute", "inset-0", "-z-10", "rounded-full", "bg-[var(--negis-black)]");
+      layoutId ??= fills[0].props.layoutId;
+      assert.equal(fills[0].props.layoutId, layoutId);
+      assert.equal(fills[0].props.transition.duration, reducedMotion ? 0 : 0.18);
+      assert.equal(nodes(active).filter((node) => node.type === "span" && node.props.className === fills[0].props.className).length, 1);
+      const overdueBadge = find(agenda, (node) => node.props["aria-label"] === `Просрочено: ${data.metrics.overdueTasks}`);
+      expectClasses(overdueBadge, "badge", "badge-error", "!tracking-normal");
+      expectClasses(links(agenda, selected === "meetings" ? "/appointments" : "/tasks")[0], "neu-btn");
+    }
+  }
+  const team = section(tree, "mortgage-team-load");
+  assert.equal(rows(team).length, data.memberMetrics.length);
+  for (const row of rows(team)) {
+    expectClasses(find(row, (node) => node.type === "span" && node.props["aria-hidden"] === "true"),
+      "bg-[var(--negis-primary-soft)]", "text-[var(--negis-primary)]");
+  }
+  const bars = f.motionNodes.filter((node) => node.props.animate?.scaleX !== undefined);
+  assert.equal(bars.length, data.memberMetrics.length);
+  for (const bar of bars) expectClasses(bar, "bg-[var(--negis-primary)]");
+  const preview = section(tree, "mortgage-overview-contacts");
+  assert.equal(rows(preview).length, 2);
+  for (const [index, row] of rows(preview).entries()) {
+    const cardLink = find(row, (node) => node.type === "a" && node.props["aria-label"] === `Карточка: ${contacts[index].name}`);
+    expectClasses(find(cardLink, (node) => node.type === "span"), "badge", index === 0 ? "badge-blue" : "badge-muted", "!tracking-normal");
+  }
   assert.deepEqual(f.writes, []);
   f.dispose();
 });
