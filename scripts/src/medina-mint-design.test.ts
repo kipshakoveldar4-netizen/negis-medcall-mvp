@@ -10,9 +10,66 @@ import { Script } from "node:vm";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const src = "artifacts/negis/src/";
 const ts = createRequire(path.join(root, "package.json"))("typescript") as typeof import("typescript");
+type CssNode = {
+  type: string;
+  name?: string;
+  params?: string;
+  prop?: string;
+  value?: string;
+  important?: boolean;
+  nodes?: CssNode[];
+  parent?: CssNode;
+};
+type CssRule = CssNode & { selectors: string[]; nodes: CssNode[] };
+type CssAtRule = CssNode & { name: string; params: string; nodes: CssNode[] };
+type CssSheet = {
+  walkRules: (visit: (rule: CssRule) => void) => void;
+  walkAtRules: (name: string | RegExp, visit: (rule: CssAtRule) => void) => void;
+};
+const frontendRequire = createRequire(path.join(root, "artifacts/negis/package.json"));
+const postcss = createRequire(frontendRequire.resolve("vite"))("postcss") as {
+  parse: (css: string) => CssSheet;
+  list: { comma: (value: string) => string[]; space: (value: string) => string[] };
+};
 const pages = ["MortgageOverview", "MortgageClients", "MortgageCalendar", "MortgageTasks", "MortgageAnalytics"];
 const routes = ["/dashboard", "/leads", "/clients", "/appointments", "/tasks", "/analytics", "/admin"];
 const read = (file: string) => readFile(path.join(root, file), "utf8");
+const declarations = (node: CssNode) => (node.nodes || []).filter((child): child is CssNode & { prop: string; value: string } =>
+  child.type === "decl" && typeof child.prop === "string" && typeof child.value === "string");
+const cssValue = (node: CssNode, prop: string) => declarations(node).filter((child) => child.prop === prop).at(-1)?.value;
+const isKeyframe = (node?: CssNode) => node?.type === "atrule" && /^(?:-\w+-)?keyframes$/i.test(node.name || "");
+function inMotionMedia(node: CssNode, preference: "reduce" | "no-preference") {
+  for (let parent = node.parent; parent; parent = parent.parent) {
+    if (parent.type === "atrule" && parent.name === "media" && postcss.list.comma(parent.params || "").every((query) =>
+      new RegExp(`\\(\\s*prefers-reduced-motion\\s*:\\s*${preference}\\s*\\)`, "i").test(query)
+        && !/\bnot\b/i.test(query))) return true;
+  }
+  return false;
+  return false;
+}
+function milliseconds(value: string) {
+  assert.match(value, /^(?:\d+(?:\.\d+)?|\.\d+)(?:ms|s)$/i, `Expected a literal CSS duration: ${value}`);
+  return parseFloat(value) * (/ms$/i.test(value) ? 1 : 1000);
+}
+function disablesMotion(rule: CssRule, property: "animation" | "transition") {
+  if (cssValue(rule, property) === "none") return true;
+  const duration = cssValue(rule, `${property}-duration`);
+  return duration !== undefined && postcss.list.comma(duration).every((value) => milliseconds(value) <= 0.01);
+}
+function assertReducedMotionReset(sheet: CssSheet, rules: CssRule[], property: "animation" | "transition") {
+  const resets: CssRule[] = [];
+  sheet.walkRules((rule) => {
+    if (inMotionMedia(rule, "reduce") && disablesMotion(rule, property)) resets.push(rule);
+  });
+  for (const rule of rules) {
+    for (const selector of rule.selectors) {
+      assert.ok(resets.some((reset) => reset.selectors.some((target) => target === selector
+        || (target === ".negis-app-shell *" && declarations(reset).some((decl) => decl.important
+          && (decl.prop === property || decl.prop === `${property}-duration`))))),
+      `${selector}: reduced motion must disable the new ${property} without losing to more specific UI rules`);
+    }
+  }
+}
 async function parse(file: string) {
   return ts.createSourceFile(file, await read(file), ts.ScriptTarget.Latest, true);
 }
@@ -115,24 +172,16 @@ test("desktop/mobile navigation, application router and isolated preview expose 
 });
 
 test("mint overrides stay inside the private shell and preserve mobile button touch targets", async () => {
-  type CssRule = {
-    selectors: string[];
-    nodes: { prop?: string; value?: string }[];
-    parent: { type: string; name?: string; params?: string };
-  };
-  const frontendRequire = createRequire(path.join(root, "artifacts/negis/package.json"));
-  const postcss = createRequire(frontendRequire.resolve("vite"))("postcss") as {
-    parse: (css: string) => { walkRules: (visit: (rule: CssRule) => void) => void };
-  };
   assert.match(await read(src + "index.css"), /@import\s+["']\.\/styles\/mint-workspace\.css["']/);
   const sheet = postcss.parse(await read(src + "styles/mint-workspace.css"));
   const touchControls = new Set<string>();
   let ruleCount = 0;
   sheet.walkRules((rule) => {
+    if (isKeyframe(rule.parent)) return;
     ruleCount++;
     for (const selector of rule.selectors) assert.match(selector, /^\.negis-app-shell(?:$|[\s:.\[>+~])/,
       `Mint override escapes the signed-in shell: ${selector}`);
-    if (rule.parent.type !== "atrule" || rule.parent.name !== "media" || !/max-width/.test(rule.parent.params || "")) return;
+    if (rule.parent?.type !== "atrule" || rule.parent.name !== "media" || !/max-width/.test(rule.parent.params || "")) return;
     if (!rule.nodes.some((node) => node.prop === "min-height" && /^\d+(?:\.\d+)?px$/.test(node.value || "") && parseFloat(node.value!) >= 44)) return;
     for (const selector of rule.selectors) {
       for (const match of selector.matchAll(/\.([a-z][\w-]*)/gi)) touchControls.add(match[1]);
@@ -146,6 +195,166 @@ test("mint overrides stay inside the private shell and preserve mobile button to
     const ast = await parse(`${src}pages/${page}.tsx`);
     assert.ok(!descendants(ast).some((node) => ts.isStringLiteral(node) && /\bnegis-app-shell\b/.test(node.text)),
       `${page}: public entry must not opt into private theme overrides`);
+  }
+});
+
+test("Inter is self-hosted as a normal variable face with its license and no Google Fonts HTML links", async () => {
+  const index = postcss.parse(await read(src + "index.css"));
+  const imports: string[] = [];
+  index.walkAtRules("import", (rule) => { imports.push(rule.params); });
+  assert.ok(imports.some((value) => /^(?:url\(\s*)?["']\.\/styles\/fonts\.css["'](?:\s*\))?$/.test(value)),
+    "The application stylesheet must load the shared local font definitions");
+  const sheet = postcss.parse(await read(src + "styles/fonts.css"));
+  const faces: CssAtRule[] = [];
+  sheet.walkAtRules("font-face", (rule) => {
+    if (/^["']?Inter["']?$/i.test(cssValue(rule, "font-family") || "")) faces.push(rule);
+  });
+  assert.ok(faces.length > 0, "Declare an actual Inter @font-face");
+  for (const face of faces) {
+    assert.equal(cssValue(face, "font-style"), "normal");
+    assert.match(cssValue(face, "font-weight") || "", /^(?:100\s+900|400\s+700)$/,
+      "Normal Inter must cover the restored UI weights as one variable face");
+    assert.equal(cssValue(face, "font-display"), "swap", "The UI must remain readable while a local font loads");
+    const source = cssValue(face, "src") || "";
+    assert.doesNotMatch(source, /\blocal\s*\(|(?:https?:)?\/\//i, "Use the bundled font, not a machine-installed or remote copy");
+    assert.match(source, /\bformat\(\s*["']woff2(?:-variations)?["']\s*\)/i);
+    const urls = [...source.matchAll(/\burl\(\s*(?:"([^"]+)"|'([^']+)'|([^\s)]+))\s*\)/gi)]
+      .map((match) => match[1] || match[2] || match[3]);
+    assert.ok(urls.length > 0, "Inter must reference a local WOFF2 file");
+    for (const url of urls) {
+      assert.match(url, /^\/fonts\/inter\/[\w.-]+\.woff2$/i);
+      const font = await readFile(path.join(root, "artifacts/negis/public", url.slice(1)));
+      assert.ok(font.length > 48 && font.subarray(0, 4).toString("ascii") === "wOF2", `${url}: ship real WOFF2 bytes`);
+    }
+  }
+  const license = await read("artifacts/negis/public/fonts/inter/OFL.txt");
+  assert.match(license, /SIL OPEN FONT LICENSE\s+Version 1\.1/i);
+  assert.match(license, /copyright/i);
+  const html = (await read("artifacts/negis/index.html")).replace(/<!--[\s\S]*?-->/g, "");
+  assert.doesNotMatch(html, /<link\b[^>]*\bfonts\.(?:googleapis|gstatic)\.com\b/i,
+    "Do not reconnect to Google Fonts through stylesheet, preload or preconnect links");
+});
+
+test("shared workspace entry is a short opacity-only animation with an explicit reduced-motion reset", async () => {
+  const sheet = postcss.parse(await read(src + "styles/mint-workspace.css"));
+  const keyframes: CssAtRule[] = [];
+  sheet.walkAtRules(/^(?:-\w+-)?keyframes$/i, (rule) => {
+    if (rule.params === "negis-workspace-enter") keyframes.push(rule);
+  });
+  assert.ok(keyframes.length > 0, "Keep one shared negis-workspace-enter keyframe contract");
+  for (const keyframe of keyframes) {
+    const frames = keyframe.nodes.filter((node) => node.type !== "comment");
+    assert.equal(frames.length, 2, "The entry fade needs only its initial and final frame");
+    for (const [index, frame] of frames.entries()) {
+      assert.equal(frame.type, "rule");
+      const selector = (frame as CssRule).selectors;
+      assert.equal(selector.length, 1);
+      assert.ok((index === 0 ? ["from", "0%"] : ["to", "100%"]).includes(selector[0]));
+      assert.deepEqual(declarations(frame).map((decl) => decl.prop), ["opacity"],
+        "Page entry must not animate layout, transforms, filters or promoted layers");
+      assert.equal(Number(cssValue(frame, "opacity")), index === 0 ? 0.94 : 1);
+    }
+  }
+  const layout = await isolatedFunction("components/layout/PageLayout.tsx", "PageLayout", {
+    useAuth: () => ({ session: { user: { id: "synthetic-user" } } }),
+  });
+  const mains = elements(layout({ children: "Synthetic page" })).filter((node) => node.type === "main");
+  assert.equal(mains.length, 1, "All signed-in sections must keep the same main content surface");
+  const mainClasses = String(mains[0].props.className).split(/\s+/);
+  const entryRules: CssRule[] = [];
+  sheet.walkRules((rule) => {
+    if (isKeyframe(rule.parent)) return;
+    const animation = cssValue(rule, "animation") || cssValue(rule, "animation-name") || "";
+    if (!postcss.list.space(animation).includes("negis-workspace-enter")) return;
+    assert.equal(postcss.list.comma(animation).length, 1, "Do not attach additional motion to the entry fade");
+    assert.ok(inMotionMedia(rule, "no-preference"), "Entry motion must be opt-in through the system motion preference");
+    assert.ok(rule.selectors.every((selector) => mainClasses.some((name) =>
+      selector === `.negis-app-shell .${name}` || selector === `.negis-app-shell .${name} > *`)),
+    "Apply the shared fade to the actual main surface or its page children, not a page-specific class");
+    const duration = cssValue(rule, "animation-duration")
+      || postcss.list.space(animation).find((value) => /^(?:\d+(?:\.\d+)?|\.\d+)(?:ms|s)$/i.test(value));
+    assert.ok(duration, "Declare the entry animation duration");
+    assert.ok(milliseconds(duration) > 0 && milliseconds(duration) <= 180, "Page entry must finish within 180ms");
+    const delay = cssValue(rule, "animation-delay") || postcss.list.space(animation)
+      .filter((value) => /^(?:\d+(?:\.\d+)?|\.\d+)(?:ms|s)$/i.test(value))[1] || "0ms";
+    assert.ok(milliseconds(duration) + milliseconds(delay) <= 180, "Entry delay must not hide content beyond 180ms");
+    assert.equal(cssValue(rule, "animation-iteration-count") || postcss.list.space(animation)
+      .find((value) => /^(?:infinite|\d+(?:\.\d+)?)$/.test(value)) || "1", "1", "Page entry must run only once");
+    entryRules.push(rule);
+  });
+  assert.ok(entryRules.length > 0, "The shared shell must actually use the entry animation");
+  assertReducedMotionReset(sheet, entryRules, "animation");
+  for (const file of ["index.css", "styles/mint-workspace.css"]) {
+    postcss.parse(await read(src + file)).walkRules((rule) => {
+      if (!rule.selectors.some((selector) => /\.negis-main(?:$|[:\[])/.test(selector))) return;
+      for (const decl of declarations(rule)) assert.doesNotMatch(decl.prop,
+        /^(?:transform|translate|rotate|scale|will-change|(?:backdrop-)?filter)$/,
+        `${file}: keep main content free of transforms, filters and layer promotion`);
+    });
+  }
+  for (const prop of ["transform", "translate", "rotate", "scale", "willChange", "filter", "backdropFilter"]) {
+    assert.ok(!(prop in (mains[0].props.style || {})), `Main must not add inline ${prop}`);
+  }
+});
+
+test("shared control transitions affect paint only, finish in 140-180ms, and switch off for reduced motion", async () => {
+  const sheet = postcss.parse(await read(src + "styles/mint-workspace.css"));
+  const paint = new Set(["background", "background-color", "color", "border-color", "border-top-color", "border-right-color",
+    "border-bottom-color", "border-left-color", "box-shadow", "text-shadow", "outline-color", "text-decoration-color",
+    "opacity", "fill", "stroke", "caret-color", "accent-color"]);
+  const transitionRules: CssRule[] = [];
+  sheet.walkRules((rule) => {
+    for (const decl of declarations(rule).filter((node) => /^(?:-\w+-)?transition(?:-property)?$/.test(node.prop))) {
+      for (const entry of postcss.list.comma(decl.value)) {
+        if (entry === "none") continue;
+        const tokens = postcss.list.space(entry);
+        assert.ok(paint.has(tokens[0]), `${rule.selectors.join(", ")}: transition ${tokens[0]} is not paint-only`);
+        if (inMotionMedia(rule, "reduce")) {
+          assert.ok(disablesMotion(rule, "transition"), "Reduced-motion transitions must actually be disabled");
+          continue;
+        }
+        assert.ok(inMotionMedia(rule, "no-preference"), "New control transitions must respect the system motion preference");
+        const duration = decl.prop.endsWith("-property") ? cssValue(rule, "transition-duration")
+          : tokens.find((value) => /^(?:\d+(?:\.\d+)?|\.\d+)(?:ms|s)$/i.test(value));
+        assert.ok(duration, "Declare a short control transition duration");
+        for (const value of postcss.list.comma(duration)) {
+          assert.ok(milliseconds(value) >= 140 && milliseconds(value) <= 180,
+            `${rule.selectors.join(", ")}: control transitions must last 140-180ms`);
+        }
+        transitionRules.push(rule);
+      }
+    }
+  });
+  const selectors = transitionRules.flatMap((rule) => rule.selectors).join(" ");
+  for (const [control, pattern] of [
+    ["inputs", /\b(?:input|select|textarea)\b|\.neu-input\b/],
+    ["buttons", /\bbutton\b|\.neu-(?:icon-)?btn\b/],
+    ["navigation", /\b(?:nav|a)\b|\.medina-sidebar\b|\.mobile-(?:bottom-nav|nav)[\w-]*/],
+  ] as const) assert.match(selectors, pattern, `${control}: include the shared control transitions`);
+  assertReducedMotionReset(sheet, transitionRules, "transition");
+});
+
+test("the shared layout keeps CSS entry motion off the eager Framer path and never retains exiting pages", async () => {
+  for (const file of ["components/layout/PageLayout.tsx", "App.tsx"]) {
+    const ast = await parse(src + file);
+    const presenceNames = new Set(["AnimatePresence"]);
+    for (const node of descendants(ast)) {
+      if (!ts.isImportDeclaration(node) || !ts.isStringLiteral(node.moduleSpecifier)) continue;
+      const module = node.moduleSpecifier.text;
+      if (file.endsWith("PageLayout.tsx") && !node.importClause?.isTypeOnly) {
+        assert.doesNotMatch(module, /^(?:framer-motion|motion)(?:\/|$)/,
+          "The shared layout must not eagerly load the animation runtime");
+      }
+      for (const child of descendants(node).filter(ts.isImportSpecifier)) {
+        if ((child.propertyName || child.name).text === "AnimatePresence") presenceNames.add(child.name.text);
+      }
+    }
+    for (const node of descendants(ast)) {
+      if (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) {
+        assert.ok(!presenceNames.has(node.tagName.getText(ast).split(".").at(-1)!),
+          `${file}: do not retain exiting route trees with AnimatePresence`);
+      }
+    }
   }
 });
 

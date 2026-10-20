@@ -24,7 +24,7 @@ Acceptance is visual-system consistency, not copying invented mock data or featu
 
 ## Required Fidelity Surfaces
 
-- Typography: existing Inter/system-ui stack retained, moderate 24px page headings, compact 12-14px data labels, zero letter spacing on new surfaces, long synthetic names tested. Offline fixture uses the available system fallback; no external font fetch was introduced.
+- Typography in the initial pass: Inter/system-ui stack retained, moderate 24px page headings, compact 12-14px data labels, zero letter spacing on new surfaces, long synthetic names tested. The offline fallback was subsequently rejected by the owner and corrected in the follow-up below.
 - Layout: charcoal navigation, neutral working ground, white repeated items, 8px borders/corners and restrained elevation. All seven mortgage routes passed four viewport sizes with document scroll width equal to client width. Wide data tables/calendar scroll inside labeled regions rather than widening the page.
 - Colors: mint selected navigation/segments and first overview metric, black primary commands, white outlined secondary commands, semantic blue/amber/red statuses. Measured sidebar rgb(20,26,23), primary rgb(18,22,20).
 - Images/icons: existing brand treatment and Lucide icons reused. The chosen design has no photographic or illustrative asset requirement; no generated bitmap was substituted for working UI. Analytics use semantic meters with actual snapshot values, including empty zero meters.
@@ -50,7 +50,54 @@ Acceptance is visual-system consistency, not copying invented mock data or featu
 
 ## Follow-Up Polish
 
-- P3: self-hosting the existing Inter font could remove offline/system-fallback rendering differences; not required for this local design acceptance.
+- Resolved: the original self-hosted-font follow-up is complete; see the typography/motion pass below.
 - Live authentication, persistence, integrations and production deployment are outside this run and are not claimed as verified.
+
+## Typography And Motion Follow-Up, 20 October
+
+User requested the previous softer font and smooth animations in all sections,
+with phone/desktop verification and no publication.
+
+- Source visual truth remains the selected first concept above. For the scoped
+  refinement, the layout baseline is `mint-office/dashboard-1440.png`, copied to
+  `soft-type-motion/baseline-1440.png` under the same evidence parent directory.
+  The previous production source explicitly named Inter; the offline fixture
+  had no font source under its self-only CSP and rendered the system fallback.
+- Implementation: `soft-type-motion/dashboard-1440.png`, `dashboard-390.png`,
+  plus all seven route screenshots at 360/390/1440. Combined visual inputs:
+  `full-comparison.png` and `focused-comparison.png`; handoff board:
+  `desktop-mobile.png`. Baseline and revised desktop captures are both
+  1425x990 pixels at 1440x1000 CSS, no density conversion. Mobile 390x844 CSS
+  produces a 375x834 screenshot because the capture excludes the scrollbar.
+- State: same synthetic admin, team overview with task agenda selected. Fixture
+  clock timestamps differ between runs; counts, identities and layout match.
+  An initial 1280x720 capture was excluded from comparison, rather than treated
+  as a layout change at the 1440px breakpoint.
+- Finding P2, resolved: the fallback made Cyrillic labels and the overall type
+  rhythm differ from the intended existing Inter. Bundled unmodified variable
+  WOFF2 files now cover Latin, Cyrillic and Cyrillic-ext. Browser font checks
+  passed for 400/500/600 and for Kazakh letters after making them visible in a
+  synthetic search field. The extended subset loads on demand. The license and
+  upstream sources are bundled; no external font request or CSP relaxation.
+- Typography: headings and shared buttons use weight 500, metrics retain 600,
+  body text stays 400. Sizes, line heights and zero tracking remain. Side-by-side
+  full/focused review found no clipping, awkward new wrapping or open P0/P1/P2.
+- Layout/colors/assets/copy: all unchanged from the selected system. Existing
+  Lucide icons, mint/charcoal/white tokens and Russian labels remain. No new
+  illustration, chart value, product feature or API behavior was introduced.
+- Motion: shared page entry is opacity 0.94 to 1 in 180ms, controls/nav/rows use
+  160ms paint-only transitions. No main transform, delayed unmount, exit-retained
+  private data or eager Framer import. Existing agenda motion remains in its
+  lazy page chunk. New entry/transitions honor the reduced-motion media query;
+  executable CSS/VM checks cover that branch, not a claimed physical-device test.
+- Browser checks: seven sections at 360x740, 390x844 and 1440x1000 without
+  document overflow or alert errors; mobile More > Clients navigation and
+  contact form open/cancel passed. Form font is Inter, fields 16px/44px,
+  dialog layer 80 and main transform none. No data was submitted.
+- Verification: focused mint 11/11, overview/mobile 47/47; frontend and scripts
+  typechecks and final frontend build passed. Existing build warnings remain.
+  Clean final browser reload has no new console errors; proofs are in the
+  `soft-type-motion` directory. Local-only, no database/deployment/WhatsApp or
+  working Baspana/salon changes. Unrelated migrations 059/065 were preserved.
 
 final result: passed

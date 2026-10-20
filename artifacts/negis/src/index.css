@@ -1,7 +1,6 @@
-/* Inter is loaded once, via <link> in index.html — a second @import here
-   double-fetched the family and delayed first paint. */
 @import "tailwindcss";
 @import "tw-animate-css";
+@import "./styles/fonts.css";
 @import "./styles/mint-workspace.css";
 @plugin "@tailwindcss/typography";
 
