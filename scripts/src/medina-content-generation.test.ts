@@ -1001,6 +1001,18 @@ type LocalVideoCallbacks = {
   retry: () => void | Promise<void>;
 };
 type LocalVideoRefs = { videoJobRef: { current: LocalVideoJob | null }; videoGenerationRevision: { current: number } };
+type LocalPackageBrief = { mode: string; format: string; service: string; city: string; offer: string; audience: string;
+  goal: string; tone: string; materialNotes: string };
+type LocalPackageCallbacks = { generate: () => Promise<void>; click: () => void; disabled: boolean;
+  updateBrief: (key: keyof LocalPackageBrief, value: string) => void };
+const LOCAL_PACKAGE_BRIEF: LocalPackageBrief = { mode: "idea", format: "reels", service: "Synthetic service A", city: "Synthetic city A",
+  offer: "Synthetic offer A", audience: "Synthetic audience A", goal: "leads", tone: "local", materialNotes: "Local materials A" };
+const LOCAL_GENERATED_PACKAGE = { ideaTitle: "Synthetic generated package A", hook: "Local hook A", script: "Local script A",
+  voiceover: "Local voice A", caption: "Local caption A", cta: "Local CTA A", photoPrompt: "Local photo prompt A",
+  videoPrompt: "Local video prompt A", adPrimaryText: "Local primary A", adHeadline: "Local headline A", whatsappMessage: "Local WhatsApp opener A",
+  shotList: ["Local shot A"], textOnScreen: ["Local overlay A"], complianceNotes: ["Local compliance note A"],
+  adVariants: [{ id: "generated-variant-a", label: "Local variant A", angle: "local",
+    primaryText: "Local primary A", headline: "Local headline A", description: "Local description A", cta: "LEARN_MORE" }] };
 
 function generationDeferred<T>() {
   let resolve!: (value: T) => void;
@@ -1094,7 +1106,54 @@ const generationCallbackPrograms = (async () => {
       return { photo: usePhotoInAdsAutomation, generated: useGeneratedInAdsAutomation, package: useInAdsAutomation,
         approve: persistSelectedContentApproval };
     };`;
+  const packageRefDeclarations = child.body.statements.filter((node) => ts.isVariableStatement(node)
+    && node.declarationList.declarations.some((item) => ts.isIdentifier(item.name) && /package/i.test(item.name.text)
+      && item.initializer && ts.isCallExpression(item.initializer) && item.initializer.expression.getText(ast) === "useRef"));
+  const packageRefNames = packageRefDeclarations.flatMap((node) => (node as import("typescript").VariableStatement)
+    .declarationList.declarations.map((item) => item.name.getText(ast)));
+  const packageRefAssignments = child.body.statements.filter((node) => {
+    if (!ts.isExpressionStatement(node) && !ts.isIfStatement(node)) return false;
+    if (ts.isExpressionStatement(node) && !ts.isBinaryExpression(node.expression)
+      && !ts.isPrefixUnaryExpression(node.expression) && !ts.isPostfixUnaryExpression(node.expression)) return false;
+    let referencesRef = false;
+    const visit = (item: import("typescript").Node) => {
+      if (ts.isIdentifier(item) && packageRefNames.includes(item.text)) referencesRef = true;
+      ts.forEachChild(item, visit);
+    };
+    visit(node); return referencesRef;
+  });
+  const packageButtons: { click: string; disabled: string }[] = [];
+  const visitPackageButton = (node: import("typescript").Node) => {
+    if (ts.isJsxOpeningElement(node) && node.tagName.getText(ast) === "button") {
+      const attribute = (name: string) => node.attributes.properties.find((item) => ts.isJsxAttribute(item) && item.name.getText(ast) === name);
+      const expression = (item: import("typescript").JsxAttributeLike | undefined) => item && ts.isJsxAttribute(item)
+        && item.initializer && ts.isJsxExpression(item.initializer) ? item.initializer.expression?.getText(ast) : undefined;
+      const click = expression(attribute("onClick"));
+      if (click?.includes("generatePackage()")) {
+        const disabled = expression(attribute("disabled")); assert.ok(disabled);
+        packageButtons.push({ click, disabled });
+      }
+    }
+    ts.forEachChild(node, visitPackageButton);
+  };
+  visitPackageButton(child);
+  assert.equal(packageButtons.length, 1, "execute the actual package button's click and disabled expressions");
+  const packageRefs = `exports.selected = function renderPackageRefs(packageBrief) {
+    ${packageRefDeclarations.map((node) => node.getText(ast)).join("\n")}
+    ${packageRefAssignments.map((node) => node.getText(ast)).join("\n")}
+    return { ${packageRefNames.join(", ")} };
+  };`;
+  const packageProgram = `${select(source, ["safeJson", "withWorkspace", ...denialHelpers])}
+    exports.selected = function capturePackage({ actorId, workspaceId, localDraftsOnly, sessionRef }, packageBrief, refs, loading) {
+      const { ${packageRefNames.join(", ")} } = refs;
+      ${select(source, ["isSessionAlive", "isGenerationSessionCurrent", ...handoffHelpers, "updatePackageBrief", "generatePackage"])}
+      return { generate: generatePackage, updateBrief: updatePackageBrief, click: ${packageButtons[0].click}, disabled: ${packageButtons[0].disabled} };
+    };`;
   return {
+    packageRefs: ts.transpileModule(packageRefs, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText,
+    package: ts.transpileModule(packageProgram, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText,
+    packageDemo: compile(await readFile(path.join(repoRoot, "lib/content-studio/core.ts"), "utf8"),
+      ["briefString", "demoContentPackage"], ["demoContentPackage"]),
     handoff: ts.transpileModule(handoff, {
       compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
       transformers: { before: [(context) => (root) => {
@@ -1247,7 +1306,7 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
   let targetedTokenStarted: ReturnType<typeof generationDeferred<void>> | undefined;
   const tokenStarted = generationDeferred<void>(), bodyStarted = generationDeferred<void>();
   let delayedBody: ReturnType<typeof generationDeferred<string>> | undefined;
-  type Resource = "generation" | "usage" | "poll" | "restore" | "signed" | "metadata" | "approval";
+  type Resource = "generation" | "usage" | "poll" | "restore" | "signed" | "metadata" | "approval" | "package-generation" | "package-save";
   let responseWait: ReturnType<typeof generationDeferred<void>> | undefined, responseResource: Resource | undefined;
   const responseStarted = generationDeferred<void>();
   let handoffResponseHook: ((resource: Resource) => void) | undefined;
@@ -1298,18 +1357,33 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
   const handoffStatuses: Partial<Record<Resource, number>> = {};
   const handoffBodyFailures = new Set<Resource>();
   const handoffTransportFailures: Partial<Record<Resource, number>> = {};
+  let packageFixtureActive = false;
+  const packageReplies: { generation: unknown; save: unknown; generationText?: string; saveText?: string } = {
+    generation: { success: true, mode: "fixture", data: LOCAL_GENERATED_PACKAGE },
+    save: { success: true, data: { video: { id: "saved-package-a" } } },
+  };
+  const packageBodyReads: Resource[] = [];
   const signedReply = { success: true, data: { bucket: "fixture-creatives", storagePath: "workspace-a/local.jpg",
     token: "synthetic-upload-token", publicUrl: "https://example.invalid/local-upload.jpg" } };
   const localResponse = (value: unknown, resource: Resource) => {
     handoffResponseHook?.(resource);
     const response = Response.json(value, { status: handoffStatuses[resource] ?? 200 });
+    if (resource === "package-generation" || resource === "package-save") {
+      const text = resource === "package-generation" ? packageReplies.generationText : packageReplies.saveText;
+      const read = response.text.bind(response);
+      Object.defineProperty(response, "text", { configurable: true, value: () => {
+        packageBodyReads.push(resource); return text === undefined ? read() : Promise.resolve(text);
+      } });
+    }
     if (handoffBodyFailures.has(resource)) {
-      Object.defineProperty(response, "text", { value: async () => { throw new Error("Synthetic body read failure"); } });
+      Object.defineProperty(response, "text", { value: async () => {
+        packageBodyReads.push(resource); throw new Error("Synthetic body read failure");
+      } });
     }
     if (delayedBody && delayedResource === resource) {
       const pending = delayedBody;
       delayedBody = undefined;
-      Object.defineProperty(response, "text", { value: () => { bodyStarted.resolve(); return pending.promise; } });
+      Object.defineProperty(response, "text", { value: () => { packageBodyReads.push(resource); bodyStarted.resolve(); return pending.promise; } });
     }
     return response;
   };
@@ -1321,9 +1395,15 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
     async fetch(url: string, init: LocalGenerationInit) {
       const method = init.method || "GET";
       dispatches.push({ url, method, headers: new Headers(init.headers), body: init.body ? JSON.parse(String(init.body)) : null, signal: init.signal });
-      const resource = url.includes("signed-upload") ? "signed" : method === "PATCH" ? "approval" : "metadata";
+      const resource = url.includes("generate-package") ? "package-generation"
+        : packageFixtureActive && url.split("?")[0] === "/api/crm/content-videos" && method === "POST" ? "package-save"
+        : url.includes("signed-upload") ? "signed" : method === "PATCH" ? "approval" : "metadata";
       if (responseWait && responseResource === resource) { responseStarted.resolve(); await responseWait.promise; }
       if (handoffTransportFailures[resource]) throw new api.CrmApiError(handoffTransportFailures[resource]!, "authentication_required", "Synthetic denied transport");
+      if (resource === "package-generation" || resource === "package-save") {
+        assert.equal(method, "POST");
+        return localResponse(resource === "package-generation" ? packageReplies.generation : packageReplies.save, resource);
+      }
       if (url.split("?")[0] === "/api/crm/ad-creatives/signed-upload") {
         assert.equal(method, "POST"); return localResponse(signedReply, "signed");
       }
@@ -1349,6 +1429,7 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
   }, { "@/lib/serverAuth": auth });
   const setters = Object.fromEntries([
     "GenBusy", "GenNotice", "GenImage", "GenVideo", "VideoJob", "GenerationUsage", "GenerationUsageLoading", "Videos", "ActiveId", "PhotoBusy",
+    "Loading", "Notice", "ContentPackage", "ContentPackageId", "SelectedAdVariantId", "PackageGenerationMode", "GenPrompt", "PackageBrief",
   ].map((field) => [`set${field}`, (update: unknown) => {
     const value = typeof update === "function" ? (update as (previous: unknown) => unknown)(state[field]) : update;
     state[field] = value; writes.push({ field, value });
@@ -1420,7 +1501,34 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
     paidGenerationAttemptKey: (kind: LocalGenerationKind) => string;
     clearBrowserPaidGenerationAttempt: (kind: LocalGenerationKind, key?: string, expectedRequestKey?: string) => void;
   }>(programs.page, bindings);
+  const packageRequests: { url: string; init: LocalGenerationInit }[] = [];
+  const purePackageDemo = evaluateGenerationFixture<{ demoContentPackage: (input: Record<string, unknown>) => Record<string, unknown> }>(programs.packageDemo, {});
+  const capturePackage = evaluateGenerationFixture<(session: LocalGenerationSession, brief: LocalPackageBrief,
+    refs: Record<string, unknown>, loading: unknown) => LocalPackageCallbacks>(programs.package, {
+    ...bindings, ...purePackageDemo, ...briefModule,
+    async crmFetch(url: string, init: LocalGenerationInit) {
+      packageRequests.push({ url, init }); activeTransport = url.includes("generate-package") ? "package-generation" : "package-save";
+      try { return await api.crmFetch(url, init); } finally { activeTransport = undefined; }
+    },
+  });
+  const packageRefInstances = new Map<LocalGenerationSession["sessionRef"], { slots: { current: unknown }[]; cursor: number }>();
+  let packageRefInstance: { slots: { current: unknown }[]; cursor: number };
+  const renderPackageRefs = evaluateGenerationFixture<(brief: LocalPackageBrief) => Record<string, unknown>>(programs.packageRefs, {
+    useRef(initial: unknown) { return packageRefInstance.slots[packageRefInstance.cursor++] ??= { current: initial }; },
+  });
   return {
+    packages() {
+      assert.ok(lifetime, "package generation must receive actual wrapper-computed session props");
+      packageFixtureActive = true;
+      if (!("PackageBrief" in state)) Object.assign(state, { PackageBrief: { ...LOCAL_PACKAGE_BRIEF }, ContentPackage: null,
+        ContentPackageId: "", SelectedAdVariantId: "", PackageGenerationMode: "", GenPrompt: "", Loading: null, Notice: "" });
+      const next = lifetime.render();
+      packageRefInstance = packageRefInstances.get(next.session.sessionRef) ?? { slots: [], cursor: 0 };
+      packageRefInstances.set(next.session.sessionRef, packageRefInstance); packageRefInstance.cursor = 0;
+      const refs = renderPackageRefs(state.PackageBrief as LocalPackageBrief);
+      return { ...next, refs, callbacks: capturePackage(next.session, state.PackageBrief as LocalPackageBrief, refs, state.Loading) };
+    },
+    packageReplies, packageRequests, packageBodyReads, purePackageDemo: purePackageDemo.demoContentPackage,
     handoffs(options?: Parameters<typeof captureHandoffs>[1]) {
       assert.ok(lifetime, "handoffs must use the actual wrapper session");
       const next = lifetime.render();
@@ -2702,6 +2810,344 @@ for (const kind of ["image", "video"] as const) {
       assert.ok(!prefill.contentApproval); assert.deepEqual(fixture.dispatches, []); assert.deepEqual(fixture.uploads, []);
       assert.deepEqual(fixture.navigations, ["/ads-automation"]);
       assert.equal(fixture.toasts.length, 1); assert.equal(fixture.toasts[0].kind, "success");
+    } finally { fixture.lifetime!.unmount(); }
+  });
+}
+
+const PACKAGE_STAGES = [
+  { resource: "package-generation", phase: "token" }, { resource: "package-generation", phase: "response" },
+  { resource: "package-generation", phase: "body" }, { resource: "package-save", phase: "token" },
+  { resource: "package-save", phase: "response" }, { resource: "package-save", phase: "body" },
+] as const;
+type PackageStage = typeof PACKAGE_STAGES[number];
+
+async function pausePackage(fixture: LocalHandoffFixture, stage: PackageStage) {
+  const token = stage.phase === "token" ? fixture.deferToken(stage.resource) : undefined;
+  const body = stage.phase === "body" ? fixture.deferBody(stage.resource) : undefined;
+  const response = stage.phase === "response" ? fixture.deferResponse(stage.resource) : undefined;
+  const captured = fixture.packages(), work = captured.callbacks.generate();
+  const resume = (bodyValue?: string) => {
+    token?.resolve(); response?.resolve();
+    body?.resolve(bodyValue ?? JSON.stringify(stage.resource === "package-generation" ? fixture.packageReplies.generation : fixture.packageReplies.save));
+  };
+  try {
+    if (token) await token.started;
+    if (body) await fixture.bodyStarted.promise;
+    if (response) await response.started;
+    const expectedRequests = stage.resource === "package-generation" ? (stage.phase === "token" ? 0 : 1)
+      : stage.phase === "token" ? 1 : 2;
+    assert.equal(fixture.dispatches.length, expectedRequests, "pause the actual requested transport stage, not an earlier auth guard");
+    return { captured, work, resume, expectedRequests };
+  } catch (error) { resume(); await work; throw error; }
+}
+
+function packageSnapshot(fixture: LocalHandoffFixture) {
+  return JSON.parse(JSON.stringify(Object.fromEntries(["ContentPackage", "ContentPackageId", "SelectedAdVariantId", "PackageGenerationMode", "GenPrompt", "Notice"]
+    .map((field) => [field, fixture.state[field]]))));
+}
+
+for (const stage of PACKAGE_STAGES) {
+  for (const boundary of ["account", "silent-account", "workspace", "A-B-A", "unmount"] as const) {
+    test(`G5C9 ${stage.resource}-${stage.phase} cannot publish or follow up after ${boundary}`, { timeout: 5000 }, async () => {
+      const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE);
+      const paused = await pausePackage(fixture, stage);
+      try {
+        if (boundary === "account" || boundary === "A-B-A") fixture.sdkSession("actor-b");
+        if (boundary === "silent-account") fixture.sdkSession("actor-b", "fixture-token-b", null);
+        if (boundary === "workspace") fixture.workspace(HANDOFF_WORKSPACE_B);
+        if (boundary === "A-B-A") {
+          fixture.lifetime!.render(); fixture.sdkSession("actor-a"); fixture.lifetime!.render();
+        }
+        if (boundary === "unmount") fixture.lifetime!.unmount();
+        Object.assign(fixture.state, { ContentPackage: { ...LOCAL_GENERATED_PACKAGE, ideaTitle: "Current package B" },
+          ContentPackageId: "current-package-b", GenPrompt: "Current prompt B", Notice: "Current notice B", Loading: "package" });
+        const before = packageSnapshot(fixture), writes = fixture.writes.length, toasts = fixture.toasts.length, mutations = fixture.mutations.length;
+        paused.resume(); await paused.work; await flushLocalVideoWork();
+        assert.equal(fixture.dispatches.length, paused.expectedRequests, "expired generation must not save; expired save must not continue");
+        assert.deepEqual(packageSnapshot(fixture), before, "late A must not replace B's package, receipt, variant, prompt or notice");
+        assert.deepEqual(fixture.writes.slice(writes), boundary === "silent-account" || boundary === "workspace"
+          ? [{ field: "Loading", value: null }] : []);
+        assert.deepEqual(fixture.toasts.slice(toasts), []); assert.deepEqual(fixture.mutations.slice(mutations), []);
+        assert.deepEqual(fixture.uploads, []); assert.deepEqual(fixture.navigations, []);
+      } finally { paused.resume(); await paused.work; fixture.lifetime!.unmount(); }
+    });
+  }
+}
+
+for (const resource of ["package-generation", "package-save"] as const) {
+  for (const outcome of ["error", "auth", "unreadable"] as const) {
+    test(`G5C9 late ${resource} ${outcome} body remains silent after account replacement`, { timeout: 5000 }, async () => {
+      const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE);
+      const paused = await pausePackage(fixture, { resource, phase: "body" });
+      try {
+        fixture.sdkSession("actor-b"); fixture.auth({ user: { id: "actor-b" } }); fixture.lifetime!.render();
+        fixture.state.Notice = "Current notice B";
+        const writes = fixture.writes.length, toasts = fixture.toasts.length;
+        paused.resume(outcome === "unreadable" ? "{not-json" : JSON.stringify({ success: false,
+          error: outcome === "auth" ? "Synthetic authorization body" : "Synthetic late error", code: outcome === "auth" ? "authentication_required" : "fixture_error" }));
+        await paused.work;
+        assert.equal(fixture.state.Notice, "Current notice B");
+        assert.deepEqual(fixture.writes.slice(writes).filter((write) => write.field !== "Loading"), []);
+        assert.deepEqual(fixture.toasts.slice(toasts), []);
+        assert.equal(fixture.dispatches.length, paused.expectedRequests);
+      } finally { paused.resume(); await paused.work; fixture.lifetime!.unmount(); }
+    });
+  }
+}
+
+for (const stage of PACKAGE_STAGES) {
+  test(`G5C9 brief ABA revision expires ${stage.resource}-${stage.phase} even when values return to A`, { timeout: 5000 }, async () => {
+    const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE);
+    const paused = await pausePackage(fixture, stage);
+    try {
+      paused.captured.callbacks.updateBrief("service", "Synthetic service B");
+      const edited = fixture.packages();
+      edited.callbacks.updateBrief("service", LOCAL_PACKAGE_BRIEF.service);
+      const restored = fixture.packages();
+      assert.equal(restored.key, paused.captured.key, "a brief edit must not masquerade as a new actor lifetime");
+      assert.deepEqual(JSON.parse(JSON.stringify(fixture.state.PackageBrief)), LOCAL_PACKAGE_BRIEF);
+      const before = packageSnapshot(fixture), writes = fixture.writes.length, toasts = fixture.toasts.length;
+      paused.resume(); await paused.work;
+      assert.deepEqual(packageSnapshot(fixture), before, "ABA values cannot revive a superseded form revision");
+      assert.deepEqual(fixture.writes.slice(writes).filter((write) => write.field !== "Loading"), []);
+      assert.deepEqual(fixture.toasts.slice(toasts), []);
+      assert.equal(fixture.dispatches.length, paused.expectedRequests);
+    } finally { paused.resume(); await paused.work; fixture.lifetime!.unmount(); }
+  });
+}
+
+for (const resource of ["package-generation", "package-save"] as const) {
+  test(`G5C9 same-account refresh during ${resource} token lookup completes one scoped generation and save`, { timeout: 5000 }, async () => {
+    const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE);
+    const paused = await pausePackage(fixture, { resource, phase: "token" });
+    try {
+      const controller = paused.captured.session.sessionRef.current;
+      assert.ok(fixture.packageRequests.every((request) => request.init.dispatchGuard?.() === true));
+      fixture.sdkSession("actor-a", "fixture-token-a-refreshed", "TOKEN_REFRESHED");
+      assert.equal(fixture.packages().key, paused.captured.key);
+      paused.resume(); await paused.work;
+      assert.equal(fixture.dispatches.length, 2); assert.equal(fixture.state.ContentPackageId, "saved-package-a");
+      assert.deepEqual(JSON.parse(JSON.stringify(fixture.state.ContentPackage)), LOCAL_GENERATED_PACKAGE);
+      assert.equal(fixture.state.SelectedAdVariantId, "generated-variant-a"); assert.equal(fixture.state.GenPrompt, LOCAL_GENERATED_PACKAGE.photoPrompt);
+      assert.equal(fixture.state.Loading, null); assert.equal(fixture.state.Notice, "");
+      assert.deepEqual(fixture.dispatches[0].body, LOCAL_PACKAGE_BRIEF);
+      const saved = fixture.dispatches[1].body as { packageBrief: unknown; packageData: unknown };
+      assert.deepEqual(saved.packageBrief, LOCAL_PACKAGE_BRIEF); assert.deepEqual(saved.packageData, LOCAL_GENERATED_PACKAGE);
+      for (const call of fixture.dispatches) {
+        assert.equal(new URL(call.url, "https://example.invalid").searchParams.get("workspaceId"), REAL_DEMO_TEST_WORKSPACE);
+        assert.equal(call.signal, controller!.signal);
+      }
+      for (const request of fixture.packageRequests) {
+        assert.equal(request.init.expectedUserId, "actor-a"); assert.equal(typeof request.init.dispatchGuard, "function");
+      }
+      const refreshedCalls = fixture.dispatches.slice(resource === "package-generation" ? 0 : 1);
+      assert.ok(refreshedCalls.every((call) => call.headers.get("Authorization") === "Bearer fixture-token-a-refreshed"));
+      assert.equal(fixture.toasts.filter((toast) => toast.kind === "success").length, 1);
+      assert.deepEqual(fixture.uploads, []); assert.deepEqual(fixture.navigations, []);
+    } finally { paused.resume(); await paused.work; fixture.lifetime!.unmount(); }
+  });
+}
+
+for (const resource of ["package-generation", "package-save"] as const) {
+  for (const status of [401, 403] as const) {
+    test(`G5C9 ${resource} ${status} is denied before reading an unreadable body`, async () => {
+      const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE);
+      fixture.handoffStatuses[resource] = status; fixture.handoffBodyFailures.add(resource);
+      try {
+        await fixture.packages().callbacks.generate();
+        assert.equal(fixture.packageBodyReads.includes(resource), false, "known HTTP authorization denial must be classified before text()");
+        assert.equal(fixture.dispatches.length, resource === "package-generation" ? 1 : 2);
+        assert.ok(!fixture.state.ContentPackageId);
+        assert.ok(fixture.toasts.some((toast) => toast.kind === "error"));
+      } finally { fixture.lifetime!.unmount(); }
+    });
+  }
+}
+
+const PACKAGE_INVALID_RECEIPTS: { name: string; status?: number; body?: unknown; text?: string; transport?: number }[] = [
+  { name: "HTTP 500 with success and ID", status: 500, body: { success: true, data: { video: { id: "unconfirmed-id" } } } },
+  { name: "HTTP 201 success false", status: 201, body: { success: false, data: { video: { id: "unconfirmed-id" } } } },
+  { name: "malformed JSON", text: "{invalid-json" }, { name: "missing ID", body: { success: true, data: { video: {} } } },
+  { name: "missing data", body: { success: true } }, { name: "null receipt", body: null },
+  ...[0, 42, {}, [], "", " \n\t "].map((id) => ({ name: `invalid ID ${JSON.stringify(id)}`, body: { success: true, data: { video: { id } } } })),
+  { name: "transport 500", transport: 500 },
+];
+
+for (const receipt of PACKAGE_INVALID_RECEIPTS) {
+  test(`G5C9 accepted new package cannot retain an old or invalid ID after ${receipt.name}`, async () => {
+    const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE);
+    try {
+      await fixture.packages().callbacks.generate(); assert.equal(fixture.state.ContentPackageId, "saved-package-a");
+      const nextPackage = { ...LOCAL_GENERATED_PACKAGE, ideaTitle: "Synthetic generated package B" };
+      fixture.packageReplies.generation = { success: true, mode: "fixture", data: nextPackage };
+      fixture.packageReplies.save = receipt.body ?? (receipt.name === "null receipt" ? null : { success: true, data: {} });
+      fixture.packageReplies.saveText = receipt.text;
+      if (receipt.status) fixture.handoffStatuses["package-save"] = receipt.status;
+      if (receipt.transport) fixture.handoffTransportFailures["package-save"] = receipt.transport;
+      await fixture.packages().callbacks.generate();
+      assert.equal((fixture.state.ContentPackage as { ideaTitle: string }).ideaTitle, nextPackage.ideaTitle);
+      assert.equal(fixture.state.ContentPackageId, "", "an accepted new package cannot inherit a prior package's receipt");
+      assert.equal(fixture.dispatches.length, 4); assert.equal(fixture.state.Loading, null);
+    } finally { fixture.lifetime!.unmount(); }
+  });
+}
+
+for (const key of ["video", "item"] as const) {
+  test(`G5C9 OK save retains a valid string ${key} receipt and preserves an edited photo prompt`, async () => {
+    const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE);
+    fixture.packages(); fixture.state.GenPrompt = "Operator's edited prompt";
+    fixture.packageReplies.save = { success: true, data: { [key]: { id: "valid-package-receipt" } } };
+    const body = fixture.deferBody("package-save"), work = fixture.packages().callbacks.generate();
+    const savedBody = JSON.stringify(fixture.packageReplies.save);
+    try {
+      await fixture.bodyStarted.promise;
+      fixture.state.Loading = "video";
+      body.resolve(savedBody); await work;
+      assert.equal(fixture.state.ContentPackageId, "valid-package-receipt");
+      assert.equal(fixture.state.GenPrompt, "Operator's edited prompt"); assert.equal(fixture.dispatches.length, 2);
+      assert.equal(fixture.state.Loading, "video", "package finally must not clear a different current loading operation");
+    } finally { body.resolve(savedBody); await work; fixture.lifetime!.unmount(); }
+  });
+}
+
+for (const stage of PACKAGE_STAGES.filter((item) => item.phase !== "response")) {
+  test(`G5C9 pending lock survives ${stage.resource}-${stage.phase}, disabled click and edited-brief render`, { timeout: 5000 }, async () => {
+    const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE);
+    const paused = await pausePackage(fixture, stage);
+    try {
+      const disabled = fixture.packages(); assert.equal(disabled.callbacks.disabled, true);
+      paused.captured.callbacks.click(); disabled.callbacks.click();
+      disabled.callbacks.updateBrief("service", "Synthetic edited brief B");
+      const next = fixture.packages(); next.callbacks.click();
+      await flushLocalVideoWork();
+      assert.equal(fixture.dispatches.length, paused.expectedRequests, "the pending ref, not a rendered disabled attribute, must block duplicate POSTs");
+      paused.resume(); await paused.work; await flushLocalVideoWork();
+      assert.equal(fixture.dispatches.length, paused.expectedRequests, "editing the brief must not release the pending lock before old save/generation settles");
+      await fixture.packages().callbacks.generate();
+      assert.equal(fixture.dispatches.length, paused.expectedRequests + 2, "settled obsolete work must release the lock for the current brief");
+      assert.equal((fixture.dispatches.at(-2)!.body as LocalPackageBrief).service, "Synthetic edited brief B");
+    } finally { paused.resume(); await paused.work; await flushLocalVideoWork(); fixture.lifetime!.unmount(); }
+  });
+}
+
+for (const resource of ["package-generation", "package-save"] as const) {
+  test(`G5C9 late ${resource} A cannot overwrite a newer actor B package or receipt`, { timeout: 5000 }, async () => {
+    const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE);
+    const paused = await pausePackage(fixture, { resource, phase: "body" });
+    const oldBody = JSON.stringify(resource === "package-generation" ? fixture.packageReplies.generation : fixture.packageReplies.save);
+    try {
+      fixture.sdkSession("actor-b"); fixture.auth({ user: { id: "actor-b" } });
+      fixture.packageReplies.generation = { success: true, mode: "fixture", data: { ...LOCAL_GENERATED_PACKAGE, ideaTitle: "Accepted package B" } };
+      fixture.packageReplies.save = { success: true, data: { item: { id: "accepted-package-b" } } };
+      await fixture.packages().callbacks.generate();
+      assert.equal(fixture.state.ContentPackageId, "accepted-package-b");
+      const before = packageSnapshot(fixture), requests = fixture.dispatches.length, toasts = fixture.toasts.length;
+      paused.resume(oldBody); await paused.work;
+      assert.deepEqual(packageSnapshot(fixture), before); assert.equal(fixture.dispatches.length, requests);
+      assert.deepEqual(fixture.toasts.slice(toasts), []);
+    } finally { paused.resume(oldBody); await paused.work; fixture.lifetime!.unmount(); }
+  });
+}
+
+test("G5C9 explicit synthetic local demo uses the real shared demo package with zero transport or SDK reads", async () => {
+  const fixture = await localGenerationCallbacks("photo", true);
+  fixture.workspace("demo-local-a"); fixture.auth({ user: null, isDemoMode: true });
+  const captured = fixture.packages(), reads = fixture.sdkReads.total, mutations = fixture.mutations.length;
+  try {
+    assert.equal(captured.session.localDraftsOnly, true);
+    await captured.callbacks.generate();
+    assert.deepEqual(JSON.parse(JSON.stringify(fixture.state.ContentPackage)), JSON.parse(JSON.stringify(fixture.purePackageDemo(LOCAL_PACKAGE_BRIEF))));
+    assert.equal(fixture.state.PackageGenerationMode, "demo"); assert.equal(fixture.state.ContentPackageId, "");
+    assert.deepEqual(fixture.dispatches, []); assert.deepEqual(fixture.packageRequests, []); assert.deepEqual(fixture.uploads, []);
+    assert.equal(fixture.sdkReads.total, reads); assert.deepEqual(fixture.mutations.slice(mutations), []);
+  } finally { fixture.lifetime!.unmount(); }
+});
+
+for (const boundary of ["UUID-demo", "anonymous-not-demo", "account", "workspace", "unmount"] as const) {
+  test(`G5C9 local package demo cannot run under ${boundary}`, async () => {
+    const fixture = await localGenerationCallbacks("photo", true);
+    fixture.workspace("demo-local-a"); fixture.auth({ user: null, isDemoMode: true });
+    let captured = fixture.packages();
+    if (boundary === "UUID-demo") { fixture.workspace(REAL_DEMO_TEST_WORKSPACE); captured = fixture.packages(); }
+    if (boundary === "anonymous-not-demo") { fixture.auth({ isDemoMode: false }); captured = fixture.packages(); }
+    if (boundary === "account") { fixture.auth({ user: { id: "actor-b" }, isDemoMode: false }); fixture.lifetime!.render(); }
+    if (boundary === "workspace") fixture.workspace("demo-local-b");
+    if (boundary === "unmount") fixture.lifetime!.unmount();
+    const writes = fixture.writes.length, reads = fixture.sdkReads.total, mutations = fixture.mutations.length;
+    try {
+      await captured.callbacks.generate();
+      assert.deepEqual(fixture.writes.slice(writes), []); assert.deepEqual(fixture.toasts, []);
+      assert.deepEqual(fixture.dispatches, []); assert.deepEqual(fixture.uploads, []);
+      assert.equal(fixture.sdkReads.total, reads); assert.deepEqual(fixture.mutations.slice(mutations), []);
+    } finally { fixture.lifetime!.unmount(); }
+  });
+}
+
+test("G5C9 review mounted workspace mismatch releases loading and permits retry after selector restoration", { timeout: 5000 }, async () => {
+  const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE);
+  const paused = await pausePackage(fixture, { resource: "package-save", phase: "body" });
+  try {
+    fixture.workspace(HANDOFF_WORKSPACE_B);
+    assert.equal(paused.captured.session.sessionRef.current!.signal.aborted, false, "keep the original child mounted during selector mismatch");
+    const before = packageSnapshot(fixture), writes = fixture.writes.length, toasts = fixture.toasts.length;
+    paused.resume(); await paused.work;
+    assert.equal(fixture.state.Loading, null, "mounted spinner cleanup must not require the selector still to match");
+    assert.deepEqual(packageSnapshot(fixture), before, "spinner cleanup cannot authorize publishing the expired save receipt");
+    assert.deepEqual(fixture.writes.slice(writes), [{ field: "Loading", value: null }]);
+    assert.deepEqual(fixture.toasts.slice(toasts), []); assert.equal(fixture.dispatches.length, 2);
+    fixture.workspace(REAL_DEMO_TEST_WORKSPACE);
+    const restored = fixture.packages();
+    assert.equal(restored.key, paused.captured.key); assert.equal(restored.callbacks.disabled, false);
+    await restored.callbacks.generate();
+    assert.equal(fixture.dispatches.length, 4); assert.equal(fixture.state.ContentPackageId, "saved-package-a");
+    assert.equal(fixture.state.Loading, null);
+  } finally { paused.resume(); await paused.work; fixture.lifetime!.unmount(); }
+});
+
+test("G5C9 review no-op brief update preserves the pending generation revision and receipt", { timeout: 5000 }, async () => {
+  const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE);
+  const paused = await pausePackage(fixture, { resource: "package-generation", phase: "body" });
+  try {
+    const brief = fixture.state.PackageBrief, writes = fixture.writes.length;
+    paused.captured.callbacks.updateBrief("service", LOCAL_PACKAGE_BRIEF.service);
+    assert.equal(fixture.state.PackageBrief, brief, "a no-op must neither clone the brief nor invalidate its revision");
+    assert.deepEqual(fixture.writes.slice(writes), []);
+    const rendered = fixture.packages(); assert.equal(rendered.key, paused.captured.key);
+    paused.resume(); await paused.work;
+    assert.equal(fixture.dispatches.length, 2); assert.equal(fixture.state.ContentPackageId, "saved-package-a");
+    assert.deepEqual(JSON.parse(JSON.stringify(fixture.state.ContentPackage)), LOCAL_GENERATED_PACKAGE);
+  } finally { paused.resume(); await paused.work; fixture.lifetime!.unmount(); }
+});
+
+const PACKAGE_REJECTED_GENERATIONS: { name: string; data: unknown; mode?: unknown; status?: number; success?: boolean }[] = [
+  { name: "empty object", data: {} }, { name: "null", data: null },
+  { name: "malformed variant", data: { ...LOCAL_GENERATED_PACKAGE, adVariants: [{ ...LOCAL_GENERATED_PACKAGE.adVariants[0], id: 42 }] } },
+  { name: "malformed string list", data: { ...LOCAL_GENERATED_PACKAGE, shotList: ["Valid shot", 42] } },
+  { name: "malformed required string", data: { ...LOCAL_GENERATED_PACKAGE, ideaTitle: null } },
+  { name: "empty variant list", data: { ...LOCAL_GENERATED_PACKAGE, adVariants: [] } },
+  { name: "non-string mode", data: LOCAL_GENERATED_PACKAGE, mode: 42 },
+  { name: "failed generation HTTP 503", data: LOCAL_GENERATED_PACKAGE, status: 503, success: false },
+];
+
+for (const rejected of PACKAGE_REJECTED_GENERATIONS) {
+  test(`G5C9 review ${rejected.name} generation preserves the prior valid package and ID before any publication`, async () => {
+    const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE);
+    try {
+      await fixture.packages().callbacks.generate();
+      assert.equal(fixture.state.ContentPackageId, "saved-package-a");
+      const prior = packageSnapshot(fixture), writes = fixture.writes.length, toasts = fixture.toasts.length;
+      fixture.packageReplies.generation = { success: rejected.success ?? true, mode: rejected.mode ?? "fixture", data: rejected.data,
+        error: "Synthetic generation unavailable" };
+      fixture.handoffStatuses["package-generation"] = rejected.status ?? 200;
+      await fixture.packages().callbacks.generate();
+      const current = packageSnapshot(fixture);
+      assert.deepEqual({ ...current, Notice: prior.Notice }, prior, "failed or malformed generation must preserve the complete prior valid package provenance");
+      assert.deepEqual(fixture.writes.slice(writes).filter((write) => !["Loading", "Notice"].includes(write.field)), [],
+        "never queue malformed data, clear the old receipt, or publish a normalized replacement before validation");
+      assert.equal(fixture.dispatches.length, 3, "rejected generation must not dispatch a save");
+      assert.equal(fixture.state.Loading, null); assert.ok(fixture.state.Notice);
+      assert.equal(fixture.toasts.slice(toasts).filter((toast) => toast.kind === "error").length, 1);
+      assert.equal(fixture.toasts.slice(toasts).some((toast) => toast.kind === "success"), false);
     } finally { fixture.lifetime!.unmount(); }
   });
 }

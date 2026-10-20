@@ -33,7 +33,7 @@ import {
   type AdvertisingCampaignPrefillInput,
 } from "../../../../lib/advertising/campaignBrief";
 import { checkMetaCompliance } from "../../../../lib/meta/compliance";
-import type { ContentAdVariant, ContentPackage } from "../../../../lib/content-studio/core";
+import { demoContentPackage, type ContentAdVariant, type ContentPackage } from "../../../../lib/content-studio/core";
 import {
   clearStoredPaidGenerationAttempt,
   readStoredPaidGenerationAttempt,
@@ -839,6 +839,9 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
   const [loading, setLoading] = useState<"video" | "script" | "avatar" | "tapnow" | "telegram" | "telegram-test" | "package" | null>(null);
   const [notice, setNotice] = useState("");
   const [packageBrief, setPackageBrief] = useState<PackageBrief>(defaultPackageBrief);
+  const packageBriefRef = useRef(packageBrief);
+  const packageBriefRevision = useRef(0);
+  const packageGenerationPending = useRef<object | null>(null);
   const [advertisingGoalContext, setAdvertisingGoalContext] = useState<AdvertisingGoalContext>({});
   const [contentPackage, setContentPackage] = useState<ContentPackage | null>(null);
   const [selectedAdVariantId, setSelectedAdVariantId] = useState("");
@@ -927,17 +930,20 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
         ? `Контекст рекламной цели: ${goalDetails.join(" · ")}. Не обещать достижение цели.`
         : "";
 
-      setPackageBrief((current) => ({
-        ...current,
+      const nextBrief = {
+        ...packageBriefRef.current,
         mode: "ads",
         format: "reels",
-        service: incoming.service || current.service,
-        city: incoming.city || current.city,
+        service: incoming.service || packageBriefRef.current.service,
+        city: incoming.city || packageBriefRef.current.city,
         offer: incoming.offer || "",
         audience: incoming.audience || "",
         goal: "leads",
         materialNotes: goalNote,
-      }));
+      };
+      packageBriefRevision.current += 1;
+      packageBriefRef.current = nextBrief;
+      setPackageBrief(nextBrief);
       setNotice(`Цель рекламы перенесена из рекламного центра${goalDetails.length > 0 ? `: ${goalDetails.join(" · ")}` : ""}. Дополните оффер и аудиторию. Генерация начнётся только после вашего нажатия.`);
       toast.success("Цель рекламы загружена");
     } catch {
@@ -1664,8 +1670,13 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
     setLocation("/ads-automation");
   };
 
-  const updatePackageBrief = (key: keyof PackageBrief, value: string) =>
-    setPackageBrief((current) => ({ ...current, [key]: value }));
+  const updatePackageBrief = (key: keyof PackageBrief, value: string) => {
+    if (packageBriefRef.current[key] === value) return;
+    packageBriefRevision.current += 1;
+    const nextBrief = { ...packageBriefRef.current, [key]: value };
+    packageBriefRef.current = nextBrief;
+    setPackageBrief(nextBrief);
+  };
 
   const selectedAdVariant = useMemo(
     () =>
@@ -1700,65 +1711,147 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
   );
 
   const generatePackage = async () => {
+    const session = sessionRef.current;
+    if (packageGenerationPending.current || !isHandoffSessionAlive(session)) return;
+    const brief = packageBriefRef.current;
+    const revision = packageBriefRevision.current;
+    const attempt = {};
+    packageGenerationPending.current = attempt;
+    const isCurrent = () => packageGenerationPending.current === attempt
+      && isHandoffSessionAlive(session) && packageBriefRevision.current === revision
+      && packageBriefRef.current === brief;
+    const isVerified = async () => isCurrent() && await isHandoffSessionCurrent(session) && isCurrent();
+    const denyAccess = () => {
+      setContentPackageId("");
+      setContentPackage(null);
+      setSelectedAdVariantId("");
+      setPackageGenerationMode("");
+      const message = "Доступ к пакету контента отозван. Обновите страницу.";
+      setNotice(message);
+      toast.error(message);
+    };
     setLoading("package");
     setNotice("");
     try {
-      const response = await crmFetch(withWorkspace("/api/content-studio/generate-package"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...packageBrief }),
-      });
-      const body = await safeJson<ContentPackage>(response);
-      if (!response.ok || body?.success !== true) {
-        throw new Error(body?.success === false ? body.error : "Не удалось сгенерировать пакет контента");
+      if (!await isVerified()) return;
+      let data: ContentPackage;
+      let mode: string;
+      if (localDraftsOnly) {
+        data = demoContentPackage(brief);
+        mode = "demo";
+      } else {
+        const response = await crmFetch(`/api/content-studio/generate-package?workspaceId=${encodeURIComponent(workspaceId)}`, {
+          expectedUserId: actorId, dispatchGuard: isCurrent, signal: session.signal,
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(brief),
+        });
+        if (handoffAccessDenied(response)) {
+          if (await isVerified()) denyAccess();
+          return;
+        }
+        if (!await isVerified()) return;
+        const body = await safeJson<ContentPackage>(response);
+        if (!await isVerified()) return;
+        if (!response.ok || body?.success !== true) {
+          throw new Error(body?.success === false ? body.error : "Не удалось сгенерировать пакет контента");
+        }
+        data = body.data;
+        mode = body.mode;
       }
-      setContentPackage(body.data);
-      setSelectedAdVariantId(body.data.adVariants[0]?.id || "");
-      setPackageGenerationMode(body.mode);
+      if (!await isVerified()) return;
+      const isText = (value: unknown): value is string => typeof value === "string";
+      if (typeof mode !== "string" || !data
+        || ![data.ideaTitle, data.hook, data.script, data.voiceover, data.caption,
+          data.adPrimaryText, data.adHeadline, data.cta, data.photoPrompt,
+          data.videoPrompt, data.whatsappMessage].every(isText)
+        || ![data.shotList, data.textOnScreen, data.complianceNotes]
+          .every((items) => Array.isArray(items) && items.every(isText))
+        || !Array.isArray(data.adVariants) || data.adVariants.length === 0
+        || !data.adVariants.every((variant) => variant && [variant.id, variant.label,
+          variant.angle, variant.primaryText, variant.headline, variant.description, variant.cta].every(isText))) {
+        throw new Error("Сервер вернул неполный пакет контента. Прежний черновик сохранён.");
+      }
+      // A new draft must never inherit an approval/library ID from its predecessor.
+      setContentPackageId("");
+      setContentPackage(data);
+      setSelectedAdVariantId(data.adVariants[0]?.id || "");
+      setPackageGenerationMode(mode);
       // Готовый photo prompt — это ровно то, что нужно генератору изображения.
       // Заполняем только пустое поле: перезаписать текст, который оператор уже
       // правил руками, — худшее, что здесь можно сделать.
-      setGenPrompt((current) => (current.trim() ? current : body.data.photoPrompt));
-      toast.success(body.mode === "demo" ? "Образец пакета готов" : "Пакет контента готов");
+      setGenPrompt((current) => (current.trim() ? current : data.photoPrompt));
+      toast.success(mode === "demo" ? "Образец пакета готов" : "Пакет контента готов");
+      if (localDraftsOnly) return;
 
       // Persist the package: content_videos stores the whole body in raw_payload.
       try {
-        const saveResponse = await crmFetch("/api/crm/content-videos", {
+        if (!await isVerified()) return;
+        const saveResponse = await crmFetch(`/api/crm/content-videos?workspaceId=${encodeURIComponent(workspaceId)}`, {
+          expectedUserId: actorId, dispatchGuard: isCurrent, signal: session.signal,
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-                        title: body.data.ideaTitle,
-            niche: packageBrief.service,
-            goal: packageBrief.goal,
+            title: data.ideaTitle,
+            niche: brief.service,
+            goal: brief.goal,
             duration: "30-45 seconds",
-            style: packageBrief.tone,
-            audience: packageBrief.audience,
-            hook: body.data.hook,
-            script: body.data.script,
-            voiceover: body.data.voiceover,
-            cta: body.data.cta,
-            caption: body.data.caption,
+            style: brief.tone,
+            audience: brief.audience,
+            hook: data.hook,
+            script: data.script,
+            voiceover: data.voiceover,
+            cta: data.cta,
+            caption: data.caption,
             status: "script_ready",
-            packageBrief,
-            packageData: body.data,
+            packageBrief: brief,
+            packageData: data,
             approvalStatus: "draft",
             contentVersion: ADVERTISING_CONTENT_APPROVAL_VERSION,
           }),
         });
-        const saveBody = await safeJson<{ video?: { id?: string }; item?: { id?: string } }>(saveResponse);
-        if (saveBody?.success === true) {
-          const savedId = saveBody.data.video?.id || saveBody.data.item?.id || "";
-          if (savedId) setContentPackageId(savedId);
+        if (handoffAccessDenied(saveResponse)) {
+          if (await isVerified()) denyAccess();
+          return;
         }
-      } catch {
-        // localStorage/demo mode: the package still lives in state.
+        if (!await isVerified()) return;
+        const saveBody = await safeJson<{ video?: { id?: unknown }; item?: { id?: unknown } }>(saveResponse);
+        if (!await isVerified()) return;
+        if (saveResponse.ok && saveBody?.success === true) {
+          const savedId = [saveBody.data?.video?.id, saveBody.data?.item?.id]
+            .find((id): id is string => typeof id === "string" && Boolean(id.trim()));
+          if (savedId) {
+            setContentPackageId(savedId.trim());
+            return;
+          }
+        }
+        throw new Error("Не удалось подтвердить сохранение пакета в библиотеке.");
+      } catch (error) {
+        if (!await isVerified()) return;
+        if (handoffAccessDenied(error)) {
+          denyAccess();
+          return;
+        }
+        const message = "Пакет готов, но не сохранён в библиотеке. Черновик доступен на этой странице.";
+        setNotice(message);
+        toast.warning(message);
       }
     } catch (error) {
+      if (!await isVerified()) return;
+      if (handoffAccessDenied(error)) {
+        denyAccess();
+        return;
+      }
       const message = error instanceof Error ? error.message : "Ошибка генерации пакета";
       setNotice(message);
       toast.error(message);
     } finally {
-      setLoading(null);
+      if (packageGenerationPending.current === attempt) {
+        packageGenerationPending.current = null;
+        if (session && sessionRef.current === session && !session.signal.aborted) {
+          setLoading((current) => current === "package" ? null : current);
+        }
+      }
     }
   };
 
