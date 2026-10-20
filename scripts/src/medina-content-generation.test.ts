@@ -1013,6 +1013,19 @@ type LocalPhotoSuggestionCallbacks = { suggest: () => Promise<void>; click: () =
   changeFormat: (value: string) => void; changeSourceType: (value: string) => void; changeLayout: (value: string) => void;
   render: (layout?: string) => Promise<void>; next: () => Promise<void>; download: () => void | Promise<void>; handoff: () => Promise<void>;
   selectFile: (file: { name: string; type: string; size: number } | null) => void };
+const LOCAL_LIBRARY_FORM = { title: "Synthetic library idea", niche: "Synthetic niche", goal: "Synthetic goal", duration: "30 seconds",
+  style: "Synthetic style", audience: "Synthetic audience", hook: "", script: "", voiceover: "", cta: "", caption: "", hashtags: [] as string[],
+  avatarPrompt: "", tapnowPrompt: "" };
+type LocalLibraryForm = typeof LOCAL_LIBRARY_FORM;
+type LocalLibraryVideo = LocalLibraryForm & { id: string; status: string; createdAt: string };
+type LocalLibrarySnapshot = { form: LocalLibraryForm; videos: LocalLibraryVideo[]; activeId: string };
+type LocalLibraryCallbacks = { create: () => Promise<unknown>; update: (patch: Partial<LocalLibraryVideo>) => unknown;
+  persist: (id: string, patch: Partial<LocalLibraryVideo>) => unknown; save: (rows: LocalLibraryVideo[], id?: string) => unknown;
+  editTitle: (value: string) => void; select: (id: string) => void; read: (key?: string) => LocalLibraryVideo[];
+  write: (rows: LocalLibraryVideo[], key?: string) => void };
+const LOCAL_LIBRARY_ROW_A: LocalLibraryVideo = { ...LOCAL_LIBRARY_FORM, id: "33333333-3333-4333-8333-333333333333", status: "idea", createdAt: "2090-10-20T00:00:00Z" };
+const LOCAL_LIBRARY_ROW_B: LocalLibraryVideo = { ...LOCAL_LIBRARY_FORM, title: "Synthetic second idea", id: "44444444-4444-4444-8444-444444444444",
+  status: "idea", createdAt: "2090-10-21T00:00:00Z" };
 const LOCAL_PACKAGE_BRIEF: LocalPackageBrief = { mode: "idea", format: "reels", service: "Synthetic service A", city: "Synthetic city A",
   offer: "Synthetic offer A", audience: "Synthetic audience A", goal: "leads", tone: "local", materialNotes: "Local materials A" };
 const LOCAL_GENERATED_PACKAGE = { ideaTitle: "Synthetic generated package A", hook: "Local hook A", script: "Local script A",
@@ -1073,7 +1086,13 @@ const generationCallbackPrograms = (async () => {
       if (callback.includes("const completedUrl =")) videoEffects.poll.push(callback);
       if (callback.includes("writeStoredVideoJob({") && callback.includes("url: genVideo?.url")) videoEffects.persist.push(callback);
       if (callback.includes("const storedJob = readStoredVideoJob(")) videoEffects.restore.push(callback);
-      if (callback.includes("localDraftsOnly") && callback.includes("const saved = readVideos()")) demoEffects.push(callback);
+      let readsLibrary = false;
+      const visitRead = (item: import("typescript").Node) => {
+        if (ts.isCallExpression(item) && item.expression.getText(ast) === "readVideos") readsLibrary = true;
+        ts.forEachChild(item, visitRead);
+      };
+      visitRead(node.arguments[0]);
+      if (callback.includes("localDraftsOnly") && readsLibrary) demoEffects.push(callback);
     }
     if (ts.isJsxElement(node) && node.openingElement.tagName.getText(ast) === "button" &&
         node.children.some((item) => ts.isJsxText(item) && item.text.includes("Проверить ещё раз"))) {
@@ -1086,6 +1105,75 @@ const generationCallbackPrograms = (async () => {
   visitVideo(child);
   assert.equal(demoEffects.length, 1, "execute exactly one actual pure-local draft hydration effect");
   for (const [name, matches] of Object.entries(videoEffects)) assert.equal(matches.length, 1, `execute exactly one actual video ${name} callback`);
+  const libraryRefDeclarations = child.body.statements.filter((node) => ts.isVariableStatement(node)
+    && node.declarationList.declarations.some((item) => ts.isIdentifier(item.name) && /library/i.test(item.name.text)
+      && item.initializer && ts.isCallExpression(item.initializer) && item.initializer.expression.getText(ast) === "useRef"));
+  const libraryRefNames = libraryRefDeclarations.flatMap((node) => (node as import("typescript").VariableStatement)
+    .declarationList.declarations.map((item) => item.name.getText(ast)));
+  const namedDeclarations = (nodes: readonly import("typescript").Statement[]) => {
+    const found = new Map<string, import("typescript").Statement>();
+    for (const node of nodes) {
+      if (ts.isFunctionDeclaration(node) && node.name) found.set(node.name.text, node);
+      if (ts.isVariableStatement(node)) for (const item of node.declarationList.declarations) {
+        if (!ts.isIdentifier(item.name)) continue;
+        if (item.initializer && ts.isCallExpression(item.initializer) && ["useRef", "useState"].includes(item.initializer.expression.getText(ast))) continue;
+        found.set(item.name.text, node);
+      }
+    }
+    return found;
+  };
+  const topDeclarations = namedDeclarations(ast.statements), childDeclarations = namedDeclarations(child.body.statements);
+  const libraryDependencies = (names: string[], expressions: string[] = []) => {
+    const top = new Map<string, import("typescript").Statement>(), nested = new Map<string, import("typescript").Statement>();
+    const add = (name: string) => {
+      const node = childDeclarations.get(name) ?? topDeclarations.get(name);
+      const selected = childDeclarations.has(name) ? nested : top;
+      if (!node || selected.has(name)) return;
+      selected.set(name, node); visit(node);
+    };
+    const visit = (node: import("typescript").Node) => {
+      if (ts.isTypeNode(node)) return;
+      if (ts.isIdentifier(node) && !(ts.isPropertyAccessExpression(node.parent) && node.parent.name === node)
+        && !(ts.isPropertyAssignment(node.parent) && node.parent.name === node)) add(node.text);
+      ts.forEachChild(node, visit);
+    };
+    names.forEach(add);
+    for (const expression of expressions) visit(ts.createSourceFile("library-callback.tsx", expression, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX));
+    return { top, nested };
+  };
+  const libraryEvents = { form: [] as string[], selection: [] as string[] };
+  const visitLibraryEvents = (node: import("typescript").Node) => {
+    if (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) {
+      const expression = (name: string) => {
+        const item = node.attributes.properties.find((attribute) => ts.isJsxAttribute(attribute) && attribute.name.getText(ast) === name);
+        return item && ts.isJsxAttribute(item) && item.initializer && ts.isJsxExpression(item.initializer)
+          ? item.initializer.expression?.getText(ast) : undefined;
+      };
+      if (node.tagName.getText(ast) === "Field" && ["form.title", "libraryView.form.title"].includes(expression("value") || "")) libraryEvents.form.push(expression("onChange")!);
+      if (node.tagName.getText(ast) === "button" && expression("onClick")?.includes("video.id")) libraryEvents.selection.push(expression("onClick")!);
+    }
+    ts.forEachChild(node, visitLibraryEvents);
+  };
+  visitLibraryEvents(child);
+  for (const [name, matches] of Object.entries(libraryEvents)) assert.equal(matches.length, 1, `execute the actual library ${name} handler`);
+  const library = libraryDependencies(["createIdea", "updateCurrentVideo", "persistCurrentVideoPatch", "saveVideos", "readVideos", "writeVideos"],
+    [...libraryEvents.form, ...libraryEvents.selection]);
+  const libraryRestore = libraryDependencies(["readVideos"], [videoEffects.restore[0], demoEffects[0]]);
+  const texts = (nodes: Map<string, import("typescript").Statement>, excluded: string[] = []) => [...new Set([...nodes]
+    .filter(([name]) => !excluded.includes(name)).map(([, node]) => node))]
+    .sort((left, right) => left.getStart(ast) - right.getStart(ast)).map((node) => node.getText(ast)).join("\n");
+  const libraryRefs = `exports.selected = function renderLibraryRefs({ form, videos, activeId }) {
+    ${libraryRefDeclarations.map((node) => node.getText(ast)).join("\n")}
+    return { ${libraryRefNames.join(", ")} };
+  };`;
+  const libraryProgram = `${texts(library.top)}
+    exports.selected = function captureLibrary({ actorId, workspaceId, localDraftsOnly, sessionRef }, { form, videos, activeId }, refs, loading) {
+      const { ${libraryRefNames.join(", ")} } = refs;
+      ${texts(library.nested)}
+      return { create: createIdea, update: updateCurrentVideo, persist: persistCurrentVideoPatch, save: saveVideos,
+        editTitle(value) { return (${libraryEvents.form[0]})(value); },
+        select(id) { const video = { id }; return (${libraryEvents.selection[0]})(); }, read: readVideos, write: writeVideos };
+    };`;
   const jobRefAssignments = child.body.statements.filter((node) => ts.isExpressionStatement(node)
     && ts.isBinaryExpression(node.expression) && node.expression.operatorToken.kind === ts.SyntaxKind.EqualsToken
     && node.expression.left.getText(ast) === "videoJobRef.current" && node.expression.right.getText(ast) === "videoJob");
@@ -1095,13 +1183,20 @@ const generationCallbackPrograms = (async () => {
     ${jobRefAssignments[0].getText(ast)}
     return { videoJobRef, videoGenerationRevision };
   };`;
-  const video = `${select(source, ["safeJson", "withWorkspace", "VIDEO_JOB_KEY", "VIDEO_POLL_INTERVAL_MS", "STORAGE_KEY",
-    "readStoredVideoJob", "writeStoredVideoJob", "readVideos", "writeVideos", "generationRefusalText", "isSessionAlive", "isGenerationSessionCurrent", "pollingSessionState"])}
+  const videoNames = ["safeJson", "withWorkspace", "VIDEO_JOB_KEY", "VIDEO_POLL_INTERVAL_MS", "STORAGE_KEY",
+    "readStoredVideoJob", "writeStoredVideoJob", "readVideos", "writeVideos", "generationRefusalText", "isSessionAlive", "isGenerationSessionCurrent", "pollingSessionState"];
+  const video = `${select(source, videoNames)}
+    ${texts(libraryRestore.top, videoNames)}
+    ${texts(libraryRestore.nested, videoNames)}
     exports.selected = function captureVideoCallbacks(videoJob, genVideo) {
       return { ${Object.entries(videoEffects).map(([name, matches]) => `${name}: ${matches[0]}`).join(",\n")} };
     };`;
-  const demo = `${select(source, ["STORAGE_KEY", "readVideos"])}
-    exports.selected = function captureLocalDraftHydration({ workspaceId, localDraftsOnly }) { return ${demoEffects[0]}; };`;
+  const demo = `${texts(libraryRestore.top)}
+    exports.selected = function captureLocalDraftHydration({ workspaceId, localDraftsOnly }, refs) {
+      const { ${libraryRefNames.join(", ")} } = refs;
+      ${texts(libraryRestore.nested)}
+      return ${demoEffects[0]};
+    };`;
   const handoffHelpers = ["isHandoffSessionAlive", "isHandoffSessionCurrent"].filter((name) =>
     child.body!.statements.some((node) => ts.isFunctionDeclaration(node) && node.name?.text === name));
   const denialHelpers = ast.statements.some((node) => ts.isFunctionDeclaration(node) && node.name?.text === "handoffAccessDenied")
@@ -1239,6 +1334,9 @@ const generationCallbackPrograms = (async () => {
     return ts.visitNode(root, visit) as import("typescript").SourceFile;
   };
   return {
+    library: ts.transpileModule(libraryProgram, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText,
+    libraryRefs: ts.transpileModule(libraryRefs, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText,
+    libraryDefaults: compile(source, ["initialVideo"], ["initialVideo"]),
     photoDefaults: ts.transpileModule(`${select(source, ["photoSourceTypes", "photoFormats", "photoLayouts", "defaultPhotoTexts"])}
       exports.selected = { photoSourceTypes, photoFormats, photoLayouts, inputs: { ${photoDefaults.join(", ")} } };`,
       { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText,
@@ -1372,9 +1470,11 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
     const values = new Map<string, string>();
     const failedReads: string[] = [];
     let failReadKey: string | undefined;
+    let failWriteKey: string | undefined;
     return {
       failedReads,
       failNextRead(key: string) { failReadKey = key; },
+      failNextWrite(key: string) { failWriteKey = key; },
       getItem(key: string) {
         storageReads.push({ storage: name, key });
         if (key === failReadKey) {
@@ -1383,7 +1483,10 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
         }
         return values.get(key) ?? null;
       },
-      setItem(key: string, value: string) { mutations.push({ storage: name, operation: "set", key }); values.set(key, value); },
+      setItem(key: string, value: string) {
+        if (key === failWriteKey) { failWriteKey = undefined; throw new Error("Synthetic library cache write failure"); }
+        mutations.push({ storage: name, operation: "set", key }); values.set(key, value);
+      },
       removeItem(key: string) { mutations.push({ storage: name, operation: "remove", key }); values.delete(key); },
     };
   };
@@ -1405,7 +1508,7 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
   let targetedTokenStarted: ReturnType<typeof generationDeferred<void>> | undefined;
   const tokenStarted = generationDeferred<void>(), bodyStarted = generationDeferred<void>();
   let delayedBody: ReturnType<typeof generationDeferred<string>> | undefined;
-  type Resource = "generation" | "usage" | "poll" | "restore" | "signed" | "metadata" | "approval" | "package-generation" | "package-save" | "photo-suggest";
+  type Resource = "generation" | "usage" | "poll" | "restore" | "signed" | "metadata" | "approval" | "package-generation" | "package-save" | "photo-suggest" | "library-create" | "library-patch";
   let responseWait: ReturnType<typeof generationDeferred<void>> | undefined, responseResource: Resource | undefined;
   const responseStarted = generationDeferred<void>();
   let handoffResponseHook: ((resource: Resource) => void) | undefined;
@@ -1456,20 +1559,25 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
   const handoffStatuses: Partial<Record<Resource, number>> = {};
   const handoffBodyFailures = new Set<Resource>();
   const handoffTransportFailures: Partial<Record<Resource, number>> = {};
-  let packageFixtureActive = false, photoSuggestionActive = false;
+  let packageFixtureActive = false, photoSuggestionActive = false, libraryFixtureActive = false;
   const packageReplies: { generation: unknown; save: unknown; generationText?: string; saveText?: string } = {
     generation: { success: true, mode: "fixture", data: LOCAL_GENERATED_PACKAGE },
     save: { success: true, data: { video: { id: "saved-package-a" } } },
   };
   const packageBodyReads: Resource[] = [];
   const photoSuggestionReply: { body: unknown; text?: string } = { body: { success: true, mode: "fixture", data: LOCAL_GENERATED_PACKAGE } };
+  const libraryReplies: { create: unknown; patch: unknown; restore: unknown; text?: string } = {
+    create: { success: true, mode: "supabase", data: { video: LOCAL_LIBRARY_ROW_A } },
+    patch: { success: true, mode: "supabase", data: { video: { ...LOCAL_LIBRARY_ROW_A, script: "Canonical saved script", status: "script_ready" } } },
+    restore: { success: true, mode: "supabase", data: { videos: [LOCAL_LIBRARY_ROW_A, LOCAL_LIBRARY_ROW_B] } },
+  };
   const signedReply = { success: true, data: { bucket: "fixture-creatives", storagePath: "workspace-a/local.jpg",
     token: "synthetic-upload-token", publicUrl: "https://example.invalid/local-upload.jpg" } };
   const localResponse = (value: unknown, resource: Resource) => {
     handoffResponseHook?.(resource);
     const response = Response.json(value, { status: handoffStatuses[resource] ?? 200 });
-    if (resource === "package-generation" || resource === "package-save" || resource === "photo-suggest") {
-      const text = resource === "photo-suggest" ? photoSuggestionReply.text
+    if (resource === "package-generation" || resource === "package-save" || resource === "photo-suggest" || resource.startsWith("library-") || resource === "restore") {
+      const text = resource.startsWith("library-") ? libraryReplies.text : resource === "restore" ? undefined : resource === "photo-suggest" ? photoSuggestionReply.text
         : resource === "package-generation" ? packageReplies.generationText : packageReplies.saveText;
       const read = response.text.bind(response);
       Object.defineProperty(response, "text", { configurable: true, value: () => {
@@ -1496,11 +1604,16 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
     async fetch(url: string, init: LocalGenerationInit) {
       const method = init.method || "GET";
       dispatches.push({ url, method, headers: new Headers(init.headers), body: init.body ? JSON.parse(String(init.body)) : null, signal: init.signal });
-      const resource = url.includes("generate-package") ? (photoSuggestionActive ? "photo-suggest" : "package-generation")
+      const resource = libraryFixtureActive && url.split("?")[0] === "/api/crm/content-videos"
+        ? method === "POST" ? "library-create" : method === "PATCH" ? "library-patch" : "restore"
+        : url.includes("generate-package") ? (photoSuggestionActive ? "photo-suggest" : "package-generation")
         : packageFixtureActive && url.split("?")[0] === "/api/crm/content-videos" && method === "POST" ? "package-save"
         : url.includes("signed-upload") ? "signed" : method === "PATCH" ? "approval" : "metadata";
       if (responseWait && responseResource === resource) { responseStarted.resolve(); await responseWait.promise; }
       if (handoffTransportFailures[resource]) throw new api.CrmApiError(handoffTransportFailures[resource]!, "authentication_required", "Synthetic denied transport");
+      if (resource === "library-create" || resource === "library-patch" || (resource === "restore" && libraryFixtureActive)) {
+        return localResponse(resource === "library-create" ? libraryReplies.create : resource === "library-patch" ? libraryReplies.patch : libraryReplies.restore, resource);
+      }
       if (resource === "photo-suggest") { assert.equal(method, "POST"); return localResponse(photoSuggestionReply.body, resource); }
       if (resource === "package-generation" || resource === "package-save") {
         assert.equal(method, "POST");
@@ -1531,7 +1644,7 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
   }, { "@/lib/serverAuth": auth });
   const setters = Object.fromEntries([
     "GenBusy", "GenNotice", "GenImage", "GenVideo", "VideoJob", "GenerationUsage", "GenerationUsageLoading", "Videos", "ActiveId", "PhotoBusy",
-    "Loading", "Notice", "ContentPackage", "ContentPackageId", "SelectedAdVariantId", "PackageGenerationMode", "GenPrompt", "PackageBrief",
+    "Loading", "Notice", "ContentPackage", "ContentPackageId", "SelectedAdVariantId", "PackageGenerationMode", "GenPrompt", "PackageBrief", "Form",
     "PhotoTexts", "PhotoSuggestMode", "PhotoFormat", "PhotoLayout", "PhotoSourceType", "PhotoSourceName", "PhotoSourceUrl", "PhotoPreviewUrl", "PhotoBlob",
   ].map((field) => [`set${field}`, (update: unknown) => {
     const value = typeof update === "function" ? (update as (previous: unknown) => unknown)(state[field]) : update;
@@ -1553,9 +1666,27 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
     useRef(initial: unknown) { return refSlots[refCursor++] ??= { current: initial }; },
   });
   const videoRefs = renderVideoRefs(null);
+  const briefModule = await import(pathToFileURL(path.join(repoRoot, "lib", "advertising", "campaignBrief.ts")).href);
+  const libraryDefaults = evaluateGenerationFixture<{ initialVideo: LocalLibraryForm }>(programs.libraryDefaults, {});
+  const libraryRefInstances = new Map<LocalGenerationSession["sessionRef"], { slots: { current: unknown }[]; cursor: number }>();
+  let libraryRefInstance: { slots: { current: unknown }[]; cursor: number };
+  const renderLibraryRefs = evaluateGenerationFixture<(snapshot: LocalLibrarySnapshot) => Record<string, unknown>>(programs.libraryRefs, {
+    useRef(initial: unknown) { return libraryRefInstance.slots[libraryRefInstance.cursor++] ??= { current: initial }; },
+  });
+  const libraryRefsFor = (session: LocalGenerationSession) => {
+    if (!("Form" in state)) state.Form = JSON.parse(JSON.stringify(libraryDefaults.initialVideo));
+    if (!("Videos" in state)) state.Videos = [];
+    if (!("ActiveId" in state)) state.ActiveId = "";
+    libraryRefInstance = libraryRefInstances.get(session.sessionRef) ?? { slots: [], cursor: 0 };
+    libraryRefInstances.set(session.sessionRef, libraryRefInstance); libraryRefInstance.cursor = 0;
+    return renderLibraryRefs({ form: state.Form as LocalLibraryForm, videos: state.Videos as LocalLibraryVideo[], activeId: state.ActiveId as string });
+  };
+  const initialLibraryRefs = libraryRefsFor(captured as LocalGenerationSession);
   const bindings = {
-    ...paidGeneration, ...storage, ...setters, ...api, ...auth, window, localStorage,
+    ...paidGeneration, ...storage, ...setters, ...api, ...auth, ...briefModule, window, localStorage,
     ...videoRefs, supabase: sdk,
+    ...initialLibraryRefs, form: state.Form, videos: state.Videos, activeId: state.ActiveId,
+    useMemo: (callback: () => unknown) => callback(),
     actorId: captured.actorId, workspaceId: captured.workspaceId, sessionRef: captured.sessionRef,
     genPrompt: "Synthetic clinic room", genFormat: "reels",
     photoGenerationAttempt: { current: null }, videoGenerationAttempt: { current: null },
@@ -1570,8 +1701,16 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
     },
   };
   const captureVideo = evaluateGenerationFixture<(job: LocalVideoJob | null, file: unknown) => LocalVideoCallbacks>(programs.video, bindings);
-  const captureLocalDrafts = evaluateGenerationFixture<(session: LocalGenerationSession) => () => void>(programs.demo, bindings);
-  const briefModule = await import(pathToFileURL(path.join(repoRoot, "lib", "advertising", "campaignBrief.ts")).href);
+  const captureLocalDrafts = evaluateGenerationFixture<(session: LocalGenerationSession, refs: Record<string, unknown>) => () => void>(programs.demo, bindings);
+  const libraryRequests: { url: string; init: LocalGenerationInit }[] = [];
+  const captureLibrary = evaluateGenerationFixture<(session: LocalGenerationSession, snapshot: LocalLibrarySnapshot,
+    refs: Record<string, unknown>, loading: unknown) => LocalLibraryCallbacks>(programs.library, {
+    ...bindings,
+    async crmFetch(url: string, init: LocalGenerationInit = {}) {
+      libraryRequests.push({ url, init }); activeTransport = init.method === "PATCH" ? "library-patch" : init.method === "POST" ? "library-create" : "restore";
+      try { return await api.crmFetch(url, init); } finally { activeTransport = undefined; }
+    },
+  });
   const navigations: string[] = [];
   const handoffRequests: { url: string; init: LocalGenerationInit }[] = [];
   const handoffPackage = { ideaTitle: "Synthetic package", hook: "Local hook", script: "Local script", voiceover: "Local voice",
@@ -1673,6 +1812,20 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
     return refs;
   };
   return {
+    library() {
+      assert.ok(lifetime, "library callbacks must use the actual keyed wrapper session"); libraryFixtureActive = true;
+      const next = lifetime.render(), refs = libraryRefsFor(next.session);
+      return { ...next, refs, callbacks: captureLibrary(next.session, { form: state.Form as LocalLibraryForm,
+        videos: state.Videos as LocalLibraryVideo[], activeId: state.ActiveId as string }, refs, state.Loading) };
+    },
+    seedLibrary(rows: LocalLibraryVideo[], selectedId = rows[0]?.id || "", form: LocalLibraryForm = { ...LOCAL_LIBRARY_FORM }) {
+      assert.ok(lifetime); const next = lifetime.render();
+      Object.assign(state, { Form: form, Videos: rows, ActiveId: selectedId });
+      const refs = libraryRefsFor(next.session), snapshot = refs.librarySnapshotRef as { current: LocalLibrarySnapshot } | undefined;
+      if (snapshot) snapshot.current = { form, videos: rows, activeId: selectedId };
+    },
+    libraryReplies, libraryRequests, libraryDefaults,
+    libraryKey: (workspaceId = storage.readWorkspaceId()) => `negis_content_studio_videos::${workspaceId}`,
     photoSuggestions() {
       assert.ok(lifetime, "photo suggestions must receive actual wrapper-computed session props");
       photoSuggestionActive = true;
@@ -1728,7 +1881,7 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
     localDrafts() {
       assert.ok(lifetime, "local drafts must receive their actual wrapper-computed session props");
       const next = lifetime.render();
-      return { ...next, hydrate: captureLocalDrafts(next.session) };
+      return { ...next, hydrate: captureLocalDrafts(next.session, libraryRefsFor(next.session)) };
     },
     video(job: LocalVideoJob | null, file: unknown = null) {
       state.VideoJob = job; state.GenVideo = file;
@@ -2525,7 +2678,7 @@ for (const phase of ["timer", "token", "body"] as const) {
   });
 }
 
-const LOCAL_DEMO_DRAFTS = [{ id: "local-demo-idea", title: "Synthetic local idea", status: "idea", createdAt: "2090-10-20T00:00:00Z" }];
+const LOCAL_DEMO_DRAFTS = [{ ...LOCAL_LIBRARY_FORM, id: "local-demo-idea", title: "Synthetic local idea", status: "idea", createdAt: "2090-10-20T00:00:00Z" }];
 const REAL_DEMO_TEST_WORKSPACE = "11111111-1111-4111-8111-111111111111";
 
 test("GEN65 explicitly allowed local demo hydrates only idea drafts without API, SDK or paid-cache access", async () => {
@@ -3942,4 +4095,371 @@ test("G5C11 edited artifact is rejected by both retained download and handoff ca
     assert.deepEqual(fixture.anchors, []); assert.deepEqual(fixture.dispatches, []); assert.deepEqual(fixture.uploads, []);
     assert.deepEqual(fixture.navigations, []); assert.deepEqual(fixture.mutations.slice(mutated), []);
   } finally { fixture.lifetime!.unmount(); }
+});
+
+type LocalLibrary = ReturnType<LocalHandoffFixture["library"]>;
+const LOCAL_LIBRARY_PATCH = { script: "Requested local script", status: "script_ready" };
+function libraryState(fixture: LocalHandoffFixture) {
+  return JSON.parse(JSON.stringify({ form: fixture.state.Form, videos: fixture.state.Videos, activeId: fixture.state.ActiveId }));
+}
+function libraryRows(fixture: LocalHandoffFixture) { return fixture.state.Videos as LocalLibraryVideo[]; }
+test("G5C12 retained create callback cannot submit a newer form after form ABA", async () => {
+  const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE);
+  const captured = fixture.library();
+  try {
+    captured.callbacks.editTitle("Temporary idea B");
+    fixture.library().callbacks.editTitle(LOCAL_LIBRARY_FORM.title);
+    const before = libraryState(fixture), writes = fixture.writes.length, mutations = fixture.mutations.length;
+    await captured.callbacks.create();
+    assert.deepEqual(libraryState(fixture), before);
+    assert.deepEqual(fixture.dispatches, []);
+    assert.deepEqual(fixture.writes.slice(writes), []);
+    assert.deepEqual(fixture.mutations.slice(mutations), []);
+    assert.deepEqual(fixture.toasts, []);
+  } finally { fixture.lifetime!.unmount(); }
+});
+async function pauseLibraryWrite(fixture: LocalHandoffFixture, kind: "create" | "patch", phase: "token" | "body") {
+  const resource = kind === "create" ? "library-create" : "library-patch";
+  const token = phase === "token" ? fixture.deferToken(resource) : undefined;
+  const body = phase === "body" ? fixture.deferBody(resource) : undefined;
+  const captured = fixture.library(), before = libraryState(fixture);
+  const work = Promise.resolve(kind === "create" ? captured.callbacks.create() : captured.callbacks.update(LOCAL_LIBRARY_PATCH));
+  const resume = (value?: string) => { token?.resolve(); body?.resolve(value ?? JSON.stringify(kind === "create" ? fixture.libraryReplies.create : fixture.libraryReplies.patch)); };
+  try {
+    await flushLocalVideoWork();
+    if (kind === "patch") assert.deepEqual(libraryState(fixture), before, "PATCH receipt must be awaited before any local apply or cache update");
+    if (token) await token.started; else await fixture.bodyStarted.promise;
+    assert.equal(fixture.dispatches.length, phase === "token" ? 0 : 1);
+    return { captured, work, resume };
+  } catch (error) { resume(); await work; await flushLocalVideoWork(); throw error; }
+}
+
+const LIBRARY_STALE_WRITES = [
+  { kind: "create", phase: "token", boundary: "account" }, { kind: "create", phase: "body", boundary: "workspace" },
+  { kind: "create", phase: "body", boundary: "A-B-A" }, { kind: "create", phase: "body", boundary: "unmount" },
+  { kind: "create", phase: "body", boundary: "form-ABA" },
+  { kind: "patch", phase: "token", boundary: "workspace" }, { kind: "patch", phase: "body", boundary: "account" },
+  { kind: "patch", phase: "body", boundary: "A-B-A" }, { kind: "patch", phase: "body", boundary: "unmount" },
+  { kind: "patch", phase: "body", boundary: "selection-ABA" }, { kind: "patch", phase: "body", boundary: "form-ABA" },
+] as const;
+for (const { kind, phase, boundary } of LIBRARY_STALE_WRITES) {
+  test(`G5C12 ${kind} ${phase} suppresses late UI, cache and notices after ${boundary}`, { timeout: 5000 }, async () => {
+    const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE);
+    fixture.seedLibrary([LOCAL_LIBRARY_ROW_A, LOCAL_LIBRARY_ROW_B], LOCAL_LIBRARY_ROW_A.id);
+    const paused = await pauseLibraryWrite(fixture, kind, phase);
+    try {
+      if (boundary === "account" || boundary === "A-B-A") fixture.sdkSession("actor-b");
+      if (boundary === "workspace") fixture.workspace(HANDOFF_WORKSPACE_B);
+      if (boundary === "A-B-A") { fixture.lifetime!.render(); fixture.sdkSession("actor-a"); fixture.lifetime!.render(); }
+      if (boundary === "unmount") fixture.lifetime!.unmount();
+      if (boundary === "form-ABA") {
+        paused.captured.callbacks.editTitle("Temporary title B"); fixture.library().callbacks.editTitle(LOCAL_LIBRARY_FORM.title);
+      }
+      if (boundary === "selection-ABA") {
+        paused.captured.callbacks.select(LOCAL_LIBRARY_ROW_B.id); fixture.library().callbacks.select(LOCAL_LIBRARY_ROW_A.id);
+      }
+      const before = libraryState(fixture), writes = fixture.writes.length, mutations = fixture.mutations.length, toasts = fixture.toasts.length;
+      paused.resume(); await paused.work; await flushLocalVideoWork();
+      assert.deepEqual(libraryState(fixture), before);
+      assert.deepEqual(fixture.writes.slice(writes).filter((write) => write.field !== "Loading"), []);
+      assert.deepEqual(fixture.mutations.slice(mutations), []); assert.deepEqual(fixture.toasts.slice(toasts), []);
+      assert.equal(fixture.dispatches.length, phase === "token" ? 0 : 1);
+      assert.equal(fixture.localStorage.getItem(fixture.libraryKey(HANDOFF_WORKSPACE_B)), null);
+    } finally { paused.resume(); await paused.work; await flushLocalVideoWork(); fixture.lifetime!.unmount(); }
+  });
+}
+
+for (const kind of ["create", "patch"] as const) {
+  test(`G5C12 late ${kind} error body remains silent after account replacement`, { timeout: 5000 }, async () => {
+    const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE);
+    fixture.seedLibrary([LOCAL_LIBRARY_ROW_A]);
+    const paused = await pauseLibraryWrite(fixture, kind, "body");
+    try {
+      fixture.sdkSession("actor-b"); const before = libraryState(fixture), writes = fixture.writes.length, mutations = fixture.mutations.length;
+      paused.resume(JSON.stringify({ success: false, error: "Synthetic late refusal" })); await paused.work; await flushLocalVideoWork();
+      assert.deepEqual(libraryState(fixture), before);
+      assert.deepEqual(fixture.writes.slice(writes).filter((write) => write.field !== "Loading"), []);
+      assert.deepEqual(fixture.mutations.slice(mutations), []); assert.deepEqual(fixture.toasts, []);
+    } finally { paused.resume(); await paused.work; await flushLocalVideoWork(); fixture.lifetime!.unmount(); }
+  });
+}
+
+test("G5C12 same-actor refresh creates one scoped idea with an exact form payload and confirmed receipt", { timeout: 5000 }, async () => {
+  const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE);
+  fixture.library().callbacks.editTitle("Edited idea title");
+  const paused = await pauseLibraryWrite(fixture, "create", "token");
+  try {
+    const form = JSON.parse(JSON.stringify(fixture.state.Form));
+    fixture.sdkSession("actor-a", "fixture-token-a-refreshed", "TOKEN_REFRESHED");
+    assert.equal(fixture.library().key, paused.captured.key); paused.resume(); await paused.work;
+    assert.equal(fixture.dispatches.length, 1); const call = fixture.dispatches[0];
+    assert.equal(call.method, "POST"); assert.equal(call.url, `/api/crm/content-videos?workspaceId=${REAL_DEMO_TEST_WORKSPACE}`);
+    assert.equal(call.headers.get("Authorization"), "Bearer fixture-token-a-refreshed"); assert.equal(call.signal, paused.captured.session.sessionRef.current!.signal);
+    assert.deepEqual(call.body, form); assert.equal(fixture.libraryRequests[0].init.expectedUserId, "actor-a");
+    assert.equal(typeof fixture.libraryRequests[0].init.dispatchGuard, "function");
+    assert.deepEqual(JSON.parse(JSON.stringify(libraryRows(fixture))), [LOCAL_LIBRARY_ROW_A]); assert.equal(fixture.state.ActiveId, LOCAL_LIBRARY_ROW_A.id);
+    assert.deepEqual(JSON.parse(fixture.localStorage.getItem(fixture.libraryKey())!), [LOCAL_LIBRARY_ROW_A]);
+    assert.deepEqual(fixture.toasts, [{ kind: "success", message: "Идея ролика создана" }]);
+  } finally { paused.resume(); await paused.work; fixture.lifetime!.unmount(); }
+});
+
+test("G5C12 PATCH waits for the exact target receipt and applies canonical server fields", { timeout: 5000 }, async () => {
+  const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE);
+  fixture.seedLibrary([LOCAL_LIBRARY_ROW_A, LOCAL_LIBRARY_ROW_B], LOCAL_LIBRARY_ROW_B.id);
+  fixture.library().callbacks.select(LOCAL_LIBRARY_ROW_A.id);
+  const paused = await pauseLibraryWrite(fixture, "patch", "body");
+  try {
+    assert.equal(libraryRows(fixture).find((row) => row.id === LOCAL_LIBRARY_ROW_A.id)!.script, "");
+    assert.equal(fixture.localStorage.getItem(fixture.libraryKey()), null, "no optimistic cache write precedes acknowledgment");
+    paused.resume(); assert.equal(await paused.work, true);
+    const call = fixture.dispatches[0]; assert.equal(call.method, "PATCH");
+    assert.equal(call.url, `/api/crm/content-videos?workspaceId=${REAL_DEMO_TEST_WORKSPACE}`);
+    assert.deepEqual(call.body, { ...LOCAL_LIBRARY_PATCH, id: LOCAL_LIBRARY_ROW_A.id });
+    assert.equal(fixture.libraryRequests[0].init.expectedUserId, "actor-a");
+    assert.equal(libraryRows(fixture).find((row) => row.id === LOCAL_LIBRARY_ROW_A.id)!.script, "Canonical saved script");
+    assert.deepEqual(JSON.parse(JSON.stringify(libraryRows(fixture).find((row) => row.id === LOCAL_LIBRARY_ROW_B.id))), LOCAL_LIBRARY_ROW_B);
+    assert.equal(fixture.state.ActiveId, LOCAL_LIBRARY_ROW_A.id);
+  } finally { paused.resume(); await paused.work; fixture.lifetime!.unmount(); }
+});
+
+for (const kind of ["create", "patch"] as const) {
+  for (const status of [401, 403] as const) {
+    test(`G5C12 ${kind} ${status} denies before body parsing and never writes fallback`, async () => {
+      const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE);
+      fixture.seedLibrary(kind === "patch" ? [LOCAL_LIBRARY_ROW_A] : []);
+      const resource = kind === "create" ? "library-create" : "library-patch";
+      fixture.handoffStatuses[resource] = status; fixture.handoffBodyFailures.add(resource);
+      const captured = fixture.library(), before = libraryState(fixture), mutations = fixture.mutations.length;
+      try {
+        await (kind === "create" ? captured.callbacks.create() : captured.callbacks.update(LOCAL_LIBRARY_PATCH)); await flushLocalVideoWork();
+        assert.equal(fixture.packageBodyReads.includes(resource), false);
+        assert.deepEqual(libraryState(fixture), before); assert.deepEqual(fixture.mutations.slice(mutations), []);
+        assert.equal(fixture.dispatches.length, 1); assert.ok(fixture.state.Notice);
+        assert.ok(fixture.toasts.every((toast) => toast.kind !== "success" && toast.kind !== "warning"));
+      } finally { fixture.lifetime!.unmount(); }
+    });
+  }
+}
+
+for (const kind of ["create", "patch"] as const) {
+  test(`G5C12 shared write mutex blocks create and PATCH duplicates while ${kind} is pending`, { timeout: 5000 }, async () => {
+    const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE);
+    fixture.seedLibrary([LOCAL_LIBRARY_ROW_A]);
+    const gate = fixture.deferToken(), captured = fixture.library(), reads = fixture.sdkReads.total;
+    const work = Promise.resolve(kind === "create" ? captured.callbacks.create() : captured.callbacks.update(LOCAL_LIBRARY_PATCH));
+    const duplicate = captured.callbacks.create(), patch = Promise.resolve(captured.callbacks.update(LOCAL_LIBRARY_PATCH));
+    try {
+      await gate.started; await flushLocalVideoWork();
+      assert.equal(fixture.sdkReads.total - reads, 1); assert.equal(fixture.dispatches.length, 0);
+      gate.resolve(); await Promise.all([work, duplicate, patch]); await flushLocalVideoWork();
+      assert.equal(fixture.dispatches.length, 1);
+    } finally { gate.resolve(); await Promise.all([work, duplicate, patch]); await flushLocalVideoWork(); fixture.lifetime!.unmount(); }
+  });
+}
+
+const LIBRARY_UNCONFIRMED_RECEIPTS: { name: string; body: unknown; status?: number }[] = [
+  { name: "HTTP 500", status: 500, body: { success: true, mode: "supabase", data: { video: LOCAL_LIBRARY_ROW_A } } },
+  { name: "success false", body: { success: false, error: "Synthetic unavailable", data: { video: LOCAL_LIBRARY_ROW_A } } },
+  { name: "demo mode", body: { success: true, mode: "demo", data: { video: LOCAL_LIBRARY_ROW_A } } },
+  { name: "blank ID", body: { success: true, mode: "supabase", data: { video: { ...LOCAL_LIBRARY_ROW_A, id: " " } } } },
+  { name: "missing title", body: { success: true, mode: "supabase", data: { video: { ...LOCAL_LIBRARY_ROW_A, title: undefined } } } },
+  { name: "invalid status", body: { success: true, mode: "supabase", data: { video: { ...LOCAL_LIBRARY_ROW_A, status: "unrecognized" } } } },
+  { name: "corrupt optional script", body: { success: true, mode: "supabase", data: { video: { ...LOCAL_LIBRARY_ROW_A, script: {} } } } },
+];
+for (const receipt of LIBRARY_UNCONFIRMED_RECEIPTS) {
+  test(`G5C12 create ${receipt.name} keeps only a valid local draft and never claims server success`, async () => {
+    const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE);
+    fixture.libraryReplies.create = receipt.body; fixture.handoffStatuses["library-create"] = receipt.status ?? 200;
+    const captured = fixture.library();
+    try {
+      await captured.callbacks.create();
+      assert.equal(libraryRows(fixture).length, 1); const row = libraryRows(fixture)[0];
+      assert.match(row.id, /^content-/); assert.equal(row.title, (fixture.state.Form as LocalLibraryForm).title); assert.equal(row.status, "idea");
+      assert.equal(typeof row.script, "string"); assert.ok(Number.isFinite(Date.parse(row.createdAt)));
+      assert.ok(fixture.state.Notice); assert.equal(fixture.toasts.some((toast) => toast.kind === "success"), false);
+      assert.equal(fixture.toasts.filter((toast) => toast.kind === "warning").length, 1);
+      assert.equal(fixture.dispatches.length, 1);
+    } finally { fixture.lifetime!.unmount(); }
+  });
+}
+
+for (const receipt of ["wrong-ID", "wrong-mode", "outage"] as const) {
+  test(`G5C12 PATCH ${receipt} keeps only the requested local edit with an explicit unsaved notice`, async () => {
+    const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE);
+    fixture.seedLibrary([LOCAL_LIBRARY_ROW_A, LOCAL_LIBRARY_ROW_B], LOCAL_LIBRARY_ROW_A.id);
+    fixture.libraryReplies.patch = { success: true, mode: receipt === "wrong-mode" ? "demo" : "supabase",
+      data: { video: receipt === "wrong-ID" ? LOCAL_LIBRARY_ROW_B : { ...LOCAL_LIBRARY_ROW_A, script: "Unconfirmed remote script" } } };
+    if (receipt === "outage") fixture.handoffTransportFailures["library-patch"] = 500;
+    try {
+      assert.equal(await fixture.library().callbacks.update(LOCAL_LIBRARY_PATCH), true);
+      assert.equal(libraryRows(fixture).find((row) => row.id === LOCAL_LIBRARY_ROW_A.id)!.script, LOCAL_LIBRARY_PATCH.script);
+      assert.deepEqual(JSON.parse(JSON.stringify(libraryRows(fixture).find((row) => row.id === LOCAL_LIBRARY_ROW_B.id))), LOCAL_LIBRARY_ROW_B);
+      assert.ok(fixture.state.Notice); assert.equal(fixture.dispatches.length, 1);
+      assert.equal(fixture.toasts.some((toast) => toast.kind === "success"), false);
+    } finally { fixture.lifetime!.unmount(); }
+  });
+}
+
+for (const demo of [false, true]) {
+  test(`G5C12 ${demo ? "explicit demo" : "real-workspace content-* draft"} edit skips PATCH and retains an honest local notice`, async () => {
+    const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE);
+    if (demo) { fixture.workspace("demo-local-a"); fixture.auth({ user: null, isDemoMode: true }); }
+    fixture.seedLibrary([{ ...LOCAL_LIBRARY_ROW_A, id: "content-local-fixture" }]);
+    const captured = fixture.library(), reads = fixture.sdkReads.total;
+    try {
+      assert.equal(await captured.callbacks.update(LOCAL_LIBRARY_PATCH), true);
+      assert.equal(libraryRows(fixture)[0].script, LOCAL_LIBRARY_PATCH.script);
+      assert.deepEqual(fixture.dispatches, []); assert.ok(fixture.state.Notice);
+      if (demo) assert.equal(fixture.sdkReads.total, reads);
+    } finally { fixture.lifetime!.unmount(); }
+  });
+}
+
+test("G5C12 explicit local demo creates only a local idea without API or SDK access", async () => {
+  const fixture = await localGenerationCallbacks("video", true);
+  fixture.workspace("demo-local-a"); fixture.auth({ user: null, isDemoMode: true }); const captured = fixture.library(), reads = fixture.sdkReads.total;
+  try {
+    await captured.callbacks.create();
+    assert.equal(libraryRows(fixture).length, 1); assert.match(libraryRows(fixture)[0].id, /^content-/);
+    assert.ok(fixture.state.Notice); assert.deepEqual(fixture.dispatches, []); assert.equal(fixture.sdkReads.total, reads);
+  } finally { fixture.lifetime!.unmount(); }
+});
+
+for (const boundary of ["UUID-demo", "anonymous-not-demo"] as const) {
+  test(`G5C12 ${boundary} cannot create a local demo idea or perform any UI/cache write`, async () => {
+    const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE);
+    fixture.auth({ user: null, isDemoMode: boundary === "UUID-demo" }); const captured = fixture.library(), mutations = fixture.mutations.length, writes = fixture.writes.length;
+    try {
+      await captured.callbacks.create(); assert.deepEqual(fixture.writes.slice(writes), []);
+      assert.deepEqual(fixture.mutations.slice(mutations), []); assert.deepEqual(fixture.toasts, []); assert.deepEqual(fixture.dispatches, []);
+    } finally { fixture.lifetime!.unmount(); }
+  });
+}
+
+test("G5C12 no-op form and selection events preserve an in-flight PATCH snapshot", { timeout: 5000 }, async () => {
+  const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE); fixture.seedLibrary([LOCAL_LIBRARY_ROW_A]);
+  const paused = await pauseLibraryWrite(fixture, "patch", "body");
+  try {
+    const writes = fixture.writes.length;
+    paused.captured.callbacks.editTitle(LOCAL_LIBRARY_FORM.title); paused.captured.callbacks.select(LOCAL_LIBRARY_ROW_A.id);
+    assert.deepEqual(fixture.writes.slice(writes), []); paused.resume(); assert.equal(await paused.work, true);
+    assert.equal(libraryRows(fixture)[0].script, "Canonical saved script");
+  } finally { paused.resume(); await paused.work; fixture.lifetime!.unmount(); }
+});
+
+test("G5C12 saveVideos validates, sorts and caches to the captured workspace before publishing selection", async () => {
+  const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE);
+  try {
+    assert.equal(await fixture.library().callbacks.save([LOCAL_LIBRARY_ROW_A, LOCAL_LIBRARY_ROW_B], LOCAL_LIBRARY_ROW_A.id), true);
+    assert.deepEqual(Array.from(libraryRows(fixture), (row) => row.id), [LOCAL_LIBRARY_ROW_B.id, LOCAL_LIBRARY_ROW_A.id]);
+    assert.equal(fixture.state.ActiveId, LOCAL_LIBRARY_ROW_A.id);
+    assert.deepEqual(JSON.parse(fixture.localStorage.getItem(fixture.libraryKey())!).map((row: LocalLibraryVideo) => row.id), [LOCAL_LIBRARY_ROW_B.id, LOCAL_LIBRARY_ROW_A.id]);
+    assert.deepEqual(fixture.dispatches, []);
+  } finally { fixture.lifetime!.unmount(); }
+});
+
+for (const boundary of ["workspace", "unmount"] as const) {
+  test(`G5C12 retained saveVideos cannot publish or cache after ${boundary}`, async () => {
+    const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE), captured = fixture.library();
+    if (boundary === "workspace") fixture.workspace(HANDOFF_WORKSPACE_B); else fixture.lifetime!.unmount();
+    const writes = fixture.writes.length, mutations = fixture.mutations.length;
+    try {
+      assert.equal(await captured.callbacks.save([LOCAL_LIBRARY_ROW_A], LOCAL_LIBRARY_ROW_A.id), false);
+      assert.deepEqual(fixture.writes.slice(writes), []); assert.deepEqual(fixture.mutations.slice(mutations), []);
+    } finally { fixture.lifetime!.unmount(); }
+  });
+}
+
+test("G5C12 fixed-key cache helpers never reinterpret an explicitly captured key through the live selector", () => localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE).then((fixture) => {
+  try {
+    const captured = fixture.library(), key = fixture.libraryKey(REAL_DEMO_TEST_WORKSPACE); fixture.workspace(HANDOFF_WORKSPACE_B);
+    captured.callbacks.write([LOCAL_LIBRARY_ROW_A], key);
+    assert.deepEqual(JSON.parse(fixture.localStorage.getItem(key)!), [LOCAL_LIBRARY_ROW_A]);
+    assert.equal(fixture.localStorage.getItem(fixture.libraryKey(HANDOFF_WORKSPACE_B)), null);
+    assert.deepEqual(JSON.parse(JSON.stringify(captured.callbacks.read(key))), [LOCAL_LIBRARY_ROW_A]);
+  } finally { fixture.lifetime!.unmount(); }
+}));
+
+test("G5C12 cache write failure returns false without publishing an unsaved list", async () => {
+  const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE), captured = fixture.library(), before = libraryState(fixture);
+  fixture.localStorage.failNextWrite(fixture.libraryKey());
+  try {
+    assert.equal(await captured.callbacks.save([LOCAL_LIBRARY_ROW_A], LOCAL_LIBRARY_ROW_A.id), false);
+    assert.deepEqual(libraryState(fixture), before); assert.ok(fixture.state.Notice); assert.deepEqual(fixture.dispatches, []);
+  } finally { fixture.lifetime!.unmount(); }
+});
+
+test("G5C12 current library GET validates rows and hydrates sorted receipt data without changing the form", async () => {
+  const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE);
+  fixture.library().callbacks.editTitle("Current unsaved form"); const form = fixture.state.Form;
+  const cleanup = fixture.video(null).restore();
+  try {
+    await flushLocalVideoWork();
+    assert.equal(fixture.dispatches.length, 1); assert.equal(fixture.dispatches[0].method, "GET");
+    assert.deepEqual(Array.from(libraryRows(fixture), (row) => row.id), [LOCAL_LIBRARY_ROW_B.id, LOCAL_LIBRARY_ROW_A.id]);
+    assert.equal(fixture.state.ActiveId, LOCAL_LIBRARY_ROW_B.id); assert.equal(fixture.state.Form, form);
+    assert.ok(fixture.localStorage.getItem(fixture.libraryKey()));
+  } finally { if (typeof cleanup === "function") cleanup(); fixture.lifetime!.unmount(); }
+});
+
+for (const edit of ["form", "selection-ABA"] as const) {
+  test(`G5C12 pending library GET cannot overwrite a synchronous ${edit} edit`, { timeout: 5000 }, async () => {
+    const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE);
+    fixture.seedLibrary([LOCAL_LIBRARY_ROW_A, LOCAL_LIBRARY_ROW_B], LOCAL_LIBRARY_ROW_A.id);
+    const captured = fixture.library(), body = fixture.deferBody("restore"), cleanup = fixture.video(null).restore();
+    try {
+      await fixture.bodyStarted.promise;
+      if (edit === "form") captured.callbacks.editTitle("Edited while loading");
+      else { captured.callbacks.select(LOCAL_LIBRARY_ROW_B.id); fixture.library().callbacks.select(LOCAL_LIBRARY_ROW_A.id); }
+      const before = libraryState(fixture), writes = fixture.writes.length, mutations = fixture.mutations.length;
+      body.resolve(JSON.stringify(fixture.libraryReplies.restore)); await flushLocalVideoWork();
+      assert.deepEqual(libraryState(fixture), before); assert.deepEqual(fixture.writes.slice(writes), []);
+      assert.deepEqual(fixture.mutations.slice(mutations), []);
+    } finally { body.resolve(JSON.stringify(fixture.libraryReplies.restore)); await flushLocalVideoWork(); if (typeof cleanup === "function") cleanup(); fixture.lifetime!.unmount(); }
+  });
+}
+
+test("G5C12 malformed library GET rows never reach state or cache", async () => {
+  const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE); fixture.seedLibrary([LOCAL_LIBRARY_ROW_A]); fixture.library();
+  fixture.libraryReplies.restore = { success: true, mode: "supabase", data: { videos: [{ ...LOCAL_LIBRARY_ROW_B, title: {} }] } };
+  const before = libraryState(fixture), mutations = fixture.mutations.length, cleanup = fixture.video(null).restore();
+  try { await flushLocalVideoWork(); assert.deepEqual(libraryState(fixture), before); assert.deepEqual(fixture.mutations.slice(mutations), []); }
+  finally { if (typeof cleanup === "function") cleanup(); fixture.lifetime!.unmount(); }
+});
+
+test("G5C12 current GET 403 hides server rows without reading its body or deleting the cache", async () => {
+  const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE); fixture.seedLibrary([LOCAL_LIBRARY_ROW_A]); fixture.library();
+  const key = fixture.libraryKey(), cache = JSON.stringify([LOCAL_LIBRARY_ROW_A]); fixture.localStorage.setItem(key, cache);
+  fixture.handoffStatuses.restore = 403; fixture.handoffBodyFailures.add("restore"); const cleanup = fixture.video(null).restore();
+  try {
+    await flushLocalVideoWork(); assert.equal(fixture.packageBodyReads.includes("restore"), false);
+    assert.equal(libraryRows(fixture).length, 0); assert.equal(fixture.state.ActiveId, ""); assert.ok(fixture.state.Notice);
+    assert.equal(fixture.localStorage.getItem(key), cache);
+  } finally { if (typeof cleanup === "function") cleanup(); fixture.lifetime!.unmount(); }
+});
+
+test("G5C12 a later denied create intent expires a pending GET even without a snapshot change", { timeout: 5000 }, async () => {
+  const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE); fixture.seedLibrary([LOCAL_LIBRARY_ROW_A]);
+  const captured = fixture.library(), body = fixture.deferBody("restore"), cleanup = fixture.video(null).restore();
+  try {
+    await fixture.bodyStarted.promise; fixture.handoffStatuses["library-create"] = 403;
+    const before = libraryState(fixture); await captured.callbacks.create();
+    assert.deepEqual(libraryState(fixture), before); const writes = fixture.writes.length, mutations = fixture.mutations.length;
+    body.resolve(JSON.stringify(fixture.libraryReplies.restore)); await flushLocalVideoWork();
+    assert.deepEqual(libraryState(fixture), before); assert.deepEqual(fixture.writes.slice(writes), []);
+    assert.deepEqual(fixture.mutations.slice(mutations), []);
+  } finally { body.resolve(JSON.stringify(fixture.libraryReplies.restore)); await flushLocalVideoWork(); if (typeof cleanup === "function") cleanup(); fixture.lifetime!.unmount(); }
+});
+
+test("G5C12 confirmed empty GET drops cached server rows while retaining local drafts and their selection", async () => {
+  const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE);
+  const draft = { ...LOCAL_LIBRARY_ROW_A, id: "content-owned-local", title: "Local-only idea" };
+  fixture.seedLibrary([LOCAL_LIBRARY_ROW_A, draft], draft.id); fixture.library();
+  fixture.localStorage.setItem(fixture.libraryKey(), JSON.stringify([LOCAL_LIBRARY_ROW_A, draft]));
+  fixture.libraryReplies.restore = { success: true, mode: "supabase", data: { videos: [] } };
+  const cleanup = fixture.video(null).restore();
+  try {
+    await flushLocalVideoWork(); assert.deepEqual(JSON.parse(JSON.stringify(libraryRows(fixture))), [draft]);
+    assert.equal(fixture.state.ActiveId, draft.id); assert.deepEqual(JSON.parse(fixture.localStorage.getItem(fixture.libraryKey())!), [draft]);
+  } finally { if (typeof cleanup === "function") cleanup(); fixture.lifetime!.unmount(); }
 });

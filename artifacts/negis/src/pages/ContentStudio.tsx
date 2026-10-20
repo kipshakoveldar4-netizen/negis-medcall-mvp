@@ -28,6 +28,7 @@ import {
   ADVERTISING_CONTENT_STUDIO_PREFILL_KEY,
   ADVERTISING_CONTENT_APPROVAL_VERSION,
   createAdvertisingCampaignPrefill,
+  normalizeAdvertisingContentApproval,
   parseAdvertisingCampaignPrefillForPlatform,
   type AdvertisingContentApproval,
   type AdvertisingCampaignPrefillInput,
@@ -65,6 +66,18 @@ type ContentVideo = {
   contentApproval?: AdvertisingContentApproval;
   status: ContentVideoStatus;
   createdAt: string;
+};
+
+type ContentLibrarySnapshot = {
+  form: Omit<ContentVideo, "id" | "status" | "createdAt">;
+  videos: ContentVideo[];
+  activeId: string;
+};
+
+type ContentLibraryWrite = {
+  session: AbortController;
+  snapshot: ContentLibrarySnapshot;
+  storageKey: string;
 };
 
 type ScriptPackage = Pick<ContentVideo, "hook" | "script" | "voiceover" | "cta" | "caption" | "hashtags">;
@@ -636,19 +649,41 @@ function clearBrowserPaidGenerationAttempt(kind: PaidGenerationKind, key = paidG
   } catch { /* A receipt cleanup failure must not discard an accepted paid result. */ }
 }
 
-function readVideos(): ContentVideo[] {
+function parseContentVideo(value: unknown): ContentVideo | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const video = value as ContentVideo;
+  if (![video.id, video.title, video.niche, video.goal, video.duration, video.style, video.audience, video.createdAt]
+    .every((item) => typeof item === "string") || !video.id.trim() || !video.title.trim()
+    || !Number.isFinite(Date.parse(video.createdAt)) || typeof video.status !== "string" || !Object.hasOwn(statusLabels, video.status)) return null;
+  const optionalText = [video.hook, video.script, video.voiceover, video.cta, video.caption, video.avatarPrompt, video.tapnowPrompt];
+  if (optionalText.some((item) => item !== undefined && typeof item !== "string")
+    || (video.hashtags !== undefined && (!Array.isArray(video.hashtags) || !video.hashtags.every((tag) => typeof tag === "string")))) return null;
+  const contentApproval = normalizeAdvertisingContentApproval(video.contentApproval);
+  if (video.contentApproval !== undefined && !contentApproval) return null;
+  return {
+    id: video.id, title: video.title, niche: video.niche, goal: video.goal, duration: video.duration,
+    style: video.style, audience: video.audience, createdAt: video.createdAt, status: video.status,
+    hook: video.hook, script: video.script, voiceover: video.voiceover, cta: video.cta, caption: video.caption,
+    hashtags: video.hashtags, avatarPrompt: video.avatarPrompt, tapnowPrompt: video.tapnowPrompt,
+    ...(contentApproval ? { contentApproval } : {}),
+  };
+}
+
+function readVideos(key = workspaceScopedKey(STORAGE_KEY)): ContentVideo[] {
   try {
-    const raw = localStorage.getItem(workspaceScopedKey(STORAGE_KEY));
+    const raw = localStorage.getItem(key);
     if (!raw) return [];
-    const parsed = JSON.parse(raw) as ContentVideo[];
-    return Array.isArray(parsed) ? parsed : [];
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    const videos = parsed.map(parseContentVideo);
+    return videos.every((video): video is ContentVideo => video !== null) ? videos : [];
   } catch {
     return [];
   }
 }
 
-function writeVideos(videos: ContentVideo[]) {
-  localStorage.setItem(workspaceScopedKey(STORAGE_KEY), JSON.stringify(videos));
+function writeVideos(videos: ContentVideo[], key = workspaceScopedKey(STORAGE_KEY)) {
+  localStorage.setItem(key, JSON.stringify(videos));
 }
 
 function combinePrompt(result: PromptPackage) {
@@ -836,6 +871,45 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
   const [form, setForm] = useState(initialVideo);
   const [videos, setVideos] = useState<ContentVideo[]>([]);
   const [activeId, setActiveId] = useState<string>("");
+  // Replacing this snapshot also invalidates work after a form/selection A-B-A.
+  const librarySnapshotRef = useRef<ContentLibrarySnapshot>({ form, videos, activeId });
+  const libraryWritePending = useRef<ContentLibraryWrite | null>(null);
+  const libraryReadEpoch = useRef(0);
+  const libraryView = librarySnapshotRef.current;
+  const libraryStorageKey = `${STORAGE_KEY}::${workspaceId}`;
+
+  function beginLibraryWrite(snapshot: ContentLibrarySnapshot): ContentLibraryWrite | null {
+    const session = sessionRef.current;
+    if (libraryWritePending.current || !isHandoffSessionAlive(session) || librarySnapshotRef.current !== snapshot) return null;
+    const write = { session, snapshot, storageKey: libraryStorageKey };
+    libraryReadEpoch.current += 1;
+    libraryWritePending.current = write;
+    return write;
+  }
+
+  function isLibraryWriteCurrent(write: ContentLibraryWrite) {
+    return libraryWritePending.current === write && isHandoffSessionAlive(write.session)
+      && librarySnapshotRef.current === write.snapshot;
+  }
+
+  async function isLibraryWriteVerified(write: ContentLibraryWrite) {
+    return isLibraryWriteCurrent(write) && await isHandoffSessionCurrent(write.session) && isLibraryWriteCurrent(write);
+  }
+
+  const updateIdeaForm = (key: "title" | "niche" | "goal" | "audience" | "style" | "duration", value: string) => {
+    const snapshot = librarySnapshotRef.current;
+    if (snapshot.form[key] === value) return;
+    const nextForm = { ...snapshot.form, [key]: value };
+    librarySnapshotRef.current = { ...snapshot, form: nextForm };
+    setForm(nextForm);
+  };
+
+  const selectLibraryVideo = (id: string) => {
+    const snapshot = librarySnapshotRef.current;
+    if (!isHandoffSessionAlive(sessionRef.current) || snapshot.activeId === id || !snapshot.videos.some((video) => video.id === id)) return;
+    librarySnapshotRef.current = { ...snapshot, activeId: id };
+    setActiveId(id);
+  };
   const [loading, setLoading] = useState<"video" | "script" | "avatar" | "tapnow" | "telegram" | "telegram-test" | "package" | null>(null);
   const [notice, setNotice] = useState("");
   const [packageBrief, setPackageBrief] = useState<PackageBrief>(defaultPackageBrief);
@@ -2062,8 +2136,9 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
 
   useEffect(() => {
     if (!localDraftsOnly || isRealWorkspace(workspaceId) || readWorkspaceId() !== workspaceId) return;
-    const saved = readVideos();
+    const saved = readVideos(libraryStorageKey);
     if (saved.length > 0) {
+      librarySnapshotRef.current = { ...librarySnapshotRef.current, videos: saved, activeId: saved[0].id };
       setVideos(saved);
       setActiveId(saved[0].id);
     }
@@ -2075,6 +2150,8 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
     const key = workspaceScopedKey(VIDEO_JOB_KEY);
     const originalJob = videoJobRef.current;
     const originalGeneration = videoGenerationRevision.current;
+    let expectedLibrary = librarySnapshotRef.current;
+    const readEpoch = libraryReadEpoch.current;
     const controller = new AbortController();
     const signal = AbortSignal.any([session.signal, controller.signal]);
     let stopped = false;
@@ -2112,25 +2189,55 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
             }
           }
         }
-        const saved = readVideos();
+        const libraryCurrent = () => current() && librarySnapshotRef.current === expectedLibrary && libraryReadEpoch.current === readEpoch;
+        if (!libraryCurrent()) return;
+        const saved = readVideos(libraryStorageKey);
         if (saved.length > 0) {
+          expectedLibrary = { ...expectedLibrary, videos: saved, activeId: saved[0].id };
+          librarySnapshotRef.current = expectedLibrary;
           setVideos(saved);
           setActiveId(saved[0].id);
         }
         const response = await crmFetch(`/api/crm/content-videos?workspaceId=${encodeURIComponent(workspaceId)}`, {
-          expectedUserId: actorId, dispatchGuard: current, signal, cache: "no-store",
+          expectedUserId: actorId, dispatchGuard: libraryCurrent, signal, cache: "no-store",
         });
-        if (!current()) return;
+        if (!libraryCurrent()) return;
+        if (handoffAccessDenied(response)) {
+          if (!await isGenerationSessionCurrent(session) || !libraryCurrent()) return;
+          librarySnapshotRef.current = { ...expectedLibrary, videos: [], activeId: "" };
+          setVideos([]);
+          setActiveId("");
+          setNotice("Доступ к библиотеке контента отозван. Обновите страницу.");
+          return;
+        }
         const body = await safeJson<{ videos?: ContentVideo[]; items?: ContentVideo[] }>(response);
-        if (!await isGenerationSessionCurrent(session) || !current() || !response.ok || body?.success !== true || body.mode !== "supabase") return;
+        if (!await isGenerationSessionCurrent(session) || !libraryCurrent()) return;
+        if (!response.ok || body?.success !== true || body.mode !== "supabase") {
+          setNotice("Библиотека на сервере не подтверждена. Прежний список не изменён.");
+          return;
+        }
 
-        const apiVideos = body.data.videos ?? body.data.items ?? [];
-        if (apiVideos.length === 0) return;
+        const rawVideos: unknown = body.data?.videos ?? body.data?.items;
+        if (!Array.isArray(rawVideos)) {
+          setNotice("Сервер вернул неполную библиотеку. Прежний список не изменён.");
+          return;
+        }
+        const apiVideos = rawVideos.map(parseContentVideo);
+        if (!apiVideos.every((video): video is ContentVideo => video !== null && isRealWorkspace(video.id))
+          || new Set(apiVideos.map((video) => video.id)).size !== apiVideos.length) {
+          setNotice("Сервер вернул неполную библиотеку. Прежний список не изменён.");
+          return;
+        }
 
-        const sorted = [...apiVideos].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+        const localDrafts = expectedLibrary.videos.filter((video) => video.id.startsWith("content-"));
+        const sorted = [...apiVideos, ...localDrafts].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+        const nextId = sorted.some((video) => video.id === expectedLibrary.activeId) ? expectedLibrary.activeId : sorted[0]?.id || "";
+        if (sorted.length === 0 && expectedLibrary.videos.length === 0 && !expectedLibrary.activeId) return;
+        writeVideos(sorted, libraryStorageKey);
+        if (!libraryCurrent()) return;
+        librarySnapshotRef.current = { ...expectedLibrary, videos: sorted, activeId: nextId };
         setVideos(sorted);
-        writeVideos(sorted);
-        setActiveId(sorted[0].id);
+        setActiveId(nextId);
       } catch {
         // Keep localStorage videos as the offline fallback.
       }
@@ -2158,43 +2265,83 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
 
   const packageText = buildTelegramPackage(current);
 
-  const saveVideos = (nextVideos: ContentVideo[], selectedId?: string) => {
-    const sorted = [...nextVideos].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  const saveVideos = async (
+    nextVideos: ContentVideo[], selectedId?: string,
+    expected = libraryView, session = sessionRef.current, storageKey = libraryStorageKey,
+  ) => {
+    const current = () => isHandoffSessionAlive(session) && librarySnapshotRef.current === expected;
+    if (!current() || !await isHandoffSessionCurrent(session) || !current()) return false;
+    const parsed = nextVideos.map(parseContentVideo);
+    if (!parsed.every((video): video is ContentVideo => video !== null)
+      || new Set(parsed.map((video) => video.id)).size !== parsed.length
+      || (selectedId && !parsed.some((video) => video.id === selectedId))) {
+      setNotice("Данные библиотеки не подтверждены. Прежний список сохранён.");
+      return false;
+    }
+    const sorted = parsed.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    const nextId = selectedId ?? (sorted.some((video) => video.id === expected.activeId) ? expected.activeId : sorted[0]?.id || "");
+    try { writeVideos(sorted, storageKey); }
+    catch {
+      if (current()) setNotice("Не удалось сохранить библиотеку в этом браузере. Обновите список перед повторной отправкой.");
+      return false;
+    }
+    if (!current()) return false;
+    librarySnapshotRef.current = { ...expected, videos: sorted, activeId: nextId };
     setVideos(sorted);
-    writeVideos(sorted);
-    if (selectedId) setActiveId(selectedId);
+    setActiveId(nextId);
+    return true;
   };
 
-  const updateCurrentVideo = (patch: Partial<ContentVideo>) => {
-    if (!activeVideo) return;
-    const nextVideo = { ...activeVideo, ...patch };
-    saveVideos(videos.map((video) => (video.id === nextVideo.id ? nextVideo : video)), nextVideo.id);
-    void persistCurrentVideoPatch(nextVideo.id, patch);
-  };
-
-  const persistCurrentVideoPatch = async (videoId: string, patch: Partial<ContentVideo>) => {
+  const updateCurrentVideo = async (patch: Partial<ContentVideo>) => {
+    const write = beginLibraryWrite(libraryView);
+    if (!write) return false;
     try {
-      const response = await crmFetch("/api/crm/content-videos", {
+      if (!await isLibraryWriteVerified(write)) return false;
+      const active = write.snapshot.videos.find((video) => video.id === write.snapshot.activeId) ?? write.snapshot.videos[0];
+      const keys = new Set(["title", "niche", "goal", "duration", "style", "audience", "hook", "script", "voiceover", "cta", "caption", "hashtags", "avatarPrompt", "tapnowPrompt", "status"]);
+      if (!active || Object.keys(patch).some((key) => !keys.has(key))) return false;
+      const nextVideo = parseContentVideo({ ...active, ...patch });
+      if (!nextVideo) {
+        setNotice("Изменение контента не подтверждено. Прежняя идея сохранена.");
+        return false;
+      }
+      const result = await persistCurrentVideoPatch(active.id, patch, write);
+      if (result === "stale" || !await isLibraryWriteVerified(write)) return false;
+      if (result === "denied") {
+        setNotice("Доступ к изменению контента отозван. Обновите страницу.");
+        return false;
+      }
+      const accepted = typeof result === "object" ? result : nextVideo;
+      if (!await saveVideos(write.snapshot.videos.map((video) => video.id === active.id ? accepted : video), active.id,
+        write.snapshot, write.session, write.storageKey)) return false;
+      if (result === "local") setNotice("Изменение сохранено только в этом браузере: запись на сервере не подтверждена.");
+      return true;
+    } finally {
+      if (libraryWritePending.current === write) libraryWritePending.current = null;
+    }
+  };
+
+  const persistCurrentVideoPatch = async (
+    videoId: string, patch: Partial<ContentVideo>, write: ContentLibraryWrite,
+  ): Promise<ContentVideo | "local" | "denied" | "stale"> => {
+    if (!await isLibraryWriteVerified(write)) return "stale";
+    if (localDraftsOnly || videoId.startsWith("content-")) return "local";
+    try {
+      const response = await crmFetch(`/api/crm/content-videos?workspaceId=${encodeURIComponent(workspaceId)}`, {
+        expectedUserId: actorId, dispatchGuard: () => isLibraryWriteCurrent(write), signal: write.session.signal,
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          id: videoId,
-                    ...patch,
-        }),
+        body: JSON.stringify({ ...patch, id: videoId }),
       });
-      // Ответ раньше не читался вообще: сценарий, prompt или статус могли не
-      // сохраниться на сервере, а экран продолжал показывать их как записанные.
-      // Ошибку здесь нельзя показывать как отказ — локальная копия уже
-      // обновлена и работает, — но и молчать о ней нельзя.
-      if (!response.ok) {
-        const body = await safeJson<unknown>(response);
-        setNotice(
-          `${generationRefusalText(body, response.status, "Сервер не сохранил изменение")}. ` +
-            "Изменение осталось только в этом браузере.",
-        );
-      }
-    } catch {
-      setNotice("Нет связи с сервером: изменение осталось только в этом браузере.");
+      if (handoffAccessDenied(response)) return "denied";
+      if (!await isLibraryWriteVerified(write)) return "stale";
+      const body = await safeJson<{ video?: unknown; item?: unknown }>(response);
+      if (!await isLibraryWriteVerified(write)) return "stale";
+      const receipt = body?.success === true ? parseContentVideo(body.data?.video ?? body.data?.item) : null;
+      return response.ok && body?.success === true && body.mode === "supabase" && receipt?.id === videoId ? receipt : "local";
+    } catch (error) {
+      if (handoffAccessDenied(error)) return "denied";
+      return await isLibraryWriteVerified(write) ? "local" : "stale";
     }
   };
 
@@ -2204,49 +2351,76 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
   };
 
   const createIdea = async () => {
-    setLoading("video");
-    setNotice("");
-
+    const write = beginLibraryWrite(libraryView);
+    if (!write) return;
+    let started = false;
+    const localIdea = (): ContentVideo => {
+      const base = newVideoId();
+      const ids = new Set(write.snapshot.videos.map((video) => video.id));
+      let id = base;
+      for (let suffix = 1; ids.has(id); suffix += 1) id = `${base}-${suffix}`;
+      return { ...write.snapshot.form, id, status: "idea", createdAt: new Date().toISOString() };
+    };
     try {
-      const response = await crmFetch("/api/crm/content-videos", {
+      if (!await isLibraryWriteVerified(write)) return;
+      if (!write.snapshot.form.title.trim()) {
+        setNotice("Введите название идеи.");
+        return;
+      }
+      setLoading("video");
+      started = true;
+      setNotice("");
+      if (localDraftsOnly) {
+        const video = localIdea();
+        if (await saveVideos([video, ...write.snapshot.videos], video.id, write.snapshot, write.session, write.storageKey)) {
+          setNotice("Идея сохранена только в этом браузере.");
+          toast.success("Локальная идея готова");
+        }
+        return;
+      }
+      const response = await crmFetch(`/api/crm/content-videos?workspaceId=${encodeURIComponent(workspaceId)}`, {
+        expectedUserId: actorId, dispatchGuard: () => isLibraryWriteCurrent(write), signal: write.session.signal,
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          ...form,
-                  }),
+        body: JSON.stringify(write.snapshot.form),
       });
-      const body = await safeJson<{ video: ContentVideo }>(response);
-      const apiVideo = response.ok && body?.success === true ? body.data.video : null;
-      const video: ContentVideo = apiVideo || {
-        ...form,
-        id: newVideoId(),
-        status: "idea",
-        createdAt: new Date().toISOString(),
-      };
-
-      saveVideos([video, ...videos.filter((item) => item.id !== video.id)], video.id);
-
+      if (handoffAccessDenied(response)) {
+        if (await isLibraryWriteVerified(write)) setNotice("Доступ к созданию контента отозван. Обновите страницу.");
+        return;
+      }
+      if (!await isLibraryWriteVerified(write)) return;
+      const body = await safeJson<{ video?: unknown; item?: unknown }>(response);
+      if (!await isLibraryWriteVerified(write)) return;
+      const receipt = body?.success === true ? parseContentVideo(body.data?.video ?? body.data?.item) : null;
+      const apiVideo = response.ok && body?.success === true && body.mode === "supabase" && receipt && isRealWorkspace(receipt.id)
+        && !write.snapshot.videos.some((video) => video.id === receipt.id) ? receipt : null;
+      const video = apiVideo || localIdea();
+      if (!await saveVideos([video, ...write.snapshot.videos], video.id, write.snapshot, write.session, write.storageKey)) return;
       if (apiVideo) {
         toast.success("Идея ролика создана");
       } else {
-        // Отказ сервера доходил сюда молча: ответ не проверялся, идея падала в
-        // localStorage, и экран говорил «создана». На другом устройстве её не
-        // было. Теперь видно и то, что сохранено локально, и почему.
-        const message = generationRefusalText(body, response.status, "Сервер не принял идею");
+        const message = generationRefusalText(body, response.status, "Сервер не подтвердил сохранение идеи");
         setNotice(`${message}. Идея сохранена только в этом браузере.`);
-        toast.warning("Идея сохранена локально: сервер её не принял");
+        toast.warning("Идея сохранена локально: запись на сервере не подтверждена");
       }
-    } catch {
-      const fallbackVideo: ContentVideo = {
-        ...form,
-        id: newVideoId(),
-        status: "idea",
-        createdAt: new Date().toISOString(),
-      };
-      saveVideos([fallbackVideo, ...videos], fallbackVideo.id);
-      toast.warning("API недоступен, идея сохранена локально");
+    } catch (error) {
+      if (!await isLibraryWriteVerified(write)) return;
+      if (handoffAccessDenied(error)) {
+        setNotice("Доступ к созданию контента отозван. Обновите страницу.");
+        return;
+      }
+      const video = localIdea();
+      if (await saveVideos([video, ...write.snapshot.videos], video.id, write.snapshot, write.session, write.storageKey)) {
+        setNotice("Связь с сервером не подтверждена. Идея сохранена только в этом браузере.");
+        toast.warning("API недоступен, идея сохранена локально");
+      }
     } finally {
-      setLoading(null);
+      if (libraryWritePending.current === write) {
+        libraryWritePending.current = null;
+        if (started && sessionRef.current === write.session && !write.session.signal.aborted) {
+          setLoading((current) => current === "video" ? null : current);
+        }
+      }
     }
   };
 
@@ -2272,7 +2446,7 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
       };
 
       if (activeVideo) {
-        updateCurrentVideo(patch);
+        if (!await updateCurrentVideo(patch)) return;
       } else {
         const video: ContentVideo = {
           ...form,
@@ -2281,7 +2455,7 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
           status: "script_ready",
           createdAt: new Date().toISOString(),
         };
-        saveVideos([video, ...videos], video.id);
+        if (!await saveVideos([video, ...videos], video.id)) return;
       }
 
       toast.success(body.mode === "demo" ? "Образец сценария готов" : "Сценарий готов");
@@ -2313,10 +2487,10 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
       }
 
       const prompt = combinePrompt(body.data);
-      updateCurrentVideo({
+      if (!await updateCurrentVideo({
         [kind === "avatar" ? "avatarPrompt" : "tapnowPrompt"]: prompt,
         status: "avatar_ready",
-      });
+      })) return;
       toast.success(kind === "avatar" ? "Avatar prompt готов" : "TapNow prompt готов");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Ошибка генерации prompt");
@@ -2383,7 +2557,7 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
         return;
       }
 
-      updateCurrentVideo({ status: "telegram_ready" });
+      if (!await updateCurrentVideo({ status: "telegram_ready" })) return;
       setNotice(
         body.warning ||
           (body.data.sent
@@ -3226,12 +3400,12 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
               subtitle="Сохраните базовые параметры ролика. Для MVP они лежат в localStorage и доступны после обновления страницы."
             />
             <div className="grid gap-4 md:grid-cols-2">
-              <Field label="Название" value={form.title} onChange={(value) => setForm((current) => ({ ...current, title: value }))} />
-              <Field label="Ниша" value={form.niche} onChange={(value) => setForm((current) => ({ ...current, niche: value }))} />
-              <Field label="Цель" value={form.goal} onChange={(value) => setForm((current) => ({ ...current, goal: value }))} />
-              <Field label="Аудитория" value={form.audience} onChange={(value) => setForm((current) => ({ ...current, audience: value }))} />
-              <Field label="Стиль" value={form.style} onChange={(value) => setForm((current) => ({ ...current, style: value }))} />
-              <Field label="Длительность" value={form.duration} onChange={(value) => setForm((current) => ({ ...current, duration: value }))} />
+              <Field label="Название" value={form.title} onChange={(value) => updateIdeaForm("title", value)} />
+              <Field label="Ниша" value={form.niche} onChange={(value) => updateIdeaForm("niche", value)} />
+              <Field label="Цель" value={form.goal} onChange={(value) => updateIdeaForm("goal", value)} />
+              <Field label="Аудитория" value={form.audience} onChange={(value) => updateIdeaForm("audience", value)} />
+              <Field label="Стиль" value={form.style} onChange={(value) => updateIdeaForm("style", value)} />
+              <Field label="Длительность" value={form.duration} onChange={(value) => updateIdeaForm("duration", value)} />
             </div>
             <div className="mt-5 flex flex-wrap gap-3">
               <button type="button" className="neu-btn-primary flex items-center gap-2 px-5 py-2.5 text-sm" onClick={createIdea} disabled={loading === "video"}>
@@ -3262,7 +3436,7 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
                       <button
                         key={video.id}
                         type="button"
-                        onClick={() => setActiveId(video.id)}
+                        onClick={() => selectLibraryVideo(video.id)}
                         className={`w-full rounded-xl border p-3 text-left text-sm transition ${
                           video.id === current.id ? "border-[#1A56DB] bg-[#EFF6FF]" : "border-[#E7ECF3] bg-white"
                         }`}
