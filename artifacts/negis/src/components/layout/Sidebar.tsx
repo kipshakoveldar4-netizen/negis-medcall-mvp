@@ -111,8 +111,8 @@ export function Sidebar() {
   return (
     <>
       <aside
-        className="fixed bottom-4 left-4 top-4 z-20 flex w-[236px] select-none flex-col overflow-hidden rounded-[28px]"
-        style={{ background: 'var(--negis-dark)', boxShadow: 'var(--negis-shadow-lift)' }}
+        className="medina-sidebar fixed bottom-3 left-3 top-3 z-20 flex w-[236px] select-none flex-col overflow-hidden"
+        style={{ background: 'var(--negis-dark)' }}
       >
         {/* Brand */}
         <div className="flex h-[68px] shrink-0 items-center gap-3 px-5">
@@ -126,7 +126,7 @@ export function Sidebar() {
           <div className="min-w-0">
             <p className="truncate text-sm font-semibold" style={{ color: 'var(--negis-dark-text)' }}>Medina OS</p>
             <p className="mt-0.5 truncate text-[11px] font-medium" style={{ color: 'var(--negis-dark-muted)' }}>
-              {workspacePurpose === 'mortgage_leads' ? 'Ипотечные заявки' : noClinicSelected ? 'Пробный доступ' : 'Медицинская CRM'}
+              {availableWorkspaces.find((workspace) => workspace.id === clinicId)?.name || (workspacePurpose === 'mortgage_leads' ? 'Ипотечные заявки' : noClinicSelected ? 'Пробный доступ' : 'Медицинская CRM')}
             </p>
           </div>
         </div>
@@ -153,6 +153,7 @@ export function Sidebar() {
                       <div
                         className="flex min-h-[42px] cursor-pointer items-center gap-3 rounded-xl px-3 py-2 text-sm font-medium transition-colors"
                         data-active={active}
+                        aria-current={active ? 'page' : undefined}
                         style={{
                           background: active ? 'var(--negis-mint)' : 'transparent',
                           color: active ? 'var(--negis-mint-ink)' : 'var(--negis-dark-muted)',

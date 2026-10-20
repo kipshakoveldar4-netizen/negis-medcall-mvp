@@ -3,11 +3,12 @@ import { CalendarDays, Check, Loader2, Save, Search, UserRound, X } from "lucide
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useAuth } from "@/contexts/AuthContext";
 import {
-  mortgageButtonClass, mortgageDateTimeToIso, mortgageFieldClass, mortgageLocalDateTime, mortgagePrimaryClass,
+  mortgageDateTimeToIso, mortgageLocalDateTime,
   mortgagePriorityLabels, mortgageStatusLabels, useMortgageWorkspace,
   type MortgageActivity, type MortgageActivityDraft, type MortgageActivityKind, type MortgageActivityStatus,
   type MortgageContact, type MortgagePriority,
 } from "@/lib/mortgage-workspace";
+import { mortgageButtonClass, mortgageInputClass as mortgageFieldClass, mortgagePrimaryClass } from "./MortgagePrimitives";
 
 type Workspace = ReturnType<typeof useMortgageWorkspace>;
 export type ActivityDialogProps = {
@@ -141,7 +142,7 @@ function ActivityForm({ workspace, activity, kind, leadId, initialStartsAt, onOp
   return <DialogContent className="max-h-[90dvh] w-[calc(100%-1.5rem)] max-w-xl overflow-y-auto rounded-lg bg-[var(--negis-surface)] text-[var(--negis-text)] [&>button:last-child]:hidden" style={{ letterSpacing: 0 }}
     onEscapeKeyDown={(event) => { if (savingRef.current) event.preventDefault(); }}
     onInteractOutside={(event) => { if (savingRef.current) event.preventDefault(); }}>
-    <DialogClose asChild><button type="button" className="absolute right-3 top-3 flex h-9 w-9 items-center justify-center rounded hover:bg-[var(--negis-surface-2)] disabled:opacity-50" title="Закрыть" aria-label="Закрыть" disabled={saving}><X className="h-4 w-4" /></button></DialogClose>
+    <DialogClose asChild><button type="button" className="mortgage-control absolute right-3 top-3 flex h-10 w-10 max-sm:h-11 max-sm:w-11 items-center justify-center rounded-lg hover:bg-[var(--negis-surface-2)] disabled:opacity-50" title="Закрыть" aria-label="Закрыть" disabled={saving}><X className="h-4 w-4" /></button></DialogClose>
     <DialogHeader>
       <DialogTitle className="pr-7 text-xl leading-snug" style={{ letterSpacing: 0 }}>{activity ? "Редактирование" : kind === "meeting" ? "Новая встреча" : "Новая задача"}</DialogTitle>
       <DialogDescription className="flex items-center gap-2 break-all text-sm"><CalendarDays className="h-4 w-4 shrink-0" />{timeZone}</DialogDescription>

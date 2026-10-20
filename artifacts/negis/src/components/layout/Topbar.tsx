@@ -50,17 +50,13 @@ export function Topbar() {
   return (
     <header
       className="negis-topbar sticky top-0 z-30 flex shrink-0 items-center gap-4 px-5 md:px-8"
-      style={{
-        background: 'transparent',
-        borderBottom: 'none',
-      }}
     >
       <div className="flex min-w-0 items-center gap-2 select-none">
-        <span className="text-xs font-semibold tracking-[0.06em]" style={{ color: 'var(--negis-primary)' }}>
+        <span className="text-xs font-semibold" style={{ color: 'var(--negis-primary)' }}>
           Medina OS
         </span>
         <span aria-hidden style={{ color: 'var(--negis-border)', fontSize: 14 }}>/</span>
-        <span className="truncate text-xs font-semibold tracking-[0.04em]" style={{ color: 'var(--negis-text-2)' }}>
+        <span className="truncate text-xs font-medium" style={{ color: 'var(--negis-text-2)' }}>
           {pageLabel}
         </span>
       </div>
@@ -71,7 +67,7 @@ export function Topbar() {
           style={{
             fontSize: 12,
             color: 'var(--negis-muted)',
-            letterSpacing: '0.01em',
+            letterSpacing: 0,
           }}
         >
           {today}

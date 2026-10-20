@@ -2,6 +2,7 @@
    double-fetched the family and delayed first paint. */
 @import "tailwindcss";
 @import "tw-animate-css";
+@import "./styles/mint-workspace.css";
 @plugin "@tailwindcss/typography";
 
 @custom-variant dark (&:is(.dark *));

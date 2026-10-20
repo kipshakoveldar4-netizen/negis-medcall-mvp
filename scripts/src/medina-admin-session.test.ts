@@ -1667,8 +1667,9 @@ test("mortgage starts on staff, rejects every prohibited query/tab and never mou
       assert.ok(fixture.snapshots.every((snapshot) => snapshot.activeTab === "staff"),
         "even the first content frame must be staff, before effects run");
       assert.ok(authPanel(fixture)); assert.ok(staffCreation(fixture));
-      const header = nodes(fixture.renderer.tree()).find((node) => node.type === "p" && label(node).includes(`${workspaceA}.`))!;
-      assert.ok(label(header).includes(`${mortgageUi.member}: ${logins.loginFromEmail("owner@example.test")}`));
+      const header = nodes(fixture.renderer.tree()).find((node) => node.type === "p" && label(node) === logins.loginFromEmail("owner@example.test"))!;
+      assert.equal(label(header), logins.loginFromEmail("owner@example.test"));
+      assert.ok(!label(header).includes(workspaceA), "The support copy action retains the ID without cluttering the team header");
       assert.doesNotMatch(label(header), /\u0412\u043b\u0430\u0434\u0435\u043b\u0435\u0446:/);
       assert.equal(fixture.snapshot().inviteForm.role, "lead_manager");
       assert.equal(fixture.snapshot().batchRole, "lead_manager");

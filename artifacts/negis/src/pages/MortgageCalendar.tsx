@@ -2,20 +2,23 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useSearch } from "wouter";
 import { CalendarDays, Check, ChevronLeft, ChevronRight, Clock3, Loader2, Pencil, Plus, RefreshCw, UserRoundX, X } from "lucide-react";
 import { PageLayout } from "@/components/layout/PageLayout";
-import { PageHeader } from "@/components/ui/page-header";
 import { ActivityDialog } from "@/components/mortgage/ActivityDialog";
+import {
+  MortgageActivityStatus as MortgageActivityBadge, MortgageIconButton, MortgagePageHeader,
+  mortgageButtonClass, mortgageInputClass as mortgageFieldClass, mortgagePrimaryClass, mortgageSegmentClass,
+} from "@/components/mortgage/MortgagePrimitives";
 import { dayKeyInZone } from "@/lib/clinicDay";
 import { formatSlot, minuteOfClinicDay, placeColumn } from "@/lib/dayGrid";
 import {
-  MortgageScope, MortgageNotice, mortgageActivityDraft, mortgageAddDays, mortgageButtonClass, mortgageDateTimeToIso,
-  mortgageDayLabel, mortgageFieldClass, mortgageInstantLabel, mortgageMonthStep, mortgagePrimaryClass,
+  MortgageScope, MortgageNotice, mortgageActivityDraft, mortgageAddDays, mortgageDateTimeToIso,
+  mortgageDayLabel, mortgageInstantLabel, mortgageMonthStep,
   mortgageStatusLabels, mortgageWeekStart, useMortgageWorkspace, type MortgageActivity, type MortgageActivityStatus,
 } from "@/lib/mortgage-workspace";
 
 type Mode = "day" | "week" | "month";
 type Editor = { activity?: MortgageActivity; initialStartsAt?: string };
 const modes: Array<{ value: Mode; label: string }> = [{ value: "day", label: "День" }, { value: "week", label: "Неделя" }, { value: "month", label: "Месяц" }];
-const tone = (status: MortgageActivityStatus) => status === "missed" ? "border-red-300 bg-red-50 text-red-900" : status === "cancelled" ? "border-zinc-300 bg-zinc-100 text-zinc-600" : status === "done" ? "border-emerald-300 bg-emerald-50 text-emerald-900" : "border-sky-300 bg-sky-50 text-sky-950";
+const tone = (status: MortgageActivityStatus) => status === "missed" ? "border-red-200 bg-red-50 text-red-900" : status === "cancelled" ? "border-zinc-200 bg-zinc-100 text-zinc-600" : status === "done" ? "border-emerald-200 bg-emerald-50 text-emerald-900" : "border-emerald-200 bg-[var(--negis-primary-soft)] text-[var(--negis-text)]";
 
 export function mortgageCalendarDays(day: string, mode: Mode): string[] {
   const start = mode === "month" ? mortgageWeekStart(`${day.slice(0, 7)}-01`) : mode === "week" ? mortgageWeekStart(day) : day;
@@ -114,50 +117,50 @@ function MortgageCalendarBody() {
     } finally { busyRef.current = false; if (alive.current && workspace.isCurrent()) setBusy(false); }
   };
   const title = day ? mode === "month" ? mortgageDayLabel(day, { month: "long", year: "numeric" }) : mode === "day" ? mortgageDayLabel(day, { day: "numeric", month: "long", year: "numeric" }) : `${mortgageDayLabel(days[0])} - ${mortgageDayLabel(days[6], { day: "numeric", month: "long", year: "numeric" })}` : "Календарь";
-  return <PageLayout><div className="mx-auto grid w-full min-w-0 max-w-[1600px] gap-5 p-4 sm:p-6" style={{ letterSpacing: 0 }}>
-    <PageHeader kicker="Baspana" title="Календарь встреч" description={timeZone || undefined} actions={<>
-      <button type="button" className={mortgageButtonClass} onClick={workspace.refresh} title="Обновить" aria-label="Обновить" disabled={workspace.loading}><RefreshCw className={`h-4 w-4 ${workspace.loading ? "animate-spin" : ""}`} /></button>
-      <button type="button" className={mortgagePrimaryClass} disabled={!workspace.data} onClick={() => setEditor({})}><Plus className="h-4 w-4" />Встреча</button>
-    </>} />
+  return <PageLayout><div className="grid w-full min-w-0 gap-5" style={{ letterSpacing: 0 }}>
+    <MortgagePageHeader title="Календарь встреч" caption={timeZone ? `Baspana · ${timeZone}` : "Baspana"}>
+      <MortgageIconButton icon={RefreshCw} label="Обновить" onClick={workspace.refresh} disabled={workspace.loading} />
+      <button type="button" className={mortgagePrimaryClass} disabled={!workspace.data} onClick={() => setEditor({})}><Plus className="h-4 w-4" />Новая встреча</button>
+    </MortgagePageHeader>
     <div className="flex min-w-0 flex-wrap items-center justify-between gap-3">
       <div className="flex flex-wrap items-center gap-2">
         <div className="flex items-center gap-1">
-          <button type="button" className={mortgageButtonClass} title="Предыдущий период" aria-label="Предыдущий период" disabled={!day} onClick={() => move(-1)}><ChevronLeft className="h-4 w-4" /></button>
-          <button type="button" className={mortgageButtonClass} title="Следующий период" aria-label="Следующий период" disabled={!day} onClick={() => move(1)}><ChevronRight className="h-4 w-4" /></button>
+          <MortgageIconButton icon={ChevronLeft} label="Предыдущий период" disabled={!day} onClick={() => move(-1)} />
+          <MortgageIconButton icon={ChevronRight} label="Следующий период" disabled={!day} onClick={() => move(1)} />
           <button type="button" className={mortgageButtonClass} disabled={!today} onClick={() => setDay(today)}>Сегодня</button>
         </div>
         <label className="sr-only" htmlFor="mortgage-calendar-date">Дата</label><input id="mortgage-calendar-date" type="date" className={`${mortgageFieldClass} !w-40`} value={day} onInput={(event) => { if (event.currentTarget.value) setDay(event.currentTarget.value); }} onChange={(event) => { if (event.target.value) setDay(event.target.value); }} disabled={!timeZone} />
       </div>
-      <div role="group" aria-label="Вид календаря" className="flex items-center rounded-lg border border-[var(--negis-border)] p-1">{modes.map((option) => <button type="button" key={option.value} aria-pressed={mode === option.value} className={`min-h-9 rounded px-3 text-sm ${mode === option.value ? "bg-[var(--negis-primary)] text-white" : "text-[var(--negis-muted)]"}`} onClick={() => setMode(option.value)}>{option.label}</button>)}</div>
+      <div role="group" aria-label="Вид календаря" className="inline-flex max-w-full items-center rounded-lg border border-[var(--negis-border)] bg-[var(--negis-surface)] p-0.5">{modes.map((option) => <button type="button" key={option.value} aria-pressed={mode === option.value} className={mortgageSegmentClass} onClick={() => setMode(option.value)}>{option.label}</button>)}</div>
     </div>
     <div className="flex min-w-0 flex-wrap items-center justify-between gap-3">
       <h2 className="min-w-0 break-words text-base font-semibold capitalize">{title}</h2>
-      <label className="flex w-full min-w-0 items-center gap-2 text-sm sm:w-72"><span className="shrink-0">Ответственный</span><select aria-label="Ответственный" className={mortgageFieldClass} value={managerId} onChange={(event) => setManagerId(event.target.value)}><option value="all">Все</option>{managers.map((manager) => <option key={manager.id} value={manager.id}>{manager.name}{manager.status !== "active" ? " (неактивен)" : ""}</option>)}</select></label>
+      <label className="grid w-full min-w-0 gap-1 text-xs text-[var(--negis-muted)] sm:w-64"><span>Ответственный</span><select aria-label="Ответственный" className={mortgageFieldClass} value={managerId} onChange={(event) => setManagerId(event.target.value)}><option value="all">Все ответственные</option>{managers.map((manager) => <option key={manager.id} value={manager.id}>{manager.name}{manager.status !== "active" ? " (неактивен)" : ""}</option>)}</select></label>
     </div>
     {leadId && <div className="flex flex-wrap items-center gap-3 text-sm"><Link href={`/clients?leadId=${encodeURIComponent(leadId)}`} className="font-medium text-[var(--negis-primary)] underline underline-offset-2">Карточка клиента</Link><Link href="/appointments" className="text-[var(--negis-muted)] underline underline-offset-2">Все клиенты</Link></div>}
     <MortgageNotice loading={workspace.loading} error={workspace.error} refresh={workspace.refresh} truncated={workspace.data?.activitiesTruncated} />
-    {workspace.data && day && (mode === "month" ? <div className="overflow-x-auto border border-[var(--negis-border)] bg-[var(--negis-surface)]">
+    {workspace.data && day && (mode === "month" ? <div className="min-w-0 max-w-full overflow-x-auto rounded-lg border border-[var(--negis-border)] bg-[var(--negis-surface)]" role="region" tabIndex={0} aria-label="Календарь встреч, месяц">
       <div className="grid min-w-[700px] grid-cols-7">
         {["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"].map((name) => <div key={name} className="border-b border-[var(--negis-border)] py-2 text-center text-xs font-medium text-[var(--negis-muted)]">{name}</div>)}
         {days.map((date) => {
           const entries = meetings.filter((item) => mortgageMeetingOnDay(item, date, timeZone));
           return <div key={date} className={`min-h-32 min-w-0 border-b border-r border-[var(--negis-border)] p-1.5 ${date.slice(0, 7) !== day.slice(0, 7) ? "bg-[var(--negis-surface-2)]" : ""}`}>
-            <div className="mb-1 flex items-center justify-between gap-1"><button type="button" className={`h-8 min-w-8 rounded text-sm ${date === today ? "bg-[var(--negis-primary)] text-white" : ""}`} title={mortgageDayLabel(date)} onClick={() => { setDay(date); setMode("day"); }}>{Number(date.slice(8))}</button><button type="button" className="flex h-8 w-8 items-center justify-center rounded hover:bg-[var(--negis-surface-2)]" title={`Создать встречу: ${mortgageDayLabel(date)}`} aria-label={`Создать встречу: ${mortgageDayLabel(date)}`} onClick={() => newAt(date)}><Plus className="h-3.5 w-3.5" /></button></div>
+            <div className="mb-1 flex items-center justify-between gap-1"><button type="button" className={`h-8 min-w-8 rounded text-sm ${date === today ? "bg-[var(--negis-primary-soft)] font-semibold text-[var(--negis-primary)]" : ""}`} title={mortgageDayLabel(date)} onClick={() => { setDay(date); setMode("day"); }}>{Number(date.slice(8))}</button><button type="button" className="flex h-8 w-8 items-center justify-center rounded hover:bg-[var(--negis-surface-2)]" title={`Создать встречу: ${mortgageDayLabel(date)}`} aria-label={`Создать встречу: ${mortgageDayLabel(date)}`} onClick={() => newAt(date)}><Plus className="h-3.5 w-3.5" /></button></div>
             <div className="grid gap-1">{entries.slice(0, 3).map((item) => <button type="button" key={item.id} className={`min-w-0 rounded border px-1.5 py-1 text-left text-xs ${tone(item.status)}`} title={`${item.title}, ${item.contactName}, ${mortgageStatusLabels[item.status]}`} onClick={() => setEditor({ activity: item })}><span className="block truncate font-medium">{mortgageLocalTime(item.startsAt, timeZone)} {item.title}</span><span className="block truncate">{item.contactName}</span></button>)}{entries.length > 3 && <button type="button" className="py-1 text-left text-xs text-[var(--negis-primary)]" onClick={() => { setDay(date); setMode("day"); }}>Ещё {entries.length - 3}</button>}</div>
           </div>;
         })}
       </div>
-    </div> : <div ref={scheduleRef} className="max-h-[620px] overflow-auto border border-[var(--negis-border)] bg-[var(--negis-surface)]" tabIndex={0} aria-label="Расписание встреч, 24 часа">
-      <div style={{ minWidth: mode === "week" ? 850 : 300 }}>
+    </div> : <div ref={scheduleRef} className="max-h-[620px] min-w-0 max-w-full overflow-auto rounded-lg border border-[var(--negis-border)] bg-[var(--negis-surface)]" role="region" tabIndex={0} aria-label="Расписание встреч, 24 часа">
+      <div style={{ minWidth: mode === "week" ? 850 : 280 }}>
         <div className="sticky top-0 z-20 grid border-b border-[var(--negis-border)] bg-[var(--negis-surface)]" style={{ gridTemplateColumns: `52px repeat(${days.length}, minmax(0, 1fr))` }}>
           <div className="py-3 text-center text-xs text-[var(--negis-muted)]"><Clock3 className="mx-auto h-4 w-4" /></div>
-          {days.map((date) => <button type="button" key={date} className={`min-w-0 border-l border-[var(--negis-border)] px-1 py-3 text-center text-xs ${date === today ? "font-semibold text-[var(--negis-primary)]" : ""}`} title={mortgageDayLabel(date)} onClick={() => { setDay(date); setMode("day"); }}>{mortgageDayLabel(date, { weekday: "short", day: "numeric", month: "short" })}</button>)}
+          {days.map((date) => <button type="button" key={date} className={`min-w-0 border-l border-[var(--negis-border)] px-1 py-3 text-center text-xs ${date === today ? "bg-[var(--negis-primary-soft)] font-semibold text-[var(--negis-primary)]" : "text-[var(--negis-muted)]"}`} title={mortgageDayLabel(date)} onClick={() => { setDay(date); setMode("day"); }}>{mortgageDayLabel(date, { weekday: "short", day: "numeric", month: "short" })}</button>)}
         </div>
         <div className="grid" style={{ gridTemplateColumns: `52px repeat(${days.length}, minmax(0, 1fr))` }}>
           <div className="relative" style={{ height: 1440 * 1.1 }}>{Array.from({ length: 24 }, (_, hour) => <span key={hour} className="absolute right-2 text-[10px] text-[var(--negis-muted)]" style={{ top: hour * 66 + 2 }}>{formatSlot(hour * 60)}</span>)}</div>
-          {days.map((date) => <div key={date} className="relative border-l border-[var(--negis-border)]" style={{ height: 1440 * 1.1 }}>
-            {Array.from({ length: 48 }, (_, slot) => <button type="button" key={slot} title={`${mortgageDayLabel(date)}, ${formatSlot(slot * 30)}: новая встреча`} aria-label={`${mortgageDayLabel(date)}, ${formatSlot(slot * 30)}: новая встреча`} className={`absolute left-0 w-full text-left hover:bg-[var(--negis-surface-2)] ${slot % 2 === 0 ? "border-t border-[var(--negis-border)]" : "border-t border-dashed border-[var(--negis-border)]/50"}`} style={{ top: slot * 33, height: 33 }} onClick={() => newAt(date, slot * 30)} />)}
-            {mortgageMeetingColumn(meetings, date, timeZone).map(({ item, startMinute, endMinute, lane, lanes }) => <button type="button" key={item.id} className={`absolute z-10 overflow-hidden rounded border text-left text-[11px] leading-tight ${tone(item.activity.status)}`} style={{ top: startMinute * 1.1, height: (endMinute - startMinute) * 1.1, left: `calc(${lane / lanes * 100}% + 1px)`, width: `calc(${100 / lanes}% - 2px)` }} title={`${item.activity.title}; ${item.activity.contactName}; ${mortgageInstantLabel(item.activity.startsAt, timeZone)} - ${mortgageInstantLabel(item.activity.endsAt, timeZone)}; ${item.activity.responsibleName || "Без менеджера"}; ${mortgageStatusLabels[item.activity.status]}`} aria-label={`${item.activity.title}, ${item.activity.contactName}, ${mortgageInstantLabel(item.activity.startsAt, timeZone)}`} onClick={() => setEditor({ activity: item.activity })}>{endMinute - startMinute >= 20 && <span className="block px-1 py-0.5"><span className="block truncate font-semibold">{formatSlot(startMinute)} {item.activity.title}</span><span className="block truncate">{item.activity.contactName}</span>{endMinute - startMinute >= 45 && <span className="block truncate">{item.activity.responsibleName}</span>}</span>}</button>)}
+          {days.map((date) => <div key={date} className={`relative border-l border-[var(--negis-border)] ${date === today ? "bg-emerald-50/40" : ""}`} style={{ height: 1440 * 1.1 }}>
+            {Array.from({ length: 48 }, (_, slot) => <button type="button" key={slot} title={`${mortgageDayLabel(date)}, ${formatSlot(slot * 30)}: новая встреча`} aria-label={`${mortgageDayLabel(date)}, ${formatSlot(slot * 30)}: новая встреча`} className={`absolute left-0 min-h-0 w-full text-left hover:bg-[var(--negis-surface-2)] ${slot % 2 === 0 ? "border-t border-[var(--negis-border)]" : "border-t border-dashed border-[var(--negis-border)]/50"}`} style={{ top: slot * 33, height: 33 }} onClick={() => newAt(date, slot * 30)} />)}
+            {mortgageMeetingColumn(meetings, date, timeZone).map(({ item, startMinute, endMinute, lane, lanes }) => <button type="button" key={item.id} className={`absolute z-10 min-h-0 overflow-hidden rounded border text-left text-[11px] leading-tight ${tone(item.activity.status)}`} style={{ top: startMinute * 1.1, height: (endMinute - startMinute) * 1.1, left: `calc(${lane / lanes * 100}% + 1px)`, width: `calc(${100 / lanes}% - 2px)` }} title={`${item.activity.title}; ${item.activity.contactName}; ${mortgageInstantLabel(item.activity.startsAt, timeZone)} - ${mortgageInstantLabel(item.activity.endsAt, timeZone)}; ${item.activity.responsibleName || "Без менеджера"}; ${mortgageStatusLabels[item.activity.status]}`} aria-label={`${item.activity.title}, ${item.activity.contactName}, ${mortgageInstantLabel(item.activity.startsAt, timeZone)}`} onClick={() => setEditor({ activity: item.activity })}>{endMinute - startMinute >= 20 && <span className="block px-1 py-0.5"><span className="block truncate font-semibold">{formatSlot(startMinute)} {item.activity.title}</span><span className="block truncate">{item.activity.contactName}</span>{endMinute - startMinute >= 45 && <span className="block truncate">{item.activity.responsibleName}</span>}</span>}</button>)}
           </div>)}
         </div>
       </div>
@@ -169,13 +172,13 @@ function MortgageCalendarBody() {
     </section>}
     {workspace.data && <section className="min-w-0" aria-labelledby="mortgage-meetings-list">
       <h2 id="mortgage-meetings-list" className="mb-3 flex items-center gap-2 text-base font-semibold"><CalendarDays className="h-4 w-4" />Встречи <span className="text-sm font-normal text-[var(--negis-muted)]">{visibleMeetings.length}</span></h2>
-      {!visibleMeetings.length ? <p className="border-y border-[var(--negis-border)] py-8 text-center text-sm text-[var(--negis-muted)]">В этом периоде встреч нет</p> : <ul className="divide-y divide-[var(--negis-border)] border-y border-[var(--negis-border)]">{visibleMeetings.map((item) => <li key={item.id} className="flex min-w-0 flex-col gap-3 py-4 md:flex-row md:items-center">
+      {!visibleMeetings.length ? <p className="border-y border-[var(--negis-border)] py-8 text-center text-sm text-[var(--negis-muted)]">В этом периоде встреч нет</p> : <ul className="space-y-2">{visibleMeetings.map((item) => <li key={item.id} className="flex min-w-0 flex-col gap-3 rounded-lg border border-[var(--negis-border)] bg-[var(--negis-surface)] p-3 md:flex-row md:items-center">
         <div className="w-full shrink-0 text-sm md:w-44"><p>{mortgageInstantLabel(item.startsAt, timeZone)}</p><p className="text-xs text-[var(--negis-muted)]">до {mortgageInstantLabel(item.endsAt, timeZone)}</p></div>
-        <div className="min-w-0 flex-1"><button type="button" className="block max-w-full break-words text-left text-sm font-semibold" onClick={() => setEditor({ activity: item })}>{item.title}</button><Link href={`/clients?leadId=${encodeURIComponent(item.leadId)}`} className="break-words text-sm text-[var(--negis-primary)] underline underline-offset-2">{item.contactName || "Клиент"}</Link><p className="break-words text-xs text-[var(--negis-muted)]">{item.responsibleName || "Без менеджера"} · {mortgageStatusLabels[item.status]}</p></div>
-        <div className="flex shrink-0 flex-wrap gap-2"><button type="button" className={mortgageButtonClass} title="Редактировать" aria-label={`Редактировать: ${item.title}`} onClick={() => setEditor({ activity: item })}><Pencil className="h-4 w-4" /></button>{item.status === "open" && <>
-          <button type="button" className={mortgageButtonClass} title="Завершить" aria-label={`Завершить: ${item.title}`} disabled={busy} onClick={() => { setAction({ activity: item, status: "done" }); setActionError(""); }}><Check className="h-4 w-4" /></button>
-          <button type="button" className={mortgageButtonClass} title="Неявка" aria-label={`Неявка: ${item.title}`} disabled={busy} onClick={() => { setAction({ activity: item, status: "missed" }); setActionError(""); }}><UserRoundX className="h-4 w-4" /></button>
-          <button type="button" className={mortgageButtonClass} title="Отменить встречу" aria-label={`Отменить: ${item.title}`} disabled={busy} onClick={() => { setAction({ activity: item, status: "cancelled" }); setActionError(""); }}><X className="h-4 w-4" /></button>
+        <div className="min-w-0 flex-1"><button type="button" className="block max-w-full break-words text-left text-sm font-semibold" onClick={() => setEditor({ activity: item })}>{item.title}</button><Link href={`/clients?leadId=${encodeURIComponent(item.leadId)}`} className="break-words text-sm text-[var(--negis-primary)] underline underline-offset-2">{item.contactName || "Клиент"}</Link><div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-[var(--negis-muted)]"><span className="break-words">{item.responsibleName || "Без менеджера"}</span><MortgageActivityBadge activity={item} /></div></div>
+        <div className="flex shrink-0 flex-wrap gap-2"><MortgageIconButton icon={Pencil} label={`Редактировать: ${item.title}`} onClick={() => setEditor({ activity: item })} />{item.status === "open" && <>
+          <MortgageIconButton icon={Check} label={`Завершить: ${item.title}`} disabled={busy} onClick={() => { setAction({ activity: item, status: "done" }); setActionError(""); }} />
+          <MortgageIconButton icon={UserRoundX} label={`Неявка: ${item.title}`} disabled={busy} onClick={() => { setAction({ activity: item, status: "missed" }); setActionError(""); }} />
+          <MortgageIconButton icon={X} label={`Отменить: ${item.title}`} disabled={busy} onClick={() => { setAction({ activity: item, status: "cancelled" }); setActionError(""); }} />
         </>}</div>
       </li>)}</ul>}
     </section>}

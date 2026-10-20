@@ -60,8 +60,8 @@ function MortgageOverviewBody() {
   return <div className="mx-auto w-full min-w-0 max-w-[1440px] space-y-5 sm:space-y-6" style={{ letterSpacing: 0 }}>
     <header className="flex min-w-0 flex-wrap items-start justify-between gap-4">
       <div className="min-w-0">
-        <p className="mb-1.5 text-xs font-medium text-[var(--negis-text-2)]">{teamAccess ? "Рабочее пространство команды" : "Мой рабочий день"}</p>
-        <h1 className="break-words text-2xl font-semibold text-[var(--negis-text)]">{workspaceName}</h1>
+        <p className="mb-1.5 text-xs font-medium text-[var(--negis-text-2)]">{workspaceName}</p>
+        <h1 className="break-words text-2xl font-semibold text-[var(--negis-text)]">{teamAccess ? "Обзор команды" : "Мой рабочий день"}</h1>
         {data && <p className="mt-1.5 text-sm text-[var(--negis-text-2)]">{dateLabel.charAt(0).toLocaleUpperCase("ru-RU") + dateLabel.slice(1)}</p>}
       </div>
       <div className="flex shrink-0 items-center gap-2">
@@ -75,11 +75,13 @@ function MortgageOverviewBody() {
       : workspace.error ? <MortgageState kind="error" onRetry={() => void workspace.refresh()}>{mortgageErrorMessage(workspace.error)}</MortgageState>
       : !data ? <MortgageState kind="empty">Обзор недоступен.</MortgageState>
       : <>
-        <dl className="grid min-w-0 grid-cols-2 gap-3 xl:grid-cols-4" aria-label="Показатели рабочего пространства">
+        <dl className="medina-overview-metrics min-w-0" aria-label="Показатели рабочего пространства">
           <OverviewMetric accent reducedMotion={reducedMotion} label={teamAccess ? "Всего заявок" : "Мои заявки"} value={data.metrics.totalLeads} icon={Inbox} href="/leads" tone="neutral" />
           <OverviewMetric reducedMotion={reducedMotion} label="В работе" value={data.metrics.inProgressLeads} icon={ListFilter} href="/leads" tone="green" />
+          {teamAccess && <OverviewMetric reducedMotion={reducedMotion} label="Без ответственного" value={data.metrics.unassignedLeads} icon={ArrowDownLeft} href="/leads" tone="amber" />}
           <OverviewMetric reducedMotion={reducedMotion} label="Встречи сегодня" value={data.metrics.meetingsToday} icon={CalendarDays} href="/appointments" tone="blue" />
           <OverviewMetric reducedMotion={reducedMotion} label="Просроченные задачи" value={data.metrics.overdueTasks} icon={AlarmClock} href="/tasks" tone={data.metrics.overdueTasks ? "red" : "neutral"} />
+          {teamAccess && <OverviewMetric reducedMotion={reducedMotion} label="Активные менеджеры" value={data.metrics.activeManagers} icon={Users} href="/analytics" tone="green" />}
         </dl>
 
         <div className="flex min-w-0 flex-wrap items-center justify-between gap-x-5 gap-y-2 border-y border-[var(--negis-border)] py-2.5 text-sm">
@@ -98,22 +100,22 @@ function MortgageOverviewBody() {
 
         {data.activitiesTruncated && <p role="status" className="border-l-2 border-amber-500 pl-3 text-sm text-amber-800">Встречи и задачи: неполная выборка. Счётчики полные.</p>}
 
-        <div className={`grid min-w-0 gap-7 ${teamAccess ? "xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]" : "lg:grid-cols-[minmax(0,1.2fr)_minmax(280px,1fr)]"}`}>
+        <div className="medina-overview-work min-w-0">
           {teamAccess && <OverviewContacts contacts={recent} teamAccess total={data.metrics.unassignedLeads} timeZone={data.timeZone} />}
           <section className={`min-w-0 ${teamAccess ? "border-t border-[var(--negis-border)] pt-5 xl:border-l xl:border-t-0 xl:pl-6 xl:pt-0" : ""}`} aria-labelledby="mortgage-agenda">
-            <div className="flex flex-wrap items-center justify-between gap-3 pb-4">
+            <div className="medina-section-heading flex flex-wrap items-center justify-between gap-3">
               <h2 id="mortgage-agenda" className="inline-flex items-center gap-2 text-base font-semibold"><CalendarDays size={17} className="shrink-0 text-[var(--negis-muted)]" aria-hidden="true" />Ближайшие дела</h2>
               <Link href={agenda === "meetings" ? "/appointments" : "/tasks"} className="neu-btn !min-h-11 !px-3 !py-2 !text-xs motion-reduce:transition-none sm:!min-h-9">{agenda === "meetings" ? "Календарь" : "Все задачи"}<ArrowUpRight size={14} aria-hidden="true" /></Link>
             </div>
             <div role="group" aria-label="Вид ближайших дел" className="mb-3 flex flex-wrap gap-2">
               {([{ key: "meetings", label: "Встречи", icon: CalendarDays }, { key: "tasks", label: "Задачи", icon: CheckSquare }] as const).map(({ key, label, icon: Icon }) =>
                 <button key={key} type="button" aria-pressed={agenda === key} onClick={() => { if (workspace.isCurrent()) setAgenda(key); }}
-                  className={`relative isolate inline-flex min-h-11 items-center gap-2 rounded-full px-4 py-2 text-xs font-semibold transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--negis-primary)] motion-reduce:transition-none ${agenda === key ? "text-white" : "bg-[var(--negis-ground)] text-[var(--negis-ink-2)] hover:bg-[var(--negis-plate)]"}`}>
+                  className={`relative isolate inline-flex min-h-11 items-center gap-2 rounded-md border px-4 py-2 text-xs font-semibold transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--negis-primary)] motion-reduce:transition-none ${agenda === key ? "border-transparent text-[var(--negis-mint-ink)]" : "border-[var(--negis-border)] bg-white text-[var(--negis-ink-2)] hover:bg-[var(--negis-plate)]"}`}>
                   <Icon size={15} aria-hidden="true" />{label}{key === "tasks" && data.metrics.overdueTasks > 0 && <span className="badge badge-error !px-1.5 !py-0.5 !text-[11px] !tracking-normal tabular-nums" aria-label={`Просрочено: ${data.metrics.overdueTasks}`}>{data.metrics.overdueTasks.toLocaleString("ru-RU")}</span>}
-                  {agenda === key && <motion.span layoutId="mortgage-overview-agenda-active" initial={false} aria-hidden="true" className="pointer-events-none absolute inset-0 -z-10 rounded-full bg-[var(--negis-black)]" transition={{ duration: reducedMotion ? 0 : 0.18, ease: "easeOut" }} />}
+                  {agenda === key && <motion.span layoutId="mortgage-overview-agenda-active" initial={false} aria-hidden="true" className="pointer-events-none absolute inset-0 -z-10 rounded-md bg-[var(--negis-mint)]" transition={{ duration: reducedMotion ? 0 : 0.18, ease: "easeOut" }} />}
                 </button>)}
             </div>
-            {(agenda === "meetings" ? meetings : tasks).length ? <motion.ul key={agenda} initial={reducedMotion ? false : { opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: reducedMotion ? 0 : 0.18, ease: "easeOut" }} className="divide-y divide-[var(--negis-border)]">
+            {(agenda === "meetings" ? meetings : tasks).length ? <motion.ul key={agenda} initial={reducedMotion ? false : { opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: reducedMotion ? 0 : 0.18, ease: "easeOut" }} className="divide-y divide-[var(--negis-border)] rounded-lg border border-[var(--negis-border)] bg-white px-3">
               {(agenda === "meetings" ? meetings : tasks).map((activity) => <OverviewActivity key={activity.id} activity={activity} timeZone={data.timeZone} now={now} />)}
             </motion.ul> : <div className="flex min-h-44 flex-col items-center justify-center gap-2 py-8 text-center text-[var(--negis-muted)]" role="status">
               {agenda === "meetings" ? <CalendarDays size={24} strokeWidth={1.5} aria-hidden="true" /> : <CheckSquare size={24} strokeWidth={1.5} aria-hidden="true" />}
@@ -157,11 +159,11 @@ function initials(name: string) {
   return name.trim().split(/\s+/).slice(0, 2).map((part) => Array.from(part)[0]).join("").toLocaleUpperCase("ru-RU") || "?";
 }
 
-function OverviewMetric({ label, value, icon: Icon, href, tone, reducedMotion, accent = false }: { label: string; value: number; icon: LucideIcon; href: string; tone: "neutral" | "green" | "blue" | "red"; reducedMotion: boolean; accent?: boolean }) {
-  const colors = { neutral: "badge-muted", green: "bg-[var(--negis-primary-soft)] text-[var(--negis-primary)]", blue: "badge-blue", red: "badge-error" };
-  return <motion.div initial={false} whileHover={reducedMotion ? undefined : { y: -2 }} whileTap={reducedMotion ? undefined : { scale: 0.99 }} transition={{ duration: reducedMotion ? 0 : 0.16, ease: "easeOut" }} className="neu-sm relative min-w-0 p-3 motion-reduce:transition-none sm:p-4" style={accent ? { background: "var(--negis-mint)", boxShadow: "none" } : undefined}>
+function OverviewMetric({ label, value, icon: Icon, href, tone, reducedMotion, accent = false }: { label: string; value: number; icon: LucideIcon; href: string; tone: "neutral" | "green" | "blue" | "red" | "amber"; reducedMotion: boolean; accent?: boolean }) {
+  const colors = { neutral: "badge-muted", green: "bg-[var(--negis-primary-soft)] text-[var(--negis-primary)]", blue: "badge-blue", red: "badge-error", amber: "badge-warning" };
+  return <motion.div initial={false} whileHover={reducedMotion ? undefined : { y: -2 }} whileTap={reducedMotion ? undefined : { scale: 0.99 }} transition={{ duration: reducedMotion ? 0 : 0.16, ease: "easeOut" }} className="medina-overview-metric neu-sm relative min-w-0 p-3 motion-reduce:transition-none sm:p-4" style={accent ? { background: "var(--negis-mint)", boxShadow: "none" } : undefined}>
     <dt className={`min-h-8 break-words text-xs font-semibold sm:min-h-5 ${accent ? "text-[var(--negis-mint-deep)]" : "text-[var(--negis-muted)]"}`}>{label}</dt>
-    <dd className={`mt-1 flex min-w-0 items-center justify-between gap-2 text-2xl font-semibold tabular-nums sm:text-3xl ${tone === "red" ? "text-[var(--negis-danger)]" : accent ? "text-[var(--negis-mint-ink)]" : "text-[var(--negis-text)]"}`}><Link href={href} aria-label={`${label}: ${value.toLocaleString("ru-RU")}`} className="min-w-0 break-words after:absolute after:inset-0 after:rounded-[18px] hover:text-[var(--negis-primary)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--negis-primary)]">{value.toLocaleString("ru-RU")}</Link><span className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-lg sm:h-8 sm:w-8 ${accent ? "bg-white/60 text-[var(--negis-mint-deep)]" : colors[tone]}`}><Icon size={17} aria-hidden="true" /></span></dd>
+    <dd className={`mt-1 flex min-w-0 items-center justify-between gap-2 text-2xl font-semibold tabular-nums sm:text-3xl ${tone === "red" ? "text-[var(--negis-danger)]" : accent ? "text-[var(--negis-mint-ink)]" : "text-[var(--negis-text)]"}`}><Link href={href} aria-label={`${label}: ${value.toLocaleString("ru-RU")}`} className="min-w-0 break-words after:absolute after:inset-0 after:rounded-lg hover:text-[var(--negis-primary)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--negis-primary)]">{value.toLocaleString("ru-RU")}</Link><span className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-lg sm:h-8 sm:w-8 ${accent ? "bg-white/60 text-[var(--negis-mint-deep)]" : colors[tone]}`}><Icon size={17} aria-hidden="true" /></span></dd>
   </motion.div>;
 }
 
@@ -173,7 +175,7 @@ function OverviewContacts({ contacts, teamAccess, total, timeZone, className = "
       <div className="min-w-0"><h2 id="mortgage-overview-contacts" className="flex items-start gap-2 break-words text-base font-semibold"><Inbox size={17} className="mt-0.5 shrink-0 text-[var(--negis-muted)]" aria-hidden="true" />{teamAccess ? "Заявки без ответственного" : "Последние заявки"}</h2><p className="mt-1 text-xs text-[var(--negis-text-2)]">{teamAccess ? `Показано: ${contacts.length} · Всего без ответственного: ${total.toLocaleString("ru-RU")}` : `Показано ${contacts.length} из ${total.toLocaleString("ru-RU")}`}</p></div>
       <Link href={teamAccess ? "/leads" : "/clients"} aria-label={teamAccess ? "Открыть распределение заявок" : "Все клиенты"} title={teamAccess ? "Открыть распределение заявок" : "Все клиенты"} className="neu-btn !min-h-9 !px-3 !py-2 !text-xs motion-reduce:transition-none max-sm:!h-11 max-sm:!w-11 max-sm:!p-0"><span className="hidden sm:inline">{teamAccess ? "Распределить" : "Все клиенты"}</span><ArrowUpRight size={16} className="shrink-0" aria-hidden="true" /></Link>
     </div>
-    {contacts.length ? <ul className="divide-y divide-[var(--negis-border)]">{contacts.map((contact) => <li key={contact.id} className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-3 gap-y-1.5 rounded-md py-3.5 transition-colors hover:bg-[var(--negis-surface)] focus-within:bg-[var(--negis-surface)] motion-reduce:transition-none">
+    {contacts.length ? <ul className="divide-y divide-[var(--negis-border)] rounded-lg border border-[var(--negis-border)] bg-white px-3">{contacts.map((contact) => <li key={contact.id} className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-3 gap-y-1.5 rounded-md py-3.5 transition-colors hover:bg-[var(--negis-surface-2)] focus-within:bg-[var(--negis-surface-2)] motion-reduce:transition-none">
       <Link href={`/clients?leadId=${encodeURIComponent(contact.id)}`} className="min-w-0 break-words text-sm font-medium hover:text-[var(--negis-primary)] hover:underline">{contact.name || "Без имени"}</Link>
       <Link href={`/clients?leadId=${encodeURIComponent(contact.id)}`} aria-label={`Карточка: ${contact.name || "Без имени"}`} className="col-start-2 row-span-2 row-start-1 inline-flex min-h-11 max-w-32 items-center justify-end gap-1 text-xs"><span className={`badge min-w-0 break-words !tracking-normal ${contact.status === "new" ? "badge-blue" : "badge-muted"}`}>{mortgageContactStatus(contact.status)}</span><ChevronRight size={15} className="shrink-0 text-[var(--negis-muted)]" aria-hidden="true" /></Link>
       <div className="col-start-1 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-xs text-[var(--negis-text-2)]">

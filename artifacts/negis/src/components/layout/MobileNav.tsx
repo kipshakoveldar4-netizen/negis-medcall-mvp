@@ -109,7 +109,7 @@ export function MobileNav() {
     <>
       {open && (
         <div className="mobile-nav-backdrop lg:hidden" onClick={() => setOpen(false)}>
-          <section className="mobile-nav-sheet" onClick={(event) => event.stopPropagation()}>
+          <section className="mobile-nav-sheet" aria-label="Разделы Medina OS" onClick={(event) => event.stopPropagation()}>
             <div className="mb-4 flex items-center justify-between gap-3">
               <div>
                 <p className="text-xs font-semibold uppercase tracking-[0.08em]" style={{ color: "var(--negis-muted)" }}>Меню</p>
@@ -132,6 +132,7 @@ export function MobileNav() {
                     key={href}
                     type="button"
                     className="mobile-nav-drawer-item"
+                    aria-current={isActive(location, href) ? "page" : undefined}
                     onClick={() => {
                       setOpen(false);
                       setLocation(href);
@@ -185,6 +186,7 @@ export function MobileNav() {
               key={href}
               type="button"
               className={`mobile-bottom-nav-item ${active ? "is-active" : ""}`}
+              aria-current={active ? "page" : undefined}
               onClick={() => setLocation(href)}
             >
               <Icon size={20} />
@@ -195,6 +197,8 @@ export function MobileNav() {
         <button
           type="button"
           className={`mobile-bottom-nav-item ${open || moreActive ? "is-active" : ""}`}
+          aria-expanded={open}
+          aria-label="Ещё разделы"
           onClick={() => setOpen(true)}
         >
           <Menu size={20} />

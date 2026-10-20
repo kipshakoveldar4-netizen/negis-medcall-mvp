@@ -6,8 +6,8 @@ import { formatPhone, toTelHref } from "@/lib/phone";
 import type { MortgageContact } from "../../../../../lib/crm/mortgage-contract";
 import { MortgageContactForm } from "./MortgageContactForm";
 import {
-  MortgageActivityTable, MortgageIconButton, MortgageState, mortgageButtonClass,
-  mortgageContactStatus, mortgageDate, mortgageErrorMessage,
+  MortgageActivityTable, MortgageContactBadge, MortgageIconButton, MortgageState, mortgageButtonClass,
+  mortgageDate, mortgageErrorMessage,
 } from "./MortgagePrimitives";
 
 const eventLabels: Record<string, string> = {
@@ -27,7 +27,7 @@ export function MortgageContactDetail({ leadId, canEdit, onClose, onChanged }: {
   const events = data ? [...data.events].sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt)) : [];
 
   return <section className="min-w-0 scroll-mt-4 border-b border-[var(--negis-border)] pb-5 xl:border-b-0 xl:border-l xl:pb-0 xl:pl-5" aria-label="Карточка клиента">
-    <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+    <div className="mb-4 flex flex-wrap items-center justify-between gap-2 border-b border-[var(--negis-border)] pb-3">
       <h2 className="text-sm font-semibold">Карточка клиента</h2>
       <div className="flex gap-2">
         {contact && canEdit && <MortgageIconButton icon={Pencil} label="Изменить контакт" onClick={() => setEditingContact(contact)} />}
@@ -46,11 +46,11 @@ export function MortgageContactDetail({ leadId, canEdit, onClose, onChanged }: {
             {contact.phone ? <a href={toTelHref(contact.phone)} className="inline-flex min-w-0 items-center gap-2 text-[var(--negis-primary)] hover:underline">
               <Phone size={14} className="shrink-0" aria-hidden="true" /><span className="break-all">{formatPhone(contact.phone)}</span>
             </a> : <span className="text-[var(--negis-muted)]">Телефон не указан</span>}
-            <span className="text-xs">{mortgageContactStatus(contact.status)}</span>
+            <MortgageContactBadge status={contact.status} />
           </div>
         </div>
 
-        <dl className="grid min-w-0 grid-cols-[minmax(0,1fr)_minmax(0,2fr)] gap-x-3 gap-y-2 text-xs">
+        <dl className="grid min-w-0 grid-cols-[minmax(0,1fr)_minmax(0,2fr)] gap-x-3 gap-y-3 border-y border-[var(--negis-border)] py-4 text-xs">
           <dt className="text-[var(--negis-muted)]">Источник</dt><dd className="break-words">{contact.source === "manual" ? "Вручную" : contact.source || "Не указан"}</dd>
           <dt className="text-[var(--negis-muted)]">Ответственный</dt><dd className="break-words">{contact.responsibleName || (contact.responsibleUserId ? "Имя не указано" : "Не назначен")}</dd>
           <dt className="text-[var(--negis-muted)]">Создана</dt><dd className="break-words">{mortgageDate(contact.createdAt, data.timeZone)}</dd>

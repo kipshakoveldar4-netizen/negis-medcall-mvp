@@ -120,6 +120,18 @@ const snapshot = (overrides: Record<string, any> = {}) => ({
   periodDays: 37, page: 0, pageSize: 100, ...overrides,
 });
 
+function expectedMetrics(data: ReturnType<typeof snapshot>, role = "owner") {
+  const teamAccess = role !== "lead_manager";
+  return [
+    [teamAccess ? "Всего заявок" : "Мои заявки", data.metrics.totalLeads, "/leads"],
+    ["В работе", data.metrics.inProgressLeads, "/leads"],
+    ...(teamAccess ? [["Без ответственного", data.metrics.unassignedLeads, "/leads"] as const] : []),
+    ["Встречи сегодня", data.metrics.meetingsToday, "/appointments"],
+    ["Просроченные задачи", data.metrics.overdueTasks, "/tasks"],
+    ...(teamAccess ? [["Активные менеджеры", data.metrics.activeManagers, "/analytics"] as const] : []),
+  ] as const;
+}
+
 function freeze<T>(value: T): T {
   if (value && typeof value === "object") {
     for (const child of Object.values(value)) freeze(child);
@@ -279,6 +291,8 @@ test("overview retains the page and mortgage-scope wrapper without bootstrapping
 test("overview uses shared page buttons and inherited colors for every supported role", () => {
   for (const role of ["owner", "admin", "lead_manager"]) {
     const f = fixture(role), tree = f.paint(), header = find(tree, (node) => node.type === "header");
+    assert.equal(text(find(header, (node) => node.type === "h1")), role === "lead_manager" ? "Мой рабочий день" : "Обзор команды");
+    assert.ok(nodes(header).some((node) => node.type === "p" && text(node) === "Synthetic Baspana"));
     for (const node of nodes(tree)) {
       assert.deepEqual(Object.keys(node.props.style || {}).filter((name) => name.startsWith("--negis-")), [],
         "The overview must inherit shared color tokens instead of redefining them locally");
@@ -314,25 +328,28 @@ test("only the first overview metric receives the shared mint accent while value
     const data = snapshot(), f = fixture(role, data), tree = f.paint();
     const metrics = find(tree, (node) => node.type === "dl" && node.props["aria-label"] === "Показатели рабочего пространства");
     const cards = nodes(metrics).filter((node) => node.type === "div" && nodes(node).some((child) => child.type === "dt"));
-    assert.equal(cards.length, 4);
-    assert.deepEqual(cards.map((node) => node.props.style?.background === "var(--negis-mint)"), [true, false, false, false]);
-    const values = [data.metrics.totalLeads, data.metrics.inProgressLeads, data.metrics.meetingsToday, data.metrics.overdueTasks];
+    const expected = expectedMetrics(data, role);
+    assert.equal(cards.length, role === "lead_manager" ? 4 : 6);
+    assert.deepEqual(cards.map((node) => node.props.style?.background === "var(--negis-mint)"), expected.map((_, index) => index === 0));
+    assert.equal(f.motionNodes.length, expected.length + 2 + (role === "lead_manager" ? 0 : data.memberMetrics.length),
+      "Only role-visible metrics, one agenda list/fill and permitted team bars use motion");
     for (const [index, card] of cards.entries()) {
       expectClasses(card, "neu-sm");
-      assert.equal(compact(text(find(card, (node) => node.type === "dd"))), countText(values[index]));
-      assert.equal(find(card, (node) => node.type === "a").props.href, ["/leads", "/leads", "/appointments", "/tasks"][index]);
+      assert.equal(text(find(card, (node) => node.type === "dt")), expected[index][0]);
+      assert.equal(compact(text(find(card, (node) => node.type === "dd"))), countText(expected[index][1]));
+      assert.equal(find(card, (node) => node.type === "a").props.href, expected[index][2]);
       if (index > 0) assert.equal(card.props.style, undefined, "Non-accent metrics keep the shared neutral surface");
     }
     assert.equal(cards[0].props.style.boxShadow, "none");
     expectClasses(find(cards[0], (node) => node.type === "dt"), "text-[var(--negis-mint-deep)]");
     expectClasses(find(cards[0], (node) => node.type === "dd"), "text-[var(--negis-mint-ink)]");
-    expectClasses(find(cards[3], (node) => node.type === "dd"), "text-[var(--negis-danger)]");
+    expectClasses(find(cards[expected.findIndex(([label]) => label === "Просроченные задачи")], (node) => node.type === "dd"), "text-[var(--negis-danger)]");
     assert.deepEqual(f.writes, []);
     f.dispose();
   }
 });
 
-test("agenda pills, team loads and contact badges use the common palette with motion enabled or reduced", () => {
+test("agenda segments, team loads and contact badges use the common palette with motion enabled or reduced", () => {
   const contacts = [unassignedContact(), { ...unassignedContact(), id: "synthetic-followup", name: "Synthetic followup", status: "in_progress" }];
   const data = snapshot({ contacts }), f = fixture("owner", data);
   let tree = f.paint(), layoutId: unknown;
@@ -344,12 +361,12 @@ test("agenda pills, team loads and contact badges use the common palette with mo
       const agenda = expectAgenda(tree, selected);
       const active = button(agenda, selected === "meetings" ? "Встречи" : "Задачи");
       const inactive = button(agenda, selected === "meetings" ? "Задачи" : "Встречи");
-      expectClasses(active, "isolate", "rounded-full", "text-white");
-      expectClasses(inactive, "rounded-full", "bg-[var(--negis-ground)]", "text-[var(--negis-ink-2)]", "hover:bg-[var(--negis-plate)]");
-      assert.ok(!String(inactive.props.className).split(/\s+/).includes("text-white"));
+      expectClasses(active, "isolate", "rounded-md", "text-[var(--negis-mint-ink)]");
+      expectClasses(inactive, "rounded-md", "bg-white", "text-[var(--negis-ink-2)]", "hover:bg-[var(--negis-plate)]");
+      assert.ok(!String(inactive.props.className).split(/\s+/).includes("text-[var(--negis-mint-ink)]"));
       const fills = f.motionNodes.filter((node) => node.type === "span" && node.props.layoutId);
       assert.equal(fills.length, 1);
-      expectClasses(fills[0], "absolute", "inset-0", "-z-10", "rounded-full", "bg-[var(--negis-black)]");
+      expectClasses(fills[0], "absolute", "inset-0", "-z-10", "rounded-md", "bg-[var(--negis-mint)]");
       layoutId ??= fills[0].props.layoutId;
       assert.equal(fills[0].props.layoutId, layoutId);
       assert.equal(fills[0].props.transition.duration, reducedMotion ? 0 : 0.18);
@@ -378,21 +395,21 @@ test("agenda pills, team loads and contact badges use the common palette with mo
   f.dispose();
 });
 
-for (const reducedMotion of [false, true]) test(`motion props respect reduced-motion=${reducedMotion} without delaying counts or agenda rows`, () => {
-  const data = snapshot(), f = fixture("owner", data, reducedMotion);
+for (const role of ["owner", "admin", "lead_manager"]) for (const reducedMotion of [false, true]) test(`${role} motion props respect reduced-motion=${reducedMotion} without delaying counts or agenda rows`, () => {
+  const data = snapshot(), f = fixture(role, data, reducedMotion), teamAccess = role !== "lead_manager";
   let tree = f.paint();
   const metrics = find(tree, (node) => node.type === "dl" && node.props["aria-label"] === "Показатели рабочего пространства");
   assert.deepEqual(nodes(metrics).filter((node) => node.type === "dd").map((node) => compact(text(node))),
-    [data.metrics.totalLeads, data.metrics.inProgressLeads, data.metrics.meetingsToday, data.metrics.overdueTasks].map(countText));
+    expectedMetrics(data, role).map(([, value]) => countText(value)));
   assert.equal(rows(section(tree, "mortgage-overview-contacts")).length, 1);
-  const team = section(tree, "mortgage-team-load");
-  assert.equal(rows(team).length, data.memberMetrics.length);
-  for (const member of data.memberMetrics) {
+  const team = teamAccess ? section(tree, "mortgage-team-load") : null;
+  assert.equal(rows(team).length, teamAccess ? data.memberMetrics.length : 0);
+  for (const member of teamAccess ? data.memberMetrics : []) {
     const row = find(team, (node) => node.type === "li" && text(node).includes(member.name));
     assert.equal(compact(text(find(row, (node) => node.type === "strong"))), countText(member.assignedLeads));
   }
   const metricMotion = f.motionNodes.filter((node) => nodes(node).some((child) => child.type === "dt"));
-  assert.equal(metricMotion.length, 4);
+  assert.equal(metricMotion.length, teamAccess ? 6 : 4);
   for (const node of metricMotion) {
     assert.equal(node.type, "div");
     assert.equal(node.props.initial, false);
@@ -407,7 +424,7 @@ for (const reducedMotion of [false, true]) test(`motion props respect reduced-mo
     }
   }
   const bars = f.motionNodes.filter((node) => node.props.animate?.scaleX !== undefined);
-  assert.equal(bars.length, data.memberMetrics.length);
+  assert.equal(bars.length, teamAccess ? data.memberMetrics.length : 0);
   const maxLoad = Math.max(1, ...data.memberMetrics.map((member) => member.assignedLeads));
   for (const [index, bar] of bars.entries()) {
     assert.equal(bar.type, "div");
@@ -449,7 +466,8 @@ for (const reducedMotion of [false, true]) test(`motion props respect reduced-mo
     assert.equal(underline.props.transition.duration, reducedMotion ? 0 : 0.18);
     assert.equal(nodes(button(agenda, selected === "meetings" ? "Встречи" : "Задачи")).filter((node) =>
       node.type === "span" && node.props["aria-hidden"] === "true" && text(node) === "").length, 1);
-    assert.equal(f.motionNodes.length, 8, "Only four metric hosts, one agenda list, one underline and two decorative bars use motion");
+    assert.equal(f.motionNodes.length, (teamAccess ? 6 : 4) + 2 + (teamAccess ? data.memberMetrics.length : 0),
+      "Only role-visible metric hosts, one agenda list/fill and permitted decorative bars use motion");
     for (const node of f.motionNodes) assert.equal(node.props.exit, undefined);
     for (const node of nodes(tree)) {
       for (const prop of ["initial", "animate", "exit", "whileHover", "whileTap", "transition", "layout", "layoutId"]) {
@@ -475,7 +493,7 @@ test("the same mounted overview follows motion preference changes and treats a n
     assert.equal(text(tree), originalText);
     expectAgenda(tree, "meetings");
     assert.equal(rows(section(tree, "mortgage-agenda")).length, 1);
-    assert.equal(f.motionNodes.length, 8);
+    assert.equal(f.motionNodes.length, 10);
     for (const node of f.motionNodes) {
       assert.equal(node.props.transition.duration === 0, preference === true);
       if (preference === true) {
@@ -529,8 +547,8 @@ test("the server snapshot disables motion without reading window or subscribing 
   assert.equal(rows(section(tree, "mortgage-team-load")).length, data.memberMetrics.length);
   const metrics = find(tree, (node) => node.type === "dl" && node.props["aria-label"] === "Показатели рабочего пространства");
   assert.deepEqual(nodes(metrics).filter((node) => node.type === "dd").map((node) => compact(text(node))),
-    [data.metrics.totalLeads, data.metrics.inProgressLeads, data.metrics.meetingsToday, data.metrics.overdueTasks].map(countText));
-  assert.equal(f.motionNodes.length, 8);
+    expectedMetrics(data).map(([, value]) => countText(value)));
+  assert.equal(f.motionNodes.length, 10);
   for (const node of f.motionNodes) {
     assert.equal(node.props.initial, false);
     assert.equal(node.props.transition.duration, 0);
@@ -633,7 +651,7 @@ for (const state of ["loading", "error", "stale", "missing-workspace", "missing-
   test(`${state} hides previously loaded names, phones, activities and all snapshot counts`, () => {
     const data = snapshot(), f = fixture("owner", data);
     assert.match(text(f.paint()), /Synthetic unassigned client/);
-    assert.equal(f.motionNodes.length, 8, "Begin with the actual motion-enabled overview mounted");
+    assert.equal(f.motionNodes.length, 10, "Begin with the actual motion-enabled overview mounted");
     if (state === "loading") f.workspace.loading = true;
     if (state === "error") f.workspace.error = "Synthetic local read failure";
     if (state === "stale") f.revoke();
@@ -778,8 +796,7 @@ test("empty activity samples retain server totals and never claim that all work 
   assert.match(text(tree), /Встречи и задачи: неполная выборка.*Счётчики полные/);
   assert.match(text(expectAgenda(tree, "tasks")), /В выборке нет открытых задач/);
   const metrics = find(tree, (node) => node.type === "dl" && node.props["aria-label"] === "Показатели рабочего пространства");
-  for (const [label, value, href] of [["Всего заявок", data.metrics.totalLeads, "/leads"], ["В работе", data.metrics.inProgressLeads, "/leads"],
-    ["Встречи сегодня", data.metrics.meetingsToday, "/appointments"], ["Просроченные задачи", data.metrics.overdueTasks, "/tasks"]] as const) {
+  for (const [label, value, href] of expectedMetrics(data)) {
     const metric = find(tree, (node) => node.type === "a" && compact(node.props["aria-label"] || "") === compact(`${label}: ${value.toLocaleString("ru-RU")}`));
     assert.equal(metric.props.href, href);
     assert.ok(compact(text(metric)).includes(countText(value)), "Counts come from full server metrics, not the returned rows");

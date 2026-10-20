@@ -8,8 +8,8 @@ import { formatPhone, toTelHref } from "@/lib/phone";
 import { MortgageContactDetail } from "@/components/mortgage/MortgageContactDetail";
 import { MortgageContactForm } from "@/components/mortgage/MortgageContactForm";
 import {
-  MortgageIconButton, MortgagePageHeader, MortgageState, mortgageContactStatus, mortgageDate,
-  mortgageErrorMessage, mortgageInputClass, mortgagePrimaryClass,
+  MortgageContactBadge, MortgageIconButton, MortgagePageHeader, MortgageState, mortgageDate,
+  mortgageErrorMessage, mortgageInputClass, mortgagePrimaryClass, mortgageTableClass,
 } from "@/components/mortgage/MortgagePrimitives";
 
 export default function MortgageClients() {
@@ -93,19 +93,19 @@ function MortgageClientsBody() {
           : workspace.error ? <MortgageState kind="error" onRetry={() => void workspace.refresh()}>{mortgageErrorMessage(workspace.error)}</MortgageState>
           : !data ? <MortgageState kind="empty">Список клиентов недоступен.</MortgageState>
           : <>
-            {data.contacts.length ? <div className="max-h-[65dvh] min-w-0 max-w-full overflow-auto" role="region" aria-label="Контакты клиентов" tabIndex={0}>
+            {data.contacts.length ? <div className={`${mortgageTableClass} max-h-[65dvh] overflow-y-auto`} role="region" aria-label="Контакты клиентов" tabIndex={0}>
               <table className="w-full min-w-[760px] text-left text-xs">
                 <thead className="sticky top-0 z-10 bg-[var(--negis-surface)] text-[var(--negis-muted)]">
                   <tr>{["Клиент", "Телефон", "Статус заявки", "Источник", "Ответственный", "Обновлена"].map((label) => <th key={label} scope="col" className="px-2 py-2.5 font-medium">{label}</th>)}</tr>
                 </thead>
                 <tbody>{data.contacts.map((contact) => <tr key={contact.id} className="border-t border-[var(--negis-border)] align-top hover:bg-[var(--negis-surface-2)]"
                   style={contact.id === leadId ? { background: "var(--negis-primary-soft)" } : undefined}>
-                  <th scope="row" className="min-w-40 max-w-60 px-2 py-3 font-medium">
-                    <button type="button" className="w-full break-words text-left text-[var(--negis-primary)] hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--negis-primary)]"
+                  <th scope="row" className="min-w-40 max-w-60 px-3 py-3 font-medium">
+                    <button type="button" className="w-full break-words text-left text-[var(--negis-text)] hover:text-[var(--negis-primary)] hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--negis-primary)]"
                       aria-pressed={contact.id === leadId} onClick={() => selectContact(contact.id)}>{contact.name || "Без имени"}</button>
                   </th>
                   <td className="whitespace-nowrap px-2 py-3">{contact.phone ? <a href={toTelHref(contact.phone)} className="hover:underline">{formatPhone(contact.phone)}</a> : "Не указан"}</td>
-                  <td className="min-w-28 px-2 py-3">{mortgageContactStatus(contact.status)}</td>
+                  <td className="min-w-28 px-2 py-3"><MortgageContactBadge status={contact.status} /></td>
                   <td className="max-w-40 break-words px-2 py-3">{contact.source === "manual" ? "Вручную" : contact.source || "Не указан"}</td>
                   <td className="max-w-44 break-words px-2 py-3">{contact.responsibleName || (contact.responsibleUserId ? "Имя не указано" : "Не назначен")}</td>
                   <td className="min-w-32 px-2 py-3 tabular-nums">{mortgageDate(contact.updatedAt, data.timeZone)}</td>

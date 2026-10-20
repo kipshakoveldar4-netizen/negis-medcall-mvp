@@ -77,8 +77,6 @@ type Lead = {
   createdAt?: string;
 };
 
-type NegisTone = "primary" | "secondary" | "ai" | "success" | "warning" | "error" | "muted";
-
 const leadStatusLabel: Record<LeadStatusKey, string> = {
   new: "Новая",
   in_progress: "В работе",
@@ -107,7 +105,8 @@ const DEAL_PREFILL_KEY = "negis_deal_prefill";
 
 const inputStyle: CSSProperties = {
   width: "100%",
-  borderRadius: 14,
+  minWidth: 0,
+  borderRadius: 8,
   border: "1px solid var(--negis-border)",
   background: "var(--negis-surface)",
   color: "var(--negis-text)",
@@ -115,29 +114,6 @@ const inputStyle: CSSProperties = {
   padding: "11px 13px",
   outline: "none",
 };
-
-function negisToneColor(tone: NegisTone): string {
-  return `var(--negis-${tone})`;
-}
-
-function negisToneSoftBg(tone: NegisTone): string {
-  switch (tone) {
-    case "ai":
-      return "rgba(124,58,237,0.10)";
-    case "secondary":
-      return "rgba(37,99,235,0.10)";
-    case "success":
-      return "rgba(16,185,129,0.12)";
-    case "warning":
-      return "rgba(245,158,11,0.14)";
-    case "error":
-      return "rgba(239,68,68,0.10)";
-    case "muted":
-      return "rgba(148,163,184,0.14)";
-    default:
-      return "var(--negis-primary-soft)";
-  }
-}
 
 function StatusPill({ tone, children }: { tone: "green" | "amber" | "red" | "blue" | "slate"; children: ReactNode }) {
   const palette = {
@@ -147,14 +123,14 @@ function StatusPill({ tone, children }: { tone: "green" | "amber" | "red" | "blu
     blue: "border-blue-200 bg-blue-50 text-blue-700",
     slate: "border-slate-200 bg-white/70 text-slate-700",
   };
-  return <span className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-black ${palette[tone]}`}>{children}</span>;
+  return <span className={`inline-flex max-w-full items-center gap-1.5 rounded-md border px-2 py-1 text-xs font-semibold [overflow-wrap:anywhere] ${palette[tone]}`}>{children}</span>;
 }
 
 function Fact({ label, value }: { label: string; value: ReactNode }) {
   return (
-    <p className="flex items-start justify-between gap-3">
-      <span className="shrink-0 font-semibold" style={{ color: "var(--negis-muted)" }}>{label}</span>
-      <span className="text-right font-bold" style={{ color: "var(--negis-text)" }}>{value}</span>
+    <p className="flex min-w-0 items-start justify-between gap-3">
+      <span className="max-w-[45%] shrink-0 font-medium" style={{ color: "var(--negis-muted)" }}>{label}</span>
+      <span className="min-w-0 text-right font-semibold [overflow-wrap:anywhere]" style={{ color: "var(--negis-text)" }}>{value}</span>
     </p>
   );
 }
@@ -1117,8 +1093,9 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
 
   return (
     <PageLayout>
-      <div className="mx-auto max-w-[1440px] space-y-5 px-4 py-5 sm:px-6 lg:px-8">
+      <div className="medina-page medina-leads mx-auto w-full min-w-0 max-w-[1440px] space-y-4">
         {/* Header */}
+        <div className="medina-page-header [&_header]:gap-3 [&_header]:border-0 [&_header]:pb-0 [&_h1]:text-2xl [&_p]:tracking-normal">
         <PageHeader
           kicker="Medina OS · CRM"
           title="Заявки"
@@ -1130,8 +1107,8 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
                   <button
                     key={admin ? "admin" : "client"}
                     type="button"
-                    className="rounded-md px-3 py-1.5 text-xs font-semibold transition"
-                    style={isAdminMode === admin ? { background: "var(--negis-primary)", color: "#FFFFFF" } : { color: "var(--negis-muted)" }}
+                    className="min-h-10 min-w-0 flex-1 rounded-md px-3 py-1.5 text-xs font-semibold transition sm:min-h-8 sm:flex-none"
+                    style={isAdminMode === admin ? { background: "var(--negis-mint-soft)", color: "var(--negis-mint-ink)" } : { color: "var(--negis-muted)" }}
                     aria-pressed={isAdminMode === admin}
                     onClick={() => setMode(admin)}
                   >
@@ -1146,6 +1123,7 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
             </>
           ) : undefined}
         />
+        </div>
 
         {/* Summary metrics */}
         <section className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5" aria-label="Сводка по заявкам">
@@ -1167,7 +1145,7 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
         )}
 
         {/* CRM8: attribution counts in a compact strip — mobile stays uncluttered. */}
-        {!isMortgage && <section className="negis-glass flex flex-wrap items-center gap-x-6 gap-y-1.5 p-4 text-sm" aria-label="Атрибуция рекламы">
+        {!isMortgage && <section className="flex flex-wrap items-center gap-x-6 gap-y-1.5 text-xs" aria-label="Атрибуция рекламы">
           <p className="font-medium" style={{ color: "var(--negis-muted)" }}>
             Связаны с рекламой: <span className="font-semibold tabular-nums" style={{ color: "var(--negis-text)" }}>{attributionCounts.attributed}</span>
           </p>
@@ -1177,7 +1155,7 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
         </section>}
 
         {/* Filters + search */}
-        <section className="negis-glass p-4 sm:p-5">
+        <section className="medina-toolbar min-w-0 space-y-3" aria-label="Поиск и фильтры заявок">
           <div className="flex flex-wrap gap-2" role="group" aria-label="Фильтры заявок">
             {filterOptions.map((option) => {
               const active = filter === option.id;
@@ -1185,11 +1163,11 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
                 <button
                   key={option.id}
                   type="button"
-                  className="rounded-full px-4 py-2 text-xs font-semibold transition"
+                  className="min-h-10 max-w-full rounded-lg border px-3 py-2 text-xs font-semibold transition sm:min-h-9"
                   style={
                     active
-                      ? { background: "var(--negis-black)", color: "#FFFFFF" }
-                      : { background: "var(--negis-ground)", color: "var(--negis-ink-2)" }
+                      ? { background: "var(--negis-mint-soft)", borderColor: "var(--negis-mint)", color: "var(--negis-mint-ink)" }
+                      : { background: "var(--negis-surface)", borderColor: "var(--negis-border)", color: "var(--negis-text-2)" }
                   }
                   aria-pressed={active}
                   onClick={() => setFilter(option.id)}
@@ -1200,18 +1178,18 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
             })}
           </div>
           {/* CRM8: secondary attribution filter (independent of stage filter). */}
-          {!isMortgage && <div className="mt-3 flex flex-wrap items-center gap-2" role="group" aria-label="Фильтр по рекламе">
-            <span className="text-xs font-semibold uppercase tracking-[0.05em]" style={{ color: "var(--negis-muted)" }}>Реклама:</span>
+          {!isMortgage && <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Фильтр по рекламе">
+            <span className="text-xs font-medium" style={{ color: "var(--negis-muted)" }}>Реклама:</span>
             {attributionFilterOptions.map((option) => {
               const active = attributionFilter === option.id;
               return (
                 <button
                   key={option.id}
                   type="button"
-                  className="rounded-full border px-3 py-1.5 text-xs font-semibold transition"
+                  className="min-h-10 max-w-full rounded-lg border px-3 py-1.5 text-xs font-semibold transition sm:min-h-8"
                   style={
                     active
-                      ? { background: "var(--negis-primary)", borderColor: "var(--negis-primary)", color: "#FFFFFF" }
+                      ? { background: "var(--negis-mint-soft)", borderColor: "var(--negis-mint)", color: "var(--negis-mint-ink)" }
                       : { background: "var(--negis-surface)", borderColor: "var(--negis-border)", color: "var(--negis-muted)" }
                   }
                   aria-pressed={active}
@@ -1222,7 +1200,8 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
               );
             })}
           </div>}
-          {isMortgage && !isLeadManager && <label className="mt-3 block">
+          <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-end">
+          {isMortgage && !isLeadManager && <label className="block min-w-0 sm:order-2 sm:w-60 sm:shrink-0">
             <span className="mb-1 block text-xs font-semibold" style={{ color: "var(--negis-muted)" }}>Ответственный</span>
             <select style={inputStyle} value={responsibleFilter} aria-label="Фильтр по ответственному"
               onChange={(event) => setResponsibleFilter(event.target.value)}>
@@ -1231,7 +1210,7 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
               {staffOptions.map((member) => <option key={member.id} value={member.id}>{member.name}</option>)}
             </select>
           </label>}
-          <label className="relative mt-3 block">
+          <label className="relative block min-w-0 flex-1">
             <span className="sr-only">Поиск по заявкам</span>
             <Search className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2" size={17} style={{ color: "var(--negis-muted)" }} />
             <input
@@ -1242,6 +1221,7 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
               onChange={(event) => setSearch(event.target.value)}
             />
           </label>
+          </div>
         </section>
 
         {/* Loading (production waits for the first Supabase response) / list / empty state */}
@@ -1294,73 +1274,82 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
             }
           />
         ) : (
-          <section className="space-y-3">
+          <section className="medina-leads-table min-w-0 lg:overflow-x-auto lg:rounded-lg lg:border lg:border-[var(--negis-border)] lg:bg-[var(--negis-surface)]" aria-label="Список заявок" tabIndex={0}>
+            <table className={`block w-full text-left text-sm lg:table lg:min-w-[1020px] lg:border-collapse ${isMortgage ? "lg:table-fixed" : ""}`}>
+              <thead className="hidden bg-[var(--negis-surface-2)] text-xs font-medium text-[var(--negis-muted)] lg:table-header-group">
+                <tr className="[&>th]:px-3 [&>th]:py-3 [&>th]:font-medium">
+                  <th scope="col" className={isMortgage ? "w-[26%]" : undefined}>Клиент</th>
+                  <th scope="col" className={isMortgage ? "w-[12%]" : undefined}>{isMortgage ? "Источник" : "Источник / кампания"}</th>
+                  <th scope="col" className={isMortgage ? "w-[12%]" : undefined}>Статус</th>
+                  <th scope="col" className={isMortgage ? "w-[21%]" : undefined}>Ответственный</th>
+                  <th scope="col" className={isMortgage ? "w-[13%]" : undefined}>Создана</th>
+                  <th scope="col" className={isMortgage ? "w-[16%]" : undefined}><span className="sr-only">Действия</span></th>
+                </tr>
+              </thead>
+              <tbody className="block space-y-3 lg:table-row-group lg:space-y-0">
             {visibleLeads.map((lead) => {
               const statusKey = semanticGroupForLead(lead);
               const hasPhone = Boolean((lead.phone || "").replace(/\D/g, ""));
               return (
-                <article key={lead.id} className="negis-glass p-4 sm:p-5">
-                  <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-2">
-                        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl" style={{ background: negisToneSoftBg("primary"), color: negisToneColor("primary") }}>
-                          <Users size={15} />
-                        </div>
-                        <p className="truncate font-black" style={{ color: "var(--negis-text)" }}>{lead.name || "Без имени"}</p>
-                      </div>
-                      <p className="mt-1 text-xs font-semibold" style={{ color: "var(--negis-muted)" }}>
+                <tr key={lead.id} className={`block rounded-lg border border-[var(--negis-border)] bg-[var(--negis-surface)] p-4 transition-colors lg:table-row lg:rounded-none lg:border-x-0 lg:border-b-0 lg:p-0 lg:hover:bg-[var(--negis-mint-soft)]/20 [&>td]:min-w-0 [&>td]:align-top lg:[&>td]:px-3 ${isMortgage ? "lg:h-[60px] lg:[&>td]:py-2" : "lg:[&>td]:py-3"}`}>
+                  <td className={`block lg:table-cell ${isMortgage ? "lg:w-[26%]" : "lg:w-[22%]"}`}>
+                      <p className={`font-semibold [overflow-wrap:anywhere] ${isMortgage ? "lg:text-[13px] lg:leading-[18px]" : ""}`} style={{ color: "var(--negis-text)" }}>{lead.name || "Без имени"}</p>
+                      <p className={`mt-1 text-xs ${isMortgage ? "lg:mt-0.5" : ""}`} style={{ color: "var(--negis-muted)" }}>
                         {formatPhone(lead.phone) || "Телефон не указан"}
-                        {leadSourceName(lead, activeSources) !== "—" ? ` · ${leadSourceName(lead, activeSources)}` : ""}
-                        {lead.campaign ? ` · ${lead.campaign}` : ""}
                       </p>
-                    </div>
-                    <div className="flex flex-wrap items-center gap-2">
+                      {lead.notes ? <p className="mt-2 text-xs leading-relaxed text-[var(--negis-muted)] [overflow-wrap:anywhere] lg:mt-1 lg:line-clamp-2 lg:leading-4" title={lead.notes}>{lead.notes}</p> : null}
+                  </td>
+                  <td className={`mt-3 block text-xs [overflow-wrap:anywhere] lg:table-cell ${isMortgage ? "lg:w-[12%]" : "lg:w-[23%]"}`}>
+                    <p className="text-[var(--negis-text)]"><span className="text-[var(--negis-muted)] lg:hidden">Источник: </span>{leadSourceName(lead, activeSources)}</p>
+                    {!isMortgage && <>
+                      <p className="mt-1 text-[var(--negis-muted)]"><span className="lg:sr-only">Кампания: </span>{lead.campaign || "—"}</p>
+                      <p className="mt-1 text-[var(--negis-muted)]"><span className="lg:sr-only">Рекламная кампания: </span>{linkedCampaignLabel(lead, campaignLaunchOptions)}</p>
+                    </>}
+                  </td>
+                  <td className={`mt-3 block lg:table-cell ${isMortgage ? "lg:w-[12%]" : "lg:w-[14%]"}`}>
+                    <div className="flex flex-wrap items-start gap-1.5">
                       <StatusPill tone={leadStatusPill[statusKey]}>{leadStageName(lead, activeStages)}</StatusPill>
                       {lead.clientId ? <StatusPill tone="green">Клиент создан</StatusPill> : null}
                     </div>
-                  </div>
-
-                  <div className="mt-3 grid gap-x-5 gap-y-1.5 text-sm sm:grid-cols-2">
-                    <Fact label="Источник" value={leadSourceName(lead, activeSources)} />
-                    <Fact label="Кампания" value={lead.campaign || "—"} />
-                    <Fact label="Рекламная кампания" value={linkedCampaignLabel(lead, campaignLaunchOptions)} />
-                    <Fact label="Ответственный" value={responsibleName(lead, staffOptions)} />
-                    <Fact label="Создана" value={formatCreatedAt(lead.createdAt)} />
-                  </div>
-
-                  {lead.notes ? (
-                    <p className="mt-3 rounded-2xl px-3 py-2 text-sm" style={{ background: "var(--negis-surface)", color: "var(--negis-muted)" }}>
-                      {lead.notes}
-                    </p>
-                  ) : null}
-
-                  <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:flex-wrap">
+                  </td>
+                  <td className={`mt-3 block text-xs text-[var(--negis-text-2)] [overflow-wrap:anywhere] lg:table-cell ${isMortgage ? "lg:w-[21%]" : "lg:w-[13%]"}`}>
+                    <span className="text-[var(--negis-muted)] lg:hidden">Ответственный: </span>{responsibleName(lead, staffOptions)}
+                  </td>
+                  <td className="mt-1 block text-xs text-[var(--negis-muted)] lg:table-cell lg:w-[13%]">
+                    <span className="lg:hidden">Создана: </span>{formatCreatedAt(lead.createdAt)}
+                  </td>
+                  <td className={`mt-4 block lg:table-cell ${isMortgage ? "lg:w-[16%]" : ""}`}>
+                  <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap lg:min-w-[120px] lg:justify-end lg:gap-1.5 [&_.neu-btn]:min-h-11 [&_.neu-btn]:min-w-0 [&_.neu-btn]:px-2 [&_.neu-btn]:text-xs [&_.neu-btn]:whitespace-normal lg:[&_.neu-btn]:h-8 lg:[&_.neu-btn]:min-h-8 lg:[&_.neu-btn]:w-8 lg:[&_.neu-btn]:p-0 [&_svg]:shrink-0">
                     <a
                       className={`neu-btn justify-center ${hasPhone ? "" : "pointer-events-none opacity-50"}`}
                       href={hasPhone ? toWhatsappHref(lead.phone, clinicalActions ? `Здравствуйте, ${lead.name || ""}! Пишем из клиники.` : undefined) : undefined}
                       target="_blank"
                       rel="noreferrer"
                       aria-disabled={!hasPhone}
+                      aria-label="WhatsApp"
+                      title="WhatsApp"
                     >
                       <MessageCircle size={16} />
-                      WhatsApp
+                      <span className="lg:sr-only">WhatsApp</span>
                     </a>
                     <a
                       className={`neu-btn justify-center ${hasPhone ? "" : "pointer-events-none opacity-50"}`}
                       href={hasPhone ? toTelHref(lead.phone) : undefined}
                       aria-disabled={!hasPhone}
+                      aria-label="Позвонить"
+                      title="Позвонить"
                     >
                       <PhoneCall size={16} />
-                      Позвонить
+                      <span className="lg:sr-only">Позвонить</span>
                     </a>
-                    {clinicalActions && <Link href="/appointments" className="neu-btn justify-center" onClick={() => handleBookFromLead(lead)}>
+                    {clinicalActions && <Link href="/appointments" className="neu-btn justify-center" onClick={() => handleBookFromLead(lead)} aria-label="Записать" title="Записать">
                       <CalendarCheck size={16} />
-                      Записать
+                      <span className="lg:sr-only">Записать</span>
                     </Link>}
                     {clinicalActions && (lead.clientId ? (
-                      <Link href="/clients" className="neu-btn justify-center" onClick={() => rememberOpenClient(lead.clientId)}>
+                      <Link href="/clients" className="neu-btn justify-center" onClick={() => rememberOpenClient(lead.clientId)} aria-label="Открыть клиента" title="Открыть клиента">
                         <Users size={16} />
-                        Открыть клиента
+                        <span className="lg:sr-only">Открыть клиента</span>
                       </Link>
                     ) : (
                       <button
@@ -1368,19 +1357,24 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
                         className="neu-btn justify-center"
                         disabled={convertingId === lead.id}
                         onClick={() => void convertLeadToClient(lead)}
+                        aria-label="Создать клиента"
+                        title="Создать клиента"
                       >
                         {convertingId === lead.id ? <Loader2 className="animate-spin" size={16} /> : <UserPlus size={16} />}
-                        Создать клиента
+                        <span className="lg:sr-only">Создать клиента</span>
                       </button>
                     ))}
-                    <button type="button" className="neu-btn justify-center" onClick={() => setDetailId(lead.id)}>
+                    <button type="button" className="neu-btn justify-center" onClick={() => setDetailId(lead.id)} aria-label="Подробнее" title="Подробнее">
                       <ClipboardList size={16} />
-                      Подробнее
+                      <span className="lg:sr-only">Подробнее</span>
                     </button>
                   </div>
-                </article>
+                  </td>
+                </tr>
               );
             })}
+              </tbody>
+            </table>
           </section>
         )}
       </div>
@@ -1388,7 +1382,7 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
       {/* Add / edit modal */}
       {formOpen && (!strictSession || (!loadError && (!isLeadManager || editingId))) ? (
         <div className="fixed inset-0 z-[80] flex items-center justify-center p-4" style={{ background: "rgba(15,23,42,0.35)" }} onClick={() => setFormOpen(false)}>
-          <div className="negis-glass w-full max-w-lg max-h-[90vh] overflow-y-auto p-5 sm:p-6" style={{ background: "var(--negis-surface)" }} onClick={(event) => event.stopPropagation()}>
+          <div className="medina-lead-dialog negis-glass min-w-0 w-full max-w-lg max-h-[90vh] overflow-y-auto rounded-lg p-5 sm:p-6 [&_label>span]:font-semibold [&_label>span]:normal-case [&_label>span]:tracking-normal" style={{ background: "var(--negis-surface)", borderRadius: 8 }} onClick={(event) => event.stopPropagation()}>
             <div className="flex items-center justify-between gap-3">
               <h2 className="text-lg font-black" style={{ color: "var(--negis-text)" }}>{editingId ? "Изменить заявку" : "Новая заявка"}</h2>
               <button type="button" className="neu-btn px-3 py-2" onClick={() => setFormOpen(false)} aria-label="Закрыть"><X size={16} /></button>
@@ -1503,7 +1497,7 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
       {/* Detail modal */}
       {detailLead ? (
         <div className="fixed inset-0 z-[80] flex items-center justify-center p-4" style={{ background: "rgba(15,23,42,0.35)" }} onClick={() => setDetailId(null)}>
-          <div className="negis-glass w-full max-w-lg max-h-[90vh] overflow-y-auto p-5 sm:p-6" style={{ background: "var(--negis-surface)" }} onClick={(event) => event.stopPropagation()}>
+          <div className="medina-lead-dialog negis-glass min-w-0 w-full max-w-lg max-h-[90vh] overflow-y-auto rounded-lg p-5 sm:p-6 [overflow-wrap:anywhere]" style={{ background: "var(--negis-surface)", borderRadius: 8 }} onClick={(event) => event.stopPropagation()}>
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
                 <h2 className="truncate text-lg font-black" style={{ color: "var(--negis-text)" }}>{detailLead.name || "Без имени"}</h2>
@@ -1531,7 +1525,7 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
             </div>
 
             {/* Lead → client conversion */}
-            {clinicalActions && <div className="mt-4 rounded-2xl border p-3" style={{ borderColor: "var(--negis-border)" }}>
+            {clinicalActions && <div className="mt-4 border-t pt-3" style={{ borderColor: "var(--negis-border)" }}>
               {detailLead.clientId ? (
                 <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                   <p className="text-sm font-bold" style={{ color: "var(--negis-text)" }}>Клиент уже создан</p>
@@ -1560,7 +1554,7 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
 
             {/* Quick status change */}
             <div className="mt-4">
-              <p className="mb-2 text-xs font-black uppercase tracking-[0.05em]" style={{ color: "var(--negis-muted)" }}>Статус</p>
+              <p className="mb-2 text-xs font-semibold" style={{ color: "var(--negis-muted)" }}>Статус</p>
               <div className="flex flex-wrap gap-2">
                 {activeStages.map((stage) => {
                   const active = detailLead.stageId
@@ -1570,8 +1564,9 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
                     <button
                       key={stage.id}
                       type="button"
-                      className="rounded-full border px-3 py-1.5 text-xs font-black transition"
-                      style={active ? { background: "var(--negis-primary)", borderColor: "var(--negis-primary)", color: "#FFFFFF" } : { background: "var(--negis-surface)", borderColor: "var(--negis-border)", color: "var(--negis-muted)" }}
+                      className="min-h-10 max-w-full rounded-lg border px-3 py-1.5 text-xs font-semibold transition sm:min-h-8"
+                      style={active ? { background: "var(--negis-mint-soft)", borderColor: "var(--negis-mint)", color: "var(--negis-mint-ink)" } : { background: "var(--negis-surface)", borderColor: "var(--negis-border)", color: "var(--negis-muted)" }}
+                      aria-pressed={active}
                       onClick={() => changeStatus(detailLead, stage)}
                     >
                       {stage.name}
@@ -1602,7 +1597,7 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
             ) : null}
 
             {/* AI recommendation placeholder */}
-            {!isMortgage && <div className="mt-4 rounded-2xl p-3" style={{ background: negisToneSoftBg("ai") }}>
+            {!isMortgage && <div className="mt-4 rounded-lg p-3" style={{ background: "var(--negis-surface-2)" }}>
               <div className="flex items-center gap-2">
                 <Sparkles size={15} style={{ color: "var(--negis-ai)" }} />
                 <p className="text-sm font-bold" style={{ color: "var(--negis-text)" }}>Следующий шаг</p>
@@ -1612,8 +1607,8 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
 
             {/* Admin-only technical details (collapsed) */}
             {clinicalActions && isAdminMode ? (
-              <details className="mt-4 overflow-hidden rounded-2xl border" style={{ borderColor: "var(--negis-border)" }}>
-                <summary className="cursor-pointer list-none px-4 py-2.5 text-xs font-black uppercase tracking-[0.1em]" style={{ color: "var(--negis-primary)" }}>Технические данные</summary>
+              <details className="mt-4 overflow-hidden rounded-lg border" style={{ borderColor: "var(--negis-border)" }}>
+                <summary className="cursor-pointer list-none px-4 py-2.5 text-xs font-semibold" style={{ color: "var(--negis-primary)" }}>Технические данные</summary>
                 <div className="grid gap-1 px-4 pb-4 pt-1 text-xs font-semibold" style={{ color: "var(--negis-muted)" }}>
                   <p>lead id: {detailLead.id || "-"}</p>
                   <p>client_id present: {detailLead.clientId ? "yes" : "no"}</p>
@@ -1644,7 +1639,7 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
               />
             ) : null}
 
-            <div className="mt-5 grid grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:justify-end">
+            <div className="mt-5 flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:justify-end [&_a]:whitespace-normal [&_button]:whitespace-normal">
               <button type="button" className="neu-btn justify-center" onClick={() => openEdit(detailLead)}>
                 <Pencil size={16} />
                 Изменить

@@ -27,6 +27,7 @@ function evaluate(input: string, imports: Record<string, unknown> = {}, bindings
     crypto: { randomUUID }, window: { setTimeout: () => 1, clearTimeout: () => undefined }, ...bindings,
     require(name: string) {
       if (name in imports) return imports[name];
+      if (name === "./MortgagePrimitives") return primitiveStyles;
       if (name === "react/jsx-runtime") return { jsx, jsxs: jsx, Fragment: "Fragment" };
       if (name === "lucide-react" || name.startsWith("@/components/")) return new Proxy({}, { get: (_target, key) => String(key) });
       throw new Error(`Unmocked import: ${name}`);
@@ -34,6 +35,7 @@ function evaluate(input: string, imports: Record<string, unknown> = {}, bindings
   });
   return exports;
 }
+const primitiveStyles = evaluate(await read("components/mortgage/MortgagePrimitives.tsx"), { wouter: { Link: "Link" } });
 const clinicDay = evaluate(await read("lib/clinicDay.ts"));
 const capacity = evaluate(await readFile(path.join(root, "lib/crm/appointment-capacity.ts"), "utf8"));
 const dayGrid = evaluate(await read("lib/dayGrid.ts"), { "../../../../lib/crm/appointment-capacity": capacity });

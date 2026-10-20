@@ -93,9 +93,9 @@ export function MortgageContactForm({ contact, request, isCurrent, onSubmit, onC
 
   if (!isCurrent()) return null;
   return <Dialog open onOpenChange={(open) => { if (!open && !saving) onClose(); }}>
-    <DialogContent aria-describedby={undefined} className="max-h-[90dvh] w-[calc(100%-2rem)] overflow-y-auto rounded-lg border-[var(--negis-border)] bg-[var(--negis-surface)] text-[var(--negis-text)] [&>button:last-child]:hidden">
-      <DialogClose asChild><button type="button" title="Закрыть" aria-label="Закрыть" disabled={saving} className="absolute right-3 top-3 flex h-9 w-9 items-center justify-center rounded hover:bg-[var(--negis-surface-2)] disabled:opacity-50"><X className="h-4 w-4" /></button></DialogClose>
-      <DialogHeader><DialogTitle className="pr-6 text-left text-lg tracking-normal">{contact ? "Изменить контакт" : "Новый контакт"}</DialogTitle></DialogHeader>
+    <DialogContent aria-describedby={undefined} className="max-h-[90dvh] w-[calc(100%-2rem)] max-w-lg overflow-y-auto rounded-lg border-[var(--negis-border)] bg-[var(--negis-surface)] p-4 text-[var(--negis-text)] sm:p-6 [&>button:last-child]:hidden">
+      <DialogClose asChild><button type="button" title="Закрыть" aria-label="Закрыть" disabled={saving} className="absolute right-3 top-3 flex h-9 w-9 max-sm:h-11 max-sm:w-11 items-center justify-center rounded-lg hover:bg-[var(--negis-surface-2)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--negis-primary)] disabled:opacity-50"><X className="h-4 w-4" /></button></DialogClose>
+      <DialogHeader className="border-b border-[var(--negis-border)] pb-4"><DialogTitle className="break-words pr-9 text-left text-lg tracking-normal">{contact ? "Изменить контакт" : "Новый контакт"}</DialogTitle></DialogHeader>
       <form className="space-y-4" onSubmit={(event) => void submit(event)} aria-busy={saving}>
         <fieldset disabled={saving} className="min-w-0 space-y-4">
           <div className="space-y-1.5">
@@ -125,7 +125,7 @@ export function MortgageContactForm({ contact, request, isCurrent, onSubmit, onC
           </div>
         </fieldset>
         {error && <p role="alert" className="break-words text-sm text-[var(--negis-error)]">{error}</p>}
-        <div className="flex flex-wrap justify-end gap-2">
+        <div className="flex flex-wrap justify-end gap-2 border-t border-[var(--negis-border)] pt-4">
           <button type="button" className={mortgageButtonClass} disabled={saving} onClick={onClose}>Отмена</button>
           <button type="submit" className={mortgagePrimaryClass} disabled={saving}>
             {saving ? <Loader2 size={15} className="animate-spin" aria-hidden="true" /> : <Save size={15} aria-hidden="true" />}

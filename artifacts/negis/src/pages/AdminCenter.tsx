@@ -2811,29 +2811,36 @@ function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
     // такие запросы отклоняет, и кнопка обещала бы невозможное.
     const canEdit = (member: StaffMember) =>
       member.id !== actorStaffUserId && (member.role !== "owner" || actorRole === "owner");
+    const staffSectionClass = isMortgage ? "min-w-0 border-t border-[var(--negis-border)] pt-5" : "neu-card min-w-0";
+    const staffHeadingClass = isMortgage ? "text-base font-semibold text-[var(--negis-text)]" : "text-lg font-black text-[#0F172A]";
+    const staffModeClass = (selected: boolean) => isMortgage
+      ? `flex min-h-10 min-w-0 flex-1 items-center justify-center rounded-lg border px-3 py-2 text-sm font-medium transition-colors max-sm:min-h-11 focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--negis-primary)] ${selected
+        ? "border-[var(--negis-mint)] bg-[var(--negis-mint)] text-[var(--negis-mint-ink)]"
+        : "border-[var(--negis-border)] bg-white text-[var(--negis-text-2)] hover:bg-[var(--negis-surface-2)]"}`
+      : selected ? "neu-btn-primary flex-1 justify-center" : "neu-btn flex-1 justify-center";
 
     return (
-      <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(320px,420px)]">
-        <section className="neu-card">
+      <div className={isMortgage ? "grid min-w-0 items-start gap-6 xl:grid-cols-3" : "grid gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(320px,420px)]"}>
+        <section className={isMortgage ? "min-w-0 xl:col-span-3" : "neu-card min-w-0"}>
           <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-            <div>
-              <h2 className="text-lg font-black text-[#0F172A]">{isMortgage ? "Команда" : "Сотрудники"}</h2>
+            <div className="min-w-0">
+              <h2 className={staffHeadingClass}>{isMortgage ? "Команда" : "Сотрудники"}</h2>
               <p className="text-sm text-[#64748B]">{isMortgage
                 ? "Доступы выдаются по ролям. У каждого участника команды свой логин и пароль."
                 : "Доступы выдаются по ролям. Каждый входит со своим паролем — пароли за сотрудников не создаются."}</p>
             </div>
-            <span className="rounded-full bg-[#E0F2FE] px-3 py-1 text-xs font-bold text-[#0369A1]">Профилей: {staff.length}</span>
+            <span className={isMortgage ? "w-fit shrink-0 rounded-md bg-[var(--negis-mint-soft)] px-2.5 py-1 text-xs font-medium tabular-nums text-[var(--negis-mint-ink)]" : "rounded-full bg-[#E0F2FE] px-3 py-1 text-xs font-bold text-[#0369A1]"}>Профилей: {staff.length}</span>
           </div>
           <div className="grid gap-3 md:hidden">
             {staff.map((member) => (
-              <article key={member.id} className="rounded-2xl border border-[#E2E8F0] bg-white/70 p-4">
+              <article key={member.id} className={isMortgage ? "min-w-0 rounded-lg border border-[var(--negis-border)] bg-white p-4" : "rounded-2xl border border-[#E2E8F0] bg-white/70 p-4"}>
                 <div className="flex items-start justify-between gap-3">
-                  <div>
-                    <h3 className="font-bold text-[#0F172A]">{member.name}</h3>
-                    <p className="mt-1 text-sm text-[#64748B]">{loginFromEmail(member.email)}</p>
+                  <div className="min-w-0 break-words">
+                    <h3 className="font-semibold text-[var(--negis-text)]">{member.name}</h3>
+                    <p className="mt-1 break-all text-sm text-[#64748B]">{loginFromEmail(member.email)}</p>
                     <p className="mt-1 text-xs text-[#64748B]">{roleTitles[member.role]}</p>
                   </div>
-                  <StatusPill status={member.status === "active" ? "configured" : "partial"} label={statusText(member.status)} />
+                  <StatusPill compact={isMortgage} status={member.status === "active" ? "configured" : "partial"} label={statusText(member.status)} />
                 </div>
                 {canEdit(member) ? (
                   <>
@@ -2872,26 +2879,26 @@ function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
               </article>
             ))}
           </div>
-          <div className="hidden overflow-x-auto md:block">
+          <div className={isMortgage ? "medina-table hidden md:block" : "hidden overflow-x-auto md:block"}>
             <table className="w-full min-w-[760px] text-left text-sm">
-              <thead className="text-xs uppercase tracking-[0.12em] text-[#94A3B8]">
+              <thead className={isMortgage ? "bg-[var(--negis-surface-2)] text-xs text-[var(--negis-muted)]" : "text-xs uppercase tracking-[0.12em] text-[#94A3B8]"}>
                 <tr>
-                  <th className="px-3 py-3">Имя</th>
-                  <th className="px-3 py-3">Логин / почта</th>
-                  <th className="px-3 py-3">Роль</th>
-                  <th className="px-3 py-3">Статус</th>
-                  <th className="px-3 py-3">Действие</th>
+                  <th scope="col" className="px-3 py-3 font-medium">Имя</th>
+                  <th scope="col" className="px-3 py-3 font-medium">Логин / почта</th>
+                  <th scope="col" className="px-3 py-3 font-medium">Роль</th>
+                  <th scope="col" className="px-3 py-3 font-medium">Статус</th>
+                  <th scope="col" className="px-3 py-3 font-medium">Действие</th>
                 </tr>
               </thead>
               <tbody>
                 {staff.map((member) => (
-                  <tr key={member.id} className="border-t border-[#E2E8F0]">
-                    <td className="px-3 py-4 font-semibold text-[#0F172A]">{member.name}</td>
-                    <td className="px-3 py-4 text-[#64748B]">{loginFromEmail(member.email)}</td>
-                    <td className="px-3 py-4 text-[#334155]">
+                  <tr key={member.id} className={isMortgage ? "border-t border-[var(--negis-border)] hover:bg-[var(--negis-surface-2)]" : "border-t border-[#E2E8F0]"}>
+                    <td className="min-w-40 max-w-60 break-words px-3 py-3 font-semibold text-[var(--negis-text)]">{member.name}</td>
+                    <td className="max-w-48 break-all px-3 py-3 text-[#64748B]">{loginFromEmail(member.email)}</td>
+                    <td className="px-3 py-3 text-[#334155]">
                       {canEdit(member) && assignableRoles.length > 0 ? (
                         <select
-                          className="neu-input px-2 py-1 text-xs"
+                          className="neu-input min-w-36 px-2 py-1 text-xs"
                           value={assignableRoles.includes(member.role) ? member.role : ""}
                           onChange={(event) => updateStaffRole(member.id, event.target.value as StaffRole)}
                           aria-label={`Роль: ${member.name}`}
@@ -2905,8 +2912,8 @@ function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
                         roleTitles[member.role]
                       )}
                     </td>
-                    <td className="px-3 py-4"><StatusPill status={member.status === "active" ? "configured" : "partial"} label={statusText(member.status)} /></td>
-                    <td className="px-3 py-4">
+                    <td className="px-3 py-3"><StatusPill compact={isMortgage} status={member.status === "active" ? "configured" : "partial"} label={statusText(member.status)} /></td>
+                    <td className="px-3 py-3">
                       {canEdit(member) ? (
                         <div className="flex flex-wrap gap-2">
                           <button
@@ -2940,8 +2947,8 @@ function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
 
         {/* Код клиники стоит первым: по нему приходят люди, и владелец должен
             видеть его, а не искать. */}
-        <section className="neu-card">
-          <h2 className="text-lg font-black text-[#0F172A]">{isMortgage ? "Код пространства" : "Код клиники"}</h2>
+        <section className={staffSectionClass}>
+          <h2 className={staffHeadingClass}>{isMortgage ? "Код пространства" : "Код клиники"}</h2>
           <p className="mt-2 text-sm text-[#64748B]">
             Диктуйте код только своим людям. По коду нельзя войти — по нему можно только попроситься, а пускаете вы.
           </p>
@@ -2966,7 +2973,7 @@ function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
           )}
           {joinCode.state === "ready" && joinCode.value !== null && (
             <>
-              <p className="mt-4 font-mono text-2xl font-black tracking-[0.08em] text-[#0F172A]">{formatJoinCode(joinCode.value)}</p>
+              <p className={isMortgage ? "mt-4 break-all font-mono text-2xl font-semibold text-[var(--negis-text)]" : "mt-4 font-mono text-2xl font-black tracking-[0.08em] text-[#0F172A]"}>{formatJoinCode(joinCode.value)}</p>
               <div className="mt-3 flex flex-wrap gap-2">
                 <button
                   type="button"
@@ -2996,8 +3003,8 @@ function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
 
         {/* Входящая очередь — над формой заведения: она требует решения, а не
             повторяет уже принятые. */}
-        <section className="neu-card">
-          <h2 className="text-lg font-black text-[#0F172A]">
+        <section className={staffSectionClass}>
+          <h2 className={staffHeadingClass}>
             Заявки на вступление
             {pendingJoinRequests.length > 0 && (
               <span className="ml-2 rounded-full bg-[#DC2626] px-2 py-0.5 text-xs font-bold text-white">{pendingJoinRequests.length}</span>
@@ -3024,7 +3031,7 @@ function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
           {joinRequests.state === "ready" && pendingJoinRequests.length > 0 && (
             <div className="mt-3 space-y-3">
               {pendingJoinRequests.map((request) => (
-                <article key={request.id} className="rounded-xl border border-[#E2E8F0] p-4">
+                <article key={request.id} className="min-w-0 break-words rounded-lg border border-[#E2E8F0] bg-white p-4">
                   <p className="font-semibold text-[#0F172A]">{request.fullName || request.email}</p>
                   <p className="text-xs text-[#64748B]">{request.email}</p>
                   {request.phone && <p className="text-xs text-[#64748B]">{request.phone}</p>}
@@ -3085,8 +3092,8 @@ function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
           )}
         </section>
 
-        <section className="neu-card">
-          <h2 className="text-lg font-black text-[#0F172A]">Добавить сотрудника</h2>
+        <section className={staffSectionClass}>
+          <h2 className={staffHeadingClass}>Добавить сотрудника</h2>
           <p className="mt-2 text-xs text-[#64748B]">
             Вы зовёте человека — здесь. Человек попросился сам по коду — в «Заявках на вступление» выше.
           </p>
@@ -3094,13 +3101,13 @@ function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
               доходят плохо, и сотрудник неделями не мог войти. Приглашение
               осталось вторым способом — оно единственное для почты, у которой
               уже есть аккаунт. */}
-          <div className="mt-3 flex gap-2">
+          <div className="mt-3 flex gap-2" role="group" aria-label="Способ добавления сотрудника">
             {/* Переключение режима НЕ стирает показанные данные: пароль и
                 ссылка существуют в одном экземпляре, и случайный клик по
                 соседней кнопке уничтожал единственную копию. */}
             <button
               type="button"
-              className={staffMode === "password" ? "neu-btn-primary flex-1 justify-center" : "neu-btn flex-1 justify-center"}
+              className={staffModeClass(staffMode === "password")}
               aria-pressed={staffMode === "password"}
               onClick={() => setStaffMode("password")}
             >
@@ -3108,7 +3115,7 @@ function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
             </button>
             <button
               type="button"
-              className={staffMode === "invite" ? "neu-btn-primary flex-1 justify-center" : "neu-btn flex-1 justify-center"}
+              className={staffModeClass(staffMode === "invite")}
               aria-pressed={staffMode === "invite"}
               onClick={() => setStaffMode("invite")}
             >
@@ -3152,11 +3159,11 @@ function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
             </select>
             {staffMode === "password" ? (
               <>
-                <div className="flex gap-2">
+                <div className="flex flex-wrap gap-2">
                   {/* Поле видимое намеренно: это не свой секрет, а данные,
                       которые администратор сейчас передаст дальше. */}
                   <input
-                    className="neu-input flex-1"
+                    className="neu-input min-w-0 flex-[1_1_180px]"
                     placeholder="Пароль: 8–72 символа"
                     autoComplete="off"
                     value={staffPassword}
@@ -3185,7 +3192,7 @@ function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
           </div>
 
           {createdStaff && (
-            <div className="mt-4 rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-800">
+            <div className="mt-4 break-words rounded-lg border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-800">
               <p className="font-bold">{createdStaff.kind === "reset" ? "Новый пароль для" : "Сотрудник добавлен:"} {loginFromEmail(createdStaff.email)}</p>
               <p className="mt-1">
                 Передайте эти данные лично. Пароль показывается один раз — потом его нельзя посмотреть, только задать
@@ -3253,7 +3260,7 @@ function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
                 </button>
 
                 {batchResults && batchResults.length > 0 && (
-                  <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-800">
+                  <div className="break-words rounded-lg border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-800">
                     <p className="font-bold">Логины и пароли</p>
                     <p className="mt-1 text-xs">Раздайте их лично. Второй раз пароли не покажутся.</p>
                     <div className="mt-3 space-y-2 text-xs text-emerald-900">
@@ -3289,7 +3296,7 @@ function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
           </div>
 
           {issuedInvite && (
-            <div className="mt-4 rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-800">
+            <div className="mt-4 break-words rounded-lg border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-800">
               <p className="font-bold">Приглашение для {issuedInvite.email}</p>
               <p className="mt-1">
                 {issuedInvite.emailSent
@@ -3318,7 +3325,7 @@ function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
           )}
 
           <div className="mt-6">
-            <h3 className="text-sm font-black uppercase tracking-[0.12em] text-[#94A3B8]">Ожидают принятия</h3>
+            <h3 className={isMortgage ? "text-sm font-semibold text-[var(--negis-text-2)]" : "text-sm font-black uppercase tracking-[0.12em] text-[#94A3B8]"}>Ожидают принятия</h3>
             {/* Иначе владелец ищет в этом списке сотрудника, заведённого
                 паролем, и решает, что тот не сохранился. */}
             <p className="mt-1 text-xs text-[#94A3B8]">
@@ -3331,7 +3338,7 @@ function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
                 {invitations
                   .filter((invitation) => invitation.status === "pending")
                   .map((invitation) => (
-                    <li key={invitation.id} className="grid gap-2 rounded-2xl border border-[#E2E8F0] bg-white/70 px-3 py-2">
+                    <li key={invitation.id} className="grid min-w-0 gap-2 rounded-lg border border-[#E2E8F0] bg-white px-3 py-2">
                       <div className="min-w-0">
                         <p className="truncate text-sm font-semibold text-[#0F172A]">{invitation.email}</p>
                         <p className="text-xs text-[#64748B]">
@@ -3361,7 +3368,7 @@ function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
                 только косвенно, а истёкшее — не видно вовсе. */}
             {invitations.filter((invitation) => invitation.status !== "pending").length > 0 ? (
               <div className="mt-4">
-                <h3 className="text-sm font-black uppercase tracking-[0.12em] text-[#94A3B8]">История</h3>
+                <h3 className={isMortgage ? "text-sm font-semibold text-[var(--negis-text-2)]" : "text-sm font-black uppercase tracking-[0.12em] text-[#94A3B8]"}>История</h3>
                 <ul className="mt-2 grid gap-1.5">
                   {invitations
                     .filter((invitation) => invitation.status !== "pending")
@@ -4345,13 +4352,13 @@ function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
 
   return (
     <PageLayout>
-      <div className="space-y-6">
+      <div className={isMortgage ? "min-w-0 space-y-4" : "min-w-0 space-y-6"}>
         <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
-          <div>
-            <p className="text-xs font-bold uppercase tracking-[0.18em] text-[#64748B]">Администрирование</p>
-            <h1 className="mt-2 text-2xl font-semibold text-[#0F172A]">{isMortgage ? "Команда" : "Настройки клиники"}</h1>
-            <p className="mt-2 max-w-3xl text-sm text-[#64748B]">
-              {isMortgage ? "Пространство" : "Клиника"}: {workspaceId}. {isMortgage ? "Участник" : "Владелец"}: {loginFromEmail(user?.email) || "demo user"}.
+          <div className="min-w-0">
+            <p className={isMortgage ? "text-xs font-medium text-[var(--negis-muted)]" : "text-xs font-bold uppercase tracking-[0.18em] text-[#64748B]"}>Администрирование</p>
+            <h1 className="mt-2 text-2xl font-semibold leading-8 text-[var(--negis-text)]">{isMortgage ? "Команда" : "Настройки клиники"}</h1>
+            <p className="mt-2 max-w-3xl break-words text-sm text-[#64748B]">
+              {isMortgage ? loginFromEmail(user?.email) || "demo user" : `Клиника: ${workspaceId}. Владелец: ${loginFromEmail(user?.email) || "demo user"}.`}
             </p>
           </div>
           <button type="button" className="neu-btn w-full justify-center xl:w-auto" onClick={() => setLocation(isMortgage ? "/leads" : "/ai-control-center")}>
@@ -4381,9 +4388,9 @@ function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
           </div>
         </details>}
 
-        <section className="neu-card flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between" data-testid="server-admin-auth">
-          <div className="flex min-w-0 items-start gap-3">
-            <span className="mt-0.5 grid h-10 w-10 shrink-0 place-items-center rounded-2xl bg-teal-50 text-teal-700">
+        <section className={isMortgage && serverAdminAuth.status === "confirmed" ? "flex min-w-0 flex-wrap items-center justify-between gap-x-4 gap-y-2 border-b border-[var(--negis-border)] pb-3" : "neu-card flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between"} data-testid="server-admin-auth">
+          <div className={isMortgage && serverAdminAuth.status === "confirmed" ? "flex min-w-0 items-center gap-2" : "flex min-w-0 items-start gap-3"}>
+            <span className={isMortgage ? `${serverAdminAuth.status === "confirmed" ? "h-8 w-8" : "mt-0.5 h-10 w-10"} grid shrink-0 place-items-center rounded-lg bg-[var(--negis-mint-soft)] text-[var(--negis-mint-ink)]` : "mt-0.5 grid h-10 w-10 shrink-0 place-items-center rounded-2xl bg-teal-50 text-teal-700"}>
               {serverAdminAuth.status === "checking" ? (
                 <Loader2 className="animate-spin" size={19} />
               ) : serverAdminAuth.status === "confirmed" ? (
@@ -4393,15 +4400,15 @@ function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
               )}
             </span>
             <div className="min-w-0">
-              <p className="text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">Сессия</p>
-              <h2 className="mt-1 text-base font-black text-[#0F172A]">
+              <p className={isMortgage && serverAdminAuth.status === "confirmed" ? "sr-only" : isMortgage ? "text-xs font-medium text-[var(--negis-muted)]" : "text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]"}>Сессия</p>
+              <h2 className={isMortgage && serverAdminAuth.status === "confirmed" ? "text-sm font-medium text-[var(--negis-text)]" : "mt-1 text-base font-semibold text-[var(--negis-text)]"}>
                 {serverAdminAuth.status === "confirmed" && "Админ-доступ подтверждён"}
                 {serverAdminAuth.status === "reauth" && "Сессия завершена"}
                 {serverAdminAuth.status === "forbidden" && "Недостаточно прав"}
                 {serverAdminAuth.status === "unavailable" && "Не удалось проверить доступ"}
                 {serverAdminAuth.status === "checking" && "Проверяем доступ…"}
               </h2>
-              <p className="mt-1 text-sm text-[#64748B]">
+              <p className={isMortgage && serverAdminAuth.status === "confirmed" ? "sr-only" : "mt-1 text-sm text-[#64748B]"}>
                 {serverAdminAuth.status === "confirmed" && (isMortgage
                   ? "Доступ администратора подтверждён для текущего пространства."
                   : "Доступ администратора подтверждён для текущей клиники.")}
@@ -4412,7 +4419,7 @@ function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
               </p>
             </div>
           </div>
-          <div className="flex w-full shrink-0 flex-col gap-2 sm:w-auto sm:flex-row">
+          <div className={isMortgage && serverAdminAuth.status === "confirmed" ? "flex shrink-0 items-center gap-2" : "flex w-full shrink-0 flex-col gap-2 sm:w-auto sm:flex-row"}>
             {serverAdminAuth.status === "reauth" ? (
               <button
                 type="button"
@@ -4424,7 +4431,7 @@ function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
             ) : null}
             <button
               type="button"
-              className="neu-btn w-full justify-center sm:w-auto"
+              className={isMortgage && serverAdminAuth.status === "confirmed" ? "neu-btn justify-center max-sm:min-h-11" : "neu-btn w-full justify-center sm:w-auto"}
               onClick={() => void checkServerAdminAccess()}
               disabled={serverAdminAuth.status === "checking"}
             >
@@ -4437,7 +4444,7 @@ function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
         {/* Commercial-2: honest pilot status + support path. There is no billing
             domain yet — no payment claims, no fake purchase flow, no dead CTA
             buttons. The only action is a functional workspace-ID copy for support. */}
-        <div className="grid gap-4 lg:grid-cols-2">
+        <div className={isMortgage ? "min-w-0" : "grid gap-4 lg:grid-cols-2"}>
           {/*
             Здесь была одна фраза: «условия пилота и тариф согласуются с
             менеджером». Тарифов на экране не было вовсе — их ключи жили во
@@ -4448,17 +4455,17 @@ function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
           */}
           {!isMortgage && <PlanCalculator />}
           {!isMortgage && <VerticalSwitch />}
-          <section className="neu-card" aria-label="Поддержка">
-            <p className="text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">Поддержка</p>
-            <h2 className="mt-1 text-base font-black text-[#0F172A]">Связь с Medina OS</h2>
-            <p className="mt-1 text-sm text-[#64748B]">
+          <section className={isMortgage ? "grid min-w-0 items-center gap-x-4 gap-y-1 border-b border-[var(--negis-border)] pb-4 sm:grid-cols-[minmax(0,1fr)_auto]" : "neu-card"} aria-label="Поддержка">
+            <p className={isMortgage ? "sr-only" : "text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]"}>Поддержка</p>
+            <h2 className={isMortgage ? "text-sm font-semibold text-[var(--negis-text)]" : "mt-1 text-base font-semibold text-[var(--negis-text)]"}>Связь с Medina OS</h2>
+            <p className={isMortgage ? "text-xs text-[var(--negis-muted)] sm:row-start-2" : "mt-1 text-sm text-[#64748B]"}>
               {isMortgage
                 ? "По вопросам доступа обращайтесь к вашему менеджеру Medina OS и указывайте идентификатор пространства."
                 : "Канал поддержки настраивается для вашей клиники. До подключения обращайтесь к вашему менеджеру Medina OS и указывайте идентификатор клиники."}
             </p>
             <button
               type="button"
-              className="neu-btn mt-3"
+              className={isMortgage ? "neu-btn mt-2 w-full justify-center max-sm:min-h-11 sm:col-start-2 sm:row-span-2 sm:row-start-1 sm:mt-0 sm:w-auto" : "neu-btn mt-3 w-full justify-center sm:w-auto"}
               onClick={async () => {
                 if (!access.isCurrent()) return;
                 try {
@@ -4471,14 +4478,15 @@ function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
                 }
               }}
             >
+              <Copy size={15} aria-hidden="true" />
               {isMortgage ? "Скопировать идентификатор пространства" : "Скопировать идентификатор клиники"}
             </button>
           </section>
         </div>
 
         <div className="md:hidden">
-          <label className="mb-2 block text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]">Раздел админки</label>
-          <select className="neu-input w-full" value={activeTab} onChange={(event) => setActiveTab(event.target.value as AdminTab)}>
+          <label htmlFor="admin-section" className={isMortgage ? "mb-2 block text-xs font-medium text-[var(--negis-muted)]" : "mb-2 block text-xs font-bold uppercase tracking-[0.12em] text-[#64748B]"}>Раздел админки</label>
+          <select id="admin-section" className="neu-input w-full" value={activeTab} onChange={(event) => setActiveTab(event.target.value as AdminTab)}>
             {visibleTabs.map((tab) => (
               <option key={tab.id} value={tab.id}>
                 {/* Счётчик и в мобильном селекте: иначе на телефоне его не
@@ -4491,14 +4499,17 @@ function AdminCenterContent({ access }: { access: AdminSessionAccess }) {
         </div>
 
         <nav className="hidden overflow-x-auto md:block" aria-label="Admin sections">
-          <div className="inline-flex min-w-max gap-2 rounded-[28px] border border-white/70 bg-white/55 p-2 shadow-[8px_10px_28px_rgba(116,135,154,0.12)]">
+          <div className={isMortgage ? "inline-flex min-w-max gap-2" : "inline-flex min-w-max gap-2 rounded-[28px] border border-white/70 bg-white/55 p-2 shadow-[8px_10px_28px_rgba(116,135,154,0.12)]"}>
             {visibleTabs.map((tab) => (
               <button
                 key={tab.id}
                 type="button"
-                className={`flex min-h-11 items-center gap-2 rounded-2xl px-4 text-sm font-bold transition ${
+                className={isMortgage ? `flex min-h-10 items-center gap-2 rounded-lg border px-4 text-sm font-medium transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--negis-primary)] ${
+                  activeTab === tab.id ? "border-[var(--negis-mint)] bg-[var(--negis-mint)] text-[var(--negis-mint-ink)]" : "border-[var(--negis-border)] bg-white text-[var(--negis-text-2)] hover:bg-[var(--negis-surface-2)]"
+                }` : `flex min-h-11 items-center gap-2 rounded-2xl px-4 text-sm font-bold transition ${
                   activeTab === tab.id ? "bg-[#0D9488] text-white shadow-[0_8px_20px_rgba(13,148,136,0.22)]" : "text-[#64748B] hover:bg-white/80"
                 }`}
+                aria-pressed={activeTab === tab.id}
                 onClick={() => setActiveTab(tab.id)}
               >
                 <tab.icon size={16} />
@@ -4659,9 +4670,9 @@ function StatusTile({ title, value }: { title: string; value: string }) {
   );
 }
 
-function StatusPill({ status, label }: { status: Status | ReleaseStatus | string; label?: string }) {
+function StatusPill({ status, label, compact = false }: { status: Status | ReleaseStatus | string; label?: string; compact?: boolean }) {
   return (
-    <span className={`inline-flex w-fit items-center rounded-full border px-3 py-1 text-xs font-bold ${statusClass(status as Status | ReleaseStatus)}`}>
+    <span className={`inline-flex w-fit shrink-0 items-center whitespace-nowrap border ${compact ? "rounded-md px-2 py-1 text-[11px] font-medium" : "rounded-full px-3 py-1 text-xs font-bold"} ${statusClass(status as Status | ReleaseStatus)}`}>
       {label || statusLabel(status as Status | ReleaseStatus)}
     </span>
   );
