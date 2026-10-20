@@ -324,3 +324,107 @@ test("clinic arrival server middleware is loopback-only and preserves CSP and AP
   assert.equal((await request("/not-included", "127.0.0.1:5181")).statusCode, 404);
   assert.equal((await request("/operator", "127.0.0.1:5181")).statusCode, 200);
 });
+
+test("content opt-in cannot activate on another route, protocol or host", async () => {
+  for (const location of [
+    ...["/", "/appointments", "/admin", "/operator", "/clinic-arrival", "/ads-automation"].map(pathname => ({ pathname })),
+    { pathname: "/content-studio", hostname: "preview.invalid" },
+    { pathname: "/content-studio", hostname: "127.0.0.1.external.invalid" },
+    { pathname: "/content-studio", protocol: "https:" },
+    { pathname: "/content-studio", search: "?contentStudio=handoff&fixturePurpose=mortgage_leads&fixtureRole=lead_manager" },
+  ]) {
+    await withArrivalLocation({ search: "?contentStudio=handoff", ...location }, async isolated => {
+      assert.equal(isolated.contentStudioFixture, null);
+      await assert.rejects(isolated.crmFetch("/api/content-studio/generate-photo", { method: "POST" }), /External request forbidden/);
+    });
+  }
+});
+
+test("content mocks keep synthetic SDK and current auth aligned without enabling other fixtures", async () => {
+  const localBefore = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+  const sessionBefore = Object.getOwnPropertyDescriptor(globalThis, "sessionStorage");
+  const localValues = new Map(), sessionValues = new Map();
+  const makeStorage = values => ({ getItem: key => values.get(key) || null,
+    setItem: (key, value) => values.set(key, String(value)), removeItem: key => values.delete(key) });
+  Object.defineProperty(globalThis, "localStorage", { configurable: true, value: makeStorage(localValues) });
+  Object.defineProperty(globalThis, "sessionStorage", { configurable: true, value: makeStorage(sessionValues) });
+  try {
+    await withArrivalLocation({ pathname: "/content-studio", search: "?contentStudio=handoff" }, async isolated => {
+      const store = isolated.contentStudioFixture;
+      assert.ok(store);
+      assert.equal(isolated.appointmentCreateFixture, null);
+      assert.equal(isolated.useAuth().workspacePurpose, "clinic_services");
+      assert.equal(isolated.useAuth().userRole, "owner");
+      assert.equal(isolated.useAuth().user.id, store.session().user.id);
+      assert.equal((await isolated.supabase.auth.getSession()).data.session.user.id, store.session().user.id);
+      const workspace = store.snapshot().workspaceId;
+      assert.equal(localValues.get("negis_workspace_selector"), workspace);
+      const init = { expectedUserId: store.session().user.id, dispatchGuard: () => true, signal: new AbortController().signal };
+      const read = await isolated.crmFetch(`/api/crm/content-videos?workspaceId=${workspace}`, init);
+      assert.equal(read.status, 200);
+      assert.ok((await read.json()).data.videos[0].avatarPrompt);
+      store.switchActor();
+      assert.equal(isolated.useAuth().user.id, store.session().user.id);
+      assert.equal((await isolated.supabase.auth.getSession()).data.session.user.id, store.session().user.id);
+      assert.equal((await isolated.crmFetch(`/api/crm/appointments?workspaceId=${workspace}`, init)).status, 403);
+      assert.equal((await isolated.crmFetch(`/api/content-studio/send-telegram?workspaceId=${workspace}`, { ...init, method: "POST" })).status, 403);
+      assert.ok((await isolated.supabase.auth.signInWithPassword()).error);
+      await assert.rejects(fixtureWindow.fetch("https://example.invalid"), /Network disabled/);
+    });
+  } finally {
+    Object.defineProperty(globalThis, "localStorage", localBefore);
+    Object.defineProperty(globalThis, "sessionStorage", sessionBefore);
+  }
+});
+
+test("content view mounts real studio, simulated write-only clipboard and receipt-only advertising destination", async () => {
+  const source = await readFile(new URL("./crm-browser.tsx", import.meta.url), "utf8");
+  assert.match(source, /import ContentStudio from ['"].*pages\/ContentStudio['"]/);
+  assert.match(source, /<Route path="\/content-studio" component=\{ContentStudioFixture\}/);
+  assert.match(source, /<Route path="\/ads-automation" component=\{ContentStudioFixture\}/);
+  assert.match(source, /Object\.defineProperty\(navigator, "clipboard", \{ configurable: false, writable: false, value: contentClipboard \}\)/);
+  assert.match(source, /writeText: contentStudioFixture\.writeClipboard/);
+  assert.match(source, /!clipboardReady \|\| Object\.getOwnPropertyDescriptor\(navigator, "clipboard"\)\?\.value !== contentClipboard/);
+  assert.match(source, /sourceId === sourceId/);
+  assert.match(source, /parseAdvertisingCampaignPrefillForPlatform\(value, "meta"\)/);
+  assert.doesNotMatch(source, /navigator\.clipboard\.(?:read|readText)\s*\(/);
+  assert.doesNotMatch(source, /import AdsAutomation |component=\{AdsAutomation\}|<AdsAutomation/);
+  assert.match(source, /import\.meta\.hot\.dispose\(\(\) => fixtureRoot\.unmount\(\)\)/);
+});
+
+test("content server routes remain loopback-only with no API or unknown-document fallback", async () => {
+  const source = await readFile(new URL("./crm-browser.mjs", import.meta.url), "utf8");
+  const parsed = ts.createSourceFile("fixture.mjs", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+  let body;
+  function visit(node) {
+    if (ts.isMethodDeclaration(node) && node.name.getText(parsed) === "configureServer") body = node.body.getText(parsed);
+    ts.forEachChild(node, visit);
+  }
+  visit(parsed);
+  assert.ok(body);
+  const configure = new Function("entryPath", "routes", `return function(vite) ${body}`)(
+    "/synthetic/crm-browser.tsx", new Set(["/content-studio", "/ads-automation"]));
+  let handler;
+  configure({ middlewares: { use(value) { handler = value; } }, transformIndexHtml: async (_path, html) => html });
+  async function request(url, host) {
+    const result = { statusCode: 200, headers: {}, body: "" };
+    await handler({ url, headers: { host, accept: "text/html" } }, {
+      set statusCode(value) { result.statusCode = value; },
+      setHeader(key, value) { result.headers[key] = value; }, end(body) { result.body = body; },
+    }, () => { throw new Error("Unexpected content fixture fallback"); });
+    return result;
+  }
+  for (const route of ["/content-studio?contentStudio=handoff", "/ads-automation"]) {
+    for (const host of ["127.0.0.1:5205", "localhost:5205", "[::1]:5205"]) {
+      const result = await request(route, host);
+      assert.equal(result.statusCode, 200);
+      assert.match(result.headers["Content-Security-Policy"], /form-action 'none'; frame-src 'none'/);
+      assert.equal(result.headers["Cache-Control"], "no-store");
+    }
+    for (const host of [undefined, "preview.invalid", "127.0.0.1.external.invalid", "localhost@external.invalid"]) {
+      assert.equal((await request(route, host)).statusCode, 403);
+    }
+  }
+  assert.equal((await request("/api/content-studio/generate-package", "127.0.0.1:5205")).statusCode, 403);
+  assert.equal((await request("/other-document", "127.0.0.1:5205")).statusCode, 404);
+});

@@ -6,11 +6,14 @@ import { mortgageBrowserRequest, mortgageLeadBrowserRequest, mortgageFixtureAdmi
 import { mortgageOutcomesBrowserRequest } from './mortgage-outcomes-browser-store';
 import type { MortgageSnapshot } from '../../lib/crm/mortgage-contract';
 import { appointmentCreateFixtureIds, createAppointmentCreateBrowserFixture, isAppointmentCreateFixtureLocation } from "./appointment-create-browser-store";
+import { contentStudioFixtureIds, createContentStudioBrowserFixture, isContentStudioFixtureLocation } from "./content-studio-browser-store";
 const retryFixture = new URLSearchParams(window.location?.search || "").get("bookingRetry") === "lost-response"
   ? createBookingRetryFixture() : null;
 const fixtureParams = new URLSearchParams(window.location?.search || "");
 export const appointmentCreateFixture = isAppointmentCreateFixtureLocation(window.location)
   ? createAppointmentCreateBrowserFixture(window.location.search) : null;
+export const contentStudioFixture = isContentStudioFixtureLocation(window.location)
+  ? createContentStudioBrowserFixture() : null;
 const saleRetryFixture = fixtureParams.get("salesRetry") === "lost-response" ? createBookingRetryFixture() : null;
 const fixtureTimeZone = ["UTC", "Pacific/Chatham"].includes(fixtureParams.get("fixtureTimeZone") || "")
   ? fixtureParams.get("fixtureTimeZone")! : "Asia/Almaty";
@@ -25,14 +28,15 @@ for (const key of ["fixtureRole", "fixturePurpose"]) {
   else if (sessionStorage.getItem(`medina-visual:${key}`)) fixtureParams.set(key, sessionStorage.getItem(`medina-visual:${key}`)!);
 }
 const fixtureRole = fixtureParams.get("fixtureRole");
-const assignedLeadFixture = !appointmentCreateFixture && fixtureRole === "lead_manager";
-const mortgageFixture = !appointmentCreateFixture && fixtureParams.get("fixturePurpose") === "mortgage_leads";
+const assignedLeadFixture = !appointmentCreateFixture && !contentStudioFixture && fixtureRole === "lead_manager";
+const mortgageFixture = !appointmentCreateFixture && !contentStudioFixture && fixtureParams.get("fixturePurpose") === "mortgage_leads";
 const operatorFixture = createOperatorBrowserFixture();
 export const operatorDispatchFixture = fixtureParams.get("operatorDispatch") === "deferred"
   ? createOperatorDispatchFixture((url, init) => operatorFixture.request(url, init)) : null;
 export const suspendOperatorFixture = () => operatorFixture.suspend();
 export const endOperatorCooperationFixture = () => operatorFixture.endCooperation();
-const workspaceId = appointmentCreateFixture ? appointmentCreateFixtureIds.workspace : "00000000-0000-4000-8000-000000000001";
+const workspaceId = contentStudioFixture ? contentStudioFixtureIds.workspace
+  : appointmentCreateFixture ? appointmentCreateFixtureIds.workspace : "00000000-0000-4000-8000-000000000001";
 const clientId = "00000000-0000-4000-8000-000000000002";
 const doctorId = "00000000-0000-4000-8000-000000000003";
 const serviceId = "00000000-0000-4000-8000-000000000004";
@@ -65,11 +69,13 @@ const keys: Record<string, string> = { "clinic-doctors": "doctors", "clinic-serv
 export const hasSupabaseFrontendEnv = true;
 export const arrivedByRecoveryLink = false;
 export const supabase = { auth: {
-  getSession: async () => ({ data: { session: appointmentCreateFixture ? appointmentCreateFixture.session() : ["/admin", "/operator"].includes(window.location.pathname)
-    ? { user: { id: window.location.pathname === "/operator" ? "00000000-0000-4000-8000-000000000805" : "fixture-user" }, access_token: "visual-fixture-not-a-valid-token" } : null } }),
+  getSession: async () => contentStudioFixture ? contentStudioFixture.getSession()
+    : ({ data: { session: appointmentCreateFixture ? appointmentCreateFixture.session() : ["/admin", "/operator"].includes(window.location.pathname)
+      ? { user: { id: window.location.pathname === "/operator" ? "00000000-0000-4000-8000-000000000805" : "fixture-user" }, access_token: "visual-fixture-not-a-valid-token" } : null } }),
   signInWithPassword: async () => ({ data: null, error: { message: "Вход отключён на локальном стенде" } }),
-  onAuthStateChange: (listener: Parameters<NonNullable<typeof appointmentCreateFixture>["onAuthStateChange"]>[0]) => appointmentCreateFixture
-    ? appointmentCreateFixture.onAuthStateChange(listener) : { data: { subscription: { unsubscribe() {} } } },
+  onAuthStateChange: (listener: Parameters<NonNullable<typeof appointmentCreateFixture>["onAuthStateChange"]>[0]) => contentStudioFixture
+    ? contentStudioFixture.onAuthStateChange(listener) : appointmentCreateFixture
+      ? appointmentCreateFixture.onAuthStateChange(listener) : { data: { subscription: { unsubscribe() {} } } },
   signOut: async () => ({ error: null }),
 } };
 export const verifyCurrentPassword = async () => false;
@@ -89,6 +95,14 @@ appointmentCreateFixture?.bindAuth(({ actorId, role }) => {
   auth.user.id = actorId;
   auth.session.user.id = actorId;
   auth.userRole = role;
+  auth.workspacePurpose = "clinic_services";
+});
+contentStudioFixture?.bindAuth(({ actor, actorId }) => {
+  auth.user.id = actorId;
+  auth.session.user.id = actorId;
+  auth.user.email = `content-${actor}@example.invalid`;
+  auth.user.user_metadata.full_name = `ТЕСТ: контент ${actor}`;
+  auth.userRole = "owner";
   auth.workspacePurpose = "clinic_services";
 });
 export const useAuth = () => auth;
@@ -111,6 +125,7 @@ export const crmRequest = async (input?: string, init?: RequestInit) => {
 let fixtureWhatsAppEnabled = true;
 export async function crmFetch(input: string, init?: ClinicArrivalGuardedInit): Promise<Response> {
   const url = new URL(input, "http://fixture.invalid");
+  if (contentStudioFixture) return contentStudioFixture.request(url, init);
   if (url.origin !== "http://fixture.invalid" || !url.pathname.startsWith("/api/crm/")) throw new Error("External request forbidden");
   if (appointmentCreateFixture && (init?.method || "GET").toUpperCase() !== "GET") {
     return isAppointmentCreateFixtureLocation(window.location)
@@ -208,4 +223,12 @@ export async function crmFetch(input: string, init?: ClinicArrivalGuardedInit): 
 
 // Only the disposable loopback origin receives these fabricated identifiers.
 localStorage.setItem("negis_workspace_selector", workspaceId);
+if (contentStudioFixture) {
+  for (const key of ["negis_content_studio_videos", "negis_content_studio_video_job", "negis_ads_automation_prefill"]) {
+    localStorage.removeItem(`${key}::${contentStudioFixtureIds.workspace}`);
+  }
+  for (const kind of ["photo", "video"]) {
+    sessionStorage.removeItem(`negis_content_studio_paid_generation_attempt:${kind}::${contentStudioFixtureIds.workspace}`);
+  }
+}
 window.fetch = async () => { throw new Error("Network disabled in visual fixture"); };

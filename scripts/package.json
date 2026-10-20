@@ -9,7 +9,7 @@
     "test:assigned-leads": "tsx --test ./src/medina-assigned-lead-collection.test.ts ./src/medina-lead-manager-ui.test.ts",
     "test:admin-session": "tsx --test ./src/medina-admin-session.test.ts",
     "preview:crm": "node ./fixtures/crm-browser.mjs",
-    "test:crm-browser-fixture": "node --import tsx --test ./fixtures/crm-browser.test.mjs ./fixtures/operator-browser-store.test.mjs ./fixtures/operator-dispatch-fixture.test.mjs ./fixtures/clinic-arrival-browser-store.test.mjs ./fixtures/appointment-create-browser-store.test.mjs",
+    "test:crm-browser-fixture": "node --import tsx --test ./fixtures/crm-browser.test.mjs ./fixtures/operator-browser-store.test.mjs ./fixtures/operator-dispatch-fixture.test.mjs ./fixtures/clinic-arrival-browser-store.test.mjs ./fixtures/appointment-create-browser-store.test.mjs ./fixtures/content-studio-browser-store.test.mjs",
     "preview:site-intake": "node --import tsx ./fixtures/site-intake-browser.mjs",
     "preview:site-deletion": "node ./fixtures/site-deletion-browser.mjs",
     "test:site-intake-http": "node --import tsx --test ./fixtures/site-intake-browser.test.mjs",
