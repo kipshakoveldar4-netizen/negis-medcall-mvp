@@ -3,6 +3,8 @@ import type { MortgageActivity, MortgageContact, MortgageSnapshot } from '../../
 // In-memory loopback fixture only; never imported by the application entry.
 const today=new Date().toLocaleDateString('en-CA',{timeZone:'Asia/Almaty'});
 const stamp=new Date().toISOString();
+const nextDay = new Date(Date.now() + 86400000).toLocaleDateString('en-CA', { timeZone: 'Asia/Almaty' });
+const laterDay = new Date(Date.now() + 3 * 86400000).toLocaleDateString('en-CA', { timeZone: 'Asia/Almaty' });
 const manager='00000000-0000-4000-8000-000000000100';
 const second='00000000-0000-4000-8000-000000000101';
 export const mortgageFixtureAdmin={id:'00000000-0000-4000-8000-000000000011',name:'Тестовый администратор',role:'admin',status:'active'};
@@ -17,6 +19,8 @@ let activities:MortgageActivity[]=[
   {id:'00000000-0000-4000-8000-000000000300',kind:'meeting',leadId:contacts[0].id,title:'Консультация с Анной',notes:'Вымышленная встреча',status:'open',priority:'normal',startsAt:`${today}T10:00:00+05:00`,endsAt:`${today}T11:00:00+05:00`,dueAt:null,createdAt:stamp,updatedAt:stamp,contactName:contacts[0].name,responsibleUserId:manager,responsibleName:contacts[0].responsibleName},
   {id:'00000000-0000-4000-8000-000000000301',kind:'meeting',leadId:contacts[1].id,title:'Встреча с Ерланом',notes:'',status:'open',priority:'normal',startsAt:`${today}T12:30:00+05:00`,endsAt:`${today}T13:00:00+05:00`,dueAt:null,createdAt:stamp,updatedAt:stamp,contactName:contacts[1].name,responsibleUserId:second,responsibleName:contacts[1].responsibleName},
   {id:'00000000-0000-4000-8000-000000000302',kind:'task',leadId:contacts[0].id,title:'Перезвонить клиенту',notes:'Вымышленная задача',status:'open',priority:'high',startsAt:null,endsAt:null,dueAt:new Date(Date.now()-86400000).toISOString(),createdAt:stamp,updatedAt:stamp,contactName:contacts[0].name,responsibleUserId:manager,responsibleName:contacts[0].responsibleName},
+  {id:'00000000-0000-4000-8000-000000000303',kind:'meeting',leadId:contacts[2].id,title:'Обсуждение ипотечной программы',notes:'Вымышленная будущая встреча для проверки главной',status:'open',priority:'normal',startsAt:`${nextDay}T11:00:00+05:00`,endsAt:`${nextDay}T12:00:00+05:00`,dueAt:null,createdAt:stamp,updatedAt:stamp,contactName:contacts[2].name,responsibleUserId:manager,responsibleName:contacts[2].responsibleName},
+  {id:'00000000-0000-4000-8000-000000000304',kind:'meeting',leadId:contacts[3].id,title:'Проверка пакета документов',notes:'Вымышленная будущая встреча для проверки главной',status:'open',priority:'normal',startsAt:`${laterDay}T15:30:00+05:00`,endsAt:`${laterDay}T16:15:00+05:00`,dueAt:null,createdAt:stamp,updatedAt:stamp,contactName:contacts[3].name,responsibleUserId:second,responsibleName:contacts[3].responsibleName},
 ];
 const receipts=new Map<string,{id:string;payload:string}>();
 export async function mortgageLeadBrowserRequest(init:RequestInit|undefined,role:string):Promise<Response>{
@@ -54,7 +58,7 @@ export async function mortgageBrowserRequest(url:URL,init:RequestInit|undefined,
     const data:MortgageSnapshot={timeZone:'Asia/Almaty',contacts:selected.slice(page*100,(page+1)*100),contactsTotal:selected.length,page,pageSize:100,
       activities:ownedActivities,activitiesTruncated:false,members,events:[],periodDays:days,
       metrics:{totalLeads:visible.length,unassignedLeads:visible.filter(c=>!c.responsibleUserId).length,inProgressLeads:visible.filter(c=>c.status==='in_progress').length,
-        meetingsToday:ownedActivities.filter(a=>a.kind==='meeting'&&a.status==='open').length,
+        meetingsToday:ownedActivities.filter(a=>a.kind==='meeting'&&a.status!=='cancelled'&&a.startsAt&&new Date(a.startsAt).toLocaleDateString('en-CA',{timeZone:'Asia/Almaty'})===today).length,
         overdueTasks:ownedActivities.filter(a=>a.kind==='task'&&a.status==='open'&&a.dueAt&&Date.parse(a.dueAt)<Date.now()).length,activeManagers:members.filter(m=>m.role==='lead_manager'&&m.status==='active').length},
       memberMetrics:role==='lead_manager'?[]:members.map(m=>({id:m.id,name:m.name,role:m.role,assignedLeads:contacts.filter(c=>c.responsibleUserId===m.id).length,
         openTasks:ownedActivities.filter(a=>a.kind==='task'&&a.responsibleUserId===m.id&&a.status==='open').length,
