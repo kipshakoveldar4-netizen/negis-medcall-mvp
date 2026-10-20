@@ -22,7 +22,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import { apiUrl, crmFetch } from "@/lib/api";
 import { supabase, hasSupabaseFrontendEnv } from "@/lib/supabase";
 import { getSupabaseAccessToken } from "@/lib/serverAuth";
-import { readWorkspaceId, workspaceScopedKey } from "@/lib/demoStorage";
+import { isRealWorkspace, readWorkspaceId, workspaceScopedKey } from "@/lib/demoStorage";
 import {
   ADVERTISING_CAMPAIGN_PREFILL_KEY,
   ADVERTISING_CONTENT_STUDIO_PREFILL_KEY,
@@ -261,9 +261,9 @@ type StoredVideoJob = VideoJobState & {
   thumbnailSource?: string;
 };
 
-function readStoredVideoJob(): StoredVideoJob | null {
+function readStoredVideoJob(key = workspaceScopedKey(VIDEO_JOB_KEY)): StoredVideoJob | null {
   try {
-    const raw = localStorage.getItem(workspaceScopedKey(VIDEO_JOB_KEY));
+    const raw = localStorage.getItem(key);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as StoredVideoJob;
     return parsed && typeof parsed.handle === "string" && parsed.handle ? parsed : null;
@@ -272,9 +272,8 @@ function readStoredVideoJob(): StoredVideoJob | null {
   }
 }
 
-function writeStoredVideoJob(value: StoredVideoJob | null) {
+function writeStoredVideoJob(value: StoredVideoJob | null, key = workspaceScopedKey(VIDEO_JOB_KEY)) {
   try {
-    const key = workspaceScopedKey(VIDEO_JOB_KEY);
     if (value) localStorage.setItem(key, JSON.stringify(value));
     else localStorage.removeItem(key);
   } catch {
@@ -756,6 +755,8 @@ export default function ContentStudio() {
   const { user, userRole, clinicId, workspacePurpose, isLoading, isSigningOut, isDemoMode, isImpersonation } = useAuth();
   const actorId = !isLoading && !isSigningOut && !isDemoMode && !isImpersonation ? user?.id || "" : "";
   const workspaceId = clinicId || readWorkspaceId();
+  const localDraftsOnly = isDemoMode && !isLoading && !isSigningOut && !isImpersonation
+    && !isRealWorkspace(workspaceId) && readWorkspaceId() === workspaceId;
   const observedActorRef = useRef(user?.id || "");
   const [authEpoch, setAuthEpoch] = useState(0);
   useLayoutEffect(() => {
@@ -768,10 +769,10 @@ export default function ContentStudio() {
     });
     return () => subscription.unsubscribe();
   }, []);
-  return <ContentStudioSession key={JSON.stringify([actorId, workspaceId, userRole, workspacePurpose, authEpoch])} actorId={actorId} workspaceId={workspaceId} />;
+  return <ContentStudioSession key={JSON.stringify([actorId, workspaceId, userRole, workspacePurpose, authEpoch, localDraftsOnly])} actorId={actorId} workspaceId={workspaceId} localDraftsOnly={localDraftsOnly} />;
 }
 
-function ContentStudioSession({ actorId, workspaceId }: { actorId: string; workspaceId: string }) {
+function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actorId: string; workspaceId: string; localDraftsOnly: boolean }) {
   const [, setLocation] = useLocation();
   const sessionRef = useRef<AbortController | null>(null);
   useLayoutEffect(() => {
@@ -800,6 +801,20 @@ function ContentStudioSession({ actorId, workspaceId }: { actorId: string; works
       const token = await getSupabaseAccessToken(actorId);
       return Boolean(token && isSessionAlive(session));
     } catch { return false; }
+  }
+
+  async function pollingSessionState(session: AbortController | null): Promise<"current" | "unverified" | "ended"> {
+    if (await isGenerationSessionCurrent(session)) return "current";
+    if (!isSessionAlive(session)) return "ended";
+    try {
+      const { data, error } = await supabase.auth.getSession();
+      if (!isSessionAlive(session)) return "ended";
+      if (!error && (data.session?.user.id || "") !== actorId) {
+        session.abort();
+        return "ended";
+      }
+    } catch { /* A temporary SDK outage does not invalidate an unchanged lifetime. */ }
+    return "unverified";
   }
   const [form, setForm] = useState(initialVideo);
   const [videos, setVideos] = useState<ContentVideo[]>([]);
@@ -831,10 +846,13 @@ function ContentStudioSession({ actorId, workspaceId }: { actorId: string; works
   const [genImage, setGenImage] = useState<GeneratedFile | null>(null);
   const [genVideo, setGenVideo] = useState<GeneratedFile | null>(null);
   const [videoJob, setVideoJob] = useState<VideoJobState | null>(null);
+  const videoJobRef = useRef(videoJob);
+  videoJobRef.current = videoJob;
   const [generationUsage, setGenerationUsage] = useState<GenerationUsageSummary | null>(null);
   const [generationUsageLoading, setGenerationUsageLoading] = useState(false);
   const photoGenerationAttempt = useRef<PaidGenerationAttempt | null>(null);
   const videoGenerationAttempt = useRef<PaidGenerationAttempt | null>(null);
+  const videoGenerationRevision = useRef(0);
 
   const refreshGenerationUsage = useCallback(async () => {
     const session = sessionRef.current;
@@ -1275,6 +1293,7 @@ function ContentStudioSession({ actorId, workspaceId }: { actorId: string; works
       return;
     }
 
+    videoGenerationRevision.current += 1;
     setGenBusy("video");
     setGenNotice(null);
     setGenVideo(null);
@@ -1327,12 +1346,15 @@ function ContentStudioSession({ actorId, workspaceId }: { actorId: string; works
       // Подмена формата живёт в карточке задачи, а не в genNotice: genNotice
       // общий с генерацией изображения, и один клик по соседней кнопке стирал
       // бы предупреждение о том, что «квадратный» ролик на самом деле 9:16.
-      setVideoJob({
+      const acceptedJob: VideoJobState = {
         handle: body.data.handle,
         status: body.data.status,
         progress: body.data.progress,
         formatSubstituted: Boolean(body.data.formatSubstituted),
-      });
+      };
+      // Keep the accepted handle if the later persistence effect cannot recheck auth.
+      writeStoredVideoJob(acceptedJob, workspaceScopedKey(VIDEO_JOB_KEY));
+      setVideoJob(acceptedJob);
       void refreshGenerationUsage();
     } catch (error) {
       if (!await isGenerationSessionCurrent(session)) return;
@@ -1355,26 +1377,30 @@ function ContentStudioSession({ actorId, workspaceId }: { actorId: string; works
    * поэтому медленный ответ не копит очередь.
    */
   useEffect(() => {
+    const session = sessionRef.current;
+    if (!isSessionAlive(session)) return;
     if (!videoJob) return;
     if (videoJob.status === "completed" || videoJob.status === "failed") return;
 
     const handle = videoJob.handle;
+    const requestController = new AbortController();
+    const signal = AbortSignal.any([session.signal, requestController.signal]);
     let timer: ReturnType<typeof setTimeout> | null = null;
     let stopped = false;
 
-    // Одного флага достаточно: React всегда выполняет очистку предыдущего
-    // эффекта до запуска следующего, поэтому к моменту старта новой задачи
-    // старая цепочка уже помечена как остановленная. Счётчик поколений здесь
-    // был бы вторым названием того же условия — и следующему читателю пришлось
-    // бы гадать, какое из двух настоящее.
-    const isStale = () => stopped;
+    const isStale = () => stopped || !isSessionAlive(session);
+    const schedule = () => {
+      if (!isStale()) timer = setTimeout(() => void tick(), VIDEO_POLL_INTERVAL_MS);
+    };
 
     const tick = async () => {
       if (isStale()) return;
       try {
         const response = await crmFetch(
           withWorkspace(`/api/content-studio/video-generation?handle=${encodeURIComponent(handle)}`),
+          { expectedUserId: actorId, dispatchGuard: () => !isStale(), signal, cache: "no-store" },
         );
+        if (isStale()) return;
         const body = await safeJson<{
           status: VideoJobState["status"];
           progress: number;
@@ -1385,6 +1411,11 @@ function ContentStudioSession({ actorId, workspaceId }: { actorId: string; works
           mimeType?: string;
           fileSize?: number;
         }>(response);
+        if (isStale()) return;
+        if (await pollingSessionState(session) !== "current") {
+          schedule();
+          return;
+        }
         if (isStale()) return;
 
         if (!response.ok || body?.success !== true) {
@@ -1442,14 +1473,15 @@ function ContentStudioSession({ actorId, workspaceId }: { actorId: string; works
         }
       } catch (error) {
         if (isStale()) return;
-        setGenNotice({
-          tone: "warning",
-          text: error instanceof Error ? error.message : "Связь с сервером прервалась, опрос продолжается.",
-        });
+        if (await pollingSessionState(session) === "current" && !isStale()) {
+          setGenNotice({
+            tone: "warning",
+            text: error instanceof Error ? error.message : "Связь с сервером прервалась, опрос продолжается.",
+          });
+        }
       }
 
-      if (isStale()) return;
-      timer = setTimeout(() => void tick(), VIDEO_POLL_INTERVAL_MS);
+      schedule();
     };
 
     // Первый опрос — сразу. Так карточка перестаёт стоять на нуле двенадцать
@@ -1458,24 +1490,32 @@ function ContentStudioSession({ actorId, workspaceId }: { actorId: string; works
     void tick();
     return () => {
       stopped = true;
+      requestController.abort();
       if (timer) clearTimeout(timer);
     };
-  }, [videoJob?.handle, videoJob?.status]);
+  }, [videoJob?.handle, videoJob?.status, actorId, workspaceId]);
 
   // Задача и её результат переживают уход со страницы: см. VIDEO_JOB_KEY.
   useEffect(() => {
-    if (!videoJob) return;
-    writeStoredVideoJob({
-      ...videoJob,
-      url: genVideo?.url,
-      assetId: genVideo?.assetId,
-      fileName: genVideo?.fileName,
-      mimeType: genVideo?.mimeType,
-      fileSize: genVideo?.fileSize,
-      thumbnailUrl: genVideo?.thumbnailUrl,
-      thumbnailSource: genVideo?.thumbnailSource,
-    });
-  }, [videoJob, genVideo]);
+    const session = sessionRef.current;
+    if (!videoJob || !isSessionAlive(session)) return;
+    const key = workspaceScopedKey(VIDEO_JOB_KEY);
+    let stopped = false;
+    void (async () => {
+      if (!await isGenerationSessionCurrent(session) || stopped || !isSessionAlive(session) || videoJobRef.current !== videoJob) return;
+      writeStoredVideoJob({
+        ...videoJob,
+        url: genVideo?.url,
+        assetId: genVideo?.assetId,
+        fileName: genVideo?.fileName,
+        mimeType: genVideo?.mimeType,
+        fileSize: genVideo?.fileSize,
+        thumbnailUrl: genVideo?.thumbnailUrl,
+        thumbnailSource: genVideo?.thumbnailSource,
+      }, key);
+    })();
+    return () => { stopped = true; };
+  }, [videoJob, genVideo, actorId, workspaceId]);
 
   async function persistSelectedContentApproval(
     approval: AdvertisingContentApproval,
@@ -1701,42 +1741,68 @@ function ContentStudioSession({ actorId, workspaceId }: { actorId: string; works
   };
 
   useEffect(() => {
-    const storedJob = readStoredVideoJob();
-    if (storedJob) {
-      setVideoJob({
-        handle: storedJob.handle,
-        // Готовая задача без ссылки — состояние, которого быть не должно;
-        // считаем её незавершённой, чтобы карточка не осталась мёртвой.
-        status: storedJob.status === "completed" && !storedJob.url ? "in_progress" : storedJob.status,
-        progress: storedJob.progress,
-        formatSubstituted: Boolean(storedJob.formatSubstituted),
-      });
-      if (storedJob.url) {
-        setGenVideo({
-          url: storedJob.url,
-          assetId: storedJob.assetId,
-          fileName: storedJob.fileName,
-          mimeType: storedJob.mimeType || "video/mp4",
-          model: "",
-          fileSize: storedJob.fileSize || 0,
-          thumbnailUrl: storedJob.thumbnailUrl,
-          thumbnailSource: storedJob.thumbnailSource,
-        });
-      }
-    }
-
+    if (!localDraftsOnly || isRealWorkspace(workspaceId) || readWorkspaceId() !== workspaceId) return;
     const saved = readVideos();
     if (saved.length > 0) {
       setVideos(saved);
       setActiveId(saved[0].id);
     }
+  }, [localDraftsOnly, workspaceId]);
 
-    const loadApiVideos = async () => {
+  useEffect(() => {
+    const session = sessionRef.current;
+    if (!isSessionAlive(session)) return;
+    const key = workspaceScopedKey(VIDEO_JOB_KEY);
+    const originalJob = videoJobRef.current;
+    const originalGeneration = videoGenerationRevision.current;
+    const controller = new AbortController();
+    const signal = AbortSignal.any([session.signal, controller.signal]);
+    let stopped = false;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    const current = () => !stopped && isSessionAlive(session);
+    const initialize = async () => {
       try {
-        const workspaceId = readWorkspaceId();
-        const response = await crmFetch(`/api/crm/content-videos?workspaceId=${encodeURIComponent(workspaceId)}`);
+        const state = await pollingSessionState(session);
+        if (!current()) return;
+        if (state === "unverified") {
+          retryTimer = setTimeout(() => void initialize(), VIDEO_POLL_INTERVAL_MS);
+          return;
+        }
+        if (state !== "current") return;
+        if (videoJobRef.current === originalJob && videoGenerationRevision.current === originalGeneration) {
+          const storedJob = readStoredVideoJob(key);
+          if (storedJob) {
+            setVideoJob({
+              handle: storedJob.handle,
+              status: storedJob.status === "completed" && !storedJob.url ? "in_progress" : storedJob.status,
+              progress: storedJob.progress,
+              formatSubstituted: Boolean(storedJob.formatSubstituted),
+            });
+            if (storedJob.url) {
+              setGenVideo({
+                url: storedJob.url,
+                assetId: storedJob.assetId,
+                fileName: storedJob.fileName,
+                mimeType: storedJob.mimeType || "video/mp4",
+                model: "",
+                fileSize: storedJob.fileSize || 0,
+                thumbnailUrl: storedJob.thumbnailUrl,
+                thumbnailSource: storedJob.thumbnailSource,
+              });
+            }
+          }
+        }
+        const saved = readVideos();
+        if (saved.length > 0) {
+          setVideos(saved);
+          setActiveId(saved[0].id);
+        }
+        const response = await crmFetch(`/api/crm/content-videos?workspaceId=${encodeURIComponent(workspaceId)}`, {
+          expectedUserId: actorId, dispatchGuard: current, signal, cache: "no-store",
+        });
+        if (!current()) return;
         const body = await safeJson<{ videos?: ContentVideo[]; items?: ContentVideo[] }>(response);
-        if (!response.ok || body?.success !== true || body.mode !== "supabase") return;
+        if (!await isGenerationSessionCurrent(session) || !current() || !response.ok || body?.success !== true || body.mode !== "supabase") return;
 
         const apiVideos = body.data.videos ?? body.data.items ?? [];
         if (apiVideos.length === 0) return;
@@ -1750,8 +1816,13 @@ function ContentStudioSession({ actorId, workspaceId }: { actorId: string; works
       }
     };
 
-    void loadApiVideos();
-  }, []);
+    void initialize();
+    return () => {
+      stopped = true;
+      controller.abort();
+      if (retryTimer) clearTimeout(retryTimer);
+    };
+  }, [actorId, workspaceId]);
 
   const activeVideo = useMemo(
     () => videos.find((video) => video.id === activeId) ?? videos[0] ?? null,
@@ -2548,9 +2619,14 @@ function ContentStudioSession({ actorId, workspaceId }: { actorId: string; works
                   <button
                     type="button"
                     className="neu-btn mt-2 inline-flex items-center gap-2 px-3 py-1.5 text-xs"
-                    onClick={() => {
+                    onClick={async () => {
+                      const session = sessionRef.current;
+                      const handle = videoJob?.handle;
+                      if (!handle || !isSessionAlive(session) || videoJobRef.current?.handle !== handle || videoJobRef.current.status !== "failed") return;
+                      if (!await isGenerationSessionCurrent(session) || !isSessionAlive(session)
+                        || videoJobRef.current?.handle !== handle || videoJobRef.current.status !== "failed") return;
                       setGenNotice(null);
-                      setVideoJob((current) => (current ? { ...current, status: "in_progress" } : current));
+                      setVideoJob((current) => (current && current.handle === handle && current.status === "failed" ? { ...current, status: "in_progress" } : current));
                     }}
                   >
                     <RefreshCw size={13} />

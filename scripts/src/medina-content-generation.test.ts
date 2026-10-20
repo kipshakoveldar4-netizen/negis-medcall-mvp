@@ -851,95 +851,57 @@ test("GEN42 completed video without a file stays retryable and never looks succe
 });
 
 test("GEN43 checking a file-less completed job reuses its handle without another generation POST", async (t) => {
-  const source = await readFile(studioPage, "utf8");
-  const ts = createRequire(path.join(repoRoot, "package.json"))("typescript") as typeof import("typescript");
-  const ast = ts.createSourceFile(studioPage, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-  const polling: string[] = [], retries: string[] = [];
-  const visit = (node: import("typescript").Node) => {
-    if (ts.isCallExpression(node) && node.expression.getText(ast) === "useEffect") {
-      const callback = node.arguments[0];
-      if (callback && callback.getText(ast).includes("const completedUrl =")) polling.push(callback.getText(ast));
-    }
-    if (ts.isJsxElement(node) && node.openingElement.tagName.getText(ast) === "button" &&
-        node.children.some((child) => ts.isJsxText(child) && child.text.includes("Проверить ещё раз"))) {
-      const click = node.openingElement.attributes.properties.find((property) =>
-        ts.isJsxAttribute(property) && property.name.getText(ast) === "onClick");
-      assert.ok(click && ts.isJsxAttribute(click) && click.initializer && ts.isJsxExpression(click.initializer) && click.initializer.expression);
-      retries.push(click.initializer.expression.getText(ast));
-    }
-    ts.forEachChild(node, visit);
-  };
-  visit(ast);
-  assert.equal(polling.length, 1, "execute the actual polling effect, not a copied implementation");
-  assert.equal(retries.length, 1, "execute the actual retry button callback");
-  const compiled = ts.transpileModule(`globalThis.poll = ${polling[0]}; globalThis.retry = ${retries[0]};`, {
-    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
-  }).outputText;
-
   for (const missingUrl of [undefined, " \n\t ", 17]) {
     await t.test(`unusable URL ${JSON.stringify(missingUrl)}`, async () => {
-      type Job = { handle: string; status: string; progress: number };
-      const original: Job = { handle: "local-job+/=handle", status: "in_progress", progress: 4 };
-      let job: Job = { ...original }, notice: unknown = null, video: unknown = null;
-      const requests: { url: string; method: string }[] = [], successes: string[] = [];
-      const responses = [
-        { success: true, data: { status: "completed", progress: 100, creativeUrl: missingUrl } },
-        { success: true, data: { status: "completed", progress: 100, creativeUrl: "  https://example.invalid/fixture.mp4 \n", assetId: "local-asset", fileName: "fixture.mp4", mimeType: "video/mp4", fileSize: 42 } },
-      ];
-      let timerCalls = 0;
-      const context = {
-        videoJob: job,
-        setVideoJob(update: (current: Job) => Job) { job = update(job); context.videoJob = job; },
-        setGenNotice(value: unknown) { notice = value; },
-        setGenVideo(value: unknown) { video = value; },
-        withWorkspace: (url: string) => `${url}&workspaceId=local-workspace`,
-        async crmFetch(url: string, init?: { method?: string }) {
-          requests.push({ url, method: init?.method ?? "GET" });
-          assert.ok(responses.length, "unexpected extra request");
-          return { ok: true, status: 200, body: responses.shift() };
-        },
-        safeJson: async (response: { body: unknown }) => response.body,
-        generationRefusalText: () => { throw new Error("unexpected refusal"); },
-        toast: { success: (message: string) => successes.push(message) },
-        VIDEO_POLL_INTERVAL_MS: 12000,
-        setTimeout: () => { timerCalls++; throw new Error("completed jobs must stop polling"); },
-        clearTimeout: () => undefined,
-        poll: undefined as undefined | (() => undefined | (() => void)),
-        retry: undefined as undefined | (() => void),
-      };
-      new Script(compiled).runInNewContext(context);
-      const firstCleanup = context.poll!();
-      await new Promise<void>((resolve) => setImmediate(resolve));
-      assert.equal(job.handle, original.handle);
-      assert.equal(job.status, "failed");
-      assert.equal(video, null);
-      assert.deepEqual(successes, []);
-      assert.match((notice as { text: string }).text, /Проверить ещё раз/);
-      assert.equal(requests.length, 1);
+      const fixture = await localGenerationCallbacks("video", true);
+      const original: LocalVideoJob = { handle: "local-job+/=handle", status: "in_progress", progress: 4, formatSubstituted: false };
+      const firstBody = fixture.deferBody("poll"), firstCleanup = fixture.video(original).poll();
+      let retryBody: ReturnType<typeof generationDeferred<string>> | undefined, retryCleanup: void | (() => void);
+      const invalid = JSON.stringify({ success: true, data: { status: "completed", progress: 100, creativeUrl: missingUrl } });
+      const valid = JSON.stringify({ success: true, data: { status: "completed", progress: 100,
+        creativeUrl: "  https://example.invalid/fixture.mp4 \n", assetId: "local-asset", fileName: "fixture.mp4", mimeType: "video/mp4", fileSize: 42 } });
+      try {
+        await fixture.bodyStarted.promise;
+        firstBody.resolve(invalid); await flushLocalVideoWork();
+        let job = fixture.state.VideoJob as LocalVideoJob;
+        assert.equal(job.handle, original.handle);
+        assert.equal(job.status, "failed");
+        assert.equal(fixture.state.GenVideo, null);
+        assert.deepEqual(fixture.toasts, []);
+        assert.match((fixture.state.GenNotice as { text: string }).text, /Проверить ещё раз/);
+        assert.equal(fixture.dispatches.length, 1);
 
-      firstCleanup?.();
-      context.retry!();
-      assert.equal(notice, null);
-      assert.equal(job.handle, original.handle);
-      assert.equal(job.status, "in_progress");
-      assert.equal(requests.length, 1, "the button must not start generation");
-      const retryCleanup = context.poll!();
-      await new Promise<void>((resolve) => setImmediate(resolve));
-      assert.equal(job.status, "completed");
-      assert.equal(job.handle, original.handle);
-      assert.deepEqual(JSON.parse(JSON.stringify(video)), {
-        url: "https://example.invalid/fixture.mp4", assetId: "local-asset", fileName: "fixture.mp4",
-        mimeType: "video/mp4", model: "", fileSize: 42,
-      });
-      assert.deepEqual(successes, ["Ролик готов"]);
-      assert.deepEqual(requests, Array.from({ length: 2 }, () => ({
-        url: `/api/content-studio/video-generation?handle=${encodeURIComponent(original.handle)}&workspaceId=local-workspace`, method: "GET",
-      })));
-      assert.equal(responses.length, 0);
-      assert.equal(timerCalls, 0);
-      retryCleanup?.();
-      assert.equal(context.poll!(), undefined, "a completed job must not poll again");
-      assert.equal(requests.length, 2);
+        if (typeof firstCleanup === "function") firstCleanup();
+        await fixture.video(job).retry();
+        assert.equal(fixture.state.GenNotice, null);
+        job = fixture.state.VideoJob as LocalVideoJob;
+        assert.equal(job.handle, original.handle);
+        assert.equal(job.status, "in_progress");
+        assert.equal(fixture.dispatches.length, 1, "the actual retry button must not start generation");
+        retryBody = fixture.deferBody("poll");
+        retryCleanup = fixture.video(job).poll();
+        retryBody.resolve(valid); await flushLocalVideoWork();
+        job = fixture.state.VideoJob as LocalVideoJob;
+        assert.equal(job.status, "completed");
+        assert.equal(job.handle, original.handle);
+        assert.deepEqual(JSON.parse(JSON.stringify(fixture.state.GenVideo)), {
+          url: "https://example.invalid/fixture.mp4", assetId: "local-asset", fileName: "fixture.mp4",
+          mimeType: "video/mp4", model: "", fileSize: 42,
+        });
+        assert.deepEqual(fixture.toasts, [{ kind: "success", message: "Ролик готов" }]);
+        assert.deepEqual(fixture.dispatches.map(({ url, method }) => ({ url, method })), Array.from({ length: 2 }, () => ({
+          url: `/api/content-studio/video-generation?handle=${encodeURIComponent(original.handle)}&workspaceId=workspace-a`, method: "GET",
+        })));
+        assert.equal(fixture.timerCalls(), 0);
+        if (typeof retryCleanup === "function") retryCleanup();
+        assert.equal(fixture.video(job, fixture.state.GenVideo).poll(), undefined, "a completed job must not poll again");
+        assert.equal(fixture.dispatches.length, 2);
+      } finally {
+        firstBody.resolve(invalid); retryBody?.resolve(valid); await flushLocalVideoWork();
+        if (typeof firstCleanup === "function") firstCleanup();
+        if (typeof retryCleanup! === "function") retryCleanup!();
+        fixture.lifetime!.unmount();
+      }
     });
   }
 });
@@ -1030,7 +992,15 @@ test("GEN38 an ambiguous paid key survives a full reload in workspace-scoped ses
 
 type LocalGenerationKind = "photo" | "video";
 type LocalGenerationInit = RequestInit & { expectedUserId?: string; dispatchGuard?: () => boolean };
-type LocalGenerationDispatch = { url: string; method: string; headers: Headers; body: unknown };
+type LocalGenerationDispatch = { url: string; method: string; headers: Headers; body: unknown; signal?: AbortSignal | null };
+type LocalVideoJob = { handle: string; status: "queued" | "in_progress" | "completed" | "failed"; progress: number; formatSubstituted: boolean };
+type LocalVideoCallbacks = {
+  poll: () => void | (() => void);
+  persist: () => void | (() => void);
+  restore: () => void | (() => void);
+  retry: () => void | Promise<void>;
+};
+type LocalVideoRefs = { videoJobRef: { current: LocalVideoJob | null }; videoGenerationRevision: { current: number } };
 
 function generationDeferred<T>() {
   let resolve!: (value: T) => void;
@@ -1073,9 +1043,49 @@ const generationCallbackPrograms = (async () => {
   // Retain the real child prefix, including its layout effect and both guards.
   // Replace only the unrelated editor/render tail with an observation point.
   const lifetime = `${select(source, ["ContentStudio"])}\n${source.slice(child.getStart(ast), lastHelper.end)}
-    return { actorId, workspaceId, sessionRef, isSessionAlive, isGenerationSessionCurrent };
+    return { actorId, workspaceId, localDraftsOnly, sessionRef, isSessionAlive, isGenerationSessionCurrent };
   }\nexports.selected = { ContentStudio };`;
+  const videoEffects = { poll: [] as string[], persist: [] as string[], restore: [] as string[], retry: [] as string[] };
+  const demoEffects: string[] = [];
+  const visitVideo = (node: import("typescript").Node) => {
+    if (ts.isCallExpression(node) && node.expression.getText(ast) === "useEffect" && node.arguments[0]) {
+      const callback = node.arguments[0].getText(ast);
+      if (callback.includes("const completedUrl =")) videoEffects.poll.push(callback);
+      if (callback.includes("writeStoredVideoJob({") && callback.includes("url: genVideo?.url")) videoEffects.persist.push(callback);
+      if (callback.includes("const storedJob = readStoredVideoJob(")) videoEffects.restore.push(callback);
+      if (callback.includes("localDraftsOnly") && callback.includes("const saved = readVideos()")) demoEffects.push(callback);
+    }
+    if (ts.isJsxElement(node) && node.openingElement.tagName.getText(ast) === "button" &&
+        node.children.some((item) => ts.isJsxText(item) && item.text.includes("Проверить ещё раз"))) {
+      const click = node.openingElement.attributes.properties.find((item) => ts.isJsxAttribute(item) && item.name.getText(ast) === "onClick");
+      assert.ok(click && ts.isJsxAttribute(click) && click.initializer && ts.isJsxExpression(click.initializer) && click.initializer.expression);
+      videoEffects.retry.push(click.initializer.expression.getText(ast));
+    }
+    ts.forEachChild(node, visitVideo);
+  };
+  visitVideo(child);
+  assert.equal(demoEffects.length, 1, "execute exactly one actual pure-local draft hydration effect");
+  for (const [name, matches] of Object.entries(videoEffects)) assert.equal(matches.length, 1, `execute exactly one actual video ${name} callback`);
+  const jobRefAssignments = child.body.statements.filter((node) => ts.isExpressionStatement(node)
+    && ts.isBinaryExpression(node.expression) && node.expression.operatorToken.kind === ts.SyntaxKind.EqualsToken
+    && node.expression.left.getText(ast) === "videoJobRef.current" && node.expression.right.getText(ast) === "videoJob");
+  assert.equal(jobRefAssignments.length, 1, "execute the real job-ref assignment on each simulated render");
+  const videoRefs = `exports.selected = function renderVideoRefs(videoJob) {
+    ${select(source, ["videoJobRef", "videoGenerationRevision"])}
+    ${jobRefAssignments[0].getText(ast)}
+    return { videoJobRef, videoGenerationRevision };
+  };`;
+  const video = `${select(source, ["safeJson", "withWorkspace", "VIDEO_JOB_KEY", "VIDEO_POLL_INTERVAL_MS", "STORAGE_KEY",
+    "readStoredVideoJob", "writeStoredVideoJob", "readVideos", "writeVideos", "generationRefusalText", "isSessionAlive", "isGenerationSessionCurrent", "pollingSessionState"])}
+    exports.selected = function captureVideoCallbacks(videoJob, genVideo) {
+      return { ${Object.entries(videoEffects).map(([name, matches]) => `${name}: ${matches[0]}`).join(",\n")} };
+    };`;
+  const demo = `${select(source, ["STORAGE_KEY", "readVideos"])}
+    exports.selected = function captureLocalDraftHydration({ workspaceId, localDraftsOnly }) { return ${demoEffects[0]}; };`;
   return {
+    demo: ts.transpileModule(demo, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText,
+    videoRefs: ts.transpileModule(videoRefs, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText,
+    video: ts.transpileModule(video, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText,
     lifetime: ts.transpileModule(lifetime, { compilerOptions: {
       target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX,
     } }).outputText,
@@ -1092,15 +1102,15 @@ const generationCallbackPrograms = (async () => {
     auth: compile(await readFile(path.join(repoRoot, "artifacts/negis/src/lib/serverAuth.ts"), "utf8"),
       ["getSupabaseAccessToken"], ["getSupabaseAccessToken"]),
     storage: compile(await readFile(path.join(repoRoot, "artifacts/negis/src/lib/demoStorage.ts"), "utf8"),
-      ["WORKSPACE_SELECTOR_KEY", "readWorkspaceId", "workspaceScopedKey"],
-      ["WORKSPACE_SELECTOR_KEY", "readWorkspaceId", "workspaceScopedKey"]),
+      ["WORKSPACE_SELECTOR_KEY", "readWorkspaceId", "workspaceScopedKey", "UUID_PATTERN", "isRealWorkspace"],
+      ["WORKSPACE_SELECTOR_KEY", "readWorkspaceId", "workspaceScopedKey", "isRealWorkspace"]),
   };
 })();
 
 function evaluateGenerationFixture<T>(code: string, bindings: Record<string, unknown>, imports: Record<string, unknown> = {}): T {
   const exports: { selected?: T } = {};
   new Script(code).runInNewContext({
-    exports, Error, DOMException, AbortController, Headers, Response,
+    exports, Error, DOMException, AbortController, AbortSignal, Headers, Response,
     fetch: () => { throw new Error("Unmocked generation network call"); },
     ...bindings,
     require(name: string) {
@@ -1114,6 +1124,7 @@ function evaluateGenerationFixture<T>(code: string, bindings: Record<string, unk
 type LocalGenerationSession = {
   actorId: string;
   workspaceId: string;
+  localDraftsOnly: boolean;
   sessionRef: { current: AbortController | null };
   isSessionAlive: (session: AbortController | null) => boolean;
   isGenerationSessionCurrent: (session: AbortController | null) => Promise<boolean>;
@@ -1122,8 +1133,8 @@ type LocalGenerationSession = {
 function generationLifetime(code: string, bindings: Record<string, unknown>) {
   type Slot = { value?: unknown; deps?: unknown[]; pending?: boolean; effect?: () => void | (() => void); cleanup?: () => void };
   type Instance = { slots: Slot[]; cursor: number };
-  type Element = { type: (props: { actorId: string; workspaceId: string }) => LocalGenerationSession;
-    props: { actorId: string; workspaceId: string }; key: string };
+  type Element = { type: (props: { actorId: string; workspaceId: string; localDraftsOnly: boolean }) => LocalGenerationSession;
+    props: { actorId: string; workspaceId: string; localDraftsOnly: boolean }; key: string };
   const wrapper: Instance = { slots: [], cursor: 0 };
   let child: Instance | undefined, current = wrapper, key: string | undefined;
   let snapshot: LocalGenerationSession | undefined;
@@ -1177,6 +1188,7 @@ function generationLifetime(code: string, bindings: Record<string, unknown>) {
 async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime = false) {
   const programs = await generationCallbackPrograms;
   const mutations: { storage: string; operation: string; key: string }[] = [];
+  const storageReads: { storage: string; key: string }[] = [];
   const memoryStorage = (name: string) => {
     const values = new Map<string, string>();
     const failedReads: string[] = [];
@@ -1185,6 +1197,7 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
       failedReads,
       failNextRead(key: string) { failReadKey = key; },
       getItem(key: string) {
+        storageReads.push({ storage: name, key });
         if (key === failReadKey) {
           failReadKey = undefined; failedReads.push(key);
           throw new Error("Synthetic receipt read failure");
@@ -1201,16 +1214,18 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
     WORKSPACE_SELECTOR_KEY: string;
     readWorkspaceId: () => string;
     workspaceScopedKey: (key: string) => string;
+    isRealWorkspace: (workspaceId?: string) => boolean;
   }>(programs.storage, { window });
   localStorage.setItem(storage.WORKSPACE_SELECTOR_KEY, "workspace-a");
   let sdkActor = "actor-a", sdkToken = "fixture-token-a";
-  let authState = { user: { id: "actor-a" }, userRole: "owner", clinicId: "workspace-a", workspacePurpose: "clinic_services",
+  let authState = { user: { id: "actor-a" } as { id: string } | null, userRole: "owner", clinicId: "workspace-a", workspacePurpose: "clinic_services",
     isLoading: false, isSigningOut: false, isDemoMode: false, isImpersonation: false };
   const subscriptions = new Set<(event: string, session: { user: { id: string } }) => void>();
   let tokenWait: ReturnType<typeof generationDeferred<void>> | undefined;
   const tokenStarted = generationDeferred<void>(), bodyStarted = generationDeferred<void>();
   let delayedBody: ReturnType<typeof generationDeferred<string>> | undefined;
-  let delayedResource: "generation" | "usage" = "generation";
+  type Resource = "generation" | "usage" | "poll" | "restore";
+  let delayedResource: Resource = "generation";
   const state: Record<string, unknown> = {};
   const writes: { field: string; value: unknown }[] = [], toasts: { kind: string; message: string }[] = [];
   const dispatches: LocalGenerationDispatch[] = [];
@@ -1241,7 +1256,7 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
       mimeType: "image/png", model: "fixture-image", fileSize: 42 }
     : { handle: "local-a-signed-handle", status: "queued", progress: 0, formatSubstituted: false };
   const reply = { success: true, mode: "fixture", data: result };
-  const localResponse = (value: unknown, resource: "generation" | "usage") => {
+  const localResponse = (value: unknown, resource: Resource) => {
     const response = Response.json(value);
     if (delayedBody && delayedResource === resource) {
       const pending = delayedBody;
@@ -1250,13 +1265,23 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
     }
     return response;
   };
+  const pollReply = { success: true, data: { status: "completed", progress: 100, creativeUrl: "https://example.invalid/poll-a.mp4",
+    assetId: "poll-asset-a", fileName: "poll-a.mp4", mimeType: "video/mp4", fileSize: 84 } };
   const api = evaluateGenerationFixture<{ crmFetch: (url: string, init?: LocalGenerationInit) => Promise<Response> }>(programs.api, {
     apiUrl: (url: string) => url,
     async fetch(url: string, init: LocalGenerationInit) {
       const method = init.method || "GET";
-      dispatches.push({ url, method, headers: new Headers(init.headers), body: init.body ? JSON.parse(String(init.body)) : null });
+      dispatches.push({ url, method, headers: new Headers(init.headers), body: init.body ? JSON.parse(String(init.body)) : null, signal: init.signal });
       if (url === `/api/content-studio/generate-${kind}?workspaceId=workspace-a` && method === "POST") {
         return localResponse(reply, "generation");
+      }
+      if (url.startsWith("/api/content-studio/video-generation?")) {
+        assert.equal(method, "GET");
+        return localResponse(pollReply, "poll");
+      }
+      if (/^\/api\/crm\/content-videos\?workspaceId=workspace-[ab]$/.test(url)) {
+        assert.equal(method, "GET");
+        return localResponse({ success: true, mode: "supabase", data: { videos: [] } }, "restore");
       }
       assert.match(url, /^\/api\/content-studio\/usage\?workspaceId=workspace-[ab]$/);
       assert.equal(method, "GET", "no unlisted paid, auth or follow-up endpoint may dispatch");
@@ -1264,32 +1289,63 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
     },
   }, { "@/lib/serverAuth": auth });
   const setters = Object.fromEntries([
-    "GenBusy", "GenNotice", "GenImage", "GenVideo", "VideoJob", "GenerationUsage", "GenerationUsageLoading",
-  ].map((field) => [`set${field}`, (value: unknown) => { state[field] = value; writes.push({ field, value }); }]));
+    "GenBusy", "GenNotice", "GenImage", "GenVideo", "VideoJob", "GenerationUsage", "GenerationUsageLoading", "Videos", "ActiveId",
+  ].map((field) => [`set${field}`, (update: unknown) => {
+    const value = typeof update === "function" ? (update as (previous: unknown) => unknown)(state[field]) : update;
+    state[field] = value; writes.push({ field, value });
+  }]));
   const lifetime = withLifetime ? generationLifetime(programs.lifetime, {
     ...storage, ...auth, supabase: sdk, hasSupabaseFrontendEnv: true, useAuth: () => authState,
   }) : undefined;
   const mounted = lifetime?.render();
-  const captured = mounted?.session ?? { actorId: "actor-a", workspaceId: "workspace-a", sessionRef: { current: new AbortController() } };
+  const captured = mounted?.session ?? { actorId: "actor-a", workspaceId: "workspace-a", localDraftsOnly: false, sessionRef: { current: new AbortController() } };
+  const timers = new Map<number, () => void>();
+  const timerDelays: number[] = [];
+  let nextTimer = 0;
+  const refSlots: { current: unknown }[] = [];
+  let refCursor = 0;
+  const renderVideoRefs = evaluateGenerationFixture<(job: LocalVideoJob | null) => LocalVideoRefs>(programs.videoRefs, {
+    useRef(initial: unknown) { return refSlots[refCursor++] ??= { current: initial }; },
+  });
+  const videoRefs = renderVideoRefs(null);
+  const bindings = {
+    ...paidGeneration, ...storage, ...setters, ...api, ...auth, window, localStorage,
+    ...videoRefs, supabase: sdk,
+    actorId: captured.actorId, workspaceId: captured.workspaceId, sessionRef: captured.sessionRef,
+    genPrompt: "Synthetic clinic room", genFormat: "reels",
+    photoGenerationAttempt: { current: null }, videoGenerationAttempt: { current: null },
+    crypto: { randomUUID: () => "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" },
+    useCallback: (callback: unknown) => callback,
+    setTimeout(callback: () => void, delay: number) { const id = ++nextTimer; timers.set(id, callback); timerDelays.push(delay); return id; },
+    clearTimeout(id: number) { timers.delete(id); },
+    toast: {
+      success: (message: string) => toasts.push({ kind: "success", message }),
+      error: (message: string) => toasts.push({ kind: "error", message }),
+    },
+  };
+  const captureVideo = evaluateGenerationFixture<(job: LocalVideoJob | null, file: unknown) => LocalVideoCallbacks>(programs.video, bindings);
+  const captureLocalDrafts = evaluateGenerationFixture<(session: LocalGenerationSession) => () => void>(programs.demo, bindings);
   const page = evaluateGenerationFixture<{
     generatePhoto: () => Promise<void>;
     generateVideo: () => Promise<void>;
     refreshGenerationUsage: () => Promise<void>;
     paidGenerationAttemptKey: (kind: LocalGenerationKind) => string;
     clearBrowserPaidGenerationAttempt: (kind: LocalGenerationKind, key?: string, expectedRequestKey?: string) => void;
-  }>(programs.page, {
-    ...paidGeneration, ...storage, ...setters, ...api, ...auth, window, localStorage,
-    actorId: captured.actorId, workspaceId: captured.workspaceId, sessionRef: captured.sessionRef,
-    genPrompt: "Synthetic clinic room", genFormat: "reels",
-    photoGenerationAttempt: { current: null }, videoGenerationAttempt: { current: null },
-    crypto: { randomUUID: () => "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" },
-    useCallback: (callback: unknown) => callback,
-    toast: {
-      success: (message: string) => toasts.push({ kind: "success", message }),
-      error: (message: string) => toasts.push({ kind: "error", message }),
-    },
-  });
+  }>(programs.page, bindings);
   return {
+    localDrafts() {
+      assert.ok(lifetime, "local drafts must receive their actual wrapper-computed session props");
+      const next = lifetime.render();
+      return { ...next, hydrate: captureLocalDrafts(next.session) };
+    },
+    video(job: LocalVideoJob | null, file: unknown = null) {
+      state.VideoJob = job; state.GenVideo = file;
+      refCursor = 0; renderVideoRefs(job);
+      return captureVideo(job, file);
+    },
+    videoKey: (workspaceId = storage.readWorkspaceId()) => `negis_content_studio_video_job::${workspaceId}`,
+    localStorage, timers, timerDelays, pollReply, videoRefs, timerCalls: () => nextTimer, storageReads,
+    videoGenerationAttempt: bindings.videoGenerationAttempt,
     generate: kind === "photo" ? page.generatePhoto : page.generateVideo,
     refresh: page.refreshGenerationUsage,
     clearReceipt: (key: string, expectedRequestKey: string) => page.clearBrowserPaidGenerationAttempt(kind, key, expectedRequestKey),
@@ -1304,7 +1360,7 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
       if (event) for (const callback of [...subscriptions]) callback(event, { user: { id: actor } });
     },
     deferToken() { tokenWait = generationDeferred<void>(); return tokenWait; },
-    deferBody(resource: "generation" | "usage" = "generation") {
+    deferBody(resource: Resource = "generation") {
       delayedResource = resource; delayedBody = generationDeferred<string>(); return delayedBody;
     },
   };
@@ -1556,8 +1612,11 @@ for (const kind of ["photo", "video"] as const) {
       await work;
       await new Promise<void>((resolve) => setImmediate(resolve));
       assert.deepEqual(fixture.sessionStorage.failedReads, [key], "exercise the actual cleanup comparison, not the initial receipt write");
-      assert.deepEqual(fixture.mutations.slice(mutations), [], "failed best-effort cleanup must retain the paid receipt");
+      assert.deepEqual(fixture.mutations.slice(mutations), kind === "video"
+        ? [{ storage: "local", operation: "set", key: fixture.videoKey("workspace-a") }] : [],
+        "failed receipt cleanup may only cache the accepted video handle at its own workspace key");
       assert.equal(fixture.sessionStorage.getItem(key), stored);
+      if (kind === "video") assert.deepEqual(JSON.parse(fixture.localStorage.getItem(fixture.videoKey())!), fixture.reply.data);
       const { creativeUrl, ...file } = fixture.reply.data;
       assert.deepEqual(JSON.parse(JSON.stringify(fixture.state[kind === "photo" ? "GenImage" : "VideoJob"])),
         kind === "photo" ? { ...file, url: creativeUrl } : fixture.reply.data,
@@ -1634,3 +1693,538 @@ for (const resource of ["photo", "video", "usage"] as const) {
     }
   }
 }
+
+const LOCAL_POLL_JOB: LocalVideoJob = {
+  handle: "local-poll-a+/=handle", status: "in_progress", progress: 7, formatSubstituted: false,
+};
+const LOCAL_POLL_FILE = { url: "https://example.invalid/poll-a.mp4", assetId: "poll-asset-a", fileName: "poll-a.mp4",
+  mimeType: "video/mp4", model: "", fileSize: 84 };
+const flushLocalVideoWork = () => new Promise<void>((resolve) => setImmediate(resolve));
+type LocalVideoBoundary = "account-no-event" | "account-event" | "A-B-A" | "workspace" | "unmount";
+function changeLocalVideoScope(fixture: Awaited<ReturnType<typeof localGenerationCallbacks>>, boundary: LocalVideoBoundary) {
+  if (boundary === "workspace") fixture.workspace("workspace-b");
+  else if (boundary === "unmount") fixture.lifetime!.unmount();
+  else {
+    fixture.sdkSession("actor-b", "fixture-token-b", boundary === "account-no-event" ? null : "SIGNED_IN");
+    if (boundary === "A-B-A") fixture.sdkSession("actor-a", "fixture-token-a-returned");
+  }
+}
+
+for (const boundary of ["account-no-event", "account-event", "A-B-A", "workspace"] as const) {
+  test(`GEN53 actual poll token wait cannot dispatch across ${boundary}`, { timeout: 5000 }, async () => {
+    const fixture = await localGenerationCallbacks("video", true), token = fixture.deferToken();
+    const callbacks = fixture.video({ ...LOCAL_POLL_JOB }), cleanup = callbacks.poll();
+    try {
+      await fixture.tokenStarted.promise;
+      assert.equal(fixture.dispatches.length, 0);
+      changeLocalVideoScope(fixture, boundary);
+      const writes = fixture.writes.length, mutations = fixture.mutations.length;
+      token.resolve(); await flushLocalVideoWork();
+      assert.deepEqual({
+        dispatches: fixture.dispatches.map(({ url, method, headers }) => ({ url, method, authorization: headers.get("Authorization") })),
+        writes: fixture.writes.slice(writes), mutations: fixture.mutations.slice(mutations), toasts: fixture.toasts, timers: fixture.timers.size,
+      }, { dispatches: [], writes: [], mutations: [], toasts: [], timers: 0 },
+      "the real poll must retain its actor and live workspace through the transport token wait");
+    } finally {
+      token.resolve(); await flushLocalVideoWork();
+      if (typeof cleanup === "function") cleanup();
+      fixture.lifetime!.unmount();
+    }
+  });
+}
+
+for (const boundary of ["account-no-event", "account-event", "workspace", "unmount"] as const) {
+  test(`GEN54 actual poll late body cannot publish or persist after ${boundary}`, { timeout: 5000 }, async () => {
+    const fixture = await localGenerationCallbacks("video", true), body = fixture.deferBody("poll");
+    const callbacks = fixture.video({ ...LOCAL_POLL_JOB }), cleanup = callbacks.poll();
+    const response = JSON.stringify({ ...fixture.pollReply, warning: "Synthetic A library warning" });
+    try {
+      await fixture.bodyStarted.promise;
+      assert.equal(fixture.dispatches.length, 1);
+      changeLocalVideoScope(fixture, boundary);
+      const nextJob = { ...LOCAL_POLL_JOB, handle: "local-poll-b-handle", progress: 31 };
+      const nextFile = { ...LOCAL_POLL_FILE, url: "https://example.invalid/poll-b.mp4" };
+      fixture.video(nextJob, nextFile);
+      fixture.state.GenNotice = { tone: "info", text: "Current B notice" };
+      const keyB = fixture.videoKey(), storedB = JSON.stringify({ ...nextJob, ...nextFile });
+      fixture.localStorage.setItem(keyB, storedB);
+      const writes = fixture.writes.length, mutations = fixture.mutations.length;
+      body.resolve(response); await flushLocalVideoWork();
+      if (fixture.writes.slice(writes).some((write) => write.field === "VideoJob" || write.field === "GenVideo")) {
+        // Run the real persistence effect for the render caused by a late setter.
+        fixture.video(fixture.state.VideoJob as LocalVideoJob, fixture.state.GenVideo).persist();
+      }
+      assert.deepEqual({
+        writes: fixture.writes.slice(writes), toasts: fixture.toasts, mutations: fixture.mutations.slice(mutations),
+        storedB: fixture.localStorage.getItem(keyB), dispatches: fixture.dispatches.length, timers: fixture.timers.size,
+      }, { writes: [], toasts: [], mutations: [], storedB, dispatches: 1, timers: 0 },
+      "a completed A poll cannot publish its file, warning, success toast or persistence into the new scope");
+    } finally {
+      body.resolve(response); await flushLocalVideoWork();
+      if (typeof cleanup === "function") cleanup();
+      fixture.lifetime!.unmount();
+    }
+  });
+}
+
+for (const phase of ["token", "body"] as const) {
+  test(`GEN55 actual poll cleanup aborts ${phase}-pending transport work`, { timeout: 5000 }, async () => {
+    const fixture = await localGenerationCallbacks("video", true);
+    const token = phase === "token" ? fixture.deferToken() : undefined;
+    const body = phase === "body" ? fixture.deferBody("poll") : undefined;
+    const cleanup = fixture.video({ ...LOCAL_POLL_JOB }).poll();
+    try {
+      await (token ? fixture.tokenStarted.promise : fixture.bodyStarted.promise);
+      assert.equal(typeof cleanup, "function");
+      const writes = fixture.writes.length;
+      (cleanup as () => void)();
+      token?.resolve(); body?.resolve(JSON.stringify(fixture.pollReply));
+      await flushLocalVideoWork();
+      assert.deepEqual({
+        dispatches: fixture.dispatches.length,
+        aborted: phase === "body" ? fixture.dispatches[0].signal?.aborted === true : true,
+        writes: fixture.writes.slice(writes), toasts: fixture.toasts, timers: fixture.timers.size,
+      }, { dispatches: phase === "body" ? 1 : 0, aborted: true, writes: [], toasts: [], timers: 0 },
+      "effect cleanup must cancel the in-flight poll, including a transport still waiting for its token");
+    } finally {
+      token?.resolve(); body?.resolve(JSON.stringify(fixture.pollReply)); await flushLocalVideoWork();
+      if (typeof cleanup === "function") cleanup();
+      fixture.lifetime!.unmount();
+    }
+  });
+}
+
+test("GEN56 actual poll allows same-actor refresh and completes one original-handle GET", { timeout: 5000 }, async () => {
+  const fixture = await localGenerationCallbacks("video", true), token = fixture.deferToken();
+  const cleanup = fixture.video({ ...LOCAL_POLL_JOB }).poll();
+  try {
+    await fixture.tokenStarted.promise;
+    fixture.sdkSession("actor-a", "fixture-token-a-refreshed", "TOKEN_REFRESHED");
+    assert.equal(fixture.lifetime!.render().key, fixture.mounted!.key);
+    token.resolve(); await flushLocalVideoWork();
+    assert.equal(fixture.dispatches.length, 1);
+    assert.equal(fixture.dispatches[0].method, "GET");
+    assert.equal(fixture.dispatches[0].url,
+      `/api/content-studio/video-generation?handle=${encodeURIComponent(LOCAL_POLL_JOB.handle)}&workspaceId=workspace-a`);
+    assert.equal(fixture.dispatches[0].headers.get("Authorization"), "Bearer fixture-token-a-refreshed");
+    assert.deepEqual(JSON.parse(JSON.stringify(fixture.state.VideoJob)), { ...LOCAL_POLL_JOB, status: "completed", progress: 100 });
+    assert.deepEqual(JSON.parse(JSON.stringify(fixture.state.GenVideo)), LOCAL_POLL_FILE);
+    assert.equal(fixture.toasts.length, 1);
+    assert.equal(fixture.timers.size, 0);
+  } finally { token.resolve(); await flushLocalVideoWork(); if (typeof cleanup === "function") cleanup(); fixture.lifetime!.unmount(); }
+});
+
+for (const boundary of ["different-handle", "workspace", "account-event", "unmount"] as const) {
+  test(`GEN57 actual retained retry cannot change ${boundary}`, async () => {
+    const fixture = await localGenerationCallbacks("video", true);
+    const retry = fixture.video({ ...LOCAL_POLL_JOB, status: "failed" }).retry;
+    try {
+      if (boundary !== "different-handle") changeLocalVideoScope(fixture, boundary);
+      const current = { ...LOCAL_POLL_JOB, handle: "current-b-different-handle", status: "failed" as const };
+      fixture.video(current);
+      const notice = { tone: "warning", text: "Current B warning" };
+      fixture.state.GenNotice = notice;
+      const writes = fixture.writes.length;
+      await retry();
+      assert.deepEqual({ job: fixture.state.VideoJob, notice: fixture.state.GenNotice,
+        writes: fixture.writes.slice(writes), dispatches: fixture.dispatches, toasts: fixture.toasts },
+      { job: current, notice, writes: [], dispatches: [], toasts: [] },
+      "an old retry must retain its handle and lifetime instead of restarting a different current job");
+    } finally { fixture.lifetime!.unmount(); }
+  });
+}
+
+test("GEN57 actual retry for the same handle survives token refresh without a generation POST", async () => {
+  const fixture = await localGenerationCallbacks("video", true);
+  const callbacks = fixture.video({ ...LOCAL_POLL_JOB, status: "failed" });
+  try {
+    fixture.state.GenNotice = { tone: "error", text: "Synthetic previous poll failure" };
+    fixture.sdkSession("actor-a", "fixture-token-a-refreshed", "TOKEN_REFRESHED");
+    await callbacks.retry();
+    assert.equal(fixture.state.GenNotice, null);
+    assert.deepEqual(JSON.parse(JSON.stringify(fixture.state.VideoJob)), LOCAL_POLL_JOB);
+    assert.deepEqual(fixture.dispatches, []);
+  } finally { fixture.lifetime!.unmount(); }
+});
+
+for (const boundary of ["workspace", "account-event", "unmount"] as const) {
+  test(`GEN58 actual old persistence effect cannot write after ${boundary}`, async () => {
+    const fixture = await localGenerationCallbacks("video", true);
+    const persist = fixture.video({ ...LOCAL_POLL_JOB }, { ...LOCAL_POLL_FILE }).persist;
+    try {
+      changeLocalVideoScope(fixture, boundary);
+      const keyB = fixture.videoKey(), storedB = JSON.stringify({ ...LOCAL_POLL_JOB, handle: "current-b-persisted-handle" });
+      fixture.localStorage.setItem(keyB, storedB);
+      const mutations = fixture.mutations.length;
+      const cleanup = persist(); await flushLocalVideoWork();
+      assert.deepEqual({ storedB: fixture.localStorage.getItem(keyB), mutations: fixture.mutations.slice(mutations) },
+        { storedB, mutations: [] }, "the effect must use its captured workspace and live session, never current B's key");
+      if (typeof cleanup === "function") cleanup();
+    } finally { fixture.lifetime!.unmount(); }
+  });
+}
+
+test("GEN58 actual same-studio persistence keeps the original handle and generated file identity", async () => {
+  const fixture = await localGenerationCallbacks("video", true);
+  try {
+    const cleanup = fixture.video({ ...LOCAL_POLL_JOB }, { ...LOCAL_POLL_FILE }).persist(); await flushLocalVideoWork();
+    const stored = JSON.parse(fixture.localStorage.getItem(fixture.videoKey("workspace-a"))!);
+    const { model: _model, ...file } = LOCAL_POLL_FILE;
+    assert.deepEqual(stored, { ...LOCAL_POLL_JOB, ...file });
+    assert.equal(fixture.localStorage.getItem(fixture.videoKey("workspace-b")), null);
+    assert.deepEqual(fixture.dispatches, []);
+    if (typeof cleanup === "function") cleanup();
+  } finally { fixture.lifetime!.unmount(); }
+});
+
+for (const boundary of ["workspace", "account-event", "unmount"] as const) {
+  test(`GEN59 actual retained restore effect stays silent after ${boundary}`, async () => {
+    const fixture = await localGenerationCallbacks("video", true);
+    const restore = fixture.video({ ...LOCAL_POLL_JOB }).restore;
+    let cleanup: void | (() => void);
+    try {
+      changeLocalVideoScope(fixture, boundary);
+      fixture.localStorage.setItem(fixture.videoKey(), JSON.stringify({ ...LOCAL_POLL_JOB, ...LOCAL_POLL_FILE,
+        handle: "current-b-restored-handle", status: "completed" }));
+      const writes = fixture.writes.length, mutations = fixture.mutations.length;
+      cleanup = restore(); await flushLocalVideoWork();
+      assert.deepEqual({ writes: fixture.writes.slice(writes), mutations: fixture.mutations.slice(mutations),
+        dispatches: fixture.dispatches.map(({ url, method }) => ({ url, method })), toasts: fixture.toasts },
+      { writes: [], mutations: [], dispatches: [], toasts: [] }, "an expired restore cannot load B's job or start an old-session follow-up");
+    } finally { if (typeof cleanup! === "function") cleanup!(); fixture.lifetime!.unmount(); }
+  });
+}
+
+test("GEN59 actual same-studio restore retains the completed handle and file without a paid POST", async () => {
+  const fixture = await localGenerationCallbacks("video", true);
+  let cleanup: void | (() => void);
+  try {
+    fixture.localStorage.setItem(fixture.videoKey(), JSON.stringify({ ...LOCAL_POLL_JOB, ...LOCAL_POLL_FILE, status: "completed" }));
+    cleanup = fixture.video({ ...LOCAL_POLL_JOB }).restore(); await flushLocalVideoWork();
+    assert.deepEqual(JSON.parse(JSON.stringify(fixture.state.VideoJob)), { ...LOCAL_POLL_JOB, status: "completed" });
+    assert.deepEqual(JSON.parse(JSON.stringify(fixture.state.GenVideo)), LOCAL_POLL_FILE);
+    assert.equal(fixture.dispatches.filter((call) => call.method === "POST").length, 0);
+    assert.deepEqual(fixture.toasts, []);
+  } finally { if (typeof cleanup! === "function") cleanup!(); fixture.lifetime!.unmount(); }
+});
+
+for (const mode of ["throw", "error"] as const) {
+  for (const phase of ["token", "body"] as const) {
+    test(`GEN60 actual poll recovers from a ${phase}-phase SDK ${mode} with one bounded retry chain`, { timeout: 5000 }, async () => {
+      const fixture = await localGenerationCallbacks("video", true);
+      const token = phase === "token" ? fixture.deferToken() : undefined;
+      const body = phase === "body" ? fixture.deferBody("poll") : undefined;
+      const cleanup = fixture.video({ ...LOCAL_POLL_JOB }).poll();
+      const controller = fixture.captured.sessionRef.current!;
+      const fireOnlyTimer = async () => {
+        assert.equal(fixture.timers.size, 1, "the poll must keep only one local retry timer");
+        const [id, tick] = [...fixture.timers][0];
+        fixture.timers.delete(id); tick(); await flushLocalVideoWork();
+      };
+      try {
+        await (token ? fixture.tokenStarted.promise : fixture.bodyStarted.promise);
+        const writes = fixture.writes.length, mutations = fixture.mutations.length;
+        fixture.sdkFailure(mode);
+        token?.resolve(); body?.resolve(JSON.stringify(fixture.pollReply));
+        await flushLocalVideoWork();
+        const initialGets = phase === "body" ? 1 : 0;
+        assert.equal(fixture.dispatches.length, initialGets);
+        assert.deepEqual(fixture.writes.slice(writes), []);
+        assert.deepEqual(fixture.mutations.slice(mutations), []);
+        assert.deepEqual(fixture.toasts, []);
+        assert.equal(controller.signal.aborted, false, "an SDK outage is unverified, not a known actor replacement");
+        assert.ok(fixture.sdkReads.failed > 0);
+        assert.equal(fixture.timers.size, 1);
+        assert.equal(fixture.timerCalls(), 1);
+
+        await fireOnlyTimer();
+        assert.equal(fixture.dispatches.length, initialGets, "a still-unverified retry cannot dispatch with no valid token");
+        assert.equal(fixture.timers.size, 1);
+        assert.equal(fixture.timerCalls(), 2);
+        assert.deepEqual(fixture.writes.slice(writes), []);
+        assert.deepEqual(fixture.toasts, []);
+        assert.equal(controller.signal.aborted, false);
+
+        fixture.sdkFailure();
+        await fireOnlyTimer();
+        assert.equal(fixture.dispatches.length, initialGets + 1);
+        assert.ok(fixture.dispatches.every((call) => call.method === "GET" && call.url ===
+          `/api/content-studio/video-generation?handle=${encodeURIComponent(LOCAL_POLL_JOB.handle)}&workspaceId=workspace-a`));
+        assert.deepEqual(JSON.parse(JSON.stringify(fixture.state.VideoJob)), { ...LOCAL_POLL_JOB, status: "completed", progress: 100 });
+        assert.deepEqual(JSON.parse(JSON.stringify(fixture.state.GenVideo)), LOCAL_POLL_FILE);
+        assert.deepEqual(fixture.toasts, [{ kind: "success", message: "Ролик готов" }]);
+        assert.equal(fixture.timers.size, 0);
+        assert.equal(fixture.timerCalls(), 2, "the completed job must end the existing retry chain");
+      } finally {
+        fixture.sdkFailure(); token?.resolve(); body?.resolve(JSON.stringify(fixture.pollReply)); await flushLocalVideoWork();
+        if (typeof cleanup === "function") cleanup(); fixture.lifetime!.unmount();
+        assert.equal(fixture.timers.size, 0);
+      }
+    });
+  }
+}
+
+test("GEN61 delayed restore cannot replace a newer accepted generation before commit or lose its cache on SDK failure", { timeout: 5000 }, async () => {
+  const fixture = await localGenerationCallbacks("video", true), token = fixture.deferToken();
+  const original = { ...LOCAL_POLL_JOB };
+  fixture.localStorage.setItem(fixture.videoKey(), JSON.stringify({ ...original, ...LOCAL_POLL_FILE, status: "completed" }));
+  const restoreCleanup = fixture.video(original).restore();
+  let persistenceCleanup: void | (() => void);
+  try {
+    await fixture.tokenStarted.promise;
+    assert.equal(fixture.videoRefs.videoGenerationRevision.current, 0);
+    assert.equal(fixture.videoGenerationAttempt.current, null);
+    await fixture.generate(); await flushLocalVideoWork();
+    const accepted = fixture.state.VideoJob as LocalVideoJob;
+    assert.deepEqual(JSON.parse(JSON.stringify(accepted)), fixture.reply.data);
+    assert.equal(fixture.videoRefs.videoGenerationRevision.current, 1, "the actual paid callback must advance the monotonic revision");
+    assert.equal(fixture.videoGenerationAttempt.current, null, "the attempt has already gone null -> new -> null");
+    assert.equal(fixture.videoRefs.videoJobRef.current, original, "do not simulate a React commit before resuming the old initializer");
+    const cached = fixture.localStorage.getItem(fixture.videoKey());
+    assert.ok(cached);
+    assert.deepEqual(JSON.parse(cached), fixture.reply.data, "the accepted handle must cache immediately before any persistence effect");
+    const writes = fixture.writes.length;
+    token.resolve(); await flushLocalVideoWork();
+    assert.deepEqual(fixture.writes.slice(writes), [], "the generation revision must block old restore even before the job ref changes");
+    assert.equal(fixture.state.VideoJob, accepted);
+    assert.equal(fixture.state.GenVideo, null, "the old stored file must not accompany the new paid handle");
+    assert.equal(fixture.localStorage.getItem(fixture.videoKey()), cached);
+
+    fixture.sdkFailure("throw");
+    const mutations = fixture.mutations.length;
+    persistenceCleanup = fixture.video(accepted).persist(); await flushLocalVideoWork();
+    assert.equal(fixture.videoRefs.videoJobRef.current, accepted, "the next render must run the actual ref assignment");
+    assert.ok(fixture.sdkReads.failed > 0, "exercise the real persistence auth check");
+    assert.deepEqual(fixture.mutations.slice(mutations), []);
+    assert.deepEqual(fixture.writes.slice(writes), []);
+    assert.equal(fixture.localStorage.getItem(fixture.videoKey()), cached, "a transient persistence failure must not erase the accepted paid handle");
+    assert.equal(fixture.state.VideoJob, accepted);
+    assert.equal(fixture.state.GenBusy, null);
+    assert.deepEqual(fixture.toasts, []);
+    assert.equal(fixture.dispatches.filter((call) => call.method === "POST").length, 1);
+    assert.equal(fixture.dispatches.filter((call) => call.url.includes("/video-generation?")).length, 0);
+  } finally {
+    fixture.sdkFailure(); token.resolve(); await flushLocalVideoWork();
+    if (typeof persistenceCleanup! === "function") persistenceCleanup!();
+    if (typeof restoreCleanup === "function") restoreCleanup(); fixture.lifetime!.unmount();
+  }
+});
+
+for (const boundary of ["workspace", "cleanup", "new-render"] as const) {
+  test(`GEN62 actual pending persistence suppresses its captured write after ${boundary}`, { timeout: 5000 }, async () => {
+    const fixture = await localGenerationCallbacks("video", true), token = fixture.deferToken();
+    const cleanup = fixture.video({ ...LOCAL_POLL_JOB }, { ...LOCAL_POLL_FILE }).persist();
+    try {
+      await fixture.tokenStarted.promise;
+      if (boundary === "workspace") fixture.workspace("workspace-b");
+      if (boundary === "cleanup" && typeof cleanup === "function") cleanup();
+      if (boundary === "new-render") fixture.video({ ...LOCAL_POLL_JOB, handle: "newer-render-handle" });
+      const key = fixture.videoKey(), stored = JSON.stringify({ ...LOCAL_POLL_JOB, handle: "current-persisted-handle" });
+      fixture.localStorage.setItem(key, stored);
+      const mutations = fixture.mutations.length;
+      token.resolve(); await flushLocalVideoWork();
+      assert.deepEqual(fixture.mutations.slice(mutations), []);
+      assert.equal(fixture.localStorage.getItem(key), stored);
+      assert.deepEqual(fixture.writes, []);
+      assert.deepEqual(fixture.dispatches, []);
+    } finally {
+      token.resolve(); await flushLocalVideoWork(); if (typeof cleanup === "function") cleanup(); fixture.lifetime!.unmount();
+    }
+  });
+}
+
+for (const mode of ["throw", "error"] as const) {
+  test(`GEN63 unverified restore retries SDK ${mode} and recovers on same-actor refresh without remount`, { timeout: 5000 }, async () => {
+    const fixture = await localGenerationCallbacks("video", true);
+    const key = fixture.videoKey(), stored = JSON.stringify({ ...LOCAL_POLL_JOB, ...LOCAL_POLL_FILE, status: "completed" });
+    fixture.localStorage.setItem(key, stored);
+    fixture.sdkFailure(mode);
+    const reads = fixture.storageReads.length;
+    const cleanup = fixture.video(null).restore();
+    const controller = fixture.captured.sessionRef.current!;
+    const fireOnlyTimer = async () => {
+      assert.equal(fixture.timers.size, 1);
+      const [id, initialize] = [...fixture.timers][0];
+      fixture.timers.delete(id); initialize(); await flushLocalVideoWork();
+    };
+    try {
+      await flushLocalVideoWork();
+      assert.equal(fixture.timers.size, 1, "initial auth uncertainty must not permanently skip restore");
+      assert.deepEqual(fixture.timerDelays, [12000]);
+      assert.equal(fixture.dispatches.length, 0);
+      assert.deepEqual(fixture.writes, []);
+      assert.deepEqual(fixture.toasts, []);
+      assert.equal(fixture.storageReads.slice(reads).filter((read) => read.key === key).length, 0, "unverified restore cannot read a paid job");
+      assert.equal(controller.signal.aborted, false);
+
+      await fireOnlyTimer();
+      assert.equal(fixture.timers.size, 1, "continued uncertainty must keep one retry, not fan out");
+      assert.deepEqual(fixture.timerDelays, [12000, 12000]);
+      assert.deepEqual(fixture.writes, []);
+      assert.equal(fixture.dispatches.length, 0);
+      fixture.sdkFailure();
+      fixture.sdkSession("actor-a", "fixture-token-a-refreshed", "TOKEN_REFRESHED");
+      const refreshed = fixture.lifetime!.render();
+      assert.equal(refreshed.key, fixture.mounted!.key);
+      assert.equal(refreshed.session.sessionRef.current, controller);
+      await fireOnlyTimer();
+      assert.deepEqual(JSON.parse(JSON.stringify(fixture.state.VideoJob)), { ...LOCAL_POLL_JOB, status: "completed" });
+      assert.deepEqual(JSON.parse(JSON.stringify(fixture.state.GenVideo)), LOCAL_POLL_FILE);
+      assert.equal(fixture.storageReads.slice(reads).filter((read) => read.key === key).length, 1);
+      assert.equal(fixture.localStorage.getItem(key), stored);
+      assert.equal(fixture.dispatches.length, 1);
+      assert.equal(fixture.dispatches[0].method, "GET");
+      assert.equal(fixture.dispatches[0].url, "/api/crm/content-videos?workspaceId=workspace-a");
+      assert.equal(fixture.dispatches[0].headers.get("Authorization"), "Bearer fixture-token-a-refreshed");
+      assert.equal(fixture.timers.size, 0);
+      assert.equal(fixture.timerCalls(), 2);
+      assert.deepEqual(fixture.toasts, []);
+    } finally {
+      fixture.sdkFailure(); if (typeof cleanup === "function") cleanup(); fixture.lifetime!.unmount();
+      assert.equal(fixture.timers.size, 0);
+    }
+  });
+}
+
+for (const phase of ["timer", "token", "body"] as const) {
+  test(`GEN64 restore cleanup stops ${phase}-pending work without ending the studio lifetime`, { timeout: 5000 }, async () => {
+    const fixture = await localGenerationCallbacks("video", true);
+    const token = phase === "token" ? fixture.deferToken() : undefined;
+    const body = phase === "body" ? fixture.deferBody("restore") : undefined;
+    const reply = JSON.stringify({ success: true, mode: "supabase", data: { videos: [
+      { id: "late-library-row", title: "Expired library response", createdAt: "2090-10-20T00:00:00Z" },
+    ] } });
+    fixture.localStorage.setItem(fixture.videoKey(), JSON.stringify({ ...LOCAL_POLL_JOB, ...LOCAL_POLL_FILE, status: "completed" }));
+    if (phase === "timer") fixture.sdkFailure("throw");
+    const cleanup = fixture.video(null).restore();
+    const sessionController = fixture.captured.sessionRef.current!;
+    try {
+      if (token) await fixture.tokenStarted.promise;
+      else if (body) await fixture.bodyStarted.promise;
+      else await flushLocalVideoWork();
+      assert.equal(typeof cleanup, "function");
+      const queued = phase === "timer" ? [...fixture.timers.values()][0] : undefined;
+      if (phase === "timer") { assert.equal(fixture.timers.size, 1); assert.deepEqual(fixture.timerDelays, [12000]); }
+      const writes = fixture.writes.length, mutations = fixture.mutations.length, reads = fixture.storageReads.length;
+      const dispatches = fixture.dispatches.length;
+      const ownSignal = fixture.dispatches[0]?.signal;
+      if (phase === "body") assert.equal(ownSignal?.aborted, false);
+      (cleanup as () => void)();
+      assert.equal(fixture.timers.size, 0);
+      if (phase === "body") assert.equal(ownSignal?.aborted, true, "cleanup must abort the restore's own in-flight request");
+      assert.equal(sessionController.signal.aborted, false, "effect cleanup must not end an unchanged studio session");
+      fixture.sdkFailure(); token?.resolve(); body?.resolve(reply);
+      queued?.(); // Even a timer callback already dequeued before cleanup must stay inert.
+      await flushLocalVideoWork();
+      assert.deepEqual(fixture.writes.slice(writes), []);
+      assert.deepEqual(fixture.mutations.slice(mutations), []);
+      assert.equal(fixture.dispatches.length, dispatches);
+      assert.equal(fixture.storageReads.slice(reads).filter((read) => read.key.includes("negis_content_studio_video_job")).length, 0);
+      assert.deepEqual(fixture.toasts, []);
+      assert.equal(fixture.timers.size, 0);
+    } finally {
+      fixture.sdkFailure(); token?.resolve(); body?.resolve(reply); await flushLocalVideoWork();
+      if (typeof cleanup === "function") cleanup(); fixture.lifetime!.unmount();
+    }
+  });
+}
+
+const LOCAL_DEMO_DRAFTS = [{ id: "local-demo-idea", title: "Synthetic local idea", status: "idea", createdAt: "2090-10-20T00:00:00Z" }];
+const REAL_DEMO_TEST_WORKSPACE = "11111111-1111-4111-8111-111111111111";
+
+test("GEN65 explicitly allowed local demo hydrates only idea drafts without API, SDK or paid-cache access", async () => {
+  const fixture = await localGenerationCallbacks("video", true);
+  try {
+    fixture.workspace("demo-local-a"); fixture.auth({ user: null, isDemoMode: true });
+    const draftKey = "negis_content_studio_videos::demo-local-a";
+    fixture.localStorage.setItem(draftKey, JSON.stringify(LOCAL_DEMO_DRAFTS));
+    const paidKey = fixture.videoKey(), paidRaw = JSON.stringify({ ...LOCAL_POLL_JOB, ...LOCAL_POLL_FILE, status: "completed" });
+    fixture.localStorage.setItem(paidKey, paidRaw);
+    const attemptKey = fixture.pendingKey(), attemptRaw = JSON.stringify({ version: 1,
+      requestKey: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", fingerprint: JSON.stringify(["video", "Synthetic local idea", "reels"]) });
+    fixture.sessionStorage.setItem(attemptKey, attemptRaw);
+    const demo = fixture.localDrafts();
+    assert.equal(demo.session.localDraftsOnly, true);
+    assert.equal(demo.session.actorId, "");
+    const reads = fixture.storageReads.length, mutations = fixture.mutations.length, sdkReads = fixture.sdkReads.total;
+    demo.hydrate();
+    assert.deepEqual(JSON.parse(JSON.stringify(fixture.writes)), [
+      { field: "Videos", value: LOCAL_DEMO_DRAFTS }, { field: "ActiveId", value: LOCAL_DEMO_DRAFTS[0].id },
+    ]);
+    assert.deepEqual(fixture.storageReads.slice(reads).filter((read) => read.storage === "session" || read.key === paidKey || read.key === attemptKey), []);
+    assert.deepEqual(fixture.mutations.slice(mutations), []);
+    assert.equal(fixture.sdkReads.total, sdkReads);
+    assert.deepEqual(fixture.dispatches, []);
+    assert.deepEqual(fixture.toasts, []);
+    assert.equal(fixture.localStorage.getItem(paidKey), paidRaw);
+    assert.equal(fixture.sessionStorage.getItem(attemptKey), attemptRaw);
+    assert.equal(fixture.timers.size, 0);
+  } finally { fixture.lifetime!.unmount(); }
+});
+
+for (const boundary of ["UUID-demo", "UUID-selector-fallback", "selector-mismatch", "unauth-not-demo", "loading", "signout", "impersonation"] as const) {
+  test(`GEN65 actual wrapper denies local hydration for ${boundary}`, async () => {
+    const fixture = await localGenerationCallbacks("video", true);
+    try {
+      fixture.workspace("demo-local-a"); fixture.auth({ user: null, isDemoMode: true });
+      if (boundary === "UUID-demo" || boundary === "UUID-selector-fallback") fixture.workspace(REAL_DEMO_TEST_WORKSPACE);
+      if (boundary === "UUID-selector-fallback") fixture.auth({ clinicId: "" });
+      if (boundary === "selector-mismatch") { fixture.workspace("demo-selected-b"); fixture.auth({ clinicId: "demo-local-a" }); }
+      if (boundary === "unauth-not-demo") fixture.auth({ isDemoMode: false });
+      if (boundary === "loading") fixture.auth({ isLoading: true });
+      if (boundary === "signout") fixture.auth({ isSigningOut: true });
+      if (boundary === "impersonation") fixture.auth({ isImpersonation: true });
+      for (const workspace of ["demo-local-a", "demo-selected-b", REAL_DEMO_TEST_WORKSPACE]) {
+        fixture.localStorage.setItem(`negis_content_studio_videos::${workspace}`, JSON.stringify(LOCAL_DEMO_DRAFTS));
+        fixture.localStorage.setItem(fixture.videoKey(workspace), JSON.stringify({ ...LOCAL_POLL_JOB, ...LOCAL_POLL_FILE }));
+      }
+      const demo = fixture.localDrafts();
+      assert.equal(demo.session.localDraftsOnly, false, "eligibility must come from the actual wrapper, not a test-supplied guard");
+      const reads = fixture.storageReads.length, mutations = fixture.mutations.length, sdkReads = fixture.sdkReads.total;
+      demo.hydrate();
+      assert.deepEqual(fixture.writes, []);
+      assert.deepEqual(fixture.storageReads.slice(reads).filter((read) => read.storage === "session" || read.key.startsWith("negis_content_studio_")), []);
+      assert.deepEqual(fixture.mutations.slice(mutations), []);
+      assert.equal(fixture.sdkReads.total, sdkReads);
+      assert.deepEqual(fixture.dispatches, []);
+      assert.deepEqual(fixture.toasts, []);
+    } finally { fixture.lifetime!.unmount(); }
+  });
+}
+
+test("GEN66 demo eligibility alone changes the actual wrapper key", async () => {
+  const fixture = await localGenerationCallbacks("video", true);
+  try {
+    fixture.workspace("demo-local-a"); fixture.auth({ user: null });
+    const denied = fixture.localDrafts(), oldController = denied.session.sessionRef.current!;
+    assert.equal(denied.session.localDraftsOnly, false);
+    fixture.auth({ isDemoMode: true });
+    const allowed = fixture.localDrafts();
+    assert.equal(allowed.session.localDraftsOnly, true);
+    assert.equal(allowed.session.actorId, denied.session.actorId);
+    assert.equal(allowed.session.workspaceId, denied.session.workspaceId);
+    const oldKey = JSON.parse(denied.key!), newKey = JSON.parse(allowed.key!);
+    assert.deepEqual(oldKey.slice(0, -1), newKey.slice(0, -1));
+    assert.equal(oldKey.at(-1), false); assert.equal(newKey.at(-1), true);
+    assert.notEqual(allowed.key, denied.key);
+    assert.equal(oldController.signal.aborted, true);
+    assert.notEqual(allowed.session.sessionRef.current, oldController);
+    assert.deepEqual(fixture.dispatches, []);
+  } finally { fixture.lifetime!.unmount(); }
+});
+
+test("GEN66 retained allowed-demo hydration rechecks a changed raw workspace selector", async () => {
+  const fixture = await localGenerationCallbacks("video", true);
+  try {
+    fixture.workspace("demo-local-a"); fixture.auth({ user: null, isDemoMode: true });
+    const demo = fixture.localDrafts();
+    assert.equal(demo.session.localDraftsOnly, true);
+    fixture.workspace("demo-local-b");
+    fixture.localStorage.setItem("negis_content_studio_videos::demo-local-b", JSON.stringify(LOCAL_DEMO_DRAFTS));
+    const reads = fixture.storageReads.length;
+    demo.hydrate();
+    assert.deepEqual(fixture.writes, []);
+    assert.deepEqual(fixture.storageReads.slice(reads).filter((read) => read.key.startsWith("negis_content_studio_")), []);
+    assert.deepEqual(fixture.dispatches, []);
+  } finally { fixture.lifetime!.unmount(); }
+});
