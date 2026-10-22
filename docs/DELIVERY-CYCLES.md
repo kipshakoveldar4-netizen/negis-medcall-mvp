@@ -61,6 +61,9 @@ C21/C22 продолжили выбранные браузерные прове�
 080 применена только к site-test, этап добавлен только тестовому пространству;
 под тестовым владельцем приняты создание/reload/filter одной отложенной заявки
 и последующая уборка заявки/аудита со сверкой исходных данных.
+23 октября несогласованность ипотечной карточки исправлена локально и выпущена
+отдельным 67416e9 только в Preview v85t1mxnu (G2-C15). Приёмка самой карточки
+ожидает входа владельца и согласования временного ипотечного профиля/+5 в site-test.
 Полная готовность рекламы не заявлена; Production не менялся.
 
 ### Цикл G1-C1: управление сотрудничеством оператора
@@ -2313,13 +2316,69 @@ postponed-desktop-wide.png и postponed-team-analytics.txt. Сервер/вкл�
 - [ ] Независимый read-only обзор: stage-ID create/update/readback/filter
   согласованы, новых путей чужого доступа нет. Отдельный унаследованный дефект:
   ипотечный contact editor пишет только status, оставляя старый stage_id;
-  он не исправлен и не выдаётся за проверенный этим узким выпуском сценарий.
+  на момент C14 он не исправлен и не выдаётся за проверенный этим узким выпуском
+  сценарий. Продолжение и отдельный кандидат исправления — G2-C15 ниже.
 
 Доказательства: node_modules/.cache/postponed-release-20261022/: saved-lead-db.json,
 reloaded-lead-ui.txt, filtered-ui.txt, filtered-desktop.png, filtered-mobile.png,
 cleanup-lead.sql, cleanup-result.json, final-db-proof.json, after-cleanup-ui.txt,
 after-cleanup-desktop.png и source-proof.json. Рабочие CRM,
 Baspana, салоны, аккаунты/роли и WhatsApp не менялись. Чужие dirty 059/065 сохранены.
+
+### Цикл G2-C15: согласованность статуса ипотечной карточки — READY только Preview, приёмка ожидается, 23 октября
+
+- [x] По запросу владельца исправлены только MortgageContactForm и
+  useMortgageWorkspace.updateContact, без общего backend/прав/миграций.
+  Изменение статуса сначала читает настоящий справочник текущего пространства:
+  success/supabase/stages, точный уникальный stageKey, совпавшая semanticGroup,
+  активность и persisted UUID. Затем PATCH передаёт только stageId: сервер
+  проверяет принадлежность и сам выводит legacy status. Отсутствующий/выключенный,
+  неоднозначный/повреждённый этап или потеря сессии останавливают PATCH.
+- [x] Неизменённый статус не отправляется формой. Правки имени/телефона/заметок
+  не требуют taxonomy GET и сохраняют пользовательский этап. Чужие переданные
+  caller stageId/assignee/workspace поля отбрасываются. Существующие строки
+  не исправляются автоматически, новых полномочий не добавлено.
+- [x] Субагент воспроизвёл прежний дефект новым тестом: 1 запрос вместо GET+PATCH.
+  Root regression 108/108. Точная узкая копия от 90036fd: 97/97, без переноса
+  накопленных root-only тестов/изменений. Это synthetic hooks + fake SDK с
+  реальным кодом session transport, не настоящая смена облачных аккаунтов.
+  Приняты повторные переходы, обычные правки/custom stage, неверные этапы,
+  401/403, плохой JSON, поздний JSON после выхода/смены actor/workspace/role/purpose,
+  unmount/StrictMode и отсутствие старого PATCH/refresh.
+- [x] Полный exact-candidate build: API default/Node16, 7 workspace typechecks,
+  cold start normal 12+46 / broken-site 12+45, Vite 2456 modules, exit 0.
+  Остались прежние circular-chunk и большой bundle warnings; diff-check чистый.
+  Root fix eee390c; отдельный кандидат **67416e97528027c2f717afe406baf0d1d2747944**,
+  parent 90036fd. Ровно 2 frontend-файла и 2 тестовых файла, без lib/api/migrations.
+- [x] Истёкший CLI-доступ дал 403 до публикации. Официальный Vercel CLI whoami
+  штатно обновил существующий вход; повторный preflight подтвердил прежний
+  Production/config. Дополнительный login challenge отменён, его процесс/вкладка
+  закрыты. Ни обхода защиты, ни новых проектных прав/секретов/настроек не было.
+- [x] Создан только Preview **dpl_GEcCSeBVXTD1QV9JcTTBWmZcgzqa / v85t1mxnu**:
+  READY 2026-10-22T19:07:25.110Z (23 октября +5), source proof 834/834,
+  target=null, aliases=[]. Runtime/build закреплены за medina-os-site-test,
+  DATABASE_URL отсутствует, внешние провайдеры отключены. Production ec69a64,
+  domains/env metadata/settings/security совпали с исходным baseline.
+- [x] Новый API без сессии вернул authentication_required (HTTP-код браузерным
+  инструментом не измерен); новая форма входа заполнена только eldar1@mail.ru,
+  пароль не читался/не переносился. 080 не повторялась.
+- [x] Read-only preflight site-test: нужный этап существует и активен,
+  workspace_purpose/clinic_schedule отсутствуют. Сохранены 10 таблиц count/hash
+  и RLS/ACL. Никаких облачных данных/профилей этим циклом пока не меняли.
+- [ ] Для настоящей MortgageClients клинический профиль недостаточен.
+  Запрошены вход в новый Preview и временные mortgage_leads/Asia/Almaty только
+  «Medina OS — тест блога». До согласия не включать настройки/фикстуры.
+  Предстоящий сценарий: одна новая вымышленная заявка с persisted new stage,
+  редактирование карточки Новая → Отложена → В работе, reload/фильтр/SQL,
+  уборка своей заявки/аудита и восстановление отсутствия обеих настроек.
+- [ ] Простой локальный browser fixture использует fallback stage IDs и не
+  исполняет stageId PATCH, поэтому он не выдаётся за положительную приёмку
+  этого нового пути. Нужна настоящая Preview-проверка после согласия.
+
+Доказательства: node_modules/.cache/contact-stage-release-20261023/:
+candidate-manifest.json, before.json, preview.json, source-proof.json,
+db-before.json, anonymous-api.txt и login-handoff.png. Рабочие CRM, Baspana,
+салоны, WhatsApp, аккаунты/роли и миграции не менялись. Чужие 059/065 сохранены.
 
 ### Цикл G3-C3: пустота и повреждённый рекламный отчёт — готов локально
 
