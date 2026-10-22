@@ -652,7 +652,10 @@ test("ST15 every signed-upload browser flow sends the active workspace selector"
     "signed objects and thumbnails must save metadata in the selected workspace",
   );
   assert.ok(
-    contentStudio.includes('/api/crm/ad-creatives/signed-upload?workspaceId=${encodeURIComponent(readWorkspaceId())}'),
-    "Content Studio must use its workspace-scoped route helper for the signed upload",
+    contentStudio.includes('/api/crm/ad-creatives/signed-upload?workspaceId=${encodeURIComponent(workspaceId)}'),
+    "Content Studio must sign for the captured workspace rather than reselecting it after an await",
   );
+  const signedFlow = contentStudio.slice(contentStudio.indexOf("const signedResponse ="), contentStudio.indexOf("await supabase.storage.from(bucket).uploadToSignedUrl"));
+  assert.match(signedFlow, /expectedUserId: actorId, dispatchGuard: photoCurrent, signal: session\.signal/);
+  assert.match(signedFlow, /if \(!await photoVerified\(\)\) return;/);
 });

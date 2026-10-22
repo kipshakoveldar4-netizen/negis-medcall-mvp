@@ -90,8 +90,31 @@ function readNonNegativeInteger(value: unknown): number {
   return 0;
 }
 
-function readNullableInteger(value: unknown): number | null {
-  return value === null || value === undefined ? null : readNonNegativeInteger(value);
+function reservationInteger(value: unknown): number | null {
+  const candidate = typeof value === "string" && /^(0|[1-9]\d*)$/.test(value) ? Number(value) : value;
+  return typeof candidate === "number" && Number.isSafeInteger(candidate) && candidate >= 0 ? candidate : null;
+}
+
+function verifiedReservation(data: unknown, limit: number | null, units: number) {
+  const refuse = (): never => { throw new Error("Не удалось подтвердить квитанцию лимита генерации. Генерация не запущена."); };
+  if (Array.isArray(data) && data.length !== 1) return refuse();
+  const row = readRecord(Array.isArray(data) ? data[0] : data) as ReservationRow;
+  if (typeof row.allowed !== "boolean" || typeof row.duplicate !== "boolean" || (row.allowed && row.duplicate)) return refuse();
+  const used = reservationInteger(row.used_units);
+  const returnedLimit = row.limit_units === null ? null : reservationInteger(row.limit_units);
+  const remaining = row.remaining_units === null ? null : reservationInteger(row.remaining_units);
+  if (used === null || returnedLimit !== limit || (row.limit_units !== null && returnedLimit === null)
+    || (limit === null ? row.remaining_units !== null : remaining !== Math.max(0, limit - used))) return refuse();
+  const periodStart = readString(row.period_start);
+  if (!/^(?!0000)\d{4}-(?:0[1-9]|1[0-2])-01$/.test(periodStart)) return refuse();
+  const usageId = readString(row.usage_id);
+  if (row.allowed || row.duplicate) {
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(usageId)) return refuse();
+  } else if (row.usage_id !== null) return refuse();
+  if (!Number.isSafeInteger(units) || units <= 0
+    || (row.allowed && (used < units || (limit !== null && used > limit)))
+    || (!row.allowed && !row.duplicate && (limit === null || used + units <= limit))) return refuse();
+  return { allowed: row.allowed, duplicate: row.duplicate, usageId, used, limit, remaining, periodStart };
 }
 
 function currentPeriodStart(now = new Date()): string {
@@ -329,21 +352,21 @@ export async function reserveContentGeneration(input: {
     throw new Error("Не удалось зарезервировать лимит генерации. Попробуйте позже.");
   }
 
-  const raw = Array.isArray(data) ? data[0] : data;
-  const row = readRecord(raw) as ReservationRow;
-  const duplicate = row.duplicate === true;
-  const allowed = row.allowed === true;
+  // An HTTP-successful RPC is not proof of a reservation without a valid
+  // receipt and consistent counters. Never call a paid provider on ambiguity.
+  const verified = verifiedReservation(data, limit, input.units);
+  const { duplicate, allowed } = verified;
   const needsSubscription = input.kind !== "text_request" && !planResult.plan;
   return {
     allowed,
     tracked: true,
     duplicate,
-    usageId: readString(row.usage_id),
+    usageId: verified.usageId,
     kind: input.kind,
-    used: readNonNegativeInteger(row.used_units),
-    limit: readNullableInteger(row.limit_units),
-    remaining: readNullableInteger(row.remaining_units),
-    periodStart: readString(row.period_start) || currentPeriodStart(),
+    used: verified.used,
+    limit: verified.limit,
+    remaining: verified.remaining,
+    periodStart: verified.periodStart,
     ...(!allowed
       ? {
           reason: duplicate

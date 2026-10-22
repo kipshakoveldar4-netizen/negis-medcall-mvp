@@ -1050,6 +1050,18 @@ const LOCAL_GENERATED_PACKAGE = { ideaTitle: "Synthetic generated package A", ho
   adVariants: [{ id: "generated-variant-a", label: "Local variant A", angle: "local",
     primaryText: "Local primary A", headline: "Local headline A", description: "Local description A", cta: "LEARN_MORE" }] };
 
+type LocalUsageCounter = { used: number; limit: number | null; remaining: number | null; enabled: boolean };
+type LocalUsageSummary = {
+  trackingAvailable: boolean; subscriptionActive: boolean; plan: "basic" | "standard" | "pro" | null;
+  planTitle: string; periodStart: string; textRequests: number; images: LocalUsageCounter; videoSeconds: LocalUsageCounter;
+  videoSecondsPerGeneration: number; warning?: string;
+};
+function localUsageSummary(planTitle = "local-usage"): LocalUsageSummary {
+  return { trackingAvailable: true, subscriptionActive: true, plan: "pro", planTitle, periodStart: "2090-10-01",
+    textRequests: 3, images: { used: 2, limit: 10, remaining: 8, enabled: true },
+    videoSeconds: { used: 8, limit: 60, remaining: 52, enabled: true }, videoSecondsPerGeneration: 8 };
+}
+
 function generationDeferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((done) => { resolve = done; });
@@ -1082,6 +1094,24 @@ const generationCallbackPrograms = (async () => {
   ).outputText;
   const source = await readFile(studioPage, "utf8");
   const ast = ts.createSourceFile(studioPage, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const paidGates: Record<LocalGenerationKind, string[]> = { photo: [], video: [] };
+  const visitPaidGate = (node: import("typescript").Node) => {
+    if (ts.isJsxOpeningElement(node) && node.tagName.getText(ast) === "button") {
+      const expression = (name: string) => {
+        const attribute = node.attributes.properties.find((item) => ts.isJsxAttribute(item) && item.name.getText(ast) === name);
+        return attribute && ts.isJsxAttribute(attribute) && attribute.initializer && ts.isJsxExpression(attribute.initializer)
+          ? attribute.initializer.expression?.getText(ast) : undefined;
+      };
+      for (const kind of ["photo", "video"] as const) {
+        if (expression("onClick")?.includes(kind === "photo" ? "generatePhoto()" : "generateVideo()")) {
+          assert.ok(expression("disabled")); paidGates[kind].push(expression("disabled")!);
+        }
+      }
+    }
+    ts.forEachChild(node, visitPaidGate);
+  };
+  visitPaidGate(ast);
+  for (const kind of ["photo", "video"] as const) assert.equal(paidGates[kind].length, 1, `execute the actual paid ${kind} JSX gate`);
   const child = ast.statements.find((node) => ts.isFunctionDeclaration(node)
     && node.name?.text === "ContentStudioSession") as import("typescript").FunctionDeclaration | undefined;
   assert.ok(child?.body, "execute the actual keyed ContentStudioSession lifetime");
@@ -1413,6 +1443,12 @@ const generationCallbackPrograms = (async () => {
     return ts.visitNode(root, visit) as import("typescript").SourceFile;
   };
   return {
+    usageParser: ts.transpileModule(`${await readFile(path.join(repoRoot, "artifacts/negis/src/lib/contentGenerationUsage.ts"), "utf8")}
+      exports.selected = { parseGenerationUsageSummary };`,
+      { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText,
+    paidGates: ts.transpileModule(`exports.selected = ({ generationUsage, generationUsageLoading, genBusy, videoJob }) =>
+      ({ photo: ${paidGates.photo[0]}, video: ${paidGates.video[0]} });`,
+      { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText,
     library: ts.transpileModule(libraryProgram, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText,
     editor: ts.transpileModule(editorProgram, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS }, transformers: { before: [observeCopy] } }).outputText,
     editorRefs: ts.transpileModule(`exports.selected = function renderEditorRefs(advertisingGoalContext) { ${auxiliaryRefDeclarations.map((node) => node.getText(ast)).join("\n")}
@@ -1454,7 +1490,7 @@ const generationCallbackPrograms = (async () => {
       "safeJson", "withWorkspace", "paidGenerationHeaders", "PAID_GENERATION_ATTEMPT_KEY",
       "paidGenerationAttemptKey", "readBrowserPaidGenerationAttempt", "writeBrowserPaidGenerationAttempt",
       "clearBrowserPaidGenerationAttempt", "VIDEO_JOB_KEY", "writeStoredVideoJob", "generationRefusalText",
-      "isSessionAlive", "isGenerationSessionCurrent", "refreshGenerationUsage", "generatePhoto", "generateVideo",
+      "isSessionAlive", "isGenerationSessionCurrent", "usageRequestRef", "refreshGenerationUsage", "generatePhoto", "generateVideo",
     ], ["generatePhoto", "generateVideo", "refreshGenerationUsage", "paidGenerationAttemptKey", "clearBrowserPaidGenerationAttempt"]),
     api: compile(await readFile(path.join(repoRoot, "artifacts/negis/src/lib/api.ts"), "utf8"), [
       "CrmApiError", "resolveAccessToken", "inflightGets", "getCache", "REFERENCE_TTL_MS", "LIST_TTL_MS",
@@ -1551,6 +1587,8 @@ function generationLifetime(code: string, bindings: Record<string, unknown>) {
 
 async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime = false, initialWorkspace = "workspace-a") {
   const programs = await generationCallbackPrograms;
+  const usageParser = evaluateGenerationFixture<{ parseGenerationUsageSummary: (value: unknown) => LocalUsageSummary | null }>(programs.usageParser, {});
+  const paidGates = evaluateGenerationFixture<(input: Record<string, unknown>) => { photo: boolean; video: boolean }>(programs.paidGates, {});
   const { buildTelegramPackage } = evaluateGenerationFixture<{ buildTelegramPackage: (video: LocalLibraryVideo) => string }>(programs.telegramPackage, {});
   const mutations: { storage: string; operation: string; key: string }[] = [];
   const storageReads: { storage: string; key: string }[] = [];
@@ -1596,6 +1634,7 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
   let targetedTokenStarted: ReturnType<typeof generationDeferred<void>> | undefined;
   const tokenStarted = generationDeferred<void>(), bodyStarted = generationDeferred<void>();
   let delayedBody: ReturnType<typeof generationDeferred<string>> | undefined;
+  let delayedBodyStarted: ReturnType<typeof generationDeferred<void>> | undefined;
   type Resource = "generation" | "usage" | "poll" | "restore" | "signed" | "metadata" | "approval" | "package-generation" | "package-save" | "photo-suggest" | "library-create" | "library-patch" | "library-telegram" | `library-${LocalLibraryTextKind}`;
   let responseWait: ReturnType<typeof generationDeferred<void>> | undefined, responseResource: Resource | undefined;
   const responseStarted = generationDeferred<void>();
@@ -1644,6 +1683,7 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
       mimeType: "image/png", model: "fixture-image", fileSize: 42 }
     : { handle: "local-a-signed-handle", status: "queued", progress: 0, formatSubstituted: false };
   const reply = { success: true, mode: "fixture", data: result };
+  const usageReply: { body: unknown; text?: string } = { body: { success: true, data: localUsageSummary() } };
   const handoffStatuses: Partial<Record<Resource, number>> = {};
   const handoffBodyFailures = new Set<Resource>();
   const handoffTransportFailures: Partial<Record<Resource, number>> = {};
@@ -1678,8 +1718,8 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
   const localResponse = (value: unknown, resource: Resource) => {
     handoffResponseHook?.(resource);
     const response = Response.json(value, { status: handoffStatuses[resource] ?? 200 });
-    if (resource === "package-generation" || resource === "package-save" || resource === "photo-suggest" || resource.startsWith("library-") || resource === "restore") {
-      const text = resource === "library-telegram" ? telegramReplies.text
+    if (resource === "usage" || resource === "package-generation" || resource === "package-save" || resource === "photo-suggest" || resource.startsWith("library-") || resource === "restore") {
+      const text = resource === "usage" ? usageReply.text : resource === "library-telegram" ? telegramReplies.text
         : ["library-script", "library-avatar", "library-tapnow"].includes(resource) ? libraryTextReplies.text
         : resource.startsWith("library-") ? libraryReplies.text : resource === "restore" ? undefined : resource === "photo-suggest" ? photoSuggestionReply.text
         : resource === "package-generation" ? packageReplies.generationText : packageReplies.saveText;
@@ -1694,9 +1734,9 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
       } });
     }
     if (delayedBody && delayedResource === resource) {
-      const pending = delayedBody;
-      delayedBody = undefined;
-      Object.defineProperty(response, "text", { value: () => { packageBodyReads.push(resource); bodyStarted.resolve(); return pending.promise; } });
+      const pending = delayedBody, started = delayedBodyStarted;
+      delayedBody = undefined; delayedBodyStarted = undefined;
+      Object.defineProperty(response, "text", { value: () => { packageBodyReads.push(resource); bodyStarted.resolve(); started?.resolve(); return pending.promise; } });
     }
     return response;
   };
@@ -1713,6 +1753,7 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
       const telegram = libraryFixtureActive && url.split("?")[0] === "/api/content-studio/send-telegram";
       const resource: Resource = telegram ? "library-telegram" : textKind ? `library-${textKind}` : libraryFixtureActive && url.split("?")[0] === "/api/crm/content-videos"
         ? method === "POST" ? "library-create" : method === "PATCH" ? "library-patch" : "restore"
+        : url.startsWith("/api/content-studio/usage?") ? "usage"
         : url.includes("generate-package") ? (photoSuggestionActive ? "photo-suggest" : "package-generation")
         : packageFixtureActive && url.split("?")[0] === "/api/crm/content-videos" && method === "POST" ? "package-save"
         : url.includes("signed-upload") ? "signed" : method === "PATCH" ? "approval" : "metadata";
@@ -1748,7 +1789,7 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
       }
       assert.match(url, /^\/api\/content-studio\/usage\?workspaceId=workspace-[ab]$/);
       assert.equal(method, "GET", "no unlisted paid, auth or follow-up endpoint may dispatch");
-      return localResponse({ success: true, data: { marker: "local-usage" } }, "usage");
+      return localResponse(usageReply.body, "usage");
     },
   }, { "@/lib/serverAuth": auth });
   const setters = Object.fromEntries([
@@ -1792,7 +1833,7 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
   };
   const initialLibraryRefs = libraryRefsFor(captured as LocalGenerationSession);
   const bindings = {
-    ...paidGeneration, ...storage, ...setters, ...api, ...auth, ...briefModule, window, localStorage,
+    ...paidGeneration, ...storage, ...setters, ...api, ...auth, ...briefModule, ...usageParser, window, localStorage,
     ...videoRefs, supabase: sdk,
     ...initialLibraryRefs, form: state.Form, videos: state.Videos, activeId: state.ActiveId,
     useMemo: (callback: () => unknown) => callback(),
@@ -1801,6 +1842,7 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
     photoGenerationAttempt: { current: null }, videoGenerationAttempt: { current: null },
     crypto: { randomUUID: () => "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" },
     useCallback: (callback: unknown) => callback,
+    useRef: (initial: unknown) => ({ current: initial }),
     setTimeout(callback: () => void, delay: number) { const id = ++nextTimer; timers.set(id, callback); timerDelays.push(delay); return id; },
     clearTimeout(id: number) { timers.delete(id); },
     toast: {
@@ -2056,6 +2098,9 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
     videoGenerationAttempt: bindings.videoGenerationAttempt,
     generate: kind === "photo" ? page.generatePhoto : page.generateVideo,
     refresh: page.refreshGenerationUsage,
+    usageReply,
+    paidDisabled: () => paidGates({ generationUsage: state.GenerationUsage ?? null,
+      generationUsageLoading: state.GenerationUsageLoading ?? false, genBusy: state.GenBusy ?? null, videoJob: state.VideoJob ?? null }),
     clearReceipt: (key: string, expectedRequestKey: string) => page.clearBrowserPaidGenerationAttempt(kind, key, expectedRequestKey),
     lifetime, mounted, subscriptions, captured, sdkReads,
     sdkFailure(mode?: "throw" | "error") { sdkFailure = mode; },
@@ -2073,7 +2118,8 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
       return Object.assign(tokenWait, { started: targetedTokenStarted.promise });
     },
     deferBody(resource: Resource = "generation") {
-      delayedResource = resource; delayedBody = generationDeferred<string>(); return delayedBody;
+      delayedResource = resource; delayedBody = generationDeferred<string>(); delayedBodyStarted = generationDeferred<void>();
+      return Object.assign(delayedBody, { started: delayedBodyStarted.promise });
     },
   };
 }
@@ -2165,7 +2211,7 @@ for (const kind of ["photo", "video"] as const) {
       assert.equal(fixture.toasts.length, kind === "photo" ? 1 : 0);
       assert.deepEqual(fixture.dispatches.filter((call) => call.method === "GET").map((call) => call.url),
         ["/api/content-studio/usage?workspaceId=workspace-a"]);
-      assert.equal((fixture.state.GenerationUsage as { marker: string }).marker, "local-usage");
+      assert.equal((fixture.state.GenerationUsage as LocalUsageSummary).planTitle, "local-usage");
     } finally { token.resolve(); await work; }
   });
 
@@ -2254,7 +2300,7 @@ for (const kind of ["photo", "video"] as const) {
       assert.ok(fixture.state[kind === "photo" ? "GenImage" : "VideoJob"]);
       assert.equal(fixture.state.GenBusy, null);
       assert.equal(fixture.sessionStorage.getItem(fixture.pendingKey()), null);
-      assert.equal((fixture.state.GenerationUsage as { marker: string }).marker, "local-usage");
+      assert.equal((fixture.state.GenerationUsage as LocalUsageSummary).planTitle, "local-usage");
     } finally { token.resolve(); await work; lifetime.unmount(); assert.equal(fixture.subscriptions.size, 0); }
   });
 
@@ -2284,7 +2330,7 @@ for (const kind of ["photo", "video"] as const) {
 for (const boundary of ["workspace", "account", "account-event"] as const) {
   test(`GEN50 actual usage refresh isolates late data and local spinner cleanup after ${boundary} change`, { timeout: 5000 }, async () => {
     const fixture = await localGenerationCallbacks("photo", boundary !== "workspace"), body = fixture.deferBody("usage");
-    const reply = JSON.stringify({ success: true, data: { marker: "stale-a-usage" } });
+    const reply = JSON.stringify({ success: true, data: localUsageSummary("stale-a-usage") });
     const work = fixture.refresh();
     try {
       await fixture.bodyStarted.promise;
@@ -2296,13 +2342,14 @@ for (const boundary of ["workspace", "account", "account-event"] as const) {
         assert.equal(fixture.lifetime!.render().key, fixture.mounted!.key);
         assert.equal(fixture.mounted!.session.isSessionAlive(fixture.captured.sessionRef.current), true);
       }
-      fixture.state.GenerationUsage = { marker: "current-b-usage" };
+      const currentUsage = localUsageSummary("current-b-usage");
+      fixture.state.GenerationUsage = currentUsage;
       fixture.state.GenerationUsageLoading = true;
       const writes = fixture.writes.length;
       body.resolve(reply); await work;
       assert.deepEqual(fixture.writes.slice(writes), boundary === "account"
         ? [{ field: "GenerationUsageLoading", value: false }] : []);
-      assert.deepEqual(fixture.state.GenerationUsage, { marker: "current-b-usage" });
+      assert.deepEqual(fixture.state.GenerationUsage, currentUsage);
       assert.equal(fixture.state.GenerationUsageLoading, boundary !== "account");
       assert.equal(fixture.dispatches.length, 1);
       assert.deepEqual(fixture.toasts, []);
@@ -2357,7 +2404,7 @@ for (const resource of ["photo", "video", "usage"] as const) {
         const fixture = await localGenerationCallbacks(resource === "usage" ? "photo" : resource, true);
         const token = phase === "token" ? fixture.deferToken() : undefined;
         const body = phase === "body" ? fixture.deferBody(resource === "usage" ? "usage" : "generation") : undefined;
-        const reply = JSON.stringify(resource === "usage" ? { success: true, data: { marker: "unverified-usage" } } : fixture.reply);
+        const reply = JSON.stringify(resource === "usage" ? { success: true, data: localUsageSummary("unverified-usage") } : fixture.reply);
         const work = resource === "usage" ? fixture.refresh() : fixture.generate();
         try {
           await (token ? fixture.tokenStarted.promise : fixture.bodyStarted.promise);
@@ -2367,7 +2414,7 @@ for (const resource of ["photo", "video", "usage"] as const) {
           assert.equal(fixture.dispatches.length, dispatchCount);
           const key = fixture.pendingKey(), stored = fixture.sessionStorage.getItem(key);
           if (resource !== "usage") assert.ok(stored);
-          const previous = { marker: "previous-local-result" };
+          const previous = resource === "usage" ? localUsageSummary("previous-local-result") : { marker: "previous-local-result" };
           const dataField = resource === "usage" ? "GenerationUsage" : resource === "photo" ? "GenImage" : "VideoJob";
           fixture.state[dataField] = previous;
           const writes = fixture.writes.length, mutations = fixture.mutations.length, sdkReads = fixture.sdkReads.total;
@@ -2392,7 +2439,7 @@ for (const resource of ["photo", "video", "usage"] as const) {
 
           fixture.sdkFailure();
           await fixture.refresh();
-          assert.equal((fixture.state.GenerationUsage as { marker: string }).marker, "local-usage", "the same lifetime recovers after the transient failure");
+          assert.equal((fixture.state.GenerationUsage as LocalUsageSummary).planTitle, "local-usage", "the same lifetime recovers after the transient failure");
           assert.equal(fixture.state.GenerationUsageLoading, false);
           assert.equal(fixture.dispatches.length, dispatchCount + 1);
           assert.equal(fixture.dispatches.at(-1)?.method, "GET");
@@ -2405,6 +2452,241 @@ for (const resource of ["photo", "video", "usage"] as const) {
     }
   }
 }
+
+test("GEN75 actual usage parser accepts complete finite, exhausted, inactive and unavailable summaries", async () => {
+  const { usageParser } = await generationCallbackPrograms;
+  const { parseGenerationUsageSummary: parse } = evaluateGenerationFixture<{
+    parseGenerationUsageSummary: (value: unknown) => LocalUsageSummary | null;
+  }>(usageParser, {});
+  const valid = localUsageSummary();
+  const cases: LocalUsageSummary[] = [valid,
+    { ...valid, plan: "basic", warning: "Synthetic local warning", images: { used: 15, limit: 10, remaining: 0, enabled: true } },
+    { ...valid, plan: "standard", videoSeconds: { used: 60, limit: 60, remaining: 0, enabled: true } },
+    { ...valid, plan: null, subscriptionActive: false, planTitle: "No local subscription",
+      images: { used: 0, limit: 0, remaining: 0, enabled: false }, videoSeconds: { used: 0, limit: 0, remaining: 0, enabled: false } },
+    { ...valid, trackingAvailable: false, images: { used: 0, limit: null, remaining: null, enabled: true },
+      videoSeconds: { used: 0, limit: null, remaining: null, enabled: true }, warning: "Synthetic tracking unavailable" },
+  ];
+  for (const value of cases) {
+    const parsed = parse(value);
+    assert.ok(parsed, `accept full ${value.planTitle} summary`);
+    assert.deepEqual(JSON.parse(JSON.stringify(parsed)), value);
+    assert.notEqual(parsed, value, "publish a parsed summary rather than the untrusted response object");
+    assert.notEqual(parsed.images, value.images);
+    assert.notEqual(parsed.videoSeconds, value.videoSeconds);
+  }
+});
+
+function malformedUsageCases(): Array<[string, unknown]> {
+  const valid = localUsageSummary();
+  const cases: Array<[string, unknown]> = [
+    ["null", null], ["undefined", undefined], ["array", []], ["string", "quota"], ["boolean", true], ["number", 1],
+    ["marker-only body", { marker: "not-a-summary" }], ["envelope instead of summary", { success: true, data: valid }],
+  ];
+  for (const field of Object.keys(valid)) {
+    const missing: Record<string, unknown> = { ...valid }; delete missing[field]; cases.push([`missing ${field}`, missing]);
+  }
+  for (const [field, values] of [
+    ["trackingAvailable", [null, "true", 1]], ["subscriptionActive", [null, "true", 1]],
+    ["plan", ["enterprise", "", 1]], ["planTitle", [null, "", "   ", "x".repeat(161)]],
+    ["periodStart", [null, "2090-13-01", "2090-00-01", "2090-10-02", "2090-10-01T00:00:00Z", "0000-10-01"]],
+    ["textRequests", [-1, 0.5, "3", Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1]],
+    ["videoSecondsPerGeneration", [0, -1, 1.5, "8", 61, Number.NaN, Number.POSITIVE_INFINITY]],
+    ["warning", [null, false, "x".repeat(2001)]],
+  ] as const) {
+    values.forEach((value, index) => cases.push([`${field} invalid ${index}`, { ...valid, [field]: value }]));
+  }
+  cases.push(["active without plan", { ...valid, plan: null }], ["inactive with plan", { ...valid, subscriptionActive: false }]);
+  for (const field of ["images", "videoSeconds"] as const) {
+    for (const [name, value] of [
+      ["null", null], ["array", []], ["empty", {}], ["missing enabled", { used: 2, limit: 10, remaining: 8 }],
+      ["negative used", { used: -1, limit: 10, remaining: 11, enabled: true }],
+      ["fractional used", { used: 0.5, limit: 10, remaining: 9.5, enabled: true }],
+      ["non-finite used", { used: Number.POSITIVE_INFINITY, limit: 10, remaining: 0, enabled: true }],
+      ["negative limit", { used: 0, limit: -1, remaining: 0, enabled: false }],
+      ["string limit", { used: 2, limit: "10", remaining: 8, enabled: true }],
+      ["negative remaining", { used: 2, limit: 10, remaining: -1, enabled: true }],
+      ["string remaining", { used: 2, limit: 10, remaining: "8", enabled: true }],
+      ["inconsistent remaining", { used: 2, limit: 10, remaining: 10, enabled: true }],
+      ["null finite remaining", { used: 2, limit: 10, remaining: null, enabled: true }],
+      ["string enabled", { used: 2, limit: 10, remaining: 8, enabled: "true" }],
+      ["disabled positive limit", { used: 2, limit: 10, remaining: 8, enabled: false }],
+      ["enabled zero limit", { used: 0, limit: 0, remaining: 0, enabled: true }],
+      ["tracked unlimited", { used: 0, limit: null, remaining: null, enabled: true }],
+    ] as Array<[string, unknown]>) cases.push([`${field} ${name}`, { ...valid, [field]: value }]);
+    cases.push([`${field} unlimited with finite remaining`, { ...valid, trackingAvailable: false,
+      [field]: { used: 0, limit: null, remaining: 1, enabled: true } }]);
+  }
+  return cases;
+}
+
+for (const [name, value] of malformedUsageCases()) {
+  test(`GEN75 actual usage parser rejects ${name}`, async () => {
+    const { usageParser } = await generationCallbackPrograms;
+    const parser = evaluateGenerationFixture<{ parseGenerationUsageSummary: (value: unknown) => LocalUsageSummary | null }>(usageParser, {});
+    assert.equal(parser.parseGenerationUsageSummary(value), null, "malformed quota must never become paid-control state");
+  });
+}
+
+function assertPaidDisabled(fixture: Awaited<ReturnType<typeof localGenerationCallbacks>>, disabled: boolean) {
+  const gates = fixture.paidDisabled();
+  assert.equal(gates.photo, disabled, "actual paid photo JSX gate");
+  assert.equal(gates.video, disabled, "actual paid video JSX gate");
+}
+
+for (const order of ["newest-first", "oldest-first"] as const) {
+  test(`GEN76 same-session overlapping usage bodies commit only the newest request (${order})`, { timeout: 5000 }, async () => {
+    const fixture = await localGenerationCallbacks("photo", true), oldBody = fixture.deferBody("usage"), oldWork = fixture.refresh();
+    let newWork: Promise<void> | undefined, newBody: ReturnType<typeof fixture.deferBody> | undefined;
+    try {
+      await oldBody.started;
+      newBody = fixture.deferBody("usage"); newWork = fixture.refresh(); await newBody.started;
+      assert.equal(fixture.dispatches.length, 2, "two actual no-store GETs must overlap in one session");
+      const writes = fixture.writes.length;
+      if (order === "oldest-first") {
+        oldBody.resolve(JSON.stringify({ success: true, data: localUsageSummary("old-usage") })); await oldWork;
+        assert.deepEqual(fixture.writes.slice(writes), [], "old body and old finally must both remain silent");
+        assert.equal(fixture.state.GenerationUsage, null);
+        assert.equal(fixture.state.GenerationUsageLoading, true, "old finally cannot clear the newer loading state");
+        assertPaidDisabled(fixture, true);
+      }
+      newBody.resolve(JSON.stringify({ success: true, data: localUsageSummary("new-usage") })); await newWork;
+      assert.equal((fixture.state.GenerationUsage as LocalUsageSummary).planTitle, "new-usage");
+      assert.equal(fixture.state.GenerationUsageLoading, false); assertPaidDisabled(fixture, false);
+      const acceptedWrites = fixture.writes.length;
+      oldBody.resolve(JSON.stringify({ success: true, data: localUsageSummary("old-usage") })); await oldWork;
+      assert.deepEqual(fixture.writes.slice(acceptedWrites), [], "a late old response cannot replace the newest quota or loading state");
+      assert.equal((fixture.state.GenerationUsage as LocalUsageSummary).planTitle, "new-usage");
+      assert.equal(fixture.state.GenerationUsageLoading, false);
+      assert.deepEqual(fixture.toasts, []); assert.deepEqual(fixture.uploads, []);
+      assert.ok(fixture.dispatches.every((call) => call.method === "GET" && call.url === "/api/content-studio/usage?workspaceId=workspace-a"));
+    } finally {
+      oldBody.resolve("{}"); newBody?.resolve("{}"); await Promise.allSettled([oldWork, newWork]); fixture.lifetime!.unmount();
+    }
+  });
+}
+
+test("GEN76 newer usage request wins even while the older response awaits fresh session validation", { timeout: 5000 }, async () => {
+  const fixture = await localGenerationCallbacks("photo", true), body = fixture.deferBody("usage"), work = fixture.refresh();
+  let token: ReturnType<typeof fixture.deferToken> | undefined;
+  try {
+    await body.started; token = fixture.deferToken();
+    body.resolve(JSON.stringify({ success: true, data: localUsageSummary("old-validation") })); await token.started;
+    fixture.usageReply.body = { success: true, data: localUsageSummary("new-validation") }; await fixture.refresh();
+    assert.equal((fixture.state.GenerationUsage as LocalUsageSummary).planTitle, "new-validation");
+    const writes = fixture.writes.length; token.resolve(); await work;
+    assert.deepEqual(fixture.writes.slice(writes), [], "request equality must be checked after the asynchronous session guard");
+    assert.equal((fixture.state.GenerationUsage as LocalUsageSummary).planTitle, "new-validation");
+    assertPaidDisabled(fixture, false); assert.equal(fixture.dispatches.length, 2);
+  } finally { body.resolve("{}"); token?.resolve(); await work; fixture.lifetime!.unmount(); }
+});
+
+test("GEN76 an older unsuccessful body's finally cannot clear a newer request's loading state", { timeout: 5000 }, async () => {
+  const fixture = await localGenerationCallbacks("photo", true), oldBody = fixture.deferBody("usage"), oldWork = fixture.refresh();
+  let newBody: ReturnType<typeof fixture.deferBody> | undefined, newWork: Promise<void> | undefined;
+  try {
+    await oldBody.started; newBody = fixture.deferBody("usage"); newWork = fixture.refresh(); await newBody.started;
+    const writes = fixture.writes.length;
+    oldBody.resolve(JSON.stringify({ success: false })); await oldWork;
+    assert.equal(fixture.state.GenerationUsageLoading, true, "old finally must not release the latest request's spinner");
+    assert.deepEqual(fixture.writes.slice(writes), [], "even an old non-committing response may not clear newer loading");
+    assert.equal(fixture.state.GenerationUsage, null); assertPaidDisabled(fixture, true);
+    newBody.resolve(JSON.stringify({ success: true, data: localUsageSummary("new-after-old-finally") })); await newWork;
+    assert.equal((fixture.state.GenerationUsage as LocalUsageSummary | null)?.planTitle, "new-after-old-finally");
+    assert.equal(fixture.state.GenerationUsageLoading, false); assertPaidDisabled(fixture, false);
+  } finally { oldBody.resolve("{}"); newBody?.resolve("{}"); await Promise.allSettled([oldWork, newWork]); fixture.lifetime!.unmount(); }
+});
+
+test("GEN76 starting a fresh usage request immediately removes previously enabling quota", { timeout: 5000 }, async () => {
+  const fixture = await localGenerationCallbacks("photo", true); await fixture.refresh(); assertPaidDisabled(fixture, false);
+  const body = fixture.deferBody("usage"), work = fixture.refresh();
+  try {
+    await body.started; assert.equal(fixture.state.GenerationUsage, null); assert.equal(fixture.state.GenerationUsageLoading, true);
+    assertPaidDisabled(fixture, true);
+    body.resolve(JSON.stringify({ success: true, data: localUsageSummary("refreshed-usage") })); await work;
+    assert.equal((fixture.state.GenerationUsage as LocalUsageSummary | null)?.planTitle, "refreshed-usage"); assertPaidDisabled(fixture, false);
+  } finally { body.resolve("{}"); await work; fixture.lifetime!.unmount(); }
+});
+
+const USAGE_FAILURES = ["403", "401", "500", "malformed-json", "malformed-summary", "missing-data", "unsuccessful", "body-read", "transport-403"] as const;
+for (const failure of USAGE_FAILURES) {
+  test(`GEN76 latest usage ${failure} clears stale quota and an older success cannot reopen paid controls`, { timeout: 5000 }, async () => {
+    const fixture = await localGenerationCallbacks("photo", true); await fixture.refresh(); assertPaidDisabled(fixture, false);
+    const oldBody = fixture.deferBody("usage"), oldWork = fixture.refresh();
+    try {
+      await oldBody.started;
+      if (["403", "401", "500"].includes(failure)) fixture.handoffStatuses.usage = Number(failure);
+      if (failure === "malformed-json") fixture.usageReply.text = "{not-json";
+      if (failure === "malformed-summary") fixture.usageReply.body = { success: true, data: { marker: "not-quota" } };
+      if (failure === "missing-data") fixture.usageReply.body = { success: true };
+      if (failure === "unsuccessful") fixture.usageReply.body = { success: false, data: localUsageSummary("denied-quota") };
+      if (failure === "body-read") fixture.handoffBodyFailures.add("usage");
+      if (failure === "transport-403") fixture.handoffTransportFailures.usage = 403;
+      const mutations = fixture.mutations.length; await fixture.refresh();
+      assert.equal(fixture.state.GenerationUsage, null, "a latest failure must leave no stale paid quota");
+      assert.equal(fixture.state.GenerationUsageLoading, false); assertPaidDisabled(fixture, true);
+      const writes = fixture.writes.length;
+      oldBody.resolve(JSON.stringify({ success: true, data: localUsageSummary("late-old-success") })); await oldWork;
+      assert.deepEqual(fixture.writes.slice(writes), [], "old success and finally cannot undo the latest failure");
+      assert.equal(fixture.state.GenerationUsage, null); assertPaidDisabled(fixture, true);
+      assert.deepEqual(fixture.mutations.slice(mutations), []); assert.deepEqual(fixture.toasts, []); assert.deepEqual(fixture.uploads, []);
+      assert.equal(fixture.dispatches.length, 3); assert.ok(fixture.dispatches.every((call) => call.method === "GET"));
+      delete fixture.handoffStatuses.usage; delete fixture.handoffTransportFailures.usage; fixture.handoffBodyFailures.delete("usage");
+      delete fixture.usageReply.text; fixture.usageReply.body = { success: true, data: localUsageSummary("recovered-usage") };
+      await fixture.refresh(); assert.equal((fixture.state.GenerationUsage as LocalUsageSummary | null)?.planTitle, "recovered-usage");
+      assertPaidDisabled(fixture, false);
+    } finally { oldBody.resolve("{}"); await oldWork; fixture.lifetime!.unmount(); }
+  });
+}
+
+for (const boundary of ["workspace", "account", "role", "purpose", "unmount", "A-B-A"] as const) {
+  for (const phase of ["token", "body"] as const) {
+    test(`GEN77 usage ${phase}-pending scope guards survive ${boundary} invalidation`, { timeout: 5000 }, async () => {
+      const fixture = await localGenerationCallbacks("photo", true), mounted = fixture.mounted!, controller = fixture.captured.sessionRef.current!;
+      const token = phase === "token" ? fixture.deferToken() : undefined, body = phase === "body" ? fixture.deferBody("usage") : undefined;
+      const work = fixture.refresh();
+      try {
+        await (token ? token.started : body!.started);
+        const dispatchCount = phase === "token" ? 0 : 1; assert.equal(fixture.dispatches.length, dispatchCount);
+        if (boundary === "workspace") fixture.workspace("workspace-b");
+        if (boundary === "role") fixture.auth({ userRole: "admin" });
+        if (boundary === "purpose") fixture.auth({ workspacePurpose: "marketing" });
+        if (boundary === "account" || boundary === "A-B-A") fixture.sdkSession("actor-b");
+        if (boundary === "A-B-A") fixture.sdkSession("actor-a", "fixture-returned-token");
+        if (boundary === "unmount") fixture.lifetime!.unmount();
+        else assert.notEqual(fixture.lifetime!.render().key, mounted.key);
+        assert.equal(controller.signal.aborted, true); assert.equal(fixture.captured.sessionRef.current, null);
+        const current = localUsageSummary("new-scope-quota");
+        fixture.state.GenerationUsage = current; fixture.state.GenerationUsageLoading = true;
+        const writes = fixture.writes.length, mutations = fixture.mutations.length;
+        token?.resolve(); body?.resolve(JSON.stringify({ success: true, data: localUsageSummary("old-scope-quota") })); await work;
+        await fixture.refresh();
+        assert.deepEqual(fixture.writes.slice(writes), [], "old commit, catch, finally and retained callback may not write across scope");
+        assert.equal(fixture.state.GenerationUsage, current); assert.equal(fixture.state.GenerationUsageLoading, true);
+        assert.equal(fixture.dispatches.length, dispatchCount); assert.deepEqual(fixture.mutations.slice(mutations), []);
+        assert.deepEqual(fixture.toasts, []); assert.deepEqual(fixture.uploads, []);
+      } finally { token?.resolve(); body?.resolve("{}"); await work; fixture.lifetime!.unmount(); assert.equal(fixture.subscriptions.size, 0); }
+    });
+  }
+}
+
+test("GEN78 actual paid JSX gates reject inactive or untracked quota and preserve independent image/video limits", async () => {
+  const fixture = await localGenerationCallbacks("photo", true); await fixture.refresh(); assertPaidDisabled(fixture, false);
+  try {
+    fixture.state.GenerationUsage = { ...localUsageSummary(), plan: null, subscriptionActive: false }; assertPaidDisabled(fixture, true);
+    fixture.state.GenerationUsage = { ...localUsageSummary(), trackingAvailable: false }; assertPaidDisabled(fixture, true);
+    fixture.state.GenerationUsage = { ...localUsageSummary(), images: { used: 10, limit: 10, remaining: 0, enabled: true } };
+    assert.equal(fixture.paidDisabled().photo, true); assert.equal(fixture.paidDisabled().video, false);
+    fixture.state.GenerationUsage = { ...localUsageSummary(), videoSeconds: { used: 53, limit: 60, remaining: 7, enabled: true } };
+    assert.equal(fixture.paidDisabled().photo, false); assert.equal(fixture.paidDisabled().video, true);
+    fixture.state.GenerationUsage = localUsageSummary(); fixture.state.GenerationUsageLoading = true; assertPaidDisabled(fixture, true);
+    fixture.state.GenerationUsageLoading = false; fixture.state.GenBusy = "photo"; assertPaidDisabled(fixture, true);
+    fixture.state.GenBusy = null;
+    for (const status of ["queued", "in_progress"]) {
+      fixture.state.VideoJob = { status }; assert.equal(fixture.paidDisabled().photo, false); assert.equal(fixture.paidDisabled().video, true);
+    }
+  } finally { fixture.lifetime!.unmount(); }
+});
 
 const LOCAL_POLL_JOB: LocalVideoJob = {
   handle: "local-poll-a+/=handle", status: "in_progress", progress: 7, formatSubstituted: false,

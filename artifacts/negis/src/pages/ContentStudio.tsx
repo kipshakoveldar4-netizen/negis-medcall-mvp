@@ -22,6 +22,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import { apiUrl, crmFetch } from "@/lib/api";
 import { supabase, hasSupabaseFrontendEnv } from "@/lib/supabase";
 import { getSupabaseAccessToken } from "@/lib/serverAuth";
+import { parseGenerationUsageSummary, type GenerationUsageSummary } from "@/lib/contentGenerationUsage";
 import { isRealWorkspace, readWorkspaceId, workspaceScopedKey } from "@/lib/demoStorage";
 import {
   ADVERTISING_CAMPAIGN_PREFILL_KEY,
@@ -219,26 +220,6 @@ type GeneratedFile = {
   fileSize: number;
   thumbnailUrl?: string;
   thumbnailSource?: string;
-};
-
-type GenerationUsageCounter = {
-  used: number;
-  limit: number | null;
-  remaining: number | null;
-  enabled: boolean;
-};
-
-type GenerationUsageSummary = {
-  trackingAvailable: boolean;
-  subscriptionActive: boolean;
-  plan: "basic" | "standard" | "pro" | null;
-  planTitle: string;
-  periodStart: string;
-  textRequests: number;
-  images: GenerationUsageCounter;
-  videoSeconds: GenerationUsageCounter;
-  videoSecondsPerGeneration: number;
-  warning?: string;
 };
 
 type VideoJobState = {
@@ -1035,6 +1016,7 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
   videoJobRef.current = videoJob;
   const [generationUsage, setGenerationUsage] = useState<GenerationUsageSummary | null>(null);
   const [generationUsageLoading, setGenerationUsageLoading] = useState(false);
+  const usageRequestRef = useRef(0);
   const photoGenerationAttempt = useRef<PaidGenerationAttempt | null>(null);
   const videoGenerationAttempt = useRef<PaidGenerationAttempt | null>(null);
   const videoGenerationRevision = useRef(0);
@@ -1042,19 +1024,21 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
   const refreshGenerationUsage = useCallback(async () => {
     const session = sessionRef.current;
     if (!isSessionAlive(session)) return;
+    const request = ++usageRequestRef.current;
+    setGenerationUsage(null);
     setGenerationUsageLoading(true);
     try {
       const response = await crmFetch(withWorkspace("/api/content-studio/usage"), {
         expectedUserId: actorId, dispatchGuard: () => isSessionAlive(session), signal: session.signal, cache: "no-store",
       });
-      const body = await safeJson<GenerationUsageSummary>(response);
-      if (!await isGenerationSessionCurrent(session)) return;
-      if (response.ok && body?.success === true) setGenerationUsage(body.data);
+      const body = await safeJson<unknown>(response);
+      if (!await isGenerationSessionCurrent(session) || request !== usageRequestRef.current) return;
+      if (response.ok && body?.success === true) setGenerationUsage(parseGenerationUsageSummary(body.data));
     } catch {
       // The paid write still checks its quota server-side. A diagnostic read
       // must never replace the working studio with an error screen.
     } finally {
-      if (isSessionAlive(session)) setGenerationUsageLoading(false);
+      if (isSessionAlive(session) && request === usageRequestRef.current) setGenerationUsageLoading(false);
     }
   }, [actorId, workspaceId]);
 
@@ -3166,6 +3150,7 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
                 !generationUsage ||
                 Boolean(
                   !generationUsage.trackingAvailable ||
+                    !generationUsage.subscriptionActive ||
                     !generationUsage.images.enabled ||
                     generationUsage.images.remaining === 0,
                 )
@@ -3186,6 +3171,7 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
                 videoJob?.status === "in_progress" ||
                 Boolean(
                   !generationUsage.trackingAvailable ||
+                    !generationUsage.subscriptionActive ||
                     !generationUsage.videoSeconds.enabled ||
                     (generationUsage.videoSeconds.remaining !== null &&
                       generationUsage.videoSeconds.remaining < generationUsage.videoSecondsPerGeneration),
