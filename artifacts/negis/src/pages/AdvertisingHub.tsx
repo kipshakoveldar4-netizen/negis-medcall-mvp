@@ -480,14 +480,15 @@ export default function AdvertisingHub() {
   return <AdvertisingHubSession
     key={JSON.stringify([actorId, workspaceId, userRole, workspacePurpose, authEpoch, localDraftsOnly])}
     actorId={actorId}
+    observedSdkActorId={observedActorRef.current}
     workspaceId={workspaceId}
     localDraftsOnly={localDraftsOnly}
     canReadPrivate={userRole === "owner" || userRole === "admin"}
   />;
 }
 
-function AdvertisingHubSession({ actorId, workspaceId, localDraftsOnly, canReadPrivate }: {
-  actorId: string; workspaceId: string; localDraftsOnly: boolean; canReadPrivate: boolean;
+function AdvertisingHubSession({ actorId, observedSdkActorId, workspaceId, localDraftsOnly, canReadPrivate }: {
+  actorId: string; observedSdkActorId: string; workspaceId: string; localDraftsOnly: boolean; canReadPrivate: boolean;
 }) {
   const [, setLocation] = useLocation();
   const productionWorkspace = isRealWorkspace(workspaceId);
@@ -497,7 +498,8 @@ function AdvertisingHubSession({ actorId, workspaceId, localDraftsOnly, canReadP
     sessionRef.current = session;
     const subscription = hasSupabaseFrontendEnv
       ? supabase.auth.onAuthStateChange((_event, next) => {
-          if ((next?.user.id || "") !== actorId) session.abort();
+          // Demo follows the SDK lifetime without gaining a CRM actor or server access.
+          if ((next?.user.id || "") !== (localDraftsOnly ? observedSdkActorId : actorId)) session.abort();
         }).data.subscription
       : null;
     return () => {
@@ -505,7 +507,7 @@ function AdvertisingHubSession({ actorId, workspaceId, localDraftsOnly, canReadP
       subscription?.unsubscribe();
       if (sessionRef.current === session) sessionRef.current = null;
     };
-  }, [actorId, workspaceId]);
+  }, [actorId, observedSdkActorId, workspaceId, localDraftsOnly]);
 
   function isSessionAlive(session: AbortController | null): session is AbortController {
     // The keyed lifetime follows verified membership even when selector storage is unavailable.

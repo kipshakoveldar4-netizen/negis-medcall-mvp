@@ -258,15 +258,23 @@ type Auth = {
 type PrivateResource = "meta-insights-history" | "advertising-outcomes";
 const resources: PrivateResource[] = ["meta-insights-history", "advertising-outcomes"];
 
-async function fixture(t: TestContext, options: { auth?: Partial<Auth>; selector?: string; holdTokens?: boolean; history?: unknown[] } = {}) {
+async function fixture(t: TestContext, options: {
+  auth?: Partial<Auth>; selector?: string; holdTokens?: boolean; history?: unknown[];
+  sdkActor?: string; initialSessionCallbacks?: boolean;
+} = {}) {
   const code = await compiled;
   const auth: Auth = {
     user: { id: "A", email: "a@example.invalid" }, clinicId: W1, userRole: "owner", workspacePurpose: "clinic",
     isLoading: false, isSigningOut: false, isDemoMode: false, isImpersonation: false, ...options.auth,
   };
   let selector = options.selector ?? auth.clinicId ?? "demo-workspace";
-  const sdk = { actor: auth.user?.id ?? "", token: "synthetic-A", lookups: 0 };
+  const sdkActor = options.sdkActor ?? auth.user?.id ?? "";
+  const sdk = { actor: sdkActor, token: options.sdkActor === undefined ? "synthetic-A" : `synthetic-${sdkActor}`, lookups: 0 };
   const listeners = new Set<(event: string, session: unknown) => void>();
+  const initialSessions: Array<{ registration: number; actor: string }> = [];
+  let listenerRegistrations = 0;
+  let listenerUnsubscriptions = 0;
+  let pendingInitialCallbacks = 0;
   const tokenGates: Array<ReturnType<typeof deferred<void>>> = [];
   const calls: HttpCall[] = [];
   const writes: Array<{ key: string; value: string }> = [];
@@ -288,8 +296,27 @@ async function fixture(t: TestContext, options: { auth?: Partial<Auth>; selector
       return { error: null, data: { session: session() } };
     },
     onAuthStateChange(callback: (event: string, session: unknown) => void) {
+      const registration = ++listenerRegistrations;
+      let active = true;
       listeners.add(callback);
-      return { data: { subscription: { unsubscribe: () => listeners.delete(callback) } } };
+      if (options.initialSessionCallbacks) {
+        pendingInitialCallbacks++;
+        // Model cached-session delivery after registration, without getSession
+        // or a render. A subscription removed before delivery stays silent.
+        queueMicrotask(() => {
+          pendingInitialCallbacks--;
+          if (!active) return;
+          const next = session();
+          initialSessions.push({ registration, actor: next?.user.id ?? "" });
+          callback("INITIAL_SESSION", next);
+        });
+      }
+      return { data: { subscription: { unsubscribe() {
+        if (!active) return;
+        active = false;
+        listeners.delete(callback);
+        listenerUnsubscriptions++;
+      } } } };
     },
   } };
   const unexpected = (name: string): never => assert.fail(`Unexpected fixture dependency: ${name}`);
@@ -419,9 +446,13 @@ async function fixture(t: TestContext, options: { auth?: Partial<Auth>; selector
   });
   await flush();
   return {
-    calls, writes, historyReads, navigations, notifications, sdk, flush, render, dispose,
+    calls, writes, historyReads, navigations, notifications, sdk, flush, render, dispose, initialSessions,
     get view() { return inner!.view; }, get key() { return innerKey; },
     get lifetime() { return retired.length; },
+    get listenerCount() { return listeners.size; },
+    get listenerRegistrations() { return listenerRegistrations; },
+    get listenerUnsubscriptions() { return listenerUnsubscriptions; },
+    get pendingInitialCallbacks() { return pendingInitialCallbacks; },
     lateWrites: () => retired.reduce((sum, item) => sum + item.lateWrites, 0) + (inner?.lateWrites ?? 0),
     matching(part: string) { return calls.filter((call) => call.url.includes(`/${part}?`)); },
     take(part: string) {
@@ -445,13 +476,15 @@ async function fixture(t: TestContext, options: { auth?: Partial<Auth>; selector
       selector = value;
       outer.force(); inner?.force(); await flush();
     },
-    async replay() { outer.replayEffects(); inner!.replayEffects(); await flush(); },
+    replayNow() { outer.replayEffects(); inner!.replayEffects(); },
+    async replay() { this.replayNow(); await flush(); },
+    emitSdkBeforeRender(actor: string) { emit(actor); },
     async sdkRoundTrip() {
       emit("B"); emit("A"); outer.force(); inner?.force(); await flush();
     },
     replaceSdkWithoutEvent() { sdk.actor = "B"; sdk.token = "synthetic-B"; },
     rotateToken() {
-      sdk.token = "synthetic-A-rotated";
+      sdk.token = `synthetic-${sdk.actor}-rotated`;
       for (const listener of [...listeners]) listener("TOKEN_REFRESHED", session());
     },
     releaseTokens() {
@@ -882,3 +915,171 @@ for (const status of [200, 500]) {
     assert.equal(f.notifications.length, 0);
   });
 }
+
+const DEMO_WORKSPACE = "synthetic-demo";
+const demoContext = {
+  user: { id: "demo-user", email: "demo@example.invalid" }, clinicId: DEMO_WORKSPACE, isDemoMode: true,
+};
+
+async function cachedSdkDemo(t: TestContext) {
+  return fixture(t, {
+    auth: demoContext, sdkActor: "A", initialSessionCallbacks: true, history: [launch("Local demo history")],
+  });
+}
+
+function assertLocalOnly(f: Fixture) {
+  assertPrivateEmpty(f);
+  assert.equal(f.sdk.lookups, 0, "Local-only demo must not call SDK getSession");
+  assert.equal(f.calls.length, 0, "SDK callbacks cannot grant demo server authority");
+  assert.equal(f.notifications.length, 0);
+  assert.equal(f.lateWrites(), 0);
+}
+
+function assertDemoPrefill(f: Fixture, destination: string, index = 0) {
+  assert.equal(f.writes.length, index + 1, "The current local demo handler must prepare one prefill");
+  assert.equal(f.writes[index].key,
+    `${destination === "/content-studio" ? "negis_content_studio_goal_prefill" : "negis_ads_automation_prefill"}::${DEMO_WORKSPACE}`);
+  assert.deepEqual(JSON.parse(f.writes[index].value), {
+    schemaVersion: 1, platform: "meta", sourceModule: "advertising-hub", sourceKind: "goal",
+    campaignName: "Synthetic consultation \u00b7 Synthetic City", service: "Synthetic consultation", city: "Synthetic City",
+    cityId: "astana", targetPatients: 12, durationDays: 14, maxBudget: 98, dailyBudget: 7,
+    budgetCurrency: "USD", generatedAt: NOW,
+  });
+  assert.deepEqual(f.navigations.slice(index, index + 1), [destination]);
+  assert.equal(f.navigations.length, index + 1);
+  assertLocalOnly(f);
+}
+
+for (const destination of ["/ads-automation", "/content-studio"]) {
+  test(`H20 INITIAL_SESSION cached SDK actor settles explicit local demo and prepares ${destination}`, async (t) => {
+    const f = await cachedSdkDemo(t);
+    assert.equal(f.sdk.actor, "A", "Cached SDK actor must be independent of demo AuthContext user");
+    assert.ok(f.initialSessions.length >= 3, "Wrapper, original inner and replacement inner each receive INITIAL_SESSION");
+    assert.deepEqual(f.initialSessions.map((item) => item.actor), Array(f.listenerRegistrations).fill("A"));
+    assert.deepEqual(f.initialSessions.map((item) => item.registration),
+      Array.from({ length: f.listenerRegistrations }, (_, index) => index + 1));
+    assert.equal(f.pendingInitialCallbacks, 0);
+    assert.equal(f.listenerCount, 2);
+    const key = f.key, lifetime = f.lifetime, registrations = f.listenerRegistrations;
+    await f.flush();
+    assert.equal(f.key, key); assert.equal(f.lifetime, lifetime);
+    assert.equal(f.listenerRegistrations, registrations, "Initial callbacks must settle without a remount loop");
+    assert.equal(f.view.loadState, "ready");
+    assert.deepEqual(json(rows(f.view.launches)), [launch("Local demo history")]);
+    assert.ok(f.historyReads.every((historyKey) => historyKey === `negis_ads_launch_history_${DEMO_WORKSPACE}`));
+    assertLocalOnly(f);
+    await setGoal(f);
+    f.invoke("prepareCampaign", destination);
+    assertDemoPrefill(f, destination);
+  });
+}
+
+test("H21 INITIAL_SESSION same SDK actor token refresh preserves the current local demo handoff", async (t) => {
+  const f = await cachedSdkDemo(t);
+  await setGoal(f);
+  const prepare = f.view.prepareCampaign as (destination: string) => void;
+  const key = f.key, lifetime = f.lifetime, registrations = f.listenerRegistrations;
+  const goal = f.view.campaignGoal;
+  f.rotateToken();
+  // Invoke the retained real closure before any simulated render.
+  prepare("/ads-automation");
+  assertDemoPrefill(f, "/ads-automation");
+  await f.flush();
+  assert.equal(f.key, key); assert.equal(f.lifetime, lifetime);
+  assert.equal(f.listenerRegistrations, registrations);
+  assert.equal(f.view.campaignGoal, goal);
+  assert.equal(f.sdk.token, "synthetic-A-rotated");
+  f.invoke("prepareCampaign", "/content-studio");
+  assertDemoPrefill(f, "/content-studio", 1);
+});
+
+for (const transition of ["A-to-B", "A-to-B-to-A"] as const) {
+  test(`H22 INITIAL_SESSION stale local demo handler refuses ${transition} before render`, async (t) => {
+    const f = await cachedSdkDemo(t);
+    await setGoal(f);
+    const prepare = f.view.prepareCampaign as (destination: string) => void;
+    prepare("/ads-automation");
+    assertDemoPrefill(f, "/ads-automation");
+    const key = f.key;
+    f.emitSdkBeforeRender("B");
+    prepare("/content-studio");
+    assert.equal(f.writes.length, 1, "SDK actor change must synchronously invalidate the old local handler");
+    assert.equal(f.navigations.length, 1);
+    if (transition === "A-to-B-to-A") {
+      f.emitSdkBeforeRender("A");
+      prepare("/ads-automation");
+      assert.equal(f.writes.length, 1, "Returning to A before render must not revive the old lifetime");
+      assert.equal(f.navigations.length, 1);
+    }
+    assert.equal(f.key, key, "No render may occur between SDK events and stale-handler assertions");
+    await f.flush();
+    assert.notEqual(f.key, key);
+    assert.equal(record(f.view.campaignGoal).service, "");
+    prepare("/content-studio");
+    assert.equal(f.writes.length, 1);
+    await setGoal(f);
+    f.invoke("prepareCampaign", "/content-studio");
+    assertDemoPrefill(f, "/content-studio", 1);
+    assert.equal(f.listenerCount, 2);
+  });
+}
+
+for (const [name, auth] of [
+  ["real UUID demo", { ...demoContext, clinicId: W1 }],
+  ["real UUID impersonation", { isImpersonation: true }],
+  ["local demo impersonation", { ...demoContext, isImpersonation: true }],
+] satisfies Array<[string, Partial<Auth>]>) {
+  test(`H23 INITIAL_SESSION ${name} never gains server, private or prefill authority`, async (t) => {
+    const f = await fixture(t, { auth, sdkActor: "A", initialSessionCallbacks: true, history: [launch("Forbidden history")] });
+    assert.ok(f.initialSessions.length >= 2);
+    assert.equal(f.pendingInitialCallbacks, 0);
+    await setGoal(f);
+    const prepare = f.view.prepareCampaign as (destination: string) => void;
+    for (const actor of ["A", "B", "A"]) {
+      f.emitSdkBeforeRender(actor);
+      for (const destination of ["/ads-automation", "/content-studio"]) prepare(destination);
+      f.rotateToken();
+      await f.flush();
+      await setGoal(f);
+      for (const destination of ["/ads-automation", "/content-studio"]) f.invoke("prepareCampaign", destination);
+      assert.equal(f.writes.length, 0);
+      assert.equal(f.navigations.length, 0);
+      assert.equal(f.historyReads.length, 0);
+      assert.equal(rows(f.view.launches).length, 0);
+      assertLocalOnly(f);
+    }
+    assert.equal(f.listenerCount, 2);
+  });
+}
+
+test("H24 INITIAL_SESSION listeners clean up across SDK remounts, replay and queued delivery after disposal", async (t) => {
+  const f = await cachedSdkDemo(t);
+  for (const actor of ["B", "A"]) {
+    f.emitSdkBeforeRender(actor);
+    await f.flush();
+    assert.equal(f.listenerCount, 2);
+    assert.equal(f.listenerRegistrations - f.listenerUnsubscriptions, 2);
+    assert.equal(f.initialSessions.length, f.listenerRegistrations);
+    assert.equal(f.pendingInitialCallbacks, 0);
+  }
+  for (let i = 0; i < 2; i++) {
+    await f.replay();
+    assert.equal(f.listenerCount, 2);
+    assert.equal(f.listenerRegistrations - f.listenerUnsubscriptions, 2);
+    assert.equal(f.initialSessions.length, f.listenerRegistrations);
+  }
+  const delivered = f.initialSessions.length;
+  f.replayNow();
+  assert.equal(f.pendingInitialCallbacks, 2, "Registration must queue delivery, never invoke it inline");
+  assert.equal(f.initialSessions.length, delivered);
+  f.dispose();
+  assert.equal(f.listenerCount, 0);
+  assert.equal(f.listenerRegistrations, f.listenerUnsubscriptions);
+  f.emitSdkBeforeRender("B");
+  await f.flush();
+  assert.equal(f.pendingInitialCallbacks, 0);
+  assert.equal(f.initialSessions.length, delivered, "Unsubscribed queued callbacks cannot reach disposed hooks");
+  assert.equal(f.writes.length, 0);
+  assert.equal(f.navigations.length, 0);
+  assertLocalOnly(f);
+});
