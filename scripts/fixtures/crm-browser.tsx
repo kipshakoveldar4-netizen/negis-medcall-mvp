@@ -1,6 +1,6 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
-import { Route, Router, Switch, useLocation } from "wouter";
+import { Link, Route, Router, Switch, useLocation } from "wouter";
 import { Toaster } from "sonner";
 import { ArrowLeftRight, Repeat2, RotateCw, Play, Pause, Copy, CircleX } from "../../artifacts/negis/node_modules/lucide-react";
 import "./crm-browser-mocks";
@@ -16,17 +16,53 @@ import MortgageClients from '../../artifacts/negis/src/pages/MortgageClients';
 import MortgageCalendar from '../../artifacts/negis/src/pages/MortgageCalendar';
 import MortgageTasks from '../../artifacts/negis/src/pages/MortgageTasks';
 import MortgageAnalytics from '../../artifacts/negis/src/pages/MortgageAnalytics';
-import {useAuth, suspendOperatorFixture, endOperatorCooperationFixture, operatorDispatchFixture, clinicArrivalFixture, appointmentCreateFixture, contentStudioFixture} from './crm-browser-mocks';
+import {useAuth, suspendOperatorFixture, endOperatorCooperationFixture, operatorDispatchFixture, clinicArrivalFixture, appointmentCreateFixture, contentStudioFixture, advertisingDemoFixture} from './crm-browser-mocks';
 import OperatorPortal from '../../artifacts/negis/src/pages/OperatorPortal';
 import { OperatorArrivals } from '../../artifacts/negis/src/components/operators/OperatorArrivals';
 import { clinicArrivalFixtureIds } from './clinic-arrival-browser-store';
 import ContentStudio from '../../artifacts/negis/src/pages/ContentStudio';
 import { contentStudioFixtureIds } from './content-studio-browser-store';
 import { ADVERTISING_CAMPAIGN_PREFILL_KEY, parseAdvertisingCampaignPrefillForPlatform } from '../../lib/advertising/campaignBrief';
+import AdvertisingHub from '../../artifacts/negis/src/pages/AdvertisingHub';
+import { isAdvertisingDemoFixtureLocation, readAdvertisingDemoGoalPrefill } from './advertising-demo-browser-store';
 
 const mortgage=useAuth().workspacePurpose==='mortgage_leads';
 const contentClipboard = contentStudioFixture
   ? Object.freeze({ writeText: contentStudioFixture.writeClipboard }) : null;
+
+function AdvertisingDemoFixtureView() {
+  const fixture = advertisingDemoFixture!;
+  const snapshot = React.useSyncExternalStore(fixture.subscribe, fixture.snapshot);
+  const [location] = useLocation();
+  const hub = location === "/ads" && isAdvertisingDemoFixtureLocation(window.location);
+  const destination = ["/content-studio", "/ads-automation"].includes(location) && !window.location.search && !window.location.hash;
+  const received = destination ? readAdvertisingDemoGoalPrefill(localStorage, location) : null;
+  return <div style={{ height: "100dvh", display: "flex", flexDirection: "column", overflow: "hidden" }} data-testid="advertising-demo-fixture">
+    <section aria-label="ТЕСТ: реклама и сессия" className="shrink-0 border-b border-amber-300 bg-amber-50 px-3 py-2 text-xs text-slate-900">
+      <strong>ТЕСТ G5-C21: локальная реклама, без сети и расходов</strong>
+      <div role="group" aria-label="ТЕСТ: SDK рекламы" className="mt-2 flex flex-wrap items-center gap-2">
+        <button type="button" className="neu-btn" onClick={fixture.switchActor}><ArrowLeftRight size={14} />ТЕСТ: SDK A/B</button>
+        <button type="button" className="neu-btn" disabled={snapshot.sdkActor !== "A"} onClick={fixture.switchABA}><Repeat2 size={14} />ТЕСТ: SDK A-B-A</button>
+        <button type="button" className="neu-btn" onClick={fixture.refreshSameActor}><RotateCw size={14} />ТЕСТ: TOKEN_REFRESHED</button>
+      </div>
+      <pre aria-label="ТЕСТ: состояние рекламы" data-testid="advertising-demo-state"
+        className="mt-2 whitespace-pre-wrap break-words" style={{ maxHeight: 120, overflow: "auto" }}>{JSON.stringify(snapshot)}</pre>
+    </section>
+    <div style={{ minHeight: 0, flex: 1, overflow: "auto", transform: "translateZ(0)" }} data-testid="advertising-demo-scene">
+      {hub ? <AdvertisingHub /> : <main className="space-y-3 p-4" data-testid="advertising-demo-destination">
+        <h1 className="text-lg font-semibold">ТЕСТ: локальная цель рекламы</h1>
+        {received ? <pre aria-label="ТЕСТ: принятая цель" className="whitespace-pre-wrap break-words">{JSON.stringify(received, null, 2)}</pre>
+          : <p role="alert">ТЕСТ: текущая передача не подтверждена.</p>}
+        <Link href="/ads?advertising=demo" className="neu-btn">Вернуться к локальной рекламе</Link>
+      </main>}
+    </div>
+  </div>;
+}
+
+function AdvertisingDemoFixture() {
+  return advertisingDemoFixture ? <React.StrictMode><AdvertisingDemoFixtureView /></React.StrictMode>
+    : <p role="alert">ТЕСТ: реклама доступна только с явным локальным режимом.</p>;
+}
 
 function ContentStudioFixtureView() {
   const fixture = contentStudioFixture!;
@@ -200,7 +236,8 @@ function OperatorFixture() {
 }
 
 const fixtureRoot = createRoot(document.getElementById("root")!);
-fixtureRoot.render(<Router><Switch>
+fixtureRoot.render(<Router>{advertisingDemoFixture ? <AdvertisingDemoFixture /> : <Switch>
+  <Route path="/ads" component={AdvertisingDemoFixture} />
   <Route path="/content-studio" component={ContentStudioFixture} />
   <Route path="/ads-automation" component={ContentStudioFixture} />
   <Route path="/clinic-arrival" component={ClinicArrivalFixture} />
@@ -215,5 +252,5 @@ fixtureRoot.render(<Router><Switch>
   <Route path="/leads" component={LeadsPage} />
   <Route path="/login" component={Login} />
   <Route component={AppointmentsPage} />
-</Switch><Toaster /></Router>);
+</Switch>}<Toaster /></Router>);
 if (import.meta.hot) import.meta.hot.dispose(() => fixtureRoot.unmount());

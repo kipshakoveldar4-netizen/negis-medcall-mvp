@@ -7,6 +7,9 @@ import { mortgageOutcomesBrowserRequest } from './mortgage-outcomes-browser-stor
 import type { MortgageSnapshot } from '../../lib/crm/mortgage-contract';
 import { appointmentCreateFixtureIds, createAppointmentCreateBrowserFixture, isAppointmentCreateFixtureLocation } from "./appointment-create-browser-store";
 import { contentStudioFixtureIds, createContentStudioBrowserFixture, isContentStudioFixtureLocation } from "./content-studio-browser-store";
+import { advertisingDemoFixtureIds, createAdvertisingDemoBrowserFixture, isAdvertisingDemoFixtureLocation } from "./advertising-demo-browser-store";
+export const advertisingDemoFixture = isAdvertisingDemoFixtureLocation(window.location)
+  ? createAdvertisingDemoBrowserFixture() : null;
 const retryFixture = new URLSearchParams(window.location?.search || "").get("bookingRetry") === "lost-response"
   ? createBookingRetryFixture() : null;
 const fixtureParams = new URLSearchParams(window.location?.search || "");
@@ -23,19 +26,20 @@ export const clinicArrivalFixture = isClinicArrivalFixtureLocation(window.locati
   ? createClinicArrivalBrowserFixture(window.location.search) : null;
 // Keep explicit visual-test settings across local page reloads, not CRM data.
 for (const key of ["fixtureRole", "fixturePurpose"]) {
+  if (advertisingDemoFixture) continue;
   const value = fixtureParams.get(key);
   if (value) sessionStorage.setItem(`medina-visual:${key}`, value);
   else if (sessionStorage.getItem(`medina-visual:${key}`)) fixtureParams.set(key, sessionStorage.getItem(`medina-visual:${key}`)!);
 }
 const fixtureRole = fixtureParams.get("fixtureRole");
-const assignedLeadFixture = !appointmentCreateFixture && !contentStudioFixture && fixtureRole === "lead_manager";
-const mortgageFixture = !appointmentCreateFixture && !contentStudioFixture && fixtureParams.get("fixturePurpose") === "mortgage_leads";
+const assignedLeadFixture = !advertisingDemoFixture && !appointmentCreateFixture && !contentStudioFixture && fixtureRole === "lead_manager";
+const mortgageFixture = !advertisingDemoFixture && !appointmentCreateFixture && !contentStudioFixture && fixtureParams.get("fixturePurpose") === "mortgage_leads";
 const operatorFixture = createOperatorBrowserFixture();
 export const operatorDispatchFixture = fixtureParams.get("operatorDispatch") === "deferred"
   ? createOperatorDispatchFixture((url, init) => operatorFixture.request(url, init)) : null;
 export const suspendOperatorFixture = () => operatorFixture.suspend();
 export const endOperatorCooperationFixture = () => operatorFixture.endCooperation();
-const workspaceId = contentStudioFixture ? contentStudioFixtureIds.workspace
+const workspaceId = advertisingDemoFixture ? advertisingDemoFixtureIds.workspace : contentStudioFixture ? contentStudioFixtureIds.workspace
   : appointmentCreateFixture ? appointmentCreateFixtureIds.workspace : "00000000-0000-4000-8000-000000000001";
 const clientId = "00000000-0000-4000-8000-000000000002";
 const doctorId = "00000000-0000-4000-8000-000000000003";
@@ -69,11 +73,12 @@ const keys: Record<string, string> = { "clinic-doctors": "doctors", "clinic-serv
 export const hasSupabaseFrontendEnv = true;
 export const arrivedByRecoveryLink = false;
 export const supabase = { auth: {
-  getSession: async () => contentStudioFixture ? contentStudioFixture.getSession()
+  getSession: async () => advertisingDemoFixture ? advertisingDemoFixture.getSession() : contentStudioFixture ? contentStudioFixture.getSession()
     : ({ data: { session: appointmentCreateFixture ? appointmentCreateFixture.session() : ["/admin", "/operator"].includes(window.location.pathname)
       ? { user: { id: window.location.pathname === "/operator" ? "00000000-0000-4000-8000-000000000805" : "fixture-user" }, access_token: "visual-fixture-not-a-valid-token" } : null } }),
   signInWithPassword: async () => ({ data: null, error: { message: "Вход отключён на локальном стенде" } }),
-  onAuthStateChange: (listener: Parameters<NonNullable<typeof appointmentCreateFixture>["onAuthStateChange"]>[0]) => contentStudioFixture
+  onAuthStateChange: (listener: Parameters<NonNullable<typeof appointmentCreateFixture>["onAuthStateChange"]>[0]) => advertisingDemoFixture
+    ? advertisingDemoFixture.onAuthStateChange(listener) : contentStudioFixture
     ? contentStudioFixture.onAuthStateChange(listener) : appointmentCreateFixture
       ? appointmentCreateFixture.onAuthStateChange(listener) : { data: { subscription: { unsubscribe() {} } } },
   signOut: async () => ({ error: null }),
@@ -105,6 +110,18 @@ contentStudioFixture?.bindAuth(({ actor, actorId }) => {
   auth.userRole = "owner";
   auth.workspacePurpose = "clinic_services";
 });
+if (advertisingDemoFixture) {
+  auth.user.id = advertisingDemoFixtureIds.demoUser;
+  auth.session.user.id = advertisingDemoFixtureIds.demoUser;
+  auth.user.email = "advertising-demo@example.invalid";
+  auth.user.user_metadata.full_name = "ТЕСТ: локальная реклама";
+  auth.isDemoMode = true;
+  auth.isImpersonation = false;
+  auth.isLoading = false;
+  auth.userRole = "owner";
+  auth.clinicId = advertisingDemoFixtureIds.workspace;
+  auth.workspacePurpose = "clinic_services";
+}
 export const useAuth = () => auth;
 export const clearCrmCache = () => {};
 export const crmErrorMessage = (status?: unknown) => window.location.pathname === "/operator" && status === 403
@@ -115,6 +132,10 @@ export const publicApiUrl = apiUrl;
 export class CrmApiError extends Error {}
 export const crmJson = (response: Response) => response.json();
 export const crmRequest = async (input?: string, init?: RequestInit) => {
+  if (advertisingDemoFixture) {
+    await advertisingDemoFixture.request();
+    throw new CrmApiError("TEST: advertising demo CRM denied");
+  }
   if (!mortgageFixture || !input || new URL(input, "http://fixture.invalid").pathname !== "/api/crm/whatsapp-channels") {
     throw new CrmApiError("Изменения отключены на стенде");
   }
@@ -124,6 +145,7 @@ export const crmRequest = async (input?: string, init?: RequestInit) => {
 };
 let fixtureWhatsAppEnabled = true;
 export async function crmFetch(input: string, init?: ClinicArrivalGuardedInit): Promise<Response> {
+  if (advertisingDemoFixture) return advertisingDemoFixture.request();
   const url = new URL(input, "http://fixture.invalid");
   if (contentStudioFixture) return contentStudioFixture.request(url, init);
   if (url.origin !== "http://fixture.invalid" || !url.pathname.startsWith("/api/crm/")) throw new Error("External request forbidden");
@@ -231,4 +253,7 @@ if (contentStudioFixture) {
     sessionStorage.removeItem(`negis_content_studio_paid_generation_attempt:${kind}::${contentStudioFixtureIds.workspace}`);
   }
 }
-window.fetch = async () => { throw new Error("Network disabled in visual fixture"); };
+window.fetch = async () => {
+  if (advertisingDemoFixture) return advertisingDemoFixture.denyNetwork();
+  throw new Error("Network disabled in visual fixture");
+};
