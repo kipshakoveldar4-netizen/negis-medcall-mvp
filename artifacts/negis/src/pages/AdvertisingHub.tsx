@@ -1022,7 +1022,7 @@ function AdvertisingHubSession({ actorId, observedSdkActorId, workspaceId, local
               </label>
             </div>
 
-            <div className="mt-5 flex flex-col gap-4 border-t pt-4 sm:flex-row sm:items-center sm:justify-between" style={{ borderColor: "var(--negis-border)" }}>
+            <div className="mt-5 grid gap-4 border-t pt-4" style={{ borderColor: "var(--negis-border)" }}>
               <div className="min-w-0">
                 {goalPlan.dailyBudget !== null ? (
                   <p className="text-sm font-semibold" style={{ color: "var(--negis-text)" }}>
@@ -1036,18 +1036,18 @@ function AdvertisingHubSession({ actorId, observedSdkActorId, workspaceId, local
                 </p>
                 {campaignGoalError ? <p className="mt-2 text-sm font-semibold text-red-700" role="alert">{campaignGoalError}</p> : null}
               </div>
-              <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
+              <div className="grid w-full gap-2 sm:grid-cols-2">
                 <button
                   type="button"
-                  className="neu-btn-primary inline-flex min-h-11 items-center justify-center gap-2 px-5 text-sm"
+                  className="neu-btn-primary inline-flex min-h-11 items-center justify-center gap-2 whitespace-normal px-5 text-sm"
                   onClick={() => prepareCampaign("/content-studio")}
                 >
-                  <Bot size={17} />
+                  <Bot size={17} className="shrink-0" />
                   Создать креатив с ИИ
-                  <ArrowRight size={16} />
+                  <ArrowRight size={16} className="shrink-0" />
                 </button>
-                <button type="submit" className="neu-btn inline-flex min-h-11 items-center justify-center gap-2 px-5 text-sm">
-                  <Upload size={16} />
+                <button type="submit" className="neu-btn inline-flex min-h-11 items-center justify-center gap-2 whitespace-normal px-5 text-sm">
+                  <Upload size={16} className="shrink-0" />
                   У меня есть креатив
                 </button>
               </div>
