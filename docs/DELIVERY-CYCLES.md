@@ -45,9 +45,11 @@ O1–O3, A1–A3, Q1 и P1/P-S1, не создавая второй проект
 на native PostgreSQL и после отдельного разрешения применил только 051/081
 в site-test, без квитанций/подписок. C28 закрыл повреждённые RPC-ответы и
 гонки UI остатков. C29/63692e6 READY только Preview q6xod3nqa: 835/835,
-тестовая база и новый код квот подтверждены в JS, 1095 проверок и build прошли;
-новый вход ещё ожидается. Новая мобильная и полная provider/cloud приёмка
-не засчитаны. Подробности C27–C29 ниже, Production неизменен.
+тестовая база и новый код квот подтверждены в JS, 1095 проверок и build прошли.
+После входа eldar1@mail.ru приняты чтение/refresh и запрет обеих media-генераций
+без подписки, включая непустой prompt и reload; блок квот проверен на 1440/375.
+Полная provider/cloud приёмка не засчитана. Подробности C27–C29 ниже,
+Production неизменен.
 
 Дополнение G7 на 22 октября: точный кандидат рекламных отчётов e75c4d9
 проверен отдельно от основной ветки и по отдельному разрешению выпущен только
@@ -2436,10 +2438,22 @@ test-db-security.png, existing-preview-usage-after-schema.txt.
   Без CRM-сессии auth-context отвечает authentication_required; SSO не обходили.
   Guard подтвердил неизменность Production de97fb6, доменов, project env
   metadata/settings/security; чужие 059/065 сохранены.
-- [ ] Новый вход eldar1@mail.ru в q6xod3nqa для заключительного read-only
-  проверки лимитов запрошен. Логин заполнен, пароль вводит пользователь;
-  сессии не переносились и пароль не читался/не менялся. До входа эта
-  signed-in приёмка именно нового Preview не засчитана.
+- [x] После входа пользователя в **q6xod3nqa** профиль подтвердил
+  **eldar1@mail.ru**, sidebar — **Medina OS — тест блога**. Пароль не читался
+  и не менялся, сессии не переносились. Квота загрузилась без предупреждения
+  об отсутствующем учёте: «Тариф не назначен», изображения 0/0, видео 0/0 сек.
+  При непустом QA-prompt обе media-кнопки остались disabled. Refresh сначала
+  убрал прежние числа и показал ожидание с disabled-кнопками, затем вернул
+  согласованную нулевую квоту. После reload загрузка/запрет сохранились.
+- [x] На активной вкладке Preview override фактически применился:
+  **375x812 / documentWidth=360** и **1440x900 / documentWidth=1425**.
+  В блоке квот числа, формат и обе кнопки помещаются, horizontal overflow=0;
+  обе генерации disabled, включая обновление на каждом размере. Это новая
+  ограниченная приёмка блока квот, не всего контентного процесса и не проверка
+  физического телефона. Прежняя неудачная попытка hidden-tab остаётся записана
+  выше. Снимки сохранены, override сброшен, QA-prompt очищен; после reload
+  ошибок console=0. Генерации/загрузки/отправки не нажимались; облачные строки,
+  подписки, роли, пароли и настройки не менялись.
 
 Доказательства C28/C29: scripts/src/medina-content-reservation-response.test.ts,
 scripts/src/medina-content-generation.test.ts и
@@ -2447,9 +2461,12 @@ node_modules/.cache/ads-quota-release-20261023/: candidate-manifest.json,
 local-403.txt, local-malformed.txt, local-account-B.txt, local-role-revoked.txt,
 local-sdk-ABA.json, local-final-http-trace.json, local-exhausted-desktop.png,
 local-exhausted-mobile-attempt-actual-1280.png, before.json, preview.json,
-source-proof.json, bundle-proof.json, anonymous-auth.txt, login-handoff.png.
+source-proof.json, bundle-proof.json, anonymous-auth.txt, login-handoff.png,
+preview-signed-in-acceptance.json, preview-signed-in-usage.txt,
+preview-reloaded-usage.txt, preview-usage-mobile-375.png,
+preview-usage-desktop-1440.png.
 Настоящие provider/Storage/Telegram, реальные квоты после платной генерации,
-полная облачная конкурентная матрица и новый мобильный проход не приняты.
+полная облачная конкурентная матрица и полный мобильный процесс не приняты.
 Production, Baspana, рабочие салоны, WhatsApp, реклама и деньги не затронуты.
 
 ### Цикл G2-C13: статус «Отложенные» — готов только локально, 22 октября
