@@ -57,7 +57,7 @@ export function MortgageContactForm({ contact, request, isCurrent, onSubmit, onC
     })();
     return () => { active = false; controller.abort(); };
   }, [clinicId, userRole, contact, request, isCurrent]);
-  const statuses = ["new", "in_progress", "booked", "lost"];
+  const statuses = ["new", "in_progress", "booked", "postponed", "lost"];
   if (!statuses.includes(status)) statuses.push(status);
 
   async function submit(event: FormEvent<HTMLFormElement>) {

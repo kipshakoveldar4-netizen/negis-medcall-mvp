@@ -105,7 +105,7 @@ test("snapshot is tenant scoped, includes inactive staff and never attributes ed
   assert.equal(a.members.length, 3);
   const first = a.members.find((row: Row) => row.staffId === managerA);
   const second = a.members.find((row: Row) => row.staffId === managerB);
-  assert.deepEqual(first.assigned, { total: 3, new: 1, inProgress: 1, booked: 0, lost: 0, other: 1 });
+  assert.deepEqual(first.assigned, { total: 3, new: 1, inProgress: 1, booked: 0, postponed: 0, lost: 0, other: 1 });
   assert.equal(first.activity.updatedEvents, 0);
   assert.equal(second.status, "inactive");
   assert.deepEqual(second.activity, { updatedEvents: 2, createdEvents: 1, touchedLeads: 2, lastRecordedAt: recent });
@@ -113,6 +113,65 @@ test("snapshot is tenant scoped, includes inactive staff and never attributes ed
   assert.ok(f.queries.every((q) => !/phone|notes|email|metadata|\*/.test(q.columns)));
   assert.ok(f.queries.every((q) => q.exact && q.order.column === "id" && q.order.config.ascending === true));
   assert.doesNotMatch(JSON.stringify(res.body), /Чужой сотрудник/);
+});
+
+test("postponed has its own exact structured and Russian legacy bucket without changing other stages", async () => {
+  const f = fixture();
+  const groups = ["postponed", "booked", "in_progress", "new", "lost", "custom"];
+  f.rows.lead_stages = groups.map((semantic_group, n) => ({ id: id(50 + n), workspace_id: workspace, semantic_group }));
+  f.rows.lead_stages.push({ id: id(56), workspace_id: foreign, semantic_group: "postponed" });
+  f.rows.leads = [
+    { status: "new", stage_id: id(50) }, { status: "lost", stage_id: id(50) },
+    { status: "postponed" }, { status: " ОТЛОЖЕНА " },
+    { status: "postponed", stage_id: id(51) }, { status: "postponed", stage_id: id(52) },
+    { status: "postponed", stage_id: id(53) }, { status: "postponed", stage_id: id(54) },
+    { status: "postponed", stage_id: id(55) }, { status: "postponed_custom" },
+    { status: "Отложена по просьбе" }, { status: "Новая" }, { status: "В работе" },
+    { status: "Записана" }, { status: "Потеряна" }, { status: "unknown", stage_id: id(56) },
+  ].map((lead, n) => ({ ...lead, id: id(100 + n), workspace_id: workspace, responsible_user_id: managerA }));
+  const res = await call();
+  assert.equal(res.statusCode, 200);
+  const analytics = res.body.data.analytics;
+  assert.equal(analytics.totalLeads, 16);
+  assert.deepEqual(analytics.members.find((member: Row) => member.staffId === managerA).assigned,
+    { total: 16, new: 2, inProgress: 2, booked: 2, postponed: 4, lost: 2, other: 4 });
+  for (const member of analytics.members) {
+    const { total, new: fresh, inProgress, booked, postponed, lost, other } = member.assigned;
+    assert.equal(total, fresh + inProgress + booked + postponed + lost + other);
+    assert.equal(Object.hasOwn(member.assigned, "postponed"), true);
+  }
+});
+
+test("empty assignments always include an explicit zero postponed count", async () => {
+  const f = fixture(); f.rows.leads = [];
+  const res = await call();
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.data.analytics.totalLeads, 0);
+  for (const member of res.body.data.analytics.members) {
+    assert.deepEqual(member.assigned, { total: 0, new: 0, inProgress: 0, booked: 0, postponed: 0, lost: 0, other: 0 });
+  }
+});
+
+test("only exact postponed aliases count as postponed and structured semantics still take priority", async () => {
+  for (const status of ["postponed", "deferred", "Отложена", "Отложенные", "Отложено", "Отложен", " DEFERRED ", " ОТЛОЖЕННЫЕ "]) {
+    const f = fixture();
+    f.rows.leads = [{ id: id(10), workspace_id: workspace, responsible_user_id: managerA, status }];
+    let res = await call();
+    assert.equal(res.statusCode, 200, status);
+    assert.deepEqual(res.body.data.analytics.members.find((member: Row) => member.staffId === managerA).assigned,
+      { total: 1, new: 0, inProgress: 0, booked: 0, postponed: 1, lost: 0, other: 0 }, status);
+    f.rows.leads[0].stage_id = stage;
+    res = await call();
+    assert.deepEqual(res.body.data.analytics.members.find((member: Row) => member.staffId === managerA).assigned,
+      { total: 1, new: 0, inProgress: 1, booked: 0, postponed: 0, lost: 0, other: 0 }, `${status}: structured priority`);
+  }
+  for (const status of ["deferred_custom", "not_deferred", "Отложенные по просьбе", "Отложенный", "postponement"]) {
+    const f = fixture();
+    f.rows.leads = [{ id: id(10), workspace_id: workspace, responsible_user_id: managerA, status }];
+    const res = await call();
+    assert.deepEqual(res.body.data.analytics.members.find((member: Row) => member.staffId === managerA).assigned,
+      { total: 1, new: 0, inProgress: 0, booked: 0, postponed: 0, lost: 0, other: 1 }, status);
+  }
 });
 
 test("all pages past the PostgREST ceiling are included", async () => {
@@ -136,7 +195,7 @@ test("an admin's own assignments have a team row without moving recorded actions
   const row = analytics.members.find((member: Row) => member.staffId === admin);
   assert.equal(row.role, "admin");
   assert.equal(row.status, "active");
-  assert.deepEqual(row.assigned, { total: 1, new: 1, inProgress: 0, booked: 0, lost: 0, other: 0 });
+  assert.deepEqual(row.assigned, { total: 1, new: 1, inProgress: 0, booked: 0, postponed: 0, lost: 0, other: 0 });
   assert.deepEqual(row.activity, { updatedEvents: 1, createdEvents: 0, touchedLeads: 1, lastRecordedAt: recent });
   assert.equal(analytics.members.find((member: Row) => member.staffId === managerA).assigned.total, 2);
   assert.equal(analytics.members.find((member: Row) => member.staffId === managerB).activity.updatedEvents, 2);

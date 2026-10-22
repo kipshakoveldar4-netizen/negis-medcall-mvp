@@ -15,6 +15,7 @@ const read = (file: string) => readFile(path.join(root, "artifacts/negis/src", f
 const leads = await read("pages/LeadsPage.tsx");
 const pipeline = await read("lib/leadPipeline.ts");
 const teamAnalytics = await read("components/crm/lead-team-analytics.tsx");
+const crmBrowserMocks = await readFile(path.join(root, "scripts/fixtures/crm-browser-mocks.ts"), "utf8");
 const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value));
 
 function evaluate(source: string, bindings: Record<string, unknown> = {}, imports: Record<string, unknown> = {}) {
@@ -130,6 +131,9 @@ const stageId = "00000000-0000-4000-8000-000000000003";
 const stages = [
   { id: stageId, stageKey: "new", name: "Новая", semanticGroup: "new", isDefault: true, isActive: true, sortOrder: 10 },
   { id: "00000000-0000-4000-8000-000000000004", stageKey: "in_progress", name: "В работе", semanticGroup: "in_progress", isDefault: true, isActive: true, sortOrder: 20 },
+  { id: "00000000-0000-4000-8000-000000000005", stageKey: "booked", name: "Записана", semanticGroup: "booked", isDefault: true, isActive: true, sortOrder: 30 },
+  { id: "00000000-0000-4000-8000-000000000006", stageKey: "postponed", name: "Отложена", semanticGroup: "postponed", isDefault: true, isActive: true, sortOrder: 35 },
+  { id: "00000000-0000-4000-8000-000000000007", stageKey: "lost", name: "Потеряна", semanticGroup: "lost", isDefault: true, isActive: true, sortOrder: 40 },
 ];
 const lead = { id: "lead-1", name: "Local contact", phone: "+77000000000", status: "new", stageId,
   source: "website", campaign: "Preserve campaign", sourceId: workspace, responsibleUserId: actor,
@@ -213,12 +217,12 @@ function teamPayload(days = 30) {
     totalLeads: 20, unassignedLeads: 5, otherAssigneeLeads: 4, activityStatus: "available",
     members: [
       { staffId: "manager", name: "Manager fixture", role: "lead_manager", status: "active",
-        assigned: { total: 9, new: 1, inProgress: 2, booked: 3, lost: 1, other: 2 },
+        assigned: { total: 9, new: 1, inProgress: 1, booked: 3, postponed: 1, lost: 1, other: 2 },
         activity: { updatedEvents: 13, createdEvents: 7, touchedLeads: 6, lastRecordedAt: "2026-10-14T09:00:00Z" } },
       { staffId: "admin", name: "Admin fixture", role: "admin", status: "paused",
-        assigned: { total: 2, new: 0, inProgress: 0, booked: 0, lost: 0, other: 2 }, activity: null },
+        assigned: { total: 2, new: 0, inProgress: 0, booked: 0, postponed: 0, lost: 0, other: 2 }, activity: null },
       { staffId: "owner", name: "Owner fixture", role: "owner", status: "active",
-        assigned: { total: 0, new: 0, inProgress: 0, booked: 0, lost: 0, other: 0 },
+        assigned: { total: 0, new: 0, inProgress: 0, booked: 0, postponed: 0, lost: 0, other: 0 },
         activity: { updatedEvents: 0, createdEvents: 0, touchedLeads: 0, lastRecordedAt: null } },
     ],
   } } };
@@ -232,6 +236,8 @@ function inconsistentTeamPayloads() {
     ["period after generation", (value) => { value.period.to = "2026-10-15T10:00:01Z"; }],
     ["stage sum too high", (value) => { value.members[0].assigned.other += 1; }],
     ["stage sum too low", (value) => { value.members[0].assigned.other -= 1; }],
+    ["postponed sum too high", (value) => { value.members[0].assigned.postponed += 1; }],
+    ["postponed sum too low", (value) => { value.members[0].assigned.postponed -= 1; }],
     ["booked exceeds assigned", (value) => { value.members[0].assigned.booked = 10; }],
     ["lead census too high", (value) => { value.totalLeads += 1; }],
     ["lead census too low", (value) => { value.totalLeads -= 1; }],
@@ -241,18 +247,18 @@ function inconsistentTeamPayloads() {
     ["stage sum overflow", (value) => {
       value.members = [value.members[0]];
       value.members[0].assigned = { total: Number.MAX_SAFE_INTEGER, new: Number.MAX_SAFE_INTEGER,
-        inProgress: 0, booked: 1, lost: 0, other: 0 };
+        inProgress: 0, booked: 1, postponed: 0, lost: 0, other: 0 };
       value.totalLeads = Number.MAX_SAFE_INTEGER; value.unassignedLeads = 0; value.otherAssigneeLeads = 0;
     }],
     ["lead census overflow", (value) => {
       value.members = [value.members[0]];
       value.members[0].assigned = { total: Number.MAX_SAFE_INTEGER, new: 0,
-        inProgress: 0, booked: Number.MAX_SAFE_INTEGER, lost: 0, other: 0 };
+        inProgress: 0, booked: Number.MAX_SAFE_INTEGER, postponed: 0, lost: 0, other: 0 };
       value.totalLeads = Number.MAX_SAFE_INTEGER; value.unassignedLeads = 1; value.otherAssigneeLeads = 0;
     }],
     ["staff total sum overflow", (value) => {
       value.members[0].assigned = { total: Number.MAX_SAFE_INTEGER, new: 0,
-        inProgress: 0, booked: Number.MAX_SAFE_INTEGER, lost: 0, other: 0 };
+        inProgress: 0, booked: Number.MAX_SAFE_INTEGER, postponed: 0, lost: 0, other: 0 };
       value.totalLeads = Number.MAX_SAFE_INTEGER; value.unassignedLeads = 0; value.otherAssigneeLeads = 0;
     }],
   ];
@@ -311,6 +317,36 @@ function teamSetup(props: { initiallyExpanded?: boolean; heading?: string } = {}
       return nodes(row).filter((node) => node.type === "td").map(label);
     },
   };
+}
+
+function browserTeamSetup(role = "owner", purpose = "mortgage_leads") {
+  const snapshot = { members: [
+    { id: "manager", name: "Manager fixture", role: "lead_manager", status: "active" },
+    { id: "empty", name: "Empty fixture", role: "admin", status: "inactive" },
+  ], contacts: [] as Array<{ responsibleUserId: string | null; status: string }>,
+  metrics: { totalLeads: 0, unassignedLeads: 0 } };
+  const storage = () => {
+    const values = new Map<string, string>();
+    return { getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => values.set(key, value), removeItem: (key: string) => values.delete(key) };
+  };
+  let snapshotReads = 0;
+  const module = evaluate(crmBrowserMocks + "\nexports.fixture = { teamMembers };", {
+    window: { location: { pathname: "/analytics", search: `?fixtureRole=${role}&fixturePurpose=${purpose}` } },
+    localStorage: storage(), sessionStorage: storage(), URL, URLSearchParams, Response,
+  }, {
+    "./booking-retry": {}, "./operator-dispatch-fixture": {}, "./mortgage-outcomes-browser-store": {},
+    "./operator-browser-store": { createOperatorBrowserFixture: () => ({}) },
+    "./clinic-arrival-browser-store": { isClinicArrivalFixtureLocation: () => false },
+    "./appointment-create-browser-store": { isAppointmentCreateFixtureLocation: () => false },
+    "./content-studio-browser-store": { isContentStudioFixtureLocation: () => false },
+    "./advertising-demo-browser-store": { isAdvertisingDemoFixtureLocation: () => false },
+    "../../artifacts/negis/src/lib/leadPipeline": evaluate(pipeline),
+    "./mortgage-browser-store": { mortgageFixtureAdmin: { id: "admin", name: "Admin fixture" },
+      mortgageBrowserRequest: async () => { snapshotReads += 1; return Response.json({ success: true, mode: "supabase", data: snapshot }); } },
+  });
+  return { module, snapshot, reads: () => snapshotReads,
+    request: (resource = "lead-team-analytics", method = "GET") => module.crmFetch(`/api/crm/${resource}?days=30`, { method }) as Promise<Response> };
 }
 
 test("lead manager routes, home and both menus are leads-only; other route permissions are unchanged", async () => {
@@ -487,15 +523,18 @@ test("mortgage summaries follow responsibility while stage and search only narro
       { ...lead, id: "a-new", name: "A new" },
       { ...lead, id: "a-progress", name: "A progress", stageId: undefined, status: "in_progress" },
       { ...lead, id: "a-booked", name: "A booked", stageId: undefined, status: "booked" },
+      { ...lead, id: "a-postponed", name: "A postponed", stageId: stages[3].id, semanticGroup: "postponed" },
       { ...lead, id: "a-lost", name: "A lost", stageId: undefined, status: "lost" },
       { ...lead, id: "b-new", name: "B new", responsibleUserId: workspace },
       { ...lead, id: "b-lost", name: "B lost", stageId: undefined, status: "lost", responsibleUserId: workspace },
+      { ...lead, id: "b-postponed", name: "B postponed", stageId: undefined, status: "Отложенные", responsibleUserId: workspace },
       { ...lead, id: "u-progress", name: "Unassigned progress", stageId: undefined, status: "in_progress", responsibleUserId: undefined },
       { ...lead, id: "u-booked", name: "Unassigned booked", stageId: undefined, status: "booked", responsibleUserId: null },
       { ...lead, id: "u-lost", name: "Unassigned lost", stageId: undefined, status: "lost", responsibleUserId: "" },
+      { ...lead, id: "u-postponed", name: "Unassigned postponed", stageId: undefined, status: "deferred", responsibleUserId: null },
     ]);
     fixture.content(); await fixture.driver.flush();
-    // Summary order: total, new, in progress, booked, lost.
+    // Summary order: total, new, in progress, booked, postponed, lost.
     const summary = () => fixture.driver.nodes().filter((node) => node.type === "MetricCard").map((node) => node.props.value);
     const selectResponsible = async (value: string) => {
       const select = fixture.driver.nodes().find((node) => node.props["aria-label"] === "Фильтр по ответственному");
@@ -508,33 +547,33 @@ test("mortgage summaries follow responsibility while stage and search only narro
       input.props.onChange({ target: { value } }); await fixture.driver.flush();
     };
 
-    assert.deepEqual(summary(), [9, 2, 2, 2, 3], role);
+    assert.deepEqual(summary(), [12, 2, 2, 2, 3, 3], role);
     await selectResponsible(actor);
-    assert.deepEqual(summary(), [4, 1, 1, 1, 1], role);
+    assert.deepEqual(summary(), [5, 1, 1, 1, 1, 1], role);
     button(fixture.driver, "Новая").props.onClick(); await fixture.driver.flush();
     assert.match(label(fixture.driver.tree()), /A new/);
-    assert.doesNotMatch(label(fixture.driver.tree()), /A progress|A booked|A lost|B new|Unassigned/);
-    assert.deepEqual(summary(), [4, 1, 1, 1, 1], "stage selection must not zero other summaries");
+    assert.doesNotMatch(label(fixture.driver.tree()), /A progress|A booked|A postponed|A lost|B new|Unassigned/);
+    assert.deepEqual(summary(), [5, 1, 1, 1, 1, 1], "stage selection must not zero other summaries");
 
     await search("no matching lead");
     assert.doesNotMatch(label(fixture.driver.tree()), /A new/);
-    assert.deepEqual(summary(), [4, 1, 1, 1, 1], "search must keep its existing list-only policy");
+    assert.deepEqual(summary(), [5, 1, 1, 1, 1, 1], "search must keep its existing list-only policy");
     await search("a NEW");
     assert.match(label(fixture.driver.tree()), /A new/);
-    assert.deepEqual(summary(), [4, 1, 1, 1, 1]);
+    assert.deepEqual(summary(), [5, 1, 1, 1, 1, 1]);
     await search("");
     button(fixture.driver, "Все").props.onClick(); await fixture.driver.flush();
 
     await selectResponsible("unassigned");
-    assert.deepEqual(summary(), [3, 0, 1, 1, 1]);
+    assert.deepEqual(summary(), [4, 0, 1, 1, 1, 1]);
     assert.match(label(fixture.driver.tree()), /Unassigned progress|Unassigned booked|Unassigned lost/);
     assert.doesNotMatch(label(fixture.driver.tree()), /A new|B new/);
     await selectResponsible(workspace);
-    assert.deepEqual(summary(), [2, 1, 0, 0, 1]);
+    assert.deepEqual(summary(), [3, 1, 0, 0, 1, 1]);
     await selectResponsible("missing-staff");
-    assert.deepEqual(summary(), [0, 0, 0, 0, 0]);
+    assert.deepEqual(summary(), [0, 0, 0, 0, 0, 0]);
     await selectResponsible("all");
-    assert.deepEqual(summary(), [9, 2, 2, 2, 3]);
+    assert.deepEqual(summary(), [12, 2, 2, 2, 3, 3]);
     assert.deepEqual(fixture.updates, []);
     fixture.driver.dispose();
   }
@@ -555,7 +594,7 @@ test("booking conversion rounds one decimal and distinguishes zero rates from in
 test("team analytics parser accepts count bases and safe sums but rejects inconsistent cohorts and periods", () => {
   for (const days of [7, 30, 90]) {
     const payload = teamPayload(days);
-    assert.equal(teamContract.readAnalytics(payload, days), payload.data.analytics);
+    assert.deepEqual(clone(teamContract.readAnalytics(payload, days)), payload.data.analytics);
     assert.throws(() => teamContract.readAnalytics(payload, days === 7 ? 30 : 7), /Invalid team analytics response/);
   }
   assert.equal(teamContract.safeSum([]), 0);
@@ -564,10 +603,10 @@ test("team analytics parser accepts count bases and safe sums but rejects incons
   const boundary = teamPayload();
   boundary.data.analytics.members = [boundary.data.analytics.members[0]];
   boundary.data.analytics.members[0].assigned = { total: Number.MAX_SAFE_INTEGER, new: 0,
-    inProgress: 0, booked: Number.MAX_SAFE_INTEGER, lost: 0, other: 0 };
+    inProgress: 0, booked: Number.MAX_SAFE_INTEGER, postponed: 0, lost: 0, other: 0 };
   boundary.data.analytics.totalLeads = Number.MAX_SAFE_INTEGER;
   boundary.data.analytics.unassignedLeads = 0; boundary.data.analytics.otherAssigneeLeads = 0;
-  assert.equal(teamContract.readAnalytics(boundary, 30), boundary.data.analytics);
+  assert.deepEqual(clone(teamContract.readAnalytics(boundary, 30)), boundary.data.analytics);
   for (const { name, payload } of inconsistentTeamPayloads()) {
     assert.throws(() => teamContract.readAnalytics(payload, 30), /Inconsistent team analytics response/, name);
   }
@@ -576,7 +615,7 @@ test("team analytics parser accepts count bases and safe sums but rejects incons
 test("team analytics parser requires nonnegative safe integers for every snapshot and activity count", () => {
   const groups = [
     ["totalLeads", "unassignedLeads", "otherAssigneeLeads"],
-    ["total", "new", "inProgress", "booked", "lost", "other"],
+    ["total", "new", "inProgress", "booked", "postponed", "lost", "other"],
     ["updatedEvents", "createdEvents", "touchedLeads"],
   ];
   for (const [index, keys] of groups.entries()) {
@@ -591,6 +630,103 @@ test("team analytics parser requires nonnegative safe integers for every snapsho
       }
     }
   }
+});
+
+test("only an absent postponed counter defaults to zero when the old assigned census already reconciles", () => {
+  const legacy = teamPayload();
+  for (const member of legacy.data.analytics.members) {
+    member.assigned.inProgress += member.assigned.postponed;
+    Reflect.deleteProperty(member.assigned, "postponed");
+  }
+  const before = JSON.stringify(legacy);
+  const parsed = teamContract.readAnalytics(legacy, 30);
+  assert.deepEqual(clone(parsed.members.map((member: any) => member.assigned.postponed)), [0, 0, 0]);
+  assert.equal(parsed.members[0].assigned.new, 1);
+  assert.equal(parsed.members[0].assigned.inProgress, 2);
+  assert.equal(parsed.members[0].assigned.other, 2);
+  assert.equal(JSON.stringify(legacy), before, "normalization must not mutate the server payload");
+  const gap = teamPayload(); Reflect.deleteProperty(gap.data.analytics.members[0].assigned, "postponed");
+  assert.throws(() => teamContract.readAnalytics(gap, 30), /Inconsistent team analytics response/,
+    "missing postponed cannot absorb an unexplained assigned remainder");
+  gap.data.analytics.members[0].assigned.other += 2;
+  assert.throws(() => teamContract.readAnalytics(gap, 30), /Inconsistent team analytics response/);
+
+  const empty = teamPayload();
+  empty.data.analytics.totalLeads = 9;
+  for (const member of empty.data.analytics.members) {
+    member.assigned = { total: 0, new: 0, inProgress: 0, booked: 0, postponed: 0, lost: 0, other: 0 };
+    Reflect.deleteProperty(member.assigned, "postponed");
+  }
+  assert.ok(teamContract.readAnalytics(empty, 30).members.every((member: any) => member.assigned.postponed === 0));
+  empty.data.analytics.members = [];
+  assert.deepEqual(clone(teamContract.readAnalytics(empty, 30).members), []);
+});
+
+test("old reconciled responses render zero postponed without failing or changing conversion", async () => {
+  const fixture = teamSetup({ initiallyExpanded: true }); await fixture.driver.flush();
+  const payload = teamPayload();
+  for (const member of payload.data.analytics.members) {
+    member.assigned.inProgress += member.assigned.postponed;
+    Reflect.deleteProperty(member.assigned, "postponed");
+  }
+  await fixture.resolve(0, payload);
+  assert.deepEqual(fixture.cells().slice(0, 7), ["9", "1", "2", "3", "0", "1", "2"]);
+  assert.equal(teamSummary(fixture.driver)["Отложенные"], "0");
+  assert.equal(teamSummary(fixture.driver)["Конверсия в запись"], "27,3%");
+  assert.doesNotMatch(fixture.text(), /Не удалось загрузить/);
+  fixture.driver.dispose();
+});
+
+test("fixed browser analytics fixtures reconcile and the taxonomy route exposes all five stages", async () => {
+  for (const role of ["owner", "admin", "lead_manager"]) {
+    const fixture = browserTeamSetup(role);
+    const fixed = fixture.module.fixture.teamMembers;
+    for (const member of fixed) {
+      const { total, new: fresh, inProgress, booked, postponed, lost, other } = member.assigned;
+      assert.equal(Number.isSafeInteger(postponed), true);
+      assert.equal(total, fresh + inProgress + booked + postponed + lost + other);
+    }
+    assert.equal(fixed.reduce((sum: number, member: any) => sum + member.assigned.postponed, 0), 1);
+    const response = await fixture.request("lead-stages"); assert.equal(response.status, 200);
+    const body = await response.json() as { data: {
+      stages: Array<{ stageKey: string; name: string; semanticGroup: string }>; items: unknown[];
+    } };
+    assert.deepEqual(body.data.stages.map((stage: any) => [stage.stageKey, stage.name, stage.semanticGroup]), [
+      ["new", "Новая", "new"], ["in_progress", "В работе", "in_progress"], ["booked", "Записана", "booked"],
+      ["postponed", "Отложена", "postponed"], ["lost", "Потеряна", "lost"],
+    ]);
+    assert.deepEqual(body.data.items, body.data.stages);
+  }
+});
+
+test("dynamic browser analytics counts exact postponed aliases and remains mortgage owner/admin GET only", async () => {
+  for (const role of ["owner", "admin"]) {
+    const fixture = browserTeamSetup(role);
+    const statuses = ["new", "in_progress", "booked", "postponed", "Отложена", "Отложенные", "Отложено", "Отложен",
+      " DEFERRED ", "lost", "unknown", "deferred_custom", "Отложенные по просьбе"];
+    fixture.snapshot.contacts = statuses.map((status) => ({ status, responsibleUserId: "manager" }));
+    fixture.snapshot.contacts.push({ status: "Отложена", responsibleUserId: null }, { status: "postponed", responsibleUserId: "foreign-assignee" });
+    fixture.snapshot.metrics.totalLeads = fixture.snapshot.contacts.length;
+    fixture.snapshot.metrics.unassignedLeads = 1;
+    const response = await fixture.request(); assert.equal(response.status, 200);
+    const parsed = teamContract.readAnalytics(await response.json(), 30);
+    assert.deepEqual(clone(parsed.members[0].assigned),
+      { total: 13, new: 1, inProgress: 1, booked: 1, postponed: 6, lost: 1, other: 3 });
+    assert.deepEqual(clone(parsed.members[1].assigned),
+      { total: 0, new: 0, inProgress: 0, booked: 0, postponed: 0, lost: 0, other: 0 });
+    assert.equal(parsed.unassignedLeads, 1); assert.equal(parsed.otherAssigneeLeads, 1);
+    assert.equal(teamBookingConversion(parsed.members[0].assigned.booked, parsed.members[0].assigned.total), 7.7);
+    assert.equal((await fixture.request("lead-team-analytics", "POST")).status, 403);
+    for (const deniedRole of ["lead_manager", "manager", "doctor", "marketer"]) {
+      fixture.module.useAuth().userRole = deniedRole;
+      assert.equal((await fixture.request()).status, 403, deniedRole);
+    }
+    assert.equal(fixture.reads(), 1, "denied roles and writes must not load the team snapshot");
+  }
+  const clinic = browserTeamSetup("owner", "clinic_services");
+  assert.equal((await clinic.request()).status, 403); assert.equal(clinic.reads(), 0);
+  const manager = browserTeamSetup("lead_manager");
+  assert.equal((await manager.request()).status, 403); assert.equal(manager.reads(), 0);
 });
 
 test("team analytics mounts below summaries only for mortgage owner/admin and is keyed by scope", async () => {
@@ -633,10 +769,10 @@ test("team analytics is lazy, uses bound access, renders factual snapshots and c
   for (const text of ["Активен", "Неактивен", "Менеджер заявок", "Администратор", "Владелец"]) {
     assert.ok(fixture.text().includes(text), text);
   }
-  assert.deepEqual(fixture.cells().slice(0, 9), ["9", "1", "2", "3", "1", "2", "13", "7", "6"]);
-  assert.notEqual(fixture.cells()[9], "-");
-  assert.deepEqual(fixture.cells("Admin fixture").slice(6), ["-", "-", "-", "-"]);
-  assert.deepEqual(fixture.cells("Owner fixture").slice(6), ["0", "0", "0", "-"]);
+  assert.deepEqual(fixture.cells().slice(0, 10), ["9", "1", "1", "3", "1", "1", "2", "13", "7", "6"]);
+  assert.notEqual(fixture.cells()[10], "-");
+  assert.deepEqual(fixture.cells("Admin fixture").slice(7), ["-", "-", "-", "-"]);
+  assert.deepEqual(fixture.cells("Owner fixture").slice(7), ["0", "0", "0", "-"]);
   assert.match(fixture.text(), /Конверсия в запись27,3%/);
   assert.doesNotMatch(fixture.text(), /CPL|ROI|звонк|платеж|балл|первый ответ/i);
   const scroller = fixture.driver.nodes().find((node) => node.props.role === "region"); assert.ok(scroller);
@@ -660,7 +796,7 @@ test("team analytics is lazy, uses bound access, renders factual snapshots and c
 test("team results use the weighted assigned cohort with count-labelled member meters, zero and no denominator", async () => {
   const fixture = teamSetup(); await fixture.driver.flush(); await fixture.toggle(true); await fixture.resolve(0);
   assert.deepEqual(teamSummary(fixture.driver), {
-    "Назначено сотрудникам": "11", "Записаны": "3", "Конверсия в запись": "27,3%", "Потеряны": "1",
+    "Назначено сотрудникам": "11", "Записаны": "3", "Конверсия в запись": "27,3%", "Отложенные": "1", "Потеряны": "1",
   }, "3/11 excludes unassigned/other assignees and does not average member percentages or use activity counts");
   const results = teamResults(fixture.driver);
   assert.match(label(results), /Текущие назначенные заявки · всё время/);
@@ -694,6 +830,23 @@ test("team results use the weighted assigned cohort with count-labelled member m
   await fixture.refresh(); await fixture.resolve(1, zero);
   assert.equal(teamSummary(fixture.driver)["Конверсия в запись"], "0%", "a nonempty assigned cohort can have a valid zero rate");
   assert.deepEqual(nodes(teamResults(fixture.driver)).filter((node) => node.type === "meter").map((node) => node.props.value), [0, 0]);
+  fixture.driver.dispose();
+});
+
+test("postponed is a separate labelled count and never removed from the booked conversion denominator", async () => {
+  const fixture = teamSetup({ initiallyExpanded: true }); await fixture.driver.flush();
+  const payload = teamPayload();
+  payload.data.analytics.members[0].assigned = { total: 9, new: 0, inProgress: 0, booked: 3, postponed: 6, lost: 0, other: 0 };
+  payload.data.analytics.members[1].assigned = { total: 2, new: 0, inProgress: 0, booked: 0, postponed: 2, lost: 0, other: 0 };
+  await fixture.resolve(0, payload);
+  assert.deepEqual(fixture.cells().slice(0, 7), ["9", "0", "0", "3", "6", "0", "0"]);
+  assert.deepEqual(teamSummary(fixture.driver), {
+    "Назначено сотрудникам": "11", "Записаны": "3", "Конверсия в запись": "27,3%", "Отложенные": "8", "Потеряны": "0",
+  });
+  assert.deepEqual(fixture.driver.nodes().filter((node) => node.type === "meter").map((node) => node.props.value), [33.3, 0]);
+  assert.ok(fixture.driver.nodes().some((node) => node.type === "th" && label(node) === "Отложенные"));
+  const group = fixture.driver.nodes().find((node) => node.type === "th" && node.props.scope === "colgroup"); assert.ok(group);
+  assert.equal(group.props.colSpan, 7);
   fixture.driver.dispose();
 });
 
@@ -855,14 +1008,14 @@ test("team conversion stays an all-time snapshot across activity windows and una
     available.data.analytics.members[0].activity!.touchedLeads = days + 2;
     await fixture.resolve(fixture.requests.length - 1, available);
     assert.match(fixture.text(), new RegExp(`Ручные события · последние ${days} дней`));
-    assert.deepEqual(fixture.cells().slice(6, 9), [String(days), String(days + 1), String(days + 2)]);
+    assert.deepEqual(fixture.cells().slice(7, 10), [String(days), String(days + 1), String(days + 2)]);
     assert.equal(label(teamResults(fixture.driver)), snapshot, `${days}-day activity must not change conversion`);
     await fixture.refresh();
     const unavailable = clone(available); unavailable.data.analytics.activityStatus = "unavailable";
     await fixture.resolve(fixture.requests.length - 1, unavailable);
     assert.match(fixture.text(), /Активность недоступна/);
     for (const name of ["Manager fixture", "Admin fixture", "Owner fixture"]) {
-      assert.deepEqual(fixture.cells(name).slice(6), ["-", "-", "-", "-"], name);
+      assert.deepEqual(fixture.cells(name).slice(7), ["-", "-", "-", "-"], name);
     }
     assert.equal(label(teamResults(fixture.driver)), snapshot, "unavailable activity must not zero or hide current conversion");
   }
@@ -873,16 +1026,17 @@ test("team analytics unavailable activity is not zero and empty members keep sna
   const fixture = teamSetup(); await fixture.driver.flush(); await fixture.toggle(true);
   const payload = teamPayload(); payload.data.analytics.activityStatus = "unavailable";
   await fixture.resolve(0, payload);
-  assert.deepEqual(fixture.cells().slice(6), ["-", "-", "-", "-"]);
+  assert.deepEqual(fixture.cells().slice(7), ["-", "-", "-", "-"]);
   assert.match(fixture.text(), /Активность недоступна/);
-  assert.equal(fixture.cells()[5], "2", "other statuses remain visible");
+  assert.equal(fixture.cells()[4], "1", "postponed remains separate from other statuses");
+  assert.equal(fixture.cells()[6], "2", "other statuses remain visible");
   await fixture.refresh();
   const empty = teamPayload(); empty.data.analytics.members = []; empty.data.analytics.otherAssigneeLeads = 15;
   await fixture.resolve(1, empty);
   assert.match(fixture.text(), /Сотрудников нет/);
   assert.match(fixture.text(), /Всего заявок20Не назначены5Другие ответственные15/);
   assert.deepEqual(teamSummary(fixture.driver), {
-    "Назначено сотрудникам": "0", "Записаны": "0", "Конверсия в запись": "—", "Потеряны": "0",
+    "Назначено сотрудникам": "0", "Записаны": "0", "Конверсия в запись": "—", "Отложенные": "0", "Потеряны": "0",
   });
   assert.equal(fixture.driver.nodes().some((node) => node.type === "table"), false);
   assert.equal(fixture.driver.nodes().some((node) => node.type === "meter"), false);

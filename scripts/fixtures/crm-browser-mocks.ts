@@ -5,6 +5,7 @@ import { createClinicArrivalBrowserFixture, isClinicArrivalFixtureLocation, type
 import { mortgageBrowserRequest, mortgageLeadBrowserRequest, mortgageFixtureAdmin } from './mortgage-browser-store';
 import { mortgageOutcomesBrowserRequest } from './mortgage-outcomes-browser-store';
 import type { MortgageSnapshot } from '../../lib/crm/mortgage-contract';
+import { FALLBACK_LEAD_STAGES } from "../../artifacts/negis/src/lib/leadPipeline";
 import { appointmentCreateFixtureIds, createAppointmentCreateBrowserFixture, isAppointmentCreateFixtureLocation } from "./appointment-create-browser-store";
 import { contentStudioFixtureIds, createContentStudioBrowserFixture, isContentStudioFixtureLocation } from "./content-studio-browser-store";
 import { advertisingDemoFixtureIds, createAdvertisingDemoBrowserFixture, isAdvertisingDemoFixtureLocation } from "./advertising-demo-browser-store";
@@ -51,8 +52,8 @@ const teamMembers = Array.from({ length: 5 }, (_, index) => ({
   staffId: `00000000-0000-4000-8000-${String(100 + index).padStart(12, "0")}`,
   name: index === 0 ? longName : `Тестовый менеджер ${index + 1}`,
   role: "lead_manager", status: index === 4 ? "inactive" : "active",
-  assigned: { total: 1, new: index === 0 ? 1 : 0, inProgress: index === 1 ? 1 : 0,
-    booked: index === 2 ? 1 : 0, lost: index === 3 ? 1 : 0, other: index === 4 ? 1 : 0 },
+  assigned: { total: index === 3 ? 2 : 1, new: index === 0 ? 1 : 0, inProgress: index === 1 ? 1 : 0,
+    booked: index === 2 ? 1 : 0, postponed: index === 3 ? 1 : 0, lost: index === 3 ? 1 : 0, other: index === 4 ? 1 : 0 },
   activity: { updatedEvents: index + 1, createdEvents: 1, touchedLeads: 1, lastRecordedAt: new Date().toISOString() },
 }));
 const service = "Тестовая комплексная услуга с очень длинным названием";
@@ -204,6 +205,9 @@ export async function crmFetch(input: string, init?: ClinicArrivalGuardedInit): 
   if (assignedLeadFixture && !["leads", "lead-stages", "lead-sources"].includes(resource)) {
     return Response.json({ success: false, error: "Доступ закрыт на изолированном стенде" }, { status: 403 });
   }
+  if (resource === "lead-stages") {
+    return Response.json({ success: true, mode: "supabase", data: { stages: FALLBACK_LEAD_STAGES, items: FALLBACK_LEAD_STAGES } });
+  }
   if (resource === "lead-team-analytics") {
     if (!mortgageFixture || !["owner", "admin"].includes(auth.userRole)) return Response.json({ success: false }, { status: 403 });
     const days = Number(url.searchParams.get("days") || 30);
@@ -212,10 +216,13 @@ export async function crmFetch(input: string, init?: ClinicArrivalGuardedInit): 
     const snapshot = (await snapshotResponse.json()).data as MortgageSnapshot;
     const members = snapshot.members.map((member) => {
       const mine = snapshot.contacts.filter((contact) => contact.responsibleUserId === member.id);
-      const assigned = { total: mine.length, new: 0, inProgress: 0, booked: 0, lost: 0, other: 0 };
+      const assigned = { total: mine.length, new: 0, inProgress: 0, booked: 0, postponed: 0, lost: 0, other: 0 };
       for (const contact of mine) {
-        const bucket = contact.status === "new" ? "new" : contact.status === "in_progress" ? "inProgress"
-          : contact.status === "booked" ? "booked" : contact.status === "lost" ? "lost" : "other";
+        const status = contact.status.trim().toLowerCase();
+        const bucket = status === "new" || status === "новая" ? "new" : status === "in_progress" || status === "в работе" ? "inProgress"
+          : status === "booked" || status === "записана" ? "booked"
+          : ["postponed", "deferred", "отложена", "отложенные", "отложено", "отложен"].includes(status) ? "postponed"
+          : status === "lost" || status === "потеряна" ? "lost" : "other";
         assigned[bucket] += 1;
       }
       return { staffId: member.id, name: member.name, role: member.role, status: member.status, assigned,

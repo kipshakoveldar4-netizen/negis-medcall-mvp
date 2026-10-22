@@ -1,4 +1,4 @@
-export type LeadSemanticGroup = "new" | "in_progress" | "booked" | "lost";
+export type LeadSemanticGroup = "new" | "in_progress" | "booked" | "postponed" | "lost";
 
 export type LeadStageDefinition = {
   id: string;
@@ -26,6 +26,7 @@ export const FALLBACK_LEAD_STAGES: LeadStageDefinition[] = [
   { id: "fallback:new", stageKey: "new", name: "Новая", color: "#2563eb", semanticGroup: "new", sortOrder: 10, isDefault: true, isActive: true },
   { id: "fallback:in_progress", stageKey: "in_progress", name: "В работе", color: "#d97706", semanticGroup: "in_progress", sortOrder: 20, isDefault: true, isActive: true },
   { id: "fallback:booked", stageKey: "booked", name: "Записана", color: "#059669", semanticGroup: "booked", sortOrder: 30, isDefault: true, isActive: true },
+  { id: "fallback:postponed", stageKey: "postponed", name: "Отложена", color: "#64748b", semanticGroup: "postponed", sortOrder: 35, isDefault: true, isActive: true },
   { id: "fallback:lost", stageKey: "lost", name: "Потеряна", color: "#dc2626", semanticGroup: "lost", sortOrder: 40, isDefault: true, isActive: true },
 ];
 
@@ -63,11 +64,12 @@ function booleanValue(value: unknown, fallback: boolean): boolean {
 }
 
 export function isLeadSemanticGroup(value: unknown): value is LeadSemanticGroup {
-  return value === "new" || value === "in_progress" || value === "booked" || value === "lost";
+  return value === "new" || value === "in_progress" || value === "booked" || value === "postponed" || value === "lost";
 }
 
 export function normalizeLegacyLeadStatus(raw?: string): LeadSemanticGroup {
   const value = (raw || "").toLowerCase();
+  if (/(отлож|postpon|defer)/.test(value)) return "postponed";
   if (/(work|в работе|обработ|прогресс|progress|contact|связ|звон)/.test(value)) return "in_progress";
   if (/(book|запис|schedul|приш[её]л|приш|arriv|visit|came|показ|appointment)/.test(value)) return "booked";
   if (/(lost|потер|отказ|reject|declin|cancel|отмен|fail|неудач|спам)/.test(value)) return "lost";

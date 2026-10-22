@@ -32,7 +32,7 @@ export function mortgageActivityHref(activity: MortgageActivity): string {
 }
 
 const contactStatuses: Record<string, string> = {
-  new: "Новая", in_progress: "В работе", booked: "Записана", lost: "Потеряна",
+  new: "Новая", in_progress: "В работе", booked: "Записана", postponed: "Отложена", lost: "Потеряна",
 };
 
 export function mortgageContactStatus(status: string): string {

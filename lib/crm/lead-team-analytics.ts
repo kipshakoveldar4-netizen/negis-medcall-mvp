@@ -5,12 +5,12 @@ import { readWorkspaceContext } from "./server";
 
 type Row = Record<string, unknown>;
 type Page = { data: unknown; error: unknown; count: number | null };
-type Assigned = { total: number; new: number; inProgress: number; booked: number; lost: number; other: number };
+type Assigned = { total: number; new: number; inProgress: number; booked: number; postponed: number; lost: number; other: number };
 type Activity = { updatedEvents: number; createdEvents: number; touchedLeads: number; lastRecordedAt: string | null };
 const PAGE_SIZE = 500;
 const record = (value: unknown): Row => value && typeof value === "object" && !Array.isArray(value) ? value as Row : {};
 const text = (value: unknown) => typeof value === "string" ? value.trim() : "";
-const emptyAssigned = (): Assigned => ({ total: 0, new: 0, inProgress: 0, booked: 0, lost: 0, other: 0 });
+const emptyAssigned = (): Assigned => ({ total: 0, new: 0, inProgress: 0, booked: 0, postponed: 0, lost: 0, other: 0 });
 const emptyActivity = (): Activity => ({ updatedEvents: 0, createdEvents: 0, touchedLeads: 0, lastRecordedAt: null });
 
 // Never turn a PostgREST ceiling, failed page or changing row count into a total.
@@ -43,6 +43,7 @@ function bucket(status: unknown, semanticGroup: unknown): Exclude<keyof Assigned
   if (group === "new" || group === "новая") return "new";
   if (group === "in_progress" || group === "в работе") return "inProgress";
   if (group === "booked" || group === "записана") return "booked";
+  if (["postponed", "deferred", "отложена", "отложенные", "отложено", "отложен"].includes(group)) return "postponed";
   if (group === "lost" || group === "потеряна") return "lost";
   return "other";
 }

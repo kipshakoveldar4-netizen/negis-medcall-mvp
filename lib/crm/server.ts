@@ -1088,8 +1088,8 @@ function resourceValidationDetails(resource: CrmResource, body: JsonRecord): str
     const semanticGroup = firstString(body.semanticGroup, body.semantic_group);
     if (!semanticGroup) {
       details.push("semanticGroup is required");
-    } else if (!["new", "in_progress", "booked", "lost"].includes(semanticGroup)) {
-      details.push("semanticGroup must be new, in_progress, booked or lost");
+    } else if (!["new", "in_progress", "booked", "postponed", "lost"].includes(semanticGroup)) {
+      details.push("semanticGroup must be new, in_progress, booked, postponed or lost");
     }
   }
 

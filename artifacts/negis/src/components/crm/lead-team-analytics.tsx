@@ -26,14 +26,15 @@ type Analytics = {
     name: string;
     role: string;
     status: string;
-    assigned: { total: number; new: number; inProgress: number; booked: number; lost: number; other: number };
+    assigned: { total: number; new: number; inProgress: number; booked: number; postponed: number; lost: number; other: number };
     activity: Activity | null;
   }>;
 };
 
 type LoadState = { kind: "idle" | "loading" } | { kind: "failed"; denied: boolean } | { kind: "ready"; analytics: Analytics };
 const PERIODS = [7, 30, 90] as const;
-const ASSIGNED_FIELDS = ["total", "new", "inProgress", "booked", "lost", "other"] as const;
+const ASSIGNED_FIELDS = ["total", "new", "inProgress", "booked", "postponed", "lost", "other"] as const;
+const LEGACY_ASSIGNED_FIELDS = ASSIGNED_FIELDS.filter((field) => field !== "postponed");
 const ACTIVITY_FIELDS = ["updatedEvents", "createdEvents", "touchedLeads"] as const;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -78,13 +79,18 @@ function readAnalytics(body: unknown, days: number): Analytics {
     || !analytics.members.every((member: unknown) => isRecord(member)
       && typeof member.staffId === "string" && member.staffId !== ""
       && typeof member.name === "string" && typeof member.role === "string" && typeof member.status === "string"
-      && hasCounts(member.assigned, ASSIGNED_FIELDS)
+      && hasCounts(member.assigned, LEGACY_ASSIGNED_FIELDS)
+      && isRecord(member.assigned)
+      && (!Object.hasOwn(member.assigned, "postponed") || hasCounts(member.assigned, ["postponed"]))
       && (member.activity === null || (isRecord(member.activity)
         && hasCounts(member.activity, ACTIVITY_FIELDS)
         && (member.activity.lastRecordedAt === null || isTimestamp(member.activity.lastRecordedAt)))))) {
     throw new Error("Invalid team analytics response");
   }
-  const result = analytics as Analytics;
+  // Older servers may omit postponed, but their existing counts must still reconcile.
+  const result = { ...analytics, members: analytics.members.map((member) => ({
+    ...member, assigned: { postponed: 0, ...member.assigned },
+  })) } as Analytics;
   const ids = new Set(result.members.map((member) => member.staffId));
   if (ids.size !== result.members.length
     || Date.parse(result.period.from) > Date.parse(result.period.to)
@@ -144,6 +150,7 @@ export function LeadTeamAnalytics({ access, initiallyExpanded = false, heading =
   const analytics = state.kind === "ready" ? state.analytics : null;
   const assignedTotal = analytics?.members.reduce((sum, member) => sum + member.assigned.total, 0) ?? 0;
   const bookedTotal = analytics?.members.reduce((sum, member) => sum + member.assigned.booked, 0) ?? 0;
+  const postponedTotal = analytics?.members.reduce((sum, member) => sum + member.assigned.postponed, 0) ?? 0;
   const lostTotal = analytics?.members.reduce((sum, member) => sum + member.assigned.lost, 0) ?? 0;
   const loading = state.kind === "loading";
 
@@ -196,11 +203,12 @@ export function LeadTeamAnalytics({ access, initiallyExpanded = false, heading =
         {analytics && <>
           <section className="min-w-0" aria-label="Результаты по назначенным заявкам">
             <h3 className="mb-3 text-xs font-semibold text-[var(--negis-muted)]">Текущие назначенные заявки · всё время</h3>
-            <dl className="grid min-w-0 grid-cols-2 gap-4 border-y border-[var(--negis-border)] py-4 lg:grid-cols-4">
+            <dl className="grid min-w-0 grid-cols-2 gap-4 border-y border-[var(--negis-border)] py-4 lg:grid-cols-5">
               {[
                 ["Назначено сотрудникам", assignedTotal.toLocaleString("ru-RU")],
                 ["Записаны", bookedTotal.toLocaleString("ru-RU")],
                 ["Конверсия в запись", percent(teamBookingConversion(bookedTotal, assignedTotal))],
+                ["Отложенные", postponedTotal.toLocaleString("ru-RU")],
                 ["Потеряны", lostTotal.toLocaleString("ru-RU")],
               ].map(([label, value]) => <div key={label} className="min-w-0">
                 <dt className="break-words text-xs text-[var(--negis-muted)]">{label}</dt>
@@ -243,15 +251,15 @@ export function LeadTeamAnalytics({ access, initiallyExpanded = false, heading =
           </div>
           {analytics.members.length === 0 ? <p className="text-sm" style={{ color: "var(--negis-muted)" }}>Сотрудников нет.</p> : (
             <div className="min-w-0 max-w-full overflow-x-auto" role="region" aria-label="Показатели работы команды" tabIndex={0}>
-              <table className="w-full min-w-[1120px] text-left text-xs" style={{ color: "var(--negis-text)" }}>
+              <table className="w-full min-w-[1200px] text-left text-xs" style={{ color: "var(--negis-text)" }}>
                 <thead style={{ color: "var(--negis-muted)" }}>
                   <tr>
                     <th scope="col" rowSpan={2} className="sticky left-0 z-20 w-44 min-w-44 max-w-56 px-2 py-2"
                       style={{ background: "var(--negis-surface)" }}>Сотрудник</th>
-                    <th scope="colgroup" colSpan={6} className="px-2 py-2">Текущие заявки · все время</th>
+                    <th scope="colgroup" colSpan={ASSIGNED_FIELDS.length} className="px-2 py-2">Текущие заявки · все время</th>
                     <th scope="colgroup" colSpan={4} className="px-2 py-2">Ручные события · {analytics.period.days} дней</th>
                   </tr>
-                  <tr>{["Назначено", "Новые", "В работе", "Записаны", "Потеряны", "Другие статусы", "Правки", "Создания", "Уникальные заявки", "Последнее изменение"]
+                  <tr>{["Назначено", "Новые", "В работе", "Записаны", "Отложенные", "Потеряны", "Другие статусы", "Правки", "Создания", "Уникальные заявки", "Последнее изменение"]
                     .map((label) => <th key={label} scope="col" className="px-2 py-2 font-medium">{label}</th>)}</tr>
                 </thead>
                 <tbody>{analytics.members.map((member) => {

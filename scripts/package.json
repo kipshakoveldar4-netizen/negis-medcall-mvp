@@ -21,6 +21,8 @@
     "test:assigned-leads-postgres": "node --test ./fixtures/assigned-leads-postgres.test.mjs",
     "test:meta-account-binding-postgres": "node --test ./fixtures/meta-account-binding-postgres.test.mjs",
     "test:meta-insights-access-postgres": "node --test ./fixtures/meta-insights-access-postgres.test.mjs",
+    "test:postponed-leads": "tsx --test ./src/medina-lead-postponed-ui.test.ts ./src/medina-lead-team-analytics.test.ts ./src/medina-lead-manager-ui.test.ts",
+    "test:postponed-leads-postgres": "node --test ./fixtures/postponed-lead-stage-postgres.test.mjs",
     "test:operator-access-postgres": "node --test ./fixtures/operator-access-postgres.test.mjs",
     "test:platform-subscription-postgres": "node --test ./fixtures/platform-subscription-postgres.test.mjs",
     "test:site-blog": "tsx --test ./src/medina-site-blog.test.ts",

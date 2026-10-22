@@ -3,6 +3,7 @@ import { Link } from "wouter";
 import {
   BadgeDollarSign,
   CalendarCheck,
+  Clock3,
   CheckCircle2,
   ClipboardList,
   Inbox,
@@ -81,13 +82,15 @@ const leadStatusLabel: Record<LeadStatusKey, string> = {
   new: "Новая",
   in_progress: "В работе",
   booked: "Записана",
+  postponed: "Отложена",
   lost: "Потеряна",
 };
 
-const leadStatusPill: Record<LeadStatusKey, "blue" | "amber" | "green" | "red"> = {
+const leadStatusPill: Record<LeadStatusKey, "blue" | "amber" | "green" | "red" | "slate"> = {
   new: "blue",
   in_progress: "amber",
   booked: "green",
+  postponed: "slate",
   lost: "red",
 };
 
@@ -800,7 +803,7 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
   }, [items, responsibleFilter, isMortgage, isLeadManager]);
 
   const metrics = useMemo(() => {
-    const counts: Record<LeadStatusKey, number> = { new: 0, in_progress: 0, booked: 0, lost: 0 };
+    const counts: Record<LeadStatusKey, number> = { new: 0, in_progress: 0, booked: 0, postponed: 0, lost: 0 };
     for (const lead of responsibleLeads) counts[semanticGroupForLead(lead)] += 1;
     return counts;
   }, [responsibleLeads]);
@@ -810,6 +813,7 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
     { label: "Новые", value: metrics.new, icon: Sparkles, tone: "info" },
     { label: "В работе", value: metrics.in_progress, icon: ClipboardList, tone: "warning" },
     { label: "Записаны", value: metrics.booked, icon: CheckCircle2, tone: "success" },
+    { label: "Отложенные", value: metrics.postponed, icon: Clock3, tone: "muted" },
     { label: "Потеряны", value: metrics.lost, icon: XCircle, tone: metrics.lost > 0 ? "error" : "muted" },
   ];
 
@@ -1126,7 +1130,7 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
         </div>
 
         {/* Summary metrics */}
-        <section className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5" aria-label="Сводка по заявкам">
+        <section className="grid grid-cols-2 gap-3 md:grid-cols-3 2xl:grid-cols-6" aria-label="Сводка по заявкам">
           {summaryMetrics.map((metric, index) => (
             <MetricCard
               key={metric.label}

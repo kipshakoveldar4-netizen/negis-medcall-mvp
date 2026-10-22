@@ -1,4 +1,4 @@
-import { semanticGroupForLead } from "./leadPipeline";
+import { semanticGroupForLead, type LeadSemanticGroup } from "./leadPipeline";
 
 // Medina OS UI-2 — pure dashboard aggregation over records the AI Control
 // Center already fetches from existing CRM endpoints. No fetching, no globals,
@@ -78,10 +78,11 @@ export function formatQueueDate(value: unknown): string {
   return new Date(Date.parse(text)).toLocaleString("ru-RU", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
 }
 
-const leadStatusLabel: Record<string, { label: string; tone: QueueTone }> = {
+const leadStatusLabel: Record<LeadSemanticGroup, { label: string; tone: QueueTone }> = {
   new: { label: "Новая", tone: "info" },
   in_progress: { label: "В работе", tone: "warning" },
   booked: { label: "Записана", tone: "success" },
+  postponed: { label: "Отложена", tone: "neutral" },
   lost: { label: "Потеряна", tone: "error" },
 };
 
