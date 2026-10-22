@@ -250,6 +250,11 @@ test("mortgage dropdown, row badge and edit submission preserve canonical postpo
   assert.equal(label(options[3]), "Отложена");
   await find(driver, (node) => node.type === "form").props.onSubmit({ preventDefault() {} }); await driver.flush();
   assert.equal(submissions.length, 1);
-  assert.equal(submissions[0].status, "postponed");
-  assert.deepEqual(Object.keys(submissions[0]).sort(), ["name", "notes", "phone", "status"]);
+  assert.equal("status" in submissions[0], false, "an unchanged postponed selection must preserve the persisted stage");
+  assert.deepEqual(Object.keys(submissions[0]).sort(), ["name", "notes", "phone"]);
+  select.props.onChange({ target: { value: "in_progress" } }); await driver.flush();
+  await find(driver, (node) => node.type === "form").props.onSubmit({ preventDefault() {} }); await driver.flush();
+  assert.equal(submissions.length, 2);
+  assert.equal(submissions[1].status, "in_progress");
+  assert.deepEqual(Object.keys(submissions[1]).sort(), ["name", "notes", "phone", "status"]);
 });

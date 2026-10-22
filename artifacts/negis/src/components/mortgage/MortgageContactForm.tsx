@@ -81,7 +81,8 @@ export function MortgageContactForm({ contact, request, isCurrent, onSubmit, onC
     try {
       await onSubmit({
         name: name.trim(), phone: phone.trim(), notes: notes.trim(),
-        ...(contact ? { status } : responsibleUserId ? { responsibleUserId } : {}),
+        ...(contact && status !== contact.status ? { status } : {}),
+        ...(!contact && responsibleUserId ? { responsibleUserId } : {}),
       });
       if (isCurrent()) onClose();
     } catch (cause) {

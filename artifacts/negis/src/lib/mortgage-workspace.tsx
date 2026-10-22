@@ -262,9 +262,29 @@ export function useMortgageWorkspace(query: MortgageSnapshotQuery = {}) {
     await mutate("/api/crm/leads", "POST", { name: input.name, phone: input.phone, notes: input.notes ?? "", status: "new", source: "manual", responsibleUserId: input.responsibleUserId ?? "" });
   }, [mutate]);
   const updateContact = useCallback(async (id: string, updates: { name?: string; phone?: string; notes?: string; status?: string }) => {
-    const safeUpdates = { name: updates.name, phone: updates.phone, notes: updates.notes, status: updates.status };
+    if (!access.isCurrent()) throw ended();
+    let stageId: string | undefined;
+    if (updates.status !== undefined) {
+      const invalidStage = () => new Error("Этап заявки недоступен. Обновите карточку и проверьте этапы рабочего пространства.");
+      if (!["new", "in_progress", "booked", "postponed", "lost"].includes(updates.status)) throw invalidStage();
+      const response = await access.request(`/api/crm/lead-stages?workspaceId=${encodeURIComponent(access.workspaceId)}`);
+      const body = await readResult(access, response);
+      const stages = isRecord(body.data) ? body.data.stages : undefined;
+      if (!Array.isArray(stages) || !stages.every((stage) => isRecord(stage)
+        && hasStrings(stage, ["id", "stageKey", "semanticGroup"]) && typeof stage.isActive === "boolean")
+        || new Set(stages.map((stage) => stage.id)).size !== stages.length) throw invalidStage();
+      const matches = stages.filter((stage) => stage.stageKey === updates.status);
+      const stage = matches[0];
+      if (matches.length !== 1 || !stage.isActive || stage.semanticGroup !== updates.status
+        || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(stage.id)) throw invalidStage();
+      stageId = stage.id;
+    }
+    // The API derives the legacy status from this workspace-checked stage.
+    const safeUpdates = { name: updates.name, phone: updates.phone, notes: updates.notes,
+      ...(stageId ? { stageId } : {}) };
+    if (!access.isCurrent()) throw ended();
     await mutate("/api/crm/leads", "PATCH", { id, updates: safeUpdates });
-  }, [mutate]);
+  }, [access, mutate]);
   const visible = access.isCurrent() && state.path === path;
   return {
     data: visible ? state.data : null, loading: access.isCurrent() && (!visible || state.loading),

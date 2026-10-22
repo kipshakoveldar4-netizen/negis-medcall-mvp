@@ -453,10 +453,264 @@ test("activity retries retain requestId; PATCH carries the expected version and 
   f.d.unmount();
 });
 
+const contactStages = ["new", "in_progress", "booked", "postponed", "lost"].map((status, index) => ({
+  id: `44444444-4444-4444-8444-${String(index + 1).padStart(12, "0")}`,
+  stageKey: status, semanticGroup: status, isActive: true,
+}));
+
+test("contact status transitions resolve persisted stages and never PATCH a raw status", async (t) => {
+  let saved = { ...contact, stageId: contactStages[0].id, stageKey: "new", semanticGroup: "new" };
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  const f = hookFixture(async (url, init) => {
+    calls.push({ url, init });
+    if (url.startsWith("/api/crm/lead-stages?")) return response({ stages: contactStages });
+    if (init?.method === "PATCH") {
+      const updates = JSON.parse(init.body as string).updates;
+      const stage = contactStages.find((row) => row.id === updates.stageId);
+      if (stage) saved = { ...saved, ...updates, status: stage.stageKey, stageKey: stage.stageKey, semanticGroup: stage.semanticGroup };
+    }
+    return response({ ...snapshot(), contacts: [saved] });
+  });
+  t.after(() => f.d.unmount());
+  let result = await f.d.flush();
+  for (const status of ["postponed", "in_progress", "new", "booked", "lost", "postponed", "new"]) {
+    calls.length = 0;
+    await result.updateContact(contact.id, { status, notes: "Updated" });
+    assert.equal(calls.length, 2, "an explicit status needs one taxonomy GET before the leads PATCH");
+    assert.equal(calls[0].url, `/api/crm/lead-stages?workspaceId=${scope.workspaceId}`);
+    assert.equal(calls[0].init?.method ?? "GET", "GET");
+    assert.equal(calls[0].init?.body, undefined);
+    assert.equal(calls[1].url, `/api/crm/leads?workspaceId=${scope.workspaceId}`);
+    assert.equal(calls[1].init?.method, "PATCH");
+    assert.deepEqual(JSON.parse(calls[1].init!.body as string), {
+      id: contact.id, updates: { notes: "Updated", stageId: contactStages.find((stage) => stage.stageKey === status)!.id },
+    });
+    result = await f.d.flush();
+    assert.equal(result.data.contacts[0].status, status);
+    assert.equal(result.data.contacts[0].stageKey, status);
+    assert.equal(result.data.contacts[0].semanticGroup, status);
+    assert.equal(result.data.contacts[0].stageId, contactStages.find((stage) => stage.stageKey === status)!.id);
+  }
+});
+
+test("ordinary contact edits preserve a custom stage without a taxonomy GET or caller-supplied privileged fields", async (t) => {
+  const saved = { ...contact, status: "in_progress", stageId: "55555555-5555-4555-8555-555555555555", stageKey: "custom_review" };
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  const f = hookFixture(async (url, init) => {
+    calls.push({ url, init });
+    return response({ ...snapshot(), contacts: [saved] });
+  });
+  t.after(() => f.d.unmount());
+  let result = await f.d.flush();
+  for (const fields of [{ name: "Renamed" }, { notes: "New note" }, { phone: "+77000000000" }, { name: "", notes: "" }]) {
+    calls.length = 0;
+    await result.updateContact(contact.id, {
+      ...fields, stageId: contactStages[3].id, stage_id: contactStages[3].id,
+      responsibleUserId: otherStaffId, responsible_user_id: otherStaffId, workspaceId: "foreign-workspace",
+      stageKey: "postponed", semanticGroup: "postponed",
+    });
+    assert.equal(calls.length, 1, "ordinary edits must only PATCH the existing lead");
+    assert.equal(calls[0].url, `/api/crm/leads?workspaceId=${scope.workspaceId}`);
+    assert.equal(calls[0].init?.method, "PATCH");
+    assert.deepEqual(JSON.parse(calls[0].init!.body as string), { id: contact.id, updates: fields });
+    result = await f.d.flush();
+    assert.equal(result.data.contacts[0].stageId, saved.stageId);
+    assert.equal(result.data.contacts[0].stageKey, saved.stageKey);
+  }
+});
+
+test("explicit contact statuses replace foreign stage IDs using only the persisted local match", async (t) => {
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  const f = hookFixture(async (url, init) => {
+    calls.push({ url, init });
+    return response(url.startsWith("/api/crm/lead-stages?") ? { stages: contactStages } : snapshot());
+  });
+  t.after(() => f.d.unmount());
+  const result = await f.d.flush();
+  await result.updateContact(contact.id, {
+    name: "Edited", phone: "+77000000000", notes: "Note", status: "postponed",
+    stageId: "99999999-9999-4999-8999-999999999999", stage_id: contactStages[0].id,
+    responsibleUserId: otherStaffId, responsible_user_id: otherStaffId, workspaceId: "foreign-workspace",
+    stageKey: "new", semanticGroup: "new",
+  });
+  assert.equal(calls.length, 3);
+  assert.deepEqual(JSON.parse(calls.at(-1)!.init!.body as string), {
+    id: contact.id, updates: { name: "Edited", phone: "+77000000000", notes: "Note", stageId: contactStages[3].id },
+  });
+});
+
+test("contact status resolution rejects malformed, missing, inactive, ambiguous and mismatched persisted stages before PATCH", async (t) => {
+  const selected = contactStages[3];
+  const invalid: Array<[string, unknown]> = [
+    ["missing collection", {}], ["null collection", { stages: null }], ["object collection", { stages: {} }],
+    ["missing match", { stages: contactStages.filter((stage) => stage !== selected) }],
+    ["empty collection", { stages: [] }], ["null row", { stages: [null] }], ["array row", { stages: [[]] }],
+    ["missing row fields", { stages: [{ id: selected.id }] }],
+    ["non-string ID", { stages: [{ ...selected, id: 42 }] }],
+    ["non-string key", { stages: [{ ...selected, stageKey: 42 }] }],
+    ["non-string semantics", { stages: [{ ...selected, semanticGroup: null }] }],
+    ["non-boolean active flag", { stages: [{ ...selected, isActive: "true" }] }],
+    ["missing active flag", { stages: [{ id: selected.id, stageKey: selected.stageKey, semanticGroup: selected.semanticGroup }] }],
+    ["inactive match", { stages: [{ ...selected, isActive: false }] }],
+    ["duplicate key", { stages: [selected, { ...selected, id: otherStaffId }] }],
+    ["inactive duplicate key", { stages: [selected, { ...selected, id: otherStaffId, isActive: false }] }],
+    ["duplicate IDs across keys", { stages: [selected, { ...contactStages[0], id: selected.id }] }],
+    ["mismatched semantics", { stages: [{ ...selected, semanticGroup: "new" }] }],
+    ["non-exact key", { stages: [{ ...selected, stageKey: "Postponed" }] }],
+    ["non-exact semantics", { stages: [{ ...selected, semanticGroup: "postponed " }] }],
+    ["fallback ID", { stages: [{ ...selected, id: "stage:postponed" }] }],
+    ["non-UUID ID", { stages: [{ ...selected, id: "postponed" }] }],
+    ["invalid UUID version", { stages: [{ ...selected, id: "44444444-4444-6444-8444-444444444444" }] }],
+    ["invalid UUID variant", { stages: [{ ...selected, id: "44444444-4444-4444-7444-444444444444" }] }],
+    ["malformed unrelated row", { stages: [selected, { ...contactStages[0], isActive: 1 }] }],
+    ["snake-case-only row", { stages: [{ id: selected.id, stage_key: "postponed", semantic_group: "postponed", is_active: true }] }],
+  ];
+  for (const [label, data] of invalid) await t.test(label, async (t) => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const f = hookFixture(async (url, init) => {
+      calls.push({ url, init });
+      return response(url.startsWith("/api/crm/lead-stages?") ? data : snapshot());
+    });
+    t.after(() => f.d.unmount());
+    const result = await f.d.flush(), before = calls.length, writes = f.d.writes.length;
+    await assert.rejects(result.updateContact(contact.id, { status: "postponed", notes: "Must not save" }));
+    await f.d.flush();
+    assert.equal(calls.length, before + 1, "only the taxonomy lookup is allowed");
+    assert.equal(calls.at(-1)!.url, `/api/crm/lead-stages?workspaceId=${scope.workspaceId}`);
+    assert.equal(calls.some(({ init }) => init?.method === "PATCH"), false);
+    assert.equal(f.d.writes.length, writes, "invalid taxonomy must not refresh or change loaded state");
+  });
+});
+
+test("unknown or malformed explicit contact statuses cannot request taxonomy or PATCH", async (t) => {
+  for (const status of ["", "deferred", "custom_review", "Postponed", " postponed", null, 1, {}, ["postponed"]]) {
+    const calls: string[] = [], f = hookFixture(async (url) => { calls.push(url); return response(); });
+    t.after(() => f.d.unmount());
+    const result = await f.d.flush(), before = calls.length;
+    await assert.rejects(result.updateContact(contact.id, { status }));
+    assert.equal(calls.length, before, JSON.stringify(status));
+  }
+});
+
+async function boundContactFixture(fetcher: (path: string, init: any) => Promise<Response>) {
+  const session = moduleFixture(driver(), fetcher), live = { current: { ...scope } };
+  session.d.mount(() => session.module.fixture.MortgageSession({ scope, live, children: "Synthetic contact editor" }));
+  const access = (await session.d.flush()).props.value, hook = moduleFixture();
+  hook.d.setContext(access);
+  hook.d.mount(() => hook.module.useMortgageWorkspace());
+  const result = await hook.d.flush();
+  return { session, live, access, hook, result, dispose() { hook.d.unmount(); session.d.unmount(); } };
+}
+
+test("contact status lookup and PATCH both use the real no-store actor-bound session transport", async (t) => {
+  const calls: Array<{ url: string; init: any }> = [];
+  const f = await boundContactFixture(async (url, init) => {
+    calls.push({ url, init });
+    return response(url.startsWith("/api/crm/lead-stages?") ? { stages: contactStages } : snapshot());
+  });
+  t.after(() => f.dispose());
+  calls.length = 0;
+  await f.result.updateContact(contact.id, { status: "postponed" });
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls.map(({ url }) => url), [
+    `/api/crm/lead-stages?workspaceId=${scope.workspaceId}`, `/api/crm/leads?workspaceId=${scope.workspaceId}`,
+  ]);
+  for (const { init } of calls) {
+    assert.equal(init.cache, "no-store"); assert.equal(init.expectedUserId, scope.actorId);
+    assert.ok(init.signal instanceof AbortSignal); assert.equal(init.signal.aborted, false);
+  }
+  assert.equal(calls[1].init.method, "PATCH");
+  assert.equal(new Headers(calls[1].init.headers).get("Content-Type"), "application/json");
+});
+
+test("401/403 taxonomy reads revoke real contact access before any PATCH or subsequent retry", async (t) => {
+  for (const status of [401, 403]) await t.test(String(status), async (t) => {
+    const calls: Array<{ url: string; init: any }> = [];
+    const f = await boundContactFixture(async (url, init) => {
+      calls.push({ url, init });
+      return url.startsWith("/api/crm/lead-stages?")
+        ? new Response(JSON.stringify({ success: false, error: "Local access revoked", code: "workspace_access_denied" }), { status })
+        : response();
+    });
+    t.after(() => f.dispose());
+    const before = calls.length;
+    await assert.rejects(f.result.updateContact(contact.id, { status: "postponed" }), { name: "AbortError" });
+    assert.equal(calls.length, before + 1); assert.equal(f.access.isCurrent(), false);
+    assert.equal(calls.at(-1)!.init.signal.aborted, true); assert.equal(f.hook.d.paint().data, null);
+    await assert.rejects(f.result.updateContact(contact.id, { notes: "No retry" }), { name: "AbortError" });
+    assert.equal(calls.length, before + 1);
+    assert.equal(calls.some(({ init }) => init.method === "PATCH"), false);
+  });
+});
+
+test("bad JSON and unsuccessful taxonomy envelopes never PATCH or refresh the contact", async (t) => {
+  const failures: Array<[string, () => Promise<Response>]> = [
+    ["bad JSON", async () => new Response("{not-json")],
+    ["JSON null", async () => new Response("null")],
+    ["JSON array", async () => new Response("[]")],
+    ["unsuccessful envelope", async () => new Response(JSON.stringify({ success: false, mode: "supabase", data: { stages: contactStages } }))],
+    ["demo mode", async () => new Response(JSON.stringify({ success: true, mode: "demo", data: { stages: contactStages } }))],
+    ["HTTP failure", async () => new Response(JSON.stringify({ success: true, mode: "supabase", data: { stages: contactStages } }), { status: 500 })],
+    ["network failure", async () => { throw new Error("Local taxonomy unavailable"); }],
+  ];
+  for (const [label, reply] of failures) await t.test(label, async (t) => {
+    const calls: Array<{ url: string; init: any }> = [];
+    const f = await boundContactFixture(async (url, init) => {
+      calls.push({ url, init }); return url.startsWith("/api/crm/lead-stages?") ? reply() : response();
+    });
+    t.after(() => f.dispose());
+    const before = calls.length, writes = f.hook.d.writes.length;
+    await assert.rejects(f.result.updateContact(contact.id, { status: "postponed", notes: "Must not save" }));
+    await f.hook.d.flush();
+    assert.equal(calls.length, before + 1); assert.equal(f.hook.d.writes.length, writes);
+    assert.equal(calls.some(({ init }) => init.method === "PATCH"), false);
+  });
+});
+
+test("delayed taxonomy JSON cannot PATCH through old real access after auth or scope revocation", async (t) => {
+  for (const cause of ["sign-out", "actorId", "workspaceId", "role", "purpose", "unmount", "StrictMode replay"]) await t.test(cause, async (t) => {
+    const body = defer<unknown>(), parsing = defer<void>(), calls: Array<{ url: string; init: any }> = [];
+    const f = await boundContactFixture(async (url, init) => {
+      calls.push({ url, init });
+      return url.startsWith("/api/crm/lead-stages?")
+        ? { ok: true, status: 200, json: () => { parsing.resolve(); return body.promise; } } as Response : response();
+    });
+    t.after(() => f.dispose());
+    const before = calls.length, writes = f.hook.d.writes.length;
+    const mutation = f.result.updateContact(contact.id, { status: "postponed", notes: "Old session" });
+    const rejected = assert.rejects(mutation, { name: "AbortError" });
+    await parsing.promise;
+    assert.equal(calls.length, before + 1);
+    if (cause === "sign-out") for (const listener of f.session.listeners) listener("SIGNED_OUT", null);
+    else if (cause === "unmount") f.session.d.unmount();
+    else if (cause === "StrictMode replay") await f.session.d.replay();
+    else f.live.current = { ...scope, [cause]: cause === "role" ? "admin" : "other" };
+    assert.equal(f.access.isCurrent(), false);
+    body.resolve({ success: true, mode: "supabase", data: { stages: contactStages } });
+    await rejected; await f.hook.d.flush();
+    assert.equal(calls.length, before + 1); assert.equal(f.hook.d.writes.length, writes);
+    assert.equal(calls.some(({ init }) => init.method === "PATCH"), false);
+    assert.equal(f.hook.d.paint().data, null);
+  });
+});
+
+test("already-revoked bound contact access makes neither a taxonomy GET nor a simple-edit PATCH", async (t) => {
+  const calls: string[] = [], f = await boundContactFixture(async (url) => { calls.push(url); return response(); });
+  t.after(() => f.dispose());
+  for (const listener of f.session.listeners) listener("SIGNED_OUT", null);
+  const before = calls.length;
+  await assert.rejects(f.result.updateContact(contact.id, { status: "postponed" }), { name: "AbortError" });
+  await assert.rejects(f.result.updateContact(contact.id, { name: "No save", notes: "No save" }), { name: "AbortError" });
+  assert.equal(calls.length, before);
+});
+
 test("contact writes use existing leads endpoints, surface server errors, and check after JSON parsing", async () => {
   const calls: any[] = [];
   let body: any = { success: true, mode: "supabase", data: snapshot() };
-  const f = hookFixture(async (url, init) => { calls.push({ url, init }); return new Response(JSON.stringify(body)); });
+  const f = hookFixture(async (url, init) => {
+    calls.push({ url, init });
+    return url.startsWith("/api/crm/lead-stages?") ? response({ stages: contactStages }) : new Response(JSON.stringify(body));
+  });
   const result = await f.d.flush();
   await result.createContact({ name: "Local", phone: "000" });
   let payload = JSON.parse(calls.at(-1).init.body);
@@ -508,7 +762,7 @@ function formNodes(value: any): Node[] {
   return "type" in value ? [value, ...formNodes(value.props?.children)] : [];
 }
 
-function contactFormFixture(fetcher: (path: string, init: any) => Promise<Response>, editing = false, bound?: { request: (path: string, init: any) => Promise<Response>; isCurrent: () => boolean }) {
+function contactFormFixture(fetcher: (path: string, init: any) => Promise<Response>, editing: boolean | typeof contact = false, bound?: { request: (path: string, init: any) => Promise<Response>; isCurrent: () => boolean }) {
   const d = driver(), requests: any[] = [], submitted: any[] = [];
   let current = true, closed = false;
   const isCurrent = () => current && (!bound || bound.isCurrent());
@@ -518,7 +772,7 @@ function contactFormFixture(fetcher: (path: string, init: any) => Promise<Respon
     "@/lib/phone": { phoneDigits: (value: string) => value.replace(/\D/g, "") },
     "./MortgagePrimitives": { mortgageContactStatus: (value: string) => value, mortgageErrorMessage: (error: Error) => error.message },
   });
-  const props = { contact: editing ? contact : undefined,
+  const props = { contact: typeof editing === "object" ? editing : editing ? contact : undefined,
     request, isCurrent, onSubmit: async (fields: any) => { submitted.push(fields); }, onClose: () => { closed = true; } };
   d.mount(() => form.MortgageContactForm(props));
   let output: any;
@@ -528,6 +782,43 @@ function contactFormFixture(fetcher: (path: string, init: any) => Promise<Respon
   const submit = async () => { await nodes().find((node) => node.type === "form")!.props.onSubmit({ preventDefault() {} }); await flush(); };
   return { d, requests, submitted, flush, nodes, field, submit, isClosed: () => closed, revoke: () => { current = false; } };
 }
+
+test("contact form omits unchanged status for ordinary edits and restored selections, preserving custom stages", async (t) => {
+  for (const status of ["new", "in_progress", "booked", "postponed", "lost", "custom_review"]) {
+    const original = { ...contact, phone: "+77000000000", status, stageId: "55555555-5555-4555-8555-555555555555" };
+    const before = JSON.stringify(original);
+    const f = contactFormFixture(async () => assert.fail("An edit form must not make lookups"), original);
+    t.after(() => f.d.unmount());
+    await f.flush();
+    assert.equal(f.field("status").props.value, status);
+    f.field("name").props.onChange({ target: { value: "  Renamed client  " } });
+    f.field("notes").props.onChange({ target: { value: "  Updated note  " } });
+    await f.flush(); await f.submit();
+    assert.deepEqual(Object.keys(f.submitted[0]).sort(), ["name", "notes", "phone"]);
+    assert.equal(f.submitted[0].name, "Renamed client"); assert.equal(f.submitted[0].notes, "Updated note");
+    assert.equal("status" in f.submitted[0], false);
+    f.field("status").props.onChange({ target: { value: status === "new" ? "postponed" : "new" } });
+    await f.flush();
+    f.field("status").props.onChange({ target: { value: status } });
+    await f.flush(); await f.submit();
+    assert.equal(f.submitted.length, 2);
+    assert.equal("status" in f.submitted[1], false, "returning to the original status is not a stage change");
+    assert.equal(f.requests.length, 0); assert.equal(JSON.stringify(original), before);
+  }
+});
+
+test("contact form submits only a changed canonical status and never forwards stage or responsible fields", async (t) => {
+  for (const [from, to] of [["new", "postponed"], ["postponed", "in_progress"], ["in_progress", "new"], ["new", "booked"], ["booked", "lost"]]) {
+    const original = { ...contact, phone: "+77000000000", status: from, stageId: contactStages[0].id };
+    const f = contactFormFixture(async () => assert.fail("An edit form must not make lookups"), original);
+    t.after(() => f.d.unmount());
+    await f.flush(); f.field("status").props.onChange({ target: { value: to } });
+    await f.flush(); await f.submit();
+    assert.equal(f.submitted.length, 1); assert.equal(f.submitted[0].status, to);
+    assert.deepEqual(Object.keys(f.submitted[0]).sort(), ["name", "notes", "phone", "status"]);
+    assert.equal(f.requests.length, 0); assert.equal(original.status, from);
+  }
+});
 
 test("create and edit parents forward their existing bound request and session guard to the contact form", async () => {
   for (const editing of [false, true]) {
