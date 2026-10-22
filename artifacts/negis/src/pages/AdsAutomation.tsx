@@ -1582,6 +1582,7 @@ function AdsAutomationSession({ actorId, workspaceId }: { actorId: string; works
   const [historyInsightsAccess, setHistoryInsightsAccess] = useState<HistoryInsightsAccess>("idle");
   const [historyInsightsByLaunch, setHistoryInsightsByLaunch] = useState<Record<string, MetaInsightsHistorySummary>>({});
   const [historyInsightsMessage, setHistoryInsightsMessage] = useState("");
+  const [historyInsightsReloadKey, setHistoryInsightsReloadKey] = useState(0);
   const historyInsightsRequestRef = useRef(0);
   const [videoJob, setVideoJob] = useState<VideoJob | null>(null);
   const [videoConfigBlocked, setVideoConfigBlocked] = useState(false);
@@ -1833,7 +1834,7 @@ function AdsAutomationSession({ actorId, workspaceId }: { actorId: string; works
     return () => {
       if (historyInsightsRequestRef.current === requestId) historyInsightsRequestRef.current += 1;
     };
-  }, [isAdminMode, isHistoryView, workspaceId]);
+  }, [isAdminMode, isHistoryView, workspaceId, historyInsightsReloadKey]);
 
   const videoJobPending = Boolean(videoJob && videoJob.status !== "ready" && videoJob.status !== "failed");
 
@@ -3337,6 +3338,18 @@ function AdsAutomationSession({ actorId, workspaceId }: { actorId: string; works
     }
   }
 
+  function refreshHistory() {
+    const session = sessionRef.current;
+    if (!isSessionAlive(session)) return;
+    // Invalidate before passive effects so a pending body cannot republish old results.
+    historyInsightsRequestRef.current += 1;
+    setHistoryInsightsByLaunch({});
+    setHistoryInsightsMessage("");
+    setHistoryInsightsAccess("idle");
+    setHistoryInsightsReloadKey((key) => key + 1);
+    void loadHistory();
+  }
+
   async function loadHistory() {
     const session = sessionRef.current;
     if (!isSessionAlive(session)) return;
@@ -4738,7 +4751,7 @@ function AdsAutomationSession({ actorId, workspaceId }: { actorId: string; works
                 ? "Пока нет запусков"
                 : `Показано ${visibleHistoryItems.length} из ${historyItems.length}`}
           </p>
-          <button type="button" className="neu-btn justify-center sm:w-auto" disabled={loading === "history"} onClick={() => void loadHistory()}>
+          <button type="button" className="neu-btn justify-center sm:w-auto" disabled={loading === "history"} onClick={() => void refreshHistory()}>
             {loading === "history" ? <Loader2 className="animate-spin" size={16} /> : <RefreshCw size={16} />}
             Обновить
           </button>

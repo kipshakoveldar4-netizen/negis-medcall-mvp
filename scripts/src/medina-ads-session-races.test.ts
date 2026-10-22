@@ -23,11 +23,29 @@ const W2 = "22222222-2222-4222-8222-222222222222";
 const launchId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const exposed = [
   "creative", "creativeFile", "videoJob", "aiPackage", "compliance", "launchResult", "confirmations", "brief",
-  "historyItems", "historyInsightsAccess", "historyInsightsByLaunch", "loading", "notice", "realLaunchStatus",
+  "historyItems", "historyInsightsAccess", "historyInsightsByLaunch", "historyInsightsMessage", "historyInsightsRequestRef",
+  "loading", "notice", "realLaunchStatus",
   "setCreative", "setCreativeFile", "setAiPackage", "setMetaSummary", "setConfirmations", "setUiMode", "setVideoJob",
   "uploadCreative", "uploadLargeVideo", "prepareImportedVideoThumbnail", "regenerateThumbnail", "pollVideoJob",
   "launch", "loadHistory", "checkHealth", "fillWithAi", "runComplianceCheck", "prelaunchErrors",
 ];
+
+function historyRefreshClick(node: import("typescript").Node) {
+  const handlers: import("typescript").Expression[] = [];
+  function visit(child: import("typescript").Node) {
+    if (ts.isJsxAttribute(child) && child.name.getText() === "onClick"
+      && child.initializer && ts.isJsxExpression(child.initializer)) {
+      const expression = child.initializer.expression;
+      if (expression && ts.isArrowFunction(expression) && ts.isVoidExpression(expression.body)
+        && ts.isCallExpression(expression.body.expression) && ts.isIdentifier(expression.body.expression.expression)
+        && ["loadHistory", "refreshHistory"].includes(expression.body.expression.expression.text)) handlers.push(expression);
+    }
+    ts.forEachChild(child, visit);
+  }
+  visit(node);
+  assert.equal(handlers.length, 1, "Execute the actual History Refresh button callback");
+  return handlers[0];
+}
 
 function compile(source: string, fileName: string, page = false) {
   const result = ts.transpileModule(source, {
@@ -57,7 +75,8 @@ function compile(source: string, fileName: string, page = false) {
               node.typeParameters, node.parameters, node.type, ts.factory.updateBlock(node.body,
                 node.body.statements.map((statement) => ts.isReturnStatement(statement)
                   ? ts.factory.createReturnStatement(ts.factory.createObjectLiteralExpression(
-                    exposed.map((name) => ts.factory.createShorthandPropertyAssignment(name)))) : statement)));
+                    [...exposed.map((name) => ts.factory.createShorthandPropertyAssignment(name)),
+                      ts.factory.createPropertyAssignment("refreshHistoryClick", historyRefreshClick(node))])) : statement)));
           }
         }
         return ts.visitEachChild(node, visit, context);
@@ -148,9 +167,10 @@ function driver() {
   }
   return {
     hooks, mount(fn: () => View) { component = fn; }, force() { dirty = true; },
-    render() {
-      if (!alive || !dirty) return;
-      cursor = 0; dirty = false; tree = component(); setup("layout"); setup("effect");
+    render(passiveEffects = true) {
+      if (!alive) return;
+      if (dirty) { cursor = 0; dirty = false; tree = component(); setup("layout"); }
+      if (passiveEffects) setup("effect");
     },
     replayEffects() {
       for (const kind of ["layout", "effect"] as const) for (const item of effects(kind)) { item.cleanup?.(); item.cleanup = undefined; }
@@ -166,14 +186,16 @@ function driver() {
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((yes) => { resolve = yes; });
-  return { promise, resolve };
+  let reject!: (error: Error) => void;
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
 }
 const record = (value: unknown): View => value && typeof value === "object" ? value as View : {};
 type HttpCall = {
   url: string; init: RequestInit; actor: string; body: View; claimed: boolean;
   answer(data: unknown, status?: number): void;
   answerBody(body: unknown, status?: number, gate?: Promise<void>): void;
+  reject(error: Error): void;
 };
 const photo = { name: "synthetic.jpg", type: "image/jpeg", size: 1024 };
 const video = { name: "synthetic.mp4", type: "video/mp4", size: 1024 };
@@ -247,6 +269,7 @@ async function fixture(t: TestContext, options: { history?: boolean; holdHealth?
         const pending = deferred<Response>();
         const call: HttpCall = {
           url, init, actor: sdk.actor, body: init.body ? JSON.parse(String(init.body)) : {}, claimed: false,
+          reject: pending.reject,
           answer(data, status = 200) { call.answerBody({ success: status < 400, mode: "supabase", data }, status); },
           answerBody(body, status = 200, gate) {
             const response = new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -308,15 +331,15 @@ async function fixture(t: TestContext, options: { history?: boolean; holdHealth?
     return unexpected(name);
   });
   outer.mount(code.wrapped ? page.default : () => ({}));
-  function render() {
+  function render(passiveEffects = true) {
     if (!mounted) return;
-    activeDriver = outer; outer.render();
+    activeDriver = outer; outer.render(passiveEffects);
     const element = code.wrapped ? outer.view as unknown as Element : { type: page.default, props: {}, key: undefined };
     if (!inner || !Object.is(innerKey, element.key)) {
       if (inner) { inner.dispose(); retired.push(inner); }
       inner = driver(); innerKey = element.key;
     }
-    activeDriver = inner; inner.mount(() => element.type(element.props)); inner.render();
+    activeDriver = inner; inner.mount(() => element.type(element.props)); inner.render(passiveEffects);
   }
   async function flush() {
     for (let i = 0; i < 5; i++) { render(); await tick(); }
@@ -334,6 +357,7 @@ async function fixture(t: TestContext, options: { history?: boolean; holdHealth?
   await flush();
   return {
     calls, storage, captures, notifications, writes, removals, sdk, flush,
+    renderBeforeEffects: () => render(false),
     get view() { return inner!.view; }, get key() { return innerKey; }, get timers() { return timers.size; },
     lateWrites: () => retired.reduce((sum, d) => sum + d.lateWrites, 0) + (inner?.lateWrites ?? 0),
     invoke(name: string, ...args: unknown[]) {
@@ -577,3 +601,144 @@ test("A15 live video readiness still passes its Meta video id into the PAUSED la
   request.answer({ dryRun: false, status: "paused", metaVideoId: "fresh-meta-video", launchId }); await pending; await f.flush();
   assert.equal(f.view.realLaunchStatus, "created"); assert.equal(record(f.view.creative).metaVideoId, "fresh-meta-video");
 });
+
+function historySummary(marker: string, spendMinor = "100") {
+  return {
+    metaCampaignLaunchId: launchId, marker, availability: "available", freshness: "fresh", rowCount: 1,
+    latestFetchedAt: "2026-10-22T00:00:00.000Z", coveredDateStart: "2026-10-21", coveredDateStop: "2026-10-21",
+    spendByCurrency: [{ currency: "USD", currencyExponent: 2, spendMinor }],
+    impressions: "10", clicks: "2", inlineLinkClicks: "1", metaLeads: "0",
+  };
+}
+
+async function readyHistory(t: TestContext) {
+  const f = await fixture(t, { history: true });
+  f.take("meta-launches?").answer({ launches: [{ id: launchId, campaignName: "Initial campaign", status: "paused" }] });
+  f.take("auth-context").answer({ isAdmin: true, workspaceId: W1 }); await f.flush();
+  f.take("meta-insights-history").answer({ summaries: [historySummary("old")] }); await f.flush();
+  assert.equal(f.view.historyInsightsAccess, "confirmed");
+  return f;
+}
+
+async function answerFreshHistory(f: Awaited<ReturnType<typeof fixture>>) {
+  f.take("meta-launches?").answer({ launches: [{ id: launchId, campaignName: "Refreshed campaign", status: "paused" }] });
+  f.take("auth-context").answer({ isAdmin: true, workspaceId: W1 }); await f.flush();
+  f.take("meta-insights-history").answer({ summaries: [historySummary("fresh", "200")] }); await f.flush();
+}
+
+test("A16 History Refresh clears Insights before effects and reloads both reports once without remounting", async (t) => {
+  const f = await readyHistory(t); const key = f.key;
+  const requestRef = record(f.view.historyInsightsRequestRef);
+  const generation = Number(requestRef.current);
+  void f.invoke("refreshHistoryClick");
+  assert.ok(Number(requestRef.current) > generation, "Invalidate the old request in the click, before passive effects");
+  f.renderBeforeEffects();
+  assert.equal(Object.keys(record(f.view.historyInsightsByLaunch)).length, 0);
+  assert.equal(f.view.historyInsightsMessage, ""); assert.equal(f.view.historyInsightsAccess, "idle");
+  await f.flush();
+  assert.equal(f.view.historyInsightsAccess, "checking");
+  await answerFreshHistory(f);
+  assert.equal(f.key, key); assert.equal(f.view.historyInsightsAccess, "confirmed");
+  const fresh = record(record(f.view.historyInsightsByLaunch)[launchId]);
+  assert.equal(fresh.marker, "fresh");
+  assert.equal(record((fresh.spendByCurrency as unknown[])[0]).spendMinor, "200");
+  assert.equal(record((f.view.historyItems as unknown[])[0]).campaignName, "Refreshed campaign");
+  assert.equal(f.view.historyInsightsMessage, ""); assert.equal(f.view.loading, null);
+  await f.flush();
+  for (const part of ["meta-launches?", "auth-context", "meta-insights-history"]) {
+    const reads = f.calls.filter((call) => call.url.includes(part));
+    assert.equal(reads.length, 2, `${part}: one automatic read and one manual read, no effect loop`);
+    for (const read of reads) {
+      assert.equal(read.init.cache, "no-store"); assert.equal(read.actor, "A");
+      assert.equal(new Headers(read.init.headers).get("Authorization"), "Bearer synthetic-A");
+      assert.ok(read.url.includes(`workspaceId=${W1}`)); assert.equal(read.init.signal?.aborted, false);
+    }
+  }
+  assert.ok(f.calls.every((call) => !call.init.method || call.init.method === "GET"));
+});
+
+for (const timing of ["before-effects", "after-replacement"] as const) {
+  for (const outcome of [200, 401, 403, 500, "reject"] as const) {
+    test(`A17 History Refresh ignores old Insights ${outcome} ${timing}`, async (t) => {
+      const f = await fixture(t, { history: true });
+      f.take("meta-launches?").answer({ launches: [] });
+      f.take("auth-context").answer({ isAdmin: true, workspaceId: W1 }); await f.flush();
+      const old = f.take("meta-insights-history");
+      void f.invoke("refreshHistoryClick");
+      if (timing === "after-replacement") { await f.flush(); await answerFreshHistory(f); }
+      if (outcome === "reject") old.reject(new Error("Synthetic old transport failure"));
+      else if (outcome === 200) old.answer({ summaries: [historySummary("late-old")] });
+      else old.answerBody({ success: false, error: "Synthetic old Insights failure" }, outcome);
+      if (timing === "before-effects") {
+        for (let i = 0; i < 5; i++) await tick();
+        f.renderBeforeEffects();
+        assert.equal(Object.keys(record(f.view.historyInsightsByLaunch)).length, 0);
+        assert.equal(f.view.historyInsightsAccess, "idle"); assert.equal(f.view.historyInsightsMessage, "");
+        await f.flush(); await answerFreshHistory(f);
+      }
+      await f.flush();
+      assert.equal(record(record(f.view.historyInsightsByLaunch)[launchId]).marker, "fresh");
+      assert.equal(f.view.historyInsightsAccess, "confirmed"); assert.equal(f.view.historyInsightsMessage, "");
+      assert.equal(f.lateWrites(), 0);
+    });
+  }
+}
+
+for (const status of [200, 500]) {
+  test(`A18 History Refresh ignores an old delayed Insights JSON body ${status}`, async (t) => {
+    const f = await fixture(t, { history: true });
+    f.take("meta-launches?").answer({ launches: [] });
+    f.take("auth-context").answer({ isAdmin: true, workspaceId: W1 }); await f.flush();
+    const gate = deferred<void>();
+    f.take("meta-insights-history").answerBody(status === 200
+      ? { success: true, mode: "supabase", data: { summaries: [historySummary("late-body")] } }
+      : { success: false, error: "Synthetic old body failure" }, status, gate.promise);
+    await f.flush(); void f.invoke("refreshHistoryClick"); await f.flush(); await answerFreshHistory(f);
+    gate.resolve(); await f.flush();
+    assert.equal(record(record(f.view.historyInsightsByLaunch)[launchId]).marker, "fresh");
+    assert.equal(f.view.historyInsightsAccess, "confirmed"); assert.equal(f.view.historyInsightsMessage, "");
+    assert.equal(f.lateWrites(), 0);
+  });
+}
+
+for (const stage of ["auth", "insights"] as const) {
+  for (const outcome of [401, 403, 500, "reject"] as const) {
+    test(`A19 History Refresh fails closed on current ${stage} ${outcome} and can retry`, async (t) => {
+      const f = await readyHistory(t);
+      void f.invoke("refreshHistoryClick"); await f.flush();
+      f.take("meta-launches?").answer({ launches: [] });
+      let request = f.take("auth-context");
+      if (stage === "insights") {
+        request.answer({ isAdmin: true, workspaceId: W1 }); await f.flush();
+        request = f.take("meta-insights-history");
+      }
+      if (outcome === "reject") request.reject(new Error("Synthetic current transport failure"));
+      else request.answerBody({ success: false, error: "Synthetic current failure" }, outcome);
+      await f.flush();
+      assert.equal(f.view.historyInsightsAccess, outcome === 401 ? "required" : outcome === 403 ? "forbidden"
+        : stage === "auth" ? "unavailable" : "confirmed");
+      assert.ok(String(f.view.historyInsightsMessage).length > 0);
+      assert.equal(Object.keys(record(f.view.historyInsightsByLaunch)).length, 0);
+      if (stage === "auth") assert.equal(f.calls.filter((call) => call.url.includes("meta-insights-history")).length, 1);
+      void f.invoke("refreshHistoryClick"); f.renderBeforeEffects();
+      assert.equal(f.view.historyInsightsMessage, ""); assert.equal(f.view.historyInsightsAccess, "idle");
+      await f.flush(); await answerFreshHistory(f);
+      assert.equal(f.view.historyInsightsAccess, "confirmed"); assert.equal(f.view.historyInsightsMessage, "");
+      assert.equal(record(record(f.view.historyInsightsByLaunch)[launchId]).marker, "fresh");
+    });
+  }
+}
+
+for (const transition of ["actor", "role", "unmount"] as const) {
+  test(`A20 captured History Refresh callback is inert after ${transition} invalidates its session`, async (t) => {
+    const f = await readyHistory(t);
+    const click = f.view.refreshHistoryClick as () => void;
+    if (transition === "actor") await f.change("B");
+    if (transition === "role") await f.change("A", W1, "marketer");
+    if (transition === "unmount") f.dispose();
+    const calls = f.calls.length, lookups = f.sdk.lookups, writes = f.writes.length;
+    click(); await f.flush();
+    assert.equal(f.calls.length, calls); assert.equal(f.sdk.lookups, lookups);
+    assert.equal(f.writes.length, writes); assert.equal(f.lateWrites(), 0);
+  });
+}

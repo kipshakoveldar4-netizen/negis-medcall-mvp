@@ -1,4 +1,4 @@
-import { type FormEvent, useEffect, useMemo, useState } from "react";
+import { type FormEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation } from "wouter";
 import {
   AlertTriangle,
@@ -25,6 +25,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import { crmFetch } from "@/lib/api";
 import { isRealWorkspace, readDemoStorage, readWorkspaceId, workspaceScopedKey } from "@/lib/demoStorage";
 import { getSupabaseAccessToken } from "@/lib/serverAuth";
+import { hasSupabaseFrontendEnv, supabase } from "@/lib/supabase";
 import {
   ADVERTISING_CAMPAIGN_PREFILL_KEY,
   ADVERTISING_CONTENT_STUDIO_PREFILL_KEY,
@@ -459,10 +460,65 @@ function localHistoryKey(workspaceId: string): string {
 }
 
 export default function AdvertisingHub() {
-  const [, setLocation] = useLocation();
-  const { clinicId } = useAuth();
+  const { user, userRole, clinicId, workspacePurpose, isLoading, isSigningOut, isDemoMode, isImpersonation } = useAuth();
   const workspaceId = clinicId || readWorkspaceId();
+  const actorId = clinicId && !isLoading && !isSigningOut && !isDemoMode && !isImpersonation ? user?.id || "" : "";
+  const localDraftsOnly = isDemoMode && !isLoading && !isSigningOut && !isImpersonation
+    && !isRealWorkspace(workspaceId) && readWorkspaceId() === workspaceId;
+  const observedActorRef = useRef(user?.id || "");
+  const [authEpoch, setAuthEpoch] = useState(0);
+  useLayoutEffect(() => {
+    if (!hasSupabaseFrontendEnv) return;
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      const nextActor = session?.user.id || "";
+      if (observedActorRef.current === nextActor) return;
+      observedActorRef.current = nextActor;
+      setAuthEpoch((value) => value + 1);
+    });
+    return () => subscription.unsubscribe();
+  }, []);
+  return <AdvertisingHubSession
+    key={JSON.stringify([actorId, workspaceId, userRole, workspacePurpose, authEpoch, localDraftsOnly])}
+    actorId={actorId}
+    workspaceId={workspaceId}
+    localDraftsOnly={localDraftsOnly}
+    canReadPrivate={userRole === "owner" || userRole === "admin"}
+  />;
+}
+
+function AdvertisingHubSession({ actorId, workspaceId, localDraftsOnly, canReadPrivate }: {
+  actorId: string; workspaceId: string; localDraftsOnly: boolean; canReadPrivate: boolean;
+}) {
+  const [, setLocation] = useLocation();
   const productionWorkspace = isRealWorkspace(workspaceId);
+  const sessionRef = useRef<AbortController | null>(null);
+  useLayoutEffect(() => {
+    const session = new AbortController();
+    sessionRef.current = session;
+    const subscription = hasSupabaseFrontendEnv
+      ? supabase.auth.onAuthStateChange((_event, next) => {
+          if ((next?.user.id || "") !== actorId) session.abort();
+        }).data.subscription
+      : null;
+    return () => {
+      session.abort();
+      subscription?.unsubscribe();
+      if (sessionRef.current === session) sessionRef.current = null;
+    };
+  }, [actorId, workspaceId]);
+
+  function isSessionAlive(session: AbortController | null): session is AbortController {
+    // The keyed lifetime follows verified membership even when selector storage is unavailable.
+    return Boolean(actorId && session && sessionRef.current === session && !session.signal.aborted);
+  }
+
+  function sessionFetch(session: AbortController | null, endpoint: string, accessToken?: string) {
+    if (!isSessionAlive(session)) throw new DOMException("Advertising session changed", "AbortError");
+    return crmFetch(endpoint, {
+      accessToken, expectedUserId: actorId, signal: session.signal, cache: "no-store",
+      dispatchGuard: () => isSessionAlive(session),
+    });
+  }
   const [launches, setLaunches] = useState<AdvertisingLaunch[]>([]);
   const [loadState, setLoadState] = useState<LoadState>("loading");
   const [reloadKey, setReloadKey] = useState(0);
@@ -498,6 +554,8 @@ export default function AdvertisingHub() {
   }
 
   function prepareCampaign(destination: CampaignGoalDestination) {
+    const session = sessionRef.current;
+    if (!session || session.signal.aborted || readWorkspaceId() !== workspaceId || (!actorId && !localDraftsOnly)) return;
     if (!goalPlan.ready || goalPlan.dailyBudget === null) {
       setCampaignGoalError("Укажите услугу, число пациентов, период до 90 дней и максимальный бюджет.");
       return;
@@ -541,12 +599,14 @@ export default function AdvertisingHub() {
 
   useEffect(() => {
     let cancelled = false;
+    const session = sessionRef.current;
+    const current = () => !cancelled && isSessionAlive(session);
 
     async function loadLaunches() {
       setLoadState("loading");
 
       if (!productionWorkspace) {
-        const local = readDemoStorage<unknown[]>(localHistoryKey(workspaceId), []);
+        const local = localDraftsOnly ? readDemoStorage<unknown[]>(localHistoryKey(workspaceId), []) : [];
         if (!cancelled) {
           setLaunches(local.map(normalizeLaunch).sort((left, right) => launchTime(right.createdAt) - launchTime(left.createdAt)).slice(0, 40));
           setLoadState("ready");
@@ -555,7 +615,7 @@ export default function AdvertisingHub() {
       }
 
       try {
-        const response = await crmFetch(`/api/crm/meta-launches?workspaceId=${encodeURIComponent(workspaceId)}`);
+        const response = await sessionFetch(session, `/api/crm/meta-launches?workspaceId=${encodeURIComponent(workspaceId)}`);
         const text = await response.text();
         const body = text ? (JSON.parse(text) as LaunchesResponse) : {};
         if (!response.ok || body.success !== true || body.mode !== "supabase") {
@@ -572,12 +632,12 @@ export default function AdvertisingHub() {
           .sort((left, right) => launchTime(right.createdAt) - launchTime(left.createdAt))
           .slice(0, 40);
 
-        if (!cancelled) {
+        if (current()) {
           setLaunches(normalized);
           setLoadState("ready");
         }
       } catch {
-        if (!cancelled) {
+        if (!cancelled && (current() || !actorId)) {
           setLaunches([]);
           setLoadState("error");
         }
@@ -588,10 +648,12 @@ export default function AdvertisingHub() {
     return () => {
       cancelled = true;
     };
-  }, [productionWorkspace, reloadKey, workspaceId]);
+  }, [productionWorkspace, reloadKey, workspaceId, actorId, localDraftsOnly]);
 
   useEffect(() => {
     let cancelled = false;
+    const session = sessionRef.current;
+    const current = () => !cancelled && isSessionAlive(session);
     setCrmOutcomes(EMPTY_CRM_ADVERTISING_OUTCOMES);
     setCrmOutcomesMessage("");
 
@@ -602,23 +664,30 @@ export default function AdvertisingHub() {
       };
     }
 
+    if (!actorId || !canReadPrivate) {
+      setCrmOutcomesAccess(actorId ? "forbidden" : "required");
+      setCrmOutcomesMessage("Результат рекламы в CRM доступен владельцу и администратору клиники.");
+      return () => { cancelled = true; };
+    }
+
     setCrmOutcomesAccess("checking");
     void (async () => {
       try {
-        const accessToken = await getSupabaseAccessToken();
-        if (cancelled) return;
+        const accessToken = await getSupabaseAccessToken(actorId);
+        if (!current()) return;
         if (!accessToken) {
           setCrmOutcomesAccess("required");
           setCrmOutcomesMessage("Войдите как владелец клиники, чтобы увидеть результат в CRM.");
           return;
         }
 
-        const authResponse = await crmFetch(
+        const authResponse = await sessionFetch(
+          session,
           `/api/crm/auth-context?workspaceId=${encodeURIComponent(workspaceId)}`,
-          { accessToken },
+          accessToken,
         );
         const authBody = await readJson<ServerAdminAuthContext>(authResponse);
-        if (cancelled) return;
+        if (!current()) return;
         if (authResponse.status === 401) {
           setCrmOutcomesAccess("required");
           setCrmOutcomesMessage("Сессия истекла. Войдите снова, чтобы увидеть результат в CRM.");
@@ -641,19 +710,20 @@ export default function AdvertisingHub() {
           return;
         }
 
-        const outcomesResponse = await crmFetch(
+        const outcomesResponse = await sessionFetch(
+          session,
           `/api/crm/advertising-outcomes?workspaceId=${encodeURIComponent(workspaceId)}`,
-          { accessToken },
+          accessToken,
         );
         const outcomesBody = await readJson<{ outcomes?: CrmAdvertisingOutcomesPayload }>(outcomesResponse);
-        if (cancelled) return;
+        if (!current()) return;
         if (!outcomesResponse.ok || outcomesBody.success !== true || outcomesBody.mode !== "supabase") {
           throw new Error("crm_outcomes_unavailable");
         }
         setCrmOutcomes(parseCrmAdvertisingOutcomes(outcomesBody.data?.outcomes));
         setCrmOutcomesAccess("ready");
       } catch {
-        if (!cancelled) {
+        if (current()) {
           setCrmOutcomesAccess("error");
           setCrmOutcomesMessage("Не удалось обновить связанные заявки и продажи. Попробуйте позже.");
         }
@@ -663,10 +733,12 @@ export default function AdvertisingHub() {
     return () => {
       cancelled = true;
     };
-  }, [productionWorkspace, reloadKey, workspaceId]);
+  }, [productionWorkspace, reloadKey, workspaceId, actorId, canReadPrivate]);
 
   useEffect(() => {
     let cancelled = false;
+    const session = sessionRef.current;
+    const current = () => !cancelled && isSessionAlive(session);
     setInsightsSummaries([]);
     setInsightsMessage("");
 
@@ -677,23 +749,30 @@ export default function AdvertisingHub() {
       };
     }
 
+    if (!actorId || !canReadPrivate) {
+      setInsightsAccess(actorId ? "forbidden" : "required");
+      setInsightsMessage("Результаты расходов доступны владельцу и администратору клиники.");
+      return () => { cancelled = true; };
+    }
+
     setInsightsAccess("checking");
     void (async () => {
       try {
-        const accessToken = await getSupabaseAccessToken();
-        if (cancelled) return;
+        const accessToken = await getSupabaseAccessToken(actorId);
+        if (!current()) return;
         if (!accessToken) {
           setInsightsAccess("required");
           setInsightsMessage("Войдите как владелец клиники, чтобы увидеть результаты рекламы.");
           return;
         }
 
-        const authResponse = await crmFetch(
+        const authResponse = await sessionFetch(
+          session,
           `/api/crm/auth-context?workspaceId=${encodeURIComponent(workspaceId)}`,
-          { accessToken },
+          accessToken,
         );
         const authBody = await readJson<ServerAdminAuthContext>(authResponse);
-        if (cancelled) return;
+        if (!current()) return;
         if (authResponse.status === 401) {
           setInsightsAccess("required");
           setInsightsMessage("Сессия истекла. Войдите снова, чтобы увидеть результаты рекламы.");
@@ -716,12 +795,13 @@ export default function AdvertisingHub() {
           return;
         }
 
-        const insightsResponse = await crmFetch(
+        const insightsResponse = await sessionFetch(
+          session,
           `/api/crm/meta-insights-history?workspaceId=${encodeURIComponent(workspaceId)}`,
-          { accessToken },
+          accessToken,
         );
         const insightsBody = await readJson<{ summaries?: MetaInsightsHistorySummary[] }>(insightsResponse);
-        if (cancelled) return;
+        if (!current()) return;
         if (insightsResponse.status === 401) {
           setInsightsAccess("required");
           setInsightsMessage("Сессия истекла. Войдите снова, чтобы увидеть результаты рекламы.");
@@ -739,7 +819,7 @@ export default function AdvertisingHub() {
         setInsightsSummaries(Array.isArray(insightsBody.data?.summaries) ? insightsBody.data.summaries : []);
         setInsightsAccess("ready");
       } catch {
-        if (!cancelled) {
+        if (current()) {
           setInsightsAccess("error");
           setInsightsMessage("Не удалось обновить результаты рекламы. Попробуйте позже.");
         }
@@ -749,7 +829,7 @@ export default function AdvertisingHub() {
     return () => {
       cancelled = true;
     };
-  }, [productionWorkspace, reloadKey, workspaceId]);
+  }, [productionWorkspace, reloadKey, workspaceId, actorId, canReadPrivate]);
 
   const summary = useMemo(() => {
     const states = launches.map(launchState);
