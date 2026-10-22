@@ -62,8 +62,9 @@ C21/C22 продолжили выбранные браузерные прове�
 под тестовым владельцем приняты создание/reload/filter одной отложенной заявки
 и последующая уборка заявки/аудита со сверкой исходных данных.
 23 октября несогласованность ипотечной карточки исправлена локально и выпущена
-отдельным 67416e9 только в Preview v85t1mxnu (G2-C15). Приёмка самой карточки
-ожидает входа владельца и согласования временного ипотечного профиля/+5 в site-test.
+отдельным 67416e9 только в Preview v85t1mxnu (G2-C15). Под тестовым владельцем
+принят переход Новая → Отложена → В работе через саму карточку, reload и фильтр.
+Временные заявка/аудит/ипотечный профиль/+5 удалены; исходные 10 таблиц сверены.
 Полная готовность рекламы не заявлена; Production не менялся.
 
 ### Цикл G1-C1: управление сотрудничеством оператора
@@ -2325,7 +2326,7 @@ cleanup-lead.sql, cleanup-result.json, final-db-proof.json, after-cleanup-ui.txt
 after-cleanup-desktop.png и source-proof.json. Рабочие CRM,
 Baspana, салоны, аккаунты/роли и WhatsApp не менялись. Чужие dirty 059/065 сохранены.
 
-### Цикл G2-C15: согласованность статуса ипотечной карточки — READY только Preview, приёмка ожидается, 23 октября
+### Цикл G2-C15: согласованность статуса ипотечной карточки — выбранный Preview-сценарий принят, 23 октября
 
 - [x] По запросу владельца исправлены только MortgageContactForm и
   useMortgageWorkspace.updateContact, без общего backend/прав/миграций.
@@ -2364,20 +2365,58 @@ Baspana, салоны, аккаунты/роли и WhatsApp не менялис
   пароль не читался/не переносился. 080 не повторялась.
 - [x] Read-only preflight site-test: нужный этап существует и активен,
   workspace_purpose/clinic_schedule отсутствуют. Сохранены 10 таблиц count/hash
-  и RLS/ACL. Никаких облачных данных/профилей этим циклом пока не меняли.
-- [ ] Для настоящей MortgageClients клинический профиль недостаточен.
-  Запрошены вход в новый Preview и временные mortgage_leads/Asia/Almaty только
-  «Medina OS — тест блога». До согласия не включать настройки/фикстуры.
-  Предстоящий сценарий: одна новая вымышленная заявка с persisted new stage,
-  редактирование карточки Новая → Отложена → В работе, reload/фильтр/SQL,
-  уборка своей заявки/аудита и восстановление отсутствия обеих настроек.
-- [ ] Простой локальный browser fixture использует fallback stage IDs и не
-  исполняет stageId PATCH, поэтому он не выдаётся за положительную приёмку
-  этого нового пути. Нужна настоящая Preview-проверка после согласия.
+  и RLS/ACL. До отдельного согласия данные/профили не менялись.
+- [x] Владелец вошёл как eldar1@mail.ru и отдельно разрешил временные
+  mortgage_leads/Asia/Almaty только «Medina OS — тест блога», одну новую заявку,
+  переходы и уборку с восстановлением настроек. Вставлены ровно две настройки
+  42f86c15-2026-4023-8023-000000000001/002 после guard имени/исходного hash/отсутствия
+  этих ключей. Учетные записи, роли и членства не менялись.
+- [x] Через `/leads` создана одна «QA G2C15 карточка 67416e9», только с
+  вымышленным +00000000000, без client_id/назначения/кампании. Lead
+  **2ac59f72-b4f1-4784-b62f-fb993c18ecb4**, начальный status=new и persisted new
+  stage 199f0936-49a8-4b55-9d94-243b3ca410f2 подтверждены SQL. Первый read-only
+  запрос попал до окончания POST и увидел 0; повторной отправки не было.
+  После закрытия формы подтверждена ровно одна сохранённая строка.
+- [x] В настоящей MortgageContactForm `/clients?leadId=...` выбран «Отложена».
+  После server save и reload карточка/список показали этот статус; SQL подтвердил
+  status=postponed и stage_id=9b1dae32-ec30-48c9-801b-b37f11623239, group=postponed.
+  `/leads`: total=4, new=2, in_progress=1, postponed=1, booked/lost=0;
+  отложенный фильтр оставил только свою заявку.
+- [x] На мобильном 375x812 повторно открыта сама edit-форма с сохранённым
+  «Отложена» и выполнен переход в «В работе». После закрытия формы и reload
+  карточка/список сохранили status=in_progress, SQL подтвердил новый stage_id
+  fc400d8f-b065-4dcf-8545-e977f25029e9 и group=in_progress. Сводка new=2,
+  in_progress=2, postponed=0, total=4; отложенный фильтр пуст. Проверены также
+  desktop 1440x1000 и мобильная форма с видимой кнопкой сохранения;
+  mobile document/body width=360 при viewport=375, error/warn logs=[].
+- [x] Только свои три аудита (1 created, 2 updated) принадлежат тому же
+  тестовому actor/workspace. После каждой смены остальные lead/audit hashes
+  совпали с baseline. Не нажимались звонок/WhatsApp/встреча/задача/договор.
+- [x] Cleanup одной транзакцией проверил точные lead identity/status/этап/телефон,
+  отсутствие ссылок из семи FK-таблиц, ровно три своих audit UUID и два точных
+  profile ID/key/value; удалил только эти 6 строк. Исходные hashes leads/audit/
+  settings проверены до commit с rollback на несовпадении. Итог: свои lead/audit/
+  profile=0/0/0, исходные leads/audit/settings=3/10/2.
+- [x] Независимый read-only postflight подтвердил полное совпадение всех 10
+  count/hash, RLS/ACL, исходное отсутствие обеих настроек и неизменность 080-этапа.
+  Reload вернул обычный клинический тестовый профиль и исходную сводку 3/2/1/0.
+  Vercel status 2026-10-22T19:16:36.301Z: READY, 834/834, target=null,
+  aliases=[], Production/domain/env metadata/settings/security неизменны.
+- [x] Локальный browser fixture с fallback stage IDs не используется как
+  доказательство этого сохранения: выше принят реальный Preview/API/PostgreSQL
+  путь владельца. Это не полная облачная матрица всех ролей/конкурентных смен сессии.
+
+Production не выпускался. Кандидат 67416e9 основан на цепочке тестовых рекламных
+Preview; будущий рабочий выпуск требует отдельного узкого кандидата без
+неразрешённых рекламных правок, а не продвижения этой цепочки целиком.
 
 Доказательства: node_modules/.cache/contact-stage-release-20261023/:
 candidate-manifest.json, before.json, preview.json, source-proof.json,
-db-before.json, anonymous-api.txt и login-handoff.png. Рабочие CRM, Baspana,
+db-before.json, anonymous-api.txt, login-handoff.png, lead-new-db.json,
+lead-postponed-db.json, lead-in-progress-db.json, card-postponed-desktop.png,
+edit-postponed-mobile.png, leads-postponed-filter.txt/png,
+postponed-empty-after-return.txt, cleanup-result.json, final-db-proof.json,
+after-cleanup-ui.txt и acceptance-summary.json. Рабочие CRM, Baspana,
 салоны, WhatsApp, аккаунты/роли и миграции не менялись. Чужие 059/065 сохранены.
 
 ### Цикл G3-C3: пустота и повреждённый рекламный отчёт — готов локально
