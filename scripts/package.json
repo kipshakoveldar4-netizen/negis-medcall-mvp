@@ -20,6 +20,7 @@
     "test:appointment-capacity-postgres": "node --test ./fixtures/appointment-capacity-postgres.test.mjs",
     "test:assigned-leads-postgres": "node --test ./fixtures/assigned-leads-postgres.test.mjs",
     "test:meta-account-binding-postgres": "node --test ./fixtures/meta-account-binding-postgres.test.mjs",
+    "test:meta-insights-access-postgres": "node --test ./fixtures/meta-insights-access-postgres.test.mjs",
     "test:operator-access-postgres": "node --test ./fixtures/operator-access-postgres.test.mjs",
     "test:platform-subscription-postgres": "node --test ./fixtures/platform-subscription-postgres.test.mjs",
     "test:site-blog": "tsx --test ./src/medina-site-blog.test.ts",
