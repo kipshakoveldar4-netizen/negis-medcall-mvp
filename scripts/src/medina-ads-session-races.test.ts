@@ -99,6 +99,7 @@ const compiled = (async () => {
     page: compile(page, pagePath, true), wrapped: page.includes("function AdsAutomationSession("),
     api: compile(await readFile(path.join(root, "artifacts/negis/src/lib/api.ts"), "utf8"), "api.ts"),
     auth: compile(await readFile(path.join(root, "artifacts/negis/src/lib/serverAuth.ts"), "utf8"), "serverAuth.ts"),
+    insights: compile(await readFile(path.join(root, "artifacts/negis/src/lib/metaInsightsHistory.ts"), "utf8"), "metaInsightsHistory.ts"),
   };
 })();
 
@@ -305,6 +306,7 @@ async function fixture(t: TestContext, options: { history?: boolean; holdHealth?
     assert.equal(name, "@/lib/serverAuth"); return serverAuth;
   });
   if (options.prefill) local.set(`synthetic-prefill::${W1}`, JSON.stringify(options.prefill));
+  const insightsPayload = evaluate(code.insights, "metaInsightsHistory.simulation.cjs", unexpected);
   const page = evaluate<{ default: () => View }>(code.page, "AdsAutomation.simulation.cjs", (name) => {
     if (name === "react") return Object.fromEntries(Object.keys(outer.hooks).map((key) => [key,
       (...args: unknown[]) => (activeDriver.hooks[key as keyof typeof outer.hooks] as (...args: unknown[]) => unknown)(...args)]));
@@ -315,6 +317,7 @@ async function fixture(t: TestContext, options: { history?: boolean; holdHealth?
     if (name === "@/contexts/AuthContext") return { useAuth: () => auth };
     if (name === "@/lib/api") return api;
     if (name === "@/lib/serverAuth") return serverAuth;
+    if (name === "@/lib/metaInsightsHistory") return insightsPayload;
     if (name === "@/lib/supabase") return { hasSupabaseFrontendEnv: true, supabase };
     if (name === "wouter") return { Link: Symbol("Link"), useLocation: () => [location, (next: string) => { location = next; inner?.force(); }] };
     if (name === "sonner") return { toast: Object.fromEntries(["success", "error", "warning", "info", "message"].map((key) => [key, (...args: unknown[]) => notifications.push(args)])) };
@@ -485,9 +488,9 @@ for (const transition of ["committed-keyed", "batched-auth"] as const) {
 for (const transition of ["actor", "role", "unmount"] as const) {
   test(`A7 delayed Insights body is never published after ${transition} change`, async (t) => {
     const f = await fixture(t, { history: true });
-    f.take("auth-context").answer({ isAdmin: true, workspaceId: W1 }); await f.flush();
+    f.take("auth-context").answer({ isAdmin: true, role: "owner", workspaceId: W1 }); await f.flush();
     const gate = deferred<void>();
-    f.take("meta-insights-history").answerBody({ success: true, mode: "supabase", data: { summaries: [{ metaCampaignLaunchId: launchId, marker: "private-A" }] } }, 200, gate.promise);
+    f.take("meta-insights-history").answerBody({ success: true, mode: "supabase", data: { summaries: [historySummary()] } }, 200, gate.promise);
     await f.flush();
     if (transition === "actor") await f.change("B", W1, "marketer");
     if (transition === "role") await f.change("A", W1, "marketer");
@@ -500,10 +503,10 @@ for (const transition of ["actor", "role", "unmount"] as const) {
 
 test("A8 already-confirmed Insights are cleared before replacement account revalidation", async (t) => {
   const f = await fixture(t, { history: true });
-  f.take("auth-context").answer({ isAdmin: true, workspaceId: W1 }); await f.flush();
-  f.take("meta-insights-history").answer({ summaries: [{ metaCampaignLaunchId: launchId, marker: "private-A" }] }); await f.flush();
+  f.take("auth-context").answer({ isAdmin: true, role: "owner", workspaceId: W1 }); await f.flush();
+  f.take("meta-insights-history").answer({ summaries: [historySummary()] }); await f.flush();
   assert.equal(f.view.historyInsightsAccess, "confirmed");
-  await f.change("B", W1, "marketer");
+  await f.change("B", W1, "owner");
   assert.notEqual(f.view.historyInsightsAccess, "confirmed"); assert.equal(Object.keys(record(f.view.historyInsightsByLaunch)).length, 0);
   f.take("auth-context").answerBody({ success: false, error: "Synthetic forbidden" }, 403); await f.flush();
   assert.equal(f.view.historyInsightsAccess, "forbidden");
@@ -602,9 +605,9 @@ test("A15 live video readiness still passes its Meta video id into the PAUSED la
   assert.equal(f.view.realLaunchStatus, "created"); assert.equal(record(f.view.creative).metaVideoId, "fresh-meta-video");
 });
 
-function historySummary(marker: string, spendMinor = "100") {
+function historySummary(spendMinor = "100") {
   return {
-    metaCampaignLaunchId: launchId, marker, availability: "available", freshness: "fresh", rowCount: 1,
+    metaCampaignLaunchId: launchId, availability: "available", freshness: "fresh", rowCount: 1,
     latestFetchedAt: "2026-10-22T00:00:00.000Z", coveredDateStart: "2026-10-21", coveredDateStop: "2026-10-21",
     spendByCurrency: [{ currency: "USD", currencyExponent: 2, spendMinor }],
     impressions: "10", clicks: "2", inlineLinkClicks: "1", metaLeads: "0",
@@ -614,16 +617,16 @@ function historySummary(marker: string, spendMinor = "100") {
 async function readyHistory(t: TestContext) {
   const f = await fixture(t, { history: true });
   f.take("meta-launches?").answer({ launches: [{ id: launchId, campaignName: "Initial campaign", status: "paused" }] });
-  f.take("auth-context").answer({ isAdmin: true, workspaceId: W1 }); await f.flush();
-  f.take("meta-insights-history").answer({ summaries: [historySummary("old")] }); await f.flush();
+  f.take("auth-context").answer({ isAdmin: true, role: "owner", workspaceId: W1 }); await f.flush();
+  f.take("meta-insights-history").answer({ summaries: [historySummary()] }); await f.flush();
   assert.equal(f.view.historyInsightsAccess, "confirmed");
   return f;
 }
 
 async function answerFreshHistory(f: Awaited<ReturnType<typeof fixture>>) {
   f.take("meta-launches?").answer({ launches: [{ id: launchId, campaignName: "Refreshed campaign", status: "paused" }] });
-  f.take("auth-context").answer({ isAdmin: true, workspaceId: W1 }); await f.flush();
-  f.take("meta-insights-history").answer({ summaries: [historySummary("fresh", "200")] }); await f.flush();
+  f.take("auth-context").answer({ isAdmin: true, role: "owner", workspaceId: W1 }); await f.flush();
+  f.take("meta-insights-history").answer({ summaries: [historySummary("200")] }); await f.flush();
 }
 
 test("A16 History Refresh clears Insights before effects and reloads both reports once without remounting", async (t) => {
@@ -640,7 +643,6 @@ test("A16 History Refresh clears Insights before effects and reloads both report
   await answerFreshHistory(f);
   assert.equal(f.key, key); assert.equal(f.view.historyInsightsAccess, "confirmed");
   const fresh = record(record(f.view.historyInsightsByLaunch)[launchId]);
-  assert.equal(fresh.marker, "fresh");
   assert.equal(record((fresh.spendByCurrency as unknown[])[0]).spendMinor, "200");
   assert.equal(record((f.view.historyItems as unknown[])[0]).campaignName, "Refreshed campaign");
   assert.equal(f.view.historyInsightsMessage, ""); assert.equal(f.view.loading, null);
@@ -662,12 +664,12 @@ for (const timing of ["before-effects", "after-replacement"] as const) {
     test(`A17 History Refresh ignores old Insights ${outcome} ${timing}`, async (t) => {
       const f = await fixture(t, { history: true });
       f.take("meta-launches?").answer({ launches: [] });
-      f.take("auth-context").answer({ isAdmin: true, workspaceId: W1 }); await f.flush();
+      f.take("auth-context").answer({ isAdmin: true, role: "owner", workspaceId: W1 }); await f.flush();
       const old = f.take("meta-insights-history");
       void f.invoke("refreshHistoryClick");
       if (timing === "after-replacement") { await f.flush(); await answerFreshHistory(f); }
       if (outcome === "reject") old.reject(new Error("Synthetic old transport failure"));
-      else if (outcome === 200) old.answer({ summaries: [historySummary("late-old")] });
+      else if (outcome === 200) old.answer({ summaries: [historySummary("999")] });
       else old.answerBody({ success: false, error: "Synthetic old Insights failure" }, outcome);
       if (timing === "before-effects") {
         for (let i = 0; i < 5; i++) await tick();
@@ -677,7 +679,7 @@ for (const timing of ["before-effects", "after-replacement"] as const) {
         await f.flush(); await answerFreshHistory(f);
       }
       await f.flush();
-      assert.equal(record(record(f.view.historyInsightsByLaunch)[launchId]).marker, "fresh");
+      assert.equal(record((record(record(f.view.historyInsightsByLaunch)[launchId]).spendByCurrency as unknown[])[0]).spendMinor, "200");
       assert.equal(f.view.historyInsightsAccess, "confirmed"); assert.equal(f.view.historyInsightsMessage, "");
       assert.equal(f.lateWrites(), 0);
     });
@@ -688,14 +690,14 @@ for (const status of [200, 500]) {
   test(`A18 History Refresh ignores an old delayed Insights JSON body ${status}`, async (t) => {
     const f = await fixture(t, { history: true });
     f.take("meta-launches?").answer({ launches: [] });
-    f.take("auth-context").answer({ isAdmin: true, workspaceId: W1 }); await f.flush();
+    f.take("auth-context").answer({ isAdmin: true, role: "owner", workspaceId: W1 }); await f.flush();
     const gate = deferred<void>();
     f.take("meta-insights-history").answerBody(status === 200
-      ? { success: true, mode: "supabase", data: { summaries: [historySummary("late-body")] } }
+      ? { success: true, mode: "supabase", data: { summaries: [historySummary("999")] } }
       : { success: false, error: "Synthetic old body failure" }, status, gate.promise);
     await f.flush(); void f.invoke("refreshHistoryClick"); await f.flush(); await answerFreshHistory(f);
     gate.resolve(); await f.flush();
-    assert.equal(record(record(f.view.historyInsightsByLaunch)[launchId]).marker, "fresh");
+    assert.equal(record((record(record(f.view.historyInsightsByLaunch)[launchId]).spendByCurrency as unknown[])[0]).spendMinor, "200");
     assert.equal(f.view.historyInsightsAccess, "confirmed"); assert.equal(f.view.historyInsightsMessage, "");
     assert.equal(f.lateWrites(), 0);
   });
@@ -709,7 +711,7 @@ for (const stage of ["auth", "insights"] as const) {
       f.take("meta-launches?").answer({ launches: [] });
       let request = f.take("auth-context");
       if (stage === "insights") {
-        request.answer({ isAdmin: true, workspaceId: W1 }); await f.flush();
+        request.answer({ isAdmin: true, role: "owner", workspaceId: W1 }); await f.flush();
         request = f.take("meta-insights-history");
       }
       if (outcome === "reject") request.reject(new Error("Synthetic current transport failure"));
@@ -724,7 +726,7 @@ for (const stage of ["auth", "insights"] as const) {
       assert.equal(f.view.historyInsightsMessage, ""); assert.equal(f.view.historyInsightsAccess, "idle");
       await f.flush(); await answerFreshHistory(f);
       assert.equal(f.view.historyInsightsAccess, "confirmed"); assert.equal(f.view.historyInsightsMessage, "");
-      assert.equal(record(record(f.view.historyInsightsByLaunch)[launchId]).marker, "fresh");
+      assert.equal(record((record(record(f.view.historyInsightsByLaunch)[launchId]).spendByCurrency as unknown[])[0]).spendMinor, "200");
     });
   }
 }
@@ -742,3 +744,86 @@ for (const transition of ["actor", "role", "unmount"] as const) {
     assert.equal(f.writes.length, writes); assert.equal(f.lateWrites(), 0);
   });
 }
+
+for (const workspace of [W1, W2]) {
+  test(`A21 fresh lead_manager session in ${workspace === W1 ? "same" : "different"} workspace refuses contradictory server admin confirmation`, async (t) => {
+    const f = await readyHistory(t);
+    assert.equal(Object.keys(record(f.view.historyInsightsByLaunch)).length, 1);
+    const previousReads = f.calls.filter((call) => call.url.includes("meta-insights-history")).length;
+    await f.change("A", workspace, "lead_manager");
+    // If an implementation still asks for server confirmation, even a positive
+    // contradictory reply must not override the current client role denial.
+    for (const call of f.calls.filter((item) => !item.claimed && item.url.includes("auth-context"))) {
+      call.claimed = true;
+      call.answer({ isAdmin: true, role: "lead_manager", workspaceId: workspace });
+    }
+    await f.flush();
+    assert.equal(f.calls.filter((call) => call.url.includes("meta-insights-history")).length, previousReads);
+    assert.equal(f.view.historyInsightsAccess, "forbidden");
+    assert.equal(Object.keys(record(f.view.historyInsightsByLaunch)).length, 0);
+    assert.ok(String(f.view.historyInsightsMessage).length > 0);
+    assert.equal(f.lateWrites(), 0);
+  });
+}
+
+for (const [name, summaries] of [
+  ["missing summaries", undefined], ["null summaries", null], ["non-array summaries", { broken: true }],
+  ["null row", [null]], ["nested null spend", [{ ...historySummary(), spendByCurrency: null }]],
+  ["mixed valid and invalid rows", [historySummary(), { ...historySummary(), metaCampaignLaunchId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", spendByCurrency: null }]],
+] as Array<[string, unknown]>) {
+  test(`A22 successful envelope with ${name} clears History metrics, warns and can retry`, async (t) => {
+    const f = await readyHistory(t);
+    void f.invoke("refreshHistoryClick"); await f.flush();
+    f.take("meta-launches?").answer({ launches: [{ id: launchId, campaignName: "Current campaign", status: "paused" }] });
+    f.take("auth-context").answer({ isAdmin: true, role: "owner", workspaceId: W1 }); await f.flush();
+    f.take("meta-insights-history").answer({ summaries }); await f.flush();
+    assert.equal(f.view.historyInsightsAccess, "confirmed", "Valid authorization is distinct from an invalid report payload");
+    assert.equal(Object.keys(record(f.view.historyInsightsByLaunch)).length, 0);
+    assert.ok(String(f.view.historyInsightsMessage).length > 0, "A malformed payload cannot be a silent confirmed-empty state");
+    assert.equal((f.view.historyItems as unknown[]).length, 1);
+    void f.invoke("refreshHistoryClick"); await f.flush(); await answerFreshHistory(f);
+    assert.equal(f.view.historyInsightsAccess, "confirmed");
+    assert.equal(f.view.historyInsightsMessage, "");
+    assert.equal(record((record(record(f.view.historyInsightsByLaunch)[launchId]).spendByCurrency as unknown[])[0]).spendMinor, "200");
+    assert.equal(f.lateWrites(), 0);
+  });
+}
+
+test("A23 a genuine empty summaries array confirms History without a warning", async (t) => {
+  const f = await fixture(t, { history: true });
+  f.take("meta-launches?").answer({ launches: [{ id: launchId, campaignName: "Current campaign", status: "paused" }] });
+  f.take("auth-context").answer({ isAdmin: true, role: "owner", workspaceId: W1 }); await f.flush();
+  f.take("meta-insights-history").answer({ summaries: [] }); await f.flush();
+  assert.equal(f.view.historyInsightsAccess, "confirmed");
+  assert.equal(f.view.historyInsightsMessage, "");
+  assert.equal(Object.keys(record(f.view.historyInsightsByLaunch)).length, 0);
+});
+
+for (const [name, roleFields] of [
+  ["contradictory lead_manager role", { role: "lead_manager" }],
+  ["missing role", {}],
+] as Array<[string, Record<string, unknown>]>) {
+  test(`A24 owner client rejects server ${name} despite isAdmin true without requesting Insights`, async (t) => {
+    const f = await readyHistory(t);
+    const previousReads = f.calls.filter((call) => call.url.includes("meta-insights-history")).length;
+    void f.invoke("refreshHistoryClick"); await f.flush();
+    f.take("meta-launches?").answer({ launches: [{ id: launchId, campaignName: "Current campaign", status: "paused" }] });
+    f.take("auth-context").answer({ isAdmin: true, workspaceId: W1, ...roleFields }); await f.flush();
+    assert.equal(f.view.historyInsightsAccess, "unavailable");
+    assert.equal(Object.keys(record(f.view.historyInsightsByLaunch)).length, 0);
+    assert.ok(String(f.view.historyInsightsMessage).length > 0);
+    assert.equal(f.calls.filter((call) => call.url.includes("meta-insights-history")).length, previousReads);
+    assert.equal(f.lateWrites(), 0);
+  });
+}
+
+test("A25 an explicit server admin role authorizes a nonempty History report", async (t) => {
+  const f = await fixture(t, { history: true });
+  f.take("meta-launches?").answer({ launches: [{ id: launchId, campaignName: "Current campaign", status: "paused" }] });
+  f.take("auth-context").answer({ isAdmin: true, role: "admin", workspaceId: W1 }); await f.flush();
+  f.take("meta-insights-history").answer({ summaries: [historySummary()] }); await f.flush();
+  assert.equal(f.view.historyInsightsAccess, "confirmed");
+  assert.equal(f.view.historyInsightsMessage, "");
+  assert.equal(Object.keys(record(f.view.historyInsightsByLaunch)).length, 1);
+  assert.equal(record((record(record(f.view.historyInsightsByLaunch)[launchId]).spendByCurrency as unknown[])[0]).spendMinor, "100");
+});

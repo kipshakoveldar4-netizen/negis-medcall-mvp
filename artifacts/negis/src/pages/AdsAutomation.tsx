@@ -28,6 +28,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import { apiUrl, crmFetch } from "@/lib/api";
 import { getSupabaseAccessToken } from "@/lib/serverAuth";
 import { hasSupabaseFrontendEnv, supabase } from "@/lib/supabase";
+import { parseMetaInsightsHistorySummaries, type MetaInsightsHistorySummary } from "@/lib/metaInsightsHistory";
 import { readWorkspaceId } from "@/lib/demoStorage";
 import { getPlanFeature, normalizePlan, planFeatureBadge, type NegisPlan } from "@/lib/planFeatures";
 import {
@@ -300,37 +301,6 @@ type LaunchHistoryItem = {
   createdAt?: string;
   payload?: Record<string, unknown>;
   metaResponse?: Record<string, unknown>;
-};
-
-type MetaInsightsHistoryAvailability = "available" | "not_synced" | "empty" | "running" | "failed" | "unavailable";
-type MetaInsightsHistoryFreshness = "fresh" | "stale" | "unknown";
-
-type MetaInsightsHistorySummary = {
-  metaCampaignLaunchId: string;
-  availability: MetaInsightsHistoryAvailability;
-  freshness: MetaInsightsHistoryFreshness;
-  lastRun: {
-    status: string;
-    dateStart: string | null;
-    dateStop: string | null;
-    rowsUpserted: number;
-    startedAt: string | null;
-    finishedAt: string | null;
-    safeErrorMessage: string | null;
-  } | null;
-  coveredDateStart: string | null;
-  coveredDateStop: string | null;
-  latestFetchedAt: string | null;
-  rowCount: number;
-  spendByCurrency: Array<{
-    currency: string;
-    currencyExponent: number;
-    spendMinor: string;
-  }>;
-  impressions: string;
-  clicks: string;
-  inlineLinkClicks: string;
-  metaLeads: string | null;
 };
 
 type HistoryInsightsAccess = "idle" | "checking" | "confirmed" | "required" | "forbidden" | "unavailable";
@@ -1749,6 +1719,11 @@ function AdsAutomationSession({ actorId, workspaceId }: { actorId: string; works
     void (async () => {
       let serverAdminConfirmed = false;
       try {
+        if (userRole !== "owner" && userRole !== "admin") {
+          setHistoryInsightsAccess("forbidden");
+          setHistoryInsightsMessage("Недостаточно прав для просмотра Meta Insights.");
+          return;
+        }
         const accessToken = await getSupabaseAccessToken(actorId);
         assertSessionAlive(session);
         if (historyInsightsRequestRef.current !== requestId) return;
@@ -1779,6 +1754,7 @@ function AdsAutomationSession({ actorId, workspaceId }: { actorId: string; works
           authBody.success !== true ||
           authBody.mode !== "supabase" ||
           authBody.data.isAdmin !== true ||
+          !["owner", "admin"].includes(authBody.data.role || "") ||
           authBody.data.workspaceId !== workspaceId
         ) {
           setHistoryInsightsAccess("unavailable");
@@ -1810,7 +1786,7 @@ function AdsAutomationSession({ actorId, workspaceId }: { actorId: string; works
           return;
         }
 
-        const summaries = insightsBody.data.summaries || [];
+        const summaries = parseMetaInsightsHistorySummaries(insightsBody.data?.summaries);
         const byLaunch: Record<string, MetaInsightsHistorySummary> = {};
         for (const summary of summaries) {
           if (isServerLaunchUuid(summary.metaCampaignLaunchId)) {

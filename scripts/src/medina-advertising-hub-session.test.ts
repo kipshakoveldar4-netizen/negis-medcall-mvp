@@ -30,7 +30,7 @@ const CREATED = "2026-10-21T07:00:00.000Z";
 const exposed = [
   "launches", "loadState", "insightsAccess", "insightsSummaries", "insightsMessage",
   "crmOutcomesAccess", "crmOutcomes", "crmOutcomesMessage", "campaignGoal",
-  "campaignGoalError", "updateCampaignGoal", "prepareCampaign",
+  "campaignGoalError", "updateCampaignGoal", "prepareCampaign", "setReloadKey",
 ];
 
 function compile(source: string, fileName: string, page = false) {
@@ -128,6 +128,7 @@ const compiled = (async () => {
     api: compile(await readFile(path.join(root, "artifacts/negis/src/lib/api.ts"), "utf8"), "api.ts"),
     auth: compile(await readFile(path.join(root, "artifacts/negis/src/lib/serverAuth.ts"), "utf8"), "serverAuth.ts"),
     brief: compile(await readFile(path.join(root, "lib/advertising/campaignBrief.ts"), "utf8"), "campaignBrief.ts"),
+    insights: compile(await readFile(path.join(root, "artifacts/negis/src/lib/metaInsightsHistory.ts"), "utf8"), "metaInsightsHistory.ts"),
   };
 })();
 
@@ -382,6 +383,7 @@ async function fixture(t: TestContext, options: {
     return serverAuth;
   });
   const brief = evaluate(code.brief, "campaignBrief.simulation.cjs", unexpected);
+  const insightsPayload = evaluate(code.insights, "metaInsightsHistory.simulation.cjs", unexpected);
   const page = evaluate<{ default: () => View }>(code.page, "AdvertisingHub.simulation.cjs", (name) => {
     if (name === "react") return Object.fromEntries(Object.keys(outer.hooks).map((key) => [key,
       (...args: unknown[]) => (activeDriver.hooks[key as keyof typeof outer.hooks] as (...args: unknown[]) => unknown)(...args)]));
@@ -392,6 +394,7 @@ async function fixture(t: TestContext, options: {
     if (name === "@/contexts/AuthContext") return { useAuth: () => auth };
     if (name === "@/lib/api") return api;
     if (name === "@/lib/serverAuth") return serverAuth;
+    if (name === "@/lib/metaInsightsHistory") return insightsPayload;
     if (name === "@/lib/supabase") return { hasSupabaseFrontendEnv: true, supabase };
     if (name === "wouter") return { Link: Symbol("Link"), useLocation: () => ["/advertising", (next: string) => navigations.push(next)] };
     if (name === "sonner") return { toast: Object.fromEntries(["success", "error", "warning", "info"].map((key) => [key, (...args: unknown[]) => notifications.push(args)])) };
@@ -514,16 +517,16 @@ function privateStatus(f: Fixture) {
 function resourceData(resource: PrivateResource) {
   return resource === "meta-insights-history" ? { summaries: [insights()] } : { outcomes: outcomes() };
 }
-async function allowPrivate(f: Fixture, workspace = W1) {
+async function allowPrivate(f: Fixture, workspace = W1, role: "owner" | "admin" = "owner") {
   const requests = f.matching("auth-context").filter((call) => !call.answered);
   assert.equal(requests.length, 2, "Independent CRM and Insights access checks each revalidate once");
-  for (const call of requests) call.answer({ isAdmin: true, workspaceId: workspace });
+  for (const call of requests) call.answer({ isAdmin: true, role, workspaceId: workspace });
   await f.flush();
 }
-async function loadOwner(f: Fixture) {
+async function loadOwner(f: Fixture, role: "owner" | "admin" = "owner") {
   assert.equal(f.calls.length, 3, "One launches read and two independent auth checks before access confirmation");
   f.take("meta-launches").answer({ launches: [launch()] });
-  await allowPrivate(f);
+  await allowPrivate(f, W1, role);
   assert.equal(f.calls.length, 5);
   for (const resource of resources) f.take(resource).answer(resourceData(resource));
   await f.flush();
@@ -538,10 +541,10 @@ async function setGoal(f: Fixture) {
   await f.flush();
 }
 
-for (const role of ["owner", "admin"]) {
+for (const role of ["owner", "admin"] as const) {
   test(`H1 ${role} reads exact launches, private Insights and CRM payloads`, async (t) => {
     const f = await fixture(t, { auth: { userRole: role } });
-    await loadOwner(f);
+    await loadOwner(f, role);
     assert.deepEqual(json(rows(f.view.launches)), [launch()]);
     assert.deepEqual(json(rows(f.view.insightsSummaries)), [insights()]);
     const crm = record(f.view.crmOutcomes);
@@ -585,12 +588,12 @@ for (const stage of ["headers", "body"] as const) {
       assert.equal(old.length, 2);
       const gate = deferred<void>();
       if (stage === "body") {
-        for (const call of old) call.answer({ isAdmin: true, workspaceId: W1 }, status, gate.promise);
+        for (const call of old) call.answer({ isAdmin: true, role: "owner", workspaceId: W1 }, status, gate.promise);
         await f.flush();
       }
       await f.change({ userRole: "manager" });
       const state = privateStatus(f);
-      if (stage === "headers") for (const call of old) call.answer({ isAdmin: true, workspaceId: W1 }, status);
+      if (stage === "headers") for (const call of old) call.answer({ isAdmin: true, role: "owner", workspaceId: W1 }, status);
       gate.resolve();
       await f.flush();
       assertPrivateEmpty(f);
@@ -1083,3 +1086,151 @@ test("H24 INITIAL_SESSION listeners clean up across SDK remounts, replay and que
   assert.equal(f.navigations.length, 0);
   assertLocalOnly(f);
 });
+
+for (const status of [401, 403]) {
+  test(`H25 current outcomes HTTP ${status} has an authorization state, clears data and can retry`, async (t) => {
+    const f = await fixture(t);
+    await loadOwner(f);
+    f.invoke("setReloadKey", (value: number) => value + 1); await f.flush();
+    f.take("meta-launches").answer({ launches: [launch()] });
+    await allowPrivate(f);
+    f.take("meta-insights-history").answer({ summaries: [insights()] });
+    f.take("advertising-outcomes").answerBody({ success: false, error: "Synthetic outcomes denied" }, status);
+    await f.flush();
+    assert.equal(f.view.crmOutcomesAccess, status === 401 ? "required" : "forbidden");
+    assert.ok(String(f.view.crmOutcomesMessage).length > 0);
+    for (const key of ["attributedLeads", "unattributedLeads", "paidAttributedDeals", "paidUnattributedDeals", "paidAppointmentDeals", "paidAttributedAppointmentDeals", "pendingDeals"]) {
+      assert.equal(record(f.view.crmOutcomes)[key], 0, `Denied ${key} must not retain old counts`);
+    }
+    assert.equal(rows(record(f.view.crmOutcomes).attributedRevenueByCurrency).length, 0);
+    assert.equal(record(f.view.crmOutcomes).generatedAt, "");
+    assert.equal(f.view.insightsAccess, "ready", "A separately confirmed Insights report remains usable");
+    assert.equal(rows(f.view.insightsSummaries).length, 1);
+    f.invoke("setReloadKey", (value: number) => value + 1); await f.flush();
+    f.take("meta-launches").answer({ launches: [launch()] });
+    await allowPrivate(f);
+    for (const resource of resources) f.take(resource).answer(resourceData(resource));
+    await f.flush();
+    assert.equal(f.view.crmOutcomesAccess, "ready");
+    assert.equal(f.view.crmOutcomesMessage, "");
+    assert.equal(record(f.view.crmOutcomes).attributedLeads, 7);
+    assert.equal(f.lateWrites(), 0);
+  });
+}
+
+for (const stage of ["headers", "body"] as const) for (const status of [401, 403]) {
+  test(`H26 old outcomes HTTP ${status} ${stage} cannot replace a newer nonempty success`, async (t) => {
+    const f = await fixture(t);
+    await allowPrivate(f);
+    f.take("meta-launches").answer({ launches: [launch()] });
+    f.take("meta-insights-history").answer({ summaries: [insights()] });
+    const old = f.take("advertising-outcomes"), gate = deferred<void>();
+    const denial = { success: false, error: "Synthetic obsolete outcomes denial" };
+    if (stage === "body") { old.answerBody(denial, status, gate.promise); await f.flush(); }
+    f.invoke("setReloadKey", (value: number) => value + 1); await f.flush();
+    f.take("meta-launches").answer({ launches: [launch("Latest report")] });
+    await allowPrivate(f);
+    f.take("meta-insights-history").answer({ summaries: [insights()] });
+    const latest = f.matching("advertising-outcomes").find((call) => call !== old && !call.answered);
+    assert.ok(latest, "The replacement outcomes request must be independent of the held old request");
+    latest.answer({ outcomes: { ...outcomes(), attributedLeads: 17 } });
+    await f.flush();
+    assert.equal(f.view.crmOutcomesAccess, "ready");
+    const current = f.view.crmOutcomes;
+    if (stage === "headers") old.answerBody(denial, status);
+    gate.resolve(); await f.flush();
+    assert.equal(f.view.crmOutcomesAccess, "ready");
+    assert.equal(f.view.crmOutcomes, current);
+    assert.equal(record(f.view.crmOutcomes).attributedLeads, 17);
+    assert.equal(f.view.crmOutcomesMessage, "");
+    assert.equal(f.lateWrites(), 0);
+  });
+}
+
+for (const stage of ["headers", "body"] as const) for (const status of [401, 403]) {
+  test(`H27 old outcomes success ${stage} cannot replace a newer HTTP ${status} denial`, async (t) => {
+    const f = await fixture(t);
+    await allowPrivate(f);
+    f.take("meta-launches").answer({ launches: [launch()] });
+    f.take("meta-insights-history").answer({ summaries: [insights()] });
+    const old = f.take("advertising-outcomes"), gate = deferred<void>();
+    const obsolete = { outcomes: { ...outcomes(), attributedLeads: 99 } };
+    if (stage === "body") { old.answer(obsolete, 200, gate.promise); await f.flush(); }
+    f.invoke("setReloadKey", (value: number) => value + 1); await f.flush();
+    f.take("meta-launches").answer({ launches: [launch()] });
+    await allowPrivate(f);
+    f.take("meta-insights-history").answer({ summaries: [insights()] });
+    const latest = f.matching("advertising-outcomes").find((call) => call !== old && !call.answered);
+    assert.ok(latest, "The replacement outcomes request must be independent of the held old request");
+    latest.answerBody({ success: false, error: "Synthetic latest outcomes denial" }, status);
+    await f.flush();
+    const message = f.view.crmOutcomesMessage;
+    assert.equal(f.view.crmOutcomesAccess, status === 401 ? "required" : "forbidden");
+    if (stage === "headers") old.answer(obsolete);
+    gate.resolve(); await f.flush();
+    assert.equal(f.view.crmOutcomesAccess, status === 401 ? "required" : "forbidden");
+    assert.equal(f.view.crmOutcomesMessage, message);
+    assert.equal(record(f.view.crmOutcomes).attributedLeads, 0);
+    assert.equal(rows(record(f.view.crmOutcomes).attributedRevenueByCurrency).length, 0);
+    assert.equal(record(f.view.crmOutcomes).generatedAt, "");
+    assert.equal(f.lateWrites(), 0);
+  });
+}
+
+for (const [name, summaries] of [
+  ["missing summaries", undefined], ["null summaries", null], ["non-array summaries", { broken: true }],
+  ["null row", [null]], ["nested null spend", [{ ...insights(), spendByCurrency: null }]],
+  ["mixed valid and invalid rows", [insights(), { ...insights(), metaCampaignLaunchId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", spendByCurrency: null }]],
+] as Array<[string, unknown]>) {
+  test(`H28 successful envelope with ${name} is an error, never confirmed empty or partial`, async (t) => {
+    const f = await fixture(t);
+    f.take("meta-launches").answer({ launches: [launch()] });
+    await allowPrivate(f);
+    f.take("advertising-outcomes").answer({ outcomes: outcomes() });
+    f.take("meta-insights-history").answer({ summaries });
+    await f.flush();
+    assert.equal(f.view.insightsAccess, "error");
+    assert.equal(rows(f.view.insightsSummaries).length, 0);
+    assert.ok(String(f.view.insightsMessage).length > 0);
+    assert.equal(f.view.crmOutcomesAccess, "ready");
+    assert.equal(f.view.loadState, "ready");
+    assert.equal(f.lateWrites(), 0);
+  });
+}
+
+test("H29 a genuine empty summaries array remains a confirmed empty report", async (t) => {
+  const f = await fixture(t);
+  f.take("meta-launches").answer({ launches: [launch()] });
+  await allowPrivate(f);
+  f.take("advertising-outcomes").answer({ outcomes: outcomes() });
+  f.take("meta-insights-history").answer({ summaries: [] }); await f.flush();
+  assert.equal(f.view.insightsAccess, "ready");
+  assert.equal(rows(f.view.insightsSummaries).length, 0);
+  assert.equal(f.view.insightsMessage, "");
+});
+
+for (const [name, roleFields] of [
+  ["contradictory lead_manager role", { role: "lead_manager" }],
+  ["missing role", {}],
+] as Array<[string, Record<string, unknown>]>) {
+  test(`H30 owner client rejects server ${name} despite isAdmin true in both private auth checks`, async (t) => {
+    const f = await fixture(t);
+    await loadOwner(f);
+    const previousReads = resources.map((resource) => f.matching(resource).length);
+    f.invoke("setReloadKey", (value: number) => value + 1); await f.flush();
+    f.take("meta-launches").answer({ launches: [launch()] });
+    const auth = f.matching("auth-context").filter((call) => !call.answered);
+    assert.equal(auth.length, 2, "Both independent auth checks receive the contradictory fixture reply");
+    for (const call of auth) call.answer({ isAdmin: true, workspaceId: W1, ...roleFields });
+    await f.flush();
+    assert.equal(f.view.insightsAccess, "forbidden");
+    assert.equal(f.view.crmOutcomesAccess, "forbidden");
+    assertPrivateEmpty(f);
+    assert.deepEqual(resources.map((resource) => f.matching(resource).length), previousReads,
+      "Neither Insights nor CRM outcomes may be requested after invalid server-role confirmation");
+    assert.ok(String(f.view.insightsMessage).length > 0);
+    assert.ok(String(f.view.crmOutcomesMessage).length > 0);
+    assert.equal(f.view.loadState, "ready");
+    assert.equal(f.lateWrites(), 0);
+  });
+}

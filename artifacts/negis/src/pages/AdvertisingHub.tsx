@@ -26,6 +26,7 @@ import { crmFetch } from "@/lib/api";
 import { isRealWorkspace, readDemoStorage, readWorkspaceId, workspaceScopedKey } from "@/lib/demoStorage";
 import { getSupabaseAccessToken } from "@/lib/serverAuth";
 import { hasSupabaseFrontendEnv, supabase } from "@/lib/supabase";
+import { parseMetaInsightsHistorySummaries, type MetaInsightsHistorySummary } from "@/lib/metaInsightsHistory";
 import {
   ADVERTISING_CAMPAIGN_PREFILL_KEY,
   ADVERTISING_CONTENT_STUDIO_PREFILL_KEY,
@@ -40,9 +41,6 @@ import { KZ_META_CITY_OPTIONS } from "../../../../lib/meta/cities";
 type LoadState = "loading" | "ready" | "error";
 type LaunchState = "paused" | "active" | "failed" | "dry_run" | "video_processing" | "unknown";
 type InsightsAccess = "idle" | "checking" | "ready" | "required" | "forbidden" | "error";
-type InsightsAvailability = "available" | "not_synced" | "empty" | "running" | "failed" | "unavailable";
-type InsightsFreshness = "fresh" | "stale" | "unknown";
-
 type AdvertisingLaunch = {
   id: string;
   campaignName: string;
@@ -77,25 +75,6 @@ type ServerAdminAuthContext = {
   workspaceId?: string;
   role?: string;
   isAdmin?: boolean;
-};
-
-type MetaInsightsHistorySummary = {
-  metaCampaignLaunchId: string;
-  availability: InsightsAvailability;
-  freshness: InsightsFreshness;
-  coveredDateStart: string | null;
-  coveredDateStop: string | null;
-  latestFetchedAt: string | null;
-  rowCount: number;
-  spendByCurrency: Array<{
-    currency: string;
-    currencyExponent: number;
-    spendMinor: string;
-  }>;
-  impressions: string;
-  clicks: string;
-  inlineLinkClicks: string;
-  metaLeads: string | null;
 };
 
 type AdvertisingInsightsAggregate = {
@@ -705,6 +684,7 @@ function AdvertisingHubSession({ actorId, observedSdkActorId, workspaceId, local
           authBody.success !== true
           || authBody.mode !== "supabase"
           || authBody.data?.isAdmin !== true
+          || !["owner", "admin"].includes(authBody.data.role || "")
           || authBody.data.workspaceId !== workspaceId
         ) {
           setCrmOutcomesAccess("forbidden");
@@ -719,6 +699,16 @@ function AdvertisingHubSession({ actorId, observedSdkActorId, workspaceId, local
         );
         const outcomesBody = await readJson<{ outcomes?: CrmAdvertisingOutcomesPayload }>(outcomesResponse);
         if (!current()) return;
+        if (outcomesResponse.status === 401) {
+          setCrmOutcomesAccess("required");
+          setCrmOutcomesMessage("Сессия истекла. Войдите снова, чтобы увидеть результат в CRM.");
+          return;
+        }
+        if (outcomesResponse.status === 403) {
+          setCrmOutcomesAccess("forbidden");
+          setCrmOutcomesMessage("Результат рекламы в CRM доступен владельцу и администратору клиники.");
+          return;
+        }
         if (!outcomesResponse.ok || outcomesBody.success !== true || outcomesBody.mode !== "supabase") {
           throw new Error("crm_outcomes_unavailable");
         }
@@ -790,6 +780,7 @@ function AdvertisingHubSession({ actorId, observedSdkActorId, workspaceId, local
           authBody.success !== true
           || authBody.mode !== "supabase"
           || authBody.data?.isAdmin !== true
+          || !["owner", "admin"].includes(authBody.data.role || "")
           || authBody.data.workspaceId !== workspaceId
         ) {
           setInsightsAccess("forbidden");
@@ -818,7 +809,7 @@ function AdvertisingHubSession({ actorId, observedSdkActorId, workspaceId, local
           throw new Error("insights_unavailable");
         }
 
-        setInsightsSummaries(Array.isArray(insightsBody.data?.summaries) ? insightsBody.data.summaries : []);
+        setInsightsSummaries(parseMetaInsightsHistorySummaries(insightsBody.data?.summaries));
         setInsightsAccess("ready");
       } catch {
         if (current()) {
