@@ -8,10 +8,11 @@ import { createAdvertisingReportsHttpFixture } from "./advertising-reports-http-
 const W1 = "aaaaaaaa-1111-4111-8111-111111111111";
 const W2 = "bbbbbbbb-2222-4222-8222-222222222222";
 const CONTROL = "/__fixture/ads-reports";
-const PATHS = ["meta-launches", "auth-context", "meta-insights-history", "advertising-outcomes", "meta-summary", "workspace-settings", "health"]
+const PATHS = ["meta-launches", "auth-context", "meta-insights-history", "advertising-outcomes", "meta-summary", "workspace-settings", "health", "content-videos"]
   .map((key) => `/api/crm/${key}`).concat(["/api/content-studio/status", "/api/content-studio/usage"]);
 const auth = (actor = "A") => ({ Authorization: `Bearer fixture-ads-${actor}` });
 const scoped = (resource, workspace = W1) => `/api/crm/${resource}?workspaceId=${workspace}`;
+const usagePath = (workspace = W1) => `/api/content-studio/usage?workspaceId=${workspace}`;
 
 async function until(predicate, message = "fixture state did not settle") {
   for (let i = 0; i < 400; i++) { if (predicate()) return; await delay(5); }
@@ -143,18 +144,161 @@ test("strict fake bearer tokens, missing membership and cross-workspace queries 
   assert.equal(context.workspaceId, W2); assert.equal(context.userId, f.fixture.snapshot().actorIds.A);
 });
 
-test("health without query and content status/usage never enable providers or return keys", async (t) => {
+test("health without query and content status never enable providers or return keys", async (t) => {
   const f = await serverFixture(t);
   const health = (await (await f.get("/api/crm/health")).json()).data;
   assert.deepEqual(health.meta, { configured: false, hasAccessToken: false, videoLaunchEnabled: false,
     videoOptimization: { enabled: false, workerSecretConfigured: false } });
   const status = (await (await f.get(`/api/content-studio/status?workspaceId=${W1}`)).json()).data;
   const usage = (await (await f.get(`/api/content-studio/usage?workspaceId=${W1}`)).json()).data;
-  assert.equal(status.enabled, false); assert.equal(usage.subscriptionActive, false);
-  assert.equal(usage.images.enabled, false); assert.equal(usage.images.limit, 0); assert.equal(usage.videoSeconds.enabled, false);
+  assert.equal(status.configured, false); assert.equal(status.enabled, false);
+  assert.equal(status.textEnabled, false); assert.equal(status.imageEnabled, false); assert.equal(status.videoEnabled, false);
   assert.doesNotMatch(JSON.stringify([health, status, usage]), /api[_-]?key|access_token|https?:\/\/|secret\s*:/i);
   assert.equal((await f.get("/api/crm/health", "C")).status, 401);
 });
+
+test("synthetic quota revisions match the usage API and empty videos stay actor/workspace scoped", async (t) => {
+  const f = await serverFixture(t);
+  await f.command({ command: "actorWorkspace", actor: "B", workspace: "W2" });
+  for (const revision of [1, 2, 9]) {
+    await f.command({ command: "revision", value: revision });
+    for (const [actor, workspace, label] of [["A", W1, "W1"], ["B", W2, "W2"]]) {
+      const response = await f.get(usagePath(workspace), actor);
+      assert.equal(response.status, 200);
+      const body = await response.json();
+      assert.deepEqual(body, { success: true, mode: "tracked", data: {
+        revision, fixtureMarker: `QA ${actor} r${revision} ${label}`,
+        trackingAvailable: true, subscriptionActive: true, plan: "pro",
+        planTitle: `QA quota ${actor}/${label} r${revision}`, periodStart: "2026-10-01", textRequests: revision,
+        images: { used: revision === 1 ? 1 : 150, limit: 150, remaining: revision === 1 ? 149 : 0, enabled: true },
+        videoSeconds: { used: revision === 1 ? 8 : 180, limit: 180, remaining: revision === 1 ? 172 : 0, enabled: true },
+        videoSecondsPerGeneration: 8,
+      } });
+      const videos = await (await f.get(scoped("content-videos", workspace), actor)).json();
+      assert.deepEqual(videos, { success: true, mode: "supabase", data: {
+        revision, fixtureMarker: `QA ${actor} r${revision} ${label}`, videos: [],
+      } });
+      assert.equal(response.headers.get("cache-control"), "no-store");
+      assert.doesNotMatch(JSON.stringify([body, videos]), /api[_-]?key|access_token|https?:\/\/|fixture-ads/i);
+    }
+  }
+  assert.equal(f.fixture.snapshot().requestCounters.byResource["content-usage"].completed, 6);
+  assert.equal(f.fixture.snapshot().requestCounters.byResource["content-videos"].completed, 6);
+  assert.equal(f.fixture.snapshot().externalCalls, 0);
+});
+
+test("usage and empty videos require strict fake auth, same origin and current workspace membership", async (t) => {
+  const f = await serverFixture(t);
+  for (const path of ["/api/content-studio/usage", "/api/crm/content-videos"]) {
+    for (const token of [undefined, "fixture-ads-A", "Bearer fixture-ads-A-extra", "bearer fixture-ads-A", "Bearer fixture-ads-C", "Bearer real-token"]) {
+      const response = await fetch(f.base + path + `?workspaceId=${W1}`, { headers: token ? { Authorization: token } : {} });
+      assert.equal(response.status, 401); assert.equal((await response.json()).data, undefined);
+    }
+    for (const query of ["", `?workspaceId=${W2}`, `?workspaceId=${W1}&workspaceId=${W1}`, "?workspaceId=demo-workspace"]) {
+      const response = await f.get(path + query);
+      assert.equal(response.status, 403); assert.equal((await response.json()).data, undefined);
+    }
+    for (const headers of [{ Origin: "https://foreign.invalid" }, { Origin: "null" }, { Host: "evil.invalid" }]) {
+      const result = await native(f.base, path + `?workspaceId=${W1}`, { headers: { ...auth(), ...headers } }).done;
+      assert.equal(result.status, 400); assert.equal(JSON.parse(result.text).data, undefined);
+    }
+  }
+  await f.command({ command: "actorWorkspace", actor: "A", workspace: "W2" });
+  for (const path of [usagePath, workspace => scoped("content-videos", workspace)]) {
+    assert.equal((await f.get(path(W1))).status, 403);
+    assert.equal((await f.get(path(W2))).status, 200);
+    assert.equal((await f.get(path(W1), "B")).status, 200);
+    assert.equal((await f.get(path(W2), "B")).status, 403);
+  }
+});
+
+for (const phase of ["headers", "body"]) {
+  test(`usage ${phase} gate freezes old quota across newer revision, actor and workspace reads`, async (t) => {
+    const f = await serverFixture(t);
+    await f.command({ command: "arm", resource: "content-usage", phase });
+    const old = native(f.base, usagePath(), { headers: auth() });
+    await until(() => f.fixture.snapshot().pending.length === 1);
+    if (phase === "body") await until(() => old.text.length > 0);
+    await delay(30);
+    assert.equal(old.headersSeen, phase === "body"); assert.equal(old.text, phase === "body" ? "{" : "");
+    const first = f.fixture.snapshot().pending[0];
+    assert.equal(first.resource, "content-usage"); assert.equal(first.actor, "A"); assert.equal(first.phase, phase);
+    assert.deepEqual((await (await f.get(scoped("content-videos"))).json()).data.videos, []);
+    assert.equal((await (await f.get(usagePath())).json()).data.textRequests, 1, "one arm holds only one matching GET");
+    await f.command({ command: "revision", value: 2 });
+    await f.command({ command: "actorWorkspace", actor: "A", workspace: "W2" });
+    await f.command({ command: "arm", resource: "content-usage", phase });
+    const newer = native(f.base, usagePath(), { headers: auth("B") });
+    await until(() => f.fixture.snapshot().pending.length === 2);
+    await f.command({ command: "release", id: f.fixture.snapshot().pending[1].id });
+    const latest = JSON.parse((await newer.done).text).data;
+    assert.equal(latest.planTitle, "QA quota B/W1 r2");
+    assert.equal(latest.images.remaining, 0); assert.equal(latest.videoSeconds.remaining, 0);
+    assert.equal(f.fixture.snapshot().pending[0].id, first.id);
+    assert.equal((await (await f.get(usagePath(W2))).json()).data.planTitle, "QA quota A/W2 r2");
+    await f.command({ command: "actorRole", actor: "A", role: "lead_manager" });
+    await f.command({ command: "release", id: first.id });
+    const original = await old.done;
+    assert.equal(original.status, 200);
+    const data = JSON.parse(original.text).data;
+    assert.equal(data.planTitle, "QA quota A/W1 r1"); assert.equal(data.textRequests, 1);
+    assert.equal(data.images.remaining, 149); assert.equal(data.videoSeconds.remaining, 172);
+    await until(() => f.fixture.snapshot().requestCounters.byResource["content-usage"].completed === 4);
+    assert.equal(f.fixture.snapshot().pending.length, 0); assert.equal(f.fixture.snapshot().externalCalls, 0);
+  });
+
+  test(`usage ${phase} controls preserve HTTP errors, malformed JSON and authorization denials`, async (t) => {
+    const f = await serverFixture(t);
+    for (const status of [200, 401, 403, 500]) for (const malformed of [false, true]) {
+      await f.command({ command: "arm", resource: "content-usage", phase, status, malformed, shape: "valid" });
+      const held = native(f.base, usagePath(), { headers: auth() });
+      await until(() => f.fixture.snapshot().pending.length === 1);
+      assert.equal(f.fixture.snapshot().pending[0].status, status);
+      await f.command({ command: "release" });
+      const result = await held.done;
+      assert.equal(result.status, status);
+      if (malformed) assert.throws(() => JSON.parse(result.text), SyntaxError);
+      else {
+        const body = JSON.parse(result.text);
+        assert.equal(body.success, status === 200);
+        if (status !== 200) { assert.equal(body.data, undefined); assert.doesNotMatch(result.text, /QA quota|planTitle/); }
+      }
+    }
+    for (const [actor, workspace, role, expected] of [["C", W1, "owner", 401], ["A", W2, "owner", 403], ["A", W1, "lead_manager", 403]]) {
+      await f.command({ command: "actorRole", actor: "A", role });
+      await f.command({ command: "arm", resource: "content-usage", phase, status: 200 });
+      const held = native(f.base, usagePath(workspace), { headers: auth(actor) });
+      await until(() => f.fixture.snapshot().pending.length === 1);
+      await f.command({ command: "release" });
+      const result = await held.done;
+      assert.equal(result.status, expected); assert.equal(JSON.parse(result.text).data, undefined);
+    }
+  });
+
+  test(`usage ${phase} abort and reset remove held sockets and restore revision one`, async (t) => {
+    const f = await serverFixture(t);
+    await f.command({ command: "arm", resource: "content-usage", phase });
+    const controller = new AbortController();
+    const response = f.get(usagePath(), "A", { signal: controller.signal });
+    const parsing = response.then(res => res.json()); parsing.catch(() => {});
+    await until(() => f.fixture.snapshot().pending.length === 1);
+    if (phase === "body") await response;
+    controller.abort(); await assert.rejects(parsing);
+    await until(() => f.fixture.snapshot().pending.length === 0);
+    assert.deepEqual(f.fixture.snapshot().requestCounters.byResource["content-usage"], { received: 1, completed: 0, aborted: 1 });
+    await f.command({ command: "revision", value: 9 });
+    await f.command({ command: "arm", resource: "content-usage", phase });
+    const held = native(f.base, usagePath(), { headers: auth() });
+    await until(() => f.fixture.snapshot().pending.length === 1);
+    const reset = await f.command({ command: "reset" });
+    await assert.rejects(held.done);
+    assert.deepEqual(reset.pending, []); assert.deepEqual(reset.armed, []);
+    assert.deepEqual(reset.requestCounters.byResource["content-usage"], { received: 0, completed: 0, aborted: 0 });
+    const data = (await (await f.get(usagePath())).json()).data;
+    assert.equal(data.textRequests, 1); assert.equal(data.images.remaining, 149);
+    assert.equal(data.videoSeconds.remaining, 172); assert.equal(f.fixture.snapshot().externalCalls, 0);
+  });
+}
 
 test("every known non-control write is forbidden; unknown routes remain unhandled", async (t) => {
   const f = await serverFixture(t);
@@ -324,6 +468,11 @@ test("invalid controls, JSON, size, content type, Host and Origin leave all fixt
     { command: "arm", resource: "upload", phase: "body" }, { command: "arm", resource: "meta-launches", phase: "headers", malformed: "yes" },
     { command: "arm", resource: "meta-launches", phase: "body", shape: "arbitrary" },
     { command: "arm", resource: "meta-launches", phase: "body", shape: "foreign-auth" },
+    { command: "arm", resource: "content-studio-usage", phase: "body" },
+    { command: "arm", resource: "content-videos", phase: "body" },
+    ...["null-spend", "object-summaries", "foreign-auth", "contradictory-role", "null-usage"].map(shape =>
+      ({ command: "arm", resource: "content-usage", phase: "body", shape })),
+    { command: "arm", resource: "content-usage", phase: "body", payload: { private: true } },
     { command: "arm", resource: "meta-insights-history", phase: "body", payload: { private: true } },
     { command: "release", id: "ads-report-999" }, { command: "release", id: 2 }, { command: "release" }];
   const before = f.fixture.snapshot();

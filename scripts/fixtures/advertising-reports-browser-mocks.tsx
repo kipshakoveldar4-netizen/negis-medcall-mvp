@@ -18,12 +18,16 @@ const roles: Record<Actor, Role> = { A: "owner", B: "owner" };
 const workspaces: Record<Actor, "W1" | "W2"> = { A: "W1", B: "W1" };
 let revision = 0;
 let snapshot = makeSnapshot();
+function selectFixtureWorkspace() {
+  if (typeof window !== "undefined") window.localStorage.setItem("negis_workspace_selector", reportIds[workspace]);
+}
+selectFixtureWorkspace();
 function session() {
   return { user: { id: reportIds[sdkActor], email: `qa-reports-${sdkActor.toLowerCase()}@example.invalid` },
     access_token: `fixture-ads-${sdkActor}` };
 }
 function makeSnapshot() { return { actor, sdkActor, role, workspace, revision }; }
-function changed() { snapshot = makeSnapshot(); for (const listener of listeners) listener(); }
+function changed() { selectFixtureWorkspace(); snapshot = makeSnapshot(); for (const listener of listeners) listener(); }
 function sdkEvent(next: Actor, event = "SIGNED_IN") {
   sdkActor = next;
   revision++;

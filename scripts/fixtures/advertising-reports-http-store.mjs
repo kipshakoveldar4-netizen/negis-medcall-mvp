@@ -7,12 +7,12 @@ const IDS = Object.freeze({
 });
 const CONTROL = "/__fixture/ads-reports";
 const RESOURCES = new Map([
-  ...["meta-launches", "auth-context", "meta-insights-history", "advertising-outcomes", "meta-summary", "workspace-settings", "health"]
+  ...["meta-launches", "auth-context", "meta-insights-history", "advertising-outcomes", "meta-summary", "workspace-settings", "health", "content-videos"]
     .map((resource) => [`/api/crm/${resource}`, resource]),
   ["/api/content-studio/status", "content-studio-status"],
-  ["/api/content-studio/usage", "content-studio-usage"],
+  ["/api/content-studio/usage", "content-usage"],
 ]);
-const ARMABLE = ["meta-launches", "auth-context", "meta-insights-history", "advertising-outcomes"];
+const ARMABLE = ["meta-launches", "auth-context", "meta-insights-history", "advertising-outcomes", "content-usage"];
 const ROLES = ["owner", "admin", "lead_manager"];
 const SHAPES = ["valid", "null-spend", "object-summaries", "foreign-auth", "contradictory-role"];
 const NOW = "2026-10-23T08:00:00.000Z";
@@ -71,10 +71,13 @@ function payload(resource, actor, workspace, role, revision) {
     case "workspace-settings": return ok({ ...data, settings: [], items: [] });
     case "content-studio-status": return ok({ ...data, configured: false, enabled: false,
       textEnabled: false, imageEnabled: false, videoEnabled: false });
-    case "content-studio-usage": return ok({ ...data, trackingAvailable: false, subscriptionActive: false, plan: null,
-      planTitle: "QA ONLY - generation disabled", periodStart: "2026-10-01T00:00:00.000Z", textRequests: 0,
-      images: { used: 0, limit: 0, remaining: 0, enabled: false },
-      videoSeconds: { used: 0, limit: 0, remaining: 0, enabled: false }, videoSecondsPerGeneration: 0 });
+    case "content-videos": return ok({ ...data, videos: [] });
+    case "content-usage": return { success: true, mode: "tracked", data: { ...data,
+      trackingAvailable: true, subscriptionActive: true, plan: "pro",
+      planTitle: `QA quota ${actor}/${workspace} r${revision}`, periodStart: "2026-10-01", textRequests: revision,
+      images: { used: revision === 1 ? 1 : 150, limit: 150, remaining: revision === 1 ? 149 : 0, enabled: true },
+      videoSeconds: { used: revision === 1 ? 8 : 180, limit: 180, remaining: revision === 1 ? 172 : 0, enabled: true },
+      videoSecondsPerGeneration: 8 } };
     default: throw new Error("Unknown fixture resource");
   }
 }

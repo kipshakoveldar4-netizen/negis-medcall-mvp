@@ -5,6 +5,7 @@ import { Toaster } from "sonner";
 import { ArrowLeftRight, Repeat2, RefreshCw, Pause, Play } from "../../artifacts/negis/node_modules/lucide-react";
 import AdvertisingHub from "../../artifacts/negis/src/pages/AdvertisingHub";
 import AdsAutomation from "../../artifacts/negis/src/pages/AdsAutomation";
+import ContentStudio from "../../artifacts/negis/src/pages/ContentStudio";
 import { reportsAuthFixture } from "./advertising-reports-browser-mocks";
 import "../../artifacts/negis/src/index.css";
 
@@ -20,7 +21,7 @@ function Fixture() {
   const [location] = useLocation();
   const [server, setServer] = React.useState<Record<string, unknown> | null>(null);
   const [error, setError] = React.useState("");
-  const [resource, setResource] = React.useState("meta-insights-history");
+  const [resource, setResource] = React.useState(location === "/content-studio" ? "content-usage" : "meta-insights-history");
   const [phase, setPhase] = React.useState("body");
   const [status, setStatus] = React.useState(200);
   const [malformed, setMalformed] = React.useState(false);
@@ -48,6 +49,7 @@ function Fixture() {
       <div className="mt-2 flex flex-wrap gap-2">
         <Link className="neu-btn" href="/ads?reports=concurrency">Обзор</Link>
         <Link className="neu-btn" href="/ads-automation/history?reports=concurrency">История</Link>
+        <Link className="neu-btn" href="/content-studio?reports=concurrency">Лимиты</Link>
         <button className="neu-btn" onClick={() => void act({ command: "reset" }, () => { reportsAuthFixture.reset(); setPageEpoch(value => value + 1); })}>Сбросить стенд</button>
         <button className="neu-btn" onClick={reportsAuthFixture.switchActor}><ArrowLeftRight size={14} />Аккаунт A/B</button>
         <button className="neu-btn" onClick={reportsAuthFixture.switchSdkOnly}>Только SDK A/B</button>
@@ -65,7 +67,7 @@ function Fixture() {
       </div>
       <div className="mt-2 flex flex-wrap items-center gap-2">
         <label>Запрос <select aria-label="ТЕСТ: ресурс" value={resource} onChange={e => setResource(e.target.value)}>
-          {['meta-insights-history','advertising-outcomes','auth-context','meta-launches'].map(value => <option key={value}>{value}</option>)}
+          {['meta-insights-history','advertising-outcomes','auth-context','meta-launches','content-usage'].map(value => <option key={value}>{value}</option>)}
         </select></label>
         <label>Фаза <select aria-label="ТЕСТ: фаза" value={phase} onChange={e => setPhase(e.target.value)}><option value="body">Тело ответа</option><option value="headers">До заголовков</option></select></label>
         <label>Ответ <select aria-label="ТЕСТ: код ответа" value={status} onChange={e => setStatus(Number(e.target.value))}>{[200,401,403,500].map(v => <option key={v}>{v}</option>)}</select></label>
@@ -84,7 +86,7 @@ function Fixture() {
       {error && <p role="alert">{error}</p>}
     </header>
     <div style={{ minHeight: 0, flex: 1, overflow: "auto", transform: "translateZ(0)" }} data-testid="ads-report-scene">
-      {location === "/ads" ? <AdvertisingHub key={pageEpoch} /> : <AdsAutomation key={pageEpoch} />}
+      {location === "/ads" ? <AdvertisingHub key={pageEpoch} /> : location === "/content-studio" ? <ContentStudio key={pageEpoch} /> : <AdsAutomation key={pageEpoch} />}
     </div>
     <Toaster />
   </div>;
