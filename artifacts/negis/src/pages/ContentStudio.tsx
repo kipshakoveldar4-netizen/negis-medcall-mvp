@@ -337,6 +337,19 @@ function wrapCanvasText(ctx: CanvasRenderingContext2D, text: string, maxWidth: n
   const lines: string[] = [];
   let line = "";
   for (const word of words) {
+    if (ctx.measureText(word).width > maxWidth) {
+      if (line) lines.push(line);
+      line = "";
+      for (const character of word) {
+        if (ctx.measureText(character).width > maxWidth) throw new Error("Текст не помещается в макет. Сократите его и повторите.");
+        if (line && ctx.measureText(line + character).width > maxWidth) {
+          lines.push(line);
+          line = "";
+        }
+        line += character;
+      }
+      continue;
+    }
     const candidate = line ? `${line} ${word}` : word;
     if (ctx.measureText(candidate).width > maxWidth && line) {
       lines.push(line);
@@ -360,6 +373,26 @@ function drawWrapped(
   const lines = wrapCanvasText(ctx, text, maxWidth);
   lines.forEach((line, index) => ctx.fillText(line, x, y + index * lineHeight));
   return y + lines.length * lineHeight;
+}
+
+function drawFittedCanvasLine(ctx: CanvasRenderingContext2D, text: string, x: number, y: number, maxWidth: number): number {
+  const originalFont = ctx.font;
+  const size = Number(originalFont.match(/([\d.]+)px/)?.[1]);
+  if (!Number.isFinite(size) || size <= 0) throw new Error("Не удалось определить шрифт макета.");
+  const minimum = Math.max(12, Math.ceil(size / 2));
+  try {
+    for (let current = size; current >= minimum; current -= 1) {
+      ctx.font = originalFont.replace(/[\d.]+px/, `${current}px`);
+      const width = ctx.measureText(text).width;
+      if (width <= maxWidth) {
+        ctx.fillText(text, x, y);
+        return width;
+      }
+    }
+    throw new Error("Текст не помещается в макет. Сократите подпись или дисклеймер и повторите.");
+  } finally {
+    ctx.font = originalFont;
+  }
 }
 
 function drawRoundedRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
@@ -417,16 +450,19 @@ export async function renderPhotoCreative(input: {
     ctx.font = offerFont;
     const offerLines = wrapCanvasText(ctx, texts.offer, contentWidth);
     const bottomBand = margin * 2.4 + offerLines.length * offerLine + Math.round(width * 0.1);
+    if (bandHeight + bottomBand + margin > height) throw new Error("Текст не помещается в макет. Сократите заголовок или оффер и повторите.");
     ctx.fillStyle = "rgba(255,255,255,0.94)";
     ctx.fillRect(0, height - bottomBand, width, bottomBand);
     ctx.fillStyle = "#334155";
     const afterOffer = drawWrapped(ctx, texts.offer, margin, height - bottomBand + margin * 0.6, contentWidth, offerLine);
     ctx.fillStyle = "#0D9488";
-    drawRoundedRect(ctx, margin, afterOffer + margin * 0.3, Math.min(contentWidth, width * 0.62), Math.round(width * 0.09), Math.round(width * 0.045));
+    const buttonWidth = Math.min(contentWidth, width * 0.62);
+    const buttonPadding = Math.round(width * 0.04);
+    drawRoundedRect(ctx, margin, afterOffer + margin * 0.3, buttonWidth, Math.round(width * 0.09), Math.round(width * 0.045));
     ctx.fill();
     ctx.fillStyle = "#FFFFFF";
     ctx.font = ctaFont;
-    ctx.fillText(texts.cta, margin + Math.round(width * 0.04), afterOffer + margin * 0.3 + Math.round(width * 0.026));
+    drawFittedCanvasLine(ctx, texts.cta, margin + buttonPadding, afterOffer + margin * 0.3 + Math.round(width * 0.026), buttonWidth - buttonPadding * 2);
   }
 
   if (layout === "gradient_bottom") {
@@ -442,6 +478,7 @@ export async function renderPhotoCreative(input: {
     const headlineLines = wrapCanvasText(ctx, texts.headline, contentWidth);
     const blockHeight = headlineLines.length * headlineLine + offerLines.length * offerLine + Math.round(width * 0.16);
     let cursor = height - blockHeight - margin;
+    if (cursor < margin) throw new Error("Текст не помещается в макет. Сократите заголовок или оффер и повторите.");
     ctx.fillStyle = "#FFFFFF";
     cursor = drawWrapped(ctx, texts.headline, margin, cursor, contentWidth, headlineLine);
     ctx.font = offerFont;
@@ -449,7 +486,7 @@ export async function renderPhotoCreative(input: {
     cursor = drawWrapped(ctx, texts.offer, margin, cursor + Math.round(width * 0.015), contentWidth, offerLine);
     ctx.fillStyle = "#2DD4BF";
     ctx.font = ctaFont;
-    ctx.fillText(`→ ${texts.cta}`, margin, cursor + Math.round(width * 0.02));
+    drawFittedCanvasLine(ctx, `→ ${texts.cta}`, margin, cursor + Math.round(width * 0.02), contentWidth);
   }
 
   if (layout === "medical_card") {
@@ -459,6 +496,7 @@ export async function renderPhotoCreative(input: {
     const offerLines = wrapCanvasText(ctx, texts.offer, contentWidth - margin);
     const cardHeight = headlineLines.length * headlineLine + offerLines.length * offerLine + Math.round(width * 0.22);
     const cardTop = height - cardHeight - margin;
+    if (cardTop < margin) throw new Error("Текст не помещается в макет. Сократите заголовок или оффер и повторите.");
     ctx.fillStyle = "rgba(255,255,255,0.97)";
     drawRoundedRect(ctx, margin * 0.7, cardTop, width - margin * 1.4, cardHeight, Math.round(width * 0.03));
     ctx.fill();
@@ -472,7 +510,7 @@ export async function renderPhotoCreative(input: {
     cursor = drawWrapped(ctx, texts.offer, margin * 1.3, cursor + Math.round(width * 0.012), contentWidth - margin, offerLine);
     ctx.fillStyle = "#0D9488";
     ctx.font = ctaFont;
-    ctx.fillText(texts.cta, margin * 1.3, cursor + Math.round(width * 0.015));
+    drawFittedCanvasLine(ctx, texts.cta, margin * 1.3, cursor + Math.round(width * 0.015), contentWidth - margin);
   }
 
   if (layout === "minimal_premium") {
@@ -484,19 +522,20 @@ export async function renderPhotoCreative(input: {
     ctx.fillRect(margin, cursor + Math.round(width * 0.012), Math.round(width * 0.14), 3);
     ctx.font = offerFont;
     ctx.fillStyle = "rgba(255,255,255,0.9)";
-    drawWrapped(ctx, texts.offer, margin, cursor + Math.round(width * 0.04), contentWidth, offerLine);
+    const afterOffer = drawWrapped(ctx, texts.offer, margin, cursor + Math.round(width * 0.04), contentWidth, offerLine);
     ctx.font = ctaFont;
     ctx.fillStyle = "#FFFFFF";
     const ctaY = height - margin - Math.round(width * 0.05);
-    ctx.fillText(texts.cta, margin, ctaY);
-    ctx.fillRect(margin, ctaY + Math.round(width * 0.05), ctx.measureText(texts.cta).width, 2);
+    if (afterOffer + margin * 0.3 > ctaY) throw new Error("Текст не помещается в макет. Сократите заголовок или оффер и повторите.");
+    const ctaWidth = drawFittedCanvasLine(ctx, texts.cta, margin, ctaY, contentWidth);
+    ctx.fillRect(margin, ctaY + Math.round(width * 0.05), ctaWidth, 2);
   }
 
   if (texts.disclaimer.trim()) {
     ctx.font = `500 ${Math.round(width * 0.02)}px Inter, Arial, sans-serif`;
     ctx.textAlign = "center";
     ctx.fillStyle = layout === "top_bottom" || layout === "medical_card" ? "rgba(51,65,85,0.85)" : "rgba(255,255,255,0.8)";
-    ctx.fillText(texts.disclaimer, width / 2, height - Math.round(width * 0.035));
+    drawFittedCanvasLine(ctx, texts.disclaimer, width / 2, height - Math.round(width * 0.035), contentWidth);
     ctx.textAlign = "left";
   }
 

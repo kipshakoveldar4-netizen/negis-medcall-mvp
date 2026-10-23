@@ -33,6 +33,7 @@ const TOKEN = "header.payload.signature";
 type StaffRow = { id: string; workspace_id: string; role: string; status: string };
 type QueryLog = { table: string; op: string; filters: Record<string, unknown>; columns?: string; row?: unknown };
 type StorageCall = { op: string; bucket: string; key: string };
+type StorageReplies = { signedUpload?: { data: unknown; error: unknown } };
 
 /** Records every table, filter and row; resolves from a fixed row map. */
 function dbSpy(rows: Record<string, unknown[]>, log: QueryLog[], errors: Record<string, { message: string }> = {}) {
@@ -71,7 +72,7 @@ function dbSpy(rows: Record<string, unknown[]>, log: QueryLog[], errors: Record<
 }
 
 /** Records the bucket and key of every storage call the handler makes. */
-function storageSpy(calls: StorageCall[]) {
+function storageSpy(calls: StorageCall[], replies: StorageReplies = {}) {
   return {
     from(bucket: string) {
       return {
@@ -81,7 +82,7 @@ function storageSpy(calls: StorageCall[]) {
         },
         createSignedUploadUrl: async (key: string) => {
           calls.push({ op: "createSignedUploadUrl", bucket, key });
-          return {
+          return replies.signedUpload ?? {
             data: { signedUrl: `https://project.example.test/upload/${bucket}/${key}`, token: "signed-token", path: key },
             error: null,
           };
@@ -132,6 +133,7 @@ const memberB: StaffRow = { id: "staff-b", workspace_id: WORKSPACE_B, role: "own
 async function loadRouter(rows: Record<string, unknown[]> = {}) {
   const queries: QueryLog[] = [];
   const storage: StorageCall[] = [];
+  const storageReplies: StorageReplies = {};
   const errors: Record<string, { message: string }> = {};
 
   process.env.SUPABASE_URL = "https://project.example.test";
@@ -152,7 +154,7 @@ async function loadRouter(rows: Record<string, unknown[]> = {}) {
   const clientRows: Record<string, unknown[]> = { staff_users: [memberA], workspace_settings: [], ...rows };
   supabaseModule.setSupabaseServerClientFactoryForTests(() => ({
     from: dbSpy(clientRows, queries, errors),
-    storage: storageSpy(storage),
+    storage: storageSpy(storage, storageReplies),
   }));
 
   const routerModule = (await import(pathToFileURL(routerPath).href)) as {
@@ -193,6 +195,7 @@ async function loadRouter(rows: Record<string, unknown[]> = {}) {
   return {
     call,
     errors,
+    storageReplies,
     restore: () => {
       globalThis.fetch = originalFetch;
       supabaseModule.setSupabaseServerClientFactoryForTests(null);
@@ -305,8 +308,56 @@ test("ST3 the signed upload route derives the key from the authorized workspace"
     assert.equal(signed.length, 1);
     assert.equal(signed[0].bucket, "ad-creatives");
     assert.ok(signed[0].key.startsWith(`${WORKSPACE_A}/`), `key escaped the workspace prefix: ${signed[0].key}`);
+    assert.equal(res.body.success, true);
+    const receipt = res.body.data as Record<string, unknown>;
+    assert.equal(receipt.bucket, "ad-creatives");
+    assert.equal(receipt.storageBucket, "ad-creatives");
+    assert.equal(receipt.storagePath, signed[0].key);
+    assert.equal(receipt.token, "signed-token");
+    assert.equal(receipt.signedUrl, `https://project.example.test/upload/ad-creatives/${signed[0].key}`);
+    assert.equal(receipt.publicUrl, `https://project.example.test/storage/v1/object/public/ad-creatives/${signed[0].key}`);
   });
 });
+
+const privateSigningToken = "private-fixture-signing-token";
+const privateSigningUrl = `https://project.example.test/private-upload?token=${privateSigningToken}`;
+for (const { name, data } of [
+  { name: "null data", data: null },
+  { name: "missing token", data: { signedUrl: privateSigningUrl } },
+  { name: "missing URL", data: { token: privateSigningToken } },
+  { name: "numeric token", data: { token: 42, signedUrl: privateSigningUrl } },
+  { name: "object token", data: { token: { privateDetail: privateSigningToken }, signedUrl: privateSigningUrl } },
+  { name: "numeric URL", data: { token: privateSigningToken, signedUrl: 42 } },
+  { name: "object URL", data: { token: privateSigningToken, signedUrl: { privateDetail: privateSigningUrl } } },
+  { name: "empty token", data: { token: "", signedUrl: privateSigningUrl } },
+  { name: "empty URL", data: { token: privateSigningToken, signedUrl: "" } },
+]) {
+  test(`ST3 malformed signing reply with ${name} fails closed without metadata writes`, async () => {
+    await withRouter({}, async (ctx) => {
+      ctx.storageReplies.signedUpload = { data, error: null };
+      const { res, queries, storage } = await ctx.call({
+        segments: ["ad-creatives", "signed-upload"], method: "POST",
+        query: { workspaceId: WORKSPACE_A },
+        body: { fileName: "photo-creative.jpg", fileType: "image", mimeType: "image/jpeg", fileSize: 2048 },
+      });
+
+      assert.equal(res.statusCode, 502, JSON.stringify(res.body));
+      assert.deepEqual(res.body, {
+        success: false,
+        error: "Signed upload URL is incomplete",
+        details: ["Supabase did not return token, signedUrl, or publicUrl for the creative upload."],
+      }, "the failure must contain no signing receipt or raw Storage data");
+      assert.deepEqual(queries.filter((entry) => entry.op !== "select"), [], "no metadata may be written");
+      const profiles = profileQueries(queries);
+      assert.deepEqual(queries.filter((entry) => entry.table !== "staff_users" && !profiles.includes(entry)), [],
+        "only authorization and workspace profile reads may occur");
+      assert.equal(storage.length, 1, "an incomplete signing reply must not trigger another Storage operation");
+      assert.equal(storage[0].op, "createSignedUploadUrl");
+      assert.equal(storage[0].bucket, "ad-creatives");
+      assert.ok(storage[0].key.startsWith(`${WORKSPACE_A}/`));
+    });
+  });
+}
 
 for (const failure of ["malformed", "query error"]) {
   test(`signed upload ${failure} profile fails closed before business queries or storage`, async () => {
