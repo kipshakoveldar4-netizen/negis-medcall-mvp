@@ -56,11 +56,13 @@ Production неизменен.
 9faa044 проверено на всех 12 форматах/макетах с настоящими локальными JPEG.
 Чистый кандидат 4a38872 от 63692e6: один runtime-файл и два теста,
 990/990 и полный build/115 cold-start прошли. Узкий Preview qdgmfjo1t READY,
-836/836 исходников, тестовая база и исправление подтверждены в реальном JS;
-заключительный новый вход запрошен. Облачная Storage-доставка пока не принята:
-read-only панель medina-os-site-test показывает отсутствие бакетов. Создание
-только тестового хранилища отдельно запрошено, ещё не выполнено. Новых облачных
-настроек/строк, расходов и рабочих изменений нет.
+836/836 исходников, тестовая база и исправление подтверждены в реальном JS.
+В C31 новый вход принят; после отдельного разрешения создан только тестовый
+JPEG-бакет ad-creatives. Один настоящий signed-upload, metadata, public image
+и скачивание приняты с совпадением SHA-256; файл, metadata и служебный маркер
+папки удалены. Пустой разрешённый бакет сохранён, RLS/policies и исходные строки
+сверены. Видео/Telegram/платные provider-процессы не приняты; расходов и рабочих
+изменений нет. Подробности C31 ниже.
 
 Дополнение G7 на 22 октября: точный кандидат рекламных отчётов e75c4d9
 проверен отдельно от основной ветки и по отдельному разрешению выпущен только
@@ -2536,17 +2538,17 @@ Production, Baspana, рабочие салоны, WhatsApp, реклама и д
   metadata/settings/security сохранены. Первый preflight получил 403 от
   истёкшего CLI-доступа; официальный whoami обновил прежнюю авторизацию,
   повторный preflight прошёл. Защиту/SSO и права не обходили/не меняли.
-- [ ] Новый вход **eldar1@mail.ru** в **qdgmfjo1t** для заключительного
-  исправленного export-сценария запрошен. Логин заполнен; пароль не читался,
-  не переносился и не менялся. Приёмка старого q6xod3nqa не подменяет новую.
+- [x] Новый вход **eldar1@mail.ru** в **qdgmfjo1t** принят в C31: sidebar
+  подтвердил **Medina OS — тест блога**, новый настоящий JPEG/Storage-сценарий
+  принят отдельно ниже. Пароль не читался, не переносился и не менялся.
 - [x] Read-only Supabase **ukiobbwsdoblooynzlnx / medina-os-site-test**,
   Storage -> Files: «Create a file bucket / New bucket», бакетов нет.
   Ничего не создавали, политики и лимиты не меняли. Сквозной signed-upload,
   публичное получение и уборка своего объекта требуют отдельного тестового
   хранилища; без него облачная доставка файлов не объявляется проверенной.
-  Отдельно запрошен только новый test ad-creatives (public read, JPEG <=5MB,
-  без browser-write), один синтетический JPEG и временная metadata с уборкой.
-  До явного ответа бакет/политики/данные не создаются.
+  Тогда отдельно запрошен только новый test ad-creatives (public read,
+  JPEG <=5MB, без browser-write policy), один синтетический JPEG и временная
+  metadata с уборкой. После явного ответа владельца этот сценарий принят в C31.
 
 Доказательства: scripts/src/medina-photo-export.test.ts,
 scripts/src/medina-storage-isolation.test.ts и
@@ -2560,6 +2562,85 @@ bundle-proof.json, anonymous-auth.txt и login-handoff.png. Скачать св�
 JPEG можно из того же каталога; копии в Downloads не содержат клиентских данных.
 Полная Storage/Telegram/provider-приёмка остаётся; Production, Baspana,
 рабочие салоны, WhatsApp, реклама и расходы не затронуты.
+
+### Цикл G5-C31: signed-upload и доставка одного JPEG — принято в тестовом Preview, 23 октября
+
+- [x] Отдельно разрешены новый бакет **ad-creatives** только в
+  **ukiobbwsdoblooynzlnx / medina-os-site-test**, public read, JPEG <=5MB,
+  без browser-write policies; один собственный вымышленный JPEG и одна
+  metadata-запись с последующей уборкой. Это не разрешение расширять типы
+  файлов, доступы, рабочие базы, рекламу, расходы или подключать Telegram.
+- [x] Новый вход в **qdgmfjo1t / 4a38872**: **eldar1@mail.ru** и
+  **Medina OS — тест блога** подтверждены в sidebar. До записи сохранены
+  counts/fingerprints workspaces/staff/settings/subscriptions/usage/videos/
+  storage.objects; бакетов и object-policies не было, у content_videos нет
+  неслужебных triggers. Пароль/ключи/подписанные upload-token/URL не читались.
+- [x] Через штатную панель создан **только** test ad-creatives:
+  public=true, file_size_limit=**5242880**, allowed_mime_types=[image/jpeg].
+  Storage objects RLS=true; object policies=0 до/после. Браузерный upload
+  выполнен только по прежнему серверному signed-upload, без новой политики
+  произвольной записи. Других bucket/roles/grants/миграций не создавали.
+- [x] В ContentStudio file chooser получил прежний собственный synthetic SVG;
+  локальный canvas создал feed/gradient JPEG с меткой
+  **QA G5C31 FILE DELIVERY 20261023** и ранее обрезавшимся длинным CTA.
+  В новом Preview настоящий download сохранил **1080x1080, 96939 bytes**.
+  Платные media-генерации, «Предложить тексты» и AI-fill не нажимались.
+- [x] **Один** клик «Использовать в AI запуске рекламы» выполнил настоящий
+  signed-upload и создал **одну** content_videos строку
+  **3eafa148-3290-459d-b824-9741d00c8fb3**, workspace=aa2ad78e-22f6-4cdb-bf6b-3a15fe774c04,
+  goal=photo_creative/status=idea, с точным public URL. Объект
+  **5c6d4caf-788c-4328-b010-2ecb6aa9016f** появился только под этим workspace
+  в **ad-creatives**, MIME=image/jpeg, metadata size/contentLength=96939.
+  Тост/переход не заменяли проверку записи: подтверждены реальные SQL-строки.
+- [x] Рекламный черновик показал загруженное изображение **1080x1080**.
+  Public URL без token открыт отдельной обычной вкладкой; downloadMedia
+  скачал именно доставленный файл. Его SHA-256 совпал с исходным экспортом:
+  **b0d15e1974e5832f050eddecbf627d74a834430877fbc7a41fb28a9dd7715818**;
+  MD5 **5e191d142591c44dc07f2e66a0ffc51a** совпал также с Storage eTag.
+  Кампанию, даже PAUSED, не создавали; Meta check/launch/Telegram не нажимались.
+- [x] Desktop фактически **1440x900**, documentWidth=1425; фото загружено
+  и помещается. Запрошенный override 375 не применился к целевой вкладке:
+  фактически остались 1440x900. Поэтому **новая мобильная приёмка C31 не
+  засчитана**, файл снимка переименован с actual1440, override сброшен.
+- [x] Собственные импортированные offer/audience возвращены через UI к
+  исходным значениям, файл удалён **из черновика** штатной кнопкой, UI mode
+  возвращён в клиентский. Reload подтвердил восстановленные поля и отсутствие
+  QA-маркера/изображения; content-studio после возврата не показывает источник,
+  макет или QA-запись. Чужие localStorage/sessionStorage и токены не читались.
+- [x] Metadata удалена точным SQL predicate по UUID/workspace/title/goal/status/
+  public URL: removed_count=1. JPEG удалён штатным Storage API через панель,
+  не прямым DELETE storage.objects. Свежий публичный запрос с cache-buster
+  вернул statusCode=404 / Object not found / NoSuchKey. Исходный кэшированный
+  ответ не выдавался за подтверждение существования/удаления файла.
+- [x] Дополнительная сверка нашла асинхронный служебный
+  **.emptyFolderPlaceholder** (0 bytes, application/octet-stream), созданный
+  панелью после удаления последнего JPEG. Первый снимок objects=0 был сделан
+  до появления этого маркера; он не принят за окончательную уборку. Проверен
+  единственный оставшийся путь внутри своей тестовой папки; папка удалена
+  через Storage из корня бакета. Итог: **storage.objects=0**, videos=0,
+  usage=0, subscriptions=0; RLS=true, object-policies=0. Пустой согласованный
+  бакет сохранён. Повторно сверены исходные fingerprints семи наборов строк.
+- [x] Vercel read-only guard подтвердил **836/836**, READY, target=null,
+  aliases=[], прежние Production de97fb6/домены/env metadata/security/settings.
+  Код/миграции/credentials/штатные роли не менялись; прежние **990 tests/build/115
+  cold-start** не повторялись без изменения исходников. Preview console errors=0.
+
+Доказательства: node_modules/.cache/photo-delivery-20261023/ —
+storage-preflight.sql, storage-preflight-result.txt, storage-before-fingerprints.txt,
+storage-metadata-shape.sql, storage-metadata-shape-result.txt, storage-created-settings.png,
+preview-C31-source-export.jpg, preview-C31-cloud-delivered.jpg,
+preview-C31-imported-image.json, preview-C31-imported-desktop.png,
+preview-C31-public-image.png, preview-C31-viewports.json,
+preview-C31-mobile-attempt-actual1440.png, storage-delivery-proof.sql, storage-delivery-result.txt,
+ads-draft-before-step2.txt, ads-draft-restored-after-reload.txt,
+storage-cleanup-metadata.sql, storage-metadata-cleanup-result.txt,
+storage-empty-folder-marker.txt, storage-deleted-public-response.json,
+storage-final-security.sql, storage-final-security-result.txt, storage-final-security-screen.png,
+storage-after-fingerprints.txt, storage-fingerprint-comparison.json,
+storage-cleaned-screen.png и cloud-storage-acceptance.json.
+Это приёмка **одного JPEG**, не видео, полная мобильная матрица, отклонение
+чужих подписей в облаке, истечение upload token, Telegram или платные providers.
+Рабочая CRM, Baspana, салоны, WhatsApp, реклама и расходы не затронуты.
 
 ### Цикл G2-C13: статус «Отложенные» — готов только локально, 22 октября
 
