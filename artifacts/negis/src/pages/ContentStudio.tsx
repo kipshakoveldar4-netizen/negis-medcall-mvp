@@ -2679,7 +2679,10 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
           storage: window.localStorage, locks: navigator.locks, actorId, workspaceId,
           videoId: active.id, packageText: buildTelegramPackage(active), isCurrent: () => isLibraryWriteCurrent(write),
         });
-        if (!await isLibraryWriteVerified(write)) return;
+        if (!await isLibraryWriteVerified(write)) {
+          releaseUnsentTelegramDelivery(window.localStorage, receipt);
+          return;
+        }
       }
       const response = await crmFetch(`/api/content-studio/send-telegram?workspaceId=${encodeURIComponent(workspaceId)}`, {
         expectedUserId: actorId, dispatchGuard: () => isLibraryWriteCurrent(write), signal: write.session.signal,

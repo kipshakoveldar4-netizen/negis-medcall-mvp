@@ -5678,6 +5678,35 @@ test("G5C14 a live selector mismatch clears only its own Telegram spinner and bl
   } finally { paused.resume(); await paused.work; fixture.lifetime!.unmount(); }
 });
 
+for (const boundary of ["actor", "workspace", "SDK-error", "SDK-throw"] as const) {
+  test(`G5C34 zero-dispatch ${boundary} after reservation releases only its fence and allows retry`, async () => {
+    const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE); fixture.seedLibrary([LOCAL_LIBRARY_ROW_A]);
+    telegramStatusReceipt(fixture);
+    const key = telegramDeliveryKey(fixture), setItem = fixture.localStorage.setItem;
+    let armed = true;
+    fixture.localStorage.setItem = (storedKey, value) => {
+      setItem(storedKey, value);
+      if (!armed || storedKey !== key) return;
+      armed = false;
+      if (boundary === "actor") fixture.sdkSession("actor-b");
+      else if (boundary === "workspace") fixture.workspace(HANDOFF_WORKSPACE_B);
+      else fixture.sdkFailureOnce(boundary === "SDK-error" ? "error" : "throw");
+    };
+    try {
+      await fixture.library().callbacks.sendTelegram();
+      assert.equal(armed, false); assert.equal(fixture.dispatches.length, 0);
+      assertTelegramFence(fixture, null);
+      assert.equal(fixture.toasts.some((toast) => toast.kind === "success"), false);
+      fixture.lifetime!.unmount();
+      fixture.sdkSession("actor-a", "fixture-token-a"); fixture.auth({ user: { id: "actor-a" } });
+      fixture.workspace(REAL_DEMO_TEST_WORKSPACE); fixture.seedLibrary([LOCAL_LIBRARY_ROW_A]);
+      await fixture.library().callbacks.sendTelegram();
+      assert.equal(fixture.dispatches.length, 2); assertTelegramFence(fixture, "sent");
+      assert.equal(fixture.toasts.filter((toast) => toast.kind === "success").length, 1);
+    } finally { fixture.localStorage.setItem = setItem; fixture.lifetime!.unmount(); }
+  });
+}
+
 for (const details of [undefined, "malformed details", [null, "synthetic refusal", 123]] as const) {
   test(`G5C34 malformed Telegram details (${typeof details}) preserve the partial-delivery warning`, async () => {
     const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE); fixture.seedLibrary([LOCAL_LIBRARY_ROW_A]);
