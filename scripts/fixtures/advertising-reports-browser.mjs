@@ -35,7 +35,7 @@ const server=await createServer({configFile:false,root:frontend,envDir:false,app
   }
   if(url.search!=='?reports=concurrency'||req.socket?.encrypted){res.statusCode=403;res.end('Exact loopback report fixture opt-in required');return;}
   res.setHeader('Content-Type','text/html; charset=utf-8');res.setHeader('Cache-Control','no-store');
-  res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws://127.0.0.1:*; img-src 'self' data:; font-src 'self'; form-action 'none'; frame-src 'none'");
+  res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws://127.0.0.1:*; img-src 'self' data: blob:; font-src 'self'; form-action 'none'; frame-src 'none'");
   res.end(await vite.transformIndexHtml(url.pathname,`<!doctype html><html lang="ru"><head><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>Medina OS · тест HTTP отчётов</title></head><body><div id="root"></div><script type="module" src="/@fs/${entry.replaceAll('\\','/')}"></script></body></html>`));
  });}}],server:{host:'127.0.0.1',port,strictPort:true,cors:false,fs:{allow:[root]}}});
 await server.listen();server.printUrls();

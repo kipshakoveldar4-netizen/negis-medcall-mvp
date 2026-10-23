@@ -44,6 +44,7 @@ test('isolated report browser serves real transport, CSP and fake-only HTTP', {t
   assert.equal(response.headers.get('cache-control'),'no-store');
   assert.match(response.headers.get('content-security-policy'),/connect-src 'self' ws:\/\/127\.0\.0\.1:\*/);
   assert.doesNotMatch(response.headers.get('content-security-policy'),/https:/);
+  assert.match(response.headers.get('content-security-policy'),/img-src 'self' data: blob:;/);
   assert.match(response.headers.get('content-security-policy'),/form-action 'none'; frame-src 'none'/);
   assert.match(await response.text(),/noindex,nofollow/);
  }
