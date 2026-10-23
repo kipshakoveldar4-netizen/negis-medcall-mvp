@@ -12,6 +12,7 @@
     "preview:ads-reports": "node ./fixtures/advertising-reports-browser.mjs",
     "preview:media-delivery": "node ./fixtures/media-delivery-browser.mjs",
     "test:media-delivery-http": "node --test ./fixtures/media-delivery-http-store.test.mjs",
+    "test:ad-creative-access-postgres": "node --test ./fixtures/ad-creative-access-postgres.test.mjs",
     "test:ads-reports-http": "node --test ./fixtures/advertising-reports-http-store.test.mjs ./fixtures/advertising-reports-browser.test.mjs",
     "test:crm-browser-fixture": "node --import tsx --test ./fixtures/crm-browser.test.mjs ./fixtures/operator-browser-store.test.mjs ./fixtures/operator-dispatch-fixture.test.mjs ./fixtures/clinic-arrival-browser-store.test.mjs ./fixtures/appointment-create-browser-store.test.mjs ./fixtures/content-studio-browser-store.test.mjs ./fixtures/advertising-demo-browser-store.test.mjs",
     "preview:site-intake": "node --import tsx ./fixtures/site-intake-browser.mjs",
