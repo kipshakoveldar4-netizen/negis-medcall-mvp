@@ -1,0 +1,189 @@
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import { createRequire } from "node:module";
+import path from "node:path";
+import test from "node:test";
+import { fileURLToPath } from "node:url";
+import { Script } from "node:vm";
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+
+type LocalResponse = {
+  status(code: number): LocalResponse;
+  setHeader(name: string, value: string): LocalResponse;
+  json(payload: unknown): void;
+};
+type TelegramHandler = (
+  req: { body: Record<string, unknown> },
+  res: LocalResponse,
+  context: { workspaceId: string },
+) => Promise<unknown>;
+
+async function localHandler(dependencies: Record<string, unknown>, env: Record<string, string> = {
+  TELEGRAM_BOT_TOKEN: "synthetic-not-a-bot-token",
+  TELEGRAM_CHAT_ID: "-1007654321",
+}): Promise<TelegramHandler> {
+  const ts = createRequire(path.join(root, "package.json"))("typescript") as typeof import("typescript");
+  const select = async (relativePath: string, names: string[]) => {
+    const source = await readFile(path.join(root, relativePath), "utf8");
+    const ast = ts.createSourceFile(relativePath, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+    return names.map((name) => {
+      const matches = ast.statements.filter((node) => ts.isFunctionDeclaration(node) && node.name?.text === name);
+      assert.equal(matches.length, 1, `execute exactly one actual ${name} declaration`);
+      return matches[0].getText(ast);
+    }).join("\n");
+  };
+
+  // Select real declarations without loading provider, CRM, auth or app environment imports.
+  const source = [
+    await select("lib/content-studio/core.ts", ["telegramPackageText"]),
+    await select("api/content-studio/[...path].ts", [
+      "sendJson", "readBody", "splitLongText", "splitTelegramMessage",
+      "telegramHint", "readTelegramBody", "sendTelegramMessage", "handleSendTelegram",
+    ]),
+    "exports.selected = handleSendTelegram;",
+  ].join("\n");
+  const compiled = ts.transpileModule(source, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+  }).outputText;
+  const exported: { selected?: TelegramHandler } = {};
+  new Script(compiled, { filename: "telegram-partial-delivery.fixture.cjs" }).runInNewContext({
+    ...dependencies,
+    exports: exported,
+    process: { env: Object.freeze({ ...env }) },
+  }, { timeout: 1000 });
+  assert.equal(typeof exported.selected, "function");
+  return exported.selected!;
+}
+
+for (const isTest of [false, true]) {
+  test(`G5C14 blank Telegram config with videoId (${isTest ? "test:true" : "non-test"}) stays unsent without fetch or status writes`, async () => {
+    let fetches = 0;
+    const effects: string[] = [];
+    const handler = await localHandler({
+      async fetch() { fetches++; throw new Error("No provider request allowed"); },
+      updateContentVideo() { effects.push("local status write"); },
+      async persistContentVideoPatchIfAvailable() { effects.push("persistent status write"); },
+    }, { TELEGRAM_BOT_TOKEN: "", TELEGRAM_CHAT_ID: "" });
+    let status = 0;
+    const replies: unknown[] = [];
+    const response: LocalResponse = {
+      status(code) { status = code; return this; },
+      setHeader() { return this; },
+      json(payload) { replies.push(payload); },
+    };
+    await handler({ body: {
+      title: "Synthetic unsent package",
+      videoId: "33333333-3333-4333-8333-333333333333",
+      ...(isTest ? { test: true } : {}),
+    } }, response, { workspaceId: "11111111-1111-4111-8111-111111111111" });
+
+    assert.equal(status, 200);
+    assert.equal(replies.length, 1);
+    const reply = JSON.parse(JSON.stringify(replies[0])) as {
+      success: boolean; mode: string; warning?: string;
+      data: { sent: boolean; test: boolean; packageText: string };
+    };
+    assert.equal(reply.success, true); assert.equal(reply.mode, "demo");
+    assert.equal(reply.data.sent, false); assert.equal(reply.data.test, isTest);
+    assert.equal(typeof reply.data.packageText, "string"); assert.ok(reply.data.packageText);
+    assert.equal(typeof reply.warning, "string"); assert.ok(reply.warning);
+    assert.equal(fetches, 0);
+    assert.deepEqual(effects, [], "sent:false must not mark any local or persistent row telegram_ready");
+  });
+}
+
+test("G5C14 server stops after part 2/3 fails without retry, status writes or a delivery receipt", { timeout: 5000 }, async () => {
+  const calls: { chat_id: string; text: string }[] = [];
+  const effects: string[] = [];
+  let bodyReads = 0;
+  let finishFirst!: () => void;
+  const firstAcknowledgement = new Promise<void>((resolve) => { finishFirst = resolve; });
+  let markFirst!: () => void;
+  const firstStarted = new Promise<void>((resolve) => { markFirst = resolve; });
+  const description = "Too Many Requests: retry after 30";
+  const handler = await localHandler({
+    async fetch(url: string, init: { method: string; headers: Record<string, string>; body: string }) {
+      assert.equal(url, "https://api.telegram.org/botsynthetic-not-a-bot-token/sendMessage");
+      assert.equal(init.method, "POST");
+      assert.equal(init.headers["Content-Type"], "application/json");
+      const body = JSON.parse(init.body) as { chat_id: string; text: string };
+      calls.push(body);
+      const part = calls.length;
+      assert.ok(part <= 2, "no retry or third-part dispatch is allowed after the rejection");
+      assert.equal(body.chat_id, "-1007654321");
+      assert.deepEqual(Object.keys(body).sort(), ["chat_id", "text"]);
+      assert.ok(body.text.split("\n\n")[0].endsWith(` ${part}/3`));
+      return {
+        ok: part === 1,
+        status: part === 1 ? 200 : 429,
+        async text() {
+          bodyReads++;
+          if (part === 1) {
+            markFirst();
+            await firstAcknowledgement;
+            return JSON.stringify({ ok: true, result: {
+              message_id: 17, date: 0, chat: { id: -1007654321 }, text: body.text,
+            } });
+          }
+          return JSON.stringify({ ok: false, error_code: 429, description });
+        },
+      };
+    },
+    updateContentVideo() { effects.push("local status write"); },
+    async persistContentVideoPatchIfAvailable() { effects.push("persistent status write"); },
+  });
+  let status = 0;
+  const replies: unknown[] = [];
+  const headers: Record<string, string> = {};
+  const response: LocalResponse = {
+    status(code) { status = code; return this; },
+    setHeader(name, value) { headers[name] = value; return this; },
+    json(payload) { replies.push(payload); },
+  };
+  // Three paragraph-sized parts use the actual package formatter and splitter.
+  const body = {
+    title: "Synthetic partial delivery",
+    hook: "A".repeat(3200),
+    script: "B".repeat(3200),
+    caption: "C".repeat(3200),
+    videoId: "33333333-3333-4333-8333-333333333333",
+  };
+  const work = handler({ body }, response, { workspaceId: "11111111-1111-4111-8111-111111111111" });
+  try {
+    await Promise.race([firstStarted, work.then(() => assert.fail("handler must reach the held first acknowledgement"))]);
+    assert.equal(calls.length, 1, "part 2 must wait for the first acknowledgement body");
+    assert.deepEqual(effects, []);
+    assert.deepEqual(replies, [], "an in-flight delivery cannot issue a receipt");
+    finishFirst();
+    await work;
+
+    assert.equal(calls.length, 2, "part 1 is not repeated and part 3 is never attempted");
+    assert.equal(bodyReads, 2);
+    assert.ok(calls[0].text.includes(body.hook));
+    assert.ok(calls[1].text.includes(body.script));
+    assert.ok(calls.every((call) => !call.text.includes(body.caption)));
+    assert.deepEqual(effects, [], "partial delivery must not mark the package telegram_ready");
+    assert.equal(status, 502);
+    assert.equal(headers["Content-Type"], "application/json; charset=utf-8");
+    assert.equal(replies.length, 1);
+    const reply = JSON.parse(JSON.stringify(replies[0])) as Record<string, unknown>;
+    assert.deepEqual(reply, {
+      success: false,
+      error: "Telegram API request failed",
+      details: [`Part 2/3: ${description}`],
+      telegramDescription: description,
+      telegramErrorCode: 429,
+      status: 429,
+      part: 2,
+      totalParts: 3,
+      hint: reply.hint,
+    });
+    assert.equal(typeof reply.hint, "string");
+    assert.ok(reply.hint);
+    assert.equal("data" in reply, false, "never return sent:true or a full delivery receipt");
+  } finally {
+    finishFirst();
+    await work;
+  }
+});

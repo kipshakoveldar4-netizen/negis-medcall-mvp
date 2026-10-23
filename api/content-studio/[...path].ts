@@ -726,16 +726,6 @@ async function handleSendTelegram(req: VercelRequest, res: VercelResponse, conte
   const messageText = isTest ? "✅ Telegram подключён к Medina OS Content Studio" : packageText;
 
   if (!token || !chatId) {
-    if (typeof payload.videoId === "string") {
-      const patch = { status: "telegram_ready" as const };
-      updateContentVideo(payload.videoId, patch);
-      await persistContentVideoPatchIfAvailable({
-        videoId: payload.videoId,
-        workspaceId: context.workspaceId,
-        patch,
-      });
-    }
-
     return sendJson(res, 200, {
       success: true,
       mode: "demo",
