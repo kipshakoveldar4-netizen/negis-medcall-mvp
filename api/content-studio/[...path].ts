@@ -277,9 +277,14 @@ function readPathSegment(req: VercelRequest): string {
 }
 
 function splitLongText(text: string, maxLength: number): string[] {
+  if (!Number.isInteger(maxLength) || maxLength < 2) throw new RangeError("Invalid Telegram chunk size");
   const chunks: string[] = [];
-  for (let index = 0; index < text.length; index += maxLength) {
-    chunks.push(text.slice(index, index + maxLength));
+  for (let index = 0; index < text.length;) {
+    let end = Math.min(index + maxLength, text.length);
+    const before = text.charCodeAt(end - 1), after = text.charCodeAt(end);
+    if (end < text.length && before >= 0xd800 && before <= 0xdbff && after >= 0xdc00 && after <= 0xdfff) end--;
+    chunks.push(text.slice(index, end));
+    index = end;
   }
   return chunks;
 }

@@ -187,3 +187,45 @@ test("G5C14 server stops after part 2/3 fails without retry, status writes or a 
     await work;
   }
 });
+
+for (const outcome of ["success", "network-failure", "invalid-ack"] as const) {
+  test(`G5C34 long Unicode package: ${outcome}, ordered chunks and no automatic retry`, async () => {
+    const calls: { chat_id: string; text: string }[] = [], effects: string[] = [];
+    const handler = await localHandler({
+      async fetch(_url: string, init: { body: string }) {
+        const body = JSON.parse(init.body) as { chat_id: string; text: string };
+        calls.push(body);
+        assert.ok(body.text.length <= 4096);
+        for (let offset = 0; offset < body.text.length; offset++) {
+          const unit = body.text.charCodeAt(offset);
+          if (unit >= 0xd800 && unit <= 0xdbff) {
+            const next = body.text.charCodeAt(++offset);
+            assert.ok(next >= 0xdc00 && next <= 0xdfff, "no surrogate half crosses the provider boundary");
+          } else assert.ok(unit < 0xdc00 || unit > 0xdfff);
+        }
+        if (calls.length === 2 && outcome === "network-failure") throw Error("Synthetic connection lost after the first acknowledgement");
+        return { ok: true, status: 200, async text() {
+          return JSON.stringify(calls.length === 2 && outcome === "invalid-ack" ? { ok: true } : {
+            ok: true, result: { message_id: calls.length, date: 0, chat: { id: -1007654321 }, text: body.text },
+          });
+        } };
+      },
+      updateContentVideo() { effects.push("local"); },
+      async persistContentVideoPatchIfAvailable() { effects.push("persistent"); },
+    });
+    let status = 0; let reply: any;
+    const response: LocalResponse = { status(code) { status = code; return this; }, setHeader() { return this; }, json(body) { reply = body; } };
+    await handler({ body: { title: "QA long Unicode", script: "A".repeat(3499) + "\uD83D\uDE00" + "B".repeat(3501),
+      videoId: "33333333-3333-4333-8333-333333333333" } }, response, { workspaceId: "11111111-1111-4111-8111-111111111111" });
+    assert.ok(calls.length >= 2);
+    assert.equal(new Set(calls.map(call => call.text)).size, calls.length);
+    calls.forEach((call, index) => assert.ok(call.text.split("\n\n")[0].includes(`часть ${index + 1}/`)));
+    if (outcome === "success") {
+      assert.equal(status, 200); assert.equal(reply.data.sent, true); assert.equal(reply.data.parts, calls.length);
+      assert.deepEqual(effects, ["local", "persistent"]);
+    } else {
+      assert.equal(status, 502); assert.equal(calls.length, 2, "never repeat part one or dispatch part three after failure");
+      assert.equal(reply.success, false); assert.equal(reply.data, undefined); assert.deepEqual(effects, []);
+    }
+  });
+}

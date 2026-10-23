@@ -45,6 +45,10 @@ import {
   type PaidGenerationAttempt,
   type PaidGenerationKind,
 } from "../../../../lib/content-studio/paid-generation";
+import {
+  reserveTelegramDelivery, confirmTelegramDelivery, releaseUnsentTelegramDelivery,
+  type TelegramDeliveryReceipt,
+} from "../../../../lib/content-studio/telegram-delivery-guard";
 
 type ContentVideoStatus = "idea" | "script_ready" | "avatar_ready" | "telegram_ready";
 
@@ -105,6 +109,8 @@ type ApiResponse<TData> =
       telegramDescription?: string;
       telegramErrorCode?: number;
       status?: number;
+      part?: number;
+      totalParts?: number;
       hint?: string;
       code?: string;
     };
@@ -743,8 +749,13 @@ function parseTelegramResponse(value: unknown, mode: string, test: boolean, pack
 
 function telegramErrorMessage<TData>(body: ApiResponse<TData> | null, fallback: string) {
   if (body?.success === false) {
-    const description = body.details?.filter(Boolean).join(", ") || body.telegramDescription || body.error;
-    return `${fallback}: ${description}${body.hint ? `. ${body.hint}` : ""}`;
+    const text = (value: unknown) => typeof value === "string" ? value.trim() : "";
+    const details = Array.isArray(body.details) ? body.details.map(text).filter(Boolean).join(", ") : "";
+    const description = details || text(body.telegramDescription) || text(body.error);
+    const part = Number.isSafeInteger(body.part) && Number.isSafeInteger(body.totalParts)
+      && body.part! > 0 && body.part! <= body.totalParts! ? `Часть ${body.part}/${body.totalParts}. ` : "";
+    const hint = text(body.hint);
+    return `${fallback}: ${part}${description || "Ответ сервера не подтверждён"}${hint ? `. ${hint}` : ""}`;
   }
 
   return fallback;
@@ -2640,6 +2651,7 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
     const kind = test ? "telegram-test" : "telegram";
     let started = false;
     let delivered = false;
+    let receipt: TelegramDeliveryReceipt | null = null;
     const denyAccess = () => {
       const message = "Доступ к Telegram отозван. Обновите страницу.";
       setNotice(message);
@@ -2662,6 +2674,13 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
       setLoading(kind);
       started = true;
       setNotice("");
+      if (!test && active) {
+        receipt = await reserveTelegramDelivery({
+          storage: window.localStorage, locks: navigator.locks, actorId, workspaceId,
+          videoId: active.id, packageText: buildTelegramPackage(active), isCurrent: () => isLibraryWriteCurrent(write),
+        });
+        if (!await isLibraryWriteVerified(write)) return;
+      }
       const response = await crmFetch(`/api/content-studio/send-telegram?workspaceId=${encodeURIComponent(workspaceId)}`, {
         expectedUserId: actorId, dispatchGuard: () => isLibraryWriteCurrent(write), signal: write.session.signal,
         method: "POST",
@@ -2669,6 +2688,7 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
         body: JSON.stringify(test ? { test: true } : active),
       });
       if (handoffAccessDenied(response)) {
+        if (receipt) releaseUnsentTelegramDelivery(window.localStorage, receipt);
         if (await isLibraryWriteVerified(write)) denyAccess();
         return;
       }
@@ -2683,6 +2703,7 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
       delivered = result.sent;
       if (body.warning !== undefined && typeof body.warning !== "string") throw new Error("Сервер вернул неполные данные Telegram.");
       if (!result.sent) {
+        if (receipt) releaseUnsentTelegramDelivery(window.localStorage, receipt);
         const message = body.warning || "Telegram не подключён. Пакет доступен только для копирования; сообщение не отправлено.";
         setNotice(message);
         toast.warning(message);
@@ -2693,6 +2714,7 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
         toast.success("Telegram подключён");
         return;
       }
+      if (receipt) confirmTelegramDelivery(window.localStorage, receipt);
       const saved = await applyCurrentVideoPatch({ status: "telegram_ready" }, write);
       if (!await isLibraryWriteVerified(write)) return;
       const published = write.published?.videos.find((video) => video.id === active?.id);
