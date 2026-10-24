@@ -127,6 +127,7 @@ const compiled = (async () => {
     page: compile(page, pagePath, true), wrapped: page.includes("function AdvertisingHubSession("),
     api: compile(await readFile(path.join(root, "artifacts/negis/src/lib/api.ts"), "utf8"), "api.ts"),
     auth: compile(await readFile(path.join(root, "artifacts/negis/src/lib/serverAuth.ts"), "utf8"), "serverAuth.ts"),
+    signOut: compile(await readFile(path.join(root, "artifacts/negis/src/lib/authSignOut.ts"), "utf8"), "authSignOut.ts"),
     brief: compile(await readFile(path.join(root, "lib/advertising/campaignBrief.ts"), "utf8"), "campaignBrief.ts"),
     insights: compile(await readFile(path.join(root, "artifacts/negis/src/lib/metaInsightsHistory.ts"), "utf8"), "metaInsightsHistory.ts"),
   };
@@ -282,6 +283,7 @@ async function fixture(t: TestContext, options: {
   const historyReads: string[] = [];
   const navigations: string[] = [];
   const notifications: unknown[][] = [];
+  const signOutStorage = new Map<string, string>();
   let holdTokens = options.holdTokens ?? false;
   let activeDriver = driver();
   const outer = driver();
@@ -328,14 +330,20 @@ async function fixture(t: TestContext, options: {
   function evaluate<T>(source: string, filename: string, require: (name: string) => unknown) {
     const exports = {} as T;
     const storage = {
-      getItem: () => unexpected("localStorage read"),
-      setItem: (key: string, value: string) => { writes.push({ key, value }); },
-      removeItem: () => unexpected("localStorage removal"),
+      getItem: (key: string) => key === "negis_signout_pending_v1" ? signOutStorage.get(key) ?? null : unexpected("localStorage read"),
+      setItem: (key: string, value: string) => {
+        if (key === "negis_signout_pending_v1") signOutStorage.set(key, value);
+        else writes.push({ key, value });
+      },
+      removeItem: (key: string) => {
+        if (key === "negis_signout_pending_v1") signOutStorage.delete(key);
+        else unexpected("localStorage removal");
+      },
     };
     new Script(source, { filename }).runInNewContext({
       exports, require, Error, DOMException, AbortController, AbortSignal, Headers, Response, Date: FixtureDate,
       localStorage: storage,
-      window: { location: { origin: "https://simulation.invalid" }, localStorage: storage },
+      window: { location: { origin: "https://simulation.invalid" }, localStorage: storage, sessionStorage: storage },
       fetch(url: string, init: RequestInit) {
         assert.match(url, /^\/api\/crm\/(meta-launches|auth-context|meta-insights-history|advertising-outcomes)\?workspaceId=/);
         assert.equal(init.method ?? "GET", "GET", "The Hub fixture allows read-only HTTP only");
@@ -373,8 +381,13 @@ async function fixture(t: TestContext, options: {
     });
     return exports;
   }
+  const signOut = evaluate<{
+    isSignOutPending(): boolean; getSignOutRevision(): number; markSignOutPending(): void; clearSignOutPending(): boolean;
+  }>(code.signOut, "authSignOut.simulation.cjs", unexpected);
   const serverAuth = evaluate<{ getSupabaseAccessToken(expected?: string): Promise<string> }>(code.auth, "serverAuth.simulation.cjs", (name) => {
-    if (name === "@/lib/authSignOut") return { isSignOutPending: () => auth.isSigningOut, getSignOutRevision: () => 0 };
+    if (name === "@/lib/authSignOut") return {
+      isSignOutPending: () => auth.isSigningOut || signOut.isSignOutPending(), getSignOutRevision: signOut.getSignOutRevision,
+    };
     assert.equal(name, "@/lib/supabase");
     return { hasSupabaseFrontendEnv: true, supabase };
   });
@@ -394,6 +407,7 @@ async function fixture(t: TestContext, options: {
     if (name === "@/contexts/AuthContext") return { useAuth: () => auth };
     if (name === "@/lib/api") return api;
     if (name === "@/lib/serverAuth") return serverAuth;
+    if (name === "@/lib/authSignOut") return signOut;
     if (name === "@/lib/metaInsightsHistory") return insightsPayload;
     if (name === "@/lib/supabase") return { hasSupabaseFrontendEnv: true, supabase };
     if (name === "wouter") return { Link: Symbol("Link"), useLocation: () => ["/advertising", (next: string) => navigations.push(next)] };
@@ -449,7 +463,7 @@ async function fixture(t: TestContext, options: {
   });
   await flush();
   return {
-    calls, writes, historyReads, navigations, notifications, sdk, flush, render, dispose, initialSessions,
+    calls, writes, historyReads, navigations, notifications, sdk, flush, render, dispose, initialSessions, signOut,
     get view() { return inner!.view; }, get key() { return innerKey; },
     get lifetime() { return retired.length; },
     get listenerCount() { return listeners.size; },
@@ -1231,6 +1245,69 @@ for (const [name, roleFields] of [
     assert.ok(String(f.view.insightsMessage).length > 0);
     assert.ok(String(f.view.crmOutcomesMessage).length > 0);
     assert.equal(f.view.loadState, "ready");
+    assert.equal(f.lateWrites(), 0);
+  });
+}
+
+for (const mode of ["owner", "demo"] as const) {
+  for (const destination of ["/ads-automation", "/content-studio"]) {
+    for (const phase of ["pending", "cleared"] as const) {
+      test(`H31 ${mode} retained ${destination} handler refuses ${phase} sign-out before render or SDK event`, async (t) => {
+        const f = await fixture(t, mode === "demo" ? {
+          auth: { clinicId: "demo-workspace", isDemoMode: true },
+        } : {});
+        await setGoal(f);
+        const prepare = f.view.prepareCampaign as (destination: string) => void;
+        prepare(destination);
+        assert.equal(f.writes.length, 1, "Positive control: the current goal can be handed off");
+        assert.deepEqual(f.navigations, [destination]);
+        const key = f.key, calls = f.calls.length, lookups = f.sdk.lookups;
+        const revision = f.signOut.getSignOutRevision();
+        f.signOut.markSignOutPending();
+        assert.equal(f.signOut.getSignOutRevision(), revision + 1);
+        if (phase === "cleared") assert.equal(f.signOut.clearSignOutPending(), true);
+        assert.equal(f.signOut.isSignOutPending(), phase === "pending");
+        // Keep the committed view and SDK actor unchanged across the immediate fence.
+        prepare(destination);
+        assert.equal(f.key, key);
+        assert.equal(f.writes.length, 1, "A pre-sign-out handler must not write another brief");
+        assert.deepEqual(f.navigations, [destination], "A pre-sign-out handler must not navigate");
+        assert.equal(f.calls.length, calls);
+        assert.equal(f.sdk.lookups, lookups);
+
+        f.changeNow({ isSigningOut: true });
+        assert.equal(f.signOut.clearSignOutPending(), true);
+        await f.change({ isSigningOut: false });
+        await setGoal(f);
+        prepare(destination);
+        assert.equal(f.writes.length, 1, "Recovery must not revive the retired handler");
+        f.invoke("prepareCampaign", destination);
+        assert.equal(f.writes.length, 2, "A fresh same-identity screen can prepare a new brief");
+        assert.deepEqual(f.navigations, [destination, destination]);
+      });
+    }
+  }
+}
+
+for (const phase of ["pending", "cleared"] as const) {
+  test(`H32 held report bodies cannot publish across ${phase} sign-out before context or SDK change`, async (t) => {
+    const f = await fixture(t);
+    const gate = deferred<void>();
+    t.after(() => gate.resolve());
+    f.take("meta-launches").answer({ launches: [launch()] }, 200, gate.promise);
+    await allowPrivate(f);
+    for (const resource of resources) f.take(resource).answer(resourceData(resource), 200, gate.promise);
+    await f.flush();
+    assertPrivateEmpty(f);
+    assert.equal(rows(f.view.launches).length, 0);
+    const key = f.key, calls = f.calls.length;
+    f.signOut.markSignOutPending();
+    if (phase === "cleared") assert.equal(f.signOut.clearSignOutPending(), true);
+    gate.resolve(); await f.flush();
+    assert.equal(f.key, key, "No context change, SDK event or keyed remount invalidates these replies");
+    assertPrivateEmpty(f);
+    assert.equal(rows(f.view.launches).length, 0);
+    assert.equal(f.calls.length, calls);
     assert.equal(f.lateWrites(), 0);
   });
 }

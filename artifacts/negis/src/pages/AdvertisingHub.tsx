@@ -23,6 +23,7 @@ import { PageHeader } from "@/components/ui/page-header";
 import { MetricCard } from "@/components/ui/metric-card";
 import { useAuth } from "@/contexts/AuthContext";
 import { crmFetch } from "@/lib/api";
+import { getSignOutRevision, isSignOutPending } from "@/lib/authSignOut";
 import { isRealWorkspace, readDemoStorage, readWorkspaceId, workspaceScopedKey } from "@/lib/demoStorage";
 import { getSupabaseAccessToken } from "@/lib/serverAuth";
 import { hasSupabaseFrontendEnv, supabase } from "@/lib/supabase";
@@ -472,6 +473,7 @@ function AdvertisingHubSession({ actorId, observedSdkActorId, workspaceId, local
   const [, setLocation] = useLocation();
   const productionWorkspace = isRealWorkspace(workspaceId);
   const sessionRef = useRef<AbortController | null>(null);
+  const signOutRevisionRef = useRef(getSignOutRevision());
   useLayoutEffect(() => {
     const session = new AbortController();
     sessionRef.current = session;
@@ -490,7 +492,8 @@ function AdvertisingHubSession({ actorId, observedSdkActorId, workspaceId, local
 
   function isSessionAlive(session: AbortController | null): session is AbortController {
     // The keyed lifetime follows verified membership even when selector storage is unavailable.
-    return Boolean(actorId && session && sessionRef.current === session && !session.signal.aborted);
+    return Boolean(actorId && session && sessionRef.current === session && !session.signal.aborted
+      && !isSignOutPending() && signOutRevisionRef.current === getSignOutRevision());
   }
 
   function sessionFetch(session: AbortController | null, endpoint: string, accessToken?: string) {
@@ -536,7 +539,8 @@ function AdvertisingHubSession({ actorId, observedSdkActorId, workspaceId, local
 
   function prepareCampaign(destination: CampaignGoalDestination) {
     const session = sessionRef.current;
-    if (!session || session.signal.aborted || readWorkspaceId() !== workspaceId || (!actorId && !localDraftsOnly)) return;
+    if (!session || session.signal.aborted || isSignOutPending() || signOutRevisionRef.current !== getSignOutRevision()
+      || readWorkspaceId() !== workspaceId || (!actorId && !localDraftsOnly)) return;
     if (!goalPlan.ready || goalPlan.dailyBudget === null) {
       setCampaignGoalError("Укажите услугу, число пациентов, период до 90 дней и максимальный бюджет.");
       return;
