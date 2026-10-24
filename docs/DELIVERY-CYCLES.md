@@ -3794,7 +3794,7 @@ workers, всего 14 разных субагентов, с повторным 
 | G1/G8 вход | Старый Login.submit мог вызвать signOut после смены SDK actor; 401/403/повреждённый профиль ошибочно считались пустым членством | 2584b06 готов локально: actual-handler 25/25. Это не объяснение неверного пароля в C45 |
 | G1 операторы | operatorApi ждал JSON уже известного 401/403 и задерживал скрытие контакта/формы | f3417f8 готов локально: 46 новых composed/transport случаев, с transport 75/75 |
 | G2 календарь | Вместимость считала одноимённого чужого специалиста; recovery открывал день очищенной формы | aa57117 локально: новый actual набор 9/9, с прежним capacity 31/31; соседние action-наборы 317/317 с пересечением, не суммировать |
-| G3 аналитика | При одинаковом количестве строк постраничное чтение может смешать статусы разных моментов | Воспроизведено на fake SDK, 501 строке; нужен настоящий согласованный snapshot, не повторный счётчик или формальный зелёный тест |
+| G3 аналитика | При одинаковом количестве строк постраничное чтение смешивало статусы разных моментов | 426921e / G3-C6: один DB snapshot с private STABLE audit-helper; локальные 802 и native PostgreSQL 31 прошли. 083 не применена в облаке; разные блоки всей страницы аналитики не объявлены единым snapshot |
 | G5 история | Непроверенный локальный cache, устаревшая публикация списка и malformed → ложная пустота | 3707e6c готов локально: 55 новых случаев и соседние наборы 235/235; настоящий React/native HTTP принят для выбранных 403/401 на desktop/375. Meta flow/кампании не меняются |
 | G5 контент | C46 catches закрыты, но helper improveAdText переносил внутреннюю ошибку в result.refusal | C47 d3e49e8 готов локально, 11/11 с настоящей цепочкой helper/provider. usage summaries/warnings прослежены до фиксированных сообщений и счётчиков |
 | G5 JPEG/файлы | Metadata POST/PATCH обходили часть image-валидации; manual JPEG принимал labels без проверки байтов | bab4378 / G5-C50 закрывает выбранные metadata/manual-multipart пути локально. Signed-upload byte verification, generated-media и Linux/Preview acceptance остаются. Публичные CDN URL не объявлены private-access/SSRF-уязвимостью без доказательства |
@@ -3965,6 +3965,139 @@ upload/generated-media и coherent analytics snapshot. Последние два
 Логи: `node_modules/.cache/creative-safety-combined-20261025.log` и
 `creative-safety-build-final-20261025.log`. Прежний Preview остаётся
 **6c11l89kr/f18f411**; bab4378 туда ещё не перенесён.
+
+### Цикл G3-C6: согласованная сводка команды — готова только локально, 25 октября
+
+Runtime/SQL/tests commit **426921e**. В этом проходе main организовал шесть
+разных субагентов: API-контракт, native PostgreSQL, frontend-инвентарь,
+dependency reachability/characterization, узкий release inventory и consent proof.
+Сложные SQL/API и решения выпуска оставались у main; субагент писал только
+отдельный PG fixture, не миграцию. Все исполнители после приёмки закрыты.
+
+- `lead-team-analytics` больше не собирает независимые страницы. Один
+  service-only `read_lead_team_analytics` получает только проверенные
+  workspace/staff/auth ID и 7/30/90. 070 заново проверяет текущую роль,
+  членство и ипотечный профиль с FOR SHARE; только owner/admin.
+- **083** проверяет зависимости 029/070 и core schema. Business SELECT читает
+  staff/stages/leads в одном MVCC snapshot. Private STABLE audit-helper
+  наследует именно этот snapshot, не делает новую независимую выборку.
+  Helper недоступен даже service_role напрямую; он вызывается только definer RPC.
+  Ошибка/переполнение журнала сохраняет полную нагрузку и возвращает
+  `unavailable`/null activity, не выдуманный ноль.
+- Cap+1: 1001 staff/stages, 20001 leads, 30001 events. Core overflow отказывает
+  целиком; событие с неверным entity ID у включённого сотрудника делает activity
+  недоступной. Inactive staff, роли owner/admin и записанный actor сохранены;
+  удалённая заявка не удаляет её историческую активность. UUID события trim/lower
+  нормализуется для distinct, не считается дважды из-за регистра.
+- Structured stage имеет приоритет; точные русские/английские aliases и
+  postponed/deferred сохранены. Native C locale выявила отличие от JS:
+  SQL lower не распознавал uppercase Cyrillic. Main заменил его явным
+  ASCII/Russian enum folding и сохранил ECMAScript whitespace trim, включая
+  NBSP/BOM. Исправление проверено, assertion не удалён.
+- API сверяет internal workspace receipt, счётчики/суммы, уникальные ID,
+  activity и точный период; строит новый allowlist DTO без raw extras. Время
+  приходит из DB statement anchor, нормализуется в ISO; February 30 отвергается,
+  а не переносится в март. Длительность — 24-часовые сутки, не DST calendar days.
+  Нет fallback к старой пагинации/таблицам при ошибке или отсутствии RPC.
+  Missing schema — безопасный 503, DB отказ — 403, прочий неполный ответ — 502.
+
+API regression: **325/325**, baseline bdc642f — 278 fail / 47 pass. Старые
+проверки mechanics paging заменены RPC completeness checks; прежняя бизнес-
+семантика перенесена в настоящий PG fixture, не в fake SQL implementation.
+Ошибка ожидания `invalid_filter` исправлена на прежний публичный
+`invalid_period`; runtime не подгонялся под первоначальную неточную подсказку.
+Единый main run API/UI/tenant/transport/legal: **802/802**, exit=0, без skips.
+Повторяющиеся подмножества 325/317/21 отдельно не прибавляются.
+
+Native PostgreSQL 17.11: **31/31 включая parent, 30 subtests**, exit=0.
+Настоящие 009/010/011/014/019/028/029/038/069/070, только settings DDL 013,
+083 и отдельный optional 080. Восемь наблюдаемых lock-interleavings меняют
+601 заявку, staff, stage и audit при том же количестве: каждый отчёт целиком
+одного состояния. Проверены оба порядка membership/purpose revocation,
+границы периодов, caps, повторная миграция, service-only grants, outage/recovery.
+Main добавил actual-handler → настоящий service-role PG RPC → normalized DTO
+и отказ при подменённом auth ID. 083 SHA-256:
+`c02a4a5a41fee140cc592550e649ba20670d28af64b4f6eaea86175279e2418c`.
+Кластер остановлен/удалён в finally; main подтвердил ноль run directories.
+
+Полные typecheck/build и **115 cold-start** прошли. Fixture включён в
+`test:lead-team-analytics-postgres`; запуск только на собственном disposable
+сервере, без URL/облачного fallback. Логи `node_modules/.cache/analytics-snapshot-`
+`{combined,postgres-final,build}-20261025.log`. Это не облачная приёмка.
+083 в Supabase не применялась, Preview/Production не получали 426921e.
+Другие блоки MortgageAnalytics читаются отдельно и не объявлены общим snapshot.
+Следующие остатки G3/G6: облачная приёмка и paused/lost-response подписки.
+Основание snapshot:
+[PostgreSQL isolation](https://www.postgresql.org/docs/17/transaction-iso.html),
+[STABLE visibility](https://www.postgresql.org/docs/17/xfunc-volatility.html).
+
+### Цикл G7-C20: узкий кандидат файлов — подготовлен локально, Preview ещё не создан, 25 октября
+
+- Повторно использован чистый release-worktree на f18f411. Только bab4378
+  перенесён как **54976b0**, затем test-only **ec9f3d8** убрал обязательное
+  извлечение чужого SaleRequestError из harness. Его нет на старой базе и он
+  не относится к metadata. Все 73 assertions сохранены; соответствующая правка
+  в основной ветке — **fde667e**. Один import-конфликт решён main без переноса
+  calendar helper и без остальных накопленных исправлений.
+- Кандидат `ec9f3d880d96dd3eefdcecf9ce994fbefa35230c`: ровно 11 C50 файлов
+  поверх f18f411, чистый Git status, без 083, аккаунтов, данных и миграций.
+  Frozen install без lifecycle scripts, **1327/1327** на этом отдельном дереве,
+  полный build/typecheck и **115 cold-start**, exit=0. Прежние sourcemap/import
+  и большой legacy frontend chunk warnings сохраняются. Это не root 1345.
+- Официальный CLI 63.1.2 подтвердил вход и прежний project ID
+  `prj_CamDc1FHcejoVViq5wjq7BbNiyci`, root `.` и Node **24.x**. Нового проекта,
+  .vercel/project.json, link/pull или env-файла не создавалось. Node minimum
+  content-type выполнен; Linux native Sharp/реальный packaged function ещё
+  не проверены. Windows tracing не заменяет эту приёмку.
+- **Публикация остановлена до создания deployment.** Read-only `env run`
+  именно Preview/ветки `codex/ads-quota-preview-20261023` проверил только
+  признаки наличия и разрешённый hostname в памяти: SUPABASE_URL,
+  VITE/NEXT_PUBLIC URL, server key и public key отсутствуют. Независимый
+  `env ls preview <branch>` подтвердил `No Environment Variables found`.
+  Значения ключей не выводились/не сохранялись; настройки не менялись.
+  Это не истёкший вход и не разрешение брать Production environment.
+- Для следующего выпуска нужно восстановить доказанное тестовое подключение
+  только в test/Preview scope либо поддерживаемый per-deployment механизм,
+  затем проверить Linux package и аутентифицированный decoder. Нельзя считать
+  старый 6c11 snapshot доказательством текущих branch settings и нельзя
+  использовать один githubCommitRef без provider marker.
+  CLI использует локальные файлы, не только Git tree; у него .gitignore не
+  является source allowlist. В этом checkout найдены только .env.example,
+  но перед отправкой нужен точный manifest, без generated/secret файлов.
+  Справки: [branch association](https://vercel.com/docs/cli/deploy#associate-a-cli-deployment-with-a-git-branch),
+  [Preview precedence](https://vercel.com/docs/environment-variables#preview-environment-variables).
+
+Текущий облачный Preview остаётся **6c11l89kr/f18f411**. Нового URL/READY
+не заявлено. Production, Baspana, салоны, WhatsApp и расходы не затронуты.
+Логи отдельного checkout: `node_modules/.cache/creative-candidate-final-tests.log`
+и `creative-candidate-54976b0-build.log`. Последний имеет имя runtime-кандидата,
+а последующая правка ec9f3d8 меняет только harness, не runtime/build source.
+
+### Цикл G8-C4: consent/dependency доказательства — диагностические, не готовность, 25 октября
+
+**6aa978f**, только tests/команды. Шесть actual renderer/form/handler cases
+показали одинаковый notice при разных version labels и существующий fail-closed
+отказ неподходящей версии. Это доказательство незавершённого L2, не исправление
+и не утверждение текста владельцем. С legal parity — 21/21, включены в общий
+802. Нужна утверждённая связь версия → текст/цель; историю задним числом не меняли.
+
+Lock/source review подтвердил единственный retaining chain
+`@vercel/node@5.8.17 → undici@5.29.0 → @fastify/busboy@2.1.1`. Package остаётся
+в dependencies, но application imports @vercel/node — type-only; приложению
+не найдены Undici imports или formData calls. Изученный dev-forwarder использует
+request/arrayBuffer, не Fetch formData. Это ограниченная локальная достижимость,
+не гарантия поведения опубликованного окружения и не отмена advisory match.
+
+Новый изолированный characterization fixture: **64/64**, exit=0, actual Undici,
+in-memory parser substitution 2.1.1/3.2.4, binary/chunked/base64, duplicate fields,
+quoted boundary, abort/truncation, prototype headers, CR/LF, oversized boundary
+и watchdogs. **Обе версии воспроизводят fatal unhandled truncated-file error**:
+тест ожидает exit=1 дочернего процесса и не засчитывает это как безопасный отказ.
+64 green означает точное описание поведения, не исправление/безопасность parser.
+Это отдельная команда `test:undici-parser-characterization`, не release gate.
+Override/обновление Undici/Busboy в этом проходе не применялись, lock неизменён.
+Реальных запросов, публикаций правовых текстов и изменений рабочей защиты нет.
+Лог: `node_modules/.cache/undici-parser-characterization-20261025.log`.
 
 ### Цикл G2-C13: статус «Отложенные» — готов только локально, 22 октября
 
