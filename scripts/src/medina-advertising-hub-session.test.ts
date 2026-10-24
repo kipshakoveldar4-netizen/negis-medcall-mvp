@@ -155,6 +155,7 @@ function driver() {
   let tree: View;
   let component: () => View;
   let lateWrites = 0;
+  let stateChanges = 0;
   function slot<K extends Slot["kind"]>(kind: K, create: () => Extract<Slot, { kind: K }>) {
     const index = cursor++;
     if (!slots[index]) slots[index] = create();
@@ -175,7 +176,7 @@ function driver() {
           set(update) {
             if (!alive) { lateWrites++; return; }
             const next = typeof update === "function" ? (update as (x: unknown) => unknown)(value.value) : update;
-            if (!Object.is(next, value.value)) { value.value = next; dirty = true; }
+            if (!Object.is(next, value.value)) { value.value = next; dirty = true; stateChanges++; }
           },
         };
         return value;
@@ -222,6 +223,7 @@ function driver() {
       alive = false;
     },
     get view() { return tree; }, get lateWrites() { return lateWrites; },
+    get stateChanges() { return stateChanges; },
   };
 }
 
@@ -286,7 +288,7 @@ async function fixture(t: TestContext, options: {
   const signOutStorage = new Map<string, string>();
   let holdTokens = options.holdTokens ?? false;
   let activeDriver = driver();
-  const outer = driver();
+  let outer = driver();
   let inner: ReturnType<typeof driver> | undefined;
   let innerKey: unknown = Symbol("unmounted");
   let mounted = true;
@@ -456,6 +458,12 @@ async function fixture(t: TestContext, options: {
     outer.dispose();
     mounted = false;
   }
+  function changeBeforeRender(patch: Partial<Auth>) {
+    Object.assign(auth, patch);
+    if (Object.hasOwn(patch, "clinicId")) selector = auth.clinicId ?? "demo-workspace";
+    if (Object.hasOwn(patch, "user")) emit(auth.user?.id ?? "");
+    outer.force(); inner?.force();
+  }
   t.after(() => {
     dispose();
     holdTokens = false;
@@ -470,6 +478,7 @@ async function fixture(t: TestContext, options: {
     get listenerRegistrations() { return listenerRegistrations; },
     get listenerUnsubscriptions() { return listenerUnsubscriptions; },
     get pendingInitialCallbacks() { return pendingInitialCallbacks; },
+    get sessionStateChanges() { return inner!.stateChanges; },
     lateWrites: () => retired.reduce((sum, item) => sum + item.lateWrites, 0) + (inner?.lateWrites ?? 0),
     matching(part: string) { return calls.filter((call) => call.url.includes(`/${part}?`)); },
     take(part: string) {
@@ -483,12 +492,19 @@ async function fixture(t: TestContext, options: {
       return (fn as (...values: unknown[]) => unknown)(...args);
     },
     changeNow(patch: Partial<Auth>) {
-      Object.assign(auth, patch);
-      if (Object.hasOwn(patch, "clinicId")) selector = auth.clinicId ?? "demo-workspace";
-      if (Object.hasOwn(patch, "user")) emit(auth.user?.id ?? "");
-      outer.force(); inner?.force(); render();
+      changeBeforeRender(patch); render();
     },
+    changeBeforeRender,
     async change(patch: Partial<Auth>) { this.changeNow(patch); await flush(); },
+    async remount() {
+      assert.ok(mounted, "Only a mounted route can be replaced");
+      inner!.dispose(); retired.push(inner!);
+      inner = undefined;
+      outer.dispose();
+      outer = driver();
+      outer.mount(code.wrapped ? page.default : () => ({}));
+      await flush();
+    },
     async changeSelector(value: string) {
       selector = value;
       outer.force(); inner?.force(); await flush();
@@ -1310,4 +1326,186 @@ for (const phase of ["pending", "cleared"] as const) {
     assert.equal(f.calls.length, calls);
     assert.equal(f.lateWrites(), 0);
   });
+}
+
+for (const mode of ["owner", "demo"] as const) {
+  for (const destination of ["/ads-automation", "/content-studio"]) {
+    test(`H33 ${mode} ${destination} stays fenced across batched sign-out and recovers only in a fresh route`, async (t) => {
+      const f = await fixture(t, mode === "demo" ? {
+        auth: { clinicId: "demo-workspace", isDemoMode: true },
+      } : {});
+      await setGoal(f);
+      const prepare = f.view.prepareCampaign as (destination: string) => void;
+      prepare(destination);
+      assert.equal(f.writes.length, 1, "Positive control: the committed handler works before sign-out");
+      const key = f.key, lifetime = f.lifetime, view = f.view;
+      const calls = f.calls.length, lookups = f.sdk.lookups;
+      const registrations = f.listenerRegistrations, revision = f.signOut.getSignOutRevision();
+
+      f.signOut.markSignOutPending();
+      f.changeBeforeRender({ isSigningOut: true });
+      prepare(destination);
+      assert.equal(f.writes.length, 1);
+      assert.equal(f.signOut.clearSignOutPending(), true);
+      f.changeBeforeRender({ isSigningOut: false });
+      prepare(destination);
+      assert.equal(f.signOut.getSignOutRevision(), revision + 1);
+      assert.equal(f.signOut.isSignOutPending(), false);
+      assert.equal(f.sdk.actor, "A", "No SDK actor event supplies an alternate invalidation path");
+      assert.equal(f.view, view, "Neither pending nor cleared context state has committed");
+      assert.equal(f.key, key);
+      assert.equal(f.lifetime, lifetime);
+      assert.equal(f.listenerRegistrations, registrations);
+      assert.equal(f.writes.length, 1, "Clearing pending cannot revive the committed handler");
+      assert.deepEqual(f.navigations, [destination]);
+      assert.equal(f.calls.length, calls);
+      assert.equal(f.sdk.lookups, lookups);
+
+      await f.flush();
+      assert.equal(f.key, key, "Batched same-identity context does not manufacture a keyed remount");
+      assert.equal(f.lifetime, lifetime);
+      f.invoke("prepareCampaign", destination);
+      assert.equal(f.writes.length, 1, "A render alone cannot refresh the retired revision");
+
+      await f.remount();
+      assert.equal(f.lifetime, lifetime + 1, "The positive recovery control is an actual new hook lifetime");
+      assert.equal(record(f.view.campaignGoal).service, "");
+      await setGoal(f);
+      prepare(destination);
+      assert.equal(f.writes.length, 1, "A new mount must not revive its predecessor's closure");
+      f.invoke("prepareCampaign", destination);
+      assert.equal(f.writes.length, 2, "The current legitimate session can prepare its own fresh brief");
+      assert.deepEqual(f.navigations, [destination, destination]);
+      assert.equal(f.listenerCount, 2);
+      assert.equal(f.lateWrites(), 0);
+      if (mode === "demo") assertLocalOnly(f);
+    });
+  }
+}
+
+for (const mode of ["owner", "demo"] as const) {
+  for (const destination of ["/ads-automation", "/content-studio"]) {
+    test(`H34 ${mode} retained ${destination} handler cannot survive SDK ABA before React commits`, async (t) => {
+      const f = await fixture(t, mode === "demo" ? {
+        auth: { clinicId: "demo-workspace", isDemoMode: true },
+      } : {});
+      await setGoal(f);
+      const prepare = f.view.prepareCampaign as (destination: string) => void;
+      prepare(destination);
+      assert.equal(f.writes.length, 1);
+      const key = f.key, lifetime = f.lifetime, view = f.view;
+      const calls = f.calls.length, lookups = f.sdk.lookups, registrations = f.listenerRegistrations;
+      const revision = f.signOut.getSignOutRevision();
+
+      f.emitSdkBeforeRender("B");
+      prepare(destination);
+      assert.equal(f.writes.length, 1);
+      f.emitSdkBeforeRender("A");
+      prepare(destination);
+      assert.equal(f.sdk.actor, "A");
+      assert.equal(f.signOut.getSignOutRevision(), revision, "The sign-out revision cannot mask a broken SDK lifetime guard");
+      assert.equal(f.signOut.isSignOutPending(), false);
+      assert.equal(f.view, view, "Both SDK events precede the next context commit");
+      assert.equal(f.key, key);
+      assert.equal(f.lifetime, lifetime);
+      assert.equal(f.listenerRegistrations, registrations);
+      assert.equal(f.writes.length, 1, "Returning to A cannot revive its old brief");
+      assert.deepEqual(f.navigations, [destination]);
+      assert.equal(f.calls.length, calls);
+      assert.equal(f.sdk.lookups, lookups);
+
+      await f.flush();
+      assert.notEqual(f.key, key, "Observed SDK ABA supplies a new epoch even when React only sees A");
+      assert.equal(f.lifetime, lifetime + 1);
+      assert.equal(record(f.view.campaignGoal).service, "");
+      await setGoal(f);
+      prepare(destination);
+      assert.equal(f.writes.length, 1);
+      f.invoke("prepareCampaign", destination);
+      assert.equal(f.writes.length, 2, "The replacement A lifetime is independently usable");
+      assert.deepEqual(f.navigations, [destination, destination]);
+      assert.equal(f.listenerCount, 2);
+      assert.equal(f.lateWrites(), 0);
+      if (mode === "demo") assertLocalOnly(f);
+    });
+  }
+}
+
+for (const stage of ["headers", "body"] as const) {
+  for (const transition of ["sign-out", "SDK-ABA", "sign-out+SDK-ABA"] as const) {
+    test(`H35 held report ${stage} cannot update hooks before ${transition} commits`, async (t) => {
+      const f = await fixture(t);
+      await allowPrivate(f);
+      const old = [f.take("meta-launches"), ...resources.map((resource) => f.take(resource))];
+      const payloads = [
+        { launches: [launch("Obsolete batched A")] },
+        { summaries: [{ ...insights(), impressions: "999" }] },
+        { outcomes: { ...outcomes(), attributedLeads: 99 } },
+      ];
+      const gate = deferred<void>();
+      t.after(() => gate.resolve());
+      if (stage === "body") {
+        for (const [index, call] of old.entries()) call.answer(payloads[index], 200, gate.promise);
+        await f.flush();
+      }
+      assertPrivateEmpty(f);
+      assert.equal(rows(f.view.launches).length, 0);
+      const key = f.key, lifetime = f.lifetime, view = f.view, calls = f.calls.length;
+      const revision = f.signOut.getSignOutRevision();
+      const sdkChanges = transition !== "sign-out";
+
+      if (transition !== "SDK-ABA") {
+        f.signOut.markSignOutPending();
+        f.changeBeforeRender({ isSigningOut: true });
+      }
+      if (sdkChanges) f.emitSdkBeforeRender("B");
+      if (transition !== "SDK-ABA") {
+        assert.equal(f.signOut.clearSignOutPending(), true);
+        f.changeBeforeRender({ isSigningOut: false });
+      }
+      if (sdkChanges) f.emitSdkBeforeRender("A");
+      assert.equal(f.signOut.isSignOutPending(), false);
+      assert.equal(f.signOut.getSignOutRevision(), revision + (transition === "SDK-ABA" ? 0 : 1));
+      for (const call of old) assert.equal(call.init.signal?.aborted, sdkChanges);
+      const stateChanges = f.sessionStateChanges;
+      if (stage === "headers") for (const [index, call] of old.entries()) call.answer(payloads[index]);
+      gate.resolve();
+      // Drain real transport/body continuations without letting a keyed remount
+      // hide an obsolete write to the still-mounted hooks.
+      for (let i = 0; i < 6; i++) await tick();
+      assert.equal(f.view, view);
+      assert.equal(f.key, key);
+      assert.equal(f.lifetime, lifetime);
+      assert.equal(f.sessionStateChanges, stateChanges, "Late replies must not update even the uncommitted old hooks");
+      assert.equal(f.calls.length, calls);
+      assert.equal(f.writes.length, 0);
+      assert.equal(f.navigations.length, 0);
+
+      await f.flush();
+      assertPrivateEmpty(f);
+      assert.equal(rows(f.view.launches).length, 0);
+      if (!sdkChanges) {
+        assert.equal(f.key, key);
+        assert.equal(f.lifetime, lifetime);
+        await f.remount();
+      } else {
+        assert.notEqual(f.key, key);
+      }
+      assert.equal(f.lifetime, lifetime + 1);
+      f.take("meta-launches").answer({ launches: [launch("Fresh legitimate A")] });
+      await allowPrivate(f);
+      f.take("meta-insights-history").answer({ summaries: [{ ...insights(), impressions: "400" }] });
+      f.take("advertising-outcomes").answer({ outcomes: { ...outcomes(), attributedLeads: 17 } });
+      await f.flush();
+      assert.equal(f.view.loadState, "ready");
+      assert.deepEqual(json(rows(f.view.launches)), [launch("Fresh legitimate A")]);
+      assert.equal(f.view.insightsAccess, "ready");
+      assert.equal(record(rows(f.view.insightsSummaries)[0]).impressions, "400");
+      assert.equal(f.view.crmOutcomesAccess, "ready");
+      assert.equal(record(f.view.crmOutcomes).attributedLeads, 17);
+      assert.equal(f.listenerCount, 2);
+      assert.equal(f.notifications.length, 0);
+      assert.equal(f.lateWrites(), 0);
+    });
+  }
 }

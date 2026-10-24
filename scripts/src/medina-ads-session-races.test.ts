@@ -99,6 +99,7 @@ const compiled = (async () => {
     page: compile(page, pagePath, true), wrapped: page.includes("function AdsAutomationSession("),
     api: compile(await readFile(path.join(root, "artifacts/negis/src/lib/api.ts"), "utf8"), "api.ts"),
     auth: compile(await readFile(path.join(root, "artifacts/negis/src/lib/serverAuth.ts"), "utf8"), "serverAuth.ts"),
+    signOut: compile(await readFile(path.join(root, "artifacts/negis/src/lib/authSignOut.ts"), "utf8"), "authSignOut.ts"),
     insights: compile(await readFile(path.join(root, "artifacts/negis/src/lib/metaInsightsHistory.ts"), "utf8"), "metaInsightsHistory.ts"),
   };
 })();
@@ -213,11 +214,13 @@ async function fixture(t: TestContext, options: { history?: boolean; holdHealth?
   const sdk = { actor: "A", token: "synthetic-A", lookups: 0 };
   const listeners = new Set<(event: string, session: unknown) => void>();
   const tokenGates: Array<ReturnType<typeof deferred<void>>> = [];
+  let afterTokenValidation: ((token: string) => void) | undefined;
   const calls: HttpCall[] = [];
   const storage: Array<ReturnType<typeof deferred<{ error: null }>> & { path: string }> = [];
   const captures: Array<ReturnType<typeof deferred<unknown>>> = [];
   const notifications: unknown[][] = [];
   const local = new Map<string, string>([["negis_ads_automation_ui_mode", JSON.stringify("admin")]]);
+  const signOutStorage = new Map<string, string>();
   const writes: string[] = [];
   const removals: string[] = [];
   const timers = new Map<number, () => void>();
@@ -260,7 +263,15 @@ async function fixture(t: TestContext, options: { history?: boolean; holdHealth?
         localStorage: {
           getItem: (key: string) => local.get(key) ?? null,
           setItem: (key: string, value: string) => { writes.push(key); local.set(key, value); },
-          removeItem: (key: string) => { removals.push(key); local.delete(key); },
+          removeItem: (key: string) => {
+            if (key !== "negis_signout_pending_v1") removals.push(key);
+            local.delete(key);
+          },
+        },
+        sessionStorage: {
+          getItem: (key: string) => signOutStorage.get(key) ?? null,
+          setItem: (key: string, value: string) => { signOutStorage.set(key, value); },
+          removeItem: (key: string) => { signOutStorage.delete(key); },
         },
         setTimeout: () => ++timerId, clearTimeout() {},
         setInterval: (fn: () => void) => { timers.set(++timerId, fn); return timerId; },
@@ -298,12 +309,28 @@ async function fixture(t: TestContext, options: { history?: boolean; holdHealth?
     });
     return exports;
   }
+  const signOut = evaluate<{
+    isSignOutPending(): boolean; getSignOutRevision(): number; markSignOutPending(): void; clearSignOutPending(): boolean;
+  }>(code.signOut, "authSignOut.simulation.cjs", unexpected);
   const serverAuth = evaluate<{ getSupabaseAccessToken(expected?: string): Promise<string> }>(code.auth, "auth.simulation.cjs", (name) => {
-    if (name === "@/lib/authSignOut") return { isSignOutPending: () => false, getSignOutRevision: () => 0 };
+    if (name === "@/lib/authSignOut") return signOut;
     assert.equal(name, "@/lib/supabase"); return { hasSupabaseFrontendEnv: true, supabase };
   });
   const api = evaluate<{ crmFetch(path: string, init?: RequestInit): Promise<Response> }>(code.api, "api.simulation.cjs", (name) => {
-    assert.equal(name, "@/lib/serverAuth"); return serverAuth;
+    assert.equal(name, "@/lib/serverAuth");
+    return {
+      async getSupabaseAccessToken(expected?: string) {
+        const token = await serverAuth.getSupabaseAccessToken(expected);
+        // Interleave only after the real auth helper has validated the token,
+        // before the real transport resumes its post-token dispatch checks.
+        if (token) {
+          const hook = afterTokenValidation;
+          afterTokenValidation = undefined;
+          hook?.(token);
+        }
+        return token;
+      },
+    };
   });
   if (options.prefill) local.set(`synthetic-prefill::${W1}`, JSON.stringify(options.prefill));
   const insightsPayload = evaluate(code.insights, "metaInsightsHistory.simulation.cjs", unexpected);
@@ -317,6 +344,7 @@ async function fixture(t: TestContext, options: { history?: boolean; holdHealth?
     if (name === "@/contexts/AuthContext") return { useAuth: () => auth };
     if (name === "@/lib/api") return api;
     if (name === "@/lib/serverAuth") return serverAuth;
+    if (name === "@/lib/authSignOut") return signOut;
     if (name === "@/lib/metaInsightsHistory") return insightsPayload;
     if (name === "@/lib/supabase") return { hasSupabaseFrontendEnv: true, supabase };
     if (name === "wouter") return { Link: Symbol("Link"), useLocation: () => [location, (next: string) => { location = next; inner?.force(); }] };
@@ -359,7 +387,7 @@ async function fixture(t: TestContext, options: { history?: boolean; holdHealth?
   t.after(dispose);
   await flush();
   return {
-    calls, storage, captures, notifications, writes, removals, sdk, flush,
+    calls, storage, captures, notifications, writes, removals, sdk, flush, signOut,
     renderBeforeEffects: () => render(false),
     get view() { return inner!.view; }, get key() { return innerKey; }, get timers() { return timers.size; },
     lateWrites: () => retired.reduce((sum, d) => sum + d.lateWrites, 0) + (inner?.lateWrites ?? 0),
@@ -387,6 +415,10 @@ async function fixture(t: TestContext, options: { history?: boolean; holdHealth?
     async roundTrip() { emit("B"); emit("A"); outer.force(); inner?.force(); await flush(); },
     async committedRoundTrip() { await this.change("B"); await this.change("A"); },
     delayToken() { const gate = deferred<void>(); tokenGates.push(gate); return gate; },
+    onNextValidatedToken(hook: (token: string) => void) {
+      assert.equal(afterTokenValidation, undefined, "Only one deterministic token-boundary hook may be armed");
+      afterTokenValidation = hook;
+    },
     replaceSdkWithoutEvent(actor: string) { sdk.actor = actor; sdk.token = `synthetic-${actor}`; },
     rotateToken() {
       sdk.token = "synthetic-A-rotated";
@@ -827,3 +859,161 @@ test("A25 an explicit server admin role authorizes a nonempty History report", a
   assert.equal(Object.keys(record(f.view.historyInsightsByLaunch)).length, 1);
   assert.equal(record((record(record(f.view.historyInsightsByLaunch)[launchId]).spendByCurrency as unknown[])[0]).spendMinor, "100");
 });
+
+for (const report of ["launches", "insights"] as const) {
+  for (const phase of ["pending", "cleared"] as const) {
+    test(`A26 delayed ${report} body cannot publish across ${phase} sign-out before render or SDK event`, async (t) => {
+      const f = await fixture(t, { history: true });
+      const gate = deferred<void>();
+      t.after(() => gate.resolve());
+      f.take("meta-launches?").answerBody({ success: true, mode: "supabase", data: {
+        launches: report === "launches" ? [{ id: launchId, campaignName: "Held owner campaign", status: "paused" }] : [],
+      } }, 200, report === "launches" ? gate.promise : undefined);
+      f.take("auth-context").answer({ isAdmin: true, role: "owner", workspaceId: W1 });
+      await f.flush();
+      f.take("meta-insights-history").answerBody({ success: true, mode: "supabase", data: {
+        summaries: report === "insights" ? [historySummary("999")] : [],
+      } }, 200, report === "insights" ? gate.promise : undefined);
+      await f.flush();
+      assert.equal((f.view.historyItems as unknown[]).length, 0);
+      assert.equal(Object.keys(record(f.view.historyInsightsByLaunch)).length, 0);
+      const key = f.key, calls = f.calls.length, writes = f.writes.length, notices = f.notifications.length;
+      const revision = f.signOut.getSignOutRevision();
+      f.signOut.markSignOutPending();
+      assert.equal(f.signOut.getSignOutRevision(), revision + 1);
+      if (phase === "cleared") assert.equal(f.signOut.clearSignOutPending(), true);
+      assert.equal(f.signOut.isSignOutPending(), phase === "pending");
+      gate.resolve(); await f.flush();
+      assert.equal(f.key, key, "Keep context, SDK actor and committed lifetime unchanged");
+      assert.equal((f.view.historyItems as unknown[]).length, 0, "An expired lifetime must not publish launch history");
+      assert.equal(Object.keys(record(f.view.historyInsightsByLaunch)).length, 0, "An expired lifetime must not publish Insights");
+      if (report === "insights") assert.notEqual(f.view.historyInsightsAccess, "confirmed");
+      assert.equal(f.calls.length, calls); assert.equal(f.writes.length, writes);
+      assert.equal(f.notifications.length, notices); assert.equal(f.lateWrites(), 0);
+    });
+  }
+}
+
+test("A27 cleared sign-out retires retained refresh but a fresh same-owner lifetime can read reports again", async (t) => {
+  const f = await readyHistory(t);
+  const refresh = f.view.refreshHistoryClick as () => void;
+  const key = f.key, calls = f.calls.length, lookups = f.sdk.lookups, writes = f.writes.length;
+  f.signOut.markSignOutPending();
+  refresh(); await f.flush();
+  assert.equal(f.calls.length, calls); assert.equal(f.sdk.lookups, lookups);
+  assert.equal(f.writes.length, writes);
+  assert.equal(f.signOut.clearSignOutPending(), true);
+  refresh(); await f.flush();
+  assert.equal(f.key, key, "Clearing pending does not remount or revive the old lifetime");
+  assert.equal(f.calls.length, calls); assert.equal(f.sdk.lookups, lookups);
+  assert.equal(f.writes.length, writes);
+
+  await f.change("");
+  await f.change("A");
+  assert.notEqual(f.key, key);
+  await answerFreshHistory(f);
+  assert.equal(f.view.historyInsightsAccess, "confirmed");
+  assert.equal(record((record(record(f.view.historyInsightsByLaunch)[launchId]).spendByCurrency as unknown[])[0]).spendMinor, "200");
+  assert.equal(record((f.view.historyItems as unknown[])[0]).campaignName, "Refreshed campaign");
+  const recoveredCalls = f.calls.length, recoveredLookups = f.sdk.lookups;
+  refresh(); await f.flush();
+  assert.equal(f.calls.length, recoveredCalls); assert.equal(f.sdk.lookups, recoveredLookups);
+  void f.invoke("refreshHistoryClick"); await f.flush(); await answerFreshHistory(f);
+  assert.equal(f.view.historyInsightsAccess, "confirmed");
+  assert.equal(Object.keys(record(f.view.historyInsightsByLaunch)).length, 1);
+  assert.ok(f.calls.every((call) => !call.init.method || call.init.method === "GET"));
+  assert.equal(f.notifications.length, 0); assert.equal(f.lateWrites(), 0);
+});
+
+type DispatchBoundaryScenario = "request-history" | "fetch-insights" | "request-launch";
+
+async function dispatchBoundaryFixture(t: TestContext, scenario: DispatchBoundaryScenario) {
+  const f = await fixture(t, { history: scenario === "fetch-insights" });
+  if (scenario === "request-launch") await f.seed();
+  let authResponse: HttpCall | undefined;
+  if (scenario === "fetch-insights") {
+    f.take("meta-launches?").answer({ launches: [] });
+    authResponse = f.take("auth-context");
+    await f.flush();
+  }
+  return {
+    f,
+    start() {
+      if (authResponse) {
+        authResponse.answer({ isAdmin: true, role: "owner", workspaceId: W1 });
+        return Promise.resolve();
+      }
+      return scenario === "request-launch" ? f.invoke("launch", "PAUSED") : f.invoke("loadHistory");
+    },
+    reply(call: HttpCall) {
+      if (scenario === "fetch-insights") call.answer({ summaries: [historySummary("300")] });
+      else if (scenario === "request-launch") call.answer({ dryRun: false, status: "paused", launchId });
+      else call.answer({ launches: [{ id: launchId, campaignName: "Boundary campaign", status: "paused" }] });
+    },
+  };
+}
+
+for (const scenario of ["request-history", "fetch-insights", "request-launch"] as const) {
+  for (const phase of ["pending", "cleared"] as const) {
+    test(`A28 ${scenario} refuses ${phase} sign-out after validated token but before HTTP dispatch`, async (t) => {
+      const { f, start, reply } = await dispatchBoundaryFixture(t, scenario);
+      const key = f.key, before = f.calls.length, writes = f.writes.length, notices = f.notifications.length;
+      const revision = f.signOut.getSignOutRevision();
+      let fired = 0;
+      f.onNextValidatedToken((token) => {
+        assert.equal(token, "synthetic-A", "The actual auth helper returned the original actor's nonempty token");
+        fired++;
+        f.signOut.markSignOutPending();
+        if (phase === "cleared") assert.equal(f.signOut.clearSignOutPending(), true);
+      });
+      const work = start(); await f.flush();
+      const dispatched = f.calls.slice(before);
+      // Drain a regression's synthetic responses as well, so a red test never
+      // leaves a page operation waiting on its forbidden transport.
+      for (const call of dispatched) reply(call);
+      await work; await f.flush();
+      assert.equal(fired, 1);
+      assert.equal(f.signOut.getSignOutRevision(), revision + 1);
+      assert.equal(f.signOut.isSignOutPending(), phase === "pending");
+      assert.equal(f.key, key, "No context update or SDK event invalidates the original lifetime");
+      assert.equal(f.sdk.actor, "A");
+      assert.equal(f.view.launchResult, null);
+      assert.equal((f.view.historyItems as unknown[]).length, 0);
+      assert.equal(Object.keys(record(f.view.historyInsightsByLaunch)).length, 0);
+      if (scenario === "fetch-insights") assert.notEqual(f.view.historyInsightsAccess, "confirmed");
+      assert.equal(f.writes.length, writes); assert.equal(f.notifications.length, notices);
+      assert.equal(f.lateWrites(), 0);
+      assert.equal(dispatched.filter((call) => call.init.method === "POST").length, 0, "Expired actions must not dispatch a synthetic POST");
+      assert.equal(dispatched.length, 0, "The post-token lifetime fence must stop HTTP before dispatch");
+    });
+  }
+
+  test(`A29 current ${scenario} still dispatches and accepts its response after token validation`, async (t) => {
+    const { f, start, reply } = await dispatchBoundaryFixture(t, scenario);
+    const before = f.calls.length;
+    let fired = 0;
+    f.onNextValidatedToken((token) => { assert.equal(token, "synthetic-A"); fired++; });
+    const work = start(); await f.flush();
+    const dispatched = f.calls.slice(before);
+    assert.equal(fired, 1); assert.equal(dispatched.length, 1);
+    const call = dispatched[0];
+    assert.equal(call.actor, "A"); assert.equal(call.init.signal?.aborted, false);
+    assert.equal(call.init.cache, "no-store");
+    assert.equal(new Headers(call.init.headers).get("Authorization"), "Bearer synthetic-A");
+    assert.equal(Object.hasOwn(call.init, "dispatchGuard"), false, "The actual transport consumes its private guard");
+    if (scenario === "request-launch") {
+      assert.equal(call.init.method, "POST");
+      assert.equal(call.body.statusMode, "PAUSED"); assert.equal(call.body.dryRun, false);
+    } else assert.equal(call.init.method || "GET", "GET");
+    reply(call); await work; await f.flush();
+    if (scenario === "request-history") assert.equal(record((f.view.historyItems as unknown[])[0]).campaignName, "Boundary campaign");
+    else if (scenario === "fetch-insights") {
+      assert.equal(f.view.historyInsightsAccess, "confirmed");
+      assert.equal(record((record(record(f.view.historyInsightsByLaunch)[launchId]).spendByCurrency as unknown[])[0]).spendMinor, "300");
+    } else {
+      assert.equal(f.view.realLaunchStatus, "created");
+      assert.equal(f.writes.filter((key) => key === `negis_ads_launch_history_${W1}`).length, 1);
+    }
+    assert.equal(f.lateWrites(), 0);
+  });
+}

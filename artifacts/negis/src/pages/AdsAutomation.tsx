@@ -26,6 +26,7 @@ import { PageLayout } from "@/components/layout/PageLayout";
 import { MetricCard } from "@/components/ui/metric-card";
 import { useAuth } from "@/contexts/AuthContext";
 import { apiUrl, crmFetch } from "@/lib/api";
+import { getSignOutRevision, isSignOutPending } from "@/lib/authSignOut";
 import { getSupabaseAccessToken } from "@/lib/serverAuth";
 import { hasSupabaseFrontendEnv, supabase } from "@/lib/supabase";
 import { parseMetaInsightsHistorySummaries, type MetaInsightsHistorySummary } from "@/lib/metaInsightsHistory";
@@ -1217,7 +1218,7 @@ async function safeJson<T>(response: { text: () => Promise<string> }): Promise<A
 // Security-2B: /api/crm/* is authenticated server-side. This wrapper keeps the
 // page's Meta error formatting but delegates the request itself to crmFetch, so
 // the access token is attached exactly once, in one place.
-async function crmRequest<T>(path: string, init?: RequestInit & { expectedUserId?: string }): Promise<Extract<ApiResponse<T>, { success: true }>> {
+async function crmRequest<T>(path: string, init?: Parameters<typeof crmFetch>[1]): Promise<Extract<ApiResponse<T>, { success: true }>> {
   const response = await crmFetch(path, init);
   init?.signal?.throwIfAborted();
   const body = await safeJson<T>(response);
@@ -1476,6 +1477,7 @@ function AdsAutomationSession({ actorId, workspaceId }: { actorId: string; works
   const { user, userRole } = useAuth();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const sessionRef = useRef<AbortController | null>(null);
+  const signOutRevisionRef = useRef(getSignOutRevision());
   const prefillRef = useRef<string | null>(null);
   const workspaceScopedKey = (key: string) => `${key}::${workspaceId}`;
 
@@ -1496,7 +1498,8 @@ function AdsAutomationSession({ actorId, workspaceId }: { actorId: string; works
   }, []);
 
   function isSessionAlive(session: AbortController | null): session is AbortController {
-    return Boolean(actorId && session && sessionRef.current === session && !session.signal.aborted);
+    return Boolean(actorId && session && sessionRef.current === session && !session.signal.aborted
+      && !isSignOutPending() && signOutRevisionRef.current === getSignOutRevision());
   }
 
   function assertSessionAlive(session: AbortController) {
@@ -1506,14 +1509,20 @@ function AdsAutomationSession({ actorId, workspaceId }: { actorId: string; works
   async function sessionFetch(session: AbortController, path: string, init?: RequestInit) {
     assertSessionAlive(session);
     // A fresh lifetime must not join or reuse a read from an expired session.
-    const response = await crmFetch(path, { ...init, cache: "no-store", expectedUserId: actorId, signal: session.signal });
+    const response = await crmFetch(path, {
+      ...init, cache: "no-store", expectedUserId: actorId, signal: session.signal,
+      dispatchGuard: () => isSessionAlive(session),
+    });
     assertSessionAlive(session);
     return response;
   }
 
   async function sessionRequest<T>(session: AbortController, path: string, init?: RequestInit) {
     assertSessionAlive(session);
-    const body = await crmRequest<T>(path, { ...init, cache: "no-store", expectedUserId: actorId, signal: session.signal });
+    const body = await crmRequest<T>(path, {
+      ...init, cache: "no-store", expectedUserId: actorId, signal: session.signal,
+      dispatchGuard: () => isSessionAlive(session),
+    });
     assertSessionAlive(session);
     return body;
   }
