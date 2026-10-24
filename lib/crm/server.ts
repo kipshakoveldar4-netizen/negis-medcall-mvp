@@ -6427,7 +6427,15 @@ function validateCreativeAssetBody(body: JsonRecord): string[] {
   return details;
 }
 
-async function persistAdCreativeAsset(input: { workspaceId: string; body: JsonRecord }) {
+function storedCreativeRowMatches(value: unknown, workspaceId: string, body: JsonRecord): boolean {
+  const row = asRecord(value);
+  const expected = configs["ad-creatives"].toRow(body, workspaceId);
+  return isUuid(readString(row.id)) && readString(row.workspace_id).toLowerCase() === workspaceId.toLowerCase()
+    && ["file_name", "file_type", "mime_type", "file_size", "storage_bucket", "storage_path", "public_url"]
+      .every((key) => row[key] === expected[key]);
+}
+
+async function persistAdCreativeAsset(input: { workspaceId: string; body: JsonRecord; requireStoredFileProof?: boolean }) {
   const config = configs["ad-creatives"];
   const supabase = getSupabaseServerClient();
   const demoItem = config.demoItem({ ...input.body, workspaceId: input.workspaceId });
@@ -6444,8 +6452,15 @@ async function persistAdCreativeAsset(input: { workspaceId: string; body: JsonRe
     const row = config.toRow(input.body, input.workspaceId);
     const { data, error } = await supabase.from(config.table).insert(row).select("*").single();
     if (error) throw new Error(error.message);
+    if (input.requireStoredFileProof && !storedCreativeRowMatches(data, input.workspaceId, input.body)) {
+      throw new Error("generated_asset_receipt_unconfirmed");
+    }
     return { mode: "supabase" as CrmMode, asset: config.fromRow(asRecord(data)), warning: "" };
   } catch (error) {
+    if (input.requireStoredFileProof) {
+      console.warn("[crm] generated asset persistence unconfirmed");
+      throw new Error("Не удалось подтвердить запись сгенерированного файла в библиотеку.");
+    }
     const warning = supabaseWarning(config.table, error);
     console.warn(warning);
     return { mode: "demo" as CrmMode, asset: demoItem, warning };
@@ -6528,55 +6543,54 @@ export async function storeGeneratedCreative(input: {
     );
   }
 
-  // Повторяемый вызов перезаписывает свой же объект вместо того, чтобы
-  // заводить второй. Без ключа поведение прежнее — upsert: false, чтобы
-  // случайное совпадение случайных имён не затёрло чужой файл.
-  const { error: uploadError } = await supabase.storage.from(storageBucket).upload(storagePath, input.buffer, {
-    contentType: input.mimeType,
-    upsert: Boolean(idempotencyKey),
-  });
-  if (uploadError) {
-    // Security-2F: текст Supabase Storage наружу не идёт — имена bucket'ов,
-    // политики и «permission denied for …» ничего не говорят оператору и
-    // описывают устройство сервиса. Подробность уходит в лог.
-    throw new Error(
-      redactedDetail("generated creative upload", uploadError, "Хранилище не приняло сгенерированный файл."),
-    );
-  }
-
-  const publicUrl =
-    supabase.storage.from(storageBucket).getPublicUrl(storagePath).data.publicUrl ||
-    buildSupabaseStoragePublicUrl({ bucket: storageBucket, storagePath });
-  if (!publicUrl) {
-    // Файл уже лежит в хранилище и уже занимает место. Оставить его — значит
-    // копить оплаченные объекты, на которые не ссылается ни одна строка и
-    // которых не видно нигде в продукте.
-    try {
-      await supabase.storage.from(storageBucket).remove([storagePath]);
-    } catch (removeError) {
-      console.warn(supabaseWarning("generated creative cleanup", removeError));
-    }
-    throw new Error("Файл не удалось опубликовать: Supabase не вернул ссылку. Проверьте, что bucket ad-creatives публичный.");
-  }
-
-  // Повторный вызов с тем же ключом не должен заводить вторую строку.
-  // Объект в хранилище один (перезаписан выше), а строк без этой проверки
-  // стало бы столько, сколько раз повторился опрос: два «одинаковых» креатива
-  // в библиотеке, которые оператор не различит.
-  if (idempotencyKey) {
-    const existing = await findAdCreativeByStoragePath({
-      workspaceId: input.workspaceId,
-      storagePath,
+  if (body.fileType === "image") {
+    const imageDetails = await validateCreativeImageBytes({
+      buffer: input.buffer, fileName: input.fileName, mimeType: input.mimeType,
     });
-    if (existing) {
-      return { publicUrl, asset: existing, mode: "supabase", warning: "" };
-    }
+    if (imageDetails.length > 0) throw new Error(imageDetails.join("; "));
+  }
+
+  const publicUrl = buildSupabaseStoragePublicUrl({ bucket: storageBucket, storagePath });
+  let sdkPublicUrl: unknown;
+  try { sdkPublicUrl = supabase.storage.from(storageBucket).getPublicUrl(storagePath).data.publicUrl; }
+  catch { throw new Error("Хранилище не подтвердило публичный адрес сгенерированного файла."); }
+  if (!publicUrl || typeof sdkPublicUrl !== "string" || sdkPublicUrl !== publicUrl) {
+    throw new Error("Хранилище не подтвердило публичный адрес сгенерированного файла.");
+  }
+  body.publicUrl = publicUrl;
+  if (idempotencyKey) {
+    const existing = await findAdCreativeByStoragePath({ workspaceId: input.workspaceId, storagePath, body });
+    if (existing) return { publicUrl, asset: existing, mode: "supabase", warning: "" };
+  }
+
+  // Legacy keyed upsert is not an atomic idempotency claim. Without a key,
+  // reject collisions instead of overwriting an existing object.
+  let upload: { data: unknown; error: unknown };
+  try {
+    upload = await supabase.storage.from(storageBucket).upload(storagePath, input.buffer, {
+      contentType: input.mimeType,
+      upsert: Boolean(idempotencyKey),
+    });
+  } catch { throw new Error("Хранилище не подтвердило загрузку сгенерированного файла."); }
+  if (upload.error || asRecord(upload.data).path !== storagePath) {
+    // Keep raw Storage policy and object details out of the caller response.
+    throw new Error(
+      "Хранилище не подтвердило загрузку сгенерированного файла.",
+    );
   }
 
   const saved = await persistAdCreativeAsset({
     workspaceId: input.workspaceId,
     body: { ...body, publicUrl },
+    requireStoredFileProof: true,
   });
+  const asset = asRecord(saved.asset);
+  if (saved.mode !== "supabase" || !isUuid(readString(asset.id)) || asset.workspaceId !== input.workspaceId
+    || asset.fileName !== body.fileName || asset.fileType !== body.fileType || asset.mimeType !== body.mimeType
+    || asset.fileSize !== body.fileSize || asset.storageBucket !== storageBucket || asset.storagePath !== storagePath
+    || asset.publicUrl !== publicUrl || saved.warning) {
+    throw new Error("Не удалось подтвердить запись сгенерированного файла в библиотеку.");
+  }
 
   return {
     publicUrl,
@@ -6602,6 +6616,7 @@ export async function storeGeneratedCreative(input: {
 async function findAdCreativeByStoragePath(input: {
   workspaceId: string;
   storagePath: string;
+  body: JsonRecord;
 }): Promise<JsonRecord | null> {
   const supabase = getSupabaseServerClient();
   if (!supabase) return null;
@@ -6612,16 +6627,15 @@ async function findAdCreativeByStoragePath(input: {
       .select("*")
       .eq("workspace_id", input.workspaceId)
       .eq("storage_path", input.storagePath)
-      .limit(1);
-    if (error) throw new Error(error.message);
-    const rows = Array.isArray(data) ? data : [];
-    return rows.length > 0 ? configs["ad-creatives"].fromRow(asRecord(rows[0])) : null;
+      .limit(2);
+    if (error || !Array.isArray(data) || data.length > 1
+      || (data.length === 1 && !storedCreativeRowMatches(data[0], input.workspaceId, input.body))) {
+      throw new Error("generated_asset_lookup_unconfirmed");
+    }
+    return data.length > 0 ? configs["ad-creatives"].fromRow(asRecord(data[0])) : null;
   } catch (error) {
-    // Не найти существующую строку — не повод отказать: хуже всего здесь
-    // потерять готовый файл. Дальше пойдёт обычная вставка, и в худшем случае
-    // строк станет две — это видно, в отличие от пропавшего ролика.
-    console.warn(supabaseWarning("ad_creative_assets lookup", error));
-    return null;
+    console.warn("[crm] generated asset lookup unconfirmed");
+    throw new Error("Не удалось подтвердить прежний файл. Повторите проверку, не запуская новую генерацию.");
   }
 }
 

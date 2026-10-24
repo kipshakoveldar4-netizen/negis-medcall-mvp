@@ -1,9 +1,11 @@
-// Only Auth/config are replaced. App, Overview, api.ts and receipt helpers are real.
+// Only Auth/config are replaced. App, its screens, api.ts and receipt helpers are real.
 type Actor = "A" | "B";
 const ids = { A: "11111111-1111-4111-8111-111111111111", B: "22222222-2222-4222-8222-222222222222" } as const;
 const actorKey = "qa-control-subscription-actor";
 const controlPath = "/__fixture/control-subscription";
-const allowed = new Set([controlPath, "/api/crm/platform-overview", "/api/crm/platform-subscriptions"]);
+const allowed = new Set([controlPath, "/api/crm/platform-overview", "/api/crm/platform-subscriptions",
+  "/api/crm/platform-operators", "/api/crm/platform-onboarding", "/api/crm/platform-onboarding-credentials",
+  "/api/crm/platform-invitation-reissue"]);
 if (location.protocol !== "http:" || location.hostname !== "127.0.0.1" || location.pathname !== "/"
   || location.search !== "?subscriptions=qa") throw new Error("Exact loopback subscription fixture required");
 
@@ -26,10 +28,10 @@ function session() {
   return actor ? { user: { id: ids[actor], email: `qa-subscription-${actor.toLowerCase()}@example.invalid` },
     access_token: `fixture-control-${actor}` } : null;
 }
-function change(next: Actor | null, event = next ? "SIGNED_IN" : "SIGNED_OUT") {
+function change(next: Actor | null, event = next ? "SIGNED_IN" : "SIGNED_OUT", notifyAuth = true) {
   actor = next; revision++;
   try { if (next) sessionStorage.setItem(actorKey, next); else sessionStorage.removeItem(actorKey); } catch { /* Synthetic Auth only. */ }
-  for (const listener of [...authListeners]) listener(event, session());
+  if (notifyAuth) for (const listener of [...authListeners]) listener(event, session());
   snapshot = { actor, revision };
   for (const listener of listeners) listener();
 }
@@ -51,10 +53,14 @@ export const subscriptionAuthFixture = {
   subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener); }; },
   snapshot: () => snapshot,
   select(next: Actor) { change(next); },
+  silentB() { change("B", "SIGNED_IN", false); },
   aba() { change("A"); change("B"); change("A"); },
   refresh() { change(actor, "TOKEN_REFRESHED"); },
   reset() {
-    for (const id of Object.values(ids)) sessionStorage.removeItem(`medina-control:subscription-operation:${encodeURIComponent(id)}`);
+    for (const id of Object.values(ids)) {
+      try { sessionStorage.removeItem(`medina-control:subscription-operation:${encodeURIComponent(id)}`); }
+      catch { /* Storage cleanup cannot block the synthetic Auth reset. */ }
+    }
     change(null); change("A");
   },
 };
@@ -63,5 +69,8 @@ export async function subscriptionFixtureControl(command?: Record<string, unknow
   const response = await fetch(controlPath, command ? { method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify(command) } : undefined);
   if (!response.ok) throw new Error("Local fixture control refused");
-  return response.json() as Promise<{ failAfterCommit: boolean; counters: { commits: number; replays: number; abandons: number; lostResponses: number } }>;
+  return response.json() as Promise<{ failAfterCommit: boolean; counters: { commits: number; replays: number; abandons: number; lostResponses: number };
+    holdOwnerReply: boolean; ownerReplyPending: boolean; heldOwnerReply: { method: "POST" | "PATCH"; path: string } | null;
+    ownerCounters: { reads: number; mutations: number; operatorChanges: number;
+      onboardingInvites: number; credentials: number; reissues: number; denied: number } }>;
 }

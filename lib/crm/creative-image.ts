@@ -10,6 +10,20 @@ export class CreativeImageValidationUnavailable extends Error {
   }
 }
 
+function pngNeedsAnimationDecoder(buffer: Buffer): boolean {
+  // Sharp's PNG loader may decode only the APNG poster, even with animated:true.
+  // Inspect chunk framing, not compressed pixels; native decoding remains mandatory.
+  for (let offset = 8; offset + 12 <= buffer.length;) {
+    const length = buffer.readUInt32BE(offset);
+    if (length > buffer.length - offset - 12) return true;
+    const type = buffer.toString("ascii", offset + 4, offset + 8);
+    if (type === "acTL" || type === "fcTL" || type === "fdAT") return true;
+    if (type === "IEND") return false;
+    offset += length + 12;
+  }
+  return true;
+}
+
 export async function validateCreativeImageBytes(input: {
   buffer: Buffer;
   fileName: string;
@@ -26,6 +40,9 @@ export async function validateCreativeImageBytes(input: {
   };
   if (!actualMime || actualMime !== mimeType
     || !expectedExtensions[actualMime]?.includes(extension)) return [INVALID_IMAGE];
+  if (actualMime === "image/png" && pngNeedsAnimationDecoder(input.buffer)) {
+    return ["Анимированный или повреждённый PNG не поддерживается. Сохраните обычный PNG или используйте видео."];
+  }
 
   const sharp = await import("sharp").then((module) => module.default, () => {
     throw new CreativeImageValidationUnavailable();
@@ -39,7 +56,8 @@ export async function validateCreativeImageBytes(input: {
     if (formats[metadata.format || ""] !== actualMime || !metadata.width || !metadata.height
       || metadata.width * metadata.height > MAX_CREATIVE_IMAGE_PIXELS) return [INVALID_IMAGE];
     // Metadata alone does not prove compressed pixel data can be decoded.
-    await image.stats();
+    // stats() does not consume Sharp's native timeout; a full raw pipeline does.
+    await image.toColourspace("srgb").ensureAlpha().raw({ depth: "uchar" }).toBuffer();
     return [];
   } catch {
     return [INVALID_IMAGE];

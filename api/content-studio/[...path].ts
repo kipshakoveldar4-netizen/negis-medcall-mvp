@@ -882,6 +882,26 @@ function generatedFileName(kind: "photo" | "video", mimeType: string): string {
   return `negis-${kind}-${Date.now()}.${extension}`;
 }
 
+function requireGeneratedStorageReceipt(value: unknown, expected: {
+  workspaceId: string; fileName: string; mimeType: string; fileSize: number;
+}): asserts value is { publicUrl: string; asset: { id: string }; mode: "supabase"; warning: string } {
+  const invalid = () => new Error("generated_storage_receipt_unconfirmed");
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw invalid();
+  const stored = value as Record<string, unknown>;
+  const asset = stored.asset && typeof stored.asset === "object" && !Array.isArray(stored.asset)
+    ? stored.asset as Record<string, unknown> : {};
+  if (stored.mode !== "supabase" || stored.warning !== "" || typeof stored.publicUrl !== "string"
+    || typeof asset.id !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(asset.id)
+    || asset.workspaceId !== expected.workspaceId || asset.fileName !== expected.fileName
+    || asset.mimeType !== expected.mimeType || asset.fileSize !== expected.fileSize
+    || asset.fileType !== (expected.mimeType.startsWith("image/") ? "image" : "video")
+    || asset.storageBucket !== "ad-creatives" || typeof asset.storagePath !== "string"
+    || !asset.storagePath.startsWith(`${expected.workspaceId}/`) || asset.publicUrl !== stored.publicUrl) throw invalid();
+  const base = (process.env.SUPABASE_URL || "").trim().replace(/\/+$/, "");
+  const publicUrl = `${base}/storage/v1/object/public/ad-creatives/${asset.storagePath.split("/").map(encodeURIComponent).join("/")}`;
+  if (!base || stored.publicUrl !== publicUrl) throw invalid();
+}
+
 async function handleGeneratePhoto(req: VercelRequest, res: VercelResponse, context: WorkspaceAccessContext) {
   const payload = readBody(req);
   const config = readGenerationConfig();
@@ -970,6 +990,7 @@ async function handleGeneratePhoto(req: VercelRequest, res: VercelResponse, cont
         prompt,
       },
     });
+    requireGeneratedStorageReceipt(stored, { workspaceId: context.workspaceId, fileName, mimeType: image.mimeType, fileSize: image.buffer.length });
 
     const warnings = [usage.warning, stored.warning].filter((value): value is string => Boolean(value));
     return sendJson(res, 200, {
@@ -989,7 +1010,7 @@ async function handleGeneratePhoto(req: VercelRequest, res: VercelResponse, cont
   } catch (error) {
     return sendJson(res, 502, {
       success: false,
-      error: "Изображение сгенерировано, но не сохранено",
+      error: "Изображение сгенерировано, сохранение не подтверждено",
       details: ["Хранилище не подтвердило сохранение изображения."],
       hint: "Генерация уже оплачена. Проверьте хранилище прежде, чем повторять — повторный запуск создаст новое изображение за новую цену.",
     });
@@ -1182,6 +1203,7 @@ async function handleVideoGeneration(req: VercelRequest, res: VercelResponse, co
         // строку в библиотеке: два неразличимых креатива за одну генерацию.
         idempotencyKey: jobId,
       });
+      requireGeneratedStorageReceipt(stored, { workspaceId: context.workspaceId, fileName, mimeType: "video/mp4", fileSize: buffer.length });
 
       return sendJson(res, 200, {
         success: true,
@@ -1200,7 +1222,7 @@ async function handleVideoGeneration(req: VercelRequest, res: VercelResponse, co
     } catch (storageError) {
       return sendJson(res, 502, {
         success: false,
-        error: "Ролик отрендерен, но не сохранён",
+        error: "Ролик отрендерен, сохранение не подтверждено",
         details: ["Хранилище не подтвердило сохранение готового ролика."],
         hint: "Рендер уже оплачен. Ссылка у провайдера живёт около часа — проверьте хранилище и повторите опрос, не запуская генерацию заново.",
       });

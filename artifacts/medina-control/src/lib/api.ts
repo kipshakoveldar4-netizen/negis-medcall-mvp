@@ -1,4 +1,5 @@
 import { controlConfig, supabase } from "./supabase";
+import type { Session } from "@supabase/supabase-js";
 
 // Портал ходит в существующий API продукта на его домене. Адрес задаётся
 // переменной сборки; без проверенной конфигурации запросы запрещены.
@@ -10,12 +11,20 @@ export type ControlAccess = { actorId: string; isCurrent(): boolean };
 let actorId = "";
 let revision = 0;
 let initialized = false;
+const actorListeners = new Set<(session: Session | null) => void>();
 
-function observeActor(session: { user: { id: string } } | null) {
+function observeActor(session: Session | null) {
   const next = session?.user?.id || "";
-  if (!initialized || actorId !== next) revision++;
+  const changed = !initialized || actorId !== next;
+  if (changed) revision++;
   actorId = next;
   initialized = true;
+  if (changed) for (const listener of [...actorListeners]) listener(session);
+}
+
+export function subscribeControlActor(listener: (session: Session | null) => void): () => void {
+  actorListeners.add(listener);
+  return () => { actorListeners.delete(listener); };
 }
 
 if (controlConfig.ready) {
@@ -49,16 +58,16 @@ async function currentSession(scope: ControlAccess, signal?: AbortSignal | null)
   assertCurrent(scope, signal);
   let result: Awaited<ReturnType<typeof supabase.auth.getSession>>;
   try { result = await supabase.auth.getSession(); }
-  catch { assertCurrent(scope, signal); throw new ControlAccessError(); }
+  catch { assertCurrent(scope, signal); observeActor(null); throw new ControlAccessError(); }
   assertCurrent(scope, signal);
   const { data, error } = result;
   const session = data.session;
-  if (error) throw new ControlAccessError();
+  if (error) { observeActor(null); throw new ControlAccessError(); }
   if (session?.user.id !== scope.actorId) {
-    revision++;
+    observeActor(session);
     throw new ControlAccessError();
   }
-  if (!session.access_token) throw new ControlAccessError();
+  if (!session.access_token) { observeActor(null); throw new ControlAccessError(); }
   return session;
 }
 
@@ -75,6 +84,11 @@ function guardedResponse(response: Response, scope: ControlAccess, signal?: Abor
     };
     return typeof value === "function" ? value.bind(target) : value;
   } });
+}
+
+export async function verifyControlAccess(scope: ControlAccess, signal?: AbortSignal | null): Promise<void> {
+  await currentSession(scope, signal);
+  assertCurrent(scope, signal);
 }
 
 export async function controlFetch(path: string, init: RequestInit = {}, scope = captureControlAccess()): Promise<Response> {

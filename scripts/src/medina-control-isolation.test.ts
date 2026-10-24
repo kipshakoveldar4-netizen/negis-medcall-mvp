@@ -408,13 +408,15 @@ function nodes(value: any): UiNode[] {
 function appFixture(controlConfig: ControlConfig, session: FixtureSession | null, restoredState = false) {
   const Login = () => null;
   const Overview = () => null;
-  const state = { sessionCalls: 0, subscriptionCalls: 0, unsubscribeCalls: 0 };
+  const state = { sessionCalls: 0, subscriptionCalls: 0, unsubscribeCalls: 0,
+    actorSubscriptionCalls: 0, actorUnsubscribeCalls: 0 };
   const slots: unknown[] = restoredState ? [session, true] : [];
   const effects: Array<() => void | (() => void)> = [];
   const cleanups: Array<() => void> = [];
   let cursor = 0;
   let effectRegistered = false;
   let listener: ((event: string, next: FixtureSession | null) => void) | undefined;
+  const actorListeners = new Set<(next: FixtureSession | null) => void>();
   const { default: App } = evaluate<{ default(): UiNode }>(appCode, "control-app.fixture.cjs", {
     react: {
       useState(initial: unknown) {
@@ -435,11 +437,24 @@ function appFixture(controlConfig: ControlConfig, session: FixtureSession | null
     "./lib/supabase": { controlConfig, supabase: { auth: {
       async getSession() { state.sessionCalls++; return { data: { session } }; },
       onAuthStateChange(callback: typeof listener) {
+        assert.ok(callback);
         state.subscriptionCalls++;
         listener = callback;
-        return { data: { subscription: { unsubscribe() { state.unsubscribeCalls++; } } } };
+        return { data: { subscription: { unsubscribe() {
+          assert.equal(listener, callback, "Auth listener cleanup must remove its own subscription exactly once");
+          listener = undefined;
+          state.unsubscribeCalls++;
+        } } } };
       },
     } } },
+    "./lib/api": { subscribeControlActor(callback: (next: FixtureSession | null) => void) {
+      state.actorSubscriptionCalls++;
+      actorListeners.add(callback);
+      return () => {
+        assert.equal(actorListeners.delete(callback), true, "Actor observer cleanup must remove its own subscription exactly once");
+        state.actorUnsubscribeCalls++;
+      };
+    } },
     "./screens/Login": { Login },
     "./screens/Overview": { Overview },
     "./screens/ClinicCard": { ClinicCard: () => null },
@@ -449,6 +464,7 @@ function appFixture(controlConfig: ControlConfig, session: FixtureSession | null
   function render() { cursor = 0; return App(); }
   return {
     state, Login, Overview, render,
+    actorListenerCount: () => actorListeners.size,
     async mount() {
       for (const effect of effects.splice(0)) {
         const cleanup = effect();
@@ -462,7 +478,15 @@ function appFixture(controlConfig: ControlConfig, session: FixtureSession | null
       listener("SIGNED_OUT", next);
       return render();
     },
-    unmount() { for (const cleanup of cleanups.splice(0)) cleanup(); },
+    changeActor(next: FixtureSession | null) {
+      for (const callback of [...actorListeners]) callback(next);
+      return render();
+    },
+    unmount() {
+      for (const cleanup of cleanups.splice(0)) cleanup();
+      assert.equal(actorListeners.size, 0, "No actor observers may remain after App unmount");
+      assert.equal(listener, undefined, "No SDK auth listener may remain after App unmount");
+    },
   };
 }
 
@@ -475,6 +499,10 @@ test("Unready actual App returns Login without session lookup or auth subscripti
     assert.equal(f.state.sessionCalls, 0);
     assert.equal(f.state.subscriptionCalls, 0);
     assert.equal(f.state.unsubscribeCalls, 0);
+    assert.equal(f.state.actorSubscriptionCalls, 0);
+    assert.equal(f.state.actorUnsubscribeCalls, 0);
+    assert.equal(f.actorListenerCount(), 0);
+    assert.equal(f.changeActor(storedSession).type, f.Login);
   }
 });
 
@@ -485,9 +513,16 @@ test("Ready actual App restores its session, subscribes, responds to sign-out an
   assert.ok(nodes(tree).some((node) => node.type === f.Overview));
   assert.equal(f.state.sessionCalls, 1);
   assert.equal(f.state.subscriptionCalls, 1);
+  assert.equal(f.state.actorSubscriptionCalls, 1);
+  assert.equal(f.actorListenerCount(), 1);
   assert.equal(f.changeSession(null).type, f.Login);
+  assert.ok(nodes(f.changeActor(storedSession)).some((node) => node.type === f.Overview), "Actor observation updates App independently of SDK callbacks");
+  assert.equal(f.changeActor(null).type, f.Login);
   f.unmount();
   assert.equal(f.state.unsubscribeCalls, 1);
+  assert.equal(f.state.actorUnsubscribeCalls, 1);
+  assert.equal(f.actorListenerCount(), 0);
+  assert.equal(f.changeActor(storedSession).type, f.Login, "An unsubscribed observer cannot update the unmounted App");
 });
 
 test("Ready actual App without a stored session still returns Login after lookup", async () => {
@@ -496,6 +531,11 @@ test("Ready actual App without a stored session still returns Login after lookup
   assert.equal((await f.mount()).type, f.Login);
   assert.equal(f.state.sessionCalls, 1);
   assert.equal(f.state.subscriptionCalls, 1);
+  assert.equal(f.state.actorSubscriptionCalls, 1);
+  assert.equal(f.actorListenerCount(), 1);
   f.unmount();
   assert.equal(f.state.unsubscribeCalls, 1);
+  assert.equal(f.state.actorUnsubscribeCalls, 1);
+  assert.equal(f.actorListenerCount(), 0);
+  assert.equal(f.changeActor(storedSession).type, f.Login);
 });

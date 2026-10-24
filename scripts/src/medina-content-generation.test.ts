@@ -527,7 +527,8 @@ test("GEN19 маршрут генерации не даёт браузеру в�
     .join("\n");
 
   assert.ok(!/payload\.workspaceId/.test(code), "рабочее пространство берётся только из проверенного контекста");
-  assert.ok(!/storageBucket|storagePath/.test(code), "ключ объекта и bucket выводятся на сервере, а не приходят снаружи");
+  assert.ok(!/payload\.(?:storageBucket|storagePath)/.test(code), "ключ объекта и bucket не выбираются браузером");
+  assert.ok(/requireGeneratedStorageReceipt\(stored/.test(code), "серверная квитанция проверяется до готового ответа");
   assert.ok(
     !/getSupabaseServerClient\(\)/.test(code),
     "клиент со служебным ключом здесь не собирается — только через lib/crm/server",
@@ -585,7 +586,7 @@ test("GEN23 новые вызовы идут через crmFetch и на зар�
   }
 });
 
-test("GEN24 «сгенерировано, но не сохранено» — отдельный ответ, а не «не удалось сгенерировать»", async () => {
+test("GEN24 «сгенерировано, сохранение не подтверждено» — отдельный ответ, а не «не удалось сгенерировать»", async () => {
   const source = await readFile(apiFile, "utf8");
   const handler = source.slice(
     source.indexOf("async function handleGeneratePhoto"),
@@ -597,7 +598,7 @@ test("GEN24 «сгенерировано, но не сохранено» — о�
   // сказал бы «не удалось сгенерировать», и оператор нажал бы ещё раз, заплатив
   // второй раз за то, что уже сделано.
   assert.ok(
-    handler.includes("Изображение сгенерировано, но не сохранено"),
+    handler.includes("Изображение сгенерировано, сохранение не подтверждено"),
     "отказ хранилища обязан отличаться от отказа генерации",
   );
   assert.ok(
@@ -683,7 +684,7 @@ test("GEN29 ключ подписи выводится из секрета, а �
   assert.equal(signature, derived, "ключ выводится разделением по назначению");
 });
 
-test("GEN30 повторный опрос готовой задачи не заводит второй файл и вторую строку", async () => {
+test("GEN30 повторный опрос сохраняет ключ и проверяет прежнюю строку до записи файла", async () => {
   const source = await readFile(apiFile, "utf8");
   const handler = source.slice(
     source.indexOf("async function handleVideoGeneration"),
@@ -703,12 +704,15 @@ test("GEN30 повторный опрос готовой задачи не за�
   assert.ok(/upsert:\s*Boolean\(idempotencyKey\)/.test(store), "повторяемый вызов перезаписывает свой объект");
   assert.ok(/findAdCreativeByStoragePath/.test(store), "и не заводит вторую строку в библиотеке");
 
-  // Объект, который не удалось опубликовать, не остаётся оплаченным мусором.
-  assert.ok(/\.remove\(\[storagePath\]\)/.test(store), "неопубликованный объект удаляется");
+  const upload = store.indexOf(".upload(storagePath");
+  assert.ok(store.indexOf("const publicUrl = buildSupabaseStoragePublicUrl") < upload, "публичный адрес проверяется до загрузки");
+  assert.ok(store.indexOf("await findAdCreativeByStoragePath") < upload, "непроверенная прежняя строка не разрешает перезапись");
+  assert.ok(/requireStoredFileProof: true/.test(store), "файл без подтверждённой библиотечной строки не объявляется готовым");
 
   // Security-2F: текст Postgres и Storage наружу не идёт.
-  assert.ok(/redactedDetail\(/.test(store), "подробность отказа хранилища уходит в лог, а не оператору");
   assert.ok(!/uploadError\.message/.test(store), "сырой текст Supabase Storage не пересказывается вызывающему");
+  // Stable identity across calendar boundaries and a unique concurrent receipt
+  // remain separate DB acceptance requirements; source pins cannot prove them.
 });
 
 test("GEN27 опрос рендера не кэшируется браузером", async () => {

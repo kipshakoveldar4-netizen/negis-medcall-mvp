@@ -11,6 +11,11 @@ const frontend = path.join(root, "artifacts/medina-control");
 const controlPath = "/__fixture/control-subscription";
 const subscriptionPath = "/api/crm/platform-subscriptions";
 const overviewPath = "/api/crm/platform-overview";
+const operatorPath = "/api/crm/platform-operators";
+const onboardingPath = "/api/crm/platform-onboarding";
+const credentialsPath = "/api/crm/platform-onboarding-credentials";
+const reissuePath = "/api/crm/platform-invitation-reissue";
+const ownerRoutes = new Set([operatorPath, onboardingPath, credentialsPath, reissuePath]);
 const pageQuery = "?subscriptions=qa";
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ids = Object.freeze({
@@ -43,15 +48,18 @@ function send(res, status, body) {
   res.end(JSON.stringify(body));
 }
 
-async function readJson(req) {
+async function readJson(req, assertCurrent) {
+  assertCurrent();
   if (!/^application\/json(?:\s*;|$)/i.test(req.headers["content-type"] || "")) throw fail(415, "json_required");
   let bytes = 0;
   const chunks = [];
   for await (const chunk of req) {
+    assertCurrent();
     bytes += chunk.length;
     if (bytes > 8192) throw fail(413, "fixture_body_limit");
     chunks.push(chunk);
   }
+  assertCurrent();
   let body;
   try { body = JSON.parse(Buffer.concat(chunks).toString("utf8")); }
   catch { throw fail(400, "invalid_json"); }
@@ -72,22 +80,62 @@ function seed() {
     item(4, ids.W2, "paused", "standard", 47_880_000, "yearly"), item(5, ids.W2, "cancelled", "basic", 1_990_000)];
 }
 
+function seedOperators() {
+  return ["pending", "approved", "suspended"].map((status, index) => ({
+    id: `dddddddd-1111-4111-8111-${String(index + 1).padStart(12, "0")}`,
+    displayName: `QA operator - ${status}`, status, acceptingRequests: status === "approved",
+  }));
+}
+const ownerCounts = () => ({ reads: 0, mutations: 0, operatorChanges: 0, onboardingInvites: 0,
+  credentials: 0, reissues: 0, denied: 0 });
+
 /** Does not start a server, read configuration, persist data, or perform outbound I/O. */
 export function createControlSubscriptionHttpFixture() {
+  let epoch = 0, closed = false;
   let rows = seed();
   let sequence = 0;
   let failAfterCommit = false;
   let counters = { commits: 0, replays: 0, abandons: 0, lostResponses: 0, refused: 0 };
   const operations = new Map();
+  let operators = seedOperators(), ownerCounters = ownerCounts(), holdOwnerReply = false;
+  let heldOwnerReply = null;
+  const onboardings = new Map();
   const clinics = [{ id: ids.W1, name: "QA subscription - North", ownerEmail: "qa-north@example.invalid" },
     { id: ids.W2, name: "QA subscription - South", ownerEmail: "qa-south@example.invalid" }];
   const now = () => new Date(Date.UTC(2026, 9, 25, 9) + (++sequence * 1000)).toISOString();
   const active = (workspace) => rows.find((row) => row.workspace_id === workspace && row.status === "active");
+  const isCurrent = (requestEpoch) => !closed && requestEpoch === epoch;
+  function assertCurrent(requestEpoch) {
+    if (!isCurrent(requestEpoch)) throw fail(409, "fixture_reset");
+  }
 
   function snapshot() {
     return { fixture: "QA subscription", storage: "synthetic in-memory; not SQL", failAfterCommit,
       counters: { ...counters }, receipts: operations.size, historyRows: rows.length,
+      ownerCounters: { ...ownerCounters }, holdOwnerReply, ownerReplyPending: Boolean(heldOwnerReply),
+      heldOwnerReply: heldOwnerReply ? { method: heldOwnerReply.method, path: heldOwnerReply.path } : null,
       actors: { A: ids.A, B: ids.B }, clinics: copy(clinics) };
+  }
+  function finishOwnerReply(release, held = heldOwnerReply) {
+    if (!held || heldOwnerReply !== held) return;
+    heldOwnerReply = null;
+    clearTimeout(held.timer);
+    if (release && isCurrent(held.epoch)) send(held.res, held.status, held.body);
+    else held.res.destroy();
+  }
+  function ownerReply(req, res, url, requestEpoch, status, body) {
+    assertCurrent(requestEpoch);
+    if (!holdOwnerReply || !["POST", "PATCH"].includes(req.method) || status < 200 || status >= 300) {
+      return send(res, status, body);
+    }
+    holdOwnerReply = false;
+    const held = { res, status, body: copy(body), epoch: requestEpoch, method: req.method, path: url.pathname,
+      timer: setTimeout(() => finishOwnerReply(true, held), 60_000) };
+    held.timer.unref();
+    heldOwnerReply = held;
+    res.once("close", () => {
+      if (heldOwnerReply === held) { clearTimeout(held.timer); heldOwnerReply = null; }
+    });
   }
   function overview() {
     const items = clinics.map((clinic, index) => {
@@ -108,7 +156,7 @@ export function createControlSubscriptionHttpFixture() {
       requestKey: operation.requestKey, kind: operation.kind, state: operation.state, replayed } };
   }
   function workspace(value) {
-    if (![ids.W1, ids.W2].includes(value)) throw fail(400, "workspace_required");
+    if (!clinics.some((clinic) => clinic.id === value)) throw fail(400, "workspace_required");
     return value;
   }
   function requestKey(value) {
@@ -176,25 +224,119 @@ export function createControlSubscriptionHttpFixture() {
     return { data: receipt(operation, false), fresh: true };
   }
 
-  async function dispatch(req, res, url) {
+  async function ownerRequest(req, res, url, requestEpoch) {
+    const current = () => assertCurrent(requestEpoch);
+    const reply = (status, body) => ownerReply(req, res, url, requestEpoch, status, body);
+    current();
+    const method = req.method || "GET";
+    if (url.pathname === operatorPath) {
+      if (method === "GET") {
+        const offset = url.searchParams.get("offset") ?? "0";
+        if ([...url.searchParams.keys()].some((key) => key !== "offset") || url.searchParams.getAll("offset").length > 1
+          || !/^\d{1,6}$/.test(offset)) throw fail(400, "fixture_operator_page_invalid");
+        ownerCounters.reads++;
+        const start = Number(offset);
+        return reply(200, ok({ items: copy(operators.slice(start, start + 20)), hasMore: operators.length > start + 20 }));
+      }
+      if (method !== "PATCH" || url.search) throw fail(403, "fixture_method_forbidden");
+      const body = await readJson(req, current);
+      current();
+      if (!exact(body, ["id", "action"]) || !["approve", "suspend"].includes(body.action)) throw fail(400, "fixture_operator_action_invalid");
+      const profile = operators.find((item) => item.id === body.id);
+      if (!profile || !(body.action === "approve" ? ["pending", "suspended"] : ["approved"]).includes(profile.status)) {
+        throw fail(409, "fixture_operator_status_conflict");
+      }
+      profile.status = body.action === "approve" ? "approved" : "suspended";
+      profile.acceptingRequests = false;
+      ownerCounters.operatorChanges++; ownerCounters.mutations++;
+      return reply(200, ok(copy(profile)));
+    }
+    if (method !== "POST" || url.search) throw fail(403, "fixture_method_forbidden");
+    const body = await readJson(req, current);
+    current();
+    const origin = localOrigin(req);
+    if (url.pathname === reissuePath) {
+      if (!exact(body, ["workspaceId"])) throw fail(400, "workspace_required");
+      const existing = onboardings.get(body.workspaceId);
+      if (!existing) return send(res, 404, { success: false, code: "not_found", error: "QA fixture: not found" });
+      ownerCounters.reissues++; ownerCounters.mutations++;
+      const data = { ...existing, acceptUrl: `${origin}/__fixture/invitation-not-live/${existing.workspaceId}?revision=${ownerCounters.reissues}` };
+      onboardings.set(existing.workspaceId, data);
+      return reply(201, ok(copy(data)));
+    }
+    const credentials = url.pathname === credentialsPath;
+    const required = ["name", "vertical", "ownerName", "timeZone", "purpose"];
+    const optional = credentials ? ["ownerEmail", "ownerLogin", "password"] : ["ownerEmail", "confirmAdditionalWorkspace"];
+    if (!exact(body, required, optional) || typeof body.name !== "string" || !body.name.trim() || body.name.length > 120
+      || typeof body.ownerName !== "string" || body.ownerName.length > 120
+      || !["clinic_services", "mortgage_leads", "marketing"].includes(body.purpose)
+      || !["", "clinic", "dental", "beauty"].includes(body.vertical) || typeof body.timeZone !== "string"
+      || !/^[A-Za-z_]+(?:\/[A-Za-z_]+)?$/.test(body.timeZone)
+      || (credentials && (body.purpose === "marketing" || typeof body.password !== "string" || body.password.length < 8 || body.password.length > 128))) {
+      throw fail(400, "fixture_onboarding_invalid");
+    }
+    const loginOnly = credentials && typeof body.ownerLogin === "string" && /^[a-z0-9][a-z0-9.]{2,23}$/.test(body.ownerLogin);
+    if (!loginOnly && (typeof body.ownerEmail !== "string" || !/^[a-z0-9._+-]+@example\.invalid$/i.test(body.ownerEmail))) {
+      return send(res, 400, { success: false, code: "fixture_identity_required", error: "QA fixture: use a fictitious @example.invalid owner or synthetic login" });
+    }
+    const email = loginOnly ? `qa-${body.ownerLogin}@example.invalid` : body.ownerEmail.toLowerCase();
+    const existing = [...onboardings.values()].find((item) => item.ownerEmail === email);
+    if (existing && body.confirmAdditionalWorkspace !== true) {
+      return reply(409, { success: false, code: "invitation_already_pending",
+        error: "QA fixture: synthetic owner already has a pending workspace", data: { existingWorkspaceId: existing.workspaceId } });
+    }
+    if (onboardings.size >= 16) throw fail(409, "fixture_capacity_reset_required");
+    // Explicit DTO only: request passwords never enter the in-memory store, receipts, or counters.
+    const data = { workspaceId: randomUUID(), name: `QA onboarding - ${body.name.trim()}`, vertical: body.vertical || null,
+      purpose: body.purpose, ownerEmail: email, ownerLogin: loginOnly ? body.ownerLogin : "", ownerLoginOnly: Boolean(loginOnly),
+      timeZone: body.timeZone, loginUrl: `${origin}/__fixture/login-not-live`,
+      invitationExpiresAt: "2026-12-31T23:59:59.000Z", emailSent: false,
+      emailStatus: loginOnly ? "login_only" : "fixture_not_sent" };
+    data.acceptUrl = `${origin}/__fixture/invitation-not-live/${data.workspaceId}`;
+    onboardings.set(data.workspaceId, data);
+    clinics.push({ id: data.workspaceId, name: data.name, ownerEmail: data.ownerEmail });
+    if (credentials) ownerCounters.credentials++; else ownerCounters.onboardingInvites++;
+    ownerCounters.mutations++;
+    return reply(201, ok(copy(data)));
+  }
+
+  async function dispatch(req, res, url, requestEpoch) {
+    const current = () => assertCurrent(requestEpoch);
+    current();
     if (!localOrigin(req)) throw fail(403, "loopback_same_origin_required");
     const method = req.method || "GET";
     if (url.pathname === controlPath) {
       if (url.search) throw fail(400, "fixture_query_forbidden");
       if (method === "GET") return send(res, 200, snapshot());
       if (method !== "POST") throw fail(403, "fixture_method_forbidden");
-      const body = await readJson(req);
+      const body = await readJson(req, current);
+      current();
       if (body.command === "reset" && exact(body, ["command"])) {
+        epoch++;
+        finishOwnerReply(false); holdOwnerReply = false;
+        operators = seedOperators(); ownerCounters = ownerCounts(); onboardings.clear(); clinics.splice(2);
         rows = seed(); operations.clear(); sequence = 0; failAfterCommit = false;
         counters = { commits: 0, replays: 0, abandons: 0, lostResponses: 0, refused: 0 };
       } else if (body.command === "failAfterCommit" && exact(body, ["command", "enabled"]) && typeof body.enabled === "boolean") {
         failAfterCommit = body.enabled;
+      } else if (body.command === "holdOwnerReply" && exact(body, ["command", "enabled"]) && typeof body.enabled === "boolean") {
+        if (heldOwnerReply) throw fail(409, "fixture_reply_already_held");
+        holdOwnerReply = body.enabled;
+      } else if (body.command === "releaseOwnerReply" && exact(body, ["command"])) {
+        finishOwnerReply(true);
       } else throw fail(400, "fixture_command_forbidden");
       return send(res, 200, snapshot());
     }
     const actor = req.headers.authorization === "Bearer fixture-control-A" ? "A"
       : req.headers.authorization === "Bearer fixture-control-B" ? "B" : null;
     if (!actor) throw fail(401, "fixture_actor_required");
+    if (ownerRoutes.has(url.pathname)) {
+      if (actor !== "A") {
+        ownerCounters.denied++;
+        return send(res, 404, { success: false, code: "not_found", error: "QA fixture: not found" });
+      }
+      return ownerRequest(req, res, url, requestEpoch);
+    }
     if (url.pathname === overviewPath) {
       if (method !== "GET" || url.search) throw fail(403, "fixture_route_forbidden");
       return send(res, 200, ok(overview()));
@@ -212,7 +354,8 @@ export function createControlSubscriptionHttpFixture() {
         .sort((a, b) => b.started_at.localeCompare(a.started_at) || b.id.localeCompare(a.id))) }));
     }
     if (!["POST", "PATCH"].includes(method) || url.search) throw fail(403, "fixture_method_forbidden");
-    const body = await readJson(req);
+    const body = await readJson(req, current);
+    current();
     const workspaceId = workspace(body.workspaceId), key = requestKey(body.requestKey), actorId = ids[actor];
     if (Object.hasOwn(body, "abandon")) {
       if (method !== "POST" || body.abandon !== true || !exact(body, ["workspaceId", "requestKey", "abandon"])) throw fail(400, "subscription_operation_invalid");
@@ -237,10 +380,13 @@ export function createControlSubscriptionHttpFixture() {
   }
   return {
     snapshot,
+    close() { closed = true; epoch++; finishOwnerReply(false); },
     handle(req, res) {
       const url = new URL(req.url || "/", "http://127.0.0.1");
-      if (![controlPath, overviewPath, subscriptionPath].includes(url.pathname)) return false;
-      void dispatch(req, res, url).catch((error) => {
+      if (![controlPath, overviewPath, subscriptionPath].includes(url.pathname) && !ownerRoutes.has(url.pathname)) return false;
+      const requestEpoch = epoch;
+      void dispatch(req, res, url, requestEpoch).catch((error) => {
+        if (!isCurrent(requestEpoch)) { res.destroy(); return; }
         counters.refused++;
         const status = Number.isInteger(error.status) ? error.status : 500;
         send(res, status, { success: false, code: status === 500 ? "fixture_internal_error" : error.code,
@@ -318,10 +464,10 @@ export async function startControlSubscriptionBrowser(port = 5236) {
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   if (process.argv.slice(2).some((arg) => !/^--port=\d+$/.test(arg)) || process.argv.length > 3) throw new Error("Use only --port=<loopback port>");
   const port = Number(process.argv[2]?.slice("--port=".length) || 5236);
-  const { server } = await startControlSubscriptionBrowser(port);
+  const { server, fixture } = await startControlSubscriptionBrowser(port);
   let closing = false;
   for (const signal of ["SIGINT", "SIGTERM"]) process.once(signal, async () => {
     if (closing) return;
-    closing = true; await server.close(); process.exit(0);
+    closing = true; fixture.close(); await server.close(); process.exit(0);
   });
 }

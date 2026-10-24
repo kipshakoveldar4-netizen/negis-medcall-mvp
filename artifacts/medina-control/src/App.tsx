@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { Session } from "@supabase/supabase-js";
 import { controlConfig, supabase } from "./lib/supabase";
+import { subscribeControlActor } from "./lib/api";
 import { Login } from "./screens/Login";
 import { Overview } from "./screens/Overview";
 import { ClinicCard } from "./screens/ClinicCard";
@@ -38,15 +39,17 @@ export default function App() {
       setSession(next);
       setReady(true);
     };
-    const { data: listener } = supabase.auth.onAuthStateChange((_event, next) => {
+    const onSession = (next: Session | null) => {
       observed++;
       apply(next);
-    });
+    };
+    const unsubscribeActor = subscribeControlActor(onSession);
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, next) => onSession(next));
     const initialObservation = observed;
     void supabase.auth.getSession().then(({ data, error }) => {
       if (observed === initialObservation) apply(error ? null : data.session);
     }, () => { if (observed === initialObservation) apply(null); });
-    return () => { disposed = true; listener.subscription.unsubscribe(); };
+    return () => { disposed = true; unsubscribeActor(); listener.subscription.unsubscribe(); };
   }, []);
 
   if (!controlConfig.ready) return <Login />;

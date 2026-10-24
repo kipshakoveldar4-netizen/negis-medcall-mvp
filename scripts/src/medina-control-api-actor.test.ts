@@ -42,6 +42,7 @@ type Api = {
   API_BASE_URL: string;
   ControlAccessError: new () => Error & { status: number; code: string };
   captureControlAccess(): Access;
+  subscribeControlActor(listener: (session: Session | null) => void): () => void;
   controlFetch(path: string, init?: RequestInit, scope?: Access): Promise<Response>;
 };
 type Outcome<T> = { ok: true; value: T } | { ok: false; error: unknown };
@@ -381,11 +382,31 @@ for (const [label, next] of [["B", actorB], ["null", null]] as const) {
       const access = await f.capture();
       f.change(next, next ? "SIGNED_IN" : "SIGNED_OUT", true);
       rejected(await f.start(access));
+      assert.equal(f.api.captureControlAccess().actorId, next ?? "");
+      const afterInvalidation = f.sessionCalls();
       f.change(actorA, "SIGNED_IN", true);
       rejected(await f.start(access));
       assert.equal(access.isCurrent(), false);
+      assert.equal(f.sessionCalls(), afterInvalidation, "An expired A capture cannot perform another SDK lookup");
       assert.equal(f.requests.length, 0, "A silently observed identity change must not revive old work");
-      assert.equal((await f.start(await f.capture())).ok, true);
+      const observed = f.api.captureControlAccess();
+      assert.equal(observed.actorId, next ?? "", "A silent SDK return does not update the observed actor by itself");
+      rejected(await f.start(observed));
+      if (next) {
+        assert.equal(f.sessionCalls(), afterInvalidation + 1, "Fresh B work discovers returned A before refusing");
+      } else {
+        assert.equal(f.sessionCalls(), afterInvalidation, "A signed-out scope cannot start a private SDK lookup");
+        assert.equal(f.api.captureControlAccess().isCurrent(), false);
+        f.change(actorA, "SIGNED_IN");
+      }
+      assert.equal(observed.isCurrent(), false);
+      assert.equal(access.isCurrent(), false, "SDK rediscovery must never resurrect old A work");
+      assert.equal(f.requests.length, 0, "Rediscovering A must reject the B/null-scoped request before HTTP");
+      unpublished(f);
+      const fresh = await f.capture();
+      rejected(await f.start(access));
+      assert.equal(f.requests.length, 0);
+      assert.equal((await f.start(fresh)).ok, true);
       pinned(f);
     }, { automatic: true });
   });
@@ -684,6 +705,7 @@ function appFixture(fixture: Fixture) {
       };
       if (name === "react/jsx-runtime") return { jsx, jsxs: jsx, Fragment: "Fragment" };
       if (name === "./lib/supabase") return { controlConfig: fixture.config, supabase: { auth: fixture.auth } };
+      if (name === "./lib/api") return fixture.api;
       if (name.startsWith("./screens/")) {
         const screen = name.slice("./screens/".length);
         assert.ok(Object.hasOwn(screens, screen), "Only known screen boundaries may be mocked");

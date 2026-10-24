@@ -24,7 +24,10 @@ const context = {
 };
 const requestKey = "33333333-3333-4333-8333-333333333333";
 const videoId = "44444444-4444-4444-8444-444444444444";
-const safeUrl = "https://synthetic-assets.invalid/public-fixture.png";
+const storageOrigin = "https://synthetic-assets.invalid";
+const storagePath = `${context.workspaceId}/public-fixture`;
+const safeUrl = `${storageOrigin}/storage/v1/object/public/ad-creatives/${storagePath}`;
+const assetId = "55555555-5555-4555-8555-555555555555";
 const textData = { prompt: "Synthetic safe output", negativePrompt: "Synthetic negative output", hook: "Synthetic hook" };
 const config = Object.freeze({ apiKey: markers.token, imageModel: "synthetic-image", videoModel: "synthetic-video", videoSeconds: "8" });
 const reservation = {
@@ -197,14 +200,19 @@ function fixture(options: Options = {}) {
       events.push("store");
       stores.push(plain(input));
       if (options.failAt === "store") fail();
-      return { publicUrl: safeUrl, asset: { id: "synthetic-asset" } };
+      return { publicUrl: safeUrl, mode: "supabase", warning: "", asset: {
+        id: assetId, workspaceId: input.workspaceId, fileName: input.fileName,
+        fileType: String(input.mimeType).startsWith("image/") ? "image" : "video",
+        mimeType: input.mimeType, fileSize: (input.buffer as Uint8Array).length,
+        storageBucket: "ad-creatives", storagePath, publicUrl: safeUrl,
+      } };
     },
     fetch() { calls.network++; assert.fail("real network must never be reached"); },
   };
   // No require, application imports, auth/DB clients or real process/environment enter this VM.
   new Script(compiled, { filename: "content-error-privacy.fixture.cjs" }).runInNewContext({
     ...dependencies, Error, exports: exported,
-    process: { env: Object.freeze({ SUPABASE_SERVICE_ROLE_KEY: markers.token }) },
+    process: { env: Object.freeze({ SUPABASE_URL: storageOrigin, SUPABASE_SERVICE_ROLE_KEY: markers.token }) },
   }, { timeout: 1000 });
   selected = exported.selected!;
   assert.equal(typeof selected?.GenerationProviderError, "function");
@@ -378,7 +386,7 @@ test("content privacy: post-generation photo storage failure remains paid, stage
   const f = fixture({ failAt: "store" });
   const result = await f.invoke("handleGeneratePhoto");
   assertFailure(result, 502, true);
-  assert.match(result.reply.error!, /сгенерирован.*не сохран/iu);
+  assert.match(result.reply.error!, /сгенерирован.*сохранение не подтверждено/iu);
   assert.match(result.reply.hint!, /оплачен/iu);
   assert.match(result.reply.hint!, /повтор/iu);
   assert.deepEqual(f.events, ["reserve", "image", "complete:succeeded", "store"]);
@@ -399,7 +407,7 @@ test("content privacy: photo positive control preserves the actual stored asset 
   assert.equal(result.status, 200);
   assert.equal(result.reply.success, true);
   assert.equal(result.reply.data?.creativeUrl, safeUrl);
-  assert.equal(result.reply.data?.assetId, "synthetic-asset");
+  assert.equal(result.reply.data?.assetId, assetId);
   assert.equal(result.reply.data?.fileSize, 3);
   assert.equal(result.reply.data?.model, config.imageModel);
   assert.equal((f.stores[0].metadata as Record<string, unknown>).prompt, markers.customer, "private input actually reaches only fake storage");
@@ -445,7 +453,7 @@ test("content privacy: completed video storage failure preserves paid-render pol
   const f = fixture({ jobStatus: "completed", failAt: "store" });
   const result = await f.invoke("handleVideoGeneration");
   assertFailure(result, 502, true);
-  assert.match(result.reply.error!, /отрендерен.*не сохран/iu);
+  assert.match(result.reply.error!, /отрендерен.*сохранение не подтверждено/iu);
   assert.match(result.reply.hint!, /оплачен/iu);
   assert.match(result.reply.hint!, /опрос/iu);
   assert.deepEqual(f.events, ["poll", "download", "store"]);
@@ -466,7 +474,7 @@ test("content privacy: completed video positive control stores the same job with
   assert.equal(result.reply.data?.status, "completed");
   assert.equal(result.reply.data?.progress, 100);
   assert.equal(result.reply.data?.creativeUrl, safeUrl);
-  assert.equal(result.reply.data?.assetId, "synthetic-asset");
+  assert.equal(result.reply.data?.assetId, assetId);
   assert.equal(result.reply.data?.mimeType, "video/mp4");
   assert.deepEqual(f.events, ["poll", "download", "store"]);
   assert.equal(f.calls.create, 0);

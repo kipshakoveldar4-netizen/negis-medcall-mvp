@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { isLoginShape, isSyntheticEmail, loginFromEmail, normalizeLogin } from "../../../../lib/auth/staff-logins";
-import { controlFetch } from "../lib/api";
+import { captureControlAccess, controlFetch, verifyControlAccess } from "../lib/api";
 
 // Подключение клиники с портала.
 //
@@ -125,6 +125,43 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
   const [shownPassword, setShownPassword] = useState("");
   const [copied, setCopied] = useState(false);
   const titleRef = useRef<HTMLHeadingElement | null>(null);
+  const origin = useRef(captureControlAccess());
+  const mounted = useRef(true);
+  const pending = useRef<object | null>(null);
+  const denied = useRef(false);
+  const [accessDenied, setAccessDenied] = useState(false);
+  const copyTimer = useRef<number | null>(null);
+  const formVersion = useRef(0);
+  const recoveryState = useRef({ reissueWorkspaceId, confirmDuplicate });
+  recoveryState.current = { reissueWorkspaceId, confirmDuplicate };
+  const fields = [mode, identityMode, name, vertical, purpose, ownerEmail, ownerLogin, ownerName, timeZone, password];
+  const lastFields = useRef(fields);
+  if (fields.some((value, index) => value !== lastFields.current[index])) {
+    lastFields.current = fields;
+    formVersion.current++;
+  }
+  const version = formVersion.current;
+  const current = () => mounted.current && !denied.current && origin.current.isCurrent() && formVersion.current === version;
+  const taskScope = (attempt: object) => ({ actorId: origin.current.actorId,
+    isCurrent: () => current() && pending.current === attempt });
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false; pending.current = null;
+      if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
+    };
+  }, []);
+  function finish(attempt: object) {
+    if (current() && pending.current === attempt) { pending.current = null; setBusy(false); }
+  }
+  function refuse() {
+    denied.current = true;
+    pending.current = null;
+    setBusy(false); setPassword(""); setShownPassword(""); setResult(null); setCredsResult(null);
+    setReissueWorkspaceId(""); setOfferInvite(false); setConfirmDuplicate(false); setCopied(false);
+    if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
+    setAccessDenied(true);
+  }
 
   // Фокус — эффектом, а не сразу после setState: в момент вызова экран
   // результата ещё не отрендерен и titleRef.current был бы null всегда.
@@ -134,7 +171,7 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
 
   /** Смена режима гасит ошибки прежнего: их советы и кнопки — про другой путь. */
   function switchMode(next: Mode) {
-    if (busy || next === mode) return;
+    if (!current() || pending.current || busy || next === mode) return;
     if (purpose === "marketing" && next === "credentials") return;
     setMode(next);
     setPassword("");
@@ -142,7 +179,7 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
   }
 
   function switchIdentity(next: IdentityMode) {
-    if (busy || next === identityMode) return;
+    if (!current() || pending.current || busy || next === identityMode) return;
     setIdentityMode(next);
     setPassword("");
     clearOutcome();
@@ -169,7 +206,8 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
    * рождались из повторов формы.
    */
   async function performSubmit(confirmAdditional: boolean) {
-    if (busy) return;
+    if (!current() || pending.current || busy) return;
+    if (confirmAdditional && (!confirmDuplicate || !recoveryState.current.confirmDuplicate)) return;
     clearOutcome();
     const usesOwnerLogin = mode === "credentials" && identityMode === "login";
     const rawOwnerLogin = ownerLogin.trim();
@@ -188,6 +226,9 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
     }
     // Один снимок пароля для запроса и результата, независимо от новых рендеров.
     const submittedPassword = password;
+    const attempt = {};
+    pending.current = attempt;
+    const scope = taskScope(attempt);
     setBusy(true);
     try {
       if (mode === "credentials") {
@@ -195,8 +236,11 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ name, vertical, ownerName, timeZone, purpose, password: submittedPassword, ...(usesOwnerLogin ? { ownerLogin: normalizedOwnerLogin } : { ownerEmail }) }),
-        });
+        }, scope);
+        if (!scope.isCurrent()) return;
+        if ([401, 403, 404].includes(response.status)) { refuse(); return; }
         const body = await response.json().catch(() => null);
+        if (!scope.isCurrent()) return;
         if (!response.ok || body?.success !== true) {
           const reasons = [body?.error, ...(Array.isArray(body?.details) ? body.details : [])].filter(Boolean);
           setError(reasons.length > 0 ? reasons : ["Не удалось подключить клинику. Попробуйте ещё раз."]);
@@ -213,6 +257,8 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
           setOfferInvite(!usesOwnerLogin && body?.code === "email_already_registered" && !existingWorkspaceId);
           return;
         }
+        finish(attempt);
+        formVersion.current++;
         setShownPassword(submittedPassword);
         setPassword("");
         setCredsResult(body.data as CredsResult);
@@ -224,8 +270,11 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
         headers: { "Content-Type": "application/json" },
         // Пароль в инвайт-путь не уходит даже заполненным полем.
         body: JSON.stringify({ name, vertical, ownerEmail, ownerName, timeZone, purpose, ...(confirmAdditional ? { confirmAdditionalWorkspace: true } : {}) }),
-      });
+      }, scope);
+      if (!scope.isCurrent()) return;
+      if ([401, 403, 404].includes(response.status)) { refuse(); return; }
       const body = await response.json().catch(() => null);
+      if (!scope.isCurrent()) return;
       if (!response.ok || body?.success !== true) {
         const reasons = [body?.error, ...(Array.isArray(body?.details) ? body.details : [])].filter(Boolean);
         setError(reasons.length > 0 ? reasons : ["Не удалось подключить клинику. Попробуйте ещё раз."]);
@@ -237,18 +286,25 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
         setConfirmDuplicate(body?.code === "owner_already_has_workspace");
         return;
       }
+      finish(attempt);
+      formVersion.current++;
       setResult(body.data as Result);
     } catch {
+      if (!scope.isCurrent()) return;
       // Сервер мог успеть закоммитить до обрыва сети — утверждать «не
       // подключена» отсюда нельзя.
       setError(["Сеть не ответила — неизвестно, успело ли подключение. Проверьте список клиник на «Обзоре» перед повтором."]);
     } finally {
-      setBusy(false);
+      finish(attempt);
     }
   }
 
   async function reissue() {
-    if (busy || !reissueWorkspaceId) return;
+    if (!current() || pending.current || busy || !reissueWorkspaceId) return;
+    if (recoveryState.current.reissueWorkspaceId !== reissueWorkspaceId) return;
+    const attempt = {};
+    pending.current = attempt;
+    const scope = taskScope(attempt);
     setBusy(true);
     setError([]);
     try {
@@ -256,8 +312,11 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ workspaceId: reissueWorkspaceId }),
-      });
+      }, scope);
+      if (!scope.isCurrent()) return;
+      if ([401, 403, 404].includes(response.status)) { refuse(); return; }
       const body = await response.json().catch(() => null);
+      if (!scope.isCurrent()) return;
       if (!response.ok || body?.success !== true) {
         const reasons = [body?.error, ...(Array.isArray(body?.details) ? body.details : [])].filter(Boolean);
         setError(reasons.length > 0 ? reasons : ["Перевыпустить не удалось. Попробуйте ещё раз."]);
@@ -266,27 +325,39 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
         if (body?.code === "owner_already_member" || body?.code === "not_found") setReissueWorkspaceId("");
         return;
       }
+      finish(attempt);
+      formVersion.current++;
       setReissueWorkspaceId("");
       setPassword("");
       setResult(body.data as Result);
     } catch {
+      if (!scope.isCurrent()) return;
       setError(["Сеть не ответила — неизвестно, перевыпустилось ли приглашение. Проверьте карточку клиники перед повтором."]);
     } finally {
-      setBusy(false);
+      finish(attempt);
     }
   }
 
   async function copyText(value: string) {
+    if (!current() || pending.current) return;
+    const scope = { actorId: origin.current.actorId, isCurrent: current };
     try {
+      await verifyControlAccess(scope);
+      if (!scope.isCurrent()) return;
       await navigator.clipboard.writeText(value);
+      if (!scope.isCurrent()) return;
       setCopied(true);
-      window.setTimeout(() => setCopied(false), 2500);
+      if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
+      copyTimer.current = window.setTimeout(() => { if (scope.isCurrent()) setCopied(false); }, 2500);
     } catch {
       // Буфер недоступен — значение выделяется и копируется руками.
     }
   }
 
   function resetForm() {
+    if (!current() || pending.current) return;
+    formVersion.current++;
+    if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
     setResult(null);
     setCredsResult(null);
     setShownPassword("");
@@ -301,6 +372,10 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
     setCopied(false);
     clearOutcome();
   }
+  function backToOverview() { if (current()) onDone(); }
+
+  if (accessDenied) return <><h1 className="page-title">Страница не найдена</h1><p className="page-sub">Доступ к подключению пространств закрыт.</p></>;
+  if (!origin.current.isCurrent()) return <p role="status">Проверяем доступ…</p>;
 
   if (credsResult) {
     return (
@@ -350,7 +425,7 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
             </>}
           </p>
           <div style={{ marginTop: 14, display: "flex", flexWrap: "wrap", gap: 8 }}>
-            <button type="button" className="btn" onClick={onDone}>К обзору</button>
+            <button type="button" className="btn" onClick={backToOverview}>К обзору</button>
             <button type="button" className="btn" onClick={resetForm}>Подключить ещё одну</button>
           </div>
         </div>
@@ -400,7 +475,7 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
             </>}
           </p>
           <div style={{ marginTop: 14, display: "flex", flexWrap: "wrap", gap: 8 }}>
-            <button type="button" className="btn" onClick={onDone}>К обзору</button>
+            <button type="button" className="btn" onClick={backToOverview}>К обзору</button>
             <button type="button" className="btn" onClick={resetForm}>Подключить ещё одну</button>
           </div>
         </div>
@@ -419,6 +494,7 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
             <div className="field">
               <label htmlFor="ob-purpose">Назначение пространства</label>
               <select id="ob-purpose" value={purpose} onChange={(event) => {
+                if (!current() || pending.current) return;
                 setPurpose(event.target.value);
                 setVertical("");
                 setPassword("");
@@ -470,13 +546,13 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
             </div> : null}
             <div className="field">
               <label htmlFor="ob-name">Название</label>
-              <input id="ob-name" value={name} onChange={(event) => setName(event.target.value)} placeholder={purpose === "clinic_services" ? "Салон «Люкс»" : "Название компании"} />
+              <input id="ob-name" value={name} onChange={(event) => { if (current() && !pending.current) setName(event.target.value); }} placeholder={purpose === "clinic_services" ? "Салон «Люкс»" : "Название компании"} />
             </div>
             {purpose === "clinic_services" && <div className="field">
               <label htmlFor="ob-vertical">Ниша</label>
               {/* Пустой первый пункт намеренно: ниша меняет правила проверки
                   рекламы, и выбрать её молча значило бы выбрать за клиента. */}
-              <select id="ob-vertical" value={vertical} onChange={(event) => setVertical(event.target.value)}>
+              <select id="ob-vertical" value={vertical} onChange={(event) => { if (current() && !pending.current) setVertical(event.target.value); }}>
                 <option value="">— выберите —</option>
                 <option value="beauty">Салон красоты</option>
                 <option value="dental">Стоматология</option>
@@ -490,6 +566,7 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
                 type="text"
                 value={ownerLogin}
                 onChange={(event) => {
+                  if (!current() || pending.current) return;
                   setOwnerLogin(event.target.value);
                   clearOutcome();
                   setPassword("");
@@ -512,6 +589,7 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
                 type="email"
                 value={ownerEmail}
                 onChange={(event) => {
+                  if (!current() || pending.current) return;
                   setOwnerEmail(event.target.value);
                   clearOutcome();
                   setPassword("");
@@ -522,7 +600,7 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
             </div>}
             <div className="field">
               <label htmlFor="ob-owner">Имя владельца</label>
-              <input id="ob-owner" value={ownerName} onChange={(event) => setOwnerName(event.target.value)} placeholder="Необязательно" />
+              <input id="ob-owner" value={ownerName} onChange={(event) => { if (current() && !pending.current) setOwnerName(event.target.value); }} placeholder="Необязательно" />
             </div>
             {mode === "credentials" ? (
               <div className="field">
@@ -531,12 +609,12 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
                   <input
                     id="ob-password"
                     value={password}
-                    onChange={(event) => setPassword(event.target.value)}
+                    onChange={(event) => { if (current() && !pending.current) setPassword(event.target.value); }}
                     placeholder="8–72 символа"
                     autoComplete="off"
                     style={{ flex: "1 1 180px", minWidth: 0 }}
                   />
-                  <button type="button" className="btn" onClick={() => setPassword(generatePassword())}>
+                  <button type="button" className="btn" onClick={() => { if (current() && !pending.current) setPassword(generatePassword()); }}>
                     Сгенерировать
                   </button>
                 </div>
@@ -544,7 +622,7 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
             ) : null}
             <div className="field">
               <label htmlFor="ob-tz">Часовой пояс</label>
-              <select id="ob-tz" value={timeZone} onChange={(event) => setTimeZone(event.target.value)}>
+              <select id="ob-tz" value={timeZone} onChange={(event) => { if (current() && !pending.current) setTimeZone(event.target.value); }}>
                 {TIME_ZONES.map((zone) => (
                   <option key={zone} value={zone}>{zone}</option>
                 ))}
@@ -583,7 +661,7 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
             <button type="submit" className="btn-primary" disabled={busy}>
               {busy ? "Подключаю…" : "Подключить"}
             </button>
-            <button type="button" className="btn" onClick={onDone}>Отмена</button>
+            <button type="button" className="btn" onClick={backToOverview}>Отмена</button>
           </div>
         </fieldset>
       </form>
