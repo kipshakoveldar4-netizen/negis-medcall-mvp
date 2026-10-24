@@ -187,9 +187,10 @@ async function readRawBody(req: VercelRequest): Promise<Buffer> {
 async function ensureParsedBody(req: VercelRequest) {
   if (req.body !== undefined || req.method === "GET" || req.method === "HEAD") return;
 
-  const contentType = Array.isArray(req.headers["content-type"])
+  const rawContentType = Array.isArray(req.headers["content-type"])
     ? req.headers["content-type"][0]
     : req.headers["content-type"] || "";
+  const contentType = (rawContentType || "").toLowerCase();
   if (contentType.includes("multipart/form-data")) return;
 
   const rawBody = await readRawBody(req);

@@ -224,11 +224,14 @@ function multipartBody(fields: Record<string, string>): { buffer: Buffer; conten
   }
   parts.push(
     `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="creative.jpg"\r\n` +
-      `Content-Type: image/jpeg\r\n\r\nnot-a-real-jpeg\r\n`,
+      `Content-Type: image/jpeg\r\n\r\n`,
   );
-  parts.push(`--${boundary}--\r\n`);
   return {
-    buffer: Buffer.from(parts.join(""), "utf8"),
+    buffer: Buffer.concat([
+      Buffer.from(parts.join(""), "utf8"),
+      Buffer.from("/9j/4AAQSkZJRgABAgAAAQABAAD//gAQTGF2YzYyLjI4LjEwMgD/2wBDAAgEBAQEBAUFBQUFBQYGBgYGBgYGBgYGBgYHBwcICAgHBwcGBgcHCAgICAkJCQgICAgJCQoKCgwMCwsODg4RERT/xABMAAEBAAAAAAAAAAAAAAAAAAAABAEBAQAAAAAAAAAAAAAAAAAABAYQAQAAAAAAAAAAAAAAAAAAAAARAQAAAAAAAAAAAAAAAAAAAAD/wAARCAACAAIDASIAAhEAAxEA/9oADAMBAAIRAxEAPwCMABEP/9k=", "base64"),
+      Buffer.from(`\r\n--${boundary}--\r\n`, "utf8"),
+    ]),
     contentType: `multipart/form-data; boundary=${boundary}`,
   };
 }

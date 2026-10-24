@@ -1,4 +1,5 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
+import Busboy, { Dicer } from "@fastify/busboy";
 import { createHash, randomUUID } from "node:crypto";
 import { canAssignRole, isStaffRole, isWorkspaceAdminRole } from "../auth/permissions";
 import { extractJsonObject, generateText, resolveTextProvider } from "../ai/text-provider";
@@ -9,6 +10,7 @@ import { arrivalPaymentError } from "./arrival-payment";
 import { assignedLeadPatch, assignedLeadRouteAllowed, isAssignedLeadRole } from "./assigned-leads";
 import { normalizeAppointmentServices, readAppointmentServices, summarizeAppointmentServices } from "./appointment-services";
 import { findAppointmentCapacityConflict } from "./appointment-capacity";
+import { CreativeImageValidationUnavailable, validateCreativeImageBytes } from "./creative-image";
 import { hidesClientContacts, redactContacts, redactContactsList, stripContactWrites } from "./contact-privacy";
 import { isEmptyIdentity, rowBelongsTo, rowTargetsOnlySelf, seesOnlyOwnWork, type OwnWorkIdentity } from "./own-work";
 import { escapeLikePattern } from "./staff-invitations";
@@ -809,7 +811,7 @@ function buildPatchRow(resource: CrmResource, body: JsonRecord): JsonRecord {
     setText("launch_id", ["launchId", "launch_id"]);
     setText("uploaded_by", ["uploadedBy", "uploaded_by"]);
     setText("file_name", ["fileName", "file_name"]);
-    setText("file_type", ["fileType", "file_type"]);
+    setText("file_type", ["fileType", "file_type", "creativeType", "creative_type"]);
     setText("mime_type", ["mimeType", "mime_type"]);
     setRaw("file_size", ["fileSize", "file_size"]);
     setText("storage_bucket", ["storageBucket", "storage_bucket"]);
@@ -2382,7 +2384,7 @@ const configs: Record<CrmResource, ResourceConfig> = {
         file_name: firstString(body.fileName, body.file_name),
         file_type: normalizeCreativeFileType(body),
         mime_type: firstString(body.mimeType, body.mime_type) || null,
-        file_size: readNumber(body.fileSize ?? body.file_size),
+        file_size: readNullableNumber(body.fileSize ?? body.file_size),
         storage_bucket: firstString(body.storageBucket, body.storage_bucket, "ad-creatives"),
         storage_path: firstString(body.storagePath, body.storage_path) || null,
         public_url: resolveAdCreativePublicUrl(body) || null,
@@ -4905,6 +4907,7 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
   const config = configs[resource];
   const body = { ...asRecord(req.body) };
   const details = [...validationDetails(body, config.requiredPost), ...resourceValidationDetails(resource, body), ...appointmentServicesValidationDetails(resource, body)];
+  if (resource === "ad-creatives") details.push(...validateCreativeAssetBody(body));
   const keyedAppointment = resource === "appointments" && "requestKey" in body;
   const keyedSale = resource === "deals" && "requestKey" in body;
   if (keyedAppointment && !isUuid(body.requestKey)) details.push("requestKey must be a UUID");
@@ -5509,7 +5512,46 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
     });
   }
 
+  let creativeMetadataVersion: string | null | undefined;
+  let creativeMetadataSnapshot: JsonRecord | undefined;
+  let creativeMetadataPatch: JsonRecord | undefined;
   try {
+    if (resource === "ad-creatives" && hasAnyKey(patchBody, [
+      "fileName", "file_name", "fileType", "file_type", "creativeType", "creative_type",
+      "mimeType", "mime_type", "fileSize", "file_size",
+    ])) {
+      let existing: unknown;
+      let existingError: unknown;
+      try {
+        ({ data: existing, error: existingError } = await supabase.from(config.table)
+          .select("*").eq("workspace_id", workspaceId).eq("id", id).maybeSingle());
+      } catch {
+        return sendJson(res, 503, errorBody("Не удалось проверить метаданные файла. Изменения не сохранены."));
+      }
+      if (existingError) return sendJson(res, 503, errorBody("Не удалось проверить метаданные файла. Изменения не сохранены."));
+      if (!existing) return sendJson(res, 404, errorBody("Файл не найден"));
+      const existingRow = asRecord(existing);
+      const version = existingRow.updated_at;
+      if (version !== null && (typeof version !== "string" || !Number.isFinite(Date.parse(version)))) {
+        return sendJson(res, 503, errorBody("Не удалось проверить версию метаданных файла. Изменения не сохранены."));
+      }
+      creativeMetadataVersion = version as string | null;
+      const merged = { ...existingRow, ...buildPatchRow(resource, patchBody) };
+      const creativeDetails = [...creativeMetadataShapeErrors(patchBody), ...validateCreativeAssetBody(merged)];
+      if (creativeDetails.length) return sendJson(res, 400, errorBody("Validation error", creativeDetails));
+      creativeMetadataSnapshot = Object.fromEntries(["file_name", "file_type", "mime_type", "file_size"]
+        .map((column) => [column, existingRow[column] ?? null]));
+      creativeMetadataPatch = buildPatchRow(resource, patchBody);
+      if (hasAnyKey(patchBody, ["fileType", "file_type", "creativeType", "creative_type"])) {
+        creativeMetadataPatch.file_type = normalizeCreativeFileType(merged);
+      }
+      if (hasAnyKey(patchBody, ["mimeType", "mime_type"])) {
+        creativeMetadataPatch.mime_type = readString(merged.mime_type).toLowerCase() || null;
+      }
+      if (hasAnyKey(patchBody, ["fileSize", "file_size"])) {
+        creativeMetadataPatch.file_size = readNullableNumber(merged.file_size);
+      }
+    }
     if (resource === "staff") {
       const context = readWorkspaceContext(req);
       if (!context) {
@@ -5835,6 +5877,7 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
     }
 
     const runUpdate = async (candidate: JsonRecord) => {
+      if (creativeMetadataPatch) Object.assign(candidate, creativeMetadataPatch);
       if (resource === "leads" && isMortgageAdminSelfAssignment(req, candidate)) {
         return await saveMortgageAdminSelfLead(supabase, req, candidate, id);
       }
@@ -5842,14 +5885,31 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
         // Advance even if the acknowledgement and the previous edit share a millisecond.
         candidate.updated_at = new Date(Math.max(Date.now(), Date.parse(expectedContentVersion!) + 1)).toISOString();
       }
+      if (creativeMetadataVersion !== undefined) {
+        candidate.updated_at = new Date(Math.max(Date.now(), creativeMetadataVersion === null ? 0
+          : Date.parse(creativeMetadataVersion) + 1)).toISOString();
+      }
       const update = supabase.from(config.table).update(candidate).eq("id", id).eq("workspace_id", workspaceId);
       if (requiresContentVersion) {
         return await update.eq("updated_at", expectedContentVersion).select(config.selectColumns ?? "*").maybeSingle();
+      }
+      if (creativeMetadataVersion !== undefined) {
+        let guarded = creativeMetadataVersion === null ? update.is("updated_at", null)
+          : update.eq("updated_at", creativeMetadataVersion);
+        // Other writers may reuse a timestamp. Also compare the exact metadata
+        // that was validated, so an unrelated status write cannot revive a stale edit.
+        for (const [column, value] of Object.entries(creativeMetadataSnapshot!)) {
+          guarded = value === null ? guarded.is(column, null) : guarded.eq(column, value);
+        }
+        return await guarded.select(config.selectColumns ?? "*").maybeSingle();
       }
       return await update.select(config.selectColumns ?? "*").single();
     };
 
     let { data, error } = await runUpdate(row);
+    if (creativeMetadataVersion !== undefined && !error && !data) {
+      return sendJson(res, 409, { ...errorBody("Метаданные файла изменились. Обновите библиотеку перед сохранением."), code: "creative_metadata_conflict" });
+    }
     if (requiresContentVersion && !error && !data) {
       return sendJson(res, 409, {
         ...errorBody("Контент изменён в другой вкладке. Статус Telegram не сохранён; обновите библиотеку, не отправляя пакет повторно."),
@@ -6059,6 +6119,7 @@ const IMAGE_EXTENSIONS = new Set(["jpg", "jpeg", "png", "webp"]);
 const VIDEO_EXTENSIONS = new Set(["mp4", "mov", "webm"]);
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 const MAX_VIDEO_BYTES = 100 * 1024 * 1024;
+const MAX_MULTIPART_REQUEST_BYTES = MAX_VIDEO_BYTES + 1024 * 1024;
 
 // Large video optimization pipeline (Phase A). Raw originals are temporary:
 // they live in a private bucket and are never sent to Meta or end users.
@@ -6142,91 +6203,92 @@ function isMultipartRequest(req: VercelRequest): boolean {
   return getHeaderValue(req, "content-type").toLowerCase().includes("multipart/form-data");
 }
 
-function readMultipartBoundary(contentType: string): string {
-  const match = contentType.match(/boundary=(?:"([^"]+)"|([^;]+))/i);
-  return (match?.[1] || match?.[2] || "").trim();
+class CreativeUploadTooLargeError extends Error {
+  constructor() { super("Запрос загрузки слишком большой."); }
 }
 
 async function readRequestBuffer(req: VercelRequest): Promise<Buffer> {
+  const contentLength = getHeaderValue(req, "content-length");
+  if (contentLength && (!/^\d+$/.test(contentLength) || !Number.isSafeInteger(Number(contentLength)))) {
+    throw new Error("Некорректный размер запроса загрузки.");
+  }
+  if (contentLength && Number(contentLength) > MAX_MULTIPART_REQUEST_BYTES) throw new CreativeUploadTooLargeError();
   const chunks: Buffer[] = [];
+  let bytes = 0;
   for await (const chunk of req as AsyncIterable<Buffer | string>) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    bytes += buffer.length;
+    if (bytes > MAX_MULTIPART_REQUEST_BYTES) throw new CreativeUploadTooLargeError();
+    chunks.push(buffer);
   }
 
   return Buffer.concat(chunks);
 }
 
-function parseHeaderParams(value: string): Record<string, string> {
-  const params: Record<string, string> = {};
-  for (const segment of value.split(";").map((item) => item.trim()).filter(Boolean)) {
-    const [rawKey, ...rawValue] = segment.split("=");
-    const key = rawKey.trim().toLowerCase();
-    const text = rawValue.join("=").trim();
-    if (!text) continue;
-    params[key] = text.replace(/^"|"$/g, "");
-  }
-
-  return params;
+async function countMultipartParts(buffer: Buffer, boundary: string): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const parser = new Dicer({ boundary, maxHeaderPairs: 32 });
+    let count = 0;
+    let failure: Error | undefined;
+    parser.on("part", (part) => {
+      if (++count > 33) failure ??= new CreativeUploadTooLargeError();
+      part.on("error", reject);
+      part.resume();
+    });
+    parser.on("error", reject);
+    parser.on("finish", () => failure ? reject(failure) : resolve(count));
+    parser.end(buffer);
+  });
 }
 
-function parseMultipartFormData(buffer: Buffer, contentType: string): MultipartFormData {
-  const boundary = readMultipartBoundary(contentType);
-  if (!boundary) {
-    throw new Error("multipart boundary is missing");
+async function parseMultipartFormData(buffer: Buffer, contentType: string): Promise<MultipartFormData> {
+  const { parse: parseContentType } = await import("content-type");
+  const parsedType = parseContentType(contentType);
+  const boundary = parsedType.parameters.boundary;
+  if (parsedType.type !== "multipart/form-data" || !boundary
+    || !/^[0-9a-z'()+_,\-./:=? ]{0,69}[0-9a-z'()+_,\-./:=?]$/i.test(boundary)) {
+    throw new Error("Invalid multipart boundary");
   }
-
-  const delimiter = Buffer.from(`--${boundary}`);
-  const fields: JsonRecord = {};
-  let file: MultipartFile | undefined;
-  let cursor = buffer.indexOf(delimiter);
-
-  while (cursor >= 0) {
-    cursor += delimiter.length;
-    const closing = buffer.subarray(cursor, cursor + 2).toString("utf8") === "--";
-    if (closing) break;
-    if (buffer.subarray(cursor, cursor + 2).toString("utf8") === "\r\n") cursor += 2;
-
-    const next = buffer.indexOf(delimiter, cursor);
-    if (next < 0) break;
-
-    let part = buffer.subarray(cursor, next);
-    if (part.subarray(part.length - 2).toString("utf8") === "\r\n") {
-      part = part.subarray(0, part.length - 2);
-    }
-
-    const headerEnd = part.indexOf(Buffer.from("\r\n\r\n"));
-    if (headerEnd >= 0) {
-      const rawHeaders = part.subarray(0, headerEnd).toString("utf8");
-      const body = part.subarray(headerEnd + 4);
-      const headers: Record<string, string> = {};
-
-      for (const line of rawHeaders.split("\r\n")) {
-        const separator = line.indexOf(":");
-        if (separator < 0) continue;
-        headers[line.slice(0, separator).trim().toLowerCase()] = line.slice(separator + 1).trim();
-      }
-
-      const disposition = headers["content-disposition"] || "";
-      const params = parseHeaderParams(disposition);
-      const fieldName = params.name || "";
-      const fileName = params.filename || "";
-
-      if (fieldName && fileName && !file) {
-        file = {
-          fieldName,
-          fileName,
-          mimeType: headers["content-type"] || "application/octet-stream",
-          buffer: body,
-        };
-      } else if (fieldName) {
-        fields[fieldName] = body.toString("utf8");
-      }
-    }
-
-    cursor = next;
-  }
-
-  return { fields, file };
+  // Busboy intentionally skips some malformed/non-form parts. Reject that
+  // ambiguity instead of accepting a preceding file from a partially used form.
+  const partCount = await countMultipartParts(buffer, boundary);
+  return new Promise((resolve, reject) => {
+    const parser = new Busboy({
+      headers: { "content-type": contentType },
+      limits: { fileSize: MAX_VIDEO_BYTES + 1, files: 1, fields: 32, parts: 33, fieldSize: 64 * 1024, fieldNameSize: 100, headerPairs: 32, headerSize: 8 * 1024 },
+    });
+    const fields: JsonRecord = Object.create(null);
+    let file: MultipartFile | undefined;
+    let failure: Error | undefined;
+    const invalid = () => { failure ??= new Error("Invalid multipart upload"); };
+    const tooLarge = () => { failure ??= new CreativeUploadTooLargeError(); };
+    parser.on("file", (fieldName, stream, fileName, _encoding, mimeType) => {
+      const chunks: Buffer[] = [];
+      if (!fieldName || !fileName || /[\r\n\0]/.test(fieldName + fileName)) invalid();
+      stream.on("limit", tooLarge);
+      stream.on("error", reject);
+      stream.on("data", (chunk: Buffer) => { if (!failure) chunks.push(chunk); });
+      stream.on("end", () => {
+        if (stream.truncated) tooLarge();
+        if (!failure) file = { fieldName, fileName, mimeType, buffer: Buffer.concat(chunks) };
+      });
+    });
+    parser.on("field", (name, value, nameTruncated, valueTruncated) => {
+      if (nameTruncated || valueTruncated) return tooLarge();
+      if (!name || /[\r\n\0]/.test(name) || Object.hasOwn(fields, name)) return invalid();
+      fields[name] = value;
+    });
+    parser.on("filesLimit", invalid);
+    parser.on("fieldsLimit", tooLarge);
+    parser.on("partsLimit", tooLarge);
+    parser.on("error", reject);
+    // Resolve only when the complete form and every file stream have ended.
+    parser.on("finish", () => {
+      if (Object.keys(fields).length + (file ? 1 : 0) !== partCount) invalid();
+      failure ? reject(failure) : resolve({ fields, file });
+    });
+    parser.end(buffer);
+  });
 }
 
 function safeStorageFileName(name: string): string {
@@ -6331,15 +6393,39 @@ function validateSignedUploadBody(body: JsonRecord): { details: string[]; normal
   };
 }
 
-function validateCreativeAssetBody(body: JsonRecord): string[] {
+function creativeMetadataShapeErrors(body: JsonRecord): string[] {
   const details: string[] = [];
+  for (const key of ["fileName", "file_name", "mimeType", "mime_type", "fileType", "file_type", "creativeType", "creative_type"]) {
+    if (body[key] !== undefined && body[key] !== null && typeof body[key] !== "string") details.push(`${key} must be text`);
+  }
+  for (const key of ["fileSize", "file_size"]) {
+    if (body[key] !== undefined && body[key] !== null && !["string", "number"].includes(typeof body[key])) {
+      details.push(`${key} must be a byte count`);
+    }
+  }
+  return details;
+}
+
+function validateCreativeAssetBody(body: JsonRecord): string[] {
+  const details = creativeMetadataShapeErrors(body);
   const fileName = firstString(body.fileName, body.file_name);
   const mimeType = firstString(body.mimeType, body.mime_type).toLowerCase();
   const fileSize = readNumber(body.fileSize ?? body.file_size) ?? 0;
   const fileType = normalizeCreativeFileType(body);
   const extension = fileExtension(fileName);
+  const declaredType = firstString(body.fileType, body.file_type, body.creativeType, body.creative_type).toLowerCase();
+  const declaredSize = body.fileSize ?? body.file_size;
 
   if (!fileName) details.push("fileName is required");
+  if (declaredType && !["image", "video"].includes(declaredType)) details.push("fileType must be image or video");
+  if (declaredSize !== undefined && declaredSize !== null
+    && (!Number.isSafeInteger(readNumber(declaredSize)) || fileSize <= 0)) {
+    details.push("fileSize must be a positive safe integer");
+  }
+  if (declaredType === "image" && mimeType.startsWith("video/")) details.push("fileType does not match mimeType");
+  if (declaredType === "video" && mimeType.startsWith("image/")) details.push("fileType does not match mimeType");
+  const inferredMime = inferMimeType({ fileName });
+  if (mimeType && extension && mimeType !== inferredMime) details.push("fileName does not match mimeType");
   if (fileType === "image") {
     if (mimeType && !IMAGE_MIME_TYPES.has(mimeType)) details.push("Поддерживаются только изображения JPG, PNG или WEBP");
     if (!mimeType && extension && !IMAGE_EXTENSIONS.has(extension)) details.push("Поддерживаются только изображения JPG, PNG или WEBP");
@@ -6669,12 +6755,12 @@ async function handleMultipartAdCreativeUpload(req: VercelRequest, res: VercelRe
 
   let form: MultipartFormData;
   try {
-    form = parseMultipartFormData(await readRequestBuffer(req), getHeaderValue(req, "content-type"));
+    form = await parseMultipartFormData(await readRequestBuffer(req), getHeaderValue(req, "content-type"));
   } catch (error) {
     return sendJson(
       res,
-      400,
-      errorBody("Invalid multipart upload", [error instanceof Error ? error.message : "Could not parse multipart form data"]),
+      error instanceof CreativeUploadTooLargeError ? 413 : 400,
+      errorBody("Invalid multipart upload", [error instanceof CreativeUploadTooLargeError ? error.message : "Не удалось разобрать запрос загрузки."]),
     );
   }
 
@@ -6717,6 +6803,16 @@ async function handleMultipartAdCreativeUpload(req: VercelRequest, res: VercelRe
   };
 
   const details = validateCreativeAssetBody(uploadBody);
+  if (uploadBody.fileType === "image" && details.length === 0) {
+    try {
+      details.push(...await validateCreativeImageBytes({ buffer: form.file.buffer, fileName, mimeType }));
+    } catch (error) {
+      if (error instanceof CreativeImageValidationUnavailable) {
+        return sendJson(res, 503, { ...errorBody(error.message), code: "image_validation_unavailable" });
+      }
+      return sendJson(res, 503, { ...errorBody("Проверка изображения временно недоступна. Файл не загружен."), code: "image_validation_unavailable" });
+    }
+  }
   if (details.length > 0) {
     return sendJson(res, 400, errorBody("Validation error", details));
   }
@@ -6731,7 +6827,7 @@ async function handleMultipartAdCreativeUpload(req: VercelRequest, res: VercelRe
       res,
       502,
       errorBody("Creative upload failed", [
-        uploadError.message || "Supabase Storage did not accept the creative file.",
+        redactedDetail("ad-creatives upload", uploadError, SERVICE_FAILURE_DETAIL),
       ]),
     );
   }
