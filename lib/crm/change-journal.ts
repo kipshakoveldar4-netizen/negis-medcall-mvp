@@ -102,7 +102,7 @@ const CLIENT_FIELDS: Record<string, FieldPolicy> = {
 
 const DEAL_FIELDS: Record<string, FieldPolicy> = {
   status: { label: "Статус", sensitivity: "value" },
-  title: { label: "Название", sensitivity: "value" },
+  title: { label: "Название", sensitivity: "fact" },
   amount_minor: { label: "Сумма", sensitivity: "value" },
   currency: { label: "Валюта", sensitivity: "value" },
   client_id: { label: "Клиент", sensitivity: "value" },

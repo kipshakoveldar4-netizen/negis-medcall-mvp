@@ -21,10 +21,9 @@ const push = (await load("web-push.ts")) as {
 };
 const rules = (await load("staff-notifications.ts")) as {
   notificationFor: (input: {
-    event: "created" | "cancelled";
+    event: "created" | "cancelled" | "rescheduled";
     appointment: Snapshot;
     timeZone: string;
-    clientNameVisible?: boolean;
   }) => { title: string; text: string; url: string; tag: string } | null;
   resolveRecipient: (input: {
     appointment: Snapshot;
@@ -193,7 +192,7 @@ test("PN10 пустой мастер и неизвестная карточка 
   assert.deepEqual(decide({ doctorName: "Кто-то" }), { skipped: "мастер не найден по имени" });
 });
 
-test("PN11 в тексте нет телефона — даже если его вписали в услугу", () => {
+test("PN11 на экран блокировки не попадают имя клиента, услуга и контакты", () => {
   const notification = notificationFor({
     event: "created",
     appointment: {
@@ -208,19 +207,28 @@ test("PN11 в тексте нет телефона — даже если его 
   assert.ok(notification);
   assert.ok(!/\+7\s?7\d/.test(notification.text), `номер утёк на экран блокировки: ${notification.text}`);
   assert.equal(notification.title, "Новая запись");
-  assert.ok(notification.text.includes("Айгерим"));
+  assert.ok(!notification.text.includes("Айгерим"));
+  assert.ok(!notification.text.includes("Маникюр"));
+  assert.ok(notification.text.includes("Подробности в календаре"));
   assert.ok(notification.url.startsWith("/appointments?date=2026-08-23"));
 });
 
-test("PN12 отмена называется отменой, а имя клиента можно выключить", () => {
+test("PN12 все события сохраняют время и ссылку, но не раскрывают сведения о визите", () => {
   const appointment = { doctorId: "d3", doctorName: "Сабина", client: "Айгерим", service: "Педикюр", startsAt: FUTURE };
   const cancelled = notificationFor({ event: "cancelled", appointment, timeZone: "Asia/Almaty" });
   assert.equal(cancelled?.title, "Запись отменена");
   assert.notEqual(cancelled?.tag, notificationFor({ event: "created", appointment, timeZone: "Asia/Almaty" })?.tag);
 
-  const anonymous = notificationFor({ event: "created", appointment, timeZone: "Asia/Almaty", clientNameVisible: false });
-  assert.ok(!anonymous?.text.includes("Айгерим"), "имя обязано исчезать по флагу, а не переписыванием");
-  assert.ok(anonymous?.text.includes("Педикюр"));
+  for (const event of ["created", "cancelled", "rescheduled"] as const) {
+    const anonymous = notificationFor({ event, appointment, timeZone: "Asia/Almaty" });
+    assert.ok(anonymous);
+    assert.equal(anonymous.title, { created: "Новая запись", cancelled: "Запись отменена", rescheduled: "Запись перенесена" }[event]);
+    assert.ok(!/Айгерим|Педикюр/.test(JSON.stringify(anonymous)), "ни одно событие не раскрывает имя или услугу");
+    assert.equal(anonymous.text, "23 августа в 10:00 · Подробности в календаре");
+    assert.equal(anonymous.url, "/appointments?date=2026-08-23");
+    assert.equal(anonymous.tag, `appointment:${event}:${FUTURE}`);
+  }
+  assert.deepEqual(appointment, { doctorId: "d3", doctorName: "Сабина", client: "Айгерим", service: "Педикюр", startsAt: FUTURE }, "исходные данные визита не меняются");
 });
 
 test("PN13 нечитаемое время не превращается в бессмысленное уведомление", () => {

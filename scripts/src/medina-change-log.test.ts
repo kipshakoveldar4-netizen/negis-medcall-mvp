@@ -349,6 +349,67 @@ test("CL12 a note's text never enters the journal", async () => {
   );
 });
 
+test("CL12a deal title changes record only a fact on creation, update and clearing", async () => {
+  const journal = (await import(pathToFileURL(journalPath).href)) as {
+    diffForJournal: (entity: string, before: Record<string, unknown>, after: Record<string, unknown>) => Array<{ field: string; from: unknown; to: unknown }>;
+  };
+  const before = Object.freeze({ title: "Fixture skin diagnosis +7 700 801 77 21" });
+  const after = Object.freeze({ title: "Fixture anesthesia allergy +7 747 330 19 90" });
+  for (const [oldRow, newRow] of [[{}, before], [before, after], [after, { title: "" }]]) {
+    const changes = journal.diffForJournal("deal", oldRow, newRow);
+    assert.equal(changes.length, 1);
+    assert.equal(changes[0].field, "title");
+    assert.equal(changes[0].from, null);
+    assert.equal(changes[0].to, null);
+  }
+  assert.deepEqual(journal.diffForJournal("deal", before, before), [], "an unchanged title is not an event");
+  assert.equal(before.title, "Fixture skin diagnosis +7 700 801 77 21");
+  assert.equal(after.title, "Fixture anesthesia allergy +7 747 330 19 90");
+});
+
+test("CL12b deal audit metadata excludes title contacts and medical text but preserves amount and status", async () => {
+  const before = Object.freeze({
+    id: CLIENT_ID,
+    workspace_id: WORKSPACE_A,
+    title: "Fixture skin diagnosis +7 700 801 77 21",
+    amount_minor: 0,
+    currency: "KZT",
+    status: "pending",
+  });
+  const title = "Fixture anesthesia allergy +7 747 330 19 90";
+  const call = await loadRouter({ memberships: [owner], rows: { deals: [before] } });
+  const { res, log } = await call({
+    segments: ["deals"],
+    method: "PATCH",
+    body: { id: before.id, updates: { title, amountMinor: 1500000, status: "paid" } },
+  });
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  const writes = journalWrites(log);
+  assert.equal(writes.length, 1);
+  const audit = writes[0].filters.__row as Record<string, unknown>;
+  assert.equal(audit.entity_type, "deal");
+  const metadata = audit.metadata as { changes: Array<{ field: string; from: unknown; to: unknown }> };
+  const titleChange = metadata.changes.find(change => change.field === "title");
+  assert.ok(titleChange);
+  assert.equal(titleChange.from, null);
+  assert.equal(titleChange.to, null);
+  const text = JSON.stringify(metadata);
+  for (const sensitive of [before.title, title, "skin diagnosis", "anesthesia allergy", "+7 700 801 77 21", "+7 747 330 19 90"]) {
+    assert.ok(!text.includes(sensitive), `audit metadata must not duplicate ${sensitive}`);
+  }
+  const amount = metadata.changes.find(change => change.field === "amount_minor");
+  assert.ok(amount);
+  assert.equal(amount.from, "0");
+  assert.equal(amount.to, "1500000");
+  const status = metadata.changes.find(change => change.field === "status");
+  assert.ok(status);
+  assert.equal(status.from, "pending");
+  assert.equal(status.to, "paid");
+  const stored = log.find(entry => entry.table === "deals" && entry.op === "update")?.filters.__row as Record<string, unknown>;
+  assert.equal(stored.title, title, "only audit metadata is minimized, not the saved sale");
+  assert.equal(before.title, "Fixture skin diagnosis +7 700 801 77 21");
+});
+
 test("CL13 a phone and a name are recorded masked, never whole", async () => {
   const journal = (await import(pathToFileURL(journalPath).href)) as {
     diffForJournal: (entity: string, before: Record<string, unknown>, after: Record<string, unknown>) => Array<{ field: string; from: unknown; to: unknown }>;

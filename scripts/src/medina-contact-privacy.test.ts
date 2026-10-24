@@ -19,8 +19,8 @@ const privacyPath = path.join(repoRoot, "lib", "crm", "contact-privacy.ts");
 type PrivacyModule = {
   hidesClientContacts: (role: unknown) => boolean;
   maskContactsInText: (value: string) => string;
-  redactContacts: <T extends Record<string, unknown>>(item: T, role: unknown) => T;
-  redactContactsList: <T extends Record<string, unknown>>(items: T[], role: unknown) => T[];
+  redactContacts: <T extends Record<string, unknown>>(item: T, role: unknown, actor?: unknown) => T;
+  redactContactsList: <T extends Record<string, unknown>>(items: T[], role: unknown, actor?: unknown) => T[];
   stripContactWrites: <T extends Record<string, unknown>>(row: T, role: unknown) => T;
 };
 
@@ -111,6 +111,84 @@ test("CP3 номер, вписанный руками в свободный те
 
   // Метка времени остаётся меткой времени: цифры разбиты «T» и «:».
   assert.equal(privacy.maskContactsInText("2026-08-19T10:00:00Z"), "2026-08-19T10:00:00Z");
+});
+
+test("CP3a mapped appointment client and service text hide embedded contacts from a non-author doctor", () => {
+  const contacts = [
+    ["+7 701 234 56 78", "(номер скрыт)"],
+    ["fixture@example.test", "(почта скрыта)"],
+    ["@fixture_contact", "(контакт скрыт)"],
+  ] as const;
+  for (const field of ["client", "service"] as const) {
+    for (const [contact, replacement] of contacts) {
+      for (const author of ["staff-admin", undefined]) {
+        const appointment = Object.freeze({
+          client: "Aigul Sadykova",
+          service: "Consultation",
+          phone: "+7 701 234 56 78",
+          ...(author ? { createdByStaffUserId: author } : {}),
+          [field]: `Fixture ${contact}`,
+        });
+        const before = { ...appointment };
+        const masked = privacy.redactContacts(appointment, "doctor", "staff-doctor");
+        assert.equal(masked[field], `Fixture ${replacement}`, `${field}: ${contact}, author: ${author}`);
+        assert.ok(!("phone" in masked));
+        assert.notStrictEqual(masked, appointment);
+        assert.deepEqual(privacy.redactContactsList([appointment], "doctor", "staff-doctor"), [masked]);
+        assert.deepEqual(appointment, before, "redaction must not modify the source appointment");
+      }
+    }
+  }
+});
+
+test("CP3b mapped appointment text preserves ordinary names, services, dates and prices", () => {
+  for (const service of [
+    "Consultation",
+    "Consultation 40 minutes, 15000 KZT; room 12; 2026-08-19",
+    "Course 1 200 000 KZT; visit 12-05-2026",
+  ]) {
+    const appointment = Object.freeze({
+      client: "Aigul Sadykova",
+      service,
+      startsAt: "2026-08-19T10:00:00Z",
+      priceMinor: 1500000,
+      createdByStaffUserId: "staff-admin",
+    });
+    const masked = privacy.redactContacts(appointment, "doctor", "staff-doctor");
+    assert.deepEqual(masked, appointment);
+    assert.notStrictEqual(masked, appointment);
+  }
+});
+
+test("CP3c an author doctor retains embedded contacts and the original appointment object", () => {
+  for (const authorField of ["createdByStaffUserId", "created_by_staff_user_id"]) {
+    const appointment = Object.freeze({
+      client: "Aigul +7 701 234 56 78",
+      service: "Consultation fixture@example.test @fixture_contact",
+      phone: "+7 701 234 56 78",
+      [authorField]: "staff-doctor",
+    });
+    const before = { ...appointment };
+    assert.strictEqual(privacy.redactContacts(appointment, "doctor", "staff-doctor"), appointment);
+    assert.strictEqual(privacy.redactContactsList([appointment], "doctor", "staff-doctor")[0], appointment);
+    assert.deepEqual(appointment, before);
+  }
+});
+
+test("CP3d owner and admin retain embedded contacts and the original appointment object", () => {
+  const appointment = Object.freeze({
+    client: "Aigul +7 701 234 56 78",
+    service: "Consultation fixture@example.test @fixture_contact",
+    phone: "+7 701 234 56 78",
+    createdByStaffUserId: "staff-doctor",
+  });
+  const before = { ...appointment };
+  for (const role of ["owner", "admin"]) {
+    assert.strictEqual(privacy.redactContacts(appointment, role, "staff-admin"), appointment);
+    const appointments = [appointment];
+    assert.strictEqual(privacy.redactContactsList(appointments, role, "staff-admin"), appointments);
+    assert.deepEqual(appointment, before);
+  }
 });
 
 test("CP4 контакт нельзя не только прочитать, но и записать", () => {

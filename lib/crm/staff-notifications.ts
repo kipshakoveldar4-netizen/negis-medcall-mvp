@@ -83,33 +83,24 @@ export interface StaffNotification {
 /**
  * Текст уведомления.
  *
- * Телефон, WhatsApp и заметка не попадают сюда ни одним полем: уведомление видно
- * на экране блокировки любому, кто взял телефон в руки. Готовый объект всё равно
- * прогоняется через redactContacts с ролью мастера — на случай, если однажды
- * кто-то добавит в текст заметку, где администратор написал «перезвонить на +7…».
+ * На экране блокировки остаются только событие и время. Имя и услуга доступны
+ * после входа в календарь: маскирования телефона недостаточно для защиты
+ * сведений о визите. Готовый объект дополнительно проходит redactContacts.
  */
 export function notificationFor(input: {
   event: StaffNotificationEvent;
   appointment: AppointmentSnapshot;
   timeZone: string;
-  clientNameVisible?: boolean;
 }): StaffNotification | null {
   const { event, appointment, timeZone } = input;
   const when = clinicTimeLabel(appointment.startsAt, timeZone);
   if (!when) return null;
 
-  const clientNameVisible = input.clientNameVisible !== false;
-  const client = clientNameVisible ? appointment.client.trim() : "";
-  const service = appointment.service.trim();
-
   const title = event === "created" ? "Новая запись" : event === "rescheduled" ? "Запись перенесена" : "Запись отменена";
-  const parts = [when];
-  if (client) parts.push(client);
-  if (service) parts.push(service);
 
   const draft: Record<string, unknown> = {
     title,
-    text: parts.join(" · "),
+    text: `${when} · Подробности в календаре`,
     // Экран записей на нужном дне: уведомление без места, куда нажать, заставляет
     // искать запись руками.
     url: `/appointments?date=${appointment.startsAt.slice(0, 10)}`,
