@@ -24,6 +24,20 @@ after(() => {
 });
 const fixture = await import("./crm-browser-mocks.ts");
 
+test("legal notice routes use real pages without enabling environment or API access", async () => {
+  const server = await readFile(new URL("./crm-browser.mjs", import.meta.url), "utf8");
+  const entry = await readFile(new URL("./crm-browser.tsx", import.meta.url), "utf8");
+  for (const [route, component] of [["privacy", "Privacy"], ["terms", "Terms"], ["data-deletion", "DataDeletion"]]) {
+    assert.match(server, new RegExp(`const routes = new Set\\([^;]*"/${route}"`));
+    assert.ok(entry.includes(`<Route path="/${route}" component={${component}} />`));
+    assert.ok(entry.includes(`import ${component} from "../../artifacts/negis/src/pages/${component}"`));
+  }
+  assert.match(server, /configFile: false, root: frontend, envDir: false/);
+  assert.match(server, /globalThis\.fetch = async \(\) => \{ throw new Error\("External fetch forbidden/);
+  assert.match(server, /server: \{ host: "127\.0\.0\.1", port: requestedPort, strictPort: true/);
+  assert.match(server, /pathname\.startsWith\("\/api\/"\)[^\n]+403/);
+});
+
 test("visual fixture uses fabricated contacts and filters the displayed client list", async () => {
   const response = await fixture.crmFetch("/api/crm/clients?search=" + encodeURIComponent("Мария"));
   const body = await response.json();

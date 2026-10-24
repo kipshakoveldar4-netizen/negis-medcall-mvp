@@ -17,7 +17,7 @@ const { default: react } = await import(pathToFileURL(require.resolve("@vitejs/p
 const { default: tailwindcss } = await import(pathToFileURL(require.resolve("@tailwindcss/vite")).href);
 const entryPath = path.join(root, "scripts/fixtures/crm-browser.tsx");
 const mocks = path.join(root, "scripts/fixtures/crm-browser-mocks.ts");
-const routes = new Set(["/", "/appointments", "/clients", "/sales", "/leads", "/login", "/dashboard", "/tasks", "/analytics", "/admin", "/operator", "/clinic-arrival", "/content-studio", "/ads-automation", "/ads"]);
+const routes = new Set(["/", "/appointments", "/clients", "/sales", "/leads", "/login", "/dashboard", "/tasks", "/analytics", "/admin", "/operator", "/clinic-arrival", "/content-studio", "/ads-automation", "/ads", "/privacy", "/terms", "/data-deletion"]);
 const requestedPort=Number(process.argv.find(arg=>arg.startsWith('--port='))?.split('=')[1]||5181);
 if(!Number.isInteger(requestedPort)||requestedPort<1024||requestedPort>65535)throw new Error('Invalid local fixture port');
 const server = await createServer({

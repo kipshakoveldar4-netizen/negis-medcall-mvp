@@ -10,6 +10,9 @@ import ClientsPage from "../../artifacts/negis/src/pages/ClientsPage";
 import SalesPage from "../../artifacts/negis/src/pages/SalesPage";
 import LeadsPage from "../../artifacts/negis/src/pages/LeadsPage";
 import Login from "../../artifacts/negis/src/pages/Login";
+import Privacy from "../../artifacts/negis/src/pages/Privacy";
+import Terms from "../../artifacts/negis/src/pages/Terms";
+import DataDeletion from "../../artifacts/negis/src/pages/DataDeletion";
 import AdminCenter from "../../artifacts/negis/src/pages/AdminCenter";
 import MortgageOverview from '../../artifacts/negis/src/pages/MortgageOverview';
 import MortgageClients from '../../artifacts/negis/src/pages/MortgageClients';
@@ -251,6 +254,9 @@ fixtureRoot.render(<Router>{advertisingDemoFixture ? <AdvertisingDemoFixture /> 
   <Route path="/sales" component={SalesPage} />
   <Route path="/leads" component={LeadsPage} />
   <Route path="/login" component={Login} />
+  <Route path="/privacy" component={Privacy} />
+  <Route path="/terms" component={Terms} />
+  <Route path="/data-deletion" component={DataDeletion} />
   <Route component={AppointmentsPage} />
 </Switch>}<Toaster /></Router>);
 if (import.meta.hot) import.meta.hot.dispose(() => fixtureRoot.unmount());

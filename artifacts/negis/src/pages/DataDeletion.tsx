@@ -3,32 +3,42 @@ import "./legal.css";
 
 export default function DataDeletion() {
   return (
-    <LegalPage title="Удаление данных пользователя — Medina OS" heading="Удаление данных пользователя" updated="17 мая 2026">
+    <LegalPage title="Удаление данных пользователя — Medina OS" heading="Удаление данных пользователя" updated="24 октября 2026">
 
       <p style={P}>
-        Если вы хотите удалить свои данные из Medina OS, отправьте запрос на email:{' '}
+        Запрос на удаление своих данных из Medina OS или отзыв согласия, если обработка основана на нём, можно направить по email:{' '}
         <a href="mailto:kipshakoveldar4@gmail.com" style={A}>kipshakoveldar4@gmail.com</a>
       </p>
 
       <Section title="В письме укажите">
         <ul style={UL}>
-          <li style={LI}>ваше имя;</li>
-          <li style={LI}>email или телефон;</li>
-          <li style={LI}>название клиники;</li>
-          <li style={LI}>какие данные вы хотите удалить;</li>
-          <li style={LI}>что запрос связан с удалением данных из Medina OS.</li>
+          <li style={LI}>минимальные сведения для поиска своей записи: использованное в сервисе имя или контакт и способ обратной связи;</li>
+          <li style={LI}>название организации или рабочего пространства, если известно;</li>
+          <li style={LI}>какие ваши данные и какой запрос требуется рассмотреть; источник обращения, если известен.</li>
         </ul>
+        <p style={P}>
+          Не отправляйте документы, удостоверяющие личность, пароли, коды входа или токены доступа. Проверка принадлежности запроса и полномочий должна ограничиваться необходимыми для этого сведениями.
+        </p>
       </Section>
 
-      <Section title="Сроки обработки">
+      <Section title="Рассмотрение запроса">
         <p style={P}>
-          Мы обработаем запрос и удалим связанные данные в течение 30 дней, если хранение этих данных не требуется по закону или договорным обязательствам.
+          Запрос рассматривается с проверкой его принадлежности и полномочий заявителя. При рассмотрении запроса и выполнении необходимых действий применяются установленные законом сроки. Допустимый объём действий определяется после проверки цели обработки, применимых требований закона и оснований дальнейшего хранения. Это не означает автоматического удаления всех связанных данных.
+        </p>
+      </Section>
+
+      <Section title="Инструмент удаления заявки с сайта">
+        <p style={P}>
+          Внутренний инструмент CRM, если он включён для сайта и доступен уполномоченному владельцу или администратору, предназначен только для выбранной заявки с сайта и её копий согласия. При связях с рабочими данными удаление может быть заблокировано до отдельного разбора. Это не замена рассмотрению запроса по email.
+        </p>
+        <p style={P}>
+          Инструмент не очищает другие обращения, данные внешних провайдеров или резервные копии; их обработка требует отдельной проверки. Запрос не даёт права удалять данные других клиентов или рабочих пространств.
         </p>
       </Section>
 
       <Section title="Данные из Facebook / Instagram Lead Ads">
         <p style={P}>
-          Если ваши данные были получены через Facebook или Instagram Lead Ads, укажите это в запросе. Мы удалим связанные лиды и рекламные данные из аккаунта клиники в Medina OS.
+          Если ваши данные были получены через Facebook или Instagram Lead Ads, укажите этот источник, если он известен. Допустимый объём удаления определяется после проверки принадлежности запроса, ваших прав и оснований хранения. Запрос не означает удаления всех рекламных данных аккаунта или данных других клиентов; данные у Meta требуют отдельного рассмотрения.
         </p>
       </Section>
 
@@ -39,8 +49,7 @@ export default function DataDeletion() {
         }}>
           To request deletion of your data from Medina OS, please email{' '}
           <a href="mailto:kipshakoveldar4@gmail.com" style={A}>kipshakoveldar4@gmail.com</a>{' '}
-          with your name, contact details, clinic name, and a clear request to delete your data.
-          We will process the request within 30 days.
+          with only the name or contact already used in the service, a reply contact, the organization or workspace if known, and the scope of your request. Do not send identity documents, passwords, login codes or access tokens. A consent withdrawal request may also be submitted where processing relies on consent. Requests are reviewed with verification of ownership and the requester's authority. Applicable statutory deadlines govern request handling and any required action. The lawful scope of action is determined after reviewing the processing purpose, applicable law and grounds for further retention. This does not promise automatic deletion of all related data. The enabled in-CRM site-inquiry tool is limited to one selected inquiry and its consent copies, may be blocked by linked records, and does not replace email request handling. Other inquiries, external providers and backups require separate review. A request does not authorize erasure of other clients or workspaces, or automatic deletion of all Facebook/Instagram advertising data.
         </div>
       </Section>
 
