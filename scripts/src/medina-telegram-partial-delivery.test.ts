@@ -171,8 +171,8 @@ test("G5C14 server stops after part 2/3 fails without retry, status writes or a 
     assert.deepEqual(reply, {
       success: false,
       error: "Telegram API request failed",
-      details: [`Part 2/3: ${description}`],
-      telegramDescription: description,
+      details: ["Part 2/3: Telegram не подтвердил доставку сообщения."],
+      telegramDescription: "Telegram не подтвердил доставку сообщения.",
       telegramErrorCode: 429,
       status: 429,
       part: 2,

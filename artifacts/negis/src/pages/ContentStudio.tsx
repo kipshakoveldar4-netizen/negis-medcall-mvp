@@ -22,6 +22,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import { apiUrl, crmFetch } from "@/lib/api";
 import { supabase, hasSupabaseFrontendEnv } from "@/lib/supabase";
 import { getSupabaseAccessToken } from "@/lib/serverAuth";
+import { getSignOutRevision, isSignOutPending } from "@/lib/authSignOut";
 import { parseGenerationUsageSummary, type GenerationUsageSummary } from "@/lib/contentGenerationUsage";
 import { isRealWorkspace, readWorkspaceId, workspaceScopedKey } from "@/lib/demoStorage";
 import {
@@ -880,6 +881,7 @@ export default function ContentStudio() {
 function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actorId: string; workspaceId: string; localDraftsOnly: boolean }) {
   const [, setLocation] = useLocation();
   const sessionRef = useRef<AbortController | null>(null);
+  const signOutRevisionRef = useRef(getSignOutRevision());
   useLayoutEffect(() => {
     const session = new AbortController();
     sessionRef.current = session;
@@ -897,7 +899,7 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
 
   function isSessionAlive(session: AbortController | null): session is AbortController {
     return Boolean(actorId && workspaceId && session && sessionRef.current === session && !session.signal.aborted
-      && readWorkspaceId() === workspaceId);
+      && readWorkspaceId() === workspaceId && !isSignOutPending() && signOutRevisionRef.current === getSignOutRevision());
   }
 
   async function isGenerationSessionCurrent(session: AbortController | null): Promise<boolean> {
@@ -911,7 +913,8 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
   function isHandoffSessionAlive(session: AbortController | null): session is AbortController {
     return Boolean(localDraftsOnly && !actorId && workspaceId
       && !isRealWorkspace(workspaceId) && readWorkspaceId() === workspaceId
-      && session && sessionRef.current === session && !session.signal.aborted) || isSessionAlive(session);
+      && session && sessionRef.current === session && !session.signal.aborted
+      && !isSignOutPending() && signOutRevisionRef.current === getSignOutRevision()) || isSessionAlive(session);
   }
 
   async function isHandoffSessionCurrent(session: AbortController | null): Promise<boolean> {
@@ -2476,6 +2479,7 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
         toast.warning("Нет текста для копирования.");
         return false;
       }
+      if (!current()) return false;
       await navigator.clipboard.writeText(text);
       if (!await verified()) return false;
       toast.success(`${label} скопирован`);

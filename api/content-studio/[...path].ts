@@ -394,7 +394,8 @@ async function sendTelegramMessage(input: {
     return {
       success: false as const,
       status: response.status,
-      telegramDescription: description,
+      // Provider text can echo credentials, recipient IDs or request content.
+      telegramDescription: "Telegram не подтвердил доставку сообщения.",
       telegramErrorCode: Number.isSafeInteger(body.error_code) ? body.error_code : undefined,
       hint: telegramHint(description, response.status),
     };
@@ -800,11 +801,11 @@ async function handleSendTelegram(req: VercelRequest, res: VercelResponse, conte
         ...(statusPersisted !== undefined ? { statusPersisted } : {}),
       },
     });
-  } catch (error) {
+  } catch {
     return sendJson(res, 502, {
       success: false,
       error: "Telegram network error",
-      details: [error instanceof Error ? error.message : "Failed to send Telegram message"],
+      details: ["Не удалось подтвердить доставку. Проверьте сообщения в Telegram перед повторной отправкой."],
       hint: "Проверьте доступность Telegram API, TELEGRAM_BOT_TOKEN и TELEGRAM_CHAT_ID.",
     });
   }

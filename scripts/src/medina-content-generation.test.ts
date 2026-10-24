@@ -1528,6 +1528,7 @@ function evaluateGenerationFixture<T>(code: string, bindings: Record<string, unk
   const exports: { selected?: T } = {};
   new Script(code).runInNewContext({
     exports, Error, DOMException, AbortController, AbortSignal, Headers, Response,
+    getSignOutRevision: () => 0, isSignOutPending: () => false, signOutRevisionRef: { current: 0 },
     readContentVideoVersion: telegramDeliveryGuard.readContentVideoVersion,
     fetch: () => { throw new Error("Unmocked generation network call"); },
     ...bindings,
@@ -6055,10 +6056,11 @@ for (const { status, description, expectedHint } of [
   { status: 401, description: "Unauthorized", expectedHint: /TELEGRAM_BOT_TOKEN/ },
   { status: 400, description: "Bad Request: chat not found", expectedHint: /TELEGRAM_CHAT_ID.*\/start/ },
 ]) {
-  test(`G5C14 upstream HTTP ${status} preserves the actual Telegram error and actionable hint`, async () => {
+  test(`G5C14 upstream HTTP ${status} preserves the Telegram status and actionable hint without echoing provider text`, async () => {
     const result = await actualTelegramUpstream(JSON.stringify({ ok: false, error_code: status, description }), status);
     assert.equal(result.success, false); assert.equal(result.status, status); assert.equal(result.telegramErrorCode, status);
-    assert.equal(result.telegramDescription, description); assert.match(result.hint!, expectedHint);
+    assert.equal(result.telegramDescription, "Telegram не подтвердил доставку сообщения.");
+    assert.ok(!JSON.stringify(result).includes(description)); assert.match(result.hint!, expectedHint);
   });
 }
 
