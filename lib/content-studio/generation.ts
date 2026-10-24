@@ -204,9 +204,9 @@ async function readJson(response: GenerationFetchResponse): Promise<Record<strin
 }
 
 /**
- * Текст отказа провайдера. Ключа в нём быть не может: сюда попадает только
- * тело ответа и статус, а Authorization уходит в заголовке и обратно не
- * возвращается. Сырое тело обрезается — оно бывает html-страницей прокси.
+ * Внутренний текст отказа: тело провайдера может повторять параметры запроса
+ * или чувствительные сведения. Не передавать его напрямую в публичный ответ.
+ * Сырое тело обрезается — оно бывает html-страницей прокси.
  */
 export function providerErrorMessage(body: Record<string, unknown>, status: number): string {
   const typed = body as ProviderErrorBody;

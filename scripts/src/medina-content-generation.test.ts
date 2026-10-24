@@ -298,7 +298,7 @@ test("GEN6 запрос изображения содержит модель, pr
   assert.ok(image.buffer.equals(PNG_BYTES));
 });
 
-test("GEN7 отказ провайдера пересказывается дословно и никогда не содержит ключ", async () => {
+test("GEN7 внутренний отказ сохраняет статус и не добавляет Authorization к тексту", async () => {
   const { fetchImpl } = stubFetch(() => ({
     ok: false,
     status: 401,
@@ -313,7 +313,7 @@ test("GEN7 отказ провайдера пересказывается дос
   assert.ok(error instanceof GenerationProviderError);
   assert.equal(error.status, 401);
   assert.equal(error.message, "Incorrect API key provided");
-  assert.ok(!error.message.includes(FAKE_KEY), "ключ не попадает в текст ошибки");
+  assert.ok(!error.message.includes(FAKE_KEY), "заголовок Authorization не добавляется к внутреннему ответу провайдера");
 });
 
 test("GEN8 пустой или неизвестный ответ провайдера — отказ, а не пустая карточка", async () => {

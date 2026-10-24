@@ -479,7 +479,7 @@ async function handleGeneratePackage(req: VercelRequest, res: VercelResponse, co
     return sendJson(res, 500, {
       success: false,
       error: "Generation error",
-      details: [error instanceof Error ? error.message : "Failed to generate content package"],
+      details: ["Не удалось завершить подготовку пакета контента. Повторите позже."],
     });
   }
 }
@@ -548,7 +548,7 @@ async function handleImproveAdText(req: VercelRequest, res: VercelResponse, cont
     return sendJson(res, 500, {
       success: false,
       error: "Не удалось переписать текст",
-      details: [error instanceof Error ? error.message : "Провайдер не ответил"],
+      details: ["Не удалось завершить обработку текста. Повторите позже."],
     });
   }
 }
@@ -599,7 +599,7 @@ async function handleGenerateScript(req: VercelRequest, res: VercelResponse, con
     return sendJson(res, 500, {
       success: false,
       error: "Generation error",
-      details: [error instanceof Error ? error.message : "Failed to generate script package"],
+      details: ["Не удалось завершить подготовку сценария. Повторите позже."],
     });
   }
 }
@@ -649,7 +649,7 @@ async function handleGenerateAvatarPrompt(req: VercelRequest, res: VercelRespons
     return sendJson(res, 500, {
       success: false,
       error: "Generation error",
-      details: [error instanceof Error ? error.message : "Failed to generate avatar prompt"],
+      details: ["Не удалось завершить подготовку Avatar prompt. Повторите позже."],
     });
   }
 }
@@ -705,7 +705,7 @@ async function handleGenerateTapNowPrompt(req: VercelRequest, res: VercelRespons
     return sendJson(res, 500, {
       success: false,
       error: "Generation error",
-      details: [error instanceof Error ? error.message : "Failed to generate TapNow prompt"],
+      details: ["Не удалось завершить подготовку TapNow prompt. Повторите позже."],
     });
   }
 }
@@ -832,11 +832,11 @@ function sendRefusal(res: VercelResponse, refusal: GenerationRefusal) {
 }
 
 /**
- * Отказ провайдера пересказывается оператору как есть, но своим статусом.
+ * Отказ провайдера получает безопасную публичную категорию и свой статус.
  *
  * 401 от OpenAI — это наш ключ, а не сессия оператора: вернуть его наружу
  * значило бы выкинуть человека на экран входа из-за чужой проблемы. Наружу
- * уходит 502 «сервис генерации ответил отказом» с исходным текстом.
+ * уходит 502 без исходного текста, который может повторять данные запроса.
  */
 function sendProviderFailure(res: VercelResponse, error: unknown, subject: string) {
   if (error instanceof GenerationProviderError) {
@@ -844,31 +844,30 @@ function sendProviderFailure(res: VercelResponse, error: unknown, subject: strin
       return sendJson(res, 429, {
         success: false,
         error: `${subject}: сервис генерации ограничил частоту запросов`,
-        details: [error.message],
+        details: ["Сервис генерации временно ограничил частоту запросов."],
         hint: "Попробуйте через минуту. Если повторяется — проверьте лимиты и баланс аккаунта OpenAI.",
       });
     }
     if (error.status === 400 || error.status === 422) {
-      // Отказ по содержанию запроса: провайдер отклонил prompt. Это не сбой,
-      // это ответ, который оператору нужно прочитать и переписать текст.
+      // Keep validation distinct without exposing the provider's request echo.
       return sendJson(res, 422, {
         success: false,
         error: `${subject}: сервис генерации отклонил запрос`,
-        details: [error.message],
+        details: ["Провайдер не принял параметры или содержание запроса."],
         hint: "Перепишите описание кадра: провайдер отклоняет медицинские обещания, узнаваемых людей и защищённые бренды.",
       });
     }
     return sendJson(res, 502, {
       success: false,
       error: `${subject}: сервис генерации ответил отказом`,
-      details: [error.message],
+      details: ["Сервис генерации не подтвердил выполнение запроса."],
     });
   }
 
   return sendJson(res, 502, {
     success: false,
     error: subject,
-    details: [error instanceof Error ? error.message : "Неизвестная ошибка"],
+    details: ["Не удалось подтвердить результат запроса к сервису генерации."],
   });
 }
 
@@ -918,7 +917,7 @@ async function handleGeneratePhoto(req: VercelRequest, res: VercelResponse, cont
     return sendJson(res, 503, {
       success: false,
       error: "Не удалось проверить лимит генерации",
-      details: [error instanceof Error ? error.message : "Учёт генераций временно недоступен."],
+      details: ["Учёт генераций временно недоступен. Генерация не запущена."],
       code: "generation_usage_unavailable",
     });
   }
@@ -992,7 +991,7 @@ async function handleGeneratePhoto(req: VercelRequest, res: VercelResponse, cont
     return sendJson(res, 502, {
       success: false,
       error: "Изображение сгенерировано, но не сохранено",
-      details: [error instanceof Error ? error.message : "Хранилище не приняло файл"],
+      details: ["Хранилище не подтвердило сохранение изображения."],
       hint: "Генерация уже оплачена. Проверьте хранилище прежде, чем повторять — повторный запуск создаст новое изображение за новую цену.",
     });
   }
@@ -1053,7 +1052,7 @@ async function handleGenerateVideo(req: VercelRequest, res: VercelResponse, cont
     return sendJson(res, 503, {
       success: false,
       error: "Не удалось проверить лимит генерации",
-      details: [error instanceof Error ? error.message : "Учёт генераций временно недоступен."],
+      details: ["Учёт генераций временно недоступен. Генерация не запущена."],
       code: "generation_usage_unavailable",
     });
   }
@@ -1145,7 +1144,7 @@ async function handleVideoGeneration(req: VercelRequest, res: VercelResponse, co
           status: "failed",
           progress: job.progress,
           creativeUrl: "",
-          failureReason: job.error || "Сервис генерации не сообщил причину.",
+          failureReason: "Сервис генерации сообщил об ошибке рендера.",
         },
       });
     }
@@ -1203,7 +1202,7 @@ async function handleVideoGeneration(req: VercelRequest, res: VercelResponse, co
       return sendJson(res, 502, {
         success: false,
         error: "Ролик отрендерен, но не сохранён",
-        details: [storageError instanceof Error ? storageError.message : "Хранилище не приняло файл"],
+        details: ["Хранилище не подтвердило сохранение готового ролика."],
         hint: "Рендер уже оплачен. Ссылка у провайдера живёт около часа — проверьте хранилище и повторите опрос, не запуская генерацию заново.",
       });
     }
