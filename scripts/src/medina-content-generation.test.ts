@@ -94,6 +94,7 @@ type TelegramDeliveryStorage = Parameters<PaidGenerationModuleShape["clearStored
 type TelegramDeliveryLocks = { request<T>(name: string, callback: () => T | Promise<T>): Promise<T> };
 type TelegramDeliveryReceipt = { key: string; attemptId: string };
 type TelegramDeliveryModuleShape = {
+  readContentVideoVersion: (value: unknown) => string | null;
   reserveTelegramDelivery: (input: {
     storage: TelegramDeliveryStorage; locks?: TelegramDeliveryLocks; actorId: string; workspaceId: string;
     videoId: string; packageText: string; isCurrent: () => boolean;
@@ -1032,7 +1033,7 @@ const LOCAL_LIBRARY_FORM = { title: "Synthetic library idea", niche: "Synthetic 
   style: "Synthetic style", audience: "Synthetic audience", hook: "", script: "", voiceover: "", cta: "", caption: "", hashtags: [] as string[],
   avatarPrompt: "", tapnowPrompt: "" };
 type LocalLibraryForm = typeof LOCAL_LIBRARY_FORM;
-type LocalLibraryVideo = LocalLibraryForm & { id: string; status: string; createdAt: string };
+type LocalLibraryVideo = LocalLibraryForm & { id: string; status: string; createdAt: string; updatedAt?: string };
 type LocalLibrarySnapshot = { form: LocalLibraryForm; videos: LocalLibraryVideo[]; activeId: string };
 type LocalLibraryTextKind = "script" | "avatar" | "tapnow";
 type LocalEditorCallbacks = {
@@ -1053,9 +1054,10 @@ const LOCAL_LIBRARY_SCRIPT = { hook: "Synthetic hook", script: "Synthetic genera
   cta: "Synthetic CTA", caption: "Synthetic caption", hashtags: ["#synthetic"] };
 const LOCAL_LIBRARY_PROMPT = { prompt: "Synthetic visual prompt", negativePrompt: "Synthetic negative prompt", format: "video" };
 const LOCAL_TELEGRAM_DELIVERY = { sent: true, packageText: "Synthetic Telegram package", parts: 2 };
-const LOCAL_LIBRARY_ROW_A: LocalLibraryVideo = { ...LOCAL_LIBRARY_FORM, id: "33333333-3333-4333-8333-333333333333", status: "idea", createdAt: "2090-10-20T00:00:00Z" };
+const LOCAL_LIBRARY_ROW_A: LocalLibraryVideo = { ...LOCAL_LIBRARY_FORM, id: "33333333-3333-4333-8333-333333333333", status: "idea",
+  createdAt: "2090-10-20T00:00:00Z", updatedAt: "2090-10-20T05:00:00.123456+05:00" };
 const LOCAL_LIBRARY_ROW_B: LocalLibraryVideo = { ...LOCAL_LIBRARY_FORM, title: "Synthetic second idea", id: "44444444-4444-4444-8444-444444444444",
-  status: "idea", createdAt: "2090-10-21T00:00:00Z" };
+  status: "idea", createdAt: "2090-10-21T00:00:00Z", updatedAt: "2090-10-21T00:00:00.654321Z" };
 const LOCAL_PACKAGE_BRIEF: LocalPackageBrief = { mode: "idea", format: "reels", service: "Synthetic service A", city: "Synthetic city A",
   offer: "Synthetic offer A", audience: "Synthetic audience A", goal: "leads", tone: "local", materialNotes: "Local materials A" };
 const LOCAL_GENERATED_PACKAGE = { ideaTitle: "Synthetic generated package A", hook: "Local hook A", script: "Local script A",
@@ -1526,6 +1528,7 @@ function evaluateGenerationFixture<T>(code: string, bindings: Record<string, unk
   const exports: { selected?: T } = {};
   new Script(code).runInNewContext({
     exports, Error, DOMException, AbortController, AbortSignal, Headers, Response,
+    readContentVideoVersion: telegramDeliveryGuard.readContentVideoVersion,
     fetch: () => { throw new Error("Unmocked generation network call"); },
     ...bindings,
     require(name: string) {
@@ -5344,10 +5347,141 @@ function invokeLibraryTelegram(captured: LocalLibrary, kind: LocalTelegramKind) 
   return kind === "test" ? captured.callbacks.testTelegram() : captured.callbacks.sendTelegram();
 }
 function telegramStatusReceipt(fixture: LocalHandoffFixture) {
-  const canonical = { ...LOCAL_LIBRARY_ROW_A, status: "telegram_ready", caption: "Canonical Telegram status receipt" };
+  const canonical = { ...LOCAL_LIBRARY_ROW_A, status: "telegram_ready", updatedAt: "2090-10-20T00:00:01.654321+00:00" };
   fixture.libraryReplies.patch = { success: true, mode: "supabase", data: { video: canonical } };
   return canonical;
 }
+
+test("G5C14 CAS library parsing preserves exact offset microseconds and rejects untrusted versions without adding a form field", async () => {
+  const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE), captured = fixture.library();
+  try {
+    assert.equal(Object.hasOwn(fixture.libraryDefaults.initialVideo, "updatedAt"), false);
+    for (const updatedAt of [LOCAL_LIBRARY_ROW_A.updatedAt, "2090-10-20T00:00:00Z", "2090-10-20T00:00:00.000001-04:00"]) {
+      captured.callbacks.write([{ ...LOCAL_LIBRARY_ROW_A, updatedAt }]);
+      assert.equal(captured.callbacks.read()[0]?.updatedAt, updatedAt);
+    }
+    captured.callbacks.write([{ ...LOCAL_LIBRARY_ROW_A, updatedAt: undefined }]);
+    assert.equal(captured.callbacks.read().length, 1, "legacy/local rows remain readable without a server version");
+    assert.equal(Object.hasOwn(captured.callbacks.read()[0], "updatedAt"), false);
+    for (const updatedAt of [null, 42, "", "bad-version", "2090-10-20T00:00:00", "2090-10-20T00:00:00.1234567Z",
+      " 2090-10-20T00:00:00Z", "2090-02-30T00:00:00Z"]) {
+      fixture.localStorage.setItem(fixture.libraryKey(), JSON.stringify([{ ...LOCAL_LIBRARY_ROW_A, updatedAt }]));
+      assert.equal(captured.callbacks.read().length, 0, `reject an untrusted stored version: ${String(updatedAt)}`);
+    }
+    assert.deepEqual(fixture.dispatches, []);
+  } finally { fixture.lifetime!.unmount(); }
+});
+
+for (const updatedAt of [undefined, "bad-version", "2090-10-20T00:00:00", "2090-10-20T00:00:00.1234567Z"]) {
+  test(`G5C14 CAS real send refuses ${updatedAt ?? "missing version"} before Telegram dispatch or reservation`, async () => {
+    const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE);
+    fixture.seedLibrary([{ ...LOCAL_LIBRARY_ROW_A, updatedAt }]);
+    const before = libraryState(fixture), mutations = fixture.mutations.length;
+    try {
+      await fixture.library().callbacks.sendTelegram();
+      assert.deepEqual(fixture.dispatches, []); assert.deepEqual(libraryState(fixture), before);
+      assert.deepEqual(fixture.mutations.slice(mutations), []); assertTelegramFence(fixture, null);
+      assert.match(String(fixture.state.Notice), /версия контента.*не подтверждена.*обновите библиотеку.*не отправлялось/i);
+      assert.equal(fixture.toasts.filter((toast) => toast.kind === "warning").length, 1);
+      assert.equal(fixture.toasts.some((toast) => toast.kind === "success"), false);
+      assert.equal(fixture.writes.some((write) => write.field === "Loading"), false);
+    } finally { fixture.lifetime!.unmount(); }
+  });
+}
+
+test("G5C14 CAS test delivery and content-* draft send do not require a server version", async () => {
+  for (const testOnly of [true, false]) {
+    const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE);
+    const row = { ...LOCAL_LIBRARY_ROW_A, id: testOnly ? LOCAL_LIBRARY_ROW_A.id : "content-local-versionless", updatedAt: undefined };
+    fixture.seedLibrary([row]);
+    const before = libraryState(fixture);
+    try {
+      await invokeLibraryTelegram(fixture.library(), testOnly ? "test" : "send");
+      assert.equal(fixture.dispatches.length, 1); assert.equal(fixture.dispatches[0].method, "POST");
+      assert.deepEqual(fixture.dispatches[0].body, testOnly ? { test: true } : JSON.parse(JSON.stringify(row)));
+      if (testOnly) { assert.deepEqual(libraryState(fixture), before); assert.equal(fixture.localStorage.getItem(fixture.libraryKey()), null); }
+      else { assert.equal(libraryRows(fixture)[0].status, "telegram_ready"); assertTelegramFence(fixture, "sent", row); }
+      assert.equal(fixture.toasts.filter((toast) => toast.kind === (testOnly ? "success" : "warning")).length, 1);
+    } finally { fixture.lifetime!.unmount(); }
+  }
+});
+
+test("G5C14 CAS readiness sends the original unrounded version and accepts an unchanged valid receipt version", async () => {
+  const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE);
+  fixture.seedLibrary([LOCAL_LIBRARY_ROW_A]);
+  const canonical = { ...LOCAL_LIBRARY_ROW_A, status: "telegram_ready" };
+  fixture.libraryReplies.patch = { success: true, mode: "supabase", data: { video: canonical } };
+  try {
+    await fixture.library().callbacks.sendTelegram();
+    assert.deepEqual(fixture.dispatches.map((call) => call.method), ["POST", "PATCH"]);
+    assert.deepEqual(fixture.dispatches[1].body, { id: LOCAL_LIBRARY_ROW_A.id, status: "telegram_ready", expectedUpdatedAt: LOCAL_LIBRARY_ROW_A.updatedAt });
+    assert.notEqual((fixture.dispatches[1].body as { expectedUpdatedAt: string }).expectedUpdatedAt, new Date(LOCAL_LIBRARY_ROW_A.updatedAt!).toISOString());
+    assert.deepEqual(JSON.parse(JSON.stringify(libraryRows(fixture))), [canonical]);
+    assert.deepEqual(JSON.parse(fixture.localStorage.getItem(fixture.libraryKey())!), [canonical]);
+    assertTelegramFence(fixture, "sent");
+    assert.equal(fixture.toasts.filter((toast) => toast.kind === "success").length, 1);
+  } finally { fixture.lifetime!.unmount(); }
+});
+
+for (const outcome of ["safe canonical metadata", "changed approval package", "changed approved copy"] as const) {
+  test(`G5C14 CAS readiness checks ${outcome} against the original parsed content`, async () => {
+    const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE);
+    const contentApproval = { packageId: "synthetic-approved-package", variantId: "synthetic-approved-variant", variantLabel: "Synthetic variant",
+      variantAngle: "Synthetic angle", version: 1, approvedAt: "2090-10-20T00:00:00Z", copyMatchesLaunch: true,
+      approvedCopy: { primaryText: "Synthetic primary", headline: "Synthetic headline", description: "Synthetic description" } };
+    const row = { ...LOCAL_LIBRARY_ROW_A, contentApproval };
+    fixture.seedLibrary([row]);
+    const canonical = { ...row, status: "telegram_ready", updatedAt: "2090-10-20T00:00:01.654321Z" };
+    const receipt = { ...canonical, serverOnlyMetadata: "not content", contentApproval: { ...contentApproval,
+      variantLabel: " Synthetic variant ", approvedCopy: { ...contentApproval.approvedCopy, headline: " Synthetic headline " } } };
+    if (outcome === "changed approval package") receipt.contentApproval.packageId = "different-approved-package";
+    if (outcome === "changed approved copy") receipt.contentApproval.approvedCopy.primaryText = "Different approved primary";
+    fixture.libraryReplies.patch = { success: true, mode: "supabase", data: { video: Object.fromEntries(Object.entries(receipt).reverse()) } };
+    const before = libraryState(fixture), mutations = fixture.mutations.length;
+    try {
+      assert.equal(fixture.buildTelegramPackage(row), fixture.buildTelegramPackage(receipt), "metadata is checked beyond the package text");
+      await fixture.library().callbacks.sendTelegram();
+      assert.deepEqual(fixture.dispatches.map((call) => call.method), ["POST", "PATCH"]);
+      assert.deepEqual(fixture.dispatches[1].body, { id: row.id, status: "telegram_ready", expectedUpdatedAt: row.updatedAt });
+      assertTelegramFence(fixture, "sent", row);
+      if (outcome === "safe canonical metadata") {
+        assert.deepEqual(JSON.parse(JSON.stringify(libraryRows(fixture))), [canonical]);
+        assert.deepEqual(JSON.parse(fixture.localStorage.getItem(fixture.libraryKey())!), [canonical]);
+        assert.equal(fixture.toasts.filter((toast) => toast.kind === "success").length, 1);
+      } else {
+        assert.deepEqual(libraryState(fixture), before); assert.equal(fixture.localStorage.getItem(fixture.libraryKey()), null);
+        assert.deepEqual(fixture.mutations.slice(mutations), telegramFenceMutations(fixture, ["set", "set"]));
+        assert.equal(fixture.toasts.some((toast) => toast.kind === "success"), false);
+      }
+    } finally { fixture.lifetime!.unmount(); }
+  });
+}
+
+for (const outcome of ["stale 409", "network error", "missing receipt version", "malformed receipt version", "changed caption"] as const) {
+  test(`G5C14 CAS apply ${outcome} returns false without local promotion or a cache write`, async () => {
+    const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE);
+    fixture.seedLibrary([LOCAL_LIBRARY_ROW_A]);
+    const canonical = telegramStatusReceipt(fixture), before = libraryState(fixture), mutations = fixture.mutations.length;
+    if (outcome === "stale 409") {
+      fixture.handoffStatuses["library-patch"] = 409;
+      fixture.libraryReplies.patch = { success: false, code: "content_version_conflict" };
+    } else if (outcome === "network error") {
+      fixture.handoffTransportFailures["library-patch"] = 500;
+    } else {
+      const changed = outcome === "missing receipt version" ? { updatedAt: undefined }
+        : outcome === "malformed receipt version" ? { updatedAt: "invalid-version" } : { caption: "Different readiness caption" };
+      fixture.libraryReplies.patch = { success: true, mode: "supabase", data: { video: { ...canonical, ...changed } } };
+    }
+    try {
+      assert.equal(await fixture.library().callbacks.update({ status: "telegram_ready" }), false);
+      assert.deepEqual(libraryState(fixture), before); assert.deepEqual(fixture.mutations.slice(mutations), []);
+      assert.equal(fixture.dispatches.length, 1); assert.equal(fixture.dispatches[0].method, "PATCH");
+      assert.equal(fixture.localStorage.getItem(fixture.libraryKey()), null);
+      assert.match(String(fixture.state.Notice), /версия контента.*обновите библиотеку/i);
+    } finally { fixture.lifetime!.unmount(); }
+  });
+}
+
 async function pauseLibraryTelegram(fixture: LocalHandoffFixture, kind: LocalTelegramKind, phase: "token" | "body" | "response" | "patch-body") {
   const token = phase === "token" ? fixture.deferToken("library-telegram") : undefined;
   const body = phase === "body" || phase === "patch-body" ? fixture.deferBody(phase === "patch-body" ? "library-patch" : "library-telegram") : undefined;
@@ -5426,7 +5560,7 @@ for (const kind of ["test", "send"] as const) {
       if (kind === "test") { assert.deepEqual(libraryState(fixture), before); assert.equal(fixture.localStorage.getItem(fixture.libraryKey()), null); }
       else {
         assert.equal(fixture.dispatches[1].method, "PATCH"); assert.equal(fixture.dispatches[1].url, `/api/crm/content-videos?workspaceId=${REAL_DEMO_TEST_WORKSPACE}`);
-        assert.deepEqual(fixture.dispatches[1].body, { id: LOCAL_LIBRARY_ROW_A.id, status: "telegram_ready" });
+        assert.deepEqual(fixture.dispatches[1].body, { id: LOCAL_LIBRARY_ROW_A.id, status: "telegram_ready", expectedUpdatedAt: LOCAL_LIBRARY_ROW_A.updatedAt });
         assert.deepEqual(JSON.parse(JSON.stringify(libraryRows(fixture))), [LOCAL_LIBRARY_ROW_B, canonical]);
         assert.deepEqual(JSON.parse(fixture.localStorage.getItem(fixture.libraryKey())!), [LOCAL_LIBRARY_ROW_B, canonical]);
         assert.equal(fixture.state.ActiveId, LOCAL_LIBRARY_ROW_A.id); assert.match(String(fixture.state.Notice), /2/);
@@ -5534,30 +5668,43 @@ test("G5C14 confirmed test delivery with an active idea never patches or changes
   } finally { fixture.lifetime!.unmount(); }
 });
 
-for (const failure of ["PATCH 403", "PATCH outage", "cache failure", "wrong canonical status"] as const) {
+for (const failure of ["PATCH 403", "PATCH outage", "cache failure", "wrong canonical status", "PATCH 409", "unreadable PATCH 409",
+  "missing receipt version", "invalid receipt version", "changed caption", "changed brief", "malformed receipt"] as const) {
   test(`G5C14 delivered send with ${failure} preserves delivery proof but warns status is not server-confirmed`, async () => {
     const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE); fixture.seedLibrary([LOCAL_LIBRARY_ROW_A]);
-    const canonical = telegramStatusReceipt(fixture), before = libraryState(fixture);
+    const canonical = telegramStatusReceipt(fixture), before = libraryState(fixture), mutations = fixture.mutations.length;
     if (failure === "PATCH 403") { fixture.handoffStatuses["library-patch"] = 403; fixture.handoffBodyFailures.add("library-patch"); }
     if (failure === "PATCH outage") fixture.handoffTransportFailures["library-patch"] = 500;
     if (failure === "cache failure") fixture.localStorage.failNextWrite(fixture.libraryKey());
     if (failure === "wrong canonical status") fixture.libraryReplies.patch = { success: true, mode: "supabase", data: { video: { ...canonical, status: "idea" } } };
+    const conflict = !["PATCH 403", "cache failure"].includes(failure);
+    if (failure === "PATCH 409" || failure === "unreadable PATCH 409") {
+      fixture.handoffStatuses["library-patch"] = 409;
+      fixture.libraryReplies.patch = { success: false, code: "content_version_conflict", error: "Synthetic stale content version" };
+      if (failure === "unreadable PATCH 409") fixture.handoffBodyFailures.add("library-patch");
+    }
+    const changed = failure === "missing receipt version" ? { updatedAt: undefined }
+      : failure === "invalid receipt version" ? { updatedAt: "2090-10-20T00:00:01.6543217Z" }
+      : failure === "changed caption" ? { caption: "Canonical Telegram status receipt" }
+      : failure === "changed brief" ? { audience: "Different server audience" }
+      : failure === "malformed receipt" ? { script: {} } : null;
+    if (changed) fixture.libraryReplies.patch = { success: true, mode: "supabase", data: { video: { ...canonical, ...changed } } };
     try {
       await fixture.library().callbacks.sendTelegram(); assert.equal(fixture.dispatches.length, 2);
       const notice = String(fixture.state.Notice); assert.match(notice, /Telegram.*подтвердил.*отправ/i); assert.match(notice, /статус.*не подтвержд/i);
       assert.doesNotMatch(notice, /не удалось отправить|сообщение не отправлено/i);
       assert.equal(fixture.toasts.filter((toast) => toast.kind === "warning").length, 1); assert.equal(fixture.toasts.some((toast) => toast.kind === "success" || toast.kind === "error"), false);
-      if (failure === "PATCH 403" || failure === "cache failure") { assert.deepEqual(libraryState(fixture), before); assert.equal(fixture.localStorage.getItem(fixture.libraryKey()), null); }
-      if (failure === "PATCH 403") assert.equal(fixture.packageBodyReads.includes("library-patch"), false);
-      if (failure === "PATCH outage") assert.equal(libraryRows(fixture)[0].status, "telegram_ready");
+      assert.deepEqual(libraryState(fixture), before); assert.equal(fixture.localStorage.getItem(fixture.libraryKey()), null);
+      if (failure === "PATCH 403" || failure === "PATCH 409" || failure === "unreadable PATCH 409") assert.equal(fixture.packageBodyReads.includes("library-patch"), false);
+      if (conflict) assert.deepEqual(fixture.mutations.slice(mutations), telegramFenceMutations(fixture, ["set", "set"]), "a readiness conflict must never cache a local status fallback");
       assert.equal(fixture.dispatches.filter((call) => call.url.includes("send-telegram")).length, 1, "never repeat delivery just to recover its status write");
       const fence = assertTelegramFence(fixture, "sent");
       for (const remount of [false, true]) {
         if (remount) fixture.lifetime!.unmount();
-        fixture.seedLibrary([LOCAL_LIBRARY_ROW_A]);
+        fixture.seedLibrary([{ ...LOCAL_LIBRARY_ROW_A, updatedAt: remount ? canonical.updatedAt : LOCAL_LIBRARY_ROW_A.updatedAt }]);
         const retryBefore = libraryState(fixture), retryMutations = fixture.mutations.length;
         await fixture.library().callbacks.sendTelegram();
-        assert.equal(fixture.dispatches.length, 2, "manual retry or reload must not resend to recover the status");
+        assert.equal(fixture.dispatches.length, 2, "manual retry or reload with a refreshed version must not resend to recover the status");
         assert.deepEqual(libraryState(fixture), retryBefore); assert.deepEqual(fixture.mutations.slice(retryMutations), []);
         assert.equal(assertTelegramFence(fixture, "sent"), fence);
         assert.match(String(fixture.state.Notice), /повторная отправка заблокирована/i);
@@ -5830,7 +5977,7 @@ for (const dimension of ["package", "actor", "workspace"] as const) {
       assert.deepEqual(fixture.dispatches[1].body, row); assert.equal(fixture.libraryRequests[1].init.expectedUserId, actorId);
       assert.equal(fixture.dispatches[1].signal, current.session.sessionRef.current!.signal);
       assert.equal(fixture.dispatches[1].headers.get("Authorization"), dimension === "actor" ? "Bearer fixture-token-b" : "Bearer fixture-token-a");
-      assert.deepEqual(fixture.dispatches[2].body, { id: row.id, status: "telegram_ready" });
+      assert.deepEqual(fixture.dispatches[2].body, { id: row.id, status: "telegram_ready", expectedUpdatedAt: row.updatedAt });
       assert.deepEqual(JSON.parse(JSON.stringify(libraryRows(fixture))), [canonical]);
       assert.deepEqual(JSON.parse(fixture.localStorage.getItem(fixture.libraryKey(workspaceId))!), [canonical]);
       assertTelegramFence(fixture, "sent", row, actorId, workspaceId); assert.equal(assertTelegramFence(fixture, "uncertain"), originalFence);

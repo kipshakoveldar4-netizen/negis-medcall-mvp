@@ -19,6 +19,7 @@ const ok = (data) => ({ success: true, mode: "supabase", data });
 const denied = (status) => ({ success: false, error: `TEST ONLY: synthetic fixture request denied (${status})` });
 const object = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
 const count = (value) => Math.min(Number.MAX_SAFE_INTEGER, value + 1);
+const nextVersion = (video) => new Date(Date.parse(video.updatedAt) + 1).toISOString().replace("Z", "000Z");
 
 function seed(actor) {
   return {
@@ -28,7 +29,7 @@ function seed(actor) {
     hook: `QA ${actor} hook`, script: actor === "A" ? "A".repeat(7000) : "QA B script",
     voiceover: `QA ${actor} voiceover`, cta: `QA ${actor} CTA`, caption: `QA ${actor} caption`,
     hashtags: [`#QA${actor}`, "#Synthetic"], avatarPrompt: `QA ${actor} avatar prompt`, tapnowPrompt: `QA ${actor} TapNow prompt`,
-    status: "idea", createdAt: "2026-10-23T08:00:00.000Z",
+    status: "idea", createdAt: "2026-10-23T08:00:00.000Z", updatedAt: "2026-10-23T08:00:00.123456Z",
   };
 }
 
@@ -191,11 +192,16 @@ export function createTelegramDeliveryHttpFixture() {
 
   function command(record, body) {
     if (!object(body) || Object.keys(body).length !== 1 || !Object.hasOwn(body, "action")
-      || ![...MODES, "release", "reset"].includes(body.action)) { send(record.res, 400, denied(400)); return; }
+      || ![...MODES, "release", "reset", "edit-A"].includes(body.action)) { send(record.res, 400, denied(400)); return; }
     if (body.action === "reset") reset(record);
     else if (body.action === "release") {
       // Release all captured replies; changing mode never rewrites an older response.
       for (const held of [...pending.values()]) held.release();
+    } else if (body.action === "edit-A") {
+      if (![...pending.values()].some((held) => held.actor === "A" && !held.test && current(held))) {
+        send(record.res, 400, denied(400)); return;
+      }
+      videos.A = { ...videos.A, caption: "QA A caption edited while delivery was held", updatedAt: nextVersion(videos.A) };
     } else mode = body.action;
     send(record.res, 200, snapshot());
   }
@@ -240,9 +246,13 @@ export function createTelegramDeliveryHttpFixture() {
     readJson(record, (body) => {
       if (kind === "control") command(record, body);
       else if (kind === "delivery") delivery(record, body);
-      else if (!isDeepStrictEqual(body, { id: videos[actor].id, status: "telegram_ready" })) send(res, 400, denied(400));
-      else {
-        videos[actor] = { ...videos[actor], status: "telegram_ready" };
+      else if (!object(body) || typeof body.expectedUpdatedAt !== "string" || !body.expectedUpdatedAt
+        || !isDeepStrictEqual(body, { id: videos[actor].id, status: "telegram_ready", expectedUpdatedAt: body.expectedUpdatedAt })) {
+        send(res, 400, denied(400));
+      } else if (body.expectedUpdatedAt !== videos[actor].updatedAt) {
+        send(res, 409, { ...denied(409), code: "content_version_conflict" });
+      } else {
+        videos[actor] = { ...videos[actor], status: "telegram_ready", updatedAt: nextVersion(videos[actor]) };
         totals.statusWrites = count(totals.statusWrites);
         send(res, 200, ok({ video: videos[actor] }));
       }

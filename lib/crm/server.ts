@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { canAssignRole, isStaffRole, isWorkspaceAdminRole } from "../auth/permissions";
 import { extractJsonObject, generateText, resolveTextProvider } from "../ai/text-provider";
 import { normalizeAdvertisingContentApproval } from "../advertising/campaignBrief";
+import { readContentVideoVersion } from "../content-studio/telegram-delivery-guard";
 import { normalizePhone } from "./phone";
 import { arrivalPaymentError } from "./arrival-payment";
 import { assignedLeadPatch, assignedLeadRouteAllowed, isAssignedLeadRole } from "./assigned-leads";
@@ -1586,6 +1587,7 @@ function makeContentVideo(body: JsonRecord): JsonRecord {
   const contentApproval = normalizeAdvertisingContentApproval(
     body.contentApproval ?? rawPayload.contentApproval,
   );
+  const updatedAt = readContentVideoVersion(body.updatedAt ?? body.updated_at);
   return {
     id: readString(body.id) || nextDemoId("content"),
     title: readString(body.title),
@@ -1605,6 +1607,7 @@ function makeContentVideo(body: JsonRecord): JsonRecord {
     ...(contentApproval ? { contentApproval } : {}),
     status: readString(body.status) || "idea",
     createdAt: firstString(body.createdAt, body.created_at, new Date().toISOString()),
+    ...(updatedAt ? { updatedAt } : {}),
   };
 }
 
@@ -2186,6 +2189,7 @@ const configs: Record<CrmResource, ResourceConfig> = {
         rawPayload: row.raw_payload,
         status: row.status,
         createdAt: row.created_at,
+        updatedAt: row.updated_at,
       }),
   },
   "admin-settings": {
@@ -5495,6 +5499,16 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
     );
   }
 
+  const requiresContentVersion = resource === "content-videos" && readString(patchBody.status) === "telegram_ready";
+  const expectedContentVersion = requiresContentVersion ? readContentVideoVersion(patchBody.expectedUpdatedAt) : null;
+  if (requiresContentVersion && !expectedContentVersion) {
+    const missing = patchBody.expectedUpdatedAt === undefined;
+    return sendJson(res, missing ? 409 : 400, {
+      ...errorBody("Версия контента не подтверждена. Обновите библиотеку; повторная отправка Telegram не нужна."),
+      code: missing ? "content_version_conflict" : "invalid_content_version",
+    });
+  }
+
   try {
     if (resource === "staff") {
       const context = readWorkspaceContext(req);
@@ -5824,11 +5838,24 @@ async function patchItem(resource: CrmResource, req: VercelRequest, res: VercelR
       if (resource === "leads" && isMortgageAdminSelfAssignment(req, candidate)) {
         return await saveMortgageAdminSelfLead(supabase, req, candidate, id);
       }
-      return await supabase.from(config.table).update(candidate).eq("id", id).eq("workspace_id", workspaceId)
-        .select(config.selectColumns ?? "*").single();
+      if (requiresContentVersion) {
+        // Advance even if the acknowledgement and the previous edit share a millisecond.
+        candidate.updated_at = new Date(Math.max(Date.now(), Date.parse(expectedContentVersion!) + 1)).toISOString();
+      }
+      const update = supabase.from(config.table).update(candidate).eq("id", id).eq("workspace_id", workspaceId);
+      if (requiresContentVersion) {
+        return await update.eq("updated_at", expectedContentVersion).select(config.selectColumns ?? "*").maybeSingle();
+      }
+      return await update.select(config.selectColumns ?? "*").single();
     };
 
     let { data, error } = await runUpdate(row);
+    if (requiresContentVersion && !error && !data) {
+      return sendJson(res, 409, {
+        ...errorBody("Контент изменён в другой вкладке. Статус Telegram не сохранён; обновите библиотеку, не отправляя пакет повторно."),
+        code: "content_version_conflict",
+      });
+    }
 
     // См. тот же разбор на создании: что из присланного не доехало до базы.
     const unsaved: string[] = [];
@@ -10698,6 +10725,7 @@ export async function persistContentVideoPatchIfAvailable(input: {
   videoId?: unknown;
   workspaceId?: unknown;
   patch: JsonRecord;
+  expectedUpdatedAt?: unknown;
 }) {
   const id = readString(input.videoId);
   const workspaceId = readString(input.workspaceId);
@@ -10708,24 +10736,38 @@ export async function persistContentVideoPatchIfAvailable(input: {
   // workspace owned that row — and until this phase the id and the workspace
   // both came straight from an unauthenticated request body.
   if (!supabase || !isUuid(id) || !isUuid(workspaceId)) {
-    return;
+    return false;
   }
 
+  const requiresVersion = readString(input.patch.status) === "telegram_ready";
+  const expectedVersion = requiresVersion ? readContentVideoVersion(input.expectedUpdatedAt) : null;
+  if (requiresVersion && !expectedVersion) return false;
   const row = buildPatchRow("content-videos", input.patch);
   if (Object.keys(row).length === 0) {
-    return;
+    return false;
+  }
+  if (requiresVersion) {
+    row.updated_at = new Date(Math.max(Date.now(), Date.parse(expectedVersion!) + 1)).toISOString();
   }
 
   try {
-    const { error } = await supabase
+    const update = supabase
       .from("content_videos")
       .update(row)
       .eq("id", id)
       .eq("workspace_id", workspaceId);
+    if (requiresVersion) {
+      const { data, error } = await update.eq("updated_at", expectedVersion).select("id").maybeSingle();
+      if (error) throw new Error(error.message);
+      return readString(asRecord(data).id) === id;
+    }
+    const { error } = await update;
     if (error) {
       throw new Error(error.message);
     }
+    return true;
   } catch (error) {
     console.warn(supabaseWarning("content_videos", error));
+    return false;
   }
 }

@@ -2,6 +2,16 @@ type Storage = Pick<globalThis.Storage, "getItem" | "setItem" | "removeItem">;
 type Locks = { request<T>(name: string, callback: () => T | Promise<T>): Promise<T> };
 export type TelegramDeliveryReceipt = { key: string; attemptId: string };
 
+export function readContentVideoVersion(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const match = /^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,6})?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/.exec(value);
+  if (!match || Number(match[2]) > 23 || Number(match[3]) > 59 || Number(match[4]) > 59
+    || !Number.isFinite(Date.parse(value))) return null;
+  if (new Date(`${match[1]}T00:00:00Z`).toISOString().slice(0, 10) !== match[1]) return null;
+  // Keep PostgreSQL microseconds: Date.toISOString() would round the CAS token.
+  return value;
+}
+
 const storageError = "Не удалось сохранить защиту от повторной отправки Telegram. Пакет можно скопировать.";
 const duplicateError = "Этот пакет уже отправлялся или его доставка не подтверждена. Проверьте Telegram; повторная отправка заблокирована, чтобы не создать дубли. Пакет можно скопировать.";
 

@@ -15,6 +15,7 @@ const VIDEOS = `/api/crm/content-videos?workspaceId=${W1}`;
 const SEND = `/api/content-studio/send-telegram?workspaceId=${W1}`;
 const auth = (actor = "A") => ({ Authorization: `Bearer fixture-ads-${actor}` });
 const jsonHeaders = (actor = "A") => ({ ...auth(actor), "Content-Type": "application/json" });
+const readyPatch = (video) => ({ id: video.id, status: "telegram_ready", expectedUpdatedAt: video.updatedAt });
 
 async function until(predicate) {
   for (let index = 0; index < 400; index++) { if (predicate()) return; await delay(5); }
@@ -38,12 +39,15 @@ async function serverFixture(t) {
   const post = (body, actor = "A", options = {}) => fetch(base + SEND, {
     ...options, method: "POST", headers: jsonHeaders(actor), body: JSON.stringify(body),
   });
+  const patch = (body, actor = "A") => native(base, VIDEOS, {
+    method: "PATCH", headers: jsonHeaders(actor), body: JSON.stringify(body),
+  }).done;
   const command = async (action) => {
     const response = await fetch(base + CONTROL, { method: "POST", headers: { "Content-Type": "application/json", Origin: base }, body: JSON.stringify({ action }) });
     assert.equal(response.status, 200, action); return response.json();
   };
   const video = async (actor = "A") => (await (await get(VIDEOS, actor)).json()).data.videos[0];
-  return { fixture, server, base, get, post, command, video };
+  return { fixture, server, base, get, post, patch, command, video };
 }
 
 // Native HTTP permits a body to remain unfinished across reset/close.
@@ -84,6 +88,8 @@ test("seeded GET is actor-separated, fully shaped, stable and A has exactly 7000
     for (const field of ["title", "niche", "goal", "duration", "style", "audience", "hook", "script", "voiceover", "cta", "caption", "avatarPrompt", "tapnowPrompt"])
       assert.equal(typeof video[field], "string", field);
     assert.equal(video.status, "idea"); assert.ok(Number.isFinite(Date.parse(video.createdAt)));
+    assert.equal(video.updatedAt, "2026-10-23T08:00:00.123456Z");
+    assert.equal(Object.hasOwn(video, "expectedUpdatedAt"), false);
     assert.ok(Array.isArray(video.hashtags) && video.hashtags.every((tag) => typeof tag === "string"));
     assert.match(video.title, new RegExp(`QA Telegram ${actor}`));
     assert.deepEqual(await f.video(actor), video);
@@ -111,22 +117,70 @@ test("existing synthetic auth/status/usage are read-only, fixed to W1 and disabl
   assert.equal(f.fixture.snapshot().externalCalls, 0);
 });
 
-test("PATCH accepts exactly the authenticated actor's own id/status and returns camelCase receipt", async (t) => {
+test("native PATCH accepts exactly the authenticated actor's own id/status/expectedUpdatedAt shape", async (t) => {
   const f = await serverFixture(t), a = await f.video(), b = await f.video("B");
-  for (const [actor, other] of [["A", b], ["B", a]]) {
-    for (const body of [{ id: other.id, status: "telegram_ready" }, { id: a.id, status: "idea" },
-      { id: a.id, status: "telegram_ready", extra: true }, { id: a.id }, null, []]) {
-      const response = await fetch(f.base + VIDEOS, { method: "PATCH", headers: jsonHeaders(actor), body: JSON.stringify(body) });
+  for (const [actor, own, other] of [["A", a, b], ["B", b, a]]) {
+    const valid = readyPatch(own);
+    for (const body of [readyPatch(other), { ...valid, status: "idea" }, { ...valid, extra: true },
+      { ...valid, updatedAt: own.updatedAt }, { id: own.id, status: "telegram_ready" }, { id: own.id },
+      ...[null, 1, true, [], {}, ""].map((expectedUpdatedAt) => ({ ...valid, expectedUpdatedAt })), null, []]) {
+      const response = await f.patch(body, actor);
       assert.equal(response.status, 400); assert.equal(f.fixture.snapshot().statusWrites, 0);
+      assert.equal(JSON.parse(response.text).data, undefined);
     }
+    assert.deepEqual(await f.video(actor), own);
   }
+});
+
+test("native correct CAS advances updatedAt, returns camelCase receipt and never stores expectedUpdatedAt", async (t) => {
+  const f = await serverFixture(t), a = await f.video(), b = await f.video("B");
   for (const [actor, original] of [["A", a], ["B", b]]) {
-    const response = await fetch(f.base + VIDEOS, { method: "PATCH", headers: jsonHeaders(actor), body: JSON.stringify({ id: original.id, status: "telegram_ready" }) });
+    const response = await f.patch(readyPatch(original), actor);
     assert.equal(response.status, 200);
-    assert.deepEqual(await response.json(), { success: true, mode: "supabase", data: { video: { ...original, status: "telegram_ready" } } });
-    assert.deepEqual(await f.video(actor), { ...original, status: "telegram_ready" });
+    const receipt = JSON.parse(response.text), saved = receipt.data.video;
+    assert.deepEqual(receipt, { success: true, mode: "supabase", data: {
+      video: { ...original, status: "telegram_ready", updatedAt: saved.updatedAt },
+    } });
+    assert.match(saved.updatedAt, /^2026-10-23T08:00:00\.\d{6}Z$/);
+    assert.ok(Date.parse(saved.updatedAt) > Date.parse(original.updatedAt));
+    assert.equal(Object.hasOwn(saved, "expectedUpdatedAt"), false);
+    assert.deepEqual(await f.video(actor), saved);
+    if (actor === "A") assert.deepEqual(await f.video("B"), b);
   }
   assert.equal(f.fixture.snapshot().statusWrites, 2);
+});
+
+test("native stale CAS compares the exact microsecond token without rounding or changing content", async (t) => {
+  const f = await serverFixture(t), a = await f.video();
+  for (const expectedUpdatedAt of ["2026-10-23T08:00:00.123455Z", "2026-10-23T08:00:00.123457Z",
+    new Date(a.updatedAt).toISOString()]) {
+    assert.equal(Date.parse(expectedUpdatedAt), Date.parse(a.updatedAt), "Date alone cannot distinguish these versions");
+    const response = await f.patch({ ...readyPatch(a), expectedUpdatedAt });
+    assert.equal(response.status, 409);
+    const body = JSON.parse(response.text);
+    assert.equal(body.success, false); assert.equal(body.code, "content_version_conflict"); assert.equal(body.data, undefined);
+    assert.deepEqual(await f.video(), a); assert.equal(f.fixture.snapshot().statusWrites, 0);
+  }
+});
+
+test("native double CAS uploads race atomically with exactly one winner and stale replays stay rejected", async (t) => {
+  const f = await serverFixture(t), a = await f.video(), b = await f.video("B");
+  const uploads = Array.from({ length: 2 }, () => native(f.base, VIDEOS, {
+    method: "PATCH", headers: jsonHeaders(), slow: true, body: JSON.stringify(readyPatch(a)).slice(0, -1),
+  }));
+  await until(() => f.fixture.snapshot().inFlight === 2);
+  for (const upload of uploads) upload.req.end("}");
+  const replies = await Promise.all(uploads.map((upload) => upload.done));
+  assert.deepEqual(replies.map((reply) => reply.status).sort(), [200, 409]);
+  const saved = JSON.parse(replies.find((reply) => reply.status === 200).text).data.video;
+  const conflict = JSON.parse(replies.find((reply) => reply.status === 409).text);
+  assert.equal(conflict.code, "content_version_conflict"); assert.equal(conflict.data, undefined);
+  assert.deepEqual(saved, { ...a, status: "telegram_ready", updatedAt: saved.updatedAt });
+  assert.notEqual(saved.updatedAt, a.updatedAt); assert.equal(Object.hasOwn(saved, "expectedUpdatedAt"), false);
+  const replay = await f.patch(readyPatch(a));
+  assert.equal(replay.status, 409); assert.equal(JSON.parse(replay.text).code, "content_version_conflict");
+  assert.deepEqual(await f.video(), saved); assert.deepEqual(await f.video("B"), b);
+  assert.equal(f.fixture.snapshot().statusWrites, 1);
 });
 
 test("success text matches the actual ContentStudio formatter including every separator", async (t) => {
@@ -200,7 +254,68 @@ for (const phase of ["headers", "body"]) {
     assert.ok(body.data.packageText.includes(a.script)); assert.ok(body.data.packageText.includes(a.title));
     assert.equal(f.fixture.snapshot().pending.length, 0); assert.equal(f.fixture.snapshot().statusWrites, 0);
   });
+
+  test(`hold-${phase}: native send/edit-A/release keeps the old reply and stale CAS leaves newer content as idea`, async (t) => {
+    const f = await serverFixture(t), a = await f.video(), b = await f.video("B");
+    await f.command(`hold-${phase}`);
+    const held = native(f.base, SEND, { method: "POST", headers: jsonHeaders(), body: JSON.stringify(a) });
+    await until(() => f.fixture.snapshot().pending.length === 1);
+    if (phase === "body") await until(() => held.text === "{");
+    const before = f.fixture.snapshot();
+    const after = await f.command("edit-A"), edited = await f.video();
+    assert.deepEqual(after.pending, before.pending); assert.equal(after.mode, before.mode);
+    assert.deepEqual(edited, { ...a, caption: edited.caption, updatedAt: edited.updatedAt });
+    assert.notEqual(edited.caption, a.caption); assert.notEqual(edited.updatedAt, a.updatedAt);
+    assert.ok(Date.parse(edited.updatedAt) > Date.parse(a.updatedAt));
+    assert.equal(edited.status, "idea"); assert.deepEqual(await f.video("B"), b);
+    assert.equal(Object.hasOwn(edited, "expectedUpdatedAt"), false);
+    assert.equal(held.headersSeen, phase === "body"); assert.equal(held.text, phase === "body" ? "{" : "");
+    await f.command("release");
+    const reply = await held.done, body = JSON.parse(reply.text);
+    assert.equal(reply.status, 200); assert.equal(body.success, true); assert.equal(body.data.parts, 3);
+    assert.ok(body.data.packageText.includes(`Caption:\n${a.caption}\n\n---\n\n`));
+    assert.ok(body.data.packageText.includes(a.script)); assert.equal(body.data.packageText.includes(edited.caption), false);
+    const stale = await f.patch(readyPatch(a));
+    assert.equal(stale.status, 409); assert.equal(JSON.parse(stale.text).code, "content_version_conflict");
+    assert.equal(JSON.parse(stale.text).data, undefined);
+    assert.deepEqual(await f.video(), edited); assert.deepEqual(await f.video("B"), b);
+    assert.equal(f.fixture.snapshot().pending.length, 0); assert.equal(f.fixture.snapshot().statusWrites, 0);
+    assert.equal(f.fixture.snapshot().externalCalls, 0);
+  });
 }
+
+test("edit-A is bounded to a held non-test A delivery and rejects arbitrary actor/content/version edits", async (t) => {
+  const f = await serverFixture(t), a = await f.video(), b = await f.video("B");
+  const edit = (body = { action: "edit-A" }, extraHeaders = {}) => native(f.base, CONTROL, {
+    method: "POST", headers: { "Content-Type": "application/json", ...extraHeaders }, body: JSON.stringify(body),
+  }).done;
+  assert.equal((await edit()).status, 400);
+  await f.command("hold-headers");
+  const held = [native(f.base, SEND, { method: "POST", headers: jsonHeaders("B"), body: JSON.stringify(b) }),
+    native(f.base, SEND, { method: "POST", headers: jsonHeaders(), body: '{"test":true}' })];
+  await until(() => f.fixture.snapshot().pending.length === 2);
+  assert.equal((await edit()).status, 400);
+  held.push(native(f.base, SEND, { method: "POST", headers: jsonHeaders(), body: JSON.stringify(a) }));
+  await until(() => f.fixture.snapshot().pending.length === 3);
+  for (const body of [{ action: "edit-B" }, { action: "edit-A", actor: "B" }, { action: "edit-A", caption: "injected" },
+    { action: "edit-A", updatedAt: "2026-10-23T08:00:00.999999Z" }, { action: "edit-A", status: "telegram_ready" }])
+    assert.equal((await edit(body)).status, 400);
+  for (const headers of [{ Origin: "null" }, { Origin: "https://foreign.invalid" }, { Host: "foreign.invalid" },
+    { Origin: [f.base, f.base] }]) assert.equal((await edit({ action: "edit-A" }, headers)).status, 400);
+  assert.deepEqual(await f.video(), a); assert.deepEqual(await f.video("B"), b);
+  assert.equal((await edit()).status, 200);
+  const edited = await f.video();
+  assert.equal(edited.caption, "QA A caption edited while delivery was held");
+  assert.equal((await edit()).status, 200);
+  const editedAgain = await f.video();
+  assert.deepEqual(editedAgain, { ...edited, updatedAt: editedAgain.updatedAt });
+  assert.ok(Date.parse(editedAgain.updatedAt) > Date.parse(edited.updatedAt));
+  assert.deepEqual(await f.video("B"), b); assert.equal(f.fixture.snapshot().statusWrites, 0);
+  await f.command("release");
+  for (const pending of held) assert.equal((await pending.done).status, 200);
+  assert.equal((await edit()).status, 400);
+  assert.deepEqual(await f.video(), editedAgain);
+});
 
 test("partial is a synthetic 502/429 part 2 of 3, never writes status or calls a provider", async (t) => {
   const f = await serverFixture(t), original = await f.video();
@@ -223,12 +338,15 @@ for (const action of ["reset", "close"]) {
       held.push(native(f.base, SEND, { method: "POST", headers: jsonHeaders(), body: JSON.stringify(a) }));
       await until(() => f.fixture.snapshot().pending.length === held.length);
     }
+    await f.command("edit-A");
+    assert.notEqual((await f.video()).updatedAt, a.updatedAt);
     const slowDelivery = native(f.base, SEND, { method: "POST", headers: jsonHeaders(), slow: true, body: '{"test":' });
     const slowPatch = native(f.base, VIDEOS, { method: "PATCH", headers: jsonHeaders(), slow: true, body: `{"id":"${a.id}","status":` });
     const slowControl = native(f.base, CONTROL, { method: "POST", headers: { "Content-Type": "application/json" }, slow: true, body: '{"action":' });
     await until(() => f.fixture.snapshot().inFlight === 5);
     if (action === "reset") await f.command("reset"); else f.fixture.close();
-    slowDelivery.req.end("true}"); slowPatch.req.end('"telegram_ready"}'); slowControl.req.end('"partial"}');
+    slowDelivery.req.end("true}");
+    slowPatch.req.end(`"telegram_ready","expectedUpdatedAt":"${a.updatedAt}"}`); slowControl.req.end('"partial"}');
     for (const pending of [...held, slowDelivery, slowPatch, slowControl]) await assert.rejects(pending.done);
     await delay(25);
     const state = f.fixture.snapshot();

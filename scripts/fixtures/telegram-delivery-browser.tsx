@@ -2,12 +2,12 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 import { Router } from "wouter";
 import { Toaster } from "sonner";
-import { ArrowLeftRight, Play, Repeat2, RotateCcw } from "../../artifacts/negis/node_modules/lucide-react";
+import { ArrowLeftRight, Pencil, Play, Repeat2, RotateCcw } from "../../artifacts/negis/node_modules/lucide-react";
 import ContentStudio from "../../artifacts/negis/src/pages/ContentStudio";
 import { reportIds, reportsAuthFixture } from "./advertising-reports-browser-mocks";
 import "../../artifacts/negis/src/index.css";
 
-type Action = "success" | "hold-headers" | "hold-body" | "partial" | "release" | "reset";
+type Action = "success" | "hold-headers" | "hold-body" | "partial" | "release" | "reset" | "edit-A";
 type Snapshot = { mode: string; pending: unknown[]; received: unknown[]; completed: number; aborted: number;
   statusWrites: number; externalCalls: number; closed: boolean };
 const modes = ["success", "hold-headers", "hold-body", "partial"] as const;
@@ -90,6 +90,7 @@ function Fixture() {
         </label>
         <button type="button" className="neu-btn" disabled={busy} onClick={() => void act("release")}><Play size={14} />Release</button>
         <button type="button" className="neu-btn" disabled={busy} onClick={() => void act("reset")}><RotateCcw size={14} />Reset</button>
+        <button type="button" className="neu-btn" disabled={busy} onClick={() => void act("edit-A")}><Pencil size={14} />Edit A</button>
         <button type="button" className="neu-btn" disabled={busy} onClick={reportsAuthFixture.switchActor}><ArrowLeftRight size={14} />Actor A/B</button>
         <button type="button" className="neu-btn" disabled={busy} onClick={reportsAuthFixture.switchABA}><Repeat2 size={14} />SDK A-B-A</button>
       </div>

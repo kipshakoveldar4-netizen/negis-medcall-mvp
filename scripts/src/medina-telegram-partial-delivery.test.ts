@@ -211,21 +211,80 @@ for (const outcome of ["success", "network-failure", "invalid-ack"] as const) {
         } };
       },
       updateContentVideo() { effects.push("local"); },
-      async persistContentVideoPatchIfAvailable() { effects.push("persistent"); },
+      async persistContentVideoPatchIfAvailable(input: Record<string, unknown>) {
+        effects.push("persistent");
+        assert.equal(input.expectedUpdatedAt, "2026-10-24T08:00:00.123456+00:00");
+        return true;
+      },
     });
     let status = 0; let reply: any;
     const response: LocalResponse = { status(code) { status = code; return this; }, setHeader() { return this; }, json(body) { reply = body; } };
     await handler({ body: { title: "QA long Unicode", script: "A".repeat(3499) + "\uD83D\uDE00" + "B".repeat(3501),
-      videoId: "33333333-3333-4333-8333-333333333333" } }, response, { workspaceId: "11111111-1111-4111-8111-111111111111" });
+      videoId: "33333333-3333-4333-8333-333333333333",
+      expectedUpdatedAt: "2026-10-24T08:00:00.123456+00:00" } }, response, { workspaceId: "11111111-1111-4111-8111-111111111111" });
     assert.ok(calls.length >= 2);
     assert.equal(new Set(calls.map(call => call.text)).size, calls.length);
     calls.forEach((call, index) => assert.ok(call.text.split("\n\n")[0].includes(`часть ${index + 1}/`)));
     if (outcome === "success") {
       assert.equal(status, 200); assert.equal(reply.data.sent, true); assert.equal(reply.data.parts, calls.length);
-      assert.deepEqual(effects, ["local", "persistent"]);
+      assert.equal(reply.data.statusPersisted, true);
+      assert.deepEqual(effects, ["persistent", "local"], "memory readiness follows the confirmed conditional database write");
     } else {
       assert.equal(status, 502); assert.equal(calls.length, 2, "never repeat part one or dispatch part three after failure");
       assert.equal(reply.success, false); assert.equal(reply.data, undefined); assert.deepEqual(effects, []);
     }
   });
 }
+
+for (const version of [undefined, "invalid", "2026-10-24T08:00:00.123456+00:00"]) {
+  test(`G5C37 compatibility videoId delivery does not promote memory after version refusal (${version ?? "missing"})`, async () => {
+    const effects: string[] = [];
+    let sends = 0;
+    const handler = await localHandler({
+      async fetch(_url: string, init: { body: string }) {
+        sends++;
+        return { ok: true, status: 200, async text() {
+          return JSON.stringify({ ok: true, result: { message_id: 19, date: 0, chat: { id: -1007654321 }, text: JSON.parse(init.body).text } });
+        } };
+      },
+      async persistContentVideoPatchIfAvailable(input: Record<string, unknown>) {
+        effects.push("conditional persistence refused");
+        assert.equal(input.expectedUpdatedAt, version);
+        assert.equal(input.workspaceId, "11111111-1111-4111-8111-111111111111");
+        assert.equal(input.videoId, "33333333-3333-4333-8333-333333333333");
+        assert.deepEqual(JSON.parse(JSON.stringify(input.patch)), { status: "telegram_ready" });
+        return false;
+      },
+      updateContentVideo() { effects.push("incorrect memory promotion"); },
+    });
+    let status = 0; let reply: any;
+    const response: LocalResponse = { status(code) { status = code; return this; }, setHeader() { return this; }, json(body) { reply = body; } };
+    await handler({ body: { title: "Synthetic CAS conflict", videoId: "33333333-3333-4333-8333-333333333333",
+      ...(version === undefined ? {} : { expectedUpdatedAt: version }) } }, response,
+    { workspaceId: "11111111-1111-4111-8111-111111111111" });
+    assert.equal(status, 200); assert.equal(sends, 1);
+    assert.equal(reply.data.sent, true, "physical delivery remains acknowledged, not a reason to resend");
+    assert.equal(reply.data.statusPersisted, false, "no claim that the database accepted readiness");
+    assert.deepEqual(effects, ["conditional persistence refused"]);
+  });
+}
+
+test("G5C37 test:true with a legacy videoId never attempts readiness persistence", async () => {
+  let sends = 0;
+  const handler = await localHandler({
+    async fetch(_url: string, init: { body: string }) {
+      sends++;
+      return { ok: true, status: 200, async text() {
+        return JSON.stringify({ ok: true, result: { message_id: 20, date: 0, chat: { id: -1007654321 }, text: JSON.parse(init.body).text } });
+      } };
+    },
+    async persistContentVideoPatchIfAvailable() { assert.fail("test packets do not update content rows"); },
+    updateContentVideo() { assert.fail("test packets do not promote memory status"); },
+  });
+  let reply: any;
+  const response: LocalResponse = { status() { return this; }, setHeader() { return this; }, json(body) { reply = body; } };
+  await handler({ body: { test: true, videoId: "33333333-3333-4333-8333-333333333333" } }, response,
+    { workspaceId: "11111111-1111-4111-8111-111111111111" });
+  assert.equal(sends, 1); assert.equal(reply.data.sent, true); assert.equal(reply.data.test, true);
+  assert.equal(Object.hasOwn(reply.data, "statusPersisted"), false);
+});

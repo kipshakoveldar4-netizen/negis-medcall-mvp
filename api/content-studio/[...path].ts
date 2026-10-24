@@ -777,14 +777,16 @@ async function handleSendTelegram(req: VercelRequest, res: VercelResponse, conte
       }
     }
 
+    let statusPersisted: boolean | undefined;
     if (!isTest && typeof payload.videoId === "string") {
       const patch = { status: "telegram_ready" as const };
-      updateContentVideo(payload.videoId, patch);
-      await persistContentVideoPatchIfAvailable({
+      statusPersisted = await persistContentVideoPatchIfAvailable({
         videoId: payload.videoId,
         workspaceId: context.workspaceId,
         patch,
+        expectedUpdatedAt: payload.expectedUpdatedAt,
       });
+      if (statusPersisted) updateContentVideo(payload.videoId, patch);
     }
 
     return sendJson(res, 200, {
@@ -795,6 +797,7 @@ async function handleSendTelegram(req: VercelRequest, res: VercelResponse, conte
         packageText: messageText,
         test: isTest,
         parts: chunks.length,
+        ...(statusPersisted !== undefined ? { statusPersisted } : {}),
       },
     });
   } catch (error) {

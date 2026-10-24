@@ -46,7 +46,7 @@ import {
   type PaidGenerationKind,
 } from "../../../../lib/content-studio/paid-generation";
 import {
-  reserveTelegramDelivery, confirmTelegramDelivery, releaseUnsentTelegramDelivery,
+  reserveTelegramDelivery, confirmTelegramDelivery, releaseUnsentTelegramDelivery, readContentVideoVersion,
   type TelegramDeliveryReceipt,
 } from "../../../../lib/content-studio/telegram-delivery-guard";
 
@@ -71,10 +71,11 @@ type ContentVideo = {
   contentApproval?: AdvertisingContentApproval;
   status: ContentVideoStatus;
   createdAt: string;
+  updatedAt?: string;
 };
 
 type ContentLibrarySnapshot = {
-  form: Omit<ContentVideo, "id" | "status" | "createdAt">;
+  form: Omit<ContentVideo, "id" | "status" | "createdAt" | "updatedAt">;
   videos: ContentVideo[];
   activeId: string;
 };
@@ -577,7 +578,7 @@ const labelStyle: CSSProperties = {
   letterSpacing: "0.04em",
 };
 
-const initialVideo: Omit<ContentVideo, "id" | "status" | "createdAt"> = {
+const initialVideo: Omit<ContentVideo, "id" | "status" | "createdAt" | "updatedAt"> = {
   title: "Почему клиника теряет заявки после рекламы",
   niche: "медицинский маркетинг",
   goal: "получить больше записей из рекламных лидов",
@@ -688,12 +689,15 @@ function parseContentVideo(value: unknown): ContentVideo | null {
     || (video.hashtags !== undefined && (!Array.isArray(video.hashtags) || !video.hashtags.every((tag) => typeof tag === "string")))) return null;
   const contentApproval = normalizeAdvertisingContentApproval(video.contentApproval);
   if (video.contentApproval !== undefined && !contentApproval) return null;
+  const updatedAt = readContentVideoVersion(video.updatedAt);
+  if (video.updatedAt !== undefined && !updatedAt) return null;
   return {
     id: video.id, title: video.title, niche: video.niche, goal: video.goal, duration: video.duration,
     style: video.style, audience: video.audience, createdAt: video.createdAt, status: video.status,
     hook: video.hook, script: video.script, voiceover: video.voiceover, cta: video.cta, caption: video.caption,
     hashtags: video.hashtags, avatarPrompt: video.avatarPrompt, tapnowPrompt: video.tapnowPrompt,
     ...(contentApproval ? { contentApproval } : {}),
+    ...(updatedAt ? { updatedAt } : {}),
   };
 }
 
@@ -2399,6 +2403,10 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
       setNotice("Доступ к изменению контента отозван. Обновите страницу.");
       return false;
     }
+    if (result === "conflict") {
+      setNotice("Версия контента не подтверждена или изменилась на сервере. Обновите библиотеку; прежняя идея сохранена.");
+      return false;
+    }
     const accepted = typeof result === "object" ? result : nextVideo;
     if (!await saveVideos(write.snapshot.videos.map((video) => video.id === active.id ? accepted : video), active.id,
       write.snapshot, write.session, write.storageKey, write)) return false;
@@ -2420,25 +2428,35 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
 
   const persistCurrentVideoPatch = async (
     videoId: string, patch: Partial<ContentVideo>, write: ContentLibraryWrite,
-  ): Promise<ContentVideo | "local" | "denied" | "stale"> => {
+  ): Promise<ContentVideo | "local" | "denied" | "stale" | "conflict"> => {
     if (!await isLibraryWriteVerified(write)) return "stale";
     if (localDraftsOnly || videoId.startsWith("content-")) return "local";
+    const finalReadiness = patch.status === "telegram_ready";
+    const original = finalReadiness ? parseContentVideo(write.snapshot.videos.find((video) => video.id === videoId)) : null;
+    const expectedUpdatedAt = readContentVideoVersion(original?.updatedAt);
+    if (finalReadiness && !expectedUpdatedAt) return "conflict";
     try {
       const response = await crmFetch(`/api/crm/content-videos?workspaceId=${encodeURIComponent(workspaceId)}`, {
         expectedUserId: actorId, dispatchGuard: () => isLibraryWriteCurrent(write), signal: write.session.signal,
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...patch, id: videoId }),
+        body: JSON.stringify({ ...patch, id: videoId, ...(finalReadiness ? { expectedUpdatedAt } : {}) }),
       });
       if (handoffAccessDenied(response)) return "denied";
       if (!await isLibraryWriteVerified(write)) return "stale";
+      if (response.status === 409) return "conflict";
       const body = await safeJson<{ video?: unknown; item?: unknown }>(response);
       if (!await isLibraryWriteVerified(write)) return "stale";
       const receipt = body?.success === true ? parseContentVideo(body.data?.video ?? body.data?.item) : null;
+      if (finalReadiness && (!response.ok || body?.success !== true || body.mode !== "supabase"
+        || receipt?.id !== videoId || receipt.status !== "telegram_ready" || !readContentVideoVersion(receipt.updatedAt)
+        || JSON.stringify({ ...receipt, status: undefined, updatedAt: undefined })
+          !== JSON.stringify({ ...original, status: undefined, updatedAt: undefined }))) return "conflict";
       return response.ok && body?.success === true && body.mode === "supabase" && receipt?.id === videoId ? receipt : "local";
     } catch (error) {
       if (handoffAccessDenied(error)) return "denied";
-      return await isLibraryWriteVerified(write) ? "local" : "stale";
+      if (!await isLibraryWriteVerified(write)) return "stale";
+      return finalReadiness ? "conflict" : "local";
     }
   };
 
@@ -2667,6 +2685,12 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
       if (localDraftsOnly) {
         const message = test ? "В локальном режиме Telegram не проверяется. Сообщение не отправлялось."
           : "Пакет доступен для копирования. В локальном режиме сообщение в Telegram не отправлялось.";
+        setNotice(message);
+        toast.warning(message);
+        return;
+      }
+      if (!test && active && isRealWorkspace(active.id) && !readContentVideoVersion(active.updatedAt)) {
+        const message = "Версия контента не подтверждена. Обновите библиотеку перед отправкой; сообщение в Telegram не отправлялось.";
         setNotice(message);
         toast.warning(message);
         return;
