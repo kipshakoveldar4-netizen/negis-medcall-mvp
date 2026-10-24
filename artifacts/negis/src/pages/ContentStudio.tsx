@@ -19,7 +19,7 @@ import {
 import { toast } from "sonner";
 import { PageLayout } from "@/components/layout/PageLayout";
 import { useAuth } from "@/contexts/AuthContext";
-import { apiUrl, crmFetch } from "@/lib/api";
+import { apiUrl, CrmApiError, crmFetch } from "@/lib/api";
 import { supabase, hasSupabaseFrontendEnv } from "@/lib/supabase";
 import { getSupabaseAccessToken } from "@/lib/serverAuth";
 import { getSignOutRevision, isSignOutPending } from "@/lib/authSignOut";
@@ -2758,6 +2758,11 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
       setNotice(`Пакет отправлен в Telegram${result.parts && result.parts > 1 ? ` частями: ${result.parts}` : ""}.`);
       toast.success("Отправлено в Telegram");
     } catch (error) {
+      // This transport refusal proves no POST, even if the captured session has ended.
+      if (receipt && !delivered && error instanceof CrmApiError
+        && error.status === 401 && error.code === "authentication_required") {
+        releaseUnsentTelegramDelivery(window.localStorage, receipt);
+      }
       if (!await isLibraryWriteVerified(write)) return;
       if (handoffAccessDenied(error) && !delivered) {
         denyAccess();
