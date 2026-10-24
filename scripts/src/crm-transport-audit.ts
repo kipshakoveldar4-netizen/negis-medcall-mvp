@@ -279,7 +279,7 @@ function verifiedMortgageReceivers(sources: CrmSources): Map<string, Set<number>
     || (ts.isVariableStatement(context.parent.parent) && context.parent.parent.modifiers?.some((node) => node.kind === ts.SyntaxKind.ExportKeyword))
     || !matches(session.parameters[0]?.name, "{ scope, live, children }") || session.parameters[0].initializer) return undefined;
   if (!references(hook.name!, (node) => node === hook.name)) return undefined;
-  for (const name of ["createContext", "useContext", "useMemo", "useCallback", "useRef"]) {
+  for (const name of ["createContext", "useContext", "useMemo", "useCallback", "useRef", "useEffect"]) {
     const binding = imported(model, name, "react");
     if (!binding || !nodes(model).filter(ts.isCallExpression).filter((node) => ts.isIdentifier(node.expression) && node.expression.text === name)
       .every((node) => boundTo(node.expression, binding.name)) || !references(binding.name, (node) => node === binding.name
@@ -369,9 +369,35 @@ function verifiedMortgageReceivers(sources: CrmSources): Map<string, Set<number>
     || hookReturn.expression.properties.some(ts.isSpreadAssignment)) return undefined;
   const requestProperty = one(hookReturn.expression.properties.filter((node) => node.name?.getText() === "request"));
   if (!requestProperty || !ts.isPropertyAssignment(requestProperty) || !matches(requestProperty.initializer, "access.request")) return undefined;
-  const requestCalls = nodes(hook).filter(ts.isCallExpression).filter((node) => ts.isPropertyAccessExpression(node.expression)
+  const snapshotEffect = one(nodes(hook).filter(ts.isCallExpression).filter((node) => node.expression.getText() === "useEffect"));
+  const callback = (name: string) => {
+    const initializer = variable(hook, name)?.initializer;
+    return initializer && ts.isCallExpression(initializer) && initializer.expression.getText() === "useCallback"
+      ? initializer.arguments[0] : undefined;
+  };
+  // Pin each awaited response to its owning closure and the context binding;
+  // an extra authenticated call must not compensate for a replaced transport.
+  const requestCalls: ts.CallExpression[] = [];
+  for (const [owner, expected] of [
+    [snapshotEffect?.arguments[0], "access.request(path, { signal: controller.signal })"],
+    [callback("mutate"), `access.request(\`\${endpoint}?workspaceId=\${encodeURIComponent(access.workspaceId)}\`, {
+      method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    })`],
+    [callback("searchContacts"), "access.request(`/api/crm/mortgage-workspace?${search}`)"],
+    [callback("updateContact"), "access.request(`/api/crm/lead-stages?workspaceId=${encodeURIComponent(access.workspaceId)}`)"],
+  ] as const) {
+    if (!owner || !ts.isArrowFunction(owner)) return undefined;
+    const response = variable(owner, "response")?.initializer;
+    if (!response || !ts.isAwaitExpression(response) || !ts.isCallExpression(response.expression)) return undefined;
+    const call = response.expression;
+    if (!matches(call, expected) || !ts.isPropertyAccessExpression(call.expression)
+      || !boundTo(call.expression.expression, hookAccess.name)) return undefined;
+    requestCalls.push(call);
+  }
+  const allRequestCalls = nodes(hook).filter(ts.isCallExpression).filter((node) => ts.isPropertyAccessExpression(node.expression)
     && node.expression.name.text === "request" && boundTo(node.expression.expression, hookAccess.name));
-  if (requestCalls.length !== 3 || !references(hookAccess.name, (node) => node === hookAccess.name || dependency(node)
+  if (allRequestCalls.length !== requestCalls.length || !allRequestCalls.every((node) => requestCalls.includes(node))
+    || !references(hookAccess.name, (node) => node === hookAccess.name || dependency(node)
     || (ts.isPrefixUnaryExpression(node.parent) && node.parent.operator === ts.SyntaxKind.ExclamationToken)
     || (readOnlyProperty(node) && ["access.workspaceId", "access.isCurrent", "access.request"].includes(node.parent.getText())
       && (node.parent.getText() !== "access.request" || node.parent === requestProperty.initializer || requestCalls.some((call) => call.expression === node.parent)))
