@@ -3797,7 +3797,7 @@ workers, всего 14 разных субагентов, с повторным 
 | G3 аналитика | При одинаковом количестве строк постраничное чтение может смешать статусы разных моментов | Воспроизведено на fake SDK, 501 строке; нужен настоящий согласованный snapshot, не повторный счётчик или формальный зелёный тест |
 | G5 история | Непроверенный локальный cache, устаревшая публикация списка и malformed → ложная пустота | 3707e6c готов локально: 55 новых случаев и соседние наборы 235/235; настоящий React/native HTTP принят для выбранных 403/401 на desktop/375. Meta flow/кампании не меняются |
 | G5 контент | C46 catches закрыты, но helper improveAdText переносил внутреннюю ошибку в result.refusal | C47 d3e49e8 готов локально, 11/11 с настоящей цепочкой helper/provider. usage summaries/warnings прослежены до фиксированных сообщений и счётчиков |
-| G5 JPEG/файлы | Metadata POST/PATCH обходят часть image-валидации; manual JPEG принимает labels без проверки байтов | Новые синтетические воспроизведения, ещё не исправлено. Публичные CDN URL не объявлены private-access/SSRF-уязвимостью без доказательства |
+| G5 JPEG/файлы | Metadata POST/PATCH обходили часть image-валидации; manual JPEG принимал labels без проверки байтов | bab4378 / G5-C50 закрывает выбранные metadata/manual-multipart пути локально. Signed-upload byte verification, generated-media и Linux/Preview acceptance остаются. Публичные CDN URL не объявлены private-access/SSRF-уязвимостью без доказательства |
 | G5 Telegram | Известный pre-dispatch auth refusal оставлял replay receipt и блокировал заведомо неотправленный пакет | 5b65b0d готов локально: 23/23 новых actual transport случая. Partial/unknown результаты сохраняют запрет дубля |
 | G8 правовая готовность | Версия callback-согласия не связана с отображённым текстом; более широкий L3/L4/L5 процесс остаётся | Только inventory, не юридическое заключение; mapping/цели, размещение, категория/MFA и утверждённые реквизиты требуют владельца/специалиста |
 | G6 подписки/платежи | PATCH не находит paused-подписку для resume/cancel; lost-response UI ошибочно сообщает «не сохранено» | Синтетические локальные задачи ещё не закрыты. Merchant sandbox и согласованные условия остаются внешними gate, не обходятся ручной подпиской |
@@ -3876,12 +3876,95 @@ pending=1 до отпускания.
 ads-mobile-denied-held-body.png). C45 owner A/B/A остаётся отдельным f18f411 proof.
 Машинный итог: `node_modules/.cache/readiness-wave-20261025/local-checks.json`.
 
-Следующий безопасный порядок в существующем плане: JPEG bytes/metadata и
+Следующий безопасный порядок в существующем плане: оставшаяся file-acceptance и
 согласованный snapshot аналитики; затем paused subscription/неопределённый
 ответ Control и оставшиеся конкурентные сценарии. Новые локальные коммиты
 этого прохода пока не перенесены в release-worktree и не опубликованы даже в
 новый Preview: кандидат требует отдельной проверки зависимостей, особенно
 календарных. Текущий принятый облачный адрес остаётся 6c11l89kr/f18f411.
+
+### Цикл G5-C50: байты файлов, multipart и конкурентные metadata — готов только локально, 25 октября
+
+Узкий локальный commit **bab4378**. По просьбе владельца в этом проходе
+использованы десять разных субагентов, не более шести одновременно: тесты
+метаданных, настоящих image bytes, лимитов запроса и multipart, совместимость,
+инвентаризация analytics/subscriptions, dependency review и независимая проверка.
+Main принимал решения и менял общий API; SQL, Meta, видео/worker pipeline
+субагентам не передавались. Закончившие workers закрыты.
+
+- Generic `ad-creatives` POST проверяет фактическую форму metadata до INSERT.
+  PATCH читает только точный workspace/id, проверяет объединённые исходные
+  значения, отказывает при ошибке чтения и сохраняет канонические type/MIME/size.
+  NULL размера остаётся неизвестным размером у обоих aliases, не нулём.
+- Metadata UPDATE сравнивает исходные timestamp и все четыре проверенные
+  колонки `file_name/file_type/mime_type/file_size`, включая IS NULL. Это
+  закрывает и найденный независимым reviewer сценарий: status-only writer
+  повторно использовал старый timestamp и пропускал устаревшие 50 MiB в image.
+  Конфликт даёт 409 без записи; unrelated PATCH сохраняет прежний read-free путь.
+- Manual multipart image требует согласованных расширения/MIME/signature и
+  настоящего декодирования Sharp, не только metadata(). Повреждённые и усечённые
+  JPG/PNG/WebP отклоняются до Storage; положительные байты сохраняются без
+  перекодирования. Ограничения: 10 MiB и 40 млн пикселей; настроен decoder timeout
+  5 секунд, но жёсткий wall-clock/RSS предел этим прогоном не доказан. Отсутствие
+  decoder даёт безопасный 503 без записи; публичный Storage error обезличен.
+- Multipart использует `@fastify/busboy` 3.2.4 и публичный Dicer: завершение
+  всех частей, совпадение числа использованных частей, единственный файл,
+  уникальные scalar fields и ограничения parts/fields/headers. Structured
+  `content-type` 3.1.1 и RFC boundary guard закрывают malformed/empty boundary.
+  Бинарная подстрока boundary больше не обрезает файл. Catch-all распознаёт
+  media type без учёта регистра и не забирает multipart в другой reader.
+- Reader отказывает до чтения при заявленном размере выше 101 MiB, ограничивает
+  накопление при отсутствии/занижении Content-Length и закрывает итератор при
+  превышении. Это предел buffered request, не доказанный предел RSS процесса;
+  direct signed-upload и общий non-multipart readRawBody не объявлены защищёнными
+  этой правкой. Video bytes/codec этим циклом не валидируются.
+
+Проверки против actual source с fake SDK/Storage, без внешней сети:
+
+| Набор | Baseline db5a200 | Финал |
+|---|---|---|
+| Metadata handlers/config/mapping/CAS | 62 fail / 11 pass | 73/73 |
+| Multipart с настоящей библиотекой | 28 fail / 14 pass | 42/42 |
+| Request limit/router/storage error | 30 fail / 8 pass | 38/38 |
+| Image bytes с настоящим native Sharp | Первоначальные 35 handler cases: 25 fail / 10 pass; остальные helper cases добавлены позже | 67/67 |
+
+Промежуточный multipart дал 8 отказавших assertions; они не удалены, main
+добавил строгую boundary/part-count проверку. Независимый review нашёл ещё
+четыре mapper/CAS дефекта; добавлены actual interleaving/normalization контроли,
+после исправления scoped повтор не выявил остатка в этих четырёх сценариях.
+Это не pentest и не реальный PostgreSQL race test.
+
+Финальный единый запуск четырёх новых и соседних Storage/content/API/tenant/
+ACTIVE/Meta-payload/failure-honesty наборов: **1345/1345**, exit=0,
+skipped/cancelled/todo=0. Промежуточные пересекающиеся 1075, 147 и 50 не
+суммировать повторно. Полные typecheck/build и **115 cold-start** прошли;
+после ESM-only typecheck отказа static content-type import заменён dynamic import,
+а не сменой module type всего репозитория. Прежние tooltip sourcemap и
+static/dynamic serverAuth warnings сохраняются. Четыре новых набора включены
+в существующий `test:storage-isolation`, не оставлены отдельными забытыми файлами.
+
+Зависимости pinned: Sharp 0.35.5, Busboy 3.2.4, content-type 3.1.1. Установка
+без lifecycle scripts; minimumReleaseAge=1440, allowlist и исключения неизменны.
+Только связанные lock entries. Основания:
+[Sharp constructor/input](https://sharp.pixelplumbing.com/api-constructor/),
+[Sharp stats](https://sharp.pixelplumbing.com/api-input/),
+[Busboy 3.2.4](https://github.com/fastify/busboy/releases/tag/v3.2.4),
+[Content-Type API](https://github.com/jshttp/content-type).
+Оставшаяся старая transitive копия Busboy 2.1.1 через Undici 5.29.0 совпадает
+с опубликованными advisory ranges; достижимость в приложении ещё не доказана,
+direct pin не объявлен её исправлением. Нужен отдельный scoped dependency цикл:
+[prototype-header](https://github.com/fastify/busboy/security/advisories/GHSA-x8mw-p69m-v3mx),
+[CRLF](https://github.com/fastify/busboy/security/advisories/GHSA-gxm5-99cw-xjw9).
+
+Новый Preview, облачные строки/хранилища/доступы и миграции не создавались.
+Рабочая CRM/Baspana/салоны/WhatsApp, реклама, генерации и деньги не вызывались.
+Чужие 059/065 сохранены по исходным Git object hashes. Приёмка Linux native
+packaging/изоляции в новом Preview остаётся, как и byte verification signed
+upload/generated-media и coherent analytics snapshot. Последние два inventory
+агентов не заменяют реализацию snapshot или безопасный subscription transition.
+Логи: `node_modules/.cache/creative-safety-combined-20261025.log` и
+`creative-safety-build-final-20261025.log`. Прежний Preview остаётся
+**6c11l89kr/f18f411**; bab4378 туда ещё не перенесён.
 
 ### Цикл G2-C13: статус «Отложенные» — готов только локально, 22 октября
 
