@@ -4,48 +4,68 @@ import { getSupabaseServerClient } from "../supabase/server";
 import { readWorkspaceContext } from "./server";
 
 type Row = Record<string, unknown>;
-type Page = { data: unknown; error: unknown; count: number | null };
-type Assigned = { total: number; new: number; inProgress: number; booked: number; postponed: number; lost: number; other: number };
-type Activity = { updatedEvents: number; createdEvents: number; touchedLeads: number; lastRecordedAt: string | null };
-const PAGE_SIZE = 500;
 const record = (value: unknown): Row => value && typeof value === "object" && !Array.isArray(value) ? value as Row : {};
-const text = (value: unknown) => typeof value === "string" ? value.trim() : "";
-const emptyAssigned = (): Assigned => ({ total: 0, new: 0, inProgress: 0, booked: 0, postponed: 0, lost: 0, other: 0 });
-const emptyActivity = (): Activity => ({ updatedEvents: 0, createdEvents: 0, touchedLeads: 0, lastRecordedAt: null });
+const counters = ["new", "inProgress", "booked", "postponed", "lost", "other"] as const;
+const validCount = (value: unknown, cap: number): value is number => typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= cap;
+const invalid = (): never => { throw new Error("analytics_incomplete"); };
 
-// Never turn a PostgREST ceiling, failed page or changing row count into a total.
-async function completeRows(fetchPage: (from: number, to: number) => PromiseLike<Page>, cap: number, workspaceId: string) {
-  const result: Row[] = [];
-  const seen = new Set<string>();
-  let expected: number | null = null;
-  do {
-    const page = await fetchPage(result.length, result.length + PAGE_SIZE - 1);
-    if (page.error || !Array.isArray(page.data) || !Number.isSafeInteger(page.count) || page.count! < 0 || page.count! > cap) {
-      throw new Error("analytics_incomplete");
-    }
-    expected ??= page.count;
-    if (page.count !== expected || page.data.length !== Math.min(PAGE_SIZE, expected! - result.length)) {
-      throw new Error("analytics_incomplete");
-    }
-    for (const value of page.data) {
-      const row = record(value);
-      const id = text(row.id);
-      if (!isUuidValue(id) || seen.has(id) || row.workspace_id !== workspaceId) throw new Error("analytics_incomplete");
-      seen.add(id);
-      result.push(row);
-    }
-  } while (result.length < expected!);
-  return result;
+function timestamp(value: unknown): string {
+  if (typeof value !== "string") return invalid();
+  const parts = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/.exec(value);
+  if (!parts || !Number.isFinite(Date.parse(value))) return invalid();
+  const calendar = new Date(0);
+  calendar.setUTCFullYear(Number(parts[1]), Number(parts[2]) - 1, Number(parts[3]));
+  calendar.setUTCHours(Number(parts[4]), Number(parts[5]), Number(parts[6]), 0);
+  const actual = [calendar.getUTCFullYear(), calendar.getUTCMonth() + 1, calendar.getUTCDate(),
+    calendar.getUTCHours(), calendar.getUTCMinutes(), calendar.getUTCSeconds()];
+  if (actual.some((part, index) => part !== Number(parts[index + 1]))) return invalid();
+  return new Date(Date.parse(value)).toISOString();
 }
 
-function bucket(status: unknown, semanticGroup: unknown): Exclude<keyof Assigned, "total"> {
-  const group = text(semanticGroup) || text(status).toLowerCase();
-  if (group === "new" || group === "новая") return "new";
-  if (group === "in_progress" || group === "в работе") return "inProgress";
-  if (group === "booked" || group === "записана") return "booked";
-  if (["postponed", "deferred", "отложена", "отложенные", "отложено", "отложен"].includes(group)) return "postponed";
-  if (group === "lost" || group === "потеряна") return "lost";
-  return "other";
+function normalizeAnalytics(value: unknown, workspaceId: string, days: number) {
+  const data = record(value), period = record(data.period);
+  if (typeof data.workspaceId !== "string" || data.workspaceId.toLowerCase() !== workspaceId.toLowerCase()) return invalid();
+  const generatedAt = timestamp(data.generatedAt), from = timestamp(period.from), to = timestamp(period.to);
+  if (period.days !== days || generatedAt !== to || Date.parse(to) - Date.parse(from) !== days * 86_400_000) return invalid();
+  if (!validCount(data.totalLeads, 20_000) || !validCount(data.unassignedLeads, 20_000)
+    || !validCount(data.otherAssigneeLeads, 20_000) || !Array.isArray(data.members) || data.members.length > 1000
+    || typeof data.activityStatus !== "string" || !["available", "unavailable"].includes(data.activityStatus)) return invalid();
+  const ids = new Set<string>();
+  let assignedTotal = 0, eventTotal = 0;
+  const members = data.members.map((value) => {
+    const member = record(value), assigned = record(member.assigned), activity = record(member.activity);
+    if (!isUuidValue(member.staffId) || typeof member.staffId !== "string" || ids.has(member.staffId.toLowerCase())
+      || typeof member.name !== "string" || !member.name.trim() || member.name.length > 1000
+      || !["owner", "admin", "lead_manager"].includes(String(member.role)) || typeof member.role !== "string"
+      || typeof member.status !== "string" || member.status.length > 100) return invalid();
+    const staffId = member.staffId.toLowerCase();
+    ids.add(staffId);
+    if (!validCount(assigned.total, 20_000) || counters.some((key) => !validCount(assigned[key], 20_000))
+      || counters.reduce((sum, key) => sum + (assigned[key] as number), 0) !== assigned.total) return invalid();
+    assignedTotal += assigned.total;
+    let normalizedActivity = null;
+    if (data.activityStatus === "unavailable") {
+      if (member.activity !== null) return invalid();
+    } else {
+      if (!validCount(activity.createdEvents, 30_000) || !validCount(activity.updatedEvents, 30_000)
+        || !validCount(activity.touchedLeads, 30_000)) return invalid();
+      const events = activity.createdEvents + activity.updatedEvents;
+      const lastRecordedAt = activity.lastRecordedAt === null ? null : timestamp(activity.lastRecordedAt);
+      if (activity.touchedLeads > events || (events === 0 ? activity.touchedLeads !== 0 || lastRecordedAt !== null
+        : activity.touchedLeads === 0 || lastRecordedAt === null)
+        || (lastRecordedAt !== null && (lastRecordedAt < from || lastRecordedAt > to))) return invalid();
+      eventTotal += events;
+      normalizedActivity = { createdEvents: activity.createdEvents, updatedEvents: activity.updatedEvents,
+        touchedLeads: activity.touchedLeads, lastRecordedAt };
+    }
+    return { staffId, name: member.name.trim(), role: member.role, status: member.status,
+      assigned: { total: assigned.total, new: assigned.new as number, inProgress: assigned.inProgress as number,
+        booked: assigned.booked as number, postponed: assigned.postponed as number, lost: assigned.lost as number, other: assigned.other as number },
+      activity: normalizedActivity };
+  }).sort((a, b) => a.name.localeCompare(b.name, "ru") || a.staffId.localeCompare(b.staffId));
+  if (eventTotal > 30_000 || assignedTotal + data.unassignedLeads + data.otherAssigneeLeads !== data.totalLeads) return invalid();
+  return { generatedAt, period: { days, from, to }, totalLeads: data.totalLeads, unassignedLeads: data.unassignedLeads,
+    otherAssigneeLeads: data.otherAssigneeLeads, activityStatus: data.activityStatus, members };
 }
 
 function json(res: VercelResponse, status: number, body: unknown) {
@@ -57,8 +77,8 @@ function json(res: VercelResponse, status: number, body: unknown) {
 export async function handleLeadTeamAnalytics(req: VercelRequest, res: VercelResponse) {
   if (req.method !== "GET") return json(res, 405, { success: false, code: "method_not_allowed" });
   const context = readWorkspaceContext(req);
-  if (!context || !isUuidValue(context.workspaceId) || context.purpose !== "mortgage_leads"
-    || !["owner", "admin"].includes(context.role)) {
+  if (!context || !isUuidValue(context.workspaceId) || !isUuidValue(context.staffUserId) || !isUuidValue(context.userId)
+    || context.purpose !== "mortgage_leads" || !["owner", "admin"].includes(context.role)) {
     return json(res, 403, { success: false, code: "workspace_access_denied", error: "Недостаточно прав" });
   }
   const rawDays = req.query.days;
@@ -66,70 +86,19 @@ export async function handleLeadTeamAnalytics(req: VercelRequest, res: VercelRes
   if (!days) return json(res, 400, { success: false, code: "invalid_period", error: "Недопустимый период" });
   const client = getSupabaseServerClient();
   if (!client) return json(res, 503, { success: false, error: "Хранилище недоступно" });
-  const workspaceId = context.workspaceId;
-  const generatedAt = new Date().toISOString();
-  const from = new Date(Date.parse(generatedAt) - days * 86_400_000).toISOString();
   try {
-    const staff = await completeRows((start, end) => client.from("staff_users")
-      .select("id,workspace_id,full_name,role,status", { count: "exact" }).eq("workspace_id", workspaceId)
-      .order("id", { ascending: true }).range(start, end), 1_000, workspaceId);
-    const stages = await completeRows((start, end) => client.from("lead_stages")
-      .select("id,workspace_id,semantic_group", { count: "exact" }).eq("workspace_id", workspaceId)
-      .order("id", { ascending: true }).range(start, end), 1_000, workspaceId);
-    const leads = await completeRows((start, end) => client.from("leads")
-      .select("id,workspace_id,responsible_user_id,status,stage_id", { count: "exact" }).eq("workspace_id", workspaceId)
-      .order("id", { ascending: true }).range(start, end), 20_000, workspaceId);
-    const members = staff.filter((row) => ["owner", "admin", "lead_manager"].includes(text(row.role))).map((row) => ({
-      staffId: text(row.id), name: text(row.full_name) || "Сотрудник", role: text(row.role), status: text(row.status),
-      assigned: emptyAssigned(), activity: emptyActivity() as Activity | null,
-    })).sort((a, b) => a.name.localeCompare(b.name, "ru") || a.staffId.localeCompare(b.staffId));
-    const memberById = new Map(members.map((member) => [member.staffId, member]));
-    const stageById = new Map(stages.map((stage) => [text(stage.id), stage.semantic_group]));
-    let unassignedLeads = 0, otherAssigneeLeads = 0;
-    for (const lead of leads) {
-      const responsibleId = text(lead.responsible_user_id);
-      const member = memberById.get(responsibleId);
-      if (!responsibleId) unassignedLeads += 1;
-      else if (!member) otherAssigneeLeads += 1;
-      else {
-        member.assigned.total += 1;
-        member.assigned[bucket(lead.status, stageById.get(text(lead.stage_id)))] += 1;
-      }
+    const { data, error } = await client.rpc("read_lead_team_analytics", {
+      p_workspace_id: context.workspaceId, p_staff_user_id: context.staffUserId, p_auth_user_id: context.userId, p_days: days,
+    });
+    if (error) {
+      const code = record(error).code;
+      if (code === "P7001") return json(res, 403, { success: false, code: "workspace_access_denied", error: "Недостаточно прав" });
+      if (code === "P8303") return json(res, 400, { success: false, code: "invalid_period", error: "Недопустимый период" });
+      if (code === "42883" || code === "PGRST202") return json(res, 503, { success: false, code: "analytics_unavailable", error: "Сводка команды временно недоступна" });
+      return json(res, 502, { success: false, code: "analytics_incomplete", error: "Не удалось загрузить полную сводку команды" });
     }
-    let activityStatus: "available" | "unavailable" = "available";
-    try {
-      // Count the recorded actor, not today's assignee. No names, notes or
-      // contact values from the journal are loaded into this aggregate.
-      const events = await completeRows((start, end) => client.from("audit_logs")
-        .select("id,workspace_id,actor_staff_user_id,entity_id,action,created_at", { count: "exact" })
-        .eq("workspace_id", workspaceId).eq("entity_type", "lead").eq("actor_kind", "manual")
-        .in("action", ["created", "updated"]).gte("created_at", from).lte("created_at", generatedAt)
-        .order("id", { ascending: true }).range(start, end), 30_000, workspaceId);
-      const touched = new Map<string, Set<string>>();
-      for (const event of events) {
-        const member = memberById.get(text(event.actor_staff_user_id));
-        if (!member) continue;
-        const timestamp = Date.parse(text(event.created_at)), entityId = text(event.entity_id);
-        if (!isUuidValue(entityId) || !Number.isFinite(timestamp) || timestamp < Date.parse(from) || timestamp > Date.parse(generatedAt)
-          || !["created", "updated"].includes(text(event.action))) throw new Error("analytics_incomplete");
-        const at = new Date(timestamp).toISOString();
-        const activity = member.activity!;
-        if (event.action === "created") activity.createdEvents += 1;
-        else activity.updatedEvents += 1;
-        const ids = touched.get(member.staffId) ?? new Set<string>();
-        ids.add(entityId);
-        touched.set(member.staffId, ids);
-        activity.touchedLeads = ids.size;
-        if (!activity.lastRecordedAt || at > activity.lastRecordedAt) activity.lastRecordedAt = at;
-      }
-    } catch {
-      activityStatus = "unavailable";
-      for (const member of members) member.activity = null;
-    }
-    return json(res, 200, { success: true, mode: "supabase", data: { analytics: {
-      generatedAt, period: { days, from, to: generatedAt }, totalLeads: leads.length,
-      unassignedLeads, otherAssigneeLeads, activityStatus, members,
-    } } });
+    const analytics = normalizeAnalytics(data, context.workspaceId, days);
+    return json(res, 200, { success: true, mode: "supabase", data: { analytics } });
   } catch {
     return json(res, 502, { success: false, code: "analytics_incomplete", error: "Не удалось загрузить полную сводку команды" });
   }

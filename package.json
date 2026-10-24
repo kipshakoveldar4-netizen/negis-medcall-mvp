@@ -9,6 +9,7 @@
     "test:appointment-capacity-postgres": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:appointment-capacity-postgres",
     "test:meta-account-binding-postgres": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:meta-account-binding-postgres",
     "test:platform-subscription-postgres": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:platform-subscription-postgres",
+    "test:lead-team-analytics-postgres": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:lead-team-analytics-postgres",
     "test:branding": "node --test scripts/test-medina-branding.cjs",
     "test:crm-cold-start": "node scripts/test-crm-cold-start.cjs",
     "preinstall": "node scripts/preinstall.cjs",
