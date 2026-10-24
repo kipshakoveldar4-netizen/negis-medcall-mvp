@@ -61,7 +61,8 @@ test("PB2 пустая цена — отказ, а не ноль", async () => {
   // числовая цена не проходила никогда. Пин охранял собственную формулировку.
   assert.ok(/typeof rawPrice === "string" && rawPrice\.trim\(\) === ""/.test(handler), "пустота — свойство строки, а не числа");
   assert.ok(!/readString\(rawPrice\) === ""/.test(handler), "старая проверка, глотавшая числа, не возвращается");
-  assert.ok(/if \(!typed\)/.test(panel), "экран тоже не отправляет пустое поле");
+  assert.ok(/if \(!price\.trim\(\)\)/.test(panel), "экран тоже не отправляет пустое поле");
+  assert.ok(/parseSubscriptionPriceInput\(price\)/.test(panel), "цена разбирается без округления тиынов");
 });
 
 test("PB3 назначенный ноль не заменяется прайсом", async () => {
@@ -97,7 +98,10 @@ test("PB5 паузу можно поставить, не называя тари
 test("PB6 замена подписки выполняется одной серверной транзакцией", async () => {
   const handler = await codeOf(handlerPath);
 
-  assert.ok(/\.rpc\("replace_platform_subscription"/.test(handler));
+  assert.ok(/\.rpc\("apply_platform_subscription_operation"/.test(handler));
+  assert.ok(/p_actor_auth_user_id: scope.actorId/.test(handler), "операция привязана к проверенному владельцу");
+  assert.ok(/p_request_id: requestKey/.test(handler), "повтор сохраняет исходный ключ");
+  assert.ok(/expectedActiveId/.test(handler), "замена проверяет исходную подписку");
   assert.ok(/Number\.isSafeInteger\(priceNumber\)/.test(handler), "дробные и небезопасно большие суммы не округляются молча");
   assert.ok(!/const \{ error: cancelError \}/.test(handler));
   assert.ok(!/\.from\("platform_subscriptions"\)[\s\S]{0,350}\.insert\(/.test(handler));

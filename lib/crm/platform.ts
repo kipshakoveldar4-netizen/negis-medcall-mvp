@@ -1,5 +1,6 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { getSupabaseServerClient } from "../supabase/server";
+import { readPlatformOwner } from "../auth/platform";
 import { computeClinicSignals, type ClinicFacts } from "./clinic-signals";
 import { invitationStatus } from "./staff-invitations";
 import { readVertical, VERTICAL_SETTINGS_KEY } from "../vertical/terms";
@@ -44,6 +45,7 @@ function readInteger(value: unknown): number {
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function sendJson(res: VercelResponse, status: number, body: JsonRecord) {
+  res.setHeader("Cache-Control", "private, no-store");
   res.status(status).json(body);
 }
 
@@ -66,6 +68,7 @@ type ClinicRow = {
   createdAt: string;
   plan: string;
   subscriptionStatus: string;
+  subscriptionId: string;
   priceMinor: number;
   currency: string;
   billingPeriod: string;
@@ -137,7 +140,7 @@ async function handleOverview(res: VercelResponse) {
   // стать много, а вызов панели — один.
   const { data: subscriptionRows, error: subscriptionError } = await supabase
     .from("platform_subscriptions")
-    .select("workspace_id, plan, status, price_minor, currency, billing_period, started_at")
+    .select("id, workspace_id, plan, status, price_minor, currency, billing_period, started_at")
     .eq("status", "active");
 
   // Отказ чтения подписок молча давал «выручка 0 ₸» — число, по которому
@@ -257,6 +260,7 @@ async function handleOverview(res: VercelResponse) {
       createdAt: readString(workspace.created_at),
       plan: readString(subscription.plan),
       subscriptionStatus: readString(subscription.status),
+      subscriptionId: readString(subscription.id),
       priceMinor,
       currency: readString(subscription.currency) || "KZT",
       billingPeriod,
@@ -291,173 +295,171 @@ async function handleOverview(res: VercelResponse) {
   });
 }
 
+function validSubscriptionTimestamp(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const parts = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,6})?(?:Z|[+-](\d{2}):(\d{2}))$/.exec(value);
+  if (!parts) return false;
+  const [, year, month, day, hour, minute, second, offsetHour, offsetMinute] = parts.map((part) => Number(part ?? 0));
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1];
+  return year > 0 && month >= 1 && month <= 12 && day >= 1 && day <= days
+    && hour <= 23 && minute <= 59 && second <= 59 && offsetHour <= 23 && offsetMinute <= 59
+    && Number.isFinite(Date.parse(value));
+}
+
+type SubscriptionOperationScope = { actorId: string; requestKey: string; workspaceId: string; kind?: "replace" | "status"; payload?: JsonRecord };
+
+function subscriptionItem(value: unknown, workspaceId?: string): JsonRecord | null {
+  const row = asRecord(value);
+  if (!UUID_PATTERN.test(readString(row.id)) || !UUID_PATTERN.test(readString(row.workspace_id))
+    || (workspaceId && readString(row.workspace_id).toLowerCase() !== workspaceId.toLowerCase())
+    || !["basic", "standard", "pro"].includes(row.plan as string) || !["active", "paused", "cancelled"].includes(row.status as string)
+    || typeof row.price_minor !== "number" || !Number.isSafeInteger(row.price_minor) || row.price_minor < 0
+    || typeof row.currency !== "string" || !/^[A-Z]{3}$/.test(row.currency)
+    || !["monthly", "yearly"].includes(row.billing_period as string)
+    || !validSubscriptionTimestamp(row.started_at) || !validSubscriptionTimestamp(row.updated_at)
+    || (row.ended_at !== null && !validSubscriptionTimestamp(row.ended_at))
+    || (row.created_at !== null && !validSubscriptionTimestamp(row.created_at))
+    || (row.note !== null && (typeof row.note !== "string" || row.note.length > 2000))) return null;
+  const item: JsonRecord = {};
+  for (const key of ["id", "workspace_id", "plan", "status", "price_minor", "currency", "billing_period",
+    "started_at", "ended_at", "note", "created_at", "updated_at"]) item[key] = row[key];
+  return item;
+}
+
+function subscriptionOperationData(value: unknown, scope: SubscriptionOperationScope, committedOnly = false): JsonRecord {
+  const receipt = asRecord(value);
+  if (readString(receipt.actorId).toLowerCase() !== scope.actorId.toLowerCase()
+    || readString(receipt.requestKey).toLowerCase() !== scope.requestKey.toLowerCase()
+    || readString(receipt.workspaceId).toLowerCase() !== scope.workspaceId.toLowerCase()
+    || typeof receipt.replayed !== "boolean" || (receipt.state !== "committed" && receipt.state !== "abandoned")) {
+    throw new Error("subscription_transition_unconfirmed");
+  }
+  const operation = { actorId: scope.actorId, requestKey: scope.requestKey, workspaceId: scope.workspaceId,
+    kind: receipt.kind, state: receipt.state, replayed: receipt.replayed };
+  if (receipt.state === "abandoned") {
+    if (committedOnly || receipt.kind !== null || receipt.item !== null) throw new Error("subscription_transition_unconfirmed");
+    return { item: null, operation };
+  }
+  if (typeof receipt.state !== "string" || typeof receipt.kind !== "string" || !["replace", "status"].includes(receipt.kind)
+    || (scope.kind && receipt.kind !== scope.kind)) throw new Error("subscription_transition_unconfirmed");
+  const row = subscriptionItem(receipt.item, scope.workspaceId);
+  if (!row) throw new Error("subscription_transition_unconfirmed");
+  if (scope.payload && scope.kind === "replace" && (row.plan !== scope.payload.plan || row.price_minor !== scope.payload.priceMinor
+    || row.currency !== scope.payload.currency || row.billing_period !== scope.payload.billingPeriod || row.status !== "active"
+    || row.ended_at !== null || row.note !== (scope.payload.note ?? null)
+    || readString(row.id).toLowerCase() === scope.payload.expectedActiveId)) throw new Error("subscription_transition_unconfirmed");
+  if (scope.payload && scope.kind === "status" && (readString(row.id).toLowerCase() !== scope.payload.subscriptionId
+    || row.status !== scope.payload.status)) throw new Error("subscription_transition_unconfirmed");
+  return { item: row, operation };
+}
+
+function subscriptionOperationFailure(res: VercelResponse, error: unknown) {
+  const code = readString(asRecord(error).code);
+  const known: Record<string, [number, string, string]> = {
+    P8403: [400, "subscription_operation_invalid", "Некорректные параметры запроса подписки"],
+    P8404: [409, "subscription_conflict", "Подписка изменилась. Обновите её перед новым действием."],
+    P8407: [409, "subscription_request_conflict", "Этот запрос уже использован с другими параметрами."],
+    P8409: [409, "subscription_request_abandoned", "Этот запрос закрыт. Повторное назначение по нему запрещено."],
+  };
+  const refusal = Object.hasOwn(known, code) ? known[code] : undefined;
+  if (refusal) return sendJson(res, refusal[0], { success: false, code: refusal[1], error: refusal[2] });
+  const migrationMissing = code === "PGRST202" || code === "42883";
+  return sendJson(res, migrationMissing ? 503 : 502, { success: false,
+    code: migrationMissing ? "subscription_transition_unavailable" : "subscription_transition_unconfirmed",
+    error: migrationMissing ? "Операции подписок временно недоступны" : "Результат сохранения не подтверждён. Проверьте тот же запрос." });
+}
+
 async function handleSubscriptions(req: VercelRequest, res: VercelResponse) {
-  const supabase = getSupabaseServerClient();
-  if (!supabase) {
-    return sendJson(res, 503, {
-      success: false,
-      error: "Хранилище не настроено",
-      code: "storage_not_configured",
-    });
-  }
-
+  const owner = readPlatformOwner(req);
+  if (!owner || !UUID_PATTERN.test(owner.userId)) return sendJson(res, 404, { success: false, code: "not_found", error: "Не найдено" });
   const method = (req.method || "GET").toUpperCase();
+  if (!["GET", "POST", "PATCH"].includes(method)) return sendJson(res, 405, { success: false, code: "method_not_allowed" });
   const body = asRecord(req.body);
-
-  if (method === "GET") {
-    const { data, error } = await supabase
-      .from("platform_subscriptions")
-      .select("*")
-      .order("started_at", { ascending: false });
-    if (error) {
-      return sendJson(res, 502, { success: false, error: "Не удалось прочитать подписки", code: "unavailable" });
-    }
-    return sendJson(res, 200, { success: true, data: { items: (data || []).map(asRecord) } });
+  const workspaceId = readString(method === "GET" ? req.query.workspaceId : body.workspaceId ?? body.workspace_id).toLowerCase();
+  const requestKey = readString(method === "GET" ? req.query.requestKey : body.requestKey).toLowerCase();
+  if (method !== "GET" || req.query.workspaceId !== undefined || req.query.requestKey !== undefined) {
+    if (!UUID_PATTERN.test(workspaceId)) return sendJson(res, 400, { success: false, error: "Нужна клиника", code: "workspace_required" });
   }
-
-  const workspaceId = readString(body.workspaceId) || readString(body.workspace_id);
-  if (!UUID_PATTERN.test(workspaceId)) {
-    return sendJson(res, 400, {
-      success: false,
-      error: "Нужна клиника",
-      code: "workspace_required",
-      details: ["Передайте workspaceId существующей клиники."],
-    });
+  if ((method !== "GET" || req.query.requestKey !== undefined) && !UUID_PATTERN.test(requestKey)) {
+    return sendJson(res, 400, { success: false, error: "Нужен ключ запроса", code: "subscription_request_required" });
   }
-
-  // PATCH меняет только статус: поставить подписку на паузу или отменить её.
-  // Прежде он требовал тариф и цену, которых у такого запроса нет по смыслу, —
-  // и паузу поставить было нельзя вообще, отказ приходил раньше проверки статуса.
-  if (method === "PATCH") {
-    const status = readString(body.status).toLowerCase();
-    if (!["active", "paused", "cancelled"].includes(status)) {
-      return sendJson(res, 400, { success: false, error: "Неизвестный статус", code: "status_invalid" });
+  const supabase = getSupabaseServerClient();
+  if (!supabase) return sendJson(res, 503, { success: false, error: "Хранилище не настроено", code: "storage_not_configured" });
+  const scope: SubscriptionOperationScope = { actorId: owner.userId.toLowerCase(), requestKey, workspaceId };
+  try {
+    if (method === "GET") {
+      if (requestKey) {
+        const { data, error } = await supabase.rpc("read_platform_subscription_operation", {
+          p_actor_auth_user_id: scope.actorId, p_request_id: requestKey, p_workspace_id: workspaceId,
+        });
+        if (error) return subscriptionOperationFailure(res, error);
+        return sendJson(res, 200, { success: true, data: data === null ? { item: null, operation: null } : subscriptionOperationData(data, scope) });
+      }
+      let query = supabase.from("platform_subscriptions").select("*", { count: "exact" });
+      if (workspaceId) query = query.eq("workspace_id", workspaceId);
+      const { data, error, count } = await query.order("started_at", { ascending: false }).order("id", { ascending: false }).range(0, 999);
+      const seen = new Set<string>();
+      if (error || !Array.isArray(data) || !Number.isSafeInteger(count) || count! < 0 || count! > 1000 || data.length !== count
+        || data.some((value) => {
+          const row = asRecord(value), id = readString(row.id).toLowerCase();
+          if (seen.has(id) || !subscriptionItem(value, workspaceId)) return true;
+          seen.add(id); return false;
+        })) return sendJson(res, 502, { success: false, error: "Не удалось прочитать полную историю подписок", code: "unavailable" });
+      return sendJson(res, 200, { success: true, data: { items: data.map((value) => subscriptionItem(value, workspaceId)) } });
     }
-    const now = new Date().toISOString();
-    const { data, error } = await supabase
-      .from("platform_subscriptions")
-      .update({ status, ended_at: status === "cancelled" ? now : null, updated_at: now })
-      .eq("workspace_id", workspaceId)
-      .eq("status", "active")
-      .select("*")
-      .maybeSingle();
-    if (error) {
-      return sendJson(res, 502, {
-        success: false,
-        error: "Не удалось изменить подписку",
-        code: "unavailable",
-        details: [error.message],
+    if ("abandon" in body) {
+      if (method !== "POST" || body.abandon !== true) return sendJson(res, 400, { success: false, code: "subscription_operation_invalid", error: "Некорректный запрос" });
+      const { data, error } = await supabase.rpc("abandon_platform_subscription_operation", {
+        p_actor_auth_user_id: scope.actorId, p_request_id: requestKey, p_workspace_id: workspaceId,
       });
+      if (error) return subscriptionOperationFailure(res, error);
+      return sendJson(res, 200, { success: true, data: subscriptionOperationData(data, scope) });
     }
-    if (!data) {
-      return sendJson(res, 404, { success: false, error: "Действующей подписки нет", code: "not_found" });
+
+    let payload: JsonRecord;
+    if (method === "PATCH") {
+      const status = readString(body.status).toLowerCase(), expectedStatus = readString(body.expectedStatus).toLowerCase();
+      const subscriptionId = readString(body.subscriptionId).toLowerCase(), expectedUpdatedAt = readString(body.expectedUpdatedAt);
+      if (!["active", "paused", "cancelled"].includes(status) || !["active", "paused", "cancelled"].includes(expectedStatus)
+        || !UUID_PATTERN.test(subscriptionId) || !validSubscriptionTimestamp(expectedUpdatedAt)) {
+        return sendJson(res, 400, { success: false, code: "subscription_operation_invalid", error: "Нужны точная подписка, её версия и статус" });
+      }
+      scope.kind = "status";
+      payload = { subscriptionId, expectedUpdatedAt, expectedStatus, status };
+    } else {
+      const plan = readString(body.plan).toLowerCase();
+      if (!["basic", "standard", "pro"].includes(plan)) return sendJson(res, 400, { success: false, error: "Неизвестный тариф", code: "plan_invalid" });
+      const rawPrice = body.priceMinor ?? body.price_minor;
+      const priceNumber = typeof rawPrice === "number" ? rawPrice : Number(readString(rawPrice));
+      const emptyString = typeof rawPrice === "string" && rawPrice.trim() === "";
+      if (rawPrice === undefined || rawPrice === null || emptyString || !["number", "string"].includes(typeof rawPrice) || !Number.isFinite(priceNumber)) {
+        return sendJson(res, 400, { success: false, error: "Нужна цена", code: "price_required" });
+      }
+      if (priceNumber < 0 || !Number.isSafeInteger(priceNumber)) return sendJson(res, 400, { success: false, error: "Нужна целая неотрицательная цена в тиынах", code: "price_invalid" });
+      const billingPeriod = readString(body.billingPeriod ?? body.billing_period) || "monthly";
+      if (!["monthly", "yearly"].includes(billingPeriod)) return sendJson(res, 400, { success: false, error: "Недопустимый период", code: "period_invalid" });
+      const currency = (readString(body.currency) || "KZT").toUpperCase();
+      if (!/^[A-Z]{3}$/.test(currency)) return sendJson(res, 400, { success: false, error: "Недопустимая валюта", code: "currency_invalid" });
+      const note = readString(body.note);
+      if (note.length > 2000) return sendJson(res, 400, { success: false, error: "Комментарий слишком длинный", code: "note_invalid" });
+      const expectedActiveId = body.expectedActiveId === null ? null : readString(body.expectedActiveId).toLowerCase();
+      if (!Object.hasOwn(body, "expectedActiveId") || (expectedActiveId !== null && !UUID_PATTERN.test(expectedActiveId))) {
+        return sendJson(res, 400, { success: false, error: "Подтвердите исходную подписку", code: "expected_subscription_required" });
+      }
+      scope.kind = "replace";
+      payload = { expectedActiveId, plan, priceMinor: priceNumber, billingPeriod, currency, note: note || null };
     }
-    return sendJson(res, 200, { success: true, data: { item: asRecord(data) } });
-  }
-
-  const plan = readString(body.plan).toLowerCase();
-  if (!["basic", "standard", "pro"].includes(plan)) {
-    return sendJson(res, 400, {
-      success: false,
-      error: "Неизвестный тариф",
-      code: "plan_invalid",
-      details: ["Допустимые тарифы: basic, standard, pro."],
+    scope.payload = payload;
+    const { data, error } = await supabase.rpc("apply_platform_subscription_operation", {
+      p_actor_auth_user_id: scope.actorId, p_request_id: requestKey, p_workspace_id: workspaceId, p_kind: scope.kind, p_payload: payload,
     });
+    if (error) return subscriptionOperationFailure(res, error);
+    const confirmed = subscriptionOperationData(data, scope, true);
+    return sendJson(res, method === "POST" ? 201 : 200, { success: true, data: confirmed });
+  } catch (error) {
+    return subscriptionOperationFailure(res, error);
   }
-
-  // Цену задаёт владелец, а не код. Значения по умолчанию здесь нет намеренно:
-  // подставленная цена на панели читается как настоящая цена продукта.
-  //
-  // Пустое поле — это НЕ ноль. readInteger вернул бы 0 и на пустой строке, и на
-  // мусоре, и подписка сохранялась бы «бесплатной» с зелёным сообщением об
-  // успехе. Бесплатный доступ существует, но его назначают, а не получают по
-  // недосмотру.
-  const rawPrice = body.priceMinor ?? body.price_minor;
-  const priceNumber = typeof rawPrice === "number" ? rawPrice : Number(readString(rawPrice));
-  // Пустоту проверяем ТОЛЬКО у строки. Прежняя проверка звала readString на
-  // любом значении, а он возвращает пустую строку для всего, что не строка, —
-  // то есть ЧИСЛОВАЯ цена не проходила никогда, и панель отвечала «Нужна цена»
-  // на запрос, в котором цена есть. Найдено на проде первым же настоящим
-  // назначением тарифа; собственная проверка PB2 дефект закрепляла, потому что
-  // пинила формулировку строки, а не поведение обработчика.
-  const emptyString = typeof rawPrice === "string" && rawPrice.trim() === "";
-  if (rawPrice === undefined || rawPrice === null || emptyString || !Number.isFinite(priceNumber)) {
-    return sendJson(res, 400, {
-      success: false,
-      error: "Нужна цена",
-      code: "price_required",
-      details: ["Укажите цену в тиынах. Ноль — законное значение, но его нужно указать явно."],
-    });
-  }
-  if (priceNumber < 0) {
-    return sendJson(res, 400, { success: false, error: "Цена не может быть отрицательной", code: "price_invalid" });
-  }
-  if (!Number.isSafeInteger(priceNumber)) {
-    return sendJson(res, 400, {
-      success: false,
-      error: "Цена должна быть целым числом в тиынах",
-      code: "price_invalid",
-    });
-  }
-  const priceMinor = priceNumber;
-
-  const billingPeriod = readString(body.billingPeriod ?? body.billing_period) || "monthly";
-  if (!["monthly", "yearly"].includes(billingPeriod)) {
-    return sendJson(res, 400, { success: false, error: "Период может быть monthly или yearly", code: "period_invalid" });
-  }
-
-  const currency = (readString(body.currency) || "KZT").toUpperCase();
-  if (!/^[A-Z]{3}$/.test(currency)) {
-    return sendJson(res, 400, {
-      success: false,
-      error: "Нужна валюта из трёх букв",
-      code: "currency_invalid",
-    });
-  }
-
-  const note = readString(body.note);
-  if (note.length > 2000) {
-    return sendJson(res, 400, {
-      success: false,
-      error: "Комментарий слишком длинный",
-      code: "note_invalid",
-    });
-  }
-
-  // Cancellation and replacement must commit together. This RPC locks the
-  // clinic row, closes the previous active subscription and inserts the new
-  // one in a single transaction. It is manual plan assignment, not payment
-  // confirmation; a future provider webhook must use its own verified order.
-  const { data, error } = await supabase.rpc("replace_platform_subscription", {
-    p_workspace_id: workspaceId,
-    p_plan: plan,
-    p_price_minor: priceMinor,
-    p_currency: currency,
-    p_billing_period: billingPeriod,
-    p_note: note || null,
-  });
-
-  if (error) {
-    const migrationMissing = error.code === "PGRST202" || /replace_platform_subscription/i.test(error.message || "");
-    return sendJson(res, migrationMissing ? 503 : 502, {
-      success: false,
-      error: migrationMissing
-        ? "Обновите схему подписок перед назначением тарифа"
-        : "Не удалось заменить подписку. Прежняя подписка сохранена.",
-      code: migrationMissing ? "subscription_transition_unavailable" : "unavailable",
-    });
-  }
-
-  const item = asRecord(data);
-  if (!UUID_PATTERN.test(readString(item.id)) || readString(item.workspace_id) !== workspaceId) {
-    return sendJson(res, 502, {
-      success: false,
-      error: "База не подтвердила новую подписку",
-      code: "subscription_transition_unconfirmed",
-    });
-  }
-
-  return sendJson(res, 201, { success: true, data: { item } });
 }
 
 /**

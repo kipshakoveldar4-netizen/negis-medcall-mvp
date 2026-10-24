@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Session } from "@supabase/supabase-js";
 import { controlConfig, supabase } from "./lib/supabase";
 import { Login } from "./screens/Login";
@@ -18,20 +18,35 @@ export default function App() {
   const [ready, setReady] = useState(false);
   const [clinicId, setClinicId] = useState("");
   const [screen, setScreen] = useState<"overview" | "onboard" | "operators">("overview");
+  const [actorEpoch, setActorEpoch] = useState(0);
+  const actor = useRef("");
+  const epoch = useRef(0);
 
   useEffect(() => {
     if (!controlConfig.ready) return;
-    void supabase.auth.getSession().then(({ data }) => {
-      setSession(data.session);
-      setReady(true);
-    }, () => {
-      setSession(null);
-      setReady(true);
-    });
-    const { data: listener } = supabase.auth.onAuthStateChange((_event, next) => {
+    let disposed = false, observed = 0;
+    const apply = (next: Session | null) => {
+      if (disposed) return;
+      const id = next?.user.id || "";
+      if (id !== actor.current) {
+        actor.current = id;
+        epoch.current++;
+        setActorEpoch(epoch.current);
+        setClinicId("");
+        setScreen("overview");
+      }
       setSession(next);
+      setReady(true);
+    };
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, next) => {
+      observed++;
+      apply(next);
     });
-    return () => listener.subscription.unsubscribe();
+    const initialObservation = observed;
+    void supabase.auth.getSession().then(({ data, error }) => {
+      if (observed === initialObservation) apply(error ? null : data.session);
+    }, () => { if (observed === initialObservation) apply(null); });
+    return () => { disposed = true; listener.subscription.unsubscribe(); };
   }, []);
 
   if (!controlConfig.ready) return <Login />;
@@ -68,7 +83,7 @@ export default function App() {
         <div className="who">{session.user.email}</div>
         <button type="button" className="signout" onClick={() => void supabase.auth.signOut()}>Выйти</button>
       </aside>
-      <main className="main">
+      <main className="main" key={actorEpoch}>
         {clinicId ? (
           <ClinicCard workspaceId={clinicId} onBack={() => setClinicId("")} />
         ) : screen === "operators" ? (

@@ -269,9 +269,11 @@ function apiFixture(controlConfig: ControlConfig) {
   const calls: Array<{ url: string; init: RequestInit }> = [];
   const response = new Response(JSON.stringify({ fixture: true }));
   const api = evaluate<Api>(apiCode, "control-api.fixture.cjs", {
-    "./supabase": { controlConfig, supabase: { auth: { async getSession() {
+    "./supabase": { controlConfig, supabase: { auth: { onAuthStateChange() {
+      return { data: { subscription: { unsubscribe() {} } } };
+    }, async getSession() {
       state.sessionCalls++;
-      return { data: { session: { access_token: "synthetic-session-bearer" } } };
+      return { data: { session: { user: { id: "synthetic-owner-id" }, access_token: "synthetic-session-bearer" } }, error: null };
     } } } },
   }, {
     __fixtureEnv: {},
@@ -309,13 +311,16 @@ test("Ready API uses the exact configured origin and bearer, forcing redirect:er
     for (const redirect of [undefined, "follow", "manual", "error"] as const) {
       await t.test(`${config.apiOrigin}, redirect=${redirect ?? "default"}`, async () => {
         const f = apiFixture(config);
+        await Promise.resolve();
         const response = await f.api.controlFetch(ROUTE, {
           ...(redirect ? { redirect } : {}),
           headers: { Authorization: "Bearer caller-fixture", "X-Fixture": "preserved" },
         });
-        assert.equal(response, f.response);
+        assert.notEqual(response, f.response, "Private response readers must remain guarded");
+        assert.equal(response.status, f.response.status);
+        assert.deepEqual(await response.json(), { fixture: true });
         assert.equal(f.api.API_BASE_URL, config.apiOrigin);
-        assert.equal(f.state.sessionCalls, 1);
+        assert.equal(f.state.sessionCalls, 5, "Initial, request, headers and both sides of the body read verify the session");
         assert.equal(f.calls.length, 1);
         assert.equal(f.calls[0].url, `${config.apiOrigin}${ROUTE}`);
         assert.equal(f.calls[0].init.redirect, "error");
@@ -391,8 +396,8 @@ test("Ready actual Supabase wrapper preserves explicit credentials and session f
 });
 
 type UiNode = { type: unknown; props: Record<string, any> };
-type FixtureSession = { user: { email: string }; access_token: string };
-const storedSession: FixtureSession = { user: { email: "owner@example.test" }, access_token: "synthetic-stored-session" };
+type FixtureSession = { user: { id: string; email: string }; access_token: string };
+const storedSession: FixtureSession = { user: { id: "synthetic-owner-id", email: "owner@example.test" }, access_token: "synthetic-stored-session" };
 function jsx(type: unknown, props: UiNode["props"]): UiNode { return { type, props }; }
 function nodes(value: any): UiNode[] {
   if (Array.isArray(value)) return value.flatMap(nodes);
@@ -416,6 +421,11 @@ function appFixture(controlConfig: ControlConfig, session: FixtureSession | null
         const index = cursor++;
         if (!(index in slots)) slots[index] = initial;
         return [slots[index], (next: unknown) => { slots[index] = next; }];
+      },
+      useRef(initial: unknown) {
+        const index = cursor++;
+        if (!(index in slots)) slots[index] = { current: initial };
+        return slots[index];
       },
       useEffect(effect: () => void | (() => void)) {
         if (!effectRegistered) { effects.push(effect); effectRegistered = true; }
