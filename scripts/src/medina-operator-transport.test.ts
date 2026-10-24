@@ -178,16 +178,30 @@ for (const status of [401, 403]) {
   });
 }
 
-for (const status of [403, 503]) {
-  test(`O5 authorization_unavailable at HTTP ${status} gives safe retry guidance`, async () => {
-    const { api } = await fixture(() => reply({
+for (const status of [401, 403, 503]) {
+  const denied = status === 401 || status === 403;
+  test(`O5 authorization_unavailable at HTTP ${status} ${denied ? "keeps status-only denial without reading the body" : "gives safe retry guidance"}`, async () => {
+    const response = reply({
       success: false, code: "authorization_unavailable", error: SERVER_DETAIL,
-    }, status));
+    }, status);
+    let jsonCalls = 0;
+    const json = response.json.bind(response);
+    Object.defineProperty(response, "json", { value: () => {
+      jsonCalls++;
+      return json();
+    } });
+    const { api, errors } = await fixture(() => response);
     await assert.rejects(api.operatorApi(LEADS), operatorError(api, status, (message) => {
       assert.notEqual(message, SERVER_DETAIL);
-      assert.match(message, /\u0421\u0435\u0440\u0432\u0438\u0441 \u0432\u0445\u043e\u0434\u0430/);
-      assert.match(message, /\u043f\u043e\u0437\u0436\u0435/, "Explain that retrying later is appropriate");
+      if (denied) {
+        assert.equal(message, errors.crmErrorMessage(status));
+      } else {
+        assert.match(message, /\u0421\u0435\u0440\u0432\u0438\u0441 \u0432\u0445\u043e\u0434\u0430/);
+        assert.match(message, /\u043f\u043e\u0437\u0436\u0435/, "Explain that retrying later is appropriate");
+      }
     }));
+    assert.equal(jsonCalls, denied ? 0 : 1);
+    assert.equal(response.bodyUsed, !denied);
   });
 }
 

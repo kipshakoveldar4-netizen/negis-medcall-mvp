@@ -46,6 +46,9 @@ export async function operatorApi<T>(
     }
     throw error;
   }
+  if (response.status === 401 || response.status === 403) {
+    throw new OperatorApiError(crmErrorMessage(response.status), response.status);
+  }
   const payload = (await response.json().catch(() => null)) as {
     success?: boolean;
     error?: string;
