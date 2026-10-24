@@ -198,7 +198,7 @@ type Snapshot = {
   isSigningOut: boolean; signOutFailed: boolean;
   selectWorkspace: (id: string) => void; clearWorkspaceSelection: () => void; signOut: () => Promise<void>;
 };
-type Init = RequestInit & { accessToken?: string; expectedUserId?: string };
+type Init = RequestInit & { accessToken?: string; expectedUserId?: string; dispatchGuard?: () => boolean };
 type PendingRequest = { url: string; init: Init; actor: string | undefined; reply: (body: unknown, status?: number) => void;
   resolve: (response: Response) => void; reject: (error: unknown) => void };
 type Options = { initialActor?: string | null; deferSession?: boolean; storage?: Record<string, string>;
@@ -295,6 +295,7 @@ function setup(options: Options = {}) {
     snapshot: () => snapshot,
     subscriptions: () => callbacks.size,
     sdkCalls: () => ({ signOut: signOutCalls, getSession: getSessionCalls }),
+    setSdkActor(id: string | null) { sdkActor = id; },
     token(reply?: typeof tokenReply) { tokenReply = reply; },
     holdSignOut() { logoutGate = deferred<void>(); return logoutGate; },
     releaseSignOut() { logoutGate?.resolve(); },
@@ -344,6 +345,341 @@ function effects(fixture: Fixture) {
     writes: fixture.renderer.writes.length, toasts: fixture.toasts.length, locations: fixture.locations.length,
     cacheClears: fixture.cacheClears.length };
 }
+
+const managerMembership = () => membership({ staffUserId: "staff-profile-local-manager", role: "lead_manager", permissions: ["view_leads"] });
+
+async function confirmManagerB(fixture: Fixture) {
+  fixture.emit(actorB);
+  await fixture.renderer.flush();
+  await fixture.respond(fixture.request(actorB), success([managerMembership()]));
+  assert.equal(fixture.snapshot().user?.id, actorB);
+  assert.equal(fixture.snapshot().clinicId, workspaceA);
+  assert.equal(fixture.snapshot().userRole, "lead_manager");
+  assert.equal(fixture.snapshot().rolePermissions.admin, false);
+  assert.equal(fixture.snapshot().workspacePurpose, "clinic_services");
+  assert.equal(fixture.toasts.length, 0);
+}
+
+for (const phase of ["headers", "body"] as const) {
+  const outcomes = [
+    { label: "success", status: 200, body: success([membership()]) },
+    { label: "empty", status: 200, body: success([]) },
+    ...[401, 403, 503].map((status) => ({ label: String(status), status, body: { success: false } })),
+  ];
+  for (const outcome of outcomes.filter(({ status }) => phase === "headers" || status === 200)) {
+    test(`publication fence: SDK B before callback suppresses delayed ${phase} ${outcome.label}`, async () => {
+      await withFixture(async (fixture) => {
+        await confirm(fixture);
+        fixture.seedCaches();
+        const clearStart = fixture.cacheClears.length;
+        fixture.emit(actorA, "USER_UPDATED");
+        await fixture.renderer.flush();
+        const pending = fixture.request(actorA, 1);
+        const body = deferred<string>();
+        let bodyReads = 0;
+        if (phase === "body") {
+          pending.resolve({ ok: true, status: 200, text() { bodyReads++; return body.promise; } } as Response);
+          await fixture.renderer.flush();
+          assert.equal(bodyReads, 1, "the successful response body must already be pending");
+        }
+        fixture.setSdkActor(actorB);
+        if (phase === "headers") pending.reply(outcome.body, outcome.status);
+        else body.resolve(JSON.stringify(outcome.body));
+        await fixture.renderer.flush();
+        assert.equal(fixture.toasts.length, 0, "a stale result cannot announce denial, missing membership or service failure");
+        assertUnselected(fixture);
+        assert.equal(fixture.snapshot().isStaffMode, false);
+        assertCachesEmpty(fixture, clearStart);
+        assert.deepEqual(fixture.locations, []);
+        assert.equal(fixture.sdkCalls().signOut, 0);
+        await confirmManagerB(fixture);
+      });
+    });
+  }
+
+  test(`publication fence: SDK B before callback suppresses a delayed ${phase} rejection`, async () => {
+    await withFixture(async (fixture) => {
+      await confirm(fixture);
+      fixture.seedCaches();
+      const clearStart = fixture.cacheClears.length;
+      fixture.emit(actorA, "USER_UPDATED");
+      await fixture.renderer.flush();
+      const pending = fixture.request(actorA, 1);
+      const body = deferred<string>();
+      let bodyReads = 0;
+      if (phase === "body") {
+        pending.resolve({ ok: true, status: 200, text() { bodyReads++; return body.promise; } } as Response);
+        await fixture.renderer.flush();
+        assert.equal(bodyReads, 1);
+      }
+      fixture.setSdkActor(actorB);
+      if (phase === "headers") pending.reject(new Error("Isolated delayed headers failure"));
+      else body.reject(new Error("Isolated delayed body failure"));
+      await fixture.renderer.flush();
+      assert.equal(fixture.toasts.length, 0);
+      assertUnselected(fixture);
+      assertCachesEmpty(fixture, clearStart);
+      await confirmManagerB(fixture);
+    });
+  });
+}
+
+for (const phase of ["headers", "body"] as const) {
+  test(`publication fence: a rotated same-user token invalidates delayed ${phase} before the SDK event`, async () => {
+    await withFixture(async (fixture) => {
+      await confirm(fixture);
+      fixture.seedCaches();
+      const clearStart = fixture.cacheClears.length;
+      fixture.emit(actorA, "USER_UPDATED");
+      await fixture.renderer.flush();
+      const pending = fixture.request(actorA, 1);
+      const body = deferred<string>();
+      if (phase === "body") {
+        pending.resolve({ ok: true, status: 200, text: () => body.promise } as Response);
+        await fixture.renderer.flush();
+      }
+      fixture.token(() => Promise.resolve("local-rotated-a-token"));
+      if (phase === "headers") pending.reply(success([membership()]));
+      else body.resolve(JSON.stringify(success([membership()])));
+      await fixture.renderer.flush();
+      assertUnselected(fixture);
+      assertCachesEmpty(fixture, clearStart);
+      assert.equal(fixture.toasts.length, 0);
+      fixture.emit(actorA, "TOKEN_REFRESHED");
+      await fixture.renderer.flush();
+      await fixture.respond(fixture.request(actorA, 2), success([membership()]));
+      assert.equal(fixture.snapshot().userRole, "owner");
+      assert.equal(fixture.snapshot().clinicId, workspaceA);
+    });
+  });
+}
+
+test("publication fence: requests pin the expected actor and expire their dispatch guard across raw ABA", async () => {
+  await withFixture(async (fixture) => {
+    const firstA = fixture.request(actorA);
+    assert.equal(firstA.init.expectedUserId, actorA);
+    assert.equal(typeof firstA.init.dispatchGuard, "function");
+    assert.equal(firstA.init.dispatchGuard!(), true);
+    fixture.emit(actorB);
+    assert.equal(firstA.init.dispatchGuard!(), false);
+    fixture.emit(actorA);
+    assert.equal(firstA.init.dispatchGuard!(), false, "matching the actor again cannot revive a dispatch lifetime");
+    await fixture.renderer.flush();
+    const currentA = fixture.request(actorA, 1);
+    assert.equal(currentA.init.expectedUserId, actorA);
+    assert.equal(currentA.init.dispatchGuard!(), true);
+    await fixture.respond(currentA, success([managerMembership()]));
+    const before = effects(fixture);
+    await fixture.respond(firstA, success([membership()]));
+    assert.deepEqual(effects(fixture), before);
+    fixture.renderer.dispose();
+    assert.equal(currentA.init.dispatchGuard!(), false);
+  });
+});
+
+test("publication fence: a cleared signout marker cannot revive the preceding resolution or dispatch guard", async () => {
+  await withFixture(async (fixture) => {
+    const pending = fixture.request(actorA);
+    assert.equal(pending.init.dispatchGuard!(), true);
+    fixture.signOutBoundary.markSignOutPending();
+    assert.equal(pending.init.dispatchGuard!(), false);
+    assert.equal(fixture.signOutBoundary.clearSignOutPending(), true);
+    assert.equal(pending.init.dispatchGuard!(), false, "a new signout revision outlives its pending marker");
+    const before = effects(fixture);
+    await fixture.respond(pending, success([membership()]));
+    assert.deepEqual(effects(fixture), before);
+    assertUnselected(fixture);
+  });
+});
+
+test("publication fence: a delayed first-A token cannot dispatch after raw ABA returns to A", async () => {
+  await withFixture(async (fixture) => {
+    const token = deferred<string>();
+    let firstA = true;
+    fixture.token((expected) => {
+      if (expected === actorA && firstA) { firstA = false; return token.promise; }
+      return Promise.resolve(`local-current-token:${expected}`);
+    });
+    fixture.sessionGate.resolve({ data: { session: localSession(actorA) } });
+    await fixture.renderer.flush();
+    assert.equal(fixture.requests.length, 0);
+    fixture.emit(actorB);
+    fixture.emit(actorA);
+    await fixture.renderer.flush();
+    await fixture.respond(fixture.request(actorA), success([managerMembership()]));
+    const before = effects(fixture);
+    const requests = fixture.requests.length;
+    token.resolve("local-expired-first-a-token");
+    await fixture.renderer.flush();
+    assert.deepEqual(effects(fixture), before);
+    assert.equal(fixture.requests.length, requests, "the original A token must never reach transport");
+    assert.equal(fixture.snapshot().userRole, "lead_manager");
+  }, { deferSession: true });
+});
+
+for (const batching of ["committed B", "raw ABA"] as const) {
+  for (const result of ["success", "empty", "malformed"] as const) {
+    test(`publication fence: late first-A body ${result} cannot publish after ${batching} returns to A`, async () => {
+      await withFixture(async (fixture) => {
+        const body = deferred<string>();
+        let bodyReads = 0;
+        fixture.request(actorA).resolve({ ok: true, status: 200, text() { bodyReads++; return body.promise; } } as Response);
+        await fixture.renderer.flush();
+        assert.equal(bodyReads, 1);
+        fixture.emit(actorB);
+        if (batching === "committed B") await fixture.renderer.flush();
+        const oldB = fixture.requests.find(({ actor }) => actor === actorB);
+        fixture.emit(actorA);
+        await fixture.renderer.flush();
+        await fixture.respond(fixture.request(actorA, 1), success([managerMembership()]));
+        const before = effects(fixture);
+        body.resolve(result === "malformed" ? "{" : JSON.stringify(success(result === "success" ? [membership()] : [])));
+        await fixture.renderer.flush();
+        assert.deepEqual(effects(fixture), before, "an old body's success, denial or parse failure cannot attempt any publication");
+        if (oldB) {
+          await fixture.respond(oldB, success([membership()]));
+          assert.deepEqual(effects(fixture), before);
+        }
+        assert.equal(fixture.snapshot().user?.id, actorA);
+        assert.equal(fixture.snapshot().userRole, "lead_manager");
+        assert.equal(fixture.snapshot().rolePermissions.admin, false);
+      });
+    });
+  }
+}
+
+test("publication fence: verified empty membership still warns and removes confirmed permissions, caches and picker refs", async () => {
+  await withFixture(async (fixture) => {
+    await confirm(fixture, [membership(), mortgage()]);
+    fixture.snapshot().selectWorkspace(workspaceA);
+    await fixture.renderer.flush();
+    const oldSelect = fixture.snapshot().selectWorkspace;
+    fixture.seedCaches();
+    const clearStart = fixture.cacheClears.length;
+    fixture.emit(actorA, "USER_UPDATED");
+    await fixture.renderer.flush();
+    await fixture.respond(fixture.request(actorA, 1), success([]));
+    assertUnselected(fixture);
+    assertCachesEmpty(fixture, clearStart);
+    assert.equal(fixture.snapshot().user?.id, actorA);
+    assert.equal(fixture.snapshot().isLoading, false);
+    assert.equal(fixture.snapshot().isStaffMode, false);
+    assert.ok(fixture.toasts.some(({ message }) => message.includes("Аккаунт не привязан")));
+    const denied = context(fixture);
+    for (const workspace of [workspaceA, workspaceB]) {
+      oldSelect(workspace);
+      await fixture.renderer.flush();
+      assert.deepEqual(context(fixture), denied);
+    }
+  });
+});
+
+for (const [label, body] of [
+  ["null payload", null],
+  ["missing success", { data: { memberships: [] } }],
+  ["false success", { success: false, data: { memberships: [] } }],
+  ["truthy success", { success: "true", data: { memberships: [] } }],
+  ["missing data", { success: true }],
+  ["null data", { success: true, data: null }],
+  ["missing memberships", { success: true, data: {} }],
+  ["null memberships", { success: true, data: { memberships: null } }],
+  ["object memberships", { success: true, data: { memberships: {} } }],
+  ["null membership entry", { success: true, data: { memberships: [null] } }],
+  ["primitive membership entry", { success: true, data: { memberships: ["owner"] } }],
+  ["missing workspace ID", { success: true, data: { memberships: [{ role: "owner", purpose: "clinic_services" }] } }],
+  ["empty workspace ID", success([membership({ workspaceId: "" })])],
+  ["nonstring workspace ID", success([membership({ workspaceId: 42 })])],
+  ["unknown role", success([membership({ role: "not-a-staff-role" })])],
+  ["nonstring role", success([membership({ role: 42 })])],
+  ["mixed valid and invalid entries", success([membership(), membership({ workspaceId: "" })])],
+] as const) {
+  test(`publication fence: malformed successful contract (${label}) denies as profile failure, never unlinked`, async () => {
+    await withFixture(async (fixture) => {
+      await confirm(fixture, [membership(), mortgage()]);
+      fixture.snapshot().selectWorkspace(workspaceA);
+      await fixture.renderer.flush();
+      const oldSelect = fixture.snapshot().selectWorkspace;
+      fixture.seedCaches();
+      const clearStart = fixture.cacheClears.length;
+      fixture.emit(actorA, "USER_UPDATED");
+      await fixture.renderer.flush();
+      await fixture.respond(fixture.request(actorA, 1), body);
+      assertUnselected(fixture);
+      assertCachesEmpty(fixture, clearStart);
+      assert.equal(fixture.snapshot().isLoading, false);
+      assert.equal(fixture.snapshot().isStaffMode, false);
+      assert.match(fixture.toasts.at(-1)?.message ?? "", /профил/i);
+      assert.ok(fixture.toasts.every(({ message }) => !message.includes("Аккаунт не привязан")));
+      const denied = context(fixture);
+      oldSelect(workspaceB);
+      await fixture.renderer.flush();
+      assert.deepEqual(context(fixture), denied);
+    });
+  });
+}
+
+for (const status of [401, 403]) {
+  test(`publication fence: live same-account ${status} clears both caches and invalidates old picker refs`, async () => {
+    await withFixture(async (fixture) => {
+      await confirm(fixture, [membership(), mortgage()]);
+      fixture.snapshot().selectWorkspace(workspaceA);
+      await fixture.renderer.flush();
+      const oldSelect = fixture.snapshot().selectWorkspace;
+      fixture.seedCaches();
+      const clearStart = fixture.cacheClears.length;
+      fixture.emit(actorA, "USER_UPDATED");
+      await fixture.renderer.flush();
+      await fixture.respond(fixture.request(actorA, 1), { success: false }, status);
+      assertUnselected(fixture);
+      assertCachesEmpty(fixture, clearStart);
+      assert.equal(fixture.snapshot().isStaffMode, false);
+      assert.equal(fixture.snapshot().isLoading, false);
+      assert.equal(fixture.snapshot().user?.id, actorA);
+      assert.equal(fixture.sdkCalls().signOut, 0);
+      assert.match(fixture.toasts.at(-1)?.message ?? "", status === 401 ? /сесси|войдите|авторизац/i : /доступ|прав|запрещ/i);
+      assert.ok(fixture.toasts.every(({ message }) => !message.includes("Аккаунт не привязан")));
+      const denied = context(fixture);
+      const navigations = [...fixture.locations];
+      for (const workspace of [workspaceA, workspaceB]) {
+        oldSelect(workspace);
+        await fixture.renderer.flush();
+        assert.deepEqual(context(fixture), denied);
+        assert.deepEqual(fixture.locations, navigations);
+      }
+    });
+  });
+}
+
+test("publication fence: live same-account 429 preserves the verified profile, both caches and picker refs", async () => {
+  await withFixture(async (fixture) => {
+    await confirm(fixture, [membership(), mortgage()]);
+    fixture.snapshot().selectWorkspace(workspaceB);
+    await fixture.renderer.flush();
+    const oldSelect = fixture.snapshot().selectWorkspace;
+    fixture.seedCaches();
+    const before = context(fixture);
+    const clearStart = fixture.cacheClears.length;
+    const crmBefore = [...fixture.caches.crm];
+    const listsBefore = [...fixture.caches.lists];
+    fixture.emit(actorA, "USER_UPDATED");
+    await fixture.renderer.flush();
+    assert.deepEqual(context(fixture), before);
+    await fixture.respond(fixture.request(actorA, 1), { success: false }, 429);
+    assert.deepEqual(context(fixture), before);
+    assert.equal(fixture.cacheClears.length, clearStart);
+    assert.deepEqual([...fixture.caches.crm], crmBefore);
+    assert.deepEqual([...fixture.caches.lists], listsBefore);
+    assert.equal(fixture.storage.getItem(selectorKey), workspaceB);
+    assert.ok(fixture.toasts.length > 0, "rate limiting remains visible without revoking verified access");
+    assert.ok(fixture.toasts.every(({ message }) => !message.includes("Аккаунт не привязан")));
+    oldSelect(workspaceA);
+    await fixture.renderer.flush();
+    assert.equal(fixture.snapshot().clinicId, workspaceA);
+    assert.equal(fixture.snapshot().userRole, "owner");
+    assert.equal(fixture.snapshot().rolePermissions.admin, true);
+    assert.equal(fixture.snapshot().availableWorkspaces.length, 2);
+  });
+});
 
 test("mortgage purpose comes only from the signed-in user's server membership", async () => {
   await withFixture(async (fixture) => {
@@ -501,7 +837,7 @@ test("account A to B clears context, both caches and membership refs synchronous
     assertUnselected(fixture);
     tokenGate.resolve("local-b-gated-token");
     await fixture.renderer.flush();
-    assert.deepEqual(fixture.tokenCalls, [actorA, actorB]);
+    assert.deepEqual(fixture.tokenCalls, [actorA, actorA, actorB], "confirmed A is reverified; B remains gated until its own token arrives");
     assertUnselected(fixture);
     await fixture.respond(fixture.request(actorB), success([mortgage()]));
     assert.equal(fixture.snapshot().workspacePurpose, "mortgage_leads");
@@ -542,6 +878,41 @@ test("late A denial or unavailable response cannot revoke B or announce A's fail
   }
 });
 
+test("a token lookup rejected by the changed SDK session before its event cannot announce missing membership", async () => {
+  await withFixture(async (fixture) => {
+    await confirm(fixture);
+    const token = deferred<string>();
+    fixture.token(() => token.promise);
+    fixture.emit(actorA, "USER_UPDATED");
+    await fixture.renderer.flush();
+    fixture.setSdkActor(actorB);
+    token.resolve("");
+    await fixture.renderer.flush();
+    assertUnselected(fixture);
+    assert.equal(fixture.toasts.length, 0, "an expired session lookup is not verified empty membership");
+    fixture.token();
+    fixture.emit(actorB);
+    await fixture.renderer.flush();
+    await fixture.respond(fixture.request(actorB), success([mortgage()]));
+    assert.equal(fixture.snapshot().user?.id, actorB);
+    assert.equal(fixture.snapshot().userRole, "lead_manager");
+  });
+});
+
+for (const status of [401, 403]) {
+  test(`current-session HTTP ${status} must deny access without diagnosing an unlinked account`, async () => {
+    await withFixture(async (fixture) => {
+      await confirm(fixture);
+      fixture.emit(actorA, "USER_UPDATED");
+      await fixture.renderer.flush();
+      await fixture.respond(fixture.request(actorA, 1), { success: false }, status);
+      assertUnselected(fixture);
+      assert.ok(fixture.toasts.length > 0, "a genuine authorization refusal remains visible");
+      assert.ok(fixture.toasts.every(({ message }) => !message.includes("Аккаунт не привязан")));
+    });
+  });
+}
+
 for (const result of ["success", "denial"] as const) {
   test(`ABA auth events reject the first A generation's late ${result} even though its user ID matches again`, async () => {
     await withFixture(async (fixture) => {
@@ -562,7 +933,7 @@ for (const result of ["success", "denial"] as const) {
       assert.deepEqual(effects(fixture), confirmed);
       assert.equal(fixture.snapshot().user?.id, actorA);
       assert.equal(fixture.snapshot().workspacePurpose, "mortgage_leads");
-      assert.deepEqual(fixture.tokenCalls, [actorA, actorB, actorA]);
+      assert.deepEqual(fixture.tokenCalls, [actorA, actorB, actorA, actorA], "only the current A response gets a publication verification");
     });
   });
 }
@@ -861,7 +1232,7 @@ test("a callback-confirmed B session cannot be overwritten by a delayed initial 
       await fixture.renderer.flush();
       assert.deepEqual(effects(fixture), before);
       assert.equal(fixture.requests.length, 1, "late initial snapshot cannot dispatch a previous actor bootstrap");
-      assert.deepEqual(fixture.tokenCalls, [actorB]);
+      assert.deepEqual(fixture.tokenCalls, [actorB, actorB], "B is checked before dispatch and before publication");
     }, { deferSession: true });
   }
 });
@@ -881,7 +1252,7 @@ test("a pending expected-user token lookup cannot dispatch or apply A after the 
     gate.resolve("local-delayed-a-token");
     await fixture.renderer.flush();
     assert.deepEqual(effects(fixture), before);
-    assert.deepEqual(fixture.tokenCalls, [actorA, actorB]);
+    assert.deepEqual(fixture.tokenCalls, [actorA, actorB, actorB], "only B may be reverified after its response");
     assert.equal(fixture.requests.length, 1);
   }, { deferSession: true });
 });

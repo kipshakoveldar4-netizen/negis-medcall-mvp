@@ -7,7 +7,7 @@ import { useLocation } from 'wouter';
 import { toast } from 'sonner';
 import { apiUrl, clearCrmCache, crmFetch } from '@/lib/api';
 import { getSupabaseAccessToken } from '@/lib/serverAuth';
-import { isSignOutPending, markSignOutPending, clearSignOutPending } from '@/lib/authSignOut';
+import { isSignOutPending, getSignOutRevision, markSignOutPending, clearSignOutPending } from '@/lib/authSignOut';
 import { clearListReadCache, WORKSPACE_SELECTOR_KEY } from '@/lib/demoStorage';
 import { isStaffRole, permissionsForRole, type StaffRole } from '@/lib/permissions';
 
@@ -315,6 +315,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const membershipsRef = useRef<AuthContextMembership[]>([]);
   const userRef = useRef<User | null>(null);
   const authRevisionRef = useRef(0);
+  const authSignOutRevisionRef = useRef(getSignOutRevision());
   const authIdentityRef = useRef<string | null>(null);
   const mountedRef = useRef(true);
   const signOutRequestRef = useRef<Promise<void> | null>(null);
@@ -339,12 +340,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const isCurrentAuthResolution = (userId: string, revision: number) =>
     mountedRef.current && !isSignOutPending()
+    && authSignOutRevisionRef.current === getSignOutRevision()
     && authIdentityRef.current === userId && authRevisionRef.current === revision;
 
   const beginAuthResolution = (nextUser: User | null) => {
     const nextId = nextUser?.id ?? null;
     const changed = authIdentityRef.current !== nextId;
     authIdentityRef.current = nextId;
+    authSignOutRevisionRef.current = getSignOutRevision();
     userRef.current = nextUser;
     const revision = ++authRevisionRef.current;
     if (changed || !nextUser) {
@@ -444,26 +447,47 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const fetchAuthContext = async (userId: string, revision: number): Promise<{
     memberships: AuthContextMembership[];
     status: number;
+    sessionChanged?: boolean;
   }> => {
+    const changedSession = { memberships: [], status: 0, sessionChanged: true };
+    let accessToken = '';
+    const isCurrentRequest = () => isCurrentAuthResolution(userId, revision);
+    const hasCurrentToken = async () => {
+      if (!accessToken || !isCurrentRequest()) return false;
+      try {
+        const currentToken = await getSupabaseAccessToken(userId);
+        return currentToken === accessToken && isCurrentRequest();
+      } catch {
+        return false;
+      }
+    };
     try {
-      const accessToken = await getSupabaseAccessToken(userId);
-      if (!isCurrentAuthResolution(userId, revision)) return { memberships: [], status: 0 };
-      if (!accessToken) return { memberships: [], status: 401 };
+      accessToken = await getSupabaseAccessToken(userId);
+      if (!isCurrentRequest() || !accessToken) return changedSession;
 
-      const response = await crmFetch('/api/crm/auth-context', { accessToken });
+      const response = await crmFetch('/api/crm/auth-context', {
+        accessToken, expectedUserId: userId, dispatchGuard: isCurrentRequest,
+      });
+      const text = response.ok ? await response.text() : '';
+      // The SDK can replace its session before this tab receives its auth event.
+      if (!await hasCurrentToken()) return changedSession;
       if (!response.ok) return { memberships: [], status: response.status };
 
-      const text = await response.text();
       const body = text ? (JSON.parse(text) as { success?: boolean; data?: Record<string, unknown> }) : null;
-      if (body?.success !== true || !body.data) return { memberships: [], status: response.status };
+      if (body?.success !== true || !body.data || !Array.isArray(body.data.memberships)) {
+        return { memberships: [], status: 422 };
+      }
 
-      const raw = Array.isArray(body.data.memberships) ? body.data.memberships : [];
-      if (raw.some((entry) => !entry || typeof entry !== 'object' || !isWorkspacePurpose((entry as Record<string, unknown>).purpose))) {
+      const raw = body.data.memberships;
+      if (raw.some((entry) => !entry || typeof entry !== 'object'
+        || typeof (entry as Record<string, unknown>).workspaceId !== 'string'
+        || !(entry as { workspaceId: string }).workspaceId.trim()
+        || !isStaffRole((entry as Record<string, unknown>).role)
+        || !isWorkspacePurpose((entry as Record<string, unknown>).purpose))) {
         return { memberships: [], status: 422 };
       }
       const memberships = raw
         .map((entry) => entry as Record<string, unknown>)
-        .filter((entry) => typeof entry.workspaceId === 'string' && typeof entry.role === 'string')
         .map((entry) => ({
           staffUserId: String(entry.staffUserId || ''),
           workspaceId: String(entry.workspaceId),
@@ -479,8 +503,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
       return { memberships, status: response.status };
     } catch {
-      // A network failure must not upgrade anyone; it resolves to no access.
-      return { memberships: [], status: 0 };
+      return await hasCurrentToken() ? { memberships: [], status: 0 } : changedSession;
     }
   };
 
@@ -526,7 +549,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   const tryApplySupabaseStaffUser = async (supabaseUser: User, revision: number): Promise<boolean> => {
-    const { memberships, status } = await fetchAuthContext(supabaseUser.id, revision);
+    const { memberships, status, sessionChanged } = await fetchAuthContext(supabaseUser.id, revision);
     if (!isCurrentAuthResolution(supabaseUser.id, revision)) return true;
 
     // «Прочитать не удалось» — не то же самое, что «членств нет». Разница стала
@@ -534,7 +557,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     // USER_UPDATED, подписчик тут же перечитывает контекст, и одного моргнувшего
     // Wi-Fi хватало, чтобы обнулить роль и права и объявить человеку «Аккаунт не
     // привязан к клинике» — сразу после того, как его пароль успешно сменился.
-    const readFailed = memberships.length === 0 && (status === 0 || status >= 500);
+    const readFailed = !sessionChanged && memberships.length === 0 && (status === 0 || status === 429 || status >= 500);
     if (readFailed) {
       toast.error(
         membershipsRef.current.length > 0
@@ -546,14 +569,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       return true;
     }
 
-    if (JSON.stringify(membershipsRef.current) !== JSON.stringify(memberships)) {
+    if (sessionChanged || status >= 400 || JSON.stringify(membershipsRef.current) !== JSON.stringify(memberships)) {
       clearCrmCache();
       clearListReadCache();
     }
     membershipsRef.current = memberships;
     if (memberships.length === 0) {
       setAvailableWorkspaces([]);
-      if (status === 422) {
+      rememberSelector(null);
+      if (sessionChanged || status === 401 || status === 403) {
+        applyNoWorkspaceAccess(false);
+        if (!sessionChanged) {
+          toast.error(status === 401 ? 'Сессия истекла. Войдите снова.' : 'Недостаточно прав для этого действия.');
+        }
+        return true;
+      }
+      if (status >= 400) {
         applyNoWorkspaceAccess(false);
         toast.error('Не удалось подтвердить профиль рабочего пространства. Обновите страницу или обратитесь в поддержку.');
         return true;
