@@ -2253,7 +2253,9 @@ export function AppointmentsPage() {
       : entry.fullName.trim().toLowerCase() === doctorName);
     const intervals = items
       .filter((appointment) => appointment.id.toLowerCase() !== candidate.id.toLowerCase()
-        && appointment.doctor.trim().toLowerCase() === doctorName
+        && (candidate.doctorId && appointment.doctorId
+          ? appointment.doctorId.toLowerCase() === candidate.doctorId.toLowerCase()
+          : Boolean(doctorName) && appointment.doctor.trim().toLowerCase() === doctorName)
         && activeStatuses.includes(normalizeStatus(appointment.status)))
       .map((appointment) => ({ ...appointmentInterval(appointment), value: appointment }));
     return findAppointmentCapacityConflict(candidateInterval, intervals, doctor?.capacity ?? 1);
@@ -2385,7 +2387,7 @@ export function AppointmentsPage() {
     if (!isCurrentMutationScope()) return;
     setModalOpen(false);
     setConflictMessage("");
-    setSelectedDate(form.date);
+    setSelectedDate(dateKeyFromStartsAt(appointment.startsAt, clinicTimeZone));
     } finally {
       if (isCurrentMutationScope()) {
         submitLock.current = false;

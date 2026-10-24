@@ -192,7 +192,10 @@ test("UI excludes its own UUID case-insensitively and normalizes unknown existin
   const existing = booking(doctorId);
   assert.equal(prefilter([existing])(booking(doctorId.toUpperCase(), { durationMinutes: 90 })), null);
   assert.equal(prefilter([booking("unknown", { status: "legacy" })])(booking("new"))?.id, "unknown");
-  assert.equal(prefilter([booking("other", { doctor: "Another" })])(booking("new")), null);
+  const renamed = booking("renamed", { doctorId: doctorId.toUpperCase(), doctor: "Another" });
+  assert.equal(prefilter([renamed])(booking("new")), renamed);
+  assert.equal(prefilter([booking("other", { doctorId: "another-doctor" })])(booking("new")), null);
+  assert.equal(prefilter([booking("legacy-other", { doctorId: "", doctor: "Another" })])(booking("new")), null);
 });
 
 for (const status of ["cancelled", "no_show"]) {
@@ -221,7 +224,10 @@ test("UI retains and shrinks occupied legacy-overcapacity visits, including stat
   assert.equal(check({ ...original, durationMinutes: 90 })?.id, "overbooked");
   assert.equal(check({ ...original, startsAt: "2026-10-20T09:45:00Z" })?.id, "overbooked");
   assert.equal(prefilter([booking(doctorId, { status: "no_show" }), booking("overbooked")])({ ...original, status: "arrived" })?.id, "overbooked");
-  assert.equal(check({ ...original, doctorId: "another-doctor" })?.id, "overbooked");
+  const moved = { ...original, doctorId: "another-doctor" };
+  assert.equal(check(moved), null);
+  const destination = booking("destination", { doctorId: moved.doctorId });
+  assert.equal(prefilter([original, destination])(moved), destination);
 });
 
 type GridModule = {
