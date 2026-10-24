@@ -520,7 +520,7 @@ async function handleImproveAdText(req: VercelRequest, res: VercelResponse, cont
       return sendJson(res, 502, {
         success: false,
         error: "Не удалось переписать текст",
-        details: [result.refusal],
+        details: ["Сервис генерации не подтвердил завершение обработки текста. Повторите позже."],
         data: { before: result.before },
       });
     }
@@ -539,8 +539,7 @@ async function handleImproveAdText(req: VercelRequest, res: VercelResponse, cont
         before: result.before,
         invented: result.candidates.flatMap((candidate) => candidate.invented),
         attempts: result.candidates.filter((candidate) => candidate.source !== "original").length,
-        // Провайдер мог отказать на второй попытке — первая при этом цела.
-        refusal: result.refusal,
+        refusal: "",
       },
     });
   } catch (error) {
