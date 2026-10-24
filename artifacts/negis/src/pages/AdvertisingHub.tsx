@@ -505,6 +505,7 @@ function AdvertisingHubSession({ actorId, observedSdkActorId, workspaceId, local
   }
   const [launches, setLaunches] = useState<AdvertisingLaunch[]>([]);
   const [loadState, setLoadState] = useState<LoadState>("loading");
+  const launchesRequestRef = useRef(0);
   const [reloadKey, setReloadKey] = useState(0);
   const [insightsAccess, setInsightsAccess] = useState<InsightsAccess>("idle");
   const [insightsSummaries, setInsightsSummaries] = useState<MetaInsightsHistorySummary[]>([]);
@@ -582,17 +583,25 @@ function AdvertisingHubSession({ actorId, observedSdkActorId, workspaceId, local
     prepareCampaign("/ads-automation");
   }
 
+  function refreshLaunches() {
+    launchesRequestRef.current += 1;
+    setLoadState("loading");
+    setReloadKey((value) => value + 1);
+  }
+
   useEffect(() => {
     let cancelled = false;
     const session = sessionRef.current;
-    const current = () => !cancelled && isSessionAlive(session);
+    const requestId = ++launchesRequestRef.current;
+    const latest = () => !cancelled && requestId === launchesRequestRef.current;
+    const current = () => latest() && isSessionAlive(session);
 
     async function loadLaunches() {
       setLoadState("loading");
 
       if (!productionWorkspace) {
         const local = localDraftsOnly ? readDemoStorage<unknown[]>(localHistoryKey(workspaceId), []) : [];
-        if (!cancelled) {
+        if (latest()) {
           setLaunches(local.map(normalizeLaunch).sort((left, right) => launchTime(right.createdAt) - launchTime(left.createdAt)).slice(0, 40));
           setLoadState("ready");
         }
@@ -607,11 +616,10 @@ function AdvertisingHubSession({ actorId, observedSdkActorId, workspaceId, local
           throw new Error("launches_unavailable");
         }
 
-        const raw = Array.isArray(body.data?.launches)
-          ? body.data.launches
-          : Array.isArray(body.data?.items)
-            ? body.data.items
-            : [];
+        const raw = Object.prototype.hasOwnProperty.call(body.data ?? {}, "launches")
+          ? body.data?.launches
+          : body.data?.items;
+        if (!Array.isArray(raw)) throw new Error("launches_invalid");
         const normalized = raw
           .map(normalizeLaunch)
           .sort((left, right) => launchTime(right.createdAt) - launchTime(left.createdAt))
@@ -622,7 +630,7 @@ function AdvertisingHubSession({ actorId, observedSdkActorId, workspaceId, local
           setLoadState("ready");
         }
       } catch {
-        if (!cancelled && (current() || !actorId)) {
+        if (latest() && (current() || !actorId)) {
           setLaunches([]);
           setLoadState("error");
         }
@@ -1061,7 +1069,8 @@ function AdvertisingHubSession({ actorId, observedSdkActorId, workspaceId, local
               className="neu-icon-btn shrink-0"
               aria-label="Обновить статусы рекламы"
               title="Обновить"
-              onClick={() => setReloadKey((value) => value + 1)}
+              disabled={loadState === "loading"}
+              onClick={refreshLaunches}
             >
               <RefreshCw size={17} />
             </button>

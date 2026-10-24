@@ -25,7 +25,7 @@ import { toast } from "sonner";
 import { PageLayout } from "@/components/layout/PageLayout";
 import { MetricCard } from "@/components/ui/metric-card";
 import { useAuth } from "@/contexts/AuthContext";
-import { apiUrl, crmFetch } from "@/lib/api";
+import { apiUrl, CrmApiError, crmErrorMessage, crmFetch } from "@/lib/api";
 import { getSignOutRevision, isSignOutPending } from "@/lib/authSignOut";
 import { getSupabaseAccessToken } from "@/lib/serverAuth";
 import { hasSupabaseFrontendEnv, supabase } from "@/lib/supabase";
@@ -942,8 +942,8 @@ function uniqueStrings(values: Array<string | undefined>) {
   return Array.from(new Set(values.filter((value): value is string => Boolean(value?.trim()))));
 }
 
-function localHistoryKey(workspaceId: string) {
-  return `negis_ads_launch_history_${workspaceId}`;
+function localHistoryKey(workspaceId: string, actorId: string) {
+  return `negis_ads_launch_history_${workspaceId}::${actorId}`;
 }
 
 type VideoThumbnailCapture = { blob: Blob; mimeType: string };
@@ -1558,6 +1558,9 @@ function AdsAutomationSession({ actorId, workspaceId }: { actorId: string; works
   const [historyFilter, setHistoryFilter] = useState<HistoryFilter>("all");
   const [historySearch, setHistorySearch] = useState("");
   const [historyLoaded, setHistoryLoaded] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState("");
+  const historyRequestRef = useRef(0);
   const [historyInsightsAccess, setHistoryInsightsAccess] = useState<HistoryInsightsAccess>("idle");
   const [historyInsightsByLaunch, setHistoryInsightsByLaunch] = useState<Record<string, MetaInsightsHistorySummary>>({});
   const [historyInsightsMessage, setHistoryInsightsMessage] = useState("");
@@ -3133,7 +3136,7 @@ function AdsAutomationSession({ actorId, workspaceId }: { actorId: string; works
   }
 
   function saveLocalLaunch(result: LaunchResult, nextStatusMode: "PAUSED" | "ACTIVE", statusOverride?: string) {
-    const key = localHistoryKey(workspaceId);
+    const key = localHistoryKey(workspaceId, actorId);
     const current = readStored<LaunchHistoryItem[]>(key, []);
     const metaPayload = asRecord(result.metaPayload);
     const campaignPayload = asRecord(metaPayload.campaign);
@@ -3338,25 +3341,36 @@ function AdsAutomationSession({ actorId, workspaceId }: { actorId: string; works
   async function loadHistory() {
     const session = sessionRef.current;
     if (!isSessionAlive(session)) return;
-    const local = readStored<LaunchHistoryItem[]>(localHistoryKey(workspaceId), []);
-    setHistoryItems(mergeHistoryCollections(local, []));
-    setLoading("history");
+    const requestId = ++historyRequestRef.current;
+    const current = () => requestId === historyRequestRef.current && isSessionAlive(session);
+    setHistoryLoading(true);
+    setHistoryError("");
     setNotice("");
     try {
-      const body = await sessionRequest<{ launches?: LaunchHistoryItem[]; items?: LaunchHistoryItem[] }>(session, `/api/crm/meta-launches?workspaceId=${encodeURIComponent(workspaceId)}`);
-      assertSessionAlive(session);
-      const remote = body.data.launches || body.data.items || [];
+      const response = await sessionFetch(session, `/api/crm/meta-launches?workspaceId=${encodeURIComponent(workspaceId)}`);
+      if (!current()) return;
+      if (response.status === 401 || response.status === 403) {
+        throw new CrmApiError(response.status, response.status === 401 ? "authentication_required" : "permission_denied", crmErrorMessage(response.status));
+      }
+      const body = await safeJson<{ launches?: unknown; items?: unknown }>(response);
+      if (!current()) return;
+      if (!response.ok || body.success !== true) throw new Error("История запусков недоступна.");
+      const data = asRecord(body.data);
+      const remote = Object.prototype.hasOwnProperty.call(data, "launches") ? data.launches : data.items;
+      if (!Array.isArray(remote)) throw new Error("Некорректный список запусков.");
+      const stored = readStored<LaunchHistoryItem[]>(localHistoryKey(workspaceId, actorId), []);
+      const local = Array.isArray(stored) ? stored : [];
       setHistoryItems(mergeHistoryCollections(local, remote));
     } catch (error) {
-      if (!isSessionAlive(session)) return;
-      const fallbackMessage = local.length
-        ? "Не удалось обновить историю. Показываем запуски, сохранённые на этом устройстве."
-        : "История запусков временно недоступна. Попробуйте обновить страницу позже.";
-      setNotice(isAdminMode && error instanceof Error ? `${fallbackMessage} ${error.message}` : fallbackMessage);
+      if (!current()) return;
+      const message = "История запусков временно недоступна. Попробуйте обновить страницу позже.";
+      setHistoryItems([]);
+      setHistoryError(message);
+      setNotice(isAdminMode && error instanceof Error ? `${message} ${error.message}` : message);
     } finally {
-      if (isSessionAlive(session)) {
+      if (current()) {
         setHistoryLoaded(true);
-        setLoading(null);
+        setHistoryLoading(false);
       }
     }
   }
@@ -3392,7 +3406,7 @@ function AdsAutomationSession({ actorId, workspaceId }: { actorId: string; works
         payload: { ...asRecord(entry.payload), videoProcessingStatus: processingStatus, lastCheckedAt },
       });
       setHistoryItems((items) => items.map((entry) => (entry === item ? patchPayload(entry) : entry)));
-      const key = localHistoryKey(workspaceId);
+      const key = localHistoryKey(workspaceId, actorId);
       const stored = readStored<LaunchHistoryItem[]>(key, []);
       if (item.id && stored.some((entry) => entry.id === item.id)) {
         window.localStorage.setItem(key, JSON.stringify(stored.map((entry) => (entry.id === item.id ? patchPayload(entry) : entry))));
@@ -4724,7 +4738,7 @@ function AdsAutomationSession({ actorId, workspaceId }: { actorId: string; works
       { label: "Видео оптимизировано", value: optimizedCount, icon: Video, tone: "ai" },
       { label: "Тесты без создания рекламы", value: dryRunCount, icon: FlaskConical, tone: "secondary" },
     ];
-    const showingInitialLoader = !historyLoaded && historyItems.length === 0;
+    const showingInitialLoader = (!historyLoaded || historyLoading) && historyItems.length === 0;
 
     return (
       <div className="space-y-5">
@@ -4732,12 +4746,14 @@ function AdsAutomationSession({ actorId, workspaceId }: { actorId: string; works
           <p className="text-sm font-semibold" style={{ color: "var(--negis-muted)" }}>
             {showingInitialLoader
               ? "Загружаем историю запусков"
-              : historyItems.length === 0
-                ? "Пока нет запусков"
-                : `Показано ${visibleHistoryItems.length} из ${historyItems.length}`}
+              : historyError
+                ? "История запусков недоступна"
+                : historyItems.length === 0
+                  ? "Пока нет запусков"
+                  : `Показано ${visibleHistoryItems.length} из ${historyItems.length}`}
           </p>
-          <button type="button" className="neu-btn justify-center sm:w-auto" disabled={loading === "history"} onClick={() => void refreshHistory()}>
-            {loading === "history" ? <Loader2 className="animate-spin" size={16} /> : <RefreshCw size={16} />}
+          <button type="button" className="neu-btn justify-center sm:w-auto" disabled={historyLoading} onClick={() => void refreshHistory()}>
+            {historyLoading ? <Loader2 className="animate-spin" size={16} /> : <RefreshCw size={16} />}
             Обновить
           </button>
         </div>
@@ -4806,6 +4822,11 @@ function AdsAutomationSession({ actorId, workspaceId }: { actorId: string; works
           <section className="negis-glass flex min-h-44 flex-col items-center justify-center gap-3 p-8 text-center" aria-live="polite">
             <Loader2 className="animate-spin" size={24} style={{ color: "var(--negis-primary)" }} />
             <p className="text-sm font-bold" style={{ color: "var(--negis-muted)" }}>Собираем запуски из Medina OS</p>
+          </section>
+        ) : historyError ? (
+          <section className="negis-glass flex flex-col items-center gap-3 p-8 text-center" role="alert">
+            <AlertTriangle size={24} style={{ color: "var(--negis-muted)" }} />
+            <p className="text-sm font-semibold" style={{ color: "var(--negis-muted)" }}>{historyError}</p>
           </section>
         ) : historyItems.length === 0 ? (
           <section className="negis-glass-hero flex flex-col items-center gap-3 p-8 text-center">

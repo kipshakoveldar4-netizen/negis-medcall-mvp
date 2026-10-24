@@ -569,7 +569,7 @@ test("A10 current session keeps signed upload and PAUSED launch working", async 
   assert.equal(Object.hasOwn(request.init, "expectedUserId"), false);
   request.answer({ dryRun: false, status: "paused", launchId }); await launched; await f.flush();
   assert.equal(f.view.realLaunchStatus, "created");
-  assert.equal(f.writes.filter((key) => key === `negis_ads_launch_history_${W1}`).length, 1);
+  assert.equal(f.writes.filter((key) => key === `negis_ads_launch_history_${W1}::A`).length, 1);
 });
 
 test("A11 StrictMode consumes a video prefill once and resumes its cover in the fresh lifetime", async (t) => {
@@ -1012,7 +1012,7 @@ for (const scenario of ["request-history", "fetch-insights", "request-launch"] a
       assert.equal(record((record(record(f.view.historyInsightsByLaunch)[launchId]).spendByCurrency as unknown[])[0]).spendMinor, "300");
     } else {
       assert.equal(f.view.realLaunchStatus, "created");
-      assert.equal(f.writes.filter((key) => key === `negis_ads_launch_history_${W1}`).length, 1);
+      assert.equal(f.writes.filter((key) => key === `negis_ads_launch_history_${W1}::A`).length, 1);
     }
     assert.equal(f.lateWrites(), 0);
   });
