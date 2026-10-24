@@ -79,6 +79,7 @@ overrides:
   "js-yaml@4": "4.3.2"
   "smol-toml@1": "1.9.0"
   "fast-uri@3": "3.1.9"
+  "@vercel/static-config@3.4.0>ajv": "8.20.0"
   "minimatch@10": "10.2.3"
   "@babel/core@7": "7.29.6"
   "browserslist@4": "4.28.7"
