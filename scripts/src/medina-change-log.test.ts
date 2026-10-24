@@ -329,6 +329,128 @@ test("CL11 a journal the database refuses does not fail the save it describes", 
   );
 });
 
+test("CL11a returned and thrown journal failures log only an operation and an allowlisted code", async () => {
+  const journal = (await import(pathToFileURL(journalPath).href)) as {
+    recordCrmChange: (input: Record<string, unknown>) => Promise<void>;
+  };
+  const privateFields = {
+    message: "fixture-private provider message",
+    detail: "fixture-private detail",
+    details: "fixture-private details",
+    hint: "fixture-private hint",
+    query: "select fixture_private_query",
+    row: { full_name: "Fixture Private Patient", phone: "fixture-private phone" },
+    contact: "fixture-private@example.test",
+    token: "fixture-private token",
+    stack: "Error: fixture-private stack",
+  };
+  const codes: Array<{ name: string; value: unknown; expected: string }> = [
+    ...["23502", "23503", "23505", "23514", "40001", "40P01", "42501", "42703", "42P01", "57014", "PGRST204", "PGRST205"]
+      .map(code => ({ name: code, value: code, expected: code })),
+    ...[
+      { name: "absent", value: undefined },
+      { name: "null", value: null },
+      { name: "numeric", value: 42501 },
+      { name: "boolean", value: true },
+      { name: "array", value: ["42501"] },
+      { name: "object", value: { toString() { throw new Error(privateFields.message); } } },
+      { name: "symbol", value: Symbol(privateFields.message) },
+      { name: "empty", value: "" },
+      { name: "unknown SQLSTATE", value: "ZZ999" },
+      { name: "unknown PostgREST", value: "PGRST999" },
+      { name: "private text", value: privateFields.message },
+      { name: "suffixed text", value: `42501 ${privateFields.contact}` },
+      { name: "prefixed text", value: `${privateFields.token} PGRST205` },
+      { name: "whitespace", value: " 42501 " },
+      { name: "newline", value: "42501\n" },
+      { name: "lowercase", value: "pgrst205" },
+      { name: "prototype key", value: "constructor" },
+    ].map(entry => ({ ...entry, expected: "unknown" })),
+  ];
+  const failures: Array<{ name: string; error: unknown; expected: string; thrown: boolean }> = [];
+  for (const { name, value, expected } of codes) {
+    failures.push(
+      { name: `returned ${name}`, error: { ...privateFields, code: value }, expected, thrown: false },
+      { name: `thrown object ${name}`, error: { ...privateFields, code: value }, expected, thrown: true },
+      { name: `thrown Error ${name}`, error: Object.assign(new Error(privateFields.message), privateFields, { code: value }), expected, thrown: true },
+    );
+  }
+  for (const error of [new Error(privateFields.message), privateFields.message, null, undefined, 42501, [{ ...privateFields, code: "42501" }]]) {
+    failures.push({ name: "thrown value without a usable code", error, expected: "unknown", thrown: true });
+  }
+
+  const warnings: unknown[][] = [];
+  const originalWarn = console.warn;
+  console.warn = (...args: unknown[]) => { warnings.push(args); };
+  try {
+    for (const failure of failures) {
+      warnings.length = 0;
+      let writes = 0;
+      const supabase = {
+        from(table: string) {
+          assert.equal(table, "audit_logs");
+          return {
+            async insert() {
+              writes += 1;
+              if (failure.thrown) throw failure.error;
+              return { error: failure.error };
+            },
+          };
+        },
+      };
+      assert.equal(await journal.recordCrmChange({
+        supabase,
+        workspaceId: WORKSPACE_A,
+        entity: "lead",
+        entityId: LEAD_ID,
+        action: "created",
+        changes: [],
+        actorName: "Fixture Actor",
+        actorRole: "owner",
+        actorStaffUserId: STAFF_A,
+        actorKind: "manual",
+      }), undefined, `${failure.name}: the secondary write must still resolve`);
+      assert.equal(writes, 1, `${failure.name}: one write attempt, without retries`);
+      assert.deepEqual(warnings, [
+        ["audit_logs: change journal write failed", { code: failure.expected }],
+      ], `${failure.name}: no provider fields, row, contact, token or stack may reach the log`);
+    }
+  } finally {
+    console.warn = originalWarn;
+  }
+});
+
+test("CL11b successful and unchanged journal writes stay silent", async () => {
+  const journal = (await import(pathToFileURL(journalPath).href)) as {
+    recordCrmChange: (input: Record<string, unknown>) => Promise<void>;
+  };
+  const log: QueryLog[] = [];
+  const input = {
+    supabase: spyClient({}, log, new Set()),
+    workspaceId: WORKSPACE_A,
+    entity: "lead",
+    entityId: LEAD_ID,
+    action: "created",
+    changes: [],
+    actorName: "Fixture Actor",
+    actorRole: "owner",
+    actorStaffUserId: STAFF_A,
+    actorKind: "manual",
+  };
+  const warnings: unknown[][] = [];
+  const originalWarn = console.warn;
+  console.warn = (...args: unknown[]) => { warnings.push(args); };
+  try {
+    assert.equal(await journal.recordCrmChange(input), undefined);
+    assert.equal(journalWrites(log).length, 1);
+    assert.equal(await journal.recordCrmChange({ ...input, action: "updated" }), undefined);
+    assert.equal(journalWrites(log).length, 1, "an unchanged save must not reach the database");
+    assert.deepEqual(warnings, []);
+  } finally {
+    console.warn = originalWarn;
+  }
+});
+
 /* ── What the journal is allowed to contain ── */
 
 test("CL12 a note's text never enters the journal", async () => {
@@ -583,7 +705,7 @@ test("CL17 the writer cannot fail a save", async () => {
   const source = await readFile(journalPath, "utf8");
   const writer = source.slice(source.indexOf("export async function recordCrmChange("));
   assert.ok(writer.includes("try {"), "the write is guarded");
-  assert.ok(writer.includes("console.warn"), "the detail reaches the operator log");
+  assert.ok(writer.includes("console.warn"), "a stable diagnostic reaches the operator log");
   assert.ok(
     !/throw\s+/.test(writer.slice(writer.indexOf("catch"))),
     "and nothing is rethrown past the guard",

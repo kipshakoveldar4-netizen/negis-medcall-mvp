@@ -370,11 +370,15 @@ export async function recordCrmChange(input: RecordChangeInput): Promise<void> {
       entity_id: input.entityId,
       metadata: { changes: input.changes },
     });
-    if (error) throw new Error(error.message);
+    if (error) throw error;
   } catch (error) {
-    // The message can name a table or a constraint, so it goes to the operator
-    // log and never into a response.
-    console.warn("audit_logs: change journal write failed", error instanceof Error ? error.message : error);
+    // Provider text can contain private row data; only known diagnostic codes are safe.
+    const code = asRecord(error).code;
+    const safeCode = typeof code === "string" && [
+      "23502", "23503", "23505", "23514", "40001", "40P01", "42501", "42703", "42P01", "57014",
+      "PGRST204", "PGRST205",
+    ].includes(code) ? code : "unknown";
+    console.warn("audit_logs: change journal write failed", { code: safeCode });
   }
 }
 
