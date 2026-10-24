@@ -4,6 +4,8 @@
   "packageManager": "pnpm@10.33.2",
   "license": "MIT",
   "scripts": {
+    "test:legal-notices": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:legal-notices",
+    "test:undici-parser-characterization": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:undici-parser-characterization",
     "test:arrival-payment": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:arrival-payment",
     "test:appointment-preview-readiness": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:appointment-preview-readiness",
     "test:appointment-capacity-postgres": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:appointment-capacity-postgres",
