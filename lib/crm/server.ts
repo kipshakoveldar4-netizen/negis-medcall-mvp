@@ -6362,24 +6362,10 @@ function inferMimeType(input: { fileName: string; mimeType?: string }): string {
 
 function validateSignedUploadBody(body: JsonRecord): { details: string[]; normalized: JsonRecord } {
   const fileName = firstString(body.fileName, body.file_name);
-  const mimeType = inferMimeType({ fileName, mimeType: firstString(body.mimeType, body.mime_type) });
+  const mimeType = inferMimeType({ fileName, mimeType: firstString(body.mimeType, body.mime_type).toLowerCase() });
   const fileType = normalizeCreativeFileType({ ...body, fileName, mimeType });
   const fileSize = readNumber(body.fileSize ?? body.file_size) ?? 0;
-  const details: string[] = [];
-
-  if (!fileName) details.push("fileName is required");
-  if (fileType === "image" && !IMAGE_MIME_TYPES.has(mimeType)) {
-    details.push("Формат не поддерживается. Используйте JPG, PNG, WEBP, MP4, MOV или WEBM.");
-  }
-  if (fileType === "video" && !VIDEO_MIME_TYPES.has(mimeType)) {
-    details.push("Формат не поддерживается. Используйте JPG, PNG, WEBP, MP4, MOV или WEBM.");
-  }
-  if (fileType === "image" && fileSize > MAX_IMAGE_BYTES) {
-    details.push("Фото больше 10 MB. Сожмите изображение.");
-  }
-  if (fileType === "video" && fileSize > MAX_VIDEO_BYTES) {
-    details.push("Видео больше 100 MB. Загрузите файл меньшего размера.");
-  }
+  const details = [...creativeMetadataShapeErrors(body), ...validateCreativeAssetBody({ ...body, fileName, mimeType, fileSize })];
   if (fileSize <= 0) details.push("fileSize is required");
 
   return {
