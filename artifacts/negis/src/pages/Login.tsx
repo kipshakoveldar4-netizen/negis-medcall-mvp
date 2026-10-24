@@ -1,8 +1,10 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useLocation } from "wouter";
 import { KeyRound, LogIn, ShieldCheck } from "lucide-react";
 import { toast } from "sonner";
-import { apiUrl, crmFetch } from "@/lib/api";
+import { apiUrl, CrmApiError, crmErrorMessage, crmFetch } from "@/lib/api";
+import { getSupabaseAccessToken } from "@/lib/serverAuth";
+import { getSignOutRevision, isSignOutPending } from "@/lib/authSignOut";
 import { hasSupabaseFrontendEnv, supabase } from "@/lib/supabase";
 import { isSyntheticEmail, loginOrEmailToAuthEmail } from "../../../../lib/auth/staff-logins";
 import { isStaffRole, roleLabels } from "@/lib/permissions";
@@ -80,6 +82,11 @@ export default function Login() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
+  const loginAttempt = useRef<{ alive: boolean; actorId: string; signOutRevision: number } | null>(null);
+  useEffect(() => () => {
+    if (loginAttempt.current) loginAttempt.current.alive = false;
+    loginAttempt.current = null;
+  }, []);
   // «Забыли пароль» прямо на входе. Приглашённый владелец, чей аккаунт
   // существовал без пароля, упирался здесь в «Invalid login credentials» и
   // тупик: восстановление жило только в модале лендинга, о котором со
@@ -120,6 +127,7 @@ export default function Login() {
   };
 
   const submit = async () => {
+    if (loginAttempt.current) return;
     // Одно поле на два вида входа: с «@» — почта, без — логин, который
     // превращается в служебный адрес ТЕМ ЖЕ модулем, что применил сервер при
     // заведении. Две копии транслитерации дали бы «неверный логин или пароль»,
@@ -130,6 +138,17 @@ export default function Login() {
       return;
     }
 
+    const attempt = { alive: true, actorId: "", signOutRevision: getSignOutRevision() };
+    loginAttempt.current = attempt;
+    const current = () => loginAttempt.current === attempt && attempt.alive
+      && !isSignOutPending() && getSignOutRevision() === attempt.signOutRevision;
+    const currentActor = async () => {
+      if (!current() || !attempt.actorId) return false;
+      const token = await getSupabaseAccessToken(attempt.actorId);
+      return current() && Boolean(token);
+    };
+    const serviceError = "Сервис авторизации не ответил. Попробуйте войти ещё раз через минуту.";
+    let subscription: { unsubscribe(): void } | null = null;
     setLoading(true);
     try {
       if (!hasSupabaseFrontendEnv) {
@@ -149,6 +168,16 @@ export default function Login() {
         return;
       }
 
+      // Observe the whole attempt, including A -> B -> A between awaited reads.
+      subscription = supabase.auth.onAuthStateChange((event, session) => {
+        if (event === "INITIAL_SESSION") return;
+        const nextActor = session?.user.id || "";
+        if (event === "SIGNED_OUT") attempt.alive = false;
+        else if (nextActor) {
+          if (!attempt.actorId) attempt.actorId = nextActor;
+          else if (nextActor !== attempt.actorId) attempt.alive = false;
+        }
+      }).data.subscription;
       const { data, error } = await supabase.auth.signInWithPassword({
         email: normalizedEmail,
         password,
@@ -157,24 +186,37 @@ export default function Login() {
       if (error) {
         throw new Error(error.message);
       }
+      const actorId = data.session?.user.id || "";
+      if (!actorId) throw new Error(serviceError);
+      if (attempt.actorId && attempt.actorId !== actorId) return;
+      attempt.actorId = actorId;
+      if (!await currentActor()) return;
 
       // Security-2B: the staff lookup by email is gone — it answered for any
       // address in any workspace. Membership now comes from the verified session
       // via /api/crm/auth-context, which AuthContext resolves on the next render.
-      const contextResponse = await crmFetch("/api/crm/auth-context").catch(() => null);
-      const context = contextResponse?.ok
-        ? await (contextResponse.json() as Promise<{ success?: boolean; data?: { memberships?: unknown[] } }>).catch(() => null)
-        : null;
-      const memberships = Array.isArray(context?.data?.memberships) ? context!.data!.memberships! : [];
+      const requestOptions = { expectedUserId: actorId, dispatchGuard: current, cache: "no-store" as const };
+      const contextResponse = await crmFetch("/api/crm/auth-context", requestOptions);
+      if (!await currentActor()) return;
 
       // Сеть моргнула или сервис недоступен — это НЕ «аккаунт не связан с
       // клиникой»: прежний код выбрасывал из сессии по любому сбою чтения и
       // ставил ложный диагноз.
-      if (!contextResponse || (!contextResponse.ok && contextResponse.status >= 500)) {
-        throw new Error("Сервис авторизации не ответил. Попробуйте войти ещё раз через минуту.");
+      if (!contextResponse.ok) {
+        throw new Error(contextResponse.status >= 500 ? serviceError : crmErrorMessage(contextResponse.status));
       }
+      const context = await (contextResponse.json() as Promise<{
+        success?: boolean; data?: { memberships?: unknown[] };
+      }>).catch(() => null);
+      if (!await currentActor()) return;
+      if (context?.success !== true || !Array.isArray(context.data?.memberships)) throw new Error(serviceError);
+      const memberships = context.data.memberships;
+      if (!memberships.every((entry) => !!entry && typeof entry === "object" && !Array.isArray(entry)
+        && "workspaceId" in entry && typeof entry.workspaceId === "string" && Boolean(entry.workspaceId.trim())
+        && "role" in entry && isStaffRole(entry.role)
+        && "purpose" in entry && isWorkspacePurpose(entry.purpose))) throw new Error(serviceError);
 
-      if (context?.success !== true || memberships.length === 0) {
+      if (memberships.length === 0) {
         // Приглашённый входит ИМЕННО без членства: оно появляется только при
         // принятии приглашения, для которого нужна живая сессия. Разлогин здесь
         // замыкал круг — /join → «войти» → вход → разлогин → /join.
@@ -195,20 +237,27 @@ export default function Login() {
         // не только ставил ложный диагноз «всё сломалось», но и убивал сессию,
         // без которой человек не мог посмотреть статус своей заявки.
         // Проверка стоит ДО signOut намеренно — маршрут заявок требует JWT.
-        const joinResponse = await crmFetch("/api/crm/join-request").catch(() => null);
-        const joinBody = joinResponse?.ok
-          ? await (joinResponse.json() as Promise<{ data?: { requests?: { status?: string }[] } }>).catch(() => null)
-          : null;
-        const requests = Array.isArray(joinBody?.data?.requests) ? joinBody!.data!.requests! : [];
+        const joinResponse = await crmFetch("/api/crm/join-request", requestOptions);
+        if (!await currentActor()) return;
+        if (!joinResponse.ok) throw new Error(joinResponse.status >= 500 ? serviceError : crmErrorMessage(joinResponse.status));
+        const joinBody = await (joinResponse.json() as Promise<{
+          success?: boolean; data?: { requests?: { status?: string }[] };
+        }>).catch(() => null);
+        if (!await currentActor()) return;
+        if (joinBody?.success !== true || !Array.isArray(joinBody.data?.requests)) throw new Error(serviceError);
+        const requests = joinBody.data.requests;
+        if (!requests.every((request) => !!request && typeof request.status === "string")) throw new Error(serviceError);
         if (requests.some((request) => request.status === "pending" || request.status === "rejected")) {
           setLocation("/join-request");
           return;
         }
 
-        await supabase.auth.signOut();
-        throw new Error(
+        if (!current()) return;
+        toast.error(
           "Аккаунт не привязан к клинике. Если вам присылали ссылку-приглашение — откройте её ещё раз. Если у вас есть код клиники — подайте заявку на странице «Есть код клиники?». Иначе попросите администратора клиники выслать приглашение.",
         );
+        await supabase.auth.signOut();
+        return;
       }
 
       toast.success("Вход выполнен");
@@ -220,9 +269,14 @@ export default function Login() {
         .find((entry) => entry.workspaceId === selectedWorkspaceId || memberships.length === 1);
       setLocation(workspaceEntryRoute(selectedMembership?.purpose ?? null, selectedMembership?.role ?? null));
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Не удалось войти");
+      if (current()) toast.error(error instanceof CrmApiError ? crmErrorMessage(error)
+        : error instanceof Error ? error.message : "Не удалось войти");
     } finally {
-      setLoading(false);
+      subscription?.unsubscribe();
+      if (loginAttempt.current === attempt) {
+        loginAttempt.current = null;
+        setLoading(false);
+      }
     }
   };
 
