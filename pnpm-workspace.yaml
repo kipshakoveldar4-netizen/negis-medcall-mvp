@@ -78,7 +78,7 @@ overrides:
   # Upstream pins lag security fixes; retain each dependency's existing major.
   "js-yaml@4": "4.3.2"
   "smol-toml@1": "1.9.0"
-  "fast-uri@3": "3.1.8"
+  "fast-uri@3": "3.1.9"
   "minimatch@10": "10.2.3"
   "@babel/core@7": "7.29.6"
   "browserslist@4": "4.28.7"

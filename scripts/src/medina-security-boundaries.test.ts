@@ -465,7 +465,7 @@ test("SB unused vulnerable mail and workbook libraries stay out of application d
     }
   }
   const manifest = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"));
-  assert.equal(manifest.dependencies["markdown-it"], "14.3.2");
+  assert.equal(manifest.dependencies["markdown-it"], "14.3.3");
   const installed = JSON.parse(await readFile(path.join(root, "node_modules/markdown-it/package.json"), "utf8"));
   assert.equal(installed.version, manifest.dependencies["markdown-it"]);
   const spec = JSON.parse(await readFile(path.join(root, "lib/api-spec/package.json"), "utf8"));
@@ -584,7 +584,7 @@ test("SB actual generator URI parser normalizes encoded host spelling consistent
   const requireOrval = createRequire(requireSpec.resolve("orval"));
   const requireScalar = createRequire(requireOrval.resolve("@scalar/openapi-parser"));
   const requireAjv = createRequire(requireScalar.resolve("ajv"));
-  assert.equal(requireAjv("fast-uri/package.json").version, "3.1.8");
+  assert.equal(requireAjv("fast-uri/package.json").version, "3.1.9");
   const uri = requireAjv("fast-uri");
   for (const spelling of ["//%41.com", "//A.com", "//a.com"]) {
     assert.equal(uri.parse(spelling).host, "a.com");
