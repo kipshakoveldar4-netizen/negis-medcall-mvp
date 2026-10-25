@@ -10,6 +10,24 @@ export class CreativeImageValidationUnavailable extends Error {
   }
 }
 
+/** Re-encode accepted pixels, not the original container or its private metadata. */
+export async function normalizeCreativeImageBytes(input: { buffer: Buffer; fileName: string; mimeType: string }): Promise<Buffer> {
+  const details = await validateCreativeImageBytes(input);
+  if (details.length) throw new Error(details.join(" "));
+  const mimeType = input.mimeType.trim().toLowerCase();
+  const sharp = await import("sharp").then(module => module.default, () => { throw new CreativeImageValidationUnavailable(); });
+  try {
+    let image = sharp(input.buffer, { failOn: "warning", limitInputPixels: MAX_CREATIVE_IMAGE_PIXELS, animated: true })
+      .autoOrient().toColourspace("srgb").timeout({ seconds: 5 });
+    if (mimeType === "image/jpeg") image = image.jpeg({ quality: 92 });
+    else if (mimeType === "image/png") image = image.png();
+    else image = image.webp({ quality: 92 });
+    const output = await image.toBuffer();
+    if (!output.length || output.length > MAX_CREATIVE_IMAGE_BYTES || sniffImageMimeType(output) !== mimeType) throw new Error();
+    return output;
+  } catch { throw new Error(INVALID_IMAGE); }
+}
+
 function pngNeedsAnimationDecoder(buffer: Buffer): boolean {
   // Sharp's PNG loader may decode only the APNG poster, even with animated:true.
   // Inspect chunk framing, not compressed pixels; native decoding remains mandatory.

@@ -369,6 +369,26 @@ video не проходят новый worker decoder автоматически
 generated variants остаются. Нативная Windows-проверка не равна Linux/container
 или облачной приёмке. Рекламы, расходов и рабочих изменений в этом цикле нет.
 
+G5-C55, foundation: подтверждён пробел public signed upload в текущем server
+handler/callers. Подготовлены private HMAC manifest, bounded read, настоящий
+image pixel normalization без EXIF/XMP/ICC и локальная 087 с restrictive
+Storage policy и immutable verified receipt fields. 142/142 runtime/image,
+18/18 native PostgreSQL. Storage schema scaffold и SDK явно вымышленные,
+не облачная Storage-приёмка. Существующие public signed-upload маршруты
+**ещё не переключены**: требуется API/client integration и live authorization,
+durable admission/quota, atomic finalize/replay, запрет metadata bypass и
+worker для обычного видео. Stateless HMAC не заменяет журнал/retention.
+Нельзя засчитывать ядро как исправление уже опубликованной платформы.
+Прежние строки не backfill-ятся в «проверенные»; существующий бакет с неверными
+настройками миграция не перенастраивает. Guard сохраняет также видимость
+прежних null bucket_id rows. Нового cloud apply/Preview не было.
+Signed upload tokens действуют 2 часа: необходимы expiry/drain и retention,
+не немедленное удаление staging при logout. См.
+[Supabase upload tickets](https://supabase.com/docs/reference/javascript/file-buckets-createsigneduploadurl).
+Полный migration-chain run всё ещё имеет M2 fail: чужая dirty 065 дублирует
+таблицу из 064; обе прежние foreign hashes сохранены, исключений тесту не
+добавлялось. Selected 087 fixture не подменяет этот непройденный общий gate.
+
 Нет основания выставлять «100% защиты» или «100% юридической готовности».
 Изменение исходников не меняет уже опубликованную версию. Отдельно фиксируются
 локальные тесты, проверки Preview, юридическое согласование и рабочий выпуск.

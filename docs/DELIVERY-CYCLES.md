@@ -4436,6 +4436,81 @@ expiry и настоящая внешняя матрица остаются. Н�
 не менялись. Новый UI в этом цикле не создавался, мобильная/desktop приёмка
 предыдущего цикла не выдаётся за проверку облачного worker.
 
+### Цикл G5-C55: закрытая подготовка загрузки — foundation готов локально, интеграция продолжается, 25 октября
+
+По фактическому коду подтверждено: прежний `handleAdCreativeSignedUpload`
+выдаёт token сразу в public `ad-creatives`; проверяется metadata, не байты.
+ContentStudio photo handoff использует эту ссылку без серверной финализации.
+У обычного видео отдельный public signed path, хотя для больших файлов уже
+есть private worker. Наличие image decoder в multipart/generated ветках не
+закрывает signed path. **Эти старые маршруты этим foundation ещё не исправлены.**
+
+Подготовлено общее ядро следующего настоящего handshake, не новый проект:
+
+- HMAC manifest фиксирует version, nonce UUID, workspace/auth/staff identity,
+  имя, MIME, точный размер, issue/expiry. Чужой actor, подмена, неверная
+  подпись, неподдерживаемый/неполный manifest, дополнительные поля и expiry
+  отказаны. Manifest не заменяет живую серверную авторизацию при финализации.
+- Подготовка принимает только подтверждённый private `ad-creatives-staging`
+  с ограниченными типами/размером. `upsert:false` задан именно при выдаче
+  signed token; точные SDK path/origin/token проверяются. Ответ не содержит
+  publicUrl, asset или ложный ready. GetBucket и выдача имеют deadline 10 s;
+  это прекращает ожидание, не отзывает уже созданный сервером Storage token.
+- Private image read выводит URL из проверенного manifest и server config,
+  без browser URL/bucket/path. Проверяются MIME, точный size и 10-секундный
+  read deadline; redirect запрещён, тело ограничено 10 MiB. Видео отказано до
+  чтения/буферизации: оно должно идти в worker, не в этот image API.
+- Реальный Sharp полностью декодирует pixels и canonical re-encode убирает
+  EXIF/XMP/ICC и добавленный payload, применяя EXIF orientation. Локально
+  проверены JPEG/PNG/WebP, повреждения и зависания; ничего не публикуется
+  этим private verification helper. Новая функция нормализации ещё не
+  подключена вместо текущих writers, поэтому их байты не изменились.
+- **087 только локально**, зависимости actual 015 table + 082 + 085 и Storage
+  schema. Она добавляет новый private staging bucket, не перенастраивает
+  существующий; несовпавшие прежние настройки останавливают миграцию.
+  Restrictive policy запрещает browser CRUD его objects даже поверх широких
+  permissive policies, не меняя видимость других бакетов и прежних orphan rows
+  с null bucket_id (`IS DISTINCT FROM`, а не SQL-null-sensitive `<>`). Для будущих
+  проверенных receipts добавлены неизменяемые key/hash/actor/file поля;
+  прежние строки не backfill-ятся и не объявляются проверенными.
+
+Приёмка ядра + прежних image controls: **142/142**. На собственном native
+PostgreSQL 17.11 actual 015 table-only/082/085/087: **18/18**. Storage tables
+в этой фикстуре — явно synthetic schema scaffold; проверены настоящие RLS,
+trigger, rollback и неизменность других строк, **не HTTP API Storage или
+signed token enforcement**. SHA-256 087:
+`6bd1b265223a5b406365a418c910f81cd52467fc6d983746cc9803fd4a484094`.
+SDK/fetch/credentials в runtime suite явно поддельные; image decoder настоящий.
+Логи: `node_modules/.cache/g5c55-{staging-accepted,staging-postgres-final,types-final,`
+`script-types-final,workspace-build,regression}.log`. Повторные поднаборы не
+прибавляются к 142. Полные workspace/API typechecks (оба resolution mode),
+CRM build и 115 cold-start прошли; прежний tooltip sourcemap warning остаётся.
+Отдельная image/generated + migration-chain регрессия: **203 pass / 1 fail**.
+M2 снова обнаружил `crm_appointment_create_requests` и в 064, и в чужой dirty
+065. Её hash до/после остался `162236628994265c1915e8e2eaf304c2374b1b09`;
+HEAD-версия 065 этой таблицы не создаёт. Чужая правка не изменена/не коммитится,
+allowlist не ослаблен, полный migration-chain gate не объявлен пройденным.
+Своя native database удалена; оставшихся postgres-процессов/cluster dirs нет.
+
+Следующий обязательный шаг **этого же G5-C55**: подключить prepare/finalize к
+настоящим API и всем signed-upload callers; сделать durable admission/quota
+для временных файлов и атомарный receipt/replay с живой проверкой членства,
+запретить обход через старые metadata writers,
+направить обычное видео в private worker, проверить смену аккаунта/дубликаты
+в реальном React. Затем G5-C56: generated video variant и бесплатный poll/replay.
+Удалять staging до истечения signed tokens и завершения in-flight uploads
+нельзя без retention/reconcile правила; нужно также учитывать ранее выданные
+public tokens при выпуске. HMAC сам по себе не является журналом операций,
+квотой хранилища или запретом повторного создания после удаления.
+По документации Supabase upload tokens действуют 2 часа и не требуют нового
+входа; browser logout не считается их отзывом. Основания:
+[createSignedUploadUrl](https://supabase.com/docs/reference/javascript/file-buckets-createsigneduploadurl),
+[uploadToSignedUrl](https://supabase.com/docs/reference/javascript/file-buckets-uploadtosignedurl),
+[Sharp metadata/output](https://sharp.pixelplumbing.com/api-output/).
+087 не применялась в Supabase; нового Preview, файлов в облаке, worker,
+рекламы, расходов и изменений рабочих пространств не было. Обход public
+signed path нельзя объявлять закрытым до завершения перечисленной интеграции.
+
 ### Цикл G7-C21: шесть независимых направлений — интеграция локально, 25 октября
 
 После замечания владельца write scopes разделены: G1 operator requests,

@@ -4,6 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "test:staged-creatives": "tsx --test ./src/medina-staged-creative.test.ts ./src/medina-creative-image-bytes.test.ts ./src/medina-creative-image-resource-limits.test.ts",
+    "test:staged-creatives-postgres": "node --test ./fixtures/staged-creative-postgres.test.mjs",
     "test:video-worker-media": "tsx --test ./src/medina-video-worker-media.test.ts",
     "test:video-worker-contract": "tsx ./src/smoke-negis-routes.ts --video-worker-only",
     "test:video-job-promotion-postgres": "node --test ./fixtures/video-job-promotion-postgres.test.mjs",
