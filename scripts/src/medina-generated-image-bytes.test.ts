@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import * as crypto from "node:crypto";
+import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
@@ -21,7 +23,7 @@ const helperSource = await readFile(path.join(root, "lib/crm/creative-image.ts")
 
 type Json = Record<string, unknown>;
 type Image = { buffer: Buffer; fileName: string; mimeType: string };
-type StoreInput = Image & { workspaceId: string; metadata?: Json };
+type StoreInput = Image & { workspaceId: string; metadata?: Json; idempotencyKey?: string };
 type StoreResult = { publicUrl: string; asset: Json; mode: string; warning: string };
 type ImageHelper = {
   validateCreativeImageBytes(input: Image): Promise<string[]>;
@@ -44,6 +46,10 @@ const ASSET = "44444444-4444-4444-8444-444444444444";
 const LIMIT = 10 * 1024 * 1024;
 const ORIGIN = "https://generated-image-storage.invalid";
 const PRIVATE_DETAIL = "SYNTHETIC_PRIVATE_GENERATED_IMAGE_DIAGNOSTIC";
+const KEY = "synthetic-render-1";
+const DIGEST = "8fb7bdc82870eb03a5941acd76ea41f29fa1fbe1869b4d7ba8ec3ad8a5644043";
+const CANONICAL_ID = "fda70de5-673d-57ed-8cfd-7aa74a193832";
+const sha256 = (bytes: Buffer) => crypto.createHash("sha256").update(bytes).digest("hex");
 const observe = <T,>(promise: Promise<T>) => promise.then(value => ({ value, error: undefined }), error => ({ value: undefined, error }));
 const plain = <T,>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 
@@ -97,6 +103,8 @@ for (const name of ["validateCreativeAssetBody", "persistAdCreativeAsset", "conf
   assert.ok(selected.has(declarations.get(name)!), `execute actual ${name}, never a behavior stub`);
 }
 const storeScript = new Script(compile([
+  ...ast.statements.filter(ts.isImportDeclaration).filter(statement => ts.isStringLiteral(statement.moduleSpecifier)
+    && ["./generated-identity", "./generated-storage-verification"].includes(statement.moduleSpecifier.text)).map(statement => statement.getText(ast)),
   ...ast.statements.filter(statement => selected.has(statement)).map(statement => statement.getText(ast)),
   "exports.runtime = { storeGeneratedCreative, MAX_IMAGE_BYTES };",
 ].join("\n"), "generated-image-bytes.actual.ts"), { filename: `${baseline ?? "working-tree"}:generated-image-bytes.actual.cjs` });
@@ -106,6 +114,7 @@ function fixture(options: { helper?: ImageHelper; uploadError?: boolean; persist
   const helper = options.helper ?? actualHelper;
   const events: string[] = [], sdkEvents: string[] = [], logs: string[] = [], forbidden: string[] = [];
   const uploaded: Upload[] = [], inserted: Array<{ table: string; row: Json }> = [], validationInputs: Image[] = [];
+  const lookups: Array<Array<[string, unknown]>> = [];
   const fail = (name: string): never => { forbidden.push(name); throw new Error(`Forbidden test boundary: ${name}`); };
   const sdk = {
     storage: {
@@ -130,13 +139,28 @@ function fixture(options: { helper?: ImageHelper; uploadError?: boolean; persist
       sdkEvents.push("table.from");
       assert.equal(table, "ad_creative_assets");
       return {
+        select(columns: string) {
+          assert.equal(columns, "*");
+          const filters: Array<[string, unknown]> = [];
+          const query = {
+            eq(column: string, value: unknown) { filters.push([column, value]); return this; },
+            limit(count: number) { assert.ok(count >= 2, "Do not hide duplicate keyed rows"); return this; },
+            then(resolve: (result: { data: unknown[]; error: null }) => unknown, reject: (error: unknown) => unknown) {
+              lookups.push(filters);
+              assert.ok(filters.some(([column, value]) => column === "generated_key" && value === `v1:${KEY}`));
+              assert.ok(filters.some(([column, value]) => column === "workspace_id" && value === WORKSPACE));
+              return Promise.resolve({ data: [], error: null }).then(resolve, reject);
+            },
+          };
+          return query;
+        },
         insert(row: Json) {
           sdkEvents.push("insert"); events.push("insert");
           inserted.push({ table, row: plain(row) });
           return { select(columns: string) {
             assert.equal(columns, "*");
             return { async single() {
-              return { data: { ...plain(row), id: ASSET, created_at: "2026-10-25T00:00:00.000Z" },
+              return { data: { ...plain(row), id: row.id ?? ASSET, created_at: "2026-10-25T00:00:00.000Z" },
                 error: options.persistenceError ? new Error(PRIVATE_DETAIL) : null };
             } };
           } };
@@ -144,9 +168,28 @@ function fixture(options: { helper?: ImageHelper; uploadError?: boolean; persist
       };
     },
   };
+  const helpers = new Map<string, Json>();
+  const load = (name: string): unknown => {
+    if (name === "node:crypto") return crypto;
+    if (!["./generated-identity", "./generated-storage-verification"].includes(name)) return fail(`unexpected application import: ${name}`);
+    if (helpers.has(name)) return helpers.get(name);
+    const exported: Json = {};
+    helpers.set(name, exported);
+    new Script(compile(readFileSync(path.join(root, "lib/crm", `${name.slice(2)}.ts`), "utf8"), `${name}.actual.ts`)).runInNewContext({
+      exports: exported, Buffer, Error, URL, AbortController, AbortSignal, setTimeout, clearTimeout,
+      require: load,
+      fetch(url: string, init: RequestInit) {
+        assert.ok(options.uploadError, "Only the upload-error fixture may verify a synthetic object");
+        assert.equal(url, sdk.storage.from(uploaded[0].bucket).getPublicUrl(uploaded[0].key).data.publicUrl);
+        assert.equal(init.method, "GET"); assert.equal(init.redirect, "error"); assert.equal(init.credentials, "omit");
+        return Promise.resolve(new Response(null, { status: 404 }));
+      },
+    }, { timeout: 1000 });
+    return exported;
+  };
   const exported: { runtime?: Runtime } = {};
   storeScript.runInNewContext({
-    exports: exported, Buffer, Error,
+    exports: exported, Buffer, Error, URL, createHash: crypto.createHash, randomUUID: crypto.randomUUID,
     CreativeImageValidationUnavailable: helper.CreativeImageValidationUnavailable,
     async validateCreativeImageBytes(input: Image) {
       events.push("validate:start");
@@ -157,15 +200,15 @@ function fixture(options: { helper?: ImageHelper; uploadError?: boolean; persist
     },
     getSupabaseServerClient: () => sdk,
     process: Object.freeze({ env: Object.freeze({ SUPABASE_URL: ORIGIN }) }),
-    fetch: () => fail("network"), require: () => fail("unexpected application import"),
+    fetch: () => fail("network"), require: load,
     console: { warn: (...args: unknown[]) => logs.push(args.map(String).join(" ")), error: (...args: unknown[]) => logs.push(args.map(String).join(" ")) },
   }, { timeout: 1000 });
   assert.ok(exported.runtime);
   const runtime = exported.runtime;
   assert.equal(runtime.MAX_IMAGE_BYTES, LIMIT);
-  return { uploaded, inserted, events, sdkEvents, validationInputs, logs,
-    async call(input: Image, workspaceId = WORKSPACE, metadata: Json = { source: "synthetic-generated-image", actorId: ACTOR }) {
-      try { return await runtime.storeGeneratedCreative({ ...input, workspaceId, metadata }); }
+  return { uploaded, inserted, events, sdkEvents, validationInputs, logs, lookups,
+    async call(input: Image, workspaceId = WORKSPACE, metadata: Json = { source: "synthetic-generated-image", actorId: ACTOR }, idempotencyKey?: string) {
+      try { return await runtime.storeGeneratedCreative({ ...input, workspaceId, metadata, idempotencyKey }); }
       finally { assert.deepEqual(forbidden, [], "no real SDK, imports, HTTP or external services"); }
     },
   };
@@ -238,7 +281,7 @@ for (const image of [...images, { ...jpeg, format: "JPEG extension alias", fileN
     assert.equal(row.public_url, result.publicUrl);
     assert.equal(result.asset.id, ASSET);
     assert.equal(result.asset.workspaceId, WORKSPACE);
-    assert.deepEqual(row.metadata, { source: "synthetic-generated-image", actorId: ACTOR, uploadMode: "ai-generated" });
+    assert.deepEqual(row.metadata, { source: "synthetic-generated-image", actorId: ACTOR, uploadMode: "ai-generated", contentSha256: sha256(original) });
   });
 }
 
@@ -249,6 +292,34 @@ for (const input of corrupt) {
     noWrites(ctx);
     assert.equal(result.value, undefined);
     safeFailure(result.error);
+  });
+}
+
+for (const image of images) {
+  test(`keyed generated IMAGE decodes real ${image.format} and stores canonical identity, ignoring incoming filename`, async () => {
+    const ctx = fixture();
+    const extension = image.mimeType === "image/jpeg" ? "jpg" : image.mimeType.slice("image/".length);
+    const fileName = `negis-image-${DIGEST.slice(0, 20)}.${extension}`;
+    const result = await ctx.call({ ...image, fileName: "../../ignored-provider-name.bin" }, WORKSPACE,
+      { uploadMode: "forged", generationKey: "forged", contentSha256: "forged" }, KEY);
+    assert.equal(result.mode, "supabase");
+    assert.equal(ctx.validationInputs.length, 1, "The actual native full decode remains required for keyed images");
+    assert.equal(ctx.validationInputs[0].fileName, fileName);
+    assert.equal(ctx.lookups.length, 1);
+    assert.equal(ctx.uploaded.length, 1); assert.equal(ctx.inserted.length, 1);
+    assert.equal(ctx.uploaded[0].key, `${WORKSPACE}/generated/${DIGEST}`);
+    assert.deepEqual(ctx.uploaded[0].buffer, image.buffer);
+    assert.deepEqual(ctx.uploaded[0].options, { contentType: image.mimeType, upsert: false });
+    const row = ctx.inserted[0].row;
+    assert.equal(row.id, CANONICAL_ID); assert.equal(row.file_name, fileName);
+    assert.equal(row.generated_key, `v1:${KEY}`); assert.equal(row.generated_sha256, sha256(image.buffer));
+    assert.deepEqual(row.metadata, { uploadMode: "ai-generated", generationKey: DIGEST, contentSha256: sha256(image.buffer) });
+    assert.equal(result.asset.id, CANONICAL_ID); assert.equal(result.asset.fileName, fileName);
+  });
+  test(`keyed generated IMAGE cannot bypass real ${image.format} decoding with a canonical key`, async () => {
+    const ctx = fixture();
+    const outcome = await observe(ctx.call({ ...image, buffer: image.buffer.subarray(0, 12) }, WORKSPACE, {}, KEY));
+    noWrites(ctx); safeFailure(outcome.error); assert.equal(outcome.value, undefined);
   });
 }
 

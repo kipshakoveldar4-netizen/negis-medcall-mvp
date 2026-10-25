@@ -32,6 +32,7 @@ import {
   type GenerationRefusal,
 } from "../../lib/content-studio/generation";
 import { persistContentVideoPatchIfAvailable, storeGeneratedCreative } from "../../lib/crm/server";
+import { generatedCreativeIdentity, isLegacyGeneratedVideoIdentity } from "../../lib/crm/generated-identity";
 import { resolveTextProvider } from "../../lib/ai/text-provider";
 import {
   billableVideoSeconds,
@@ -883,7 +884,7 @@ function generatedFileName(kind: "photo" | "video", mimeType: string): string {
 }
 
 function requireGeneratedStorageReceipt(value: unknown, expected: {
-  workspaceId: string; fileName: string; mimeType: string; fileSize: number;
+  workspaceId: string; fileName: string; mimeType: string; fileSize: number; idempotencyKey?: string;
 }): asserts value is { publicUrl: string; asset: { id: string }; mode: "supabase"; warning: string } {
   const invalid = () => new Error("generated_storage_receipt_unconfirmed");
   if (!value || typeof value !== "object" || Array.isArray(value)) throw invalid();
@@ -892,11 +893,18 @@ function requireGeneratedStorageReceipt(value: unknown, expected: {
     ? stored.asset as Record<string, unknown> : {};
   if (stored.mode !== "supabase" || stored.warning !== "" || typeof stored.publicUrl !== "string"
     || typeof asset.id !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(asset.id)
-    || asset.workspaceId !== expected.workspaceId || asset.fileName !== expected.fileName
+    || asset.workspaceId !== expected.workspaceId
     || asset.mimeType !== expected.mimeType || asset.fileSize !== expected.fileSize
     || asset.fileType !== (expected.mimeType.startsWith("image/") ? "image" : "video")
     || asset.storageBucket !== "ad-creatives" || typeof asset.storagePath !== "string"
     || !asset.storagePath.startsWith(`${expected.workspaceId}/`) || asset.publicUrl !== stored.publicUrl) throw invalid();
+  if (expected.idempotencyKey !== undefined) {
+    const identity = generatedCreativeIdentity({ ...expected, idempotencyKey: expected.idempotencyKey });
+    const canonical = asset.id === identity.assetId && asset.fileName === identity.fileName && asset.storagePath === identity.storagePath;
+    const legacy = expected.mimeType === "video/mp4" && isLegacyGeneratedVideoIdentity({ ...expected,
+      idempotencyKey: expected.idempotencyKey, fileName: asset.fileName, storagePath: asset.storagePath });
+    if (!canonical && !legacy) throw invalid();
+  } else if (asset.fileName !== expected.fileName) throw invalid();
   const base = (process.env.SUPABASE_URL || "").trim().replace(/\/+$/, "");
   const publicUrl = `${base}/storage/v1/object/public/ad-creatives/${asset.storagePath.split("/").map(encodeURIComponent).join("/")}`;
   if (!base || stored.publicUrl !== publicUrl) throw invalid();
@@ -1184,7 +1192,7 @@ async function handleVideoGeneration(req: VercelRequest, res: VercelResponse, co
     // раз. Ссылка провайдера живёт час, поэтому повтор опроса в этот час ещё
     // может забрать тот же файл: об этом и говорит подсказка.
     try {
-      const fileName = generatedFileName("video", "video/mp4");
+      const fileName = generatedCreativeIdentity({ workspaceId: context.workspaceId, idempotencyKey: jobId, mimeType: "video/mp4" }).fileName;
       const stored = await storeGeneratedCreative({
         workspaceId: context.workspaceId,
         fileName,
@@ -1203,7 +1211,7 @@ async function handleVideoGeneration(req: VercelRequest, res: VercelResponse, co
         // строку в библиотеке: два неразличимых креатива за одну генерацию.
         idempotencyKey: jobId,
       });
-      requireGeneratedStorageReceipt(stored, { workspaceId: context.workspaceId, fileName, mimeType: "video/mp4", fileSize: buffer.length });
+      requireGeneratedStorageReceipt(stored, { workspaceId: context.workspaceId, fileName, mimeType: "video/mp4", fileSize: buffer.length, idempotencyKey: jobId });
 
       return sendJson(res, 200, {
         success: true,
@@ -1214,7 +1222,7 @@ async function handleVideoGeneration(req: VercelRequest, res: VercelResponse, co
           progress: 100,
           creativeUrl: stored.publicUrl,
           assetId: typeof stored.asset.id === "string" ? stored.asset.id : "",
-          fileName,
+          fileName: String((stored.asset as Record<string, unknown>).fileName),
           fileSize: buffer.length,
           mimeType: "video/mp4",
         },

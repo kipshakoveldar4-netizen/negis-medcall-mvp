@@ -699,14 +699,14 @@ test("GEN30 повторный опрос сохраняет ключ и про�
   const server = await readFile(path.join(repoRoot, "lib", "crm", "server.ts"), "utf8");
   const store = server.slice(
     server.indexOf("export async function storeGeneratedCreative"),
-    server.indexOf("async function findAdCreativeByStoragePath"),
+    server.indexOf("async function findGeneratedCreativeRow"),
   );
-  assert.ok(/upsert:\s*Boolean\(idempotencyKey\)/.test(store), "повторяемый вызов перезаписывает свой объект");
-  assert.ok(/findAdCreativeByStoragePath/.test(store), "и не заводит вторую строку в библиотеке");
+  assert.ok(/upsert:\s*false/.test(store), "повторный вызов никогда не перезаписывает готовый объект");
+  assert.ok(/findGeneratedCreativeRow/.test(store), "прежняя запись ищется по постоянному ключу задачи");
 
   const upload = store.indexOf(".upload(storagePath");
   assert.ok(store.indexOf("const publicUrl = buildSupabaseStoragePublicUrl") < upload, "публичный адрес проверяется до загрузки");
-  assert.ok(store.indexOf("await findAdCreativeByStoragePath") < upload, "непроверенная прежняя строка не разрешает перезапись");
+  assert.ok(store.indexOf("const prior = await priorResult()") < upload, "прежняя запись подтверждается до новой загрузки");
   assert.ok(/requireStoredFileProof: true/.test(store), "файл без подтверждённой библиотечной строки не объявляется готовым");
 
   // Security-2F: текст Postgres и Storage наружу не идёт.

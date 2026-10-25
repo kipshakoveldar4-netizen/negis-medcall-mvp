@@ -11,6 +11,8 @@ import { assignedLeadPatch, assignedLeadRouteAllowed, isAssignedLeadRole } from 
 import { normalizeAppointmentServices, readAppointmentServices, summarizeAppointmentServices } from "./appointment-services";
 import { findAppointmentCapacityConflict } from "./appointment-capacity";
 import { CreativeImageValidationUnavailable, validateCreativeImageBytes } from "./creative-image";
+import { generatedCreativeIdentity, isLegacyGeneratedVideoIdentity } from "./generated-identity";
+import { verifyGeneratedStorageBytes } from "./generated-storage-verification";
 import { hidesClientContacts, redactContacts, redactContactsList, stripContactWrites } from "./contact-privacy";
 import { isEmptyIdentity, rowBelongsTo, rowTargetsOnlySelf, seesOnlyOwnWork, type OwnWorkIdentity } from "./own-work";
 import { escapeLikePattern } from "./staff-invitations";
@@ -6430,7 +6432,8 @@ function validateCreativeAssetBody(body: JsonRecord): string[] {
 function storedCreativeRowMatches(value: unknown, workspaceId: string, body: JsonRecord): boolean {
   const row = asRecord(value);
   const expected = configs["ad-creatives"].toRow(body, workspaceId);
-  return isUuid(readString(row.id)) && readString(row.workspace_id).toLowerCase() === workspaceId.toLowerCase()
+  return isUuid(row.id) && typeof row.workspace_id === "string" && row.workspace_id.toLowerCase() === workspaceId.toLowerCase()
+    && (!body.generatedKey || (row.id === body.generatedAssetId && row.generated_key === body.generatedKey && row.generated_sha256 === body.generatedSha256))
     && ["file_name", "file_type", "mime_type", "file_size", "storage_bucket", "storage_path", "public_url"]
       .every((key) => row[key] === expected[key]);
 }
@@ -6450,6 +6453,9 @@ async function persistAdCreativeAsset(input: { workspaceId: string; body: JsonRe
 
   try {
     const row = config.toRow(input.body, input.workspaceId);
+    if (input.requireStoredFileProof && input.body.generatedKey) {
+      row.id = input.body.generatedAssetId; row.generated_key = input.body.generatedKey; row.generated_sha256 = input.body.generatedSha256;
+    }
     const { data, error } = await supabase.from(config.table).insert(row).select("*").single();
     if (error) throw new Error(error.message);
     if (input.requireStoredFileProof && !storedCreativeRowMatches(data, input.workspaceId, input.body)) {
@@ -6510,20 +6516,28 @@ export async function storeGeneratedCreative(input: {
 }): Promise<StoredGeneratedCreative> {
   const supabase = getSupabaseServerClient();
   const storageBucket = AD_CREATIVE_BUCKET;
-  const idempotencyKey = readString(input.idempotencyKey);
-  const storagePath = idempotencyKey
-    ? buildAdCreativeStoragePath({ workspaceId: input.workspaceId, fileName: input.fileName, stableId: idempotencyKey })
-    : buildAdCreativeStoragePath({ workspaceId: input.workspaceId, fileName: input.fileName });
+  const identity = input.idempotencyKey === undefined ? null : generatedCreativeIdentity({ workspaceId: input.workspaceId,
+    idempotencyKey: input.idempotencyKey, mimeType: input.mimeType });
+  const workspaceId = input.workspaceId.toLowerCase();
+  const idempotencyKey = input.idempotencyKey;
+  const storagePath = identity
+    ? identity.storagePath
+    : buildAdCreativeStoragePath({ workspaceId, fileName: input.fileName });
+  const incomingDetails = validateCreativeAssetBody({ fileName: input.fileName, mimeType: input.mimeType, fileSize: input.buffer.length });
+  if (!identity && incomingDetails.length) throw new Error(incomingDetails.join("; "));
   const body: JsonRecord = {
-    workspaceId: input.workspaceId,
-    fileName: input.fileName,
-    fileType: normalizeCreativeFileType({ fileName: input.fileName, mimeType: input.mimeType }),
+    workspaceId,
+    fileName: identity?.fileName || input.fileName,
+    fileType: normalizeCreativeFileType({ fileName: identity?.fileName || input.fileName, mimeType: input.mimeType }),
     mimeType: input.mimeType,
     fileSize: input.buffer.length,
     storageBucket,
     storagePath,
     status: "uploaded",
-    metadata: { ...(input.metadata || {}), uploadMode: "ai-generated" },
+    ...(identity ? { generatedAssetId: identity.assetId, generatedKey: `v1:${idempotencyKey}` } : {}),
+    metadata: { ...(input.metadata || {}), uploadMode: "ai-generated",
+      ...(identity ? { generationKey: identity.keyDigest,
+        ...(input.mimeType.startsWith("video/") ? { jobId: idempotencyKey } : {}) } : {}) },
   };
 
   // Тот же список допустимых типов и тот же предел размера, что и на ручной
@@ -6545,10 +6559,13 @@ export async function storeGeneratedCreative(input: {
 
   if (body.fileType === "image") {
     const imageDetails = await validateCreativeImageBytes({
-      buffer: input.buffer, fileName: input.fileName, mimeType: input.mimeType,
+      buffer: input.buffer, fileName: readString(body.fileName), mimeType: input.mimeType,
     });
     if (imageDetails.length > 0) throw new Error(imageDetails.join("; "));
   }
+  const sha256 = createHash("sha256").update(input.buffer).digest("hex");
+  body.metadata = { ...asRecord(body.metadata), contentSha256: sha256 };
+  if (identity) body.generatedSha256 = sha256;
 
   const publicUrl = buildSupabaseStoragePublicUrl({ bucket: storageBucket, storagePath });
   let sdkPublicUrl: unknown;
@@ -6558,34 +6575,52 @@ export async function storeGeneratedCreative(input: {
     throw new Error("Хранилище не подтвердило публичный адрес сгенерированного файла.");
   }
   body.publicUrl = publicUrl;
-  if (idempotencyKey) {
-    const existing = await findAdCreativeByStoragePath({ workspaceId: input.workspaceId, storagePath, body });
-    if (existing) return { publicUrl, asset: existing, mode: "supabase", warning: "" };
+  async function priorResult(): Promise<StoredGeneratedCreative | null> {
+    if (!identity || idempotencyKey === undefined) return null;
+    const row = await findGeneratedCreativeRow({ workspaceId, generatedKey: `v1:${idempotencyKey}` });
+    if (!row) return null;
+    let expected = body;
+    if (row.generated_sha256 === null && input.mimeType === "video/mp4"
+      && isLegacyGeneratedVideoIdentity({ workspaceId: input.workspaceId, idempotencyKey, fileName: row.file_name, storagePath: row.storage_path })) {
+      expected = { ...body, generatedAssetId: row.id, generatedSha256: null, fileName: row.file_name, storagePath: row.storage_path,
+        publicUrl: buildSupabaseStoragePublicUrl({ bucket: storageBucket, storagePath: readString(row.storage_path) }) };
+    }
+    if (!storedCreativeRowMatches(row, workspaceId, expected)) {
+      throw new Error("Не удалось подтвердить идентичность прежнего сгенерированного файла.");
+    }
+    await confirmObject(readString(expected.publicUrl));
+    return { publicUrl: readString(expected.publicUrl), asset: configs["ad-creatives"].fromRow(row), mode: "supabase", warning: "" };
   }
+  async function confirmObject(url: string) {
+    try { await verifyGeneratedStorageBytes({ publicUrl: url, mimeType: input.mimeType, size: input.buffer.length, sha256 }); }
+    catch { throw new Error("Хранилище не подтвердило байты прежнего сгенерированного файла."); }
+  }
+  const prior = await priorResult();
+  if (prior) return prior;
 
-  // Legacy keyed upsert is not an atomic idempotency claim. Without a key,
-  // reject collisions instead of overwriting an existing object.
+  // Create-only Storage plus a database unique identity: never overwrite on a retry.
   let upload: { data: unknown; error: unknown };
   try {
     upload = await supabase.storage.from(storageBucket).upload(storagePath, input.buffer, {
       contentType: input.mimeType,
-      upsert: Boolean(idempotencyKey),
+      upsert: false,
     });
-  } catch { throw new Error("Хранилище не подтвердило загрузку сгенерированного файла."); }
+  } catch { upload = { data: null, error: true }; }
   if (upload.error || asRecord(upload.data).path !== storagePath) {
-    // Keep raw Storage policy and object details out of the caller response.
-    throw new Error(
-      "Хранилище не подтвердило загрузку сгенерированного файла.",
-    );
+    if (!identity) throw new Error("Хранилище не подтвердило загрузку сгенерированного файла.");
+    await confirmObject(publicUrl);
   }
 
-  const saved = await persistAdCreativeAsset({
-    workspaceId: input.workspaceId,
-    body: { ...body, publicUrl },
-    requireStoredFileProof: true,
-  });
+  let saved: Awaited<ReturnType<typeof persistAdCreativeAsset>>;
+  try {
+    saved = await persistAdCreativeAsset({ workspaceId, body: { ...body, publicUrl }, requireStoredFileProof: true });
+  } catch (error) {
+    const recovered = await priorResult();
+    if (recovered) return recovered;
+    throw error;
+  }
   const asset = asRecord(saved.asset);
-  if (saved.mode !== "supabase" || !isUuid(readString(asset.id)) || asset.workspaceId !== input.workspaceId
+  if (saved.mode !== "supabase" || !isUuid(readString(asset.id)) || asset.workspaceId !== workspaceId
     || asset.fileName !== body.fileName || asset.fileType !== body.fileType || asset.mimeType !== body.mimeType
     || asset.fileSize !== body.fileSize || asset.storageBucket !== storageBucket || asset.storagePath !== storagePath
     || asset.publicUrl !== publicUrl || saved.warning) {
@@ -6613,10 +6648,9 @@ export async function storeGeneratedCreative(input: {
  * служебным клиентом в обход RLS, и ключ объекта хоть и начинается с сегмента
  * рабочего пространства, но это свойство пути, а не проверка.
  */
-async function findAdCreativeByStoragePath(input: {
+async function findGeneratedCreativeRow(input: {
   workspaceId: string;
-  storagePath: string;
-  body: JsonRecord;
+  generatedKey: string;
 }): Promise<JsonRecord | null> {
   const supabase = getSupabaseServerClient();
   if (!supabase) return null;
@@ -6626,13 +6660,12 @@ async function findAdCreativeByStoragePath(input: {
       .from("ad_creative_assets")
       .select("*")
       .eq("workspace_id", input.workspaceId)
-      .eq("storage_path", input.storagePath)
+      .eq("generated_key", input.generatedKey)
       .limit(2);
-    if (error || !Array.isArray(data) || data.length > 1
-      || (data.length === 1 && !storedCreativeRowMatches(data[0], input.workspaceId, input.body))) {
+    if (error || !Array.isArray(data) || data.length > 1) {
       throw new Error("generated_asset_lookup_unconfirmed");
     }
-    return data.length > 0 ? configs["ad-creatives"].fromRow(asRecord(data[0])) : null;
+    return data.length > 0 ? asRecord(data[0]) : null;
   } catch (error) {
     console.warn("[crm] generated asset lookup unconfirmed");
     throw new Error("Не удалось подтвердить прежний файл. Повторите проверку, не запуская новую генерацию.");

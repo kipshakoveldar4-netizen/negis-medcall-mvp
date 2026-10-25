@@ -6,6 +6,12 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { Script } from "node:vm";
+const { generatedCreativeIdentity, isLegacyGeneratedVideoIdentity } = createRequire(import.meta.url)("../../lib/crm/generated-identity.ts") as {
+  generatedCreativeIdentity(input: { workspaceId: unknown; idempotencyKey: unknown; mimeType: unknown }): {
+    assetId: string; fileName: string; storagePath: string; keyDigest: string;
+  };
+  isLegacyGeneratedVideoIdentity(input: { workspaceId: string; idempotencyKey: string; fileName: unknown; storagePath: unknown }): boolean;
+};
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const apiPath = "api/content-studio/[...path].ts";
@@ -128,6 +134,7 @@ function fixture(options: Options = {}) {
     return { mode: "synthetic", data: { ...textData } };
   };
   const dependencies = {
+    generatedCreativeIdentity, isLegacyGeneratedVideoIdentity,
     randomUUID: () => requestKey,
     resolveTextProvider: () => "openai",
     readGenerationConfig: () => config,
@@ -200,11 +207,14 @@ function fixture(options: Options = {}) {
       events.push("store");
       stores.push(plain(input));
       if (options.failAt === "store") fail();
-      return { publicUrl: safeUrl, mode: "supabase", warning: "", asset: {
-        id: assetId, workspaceId: input.workspaceId, fileName: input.fileName,
+      const identity = input.idempotencyKey === undefined ? null : generatedCreativeIdentity(input as { workspaceId: unknown; idempotencyKey: unknown; mimeType: unknown });
+      const objectPath = identity?.storagePath || storagePath;
+      const url = `${storageOrigin}/storage/v1/object/public/ad-creatives/${objectPath}`;
+      return { publicUrl: url, mode: "supabase", warning: "", asset: {
+        id: identity?.assetId || assetId, workspaceId: input.workspaceId, fileName: input.fileName,
         fileType: String(input.mimeType).startsWith("image/") ? "image" : "video",
         mimeType: input.mimeType, fileSize: (input.buffer as Uint8Array).length,
-        storageBucket: "ad-creatives", storagePath, publicUrl: safeUrl,
+        storageBucket: "ad-creatives", storagePath: objectPath, publicUrl: url,
       } };
     },
     fetch() { calls.network++; assert.fail("real network must never be reached"); },
@@ -473,8 +483,9 @@ test("content privacy: completed video positive control stores the same job with
   assert.equal(result.reply.success, true);
   assert.equal(result.reply.data?.status, "completed");
   assert.equal(result.reply.data?.progress, 100);
-  assert.equal(result.reply.data?.creativeUrl, safeUrl);
-  assert.equal(result.reply.data?.assetId, assetId);
+  const identity = generatedCreativeIdentity({ workspaceId: context.workspaceId, idempotencyKey: "synthetic-job", mimeType: "video/mp4" });
+  assert.equal(result.reply.data?.creativeUrl, `${storageOrigin}/storage/v1/object/public/ad-creatives/${identity.storagePath}`);
+  assert.equal(result.reply.data?.assetId, identity.assetId);
   assert.equal(result.reply.data?.mimeType, "video/mp4");
   assert.deepEqual(f.events, ["poll", "download", "store"]);
   assert.equal(f.calls.create, 0);
