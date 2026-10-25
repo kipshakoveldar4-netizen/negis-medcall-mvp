@@ -1,7 +1,11 @@
-export type DeletionRequest = (path: string, init?: RequestInit) => Promise<Response>;
+import { parseSiteDeletionOperationResponse, siteDeletionIntentBody } from "./siteDeletionOperations";
+
+export type DeletionRequestInit = RequestInit & { dispatchGuard?: () => boolean };
+export type DeletionRequest = (path: string, init?: DeletionRequestInit) => Promise<Response>;
 // Owners may retire an actor/session epoch without waiting for a React render.
 // Once false, that epoch must never become current again (including A/B/A).
 export type DeletionLifetime = {
+  actorId?: string;
   isCurrent: () => boolean;
   subscribe?: (listener: () => void) => () => void;
 };
@@ -58,6 +62,9 @@ const conflictMessages: Record<string, string> = {
   site_deletion_disabled: "Удаление для этого сайта отключено.",
   site_inquiry_not_found: "Заявка больше недоступна. Обновите список заявок.",
   deletion_request_conflict: "Запрос не соответствует подтверждённому составу. Проверьте состав заново.",
+  deletion_operation_not_prepared: "Подтверждение запроса не сохранено. Проверьте операции удаления.",
+  deletion_operation_abandoned: "Выполнение этого запроса отменено.",
+  deletion_operation_capacity: "Журнал операций заполнен. Нужен разбор сохранённых подтверждений.",
   invalid_deletion_request: "Не удалось подтвердить состав. Проверьте его заново.",
 };
 
@@ -107,7 +114,7 @@ export function createSiteInquiryDeletion(workspaceId: string, leadId: string, r
       try {
         if (!uuid.test(workspaceId) || !uuid.test(leadId)) throw new Error("invalid_scope");
         if (!isCurrent()) return;
-        const response = await request(`/api/crm/site-inquiry-deletion-preview?workspaceId=${encodeURIComponent(workspaceId)}&leadId=${encodeURIComponent(leadId)}`, { cache: "no-store" });
+        const response = await request(`/api/crm/site-inquiry-deletion-preview?workspaceId=${encodeURIComponent(workspaceId)}&leadId=${encodeURIComponent(leadId)}`, { cache: "no-store", dispatchGuard: isCurrent });
         if (!isCurrent() || current !== revision) return;
         const scope = response.ok ? parseDeletionScope(await response.json(), leadId) : null;
         if (!isCurrent() || current !== revision) return;
@@ -142,8 +149,29 @@ export function createSiteInquiryDeletion(workspaceId: string, leadId: string, r
       set({ ...state, phase: "submitting", message: "" });
       try {
         if (!isCurrent()) return;
-        const response = await request(base, { method: "POST", headers: { "Content-Type": "application/json" }, body: submission, cache: "no-store" });
+        const preparedResponse = await request(`/api/crm/site-inquiry-deletion-operations?workspaceId=${encodeURIComponent(workspaceId)}`, {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "prepare", request: JSON.parse(submission!) }), cache: "no-store", dispatchGuard: isCurrent,
+        });
         if (!isCurrent() || current !== revision) return;
+        if (preparedResponse.status === 401 || preparedResponse.status === 403) { dispose(); return; }
+        const preparedBody: unknown = await preparedResponse.json();
+        if (!isCurrent() || current !== revision) return;
+        const prepared = preparedResponse.ok ? parseSiteDeletionOperationResponse(preparedBody, workspaceId, lifetime?.actorId) : null;
+        if (!prepared || siteDeletionIntentBody(prepared.request) !== submission) throw new Error("unconfirmed_preparation");
+        if (prepared.state === "abandoned") {
+          submission = null;
+          set({ phase: "error", visible: true, scope: null, confirmed: false, message: conflictMessages.deletion_operation_abandoned });
+          return;
+        }
+        if (prepared.state === "committed") {
+          submission = null;
+          set({ phase: "done", visible: true, scope: null, confirmed: false, message: "Заявка и её копии согласия удалены." });
+          return;
+        }
+        if (!isCurrent()) return;
+        const response = await request(base, { method: "POST", headers: { "Content-Type": "application/json" }, body: submission, cache: "no-store", dispatchGuard: isCurrent });
+        if (!isCurrent() || current !== revision) return;
+        if (response.status === 401 || response.status === 403) { dispose(); return; }
         const body = record(await response.json());
         if (!isCurrent() || current !== revision) return;
         const result = record(body?.data);

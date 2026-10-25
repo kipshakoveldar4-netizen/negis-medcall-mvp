@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useLocation } from "wouter";
 import { Loader2, ShieldCheck } from "lucide-react";
 import { crmFetch, crmJson, crmErrorMessage, CrmApiError } from "@/lib/api";
@@ -6,6 +6,8 @@ import { supabase, hasSupabaseFrontendEnv } from "@/lib/supabase";
 import { toast } from "sonner";
 import { isSyntheticEmail } from "../../../../lib/auth/staff-logins";
 import { WORKSPACE_SELECTOR_KEY } from "@/lib/demoStorage";
+import { useAuth } from "@/contexts/AuthContext";
+import { getSignOutRevision, isSignOutPending } from "@/lib/authSignOut";
 
 // Commercial-3B — the invited person's half of enrollment.
 //
@@ -28,7 +30,43 @@ type Phase = "checking" | "needs-auth" | "ready" | "joining" | "joined" | "error
  */
 export const PENDING_INVITE_KEY = "negis_pending_invite";
 
+type InviteLifetime = {
+  active: boolean;
+  actorId: string;
+  email: string;
+  sdkToken?: string;
+  signOutRevision: number;
+  actionRevision: number;
+  pending: AbortController | null;
+  recoveryPending: boolean;
+  accepted: boolean;
+  redirect?: ReturnType<typeof setTimeout>;
+};
+
+function newLifetime(): InviteLifetime {
+  return { active: true, actorId: "", email: "", signOutRevision: getSignOutRevision(),
+    actionRevision: 0, pending: null, recoveryPending: false, accepted: false };
+}
+
+function retire(lifetime: InviteLifetime) {
+  lifetime.active = false;
+  lifetime.pending?.abort();
+  if (lifetime.redirect !== undefined) clearTimeout(lifetime.redirect);
+}
+
 export default function JoinWorkspace() {
+  const auth = useAuth();
+  const token = useInvitationToken();
+  const contextKey = JSON.stringify([auth.user?.id, auth.session?.user.id, auth.clinicId, auth.userRole,
+    auth.workspacePurpose, auth.vertical, auth.isSigningOut, auth.isDemoMode, auth.isImpersonation,
+    Object.entries(auth.rolePermissions ?? {}).sort(([left], [right]) => left.localeCompare(right))]);
+  return <JoinWorkspaceSession key={contextKey} token={token}
+    contextActor={auth.session?.user.id || auth.user?.id}
+    blocked={auth.isSigningOut || auth.isDemoMode || auth.isImpersonation
+      || Boolean(auth.user && auth.session && auth.user.id !== auth.session.user.id)} />;
+}
+
+function JoinWorkspaceSession({ token, blocked, contextActor }: { token: string; blocked: boolean; contextActor?: string }) {
   const [, setLocation] = useLocation();
   const [phase, setPhase] = useState<Phase>("checking");
   const [email, setEmail] = useState("");
@@ -37,62 +75,49 @@ export default function JoinWorkspace() {
   const [recoveryEmail, setRecoveryEmail] = useState("");
   const [recoverySending, setRecoverySending] = useState(false);
   const [recoverySent, setRecoverySent] = useState(false);
+  const [lookupRevision, setLookupRevision] = useState(0);
+  const mounted = useRef(false);
+  const lifetime = useRef<InviteLifetime>({ ...newLifetime(), active: false });
+  const scope = lifetime.current;
+  const actionRevision = scope.actionRevision;
+  const isCurrent = () => scope.active && lifetime.current === scope && !blocked
+    && !isSignOutPending() && scope.signOutRevision === getSignOutRevision();
+  const canAct = () => isCurrent() && scope.actionRevision === actionRevision
+    && !scope.pending && !scope.recoveryPending && !scope.accepted;
 
   const sendRecovery = async () => {
-    if (recoverySending || !recoveryEmail.trim()) return;
+    if (!canAct() || phase !== "needs-auth" || !recoveryEmail.trim()) return;
     // У входа по логину почты нет: письмо ушло бы в домен без MX, а человек
     // ждал бы его вместо того, чтобы попросить пароль у администратора.
     if (isSyntheticEmail(recoveryEmail.trim())) {
       toast.error("У логина нет почты — новый пароль задаёт администратор клиники.");
       return;
     }
+    scope.recoveryPending = true;
+    scope.actionRevision += 1;
     setRecoverySending(true);
     try {
       await supabase.auth.resetPasswordForEmail(recoveryEmail.trim(), {
         redirectTo: `${window.location.origin}/reset-password`,
       });
-      setRecoverySent(true);
+      if (isCurrent()) setRecoverySent(true);
     } catch {
       // Один ответ на любой исход: существование аккаунта — не для угадывания.
-      setRecoverySent(true);
+      if (isCurrent()) setRecoverySent(true);
     } finally {
-      setRecoverySending(false);
+      if (isCurrent()) { scope.recoveryPending = false; setRecoverySending(false); }
     }
   };
 
-  // Read once — from the query или из старого фрагмента — и сразу убрать из
-  // адресной строки. Query выбран основным сознательно: WhatsApp и другие
-  // мессенджеры отбрасывают часть ссылки после «#» при открытии во встроенном
-  // браузере, и первая же настоящая передача салона сломалась ровно на этом.
-  // Токен одноразовый, привязан к почте и хранится хэшем — сам по себе он не
-  // открывает ничего. Значение живёт только в памяти этого компонента.
-  const token = useMemo(() => {
-    if (typeof window === "undefined") return "";
-    const fromQuery = new URLSearchParams(window.location.search).get("token")?.trim() || "";
-    const rawHash = window.location.hash.startsWith("#") ? window.location.hash.slice(1) : "";
-    const fromHash = new URLSearchParams(rawHash).get("token")?.trim() || "";
-    // Отложенный токен — возврат из похода за паролем: адресная строка уже
-    // чистая, а приглашение ещё не принято.
-    let stashed = "";
-    try {
-      stashed = window.sessionStorage.getItem(PENDING_INVITE_KEY)?.trim() || "";
-    } catch {
-      // Приватный режим без хранилища — работаем только с адресной строкой.
-    }
-    const captured = fromQuery || fromHash || stashed;
-    if (fromQuery || fromHash) {
-      window.history.replaceState(null, "", window.location.pathname);
-    }
-    return captured;
-  }, []);
-
   /** Уходя за паролем, откладываем токен: вернуться по ссылке уже нельзя. */
   function stashToken() {
+    if (!canAct()) return false;
     try {
       if (token) window.sessionStorage.setItem(PENDING_INVITE_KEY, token);
     } catch {
       // Нет хранилища — пусть возвращается по исходной ссылке.
     }
+    return true;
   }
 
   function clearStashedToken() {
@@ -103,9 +128,39 @@ export default function JoinWorkspace() {
     }
   }
 
-  useEffect(() => {
-    let cancelled = false;
-
+  useLayoutEffect(() => {
+    mounted.current = true;
+    let active = true;
+    let resolved = false;
+    let live = newLifetime();
+    lifetime.current = live;
+    const reset = () => {
+      setPhase("checking"); setEmail(""); setMessage(""); setFullName("");
+      setRecoveryEmail(""); setRecoverySending(false); setRecoverySent(false);
+    };
+    reset();
+    // SDK events invalidate immediately, even before React commits an account switch.
+    const publish = (session: { user: { id: string; email?: string }; access_token?: string } | null, event = "") => {
+      if (!active || (event === "INITIAL_SESSION" && resolved)) return;
+      const actorId = session?.user.id || "";
+      const sessionEmail = session?.user.email || "";
+      if (resolved && live.actorId === actorId && live.email === sessionEmail
+        && !(event === "SIGNED_IN" && live.sdkToken !== session?.access_token)) {
+        live.sdkToken = session?.access_token;
+        return;
+      }
+      resolved = true;
+      retire(live);
+      live = newLifetime();
+      live.actorId = actorId; live.email = sessionEmail; live.sdkToken = session?.access_token;
+      lifetime.current = live;
+      reset();
+      if (actorId && contextActor && actorId !== contextActor) return;
+      setEmail(sessionEmail);
+      setPhase(actorId && sessionEmail ? "ready" : "needs-auth");
+    };
+    const lookupCurrent = () => active && !resolved && live.active && !isSignOutPending()
+      && live.signOutRevision === getSignOutRevision();
     const resolve = async () => {
       if (!token) {
         setPhase("error");
@@ -117,65 +172,99 @@ export default function JoinWorkspace() {
         setMessage("Вход недоступен: не настроен Supabase.");
         return;
       }
-
-      const { data } = await supabase.auth.getSession();
-      if (cancelled) return;
-
-      const sessionEmail = data.session?.user?.email || "";
-      if (!sessionEmail) {
-        setPhase("needs-auth");
-        return;
+      try {
+        const { data, error } = await supabase.auth.getSession();
+        if (!lookupCurrent()) return;
+        if (error) throw error;
+        publish(data.session);
+      } catch (error) {
+        if (!lookupCurrent()) return;
+        setPhase("error"); setMessage(crmErrorMessage(error));
       }
-
-      setEmail(sessionEmail);
-      setPhase("ready");
     };
-
-    void resolve();
-    // The invite email lands here after Supabase sets the session, so react to
-    // that rather than only to the first render.
-    const { data: listener } = supabase.auth.onAuthStateChange(() => {
-      void resolve();
-    });
-
+    const listener = token && hasSupabaseFrontendEnv && !blocked
+      ? supabase.auth.onAuthStateChange((event, session) => {
+        if (isSignOutPending() || live.signOutRevision !== getSignOutRevision()) {
+          retire(live); if (active) reset(); return;
+        }
+        publish(session, event);
+      }).data.subscription : undefined;
+    if (!blocked) void resolve();
     return () => {
-      cancelled = true;
-      listener?.subscription?.unsubscribe();
+      mounted.current = false;
+      active = false;
+      retire(live);
+      listener?.unsubscribe();
     };
-  }, [token]);
+  }, [token, blocked, contextActor, lookupRevision]);
+
+  function goToLogin() {
+    if (!canAct()) return;
+    stashToken(); setLocation("/login");
+    retire(scope);
+  }
+
+  function switchAccount() {
+    if (!stashToken()) return;
+    retire(scope);
+    setPhase("checking");
+    void supabase.auth.signOut().then(({ error }) => {
+      if (!mounted.current || lifetime.current !== scope) return;
+      if (error && scope.active === false) setLookupRevision(value => value + 1);
+    }).catch(() => {
+      if (mounted.current && lifetime.current === scope) setLookupRevision(value => value + 1);
+    });
+  }
 
   async function accept() {
+    if (!canAct() || !scope.actorId || (phase !== "ready" && phase !== "error")) return;
+    const abort = new AbortController();
+    scope.pending = abort;
+    scope.actionRevision += 1;
+    const current = () => isCurrent() && scope.pending === abort;
     setPhase("joining");
     setMessage("");
     try {
       const response = await crmFetch("/api/crm/staff-invitations/accept", {
         method: "POST",
+        expectedUserId: scope.actorId,
+        dispatchGuard: current,
+        signal: abort.signal,
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ token, fullName: fullName.trim() || undefined }),
       });
-      const body = await crmJson<{ data?: { workspaceId?: string } }>(response);
-      const workspaceId = body.data?.workspaceId;
+      const body = await crmJson<{ success?: boolean; data?: { workspaceId?: string } }>(response);
+      if (!current()) return;
+      const workspaceId = body?.data?.workspaceId;
+      if (body?.success !== true || typeof workspaceId !== "string" || !workspaceId.trim()) {
+        throw new Error("Invalid invitation response");
+      }
       if (workspaceId) {
         // The bootstrap will confirm this against the server on the next load;
         // writing it here only saves the new member a workspace choice.
         window.localStorage.setItem(WORKSPACE_SELECTOR_KEY, workspaceId);
       }
       clearStashedToken();
+      scope.accepted = true;
       setPhase("joined");
       // Полная навигация, а не SPA-переход: членство появилось секунду назад,
       // AuthContext о нём не знает, и клиентский роутер вышвыривал новичка с
       // /dashboard на маркетинговый лендинг. Перезагрузка перечитывает
       // членства с сервера — человек попадает в свой кабинет.
-      setTimeout(() => {
+      scope.redirect = setTimeout(() => {
+        if (!isCurrent() || !scope.accepted) return;
         window.location.assign(`${window.location.origin}${import.meta.env.BASE_URL || "/"}dashboard`.replace(/\/{2,}dashboard$/, "/dashboard"));
       }, 1400);
     } catch (error) {
+      if (!current()) return;
       setPhase("error");
       if (error instanceof CrmApiError) {
         setMessage(invitationMessage(error));
         return;
       }
       setMessage(crmErrorMessage(error));
+    } finally {
+      if (current()) scope.pending = null;
     }
   }
 
@@ -210,7 +299,7 @@ export default function JoinWorkspace() {
               type="email"
               placeholder="Почта из приглашения"
               value={recoveryEmail}
-              onChange={(event) => setRecoveryEmail(event.target.value)}
+              onChange={(event) => { if (canAct()) setRecoveryEmail(event.target.value); }}
             />
             {recoverySent ? (
               <p className="rounded-2xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-800">
@@ -221,7 +310,7 @@ export default function JoinWorkspace() {
                 type="button"
                 className="neu-btn w-full justify-center"
                 disabled={recoverySending}
-                onClick={() => { stashToken(); void sendRecovery(); }}
+                onClick={() => { if (stashToken()) void sendRecovery(); }}
               >
                 {recoverySending ? "Отправляем письмо…" : "Выслать письмо для пароля"}
               </button>
@@ -231,7 +320,7 @@ export default function JoinWorkspace() {
             <button
               type="button"
               className="neu-btn-primary w-full justify-center"
-              onClick={() => { stashToken(); setLocation("/login"); }}
+              onClick={goToLogin}
             >
               У меня есть пароль — войти
             </button>
@@ -248,7 +337,8 @@ export default function JoinWorkspace() {
               className="neu-input"
               placeholder="Как вас показывать коллегам"
               value={fullName}
-              onChange={(event) => setFullName(event.target.value)}
+              disabled={phase === "joining"}
+              onChange={(event) => { if (canAct()) setFullName(event.target.value); }}
             />
             <button
               type="button"
@@ -266,7 +356,7 @@ export default function JoinWorkspace() {
               type="button"
               className="neu-btn w-full justify-center"
               disabled={phase === "joining"}
-              onClick={() => { stashToken(); void supabase.auth.signOut(); }}
+              onClick={switchAccount}
             >
               Это не я — войти под другой почтой
             </button>
@@ -283,15 +373,25 @@ export default function JoinWorkspace() {
           <div className="mt-4 grid gap-3">
             <p className="rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800">{message}</p>
             {email ? (
+              <button type="button" className="neu-btn-primary w-full justify-center" onClick={accept}>
+                Повторить
+              </button>
+            ) : token && hasSupabaseFrontendEnv && !blocked ? (
+              <button type="button" className="neu-btn w-full justify-center"
+                onClick={() => { if (canAct()) setLookupRevision(value => value + 1); }}>
+                Проверить снова
+              </button>
+            ) : null}
+            {email ? (
               <button
                 type="button"
                 className="neu-btn w-full justify-center"
-                onClick={() => { stashToken(); void supabase.auth.signOut(); }}
+                onClick={switchAccount}
               >
                 Войти под другой почтой
               </button>
             ) : null}
-            <button type="button" className="neu-btn w-full justify-center" onClick={() => { stashToken(); setLocation("/login"); }}>
+            <button type="button" className="neu-btn w-full justify-center" onClick={goToLogin}>
               Ко входу
             </button>
           </div>
@@ -299,6 +399,21 @@ export default function JoinWorkspace() {
       </section>
     </div>
   );
+}
+
+function useInvitationToken() {
+  // Capture before stripping the URL; keep the token across account/workspace remounts.
+  return useMemo(() => {
+    if (typeof window === "undefined") return "";
+    const fromQuery = new URLSearchParams(window.location.search).get("token")?.trim() || "";
+    const rawHash = window.location.hash.startsWith("#") ? window.location.hash.slice(1) : "";
+    const fromHash = new URLSearchParams(rawHash).get("token")?.trim() || "";
+    let stashed = "";
+    try { stashed = window.sessionStorage.getItem(PENDING_INVITE_KEY)?.trim() || ""; } catch { /* Storage is optional. */ }
+    const captured = fromQuery || fromHash || stashed;
+    if (fromQuery || fromHash) window.history.replaceState(null, "", window.location.pathname);
+    return captured;
+  }, []);
 }
 
 /** Russian copy for the states an invited person can actually reach. */

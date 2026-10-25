@@ -33,8 +33,14 @@ const preview=(lead=ids.la,count=1)=>({success:true,data:{leadId:lead,leadUpdate
  confirmationRequired:true,deletionEnabled:true,deletionAvailability:'confirmation_required'}});
 const success=(count=1)=>({success:true,data:{deleted:true,receiptsDeleted:count,replayed:false}});
 let app,props,mounted=false,seq=0,transport=0;
-const f={ids,preview,success,calls:[],notices:[],evidence:[],captured:[],flows:[],
+const f={ids,preview,success,calls:[],preparations:[],notices:[],evidence:[],captured:[],flows:[],
  request(){const generation=++transport;return(path,init={})=>new Promise((resolve,reject)=>{
+  if(init.dispatchGuard&&!init.dispatchGuard()){reject(new DOMException('Retired','AbortError'));return;}
+  if(path.startsWith('/api/crm/site-inquiry-deletion-operations?')){
+   const body=JSON.parse(init.body);if(body.action!=='prepare')throw Error('Unexpected preparation');f.preparations.push({path,body});
+   resolve(Response.json({success:true,data:{operation:{workspaceId:new URL(path,'http://fixture.invalid').searchParams.get('workspaceId'),
+    actorId:ids.ra,requestKey:body.request.requestKey,leadId:body.request.leadId,request:body.request,state:'prepared',createdAt:version,
+    completedAt:null,acknowledgedAt:null,receiptsDeleted:null,replayed:false}}}));return;}
   if(!/^\\/api\\/crm\\/site-inquiry-deletion(?:-preview)?\\?/.test(path))throw Error('Unrelated fake HTTP');
   f.calls.push({id:++seq,generation,path,init,resolve,reject,settled:false});});},
  lifetime(){let current=true;const listeners=new Set();const owner={isCurrent:()=>current,
@@ -42,7 +48,7 @@ const f={ids,preview,success,calls:[],notices:[],evidence:[],captured:[],flows:[
   retire(){current=false;for(const fn of [...listeners])fn();}};
   return owner;},
  render(){const{key,...rest}=props;flushSync(()=>app.render(<StrictMode><SiteInquiryDeletion key={key} {...rest}/></StrictMode>));},
- mount(){f.calls=[];f.notices=[];f.evidence=[];f.captured=[];f.flows=[];seq=0;
+ mount(){f.calls=[];f.preparations=[];f.notices=[];f.evidence=[];f.captured=[];f.flows=[];seq=0;
   props={key:'A',workspaceId:ids.wa,leadId:ids.la,request:f.request(),lifetime:f.lifetime(),
    onDeleted:()=>f.notices.push('A'),onReconciliationRequired:e=>f.evidence.push(e)};
   f.originalRequest=props.request;
@@ -260,19 +266,18 @@ test("owned Chromium: deletion lifetime boundaries with real React and deferred 
     assert.equal(after.calls.length, before.calls.length);
   });
 
-  await t.test("lost response and later auth failure retain the exact reviewed request for explicit retry only", async () => {
+  await t.test("lost response permits same-key retry; later auth failure hides controls but preserves original-owner evidence", async () => {
     await reset(); await review(); const first = await submit();
     await evaluate(`f.calls.find(c=>c.id===${first.id}).reject(Error('synthetic lost response'));`); await settle();
     const before = (await state()).calls.length;
     await evaluate("f.patch({});f.ready();"); await settle(); assert.equal((await state()).calls.length, before);
-    await evaluate("f.click('retry');"); await settle(); let retry = (await state()).calls.at(-1)!;
+    await evaluate("f.capture('retry');f.click('retry');"); await settle(); let retry = (await state()).calls.at(-1)!;
     assert.equal(retry.body, first.body); assert.equal(retry.path, first.path);
     await evaluate(`f.reply(${retry.id},{success:false,private:'must not appear'},401);`); await settle();
-    assert.match((await state()).text, /Результат удаления не подтверждён/); assert.doesNotMatch((await state()).text, /must not appear/);
-    await evaluate("f.click('retry');"); await settle(); retry = (await state()).calls.at(-1)!;
-    assert.equal(retry.body, first.body);
-    await evaluate(`f.reply(${retry.id},{success:true,data:{deleted:true,receiptsDeleted:1,replayed:true}});`); await settle();
-    assert.deepEqual((await state()).notices, ["A"]); await evaluate("f.unmount();"); assert.deepEqual((await state()).evidence, []);
+    assert.equal((await state()).text, ""); assert.equal((await state()).checkbox, false);
+    const calls = (await state()).calls.length; await evaluate("f.invoke();"); await settle(); assert.equal((await state()).calls.length, calls);
+    assert.deepEqual((await state()).notices, []); await evaluate("f.unmount();");
+    assert.deepEqual((await state()).evidence, [{ workspaceId: "00000000-0000-4000-8000-000000000001", leadId: "00000000-0000-4000-8000-000000000002", body: first.body }]);
   });
 
   for (const result of ["wrong-count", "missing-replayed", "conflict"]) {

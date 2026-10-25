@@ -13,6 +13,14 @@ silently included in historical passes below. Its exact current acceptance is
 recorded separately in DELIVERY-CYCLES. Freeze the selected committed source
 and refresh byte receipts before any approved test release.
 
+**26 October local increment (G7-C25):** base `db73c4ab8bf52cc5cef9a0a6569d243cb8f92a2e`.
+Candidate 101 adds durable site-deletion intent/outcome recovery with matching
+API, workflow and LeadsPage; new browser helpers and six bounded workflow tasks
+add original-context guards. Main's exact local acceptance is recorded in
+DELIVERY-CYCLES G7-C25, separately from C24 and historical Preview receipts.
+This remains an inventory, not an approved whole-branch release. None of 101,
+its new endpoint/UI or the workflow changes was deployed by this cycle.
+
 This task is LOCAL ONLY: no remote inspection, browser-user sessions, cloud SQL,
 Preview/Production deployment, Baspana/salons, WhatsApp, providers, paid
 generation, sends or expenses. Protected 059/065 are not edited or staged by
@@ -32,6 +40,12 @@ Primary sources: [DELIVERY-CYCLES](DELIVERY-CYCLES.md), especially G5-C45 throug
 G7-C23, and [LEGAL-SECURITY-READINESS](LEGAL-SECURITY-READINESS.md), including its
 G7-C22/C23 addenda. Earlier sections are historical; later scoped completions
 supersede earlier local residuals only for the behavior actually proved.
+
+The new [static isolation delta](TEST-PREVIEW-ISOLATION-DELTA-2026-10-25.md)
+records 47 missing safety-relevant fixture entries and five changed historical
+readers. It did not inspect deployed values/secrets. Old fixture equality and
+blank/PAUSED/off values do not attest current build/runtime DB, sender, provider
+or independent worker isolation. Re-attestation is a release gate.
 
 ## Latest Recorded Preview
 
@@ -54,7 +68,7 @@ a gate, not an invitation to inherit Production settings or request secrets.
 
 ## G1-G8 Matrix
 
-G7-C24 results are the later local acceptance of this increment; older counts
+G7-C24/C25 results are later local acceptances; older counts
 are historical source-reported results. Overlapping suites must not be summed.
 
 | Family | Current local evidence and schema coupling | Latest relevant recorded Preview acceptance | Required next evidence |
@@ -68,13 +82,29 @@ are historical source-reported results. Overlapping suites must not be summed.
 | G7: release/schema | G7-C23 records raw 009-099 native chain 114/114 and earlier runtime evidence; do not sum. G7-C24 extends the exact raw chain to 009-100: 134/134, including three native concurrent-authority refusals. All source-created application tables have RLS. Only synthetic Storage catalogues are scaffolded. 100 enables seven remaining RLS flags without changing rows, grants, policies or FORCE flags; service-role tenant authorization is still required. | Latest recorded Preview remains f18f411; ec9f3d8 stopped at G7-C20 isolation gate. Historical exact Git-source receipts do not cover the accumulated current branch or new SQL. | Selected committed manifest, EOL-aware byte receipts, exact target dependencies/ACLs and renewed test-only isolation. 100 is locally accepted, **not cloud-applied or release-approved**. |
 | G8: privacy/legal/security | G8-C5-C7 and G7-C22/C23 guard Control/profile epochs, original bearer and unknown consent versions. 093 adds immutable notice snapshots; default approved-notice registry remains empty. Synthetic dump/restore 12/12 covered two tenants, consent, constraints/ACL/RLS and rejected bad targets. This is not real-backup/site/legal acceptance. | G8-C2/C3 accepted scoped legal-page/privacy/log/dependency work in test Preview; G5-C45 accepted a selected real A/B/A, not new Control/profile/093 behavior. No later legal text/consent approval is recorded. | Test 093 new inquiries/replay/erasure and unknown-version refusal with explicit synthetic notice injection only; do not invent historical consent. L2-L5, deployment geography, operator identity/contracts, processing category/MFA, real restore/incident process and dependency residuals require separate evidence/owner review. |
 
+G7-C25 supersedes C24's **local** missing durable-deletion recovery residual:
+176/176 actual React/Chromium client cases, 25/25 registered operation
+handler/model/SQL cases, and exact raw 009-101 native PG17.11 chain **151/151**
+(93 files). 101 races include both execute/abandon orders, read-after-commit,
+revocation during staff-lock wait, independent tenant progress and rollback
+snapshot equality. Acknowledgement hides a terminal item, not its retained
+ledger. No automatic retry, expiry, GC, contact persistence or historical
+backfill is added. Separate widget screenshots at 390x844/1440x900 use real
+built CSS/local Inter; not whole-route, iOS/WebKit or physical-device acceptance.
+Workflow tests **554/554** (including 50 actual-helper/synthetic-native boundary
+cases), neighbor regressions 335/335, source review 38/38 and full build with
+143 cold-start checks are separate overlapping receipts, not a combined coverage
+total. Additional scripts typecheck passed after the helper fixture was added.
+The helper proof cannot imply cancellation of an already-entered native mutation
+or global endpoint ownership. Exact limits are recorded in DELIVERY-CYCLES.
+
 ## Pending Schema and Dependencies
 
 This is a dependency inventory, **not an apply script**. Existing site-test
 receipts are scoped: DELIVERY records selected applications of 072/073/074,
 075, 076/077, 078, 021+079, 080 and 051+081 in their respective R2/O2/G7/G5
 cycles. They do not attest every 009-081 body, effective grant or later branch
-snapshot. No cloud application of 082-100 is credited from the reviewed local
+snapshot. No cloud application of 082-101 is credited from the reviewed local
 records. Prove the exact target baseline before calculating a delta.
 
 | Migration/source | Required predecessor/schema | Release coupling or owner-review effect |
@@ -98,13 +128,16 @@ records. Prove the exact target baseline before calculating a delta.
 | [098](../migrations/098_legacy_server_access.sql) | 009/010/013/014 exact fields/types and reviewed server/browser roles | Only 17 server permissions, RLS on `content_videos`, `meta_ad_accounts`, `meta_campaign_launches`, `meta_launch_audit_logs`, `release_checks`, `targeting_campaigns`, `targeting_reports`. Not the seven-table residual assigned to 100. |
 | [099](../migrations/099_application_function_default_access.sql) | 023 context; execute as known creator postgres, public schema and browser roles, reviewed default ACLs | Global future postgres-function PUBLIC EXECUTE revoke, **all schemas**, not just public. No retroactive fix for existing functions or another creator's defaults. Extra direct/inherited grants abort. |
 | [100](../migrations/100_legacy_crm_row_security.sql) | Existing 010/013 tables, reviewed service SELECT/INSERT/UPDATE grants/BYPASSRLS, postgres ownership and no unexpected browser rights/permissive policies; rechecked after DDL lock wait | Seven tables: `ai_provider_settings`, `calls`, `chat_messages`, `clients`, `integration_statuses`, `staff_users`, `workspace_settings`. Raw source SHA-256 `e11717ba583fcacb491db52d85404c71c8a32f49b08afb269726b4fc8a36cfe0`; native chain 134/134, focused source/refusal 19/19. No cloud application. Service-role queries still need API tenant authorization. |
+| [101](../migrations/101_site_deletion_operations.sql) | Exact 062 executor signature, postgres owner/SECURITY DEFINER/empty search_path and normalized prosrc SHA-256 `b220eb795f2d610fe1ad4af204fe9079b49bbcc1400a8e2278c9b19f5b15846a`; 010/011 staff Auth binding and 058 site/intake schema. 093 composition is tested when present. | RPC-only intent/outcome ledger; live actor/site locks; execute wraps 062 atomically; abandon/ack/read recover only the original actor. Revokes service-role EXECUTE on old 062, so coordinate API/UI + SQL; no fallback executor. 64 unacknowledged/actor and 10,000 total/workspace; no TTL/GC. Raw source SHA-256 `8a526e071fbef948b664121e443cadce53865fc898d35b99c9e97d1fdb810e30`; native full chain 151/151, focused SQL 16/16. No cloud application; retention/capacity/ACL review required. |
 
 Consumer source anchors: [operator RPC callers](../lib/crm/operators.ts),
 [report reader](../lib/crm/lead-team-analytics.ts),
 [private upload workflow](../lib/crm/staged-creative-workflow.ts),
 [generated workflow](../lib/crm/generated-video-workflow.ts),
 [Telegram admission](../lib/crm/telegram-delivery.ts),
-[intake wrapper](../lib/crm/site-intake-handler.ts), and
+[intake wrapper](../lib/crm/site-intake-handler.ts),
+[deletion server](../lib/crm/site-inquiry-deletion.ts),
+[recovery UI](../artifacts/negis/src/components/crm/site-deletion-recovery.tsx), and
 [worker compatibility contract](VIDEO-WORKER.md).
 
 ## Receipts and Baseline Limits
@@ -138,7 +171,7 @@ successful cleaned run. No force-cleanup or ownership-guard weakening is implied
 **001-008 require an undocumented legacy baseline and were excluded**;
 `migrations/data/*.sql` is not the application chain. Synthetic Storage catalogue
 tables and roles are prerequisites, not Supabase HTTP/Auth/signed-token services.
-Fresh 009-100 compatibility is not existing-data migration safety, idempotency,
+Fresh 009-101 compatibility is not existing-data migration safety, idempotency,
 actual cloud ACL evidence or permission to apply the whole directory.
 
 ## Owner Review and Rollout Order
@@ -147,20 +180,22 @@ Proposed order for a separately approved test release, not executed here:
 
 1. **Select source first.** Freeze exact approved Git candidate, API/UI/worker
    files, dependency lock and SQL byte manifest. Record deltas from the intended
-   Preview baseline, not merely current HEAD. Resolve protected-byte and 100
+   Preview baseline, not merely current HEAD. Resolve protected-byte and 100/101
    evidence with main; no foreign changes or env/generated files in upload.
 2. **Prove target and pause incompatible writers.** Preserve baseline/restore
    plan, exact dependencies, role memberships, effective table/column/RPC/default
    ACLs and Storage settings. Stop/drain old producer/worker/intake/operator
    writers where contracts change. Do not leave old API silently writing around
-   093/096, or old public video writers mixed with 086/090.
+   093/096/101, or old public video writers mixed with 086/090.
 3. **Schema before dependent runtime.** In main-approved dependency order:
    015/016/017/018 -> 082 -> 085 -> 086; 085 + Storage -> 087 -> 088 -> 089;
    086 + staff -> 090 -> 092; 029/070 -> 083 -> 095;
    034/067 -> 084; 019 -> 091; 058/(062) -> 093;
    052/053/054 -> 094 -> 096; 010/011 -> 097; reviewed legacy tables -> 098;
    owner-reviewed defaults -> 099. Review 100 against the exact target after
-   verifying its required server grants. Numeric fresh-chain order does not mean every target needs
+   verifying its required server grants. Review exact 062 and actor/site schema
+   before 101; stop/drain the incompatible old deletion executor and deploy its
+   matching API/UI, preserving existing receipts. Numeric fresh-chain order does not mean every target needs
    every migration. Existing-function ACLs still need verification after 099.
 4. **Deploy matching runtime only under separate approval.** Publish selected
    API/UI and matching worker package only after schema/postflight acceptance.
@@ -174,7 +209,7 @@ Proposed order for a separately approved test release, not executed here:
 
 Owner review must cover these authority/destructive effects before any apply:
 browser/column/RPC revokes and RLS (082/086/087/091/098/100); service-role writer
-revocation (096); old intake accept revocation (093); global future postgres
+revocation (096) and old erasure EXECUTE revocation (101); old intake accept revocation (093); global future postgres
 routine defaults (099); immutable constraints/legacy backfill and uniqueness
 (085/087); and locks/outage windows. Unknown inherited grants, policies or data
 must stop, not be silently removed to make a test green. Raw replacement/deletion,

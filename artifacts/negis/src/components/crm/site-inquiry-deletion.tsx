@@ -75,7 +75,7 @@ export function SiteInquiryDeletion({ workspaceId, leadId, request, onDeleted, l
         {state.phase === "checking" ? <p role="status" className="flex items-center gap-2"><Loader2 size={16} className="animate-spin" />Проверяем доступ и состав…</p> : null}
         {scope ? <>
           <p>Состав запроса: эта заявка (1) и копии согласия с сайта ({scope.receiptCount}).</p>
-          <p style={{ color: "var(--negis-muted)" }}>Действие необратимо. Оно не очищает другие обращения, резервные копии и данные внешних сервисов.</p>
+          <p style={{ color: "var(--negis-muted)" }}>Действие необратимо. Оно не очищает другие обращения, резервные копии и данные внешних сервисов. Служебные квитанции сохраняются.</p>
           {scope.deletionAvailability === "disabled" ? <p>Удаление для этого сайта пока отключено. Данные не изменены.</p> : null}
           {scope.deletionAvailability === "schema_not_ready" ? <p>Удаление ещё не подготовлено на сервере. Данные не изменены.</p> : null}
           {scope.reviewReasons.length > 0 ? <div role="status">

@@ -99,10 +99,17 @@ function readKey(subscription: PushSubscription, name: "p256dh" | "auth"): strin
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-export async function readThisDeviceSubscription(): Promise<DeviceSubscription | null> {
+function assertPushCurrent(isCurrent: () => boolean): void {
+  if (!isCurrent()) throw new DOMException("Push context changed", "AbortError");
+}
+
+export async function readThisDeviceSubscription(isCurrent: () => boolean = () => true): Promise<DeviceSubscription | null> {
+  assertPushCurrent(isCurrent);
   if (describePushSupport() !== "ok") return null;
   const registration = await navigator.serviceWorker.ready;
+  assertPushCurrent(isCurrent);
   const existing = await registration.pushManager.getSubscription();
+  assertPushCurrent(isCurrent);
   if (!existing) return null;
   return {
     endpoint: existing.endpoint,
@@ -112,19 +119,25 @@ export async function readThisDeviceSubscription(): Promise<DeviceSubscription |
   };
 }
 
-export async function subscribeThisDevice(publicKey: string): Promise<DeviceSubscription> {
+export async function subscribeThisDevice(publicKey: string, isCurrent: () => boolean = () => true): Promise<DeviceSubscription> {
+  assertPushCurrent(isCurrent);
   if (!publicKey) throw new Error("Уведомления ещё не настроены в системе");
   const permission = await Notification.requestPermission();
+  assertPushCurrent(isCurrent);
   if (permission !== "granted") throw new Error("Без разрешения уведомления приходить не будут");
 
   const registration = await navigator.serviceWorker.ready;
-  const subscription =
-    (await registration.pushManager.getSubscription()) ??
-    (await registration.pushManager.subscribe({
+  assertPushCurrent(isCurrent);
+  let subscription = await registration.pushManager.getSubscription();
+  assertPushCurrent(isCurrent);
+  if (!subscription) {
+    subscription = await registration.pushManager.subscribe({
       // Без этого флага браузер отказывает: тихие уведомления запрещены.
       userVisibleOnly: true,
       applicationServerKey: base64UrlToArrayBuffer(publicKey),
-    }));
+    });
+    assertPushCurrent(isCurrent);
+  }
 
   return {
     endpoint: subscription.endpoint,
@@ -134,11 +147,16 @@ export async function subscribeThisDevice(publicKey: string): Promise<DeviceSubs
   };
 }
 
-export async function unsubscribeThisDevice(): Promise<string> {
+export async function unsubscribeThisDevice(isCurrent: () => boolean = () => true): Promise<string> {
+  assertPushCurrent(isCurrent);
   const registration = await navigator.serviceWorker.ready;
+  assertPushCurrent(isCurrent);
   const subscription = await registration.pushManager.getSubscription();
+  assertPushCurrent(isCurrent);
   if (!subscription) return "";
   const endpoint = subscription.endpoint;
-  await subscription.unsubscribe();
+  const confirmed = await subscription.unsubscribe();
+  assertPushCurrent(isCurrent);
+  if (confirmed !== true) throw new Error("Браузер не подтвердил отключение уведомлений");
   return endpoint;
 }

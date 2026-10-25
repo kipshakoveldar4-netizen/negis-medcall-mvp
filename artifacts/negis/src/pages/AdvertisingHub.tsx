@@ -533,15 +533,21 @@ function AdvertisingHubSession({ actorId, observedSdkActorId, workspaceId, local
     return { ready, targetPatients, durationDays, maxBudget, dailyBudget };
   }, [campaignGoal]);
 
+  function canUseCampaignControls() {
+    const session = sessionRef.current;
+    return Boolean(session && !session.signal.aborted
+      && !isSignOutPending() && signOutRevisionRef.current === getSignOutRevision()
+      && (localDraftsOnly || (canReadPrivate && isSessionAlive(session))));
+  }
+
   function updateCampaignGoal(field: keyof CampaignGoalForm, value: string) {
+    if (!canUseCampaignControls()) return;
     setCampaignGoal((current) => ({ ...current, [field]: value }));
     if (campaignGoalError) setCampaignGoalError("");
   }
 
   function prepareCampaign(destination: CampaignGoalDestination) {
-    const session = sessionRef.current;
-    if (!session || session.signal.aborted || isSignOutPending() || signOutRevisionRef.current !== getSignOutRevision()
-      || readWorkspaceId() !== workspaceId || (!actorId && !localDraftsOnly)) return;
+    if (!canUseCampaignControls() || readWorkspaceId() !== workspaceId) return;
     if (!goalPlan.ready || goalPlan.dailyBudget === null) {
       setCampaignGoalError("Укажите услугу, число пациентов, период до 90 дней и максимальный бюджет.");
       return;
@@ -584,6 +590,7 @@ function AdvertisingHubSession({ actorId, observedSdkActorId, workspaceId, local
   }
 
   function refreshLaunches() {
+    if (!canUseCampaignControls()) return;
     launchesRequestRef.current += 1;
     setLoadState("loading");
     setReloadKey((value) => value + 1);
@@ -1393,7 +1400,7 @@ function AdvertisingHubSession({ actorId, observedSdkActorId, workspaceId, local
                 <span className="neu-btn inline-flex min-h-10 cursor-pointer items-center justify-center whitespace-nowrap text-sm">{assistant.actionLabel}</span>
               </Link>
             ) : assistant.actionLabel ? (
-              <button type="button" className="neu-btn justify-center whitespace-nowrap text-sm" onClick={() => setReloadKey((value) => value + 1)}>
+              <button type="button" className="neu-btn justify-center whitespace-nowrap text-sm" onClick={refreshLaunches}>
                 {assistant.actionLabel}
               </button>
             ) : null}

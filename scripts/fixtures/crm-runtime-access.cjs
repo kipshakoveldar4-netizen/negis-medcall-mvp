@@ -27,14 +27,15 @@ module.exports = async function checkRuntimeAccess(handler, { brokenRenderer = f
   };
   const client = {
     async rpc(name, args) {
-      assert.equal(name, 'delete_crm_site_inquiry');
-      assert.equal(args.p_workspace_id, workspace);
+      assert.ok(['execute_site_deletion_operation','read_site_deletion_operations','prepare_site_deletion_operation','close_site_deletion_operation'].includes(name));
+      assert.equal(args.p_workspace, workspace);
       assert.equal(args.p_site_key, 'runtime-fixture');
-      assert.equal(args.p_confirmed, true);
-      const actor = users.find(row => row.id === args.p_staff_user_id && row.auth_user_id === args.p_auth_user_id);
+      const actor = users.find(row => row.id === args.p_staff && row.auth_user_id === args.p_actor);
       assert.ok(actor && ['owner', 'admin'].includes(actor.role));
-      assert.equal(args.p_expected_lead_updated_at, tables.leads[0].updated_at);
       log.push({ rpc: name });
+      if (name === 'read_site_deletion_operations') return { data: { operations: [], complete: true, deletionEnabled: false }, error: null };
+      assert.equal(args.p_request.confirmed, true);
+      assert.equal(args.p_request.leadUpdatedAt, tables.leads[0].updated_at);
       // Do not model a write here; real persistence is tested in isolated PGlite.
       return { data: null, error: { message: 'site_deletion_disabled' } };
     },
@@ -132,6 +133,9 @@ module.exports = async function checkRuntimeAccess(handler, { brokenRenderer = f
         assert.equal(scope.data.deletionAvailability, 'disabled');
         assert.deepEqual(scope.data.receiptIds, [id(42)]);
       }
+      const operations = await call('site-inquiry-deletion-operations', role, role === 'doctor' ? 403 : 200);
+      if (role === 'doctor') assert.ok(!log.some(entry => entry.rpc));
+      else assert.deepEqual(operations.data, { operations: [], complete: true, deletionEnabled: false });
     }
     tables.crm_intake_sites[0].manual_deletion_enabled = true;
     const eligibleScope = await call('site-inquiry-deletion-preview', 'owner', 200, { leadId: id(41) });
@@ -154,6 +158,9 @@ module.exports = async function checkRuntimeAccess(handler, { brokenRenderer = f
       const result = await call('site-inquiry-deletion', role, 409, {}, 'POST', confirmation);
       assert.equal(result.code, 'site_deletion_disabled');
       assert.equal(log.filter(entry => entry.rpc).length, 1);
+      const preparation = await call('site-inquiry-deletion-operations', role, 409, {}, 'POST', { action: 'prepare', request: confirmation });
+      assert.equal(preparation.code, 'site_deletion_disabled');
+      assert.equal(log.filter(entry => entry.rpc).length, 1);
     }
     for (const [role, expected, query] of [[undefined, 401, {}], ['expired', 401, {}], ['doctor', 403, {}], ['owner', 403, { workspaceId: id(2) }]]) {
       await call('site-inquiry-deletion', role, expected, query, 'POST', '{unparsed');
@@ -164,6 +171,12 @@ module.exports = async function checkRuntimeAccess(handler, { brokenRenderer = f
     await call('site-inquiry-deletion', 'owner', 400, {}, 'POST', { ...confirmation, userId: id(21) });
     await call('site-inquiry-deletion', 'owner', 405);
     await call('site-inquiry-deletion/extra', 'owner', 404, { path: ['site-inquiry-deletion', 'extra'] }, 'POST', confirmation);
+    await call('site-inquiry-deletion-operations', 'doctor', 403, {}, 'POST', '{unparsed');
+    assert.ok(!log.some(entry => entry.rpc));
+    await call('site-inquiry-deletion-operations', 'owner', 400, {}, 'POST', '{unparsed');
+    await call('site-inquiry-deletion-operations', 'owner', 400, {}, 'POST', { action: 'prepare', request: { ...confirmation, actorId: id(21) } });
+    await call('site-inquiry-deletion-operations', 'owner', 405, {}, 'PATCH');
+    await call('site-inquiry-deletion-operations/extra', 'owner', 404, { path: ['site-inquiry-deletion-operations', 'extra'] });
     await call('site-blog', 'doctor', 403, {}, 'POST');
     await call('site-blog', 'owner', 403, { workspaceId: id(2) });
     await call('auth-context', 'expired', 401);

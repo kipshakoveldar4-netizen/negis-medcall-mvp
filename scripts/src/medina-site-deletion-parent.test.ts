@@ -29,8 +29,8 @@ let context=initial(),selected=ids.wa,session={user:{id:ids.aa},access_token:'sy
 const listeners=new Set(),sdk=new Set();
 const deferred=()=>{let resolve,reject;const promise=new Promise((yes,no)=>{resolve=yes;reject=no;});return{promise,resolve,reject};};
 const version='2026-09-28T11:00:00.123456+00:00';
-export const fixture={calls:[],writes:[],notices:[],wiring:null,history:[],lookups:0,
- reset(){context=initial();selected=ids.wa;session={user:{id:ids.aa},access_token:'synthetic-token-A'};gate=null;this.calls=[];this.writes=[];this.notices=[];this.wiring=null;this.history=[];this.lookups=0;},
+export const fixture={calls:[],operations:[],operationReadFailure:false,deferExecution:false,writes:[],notices:[],wiring:null,history:[],lookups:0,
+ reset(){context=initial();selected=ids.wa;session={user:{id:ids.aa},access_token:'synthetic-token-A'};gate=null;this.calls=[];this.operations=[];this.operationReadFailure=false;this.deferExecution=false;this.writes=[];this.notices=[];this.wiring=null;this.history=[];this.lookups=0;},
  patch(value){flushSync(()=>{context={...context,...value};for(const fn of listeners)fn();});},
  raw(actor,event='SIGNED_IN'){session=actor?{user:{id:actor},access_token:actor===ids.aa?'synthetic-token-A':'synthetic-token-B'}:null;
   for(const fn of [...sdk])fn(event,session);},
@@ -83,7 +83,15 @@ Storage.prototype.getItem=()=>null;
 for(const method of ['setItem','removeItem','clear'])Storage.prototype[method]=()=>{throw Error('Persistence forbidden');};
 globalThis.fetch=(input,init={})=>{
  const path=String(input),url=new URL(path,location.origin),method=(init.method||'GET').toUpperCase();
- if(url.origin!==location.origin||!/^\\/api\\/crm\\/(?:site-inquiry-deletion(?:-preview)?|lead-stages|lead-sources|lead-assignees|meta-launches)$/.test(url.pathname))throw Error('Unrelated or external HTTP forbidden');
+ if(url.origin!==location.origin||!/^\\/api\\/crm\\/(?:site-inquiry-deletion(?:-preview|-operations)?|lead-stages|lead-sources|lead-assignees|meta-launches)$/.test(url.pathname))throw Error('Unrelated or external HTTP forbidden');
+ if(url.pathname.endsWith('site-inquiry-deletion-operations')){
+  fixture.operations.push({method,body:init.body});
+  if(method==='GET')return Promise.resolve(fixture.operationReadFailure?Response.json({success:false,code:'site_deletion_unavailable'},{status:503}):Response.json({success:true,data:{operations:[],complete:true,deletionEnabled:true}}));
+  const body=JSON.parse(init.body);if(method!=='POST'||body.action!=='prepare')throw Error('Unexpected operation mutation');
+  if(fixture.deferExecution){fixture.deferExecution=false;fixture.holdLookup();}
+  return Promise.resolve(Response.json({success:true,data:{operation:{workspaceId:url.searchParams.get('workspaceId'),actorId:session.user.id,
+   requestKey:body.request.requestKey,leadId:body.request.leadId,request:body.request,state:'prepared',createdAt:version,
+   completedAt:null,acknowledgedAt:null,receiptsDeleted:null,replayed:false}}}));}
  const deletion=url.pathname.includes('site-inquiry-deletion');
  if(!deletion&&method!=='GET')throw Error('Generic CRUD forbidden');
  const d=deferred(),call={id:fixture.calls.length+1,path,method,body:init.body,signal:init.signal,cache:init.cache,
@@ -97,7 +105,7 @@ globalThis.fetch=(input,init={})=>{
 async function bundle() {
   const entry = `import {StrictMode} from 'react';import {createRoot} from 'react-dom/client';import {flushSync} from 'react-dom';
 import LeadsPage from './src/pages/LeadsPage';import {fixture} from 'parent-owned-mocks';
-let app;fixture.mount=()=>{fixture.reset();app=createRoot(document.getElementById('root'));flushSync(()=>app.render(<StrictMode><LeadsPage/></StrictMode>));};
+let app;fixture.mount=(options={})=>{fixture.reset();fixture.operationReadFailure=options.operationReadFailure===true;app=createRoot(document.getElementById('root'));flushSync(()=>app.render(<StrictMode><LeadsPage/></StrictMode>));};
 fixture.unmount=()=>flushSync(()=>app.unmount());window.__parentFixture=fixture;fixture.mount();`;
   const result = await esbuild.build({ stdin: { contents: entry, sourcefile: "deletion-parent-owned.tsx", resolveDir: frontend, loader: "tsx" },
     bundle: true, write: false, platform: "browser", format: "iife", jsx: "automatic", metafile: true,
@@ -216,6 +224,19 @@ test("owned Chromium: real LeadsPage/session and composed deletion transport", {
   const submit = async () => { await evaluate("f.confirm();f.capture();f.click('submit');"); await settle();
     const call = (await deletionCalls()).filter(c => c.method === "POST").at(-1); assert.ok(call); return call; };
 
+  await t.test("application hides deletion until durable-operation readiness is verified, then recovers without re-login", async () => {
+    await evaluate("f.unmount();f.mount({operationReadFailure:true});"); await settle();
+    await evaluate("f.click('detail');"); await settle();
+    assert.equal((await state()).deletion, ""); assert.equal((await deletionCalls()).length, 0);
+    assert.match((await state()).text, /Не удалось проверить операции удаления/);
+    await evaluate("f.operationReadFailure=false;document.querySelector('button[aria-label=\"Проверить операции\"]').click();"); await settle();
+    await evaluate("f.ready();"); await settle();
+    assert.match((await state()).deletion, /Удаление заявки с сайта/);
+    await evaluate("f.click('open');"); await settle(); await evaluate("f.ready();"); await settle();
+    assert.equal((await state()).checked, false);
+    assert.equal((await deletionCalls()).filter(c => c.method === "POST").length, 0);
+  });
+
   await t.test("parent binds the real preview/POST to its actor and controller; same actor refresh keeps review and identities", async () => {
     await reset(); await review(); await evaluate("f.confirm();f.saved=f.wiring;f.savedAccess=f.pageAccess();");
     const before = await deletionCalls(); await evaluate("f.refresh();"); await settle();
@@ -235,6 +256,19 @@ test("owned Chromium: real LeadsPage/session and composed deletion transport", {
     assert.equal((await deletionCalls()).filter(c => c.method === "POST").length, 0);
     assert.equal((await deletionCalls()).length, before.length); assert.equal((await state()).deletion, "");
     assert.deepEqual((await state()).notices, []); assert.deepEqual((await state()).writes, []);
+  });
+
+  for (const phase of ["prepare", "execute"]) await t.test(`closing only the card during ${phase} token lookup blocks dispatch while the page session stays current`, async () => {
+    await reset(); await review();
+    await evaluate(`f.confirm();${phase === "prepare" ? "f.holdLookup();" : "f.deferExecution=true;"}f.click('submit');`); await settle();
+    const prepares = await evaluate("return f.operations.filter(c=>c.method==='POST').length;");
+    assert.equal(prepares, phase === "prepare" ? 0 : 1);
+    await evaluate("document.querySelector('button[aria-label=Закрыть]').click();"); await settle();
+    await evaluate("f.releaseLookup();"); await settle();
+    assert.equal(await evaluate("return f.operations.filter(c=>c.method==='POST').length;"), prepares);
+    assert.equal((await deletionCalls()).filter(c => c.method === "POST").length, 0);
+    assert.deepEqual((await state()).notices, []); assert.deepEqual((await state()).writes, []);
+    assert.equal(await evaluate("return f.pageAccess().isCurrent();"), true);
   });
 
   await t.test("silent SDK subject mismatch during token lookup cannot borrow B's token for A's deletion", async () => {

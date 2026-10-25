@@ -124,7 +124,7 @@ window.__analyticsFixture=fixture;fixture.mount();`;
 export const stopAnalyticsBundler = () => esbuild.stop();
 
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-export async function ownedAnalyticsBrowser(origin: string) {
+export async function ownedAnalyticsBrowser(origin: string, readyExpression = "f && f.requests.length===3") {
   assert.equal(new URL(origin).hostname, "127.0.0.1");
   assert.equal(new URL(origin).protocol, "http:");
   const browserPath = [process.env.MEDINA_TEST_BROWSER_PATH, "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe",
@@ -206,7 +206,12 @@ export async function ownedAnalyticsBrowser(origin: string) {
       }
       throw Error(`Analytics fixture did not settle: ${expression}; ${JSON.stringify({ exceptions, state: await evaluate("return f?.snapshot();") })}`);
     };
-    await call("Page.navigate", { url: origin }); await waitFor("f && f.requests.length===3");
-    return { evaluate, waitFor, close, requests, exceptions };
+    await call("Page.navigate", { url: origin }); await waitFor(readyExpression);
+    const viewport = (width: number, height: number) => {
+      assert.ok(Number.isSafeInteger(width) && Number.isSafeInteger(height) && width >= 320 && width <= 2560 && height >= 480 && height <= 1600);
+      return call("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: width < 768 });
+    };
+    const screenshot = async () => Buffer.from((await call("Page.captureScreenshot", { format: "png", captureBeyondViewport: false })).data, "base64");
+    return { evaluate, waitFor, close, requests, exceptions, viewport, screenshot };
   } catch (error) { await close(); throw error; }
 }

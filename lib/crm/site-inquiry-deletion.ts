@@ -134,7 +134,100 @@ const deletionErrors: Record<string, number> = {
   deletion_request_conflict: 409,
   deletion_scope_changed: 409,
   deletion_requires_review: 409,
+  deletion_operation_not_prepared: 409,
+  deletion_operation_abandoned: 409,
+  deletion_operation_pending: 409,
+  deletion_operation_capacity: 409,
 };
+
+type DeletionInput = { leadId: string; receiptIds: string[]; leadUpdatedAt: string; requestKey: string; confirmed: true };
+function deletionInput(value: unknown): DeletionInput | null {
+  const body = record(value);
+  if (!body || Object.keys(body).some(key => !["leadId", "receiptIds", "leadUpdatedAt", "requestKey", "confirmed"].includes(key))) return null;
+  const { leadId, receiptIds, leadUpdatedAt, requestKey, confirmed } = body;
+  if (confirmed !== true || typeof leadId !== "string" || !uuid.test(leadId)
+    || typeof requestKey !== "string" || !uuid.test(requestKey) || !isTimestamp(leadUpdatedAt)
+    || !Array.isArray(receiptIds) || receiptIds.length < 1 || receiptIds.length > maxReceipts
+    || !receiptIds.every((value): value is string => typeof value === "string" && uuid.test(value))
+    || new Set(receiptIds.map(value => value.toLowerCase())).size !== receiptIds.length) return null;
+  return { leadId, receiptIds, leadUpdatedAt, requestKey, confirmed };
+}
+
+function operationReceipt(value: unknown, workspaceId: string, actorId: string) {
+  const row = record(value), request = deletionInput(row?.request);
+  if (!row || !request || row.workspaceId !== workspaceId.toLowerCase() || row.actorId !== actorId.toLowerCase()
+    || row.requestKey !== request.requestKey.toLowerCase() || row.leadId !== request.leadId.toLowerCase()
+    || typeof row.replayed !== "boolean" || !isTimestamp(row.createdAt)
+    || (row.completedAt !== null && !isTimestamp(row.completedAt))
+    || (row.acknowledgedAt !== null && !isTimestamp(row.acknowledgedAt))) return null;
+  const { state, completedAt, acknowledgedAt, receiptsDeleted } = row;
+  if (!(state === "prepared" && completedAt === null && acknowledgedAt === null && receiptsDeleted === null)
+    && !(state === "committed" && completedAt !== null && receiptsDeleted === request.receiptIds.length)
+    && !(state === "abandoned" && completedAt !== null && receiptsDeleted === null)) return null;
+  return { workspaceId: row.workspaceId, actorId: row.actorId, requestKey: row.requestKey, leadId: row.leadId,
+    request, state, createdAt: row.createdAt, completedAt, acknowledgedAt, receiptsDeleted, replayed: row.replayed };
+}
+
+export function createSiteDeletionOperationsHandler(env: () => Record<string, string | undefined> = () => process.env) {
+  return async (req: VercelRequest, res: VercelResponse) => {
+    res.setHeader("Cache-Control", "no-store");
+    const fail = (status: number, code: string) => res.status(status).json({ success: false, code });
+    const context = readWorkspaceContext(req);
+    if (!context) return fail(401, "authentication_required");
+    if ((context.role !== "owner" && context.role !== "admin") || !uuid.test(context.userId) || !uuid.test(context.staffUserId)) return fail(403, "workspace_access_denied");
+    if (req.method !== "GET" && req.method !== "POST") return fail(405, "method_not_allowed");
+    if (typeof req.query.workspaceId !== "string" || req.query.workspaceId.toLowerCase() !== context.workspaceId.toLowerCase()
+      || Object.keys(req.query).some(key => !["path", "workspaceId", ...(req.method === "GET" ? ["requestKey"] : [])].includes(key))
+      || (req.query.requestKey !== undefined && (typeof req.query.requestKey !== "string" || !uuid.test(req.query.requestKey)))) return fail(400, "invalid_request");
+    const config = readConfig(env());
+    if (!config) return fail(503, "site_deletion_not_configured");
+    if (config.workspace.toLowerCase() !== context.workspaceId.toLowerCase()) return fail(403, "workspace_access_denied");
+    const client = getSupabaseServerClient();
+    if (!client) return fail(503, "site_deletion_unavailable");
+    const args = { p_workspace: context.workspaceId, p_site_key: config.siteKey, p_staff: context.staffUserId, p_actor: context.userId };
+    try {
+      if (req.method === "GET") {
+        const { data, error } = await client.rpc("read_site_deletion_operations", { ...args, p_request_key: req.query.requestKey ?? null });
+        if (error) {
+          const code = typeof error.message === "string" && Object.hasOwn(deletionErrors, error.message) ? error.message : "site_deletion_unavailable";
+          return fail(deletionErrors[code] ?? 503, code);
+        }
+        const result = record(data);
+        if (result?.complete !== true || typeof result.deletionEnabled !== "boolean" || !Array.isArray(result.operations) || result.operations.length > 64) return fail(503, "site_deletion_unavailable");
+        const operations = result.operations.map(value => operationReceipt(value, context.workspaceId, context.userId));
+        if (operations.some(value => !value) || new Set(operations.map(value => value?.requestKey)).size !== operations.length
+          || (req.query.requestKey && operations.some(value => value?.requestKey !== (req.query.requestKey as string).toLowerCase()))
+          || (!req.query.requestKey && operations.some(value => value?.acknowledgedAt !== null))) return fail(503, "site_deletion_unavailable");
+        return res.status(200).json({ success: true, data: { operations, complete: true, deletionEnabled: result.deletionEnabled } });
+      }
+      if (typeof req.headers["content-type"] !== "string" || !/^application\/json(?:\s*;|$)/i.test(req.headers["content-type"])) return fail(415, "invalid_content_type");
+      let body: Record<string, unknown> | null;
+      try { body = record(await readSiteJsonBody(req)); } catch { return fail(400, "invalid_request"); }
+      if (!body) return fail(400, "invalid_request");
+      let name: string, parameters: Record<string, unknown>, expectedKey: string;
+      if (body.action === "prepare") {
+        const request = deletionInput(body.request);
+        if (!request || Object.keys(body).some(key => !["action", "request"].includes(key))) return fail(400, "invalid_request");
+        name = "prepare_site_deletion_operation"; parameters = { ...args, p_request: request }; expectedKey = request.requestKey;
+      } else {
+        if ((body.action !== "abandon" && body.action !== "acknowledge") || typeof body.requestKey !== "string" || !uuid.test(body.requestKey)
+          || Object.keys(body).some(key => !["action", "requestKey"].includes(key))) return fail(400, "invalid_request");
+        name = "close_site_deletion_operation"; parameters = { ...args, p_request_key: body.requestKey, p_action: body.action }; expectedKey = body.requestKey;
+      }
+      const { data, error } = await client.rpc(name, parameters);
+      if (error) {
+        const code = typeof error.message === "string" && Object.hasOwn(deletionErrors, error.message) ? error.message : "site_deletion_unavailable";
+        return fail(deletionErrors[code] ?? 503, code);
+      }
+      const operation = operationReceipt(data, context.workspaceId, context.userId);
+      if (!operation || operation.requestKey !== expectedKey.toLowerCase()) return fail(503, "site_deletion_unavailable");
+      if (body.action === "prepare" && JSON.stringify(operation.request) !== JSON.stringify(deletionInput(body.request))) return fail(503, "site_deletion_unavailable");
+      return res.status(200).json({ success: true, data: { operation } });
+    } catch { return fail(503, "site_deletion_unavailable"); }
+  };
+}
+
+export const handleSiteDeletionOperations = createSiteDeletionOperationsHandler();
 
 export function createSiteInquiryDeletionHandler(
   env: () => Record<string, string | undefined> = () => process.env,
@@ -173,21 +266,20 @@ export function createSiteInquiryDeletionHandler(
     try {
       // Never delete via separate table writes. RPC gates on the site's explicit
       // opt-in, rechecks the verified actor, and provides atomic, retry-safe erasure.
-      const { data, error } = await client.rpc("delete_crm_site_inquiry", {
-        p_workspace_id: context.workspaceId, p_site_key: config.siteKey,
-        p_lead_id: leadId, p_expected_receipt_ids: receiptIds,
-        p_expected_lead_updated_at: leadUpdatedAt,
-        p_staff_user_id: context.staffUserId, p_auth_user_id: context.userId,
-        p_request_key: requestKey, p_confirmed: true,
+      const { data, error } = await client.rpc("execute_site_deletion_operation", {
+        p_workspace: context.workspaceId, p_site_key: config.siteKey,
+        p_staff: context.staffUserId, p_actor: context.userId,
+        p_request: { leadId, receiptIds, leadUpdatedAt, requestKey, confirmed: true },
       });
       if (error) {
         const code = typeof error.message === "string" && Object.hasOwn(deletionErrors, error.message)
           ? error.message : "site_deletion_unavailable";
         return fail(deletionErrors[code] ?? 503, code);
       }
-      const result = record(data);
-      if (result?.deleted !== true || typeof result.replayed !== "boolean"
-        || result.receiptsDeleted !== receiptIds.length) return fail(503, "site_deletion_unavailable");
+      const result = operationReceipt(data, context.workspaceId, context.userId);
+      const expectedRequest = { leadId, receiptIds, leadUpdatedAt, requestKey, confirmed: true };
+      if (result?.state !== "committed" || result.receiptsDeleted !== receiptIds.length
+        || JSON.stringify(result.request) !== JSON.stringify(expectedRequest)) return fail(503, "site_deletion_unavailable");
       return res.status(200).json({ success: true, data: {
         deleted: true, receiptsDeleted: result.receiptsDeleted, replayed: result.replayed,
       } });

@@ -27,24 +27,33 @@ let rpcFailure = "";
 let rpcResponse: unknown = undefined;
 let permissionOverride: { data: unknown; error: { code: string; message: string } | null } | undefined;
 
-// Preview permits SELECT only; confirmation permits the single atomic RPC.
-// Everything runs against real local migrations, without credentials/network.
+// Legacy 062 scope/erasure regressions plus current HTTP validation. The RPC
+// adapter below wraps actual 062 results in the current operation DTO; it does
+// NOT claim 101 preparation/recovery coverage (separate actual-SQL suite).
+// Everything uses local migrations, without credentials/network.
 function client() {
   return {
     async rpc(name: string, args: Record<string, unknown>) {
       assert.ok(allowRpc, "preview must never execute an RPC");
-      assert.equal(name, "delete_crm_site_inquiry");
+      assert.equal(name, "execute_site_deletion_operation");
       rpcCalls.push(args);
       if (rpcFailure) return { data: null, error: { message: rpcFailure } };
-      if (rpcResponse !== undefined) return { data: rpcResponse, error: null };
+      const intent = args.p_request as Record<string, unknown>;
+      const receipt = (value: unknown) => {
+        const result = value as Record<string, unknown> | null;
+        return result?.deleted === true ? { ...result, workspaceId: args.p_workspace, actorId: args.p_actor,
+          requestKey: intent.requestKey, leadId: intent.leadId, request: intent, state: "committed",
+          createdAt: "2026-09-28T00:00:00Z", completedAt: "2026-09-28T00:00:01Z", acknowledgedAt: null } : value;
+      };
+      if (rpcResponse !== undefined) return { data: receipt(rpcResponse), error: null };
       await db.exec("savepoint http_delete");
       try {
         const result = await row("select public.delete_crm_site_inquiry($1,$2,$3,$4,$5,$6,$7,$8,$9) as result", [
-          args.p_workspace_id, args.p_site_key, args.p_lead_id, args.p_expected_receipt_ids,
-          args.p_expected_lead_updated_at, args.p_staff_user_id, args.p_auth_user_id, args.p_request_key, args.p_confirmed,
+          args.p_workspace, args.p_site_key, intent.leadId, intent.receiptIds,
+          intent.leadUpdatedAt, args.p_staff, args.p_actor, intent.requestKey, intent.confirmed,
         ]);
         await db.exec("release savepoint http_delete");
-        return { data: result.result, error: null };
+        return { data: receipt(result.result), error: null };
       } catch (error) {
         await db.exec("rollback to savepoint http_delete; release savepoint http_delete");
         return { data: null, error: { message: error instanceof Error ? error.message : "PRIVATE_DATABASE_ERROR" } };
@@ -328,9 +337,9 @@ test("owner/admin confirmation preserves microseconds, erases exact scope and sa
   assert.match(String(body.leadUpdatedAt), /123456/);
   const result = await erase(body, { role: "admin", stream: [Buffer.from(JSON.stringify(body))] });
   assert.deepEqual(result, { status: 200, payload: { success: true, data: { deleted: true, receiptsDeleted: 2, replayed: false } } });
-  assert.equal(rpcCalls[0].p_staff_user_id, id(91)); assert.equal(rpcCalls[0].p_auth_user_id, id(90));
+  assert.equal(rpcCalls[0].p_staff, id(91)); assert.equal(rpcCalls[0].p_actor, id(90));
   assert.equal(rpcCalls[0].p_site_key, "medina-test");
-  assert.equal(rpcCalls[0].p_expected_lead_updated_at, body.leadUpdatedAt);
+  assert.equal((rpcCalls[0].p_request as Record<string, unknown>).leadUpdatedAt, body.leadUpdatedAt);
   assert.equal((await row("select count(*)::int as n from public.leads")).n, 0);
   assert.equal((await row("select count(*)::int as n from public.crm_site_inquiries")).n, 0);
   assert.deepEqual((await erase(body, { role: "admin" })).payload,

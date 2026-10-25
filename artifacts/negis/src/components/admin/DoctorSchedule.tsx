@@ -1,9 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Plus, RefreshCw, X } from "lucide-react";
 import { toast } from "sonner";
 import { useAuth } from "@/contexts/AuthContext";
 import { crmErrorMessage, crmFetch } from "@/lib/api";
 import { isRealWorkspace, readWorkspaceId } from "@/lib/demoStorage";
+import { getSignOutRevision, isSignOutPending } from "@/lib/authSignOut";
+import { hasSupabaseFrontendEnv, supabase } from "@/lib/supabase";
 import { capitalize, termsFor, type Terms } from "../../../../../lib/vertical/terms";
 
 // Справочник исполнителей — врачей или мастеров — и их график.
@@ -213,7 +215,21 @@ async function readEnvelope(response: Response): Promise<Envelope | null> {
 }
 
 export function DoctorSchedule() {
-  const { userRole, rolePermissions, vertical } = useAuth();
+  const auth = useAuth();
+  const workspaceId = readWorkspaceId();
+  // The parent does not key this tab by workspace or auth identity.
+  const key = JSON.stringify([workspaceId, auth.user?.id, auth.session?.user.id, auth.clinicId,
+    auth.userRole, Object.entries(auth.rolePermissions).sort(([a], [b]) => a.localeCompare(b)),
+    auth.isLoading, auth.isSigningOut, auth.isImpersonation, auth.isDemoMode, auth.isStaffMode,
+    auth.vertical, getSignOutRevision()]);
+  return <DoctorScheduleEditor key={key} auth={auth} workspaceId={workspaceId} />;
+}
+
+function DoctorScheduleEditor({ auth, workspaceId }: { auth: ReturnType<typeof useAuth>; workspaceId: string }) {
+  const { userRole, rolePermissions, vertical } = auth;
+  const actorId = auth.user?.id || "";
+  const lifetime = useRef({ mounted: false, retired: false, run: 0, revision: getSignOutRevision(), controller: new AbortController() }).current;
+  const [expired, setExpired] = useState(false);
   const terms = termsFor(vertical);
   const detailText = useMemo(() => detailTextFor(terms), [terms]);
   const [doctors, setDoctors] = useState<ClinicDoctor[]>([]);
@@ -232,6 +248,33 @@ export function DoctorSchedule() {
   const [weekdayWindow, setWeekdayWindow] = useState({ weekday: 0, start: "13:00", end: "14:00", note: "" });
 
   const generation = useRef(0);
+  const selection = useRef({ id: "", doctorSaving: false, rhythmSaving: false });
+  const view = selection.current;
+  const isCurrent = (run = lifetime.run) => lifetime.mounted && !lifetime.retired && run === lifetime.run
+    && Boolean(actorId) && !auth.isLoading && !auth.isSigningOut && !auth.isDemoMode
+    && !isSignOutPending() && getSignOutRevision() === lifetime.revision && readWorkspaceId() === workspaceId;
+  const isViewCurrent = (run = lifetime.run) => isCurrent(run) && selection.current === view;
+  const retire = () => {
+    if (!lifetime.mounted || lifetime.retired) return;
+    lifetime.retired = true;
+    lifetime.controller.abort();
+    setExpired(true);
+  };
+
+  useLayoutEffect(() => {
+    lifetime.mounted = true;
+    lifetime.run++;
+    lifetime.controller = new AbortController();
+    const subscription = hasSupabaseFrontendEnv ? supabase.auth.onAuthStateChange((_event, session) => {
+      if ((session?.user.id || "") !== actorId) retire();
+    }).data.subscription : null;
+    return () => {
+      lifetime.mounted = false;
+      lifetime.run++;
+      lifetime.controller.abort();
+      subscription?.unsubscribe();
+    };
+  }, [lifetime, actorId]);
 
   /** Правит тот, кто отвечает за клинику. Нет права — нет и кнопок. */
   const canManage = useMemo(
@@ -242,26 +285,43 @@ export function DoctorSchedule() {
   /** Часовой пояс пишется через настройки, а они только для владельца и админа. */
   const canSetTimeZone = userRole === "owner" || userRole === "admin";
 
+  const selectDoctor = (id: string) => {
+    if (!isCurrent() || selection.current.id === id) return;
+    selection.current = { id, doctorSaving: false, rhythmSaving: false };
+    setSelectedId(id);
+    setFormOpen(false);
+    setSaving(false);
+    setRhythmSaving(false);
+    setWeekdayWindow({ weekday: 0, start: "13:00", end: "14:00", note: "" });
+    setException({ from: "", to: "", note: "", kind: "off", start: "09:00", end: "18:00" });
+    setRhythm({ work: 2, off: 2, start: "", weeks: 4, from: "09:00", to: "21:00" });
+  };
+
+  const fetchFor = (path: string, run: number, guard: () => boolean, init: RequestInit = {}) => crmFetch(path, {
+    ...init, cache: "no-store", expectedUserId: actorId, signal: lifetime.controller.signal,
+    dispatchGuard: () => isCurrent(run) && guard(),
+  });
+
   const load = async (options: { quiet?: boolean } = {}) => {
+    const run = lifetime.run;
+    if (!lifetime.mounted || lifetime.retired || selection.current !== view) return;
+    if (!isRealWorkspace()) { setScreen("unavailable"); return; }
+    if (!isViewCurrent(run)) return;
     const current = generation.current + 1;
     generation.current = current;
     if (!options.quiet) setScreen("loading");
 
-    if (!isRealWorkspace()) {
-      if (generation.current !== current) return;
-      setScreen("unavailable");
-      return;
-    }
-
     try {
-      const workspaceId = encodeURIComponent(readWorkspaceId());
+      const query = encodeURIComponent(workspaceId);
       const [doctorsResponse, shiftsResponse] = await Promise.all([
-        crmFetch(`/api/crm/clinic-doctors?workspaceId=${workspaceId}`),
-        crmFetch(`/api/crm/doctor-schedule?workspaceId=${workspaceId}`),
+        fetchFor(`/api/crm/clinic-doctors?workspaceId=${query}`, run, () => generation.current === current),
+        fetchFor(`/api/crm/doctor-schedule?workspaceId=${query}`, run, () => generation.current === current),
       ]);
+      if (!isCurrent(run) || generation.current !== current) return;
+      if ([doctorsResponse.status, shiftsResponse.status].some((status) => status === 401 || status === 403)) { retire(); return; }
       const doctorsBody = await readEnvelope(doctorsResponse);
       const shiftsBody = await readEnvelope(shiftsResponse);
-      if (generation.current !== current) return;
+      if (!isCurrent(run) || generation.current !== current) return;
 
       if (!doctorsResponse.ok || doctorsBody?.success !== true) {
         // Пустой список здесь был бы неправдой: «не удалось прочитать» и
@@ -291,10 +351,14 @@ export function DoctorSchedule() {
         setTimeZone(readText(shiftsBody.data?.timeZone));
       }
 
-      setSelectedId((current2) => (current2 && list.some((doctor) => doctor.id === current2) ? current2 : list[0]?.id ?? ""));
+      // These reads cover the whole workspace. Preserve a choice made while
+      // decoding instead of restoring the doctor captured by the loader.
+      const chosen = selection.current.id;
+      selectDoctor(chosen && list.some((doctor) => doctor.id === chosen) ? chosen : list[0]?.id ?? "");
       setScreen("ready");
     } catch (error) {
-      if (generation.current !== current) return;
+      if (!isCurrent(run) || generation.current !== current) return;
+      if ([401, 403].includes(Number((error as { status?: number })?.status))) { retire(); return; }
       console.warn("[doctors] read threw", error);
       setFailureText(crmErrorMessage(error));
       setScreen("failed");
@@ -309,20 +373,25 @@ export function DoctorSchedule() {
   useEffect(() => {
     if (!formOpen) return;
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setFormOpen(false);
+      if (isViewCurrent() && event.key === "Escape") setFormOpen(false);
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [formOpen]);
+  }, [formOpen, view]);
 
   const write = async (path: string, method: "POST" | "PATCH", payload: Record<string, unknown>): Promise<boolean> => {
+    const run = lifetime.run;
+    if (!isViewCurrent(run) || !canManage || (path === "/api/crm/admin-settings" && !canSetTimeZone)) return false;
     try {
-      const response = await crmFetch(path, {
+      const response = await fetchFor(path, run, () => isViewCurrent(run), {
         method,
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...payload, workspaceId: readWorkspaceId() }),
+        body: JSON.stringify({ ...payload, workspaceId }),
       });
+      if (!isViewCurrent(run)) return false;
+      if (response.status === 401 || response.status === 403) { retire(); return false; }
       const body = await readEnvelope(response);
+      if (!isViewCurrent(run)) return false;
       if (!response.ok || body?.success !== true) {
         console.warn("[doctors] write failed", path, method, response.status, body?.error, (body?.details || []).join("; "));
         toast.error(refusalText(response.status, readText(body?.error), body?.details || [], detailText));
@@ -330,6 +399,8 @@ export function DoctorSchedule() {
       }
       return true;
     } catch (error) {
+      if (!isViewCurrent(run)) return false;
+      if ([401, 403].includes(Number((error as { status?: number })?.status))) { retire(); return false; }
       console.warn("[doctors] write threw", path, method, error);
       toast.error(crmErrorMessage(error));
       return false;
@@ -337,11 +408,14 @@ export function DoctorSchedule() {
   };
 
   const submitDoctor = async () => {
+    const run = lifetime.run;
+    if (!isViewCurrent(run) || !canManage || view.doctorSaving) return;
     const fullName = form.fullName.trim();
     if (!fullName) {
       toast.error(`Укажите имя ${terms.specialistGenitive}`);
       return;
     }
+    view.doctorSaving = true;
     setSaving(true);
     try {
       // Оплата: пустое поле — null, «условия не заданы»; это не ноль.
@@ -359,12 +433,12 @@ export function DoctorSchedule() {
       const ok = editingId
         ? await write("/api/crm/clinic-doctors", "PATCH", { id: editingId, ...fields })
         : await write("/api/crm/clinic-doctors", "POST", fields);
-      if (!ok) return;
+      if (!ok || !isViewCurrent(run)) return;
       setFormOpen(false);
       toast.success(`${capitalize(terms.specialist)} ${editingId ? "обновлён" : "добавлен"}`);
       await load({ quiet: true });
     } finally {
-      setSaving(false);
+      if (isViewCurrent(run)) { view.doctorSaving = false; setSaving(false); }
     }
   };
 
@@ -383,7 +457,8 @@ export function DoctorSchedule() {
   const exceptions = useMemo(() => mine.filter((shift) => Boolean(shift.onDate)), [mine]);
 
   const saveWeekday = async (iso: number, start: string, end: string) => {
-    if (!selectedId) return;
+    const run = lifetime.run;
+    if (!isViewCurrent(run) || !canManage || !selectedId) return;
     const startMinute = timeToMinute(start);
     const endMinute = timeToMinute(end);
     if (startMinute === null || endMinute === null) {
@@ -408,13 +483,14 @@ export function DoctorSchedule() {
         ok = (await write("/api/crm/doctor-schedule", "PATCH", { id: row.id, ...payload })) && ok;
       }
     }
-    if (!ok) return;
+    if (!ok || !isViewCurrent(run)) return;
     toast.success("График сохранён");
     await load({ quiet: true });
   };
 
   const setDayOff = async (iso: number) => {
-    if (!selectedId) return;
+    const run = lifetime.run;
+    if (!isViewCurrent(run) || !canManage || !selectedId) return;
     const existing = (weeklyByDay.get(iso) ?? []).filter((row) => !isClosedWindow(row));
     const payload = { doctorId: selectedId, weekday: iso, isWorking: false, startMinute: null, endMinute: null };
     let ok = true;
@@ -425,7 +501,7 @@ export function DoctorSchedule() {
         ok = (await write("/api/crm/doctor-schedule", "PATCH", { id: row.id, ...payload })) && ok;
       }
     }
-    if (!ok) return;
+    if (!ok || !isViewCurrent(run)) return;
     toast.success("День отмечен как нерабочий");
     await load({ quiet: true });
   };
@@ -438,7 +514,8 @@ export function DoctorSchedule() {
    * отъезд не одно и то же, — и правка первой строки съела бы вторую.
    */
   const closeWeekdayWindow = async (iso: number) => {
-    if (!selectedId) return;
+    const run = lifetime.run;
+    if (!isViewCurrent(run) || !canManage || !selectedId) return;
     const startMinute = timeToMinute(weekdayWindow.start);
     const endMinute = timeToMinute(weekdayWindow.end);
     if (startMinute === null || endMinute === null) {
@@ -453,7 +530,7 @@ export function DoctorSchedule() {
       endMinute: endMinute <= startMinute ? endMinute + 1440 : endMinute,
       note: weekdayWindow.note.trim(),
     });
-    if (!ok) return;
+    if (!ok || !isViewCurrent(run)) return;
     setWeekdayWindow({ weekday: 0, start: "13:00", end: "14:00", note: "" });
     toast.success("Окно закрыто");
     await load({ quiet: true });
@@ -477,7 +554,8 @@ export function DoctorSchedule() {
   const [rhythmSaving, setRhythmSaving] = useState(false);
 
   const fillRhythm = async () => {
-    if (!selectedId) return;
+    const run = lifetime.run;
+    if (!isViewCurrent(run) || !canManage || !selectedId || view.rhythmSaving) return;
     if (!rhythm.start) {
       toast.error("Укажите, с какой даты начинается ритм");
       return;
@@ -511,6 +589,7 @@ export function DoctorSchedule() {
       cursor = offEnd;
     }
 
+    view.rhythmSaving = true;
     setRhythmSaving(true);
     let written = 0;
     try {
@@ -527,6 +606,7 @@ export function DoctorSchedule() {
           payload.endMinute = endMinute;
         }
         const ok = await write("/api/crm/doctor-schedule", "POST", payload);
+        if (!isViewCurrent(run)) return;
         if (!ok) {
           // Останавливаемся честно: половина записанного ритма видна в списке
           // исключений, и её можно перенести или продолжить, а не гадать.
@@ -539,12 +619,13 @@ export function DoctorSchedule() {
       setRhythm((current) => ({ ...current, start: "" }));
       await load({ quiet: true });
     } finally {
-      setRhythmSaving(false);
+      if (isViewCurrent(run)) { view.rhythmSaving = false; setRhythmSaving(false); }
     }
   };
 
   const addException = async () => {
-    if (!selectedId) return;
+    const run = lifetime.run;
+    if (!isViewCurrent(run) || !canManage || !selectedId) return;
     if (!exception.from) {
       toast.error("Укажите дату");
       return;
@@ -581,7 +662,7 @@ export function DoctorSchedule() {
       }
     }
     const ok = await write("/api/crm/doctor-schedule", "POST", payload);
-    if (!ok) return;
+    if (!ok || !isViewCurrent(run)) return;
     const kind = exception.kind;
     setException({ from: "", to: "", note: "", kind: "off", start: "09:00", end: "18:00" });
     toast.success(kind === "window" ? "Окно закрыто" : kind === "hours" ? "Особые часы сохранены" : "День закрыт");
@@ -599,6 +680,8 @@ export function DoctorSchedule() {
    * перенос дат, и честная строка о том, что удаления пока не существует.
    */
   const moveException = async (shift: Shift, from: string, to: string) => {
+    const run = lifetime.run;
+    if (!isViewCurrent(run) || !canManage || shift.doctorId !== selectedId) return;
     if (!from) {
       toast.error("Укажите дату");
       return;
@@ -608,14 +691,16 @@ export function DoctorSchedule() {
       onDate: from,
       onDateEnd: to || from,
     });
-    if (!ok) return;
+    if (!ok || !isViewCurrent(run)) return;
     toast.success("Даты исключения изменены");
     await load({ quiet: true });
   };
 
   const saveTimeZone = async (zone: string) => {
+    const run = lifetime.run;
+    if (!isViewCurrent(run) || !canSetTimeZone) return;
     const ok = await write("/api/crm/admin-settings", "POST", { key: "clinic_schedule", value: { timeZone: zone } });
-    if (!ok) return;
+    if (!ok || !isViewCurrent(run)) return;
     setTimeZone(zone);
     toast.success(`Часовой пояс ${terms.orgGenitive} сохранён`);
   };
@@ -636,6 +721,8 @@ export function DoctorSchedule() {
     // бы сводку на словаре прежней ниши, пока остальной экран уже переключился.
   }, [mine.length, selected, terms, weeklyByDay]);
 
+  if (expired) return null;
+
   return (
     <div className="grid gap-5 xl:grid-cols-[minmax(280px,360px)_minmax(0,1fr)]">
       <section className="neu-card">
@@ -649,6 +736,7 @@ export function DoctorSchedule() {
               type="button"
               className="neu-btn px-3 py-2"
               onClick={() => {
+                if (!isViewCurrent()) return;
                 setEditingId("");
                 setForm({ fullName: "", specialty: "", capacity: "1", sortOrder: "0", isActive: true, salaryFixedTenge: "", salaryPercent: "" });
                 setFormOpen(true);
@@ -694,7 +782,7 @@ export function DoctorSchedule() {
               <button
                 key={doctor.id}
                 type="button"
-                onClick={() => setSelectedId(doctor.id)}
+                onClick={() => { if (isViewCurrent()) selectDoctor(doctor.id); }}
                 className={`rounded-2xl border p-3 text-left ${
                   doctor.id === selectedId ? "border-[#0D9488] bg-[#ECFDF5]" : "border-[#E2E8F0] bg-white/70"
                 }`}
@@ -711,6 +799,7 @@ export function DoctorSchedule() {
                     className="mt-2 inline-block text-xs font-bold text-[#0D9488]"
                     onClick={(event) => {
                       event.stopPropagation();
+                      if (!isViewCurrent()) return;
                       setEditingId(doctor.id);
                       setForm({
                         fullName: doctor.fullName,
@@ -806,7 +895,7 @@ export function DoctorSchedule() {
                             <button
                               type="button"
                               className="neu-btn px-3 py-1.5 text-xs"
-                              onClick={() => setWeekdayWindow({ weekday: day.iso, start: "13:00", end: "14:00", note: "" })}
+                              onClick={() => isViewCurrent() && setWeekdayWindow({ weekday: day.iso, start: "13:00", end: "14:00", note: "" })}
                             >
                               Закрыть окно
                             </button>
@@ -851,7 +940,7 @@ export function DoctorSchedule() {
                             type="time"
                             step={300}
                             value={weekdayWindow.start}
-                            onChange={(event) => setWeekdayWindow((c) => ({ ...c, start: event.target.value }))}
+                            onChange={(event) => isViewCurrent() && setWeekdayWindow((c) => ({ ...c, start: event.target.value }))}
                           />
                         </label>
                         <label className="block">
@@ -861,7 +950,7 @@ export function DoctorSchedule() {
                             type="time"
                             step={300}
                             value={weekdayWindow.end}
-                            onChange={(event) => setWeekdayWindow((c) => ({ ...c, end: event.target.value }))}
+                            onChange={(event) => isViewCurrent() && setWeekdayWindow((c) => ({ ...c, end: event.target.value }))}
                           />
                         </label>
                         <label className="block min-w-[160px] flex-1">
@@ -869,7 +958,7 @@ export function DoctorSchedule() {
                           <input
                             className="neu-input w-full"
                             value={weekdayWindow.note}
-                            onChange={(event) => setWeekdayWindow((c) => ({ ...c, note: event.target.value }))}
+                            onChange={(event) => isViewCurrent() && setWeekdayWindow((c) => ({ ...c, note: event.target.value }))}
                             placeholder="Обед, планёрка…"
                           />
                         </label>
@@ -879,7 +968,7 @@ export function DoctorSchedule() {
                         <button
                           type="button"
                           className="neu-btn px-3 py-2 text-xs"
-                          onClick={() => setWeekdayWindow((c) => ({ ...c, weekday: 0 }))}
+                          onClick={() => isViewCurrent() && setWeekdayWindow((c) => ({ ...c, weekday: 0 }))}
                         >
                           Отмена
                         </button>
@@ -912,7 +1001,7 @@ export function DoctorSchedule() {
                     type="button"
                     className="neu-btn px-3 py-1.5 text-sm"
                     style={rhythm.work === preset.work && rhythm.off === preset.off ? { color: "#0D9488", fontWeight: 800 } : undefined}
-                    onClick={() => setRhythm((current) => ({ ...current, work: preset.work, off: preset.off }))}
+                    onClick={() => isViewCurrent() && setRhythm((current) => ({ ...current, work: preset.work, off: preset.off }))}
                   >
                     {preset.label}
                   </button>
@@ -920,32 +1009,32 @@ export function DoctorSchedule() {
                 <label className="flex items-center gap-1 text-xs font-bold text-[#64748B]">
                   работает
                   <input className="neu-input w-14 px-2 py-1.5 text-sm" type="number" min={1} max={6} value={rhythm.work}
-                    onChange={(event) => setRhythm((current) => ({ ...current, work: Number(event.target.value) || 1 }))} />
+                    onChange={(event) => isViewCurrent() && setRhythm((current) => ({ ...current, work: Number(event.target.value) || 1 }))} />
                   через
                   <input className="neu-input w-14 px-2 py-1.5 text-sm" type="number" min={1} max={6} value={rhythm.off}
-                    onChange={(event) => setRhythm((current) => ({ ...current, off: Number(event.target.value) || 1 }))} />
+                    onChange={(event) => isViewCurrent() && setRhythm((current) => ({ ...current, off: Number(event.target.value) || 1 }))} />
                 </label>
               </div>
               <div className="mb-3 flex flex-wrap items-center gap-2">
                 <label className="flex items-center gap-1 text-xs font-bold text-[#64748B]">
                   с
                   <input className="neu-input px-2 py-1.5 text-sm" type="date" value={rhythm.start}
-                    onChange={(event) => setRhythm((current) => ({ ...current, start: event.target.value }))} />
+                    onChange={(event) => isViewCurrent() && setRhythm((current) => ({ ...current, start: event.target.value }))} />
                 </label>
                 <label className="flex items-center gap-1 text-xs font-bold text-[#64748B]">
                   недель
                   <select className="neu-input px-2 py-1.5 text-sm" value={rhythm.weeks}
-                    onChange={(event) => setRhythm((current) => ({ ...current, weeks: Number(event.target.value) }))}>
+                    onChange={(event) => isViewCurrent() && setRhythm((current) => ({ ...current, weeks: Number(event.target.value) }))}>
                     {[2, 4, 6, 8].map((weeks) => <option key={weeks} value={weeks}>{weeks}</option>)}
                   </select>
                 </label>
                 <label className="flex items-center gap-1 text-xs font-bold text-[#64748B]">
                   часы
                   <input className="neu-input w-24 px-2 py-1.5 text-sm" value={rhythm.from} placeholder="09:00"
-                    onChange={(event) => setRhythm((current) => ({ ...current, from: event.target.value }))} />
+                    onChange={(event) => isViewCurrent() && setRhythm((current) => ({ ...current, from: event.target.value }))} />
                   –
                   <input className="neu-input w-24 px-2 py-1.5 text-sm" value={rhythm.to} placeholder="21:00"
-                    onChange={(event) => setRhythm((current) => ({ ...current, to: event.target.value }))} />
+                    onChange={(event) => isViewCurrent() && setRhythm((current) => ({ ...current, to: event.target.value }))} />
                 </label>
                 <button type="button" className="neu-btn-primary px-4 py-2 text-sm" disabled={rhythmSaving} onClick={() => void fillRhythm()}>
                   {rhythmSaving ? "Заполняем…" : "Заполнить график"}
@@ -998,18 +1087,18 @@ export function DoctorSchedule() {
                 <div className="mt-3 flex flex-wrap items-end gap-2 rounded-2xl border border-dashed border-[#CBD5E1] p-3">
                   <label className="block">
                     <span className="mb-1 block text-xs font-bold uppercase text-[#64748B]">С</span>
-                    <input className="neu-input w-40" type="date" value={exception.from} onChange={(event) => setException((c) => ({ ...c, from: event.target.value }))} />
+                    <input className="neu-input w-40" type="date" value={exception.from} onChange={(event) => isViewCurrent() && setException((c) => ({ ...c, from: event.target.value }))} />
                   </label>
                   <label className="block">
                     <span className="mb-1 block text-xs font-bold uppercase text-[#64748B]">По</span>
-                    <input className="neu-input w-40" type="date" value={exception.to} onChange={(event) => setException((c) => ({ ...c, to: event.target.value }))} />
+                    <input className="neu-input w-40" type="date" value={exception.to} onChange={(event) => isViewCurrent() && setException((c) => ({ ...c, to: event.target.value }))} />
                   </label>
                   <label className="block">
                     <span className="mb-1 block text-xs font-bold uppercase text-[#64748B]">Что делаем</span>
                     <select
                       className="neu-input w-56"
                       value={exception.kind}
-                      onChange={(event) => setException((c) => ({ ...c, kind: event.target.value as ExceptionKind }))}
+                      onChange={(event) => isViewCurrent() && setException((c) => ({ ...c, kind: event.target.value as ExceptionKind }))}
                     >
                       <option value="off">Закрыть день целиком</option>
                       <option value="window">Закрыть окно внутри дня</option>
@@ -1022,17 +1111,17 @@ export function DoctorSchedule() {
                         <span className="mb-1 block text-xs font-bold uppercase text-[#64748B]">
                           {exception.kind === "window" ? "Закрыто с" : "Часы с"}
                         </span>
-                        <input className="neu-input w-28" type="time" step={300} value={exception.start} onChange={(event) => setException((c) => ({ ...c, start: event.target.value }))} />
+                        <input className="neu-input w-28" type="time" step={300} value={exception.start} onChange={(event) => isViewCurrent() && setException((c) => ({ ...c, start: event.target.value }))} />
                       </label>
                       <label className="block">
                         <span className="mb-1 block text-xs font-bold uppercase text-[#64748B]">по</span>
-                        <input className="neu-input w-28" type="time" step={300} value={exception.end} onChange={(event) => setException((c) => ({ ...c, end: event.target.value }))} />
+                        <input className="neu-input w-28" type="time" step={300} value={exception.end} onChange={(event) => isViewCurrent() && setException((c) => ({ ...c, end: event.target.value }))} />
                       </label>
                     </>
                   ) : null}
                   <label className="block flex-1 min-w-[180px]">
                     <span className="mb-1 block text-xs font-bold uppercase text-[#64748B]">Причина</span>
-                    <input className="neu-input w-full" value={exception.note} onChange={(event) => setException((c) => ({ ...c, note: event.target.value }))} placeholder="Отпуск, конференция…" />
+                    <input className="neu-input w-full" value={exception.note} onChange={(event) => isViewCurrent() && setException((c) => ({ ...c, note: event.target.value }))} placeholder="Отпуск, конференция…" />
                   </label>
                   <button type="button" className="neu-btn-primary px-4 py-2 text-sm" onClick={() => void addException()}>
                     {exception.kind === "window" ? "Закрыть окно" : exception.kind === "off" ? "Закрыть день" : "Сохранить особые часы"}
@@ -1052,25 +1141,25 @@ export function DoctorSchedule() {
       </section>
 
       {formOpen ? (
-        <div className="fixed inset-0 z-[80] flex items-center justify-center p-4" style={{ background: "rgba(15,23,42,0.35)" }} onClick={() => setFormOpen(false)}>
+        <div className="fixed inset-0 z-[80] flex items-center justify-center p-4" style={{ background: "rgba(15,23,42,0.35)" }} onClick={() => isViewCurrent() && setFormOpen(false)}>
           {/* max-h + overflow обязательны: без них на iPhone SE карточка выше
               экрана, а прокрутить нечем — ни заголовок, ни «Сохранить» не
               достать. Тот же приём, что у остальных модалок продукта. */}
           <div className="neu-card max-h-[90vh] w-full max-w-md overflow-y-auto bg-white p-5" onClick={(event) => event.stopPropagation()}>
             <div className="flex items-center justify-between gap-3">
               <h3 className="text-base font-black text-[#0F172A]">{editingId ? `Изменить ${terms.specialistGenitive}` : `Новый ${terms.specialist}`}</h3>
-              <button type="button" className="neu-btn px-3 py-2" onClick={() => setFormOpen(false)} aria-label="Закрыть">
+              <button type="button" className="neu-btn px-3 py-2" onClick={() => isViewCurrent() && setFormOpen(false)} aria-label="Закрыть">
                 <X size={15} />
               </button>
             </div>
             <div className="mt-4 grid gap-3">
               <label className="block">
                 <span className="mb-1 block text-xs font-bold uppercase text-[#64748B]">ФИО</span>
-                <input className="neu-input w-full" value={form.fullName} onChange={(event) => setForm((c) => ({ ...c, fullName: event.target.value }))} placeholder="Сауле Ахметова" />
+                <input className="neu-input w-full" value={form.fullName} onChange={(event) => isViewCurrent() && setForm((c) => ({ ...c, fullName: event.target.value }))} placeholder="Сауле Ахметова" />
               </label>
               <label className="block">
                 <span className="mb-1 block text-xs font-bold uppercase text-[#64748B]">Специальность</span>
-                <input className="neu-input w-full" value={form.specialty} onChange={(event) => setForm((c) => ({ ...c, specialty: event.target.value }))} placeholder="Косметолог" />
+                <input className="neu-input w-full" value={form.specialty} onChange={(event) => isViewCurrent() && setForm((c) => ({ ...c, specialty: event.target.value }))} placeholder="Косметолог" />
               </label>
               <div className="grid grid-cols-2 gap-2">
                 <label className="block">
@@ -1080,13 +1169,13 @@ export function DoctorSchedule() {
                       зарплату, а не выдумывает нули. */}
                   <input className="neu-input w-full" type="number" min={0} step={1000} placeholder="Не задан"
                     value={form.salaryFixedTenge}
-                    onChange={(event) => setForm((current) => ({ ...current, salaryFixedTenge: event.target.value }))} />
+                    onChange={(event) => isViewCurrent() && setForm((current) => ({ ...current, salaryFixedTenge: event.target.value }))} />
                 </label>
                 <label className="block">
                   <span className="mb-1.5 block text-[11px] font-bold text-[#64748B]">Процент от услуг, %</span>
                   <input className="neu-input w-full" type="number" min={0} max={100} step={1} placeholder="Не задан"
                     value={form.salaryPercent}
-                    onChange={(event) => setForm((current) => ({ ...current, salaryPercent: event.target.value }))} />
+                    onChange={(event) => isViewCurrent() && setForm((current) => ({ ...current, salaryPercent: event.target.value }))} />
                 </label>
               </div>
               <label className="block">
@@ -1095,7 +1184,7 @@ export function DoctorSchedule() {
                   className="neu-input w-full"
                   inputMode="numeric"
                   value={form.capacity}
-                  onChange={(event) => setForm((c) => ({ ...c, capacity: event.target.value }))}
+                  onChange={(event) => isViewCurrent() && setForm((c) => ({ ...c, capacity: event.target.value }))}
                 />
                 {/*
                   Единица — обычный приём: второй клиент в тот же интервал будет
@@ -1109,15 +1198,15 @@ export function DoctorSchedule() {
               </label>
               <label className="block">
                 <span className="mb-1 block text-xs font-bold uppercase text-[#64748B]">Порядок в списке</span>
-                <input className="neu-input w-full" inputMode="numeric" value={form.sortOrder} onChange={(event) => setForm((c) => ({ ...c, sortOrder: event.target.value }))} />
+                <input className="neu-input w-full" inputMode="numeric" value={form.sortOrder} onChange={(event) => isViewCurrent() && setForm((c) => ({ ...c, sortOrder: event.target.value }))} />
               </label>
               <label className="flex items-center gap-2 text-sm font-semibold text-[#334155]">
-                <input type="checkbox" checked={form.isActive} onChange={(event) => setForm((c) => ({ ...c, isActive: event.target.checked }))} />
+                <input type="checkbox" checked={form.isActive} onChange={(event) => isViewCurrent() && setForm((c) => ({ ...c, isActive: event.target.checked }))} />
                 Принимает — показывать в форме записи
               </label>
             </div>
             <div className="mt-5 flex flex-col gap-2 sm:flex-row sm:justify-end">
-              <button type="button" className="neu-btn px-4 py-2 text-sm" onClick={() => setFormOpen(false)}>Отмена</button>
+              <button type="button" className="neu-btn px-4 py-2 text-sm" onClick={() => isViewCurrent() && setFormOpen(false)}>Отмена</button>
               <button type="button" className="neu-btn-primary px-4 py-2 text-sm" disabled={saving} onClick={() => void submitDoctor()}>
                 {saving ? "Сохраняем…" : "Сохранить"}
               </button>

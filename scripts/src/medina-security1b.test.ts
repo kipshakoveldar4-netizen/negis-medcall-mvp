@@ -405,6 +405,21 @@ type ReceiptReview = {
   triggers?: { name: string; table: string; fn: string; events: string[]; timing: string; deferred?: boolean }[];
 };
 const RPC_ONLY_TABLES = new Map<string, ReceiptReview>([
+  ["site_deletion_operations", {
+    migration: "101_site_deletion_operations.sql",
+    functions: [
+      { name: "prepare_site_deletion_operation", args: ["uuid", "text", "uuid", "uuid", "jsonb"] },
+      { name: "read_site_deletion_operations", args: ["uuid", "text", "uuid", "uuid", "uuid"] },
+      { name: "execute_site_deletion_operation", args: ["uuid", "text", "uuid", "uuid", "jsonb"] },
+      { name: "close_site_deletion_operation", args: ["uuid", "text", "uuid", "uuid", "uuid", "text"] },
+    ],
+    privateFunctions: [
+      { name: "validate_site_deletion_operation_request", args: ["jsonb"], definer: false },
+      { name: "lock_site_deletion_operation_actor", args: ["uuid", "uuid", "uuid"], definer: true },
+      { name: "site_deletion_operation_receipt", args: ["public.site_deletion_operations", "boolean"], definer: false },
+      { name: "delete_crm_site_inquiry", args: ["uuid", "text", "uuid", "uuid[]", "timestamp with time zone", "uuid", "uuid", "uuid", "boolean"], external: true, definer: true },
+    ],
+  }],
   ["crm_appointment_create_requests", {
     migration: "064_appointment_create_requests.sql",
     functions: [
@@ -636,7 +651,9 @@ for (const [table, review] of RPC_ONLY_TABLES) {
     }
     for (const signature of review.functions) {
       const changed = new Map(migrations);
-      const at = source.indexOf(`create or replace function public.${signature.name}(`);
+      const declaration = source.includes(`create or replace function public.${signature.name}(`)
+        ? `create or replace function public.${signature.name}(` : `create function public.${signature.name}(`;
+      const at = source.indexOf(declaration);
       assert.ok(at >= 0, signature.name);
       changed.set(review.migration, source.slice(0, at) + source.slice(at).replace("security definer", "security invoker"));
       assert.throws(() => assertPrivateReceipt(changed, table), `each RPC must be protected: ${signature.name}`);

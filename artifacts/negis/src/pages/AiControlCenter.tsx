@@ -1,4 +1,4 @@
-import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { Link } from "wouter";
 import {
   ArrowRight,
@@ -25,7 +25,7 @@ import { PlatformRecommendations } from "@/components/crm/PlatformRecommendation
 import { WorkQueue } from "@/components/dashboard/work-queue";
 import { RecentRecords } from "@/components/dashboard/recent-records";
 import { DistributionPanel } from "@/components/dashboard/distribution-panel";
-import { apiUrl, crmFetch } from "@/lib/api";
+import { crmFetch } from "@/lib/api";
 import { toast } from "sonner";
 import { useAuth } from "@/contexts/AuthContext";
 import { capitalize, termsFor } from "../../../../lib/vertical/terms";
@@ -38,7 +38,10 @@ import {
   buildUpcomingAppointmentsQueue,
   type DashboardRecord,
 } from "@/lib/dashboardData";
-import { readDemoStorage, isRealWorkspace, readWorkspaceId } from "@/lib/demoStorage";
+import { hasSupabaseFrontendEnv, supabase } from "@/lib/supabase";
+import { getSignOutRevision, isSignOutPending } from "@/lib/authSignOut";
+import { workspaceAllowsRoute } from "@/lib/workspaceRoutes";
+import { isRealWorkspace } from "@/lib/demoStorage";
 import { semanticGroupForLead } from "@/lib/leadPipeline";
 
 // Операционный обзор (Medina OS UI-2) uses real workspace-scoped CRM
@@ -135,12 +138,21 @@ const launchModeLabel: Record<LaunchMode, string> = {
   unknown: "Статус неизвестен",
 };
 
-async function fetchJson(path: string): Promise<{ ok: boolean; body: Record<string, unknown> }> {
+type ControlAccess = {
+  workspaceId: string;
+  localDemo: boolean;
+  isCurrent: () => boolean;
+  request: (path: string, init?: RequestInit) => Promise<Response>;
+};
+
+async function fetchJson(access: ControlAccess, path: string): Promise<{ ok: boolean; body: Record<string, unknown> }> {
   try {
-    const response = await crmFetch(path);
+    const response = await access.request(path);
+    if (!response.ok) return { ok: false, body: {} };
     const text = await response.text();
-    const body = text ? (JSON.parse(text) as Record<string, unknown>) : {};
-    return { ok: response.ok, body };
+    if (!access.isCurrent()) return { ok: false, body: {} };
+    const body = asRecord(text ? JSON.parse(text) : null);
+    return { ok: body.mode !== "demo", body };
   } catch {
     return { ok: false, body: {} };
   }
@@ -166,27 +178,36 @@ function isTodayDate(value: string, dayKey: string, timeZone: string): boolean {
 
 type CrmList = { responded: boolean; items: Array<Record<string, unknown>>; timeZone: string };
 
-// Real API items when Supabase answers; in demo mode the endpoint responds but the
-// data lives in the CRM pages' localStorage (read-only fallback). A failed endpoint
-// reports responded: false and the metric shows "Не удалось проверить".
-async function fetchCrmList(path: string, listKey: string, demoKey: string): Promise<CrmList> {
-  const { ok, body } = await fetchJson(path);
-  if (!ok || body.success !== true) return { responded: false, items: [], timeZone: "" };
-  if (body.mode === "supabase") {
-    const data = asRecord(body.data);
-    const rawItems = data[listKey];
-    return {
-      responded: true,
-      items: Array.isArray(rawItems) ? rawItems.map((item) => asRecord(item)) : [],
-      // Пояс клиники едет вместе со списком записей: маршрут настроек открыт
-      // только владельцу и администратору, и спросить его напрямую нельзя.
-      timeZone: str(data.timeZone),
-    };
+function isRecordList(value: unknown): value is Array<Record<string, unknown>> {
+  return Array.isArray(value) && value.every((item) => item !== null && typeof item === "object" && !Array.isArray(item));
+}
+
+const demoCollectionKeys: Record<string, string> = {
+  leads: "negis_demo_leads", clients: "negis_demo_clients",
+  appointments: "negis_demo_appointments", deals: "negis_demo_deals",
+};
+
+// Only explicit non-production demo Auth may read existing local collections.
+// It never seeds storage, queries an endpoint, or falls back from a failed real read.
+async function fetchCrmList(access: ControlAccess, path: string, listKey: string): Promise<CrmList> {
+  if (access.localDemo) {
+    try {
+      if (!access.isCurrent()) throw new Error("Control view changed");
+      const key = demoCollectionKeys[listKey];
+      if (!key) throw new Error("Unknown demo collection");
+      const raw = window.localStorage.getItem(key);
+      const items: unknown = raw === null ? [] : JSON.parse(raw);
+      if (!isRecordList(items)) throw new Error("Invalid demo collection");
+      return { responded: true, items, timeZone: "" };
+    } catch { return { responded: false, items: [], timeZone: "" }; }
   }
-  // Production (UUID workspace): a non-supabase answer means the data is genuinely
-  // unavailable — report an honest failure instead of counting demo localStorage.
-  if (isRealWorkspace()) return { responded: false, items: [], timeZone: "" };
-  return { responded: true, items: readDemoStorage<unknown[]>(demoKey, []).map((item) => asRecord(item)), timeZone: "" };
+  const { ok, body } = await fetchJson(access, path);
+  const data = asRecord(body.data);
+  const rawItems = data[listKey];
+  if (!ok || body.success !== true || body.mode !== "supabase" || !isRecordList(rawItems)) {
+    return { responded: false, items: [], timeZone: "" };
+  }
+  return { responded: true, items: rawItems.map((item) => asRecord(item)), timeZone: str(data.timeZone) };
 }
 
 /* ── Presentational components ─────────────────────────────── */
@@ -209,7 +230,8 @@ function AIActionCard({
   openHref,
   onCreateTask,
   creatingTask,
-}: Recommendation & { onCreateTask: () => void; creatingTask: boolean }) {
+  taskDisabled,
+}: Recommendation & { onCreateTask: () => void; creatingTask: boolean; taskDisabled: boolean }) {
   const meta = priorityMeta[priority];
   return (
     <div className="negis-glass flex flex-col gap-3 p-5">
@@ -242,7 +264,7 @@ function AIActionCard({
         {/* Задачи давно подключены: рекомендация превращается в поручение
             одним нажатием, а не остаётся личным делом владельца. Мёртвой
             кнопки «Подробнее» больше нет — обещаний тут не вешают. */}
-        <button type="button" className="neu-btn justify-center px-4 py-2 text-xs" disabled={creatingTask} onClick={onCreateTask}>
+        <button type="button" className="neu-btn justify-center px-4 py-2 text-xs" disabled={taskDisabled || creatingTask} onClick={onCreateTask}>
           {creatingTask ? "Создаю…" : "Создать задачу"}
         </button>
       </div>
@@ -300,41 +322,126 @@ function SectionTitle({ children, hint }: { children: ReactNode; hint?: string }
   );
 }
 
+function UnavailableSection({ title }: { title: string }) {
+  return <section className="neu p-4" aria-label={title}>
+    <h3 className="text-sm font-semibold">{title}</h3>
+    <p className="mt-3 text-sm" style={{ color: "var(--negis-muted)" }}>Не удалось загрузить данные.</p>
+  </section>;
+}
+
 const chipStyle: CSSProperties = { borderRadius: 999, padding: "4px 12px", fontSize: 11, fontWeight: 800 };
 
 const ONBOARDING_HINT_KEY = "negis_onboarding_hint_dismissed";
 
 export default function AiControlCenter() {
+  const auth = useAuth();
+  const { user, clinicId, userRole, workspacePurpose, rolePermissions } = auth;
+  const localDemo = auth.isDemoMode && !!clinicId && !isRealWorkspace(clinicId);
+  const allowed = !auth.isLoading && !auth.isSigningOut && !auth.isImpersonation
+    && (!auth.isDemoMode || localDemo)
+    && !!user?.id && !!clinicId && userRole !== "lead_manager"
+    && (userRole === "owner" || userRole === "manager" || !!rolePermissions.dashboard)
+    && workspaceAllowsRoute(workspacePurpose, userRole, "/ai-control-center");
+  const scopeKey = JSON.stringify([user?.id, clinicId, userRole, workspacePurpose, allowed, rolePermissions.tasks, localDemo]);
+  const live = useRef(scopeKey);
+  live.current = scopeKey;
+  const observedActor = useRef(user?.id || "");
+  const authObserved = useRef(false);
+  const [authEpoch, setAuthEpoch] = useState(0);
+  useLayoutEffect(() => {
+    if (!hasSupabaseFrontendEnv || localDemo) return;
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      authObserved.current = true;
+      const next = session?.user.id || "";
+      if (observedActor.current === next) return;
+      observedActor.current = next;
+      setAuthEpoch((value) => value + 1);
+    });
+    return () => subscription.unsubscribe();
+  }, [localDemo]);
+  if (!allowed || (!localDemo && authObserved.current && observedActor.current !== user?.id)) return null;
+  return <AiControlLifetime key={`${scopeKey}:${authEpoch}`} actorId={user!.id} workspaceId={clinicId!} localDemo={localDemo} scopeKey={scopeKey} live={live} />;
+}
+
+function AiControlLifetime({ actorId, workspaceId, localDemo, scopeKey, live }: {
+  actorId: string; workspaceId: string; localDemo: boolean; scopeKey: string; live: { current: string };
+}) {
+  const active = useRef<AbortController | null>(null);
+  const retired = useRef(false);
+  const [access, setAccess] = useState<ControlAccess | null>(null);
+  useLayoutEffect(() => {
+    const controller = new AbortController();
+    const signOutRevision = getSignOutRevision();
+    active.current = controller;
+    const isCurrent = () => active.current === controller && !controller.signal.aborted && !retired.current
+      && live.current === scopeKey && !isSignOutPending() && signOutRevision === getSignOutRevision();
+    const retire = () => {
+      retired.current = true;
+      controller.abort();
+      setAccess(null);
+    };
+    const subscription = hasSupabaseFrontendEnv && !localDemo ? supabase.auth.onAuthStateChange((_event, session) => {
+      if ((session?.user.id || "") !== actorId) retire();
+    }).data.subscription : null;
+    setAccess({ workspaceId, localDemo, isCurrent, request: async (path, init) => {
+      if (!isCurrent() || localDemo) throw new DOMException("Control request unavailable", "AbortError");
+      const signal = init?.signal ? AbortSignal.any([controller.signal, init.signal]) : controller.signal;
+      const response = await crmFetch(path, {
+        ...init, cache: "no-store", signal, expectedUserId: actorId, dispatchGuard: isCurrent,
+      });
+      signal.throwIfAborted();
+      if (!isCurrent()) throw new DOMException("Control view changed", "AbortError");
+      if ([401, 403].includes(response.status)) {
+        retire();
+        throw new DOMException("Control access ended", "AbortError");
+      }
+      return response;
+    } });
+    return () => { controller.abort(); subscription?.unsubscribe(); if (active.current === controller) active.current = null; };
+  }, [actorId, workspaceId, localDemo, scopeKey, live]);
+  if (!access || !access.isCurrent()) return null;
+  return <AiControlSession key={access.workspaceId} access={access} />;
+}
+
+function AiControlSession({ access }: { access: ControlAccess }) {
   const { vertical, rolePermissions } = useAuth();
   const terms = termsFor(vertical);
   const todayLabel = new Date().toLocaleDateString("ru-RU", { day: "numeric", month: "long" });
   // Задача из рекомендации: карточка «Требует внимания» становится поручением.
   const [creatingTaskFor, setCreatingTaskFor] = useState("");
+  const pendingTask = useRef(false);
+  const mounted = useRef(false);
+  useLayoutEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  const isCurrent = () => mounted.current && access.isCurrent();
   const createTaskFromRecommendation = async (rec: Recommendation) => {
-    if (creatingTaskFor) return;
+    if (access.localDemo || !isCurrent() || pendingTask.current) return;
+    pendingTask.current = true;
     setCreatingTaskFor(rec.title);
     try {
-      const response = await crmFetch(`/api/crm/tasks?workspaceId=${encodeURIComponent(readWorkspaceId())}`, {
+      const response = await access.request(`/api/crm/tasks?workspaceId=${encodeURIComponent(access.workspaceId)}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          workspaceId: readWorkspaceId(),
+          workspaceId: access.workspaceId,
           title: rec.action || rec.title,
           status: "new",
           priority: rec.priority === "high" ? "high" : "medium",
         }),
       });
+      if (!response.ok) throw new Error(String(response.status));
       const body = (await response.json().catch(() => null)) as { success?: boolean; mode?: string } | null;
+      if (!isCurrent()) return;
       // 200 mode:"demo" — сервер ничего не записал: честный отказ, не успех.
       if (!response.ok || body?.success !== true || body.mode !== "supabase") {
         throw new Error(String(response.status));
       }
       toast.success("Задача создана — она в разделе задач на карточках заявок и клиентов");
     } catch (error) {
+      if (!isCurrent()) return;
       console.warn("[control-center] task create refused", error instanceof Error ? error.message : error);
       toast.error("Не удалось создать задачу. Попробуйте позже.");
     } finally {
-      setCreatingTaskFor("");
+      if (isCurrent()) { pendingTask.current = false; setCreatingTaskFor(""); }
     }
   };
   // Commercial-2: dismissible onboarding reminder. Dismissal only hides this
@@ -343,6 +450,7 @@ export default function AiControlCenter() {
     () => typeof window !== "undefined" && window.localStorage.getItem(ONBOARDING_HINT_KEY) !== "1",
   );
   const dismissOnboardingHint = () => {
+    if (access.localDemo || !isCurrent()) return;
     setShowOnboardingHint(false);
     try {
       window.localStorage.setItem(ONBOARDING_HINT_KEY, "1");
@@ -352,6 +460,7 @@ export default function AiControlCenter() {
   };
 
   const [loading, setLoading] = useState(true);
+  const [loadFailed, setLoadFailed] = useState(false);
   const [launchesLoaded, setLaunchesLoaded] = useState(false);
   const [launches, setLaunches] = useState<LaunchItem[]>([]);
   const [apiState, setApiState] = useState<HealthState>("loading");
@@ -388,21 +497,37 @@ export default function AiControlCenter() {
 
   useEffect(() => {
     let cancelled = false;
+    const controller = new AbortController();
+    const readAccess: ControlAccess = {
+      ...access,
+      isCurrent: () => !cancelled && isCurrent(),
+      request: (path, init) => access.request(path, { ...init, signal: controller.signal }),
+    };
     async function load() {
-      const workspaceId = readWorkspaceId();
+      const workspaceId = access.workspaceId;
       const workspaceQuery = `workspaceId=${encodeURIComponent(workspaceId)}`;
       // Independent fetches: one failing endpoint must not block the page.
+      // Each unavailable collection stays unknown; no empty-success fallback.
+      const remoteRead = (path: string) => access.localDemo
+        ? Promise.resolve({ ok: false, body: {} as Record<string, unknown> })
+        : fetchJson(readAccess, path);
       const [health, storage, targeting, launchesRes, leadsRes, clientsRes, appointmentsRes, dealsRes] = await Promise.all([
-        fetchJson("/api/crm/health"),
-        fetchJson("/api/crm/storage-health"),
-        fetchJson("/api/targeting/health"),
-        fetchJson(`/api/crm/meta-launches?${workspaceQuery}`),
-        fetchCrmList(`/api/crm/leads?${workspaceQuery}`, "leads", "negis_demo_leads"),
-        fetchCrmList(`/api/crm/clients?${workspaceQuery}`, "clients", "negis_demo_clients"),
-        fetchCrmList(`/api/crm/appointments?${workspaceQuery}`, "appointments", "negis_demo_appointments"),
-        fetchCrmList(`/api/crm/deals?${workspaceQuery}`, "deals", "negis_demo_deals"),
+        remoteRead(`/api/crm/health?${workspaceQuery}`),
+        remoteRead(`/api/crm/storage-health?${workspaceQuery}`),
+        remoteRead(`/api/targeting/health?${workspaceQuery}`),
+        remoteRead(`/api/crm/meta-launches?${workspaceQuery}`),
+        fetchCrmList(readAccess, `/api/crm/leads?${workspaceQuery}`, "leads"),
+        fetchCrmList(readAccess, `/api/crm/clients?${workspaceQuery}`, "clients"),
+        fetchCrmList(readAccess, `/api/crm/appointments?${workspaceQuery}`, "appointments"),
+        fetchCrmList(readAccess, `/api/crm/deals?${workspaceQuery}`, "deals"),
       ]);
-      if (cancelled) return;
+      if (cancelled || !isCurrent()) return;
+      const launchData = asRecord(launchesRes.body.data);
+      const launchList = launchData.launches ?? launchData.items;
+      const launchesResponded = launchesRes.ok && launchesRes.body.success === true
+        && launchesRes.body.mode === "supabase" && isRecordList(launchList);
+      setLoadFailed(![leadsRes, clientsRes, appointmentsRes, dealsRes].every((result) => result.responded)
+        || (!access.localDemo && !launchesResponded));
 
       // Сутки клиники, а не сутки ноутбука: пояс приезжает вместе с записями.
       const clinicTimeZone = appointmentsRes.timeZone;
@@ -419,10 +544,10 @@ export default function AiControlCenter() {
         appointments: appointmentsRes.items,
         deals: dealsRes.items,
       });
-      const paidDealsToday = dealsRes.items.filter((deal) =>
+      const paidDealsToday = appointmentsRes.responded ? dealsRes.items.filter((deal) =>
         str(deal.status).toLowerCase() === "paid"
         && isTodayDate(str(deal.paidAt) || str(deal.paid_at), clinicDayKey, clinicTimeZone),
-      );
+      ) : [];
       setCrmCounts({
         newLeads: leadsRes.items.filter((lead) => semanticGroupForLead(lead) === "new").length,
         unprocessedLeads: leadsRes.items.filter((lead) => {
@@ -477,12 +602,11 @@ export default function AiControlCenter() {
       }
 
       // Targeting Agent (external; often unavailable)
-      setTargetingState(targeting.ok && targeting.body.success === true ? "ready" : "disconnected");
+      setTargetingState(targeting.ok && targeting.body.success === true ? "ready" : "unknown");
 
       // Ad launches
-      if (launchesRes.ok && launchesRes.body.success === true) {
-        const data = asRecord(launchesRes.body.data);
-        const list = (Array.isArray(data.launches) ? data.launches : Array.isArray(data.items) ? data.items : []) as LaunchItem[];
+      if (launchesResponded) {
+        const list = launchList as LaunchItem[];
         const sorted = [...list].sort((a, b) => str(b.createdAt).localeCompare(str(a.createdAt)));
         setLaunches(sorted);
         setLaunchesLoaded(true);
@@ -493,8 +617,9 @@ export default function AiControlCenter() {
     void load();
     return () => {
       cancelled = true;
+      controller.abort();
     };
-  }, []);
+  }, [access]);
 
   const latest = launches[0];
   const latestMode = latest ? classifyLaunch(latest) : null;
@@ -512,6 +637,8 @@ export default function AiControlCenter() {
     deal: crmRecords.deals,
   });
   const leadSourceSlices = buildLeadSourceDistribution(crmRecords.leads);
+  const revenueState = dealsState === "ready" ? appointmentsState : dealsState;
+  const recentUnavailable = [leadsState, clientsState, appointmentsState, dealsState].includes("unknown");
 
   // CRM metric helper: value only when the endpoint responded, honest "Не удалось
   // проверить" when it failed — never invented numbers.
@@ -555,23 +682,23 @@ export default function AiControlCenter() {
         ? failedCount > 0
           ? "Неудачные запуски рекламы. Проверьте историю."
           : "Неудачных запусков нет."
-        : "Проверяем статусы запусков…",
+        : loading ? "Проверяем статусы запусков…" : "Не удалось проверить",
       loading,
     },
     {
       label: "Выручка сегодня",
       icon: DollarSign,
       tone: crmCounts.paidDealsToday > 0 ? "success" : "muted",
-      value: dealsState === "ready" ? formatRevenueMinor(crmCounts.revenueTodayMinor) : undefined,
+      value: revenueState === "ready" ? formatRevenueMinor(crmCounts.revenueTodayMinor) : undefined,
       // CRM10: the linked share is manually attributed revenue, not ad effectiveness.
-      hint: dealsState === "unknown"
+      hint: revenueState === "unknown"
         ? "Не удалось проверить"
-        : dealsState === "ready"
+        : revenueState === "ready"
           ? crmCounts.paidAttributedRevenueMinor > 0
             ? `По оплаченным продажам за сегодня. Из них с рекламой: ${formatRevenueMinor(crmCounts.paidAttributedRevenueMinor)} (связано вручную).`
             : "По оплаченным продажам за сегодня."
           : "Загружаем данные CRM…",
-      loading: dealsState === "loading",
+      loading: revenueState === "loading",
     },
   ];
 
@@ -696,6 +823,7 @@ export default function AiControlCenter() {
             Заявки, записи, продажи, реклама и состояние систем — реальные данные {terms.orgGenitive}.
           </p>
         </header>
+        {loadFailed ? <p role="alert" className="text-sm">Не удалось загрузить часть данных обзора. Попробуйте позже.</p> : null}
 
         {/* Календарь — в одно нажатие с главного экрана: журнал записей и
             есть рабочий стол салона, дашборд лишь прихожая перед ним. */}
@@ -717,10 +845,10 @@ export default function AiControlCenter() {
         {/* Советы владельца платформы: карточки видят владелец, админ и
             управляющий; при неприменённой миграции или любом сбое секция
             просто отсутствует. */}
-        <PlatformRecommendations />
+        {!access.localDemo ? <PlatformRecommendations /> : null}
 
         {/* Commercial-2: onboarding entry card (dismissible; never marks setup done) */}
-        {showOnboardingHint ? (
+        {showOnboardingHint && !access.localDemo ? (
           <section className="neu flex flex-wrap items-center justify-between gap-3 p-4" aria-label="Настройка клиники">
             <p className="min-w-0 text-sm" style={{ color: "var(--negis-muted)" }}>
               <span className="font-semibold" style={{ color: "var(--negis-text)" }}>Продолжите настройку клиники.</span>{" "}
@@ -768,12 +896,13 @@ export default function AiControlCenter() {
                   {...rec}
                   onCreateTask={() => void createTaskFromRecommendation(rec)}
                   creatingTask={creatingTaskFor === rec.title}
+                  taskDisabled={access.localDemo}
                 />
               ))}
             </div>
           ) : (
             <div className="negis-glass p-5 text-sm font-semibold leading-relaxed" style={{ color: "var(--negis-muted)" }}>
-              Критичных CRM-действий пока нет.
+              {loadFailed ? "Не удалось проверить все CRM-действия." : "Критичных CRM-действий пока нет."}
             </div>
           )}
         </section>
@@ -782,39 +911,39 @@ export default function AiControlCenter() {
         <section>
           <SectionTitle hint="Ближайшая работа по реальным записям CRM.">Очереди работы</SectionTitle>
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
-            <WorkQueue
+            {leadsState === "unknown" ? <UnavailableSection title="Новые заявки" /> : <WorkQueue
               title="Новые заявки"
               items={newLeadsQueue}
               loading={loading}
               emptyText="Новых заявок нет."
               href="/leads"
-            />
-            <WorkQueue
+            />}
+            {appointmentsState === "unknown" ? <UnavailableSection title="Ближайшие записи" /> : <WorkQueue
               title="Ближайшие записи"
               items={upcomingAppointmentsQueue}
               loading={loading}
               emptyText="Запланированных записей нет."
               href="/appointments"
-            />
-            <WorkQueue
+            />}
+            {dealsState === "unknown" ? <UnavailableSection title="Неоплаченные продажи" /> : <WorkQueue
               title="Неоплаченные продажи"
               items={pendingDealsQueue}
               loading={loading}
               emptyText="Продаж в ожидании оплаты нет."
               href="/sales"
-            />
+            />}
           </div>
         </section>
 
         {/* 3c. Distribution + honest recency */}
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-          <DistributionPanel
+          {leadsState === "unknown" ? <UnavailableSection title="Заявки по источникам" /> : <DistributionPanel
             title="Заявки по источникам"
             hint="Распределение всех загруженных заявок по источнику обращения."
             slices={leadSourceSlices}
             loading={loading}
-          />
-          <RecentRecords records={recentRecords} loading={loading} />
+          />}
+          {recentUnavailable ? <UnavailableSection title="Недавно созданные записи" /> : <RecentRecords records={recentRecords} loading={loading} />}
         </div>
 
         {/* 4. Quick actions */}
@@ -854,6 +983,8 @@ export default function AiControlCenter() {
             </div>
             {loading ? (
               <p className="mt-3 text-sm font-semibold" style={{ color: "var(--negis-muted)" }}>Загрузка…</p>
+            ) : !launchesLoaded ? (
+              <p className="mt-3 text-sm font-semibold" style={{ color: "var(--negis-muted)" }}>Не удалось проверить статусы запусков.</p>
             ) : latest && latestMode ? (
               <div className="mt-3 space-y-1 text-sm font-semibold" style={{ color: "var(--negis-muted)" }}>
                 <p>Последний запуск: <span style={{ color: "var(--negis-text)" }}>{launchModeLabel[latestMode]}</span></p>

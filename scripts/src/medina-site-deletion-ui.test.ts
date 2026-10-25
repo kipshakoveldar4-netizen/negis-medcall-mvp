@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 type DeletionRequest = (path: string, init?: RequestInit) => Promise<Response>;
 type Workflow = {
   inspect(): Promise<void>; confirm(value: boolean): void; submit(): Promise<void>;
+  getReconciliation(): { workspaceId: string; leadId: string; body: string } | null;
   getSnapshot(): { phase: string; visible: boolean; confirmed: boolean; message: string; scope: Record<string, unknown> | null };
 };
 const moduleUrl = new URL("../../artifacts/negis/src/lib/siteInquiryDeletion.ts", import.meta.url);
@@ -29,6 +30,14 @@ function setup(responses: Array<() => Response | Promise<Response>>) {
   const calls: { path: string; init?: RequestInit }[] = [];
   let keys = 0;
   const request: DeletionRequest = async (path, init) => {
+    // Preparation transport has its own end-to-end suite; retain this suite's
+    // original inspection/execution fault queue and all existing assertions.
+    if (path.startsWith("/api/crm/site-inquiry-deletion-operations?")) {
+      const body = JSON.parse(String(init?.body)); assert.equal(body.action, "prepare");
+      return json({ success: true, data: { operation: { workspaceId: workspace, actorId: receipt, requestKey: body.request.requestKey,
+        leadId: body.request.leadId, request: body.request, state: "prepared", createdAt: version,
+        completedAt: null, acknowledgedAt: null, receiptsDeleted: null, replayed: false } } });
+    }
     calls.push({ path, init });
     const response = responses.shift();
     assert.ok(response, "unexpected request");
@@ -80,6 +89,7 @@ test("confirmation is required; exact reviewed scope only is submitted; no optim
   flow.confirm(true);
   const submitted = flow.submit();
   assert.equal(flow.getSnapshot().phase, "submitting");
+  await new Promise<void>(resolve => setImmediate(resolve));
   await flow.submit(); await flow.inspect();
   assert.equal(calls.length, 2, "double click and refresh cannot change inflight request");
   assert.deepEqual(JSON.parse(String(calls[1].init?.body)), { leadId: lead, leadUpdatedAt: version, receiptIds: [receipt], requestKey: key, confirmed: true });
@@ -107,7 +117,6 @@ test("lost response retains byte-identical request/key for explicit retry only",
 
 for (const response of [
   () => json({ success: false, code: "site_deletion_unavailable", raw: "private" }, 503),
-  () => json({ success: false }, 401),
   () => json({ success: false, code: "__proto__" }, 409),
   () => json({ success: true, data: { deleted: true, receiptsDeleted: 2, replayed: false } }),
   () => new Response("not json", { status: 200 }),
@@ -116,6 +125,14 @@ for (const response of [
   await flow.inspect(); flow.confirm(true); await flow.submit();
   assert.equal(flow.getSnapshot().phase, "uncertain");
   await flow.submit(); assert.equal(calls[1].init?.body, calls[2].init?.body);
+});
+
+for (const status of [401, 403]) test(`authority ${status} hides the form but retains owner-only unknown request evidence`, async () => {
+  const { flow, calls } = setup([() => json(preview()), () => json({ success: false }, status)]);
+  await flow.inspect(); flow.confirm(true); await flow.submit();
+  assert.equal(flow.getSnapshot().phase, "hidden"); assert.equal(flow.getSnapshot().scope, null);
+  assert.equal(flow.getReconciliation()?.body, calls[1].init?.body);
+  await flow.submit(); await flow.inspect(); assert.equal(calls.length, 2);
 });
 
 test("scope changed requires a new read and explicit confirmation", async () => {

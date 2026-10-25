@@ -9,6 +9,8 @@ import { legacyServerPrivilegeMatrix as directServiceResources } from './legacy-
 import { exerciseLegacyAccessRefusals, legacyAccessSnapshot, proveLegacyAccessBaseline, proveLegacyAccessRepair } from './legacy-server-access-cases.mjs';
 import { legacyCrmRlsSnapshot,exerciseLegacyCrmRlsRefusals,proveLegacyCrmRlsBaseline,
   proveLegacyCrmRlsChange,proveLegacyCrmRlsEnforcement } from './legacy-crm-rls-cases.mjs';
+import { exerciseDeletionOperations } from './site-deletion-operations-cases.mjs';
+import { proveDeletionOperationConcurrency } from './site-deletion-operations-native-cases.mjs';
 
 // Native application-chain acceptance, NOT an authority to release migrations.
 // 001-008 require an undocumented legacy baseline; data/*.sql is deliberately
@@ -192,6 +194,7 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
     // Stop after the first failed migration. Running later steps on a partial
     // chain would mislabel dependent SQL as independently accepted.
     assert.ok(passed, `${entry.file} failed; the remaining cumulative gate is unexecuted`);
+    if(entry.file==='101_site_deletion_operations.sql') await exerciseDeletionOperations(db,t);
     if(entry.file==='100_legacy_crm_row_security.sql') {
       let repaired=false;
       await t.test('100 changes only seven RLS flags and protects actual rows after an accidental DML grant, with full rollback',async()=>{
@@ -209,6 +212,7 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
     }
   }
 
+  await proveDeletionOperationConcurrency(fixture,db,t);
   const tables = await allPublicTables(db);
   await t.test('every source-created table is real; no unknown application baseline was added', async () => {
     const expected = [...new Set(chain.flatMap(entry => entry.evidence.tables))].sort();
@@ -281,7 +285,7 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
   }));
 
   await t.test('RPC-only and read-only server boundaries survive later migrations', async () => {
-    for (const table of ['platform_subscription_operations', 'content_telegram_deliveries', 'content_telegram_delivery_guards']) {
+    for (const table of ['platform_subscription_operations', 'content_telegram_deliveries', 'content_telegram_delivery_guards', 'site_deletion_operations']) {
       const result = await one(db, `select has_table_privilege('service_role',$1,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') as tab,
         has_any_column_privilege('service_role',$1,'SELECT,INSERT,UPDATE,REFERENCES') as col`, [`public.${table}`]);
       assert.deepEqual(result, { tab: false, col: false }, `${table}: no direct service access may be restored`);
@@ -293,12 +297,16 @@ test('G7 cumulative 009-current reviewed SQL on attested PostgreSQL 17.11', { ti
       assert.deepEqual(result, { read: select, write: false, column_write: false }, `${table}: only the reviewed reader remains`);
     }
     for (const signature of ['public.accept_growth_operator_request(uuid,uuid)', 'public.lock_clinic_operator_actor(uuid,uuid,uuid)',
-      'public.accept_crm_site_inquiry(text,uuid,jsonb)', 'public.valid_crm_site_consent_receipt(jsonb)']) {
+      'public.accept_crm_site_inquiry(text,uuid,jsonb)', 'public.valid_crm_site_consent_receipt(jsonb)',
+      'public.delete_crm_site_inquiry(uuid,text,uuid,uuid[],timestamptz,uuid,uuid,uuid,boolean)',
+      'public.lock_site_deletion_operation_actor(uuid,uuid,uuid)', 'public.validate_site_deletion_operation_request(jsonb)',
+      'public.site_deletion_operation_receipt(public.site_deletion_operations,boolean)']) {
       assert.equal((await one(db, "select has_function_privilege('service_role',$1,'EXECUTE') as allowed", [signature])).allowed, false, signature);
     }
     for (const name of ['create_clinic_operator_request', 'transition_clinic_operator_request', 'transition_growth_operator_request',
       'admit_content_telegram_delivery', 'advance_content_telegram_delivery', 'accept_crm_site_inquiry_with_consent',
-      'read_lead_team_analytics', 'read_generated_video_workflow', 'read_platform_subscription_operation']) {
+      'read_lead_team_analytics', 'read_generated_video_workflow', 'read_platform_subscription_operation',
+      'prepare_site_deletion_operation', 'read_site_deletion_operations', 'execute_site_deletion_operation', 'close_site_deletion_operation']) {
       const functions = (await db.query(`select p.oid::regprocedure::text as signature,has_function_privilege('service_role',p.oid,'EXECUTE') as allowed
         from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public' and p.proname=$1`, [name])).rows;
       assert.equal(functions.length, 1, name); assert.equal(functions[0].allowed, true, name);

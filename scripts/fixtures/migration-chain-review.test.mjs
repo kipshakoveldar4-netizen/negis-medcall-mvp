@@ -8,9 +8,9 @@ const directory = fileURLToPath(new URL('../../migrations/', import.meta.url));
 const chain = await readReviewedChain(directory);
 const records = () => chain.map(({ file, source }) => ({ file, source }));
 
-test('review covers the contiguous actual worktree 009-100, including protected 059/065 and coordinated candidates', () => {
-  assert.equal(chain.length, 92);
-  assert.deepEqual(chain.map(entry => Number(entry.file.slice(0, 3))), Array.from({ length: 92 }, (_, i) => i + 9));
+test('review covers the contiguous actual worktree 009-101, including protected 059/065 and coordinated candidates', () => {
+  assert.equal(chain.length, 93);
+  assert.deepEqual(chain.map(entry => Number(entry.file.slice(0, 3))), Array.from({ length: 93 }, (_, i) => i + 9));
   for (const entry of chain) assert.equal(digest(entry.source), migrationReview[entry.file]);
   assert.ok(Object.isFrozen(migrationReview));
   assert.ok(chain.every(entry => Object.isFrozen(entry)));
@@ -19,7 +19,7 @@ test('review covers the contiguous actual worktree 009-100, including protected 
 for (const kind of ['missing', 'unknown', 'duplicate', 'reordered', 'renamed']) test(`preflight rejects ${kind} chain membership before any native startup`, () => {
   const value = records();
   if (kind === 'missing') value.splice(31, 1);
-  if (kind === 'unknown') value.push({ file: '101_unknown.sql', source: 'select 1;' });
+  if (kind === 'unknown') value.push({ file: '102_unknown.sql', source: 'select 1;' });
   if (kind === 'duplicate') value.splice(20, 0, value[20]);
   if (kind === 'reordered') [value[0], value[1]] = [value[1], value[0]];
   if (kind === 'renamed') value[0] = { ...value[0], file: '009_changed.sql' };

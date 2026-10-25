@@ -4,6 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "test:readiness-workflows": "tsx --test --test-concurrency=1 ./src/medina-push-helper-lifetime.test.ts ./src/medina-push-settings-lifetime.test.ts ./src/medina-push-settings-browser.test.ts ./src/medina-advertising-goal-lifetime.test.ts ./src/medina-ai-control-lifetime.test.ts ./src/medina-doctor-schedule-lifetime.test.ts ./src/medina-join-workspace-lifetime.test.ts",
+    "test:site-deletion-operations": "node --import tsx --test --test-concurrency=1 ./fixtures/site-deletion-operations.test.mjs ./fixtures/site-deletion-operations-http.test.mjs",
+    "test:site-deletion-client": "tsx --test --test-concurrency=1 ./src/medina-site-deletion-ui.test.ts ./src/medina-site-deletion-lifetime.test.ts ./src/medina-site-deletion-parent.test.ts ./src/medina-site-deletion-recovery-browser.test.ts ./src/medina-site-deletion-preview.test.ts ./src/medina-site-deletion-sql.test.ts",
     "test:legacy-crm-rls": "node --test ./fixtures/legacy-crm-rls.test.mjs",
     "test:readiness-composed": "tsx --test --test-concurrency=1 ./src/medina-analytics-composed-scope.test.ts ./src/medina-mortgage-task-lifetime.test.ts ./src/medina-site-deletion-lifetime.test.ts ./src/medina-site-deletion-parent.test.ts ./src/medina-telegram-replay-notice.test.ts ./src/medina-profile-modal-accessibility.test.ts",
     "test:function-default-access": "node --test ./fixtures/function-default-access.test.mjs",

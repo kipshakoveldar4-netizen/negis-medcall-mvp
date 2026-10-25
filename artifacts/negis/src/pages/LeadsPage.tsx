@@ -29,7 +29,8 @@ import { ChangeLogPanel } from "@/components/crm/change-log-panel";
 import { LeadTeamAnalytics } from "@/components/crm/lead-team-analytics";
 import { TaskPanel } from "@/components/crm/task-panel";
 import { SiteInquiryDeletion } from "@/components/crm/site-inquiry-deletion";
-import type { DeletionLifetime, DeletionRequest } from "@/lib/siteInquiryDeletion";
+import { SiteDeletionRecovery } from "@/components/crm/site-deletion-recovery";
+import type { DeletionLifetime, DeletionRequest, DeletionRequestInit } from "@/lib/siteInquiryDeletion";
 import { useAuth } from "@/contexts/AuthContext";
 import { EmptyState } from "@/components/ui/empty-state";
 import { useDemoCollection, readDemoStorage, writeDemoStorage, isRealWorkspace, readWorkspaceId, workspaceScopedKey } from "@/lib/demoStorage";
@@ -646,12 +647,13 @@ function LeadsPageSession({ actorId, workspaceId }: { actorId: string; workspace
       && liveScopeRef.current.actorId === actorId && liveScopeRef.current.workspaceId === workspaceId
       && liveScopeRef.current.userRole === capturedScope.userRole && liveScopeRef.current.workspacePurpose === capturedScope.workspacePurpose
       && sessionRef.current === controller && !controller.signal.aborted);
-    const requestWithGuard = async (path: string, init: RequestInit | undefined, dispatchGuard: () => boolean) => {
+    const requestWithGuard = async (path: string, init: DeletionRequestInit | undefined, dispatchGuard: () => boolean) => {
+      const isDispatchCurrent = () => dispatchGuard() && !init?.signal?.aborted && (init?.dispatchGuard?.() ?? true);
       const assertCurrent = () => {
-        if (!dispatchGuard()) throw new DOMException("Lead session ended", "AbortError");
+        if (!isDispatchCurrent()) throw new DOMException("Lead session ended", "AbortError");
       };
       assertCurrent();
-      const response = await crmFetch(path, { ...init, cache: "no-store", expectedUserId: actorId, signal: controller.signal, dispatchGuard });
+      const response = await crmFetch(path, { ...init, cache: "no-store", expectedUserId: actorId, signal: controller.signal, dispatchGuard: isDispatchCurrent });
       assertCurrent();
       return response;
     };
@@ -659,6 +661,7 @@ function LeadsPageSession({ actorId, workspaceId }: { actorId: string; workspace
     // The selector can change before Auth context renders. This extra fence is
     // deletion-only; ordinary clinic collection access keeps its existing scope.
     const deletionLifetime: DeletionLifetime = {
+      actorId,
       isCurrent: () => isCurrent() && readWorkspaceId() === workspaceId,
       subscribe(listener) {
         controller.signal.addEventListener("abort", listener, { once: true });
@@ -709,6 +712,8 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
   // Занятая кнопка на время записи: двойной клик заводил вторую заявку.
   const [saving, setSaving] = useState(false);
   const [detailId, setDetailId] = useState<string | null>(null);
+  const [deletionRecoveryRevision, setDeletionRecoveryRevision] = useState(0);
+  const [deletionOperationsReady, setDeletionOperationsReady] = useState(false);
   const [convertingId, setConvertingId] = useState<string | null>(null);
   // Admin-only diagnostics: whether the conversion matched an existing client (per lead).
   const [conversionMatched, setConversionMatched] = useState<Record<string, boolean>>({});
@@ -1148,6 +1153,17 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
           ) : undefined}
         />
         </div>
+
+        {!isMortgage && !isDemoMode && !isImpersonation && session && user && clinicId === readWorkspaceId() && isRealWorkspace()
+          && (userRole === "owner" || userRole === "admin") ? <SiteDeletionRecovery
+          workspaceId={clinicId} actorId={user.id} request={access.deletionRequest} lifetime={access.deletionLifetime}
+          onAvailability={ready => { if (access.deletionLifetime.isCurrent()) setDeletionOperationsReady(ready); }}
+          refreshKey={deletionRecoveryRevision} onDeleted={leadId => {
+            if (!access.deletionLifetime.isCurrent()) return;
+            clearCrmCache();
+            setItems(current => access.deletionLifetime.isCurrent() ? current.filter(lead => lead.id !== leadId) : current);
+            setDetailId(current => access.deletionLifetime.isCurrent() && current === leadId ? null : current);
+          }}/>: null}
 
         {/* Summary metrics */}
         <section className="grid grid-cols-2 gap-3 md:grid-cols-3 2xl:grid-cols-6" aria-label="Сводка по заявкам">
@@ -1648,19 +1664,23 @@ function LeadsPageContent({ access }: { access: LeadSessionAccess }) {
 
             {!isMortgage && !isDemoMode && !isImpersonation && session && user && clinicId === readWorkspaceId() && isRealWorkspace()
               && (userRole === "owner" || userRole === "admin")
-              && (detailLead.source === "website" || detailLead.sourceKey === "website") ? (
+              && deletionOperationsReady && (detailLead.source === "website" || detailLead.sourceKey === "website") ? (
               <SiteInquiryDeletion
                 key={`${clinicId}:${user.id}:${detailLead.id}`}
                 workspaceId={clinicId}
                 leadId={detailLead.id}
                 request={access.deletionRequest}
                 lifetime={access.deletionLifetime}
+                onReconciliationRequired={() => {
+                  if (access.deletionLifetime.isCurrent()) setDeletionRecoveryRevision(value => value + 1);
+                }}
                 onDeleted={() => {
                   if (!access.deletionLifetime.isCurrent()) return;
                   clearCrmCache();
                   setItems((current) => access.deletionLifetime.isCurrent() ? current.filter((lead) => lead.id !== detailLead.id) : current);
                   setDetailId((current) => access.deletionLifetime.isCurrent() && current === detailLead.id ? null : current);
                   toast.success("Заявка и её копии согласия удалены");
+                  setDeletionRecoveryRevision(value => value + 1);
                 }}
               />
             ) : null}
