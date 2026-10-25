@@ -756,22 +756,75 @@ test("GEN32 Content Studio keeps generated video identity across reload and hand
   }
 });
 
-test("GEN33 Ads Automation restores generated video and prepares a cover without changing launch", async () => {
+test("GEN33 untrusted Studio handoff fails closed without restoring identity or arming a launch", async () => {
   const source = await readFile(
     path.join(repoRoot, "artifacts", "negis", "src", "pages", "AdsAutomation.tsx"),
     "utf8",
   );
-  const importBlock = source.slice(
-    source.indexOf("// Import a package handed off by AI Контент-студия"),
-    source.indexOf("if (isHistoryView) void loadHistory();"),
-  );
-
-  assert.ok(importBlock.includes('const isVideo = data.creative?.type === "video"'));
-  assert.ok(importBlock.includes("id: importedAssetId"));
-  assert.ok(importBlock.includes("prepareImportedVideoThumbnail"));
-  assert.ok(source.includes("captureVideoThumbnail(input.publicUrl)"));
-  assert.ok(source.includes('thumbnailSource: "auto_frame"'));
-  assert.ok(source.includes("setActiveConfirmation(\"\")"), "handoff must keep launch confirmation cleared");
+  const ts = createRequire(path.join(repoRoot, "package.json"))("typescript") as typeof import("typescript");
+  const ast = ts.createSourceFile("AdsAutomation.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const session = ast.statements.find((node): node is import("typescript").FunctionDeclaration =>
+    ts.isFunctionDeclaration(node) && node.name?.text === "AdsAutomationSession");
+  assert.ok(session?.body);
+  const declarations = [...ast.statements, ...session.body.statements];
+  const select = (name: string) => {
+    const matches = declarations.filter(node => ts.isFunctionDeclaration(node) && node.name?.text === name);
+    assert.equal(matches.length, 1, `Execute exactly the actual ${name}`); return matches[0].getText(ast);
+  };
+  const effects = session.body.statements.filter(node => ts.isExpressionStatement(node) && ts.isCallExpression(node.expression)
+    && node.expression.expression.getText(ast) === "useEffect" && node.getText(ast).includes("parseAdvertisingCampaignPrefillForPlatform"));
+  assert.equal(effects.length, 1, "Execute the actual Studio-prefill effect, not old source markers");
+  const helperCode = ts.transpileModule(await readFile(path.join(repoRoot, "artifacts/negis/src/lib/creative-import.ts"), "utf8"), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+  }).outputText;
+  const program = ts.transpileModule([
+    ...["firstString", "isSessionAlive", "assertSessionAlive", "beginCreativeIntent", "isCreativeIntentCurrent", "assertCreativeIntent", "importCreativeFromUrl"].map(select),
+    "const originalImport = importCreativeFromUrl; importCreativeFromUrl = (...args) => { const work = originalImport(...args); imports.push(work); return work; };",
+    effects[0].getText(ast),
+  ].join("\n"), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+    transformers: { before: [(context) => {
+      const visit: import("typescript").Visitor = node => ts.isPropertyAccessExpression(node) && node.name.text === "env" && ts.isMetaProperty(node.expression)
+        ? ts.factory.createIdentifier("fixtureEnv") : ts.visitEachChild(node, visit, context);
+      return file => ts.visitNode(file, visit) as import("typescript").SourceFile;
+    }] },
+  }).outputText;
+  const briefModule = await import(pathToFileURL(path.join(repoRoot, "lib/advertising/campaignBrief.ts")).href);
+  const importWorkspace = "11111111-1111-4111-8111-111111111111";
+  for (const type of ["image", "video"]) {
+    const imports: Promise<void>[] = [], confirmations: unknown[] = [], launches: unknown[] = [], assets: unknown[] = [], statuses: string[] = [];
+    const prefill = briefModule.createAdvertisingCampaignPrefill({ platform: "meta", sourceKind: "generated", primaryText: "Synthetic copy",
+      creative: { type, url: `https://arbitrary.invalid/source.${type === "video" ? "mp4" : "jpg"}`, assetId: "forged-ready-id",
+        fileName: type === "video" ? "handoff.mp4" : "handoff.jpg", mimeType: type === "video" ? "video/mp4" : "image/jpeg",
+        thumbnailUrl: "https://arbitrary.invalid/forged-cover.jpg", thumbnailSource: "untrusted" } });
+    let stored: string | null = JSON.stringify(prefill), fetches = 0, uploads = 0;
+    const helper = {};
+    new Script(helperCode).runInNewContext({ exports: helper, Error, DOMException, URL, Blob, File: globalThis.File, TextEncoder, Uint8Array,
+      AbortController, setTimeout, clearTimeout, fetch() { fetches++; assert.fail("Unsupported handoff URL must never fetch"); } });
+    new Script(program, { filename: "GEN33.actual-import.cjs" }).runInNewContext({
+      exports: {}, Error, DOMException, ...briefModule, imports, actorId: "synthetic-A", workspaceId: importWorkspace,
+      sessionRef: { current: new AbortController() }, creativeIntentRef: { current: { revision: 0, file: null, requestKeys: new WeakMap(), videoJobId: "" } },
+      signOutRevisionRef: { current: 0 }, getSignOutRevision: () => 0, isSignOutPending: () => false,
+      fixtureEnv: { VITE_SUPABASE_URL: "https://storage.fixture.invalid" }, prefillRef: { current: null },
+      STUDIO_PREFILL_KEY: briefModule.ADVERTISING_CAMPAIGN_PREFILL_KEY, STUDIO_PREFILL_NOTICE: "Synthetic imported copy",
+      workspaceScopedKey: (key: string) => `${key}::${importWorkspace}`,
+      window: { localStorage: { getItem() { return stored; }, removeItem() { stored = null; } } },
+      useEffect(create: () => void) { create(); }, getKzMetaCityOption: () => null,
+      setBrief() {}, setAiPackage() {}, setCompliance() {}, setImproved() {}, setContentApproval() {}, setNotice() {}, setLoading() {},
+      setCreative: (value: unknown) => assets.push(value), setCreativeFile() {}, setVideoJob() {},
+      setUploadStatus: (value: string) => statuses.push(value), setLastUploadError() {},
+      setActiveConfirmation: (value: unknown) => confirmations.push(value),
+      setLaunchResult: (value: unknown) => launches.push(value), setLastDryRunResult: (value: unknown) => launches.push(value),
+      friendlyCreativeError: () => "Synthetic safe refusal", toast: { success() {} },
+      async uploadCreative() { uploads++; assert.fail("An unsupported URL must not produce uploadable bytes"); },
+      require(name: string) { assert.equal(name, "@/lib/creative-import"); return helper; },
+    });
+    assert.equal(imports.length, 1); await Promise.all(imports);
+    assert.equal(stored, null); assert.equal(fetches, 0); assert.equal(uploads, 0);
+    assert.deepEqual(assets, [null], "Incoming URL, asset ID and cover cannot restore a ready asset");
+    assert.deepEqual(statuses, ["validating", "failed"]);
+    assert.deepEqual(confirmations, [""]); assert.deepEqual(launches, [null, null]);
+  }
 });
 
 test("GEN34 selected ad variant approval persists and follows the launch as safe provenance", async () => {
@@ -1457,10 +1510,10 @@ const generationCallbackPrograms = (async () => {
     };
     return ts.visitNode(root, visit) as import("typescript").SourceFile;
   };
-  const forbidEnv = (context: import("typescript").TransformationContext) => (root: import("typescript").SourceFile) => {
+  const syntheticHandoffEnv = (context: import("typescript").TransformationContext) => (root: import("typescript").SourceFile) => {
     const visit: import("typescript").Visitor = (node) => ts.isPropertyAccessExpression(node)
       && node.name.text === "env" && ts.isMetaProperty(node.expression)
-      ? ts.factory.createIdentifier("forbiddenHandoffEnv") : ts.visitEachChild(node, visit, context);
+      ? ts.factory.createIdentifier("handoffEnv") : ts.visitEachChild(node, visit, context);
     return ts.visitNode(root, visit) as import("typescript").SourceFile;
   };
   return {
@@ -1485,7 +1538,10 @@ const generationCallbackPrograms = (async () => {
     photoRefs: ts.transpileModule(photoRefs, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText,
     photoCleanup: ts.transpileModule(photoCleanup, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText,
     photoSuggestion: ts.transpileModule(photoSuggestion, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
-      transformers: { before: [forbidEnv] } }).outputText,
+      transformers: { before: [syntheticHandoffEnv] } }).outputText,
+    verifiedUpload: ts.transpileModule(`${await readFile(path.join(repoRoot, "artifacts/negis/src/lib/verified-creative-upload.ts"), "utf8")}
+      exports.selected = { uploadVerifiedCreativeImage };`,
+      { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText,
     packageRefs: ts.transpileModule(packageRefs, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText,
     package: ts.transpileModule(packageProgram, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText,
     packageDemo: compile(await readFile(path.join(repoRoot, "lib/content-studio/core.ts"), "utf8"),
@@ -1494,12 +1550,7 @@ const generationCallbackPrograms = (async () => {
       ["readString", "demoScriptPackage", "demoAvatarPrompt", "demoTapNowPrompt"], ["demoScriptPackage", "demoAvatarPrompt", "demoTapNowPrompt"]),
     handoff: ts.transpileModule(handoff([...packageRefNames, ...photoRefNames], photoArtifactHelpers), {
       compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
-      transformers: { before: [(context) => (root) => {
-        const visit: import("typescript").Visitor = (node) => ts.isPropertyAccessExpression(node)
-          && node.name.text === "env" && ts.isMetaProperty(node.expression)
-          ? ts.factory.createIdentifier("forbiddenHandoffEnv") : ts.visitEachChild(node, visit, context);
-        return ts.visitNode(root, visit) as import("typescript").SourceFile;
-      }] },
+      transformers: { before: [syntheticHandoffEnv] },
     }).outputText,
     demo: ts.transpileModule(demo, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText,
     videoRefs: ts.transpileModule(videoRefs, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText,
@@ -1531,7 +1582,7 @@ await generationCallbackPrograms;
 function evaluateGenerationFixture<T>(code: string, bindings: Record<string, unknown>, imports: Record<string, unknown> = {}): T {
   const exports: { selected?: T } = {};
   new Script(code).runInNewContext({
-    exports, Error, DOMException, AbortController, AbortSignal, Headers, Response,
+    exports, Error, DOMException, AbortController, AbortSignal, Headers, Response, Blob, URL, TextEncoder,
     getSignOutRevision: () => 0, isSignOutPending: () => false, signOutRevisionRef: { current: 0 },
     readContentVideoVersion: telegramDeliveryGuard.readContentVideoVersion,
     fetch: () => { throw new Error("Unmocked generation network call"); },
@@ -1671,7 +1722,7 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
   const tokenStarted = generationDeferred<void>(), bodyStarted = generationDeferred<void>();
   let delayedBody: ReturnType<typeof generationDeferred<string>> | undefined;
   let delayedBodyStarted: ReturnType<typeof generationDeferred<void>> | undefined;
-  type Resource = "generation" | "usage" | "poll" | "restore" | "signed" | "metadata" | "approval" | "package-generation" | "package-save" | "photo-suggest" | "library-create" | "library-patch" | "library-telegram" | `library-${LocalLibraryTextKind}`;
+  type Resource = "generation" | "usage" | "poll" | "restore" | "signed" | "finalize" | "metadata" | "approval" | "package-generation" | "package-save" | "photo-suggest" | "library-create" | "library-patch" | "library-telegram" | `library-${LocalLibraryTextKind}`;
   let responseWait: ReturnType<typeof generationDeferred<void>> | undefined, responseResource: Resource | undefined;
   const responseStarted = generationDeferred<void>();
   let handoffResponseHook: ((resource: Resource) => void) | undefined;
@@ -1686,12 +1737,21 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
   const uploadStarted = generationDeferred<void>();
   let uploadWait: ReturnType<typeof generationDeferred<void>> | undefined, uploadFailure = false;
   let uploadError: unknown, uploadThrown: unknown;
+  let stagedFile: Blob | undefined;
   const sdk = { storage: { from(bucket: string) { return {
     async uploadToSignedUrl(storagePath: string, token: string, file: unknown, options: unknown) {
+      assert.equal(bucket, "ad-creatives-staging"); assert.equal(storagePath, signedReply.data.storagePath);
+      assert.equal(token, signedReply.data.token); assert.ok(file instanceof Blob);
+      assert.equal(file.size, signedReply.data.fileSize); assert.equal(file.type, signedReply.data.mimeType);
+      assert.deepEqual(Object.keys(options as object).sort(), ["contentType", "upsert"]);
+      assert.equal((options as { contentType: string }).contentType, "image/jpeg");
+      assert.equal((options as { upsert: boolean }).upsert, false);
       uploads.push({ bucket, path: storagePath, token, file, options }); uploadStarted.resolve();
       if (uploadWait) await uploadWait.promise;
       if (uploadThrown) throw uploadThrown;
-      return { error: uploadError ?? (uploadFailure ? new Error("Synthetic storage failure") : null) };
+      const error = uploadError ?? (uploadFailure ? new Error("Synthetic storage failure") : null);
+      if (!error) stagedFile = file;
+      return { data: error ? undefined : { path: storagePath }, error };
     },
   }; } }, auth: {
     onAuthStateChange(callback: (event: string, session: { user: { id: string } }) => void) {
@@ -1749,11 +1809,19 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
     return path === "/api/content-studio/generate-script" ? "script" : path === "/api/content-studio/generate-avatar-prompt" ? "avatar"
       : path === "/api/content-studio/generate-tapnow-prompt" ? "tapnow" : undefined;
   };
-  const signedReply = { success: true, data: { bucket: "fixture-creatives", storagePath: "workspace-a/local.jpg",
-    token: "synthetic-upload-token", publicUrl: "https://example.invalid/local-upload.jpg" } };
-  const localResponse = (value: unknown, resource: Resource) => {
+  const verifiedStorageOrigin = "https://content-storage.fixture.invalid";
+  const verifiedNonce = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const signedReply = { success: true, mode: "supabase", data: { workspaceId: initialWorkspace, requestKey: "", fileName: "",
+    fileType: "image", mimeType: "image/jpeg", fileSize: 0, bucket: "ad-creatives-staging",
+    storagePath: `${initialWorkspace}/staged/${verifiedNonce}/original.jpg`,
+    uploadHandle: `u1.c3ludGhldGlj.${"A".repeat(43)}`, token: "synthetic-upload-token" } };
+  const verifiedPath = `${initialWorkspace}/verified/${verifiedNonce}/${"1".repeat(64)}.jpg`;
+  const finalizedReply = { success: true, mode: "supabase", data: { asset: { id: verifiedNonce, workspaceId: initialWorkspace,
+    fileName: "", fileType: "image", mimeType: "image/jpeg", fileSize: 0, storageBucket: "ad-creatives",
+    storagePath: verifiedPath, publicUrl: `${verifiedStorageOrigin}/storage/v1/object/public/ad-creatives/${verifiedPath}`, status: "uploaded" } } };
+  const localResponse = (value: unknown, resource: Resource, defaultStatus = 200) => {
     handoffResponseHook?.(resource);
-    const response = Response.json(value, { status: handoffStatuses[resource] ?? 200 });
+    const response = Response.json(value, { status: handoffStatuses[resource] ?? defaultStatus });
     if (resource === "usage" || resource === "package-generation" || resource === "package-save" || resource === "photo-suggest" || resource.startsWith("library-") || resource === "restore") {
       const text = resource === "usage" ? usageReply.text : resource === "library-telegram" ? telegramReplies.text
         : ["library-script", "library-avatar", "library-tapnow"].includes(resource) ? libraryTextReplies.text
@@ -1792,7 +1860,7 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
         : url.startsWith("/api/content-studio/usage?") ? "usage"
         : url.includes("generate-package") ? (photoSuggestionActive ? "photo-suggest" : "package-generation")
         : packageFixtureActive && url.split("?")[0] === "/api/crm/content-videos" && method === "POST" ? "package-save"
-        : url.includes("signed-upload") ? "signed" : method === "PATCH" ? "approval" : "metadata";
+        : url.includes("signed-upload") ? "signed" : url.includes("finalize-upload") ? "finalize" : method === "PATCH" ? "approval" : "metadata";
       if (responseWait && responseResource === resource) { responseStarted.resolve(); await responseWait.promise; }
       if (handoffTransportFailures[resource]) throw new api.CrmApiError(handoffTransportFailures[resource]!, "authentication_required", "Synthetic denied transport");
       if (telegram) { assert.equal(method, "POST"); return localResponse(telegramReplies[body && (body as { test?: unknown }).test === true ? "test" : "send"], resource); }
@@ -1806,7 +1874,21 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
         return localResponse(resource === "package-generation" ? packageReplies.generation : packageReplies.save, resource);
       }
       if (url.split("?")[0] === "/api/crm/ad-creatives/signed-upload") {
+        assert.ok(body && typeof body === "object");
+        const metadata = body as { requestKey: string; fileName: string; fileType: string; mimeType: string; fileSize: number };
+        assert.deepEqual(Object.keys(metadata).sort(), ["fileName", "fileSize", "fileType", "mimeType", "requestKey"]);
+        assert.match(metadata.requestKey, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+        assert.equal(metadata.fileType, "image"); assert.equal(metadata.mimeType, "image/jpeg");
+        assert.equal(new URL(url, "https://example.invalid").searchParams.get("workspaceId"), initialWorkspace);
+        Object.assign(signedReply.data, metadata);
+        Object.assign(finalizedReply.data.asset, { fileName: metadata.fileName, mimeType: metadata.mimeType, fileSize: metadata.fileSize + 23 });
         assert.equal(method, "POST"); return localResponse(signedReply, "signed");
+      }
+      if (url.split("?")[0] === "/api/crm/ad-creatives/finalize-upload") {
+        assert.equal(method, "POST"); assert.deepEqual(body, { uploadHandle: signedReply.data.uploadHandle });
+        assert.equal(new URL(url, "https://example.invalid").searchParams.get("workspaceId"), initialWorkspace);
+        return stagedFile ? localResponse(finalizedReply, "finalize")
+          : localResponse({ success: false, mode: "supabase", data: {} }, "finalize", 500);
       }
       if (url.split("?")[0] === "/api/crm/content-videos" && (method === "POST" || method === "PATCH")) {
         return localResponse({ success: !handoffStatuses[method === "PATCH" ? "approval" : "metadata"], data: {} },
@@ -1872,6 +1954,7 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
     ...paidGeneration, ...telegramDeliveryGuard, ...storage, ...setters, ...api, ...auth, ...briefModule, ...usageParser, window, localStorage,
     navigator: { locks: telegramLocks },
     ...videoRefs, supabase: sdk,
+    ...evaluateGenerationFixture<Record<string, unknown>>(programs.verifiedUpload, {}),
     ...initialLibraryRefs, form: state.Form, videos: state.Videos, activeId: state.ActiveId,
     useMemo: (callback: () => unknown) => callback(),
     actorId: captured.actorId, workspaceId: captured.workspaceId, sessionRef: captured.sessionRef,
@@ -1913,12 +1996,15 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
   const legacyPhotoBlob = new Blob([new Uint8Array(42)], { type: "image/jpeg" });
   const localObjectUrls: { operation: string; name: string; value?: unknown }[] = [];
   let nextObjectUrl = 0;
-  const photoUrl = {
-    createObjectURL(value: unknown) { const name = `blob:synthetic-${++nextObjectUrl}`;
-      localObjectUrls.push({ operation: "create", name, value }); return name; },
-    revokeObjectURL(name: string) { localObjectUrls.push({ operation: "revoke", name }); },
+  const photoUrl = class extends URL {
+    static createObjectURL(value: Blob) { const name = `blob:synthetic-${++nextObjectUrl}`;
+      localObjectUrls.push({ operation: "create", name, value }); return name; }
+    static revokeObjectURL(name: string) { localObjectUrls.push({ operation: "revoke", name }); }
   };
-  const forbiddenHandoffEnv = new Proxy({}, { get() { throw new Error("Handoff must not access environment configuration"); } });
+  const handoffEnv = new Proxy({}, { get(_target, key) {
+    assert.equal(key, "VITE_SUPABASE_URL", "Only the synthetic trusted storage origin may be read");
+    return verifiedStorageOrigin;
+  } });
   const captureHandoffs = evaluateGenerationFixture<(session: LocalGenerationSession, options?: {
     contentPackageId?: string; contentPackage?: typeof handoffPackage | null; selectedAdVariant?: typeof handoffVariant | null;
   }, refs?: Record<string, unknown>) => {
@@ -1926,11 +2012,11 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
     approve: (approval: unknown, session: AbortController | null) => Promise<boolean | null>;
   }>(programs.handoff, {
     ...bindings, ...briefModule, handoffPackage, handoffVariant, hasSupabaseFrontendEnv: true,
-    forbiddenHandoffEnv, URL: photoUrl,
+    handoffEnv, URL: photoUrl,
     // Observe the transport boundary, but always execute the actual crmFetch/auth implementation.
     async crmFetch(url: string, init: LocalGenerationInit) {
       handoffRequests.push({ url, init });
-      activeTransport = url.includes("signed-upload") ? "signed" : init.method === "PATCH" ? "approval" : "metadata";
+      activeTransport = url.includes("signed-upload") ? "signed" : url.includes("finalize-upload") ? "finalize" : init.method === "PATCH" ? "approval" : "metadata";
       try { return await api.crmFetch(url, init); } finally { activeTransport = undefined; }
     },
     photoBlob: legacyPhotoBlob, photoPreviewUrl: "blob:legacy-rendered-preview", photoFormat: "feed", photoLayout: "minimal", photoSourceType: "upload",
@@ -1977,7 +2063,7 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
   const anchors: { href: string; download: string; clicked: boolean }[] = [];
   const capturePhotoSuggestion = evaluateGenerationFixture<(session: LocalGenerationSession, brief: LocalPackageBrief,
     inputs: LocalPhotoInputs, refs: Record<string, unknown>) => LocalPhotoSuggestionCallbacks>(programs.photoSuggestion, {
-    ...bindings, ...purePackageDemo, ...briefModule, URL: photoUrl, forbiddenHandoffEnv, hasSupabaseFrontendEnv: true,
+    ...bindings, ...purePackageDemo, ...briefModule, URL: photoUrl, handoffEnv, hasSupabaseFrontendEnv: true,
     advertisingGoalContext: { targetPatients: 7 }, setLocation: (location: string) => navigations.push(location),
     document: { createElement(tag: string) {
       assert.equal(tag, "a"); const link = { href: "", download: "", clicked: false, click() { this.clicked = true; } };
@@ -1992,7 +2078,7 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
     },
     async crmFetch(url: string, init: LocalGenerationInit) {
       if (url.includes("generate-package")) { photoSuggestionRequests.push({ url, init }); activeTransport = "photo-suggest"; }
-      else { handoffRequests.push({ url, init }); activeTransport = url.includes("signed-upload") ? "signed" : "metadata"; }
+      else { handoffRequests.push({ url, init }); activeTransport = url.includes("signed-upload") ? "signed" : url.includes("finalize-upload") ? "finalize" : "metadata"; }
       try { return await api.crmFetch(url, init); } finally { activeTransport = undefined; }
     },
   });
@@ -2112,7 +2198,7 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
       }
       return { ...next, callbacks: captureHandoffs(next.session, options, refs) };
     },
-    handoffStatuses, handoffBodyFailures, handoffTransportFailures, handoffRequests, signedReply, uploads, uploadStarted, navigations,
+    handoffStatuses, handoffBodyFailures, handoffTransportFailures, handoffRequests, signedReply, finalizedReply, uploads, uploadStarted, navigations,
     onHandoffResponse(callback?: (resource: Resource) => void) { handoffResponseHook = callback; },
     deferResponse(resource: Resource) { responseResource = resource; responseWait = generationDeferred<void>();
       return Object.assign(responseWait, { started: responseStarted.promise }); },
@@ -3268,7 +3354,7 @@ type LocalHandoffPrefill = {
   platform?: string; sourceId?: string; campaignName?: string; city?: string; offer?: string; audience?: string;
   headline?: string; description?: string; cta?: string; durationDays?: number; maxBudget?: number; dailyBudget?: number; budgetCurrency?: string;
   contentApproval?: { packageId?: string; variantId: string; approvedCopy: { primaryText: string } };
-  creative: { type: string; url?: string; fileName?: string; assetId?: string; thumbnailUrl?: string };
+  creative?: { type: string; url?: string; fileName?: string; assetId?: string; thumbnailUrl?: string; fileSize?: number; mimeType?: string };
 };
 const HANDOFF_WORKSPACE_B = "22222222-2222-4222-8222-222222222222";
 const HANDOFF_FILE = { url: "https://example.invalid/generated.png", assetId: "fixture-generated-asset", fileName: "generated.png",
@@ -3289,10 +3375,26 @@ function readLocalHandoff(fixture: LocalHandoffFixture, workspace = REAL_DEMO_TE
   return JSON.parse(raw) as LocalHandoffPrefill;
 }
 
+async function waitForLocalHandoffBoundary(work: Promise<void>, started: Promise<void>) {
+  await Promise.race([started, work.then(() => assert.fail("The actual handoff finished before reaching the requested boundary"))]);
+}
+
+function assertNoPrivateHandoffHistory(fixture: LocalHandoffFixture) {
+  const persisted = JSON.stringify({ mutations: fixture.mutations, metadata: fixture.dispatches.filter((call) =>
+    call.url.split("?")[0] === "/api/crm/content-videos"), toasts: fixture.toasts });
+  for (const privateValue of [fixture.signedReply.data.token, fixture.signedReply.data.uploadHandle,
+    fixture.signedReply.data.storagePath, "ad-creatives-staging", "blob:"]) {
+    assert.equal(persisted.includes(privateValue), false, "Private upload receipts must never become draft/history metadata");
+  }
+}
+
 const handoffStages = [
   { kind: "photo", resource: "signed", phase: "token" },
   { kind: "photo", resource: "signed", phase: "body" },
   { kind: "photo", resource: "signed", phase: "upload" },
+  { kind: "photo", resource: "finalize", phase: "token" },
+  { kind: "photo", resource: "finalize", phase: "response" },
+  { kind: "photo", resource: "finalize", phase: "body" },
   { kind: "photo", resource: "metadata", phase: "token" },
   { kind: "photo", resource: "metadata", phase: "response" },
   ...(["image", "video", "package"] as const).flatMap((kind) => ([
@@ -3309,15 +3411,17 @@ for (const stage of handoffStages) {
       const body = stage.phase === "body" ? fixture.deferBody(stage.resource) : undefined;
       const upload = stage.phase === "upload" ? fixture.deferUpload() : undefined;
       const response = stage.phase === "response" ? fixture.deferResponse(stage.resource) : undefined;
-      const bodyValue = JSON.stringify(stage.resource === "signed" ? fixture.signedReply : { success: true, data: {} });
+      const bodyValue = () => JSON.stringify(stage.resource === "signed" ? fixture.signedReply
+        : stage.resource === "finalize" ? fixture.finalizedReply : { success: true, data: {} });
       const work = invokeLocalHandoff(handoff, stage.kind);
       try {
-        if (token) await token.started;
-        if (body) await fixture.bodyStarted.promise;
-        if (upload) await fixture.uploadStarted.promise;
-        if (response) await response.started;
+        if (token) await waitForLocalHandoffBoundary(work, token.started);
+        if (body) await waitForLocalHandoffBoundary(work, fixture.bodyStarted.promise);
+        if (upload) await waitForLocalHandoffBoundary(work, fixture.uploadStarted.promise);
+        if (response) await waitForLocalHandoffBoundary(work, response.started);
         const expectedDispatches = stage.resource === "signed" ? (stage.phase === "token" ? 0 : 1)
-          : stage.resource === "metadata" ? (stage.phase === "token" ? 1 : 2) : (stage.phase === "token" ? 0 : 1);
+          : stage.resource === "finalize" ? (stage.phase === "token" ? 1 : 2)
+          : stage.resource === "metadata" ? (stage.phase === "token" ? 2 : 3) : (stage.phase === "token" ? 0 : 1);
         assert.equal(fixture.dispatches.length, expectedDispatches, "pause the actual requested boundary, not an earlier auth guard");
         if (boundary === "account" || boundary === "A-B-A") fixture.sdkSession("actor-b");
         if (boundary === "silent-account") fixture.sdkSession("actor-b", "fixture-token-b", null);
@@ -3327,7 +3431,7 @@ for (const stage of handoffStages) {
         if (boundary === "unmount") fixture.lifetime!.unmount();
         if (!["silent-account", "workspace"].includes(boundary)) assert.equal(controller.signal.aborted, true);
         const mutations = fixture.mutations.length, writes = fixture.writes.length, uploads = fixture.uploads.length;
-        token?.resolve(); body?.resolve(bodyValue); upload?.resolve(); response?.resolve(); await work; await flushLocalVideoWork();
+        token?.resolve(); body?.resolve(bodyValue()); upload?.resolve(); response?.resolve(); await work; await flushLocalVideoWork();
         assert.equal(fixture.dispatches.length, expectedDispatches, "an expired callback cannot issue a follow-up request");
         assert.equal(fixture.uploads.length, uploads, "a signed response cannot begin storage upload under an expired actor/workspace");
         assert.deepEqual(fixture.mutations.slice(mutations), [], "no prefill can leak into the new workspace");
@@ -3336,8 +3440,9 @@ for (const stage of handoffStages) {
         assert.deepEqual(fixture.toasts, []);
         assert.deepEqual(fixture.navigations, []);
         assert.equal(fixture.dispatches.some((call) => call.url.includes("/generate-")), false);
+        assertNoPrivateHandoffHistory(fixture);
       } finally {
-        token?.resolve(); body?.resolve(bodyValue); upload?.resolve(); response?.resolve(); await work; fixture.lifetime!.unmount();
+        token?.resolve(); body?.resolve(bodyValue()); upload?.resolve(); response?.resolve(); await work; fixture.lifetime!.unmount();
       }
     });
   }
@@ -3350,13 +3455,13 @@ for (const kind of ["photo", "image", "video", "package"] as const) {
     const token = fixture.deferToken(kind === "photo" ? "signed" : "approval");
     const work = invokeLocalHandoff(handoff, kind);
     try {
-      await token.started;
+      await waitForLocalHandoffBoundary(work, token.started);
       if (kind === "photo") assert.ok(fixture.handoffRequests.every(({ init }) => init.dispatchGuard?.() === true), "the artifact-bound guard is live while handoff is pending");
       fixture.sdkSession("actor-a", "fixture-token-a-refreshed", "TOKEN_REFRESHED");
       assert.equal(fixture.lifetime!.render().key, handoff.key);
       assert.equal(controller.signal.aborted, false);
       token.resolve(); await work;
-      assert.equal(fixture.dispatches.length, kind === "photo" ? 2 : 1);
+      assert.equal(fixture.dispatches.length, kind === "photo" ? 3 : 1);
       for (const call of fixture.dispatches) {
         assert.equal(new URL(call.url, "https://example.invalid").searchParams.get("workspaceId"), REAL_DEMO_TEST_WORKSPACE);
         assert.equal(call.headers.get("Authorization"), "Bearer fixture-token-a-refreshed");
@@ -3371,12 +3476,22 @@ for (const kind of ["photo", "image", "video", "package"] as const) {
       assert.equal(prefill.targetPatients, 7);
       assert.equal(prefill.service, "Synthetic service");
       assert.equal(prefill.primaryText, kind === "photo" ? "Local photo offer. Local photo CTA." : "Approved local copy");
+      assert.ok(prefill.creative);
       assert.equal(prefill.creative.type, kind === "photo" || kind === "image" ? "image" : "video");
       if (kind === "photo") {
-        assert.equal(fixture.uploads.length, 1); assert.equal(fixture.uploads[0].bucket, "fixture-creatives");
-        assert.equal(prefill.creative.url, fixture.signedReply.data.publicUrl);
-        assert.equal((fixture.dispatches[1].body as { photoCreative: { creativeUrl: string } }).photoCreative.creativeUrl, prefill.creative.url);
+        assert.equal(fixture.uploads.length, 1); assert.equal(fixture.uploads[0].bucket, "ad-creatives-staging");
+        assert.equal(Object.hasOwn(fixture.signedReply.data, "publicUrl"), false);
+        assert.deepEqual(fixture.dispatches.map((call) => call.url.split("?")[0]), [
+          "/api/crm/ad-creatives/signed-upload", "/api/crm/ad-creatives/finalize-upload", "/api/crm/content-videos",
+        ]);
+        assert.deepEqual(fixture.dispatches[1].body, { uploadHandle: fixture.signedReply.data.uploadHandle });
+        assert.equal(prefill.creative.url, fixture.finalizedReply.data.asset.publicUrl);
+        assert.equal(prefill.creative.assetId, fixture.finalizedReply.data.asset.id);
+        assert.equal(prefill.creative.fileSize, fixture.finalizedReply.data.asset.fileSize);
+        assert.notEqual(prefill.creative.fileSize, fixture.signedReply.data.fileSize, "Use the finalized encoding metadata, not the private input size");
+        assert.equal((fixture.dispatches[2].body as { photoCreative: { creativeUrl: string } }).photoCreative.creativeUrl, prefill.creative.url);
         assert.equal(fixture.state.PhotoBusy, null);
+        assertNoPrivateHandoffHistory(fixture);
       } else {
         assert.equal(fixture.uploads.length, 0);
         const approval = (fixture.dispatches[0].body as { contentApproval: NonNullable<LocalHandoffPrefill["contentApproval"]> }).contentApproval;
@@ -3394,7 +3509,7 @@ for (const kind of ["photo", "image", "video", "package"] as const) {
 }
 
 for (const status of [401, 403] as const) {
-  for (const resource of ["signed", "metadata", "approval"] as const) {
+  for (const resource of ["signed", "finalize", "metadata", "approval"] as const) {
     for (const failure of ["response", "body-reject", "transport"] as const) {
       test(`GEN69 actual ${resource} ${status} ${failure} denies handoff despite a valid same-actor token`, async () => {
         const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE);
@@ -3403,12 +3518,13 @@ for (const status of [401, 403] as const) {
         if (failure === "body-reject") fixture.handoffBodyFailures.add(resource);
         try {
           await invokeLocalHandoff(fixture.handoffs(), resource === "approval" ? "package" : "photo");
-          assert.equal(fixture.dispatches.length, resource === "metadata" ? 2 : 1);
-          assert.equal(fixture.uploads.length, resource === "metadata" ? 1 : 0);
+          assert.equal(fixture.dispatches.length, resource === "metadata" ? 3 : resource === "finalize" ? 2 : 1);
+          assert.equal(fixture.uploads.length, resource === "metadata" || resource === "finalize" ? 1 : 0);
           assert.deepEqual(fixture.mutations.filter((item) => item.key.includes("ads_automation_prefill")), []);
           assert.deepEqual(fixture.navigations, []);
           assert.equal(fixture.toasts.length, 1); assert.equal(fixture.toasts[0].kind, "error");
           assert.ok(fixture.sdkReads.total > 0, "same actor remains genuinely authenticated; rights denial must remain distinct");
+          assertNoPrivateHandoffHistory(fixture);
         } finally { fixture.lifetime!.unmount(); }
       });
     }
@@ -3446,12 +3562,14 @@ for (const status of [401, 403] as const) {
   }
 }
 
-for (const failure of ["signed-500", "storage-500", "storage-unavailable", "metadata-500", "metadata-transport-500"] as const) {
+for (const failure of ["signed-500", "storage-500", "storage-unavailable", "finalize-500", "finalize-body-reject", "metadata-500", "metadata-transport-500"] as const) {
   test(`GEN70 actual photo ${failure} preserves current-scope local handoff behavior`, async () => {
     const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE);
     if (failure === "signed-500") fixture.handoffStatuses.signed = 500;
     if (failure === "storage-500") fixture.uploadError({ statusCode: "500", message: "Synthetic upload unavailable" });
     if (failure === "storage-unavailable") fixture.uploadFailure();
+    if (failure === "finalize-500") fixture.handoffStatuses.finalize = 500;
+    if (failure === "finalize-body-reject") fixture.handoffBodyFailures.add("finalize");
     if (failure === "metadata-500") fixture.handoffStatuses.metadata = 500;
     if (failure === "metadata-transport-500") fixture.handoffTransportFailures.metadata = 500;
     try {
@@ -3459,15 +3577,17 @@ for (const failure of ["signed-500", "storage-500", "storage-unavailable", "meta
       const prefill = readLocalHandoff(fixture);
       assert.equal(prefill.sourceKind, "photo");
       if (!failure.startsWith("metadata")) {
-        assert.ok(!prefill.creative.url); assert.ok(!prefill.creative.fileName);
+        assert.equal(prefill.creative, undefined, "A failed verification must not fabricate an image asset");
         assert.ok(fixture.toasts.some((toast) => toast.kind === "warning" && toast.message.includes("только тексты")));
+        assert.ok(fixture.toasts.every((toast) => !toast.message.includes("Фото-креатив передан")));
       } else {
-        assert.equal(prefill.creative.url, fixture.signedReply.data.publicUrl);
+        assert.ok(prefill.creative); assert.equal(prefill.creative.url, fixture.finalizedReply.data.asset.publicUrl);
         assert.deepEqual(fixture.toasts, [{ kind: "success", message: "Фото-креатив передан в AI запуск рекламы" }]);
       }
       assert.deepEqual(fixture.navigations, ["/ads-automation"]);
       assert.equal(fixture.state.PhotoBusy, null);
       assert.ok(fixture.toasts.every((toast) => toast.kind !== "error"));
+      assertNoPrivateHandoffHistory(fixture);
     } finally { fixture.lifetime!.unmount(); }
   });
 }
@@ -4348,10 +4468,11 @@ test("G5C11 fresh render preserves exact dimensions, layout, text and blob throu
     assert.equal(fixture.anchors.length, 1); assert.equal(fixture.anchors[0].href, artifact.previewUrl);
     assert.equal(fixture.anchors[0].download, "medina-os-photo-creative-feed.jpg"); assert.equal(fixture.anchors[0].clicked, true);
     await photo.callbacks.handoff();
-    assert.equal(fixture.dispatches.length, 2); assert.equal(fixture.uploads.length, 1); assert.equal(fixture.uploads[0].file, blob);
-    assert.deepEqual(JSON.parse(JSON.stringify(fixture.uploads[0].options)), { contentType: "image/jpeg" });
+    assert.equal(fixture.dispatches.length, 3); assert.equal(fixture.uploads.length, 1); assert.equal(fixture.uploads[0].file, blob);
+    assert.deepEqual(JSON.parse(JSON.stringify(fixture.uploads[0].options)), { contentType: "image/jpeg", upsert: false });
     assert.equal((fixture.dispatches[0].body as { fileSize: number }).fileSize, blob!.size);
-    const metadata = fixture.dispatches[1].body as { photoCreative: { texts: LocalPhotoTexts; format: string; layout: string } };
+    assert.deepEqual(fixture.dispatches[1].body, { uploadHandle: fixture.signedReply.data.uploadHandle });
+    const metadata = fixture.dispatches[2].body as { photoCreative: { texts: LocalPhotoTexts; format: string; layout: string } };
     assert.deepEqual(metadata.photoCreative.texts, JSON.parse(JSON.stringify(current.inputs.photoTexts)));
     assert.equal(metadata.photoCreative.format, "feed"); assert.equal(metadata.photoCreative.layout, "minimal_premium");
     assert.equal(readLocalHandoff(fixture).primaryText, `${current.inputs.photoTexts.offer}. ${current.inputs.photoTexts.cta}.`);
@@ -4521,20 +4642,25 @@ test("G5C11 failed same-input rerender preserves the prior valid blob, preview a
 
 const PHOTO_ARTIFACT_HANDOFF_STAGES = [
   { phase: "signed-token", change: "format" }, { phase: "signed-body", change: "brief" },
+  { phase: "finalize-token", change: "format" }, { phase: "finalize-response", change: "file" }, { phase: "finalize-body", change: "brief" },
   { phase: "upload", change: "text" }, { phase: "metadata-token", change: "layout" }, { phase: "metadata-response", change: "file" },
 ] as const;
 
 for (const { phase, change } of PHOTO_ARTIFACT_HANDOFF_STAGES) {
   test(`G5C11 handoff ${phase} rechecks captured artifact and brief before further effects`, { timeout: 5000 }, async () => {
     const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE), photo = await renderedPhoto(fixture);
-    const token = phase.endsWith("token") ? fixture.deferToken(phase === "signed-token" ? "signed" : "metadata") : undefined;
-    const body = phase === "signed-body" ? fixture.deferBody("signed") : undefined;
+    const token = phase.endsWith("token") ? fixture.deferToken(phase === "signed-token" ? "signed" : phase === "finalize-token" ? "finalize" : "metadata") : undefined;
+    const body = phase.endsWith("body") ? fixture.deferBody(phase === "signed-body" ? "signed" : "finalize") : undefined;
     const upload = phase === "upload" ? fixture.deferUpload() : undefined;
-    const response = phase === "metadata-response" ? fixture.deferResponse("metadata") : undefined;
-    const work = photo.callbacks.handoff(), resume = () => { token?.resolve(); body?.resolve(JSON.stringify(fixture.signedReply)); upload?.resolve(); response?.resolve(); };
+    const response = phase.endsWith("response") ? fixture.deferResponse(phase === "finalize-response" ? "finalize" : "metadata") : undefined;
+    const work = photo.callbacks.handoff(), resume = () => { token?.resolve();
+      body?.resolve(JSON.stringify(phase === "finalize-body" ? fixture.finalizedReply : fixture.signedReply)); upload?.resolve(); response?.resolve(); };
     try {
-      if (token) await token.started; if (body) await fixture.bodyStarted.promise;
-      if (upload) await fixture.uploadStarted.promise; if (response) await response.started;
+      if (token) await waitForLocalHandoffBoundary(work, token.started); if (body) await waitForLocalHandoffBoundary(work, fixture.bodyStarted.promise);
+      if (upload) await waitForLocalHandoffBoundary(work, fixture.uploadStarted.promise); if (response) await waitForLocalHandoffBoundary(work, response.started);
+      const expectedRequests = phase === "signed-token" ? 0 : phase.startsWith("signed") || phase === "upload" || phase === "finalize-token" ? 1
+        : phase.startsWith("finalize") || phase === "metadata-token" ? 2 : 3;
+      assert.equal(fixture.dispatches.length, expectedRequests, "Pause exactly the requested upload/finalization boundary");
       if (change === "format") { photo.callbacks.changeFormat("feed"); photo.callbacks.changeFormat(photo.inputs.photoFormat); }
       if (change === "brief") { photo.callbacks.updateBrief("service", "Temporary service B"); photo.callbacks.updateBrief("service", LOCAL_PACKAGE_BRIEF.service); }
       if (change === "text") photo.callbacks.updateTexts("headline", "Edited after render");
@@ -4555,7 +4681,7 @@ test("G5C11 artifact handoff pending lock precedes auth and suppresses duplicate
   try {
     await token.started; await flushLocalVideoWork(); assert.equal(fixture.sdkReads.total - reads, 1); assert.equal(fixture.dispatches.length, 0);
     token.resolve(); await Promise.all([work, duplicate]);
-    assert.equal(fixture.dispatches.length, 2); assert.equal(fixture.uploads.length, 1); assert.equal(fixture.uploads[0].file, fixture.renderReply.blob);
+    assert.equal(fixture.dispatches.length, 3); assert.equal(fixture.uploads.length, 1); assert.equal(fixture.uploads[0].file, fixture.renderReply.blob);
     assert.deepEqual(fixture.navigations, ["/ads-automation"]);
   } finally { token.resolve(); await Promise.all([work, duplicate]); fixture.lifetime!.unmount(); }
 });

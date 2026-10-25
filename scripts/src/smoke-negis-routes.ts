@@ -6,6 +6,7 @@ import { formatAuthBoundaryCoverage } from "./smoke-auth-boundary-report";
 type ApiBody = {
   success?: boolean;
   mode?: string;
+  code?: string;
   error?: string;
   details?: string[];
   data?: unknown;
@@ -13,11 +14,12 @@ type ApiBody = {
 
 export {};
 
-const baseUrl = (
+const creativeUploadSourceOnly = process.argv.includes("--creative-upload-source-only");
+const baseUrl = (creativeUploadSourceOnly ? "http://localhost:5173" : (
   process.env.NEGIS_SMOKE_BASE_URL ||
   process.env.NEGIS_BASE_URL ||
   "http://localhost:5173"
-).replace(/\/$/, "");
+)).replace(/\/$/, "");
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -35,9 +37,13 @@ function assertSourceExcludes(source: string, forbidden: string, label: string) 
 
 async function checkAdsAutomationSource() {
   const source = await readFile(path.join(repoRoot, "artifacts", "negis", "src", "pages", "AdsAutomation.tsx"), "utf8");
+  const uploadHelper = await readFile(path.join(repoRoot, "artifacts", "negis", "src", "lib", "verified-creative-upload.ts"), "utf8");
 
-  assertSourceIncludes(source, "publicURL", "publicURL normalization");
-  assertSourceIncludes(source, "buildFrontendStoragePublicUrl(storagePath, storageBucket)", "publicUrl derivation from storagePath");
+  assertSourceIncludes(source, 'from "@/lib/verified-creative-upload"', "shared verified upload import");
+  assertSourceIncludes(source, "await uploadVerifiedCreativeImage({", "shared private upload workflow dispatch");
+  assertSourceIncludes(source, "publicUrl: verified.publicUrl", "public URL comes from the verified receipt");
+  assertSourceExcludes(source, "buildFrontendStoragePublicUrl", "unverified public URL construction");
+  assertSourceExcludes(source, "normalizeAsset(", "metadata-only upload normalization fallback");
   assertSourceIncludes(source, "Техническая информация", "collapsed technical info block");
   assertSourceIncludes(source, "Клиентский режим", "client/admin mode toggle");
   assertSourceIncludes(source, "clientWizardSteps", "four-step client wizard");
@@ -71,15 +77,27 @@ async function checkAdsAutomationSource() {
   assertSourceIncludes(source, "Не удалось загрузить файл.", "failed upload message");
   assertSourceIncludes(source, "getting_signed_url", "signed URL status");
   assertSourceIncludes(source, "uploading_to_storage", "Storage upload status");
-  assertSourceIncludes(source, "saving_metadata", "metadata save status");
+  assertSourceIncludes(source, "saving_metadata", "upload finalization status");
   assertSourceIncludes(source, "setUploadStatus(\"failed\")", "failed upload state");
   assertSourceIncludes(source, "const creativeCanContinue = readiness.isReadyForMeta", "next step requires ready_for_meta");
   assertSourceIncludes(source, "uploadToSignedUrl", "signed Supabase upload call");
-  assertSourceIncludes(source, "/api/crm/ad-creatives/signed-upload", "signed upload endpoint");
-  assertSourceIncludes(source, "/api/crm/ad-creatives", "metadata save endpoint");
-  assertSourceIncludes(source, "signed_url", "signed upload metadata marker");
+  assertSourceExcludes(source, "/api/crm/ad-creatives/signed-upload", "page-owned signed upload bypass");
+  assertSourceIncludes(uploadHelper, "/api/crm/ad-creatives/signed-upload", "shared helper signed upload endpoint");
+  assertSourceIncludes(uploadHelper, "/api/crm/ad-creatives/finalize-upload", "shared helper finalization endpoint");
+  assertSourceIncludes(uploadHelper, 'fileType: "image"', "private image-only ticket request");
+  assertSourceIncludes(uploadHelper, "fileSize: file.size, requestKey", "byte-count and request-key binding");
+  assertSourceIncludes(uploadHelper, 'const stagingBucket = "ad-creatives-staging"', "private staging target");
+  assertSourceIncludes(uploadHelper, "ticket.publicUrl !== undefined", "reject public signed-ticket receipts");
+  assertSourceIncludes(uploadHelper, "init({ uploadHandle: ticket.uploadHandle })", "handle-only finalization body");
+  assertSourceIncludes(uploadHelper, "return verifiedAsset(finalized", "finalized asset validation before returning a URL");
+  assertSourceIncludes(source, "requestKeys: new WeakMap<Blob, string>()", "request-key cache uses Blob identity");
+  assertSourceIncludes(source, "crypto.randomUUID()", "UUID request keys");
+  assertSourceIncludes(source, "assertCurrent: async () => { assertCreativeIntent(session, intent); }", "session and intent fencing through the helper");
+  assertSourceIncludes(source, "await uploadVerifiedImage(session, intent, capture.blob", "thumbnail bytes use verified upload");
+  assertSourceIncludes(source, "void importCreativeFromUrl", "URL handoffs enter verified dispatch");
+  assertSourceIncludes(source, 'uploadMode: "verified_image"', "verified image upload marker");
   assertSourceIncludes(source, "lastUploadError", "detailed upload error state");
-  assertSourceIncludes(source, "VERCEL_FUNCTION_FILE_LIMIT_BYTES", "Vercel payload guard");
+  assertSourceExcludes(source, "VERCEL_FUNCTION_FILE_LIMIT_BYTES", "obsolete server-proxy upload branch");
   assertSourceIncludes(source, "creative.imageUploadMode", "Meta image upload mode debug");
   assertSourceIncludes(source, "creative.pictureUrl", "Meta picture URL fallback debug");
   assertSourceIncludes(source, "creative.imageUploadCapabilityFallback", "Meta image upload fallback debug");
@@ -160,23 +178,30 @@ async function checkAdsAutomationSource() {
   assertSourceIncludes(source, "Параметры перенесены из истории", "prefill without auto-launch notice");
   assertSourceExcludes(source, "isRealLaunch || mode === \"failed\" ? (", "Meta IDs shown outside real launches");
   assertSourceIncludes(source, "uploadLargeVideo", "large video optimization branch");
-  assertSourceIncludes(source, "file.size > optimizationThresholdBytes", "threshold comparison in bytes");
-  assertSourceIncludes(source, "exceedsThreshold && optimization?.enabled === true", "large video branch gated by flag and threshold");
-  assertSourceIncludes(source, "exceedsThreshold && !optimization", "large files blocked while optimization config is missing");
+  assertSourceExcludes(source, "exceedsThreshold", "small-video bypass of the private worker");
+  assertSourceIncludes(source, 'if (fileType === "video") {', "all videos dispatch through the worker");
+  assertSourceIncludes(source, "await uploadLargeVideo(file, optimizationDebug, intent, previewUrl)", "private video dispatch preserves the captured intent");
+  assertSourceIncludes(source, 'fileType === "video" && !optimization', "all videos blocked while worker configuration is missing");
+  assertSourceIncludes(source, 'fileType === "video" && optimization?.enabled !== true', "all videos blocked while worker is disabled");
   assertSourceIncludes(source, "Настройки оптимизации видео ещё загружаются", "config loading block message");
   assertSourceIncludes(source, "largeVideoBranch", "large video branch debug flag");
   assertSourceIncludes(source, "fileSizeMb", "file size debug field");
-  assertSourceIncludes(source, 'uploadTarget: "ad-creatives"', "direct upload target debug");
+  assertSourceIncludes(source, 'uploadTarget: fileType === "video" ? "private_video_job" : "ad-creatives-staging"', "private per-media upload target debug");
   assertSourceIncludes(source, "uploadTarget: storageBucket", "raw upload target debug from server response");
   assertSourceIncludes(source, "VIDEO_OPTIMIZING_MESSAGE", "public link state replaced while optimizing");
   assertSourceIncludes(source, "Идёт оптимизация для рекламы", "video optimization in-progress message");
   assertSourceIncludes(source, "Видео оптимизировано и готово для Meta", "video optimization ready message");
   assertSourceIncludes(source, "Видео ещё оптимизируется", "real launch blocked while optimizing message");
   assertSourceIncludes(source, "if (videoJobPending) errors.push(VIDEO_OPTIMIZING_LAUNCH_BLOCKED_MESSAGE)", "prelaunch gate while optimization job runs");
-  assertSourceIncludes(source, "publicUrl: job.outputPublicUrl || current.publicUrl", "creative publicUrl comes only from the optimized output");
-  assertSourceIncludes(source, "thumbnailUrl: job.thumbnailPublicUrl || current.thumbnailUrl", "thumbnailUrl comes from the optimization job");
+  assertSourceIncludes(source, "publicUrl: job.outputPublicUrl,", "creative publicUrl comes only from the worker output");
+  assertSourceExcludes(source, "job.outputPublicUrl || current.publicUrl", "stale original URL fallback after worker completion");
+  assertSourceIncludes(source, "thumbnailUrl: job.thumbnailPublicUrl,", "thumbnailUrl comes from the optimization job");
   // Optimized-video → Meta wiring (worker output becomes the ready creative).
-  assertSourceIncludes(source, 'mimeType: job.outputPublicUrl ? job.outputMimeType || "video/mp4"', "ready optimized creative is treated as video/mp4");
+  assertSourceIncludes(source, "hasWorkerReadyReceipt(job)", "complete worker receipt gates readiness");
+  for (const field of ["id: job.outputAssetId", "fileName: job.outputFileName", "fileSize: job.outputSizeBytes",
+    "storageBucket: job.outputStorageBucket", "storagePath: job.outputStoragePath", "mimeType: job.outputMimeType"]) {
+    assertSourceIncludes(source, field, `ready worker output identity: ${field}`);
+  }
   assertSourceIncludes(source, 'job.thumbnailPublicUrl ? "worker"', "ready thumbnail source falls back to worker");
   assertSourceIncludes(source, "Итоговый размер:", "optimized output size shown when the job is ready");
   assertSourceIncludes(source, "меньше на ${Math.round((1 - videoJob.compressionRatio)", "compression ratio shown as a size reduction");
@@ -193,9 +218,9 @@ async function checkAdsAutomationSource() {
   assertSourceExcludes(source, "ad-creatives-raw", "raw bucket name hardcoded in the UI");
   assertSourceExcludes(source, "SERVICE_ROLE", "service role key referenced in the frontend");
   assertSourceExcludes(source, "Следующим этапом будет добавлена", "stale future-optimization promise text");
-  assertSourceIncludes(source, "Автоматическая оптимизация видео скоро будет доступна", "disabled optimization too-large message");
+  assertSourceIncludes(source, "Защищённая обработка видео сейчас недоступна", "controlled worker unavailability message");
   assertSourceIncludes(source, "Видео большое. Для запуска рекламы его нужно оптимизировать.", "large video needs optimization client copy");
-  assertSourceIncludes(source, "Следующим этапом система подготовит MP4-версию для Meta.", "future MP4 optimization copy");
+  assertSourceExcludes(source, "Следующим этапом система подготовит MP4-версию для Meta.", "obsolete future-optimization fallback copy");
   assertSourceIncludes(source, "video_optimization_required", "large video is not sent through direct upload when optimization is disabled");
   assertSourceIncludes(source, "creative.status === \"needs_optimization\"", "needs optimization readiness branch");
   assertSourceIncludes(source, '"config_loading"', "config loading readiness state");
@@ -4177,7 +4202,7 @@ async function checkJsonEndpoint(path: string, init?: RequestInit) {
   return body;
 }
 
-async function checkJsonFailure(path: string, init: RequestInit, expectedText?: string) {
+async function checkJsonFailure(path: string, init: RequestInit, expectedText?: string, expectedCode?: string, expectedStatus?: number) {
   if (isPrivateApiPath(path)) {
     // Authentication is refused before any validation runs, so the specific
     // business failure this call used to assert is no longer reachable here.
@@ -4196,6 +4221,16 @@ async function checkJsonFailure(path: string, init: RequestInit, expectedText?: 
 
   if (response.ok && body.success !== false) {
     throw new Error(`${path} unexpectedly succeeded`);
+  }
+  if (expectedStatus !== undefined && response.status !== expectedStatus) {
+    throw new Error(`${path} must fail with HTTP ${expectedStatus}, got ${response.status}`);
+  }
+  if ((expectedCode !== undefined || expectedStatus !== undefined)
+    && (body.success !== false || body.data !== undefined || body.mode !== undefined)) {
+    throw new Error(`${path} must refuse without a success/demo asset receipt`);
+  }
+  if (expectedCode !== undefined && body.code !== expectedCode) {
+    throw new Error(`${path} must refuse with ${expectedCode}, got ${String(body.code)}`);
   }
 
   const combined = [body.error, ...(body.details || [])].filter(Boolean).join(" ");
@@ -4506,264 +4541,95 @@ async function main() {
     campaignName: "Smoke Meta Launch",
     status: "draft",
   });
-  await checkCrmEndpoint("/api/crm/ad-creatives", {
-    fileName: "smoke-creative.jpg",
-    fileType: "image",
-    mimeType: "image/jpeg",
-    fileSize: 2048,
-    publicUrl: "https://example.com/smoke-creative.jpg",
-    status: "uploaded",
-  });
-  const metadataSave = await checkJsonEndpoint("/api/crm/ad-creatives", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      workspaceId: "demo-workspace",
-      fileName: "smoke-direct-upload.jpg",
-      fileType: "image",
-      mimeType: "image/jpeg",
-      fileSize: 6_700_000,
-      storageBucket: "ad-creatives",
-      storagePath: "demo-workspace/smoke-direct-upload.jpg",
-      publicUrl: "https://example.com/smoke-direct-upload.jpg",
-      status: "uploaded",
-      metadata: {
-        source: "ads-automation",
-        uploadMode: "signed_url",
-        signedUpload: true,
-      },
-    }),
-  });
-  // Security-2B: the route is refused before any business branch runs. Its
-  // invariants are covered by the handler-level suites, which run without a
-  // deployment; the NOT CHECKED summary at the end of the run lists what this
-  // run itself did not get past.
-  if (isCrmGuarded(metadataSave)) return;
-  const metadataAsset = (metadataSave.data || {}) as { publicUrl?: string; item?: { publicUrl?: string; storagePath?: string } };
-  if (!metadataAsset.publicUrl && !metadataAsset.item?.publicUrl) {
-    throw new Error("/api/crm/ad-creatives did not return publicUrl for metadata save");
-  }
-  if (!metadataAsset.item?.storagePath) {
-    throw new Error("/api/crm/ad-creatives did not keep storagePath for metadata save");
-  }
-  await checkJsonFailure(
-    "/api/crm/ad-creatives/signed-upload",
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        workspaceId: "demo-workspace",
-        fileName: "smoke-bad.gif",
-        fileType: "image",
-        mimeType: "image/gif",
-        fileSize: 2048,
-      }),
-    },
-    "Формат",
-  );
-  await checkJsonFailure(
-    "/api/crm/ad-creatives/signed-upload",
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        workspaceId: "demo-workspace",
-        fileName: "smoke-too-large.jpg",
-        fileType: "image",
-        mimeType: "image/jpeg",
-        fileSize: 10 * 1024 * 1024 + 1,
-      }),
-    },
-    "10 MB",
-  );
-  await checkJsonFailure(
-    "/api/crm/ad-creatives/signed-upload",
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        workspaceId: "demo-workspace",
-        fileName: "smoke-too-large.mp4",
-        fileType: "video",
-        mimeType: "video/mp4",
-        fileSize: 100 * 1024 * 1024 + 1,
-      }),
-    },
-    "100 MB",
-  );
-  if (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY) {
-    const signedUpload = await checkJsonEndpoint("/api/crm/ad-creatives/signed-upload", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        workspaceId: "demo-workspace",
-        fileName: "smoke-signed-upload.jpg",
-        fileType: "image",
-        mimeType: "image/jpeg",
-        fileSize: 2048,
-      }),
-    });
-    // Security-2B: the route is refused before any business branch runs. Its
-    // invariants are covered by the handler-level suites, which run without a
-  // deployment; the NOT CHECKED summary at the end of the run lists what this
-  // run itself did not get past.
-    if (isCrmGuarded(signedUpload)) return;
-    const signedData = (signedUpload.data || {}) as { storagePath?: string; publicUrl?: string; token?: string };
-    if (!signedData.storagePath || !signedData.publicUrl || !signedData.token) {
-      throw new Error("/api/crm/ad-creatives/signed-upload did not return storagePath/publicUrl/token");
-    }
-  } else {
-    await checkJsonFailure(
-      "/api/crm/ad-creatives/signed-upload",
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          workspaceId: "demo-workspace",
-          fileName: "smoke-signed-upload.jpg",
-          fileType: "image",
-          mimeType: "image/jpeg",
-          fileSize: 2048,
-        }),
-      },
-      "SUPABASE_URL",
-    );
-  }
-  const upload = await checkJsonEndpoint("/api/crm/ad-creative-upload", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      workspaceId: "demo-workspace",
-      fileName: "smoke-upload.jpg",
-      fileType: "image",
-      mimeType: "image/jpeg",
-      fileSize: 2048,
-      publicUrl: "https://example.com/smoke-upload.jpg",
-      status: "uploaded",
-    }),
-  });
-  // Security-2B: the route is refused before any business branch runs. Its
-  // invariants are covered by the handler-level suites, which run without a
-  // deployment; the NOT CHECKED summary at the end of the run lists what this
-  // run itself did not get past.
-  if (isCrmGuarded(upload)) return;
-  const uploadedAsset = (upload.data || {}) as { publicUrl?: string; asset?: { publicUrl?: string } };
-  if (!uploadedAsset.publicUrl && !uploadedAsset.asset?.publicUrl) {
-    throw new Error("/api/crm/ad-creative-upload did not return publicUrl");
-  }
-  const snakeUpload = await checkJsonEndpoint("/api/crm/ad-creative-upload", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      workspaceId: "demo-workspace",
-      file_name: "smoke-upload-snake.jpg",
-      file_type: "image",
-      mime_type: "image/jpeg",
-      file_size: 2048,
-      storage_bucket: "ad-creatives",
-      storage_path: "demo-workspace/ads/smoke-upload-snake.jpg",
-      public_url: "https://example.com/smoke-upload-snake.jpg",
-      status: "uploaded",
-    }),
-  });
-  // Security-2B: the route is refused before any business branch runs. Its
-  // invariants are covered by the handler-level suites, which run without a
-  // deployment; the NOT CHECKED summary at the end of the run lists what this
-  // run itself did not get past.
-  if (isCrmGuarded(snakeUpload)) return;
-  const snakeUploadedAsset = (snakeUpload.data || {}) as { publicUrl?: string; asset?: { publicUrl?: string } };
-  if (!snakeUploadedAsset.publicUrl && !snakeUploadedAsset.asset?.publicUrl) {
-    throw new Error("/api/crm/ad-creative-upload did not normalize public_url to publicUrl");
-  }
-  const urlUpload = await checkJsonEndpoint("/api/crm/ad-creative-upload", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      workspaceId: "demo-workspace",
-      fileName: "smoke-upload-url.jpg",
-      fileType: "image",
-      mimeType: "image/jpeg",
-      fileSize: 2048,
-      storageBucket: "ad-creatives",
-      storagePath: "demo-workspace/ads/smoke-upload-url.jpg",
-      url: "https://example.com/smoke-upload-url.jpg",
-      status: "uploaded",
-    }),
-  });
-  // Security-2B: the route is refused before any business branch runs. Its
-  // invariants are covered by the handler-level suites, which run without a
-  // deployment; the NOT CHECKED summary at the end of the run lists what this
-  // run itself did not get past.
-  if (isCrmGuarded(urlUpload)) return;
-  const urlUploadedAsset = (urlUpload.data || {}) as { publicUrl?: string; asset?: { publicUrl?: string } };
-  if (!urlUploadedAsset.publicUrl && !urlUploadedAsset.asset?.publicUrl) {
-    throw new Error("/api/crm/ad-creative-upload did not normalize url to publicUrl");
-  }
-  const publicURLUpload = await checkJsonEndpoint("/api/crm/ad-creative-upload", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      workspaceId: "demo-workspace",
-      fileName: "smoke-upload-public-url.jpg",
-      fileType: "image",
-      mimeType: "image/jpeg",
-      fileSize: 2048,
-      storageBucket: "ad-creatives",
-      storagePath: "demo-workspace/ads/smoke-upload-public-url.jpg",
-      publicURL: "https://example.com/smoke-upload-public-url.jpg",
-      status: "uploaded",
-    }),
-  });
-  // Security-2B: the route is refused before any business branch runs. Its
-  // invariants are covered by the handler-level suites, which run without a
-  // deployment; the NOT CHECKED summary at the end of the run lists what this
-  // run itself did not get past.
-  if (isCrmGuarded(publicURLUpload)) return;
-  const publicURLUploadedAsset = (publicURLUpload.data || {}) as { publicUrl?: string; asset?: { publicUrl?: string } };
-  if (!publicURLUploadedAsset.publicUrl && !publicURLUploadedAsset.asset?.publicUrl) {
-    throw new Error("/api/crm/ad-creative-upload did not normalize publicURL to publicUrl");
-  }
-  if (process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL) {
-    const derivedUpload = await checkJsonEndpoint("/api/crm/ad-creative-upload", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        workspaceId: "demo-workspace",
-        fileName: "smoke-upload-derived.jpg",
-        fileType: "image",
-        mimeType: "image/jpeg",
-        fileSize: 2048,
-        storageBucket: "ad-creatives",
-        storagePath: "demo-workspace/ads/smoke-upload-derived.jpg",
-        status: "uploaded",
-      }),
-    });
-    // Security-2B: the route is refused before any business branch runs. Its
-    // invariants are covered by the handler-level suites, which run without a
-  // deployment; the NOT CHECKED summary at the end of the run lists what this
-  // run itself did not get past.
-    if (isCrmGuarded(derivedUpload)) return;
-    const derivedUploadedAsset = (derivedUpload.data || {}) as { publicUrl?: string; asset?: { publicUrl?: string } };
-    if (!derivedUploadedAsset.publicUrl && !derivedUploadedAsset.asset?.publicUrl) {
-      throw new Error("/api/crm/ad-creative-upload did not derive publicUrl from storagePath");
+  await checkJsonEndpoint("/api/crm/ad-creatives?workspaceId=demo-workspace");
+  const metadataOnlyUploads: Array<[string, Record<string, unknown>]> = [
+    ["camel metadata", {
+      fileName: "smoke-direct-upload.jpg", fileType: "image", mimeType: "image/jpeg", fileSize: 6_700_000,
+      storageBucket: "ad-creatives", storagePath: "demo-workspace/smoke-direct-upload.jpg",
+      publicUrl: "https://example.com/smoke-direct-upload.jpg", status: "uploaded",
+      metadata: { source: "ads-automation", uploadMode: "signed_url", signedUpload: true },
+    }],
+    ["snake metadata", {
+      file_name: "smoke-upload-snake.jpg", file_type: "image", mime_type: "image/jpeg", file_size: 2048,
+      storage_bucket: "ad-creatives", storage_path: "demo-workspace/ads/smoke-upload-snake.jpg",
+      public_url: "https://example.com/smoke-upload-snake.jpg", status: "uploaded",
+    }],
+    ["URL alias", {
+      fileName: "smoke-upload-url.jpg", fileType: "image", mimeType: "image/jpeg", fileSize: 2048,
+      storageBucket: "ad-creatives", storagePath: "demo-workspace/ads/smoke-upload-url.jpg",
+      url: "https://example.com/smoke-upload-url.jpg", status: "uploaded",
+    }],
+    ["publicURL alias", {
+      fileName: "smoke-upload-public-url.jpg", fileType: "image", mimeType: "image/jpeg", fileSize: 2048,
+      storageBucket: "ad-creatives", storagePath: "demo-workspace/ads/smoke-upload-public-url.jpg",
+      publicURL: "https://example.com/smoke-upload-public-url.jpg", status: "uploaded",
+    }],
+    ["derived storage URL", {
+      fileName: "smoke-upload-derived.jpg", fileType: "image", mimeType: "image/jpeg", fileSize: 2048,
+      storageBucket: "ad-creatives", storagePath: "demo-workspace/ads/smoke-upload-derived.jpg", status: "uploaded",
+    }],
+    ["missing URL", {
+      fileName: "smoke-upload-missing-url.jpg", fileType: "image", mimeType: "image/jpeg", fileSize: 2048, status: "demo",
+    }],
+  ];
+  for (const endpoint of ["/api/crm/ad-creatives", "/api/crm/ad-creative-upload", "/api/crm/ad-creatives/finalize-upload"]) {
+    for (const [label, body] of metadataOnlyUploads) {
+      const refused = await checkJsonFailure(endpoint, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ workspaceId: "demo-workspace", ...body }),
+      }, "подтверждённая защищённая загрузка", "creative_upload_verification_required", 400);
+      // An unauthenticated smoke cannot claim the business refusal was exercised.
+      if (isCrmGuarded(refused)) return;
+      console.log(`${endpoint}: ${label} requires an upload handle`);
     }
   }
-  await checkJsonFailure(
-    "/api/crm/ad-creative-upload",
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        workspaceId: "demo-workspace",
-        fileName: "smoke-upload-missing-url.jpg",
-        fileType: "image",
-        mimeType: "image/jpeg",
-        fileSize: 2048,
-        status: "demo",
-      }),
-    },
-    "публичную ссылку",
-  );
+  const signedEndpoint = "/api/crm/ad-creatives/signed-upload";
+  const requestKey = "66666666-6666-4666-8666-666666666666";
+  const signedInput = {
+    workspaceId: "demo-workspace", fileName: "smoke-signed-upload.jpg",
+    fileType: "image", mimeType: "image/jpeg", fileSize: 2048, requestKey,
+  };
+  for (const [body, expectedText] of [
+    [{ ...signedInput, fileName: "smoke-bad.gif", mimeType: "image/gif" }, "JPG"],
+    [{ ...signedInput, fileSize: 10 * 1024 * 1024 + 1 }, "10"],
+    [{ ...signedInput, fileName: "smoke-too-large.mp4", fileType: "video", mimeType: "video/mp4", fileSize: 100 * 1024 * 1024 + 1 }, "100"],
+  ] as Array<[Record<string, unknown>, string]>) {
+    const refused = await checkJsonFailure(signedEndpoint, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    }, expectedText, undefined, 400);
+    if (isCrmGuarded(refused)) return;
+  }
+  const missingRequestKey = await checkJsonFailure(signedEndpoint, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...signedInput, requestKey: undefined }),
+  }, undefined, "creative_upload_request_key_required", 400);
+  if (isCrmGuarded(missingRequestKey)) return;
+  // Small, otherwise valid videos are also forbidden on the image ticket route.
+  const privateVideoRequired = await checkJsonFailure(signedEndpoint, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...signedInput, fileName: "smoke-small.mp4", fileType: "video", mimeType: "video/mp4" }),
+  }, "защищённую обработку видео", "creative_video_worker_required", 409);
+  if (isCrmGuarded(privateVideoRequired)) return;
+  const signedUpload = await checkJsonEndpoint(signedEndpoint, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(signedInput),
+  });
+  if (isCrmGuarded(signedUpload)) return;
+  const signedData = (signedUpload.data || {}) as Record<string, unknown>;
+  const bucket = signedData.bucket ?? signedData.storageBucket;
+  if (signedUpload.mode !== "supabase" || bucket !== "ad-creatives-staging"
+    || (signedData.bucket !== undefined && signedData.bucket !== bucket)
+    || (signedData.storageBucket !== undefined && signedData.storageBucket !== bucket)
+    || typeof signedData.storagePath !== "string"
+    || !/^[0-9a-f-]{36}\/staged\/[0-9a-f-]{36}\/original\.jpg$/.test(signedData.storagePath)
+    || typeof signedData.uploadHandle !== "string" || !/^u1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{43}$/.test(signedData.uploadHandle)
+    || typeof signedData.token !== "string" || !signedData.token.trim()
+    || signedData.fileName !== signedInput.fileName || signedData.fileType !== "image"
+    || signedData.mimeType !== signedInput.mimeType || signedData.fileSize !== signedInput.fileSize
+    || ["publicUrl", "asset", "item"].some((key) => key in signedData) || signedData.ready === true || signedData.status === "ready") {
+    throw new Error("signed-upload must return only a bound private staging ticket, never a public/ready asset");
+  }
+  // This smoke does not upload bytes or finalize a synthetic handle. A ticket is
+  // not a verified asset; byte verification is exercised by isolated local tests.
   await checkJsonEndpoint("/api/crm/ad-creative-meta-upload", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -5316,7 +5182,13 @@ function reportAuthBoundaryCoverage() {
 }
 
 const videoWorkerOnly = process.argv.includes("--video-worker-only");
-if (videoWorkerOnly) {
+if (creativeUploadSourceOnly) {
+  try { await checkAdsAutomationSource(); }
+  catch (error) {
+    console.error(error instanceof Error ? error.message : error);
+    process.exitCode = 1;
+  }
+} else if (videoWorkerOnly) {
   try { await checkVideoWorkerPackage(); }
   catch (error) {
     console.error(error instanceof Error ? error.message : error);

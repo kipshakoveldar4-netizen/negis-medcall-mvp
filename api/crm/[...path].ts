@@ -11,6 +11,7 @@ import { handleClinicOperatorArrivals, handleOperatorArrivals } from "../../lib/
 import {
   handleAdCreativeMetaUpload,
   handleAdCreativeSignedUpload,
+  handleAdCreativeFinalizeUpload,
   handleAdCreativeUpload,
   handleAdsAiFill,
   handleAdvertisingOutcomes,
@@ -344,6 +345,8 @@ async function dispatch(
       return handleMetaInsightsSyncRuns(req, res);
     case "ad-creatives/signed-upload":
       return handleAdCreativeSignedUpload(req, res);
+    case "ad-creatives/finalize-upload":
+      return handleAdCreativeFinalizeUpload(req, res);
     case "ad-creative-upload":
       return handleAdCreativeUpload(req, res);
     case "ad-creative-meta-upload":

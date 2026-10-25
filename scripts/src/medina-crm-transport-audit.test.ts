@@ -107,6 +107,122 @@ test('another admin content caller cannot inject bare fetch', () => {
     ['components/unsafe.tsx', 'const Unsafe = () => <AdminCenterContent access={{ request: fetch }} />;']])), []);
 });
 
+const uploadHelper = "lib/verified-creative-upload.ts";
+const adsUploadCaller = "pages/AdsAutomation.tsx";
+const studioUploadCaller = "pages/ContentStudio.tsx";
+const uploadSources = new Map<string, string>();
+for (const file of [uploadHelper, adsUploadCaller, studioUploadCaller]) {
+  uploadSources.set(file, await readFile(new URL(`../../artifacts/negis/src/${file}`, import.meta.url), "utf8"));
+}
+const rejectsUploadTransport = (changed: ReadonlyMap<string, string>) => {
+  const offenders = crmTransportOffenders(changed);
+  assert.ok(offenders.some((entry) => entry.startsWith(uploadHelper + ":")), offenders.join("\n"));
+};
+
+test("actual image helper's two request calls bind through both callers to crmFetch", () => {
+  assert.deepEqual(crmTransportOffenders(uploadSources), []);
+});
+
+for (const [label, file, from, to] of [
+  ["callback removal", adsUploadCaller, "request: async (url, init) =>", "unused: async (url, init) =>"],
+  ["callback removal", studioUploadCaller, "request: async (url, init) =>", "unused: async (url, init) =>"],
+  ["raw callback", studioUploadCaller, "const response = await crmFetch(url,", "const response = await fetch(url,"],
+  ["raw session wrapper", adsUploadCaller, "await crmRequest<T>(path,", "await fetch(path,"],
+  ["raw API wrapper", adsUploadCaller, "const response = await crmFetch(path, init);", "const response = await fetch(path, init);"],
+  ["removed URL forwarding", adsUploadCaller, "await sessionRequest(session, url, init,", 'await sessionRequest(session, "/unrelated", init,'],
+  ["removed URL forwarding", studioUploadCaller, "await crmFetch(url,", 'await crmFetch("/unrelated",'],
+  ["fake API import", adsUploadCaller, 'from "@/lib/api"', 'from "@/lib/not-authenticated"'],
+  ["fake API import", studioUploadCaller, 'from "@/lib/api"', 'from "@/lib/not-authenticated"'],
+  ["fake helper import", adsUploadCaller, 'from "@/lib/verified-creative-upload"', 'from "@/lib/not-the-upload-helper"'],
+  ["fake helper import", studioUploadCaller, 'from "@/lib/verified-creative-upload"', 'from "@/lib/not-the-upload-helper"'],
+  ["shadowed callback target", studioUploadCaller, "const response = await crmFetch(url,", "const crmFetch = fetch; const response = await crmFetch(url,"],
+  ["shadowed session wrapper", adsUploadCaller, "const body = await sessionRequest(session, url,", "const sessionRequest = fetch; const body = await sessionRequest(session, url,"],
+  ["URL escape", adsUploadCaller, "const body = await sessionRequest(session, url,", "steal(url); const body = await sessionRequest(session, url,"],
+  ["captured transport default", uploadHelper, "requestKey, request, upload", "requestKey, request = fetch, upload"],
+  ["mutable capture", uploadHelper, "const { workspaceId, file, fileName, mimeType, requestKey, request, upload, assertCurrent } = attempt;",
+    "let { workspaceId, file, fileName, mimeType, requestKey, request, upload, assertCurrent } = attempt;"],
+  ["mutable snapshot", uploadHelper, "const attempt = { ...input };", "let attempt = { ...input };"],
+  ["snapshot override", uploadHelper, "const attempt = { ...input };", "const attempt = { ...input, request: fetch };"],
+  ["input replacement before capture", uploadHelper, "const attempt = { ...input };", "input.request = fetch; const attempt = { ...input };"],
+  ["snapshot replacement before capture", uploadHelper, "const { workspaceId, file, fileName, mimeType, requestKey, request, upload, assertCurrent } = attempt;",
+    "Object.assign(attempt, { request: fetch }); const { workspaceId, file, fileName, mimeType, requestKey, request, upload, assertCurrent } = attempt;"],
+  ["transport reassignment", uploadHelper, "let signed: unknown;", "request = fetch; let signed: unknown;"],
+  ["transport alias escape", uploadHelper, "let signed: unknown;", "const stolen = request; let signed: unknown;"],
+  ["direct helper fetch", uploadHelper, "await request(`/api/crm/ad-creatives/signed-upload", "await fetch(`/api/crm/ad-creatives/signed-upload"],
+] as const) {
+  test(`object injection rejects ${label} in ${file}`, () => {
+    rejectsUploadTransport(mutate(file, from, to, uploadSources));
+  });
+}
+
+for (const file of [adsUploadCaller, studioUploadCaller]) {
+  for (const [label, from, to] of [
+    ["spread before callback", "request: async (url, init) =>", "...unsafe, request: async (url, init) =>"],
+    ["spread after callback", "upload: async (bucket, path, token,", "...unsafe, upload: async (bucket, path, token,"],
+    ["duplicate request", "request: async (url, init) =>", "request: fetch, request: async (url, init) =>"],
+    ["computed request override", "upload: async (bucket, path, token,", '["request"]: fetch, upload: async (bucket, path, token,'],
+  ] as const) {
+    test(`object injection rejects ${label} in ${file}`, () => rejectsUploadTransport(mutate(file, from, to, uploadSources)));
+  }
+}
+
+test("a helper without its caller implementations has no transport proof", () => {
+  rejectsUploadTransport(new Map([[uploadHelper, uploadSources.get(uploadHelper)!]]));
+});
+
+for (const [label, extra] of [
+  ["unsafe additional caller", 'import { uploadVerifiedCreativeImage } from "@/lib/verified-creative-upload"; uploadVerifiedCreativeImage({ request: fetch });'],
+  ["unsafe aliased caller", 'import { uploadVerifiedCreativeImage as write } from "@/lib/verified-creative-upload"; write({ request: fetch });'],
+  ["namespace caller", 'import * as upload from "@/lib/verified-creative-upload"; upload.uploadVerifiedCreativeImage({ request: fetch });'],
+  ["dynamic caller", 'const upload = import("@/lib/verified-creative-upload");'],
+  ["reexport", 'export * from "@/lib/verified-creative-upload";'],
+  ["helper escape", 'import { uploadVerifiedCreativeImage } from "@/lib/verified-creative-upload"; const stolen = uploadVerifiedCreativeImage;'],
+] as const) {
+  test(`object injection rejects ${label}`, () => rejectsUploadTransport(new Map(uploadSources).set("pages/unsafe-upload.ts", extra)));
+}
+
+test("comments cannot replace a removed authenticated upload edge", () => {
+  const changed = mutate(studioUploadCaller, "await crmFetch(url,", "await fetch(url,", uploadSources);
+  changed.set(studioUploadCaller, changed.get(studioUploadCaller)! + "\n// await crmFetch(url, init);\n");
+  rejectsUploadTransport(changed);
+});
+
+for (const file of [uploadHelper, adsUploadCaller, studioUploadCaller, "lib/unsafe-upload.ts"]) {
+  test(`object transport proof never exempts unrelated request calls in ${file}`, () => {
+    const changed = new Map(uploadSources).set(file, (uploadSources.get(file) ?? "")
+      + '\nfunction Unsafe(request: Function) { return request("/api/crm/leads"); }');
+    assert.ok(crmTransportOffenders(changed).some((entry) => entry.startsWith(file + ":")));
+  });
+}
+
+const genericInjection = new Map([
+  ["lib/injected-operation.ts", `export async function perform(options: Options) {
+    const captured = { ...options };
+    const { dispatch: send } = captured;
+    return send("/api/crm/example");
+  }`],
+  ["pages/injected-parent.ts", `import { perform as execute } from "@/lib/injected-operation";
+    import { crmFetch as authenticated } from "@/lib/api";
+    async function forward(scope: string, endpoint: string) { return authenticated(endpoint); }
+    execute({ dispatch: async (target: string) => forward("scope", target) });`],
+]);
+
+test("object transport proof is structural, not tied to upload file, function or receiver names", () => {
+  assert.deepEqual(crmTransportOffenders(genericInjection), []);
+});
+for (const [label, from, to] of [
+  ["dead authenticated edge", "return authenticated(endpoint);", "if (false) return authenticated(endpoint); return unsafe;"],
+  ["early synthetic return", "return authenticated(endpoint);", "if (cached) return synthetic; return authenticated(endpoint);"],
+  ["wrong forwarded argument", "forward(\"scope\", target)", "forward(target, \"unrelated\")"],
+  ["raw branch beside authenticated edge", "return authenticated(endpoint);", 'if (other) fetch("/unrelated"); return authenticated(endpoint);'],
+  ["global fetch beside authenticated edge", "return authenticated(endpoint);", 'globalThis.fetch("/unrelated"); return authenticated(endpoint);'],
+  ["replaced authenticated import", "return authenticated(endpoint);", "authenticated = unsafe; return authenticated(endpoint);"],
+] as const) {
+  test(`generic object transport proof rejects ${label}`, () => {
+    assert.notDeepEqual(crmTransportOffenders(mutate("pages/injected-parent.ts", from, to, genericInjection)), []);
+  });
+}
+
 const mortgage = "lib/mortgage-workspace.tsx";
 const mortgageAnalytics = "pages/MortgageAnalytics.tsx";
 const mortgageResults = "components/mortgage/MortgageResults.tsx";

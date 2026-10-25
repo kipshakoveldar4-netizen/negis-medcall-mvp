@@ -4438,6 +4438,9 @@ expiry и настоящая внешняя матрица остаются. Н�
 
 ### Цикл G5-C55: закрытая подготовка загрузки — foundation готов локально, интеграция продолжается, 25 октября
 
+Этот подраздел сохраняет состояние foundation; актуальная интеграция описана
+в «Продолжении G5-C55» ниже, а не выдаётся за выполненную на этом первом шаге.
+
 По фактическому коду подтверждено: прежний `handleAdCreativeSignedUpload`
 выдаёт token сразу в public `ad-creatives`; проверяется metadata, не байты.
 ContentStudio photo handoff использует эту ссылку без серверной финализации.
@@ -4510,6 +4513,101 @@ public tokens при выпуске. HMAC сам по себе не являет
 087 не применялась в Supabase; нового Preview, файлов в облаке, worker,
 рекламы, расходов и изменений рабочих пространств не было. Обход public
 signed path нельзя объявлять закрытым до завершения перечисленной интеграции.
+
+### Продолжение G5-C55: private workflow подключён к API и React, 25 октября
+
+Это продолжение предыдущего foundation, не новая задача. Шесть агентов получили
+разные write scopes: общий browser helper, AdsAutomation, ContentStudio,
+router/security fixtures, native PostgreSQL и video producer receipts. Main
+соединяет API/SQL и проверяет общую регрессию; повторные поднаборы не суммируются.
+
+- Signed image prepare выдаёт только private ticket после durable admission.
+  Общий helper используется загрузкой фото/обложки и photo handoff. Он проверяет
+  private path и итоговую identity; только server finalize возвращает public asset.
+  До/после ожиданий действуют captured account/session и creative-intent guards.
+  Старые JSON metadata-only writers больше не создают строки без upload handle.
+- Финализация читает только выведенный из manifest private URL, полностью
+  декодирует и нормализует изображение, загружает immutable hash path create-only,
+  сверяет фактические public MIME/size/hash и принимает точный DB receipt.
+  Multipart image использует ту же нормализацию/receipt; его requestKey опционален
+  для совместимости, поэтому replay гарантируется лишь при переданном ключе.
+- **088 только локально**: server-only ledger, точный replay, отказ при конфликте
+  параметров и неизменяемая identity. RPC finalize одновременно сохраняет asset
+  и receipt и удерживает staff authority lock до commit. Browser table/column/RPC
+  grants закрыты; платёжные квоты и тарифы не меняются. Технические границы:
+  4 pending, 128 выдач за 2 часа, 256 MiB retained raw на пространство.
+- Native race проверка нашла обход лимита при старом RR/Serializable snapshot:
+  advisory lock не обновлял видимость строк. Теперь отдельная закрытая guard row
+  получает настоящий MVCC write; конфликтующий старый snapshot прерывается.
+  Заявленный браузером размер не ограничивает signed Storage upload: поэтому
+  каждый signed admission резервирует весь подтверждённый максимум бакета
+  **100 MiB**, не `fileSize=1`. Сейчас raw budget допускает два таких retained
+  ticket, пока безопасное удаление не подтверждено. Истечение времени само по
+  себе бюджет не освобождает; inline не создаёт private raw reservation.
+- Все новые обычные video uploads, включая маленькие и handoff, идут в private
+  worker. Выключенный worker даёт явный отказ, public fallback удалён. Producer
+  требует подтверждённые private bucket/token/path и точные asset/job INSERT
+  receipts, не выдаёт demo success при потере ACK. PATCH не заменяет канонический
+  размер browser-значением. GET различает отсутствие строки и сбой чтения.
+- Ready video требует существующий asset той же клиники и точное совпадение
+  output/thumbnail identity. Найден и закрыт alias-разрыв: проверенный
+  optimized_public_url не мог гарантировать безопасность сериализованного
+  output_public_url. Непустые конфликтующие URL/path/bucket/size/MIME/actor aliases
+  теперь отклоняются. UI принимает только полный подтверждённый worker output,
+  а не имя/размер исходного raw-файла.
+- URL из handoff/истории не является доказательством asset identity. Импорт
+  принимает только HTTPS public path своего пространства в настроенном Storage,
+  без query/hash/traversal/redirect и передачи credentials/referrer. MIME,
+  расширение, Content-Length и stream budget проверяются до создания File;
+  headers и body ограничены общим deadline 20 s. Смена intent/account и зависшая
+  отмена не разрешают поздний upload. Произвольный URL/старый assetId/cover не
+  восстанавливают readiness. Extensionless generated URLs пока fail-closed,
+  их безопасный handoff относится к G5-C56.
+
+Общий интегрированный runtime/regression прогон: **2681/2681**, без skips или
+cancelled. В него входят actual helper/page closures, router, native image
+normalization, metadata/tenant/storage/permission guards и structural transport
+audit с опасными mutation controls; повторы focused runs сверху не добавляются.
+Полная workspace/API typecheck в обоих resolution modes, build и **115**
+изолированных cold-start checks прошли. Scripts rootDir не расширялся:
+dynamic fixture imports используют явные наблюдаемые контракты. Source-only
+upload smoke и worker contract прошли без HTTP вызовов. Прежний tooltip
+sourcemap warning не устранён и не объявлен новым исправлением. Логи:
+`node_modules/.cache/g5c55-integrated-{accepted,build-accepted,postgres,`
+`migration-chain,smoke-source,worker-contract}.log`.
+
+Actual 015 table-only/082/085/087/088 на собственном native PostgreSQL 17.11:
+**52/52**, без skips; две disposable БД остановлены и каталоги удалены. Storage
+schema — synthetic scaffold, не проверка HTTP API Supabase. SHA-256 actual 088:
+`c284e9ba1668c2b64938da47a1547a75a9478b2bcb8fafec574fff1e0dedb47e`.
+Отдельный actual client → server → native Sharp runtime проверяет 13 сценариев,
+с явно поддельными auth/SDK/RPC/network; он не выдаётся за облачную приёмку.
+В браузере на local-only synthetic fixture проверены desktop 1440×1000 и
+mobile 390×844: горизонтального переполнения нет, платные image/video actions
+disabled; после A→B прежний `TEST local A hook` отсутствует, новый B присутствует.
+Это визуальная/session проверка, не реальная загрузка в Storage. Тестовая панель
+фикстуры занимает часть mobile viewport; полноценная mobile upload-приёмка ещё
+нужна. Временный viewport сброшен, собственная вкладка и сервер закрыты.
+
+**Не закрыто и не выпускать за готовое:** безопасный retention/reconciliation
+private raw и public orphans; учёт последней повторной выдачи signed token и
+drain незавершённых upload перед удалением; без cleaner raw budget со временем
+блокирует новые загрузки. Storage upload и DB commit не являются одной
+транзакцией: при отказе после public upload возможен валидный orphan без
+выданного asset receipt. Replays одного requestKey не означают dedup разных
+намерений/новых File objects. Video admission пока не имеет общего durable
+operation key/quota и может оставить orphan при потерянном INSERT ACK. Старые
+video jobs без asset/канонического размера требуют отдельного recovery, не
+unsafe fallback. Generated provider-video writers остаются G5-C56; нужен также
+Linux/container sandbox и настоящая изолированная Storage/Preview матрица.
+Перед выпуском требуется план для ранее выданных public tokens и старых assets,
+а не автоматическое объявление их проверенными.
+
+Новых Preview/cloud apply/реальных файлов/отправок/платных генераций не было.
+087/088 в Supabase не применялись. Production, Baspana, салоны, WhatsApp, домены,
+аккаунты/роли и расходы не изменены. Общий migration-chain остаётся **3 pass /
+1 fail**: прежний M2 duplicate в чужой dirty 065; 059/065 не менялись и не
+включаются в commit, исключения/allowlist не добавлялись.
 
 ### Цикл G7-C21: шесть независимых направлений — интеграция локально, 25 октября
 

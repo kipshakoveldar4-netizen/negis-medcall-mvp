@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
@@ -12,8 +13,15 @@ const ts = requireFromRoot("typescript") as typeof import("typescript");
 const serverFile = "lib/crm/server.ts";
 const source = await readFile(path.join(root, serverFile), "utf8");
 const WORKSPACE = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const USER = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+const STAFF = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+const OPERATION = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+const REQUEST_KEY = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+const ORIGIN = "https://creative-image-bytes.fixture.invalid";
+const SECRET = "SYNTHETIC_INLINE_IMAGE_SECRET_NEVER_REAL_088";
 type ImageHelper = {
   validateCreativeImageBytes(input: { buffer: Buffer; fileName: string; mimeType: string }): Promise<string[]>;
+  normalizeCreativeImageBytes(input: { buffer: Buffer; fileName: string; mimeType: string }): Promise<Buffer>;
   CreativeImageValidationUnavailable: new () => Error;
   MAX_CREATIVE_IMAGE_PIXELS: number;
 };
@@ -103,11 +111,21 @@ function selectHandler() {
   ].join("\n"));
 }
 const handlerCode = selectHandler();
+const runtimeCode = new Map<string, string>();
+for (const [id, file] of [
+  ["../auth/permissions", "lib/auth/permissions.ts"],
+  ["./staged-creative-ticket", "lib/crm/staged-creative-ticket.ts"],
+  ["./staged-creative-storage", "lib/crm/staged-creative-storage.ts"],
+  ["./generated-storage-verification", "lib/crm/generated-storage-verification.ts"],
+  ["./staged-creative-workflow", "lib/crm/staged-creative-workflow.ts"],
+]) {
+  runtimeCode.set(id, compile(await readFile(path.join(root, file), "utf8")));
+}
 
 function multipart(input: Upload) {
   const boundary = "----syntheticCreativeImageBytesBoundary";
   const parts: Buffer[] = [];
-  for (const [name, value] of Object.entries(input.fields ?? {})) {
+  for (const [name, value] of Object.entries({ requestKey: REQUEST_KEY, ...input.fields })) {
     parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`));
   }
   parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${input.fileName}"\r\nContent-Type: ${input.mimeType}\r\n\r\n`));
@@ -120,6 +138,12 @@ function fixture(helper: ImageHelper = actualHelper) {
   const uploaded: Array<{ bucket: string; key: string; buffer: Buffer; options: Json }> = [];
   const persisted: Array<{ workspaceId: string; body: Json }> = [];
   const network: string[] = [];
+  const rpcs: Array<{ name: string; args: Json }> = [];
+  const reads: Array<{ table: string; columns: string; filters: Json }> = [];
+  const verified: Array<{ url: string; bytes: Buffer }> = [];
+  let operation: Json | null = null;
+  let ticket: Json | null = null;
+  const identity = { p_workspace_id: WORKSPACE, p_staff_user_id: STAFF, p_auth_user_id: USER };
   const storage = {
     from(bucket: string) {
       events.push("storage.from");
@@ -136,30 +160,126 @@ function fixture(helper: ImageHelper = actualHelper) {
       };
     },
   };
+  const client = {
+    storage,
+    from(table: string) {
+      const entry = { table, columns: "", filters: {} as Json };
+      reads.push(entry);
+      const builder = {
+        select(columns: string) { entry.columns = columns; return builder; },
+        eq(column: string, value: unknown) { entry.filters[column] = value; return builder; },
+        async maybeSingle() {
+          assert.ok(["staff_users", "creative_upload_operations"].includes(table), `unexpected table ${table}`);
+          const row = table === "staff_users"
+            ? { id: STAFF, workspace_id: WORKSPACE, auth_user_id: USER, role: "owner", status: "active" }
+            : operation;
+          assert.ok(row, "admission must precede the operation read");
+          for (const [column, value] of Object.entries(entry.filters)) assert.equal(row[column as keyof typeof row], value);
+          events.push(table === "staff_users" ? "actor.read" : "operation.read");
+          return { data: row, error: null };
+        },
+      };
+      return builder;
+    },
+    async rpc(name: string, args: Json) {
+      rpcs.push({ name, args: structuredClone(args) });
+      assert.deepEqual({ p_workspace_id: args.p_workspace_id, p_staff_user_id: args.p_staff_user_id,
+        p_auth_user_id: args.p_auth_user_id }, identity);
+      if (name === "reserve_creative_upload") {
+        events.push("reserve");
+        assert.equal(args.p_request_key, REQUEST_KEY);
+        assert.equal(args.p_source, "inline");
+        const issuedAt = Date.now();
+        ticket = { v: 1, id: OPERATION, workspaceId: WORKSPACE, userId: USER, staffUserId: STAFF,
+          fileName: args.p_file_name, mimeType: args.p_mime_type, fileSize: args.p_file_size,
+          issuedAt, expiresAt: issuedAt + 7_200_000 };
+        operation = { id: OPERATION, workspace_id: WORKSPACE, staff_user_id: STAFF, auth_user_id: USER,
+          request_key: REQUEST_KEY, file_name: args.p_file_name, mime_type: args.p_mime_type, file_size: args.p_file_size,
+          source: "inline", issued_at: issuedAt, expires_at: issuedAt + 7_200_000, status: "reserved" };
+        return { data: { ticket, requestKey: REQUEST_KEY, status: "reserved" }, error: null };
+      }
+      assert.equal(name, "finalize_creative_image_upload", "only the atomic verified receipt may persist a creative");
+      assert.ok(ticket);
+      assert.equal(args.p_operation_id, OPERATION);
+      assert.equal(uploaded.length, 1);
+      assert.equal(verified.length, 1, "the actual public-byte verifier must finish before the commit");
+      const written = uploaded[0];
+      const digest = createHash("sha256").update(written.buffer).digest("hex");
+      const result = { file_name: ticket.fileName, file_type: "image", mime_type: ticket.mimeType,
+        file_size: written.buffer.length, storage_bucket: written.bucket, storage_path: written.key,
+        public_url: `${ORIGIN}/storage/v1/object/public/${written.bucket}/${written.key}`, sha256: digest };
+      assert.deepEqual(structuredClone(args.p_result), result, "commit the canonical bytes, never the original container size/hash");
+      const { sha256: _digest, ...fields } = result;
+      const asset = { id: OPERATION, workspace_id: WORKSPACE, uploaded_by: USER, ...fields, status: "uploaded",
+        verified_upload_key: OPERATION, verified_upload_sha256: digest, verified_upload_actor_id: USER,
+        metadata: { uploadMode: "verified-staged", contentSha256: digest } };
+      events.push("persist");
+      persisted.push({ workspaceId: WORKSPACE, body: asset });
+      return { data: { operationId: OPERATION, status: "finalized", asset, replayed: false }, error: null };
+    },
+  };
+  const isolatedFetch = async (url: string, options?: RequestInit) => {
+    const written = uploaded[0];
+    const expected = written && `${ORIGIN}/storage/v1/object/public/${written.bucket}/${written.key}`;
+    if (!written || url !== expected) {
+      network.push(url);
+      throw new Error("Network forbidden in synthetic image tests");
+    }
+    assert.equal(options?.method, "GET");
+    assert.equal(options?.redirect, "error");
+    assert.equal(options?.credentials, "omit");
+    assert.equal(options?.cache, "no-store");
+    assert.equal(verified.length, 0);
+    events.push("verify");
+    verified.push({ url, bytes: Buffer.from(written.buffer) });
+    return new globalThis.Response(new Uint8Array(written.buffer), { status: 200, headers: {
+      "content-type": String(written.options.contentType), "content-length": String(written.buffer.length),
+    } });
+  };
+  const isolatedGlobals = {
+    Buffer, Error, URL, AbortController, setTimeout, clearTimeout, fetch: isolatedFetch,
+    process: Object.freeze({ env: Object.freeze({ SUPABASE_URL: ORIGIN, SUPABASE_SERVICE_ROLE_KEY: SECRET }) }),
+  };
+  const modules = new Map<string, Json>([["./creative-image", helper as unknown as Json]]);
+  function loadRuntime(id: string): Json {
+    if (id === "node:crypto") return requireFromRoot(id) as Json;
+    const cached = modules.get(id);
+    if (cached) return cached;
+    const code = runtimeCode.get(id);
+    assert.ok(code, `unexpected workflow import ${id}`);
+    const exports: Json = {};
+    modules.set(id, exports);
+    new Script(code, { filename: `creative-image-bytes.actual-${id.split("/").at(-1)}.cjs` }).runInNewContext({
+      ...isolatedGlobals, exports, require: loadRuntime,
+    }, { timeout: 1000 });
+    return exports;
+  }
+  const workflow = loadRuntime("./staged-creative-workflow");
   const exported: { selected?: {
     handleAdCreativeUpload: Handler;
     attachWorkspaceContext(req: Request, context: Json): void;
     IMAGE_MIME_TYPES: Set<string>;
   } } = {};
   new Script(handlerCode, { filename: "creative-image-bytes.actual-handler.cjs" }).runInNewContext({
-    ...helper, exports: exported, Buffer, Error,
-    process: Object.freeze({ env: Object.freeze({}) }),
-    fetch(url: string) { network.push(url); throw new Error("Network forbidden in synthetic image tests"); },
+    ...isolatedGlobals, ...helper, ...workflow, randomUUID, exports: exported,
+    hasPermission: loadRuntime("../auth/permissions").hasPermission,
+    StagedCreativeTicketError: loadRuntime("./staged-creative-ticket").StagedCreativeTicketError,
+    StagedCreativeStorageError: loadRuntime("./staged-creative-storage").StagedCreativeStorageError,
     require(id: string) {
       if (id === "@fastify/busboy" || id === "content-type") return requireFromRoot(id);
       throw new Error(`Unexpected application import: ${id}`);
     },
-    getSupabaseServerClient: () => ({ storage }),
+    getSupabaseServerClient: () => client,
     async persistAdCreativeAsset(input: { workspaceId: string; body: Json }) {
       events.push("persist");
       persisted.push(input);
-      return { mode: "supabase", asset: { id: "synthetic-image-asset", ...input.body }, warning: "" };
+      throw new Error("Legacy non-atomic creative persistence is forbidden in inline fixtures");
     },
   }, { timeout: 1000 });
   assert.ok(exported.selected);
   const actual = exported.selected;
   return {
-    uploaded, persisted, network, events, allowedMimes: [...actual.IMAGE_MIME_TYPES],
+    uploaded, persisted, network, events, rpcs, reads, verified, allowedMimes: [...actual.IMAGE_MIME_TYPES],
     async call(input: Upload, method = "POST") {
       const form = multipart(input);
       const req: Request = {
@@ -169,7 +289,8 @@ function fixture(helper: ImageHelper = actualHelper) {
           for (let offset = 0; offset < form.buffer.length; offset += 17) yield form.buffer.subarray(offset, offset + 17);
         },
       };
-      actual.attachWorkspaceContext(req, { workspaceId: WORKSPACE });
+      actual.attachWorkspaceContext(req, { workspaceId: WORKSPACE, userId: USER, staffUserId: STAFF,
+        role: "owner", permissions: ["manage_marketing"] });
       const res: Response = {
         statusCode: 0, body: {},
         status(code) { this.statusCode = code; return this; },
@@ -243,27 +364,65 @@ test("CI1 controls cover exactly the handler's allowed image MIME set", () => {
 });
 
 for (const image of [...images, { ...jpeg, format: "JPEG extension alias", fileName: "synthetic.jpeg" }]) {
-  test(`CI2 valid ${image.format} reaches fake storage and persistence unchanged`, async () => {
+  test(`CI2 valid ${image.format} persists fully decoded canonical bytes through the verified-inline receipt`, async () => {
     const ctx = fixture();
+    const before = Buffer.from(image.buffer);
     const res = await ctx.call(image);
     assert.equal(res.statusCode, 201, JSON.stringify(res.body));
     assert.equal(res.body.success, true);
     assert.equal(ctx.uploaded.length, 1);
     assert.equal(ctx.persisted.length, 1);
-    assert.deepEqual(ctx.events, ["storage.from", "upload", "storage.from", "publicUrl", "persist"]);
+    assert.deepEqual(ctx.events, ["reserve", "operation.read", "actor.read", "storage.from", "upload", "verify", "persist"]);
     const written = ctx.uploaded[0];
     assert.equal(written.bucket, "ad-creatives");
-    assert.ok(written.key.startsWith(`${WORKSPACE}/`));
-    assert.ok(written.key.endsWith(`-${image.fileName}`));
-    assert.deepEqual(written.buffer, image.buffer, "validation must not re-encode or sanitize the image");
+    assert.ok(written.buffer.length > 0 && written.buffer.length <= 10 * 1024 * 1024);
+    assert.deepEqual(image.buffer, before, "normalization must not mutate the request bytes");
+    assert.equal(actualSniffer.sniffImageMimeType(written.buffer), image.mimeType);
+    const sharp = requireFromRoot("sharp") as typeof import("sharp").default;
+    const decoder = sharp(written.buffer, { failOn: "warning", limitInputPixels: 40_000_000, animated: true });
+    const metadata = await decoder.metadata();
+    assert.equal(metadata.format, image.mimeType.slice("image/".length));
+    const decoded = await decoder.toColourspace("srgb").ensureAlpha().raw({ depth: "uchar" }).toBuffer({ resolveWithObject: true });
+    assert.deepEqual({ width: decoded.info.width, height: decoded.info.height, channels: decoded.info.channels },
+      { width: 2, height: 2, channels: 4 });
+    assert.equal(decoded.data.length, 16, "consume the entire normalized pixel payload, not only its header");
+    const digest = createHash("sha256").update(written.buffer).digest("hex");
+    assert.equal(written.key, `${WORKSPACE}/verified/${OPERATION}/${digest}.${image.fileName.split(".").at(-1)}`);
     assert.equal(written.options.contentType, image.mimeType);
     assert.equal(written.options.upsert, false);
+    assert.equal(ctx.verified.length, 1);
+    assert.deepEqual(ctx.verified[0].bytes, written.buffer);
+    assert.equal(createHash("sha256").update(ctx.verified[0].bytes).digest("hex"), digest);
     const saved = ctx.persisted[0];
     assert.equal(saved.workspaceId, WORKSPACE);
-    assert.equal(saved.body.fileType, "image");
-    assert.equal(saved.body.fileName, image.fileName);
-    assert.equal(saved.body.mimeType, image.mimeType);
-    assert.equal(saved.body.fileSize, image.buffer.length);
+    assert.equal(saved.body.id, OPERATION);
+    assert.equal(saved.body.uploaded_by, USER);
+    assert.equal(saved.body.file_type, "image");
+    assert.equal(saved.body.file_name, image.fileName);
+    assert.equal(saved.body.mime_type, image.mimeType);
+    assert.equal(saved.body.file_size, written.buffer.length);
+    assert.equal(saved.body.storage_bucket, written.bucket);
+    assert.equal(saved.body.storage_path, written.key);
+    assert.equal(saved.body.public_url, ctx.verified[0].url);
+    assert.equal(saved.body.verified_upload_key, OPERATION);
+    assert.equal(saved.body.verified_upload_sha256, digest);
+    assert.equal(saved.body.verified_upload_actor_id, USER);
+    assert.deepEqual(ctx.rpcs.map(call => call.name), ["reserve_creative_upload", "finalize_creative_image_upload"]);
+    assert.deepEqual(ctx.rpcs[0].args, {
+      p_workspace_id: WORKSPACE, p_staff_user_id: STAFF, p_auth_user_id: USER, p_request_key: REQUEST_KEY,
+      p_file_name: image.fileName, p_mime_type: image.mimeType, p_file_size: image.buffer.length, p_source: "inline",
+    });
+    assert.deepEqual(ctx.reads.find(read => read.table === "staff_users")?.filters,
+      { id: STAFF, workspace_id: WORKSPACE, auth_user_id: USER }, "publication must recheck the live actor");
+    assert.deepEqual(ctx.reads.find(read => read.table === "creative_upload_operations")?.filters,
+      { id: OPERATION, workspace_id: WORKSPACE, auth_user_id: USER, staff_user_id: STAFF });
+    const data = res.body.data as Json;
+    const asset = data.asset as Json;
+    assert.equal(data.uploadMode, "verified-inline");
+    assert.equal(asset.id, OPERATION);
+    assert.equal(asset.fileSize, written.buffer.length);
+    assert.equal(asset.storagePath, written.key);
+    assert.equal(asset.publicUrl, ctx.verified[0].url);
   });
 }
 

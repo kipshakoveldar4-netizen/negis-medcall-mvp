@@ -55,6 +55,7 @@ async function isolated(fn: (ctx: any) => Promise<void>) {
     NEGIS_VAPID_SUBJECT: keys.vapid.subject, META_VIDEO_LAUNCH_ENABLED: "true",
     META_ACCESS_TOKEN: "local-test-placeholder", META_AD_ACCOUNT_ID: "act_123",
     META_PAGE_ID: "123", META_INSTAGRAM_ACTOR_ID: "123", VIDEO_OPTIMIZATION_ENABLED: "true",
+    VIDEO_OPTIMIZATION_RAW_BUCKET: "ad-creatives-raw", VIDEO_OPTIMIZATION_MAX_INPUT_MB: "500",
   };
   const oldEnv = Object.fromEntries(Object.keys(env).map((key) => [key, process.env[key]]));
   const oldFetch = globalThis.fetch;
@@ -103,6 +104,11 @@ async function isolated(fn: (ctx: any) => Promise<void>) {
       return builder;
     },
     storage: {
+      async getBucket(bucket: string) {
+        ctx.storageCalls.push({ op: "getBucket", bucket });
+        return { data: { id: "ad-creatives-raw", public: false, file_size_limit: 500 * 1024 * 1024,
+          allowed_mime_types: ["video/mp4", "video/quicktime", "video/webm"] }, error: null };
+      },
       from(bucket: string) {
         return {
           download: async (key: string) => {
@@ -134,7 +140,7 @@ async function isolated(fn: (ctx: any) => Promise<void>) {
   }
 }
 
-const ownAsset = { id: ASSET, workspace_id: WORKSPACE, metadata: { retained: true }, file_type: "video", mime_type: "video/mp4", file_size: 100,
+const ownAsset = { id: ASSET, workspace_id: WORKSPACE, metadata: { retained: true }, file_name: "test.mp4", file_type: "video", mime_type: "video/mp4", file_size: 100,
   storage_bucket: "ad-creatives-raw", storage_path: `${WORKSPACE}/test.mp4`, updated_at: "2026-10-25T00:00:00Z" };
 const videoBody = { assetId: ASSET, rawPath: `${WORKSPACE}/test.mp4`, fileName: "test.mp4", inputMimeType: "video/mp4", inputSizeBytes: 100 };
 

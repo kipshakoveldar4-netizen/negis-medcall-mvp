@@ -631,17 +631,211 @@ function verifiedMortgageReceivers(sources: CrmSources): Map<string, Set<number>
   return calls;
 }
 
+// Prove a closed object-argument injection: the exported helper captures one
+// transport, every value use is a direct call, and every caller forwards that
+// call's URL through a binding-verified chain to the shared API module.
+function verifiedObjectTransports(sources: CrmSources): { calls: Map<string, Set<number>>; failures: Set<string> } {
+  const files = new Map<string, ts.SourceFile>();
+  const nodes = (root: ts.Node): ts.Node[] => {
+    const result: ts.Node[] = [];
+    const visit = (node: ts.Node) => { result.push(node); ts.forEachChild(node, visit); };
+    visit(root);
+    return result;
+  };
+  const parse = (file: string, source: string) => ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true,
+    file.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
+  const owner = (node: ts.Node): ts.Node | undefined => {
+    let parent = node.parent;
+    while (parent && !ts.isFunctionLike(parent)) parent = parent.parent;
+    return parent;
+  };
+  const exported = (fn: ts.FunctionDeclaration) => fn.modifiers?.some((node) => node.kind === ts.SyntaxKind.ExportKeyword)
+    && !fn.modifiers.some((node) => node.kind === ts.SyntaxKind.DefaultKeyword);
+  const crmPath = (node: ts.Expression | undefined) => node && (ts.isStringLiteralLike(node) || ts.isTemplateExpression(node))
+    && (ts.isTemplateExpression(node) ? node.head.text : node.text).includes("/api/crm/");
+  // Avoid building another binding graph for source sets without this shape.
+  const roots: ts.FunctionDeclaration[] = [];
+  for (const [file, source] of sources) {
+    if (!source.includes("/api/crm/") || !/export\s+(?:async\s+)?function\b/.test(source)) continue;
+    const ast = parse(file, source);
+    files.set(file, ast);
+    for (const fn of ast.statements.filter(ts.isFunctionDeclaration)) {
+      if (exported(fn) && fn.body && fn.name && fn.parameters.length === 1 && ts.isIdentifier(fn.parameters[0].name)
+        && nodes(fn.body).some((node) => ts.isCallExpression(node) && crmPath(node.arguments[0])
+          && ts.isIdentifier(node.expression) && owner(node) === fn)
+        && nodes(fn.body).some((node) => ts.isVariableDeclaration(node) && ts.isObjectBindingPattern(node.name))) roots.push(fn);
+    }
+  }
+  const calls = new Map<string, Set<number>>(), failures = new Set<string>();
+  if (!roots.length) return { calls, failures };
+  for (const [file, source] of sources) if (!files.has(file)) files.set(file, parse(file, source));
+  const program = ts.createProgram([...files.keys()], { noLib: true, noResolve: true }, {
+    getSourceFile: (file) => files.get(file), getDefaultLibFileName: () => "", writeFile: () => {},
+    getCurrentDirectory: () => "", getDirectories: () => [], fileExists: (file) => files.has(file),
+    readFile: (file) => sources.get(file), getCanonicalFileName: (file) => file,
+    useCaseSensitiveFileNames: () => true, getNewLine: () => "\n",
+  });
+  const checker = program.getTypeChecker();
+  const cache = new Map<ts.Node, ts.Node[]>();
+  const all = (node: ts.Node) => {
+    if (!cache.has(node)) cache.set(node, nodes(node));
+    return cache.get(node)!;
+  };
+  const symbol = (node: ts.Node) => ts.isIdentifier(node) && ts.isShorthandPropertyAssignment(node.parent)
+    ? checker.getShorthandAssignmentValueSymbol(node.parent) : checker.getSymbolAtLocation(node);
+  const bound = (node: ts.Node, name: ts.Node) => Boolean(symbol(name)) && symbol(node) === symbol(name);
+  const references = (name: ts.Node) => all(name.getSourceFile()).filter(ts.isIdentifier).filter((node) => bound(node, name));
+  const typeUse = (node: ts.Node): boolean => {
+    for (let parent: ts.Node | undefined = node.parent; parent; parent = parent.parent) {
+      if (ts.isTypeNode(parent)) return true;
+      if (ts.isStatement(parent) || ts.isExpression(parent)) return false;
+    }
+    return false;
+  };
+  const constant = (node: ts.VariableDeclaration) => ts.isVariableDeclarationList(node.parent)
+    && Boolean(node.parent.flags & ts.NodeFlags.Const);
+  const one = <T,>(values: T[]): T | undefined => values.length === 1 ? values[0] : undefined;
+  const directUse = (node: ts.Node) => ts.isCallExpression(node.parent) && node.parent.expression === node;
+  const apiImport = (name: ts.Identifier) => {
+    const declarations = symbol(name)?.declarations;
+    const entry = declarations?.length === 1 ? declarations[0] : undefined;
+    if (!entry || !ts.isImportSpecifier(entry) || entry.isTypeOnly) return false;
+    const declaration = entry.parent.parent.parent;
+    return ts.isImportDeclaration(declaration) && !declaration.importClause?.isTypeOnly && ts.isStringLiteral(declaration.moduleSpecifier)
+      && modulePath(name.getSourceFile().fileName, declaration.moduleSpecifier.text) === "lib/api"
+      && ["crmFetch", "crmRequest", "crmJson"].includes((entry.propertyName ?? entry.name).text)
+      && references(entry.name).every((node) => node === entry.name || typeUse(node) || directUse(node));
+  };
+  type Forwarder = ts.FunctionDeclaration | ts.ArrowFunction | ts.FunctionExpression;
+  const forwarding = new Set<ts.Node>();
+  const forwards = (fn: Forwarder, index: number): boolean => {
+    if (forwarding.has(fn) || !fn.body) return false;
+    const parameter = fn.parameters[index];
+    if (!parameter || !ts.isIdentifier(parameter.name) || parameter.initializer || parameter.dotDotDotToken) return false;
+    forwarding.add(fn);
+    const finish = (valid: boolean) => { forwarding.delete(fn); return valid; };
+    const uses = references(parameter.name).filter((node) => node !== parameter.name && !typeUse(node));
+    const url = one(uses);
+    if (!url || !ts.isCallExpression(url.parent) || !ts.isIdentifier(url.parent.expression)
+      || owner(url.parent) !== fn || url.parent.questionDotToken) return finish(false);
+    const call = url.parent, target = call.expression as ts.Identifier;
+    const argument = call.arguments.indexOf(url);
+    if (argument < 0) return finish(false);
+    // A neighboring/dead authenticated call cannot prove the URL's real path.
+    let statement: ts.Node = call;
+    if (ts.isAwaitExpression(statement.parent)) statement = statement.parent;
+    if (ts.isVariableDeclaration(statement.parent) && statement.parent.initializer === statement) {
+      const declaration = statement.parent;
+      if (!constant(declaration) || !ts.isVariableDeclarationList(declaration.parent) || declaration.parent.declarations.length !== 1) return finish(false);
+      statement = declaration.parent.parent;
+    } else if (ts.isReturnStatement(statement.parent) || ts.isExpressionStatement(statement.parent)) statement = statement.parent;
+    else if (fn.body !== statement) return finish(false);
+    if (statement !== fn.body && statement.parent !== fn.body) return finish(false);
+    if (all(fn.body).some((node) => ts.isReturnStatement(node) && owner(node) === fn && node.getStart() < statement.getStart())) return finish(false);
+    if (all(fn.body).some((node) => ts.isCallExpression(node)
+      && ((ts.isIdentifier(node.expression) && node.expression.text === "fetch")
+        || (ts.isPropertyAccessExpression(node.expression) && ["fetch", "sendBeacon"].includes(node.expression.name.text))))) return finish(false);
+    if (apiImport(target)) return finish(argument === 0);
+    const declarations = symbol(target)?.declarations;
+    const declaration = declarations?.length === 1 ? declarations[0] : undefined;
+    const local = declaration && ts.isFunctionDeclaration(declaration) ? declaration
+      : declaration && ts.isVariableDeclaration(declaration) && constant(declaration) && declaration.initializer
+        && (ts.isArrowFunction(declaration.initializer) || ts.isFunctionExpression(declaration.initializer)) ? declaration.initializer : undefined;
+    const name = declaration && (ts.isFunctionDeclaration(declaration) || ts.isVariableDeclaration(declaration)) ? declaration.name : undefined;
+    return finish(Boolean(local && name && references(name).every((node) => node === name || typeUse(node) || directUse(node))
+      && forwards(local, argument)));
+  };
+  for (const fn of roots) {
+    const file = fn.getSourceFile().fileName;
+    const paths = all(fn.body!).filter(ts.isCallExpression).filter((node) => crmPath(node.arguments[0]) && owner(node) === fn);
+    const receiver = paths[0].expression;
+    const declaration = symbol(receiver)?.declarations?.[0];
+    // Positional injections and scoped hooks retain their existing proofs.
+    if (!ts.isIdentifier(receiver) || !declaration || !ts.isBindingElement(declaration)
+      || !ts.isObjectBindingPattern(declaration.parent) || !ts.isVariableDeclaration(declaration.parent.parent)) continue;
+    let valid = !fn.parameters[0].initializer && !fn.parameters[0].dotDotDotToken
+      && !declaration.initializer && !declaration.dotDotDotToken && ts.isIdentifier(declaration.name)
+      && (!declaration.propertyName || ts.isIdentifier(declaration.propertyName));
+    const binding = declaration.parent.parent;
+    const transport = (declaration.propertyName ?? declaration.name).getText();
+    valid &&= constant(binding) && declaration.parent.elements.filter((node) => (node.propertyName ?? node.name).getText() === transport).length === 1
+      && paths.every((call) => bound(call.expression, declaration.name))
+      && references(declaration.name).every((node) => node === declaration.name || directUse(node));
+    let input = binding.initializer;
+    // Follow only immutable identity aliases/snapshots, before the capture.
+    const seen = new Set<ts.Node>();
+    let capture: ts.Node = binding;
+    while (valid && input && ts.isIdentifier(input) && !bound(input, fn.parameters[0].name)) {
+      const alias = symbol(input)?.declarations?.[0];
+      if (!alias || !ts.isVariableDeclaration(alias) || !constant(alias) || seen.has(alias)
+        || !alias.initializer || alias.getStart() >= capture.getStart()
+        || !references(alias.name).every((node) => node === alias.name || node.getStart() > binding.getStart() || node === input)) { valid = false; break; }
+      seen.add(alias);
+      capture = alias;
+      input = alias.initializer;
+      if (ts.isObjectLiteralExpression(input) && input.properties.length === 1 && ts.isSpreadAssignment(input.properties[0])) input = input.properties[0].expression;
+    }
+    valid &&= Boolean(input && ts.isIdentifier(input) && bound(input, fn.parameters[0].name)
+      && references(fn.parameters[0].name).every((node) => node === fn.parameters[0].name || node === input || node.getStart() > binding.getStart()));
+    const helperCalls: ts.CallExpression[] = [];
+    const helperBindings = new Set([symbol(fn.name!)]);
+    const use = (node: ts.Identifier) => {
+      if (typeUse(node)) return true;
+      if (!directUse(node)) return false;
+      helperCalls.push(node.parent as ts.CallExpression);
+      return true;
+    };
+    valid &&= references(fn.name!).every((node) => node === fn.name || use(node));
+    const module = file.replace(/\.tsx?$/, "");
+    for (const ast of files.values()) {
+      for (const literal of all(ast).filter(ts.isStringLiteral)) {
+        if (modulePath(ast.fileName, literal.text) !== module) continue;
+        const parent = literal.parent;
+        if (!ts.isImportDeclaration(parent)) { valid = false; continue; }
+        if (parent.importClause?.isTypeOnly) continue;
+        const clause = parent.importClause, imports = clause?.namedBindings;
+        if (!clause || clause.name || !imports || !ts.isNamedImports(imports)) { valid = false; continue; }
+        for (const entry of imports.elements) {
+          if (!entry.isTypeOnly && (entry.propertyName ?? entry.name).text === fn.name!.text) {
+            helperBindings.add(symbol(entry.name));
+            valid &&= references(entry.name).every((node) => node === entry.name || use(node));
+          }
+        }
+      }
+    }
+    // A same-named fake import or shadow cannot stand in for a real caller.
+    valid &&= [...files.values()].every((ast) => all(ast).filter(ts.isIdentifier)
+      .filter((node) => node.text === fn.name!.text && directUse(node)).every((node) => helperBindings.has(symbol(node))));
+    valid &&= helperCalls.length > 0 && helperCalls.every((call) => {
+      const object = call.arguments[0];
+      if (call.arguments.length !== 1 || call.questionDotToken || !object || !ts.isObjectLiteralExpression(object)
+        || object.properties.some((node) => ts.isSpreadAssignment(node) || (node.name && ts.isComputedPropertyName(node.name)))) return false;
+      const property = one(object.properties.filter((node) => node.name && (ts.isStringLiteral(node.name) ? node.name.text : node.name.getText()) === transport));
+      if (!property || !ts.isPropertyAssignment(property)) return false;
+      const callback = property.initializer;
+      return (ts.isArrowFunction(callback) || ts.isFunctionExpression(callback)) && forwards(callback, 0);
+    });
+    if (!valid) failures.add(file);
+    else {
+      if (!calls.has(file)) calls.set(file, new Set());
+      for (const node of paths) calls.get(file)!.add(node.getStart());
+    }
+  }
+  return { calls, failures };
+}
+
 export function crmTransportOffenders(sources: CrmSources): string[] {
   const injectedDeletionIsSafe = hasVerifiedDeletionTransport(sources);
   const injectedAdminIsSafe = hasVerifiedAdminTransport(sources);
   const mortgageReceivers = verifiedMortgageReceivers(sources);
+  const objectTransports = verifiedObjectTransports(sources);
   const sharedHelpers = new Set(["crmFetch", "crmRequest", "crmJson"]);
   const offenders: string[] = [];
   for (const [name, source] of sources) {
     if (name === "lib/api.ts") continue;
     const receivers = new Set<string>();
     for (const match of source.matchAll(/([A-Za-z_$][A-Za-z0-9_$]*)\s*(?:<[^<>()]*>)?\s*\(\s*[`"'][^`"']*\/api\/crm\//g)) {
-      if (!mortgageReceivers?.get(name)?.has(match.index!)) receivers.add(match[1]);
+      if (!mortgageReceivers?.get(name)?.has(match.index!) && !objectTransports.calls.get(name)?.has(match.index!)) receivers.add(match[1]);
     }
     const ast = ts.createSourceFile(name, source, ts.ScriptTarget.Latest, true,
       name.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
@@ -686,6 +880,7 @@ export function crmTransportOffenders(sources: CrmSources): string[] {
       else if (!safe.has(helper)) offenders.push(name + ": CRM paths flow through " + helper + ", which never reaches crmFetch");
     }
     if (name === modelFile && !injectedDeletionIsSafe) offenders.push(name + ": unverified injected transport chain");
+    if (objectTransports.failures.has(name)) offenders.push(name + ": unverified object-injected transport chain");
     if (mortgageConsumerFiles.has(name) && !mortgageReceivers) offenders.push(name + ": unverified scoped mortgage transport chain");
   }
   return offenders;

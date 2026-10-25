@@ -361,6 +361,11 @@ export const CRM_SUBROUTE_AUTHORIZATION: Readonly<Record<string, RouteAuthorizat
     methods: ["POST"],
     permissions: { POST: "manage_marketing" },
   },
+  "ad-creatives/finalize-upload": {
+    kind: "browser",
+    methods: ["POST"],
+    permissions: { POST: "manage_marketing" },
+  },
 };
 
 export type ResolvedRoute = {

@@ -389,6 +389,31 @@ Signed upload tokens действуют 2 часа: необходимы expiry/
 таблицу из 064; обе прежние foreign hashes сохранены, исключений тесту не
 добавлялось. Selected 087 fixture не подменяет этот непройденный общий gate.
 
+G5-C55, продолжение: private prepare/finalize подключены к API, AdsAutomation
+и photo handoff ContentStudio. Metadata-only POST без handle отказан; public
+image появляется только после native normalization и точного атомарного DB
+receipt. Обычные видео используют private worker без public fallback; неполные
+или конфликтующие ready aliases отказаны. 088 добавляет закрытый durable
+admission/replay и живую staff authority проверку; RR/Serializable race закрыт
+настоящей MVCC guard-row записью. Raw quota резервирует максимум signed бакета,
+не размер из браузера: ложное `fileSize=1` не обходит бюджет. Actual 087/088
+native PostgreSQL приёмка: 52/52, с synthetic Storage schema, не HTTP API.
+Общая интегрированная runtime регрессия: 2681/2681; полная сборка, API/workspace
+types и 115 cold-start checks прошли. Импорт handoff/истории теперь ограничен
+own-workspace HTTPS Storage path, byte/stream budget и deadline; URL/ID из
+браузерного payload сами по себе не дают готовый asset. Structural transport
+audit проверяет оба caller до crmFetch, без исключения нового helper из проверки.
+
+Это всё ещё **локальный кандидат**, не исправление опубликованной платформы.
+087/088 не применялись в облаке. Нужны retention/reconcile с учётом последнего
+выданного token и in-flight upload, durable video admission/recovery, generated
+video path, Linux sandbox и настоящая изолированная Preview/Storage приёмка.
+Без cleaner retained raw со временем исчерпает технический бюджет. Public
+upload и DB commit не атомарны между сервисами: валидный orphan при отказе
+возможен, но без подтверждённого receipt клиент не получает готовый asset.
+Прежние public tokens/legacy assets требуют отдельного плана перед выпуском.
+Никаких рабочих данных, внешних подключений, рекламы или расходов не меняли.
+
 Нет основания выставлять «100% защиты» или «100% юридической готовности».
 Изменение исходников не меняет уже опубликованную версию. Отдельно фиксируются
 локальные тесты, проверки Preview, юридическое согласование и рабочий выпуск.

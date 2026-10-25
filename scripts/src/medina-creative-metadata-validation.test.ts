@@ -65,16 +65,19 @@ const compiledServer = compile([
     "fileExtension", "inferMimeType", "normalizeCreativeFileType", "buildSupabaseStoragePublicUrl", "resolveAdCreativePublicUrl",
     ...(server.statements.some((node) => ts.isFunctionDeclaration(node)
       && node.name?.text === "creativeMetadataShapeErrors") ? ["creativeMetadataShapeErrors"] : []),
-    "makeAdCreativeAsset", "validateCreativeAssetBody", "createItem", "patchItem",
+    "makeAdCreativeAsset", "validateCreativeAssetBody", "validateSignedUploadBody",
+    ...(server.statements.some((node) => ts.isFunctionDeclaration(node)
+      && node.name?.text === "handleAdCreativeFinalizeUpload") ? ["handleAdCreativeFinalizeUpload"] : []),
+    "createItem", "patchItem",
   ]),
   select(journal, ["RESOURCE_ENTITY", "journaledEntityFor"]),
   `const configs = { ${creativeConfigs[0]!.getText(server)} };`,
-  "exports.runtime = { createItem, patchItem, attachWorkspaceContext, MAX_IMAGE_BYTES, MAX_VIDEO_BYTES };",
+  "exports.runtime = { createItem, patchItem, attachWorkspaceContext, validateSignedUploadBody, MAX_IMAGE_BYTES, MAX_VIDEO_BYTES };",
 ].join("\n"), "creative-metadata.actual-server.ts");
 const compiledPrivacy = compile(privacy.text, privacy.fileName);
 
 type RecordValue = Record<string, unknown>;
-type Reply = { status: number; body: RecordValue };
+type Reply = { status: number; body: RecordValue; headers: Record<string, string> };
 type FakeResponse = {
   status(code: number): FakeResponse;
   setHeader(name: string, value: string): FakeResponse;
@@ -84,6 +87,7 @@ type Runtime = {
   createItem(resource: "ad-creatives", req: RecordValue, res: FakeResponse): Promise<unknown>;
   patchItem(resource: "ad-creatives", req: RecordValue, res: FakeResponse): Promise<unknown>;
   attachWorkspaceContext(req: RecordValue, context: RecordValue): void;
+  validateSignedUploadBody(body: RecordValue): { details: string[]; normalized: RecordValue };
   MAX_IMAGE_BYTES: number;
   MAX_VIDEO_BYTES: number;
 };
@@ -227,6 +231,9 @@ function fixture(options: ConstructorParameters<typeof FakeSdk>[0] = {}) {
   new Script(compiledServer, { filename: `${baseline ?? "working-tree"}:creative-metadata.actual-server.cjs` }).runInNewContext({
     exports, Error, Date: options.now === undefined ? Date : FrozenDate, ...privacyExports, getSupabaseServerClient: () => sdk,
     require: () => forbidden("server import"), fetch: () => forbidden("network"),
+    creativeUploadContext: () => forbidden("upload actor lookup without a handle"),
+    creativeUploadConfig: () => forbidden("upload configuration without a handle"),
+    finalizeCreativeImageUpload: () => forbidden("upload finalization without a handle"),
     // The actual URL mapper can consult these explicit synthetic values, never host env.
     process: { env: Object.freeze({ SUPABASE_URL: "https://storage.invalid", VITE_SUPABASE_URL: "" }) },
     console: { warn() {}, error() {} },
@@ -237,14 +244,16 @@ function fixture(options: ConstructorParameters<typeof FakeSdk>[0] = {}) {
   assert.equal(runtime.MAX_VIDEO_BYTES, VIDEO_LIMIT, "retain the existing 100 MiB video policy");
   return {
     sdk,
+    validateSignedUploadBody: runtime.validateSignedUploadBody,
     async invoke(method: "POST" | "PATCH", body: RecordValue, id = ASSET): Promise<Reply> {
       const req: RecordValue = { method, body: clone(body), query: method === "PATCH" ? { id } : {} };
       runtime.attachWorkspaceContext(req, { workspaceId: WORKSPACE, role: "owner", permissions: [] });
       const replies: RecordValue[] = [];
+      const headers: Record<string, string> = {};
       let status = 0;
       const res: FakeResponse = {
         status(code) { status = code; return this; },
-        setHeader() { return this; },
+        setHeader(name, value) { headers[name.toLowerCase()] = value; return this; },
         json(value) { replies.push(clone(value) as RecordValue); },
       };
       try {
@@ -254,7 +263,7 @@ function fixture(options: ConstructorParameters<typeof FakeSdk>[0] = {}) {
         assert.deepEqual(sdk.violations, [], "caught SDK assertions must not masquerade as validation failures");
       }
       assert.equal(replies.length, 1, "exactly one handler reply");
-      return { status, body: replies[0]! };
+      return { status, body: replies[0]!, headers };
     },
   };
 }
@@ -266,6 +275,18 @@ function assertRefused(reply: Reply, sdk: FakeSdk, status = 400) {
   assert.equal(reply.body.data, undefined);
   assert.notEqual(reply.body.mode, "demo", "a refusal must not become demo success");
   if (status === 400) assert.ok(Array.isArray(reply.body.details) && reply.body.details.length > 0);
+}
+function assertHandleRequired(reply: Reply, sdk: FakeSdk) {
+  assert.equal(reply.status, 400);
+  assert.equal(reply.body.success, false);
+  assert.equal(reply.body.code, "creative_upload_verification_required");
+  assert.equal(reply.body.error, "Для файла требуется подтверждённая защищённая загрузка.");
+  assert.equal(reply.body.data, undefined);
+  assert.equal(reply.body.mode, undefined, "a missing handle cannot produce a stored or demo receipt");
+  assert.equal(reply.headers["cache-control"], "private, no-store");
+  assert.equal(sdk.queries.length, 0, "handle validation must precede all SDK access");
+  assert.equal(sdk.attempts.length, 0, "handle-less metadata must never reach INSERT/UPDATE");
+  assert.equal(sdk.writes.length, 0);
 }
 function assertSaved(reply: Reply, sdk: FakeSdk, method: "POST" | "PATCH") {
   assert.equal(reply.status, method === "POST" ? 201 : 200);
@@ -311,13 +332,20 @@ const invalidSizes: Array<[string, unknown]> = [
 ];
 for (const [label, value] of invalidSizes) invalidCreate.push([`${label} byte count`, metadata({ fileSize: value })]);
 for (const [label, body] of invalidCreate) {
-  test(`generic create rejects ${label} before INSERT`, async () => {
+  test(`metadata-only POST rejects ${label} without a verified upload handle`, async () => {
     const f = fixture();
     const before = clone(f.sdk.rows);
     const reply = await f.invoke("POST", body);
-    assertRefused(reply, f.sdk);
+    assertHandleRequired(reply, f.sdk);
     assert.deepEqual(f.sdk.rows, before);
     assert.equal(f.sdk.queries.length, 0, "create validation precedes SDK access");
+  });
+  test(`signed-upload validation rejects ${label} before issuing a private ticket`, () => {
+    const f = fixture();
+    const result = f.validateSignedUploadBody(body);
+    assert.ok(result.details.length > 0, "the private entry point retains strict metadata validation");
+    assert.equal(f.sdk.queries.length, 0);
+    assert.equal(f.sdk.writes.length, 0);
   });
 }
 
@@ -328,18 +356,39 @@ for (const [label, body] of [
   ["unknown null size", metadata({ fileSize: null })],
   ["unknown omitted size", Object.fromEntries(Object.entries(metadata()).filter(([key]) => key !== "fileSize"))],
 ] as Array<[string, RecordValue]>) {
-  test(`generic create retains ${label} and authorized tenant mapping`, async () => {
+  test(`metadata-only POST refuses otherwise valid ${label}, including a forged tenant`, async () => {
     const f = fixture();
-    const item = assertSaved(await f.invoke("POST", { ...body, workspaceId: FOREIGN_WORKSPACE, workspace_id: FOREIGN_WORKSPACE }), f.sdk, "POST");
-    assert.equal(item.fileName, body.fileName);
-    assert.equal(item.mimeType, body.mimeType ?? "");
-    assert.equal(f.sdk.writes[0]!.row?.workspace_id, WORKSPACE);
-    assert.equal(f.sdk.writes[0]!.row?.file_name, body.fileName);
-    assert.equal(f.sdk.writes[0]!.row?.file_size, body.fileSize ?? null);
-    assert.equal(f.sdk.queries.filter((query) => query.kind === "read").length, 0);
-    assert.deepEqual(f.sdk.writes[0]!.filters, []);
+    const before = clone(f.sdk.rows);
+    assertHandleRequired(await f.invoke("POST", { ...body, workspaceId: FOREIGN_WORKSPACE, workspace_id: FOREIGN_WORKSPACE }), f.sdk);
+    assert.deepEqual(f.sdk.rows, before);
   });
 }
+
+for (const uploadHandle of [undefined, null, "", false, 0, {}, []]) {
+  test(`metadata-only POST refuses a missing/non-string handle: ${JSON.stringify(uploadHandle)}`, async () => {
+    const f = fixture();
+    const before = clone(f.sdk.rows);
+    assertHandleRequired(await f.invoke("POST", metadata({ uploadHandle })), f.sdk);
+    assert.deepEqual(f.sdk.rows, before);
+  });
+}
+
+test("private ticket validation retains the image limit and canonical MIME inference", () => {
+  const f = fixture();
+  for (const mimeType of ["image/jpeg", ""]) {
+    const result = f.validateSignedUploadBody(metadata({ mimeType, fileSize: IMAGE_LIMIT }));
+    assert.equal(result.details.length, 0);
+    assert.deepEqual(clone(result.normalized), {
+      fileName: "synthetic.jpg", fileType: "image", mimeType: "image/jpeg", fileSize: IMAGE_LIMIT,
+    });
+  }
+  for (const fileSize of [undefined, null]) {
+    assert.ok(f.validateSignedUploadBody(metadata({ fileSize })).details.includes("fileSize is required"),
+      "unknown size is not enough to issue a private upload ticket");
+  }
+  assert.equal(f.sdk.queries.length, 0);
+  assert.equal(f.sdk.writes.length, 0);
+});
 
 const invalidPatches: Array<[string, RecordValue]> = [
   ["HTML MIME only", { mimeType: "text/html" }],
@@ -482,15 +531,15 @@ for (const [label, patch] of [
   });
 }
 
-test("generic POST preserves unknown null size equally for camel and snake aliases", async () => {
+test("metadata-only POST refuses unknown null size equally for camel and snake aliases", async () => {
   for (const key of ["fileSize", "file_size"]) {
     const body = metadata();
     delete body.fileSize;
     body[key] = null;
     const f = fixture();
-    const item = assertSaved(await f.invoke("POST", body), f.sdk, "POST");
-    assert.equal(f.sdk.writes[0]!.row!.file_size, null, `${key}: unknown size must not become zero bytes`);
-    assert.equal(item.fileSize, null);
+    const before = clone(f.sdk.rows);
+    assertHandleRequired(await f.invoke("POST", body), f.sdk);
+    assert.deepEqual(f.sdk.rows, before, `${key}: no handle means no row, even with a valid URL`);
   }
 });
 

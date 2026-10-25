@@ -23,6 +23,7 @@ import { apiUrl, CrmApiError, crmFetch } from "@/lib/api";
 import { supabase, hasSupabaseFrontendEnv } from "@/lib/supabase";
 import { getSupabaseAccessToken } from "@/lib/serverAuth";
 import { getSignOutRevision, isSignOutPending } from "@/lib/authSignOut";
+import { uploadVerifiedCreativeImage, type VerifiedCreativeAsset } from "@/lib/verified-creative-upload";
 import { parseGenerationUsageSummary, type GenerationUsageSummary } from "@/lib/contentGenerationUsage";
 import { isRealWorkspace, readWorkspaceId, workspaceScopedKey } from "@/lib/demoStorage";
 import {
@@ -1029,6 +1030,7 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
   } | null>(null);
   const photoRenderPending = useRef<object | null>(null);
   const photoHandoffPending = useRef<object | null>(null);
+  const photoUploadAttempts = useRef(new WeakMap<Blob, { requestKey: string; fileName: string }>());
   const photoObjectUrls = useRef(new Set<string>());
   const [photoBusy, setPhotoBusy] = useState<"render" | "suggest" | "handoff" | null>(null);
   const [photoSuggestMode, setPhotoSuggestMode] = useState("");
@@ -1393,76 +1395,82 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
     const photoCurrent = () => photoHandoffPending.current === attempt && isPhotoArtifactCurrent(artifact, session)
       && !photoRenderPending.current && packageBriefRef.current === brief && packageBriefRevision.current === briefRevision;
     const photoVerified = async () => photoCurrent() && await isHandoffSessionCurrent(session) && photoCurrent();
+    // The helper reconciles uncertain SDK results, but access denial must stay terminal.
+    let uploadAccessError: unknown = null;
+    const assertPhotoCurrent = async () => {
+      if (!await photoVerified() || !photoCurrent()) throw new DOMException("Photo handoff changed", "AbortError");
+      if (uploadAccessError) throw uploadAccessError;
+    };
     let handoffStarted = false;
     try {
-      if (!await photoVerified()) return;
+      if (!await photoVerified() || !photoCurrent()) return;
       setPhotoBusy("handoff");
       handoffStarted = true;
-      // Upload the rendered JPEG through the existing signed upload flow so
-      // Ads Automation gets a real public creative URL.
-      let creativeUrl = "";
-      let fileName = `photo-creative-${Date.now()}.jpg`;
+      let verifiedAsset: VerifiedCreativeAsset | null = null;
       if (hasSupabaseFrontendEnv && !localDraftsOnly) {
         try {
-          const signedResponse = await crmFetch(
-            `/api/crm/ad-creatives/signed-upload?workspaceId=${encodeURIComponent(workspaceId)}`,
-            {
-              expectedUserId: actorId, dispatchGuard: photoCurrent, signal: session.signal,
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                fileName,
-                fileType: "image",
-                mimeType: "image/jpeg",
-                fileSize: artifact.blob.size,
-              }),
-            },
-          );
-          if (!await photoVerified()) return;
-          if (handoffAccessDenied(signedResponse)) {
-            toast.error("Доступ к передаче креатива отозван. Обновите страницу.");
-            return;
+          let uploadAttempt = photoUploadAttempts.current.get(artifact.blob);
+          if (!uploadAttempt) {
+            const requestKey = crypto.randomUUID();
+            uploadAttempt = { requestKey, fileName: `photo-creative-${requestKey}.jpg` };
+            photoUploadAttempts.current.set(artifact.blob, uploadAttempt);
           }
-          const signedBody = await safeJson<{ bucket?: string; storageBucket?: string; storagePath?: string; token?: string; publicUrl?: string }>(signedResponse);
-          if (!await photoVerified()) return;
-          if (signedResponse.ok && signedBody?.success === true) {
-            const bucket = signedBody.data.bucket || signedBody.data.storageBucket || "ad-creatives";
-            const storagePath = signedBody.data.storagePath || "";
-            const token = signedBody.data.token || "";
-            if (storagePath && token) {
-              const { error: uploadError } = await supabase.storage.from(bucket).uploadToSignedUrl(storagePath, token, artifact.blob, {
-                contentType: "image/jpeg",
+          const env = import.meta.env as Record<string, string | undefined>;
+          verifiedAsset = await uploadVerifiedCreativeImage({
+            workspaceId,
+            file: artifact.blob,
+            fileName: uploadAttempt.fileName,
+            mimeType: "image/jpeg",
+            requestKey: uploadAttempt.requestKey,
+            storageOrigin: new URL(env.VITE_SUPABASE_URL || "").origin,
+            assertCurrent: assertPhotoCurrent,
+            request: async (url, init) => {
+              await assertPhotoCurrent();
+              if (!photoCurrent()) throw new DOMException("Photo handoff changed", "AbortError");
+              const response = await crmFetch(url, {
+                ...init, expectedUserId: actorId, dispatchGuard: photoCurrent, signal: session.signal,
               });
-              if (!await photoVerified()) return;
-              if (handoffAccessDenied(uploadError)) {
-                toast.error("Доступ к передаче креатива отозван. Обновите страницу.");
-                return;
+              await assertPhotoCurrent();
+              if (!photoCurrent()) throw new DOMException("Photo handoff changed", "AbortError");
+              if (handoffAccessDenied(response)) {
+                throw new CrmApiError(response.status, "creative_upload_denied", "Creative upload denied");
               }
-              if (!uploadError) {
-                creativeUrl = signedBody.data.publicUrl || "";
-                if (!creativeUrl) {
-                  const env = import.meta.env as Record<string, string | undefined>;
-                  const supabaseUrl = (env.VITE_SUPABASE_URL || "").replace(/\/$/, "");
-                  if (supabaseUrl) {
-                    creativeUrl = `${supabaseUrl}/storage/v1/object/public/${bucket}/${storagePath.split("/").map(encodeURIComponent).join("/")}`;
-                  }
-                }
+              const body = await safeJson<unknown>(response);
+              await assertPhotoCurrent();
+              if (!photoCurrent()) throw new DOMException("Photo handoff changed", "AbortError");
+              if (!response.ok || body?.success !== true) throw new Error("Creative upload failed");
+              return { success: true, mode: body.mode, data: body.data };
+            },
+            upload: async (bucket, path, token, file, opts) => {
+              await assertPhotoCurrent();
+              if (!photoCurrent()) throw new DOMException("Photo handoff changed", "AbortError");
+              let result;
+              try {
+                result = await supabase.storage.from(bucket).uploadToSignedUrl(path, token, file, opts);
+              } catch (error) {
+                if (handoffAccessDenied(error)) uploadAccessError = error;
+                await assertPhotoCurrent();
+                if (!photoCurrent()) throw new DOMException("Photo handoff changed", "AbortError");
+                throw error;
               }
-            }
-          }
+              if (handoffAccessDenied(result.error)) uploadAccessError = result.error;
+              await assertPhotoCurrent();
+              if (!photoCurrent()) throw new DOMException("Photo handoff changed", "AbortError");
+              return result;
+            },
+          });
+          if (!await photoVerified() || !photoCurrent()) return;
         } catch (error) {
-          if (!await photoVerified()) return;
+          if (!await photoVerified() || !photoCurrent()) return;
           if (handoffAccessDenied(error)) {
             toast.error("Доступ к передаче креатива отозван. Обновите страницу.");
             return;
           }
-          creativeUrl = "";
         }
       }
-      if (!await photoVerified()) return;
-      if (!creativeUrl) {
+      if (!await photoVerified() || !photoCurrent()) return;
+      if (!verifiedAsset) {
         toast.warning("Не удалось загрузить креатив в Storage — передаём только тексты. Изображение можно скачать и загрузить вручную.");
-        fileName = "";
       }
 
       const formatLabel = photoFormats.find((item) => item.id === inputs.format)?.label || inputs.format;
@@ -1488,19 +1496,19 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
                 format: inputs.format,
                 layout: inputs.layout,
                 sourceType: inputs.sourceType,
-                creativeUrl,
+                ...(verifiedAsset ? { creativeUrl: verifiedAsset.publicUrl, assetId: verifiedAsset.id } : {}),
                 texts: inputs.texts,
               },
             }),
           });
-          if (!await photoVerified()) return;
+          if (!await photoVerified() || !photoCurrent()) return;
           if (handoffAccessDenied(response)) {
             toast.error("Доступ к передаче креатива отозван. Обновите страницу.");
             return;
           }
         }
       } catch (error) {
-        if (!await photoVerified()) return;
+        if (!await photoVerified() || !photoCurrent()) return;
         if (handoffAccessDenied(error)) {
           toast.error("Доступ к передаче креатива отозван. Обновите страницу.");
           return;
@@ -1508,7 +1516,7 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
         // A metadata outage does not discard the current user's local draft.
       }
 
-      if (!await photoVerified()) return;
+      if (!await photoVerified() || !photoCurrent()) return;
       writeContentToAdsAutomation({
         sourceKind: "photo",
         campaignName: inputs.texts.headline,
@@ -1520,17 +1528,18 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
         headline: inputs.texts.headline,
         description: inputs.texts.offer,
         cta: "LEARN_MORE",
-        creative: {
+        creative: verifiedAsset ? {
           type: "image",
-          url: creativeUrl,
-          fileName,
-          mimeType: "image/jpeg",
-          fileSize: artifact.blob.size,
+          assetId: verifiedAsset.id,
+          url: verifiedAsset.publicUrl,
+          fileName: verifiedAsset.fileName,
+          mimeType: verifiedAsset.mimeType,
+          fileSize: verifiedAsset.fileSize,
           format: inputs.format,
           brief: `Фото-креатив: ${layoutLabel}, формат ${formatLabel}, CTA «${inputs.texts.cta}»`,
-        },
+        } : undefined,
       });
-      toast.success("Фото-креатив передан в AI запуск рекламы");
+      toast.success(verifiedAsset ? "Фото-креатив передан в AI запуск рекламы" : "Тексты переданы в AI запуск рекламы");
       setLocation("/ads-automation");
     } finally {
       if (photoHandoffPending.current === attempt) {

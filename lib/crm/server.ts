@@ -1,7 +1,7 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import Busboy, { Dicer } from "@fastify/busboy";
 import { createHash, randomUUID } from "node:crypto";
-import { canAssignRole, isStaffRole, isWorkspaceAdminRole } from "../auth/permissions";
+import { canAssignRole, hasPermission, isStaffRole, isWorkspaceAdminRole } from "../auth/permissions";
 import { extractJsonObject, generateText, resolveTextProvider } from "../ai/text-provider";
 import { normalizeAdvertisingContentApproval } from "../advertising/campaignBrief";
 import { readContentVideoVersion } from "../content-studio/telegram-delivery-guard";
@@ -13,6 +13,10 @@ import { findAppointmentCapacityConflict } from "./appointment-capacity";
 import { CreativeImageValidationUnavailable, validateCreativeImageBytes } from "./creative-image";
 import { generatedCreativeIdentity, isLegacyGeneratedVideoIdentity } from "./generated-identity";
 import { verifyGeneratedStorageBytes } from "./generated-storage-verification";
+import { CreativeUploadWorkflowError, finalizeCreativeImageUpload, finalizeInlineCreativeImage, prepareCreativeImageUpload,
+  type CreativeUploadWorkflowConfig } from "./staged-creative-workflow";
+import { StagedCreativeStorageError } from "./staged-creative-storage";
+import { StagedCreativeTicketError } from "./staged-creative-ticket";
 import { hidesClientContacts, redactContacts, redactContactsList, stripContactWrites } from "./contact-privacy";
 import { isEmptyIdentity, rowBelongsTo, rowTargetsOnlySelf, seesOnlyOwnWork, type OwnWorkIdentity } from "./own-work";
 import { escapeLikePattern } from "./staff-invitations";
@@ -4906,10 +4910,11 @@ async function createItem(resource: CrmResource, req: VercelRequest, res: Vercel
     return createStaffItem(req, res);
   }
 
+  if (resource === "ad-creatives") return handleAdCreativeFinalizeUpload(req, res);
+
   const config = configs[resource];
   const body = { ...asRecord(req.body) };
   const details = [...validationDetails(body, config.requiredPost), ...resourceValidationDetails(resource, body), ...appointmentServicesValidationDetails(resource, body)];
-  if (resource === "ad-creatives") details.push(...validateCreativeAssetBody(body));
   const keyedAppointment = resource === "appointments" && "requestKey" in body;
   const keyedSale = resource === "deals" && "requestKey" in body;
   if (keyedAppointment && !isUuid(body.requestKey)) details.push("requestKey must be a UUID");
@@ -6169,6 +6174,10 @@ function makeVideoJob(body: JsonRecord): JsonRecord {
     sourceMimeType: firstString(body.sourceMimeType, body.source_mime_type, body.inputMimeType, body.input_mime_type),
     inputMimeType: firstString(body.inputMimeType, body.input_mime_type, body.sourceMimeType, body.source_mime_type),
     outputMimeType: firstString(body.outputMimeType, body.output_mime_type),
+    outputAssetId: firstString(body.outputAssetId, body.output_asset_id, body.assetId, body.asset_id) || null,
+    outputStorageBucket: firstString(body.optimized_bucket, body.output_bucket) || null,
+    outputStoragePath: firstString(body.optimized_path, body.output_path) || null,
+    outputFileName: firstString(body.output_file_name) || null,
     rawSize: inputSizeBytes,
     inputSizeBytes,
     outputPublicUrl: firstString(body.outputPublicUrl, body.output_public_url, body.optimizedPublicUrl, body.optimized_public_url),
@@ -6701,7 +6710,52 @@ async function updateAdCreativeMeta(input: {
   }
 }
 
+function creativeUploadContext(req: VercelRequest) {
+  const actor = readWorkspaceContext(req);
+  if (!actor || !isUuid(actor.userId) || !isUuid(actor.staffUserId) || !isUuid(actor.workspaceId) || !hasPermission(actor.role, "manage_marketing")) {
+    throw new CreativeUploadWorkflowError(403, "creative_upload_access_denied");
+  }
+  return actor;
+}
+
+function creativeUploadConfig(): CreativeUploadWorkflowConfig {
+  const supabase = getSupabaseServerClient();
+  const origin = (process.env.SUPABASE_URL || "").replace(/\/+$/, "");
+  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
+  try {
+    const url = new URL(origin);
+    if (!supabase || url.protocol !== "https:" || url.origin !== origin || url.username || url.password || serviceRoleKey.length < 32) throw new Error();
+    return { supabase, origin, serviceRoleKey };
+  } catch { throw new CreativeUploadWorkflowError(503, "creative_upload_configuration_unavailable"); }
+}
+
+function creativeUploadError(res: VercelResponse, error: unknown) {
+  const status = error instanceof CreativeUploadWorkflowError ? error.status : error instanceof StagedCreativeTicketError ? 400 : 503;
+  const code = error instanceof CreativeUploadWorkflowError || error instanceof StagedCreativeStorageError ? error.code
+    : error instanceof StagedCreativeTicketError ? "creative_upload_ticket_unconfirmed" : "creative_upload_unconfirmed";
+  const message = status === 403 ? "Доступ к загрузке файла отозван." : status === 400 ? "Не удалось проверить файл или запрос загрузки."
+    : status === 429 ? "Достигнут технический предел загрузок. Дождитесь завершения предыдущих файлов."
+      : "Сохранение файла не подтверждено. Повторите проверку, не создавая новую загрузку.";
+  return sendJson(res, status, { ...errorBody(message), code });
+}
+
+export async function handleAdCreativeFinalizeUpload(req: VercelRequest, res: VercelResponse) {
+  res.setHeader("Cache-Control", "private, no-store");
+  if (req.method !== "POST") return sendJson(res, 405, errorBody("Method not allowed", ["Use POST"]));
+  const body = asRecord(req.body);
+  if (typeof body.uploadHandle !== "string" || !body.uploadHandle) return sendJson(res, 400, {
+    ...errorBody("Для файла требуется подтверждённая защищённая загрузка."), code: "creative_upload_verification_required",
+  });
+  try {
+    const actor = creativeUploadContext(req);
+    const row = await finalizeCreativeImageUpload(creativeUploadConfig(), body.uploadHandle, actor);
+    const asset = configs["ad-creatives"].fromRow(row);
+    return sendJson(res, 201, success("supabase", { ...asset, asset, item: asset }));
+  } catch (error) { return creativeUploadError(res, error); }
+}
+
 export async function handleAdCreativeSignedUpload(req: VercelRequest, res: VercelResponse) {
+  res.setHeader("Cache-Control", "private, no-store");
   if (req.method !== "POST") {
     return sendJson(res, 405, errorBody("Method not allowed", ["Use POST"]));
   }
@@ -6712,66 +6766,18 @@ export async function handleAdCreativeSignedUpload(req: VercelRequest, res: Verc
     return sendJson(res, 400, errorBody("Validation error", details));
   }
 
-  const supabase = getSupabaseServerClient();
-  if (!supabase) {
-    return sendJson(
-      res,
-      503,
-      errorBody("Supabase Storage is not configured", [
-        "SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required to create a signed upload URL.",
-      ]),
-    );
-  }
-
-  const bucket = AD_CREATIVE_BUCKET;
-  const workspaceId = readWorkspaceId(req, body);
-  const storagePath = buildAdCreativeStoragePath({
-    workspaceId,
-    fileName: firstString(normalized.fileName),
+  if (normalized.fileType !== "image") return sendJson(res, 409, {
+    ...errorBody("Видео загружается через защищённую обработку видео."), code: "creative_video_worker_required",
   });
-
-  const { data, error } = await supabase.storage.from(bucket).createSignedUploadUrl(storagePath);
-  if (error) {
-    return sendJson(
-      res,
-      502,
-      errorBody("Signed upload URL failed", [
-        redactedDetail("ad-creatives signed upload", error, SERVICE_FAILURE_DETAIL),
-      ]),
-    );
+  if (typeof body.requestKey !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(body.requestKey)) {
+    return sendJson(res, 400, { ...errorBody("Не подтверждён идентификатор загрузки."), code: "creative_upload_request_key_required" });
   }
-
-  const signedData = asRecord(data);
-  const signedUrl = firstString(signedData.signedUrl, signedData.signedURL, signedData.url);
-  const token = firstString(signedData.token);
-  const publicUrl = buildSupabaseStoragePublicUrl({ bucket, storagePath });
-
-  if (!token || !signedUrl || !publicUrl) {
-    return sendJson(
-      res,
-      502,
-      errorBody("Signed upload URL is incomplete", [
-        "Supabase did not return token, signedUrl, or publicUrl for the creative upload.",
-      ]),
-    );
-  }
-
-  return sendJson(
-    res,
-    200,
-    success("supabase", {
-      bucket,
-      storageBucket: bucket,
-      storagePath,
-      signedUrl,
-      token,
-      publicUrl,
-      fileName: normalized.fileName,
-      fileType: normalized.fileType,
-      mimeType: normalized.mimeType,
-      fileSize: normalized.fileSize,
-    }),
-  );
+  try {
+    const actor = creativeUploadContext(req);
+    const prepared = await prepareCreativeImageUpload(creativeUploadConfig(), { ...actor, requestKey: body.requestKey,
+      fileName: String(normalized.fileName), mimeType: String(normalized.mimeType), fileSize: Number(normalized.fileSize) });
+    return sendJson(res, 200, success("supabase", prepared));
+  } catch (error) { return creativeUploadError(res, error); }
 }
 
 async function handleMultipartAdCreativeUpload(req: VercelRequest, res: VercelResponse) {
@@ -6850,57 +6856,17 @@ async function handleMultipartAdCreativeUpload(req: VercelRequest, res: VercelRe
     return sendJson(res, 400, errorBody("Validation error", details));
   }
 
-  const { error: uploadError } = await supabase.storage.from(storageBucket).upload(storagePath, form.file.buffer, {
-    contentType: mimeType,
-    upsert: false,
+  if (uploadBody.fileType !== "image") return sendJson(res, 409, {
+    ...errorBody("Видео загружается через защищённую обработку видео."), code: "creative_video_worker_required",
   });
-
-  if (uploadError) {
-    return sendJson(
-      res,
-      502,
-      errorBody("Creative upload failed", [
-        redactedDetail("ad-creatives upload", uploadError, SERVICE_FAILURE_DETAIL),
-      ]),
-    );
-  }
-
-  const publicUrl =
-    supabase.storage.from(storageBucket).getPublicUrl(storagePath).data.publicUrl ||
-    buildSupabaseStoragePublicUrl({ bucket: storageBucket, storagePath });
-
-  if (!publicUrl) {
-    return sendJson(
-      res,
-      502,
-      errorBody("Creative public URL is missing", [
-        "File was uploaded, but Supabase did not return a public URL. Check that bucket ad-creatives is public.",
-      ]),
-    );
-  }
-
-  const saved = await persistAdCreativeAsset({
-    workspaceId,
-    body: {
-      ...uploadBody,
-      publicUrl,
-    },
-  });
-
-  return sendJson(
-    res,
-    saved.mode === "supabase" ? 201 : 200,
-    success(
-      saved.mode,
-      {
-        ...saved.asset,
-        asset: saved.asset,
-        item: saved.asset,
-        uploadMode: "server-storage",
-      },
-      saved.warning || undefined,
-    ),
-  );
+  try {
+    const actor = creativeUploadContext(req);
+    const requestKey = firstString(form.fields.requestKey) || randomUUID();
+    const row = await finalizeInlineCreativeImage(creativeUploadConfig(), { ...actor, requestKey, fileName,
+      mimeType: mimeType.toLowerCase(), buffer: form.file.buffer });
+    const asset = configs["ad-creatives"].fromRow(row);
+    return sendJson(res, 201, success("supabase", { ...asset, asset, item: asset, uploadMode: "verified-inline" }));
+  } catch (error) { return creativeUploadError(res, error); }
 }
 
 export async function handleAdCreativeUpload(req: VercelRequest, res: VercelResponse) {
@@ -6912,44 +6878,7 @@ export async function handleAdCreativeUpload(req: VercelRequest, res: VercelResp
     return handleMultipartAdCreativeUpload(req, res);
   }
 
-  const body = asRecord(req.body);
-  const details = validateCreativeAssetBody(body);
-  if (details.length > 0) {
-    return sendJson(res, 400, errorBody("Validation error", details));
-  }
-
-  const storageBucket = firstString(body.storageBucket, body.storage_bucket, "ad-creatives");
-  const storagePath = firstString(body.storagePath, body.storage_path);
-  const publicUrl = resolveAdCreativePublicUrl(body);
-  if (!publicUrl) {
-    return sendJson(res, 400, {
-      success: false,
-      error: "Не удалось получить публичную ссылку креатива",
-      details: ["Файл загружен, но публичная ссылка не получена."],
-      hint: storagePath
-        ? "Storage bucket работает, но SUPABASE_URL не доступен серверу для сборки publicUrl."
-        : "Проверьте, что Supabase Storage bucket ad-creatives создан, public access включён и upload response содержит storagePath.",
-    });
-  }
-
-  const workspaceId = readWorkspaceId(req, body);
-  const saved = await persistAdCreativeAsset({
-    workspaceId,
-    body: {
-      ...body,
-      workspaceId,
-      status: readString(body.status) || "uploaded",
-      storageBucket,
-      storagePath,
-      publicUrl,
-    },
-  });
-
-  return sendJson(
-    res,
-    saved.mode === "supabase" ? 201 : 200,
-    success(saved.mode, { ...saved.asset, asset: saved.asset, item: saved.asset }, saved.warning || undefined),
-  );
+  return handleAdCreativeFinalizeUpload(req, res);
 }
 
 export async function handleStorageHealth(req: VercelRequest, res: VercelResponse) {
@@ -7222,7 +7151,98 @@ export async function handleAdCreativeMetaUpload(req: VercelRequest, res: Vercel
   }
 }
 
+class VideoJobReceiptError extends Error {
+  constructor(readonly status: number) { super("video_job_unconfirmed"); }
+}
+
+function safeVideoRawPath(value: unknown, workspaceId: string): value is string {
+  return typeof value === "string" && value.length <= 1024 && value.startsWith(`${workspaceId}/`)
+    && !/[\\%\u0000-\u001f\u007f]/.test(value) && value.split("/").every(part => part && part !== "." && part !== "..");
+}
+
+function checkedVideoJob(value: unknown, workspaceId: string, expected: JsonRecord = {}): JsonRecord {
+  const row = asRecord(value);
+  if (!isUuid(row.id) || row.workspace_id !== workspaceId || !VIDEO_JOB_STATUSES.has(readString(row.status))
+    || (row.asset_id !== null && row.asset_id !== undefined && !isUuid(row.asset_id))
+    || (row.raw_path !== null && row.raw_path !== undefined && !safeVideoRawPath(row.raw_path, workspaceId))
+    || Object.entries(expected).some(([key, item]) => row[key] !== item)) throw new VideoJobReceiptError(502);
+  return row;
+}
+
+async function readConfirmedVideoJob(supabase: NonNullable<ReturnType<typeof getSupabaseServerClient>>, workspaceId: string, id: string): Promise<JsonRecord | null> {
+  if (!isUuid(workspaceId)) throw new VideoJobReceiptError(403);
+  if (!isUuid(id)) throw new VideoJobReceiptError(400);
+  try {
+    const { data, error } = await supabase.from("video_processing_jobs").select("*").eq("id", id).eq("workspace_id", workspaceId).maybeSingle();
+    if (error) throw new VideoJobReceiptError(502);
+    if (!data) return null;
+    const row = checkedVideoJob(data, workspaceId, { id });
+    if (row.status === "ready") {
+      const bucket = firstString(row.optimized_bucket, row.output_bucket), storagePath = firstString(row.optimized_path, row.output_path);
+      const url = firstString(row.optimized_public_url, row.output_public_url);
+      const thumbnailPath = firstString(row.thumbnail_path), thumbnailUrl = firstString(row.thumbnail_url, row.thumbnail_public_url);
+      const bytes = readNumber(row.output_size_bytes ?? row.output_size);
+      const aliasesMatch = (keys: string[], expected: unknown) => keys.every(key =>
+        row[key] === undefined || row[key] === null || row[key] === "" || row[key] === expected);
+      if (bucket !== AD_CREATIVE_BUCKET || !safeVideoRawPath(storagePath, "optimized") || !storagePath.startsWith(`optimized/${workspaceId}/`)
+        || !storagePath.endsWith(".mp4") || row.output_mime_type !== "video/mp4" || !Number.isSafeInteger(bytes) || Number(bytes) <= 0
+        || Number(bytes) > MAX_VIDEO_BYTES || url !== buildSupabaseStoragePublicUrl({ bucket, storagePath })
+        || !safeVideoRawPath(thumbnailPath, "optimized") || !thumbnailPath.startsWith(`optimized/${workspaceId}/`) || !thumbnailPath.endsWith(".jpg")
+        || thumbnailUrl !== buildSupabaseStoragePublicUrl({ bucket, storagePath: thumbnailPath })
+        || !aliasesMatch(["outputPublicUrl", "output_public_url", "optimizedPublicUrl", "optimized_public_url"], url)
+        || !aliasesMatch(["thumbnailPublicUrl", "thumbnail_public_url", "thumbnailUrl", "thumbnail_url"], thumbnailUrl)
+        || !aliasesMatch(["optimized_bucket", "output_bucket"], bucket)
+        || !aliasesMatch(["optimized_path", "output_path"], storagePath)
+        || !aliasesMatch(["outputSizeBytes", "output_size_bytes", "optimizedSizeBytes", "optimized_size_bytes", "outputSize", "output_size"], bytes)
+        || !aliasesMatch(["outputMimeType", "output_mime_type"], "video/mp4")
+        || !aliasesMatch(["workspaceId", "workspace_id"], workspaceId)
+        || !aliasesMatch(["assetId", "asset_id", "outputAssetId", "output_asset_id"], row.asset_id)) throw new VideoJobReceiptError(502);
+      if (!isUuid(row.asset_id)) throw new VideoJobReceiptError(502);
+      const result = await supabase.from("ad_creative_assets").select("*").eq("id", row.asset_id).eq("workspace_id", workspaceId).maybeSingle();
+      const asset = asRecord(result.data);
+      if (result.error || asset.id !== row.asset_id || asset.workspace_id !== workspaceId || asset.file_type !== "video"
+        || asset.mime_type !== "video/mp4" || asset.file_size !== bytes || asset.storage_bucket !== bucket || asset.storage_path !== storagePath
+        || asset.public_url !== url || !readString(asset.file_name) || !["uploaded", "ready"].includes(readString(asset.status))) throw new VideoJobReceiptError(502);
+      row.output_asset_id = asset.id; row.output_file_name = asset.file_name;
+    }
+    return row;
+  } catch (error) { throw error instanceof VideoJobReceiptError ? error : new VideoJobReceiptError(502); }
+}
+
+function videoJobError(res: VercelResponse, error: unknown) {
+  const status = error instanceof VideoJobReceiptError ? error.status : 502;
+  return sendJson(res, status, { ...errorBody(status === 404 ? "Задача оптимизации не найдена" : "Не удалось подтвердить задачу оптимизации. Повторите проверку."),
+    code: "video_job_unconfirmed" });
+}
+
+async function confirmPrivateVideoBucket(supabase: NonNullable<ReturnType<typeof getSupabaseServerClient>>, bucket: string, mime: string, size: number) {
+  try {
+    if (bucket === AD_CREATIVE_BUCKET || !/^[a-z0-9][a-z0-9._-]{0,62}$/.test(bucket)) throw new Error();
+    const { data, error } = await supabase.storage.getBucket(bucket);
+    if (error || data?.id !== bucket || data.public !== false || !Number.isSafeInteger(data.file_size_limit)
+      || Number(data.file_size_limit) < size || Number(data.file_size_limit) > 500 * 1024 * 1024
+      || !Array.isArray(data.allowed_mime_types) || !data.allowed_mime_types.includes(mime)
+      || data.allowed_mime_types.some(value => !VIDEO_MIME_TYPES.has(value))) throw new Error();
+  } catch { throw new VideoJobReceiptError(503); }
+}
+
+function checkedPrivateVideoTicket(value: unknown, bucket: string, storagePath: string): { token: string; signedUrl: string } {
+  const row = asRecord(value);
+  if (row.path !== storagePath || typeof row.token !== "string" || !row.token || row.token.trim() !== row.token) throw new VideoJobReceiptError(502);
+  const signedUrl = typeof row.signedUrl === "string" ? row.signedUrl : "";
+  if (signedUrl) {
+    try {
+      const url = new URL(signedUrl), origin = (process.env.SUPABASE_URL || "").replace(/\/+$/, "");
+      if (url.protocol !== "https:" || url.origin !== origin || url.username || url.password || url.hash
+        || url.pathname !== `/storage/v1/object/upload/sign/${bucket}/${storagePath}`
+        || [...url.searchParams].length !== 1 || url.searchParams.get("token") !== row.token) throw new Error();
+    } catch { throw new VideoJobReceiptError(502); }
+  }
+  return { token: row.token, signedUrl };
+}
+
 export async function handleVideoJobs(req: VercelRequest, res: VercelResponse) {
+  res.setHeader("Cache-Control", "private, no-store");
   const config = videoOptimizationConfig();
   const rawBucket = config.rawBucket;
 
@@ -7233,13 +7253,7 @@ export async function handleVideoJobs(req: VercelRequest, res: VercelResponse) {
     }
     const supabase = getSupabaseServerClient();
     if (!supabase || !isUuid(jobId)) {
-      // Demo mode has no persistent jobs: report the job as queued so the UI can
-      // explain that the worker is not available in this environment.
-      return sendJson(
-        res,
-        200,
-        success("demo", { job: makeVideoJob({ id: jobId, status: "queued" }) }, "Supabase не настроен: статус задачи оптимизации недоступен в demo-режиме."),
-      );
+      return videoJobError(res, new VideoJobReceiptError(supabase ? 400 : 503));
     }
     try {
       const workspaceId = readWorkspaceId(req, {});
@@ -7250,18 +7264,11 @@ export async function handleVideoJobs(req: VercelRequest, res: VercelResponse) {
       // reaches a browser route without a verified workspace, which is exactly
       // why an unverified one must end the request rather than widen it.
       if (!isUuid(workspaceId)) throw new Error("workspace is not verified");
-      const query = supabase
-        .from("video_processing_jobs")
-        .select("*")
-        .eq("id", jobId)
-        .eq("workspace_id", workspaceId);
-      const { data, error } = await query.single();
-      if (error) throw new Error(error.message);
-      return sendJson(res, 200, success("supabase", { job: makeVideoJob(asRecord(data)) }));
+      const data = await readConfirmedVideoJob(supabase, workspaceId, jobId);
+      if (!data) throw new VideoJobReceiptError(404);
+      return sendJson(res, 200, success("supabase", { job: makeVideoJob(data) }));
     } catch (error) {
-      return sendJson(res, 404, {
-        ...errorBody("Задача оптимизации не найдена", [redactedDetail("video job lookup", error, "not found")]),
-      });
+      return videoJobError(res, error);
     }
   }
 
@@ -7276,13 +7283,14 @@ export async function handleVideoJobs(req: VercelRequest, res: VercelResponse) {
 
     const workspaceId = readWorkspaceId(req, body);
     const fileName = firstString(body.fileName, body.file_name);
-    const mimeType = inferMimeType({ fileName, mimeType: firstString(body.mimeType, body.mime_type) });
+    const mimeType = inferMimeType({ fileName, mimeType: firstString(body.mimeType, body.mime_type) }).toLowerCase();
     const fileSize = readNumber(body.fileSize ?? body.file_size) ?? 0;
-    const maxInputBytes = config.maxInputMb * 1024 * 1024;
+    const maxInputBytes = Math.min(500, config.maxInputMb) * 1024 * 1024;
     const details: string[] = [];
-    if (!fileName) details.push("fileName is required");
+    if (!fileName || Buffer.byteLength(fileName)>255 || /[\\/\u0000-\u001f\u007f]/.test(fileName)) details.push("fileName is required");
     if (!VIDEO_MIME_TYPES.has(mimeType)) details.push("Для оптимизации поддерживаются только видео MP4, MOV или WEBM.");
-    if (fileSize <= 0) details.push("fileSize is required");
+    if (!Number.isSafeInteger(fileSize) || fileSize <= 0) details.push("fileSize is required");
+    if (inferMimeType({ fileName }) !== mimeType) details.push("fileName does not match mimeType");
     if (fileSize > maxInputBytes) details.push(`Видео больше ${config.maxInputMb} MB. Загрузите файл меньшего размера.`);
     if (details.length > 0) {
       return sendJson(res, 400, errorBody("Validation error", details));
@@ -7294,37 +7302,17 @@ export async function handleVideoJobs(req: VercelRequest, res: VercelResponse) {
     // result to the public bucket and deletes the original. Without a verified
     // workspace there is nothing to file it under, so it stays a demo answer.
     if (!supabase || !isUuid(workspaceId)) {
-      return sendJson(
-        res,
-        200,
-        success(
-          "demo",
-          {
-            job: makeVideoJob({
-              workspaceId,
-              status: "awaiting_upload",
-              sourceFileName: fileName,
-              sourceMimeType: mimeType,
-              rawSize: fileSize,
-            }),
-            signedUpload: null,
-            assetId: "",
-          },
-          "Supabase Storage не настроен: загрузка исходника недоступна в demo-режиме.",
-        ),
-      );
+      return videoJobError(res, new VideoJobReceiptError(supabase ? 403 : 503));
     }
 
     const storagePath = buildAdCreativeStoragePath({ workspaceId, fileName });
-    const { data: signed, error: signedError } = await supabase.storage.from(rawBucket).createSignedUploadUrl(storagePath);
-    if (signedError || !signed?.token) {
-      return sendJson(res, 502, {
-        ...errorBody("Не удалось создать ссылку для загрузки исходника", [
-          signedError?.message || "signed upload URL is missing",
-          `Проверьте, что bucket ${rawBucket} создан (migration 016).`,
-        ]),
-      });
-    }
+    let signed: { token: string; signedUrl: string };
+    try {
+      await confirmPrivateVideoBucket(supabase, rawBucket, mimeType, fileSize);
+      const result = await supabase.storage.from(rawBucket).createSignedUploadUrl(storagePath, { upsert: false });
+      if (result.error) throw new VideoJobReceiptError(502);
+      signed = checkedPrivateVideoTicket(result.data, rawBucket, storagePath);
+    } catch (error) { return videoJobError(res, error); }
 
     let assetId = "";
     try {
@@ -7342,11 +7330,16 @@ export async function handleVideoJobs(req: VercelRequest, res: VercelResponse) {
         },
         workspaceId,
       );
-      const { data: assetData, error: assetError } = await supabase.from("ad_creative_assets").insert(assetRow).select("id").single();
+      assetRow.public_url = null;
+      const { data: assetData, error: assetError } = await supabase.from("ad_creative_assets").insert(assetRow).select("*").single();
       if (assetError) throw new Error(assetError.message);
-      assetId = firstString(asRecord(assetData).id);
+      const asset = asRecord(assetData);
+      if (!isUuid(asset.id) || Object.entries(assetRow).some(([key, value]) => key !== "updated_at" && key !== "metadata" && asset[key] !== value)) {
+        throw new VideoJobReceiptError(502);
+      }
+      assetId = readString(asset.id);
     } catch (error) {
-      console.warn(supabaseWarning("ad_creative_assets optimizing insert", error));
+      return videoJobError(res, error);
     }
 
     try {
@@ -7360,22 +7353,30 @@ export async function handleVideoJobs(req: VercelRequest, res: VercelResponse) {
           raw_path: storagePath,
           source_file_name: fileName,
           source_mime_type: mimeType,
+          input_mime_type: mimeType,
+          raw_size: fileSize,
+          input_size_bytes: fileSize,
+          output_bucket: AD_CREATIVE_BUCKET,
+          optimized_bucket: AD_CREATIVE_BUCKET,
           metadata: { source: "ads-automation" },
         })
         .select("*")
         .single();
       if (jobError) throw new Error(jobError.message);
+      const confirmedJob = checkedVideoJob(jobData, workspaceId, { asset_id: assetId, status: "awaiting_upload",
+        raw_bucket: rawBucket, raw_path: storagePath, source_file_name: fileName, source_mime_type: mimeType,
+        raw_size: fileSize, input_size_bytes: fileSize });
       return sendJson(
         res,
         201,
         success("supabase", {
-          job: makeVideoJob(asRecord(jobData)),
+          job: makeVideoJob(confirmedJob),
           signedUpload: {
             bucket: rawBucket,
             storageBucket: rawBucket,
             storagePath,
             token: signed.token,
-            signedUrl: firstString(asRecord(signed as unknown as JsonRecord).signedUrl),
+            signedUrl: signed.signedUrl,
           },
           assetId,
         }),
@@ -7400,63 +7401,42 @@ export async function handleVideoJobs(req: VercelRequest, res: VercelResponse) {
 
     const supabase = getSupabaseServerClient();
     if (!supabase || !isUuid(jobId)) {
-      return sendJson(
-        res,
-        200,
-        success("demo", { job: makeVideoJob({ id: jobId, status: "queued", rawSize }) }, "Supabase не настроен: задача помечена queued только в ответе."),
-      );
+      return videoJobError(res, new VideoJobReceiptError(supabase ? 400 : 503));
     }
 
     try {
       const workspaceId = readWorkspaceId(req, body);
-      // Only the awaiting_upload → queued transition is allowed from the frontend;
-      // every other status belongs to the worker.
-      // The tenant filter below is not optional. Everywhere else in this file
-      // the workspace is applied unconditionally; here it was applied only when
-      // it happened to be a UUID, so a missing context would have silently
-      // dropped it and let the query see another clinic's job. The router never
-      // reaches a browser route without a verified workspace, which is exactly
-      // why an unverified one must end the request rather than widen it.
-      if (!isUuid(workspaceId)) throw new Error("workspace is not verified");
+      if (!isUuid(workspaceId)) throw new VideoJobReceiptError(403);
+      const initial = await readConfirmedVideoJob(supabase, workspaceId, jobId);
+      if (!initial) throw new VideoJobReceiptError(404);
+      const canonicalSize = readNumber(initial.input_size_bytes ?? initial.raw_size);
+      if (!Number.isSafeInteger(canonicalSize) || Number(canonicalSize) <= 0
+        || (rawSize !== null && rawSize !== canonicalSize)) throw new VideoJobReceiptError(400);
+      if (initial.status !== "awaiting_upload") return sendJson(res, 200, success("supabase", { job: makeVideoJob(initial) }));
       const update = supabase
         .from("video_processing_jobs")
-        .update({ status: "queued", raw_size: rawSize, updated_at: new Date().toISOString() })
+        .update({ status: "queued", raw_size: canonicalSize, input_size_bytes: canonicalSize, updated_at: new Date().toISOString() })
         .eq("id", jobId)
         .eq("status", "awaiting_upload")
-        .eq("workspace_id", workspaceId);
+        .eq("workspace_id", workspaceId).eq("raw_path", initial.raw_path).eq("raw_bucket", initial.raw_bucket)
+        .eq("source_file_name", initial.source_file_name).eq("source_mime_type", initial.source_mime_type);
+      if (initial.updated_at) update.eq("updated_at", initial.updated_at);
       const { data, error } = await update.select("*").maybeSingle();
-      if (error) throw new Error(error.message);
+      if (error) throw new VideoJobReceiptError(502);
       if (data) {
-        return sendJson(res, 200, success("supabase", { job: makeVideoJob(asRecord(data)) }));
+        const confirmed = checkedVideoJob(data, workspaceId, { id: jobId, status: "queued", raw_size: canonicalSize,
+          asset_id: initial.asset_id, raw_path: initial.raw_path, raw_bucket: initial.raw_bucket,
+          source_file_name: initial.source_file_name, source_mime_type: initial.source_mime_type });
+        return sendJson(res, 200, success("supabase", { job: makeVideoJob(confirmed) }));
       }
-      // Тот же фильтр арендатора, что и у обновления выше, и по той же причине.
-      //
-      // Здесь его не было. Обновление промахивалось по двум причинам — задача
-      // уже не в awaiting_upload ЛИБО задача чужая, — и обе приводили сюда, где
-      // строка перечитывалась по одному id. Ответ уезжал спрашивавшему целиком:
-      // чужой workspaceId и публичные ссылки на чужой ролик. Комментарий двадцатью
-      // строками выше объясняет, почему фильтр не факультативен, а следующий же
-      // запрос его терял.
-      //
-      // maybeSingle, а не single: промах теперь означает «нет такой задачи у этой
-      // клиники» и обязан стать 404, а не ошибкой PostgREST в теле ответа.
-      const { data: current, error: currentError } = await supabase
-        .from("video_processing_jobs")
-        .select("*")
-        .eq("id", jobId)
-        .eq("workspace_id", workspaceId)
-        .maybeSingle();
-      if (currentError) throw new Error(currentError.message);
-      if (!current) throw new Error("job not found in this workspace");
-      return sendJson(
-        res,
-        200,
-        success("supabase", { job: makeVideoJob(asRecord(current)) }, "Задача уже не в статусе awaiting_upload."),
-      );
+      const current = await readConfirmedVideoJob(supabase, workspaceId, jobId);
+      if (!current) throw new VideoJobReceiptError(404);
+      checkedVideoJob(current, workspaceId, { id: jobId, raw_path: initial.raw_path, raw_bucket: initial.raw_bucket,
+        source_file_name: initial.source_file_name, source_mime_type: initial.source_mime_type, raw_size: canonicalSize, asset_id: initial.asset_id });
+      if (current.status === "awaiting_upload") throw new VideoJobReceiptError(409);
+      return sendJson(res, 200, success("supabase", { job: makeVideoJob(current) }));
     } catch (error) {
-      return sendJson(res, 404, {
-        ...errorBody("Задача оптимизации не найдена", [redactedDetail("video job lookup", error, "not found")]),
-      });
+      return videoJobError(res, error);
     }
   }
 
@@ -7464,6 +7444,7 @@ export async function handleVideoJobs(req: VercelRequest, res: VercelResponse) {
 }
 
 export async function handleVideoProcessingJobs(req: VercelRequest, res: VercelResponse, pathSegments: string[] = []) {
+  res.setHeader("Cache-Control", "private, no-store");
   const config = videoOptimizationConfig();
   const rawBucket = firstString(config.rawBucket, DEFAULT_RAW_VIDEO_BUCKET);
   const pathJobId = firstString(pathSegments[0], readQueryString(req.query.id));
@@ -7477,11 +7458,7 @@ export async function handleVideoProcessingJobs(req: VercelRequest, res: VercelR
 
     const supabase = getSupabaseServerClient();
     if (!supabase || !isUuid(jobId)) {
-      return sendJson(
-        res,
-        200,
-        success("demo", { job: makeVideoJob({ id: jobId, status: "queued" }) }, "Supabase не настроен: статус задачи доступен только как demo-ответ."),
-      );
+      return videoJobError(res, new VideoJobReceiptError(supabase ? 400 : 503));
     }
 
     try {
@@ -7493,16 +7470,11 @@ export async function handleVideoProcessingJobs(req: VercelRequest, res: VercelR
       // reaches a browser route without a verified workspace, which is exactly
       // why an unverified one must end the request rather than widen it.
       if (!isUuid(workspaceId)) throw new Error("workspace is not verified");
-      const query = supabase
-        .from("video_processing_jobs")
-        .select("*")
-        .eq("id", jobId)
-        .eq("workspace_id", workspaceId);
-      const { data, error } = await query.single();
-      if (error) throw new Error(error.message);
-      return sendJson(res, 200, success("supabase", { job: makeVideoJob(asRecord(data)) }));
+      const data = await readConfirmedVideoJob(supabase, workspaceId, jobId);
+      if (!data) throw new VideoJobReceiptError(404);
+      return sendJson(res, 200, success("supabase", { job: makeVideoJob(data) }));
     } catch (error) {
-      return sendJson(res, 404, errorBody("Задача оптимизации не найдена", [redactedDetail("video job lookup", error, "not found")]));
+      return videoJobError(res, error);
     }
   }
 
@@ -7515,15 +7487,7 @@ export async function handleVideoProcessingJobs(req: VercelRequest, res: VercelR
     const body = asRecord(req.body);
     const supabase = getSupabaseServerClient();
     if (!supabase || !isUuid(jobId)) {
-      const status = firstString(body.status, "failed").toLowerCase();
-      if (status !== "failed") {
-        return sendJson(res, 409, errorBody("Retry is not allowed", ["Only failed jobs can be retried"]));
-      }
-      return sendJson(
-        res,
-        200,
-        success("demo", { job: makeVideoJob({ id: jobId, status: "queued", progress: 0 }) }, "Supabase не настроен: retry выполнен только в demo-ответе."),
-      );
+      return videoJobError(res, new VideoJobReceiptError(supabase ? 400 : 503));
     }
 
     try {
@@ -7547,20 +7511,14 @@ export async function handleVideoProcessingJobs(req: VercelRequest, res: VercelR
         .eq("workspace_id", workspaceId);
       const { data, error } = await update.select("*").maybeSingle();
       if (error) throw new Error(error.message);
-      if (data) return sendJson(res, 200, success("supabase", { job: makeVideoJob(asRecord(data)) }));
+      if (data) return sendJson(res, 200, success("supabase", { job: makeVideoJob(checkedVideoJob(data, workspaceId, { id: jobId, status: "queued" })) }));
 
       // Storage-1: this second lookup exists to tell "job is not failed" (409)
       // from "job does not exist" (404). Unscoped, it answered 409 for a job in
       // someone else's workspace, which turned the route into a cross-tenant
       // existence oracle. Scoped, a foreign id is indistinguishable from a
       // missing one.
-      const { data: current, error: currentError } = await supabase
-        .from("video_processing_jobs")
-        .select("status")
-        .eq("id", jobId)
-        .eq("workspace_id", workspaceId)
-        .maybeSingle();
-      if (currentError) throw new Error(currentError.message);
+      const current = await readConfirmedVideoJob(supabase, workspaceId, jobId);
       if (current) {
         return sendJson(res, 409, errorBody("Retry is not allowed", ["Only failed jobs can be retried"]));
       }
@@ -7572,10 +7530,10 @@ export async function handleVideoProcessingJobs(req: VercelRequest, res: VercelR
 
   if (req.method === "POST") {
     const body = asRecord(req.body);
+    if (!config.enabled) return sendJson(res, 409, { ...errorBody(VIDEO_OPTIMIZATION_DISABLED_MESSAGE), code: "video_optimization_disabled" });
     const workspaceId = readWorkspaceId(req, body);
     const assetId = firstString(body.assetId, body.asset_id);
     const rawPath = firstString(body.rawPath, body.raw_path);
-    const rawPublicUrl = firstString(body.rawPublicUrl, body.raw_public_url);
     const inputMimeType = inferMimeType({
       fileName: firstString(body.fileName, body.file_name, "video.mp4"),
       mimeType: firstString(body.inputMimeType, body.input_mime_type, body.mimeType, body.mime_type),
@@ -7586,40 +7544,26 @@ export async function handleVideoProcessingJobs(req: VercelRequest, res: VercelR
 
     if (!VIDEO_MIME_TYPES.has(inputMimeType)) details.push("inputMimeType must be MP4, MOV or WEBM");
     if (assetId && !isUuid(assetId)) details.push("assetId must be a UUID");
-    if (inputSizeBytes <= 0) details.push("inputSizeBytes is required");
-    if (inputSizeBytes > config.maxInputMb * 1024 * 1024) details.push(`Видео больше ${config.maxInputMb} MB. Загрузите файл меньшего размера.`);
-    if (rawPath && !isOwnWorkspaceStoragePath(rawPath, workspaceId)) {
+    if (!Number.isSafeInteger(inputSizeBytes) || inputSizeBytes <= 0) details.push("inputSizeBytes is required");
+    if (inputSizeBytes > Math.min(500, config.maxInputMb) * 1024 * 1024) details.push(`Видео больше ${config.maxInputMb} MB. Загрузите файл меньшего размера.`);
+    if (!fileName || Buffer.byteLength(fileName)>255 || /[\\/\u0000-\u001f\u007f]/.test(fileName)) details.push("fileName is required");
+    if (inferMimeType({ fileName }) !== inputMimeType) details.push("fileName does not match inputMimeType");
+    if (!safeVideoRawPath(rawPath, workspaceId)) {
       details.push("rawPath must point at an object inside this workspace");
     }
     if (details.length > 0) return sendJson(res, 400, errorBody("Validation error", details));
 
-    const demoJob = makeVideoJob({
-      workspaceId,
-      assetId,
-      status: "queued",
-      progress: 0,
-      rawBucket,
-      rawPath,
-      rawPublicUrl,
-      sourceFileName: fileName,
-      inputMimeType,
-      inputSizeBytes,
-    });
     const supabase = getSupabaseServerClient();
     // Same rule as /api/crm/video-jobs: no verified workspace, no row.
     if (!supabase || !isUuid(workspaceId)) {
-      return sendJson(
-        res,
-        200,
-        success("demo", { job: demoJob }, "Supabase не настроен: задача оптимизации создана только как demo-ответ."),
-      );
+      return videoJobError(res, new VideoJobReceiptError(supabase ? 403 : 503));
     }
 
     try {
       if (assetId) {
         const { data: asset, error: assetError } = await supabase
           .from("ad_creative_assets")
-          .select("id, workspace_id")
+          .select("*")
           .eq("id", assetId)
           .eq("workspace_id", workspaceId)
           .maybeSingle();
@@ -7627,7 +7571,12 @@ export async function handleVideoProcessingJobs(req: VercelRequest, res: VercelR
         if (!asset || asset.id !== assetId || asset.workspace_id !== workspaceId) {
           return sendJson(res, 404, errorBody("Креатив не найден", ["not found"]));
         }
+        if (asset.file_type !== "video" || asset.storage_bucket !== rawBucket || asset.storage_path !== rawPath
+          || asset.file_name !== fileName || asset.mime_type !== inputMimeType || asset.file_size !== inputSizeBytes) {
+          throw new VideoJobReceiptError(409);
+        }
       }
+      await confirmPrivateVideoBucket(supabase, rawBucket, inputMimeType, inputSizeBytes);
       const { data, error } = await supabase
         .from("video_processing_jobs")
         .insert({
@@ -7637,7 +7586,7 @@ export async function handleVideoProcessingJobs(req: VercelRequest, res: VercelR
           progress: 0,
           raw_bucket: rawBucket,
           raw_path: rawPath || null,
-          raw_public_url: rawPublicUrl || null,
+          raw_public_url: null,
           source_file_name: fileName || null,
           source_mime_type: inputMimeType,
           input_mime_type: inputMimeType,
@@ -7650,7 +7599,10 @@ export async function handleVideoProcessingJobs(req: VercelRequest, res: VercelR
         .select("*")
         .single();
       if (error) throw new Error(error.message);
-      return sendJson(res, 201, success("supabase", { job: makeVideoJob(asRecord(data)) }));
+      const confirmed = checkedVideoJob(data, workspaceId, { asset_id: isUuid(assetId) ? assetId : null, status: "queued",
+        raw_bucket: rawBucket, raw_path: rawPath, source_file_name: fileName, source_mime_type: inputMimeType,
+        raw_size: inputSizeBytes, input_size_bytes: inputSizeBytes });
+      return sendJson(res, 201, success("supabase", { job: makeVideoJob(confirmed) }));
     } catch (error) {
       // Security-2F: a job the database refused has no id to poll, so reporting
       // it as queued left the browser watching a job that never existed.

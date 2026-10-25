@@ -1,11 +1,12 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { issueStagedCreativeTicket, readStagedCreativeTicket, stagedCreativeKind, stagedCreativePath,
+import { issueStagedCreativeTicket, readStagedCreativeTicket, sealStagedCreativeTicket, stagedCreativeKind, stagedCreativePath,
   STAGED_CREATIVE_BUCKET, type StagedCreativeActor, type StagedCreativeTicket } from "./staged-creative-ticket";
 import { CreativeImageValidationUnavailable, normalizeCreativeImageBytes } from "./creative-image";
 
 const allowedMimes = new Set(["image/jpeg", "image/png", "image/webp", "video/mp4", "video/quicktime", "video/webm"]);
 type Storage = Pick<SupabaseClient, "storage">;
-type Config = { supabase: Storage; origin: string; serviceRoleKey: string };
+export type StagedCreativeStorageConfig = { supabase: Storage; origin: string; serviceRoleKey: string };
+type Config = StagedCreativeStorageConfig;
 
 export class StagedCreativeStorageError extends Error {
   constructor(readonly code: string) { super(code); }
@@ -42,8 +43,14 @@ async function privateBucket(config: Config, ticket: StagedCreativeTicket): Prom
 export async function prepareStagedCreativeUpload(config: Config, input: StagedCreativeActor & {
   fileName: string; mimeType: string; fileSize: number;
 }, now = Date.now()) {
+  originOf(config);
+  const { ticket } = issueStagedCreativeTicket(input, config.serviceRoleKey, now);
+  return prepareReservedStagedCreativeUpload(config, ticket, now);
+}
+
+export async function prepareReservedStagedCreativeUpload(config: Config, ticket: StagedCreativeTicket, now = Date.now()) {
   const origin = originOf(config);
-  const { ticket, handle } = issueStagedCreativeTicket(input, config.serviceRoleKey, now);
+  const handle = sealStagedCreativeTicket(ticket, config.serviceRoleKey, now);
   await privateBucket(config, ticket);
   const storagePath = stagedCreativePath(ticket);
   try {

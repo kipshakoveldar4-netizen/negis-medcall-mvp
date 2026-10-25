@@ -55,8 +55,14 @@ export function issueStagedCreativeTicket(input: StagedCreativeActor & {
     staffUserId: input.staffUserId, fileName: input.fileName, mimeType: input.mimeType, fileSize: input.fileSize,
     issuedAt: now, expiresAt: now + STAGED_CREATIVE_LIFETIME_MS };
   if (!valid(ticket, now)) throw new StagedCreativeTicketError();
+  return { handle: sealStagedCreativeTicket(ticket, secret, now), ticket: Object.freeze(ticket) };
+}
+
+/** Used only for the exact immutable manifest returned by server admission. */
+export function sealStagedCreativeTicket(ticket: StagedCreativeTicket, secret: string, now = Date.now()): string {
+  if (!valid(ticket, now)) throw new StagedCreativeTicketError();
   const payload = Buffer.from(canonical(ticket)).toString("base64url");
-  return { handle: `u1.${payload}.${signature(payload, secret).toString("base64url")}`, ticket: Object.freeze(ticket) };
+  return `u1.${payload}.${signature(payload, secret).toString("base64url")}`;
 }
 
 export function readStagedCreativeTicket(handle: unknown, actor: StagedCreativeActor, secret: string, now = Date.now()): StagedCreativeTicket {

@@ -29,6 +29,7 @@ import { apiUrl, CrmApiError, crmErrorMessage, crmFetch } from "@/lib/api";
 import { getSignOutRevision, isSignOutPending } from "@/lib/authSignOut";
 import { getSupabaseAccessToken } from "@/lib/serverAuth";
 import { hasSupabaseFrontendEnv, supabase } from "@/lib/supabase";
+import { uploadVerifiedCreativeImage, type VerifiedCreativeAsset } from "@/lib/verified-creative-upload";
 import { parseMetaInsightsHistorySummaries, type MetaInsightsHistorySummary } from "@/lib/metaInsightsHistory";
 import { readWorkspaceId } from "@/lib/demoStorage";
 import { getPlanFeature, normalizePlan, planFeatureBadge, type NegisPlan } from "@/lib/planFeatures";
@@ -74,6 +75,7 @@ type CreativeAsset = {
   thumbnailGeneratedAt?: string;
   thumbnailSource?: string;
   thumbnailMimeType?: string;
+  workerJobId?: string;
   status: string;
 };
 
@@ -211,6 +213,10 @@ type VideoJob = {
   thumbnailSource?: string;
   outputMimeType?: string;
   outputSizeBytes?: number;
+  outputAssetId?: string;
+  outputStorageBucket?: string;
+  outputStoragePath?: string;
+  outputFileName?: string;
   compressionRatio?: number;
   rawDeletedAt?: string;
 };
@@ -270,9 +276,7 @@ type SignedUploadData = {
   bucket?: string;
   storageBucket?: string;
   storagePath?: string;
-  signedUrl?: string;
   token?: string;
-  publicUrl?: string;
 };
 
 type ConfirmationState = {
@@ -358,9 +362,8 @@ const STUDIO_PREFILL_KEY = ADVERTISING_CAMPAIGN_PREFILL_KEY;
 const STUDIO_PREFILL_NOTICE = "Данные перенесены из AI Контент-студии. Проверьте параметры перед запуском.";
 const ADVERTISING_HUB_PREFILL_NOTICE = "Цель кампании перенесена из рекламного центра. Проверьте бриф и креатив перед запуском.";
 const VIDEO_OPTIMIZATION_DISABLED_TOO_LARGE_MESSAGE =
-  "Автоматическая оптимизация видео скоро будет доступна. Сейчас загрузите видео до 50 МБ или MP4 H.264.";
+  "Защищённая обработка видео сейчас недоступна. Попробуйте позже или загрузите фото.";
 const VIDEO_NEEDS_OPTIMIZATION_MESSAGE = "Видео большое. Для запуска рекламы его нужно оптимизировать.";
-const VIDEO_OPTIMIZATION_NEXT_STEP_MESSAGE = "Следующим этапом система подготовит MP4-версию для Meta.";
 
 const videoJobStatusLabels: Record<VideoJobStatus, string> = {
   awaiting_upload: "Загружаем исходное видео",
@@ -382,7 +385,7 @@ function normalizeVideoJob(record: Record<string, unknown>): VideoJob | null {
   const known: VideoJobStatus[] = ["awaiting_upload", "queued", "downloading", "transcoding", "uploading", "ready", "failed"];
   const outputSizeBytes = Number(record.outputSizeBytes ?? record.output_size_bytes ?? record.outputSize ?? record.output_size);
   const compressionRatio = Number(record.compressionRatio ?? record.compression_ratio);
-  return {
+  const job: VideoJob = {
     id,
     status: known.includes(statusRaw as VideoJobStatus) ? (statusRaw as VideoJobStatus) : "queued",
     progress: Number(record.progress) || 0,
@@ -396,9 +399,20 @@ function normalizeVideoJob(record: Record<string, unknown>): VideoJob | null {
     thumbnailSource: firstString(record.thumbnailSource, record.thumbnail_source) || undefined,
     outputMimeType: firstString(record.outputMimeType, record.output_mime_type) || undefined,
     outputSizeBytes: Number.isFinite(outputSizeBytes) && outputSizeBytes > 0 ? outputSizeBytes : undefined,
+    outputAssetId: firstString(record.outputAssetId, record.output_asset_id, record.assetId, record.asset_id) || undefined,
+    outputStorageBucket: firstString(record.outputStorageBucket, record.output_storage_bucket, record.outputBucket, record.output_bucket) || undefined,
+    outputStoragePath: firstString(record.outputStoragePath, record.output_storage_path, record.outputPath, record.output_path) || undefined,
+    outputFileName: firstString(record.outputFileName, record.output_file_name) || undefined,
     compressionRatio: Number.isFinite(compressionRatio) && compressionRatio > 0 ? compressionRatio : undefined,
     rawDeletedAt: firstString(record.rawDeletedAt, record.raw_deleted_at) || undefined,
   };
+  return job.status === "ready" && !hasWorkerReadyReceipt(job) ? { ...job, status: "uploading" } : job;
+}
+
+function hasWorkerReadyReceipt(job?: VideoJob | null) {
+  return Boolean(job?.status === "ready" && job.outputPublicUrl && job.outputAssetId
+    && job.outputStorageBucket && job.outputStoragePath && job.outputFileName
+    && Number.isSafeInteger(job.outputSizeBytes) && job.outputSizeBytes! > 0 && job.outputMimeType === "video/mp4");
 }
 
 const defaultBrief: Brief = {
@@ -427,8 +441,6 @@ const confirmationDefaults: ConfirmationState = {
   spendUnderstood: false,
 };
 
-const VERCEL_FUNCTION_FILE_LIMIT_BYTES = 4 * 1024 * 1024;
-
 const destinationOptions: Array<{ value: LeadDestination; label: string; placeholder: string }> = [
   { value: "whatsapp", label: "WhatsApp", placeholder: "+7 700 000 00 00" },
   { value: "instagram_profile", label: "Instagram профиль", placeholder: "@clinic или https://instagram.com/clinic" },
@@ -455,31 +467,6 @@ function firstString(...values: unknown[]): string {
   return "";
 }
 
-function readStringField(record: Record<string, unknown>, keys: string[], fallback = "") {
-  return firstString(...keys.map((key) => record[key]), fallback);
-}
-
-function readNumberField(record: Record<string, unknown>, keys: string[], fallback: number) {
-  for (const key of keys) {
-    const value = record[key];
-    const numeric = typeof value === "number" ? value : Number(value);
-    if (Number.isFinite(numeric)) return numeric;
-  }
-  return fallback;
-}
-
-function buildFrontendStoragePublicUrl(storagePath: string, storageBucket = "ad-creatives") {
-  const env = import.meta.env as Record<string, string | undefined>;
-  const supabaseUrl = firstString(env.VITE_SUPABASE_URL).replace(/\/$/, "");
-  if (!supabaseUrl || !storagePath) return "";
-
-  const encodedPath = storagePath
-    .split("/")
-    .map((part) => encodeURIComponent(part))
-    .join("/");
-  return `${supabaseUrl}/storage/v1/object/public/${encodeURIComponent(storageBucket)}/${encodedPath}`;
-}
-
 function readStored<T>(key: string, fallback: T): T {
   if (typeof window === "undefined") return fallback;
   try {
@@ -501,48 +488,6 @@ function normalizeBriefCity(brief: Brief): Brief {
   };
 }
 
-
-function normalizeAsset(value: unknown, fallback: CreativeAsset): CreativeAsset {
-  const record = asRecord(value);
-  const storageBucket = readStringField(record, ["storageBucket", "storage_bucket"], fallback.storageBucket || "ad-creatives");
-  const storagePath = readStringField(record, ["storagePath", "storage_path"], fallback.storagePath || "");
-  const publicUrl =
-    readStringField(
-      record,
-      ["publicUrl", "public_url", "publicURL", "url", "imageUrl", "image_url", "imageURL", "videoUrl", "video_url", "videoURL", "creativeUrl", "creative_url"],
-      fallback.publicUrl || "",
-    ) ||
-    buildFrontendStoragePublicUrl(storagePath, storageBucket);
-  const explicitFileType = readStringField(record, ["fileType", "file_type", "creativeType", "creative_type"], fallback.fileType);
-  return {
-    id: readStringField(record, ["id"], fallback.id || "") || fallback.id,
-    fileName: readStringField(record, ["fileName", "file_name"], fallback.fileName),
-    fileType: explicitFileType === "video" ? "video" : "image",
-    mimeType: readStringField(record, ["mimeType", "mime_type"], fallback.mimeType),
-    fileSize: readNumberField(record, ["fileSize", "file_size"], fallback.fileSize),
-    previewUrl: fallback.previewUrl,
-    publicUrl,
-    storagePath,
-    storageBucket,
-    metaVideoId: readStringField(record, ["metaVideoId", "meta_video_id", "videoId", "video_id"], fallback.metaVideoId || "") || undefined,
-    videoUploadMode: readStringField(record, ["videoUploadMode", "video_upload_mode", "uploadMode", "upload_mode"], fallback.videoUploadMode || "") || undefined,
-    videoProcessingStatus: readStringField(record, ["videoProcessingStatus", "video_processing_status", "processingStatus", "processing_status"], fallback.videoProcessingStatus || "") || undefined,
-    videoWarnings: Array.isArray(record.videoWarnings)
-      ? record.videoWarnings.filter((item): item is string => typeof item === "string")
-      : fallback.videoWarnings,
-    thumbnailUrl:
-      readStringField(record, ["thumbnailUrl", "thumbnail_url"], "") ||
-      readStringField(asRecord(record.metadata), ["thumbnailUrl", "thumbnail_url"], fallback.thumbnailUrl || "") ||
-      undefined,
-    thumbnailGeneratedAt:
-      readStringField(asRecord(record.metadata), ["thumbnailGeneratedAt", "thumbnail_generated_at"], fallback.thumbnailGeneratedAt || "") || undefined,
-    thumbnailSource:
-      readStringField(asRecord(record.metadata), ["thumbnailSource", "thumbnail_source"], fallback.thumbnailSource || "") || undefined,
-    thumbnailMimeType:
-      readStringField(asRecord(record.metadata), ["thumbnailMimeType", "thumbnail_mime_type"], fallback.thumbnailMimeType || "") || undefined,
-    status: readStringField(record, ["status"], fallback.status),
-  };
-}
 
 function publicDestinationUrl(brief: Brief) {
   const value = brief.destinationValue.trim();
@@ -755,7 +700,7 @@ function getCreativeReadiness({
       clientMessage:
         videoOptimization?.enabled === true
           ? `${VIDEO_NEEDS_OPTIMIZATION_MESSAGE} Видео будет отправлено на оптимизацию перед запуском.`
-          : `${VIDEO_NEEDS_OPTIMIZATION_MESSAGE} ${VIDEO_OPTIMIZATION_NEXT_STEP_MESSAGE} ${VIDEO_OPTIMIZATION_DISABLED_TOO_LARGE_MESSAGE}`,
+          : VIDEO_OPTIMIZATION_DISABLED_TOO_LARGE_MESSAGE,
       adminMessage: rawError,
     };
   }
@@ -792,6 +737,24 @@ function getCreativeReadiness({
       isReadyForMeta: false,
       isBlocking: false,
       clientMessage: "Для видео готовится обложка.",
+      adminMessage: rawError,
+    };
+  }
+
+  if (creative.fileType === "video" && (!hasWorkerReadyReceipt(videoJob)
+    || creative.workerJobId !== videoJob?.id || creative.id !== videoJob?.outputAssetId
+    || creative.storageBucket !== videoJob?.outputStorageBucket || creative.storagePath !== videoJob?.outputStoragePath
+    || creative.fileName !== videoJob?.outputFileName || creative.fileSize !== videoJob?.outputSizeBytes
+    || creative.mimeType !== videoJob?.outputMimeType
+    || creative.publicUrl !== videoJob?.outputPublicUrl)) {
+    return {
+      status: "needs_optimization",
+      label: "Видео нужно оптимизировать",
+      tone: "amber",
+      isReadyForMeta: false,
+      isBlocking: true,
+      clientMessage: videoOptimization?.enabled === false
+        ? VIDEO_OPTIMIZATION_DISABLED_TOO_LARGE_MESSAGE : VIDEO_OPTIMIZING_LAUNCH_BLOCKED_MESSAGE,
       adminMessage: rawError,
     };
   }
@@ -1479,6 +1442,7 @@ function AdsAutomationSession({ actorId, workspaceId }: { actorId: string; works
   const sessionRef = useRef<AbortController | null>(null);
   const signOutRevisionRef = useRef(getSignOutRevision());
   const prefillRef = useRef<string | null>(null);
+  const creativeIntentRef = useRef({ file: null as Blob | null, revision: 0, requestKeys: new WeakMap<Blob, string>(), videoJobId: "" });
   const workspaceScopedKey = (key: string) => `${key}::${workspaceId}`;
 
   // Each effect setup owns a new lifetime, including StrictMode's replay.
@@ -1517,14 +1481,71 @@ function AdsAutomationSession({ actorId, workspaceId }: { actorId: string; works
     return response;
   }
 
-  async function sessionRequest<T>(session: AbortController, path: string, init?: RequestInit) {
+  async function sessionRequest<T>(session: AbortController, path: string, init?: RequestInit, current: () => boolean = () => true) {
     assertSessionAlive(session);
+    if (!current()) throw new DOMException("Creative selection changed", "AbortError");
     const body = await crmRequest<T>(path, {
       ...init, cache: "no-store", expectedUserId: actorId, signal: session.signal,
-      dispatchGuard: () => isSessionAlive(session),
+      dispatchGuard: () => isSessionAlive(session) && current(),
     });
     assertSessionAlive(session);
+    if (!current()) throw new DOMException("Creative selection changed", "AbortError");
     return body;
+  }
+
+  function beginCreativeIntent(file: Blob | null) {
+    const current = creativeIntentRef.current;
+    if (!file || current.file !== file) current.requestKeys = new WeakMap();
+    current.file = file;
+    current.videoJobId = "";
+    return ++current.revision;
+  }
+
+  function isCreativeIntentCurrent(session: AbortController | null, intent: number) {
+    return isSessionAlive(session) && creativeIntentRef.current.revision === intent;
+  }
+
+  function assertCreativeIntent(session: AbortController, intent: number) {
+    assertSessionAlive(session);
+    if (creativeIntentRef.current.revision !== intent) throw new DOMException("Creative selection changed", "AbortError");
+  }
+
+  async function uploadVerifiedImage(session: AbortController, intent: number, file: Blob, fileName: string, mimeType: string, trackUpload = true): Promise<VerifiedCreativeAsset> {
+    assertCreativeIntent(session, intent);
+    if (!hasSupabaseFrontendEnv) throw new Error("Хранилище креативов недоступно.");
+    const keys = creativeIntentRef.current.requestKeys;
+    let requestKey = keys.get(file);
+    if (!requestKey) {
+      requestKey = crypto.randomUUID();
+      keys.set(file, requestKey);
+    }
+    const asset = await uploadVerifiedCreativeImage({
+      workspaceId, file, fileName, mimeType, requestKey,
+      storageOrigin: firstString(import.meta.env.VITE_SUPABASE_URL).replace(/\/$/, ""),
+      assertCurrent: async () => { assertCreativeIntent(session, intent); },
+      request: async (url, init) => {
+        assertCreativeIntent(session, intent);
+        const body = await sessionRequest(session, url, init, () => isCreativeIntentCurrent(session, intent));
+        assertCreativeIntent(session, intent);
+        return { success: body.success, mode: body.mode || "", data: body.data };
+      },
+      upload: async (bucket, path, token, blob, opts) => {
+        assertCreativeIntent(session, intent);
+        if (trackUpload) {
+          setUploadStatus("uploading_to_storage");
+          setUploadStage(uploadStatusLabel("uploading_to_storage"));
+        }
+        const result = await supabase.storage.from(bucket).uploadToSignedUrl(path, token, blob, opts);
+        assertCreativeIntent(session, intent);
+        if (trackUpload) {
+          setUploadStatus("saving_metadata");
+          setUploadStage(uploadStatusLabel("saving_metadata"));
+        }
+        return result;
+      },
+    });
+    assertCreativeIntent(session, intent);
+    return asset;
   }
   const [plan] = useState<NegisPlan>(() => normalizePlan(readStored("negis_plan", "demo")));
   const [currentStep, setCurrentStep] = useState(1);
@@ -1539,6 +1560,8 @@ function AdsAutomationSession({ actorId, workspaceId }: { actorId: string; works
   const statusMode: "PAUSED" = "PAUSED";
   const [uiMode, setUiMode] = useState<UiMode>(() => (readStored<UiMode>("negis_ads_automation_ui_mode", "client") === "admin" ? "admin" : "client"));
   const [metaSummary, setMetaSummary] = useState<MetaSummary | null>(null);
+  const metaSummaryRef = useRef(metaSummary);
+  useLayoutEffect(() => { metaSummaryRef.current = metaSummary; }, [metaSummary]);
   const [storageHealth, setStorageHealth] = useState<StorageHealth | null>(null);
   const [uploadDebug, setUploadDebug] = useState<UploadDebug | null>(null);
   const [uploadStatus, setUploadStatus] = useState<UploadStatus>("idle");
@@ -1647,38 +1670,13 @@ function AdsAutomationSession({ actorId, workspaceId }: { actorId: string; works
       }
       setContentApproval(data.contentApproval || null);
 
-      // Restore a ready creative from Content Studio. Generated video already
-      // lives in the public ad-creatives bucket; its cover is prepared below
-      // through the same signed-upload path used for manually uploaded video.
+      // Handoff URLs are input bytes, not proof of a verified creative.
       const creativeUrl = firstString(data.creative?.url);
       if (creativeUrl) {
         const isVideo = data.creative?.type === "video";
         const importedFileName = firstString(data.creative?.fileName) || (isVideo ? "studio-video.mp4" : "studio-creative.jpg");
-        const importedThumbnailUrl = isVideo ? firstString(data.creative?.thumbnailUrl) : "";
-        const importedAssetId = firstString(data.creative?.assetId);
-        setCreative({
-          id: importedAssetId || undefined,
-          fileName: importedFileName,
-          fileType: isVideo ? "video" : "image",
-          mimeType: firstString(data.creative?.mimeType) || (isVideo ? "video/mp4" : "image/jpeg"),
-          fileSize: data.creative?.fileSize || 0,
-          previewUrl: creativeUrl,
-          publicUrl: creativeUrl,
-          thumbnailUrl: importedThumbnailUrl || undefined,
-          thumbnailSource: firstString(data.creative?.thumbnailSource) || undefined,
-          status: "uploaded",
-        });
-        setCreativeFile(null);
-        setVideoJob(null);
-        setUploadStatus("ready");
-        setLastUploadError("");
-        if (isVideo && !importedThumbnailUrl) {
-          void prepareImportedVideoThumbnail({
-            assetId: importedAssetId,
-            fileName: importedFileName,
-            publicUrl: creativeUrl,
-          });
-        }
+        void importCreativeFromUrl(creativeUrl, importedFileName,
+          firstString(data.creative?.mimeType) || (isVideo ? "video/mp4" : "image/jpeg"));
       }
 
       // Never pre-arm a launch from an import.
@@ -1964,7 +1962,7 @@ function AdsAutomationSession({ actorId, workspaceId }: { actorId: string; works
     }
   }
 
-  function validateFile(file: File): string[] {
+  function validateFile(file: File, optimization = metaSummaryRef.current?.videoOptimization): string[] {
     const isVideo = file.type.startsWith("video/");
     const isImage = file.type.startsWith("image/");
     const extension = file.name.split(".").pop()?.toLowerCase() || "";
@@ -1978,7 +1976,6 @@ function AdsAutomationSession({ actorId, workspaceId }: { actorId: string; works
     if ((isImage || allowedImage) && file.size > 10 * 1024 * 1024) {
       details.push("Фото больше 10 MB. Сожмите изображение.");
     }
-    const optimization = metaSummary?.videoOptimization;
     const maxVideoMb = optimization?.enabled ? optimization.maxInputMb || 500 : 100;
     if ((isVideo || allowedVideo) && file.size > maxVideoMb * 1024 * 1024) {
       details.push(
@@ -1992,22 +1989,46 @@ function AdsAutomationSession({ actorId, workspaceId }: { actorId: string; works
   }
 
   function applyVideoJobResult(job: VideoJob) {
+    if (!hasWorkerReadyReceipt(job) || creativeIntentRef.current.videoJobId !== job.id) return;
     setCreative((current) =>
-      current && current.fileType === "video"
+      current && current.fileType === "video" && current.workerJobId === job.id
         ? {
             ...current,
-            // Only the optimized public URL ever reaches Meta — never the raw original.
-            publicUrl: job.outputPublicUrl || current.publicUrl,
-            // The worker always outputs an MP4 (H.264 + AAC); treat the ready creative as video/mp4.
-            mimeType: job.outputPublicUrl ? job.outputMimeType || "video/mp4" : current.mimeType,
-            thumbnailUrl: job.thumbnailPublicUrl || current.thumbnailUrl,
-            thumbnailGeneratedAt: job.thumbnailPublicUrl ? new Date().toISOString() : current.thumbnailGeneratedAt,
-            thumbnailSource: job.thumbnailSource || (job.thumbnailPublicUrl ? "worker" : current.thumbnailSource),
-            thumbnailMimeType: job.thumbnailPublicUrl ? "image/jpeg" : current.thumbnailMimeType,
+            id: job.outputAssetId,
+            fileName: job.outputFileName!,
+            fileSize: job.outputSizeBytes!,
+            storageBucket: job.outputStorageBucket,
+            storagePath: job.outputStoragePath,
+            publicUrl: job.outputPublicUrl,
+            previewUrl: job.outputPublicUrl!,
+            mimeType: job.outputMimeType!,
+            metaVideoId: undefined,
+            videoUploadMode: undefined,
+            videoProcessingStatus: undefined,
+            thumbnailUrl: job.thumbnailPublicUrl,
+            thumbnailGeneratedAt: job.thumbnailPublicUrl ? new Date().toISOString() : undefined,
+            thumbnailSource: job.thumbnailSource || (job.thumbnailPublicUrl ? "worker" : undefined),
+            thumbnailMimeType: job.thumbnailPublicUrl ? "image/jpeg" : undefined,
             status: "uploaded",
           }
         : current,
     );
+    setUploadStatus("ready");
+    setUploadStage(uploadStatusLabel("ready"));
+    setUploadDebug((current) => ({
+      ...current,
+      assetId: job.outputAssetId,
+      fileName: job.outputFileName,
+      fileType: "video",
+      uploadMode: "video_job_worker_ready",
+      storagePath: job.outputStoragePath,
+      storagePathExists: true,
+      publicUrlExists: true,
+      publicUrlPreview: job.outputPublicUrl!.slice(0, 60),
+      uploadTarget: job.outputStorageBucket,
+      uploadStage: uploadStatusLabel("ready"),
+      responseKeys: ["job"],
+    }));
     setNotice(`${VIDEO_OPTIMIZED_READY_MESSAGE}. Можно продолжать запуск.`);
     toast.success(VIDEO_OPTIMIZED_READY_MESSAGE);
   }
@@ -2015,12 +2036,17 @@ function AdsAutomationSession({ actorId, workspaceId }: { actorId: string; works
   async function pollVideoJob(jobId: string) {
     const session = sessionRef.current;
     if (!isSessionAlive(session)) return;
+    const intent = creativeIntentRef.current.revision;
+    const current = () => isCreativeIntentCurrent(session, intent) && creativeIntentRef.current.videoJobId === jobId;
+    if (!current()) return;
     try {
       const body = await sessionRequest<{ job?: Record<string, unknown> }>(
         session,
         `/api/crm/video-jobs?id=${encodeURIComponent(jobId)}&workspaceId=${encodeURIComponent(workspaceId)}`,
+        undefined, current,
       );
-      assertSessionAlive(session);
+      assertCreativeIntent(session, intent);
+      if (!current() || body.mode !== "supabase") return;
       const job = normalizeVideoJob(asRecord(body.data.job));
       if (!job || job.id !== jobId) return;
       const wasReady = videoJob?.status === "ready";
@@ -2044,6 +2070,9 @@ function AdsAutomationSession({ actorId, workspaceId }: { actorId: string; works
     const session = sessionRef.current;
     if (!isSessionAlive(session)) return;
     if (!jobId) return;
+    const intent = creativeIntentRef.current.revision;
+    const current = () => isCreativeIntentCurrent(session, intent) && creativeIntentRef.current.videoJobId === jobId;
+    if (!current()) return;
     setLoading("video");
     try {
       const body = await sessionRequest<{ job?: Record<string, unknown> }>(
@@ -2053,31 +2082,36 @@ function AdsAutomationSession({ actorId, workspaceId }: { actorId: string; works
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ workspaceId, status: "failed" }),
-        },
+        }, current,
       );
-      assertSessionAlive(session);
+      assertCreativeIntent(session, intent);
       const job = normalizeVideoJob(asRecord(body.data.job));
-      if (job) {
+      if (job?.id === jobId && body.mode === "supabase") {
         setVideoJob(job);
+        if (job.status === "ready") applyVideoJobResult(job);
         setLastUploadError("");
         setNotice(`${VIDEO_OPTIMIZING_BODY} ${VIDEO_OPTIMIZING_LAUNCH_AFTER_MESSAGE}`);
         toast.success("Обработка перезапущена");
       }
     } catch (error) {
-      if (!isSessionAlive(session)) return;
+      if (!current()) return;
       toast.error(error instanceof Error ? error.message : VIDEO_OPTIMIZATION_FAILED_MESSAGE);
     } finally {
-      if (isSessionAlive(session)) setLoading(null);
+      if (current()) setLoading(null);
     }
   }
 
-  async function uploadLargeVideo(file: File, optimizationDebug: Partial<UploadDebug> = {}) {
+  async function uploadLargeVideo(file: File, optimizationDebug: Partial<UploadDebug>, intent: number, previewUrl: string) {
     const session = sessionRef.current;
-    if (!isSessionAlive(session)) return;
+    if (!isCreativeIntentCurrent(session, intent) || !session) return;
+    if (metaSummaryRef.current?.videoOptimization?.enabled !== true) {
+      setNotice(VIDEO_OPTIMIZATION_DISABLED_TOO_LARGE_MESSAGE);
+      return;
+    }
     setLoading("upload");
     setVideoJob(null);
     setCreativeFile(file);
-    const previewUrl = URL.createObjectURL(file);
+    setCreative({ fileName: file.name, fileType: "video", mimeType: file.type, fileSize: file.size, previewUrl, status: "optimizing" });
     try {
       if (!hasSupabaseFrontendEnv) {
         throw new Error("Для загрузки креативов нужны VITE_SUPABASE_URL и VITE_SUPABASE_ANON_KEY в Vercel.");
@@ -2098,24 +2132,26 @@ function AdsAutomationSession({ actorId, workspaceId }: { actorId: string; works
             mimeType: file.type,
             fileSize: file.size,
           }),
-        },
+        }, () => isCreativeIntentCurrent(session, intent),
       );
-      assertSessionAlive(session);
+      assertCreativeIntent(session, intent);
       const createdJob = normalizeVideoJob(asRecord(created.data.job));
       const signedUpload = created.data.signedUpload || null;
       const storageBucket = firstString(signedUpload?.bucket, signedUpload?.storageBucket);
       const storagePath = firstString(signedUpload?.storagePath);
       const token = firstString(signedUpload?.token);
-      if (!createdJob || !storageBucket || !storagePath || !token) {
+      if (created.mode !== "supabase" || !createdJob || !storageBucket || storageBucket === "ad-creatives" || !storagePath || !token) {
         throw new Error("Сервер не вернул данные для загрузки исходного видео. Проверьте настройки Supabase и migration 016.");
       }
+      creativeIntentRef.current.videoJobId = createdJob.id;
 
       setUploadStatus("uploading_to_storage");
       setUploadStage("Загружаем исходное видео в защищённое хранилище");
+      assertCreativeIntent(session, intent);
       const { error: uploadError } = await supabase.storage.from(storageBucket).uploadToSignedUrl(storagePath, token, file, {
         contentType: file.type || "video/mp4",
       });
-      assertSessionAlive(session);
+      assertCreativeIntent(session, intent);
       if (uploadError) {
         throw new Error(
           `Не удалось загрузить исходное видео в хранилище оптимизации: ${uploadError.message}. Проверьте общий лимит загрузки файлов в Supabase (Settings → Storage → Upload file size limit).`,
@@ -2127,9 +2163,10 @@ function AdsAutomationSession({ actorId, workspaceId }: { actorId: string; works
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ id: createdJob.id, workspaceId, rawSize: file.size }),
-      });
-      assertSessionAlive(session);
-      const queuedJob = normalizeVideoJob(asRecord(patched.data.job)) || { ...createdJob, status: "queued" as VideoJobStatus };
+      }, () => isCreativeIntentCurrent(session, intent));
+      assertCreativeIntent(session, intent);
+      const queuedJob = normalizeVideoJob(asRecord(patched.data.job));
+      if (patched.mode !== "supabase" || !queuedJob || queuedJob.id !== createdJob.id) throw new Error(VIDEO_OPTIMIZATION_FAILED_MESSAGE);
 
       setCreative({
         id: firstString(created.data.assetId) || undefined,
@@ -2142,6 +2179,7 @@ function AdsAutomationSession({ actorId, workspaceId }: { actorId: string; works
         // the raw original has no public URL and must never be sent to Meta.
         publicUrl: "",
         status: "optimizing",
+        workerJobId: createdJob.id,
       });
       setVideoJob(queuedJob);
       setUploadDebug({
@@ -2164,8 +2202,9 @@ function AdsAutomationSession({ actorId, workspaceId }: { actorId: string; works
       setUploadStage(VIDEO_OPTIMIZING_MESSAGE);
       setNotice(`${VIDEO_OPTIMIZING_MESSAGE} ${VIDEO_OPTIMIZING_LAUNCH_BLOCKED_MESSAGE}`);
       toast.success("Видео загружено, оптимизация запущена");
+      if (queuedJob.status === "ready") applyVideoJobResult(queuedJob);
     } catch (error) {
-      if (!isSessionAlive(session)) return;
+      if (!isCreativeIntentCurrent(session, intent)) return;
       const message = error instanceof Error ? error.message : VIDEO_OPTIMIZATION_FAILED_MESSAGE;
       setCreative({
         fileName: file.name,
@@ -2195,115 +2234,59 @@ function AdsAutomationSession({ actorId, workspaceId }: { actorId: string; works
       setNotice(message);
       toast.error(VIDEO_OPTIMIZATION_FAILED_MESSAGE);
     } finally {
-      if (isSessionAlive(session)) setLoading(null);
+      if (isCreativeIntentCurrent(session, intent)) setLoading(null);
     }
   }
 
   async function uploadVideoThumbnail(
     capture: VideoThumbnailCapture,
     sourceFileName: string,
+    session: AbortController,
+    intent: number,
   ): Promise<{ publicUrl: string; generatedAt: string; mimeType: string } | null> {
-    const session = sessionRef.current;
-    if (!isSessionAlive(session)) return null;
+    assertCreativeIntent(session, intent);
     try {
       const baseName = sourceFileName.replace(/\.[^.]+$/, "") || "video";
-      const thumbnailFileName = `${baseName}-thumbnail.jpg`;
-      const signedBody = await sessionRequest<SignedUploadData>(session, `/api/crm/ad-creatives/signed-upload?workspaceId=${encodeURIComponent(workspaceId)}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          workspaceId,
-          fileName: thumbnailFileName,
-          fileType: "image",
-          mimeType: capture.mimeType,
-          fileSize: capture.blob.size,
-        }),
-      });
-      assertSessionAlive(session);
-      const storageBucket = firstString(signedBody.data.bucket, signedBody.data.storageBucket, "ad-creatives");
-      const storagePath = firstString(signedBody.data.storagePath);
-      const token = firstString(signedBody.data.token);
-      const thumbnailPublicUrl = firstString(signedBody.data.publicUrl) || buildFrontendStoragePublicUrl(storagePath, storageBucket);
-      if (!storagePath || !token || !thumbnailPublicUrl) return null;
-      const { error: uploadError } = await supabase.storage.from(storageBucket).uploadToSignedUrl(storagePath, token, capture.blob, {
-        contentType: capture.mimeType,
-      });
-      assertSessionAlive(session);
-      if (uploadError) return null;
-      return { publicUrl: thumbnailPublicUrl, generatedAt: new Date().toISOString(), mimeType: capture.mimeType };
+      const asset = await uploadVerifiedImage(session, intent, capture.blob, `${baseName}-thumbnail.jpg`, capture.mimeType, false);
+      assertCreativeIntent(session, intent);
+      return { publicUrl: asset.publicUrl, generatedAt: new Date().toISOString(), mimeType: asset.mimeType };
     } catch {
+      assertCreativeIntent(session, intent);
       return null;
     }
   }
 
-  async function prepareImportedVideoThumbnail(input: {
-    assetId: string;
-    fileName: string;
-    publicUrl: string;
-  }) {
+  async function importCreativeFromUrl(url: string, fileName: string, mimeType: string) {
     const session = sessionRef.current;
     if (!isSessionAlive(session)) return;
-    setLoading("thumbnail");
-    setNotice("Видео из AI Контент-студии загружено. Создаём обложку для Meta.");
+    const intent = beginCreativeIntent(null);
+    setCreative(null);
+    setCreativeFile(null);
+    setVideoJob(null);
+    setLoading("upload");
+    setUploadStatus("validating");
+    setLastUploadError("");
     try {
-      const capture = await captureVideoThumbnail(input.publicUrl);
-      assertSessionAlive(session);
-      const thumbnail = capture ? await uploadVideoThumbnail(capture, input.fileName) : null;
-      assertSessionAlive(session);
-      if (!thumbnail) {
-        setNotice(
-          "Видео передано из AI Контент-студии, но обложку не удалось создать автоматически. Загрузите исходный файл заново, чтобы продолжить запуск.",
-        );
-        return;
-      }
-
-      setCreative((current) =>
-        current?.fileType === "video" && current.publicUrl === input.publicUrl
-          ? {
-              ...current,
-              thumbnailUrl: thumbnail.publicUrl,
-              thumbnailGeneratedAt: thumbnail.generatedAt,
-              thumbnailSource: "auto_frame",
-              thumbnailMimeType: thumbnail.mimeType,
-            }
-          : current,
-      );
-
-      if (input.assetId) {
-        try {
-          await sessionRequest(session, `/api/crm/ad-creatives?workspaceId=${encodeURIComponent(workspaceId)}`, {
-            method: "PATCH",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              workspaceId,
-              id: input.assetId,
-              metadata: {
-                source: "content-studio",
-                uploadMode: "ai-generated",
-                thumbnailUrl: thumbnail.publicUrl,
-                thumbnailGeneratedAt: thumbnail.generatedAt,
-                thumbnailSource: "auto_frame",
-                thumbnailMimeType: thumbnail.mimeType,
-              },
-            }),
-          });
-          assertSessionAlive(session);
-        } catch {
-          // The in-memory cover is enough for this launch; metadata persistence
-          // remains best-effort just as it is for a manually regenerated cover.
-        }
-      }
-
-      assertSessionAlive(session);
-      setNotice("Видео и обложка из AI Контент-студии готовы. Проверьте параметры перед запуском.");
-      toast.success("Видео из Content Studio готово для Meta");
-    } catch {
-      if (!isSessionAlive(session)) return;
-      setNotice(
-        "Видео передано из AI Контент-студии, но обложку не удалось создать автоматически. Загрузите исходный файл заново, чтобы продолжить запуск.",
-      );
+      assertCreativeIntent(session, intent);
+      const { downloadCreativeImport } = await import("@/lib/creative-import");
+      assertCreativeIntent(session, intent);
+      const env = import.meta.env as Record<string, string | undefined>;
+      const file = await downloadCreativeImport({
+        url, fileName, mimeType, workspaceId, storageOrigin: env.VITE_SUPABASE_URL || "",
+        signal: session.signal, assertCurrent: () => assertCreativeIntent(session, intent),
+      });
+      assertCreativeIntent(session, intent);
+      await uploadCreative(file);
+      if (!isCreativeIntentCurrent(session, intent)) return;
+    } catch (error) {
+      if (!isCreativeIntentCurrent(session, intent)) return;
+      setUploadStatus("failed");
+      const message = error instanceof Error && error.name !== "CreativeImportError" && error.name !== "TimeoutError"
+        ? error.message : "Не удалось безопасно получить исходный файл креатива.";
+      setLastUploadError(message);
+      setNotice(friendlyCreativeError(message));
     } finally {
-      if (isSessionAlive(session)) setLoading((current) => (current === "thumbnail" ? null : current));
+      if (isCreativeIntentCurrent(session, intent)) setLoading(null);
     }
   }
 
@@ -2311,6 +2294,11 @@ function AdsAutomationSession({ actorId, workspaceId }: { actorId: string; works
     const session = sessionRef.current;
     if (!isSessionAlive(session)) return;
     if (!creative || creative.fileType !== "video") return;
+    const intent = creativeIntentRef.current.revision;
+    if (!hasWorkerReadyReceipt(videoJob) || creative.workerJobId !== videoJob?.id) {
+      setNotice(VIDEO_OPTIMIZING_LAUNCH_BLOCKED_MESSAGE);
+      return;
+    }
     if (!creativeFile) {
       setNotice("Исходный файл видео недоступен в этой сессии. Загрузите видео заново, чтобы создать обложку.");
       return;
@@ -2318,16 +2306,16 @@ function AdsAutomationSession({ actorId, workspaceId }: { actorId: string; works
     setLoading("thumbnail");
     try {
       const capture = await captureVideoThumbnail(creativeFile);
-      assertSessionAlive(session);
-      const thumbnail = capture ? await uploadVideoThumbnail(capture, creativeFile.name) : null;
-      assertSessionAlive(session);
+      assertCreativeIntent(session, intent);
+      const thumbnail = capture ? await uploadVideoThumbnail(capture, creative.fileName, session, intent) : null;
+      assertCreativeIntent(session, intent);
       if (!thumbnail) {
         setNotice(THUMBNAIL_FAILED_MESSAGE);
         toast.error(THUMBNAIL_FAILED_MESSAGE);
         return;
       }
       setCreative((current) =>
-        current
+        current && current.workerJobId === creative.workerJobId
           ? {
               ...current,
               thumbnailUrl: thumbnail.publicUrl,
@@ -2347,7 +2335,7 @@ function AdsAutomationSession({ actorId, workspaceId }: { actorId: string; works
               id: creative.id,
               metadata: {
                 source: "ads-automation",
-                uploadMode: "signed_url",
+                uploadMode: "verified_image",
                 signedUpload: true,
                 thumbnailUrl: thumbnail.publicUrl,
                 thumbnailGeneratedAt: thumbnail.generatedAt,
@@ -2355,53 +2343,58 @@ function AdsAutomationSession({ actorId, workspaceId }: { actorId: string; works
                 thumbnailMimeType: thumbnail.mimeType,
               },
             }),
-          });
-          assertSessionAlive(session);
+          }, () => isCreativeIntentCurrent(session, intent));
+          assertCreativeIntent(session, intent);
         } catch {
           // Local state keeps the thumbnail; metadata sync is best-effort.
         }
       }
-      assertSessionAlive(session);
+      assertCreativeIntent(session, intent);
+      setUploadStatus("ready");
       setNotice("");
       toast.success("Обложка видео создана заново");
     } catch (error) {
-      if (isSessionAlive(session)) throw error;
+      if (!isCreativeIntentCurrent(session, intent)) return;
+      setNotice(THUMBNAIL_FAILED_MESSAGE);
+      toast.error(THUMBNAIL_FAILED_MESSAGE);
     } finally {
-      if (isSessionAlive(session)) setLoading(null);
+      if (isCreativeIntentCurrent(session, intent)) setLoading(null);
     }
   }
 
   async function uploadCreative(file: File) {
     const session = sessionRef.current;
     if (!isSessionAlive(session)) return;
+    const intent = beginCreativeIntent(file);
+    const fileType = inferCreativeFileType(file);
+    const previewUrl = URL.createObjectURL(file);
+    const selected: CreativeAsset = {
+      fileName: file.name, fileType, mimeType: file.type, fileSize: file.size,
+      previewUrl, status: "selected",
+    };
+    setCreative(selected);
+    setCreativeFile(file);
+    setVideoJob(null);
+    setLoading(null);
     setUploadStatus("validating");
     setUploadStage(uploadStatusLabel("validating"));
     setLastUploadError("");
     setUploadDebug(null);
-    const fileType = inferCreativeFileType(file);
-    const isMovVideo = fileType === "video" && (file.type === "video/quicktime" || file.name.toLowerCase().endsWith(".mov"));
+    setVideoConfigBlocked(false);
 
-    // Large-video branch decision. All "MB" here means MiB (1024*1024 bytes),
-    // consistently with the server-side limits and the bucket file_size_limit.
-    const optimization = metaSummary?.videoOptimization;
-    const optimizationThresholdMb = optimization?.thresholdMb || 50;
-    const optimizationThresholdBytes = optimizationThresholdMb * 1024 * 1024;
-    const fileSizeMb = Number((file.size / (1024 * 1024)).toFixed(1));
-    const exceedsThreshold = fileType === "video" && file.size > optimizationThresholdBytes;
+    const optimization = metaSummaryRef.current?.videoOptimization;
     const optimizationDebug: Partial<UploadDebug> = {
       videoOptimizationLoaded: Boolean(optimization),
       videoOptimizationEnabled: Boolean(optimization?.enabled),
-      videoOptimizationThresholdMb: optimizationThresholdMb,
+      videoOptimizationThresholdMb: optimization?.thresholdMb || 50,
       videoOptimizationMaxInputMb: optimization?.maxInputMb || 500,
-      fileSizeMb,
-      largeVideoBranch: exceedsThreshold && optimization?.enabled === true,
-      uploadTarget: "ad-creatives",
+      fileSizeMb: Number((file.size / (1024 * 1024)).toFixed(1)),
+      largeVideoBranch: fileType === "video" && optimization?.enabled === true,
+      uploadTarget: fileType === "video" ? "private_video_job" : "ad-creatives-staging",
     };
 
-    // A large video must never silently fall back to the direct ad-creatives upload.
-    // If the optimization config has not arrived from /api/crm/health yet, block and refresh.
-    setVideoConfigBlocked(false);
-    if (exceedsThreshold && !optimization) {
+    // Every video, including small files and handoffs, requires the private worker.
+    if (fileType === "video" && !optimization) {
       setUploadStatus("idle");
       setUploadStage("");
       setVideoConfigBlocked(true);
@@ -2410,46 +2403,28 @@ function AdsAutomationSession({ actorId, workspaceId }: { actorId: string; works
       void checkHealth();
       return;
     }
-
-    if (exceedsThreshold && optimization?.enabled !== true) {
-      const previewUrl = URL.createObjectURL(file);
-      const message = `${VIDEO_NEEDS_OPTIMIZATION_MESSAGE} ${VIDEO_OPTIMIZATION_NEXT_STEP_MESSAGE} ${VIDEO_OPTIMIZATION_DISABLED_TOO_LARGE_MESSAGE}`;
-      setCreativeFile(file);
-      setVideoJob(null);
-      setCreative({
-        fileName: file.name,
-        fileType: "video",
-        mimeType: file.type,
-        fileSize: file.size,
-        previewUrl,
-        publicUrl: "",
-        status: "needs_optimization",
-      });
+    if (fileType === "video" && optimization?.enabled !== true) {
+      setCreative({ ...selected, status: "needs_optimization" });
       setUploadStatus("idle");
       setUploadStage("Видео нужно оптимизировать");
-      setLastUploadError(message);
+      setLastUploadError(VIDEO_OPTIMIZATION_DISABLED_TOO_LARGE_MESSAGE);
       setUploadDebug({
-        ...optimizationDebug,
-        fileName: file.name,
-        fileType: "video",
-        uploadMode: "video_optimization_required",
-        signedUpload: false,
-        storagePathExists: false,
-        publicUrlExists: false,
-        publicUrlPreview: "",
-        uploadStage: "needs_optimization",
-        lastError: message,
+        ...optimizationDebug, fileName: file.name, fileType,
+        uploadMode: "video_optimization_required", signedUpload: false,
+        storagePathExists: false, publicUrlExists: false,
         responseKeys: ["localFile", "videoOptimization"],
       });
-      setNotice(message);
-      toast.warning("Видео нужно оптимизировать");
+      setNotice(VIDEO_OPTIMIZATION_DISABLED_TOO_LARGE_MESSAGE);
+      toast.warning(VIDEO_OPTIMIZATION_DISABLED_TOO_LARGE_MESSAGE);
       return;
     }
 
-    const details = validateFile(file);
+    const details = validateFile(file, optimization);
     if (details.length > 0) {
       const message = details.join(" ");
-      const friendlyMessage = friendlyCreativeError(message, { fileName: file.name, fileType, mimeType: file.type, fileSize: file.size, previewUrl: "", status: "failed" });
+      const failed = { ...selected, status: "failed" };
+      const friendlyMessage = friendlyCreativeError(message, failed);
+      setCreative(failed);
       setUploadStatus("failed");
       setUploadStage(uploadStatusLabel("failed"));
       setLastUploadError(message);
@@ -2458,202 +2433,57 @@ function AdsAutomationSession({ actorId, workspaceId }: { actorId: string; works
       return;
     }
 
-    const largeVideoBranch = exceedsThreshold && optimization?.enabled === true;
-
-    if (largeVideoBranch) {
-      await uploadLargeVideo(file, optimizationDebug);
+    if (fileType === "video") {
+      await uploadLargeVideo(file, optimizationDebug, intent, previewUrl);
       return;
     }
-    setVideoJob(null);
 
     setLoading("upload");
-    setNotice(isMovVideo ? MOV_VIDEO_WARNING : "");
-    if (isMovVideo) toast.warning(MOV_VIDEO_WARNING);
-    setCreativeFile(file);
-    const previewUrl = URL.createObjectURL(file);
-    let publicUrl = "";
-    let storagePath = "";
-    type UploadResponse = Partial<CreativeAsset> & { asset?: unknown; item?: unknown };
-    let signedUpload: SignedUploadData | null = null;
-    let lastError = "";
-    let thumbnail: { publicUrl: string; generatedAt: string; mimeType: string } | null = null;
-    let thumbnailWarning = "";
-
+    setNotice("");
     try {
-      if (!hasSupabaseFrontendEnv) {
-        const missingEnvMessage = "Для загрузки креативов нужны VITE_SUPABASE_URL и VITE_SUPABASE_ANON_KEY в Vercel.";
-        if (file.size > VERCEL_FUNCTION_FILE_LIMIT_BYTES) {
-          throw new Error(`${missingEnvMessage} Файл нельзя отправлять через Vercel. Используется прямая загрузка в Supabase Storage.`);
-        }
-
-        throw new Error(missingEnvMessage);
-      }
-
       setUploadStatus("getting_signed_url");
       setUploadStage(uploadStatusLabel("getting_signed_url"));
-      const signedBody = await sessionRequest<SignedUploadData>(session, `/api/crm/ad-creatives/signed-upload?workspaceId=${encodeURIComponent(workspaceId)}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          workspaceId,
-          fileName: file.name,
-          fileType,
-          mimeType: file.type,
-          fileSize: file.size,
-        }),
-      });
-      assertSessionAlive(session);
-      signedUpload = signedBody.data;
-      const storageBucket = firstString(signedUpload.bucket, signedUpload.storageBucket, "ad-creatives");
-      storagePath = firstString(signedUpload.storagePath);
-      publicUrl = firstString(signedUpload.publicUrl) || buildFrontendStoragePublicUrl(storagePath, storageBucket);
-      const token = firstString(signedUpload.token);
-
-      if (!storagePath || !token || !publicUrl) {
-        throw new Error("Signed upload URL неполный: backend не вернул storagePath, token или publicUrl.");
-      }
-
-      setUploadStatus("uploading_to_storage");
-      setUploadStage(uploadStatusLabel("uploading_to_storage"));
-      const { error: uploadError } = await supabase.storage.from(storageBucket).uploadToSignedUrl(storagePath, token, file, {
-        contentType: file.type || (fileType === "video" ? "video/mp4" : "image/jpeg"),
-      });
-      assertSessionAlive(session);
-      if (uploadError) {
-        throw new Error(`Supabase Storage: ${uploadError.message}`);
-      }
-
-      if (!publicUrl) {
-        throw new Error("Публичная ссылка не получена. Проверьте public access bucket ad-creatives.");
-      }
-
-      // Auto-generate a video thumbnail: Meta requires image_url inside video_data,
-      // and the clinic must not have to upload a separate cover image manually.
-      if (fileType === "video") {
-        setUploadStage("Создаём обложку видео автоматически");
-        const capture = await captureVideoThumbnail(file);
-        assertSessionAlive(session);
-        thumbnail = capture ? await uploadVideoThumbnail(capture, file.name) : null;
-        assertSessionAlive(session);
-        if (!thumbnail) {
-          thumbnailWarning = THUMBNAIL_FAILED_MESSAGE;
-          toast.warning(THUMBNAIL_FAILED_MESSAGE);
-        }
-      }
-
-      const fallback: CreativeAsset = {
-        fileName: file.name,
-        fileType,
-        mimeType: file.type,
-        fileSize: file.size,
-        previewUrl,
-        publicUrl,
-        storagePath,
-        storageBucket,
-        thumbnailUrl: thumbnail?.publicUrl,
-        thumbnailGeneratedAt: thumbnail?.generatedAt,
-        thumbnailSource: thumbnail ? "auto_frame" : undefined,
-        thumbnailMimeType: thumbnail?.mimeType,
-        status: "uploaded",
+      const extension = file.name.split(".").pop()?.toLowerCase();
+      const mimeType = file.type || (extension === "png" ? "image/png" : extension === "webp" ? "image/webp" : "image/jpeg");
+      const verified = await uploadVerifiedImage(session, intent, file, file.name, mimeType);
+      assertCreativeIntent(session, intent);
+      const uploadedAsset: CreativeAsset = {
+        id: verified.id, fileName: verified.fileName, fileType: verified.fileType,
+        mimeType: verified.mimeType, fileSize: verified.fileSize,
+        storageBucket: verified.storageBucket, storagePath: verified.storagePath,
+        publicUrl: verified.publicUrl, previewUrl, status: "uploaded",
       };
-
-      setUploadStatus("saving_metadata");
-      setUploadStage(uploadStatusLabel("saving_metadata"));
-      const body = await sessionRequest<UploadResponse>(session, `/api/crm/ad-creatives?workspaceId=${encodeURIComponent(workspaceId)}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          workspaceId,
-          uploadedBy: user?.email || user?.user_metadata?.full_name || "Medina OS user",
-          fileName: file.name,
-          fileType,
-          mimeType: file.type,
-          fileSize: file.size,
-          storageBucket,
-          storagePath,
-          publicUrl,
-          status: "uploaded",
-          metadata: {
-            source: "ads-automation",
-            uploadMode: "signed_url",
-            signedUpload: true,
-            ...(thumbnail
-              ? {
-                  thumbnailUrl: thumbnail.publicUrl,
-                  thumbnailGeneratedAt: thumbnail.generatedAt,
-                  thumbnailSource: "auto_frame",
-                  thumbnailMimeType: thumbnail.mimeType,
-                }
-              : {}),
-          },
-        }),
-      });
-      assertSessionAlive(session);
-
-      const uploadedAsset = normalizeAsset(body.data.item || body.data.asset || body.data, fallback);
       setCreative(uploadedAsset);
       setUploadStatus("ready");
       setUploadStage(uploadStatusLabel("ready"));
-      setUploadDebug(
-        buildUploadDebug(
-          { signedUpload, metadata: body.data },
-          uploadedAsset,
-          {
-            ...optimizationDebug,
-            uploadMode: "signed_url",
-            signedUpload: true,
-            uploadStage: uploadStatusLabel("ready"),
-          },
-        ),
-      );
-      toast.success(fileType === "video" ? "Видео загружено" : "Фото загружено");
-      const uploadedReadiness = getCreativeReadiness({ creative: uploadedAsset, uploadStatus: "ready", loading: null, videoJobPending: false, lastUploadError: "" });
-      if (uploadedReadiness.isReadyForMeta) goToStep(2);
-      setNotice([uploadedReadiness.clientMessage, thumbnailWarning].filter(Boolean).join(" "));
+      setUploadDebug(buildUploadDebug({ asset: verified }, uploadedAsset, {
+        ...optimizationDebug, uploadMode: "verified_image", signedUpload: true,
+        uploadStage: uploadStatusLabel("ready"),
+      }));
+      toast.success("Фото загружено");
+      goToStep(2);
+      setNotice("Креатив готов для Meta");
     } catch (error) {
-      if (!isSessionAlive(session)) return;
-      lastError = error instanceof Error ? error.message : uploadLinkMissingMessage(storageHealth);
-      const fallback: CreativeAsset = {
-        fileName: file.name,
-        fileType,
-        mimeType: file.type,
-        fileSize: file.size,
-        previewUrl,
-        publicUrl,
-        storagePath,
-        storageBucket: firstString(signedUpload?.bucket, signedUpload?.storageBucket, "ad-creatives"),
-        thumbnailUrl: thumbnail?.publicUrl,
-        thumbnailGeneratedAt: thumbnail?.generatedAt,
-        thumbnailSource: thumbnail ? "auto_frame" : undefined,
-        thumbnailMimeType: thumbnail?.mimeType,
-        status: "failed",
-      };
+      if (!isCreativeIntentCurrent(session, intent)) return;
+      const message = error instanceof Error ? error.message : uploadLinkMissingMessage(storageHealth);
+      const failed = { ...selected, status: "failed" };
+      setCreative(failed);
       setUploadStatus("failed");
       setUploadStage(uploadStatusLabel("failed"));
-      setLastUploadError(lastError);
-      setCreative(fallback);
+      setLastUploadError(message);
       setUploadDebug({
-        ...optimizationDebug,
-        assetId: fallback.id,
-        fileName: fallback.fileName,
-        fileType: fallback.fileType,
-        uploadMode: "signed_url",
-        signedUpload: Boolean(signedUpload?.token),
-        storagePath: fallback.storagePath,
-        storagePathExists: Boolean(fallback.storagePath),
-        publicUrlExists: Boolean(fallback.publicUrl),
-        publicUrlPreview: fallback.publicUrl ? fallback.publicUrl.slice(0, 60) : "",
-        uploadStage: uploadStatusLabel("failed"),
-        lastError,
-        responseKeys: signedUpload ? uploadResponseKeys({ signedUpload }) : ["error"],
+        ...optimizationDebug, fileName: file.name, fileType,
+        uploadMode: "verified_image", publicUrlExists: false, storagePathExists: false,
+        uploadStage: uploadStatusLabel("failed"), lastError: message, responseKeys: ["error"],
       });
-      setNotice(friendlyCreativeError(lastError, fallback));
+      setNotice(friendlyCreativeError(message, failed));
     } finally {
-      if (isSessionAlive(session)) setLoading(null);
+      if (isCreativeIntentCurrent(session, intent)) setLoading(null);
     }
   }
 
   function removeCreative() {
+    beginCreativeIntent(null);
     if (creative?.previewUrl.startsWith("blob:")) URL.revokeObjectURL(creative.previewUrl);
     setCreative(null);
     setCreativeFile(null);
@@ -2773,30 +2603,19 @@ function AdsAutomationSession({ actorId, workspaceId }: { actorId: string; works
       endDate: "",
     }));
 
-    // Restore the creative from its stored public URL when possible; metaVideoId and thumbnail
-    // are reused so the video is not uploaded to Meta a second time.
+    // History URLs must pass the same verification/worker flow as a new handoff.
     const creativeUrl = firstString(payload.creativeUrl, payload.videoUrl, payload.imageUrl);
     const restoredFileType = firstString(payload.creativeType, payload.fileType) === "video" ? "video" : "image";
     if (creativeUrl) {
-      const restoredVideoId = firstString(item.metaVideoId, payload.metaVideoId);
-      setCreative({
-        id: firstString(payload.sourceId) || undefined,
-        fileName: firstString(payload.fileName) || (restoredFileType === "video" ? "video.mp4" : "photo.jpg"),
-        fileType: restoredFileType,
-        mimeType: firstString(payload.mimeType),
-        fileSize: Number(payload.fileSize) || 0,
-        previewUrl: creativeUrl,
-        publicUrl: creativeUrl,
-        metaVideoId: restoredVideoId && !isDryRunMetaId(restoredVideoId) ? restoredVideoId : undefined,
-        videoProcessingStatus: firstString(payload.videoProcessingStatus) || undefined,
-        thumbnailUrl: firstString(payload.thumbnailUrl) || undefined,
-        thumbnailSource: firstString(payload.thumbnailSource) || undefined,
-        status: "uploaded",
-      });
+      void importCreativeFromUrl(creativeUrl,
+        firstString(payload.fileName) || (restoredFileType === "video" ? "video.mp4" : "photo.jpg"),
+        firstString(payload.mimeType) || (restoredFileType === "video" ? "video/mp4" : "image/jpeg"));
     } else {
+      beginCreativeIntent(null);
       setCreative(null);
+      setCreativeFile(null);
+      setVideoJob(null);
     }
-    setCreativeFile(null);
 
     // Only prefill — never auto-launch: the AI package, safety check, and every
     // confirmation checkbox must be walked through again by the employee.
@@ -2815,7 +2634,7 @@ function AdsAutomationSession({ actorId, workspaceId }: { actorId: string; works
     setUploadStage("");
     setUploadStatus("idle");
     setLocation("/ads-automation");
-    goToStep(creativeUrl ? 2 : 1);
+    goToStep(1);
     setNotice("Параметры перенесены из истории. Проверьте шаги, пройдите проверку безопасности и запустите заново — автозапуска нет.");
     toast.success("Параметры перенесены из истории");
   }

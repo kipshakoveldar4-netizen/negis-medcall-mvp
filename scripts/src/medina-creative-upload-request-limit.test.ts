@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { Script } from "node:vm";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
@@ -22,6 +22,12 @@ assert.ok(!baseline || baseline === "db5a200", "only the reviewed local baseline
 const MIB = 1024 * 1024;
 const LIMIT = 101 * MIB;
 const WORKSPACE = "11111111-1111-4111-8111-111111111111";
+const USER = "22222222-2222-4222-8222-222222222222";
+const STAFF = "33333333-3333-4333-8333-333333333333";
+const OPERATION = "44444444-4444-4444-8444-444444444444";
+const REQUEST_KEY = "55555555-5555-4555-8555-555555555555";
+const ORIGIN = "https://request-limit.fixture.invalid";
+const SECRET = "SYNTHETIC_REQUEST_LIMIT_SECRET_NEVER_REAL_088";
 const MARKER = "SYNTHETIC_UPLOAD_PRIVATE_DIAGNOSTIC_8472";
 const SAFE_PARSE_DETAIL = "Не удалось разобрать запрос загрузки.";
 const BLOCK = Buffer.alloc(MIB, 0xa7);
@@ -29,6 +35,14 @@ const BOUNDARY = "syntheticRequestLimitBoundary";
 const CONTENT_TYPE = `multipart/form-data; boundary=${BOUNDARY}`;
 
 type Json = Record<string, unknown>;
+type ImageInput = { buffer: Buffer; fileName: string; mimeType: string };
+const { validateCreativeImageBytes, normalizeCreativeImageBytes, CreativeImageValidationUnavailable } = await import(
+  pathToFileURL(path.join(root, "lib/crm/creative-image.ts")).href
+) as {
+  validateCreativeImageBytes(input: ImageInput): Promise<string[]>;
+  normalizeCreativeImageBytes(input: ImageInput): Promise<Buffer>;
+  CreativeImageValidationUnavailable: new () => Error;
+};
 type Headers = Record<string, string | string[]>;
 type Chunk = Buffer | string | Error;
 type Request = {
@@ -104,6 +118,21 @@ const compilation = ts.transpileModule([
 });
 assert.deepEqual(compilation.diagnostics?.filter((item) => item.category === ts.DiagnosticCategory.Error), []);
 const script = new Script(compilation.outputText, { filename: "creative-upload-request-limit.actual.cjs" });
+const runtimeCode = new Map<string, string>();
+for (const [id, file] of [
+  ["../auth/permissions", "lib/auth/permissions.ts"],
+  ["./staged-creative-ticket", "lib/crm/staged-creative-ticket.ts"],
+  ["./staged-creative-storage", "lib/crm/staged-creative-storage.ts"],
+  ["./generated-storage-verification", "lib/crm/generated-storage-verification.ts"],
+  ["./staged-creative-workflow", "lib/crm/staged-creative-workflow.ts"],
+]) {
+  const result = ts.transpileModule(await readFile(path.join(root, file), "utf8"), {
+    fileName: file, reportDiagnostics: true,
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+  });
+  assert.deepEqual(result.diagnostics?.filter(item => item.category === ts.DiagnosticCategory.Error), []);
+  runtimeCode.set(id, result.outputText);
+}
 
 function stream(chunks: readonly Chunk[], headers: Headers = {}): Request {
   const stats = { iterators: 0, next: 0, returned: 0, yielded: 0, bytes: 0, closed: false };
@@ -145,6 +174,13 @@ function fixture(options: { configured?: boolean; storageError?: Error } = {}) {
   const concatBytes: number[] = [];
   const warnings: string[] = [];
   const uploads: Array<{ bucket: string; key: string; buffer: Buffer; options: Json }> = [];
+  const rpcs: Array<{ name: string; args: Json }> = [];
+  const reads: Array<{ table: string; filters: Json }> = [];
+  const metadataWrites: Array<{ target: string; values: unknown }> = [];
+  const verificationUrls: string[] = [];
+  const network: string[] = [];
+  const sdkErrors: Error[] = [];
+  let operation: Json | null = null;
   const exported: { actual?: Actual } = {};
   const guardedBuffer = Object.create(Buffer) as typeof Buffer;
   guardedBuffer.concat = (chunks: readonly Uint8Array[], length?: number) => {
@@ -155,43 +191,129 @@ function fixture(options: { configured?: boolean; storageError?: Error } = {}) {
     if (total > LIMIT) throw new Error("SYNTHETIC_OVERSIZED_CONCAT_TRIPWIRE");
     return Buffer.concat(chunks, length);
   };
-  script.runInNewContext({
-    exports: exported, Buffer: guardedBuffer, Error, Busboy, Dicer, parseContentType,
-    process: Object.freeze({ env: Object.freeze({}) }),
+  const client = {
+    from(table: string) {
+      const entry = { table, filters: {} as Json };
+      reads.push(entry);
+      const builder = {
+        select() { return builder; },
+        eq(column: string, value: unknown) { entry.filters[column] = value; return builder; },
+        insert(values: unknown) {
+          metadataWrites.push({ target: table, values });
+          throw new Error("Metadata persistence forbidden after a failed upload");
+        },
+        async maybeSingle() {
+          assert.ok(["staff_users", "creative_upload_operations"].includes(table), `unexpected table ${table}`);
+          const row: Json | null = table === "staff_users"
+            ? { id: STAFF, workspace_id: WORKSPACE, auth_user_id: USER, role: "owner", status: "active" }
+            : operation;
+          assert.ok(row, "admission must precede an operation read");
+          for (const [column, value] of Object.entries(entry.filters)) assert.equal(row[column], value);
+          events.push(table === "staff_users" ? "actor.read" : "operation.read");
+          return { data: row, error: null };
+        },
+      };
+      return builder;
+    },
+    async rpc(name: string, args: Json) {
+      rpcs.push({ name, args: structuredClone(args) });
+      if (name !== "reserve_creative_upload") {
+        metadataWrites.push({ target: name, values: args });
+        throw new Error("Only admission may run before an unconfirmed storage failure");
+      }
+      assert.deepEqual({ p_workspace_id: args.p_workspace_id, p_staff_user_id: args.p_staff_user_id,
+        p_auth_user_id: args.p_auth_user_id }, { p_workspace_id: WORKSPACE, p_staff_user_id: STAFF, p_auth_user_id: USER });
+      assert.equal(args.p_request_key, REQUEST_KEY);
+      assert.equal(args.p_source, "inline");
+      events.push("reserve");
+      const issuedAt = Date.now();
+      const ticket = { v: 1, id: OPERATION, workspaceId: WORKSPACE, userId: USER, staffUserId: STAFF,
+        fileName: args.p_file_name, mimeType: args.p_mime_type, fileSize: args.p_file_size,
+        issuedAt, expiresAt: issuedAt + 7_200_000 };
+      operation = { id: OPERATION, workspace_id: WORKSPACE, staff_user_id: STAFF, auth_user_id: USER,
+        request_key: REQUEST_KEY, file_name: args.p_file_name, mime_type: args.p_mime_type, file_size: args.p_file_size,
+        source: "inline", status: "reserved", issued_at: issuedAt, expires_at: issuedAt + 7_200_000 };
+      return { data: { ticket, requestKey: REQUEST_KEY, status: "reserved" }, error: null };
+    },
+    storage: {
+      from(bucket: string) {
+        events.push("storage.from");
+        return {
+          async upload(key: string, buffer: Buffer, uploadOptions: Json) {
+            events.push("upload");
+            uploads.push({ bucket, key, buffer: Buffer.from(buffer), options: uploadOptions });
+            const error = options.storageError ?? new Error("SYNTHETIC_STORAGE_STOP");
+            sdkErrors.push(error);
+            return { data: null, error };
+          },
+          getPublicUrl() { throw new Error("Public URL must not follow a failed upload"); },
+        };
+      },
+    },
+  };
+  const isolatedGlobals = {
+    Buffer, Error, URL, AbortController, setTimeout, clearTimeout,
+    process: Object.freeze({ env: Object.freeze({ SUPABASE_URL: ORIGIN, SUPABASE_SERVICE_ROLE_KEY: SECRET }) }),
     console: { warn(...values: unknown[]) { warnings.push(values.map(String).join(" ")); } },
+    async fetch(url: string, init?: RequestInit) {
+      const uploaded = uploads[0];
+      const expected = uploaded && `${ORIGIN}/storage/v1/object/public/${uploaded.bucket}/${uploaded.key}`;
+      if (!uploaded || url !== expected) {
+        network.push(url);
+        throw new Error("Network forbidden in request-limit fixtures");
+      }
+      assert.equal(init?.method, "GET");
+      assert.equal(init?.redirect, "error");
+      assert.equal(init?.credentials, "omit");
+      assert.equal(init?.cache, "no-store");
+      verificationUrls.push(url);
+      events.push("verify");
+      // A failed fake SDK write leaves no public object. The real verifier
+      // must reject this synthetic 404, never commit a metadata-only asset.
+      return new globalThis.Response(MARKER, { status: 404, headers: { "content-type": "text/plain" } });
+    },
+  };
+  const modules = new Map<string, Json>([["./creative-image", {
+    validateCreativeImageBytes, normalizeCreativeImageBytes, CreativeImageValidationUnavailable,
+  }]]);
+  function loadRuntime(id: string): Json {
+    if (id === "node:crypto") return requireFromRoot(id) as Json;
+    const cached = modules.get(id);
+    if (cached) return cached;
+    const code = runtimeCode.get(id);
+    assert.ok(code, `unexpected workflow import ${id}`);
+    const exports: Json = {};
+    modules.set(id, exports);
+    new Script(code, { filename: `request-limit.actual-${id.split("/").at(-1)}.cjs` }).runInNewContext({
+      ...isolatedGlobals, exports, require: loadRuntime,
+    }, { timeout: 1000 });
+    return exports;
+  }
+  const workflow = loadRuntime("./staged-creative-workflow");
+  script.runInNewContext({
+    ...isolatedGlobals, ...workflow, exports: exported, Buffer: guardedBuffer, Busboy, Dicer, parseContentType, randomUUID,
+    validateCreativeImageBytes, CreativeImageValidationUnavailable,
+    hasPermission: loadRuntime("../auth/permissions").hasPermission,
+    StagedCreativeTicketError: loadRuntime("./staged-creative-ticket").StagedCreativeTicketError,
+    StagedCreativeStorageError: loadRuntime("./staged-creative-storage").StagedCreativeStorageError,
     require(id: string) {
       if (id === "content-type") return requireFromRoot(id);
       throw new Error(`Unexpected integration import: ${id}`);
     },
-    fetch() { throw new Error("Network forbidden in request-limit fixtures"); },
-    getSupabaseServerClient() {
-      events.push("client");
-      return options.configured === false ? null : {
-        storage: {
-          from(bucket: string) {
-            events.push("storage.from");
-            return {
-              async upload(key: string, buffer: Buffer, uploadOptions: Json) {
-                events.push("upload");
-                uploads.push({ bucket, key, buffer, options: uploadOptions });
-                return { error: options.storageError ?? new Error("SYNTHETIC_STORAGE_STOP") };
-              },
-              getPublicUrl() { throw new Error("Public URL must not follow a failed upload"); },
-            };
-          },
-        },
-      };
+    getSupabaseServerClient() { events.push("client"); return options.configured === false ? null : client; },
+    async persistAdCreativeAsset(input: unknown) {
+      events.push("persist");
+      metadataWrites.push({ target: "persistAdCreativeAsset", values: input });
+      throw new Error("Persistence forbidden in request-limit fixtures");
     },
-    async validateCreativeImageBytes() { throw new Error("Image decoding is outside request-limit tests"); },
-    CreativeImageValidationUnavailable: class extends Error {},
-    async persistAdCreativeAsset() { events.push("persist"); throw new Error("Persistence forbidden in request-limit fixtures"); },
   }, { timeout: 1000 });
   assert.ok(exported.actual);
   const actual = exported.actual;
   return {
-    actual, events, uploads, warnings, concatBytes,
+    actual, events, uploads, warnings, concatBytes, rpcs, reads, metadataWrites, verificationUrls, network, sdkErrors,
     async call(req: Request) {
-      actual.attachWorkspaceContext(req, { workspaceId: WORKSPACE });
+      actual.attachWorkspaceContext(req, { workspaceId: WORKSPACE, userId: USER, staffUserId: STAFF,
+        role: "owner", permissions: ["manage_marketing"] });
       const res: Response = {
         statusCode: 0, body: {},
         status(code) { this.statusCode = code; return this; },
@@ -199,6 +321,7 @@ function fixture(options: { configured?: boolean; storageError?: Error } = {}) {
         json(body) { this.body = JSON.parse(JSON.stringify(body)) as Json; return this; },
       };
       await actual.handleMultipartAdCreativeUpload(req, res);
+      assert.deepEqual(network, [], "never delegate any request to real fetch");
       return res;
     },
   };
@@ -208,6 +331,10 @@ function assertNoStorage(ctx: ReturnType<typeof fixture>) {
   assert.deepEqual(ctx.events, ["client"], "request rejection must precede storage selection and persistence");
   assert.equal(ctx.uploads.length, 0);
   assert.equal(ctx.warnings.length, 0);
+  assert.deepEqual(ctx.reads, []);
+  assert.deepEqual(ctx.rpcs, []);
+  assert.deepEqual(ctx.metadataWrites, []);
+  assert.deepEqual(ctx.verificationUrls, []);
 }
 function assertUnread(req: Request) {
   assert.deepEqual(req.stats, { iterators: 0, next: 0, returned: 0, yielded: 0, bytes: 0, closed: false });
@@ -377,24 +504,48 @@ test("CUL12 extracted router still preserves non-multipart raw JSON bytes", asyn
 });
 
 test("CUL13 actual storage-error branch redacts diagnostics and never persists", async () => {
-  const ctx = fixture({ storageError: new Error(MARKER) });
-  const binary = Buffer.from([0, 0, 0, 20, 102, 116, 121, 112, 109, 112, 52, 50]);
-  const header = Buffer.from(`--${BOUNDARY}\r\nContent-Disposition: form-data; name="file"; filename="synthetic.mp4"\r\nContent-Type: video/mp4\r\n\r\n`);
+  const sdkFailure = new Error(MARKER);
+  const ctx = fixture({ storageError: sdkFailure });
+  // Videos intentionally stop before storage now. This bounded, valid image
+  // reaches the actual inline admission, normalization and failed publication.
+  const binary = Buffer.from(
+    "/9j/4AAQSkZJRgABAgAAAQABAAD//gAQTGF2YzYyLjI4LjEwMgD/2wBDAAgEBAQEBAUFBQUFBQYGBgYGBgYGBgYGBgYHBwcICAgHBwcGBgcHCAgICAkJCQgICAgJCQoKCgwMCwsODg4RERT/xABMAAEBAAAAAAAAAAAAAAAAAAAABAEBAQAAAAAAAAAAAAAAAAAABAYQAQAAAAAAAAAAAAAAAAAAAAARAQAAAAAAAAAAAAAAAAAAAAD/wAARCAACAAIDASIAAhEAAxEA/9oADAMBAAIRAxEAPwCMABEP/9k=",
+    "base64",
+  );
+  const header = Buffer.from(`--${BOUNDARY}\r\nContent-Disposition: form-data; name="requestKey"\r\n\r\n${REQUEST_KEY}\r\n`
+    + `--${BOUNDARY}\r\nContent-Disposition: form-data; name="file"; filename="synthetic.jpg"\r\nContent-Type: image/jpeg\r\n\r\n`);
   const end = Buffer.from(`\r\n--${BOUNDARY}--\r\n`);
   const req = stream([header, binary, end], { "content-length": String(header.length + binary.length + end.length) });
   const res = await ctx.call(req);
-  assert.equal(res.statusCode, 502);
-  assert.equal(res.body.error, "Creative upload failed");
-  assert.deepEqual(res.body.details, [ctx.actual.serviceFailure]);
+  // The workflow reconciles an SDK failure with the exact public object. With
+  // that object absent, the result is a fixed unavailable error, not old 502.
+  assert.equal(res.statusCode, 503);
+  assert.deepEqual(res.body, {
+    success: false, code: "creative_upload_unconfirmed", details: [],
+    error: "Сохранение файла не подтверждено. Повторите проверку, не создавая новую загрузку.",
+  });
   assert.ok(!JSON.stringify(res.body).includes(MARKER));
+  assert.ok(!JSON.stringify(res.body).includes(SECRET));
   assert.equal(ctx.uploads.length, 1, "one fake SDK failure, never a real upload");
-  assert.deepEqual(ctx.uploads[0]!.buffer, binary);
-  assert.equal(ctx.uploads[0]!.bucket, "ad-creatives");
-  assert.ok(ctx.uploads[0]!.key.startsWith(`${WORKSPACE}/`));
-  assert.equal(ctx.uploads[0]!.options.contentType, "video/mp4");
-  assert.equal(ctx.uploads[0]!.options.upsert, false);
-  assert.deepEqual(ctx.events, ["client", "storage.from", "upload"]);
-  assert.ok(ctx.warnings.some((warning) => warning.includes(MARKER)), "actual redactedDetail retains server-side diagnostics");
+  assert.deepEqual(ctx.sdkErrors, [sdkFailure], "the SDK actually returns the private diagnostic, rather than failing at auth/admission");
+  const uploaded = ctx.uploads[0]!;
+  assert.deepEqual(await validateCreativeImageBytes({ buffer: uploaded.buffer, fileName: "synthetic.jpg", mimeType: "image/jpeg" }), []);
+  assert.equal(uploaded.bucket, "ad-creatives");
+  const digest = createHash("sha256").update(uploaded.buffer).digest("hex");
+  assert.equal(uploaded.key, `${WORKSPACE}/verified/${OPERATION}/${digest}.jpg`);
+  assert.equal(uploaded.options.contentType, "image/jpeg");
+  assert.equal(uploaded.options.upsert, false);
+  assert.deepEqual(ctx.verificationUrls, [`${ORIGIN}/storage/v1/object/public/ad-creatives/${uploaded.key}`]);
+  assert.deepEqual(ctx.rpcs, [{ name: "reserve_creative_upload", args: {
+    p_workspace_id: WORKSPACE, p_staff_user_id: STAFF, p_auth_user_id: USER, p_request_key: REQUEST_KEY,
+    p_file_name: "synthetic.jpg", p_mime_type: "image/jpeg", p_file_size: binary.length, p_source: "inline",
+  } }], "failed publication must not invoke the atomic asset commit");
+  assert.deepEqual(ctx.reads, [
+    { table: "creative_upload_operations", filters: { id: OPERATION, workspace_id: WORKSPACE, auth_user_id: USER, staff_user_id: STAFF } },
+    { table: "staff_users", filters: { id: STAFF, workspace_id: WORKSPACE, auth_user_id: USER } },
+  ]);
+  assert.deepEqual(ctx.metadataWrites, [], "neither a generic insert nor a receipt RPC may persist metadata after the failed upload");
+  assert.deepEqual(ctx.events, ["client", "client", "reserve", "operation.read", "actor.read", "storage.from", "upload", "verify"]);
 });
 
 test("CUL14 unavailable storage configuration precedes reader iteration", async () => {
