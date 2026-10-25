@@ -163,6 +163,7 @@ function fixture(t: TestContext, patch: Partial<Auth> = {}, authModule?: AuthMod
     change(patch: Partial<Auth>, runEffects = true) { auth = { ...auth, ...patch }; render(runEffects); },
     mutatePermissions(value: Record<string, boolean>) { Object.assign(auth.rolePermissions, value); render(); },
     writes: () => writes,
+    needsRender: () => dirty,
     sheet: () => find(node => node.type === "section" && node.props.className === "mobile-nav-sheet"),
     backdrop: () => find(node => node.type === "div" && node.props.className === "mobile-nav-backdrop lg:hidden"),
     hasSheet: () => elements(tree).some(node => node.type === "section" && node.props.className === "mobile-nav-sheet"),
@@ -458,6 +459,7 @@ test("actual AuthProvider: unrendered SDK A/B/A cannot revive old navigation", b
   const auth = actualAuthProvider(t); await auth.settle();
   const f = fixture(t, {}, auth.module); const old = f.route("/leads").props.onClick;
   auth.emit("synthetic-B"); auth.emit("synthetic-A"); await auth.settle(false);
+  assert.equal(f.needsRender(), true, "Closed menu must request its own render even when auth state batches back to A");
   auth.render(); f.render();
   assert.equal(auth.snapshot().user?.id, "synthetic-A");
   old();

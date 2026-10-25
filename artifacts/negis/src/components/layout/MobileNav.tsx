@@ -77,6 +77,7 @@ function isActive(location: string, href: string) {
 export function MobileNav() {
   const [open, setOpen] = useState(false);
   const [showProfile, setShowProfile] = useState(false);
+  const [, setSessionRevision] = useState(0);
   const [location, setLocation] = useLocation();
   const { signOut, user, clinicId, userRole, rolePermissions, vertical, workspacePurpose, isSigningOut, isImpersonation } = useAuth();
   const terms = termsFor(vertical);
@@ -110,6 +111,7 @@ export function MobileNav() {
       // SDK events invalidate captured actions before React can batch A/B/A.
       lifetime.current.sdkActor = next;
       lifetime.current.revision++;
+      setSessionRevision(value => value + 1);
       drawerOpen.current = false;
       setOpen(false);
       setShowProfile(false);
