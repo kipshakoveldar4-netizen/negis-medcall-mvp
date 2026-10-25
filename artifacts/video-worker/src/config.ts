@@ -29,11 +29,15 @@ function readPositiveNumber(key: string, fallback: number): number {
 }
 
 export function loadWorkerConfig(): WorkerConfig {
-  const supabaseUrl = readString("SUPABASE_URL");
+  const supabaseUrl = readString("SUPABASE_URL").replace(/\/+$/, "");
   const serviceRoleKey = readString("SUPABASE_SERVICE_ROLE_KEY");
   if (!supabaseUrl || !serviceRoleKey) {
     throw new Error("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required for the video worker");
   }
+  try {
+    const url = new URL(supabaseUrl);
+    if (url.protocol !== "https:" || url.origin !== supabaseUrl) throw new Error();
+  } catch { throw new Error("Video worker requires an HTTPS Supabase origin"); }
 
   return {
     supabaseUrl,

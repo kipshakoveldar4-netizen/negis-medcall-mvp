@@ -4,6 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "test:video-worker-media": "tsx --test ./src/medina-video-worker-media.test.ts",
+    "test:video-worker-contract": "tsx ./src/smoke-negis-routes.ts --video-worker-only",
+    "test:video-job-promotion-postgres": "node --test ./fixtures/video-job-promotion-postgres.test.mjs",
     "test:legal-notices": "tsx --test ./src/medina-legal-notice-parity.test.ts ./src/medina-site-consent-version-binding.test.ts ./src/medina-site-consent-registry.test.ts",
     "test:undici-parser-characterization": "node --test ./fixtures/undici-busboy-compat.test.mjs",
     "test:web-analytics": "tsx --test ./src/medina-web-analytics.test.ts",

@@ -27,8 +27,8 @@ async function main(): Promise<void> {
         await processJob(supabase, config, job);
         continue;
       }
-    } catch (error) {
-      console.error(`[video-worker] poll error: ${error instanceof Error ? error.message : String(error)}`);
+    } catch {
+      console.error("[video-worker] queue operation unconfirmed");
     }
     await delay(config.pollIntervalMs);
   }
@@ -36,7 +36,7 @@ async function main(): Promise<void> {
   console.log("[video-worker] stopped");
 }
 
-main().catch((error) => {
-  console.error(`[video-worker] fatal: ${error instanceof Error ? error.message : String(error)}`);
+main().catch(() => {
+  console.error("[video-worker] startup failed; verify server configuration");
   process.exit(1);
 });

@@ -4,6 +4,9 @@
   "packageManager": "pnpm@10.33.2",
   "license": "MIT",
   "scripts": {
+    "test:video-worker-media": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:video-worker-media",
+    "test:video-worker-contract": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:video-worker-contract",
+    "test:video-job-promotion-postgres": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:video-job-promotion-postgres",
     "test:legal-notices": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:legal-notices",
     "test:generated-identity-postgres": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:generated-identity-postgres",
     "test:generated-identity": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:generated-identity",

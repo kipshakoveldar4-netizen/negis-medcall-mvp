@@ -1413,7 +1413,7 @@ async function checkVideoWorkerPackage() {
   }
 
   const ffmpegSource = await readFile(path.join(workerDir, "src", "ffmpeg.ts"), "utf8");
-  for (const marker of ["libx264", '"aac"', "+faststart", "-map_metadata", "':-2", "fps=${options.fps}"]) {
+  for (const marker of ["libx264", '"aac"', "+faststart", "-map_metadata", "-map_chapters", "force_original_aspect_ratio=decrease", "fps=${options.fps}"]) {
     if (!ffmpegSource.includes(marker)) {
       throw new Error(`video worker ffmpeg source is missing ${marker}`);
     }
@@ -1425,19 +1425,18 @@ async function checkVideoWorkerPackage() {
     "claimed_by",
     "claimed_at",
     "attempts",
-    "output_public_url",
-    "optimized_public_url",
     "thumbnail_public_url",
-    "thumbnail_url",
-    'thumbnail_source: "worker"',
-    'status: "ready"',
+    'supabase.rpc("finalize_video_job"',
+    "p_asset_version",
+    "p_result: promotion",
+    "data?.status === \"ready\"",
     'status: "failed"',
     "raw_deleted_at",
     "raw_delete_error",
     ".remove([",
-    "completed_at",
-    "input_size_bytes",
-    "output_size_bytes",
+    "downloadPrivateVideo",
+    "probeVideo",
+    "buildDecodeArgs",
     "error_message",
     "compressionRatio",
     "config.ffmpegPath",
@@ -1449,6 +1448,15 @@ async function checkVideoWorkerPackage() {
     if (!workerSource.includes(marker)) {
       throw new Error(`video worker source is missing ${marker}`);
     }
+  }
+
+  // Promotion fields moved to one transaction, not independent worker writes.
+  const promotionSource = await readFile(path.join(repoRoot, "migrations", "086_video_job_promotion.sql"), "utf8");
+  for (const marker of ["finalize_video_job", "for update", "p_claimed_at", "p_attempt", "p_asset_version",
+    "promotion_receipt", "video_promotion_replay_refused", "output_public_url", "optimized_public_url",
+    "thumbnail_public_url", "thumbnail_url", "thumbnail_source='worker'", "status='ready'", "completed_at",
+    "input_size_bytes", "output_size_bytes", "enable row level security", "from public, anon, authenticated"]) {
+    if (!promotionSource.includes(marker)) throw new Error(`video promotion transaction is missing ${marker}`);
   }
 
   // The claim must happen before processing so two workers never run the same job.
@@ -1477,21 +1485,21 @@ async function checkVideoWorkerPackage() {
     fps: 30,
   });
   const joinedArgs = transcodeArgs.join(" ");
-  for (const flag of ["libx264", "aac", "+faststart", "min(1080,iw)", ":-2", "fps=30", "-map_metadata"]) {
+  for (const flag of ["libx264", "aac", "+faststart", "min(1080,iw)", "min(1920,ih)", "force_original_aspect_ratio=decrease", "force_divisible_by=2", "fps=30", "-map_metadata", "-map_chapters", "-protocol_whitelist file", "-xerror"]) {
     if (!joinedArgs.includes(flag)) {
       throw new Error(`video worker transcode args must include ${flag}`);
     }
   }
-  if (joinedArgs.includes("force_original_aspect_ratio") || joinedArgs.includes("trunc(iw/2)")) {
-    throw new Error("video worker transcode filter must be the scale=min(width,iw):-2 form (no crop/force filters)");
+  if (joinedArgs.includes("crop=") || joinedArgs.includes("force_original_aspect_ratio=increase")) {
+    throw new Error("video worker must fit both bounds without cropping or enlarging the source");
   }
   if (!transcodeArgs.includes("23") || !transcodeArgs.includes("medium") || !transcodeArgs.includes("optimized.mp4")) {
     throw new Error("video worker transcode args must apply CRF, preset, and the output path");
   }
   const thumbnailArgs = ffmpegModule.buildThumbnailArgs("optimized.mp4", "thumbnail.jpg");
   const joinedThumbnail = thumbnailArgs.join(" ");
-  if (!joinedThumbnail.includes("-ss 1") || !joinedThumbnail.includes("-frames:v 1") || !thumbnailArgs.includes("thumbnail.jpg")) {
-    throw new Error("video worker thumbnail args must capture one frame at ~1 second");
+  if (joinedThumbnail.includes("-ss 1") || !joinedThumbnail.includes("-frames:v 1") || !thumbnailArgs.includes("thumbnail.jpg")) {
+    throw new Error("video worker thumbnail must use the first decoded frame, including sub-second clips");
   }
 
   console.log("Video worker package checks: ok");
@@ -5307,12 +5315,21 @@ function reportAuthBoundaryCoverage() {
   }
 }
 
-main()
-  .then(reportAuthBoundaryCoverage)
-  .catch((error) => {
-    // Report the coverage gap even on failure: a run that died halfway checked
-    // even less than a clean one, which is exactly when it matters.
-    reportAuthBoundaryCoverage();
+const videoWorkerOnly = process.argv.includes("--video-worker-only");
+if (videoWorkerOnly) {
+  try { await checkVideoWorkerPackage(); }
+  catch (error) {
     console.error(error instanceof Error ? error.message : error);
     process.exitCode = 1;
-  });
+  }
+} else {
+  main()
+    .then(reportAuthBoundaryCoverage)
+    .catch((error) => {
+      // Report the coverage gap even on failure: a run that died halfway checked
+      // even less than a clean one, which is exactly when it matters.
+      reportAuthBoundaryCoverage();
+      console.error(error instanceof Error ? error.message : error);
+      process.exitCode = 1;
+    });
+}

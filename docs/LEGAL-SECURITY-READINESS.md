@@ -349,6 +349,26 @@ static renderer 8/8 и loopback intake HTTP 9/9 учитываются отде�
 Повторная полная сборка после последней runtime-правки также прошла, включая
 все проверки типов и 115 cold-start. Это локальная проверка, не новый Preview.
 
+25 октября, G5-C54: локальный worker получил streaming download с проверкой
+размера/deadline, настоящий probe/transcode/full decode до публичного upload,
+ограничение обеих сторон видео и удаление global/stream/chapter metadata.
+Subprocess не наследует service credentials/FFREPORT; ошибки native/SDK не
+записываются исходным текстом. 086 — **только локальный кандидат** — закрывает
+browser/PUBLIC queue ACL/RLS и атомарно фиксирует asset + ready job с exact
+claim/version/receipt. Унаследованные table/column/RPC grants дают rollback.
+Native PostgreSQL 25/25, worker/security 62/62; не настоящий cloud Storage.
+Старые queue-миграции сами не задавали эту защитную границу: synthetic broad
+default grants воспроизводят риск, **не доказывают текущие ACL рабочей базы**.
+086 не применялась в Supabase, worker/Preview не выпускались.
+
+Private raw удаляется только по подтверждённому DB receipt. Однако orphan/TTL
+cleanup, SDK upload deadline, atomic failure marking и Linux OS resource/
+filesystem/network sandbox не приняты. Выходной размер проверяется после
+encoding, это не scratch-disk quota. Direct/signed upload и generated provider
+video не проходят новый worker decoder автоматически; private staging и
+generated variants остаются. Нативная Windows-проверка не равна Linux/container
+или облачной приёмке. Рекламы, расходов и рабочих изменений в этом цикле нет.
+
 Нет основания выставлять «100% защиты» или «100% юридической готовности».
 Изменение исходников не меняет уже опубликованную версию. Отдельно фиксируются
 локальные тесты, проверки Preview, юридическое согласование и рабочий выпуск.

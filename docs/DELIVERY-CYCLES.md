@@ -4370,6 +4370,72 @@ URL/outage не считается offline replay. Старый клиент м�
 staging/finalization signed-upload, decoder/container limits видео и облачная
 приёмка ещё не закрыты. 085 не применялась к Supabase, Preview не выпускался.
 
+### Цикл G5-C54: проверка видео и атомарная финализация worker — готов локально, 25 октября
+
+Продолжен существующий пункт file-acceptance. Субагенты после лимита предыдущего
+цикла не перезапускались для обхода ограничения; main завершил свой отдельный
+G5 scope. Новые чаты/проекты/облачные worker не создавались.
+
+- Private download теперь потоковый: точный настроенный HTTPS origin, запрет
+  redirect, deadline 60 секунд, точные объявленный/прочитанный размеры до
+  500 MiB. Исходник не копится целиком в памяти.
+- Настоящий ffprobe проверяет контейнер, codec, duration, geometry/fps/frames.
+  Ограничены обе стороны результата, не только ширина. MP4 проходит полный
+  native decode до upload; повреждённый payload с читаемым заголовком отказан.
+  Первый кадр обложки работает и для короткого видео. Global/stream metadata
+  и chapters удаляются; проверено, что приватная SYNTHETIC метка исходника
+  отсутствует в опубликованных байтах.
+- Native процессы запускаются без shell и service credentials/FFREPORT,
+  с deadline, пределом stdout/stderr и decoder options. SDK/native ошибки
+  не попадают в job error или poll/startup logs как исходный текст.
+- Worker проверяет исходный asset/raw/tenant/version и точный claim на каждом
+  переходе. Upload create-only, output path содержит claim tag. 085 generated
+  originals и известный legacy generated источник не переписываются.
+- Подготовлена **086 только локально**: зависимости 015/016/017/018+082+085.
+  Очередь закрывается RLS и table/column/RPC revoke от browser/PUBLIC.
+  Остаточные унаследованные browser grants останавливают миграцию с откатом,
+  а не выдаются за закрытую границу. Прямой доступ service role сохраняется.
+- `finalize_video_job` под row locks проверяет claim/version и одним DB commit
+  сохраняет asset и ready job. Неопределённый ответ разрешает один точный
+  replay receipt без новых uploads/render. Private raw удаляется только после
+  подтверждённого receipt; при двух потерянных ответах остаётся на месте.
+  Cleanup error не превращает подтверждённый ready в failed.
+
+**Локальная приёмка:** actual worker/native media + security boundaries **62/62**;
+actual 015/016 table-only + 017/018/082/085/086 на собственном PostgreSQL 17.11
+**25/25**, включая реальные lock waits/replay, rollback обоих rows, отказы
+чужому tenant/claim/version, immutable generated и inherited ACL. SQL SHA-256
+`8ad71f0b656af50ab818cd15e75c463bffc203e69b604695fe69923a6ccfd1c2`
+совпал с проверенным файлом. Cluster и свои scratch files удалены, postgres
+процессов не осталось. Queue/Storage/auth/network в media suite явно поддельные;
+это не настоящая облачная доставка и не полный migration chain.
+
+Standalone worker build, полный workspace typecheck, оба API resolution mode,
+CRM build и **115 cold-start** прошли. Выбранный регрессионный набор рекламы,
+квот, изоляции, generated identity/replay и отключённых запусков **1459/1459**;
+он не пересекается с 62 worker/security сценариями. Поднабор API surface 35/35
+не прибавляется повторно. Worker-only smoke не вызывает HTTP;
+сохранены и отдельно проверены честные NOT CHECKED отчёты полного smoke.
+Первый расширенный run поймал устаревший source pin `.then(...)`, а повтор
+native test под нагрузкой — остановку child до записи PID за 500 ms. Сохранён
+обычный smoke reporting; тест процесса получил 5 секунд на запуск/тайм-аут,
+не ослабляя kill/private-error assertions. Непрошедшие запуски не засчитаны.
+Логи: `node_modules/.cache/g5c54-{media-accepted,postgres-final,worker-build,`
+`workspace-build,api-surface-accepted,regression-accepted}.log`.
+
+**Остаток:** новый код не в Preview/Supabase/Production. Отдельные direct/signed
+upload и provider-generated video ещё не проходят этот decoder: нужны private
+staging/finalization и отдельная generated variant. Child flags/одиночный
+allocation limit не являются OS sandbox или общим RAM/disk quota; Linux
+container acceptance остаётся. При неподтверждённом Storage/DB результате
+возможны валидированные public orphans/сохранённый raw; retention/reconciliation
+пока нет. Failure job/asset marking — два CAS, не атомарная success-транзакция.
+SDK upload ожидание не получило общего deadline. Provider-independent replay,
+expiry и настоящая внешняя матрица остаются. Новая реклама, генерации и расходы
+не выполнялись; рабочая CRM, Baspana, салоны, WhatsApp, домены и чужие 059/065
+не менялись. Новый UI в этом цикле не создавался, мобильная/desktop приёмка
+предыдущего цикла не выдаётся за проверку облачного worker.
+
 ### Цикл G7-C21: шесть независимых направлений — интеграция локально, 25 октября
 
 После замечания владельца write scopes разделены: G1 operator requests,

@@ -71,6 +71,15 @@ async function isolated(fn: (ctx: any) => Promise<void>) {
     return ctx.fetch(String(url), init ?? {});
   }) as typeof fetch;
   const db = {
+    async rpc(name: string, args: Row) {
+      assert.equal(name, "finalize_video_job");
+      ctx.queries.push({ table: name, op: "rpc", filters: {}, row: args });
+      const asset = ctx.rows.ad_creative_assets.find((row: Row) => row.id === ASSET && row.workspace_id === args.p_workspace_id);
+      assert.equal(asset.workspace_id, args.p_workspace_id);
+      assert.equal(asset.updated_at, args.p_asset_version);
+      ctx.rows.ad_creative_assets = [{ ...asset, status: "ready", metadata: { ...asset.metadata, optimized: true } }];
+      return { data: { jobId: args.p_job_id, workspaceId: args.p_workspace_id, assetId: asset.id, status: "ready", promotion: args.p_result }, error: null };
+    },
     from(table: string) {
       const entry: Query = { table, op: "select", filters: {} };
       ctx.queries.push(entry);
@@ -78,7 +87,7 @@ async function isolated(fn: (ctx: any) => Promise<void>) {
       const settle = (single = false) => {
         ctx.onQuery?.(entry);
         const rows = (ctx.rows[table] ?? []).filter((row: Row) => Object.entries(entry.filters).every(([key, value]) => row[key] === value));
-        return Promise.resolve({ data: entry.row ? { id: JOB, ...entry.row } : single ? rows[0] ?? null : rows, error: ctx.errors[table] ?? null });
+        return Promise.resolve({ data: entry.row ? { id: entry.filters.id || JOB, ...entry.row } : single ? rows[0] ?? null : rows, error: ctx.errors[table] ?? null });
       };
       Object.assign(builder, {
         select: () => builder,
@@ -100,8 +109,8 @@ async function isolated(fn: (ctx: any) => Promise<void>) {
             ctx.storageCalls.push({ op: "download", bucket, key });
             return { data: ctx.raw, error: ctx.raw ? null : { message: "local download refused" } };
           },
-          upload: async (key: string) => { ctx.storageCalls.push({ op: "upload", bucket, key }); return { error: null }; },
-          remove: async (keys: string[]) => { ctx.storageCalls.push({ op: "remove", bucket, keys }); return { error: null }; },
+          upload: async (key: string) => { ctx.storageCalls.push({ op: "upload", bucket, key }); return { data: { path: key }, error: null }; },
+          remove: async (keys: string[]) => { ctx.storageCalls.push({ op: "remove", bucket, keys }); return { data: keys.map(name => ({ name })), error: null }; },
           getPublicUrl: (key: string) => ({ data: { publicUrl: `${STORAGE}/storage/v1/object/public/${bucket}/${key}` } }),
         };
       },
@@ -125,7 +134,8 @@ async function isolated(fn: (ctx: any) => Promise<void>) {
   }
 }
 
-const ownAsset = { id: ASSET, workspace_id: WORKSPACE, metadata: { retained: true } };
+const ownAsset = { id: ASSET, workspace_id: WORKSPACE, metadata: { retained: true }, file_type: "video", mime_type: "video/mp4", file_size: 100,
+  storage_bucket: "ad-creatives-raw", storage_path: `${WORKSPACE}/test.mp4`, updated_at: "2026-10-25T00:00:00Z" };
 const videoBody = { assetId: ASSET, rawPath: `${WORKSPACE}/test.mp4`, fileName: "test.mp4", inputMimeType: "video/mp4", inputSizeBytes: 100 };
 
 async function queueVideo(ctx: any, body = videoBody) {
@@ -166,11 +176,19 @@ test("SB malformed asset id cannot silently become a detached job", () => isolat
 
 async function runWorker(ctx: any, overrides: Row = {}) {
   const worker = await load("artifacts/video-worker/src/worker.ts");
+  const raw = ctx.raw ? Buffer.from(await ctx.raw.arrayBuffer()) : null;
+  ctx.fetch = (url: string) => {
+    assert.equal(url, `${STORAGE}/storage/v1/object/ad-creatives-raw/${WORKSPACE}/test.mp4`);
+    ctx.storageCalls.push({ op: "download", bucket: "ad-creatives-raw", key: `${WORKSPACE}/test.mp4` });
+    return new Response(raw ? new Uint8Array(raw) : null, { status: raw ? 200 : 404 });
+  };
   await worker.processJob(ctx.db, {
     tmpDir: os.tmpdir(), rawBucket: "ad-creatives-raw", outputBucket: "ad-creatives", ffmpegPath: "ffmpeg",
+    ffprobePath: "ffprobe", supabaseUrl: STORAGE, serviceRoleKey: "SYNTHETIC_WORKER_KEY", workerId: "SYNTHETIC_WORKER", maxAttempts: 3,
     crf: 23, preset: "ultrafast", maxWidth: 64, maxHeight: 64, fps: 5,
   }, {
     id: JOB, workspace_id: WORKSPACE, asset_id: ASSET, raw_bucket: "ad-creatives-raw",
+    status: "downloading", attempts: 1, claimed_by: "SYNTHETIC_WORKER", claimed_at: "2026-10-25T00:00:00Z", raw_size: raw?.length ?? 100,
     raw_path: `${WORKSPACE}/test.mp4`, source_file_name: "test.mp4", source_mime_type: "video/mp4", ...overrides,
   });
 }
@@ -180,14 +198,14 @@ test("SB worker rejects previously queued foreign assets before storage and neve
   await runWorker(ctx);
   assert.equal(ctx.storageCalls.length, 0);
   assert.ok(!ctx.queries.some((q: Query) => q.table === "ad_creative_assets" && q.op === "update"));
-  assert.equal(ctx.queries.find((q: Query) => q.table === "video_processing_jobs" && q.op === "update").row.status, "failed");
+  assert.ok(ctx.queries.some((q: Query) => q.table === "video_processing_jobs" && q.op === "update" && q.row?.status === "failed"));
 }));
 
 test("SB worker failure update is restricted to the verified workspace", () => isolated(async (ctx) => {
   ctx.rows.ad_creative_assets = [ownAsset];
   await runWorker(ctx);
   const update = ctx.queries.find((q: Query) => q.table === "ad_creative_assets" && q.op === "update");
-  assert.deepEqual(update.filters, { id: ASSET, workspace_id: WORKSPACE });
+  assert.deepEqual(update.filters, { id: ASSET, workspace_id: WORKSPACE, storage_bucket: "ad-creatives-raw", storage_path: `${WORKSPACE}/test.mp4`, updated_at: ownAsset.updated_at });
   assert.equal(update.row.status, "optimization_failed");
 }));
 
@@ -208,14 +226,13 @@ test("SB real local transcode preserves own asset scope and metadata on success"
   });
   if (!stdout) return;
   ctx.raw = { arrayBuffer: async () => stdout };
-  ctx.rows.ad_creative_assets = [ownAsset];
+  ctx.rows.ad_creative_assets = [{ ...ownAsset, file_size: stdout.length }];
   await runWorker(ctx);
-  const update = ctx.queries.find((q: Query) => q.table === "ad_creative_assets" && q.op === "update");
-  assert.deepEqual(update.filters, { id: ASSET, workspace_id: WORKSPACE });
-  assert.equal(update.row.status, "ready");
-  assert.equal(update.row.metadata.retained, true);
-  assert.equal(update.row.metadata.optimized, true);
-  assert.equal(ctx.queries.find((q: Query) => q.table === "video_processing_jobs" && q.row?.status === "ready").row.status, "ready");
+  const promotion = ctx.queries.find((q: Query) => q.table === "finalize_video_job" && q.op === "rpc");
+  assert.equal(promotion.row.p_workspace_id, WORKSPACE); assert.equal(promotion.row.p_asset_version, ownAsset.updated_at);
+  assert.equal(ctx.rows.ad_creative_assets[0].status, "ready");
+  assert.equal(ctx.rows.ad_creative_assets[0].metadata.retained, true);
+  assert.equal(ctx.rows.ad_creative_assets[0].metadata.optimized, true);
   assert.deepEqual(ctx.storageCalls.find((call: Row) => call.op === "remove").keys, [`${WORKSPACE}/test.mp4`]);
 }));
 

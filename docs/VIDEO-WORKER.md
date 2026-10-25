@@ -1,6 +1,11 @@
 # Video Optimization Worker
 
 Background worker for the large-video pipeline (`artifacts/video-worker`, `@workspace/video-worker`).
+**G5-C54 is a local candidate, not a deployed worker or a cloud migration.** It
+requires 086 after 015/016/017/018, 082 and 085. Do not deploy this source against
+an older schema. Production, Baspana and other working tenants were not tested
+or changed. The acceptance below uses synthetic files and disposable PostgreSQL.
+
 It runs **outside Vercel** (Railway or any Docker host) and processes `video_processing_jobs`
 created by the CRM API. The UI's signed raw-upload handshake still uses `POST /api/crm/video-jobs`;
 the public foundation contract is `POST /api/crm/video-processing-jobs` plus
@@ -11,45 +16,69 @@ the public foundation contract is `POST /api/crm/video-processing-jobs` plus
 
 1. Polls `video_processing_jobs` for `status = queued` with `attempts < VIDEO_WORKER_MAX_ATTEMPTS`.
 2. Claims one job atomically: `UPDATE ... SET status='downloading', claimed_by, claimed_at, attempts+1 WHERE id = ? AND status = 'queued'`. If zero rows return, another worker won the job.
-3. Downloads the raw original from the **private** `ad-creatives-raw` bucket.
-4. Transcodes with ffmpeg to an ads-friendly MP4 (see command below).
-5. Generates a JPG thumbnail from the **optimized** video at ~1 second.
-6. Uploads both to the public `ad-creatives` bucket:
-   - `optimized/{workspaceId|demo}/{jobId}.mp4`
-   - `optimized/{workspaceId|demo}/{jobId}-thumbnail.jpg`
-7. Updates the `ad_creative_assets` row: `public_url`/`storage_bucket`/`storage_path` now point at the optimized MP4, `status = ready`, metadata gets `optimized`, `optimizationStatus`, `thumbnailUrl`, `thumbnailSource: worker`, `inputSizeBytes`, `outputSizeBytes`, `compressionRatio`. Meta launches read `public_url`, so the raw original can never reach Meta.
-8. Marks the job `ready` (progress 100) with the migration-018 contract fields: `optimized_bucket`, `optimized_path`, `optimized_public_url`, `thumbnail_url`, `thumbnail_source = worker`, `output_mime_type = video/mp4`, `input_size_bytes`, `output_size_bytes`, `compression_ratio`, `completed_at`.
-9. Deletes the raw original **after** the optimized upload succeeded. Success sets `raw_deleted_at`; a failed delete keeps `status = ready` and records `raw_delete_error` (a raw-deletion failure never fails a ready optimized video). The job stays `status = ready` rather than flipping to `deleted_original`, so the app's ready check still matches.
-10. On any controlled failure (raw object missing, ffmpeg failed, upload failed, thumbnail failed) the job becomes `status = failed` with a truncated `error_message`; the UI shows a controlled Russian message and offers retry.
+3. Rechecks the exact workspace, asset/raw identity, size, MIME and asset version.
+   Immutable generated originals (085 or known legacy metadata) are refused:
+   their optimization needs a separate variant workflow, not an in-place rewrite.
+4. Streams the raw original from the configured **private** bucket, using only
+   the configured HTTPS Supabase origin, no redirects, a 60-second deadline and
+   exact byte count. It does not allocate the whole download in memory.
+5. Probes container/codec/geometry/duration/frame bounds, transcodes to H.264/AAC
+   MP4, probes and fully decodes the result, then takes its first frame as JPEG.
+   Global/stream metadata and chapters are removed from the published video.
+6. Uploads both validated files create-only to the configured public bucket:
+   - `optimized/{workspaceId}/{jobId}-{claimTag}.mp4`
+   - `optimized/{workspaceId}/{jobId}-{claimTag}-thumbnail.jpg`
+   The tag is derived from worker, claim timestamp and attempt. An old claim
+   cannot overwrite a newer claim's objects. Upload receipts and public URLs
+   must exactly match the server-derived identity.
+7. Calls the service-only 086 `finalize_video_job` RPC. It locks and checks the
+   exact claim and matching asset version, then commits asset + ready job in
+   **one database transaction**, preserving unrelated metadata and the 018 API
+   fields. The job stores an exact promotion receipt, including sizes/hashes.
+8. A lost RPC response gets one identical reconciliation call. An already
+   committed matching receipt returns without rewriting rows or uploading again.
+   A changed claim/version/receipt refuses; an unconfirmed result is not success.
+9. Deletes raw **only after a matching promotion acknowledgement**. A cleanup
+   failure keeps the confirmed result ready and records a generic cleanup error.
+   With two lost acknowledgements a committed ready result retains raw; manual
+   reconciliation/retention cleanup remains necessary.
+10. Controlled failures use fixed public error codes. Failure updates are scoped
+    to the exact claim and original asset version. Job/asset failure marking is
+    still two conditional writes, not the atomic success-promotion transaction.
 
 Status flow: `awaiting_upload → queued → downloading (10%) → transcoding (40%) → uploading (80%) → ready (100%)`, or `failed`. Retry (`POST /api/crm/video-processing-jobs/:id/retry`) resets a failed job to `queued`.
 
-Concurrency: one job at a time by default (`VIDEO_WORKER_MAX_CONCURRENT_JOBS = 1`). The `queued → downloading` UPDATE guarded by `status = 'queued'` is the lock — two workers can never process the same job.
+Concurrency: the current loop processes one job at a time. The guarded
+`queued → downloading` update chooses a claimant. Subsequent updates and final
+promotion additionally require its timestamp/attempt/worker identity. This does
+not promise exactly-once rendering across a manual requeue or a crashed worker.
 
-## ffmpeg command
+## Native Media Limits
 
-```
-ffmpeg -y -i input.<ext> \
-  -vf "scale='min(1080,iw)':-2,fps=30" \
-  -c:v libx264 -preset medium -crf 23 -pix_fmt yuv420p \
-  -c:a aac -b:a 128k \
-  -movflags +faststart \
-  -map_metadata -1 \
-  optimized.mp4
+The executable arguments live in `src/ffmpeg.ts`; do not copy an older width-only
+command. Both width (1080) and height (1920) are capped, preserving aspect ratio,
+with even dimensions, no crop/upscale, and configurable output fps (default 30).
+Only the first video and optional first audio stream are mapped. First-frame
+thumbnails also support clips shorter than one second.
 
-ffmpeg -y -ss 1 -i optimized.mp4 -frames:v 1 -q:v 3 thumbnail.jpg
-```
+Admission limits: input 500 MiB, duration 600 seconds, side 8192 pixels,
+16,777,216 pixels/frame, 120 fps and 72,000 declared/estimated frames. Output
+is checked at 100 MiB and JPEG at 10 MiB before reading/uploading them. These
+post-process checks do not constitute a scratch-disk quota during encoding.
 
-Cap width to `MAX_WIDTH` (1080) and auto-compute height with `-2` — this preserves aspect
-ratio and orientation, keeps an even height for libx264, and never crops faces. `-map_metadata -1`
-strips source metadata; output is MP4 H.264 + AAC with `+faststart`. CRF/preset/width/fps are
-tunable via env. The thumbnail is taken from the **optimized** MP4 (~1s frame), never the raw original.
+Native children have no shell, no inherited service credentials/FFREPORT, a
+256 KiB stdout/stderr cap, 15-second probe / 120-second processing deadlines,
+single-thread decode/encode, restricted container/protocol options and a
+128 MiB single-allocation limit. A corrupt payload with readable MP4 metadata
+is still rejected by full decoding. These are **not** a total memory budget or
+an OS security sandbox. Container filesystem/network/CPU/RAM/disk limits and the
+actual Linux FFmpeg version remain a deployment gate, not a Windows test result.
 
 ## Env vars
 
 | Var | Default | Notes |
 |---|---|---|
-| `SUPABASE_URL` | required | same project as the app |
+| `SUPABASE_URL` | required | exact HTTPS project origin; trailing slash removed |
 | `SUPABASE_SERVICE_ROLE_KEY` | required | server-side only — never in the frontend |
 | `VIDEO_OPTIMIZATION_RAW_BUCKET` | `ad-creatives-raw` | private raw-original (input) bucket |
 | `VIDEO_OPTIMIZATION_OUTPUT_BUCKET` | `ad-creatives` | public optimized (output) bucket |
@@ -60,26 +89,41 @@ tunable via env. The thumbnail is taken from the **optimized** MP4 (~1s frame), 
 | `VIDEO_WORKER_MAX_CONCURRENT_JOBS` | `1` | jobs processed at once (kept at 1 for MVP) |
 | `VIDEO_WORKER_TMP_DIR` | OS tmp (`/tmp`) | scratch space for downloads/transcodes |
 | `FFMPEG_PATH` | `ffmpeg` | ffmpeg binary path |
-| `FFPROBE_PATH` | `ffprobe` | ffprobe binary path (reserved) |
+| `FFPROBE_PATH` | `ffprobe` | required native probe binary |
 | `VIDEO_WORKER_CRF` | `23` | quality (lower = better/larger) |
 | `VIDEO_WORKER_PRESET` | `medium` | libx264 preset |
 | `VIDEO_WORKER_MAX_WIDTH` | `1080` | width cap |
-| `VIDEO_WORKER_MAX_HEIGHT` | `1920` | reserved (not used by the width-cap filter) |
+| `VIDEO_WORKER_MAX_HEIGHT` | `1920` | active height cap |
 | `VIDEO_WORKER_FPS` | `30` | output fps |
 
 ## Run locally
 
-Requires Node 20+ and `ffmpeg` on PATH.
+Requires Node 20+, `ffmpeg` and `ffprobe` on PATH. The worker command processes
+the configured queue: do not start it with working credentials for local QA.
+Run the isolated tests instead (no real SDK client, real credentials or sends):
 
 ```bash
-cd artifacts/video-worker
-pnpm install            # or npm install
-SUPABASE_URL=... SUPABASE_SERVICE_ROLE_KEY=... pnpm run dev
+pnpm test:video-worker-media
+pnpm test:video-worker-contract
+pnpm test:video-job-promotion-postgres
 ```
 
-`pnpm run build` compiles to `dist/`, `pnpm run start` runs the compiled worker.
+The PostgreSQL fixture requires the existing local Docker image; on this
+Windows workstation the verified, separately provisioned native fixture can be
+selected with `MEDINA_TEST_POSTGRES_NATIVE=1`. It accepts no external DB URL and
+removes only its own cluster. Actual table migrations are tested, not Storage
+policies or the complete application migration chain.
+
+Within `artifacts/video-worker`, `pnpm run build` compiles to `dist/`;
+`pnpm run start` starts the queue processor only after a separately approved
+deployment gate.
 
 ## Deploy to Railway
+
+**Deferred instructions, not authorization or a record of deployment.** First
+accept 086 and the private/public bucket contract in an isolated test environment,
+then accept the Linux runtime/resource sandbox. Obtain a separate release scope
+before changing a shared database, cloud worker or working credentials.
 
 1. Railway → New Service → Deploy from GitHub repo (`negis-medcall-mvp`).
 2. Service settings → **Root Directory**: `artifacts/video-worker`. Railway picks up the `Dockerfile` there (it installs ffmpeg — do not switch to plain Nixpacks Node without adding ffmpeg).
@@ -87,7 +131,7 @@ SUPABASE_URL=... SUPABASE_SERVICE_ROLE_KEY=... pnpm run dev
 3. Variables: set `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` (plus any `VIDEO_WORKER_*` overrides).
 4. Start command: none needed — the image `CMD` is `npm start`.
 5. Deploy. Logs show `[video-worker] started as ...`; the worker logs only job ids, statuses, and byte sizes — never URLs or credentials.
-6. Scale: one instance is enough for MVP. Multiple instances are safe — claims are atomic — but keep one until volume demands more.
+6. Keep one instance until failover/requeue and orphan retention are accepted.
 
 ## Troubleshooting
 
@@ -101,6 +145,15 @@ SUPABASE_URL=... SUPABASE_SERVICE_ROLE_KEY=... pnpm run dev
 
 ## Security
 
-- The service role key exists only in Vercel and Railway env — never in `artifacts/negis` (enforced by a smoke test).
-- Raw originals live in a private bucket, are never publicly served, and are deleted after successful optimization.
+- The service role key belongs only in approved server environments, never in
+  `artifacts/negis` or browser requests (enforced by a smoke test).
+- Worker raw originals must live in a private bucket and are retained until
+  database promotion is acknowledged. Validated orphan output may remain after
+  an unconfirmed upload/promotion; a retention/reconciliation process is pending.
 - The UI polls safe job endpoints, which expose only safe fields (no raw paths, no claim data).
+- 086 enables queue RLS and revokes browser/PUBLIC table, column and RPC access;
+  service-role access remains. A synthetic broad-grants scaffold tests this
+  boundary; it is not evidence of the ACL state of a working cloud database.
+- This worker does not validate the separate direct/signed-upload or generated
+  provider-video paths. Private staging/finalization and generated variants,
+  provider-independent replay and cloud acceptance remain open.
