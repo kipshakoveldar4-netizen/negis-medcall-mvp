@@ -77,9 +77,14 @@ test("CU5 paid media is reserved before provider calls and completion is durable
   const imageReservation = route.indexOf('operation: "generated_image"');
   const imageProvider = route.indexOf("image = await generateImage");
   const videoReservation = route.indexOf('operation: "generated_video"');
-  const videoProvider = route.indexOf("const job = await createVideoJob");
+  const videoProvider = route.indexOf("job = await createVideoJob");
+  const videoAdmission = route.indexOf("await admitGeneratedVideoWorkflow");
+  const videoDispatch = route.indexOf("await beginGeneratedVideoDispatch");
   assert.ok(imageReservation > 0 && imageReservation < imageProvider);
   assert.ok(videoReservation > 0 && videoReservation < videoProvider);
+  assert.ok(videoAdmission > 0 && videoAdmission < videoReservation, "private capacity must be reserved before paid quota");
+  assert.ok(videoDispatch > videoReservation && videoDispatch < videoProvider, "only the accepted dispatch nonce can call the provider");
+  assert.ok(route.indexOf("await linkGeneratedVideoProvider") > videoProvider, "the accepted provider job must be durably linked");
   assert.match(route, /completeContentGeneration/);
   assert.match(route, /generation_quota_exceeded/);
   assert.match(route, /x-idempotency-key/);

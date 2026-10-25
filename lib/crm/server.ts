@@ -6523,6 +6523,9 @@ export async function storeGeneratedCreative(input: {
    */
   idempotencyKey?: string;
 }): Promise<StoredGeneratedCreative> {
+  if (input.mimeType.trim().toLowerCase().startsWith("video/")) {
+    throw new Error("generated_video_native_validation_required");
+  }
   const supabase = getSupabaseServerClient();
   const storageBucket = AD_CREATIVE_BUCKET;
   const identity = input.idempotencyKey === undefined ? null : generatedCreativeIdentity({ workspaceId: input.workspaceId,

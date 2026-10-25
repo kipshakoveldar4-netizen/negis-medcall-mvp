@@ -16,11 +16,16 @@ type GenerationFetchResponse = {
   status: number;
   text: () => Promise<string>;
   arrayBuffer: () => Promise<ArrayBuffer>;
+  body?: ReadableStream<Uint8Array> | null;
+  headers?: Headers;
+  redirected?: boolean;
+  url?: string;
 };
 
 type GenerationFetch = (
   input: string,
-  init?: { method?: string; headers?: Record<string, string>; body?: string },
+  init?: { method?: string; headers?: Record<string, string>; body?: string; signal?: AbortSignal;
+    redirect?: "error"; credentials?: "omit"; cache?: "no-store" },
 ) => Promise<GenerationFetchResponse>;
 
 type GenerationConfig = {
@@ -37,7 +42,7 @@ type ProviderCall = { fetchImpl: GenerationFetch; config: GenerationConfig };
 
 type GenerationModuleShape = {
   createVideoJob: (input: ProviderCall & { prompt: string; size: string }) => Promise<VideoJob>;
-  downloadVideoContent: (input: ProviderCall & { jobId: string }) => Promise<Buffer>;
+  downloadVideoContent: (input: ProviderCall & { jobId: string; timeoutMs?: number }) => Promise<Buffer>;
   fetchVideoJob: (input: ProviderCall & { jobId: string }) => Promise<VideoJob>;
   generateImage: (input: ProviderCall & { prompt: string; size: string }) => Promise<GeneratedImage>;
   GenerationProviderError: new (status: number, message: string) => Error & { status: number };
@@ -141,6 +146,8 @@ const paidGeneration = (await import(
 const telegramDeliveryGuard = (await import(
   pathToFileURL(path.join(repoRoot, "lib", "content-studio", "telegram-delivery-guard.ts")).href
 )) as TelegramDeliveryModuleShape;
+const generatedVideoReceipt = await import(pathToFileURL(path.join(repoRoot,
+  "artifacts/negis/src/lib/generated-video-receipt.ts")).href);
 
 const {
   createVideoJob,
@@ -191,9 +198,11 @@ function stubFetch(
     };
     calls.push(call);
     const result = answer(call);
+    const stream = new Response(new Uint8Array(result.bytes ?? []), { headers: { "content-length": String(result.bytes?.length ?? 0) } });
     const response: GenerationFetchResponse = {
       ok: result.ok,
       status: result.status,
+      body: stream.body, headers: stream.headers, redirected: false,
       text: async () => result.text ?? "",
       arrayBuffer: async () => {
         const bytes = result.bytes ?? new Uint8Array();
@@ -618,11 +627,13 @@ test("GEN25 опрос без настроенного хранилища отв
     source.indexOf("async function handleVideoGeneration"),
     source.indexOf("export default async function handler"),
   );
-  const secretGuard = handler.slice(handler.indexOf("const secret = jobHandleSecret()"), handler.indexOf("const handleParam"));
+  const secretGuard = handler.slice(handler.indexOf("const secret = jobHandleSecret()"), handler.indexOf("const handle ="));
 
   // «Задача не найдена» отправило бы оператора искать несуществующую ошибку:
   // задача есть, проверить её принадлежность нечем.
-  assert.ok(/sendJson\(res,\s*503/.test(secretGuard), "отсутствие хранилища — отказ конфигурации, 503");
+  assert.ok(secretGuard.includes("if (!secret) return sendVideoWorkflowFailure(res)"));
+  const failure = source.slice(source.indexOf("function sendVideoWorkflowFailure"), source.indexOf("async function cancelUnsentVideo"));
+  assert.ok(failure.includes("failure.status : 503"), "отсутствие хранилища — отказ конфигурации, 503");
   assert.ok(!/sendJson\(res,\s*404/.test(secretGuard));
 });
 
@@ -633,8 +644,8 @@ test("GEN26 задача рендера переживает уход со ст�
   // состоянии React, терялся бы при любом переходе — вместе с оплаченным файлом.
   assert.ok(source.includes("VIDEO_JOB_KEY"), "подписанный идентификатор задачи обязан переживать переход");
   assert.ok(
-    /writeStoredVideoJob\(\{[\s\S]{0,200}url: genVideo\?\.url/.test(source),
-    "готовая задача хранится вместе со ссылкой, иначе возврат опросил бы её заново и записал ролик второй раз",
+    /writeStoredVideoJob\(\{ \.\.\.videoJob \}, key, \{ actorId, workspaceId \}\)/.test(source),
+    "дескриптор сохраняется отдельно для пользователя, а не вместе с недостоверной публичной ссылкой",
   );
   const generateVideo = source.slice(
     source.indexOf("const generateVideo = async"),
@@ -646,7 +657,7 @@ test("GEN26 задача рендера переживает уход со ст�
   // videoJob показывал бы «Ролик готов 100%» от прошлой задачи рядом с кнопкой
   // «Отправляем задачу...» и без самого ролика; оставленная запись в хранилище
   // вернула бы старый ролик после перезагрузки.
-  for (const reset of ["setGenVideo(null)", "setVideoJob(null)", "writeStoredVideoJob(null)"]) {
+  for (const reset of ["setGenVideo(null)", "setVideoJob(null)", "writeStoredVideoJob(null,"]) {
     assert.ok(generateVideo.includes(reset), `новая задача обязана выполнить ${reset}`);
   }
 });
@@ -694,7 +705,9 @@ test("GEN30 повторный опрос сохраняет ключ и про�
   // Провайдер отвечает «completed» на каждый запрос: без ключа повторяемости
   // потерянный ответ, перезагрузка или второй клик дали бы два неразличимых
   // креатива за одну оплаченную генерацию.
-  assert.ok(/idempotencyKey:\s*jobId/.test(handler), "сохранение ролика обязано быть повторяемым по идентификатору задачи");
+  assert.ok(handler.includes("resumeGeneratedVideoWorkflow(nativeConfig, context, generationKey)"));
+  assert.ok(handler.includes("receiveGeneratedVideoInput(nativeConfig, context, generationKey, buffer)"));
+  assert.equal(handler.includes("storeGeneratedCreative("), false, "сырой MP4 не может обойти закрытую проверку worker");
 
   const server = await readFile(path.join(repoRoot, "lib", "crm", "server.ts"), "utf8");
   const store = server.slice(
@@ -731,24 +744,28 @@ test("GEN31 сгенерированный файл возвращает ста�
     source.indexOf("function jobHandleSecret"),
   );
   const videoHandler = source.slice(
-    source.indexOf("async function handleVideoGeneration"),
+    source.indexOf("function sendVideoWorkflowState"),
     source.indexOf("export default async function handler"),
   );
 
-  for (const [kind, handler] of [["photo", photoHandler], ["video", videoHandler]] as const) {
+  for (const [kind, handler] of [["photo", photoHandler]] as const) {
     assert.ok(handler.includes("assetId:"), `${kind} response must return the saved creative id`);
     assert.ok(handler.includes("fileName,"), `${kind} response must return the stored file name`);
     assert.ok(handler.includes("creativeUrl: stored.publicUrl"), `${kind} response must return the public creative URL`);
   }
+  assert.ok(videoHandler.includes("nativeValidated: true"));
+  assert.ok(videoHandler.includes("assetId: result.assetId"));
+  assert.ok(videoHandler.includes("creativeUrl: result.creativeUrl"));
+  assert.ok(videoHandler.includes("fileName: result.fileName"));
 });
 
 test("GEN32 Content Studio keeps generated video identity across reload and handoff", async () => {
   const source = await readFile(studioPage, "utf8");
   for (const marker of [
-    "assetId: genVideo?.assetId",
-    "fileName: genVideo?.fileName",
-    "assetId: storedJob.assetId",
-    "fileName: storedJob.fileName",
+    "assetId: receipt.assetId",
+    "fileName: receipt.fileName",
+    "parseGeneratedVideoDraft(raw, owner)",
+    "serializeGeneratedVideoDraft(value, owner)",
     "assetId: file.assetId",
     "fileName: file.fileName",
   ]) {
@@ -913,26 +930,25 @@ test("GEN42 completed video without a file stays retryable and never looks succe
 
   assert.ok(polling.length > 0, "video polling result handling must be present");
   assert.ok(
-    /visibleStatus = body\.data\.status === "completed" && !completedUrl \? "failed"/.test(polling),
-    "a completed response without a usable URL must expose the retry state",
+    source.includes("parseGeneratedVideoPoll(body.data, videoReceiptContext(validationJobId))") && source.includes('status: "failed"'),
+    "a completed response requires the actual strict native receipt parser and exposes its failed state on rejection",
   );
   assert.ok(
-    polling.includes("новый платный рендер не запустится"),
+    source.includes("новая генерация не запускается"),
     "the operator must know that checking the existing job does not create another paid render",
   );
-  assert.ok(polling.includes("url: completedUrl"), "only the trimmed usable URL may become the generated video");
+  assert.ok(polling.includes("displayGeneratedVideoReceipt(confirmed.receipt)"), "only the strict native receipt becomes the generated video");
 });
 
 test("GEN43 checking a file-less completed job reuses its handle without another generation POST", async (t) => {
   for (const missingUrl of [undefined, " \n\t ", 17]) {
     await t.test(`unusable URL ${JSON.stringify(missingUrl)}`, async () => {
       const fixture = await localGenerationCallbacks("video", true);
-      const original: LocalVideoJob = { handle: "local-job+/=handle", status: "in_progress", progress: 4, formatSubstituted: false };
+      const original: LocalVideoJob = { handle: "fixture_original.ccccccccccccccccccccccccccccccccccccccccccc", status: "in_progress", progress: 4, formatSubstituted: false };
       const firstBody = fixture.deferBody("poll"), firstCleanup = fixture.video(original).poll();
       let retryBody: ReturnType<typeof generationDeferred<string>> | undefined, retryCleanup: void | (() => void);
       const invalid = JSON.stringify({ success: true, data: { status: "completed", progress: 100, creativeUrl: missingUrl } });
-      const valid = JSON.stringify({ success: true, data: { status: "completed", progress: 100,
-        creativeUrl: "  https://example.invalid/fixture.mp4 \n", assetId: "local-asset", fileName: "fixture.mp4", mimeType: "video/mp4", fileSize: 42 } });
+      const valid = JSON.stringify({ success: true, data: localNativeVideoReceipt() });
       try {
         await fixture.bodyStarted.promise;
         firstBody.resolve(invalid); await flushLocalVideoWork();
@@ -957,13 +973,10 @@ test("GEN43 checking a file-less completed job reuses its handle without another
         job = fixture.state.VideoJob as LocalVideoJob;
         assert.equal(job.status, "completed");
         assert.equal(job.handle, original.handle);
-        assert.deepEqual(JSON.parse(JSON.stringify(fixture.state.GenVideo)), {
-          url: "https://example.invalid/fixture.mp4", assetId: "local-asset", fileName: "fixture.mp4",
-          mimeType: "video/mp4", model: "", fileSize: 42,
-        });
+        assert.deepEqual(JSON.parse(JSON.stringify(fixture.state.GenVideo)), localNativeVideoFile());
         assert.deepEqual(fixture.toasts, [{ kind: "success", message: "Ролик готов" }]);
         assert.deepEqual(fixture.dispatches.map(({ url, method }) => ({ url, method })), Array.from({ length: 2 }, () => ({
-          url: `/api/content-studio/video-generation?handle=${encodeURIComponent(original.handle)}&workspaceId=workspace-a`, method: "GET",
+          url: `/api/content-studio/video-generation?handle=${encodeURIComponent(original.handle)}&workspaceId=33333333-3333-4333-8333-333333333333`, method: "GET",
         })));
         assert.equal(fixture.timerCalls(), 0);
         if (typeof retryCleanup === "function") retryCleanup();
@@ -1017,7 +1030,7 @@ test("GEN38 an ambiguous paid key survives a full reload in workspace-scoped ses
     setItem: (key: string, value: string) => values.set(key, value),
     removeItem: (key: string) => void values.delete(key),
   };
-  const key = "paid-photo::workspace-a";
+  const key = "paid-photo::33333333-3333-4333-8333-333333333333";
   const input = { kind: "photo" as const, prompt: "кабинет клиники", format: "reels" };
   const first = paidGeneration.resolvePaidGenerationAttempt(null, input, () => "44444444-4444-4444-8444-444444444444");
 
@@ -1066,14 +1079,14 @@ test("GEN38 an ambiguous paid key survives a full reload in workspace-scoped ses
 type LocalGenerationKind = "photo" | "video";
 type LocalGenerationInit = RequestInit & { expectedUserId?: string; dispatchGuard?: () => boolean };
 type LocalGenerationDispatch = { url: string; method: string; headers: Headers; body: unknown; signal?: AbortSignal | null };
-type LocalVideoJob = { handle: string; status: "queued" | "in_progress" | "completed" | "failed"; progress: number; formatSubstituted: boolean };
+type LocalVideoJob = { handle: string; status: "queued" | "in_progress" | "completed" | "failed"; progress: number; formatSubstituted: boolean; phase?: "generation" | "validation"; validationJobId?: string };
 type LocalVideoCallbacks = {
   poll: () => void | (() => void);
   persist: () => void | (() => void);
   restore: () => void | (() => void);
   retry: () => void | Promise<void>;
 };
-type LocalVideoRefs = { videoJobRef: { current: LocalVideoJob | null }; videoGenerationRevision: { current: number } };
+type LocalVideoRefs = { videoJobRef: { current: LocalVideoJob | null }; videoGenerationRevision: { current: number }; videoCommandRef: { current: object | null } };
 type LocalPackageBrief = { mode: string; format: string; service: string; city: string; offer: string; audience: string;
   goal: string; tone: string; materialNotes: string };
 type LocalPackageCallbacks = { generate: () => Promise<void>; click: () => void; disabled: boolean;
@@ -1136,6 +1149,23 @@ function localUsageSummary(planTitle = "local-usage"): LocalUsageSummary {
     videoSeconds: { used: 8, limit: 60, remaining: 52, enabled: true }, videoSecondsPerGeneration: 8 };
 }
 
+function localNativeVideoReceipt() {
+  const job = "55555555-5555-4555-8555-555555555555";
+  const stem = `https://upload.synthetic.invalid/storage/v1/object/public/ad-creatives/optimized/33333333-3333-4333-8333-333333333333/${job}-${"a".repeat(20)}`;
+  return { status: "completed", progress: 100, phase: "validation", nativeValidated: true, validationJobId: job,
+    creativeUrl: `${stem}.mp4`, thumbnailUrl: `${stem}-thumbnail.jpg`, assetId: "66666666-6666-5666-8666-666666666666",
+    fileName: `negis-video-${"a".repeat(20)}.mp4`, mimeType: "video/mp4", fileSize: 84, sha256: "b".repeat(64) };
+}
+function localNativeVideoFile() {
+  const r = localNativeVideoReceipt();
+  return { url: r.creativeUrl, thumbnailUrl: r.thumbnailUrl, assetId: r.assetId, fileName: r.fileName,
+    mimeType: r.mimeType, model: "", fileSize: r.fileSize, sha256: r.sha256, nativeValidated: true, validationJobId: r.validationJobId };
+}
+function localNativeVideoDraft(job: LocalVideoJob) {
+  return JSON.stringify({ version: 2, actorId: "11111111-1111-4111-8111-111111111111", workspaceId: "33333333-3333-4333-8333-333333333333",
+    ...job, phase: job.status === "completed" ? "validation" : job.phase ?? "generation",
+    ...(job.status === "completed" ? { validationJobId: localNativeVideoReceipt().validationJobId } : {}) });
+}
 function generationDeferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((done) => { resolve = done; });
@@ -1160,7 +1190,7 @@ const generationCallbackPrograms = (async () => {
       visit(ast);
       assert.equal(matches.length, 1, `execute exactly one actual ${name} declaration`);
       return matches[0].getText(ast);
-    }).join("\n");
+    }).join("\n").replaceAll("import.meta.env", "handoffEnv");
   };
   const compile = (source: string, names: string[], exposed: string[]) => ts.transpileModule(
     `${select(source, names)}\nexports.selected = { ${exposed.join(", ")} };`,
@@ -1203,7 +1233,7 @@ const generationCallbackPrograms = (async () => {
     if (ts.isCallExpression(node) && node.expression.getText(ast) === "useEffect" && node.arguments[0]) {
       const callback = node.arguments[0].getText(ast);
       if (callback.includes("const completedUrl =")) videoEffects.poll.push(callback);
-      if (callback.includes("writeStoredVideoJob({") && callback.includes("url: genVideo?.url")) videoEffects.persist.push(callback);
+      if (callback.includes("writeStoredVideoJob({ ...videoJob }") && callback.includes("videoJobRef.current !== videoJob")) videoEffects.persist.push(callback);
       if (callback.includes("const storedJob = readStoredVideoJob(")) videoEffects.restore.push(callback);
       let readsLibrary = false;
       const visitRead = (item: import("typescript").Node) => {
@@ -1300,12 +1330,13 @@ const generationCallbackPrograms = (async () => {
     && node.expression.left.getText(ast) === "videoJobRef.current" && node.expression.right.getText(ast) === "videoJob");
   assert.equal(jobRefAssignments.length, 1, "execute the real job-ref assignment on each simulated render");
   const videoRefs = `exports.selected = function renderVideoRefs(videoJob) {
-    ${select(source, ["videoJobRef", "videoGenerationRevision"])}
+    ${select(source, ["videoJobRef", "videoGenerationRevision", "videoCommandRef"])}
     ${jobRefAssignments[0].getText(ast)}
-    return { videoJobRef, videoGenerationRevision };
+    return { videoJobRef, videoGenerationRevision, videoCommandRef };
   };`;
   const videoNames = ["safeJson", "withWorkspace", "VIDEO_JOB_KEY", "VIDEO_POLL_INTERVAL_MS", "STORAGE_KEY",
-    "readStoredVideoJob", "writeStoredVideoJob", "readVideos", "writeVideos", "generationRefusalText", "isSessionAlive", "isGenerationSessionCurrent", "pollingSessionState"];
+    "readStoredVideoJob", "writeStoredVideoJob", "readVideos", "writeVideos", "generationRefusalText", "isSessionAlive", "isGenerationSessionCurrent", "pollingSessionState",
+    "videoJobStorageKey", "videoReceiptContext", "clearGeneratedVideoAccess", "displayGeneratedVideoReceipt", "handoffAccessDenied"];
   const video = `${select(source, videoNames)}
     ${texts(libraryRestore.top, videoNames)}
     ${texts(libraryRestore.nested, videoNames)}
@@ -1520,7 +1551,7 @@ const generationCallbackPrograms = (async () => {
     usageParser: ts.transpileModule(`${await readFile(path.join(repoRoot, "artifacts/negis/src/lib/contentGenerationUsage.ts"), "utf8")}
       exports.selected = { parseGenerationUsageSummary };`,
       { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText,
-    paidGates: ts.transpileModule(`exports.selected = ({ generationUsage, generationUsageLoading, genBusy, videoJob }) =>
+    paidGates: ts.transpileModule(`exports.selected = ({ generationUsage, generationUsageLoading, genBusy, videoJob, videoRetryBusy = false }) =>
       ({ photo: ${paidGates.photo[0]}, video: ${paidGates.video[0]} });`,
       { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText,
     library: ts.transpileModule(libraryProgram, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText,
@@ -1562,6 +1593,7 @@ const generationCallbackPrograms = (async () => {
       "safeJson", "withWorkspace", "paidGenerationHeaders", "PAID_GENERATION_ATTEMPT_KEY",
       "paidGenerationAttemptKey", "readBrowserPaidGenerationAttempt", "writeBrowserPaidGenerationAttempt",
       "clearBrowserPaidGenerationAttempt", "VIDEO_JOB_KEY", "writeStoredVideoJob", "generationRefusalText",
+      "videoJobStorageKey", "videoReceiptContext", "clearGeneratedVideoAccess", "displayGeneratedVideoReceipt", "handoffAccessDenied",
       "isSessionAlive", "isGenerationSessionCurrent", "usageRequestRef", "refreshGenerationUsage", "generatePhoto", "generateVideo",
     ], ["generatePhoto", "generateVideo", "refreshGenerationUsage", "paidGenerationAttemptKey", "clearBrowserPaidGenerationAttempt"]),
     api: compile(await readFile(path.join(repoRoot, "artifacts/negis/src/lib/api.ts"), "utf8"), [
@@ -1585,6 +1617,8 @@ function evaluateGenerationFixture<T>(code: string, bindings: Record<string, unk
     exports, Error, DOMException, AbortController, AbortSignal, Headers, Response, Blob, URL, TextEncoder,
     getSignOutRevision: () => 0, isSignOutPending: () => false, signOutRevisionRef: { current: 0 },
     readContentVideoVersion: telegramDeliveryGuard.readContentVideoVersion,
+    ...generatedVideoReceipt,
+    handoffEnv: { VITE_SUPABASE_URL: "https://upload.synthetic.invalid" },
     fetch: () => { throw new Error("Unmocked generation network call"); },
     ...bindings,
     require(name: string) {
@@ -1662,7 +1696,7 @@ function generationLifetime(code: string, bindings: Record<string, unknown>) {
   };
 }
 
-async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime = false, initialWorkspace = "workspace-a") {
+async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime = false, initialWorkspace = "33333333-3333-4333-8333-333333333333") {
   const programs = await generationCallbackPrograms;
   const usageParser = evaluateGenerationFixture<{ parseGenerationUsageSummary: (value: unknown) => LocalUsageSummary | null }>(programs.usageParser, {});
   const paidGates = evaluateGenerationFixture<(input: Record<string, unknown>) => { photo: boolean; video: boolean }>(programs.paidGates, {});
@@ -1712,8 +1746,8 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
     isRealWorkspace: (workspaceId?: string) => boolean;
   }>(programs.storage, { window });
   localStorage.setItem(storage.WORKSPACE_SELECTOR_KEY, initialWorkspace);
-  let sdkActor = "actor-a", sdkToken = "fixture-token-a";
-  let authState = { user: { id: "actor-a" } as { id: string } | null, userRole: "owner", clinicId: initialWorkspace, workspacePurpose: "clinic_services",
+  let sdkActor = "11111111-1111-4111-8111-111111111111", sdkToken = "fixture-token-a";
+  let authState = { user: { id: "11111111-1111-4111-8111-111111111111" } as { id: string } | null, userRole: "owner", clinicId: initialWorkspace, workspacePurpose: "clinic_services",
     isLoading: false, isSigningOut: false, isDemoMode: false, isImpersonation: false };
   const subscriptions = new Set<(event: string, session: { user: { id: string } }) => void>();
   let tokenWait: ReturnType<typeof generationDeferred<void>> | undefined;
@@ -1777,7 +1811,7 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
   const result = kind === "photo"
     ? { creativeUrl: "https://example.invalid/local-a.png", assetId: "asset-a", fileName: "local-a.png",
       mimeType: "image/png", model: "fixture-image", fileSize: 42 }
-    : { handle: "local-a-signed-handle", status: "queued", progress: 0, formatSubstituted: false };
+    : { handle: "fixture_a.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", status: "queued", progress: 0, formatSubstituted: false, phase: "generation" };
   const reply = { success: true, mode: "fixture", data: result };
   const usageReply: { body: unknown; text?: string } = { body: { success: true, data: localUsageSummary() } };
   const handoffStatuses: Partial<Record<Resource, number>> = {};
@@ -1844,8 +1878,7 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
     }
     return response;
   };
-  const pollReply = { success: true, data: { status: "completed", progress: 100, creativeUrl: "https://example.invalid/poll-a.mp4",
-    assetId: "poll-asset-a", fileName: "poll-a.mp4", mimeType: "video/mp4", fileSize: 84 } };
+  const pollReply = { success: true, data: localNativeVideoReceipt() };
   const api = evaluateGenerationFixture<{ crmFetch: (url: string, init?: LocalGenerationInit) => Promise<Response>;
     CrmApiError: new (status: number, code: string, message: string) => Error }>(programs.api, {
     apiUrl: (url: string) => url,
@@ -1894,24 +1927,24 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
         return localResponse({ success: !handoffStatuses[method === "PATCH" ? "approval" : "metadata"], data: {} },
           method === "PATCH" ? "approval" : "metadata");
       }
-      if (url === `/api/content-studio/generate-${kind}?workspaceId=workspace-a` && method === "POST") {
+      if (url === `/api/content-studio/generate-${kind}?workspaceId=33333333-3333-4333-8333-333333333333` && method === "POST") {
         return localResponse(reply, "generation");
       }
       if (url.startsWith("/api/content-studio/video-generation?")) {
         assert.equal(method, "GET");
         return localResponse(pollReply, "poll");
       }
-      if (/^\/api\/crm\/content-videos\?workspaceId=workspace-[ab]$/.test(url)) {
+      if (/^\/api\/crm\/content-videos\?workspaceId=(?:33333333-3333-4333-8333-333333333333|44444444-4444-4444-8444-444444444444)$/.test(url)) {
         assert.equal(method, "GET");
         return localResponse({ success: true, mode: "supabase", data: { videos: [] } }, "restore");
       }
-      assert.match(url, /^\/api\/content-studio\/usage\?workspaceId=workspace-[ab]$/);
+      assert.match(url, /^\/api\/content-studio\/usage\?workspaceId=(?:33333333-3333-4333-8333-333333333333|44444444-4444-4444-8444-444444444444)$/);
       assert.equal(method, "GET", "no unlisted paid, auth or follow-up endpoint may dispatch");
       return localResponse(usageReply.body, "usage");
     },
   }, { "@/lib/serverAuth": auth });
   const setters = Object.fromEntries([
-    "GenBusy", "GenNotice", "GenImage", "GenVideo", "VideoJob", "GenerationUsage", "GenerationUsageLoading", "Videos", "ActiveId", "PhotoBusy",
+    "GenBusy", "GenNotice", "GenImage", "GenVideo", "VideoJob", "VideoRetryBusy", "GenerationUsage", "GenerationUsageLoading", "Videos", "ActiveId", "PhotoBusy",
     "Loading", "Notice", "ContentPackage", "ContentPackageId", "SelectedAdVariantId", "PackageGenerationMode", "GenPrompt", "PackageBrief", "Form", "AdvertisingGoalContext",
     "PhotoTexts", "PhotoSuggestMode", "PhotoFormat", "PhotoLayout", "PhotoSourceType", "PhotoSourceName", "PhotoSourceUrl", "PhotoPreviewUrl", "PhotoBlob",
   ].map((field) => [`set${field}`, (update: unknown) => {
@@ -1924,7 +1957,7 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
     onChildUnmount(sessionRef: LocalGenerationSession["sessionRef"]) { photoScopeCleanups.get(sessionRef)?.(); photoScopeCleanups.delete(sessionRef); },
   }) : undefined;
   const mounted = lifetime?.render();
-  const captured = mounted?.session ?? { actorId: "actor-a", workspaceId: "workspace-a", localDraftsOnly: false, sessionRef: { current: new AbortController() } };
+  const captured = mounted?.session ?? { actorId: "11111111-1111-4111-8111-111111111111", workspaceId: "33333333-3333-4333-8333-333333333333", localDraftsOnly: false, sessionRef: { current: new AbortController() } };
   const timers = new Map<number, () => void>();
   const timerDelays: number[] = [];
   let nextTimer = 0;
@@ -2212,11 +2245,13 @@ async function localGenerationCallbacks(kind: LocalGenerationKind, withLifetime 
       return { ...next, hydrate: captureLocalDrafts(next.session, libraryRefsFor(next.session)) };
     },
     video(job: LocalVideoJob | null, file: unknown = null) {
+      if (job) job.phase ??= "generation";
       state.VideoJob = job; state.GenVideo = file;
       refCursor = 0; renderVideoRefs(job);
       return captureVideo(job, file);
     },
-    videoKey: (workspaceId = storage.readWorkspaceId()) => `negis_content_studio_video_job::${workspaceId}`,
+    // This seeding helper also names deliberately invalid demo keys, which production must never read.
+    videoKey: (workspaceId = storage.readWorkspaceId()) => `negis_content_studio_video_job::${workspaceId}::${captured.actorId}`,
     localStorage, timers, timerDelays, pollReply, videoRefs, timerCalls: () => nextTimer, storageReads,
     videoGenerationAttempt: bindings.videoGenerationAttempt,
     generate: kind === "photo" ? page.generatePhoto : page.generateVideo,
@@ -2260,8 +2295,8 @@ for (const kind of ["photo", "video"] as const) {
         const receiptA = paidGeneration.readStoredPaidGenerationAttempt(fixture.sessionStorage, fixture.pendingKey());
         assert.ok(receiptA, "A's real callback must persist its paid receipt before dispatch");
 
-        if (boundary === "workspace") fixture.workspace("workspace-b");
-        else fixture.sdkSession("actor-b", "fixture-token-b", null); // No auth event: only the spinner may finish locally.
+        if (boundary === "workspace") fixture.workspace("44444444-4444-4444-8444-444444444444");
+        else fixture.sdkSession("22222222-2222-4222-8222-222222222222", "fixture-token-b", null); // No auth event: only the spinner may finish locally.
         if (boundary === "account") {
           assert.equal(fixture.lifetime!.render().key, fixture.mounted!.key);
           assert.equal(fixture.mounted!.session.isSessionAlive(fixture.captured.sessionRef.current), true);
@@ -2298,7 +2333,7 @@ for (const kind of ["photo", "video"] as const) {
     try {
       await fixture.tokenStarted.promise;
       assert.equal(fixture.dispatches.length, 0, "the SDK lookup must still be pending");
-      fixture.sdkSession("actor-b");
+      fixture.sdkSession("22222222-2222-4222-8222-222222222222");
       token.resolve();
       await work;
       assert.deepEqual(fixture.dispatches.filter((call) => call.method === "POST").map(({ url, headers }) => ({
@@ -2315,13 +2350,13 @@ for (const kind of ["photo", "video"] as const) {
       assert.equal(fixture.dispatches.length, 0);
       const receipt = paidGeneration.readStoredPaidGenerationAttempt(fixture.sessionStorage, fixture.pendingKey());
       assert.ok(receipt);
-      fixture.sdkSession("actor-a", "fixture-token-a-refreshed", "TOKEN_REFRESHED");
+      fixture.sdkSession("11111111-1111-4111-8111-111111111111", "fixture-token-a-refreshed", "TOKEN_REFRESHED");
       token.resolve();
       await work;
       await new Promise<void>((resolve) => setImmediate(resolve));
       const posts = fixture.dispatches.filter((call) => call.method === "POST");
       assert.equal(posts.length, 1);
-      assert.equal(posts[0].url, `/api/content-studio/generate-${kind}?workspaceId=workspace-a`);
+      assert.equal(posts[0].url, `/api/content-studio/generate-${kind}?workspaceId=33333333-3333-4333-8333-333333333333`);
       assert.equal(posts[0].headers.get("Authorization"), "Bearer fixture-token-a-refreshed");
       assert.equal(posts[0].headers.get("X-Idempotency-Key"), receipt.requestKey);
       assert.deepEqual(posts[0].body, { prompt: "Synthetic clinic room", format: "reels" });
@@ -2333,7 +2368,7 @@ for (const kind of ["photo", "video"] as const) {
         kind === "photo" ? { ...file, url: creativeUrl } : fixture.reply.data);
       assert.equal(fixture.toasts.length, kind === "photo" ? 1 : 0);
       assert.deepEqual(fixture.dispatches.filter((call) => call.method === "GET").map((call) => call.url),
-        ["/api/content-studio/usage?workspaceId=workspace-a"]);
+        ["/api/content-studio/usage?workspaceId=33333333-3333-4333-8333-333333333333"]);
       assert.equal((fixture.state.GenerationUsage as LocalUsageSummary).planTitle, "local-usage");
     } finally { token.resolve(); await work; }
   });
@@ -2353,16 +2388,16 @@ for (const kind of ["photo", "video"] as const) {
           await (token ? fixture.tokenStarted.promise : fixture.bodyStarted.promise);
           const dispatchCount = phase === "token" ? 0 : 1;
           assert.equal(fixture.dispatches.length, dispatchCount);
-          if (boundary === "workspace") fixture.workspace("workspace-b");
+          if (boundary === "workspace") fixture.workspace("44444444-4444-4444-8444-444444444444");
           if (boundary === "role") fixture.auth({ userRole: "admin" });
           if (boundary === "purpose") fixture.auth({ workspacePurpose: "marketing" });
           if (boundary === "account") {
-            fixture.sdkSession("actor-b");
+            fixture.sdkSession("22222222-2222-4222-8222-222222222222");
             assert.equal(controller.signal.aborted, true, "an SDK auth event forbids even spinner cleanup");
           }
           if (boundary === "A-B-A") {
-            fixture.sdkSession("actor-b");
-            fixture.sdkSession("actor-a", "fixture-token-a-returned");
+            fixture.sdkSession("22222222-2222-4222-8222-222222222222");
+            fixture.sdkSession("11111111-1111-4111-8111-111111111111", "fixture-token-a-returned");
             assert.equal(controller.signal.aborted, true, "SDK abort must precede the batched wrapper render");
           }
           if (boundary === "unmount") lifetime.unmount();
@@ -2409,7 +2444,7 @@ for (const kind of ["photo", "video"] as const) {
     const work = fixture.generate();
     try {
       await fixture.tokenStarted.promise;
-      fixture.sdkSession("actor-a", "fixture-token-a-refreshed", "TOKEN_REFRESHED");
+      fixture.sdkSession("11111111-1111-4111-8111-111111111111", "fixture-token-a-refreshed", "TOKEN_REFRESHED");
       const refreshed = lifetime.render();
       assert.equal(refreshed.key, mounted.key);
       assert.equal(refreshed.session.sessionRef.current, controller);
@@ -2437,7 +2472,7 @@ for (const kind of ["photo", "video"] as const) {
     paidGeneration.writeStoredPaidGenerationAttempt(fixture.sessionStorage, keyA, original);
     paidGeneration.writeStoredPaidGenerationAttempt(fixture.sessionStorage, keyA, replacement);
     const replacementRaw = fixture.sessionStorage.getItem(keyA);
-    fixture.workspace("workspace-b");
+    fixture.workspace("44444444-4444-4444-8444-444444444444");
     const keyB = fixture.pendingKey();
     paidGeneration.writeStoredPaidGenerationAttempt(fixture.sessionStorage, keyB, replacement);
     fixture.clearReceipt(keyA, original.requestKey);
@@ -2459,8 +2494,8 @@ for (const boundary of ["workspace", "account", "account-event"] as const) {
       await fixture.bodyStarted.promise;
       assert.equal(fixture.dispatches.length, 1);
       assert.equal(fixture.dispatches[0].method, "GET");
-      if (boundary === "workspace") fixture.workspace("workspace-b");
-      else fixture.sdkSession("actor-b", "fixture-token-b", boundary === "account-event" ? "SIGNED_IN" : null);
+      if (boundary === "workspace") fixture.workspace("44444444-4444-4444-8444-444444444444");
+      else fixture.sdkSession("22222222-2222-4222-8222-222222222222", "fixture-token-b", boundary === "account-event" ? "SIGNED_IN" : null);
       if (boundary === "account") {
         assert.equal(fixture.lifetime!.render().key, fixture.mounted!.key);
         assert.equal(fixture.mounted!.session.isSessionAlive(fixture.captured.sessionRef.current), true);
@@ -2495,10 +2530,10 @@ for (const kind of ["photo", "video"] as const) {
       await new Promise<void>((resolve) => setImmediate(resolve));
       assert.deepEqual(fixture.sessionStorage.failedReads, [key], "exercise the actual cleanup comparison, not the initial receipt write");
       assert.deepEqual(fixture.mutations.slice(mutations), kind === "video"
-        ? [{ storage: "local", operation: "set", key: fixture.videoKey("workspace-a") }] : [],
+        ? [{ storage: "local", operation: "set", key: fixture.videoKey("33333333-3333-4333-8333-333333333333") }] : [],
         "failed receipt cleanup may only cache the accepted video handle at its own workspace key");
       assert.equal(fixture.sessionStorage.getItem(key), stored);
-      if (kind === "video") assert.deepEqual(JSON.parse(fixture.localStorage.getItem(fixture.videoKey())!), fixture.reply.data);
+      if (kind === "video") assert.deepEqual(JSON.parse(fixture.localStorage.getItem(fixture.videoKey())!), JSON.parse(localNativeVideoDraft(fixture.reply.data as LocalVideoJob)));
       const { creativeUrl, ...file } = fixture.reply.data;
       assert.deepEqual(JSON.parse(JSON.stringify(fixture.state[kind === "photo" ? "GenImage" : "VideoJob"])),
         kind === "photo" ? { ...file, url: creativeUrl } : fixture.reply.data,
@@ -2507,8 +2542,8 @@ for (const kind of ["photo", "video"] as const) {
       assert.equal(fixture.state.GenBusy, null);
       assert.equal(fixture.toasts.length, kind === "photo" ? 1 : 0);
       assert.deepEqual(fixture.dispatches.map(({ method, url }) => ({ method, url })), [
-        { method: "POST", url: `/api/content-studio/generate-${kind}?workspaceId=workspace-a` },
-        { method: "GET", url: "/api/content-studio/usage?workspaceId=workspace-a" },
+        { method: "POST", url: `/api/content-studio/generate-${kind}?workspaceId=33333333-3333-4333-8333-333333333333` },
+        { method: "GET", url: "/api/content-studio/usage?workspaceId=33333333-3333-4333-8333-333333333333" },
       ]);
       const retained = paidGeneration.readStoredPaidGenerationAttempt(fixture.sessionStorage, key);
       assert.ok(retained);
@@ -2682,7 +2717,7 @@ for (const order of ["newest-first", "oldest-first"] as const) {
       assert.equal((fixture.state.GenerationUsage as LocalUsageSummary).planTitle, "new-usage");
       assert.equal(fixture.state.GenerationUsageLoading, false);
       assert.deepEqual(fixture.toasts, []); assert.deepEqual(fixture.uploads, []);
-      assert.ok(fixture.dispatches.every((call) => call.method === "GET" && call.url === "/api/content-studio/usage?workspaceId=workspace-a"));
+      assert.ok(fixture.dispatches.every((call) => call.method === "GET" && call.url === "/api/content-studio/usage?workspaceId=33333333-3333-4333-8333-333333333333"));
     } finally {
       oldBody.resolve("{}"); newBody?.resolve("{}"); await Promise.allSettled([oldWork, newWork]); fixture.lifetime!.unmount();
     }
@@ -2771,11 +2806,11 @@ for (const boundary of ["workspace", "account", "role", "purpose", "unmount", "A
       try {
         await (token ? token.started : body!.started);
         const dispatchCount = phase === "token" ? 0 : 1; assert.equal(fixture.dispatches.length, dispatchCount);
-        if (boundary === "workspace") fixture.workspace("workspace-b");
+        if (boundary === "workspace") fixture.workspace("44444444-4444-4444-8444-444444444444");
         if (boundary === "role") fixture.auth({ userRole: "admin" });
         if (boundary === "purpose") fixture.auth({ workspacePurpose: "marketing" });
-        if (boundary === "account" || boundary === "A-B-A") fixture.sdkSession("actor-b");
-        if (boundary === "A-B-A") fixture.sdkSession("actor-a", "fixture-returned-token");
+        if (boundary === "account" || boundary === "A-B-A") fixture.sdkSession("22222222-2222-4222-8222-222222222222");
+        if (boundary === "A-B-A") fixture.sdkSession("11111111-1111-4111-8111-111111111111", "fixture-returned-token");
         if (boundary === "unmount") fixture.lifetime!.unmount();
         else assert.notEqual(fixture.lifetime!.render().key, mounted.key);
         assert.equal(controller.signal.aborted, true); assert.equal(fixture.captured.sessionRef.current, null);
@@ -2812,18 +2847,17 @@ test("GEN78 actual paid JSX gates reject inactive or untracked quota and preserv
 });
 
 const LOCAL_POLL_JOB: LocalVideoJob = {
-  handle: "local-poll-a+/=handle", status: "in_progress", progress: 7, formatSubstituted: false,
+  handle: "fixture_poll.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", status: "in_progress", progress: 7, formatSubstituted: false, phase: "generation",
 };
-const LOCAL_POLL_FILE = { url: "https://example.invalid/poll-a.mp4", assetId: "poll-asset-a", fileName: "poll-a.mp4",
-  mimeType: "video/mp4", model: "", fileSize: 84 };
+const LOCAL_POLL_FILE = localNativeVideoFile();
 const flushLocalVideoWork = () => new Promise<void>((resolve) => setImmediate(resolve));
 type LocalVideoBoundary = "account-no-event" | "account-event" | "A-B-A" | "workspace" | "unmount";
 function changeLocalVideoScope(fixture: Awaited<ReturnType<typeof localGenerationCallbacks>>, boundary: LocalVideoBoundary) {
-  if (boundary === "workspace") fixture.workspace("workspace-b");
+  if (boundary === "workspace") fixture.workspace("44444444-4444-4444-8444-444444444444");
   else if (boundary === "unmount") fixture.lifetime!.unmount();
   else {
-    fixture.sdkSession("actor-b", "fixture-token-b", boundary === "account-no-event" ? null : "SIGNED_IN");
-    if (boundary === "A-B-A") fixture.sdkSession("actor-a", "fixture-token-a-returned");
+    fixture.sdkSession("22222222-2222-4222-8222-222222222222", "fixture-token-b", boundary === "account-no-event" ? null : "SIGNED_IN");
+    if (boundary === "A-B-A") fixture.sdkSession("11111111-1111-4111-8111-111111111111", "fixture-token-a-returned");
   }
 }
 
@@ -2916,15 +2950,15 @@ test("GEN56 actual poll allows same-actor refresh and completes one original-han
   const cleanup = fixture.video({ ...LOCAL_POLL_JOB }).poll();
   try {
     await fixture.tokenStarted.promise;
-    fixture.sdkSession("actor-a", "fixture-token-a-refreshed", "TOKEN_REFRESHED");
+    fixture.sdkSession("11111111-1111-4111-8111-111111111111", "fixture-token-a-refreshed", "TOKEN_REFRESHED");
     assert.equal(fixture.lifetime!.render().key, fixture.mounted!.key);
     token.resolve(); await flushLocalVideoWork();
     assert.equal(fixture.dispatches.length, 1);
     assert.equal(fixture.dispatches[0].method, "GET");
     assert.equal(fixture.dispatches[0].url,
-      `/api/content-studio/video-generation?handle=${encodeURIComponent(LOCAL_POLL_JOB.handle)}&workspaceId=workspace-a`);
+      `/api/content-studio/video-generation?handle=${encodeURIComponent(LOCAL_POLL_JOB.handle)}&workspaceId=33333333-3333-4333-8333-333333333333`);
     assert.equal(fixture.dispatches[0].headers.get("Authorization"), "Bearer fixture-token-a-refreshed");
-    assert.deepEqual(JSON.parse(JSON.stringify(fixture.state.VideoJob)), { ...LOCAL_POLL_JOB, status: "completed", progress: 100 });
+    assert.deepEqual(JSON.parse(JSON.stringify(fixture.state.VideoJob)), { ...LOCAL_POLL_JOB, status: "completed", progress: 100, phase: "validation", validationJobId: localNativeVideoReceipt().validationJobId });
     assert.deepEqual(JSON.parse(JSON.stringify(fixture.state.GenVideo)), LOCAL_POLL_FILE);
     assert.equal(fixture.toasts.length, 1);
     assert.equal(fixture.timers.size, 0);
@@ -2956,7 +2990,7 @@ test("GEN57 actual retry for the same handle survives token refresh without a ge
   const callbacks = fixture.video({ ...LOCAL_POLL_JOB, status: "failed" });
   try {
     fixture.state.GenNotice = { tone: "error", text: "Synthetic previous poll failure" };
-    fixture.sdkSession("actor-a", "fixture-token-a-refreshed", "TOKEN_REFRESHED");
+    fixture.sdkSession("11111111-1111-4111-8111-111111111111", "fixture-token-a-refreshed", "TOKEN_REFRESHED");
     await callbacks.retry();
     assert.equal(fixture.state.GenNotice, null);
     assert.deepEqual(JSON.parse(JSON.stringify(fixture.state.VideoJob)), LOCAL_POLL_JOB);
@@ -2985,10 +3019,10 @@ test("GEN58 actual same-studio persistence keeps the original handle and generat
   const fixture = await localGenerationCallbacks("video", true);
   try {
     const cleanup = fixture.video({ ...LOCAL_POLL_JOB }, { ...LOCAL_POLL_FILE }).persist(); await flushLocalVideoWork();
-    const stored = JSON.parse(fixture.localStorage.getItem(fixture.videoKey("workspace-a"))!);
-    const { model: _model, ...file } = LOCAL_POLL_FILE;
-    assert.deepEqual(stored, { ...LOCAL_POLL_JOB, ...file });
-    assert.equal(fixture.localStorage.getItem(fixture.videoKey("workspace-b")), null);
+    const stored = JSON.parse(fixture.localStorage.getItem(fixture.videoKey("33333333-3333-4333-8333-333333333333"))!);
+    assert.deepEqual(stored, JSON.parse(localNativeVideoDraft(LOCAL_POLL_JOB)));
+    for (const field of ["url", "creativeUrl", "thumbnailUrl", "sha256", "assetId"]) assert.equal(stored[field], undefined);
+    assert.equal(fixture.localStorage.getItem(fixture.videoKey("44444444-4444-4444-8444-444444444444")), null);
     assert.deepEqual(fixture.dispatches, []);
     if (typeof cleanup === "function") cleanup();
   } finally { fixture.lifetime!.unmount(); }
@@ -3012,14 +3046,14 @@ for (const boundary of ["workspace", "account-event", "unmount"] as const) {
   });
 }
 
-test("GEN59 actual same-studio restore retains the completed handle and file without a paid POST", async () => {
+test("GEN59 actual same-studio restore retains only the handle and rechecks completed files without a paid POST", async () => {
   const fixture = await localGenerationCallbacks("video", true);
   let cleanup: void | (() => void);
   try {
-    fixture.localStorage.setItem(fixture.videoKey(), JSON.stringify({ ...LOCAL_POLL_JOB, ...LOCAL_POLL_FILE, status: "completed" }));
+    fixture.localStorage.setItem(fixture.videoKey(), localNativeVideoDraft({ ...LOCAL_POLL_JOB, status: "completed" }));
     cleanup = fixture.video({ ...LOCAL_POLL_JOB }).restore(); await flushLocalVideoWork();
-    assert.deepEqual(JSON.parse(JSON.stringify(fixture.state.VideoJob)), { ...LOCAL_POLL_JOB, status: "completed" });
-    assert.deepEqual(JSON.parse(JSON.stringify(fixture.state.GenVideo)), LOCAL_POLL_FILE);
+    assert.deepEqual(JSON.parse(JSON.stringify(fixture.state.VideoJob)), { ...LOCAL_POLL_JOB, status: "in_progress", phase: "validation", validationJobId: localNativeVideoReceipt().validationJobId });
+    assert.equal(fixture.state.GenVideo, null, "Local storage cannot authorize an old public URL");
     assert.equal(fixture.dispatches.filter((call) => call.method === "POST").length, 0);
     assert.deepEqual(fixture.toasts, []);
   } finally { if (typeof cleanup! === "function") cleanup!(); fixture.lifetime!.unmount(); }
@@ -3066,8 +3100,8 @@ for (const mode of ["throw", "error"] as const) {
         await fireOnlyTimer();
         assert.equal(fixture.dispatches.length, initialGets + 1);
         assert.ok(fixture.dispatches.every((call) => call.method === "GET" && call.url ===
-          `/api/content-studio/video-generation?handle=${encodeURIComponent(LOCAL_POLL_JOB.handle)}&workspaceId=workspace-a`));
-        assert.deepEqual(JSON.parse(JSON.stringify(fixture.state.VideoJob)), { ...LOCAL_POLL_JOB, status: "completed", progress: 100 });
+          `/api/content-studio/video-generation?handle=${encodeURIComponent(LOCAL_POLL_JOB.handle)}&workspaceId=33333333-3333-4333-8333-333333333333`));
+        assert.deepEqual(JSON.parse(JSON.stringify(fixture.state.VideoJob)), { ...LOCAL_POLL_JOB, status: "completed", progress: 100, phase: "validation", validationJobId: localNativeVideoReceipt().validationJobId });
         assert.deepEqual(JSON.parse(JSON.stringify(fixture.state.GenVideo)), LOCAL_POLL_FILE);
         assert.deepEqual(fixture.toasts, [{ kind: "success", message: "Ролик готов" }]);
         assert.equal(fixture.timers.size, 0);
@@ -3084,7 +3118,7 @@ for (const mode of ["throw", "error"] as const) {
 test("GEN61 delayed restore cannot replace a newer accepted generation before commit or lose its cache on SDK failure", { timeout: 5000 }, async () => {
   const fixture = await localGenerationCallbacks("video", true), token = fixture.deferToken();
   const original = { ...LOCAL_POLL_JOB };
-  fixture.localStorage.setItem(fixture.videoKey(), JSON.stringify({ ...original, ...LOCAL_POLL_FILE, status: "completed" }));
+  fixture.localStorage.setItem(fixture.videoKey(), localNativeVideoDraft({ ...original, status: "completed" }));
   const restoreCleanup = fixture.video(original).restore();
   let persistenceCleanup: void | (() => void);
   try {
@@ -3099,7 +3133,7 @@ test("GEN61 delayed restore cannot replace a newer accepted generation before co
     assert.equal(fixture.videoRefs.videoJobRef.current, original, "do not simulate a React commit before resuming the old initializer");
     const cached = fixture.localStorage.getItem(fixture.videoKey());
     assert.ok(cached);
-    assert.deepEqual(JSON.parse(cached), fixture.reply.data, "the accepted handle must cache immediately before any persistence effect");
+    assert.deepEqual(JSON.parse(cached), JSON.parse(localNativeVideoDraft(accepted)), "the accepted handle must cache immediately before any persistence effect");
     const writes = fixture.writes.length;
     token.resolve(); await flushLocalVideoWork();
     assert.deepEqual(fixture.writes.slice(writes), [], "the generation revision must block old restore even before the job ref changes");
@@ -3133,7 +3167,7 @@ for (const boundary of ["workspace", "cleanup", "new-render"] as const) {
     const cleanup = fixture.video({ ...LOCAL_POLL_JOB }, { ...LOCAL_POLL_FILE }).persist();
     try {
       await fixture.tokenStarted.promise;
-      if (boundary === "workspace") fixture.workspace("workspace-b");
+      if (boundary === "workspace") fixture.workspace("44444444-4444-4444-8444-444444444444");
       if (boundary === "cleanup" && typeof cleanup === "function") cleanup();
       if (boundary === "new-render") fixture.video({ ...LOCAL_POLL_JOB, handle: "newer-render-handle" });
       const key = fixture.videoKey(), stored = JSON.stringify({ ...LOCAL_POLL_JOB, handle: "current-persisted-handle" });
@@ -3153,7 +3187,7 @@ for (const boundary of ["workspace", "cleanup", "new-render"] as const) {
 for (const mode of ["throw", "error"] as const) {
   test(`GEN63 unverified restore retries SDK ${mode} and recovers on same-actor refresh without remount`, { timeout: 5000 }, async () => {
     const fixture = await localGenerationCallbacks("video", true);
-    const key = fixture.videoKey(), stored = JSON.stringify({ ...LOCAL_POLL_JOB, ...LOCAL_POLL_FILE, status: "completed" });
+    const key = fixture.videoKey(), stored = localNativeVideoDraft({ ...LOCAL_POLL_JOB, status: "completed" });
     fixture.localStorage.setItem(key, stored);
     fixture.sdkFailure(mode);
     const reads = fixture.storageReads.length;
@@ -3180,18 +3214,18 @@ for (const mode of ["throw", "error"] as const) {
       assert.deepEqual(fixture.writes, []);
       assert.equal(fixture.dispatches.length, 0);
       fixture.sdkFailure();
-      fixture.sdkSession("actor-a", "fixture-token-a-refreshed", "TOKEN_REFRESHED");
+      fixture.sdkSession("11111111-1111-4111-8111-111111111111", "fixture-token-a-refreshed", "TOKEN_REFRESHED");
       const refreshed = fixture.lifetime!.render();
       assert.equal(refreshed.key, fixture.mounted!.key);
       assert.equal(refreshed.session.sessionRef.current, controller);
       await fireOnlyTimer();
-      assert.deepEqual(JSON.parse(JSON.stringify(fixture.state.VideoJob)), { ...LOCAL_POLL_JOB, status: "completed" });
-      assert.deepEqual(JSON.parse(JSON.stringify(fixture.state.GenVideo)), LOCAL_POLL_FILE);
+      assert.deepEqual(JSON.parse(JSON.stringify(fixture.state.VideoJob)), { ...LOCAL_POLL_JOB, status: "in_progress", phase: "validation", validationJobId: localNativeVideoReceipt().validationJobId });
+      assert.equal(fixture.state.GenVideo, null, "A recovered local descriptor still requires fresh server file proof");
       assert.equal(fixture.storageReads.slice(reads).filter((read) => read.key === key).length, 1);
       assert.equal(fixture.localStorage.getItem(key), stored);
       assert.equal(fixture.dispatches.length, 1);
       assert.equal(fixture.dispatches[0].method, "GET");
-      assert.equal(fixture.dispatches[0].url, "/api/crm/content-videos?workspaceId=workspace-a");
+      assert.equal(fixture.dispatches[0].url, "/api/crm/content-videos?workspaceId=33333333-3333-4333-8333-333333333333");
       assert.equal(fixture.dispatches[0].headers.get("Authorization"), "Bearer fixture-token-a-refreshed");
       assert.equal(fixture.timers.size, 0);
       assert.equal(fixture.timerCalls(), 2);
@@ -3211,7 +3245,7 @@ for (const phase of ["timer", "token", "body"] as const) {
     const reply = JSON.stringify({ success: true, mode: "supabase", data: { videos: [
       { id: "late-library-row", title: "Expired library response", createdAt: "2090-10-20T00:00:00Z" },
     ] } });
-    fixture.localStorage.setItem(fixture.videoKey(), JSON.stringify({ ...LOCAL_POLL_JOB, ...LOCAL_POLL_FILE, status: "completed" }));
+    fixture.localStorage.setItem(fixture.videoKey(), localNativeVideoDraft({ ...LOCAL_POLL_JOB, status: "completed" }));
     if (phase === "timer") fixture.sdkFailure("throw");
     const cleanup = fixture.video(null).restore();
     const sessionController = fixture.captured.sessionRef.current!;
@@ -3255,7 +3289,7 @@ test("GEN65 explicitly allowed local demo hydrates only idea drafts without API,
     fixture.workspace("demo-local-a"); fixture.auth({ user: null, isDemoMode: true });
     const draftKey = "negis_content_studio_videos::demo-local-a";
     fixture.localStorage.setItem(draftKey, JSON.stringify(LOCAL_DEMO_DRAFTS));
-    const paidKey = fixture.videoKey(), paidRaw = JSON.stringify({ ...LOCAL_POLL_JOB, ...LOCAL_POLL_FILE, status: "completed" });
+    const paidKey = fixture.videoKey(), paidRaw = localNativeVideoDraft({ ...LOCAL_POLL_JOB, status: "completed" });
     fixture.localStorage.setItem(paidKey, paidRaw);
     const attemptKey = fixture.pendingKey(), attemptRaw = JSON.stringify({ version: 1,
       requestKey: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", fingerprint: JSON.stringify(["video", "Synthetic local idea", "reels"]) });
@@ -3423,11 +3457,11 @@ for (const stage of handoffStages) {
           : stage.resource === "finalize" ? (stage.phase === "token" ? 1 : 2)
           : stage.resource === "metadata" ? (stage.phase === "token" ? 2 : 3) : (stage.phase === "token" ? 0 : 1);
         assert.equal(fixture.dispatches.length, expectedDispatches, "pause the actual requested boundary, not an earlier auth guard");
-        if (boundary === "account" || boundary === "A-B-A") fixture.sdkSession("actor-b");
-        if (boundary === "silent-account") fixture.sdkSession("actor-b", "fixture-token-b", null);
+        if (boundary === "account" || boundary === "A-B-A") fixture.sdkSession("22222222-2222-4222-8222-222222222222");
+        if (boundary === "silent-account") fixture.sdkSession("22222222-2222-4222-8222-222222222222", "fixture-token-b", null);
         if (boundary === "workspace" || boundary === "workspace-remount") fixture.workspace(HANDOFF_WORKSPACE_B);
         if (boundary === "workspace-remount" || boundary === "A-B-A") fixture.lifetime!.render();
-        if (boundary === "A-B-A") { fixture.sdkSession("actor-a"); fixture.lifetime!.render(); }
+        if (boundary === "A-B-A") { fixture.sdkSession("11111111-1111-4111-8111-111111111111"); fixture.lifetime!.render(); }
         if (boundary === "unmount") fixture.lifetime!.unmount();
         if (!["silent-account", "workspace"].includes(boundary)) assert.equal(controller.signal.aborted, true);
         const mutations = fixture.mutations.length, writes = fixture.writes.length, uploads = fixture.uploads.length;
@@ -3457,7 +3491,7 @@ for (const kind of ["photo", "image", "video", "package"] as const) {
     try {
       await waitForLocalHandoffBoundary(work, token.started);
       if (kind === "photo") assert.ok(fixture.handoffRequests.every(({ init }) => init.dispatchGuard?.() === true), "the artifact-bound guard is live while handoff is pending");
-      fixture.sdkSession("actor-a", "fixture-token-a-refreshed", "TOKEN_REFRESHED");
+      fixture.sdkSession("11111111-1111-4111-8111-111111111111", "fixture-token-a-refreshed", "TOKEN_REFRESHED");
       assert.equal(fixture.lifetime!.render().key, handoff.key);
       assert.equal(controller.signal.aborted, false);
       token.resolve(); await work;
@@ -3468,7 +3502,7 @@ for (const kind of ["photo", "image", "video", "package"] as const) {
         assert.equal(call.signal, controller.signal);
       }
       for (const { init } of fixture.handoffRequests) {
-        assert.equal(init.expectedUserId, "actor-a"); assert.equal(init.signal, controller.signal);
+        assert.equal(init.expectedUserId, "11111111-1111-4111-8111-111111111111"); assert.equal(init.signal, controller.signal);
         assert.equal(init.dispatchGuard?.(), kind !== "photo", "the completed photo attempt must no longer authorize dispatch");
       }
       const prefill = readLocalHandoff(fixture);
@@ -3628,7 +3662,7 @@ for (const kind of ["photo", "image", "video", "package"] as const) {
       const fixture = await localGenerationCallbacks("photo", true);
       fixture.workspace("demo-local-a"); fixture.auth({ user: null, isDemoMode: true });
       let handoff = fixture.handoffs();
-      if (boundary === "account") { fixture.auth({ user: { id: "actor-b" }, isDemoMode: false }); fixture.lifetime!.render(); }
+      if (boundary === "account") { fixture.auth({ user: { id: "22222222-2222-4222-8222-222222222222" }, isDemoMode: false }); fixture.lifetime!.render(); }
       if (boundary === "workspace") fixture.workspace("demo-local-b");
       if (boundary === "unmount") fixture.lifetime!.unmount();
       if (boundary === "UUID-demo") { fixture.workspace(REAL_DEMO_TEST_WORKSPACE); handoff = fixture.handoffs(); }
@@ -3689,8 +3723,8 @@ for (const kind of ["photo", "image", "video", "package"] as const) {
     test(`GEN73 actual ${kind} handoff rejects ${failure} before any effect`, async () => {
       const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE);
       const handoff = fixture.handoffs();
-      if (failure === "actor-mismatch") fixture.sdkSession("actor-b", "fixture-token-b", null);
-      if (failure === "missing-token") fixture.sdkSession("actor-a", "", null);
+      if (failure === "actor-mismatch") fixture.sdkSession("22222222-2222-4222-8222-222222222222", "fixture-token-b", null);
+      if (failure === "missing-token") fixture.sdkSession("11111111-1111-4111-8111-111111111111", "", null);
       if (failure === "SDK-error") fixture.sdkFailure("error");
       if (failure === "SDK-throw") fixture.sdkFailure("throw");
       const mutations = fixture.mutations.length;
@@ -3709,7 +3743,7 @@ for (const kind of ["photo", "image", "video", "package"] as const) {
       fixture.workspace("demo-local-a"); fixture.auth({ user: null, isDemoMode: true });
       const handoff = fixture.handoffs(), reads = fixture.sdkReads.total;
       const work = invokeLocalHandoff(handoff, kind);
-      if (boundary === "account") { fixture.auth({ user: { id: "actor-b" }, isDemoMode: false }); fixture.lifetime!.render(); }
+      if (boundary === "account") { fixture.auth({ user: { id: "22222222-2222-4222-8222-222222222222" }, isDemoMode: false }); fixture.lifetime!.render(); }
       if (boundary === "workspace") fixture.workspace("demo-local-b");
       if (boundary === "unmount") fixture.lifetime!.unmount();
       const mutations = fixture.mutations.length;
@@ -3793,11 +3827,11 @@ for (const stage of PACKAGE_STAGES) {
       const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE);
       const paused = await pausePackage(fixture, stage);
       try {
-        if (boundary === "account" || boundary === "A-B-A") fixture.sdkSession("actor-b");
-        if (boundary === "silent-account") fixture.sdkSession("actor-b", "fixture-token-b", null);
+        if (boundary === "account" || boundary === "A-B-A") fixture.sdkSession("22222222-2222-4222-8222-222222222222");
+        if (boundary === "silent-account") fixture.sdkSession("22222222-2222-4222-8222-222222222222", "fixture-token-b", null);
         if (boundary === "workspace") fixture.workspace(HANDOFF_WORKSPACE_B);
         if (boundary === "A-B-A") {
-          fixture.lifetime!.render(); fixture.sdkSession("actor-a"); fixture.lifetime!.render();
+          fixture.lifetime!.render(); fixture.sdkSession("11111111-1111-4111-8111-111111111111"); fixture.lifetime!.render();
         }
         if (boundary === "unmount") fixture.lifetime!.unmount();
         Object.assign(fixture.state, { ContentPackage: { ...LOCAL_GENERATED_PACKAGE, ideaTitle: "Current package B" },
@@ -3821,7 +3855,7 @@ for (const resource of ["package-generation", "package-save"] as const) {
       const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE);
       const paused = await pausePackage(fixture, { resource, phase: "body" });
       try {
-        fixture.sdkSession("actor-b"); fixture.auth({ user: { id: "actor-b" } }); fixture.lifetime!.render();
+        fixture.sdkSession("22222222-2222-4222-8222-222222222222"); fixture.auth({ user: { id: "22222222-2222-4222-8222-222222222222" } }); fixture.lifetime!.render();
         fixture.state.Notice = "Current notice B";
         const writes = fixture.writes.length, toasts = fixture.toasts.length;
         paused.resume(outcome === "unreadable" ? "{not-json" : JSON.stringify({ success: false,
@@ -3864,7 +3898,7 @@ for (const resource of ["package-generation", "package-save"] as const) {
     try {
       const controller = paused.captured.session.sessionRef.current;
       assert.ok(fixture.packageRequests.every((request) => request.init.dispatchGuard?.() === true));
-      fixture.sdkSession("actor-a", "fixture-token-a-refreshed", "TOKEN_REFRESHED");
+      fixture.sdkSession("11111111-1111-4111-8111-111111111111", "fixture-token-a-refreshed", "TOKEN_REFRESHED");
       assert.equal(fixture.packages().key, paused.captured.key);
       paused.resume(); await paused.work;
       assert.equal(fixture.dispatches.length, 2); assert.equal(fixture.state.ContentPackageId, "saved-package-a");
@@ -3879,7 +3913,7 @@ for (const resource of ["package-generation", "package-save"] as const) {
         assert.equal(call.signal, controller!.signal);
       }
       for (const request of fixture.packageRequests) {
-        assert.equal(request.init.expectedUserId, "actor-a"); assert.equal(typeof request.init.dispatchGuard, "function");
+        assert.equal(request.init.expectedUserId, "11111111-1111-4111-8111-111111111111"); assert.equal(typeof request.init.dispatchGuard, "function");
       }
       const refreshedCalls = fixture.dispatches.slice(resource === "package-generation" ? 0 : 1);
       assert.ok(refreshedCalls.every((call) => call.headers.get("Authorization") === "Bearer fixture-token-a-refreshed"));
@@ -3977,7 +4011,7 @@ for (const resource of ["package-generation", "package-save"] as const) {
     const paused = await pausePackage(fixture, { resource, phase: "body" });
     const oldBody = JSON.stringify(resource === "package-generation" ? fixture.packageReplies.generation : fixture.packageReplies.save);
     try {
-      fixture.sdkSession("actor-b"); fixture.auth({ user: { id: "actor-b" } });
+      fixture.sdkSession("22222222-2222-4222-8222-222222222222"); fixture.auth({ user: { id: "22222222-2222-4222-8222-222222222222" } });
       fixture.packageReplies.generation = { success: true, mode: "fixture", data: { ...LOCAL_GENERATED_PACKAGE, ideaTitle: "Accepted package B" } };
       fixture.packageReplies.save = { success: true, data: { item: { id: "accepted-package-b" } } };
       await fixture.packages().callbacks.generate();
@@ -4011,7 +4045,7 @@ for (const boundary of ["UUID-demo", "anonymous-not-demo", "account", "workspace
     let captured = fixture.packages();
     if (boundary === "UUID-demo") { fixture.workspace(REAL_DEMO_TEST_WORKSPACE); captured = fixture.packages(); }
     if (boundary === "anonymous-not-demo") { fixture.auth({ isDemoMode: false }); captured = fixture.packages(); }
-    if (boundary === "account") { fixture.auth({ user: { id: "actor-b" }, isDemoMode: false }); fixture.lifetime!.render(); }
+    if (boundary === "account") { fixture.auth({ user: { id: "22222222-2222-4222-8222-222222222222" }, isDemoMode: false }); fixture.lifetime!.render(); }
     if (boundary === "workspace") fixture.workspace("demo-local-b");
     if (boundary === "unmount") fixture.lifetime!.unmount();
     const writes = fixture.writes.length, reads = fixture.sdkReads.total, mutations = fixture.mutations.length;
@@ -4118,10 +4152,10 @@ for (const phase of ["token", "body"] as const) {
       const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE);
       const paused = await pausePhotoSuggestion(fixture, phase);
       try {
-        if (boundary === "account" || boundary === "actor-A-B-A") fixture.sdkSession("actor-b");
-        if (boundary === "silent-account") fixture.sdkSession("actor-b", "fixture-token-b", null);
+        if (boundary === "account" || boundary === "actor-A-B-A") fixture.sdkSession("22222222-2222-4222-8222-222222222222");
+        if (boundary === "silent-account") fixture.sdkSession("22222222-2222-4222-8222-222222222222", "fixture-token-b", null);
         if (boundary === "workspace") fixture.workspace(HANDOFF_WORKSPACE_B);
-        if (boundary === "actor-A-B-A") { fixture.lifetime!.render(); fixture.sdkSession("actor-a"); fixture.lifetime!.render(); }
+        if (boundary === "actor-A-B-A") { fixture.lifetime!.render(); fixture.sdkSession("11111111-1111-4111-8111-111111111111"); fixture.lifetime!.render(); }
         if (boundary === "unmount") fixture.lifetime!.unmount();
         fixture.state.PhotoTexts = { headline: "Current B headline", offer: "Current B offer", cta: "Current B CTA", disclaimer: "Current B disclaimer" };
         fixture.state.PhotoSuggestMode = "current-b-mode";
@@ -4204,7 +4238,7 @@ for (const outcome of ["error", "auth", "unreadable"] as const) {
     const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE);
     const paused = await pausePhotoSuggestion(fixture, "body");
     try {
-      fixture.sdkSession("actor-b");
+      fixture.sdkSession("22222222-2222-4222-8222-222222222222");
       const before = photoSuggestionSnapshot(fixture), writes = fixture.writes.length;
       paused.resume(outcome === "unreadable" ? "{invalid" : JSON.stringify({ success: false, error: "Synthetic late refusal",
         code: outcome === "auth" ? "authentication_required" : "fixture_failure" }));
@@ -4221,7 +4255,7 @@ test("G5C10 same-actor refresh sends one exact scoped payload and retains the ma
   initial.callbacks.updateTexts("disclaimer", "Operator's retained disclaimer");
   const paused = await pausePhotoSuggestion(fixture, "token");
   try {
-    fixture.sdkSession("actor-a", "fixture-token-a-refreshed", "TOKEN_REFRESHED");
+    fixture.sdkSession("11111111-1111-4111-8111-111111111111", "fixture-token-a-refreshed", "TOKEN_REFRESHED");
     assert.equal(fixture.photoSuggestions().key, paused.captured.key);
     paused.resume(); await paused.work;
     assert.equal(fixture.dispatches.length, 1);
@@ -4233,7 +4267,7 @@ test("G5C10 same-actor refresh sends one exact scoped payload and retains the ma
       city: LOCAL_PACKAGE_BRIEF.city, offer: LOCAL_PACKAGE_BRIEF.offer, audience: LOCAL_PACKAGE_BRIEF.audience,
       goal: LOCAL_PACKAGE_BRIEF.goal, tone: LOCAL_PACKAGE_BRIEF.tone,
       materialNotes: `${fixture.photoDefaults.inputs.photoSourceType}: ${LOCAL_PHOTO_FILE.name}` });
-    assert.equal(fixture.photoSuggestionRequests[0].init.expectedUserId, "actor-a");
+    assert.equal(fixture.photoSuggestionRequests[0].init.expectedUserId, "11111111-1111-4111-8111-111111111111");
     assert.equal(typeof fixture.photoSuggestionRequests[0].init.dispatchGuard, "function");
     assert.deepEqual(JSON.parse(JSON.stringify(fixture.state.PhotoTexts)), { headline: LOCAL_GENERATED_PACKAGE.adHeadline,
       offer: LOCAL_PACKAGE_BRIEF.offer, cta: LOCAL_GENERATED_PACKAGE.cta, disclaimer: "Operator's retained disclaimer" });
@@ -4516,9 +4550,9 @@ for (const { phase, boundary } of PHOTO_STALE_RENDERS) {
     const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE);
     const paused = await pausePhotoRender(fixture, phase);
     try {
-      if (boundary === "account" || boundary === "A-B-A") fixture.sdkSession("actor-b");
+      if (boundary === "account" || boundary === "A-B-A") fixture.sdkSession("22222222-2222-4222-8222-222222222222");
       if (boundary === "workspace") fixture.workspace(HANDOFF_WORKSPACE_B);
-      if (boundary === "A-B-A") { fixture.lifetime!.render(); fixture.sdkSession("actor-a"); fixture.photoSuggestions(); }
+      if (boundary === "A-B-A") { fixture.lifetime!.render(); fixture.sdkSession("11111111-1111-4111-8111-111111111111"); fixture.photoSuggestions(); }
       if (boundary === "input-ABA") { paused.captured.callbacks.changeFormat("feed"); paused.captured.callbacks.changeFormat(paused.captured.inputs.photoFormat); }
       if (boundary === "unmount") fixture.lifetime!.unmount();
       const before = renderedPhotoState(fixture), writes = fixture.writes.length, urls = fixture.localObjectUrls.length, toasts = fixture.toasts.length;
@@ -4563,7 +4597,7 @@ test("G5C11 actual photo cleanup revokes only its owned live source and preview 
 test("G5C11 late A canvas completion cannot revoke or replace B's accepted artifact", { timeout: 5000 }, async () => {
   const fixture = await localGenerationCallbacks("photo", true, REAL_DEMO_TEST_WORKSPACE), paused = await pausePhotoRender(fixture, "renderer");
   try {
-    fixture.sdkSession("actor-b"); fixture.auth({ user: { id: "actor-b" } }); fixture.photoSuggestions();
+    fixture.sdkSession("22222222-2222-4222-8222-222222222222"); fixture.auth({ user: { id: "22222222-2222-4222-8222-222222222222" } }); fixture.photoSuggestions();
     fixture.renderReply.blob = new Blob(["accepted B"], { type: "image/jpeg" });
     const current = await renderedPhoto(fixture), before = renderedPhotoState(fixture), urls = fixture.localObjectUrls.length, toasts = fixture.toasts.length;
     paused.resume(); await paused.work;
@@ -4758,9 +4792,9 @@ for (const { kind, phase, boundary } of LIBRARY_STALE_WRITES) {
     fixture.seedLibrary([LOCAL_LIBRARY_ROW_A, LOCAL_LIBRARY_ROW_B], LOCAL_LIBRARY_ROW_A.id);
     const paused = await pauseLibraryWrite(fixture, kind, phase);
     try {
-      if (boundary === "account" || boundary === "A-B-A") fixture.sdkSession("actor-b");
+      if (boundary === "account" || boundary === "A-B-A") fixture.sdkSession("22222222-2222-4222-8222-222222222222");
       if (boundary === "workspace") fixture.workspace(HANDOFF_WORKSPACE_B);
-      if (boundary === "A-B-A") { fixture.lifetime!.render(); fixture.sdkSession("actor-a"); fixture.lifetime!.render(); }
+      if (boundary === "A-B-A") { fixture.lifetime!.render(); fixture.sdkSession("11111111-1111-4111-8111-111111111111"); fixture.lifetime!.render(); }
       if (boundary === "unmount") fixture.lifetime!.unmount();
       if (boundary === "form-ABA") {
         paused.captured.callbacks.editTitle("Temporary title B"); fixture.library().callbacks.editTitle(LOCAL_LIBRARY_FORM.title);
@@ -4785,7 +4819,7 @@ for (const kind of ["create", "patch"] as const) {
     fixture.seedLibrary([LOCAL_LIBRARY_ROW_A]);
     const paused = await pauseLibraryWrite(fixture, kind, "body");
     try {
-      fixture.sdkSession("actor-b"); const before = libraryState(fixture), writes = fixture.writes.length, mutations = fixture.mutations.length;
+      fixture.sdkSession("22222222-2222-4222-8222-222222222222"); const before = libraryState(fixture), writes = fixture.writes.length, mutations = fixture.mutations.length;
       paused.resume(JSON.stringify({ success: false, error: "Synthetic late refusal" })); await paused.work; await flushLocalVideoWork();
       assert.deepEqual(libraryState(fixture), before);
       assert.deepEqual(fixture.writes.slice(writes).filter((write) => write.field !== "Loading"), []);
@@ -4800,12 +4834,12 @@ test("G5C12 same-actor refresh creates one scoped idea with an exact form payloa
   const paused = await pauseLibraryWrite(fixture, "create", "token");
   try {
     const form = JSON.parse(JSON.stringify(fixture.state.Form));
-    fixture.sdkSession("actor-a", "fixture-token-a-refreshed", "TOKEN_REFRESHED");
+    fixture.sdkSession("11111111-1111-4111-8111-111111111111", "fixture-token-a-refreshed", "TOKEN_REFRESHED");
     assert.equal(fixture.library().key, paused.captured.key); paused.resume(); await paused.work;
     assert.equal(fixture.dispatches.length, 1); const call = fixture.dispatches[0];
     assert.equal(call.method, "POST"); assert.equal(call.url, `/api/crm/content-videos?workspaceId=${REAL_DEMO_TEST_WORKSPACE}`);
     assert.equal(call.headers.get("Authorization"), "Bearer fixture-token-a-refreshed"); assert.equal(call.signal, paused.captured.session.sessionRef.current!.signal);
-    assert.deepEqual(call.body, form); assert.equal(fixture.libraryRequests[0].init.expectedUserId, "actor-a");
+    assert.deepEqual(call.body, form); assert.equal(fixture.libraryRequests[0].init.expectedUserId, "11111111-1111-4111-8111-111111111111");
     assert.equal(typeof fixture.libraryRequests[0].init.dispatchGuard, "function");
     assert.deepEqual(JSON.parse(JSON.stringify(libraryRows(fixture))), [LOCAL_LIBRARY_ROW_A]); assert.equal(fixture.state.ActiveId, LOCAL_LIBRARY_ROW_A.id);
     assert.deepEqual(JSON.parse(fixture.localStorage.getItem(fixture.libraryKey())!), [LOCAL_LIBRARY_ROW_A]);
@@ -4825,7 +4859,7 @@ test("G5C12 PATCH waits for the exact target receipt and applies canonical serve
     const call = fixture.dispatches[0]; assert.equal(call.method, "PATCH");
     assert.equal(call.url, `/api/crm/content-videos?workspaceId=${REAL_DEMO_TEST_WORKSPACE}`);
     assert.deepEqual(call.body, { ...LOCAL_LIBRARY_PATCH, id: LOCAL_LIBRARY_ROW_A.id });
-    assert.equal(fixture.libraryRequests[0].init.expectedUserId, "actor-a");
+    assert.equal(fixture.libraryRequests[0].init.expectedUserId, "11111111-1111-4111-8111-111111111111");
     assert.equal(libraryRows(fixture).find((row) => row.id === LOCAL_LIBRARY_ROW_A.id)!.script, "Canonical saved script");
     assert.deepEqual(JSON.parse(JSON.stringify(libraryRows(fixture).find((row) => row.id === LOCAL_LIBRARY_ROW_B.id))), LOCAL_LIBRARY_ROW_B);
     assert.equal(fixture.state.ActiveId, LOCAL_LIBRARY_ROW_A.id);
@@ -5128,8 +5162,8 @@ for (const { kind, phase, boundary } of LIBRARY_TEXT_STALE_CASES) {
     fixture.seedLibrary([LOCAL_LIBRARY_ROW_A, LOCAL_LIBRARY_ROW_B], LOCAL_LIBRARY_ROW_A.id);
     const paused = await pauseLibraryText(fixture, kind, phase), controller = paused.captured.session.sessionRef.current!;
     try {
-      if (boundary === "account" || boundary === "session-ABA") fixture.sdkSession("actor-b");
-      if (boundary === "session-ABA") { fixture.lifetime!.render(); fixture.sdkSession("actor-a"); fixture.lifetime!.render(); }
+      if (boundary === "account" || boundary === "session-ABA") fixture.sdkSession("22222222-2222-4222-8222-222222222222");
+      if (boundary === "session-ABA") { fixture.lifetime!.render(); fixture.sdkSession("11111111-1111-4111-8111-111111111111"); fixture.lifetime!.render(); }
       if (boundary === "workspace") fixture.workspace(HANDOFF_WORKSPACE_B);
       if (boundary === "unmount") fixture.lifetime!.unmount();
       if (boundary === "form-ABA") {
@@ -5159,7 +5193,7 @@ for (const kind of ["script", "avatar", "tapnow"] as const) {
     try {
       if (kind === "script") { captured.callbacks.editTitle("Temporary form B"); fixture.library().callbacks.editTitle(LOCAL_LIBRARY_FORM.title); }
       if (kind === "avatar") { captured.callbacks.select(LOCAL_LIBRARY_ROW_B.id); fixture.library().callbacks.select(LOCAL_LIBRARY_ROW_A.id); }
-      if (kind === "tapnow") { fixture.sdkSession("actor-b"); fixture.lifetime!.render(); fixture.sdkSession("actor-a"); fixture.lifetime!.render(); }
+      if (kind === "tapnow") { fixture.sdkSession("22222222-2222-4222-8222-222222222222"); fixture.lifetime!.render(); fixture.sdkSession("11111111-1111-4111-8111-111111111111"); fixture.lifetime!.render(); }
       const before = libraryState(fixture), writes = fixture.writes.length, mutations = fixture.mutations.length;
       await invokeLibraryText(captured, kind);
       assert.deepEqual(fixture.dispatches, []); assert.deepEqual(libraryState(fixture), before);
@@ -5172,7 +5206,7 @@ for (const kind of ["script", "avatar", "tapnow"] as const) {
     fixture.seedLibrary([LOCAL_LIBRARY_ROW_A]); const canonical = libraryTextReceipt(fixture, kind);
     const paused = await pauseLibraryText(fixture, kind, "token");
     try {
-      fixture.sdkSession("actor-a", "fixture-token-text-refreshed", "TOKEN_REFRESHED");
+      fixture.sdkSession("11111111-1111-4111-8111-111111111111", "fixture-token-text-refreshed", "TOKEN_REFRESHED");
       assert.equal(fixture.library().key, paused.captured.key); paused.resume(); await paused.work;
       assert.equal(fixture.dispatches.length, 2);
       const [provider, patch] = fixture.dispatches;
@@ -5184,7 +5218,7 @@ for (const kind of ["script", "avatar", "tapnow"] as const) {
       for (let index = 0; index < 2; index++) {
         assert.equal(fixture.dispatches[index].headers.get("Authorization"), "Bearer fixture-token-text-refreshed");
         assert.equal(fixture.dispatches[index].signal, paused.captured.session.sessionRef.current!.signal);
-        assert.equal(fixture.libraryRequests[index].init.expectedUserId, "actor-a");
+        assert.equal(fixture.libraryRequests[index].init.expectedUserId, "11111111-1111-4111-8111-111111111111");
         assert.equal(typeof fixture.libraryRequests[index].init.dispatchGuard, "function");
       }
       assert.deepEqual(JSON.parse(JSON.stringify(libraryRows(fixture))), [canonical]);
@@ -5347,7 +5381,7 @@ for (const kind of ["script", "tapnow"] as const) {
     const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE); fixture.seedLibrary([LOCAL_LIBRARY_ROW_A]);
     const paused = await pauseLibraryText(fixture, kind, "body");
     try {
-      if (kind === "script") fixture.sdkSession("actor-b"); else fixture.workspace(HANDOFF_WORKSPACE_B);
+      if (kind === "script") fixture.sdkSession("22222222-2222-4222-8222-222222222222"); else fixture.workspace(HANDOFF_WORKSPACE_B);
       const before = libraryState(fixture), writes = fixture.writes.length, mutations = fixture.mutations.length;
       paused.resume({ success: false, error: "Synthetic late provider refusal" }); await paused.work;
       assert.deepEqual(libraryState(fixture), before); assert.deepEqual(fixture.mutations.slice(mutations), []); assert.deepEqual(fixture.toasts, []);
@@ -5456,7 +5490,7 @@ test("G5C13 a live selector mismatch releases its own spinner and permits a fres
 });
 
 type LocalTelegramKind = "test" | "send";
-function telegramDeliveryKey(fixture: LocalHandoffFixture, row = LOCAL_LIBRARY_ROW_A, actorId = "actor-a", workspaceId = REAL_DEMO_TEST_WORKSPACE) {
+function telegramDeliveryKey(fixture: LocalHandoffFixture, row = LOCAL_LIBRARY_ROW_A, actorId = "11111111-1111-4111-8111-111111111111", workspaceId = REAL_DEMO_TEST_WORKSPACE) {
   const fingerprint = createHash("sha256").update(fixture.buildTelegramPackage(row)).digest("hex");
   return `negis_telegram_delivery_v1::${JSON.stringify([actorId, workspaceId, row.id, fingerprint])}`;
 }
@@ -5464,7 +5498,7 @@ function telegramFenceMutations(fixture: LocalHandoffFixture, operations: Array<
   return operations.map((operation) => ({ storage: "local", operation, key: telegramDeliveryKey(fixture) }));
 }
 function assertTelegramFence(fixture: LocalHandoffFixture, state: "uncertain" | "sent" | null,
-  row = LOCAL_LIBRARY_ROW_A, actorId = "actor-a", workspaceId = REAL_DEMO_TEST_WORKSPACE) {
+  row = LOCAL_LIBRARY_ROW_A, actorId = "11111111-1111-4111-8111-111111111111", workspaceId = REAL_DEMO_TEST_WORKSPACE) {
   const raw = fixture.localStorage.getItem(telegramDeliveryKey(fixture, row, actorId, workspaceId));
   if (state === null) { assert.equal(raw, null); return raw; }
   assert.ok(raw, `persist the ${state} Telegram fence`);
@@ -5642,8 +5676,8 @@ for (const { kind, phase, boundary } of TELEGRAM_STALE_CASES) {
     fixture.seedLibrary([LOCAL_LIBRARY_ROW_A, LOCAL_LIBRARY_ROW_B], LOCAL_LIBRARY_ROW_A.id); telegramStatusReceipt(fixture);
     const paused = await pauseLibraryTelegram(fixture, kind, phase), controller = paused.captured.session.sessionRef.current!;
     try {
-      if (boundary === "account" || boundary === "session-ABA") fixture.sdkSession("actor-b");
-      if (boundary === "session-ABA") { fixture.lifetime!.render(); fixture.sdkSession("actor-a"); fixture.lifetime!.render(); }
+      if (boundary === "account" || boundary === "session-ABA") fixture.sdkSession("22222222-2222-4222-8222-222222222222");
+      if (boundary === "session-ABA") { fixture.lifetime!.render(); fixture.sdkSession("11111111-1111-4111-8111-111111111111"); fixture.lifetime!.render(); }
       if (boundary === "workspace") { fixture.workspace(HANDOFF_WORKSPACE_B); fixture.state.Loading = "avatar"; }
       if (boundary === "unmount") fixture.lifetime!.unmount();
       if (boundary === "form-ABA") { paused.captured.callbacks.editTitle("Temporary Telegram form B"); fixture.library().callbacks.editTitle(LOCAL_LIBRARY_FORM.title); }
@@ -5678,7 +5712,7 @@ for (const kind of ["test", "send"] as const) {
     fixture.seedLibrary(kind === "test" ? [] : [LOCAL_LIBRARY_ROW_A, LOCAL_LIBRARY_ROW_B], kind === "test" ? "" : LOCAL_LIBRARY_ROW_A.id);
     const canonical = telegramStatusReceipt(fixture), before = libraryState(fixture), paused = await pauseLibraryTelegram(fixture, kind, "token");
     try {
-      fixture.sdkSession("actor-a", "fixture-token-telegram-refreshed", "TOKEN_REFRESHED");
+      fixture.sdkSession("11111111-1111-4111-8111-111111111111", "fixture-token-telegram-refreshed", "TOKEN_REFRESHED");
       assert.equal(fixture.library().key, paused.captured.key); paused.resume(); await paused.work;
       assert.equal(fixture.dispatches.length, kind === "test" ? 1 : 2);
       const call = fixture.dispatches[0]; assert.equal(call.url, `/api/content-studio/send-telegram?workspaceId=${REAL_DEMO_TEST_WORKSPACE}`);
@@ -5686,7 +5720,7 @@ for (const kind of ["test", "send"] as const) {
       for (let index = 0; index < fixture.dispatches.length; index++) {
         assert.equal(fixture.dispatches[index].headers.get("Authorization"), "Bearer fixture-token-telegram-refreshed");
         assert.equal(fixture.dispatches[index].signal, paused.captured.session.sessionRef.current!.signal);
-        assert.equal(fixture.libraryRequests[index].init.expectedUserId, "actor-a"); assert.equal(typeof fixture.libraryRequests[index].init.dispatchGuard, "function");
+        assert.equal(fixture.libraryRequests[index].init.expectedUserId, "11111111-1111-4111-8111-111111111111"); assert.equal(typeof fixture.libraryRequests[index].init.dispatchGuard, "function");
       }
       if (kind === "test") { assert.deepEqual(libraryState(fixture), before); assert.equal(fixture.localStorage.getItem(fixture.libraryKey()), null); }
       else {
@@ -5882,7 +5916,7 @@ for (const kind of ["test", "send"] as const) {
     const fixture = await localGenerationCallbacks("video", true, REAL_DEMO_TEST_WORKSPACE); fixture.seedLibrary([LOCAL_LIBRARY_ROW_A]);
     const paused = await pauseLibraryTelegram(fixture, kind, "body");
     try {
-      fixture.sdkSession("actor-b"); const before = libraryState(fixture), writes = fixture.writes.length, mutations = fixture.mutations.length;
+      fixture.sdkSession("22222222-2222-4222-8222-222222222222"); const before = libraryState(fixture), writes = fixture.writes.length, mutations = fixture.mutations.length;
       paused.resume({ success: false, error: "Synthetic late Telegram failure" }); await paused.work;
       assert.deepEqual(libraryState(fixture), before); assert.deepEqual(fixture.writes.slice(writes), []);
       assert.deepEqual(fixture.mutations.slice(mutations), []); assert.deepEqual(fixture.toasts, []); assert.equal(fixture.dispatches.length, 1);
@@ -5966,7 +6000,7 @@ for (const boundary of ["actor", "workspace", "SDK-error", "SDK-throw"] as const
       setItem(storedKey, value);
       if (!armed || storedKey !== key) return;
       armed = false;
-      if (boundary === "actor") fixture.sdkSession("actor-b");
+      if (boundary === "actor") fixture.sdkSession("22222222-2222-4222-8222-222222222222");
       else if (boundary === "workspace") fixture.workspace(HANDOFF_WORKSPACE_B);
       else fixture.sdkFailureOnce(boundary === "SDK-error" ? "error" : "throw");
     };
@@ -5976,7 +6010,7 @@ for (const boundary of ["actor", "workspace", "SDK-error", "SDK-throw"] as const
       assertTelegramFence(fixture, null);
       assert.equal(fixture.toasts.some((toast) => toast.kind === "success"), false);
       fixture.lifetime!.unmount();
-      fixture.sdkSession("actor-a", "fixture-token-a"); fixture.auth({ user: { id: "actor-a" } });
+      fixture.sdkSession("11111111-1111-4111-8111-111111111111", "fixture-token-a"); fixture.auth({ user: { id: "11111111-1111-4111-8111-111111111111" } });
       fixture.workspace(REAL_DEMO_TEST_WORKSPACE); fixture.seedLibrary([LOCAL_LIBRARY_ROW_A]);
       await fixture.library().callbacks.sendTelegram();
       assert.equal(fixture.dispatches.length, 2); assertTelegramFence(fixture, "sent");
@@ -6062,7 +6096,7 @@ for (const boundary of ["actor", "workspace"] as const) {
       const paused = await pauseLibraryTelegram(fixture, "send", phase);
       try {
         const fenceState = phase === "patch-body" ? "sent" : "uncertain", fence = assertTelegramFence(fixture, fenceState);
-        if (boundary === "actor") { fixture.sdkSession("actor-b"); fixture.auth({ user: { id: "actor-b" } }); }
+        if (boundary === "actor") { fixture.sdkSession("22222222-2222-4222-8222-222222222222"); fixture.auth({ user: { id: "22222222-2222-4222-8222-222222222222" } }); }
         else fixture.workspace(HANDOFF_WORKSPACE_B);
         fixture.seedLibrary([LOCAL_LIBRARY_ROW_B]); fixture.state.Notice = "TEST current scope notice"; fixture.state.Loading = "avatar";
         const before = libraryState(fixture), mutations = fixture.mutations.length, writes = fixture.writes.length;
@@ -6074,7 +6108,7 @@ for (const boundary of ["actor", "workspace"] as const) {
         assert.equal(fixture.dispatches.length, requests); assert.equal(assertTelegramFence(fixture, fenceState), fence);
         assert.equal(fixture.localStorage.getItem(fixture.libraryKey(REAL_DEMO_TEST_WORKSPACE)), null);
         assert.equal(fixture.localStorage.getItem(fixture.libraryKey(HANDOFF_WORKSPACE_B)), null);
-        if (boundary === "actor") { fixture.sdkSession("actor-a"); fixture.auth({ user: { id: "actor-a" } }); }
+        if (boundary === "actor") { fixture.sdkSession("11111111-1111-4111-8111-111111111111"); fixture.auth({ user: { id: "11111111-1111-4111-8111-111111111111" } }); }
         else fixture.workspace(REAL_DEMO_TEST_WORKSPACE);
         fixture.seedLibrary([LOCAL_LIBRARY_ROW_A]); const restored = libraryState(fixture), retryMutations = fixture.mutations.length;
         await fixture.library().callbacks.sendTelegram();
@@ -6095,7 +6129,7 @@ for (const dimension of ["package", "actor", "workspace"] as const) {
       await fixture.library().callbacks.sendTelegram(); assert.equal(fixture.dispatches.length, 1);
       const originalFence = assertTelegramFence(fixture, "uncertain");
       const row = dimension === "package" ? { ...LOCAL_LIBRARY_ROW_A, caption: "TEST independently allowed package" } : LOCAL_LIBRARY_ROW_A;
-      const actorId = dimension === "actor" ? "actor-b" : "actor-a", workspaceId = dimension === "workspace" ? HANDOFF_WORKSPACE_B : REAL_DEMO_TEST_WORKSPACE;
+      const actorId = dimension === "actor" ? "22222222-2222-4222-8222-222222222222" : "11111111-1111-4111-8111-111111111111", workspaceId = dimension === "workspace" ? HANDOFF_WORKSPACE_B : REAL_DEMO_TEST_WORKSPACE;
       if (dimension === "actor") { fixture.sdkSession(actorId); fixture.auth({ user: { id: actorId } }); }
       if (dimension === "workspace") fixture.workspace(workspaceId);
       fixture.seedLibrary([row]); delete fixture.handoffTransportFailures["library-telegram"];
@@ -6113,7 +6147,7 @@ for (const dimension of ["package", "actor", "workspace"] as const) {
       assert.deepEqual(JSON.parse(fixture.localStorage.getItem(fixture.libraryKey(workspaceId))!), [canonical]);
       assertTelegramFence(fixture, "sent", row, actorId, workspaceId); assert.equal(assertTelegramFence(fixture, "uncertain"), originalFence);
       assert.equal(fixture.toasts.filter((toast) => toast.kind === "success").length, 1);
-      if (dimension === "actor") { fixture.sdkSession("actor-a"); fixture.auth({ user: { id: "actor-a" } }); }
+      if (dimension === "actor") { fixture.sdkSession("11111111-1111-4111-8111-111111111111"); fixture.auth({ user: { id: "11111111-1111-4111-8111-111111111111" } }); }
       if (dimension === "workspace") fixture.workspace(REAL_DEMO_TEST_WORKSPACE);
       fixture.seedLibrary([LOCAL_LIBRARY_ROW_A]); const mutations = fixture.mutations.length, before = libraryState(fixture);
       await fixture.library().callbacks.sendTelegram();
@@ -6240,8 +6274,8 @@ async function pauseActualCopy(fixture: LocalHandoffFixture, source: LocalCopySo
   } catch (error) { resume(); await Promise.allSettled([work]); throw error; }
 }
 function editCopySource(fixture: LocalHandoffFixture, captured: LocalEditor, boundary: string) {
-  if (boundary === "account" || boundary === "session-ABA") fixture.sdkSession("actor-b");
-  if (boundary === "session-ABA") { fixture.lifetime!.render(); fixture.sdkSession("actor-a"); fixture.lifetime!.render(); }
+  if (boundary === "account" || boundary === "session-ABA") fixture.sdkSession("22222222-2222-4222-8222-222222222222");
+  if (boundary === "session-ABA") { fixture.lifetime!.render(); fixture.sdkSession("11111111-1111-4111-8111-111111111111"); fixture.lifetime!.render(); }
   if (boundary === "workspace") fixture.workspace(HANDOFF_WORKSPACE_B);
   if (boundary === "unmount") fixture.lifetime!.unmount();
   if (boundary === "form-ABA") { captured.callbacks.editTitle("Temporary copy form B"); fixture.editor().callbacks.editTitle(LOCAL_LIBRARY_FORM.title); }
@@ -6313,7 +6347,7 @@ for (const source of ["library", "package", "photo"] as const) {
   test(`G5C15 ${source} copy survives same-actor token refresh without losing its text`, { timeout: 5000 }, async () => {
     const fixture = await copyFixture(), paused = await pauseActualCopy(fixture, source, source === "library" ? "token" : "clipboard");
     try {
-      fixture.sdkSession("actor-a", "fixture-copy-refreshed", "TOKEN_REFRESHED"); assert.equal(fixture.editor().key, paused.captured.key);
+      fixture.sdkSession("11111111-1111-4111-8111-111111111111", "fixture-copy-refreshed", "TOKEN_REFRESHED"); assert.equal(fixture.editor().key, paused.captured.key);
       paused.resume(); await paused.work; assert.deepEqual(fixture.clipboardWrites, [expectedCopy(fixture, paused.item)]);
       assert.deepEqual(fixture.toasts, [{ kind: "success", message: `${paused.item.label} скопирован` }]); assert.deepEqual(fixture.dispatches, []);
     } finally { paused.resume(); await Promise.allSettled([paused.work]); fixture.lifetime!.unmount(); }

@@ -31,6 +31,16 @@ export type GenerationFetchResponse = {
   status: number;
   text: () => Promise<string>;
   arrayBuffer: () => Promise<ArrayBuffer>;
+  headers?: { get(name: string): string | null };
+  body?: {
+    getReader(): {
+      read(): Promise<{ done: true; value?: Uint8Array } | { done: false; value: Uint8Array }>;
+      cancel(reason?: unknown): Promise<unknown>;
+    };
+    cancel?(): Promise<unknown>;
+  } | null;
+  redirected?: boolean;
+  url?: string;
 };
 
 export type GenerationFetch = (
@@ -39,6 +49,10 @@ export type GenerationFetch = (
     method?: string;
     headers?: Record<string, string>;
     body?: string;
+    signal?: AbortSignal;
+    redirect?: "error";
+    credentials?: "omit";
+    cache?: "no-store";
   },
 ) => Promise<GenerationFetchResponse>;
 
@@ -452,44 +466,73 @@ export function readSignedVideoJobHandle(input: {
   return timingSafeEqual(provided, expected) ? jobId : null;
 }
 
-/** MP4 готового ролика. Ссылка провайдера живёт час, поэтому файл сразу
- *  перекладывается в наше хранилище, а не отдаётся браузеру как есть. */
+/** Bounded transport only: the private native worker validates the complete video later. */
 export async function downloadVideoContent(input: {
   fetchImpl: GenerationFetch;
   config: GenerationConfig;
   jobId: string;
+  timeoutMs?: number;
 }): Promise<Buffer> {
-  const response = await input.fetchImpl(
-    `https://api.openai.com/v1/videos/${encodeURIComponent(input.jobId)}/content?variant=video`,
-    {
-      method: "GET",
-      headers: { Authorization: `Bearer ${input.config.apiKey}` },
-    },
-  );
-
-  if (!response.ok) {
-    const body = await readJson(response);
-    throw new GenerationProviderError(response.status, providerErrorMessage(body, response.status));
+  const timeout = input.timeoutMs ?? 15_000;
+  const unavailable = () => new GenerationProviderError(502, "Не удалось подтвердить загрузку файла ролика.");
+  if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > 15_000) throw unavailable();
+  const url = `https://api.openai.com/v1/videos/${encodeURIComponent(input.jobId)}/content?variant=video`;
+  const controller = new AbortController();
+  let response: GenerationFetchResponse | undefined;
+  let reader: ReturnType<NonNullable<GenerationFetchResponse["body"]>["getReader"]> | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const cancelBody = (body: GenerationFetchResponse["body"]) => {
+    try { void body?.cancel?.().catch(() => {}); } catch { /* Cleanup must not extend the download deadline. */ }
+  };
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => { controller.abort(); reject(unavailable()); }, timeout);
+  });
+  try {
+    const pending = Promise.resolve().then(() => input.fetchImpl(url, {
+      method: "GET", headers: { Authorization: `Bearer ${input.config.apiKey}` }, signal: controller.signal,
+      redirect: "error", credentials: "omit", cache: "no-store",
+    }));
+    void pending.then(late => {
+      if (controller.signal.aborted) { try { cancelBody(late?.body); } catch { /* A malformed late receipt is already rejected. */ } }
+    }, () => {});
+    response = await Promise.race([pending, deadline]);
+    if (response.redirected || (response.url && response.url !== url)) throw unavailable();
+    if (!response.ok || response.status !== 200) {
+      // Error bodies may echo credentials or never finish; HTTP status is sufficient.
+      const status = Number.isInteger(response.status) && response.status >= 400 && response.status <= 599 ? response.status : 502;
+      throw new GenerationProviderError(status, "Сервис генерации не подтвердил загрузку ролика.");
+    }
+    const length = response.headers?.get("content-length") ?? null;
+    const declared = length === null ? null : /^\d+$/.test(length) ? Number(length) : Number.NaN;
+    if (declared !== null && (!Number.isSafeInteger(declared) || declared <= 0 || declared > VIDEO_MAX_BYTES)) throw unavailable();
+    if (!response.body) throw unavailable();
+    reader = response.body.getReader();
+    const chunks: Buffer[] = [];
+    let bytes = 0;
+    for (;;) {
+      const part = await Promise.race([reader.read(), deadline]);
+      if (part.done) break;
+      if (!ArrayBuffer.isView(part.value) || part.value.BYTES_PER_ELEMENT !== 1 || part.value.byteLength === 0) throw unavailable();
+      bytes += part.value.byteLength;
+      // Bound retained fragment overhead as well as payload bytes.
+      if (bytes > VIDEO_MAX_BYTES || chunks.length >= 8192 || (declared !== null && bytes > declared)) throw unavailable();
+      chunks.push(Buffer.from(part.value));
+    }
+    if (!bytes || (declared !== null && bytes !== declared) || controller.signal.aborted) throw unavailable();
+    const buffer = Buffer.concat(chunks, bytes);
+    if (!looksLikeMp4(buffer)) throw new GenerationProviderError(502, "Провайдер вернул файл, который не является MP4.");
+    return buffer;
+  } catch (error) {
+    if (error instanceof GenerationProviderError && Number.isInteger(error.status) && error.status >= 400 && error.status <= 599) {
+      throw new GenerationProviderError(error.status, "Не удалось подтвердить загрузку файла ролика.");
+    }
+    throw unavailable();
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    controller.abort();
+    if (reader) { try { void reader.cancel().catch(() => {}); } catch { /* Never await stalled cancellation. */ } }
+    else cancelBody(response?.body);
   }
-
-  const buffer = Buffer.from(await response.arrayBuffer());
-  if (buffer.length === 0) {
-    throw new GenerationProviderError(502, "Провайдер вернул пустой файл ролика.");
-  }
-  if (buffer.length > VIDEO_MAX_BYTES) {
-    // Тот же предел, что и у ручной загрузки креатива. Оговорка: ответ уже
-    // прочитан целиком в память — этот предел отсекает файл до записи в
-    // хранилище, но не защищает от расхода памяти на само чтение. Потоковая
-    // загрузка потребовала бы другого клиента хранилища.
-    throw new GenerationProviderError(502, "Готовый ролик больше 100 МБ — такой файл не принимает библиотека креативов.");
-  }
-  if (!looksLikeMp4(buffer)) {
-    // Тип берётся по сигнатуре, как и у картинки: дальше файл уйдёт в
-    // публичный bucket с заявленным video/mp4, и записать туда что-то другое
-    // означало бы отдать Meta файл, который она отклонит на запуске.
-    throw new GenerationProviderError(502, "Провайдер вернул файл, который не является MP4.");
-  }
-  return buffer;
 }
 
 /** Предел размера ролика — как у ручной загрузки креатива (lib/crm/server.ts). */

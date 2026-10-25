@@ -6,6 +6,9 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { Script } from "node:vm";
+const { generatedVideoRequestDigest } = createRequire(import.meta.url)("../../lib/content-studio/generated-video-handle.ts") as {
+  generatedVideoRequestDigest(prompt: unknown, format: unknown): string;
+};
 const { generatedCreativeIdentity, isLegacyGeneratedVideoIdentity } = createRequire(import.meta.url)("../../lib/crm/generated-identity.ts") as {
   generatedCreativeIdentity(input: { workspaceId: unknown; idempotencyKey: unknown; mimeType: unknown }): {
     assetId: string; fileName: string; storagePath: string; keyDigest: string;
@@ -27,6 +30,7 @@ const privateEcho = Object.values(markers).join("; ");
 const context = {
   workspaceId: "11111111-1111-4111-8111-111111111111",
   staffUserId: "22222222-2222-4222-8222-222222222222",
+  userId: "66666666-6666-4666-8666-666666666666",
 };
 const requestKey = "33333333-3333-4333-8333-333333333333";
 const videoId = "44444444-4444-4444-8444-444444444444";
@@ -49,7 +53,7 @@ type HandlerName = typeof handlerNames[number];
 type Request = { body: Record<string, unknown>; headers: Record<string, string>; query: Record<string, string> };
 type PublicJson = {
   success: boolean; error?: string; details?: string[]; hint?: string; code?: string;
-  mode?: string; data?: Record<string, unknown>;
+  mode?: string; data?: Record<string, unknown>; accepted?: boolean;
 };
 type Response = {
   status(code: number): Response;
@@ -122,6 +126,14 @@ function fixture(options: Options = {}) {
   const calls = { text: 0, image: 0, create: 0, poll: 0, download: 0, network: 0 };
   const exported: { selected?: Selected } = {};
   let selected: Selected;
+  const generationKey = `v2:${requestKey}`;
+  const nativeIdentity = generatedCreativeIdentity({ workspaceId: context.workspaceId, idempotencyKey: generationKey, mimeType: "video/mp4" });
+  const nativePath = `optimized/${context.workspaceId}/${videoId}-${"a".repeat(20)}.mp4`;
+  let native: Record<string, unknown> | null = null;
+  let nativeReady = false;
+  const pending = (status: string, providerJobId: string | null = "synthetic-job") => ({ status, generationKey,
+    requestDigest: generatedVideoRequestDigest(markers.customer, "universal"), providerJobId,
+    validationJobId: ["queued", "ready"].includes(status) ? videoId : null, progress: 0, needInput: status === "rendering" });
   const fail = () => {
     throw options.providerStatus !== undefined
       ? new selected.GenerationProviderError(options.providerStatus, privateEcho)
@@ -135,6 +147,32 @@ function fixture(options: Options = {}) {
   };
   const dependencies = {
     generatedCreativeIdentity, isLegacyGeneratedVideoIdentity,
+    generatedVideoRequestDigest,
+    WorkspaceAdminAuthError: class extends Error {},
+    requireWorkspaceAccess: async () => ({ ...context }),
+    generatedVideoWorkflowConfig: () => ({}),
+    requireGeneratedVideoWorkflowReady: async () => { events.push("native.preflight"); },
+    readGeneratedVideoWorkflow: async () => { events.push("native.read"); return native; },
+    admitGeneratedVideoWorkflow: async () => { events.push("native.admit"); return native = pending("reserved", null); },
+    beginGeneratedVideoDispatch: async () => { events.push("native.dispatch"); return native = { ...pending("dispatching", null), dispatchAccepted: true }; },
+    cancelGeneratedVideoWorkflow: async () => { events.push("native.cancel"); return native = pending("cancelled", null); },
+    linkGeneratedVideoProvider: async () => { events.push("native.link"); return native = pending("rendering"); },
+    resumeGeneratedVideoWorkflow: async () => {
+      events.push("native.resume");
+      if (!nativeReady) return native ?? pending("rendering");
+      return { ...pending("ready"), nativeValidated: true, asset: { id: nativeIdentity.assetId, workspaceId: context.workspaceId,
+        fileName: nativeIdentity.fileName, fileType: "video", mimeType: "video/mp4", fileSize: 3,
+        storageBucket: "ad-creatives", storagePath: nativePath, publicUrl: `${storageOrigin}/storage/v1/object/public/ad-creatives/${nativePath}`,
+        status: "ready", sha256: "a".repeat(64), thumbnailUrl: `${storageOrigin}/storage/v1/object/public/ad-creatives/${nativePath.slice(0, -4)}-thumbnail.jpg`,
+        thumbnailPath: `${nativePath.slice(0, -4)}-thumbnail.jpg`, thumbnailSize: 2, thumbnailSha256: "b".repeat(64) } };
+    },
+    receiveGeneratedVideoInput: async (...args: unknown[]) => {
+      events.push("native.receive");
+      assert.equal(args[2], generationKey);
+      assert.deepEqual(Array.from(args[3] as Uint8Array), [4, 5, 6]);
+      if (options.failAt === "store") fail();
+      return native = pending("queued");
+    },
     randomUUID: () => requestKey,
     resolveTextProvider: () => "openai",
     readGenerationConfig: () => config,
@@ -145,8 +183,8 @@ function fixture(options: Options = {}) {
     videoSizeForFormat: () => "720x1280",
     billableVideoSeconds: () => 8,
     videoFormatWasSubstituted: () => false,
-    signVideoJobHandle: () => "synthetic-signed-handle",
-    readSignedVideoJobHandle: () => "synthetic-job",
+    signGeneratedVideoJobHandle: () => "synthetic-signed-handle",
+    readGeneratedVideoJobHandle: () => ({ workspaceId: context.workspaceId, generationKey, providerJobId: "synthetic-job", legacy: false }),
     async reserveContentGeneration(input: Record<string, unknown>) {
       events.push("reserve");
       reserves.push(plain(input));
@@ -247,7 +285,11 @@ function fixture(options: Options = {}) {
   };
   return {
     selected, events, reserves, completions, stores, patches, calls,
-    invoke: (name: HandlerName) => capture((res) => selected[name](request, res, context)),
+    finishNative: () => { nativeReady = true; },
+    invoke: (name: HandlerName) => {
+      if (name === "handleVideoGeneration" && native === null) native = pending("rendering");
+      return capture((res) => selected[name](request, res, context));
+    },
     providerFailure: (error: unknown) => capture((res) => selected.sendProviderFailure(res, error, "Synthetic generation failure")),
   };
 }
@@ -367,7 +409,8 @@ for (const [name, kind, units] of [
     assert.equal(f.reserves[0].requestKey, requestKey);
     assert.deepEqual(f.calls, { text: 0, image: 0, create: 0, poll: 0, download: 0, network: 0 });
     assert.deepEqual(f.completions, [], "no receipt to bill or finalize");
-    assert.deepEqual(f.events, ["reserve"]);
+    assert.deepEqual(f.events, name === "handleGenerateVideo"
+      ? ["native.read", "native.preflight", "native.admit", "reserve", "native.cancel"] : ["reserve"]);
     assertNoAssetWrites(f);
     assertPrivate(result);
   });
@@ -434,12 +477,32 @@ test("content privacy: video submission positive control remains accepted and bi
   assert.equal(result.reply.data?.status, "queued");
   assert.equal(result.reply.data?.seconds, 8);
   assert.equal(result.reply.data?.formatSubstituted, false);
-  assert.deepEqual(f.events, ["reserve", "create", "complete:succeeded"]);
+  assert.deepEqual(f.events, ["native.read", "native.preflight", "native.admit", "reserve", "native.dispatch", "create", "native.link", "complete:succeeded"]);
   assert.equal(f.reserves.length, 1);
   assert.equal(f.completions.length, 1);
   assertNoAssetWrites(f);
   assertPrivate(result);
 });
+
+for (const scenario of [
+  { label: "known rejected dispatch", providerStatus: 400, status: 422, completion: "failed", code: "provider_rejected" },
+  { label: "unknown paid dispatch", providerStatus: undefined, status: 409, completion: "unknown", code: "request_unknown" },
+]) {
+  test(`content privacy: video ${scenario.label} preserves accounting without raw diagnostics or another dispatch`, async () => {
+    const f = fixture({ failAt: "provider", providerStatus: scenario.providerStatus });
+    const result = await f.invoke("handleGenerateVideo");
+    assert.equal(result.status, scenario.status);
+    assert.equal(result.reply.success, false);
+    assert.equal(result.reply.data, undefined, "no provider or private object identity is exposed on dispatch uncertainty");
+    assert.equal(f.reserves.length, 1); assert.equal(f.calls.create, 1);
+    assert.equal(f.completions.length, 1); assert.equal(f.completions[0].status, scenario.completion);
+    assert.equal(f.completions[0].errorCode, scenario.code);
+    assert.equal(f.events.includes("native.cancel"), scenario.completion === "failed",
+      "an uncertain provider outcome must retain admission rather than authorizing another render");
+    assert.equal(f.events.includes("native.link"), false);
+    assertNoAssetWrites(f); assertPrivate(result);
+  });
+}
 
 test("content privacy: failed video job remains HTTP 200 success with failed status and safe failureReason", async () => {
   const f = fixture({ jobStatus: "failed" });
@@ -448,9 +511,10 @@ test("content privacy: failed video job remains HTTP 200 success with failed sta
   assert.equal(result.reply.success, true);
   assert.equal(result.reply.data?.status, "failed");
   assert.equal(result.reply.data?.progress, 37);
-  assert.equal(result.reply.data?.creativeUrl, "");
+  assert.equal(Object.hasOwn(result.reply.data!, "creativeUrl"), false);
+  assert.equal(result.reply.data?.phase, "generation");
   assert.ok(typeof result.reply.data?.failureReason === "string" && result.reply.data.failureReason.trim());
-  assert.deepEqual(f.events, ["poll"]);
+  assert.deepEqual(f.events, ["native.read", "native.resume", "native.preflight", "poll"]);
   assert.deepEqual(f.reserves, []);
   assert.deepEqual(f.completions, []);
   assert.equal(f.calls.create, 0);
@@ -462,35 +526,49 @@ test("content privacy: failed video job remains HTTP 200 success with failed sta
 test("content privacy: completed video storage failure preserves paid-render polling advice with no new charge", async () => {
   const f = fixture({ jobStatus: "completed", failAt: "store" });
   const result = await f.invoke("handleVideoGeneration");
-  assertFailure(result, 502, true);
-  assert.match(result.reply.error!, /отрендерен.*сохранение не подтверждено/iu);
-  assert.match(result.reply.hint!, /оплачен/iu);
-  assert.match(result.reply.hint!, /опрос/iu);
-  assert.deepEqual(f.events, ["poll", "download", "store"]);
+  assert.equal(result.status, 503);
+  assert.equal(result.reply.success, false);
+  assert.equal(result.reply.accepted, true);
+  assert.ok(result.reply.details?.length);
+  assert.match(result.reply.error!, /принят.*не подтверждена/iu);
+  assert.match(result.reply.hint!, /проверку.*не запускайте новую платную/iu);
+  assert.deepEqual(result.reply.data, { handle: "synthetic-signed-handle", status: "in_progress", phase: "validation" });
+  assert.deepEqual(f.events, ["native.read", "native.resume", "native.preflight", "poll", "download", "native.receive"]);
   assert.equal(f.calls.create, 0, "polling never starts another paid render");
   assert.deepEqual(f.reserves, []);
   assert.deepEqual(f.completions, []);
-  assert.equal(f.stores.length, 1);
-  assert.equal(f.stores[0].idempotencyKey, "synthetic-job");
+  assert.equal(f.stores.length, 0, "generated raw video must never reach the old public writer");
   assert.deepEqual(f.patches, []);
   assertPrivate(result);
 });
 
-test("content privacy: completed video positive control stores the same job without reserving another render", async () => {
+test("content privacy: completed provider video stays pending until native validation and never reserves another render", async () => {
   const f = fixture({ jobStatus: "completed" });
   const result = await f.invoke("handleVideoGeneration");
   assert.equal(result.status, 200);
   assert.equal(result.reply.success, true);
-  assert.equal(result.reply.data?.status, "completed");
-  assert.equal(result.reply.data?.progress, 100);
-  const identity = generatedCreativeIdentity({ workspaceId: context.workspaceId, idempotencyKey: "synthetic-job", mimeType: "video/mp4" });
-  assert.equal(result.reply.data?.creativeUrl, `${storageOrigin}/storage/v1/object/public/ad-creatives/${identity.storagePath}`);
-  assert.equal(result.reply.data?.assetId, identity.assetId);
-  assert.equal(result.reply.data?.mimeType, "video/mp4");
-  assert.deepEqual(f.events, ["poll", "download", "store"]);
+  assert.equal(result.reply.data?.status, "in_progress");
+  assert.equal(result.reply.data?.phase, "validation");
+  assert.equal(result.reply.data?.validationJobId, videoId);
+  assert.equal(Object.hasOwn(result.reply.data!, "creativeUrl"), false);
+  assert.deepEqual(f.events, ["native.read", "native.resume", "native.preflight", "poll", "download", "native.receive"]);
   assert.equal(f.calls.create, 0);
   assert.deepEqual(f.reserves, []);
   assert.deepEqual(f.completions, []);
-  assert.equal(f.stores[0].idempotencyKey, "synthetic-job");
+  assert.deepEqual(f.stores, []);
   assertPrivate(result);
+  f.finishNative();
+  const completed = await f.invoke("handleVideoGeneration");
+  assert.equal(completed.reply.data?.status, "completed");
+  assert.equal(completed.reply.data?.progress, 100);
+  assert.equal(completed.reply.data?.nativeValidated, true);
+  assert.equal(completed.reply.data?.validationJobId, videoId);
+  const identity = generatedCreativeIdentity({ workspaceId: context.workspaceId, idempotencyKey: `v2:${requestKey}`, mimeType: "video/mp4" });
+  assert.equal(completed.reply.data?.assetId, identity.assetId);
+  assert.match(String(completed.reply.data?.creativeUrl), /\/optimized\/.*\.mp4$/);
+  assert.equal(completed.reply.data?.mimeType, "video/mp4");
+  assert.equal(f.calls.poll, 1);
+  assert.equal(f.calls.download, 1);
+  assert.deepEqual(f.events.slice(-2), ["native.read", "native.resume"]);
+  assertPrivate(completed);
 });

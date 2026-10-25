@@ -437,6 +437,29 @@ API делает один same-key cleanup fallback при capacity отказе
 Generated provider-video, physical cleanup/retention, Linux sandbox, настоящая
 Preview/mobile/Storage матрица и юридическое согласование остаются отдельно.
 
+G5-C56, интеграция generated video: paid dispatch получает server-only durable
+admission/nonce до вызова провайдера, исходник попадает только в private bucket,
+а публичная квитанция требует native MP4/JPEG promotion 086 и финализации 090.
+Повторы восстанавливают тот же render/asset/job без новой генерации. Direct
+public video writer закрыт. Исходный SHA-256 проверяется и worker до декодирования.
+Поздний create-only upload не может вернуть raw после освобождения квоты:
+generated raw заменяется проверенным 56-byte occupied-key fence, а не удаляется.
+Только точный claim-scoped ACK освобождает 100 MiB reserve; это не физическая
+очистка, не удаление версий и не основание обещать пользователю стирание данных.
+090 проверена на disposable PostgreSQL 17.11: 64/64, без облачного применения.
+Найден и исправлен lease-clock-before-row-lock дефект. Старые retry callbacks
+также больше не заимствуют новую задачу из mutable ref. Подробности и точные
+ограничения — в G5-C56 DELIVERY-CYCLES и VIDEO-WORKER.
+
+Новый браузерный стенд использует настоящий React и только синтетические
+локальные API/медиа. DOM-геометрия и воспроизведение проверены на 390/1440 px;
+pixel acceptance не состоялся из-за timeout захвата экрана. Общий schema/source
+прогон 45/49 не зелёный: остаются M2/foreign 065, неподтверждённый в цепочке
+RLS lead_stages и устаревшие static checks 084/088. Это не доказательство текущих
+облачных прав: рабочие базы не читались и не менялись. Preview Storage/versioning,
+Linux runtime/resource sandbox, legacy recovery и retention/reconciliation
+остаются release gates. Терминальный отказ генератора пока сохраняет reservation.
+
 Нет основания выставлять «100% защиты» или «100% юридической готовности».
 Изменение исходников не меняет уже опубликованную версию. Отдельно фиксируются
 локальные тесты, проверки Preview, юридическое согласование и рабочий выпуск.

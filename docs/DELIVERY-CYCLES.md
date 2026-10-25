@@ -4699,6 +4699,83 @@ pipeline/durable video admission, Linux/container sandbox. Extensionless fix
 Production, Baspana, салоны, WhatsApp, домены, аккаунты и настройки нетронуты.
 Прежний M2 duplicate 064/foreign dirty 065 сохраняется; 059/065 не менялись.
 
+### Цикл G5-C56: генерируемое видео через закрытую native-очередь — локальный кандидат, 25 октября
+
+Шесть независимых участков: backend workflow, API, React/локальный браузерный
+стенд, HMAC/идентичность/запрет старого writer, настоящий PostgreSQL и API/runtime
+регрессии. Main интегрирует SQL/worker, устраняет найденные дефекты и проверяет
+сборку. Рабочие среды и внешние поставщики не участвуют.
+
+- Новый запрос резервирует ограниченное место для private raw **до** квоты и
+  обращения к генератору. 090 хранит request digest, immutable asset/job identity,
+  dispatch nonce и provider id. Повтор RPC с тем же nonce восстанавливает ACK;
+  другой nonce не разрешает вторую отправку. Неопределённая отправка остаётся
+  в карантине, а не освобождает место по одному истечению времени.
+- `g2` HMAC привязан к workspace, ключу запроса и существующему provider job.
+  Legacy-подпись читается, но старый публичный immutable asset не переписывается.
+  Прямой `storeGeneratedCreative(video)` закрыт до SDK/Storage/DB. Изображения
+  продолжают свой прежний проверенный путь.
+- Результат генератора получает immutable SHA-256/size и один private raw key.
+  Только подтверждение тех же байтов ставит один native job в очередь. Worker
+  сверяет SHA-256 до декодирования. 086 атомарно продвигает проверенные MP4/JPEG;
+  API сверяет их публичные байты и квитанцию, затем 090 фиксирует generated key,
+  digest и native job proof. Pending/raw ссылки браузеру не выдаются.
+- После обработки generated raw не удаляется: его ключ занимает проверенный
+  56-byte служебный fence. Это закрывает восстановление большого raw поздней
+  параллельной create-only загрузкой. ACK привязан к точному worker claim и
+  разрешает квоте учитывать только 56 байт вместо 100 MiB. Без квитанции fence
+  даже `raw_deleted_at` не освобождает резерв. Физическая очистка/версии и срок
+  хранения fence/журнала не объявляются решёнными.
+- React хранит handle/phase/job id отдельно для actor/workspace, без ссылок на
+  raw или доверия локальному «completed». GET повторяет проверку бесплатно;
+  повтор native-обработки вызывает только существующий protected CRM job.
+  Исправлены обе устаревшие кнопки: они захватывают исходную задачу, а не берут
+  новую из mutable ref. Отзыв роли/смена аккаунта/ABA не публикуют старый ответ.
+- Скачивание готового provider MP4 теперь потоковое: общий
+  deadline headers+body 15 s, максимум 100 MiB/8192 фрагмента, без `arrayBuffer()`
+  fallback и чтения неизвестного error body. Redirect/неверная длина/зависшее
+  тело/поздний ответ не обходят предел; это transport gate, не native validation.
+  Отдельно: **40/40** bounded download и **97/97** occupied-key reclamation.
+- Native PostgreSQL 17.11: **64/64**, настоящие 086/090, вымышленный provider/
+  Storage receipt. Тест выявил и закрыл реальный дефект: время lease нужно
+  читать **после** ожидания operation row lock, а не перед ним. SHA-256 090:
+  `ebba17c2ee9108e35c17da426d66715599931510c4f542e5c249edabab41ea5c`.
+  Это не тест облачного Storage, генератора или Linux worker.
+- Настоящий FFmpeg/ffprobe с вымышленными файлами: **34/34**, включая input hash,
+  private fence и запрет удаления generated raw. React/receipt runtime: **162/162**;
+  AdsAutomation session runtime после актуализации строгого fixture: **78/78**.
+  Upload/import/reclamation регрессии: **1106/1106**.
+  Объединённый финальный прогон 33 runtime/browser/security test files:
+  **3399/3399**, без пропусков. Это отдельный выбранный набор, не зелёный
+  общий migration/schema audit, который явно описан ниже.
+  Общая сборка, workspace/API types (оба module-resolution режима) и **115**
+  cold-start auth/denial checks прошли. Предупреждение sourcemap tooltip остаётся.
+- Во встроенном браузере проверены ширины **390/1440 px**: document scrollWidth
+  совпадает с clientWidth, controls не выходят за границы. Тестовый MP4 реально
+  загружен (`readyState=4`, error отсутствует), ширины видео 311/653.5 px при
+  высоте 420 px. В failed-состоянии доступны два бесплатных повтора. Захват
+  скриншотов последовательно завершался timeout инструмента: pixel/visual
+  acceptance **не подтверждён**. HMR стенда дал предупреждение повторного root;
+  это не объявляется чистым production/browser console acceptance.
+
+Остатки до Preview/release: применение 090 только после согласования зависимостей
+и остановки смешанных старых producer/worker; настоящий private/public Storage,
+версионирование и occupied-key fence; общий request deadline; Linux/container
+resource sandbox и живой worker; legacy frontend drafts/старые публичные видео;
+согласованный retention/reconciliation неизвестных и terminal-provider ошибок.
+Терминальная ошибка провайдера пока консервативно сохраняет admission reserve;
+автоматическое освобождение такого резерва не реализовано и не выдаётся за успех.
+
+Отдельный schema/source прогон **45/49** не зелёный: M2 — существующий duplicate
+064/foreign dirty 065; 22b — цепочка не подтверждает RLS `lead_stages`; 23 — старый
+regex ошибочно видит browser EXECUTE в type-qualified списке 088; 26 — checker
+не учитывает RPC-only таблицу 084. Эти проверки не отключались и не ослаблялись.
+090 имеет явные RLS/серверные GRANT и отдельную проверку реальных прав в PG.
+
+Новых Preview, облачных миграций, генераций, файлов, отправок и расходов нет.
+Production, Baspana, салоны, WhatsApp, домены, аккаунты и настройки нетронуты;
+чужие 059/065 не редактировались. Общая готовность G1–G8 не объявляется 100%.
+
 ### Цикл G7-C21: шесть независимых направлений — интеграция локально, 25 октября
 
 После замечания владельца write scopes разделены: G1 operator requests,

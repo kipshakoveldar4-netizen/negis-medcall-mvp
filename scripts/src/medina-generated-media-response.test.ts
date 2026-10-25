@@ -8,10 +8,11 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { Script } from "node:vm";
 
-// Actual photo/start/poll handlers and storage helper. Provider HTTP, Storage
-// SDK, usage and library persistence are recording doubles, never real services.
-// Image validation is different: the actual helper uses the real local sharp
-// decoder. The synthetic MP4 below is a transport fixture, not decoded video.
+// Actual photo/start/poll handlers, private-video workflow and image writer.
+// Provider HTTP, Storage, auth, accounting and SQL envelopes are explicit I/O
+// doubles. SQL 090 and native decoding are tested by their separate suites;
+// this suite never claims its simulated 086 promotion decoded the MP4 fixture.
+// Images do exercise the actual local sharp decoder.
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const requireFromRoot = createRequire(path.join(root, "package.json"));
 const ts = requireFromRoot("typescript") as typeof import("typescript");
@@ -69,6 +70,9 @@ const generation = await sourceFile("lib/content-studio/generation.ts");
 const imageHelper = await sourceFile("lib/crm/creative-image.ts");
 const identityHelper = await sourceFile("lib/crm/generated-identity.ts");
 const verificationHelper = await sourceFile("lib/crm/generated-storage-verification.ts");
+const nativeWorkflow = await sourceFile("lib/crm/generated-video-workflow.ts");
+const nativeIdentity = await sourceFile("lib/crm/generated-video-identity.ts");
+const nativeHandle = await sourceFile("lib/content-studio/generated-video-handle.ts");
 const usage = await sourceFile("lib/content-studio/usage.ts");
 const handlerScript = select(route, ["handleGeneratePhoto", "handleGenerateVideo", "handleVideoGeneration"]);
 const storeScript = select(server, [
@@ -79,6 +83,9 @@ const decoderScript = compile(imageHelper.text, imageHelper.fileName);
 const identityScript = compile(identityHelper.text, identityHelper.fileName);
 const verificationScript = compile(verificationHelper.text, verificationHelper.fileName);
 const billingScript = select(usage, ["billableVideoSeconds"]);
+const workflowScript = compile(nativeWorkflow.text, nativeWorkflow.fileName);
+const nativeIdentityScript = compile(nativeIdentity.text, nativeIdentity.fileName);
+const nativeHandleScript = compile(nativeHandle.text, nativeHandle.fileName);
 
 type Json = Record<string, unknown>;
 type Kind = "photo" | "video";
@@ -107,6 +114,9 @@ const STAFF = "22222222-2222-4222-8222-222222222222";
 const ASSET = "33333333-3333-4333-8333-333333333333";
 const REQUEST_KEY = "44444444-4444-4444-8444-444444444444";
 const USAGE_ID = "55555555-5555-4555-8555-555555555555";
+const AUTH_USER = "66666666-6666-4666-8666-666666666666";
+const VALIDATION_JOB = "77777777-7777-4777-8777-777777777777";
+const GENERATION_KEY = `v2:${REQUEST_KEY}`;
 const JOB = "video_synthetic_job";
 const ORIGIN = "https://generated-media.invalid";
 const RAW = "RAW_DIAGNOSTIC synthetic_internal_policy customer=synthetic";
@@ -117,11 +127,14 @@ const SYNTHETIC_ENV = Object.freeze({
   CONTENT_STUDIO_VIDEO_SECONDS: "4",
   SUPABASE_URL: ORIGIN,
   SUPABASE_SERVICE_ROLE_KEY: "synthetic-signing-material-not-a-credential",
+  VIDEO_OPTIMIZATION_ENABLED: "true",
 });
 const PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAAEklEQVQImWOQq9giV7GFAUIBACHOBSl+UhuwAAAAAElFTkSuQmCC", "base64",
 );
 const MP4 = Buffer.from("000000186674797069736f6d0000020069736f6d6d703432", "hex");
+const OPTIMIZED = Buffer.concat([MP4, Buffer.from([1, 2, 3])]);
+const THUMBNAIL = Buffer.from("ffd8ffe0010203ffd9", "hex");
 const clone = <T,>(value: T): T => structuredClone(value);
 const record = (value: unknown): Json => value && typeof value === "object" && !Array.isArray(value) ? value as Json : {};
 
@@ -139,6 +152,9 @@ function fixture(options: Options = {}) {
   const storageReads: Array<{ url: string; init: Json }> = [];
   const lookups: Json[] = [];
   const decoderCalls: DecoderInput[] = [];
+  const nativeOperations = new Map<string, Json>();
+  let nativeAsset: Json | null = null, nativeJob: Json | null = null;
+  const nativeRpcs: Array<{ name: string; args: Json }> = [];
   let now = "2026-10-25T03:00:00.000Z";
   const forbidden = (operation: string): never => {
     external.push(operation);
@@ -202,6 +218,11 @@ function fixture(options: Options = {}) {
   }) as { validateCreativeImageBytes(input: DecoderInput): Promise<string[]>; CreativeImageValidationUnavailable: unknown };
   const sdk = {
     storage: {
+      async getBucket(bucket: string) {
+        assert.ok(["ad-creatives-raw", "ad-creatives"].includes(bucket));
+        return { data: { id: bucket, name: bucket, public: bucket === "ad-creatives", file_size_limit: 100 * 1024 * 1024,
+          allowed_mime_types: bucket === "ad-creatives" ? ["video/mp4", "image/jpeg"] : ["video/mp4"], versioning_status: "disabled" }, error: null };
+      },
       from(bucket: string) {
         return {
           async upload(key: string, buffer: Buffer, uploadOptions: Json) {
@@ -222,7 +243,67 @@ function fixture(options: Options = {}) {
         };
       },
     },
+    async rpc(name: string, args: Json) {
+      nativeRpcs.push({ name, args: clone(args) }); events.push(name);
+      assert.equal(args.p_workspace_id, WORKSPACE); assert.equal(args.p_staff_user_id, STAFF); assert.equal(args.p_auth_user_id, AUTH_USER);
+      const key = String(args.p_generation_key);
+      let op = nativeOperations.get(key);
+      const envelope = () => op ? clone({ operation: op, job: nativeJob, asset: nativeAsset }) : null;
+      if (name === "read_generated_video_workflow") return options.lookup ? options.lookup() : { data: envelope(), error: null };
+      if (name === "admit_generated_video_workflow") {
+        if (!op) {
+          op = { workspace_id: WORKSPACE, generation_key: key, request_digest: args.p_request_digest, key_digest: args.p_key_digest,
+            asset_id: args.p_asset_id, job_id: VALIDATION_JOB, file_name: args.p_file_name, status: "reserved", provider_job_id: null,
+            dispatch_id: null, reserved_until: new Date(Date.parse(now) + 120000).toISOString(), input_size: null, input_sha256: null,
+            raw_bucket: null, raw_path: null, result: null, created_by_staff_user_id: STAFF, created_by_auth_user_id: AUTH_USER,
+            created_at: now, updated_at: now };
+          nativeOperations.set(key, op);
+        }
+      } else {
+        assert.ok(op, "fixture RPC receipts describe only the admitted generation");
+        if (name === "begin_generated_video_dispatch") {
+          Object.assign(op, { status: "dispatching", dispatch_id: args.p_dispatch_id });
+          return { data: { ...envelope(), dispatchAccepted: true }, error: null };
+        }
+        if (name === "link_generated_video_provider") Object.assign(op, { status: "rendering", provider_job_id: args.p_provider_job_id });
+        else if (name === "bind_generated_video_input") {
+          Object.assign(op, { status: "awaiting_upload", input_size: args.p_input_size, input_sha256: args.p_input_sha256,
+            raw_bucket: args.p_raw_bucket, raw_path: `${WORKSPACE}/generated-raw/${op.key_digest}/original.mp4` });
+          nativeAsset = { id: op.asset_id, workspace_id: WORKSPACE, uploaded_by: AUTH_USER, file_name: op.file_name, file_type: "video",
+            mime_type: "video/mp4", file_size: op.input_size, storage_bucket: op.raw_bucket, storage_path: op.raw_path, public_url: null,
+            status: "uploaded", generated_key: null, generated_sha256: null, generated_video_job_id: null, updated_at: now,
+            metadata: { uploadMode: "native-generated-pending", kind: "generated-video-pending", generationKey: key, contentSha256: op.input_sha256 } };
+          nativeJob = { id: op.job_id, workspace_id: WORKSPACE, asset_id: op.asset_id, status: "awaiting_upload", progress: 0,
+            raw_bucket: op.raw_bucket, raw_path: op.raw_path, raw_public_url: null, raw_size: op.input_size,
+            source_file_name: op.file_name, source_mime_type: "video/mp4", output_bucket: "ad-creatives", optimized_bucket: "ad-creatives",
+            promotion_receipt: null, metadata: { kind: "generated-video-native", generationKey: key, inputSha256: op.input_sha256 } };
+          libraryAttempts.push({ workspaceId: WORKSPACE, body: clone(nativeAsset) });
+          libraryRows.set(String(op.raw_path), nativeAsset);
+        } else if (name === "queue_generated_video_workflow") {
+          Object.assign(op, { status: "queued" }); Object.assign(nativeJob!, { status: "queued" });
+        } else if (name === "finalize_generated_video_workflow") {
+          assert.equal(nativeJob?.status, "ready");
+          const saved = { mode: "supabase", warning: "", asset: { id: op.asset_id } };
+          const reply = options.persist ? options.persist({ workspaceId: WORKSPACE, body: clone(nativeAsset!) }, saved) : saved;
+          if (record(reply).mode !== "supabase" || record(record(reply).asset).id !== op.asset_id) return { data: null, error: { message: RAW } };
+          const proof = record(record(nativeJob!.promotion_receipt).result);
+          Object.assign(nativeAsset!, { generated_key: `v1:${key}`, generated_sha256: proof.sha256, generated_video_job_id: op.job_id,
+            metadata: { ...record(nativeAsset!.metadata), uploadMode: "ai-generated", kind: "generated-video", jobId: key, nativeValidated: true } });
+          Object.assign(op, { status: "ready", result: { assetId: op.asset_id, validationJobId: op.job_id, nativeValidated: true,
+            fileName: op.file_name, mimeType: "video/mp4", fileSize: proof.file_size, storageBucket: proof.storage_bucket,
+            storagePath: proof.storage_path, creativeUrl: proof.public_url, sha256: proof.sha256, thumbnailUrl: proof.thumbnail_public_url,
+            thumbnailPath: proof.thumbnail_path, thumbnailSize: proof.thumbnail_size, thumbnailSha256: proof.thumbnail_sha256 } });
+        } else return forbidden(`unrecognized native RPC ${name}`);
+      }
+      return { data: envelope(), error: null };
+    },
     from(table: string) {
+      if (table === "staff_users") {
+        const staffQuery = { select() { return staffQuery; }, eq() { return staffQuery; }, async maybeSingle() {
+          return { data: { id: STAFF, workspace_id: WORKSPACE, auth_user_id: AUTH_USER, role: "owner", status: "active" }, error: null };
+        } };
+        return staffQuery;
+      }
       assert.equal(table, "ad_creative_assets", "only the generated library lookup is simulated");
       const filters: Json = {};
       const query = {
@@ -294,14 +375,53 @@ function fixture(options: Options = {}) {
     }
     if (url === `https://api.openai.com/v1/videos/${JOB}/content?variant=video` && method === "GET") {
       events.push("provider.file");
-      return { ok: true, status: 200, text: async () => "",
-        arrayBuffer: async () => MP4.buffer.slice(MP4.byteOffset, MP4.byteOffset + MP4.byteLength) };
+      return new globalThis.Response(new Uint8Array(MP4), { headers: { "content-type": "video/mp4", "content-length": String(MP4.length) } });
     }
     return forbidden(`unrecognized provider request ${method} ${url}`);
   }
   const billing = record(evaluate(billingScript).runtime);
+  const actualNativeIdentity = evaluate(nativeIdentityScript, { require: (id: string) => id === "./generated-identity" ? actualIdentity : forbidden(id) });
+  const actualHandle = evaluate(nativeHandleScript, { require: (id: string) => id === "node:crypto" ? requireFromRoot(id)
+    : id === "./generation" ? actualGeneration : forbidden(id) });
+  const actualWorkflow = evaluate(workflowScript, {
+    require: (id: string) => id === "node:crypto" ? requireFromRoot(id)
+      : id === "../auth/permissions" ? requireFromRoot("./lib/auth/permissions.ts")
+      : id === "../supabase/server" ? { getSupabaseServerClient: () => sdk }
+      : id === "./generated-video-identity" ? actualNativeIdentity : forbidden(`native import ${id}`),
+    async fetch(url: string, init: Json) {
+      const privatePrefix = `${ORIGIN}/storage/v1/object/ad-creatives-raw/`;
+      const publicPrefix = `${ORIGIN}/storage/v1/object/public/ad-creatives/`;
+      const privateRead = url.startsWith(privatePrefix);
+      assert.ok(privateRead || url.startsWith(publicPrefix), "native proof reads only own private/public Storage");
+      assert.equal(init.redirect, "error"); assert.equal(init.credentials, "omit"); assert.equal(init.cache, "no-store");
+      assert.equal(record(init.headers).Authorization, privateRead ? `Bearer ${SYNTHETIC_ENV.SUPABASE_SERVICE_ROLE_KEY}` : undefined);
+      const key = url.slice((privateRead ? privatePrefix : publicPrefix).length);
+      const bytes = privateRead && uploads.length && options.ownStorageBytes ? options.ownStorageBytes : objects.get(key);
+      storageReads.push({ url, init }); events.push("native.bytes");
+      return new globalThis.Response(bytes ? new ReadableStream<Uint8Array>({ start(controller) {
+        controller.enqueue(bytes.subarray(0, 7)); controller.enqueue(bytes.subarray(7)); controller.close();
+      } }) : null, { status: bytes ? 200 : 404, headers: bytes ? {
+        "content-type": key.endsWith(".jpg") ? "image/jpeg" : "video/mp4", "content-length": String(bytes.length),
+      } : {} });
+    },
+  });
+  async function resumeNative(...args: unknown[]) {
+    const state = await (actualWorkflow.resumeGeneratedVideoWorkflow as (...args: unknown[]) => Promise<Json>)(...args);
+    if (!options.stored || state.status !== "ready") return state;
+    const asset = record(state.asset);
+    const changed = options.stored({ workspaceId: WORKSPACE, fileName: String(asset.fileName), mimeType: "video/mp4", buffer: OPTIMIZED },
+      { publicUrl: asset.publicUrl, asset, mode: "supabase", warning: "" });
+    if (!changed || typeof changed !== "object") return changed;
+    const receipt = record(changed);
+    return { ...state, nativeValidated: receipt.mode === "supabase" && receipt.warning === "" ? true : undefined,
+      asset: { ...record(receipt.asset), publicUrl: receipt.publicUrl } };
+  }
   const handlers = record(evaluate(handlerScript, {
-    ...actualGeneration, ...actualIdentity, ...billing, fetch: providerFetch,
+    ...actualGeneration, ...actualIdentity, ...actualHandle, ...actualWorkflow, ...billing, fetch: providerFetch,
+    resumeGeneratedVideoWorkflow: resumeNative,
+    WorkspaceAdminAuthError: class extends Error {},
+    requireWorkspaceAccess: async () => ({ workspaceId: WORKSPACE, staffUserId: STAFF, userId: AUTH_USER, role: "owner" }),
+    randomUUID: () => REQUEST_KEY,
     async reserveContentGeneration(input: Json) {
       events.push("usage.reserve");
       reservations.push(clone(input));
@@ -351,7 +471,7 @@ function fixture(options: Options = {}) {
     };
     const name = action === "photo" ? "handleGeneratePhoto" : action === "start" ? "handleGenerateVideo" : "handleVideoGeneration";
     try {
-      await handlers[name]!(req, res, { workspaceId: WORKSPACE, staffUserId: STAFF, role: "owner" });
+      await handlers[name]!(req, res, { workspaceId: WORKSPACE, staffUserId: STAFF, userId: AUTH_USER, role: "owner" });
     } finally {
       assert.deepEqual(external, [], "no real network, credentials, provider jobs or database access");
     }
@@ -361,6 +481,28 @@ function fixture(options: Options = {}) {
   return {
     events, providerCalls, reservations, completions, stores, uploads, libraryAttempts, libraryRows, decoderCalls, storageReads, lookups,
     identity: actualIdentity.generatedCreativeIdentity,
+    nativeRpcs,
+    finishNative() {
+      assert.equal(nativeJob?.status, "queued", "only a privately proven queued input may receive the simulated native receipt");
+      const op = nativeOperations.get(GENERATION_KEY)!;
+      const digest = createHash("sha256").update(OPTIMIZED).digest("hex"), path = `optimized/${WORKSPACE}/${VALIDATION_JOB}-${digest.slice(0, 20)}.mp4`;
+      const thumbnailPath = `${path.slice(0, -4)}-thumbnail.jpg`;
+      const url = (key: string) => `${ORIGIN}/storage/v1/object/public/ad-creatives/${key}`;
+      const proof = { storage_origin: ORIGIN, storage_bucket: "ad-creatives", storage_path: path,
+        public_url: options.publicUrl ? record(record(options.publicUrl(path)).data).publicUrl : url(path), file_size: OPTIMIZED.length, sha256: digest,
+        thumbnail_path: thumbnailPath, thumbnail_public_url: url(thumbnailPath), thumbnail_size: THUMBNAIL.length,
+        thumbnail_sha256: createHash("sha256").update(THUMBNAIL).digest("hex"), input_size: MP4.length };
+      objects.set(path, OPTIMIZED); objects.set(thumbnailPath, THUMBNAIL);
+      Object.assign(nativeJob!, { status: "ready", progress: 100, output_path: path, output_public_url: proof.public_url, output_size: OPTIMIZED.length,
+        output_mime_type: "video/mp4", optimized_path: path, optimized_public_url: proof.public_url, output_size_bytes: OPTIMIZED.length,
+        input_size_bytes: MP4.length, input_mime_type: "video/mp4", thumbnail_path: thumbnailPath, thumbnail_public_url: url(thumbnailPath),
+        thumbnail_url: url(thumbnailPath), promotion_receipt: { asset_version: now, result: proof } });
+      Object.assign(nativeAsset!, { status: "ready", storage_bucket: "ad-creatives", storage_path: path, public_url: proof.public_url,
+        file_size: OPTIMIZED.length, metadata: { ...record(nativeAsset!.metadata), optimized: true, optimizationStatus: "ready",
+          contentSha256: digest, inputSizeBytes: MP4.length, outputSizeBytes: OPTIMIZED.length,
+          thumbnailUrl: url(thumbnailPath), thumbnailSource: "worker", thumbnailMimeType: "image/jpeg" } });
+      libraryRows.delete(String(op.raw_path)); libraryRows.set(path, nativeAsset!);
+    },
     advanceMonth() { now = "2026-11-25T03:00:00.000Z"; },
     decode: (input: DecoderInput) => actualDecoder.validateCreativeImageBytes(input),
     invoke,
@@ -389,7 +531,13 @@ function assertCharged(f: Fixture, kind: Kind) {
   assert.equal(f.completions[0]!.workspaceId, WORKSPACE);
   assert.equal(record(f.completions[0]!.reservation).usageId, USAGE_ID);
   assert.equal(f.completions[0]!.errorCode, undefined);
-  assert.ok(f.events.indexOf("usage.succeeded") < f.events.indexOf("store"), "provider charge precedes storage");
+  assert.ok(f.events.indexOf("usage.succeeded") < f.events.indexOf(kind === "photo" ? "store" : "sdk.upload"), "provider charge precedes storage");
+  if (kind === "video") {
+    assert.deepEqual(f.stores, [], "raw generated video cannot use the direct public writer");
+    assert.ok(f.events.indexOf("admit_generated_video_workflow") < f.events.indexOf("usage.reserve"));
+    assert.ok(f.events.indexOf("begin_generated_video_dispatch") < f.events.indexOf("provider.start"));
+    assert.ok(f.events.indexOf("link_generated_video_provider") < f.events.indexOf("usage.succeeded"));
+  }
   const paid = f.providerCalls.filter((call) => call.method === "POST");
   assert.deepEqual(paid, [{ method: "POST", url: `https://api.openai.com/v1/${kind === "photo" ? "images/generations" : "videos"}` }]);
 }
@@ -401,7 +549,7 @@ function assertRedacted(reply: Reply) {
 }
 function assertNotSaved(reply: Reply, kind: Kind) {
   assertRedacted(reply);
-  assert.equal(reply.status, 502, "an unconfirmed generated file must not be reported ready");
+  assert.equal(reply.status, kind === "photo" ? 502 : 503, "an unconfirmed generated file must not be reported ready");
   assert.equal(reply.body.success, false);
   const data = record(reply.body.data);
   assert.ok(!data.creativeUrl && !data.publicUrl && !data.assetId, "no public creative or library identity on rejection");
@@ -409,6 +557,15 @@ function assertNotSaved(reply: Reply, kind: Kind) {
   assert.notEqual(data.librarySaved, true);
   assert.notEqual(data.saved, true);
   assert.ok(Array.isArray(reply.body.details) && reply.body.details.length > 0);
+  if (kind === "video") {
+    assert.equal(reply.body.accepted, true);
+    assert.equal(typeof data.handle, "string", "the already accepted paid job remains recoverable");
+    assert.equal(data.status, "in_progress");
+    assert.equal(data.phase, "validation");
+    assert.match(String(reply.body.error), /принят.*не подтверждена/u);
+    assert.match(String(reply.body.hint), /не запускайте новую платную/u);
+    return;
+  }
   // Preserve the paid/rendered stage, not a claim that generation never ran.
   assert.match(String(reply.body.error), kind === "photo"
     ? /\u0441\u0433\u0435\u043d\u0435\u0440\u0438\u0440\u043e\u0432\u0430\u043d\u043e/
@@ -420,7 +577,6 @@ function assertNotSaved(reply: Reply, kind: Kind) {
     /\u043d\u0435\s+\u0441\u043e\u0445\u0440\u0430\u043d(?:\u0435\u043d\u043e?|\u0451\u043d)/i,
     "no public error, detail or hint may claim the generated file definitely was not saved");
   assert.match(String(reply.body.hint), /\u043e\u043f\u043b\u0430\u0447\u0435\u043d/);
-  if (kind === "video") assert.match(String(reply.body.hint), /\u043e\u043f\u0440\u043e\u0441/);
 }
 function assertSaved(reply: Reply, kind: Kind, f: Fixture) {
   assertRedacted(reply);
@@ -428,25 +584,38 @@ function assertSaved(reply: Reply, kind: Kind, f: Fixture) {
   assert.equal(reply.body.success, true);
   assert.equal(reply.body.mode, "openai");
   const data = record(reply.body.data);
-  const identity = f.identity({ workspaceId: WORKSPACE, idempotencyKey: JOB, mimeType: "video/mp4" });
+  const identity = f.identity({ workspaceId: WORKSPACE, idempotencyKey: GENERATION_KEY, mimeType: "video/mp4" });
   assert.equal(data.assetId, kind === "photo" ? ASSET : identity.assetId);
   assert.equal(typeof data.creativeUrl, "string");
   assert.ok(String(data.creativeUrl).startsWith(`${ORIGIN}/`));
   assert.equal(data.mimeType, kind === "photo" ? "image/png" : "video/mp4");
-  assert.equal(data.fileSize, kind === "photo" ? PNG.length : MP4.length);
+  assert.equal(data.fileSize, kind === "photo" ? PNG.length : OPTIMIZED.length);
   if (kind === "photo") assert.match(String(data.fileName), /^negis-photo-\d+\.png$/);
   else {
     assert.equal(data.fileName, identity.fileName);
-    assert.equal(data.creativeUrl, `${ORIGIN}/storage/v1/object/public/ad-creatives/${identity.storagePath}`);
+    const digest = createHash("sha256").update(OPTIMIZED).digest("hex");
+    assert.equal(data.creativeUrl, `${ORIGIN}/storage/v1/object/public/ad-creatives/optimized/${WORKSPACE}/${VALIDATION_JOB}-${digest.slice(0, 20)}.mp4`);
     assert.equal(data.status, "completed");
+    assert.equal(data.phase, "validation");
+    assert.equal(data.nativeValidated, true);
+    assert.equal(data.validationJobId, VALIDATION_JOB);
+    assert.equal(data.sha256, digest);
+    assert.equal(data.thumbnailSha256, createHash("sha256").update(THUMBNAIL).digest("hex"));
   }
 }
 async function produce(f: Fixture, kind: Kind) {
   if (kind === "photo") return f.invoke("photo");
-  return f.invoke("poll", await f.start());
+  const handle = await f.start();
+  const pending = await f.invoke("poll", handle);
+  if (pending.status !== 200) return pending;
+  assert.equal(record(pending.body.data).status, "in_progress");
+  assert.equal(record(pending.body.data).phase, "validation");
+  assert.equal(record(pending.body.data).creativeUrl, undefined);
+  f.finishNative();
+  return f.invoke("poll", handle);
 }
 for (const kind of ["photo", "video"] as const) {
-  test(`generated ${kind} positive control reaches actual storage and confirms the library receipt`, async () => {
+  test(`generated ${kind} positive control reaches actual ${kind === "photo" ? "storage" : "private workflow"} and confirms the library receipt`, async () => {
     const f = fixture();
     assert.equal((await f.decode({ buffer: PNG, fileName: "fixture.png", mimeType: "image/png" })).length, 0,
       "real decoder accepts fixture");
@@ -454,22 +623,20 @@ for (const kind of ["photo", "video"] as const) {
     assertCharged(f, kind);
     assertSaved(reply, kind, f);
     assert.equal(f.uploads.length, 1);
-    assert.equal(f.uploads[0]!.bucket, "ad-creatives");
+    assert.equal(f.uploads[0]!.bucket, kind === "photo" ? "ad-creatives" : "ad-creatives-raw");
     assert.ok(f.uploads[0]!.key.startsWith(`${WORKSPACE}/`));
     assert.equal(f.uploads[0]!.options.upsert, false, "generated objects are create-only, including keyed video");
     assert.equal(f.libraryRows.size, 1);
     if (kind === "video") {
-      const identity = f.identity({ workspaceId: WORKSPACE, idempotencyKey: JOB, mimeType: "video/mp4" });
-      assert.equal(f.stores[0]!.fileName, identity.fileName, "the actual API derives identity before storage");
-      assert.equal(f.uploads[0]!.key, identity.storagePath);
-      const body = f.libraryAttempts[0]!.body;
-      assert.equal(body.generatedAssetId, identity.assetId);
-      assert.equal(body.generatedKey, `v1:${JOB}`);
-      assert.equal(body.generatedSha256, createHash("sha256").update(MP4).digest("hex"));
-      assert.equal(record(body.metadata).generationKey, identity.keyDigest);
-      assert.equal(record(body.metadata).contentSha256, body.generatedSha256);
-      assert.equal(record(body.metadata).uploadMode, "ai-generated");
-      assert.equal(record(body.metadata).jobId, JOB);
+      const identity = f.identity({ workspaceId: WORKSPACE, idempotencyKey: GENERATION_KEY, mimeType: "video/mp4" });
+      assert.equal(f.uploads[0]!.key, `${WORKSPACE}/generated-raw/${identity.keyDigest}/original.mp4`);
+      const raw = f.libraryAttempts[0]!.body, final = [...f.libraryRows.values()][0]!;
+      assert.equal(raw.file_name, identity.fileName); assert.equal(raw.public_url, null);
+      assert.equal(raw.generated_key, null, "the raw asset cannot freeze its final identity before native processing");
+      assert.equal(record(raw.metadata).kind, "generated-video-pending");
+      assert.equal(final.generated_key, `v1:${GENERATION_KEY}`);
+      assert.equal(final.generated_sha256, createHash("sha256").update(OPTIMIZED).digest("hex"));
+      assert.equal(final.generated_video_job_id, VALIDATION_JOB);
     }
   });
 
@@ -478,7 +645,7 @@ for (const kind of ["photo", "video"] as const) {
     const reply = await produce(f, kind);
     assertCharged(f, kind);
     assertSaved(reply, kind, f);
-    assert.equal(f.uploads.length, 0, "the DTO double must be valid before individual malformed-receipt mutations");
+    assert.equal(f.uploads.length, kind === "photo" ? 0 : 1, "video boundary mutations occur only after actual private upload and native proof");
   });
 
   const malformedReceipts: Array<[string, NonNullable<Options["stored"]>]> = [
@@ -495,7 +662,7 @@ for (const kind of ["photo", "video"] as const) {
       const f = fixture({ stored: result });
       const reply = await produce(f, kind);
       assertCharged(f, kind);
-      assert.equal(f.uploads.length, 0, "this case substitutes the store boundary, not a decoder or SDK");
+      assert.equal(f.uploads.length, kind === "photo" ? 0 : 1, "only the final caller receipt is mutated; video still exercises the real private pipeline");
       assertNotSaved(reply, kind);
     });
   }
@@ -522,24 +689,50 @@ for (const kind of ["photo", "video"] as const) {
     ["library throws a raw persistence error", { persist: () => { throw new Error(RAW); } }],
   ];
   for (const [label, options] of storageCases) {
-    test(`generated ${kind} actual store rejects: ${label}`, async () => {
+    test(`generated ${kind} actual ${kind === "photo" ? "store" : "private/native workflow"} rejects: ${label}`, async () => {
       const f = fixture(options);
       const reply = await produce(f, kind);
       assertCharged(f, kind);
-      assert.equal(f.stores.length, 1, "the actual handler reaches the actual storage helper");
-      assert.equal(f.uploads.length, label.startsWith("public URL") ? 0 : 1,
+      assert.equal(f.stores.length, kind === "photo" ? 1 : 0, "video is handled only by the private/native workflow");
+      assert.equal(f.uploads.length, kind === "photo" && label.startsWith("public URL") ? 0 : 1,
         "invalid public URLs must be refused before an SDK upload; SDK attempts are not byte validation");
       assertNotSaved(reply, kind);
     });
   }
 
-  test(`generated ${kind} rejects an empty SDK public URL before upload instead of guessing a fallback`, async () => {
+  test(`generated ${kind} rejects an empty ${kind === "photo" ? "SDK public URL before upload" : "native promotion URL before delivery"} instead of guessing a fallback`, async () => {
     const f = fixture({ publicUrl: () => ({ data: { publicUrl: "" } }) });
     const reply = await produce(f, kind);
     assertCharged(f, kind);
     assertNotSaved(reply, kind);
-    assert.equal(f.uploads.length, 0);
-    assert.equal(f.libraryAttempts.length, 0);
+    assert.equal(f.uploads.length, kind === "photo" ? 0 : 1);
+    assert.equal(f.libraryAttempts.length, kind === "photo" ? 0 : 1);
+    if (kind === "video") assert.equal(f.nativeRpcs.some(call => call.name === "finalize_generated_video_workflow"), false);
+  });
+}
+
+const nativeReceiptMutations: Array<[string, (asset: Json) => Json]> = [
+  ["foreign workspace", asset => ({ ...asset, workspaceId: AUTH_USER })],
+  ["different valid asset identity", asset => ({ ...asset, id: ASSET })],
+  ["image instead of video", asset => ({ ...asset, fileType: "image" })],
+  ["noncanonical filename", asset => ({ ...asset, fileName: "unrelated.mp4" })],
+  ["raw MIME", asset => ({ ...asset, mimeType: "video/quicktime" })],
+  ["missing final size", asset => ({ ...asset, fileSize: undefined })],
+  ["zero final size", asset => ({ ...asset, fileSize: 0 })],
+  ["missing final hash", asset => ({ ...asset, sha256: undefined })],
+  ["malformed final hash", asset => ({ ...asset, sha256: "a".repeat(63) })],
+  ["raw public path", asset => ({ ...asset, storagePath: `${WORKSPACE}/generated/raw.mp4` })],
+  ["foreign thumbnail", asset => ({ ...asset, thumbnailUrl: "https://foreign.invalid/thumb.jpg" })],
+  ["missing thumbnail hash", asset => ({ ...asset, thumbnailSha256: undefined })],
+];
+for (const [label, mutate] of nativeReceiptMutations) {
+  test(`generated video caller rejects an incomplete native delivery receipt: ${label}`, async () => {
+    const f = fixture({ stored: (_input, saved) => ({ ...saved, asset: mutate(record(saved.asset)) }) });
+    const reply = await produce(f, "video");
+    assertCharged(f, "video"); assertNotSaved(reply, "video");
+    assert.equal(f.uploads.length, 1); assert.equal(f.uploads[0]!.bucket, "ad-creatives-raw");
+    assert.equal(f.providerCalls.filter(call => call.method === "GET").length, 2);
+    assert.equal(f.nativeRpcs.filter(call => call.name === "queue_generated_video_workflow").length, 1);
   });
 }
 
@@ -583,14 +776,23 @@ for (const failedStage of ["upload", "library"] as const) {
     });
     const handle = await f.start();
     const accountingAtStart = clone({ reservations: f.reservations, completions: f.completions });
-    const refused = await f.invoke("poll", handle);
+    let refused = await f.invoke("poll", handle);
+    if (failedStage === "library") {
+      assert.equal(record(refused.body.data).status, "in_progress");
+      f.finishNative(); refused = await f.invoke("poll", handle);
+    }
     reject = false;
-    const recovered = await f.invoke("poll", handle);
+    let recovered = await f.invoke("poll", handle);
+    if (recovered.status === 200 && record(recovered.body.data).status !== "completed") {
+      f.finishNative(); recovered = await f.invoke("poll", handle);
+    }
     assertCharged(f, "video");
     assert.deepEqual({ reservations: f.reservations, completions: f.completions }, accountingAtStart,
       "failed storage and successful same-job repoll must preserve the original consumed provider accounting");
-    assert.deepEqual(f.stores.map((input) => input.idempotencyKey), [JOB, JOB], "repoll retains the original job identity");
-    assert.equal(f.providerCalls.filter((call) => call.method === "GET").length, 4, "two status/file reads, no paid creation");
+    assert.deepEqual(f.stores, [], "recovery never uses the obsolete direct public writer");
+    assert.equal(f.providerCalls.filter((call) => call.method === "GET").length, failedStage === "upload" ? 4 : 2,
+      "only a missing private object can repeat the free status/file download; finalization recovery cannot download again");
+    assert.equal(f.nativeRpcs.filter(call => call.name === "bind_generated_video_input").length, failedStage === "upload" ? 2 : 1);
     assertSaved(recovered, "video", f);
     assertNotSaved(refused, "video");
   });
@@ -632,14 +834,17 @@ test("actual generated identity pins the versioned digest and UUID, not date, fi
   assert.equal(f.providerCalls.length, 0);
 });
 
-test("completed video repolls across a month boundary using private proof after metadata replacement", async () => {
+test("completed native video repolls across a month boundary while unrelated Meta metadata is added", async () => {
   const f = fixture();
   const handle = await f.start();
+  const pending = await f.invoke("poll", handle);
+  assert.equal(record(pending.body.data).creativeUrl, undefined);
+  f.finishNative();
   const first = await f.invoke("poll", handle);
   assertSaved(first, "video", f);
   const accounting = clone({ reservations: f.reservations, completions: f.completions });
   const row = [...f.libraryRows.values()][0]!;
-  row.metadata = { metaStatus: "ready" };
+  row.metadata = { ...record(row.metadata), metaStatus: "ready" };
   row.status = "ready";
   f.advanceMonth();
   const repeated = await f.invoke("poll", handle);
@@ -650,8 +855,10 @@ test("completed video repolls across a month boundary using private proof after 
   assert.equal(f.uploads.length, 1, "an exact existing keyed row must be verified before any new write");
   assert.equal(f.libraryAttempts.length, 1);
   assert.equal(f.libraryRows.size, 1);
-  assert.equal(f.storageReads.length, 1, "existing canonical receipt still requires streamed own-object byte proof");
-  assert.equal(f.lookups.length, 2);
+  assert.equal(f.storageReads.filter(read => read.url.includes("/public/")).length, 4,
+    "each completed replay verifies the exact public video and thumbnail bytes");
+  assert.equal(f.lookups.length, 0, "the public generated writer and its legacy lookup are no longer used");
+  assert.equal(f.providerCalls.filter(call => call.method === "GET").length, 2);
 });
 
 test("lost video upload acknowledgement recovers only after exact streamed own-Storage verification", async () => {
@@ -661,14 +868,14 @@ test("lost video upload acknowledgement recovers only after exact streamed own-S
   assertSaved(reply, "video", f);
   assert.equal(f.uploads.length, 1);
   assert.equal(f.uploads[0]!.options.upsert, false);
-  assert.equal(f.storageReads.length, 1);
-  const read = f.storageReads[0]!;
+  const read = f.storageReads.find(item => item.url.includes("/object/ad-creatives-raw/") && record(item.init.headers).Authorization)!;
+  assert.ok(read);
   assert.equal(read.init.method, "GET");
   assert.equal(read.init.redirect, "error");
   assert.equal(read.init.credentials, "omit");
   assert.equal(read.init.cache, "no-store");
   assert.equal((read.init.signal as AbortSignal).aborted, true, "verification lifetime ends after reading");
-  assert.ok(f.events.indexOf("storage.read") < f.events.indexOf("library.persist"));
+  assert.ok(f.events.lastIndexOf("native.bytes") > f.events.indexOf("queue_generated_video_workflow"), "final delivery must prove native outputs too");
   assert.equal(f.libraryAttempts.length, 1);
 });
 
@@ -681,17 +888,23 @@ test("video upload collision with same-size different bytes remains unconfirmed 
   assertNotSaved(reply, "video");
   assert.equal(f.uploads.length, 1);
   assert.equal(f.uploads[0]!.options.upsert, false);
-  assert.equal(f.storageReads.length, 1);
-  assert.equal(f.libraryAttempts.length, 0);
-  assert.equal(f.libraryRows.size, 0);
+  assert.equal(f.storageReads.length, 2, "one absent private read and one mismatching private-byte proof");
+  assert.equal(f.libraryAttempts.length, 1, "the raw identity is reserved atomically but cannot be promoted");
+  assert.equal([...f.libraryRows.values()][0]!.public_url, null);
+  assert.equal(f.nativeRpcs.some(call => call.name === "queue_generated_video_workflow"), false);
 });
 
-test("missing private-key columns cannot be treated as absent keyed video before upload", async () => {
+test("missing native workflow schema refuses before quota, render or upload rather than treating it as an absent video", async () => {
   const f = fixture({ lookup: () => ({ data: null, error: { message: `column generated_key does not exist: ${RAW}` } }) });
-  const reply = await produce(f, "video");
-  assertCharged(f, "video");
-  assertNotSaved(reply, "video");
-  assert.equal(f.lookups.length, 1);
+  const reply = await f.invoke("start");
+  assert.equal(reply.status, 503);
+  assert.equal(reply.body.success, false);
+  assert.equal(reply.body.data, undefined);
+  assertRedacted(reply);
+  assert.deepEqual(f.reservations, []);
+  assert.deepEqual(f.completions, []);
+  assert.deepEqual(f.providerCalls, []);
+  assert.equal(f.nativeRpcs.filter(call => call.name === "read_generated_video_workflow").length, 2, "only identical uncertain reads may retry");
   assert.equal(f.uploads.length, 0);
   assert.equal(f.storageReads.length, 0);
   assert.equal(f.libraryAttempts.length, 0);

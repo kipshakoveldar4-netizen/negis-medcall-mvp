@@ -6,6 +6,16 @@ requires 086 after 015/016/017/018, 082 and 085. Do not deploy this source again
 an older schema. Production, Baspana and other working tenants were not tested
 or changed. The acceptance below uses synthetic files and disposable PostgreSQL.
 
+The integrated G5-C56 generated-video producer additionally requires **090**.
+This remains a local candidate: no 090/cloud worker/Preview rollout was made.
+The API reserves private input capacity before its paid quota/provider dispatch,
+records a dispatch nonce and provider id, then binds the immutable input hash to
+one private asset and native job. A lost response resumes that identity rather
+than starting another render. Completed provider output is not a public receipt.
+Only 086 native promotion, exact public video/thumbnail byte verification and
+090 generated-identity finalization permit delivery to the browser. Old public
+generated assets are not rewritten or grandfathered as native-validated.
+
 It runs **outside Vercel** (Railway or any Docker host) and processes `video_processing_jobs`
 created by the CRM API. The UI's signed raw-upload handshake still uses `POST /api/crm/video-jobs`;
 the public foundation contract is `POST /api/crm/video-processing-jobs` plus
@@ -22,6 +32,8 @@ the public foundation contract is `POST /api/crm/video-processing-jobs` plus
 4. Streams the raw original from the configured **private** bucket, using only
    the configured HTTPS Supabase origin, no redirects, a 60-second deadline and
    exact byte count. It does not allocate the whole download in memory.
+   Generated-native inputs additionally require the immutable SHA-256 bound by
+   090; a same-length replacement fails before decode or any public upload.
 5. Probes container/codec/geometry/duration/frame bounds, transcodes to H.264/AAC
    MP4, probes and fully decodes the result, then takes its first frame as JPEG.
    Global/stream metadata and chapters are removed from the published video.
@@ -38,10 +50,21 @@ the public foundation contract is `POST /api/crm/video-processing-jobs` plus
 8. A lost RPC response gets one identical reconciliation call. An already
    committed matching receipt returns without rewriting rows or uploading again.
    A changed claim/version/receipt refuses; an unconfirmed result is not success.
-9. Deletes raw **only after a matching promotion acknowledgement**. A cleanup
+9. Deletes ordinary raw **only after a matching promotion acknowledgement**. A cleanup
    failure keeps the confirmed result ready and records a generic cleanup error.
    With two lost acknowledgements a committed ready result retains raw; manual
    reconciliation/retention cleanup remains necessary.
+   Generated-native raw is **never deleted** here: a parallel create-only
+   producer may still be finishing its upload. Instead, the worker replaces the
+   same private key with a fixed 56-byte MP4-container fence, proves its bytes
+   through a bounded private GET, then calls the claim-scoped 090 reclamation
+   ACK. Late create-only writes cannot overwrite an occupied key. Only that
+   exact receipt releases the original 100 MiB admission reserve; the 56 bytes
+   remain charged. A legacy `raw_deleted_at` alone cannot release it. For this
+   flow that timestamp means original live bytes replaced, not physical backend
+   or version deletion. Never remove these fences with generic raw cleanup.
+   Explicit enabled/suspended bucket versioning refuses reclamation. An absent
+   versioning field still requires real backend acceptance before deployment.
 10. Controlled failures use fixed public error codes. Failure updates are scoped
     to the exact claim and original asset version. Job/asset failure marking is
     still two conditional writes, not the atomic success-promotion transaction.
@@ -106,6 +129,9 @@ Run the isolated tests instead (no real SDK client, real credentials or sends):
 pnpm test:video-worker-media
 pnpm test:video-worker-contract
 pnpm test:video-job-promotion-postgres
+pnpm test:generated-video-workflow
+pnpm test:generated-video-client
+pnpm test:generated-video-workflow-postgres
 ```
 
 The PostgreSQL fixture requires the existing local Docker image; on this

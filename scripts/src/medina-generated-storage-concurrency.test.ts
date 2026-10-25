@@ -95,14 +95,14 @@ const FOREIGN = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const KEY = "synthetic-video-job-42";
 const ORIGIN = "https://own-generated-storage.invalid";
 const PRIVATE_DETAIL = "synthetic-private-backend-detail";
-const BYTES = Buffer.from("synthetic-generated-video-content-A");
-const DIFFERENT_BYTES = Buffer.from("synthetic-generated-video-content-B");
+const BYTES = Buffer.from("synthetic-generated-image-content-A");
+const DIFFERENT_BYTES = Buffer.from("synthetic-generated-image-content-B");
 const clone = <T,>(value: T): T => structuredClone(value);
 const sha256 = (buffer: Buffer) => crypto.createHash("sha256").update(buffer).digest("hex");
 const ownUrl = (storagePath: string) => `${ORIGIN}/storage/v1/object/public/ad-creatives/${storagePath.split("/").map(encodeURIComponent).join("/")}`;
 function input(patch: Partial<StoreInput> = {}): StoreInput {
-  return { workspaceId: WORKSPACE, idempotencyKey: KEY, fileName: "incoming-one.mp4", mimeType: "video/mp4",
-    buffer: Buffer.from(BYTES), metadata: { kind: "generated-video", source: "content-studio" }, ...patch };
+  return { workspaceId: WORKSPACE, idempotencyKey: KEY, fileName: "incoming-one.png", mimeType: "image/png",
+    buffer: Buffer.from(BYTES), metadata: { kind: "generated-photo", source: "content-studio" }, ...patch };
 }
 
 class SharedBackend {
@@ -230,7 +230,7 @@ class SharedBackend {
     let bytes = object?.buffer ?? Buffer.alloc(0);
     if (fault === "oversize") bytes = Buffer.concat([bytes, Buffer.from([1])]);
     if (fault === "short-stream") bytes = bytes.subarray(0, Math.max(0, bytes.length - 1));
-    const headers = new Headers({ "content-type": fault === "wrong-type" ? "image/png" : object?.mimeType ?? "video/mp4" });
+    const headers = new Headers({ "content-type": fault === "wrong-type" ? "image/jpeg" : object?.mimeType ?? "image/png" });
     if (!["oversize", "short-stream", "no-length"].includes(fault ?? "")) {
       headers.set("content-length", String(bytes.length + (fault === "wrong-length" ? 1 : 0)));
     }
@@ -306,14 +306,14 @@ function seed(f: ReturnType<typeof fixture>, patch: Json = {}) {
   const identity = f.identity;
   const raw: Json = {
     id: identity.assetId, workspace_id: WORKSPACE, file_name: identity.fileName,
-    file_type: "video", mime_type: "video/mp4", file_size: BYTES.length,
+    file_type: "image", mime_type: "image/png", file_size: BYTES.length,
     storage_bucket: "ad-creatives", storage_path: identity.storagePath, public_url: ownUrl(identity.storagePath),
     generated_key: `v1:${KEY}`, generated_sha256: sha256(BYTES), status: "uploaded",
-    metadata: { source: "content-studio", kind: "generated-video", jobId: KEY, uploadMode: "ai-generated" },
+    metadata: { source: "content-studio", kind: "generated-photo", jobId: KEY, uploadMode: "ai-generated" },
     created_at: "2026-10-31T23:59:59Z", updated_at: "2026-10-31T23:59:59Z", ...patch,
   };
   f.backend.rows.set(String(raw.id), raw);
-  f.backend.objects.set(`ad-creatives/${raw.storage_path}`, { buffer: Buffer.from(BYTES), mimeType: "video/mp4" });
+  f.backend.objects.set(`ad-creatives/${raw.storage_path}`, { buffer: Buffer.from(BYTES), mimeType: "image/png" });
   return raw;
 }
 
@@ -325,7 +325,7 @@ function assertSaved(value: Stored, identity: Identity, bytes = BYTES) {
   assert.equal(value.asset.fileName, identity.fileName);
   assert.equal(value.asset.storagePath, identity.storagePath);
   assert.equal(value.asset.storageBucket, "ad-creatives");
-  assert.equal(value.asset.mimeType, "video/mp4");
+  assert.equal(value.asset.mimeType, "image/png");
   assert.equal(value.asset.fileSize, bytes.length);
   assert.equal(value.publicUrl, ownUrl(identity.storagePath));
   assert.equal(value.asset.publicUrl, value.publicUrl);
@@ -363,8 +363,8 @@ function assertBoundaries(backend: SharedBackend) {
 test("two independent modules racing one key across dates and incoming names store one object and one deterministic row", { timeout: 5000 }, async () => {
   const f = fixture({ raceUploads: true });
   const values = await Promise.all([
-    f.first.store(input({ fileName: "old-incoming-name.mp4", metadata: { uploadMode: "spoofed", generationKey: "spoofed", contentSha256: "spoofed", jobId: "spoofed" } })),
-    f.second.store(input({ fileName: "different-incoming-name.mp4" })),
+    f.first.store(input({ fileName: "old-incoming-name.png", metadata: { uploadMode: "spoofed", generationKey: "spoofed", contentSha256: "spoofed", jobId: "spoofed" } })),
+    f.second.store(input({ fileName: "different-incoming-name.png" })),
   ]);
   for (const value of values) assertSaved(value, f.identity);
   assert.equal(f.backend.uploads.length, 2, "Both independent requests reached the create-only collision");
@@ -381,13 +381,13 @@ test("two independent modules racing one key across dates and incoming names sto
   assert.equal(raw.metadata.uploadMode, "ai-generated");
   assert.equal(raw.metadata.generationKey, f.identity.keyDigest);
   assert.equal(raw.metadata.contentSha256, sha256(BYTES));
-  assert.equal(raw.metadata.jobId, KEY);
+  assert.equal(raw.metadata.jobId, "spoofed", "Image-only caller metadata cannot replace immutable generated key/hash columns");
   assertBoundaries(f.backend);
 });
 
 test("concurrent same-key different bytes has one winner and never overwrites its object", { timeout: 5000 }, async () => {
   const f = fixture({ raceUploads: true });
-  const values = await Promise.allSettled([f.first.store(input()), f.second.store(input({ fileName: "another.mp4", buffer: DIFFERENT_BYTES }))]);
+  const values = await Promise.allSettled([f.first.store(input()), f.second.store(input({ fileName: "another.png", buffer: DIFFERENT_BYTES }))]);
   assert.equal(values.filter((value) => value.status === "fulfilled").length, 1);
   assert.equal(values.filter((value) => value.status === "rejected").length, 1);
   const winnerIndex = values.findIndex((value) => value.status === "fulfilled");
@@ -402,7 +402,7 @@ test("concurrent same-key different bytes has one winner and never overwrites it
 test("replay survives metadata being overwritten by Meta because private key and hash columns remain authoritative", async () => {
   const f = fixture();
   seed(f, { metadata: { changedBy: "synthetic-meta-updater" } });
-  assertSaved(await f.second.store(input({ fileName: "new-day-name.mp4" })), f.identity);
+  assertSaved(await f.second.store(input({ fileName: "new-day-name.png" })), f.identity);
   assert.equal(f.backend.http.length, 1);
   assert.deepEqual(f.backend.uploads, []);
   assert.deepEqual(f.backend.inserts, []);
@@ -416,8 +416,8 @@ test("missing or different bytes behind a matching existing row refuse before an
       seed(f);
       const key = `ad-creatives/${f.identity.storagePath}`;
       if (missing) f.backend.objects.delete(key);
-      else f.backend.objects.set(key, { buffer: Buffer.from(DIFFERENT_BYTES), mimeType: "video/mp4" });
-      await assertRefused(f.second.store(input({ fileName: "retry.mp4" })));
+      else f.backend.objects.set(key, { buffer: Buffer.from(DIFFERENT_BYTES), mimeType: "image/png" });
+      await assertRefused(f.second.store(input({ fileName: "retry.png" })));
       assert.equal(f.backend.http.length, 1);
       assert.deepEqual(f.backend.uploads, []);
       assert.deepEqual(f.backend.inserts, []);
@@ -465,7 +465,7 @@ test("upload committed but response lost recovers by streaming exact bytes and s
     await t.test(uploadFault, async () => {
       const f = fixture({ uploadFault });
       assertSaved(await f.first.store(input()), f.identity);
-      assertSaved(await f.second.store(input({ fileName: "retry-name.mp4" })), f.identity);
+      assertSaved(await f.second.store(input({ fileName: "retry-name.png" })), f.identity);
       assert.equal(f.backend.objectCommits, 1);
       assert.equal(f.backend.rowCommits, 1);
       assert.equal(f.backend.uploads.length, 1);
@@ -482,7 +482,7 @@ test("failed uncommitted upload cannot fake a saved row, but a retry may create 
   assert.equal(f.backend.rows.size, 0);
   assert.deepEqual(f.backend.inserts, []);
   assert.equal(f.backend.http.length, 1);
-  assertSaved(await f.second.store(input({ fileName: "free-retry.mp4" })), f.identity);
+  assertSaved(await f.second.store(input({ fileName: "free-retry.png" })), f.identity);
   assert.equal(f.backend.objectCommits, 1);
   assert.equal(f.backend.rowCommits, 1);
   assertBoundaries(f.backend);
@@ -493,7 +493,7 @@ test("DB insert committed but response lost reconciles its exact matching determ
     await t.test(insertFault, async () => {
       const f = fixture({ insertFault });
       assertSaved(await f.first.store(input()), f.identity);
-      assertSaved(await f.second.store(input({ fileName: "free-retry.mp4" })), f.identity);
+      assertSaved(await f.second.store(input({ fileName: "free-retry.png" })), f.identity);
       assert.equal(f.backend.objectCommits, 1);
       assert.equal(f.backend.rowCommits, 1);
       assert.equal(f.backend.inserts.length, 1);
@@ -508,7 +508,7 @@ test("DB failure without commit is not success, and retry reconciles the orphan 
   await assertRefused(f.first.store(input()));
   assert.equal(f.backend.objects.size, 1);
   assert.equal(f.backend.rows.size, 0);
-  assertSaved(await f.second.store(input({ fileName: "free-retry.mp4" })), f.identity);
+  assertSaved(await f.second.store(input({ fileName: "free-retry.png" })), f.identity);
   assert.equal(f.backend.objectCommits, 1);
   assert.equal(f.backend.rowCommits, 1);
   assert.ok(f.backend.http.length >= 1);
@@ -518,7 +518,7 @@ test("DB failure without commit is not success, and retry reconciles the orphan 
 test("an orphan object with wrong bytes cannot be reconciled into a new DB row after a create-only collision", async () => {
   const f = fixture();
   const key = `ad-creatives/${f.identity.storagePath}`;
-  f.backend.objects.set(key, { buffer: Buffer.from(DIFFERENT_BYTES), mimeType: "video/mp4" });
+  f.backend.objects.set(key, { buffer: Buffer.from(DIFFERENT_BYTES), mimeType: "image/png" });
   await assertRefused(f.first.store(input()));
   assert.equal(f.backend.uploads.length, 1, "Exercise create-only collision recovery, not an existing-row fast path");
   assert.equal(f.backend.http.length, 1);
@@ -559,5 +559,14 @@ test("stream proof accepts absent Content-Length only after exact bounded byte c
   assert.ok(f.backend.http[0]!.reads > 2, "Digest must cover streamed chunks, not a metadata-only check");
   assert.equal(f.backend.http[0]!.canceled, true);
   assertBoundaries(f.backend);
+});
+
+test("the direct generated writer refuses every video type before any SDK or public object access", async () => {
+  const f = fixture();
+  for (const mimeType of ["video/mp4", "video/quicktime", "video/webm"]) {
+    await assert.rejects(f.first.store(input({ mimeType, fileName: "unvalidated.mp4" })), /generated_video_native_validation_required/);
+  }
+  assert.deepEqual(f.backend.reads, []); assert.deepEqual(f.backend.uploads, []); assert.deepEqual(f.backend.inserts, []);
+  assert.equal(f.backend.http.length, 0); assertBoundaries(f.backend);
 });
 

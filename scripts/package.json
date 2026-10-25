@@ -4,6 +4,10 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "test:generated-video-workflow": "tsx --test ./src/medina-generated-video-handle.test.ts ./src/medina-generated-video-identity.test.ts ./src/medina-generated-video-workflow.test.ts ./src/medina-generated-raw-reclamation.test.ts ./src/medina-generated-video-download.test.ts",
+    "test:generated-video-client": "node --test ./fixtures/generated-video-browser.test.mjs",
+    "preview:generated-video": "node ./fixtures/generated-video-browser.mjs",
+    "test:generated-video-workflow-postgres": "node --test ./fixtures/generated-video-workflow-postgres.test.mjs",
     "test:staged-creatives": "tsx --test ./src/medina-staged-creative.test.ts ./src/medina-creative-image-bytes.test.ts ./src/medina-creative-image-resource-limits.test.ts ./src/medina-verified-creative-upload-client.test.ts ./src/medina-staged-upload-route-security.test.ts ./src/medina-staged-upload-workflow-runtime.test.ts ./src/medina-ads-verified-upload.test.ts ./src/medina-content-verified-handoff.test.ts ./src/medina-video-job-ingest-receipt.test.ts ./src/medina-creative-import.test.ts ./src/medina-staged-reclamation.test.ts ./src/medina-staged-reclamation-races.test.ts",
     "test:staged-creatives-postgres": "node --test ./fixtures/staged-creative-postgres.test.mjs ./fixtures/staged-creative-workflow-postgres.test.mjs ./fixtures/staged-creative-reclamation-postgres.test.mjs",
     "test:video-worker-config": "tsx --test ./src/medina-video-worker-config-limits.test.ts",

@@ -557,6 +557,12 @@ test("canonical path and v5 id ignore incoming filename, UTC date and MIME ident
       const f = fixture({ now });
       const outcome = await f.invoke(input({ idempotencyKey: KEY, fileName: "../../ignored-caller-name.bin", mimeType,
         metadata: { generationKey: "forged", contentSha256: "forged", uploadMode: "forged", jobId: "forged" } }));
+      if (mimeType.startsWith("video/")) {
+        assertNotSaved(outcome);
+        assert.match(String(outcome.error), /generated_video_native_validation_required/);
+        assert.deepEqual(f.sdk.queries, []); assert.deepEqual(f.sdk.uploads, []); assert.deepEqual(f.fetches, []);
+        continue;
+      }
       const fileName = `negis-${mimeType.startsWith("video/") ? "video" : "image"}-${DIGEST.slice(0, 20)}.${extension}`;
       assertSaved(outcome, CANONICAL_PATH, CANONICAL_ID, fileName, mimeType);
       const saved = f.sdk.insertAttempts[0];
@@ -713,12 +719,12 @@ function videoInput() {
     metadata: { uploadMode: "forged", kind: "generated-video", jobId: "forged" } });
 }
 
-test("single exact legacy video preserves existing id/name only after own-Storage streamed SHA-256 proof", async () => {
+test("a legacy public video cannot bypass the private native workflow through the direct writer", async () => {
   const reply = streamedReply({ bytes: VIDEO, mimeType: "video/mp4" });
   const f = fixture({ lookup: query => { lookupPath(query); return { data: [legacyRow()], error: null }; }, fetch: () => reply.response });
-  assertSaved(await f.invoke(videoInput()), LEGACY_PATH, ASSET, LEGACY_NAME, "video/mp4", VIDEO.length);
-  assert.equal(f.fetches.length, 1); assert.equal(f.fetches[0].url, publicUrl(LEGACY_PATH));
-  assert.equal(reply.metrics().wholeBodyCalls, 0); assert.ok(reply.metrics().reads > 1);
+  const outcome = await f.invoke(videoInput());
+  assertNotSaved(outcome); assert.match(String(outcome.error), /generated_video_native_validation_required/);
+  assert.equal(f.fetches.length, 0); assert.equal(reply.metrics().wholeBodyCalls, 0); assert.equal(reply.metrics().reads, 0);
   assert.deepEqual(f.sdk.uploads, []); assert.deepEqual(f.sdk.insertAttempts, []);
   assert.equal(f.sdk.queries.filter(query => query.kind !== "lookup").length, 0, "No runtime backfill or UPDATE");
 });
@@ -756,5 +762,5 @@ test("exact legacy identity with wrong stored bytes cannot be acknowledged or re
   const reply = streamedReply({ bytes: Buffer.alloc(VIDEO.length, 0x61), mimeType: "video/mp4" });
   const f = fixture({ lookup: () => ({ data: [legacyRow()], error: null }), fetch: () => reply.response });
   assertNotSaved(await f.invoke(videoInput()));
-  assert.equal(f.fetches.length, 1); assert.deepEqual(f.sdk.uploads, []); assert.deepEqual(f.sdk.insertAttempts, []);
+  assert.equal(f.fetches.length, 0); assert.deepEqual(f.sdk.uploads, []); assert.deepEqual(f.sdk.insertAttempts, []);
 });

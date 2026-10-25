@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { webcrypto } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
@@ -24,9 +25,9 @@ const launchId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const exposed = [
   "creative", "creativeFile", "videoJob", "aiPackage", "compliance", "launchResult", "confirmations", "brief",
   "historyItems", "historyInsightsAccess", "historyInsightsByLaunch", "historyInsightsMessage", "historyInsightsRequestRef",
-  "loading", "notice", "realLaunchStatus",
+  "loading", "notice", "lastUploadError", "realLaunchStatus",
   "setCreative", "setCreativeFile", "setAiPackage", "setMetaSummary", "setConfirmations", "setUiMode", "setVideoJob",
-  "uploadCreative", "uploadLargeVideo", "prepareImportedVideoThumbnail", "regenerateThumbnail", "pollVideoJob",
+  "uploadCreative", "uploadLargeVideo", "regenerateThumbnail", "pollVideoJob",
   "launch", "loadHistory", "checkHealth", "fillWithAi", "runComplianceCheck", "prelaunchErrors",
 ];
 
@@ -57,6 +58,7 @@ function compile(source: string, fileName: string, page = false) {
           return ts.factory.createObjectLiteralExpression([
             ts.factory.createPropertyAssignment("BASE_URL", ts.factory.createStringLiteral("/")),
             ts.factory.createPropertyAssignment("VITE_API_BASE_URL", ts.factory.createStringLiteral("")),
+            ts.factory.createPropertyAssignment("VITE_SUPABASE_URL", ts.factory.createStringLiteral("https://storage.invalid")),
           ]);
         }
         if (page && ts.isFunctionDeclaration(node) && node.body) {
@@ -71,12 +73,12 @@ function compile(source: string, fileName: string, page = false) {
           if (node.name?.text === inner) {
             // Only replace the page's final JSX return. Its state, effects,
             // guards, payload builders and async operations stay unchanged.
-            return ts.factory.updateFunctionDeclaration(node, node.modifiers, node.asteriskToken, node.name,
+            return ts.visitEachChild(ts.factory.updateFunctionDeclaration(node, node.modifiers, node.asteriskToken, node.name,
               node.typeParameters, node.parameters, node.type, ts.factory.updateBlock(node.body,
                 node.body.statements.map((statement) => ts.isReturnStatement(statement)
                   ? ts.factory.createReturnStatement(ts.factory.createObjectLiteralExpression(
                     [...exposed.map((name) => ts.factory.createShorthandPropertyAssignment(name)),
-                      ts.factory.createPropertyAssignment("refreshHistoryClick", historyRefreshClick(node))])) : statement)));
+                      ts.factory.createPropertyAssignment("refreshHistoryClick", historyRefreshClick(node))])) : statement))), visit, context);
           }
         }
         return ts.visitEachChild(node, visit, context);
@@ -101,6 +103,7 @@ const compiled = (async () => {
     auth: compile(await readFile(path.join(root, "artifacts/negis/src/lib/serverAuth.ts"), "utf8"), "serverAuth.ts"),
     signOut: compile(await readFile(path.join(root, "artifacts/negis/src/lib/authSignOut.ts"), "utf8"), "authSignOut.ts"),
     insights: compile(await readFile(path.join(root, "artifacts/negis/src/lib/metaInsightsHistory.ts"), "utf8"), "metaInsightsHistory.ts"),
+    verifiedUpload: compile(await readFile(path.join(root, "artifacts/negis/src/lib/verified-creative-upload.ts"), "utf8"), "verified-creative-upload.ts"),
   };
 })();
 
@@ -199,14 +202,17 @@ type HttpCall = {
   answerBody(body: unknown, status?: number, gate?: Promise<void>): void;
   reject(error: Error): void;
 };
-const photo = { name: "synthetic.jpg", type: "image/jpeg", size: 1024 };
+const photo = Object.assign(new Blob([new Uint8Array(1024)], { type: "image/jpeg" }), { name: "synthetic.jpg" });
 const video = { name: "synthetic.mp4", type: "video/mp4", size: 1024 };
 const creative = (kind = "image") => ({
   id: "synthetic-asset", fileName: kind === "video" ? video.name : photo.name,
   fileType: kind, mimeType: kind === "video" ? video.type : photo.type, fileSize: 1024,
   previewUrl: "https://storage.invalid/creative", publicUrl: "https://storage.invalid/creative",
   thumbnailUrl: kind === "video" ? "https://storage.invalid/thumbnail.jpg" : undefined, status: "uploaded",
+  ...(kind === "video" ? { workerJobId: "synthetic-worker-job", storageBucket: "ad-creatives", storagePath: `${W1}/optimized.mp4` } : {}),
 });
+const photoTicket = { bucket: "ad-creatives-staging", storagePath: `${W1}/staged/cccccccc-cccc-4ccc-8ccc-cccccccccccc/original.jpg`,
+  token: "signed-synthetic", uploadHandle: `u1.synthetic.${"a".repeat(43)}`, fileName: photo.name, fileType: "image", mimeType: photo.type, fileSize: photo.size };
 
 async function fixture(t: TestContext, options: { history?: boolean; holdHealth?: boolean; prefill?: View } = {}) {
   const code = await compiled;
@@ -255,8 +261,8 @@ async function fixture(t: TestContext, options: { history?: boolean; holdHealth?
   function evaluate<T>(source: string, filename: string, require: (name: string) => unknown) {
     const exports = {} as T;
     new Script(source, { filename }).runInNewContext({
-      exports, require, Error, DOMException, AbortController, Headers, Response, Blob,
-      URL: { createObjectURL: () => "blob:synthetic", revokeObjectURL() {} },
+      exports, require, Error, DOMException, AbortController, Headers, Response, Blob, TextEncoder, crypto: webcrypto,
+      URL: class extends URL { static createObjectURL() { return "blob:synthetic"; } static revokeObjectURL() {} },
       fixtureCapture() { const pending = deferred<unknown>(); captures.push(pending); return pending.promise; },
       window: {
         location: { origin: "https://simulation.invalid" }, scrollTo() {},
@@ -334,6 +340,7 @@ async function fixture(t: TestContext, options: { history?: boolean; holdHealth?
   });
   if (options.prefill) local.set(`synthetic-prefill::${W1}`, JSON.stringify(options.prefill));
   const insightsPayload = evaluate(code.insights, "metaInsightsHistory.simulation.cjs", unexpected);
+  const verifiedUpload = evaluate(code.verifiedUpload, "verified-creative-upload.simulation.cjs", unexpected);
   const page = evaluate<{ default: () => View }>(code.page, "AdsAutomation.simulation.cjs", (name) => {
     if (name === "react") return Object.fromEntries(Object.keys(outer.hooks).map((key) => [key,
       (...args: unknown[]) => (activeDriver.hooks[key as keyof typeof outer.hooks] as (...args: unknown[]) => unknown)(...args)]));
@@ -346,6 +353,7 @@ async function fixture(t: TestContext, options: { history?: boolean; holdHealth?
     if (name === "@/lib/serverAuth") return serverAuth;
     if (name === "@/lib/authSignOut") return signOut;
     if (name === "@/lib/metaInsightsHistory") return insightsPayload;
+    if (name === "@/lib/verified-creative-upload") return verifiedUpload;
     if (name === "@/lib/supabase") return { hasSupabaseFrontendEnv: true, supabase };
     if (name === "wouter") return { Link: Symbol("Link"), useLocation: () => [location, (next: string) => { location = next; inner?.force(); }] };
     if (name === "sonner") return { toast: Object.fromEntries(["success", "error", "warning", "info", "message"].map((key) => [key, (...args: unknown[]) => notifications.push(args)])) };
@@ -396,6 +404,9 @@ async function fixture(t: TestContext, options: { history?: boolean; holdHealth?
       return Promise.resolve((fn as (...args: unknown[]) => unknown)(...args));
     },
     async seed(kind = "image") {
+      if (kind === "video") (inner!.view.setVideoJob as (value: unknown) => void)({ id: "synthetic-worker-job", status: "ready",
+        outputPublicUrl: creative("video").publicUrl, outputAssetId: creative("video").id, outputStorageBucket: "ad-creatives",
+        outputStoragePath: `${W1}/optimized.mp4`, outputFileName: video.name, outputSizeBytes: video.size, outputMimeType: "video/mp4" });
       for (const [name, value] of Object.entries({
         setCreative: creative(kind), setAiPackage: { primaryText: "Synthetic text", headline: "Synthetic headline" },
         setMetaSummary: { configured: true, videoLaunchEnabled: true },
@@ -406,7 +417,7 @@ async function fixture(t: TestContext, options: { history?: boolean; holdHealth?
     },
     take(part: string, method = "GET") {
       const call = calls.find((c) => !c.claimed && c.url.includes(part) && (c.init.method || "GET") === method);
-      assert.ok(call, `Expected ${method} ${part}`); call.claimed = true; return call;
+      assert.ok(call, `Expected ${method} ${part}; notice=${String(inner!.view.notice)}; upload=${String(inner!.view.lastUploadError)}; calls=${calls.map(item => item.url).join(",")}`); call.claimed = true; return call;
     },
     async change(actor = auth.user.id, workspace = auth.clinicId, role = auth.userRole) {
       auth.user = { id: actor, email: `${actor.toLowerCase()}@example.invalid` }; auth.clinicId = workspace; auth.userRole = role;
@@ -465,17 +476,17 @@ for (const stage of ["signature", "storage", "metadata"] as const) {
     const pending = f.invoke("uploadCreative", photo); await f.flush();
     const signed = f.take("signed-upload", "POST");
     if (stage !== "signature") {
-      signed.answer({ bucket: "ad-creatives", storagePath: `${W1}/photo.jpg`, token: "signed-synthetic", publicUrl: "https://storage.invalid/photo.jpg" }); await f.flush();
+      signed.answer(photoTicket); await f.flush();
       assert.equal(f.storage.length, 1);
     }
     if (stage === "metadata") { f.storage[0].resolve({ error: null }); await f.flush(); }
     await f.change("B"); const notices = f.notifications.length;
-    if (stage === "signature") signed.answer({ bucket: "ad-creatives", storagePath: `${W1}/photo.jpg`, token: "signed-synthetic", publicUrl: "https://storage.invalid/photo.jpg" });
+    if (stage === "signature") signed.answer(photoTicket);
     if (stage === "storage") f.storage[0].resolve({ error: null });
-    if (stage === "metadata") f.take("ad-creatives?", "POST").answer({ id: "old-asset" });
+    if (stage === "metadata") f.take("ad-creatives/finalize-upload?", "POST").answer({ id: "old-asset" });
     await f.flush();
     assert.equal(f.storage.length, stage === "signature" ? 0 : 1);
-    assert.equal(f.calls.filter((c) => c.url.includes("ad-creatives?")).length, stage === "metadata" ? 1 : 0);
+    assert.equal(f.calls.filter((c) => c.url.includes("ad-creatives/finalize-upload?")).length, stage === "metadata" ? 1 : 0);
     await pending;
     assert.equal(f.view.creative, null); assert.equal(f.notifications.length, notices); assert.equal(f.lateWrites(), 0);
   });
@@ -483,7 +494,8 @@ for (const stage of ["signature", "storage", "metadata"] as const) {
 
 test("A4 large-video storage completion cannot queue an old job after unmount cleanup", async (t) => {
   const f = await fixture(t);
-  const pending = f.invoke("uploadLargeVideo", { ...video, size: 60 * 1024 * 1024 }); await f.flush();
+  (f.view.setMetaSummary as (value: unknown) => void)({ videoOptimization: { enabled: true, maxInputMb: 500 } }); await f.flush();
+  const pending = f.invoke("uploadCreative", { ...video, size: 60 * 1024 * 1024 }); await f.flush();
   f.take("video-jobs?", "POST").answer({ job: { id: "old-job", status: "awaiting_upload" }, signedUpload: { bucket: "raw", storagePath: `${W1}/raw.mp4`, token: "signed-synthetic" } }); await f.flush();
   assert.equal(f.storage.length, 1); f.dispose(); const notices = f.notifications.length;
   f.storage[0].resolve({ error: null }); await f.flush();
@@ -494,7 +506,8 @@ test("A4 large-video storage completion cannot queue an old job after unmount cl
 
 test("A5 captured thumbnail cannot request signing after workspace switch", async (t) => {
   const f = await fixture(t);
-  const pending = f.invoke("prepareImportedVideoThumbnail", { assetId: "old-asset", fileName: video.name, publicUrl: "https://storage.invalid/old.mp4" }); await f.flush();
+  await f.seed("video"); (f.view.setCreativeFile as (value: unknown) => void)(video); await f.flush();
+  const pending = f.invoke("regenerateThumbnail"); await f.flush();
   assert.equal(f.captures.length, 1); await f.change("A", W2); const notices = f.notifications.length;
   f.captures[0].resolve({ blob: new Blob(["synthetic"]), mimeType: "image/jpeg", generatedAt: "synthetic" });
   await f.flush();
@@ -557,9 +570,14 @@ test("A9 StrictMode cleanup/setup expires old requests but the replacement sessi
 test("A10 current session keeps signed upload and PAUSED launch working", async (t) => {
   const f = await fixture(t);
   const pending = f.invoke("uploadCreative", photo); await f.flush();
-  f.take("signed-upload", "POST").answer({ bucket: "ad-creatives", storagePath: `${W1}/photo.jpg`, token: "signed-synthetic", publicUrl: "https://storage.invalid/photo.jpg" }); await f.flush();
-  f.storage[0].resolve({ error: null }); await f.flush(); f.take("ad-creatives?", "POST").answer({ id: "new-asset" }); await pending; await f.flush();
-  assert.equal(record(f.view.creative).id, "new-asset");
+  f.take("signed-upload", "POST").answer(photoTicket); await f.flush();
+  f.storage[0].resolve({ error: null }); await f.flush();
+  const path = `${W1}/verified/cccccccc-cccc-4ccc-8ccc-cccccccccccc/${"a".repeat(64)}.jpg`;
+  f.take("ad-creatives/finalize-upload?", "POST").answer({ asset: { id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", workspaceId: W1,
+    fileName: photo.name, fileType: "image", mimeType: photo.type, fileSize: photo.size, storageBucket: "ad-creatives", storagePath: path,
+    publicUrl: `https://storage.invalid/storage/v1/object/public/ad-creatives/${path}`, status: "uploaded" } });
+  await pending; await f.flush();
+  assert.equal(record(f.view.creative).id, "cccccccc-cccc-4ccc-8ccc-cccccccccccc");
   await f.seed(); const key = f.key; const gate = f.delayToken();
   const launched = f.invoke("launch", "PAUSED"); await f.flush(); f.rotateToken(); gate.resolve(); await f.flush();
   const request = f.take("/meta-launch", "POST");
@@ -572,25 +590,19 @@ test("A10 current session keeps signed upload and PAUSED launch working", async 
   assert.equal(f.writes.filter((key) => key === `negis_ads_launch_history_${W1}::A`).length, 1);
 });
 
-test("A11 StrictMode consumes a video prefill once and resumes its cover in the fresh lifetime", async (t) => {
+test("A11 StrictMode consumes a video prefill once without capturing or publishing an unverified original", async (t) => {
   const f = await fixture(t, { prefill: {
     sourceModule: "content-studio", primaryText: "Synthetic prefill",
     creative: { type: "video", assetId: "prefill-asset", url: "https://storage.invalid/prefill.mp4", fileName: video.name },
   } });
-  assert.equal(f.captures.length, 1);
+  assert.equal(f.captures.length, 0);
   await f.replay();
-  assert.equal(f.captures.length, 2);
+  assert.equal(f.captures.length, 0);
   assert.equal(f.removals.filter((key) => key === `synthetic-prefill::${W1}`).length, 1);
-  const thumb = { blob: new Blob(["synthetic"]), mimeType: "image/jpeg", generatedAt: "synthetic" };
-  f.captures[0].resolve(thumb); await f.flush();
   assert.equal(f.calls.filter((c) => c.url.includes("signed-upload")).length, 0);
-  f.captures[1].resolve(thumb); await f.flush();
-  f.take("signed-upload", "POST").answer({ bucket: "ad-creatives", storagePath: `${W1}/cover.jpg`, token: "signed-synthetic", publicUrl: "https://storage.invalid/cover.jpg" }); await f.flush();
-  f.storage[0].resolve({ error: null }); await f.flush();
-  f.take("ad-creatives?", "PATCH").answer({ saved: true }); await f.flush();
-  assert.equal(record(f.view.creative).thumbnailUrl, "https://storage.invalid/cover.jpg");
-  assert.equal(f.view.loading, null);
-  assert.equal(f.calls.filter((c) => c.url.includes("signed-upload")).length, 1);
+  assert.equal(f.storage.length, 0);
+  assert.notEqual(record(f.view.creative).status, "uploaded");
+  assert.equal(f.calls.some(call => call.url.includes("ad-creative-meta-upload") || call.url.endsWith("/meta-launch")), false);
 });
 
 for (const status of [200, 500]) {
@@ -608,7 +620,13 @@ for (const status of [200, 500]) {
 }
 
 test("A13 old video poll cannot publish a ready job or resume its timer after unmount", async (t) => {
-  const f = await fixture(t); await f.seed("video");
+  const f = await fixture(t);
+  (f.view.setMetaSummary as (value: unknown) => void)({ videoOptimization: { enabled: true, maxInputMb: 500 } }); await f.flush();
+  const uploading = f.invoke("uploadCreative", video); await f.flush();
+  f.take("video-jobs?", "POST").answer({ job: { id: "old-job", status: "awaiting_upload" },
+    signedUpload: { bucket: "ad-creatives-raw", storagePath: `${W1}/raw.mp4`, token: "signed-synthetic" } }); await f.flush();
+  f.storage[0].resolve({ error: null }); await f.flush();
+  f.take("video-jobs?", "PATCH").answer({ job: { id: "old-job", status: "queued" } }); await uploading; await f.flush();
   const pending = f.invoke("pollVideoJob", "old-job"); await f.flush(); const request = f.take("video-jobs?");
   f.dispose(); const notices = f.notifications.length;
   request.answer({ job: { id: "old-job", status: "ready", outputPublicUrl: "https://storage.invalid/old-output.mp4" } });

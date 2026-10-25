@@ -4,6 +4,9 @@
   "packageManager": "pnpm@10.33.2",
   "license": "MIT",
   "scripts": {
+    "test:generated-video-workflow": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:generated-video-workflow",
+    "test:generated-video-client": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:generated-video-client",
+    "test:generated-video-workflow-postgres": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:generated-video-workflow-postgres",
     "test:staged-creatives": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:staged-creatives",
     "test:staged-creatives-postgres": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:staged-creatives-postgres",
     "test:video-worker-media": "node scripts/run-pnpm.cjs --filter @workspace/scripts run test:video-worker-media",

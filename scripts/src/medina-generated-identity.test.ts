@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import test from "node:test";
+import { Script } from "node:vm";
 
 type IdentityInput = { workspaceId: string; idempotencyKey: string; mimeType: string };
 type Identity = { assetId: string; fileName: string; storagePath: string; keyDigest: string };
@@ -207,5 +210,38 @@ test("Generated identity: rejects unsupported or malformed MIME values without e
     "application/octet-stream", "image/png; charset=utf-8", "image/../png", "video/unknown", "png", ".jpg"];
   for (const mimeType of invalid) {
     assert.throws(() => identity({ ...input(), mimeType } as IdentityInput), `Reject invalid MIME ${String(mimeType)}`);
+  }
+});
+
+test("Generated identity: direct generated-video storage is refused before any SDK, persistence or public URL effect", async () => {
+  const ts = createRequire(new URL("../../package.json", import.meta.url))("typescript") as typeof import("typescript");
+  const server = await readFile(new URL("../../lib/crm/server.ts", import.meta.url), "utf8");
+  const ast = ts.createSourceFile("server.ts", server, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const declaration = ast.statements.find(statement => ts.isFunctionDeclaration(statement)
+    && statement.name?.text === "storeGeneratedCreative");
+  assert.ok(declaration, "Execute the complete actual production writer, not a copied guard");
+  const compiled = ts.transpileModule(`${declaration.getText(ast)}\nexports.store = storeGeneratedCreative;`, {
+    fileName: "generated-video-refusal.actual.ts", reportDiagnostics: true,
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+  });
+  assert.deepEqual(compiled.diagnostics ?? [], []);
+  const effects: string[] = [];
+  const forbidden = (name: string) => () => { effects.push(name); throw new Error(`Unexpected ${name}`); };
+  const exported: { store?: (input: Record<string, unknown>) => Promise<unknown> } = {};
+  new Script(compiled.outputText).runInNewContext({ exports: exported, Buffer,
+    getSupabaseServerClient: forbidden("SDK access"), buildAdCreativeStoragePath: forbidden("storage path"),
+    generatedCreativeIdentity: forbidden("identity lookup"), validateCreativeAssetBody: forbidden("persistence preparation"),
+    buildSupabaseStoragePublicUrl: forbidden("public URL"), persistAdCreativeAsset: forbidden("database write"),
+    AD_CREATIVE_BUCKET: "synthetic-public-bucket" });
+  assert.equal(typeof exported.store, "function");
+  for (const mimeType of ["video/mp4", "video/quicktime", "video/webm", "video/unknown", "VIDEO/MP4", " video/mp4 ", "video/mp4; charset=utf-8"]) {
+    for (const idempotencyKey of [undefined, KEY, "v2:12345678-1234-4567-89ab-123456789abc"]) {
+      await assert.rejects(exported.store!({ workspaceId: WORKSPACE, fileName: "raw.mp4", mimeType,
+        buffer: Buffer.from("not-native-validated"), idempotencyKey,
+        metadata: { kind: "generated-video", nativeValidated: true, generatedKey: "forged-browser-proof" } }),
+      (error: unknown) => error !== null && typeof error === "object" && "message" in error
+        && error.message === "generated_video_native_validation_required");
+      assert.deepEqual(effects, [], "No public storage, SDK initialization, database operation or forged metadata trust");
+    }
   }
 });

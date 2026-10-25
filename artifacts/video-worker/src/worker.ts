@@ -6,6 +6,7 @@ import path from "node:path";
 import type { WorkerConfig } from "./config.js";
 import { buildDecodeArgs, buildThumbnailArgs, buildTranscodeArgs, probeVideo, runFfmpeg, VIDEO_MEDIA_LIMITS } from "./ffmpeg.js";
 import { downloadPrivateVideo } from "./download.js";
+import { reclaimGeneratedVideoRaw } from "./generated-raw-reclamation.js";
 
 export type JobRow = {
   id: string;
@@ -144,8 +145,12 @@ export async function processJob(supabase: SupabaseClient, config: WorkerConfig,
       assetVersion = asset.updated_at;
     }
     const inputPath = path.join(tmpBase, `input.${inputExtension(job)}`);
+    const generatedInputSha256 = job.metadata?.kind === "generated-video-native" ? job.metadata.inputSha256 : undefined;
+    if (job.metadata?.kind === "generated-video-native"
+      && (typeof generatedInputSha256 !== "string" || !/^[0-9a-f]{64}$/.test(generatedInputSha256))) throw new Error("video_raw_identity_invalid");
     const inputSizeBytes = await downloadPrivateVideo({ supabaseUrl: config.supabaseUrl, serviceRoleKey: config.serviceRoleKey,
-      bucket: rawBucket, path: rawPath, outputPath: inputPath, expectedBytes: Number(job.raw_size), maxBytes: VIDEO_MEDIA_LIMITS.maxInputBytes });
+      bucket: rawBucket, path: rawPath, outputPath: inputPath, expectedBytes: Number(job.raw_size), maxBytes: VIDEO_MEDIA_LIMITS.maxInputBytes,
+      ...(typeof generatedInputSha256 === "string" ? { expectedSha256: generatedInputSha256 } : {}) });
     await probeVideo(config.ffprobePath, inputPath, job.source_mime_type!);
 
     // transcoding — optimized MP4 (H.264 + AAC, +faststart, metadata stripped)
@@ -217,14 +222,21 @@ export async function processJob(supabase: SupabaseClient, config: WorkerConfig,
     // turn an already-confirmed playable result into a failed/retryable job.
     let rawDeleted = false;
     try {
-      const { data: removed, error: removeError } = await supabase.storage.from(rawBucket).remove([rawPath]);
-      rawDeleted = !removeError && Array.isArray(removed) && removed.some(item => item.name === rawPath);
-      await updateClaim(supabase, config, job, phase, { raw_deleted_at: rawDeleted ? new Date().toISOString() : null,
-        raw_delete_error: rawDeleted ? null : "video_raw_cleanup_unconfirmed" });
+      if (job.metadata?.kind === "generated-video-native") {
+        // A delayed create-only producer may still be uploading. Keep this key
+        // occupied; deleting it would permit resurrecting unaccounted raw bytes.
+        await reclaimGeneratedVideoRaw(supabase, config, { ...job, status: "ready" });
+        rawDeleted = true;
+      } else {
+        const { data: removed, error: removeError } = await supabase.storage.from(rawBucket).remove([rawPath]);
+        rawDeleted = !removeError && Array.isArray(removed) && removed.some(item => item.name === rawPath);
+        await updateClaim(supabase, config, job, phase, { raw_deleted_at: rawDeleted ? new Date().toISOString() : null,
+          raw_delete_error: rawDeleted ? null : "video_raw_cleanup_unconfirmed" });
+      }
     } catch { console.warn("[video-worker] raw cleanup unconfirmed"); }
 
     console.log(
-      `[video-worker] job ${job.id} ready (input ${inputSizeBytes} bytes -> output ${outputSizeBytes} bytes, ratio ${compressionRatio ?? "n/a"}, raw deleted: ${rawDeleted ? "yes" : "no"})`,
+      `[video-worker] job ${job.id} ready (input ${inputSizeBytes} bytes -> output ${outputSizeBytes} bytes, ratio ${compressionRatio ?? "n/a"}, raw reclaimed: ${rawDeleted ? "yes" : "no"})`,
     );
   } catch (error) {
     // Native/SDK errors can contain paths, credentials or customer metadata.

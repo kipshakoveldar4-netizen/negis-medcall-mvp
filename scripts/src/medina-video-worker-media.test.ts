@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
@@ -15,9 +16,11 @@ const load = (file: string) => import(pathToFileURL(path.join(root, file)).href)
 const media = await load("artifacts/video-worker/src/ffmpeg.ts");
 const download = await load("artifacts/video-worker/src/download.ts");
 const worker = await load("artifacts/video-worker/src/worker.ts");
+const generationIdentity = await load("lib/crm/generated-video-identity.ts");
+const reclamation = await load("artifacts/video-worker/src/generated-raw-reclamation.ts");
 const A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const ASSET = "cccccccc-cccc-4ccc-8ccc-cccccccccccc", JOB = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
-const ORIGIN = "https://video-worker.fixture.invalid", KEY = "SYNTHETIC_SERVICE_CREDENTIAL";
+const ORIGIN = "https://video-worker.fixture.invalid", KEY = "SYNTHETIC_SERVICE_CREDENTIAL_FOR_LOCAL_ONLY";
 const PRIVATE = "SYNTHETIC_PRIVATE_DIAGNOSTIC";
 type Row = Record<string, any>;
 let directory: string, clip: Buffer;
@@ -134,6 +137,13 @@ async function fixture(t: TestContext, options: Row = {}) {
   const asset: Row = { id: ASSET, workspace_id: A, file_type: "video", mime_type: "video/mp4", file_size: clip.length,
     storage_bucket: config.rawBucket, storage_path: `${A}/input.mp4`, updated_at: "2026-10-25T00:00:00Z",
     generated_key: null, metadata: { retained: true }, status: "optimizing", ...options.asset };
+  if (job.metadata.kind === "generated-video-native") {
+    job.metadata.generationKey = "v2:eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+    const generated = generationIdentity.generatedVideoIdentity({ workspaceId: A, generationKey: job.metadata.generationKey });
+    job.raw_path = generated.rawPath; job.asset_id = generated.assetId; job.source_file_name = generated.fileName;
+    asset.id = generated.assetId; asset.storage_path = generated.rawPath; asset.file_name = generated.fileName;
+  }
+  let privateBytes = clip;
   const queries: Row[] = [], events: string[] = [], objects = new Map<string, Buffer>(), logs: string[] = [];
   let promotionCalls = 0;
   const db = { from(table: string) {
@@ -156,6 +166,12 @@ async function fixture(t: TestContext, options: Row = {}) {
       then(resolve: (value: unknown) => void, reject: (reason: unknown) => void) { return execute().then(resolve, reject); } };
     return builder;
   }, async rpc(name: string, args: Row) {
+    if (name === "ack_generated_video_raw_reclamation") {
+      assert.equal(job.status, "ready"); assert.equal(args.p_job_id, JOB); assert.equal(args.p_workspace_id, A);
+      assert.deepEqual(privateBytes, reclamation.GENERATED_RAW_FENCE);
+      events.push("ack:raw-fence"); job.raw_deleted_at = new Date().toISOString();
+      return { data: { jobId: JOB, workspaceId: A, status: "reclaimed", fenceSize: args.p_fence_size, fenceSha256: args.p_fence_sha256 }, error: null };
+    }
     promotionCalls++;
     assert.equal(name, "finalize_video_job");
     assert.equal(args.p_job_id, JOB); assert.equal(args.p_workspace_id, A);
@@ -174,11 +190,21 @@ async function fixture(t: TestContext, options: Row = {}) {
     }
     assert.deepEqual(job.promotion_receipt, args.p_result, "The fake RPC never invents a different replay payload");
     if (options.readyFailure === "after" || (options.readyFailure === "after-once" && promotionCalls === 1)) return { data: null, error: { message: PRIVATE } };
-    return { data: { jobId: JOB, workspaceId: A, assetId: ASSET, status: "ready", promotion: args.p_result, ...options.receipt }, error: null };
-  }, storage: { from(bucket: string) {
+    return { data: { jobId: JOB, workspaceId: A, assetId: job.asset_id, status: "ready", promotion: args.p_result, ...options.receipt }, error: null };
+  }, storage: { async getBucket(bucket: string) {
+    assert.equal(bucket, config.rawBucket);
+    return { data: { id: bucket, name: bucket, public: false, versioning_status: "disabled", file_size_limit: 104857600,
+      allowed_mime_types: ["video/mp4"] }, error: null };
+  }, from(bucket: string) {
     assert.ok([config.rawBucket, config.outputBucket].includes(bucket));
     return {
       async upload(key: string, bytes: Buffer, settings: Row) {
+        if (bucket === config.rawBucket) {
+          assert.equal(settings.upsert, true); assert.equal(settings.contentType, "video/mp4");
+          assert.equal(key, job.raw_path); assert.deepEqual(bytes, reclamation.GENERATED_RAW_FENCE);
+          events.push("replace:raw-fence"); privateBytes = Buffer.from(bytes);
+          return { data: { path: key }, error: null };
+        }
         events.push("upload:" + key); assert.equal(bucket, config.outputBucket); assert.equal(settings.upsert, false);
         assert.equal(objects.has(key), false); objects.set(key, Buffer.from(bytes));
         options.afterUpload?.({ job, asset });
@@ -193,12 +219,12 @@ async function fixture(t: TestContext, options: Row = {}) {
     };
   } } };
   t.mock.method(globalThis, "fetch", async (url: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
-    assert.equal(String(url), `${ORIGIN}/storage/v1/object/ad-creatives-raw/${A}/input.mp4`);
+    assert.equal(String(url), `${ORIGIN}/storage/v1/object/ad-creatives-raw/${job.raw_path}`);
     assert.equal(init?.redirect, "error"); assert.equal(init?.credentials, "omit");
     assert.equal(new Headers(init?.headers).get("Authorization"), `Bearer ${KEY}`);
     events.push("fetch:private");
-    const bytes: Buffer = options.bytes ?? clip;
-    return new Response(bytes, { headers: { "content-length": String(bytes.length) } });
+    const bytes: Buffer = options.bytes ?? privateBytes;
+    return new Response(bytes, { headers: { "content-length": String(bytes.length), "content-type": "video/mp4" } });
   });
   t.mock.method(console, "error", (...values: unknown[]) => { logs.push(values.join(" ")); });
   t.mock.method(console, "warn", (...values: unknown[]) => { logs.push(values.join(" ")); });
@@ -231,6 +257,29 @@ test("actual worker validates/transcodes the file, caps portrait height and dele
     assert.equal(query.filters.workspace_id, A); assert.equal(query.filters.claimed_by, f.config.workerId);
     assert.equal(query.filters.claimed_at, "2026-10-25T00:00:00Z"); assert.equal(query.filters.attempts, 1);
   }
+});
+
+test("generated input requires its bound SHA-256 before any public output or raw cleanup", async t => {
+  const f = await fixture(t, { job: { metadata: { kind: "generated-video-native", inputSha256: "0".repeat(64) } } });
+  await f.run();
+  assert.equal(f.job.status, "failed"); assert.equal(f.objects.size, 0);
+  assert.equal(f.events.includes("fetch:private"), true); assert.equal(f.events.includes("remove:raw"), false);
+  assert.equal(f.promotionCalls(), 0);
+});
+
+test("the same generated input hash survives native decode, promotion and confirmed cleanup", async t => {
+  const f = await fixture(t, { job: { metadata: { kind: "generated-video-native", inputSha256: createHash("sha256").update(clip).digest("hex") } } });
+  await f.run();
+  assert.equal(f.job.status, "ready"); assert.equal(f.objects.size, 2); assert.equal(f.promotionCalls(), 1);
+  assert.equal(f.events.includes("remove:raw"), false); assert.equal(f.events.includes("replace:raw-fence"), true);
+  assert.equal(f.events.includes("ack:raw-fence"), true);
+});
+
+for (const invalid of [undefined, "", "x".repeat(64), "A".repeat(64), 42]) test(`generated input refuses an invalid bound hash (${String(invalid)}) before download`, async t => {
+  const f = await fixture(t, { job: { metadata: { kind: "generated-video-native", inputSha256: invalid } } });
+  await f.run();
+  assert.equal(f.job.status, "failed"); assert.equal(f.events.includes("fetch:private"), false);
+  assert.equal(f.objects.size, 0); assert.equal(f.promotionCalls(), 0);
 });
 
 for (const [label, options] of [

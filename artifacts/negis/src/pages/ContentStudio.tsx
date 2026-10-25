@@ -25,6 +25,11 @@ import { getSupabaseAccessToken } from "@/lib/serverAuth";
 import { getSignOutRevision, isSignOutPending } from "@/lib/authSignOut";
 import { uploadVerifiedCreativeImage, type VerifiedCreativeAsset } from "@/lib/verified-creative-upload";
 import { parseGenerationUsageSummary, type GenerationUsageSummary } from "@/lib/contentGenerationUsage";
+import {
+  generatedVideoStorageKey, parseAcceptedGeneratedVideo, parseGeneratedVideoDraft, parseGeneratedVideoPoll, parseRecoverableGeneratedVideo,
+  requireGeneratedVideoRetryReceipt, serializeGeneratedVideoDraft,
+  type GeneratedVideoJobSnapshot, type NativeGeneratedVideoReceipt,
+} from "@/lib/generated-video-receipt";
 import { isRealWorkspace, readWorkspaceId, workspaceScopedKey } from "@/lib/demoStorage";
 import {
   ADVERTISING_CAMPAIGN_PREFILL_KEY,
@@ -116,6 +121,8 @@ type ApiResponse<TData> =
       totalParts?: number;
       hint?: string;
       code?: string;
+      accepted?: boolean;
+      data?: unknown;
     };
 
 type TelegramResponse = {
@@ -231,12 +238,9 @@ type GeneratedFile = {
   thumbnailSource?: string;
 };
 
-type VideoJobState = {
-  handle: string;
-  status: "queued" | "in_progress" | "completed" | "failed";
-  progress: number;
-  formatSubstituted: boolean;
-};
+type GeneratedVideoFile = GeneratedFile & Pick<NativeGeneratedVideoReceipt, "nativeValidated" | "validationJobId" | "sha256">;
+
+type VideoJobState = GeneratedVideoJobSnapshot;
 
 const VIDEO_POLL_INTERVAL_MS = 12_000;
 
@@ -249,37 +253,25 @@ const VIDEO_POLL_INTERVAL_MS = 12_000;
  * бы, а забрать файл стало бы нечем. Поэтому задача лежит в localStorage под
  * ключом рабочего пространства.
  *
- * Медицинских данных здесь нет: подписанный идентификатор задачи и ссылка на
- * публичный файл креатива. Готовая задача хранится вместе со ссылкой, поэтому
- * возврат на страницу показывает результат, а не опрашивает провайдера заново —
- * повторный опрос готовой задачи скачал бы и записал тот же ролик второй раз.
+ * В хранилище остаётся только дескриптор задачи, отдельно для пользователя и
+ * пространства. Публичные ссылки восстанавливаются только из свежей серверной
+ * квитанции: локальный черновик не подтверждает завершение обработки.
  */
 const VIDEO_JOB_KEY = "negis_content_studio_video_job";
 
-type StoredVideoJob = VideoJobState & {
-  url?: string;
-  assetId?: string;
-  fileName?: string;
-  mimeType?: string;
-  fileSize?: number;
-  thumbnailUrl?: string;
-  thumbnailSource?: string;
-};
-
-function readStoredVideoJob(key = workspaceScopedKey(VIDEO_JOB_KEY)): StoredVideoJob | null {
+function readStoredVideoJob(key: string, owner: { actorId: string; workspaceId: string }): VideoJobState | null {
   try {
     const raw = localStorage.getItem(key);
     if (!raw) return null;
-    const parsed = JSON.parse(raw) as StoredVideoJob;
-    return parsed && typeof parsed.handle === "string" && parsed.handle ? parsed : null;
+    return parseGeneratedVideoDraft(raw, owner);
   } catch {
     return null;
   }
 }
 
-function writeStoredVideoJob(value: StoredVideoJob | null, key = workspaceScopedKey(VIDEO_JOB_KEY)) {
+function writeStoredVideoJob(value: VideoJobState | null, key: string, owner: { actorId: string; workspaceId: string }) {
   try {
-    if (value) localStorage.setItem(key, JSON.stringify(value));
+    if (value) localStorage.setItem(key, serializeGeneratedVideoDraft(value, owner));
     else localStorage.removeItem(key);
   } catch {
     // Переполненное или запрещённое хранилище не должно ронять генерацию:
@@ -291,7 +283,7 @@ const videoJobLabels: Record<VideoJobState["status"], string> = {
   queued: "Ролик в очереди",
   in_progress: "Ролик рендерится",
   completed: "Ролик готов",
-  failed: "Генерация не удалась",
+  failed: "Не удалось подтвердить готовность",
 };
 
 function formatFileSize(bytes: number): string {
@@ -1069,16 +1061,41 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
   const [genBusy, setGenBusy] = useState<"photo" | "video" | null>(null);
   const [genNotice, setGenNotice] = useState<GenerationNotice | null>(null);
   const [genImage, setGenImage] = useState<GeneratedFile | null>(null);
-  const [genVideo, setGenVideo] = useState<GeneratedFile | null>(null);
+  const [genVideo, setGenVideo] = useState<GeneratedVideoFile | null>(null);
   const [videoJob, setVideoJob] = useState<VideoJobState | null>(null);
   const videoJobRef = useRef(videoJob);
   videoJobRef.current = videoJob;
+  const videoCommandRef = useRef<object | null>(null);
+  const [videoRetryBusy, setVideoRetryBusy] = useState(false);
   const [generationUsage, setGenerationUsage] = useState<GenerationUsageSummary | null>(null);
   const [generationUsageLoading, setGenerationUsageLoading] = useState(false);
   const usageRequestRef = useRef(0);
   const photoGenerationAttempt = useRef<PaidGenerationAttempt | null>(null);
   const videoGenerationAttempt = useRef<PaidGenerationAttempt | null>(null);
   const videoGenerationRevision = useRef(0);
+
+  function videoJobStorageKey(): string {
+    return generatedVideoStorageKey(VIDEO_JOB_KEY, { actorId, workspaceId });
+  }
+
+  function videoReceiptContext(validationJobId?: string) {
+    const env = import.meta.env as Record<string, string | undefined>;
+    return { workspaceId, storageOrigin: new URL(env.VITE_SUPABASE_URL || "").origin, validationJobId };
+  }
+
+  function clearGeneratedVideoAccess() {
+    videoGenerationRevision.current += 1;
+    setGenVideo(null);
+    setVideoJob(null);
+    writeStoredVideoJob(null, videoJobStorageKey(), { actorId, workspaceId });
+    setGenNotice({ tone: "error", text: "Доступ к видео отозван. Обновите страницу." });
+  }
+
+  function displayGeneratedVideoReceipt(receipt: NativeGeneratedVideoReceipt) {
+    setGenVideo({ url: receipt.creativeUrl, assetId: receipt.assetId, fileName: receipt.fileName,
+      mimeType: receipt.mimeType, model: "", fileSize: receipt.fileSize, thumbnailUrl: receipt.thumbnailUrl,
+      nativeValidated: true, validationJobId: receipt.validationJobId, sha256: receipt.sha256 });
+  }
 
   const refreshGenerationUsage = useCallback(async () => {
     const session = sessionRef.current;
@@ -1657,7 +1674,7 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
 
   const generateVideo = async () => {
     const session = sessionRef.current;
-    if (!isSessionAlive(session)) return;
+    if (!isSessionAlive(session) || videoCommandRef.current) return;
     const attemptKey = paidGenerationAttemptKey("video");
     const prompt = genPrompt.trim();
     if (!prompt) {
@@ -1683,7 +1700,10 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
       return;
     }
 
-    videoGenerationRevision.current += 1;
+    const command = {};
+    videoCommandRef.current = command;
+    const revision = ++videoGenerationRevision.current;
+    const current = () => isSessionAlive(session) && videoCommandRef.current === command && videoGenerationRevision.current === revision;
     setGenBusy("video");
     setGenNotice(null);
     setGenVideo(null);
@@ -1693,22 +1713,22 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
     // 100%» от прошлой задачи рядом с кнопкой «Отправляем задачу...», причём
     // без самого ролика: genVideo уже очищен строкой выше.
     setVideoJob(null);
-    writeStoredVideoJob(null);
+    writeStoredVideoJob(null, videoJobStorageKey(), { actorId, workspaceId });
     try {
       const response = await crmFetch(withWorkspace("/api/content-studio/generate-video"), {
-        expectedUserId: actorId, dispatchGuard: () => isSessionAlive(session), signal: session.signal,
+        expectedUserId: actorId, dispatchGuard: current, signal: session.signal,
         method: "POST",
         headers: paidGenerationHeaders(attempt.requestKey),
         body: JSON.stringify({ prompt, format: genFormat }),
       });
-      const body = await safeJson<{
-        handle: string;
-        status: VideoJobState["status"];
-        progress: number;
-        formatSubstituted: boolean;
-      }>(response);
-      if (!await isGenerationSessionCurrent(session)) return;
-      const keepAttempt = shouldKeepPaidGenerationAttempt({
+      if (!current()) return;
+      const body = await safeJson<unknown>(response);
+      if (!current() || !await isGenerationSessionCurrent(session) || !current()) return;
+      if (handoffAccessDenied(response)) {
+        clearGeneratedVideoAccess();
+        return;
+      }
+      const keepAttempt = (body?.success === false && body.accepted === true) || shouldKeepPaidGenerationAttempt({
         responseReceived: true,
         status: response.status,
         success: body?.success,
@@ -1721,7 +1741,9 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
 
       if (!response.ok || body?.success !== true) {
         void refreshGenerationUsage();
-        setVideoJob(null);
+        const acceptedJob = parseRecoverableGeneratedVideo(body, videoReceiptContext());
+        if (acceptedJob) writeStoredVideoJob(acceptedJob, videoJobStorageKey(), { actorId, workspaceId });
+        setVideoJob(acceptedJob);
         setGenNotice({
           tone: "error",
           text: `${generationRefusalText(body, response.status, "Не удалось запустить генерацию видео")}${
@@ -1736,25 +1758,75 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
       // Подмена формата живёт в карточке задачи, а не в genNotice: genNotice
       // общий с генерацией изображения, и один клик по соседней кнопке стирал
       // бы предупреждение о том, что «квадратный» ролик на самом деле 9:16.
-      const acceptedJob: VideoJobState = {
-        handle: body.data.handle,
-        status: body.data.status,
-        progress: body.data.progress,
-        formatSubstituted: Boolean(body.data.formatSubstituted),
-      };
+      const acceptedJob = parseAcceptedGeneratedVideo(body.data, videoReceiptContext());
       // Keep the accepted handle if the later persistence effect cannot recheck auth.
-      writeStoredVideoJob(acceptedJob, workspaceScopedKey(VIDEO_JOB_KEY));
+      writeStoredVideoJob(acceptedJob, videoJobStorageKey(), { actorId, workspaceId });
       setVideoJob(acceptedJob);
       void refreshGenerationUsage();
     } catch (error) {
-      if (!await isGenerationSessionCurrent(session)) return;
+      if (!current() || !await isGenerationSessionCurrent(session) || !current()) return;
+      if (handoffAccessDenied(error)) {
+        clearGeneratedVideoAccess();
+        return;
+      }
       setVideoJob(null);
       setGenNotice({
         tone: "error",
         text: `${error instanceof Error ? error.message : "Не удалось запустить генерацию видео"} Повтор без изменения описания использует прежний защитный ключ и не запустит второй платный запрос.`,
       });
     } finally {
-      if (isSessionAlive(session)) setGenBusy(null);
+      if (videoCommandRef.current === command) {
+        videoCommandRef.current = null;
+        if (isSessionAlive(session)) setGenBusy(null);
+      }
+    }
+  };
+
+  const retryNativeVideo = async () => {
+    const session = sessionRef.current;
+    const original = videoJob;
+    if (!isSessionAlive(session) || videoCommandRef.current || !original?.validationJobId
+      || original.status !== "failed" || original.phase !== "validation" || videoJobRef.current !== original) return;
+    const command = {};
+    videoCommandRef.current = command;
+    const generation = videoGenerationRevision.current;
+    const current = () => isSessionAlive(session) && videoCommandRef.current === command
+      && videoGenerationRevision.current === generation && videoJobRef.current === original;
+    setVideoRetryBusy(true);
+    try {
+      if (!current() || !await isGenerationSessionCurrent(session) || !current()) return;
+      const response = await crmFetch(`/api/crm/video-processing-jobs/${encodeURIComponent(original.validationJobId)}/retry?workspaceId=${encodeURIComponent(workspaceId)}`, {
+        expectedUserId: actorId, dispatchGuard: current, signal: session.signal,
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ workspaceId, status: "failed" }),
+      });
+      if (!current()) return;
+      const body = await safeJson<unknown>(response);
+      if (!current() || !await isGenerationSessionCurrent(session) || !current()) return;
+      if (handoffAccessDenied(response)) {
+        clearGeneratedVideoAccess();
+        return;
+      }
+      if (response.ok) requireGeneratedVideoRetryReceipt(body, { actorId, workspaceId }, original.validationJobId);
+      else if (response.status !== 409 && response.status < 500) {
+        setGenNotice({ tone: "error", text: "Повторная обработка недоступна. Исходная задача сохранена." });
+        return;
+      }
+      // A conflict or uncertain acknowledgement is reconciled by the same read, never another paid POST.
+      setGenNotice(response.ok ? null : { tone: "warning", text: "Проверяем состояние прежней задачи обработки." });
+      setVideoJob((job) => job === original ? { ...job, status: "in_progress", progress: Math.min(95, job.progress) } : job);
+    } catch (error) {
+      if (!current() || !await isGenerationSessionCurrent(session) || !current()) return;
+      if (handoffAccessDenied(error)) {
+        clearGeneratedVideoAccess();
+        return;
+      }
+      setGenNotice({ tone: "warning", text: "Не удалось подтвердить повторную обработку. Исходная задача сохранена." });
+    } finally {
+      if (videoCommandRef.current === command) {
+        videoCommandRef.current = null;
+        if (isSessionAlive(session)) setVideoRetryBusy(false);
+      }
     }
   };
 
@@ -1773,12 +1845,15 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
     if (videoJob.status === "completed" || videoJob.status === "failed") return;
 
     const handle = videoJob.handle;
+    const generation = videoGenerationRevision.current;
+    const validationJobId = videoJob.validationJobId;
     const requestController = new AbortController();
     const signal = AbortSignal.any([session.signal, requestController.signal]);
     let timer: ReturnType<typeof setTimeout> | null = null;
     let stopped = false;
 
-    const isStale = () => stopped || !isSessionAlive(session);
+    const isStale = () => stopped || !isSessionAlive(session) || videoGenerationRevision.current !== generation
+      || videoJobRef.current?.handle !== handle;
     const schedule = () => {
       if (!isStale()) timer = setTimeout(() => void tick(), VIDEO_POLL_INTERVAL_MS);
     };
@@ -1791,22 +1866,17 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
           { expectedUserId: actorId, dispatchGuard: () => !isStale(), signal, cache: "no-store" },
         );
         if (isStale()) return;
-        const body = await safeJson<{
-          status: VideoJobState["status"];
-          progress: number;
-          creativeUrl?: string;
-          failureReason?: string;
-          assetId?: string;
-          fileName?: string;
-          mimeType?: string;
-          fileSize?: number;
-        }>(response);
+        const body = await safeJson<unknown>(response);
         if (isStale()) return;
         if (await pollingSessionState(session) !== "current") {
           schedule();
           return;
         }
         if (isStale()) return;
+        if (handoffAccessDenied(response)) {
+          clearGeneratedVideoAccess();
+          return;
+        }
 
         if (!response.ok || body?.success !== true) {
           setVideoJob((current) => (current && current.handle === handle ? { ...current, status: "failed" } : current));
@@ -1817,53 +1887,47 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
           return;
         }
 
-        const completedUrl =
-          body.data.status === "completed" && typeof body.data.creativeUrl === "string"
-            ? body.data.creativeUrl.trim()
-            : "";
-        const visibleStatus = body.data.status === "completed" && !completedUrl ? "failed" : body.data.status;
+        let confirmed: ReturnType<typeof parseGeneratedVideoPoll>;
+        try {
+          confirmed = parseGeneratedVideoPoll(body.data, videoReceiptContext(validationJobId));
+        } catch {
+          setGenVideo(null);
+          setVideoJob((current) => current?.handle === handle ? { ...current, status: "failed" } : current);
+          setGenNotice({ tone: "error", text: "Проверка видео не подтверждена. Нажмите «Проверить ещё раз»: новая генерация не запускается." });
+          return;
+        }
+        const completedUrl = confirmed.receipt?.creativeUrl || "";
         setVideoJob((current) =>
           current && current.handle === handle
-            ? { ...current, status: visibleStatus, progress: body.data.progress }
+            ? { ...current, status: confirmed.status, progress: confirmed.progress, phase: confirmed.phase,
+                ...(confirmed.validationJobId ? { validationJobId: confirmed.validationJobId } : {}) }
             : current,
         );
 
-        if (body.data.status === "failed") {
+        if (confirmed.status === "failed") {
+          setGenVideo(null);
           setGenNotice({
             tone: "error",
-            text: `Сервис генерации не смог собрать ролик: ${body.data.failureReason || "причина не сообщена"}.`,
+            text: confirmed.phase === "validation"
+              ? "Проверка и обработка видео не завершились. Исходная задача сохранена."
+              : "Сервис генерации не смог собрать ролик. Исходная задача сохранена.",
           });
           return;
         }
 
-        if (body.data.status === "completed") {
-          if (!completedUrl) {
-            setGenNotice({
-              tone: "error",
-              text: "Сервис сообщил, что ролик готов, но ссылка на файл не пришла. Нажмите «Проверить ещё раз»: новый платный рендер не запустится.",
-            });
-            return;
-          }
-          setGenVideo({
-            url: completedUrl,
-            assetId: body.data.assetId,
-            fileName: body.data.fileName,
-            mimeType: body.data.mimeType || "video/mp4",
-            model: "",
-            fileSize: body.data.fileSize || 0,
-          });
-          if (body.warning) {
-            setGenNotice({
-              tone: "warning",
-              text: `Ролик сохранён, ссылка работает, но запись в библиотеке креативов не создана: ${body.warning}`,
-            });
-          }
+        if (confirmed.status === "completed" && confirmed.receipt && completedUrl) {
+          displayGeneratedVideoReceipt(confirmed.receipt);
+          setGenNotice(null);
           toast.success("Ролик готов");
           return;
         }
       } catch (error) {
         if (isStale()) return;
         if (await pollingSessionState(session) === "current" && !isStale()) {
+          if (handoffAccessDenied(error)) {
+            clearGeneratedVideoAccess();
+            return;
+          }
           setGenNotice({
             tone: "warning",
             text: error instanceof Error ? error.message : "Связь с сервером прервалась, опрос продолжается.",
@@ -1889,23 +1953,14 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
   useEffect(() => {
     const session = sessionRef.current;
     if (!videoJob || !isSessionAlive(session)) return;
-    const key = workspaceScopedKey(VIDEO_JOB_KEY);
+    const key = videoJobStorageKey();
     let stopped = false;
     void (async () => {
       if (!await isGenerationSessionCurrent(session) || stopped || !isSessionAlive(session) || videoJobRef.current !== videoJob) return;
-      writeStoredVideoJob({
-        ...videoJob,
-        url: genVideo?.url,
-        assetId: genVideo?.assetId,
-        fileName: genVideo?.fileName,
-        mimeType: genVideo?.mimeType,
-        fileSize: genVideo?.fileSize,
-        thumbnailUrl: genVideo?.thumbnailUrl,
-        thumbnailSource: genVideo?.thumbnailSource,
-      }, key);
+      writeStoredVideoJob({ ...videoJob }, key, { actorId, workspaceId });
     })();
     return () => { stopped = true; };
-  }, [videoJob, genVideo, actorId, workspaceId]);
+  }, [videoJob, actorId, workspaceId]);
 
   async function persistSelectedContentApproval(
     approval: AdvertisingContentApproval,
@@ -2250,7 +2305,7 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
   useEffect(() => {
     const session = sessionRef.current;
     if (!isSessionAlive(session)) return;
-    const key = workspaceScopedKey(VIDEO_JOB_KEY);
+    const key = videoJobStorageKey();
     const originalJob = videoJobRef.current;
     const originalGeneration = videoGenerationRevision.current;
     let expectedLibrary = librarySnapshotRef.current;
@@ -2270,26 +2325,10 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
         }
         if (state !== "current") return;
         if (videoJobRef.current === originalJob && videoGenerationRevision.current === originalGeneration) {
-          const storedJob = readStoredVideoJob(key);
+          const storedJob = readStoredVideoJob(key, { actorId, workspaceId });
           if (storedJob) {
-            setVideoJob({
-              handle: storedJob.handle,
-              status: storedJob.status === "completed" && !storedJob.url ? "in_progress" : storedJob.status,
-              progress: storedJob.progress,
-              formatSubstituted: Boolean(storedJob.formatSubstituted),
-            });
-            if (storedJob.url) {
-              setGenVideo({
-                url: storedJob.url,
-                assetId: storedJob.assetId,
-                fileName: storedJob.fileName,
-                mimeType: storedJob.mimeType || "video/mp4",
-                model: "",
-                fileSize: storedJob.fileSize || 0,
-                thumbnailUrl: storedJob.thumbnailUrl,
-                thumbnailSource: storedJob.thumbnailSource,
-              });
-            }
+            setGenVideo(null);
+            setVideoJob(storedJob);
           }
         }
         const libraryCurrent = () => current() && librarySnapshotRef.current === expectedLibrary && libraryReadEpoch.current === readEpoch;
@@ -3271,6 +3310,7 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
               className="neu-btn inline-flex items-center gap-2 px-4 py-2.5 text-sm"
               disabled={
                 genBusy !== null ||
+                videoRetryBusy ||
                 generationUsageLoading ||
                 !generationUsage ||
                 videoJob?.status === "queued" ||
@@ -3314,14 +3354,15 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
           */}
           {videoJob ? (
             <div
-              className={`mt-4 rounded-2xl border p-4 ${
+              className={`mt-4 rounded-lg border p-4 ${
                 videoJob.status === "failed" ? "border-rose-200 bg-rose-50" : "border-[#E7ECF3] bg-white"
               }`}
               aria-live="polite"
             >
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <p className={`text-sm font-black ${videoJob.status === "failed" ? "text-rose-900" : "text-[#0B1220]"}`}>
-                  {videoJobLabels[videoJob.status]}
+                  {videoJob.phase === "validation" && videoJob.status !== "completed" && videoJob.status !== "failed"
+                    ? "Проверяем и обрабатываем видео" : videoJobLabels[videoJob.status]}
                 </p>
                 <p className="text-sm font-bold text-[#64748B]">{videoJob.progress}%</p>
               </div>
@@ -3331,7 +3372,7 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
                 aria-valuemin={0}
                 aria-valuemax={100}
                 aria-valuenow={videoJob.progress}
-                aria-label={videoJobLabels[videoJob.status]}
+                aria-label={videoJob.phase === "validation" ? "Проверка видео" : videoJobLabels[videoJob.status]}
               >
                 <div
                   className={`h-full rounded-full ${videoJob.status === "failed" ? "bg-rose-400" : "bg-[#0D9488]"}`}
@@ -3345,32 +3386,37 @@ function ContentStudioSession({ actorId, workspaceId, localDraftsOnly }: { actor
               ) : null}
               {videoJob.status === "queued" || videoJob.status === "in_progress" ? (
                 <p className="mt-2 text-xs font-semibold text-[#64748B]">
-                  Рендер идёт на стороне сервиса и занимает минуты. Страницу можно закрыть: задача сохраняется и опрос
-                  продолжится, когда вы вернётесь в этот раздел.
+                  {videoJob.phase === "validation" ? "Подготовка проверенного файла и обложки." : "Генерация видео в обработке."}
                 </p>
               ) : null}
               {videoJob.status === "failed" ? (
-                <div className="mt-3">
-                  <p className="text-xs font-semibold text-rose-900">
-                    Если рендер у сервиса уже закончился, повторная проверка заберёт готовый файл и не будет стоить ничего.
-                    Кнопка «Сгенерировать видео» запустит новый платный рендер.
-                  </p>
+                <div className="mt-3 flex flex-wrap gap-2">
                   <button
                     type="button"
-                    className="neu-btn mt-2 inline-flex items-center gap-2 px-3 py-1.5 text-xs"
+                    className="neu-btn inline-flex items-center gap-2 px-3 py-1.5 text-xs"
+                    disabled={videoRetryBusy}
                     onClick={async () => {
                       const session = sessionRef.current;
-                      const handle = videoJob?.handle;
-                      if (!handle || !isSessionAlive(session) || videoJobRef.current?.handle !== handle || videoJobRef.current.status !== "failed") return;
+                      const original = videoJob;
+                      const handle = original?.handle;
+                      const generation = videoGenerationRevision.current;
+                      if (!handle || !isSessionAlive(session) || videoCommandRef.current || original.status !== "failed" || videoJobRef.current !== original) return;
                       if (!await isGenerationSessionCurrent(session) || !isSessionAlive(session)
-                        || videoJobRef.current?.handle !== handle || videoJobRef.current.status !== "failed") return;
+                        || videoCommandRef.current || videoJobRef.current !== original || videoGenerationRevision.current !== generation) return;
                       setGenNotice(null);
-                      setVideoJob((current) => (current && current.handle === handle && current.status === "failed" ? { ...current, status: "in_progress" } : current));
+                      setVideoJob((current) => current === original ? { ...current, status: "in_progress", progress: Math.min(95, current.progress) } : current);
                     }}
                   >
                     <RefreshCw size={13} />
                     Проверить ещё раз
                   </button>
+                  {videoJob.phase === "validation" && videoJob.validationJobId ? (
+                    <button type="button" className="neu-btn inline-flex items-center gap-2 px-3 py-1.5 text-xs"
+                      disabled={videoRetryBusy} onClick={() => void retryNativeVideo()}>
+                      <RefreshCw size={13} className={videoRetryBusy ? "animate-spin motion-reduce:animate-none" : ""} />
+                      {videoRetryBusy ? "Повторяем обработку..." : "Повторить обработку"}
+                    </button>
+                  ) : null}
                 </div>
               ) : null}
             </div>
